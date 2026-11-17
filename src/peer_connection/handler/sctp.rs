@@ -214,7 +214,16 @@ impl<'a> SctpHandler<'a> {
                 ctx_pending.insert((ch, id));
                 return Ok(());
             }
-            let Some(chunks) = stream.read_sctp()? else {
+            // Reading the stream's last message completes a stream reset that waited for it
+            // (`retry_deferred_resets`), which unregisters the stream: the next read finds it
+            // closed. That is the end of its data, not an error, or the messages read in this
+            // pass, the last one included, would be lost with the error.
+            let chunks = match stream.read_sctp() {
+                Ok(chunks) => chunks,
+                Err(Error::ErrStreamClosed) => None,
+                Err(err) => return Err(err),
+            };
+            let Some(chunks) = chunks else {
                 ctx_pending.remove(&(ch, id));
                 return Ok(());
             };

@@ -440,7 +440,9 @@ impl RTCDataChannel<'_> {
                 return Ok(());
             }
             dc.ready_state = RTCDataChannelState::Closing;
-            dc.close()
+            // Closed in the pipeline, after what was sent before it (see
+            // `write_data_channel_close`).
+            self.peer_connection.write_data_channel_close(self.id)
         } else {
             Err(Error::ErrDataChannelClosed)
         }

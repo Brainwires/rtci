@@ -422,6 +422,25 @@ impl<'a>
                         message: RTCMessageInternal::Dtls(DTLSMessage::Sctp(data_channel_message)),
                     });
                 }
+            } else if let DataChannelEvent::Close = message.data_channel_event {
+                // The application's close, in order behind its sends: reset the stream now.
+                let Some(dc) = self.data_channels.get_mut(&message.data_channel_id) else {
+                    return Ok(());
+                };
+                if dc.ready_state != RTCDataChannelState::Closed {
+                    dc.close()?;
+                }
+                if let Some(data_channel) = dc.data_channel.as_mut() {
+                    while let Some(data_channel_message) = data_channel.poll_write() {
+                        self.ctx.write_outs.push_back(TaggedRTCMessageInternal {
+                            now,
+                            transport: TransportContext::default(),
+                            message: RTCMessageInternal::Dtls(DTLSMessage::Sctp(
+                                data_channel_message,
+                            )),
+                        });
+                    }
+                }
             } else {
                 warn!(
                     "drop unsupported DATACHANNEL message to {}",
