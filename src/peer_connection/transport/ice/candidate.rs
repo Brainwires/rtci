@@ -219,12 +219,18 @@ impl RTCIceCandidate {
     /// # Specification
     ///
     /// See [RTCIceCandidate.toJSON()](https://www.w3.org/TR/webrtc/#dom-rtcicecandidate-tojson)
+    ///
+    /// The candidate knows no media section of its own, so `sdp_mid` is `None` and
+    /// `sdp_mline_index` is `0` (the first m-section, the one a BUNDLE group's transport
+    /// belongs to). An empty `sdp_mid` would name a section no description has, and
+    /// `add_remote_candidate` matches `sdp_mid` before `sdp_mline_index` (W3C
+    /// `addIceCandidate`), so the remote side would refuse it.
     pub fn to_json(&self) -> Result<RTCIceCandidateInit> {
         let candidate = self.to_ice()?;
 
         Ok(RTCIceCandidateInit {
             candidate: format!("candidate:{}", candidate.marshal()),
-            sdp_mid: Some("".to_owned()),
+            sdp_mid: None,
             sdp_mline_index: Some(0u16),
             username_fragment: None,
             url: None,
@@ -319,5 +325,32 @@ mod test {
                 assert_eq!(actual_candidate_init, candidate_init);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod to_json_section_tests {
+    use super::*;
+    use ice::candidate::{CandidateConfig, candidate_host::CandidateHostConfig};
+
+    /// A candidate built from a bare ICE candidate names the first m-section by index and no
+    /// mid: `add_remote_candidate` matches a mid first, and an empty one matches nothing.
+    #[test]
+    fn to_json_names_the_first_section_by_index() {
+        let candidate = CandidateHostConfig {
+            base_config: CandidateConfig {
+                network: "udp".to_owned(),
+                address: "192.0.2.1".to_owned(),
+                port: 5000,
+                component: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+        .new_candidate_host()
+        .unwrap();
+        let init = RTCIceCandidate::from(&candidate).to_json().unwrap();
+        assert_eq!(init.sdp_mid, None);
+        assert_eq!(init.sdp_mline_index, Some(0));
     }
 }
