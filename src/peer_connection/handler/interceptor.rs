@@ -265,7 +265,7 @@ impl<'a> InterceptorHandler<'a> {
         {
             return;
         }
-        if self.bind_undeclared_ssrc(now, ssrc, payload_type) {
+        if self.bind_undeclared_ssrc(now, ssrc, payload_type, rtp_header) {
             return;
         }
         self.bind_by_rid(now, ssrc, payload_type, rtp_header);
@@ -433,26 +433,46 @@ impl<'a> InterceptorHandler<'a> {
 
     /// The single-media-section shortcut: an SSRC absent from the SDP, resolved by there being
     /// only one place it could belong to.
+    /// An SSRC the remote description doesn't declare, for a receiver that expects one: the
+    /// only transceiver's, or — with several media sections — the one the packet's MID header
+    /// extension names without a RID (RFC 8843 §9.2: a=ssrc lines are optional, the MID
+    /// identifies the m-section).
     fn bind_undeclared_ssrc(
         &mut self,
         now: Instant,
         ssrc: SSRC,
         payload_type: PayloadType,
+        rtp_header: &rtp::Header,
     ) -> bool {
-        if self.rtp_transceivers.len() != 1 {
-            // it is multi-media-section case, let's use the rid path
-            return false;
-        }
+        let index = if self.rtp_transceivers.len() == 1 {
+            0
+        } else {
+            // A RID (or RRID) means simulcast: that is the rid path's.
+            let Some((mid, rid, rrid)) = self.get_rtp_header_extension_ids(rtp_header) else {
+                return false;
+            };
+            if mid.is_empty() || !rid.is_empty() || !rrid.is_empty() {
+                return false;
+            }
+            let Some(index) = self
+                .rtp_transceivers
+                .iter()
+                .position(|t| t.mid().as_deref() == Some(mid.as_str()))
+            else {
+                return false;
+            };
+            index
+        };
 
-        if let Some(transceiver) = self.rtp_transceivers.first()
+        if let Some(transceiver) = self.rtp_transceivers.get(index)
             && let Some(receiver) = transceiver.receiver()
             && !receiver.track().codings().is_empty()
         {
-            // it is rid-based, let's use the rid path
+            // it is rid-based (or already bound), let's use the rid path
             return false;
         }
 
-        let Some(transceiver) = self.rtp_transceivers.first_mut() else {
+        let Some(transceiver) = self.rtp_transceivers.get_mut(index) else {
             return false;
         };
         // Get kind and mid before borrowing receiver mutably
@@ -505,12 +525,10 @@ impl<'a> InterceptorHandler<'a> {
 
         // Create inbound stream accumulator before firing OnOpen event
         // Note: undeclared SSRC case doesn't have RTX/FEC info
-        self.stats.get_or_create_inbound_rtp_streams(
-            ssrc, kind, &track_id, &mid, None, None,
-            0, // Undeclared SSRC is always for the first transceiver
-        );
+        self.stats
+            .get_or_create_inbound_rtp_streams(ssrc, kind, &track_id, &mid, None, None, index);
 
-        self.emit_on_open(now, 0, track_id, stream_id, ssrc, None);
+        self.emit_on_open(now, index, track_id, stream_id, ssrc, None);
         true
     }
 

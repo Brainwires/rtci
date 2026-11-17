@@ -211,6 +211,25 @@ impl RTCPeerConnection {
         self.ice_transport().get_local_candidates()
     }
 
+    /// The fingerprints of every local certificate: W3C `RTCPeerConnection` writes an
+    /// `a=fingerprint` line for each of its certificates (RFC 8829 §5.2.1), and the remote side
+    /// accepts the one DTLS presents if it matches any of them (RFC 8122 §5).
+    fn local_dtls_fingerprints(&self) -> Result<Vec<RTCDtlsFingerprint>> {
+        let dtls_transport = self.dtls_transport();
+        if dtls_transport.certificates.is_empty() {
+            return Err(Error::ErrNonCertificate);
+        }
+        let mut fingerprints = vec![];
+        for cert in &dtls_transport.certificates {
+            for fingerprint in cert.get_fingerprints(dtls_transport.crypto_provider.crypto())? {
+                if !fingerprints.contains(&fingerprint) {
+                    fingerprints.push(fingerprint);
+                }
+            }
+        }
+        Ok(fingerprints)
+    }
+
     /// generate_unmatched_sdp generates an SDP that doesn't take remote state into account
     /// This is used for the initial call for CreateOffer
     pub(super) fn generate_unmatched_sdp(&mut self) -> Result<SessionDescription> {
@@ -244,11 +263,7 @@ impl RTCPeerConnection {
             });
         }
 
-        let dtls_fingerprints = if let Some(cert) = self.dtls_transport().certificates.first() {
-            cert.get_fingerprints(self.dtls_transport().crypto_provider.crypto())?
-        } else {
-            return Err(Error::ErrNonCertificate);
-        };
+        let dtls_fingerprints = self.local_dtls_fingerprints()?;
 
         let params = PopulateSdpParams {
             media_description_fingerprint: self.setting_engine.sdp_media_level_fingerprints,
@@ -399,11 +414,7 @@ impl RTCPeerConnection {
                 .or(Some(String::new()))
         };
 
-        let dtls_fingerprints = if let Some(cert) = self.dtls_transport().certificates.first() {
-            cert.get_fingerprints(self.dtls_transport().crypto_provider.crypto())?
-        } else {
-            return Err(Error::ErrNonCertificate);
-        };
+        let dtls_fingerprints = self.local_dtls_fingerprints()?;
 
         let params = PopulateSdpParams {
             media_description_fingerprint: self.setting_engine.sdp_media_level_fingerprints,
@@ -867,8 +878,6 @@ impl RTCPeerConnection {
             vec![]
         };
 
-        let only_one_rtp_transceiver = self.rtp_transceivers.len() == 1;
-
         for incoming_track in incoming_tracks.into_iter() {
             if let Some(transceiver) = self.rtp_transceivers.iter_mut().find(|transceiver| {
                 transceiver.mid().as_ref() == Some(&incoming_track.mid)
@@ -947,10 +956,12 @@ impl RTCPeerConnection {
                     //
                     // The bind happens once the codec is known, in the endpoint handler's
                     // `find_track_id_by_ssrc`.
-                } else if only_one_rtp_transceiver {
-                    // If the remote SDP has only one media rtp transceiver, the ssrc doesn't have to be explicitly declared
-                    // here, we should add a track but with 0 ssrc. The reason is to provide stream_id and track_id information for later usage
-                    // when received the first RTP packet. So, it is placeholder here.
+                } else {
+                    // No a=ssrc: the SSRC doesn't have to be declared (RFC 8843 §9.2). With one
+                    // media section its packets are that section's; with several, the MID header
+                    // extension says which. Add a track with no coding as a placeholder, carrying
+                    // the stream and track ids, until the first RTP packet binds its SSRC in the
+                    // interceptor handler (`bind_undeclared_ssrc`).
                     receiver.set_track(MediaStreamTrack::new(
                         incoming_track.stream_id,
                         incoming_track.track_id,
@@ -958,8 +969,6 @@ impl RTCPeerConnection {
                         incoming_track.kind,
                         vec![], // Defer receiver's track's codec until received the first RTP packet with payload_type in endpoint handler
                     ));
-                } else {
-                    return Err(Error::ErrRTPReceiverForSSRCTrackStreamNotFound);
                 }
 
                 receiver.set_coding_parameters(receive_codings);

@@ -313,6 +313,11 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use url::Url;
 
+/// `a=bundle-only` (RFC 8843 §6).
+pub(crate) const ATTR_KEY_BUNDLE_ONLY: &str = "bundle-only";
+/// `a=ice-options` (RFC 8839 §5.6).
+pub(crate) const ATTR_KEY_ICE_OPTIONS: &str = "ice-options";
+
 pub(crate) const SDP_ATTRIBUTE_RID: &str = "rid";
 pub(crate) const SDP_ATTRIBUTE_SIMULCAST: &str = "simulcast";
 pub(crate) const GENERATED_CERTIFICATE_ORIGIN: &str = "WebRTC";
@@ -1360,6 +1365,11 @@ impl RTCPeerConnection {
         if params.is_ice_lite {
             // RFC 8839 §5.3
             d = d.with_property_attribute(ATTR_KEY_ICELITE.to_owned());
+        } else {
+            // JSEP RFC 8829 §5.2.1 / §5.3.1: this side accepts trickled candidates
+            // (`add_remote_candidate` at any time after the remote description), so it says so
+            // (RFC 8840 §4.1.1). A lite agent has no checks to trickle into.
+            d = d.with_value_attribute(ATTR_KEY_ICE_OPTIONS.to_owned(), "trickle".to_owned());
         }
 
         if params.is_extmap_allow_mixed {
@@ -1394,75 +1404,219 @@ pub(crate) fn get_peer_direction(media: &MediaDescription) -> RTCRtpTransceiverD
     RTCRtpTransceiverDirection::Unspecified
 }
 
-pub(crate) fn extract_fingerprint(desc: &SessionDescription) -> Result<(String, String)> {
-    // A section may carry several `a=fingerprint` lines (RFC 8122 §5), one per hash function.
-    // From each level take the sha-256 one — the algorithm DTLS verification uses — if there is
-    // one, else the first: picking the first alone rejected a peer whose first line was, say,
-    // sha-384, even though it also offered sha-256.
-    let pick = |attributes: &[sdp::description::common::Attribute]| -> Option<String> {
-        let values: Vec<&str> = attributes
+/// Extracts the remote DTLS fingerprints (RFC 8122 §5).
+///
+/// A section carries one `a=fingerprint` line per certificate and hash function (W3C
+/// `RTCPeerConnection` writes one for each of its certificates), and the peer's certificate must
+/// match one of them, so all of them are returned, the sha-256 ones (the algorithm DTLS
+/// verification uses) first. Fingerprints may be given at session level and in every m-section;
+/// the levels must agree on the sha-256 values when they have any (else on every value), or the
+/// description is [`Error::ErrSessionDescriptionConflictingFingerprints`].
+pub(crate) fn extract_fingerprints(desc: &SessionDescription) -> Result<Vec<RTCDtlsFingerprint>> {
+    let parse =
+        |attributes: &[sdp::description::common::Attribute]| -> Result<Vec<RTCDtlsFingerprint>> {
+            let mut fingerprints = vec![];
+            for value in attributes
+                .iter()
+                .filter(|a| a.key == "fingerprint")
+                .filter_map(|a| a.value.as_deref())
+            {
+                let parts: Vec<&str> = value.split(' ').collect();
+                if parts.len() != 2 {
+                    return Err(Error::ErrSessionDescriptionInvalidFingerprint);
+                }
+                fingerprints.push(RTCDtlsFingerprint {
+                    algorithm: parts[0].to_owned(),
+                    value: parts[1].to_owned(),
+                });
+            }
+            // sha-256 first; the order within an algorithm is kept.
+            fingerprints.sort_by_key(|f| !f.algorithm.eq_ignore_ascii_case("sha-256"));
+            Ok(fingerprints)
+        };
+    let compared = |fingerprints: &[RTCDtlsFingerprint]| -> Vec<(String, String)> {
+        let has_sha256 = fingerprints
             .iter()
-            .filter(|a| a.key == "fingerprint")
-            .filter_map(|a| a.value.as_deref())
+            .any(|f| f.algorithm.eq_ignore_ascii_case("sha-256"));
+        let mut set: Vec<(String, String)> = fingerprints
+            .iter()
+            .filter(|f| !has_sha256 || f.algorithm.eq_ignore_ascii_case("sha-256"))
+            .map(|f| (f.algorithm.to_lowercase(), f.value.to_lowercase()))
             .collect();
-        values
-            .iter()
-            .find(|v| {
-                v.split(' ')
-                    .next()
-                    .is_some_and(|alg| alg.eq_ignore_ascii_case("sha-256"))
-            })
-            .or_else(|| values.first())
-            .map(|v| (*v).to_owned())
+        set.sort();
+        set.dedup();
+        set
     };
 
-    let mut fingerprints = vec![];
-    if let Some(fingerprint) = pick(&desc.attributes) {
-        fingerprints.push(fingerprint);
-    }
+    let mut levels = vec![parse(&desc.attributes)?];
     for m in &desc.media_descriptions {
-        if let Some(fingerprint) = pick(&m.attributes) {
-            fingerprints.push(fingerprint);
-        }
+        levels.push(parse(&m.attributes)?);
     }
+    levels.retain(|level| !level.is_empty());
 
-    if fingerprints.is_empty() {
+    let Some(first) = levels.first() else {
         return Err(Error::ErrSessionDescriptionNoFingerprint);
+    };
+    let expected = compared(first);
+    if levels[1..].iter().any(|level| compared(level) != expected) {
+        return Err(Error::ErrSessionDescriptionConflictingFingerprints);
     }
 
-    for m in 1..fingerprints.len() {
-        if fingerprints[m] != fingerprints[0] {
-            return Err(Error::ErrSessionDescriptionConflictingFingerprints);
-        }
-    }
-
-    let parts: Vec<&str> = fingerprints[0].split(' ').collect();
-    if parts.len() != 2 {
-        return Err(Error::ErrSessionDescriptionInvalidFingerprint);
-    }
-
-    Ok((parts[1].to_owned(), parts[0].to_owned()))
+    Ok(levels.swap_remove(0))
 }
 
-pub(crate) fn extract_ice_details(
-    desc: &SessionDescription,
-) -> Result<(String, String, Vec<Candidate>)> {
-    let mut candidates = vec![];
+/// Inserts `a=<key>[:<value>]` at the end of m-section `index` of an SDP text, keeping every
+/// other byte, with the text's own line ending. Returns the text unchanged if it has no such
+/// m-section.
+pub(crate) fn insert_media_line(sdp: &str, index: usize, key: &str, value: Option<&str>) -> String {
+    let eol = if sdp.contains("\r\n") { "\r\n" } else { "\n" };
+    let mut starts = vec![];
+    let mut offset = 0;
+    for line in sdp.split_inclusive('\n') {
+        if line.starts_with("m=") {
+            starts.push(offset);
+        }
+        offset += line.len();
+    }
+    if index >= starts.len() {
+        return sdp.to_owned();
+    }
+    let end = starts.get(index + 1).copied().unwrap_or(sdp.len());
+    let mut out = String::with_capacity(sdp.len() + key.len() + 64);
+    out.push_str(&sdp[..end]);
+    if !out.ends_with('\n') {
+        out.push_str(eol);
+    }
+    out.push_str("a=");
+    out.push_str(key);
+    if let Some(value) = value {
+        out.push(':');
+        out.push_str(value);
+    }
+    out.push_str(eol);
+    out.push_str(&sdp[end..]);
+    out
+}
 
-    // Backup ufrag/pwd is the first inactive credentials found.
-    // We will return the backup credentials to solve the corner case where
-    // all media lines/transceivers are set to inactive.
-    //
-    // This should probably be handled in a better way by the caller.
+/// The remote ICE credentials and candidates of a session description.
+#[derive(Debug, Clone)]
+pub(crate) struct RemoteIceDetails {
+    pub(crate) ufrag: String,
+    pub(crate) pwd: String,
+    pub(crate) candidates: Vec<Candidate>,
+}
+
+/// Whether an m-section is rejected: port zero without `a=bundle-only` (RFC 8843 §6, an
+/// m-section that is only reachable through its BUNDLE group also has port zero).
+pub(crate) fn is_rejected_media(m: &MediaDescription) -> bool {
+    m.media_name.port.value == 0 && !m.has_attribute(ATTR_KEY_BUNDLE_ONLY)
+}
+
+/// The mids of the description's first `a=group:BUNDLE` (RFC 8843 §7.1), in order.
+pub(crate) fn bundle_group_mids(desc: &SessionDescription) -> Vec<&str> {
+    desc.attributes
+        .iter()
+        .filter(|a| a.key == ATTR_KEY_GROUP)
+        .filter_map(|a| a.value.as_deref())
+        .find_map(|value| {
+            let mut tokens = value.split_whitespace();
+            (tokens.next() == Some("BUNDLE")).then(|| tokens.collect())
+        })
+        .unwrap_or_default()
+}
+
+/// An m-section's ICE credentials: its own `a=ice-ufrag` / `a=ice-pwd`, else the session's
+/// (RFC 8839 §5.4 allows both levels).
+pub(crate) fn media_ice_credentials<'a>(
+    desc: &'a SessionDescription,
+    m: &'a MediaDescription,
+) -> (Option<&'a str>, Option<&'a str>) {
+    let ufrag = m
+        .attribute("ice-ufrag")
+        .flatten()
+        .or_else(|| desc.attribute("ice-ufrag").map(String::as_str));
+    let pwd = m
+        .attribute("ice-pwd")
+        .flatten()
+        .or_else(|| desc.attribute("ice-pwd").map(String::as_str));
+    (ufrag, pwd)
+}
+
+/// Checks ICE credentials against RFC 8839 §5.4: `ice-ufrag` is 4 to 256 ice-chars, `ice-pwd`
+/// 22 to 256, an ice-char being ALPHA, DIGIT, "+" or "/" (RFC 8839 §5.1).
+fn check_ice_credentials(ufrag: Option<&str>, pwd: Option<&str>) -> Result<()> {
+    let valid = |value: &str, min: usize| {
+        (min..=256).contains(&value.len())
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/')
+    };
+    if ufrag.is_some_and(|u| !valid(u, 4)) || pwd.is_some_and(|p| !valid(p, 22)) {
+        return Err(Error::ErrSessionDescriptionInvalidIceCredentials);
+    }
+    Ok(())
+}
+
+/// Extracts the credentials and candidates of the ICE transport a remote description sets up.
+///
+/// This peer connection runs one ICE transport for every m-section, so the description has to
+/// name one set of credentials:
+///
+/// - With a BUNDLE group, that is the offerer-tagged m-section's (the first mid of the group
+///   that isn't rejected, RFC 8843 §7.2). The other m-sections of the group may carry their own
+///   credentials (an offer under the `balanced` or `max-compat` policy does, JSEP RFC 8829
+///   §5.2.1): their transports are discarded once BUNDLE is negotiated (RFC 8843 §7.3.3), so
+///   their credentials and candidates aren't used.
+/// - Every m-section outside the group must share those credentials; one that doesn't is
+///   [`Error::ErrSessionDescriptionConflictingIceUfrag`] /
+///   [`Error::ErrSessionDescriptionConflictingIcePwd`]. An inactive one is let through (its
+///   credentials are the fallback when every m-section is inactive).
+/// - Rejected m-sections set up no transport and are skipped.
+///
+/// Returns `Ok(None)` when there is no transport to set up: no m-section other than rejected
+/// ones, and no session-level credentials (the description of a connection that has nothing to
+/// negotiate yet, such as an offer created before any transceiver or data channel was added).
+pub(crate) fn extract_ice_details(desc: &SessionDescription) -> Result<Option<RemoteIceDetails>> {
+    let bundle = bundle_group_mids(desc);
+    let in_bundle =
+        |m: &MediaDescription| get_mid_value(m).is_some_and(|mid| bundle.contains(&mid.as_str()));
+    let tagged = bundle.iter().find_map(|mid| {
+        desc.media_descriptions
+            .iter()
+            .find(|m| get_mid_value(m).is_some_and(|v| v == mid) && !is_rejected_media(m))
+    });
+
+    // Backup ufrag/pwd is the first inactive credentials found, for the corner case where all
+    // media lines/transceivers are set to inactive.
     let mut backup_ufrag = None;
     let mut backup_pwd = None;
 
-    let mut remote_ufrag = desc.attribute("ice-ufrag").map(|s| s.as_str());
-    let mut remote_pwd = desc.attribute("ice-pwd").map(|s| s.as_str());
+    let (mut remote_ufrag, mut remote_pwd) = match tagged {
+        Some(m) => media_ice_credentials(desc, m),
+        None => (
+            desc.attribute("ice-ufrag").map(String::as_str),
+            desc.attribute("ice-pwd").map(String::as_str),
+        ),
+    };
 
+    let mut has_transport = remote_ufrag.is_some() || remote_pwd.is_some() || tagged.is_some();
+    let mut transport_media = vec![];
     for m in &desc.media_descriptions {
-        let ufrag = m.attribute("ice-ufrag").and_then(|o| o);
-        let pwd = m.attribute("ice-pwd").and_then(|o| o);
+        if is_rejected_media(m) {
+            continue;
+        }
+        has_transport = true;
+        let (ufrag, pwd) = media_ice_credentials(desc, m);
+        check_ice_credentials(ufrag, pwd)?;
+
+        if tagged.is_some() && in_bundle(m) {
+            // Part of the tagged m-section's transport only when it says so with the same
+            // credentials; otherwise its own transport, which BUNDLE replaces.
+            if (ufrag.is_none() || ufrag == remote_ufrag) && (pwd.is_none() || pwd == remote_pwd) {
+                transport_media.push(m);
+            }
+            continue;
+        }
 
         if m.attribute(ATTR_KEY_INACTIVE).is_some() {
             if backup_ufrag.is_none() {
@@ -1487,17 +1641,13 @@ pub(crate) fn extract_ice_details(
         if pwd.is_some() && pwd != remote_pwd {
             return Err(Error::ErrSessionDescriptionConflictingIcePwd);
         }
-
-        for a in &m.attributes {
-            if a.is_ice_candidate()
-                && let Some(value) = &a.value
-            {
-                let c: Candidate = unmarshal_candidate(value)?;
-                //let candidate = RTCIceCandidate::from(&c);
-                candidates.push(c);
-            }
-        }
+        transport_media.push(m);
     }
+
+    if !has_transport {
+        return Ok(None);
+    }
+    check_ice_credentials(remote_ufrag, remote_pwd)?;
 
     let remote_ufrag = remote_ufrag
         .or(backup_ufrag)
@@ -1506,7 +1656,22 @@ pub(crate) fn extract_ice_details(
         .or(backup_pwd)
         .ok_or(Error::ErrSessionDescriptionMissingIcePwd)?;
 
-    Ok((remote_ufrag.to_owned(), remote_pwd.to_owned(), candidates))
+    let mut candidates = vec![];
+    for m in transport_media {
+        for a in &m.attributes {
+            if a.is_ice_candidate()
+                && let Some(value) = &a.value
+            {
+                candidates.push(unmarshal_candidate(value)?);
+            }
+        }
+    }
+
+    Ok(Some(RemoteIceDetails {
+        ufrag: remote_ufrag.to_owned(),
+        pwd: remote_pwd.to_owned(),
+        candidates,
+    }))
 }
 
 pub(crate) fn is_lite_set(desc: &SessionDescription) -> bool {
@@ -1807,7 +1972,7 @@ mod fingerprint_tests {
 
     /// With several `a=fingerprint` lines, the sha-256 one is used even when it is not the first.
     #[test]
-    fn test_extract_fingerprint_prefers_sha256() -> Result<()> {
+    fn test_extract_fingerprints_puts_sha256_first() -> Result<()> {
         let s = SessionDescription {
             media_descriptions: vec![MediaDescription {
                 attributes: vec![
@@ -1824,9 +1989,153 @@ mod fingerprint_tests {
             }],
             ..Default::default()
         };
-        let (fingerprint, hash) = extract_fingerprint(&s)?;
-        assert_eq!(hash, "sha-256");
-        assert_eq!(fingerprint, "CC:DD");
+        let fingerprints = extract_fingerprints(&s)?;
+        assert_eq!(fingerprints[0].algorithm, "sha-256");
+        assert_eq!(fingerprints[0].value, "CC:DD");
+        assert_eq!(fingerprints.len(), 2);
         Ok(())
+    }
+
+    fn parse(sdp: &str) -> SessionDescription {
+        let mut reader = std::io::Cursor::new(sdp.as_bytes());
+        SessionDescription::unmarshal(&mut reader).expect("test SDP parses")
+    }
+
+    const HEAD: &str = "v=0\r\no=- 1 1 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\n";
+
+    fn section(media: &str, mid: &str, port: u16, extra: &str) -> String {
+        format!(
+            "m={media} {port} UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=mid:{mid}\r\n{extra}"
+        )
+    }
+
+    #[test]
+    fn extract_ice_details_takes_the_bundle_tagged_sections_credentials() -> Result<()> {
+        let a = "a=ice-ufrag:aaaa\r\na=ice-pwd:aaaaaaaaaaaaaaaaaaaaaaaa\r\n\
+a=candidate:1 1 udp 1 10.0.0.1 1000 typ host\r\n";
+        let b = "a=ice-ufrag:bbbb\r\na=ice-pwd:bbbbbbbbbbbbbbbbbbbbbbbb\r\n\
+a=candidate:1 1 udp 1 10.0.0.2 2000 typ host\r\n";
+        let s = parse(&format!(
+            "{HEAD}a=group:BUNDLE 1 0\r\n{}{}",
+            section("audio", "0", 9, a),
+            section("video", "1", 9, b)
+        ));
+        let details = extract_ice_details(&s)?.expect("a transport");
+        // The group's first mid tags the transport (RFC 8843 §7.2), whatever the m-line order.
+        assert_eq!(details.ufrag, "bbbb");
+        assert_eq!(details.candidates.len(), 1);
+        assert_eq!(details.candidates[0].port(), 2000);
+
+        // A tagged m-section that is rejected tags nothing; the next mid of the group does.
+        let s = parse(&format!(
+            "{HEAD}a=group:BUNDLE 1 0\r\n{}{}",
+            section("audio", "0", 9, a),
+            section("video", "1", 0, b)
+        ));
+        assert_eq!(extract_ice_details(&s)?.expect("a transport").ufrag, "aaaa");
+
+        // Outside a BUNDLE group, one transport means one set of credentials.
+        let s = parse(&format!(
+            "{HEAD}{}{}",
+            section("audio", "0", 9, a),
+            section("video", "1", 9, b)
+        ));
+        assert_eq!(
+            extract_ice_details(&s).unwrap_err(),
+            Error::ErrSessionDescriptionConflictingIceUfrag
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn extract_ice_details_checks_the_credentials_syntax() {
+        let with = |ufrag: &str, pwd: &str| {
+            let extra = format!("a=ice-ufrag:{ufrag}\r\na=ice-pwd:{pwd}\r\n");
+            extract_ice_details(&parse(&format!(
+                "{HEAD}{}",
+                section("audio", "0", 9, &extra)
+            )))
+        };
+        assert!(with("ETEn", "OtSK0WpNtpUjkY4+86js7Z/l").is_ok());
+        for (ufrag, pwd) in [
+            ("E$En", "OtSK0WpNtpUjkY4+86js7Z/l"),
+            ("ETEn", "OtSK$WpNtpUjkY4+86js7Z/l"),
+            ("ETE", "OtSK0WpNtpUjkY4+86js7Z/l"),
+            ("ETEn", "OtSK0WpNtpUjkY4+86js7"),
+        ] {
+            assert_eq!(
+                with(ufrag, pwd).unwrap_err(),
+                Error::ErrSessionDescriptionInvalidIceCredentials,
+                "{ufrag} {pwd}"
+            );
+        }
+    }
+
+    #[test]
+    fn extract_ice_details_is_none_without_a_transport() -> Result<()> {
+        assert!(extract_ice_details(&parse(HEAD))?.is_none());
+        let rejected = parse(&format!("{HEAD}{}", section("audio", "0", 0, "")));
+        assert!(extract_ice_details(&rejected)?.is_none());
+        // A section that is used still needs credentials.
+        let bare = parse(&format!("{HEAD}{}", section("audio", "0", 9, "")));
+        assert_eq!(
+            extract_ice_details(&bare).unwrap_err(),
+            Error::ErrSessionDescriptionMissingIceUfrag
+        );
+        // bundle-only m-sections have port 0 but aren't rejected (RFC 8843 §6).
+        let bundle_only = parse(&format!(
+            "{HEAD}a=group:BUNDLE 0\r\n{}",
+            section("audio", "0", 0, "a=bundle-only\r\n")
+        ));
+        assert!(extract_ice_details(&bundle_only).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn extract_fingerprints_keeps_one_per_certificate_and_checks_levels() -> Result<()> {
+        let two = "a=fingerprint:sha-256 AA:AA\r\na=fingerprint:sha-256 BB:BB\r\n";
+        let s = parse(&format!(
+            "{HEAD}{}{}",
+            section("audio", "0", 9, two),
+            section("video", "1", 9, two)
+        ));
+        let fingerprints = extract_fingerprints(&s)?;
+        assert_eq!(
+            fingerprints
+                .iter()
+                .map(|f| f.value.as_str())
+                .collect::<Vec<_>>(),
+            ["AA:AA", "BB:BB"]
+        );
+
+        let s = parse(&format!(
+            "{HEAD}{}{}",
+            section("audio", "0", 9, two),
+            section("video", "1", 9, "a=fingerprint:sha-256 AA:AA\r\n")
+        ));
+        assert_eq!(
+            extract_fingerprints(&s).unwrap_err(),
+            Error::ErrSessionDescriptionConflictingFingerprints
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn insert_media_line_appends_to_the_section() {
+        let sdp = "v=0\r\nm=audio 9 X 0\r\na=mid:0\r\nm=video 9 X 0\r\na=mid:1\r\n";
+        assert_eq!(
+            insert_media_line(sdp, 0, "end-of-candidates", None),
+            "v=0\r\nm=audio 9 X 0\r\na=mid:0\r\na=end-of-candidates\r\nm=video 9 X 0\r\na=mid:1\r\n"
+        );
+        assert_eq!(
+            insert_media_line(
+                "v=0\nm=audio 9 X 0\na=mid:0",
+                0,
+                "candidate",
+                Some("1 1 udp")
+            ),
+            "v=0\nm=audio 9 X 0\na=mid:0\na=candidate:1 1 udp\n"
+        );
+        assert_eq!(insert_media_line(sdp, 2, "x", None), sdp);
     }
 }

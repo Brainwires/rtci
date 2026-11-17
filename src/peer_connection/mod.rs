@@ -271,10 +271,10 @@ use crate::peer_connection::handler::sctp::SctpHandlerContext;
 use crate::peer_connection::sdp::MediaDescriptionExt;
 use crate::peer_connection::sdp::session_description::RTCSessionDescription;
 use crate::peer_connection::sdp::{
-    extract_fingerprint, extract_ice_details, get_application_media,
+    RemoteIceDetails, extract_fingerprints, extract_ice_details, get_application_media,
     get_application_media_section_max_message_size, get_application_media_section_sctp_port,
-    get_mid_value, get_peer_direction, has_ice_trickle_option, is_lite_set, sdp_type::RTCSdpType,
-    update_sdp_origin,
+    get_mid_value, get_peer_direction, has_ice_trickle_option, insert_media_line, is_lite_set,
+    media_ice_credentials, sdp_type::RTCSdpType, update_sdp_origin,
 };
 use crate::peer_connection::state::RTCIceGatheringState;
 use crate::peer_connection::state::ice_connection_state::RTCIceConnectionState;
@@ -293,6 +293,7 @@ use crate::peer_connection::transport::ice::IceTransport;
 use crate::peer_connection::transport::ice::candidate::RTCIceCandidateInit;
 use crate::peer_connection::transport::ice::parameters::RTCIceParameters;
 use crate::peer_connection::transport::ice::role::RTCIceRole;
+use crate::peer_connection::transport::ice::state::RTCIceTransportState;
 use crate::peer_connection::transport::sctp::SctpTransport;
 use crate::peer_connection::transport::sctp::capabilities::SCTPTransportCapabilities;
 use crate::rtp_transceiver::direction::RTCRtpTransceiverDirection;
@@ -310,7 +311,8 @@ use crate::rtp_transceiver::{
 use crate::statistics::StatsSelector;
 use crate::statistics::accumulator::RTCStatsAccumulator;
 use crate::statistics::report::RTCStatsReport;
-use ::sdp::description::session::Origin;
+use ::sdp::description::common::Attribute;
+use ::sdp::description::session::{ATTR_KEY_END_OF_CANDIDATES, Origin};
 use ::sdp::util::ConnectionRole;
 use ice::AgentConfig;
 use ice::candidate::{Candidate, unmarshal_candidate};
@@ -1010,6 +1012,17 @@ impl RTCPeerConnection {
             }
         }
 
+        // An offer that already took a role leaves the other one (RFC 5763 §5: an offerer's
+        // setup:active is answered with setup:passive, and setup:passive with setup:active);
+        // only an actpass offer lets the answerer choose.
+        if let Some(parsed) = self.remote_description().and_then(|r| r.parsed.as_ref()) {
+            match RTCDtlsRole::from(parsed) {
+                RTCDtlsRole::Client => connection_role = ConnectionRole::Passive,
+                RTCDtlsRole::Server => connection_role = ConnectionRole::Active,
+                _ => {}
+            }
+        }
+
         let mut d = self.generate_matched_sdp(
             false, /*includeUnmatched */
             connection_role,
@@ -1357,7 +1370,6 @@ impl RTCPeerConnection {
             .ssrc_owners
             .clear();
 
-        let is_renegotiation = self.current_remote_description.is_some();
         let answers = matches!(
             remote_description.sdp_type,
             RTCSdpType::Answer | RTCSdpType::Pranswer
@@ -1400,7 +1412,10 @@ impl RTCPeerConnection {
                 }
             }
 
-            let we_offer = remote_description.sdp_type == RTCSdpType::Answer;
+            // A provisional answer is, like the final one, the remote side answering our offer
+            // (RFC 8829 §4.1.10.1): it decides the ICE role and doesn't create transceivers.
+            let is_final_answer = remote_description.sdp_type == RTCSdpType::Answer;
+            let we_offer = is_final_answer || remote_description.sdp_type == RTCSdpType::Pranswer;
 
             // Extract media descriptions to avoid borrowing conflicts
             let media_descriptions = self
@@ -1549,7 +1564,10 @@ impl RTCPeerConnection {
                             direction = RTCRtpTransceiverDirection::Sendonly;
                         }
 
-                        transceiver.set_current_direction(direction);
+                        // [[CurrentDirection]] is set by a final answer only (W3C 4.4.1.6).
+                        if is_final_answer {
+                            transceiver.set_current_direction(direction);
+                        }
 
                         transceiver.set_codec_preferences_from_remote_description(
                             media,
@@ -1559,103 +1577,83 @@ impl RTCPeerConnection {
                 }
             }
 
-            let (remote_ufrag, remote_pwd, candidates) =
-                extract_ice_details(parsed_remote_description)?;
+            // The ICE and DTLS transports start with the first description that sets one up,
+            // not with the first remote description: a description with nothing to negotiate
+            // (no m-section) has no ICE credentials, and a remote offer may be applied again or
+            // rolled back before an answer makes it current.
+            let transports_started = self.ice_transport().state() != RTCIceTransportState::New;
 
-            if is_renegotiation
-                && self
-                    .ice_transport()
-                    .have_remote_credentials_change(&remote_ufrag, &remote_pwd)
+            if let Some(RemoteIceDetails {
+                ufrag: remote_ufrag,
+                pwd: remote_pwd,
+                candidates,
+            }) = extract_ice_details(parsed_remote_description)?
             {
-                // An ICE Restart only happens implicitly for a set_remote_description of type offer
+                // If one of the agents is lite and the other one is not, the lite agent must be
+                // the controlling agent. If both or neither agents are lite the offering agent
+                // is controlling. RFC 8445 S6.1.1
+                let remote_is_lite = is_lite_set(parsed_remote_description);
+                let local_ice_role = if (we_offer
+                    && remote_is_lite == self.setting_engine.candidates.ice_lite)
+                    || (remote_is_lite && !self.setting_engine.candidates.ice_lite)
+                {
+                    RTCIceRole::Controlling
+                } else {
+                    RTCIceRole::Controlled
+                };
+                let remote_dtls_parameters = RTCDtlsParameters {
+                    role: RTCDtlsRole::from(parsed_remote_description),
+                    fingerprints: extract_fingerprints(parsed_remote_description)?,
+                };
 
-                if !we_offer {
-                    // The answerer restarts in one step: it has `now`, and the answer it generates
-                    // next must already carry the new local credentials.
-                    self.stage_ice_restart()?;
-                    self.apply_ice_restart(now)?;
+                if transports_started
+                    && self
+                        .ice_transport()
+                        .have_remote_credentials_change(&remote_ufrag, &remote_pwd)
+                {
+                    // An ICE Restart only happens implicitly for a set_remote_description of type offer
+
+                    if !we_offer {
+                        // The answerer restarts in one step: it has `now`, and the answer it
+                        // generates next must already carry the new local credentials.
+                        self.stage_ice_restart()?;
+                        self.apply_ice_restart(now)?;
+                    }
+
+                    self.ice_transport_mut()
+                        .set_remote_credentials(remote_ufrag.clone(), remote_pwd.clone())?;
+
+                    // RFC 8842: on ICE restart the DTLS transport must re-handshake over the new
+                    // ICE path. Reset the DTLS endpoint with the description's fingerprints so
+                    // the next ICESelectedCandidatePairChange triggers a fresh handshake.
+                    self.dtls_transport_mut()
+                        .restart(local_ice_role, remote_dtls_parameters.clone())?;
                 }
 
-                self.ice_transport_mut()
-                    .set_remote_credentials(remote_ufrag.clone(), remote_pwd.clone())?;
+                for candidate in candidates {
+                    self.ice_transport_mut().add_remote_candidate(candidate)?;
+                }
 
-                // RFC 8842: on ICE restart the DTLS transport must re-handshake over the new
-                // ICE path.  Extract updated remote fingerprint from the new SDP and reset the
-                // DTLS endpoint so the next ICESelectedCandidatePairChange triggers a fresh
-                // handshake.
-                let (remote_fingerprint, remote_fingerprint_hash) =
-                    extract_fingerprint(parsed_remote_description)?;
-                let remote_dtls_role = RTCDtlsRole::from(parsed_remote_description);
+                if !transports_started {
+                    log::trace!(
+                        "start_transports: local_ice_role={local_ice_role}, remote_dtls_role={}",
+                        remote_dtls_parameters.role
+                    );
 
-                // Determine local ICE role for DTLS role derivation.
-                let remote_is_lite = is_lite_set(parsed_remote_description);
-                let local_ice_role = if (we_offer
-                    && remote_is_lite == self.setting_engine.candidates.ice_lite)
-                    || (remote_is_lite && !self.setting_engine.candidates.ice_lite)
-                {
-                    RTCIceRole::Controlling
-                } else {
-                    RTCIceRole::Controlled
-                };
-
-                self.dtls_transport_mut().restart(
-                    local_ice_role,
-                    RTCDtlsParameters {
-                        role: remote_dtls_role,
-                        fingerprints: vec![RTCDtlsFingerprint {
-                            algorithm: remote_fingerprint_hash,
-                            value: remote_fingerprint,
-                        }],
-                    },
-                )?;
+                    self.start_transports(
+                        now,
+                        local_ice_role,
+                        RTCIceParameters {
+                            username_fragment: remote_ufrag,
+                            password: remote_pwd,
+                            ice_lite: remote_is_lite,
+                        },
+                        remote_dtls_parameters,
+                    )?;
+                }
             }
 
-            for candidate in candidates {
-                self.ice_transport_mut().add_remote_candidate(candidate)?;
-            }
-
-            if !is_renegotiation {
-                let remote_is_lite = is_lite_set(parsed_remote_description);
-
-                let (remote_fingerprint, remote_fingerprint_hash) =
-                    extract_fingerprint(parsed_remote_description)?;
-
-                // If one of the agents is lite and the other one is not, the lite agent must be the controlling agent.
-                // If both or neither agents are lite the offering agent is controlling.
-                // RFC 8445 S6.1.1
-                let local_ice_role = if (we_offer
-                    && remote_is_lite == self.setting_engine.candidates.ice_lite)
-                    || (remote_is_lite && !self.setting_engine.candidates.ice_lite)
-                {
-                    RTCIceRole::Controlling
-                } else {
-                    RTCIceRole::Controlled
-                };
-
-                let remote_dtls_role = RTCDtlsRole::from(parsed_remote_description);
-                log::trace!(
-                    "start_transports: local_ice_role={local_ice_role}, remote_dtls_role={remote_dtls_role}"
-                );
-
-                self.start_transports(
-                    now,
-                    local_ice_role,
-                    RTCIceParameters {
-                        username_fragment: remote_ufrag,
-                        password: remote_pwd,
-                        ice_lite: remote_is_lite,
-                    },
-                    RTCDtlsParameters {
-                        role: remote_dtls_role,
-                        fingerprints: vec![RTCDtlsFingerprint {
-                            algorithm: remote_fingerprint_hash,
-                            value: remote_fingerprint,
-                        }],
-                    },
-                )?;
-            }
-
-            if we_offer
+            if is_final_answer
                 && let Some(parsed_local_description) = self
                     .current_local_description
                     .as_ref()
@@ -1769,20 +1767,143 @@ impl RTCPeerConnection {
     ///
     /// See [addIceCandidate](https://www.w3.org/TR/webrtc/#dom-rtcpeerconnection-addicecandidate!overload-1)
     pub fn add_remote_candidate(&mut self, remote_candidate: RTCIceCandidateInit) -> Result<()> {
-        if self.remote_description().is_none() {
+        let Some(parsed) = self
+            .remote_description()
+            .and_then(|r| r.parsed.as_ref())
+            .cloned()
+        else {
             return Err(Error::ErrNoRemoteDescription);
-        }
+        };
+        let parsed = &parsed;
 
         let candidate_value = match remote_candidate.candidate.strip_prefix("candidate:") {
             Some(s) => s,
             None => remote_candidate.candidate.as_str(),
         };
 
-        if !candidate_value.is_empty() {
-            self.add_ice_remote_candidate(candidate_value)?;
+        // The media description the candidate is for: sdpMid wins over sdpMLineIndex. With
+        // neither, an end-of-candidates indication is for every media description; a candidate
+        // without either (which W3C addIceCandidate refuses before it gets here) is given to the
+        // ICE transport only.
+        let section = if let Some(mid) = &remote_candidate.sdp_mid {
+            Some(
+                parsed
+                    .media_descriptions
+                    .iter()
+                    .position(|m| get_mid_value(m).is_some_and(|v| v == mid))
+                    .ok_or(Error::ErrIceCandidateMediaSectionNotFound)?,
+            )
+        } else if let Some(index) = remote_candidate.sdp_mline_index {
+            let index = usize::from(index);
+            if index >= parsed.media_descriptions.len() {
+                return Err(Error::ErrIceCandidateMediaSectionNotFound);
+            }
+            Some(index)
+        } else {
+            None
+        };
+
+        // A usernameFragment must be one of the corresponding media description's (any media
+        // description's when there is none): a candidate of another ICE generation is refused.
+        if let Some(ufrag) = remote_candidate.username_fragment.as_deref() {
+            let known = match section {
+                Some(i) => {
+                    media_ice_credentials(parsed, &parsed.media_descriptions[i]).0 == Some(ufrag)
+                }
+                None => parsed
+                    .media_descriptions
+                    .iter()
+                    .any(|m| media_ice_credentials(parsed, m).0 == Some(ufrag)),
+            };
+            if !known {
+                return Err(Error::ErrIceCandidateUsernameFragmentMismatch);
+            }
         }
 
+        if candidate_value.is_empty() {
+            // End-of-candidates (RFC 8838 §8.2) for the media description, or all of them.
+            let count = parsed.media_descriptions.len();
+            let sections: Vec<usize> = section.map_or_else(|| (0..count).collect(), |i| vec![i]);
+            for i in sections {
+                self.add_remote_description_attribute(
+                    i,
+                    remote_candidate.username_fragment.as_deref(),
+                    ATTR_KEY_END_OF_CANDIDATES,
+                    None,
+                );
+            }
+            return Ok(());
+        }
+
+        let Some(section) = section else {
+            return self.add_ice_remote_candidate(candidate_value);
+        };
+
+        // Only a candidate of the ICE transport in use reaches the agent. One for another
+        // m-section's own transport, which BUNDLE replaces (an offer under the `balanced` or
+        // `max-compat` policy gives each m-section its own credentials), is recorded in the
+        // remote description only.
+        let section_ufrag = remote_candidate.username_fragment.clone().or_else(|| {
+            media_ice_credentials(parsed, &parsed.media_descriptions[section])
+                .0
+                .map(str::to_owned)
+        });
+        let (transport_ufrag, _) = self.ice_transport().get_remote_user_credentials();
+        if transport_ufrag.is_empty()
+            || section_ufrag.is_none()
+            || section_ufrag.as_deref() == Some(transport_ufrag)
+        {
+            self.add_ice_remote_candidate(candidate_value)?;
+        } else {
+            // Still refuse what doesn't parse, as the transport would.
+            unmarshal_candidate(candidate_value)?;
+        }
+
+        self.add_remote_description_attribute(
+            section,
+            section_ufrag.as_deref(),
+            "candidate",
+            Some(candidate_value),
+        );
         Ok(())
+    }
+
+    /// Adds `a=<key>[:<value>]` to the remote description's media section `index`, in the
+    /// pending and the current remote description, each only while that section is of the
+    /// candidate's ICE generation (`ufrag`, when given). The SDP text keeps the remote side's
+    /// own lines: the attribute is inserted at the end of the section. An end-of-candidates line
+    /// a section already has isn't added again.
+    fn add_remote_description_attribute(
+        &mut self,
+        index: usize,
+        ufrag: Option<&str>,
+        key: &str,
+        value: Option<&str>,
+    ) {
+        for description in [
+            self.pending_remote_description.as_mut(),
+            self.current_remote_description.as_mut(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let Some(parsed) = description.parsed.as_mut() else {
+                continue;
+            };
+            let Some(media) = parsed.media_descriptions.get(index) else {
+                continue;
+            };
+            if ufrag.is_some() && media_ice_credentials(parsed, media).0 != ufrag {
+                continue;
+            }
+            if value.is_none() && media.has_attribute(key) {
+                continue;
+            }
+            parsed.media_descriptions[index]
+                .attributes
+                .push(Attribute::new(key.to_owned(), value.map(str::to_owned)));
+            description.sdp = insert_media_line(&description.sdp, index, key, value);
+        }
     }
 
     /// Adds a local ICE candidate to the peer connection.
@@ -3450,5 +3571,252 @@ mod tests {
                 "codec bound for rid {rid} must be kept across renegotiation"
             );
         }
+    }
+
+    // ---- Negotiation edge cases (JSEP RFC 8829, W3C addIceCandidate) ----
+
+    fn remote(sdp_type: RTCSdpType, sdp: &str) -> RTCSessionDescription {
+        RTCSessionDescription {
+            sdp_type,
+            sdp: sdp.to_owned(),
+            parsed: None,
+        }
+    }
+
+    /// An offer as a browser writes it under the `balanced` bundle policy: a BUNDLE group whose
+    /// m-sections each have their own ICE credentials.
+    const PER_SECTION_UFRAG_OFFER: &str = "v=0\r\n\
+o=- 4962303333179871722 1 IN IP4 0.0.0.0\r\n\
+s=-\r\n\
+t=0 0\r\n\
+a=ice-options:trickle\r\n\
+a=group:BUNDLE a1 v1\r\n\
+m=audio 10100 UDP/TLS/RTP/SAVPF 111\r\n\
+c=IN IP4 203.0.113.100\r\n\
+a=mid:a1\r\n\
+a=sendrecv\r\n\
+a=rtpmap:111 opus/48000/2\r\n\
+a=ice-ufrag:ETEn\r\n\
+a=ice-pwd:OtSK0WpNtpUjkY4+86js7ZQl\r\n\
+a=fingerprint:sha-256 19:E2:1C:3B:4B:9F:81:E6:B8:5C:F4:A5:A8:D8:73:04:BB:05:2F:70:9F:04:A9:0E:05:E9:26:33:E8:70:88:A2\r\n\
+a=setup:actpass\r\n\
+a=rtcp-mux\r\n\
+m=video 10102 UDP/TLS/RTP/SAVPF 96\r\n\
+c=IN IP4 203.0.113.100\r\n\
+a=mid:v1\r\n\
+a=sendrecv\r\n\
+a=rtpmap:96 VP8/90000\r\n\
+a=ice-ufrag:BGKk\r\n\
+a=ice-pwd:mqyWsAjvtKwTGnvhPztQ9mIf\r\n\
+a=fingerprint:sha-256 19:E2:1C:3B:4B:9F:81:E6:B8:5C:F4:A5:A8:D8:73:04:BB:05:2F:70:9F:04:A9:0E:05:E9:26:33:E8:70:88:A2\r\n\
+a=setup:actpass\r\n\
+a=rtcp-mux\r\n";
+
+    fn candidate(line: &str, mid: Option<&str>, ufrag: Option<&str>) -> RTCIceCandidateInit {
+        RTCIceCandidateInit {
+            candidate: line.to_owned(),
+            sdp_mid: mid.map(str::to_owned),
+            username_fragment: ufrag.map(str::to_owned),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn per_section_ufrags_in_a_bundle_group_use_the_tagged_sections() {
+        let mut pc = media_pc();
+        pc.set_remote_description(
+            Instant::now(),
+            remote(RTCSdpType::Offer, PER_SECTION_UFRAG_OFFER),
+        )
+        .expect("a BUNDLE group's m-sections may have their own ICE credentials");
+        assert_eq!(pc.ice_transport().get_remote_user_credentials().0, "ETEn");
+        assert_eq!(pc.can_trickle_ice_candidates(), Some(true));
+
+        // A candidate of the second m-section is its own (BUNDLE-replaced) transport's: it is
+        // accepted and recorded in that m-section, not given to the agent.
+        let line = "candidate:1 1 udp 2113929471 203.0.113.100 10100 typ host";
+        pc.add_remote_candidate(candidate(line, Some("v1"), Some("BGKk")))
+            .unwrap();
+        assert!(pc.ice_transport().get_remote_candidates().is_empty());
+        pc.add_remote_candidate(candidate(line, Some("a1"), None))
+            .unwrap();
+        assert_eq!(pc.ice_transport().get_remote_candidates().len(), 1);
+
+        let sdp = pc.remote_description().unwrap().sdp.clone();
+        let video = sdp.find("m=video").unwrap();
+        assert_eq!(sdp[..video].matches("a=candidate:").count(), 1);
+        assert_eq!(sdp[video..].matches("a=candidate:").count(), 1);
+        assert!(sdp.ends_with(&format!("a={line}\r\n")));
+
+        // The usernameFragment must be its media section's.
+        assert_eq!(
+            pc.add_remote_candidate(candidate(line, Some("a1"), Some("BGKk"))),
+            Err(Error::ErrIceCandidateUsernameFragmentMismatch)
+        );
+        assert_eq!(
+            pc.add_remote_candidate(candidate("", None, Some("no such ufrag"))),
+            Err(Error::ErrIceCandidateUsernameFragmentMismatch)
+        );
+        assert_eq!(
+            pc.add_remote_candidate(candidate(line, Some("nope"), None)),
+            Err(Error::ErrIceCandidateMediaSectionNotFound)
+        );
+
+        // End-of-candidates without a media section marks every one, once.
+        pc.add_remote_candidate(candidate("", None, None)).unwrap();
+        pc.add_remote_candidate(candidate("", Some("v1"), None))
+            .unwrap();
+        let sdp = &pc.remote_description().unwrap().sdp;
+        assert_eq!(sdp.matches("a=end-of-candidates\r\n").count(), 2);
+    }
+
+    #[test]
+    fn sections_without_ssrc_lines_are_answered() {
+        // RFC 8843 §9.2: a=ssrc is optional; the MID header extension identifies each section.
+        let offer = PER_SECTION_UFRAG_OFFER
+            .replace("a=mid:a1\r\n", "a=mid:a1\r\na=msid:stream audio-track\r\n")
+            .replace("a=mid:v1\r\n", "a=mid:v1\r\na=msid:stream video-track\r\n");
+        let mut pc = media_pc();
+        pc.set_remote_description(Instant::now(), remote(RTCSdpType::Offer, &offer))
+            .unwrap();
+        let answer = pc.create_answer(None).unwrap();
+        pc.set_local_description(Instant::now(), answer)
+            .expect("two media sections without a=ssrc");
+        assert_eq!(pc.signaling_state, RTCSignalingState::Stable);
+    }
+
+    #[test]
+    fn the_answer_takes_the_dtls_role_the_offer_left() {
+        for (offered, answered) in [
+            ("a=setup:active", "a=setup:passive"),
+            ("a=setup:passive", "a=setup:active"),
+            ("a=setup:actpass", "a=setup:active"),
+        ] {
+            let offer = PER_SECTION_UFRAG_OFFER.replace("a=setup:actpass", offered);
+            let mut pc = media_pc();
+            pc.set_remote_description(Instant::now(), remote(RTCSdpType::Offer, &offer))
+                .unwrap();
+            let answer = pc.create_answer(None).unwrap();
+            assert!(answer.sdp.contains(answered), "{offered}: {}", answer.sdp);
+            assert!(!answer.sdp.contains(offered) || offered == answered);
+        }
+    }
+
+    #[test]
+    fn an_offer_without_media_sections_is_answered_without_starting_transports() {
+        let offer = media_pc().create_offer(None).unwrap();
+        assert!(!offer.sdp.contains("m="));
+
+        let mut pc = media_pc();
+        pc.set_remote_description(Instant::now(), offer).unwrap();
+        let answer = pc.create_answer(None).unwrap();
+        pc.set_local_description(Instant::now(), answer).unwrap();
+        assert_eq!(pc.signaling_state, RTCSignalingState::Stable);
+        assert_eq!(pc.ice_transport().state(), RTCIceTransportState::New);
+
+        // The next offer that has an m-section starts them.
+        pc.set_remote_description(Instant::now(), audio_video_offer())
+            .unwrap();
+        assert_ne!(pc.ice_transport().state(), RTCIceTransportState::New);
+    }
+
+    #[test]
+    fn a_remote_offer_can_be_applied_again_and_rolled_back() {
+        let mut pc = media_pc();
+        pc.set_remote_description(Instant::now(), audio_video_offer())
+            .unwrap();
+        pc.set_remote_description(Instant::now(), audio_video_offer())
+            .expect("have-remote-offer takes another remote offer");
+        assert_eq!(pc.signaling_state, RTCSignalingState::HaveRemoteOffer);
+        pc.set_remote_description(Instant::now(), rollback())
+            .unwrap();
+        pc.set_remote_description(Instant::now(), audio_video_offer())
+            .expect("a remote offer after a rollback");
+        assert_eq!(
+            pc.set_local_description(Instant::now(), rollback()),
+            Err(Error::ErrSignalingStateProposedTransitionInvalid(format!(
+                "from {} applying {} {}",
+                RTCSignalingState::HaveRemoteOffer,
+                true,
+                RTCSdpType::Rollback
+            )))
+        );
+    }
+
+    #[test]
+    fn provisional_answers_repeat_and_keep_the_offerer_controlling() {
+        let mut offerer = media_pc();
+        offerer
+            .add_transceiver_from_kind(RtpCodecKind::Audio, None)
+            .unwrap();
+        let offer = offerer.create_offer(None).unwrap();
+        offerer
+            .set_local_description(Instant::now(), offer.clone())
+            .unwrap();
+
+        let mut answerer = media_pc();
+        answerer
+            .set_remote_description(Instant::now(), offer)
+            .unwrap();
+        let answer = answerer.create_answer(None).unwrap();
+        let pranswer = remote(RTCSdpType::Pranswer, &answer.sdp);
+        answerer
+            .set_local_description(Instant::now(), pranswer.clone())
+            .unwrap();
+        answerer
+            .set_local_description(Instant::now(), pranswer.clone())
+            .expect("have-local-pranswer takes another provisional answer");
+        assert_eq!(
+            answerer.signaling_state,
+            RTCSignalingState::HaveLocalPranswer
+        );
+
+        offerer
+            .set_remote_description(Instant::now(), pranswer.clone())
+            .unwrap();
+        assert_eq!(offerer.ice_transport().role(), RTCIceRole::Controlling);
+        offerer
+            .set_remote_description(Instant::now(), pranswer)
+            .expect("have-remote-pranswer takes another provisional answer");
+        offerer
+            .set_remote_description(Instant::now(), remote(RTCSdpType::Answer, &answer.sdp))
+            .unwrap();
+        assert_eq!(offerer.signaling_state, RTCSignalingState::Stable);
+        assert_eq!(offerer.ice_transport().role(), RTCIceRole::Controlling);
+    }
+
+    #[test]
+    fn descriptions_offer_trickle_and_a_fingerprint_per_certificate() {
+        use crate::peer_connection::certificate::RTCCertificate;
+        use crate::peer_connection::configuration::RTCConfigurationBuilder;
+
+        let certificate = || {
+            let kp = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+            RTCCertificate::from_key_pair(kp).unwrap()
+        };
+        let mut me = MediaEngine::default();
+        me.register_default_codecs().unwrap();
+        let mut pc = RTCPeerConnectionBuilder::new()
+            .with_media_engine(me)
+            .with_configuration(
+                RTCConfigurationBuilder::new()
+                    .with_certificates(vec![certificate(), certificate()])
+                    .build(),
+            )
+            .build(Instant::now())
+            .unwrap();
+        pc.add_transceiver_from_kind(RtpCodecKind::Audio, None)
+            .unwrap();
+        let offer = pc.create_offer(None).unwrap();
+        assert!(offer.sdp.contains("a=ice-options:trickle\r\n"));
+        assert_eq!(offer.sdp.matches("a=fingerprint:sha-256 ").count(), 2);
+
+        // The other side takes both and trickles back.
+        let mut answerer = media_pc();
+        answerer
+            .set_remote_description(Instant::now(), offer)
+            .unwrap();
+        let answer = answerer.create_answer(None).unwrap();
+        assert!(answer.sdp.contains("a=ice-options:trickle\r\n"));
     }
 }

@@ -362,10 +362,17 @@ pub(crate) fn check_next_signaling_state(
             }
         }
         RTCSignalingState::HaveRemotePranswer => {
-            if op == StateChangeOp::SetRemote && sdp_type == RTCSdpType::Answer {
-                // have-remote-pranswer->SetRemote(answer)->stable
-                if next == RTCSignalingState::Stable {
-                    return Ok(next);
+            if op == StateChangeOp::SetRemote {
+                match sdp_type {
+                    // have-remote-pranswer->SetRemote(answer)->stable
+                    RTCSdpType::Answer if next == RTCSignalingState::Stable => {
+                        return Ok(next);
+                    }
+                    // have-remote-pranswer->SetRemote(pranswer)->have-remote-pranswer
+                    RTCSdpType::Pranswer if next == RTCSignalingState::HaveRemotePranswer => {
+                        return Ok(next);
+                    }
+                    _ => {}
                 }
             }
         }
@@ -382,19 +389,32 @@ pub(crate) fn check_next_signaling_state(
                     }
                     _ => {}
                 }
-            } else if op == StateChangeOp::SetRemote
-                && sdp_type == RTCSdpType::Rollback
-                && next == RTCSignalingState::Stable
-            {
-                // have-remote-offer->SetRemote(rollback)->stable
-                return Ok(next);
+            } else if op == StateChangeOp::SetRemote {
+                match sdp_type {
+                    // have-remote-offer->SetRemote(offer)->have-remote-offer (reoffer)
+                    RTCSdpType::Offer if next == RTCSignalingState::HaveRemoteOffer => {
+                        return Ok(next);
+                    }
+                    // have-remote-offer->SetRemote(rollback)->stable
+                    RTCSdpType::Rollback if next == RTCSignalingState::Stable => {
+                        return Ok(next);
+                    }
+                    _ => {}
+                }
             }
         }
         RTCSignalingState::HaveLocalPranswer => {
-            if op == StateChangeOp::SetLocal && sdp_type == RTCSdpType::Answer {
-                // have-local-pranswer->SetLocal(answer)->stable
-                if next == RTCSignalingState::Stable {
-                    return Ok(next);
+            if op == StateChangeOp::SetLocal {
+                match sdp_type {
+                    // have-local-pranswer->SetLocal(answer)->stable
+                    RTCSdpType::Answer if next == RTCSignalingState::Stable => {
+                        return Ok(next);
+                    }
+                    // have-local-pranswer->SetLocal(pranswer)->have-local-pranswer
+                    RTCSdpType::Pranswer if next == RTCSignalingState::HaveLocalPranswer => {
+                        return Ok(next);
+                    }
+                    _ => {}
                 }
             }
         }
@@ -526,6 +546,43 @@ mod test {
                 StateChangeOp::SetLocal,
                 RTCSdpType::Answer,
                 None,
+            ),
+            (
+                "have-remote-offer->SetRemote(offer)->have-remote-offer",
+                RTCSignalingState::HaveRemoteOffer,
+                RTCSignalingState::HaveRemoteOffer,
+                StateChangeOp::SetRemote,
+                RTCSdpType::Offer,
+                None,
+            ),
+            (
+                "have-local-pranswer->SetLocal(pranswer)->have-local-pranswer",
+                RTCSignalingState::HaveLocalPranswer,
+                RTCSignalingState::HaveLocalPranswer,
+                StateChangeOp::SetLocal,
+                RTCSdpType::Pranswer,
+                None,
+            ),
+            (
+                "have-remote-pranswer->SetRemote(pranswer)->have-remote-pranswer",
+                RTCSignalingState::HaveRemotePranswer,
+                RTCSignalingState::HaveRemotePranswer,
+                StateChangeOp::SetRemote,
+                RTCSdpType::Pranswer,
+                None,
+            ),
+            (
+                "(invalid) have-remote-offer->SetLocal(rollback)->stable",
+                RTCSignalingState::HaveRemoteOffer,
+                RTCSignalingState::Stable,
+                StateChangeOp::SetLocal,
+                RTCSdpType::Rollback,
+                Some(Error::ErrSignalingStateProposedTransitionInvalid(format!(
+                    "from {} applying {} {}",
+                    RTCSignalingState::HaveRemoteOffer,
+                    true,
+                    RTCSdpType::Rollback
+                ))),
             ),
             (
                 "(invalid) stable->SetRemote(pranswer)->have-remote-pranswer",
