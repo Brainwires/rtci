@@ -509,6 +509,28 @@ impl<'a>
                 }
             }
 
+            RTCEventInternal::SCTPAssociationFailed(_association_handle) => {
+                // One association per connection: every channel still open fails with it.
+                let mut failed = Vec::new();
+                for dc in self.data_channels.values_mut() {
+                    if !dc.close_emitted && !dc.failed {
+                        dc.failed = true;
+                        failed.push(dc.id);
+                    }
+                }
+                failed.sort_unstable();
+                for channel_id in failed {
+                    self.ctx.event_outs.push_back(TaggedRTCEventInternal {
+                        now,
+                        event: RTCEventInternal::RTCPeerConnectionEvent(
+                            RTCPeerConnectionEvent::OnDataChannel(RTCDataChannelEvent::OnError(
+                                channel_id,
+                            )),
+                        ),
+                    });
+                }
+            }
+
             RTCEventInternal::SCTPStreamFailed(_association_handle, stream_id) => {
                 if let Some(dc) = self.data_channels.get_by_stream_mut(&stream_id)
                     && !dc.close_emitted
@@ -1142,6 +1164,28 @@ mod tests {
                 RTCDataChannelEvent::OnError(handles[0]),
                 RTCDataChannelEvent::OnClose(handles[0]),
             ]
+        );
+    }
+
+    /// An association lost to an error fails every channel over it, a pre-negotiated one that
+    /// never carried data (and so has no SCTP stream to report) included, once each.
+    #[test]
+    fn association_failure_fails_idle_negotiated_channels() {
+        let mut ctx = DataChannelHandlerContext::new(Instant::now());
+        let mut dc = negotiated_channel(0);
+        dc.ready_state = RTCDataChannelState::Open;
+        let (mut data_channels, handles) = registry(vec![dc]);
+        feed(
+            &mut ctx,
+            &mut data_channels,
+            vec![
+                RTCEventInternal::SCTPAssociationFailed(0),
+                RTCEventInternal::SCTPStreamFailed(0, 0),
+            ],
+        );
+        assert_eq!(
+            channel_events(&ctx),
+            vec![RTCDataChannelEvent::OnError(handles[0])]
         );
     }
 

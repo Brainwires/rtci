@@ -594,6 +594,12 @@ pub(crate) enum RTCEventInternal {
     /// - Stream ID
     SCTPStreamFailed(usize /*AssociationHandle*/, u16 /*StreamID*/),
 
+    /// The SCTP association was lost to an error (see `SCTPStreamFailed`): every data channel
+    /// over it fails, including one that never carried data and so has no SCTP stream.
+    ///
+    /// Parameter: Association handle
+    SCTPAssociationFailed(usize /*AssociationHandle*/),
+
     /// SCTP released outgoing buffered bytes (acknowledged or abandoned) for a
     /// stream, used to decrement the per-channel send back-pressure counter.
     ///

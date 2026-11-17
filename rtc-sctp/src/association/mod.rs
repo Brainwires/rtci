@@ -118,6 +118,13 @@ pub enum Event {
         /// The stream the loss was reported against.
         id: StreamId,
     },
+    /// The association closed, after an `AssociationLost` for each of its streams. Emitted
+    /// whether or not it had streams, so an application that keeps state beside the
+    /// association (a pre-negotiated data channel that never carried data) learns of it.
+    AssociationClosed {
+        /// Reason that the association was closed
+        reason: AssociationError,
+    },
     /// Stream events
     Stream(StreamEvent),
     /// One or more application datagrams have been received
@@ -738,6 +745,9 @@ impl Association {
             for si in self.streams.keys().cloned().collect::<Vec<u16>>() {
                 self.unregister_stream(si, reason.clone());
             }
+            self.events.push_back(Event::AssociationClosed {
+                reason: reason.clone(),
+            });
 
             debug!("[{}] association closed", self.side);
             debug!(
@@ -2133,11 +2143,26 @@ impl Association {
                 if draining.contains(id) {
                     continue;
                 }
-                if self.streams.contains_key(id) {
-                    if respond {
+                if let Some(stream) = self.streams.get(id) {
+                    // RFC 8831 section 6.7: the receiver of a reset resets its own outgoing
+                    // stream too, unless it already has (the peer's request is then the
+                    // second half of a close this side started). Echoing it again would
+                    // send a reset after the stream id is free, and reset the next channel
+                    // that takes the id.
+                    let outgoing_open = (stream.state as u8) & 0x1 != 0;
+                    if respond && outgoing_open {
                         sis_to_reset.push(*id);
                     }
                     self.unregister_stream(*id, AssociationError::Reset);
+                } else if respond {
+                    // A stream this side never sent or received on (a pre-negotiated data
+                    // channel left idle) has no state here, but the application still
+                    // holds it: report the reset, and reset the outgoing direction too.
+                    sis_to_reset.push(*id);
+                    self.events.push_back(Event::AssociationLost {
+                        reason: AssociationError::Reset,
+                        id: *id,
+                    });
                 }
             }
 

@@ -518,6 +518,19 @@ impl<'a>
                                     event: RTCEventInternal::SCTPStreamClosed(ch.0, id),
                                 });
                             }
+                            Event::AssociationClosed { reason } => {
+                                if matches!(
+                                    reason,
+                                    AssociationError::AssociationClosed
+                                        | AssociationError::TransportError
+                                        | AssociationError::TimedOut
+                                ) {
+                                    self.ctx.event_outs.push_back(TaggedRTCEventInternal {
+                                        now,
+                                        event: RTCEventInternal::SCTPAssociationFailed(ch.0),
+                                    });
+                                }
+                            }
                             Event::Stream(StreamEvent::Opened { id }) => {
                                 // The peer's DATA created this stream. Its first message
                                 // may be the OPEN this side's sends must follow.
@@ -749,15 +762,23 @@ impl<'a>
                                 message.stream_id
                             );
                             let mut stream = conn.stream(message.stream_id)?;
+                            // Closing resets the outgoing stream; RFC 8831 section 6.7: the
+                            // channel is closed, and its stream id free, once the peer has
+                            // reset the incoming one in turn, which `AssociationLost` reports
+                            // as the stream is unregistered. Freeing it now let a new channel
+                            // take the id and be reset by the peer's reply.
+                            let resets = stream.is_readable();
                             stream.close(now)?;
 
-                            self.ctx.event_outs.push_back(TaggedRTCEventInternal {
-                                now,
-                                event: RTCEventInternal::SCTPStreamClosed(
-                                    message.association_handle,
-                                    message.stream_id,
-                                ),
-                            });
+                            if !resets {
+                                self.ctx.event_outs.push_back(TaggedRTCEventInternal {
+                                    now,
+                                    event: RTCEventInternal::SCTPStreamClosed(
+                                        message.association_handle,
+                                        message.stream_id,
+                                    ),
+                                });
+                            }
                         }
                         Message::DataChannelThreshold(data_channel_threshold) => {
                             is_dcep_internal_control_message = true;
