@@ -105,7 +105,7 @@ impl SctpTransport {
     /// `sctp_associations` is a map because the endpoint API is written for the general case, but
     /// a peer connection negotiates exactly one SCTP association. One that has ended is passed
     /// over for a live one, should both be present until the endpoint drains the old one.
-    fn association(&self) -> Option<&Association> {
+    pub(crate) fn association(&self) -> Option<&Association> {
         self.sctp_associations
             .values()
             .find(|association| !Self::ended(association))

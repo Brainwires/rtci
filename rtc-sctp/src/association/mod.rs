@@ -2807,6 +2807,28 @@ impl Association {
                 .is_some_and(|deadline| now >= deadline)
     }
 
+    /// Application bytes of `stream_identifier` that have left the send queue (see
+    /// [`Stream::bytes_dequeued`]); 0 for a stream this association does not hold.
+    pub fn stream_bytes_dequeued(&self, stream_identifier: StreamId) -> u64 {
+        self.streams
+            .get(&stream_identifier)
+            .map_or(0, |s| s.bytes_dequeued)
+    }
+
+    /// Credits a chunk leaving the send queue to its stream's `bytes_dequeued`.
+    fn note_dequeued(&mut self, c: &ChunkPayloadData) {
+        if !matches!(
+            c.payload_type,
+            PayloadProtocolIdentifier::String | PayloadProtocolIdentifier::Binary
+        ) || !self.is_current_stream_data(c)
+        {
+            return;
+        }
+        if let Some(s) = self.streams.get_mut(&c.stream_identifier) {
+            s.bytes_dequeued += c.user_data.len() as u64;
+        }
+    }
+
     fn is_current_stream_data(&self, c: &ChunkPayloadData) -> bool {
         self.streams
             .get(&c.stream_identifier)
@@ -2906,6 +2928,7 @@ impl Association {
                 .first()
                 .is_some_and(|c| !c.beginning_fragment || !c.unordered);
         for mut c in tail {
+            self.note_dequeued(&c);
             if assign_tsns {
                 c.tsn = self.generate_next_tsn();
                 inflight.push(c.tsn);
@@ -3305,6 +3328,7 @@ impl Association {
             );
 
             self.inflight_queue.push_no_check(c.clone());
+            self.note_dequeued(&c);
 
             Some(c)
         } else {
