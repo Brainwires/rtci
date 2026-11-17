@@ -200,13 +200,24 @@ impl RTCPeerConnection {
         })
     }
 
+    /// The local candidates an offer or answer carries: none while an ICE restart is staged,
+    /// because the description advertises the new credentials and the candidates gathered
+    /// so far belong to the old ones (RFC 8839 section 5.4, JSEP section 5.2.3.1: a restart
+    /// starts a new gathering phase, whose candidates are signalled as they come).
+    fn offered_local_candidates(&self) -> Result<Vec<RTCIceCandidate>> {
+        if self.ice_transport().has_pending_restart() {
+            return Ok(Vec::new());
+        }
+        self.ice_transport().get_local_candidates()
+    }
+
     /// generate_unmatched_sdp generates an SDP that doesn't take remote state into account
     /// This is used for the initial call for CreateOffer
     pub(super) fn generate_unmatched_sdp(&mut self) -> Result<SessionDescription> {
         let d = SessionDescription::new_jsep_session_description(false);
 
         let ice_params = self.ice_transport().get_local_parameters()?;
-        let candidates = self.ice_transport().get_local_candidates()?;
+        let candidates = self.offered_local_candidates()?;
 
         let mut media_sections = vec![];
 
@@ -276,7 +287,7 @@ impl RTCPeerConnection {
         d = d.with_value_attribute(ATTR_KEY_MSID_SEMANTIC.to_owned(), "WMS *".to_owned());
 
         let ice_params = self.ice_transport().get_local_parameters()?;
-        let candidates = self.ice_transport().get_local_candidates()?;
+        let candidates = self.offered_local_candidates()?;
 
         let mut media_sections = vec![];
         let mut already_have_application_media_section = false;

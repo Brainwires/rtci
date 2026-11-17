@@ -1246,6 +1246,13 @@ impl RTCPeerConnection {
 
         self.ice_transport_mut().ice_gathering_state = RTCIceGatheringState::Gathering;
 
+        if matches!(
+            local_description.sdp_type,
+            RTCSdpType::Answer | RTCSdpType::Pranswer
+        ) {
+            self.assign_data_channel_ids();
+        }
+
         Ok(())
     }
 
@@ -1351,6 +1358,10 @@ impl RTCPeerConnection {
             .clear();
 
         let is_renegotiation = self.current_remote_description.is_some();
+        let answers = matches!(
+            remote_description.sdp_type,
+            RTCSdpType::Answer | RTCSdpType::Pranswer
+        );
 
         // Parse SDP (skip for rollback as content is ignored per spec)
         if remote_description.sdp_type != RTCSdpType::Rollback {
@@ -1684,6 +1695,10 @@ impl RTCPeerConnection {
             }
         }
 
+        if answers {
+            self.assign_data_channel_ids();
+        }
+
         Ok(())
     }
 
@@ -1829,6 +1844,29 @@ impl RTCPeerConnection {
         }
 
         Ok(())
+    }
+
+    /// W3C "set the RTCSessionDescription", for an answer or a provisional answer: once the
+    /// description has negotiated the DTLS role of the SCTP transport, every in-band channel
+    /// whose id is still null is given one by RFC 8832 section 6 (even as the DTLS client, odd
+    /// as the server). Channels created before negotiation get their ids here rather than when
+    /// SCTP later connects, as `RTCDataChannel.id` requires.
+    ///
+    /// Running out of ids does not fail the description: the channels left without one keep a
+    /// null id, and the SCTP connected procedure tries them again against the association's
+    /// negotiated stream count.
+    fn assign_data_channel_ids(&mut self) {
+        let dtls_role = self.dtls_transport().role();
+        if !matches!(dtls_role, RTCDtlsRole::Client | RTCDtlsRole::Server) {
+            return;
+        }
+        let max_channels = self.sctp_transport().max_channels();
+        if let Err(err) = self
+            .data_channels
+            .assign_stream_ids(dtls_role, max_channels)
+        {
+            log::debug!("data channel ids not assigned: {err}");
+        }
     }
 
     /// Tells the peer connection that ICE should be restarted.
@@ -2034,7 +2072,17 @@ impl RTCPeerConnection {
         // role — but if it somehow is not resolved, there is no correct parity to pick, and
         // "wait for the connected procedure" is the right answer rather than an error. That is
         // the ordinary path for every channel created before negotiation.
+        //
+        // Without an association but with the DTLS role already negotiated (an answer has been
+        // applied), the channel still gets its id now: W3C createDataChannel initializes
+        // [[DataChannelId]] whenever "the DTLS role of the SCTP transport has already been
+        // negotiated".
         let dtls_role = self.dtls_transport().role();
+        if matches!(dtls_role, RTCDtlsRole::Client | RTCDtlsRole::Server) {
+            let max_channels = self.sctp_transport().max_channels();
+            self.data_channels
+                .assign_stream_ids(dtls_role, max_channels)?;
+        }
         if let Some(handle) = self
             .sctp_transport()
             .sctp_associations
@@ -2043,10 +2091,6 @@ impl RTCPeerConnection {
             .copied()
             && matches!(dtls_role, RTCDtlsRole::Client | RTCDtlsRole::Server)
         {
-            let max_channels = self.sctp_transport().max_channels();
-            self.data_channels
-                .assign_stream_ids(dtls_role, max_channels)?;
-
             let data_channel = self
                 .data_channels
                 .get_mut(&id)
@@ -2851,6 +2895,57 @@ mod tests {
             internal.data_channel.is_none(),
             "a channel with no stream id cannot be dialed"
         );
+    }
+
+    /// W3C "set the RTCSessionDescription": the answer negotiates the DTLS role, and every
+    /// in-band channel gets its id then (here, the DTLS client's even ids), before any SCTP
+    /// association exists; a channel created after that gets one at once.
+    #[test]
+    fn answer_assigns_data_channel_ids_by_dtls_role() {
+        let now = Instant::now();
+        let mut pc = RTCPeerConnectionBuilder::new().build(now).unwrap();
+        let first = pc.create_data_channel("first", None).unwrap().id();
+        assert_eq!(pc.data_channels.get(&first).unwrap().stream_id, None);
+
+        let offer = pc.create_offer(None).unwrap();
+        pc.set_local_description(now, offer.clone()).unwrap();
+        assert_eq!(
+            pc.data_channels.get(&first).unwrap().stream_id,
+            None,
+            "an offer alone negotiates no DTLS role"
+        );
+        // The remote side answers `passive`: this side is the DTLS client.
+        let answer =
+            RTCSessionDescription::answer(offer.sdp.replace("actpass", "passive")).unwrap();
+        pc.set_remote_description(now, answer).unwrap();
+        assert!(pc.sctp_transport().sctp_associations.is_empty());
+
+        let first_id = pc.data_channels.get(&first).unwrap().stream_id;
+        assert_eq!(first_id, Some(0));
+        let second = pc.create_data_channel("second", None).unwrap().id();
+        assert_eq!(pc.data_channels.get(&second).unwrap().stream_id, Some(2));
+    }
+
+    /// An offer that restarts ICE carries the new credentials and none of the candidates
+    /// gathered under the old ones; they come back as the new gathering phase finds them.
+    #[test]
+    fn ice_restart_offer_carries_no_previous_candidates() {
+        let now = Instant::now();
+        let mut pc = RTCPeerConnectionBuilder::new().build(now).unwrap();
+        pc.create_data_channel("x", None).unwrap();
+        let offer = pc.create_offer(None).unwrap();
+        pc.set_local_description(now, offer).unwrap();
+        pc.add_local_candidate(RTCIceCandidateInit {
+            candidate: "candidate:1 1 udp 2130706431 127.0.0.1 5000 typ host".to_owned(),
+            ..Default::default()
+        })
+        .unwrap();
+        let again = pc.create_offer(None).unwrap();
+        assert!(again.sdp.contains("a=candidate:"), "{}", again.sdp);
+
+        pc.restart_ice();
+        let restart = pc.create_offer(None).unwrap();
+        assert!(!restart.sdp.contains("a=candidate:"), "{}", restart.sdp);
     }
 
     // ---- Rollback (RFC 9429, Section 5.7) ----

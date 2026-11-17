@@ -25,6 +25,9 @@ url.workspace = true
 rand.workspace = true
 serde.workspace = true
 
+[dev-dependencies]
+serde_json.workspace = true
+
 [target.'cfg(not(windows))'.dependencies]
 nix = { version = "0.31", default-features = false, features = ["net"] }
 

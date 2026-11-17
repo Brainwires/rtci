@@ -509,8 +509,46 @@ impl<'a>
                 }
             }
 
+            RTCEventInternal::SCTPStreamFailed(_association_handle, stream_id) => {
+                if let Some(dc) = self.data_channels.get_by_stream_mut(&stream_id)
+                    && !dc.close_emitted
+                    && !dc.failed
+                {
+                    dc.failed = true;
+                    let channel_id = dc.id;
+                    self.ctx.event_outs.push_back(TaggedRTCEventInternal {
+                        now,
+                        event: RTCEventInternal::RTCPeerConnectionEvent(
+                            RTCPeerConnectionEvent::OnDataChannel(RTCDataChannelEvent::OnError(
+                                channel_id,
+                            )),
+                        ),
+                    });
+                }
+            }
+
             RTCEventInternal::SCTPStreamClosed(_association_handle, stream_id) => {
                 if let Some(dc) = self.data_channels.remove_by_stream(&stream_id) {
+                    // W3C closing procedure: a close the remote started (its stream reset, or
+                    // its DCEP close) takes an open or connecting channel to `closing` first.
+                    // A channel this side is closing is already there, and one whose
+                    // association failed is closed with an error instead.
+                    if !dc.close_emitted
+                        && !dc.failed
+                        && matches!(
+                            dc.ready_state,
+                            RTCDataChannelState::Open | RTCDataChannelState::Connecting
+                        )
+                    {
+                        self.ctx.event_outs.push_back(TaggedRTCEventInternal {
+                            now,
+                            event: RTCEventInternal::RTCPeerConnectionEvent(
+                                RTCPeerConnectionEvent::OnDataChannel(
+                                    RTCDataChannelEvent::OnClosing(dc.id),
+                                ),
+                            ),
+                        });
+                    }
                     self.announce_closed(now, dc);
                 }
             }
@@ -1002,6 +1040,108 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, DataChannelEvent::Open)),
             "no open event may fire for a closed channel"
+        );
+    }
+
+    fn channel_events(ctx: &DataChannelHandlerContext) -> Vec<RTCDataChannelEvent> {
+        ctx.event_outs
+            .iter()
+            .filter_map(|e| match &e.event {
+                RTCEventInternal::RTCPeerConnectionEvent(
+                    RTCPeerConnectionEvent::OnDataChannel(dc),
+                ) => Some(dc.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn feed(
+        ctx: &mut DataChannelHandlerContext,
+        data_channels: &mut DataChannelRegistry,
+        events: Vec<RTCEventInternal>,
+    ) {
+        let mut stats = RTCStatsAccumulator::new();
+        let mut handler = DataChannelHandler::new(
+            ctx,
+            data_channels,
+            &mut stats,
+            None,
+            RTCDtlsRole::Server,
+            None,
+        );
+        for event in events {
+            handler
+                .handle_event(TaggedRTCEventInternal {
+                    now: Instant::now(),
+                    event,
+                })
+                .unwrap();
+        }
+    }
+
+    /// W3C closing procedure: a close the remote side starts takes an open channel through
+    /// `closing` to `closed`.
+    #[test]
+    fn remote_close_fires_closing_then_close() {
+        let mut ctx = DataChannelHandlerContext::new(Instant::now());
+        let mut dc = in_band_channel(1);
+        dc.ready_state = RTCDataChannelState::Open;
+        let (mut data_channels, handles) = registry(vec![dc]);
+        feed(
+            &mut ctx,
+            &mut data_channels,
+            vec![RTCEventInternal::SCTPStreamClosed(0, 1)],
+        );
+        assert_eq!(
+            channel_events(&ctx),
+            vec![
+                RTCDataChannelEvent::OnClosing(handles[0]),
+                RTCDataChannelEvent::OnClose(handles[0]),
+            ]
+        );
+    }
+
+    /// A channel this side is closing is already `closing`: its close completes with `close`
+    /// alone.
+    #[test]
+    fn local_close_completes_with_close_only() {
+        let mut ctx = DataChannelHandlerContext::new(Instant::now());
+        let mut dc = in_band_channel(1);
+        dc.ready_state = RTCDataChannelState::Closing;
+        let (mut data_channels, handles) = registry(vec![dc]);
+        feed(
+            &mut ctx,
+            &mut data_channels,
+            vec![RTCEventInternal::SCTPStreamClosed(0, 1)],
+        );
+        assert_eq!(
+            channel_events(&ctx),
+            vec![RTCDataChannelEvent::OnClose(handles[0])]
+        );
+    }
+
+    /// The association lost under an open channel (the peer's ABORT): `error`, then `close`,
+    /// and no `closing` (W3C "announce the data channel as closed" with an error).
+    #[test]
+    fn association_failure_fires_error_then_close() {
+        let mut ctx = DataChannelHandlerContext::new(Instant::now());
+        let mut dc = negotiated_channel(3);
+        dc.ready_state = RTCDataChannelState::Open;
+        let (mut data_channels, handles) = registry(vec![dc]);
+        feed(
+            &mut ctx,
+            &mut data_channels,
+            vec![
+                RTCEventInternal::SCTPStreamFailed(0, 3),
+                RTCEventInternal::SCTPStreamClosed(0, 3),
+            ],
+        );
+        assert_eq!(
+            channel_events(&ctx),
+            vec![
+                RTCDataChannelEvent::OnError(handles[0]),
+                RTCDataChannelEvent::OnClose(handles[0]),
+            ]
         );
     }
 

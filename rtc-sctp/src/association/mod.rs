@@ -992,7 +992,9 @@ impl Association {
             for e in &c.error_causes {
                 if matches!(e.code, USER_INITIATED_ABORT) {
                     debug!("User initiated abort received");
-                    let _ = self.close(AssociationError::Reset);
+                    // The peer aborted the association: its streams are lost with it, which
+                    // is not the stream reset `Reset` reports for a channel's own close.
+                    let _ = self.close(AssociationError::AssociationClosed);
                     return Ok(());
                 }
                 err_str += &format!("({})", e);

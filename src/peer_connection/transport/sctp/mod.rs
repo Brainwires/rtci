@@ -103,9 +103,19 @@ impl SctpTransport {
     /// The single association this transport carries, if one has been created.
     ///
     /// `sctp_associations` is a map because the endpoint API is written for the general case, but
-    /// a peer connection negotiates exactly one SCTP association.
+    /// a peer connection negotiates exactly one SCTP association. One that has ended is passed
+    /// over for a live one, should both be present until the endpoint drains the old one.
     fn association(&self) -> Option<&Association> {
-        self.sctp_associations.values().next()
+        self.sctp_associations
+            .values()
+            .find(|association| !Self::ended(association))
+            .or_else(|| self.sctp_associations.values().next())
+    }
+
+    /// An association that completed its handshake and has since closed. One still handshaking
+    /// is in SCTP's initial `CLOSED` state too (RFC 9260 section 4), which is not an end.
+    fn ended(association: &Association) -> bool {
+        association.is_closed() && !association.is_handshaking()
     }
 
     /// W3C `SctpTransport.state`.
@@ -116,8 +126,8 @@ impl SctpTransport {
     pub(crate) fn state(&self) -> RTCSctpTransportState {
         match self.association() {
             None => RTCSctpTransportState::Connecting,
-            Some(association) if association.is_closed() => RTCSctpTransportState::Closed,
             Some(association) if association.is_handshaking() => RTCSctpTransportState::Connecting,
+            Some(association) if association.is_closed() => RTCSctpTransportState::Closed,
             Some(_) => RTCSctpTransportState::Connected,
         }
     }
@@ -235,6 +245,23 @@ mod tests {
     }
     use super::*;
 
+    /// An association that has not finished its handshake is `connecting`, although SCTP's
+    /// own state machine starts it in `CLOSED`: the accepting side's association was reported
+    /// `closed` from the moment it was created.
+    #[test]
+    fn a_handshaking_association_is_connecting() {
+        let mut transport = started_transport(SctpMaxMessageSize::Bounded(65536), 65536);
+        transport
+            .sctp_associations
+            .insert(AssociationHandle(0), Association::default());
+        assert_eq!(transport.state(), RTCSctpTransportState::Connecting);
+        assert_eq!(
+            None,
+            transport.max_channels(),
+            "a handshaking association negotiated nothing"
+        );
+    }
+
     fn started_transport(
         configured: SctpMaxMessageSize,
         remote_max_message_size: u32,
@@ -319,31 +346,6 @@ mod tests {
         assert_eq!(None, transport.max_channels());
     }
 
-    // A default `Association` is in `AssociationState::Closed`, so the transport must report
-    // Closed rather than the Connecting it was constructed with. This is the case the old
-    // never-updated `state` field got wrong.
-    #[test]
-    fn state_follows_a_closed_association() {
-        let mut transport = SctpTransport::new(
-            SctpMaxMessageSize::default(),
-            None,
-            None,
-            test_transport_id(TransportKind::Sctp),
-            test_transport_id(TransportKind::Dtls),
-        );
-        transport
-            .sctp_associations
-            .insert(AssociationHandle(0), Association::default());
-        assert_eq!(RTCSctpTransportState::Closed, transport.state());
-        assert_eq!(
-            None,
-            transport.max_channels(),
-            "a closed association negotiated nothing"
-        );
-    }
-
-    // Starting a Client transport stores the built TransportConfig on the struct, so we
-    // can assert the configured (or default) receive-buffer size flowed through `start()`.
     #[test]
     fn start_applies_configured_receive_buffer_size() {
         let mut transport = SctpTransport::new(

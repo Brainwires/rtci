@@ -49,6 +49,10 @@ pub(crate) struct RTCDataChannelInternal {
     /// emitted. Prevents `SCTPStreamClosed` from emitting/counting a second close.
     pub(crate) close_emitted: bool,
 
+    /// Set when the association under the channel was lost to an error and `OnError` has
+    /// been emitted: its close is not the remote's closing procedure, so no `OnClosing`.
+    pub(crate) failed: bool,
+
     pub(crate) data_channel: Option<::datachannel::data_channel::DataChannel>,
 }
 
@@ -69,6 +73,7 @@ impl Default for RTCDataChannelInternal {
             outstanding_bytes: 0,
             handshake_deadline: None,
             close_emitted: false,
+            failed: false,
             data_channel: None,
         }
     }
@@ -99,6 +104,7 @@ impl RTCDataChannelInternal {
             outstanding_bytes: 0,
             handshake_deadline: None,
             close_emitted: false,
+            failed: false,
             data_channel: None,
         }
     }

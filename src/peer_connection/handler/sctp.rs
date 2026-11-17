@@ -499,6 +499,20 @@ impl<'a>
                             }
                             Event::AssociationLost { reason, id } => {
                                 debug!("association_handle {} is closed due to {}", ch.0, reason);
+                                // A stream reset (either side's close) is the channel's own
+                                // closing procedure; the association going away under it is
+                                // a failure the channel reports first.
+                                if matches!(
+                                    reason,
+                                    AssociationError::AssociationClosed
+                                        | AssociationError::TransportError
+                                        | AssociationError::TimedOut
+                                ) {
+                                    self.ctx.event_outs.push_back(TaggedRTCEventInternal {
+                                        now,
+                                        event: RTCEventInternal::SCTPStreamFailed(ch.0, id),
+                                    });
+                                }
                                 self.ctx.event_outs.push_back(TaggedRTCEventInternal {
                                     now,
                                     event: RTCEventInternal::SCTPStreamClosed(ch.0, id),
