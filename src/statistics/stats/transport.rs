@@ -59,7 +59,8 @@ pub struct RTCTransportStats {
 
     /// The DTLS role of this peer.
     ///
-    /// Either "client" or "server".
+    /// "client" or "server", and "unknown" before it is decided (W3C `RTCDtlsRole`).
+    #[serde(with = "w3c_dtls_role")]
     pub dtls_role: RTCDtlsRole,
 
     /// The negotiated TLS version.
@@ -100,4 +101,41 @@ pub struct RTCTransportStats {
 
     /// Number of RTCP congestion control feedback messages received.
     pub ccfb_messages_received: u32,
+}
+
+/// The W3C `RTCDtlsRole` enum of `RTCTransportStats.dtlsRole`: "client", "server", or
+/// "unknown" for a role that isn't decided yet (this crate's `Unspecified` and `Auto`).
+mod w3c_dtls_role {
+    use super::RTCDtlsRole;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub(super) fn serialize<S: Serializer>(role: &RTCDtlsRole, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(match role {
+            RTCDtlsRole::Client => "client",
+            RTCDtlsRole::Server => "server",
+            _ => "unknown",
+        })
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<RTCDtlsRole, D::Error> {
+        Ok(match String::deserialize(d)?.as_str() {
+            "client" => RTCDtlsRole::Client,
+            "server" => RTCDtlsRole::Server,
+            _ => RTCDtlsRole::Unspecified,
+        })
+    }
+}
+
+#[cfg(test)]
+mod w3c_dtls_role_tests {
+    use super::*;
+
+    #[test]
+    fn dtls_role_is_unknown_until_decided() {
+        let value = |role| w3c_dtls_role::serialize(&role, serde_json::value::Serializer).unwrap();
+        assert_eq!(value(RTCDtlsRole::Unspecified), "unknown");
+        assert_eq!(value(RTCDtlsRole::Auto), "unknown");
+        assert_eq!(value(RTCDtlsRole::Client), "client");
+        assert_eq!(value(RTCDtlsRole::Server), "server");
+    }
 }
