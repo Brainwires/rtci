@@ -15,23 +15,31 @@
 //!
 //! ```text
 //! Registry::new()
-//!     .with(Slot::CongestionControl, NoopInterceptor::new().with(gcc_builder.build()))
+//!     .with(Slot::CongestionControl, PassThroughInterceptor::new().with(gcc_builder.build()))
 //!     .with(Slot::TwccSender, TwccSenderBuilder::new().build())
 //! ```
 //!
 //! Writes walk away from the application toward the wire: TwccSender stamps first, then
 //! GCC reads it. TWCC feedback reads reach GCC first, on their way to the application.
 //!
+//! GCC is a nested interceptor, so it needs an inner end: use
+//! [`PassThroughInterceptor`](crate::PassThroughInterceptor), never
+//! [`NoopInterceptor`](crate::NoopInterceptor). The latter is the chain's RTCP terminus; wrapped
+//! in this slot, the first one inbound packets reach, it would end every RTCP packet nothing
+//! marked (NACKs, receiver reports, PLI and FIR) before any other interceptor or the application
+//! saw it.
+//!
 //! # Usage
 //!
 //! ```ignore
 //! use rtc_interceptor::{
-//!     GccInterceptorBuilder, Interceptor, NoopInterceptor, Registry, Slot, TwccSenderBuilder,
+//!     GccInterceptorBuilder, Interceptor, PassThroughInterceptor, Registry, Slot,
+//!     TwccSenderBuilder,
 //! };
 //!
 //! let (gcc_builder, gcc_handle) = GccInterceptorBuilder::new();
 //! let chain = Registry::new()
-//!     .with(Slot::CongestionControl, NoopInterceptor::new().with(gcc_builder.build()))
+//!     .with(Slot::CongestionControl, PassThroughInterceptor::new().with(gcc_builder.build()))
 //!     .with(Slot::TwccSender, TwccSenderBuilder::new().build())
 //!     .build();
 //!
@@ -390,7 +398,10 @@ fn loss_fraction(fb: &TransportLayerCc) -> f64 {
 mod tests {
     use super::*;
     use crate::AttributedPacket;
-    use crate::{NoopInterceptor, RTPHeaderExtension, Registry, Slot, twcc::TRANSPORT_CC_URI};
+    use crate::{
+        NoopInterceptor, PassThroughInterceptor, RTPHeaderExtension, Registry, Slot,
+        twcc::TRANSPORT_CC_URI,
+    };
     use rtcp::transport_feedbacks::transport_layer_cc::{
         RecvDelta, RunLengthChunk, StatusChunkTypeTcc, TYPE_TCC_DELTA_SCALE_FACTOR,
     };
@@ -479,7 +490,7 @@ mod tests {
         let chain = Registry::new()
             .with(
                 Slot::CongestionControl,
-                NoopInterceptor::new().with(gcc_builder.build()),
+                PassThroughInterceptor::new().with(gcc_builder.build()),
             )
             .with(Slot::TwccSender, TwccSenderBuilder::new().build())
             .build();
@@ -680,5 +691,99 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(loss_fraction(&fb), 1.0);
+    }
+
+    /// Counts the inbound RTCP packets that reach its slot and passes everything on.
+    #[derive(Default)]
+    struct RtcpSeen {
+        seen: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        reads: std::collections::VecDeque<TaggedPacket>,
+        writes: std::collections::VecDeque<TaggedPacket>,
+    }
+
+    impl sansio::Protocol<TaggedPacket, TaggedPacket, ()> for RtcpSeen {
+        type Rout = TaggedPacket;
+        type Wout = TaggedPacket;
+        type Eout = ();
+        type Error = shared::error::Error;
+        type Time = Instant;
+
+        fn handle_read(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
+            if matches!(msg.message.packet, Packet::Rtcp(_)) {
+                self.seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            self.reads.push_back(msg);
+            Ok(())
+        }
+        fn poll_read(&mut self) -> Option<TaggedPacket> {
+            self.reads.pop_front()
+        }
+        fn handle_write(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
+            self.writes.push_back(msg);
+            Ok(())
+        }
+        fn poll_write(&mut self) -> Option<TaggedPacket> {
+            self.writes.pop_front()
+        }
+    }
+
+    impl crate::Interceptor for RtcpSeen {
+        fn bind_local_stream(&mut self, _info: &StreamInfo) {}
+        fn unbind_local_stream(&mut self, _info: &StreamInfo) {}
+        fn bind_remote_stream(&mut self, _info: &StreamInfo) {}
+        fn unbind_remote_stream(&mut self, _info: &StreamInfo) {}
+    }
+
+    fn pli() -> TaggedPacket {
+        use rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
+        TaggedPacket {
+            now: Instant::now(),
+            transport: TransportContext::default(),
+            message: AttributedPacket::new(Packet::Rtcp(vec![Box::new(PictureLossIndication {
+                sender_ssrc: 1,
+                media_ssrc: 1001,
+            })])),
+        }
+    }
+
+    /// GCC in its slot around `inner`, an RTCP observer application-ward of it, and the
+    /// key-frame request interceptor that delivers PLI to the application. Returns how many
+    /// inbound RTCP packets the observer saw and how many packets the application read.
+    fn pli_through_gcc_slot<I: crate::Interceptor + 'static>(inner: I) -> (usize, usize) {
+        use crate::{KeyFrameRequestInterceptor, TwccSenderBuilder};
+        let (gcc_builder, _handle) = GccInterceptorBuilder::new();
+        let observer = RtcpSeen::default();
+        let seen = observer.seen.clone();
+        let mut chain = Registry::new()
+            .with(Slot::CongestionControl, inner.with(gcc_builder.build()))
+            .with(Slot::TwccSender, TwccSenderBuilder::new().build())
+            .with(Slot::from(3_500), observer)
+            .with(Slot::KeyFrameRequests, KeyFrameRequestInterceptor::new())
+            .build();
+        chain.handle_read(pli()).unwrap();
+        let mut delivered = 0;
+        while chain.poll_read().is_some() {
+            delivered += 1;
+        }
+        (seen.load(std::sync::atomic::Ordering::SeqCst), delivered)
+    }
+
+    /// With GCC registered the documented way (around a pass-through), inbound RTCP GCC doesn't
+    /// consume reaches the interceptors after its slot, and a key-frame request reaches the
+    /// application.
+    #[test]
+    fn rtcp_passes_the_gcc_slot() {
+        assert_eq!(
+            (1, 1),
+            pli_through_gcc_slot(PassThroughInterceptor::new()),
+            "the observer saw the PLI and the application read it"
+        );
+    }
+
+    /// Why the inner end must not be the terminus: around `NoopInterceptor` (the recipe this
+    /// module used to document), the PLI ends in GCC's slot, the first one it reaches.
+    #[test]
+    fn noop_inside_the_gcc_slot_ends_rtcp_there() {
+        assert_eq!((0, 0), pli_through_gcc_slot(NoopInterceptor::new()));
     }
 }
