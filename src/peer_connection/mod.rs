@@ -274,7 +274,7 @@ use crate::peer_connection::sdp::{
     RemoteIceDetails, extract_fingerprints, extract_ice_details, get_application_media,
     get_application_media_section_max_message_size, get_application_media_section_sctp_port,
     get_mid_value, get_peer_direction, has_ice_trickle_option, insert_media_line, is_lite_set,
-    media_ice_credentials, sdp_type::RTCSdpType, update_sdp_origin,
+    is_rejected_media, media_ice_credentials, sdp_type::RTCSdpType, update_sdp_origin,
 };
 use crate::peer_connection::state::RTCIceGatheringState;
 use crate::peer_connection::state::ice_connection_state::RTCIceConnectionState;
@@ -834,7 +834,9 @@ impl RTCPeerConnection {
                 {
                     self.greater_mid = numeric_mid;
                 }
-            } else {
+            } else if !transceiver.stopped() {
+                // A stopped transceiver with no mid gets none: it has no m= section (RFC 9429,
+                // Section 5.2.2), and a mid would make it look associated.
                 // A remote description may carry any numeric mid, `isize::MAX` included.
                 self.greater_mid = self.greater_mid.checked_add(1).ok_or_else(|| {
                     Error::Other("no numeric mid is left above the remote description's".into())
@@ -1436,6 +1438,13 @@ impl RTCPeerConnection {
                             continue;
                         }
 
+                        // A rejected m= section (port 0) neither creates nor changes a
+                        // transceiver: the answer rejects it too, and the application stops the
+                        // transceiver it had (W3C 4.4.1.6).
+                        if is_rejected_media(media) {
+                            continue;
+                        }
+
                         let kind = RtpCodecKind::from(media.media_name.media.as_str());
                         let direction = get_peer_direction(media);
                         if kind == RtpCodecKind::Unspecified
@@ -1543,6 +1552,12 @@ impl RTCPeerConnection {
                         };
 
                         if media.is_webrtc_datachannel() {
+                            continue;
+                        }
+
+                        // A rejected m= section in the answer: the transceiver is stopped, not
+                        // given a direction.
+                        if is_rejected_media(media) {
                             continue;
                         }
 

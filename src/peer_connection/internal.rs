@@ -238,9 +238,29 @@ impl RTCPeerConnection {
         let ice_params = self.ice_transport().get_local_parameters()?;
         let candidates = self.offered_local_candidates()?;
 
+        let local_mids = self.local_description_mids();
         let mut media_sections = vec![];
 
         for (i, t) in self.rtp_transceivers.iter_mut().enumerate() {
+            if t.stopped() {
+                // RFC 9429 Section 5.2.2: a stopped transceiver has no m= section of its own; one
+                // a local description already has stays, rejected, so the m= lines keep their
+                // order.
+                if let Some(mid) = t.mid().clone()
+                    && local_mids.contains(&mid)
+                {
+                    media_sections.push(MediaSection {
+                        mid,
+                        transceiver_index: usize::MAX,
+                        rejected: true,
+                        rejected_kind: t.kind().to_string(),
+                        stopped: true,
+                        ..Default::default()
+                    });
+                }
+                continue;
+            }
+
             if let Some(sender) = t.sender_mut() {
                 sender.set_negotiated();
             }
@@ -256,7 +276,7 @@ impl RTCPeerConnection {
 
         if !self.data_channels.is_empty() {
             media_sections.push(MediaSection {
-                mid: format!("{}", media_sections.len()),
+                mid: free_data_mid(&media_sections, &self.rtp_transceivers),
                 transceiver_index: usize::MAX,
                 data: true,
                 ..Default::default()
@@ -307,6 +327,7 @@ impl RTCPeerConnection {
         let mut media_sections = vec![];
         let mut already_have_application_media_section = false;
         let is_extmap_allow_mixed = is_ext_map_allow_mixed_set(self.remote_description());
+        let local_mids = self.local_description_mids();
 
         // Extract media descriptions to avoid borrowing conflicts
         let media_descriptions = self
@@ -315,11 +336,55 @@ impl RTCPeerConnection {
             .and_then(|r| r.parsed.as_ref())
             .map(|parsed| parsed.media_descriptions.clone());
 
+        // The mids the remote description has: a transceiver whose mid isn't among them is new
+        // to this negotiation, and may take a rejected m-line's place in an offer.
+        let remote_mids: HashSet<String> = media_descriptions
+            .iter()
+            .flatten()
+            .filter_map(|m| get_mid_value(m).cloned())
+            .collect();
+        let mut recycled: HashSet<usize> = HashSet::new();
+
         if let Some(media_descriptions) = media_descriptions {
             for media in &media_descriptions {
                 if let Some(mid_value) = get_mid_value(media) {
                     if mid_value.is_empty() {
                         return Err(Error::ErrPeerConnRemoteDescriptionWithoutMidValue);
+                    }
+
+                    // RFC 9429 Section 5.2.2: an offer may reuse a rejected m= section (whose
+                    // transceiver, if any, is stopped) for a transceiver that has no m= section
+                    // yet; it keeps its own new mid.
+                    if include_unmatched && media.media_name.port.value == 0 {
+                        let free =
+                            match RTCPeerConnection::find_by_mid(mid_value, &self.rtp_transceivers)
+                            {
+                                Some(i) => self.rtp_transceivers[i].stopped(),
+                                None => true,
+                            };
+                        let candidate = if free {
+                            self.rtp_transceivers.iter().enumerate().position(|(j, t)| {
+                                !t.stopped()
+                                    && !recycled.contains(&j)
+                                    && t.mid()
+                                        .as_ref()
+                                        .is_some_and(|m| !m.is_empty() && !remote_mids.contains(m))
+                            })
+                        } else {
+                            None
+                        };
+                        if let Some(j) = candidate {
+                            if let Some(sender) = self.rtp_transceivers[j].sender_mut() {
+                                sender.set_negotiated();
+                            }
+                            recycled.insert(j);
+                            media_sections.push(MediaSection {
+                                mid: self.rtp_transceivers[j].mid().clone().unwrap_or_default(),
+                                transceiver_index: j,
+                                ..Default::default()
+                            });
+                            continue;
+                        }
                     }
 
                     // RFC 8829 §5.3.1: rejected m-lines (port=0) in the offer MUST be
@@ -354,6 +419,21 @@ impl RTCPeerConnection {
                     if let Some(i) =
                         RTCPeerConnection::find_by_mid(mid_value, &self.rtp_transceivers)
                     {
+                        // RFC 9429 Section 5.2.2: an offer rejects a stopped transceiver's m=
+                        // section. An answer doesn't: a transceiver stopped after the offer
+                        // arrived answers inactive, and is rejected by the next offer (W3C
+                        // `stop()`).
+                        if include_unmatched && self.rtp_transceivers[i].stopped() {
+                            media_sections.push(MediaSection {
+                                mid: mid_value.to_owned(),
+                                rejected: true,
+                                rejected_kind: media.media_name.media.clone(),
+                                stopped: true,
+                                transceiver_index: usize::MAX,
+                                ..Default::default()
+                            });
+                            continue;
+                        }
                         if let Some(sender) = self.rtp_transceivers[i].sender_mut() {
                             sender.set_negotiated();
                         }
@@ -384,6 +464,22 @@ impl RTCPeerConnection {
                         continue;
                     }
 
+                    // A stopped transceiver the remote side never saw: no m= section, unless a
+                    // local description already has it (then rejected, keeping the order).
+                    if t.stopped() {
+                        if local_mids.contains(&mid) {
+                            media_sections.push(MediaSection {
+                                mid,
+                                transceiver_index: usize::MAX,
+                                rejected: true,
+                                rejected_kind: t.kind().to_string(),
+                                stopped: true,
+                                ..Default::default()
+                            });
+                        }
+                        continue;
+                    }
+
                     if let Some(sender) = t.sender_mut() {
                         sender.set_negotiated();
                     }
@@ -398,7 +494,7 @@ impl RTCPeerConnection {
 
             if !self.data_channels.is_empty() && !already_have_application_media_section {
                 media_sections.push(MediaSection {
-                    mid: format!("{}", media_sections.len()),
+                    mid: free_data_mid(&media_sections, &self.rtp_transceivers),
                     transceiver_index: usize::MAX,
                     data: true,
                     ..Default::default()
@@ -769,6 +865,29 @@ impl RTCPeerConnection {
         // machine settles back to `stable` (see `set_description`).
 
         Ok(())
+    }
+
+    /// The mids of the pending and current local descriptions.
+    pub(super) fn local_description_mids(&self) -> HashSet<String> {
+        let mut mids = HashSet::new();
+        for desc in [
+            self.pending_local_description.as_ref(),
+            self.current_local_description.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if let Some(parsed) = desc.parsed.as_ref() {
+                for media in &parsed.media_descriptions {
+                    if let Some(mid) = get_mid_value(media)
+                        && !mid.is_empty()
+                    {
+                        mids.insert(mid.clone());
+                    }
+                }
+            }
+        }
+        mids
     }
 
     /// Collects the set of mids associated by the current (last stable) local and remote
@@ -1690,6 +1809,25 @@ fn is_same_remote_track(
                 && coding.fec.as_ref().map(|f| f.ssrc) == incoming_track.fec_ssrc
         }
         _ => false,
+    }
+}
+
+/// A mid for a new data m= section: the number of m= sections so far, or the next number that
+/// no m= section and no transceiver has (a stopped transceiver left out of the offer keeps its
+/// mid, which must not come back on another section).
+fn free_data_mid(
+    media_sections: &[MediaSection],
+    transceivers: &[RTCRtpTransceiverInternal],
+) -> String {
+    let mut n = media_sections.len();
+    loop {
+        let mid = n.to_string();
+        if !media_sections.iter().any(|s| s.mid == mid)
+            && !transceivers.iter().any(|t| t.mid().as_ref() == Some(&mid))
+        {
+            return mid;
+        }
+        n += 1;
     }
 }
 

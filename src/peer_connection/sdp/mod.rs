@@ -1168,6 +1168,9 @@ pub(crate) struct MediaSection {
     pub(crate) rejected: bool,
     /// Media kind string ("video", "audio", or "application") — only meaningful when `rejected` is true.
     pub(crate) rejected_kind: String,
+    /// A rejected m-line for a stopped transceiver: it also says `a=inactive` (W3C `stop()`,
+    /// RFC 9429 Section 5.2.2), as browsers write it.
+    pub(crate) stopped: bool,
     pub(crate) match_extensions: HashMap<String, u16>,
     pub(crate) rid_map: Vec<SimulcastRid>,
 }
@@ -1223,6 +1226,7 @@ impl RTCPeerConnection {
             // Find the index first to avoid multiple mutable borrows
             if let Some(index) = local_transceivers.iter().position(|t| {
                 t.mid().is_none()
+                    && !t.stopped()
                     && t.associable_with_remote_offer()
                     && t.kind() == remote_kind
                     && possible_direction == t.direction()
@@ -1308,6 +1312,12 @@ impl RTCPeerConnection {
                     }
                     .with_value_attribute(ATTR_KEY_MID.to_owned(), m.mid.clone()),
                 );
+                if m.stopped
+                    && let Some(desc) = d.media_descriptions.last_mut()
+                {
+                    let rejected = std::mem::take(desc);
+                    *desc = rejected.with_property_attribute("inactive".to_owned());
+                }
                 continue; // rejected m-lines are not added to BUNDLE
             }
 
