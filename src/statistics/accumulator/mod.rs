@@ -562,8 +562,11 @@ impl RTCStatsAccumulator {
             .entry(format!("RTCIceCandidatePair_{}_{}", local_id, remote_id))
             .or_insert_with(|| IceCandidatePairAccumulator {
                 transport_id: self.transport.transport_id.clone(),
-                local_candidate_id: local_id.to_string(),
-                remote_candidate_id: remote_id.to_string(),
+                // W3C RTCIceCandidatePairStats: localCandidateId / remoteCandidateId are the ids
+                // of the local-candidate / remote-candidate stats objects, which are registered
+                // under these names (`add_ice_local_candidate` / `add_ice_remote_candidate`).
+                local_candidate_id: local_candidate_stats_id(local_id),
+                remote_candidate_id: remote_candidate_stats_id(remote_id),
                 ..Default::default()
             })
     }
@@ -870,4 +873,14 @@ impl RTCStatsAccumulator {
         // Remove codecs that are not referenced
         self.codecs.retain(|id, _| referenced.contains(id));
     }
+}
+
+/// The stats id of the local-candidate object for the ICE agent's candidate `id`.
+pub(crate) fn local_candidate_stats_id(id: &str) -> String {
+    format!("RTCLocalIceCandidate_{id}")
+}
+
+/// The stats id of the remote-candidate object for the ICE agent's candidate `id`.
+pub(crate) fn remote_candidate_stats_id(id: &str) -> String {
+    format!("RTCRemoteIceCandidate_{id}")
 }

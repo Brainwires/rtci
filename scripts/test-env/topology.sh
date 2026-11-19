@@ -73,6 +73,10 @@ up() {
   attach open-a eth0 "$OPEN_A_IP/24" br-wan wan
   add_ns open-b
   attach open-b eth0 "$OPEN_B_IP/24" br-wan wan
+  # The WAN has no gateway, but Firefox gathers no ICE candidates without a default route.
+  for h in turn open-a open-b; do
+    ns "$h" ip route add default dev eth0
+  done
 
   local n=0
   for nat in "${NATS[@]}"; do

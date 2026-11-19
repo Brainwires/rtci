@@ -1492,3 +1492,53 @@ fn test_update_inbound_rtx_ssrc_no_existing_stream() {
     // Verify by calling on_rtx_packet_received_if_rtx (should not panic).
     accumulator.on_rtx_packet_received_if_rtx(rtx_ssrc, 50);
 }
+
+/// W3C `RTCIceCandidatePairStats.localCandidateId` / `remoteCandidateId` are the ids of the
+/// report's local-candidate and remote-candidate objects. The pair used to name the ICE agent's
+/// raw candidate ids, which no object in the report carried, so the selected pair could not be
+/// resolved to its candidates (found by `tests/testenv_ice.rs`).
+#[test]
+fn selected_candidate_pair_names_the_reported_candidates() {
+    use crate::peer_connection::test_util::{Pair, new_pair, signal_pair};
+
+    let (mut offerer, mut answerer) = new_pair().expect("pair");
+    offerer
+        .create_data_channel("stats", None)
+        .expect("data channel");
+    signal_pair(&mut offerer, &mut answerer).expect("signal");
+    let mut pair = Pair::new(offerer, answerer);
+    pair.connect().expect("connect");
+    let now = pair.now;
+    for (side, pc) in [
+        ("offerer", &mut pair.offerer),
+        ("answerer", &mut pair.answerer),
+    ] {
+        let report = pc.get_stats(now, StatsSelector::None);
+        let pair_id = report
+            .transport()
+            .expect("transport")
+            .selected_candidate_pair_id
+            .clone();
+        assert!(!pair_id.is_empty(), "{side}: no selected pair");
+        let cp = report
+            .candidate_pairs()
+            .find(|p| p.stats.id == pair_id)
+            .unwrap_or_else(|| panic!("{side}: selected pair {pair_id} not in the report"));
+        assert!(
+            matches!(
+                report.get(&cp.local_candidate_id),
+                Some(RTCStatsReportEntry::LocalCandidate(_))
+            ),
+            "{side}: localCandidateId {} names no local-candidate",
+            cp.local_candidate_id
+        );
+        assert!(
+            matches!(
+                report.get(&cp.remote_candidate_id),
+                Some(RTCStatsReportEntry::RemoteCandidate(_))
+            ),
+            "{side}: remoteCandidateId {} names no remote-candidate",
+            cp.remote_candidate_id
+        );
+    }
+}

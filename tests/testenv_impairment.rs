@@ -490,16 +490,13 @@ fn vp8_file_through_nack_and_jitter_buffer() {
     while let Ok((f, _)) = out.parse_next_frame() {
         got.push(f.freeze());
     }
-    let identical = got
-        .iter()
-        .zip(frames.iter())
-        .take_while(|(g, f)| g == f)
-        .count();
+    // A lost frame shifts every later one, so match by content rather than position.
+    let sent: HashSet<&Bytes> = frames.iter().collect();
+    let exact = got.iter().filter(|g| sent.contains(g)).count();
     eprintln!(
-        "VP8: sent {} frames, received {} ({} identical from the start, {written} packets)",
+        "VP8: sent {} frames, received {} ({exact} byte-identical to a sent frame, {written} packets)",
         frames.len(),
-        got.len(),
-        identical
+        got.len()
     );
     assert!(
         got.len() as f64 >= frames.len() as f64 * 0.98,
@@ -508,8 +505,10 @@ fn vp8_file_through_nack_and_jitter_buffer() {
         frames.len()
     );
     assert!(
-        identical as f64 >= frames.len() as f64 * 0.9,
-        "frames corrupted after {identical}"
+        exact as f64 >= got.len() as f64 * 0.98,
+        "{} of {} received frames match no sent frame",
+        got.len() - exact,
+        got.len()
     );
 }
 

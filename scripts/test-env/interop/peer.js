@@ -14,17 +14,17 @@
     throw new Error(`timed out waiting for ${what}`);
   }
 
-  function canvasStream() {
+  function canvasStream(width = 320, height = 240) {
     const c = document.createElement("canvas");
-    c.width = 320;
-    c.height = 240;
+    c.width = width;
+    c.height = height;
     document.body.appendChild(c);
     const g = c.getContext("2d");
     let n = 0;
     setInterval(() => {
       n++;
       g.fillStyle = `hsl(${(n * 7) % 360} 80% 50%)`;
-      g.fillRect(0, 0, 320, 240);
+      g.fillRect(0, 0, width, height);
       g.fillStyle = "#fff";
       g.font = "40px sans-serif";
       g.fillText(String(n), 20 + (n % 200), 120);

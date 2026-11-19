@@ -244,8 +244,11 @@ fn tls_client_config(env: &Env) -> Arc<rustls::ClientConfig> {
         .cloned()
         .expect("install_crypto_provider() first");
     Arc::new(
+        // TLS 1.2 only: the environment's coturn (4.6, OpenSSL 3) answers every TLS 1.3
+        // ClientHello with a handshake_failure alert, `openssl s_client -tls1_3` included,
+        // instead of negotiating down. Its TLS 1.2 (ECDHE-ECDSA-AES-GCM) works.
         rustls::ClientConfig::builder_with_provider(provider)
-            .with_safe_default_protocol_versions()
+            .with_protocol_versions(&[&rustls::version::TLS12])
             .unwrap()
             .with_root_certificates(roots)
             .with_no_client_auth(),

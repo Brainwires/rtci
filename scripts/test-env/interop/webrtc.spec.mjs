@@ -238,14 +238,16 @@ for (const [codec, kind, mime] of [
 test("simulcast: three RIDs reach Rust", async ({ page }) => {
   const r = await page.evaluate(async (ws) => {
     const s = await Interop.open(ws, { media: "count" });
-    const track = Interop.canvasStream().getVideoTracks()[0];
-    // 320x240 is small; keep every layer above the encoders' minimum size.
+    // libwebrtc (Chromium, WebKit) sends as many simulcast layers as the input resolution
+    // allows: one at 320x240, three from 960x540. Each layer's cap keeps the total within the
+    // starting bandwidth estimate.
+    const track = Interop.canvasStream(1280, 720).getVideoTracks()[0];
     const tr = s.pc.addTransceiver(track, {
       direction: "sendonly",
       sendEncodings: [
-        { rid: "q", scaleResolutionDownBy: 2.0, maxBitrate: 150000 },
-        { rid: "h", scaleResolutionDownBy: 1.5, maxBitrate: 300000 },
-        { rid: "f", maxBitrate: 600000 },
+        { rid: "q", scaleResolutionDownBy: 4.0, maxBitrate: 100000 },
+        { rid: "h", scaleResolutionDownBy: 2.0, maxBitrate: 200000 },
+        { rid: "f", maxBitrate: 400000 },
       ],
     });
     Interop.prefer(tr, "video", "video/VP8");

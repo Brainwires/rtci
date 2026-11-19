@@ -560,7 +560,7 @@ impl Session {
                         continue;
                     }
                 },
-                Source::Ogg(r, last) => match r.parse_next_page() {
+                Source::Ogg(r, last) => match next_audio_page(r) {
                     Ok((d, h)) => {
                         let n = h.granule_position.saturating_sub(*last);
                         *last = h.granule_position;
@@ -587,6 +587,19 @@ impl Session {
             }
         }
         Ok(())
+    }
+}
+
+/// The next Ogg page that carries audio: OpusHead and OpusTags are stream headers, not packets
+/// to send (RFC 7845 section 3).
+fn next_audio_page(
+    r: &mut OggReader<BufReader<File>>,
+) -> rtc::shared::error::Result<(BytesMut, rtc::media::io::ogg_reader::OggPageHeader)> {
+    loop {
+        let (d, h) = r.parse_next_page()?;
+        if h.opus_header_type(&d).is_none() {
+            return Ok((d, h));
+        }
     }
 }
 

@@ -24,7 +24,9 @@ use crate::rtp_transceiver::rtp_sender::rtp_coding_parameters::{
 };
 use crate::rtp_transceiver::rtp_sender::rtp_encoding_parameters::RTCRtpEncodingParameters;
 use crate::rtp_transceiver::{PayloadType, RTCRtpTransceiverDirection, RTCRtpTransceiverId};
-use crate::statistics::accumulator::IceCandidateAccumulator;
+use crate::statistics::accumulator::{
+    IceCandidateAccumulator, local_candidate_stats_id, remote_candidate_stats_id,
+};
 use ::sdp::description::session::*;
 use ::sdp::util::ConnectionRole;
 use rand::RngExt;
@@ -1388,7 +1390,7 @@ impl RTCPeerConnection {
         // Register remote candidate with stats accumulator
         // Per W3C spec, URL must NOT be present for remote candidates
         let rtc_candidate: RTCIceCandidate = (&candidate).into();
-        let candidate_id = format!("RTCRemoteIceCandidate_{}", rtc_candidate.id);
+        let candidate_id = remote_candidate_stats_id(&rtc_candidate.id);
         let (ufrag, _) = self.ice_transport().get_remote_user_credentials();
         let accumulator = self.candidate_to_accumulator(&rtc_candidate, ufrag, None);
         self.stats_mut()
@@ -1417,7 +1419,7 @@ impl RTCPeerConnection {
             .ok_or_else(|| Error::Other("local candidate missing after registration".to_owned()))?;
 
         // Register local candidate with stats accumulator
-        let candidate_id = format!("RTCLocalIceCandidate_{}", rtc_candidate.id);
+        let candidate_id = local_candidate_stats_id(&rtc_candidate.id);
         let (ufrag, _) = self.ice_transport().get_local_user_credentials();
         let accumulator = self.candidate_to_accumulator(&rtc_candidate, ufrag, url);
         self.stats_mut()
@@ -1441,37 +1443,56 @@ impl RTCPeerConnection {
     /// This is called automatically by `get_stats()` to ensure ICE candidate pair
     /// statistics (RTT, requests/responses sent/received) are up to date.
     pub(super) fn update_ice_agent_stats(&mut self, now: Instant) {
-        if let Some((local, remote)) = self
+        let Some((local_id, remote_id, remote)) = self
             .pipeline_context
             .ice_handler_context
             .ice_transport
             .agent
             .get_selected_candidate_pair()
-        {
-            let pair_id = format!("RTCIceCandidatePair_{}_{}", local.id(), remote.id());
+            .map(|(l, r)| {
+                (
+                    l.id().to_owned(),
+                    r.id().to_owned(),
+                    RTCIceCandidate::from(r),
+                )
+            })
+        else {
+            return;
+        };
 
-            // Get candidate pair stats from the ice agent
-            for cp_stats in self
-                .pipeline_context
-                .ice_handler_context
-                .ice_transport
-                .agent
-                .get_candidate_pairs_stats(now)
-            {
-                let ice_pair_id = format!(
-                    "RTCIceCandidatePair_{}_{}",
-                    cp_stats.local_candidate_id, cp_stats.remote_candidate_id
-                );
-                if ice_pair_id == pair_id {
-                    // Sync STUN stats from ice agent to RTC accumulator
-                    self.pipeline_context.stats.update_ice_agent_stats(
-                        local.id(),
-                        remote.id(),
-                        &cp_stats,
-                    );
-                    break;
-                }
-            }
+        // A remote candidate the agent learned from a connectivity check (peer-reflexive,
+        // RFC 8445 section 7.3.1.3) was never signalled, so it has no remote-candidate stats
+        // object yet; the selected pair must still name one (W3C getStats).
+        let remote_stats_id = remote_candidate_stats_id(&remote_id);
+        if !self
+            .stats()
+            .remote_candidates
+            .contains_key(&remote_stats_id)
+        {
+            let ufrag = self
+                .ice_transport()
+                .get_remote_user_credentials()
+                .0
+                .to_owned();
+            let accumulator = self.candidate_to_accumulator(&remote, &ufrag, None);
+            self.stats_mut()
+                .register_remote_candidate(remote_stats_id, accumulator);
+        }
+
+        // Get candidate pair stats from the ice agent
+        let cp_stats = self
+            .pipeline_context
+            .ice_handler_context
+            .ice_transport
+            .agent
+            .get_candidate_pairs_stats(now)
+            .into_iter()
+            .find(|cp| cp.local_candidate_id == local_id && cp.remote_candidate_id == remote_id);
+        if let Some(cp_stats) = cp_stats {
+            // Sync STUN stats from ice agent to RTC accumulator
+            self.pipeline_context
+                .stats
+                .update_ice_agent_stats(&local_id, &remote_id, &cp_stats);
         }
     }
 
