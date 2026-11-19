@@ -302,6 +302,18 @@ impl RTCRtpTransceiver<'_> {
         self.peer_connection.rtp_transceivers[self.id].set_associable_with_remote_offer(associable);
     }
 
+    /// Sets the RTP header extensions this transceiver's next offers and answers carry
+    /// (webrtc-extensions, RTP header extension control).
+    ///
+    /// `Some(uris)` limits the media section's `a=extmap` lines to these URIs: an answer
+    /// carries an offered extension only when it is listed, and an offer carries each listed
+    /// extension the media engine has registered for this kind, a re-offer included (one
+    /// left out of an earlier answer gets the id it had, or a free one). `None` (the default)
+    /// is every extension the media engine negotiates (RFC 9429, sections 5.2 and 5.3).
+    pub fn set_header_extensions_to_negotiate(&mut self, uris: Option<Vec<String>>) {
+        self.peer_connection.rtp_transceivers[self.id].set_header_extensions_to_negotiate(uris);
+    }
+
     /// Sets the preferred direction of this transceiver.
     ///
     /// Changing the direction may trigger renegotiation to update the session description.
