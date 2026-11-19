@@ -10,4 +10,5 @@
 version = 2
 ignore = [
     { id = "RUSTSEC-2026-0441", reason = "pin-utils is unmaintained (no vulnerability). Dev-dependency only, interop tests: webrtc 0.17.3 -> webrtc-util -> nix 0.26; not in the library's dependency graph." },
+    { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained (no vulnerability, no fixed release). Dev-dependency only: log timestamps in examples and tests; not in the library's dependency graph." },
 ]

@@ -62,6 +62,12 @@ longer stops at a nested interceptor. `FORK.md` lists everything the fork carrie
 - **peer_connection**: an offer made while an ICE restart is staged carries no candidates of the
   previous generation.
 
+### Dependencies
+
+- The workspace audit ignores RUSTSEC-2026-0543 (`chrono` unmaintained, published after the
+  previous release): `chrono` is a dev-dependency only, for log timestamps in examples and
+  tests. The library's own audit, which ignores nothing, is unaffected.
+
 ### Testing
 
 - Interceptor tests that a PLI passes the GCC slot to a later interceptor and the application, and
