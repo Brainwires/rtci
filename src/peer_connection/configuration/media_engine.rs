@@ -546,7 +546,9 @@ impl MediaEngine {
                     mime_type: MIME_TYPE_AV1.to_owned(),
                     clock_rate: 90000,
                     channels: 0,
-                    sdp_fmtp_line: "profile-id=0".to_owned(),
+                    // The AV1 RTP payload format's SDP parameter is `profile` (AV1 RTP spec,
+                    // section 7.2); `profile-id` is VP9's.
+                    sdp_fmtp_line: "profile=0".to_owned(),
                     rtcp_feedback: video_rtcp_feedback.clone(),
                 },
                 payload_type: 41,
