@@ -256,6 +256,28 @@ impl RTCPeerConnection {
 
     /// Runs every handler's pending writes down the pipeline into `write_outs`, where
     /// [`poll_write`](sansio::Protocol::poll_write) hands them out.
+    /// Queues a data channel's close behind the messages the application has already sent on
+    /// it: they enter the pipeline at the endpoint too, and a close that went straight to the
+    /// channel reset its SCTP stream ahead of them (RFC 8831 section 6.7: the reset follows the
+    /// data), so the peer received none of it.
+    pub(crate) fn write_data_channel_close(
+        &mut self,
+        data_channel_id: crate::data_channel::RTCDataChannelId,
+    ) -> Result<(), Error> {
+        use sansio::Protocol;
+
+        let now = self.pipeline_context.now;
+        let mut endpoint_handler = self.get_endpoint_handler();
+        endpoint_handler.handle_write(TaggedRTCMessageInternal {
+            now,
+            transport: Default::default(),
+            message: RTCMessageInternal::Dtls(DTLSMessage::DataChannel(ApplicationMessage {
+                data_channel_id,
+                data_channel_event: DataChannelEvent::Close,
+            })),
+        })
+    }
+
     fn flush_writes(&mut self) {
         use sansio::Protocol;
 

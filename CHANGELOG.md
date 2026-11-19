@@ -5,6 +5,76 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.1+brainwires.3] - 2026-11-19
+
+W3C WebRTC behaviour the Deno WebRTC extension (Brainwires/deno `ext/webrtc`) relies on: JSEP
+negotiation edge cases from the web-platform-tests, the data channel lifecycle (ids, closing,
+failure, stream-id reuse, `bufferedAmount`), stats timestamps in milliseconds, and RTCP that no
+longer stops at a nested interceptor. `FORK.md` lists everything the fork carries over upstream.
+
+### Features
+
+- **sctp, data channel**: `Stream::bytes_dequeued`, `Association::stream_bytes_dequeued` and
+  `RTCDataChannel::bytes_dequeued` count the application bytes taken from a stream's send queue
+  (first transmission, or abandoned before it), for W3C `bufferedAmount`, which falls on
+  transmission rather than on acknowledgement. `outstanding_bytes` is unchanged.
+- **interceptor**: `PassThroughInterceptor` (exported) hands every packet on in both directions;
+  it is the inner end of a nested interceptor in a registry slot
+  (`PassThroughInterceptor::new().with(builder.build())`).
+
+### Bug Fixes
+
+- **interceptor**: the documented recipe for a nested interceptor in a registry slot,
+  `NoopInterceptor::new().with(...)`, put the chain's RTCP terminus inside the slot: in
+  `Slot::CongestionControl` (the fork's GCC) no NACK, receiver report, PLI or FIR reached the
+  interceptors after it or the application. The recipe, the GCC and adaptive jitter buffer
+  modules and `FORK.md` now use `PassThroughInterceptor`.
+- **ice**: `RTCIceCandidate::to_json` wrote `sdpMid: ""` with `sdpMLineIndex: 0`; the empty mid
+  matched no media section, so `add_remote_candidate` on the other peer refused it. A candidate
+  built from a bare ICE candidate now has no mid and names the first section by index.
+- **peer_connection**: JSEP negotiation (W3C web-platform-tests): a BUNDLE group's m-sections may
+  carry their own ICE credentials (the offerer-tagged section's are the transport's, RFC 8843
+  §7.2); a description with no m-section starts no transport, so a remote offer can be
+  re-applied or rolled back; `have-remote-offer` takes another remote offer and the pranswer
+  states another pranswer, a remote pranswer deciding the ICE role; `add_remote_candidate`
+  follows W3C `addIceCandidate` (mid or m-line index, `usernameFragment` checked, the candidate or
+  `a=end-of-candidates` recorded in the descriptions); `ice-ufrag` / `ice-pwd` syntax checked
+  (RFC 8839 §5.4); `a=ice-options:trickle` written; one `a=fingerprint` per local certificate and
+  every remote one kept; an answer to `setup:active` / `setup:passive` takes the other role;
+  media sections without `a=ssrc` accepted with several m-sections (bound by the MID header
+  extension, RFC 8843 §9.2); `RTCTransportStats.dtlsRole` serializes as W3C `RTCDtlsRole`.
+- **data channel**: a channel gets its RFC 8832 id when an answer negotiates the DTLS role, and
+  one created after that gets it at once, before SCTP connects.
+- **data channel**: a close the remote starts fires `OnClosing` before `OnClose`; an association
+  lost to the peer's ABORT (now `AssociationError::AssociationClosed`, not `Reset`), a protocol
+  error or a timeout fires `OnError` before `OnClose`, on every channel of the association, an
+  idle pre-negotiated one included (`Event::AssociationClosed`).
+- **sctp, data channel**: a stream id is freed only once both directions are reset (RFC 8831
+  §6.7); a reset this side started is not echoed back, and a reset of a stream with no state here
+  is reported and answered. A new channel no longer takes an id the peer is still resetting.
+- **data channel**: `close()` follows the messages sent before it instead of resetting the stream
+  ahead of them, and a read that completes a deferred stream reset no longer loses that pass's
+  messages.
+- **sctp**: `SctpTransport.state` is `Connecting` while the association handshakes (it reported
+  the accepting side `Closed`); an ended association is passed over for a live one.
+- **shared**: stats timestamps serialize as epoch milliseconds with sub-millisecond precision (they
+  were seconds, truncated to whole milliseconds).
+- **peer_connection**: an offer made while an ICE restart is staged carries no candidates of the
+  previous generation.
+
+### Dependencies
+
+- The workspace audit ignores RUSTSEC-2026-0543 (`chrono` unmaintained, published after the
+  previous release): `chrono` is a dev-dependency only, for log timestamps in examples and
+  tests. The library's own audit, which ignores nothing, is unaffected.
+
+### Testing
+
+- Interceptor tests that a PLI passes the GCC slot to a later interceptor and the application, and
+  that the old `NoopInterceptor` recipe ends it there; an ICE candidate JSON round-trip test
+  (`tests/ice_tcp_rtc2rtc.rs` passes again); SCTP tests for stream-id release, idle-stream resets,
+  association failure and the dequeued byte count.
+
 ## [0.21.1+brainwires.2] - 2026-11-14
 
 ICE over TCP between two `rtc` peers in both role assignments, mDNS host candidates published one

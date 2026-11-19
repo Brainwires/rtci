@@ -26,10 +26,14 @@
 //! # Usage
 //!
 //! ```ignore
-//! use rtc_interceptor::{AdaptiveJitterBufferBuilder, Interceptor, NoopInterceptor, Registry, Slot};
+//! use rtc_interceptor::{
+//!     AdaptiveJitterBufferBuilder, Interceptor, PassThroughInterceptor, Registry, Slot,
+//! };
 //! use std::time::Duration;
 //!
-//! let jitter = NoopInterceptor::new().with(
+//! // the inner end is a pass-through: `NoopInterceptor` there would end the
+//! // inbound RTCP of every slot after this one
+//! let jitter = PassThroughInterceptor::new().with(
 //!     AdaptiveJitterBufferBuilder::new()
 //!         .with_min_delay(Duration::from_millis(20))
 //!         .with_max_delay(Duration::from_millis(500))
@@ -238,7 +242,7 @@ impl<P: Interceptor> JitterBufferInterceptor<P> {
 mod tests {
     use super::*;
     use crate::AttributedPacket;
-    use crate::{NoopInterceptor, Registry, Slot, stream_info::StreamInfo};
+    use crate::{PassThroughInterceptor, Registry, Slot, stream_info::StreamInfo};
     use sansio::Protocol;
     use shared::{TransportContext, TransportMessage};
 
@@ -284,7 +288,7 @@ mod tests {
         Registry::new()
             .with(
                 Slot::JitterBuffer,
-                NoopInterceptor::new().with(
+                PassThroughInterceptor::new().with(
                     JitterBufferBuilder::new()
                         .with_min_delay(Duration::from_millis(initial_ms))
                         .with_max_delay(Duration::from_millis(max_ms))

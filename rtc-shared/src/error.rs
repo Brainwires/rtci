@@ -1851,6 +1851,26 @@ pub enum Error {
     #[error("remote description is not set")]
     ErrNoRemoteDescription,
 
+    /// ErrIceCandidateMediaSectionNotFound indicates that the sdpMid or sdpMLineIndex of a
+    /// remote candidate names no media section of the remote description
+    #[error(
+        "no media section of the remote description matches the candidate's sdpMid or sdpMLineIndex"
+    )]
+    ErrIceCandidateMediaSectionNotFound,
+
+    /// ErrIceCandidateUsernameFragmentMismatch indicates that the usernameFragment of a remote
+    /// candidate is not the ice-ufrag of its media section in the remote description
+    #[error("the candidate's usernameFragment is not its media section's ice-ufrag")]
+    ErrIceCandidateUsernameFragmentMismatch,
+
+    /// ErrSessionDescriptionInvalidIceCredentials indicates set_remote_description was called
+    /// with an ice-ufrag or ice-pwd that is not RFC 8839 §5.4 syntax (4 to 256, or 22 to 256,
+    /// ice-chars: ALPHA, DIGIT, "+" and "/")
+    #[error(
+        "set_remote_description called with an ice-ufrag or ice-pwd that isn't RFC 8839 syntax"
+    )]
+    ErrSessionDescriptionInvalidIceCredentials,
+
     /// ErrIncorrectSDPSemantics indicates that the PeerConnection was configured to
     /// generate SDP Answers with different SDP Semantics than the received Offer
     #[error("offer SDP semantics does not match configuration")]

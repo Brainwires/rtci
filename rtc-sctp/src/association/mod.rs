@@ -118,6 +118,13 @@ pub enum Event {
         /// The stream the loss was reported against.
         id: StreamId,
     },
+    /// The association closed, after an `AssociationLost` for each of its streams. Emitted
+    /// whether or not it had streams, so an application that keeps state beside the
+    /// association (a pre-negotiated data channel that never carried data) learns of it.
+    AssociationClosed {
+        /// Reason that the association was closed
+        reason: AssociationError,
+    },
     /// Stream events
     Stream(StreamEvent),
     /// One or more application datagrams have been received
@@ -738,6 +745,9 @@ impl Association {
             for si in self.streams.keys().cloned().collect::<Vec<u16>>() {
                 self.unregister_stream(si, reason.clone());
             }
+            self.events.push_back(Event::AssociationClosed {
+                reason: reason.clone(),
+            });
 
             debug!("[{}] association closed", self.side);
             debug!(
@@ -992,7 +1002,9 @@ impl Association {
             for e in &c.error_causes {
                 if matches!(e.code, USER_INITIATED_ABORT) {
                     debug!("User initiated abort received");
-                    let _ = self.close(AssociationError::Reset);
+                    // The peer aborted the association: its streams are lost with it, which
+                    // is not the stream reset `Reset` reports for a channel's own close.
+                    let _ = self.close(AssociationError::AssociationClosed);
                     return Ok(());
                 }
                 err_str += &format!("({})", e);
@@ -2131,11 +2143,26 @@ impl Association {
                 if draining.contains(id) {
                     continue;
                 }
-                if self.streams.contains_key(id) {
-                    if respond {
+                if let Some(stream) = self.streams.get(id) {
+                    // RFC 8831 section 6.7: the receiver of a reset resets its own outgoing
+                    // stream too, unless it already has (the peer's request is then the
+                    // second half of a close this side started). Echoing it again would
+                    // send a reset after the stream id is free, and reset the next channel
+                    // that takes the id.
+                    let outgoing_open = (stream.state as u8) & 0x1 != 0;
+                    if respond && outgoing_open {
                         sis_to_reset.push(*id);
                     }
                     self.unregister_stream(*id, AssociationError::Reset);
+                } else if respond {
+                    // A stream this side never sent or received on (a pre-negotiated data
+                    // channel left idle) has no state here, but the application still
+                    // holds it: report the reset, and reset the outgoing direction too.
+                    sis_to_reset.push(*id);
+                    self.events.push_back(Event::AssociationLost {
+                        reason: AssociationError::Reset,
+                        id: *id,
+                    });
                 }
             }
 
@@ -2780,6 +2807,28 @@ impl Association {
                 .is_some_and(|deadline| now >= deadline)
     }
 
+    /// Application bytes of `stream_identifier` that have left the send queue (see
+    /// [`Stream::bytes_dequeued`]); 0 for a stream this association does not hold.
+    pub fn stream_bytes_dequeued(&self, stream_identifier: StreamId) -> u64 {
+        self.streams
+            .get(&stream_identifier)
+            .map_or(0, |s| s.bytes_dequeued)
+    }
+
+    /// Credits a chunk leaving the send queue to its stream's `bytes_dequeued`.
+    fn note_dequeued(&mut self, c: &ChunkPayloadData) {
+        if !matches!(
+            c.payload_type,
+            PayloadProtocolIdentifier::String | PayloadProtocolIdentifier::Binary
+        ) || !self.is_current_stream_data(c)
+        {
+            return;
+        }
+        if let Some(s) = self.streams.get_mut(&c.stream_identifier) {
+            s.bytes_dequeued += c.user_data.len() as u64;
+        }
+    }
+
     fn is_current_stream_data(&self, c: &ChunkPayloadData) -> bool {
         self.streams
             .get(&c.stream_identifier)
@@ -2879,6 +2928,7 @@ impl Association {
                 .first()
                 .is_some_and(|c| !c.beginning_fragment || !c.unordered);
         for mut c in tail {
+            self.note_dequeued(&c);
             if assign_tsns {
                 c.tsn = self.generate_next_tsn();
                 inflight.push(c.tsn);
@@ -3278,6 +3328,7 @@ impl Association {
             );
 
             self.inflight_queue.push_no_check(c.clone());
+            self.note_dequeued(&c);
 
             Some(c)
         } else {

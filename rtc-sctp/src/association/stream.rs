@@ -388,6 +388,18 @@ impl Stream<'_> {
         }
     }
 
+    /// Application bytes of this stream that have left the send queue (transmitted, or
+    /// abandoned before their first transmission): W3C `bufferedAmount` decreases by what
+    /// "the underlying data transport sends ... from its queue", not by what the peer
+    /// acknowledges.
+    pub fn bytes_dequeued(&self) -> Result<u64> {
+        if let Some(s) = self.association.streams.get(&self.stream_identifier) {
+            Ok(s.bytes_dequeued)
+        } else {
+            Err(Error::ErrStreamClosed)
+        }
+    }
+
     /// buffered_amount returns the number of bytes of data currently queued to be sent over this stream.
     pub fn buffered_amount(&self) -> Result<usize> {
         if let Some(s) = self.association.streams.get(&self.stream_identifier) {
@@ -476,6 +488,10 @@ pub struct StreamState {
     pub(crate) reliability_type: ReliabilityType,
     pub(crate) reliability_value: u32,
     pub(crate) buffered_amount: usize,
+    /// Application bytes that have left the send queue: transmitted for the first time, or
+    /// abandoned before that. DCEP messages and the placeholder byte of an empty message
+    /// are not counted.
+    pub(crate) bytes_dequeued: u64,
     pub(crate) buffered_amount_low: usize,
     pub(crate) buffered_amount_high: usize,
 }
@@ -499,6 +515,7 @@ impl StreamState {
             reliability_type: ReliabilityType::Reliable,
             reliability_value: 0,
             buffered_amount: 0,
+            bytes_dequeued: 0,
             buffered_amount_low: 0,
             buffered_amount_high: u32::MAX as usize,
         }

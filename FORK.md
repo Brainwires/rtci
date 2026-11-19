@@ -12,7 +12,7 @@ below. It is what ReachMyDevice pins, and what the Deno WebRTC extension (Brainw
 | Last upstream commit merged | `0fbcaa74` (after v0.21.1, 2026-11-12) |
 | Previous sync point (original fork point) | `bf30a00c` (2026-04-06) |
 | Fork master before this sync | `81bc7c6b` |
-| Fork release | `0.21.1+brainwires.2` (build metadata marks the fork; it orders with upstream 0.21.1) |
+| Fork release | `0.21.1+brainwires.3` (build metadata marks the fork; it orders with upstream 0.21.1) |
 
 The fork is kept in sync by **merging** upstream into a branch (never rebasing), so the fork's
 history stays intact.
@@ -32,9 +32,9 @@ history stays intact.
 
 | Feature | Where | Notes |
 |---|---|---|
-| TWCC-driven GCC interceptor with a shared bitrate handle | `rtc-interceptor/src/gcc/twcc_gcc/` | `GccInterceptorBuilder`, `GccHandle`, `GccInterceptor`, `GccShared`. Trendline filter + AIMD (draft-ietf-rmcat-gcc-02). Lives beside upstream's GCC (`Gcc`, `configure_congestion_control`), which is the more complete estimator; the fork's keeps its pull-style `GccHandle` API, which ReachMyDevice uses. Place it in `Slot::CongestionControl`, below `Slot::TwccSender`. |
+| TWCC-driven GCC interceptor with a shared bitrate handle | `rtc-interceptor/src/gcc/twcc_gcc/` | `GccInterceptorBuilder`, `GccHandle`, `GccInterceptor`, `GccShared`. Trendline filter + AIMD (draft-ietf-rmcat-gcc-02). Lives beside upstream's GCC (`Gcc`, `configure_congestion_control`), which is the more complete estimator; the fork's keeps its pull-style `GccHandle` API, which ReachMyDevice uses. Place it in `Slot::CongestionControl`, below `Slot::TwccSender`, around a `PassThroughInterceptor`: `PassThroughInterceptor::new().with(gcc_builder.build())`. |
 | Adaptive jitter buffer | `rtc-interceptor/src/adaptive_jitter_buffer/` | Exported as `AdaptiveJitterBufferBuilder` / `AdaptiveJitterBufferInterceptor` (renamed because upstream now owns `JitterBufferBuilder`). Delay adapts to RFC 3550 interarrival jitter and honours the `playout-delay` header extension; upstream's is fixed-depth. |
-| `rtc-interceptor-derive` (`#[derive(Interceptor)]`, `#[interceptor]`) and `Interceptor::with` | `rtc-interceptor-derive/`, `rtc-interceptor/src/lib.rs` | Upstream deleted both with the list-based chain. A nested interceptor built with them is an ordinary interceptor and goes in a `Registry` slot: `NoopInterceptor::new().with(builder.build())`. |
+| `rtc-interceptor-derive` (`#[derive(Interceptor)]`, `#[interceptor]`) and `Interceptor::with` | `rtc-interceptor-derive/`, `rtc-interceptor/src/lib.rs` | Upstream deleted both with the list-based chain. A nested interceptor built with them is an ordinary interceptor and goes in a `Registry` slot around `PassThroughInterceptor` (`PassThroughInterceptor::new().with(builder.build())`), never `NoopInterceptor`: that is the chain's RTCP terminus, and inside a slot it would end every unmarked inbound RTCP packet there, before the interceptors after it and the application. |
 | DTLS re-handshake on ICE restart | `src/peer_connection/transport/dtls/mod.rs` (`restart`), `src/peer_connection/mod.rs` | Only when the remote fingerprints or the derived DTLS role change, or the session is Failed/Closed; an ICE restart alone keeps the session (browsers do not re-handshake). Keeps the local certificate; replaces the DTLS endpoint so the next selected pair starts a fresh handshake. |
 | RRID (RFC 8852 repaired-rtp-stream-id) association for RTX simulcast | `src/peer_connection/handler/interceptor.rs` (`bind_repair_by_rrid`) | Upstream still has this as TODO #12. |
 | Repair codecs never establish a layer | `src/peer_connection/handler/endpoint.rs` (`is_repair_mime_type`) | RTX/FEC payload types are not used as a layer's primary codec. |
@@ -51,6 +51,15 @@ history stays intact.
 | mDNS host candidates per address | `rtc-ice/src/agent/mod.rs` (`mdns_name_for`), `rtc-ice/src/mdns`, `rtc-mdns/src/proto` (`add_local_name`, AAAA) | `QueryAndGather` without a fixed IP publishes each local address (IPv4 and IPv6, UDP and TCP) under its own `<uuid>.local` name, as browsers do; queries ask for A and AAAA. The fixed-IP form also hides that address's TCP candidates. |
 | mDNS datagrams reach ICE whatever their first byte | `src/peer_connection/handler/demuxer.rs` | Port 5353 on both ends goes to the agent before RFC 7983 demultiplexing. |
 | Bounded RFC 4571 decoding | `rtc-shared/src/tcp_framing.rs` (`TcpFrameDecoder::push`, `try_frame_packet`) | `push` refuses data past two frames' worth; packets are taken without shifting the buffer each time. |
+| Data channel ids when the DTLS role is negotiated (W3C webrtc-pc) | `src/peer_connection/mod.rs` (`assign_data_channel_ids`, `create_data_channel`) | Applying an answer (local or remote) gives every in-band channel its RFC 8832 id, and a channel created after that gets one at once, before SCTP connects; the SCTP connected procedure still assigns any left. |
+| Data channel closing procedure and failure | `src/peer_connection/handler/{datachannel,sctp}.rs` (`SCTPStreamFailed`), `rtc-sctp/src/association/mod.rs` | A close the remote starts fires `OnClosing` before `OnClose`; an association lost to the peer's ABORT (now `AssociationError::AssociationClosed`, not `Reset`), a protocol error or a timeout fires `OnError` before `OnClose`. |
+| `SctpTransport.state` while the association handshakes | `src/peer_connection/transport/sctp/mod.rs` (`association`, `state`) | An association still handshaking is `Connecting` (SCTP's initial state is `CLOSED`, which reported the accepting side `Closed`); an ended association is passed over for a live one. |
+| Stats timestamps in milliseconds | `rtc-shared/src/serde.rs` (`instant_to_epoch`) | Epoch milliseconds with sub-millisecond precision (was seconds, truncated to whole milliseconds), as `DOMHighResTimeStamp` and the module's own docs have it. |
+| An ICE restart offer carries no previous-generation candidates | `src/peer_connection/internal.rs` (`offered_local_candidates`) | While a restart is staged the offer advertises the new credentials only; the new gathering phase signals its candidates. |
+| A data channel's stream id is free only once both directions are reset (RFC 8831 section 6.7) | `src/peer_connection/handler/sctp.rs` (`DataChannelClose`), `rtc-sctp/src/association/mod.rs` (`reset_streams_if_any`) | A local close completes when the peer resets its direction, not when ours is sent; a reset this side started is not echoed back; a reset of a stream with no state here (an idle pre-negotiated channel) is reported and echoed. A new channel no longer takes an id the peer is still resetting. |
+| Association failure reaches idle channels | `rtc-sctp` (`Event::AssociationClosed`), `src/peer_connection/handler/{sctp,datachannel}.rs` (`SCTPAssociationFailed`) | Every channel over an association lost to an error fires `OnError`, one without an SCTP stream included. |
+| Bytes a data channel's stream has transmitted | `rtc-sctp/src/association/{mod,stream}.rs` (`bytes_dequeued`, `stream_bytes_dequeued`), `src/data_channel/mod.rs` (`RTCDataChannel::bytes_dequeued`) | Application bytes taken from the send queue (first transmission, or abandoned before it), for W3C `bufferedAmount`, which falls on transmission rather than on acknowledgement (`outstanding_bytes`, the back-pressure count, is unchanged). |
+| A data channel's close follows its sends; the last message before a reset is delivered | `src/data_channel/mod.rs` (`close`), `src/peer_connection/handler/{mod,datachannel,sctp}.rs` (`write_data_channel_close`, `drain_stream`) | `close()` enters the pipeline at the endpoint behind the messages already sent, instead of resetting the stream ahead of them; a read that completes a deferred stream reset no longer loses that pass's messages to the closed stream's error. |
 | CI: benchmarks, fuzzing, OSS-Fuzz, git-cliff release notes | `.github/workflows/{bench,fuzz,release}.yml`, `oss-fuzz/`, `cliff.toml` | |
 
 ### Hardening (fork only)
@@ -83,11 +92,12 @@ cannot release the allocation or forge any other response.
 on every PR: first on the library's own graph with `.github/deny-library.toml` (normal and build
 dependencies, all features, no ignores), then on the whole workspace with `deny.toml`. Ignores are
 allowed only in `deny.toml`, only for advisories that cannot reach the library, each with its
-reason. Today there is one:
+reason. Today there are two:
 
 | Advisory | Crate | Why it is ignored |
 | --- | --- | --- |
 | RUSTSEC-2026-0441 (unmaintained, no vulnerability) | `pin-utils` 0.1.1 | Dev-dependency only, interop tests: `webrtc` 0.17.3 -> `webrtc-util` -> `nix` 0.26. `webrtc` 0.17.3 is the last release of the independent implementation the interop tests exercise; 0.20+ is built on the upstream `rtc` crates. |
+| RUSTSEC-2026-0543 (unmaintained, no vulnerability) | `chrono` 0.4 | Dev-dependency only: the examples' and tests' log timestamps (`chrono::Local::now()`). No release fixes it; replacing it in 48 example and test files is not worth a dev-only timestamp. |
 
 ### Defaults the fork widens
 

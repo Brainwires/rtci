@@ -584,6 +584,22 @@ pub(crate) enum RTCEventInternal {
     /// - Stream ID
     SCTPStreamClosed(usize /*AssociationHandle*/, u16 /*StreamID*/),
 
+    /// The SCTP association a stream ran over was lost to an error: the peer's ABORT, a
+    /// protocol violation or a timeout. Reported for each stream just before its
+    /// `SCTPStreamClosed`, so the channel on it fires `OnError` before `OnClose` (W3C
+    /// "announce the data channel as closed" with an error, `sctp-failure`).
+    ///
+    /// Parameters:
+    /// - Association handle
+    /// - Stream ID
+    SCTPStreamFailed(usize /*AssociationHandle*/, u16 /*StreamID*/),
+
+    /// The SCTP association was lost to an error (see `SCTPStreamFailed`): every data channel
+    /// over it fails, including one that never carried data and so has no SCTP stream.
+    ///
+    /// Parameter: Association handle
+    SCTPAssociationFailed(usize /*AssociationHandle*/),
+
     /// SCTP released outgoing buffered bytes (acknowledged or abandoned) for a
     /// stream, used to decrement the per-channel send back-pressure counter.
     ///

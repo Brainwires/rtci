@@ -1876,3 +1876,61 @@ fn test_handle_data_across_the_tsn_wrap() -> Result<()> {
     assert_eq!(a.peer_last_tsn, 1);
     Ok(())
 }
+
+/// RFC 8831 section 6.7: the peer's reset of a stream is answered with this side's own reset
+/// only while this side's outgoing stream is still open. When this side started the close,
+/// the peer's request completes it and is answered with a response alone; a second reset
+/// would arrive after the id is free and reset the next channel that takes it.
+#[test]
+fn test_reset_request_is_echoed_only_for_an_open_outgoing_stream() -> Result<()> {
+    for (state, echoed) in [
+        (RecvSendState::ReadWritable, true),
+        (RecvSendState::Closed, false),
+        (RecvSendState::Writable, false),
+    ] {
+        let mut a = create_association(TransportConfig::default());
+        a.set_state(AssociationState::Established);
+        a.create_stream(3, true, PayloadProtocolIdentifier::Binary);
+        a.streams.get_mut(&3).unwrap().state = state;
+        let request = ParamOutgoingResetRequest {
+            reconfig_request_sequence_number: 7,
+            reconfig_response_sequence_number: 0,
+            sender_last_tsn: a.peer_last_tsn,
+            stream_identifiers: vec![3],
+        };
+        let mut reply = vec![];
+        a.reset_streams_if_any(&request, true, &mut reply)?;
+        // The response always; a reset request of this side's own only when echoed.
+        assert_eq!(reply.len(), if echoed { 2 } else { 1 }, "{state:?}");
+        assert!(
+            !a.streams.contains_key(&3),
+            "{state:?}: the stream is reset"
+        );
+    }
+    Ok(())
+}
+
+/// A reset of a stream this side holds no state for (an idle pre-negotiated channel) is still
+/// reported, so the channel above closes, and answered with this side's own reset.
+#[test]
+fn test_reset_request_for_an_unknown_stream_is_reported_and_echoed() -> Result<()> {
+    let mut a = create_association(TransportConfig::default());
+    a.set_state(AssociationState::Established);
+    let request = ParamOutgoingResetRequest {
+        reconfig_request_sequence_number: 7,
+        reconfig_response_sequence_number: 0,
+        sender_last_tsn: a.peer_last_tsn,
+        stream_identifiers: vec![4],
+    };
+    let mut reply = vec![];
+    a.reset_streams_if_any(&request, true, &mut reply)?;
+    assert_eq!(reply.len(), 2, "a response and this side's own reset");
+    assert!(a.events.iter().any(|e| matches!(
+        e,
+        Event::AssociationLost {
+            reason: AssociationError::Reset,
+            id: 4
+        }
+    )));
+    Ok(())
+}

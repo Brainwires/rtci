@@ -390,6 +390,28 @@ impl RTCDataChannel<'_> {
         Ok(())
     }
 
+    /// Application bytes of this channel that SCTP has taken from its send queue: sent for
+    /// the first time, or abandoned (partial reliability) before that. W3C `bufferedAmount`
+    /// is what `send()` added less this, since it falls "when the underlying data transport
+    /// sends data from its queue" rather than when the peer acknowledges it, as
+    /// [`outstanding_bytes`](Self::outstanding_bytes) does. 0 before the channel has a stream.
+    pub fn bytes_dequeued(&self) -> u64 {
+        let Some(stream_id) = self
+            .peer_connection
+            .data_channels
+            .get(&self.id)
+            .and_then(|dc| dc.stream_id)
+        else {
+            return 0;
+        };
+        self.peer_connection
+            .sctp_transport()
+            .association()
+            .map_or(0, |association| {
+                association.stream_bytes_dequeued(stream_id)
+            })
+    }
+
     /// Bytes handed to [`send`](Self::send)/[`send_text`](Self::send_text) that
     /// SCTP has not yet released (acknowledged or abandoned) — the true amount of
     /// outstanding send-side memory for this channel, including bytes still queued
@@ -418,7 +440,9 @@ impl RTCDataChannel<'_> {
                 return Ok(());
             }
             dc.ready_state = RTCDataChannelState::Closing;
-            dc.close()
+            // Closed in the pipeline, after what was sent before it (see
+            // `write_data_channel_close`).
+            self.peer_connection.write_data_channel_close(self.id)
         } else {
             Err(Error::ErrDataChannelClosed)
         }

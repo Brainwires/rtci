@@ -223,6 +223,7 @@ use std::time::Instant;
 
 pub(crate) mod chain;
 pub(crate) mod noop;
+pub(crate) mod pass_through;
 pub(crate) mod registry;
 
 pub(crate) mod adaptive_jitter_buffer;
@@ -306,6 +307,7 @@ pub use pacing::sender::{
     PacerBuilder, PacerInterceptor,
 };
 pub use packet::{Attribute, AttributedPacket, Packet, TaggedPacket};
+pub use pass_through::PassThroughInterceptor;
 pub use registry::{Registry, Slot};
 pub use report::receiver::{ReceiverReportBuilder, ReceiverReportInterceptor};
 pub use report::sender::{SenderReportBuilder, SenderReportInterceptor};

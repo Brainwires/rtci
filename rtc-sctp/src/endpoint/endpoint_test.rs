@@ -3895,8 +3895,9 @@ fn kps_816_deferred_reset_completes_when_the_application_drains() -> Result<()> 
 
 /// `abort()` ends the association at once (RFC 9260 §9.1): the local side is closed, and the ABORT
 /// it sends carries a "User-Initiated Abort" cause, so the peer closes its side too instead of
-/// treating the chunk as an error. Each stream reports the loss, which is what closes data
-/// channels above.
+/// treating the chunk as an error. Each stream reports the loss as the association closing
+/// under it (`AssociationClosed`, not the `Reset` of a stream's own close), which is what fails
+/// and then closes data channels above.
 #[test]
 fn test_abort_closes_both_sides() -> Result<()> {
     let si: u16 = 1;
@@ -3918,9 +3919,45 @@ fn test_abort_closes_both_sides() -> Result<()> {
             lost.push((reason, id));
         }
     }
-    assert_eq!(vec![(AssociationError::Reset, si)], lost);
+    assert_eq!(vec![(AssociationError::AssociationClosed, si)], lost);
 
     // Idempotent: the association is already closed.
     pair.client_conn_mut(client_ch).abort()?;
+    Ok(())
+}
+
+/// `bytes_dequeued` counts application bytes once they leave the send queue (first
+/// transmission), before the peer acknowledges them; the empty-message placeholder byte is
+/// not application data.
+#[test]
+fn test_bytes_dequeued_counts_on_transmission() -> Result<()> {
+    let si: u16 = 1;
+    let (mut pair, client_ch, server_ch) = create_association_pair(AckMode::NoDelay, 0)?;
+    establish_session_pair(&mut pair, client_ch, server_ch, si)?;
+    let before = pair.client_stream(client_ch, si)?.bytes_dequeued()?;
+
+    let now = pair.time;
+    pair.client_stream(client_ch, si)?.write_sctp(
+        now,
+        &Bytes::from_static(b"hello"),
+        PayloadProtocolIdentifier::Binary,
+    )?;
+    pair.client_stream(client_ch, si)?.write_sctp(
+        now,
+        &Bytes::from_static(b"\0"),
+        PayloadProtocolIdentifier::BinaryEmpty,
+    )?;
+    assert_eq!(
+        before,
+        pair.client_stream(client_ch, si)?.bytes_dequeued()?,
+        "still queued"
+    );
+
+    pair.drive_client();
+    assert_eq!(
+        before + 5,
+        pair.client_stream(client_ch, si)?.bytes_dequeued()?,
+        "transmitted"
+    );
     Ok(())
 }
