@@ -144,9 +144,8 @@
 //! [RFC 9429]: https://datatracker.ietf.org/doc/html/rfc9429
 //! [W3C WebRTC Specification]: https://www.w3.org/TR/webrtc/#session-description-model
 
-// sdp_test.rs imports crate::api::APIBuilder which belongs to the old async API and does not
-// exist in this sans-IO crate. Enabling it requires porting the test file to the new API.
-// #[cfg(test)] mod sdp_test;
+#[cfg(test)]
+mod sdp_test;
 
 #[cfg(test)]
 mod rejected_mline_tests {

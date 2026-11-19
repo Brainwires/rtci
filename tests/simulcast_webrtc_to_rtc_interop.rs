@@ -11,9 +11,10 @@
 /// 5. rtc receives all packets via poll_read() and tracks them by SSRC
 /// 6. Test verifies at least 10 packets received (expects 50)
 ///
-/// This demonstrates the core interop capability but does not test true
-/// simulcast with multiple RID-based encodings, which requires additional
-/// SDP manipulation and RTP header extension configuration in webrtc v0.14.0.
+/// The webrtc peer sends TRUE simulcast: one sender with three RID-tagged
+/// encodings (`RTCRtpSender::add_encoding`), so the offer carries one video
+/// m-line with `a=rid` and `a=simulcast`, and every packet carries the RID header
+/// extension.
 use anyhow::Result;
 use bytes::BytesMut;
 use sansio::Protocol;
@@ -61,39 +62,23 @@ mod common;
 
 const DEFAULT_TIMEOUT_DURATION: Duration = Duration::from_secs(30);
 
-/// Integration test for multi-track video streaming (webrtc → rtc)
+/// Integration test for TRUE simulcast with RID (webrtc → rtc)
 ///
-/// This test demonstrates rtc (sans-I/O) receiving RTP packets from multiple
-/// concurrent webrtc v0.14.0 video tracks, which simulates simulcast infrastructure.
-///
-/// **What this test demonstrates:**
-/// - ✅ 3 concurrent video tracks with unique SSRCs
-/// - ✅ rtc receiving and demultiplexing multiple RTP streams simultaneously
-/// - ✅ RTP header extension negotiation infrastructure
-/// - ✅ Each track tracked independently by SSRC
-///
-/// **Note on TRUE simulcast with RID:**
-/// This test creates 3 SEPARATE tracks (3 m-lines in SDP), not true simulcast  
-/// (1 m-line with `a=simulcast` and `a=rid` attributes). webrtc v0.14.0's  
-/// `add_track()` API doesn't support creating true simulcast SDP. True RID-based
-/// simulcast requires either:
-/// - Manual SDP manipulation to add `a=simulcast:send low;mid;high` and `a=rid` lines
-/// - Using a real browser as sender (browsers handle simulcast SDP correctly)
-/// - The `/examples/simulcast/` example shows rtc receiving from browser with RIDs
-///
-/// This test validates the **infrastructure** needed for simulcast (multiple streams,
-/// header extensions, concurrent reception) even though RIDs aren't signaled in SDP.
+/// The webrtc (v0.17.3) peer sends one video track as three RID-identified
+/// encodings ("low"/"mid"/"high") on a single sender, and the rtc (sans-I/O)
+/// peer receives them as the layers of one remote track.
 ///
 /// Test flow:
-/// 1. webrtc creates 3 TrackLocalStaticSample with RID metadata ("low"/"mid"/"high")
-/// 2. Each track added separately, creating 3 m-lines in SDP (not true simulcast)
-/// 3. Each track sends 30 media samples with unique SSRC
-/// 4. rtc receives all 90 packets and tracks by SSRC (no RID in SDP)
-/// 5. Test verifies 3 distinct SSRCs received with expected packet counts
-
-//TODO: make it TRUE simulcast with RID
+/// 1. webrtc creates 3 TrackLocalStaticSample sharing one track id and stream id,
+///    each with its own RID ("low"/"mid"/"high")
+/// 2. The first is added with `add_track`; the other two join its sender as
+///    simulcast encodings with `RTCRtpSender::add_encoding`, so the offer has ONE
+///    video m-line with `a=rid:<id> send` lines and `a=simulcast:send low;mid;high`
+/// 3. Each layer sends 30 media samples on its own SSRC, every packet carrying the
+///    MID and RID header extensions
+/// 4. rtc binds each SSRC to its layer from the RID extension
+/// 5. Test verifies all 3 RIDs were received with the expected packet counts
 #[tokio::test]
-#[ignore]
 async fn test_simulcast_webrtc_to_rtc() -> Result<()> {
     common::install_crypto_provider();
     env_logger::builder()
@@ -121,7 +106,7 @@ async fn test_simulcast_webrtc_to_rtc() -> Result<()> {
             sdp_fmtp_line: "".to_owned(),
             rtcp_feedback: vec![],
         },
-        "video_low".to_owned(),
+        "video_simulcast".to_owned(),
         "low".to_owned(),
         "webrtc_stream".to_owned(),
     ));
@@ -134,7 +119,7 @@ async fn test_simulcast_webrtc_to_rtc() -> Result<()> {
             sdp_fmtp_line: "".to_owned(),
             rtcp_feedback: vec![],
         },
-        "video_mid".to_owned(),
+        "video_simulcast".to_owned(),
         "mid".to_owned(),
         "webrtc_stream".to_owned(),
     ));
@@ -147,26 +132,27 @@ async fn test_simulcast_webrtc_to_rtc() -> Result<()> {
             sdp_fmtp_line: "".to_owned(),
             rtcp_feedback: vec![],
         },
-        "video_high".to_owned(),
+        "video_simulcast".to_owned(),
         "high".to_owned(),
         "webrtc_stream".to_owned(),
     ));
 
-    // Add all 3 tracks to webrtc peer for simulcast
-    let _rtp_sender_low = webrtc_pc
+    // One sender, three simulcast encodings: the first layer creates the sender and
+    // the other two are added to it as encodings of the same track.
+    let rtp_sender = webrtc_pc
         .add_track(track_low.clone() as Arc<dyn TrackLocal + Send + Sync>)
         .await?;
     log::info!("Added track with RID: low");
 
-    let _rtp_sender_mid = webrtc_pc
-        .add_track(track_mid.clone() as Arc<dyn TrackLocal + Send + Sync>)
+    rtp_sender
+        .add_encoding(track_mid.clone() as Arc<dyn TrackLocal + Send + Sync>)
         .await?;
-    log::info!("Added track with RID: mid");
+    log::info!("Added encoding with RID: mid");
 
-    let _rtp_sender_high = webrtc_pc
-        .add_track(track_high.clone() as Arc<dyn TrackLocal + Send + Sync>)
+    rtp_sender
+        .add_encoding(track_high.clone() as Arc<dyn TrackLocal + Send + Sync>)
         .await?;
-    log::info!("Added track with RID: high");
+    log::info!("Added encoding with RID: high");
 
     // Note: webrtc will automatically add RID header extensions to packets
     log::info!("Configured webrtc sender with 3 simulcast layers (low/mid/high)");
@@ -190,6 +176,30 @@ async fn test_simulcast_webrtc_to_rtc() -> Result<()> {
         .expect("local description should be set");
     log::info!("WebRTC offer with candidates ready");
     log::debug!("Offer SDP:\n{}", offer_with_candidates.sdp);
+
+    // TRUE simulcast: one video m-line describing all three layers by RID.
+    assert_eq!(
+        offer_with_candidates.sdp.matches("m=video").count(),
+        1,
+        "{}",
+        offer_with_candidates.sdp
+    );
+    for rid in ["low", "mid", "high"] {
+        assert!(
+            offer_with_candidates
+                .sdp
+                .contains(&format!("a=rid:{rid} send")),
+            "{}",
+            offer_with_candidates.sdp
+        );
+    }
+    assert!(
+        offer_with_candidates
+            .sdp
+            .contains("a=simulcast:send low;mid;high"),
+        "{}",
+        offer_with_candidates.sdp
+    );
 
     // Convert webrtc SDP to rtc SDP
     let rtc_offer =
@@ -570,25 +580,27 @@ async fn test_simulcast_webrtc_to_rtc() -> Result<()> {
 
     // Check results
     let final_counts = packets_received.lock().await;
-    log::info!("Final packet counts by SSRC:");
-    for (ssrc_key, count) in final_counts.iter() {
-        log::info!("  {}: {} packets", ssrc_key, count);
+    log::info!("Final packet counts by RID:");
+    for (rid, count) in final_counts.iter() {
+        log::info!("  {}: {} packets", rid, count);
     }
 
-    // Verify we received packets from 3 different SSRCs (3 separate tracks)
+    // Verify every packet was attributed to one of the 3 simulcast layers by its RID
+    let mut rids: Vec<&str> = final_counts.keys().map(String::as_str).collect();
+    rids.sort_unstable();
     assert_eq!(
-        final_counts.len(),
-        3,
-        "Should have received packets from 3 different SSRCs (3 tracks), got {}",
-        final_counts.len()
+        rids,
+        ["high", "low", "mid"],
+        "Should have received packets on the 3 RIDs, got {:?}",
+        final_counts
     );
 
     // Verify each track sent approximately the expected number of packets
-    for (ssrc_key, count) in final_counts.iter() {
+    for (rid, count) in final_counts.iter() {
         assert!(
             *count >= 25,
-            "Each track should send ~30 packets, {} sent {}",
-            ssrc_key,
+            "Each layer should send ~30 packets, {} sent {}",
+            rid,
             count
         );
     }
@@ -597,12 +609,12 @@ async fn test_simulcast_webrtc_to_rtc() -> Result<()> {
     let total_packets: u32 = final_counts.values().sum();
     assert!(
         total_packets >= 75,
-        "Should have received at least 75 packets total (3 tracks × ~30), got {}",
+        "Should have received at least 75 packets total (3 layers × ~30), got {}",
         total_packets
     );
 
     log::info!(
-        "✅ Received {} total RTP packets across {} concurrent video tracks",
+        "✅ Received {} total RTP packets across {} simulcast layers",
         total_packets,
         final_counts.len()
     );

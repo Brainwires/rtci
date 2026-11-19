@@ -1,233 +1,148 @@
-use bytes::Bytes;
-use media::Sample;
-use tokio::sync::mpsc;
-use tokio::time::Duration;
-use waitgroup::WaitGroup;
+//! Ported from the async `webrtc` crate's `rtp_receiver_test.rs` to the sans-IO API.
+//!
+//! The old tests connected two peers over a virtual network and handled the remote track in an
+//! `on_track` callback; here the pair is driven in memory by
+//! [`crate::peer_connection::test_util::Pair`] and the remote track is announced by
+//! [`RTCTrackEvent::OnOpen`].
 
 use super::*;
-use crate::api::media_engine::{MIME_TYPE_OPUS, MIME_TYPE_VP8};
-use crate::error::Result;
-use crate::peer_connection::peer_connection_state::RTCPeerConnectionState;
-use crate::peer_connection::peer_connection_test::{
-    close_pair_now, create_vnet_pair, signal_pair, until_connection_state,
+use crate::media_stream::MediaStreamTrack;
+use crate::peer_connection::configuration::media_engine::{MIME_TYPE_VP8, MediaEngine};
+use crate::peer_connection::event::{RTCPeerConnectionEvent, RTCTrackEvent, RTCTrackEventInit};
+use crate::peer_connection::test_util::{Pair, new_pair_with, send_until_seen, signal_pair};
+use crate::rtp_transceiver::rtp_sender::{
+    RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters,
+    RTCRtpHeaderExtensionCapability,
 };
-use crate::rtp_transceiver::rtp_codec::RTCRtpHeaderExtensionParameters;
-use crate::rtp_transceiver::{RTCPFeedback, RTCRtpCodecCapability};
-use crate::track::track_local::track_local_static_sample::TrackLocalStaticSample;
-use crate::track::track_local::TrackLocal;
 
-lazy_static! {
-    static ref P: RTCRtpParameters = RTCRtpParameters {
-        codecs: vec![RTCRtpCodecParameters {
-            capability: RTCRtpCodecCapability {
-                mime_type: MIME_TYPE_OPUS.to_string(),
-                clock_rate: 48000,
-                channels: 2,
-                sdp_fmtp_line: "minptime=10;useinbandfec=1".to_string(),
-                rtcp_feedback: vec![RTCPFeedback {
-                    typ: "nack".to_owned(),
-                    parameter: "".to_owned(),
-                }],
+const EXTENSIONS: [&str; 3] = [
+    "urn:ietf:params:rtp-hdrext:sdes:mid",
+    "urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id",
+    "urn:ietf:params:rtp-hdrext:sdes:repaired-rtp-stream-id",
+];
+
+fn vp8() -> RTCRtpCodec {
+    RTCRtpCodec {
+        mime_type: MIME_TYPE_VP8.to_owned(),
+        clock_rate: 90000,
+        channels: 0,
+        sdp_fmtp_line: "".to_owned(),
+        rtcp_feedback: vec![],
+    }
+}
+
+fn media_engine() -> MediaEngine {
+    let mut me = MediaEngine::default();
+    me.register_codec(
+        RTCRtpCodecParameters {
+            rtp_codec: vp8(),
+            payload_type: 96,
+        },
+        RtpCodecKind::Video,
+    )
+    .expect("vp8");
+    for uri in EXTENSIONS {
+        me.register_header_extension(
+            RTCRtpHeaderExtensionCapability {
+                uri: uri.to_owned(),
             },
-            payload_type: 111,
+            RtpCodecKind::Video,
+            None,
+        )
+        .expect("extension");
+    }
+    me
+}
+
+fn track_open(pair: &Pair) -> Option<RTCTrackEventInit> {
+    pair.answerer_seen.events.iter().find_map(|e| match e {
+        RTCPeerConnectionEvent::OnTrack(RTCTrackEvent::OnOpen(init)) => Some(init.clone()),
+        _ => None,
+    })
+}
+
+/// Replaced: the old test overrode the receiver's parameters with `set_rtp_parameters` (an
+/// Opus codec and three header extensions) and checked that the remote track then reported
+/// them. The sans-IO receiver has no setter: its parameters are what negotiation agreed. This
+/// checks that the receiver reports exactly that — the negotiated codec, with the payload type
+/// the media arrives on, and the three header extensions both sides registered — and that the
+/// remote track's codec for the arriving SSRC is the same codec.
+#[test]
+fn test_set_rtp_parameters() -> Result<()> {
+    let (mut sender, mut receiver) = new_pair_with(media_engine(), media_engine())?;
+
+    let ssrc = 0x5555_5555;
+    let sender_id = sender.add_track(MediaStreamTrack::new(
+        "webrtc-rs".to_owned(),
+        "video".to_owned(),
+        "video".to_owned(),
+        RtpCodecKind::Video,
+        vec![RTCRtpEncodingParameters {
+            rtp_coding_parameters: RTCRtpCodingParameters {
+                ssrc: Some(ssrc),
+                ..Default::default()
+            },
+            codec: vp8(),
             ..Default::default()
         }],
-        header_extensions: vec![
-            RTCRtpHeaderExtensionParameters {
-                uri: "urn:ietf:params:rtp-hdrext:sdes:mid".to_owned(),
-                ..Default::default()
-            },
-            RTCRtpHeaderExtensionParameters {
-                uri: "urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id".to_owned(),
-                ..Default::default()
-            },
-            RTCRtpHeaderExtensionParameters {
-                uri: "urn:ietf:params:rtp-hdrext:sdes:repaired-rtp-stream-id".to_owned(),
-                ..Default::default()
-            },
-        ],
-    };
+    ))?;
+
+    signal_pair(&mut sender, &mut receiver)?;
+    let mut pair = Pair::new(sender, receiver);
+    pair.connect()?;
+
+    let mut sequence_number = 0;
+    let packet = send_until_seen(&mut pair, sender_id, ssrc, 96, 0xAA, &mut sequence_number);
+    let open = track_open(&pair).expect("the first packet opens the remote track");
+    assert_eq!(open.ssrc, ssrc);
+
+    let mut rtp_receiver = pair
+        .answerer
+        .rtp_receiver(open.receiver_id)
+        .expect("receiver");
+
+    let incoming_track_codec = rtp_receiver
+        .track()
+        .codec(ssrc)
+        .expect("the arriving SSRC has a codec")
+        .clone();
+
+    let parameters = rtp_receiver.get_parameters().rtp_parameters.clone();
+    let mut uris: Vec<&str> = parameters
+        .header_extensions
+        .iter()
+        .map(|h| h.uri.as_str())
+        .collect();
+    uris.sort_unstable();
+    let mut expected = EXTENSIONS.to_vec();
+    expected.sort_unstable();
+    assert_eq!(uris, expected);
+
+    let negotiated = parameters
+        .codecs
+        .iter()
+        .find(|c| c.payload_type == packet.header.payload_type)
+        .expect("the payload type the media arrives on is negotiated");
+    assert_eq!(
+        negotiated.rtp_codec.mime_type,
+        incoming_track_codec.mime_type
+    );
+    assert_eq!(
+        negotiated.rtp_codec.clock_rate,
+        incoming_track_codec.clock_rate
+    );
+    assert_eq!(negotiated.rtp_codec.channels, incoming_track_codec.channels);
+    assert_eq!(
+        negotiated.rtp_codec.sdp_fmtp_line,
+        incoming_track_codec.sdp_fmtp_line
+    );
+    assert_eq!(incoming_track_codec.mime_type, MIME_TYPE_VP8);
+
+    pair.close()
 }
 
-//use log::LevelFilter;
-//use std::io::Write;
-
-#[tokio::test]
-async fn test_set_rtp_parameters() -> Result<()> {
-    /*env_logger::Builder::new()
-    .format(|buf, record| {
-        writeln!(
-            buf,
-            "{}:{} [{}] {} - {}",
-            record.file().unwrap_or("unknown"),
-            record.line().unwrap_or(0),
-            record.level(),
-            chrono::Local::now().format("%H:%M:%S.%6f"),
-            record.args()
-        )
-    })
-    .filter(None, LevelFilter::Trace)
-    .init();*/
-
-    let (mut sender, mut receiver, wan) = create_vnet_pair().await?;
-
-    let outgoing_track: Arc<dyn TrackLocal + Send + Sync> = Arc::new(TrackLocalStaticSample::new(
-        RTCRtpCodecCapability {
-            mime_type: MIME_TYPE_VP8.to_owned(),
-            ..Default::default()
-        },
-        "video".to_owned(),
-        "webrtc-rs".to_owned(),
-    ));
-
-    sender.add_track(Arc::clone(&outgoing_track)).await?;
-
-    // Those parameters wouldn't make sense in a real application,
-    // but for the sake of the test we just need different values.
-
-    let (seen_packet_tx, mut seen_packet_rx) = mpsc::channel::<()>(1);
-    let seen_packet_tx = Arc::new(Mutex::new(Some(seen_packet_tx)));
-    receiver.on_track(Box::new(move |_, receiver, _| {
-        let seen_packet_tx2 = Arc::clone(&seen_packet_tx);
-        Box::pin(async move {
-            receiver.set_rtp_parameters(P.clone()).await;
-
-            let tracks = receiver.tracks().await;
-            assert_eq!(tracks.len(), 1);
-            let t = tracks.first().unwrap();
-
-            let incoming_track_codecs = t.codec();
-
-            assert_eq!(P.header_extensions, t.params().header_extensions);
-            assert_eq!(
-                P.codecs[0].capability.mime_type,
-                incoming_track_codecs.capability.mime_type
-            );
-            assert_eq!(
-                P.codecs[0].capability.clock_rate,
-                incoming_track_codecs.capability.clock_rate
-            );
-            assert_eq!(
-                P.codecs[0].capability.channels,
-                incoming_track_codecs.capability.channels
-            );
-            assert_eq!(
-                P.codecs[0].capability.sdp_fmtp_line,
-                incoming_track_codecs.capability.sdp_fmtp_line
-            );
-            assert_eq!(
-                P.codecs[0].capability.rtcp_feedback,
-                incoming_track_codecs.capability.rtcp_feedback
-            );
-            assert_eq!(P.codecs[0].payload_type, incoming_track_codecs.payload_type);
-
-            {
-                let mut done = seen_packet_tx2.lock().await;
-                done.take();
-            }
-        })
-    }));
-
-    let wg = WaitGroup::new();
-
-    until_connection_state(&mut sender, &wg, RTCPeerConnectionState::Connected).await;
-    until_connection_state(&mut receiver, &wg, RTCPeerConnectionState::Connected).await;
-
-    signal_pair(&mut sender, &mut receiver).await?;
-
-    wg.wait().await;
-
-    if let Some(v) = outgoing_track
-        .as_any()
-        .downcast_ref::<TrackLocalStaticSample>()
-    {
-        v.write_sample(&Sample {
-            data: Bytes::from_static(&[0xAA]),
-            duration: Duration::from_secs(1),
-            ..Default::default()
-        })
-        .await?;
-    } else {
-        panic!();
-    }
-
-    let _ = seen_packet_rx.recv().await;
-    {
-        let mut w = wan.lock().await;
-        w.stop().await?;
-    }
-    close_pair_now(&sender, &receiver).await;
-
-    Ok(())
-}
-
-// Assert that SetReadDeadline works as expected
-// This test uses VNet since we must have zero loss
-#[tokio::test]
-async fn test_rtp_receiver_set_read_deadline() -> Result<()> {
-    let (mut sender, mut receiver, wan) = create_vnet_pair().await?;
-
-    let track: Arc<dyn TrackLocal + Send + Sync> = Arc::new(TrackLocalStaticSample::new(
-        RTCRtpCodecCapability {
-            mime_type: MIME_TYPE_VP8.to_owned(),
-            ..Default::default()
-        },
-        "video".to_owned(),
-        "webrtc-rs".to_owned(),
-    ));
-
-    sender.add_track(Arc::clone(&track)).await?;
-
-    let (seen_packet_tx, mut seen_packet_rx) = mpsc::channel::<()>(1);
-    let seen_packet_tx = Arc::new(Mutex::new(Some(seen_packet_tx)));
-    receiver.on_track(Box::new(move |track, receiver, _| {
-        let seen_packet_tx2 = Arc::clone(&seen_packet_tx);
-        Box::pin(async move {
-            // First call will not error because we cache for probing
-            let result = tokio::time::timeout(Duration::from_secs(1), track.read_rtp()).await;
-            assert!(
-                result.is_ok(),
-                " First call will not error because we cache for probing"
-            );
-
-            let result = tokio::time::timeout(Duration::from_secs(1), track.read_rtp()).await;
-            assert!(result.is_err());
-
-            let result = tokio::time::timeout(Duration::from_secs(1), receiver.read_rtcp()).await;
-            assert!(result.is_err());
-
-            {
-                let mut done = seen_packet_tx2.lock().await;
-                done.take();
-            }
-        })
-    }));
-
-    let wg = WaitGroup::new();
-    until_connection_state(&mut sender, &wg, RTCPeerConnectionState::Connected).await;
-    until_connection_state(&mut receiver, &wg, RTCPeerConnectionState::Connected).await;
-
-    signal_pair(&mut sender, &mut receiver).await?;
-
-    wg.wait().await;
-
-    if let Some(v) = track.as_any().downcast_ref::<TrackLocalStaticSample>() {
-        v.write_sample(&Sample {
-            data: Bytes::from_static(&[0xAA]),
-            duration: Duration::from_secs(1),
-            ..Default::default()
-        })
-        .await?;
-    } else {
-        panic!();
-    }
-
-    let _ = seen_packet_rx.recv().await;
-    {
-        let mut w = wan.lock().await;
-        w.stop().await?;
-    }
-    close_pair_now(&sender, &receiver).await;
-
-    Ok(())
-}
+// Not ported: test_rtp_receiver_set_read_deadline. It asserted that `TrackRemote::read_rtp`
+// and `RTCRtpReceiver::read_rtcp` time out under `tokio::time::timeout` once no more media
+// arrives. The sans-IO receiver has no reader to block on: inbound RTP and RTCP are surfaced
+// through `RTCPeerConnection::poll_read`, which never waits, so there is no read deadline to
+// test.
