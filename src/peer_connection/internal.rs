@@ -25,6 +25,7 @@ use crate::rtp_transceiver::rtp_sender::rtp_coding_parameters::{
 use crate::rtp_transceiver::rtp_sender::rtp_encoding_parameters::RTCRtpEncodingParameters;
 use crate::rtp_transceiver::{PayloadType, RTCRtpTransceiverDirection, RTCRtpTransceiverId};
 use crate::statistics::accumulator::IceCandidateAccumulator;
+use ::sdp::description::common::Attribute;
 use ::sdp::description::session::*;
 use ::sdp::util::ConnectionRole;
 use rand::RngExt;
@@ -865,6 +866,54 @@ impl RTCPeerConnection {
         // machine settles back to `stable` (see `set_description`).
 
         Ok(())
+    }
+
+    /// Gives each m= section of a remote description that has no `a=mid` one (RFC 9429,
+    /// Section 5.10 / 5.11: an endpoint that predates mids). In an answer it is the mid of our
+    /// m= section at the same position; in an offer, the section's index (or the next number no
+    /// other section has). Only the parsed description changes: the SDP text stays as given.
+    pub(super) fn assign_missing_mids(&self, parsed: &mut SessionDescription, answers: bool) {
+        let local: Vec<Option<String>> = if answers {
+            self.pending_local_description
+                .as_ref()
+                .or(self.current_local_description.as_ref())
+                .and_then(|d| d.parsed.as_ref())
+                .map(|d| {
+                    d.media_descriptions
+                        .iter()
+                        .map(|m| get_mid_value(m).filter(|mid| !mid.is_empty()).cloned())
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            vec![]
+        };
+        let mut taken: HashSet<String> = parsed
+            .media_descriptions
+            .iter()
+            .filter_map(|m| get_mid_value(m).filter(|mid| !mid.is_empty()).cloned())
+            .collect();
+        for (index, media) in parsed.media_descriptions.iter_mut().enumerate() {
+            if get_mid_value(media).is_some_and(|mid| !mid.is_empty()) {
+                continue;
+            }
+            let mid = match local.get(index).cloned().flatten() {
+                Some(mid) if !taken.contains(&mid) => mid,
+                _ => {
+                    let mut n = index;
+                    while taken.contains(&n.to_string()) {
+                        n += 1;
+                    }
+                    n.to_string()
+                }
+            };
+            taken.insert(mid.clone());
+            media.attributes.retain(|a| a.key != ATTR_KEY_MID);
+            media.attributes.push(Attribute {
+                key: ATTR_KEY_MID.to_owned(),
+                value: Some(mid),
+            });
+        }
     }
 
     /// The mids of the pending and current local descriptions.

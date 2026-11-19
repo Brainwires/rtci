@@ -1379,7 +1379,9 @@ impl RTCPeerConnection {
 
         // Parse SDP (skip for rollback as content is ignored per spec)
         if remote_description.sdp_type != RTCSdpType::Rollback {
-            remote_description.parsed = Some(remote_description.unmarshal()?);
+            let mut parsed = remote_description.unmarshal()?;
+            self.assign_missing_mids(&mut parsed, answers);
+            remote_description.parsed = Some(parsed);
         }
         self.set_description(&remote_description, StateChangeOp::SetRemote)?;
 
