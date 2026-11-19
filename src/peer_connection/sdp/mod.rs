@@ -1873,6 +1873,17 @@ pub(crate) fn rtp_extensions_from_media_description(
 
     for a in &m.attributes {
         if a.key == ATTR_KEY_EXT_MAP {
+            // RFC 8285 section 5 / JSEP (RFC 9429 section 5.10): an extension the answerer
+            // doesn't understand is left out of the answer, not an error. A URI that isn't
+            // even a URI (`a=extmap:2 bogus`) is such an extension; a malformed id or
+            // direction still fails the description.
+            if a.value
+                .as_deref()
+                .and_then(|v| v.split_whitespace().nth(1))
+                .is_some_and(|uri| Url::parse(uri).is_err())
+            {
+                continue;
+            }
             let a_str = a.to_string();
             let e = ExtMap::unmarshal(&mut a_str.as_bytes())?;
 
@@ -1907,6 +1918,17 @@ fn rtp_extensions_from_media_description_reads_each_extmap_line() {
     let malformed = MediaDescription::default()
         .with_value_attribute(ATTR_KEY_EXT_MAP.to_owned(), "not-a-number urn:x".to_owned());
     assert!(rtp_extensions_from_media_description(&malformed).is_err());
+
+    // An unknown extension whose name isn't a URI is skipped, not an error.
+    let bogus = MediaDescription::default()
+        .with_value_attribute(ATTR_KEY_EXT_MAP.to_owned(), "2 bogus".to_owned())
+        .with_value_attribute(
+            ATTR_KEY_EXT_MAP.to_owned(),
+            "16 urn:ietf:params:rtp-hdrext:sdes:mid".to_owned(),
+        );
+    let extensions = rtp_extensions_from_media_description(&bogus).unwrap();
+    assert_eq!(extensions.len(), 1);
+    assert_eq!(extensions["urn:ietf:params:rtp-hdrext:sdes:mid"], 16);
 }
 
 /// update_sdp_origin saves sdp.Origin in PeerConnection when creating 1st local SDP;
