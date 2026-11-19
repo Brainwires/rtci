@@ -302,6 +302,13 @@ impl RTCRtpTransceiver<'_> {
         self.peer_connection.rtp_transceivers[self.id].set_associable_with_remote_offer(associable);
     }
 
+    /// Marks this transceiver as touched by W3C `addTrack`: a rollback of the remote offer that
+    /// created it keeps it (RFC 9429, Section 5.7). For a caller that attaches the track itself,
+    /// to a transceiver that already has a sender.
+    pub fn keep_on_rollback(&mut self) {
+        self.peer_connection.rtp_transceivers[self.id].set_created_by_remote_description(false);
+    }
+
     /// Sets the preferred direction of this transceiver.
     ///
     /// Changing the direction may trigger renegotiation to update the session description.

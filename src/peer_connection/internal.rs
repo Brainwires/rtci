@@ -739,13 +739,15 @@ impl RTCPeerConnection {
         // left untouched.
         let negotiated_mids = self.current_description_mids();
 
-        // Stop and remove transceivers created by the rolled-back remote offer that have no
-        // attached track. `created_by_remote_description` is cleared once negotiation reaches
-        // stable, so a set flag denotes a transceiver created by the pending, not-yet-committed
-        // offer. Iterate in reverse so index-based removal is stable.
+        // Stop and remove transceivers created by the rolled-back remote offer that `add_track`
+        // never touched (it clears the flag; a sender made for `replaceTrack` or a sending
+        // direction doesn't keep one, W3C 4.4.1.6 rollback). `created_by_remote_description` is
+        // cleared once negotiation reaches stable, so a set flag denotes a transceiver created by
+        // the pending, not-yet-committed offer. Iterate in reverse so index-based removal is
+        // stable.
         for i in (0..self.rtp_transceivers.len()).rev() {
             let t = &self.rtp_transceivers[i];
-            if t.created_by_remote_description() && t.sender().is_none() {
+            if t.created_by_remote_description() {
                 self.rtp_transceivers[i].stop(&self.media_engine, &mut self.interceptor)?;
                 self.rtp_transceivers.remove(i);
             }
