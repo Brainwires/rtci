@@ -209,7 +209,8 @@ pub struct EnvPeer {
     pub sent_relayed: u64,
     pub recv_direct: u64,
     pub recv_relayed: u64,
-    pub turn_errors: Vec<String>,
+    /// STUN/TURN failures and refused remote candidates, for diagnostics.
+    pub errors: Vec<String>,
 }
 
 fn turn_config(
@@ -286,7 +287,7 @@ impl EnvPeer {
             sent_relayed: 0,
             recv_direct: 0,
             recv_relayed: 0,
-            turn_errors: vec![],
+            errors: vec![],
         };
         let provider = rtc::crypto::default_provider().map_err(io::Error::other)?;
         let now = Instant::now();
@@ -392,7 +393,7 @@ impl EnvPeer {
                     ErrorKind::TimedOut,
                     format!(
                         "{name}: gathering timed out (srflx {:?}, relay {:?}, errors {:?})",
-                        peer.srflx, peer.relay, peer.turn_errors
+                        peer.srflx, peer.relay, peer.errors
                     ),
                 ));
             }
@@ -507,7 +508,11 @@ impl EnvPeer {
             if let Some(addr) = candidate_addr(&c.candidate) {
                 self.request_permission(addr);
             }
-            self.pc.add_remote_candidate(c).map_err(io::Error::other)?;
+            // The descriptions already carry the candidates gathered before the offer, so a
+            // trickled copy may be refused as a duplicate; that is not a failure.
+            if let Err(e) = self.pc.add_remote_candidate(c) {
+                self.errors.push(format!("add_remote_candidate: {e}"));
+            }
         }
         Ok(())
     }
@@ -530,9 +535,7 @@ impl EnvPeer {
             Ok(None) => {
                 self.perm_granted.insert(addr);
             }
-            Err(e) => self
-                .turn_errors
-                .push(format!("create_permission {addr}: {e}")),
+            Err(e) => self.errors.push(format!("create_permission {addr}: {e}")),
         }
     }
 
@@ -651,7 +654,7 @@ impl EnvPeer {
                         .and_then(|mut r| r.send_to(now, &m.message, peer))
                     {
                         Ok(()) => self.sent_relayed += 1,
-                        Err(e) => self.turn_errors.push(format!("relay send {peer}: {e}")),
+                        Err(e) => self.errors.push(format!("relay send {peer}: {e}")),
                     }
                 }
             } else {
@@ -745,14 +748,12 @@ impl EnvPeer {
                     TurnEvent::DataIndicationOrChannelData(_, from, data) => {
                         relayed_in.push((from, data))
                     }
-                    TurnEvent::TransactionTimeout(tid) => self
-                        .turn_errors
-                        .push(format!("transaction timeout {tid:?}")),
+                    TurnEvent::TransactionTimeout(tid) => {
+                        self.errors.push(format!("transaction timeout {tid:?}"))
+                    }
                     TurnEvent::BindingError(_, e)
                     | TurnEvent::AllocateError(_, e)
-                    | TurnEvent::CreatePermissionError(_, e) => {
-                        self.turn_errors.push(e.to_string())
-                    }
+                    | TurnEvent::CreatePermissionError(_, e) => self.errors.push(e.to_string()),
                     _ => {}
                 }
             }

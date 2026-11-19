@@ -74,11 +74,11 @@ fn connect_and_exchange(a: &mut EnvPeer, b: &mut EnvPeer) -> ((String, String), 
         a.connection_state(),
         a.sent_direct,
         a.sent_relayed,
-        a.turn_errors,
+        a.errors,
         b.connection_state(),
         b.sent_direct,
         b.sent_relayed,
-        b.turn_errors,
+        b.errors,
     );
     (
         a.selected_pair_types().expect("a selected pair"),
