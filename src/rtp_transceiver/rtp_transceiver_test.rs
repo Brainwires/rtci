@@ -122,7 +122,6 @@ fn test_rtp_transceiver_set_codec_preferences() -> Result<()> {
 
 // Assert that SetCodecPreferences properly filters codecs and PayloadTypes are respected
 #[test]
-#[ignore = "applying a remote offer replaces the transceiver's codec preferences yet"]
 fn test_rtp_transceiver_set_codec_preferences_payload_type() -> Result<()> {
     let test_codec = RTCRtpCodecParameters {
         rtp_codec: codec("video/test_codec", 90000, 0, ""),
@@ -249,7 +248,10 @@ fn test_rtp_transceiver_set_direction_causing_negotiation() -> Result<()> {
 }
 
 #[test]
-#[ignore = "a stopped transceiver is not rejected (port 0) in later offers yet"]
+#[ignore = "a stopped transceiver is not rejected (port 0) in later offers: SDP generation \
+            ignores stopped(), and making it reject stopped transceivers turns a remote \
+            a=inactive into a rejection, because set_remote_description stops a transceiver \
+            the remote marks inactive"]
 fn test_rtp_transceiver_stopping() -> Result<()> {
     let (mut offer_pc, mut answer_pc) = new_pair()?;
 
@@ -288,6 +290,42 @@ fn test_rtp_transceiver_stopping() -> Result<()> {
         "After stopping a transceiver it should be rejected in offers: {}",
         offer.sdp
     );
+
+    offer_pc.close()?;
+    answer_pc.close()
+}
+
+/// Preferences that share no codec with the offer leave the section answered from the whole
+/// engine, as without preferences, rather than with no codec.
+#[test]
+fn test_rtp_transceiver_codec_preferences_without_overlap_fall_back() -> Result<()> {
+    let mut offerer_media_engine =
+        crate::peer_connection::configuration::media_engine::MediaEngine::default();
+    offerer_media_engine.register_codec(vp8(96), RtpCodecKind::Video)?;
+    let (mut offer_pc, mut answer_pc) =
+        new_pair_with(offerer_media_engine, default_media_engine())?;
+
+    let _ = offer_pc.add_transceiver_from_kind(RtpCodecKind::Video, None)?;
+    let answer_sender = answer_pc.add_track(video_track())?;
+    answer_pc
+        .rtp_transceiver(answer_sender.0)
+        .expect("transceiver")
+        .set_codec_preferences(vec![RTCRtpCodecParameters {
+            rtp_codec: codec(MIME_TYPE_VP9, 90000, 0, "profile-id=0"),
+            payload_type: 98,
+        }])?;
+
+    let offer = offer_pc.create_offer(None)?;
+    offer_pc.set_local_description(Instant::now(), offer.clone())?;
+    answer_pc.set_remote_description(Instant::now(), offer)?;
+    let answer = answer_pc.create_answer(None)?;
+
+    assert!(
+        answer.sdp.contains("a=rtpmap:96 VP8/90000"),
+        "{}",
+        answer.sdp
+    );
+    assert!(!answer.sdp.contains("m=video 0 "), "{}", answer.sdp);
 
     offer_pc.close()?;
     answer_pc.close()
