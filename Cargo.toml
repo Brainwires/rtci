@@ -196,6 +196,11 @@ futures-util.workspace = true
 # would test this stack against its own lineage.
 webrtc = "0.17.3"
 
+# The real-network test environment's tests (tests/testenv_*.rs) create sockets inside Linux
+# network namespaces with setns(2).
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+libc = "0.2"
+
 [[example]]
 name = "broadcast"
 path = "examples/broadcast/broadcast.rs"
