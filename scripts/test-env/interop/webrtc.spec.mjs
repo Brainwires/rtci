@@ -166,10 +166,11 @@ for (const codec of ["VP8", "VP9", "H264"]) {
         s.pc.ontrack = (e) => Interop.sink(new MediaStream([e.track]));
         await s.negotiate();
         await s.connected();
+        // 15 frames: headless WebKit's canvas capture runs at a few frames per second.
         const rtp = await Interop.until(async () => {
           const r = await Interop.inbound(s.pc, "video");
-          return r && r.framesDecoded > 30 && r;
-        }, 25000, "30 decoded frames").catch(async (e) => ({ error: String(e), last: await Interop.inbound(s.pc, "video") }));
+          return r && r.framesDecoded > 15 && r;
+        }, 25000, "15 decoded frames").catch(async (e) => ({ error: String(e), last: await Interop.inbound(s.pc, "video") }));
         const report = await s.report();
         s.close();
         return { rtp, report };

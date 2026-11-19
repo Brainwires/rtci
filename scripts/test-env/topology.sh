@@ -114,6 +114,11 @@ nat_rules() {
   local r=$1 nat=$2 wan_ip=$3 host=$4
   local ipt="ip netns exec $r iptables"
   $ipt -P FORWARD DROP
+  # An unsolicited packet to the router's own address would otherwise reach its local stack and
+  # leave a confirmed conntrack entry on the mapped port; the host's next outbound packet to that
+  # peer would then be SNATed to another port, and a port-restricted NAT would act symmetric.
+  # (fullcone / restricted DNAT such packets to the host before INPUT sees them.)
+  $ipt -A INPUT -i wan0 -m conntrack --ctstate NEW -j DROP
   $ipt -A FORWARD -i lan0 -o wan0 -j ACCEPT
   $ipt -A FORWARD -i wan0 -o lan0 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
   case "$nat" in

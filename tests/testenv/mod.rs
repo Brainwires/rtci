@@ -206,6 +206,8 @@ pub struct EnvPeer {
     pub events: Vec<RTCPeerConnectionEvent>,
     pub reads: Vec<TaggedRTCMessage>,
     pub sent_direct: u64,
+    /// Datagrams the socket refused (other than a full buffer, which is waited out).
+    pub send_errors: u64,
     pub sent_relayed: u64,
     pub recv_direct: u64,
     pub recv_relayed: u64,
@@ -287,6 +289,7 @@ impl EnvPeer {
             events: vec![],
             reads: vec![],
             sent_direct: 0,
+            send_errors: 0,
             sent_relayed: 0,
             recv_direct: 0,
             recv_relayed: 0,
@@ -546,7 +549,7 @@ impl EnvPeer {
         while let Some(t) = side.client.poll_write() {
             match &mut side.link {
                 Link::Udp => {
-                    let _ = sock.send_to(&t.message, t.transport.peer_addr);
+                    let _ = send_nb(sock, &t.message, t.transport.peer_addr);
                 }
                 Link::Tcp { stream, .. } => write_all_nb(stream, &t.message)?,
                 Link::Tls { stream, conn, .. } => {
@@ -661,10 +664,12 @@ impl EnvPeer {
                     }
                 }
             } else {
-                // A send can fail (EPERM through a NAT that drops it, unreachable): a lost
-                // datagram, which ICE retransmits.
-                if self.sock.send_to(&m.message, peer).is_ok() {
-                    self.sent_direct += 1;
+                // A full socket buffer (EAGAIN on this non-blocking socket) is waited out, not
+                // dropped: a burst would otherwise lose datagrams the protocol under test never
+                // lost. Other failures (unreachable) are a lost datagram, which ICE retransmits.
+                match send_nb(&self.sock, &m.message, peer) {
+                    Ok(()) => self.sent_direct += 1,
+                    Err(_) => self.send_errors += 1,
                 }
             }
         }
@@ -828,6 +833,19 @@ impl EnvPeer {
             ty(&pair.local_candidate_id)?,
             ty(&pair.remote_candidate_id)?,
         ))
+    }
+}
+
+fn send_nb(sock: &UdpSocket, data: &[u8], to: SocketAddr) -> io::Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        match sock.send_to(data, to) {
+            Ok(_) => return Ok(()),
+            Err(e) if e.kind() == ErrorKind::WouldBlock && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_micros(200))
+            }
+            Err(e) => return Err(e),
+        }
     }
 }
 

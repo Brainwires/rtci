@@ -163,10 +163,11 @@ fn send_numbered(
             .collect::<Vec<_>>()
     };
     eprintln!(
-        "data channel stats: a {:?}, b {:?}; packets a sent {} received {}, b sent {} received {}",
+        "data channel stats: a {:?}, b {:?}; packets a sent {} (refused {}) received {}, b sent {} received {}",
         dc_stats(&mut a),
         dc_stats(&mut b),
         a.sent_direct,
+        a.send_errors,
         a.recv_direct,
         b.sent_direct,
         b.recv_direct

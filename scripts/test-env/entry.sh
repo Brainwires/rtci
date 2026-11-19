@@ -37,6 +37,8 @@ export RTC_TESTENV_TURN_CA=/run/rtc-env/ca.crt
 export RTC_TESTENV_MEDIA=/run/rtc-env/media
 
 log "media fixtures (GStreamer)"
+# H.264: one slice per picture (no tune=zerolatency, whose sliced threads code a picture as
+# several slices; a sender packetizing NAL by NAL then marks every slice as a frame end).
 # Opus: one packet per Ogg page (max-page-delay=1 ns), because OggReader returns whole pages
 # and an RTP packet carries one Opus packet (RFC 7587).
 M=$RTC_TESTENV_MEDIA
@@ -46,7 +48,7 @@ gst-launch-1.0 -q videotestsrc num-buffers=300 pattern=ball ! video/x-raw,width=
   && gst-launch-1.0 -q videotestsrc num-buffers=300 pattern=smpte ! video/x-raw,width=320,height=240,framerate=30/1 \
   ! vp9enc deadline=1 cpu-used=8 keyframe-max-dist=60 target-bitrate=400000 ! avmux_ivf ! filesink location="$M/vp9.ivf" \
   && gst-launch-1.0 -q videotestsrc num-buffers=300 ! video/x-raw,width=640,height=480,framerate=30/1 \
-  ! x264enc tune=zerolatency key-int-max=60 ! video/x-h264,stream-format=byte-stream,profile=constrained-baseline \
+  ! x264enc speed-preset=ultrafast bframes=0 key-int-max=60 ! video/x-h264,stream-format=byte-stream,profile=constrained-baseline \
   ! filesink location="$M/h264.h264" \
   && gst-launch-1.0 -q audiotestsrc num-buffers=500 wave=sine ! audio/x-raw,rate=48000,channels=2 \
   ! opusenc frame-size=20 ! oggmux max-page-delay=1 ! filesink location="$M/opus.ogg" \

@@ -161,6 +161,8 @@ struct Session {
             rtc::rtp_transceiver::RTCRtpReceiverId,
         ),
     >,
+    /// Simulcast layers share one track; each layer's SSRC names its RID.
+    rid_by_ssrc: HashMap<u32, String>,
     rtp_by_key: BTreeMap<String, u64>,
     dc_echoed: u64,
     rust_dc: Option<RTCDataChannelId>,
@@ -195,6 +197,7 @@ impl Session {
             media_dir,
             outgoing: vec![],
             tracks: HashMap::new(),
+            rid_by_ssrc: HashMap::new(),
             rtp_by_key: BTreeMap::new(),
             dc_echoed: 0,
             rust_dc: None,
@@ -404,6 +407,9 @@ impl Session {
                         .rtp_receiver(init.receiver_id)
                         .map(|r| r.track().kind())
                         .unwrap_or(RtpCodecKind::Video);
+                    if let Some(rid) = &init.rid {
+                        self.rid_by_ssrc.insert(init.ssrc, rid.to_string());
+                    }
                     self.tracks.insert(
                         init.track_id,
                         (kind, init.rid.map(|r| r.to_string()), init.receiver_id),
@@ -469,6 +475,7 @@ impl Session {
                     .map(|c| c.rtp_codec.mime_type.clone())
             })
             .unwrap_or_else(|| format!("pt{}", pkt.header.payload_type));
+        let rid = self.rid_by_ssrc.get(&pkt.header.ssrc).cloned().or(rid);
         let key = format!("{kind}:{}:{}", rid.unwrap_or_else(|| "-".into()), mime);
         *self.rtp_by_key.entry(key).or_default() += 1;
         if self.media != "reflect" {
