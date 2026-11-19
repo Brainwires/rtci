@@ -296,7 +296,7 @@ use crate::peer_connection::transport::dtls::fingerprint::RTCDtlsFingerprint;
 use crate::peer_connection::transport::ice::candidate::RTCIceCandidate;
 use crate::peer_connection::transport::ice::parameters::RTCIceParameters;
 use crate::rtp_transceiver::direction::RTCRtpTransceiverDirection;
-use crate::rtp_transceiver::rtp_sender::rtp_codec::{RTCRtpCodec, RtpCodecKind};
+use crate::rtp_transceiver::rtp_sender::rtp_codec::{RTCRtpCodec, RtpCodecKind, repair_family};
 use crate::rtp_transceiver::rtp_sender::rtp_codec_parameters::RTCRtpCodecParameters;
 use crate::rtp_transceiver::{
     PayloadType, RtpStreamId, SSRC, internal::RTCRtpTransceiverInternal,
@@ -834,6 +834,14 @@ impl RTCPeerConnection {
                 .with_property_attribute(ATTR_KEY_RTCPRSIZE.to_owned());
 
         let codecs = transceiver.get_codecs(media_engine);
+        // Which repair flows the section has a format for: a sender's RTX / FlexFEC SSRCs are
+        // described only then (codec preferences may leave either out).
+        let repair_flows = RepairFlows {
+            rtx: codecs.iter().any(|c| repair_family(&c.rtp_codec) == "rtx"),
+            fec: codecs
+                .iter()
+                .any(|c| repair_family(&c.rtp_codec) == "flexfec"),
+        };
         for codec in &codecs {
             let name = codec
                 .rtp_codec
@@ -976,6 +984,7 @@ impl RTCPeerConnection {
                 transceiver,
                 write_ssrc_attributes_for_simulcast,
                 send_sc_list.is_empty(),
+                repair_flows,
             );
 
             // Simulcast
@@ -1021,6 +1030,7 @@ impl RTCPeerConnection {
         transceiver: &mut RTCRtpTransceiverInternal,
         write_ssrc_attributes_for_simulcast: bool,
         write_rid_attributes: bool,
+        repair_flows: RepairFlows,
     ) -> (MediaDescription, Vec<RtpStreamId>) {
         let mut send_rids = vec![];
 
@@ -1055,7 +1065,17 @@ impl RTCPeerConnection {
             if write_ssrc_attributes_for_simulcast || !is_simulcast {
                 for encoding in &encodings {
                     if let Some(&ssrc) = encoding.rtp_coding_parameters.ssrc.as_ref() {
-                        if let Some(rtx) = encoding.rtp_coding_parameters.rtx.as_ref() {
+                        let rtx_flow = encoding
+                            .rtp_coding_parameters
+                            .rtx
+                            .as_ref()
+                            .filter(|_| repair_flows.rtx);
+                        let fec_flow = encoding
+                            .rtp_coding_parameters
+                            .fec
+                            .as_ref()
+                            .filter(|_| repair_flows.fec);
+                        if let Some(rtx) = rtx_flow {
                             media = media.with_value_attribute(
                                 ATTR_KEY_SSRC_GROUP.to_owned(),
                                 format!(
@@ -1065,7 +1085,7 @@ impl RTCPeerConnection {
                             );
                         }
 
-                        if let Some(fec) = encoding.rtp_coding_parameters.fec.as_ref() {
+                        if let Some(fec) = fec_flow {
                             // `FEC-FR` (RFC 5956), not the older `FEC` semantic of RFC 4756:
                             // FlexFEC repair flows are grouped under the FEC framework, and
                             // `parse_media_section` below only recognises `FEC-FR`, so writing
@@ -1088,7 +1108,7 @@ impl RTCPeerConnection {
                             track.track_id().to_owned(),
                         );
 
-                        if let Some(rtx) = encoding.rtp_coding_parameters.rtx.as_ref() {
+                        if let Some(rtx) = rtx_flow {
                             media = media.with_media_source(
                                 rtx.ssrc,
                                 track.stream_id().clone(),    /* cname */
@@ -1097,7 +1117,7 @@ impl RTCPeerConnection {
                             );
                         }
 
-                        if let Some(fec) = encoding.rtp_coding_parameters.fec.as_ref() {
+                        if let Some(fec) = fec_flow {
                             media = media.with_media_source(
                                 fec.ssrc,
                                 track.stream_id().clone(),    /* cname */
@@ -1122,6 +1142,14 @@ impl RTCPeerConnection {
 
         (media, send_rids)
     }
+}
+
+/// Whether an m-section has a format for a sender's RTX (RFC 4588) and FlexFEC (RFC 8627)
+/// flows.
+#[derive(Debug, Copy, Clone)]
+pub(crate) struct RepairFlows {
+    pub(crate) rtx: bool,
+    pub(crate) fec: bool,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]

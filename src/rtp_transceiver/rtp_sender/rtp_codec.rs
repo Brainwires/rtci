@@ -273,6 +273,22 @@ pub(crate) fn is_repair_codec(codec: &RTCRtpCodec) -> bool {
     matches!(subtype, "rtx" | "ulpfec" | "red") || subtype.starts_with("flexfec")
 }
 
+/// The kind of a repair format: `"rtx"`, `"ulpfec"`, `"red"` or `"flexfec"` (any FlexFEC
+/// draft); `""` for a media codec.
+pub(crate) fn repair_family(codec: &RTCRtpCodec) -> &'static str {
+    let mime_type = codec.mime_type.to_lowercase();
+    let subtype = mime_type
+        .split_once('/')
+        .map_or(mime_type.as_str(), |(_, subtype)| subtype);
+    match subtype {
+        "rtx" => "rtx",
+        "ulpfec" => "ulpfec",
+        "red" => "red",
+        s if s.starts_with("flexfec") => "flexfec",
+        _ => "",
+    }
+}
+
 // For now, only FlexFEC is supported.
 pub(crate) fn find_fec_payload_type(haystack: &[RTCRtpCodecParameters]) -> Option<PayloadType> {
     for c in haystack {

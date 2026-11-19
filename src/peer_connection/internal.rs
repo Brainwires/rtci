@@ -19,6 +19,7 @@ use crate::peer_connection::transport::ice::candidate_type::RTCIceCandidateType;
 use crate::peer_connection::transport::{RTCTransportId, TransportKind};
 use crate::rtp_transceiver::rtp_receiver::internal::RTCRtpReceiverInternal;
 use crate::rtp_transceiver::rtp_sender::RTCRtpCodec;
+use crate::rtp_transceiver::rtp_sender::rtp_codec::{is_repair_codec, parse_rtx_apt};
 use crate::rtp_transceiver::rtp_sender::rtp_coding_parameters::{
     RTCRtpCodingParameters, RTCRtpFecParameters, RTCRtpRtxParameters,
 };
@@ -1624,6 +1625,29 @@ impl RTCPeerConnection {
                 })
             {
                 codec_preferences.push(codec);
+            }
+        }
+
+        // The encodings name media codecs; the repair formats that accompany them (RTX for a
+        // named primary, FEC, RED) stay offered, so they are listed too (a preference list
+        // keeps only the repair kinds it lists, RTCRtpReceiverInternal::get_codecs).
+        if !codec_preferences.is_empty() {
+            for codec in &media_engine_codecs {
+                if !is_repair_codec(&codec.rtp_codec)
+                    || codec_preferences
+                        .iter()
+                        .any(|preference| preference.payload_type == codec.payload_type)
+                {
+                    continue;
+                }
+                if let Some(apt) = parse_rtx_apt(&codec.rtp_codec.sdp_fmtp_line)
+                    && !codec_preferences
+                        .iter()
+                        .any(|preference| preference.payload_type == apt)
+                {
+                    continue;
+                }
+                codec_preferences.push(codec.clone());
             }
         }
 
