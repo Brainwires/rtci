@@ -63,8 +63,8 @@ jobs:
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin || true
           if ! docker pull -q "$IMAGE"; then
             docker build -t "$IMAGE" -f scripts/test-env/Dockerfile scripts/test-env
-            # Only a push to a protected branch publishes, so a pull request cannot replace it.
-            if [ "${{ github.event_name }}" = push ]; then docker push -q "$IMAGE" || true; fi
+            # Only a push to master publishes, so a pull request or another branch cannot replace it.
+            if [ "${{ github.ref }}" = refs/heads/master ]; then docker push -q "$IMAGE" || true; fi
           fi
           echo "RTC_TESTENV_IMAGE=$IMAGE" >> "$GITHUB_ENV"
 
