@@ -1190,6 +1190,10 @@ pub(crate) struct MediaSection {
     pub(crate) rejected: bool,
     /// Media kind string ("video", "audio", or "application") — only meaningful when `rejected` is true.
     pub(crate) rejected_kind: String,
+    /// For a rejected m-section of a media type this endpoint doesn't know:
+    /// the protocol and formats to reproduce (the offer's), since only the
+    /// port changes in an answer (RFC 9429 5.3.1).
+    pub(crate) rejected_name: Option<MediaName>,
     pub(crate) match_extensions: HashMap<String, u16>,
     pub(crate) rid_map: Vec<SimulcastRid>,
 }
@@ -1286,7 +1290,9 @@ impl RTCPeerConnection {
             // RFC 8829 §5.3.1: reflect rejected m-lines (port=0) in the answer.
             // These must appear in the same position as in the offer to preserve m-line indexing.
             if m.rejected {
-                let (rejected_protos, rejected_formats) = if m.rejected_kind == "application" {
+                let (rejected_protos, rejected_formats) = if let Some(name) = &m.rejected_name {
+                    (name.protos.clone(), name.formats.clone())
+                } else if m.rejected_kind == "application" {
                     (
                         vec!["UDP".to_owned(), "DTLS".to_owned(), "SCTP".to_owned()],
                         vec!["webrtc-datachannel".to_owned()],
@@ -1876,6 +1882,20 @@ pub(crate) fn codecs_from_media_description(
     }
 
     Ok(out)
+}
+
+/// The m= line of a section whose media type this endpoint doesn't know
+/// (not audio, video or application), for a rejection that reproduces it.
+pub(crate) fn unknown_media_name(media: &MediaDescription) -> Option<MediaName> {
+    let kind = media.media_name.media.as_str();
+    if matches!(kind, "audio" | "video" | MEDIA_SECTION_APPLICATION) {
+        return None;
+    }
+    let mut name = media.media_name.clone();
+    if name.formats.is_empty() {
+        name.formats.push("0".to_owned());
+    }
+    Some(name)
 }
 
 /// RFC 3551 section 6's static audio payload types: encoding name and clock
