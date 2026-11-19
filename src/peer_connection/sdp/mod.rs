@@ -614,32 +614,42 @@ pub(crate) fn get_rids(media: &MediaDescription) -> Vec<SimulcastRid> {
         // reversing send<->recv but does not require preserving order). Without
         // this, the order followed the incidental `a=rid` line order — fine for
         // Firefox/Chrome (which agree) but not for a peer that lists them
-        // differently. Note: comma-separated rid-id alternatives within one
-        // stream are flattened here, not modeled as a single stream (no shipping
-        // browser emits alternatives).
+        // differently.
+        //
+        // Of a layer's comma-separated alternatives only the first is used
+        // (RFC 8853 section 5.2 lets an answerer pick one; W3C webrtc-pc
+        // "set the RTCSessionDescription" uses the first), so the others'
+        // `a=rid` lines are dropped below and never echoed in an answer.
         let mut simulcast_order: Vec<String> = vec![];
+        let mut alternatives: Vec<String> = vec![];
         let mut split = attr.split(' ');
         loop {
             let _dir = split.next();
             let sc_str_list = split.next();
             if let Some(list) = sc_str_list {
-                let sc_list: Vec<&str> = list.split(';').flat_map(|alt| alt.split(',')).collect();
-                for sc_id in sc_list {
-                    let (sc_id, paused) = if let Some(sc_id) = sc_id.strip_prefix('~') {
-                        (sc_id, true)
-                    } else {
-                        (sc_id, false)
-                    };
+                for layer in list.split(';') {
+                    for (n, sc_id) in layer.split(',').enumerate() {
+                        let (sc_id, paused) = if let Some(sc_id) = sc_id.strip_prefix('~') {
+                            (sc_id, true)
+                        } else {
+                            (sc_id, false)
+                        };
+                        if n > 0 {
+                            alternatives.push(sc_id.to_owned());
+                            continue;
+                        }
 
-                    if let Some(rid) = rids.iter_mut().find(|f| f.id == sc_id) {
-                        rid.paused = paused;
+                        if let Some(rid) = rids.iter_mut().find(|f| f.id == sc_id) {
+                            rid.paused = paused;
+                        }
+                        simulcast_order.push(sc_id.to_owned());
                     }
-                    simulcast_order.push(sc_id.to_owned());
                 }
             } else {
                 break;
             }
         }
+        rids.retain(|rid| simulcast_order.contains(&rid.id) || !alternatives.contains(&rid.id));
 
         // Reorder to match the `a=simulcast` preference order. `sort_by_key` is
         // stable, so any rid not referenced by the attribute (should not happen
@@ -651,6 +661,18 @@ pub(crate) fn get_rids(media: &MediaDescription) -> Vec<SimulcastRid> {
                 .unwrap_or(usize::MAX)
         });
     }
+
+    // A rid declared twice (`a=rid:foo recv` on two lines, a layer listed
+    // twice in `a=simulcast`) is one layer: the first declaration stands.
+    let mut seen: Vec<String> = vec![];
+    rids.retain(|rid| {
+        if seen.contains(&rid.id) {
+            false
+        } else {
+            seen.push(rid.id.clone());
+            true
+        }
+    });
 
     rids
 }
@@ -1864,6 +1886,20 @@ fn codecs_from_media_description_keeps_format_order_and_attributes() {
 
     m.media_name.formats.push("98".to_owned());
     assert!(codecs_from_media_description(&m).is_err());
+}
+
+#[test]
+fn get_rids_uses_each_layers_first_alternative_once() {
+    let mut m = MediaDescription::default();
+    for rid in ["foo", "bar", "1", "2", "foo"] {
+        m = m.with_value_attribute(SDP_ATTRIBUTE_RID.to_owned(), format!("{rid} recv"));
+    }
+    m = m.with_value_attribute(
+        SDP_ATTRIBUTE_SIMULCAST.to_owned(),
+        "recv foo,bar;1,2;foo".to_owned(),
+    );
+    let ids: Vec<String> = get_rids(&m).into_iter().map(|r| r.id).collect();
+    assert_eq!(ids, ["foo", "1"]);
 }
 
 pub(crate) fn rtp_extensions_from_media_description(
