@@ -1441,6 +1441,35 @@ impl RTCPeerConnection {
     /// This is called automatically by `get_stats()` to ensure ICE candidate pair
     /// statistics (RTT, requests/responses sent/received) are up to date.
     pub(super) fn update_ice_agent_stats(&mut self, now: Instant) {
+        // The selected pair's candidates always have stats of their own: a remote candidate
+        // the agent learned from a connectivity check (peer-reflexive, RFC 8445 Section 7.3.1.3)
+        // was never signalled, so `add_ice_remote_candidate` did not register it, and a
+        // candidate-pair entry naming it left `remoteCandidateId` dangling (webrtc-stats: every
+        // id a stats object names resolves in the same report).
+        let selected: Option<(RTCIceCandidate, RTCIceCandidate)> = self
+            .pipeline_context
+            .ice_handler_context
+            .ice_transport
+            .agent
+            .get_selected_candidate_pair()
+            .map(|(local, remote)| (local.into(), remote.into()));
+        if let Some((local, remote)) = selected {
+            let local_id = format!("RTCLocalIceCandidate_{}", local.id);
+            if !self.stats().local_candidates.contains_key(&local_id) {
+                let (ufrag, _) = self.ice_transport().get_local_user_credentials();
+                let accumulator = self.candidate_to_accumulator(&local, ufrag, None);
+                self.stats_mut()
+                    .register_local_candidate(local_id, accumulator);
+            }
+            let remote_id = format!("RTCRemoteIceCandidate_{}", remote.id);
+            if !self.stats().remote_candidates.contains_key(&remote_id) {
+                let (ufrag, _) = self.ice_transport().get_remote_user_credentials();
+                let accumulator = self.candidate_to_accumulator(&remote, ufrag, None);
+                self.stats_mut()
+                    .register_remote_candidate(remote_id, accumulator);
+            }
+        }
+
         if let Some((local, remote)) = self
             .pipeline_context
             .ice_handler_context

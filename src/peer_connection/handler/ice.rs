@@ -74,13 +74,13 @@ impl<'a>
                 transport: msg.transport,
                 message,
             })?;
-        } else if let Some((_, remote)) = self.ctx.ice_transport.agent.get_selected_candidate_pair()
-        {
+        } else if let Some(path) = self.ctx.ice_transport.agent.media_path() {
             // Only the selected pair's remote may send DTLS/SRTP: a datagram from any other
             // address is not part of this connection (ICE consent covers that one address), so
             // drop it rather than hand it to DTLS, where it would cost a decrypt attempt or
-            // reach handshake processing.
-            let remote_addr = remote.addr();
+            // reach handshake processing. During an ICE restart that is the pair the session
+            // had before it, until the restart selects one (RFC 8445 Section 9).
+            let remote_addr = path.peer_addr;
             if msg.transport.peer_addr != remote_addr {
                 trace!(
                     "drop non-STUN message from {:?}: not the selected pair's remote {:?}",
@@ -122,7 +122,7 @@ impl<'a>
     }
 
     fn handle_write(&mut self, mut msg: TaggedRTCMessageInternal) -> Result<()> {
-        if let Some((local, remote)) = self.ctx.ice_transport.agent.get_selected_candidate_pair() {
+        if let Some(path) = self.ctx.ice_transport.agent.media_path() {
             // use ICE selected candidate pair to replace local/peer addr and
             // transport protocol: DTLS/SCTP endpoints run on placeholder
             // transport contexts, so without the protocol rewrite their
@@ -132,9 +132,11 @@ impl<'a>
             // Use the local candidate's base address: for (server/peer-)
             // reflexive candidates the candidate address is the NAT mapping,
             // not a bound local socket (RFC 8445 §5.1.1).
-            msg.transport.local_addr = local.base_addr();
-            msg.transport.peer_addr = remote.addr();
-            msg.transport.transport_protocol = local.network_type().to_protocol();
+            // During an ICE restart this is the previous pair's path, until the restart
+            // selects one (RFC 8445 Section 9).
+            msg.transport.local_addr = path.local_addr;
+            msg.transport.peer_addr = path.peer_addr;
+            msg.transport.transport_protocol = path.transport_protocol;
             debug!("Bypass ice write {:?}", msg.transport.peer_addr);
 
             // Track packets/bytes sent on the selected candidate pair. Look the
