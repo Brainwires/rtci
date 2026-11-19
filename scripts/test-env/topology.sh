@@ -38,12 +38,24 @@ add_ns() {
   ns "$1" sysctl -qw net.ipv6.conf.all.disable_ipv6=1
 }
 
+# A veth pair between namespaces: `$1` gets interface `$2`, `$3` gets `$4`. Both ends are made
+# under unique names in the container's own namespace (where `eth0` already exists), moved,
+# then renamed.
+veth() {
+  VETH_N=$((VETH_N + 1))
+  local a="tva$VETH_N" b="tvb$VETH_N"
+  ip link add "$a" type veth peer name "$b"
+  ip link set "$a" netns "$1"
+  ip link set "$b" netns "$3"
+  ns "$1" ip link set "$a" name "$2"
+  ns "$3" ip link set "$b" name "$4"
+}
+
 # veth from namespace $1 (interface $2, address $3) to the bridge $4 in namespace $5.
 attach() {
   local nsname=$1 ifname=$2 addr=$3 bridge=$4 brns=$5
-  VETH_N=$((VETH_N + 1))
-  local peer="vb$VETH_N"
-  ip link add "$ifname" netns "$nsname" type veth peer name "$peer" netns "$brns"
+  local peer="vb$((VETH_N + 1))"
+  veth "$nsname" "$ifname" "$brns" "$peer"
   ns "$brns" ip link set "$peer" master "$bridge" up
   ns "$nsname" ip addr add "$addr" dev "$ifname"
   ns "$nsname" ip link set "$ifname" up
@@ -69,7 +81,7 @@ up() {
       add_ns "$r"
       add_ns "$h"
       attach "$r" wan0 "$wan_ip/24" br-wan wan
-      ip link add lan0 netns "$r" type veth peer name eth0 netns "$h"
+      veth "$r" lan0 "$h" eth0
       ns "$r" ip addr add "$lan.1/24" dev lan0
       ns "$r" ip link set lan0 up
       ns "$h" ip addr add "$lan.2/24" dev eth0
