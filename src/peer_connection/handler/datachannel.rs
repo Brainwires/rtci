@@ -310,7 +310,20 @@ impl<'a>
 
             if is_open {
                 while let Some(data_channel_message) = data_channel.poll_read() {
-                    let payload_len = data_channel_message.payload.len();
+                    // https://datatracker.ietf.org/doc/html/rfc8831#section-6.6
+                    // An empty message travels as one padding byte under an
+                    // Empty PPID; it counts as 0 bytes received, as the sender
+                    // counts it as 0 bytes sent (webrtc-stats bytesReceived).
+                    let is_empty = matches!(
+                        data_channel_message.ppi,
+                        PayloadProtocolIdentifier::StringEmpty
+                            | PayloadProtocolIdentifier::BinaryEmpty
+                    );
+                    let payload_len = if is_empty {
+                        0
+                    } else {
+                        data_channel_message.payload.len()
+                    };
                     debug!("recv application message {:?}", msg.transport.peer_addr);
 
                     // Track received message stats
@@ -322,11 +335,7 @@ impl<'a>
                     // When receiving an SCTP user message with one of these [Empty]
                     // PPIDs, the receiver MUST ignore the SCTP user message and
                     // process it as an empty message.
-                    let message_data = if matches!(
-                        data_channel_message.ppi,
-                        PayloadProtocolIdentifier::StringEmpty
-                            | PayloadProtocolIdentifier::BinaryEmpty
-                    ) {
+                    let message_data = if is_empty {
                         Default::default()
                     } else {
                         data_channel_message.payload

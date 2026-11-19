@@ -1533,7 +1533,12 @@ impl Association {
             self.rwnd = d.advertised_receiver_window_credit - bytes_outstanding;
         }
 
-        self.process_fast_retransmission(d.cumulative_tsn_ack, htna, cum_tsn_ack_point_advanced)?;
+        self.process_fast_retransmission(
+            d.cumulative_tsn_ack,
+            htna,
+            cum_tsn_ack_point_advanced,
+            now,
+        )?;
 
         if self.use_forward_tsn {
             // RFC 3758 Sec 3.5 C1
@@ -2015,6 +2020,7 @@ impl Association {
         cum_tsn_ack_point: u32,
         htna: u32,
         cum_tsn_ack_point_advanced: bool,
+        now: Instant,
     ) -> Result<()> {
         // HTNA algorithm - RFC 4960 Sec 7.2.4
         // Increment missIndicator of each chunks that the SACK reported missing
@@ -2063,6 +2069,32 @@ impl Association {
                     return Err(Error::ErrTsnRequestNotExist);
                 }
 
+                tsn = tsn.wrapping_add(1);
+            }
+        } else if self.use_forward_tsn {
+            // In Fast Recovery with no Cumulative TSN Ack advance, the HTNA
+            // rule above counts no new miss indications, so a later loss of
+            // a partially reliable message waited for T3-rtx (and its cwnd
+            // collapse) before it was abandoned: under steady loss an
+            // unreliable channel then delivered a fraction of its messages.
+            // A missing chunk below the HTNA whose retransmission budget is
+            // already spent (RFC 3758 3.5 A3, RFC 7496 3.1) is never sent
+            // again, so counting it changes no congestion state: it reaches
+            // the fast retransmit path, which abandons it and sends FORWARD
+            // TSN (RFC 3758 3.5 C1-C3) without waiting for the timer.
+            let mut tsn = cum_tsn_ack_point.wrapping_add(1);
+            while sna32lt(tsn, htna) {
+                let exhausted = self.inflight_queue.get(tsn).is_some_and(|c| {
+                    c.is_outstanding()
+                        && c.miss_indicator < 3
+                        && self.retransmission_policy_exhausted(c, now, true)
+                });
+                if exhausted && let Some(c) = self.inflight_queue.get_mut(tsn) {
+                    c.miss_indicator += 1;
+                    if c.miss_indicator == 3 {
+                        self.will_retransmit_fast = true;
+                    }
+                }
                 tsn = tsn.wrapping_add(1);
             }
         }

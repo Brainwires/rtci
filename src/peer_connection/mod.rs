@@ -2218,9 +2218,11 @@ impl RTCPeerConnection {
 
         // The registry assigns the handle. Note this happens before any dial: the channel is
         // addressable from the moment it exists, whether or not it has a stream id yet.
-        let id = self
-            .data_channels
-            .insert(RTCDataChannelInternal::new(params));
+        // WebRTC Priority Control API 4.3: [[DataChannelPriority]] is the option's priority,
+        // carried in the DCEP DATA_CHANNEL_OPEN when the channel is dialed.
+        let mut internal = RTCDataChannelInternal::new(params);
+        internal.priority = options.priority;
+        let id = self.data_channels.insert(internal);
 
         // https://www.w3.org/TR/webrtc/#peer-to-peer-data-api (Step #23)
         // Open the channel's data transport immediately when an SCTP association already
