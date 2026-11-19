@@ -1615,6 +1615,18 @@ impl RTCPeerConnection {
         }
 
         let is_simulcast = send_encodings.len() > 1 && all_have_rid;
+        // A rid names one encoding (RFC 8851 §4: rid-ids are unique within the m= section, and
+        // W3C addTransceiver refuses a repeated rid); two alike would be written as duplicate
+        // `a=rid` lines.
+        if is_simulcast
+            && send_encodings.iter().enumerate().any(|(i, encoding)| {
+                send_encodings[..i].iter().any(|earlier| {
+                    earlier.rtp_coding_parameters.rid == encoding.rtp_coding_parameters.rid
+                })
+            })
+        {
+            return Err(Error::ErrRTPSenderRIDCollision);
+        }
         if !is_simulcast {
             send_encodings.truncate(1);
         }

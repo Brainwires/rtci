@@ -468,6 +468,7 @@ fn test_rtp_sender_send_track_removed() -> Result<()> {
 /// so the same rules are checked there:
 ///
 /// - `ErrRTPSenderRidNil`: a layer without a rid among several.
+/// - `ErrRTPSenderRIDCollision`: two layers with the same rid.
 /// - `ErrRTPSenderStopped` (adding to a stopped sender): adding to a closed connection.
 /// - a valid set of layers gives one encoding per layer, each with its own SSRC.
 ///
@@ -493,6 +494,11 @@ fn test_rtp_sender_add_encoding() -> Result<()> {
     assert_eq!(
         sender.add_track(simulcast(&["f", ""])).unwrap_err(),
         Error::ErrRTPSenderRidNil
+    );
+
+    assert_eq!(
+        sender.add_track(simulcast(&["f", "f"])).unwrap_err(),
+        Error::ErrRTPSenderRIDCollision
     );
 
     // A layer whose codec is not the track's kind is refused too (the old
@@ -539,6 +545,43 @@ fn test_rtp_sender_add_encoding() -> Result<()> {
     receiver.close()
 }
 
+/// Every way of giving a sender its encodings refuses a repeated rid, and nothing is added.
+#[test]
+fn test_rtp_sender_duplicate_rid_is_refused() -> Result<()> {
+    let (mut pc, _) = new_pair()?;
+    let layers = || {
+        ["f", "h", "f"]
+            .iter()
+            .map(|rid| encoding(MIME_TYPE_VP8, rid, None))
+            .collect::<Vec<_>>()
+    };
+
+    let track = track_with("webrtc-rs", "video", RtpCodecKind::Video, layers());
+    assert_eq!(
+        pc.add_track(track.clone()).unwrap_err(),
+        Error::ErrRTPSenderRIDCollision
+    );
+    assert_eq!(
+        pc.add_transceiver_from_track(track, None).unwrap_err(),
+        Error::ErrRTPSenderRIDCollision
+    );
+    assert_eq!(
+        pc.add_transceiver_from_kind(
+            RtpCodecKind::Video,
+            Some(RTCRtpTransceiverInit {
+                direction: RTCRtpTransceiverDirection::Sendonly,
+                streams: vec![],
+                send_encodings: layers(),
+            }),
+        )
+        .unwrap_err(),
+        Error::ErrRTPSenderRIDCollision
+    );
+    assert_eq!(pc.get_transceivers().count(), 0);
+
+    pc.close()
+}
+
 fn rtx_media_engine() -> Result<MediaEngine> {
     let mut m = MediaEngine::default();
     m.register_codec(
@@ -573,7 +616,11 @@ fn rtx_media_engine() -> Result<MediaEngine> {
 }
 
 #[test]
-#[ignore = "only the first video m-section's codecs are negotiated yet"]
+#[ignore = "only the first video m-section's codecs are negotiated: \
+            MediaEngine::set_multi_codec_negotiation is never called, so the documented \
+            default of SettingEngine::with_disable_media_engine_multiple_codecs(false) is not \
+            honoured; wiring it lets the engine accumulate a second numbering, which \
+            tests/answer_to_renumbering_peer_is_well_formed.rs shows emits FlexFEC twice"]
 fn test_rtp_sender_rtx() -> Result<()> {
     let (registry, log) = RecordingInterceptor::registry();
     let mut offerer = new_peer(
