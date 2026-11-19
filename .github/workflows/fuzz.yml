@@ -109,7 +109,9 @@ jobs:
           for TARGET in $TARGETS; do
             echo "==> Fuzzing $TARGET for ${FUZZ_DURATION}s"
             # pipefail (above): without it the `| tail` hid every crash (the pipeline's status was tail's).
-            cargo fuzz run --debug-assertions "$TARGET" -- \
+            # --target: the prebuilt cargo-fuzz is a musl binary and would default to its own
+            # triple, which has no sanitizer runtime here.
+            cargo fuzz run --debug-assertions --target x86_64-unknown-linux-gnu "$TARGET" -- \
               -max_total_time="${FUZZ_DURATION}" \
               -error_exitcode=77 \
               2>&1 | tail -20
