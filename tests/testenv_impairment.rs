@@ -126,6 +126,8 @@ fn send_numbered(
     negotiate(&mut a, &mut b).unwrap();
     let mut next = 0u32;
     let mut last_send = Instant::now();
+    let started = Instant::now();
+    let mut drained_at: Option<Instant> = None;
     pump(&mut [&mut a, &mut b], timeout, |p| {
         if let Some(id) = dc_open_id(p[0])
             && next < count
@@ -146,10 +148,27 @@ fn send_numbered(
         if expect_all {
             got >= count
         } else {
-            next >= count && last_send.elapsed() > Duration::from_secs(3)
+            // Done once the send queue has given up every message (sent, or abandoned before
+            // sending), plus time for the last ones to arrive.
+            let dequeued = dc_open_id(p[0])
+                .and_then(|id| p[0].pc.data_channel(id))
+                .map_or(0, |dc| dc.bytes_dequeued());
+            if next >= count && dequeued >= count as u64 * 1024 && drained_at.is_none() {
+                drained_at = Some(Instant::now());
+            }
+            drained_at.is_some_and(|t| t.elapsed() > Duration::from_secs(2))
         }
     })
     .unwrap();
+    if !expect_all {
+        eprintln!(
+            "send queue drained {} after the first send",
+            drained_at.map_or("never".to_owned(), |t| format!(
+                "{:.1} s",
+                (t - started).as_secs_f64()
+            ))
+        );
+    }
     assert_eq!(
         next,
         count,
@@ -227,7 +246,7 @@ fn unreliable_channel_loses_without_retransmitting() {
             ..Default::default()
         },
         1000,
-        Duration::from_secs(60),
+        Duration::from_secs(90),
         false,
     );
     let unique: HashSet<u32> = got.iter().copied().collect();

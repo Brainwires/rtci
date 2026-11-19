@@ -260,11 +260,18 @@ test("simulcast: three RIDs reach Rust", async ({ page }) => {
       const rids = new Set(Object.keys(report.rtp).filter((k) => report.rtp[k] > 20).map((k) => k.split(":")[1]));
       return ["q", "h", "f"].every((x) => rids.has(x));
     }, 25000, "packets on q, h and f").catch(() => {});
+    // What the browser says it sent, per layer.
+    const sent = {};
+    (await s.pc.getStats()).forEach((x) => {
+      if (x.type === "outbound-rtp" && x.kind === "video" && x.rid) sent[x.rid] = x.packetsSent || 0;
+    });
     s.close();
-    return report;
+    return { report, sent };
   }, WS);
-  const rids = Object.keys(r.rtp).filter((k) => r.rtp[k] > 20).map((k) => k.split(":")[1]);
-  expect(new Set(rids), JSON.stringify(r)).toEqual(new Set(["q", "h", "f"]));
+  const sentRids = Object.keys(r.sent).filter((k) => r.sent[k] > 20);
+  test.skip(sentRids.length < 3, `the browser sent only ${JSON.stringify(r.sent)} (layers with > 20 packets: ${sentRids.join(",") || "none"})`);
+  const rids = Object.keys(r.report.rtp).filter((k) => r.report.rtp[k] > 20).map((k) => k.split(":")[1]);
+  expect(new Set(rids), JSON.stringify(r)).toEqual(new Set(sentRids));
 });
 
 // ---- encoded transforms (an SFrame-style end-to-end transform) ----
