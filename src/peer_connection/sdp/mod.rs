@@ -1815,11 +1815,31 @@ pub(crate) fn codecs_from_media_description(
     let mut out = vec![];
     for payload_str in &m.media_name.formats {
         let payload_type: PayloadType = payload_str.parse::<u8>()?;
-        let Some(codec) = codecs.get(&payload_type) else {
-            if payload_type == 0 {
-                continue;
+        // A payload type with no `a=rtpmap` (only `a=fmtp` / `a=rtcp-fb`
+        // lines, or none) is RFC 3551's static assignment for audio, else a
+        // format this description doesn't define: RFC 9429 section 5.3.1 and
+        // 5.8 ignore a format the endpoint doesn't know, rather than
+        // rejecting the whole description.
+        let static_codec;
+        let codec = match codecs.get(&payload_type).filter(|c| !c.name.is_empty()) {
+            Some(codec) => codec,
+            None => {
+                let Some((name, clock_rate)) = static_audio_payload_type(payload_type)
+                    .filter(|_| m.media_name.media == "audio")
+                else {
+                    continue;
+                };
+                let defined = codecs.get(&payload_type);
+                static_codec = sdp::util::Codec {
+                    payload_type,
+                    name: name.to_owned(),
+                    clock_rate,
+                    encoding_parameters: String::new(),
+                    fmtp: defined.map(|c| c.fmtp.clone()).unwrap_or_default(),
+                    rtcp_feedback: defined.map(|c| c.rtcp_feedback.clone()).unwrap_or_default(),
+                };
+                &static_codec
             }
-            return Err(Error::PayloadTypeNotFound);
         };
 
         let channels = codec.encoding_parameters.parse::<u16>().unwrap_or(0);
@@ -1858,6 +1878,37 @@ pub(crate) fn codecs_from_media_description(
     Ok(out)
 }
 
+/// RFC 3551 section 6's static audio payload types: encoding name and clock
+/// rate.
+fn static_audio_payload_type(payload_type: PayloadType) -> Option<(&'static str, u32)> {
+    match payload_type {
+        0 => Some(("PCMU", 8000)),
+        3 => Some(("GSM", 8000)),
+        4 => Some(("G723", 8000)),
+        8 => Some(("PCMA", 8000)),
+        9 => Some(("G722", 8000)),
+        13 => Some(("CN", 8000)),
+        18 => Some(("G729", 8000)),
+        _ => None,
+    }
+}
+
+#[test]
+fn codecs_from_media_description_reads_static_and_skips_undefined_payload_types() {
+    let mut m = MediaDescription::default()
+        .with_value_attribute("rtpmap".to_owned(), "111 opus/48000/2".to_owned());
+    m.media_name.media = "audio".to_owned();
+    m.media_name.formats = ["111", "103", "9", "0", "8"].map(str::to_owned).to_vec();
+
+    let codecs = codecs_from_media_description(&m).unwrap();
+
+    let payload_types: Vec<_> = codecs.iter().map(|c| c.payload_type).collect();
+    assert_eq!(payload_types, [111, 9, 0, 8]);
+    assert_eq!(codecs[1].rtp_codec.mime_type, "audio/G722");
+    assert_eq!(codecs[2].rtp_codec.mime_type, "audio/PCMU");
+    assert_eq!(codecs[2].rtp_codec.clock_rate, 8000);
+}
+
 #[test]
 fn codecs_from_media_description_keeps_format_order_and_attributes() {
     let mut m = MediaDescription::default()
@@ -1884,8 +1935,9 @@ fn codecs_from_media_description_keeps_format_order_and_attributes() {
     assert_eq!(vp8.rtcp_feedback[1].typ, "goog-remb");
     assert_eq!(codecs[1].rtp_codec.sdp_fmtp_line, "apt=96");
 
+    // A dynamic payload type with no a=rtpmap is left out, not an error.
     m.media_name.formats.push("98".to_owned());
-    assert!(codecs_from_media_description(&m).is_err());
+    assert_eq!(codecs_from_media_description(&m).unwrap().len(), 2);
 }
 
 #[test]
