@@ -247,6 +247,8 @@ pub mod cryptex;
 pub mod event;
 pub(crate) mod handler;
 mod internal;
+// wpt100:hdrext
+mod always_negotiate;
 pub mod message;
 pub mod sdp;
 pub mod state;
@@ -759,6 +761,8 @@ pub struct RTCPeerConnection {
     ice_restart_requested: Option<RTCOfferOptions>,
     negotiation_needed_state: NegotiationNeededState,
     is_negotiation_ongoing: bool,
+    // wpt100:hdrext — `alwaysNegotiateDataChannels` (see `always_negotiate`).
+    always_negotiate_data_channels: bool,
 }
 
 impl RTCPeerConnection {
