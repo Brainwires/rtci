@@ -274,7 +274,7 @@ use crate::peer_connection::sdp::{
     RemoteIceDetails, extract_fingerprints, extract_ice_details, get_application_media,
     get_application_media_section_max_message_size, get_application_media_section_sctp_port,
     get_mid_value, get_peer_direction, has_ice_trickle_option, insert_media_line, is_lite_set,
-    media_ice_credentials, sdp_type::RTCSdpType, update_sdp_origin,
+    is_rejected_media, media_ice_credentials, sdp_type::RTCSdpType, update_sdp_origin,
 };
 use crate::peer_connection::state::RTCIceGatheringState;
 use crate::peer_connection::state::ice_connection_state::RTCIceConnectionState;
@@ -834,7 +834,9 @@ impl RTCPeerConnection {
                 {
                     self.greater_mid = numeric_mid;
                 }
-            } else {
+            } else if !transceiver.stopped() {
+                // A stopped transceiver with no mid gets none: it has no m= section (RFC 9429,
+                // Section 5.2.2), and a mid would make it look associated.
                 // A remote description may carry any numeric mid, `isize::MAX` included.
                 self.greater_mid = self.greater_mid.checked_add(1).ok_or_else(|| {
                     Error::Other("no numeric mid is left above the remote description's".into())
@@ -1377,7 +1379,9 @@ impl RTCPeerConnection {
 
         // Parse SDP (skip for rollback as content is ignored per spec)
         if remote_description.sdp_type != RTCSdpType::Rollback {
-            remote_description.parsed = Some(remote_description.unmarshal()?);
+            let mut parsed = remote_description.unmarshal()?;
+            self.assign_missing_mids(&mut parsed, answers);
+            remote_description.parsed = Some(parsed);
         }
         self.set_description(&remote_description, StateChangeOp::SetRemote)?;
 
@@ -1433,6 +1437,13 @@ impl RTCPeerConnection {
                         };
 
                         if media.is_webrtc_datachannel() {
+                            continue;
+                        }
+
+                        // A rejected m= section (port 0) neither creates nor changes a
+                        // transceiver: the answer rejects it too, and the application stops the
+                        // transceiver it had (W3C 4.4.1.6).
+                        if is_rejected_media(media) {
                             continue;
                         }
 
@@ -1543,6 +1554,12 @@ impl RTCPeerConnection {
                         };
 
                         if media.is_webrtc_datachannel() {
+                            continue;
+                        }
+
+                        // A rejected m= section in the answer: the transceiver is stopped, not
+                        // given a direction.
+                        if is_rejected_media(media) {
                             continue;
                         }
 
@@ -2329,6 +2346,8 @@ impl RTCPeerConnection {
                     true,
                     transceiver.direction().has_recv(),
                 ));
+                // Touched by `addTrack`: a rollback keeps it (RFC 9429, Section 5.7).
+                transceiver.set_created_by_remote_description(false);
 
                 self.trigger_negotiation_needed();
                 return Ok(RTCRtpSenderId(id));
@@ -2347,6 +2366,113 @@ impl RTCPeerConnection {
             transceiver.set_codec_preferences(codec_preferences, &self.media_engine)?;
         }
         Ok(RTCRtpSenderId(self.add_rtp_transceiver(transceiver)))
+    }
+
+    /// Gives the transceiver `id`, which has no sender, one sending `track`.
+    ///
+    /// A transceiver created while applying a remote offer has no sender. W3C `addTrack` may
+    /// choose it (the first reusable transceiver of the track's kind), and from then on it sends:
+    /// its direction gains `send`, as [`add_track`](Self::add_track) does for the transceiver it
+    /// picks itself. A transceiver that got a sender this way survives a rollback of the offer
+    /// that created it (RFC 9429, Section 5.7).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the peer connection is closed, or if `id` is not a transceiver of the
+    /// track's kind that is not stopped and has no sender.
+    ///
+    /// # Specification
+    ///
+    /// See [addTrack](https://www.w3.org/TR/webrtc/#dom-rtcpeerconnection-addtrack)
+    pub fn add_track_to_transceiver(
+        &mut self,
+        id: RTCRtpTransceiverId,
+        track: MediaStreamTrack,
+    ) -> Result<RTCRtpSenderId> {
+        if self.peer_connection_state == RTCPeerConnectionState::Closed {
+            return Err(Error::ErrConnectionClosed);
+        }
+        if id >= self.rtp_transceivers.len()
+            || self.rtp_transceivers[id].stopped()
+            || self.rtp_transceivers[id].kind() != track.kind()
+            || self.rtp_transceivers[id].sender().is_some()
+        {
+            return Err(Error::ErrRTPSenderNotExisted);
+        }
+
+        let send_encodings = self.send_encodings_from_track(&track);
+        let (track, send_encodings, codec_preferences) =
+            self.normalize_sender_track(track, send_encodings)?;
+        let mut sender = RTCRtpSenderInternal::new(track.kind(), track, vec![], send_encodings);
+
+        let transceiver = &mut self.rtp_transceivers[id];
+        if transceiver.get_codec_preferences().is_empty() && !codec_preferences.is_empty() {
+            transceiver.set_codec_preferences(codec_preferences, &self.media_engine)?;
+        }
+        sender.set_codec_preferences(transceiver.get_codec_preferences().to_vec());
+        transceiver.sender_mut().replace(sender);
+        transceiver.set_direction(RTCRtpTransceiverDirection::from_send_recv(
+            true,
+            transceiver.direction().has_recv(),
+        ));
+        // `addTrack` touched it: a rollback of the offer that created it keeps it.
+        transceiver.set_created_by_remote_description(false);
+
+        self.trigger_negotiation_needed();
+        Ok(RTCRtpSenderId(id))
+    }
+
+    /// Makes sure the transceiver `id` has a sender, creating one with a placeholder track when
+    /// it has none (a transceiver a remote offer created).
+    ///
+    /// Every W3C transceiver has a sender. The application may make one that a remote offer
+    /// created send without `addTrack`, by setting its direction to `sendonly` / `sendrecv` and
+    /// giving its sender a track with `replaceTrack`; that sender needs SSRCs in the answer and
+    /// an outbound stream like any other. Unlike [`add_track_to_transceiver`], this changes
+    /// neither the direction nor what a rollback does with the transceiver (W3C: only `addTrack`
+    /// keeps a transceiver a rolled-back remote offer created).
+    ///
+    /// [`add_track_to_transceiver`]: Self::add_track_to_transceiver
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the peer connection is closed or `id` is not a transceiver.
+    pub fn ensure_transceiver_sender(&mut self, id: RTCRtpTransceiverId) -> Result<()> {
+        if self.peer_connection_state == RTCPeerConnectionState::Closed {
+            return Err(Error::ErrConnectionClosed);
+        }
+        if id >= self.rtp_transceivers.len() {
+            return Err(Error::ErrRTPSenderNotExisted);
+        }
+        if self.rtp_transceivers[id].stopped() || self.rtp_transceivers[id].sender().is_some() {
+            return Ok(());
+        }
+
+        let kind = self.rtp_transceivers[id].kind();
+        let encodings = vec![
+            crate::rtp_transceiver::rtp_sender::rtp_encoding_parameters::RTCRtpEncodingParameters {
+                active: true,
+                ..Default::default()
+            },
+        ];
+        let track = MediaStreamTrack::new(
+            math_rand_alpha(16), // MediaStreamId
+            math_rand_alpha(16), // MediaStreamTrackId
+            math_rand_alpha(16), // Label
+            kind,
+            encodings.clone(),
+        );
+        let (track, send_encodings, codec_preferences) =
+            self.normalize_sender_track(track, encodings)?;
+        let mut sender = RTCRtpSenderInternal::new(kind, track, vec![], send_encodings);
+
+        let transceiver = &mut self.rtp_transceivers[id];
+        if transceiver.get_codec_preferences().is_empty() && !codec_preferences.is_empty() {
+            transceiver.set_codec_preferences(codec_preferences, &self.media_engine)?;
+        }
+        sender.set_codec_preferences(transceiver.get_codec_preferences().to_vec());
+        transceiver.sender_mut().replace(sender);
+        Ok(())
     }
 
     /// Removes a track from the peer connection.
