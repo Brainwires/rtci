@@ -839,9 +839,21 @@ impl RTCPeerConnection {
                 {
                     self.greater_mid = numeric_mid;
                 }
-            } else if !transceiver.stopped() {
+            } else if transceiver.stopped() {
                 // A stopped transceiver with no mid gets none: it has no m= section (RFC 9429,
                 // Section 5.2.2), and a mid would make it look associated.
+            } else if let Some(generate) = self.setting_engine.mid_generator.clone() {
+                // `SettingEngineBuilder::with_mid_generator`: the generator gets the greatest
+                // numeric mid so far; each call moves it on, so two new transceivers in one
+                // offer don't get the same argument.
+                let mid = generate(self.greater_mid);
+                if let Ok(numeric_mid) = mid.parse::<isize>() {
+                    self.greater_mid = self.greater_mid.max(numeric_mid);
+                } else {
+                    self.greater_mid = self.greater_mid.saturating_add(1);
+                }
+                transceiver.set_mid(mid)?;
+            } else {
                 // A remote description may carry any numeric mid, `isize::MAX` included.
                 self.greater_mid = self.greater_mid.checked_add(1).ok_or_else(|| {
                     Error::Other("no numeric mid is left above the remote description's".into())
@@ -3968,5 +3980,26 @@ a=rtcp-mux\r\n";
             .unwrap();
         let answer = answerer.create_answer(None).unwrap();
         assert!(answer.sdp.contains("a=ice-options:trickle\r\n"));
+    }
+
+    /// `SettingEngineBuilder::with_mid_generator` was stored and never read.
+    #[test]
+    fn mid_generator_names_new_transceivers() {
+        let mut me = MediaEngine::default();
+        me.register_default_codecs().unwrap();
+        let setting_engine = SettingEngineBuilder::new()
+            .with_mid_generator(|max_mid| format!("custom_{}", max_mid + 1))
+            .build();
+        let mut pc = RTCPeerConnectionBuilder::new()
+            .with_media_engine(me)
+            .with_setting_engine(setting_engine)
+            .build(Instant::now())
+            .unwrap();
+        for kind in [RtpCodecKind::Audio, RtpCodecKind::Video] {
+            pc.add_transceiver_from_kind(kind, None).unwrap();
+        }
+        let offer = pc.create_offer(None).unwrap();
+        assert!(offer.sdp.contains("a=mid:custom_0\r\n"), "{}", offer.sdp);
+        assert!(offer.sdp.contains("a=mid:custom_1\r\n"), "{}", offer.sdp);
     }
 }

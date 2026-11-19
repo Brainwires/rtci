@@ -10,6 +10,7 @@
 #[cfg(test)]
 mod ogg_reader_test;
 
+use std::collections::VecDeque;
 use std::io::{Cursor, Read};
 
 use byteorder::{LittleEndian, ReadBytesExt};
@@ -48,12 +49,21 @@ pub enum OggHeaderType {
     OpusTags,
 }
 
-/// OggReader is used to read Ogg files and return page payloads
+/// Page header flag bit: the page's first packet continues the previous page's last one.
+pub const PAGE_HEADER_FLAG_CONTINUED_PACKET: u8 = 0x01;
+/// The longest packet [`OggReader::next_packet`] puts together across pages.
+const MAX_PACKET_SIZE: usize = 1 << 20;
+
+/// OggReader is used to read Ogg files and return page payloads, or the packets they carry
 pub struct OggReader<R: Read> {
     reader: R,
     bytes_read: usize,
     checksum_table: [u32; 256],
     do_checksum: bool,
+    /// Packets of the last page not handed out yet (`next_packet`).
+    packets: VecDeque<(BytesMut, OggPageHeader)>,
+    /// The start of a packet that continues on the next page.
+    partial: Option<BytesMut>,
 }
 
 /// OggHeader is the metadata from the first two pages
@@ -116,6 +126,8 @@ pub struct OggPageHeader {
     version: u8,
     index: u32,
     segments_count: u8,
+    /// The lacing values: where the payload's packets end (RFC 3533 section 6).
+    segment_table: Vec<u8>,
 }
 
 impl OggPageHeader {
@@ -148,6 +160,36 @@ impl OggPageHeader {
     /// Check if this is the end of a stream
     pub fn is_end_of_stream(&self) -> bool {
         self.header_type == PAGE_HEADER_TYPE_END_OF_STREAM
+    }
+
+    /// The page's segment table (its lacing values).
+    pub fn segment_table(&self) -> &[u8] {
+        &self.segment_table
+    }
+
+    /// Whether the page's first packet continues the previous page's last one.
+    pub fn is_continued_packet(&self) -> bool {
+        self.header_type & PAGE_HEADER_FLAG_CONTINUED_PACKET != 0
+    }
+
+    /// Splits a page's payload into its packets by the segment table (RFC 3533 section 6: a
+    /// packet ends with a lacing value below 255). Each comes with whether it ends on this
+    /// page; only the last can continue on the next one.
+    pub fn packets<'a>(&self, payload: &'a [u8]) -> Vec<(&'a [u8], bool)> {
+        let mut packets = vec![];
+        let mut start = 0usize;
+        let mut end = 0usize;
+        for &lacing in &self.segment_table {
+            end = (end + lacing as usize).min(payload.len());
+            if lacing < 255 {
+                packets.push((&payload[start..end], true));
+                start = end;
+            }
+        }
+        if self.segment_table.last() == Some(&255) {
+            packets.push((&payload[start..end], false));
+        }
+        packets
     }
 }
 
@@ -302,6 +344,8 @@ impl<R: Read> OggReader<R> {
             bytes_read: 0,
             checksum_table: generate_checksum_table(),
             do_checksum,
+            packets: VecDeque::new(),
+            partial: None,
         };
 
         let header = r.read_headers()?;
@@ -321,6 +365,8 @@ impl<R: Read> OggReader<R> {
             bytes_read: 0,
             checksum_table: generate_checksum_table(),
             do_checksum,
+            packets: VecDeque::new(),
+            partial: None,
         }
     }
 
@@ -404,9 +450,53 @@ impl<R: Read> OggReader<R> {
             serial,
             index,
             segments_count,
+            segment_table: size_buffer,
         };
 
         Ok((payload, page_header))
+    }
+
+    /// Reads the next packet (for Opus, one RTP payload), with the header of the page it
+    /// ends on. A page may hold several packets and a packet may span pages; a packet whose
+    /// start was lost (a continuation page with nothing before it) is skipped, as is an empty
+    /// one.
+    ///
+    /// # Errors
+    ///
+    /// As [`parse_next_page`](Self::parse_next_page): an I/O error, the end of the stream, or
+    /// a bad page.
+    pub fn next_packet(&mut self) -> Result<(BytesMut, OggPageHeader)> {
+        loop {
+            if let Some(packet) = self.packets.pop_front() {
+                return Ok(packet);
+            }
+            let (payload, header) = self.parse_next_page()?;
+            let continued = header.is_continued_packet();
+            let mut partial = self.partial.take();
+            if !continued {
+                partial = None;
+            }
+            for (i, (data, complete)) in header.packets(&payload).into_iter().enumerate() {
+                let mut packet = match (i, partial.take()) {
+                    (0, Some(mut start)) if continued => {
+                        start.extend_from_slice(data);
+                        start
+                    }
+                    (0, None) if continued => continue, // its start was lost
+                    _ => BytesMut::from(data),
+                };
+                if packet.len() > MAX_PACKET_SIZE {
+                    packet.clear();
+                }
+                if !complete {
+                    if !packet.is_empty() {
+                        self.partial = Some(packet);
+                    }
+                } else if !packet.is_empty() {
+                    self.packets.push_back((packet, header.clone()));
+                }
+            }
+        }
     }
 
     /// reset_reader resets the internal stream of OggReader. This is useful
