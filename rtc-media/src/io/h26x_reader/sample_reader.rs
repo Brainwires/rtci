@@ -20,6 +20,8 @@ pub struct H26xSampleReader<R: Read> {
     reader: H26xReader<R>,
     is_hevc: bool,
     pending_hevc_nals: Vec<BytesMut>,
+    /// The H.264 NAL read ahead to tell whether the current slice ends its picture.
+    lookahead: Option<H26xNAL>,
 }
 
 impl<R: Read> H26xSampleReader<R> {
@@ -31,6 +33,7 @@ impl<R: Read> H26xSampleReader<R> {
             reader: H26xReader::new(reader, capacity, is_hevc),
             is_hevc,
             pending_hevc_nals: vec![],
+            lookahead: None,
         }
     }
 
@@ -41,7 +44,11 @@ impl<R: Read> H26xSampleReader<R> {
     /// Fails on an I/O error, or at end of stream.
     pub fn next_sample(&mut self) -> Result<H26xSample> {
         loop {
-            let nal = match self.reader.next_nal() {
+            let next = match self.lookahead.take() {
+                Some(nal) => Ok(nal),
+                None => self.reader.next_nal(),
+            };
+            let nal = match next {
                 Ok(nal) => nal,
                 Err(Error::ErrIoEOF) if self.is_hevc && !self.pending_hevc_nals.is_empty() => {
                     let data = build_hevc_access_unit(&mut self.pending_hevc_nals, None);
@@ -50,7 +57,20 @@ impl<R: Read> H26xSampleReader<R> {
                 Err(err) => return Err(err),
             };
 
-            let timed = !should_skip_timing(&nal);
+            let mut timed = !should_skip_timing(&nal);
+            // A picture coded as several slices is several VCL NAL units; only its last slice
+            // completes the frame. The next NAL says: a slice that does not start at macroblock
+            // 0 continues this picture (ITU-T H.264 7.4.3, first_mb_in_slice).
+            if timed && !self.is_hevc && is_h264_slice(&nal) {
+                match self.reader.next_nal() {
+                    Ok(next) => {
+                        timed = !continues_h264_picture(&next);
+                        self.lookahead = Some(next);
+                    }
+                    Err(Error::ErrIoEOF) => {}
+                    Err(err) => return Err(err),
+                }
+            }
             if self.is_hevc && should_buffer_with_next_hevc_vcl(&nal) {
                 self.pending_hevc_nals.push(nal.data().clone());
                 continue;
@@ -90,6 +110,23 @@ fn should_skip_timing(nal: &H26xNAL) -> bool {
             )
         }
     }
+}
+
+fn is_h264_slice(nal: &H26xNAL) -> bool {
+    matches!(
+        nal,
+        H26xNAL::H264(nal)
+            if matches!(
+                nal.unit_type,
+                H264NalUnitType::CodedSliceNonIdr | H264NalUnitType::CodedSliceIdr
+            )
+    )
+}
+
+/// A slice of the picture already started: `first_mb_in_slice`, the first `ue(v)` after the
+/// one-byte header, is not 0 (a `ue(v)` is 0 exactly when its first bit is 1).
+fn continues_h264_picture(nal: &H26xNAL) -> bool {
+    is_h264_slice(nal) && nal.data().get(1).is_some_and(|b| b & 0x80 == 0)
 }
 
 fn should_buffer_with_next_hevc_vcl(nal: &H26xNAL) -> bool {
@@ -184,6 +221,27 @@ mod tests {
         assert!(idr.timed);
         assert_eq!(idr.data, Bytes::from_static(&[0x65, 0x88, 0x84, 0x21]));
 
+        Ok(())
+    }
+
+    /// x264 with sliced threads (e.g. `tune=zerolatency`) codes each picture as several slices.
+    /// Each was a timed sample, so a sender advanced the timestamp mid-picture and receivers
+    /// assembled only key frames (found by the browser interop tests in scripts/test-env).
+    #[test]
+    fn h264_slices_of_one_picture_advance_time_once() -> Result<()> {
+        let stream = vec![
+            0x00, 0x00, 0x00, 0x01, 0x65, 0x88, 0x84, // IDR, first_mb_in_slice 0
+            0x00, 0x00, 0x00, 0x01, 0x65, 0x40,
+            0x84, // IDR, first_mb_in_slice 1: same picture
+            0x00, 0x00, 0x00, 0x01, 0x41, 0x9a, 0x02, // P, first_mb_in_slice 0: next picture
+            0x00, 0x00, 0x00, 0x01, 0x41, 0x20, 0x02, // P, first_mb_in_slice 3: same picture
+        ];
+        let mut reader = H26xSampleReader::new(Cursor::new(stream), 1024, false);
+        let timed: Vec<bool> = (0..4)
+            .map(|_| reader.next_sample().map(|s| s.timed))
+            .collect::<Result<_>>()?;
+        assert_eq!(timed, vec![false, true, false, true]);
+        assert!(matches!(reader.next_sample(), Err(Error::ErrIoEOF)));
         Ok(())
     }
 }
