@@ -16,6 +16,7 @@ use anyhow::{Result, bail};
 use bytes::BytesMut;
 use rtc::data_channel::RTCDataChannelId;
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
+use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtc::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
 use rtc::peer_connection::message::RTCMessage;
 use rtc::peer_connection::state::RTCPeerConnectionState;
@@ -42,9 +43,14 @@ struct Peer {
 }
 
 impl Peer {
-    fn new(addr: &str) -> Result<Self> {
+    fn new(addr: &str, discard_local_candidates: bool) -> Result<Self> {
         let pc = RTCPeerConnectionBuilder::new()
             .with_configuration(RTCConfigurationBuilder::new().build())
+            .with_setting_engine(
+                SettingEngineBuilder::new()
+                    .with_discard_local_candidates_during_ice_restart(discard_local_candidates)
+                    .build(),
+            )
             .build(Instant::now())?;
         Ok(Self {
             pc,
@@ -200,8 +206,22 @@ impl World {
 
 #[test]
 fn data_flows_at_every_step_of_an_ice_restart() -> Result<()> {
+    restart_step_by_step(false)
+}
+
+/// The same when a restart discards the local candidates (a new gathering phase on the
+/// sockets already bound, as an application that re-announces its candidates does).
+#[test]
+fn data_flows_at_every_step_of_an_ice_restart_that_regathers() -> Result<()> {
+    restart_step_by_step(true)
+}
+
+fn restart_step_by_step(discard_local_candidates: bool) -> Result<()> {
     let mut world = World {
-        peers: vec![Peer::new("10.0.0.1:5000")?, Peer::new("10.0.0.2:5000")?],
+        peers: vec![
+            Peer::new("10.0.0.1:5000", discard_local_candidates)?,
+            Peer::new("10.0.0.2:5000", discard_local_candidates)?,
+        ],
         now: Instant::now(),
         dropped: 0,
     };

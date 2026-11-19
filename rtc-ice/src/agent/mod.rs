@@ -847,13 +847,10 @@ impl Agent {
         self.pending_binding_requests = vec![];
 
         // Data keeps the path it has until the new generation selects a pair (RFC 8445
-        // Section 9). Only while the local candidates, and so their sockets, are kept: a
-        // restart that discards them is one that rebinds, and the old path is gone with them.
-        let previous_media_path = if keep_local_candidates {
-            self.media_path()
-        } else {
-            None
-        };
+        // Section 9), whether or not the local candidates are kept: discarding them forgets
+        // what was signalled, not the socket the path's packets leave from. An application
+        // that closed that socket (a rebind) drops what is written to it, as before.
+        let previous_media_path = self.media_path();
 
         self.candidate_pairs = vec![];
 
