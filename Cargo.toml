@@ -202,6 +202,11 @@ webrtc = "0.17.3"
 libc = "0.2"
 
 [[example]]
+name = "interop-peer"
+path = "examples/interop-peer/interop-peer.rs"
+bench = false
+
+[[example]]
 name = "broadcast"
 path = "examples/broadcast/broadcast.rs"
 bench = false

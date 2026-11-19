@@ -1,0 +1,191 @@
+// In-page side of the interop tests: an RTCPeerConnection signalling with
+// examples/interop-peer over a WebSocket. The browser offers; the Rust peer answers (and
+// offers only when asked with "request-offer").
+(() => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  async function until(fn, ms, what) {
+    const end = Date.now() + ms;
+    while (Date.now() < end) {
+      const v = await fn();
+      if (v) return v;
+      await sleep(100);
+    }
+    throw new Error(`timed out waiting for ${what}`);
+  }
+
+  function canvasStream() {
+    const c = document.createElement("canvas");
+    c.width = 320;
+    c.height = 240;
+    document.body.appendChild(c);
+    const g = c.getContext("2d");
+    let n = 0;
+    setInterval(() => {
+      n++;
+      g.fillStyle = `hsl(${(n * 7) % 360} 80% 50%)`;
+      g.fillRect(0, 0, 320, 240);
+      g.fillStyle = "#fff";
+      g.font = "40px sans-serif";
+      g.fillText(String(n), 20 + (n % 200), 120);
+    }, 33);
+    return c.captureStream(30);
+  }
+
+  function audioStream() {
+    const ctx = new AudioContext();
+    const osc = ctx.createOscillator();
+    osc.frequency.value = 440;
+    const dst = ctx.createMediaStreamDestination();
+    osc.connect(dst);
+    osc.start();
+    ctx.resume();
+    return dst.stream;
+  }
+
+  function hasCodec(kind, mime, dir = "sender") {
+    const caps = (dir === "sender" ? RTCRtpSender : RTCRtpReceiver).getCapabilities(kind);
+    return !!caps && caps.codecs.some((c) => c.mimeType.toLowerCase() === mime.toLowerCase());
+  }
+
+  function prefer(transceiver, kind, mime) {
+    const caps = RTCRtpReceiver.getCapabilities(kind).codecs;
+    const first = caps.filter((c) => c.mimeType.toLowerCase() === mime.toLowerCase());
+    if (!first.length) throw new Error(`no ${mime}`);
+    if (transceiver.setCodecPreferences) transceiver.setCodecPreferences(first);
+  }
+
+  async function open(url, scenario, opts = {}) {
+    const pc = new RTCPeerConnection({ encodedInsertableStreams: !!opts.insertableStreams });
+    const ws = new WebSocket(url);
+    await new Promise((res, rej) => {
+      ws.onopen = res;
+      ws.onerror = () => rej(new Error(`websocket ${url} failed`));
+    });
+    const s = { pc, ws, reports: [], errors: [], remoteOffers: 0, makingOffer: false, sentScenario: false };
+    const send = (m) => ws.send(JSON.stringify(m));
+    pc.onicecandidate = (e) => send({ type: "candidate", candidate: e.candidate ? e.candidate.toJSON() : null });
+    ws.onmessage = async (ev) => {
+      const m = JSON.parse(ev.data);
+      try {
+        if (m.type === "answer") await pc.setRemoteDescription({ type: "answer", sdp: m.sdp });
+        else if (m.type === "offer") {
+          s.remoteOffers++;
+          await pc.setRemoteDescription({ type: "offer", sdp: m.sdp });
+          await pc.setLocalDescription();
+          send({ type: "answer", sdp: pc.localDescription.sdp });
+        } else if (m.type === "report") s.reports.push(m);
+        else if (m.type === "error") s.errors.push(m.error);
+      } catch (e) {
+        s.errors.push(String(e));
+      }
+    };
+    s.negotiate = async () => {
+      await pc.setLocalDescription(await pc.createOffer());
+      const msg = { type: "offer", sdp: pc.localDescription.sdp };
+      if (!s.sentScenario) {
+        msg.scenario = scenario;
+        s.sentScenario = true;
+      }
+      send(msg);
+      await until(() => pc.signalingState === "stable", 15000, "the answer");
+    };
+    s.send = send;
+    s.connected = () =>
+      until(() => pc.connectionState === "connected" || (pc.connectionState === "failed" && "failed"), 30000,
+        "connection").then((v) => {
+        if (v === "failed") throw new Error("connection failed");
+      });
+    s.report = async () => {
+      const n = s.reports.length;
+      send({ type: "report" });
+      await until(() => s.reports.length > n, 5000, "report");
+      return s.reports[s.reports.length - 1];
+    };
+    s.close = () => {
+      pc.close();
+      ws.close();
+    };
+    return s;
+  }
+
+  // Sends `count` messages on `dc` and waits for the echo; returns them in arrival order.
+  async function echo(dc, count, size = 0) {
+    const got = [];
+    dc.binaryType = "arraybuffer";
+    dc.onmessage = (e) => got.push(typeof e.data === "string" ? e.data : new Uint8Array(e.data));
+    if (dc.readyState !== "open") await new Promise((r) => (dc.onopen = r));
+    for (let i = 0; i < count; i++) {
+      if (size) {
+        const b = new Uint8Array(size);
+        b.fill(i % 251);
+        new DataView(b.buffer).setUint32(0, i);
+        dc.send(b);
+      } else dc.send(`msg-${i}`);
+      while (dc.bufferedAmount > 1 << 20) await sleep(5);
+    }
+    return { got, wait: (n, ms) => until(() => got.length >= n, ms, `${n} echoed messages (have ${got.length})`) };
+  }
+
+  async function inbound(pc, kind) {
+    const stats = await pc.getStats();
+    let rtp = null;
+    const codecs = {};
+    stats.forEach((r) => {
+      if (r.type === "inbound-rtp" && r.kind === kind && (!rtp || (r.packetsReceived || 0) > (rtp.packetsReceived || 0))) rtp = r;
+      if (r.type === "codec") codecs[r.id] = r.mimeType;
+    });
+    return rtp ? { ...rtp, mimeType: codecs[rtp.codecId] } : null;
+  }
+
+  async function transport(pc) {
+    const stats = await pc.getStats();
+    let t = null;
+    stats.forEach((r) => {
+      if (r.type === "transport") t = r;
+    });
+    return t;
+  }
+
+  function sink(stream) {
+    const v = document.createElement(stream.getVideoTracks().length ? "video" : "audio");
+    v.muted = true;
+    v.autoplay = true;
+    v.playsInline = true;
+    v.srcObject = stream;
+    document.body.appendChild(v);
+    v.play().catch(() => {});
+  }
+
+  // XOR every encoded frame's payload past its first bytes (the "SFrame-like" end-to-end
+  // transform): the Rust peer forwards bytes it cannot decode, the receiving transform undoes it.
+  function xorTransform() {
+    return new TransformStream({
+      transform(frame, ctl) {
+        const d = new Uint8Array(frame.data);
+        for (let i = 10; i < d.length; i++) d[i] ^= 0x5a;
+        frame.data = d.buffer;
+        ctl.enqueue(frame);
+      },
+    });
+  }
+
+  function attachTransform(senderOrReceiver) {
+    if (senderOrReceiver.createEncodedStreams) {
+      const { readable, writable } = senderOrReceiver.createEncodedStreams();
+      readable.pipeThrough(xorTransform()).pipeTo(writable);
+      return "createEncodedStreams";
+    }
+    if (window.RTCRtpScriptTransform) {
+      const src = `onrtctransform = (e) => { const t = e.transformer; t.readable.pipeThrough(new TransformStream({
+        transform(frame, ctl) { const d = new Uint8Array(frame.data); for (let i = 10; i < d.length; i++) d[i] ^= 0x5a;
+        frame.data = d.buffer; ctl.enqueue(frame); } })).pipeTo(t.writable); };`;
+      const w = new Worker(URL.createObjectURL(new Blob([src], { type: "text/javascript" })));
+      senderOrReceiver.transform = new RTCRtpScriptTransform(w, {});
+      return "RTCRtpScriptTransform";
+    }
+    return null;
+  }
+
+  window.Interop = { open, echo, until, sleep, canvasStream, audioStream, hasCodec, prefer, inbound, transport, sink, attachTransform };
+})();
