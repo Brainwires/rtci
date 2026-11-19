@@ -121,8 +121,10 @@ impl<'a> DtlsHandler<'a> {
         };
         self.stats.transport.srtp_cipher = srtp_cipher.to_string();
 
-        // Update TLS version
-        self.stats.transport.tls_version = "DTLS 1.2".to_string();
+        // webrtc-stats `tlsVersion`: the negotiated version as the uppercase hex of its two
+        // ServerHello bytes; the DTLS stack speaks DTLS 1.2 only (RFC 6347 section 4.1,
+        // `{254, 253}`).
+        self.stats.transport.tls_version = "FEFD".to_string();
 
         // Update DTLS cipher from the negotiated cipher suite
         if let Some(cipher) = dtls_cipher {
