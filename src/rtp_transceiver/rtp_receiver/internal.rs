@@ -8,7 +8,7 @@ use crate::rtp_transceiver::rtp_receiver::rtp_contributing_source::{
 use crate::rtp_transceiver::rtp_sender::rtp_capabilities::RTCRtpCapabilities;
 use crate::rtp_transceiver::rtp_sender::rtp_codec::{
     CodecMatch, RtpCodecKind, codec_parameters_fuzzy_search, find_fec_payload_type,
-    find_rtx_payload_type, is_repair_codec, parse_rtx_apt,
+    find_rtx_payload_type, is_repair_codec, parse_rtx_apt, repair_family,
 };
 use crate::rtp_transceiver::rtp_sender::rtp_codec_parameters::RTCRtpCodecParameters;
 use crate::rtp_transceiver::rtp_sender::rtp_coding_parameters::RTCRtpCodingParameters;
@@ -142,20 +142,38 @@ impl RTCRtpReceiverInternal {
         }
         let mut filtered_codecs = vec![];
         for codec in codecs {
+            // A retransmission format without an `apt` (as getCapabilities() lists RTX) names
+            // RTX for every primary; the loop below adds one per surviving primary.
+            if is_repair_codec(&codec.rtp_codec)
+                && repair_family(&codec.rtp_codec) == "rtx"
+                && parse_rtx_apt(&codec.rtp_codec.sdp_fmtp_line).is_none()
+            {
+                continue;
+            }
             let (c, match_type) =
                 codec_parameters_fuzzy_search(&codec.rtp_codec, &media_engine_codecs);
-            if match_type != CodecMatch::None {
+            if match_type != CodecMatch::None
+                && !filtered_codecs
+                    .iter()
+                    .any(|f: &RTCRtpCodecParameters| f.payload_type == c.payload_type)
+            {
                 filtered_codecs.push(c);
             }
         }
 
-        // Repair codecs survive the filter. They are not alternative media formats to choose
-        // between — they accompany whichever primary was chosen — so W3C `setCodecPreferences`
-        // leaves them in place, and dropping them here would produce an offer no peer can act on:
-        // an `a=ssrc-group:FEC-FR` naming a repair SSRC with no `a=rtpmap:<pt> flexfec-03/90000`
-        // to give it a format, and likewise `a=ssrc-group:FID` with no `rtx` codec.
+        // A repair format (RTX, RED, FEC) is kept when the preferences list its kind: W3C
+        // setCodecPreferences() lets an application remove RTX or FEC by leaving them out
+        // (webrtc-pc 5.4 "setCodecPreferences", and the RTX entry, which has no `apt`, stands
+        // for all primaries). A sender's `a=ssrc-group` lines for a repair kind left out are
+        // not written either (add_sender_sdp).
+        let listed: Vec<&'static str> = codecs
+            .iter()
+            .filter(|c| is_repair_codec(&c.rtp_codec))
+            .map(|c| repair_family(&c.rtp_codec))
+            .collect();
         for codec in &media_engine_codecs {
             if !is_repair_codec(&codec.rtp_codec)
+                || !listed.contains(&repair_family(&codec.rtp_codec))
                 || filtered_codecs
                     .iter()
                     .any(|filtered| filtered.payload_type == codec.payload_type)

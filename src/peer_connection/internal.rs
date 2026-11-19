@@ -8,7 +8,7 @@ use crate::peer_connection::handler::srtp::SrtpHandlerContext;
 use crate::peer_connection::sdp::{
     MediaSection, PopulateSdpParams, add_candidates_to_media_descriptions, get_by_mid,
     get_peer_direction, get_rids, have_data_channel, is_ext_map_allow_mixed_set,
-    rtp_extensions_from_media_description, track_details_from_sdp,
+    rtp_extensions_from_media_description, track_details_from_sdp, unknown_media_name,
 };
 use crate::peer_connection::state::signaling_state::check_next_signaling_state;
 use crate::peer_connection::transport::dtls::state::RTCDtlsTransportState;
@@ -19,6 +19,7 @@ use crate::peer_connection::transport::ice::candidate_type::RTCIceCandidateType;
 use crate::peer_connection::transport::{RTCTransportId, TransportKind};
 use crate::rtp_transceiver::rtp_receiver::internal::RTCRtpReceiverInternal;
 use crate::rtp_transceiver::rtp_sender::RTCRtpCodec;
+use crate::rtp_transceiver::rtp_sender::rtp_codec::{is_repair_codec, parse_rtx_apt};
 use crate::rtp_transceiver::rtp_sender::rtp_coding_parameters::{
     RTCRtpCodingParameters, RTCRtpFecParameters, RTCRtpRtxParameters,
 };
@@ -396,6 +397,7 @@ impl RTCPeerConnection {
                             rejected: true,
                             rejected_kind: media.media_name.media.clone(),
                             transceiver_index: usize::MAX,
+                            rejected_name: unknown_media_name(media),
                             ..Default::default()
                         });
                         continue;
@@ -414,6 +416,19 @@ impl RTCPeerConnection {
 
                     let kind = RtpCodecKind::from(media.media_name.media.as_str());
                     if kind == RtpCodecKind::Unspecified {
+                        // A media type this endpoint doesn't know (RFC 8866
+                        // lets <media> be any token): rejected with port 0,
+                        // its media type, protocol and formats kept, so the
+                        // answer lines up with the offer and later offers
+                        // carry it (RFC 9429 5.3.1, 5.2.2).
+                        media_sections.push(MediaSection {
+                            mid: mid_value.to_owned(),
+                            rejected: true,
+                            rejected_kind: media.media_name.media.clone(),
+                            transceiver_index: usize::MAX,
+                            rejected_name: unknown_media_name(media),
+                            ..Default::default()
+                        });
                         continue;
                     }
 
@@ -1780,6 +1795,29 @@ impl RTCPeerConnection {
                 })
             {
                 codec_preferences.push(codec);
+            }
+        }
+
+        // The encodings name media codecs; the repair formats that accompany them (RTX for a
+        // named primary, FEC, RED) stay offered, so they are listed too (a preference list
+        // keeps only the repair kinds it lists, RTCRtpReceiverInternal::get_codecs).
+        if !codec_preferences.is_empty() {
+            for codec in &media_engine_codecs {
+                if !is_repair_codec(&codec.rtp_codec)
+                    || codec_preferences
+                        .iter()
+                        .any(|preference| preference.payload_type == codec.payload_type)
+                {
+                    continue;
+                }
+                if let Some(apt) = parse_rtx_apt(&codec.rtp_codec.sdp_fmtp_line)
+                    && !codec_preferences
+                        .iter()
+                        .any(|preference| preference.payload_type == apt)
+                {
+                    continue;
+                }
+                codec_preferences.push(codec.clone());
             }
         }
 
