@@ -811,6 +811,13 @@ impl SettingEngineBuilder {
     /// - With `Srflx` type, both private and public IPs are available
     /// - Cannot use STUN servers when using `Srflx` type
     /// - Cannot use with mDNS when using `Host` type
+    ///
+    /// # Not read by this engine
+    ///
+    /// The sans-I/O engine gathers no candidates: the application adds its own with
+    /// `add_local_candidate`, so it advertises a public address by adding that candidate
+    /// (a host candidate on the public IP, or a server reflexive one). This value is stored
+    /// for API compatibility with pion and never read.
     pub fn with_nat_1to1_ips(
         mut self,
         ips: Vec<String>,
@@ -1091,6 +1098,11 @@ impl SettingEngineBuilder {
     ///
     /// This is non-standard behavior per [RFC 8445 §5.1.1.1](https://datatracker.ietf.org/doc/html/rfc8445#section-5.1.1.1).
     /// Use with caution.
+    ///
+    /// # Not read by this engine
+    ///
+    /// The sans-I/O engine gathers no candidates (the application adds them), so this value is
+    /// stored for API compatibility with pion and never read.
     pub fn with_include_loopback_candidate(mut self, allow_loopback: bool) -> Self {
         self.0.candidates.include_loopback_candidate = allow_loopback;
         self
@@ -1210,6 +1222,12 @@ impl SettingEngineBuilder {
     ///
     /// When disabled, ensure you don't share the same MediaEngine between
     /// multiple PeerConnections unless you specifically intend to do so.
+    ///
+    /// # Not read by this engine
+    ///
+    /// A PeerConnection takes its `MediaEngine` by value from the builder, so it always has
+    /// its own; there is no shared engine to copy or not. This value is stored for API
+    /// compatibility with pion and never read.
     pub fn with_disable_media_engine_copy(mut self, is_disabled: bool) -> Self {
         self.0.disable_media_engine_copy = is_disabled;
         self
@@ -1242,6 +1260,13 @@ impl SettingEngineBuilder {
     /// # Deprecation Note
     ///
     /// This setting is targeted for removal in a future release (4.2.0 or later).
+    ///
+    /// # Not read by this engine
+    ///
+    /// Each media section already negotiates its own codecs, and this switch is not wired:
+    /// forcing one codec set needs the FlexFEC payload type dedupe that
+    /// `tests/answer_to_renumbering_peer_is_well_formed.rs` describes. The value is stored
+    /// and never read.
     pub fn with_disable_media_engine_multiple_codecs(mut self, is_disabled: bool) -> Self {
         self.0.disable_media_engine_multiple_codecs = is_disabled;
         self
@@ -1274,6 +1299,12 @@ impl SettingEngineBuilder {
     /// # Ok(())
     /// # }
     /// ```
+    ///
+    /// # Not read by this engine
+    ///
+    /// The sans-I/O engine reads no sockets: the application receives each datagram into its
+    /// own buffer and hands it over whole, so there is no receive buffer to size. This value
+    /// is stored for API compatibility with pion and never read.
     pub fn with_receive_mtu(mut self, receive_mtu: usize) -> Self {
         self.0.receive_mtu = receive_mtu;
         self
@@ -1312,6 +1343,10 @@ impl SettingEngineBuilder {
     /// # See Also
     ///
     /// - [RFC 8843 - MID](https://datatracker.ietf.org/doc/html/rfc8843)
+    ///
+    /// `create_offer` calls it for each transceiver that has no mid yet, then moves the
+    /// argument on (to the generated mid when it is a greater number, else by one), so two
+    /// new transceivers of one offer get different arguments.
     pub fn with_mid_generator(
         mut self,
         f: impl Fn(isize) -> String + Send + Sync + 'static,
