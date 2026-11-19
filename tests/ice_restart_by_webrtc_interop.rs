@@ -223,9 +223,19 @@ async fn test_ice_restart_interop() -> Result<()> {
 
         // Poll writes
         while let Some(msg) = rtc_pc.poll_write() {
-            rtc_socket
+            // A datagram the socket cannot send is a lost one (a connectivity check from
+            // this loopback socket to a non-loopback candidate of the other peer is
+            // EADDRNOTAVAIL on macOS), not a failed test: ICE moves on to a pair that works.
+            if let Err(err) = rtc_socket
                 .send_to(&msg.message, msg.transport.peer_addr)
-                .await?;
+                .await
+            {
+                log::debug!(
+                    "RTC socket write error to {}: {}",
+                    msg.transport.peer_addr,
+                    err
+                );
+            }
         }
 
         // Poll events
@@ -323,9 +333,19 @@ async fn test_ice_restart_interop() -> Result<()> {
         }
 
         while let Some(msg) = rtc_pc.poll_write() {
-            rtc_socket
+            // A datagram the socket cannot send is a lost one (a connectivity check from
+            // this loopback socket to a non-loopback candidate of the other peer is
+            // EADDRNOTAVAIL on macOS), not a failed test: ICE moves on to a pair that works.
+            if let Err(err) = rtc_socket
                 .send_to(&msg.message, msg.transport.peer_addr)
-                .await?;
+                .await
+            {
+                log::debug!(
+                    "RTC socket write error to {}: {}",
+                    msg.transport.peer_addr,
+                    err
+                );
+            }
         }
 
         while let Some(event) = rtc_pc.poll_event() {
@@ -375,9 +395,19 @@ async fn test_ice_restart_interop() -> Result<()> {
     // Process messages - give more time for message to arrive
     for i in 0..100 {
         while let Some(msg) = rtc_pc.poll_write() {
-            rtc_socket
+            // A datagram the socket cannot send is a lost one (a connectivity check from
+            // this loopback socket to a non-loopback candidate of the other peer is
+            // EADDRNOTAVAIL on macOS), not a failed test: ICE moves on to a pair that works.
+            if let Err(err) = rtc_socket
                 .send_to(&msg.message, msg.transport.peer_addr)
-                .await?;
+                .await
+            {
+                log::debug!(
+                    "RTC socket write error to {}: {}",
+                    msg.transport.peer_addr,
+                    err
+                );
+            }
         }
 
         while let Some(_event) = rtc_pc.poll_event() {}
@@ -432,9 +462,19 @@ async fn test_ice_restart_interop() -> Result<()> {
     // Process echo
     for _ in 0..50 {
         while let Some(msg) = rtc_pc.poll_write() {
-            rtc_socket
+            // A datagram the socket cannot send is a lost one (a connectivity check from
+            // this loopback socket to a non-loopback candidate of the other peer is
+            // EADDRNOTAVAIL on macOS), not a failed test: ICE moves on to a pair that works.
+            if let Err(err) = rtc_socket
                 .send_to(&msg.message, msg.transport.peer_addr)
-                .await?;
+                .await
+            {
+                log::debug!(
+                    "RTC socket write error to {}: {}",
+                    msg.transport.peer_addr,
+                    err
+                );
+            }
         }
 
         let messages = webrtc_received_messages.lock().await;
@@ -519,9 +559,19 @@ async fn test_ice_restart_interop() -> Result<()> {
 
         // Poll writes
         while let Some(msg) = rtc_pc.poll_write() {
-            rtc_socket
+            // A datagram the socket cannot send is a lost one (a connectivity check from
+            // this loopback socket to a non-loopback candidate of the other peer is
+            // EADDRNOTAVAIL on macOS), not a failed test: ICE moves on to a pair that works.
+            if let Err(err) = rtc_socket
                 .send_to(&msg.message, msg.transport.peer_addr)
-                .await?;
+                .await
+            {
+                log::debug!(
+                    "RTC socket write error to {}: {}",
+                    msg.transport.peer_addr,
+                    err
+                );
+            }
         }
 
         // Poll events
@@ -609,9 +659,19 @@ async fn test_ice_restart_interop() -> Result<()> {
     // Process messages - give more time for message to arrive
     for i in 0..100 {
         while let Some(msg) = rtc_pc.poll_write() {
-            rtc_socket
+            // A datagram the socket cannot send is a lost one (a connectivity check from
+            // this loopback socket to a non-loopback candidate of the other peer is
+            // EADDRNOTAVAIL on macOS), not a failed test: ICE moves on to a pair that works.
+            if let Err(err) = rtc_socket
                 .send_to(&msg.message, msg.transport.peer_addr)
-                .await?;
+                .await
+            {
+                log::debug!(
+                    "RTC socket write error to {}: {}",
+                    msg.transport.peer_addr,
+                    err
+                );
+            }
         }
 
         while let Some(_event) = rtc_pc.poll_event() {}
@@ -669,9 +729,19 @@ async fn test_ice_restart_interop() -> Result<()> {
     // Process echo
     for _ in 0..50 {
         while let Some(msg) = rtc_pc.poll_write() {
-            rtc_socket
+            // A datagram the socket cannot send is a lost one (a connectivity check from
+            // this loopback socket to a non-loopback candidate of the other peer is
+            // EADDRNOTAVAIL on macOS), not a failed test: ICE moves on to a pair that works.
+            if let Err(err) = rtc_socket
                 .send_to(&msg.message, msg.transport.peer_addr)
-                .await?;
+                .await
+            {
+                log::debug!(
+                    "RTC socket write error to {}: {}",
+                    msg.transport.peer_addr,
+                    err
+                );
+            }
         }
 
         let messages = webrtc_received_messages.lock().await;

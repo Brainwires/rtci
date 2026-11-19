@@ -138,6 +138,17 @@ pub struct TaggedEvent {
     pub event: Event,
 }
 
+/// The addresses and transport data is sent on and accepted from. See [`Agent::media_path`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MediaPath {
+    /// The bound local address (a candidate's base).
+    pub local_addr: SocketAddr,
+    /// The remote candidate's address.
+    pub peer_addr: SocketAddr,
+    /// UDP or TCP.
+    pub transport_protocol: TransportProtocol,
+}
+
 /// Represents the ICE agent.
 pub struct Agent {
     pub(crate) crypto_provider: Arc<dyn RTCCryptoProvider>,
@@ -158,6 +169,9 @@ pub struct Agent {
     pub(crate) candidate_pairs: Vec<CandidatePair>,
     pub(crate) nominated_pair: Option<usize>,
     pub(crate) selected_pair: Option<usize>,
+    /// The selected pair's path at the moment an ICE restart was applied, kept until the
+    /// restart selects a pair (or the agent fails or closes). See [`Agent::media_path`].
+    pub(crate) previous_media_path: Option<MediaPath>,
 
     // LRU of outbound Binding request Transaction IDs
     pub(crate) pending_binding_requests: Vec<BindingRequest>,
@@ -288,6 +302,7 @@ impl Agent {
 
             nominated_pair: None,
             selected_pair: None,
+            previous_media_path: None,
             candidate_pairs: vec![],
 
             connection_state: ConnectionState::New,
@@ -704,6 +719,30 @@ impl Agent {
         interval
     }
 
+    /// The path data (DTLS, SRTP) is sent on and accepted from: the selected pair's, and
+    /// during an ICE restart, until the restart selects a pair, the one the session had when
+    /// the restart was applied.
+    ///
+    /// RFC 8445 Section 9: "the ICE agent continues to use the previously selected candidate
+    /// pair until a new pair is selected by the restart". Without it every packet between
+    /// `apply_restart` and the first nomination of the new generation was dropped, on both
+    /// sides, for as long as the offer/answer exchange took.
+    pub fn media_path(&self) -> Option<MediaPath> {
+        self.selected_media_path().or(self.previous_media_path)
+    }
+
+    fn selected_media_path(&self) -> Option<MediaPath> {
+        self.get_selected_candidate_pair()
+            .map(|(local, remote)| MediaPath {
+                // The local candidate's base: for a (server/peer-)reflexive candidate the
+                // candidate address is the NAT mapping, not a bound local socket
+                // (RFC 8445 Section 5.1.1).
+                local_addr: local.base_addr(),
+                peer_addr: remote.addr(),
+                transport_protocol: local.network_type().to_protocol(),
+            })
+    }
+
     /// Returns the selected pair (local_candidate, remote_candidate) or none
     pub fn get_selected_candidate_pair(&self) -> Option<(&Candidate, &Candidate)> {
         if let Some(pair_index) = self.get_selected_pair() {
@@ -807,10 +846,20 @@ impl Agent {
 
         self.pending_binding_requests = vec![];
 
+        // Data keeps the path it has until the new generation selects a pair (RFC 8445
+        // Section 9). Only while the local candidates, and so their sockets, are kept: a
+        // restart that discards them is one that rebinds, and the old path is gone with them.
+        let previous_media_path = if keep_local_candidates {
+            self.media_path()
+        } else {
+            None
+        };
+
         self.candidate_pairs = vec![];
 
         self.set_selected_pair(Some(now), None);
         self.delete_all_candidates(keep_local_candidates);
+        self.previous_media_path = previous_media_path;
         self.start(now);
 
         // Restart is used by NewAgent. Accept/Connect should be used to move to checking
@@ -897,6 +946,10 @@ impl Agent {
                 self.set_selected_pair(now, None);
                 self.delete_all_candidates(false);
             }
+            // A failed or closed agent has no path, a restart's previous one included.
+            if matches!(new_state, ConnectionState::Failed | ConnectionState::Closed) {
+                self.previous_media_path = None;
+            }
 
             info!(
                 "[{}]: Setting new connection state: {}",
@@ -923,6 +976,8 @@ impl Agent {
 
             self.candidate_pairs[pair_index].nominated = true;
             self.selected_pair = Some(pair_index);
+            // The restart (if any) has its pair: the previous generation's path is retired.
+            self.previous_media_path = None;
 
             self.update_connection_state(now, ConnectionState::Connected);
 
