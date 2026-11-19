@@ -165,6 +165,18 @@ impl RTCDataChannel<'_> {
             .as_str()
     }
 
+    /// The channel's DCEP priority (RFC 8832 §5.1): the one it was created with, or for a
+    /// channel the peer opened, the one in the peer's `DATA_CHANNEL_OPEN`.
+    pub fn priority(&self) -> u16 {
+        // peer_connection is mutable borrow, its data_channels won't be resized,
+        // so, unwrap() here is safe.
+        self.peer_connection
+            .data_channels
+            .get(&self.id)
+            .unwrap()
+            .priority
+    }
+
     /// Whether this DataChannel was negotiated out-of-band by the application (`true`), or
     /// established in-band over DCEP (`false`).
     pub fn negotiated(&self) -> bool {

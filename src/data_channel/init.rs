@@ -78,6 +78,15 @@ pub struct RTCDataChannelInit {
     ///
     /// [W3C specification]: https://www.w3.org/TR/webrtc/#dom-rtcdatachannelinit-negotiated
     pub negotiated: Option<StreamId>,
+
+    /// The channel's relative priority, the integer the DCEP `DATA_CHANNEL_OPEN` message
+    /// carries (RFC 8832 §5.1): 128 is very-low, 256 (the default) low, 512 medium and 1024
+    /// high, the values of the `CHANNEL_PRIORITY_*` constants.
+    ///
+    /// Corresponds to the `priority` member of the [W3C WebRTC Priority Control API].
+    ///
+    /// [W3C WebRTC Priority Control API]: https://www.w3.org/TR/webrtc-priority/#rtcdatachannel-processing-steps
+    pub priority: u16,
 }
 
 impl Default for RTCDataChannelInit {
@@ -98,6 +107,7 @@ impl Default for RTCDataChannelInit {
             max_retransmits: None,
             protocol: String::new(),
             negotiated: None,
+            priority: ::datachannel::message::message_channel_open::CHANNEL_PRIORITY_NORMAL,
         }
     }
 }
