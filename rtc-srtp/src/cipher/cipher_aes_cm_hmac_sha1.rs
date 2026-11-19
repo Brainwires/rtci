@@ -7,6 +7,7 @@ use rtcp::header::{HEADER_LENGTH, SSRC_LENGTH};
 use shared::marshal::*;
 
 use super::{Cipher, Kdf, crypto_error};
+use crate::cryptex::CryptexLayout;
 use crate::key_derivation::*;
 use crate::protection_profile::*;
 use shared::error::{Error, Result};
@@ -246,6 +247,78 @@ impl Cipher for CipherAesCmHmacSha1 {
         self.srtp_cipher
             .apply_keystream(&counter, &mut writer[header.marshal_size()..])
             .map_err(crypto_error)?;
+
+        Ok(writer)
+    }
+
+    fn encrypt_rtp_cryptex(
+        &mut self,
+        packet: &[u8],
+        header: &rtp::Header,
+        roc: u32,
+        layout: CryptexLayout,
+    ) -> Result<BytesMut> {
+        let mut writer = BytesMut::with_capacity(packet.len() + self.rtp_auth_tag_len());
+        writer.extend_from_slice(packet);
+
+        // The keystream starts at the first CSRC and runs on over the extension data and
+        // the payload, skipping the extension header (RFC 9335 section 6.2).
+        let counter = generate_counter(
+            header.sequence_number,
+            roc,
+            header.ssrc,
+            &self.srtp_session_salt,
+        );
+        let mut region = layout.gather(&writer);
+        self.srtp_cipher
+            .apply_keystream(&counter, &mut region)
+            .map_err(crypto_error)?;
+        layout.scatter(&mut writer, &region);
+
+        // The tag covers the packet as it goes out (RFC 3711 section 3.1).
+        let full_auth_tag = self.generate_srtp_auth_tag(&writer, roc)?;
+        let auth_tag = &full_auth_tag[..self.rtp_auth_tag_len()];
+        writer.extend_from_slice(auth_tag);
+
+        Ok(writer)
+    }
+
+    fn decrypt_rtp_cryptex(
+        &mut self,
+        encrypted: &[u8],
+        header: &rtp::Header,
+        roc: u32,
+        layout: CryptexLayout,
+    ) -> Result<BytesMut> {
+        let encrypted_len = encrypted.len();
+        let tag_len = self.rtp_auth_tag_len();
+        if encrypted_len < tag_len + layout.ext_data_start() {
+            return Err(Error::SrtpTooSmall(encrypted_len, tag_len));
+        }
+
+        let actual_tag = &encrypted[encrypted_len - tag_len..];
+        let cipher_text = &encrypted[..encrypted_len - tag_len];
+
+        let full_expected_tag = self.generate_srtp_auth_tag(cipher_text, roc)?;
+        let expected_tag = &full_expected_tag[..tag_len];
+        if !constant_time_eq(actual_tag, expected_tag) {
+            return Err(Error::RtpFailedToVerifyAuthTag);
+        }
+
+        let mut writer = BytesMut::with_capacity(cipher_text.len());
+        writer.extend_from_slice(cipher_text);
+
+        let counter = generate_counter(
+            header.sequence_number,
+            roc,
+            header.ssrc,
+            &self.srtp_session_salt,
+        );
+        let mut region = layout.gather(&writer);
+        self.srtp_cipher
+            .apply_keystream(&counter, &mut region)
+            .map_err(crypto_error)?;
+        layout.scatter(&mut writer, &region);
 
         Ok(writer)
     }

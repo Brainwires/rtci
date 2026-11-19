@@ -65,7 +65,7 @@ pub struct RTCTransportStats {
 
     /// The negotiated TLS version.
     ///
-    /// Typically "DTLS 1.2" for WebRTC.
+    /// The uppercase hex of the ServerHello version bytes, "FEFD" for DTLS 1.2.
     pub tls_version: String,
 
     /// The negotiated DTLS cipher suite.

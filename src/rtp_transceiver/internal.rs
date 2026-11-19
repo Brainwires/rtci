@@ -48,6 +48,11 @@ pub(crate) struct RTCRtpTransceiverInternal {
     /// that tells the two kinds apart clears it with
     /// `RTCRtpTransceiver::set_associable_with_remote_offer`.
     associable_with_remote_offer: bool,
+    /// The RTP header extensions (by URI) this transceiver's media section may carry
+    /// (webrtc-extensions, `[[HeaderExtensionsToNegotiate]]` without the "stopped" ones).
+    /// `None`, the default, is every extension the media engine negotiates; see
+    /// `RTCRtpTransceiver::set_header_extensions_to_negotiate`.
+    header_extensions_to_negotiate: Option<Vec<String>>,
 }
 
 impl fmt::Debug for RTCRtpTransceiverInternal {
@@ -95,6 +100,7 @@ impl RTCRtpTransceiverInternal {
             stopped: false,
             created_by_remote_description: false,
             associable_with_remote_offer: true,
+            header_extensions_to_negotiate: None,
         }
     }
 
@@ -104,6 +110,14 @@ impl RTCRtpTransceiverInternal {
 
     pub(crate) fn set_associable_with_remote_offer(&mut self, associable: bool) {
         self.associable_with_remote_offer = associable;
+    }
+
+    pub(crate) fn header_extensions_to_negotiate(&self) -> Option<&[String]> {
+        self.header_extensions_to_negotiate.as_deref()
+    }
+
+    pub(crate) fn set_header_extensions_to_negotiate(&mut self, uris: Option<Vec<String>>) {
+        self.header_extensions_to_negotiate = uris;
     }
 
     /// Returns the media stream identification tag (mid) for this transceiver.

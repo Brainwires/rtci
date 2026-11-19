@@ -199,6 +199,7 @@ impl RTCPeerConnection {
             ice_restart_requested: None,
             negotiation_needed_state: NegotiationNeededState::Empty,
             is_negotiation_ongoing: false,
+            always_negotiate_data_channels: false,
         })
     }
 
@@ -276,7 +277,18 @@ impl RTCPeerConnection {
             }
         }
 
-        if !self.data_channels.is_empty() {
+        if self.always_negotiate_data_channels {
+            // wpt100:hdrext — alwaysNegotiateDataChannels: the data section comes first.
+            media_sections.insert(
+                0,
+                MediaSection {
+                    mid: self.added_data_section_mid(),
+                    transceiver_index: usize::MAX,
+                    data: true,
+                    ..Default::default()
+                },
+            );
+        } else if !self.data_channels.is_empty() {
             media_sections.push(MediaSection {
                 mid: free_data_mid(&media_sections, &self.rtp_transceivers),
                 transceiver_index: usize::MAX,
@@ -473,6 +485,18 @@ impl RTCPeerConnection {
         let match_bundle_group = if include_unmatched {
             let already_matched: HashSet<String> =
                 media_sections.iter().map(|s| s.mid.clone()).collect();
+
+            // wpt100:hdrext — alwaysNegotiateDataChannels: a data section the session doesn't
+            // have yet goes after the negotiated sections, ahead of the new ones.
+            if self.always_negotiate_data_channels && !already_have_application_media_section {
+                media_sections.push(MediaSection {
+                    mid: self.added_data_section_mid(),
+                    transceiver_index: usize::MAX,
+                    data: true,
+                    ..Default::default()
+                });
+                already_have_application_media_section = true;
+            }
 
             for (i, t) in self.rtp_transceivers.iter_mut().enumerate() {
                 if let Some(mid) = t.mid().clone() {

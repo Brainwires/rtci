@@ -791,6 +791,8 @@ pub(crate) struct AddTransceiverSdpParams {
     ice_gathering_state: RTCIceGatheringState,
     ignore_rid_pause_for_recv: bool,
     write_ssrc_attributes_for_simulcast: bool,
+    /// An offer (initial or subsequent) rather than an answer.
+    is_offer: bool,
 }
 
 impl RTCPeerConnection {
@@ -812,6 +814,7 @@ impl RTCPeerConnection {
             ice_gathering_state,
             ignore_rid_pause_for_recv,
             write_ssrc_attributes_for_simulcast,
+            is_offer,
         ) = (
             params.should_add_candidates,
             params.mid_value,
@@ -819,6 +822,7 @@ impl RTCPeerConnection {
             params.ice_gathering_state,
             params.ignore_rid_pause_for_recv,
             params.write_ssrc_attributes_for_simulcast,
+            params.is_offer,
         );
 
         let transceiver = &mut transceivers[media_section.transceiver_index];
@@ -922,7 +926,14 @@ impl RTCPeerConnection {
 
         let parameters =
             media_engine.get_rtp_parameters_by_kind(transceiver.kind(), transceiver.direction());
+        let to_negotiate = transceiver.header_extensions_to_negotiate();
+        let mut written: Vec<(u16, String)> = vec![];
         for rtp_extension in &parameters.header_extensions {
+            if let Some(uris) = to_negotiate
+                && !uris.contains(&rtp_extension.uri)
+            {
+                continue;
+            }
             let id = if media_section.match_extensions.is_empty() {
                 rtp_extension.id
             } else if let Some(id) = media_section.match_extensions.get(&rtp_extension.uri) {
@@ -930,10 +941,23 @@ impl RTCPeerConnection {
             } else {
                 continue;
             };
-
-            let ext_url = Url::parse(rtp_extension.uri.as_str())?;
+            written.push((id, rtp_extension.uri.clone()));
+        }
+        if is_offer && let Some(uris) = to_negotiate {
+            for (id, uri) in reoffered_header_extensions(
+                media_engine,
+                transceiver.kind(),
+                transceiver.direction(),
+                uris,
+                &written,
+            ) {
+                written.push((id, uri));
+            }
+        }
+        for (id, uri) in &written {
+            let ext_url = Url::parse(uri.as_str())?;
             media = media.with_extmap(sdp::extmap::ExtMap {
-                value: id,
+                value: *id,
                 uri: Some(ext_url),
                 ..Default::default()
             });
@@ -1404,6 +1428,8 @@ impl RTCPeerConnection {
                     ice_gathering_state: params.ice_gathering_state,
                     ignore_rid_pause_for_recv: params.ignore_rid_pause_for_recv,
                     write_ssrc_attributes_for_simulcast: params.write_ssrc_attributes_for_simulcast,
+                    // An answer matches the remote offer's bundle group; an offer has none.
+                    is_offer: params.match_bundle_group.is_none(),
                 };
                 let (d1, should_add_id) = RTCPeerConnection::add_transceiver_sdp(
                     d,
@@ -2012,6 +2038,53 @@ fn get_rids_uses_each_layers_first_alternative_once() {
     assert_eq!(ids, ["foo", "1"]);
 }
 
+/// The extensions an offer adds back for a transceiver with an explicit list of header
+/// extensions to negotiate (webrtc-extensions: a subsequent offer carries every extension of
+/// `[[HeaderExtensionsToNegotiate]]` that isn't "stopped", not only the ones the last answer
+/// kept): each listed URI the media engine registered for `kind` and `direction` that
+/// `written` doesn't have yet, with the id it was negotiated with, or else the lowest one-byte
+/// id (RFC 8285 section 4.2) that neither the negotiated set nor `written` uses.
+pub(crate) fn reoffered_header_extensions(
+    media_engine: &MediaEngine,
+    kind: RtpCodecKind,
+    direction: RTCRtpTransceiverDirection,
+    uris: &[String],
+    written: &[(u16, String)],
+) -> Vec<(u16, String)> {
+    let mut out: Vec<(u16, String)> = vec![];
+    for uri in uris {
+        if written.iter().any(|(_, u)| u == uri) || out.iter().any(|(_, u)| u == uri) {
+            continue;
+        }
+        let registered = media_engine.header_extensions.iter().any(|e| {
+            e.uri == *uri
+                && e.is_matching_direction(direction)
+                && (e.is_audio && kind == RtpCodecKind::Audio
+                    || e.is_video && kind == RtpCodecKind::Video)
+        });
+        if !registered {
+            continue;
+        }
+        let taken =
+            |id: u16| written.iter().any(|(i, _)| *i == id) || out.iter().any(|(i, _)| *i == id);
+        let negotiated = media_engine
+            .negotiated_header_extensions
+            .iter()
+            .find(|(_, e)| e.uri == *uri)
+            .map(|(id, _)| *id)
+            .filter(|id| !taken(*id));
+        let id = negotiated.or_else(|| {
+            (1u16..15).find(|id| {
+                !taken(*id) && !media_engine.negotiated_header_extensions.contains_key(id)
+            })
+        });
+        if let Some(id) = id {
+            out.push((id, uri.clone()));
+        }
+    }
+    out
+}
+
 pub(crate) fn rtp_extensions_from_media_description(
     m: &MediaDescription,
 ) -> Result<HashMap<String, u16>> {
@@ -2019,6 +2092,17 @@ pub(crate) fn rtp_extensions_from_media_description(
 
     for a in &m.attributes {
         if a.key == ATTR_KEY_EXT_MAP {
+            // RFC 8285 section 5 / JSEP (RFC 9429 section 5.10): an extension the answerer
+            // doesn't understand is left out of the answer, not an error. A URI that isn't
+            // even a URI (`a=extmap:2 bogus`) is such an extension; a malformed id or
+            // direction still fails the description.
+            if a.value
+                .as_deref()
+                .and_then(|v| v.split_whitespace().nth(1))
+                .is_some_and(|uri| Url::parse(uri).is_err())
+            {
+                continue;
+            }
             let a_str = a.to_string();
             let e = ExtMap::unmarshal(&mut a_str.as_bytes())?;
 
@@ -2053,6 +2137,60 @@ fn rtp_extensions_from_media_description_reads_each_extmap_line() {
     let malformed = MediaDescription::default()
         .with_value_attribute(ATTR_KEY_EXT_MAP.to_owned(), "not-a-number urn:x".to_owned());
     assert!(rtp_extensions_from_media_description(&malformed).is_err());
+
+    // An unknown extension whose name isn't a URI is skipped, not an error.
+    let bogus = MediaDescription::default()
+        .with_value_attribute(ATTR_KEY_EXT_MAP.to_owned(), "2 bogus".to_owned())
+        .with_value_attribute(
+            ATTR_KEY_EXT_MAP.to_owned(),
+            "16 urn:ietf:params:rtp-hdrext:sdes:mid".to_owned(),
+        );
+    let extensions = rtp_extensions_from_media_description(&bogus).unwrap();
+    assert_eq!(extensions.len(), 1);
+    assert_eq!(extensions["urn:ietf:params:rtp-hdrext:sdes:mid"], 16);
+}
+
+#[test]
+fn reoffered_header_extensions_adds_listed_extensions_back() {
+    use crate::rtp_transceiver::rtp_sender::RTCRtpHeaderExtensionCapability;
+
+    let mut media_engine = MediaEngine::default();
+    for uri in [
+        "urn:ietf:params:rtp-hdrext:sdes:mid",
+        "urn:3gpp:video-orientation",
+        "urn:ietf:params:rtp-hdrext:ssrc-audio-level",
+    ] {
+        let kind = if uri.ends_with("audio-level") {
+            RtpCodecKind::Audio
+        } else {
+            RtpCodecKind::Video
+        };
+        media_engine
+            .register_header_extension(
+                RTCRtpHeaderExtensionCapability {
+                    uri: uri.to_owned(),
+                },
+                kind,
+                None,
+            )
+            .unwrap();
+    }
+    let listed = vec![
+        "urn:ietf:params:rtp-hdrext:sdes:mid".to_owned(),
+        "urn:3gpp:video-orientation".to_owned(),
+        "urn:ietf:params:rtp-hdrext:ssrc-audio-level".to_owned(),
+        "urn:example:unregistered".to_owned(),
+    ];
+    let written = vec![(1u16, "urn:ietf:params:rtp-hdrext:sdes:mid".to_owned())];
+    let added = reoffered_header_extensions(
+        &media_engine,
+        RtpCodecKind::Video,
+        RTCRtpTransceiverDirection::Sendrecv,
+        &listed,
+        &written,
+    );
+    // Only the registered video extension that isn't written yet, on a free id.
+    assert_eq!(added, vec![(2u16, "urn:3gpp:video-orientation".to_owned())]);
 }
 
 /// update_sdp_origin saves sdp.Origin in PeerConnection when creating 1st local SDP;

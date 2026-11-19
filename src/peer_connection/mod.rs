@@ -243,9 +243,12 @@
 
 pub mod certificate;
 pub mod configuration;
+pub mod cryptex;
 pub mod event;
 pub(crate) mod handler;
 mod internal;
+// wpt100:hdrext
+mod always_negotiate;
 pub mod message;
 pub mod sdp;
 pub mod state;
@@ -758,6 +761,8 @@ pub struct RTCPeerConnection {
     ice_restart_requested: Option<RTCOfferOptions>,
     negotiation_needed_state: NegotiationNeededState,
     is_negotiation_ongoing: bool,
+    // wpt100:hdrext — `alwaysNegotiateDataChannels` (see `always_negotiate`).
+    always_negotiate_data_channels: bool,
 }
 
 impl RTCPeerConnection {
@@ -845,7 +850,7 @@ impl RTCPeerConnection {
             }
         }
 
-        let mut d = if self.current_remote_description.is_none() {
+        let d = if self.current_remote_description.is_none() {
             self.generate_unmatched_sdp()?
         } else {
             self.generate_matched_sdp(
@@ -854,6 +859,9 @@ impl RTCPeerConnection {
                 false,
             )?
         };
+
+        // wpt100:hdrext — `a=cryptex` per the RTCRtpHeaderEncryptionPolicy (RFC 9335).
+        let mut d = self.add_cryptex_attribute(d, true);
 
         update_sdp_origin(&mut self.sdp_origin, &mut d);
 
@@ -1025,11 +1033,14 @@ impl RTCPeerConnection {
             }
         }
 
-        let mut d = self.generate_matched_sdp(
+        let d = self.generate_matched_sdp(
             false, /*includeUnmatched */
             connection_role,
             self.setting_engine.ignore_rid_pause_for_recv,
         )?;
+
+        // wpt100:hdrext — `a=cryptex` when the offer had it (RFC 9335 section 4).
+        let mut d = self.add_cryptex_attribute(d, false);
 
         update_sdp_origin(&mut self.sdp_origin, &mut d);
 
@@ -1267,6 +1278,9 @@ impl RTCPeerConnection {
         ) {
             self.assign_data_channel_ids();
         }
+
+        // wpt100:hdrext — Cryptex once both sides signalled it (RFC 9335).
+        self.update_cryptex();
 
         Ok(())
     }
@@ -1718,6 +1732,9 @@ impl RTCPeerConnection {
         if answers {
             self.assign_data_channel_ids();
         }
+
+        // wpt100:hdrext — Cryptex once both sides signalled it (RFC 9335).
+        self.update_cryptex();
 
         Ok(())
     }

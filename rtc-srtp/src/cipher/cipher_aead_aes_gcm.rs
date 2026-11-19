@@ -3,6 +3,7 @@ use bytes::BytesMut;
 use crypto::{AeadAlgorithm, AeadCipher, RTCCrypto, SecretVec};
 
 use super::{Cipher, Kdf, crypto_error};
+use crate::cryptex::CryptexLayout;
 use crate::key_derivation::*;
 use crate::protection_profile::ProtectionProfile;
 use shared::{
@@ -86,6 +87,58 @@ impl Cipher for CipherAeadAesGcm {
         self.srtp_cipher
             .open_in_place(&nonce, aad, encrypted_payload, tag)
             .map_err(|_| Error::ErrFailedToVerifyAuthTag)?;
+        Ok(writer)
+    }
+
+    fn encrypt_rtp_cryptex(
+        &mut self,
+        packet: &[u8],
+        header: &rtp::Header,
+        roc: u32,
+        layout: CryptexLayout,
+    ) -> Result<BytesMut> {
+        // RFC 9335 section 6.2: the fixed header and the extension header are the associated
+        // data; the CSRCs, the extension data and the payload are one plaintext.
+        let nonce = self.rtp_initialization_vector(header, roc);
+        let aad = layout.associated_data(packet);
+        let mut region = layout.gather(packet);
+        let mut tag = [0; CIPHER_AEAD_AES_GCM_AUTH_TAG_LEN];
+        self.srtp_cipher
+            .seal_in_place(&nonce, &aad, &mut region, &mut tag)
+            .map_err(crypto_error)?;
+
+        let mut writer = BytesMut::with_capacity(packet.len() + self.aead_auth_tag_len());
+        writer.extend_from_slice(packet);
+        layout.scatter(&mut writer, &region);
+        writer.extend_from_slice(&tag);
+        Ok(writer)
+    }
+
+    fn decrypt_rtp_cryptex(
+        &mut self,
+        ciphertext: &[u8],
+        header: &rtp::Header,
+        roc: u32,
+        layout: CryptexLayout,
+    ) -> Result<BytesMut> {
+        let tag_len = self.aead_auth_tag_len();
+        if ciphertext.len() < layout.ext_data_start() + tag_len {
+            return Err(Error::ErrFailedToVerifyAuthTag);
+        }
+
+        let nonce = self.rtp_initialization_vector(header, roc);
+        let tag_offset = ciphertext.len() - tag_len;
+        let tag = &ciphertext[tag_offset..];
+        let body = &ciphertext[..tag_offset];
+        let aad = layout.associated_data(body);
+        let mut region = layout.gather(body);
+        self.srtp_cipher
+            .open_in_place(&nonce, &aad, &mut region, tag)
+            .map_err(|_| Error::ErrFailedToVerifyAuthTag)?;
+
+        let mut writer = BytesMut::with_capacity(tag_offset);
+        writer.extend_from_slice(body);
+        layout.scatter(&mut writer, &region);
         Ok(writer)
     }
 
