@@ -156,6 +156,21 @@ fn send_numbered(
         "a could not send everything (state {:?})",
         a.connection_state()
     );
+    let dc_stats = |p: &mut EnvPeer| {
+        let r = p.pc.get_stats(Instant::now(), StatsSelector::None);
+        r.data_channels()
+            .map(|d| format!("sent {} received {}", d.messages_sent, d.messages_received))
+            .collect::<Vec<_>>()
+    };
+    eprintln!(
+        "data channel stats: a {:?}, b {:?}; packets a sent {} received {}, b sent {} received {}",
+        dc_stats(&mut a),
+        dc_stats(&mut b),
+        a.sent_direct,
+        a.recv_direct,
+        b.sent_direct,
+        b.recv_direct
+    );
     dc_messages(&b)
 }
 
