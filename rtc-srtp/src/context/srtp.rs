@@ -1,4 +1,5 @@
 use super::*;
+use crate::cryptex;
 use shared::{
     error::{Error, Result},
     marshal::{MarshalSize, Unmarshal},
@@ -51,7 +52,23 @@ impl Context {
             }
         };
 
-        let dst = self.cipher.decrypt_rtp(encrypted, header, roc)?;
+        let dst = match cryptex::received(encrypted) {
+            cryptex::Received::Cryptex(layout) => {
+                let mut dst = self
+                    .cipher
+                    .decrypt_rtp_cryptex(encrypted, header, roc, layout)?;
+                cryptex::restore_profile(&mut dst, layout);
+                dst
+            }
+            cryptex::Received::Clear if self.cryptex.require => {
+                return Err(Error::Other(format!(
+                    "SRTP packet (SSRC {}, sequence number {}) carries CSRCs or header \
+                     extensions without Cryptex, which is required",
+                    header.ssrc, header.sequence_number
+                )));
+            }
+            _ => self.cipher.decrypt_rtp(encrypted, header, roc)?,
+        };
         {
             let is_new = !self.srtp_ssrc_states.contains_key(&header.ssrc);
             let state = self.get_srtp_ssrc_state(header.ssrc);
@@ -98,7 +115,17 @@ impl Context {
             return Err(Error::ErrExceededMaxPackets);
         }
 
-        let dst = self.cipher.encrypt_rtp(plaintext, header, roc)?;
+        let dst = match self
+            .cryptex
+            .send
+            .then(|| cryptex::sender_packet(plaintext))
+            .flatten()
+        {
+            Some((packet, layout)) => self
+                .cipher
+                .encrypt_rtp_cryptex(&packet, header, roc, layout)?,
+            None => self.cipher.encrypt_rtp(plaintext, header, roc)?,
+        };
 
         self.get_srtp_ssrc_state(header.ssrc)
             .update_rollover_count(header.sequence_number, diff);

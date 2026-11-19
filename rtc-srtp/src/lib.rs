@@ -57,6 +57,7 @@ pub use crypto;
 pub mod config;
 /// The encrypt/decrypt state for one SRTP/SRTCP session.
 pub mod context;
+pub mod cryptex;
 /// Entry points for stateful fuzz targets. Gated behind `cfg(fuzzing)`; not part of the
 /// supported API.
 #[cfg(fuzzing)]
