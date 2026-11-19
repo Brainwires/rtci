@@ -1447,9 +1447,14 @@ impl RTCPeerConnection {
                         let transceiver = if let Some(i) =
                             RTCPeerConnection::find_by_mid(mid_value, &self.rtp_transceivers)
                         {
+                            // An `a=inactive` media section pauses the transceiver; it does not
+                            // stop it (RFC 9429, Section 5.10: only a rejected section, port 0,
+                            // stops one). The answer is inactive, and a later offer, or a rollback
+                            // of this one, has the transceiver send and receive again. Stopping it
+                            // here ended its sender and receiver for good.
                             if direction == RTCRtpTransceiverDirection::Inactive {
                                 self.rtp_transceivers[i]
-                                    .stop(&self.media_engine, &mut self.interceptor)?;
+                                    .set_direction(RTCRtpTransceiverDirection::Inactive);
                             }
                             Some(&mut self.rtp_transceivers[i])
                         } else {

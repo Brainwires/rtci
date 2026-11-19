@@ -41,6 +41,13 @@ pub(crate) struct RTCRtpTransceiverInternal {
     /// is subsequently rolled back must be stopped and removed, unless a track was later
     /// attached to them via `add_track`.
     created_by_remote_description: bool,
+    /// Whether a remote offer's new media section may take this transceiver (RFC 9429,
+    /// Section 5.10: only a transceiver "created by `addTrack`" is a candidate; one the
+    /// application made with `addTransceiver` gets a media section of its own, in the next
+    /// local offer). True by default, which is this crate's historical behaviour; a caller
+    /// that tells the two kinds apart clears it with
+    /// `RTCRtpTransceiver::set_associable_with_remote_offer`.
+    associable_with_remote_offer: bool,
 }
 
 impl fmt::Debug for RTCRtpTransceiverInternal {
@@ -87,7 +94,16 @@ impl RTCRtpTransceiverInternal {
             preferred_codecs: vec![],
             stopped: false,
             created_by_remote_description: false,
+            associable_with_remote_offer: true,
         }
+    }
+
+    pub(crate) fn associable_with_remote_offer(&self) -> bool {
+        self.associable_with_remote_offer
+    }
+
+    pub(crate) fn set_associable_with_remote_offer(&mut self, associable: bool) {
+        self.associable_with_remote_offer = associable;
     }
 
     /// Returns the media stream identification tag (mid) for this transceiver.

@@ -1013,11 +1013,22 @@ impl RTCPeerConnection {
                     .iter()
                     .all(|encoding| !encoding.rtp_coding_parameters.rid.is_empty());
 
-            media = media.with_property_attribute(format!(
-                "msid:{} {}",
-                track.stream_id(),
-                track.track_id()
-            ));
+            // One `a=msid` line per MediaStream the sender is associated with (RFC 9429,
+            // Section 5.2.1); a sender in no stream writes the stream id `-` (its track's own
+            // stream id, which the application sets to `-` for that).
+            let track_id = track.track_id().to_string();
+            let mut stream_ids: Vec<String> = vec![];
+            for stream_id in sender.streams() {
+                if !stream_ids.contains(stream_id) {
+                    stream_ids.push(stream_id.clone());
+                }
+            }
+            if stream_ids.is_empty() {
+                stream_ids.push(track.stream_id().to_string());
+            }
+            for stream_id in stream_ids {
+                media = media.with_property_attribute(format!("msid:{} {}", stream_id, track_id));
+            }
 
             if write_ssrc_attributes_for_simulcast || !is_simulcast {
                 for encoding in &encodings {
@@ -1211,7 +1222,10 @@ impl RTCPeerConnection {
         for possible_direction in get_preferred_directions() {
             // Find the index first to avoid multiple mutable borrows
             if let Some(index) = local_transceivers.iter().position(|t| {
-                t.mid().is_none() && t.kind() == remote_kind && possible_direction == t.direction()
+                t.mid().is_none()
+                    && t.associable_with_remote_offer()
+                    && t.kind() == remote_kind
+                    && possible_direction == t.direction()
             }) {
                 return Some(&mut local_transceivers[index]);
             }

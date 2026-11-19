@@ -281,6 +281,27 @@ impl RTCRtpTransceiver<'_> {
         self.peer_connection.rtp_transceivers[self.id].direction()
     }
 
+    /// Whether a remote offer's new media section may be associated with this transceiver.
+    ///
+    /// See [`RTCRtpTransceiver::set_associable_with_remote_offer`].
+    pub fn associable_with_remote_offer(&self) -> bool {
+        self.peer_connection.rtp_transceivers[self.id].associable_with_remote_offer()
+    }
+
+    /// Sets whether a remote offer's new media section may be associated with this
+    /// transceiver while it has no mid.
+    ///
+    /// RFC 9429, Section 5.10 gives a remote offer's new media section a transceiver that
+    /// "was created by `addTrack`" (same kind, never associated, not stopped), and otherwise
+    /// a new one; a transceiver the application created with `addTransceiver` is not a
+    /// candidate, and is offered in a media section of its own later. This crate has one way
+    /// to create a transceiver for both, so the application says which it was: `true` (the
+    /// default) for `addTrack`, `false` for `addTransceiver`. Set it back to `true` when
+    /// `addTrack` reuses the transceiver.
+    pub fn set_associable_with_remote_offer(&mut self, associable: bool) {
+        self.peer_connection.rtp_transceivers[self.id].set_associable_with_remote_offer(associable);
+    }
+
     /// Sets the preferred direction of this transceiver.
     ///
     /// Changing the direction may trigger renegotiation to update the session description.
@@ -478,5 +499,100 @@ mod tests {
             0,
             "setting the same direction must not trigger negotiation-needed",
         );
+    }
+
+    fn audio_track(stream: &str) -> crate::media_stream::MediaStreamTrack {
+        crate::media_stream::MediaStreamTrack::new(
+            stream.to_string(),
+            "track".to_string(),
+            "label".to_string(),
+            RtpCodecKind::Audio,
+            vec![
+                crate::rtp_transceiver::rtp_sender::RTCRtpEncodingParameters {
+                    active: true,
+                    ..Default::default()
+                },
+            ],
+        )
+    }
+
+    fn msid_lines(sdp: &str) -> Vec<&str> {
+        sdp.lines()
+            .filter_map(|line| line.strip_prefix("a=msid:"))
+            .collect()
+    }
+
+    /// RFC 9429, Section 5.2.1: one `a=msid` line per MediaStream of the sender, and the stream
+    /// id the track itself has (which an application sets to `-`) when it is in none.
+    #[test]
+    fn test_offer_has_one_msid_line_per_stream() {
+        let mut pc = build_pc();
+        let tid = pc
+            .add_transceiver_from_track(audio_track("-"), None)
+            .expect("add transceiver");
+
+        let offer = pc.create_offer(None).expect("create offer");
+        assert_eq!(msid_lines(&offer.sdp), vec!["- track"]);
+
+        pc.rtp_sender(tid.into()).expect("sender").set_streams(vec![
+            "one".to_string(),
+            "two".to_string(),
+            "one".to_string(),
+        ]);
+        let offer = pc.create_offer(None).expect("create offer");
+        assert_eq!(msid_lines(&offer.sdp), vec!["one track", "two track"]);
+
+        pc.rtp_sender(tid.into())
+            .expect("sender")
+            .set_streams(vec![]);
+        let offer = pc.create_offer(None).expect("create offer");
+        assert_eq!(msid_lines(&offer.sdp), vec!["- track"]);
+    }
+
+    /// RFC 9429, Section 5.10: a remote offer's new media section takes a transceiver the
+    /// application marked as created by `addTrack` (the default), not one it marked as created
+    /// by `addTransceiver`, which keeps waiting for a media section of its own.
+    #[test]
+    fn test_remote_offer_skips_a_transceiver_that_is_not_associable() {
+        let offer = {
+            let mut offerer = build_pc();
+            offerer
+                .add_transceiver_from_track(audio_track("stream"), None)
+                .expect("add offerer transceiver");
+            offerer.create_offer(None).expect("create offer")
+        };
+
+        // The default: the answerer's own transceiver is taken.
+        let mut answerer = build_pc();
+        let tid = answerer
+            .add_transceiver_from_track(audio_track("stream"), None)
+            .expect("add answerer transceiver");
+        assert!(
+            answerer
+                .rtp_transceiver(tid)
+                .expect("transceiver")
+                .associable_with_remote_offer()
+        );
+        answerer
+            .set_remote_description(Instant::now(), offer.clone())
+            .expect("set remote");
+        assert_eq!(answerer.rtp_transceivers.len(), 1);
+        assert!(answerer.rtp_transceivers[tid].mid().is_some());
+
+        // Not associable: the offer gets a new transceiver, this one stays unassociated.
+        let mut answerer = build_pc();
+        let tid = answerer
+            .add_transceiver_from_track(audio_track("stream"), None)
+            .expect("add answerer transceiver");
+        answerer
+            .rtp_transceiver(tid)
+            .expect("transceiver")
+            .set_associable_with_remote_offer(false);
+        answerer
+            .set_remote_description(Instant::now(), offer)
+            .expect("set remote");
+        assert_eq!(answerer.rtp_transceivers.len(), 2);
+        assert!(answerer.rtp_transceivers[tid].mid().is_none());
+        assert!(answerer.rtp_transceivers[1].mid().is_some());
     }
 }
