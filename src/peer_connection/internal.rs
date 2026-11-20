@@ -39,11 +39,16 @@ impl RTCPeerConnection {
     pub(super) fn new(
         now: Instant,
         mut configuration: RTCConfiguration,
-        media_engine: MediaEngine,
+        mut media_engine: MediaEngine,
         mut setting_engine: SettingEngine,
         interceptor: Box<dyn Interceptor>,
     ) -> Result<Self> {
         configuration.validate()?;
+
+        // Each media section negotiates its own codecs unless the application asked for one
+        // codec set (RFC 9429 section 5.10 answers every m= section from its own formats).
+        media_engine
+            .set_multi_codec_negotiation(!setting_engine.disable_media_engine_multiple_codecs);
 
         // The one place in `rtc` that resolves a default crypto provider. The application
         // either supplies one through `SettingEngineBuilder::with_crypto_provider` — which is also how
@@ -376,6 +381,9 @@ impl RTCPeerConnection {
             .filter_map(|m| get_mid_value(m).cloned())
             .collect();
         let mut recycled: HashSet<usize> = HashSet::new();
+        // The remote mids of the rejected m= lines a new transceiver took over: the stopped
+        // transceiver that had one is done with it, and gets no rejected section of its own.
+        let mut recycled_mids: HashSet<String> = HashSet::new();
 
         if let Some(media_descriptions) = media_descriptions {
             let transceiver_by_mid =
@@ -412,6 +420,7 @@ impl RTCPeerConnection {
                                 sender.set_negotiated();
                             }
                             recycled.insert(j);
+                            recycled_mids.insert(mid_value.to_owned());
                             media_sections.push(MediaSection {
                                 mid: self.rtp_transceivers[j].mid().clone().unwrap_or_default(),
                                 transceiver_index: j,
@@ -501,8 +510,11 @@ impl RTCPeerConnection {
 
         // If we are offering also include unmatched local transceivers
         let match_bundle_group = if include_unmatched {
-            let already_matched: HashSet<String> =
-                media_sections.iter().map(|s| s.mid.clone()).collect();
+            let already_matched: HashSet<String> = media_sections
+                .iter()
+                .map(|s| s.mid.clone())
+                .chain(recycled_mids.iter().cloned())
+                .collect();
 
             // wpt100:hdrext — alwaysNegotiateDataChannels: a data section the session doesn't
             // have yet goes after the negotiated sections, ahead of the new ones.
@@ -1145,7 +1157,8 @@ impl RTCPeerConnection {
                     receiver.set_track(MediaStreamTrack::new(
                         incoming_track.stream_id.clone(),
                         incoming_track.track_id.clone(),
-                        format!("remote-{}-{}", incoming_track.kind, math_rand_alpha(16)), //TODO:// Label
+                        // W3C webrtc 4.4.1.6 (create an RTCRtpReceiver): "remote " + kind.
+                        format!("remote {}", incoming_track.kind),
                         incoming_track.kind,
                         codings,
                     ));
@@ -1166,7 +1179,8 @@ impl RTCPeerConnection {
                     receiver.set_track(MediaStreamTrack::new(
                         incoming_track.stream_id,
                         incoming_track.track_id,
-                        format!("remote-{}-{}", incoming_track.kind, math_rand_alpha(16)), //TODO:// Label
+                        // W3C webrtc 4.4.1.6 (create an RTCRtpReceiver): "remote " + kind.
+                        format!("remote {}", incoming_track.kind),
                         incoming_track.kind,
                         vec![RTCRtpEncodingParameters {
                             rtp_coding_parameters,
@@ -1192,7 +1206,8 @@ impl RTCPeerConnection {
                     receiver.set_track(MediaStreamTrack::new(
                         incoming_track.stream_id,
                         incoming_track.track_id,
-                        format!("remote-{}-{}", incoming_track.kind, math_rand_alpha(16)), //TODO:// Label
+                        // W3C webrtc 4.4.1.6 (create an RTCRtpReceiver): "remote " + kind.
+                        format!("remote {}", incoming_track.kind),
                         incoming_track.kind,
                         vec![], // Defer receiver's track's codec until received the first RTP packet with payload_type in endpoint handler
                     ));
@@ -1264,6 +1279,12 @@ impl RTCPeerConnection {
     ///
     /// See <https://www.w3.org/TR/webrtc/#dom-rtcrtptransceiver-direction>.
     pub(crate) fn on_transceiver_direction_changed(&mut self) {
+        self.trigger_negotiation_needed();
+    }
+
+    /// W3C `RTCRtpTransceiver.stop()` and `RTCRtpSender.setStreams()` end by updating the
+    /// negotiation-needed flag (W3C webrtc 5.4, 5.2).
+    pub(crate) fn on_transceiver_stopped_or_streams_changed(&mut self) {
         self.trigger_negotiation_needed();
     }
 
@@ -1356,10 +1377,25 @@ impl RTCPeerConnection {
 
             for transceiver in &self.rtp_transceivers {
                 // https://www.w3.org/TR/webrtc/#dfn-update-the-negotiation-needed-flag
-                // Step 5.1
-                // if t.stopping && !t.stopped {
-                // 	return true
-                // }
+                // Steps 5.1 and 5.4. This engine stops a transceiver at once (no separate
+                // "stopping" state), so `stopped()` covers both: one that never had an m=
+                // section needs none, and one that has needs negotiating until that section is
+                // rejected in both current descriptions (or has gone to another transceiver).
+                if transceiver.stopped() {
+                    let Some(mid) = transceiver.mid().as_deref() else {
+                        continue;
+                    };
+                    let rejected_in = |desc: Option<&RTCSessionDescription>| {
+                        desc.and_then(|desc| get_by_mid(mid, desc))
+                            .is_none_or(is_rejected_media)
+                    };
+                    if rejected_in(Some(local_desc))
+                        && rejected_in(self.current_remote_description.as_ref())
+                    {
+                        continue;
+                    }
+                    return true;
+                }
                 let m = transceiver
                     .mid()
                     .as_ref()
@@ -1379,13 +1415,26 @@ impl RTCPeerConnection {
                     if transceiver.direction().has_send()
                         && let Some(sender) = transceiver.sender()
                     {
-                        let dmsid = match m.attribute(ATTR_KEY_MSID).and_then(|o| o) {
-                            Some(msid) => msid,
-                            None => return true, // doesn't contain a single a=msid line
-                        };
-
-                        let track = sender.track();
-                        if dmsid.split_whitespace().next() != Some(track.stream_id()) {
+                        // The stream ids of the section's a=msid lines (one per stream,
+                        // RFC 8830 section 2) against the sender's associated streams:
+                        // `setStreams` changes those without changing the track.
+                        let mut described: Vec<&str> = m
+                            .attributes
+                            .iter()
+                            .filter(|a| a.key == ATTR_KEY_MSID)
+                            .filter_map(|a| a.value.as_deref())
+                            .filter_map(|msid| msid.split_whitespace().next())
+                            .collect();
+                        if described.is_empty() {
+                            return true; // doesn't contain a single a=msid line
+                        }
+                        described.sort_unstable();
+                        described.dedup();
+                        let mut associated: Vec<&str> =
+                            sender.streams().iter().map(String::as_str).collect();
+                        associated.sort_unstable();
+                        associated.dedup();
+                        if described != associated {
                             return true;
                         }
                     }

@@ -158,26 +158,32 @@ impl RTCRtpSenderInternal {
     ///
     /// # Errors
     ///
-    /// Returns an error if:
-    /// - The number of encodings doesn't match the current configuration
-    /// - RIDs don't match between new and existing encodings
-    /// - Invalid resolution scaling values are provided (must be >= 1.0)
+    /// The setParameters validation steps (W3C webrtc 5.2):
+    /// - `InvalidStateError` when `get_parameters` has not been called since the last
+    ///   `set_parameters` (or since the codecs changed)
+    /// - `InvalidModificationError` when the transaction id is not the one `get_parameters`
+    ///   returned, the number of encodings or an encoding's rid differs, or a read-only member
+    ///   (`header_extensions`, `rtcp`, `codecs`) was changed
+    /// - `RangeError` for a `scale_resolution_down_by` below 1.0 or a negative `max_framerate`
     pub(crate) fn set_parameters(
         &mut self,
         mut parameters: RTCRtpSendParameters,
         _set_parameter_options: Option<RTCSetParameterOptions>,
     ) -> Result<()> {
-        //if transceiver.stopping  {
-        //  return Err(Error::InvalidStateError);
-        //}
-
-        //if self.last_returned_parameters.is_none() {
-        //    return Err(Error::InvalidStateError);
-        //}
-
         // Validate parameters by running the following setParameters validation steps:
         {
-            //let codecs = &parameters.rtp_parameters.codecs;
+            let Some(last) = self.last_returned_parameters.as_ref() else {
+                return Err(Error::InvalidStateError);
+            };
+            if parameters.transaction_id != last.transaction_id {
+                return Err(Error::InvalidModificationError);
+            }
+            if parameters.rtp_parameters.header_extensions != last.rtp_parameters.header_extensions
+                || parameters.rtp_parameters.rtcp != last.rtp_parameters.rtcp
+                || parameters.rtp_parameters.codecs != last.rtp_parameters.codecs
+            {
+                return Err(Error::InvalidModificationError);
+            }
             if parameters.encodings.len() != self.send_encodings.len() {
                 return Err(Error::InvalidModificationError);
             }
@@ -201,11 +207,22 @@ impl RTCRtpSenderInternal {
                         "scaleResolutionDownBy must be >= 1.0".to_string(),
                     ));
                 }
+                if parameters
+                    .encodings
+                    .iter()
+                    .any(|e| e.max_framerate.is_some_and(|v| v < 0.0))
+                {
+                    return Err(Error::RangeError(
+                        "maxFramerate must not be negative".to_string(),
+                    ));
+                }
             } else {
-                // Audio and Application have no resolution/framerate to scale.
-                parameters.encodings.retain(|encoding| {
-                    encoding.scale_resolution_down_by.is_none() && encoding.max_framerate.is_none()
-                });
+                // Audio and Application have no resolution or frame rate: those members are
+                // ignored, not the encodings that carry them (whose count is read-only).
+                for encoding in &mut parameters.encodings {
+                    encoding.scale_resolution_down_by = None;
+                    encoding.max_framerate = None;
+                }
             }
         }
 
@@ -292,9 +309,8 @@ impl RTCRtpSenderInternal {
             streams
         };
         self.associated_media_stream_ids = associated_media_stream_ids;
-
-        //TODO: https://www.w3.org/TR/webrtc/#dom-rtcrtpsender-setstreams
-        // Update the negotiation-needed flag for connection.
+        // The negotiation-needed flag is updated by `RTCRtpSender::set_streams`, which has the
+        // peer connection.
     }
 
     /// Returns whether this sender has been negotiated via SDP.

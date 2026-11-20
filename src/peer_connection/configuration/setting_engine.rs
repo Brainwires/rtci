@@ -118,7 +118,6 @@ use ice::network_type::NetworkType;
 //TODO: use ice::udp_network::UDPNetwork;
 use crate::peer_connection::transport::dtls::role::RTCDtlsRole;
 use crate::peer_connection::transport::ice::candidate_type::RTCIceCandidateType;
-use ice::mdns::MulticastDnsMode;
 use std::time::Duration;
 
 /// Equal to UDP MTU
@@ -1335,12 +1334,15 @@ impl SettingEngineBuilder {
     ///
     /// This setting is targeted for removal in a future release (4.2.0 or later).
     ///
-    /// # Not read by this engine
+    /// # What it changes
     ///
-    /// Each media section already negotiates its own codecs, and this switch is not wired:
-    /// forcing one codec set needs the FlexFEC payload type dedupe that
-    /// `tests/answer_to_renumbering_peer_is_well_formed.rs` describes. The value is stored
-    /// and never read.
+    /// By default every remote description adds the formats of each of its audio and video
+    /// sections to the codecs the connection has negotiated, so a second video section that
+    /// offers only H.264 is answered with H.264 even when the first one negotiated VP8
+    /// (RFC 9429, Section 5.10). A format is kept once, under the first payload type that
+    /// named it. With `true`, only the first section of each kind (in the first remote
+    /// description that has one) decides the codecs, and later sections are answered from
+    /// that set.
     pub fn with_disable_media_engine_multiple_codecs(mut self, is_disabled: bool) -> Self {
         self.0.disable_media_engine_multiple_codecs = is_disabled;
         self

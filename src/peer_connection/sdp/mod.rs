@@ -1267,7 +1267,12 @@ impl RTCPeerConnection {
                         SDP_ATTRIBUTE_RID.to_owned(),
                         format!("{} send", encoding.rtp_coding_parameters.rid),
                     );
-                    send_rids.push(encoding.rtp_coding_parameters.rid.to_string());
+                    // RFC 8853, Section 5.3: an inactive encoding's rid is paused.
+                    if encoding.active {
+                        send_rids.push(encoding.rtp_coding_parameters.rid.to_string());
+                    } else {
+                        send_rids.push(format!("~{}", encoding.rtp_coding_parameters.rid));
+                    }
                 }
             }
         }

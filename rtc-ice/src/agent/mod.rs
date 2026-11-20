@@ -788,6 +788,22 @@ impl Agent {
         self.is_controlling = is_controlling;
     }
 
+    /// Replaces the candidate types the agent accepts as local candidates from now on
+    /// (`AgentConfig::candidate_types`; empty means the default set).
+    ///
+    /// Candidates already added stay: a new ICE transport policy takes effect at the next
+    /// gathering (RFC 9429, Section 4.1.18). A lite agent keeps host candidates only.
+    pub fn set_candidate_types(&mut self, candidate_types: Vec<CandidateType>) {
+        if self.lite {
+            return;
+        }
+        self.candidate_types = if candidate_types.is_empty() {
+            default_candidate_types()
+        } else {
+            candidate_types
+        };
+    }
+
     /// The agent's current connection state.
     pub fn state(&self) -> ConnectionState {
         self.connection_state

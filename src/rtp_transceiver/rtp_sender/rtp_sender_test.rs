@@ -616,11 +616,6 @@ fn rtx_media_engine() -> Result<MediaEngine> {
 }
 
 #[test]
-#[ignore = "only the first video m-section's codecs are negotiated: \
-            MediaEngine::set_multi_codec_negotiation is never called, so the documented \
-            default of SettingEngine::with_disable_media_engine_multiple_codecs(false) is not \
-            honoured; wiring it lets the engine accumulate a second numbering, which \
-            tests/answer_to_renumbering_peer_is_well_formed.rs shows emits FlexFEC twice"]
 fn test_rtp_sender_rtx() -> Result<()> {
     let (registry, log) = RecordingInterceptor::registry();
     let mut offerer = new_peer(
