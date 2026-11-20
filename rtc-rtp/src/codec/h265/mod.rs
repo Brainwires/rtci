@@ -20,6 +20,8 @@ use shared::error::{Error, Result};
 mod h265_test;
 #[cfg(test)]
 mod partition_head_test;
+#[cfg(test)]
+mod short_nal_test;
 
 /// The three-byte Annex B start code (`00 00 01`).
 pub static ANNEXB_3_NALUSTART_CODE: Bytes = Bytes::from_static(&[0x00, 0x00, 0x01]);
@@ -228,7 +230,8 @@ impl HevcPayloader {
     }
 
     fn emit(nalu: &Bytes, mtu: usize, payloads: &mut Vec<Bytes>) {
-        if nalu.is_empty() {
+        // An H.265 NAL unit header is two bytes (RFC 7798 1.1.4); anything shorter is not one.
+        if nalu.len() < H265NALU_HEADER_SIZE {
             return;
         }
         let payload_header = H265NALUHeader::new(nalu[0], nalu[1]);

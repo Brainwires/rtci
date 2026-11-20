@@ -9,6 +9,8 @@
 #[cfg(test)]
 mod h264_reader_port_test;
 #[cfg(test)]
+mod h26x_reader_resume_test;
+#[cfg(test)]
 mod h26x_reader_test;
 /// Reads Annex B streams as whole samples rather than individual NAL units.
 pub mod sample_reader;
@@ -569,9 +571,15 @@ impl<R: Read> H26xReader<R> {
                         } else {
                             2
                         };
-                    let nal_unit_length =
-                        self.nal_buffer.len() - count_of_consecutive_zero_bytes_in_prefix;
-                    if nal_unit_length > 0 {
+                    // The zeros may have been counted before the buffer last emptied (a stream
+                    // that ended on `00 00` and then resumed), so the buffer can hold fewer of
+                    // them than were counted.
+                    if let Some(nal_unit_length) = self
+                        .nal_buffer
+                        .len()
+                        .checked_sub(count_of_consecutive_zero_bytes_in_prefix)
+                        && nal_unit_length > 0
+                    {
                         let _ = self.nal_buffer.split_off(nal_unit_length);
                         nal_found = true;
                     }

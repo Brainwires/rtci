@@ -3,6 +3,10 @@
 
 use bytes::Bytes;
 
+#[cfg(test)]
+#[path = "obu_size_test.rs"]
+mod obu_size_test;
+
 use crate::codec::av1::leb128::read_leb128;
 use shared::error::{Error, Result};
 
@@ -68,6 +72,12 @@ pub fn parse_obus(payload: &Bytes) -> Result<Vec<Obu>> {
                 return Err(Error::ErrPayloadTooSmallForObuPayloadSize);
             }
             let (obu_payload_size, leb128_size) = read_leb128(&payload_without_header);
+            // The declared size must fit what follows the size field.
+            if (obu_payload_size as u64)
+                > payload_without_header.len().saturating_sub(leb128_size) as u64
+            {
+                return Err(Error::ErrPayloadTooSmallForObuPayloadSize);
+            }
             payload_data_remaining -= leb128_size as isize;
             payload_data_index += leb128_size;
             payload_without_header.slice(leb128_size..leb128_size + obu_payload_size as usize)
