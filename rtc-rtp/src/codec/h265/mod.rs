@@ -18,6 +18,8 @@ use shared::error::{Error, Result};
 
 #[cfg(test)]
 mod h265_test;
+#[cfg(test)]
+mod partition_head_test;
 
 /// The three-byte Annex B start code (`00 00 01`).
 pub static ANNEXB_3_NALUSTART_CODE: Bytes = Bytes::from_static(&[0x00, 0x00, 0x01]);
@@ -1153,9 +1155,21 @@ impl Depacketizer for H265Packet {
     }
 
     /// is_partition_head checks if this is the head of a packetized nalu stream.
-    fn is_partition_head(&self, _payload: &Bytes) -> bool {
-        //TODO:
-        true
+    ///
+    /// Every payload begins a NAL unit except a fragmentation unit whose start bit is clear
+    /// (RFC 7798 4.4.3: the FU header's S bit marks the first fragment). A fragmentation unit too
+    /// short to carry its FU header cannot begin anything.
+    fn is_partition_head(&self, payload: &Bytes) -> bool {
+        if payload.len() < H265NALU_HEADER_SIZE {
+            return false;
+        }
+        let nalu_type = (payload[0] >> 1) & 0x3F;
+        if nalu_type != H265NALU_FRAGMENTATION_UNIT_TYPE {
+            return true;
+        }
+        payload
+            .get(H265NALU_HEADER_SIZE)
+            .is_some_and(|fu_header| fu_header & 0x80 != 0)
     }
 
     fn is_partition_tail(&self, marker: bool, _payload: &Bytes) -> bool {
