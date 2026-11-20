@@ -8,6 +8,8 @@
 //! The three address kinds are easy to confuse: [`RelayedAddr`] is what peers send to,
 //! [`ReflexiveAddr`] is how the server sees this client, and [`PeerAddr`] is the far end.
 #[cfg(test)]
+mod client_retry_test;
+#[cfg(test)]
 mod client_stale_nonce_test;
 #[cfg(test)]
 mod client_test;
@@ -429,6 +431,50 @@ impl Client {
         }
 
         Ok(())
+    }
+
+    /// Deals with a transaction that exhausted its retransmissions.
+    ///
+    /// A Refresh or ChannelBind is started once more as a new transaction, so one lost burst
+    /// does not let the allocation lapse or leave a channel unbound for good. A ChannelBind that
+    /// fails again returns its binding to idle, so the next send binds it again. Anything not
+    /// started again is reported as [`Event::TransactionTimeout`], under the id its caller
+    /// knows.
+    fn handle_transaction_timeout(&mut self, now: Instant, tr: Transaction) {
+        let id = tr.transaction_type.report_id(tr.transaction_id);
+        match tr.transaction_type {
+            TransactionType::RefreshRequest(relayed_addr, lifetime, retry) => {
+                if !retry.timeout
+                    && let Ok(mut relay) = self.relay(relayed_addr)
+                    && relay
+                        .refresh_allocation_with(
+                            now,
+                            lifetime,
+                            retry.after_timeout(tr.transaction_id),
+                        )
+                        .is_ok()
+                {
+                    debug!("refresh timed out; sent again");
+                    return;
+                }
+            }
+            TransactionType::ChannelBindRequest(relayed_addr, bind_addr, retry) => {
+                if !retry.timeout
+                    && let Ok(mut relay) = self.relay(relayed_addr)
+                    && relay
+                        .rebind_channel(now, bind_addr, retry.after_timeout(tr.transaction_id))
+                        .is_ok()
+                {
+                    debug!("channel bind for {bind_addr} timed out; sent again");
+                    return;
+                }
+                if let Some(b) = self.binding_mgr.get_by_addr(&bind_addr) {
+                    b.set_state(BindingState::Idle);
+                }
+            }
+            _ => {}
+        }
+        self.events.push_back(Event::TransactionTimeout(id));
     }
 
     fn handle_channel_data(&mut self, data: &[u8]) -> Result<()> {

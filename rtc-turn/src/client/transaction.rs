@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use stun::message::*;
 
-use crate::client::{Event, RelayedAddr};
+use crate::client::RelayedAddr;
 use shared::{TransportContext, TransportMessage, TransportProtocol};
 use stun::textattrs::TextAttribute;
 
@@ -31,7 +31,9 @@ pub(crate) fn authenticated_allocate_id(attempt: TransactionId) -> TransactionId
 /// What a re-sendable TURN request carries from one attempt to the next.
 ///
 /// A CreatePermission, Refresh or ChannelBind answered with 438 (Stale Nonce) is sent again
-/// with the new nonce under a new transaction id (RFC 8489 §9.2.5, RFC 8656 §4.4), once.
+/// with the new nonce under a new transaction id (RFC 8489 §9.2.5, RFC 8656 §4.4), once. A
+/// Refresh or ChannelBind that exhausts its retransmissions is started again, once, as a new
+/// transaction.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Retry {
     /// The id of the first request of the chain: the one its caller was handed, and the one
@@ -39,6 +41,8 @@ pub(crate) struct Retry {
     pub(crate) origin: Option<TransactionId>,
     /// Whether this request already re-sends one that was answered with 438 (Stale Nonce).
     pub(crate) stale_nonce: bool,
+    /// Whether this request already re-sends one that timed out.
+    pub(crate) timeout: bool,
 }
 
 impl Retry {
@@ -52,6 +56,16 @@ impl Retry {
         Self {
             origin: Some(self.report_id(wire)),
             stale_nonce: true,
+            ..self
+        }
+    }
+
+    /// The state for starting the request sent as `wire` again after it timed out.
+    pub(crate) fn after_timeout(self, wire: TransactionId) -> Self {
+        Self {
+            origin: Some(self.report_id(wire)),
+            timeout: true,
+            ..self
         }
     }
 }
@@ -209,7 +223,6 @@ fn is_reliable(transport_protocol: TransportProtocol) -> bool {
 pub(crate) struct TransactionMap {
     tr_map: HashMap<TransactionId, Transaction>,
     transmits: VecDeque<TransportMessage<BytesMut>>,
-    events: VecDeque<Event>,
 }
 
 impl TransactionMap {
@@ -218,7 +231,6 @@ impl TransactionMap {
         TransactionMap {
             tr_map: HashMap::new(),
             transmits: VecDeque::new(),
-            events: VecDeque::new(),
         }
     }
 
@@ -234,7 +246,9 @@ impl TransactionMap {
         eto
     }
 
-    pub(crate) fn handle_timeout(&mut self, now: Instant) {
+    /// Advances every transaction to `now` and removes and returns the ones that exhausted
+    /// their retransmissions. The client decides whether each is started again or reported.
+    pub(crate) fn handle_timeout(&mut self, now: Instant) -> Vec<Transaction> {
         let mut keys = vec![];
         for (key, tr) in self.tr_map.iter_mut() {
             tr.handle_timeout(now);
@@ -243,15 +257,9 @@ impl TransactionMap {
             }
         }
 
-        for key in keys {
-            let exhausted = self.tr_map.remove(&key);
-            // Reported under the id its caller knows, which an Allocate or a retried request
-            // does not have on the wire.
-            let timed_out = exhausted
-                .as_ref()
-                .map_or(key, |tr| tr.transaction_type.report_id(key));
-            self.events.push_back(Event::TransactionTimeout(timed_out));
-        }
+        keys.into_iter()
+            .filter_map(|key| self.tr_map.remove(&key))
+            .collect()
     }
 
     pub(crate) fn poll_transmit(&mut self) -> Option<TransportMessage<BytesMut>> {
@@ -261,10 +269,6 @@ impl TransactionMap {
             }
         }
         self.transmits.pop_front()
-    }
-
-    pub(crate) fn poll_event(&mut self) -> Option<Event> {
-        self.events.pop_front()
     }
 
     // Insert inserts a trasaction to the map
