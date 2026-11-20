@@ -116,7 +116,10 @@ that work. The minor version moves because the public API changes (see "Breaking
   the AES-GCM / CCM explicit nonce is the record's epoch and sequence number (RFC 5288, RFC 6655);
   CBC padding and MAC checks have a constant structure; a server does no key exchange work for a
   source address before the cookie exchange.
-- **SRTP**: the AES-GCM cipher constructor returns errors instead of panicking.
+- **SRTP**: the AES-GCM cipher constructor returns errors instead of panicking. The inbound replay
+  window defaults to 1024 packets (was 64): a NACK retransmission without RTX reuses the lost
+  packet's sequence number, and one repaired on a third try at 200 packets/s was already more
+  than 64 packets behind and refused as too old, so the packet was lost for good.
 - **RTP, RTCP, codecs, interceptors**: a packet keeps its padding size across unmarshal and
   marshal; every compound report carries an SDES CNAME; a reception report's cumulative loss is
   read as signed 24-bit; TWCC receive deltas and status chunks are checked against the packet.

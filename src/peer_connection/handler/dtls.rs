@@ -521,7 +521,19 @@ impl<'a> DtlsHandler<'a> {
         });
     }
 
-    const DEFAULT_SESSION_SRTP_REPLAY_PROTECTION_WINDOW: usize = 64;
+    /// The inbound SRTP replay window, in packets, unless the setting engine sets one.
+    ///
+    /// A NACK retransmission without RTX reuses the lost packet's sequence number, so it reaches
+    /// the replay detector behind every packet sent since. It arrives a round trip plus the NACK
+    /// interval late on the first try, and another interval later for each lost NACK or lost
+    /// retransmission: at 200 packets/s a third try is already more than 64 packets behind, and
+    /// a 64-packet window refused it as too old, losing the packet for good. 1024 matches the
+    /// NACK responder's default send buffer and the sender's own index window
+    /// (`SRTP_SEND_INDEX_WINDOW`), so any packet the sender can still retransmit is accepted,
+    /// and is what libwebrtc uses for the same reason. RFC 3711 Section 3.3.2 sets 64 as the
+    /// minimum. Replay protection is unchanged: a duplicate inside the window is still refused,
+    /// and the cost is a 128-byte bitmap per SSRC (at most `MAX_SSRC_STATES` of them).
+    const DEFAULT_SESSION_SRTP_REPLAY_PROTECTION_WINDOW: usize = 1024;
     const DEFAULT_SESSION_SRTCP_REPLAY_PROTECTION_WINDOW: usize = 64;
     pub(crate) fn update_srtp_contexts(
         state: &State,
@@ -601,6 +613,92 @@ impl<'a> DtlsHandler<'a> {
 mod tests {
     use super::*;
     use crate::peer_connection::transport::{RTCTransportId, TransportKind};
+    use shared::marshal::Marshal;
+
+    /// A NACK retransmission (no RTX) carries the lost packet's sequence number and arrives after
+    /// every packet sent since. The session's default inbound window accepts it while it is
+    /// within the window, and still refuses a duplicate and a packet older than the window.
+    #[test]
+    fn default_srtp_replay_window_accepts_a_late_retransmission() -> Result<()> {
+        const WINDOW: u16 =
+            DtlsHandler::<'static>::DEFAULT_SESSION_SRTP_REPLAY_PROTECTION_WINDOW as u16;
+        // Repaired just inside the window: the newest packet is WINDOW - 1 ahead of it.
+        const REPAIRED: u16 = 10;
+        // Repaired just outside it: the newest packet is WINDOW ahead of it.
+        const TOO_OLD: u16 = 20;
+        const LAST: u16 = TOO_OLD + WINDOW;
+
+        let provider =
+            crypto::default_provider().expect("a built-in crypto provider is enabled for tests");
+        let key = [0x0du8; 16];
+        let salt = [0x62u8; 14];
+        let mut sender = srtp::context::Context::new(
+            &key,
+            &salt,
+            ProtectionProfile::Aes128CmHmacSha1_80,
+            None,
+            None,
+            provider.crypto(),
+        )?;
+        let mut receiver = srtp::context::Context::new(
+            &key,
+            &salt,
+            ProtectionProfile::Aes128CmHmacSha1_80,
+            Some(srtp_replay_protection(
+                DtlsHandler::<'static>::DEFAULT_SESSION_SRTP_REPLAY_PROTECTION_WINDOW,
+            )),
+            None,
+            provider.crypto(),
+        )?;
+
+        let mut protect = |seq: u16| -> Result<Vec<u8>> {
+            let packet = rtp::Packet {
+                header: rtp::Header {
+                    version: 2,
+                    payload_type: 96,
+                    sequence_number: seq,
+                    timestamp: u32::from(seq) * 450,
+                    ssrc: 0x1234_5678,
+                    ..Default::default()
+                },
+                payload: bytes::Bytes::from(vec![0x10u8; 100]),
+            };
+            Ok(sender.encrypt_rtp(&packet.marshal()?)?.to_vec())
+        };
+
+        let mut repaired = None;
+        let mut too_old = None;
+        for seq in 1..=LAST {
+            let protected = protect(seq)?;
+            match seq {
+                REPAIRED => repaired = Some(protected),
+                TOO_OLD => too_old = Some(protected),
+                _ => {
+                    receiver.decrypt_rtp(&protected)?;
+                }
+            }
+            if seq == REPAIRED + WINDOW - 1 {
+                let retransmission = repaired.as_ref().expect("protected above");
+                receiver.decrypt_rtp(retransmission).map_err(|e| {
+                    Error::Other(format!(
+                        "a retransmission {} packets late was refused: {e}",
+                        WINDOW - 1
+                    ))
+                })?;
+                assert!(
+                    receiver.decrypt_rtp(retransmission).is_err(),
+                    "a replayed packet inside the window is refused"
+                );
+            }
+        }
+        assert!(
+            receiver
+                .decrypt_rtp(too_old.as_ref().expect("protected above"))
+                .is_err(),
+            "a packet a full window behind the newest is refused"
+        );
+        Ok(())
+    }
 
     /// A fixed nonce keeps test ids deterministic while still distinguishing the kinds.
     fn test_transport_id(kind: TransportKind) -> RTCTransportId {

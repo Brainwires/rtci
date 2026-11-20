@@ -1030,6 +1030,10 @@ impl SettingEngineBuilder {
     /// SRTP replay protection prevents replay attacks on encrypted media packets.
     /// Adjust the window size based on expected packet reordering in your network.
     ///
+    /// The default is 1024 packets. A NACK retransmission sent without RTX reuses the lost
+    /// packet's sequence number and arrives after every packet sent since, so a window smaller
+    /// than the packets sent during a few NACK rounds refuses late repairs as too old.
+    ///
     /// # Parameters
     ///
     /// * `n` - Window size in packets (0 = disabled, not recommended)
@@ -1040,9 +1044,9 @@ impl SettingEngineBuilder {
     /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// // Standard size for most applications
+    /// // A wider window for a high packet rate
     /// let setting_engine = SettingEngineBuilder::new()
-    ///     .with_srtp_replay_protection_window(256)
+    ///     .with_srtp_replay_protection_window(4096)
     ///     .build();
     /// # Ok(())
     /// # }
