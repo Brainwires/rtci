@@ -86,6 +86,13 @@ struct LocalStream {
     rid_extension_id: Option<u8>,
     /// The repaired-RID extension id, if negotiated.
     repaired_rid_extension_id: Option<u8>,
+    /// Retransmissions this stream may still send: one more for each original packet sent, up
+    /// to the send buffer's size, and one less per retransmission. A NACK naming the whole buffer
+    /// may be answered once in full, but repeated NACKs cannot make the stream retransmit faster
+    /// than it sends, so the peer cannot turn its NACKs into a multiple of our send rate.
+    retransmit_budget: usize,
+    /// The budget's ceiling: the send buffer's size.
+    retransmit_budget_max: usize,
 }
 
 /// A sequence number is retransmitted at most once per this interval, however often it is
@@ -169,10 +176,14 @@ impl NackResponderInterceptor {
             if stream.last_retransmit.contains_key(&seq) {
                 continue;
             }
+            if stream.retransmit_budget == 0 {
+                break;
+            }
             let Some(original_packet) = stream.send_buffer.get(seq) else {
                 continue;
             };
             stream.last_retransmit.insert(seq, now);
+            stream.retransmit_budget -= 1;
             self.retransmissions_queued += 1;
 
             let packet = if let (Some(ssrc_rtx), Some(pt_rtx)) =
@@ -271,6 +282,8 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for NackResponderInterceptor {
             && let Some(stream) = self.streams.get_mut(&rtp_packet.header.ssrc)
         {
             stream.send_buffer.add(rtp_packet.clone());
+            stream.retransmit_budget =
+                (stream.retransmit_budget + 1).min(stream.retransmit_budget_max);
         }
 
         self.write_queue.push_back(msg);
@@ -311,6 +324,8 @@ impl Interceptor for NackResponderInterceptor {
                     last_retransmit: HashMap::new(),
                     rid_extension_id: extension_id(info, RTP_STREAM_ID_URI),
                     repaired_rid_extension_id: extension_id(info, REPAIRED_RTP_STREAM_ID_URI),
+                    retransmit_budget: usize::from(self.size),
+                    retransmit_budget_max: usize::from(self.size),
                 },
             );
         }
