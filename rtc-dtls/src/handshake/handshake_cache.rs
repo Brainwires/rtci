@@ -272,4 +272,20 @@ impl HandshakeCache {
                 .map_err(|error| Error::Crypto(error.to_string())),
         }
     }
+
+    /// Whether `data`, one complete handshake message with its header, is byte for byte the
+    /// message cached under its sequence number for `epoch` and `is_client`: a repeat of a
+    /// message already received, not a different one under a reused sequence number.
+    pub(crate) fn contains_message(&self, data: &[u8], epoch: u16, is_client: bool) -> bool {
+        let mut reader = data;
+        let Ok(header) = HandshakeHeader::unmarshal(&mut reader) else {
+            return false;
+        };
+        self.cache.iter().any(|item| {
+            item.message_sequence == header.message_sequence
+                && item.is_client == is_client
+                && item.epoch == epoch
+                && item.data == data
+        })
+    }
 }

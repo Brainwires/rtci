@@ -110,33 +110,7 @@ impl FragmentBuffer {
         let Some(next_seq_num) = seq_num.checked_add(1) else {
             return Err(Error::ErrEmptyFragment);
         };
-        if !self.cache.contains_key(&seq_num) {
-            return Err(Error::ErrEmptyFragment);
-        }
-
-        let (content, epoch) = if let Some(frags) = self.cache.get_mut(&seq_num) {
-            let Some(raw_message) = assemble_message(frags) else {
-                return Err(Error::ErrEmptyFragment);
-            };
-
-            let mut first_header = frags[0].handshake_header;
-            first_header.fragment_offset = 0;
-            first_header.fragment_length = first_header.length;
-
-            let mut raw_header = vec![];
-            {
-                let mut writer = BufWriter::<&mut Vec<u8>>::new(raw_header.as_mut());
-                if first_header.marshal(&mut writer).is_err() {
-                    return Err(Error::ErrEmptyFragment);
-                }
-            }
-
-            let message_epoch = frags[0].record_layer_header.epoch;
-
-            raw_header.extend_from_slice(&raw_message);
-
-            (raw_header, message_epoch)
-        } else {
+        let Some((content, epoch)) = self.assemble(seq_num) else {
             return Err(Error::ErrEmptyFragment);
         };
 
@@ -144,6 +118,51 @@ impl FragmentBuffer {
         self.current_message_sequence_number = next_seq_num;
 
         Ok((content, epoch))
+    }
+
+    /// Takes a complete message whose sequence number [`Self::pop`] has already handed out: the
+    /// peer sending a message again, as it does when it retransmits a flight (RFC 6347 4.2.4).
+    /// A repeat still missing fragments stays until they arrive. Returns the message (header
+    /// included), the epoch it arrived in and its sequence number.
+    pub fn pop_stale(&mut self) -> Option<(Vec<u8>, u16, u16)> {
+        let current = self.current_message_sequence_number;
+        let mut stale: Vec<u16> = self
+            .cache
+            .keys()
+            .copied()
+            .filter(|seq| *seq < current)
+            .collect();
+        stale.sort_unstable();
+        for seq in stale {
+            if let Some((content, epoch)) = self.assemble(seq) {
+                self.cache.remove(&seq);
+                return Some((content, epoch, seq));
+            }
+        }
+        None
+    }
+
+    /// Reassembles message `seq_num`, its header rebuilt as for one unfragmented message, with the
+    /// epoch it arrived in. `None` while fragments are missing.
+    fn assemble(&self, seq_num: u16) -> Option<(Vec<u8>, u16)> {
+        let frags = self.cache.get(&seq_num)?;
+        let raw_message = assemble_message(frags)?;
+
+        let mut first_header = frags[0].handshake_header;
+        first_header.fragment_offset = 0;
+        first_header.fragment_length = first_header.length;
+
+        let mut raw_header = vec![];
+        {
+            let mut writer = BufWriter::<&mut Vec<u8>>::new(raw_header.as_mut());
+            first_header.marshal(&mut writer).ok()?;
+        }
+
+        let message_epoch = frags[0].record_layer_header.epoch;
+
+        raw_header.extend_from_slice(&raw_message);
+
+        Some((raw_header, message_epoch))
     }
 
     fn size(&self) -> usize {

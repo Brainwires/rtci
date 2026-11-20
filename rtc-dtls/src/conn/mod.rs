@@ -123,6 +123,10 @@ pub struct DTLSConn {
     /// Reset on every `read`, unlike the sticky `handshake_rx`, so a completed association can tell
     /// an RFC 6347 §4.2.4 last-flight repeat from ordinary post-handshake application data.
     pub(crate) received_handshake_in_last_datagram: bool,
+    /// The peer sent again a handshake message we had already processed: it is retransmitting
+    /// its flight because ours was lost, so ours is retransmitted at once (RFC 6347 4.2.4).
+    /// Taken by the next `handshake()`.
+    pub(crate) peer_repeated_flight: bool,
 }
 
 impl DTLSConn {
@@ -190,6 +194,7 @@ impl DTLSConn {
             retransmit: false,
             handshake_rx: None,
             received_handshake_in_last_datagram: false,
+            peer_repeated_flight: false,
         }
     }
 
@@ -840,6 +845,24 @@ impl DTLSConn {
                     raw_handshake.handshake_header.handshake_type,
                     !self.is_client,
                 );
+            }
+
+            // RFC 6347 4.2.4: a message the peer sends again after it has been processed (its
+            // sequence number already handed out and parsed) means the flight we answered it
+            // with was lost, so that flight is retransmitted at once rather than when our timer
+            // fires. Only a byte-for-byte repeat of the cached message counts.
+            while let Some((out, epoch, message_sequence)) = self.fragment_buffer.pop_stale() {
+                if isize::from(message_sequence) < self.state.handshake_recv_sequence
+                    && self.cache.contains_message(&out, epoch, !self.is_client)
+                {
+                    debug!(
+                        "{}: peer repeated handshake message (epoch: {}, seq: {})",
+                        srv_cli_str(self.is_client),
+                        epoch,
+                        message_sequence
+                    );
+                    self.peer_repeated_flight = true;
+                }
             }
 
             return (true, None, None);

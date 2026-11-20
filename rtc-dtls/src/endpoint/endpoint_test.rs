@@ -272,3 +272,110 @@ fn a_discarded_record_does_not_fail_the_association() -> Result<()> {
     assert!(!server.is_connection_failed(&client_addr()));
     Ok(())
 }
+
+// ---------------------------------------------------------------------------------------------
+// RFC 6347 4.2.4: a peer that repeats a flight we already processed gets our answer again at
+// once, not when our timer fires.
+// ---------------------------------------------------------------------------------------------
+
+/// Runs flights 1 to 3, then loses the server's Flight 4. Returns the client's repeat of
+/// Flight 3, sent when its own timer fired.
+fn lose_flight_four(client: &mut Endpoint, server: &mut Endpoint, now: Instant) -> Vec<BytesMut> {
+    let flight1 = take_transmits(client);
+    deliver(server, client_addr(), flight1, now);
+    let flight2 = take_transmits(server);
+    deliver(client, server_addr(), flight2, now);
+    let flight3 = take_transmits(client);
+    assert!(!flight3.is_empty(), "the client sends Flight 3");
+    deliver(server, client_addr(), flight3, now);
+    let flight4 = take_transmits(server);
+    assert!(
+        !flight4.is_empty(),
+        "the server answers with Flight 4, which is lost"
+    );
+    assert!(
+        server.poll_timeout(&client_addr()).is_some(),
+        "the server waits for Flight 5 with its timer armed"
+    );
+
+    let client_timer = client
+        .poll_timeout(&server_addr())
+        .expect("the client waits for Flight 4 with its timer armed");
+    client
+        .handle_timeout(server_addr(), client_timer)
+        .expect("the client retransmits Flight 3");
+    let repeat = take_transmits(client);
+    assert!(!repeat.is_empty(), "the client repeats Flight 3");
+    repeat
+}
+
+/// The server, which already processed Flight 3, answers its repeat with Flight 4 at once,
+/// before its own timer fires.
+#[test]
+fn a_repeated_flight_is_answered_at_once() -> Result<()> {
+    let now = Instant::now();
+    let mut client = Endpoint::new(client_addr(), TransportProtocol::UDP, None);
+    let mut server = Endpoint::new(
+        server_addr(),
+        TransportProtocol::UDP,
+        Some(server_config()?),
+    );
+    client.connect(now, server_addr(), client_config()?, None)?;
+    let repeat = lose_flight_four(&mut client, &mut server, now);
+
+    // Delivered before the server's own timer fires.
+    let (_, errored) = deliver(&mut server, client_addr(), repeat, now);
+    assert!(!errored);
+    let answer = take_transmits(&mut server);
+    assert!(
+        !answer.is_empty(),
+        "the server retransmits Flight 4 as soon as the client repeats Flight 3"
+    );
+    assert!(
+        answer.iter().all(|datagram| record_content_types(datagram)
+            .iter()
+            .all(|content_type| *content_type == HANDSHAKE)),
+        "the answer is the handshake flight"
+    );
+    assert_eq!(
+        server.connections[&client_addr()].current_retransmit_count,
+        1,
+        "the immediate retransmission comes out of the retransmission budget"
+    );
+    assert!(!server.is_connection_failed(&client_addr()));
+
+    // The client completes from the retransmitted flight.
+    deliver(&mut client, server_addr(), answer, now);
+    complete_handshake(&mut client, &mut server, now);
+    Ok(())
+}
+
+/// A different message under a sequence number already processed is not a repeat: it provokes
+/// no retransmission.
+#[test]
+fn a_changed_message_under_an_old_sequence_number_is_not_a_repeat() -> Result<()> {
+    let now = Instant::now();
+    let mut client = Endpoint::new(client_addr(), TransportProtocol::UDP, None);
+    let mut server = Endpoint::new(
+        server_addr(),
+        TransportProtocol::UDP,
+        Some(server_config()?),
+    );
+    client.connect(now, server_addr(), client_config()?, None)?;
+    let mut repeat = lose_flight_four(&mut client, &mut server, now);
+
+    // Change one byte of the ClientHello's random: record header (13), handshake header (12),
+    // client version (2), then the random.
+    let datagram = repeat.first_mut().expect("the repeat has a datagram");
+    datagram[13 + 12 + 2 + 5] ^= 0xff;
+    deliver(&mut server, client_addr(), repeat, now);
+    assert!(
+        take_transmits(&mut server).is_empty(),
+        "a changed message is not answered"
+    );
+    assert_eq!(
+        server.connections[&client_addr()].current_retransmit_count,
+        0
+    );
+    Ok(())
+}

@@ -81,11 +81,39 @@ impl DTLSConn {
         if self.failed {
             return Err(Error::ErrConnClosed);
         }
-        let result = self.handshake_steps(now);
+        let peer_repeated_flight = std::mem::take(&mut self.peer_repeated_flight);
+        let flight_before = self.current_flight.to_string();
+        let mut result = self.handshake_steps(now);
+        if result.is_ok()
+            && peer_repeated_flight
+            && self.current_handshake_state == HandshakeState::Waiting
+            && self.current_flight.to_string() == flight_before
+        {
+            result = self.retransmit_for_repeated_flight(now);
+        }
         if result.is_err() {
             self.fail();
         }
         result
+    }
+
+    /// RFC 6347 4.2.4: the peer sent again a flight we had already processed, so the flight we
+    /// answered it with was lost. Retransmit that flight now instead of when our timer fires;
+    /// sending it restarts the timer. Only while still waiting for the peer's next flight, and
+    /// out of the same retransmission budget the timer uses. A spent budget means no answer
+    /// here: giving up stays the timer's decision.
+    fn retransmit_for_repeated_flight(&mut self, now: Instant) -> Result<()> {
+        if !self.retransmit || self.current_retransmit_count >= self.maximum_retransmit_number {
+            return Ok(());
+        }
+        debug!(
+            "[handshake:{}] {} peer repeated its flight, retransmitting",
+            srv_cli_str(self.state.is_client),
+            self.current_flight
+        );
+        self.current_retransmit_count += 1;
+        self.current_handshake_state = HandshakeState::Sending;
+        self.handshake_steps(now)
     }
 
     fn handshake_steps(&mut self, now: Instant) -> Result<()> {
