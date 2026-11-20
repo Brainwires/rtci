@@ -910,6 +910,61 @@ pub fn negotiate(a: &mut EnvPeer, b: &mut EnvPeer) -> io::Result<()> {
     Ok(())
 }
 
+/// As `negotiate`, but what each side receives is first passed through `edit_offer` /
+/// `edit_answer` (the sender keeps its own description as it made it).
+pub fn negotiate_with(
+    a: &mut EnvPeer,
+    b: &mut EnvPeer,
+    edit_offer: impl Fn(&str) -> String,
+    edit_answer: impl Fn(&str) -> String,
+) -> io::Result<()> {
+    use rtc::peer_connection::sdp::RTCSessionDescription;
+    let e = io::Error::other;
+    let offer = a.pc.create_offer(None).map_err(e)?;
+    a.pc.set_local_description(Instant::now(), offer.clone())
+        .map_err(e)?;
+    let offer = RTCSessionDescription::offer(edit_offer(offer.sdp.as_str())).map_err(e)?;
+    b.pc.set_remote_description(Instant::now(), offer)
+        .map_err(e)?;
+    let answer = b.pc.create_answer(None).map_err(e)?;
+    b.pc.set_local_description(Instant::now(), answer.clone())
+        .map_err(e)?;
+    let answer = RTCSessionDescription::answer(edit_answer(answer.sdp.as_str())).map_err(e)?;
+    a.pc.set_remote_description(Instant::now(), answer)
+        .map_err(e)?;
+    let (ca, cb) = (a.local_candidates.clone(), b.local_candidates.clone());
+    a.add_remote_candidates(&cb)?;
+    b.add_remote_candidates(&ca)?;
+    Ok(())
+}
+
+/// `sdp` with the first byte of every `a=fingerprint:` hash changed, so the certificate the
+/// other side presents no longer matches it (RFC 8122 5, RFC 5763 5).
+pub fn with_wrong_fingerprint(sdp: &str) -> String {
+    let mut changed = 0;
+    let out = sdp
+        .split("\r\n")
+        .map(|line| {
+            let Some(rest) = line.strip_prefix("a=fingerprint:") else {
+                return line.to_owned();
+            };
+            let Some((alg, hash)) = rest.split_once(' ') else {
+                return line.to_owned();
+            };
+            changed += 1;
+            let first = if hash.get(..2).is_some_and(|b| b.eq_ignore_ascii_case("00")) {
+                "FF"
+            } else {
+                "00"
+            };
+            format!("a=fingerprint:{alg} {first}{}", hash.get(2..).unwrap_or(""))
+        })
+        .collect::<Vec<_>>()
+        .join("\r\n");
+    assert!(changed > 0, "no a=fingerprint line to change in:\n{sdp}");
+    out
+}
+
 /// Offer from `a`, answer from `b`, with no trickling: each side learns the other's candidates
 /// only from the descriptions (where an mDNS-hiding peer writes `.local` names). Returns the
 /// offer's and the answer's SDP.
