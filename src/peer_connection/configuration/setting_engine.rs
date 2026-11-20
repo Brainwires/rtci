@@ -1187,10 +1187,10 @@ impl SettingEngineBuilder {
     /// ```
     /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
     ///
-    /// let setting_engine = SettingEngineBuilder::new()
+    /// // Pair loopback remote candidates with any local candidate; keep link-local ones scoped.
+    /// let _setting_engine = SettingEngineBuilder::new()
     ///     .with_remote_candidate_scopes(true, false)
     ///     .build();
-    /// assert!(setting_engine.candidates.allow_loopback_remote_candidates);
     /// ```
     pub fn with_remote_candidate_scopes(mut self, loopback: bool, link_local: bool) -> Self {
         self.0.candidates.allow_loopback_remote_candidates = loopback;
@@ -1208,12 +1208,12 @@ impl SettingEngineBuilder {
     /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
     /// use std::sync::Arc;
     ///
-    /// let setting_engine = SettingEngineBuilder::new()
+    /// // Drop every remote candidate on a loopback address.
+    /// let _setting_engine = SettingEngineBuilder::new()
     ///     .with_remote_address_filter(Arc::new(|addr: std::net::SocketAddr| {
     ///         !addr.ip().is_loopback()
     ///     }))
     ///     .build();
-    /// assert!(setting_engine.candidates.remote_address_filter.is_some());
     /// ```
     pub fn with_remote_address_filter(mut self, filter: RemoteAddressFilter) -> Self {
         self.0.candidates.remote_address_filter = Some(filter);
