@@ -336,9 +336,10 @@ fn test_packet_half_range_behind_does_not_rewind_the_index() -> Result<()> {
     Ok(())
 }
 
-/// An SRTP packet index is protected at most once (RFC 3711 Section 3.3.1, RFC 7714 Section
-/// 8.1). Indexes not yet sent, in any order within the window, are still accepted, and so is
-/// the sequence number wrap.
+/// An SRTP packet index protects one packet only (RFC 3711 Section 3.3.1, RFC 7714 Section
+/// 8.1): the same packet again (a retransmission) is protected again, to the same bytes, and a
+/// different packet under a used index is refused. Indexes not yet sent, in any order within
+/// the window, are still accepted, and so is the sequence number wrap.
 #[test]
 fn test_encrypt_refuses_a_used_packet_index() -> Result<()> {
     let provider = test_crypto_provider();
@@ -367,21 +368,26 @@ fn test_encrypt_refuses_a_used_packet_index() -> Result<()> {
             Ok(pkt.marshal()?.to_vec())
         };
 
-        ctx.encrypt_rtp(&packet(100, 1)?)?;
-        ctx.encrypt_rtp(&packet(101, 2)?)?;
+        let first = ctx.encrypt_rtp(&packet(100, 1)?)?;
+        let second = ctx.encrypt_rtp(&packet(101, 2)?)?;
 
-        // The same index again, with a different extension (and with the same bytes).
-        for stamp in [9, 1] {
-            let err = ctx
-                .encrypt_rtp(&packet(100, stamp)?)
-                .expect_err("a used index was encrypted again");
-            assert!(
-                matches!(err, Error::SrtpIndexReused(0xfeed_0002, 100)),
-                "{profile:?}: {err:?}"
-            );
-        }
+        // The same index again with a different extension: refused.
+        let err = ctx
+            .encrypt_rtp(&packet(100, 9)?)
+            .expect_err("a used index protected a different packet");
+        assert!(
+            matches!(err, Error::SrtpIndexReused(0xfeed_0002, 100)),
+            "{profile:?}: {err:?}"
+        );
 
-        // A refused packet changes nothing: the stream continues.
+        // The same packet again (a retransmission): protected to the very same bytes, and the
+        // refusal above did not spoil it.
+        assert_eq!(ctx.encrypt_rtp(&packet(100, 1)?)?, first, "{profile:?}");
+        assert_eq!(ctx.encrypt_rtp(&packet(101, 2)?)?, second, "{profile:?}");
+        assert_eq!(ctx.encrypt_rtp(&packet(100, 1)?)?, first, "{profile:?}");
+        assert!(ctx.encrypt_rtp(&packet(100, 9)?).is_err(), "{profile:?}");
+
+        // Neither the refusal nor the retransmissions moved the stream: it continues.
         ctx.encrypt_rtp(&packet(103, 3)?)?;
         // An index skipped earlier is new and still in the window.
         ctx.encrypt_rtp(&packet(102, 4)?)?;
@@ -398,9 +404,11 @@ fn test_encrypt_refuses_a_used_packet_index() -> Result<()> {
             seq += 20000.min(65000 - seq).max(1);
             ctx.encrypt_rtp(&packet(seq, 8)?)?;
         }
-        ctx.encrypt_rtp(&packet(100, 10)?)?;
+        let wrapped = ctx.encrypt_rtp(&packet(100, 10)?)?;
         assert_eq!(ctx.srtp_ssrc_states[&0xfeed_0002].index >> 16, 1);
         assert!(ctx.encrypt_rtp(&packet(100, 11)?).is_err(), "{profile:?}");
+        assert_eq!(ctx.encrypt_rtp(&packet(100, 10)?)?, wrapped, "{profile:?}");
+        assert_ne!(wrapped, first, "{profile:?}: another ROC, another index");
     }
     Ok(())
 }

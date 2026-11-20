@@ -32,7 +32,7 @@ use shared::marshal::MarshalSize;
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
-/// How soon after a simulcast layer (a `mid`/`rid`) moved to a new SSRC it may move again.
+/// How soon after a simulcast layer (a `mid`/`rid`) was bound to an SSRC it may move to another.
 /// Packets under another SSRC for that layer in between are not attributed to it.
 pub(crate) const MIN_RID_SSRC_REBIND_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -40,8 +40,8 @@ pub(crate) const MIN_RID_SSRC_REBIND_INTERVAL: Duration = Duration::from_secs(1)
 pub(crate) struct InterceptorHandlerContext {
     is_dtls_handshake_complete: bool,
     pub(crate) ssrc_owners: SsrcOwners,
-    /// When each (`mid`, `rid`) layer last moved to a new SSRC, for the rebinds of the last
-    /// [`MIN_RID_SSRC_REBIND_INTERVAL`] only.
+    /// When each (`mid`, `rid`) layer was last bound to an SSRC (first bind or move), for the
+    /// binds of the last [`MIN_RID_SSRC_REBIND_INTERVAL`] only.
     rid_rebinds: HashMap<(String, String), Instant>,
 
     pub(crate) read_outs: VecDeque<TaggedRTCMessageInternal>,
@@ -695,24 +695,27 @@ impl<'a> InterceptorHandler<'a> {
             Some(coding) => coding.ssrc,
         };
 
-        // The layer is moving to a new SSRC: at most once per interval, and the stream it leaves
-        // is unbound, so a layer holds one bound stream however often its SSRC changes.
-        if let Some(previous_ssrc) = previous_ssrc {
-            let key = (mid.clone(), rid.clone());
-            if self.ctx.rid_rebinds.get(&key).is_some_and(|last| {
+        // A layer moves to a new SSRC at most once per interval, counted from its first bind as
+        // well as from each move, and the stream it leaves is unbound: a layer holds one bound
+        // stream however often its SSRC changes.
+        let key = (mid.clone(), rid.clone());
+        if let Some(previous_ssrc) = previous_ssrc
+            && self.ctx.rid_rebinds.get(&key).is_some_and(|last| {
                 now.saturating_duration_since(*last) < MIN_RID_SSRC_REBIND_INTERVAL
-            }) {
-                debug!(
-                    "ignoring ssrc {ssrc} for mid={mid} rid={rid}: the layer moved from ssrc \
-                     {previous_ssrc} too recently"
-                );
-                return false;
-            }
-            self.ctx.rid_rebinds.retain(|_, last| {
-                now.saturating_duration_since(*last) < MIN_RID_SSRC_REBIND_INTERVAL
-            });
-            self.ctx.rid_rebinds.insert(key, now);
+            })
+        {
+            debug!(
+                "ignoring ssrc {ssrc} for mid={mid} rid={rid}: the layer was bound to ssrc \
+                 {previous_ssrc} too recently"
+            );
+            return false;
+        }
+        self.ctx
+            .rid_rebinds
+            .retain(|_, last| now.saturating_duration_since(*last) < MIN_RID_SSRC_REBIND_INTERVAL);
+        self.ctx.rid_rebinds.insert(key, now);
 
+        if let Some(previous_ssrc) = previous_ssrc {
             let parameters = receiver.get_parameters(self.media_engine);
             RTCRtpReceiverInternal::interceptor_remote_stream_op(
                 self.interceptor,

@@ -6,6 +6,7 @@ mod srtcp_test;
 mod srtp_test;
 
 use std::collections::HashMap;
+use std::hash::{BuildHasher, RandomState};
 
 use crypto::RTCCrypto;
 use shared::replay_detector::*;
@@ -25,11 +26,10 @@ pub mod srtp;
 const MAX_ROC: u32 = u32::MAX;
 const SEQ_NUM_MEDIAN: u16 = 1 << 15;
 const SEQ_NUM_MAX: u16 = u16::MAX;
-/// The highest SRTP packet index: a 32-bit ROC over a 16-bit sequence number.
-const MAX_SRTP_PACKET_INDEX: u64 = (1 << 48) - 1;
-/// How many packet indexes behind the highest one sent the sender still tracks individually.
-/// An index is encrypted at most once (RFC 3711 Section 3.3.1, RFC 7714 Section 8.1); an index
-/// older than this window is refused as well. Receivers' replay windows are far narrower.
+/// How many packet indexes behind the highest one sent the sender still tracks individually
+/// (the NACK responder's default buffer). An index protects one packet only (RFC 3711 Section
+/// 3.3.1, RFC 7714 Section 8.1): the same packet again is protected again (the output is the
+/// same), a different one is refused, and so is any index older than this window.
 pub(crate) const SRTP_SEND_INDEX_WINDOW: usize = 1024;
 /// How many SSRCs one context keeps SRTP state for, and separately SRTCP state for. Packets for
 /// a further SSRC are refused (existing state is never evicted).
@@ -43,7 +43,68 @@ pub(crate) struct SrtpSsrcState {
     rollover_has_processed: bool,
     replay_detector: Option<Box<dyn ReplayDetector>>,
     /// The packet indexes this (sending) context has encrypted, created on first encryption.
-    sent_indexes: Option<SlidingWindowDetector>,
+    sent_indexes: Option<SentIndexes>,
+}
+
+/// What an SRTP index may protect, as decided by [`SentIndexes::check`].
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum SendIndexUse {
+    /// Not used yet: protect the packet and record it.
+    New,
+    /// Already used for this very packet: protecting it again yields the same bytes.
+    SamePacket,
+    /// Used for a different packet, or too old to tell: refuse.
+    Refused,
+}
+
+/// The packet indexes a sending context protected within [`SRTP_SEND_INDEX_WINDOW`] of the
+/// highest one, each with a digest of the packet it protected.
+pub(crate) struct SentIndexes {
+    highest: Option<u64>,
+    /// `(index, digest)` by `index % SRTP_SEND_INDEX_WINDOW`; `None` when never written.
+    slots: Vec<Option<(u64, u64)>>,
+}
+
+impl SentIndexes {
+    pub(crate) fn new() -> Self {
+        SentIndexes {
+            highest: None,
+            slots: vec![None; SRTP_SEND_INDEX_WINDOW],
+        }
+    }
+
+    fn slot(index: u64) -> usize {
+        (index % SRTP_SEND_INDEX_WINDOW as u64) as usize
+    }
+
+    /// Whether `index` may protect the packet whose digest is `digest`.
+    pub(crate) fn check(&self, index: u64, digest: u64) -> SendIndexUse {
+        // Within the window every index has a slot of its own, so a slot holding another index
+        // holds an older one, and `index` is unused.
+        if let Some((used, used_digest)) = self.slots[Self::slot(index)]
+            && used == index
+        {
+            return if used_digest == digest {
+                SendIndexUse::SamePacket
+            } else {
+                SendIndexUse::Refused
+            };
+        }
+        match self.highest {
+            Some(highest) if index + SRTP_SEND_INDEX_WINDOW as u64 <= highest => {
+                SendIndexUse::Refused
+            }
+            _ => SendIndexUse::New,
+        }
+    }
+
+    /// Records that `index` protected the packet whose digest is `digest`.
+    pub(crate) fn record(&mut self, index: u64, digest: u64) {
+        self.slots[Self::slot(index)] = Some((index, digest));
+        if self.highest.is_none_or(|highest| index > highest) {
+            self.highest = Some(index);
+        }
+    }
 }
 
 /// Encrypt/Decrypt state for a single SRTCP SSRC
@@ -115,6 +176,9 @@ pub struct Context {
 
     new_srtp_replay_detector: ContextOption,
     new_srtcp_replay_detector: ContextOption,
+
+    /// Keys the digests of protected packets kept per sending SSRC (see [`SentIndexes`]).
+    sent_digest_hasher: RandomState,
 }
 
 impl Context {
@@ -182,6 +246,7 @@ impl Context {
             srtcp_ssrc_states: HashMap::new(),
             new_srtp_replay_detector: srtp_ctx_opt,
             new_srtcp_replay_detector: srtcp_ctx_opt,
+            sent_digest_hasher: RandomState::new(),
         })
     }
 
