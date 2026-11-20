@@ -51,7 +51,7 @@ impl MediaSourceStatsAccumulator {
                 typ: RTCStatsType::MediaSource,
                 id: id.to_string(),
             },
-            track_id: self.track_id.clone(),
+            track_identifier: self.track_id.clone(),
             kind: self.kind,
         }
     }
@@ -60,11 +60,11 @@ impl MediaSourceStatsAccumulator {
     pub fn snapshot_audio(&self, now: Instant, id: &str) -> RTCAudioSourceStats {
         RTCAudioSourceStats {
             media_source_stats: self.snapshot(now, id),
-            audio_level: self.audio_level.unwrap_or(0.0),
-            total_audio_energy: self.total_audio_energy.unwrap_or(0.0),
-            total_samples_duration: self.total_samples_duration.unwrap_or(0.0),
-            echo_return_loss: self.echo_return_loss.unwrap_or(0.0),
-            echo_return_loss_enhancement: self.echo_return_loss_enhancement.unwrap_or(0.0),
+            audio_level: self.audio_level,
+            total_audio_energy: self.total_audio_energy,
+            total_samples_duration: self.total_samples_duration,
+            echo_return_loss: self.echo_return_loss,
+            echo_return_loss_enhancement: self.echo_return_loss_enhancement,
         }
     }
 
@@ -72,10 +72,10 @@ impl MediaSourceStatsAccumulator {
     pub fn snapshot_video(&self, now: Instant, id: &str) -> RTCVideoSourceStats {
         RTCVideoSourceStats {
             media_source_stats: self.snapshot(now, id),
-            width: self.width.unwrap_or(0),
-            height: self.height.unwrap_or(0),
-            frames: self.frames.unwrap_or(0),
-            frames_per_second: self.frames_per_second.unwrap_or(0.0),
+            width: self.width,
+            height: self.height,
+            frames: self.frames,
+            frames_per_second: self.frames_per_second,
         }
     }
 }

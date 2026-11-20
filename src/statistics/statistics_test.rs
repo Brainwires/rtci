@@ -76,6 +76,23 @@ fn normalize_json(json_str: &str) -> Value {
     value
 }
 
+/// A reception report block about SSRC 0 with no LSR (so it measures no round trip).
+fn reception_report(
+    last_sequence_number: u32,
+    total_lost: u32,
+    jitter: u32,
+) -> rtcp::reception_report::ReceptionReport {
+    rtcp::reception_report::ReceptionReport {
+        ssrc: 0,
+        fraction_lost: 0,
+        total_lost,
+        last_sequence_number,
+        jitter,
+        last_sender_report: 0,
+        delay: 0,
+    }
+}
+
 /// Test a complete video call scenario with statistics collection.
 #[test]
 fn test_video_call_statistics_flow() {
@@ -151,8 +168,8 @@ fn test_video_call_statistics_flow() {
         pair_acc.on_packet_received(8012, t);
     }
 
-    // Simulate packet loss and retransmission
-    inbound_acc.on_rtcp_rr_generated(2, 0.003);
+    // Simulate packet loss and retransmission (jitter of 270 RTP units)
+    inbound_acc.on_rtcp_rr_generated(2, 270);
     inbound_acc.on_nack_sent();
     inbound_acc.on_rtx_received(8000);
 
@@ -161,7 +178,7 @@ fn test_video_call_statistics_flow() {
 
     // Simulate RTCP reports
     inbound_acc.on_rtcp_sr_received(30, 300000, now);
-    outbound_acc.on_rtcp_rr_received(28, 2, 0.003, 0.067, 0.025);
+    outbound_acc.on_receiver_report(&reception_report(28, 2, 270), now);
 
     // Generate stats report
     let stats = vec![
@@ -208,7 +225,7 @@ fn test_video_call_statistics_flow() {
     let inbound = report.inbound_rtp_streams().next().unwrap();
     assert_eq!(inbound.received_rtp_stream_stats.packets_received, 30);
     assert_eq!(inbound.bytes_received, 240000); // 30 * 8000
-    assert_eq!(inbound.frames_received, 30);
+    assert_eq!(inbound.frames_received, Some(30));
     assert_eq!(inbound.nack_count, 1);
     assert_eq!(inbound.retransmitted_packets_received, 1);
     assert_eq!(inbound.received_rtp_stream_stats.packets_lost, 2);
@@ -217,8 +234,8 @@ fn test_video_call_statistics_flow() {
     let outbound = report.outbound_rtp_streams().next().unwrap();
     assert_eq!(outbound.sent_rtp_stream_stats.packets_sent, 30);
     assert_eq!(outbound.sent_rtp_stream_stats.bytes_sent, 300000); // 30 * 10000
-    assert_eq!(outbound.frames_sent, 30);
-    assert_eq!(outbound.huge_frames_sent, 1);
+    assert_eq!(outbound.frames_sent, Some(30));
+    assert_eq!(outbound.huge_frames_sent, Some(1));
     assert_eq!(outbound.nack_count, 1);
     assert_eq!(outbound.retransmitted_packets_sent, 1);
 }
@@ -288,6 +305,7 @@ fn test_audio_stream_statistics_flow() {
         kind: RtpCodecKind::Audio,
         transport_id: "RTCTransport_0".to_string(),
         codec_id: "RTCCodec_audio_111".to_string(),
+        clock_rate: 48000,
         track_identifier: "remote-audio".to_string(),
         mid: "1".to_string(),
         ..Default::default()
@@ -310,9 +328,9 @@ fn test_audio_stream_statistics_flow() {
         inbound_acc.on_rtp_received(12, 160, t);
     }
 
-    // No packet loss for audio
-    inbound_acc.on_rtcp_rr_generated(0, 0.001);
-    outbound_acc.on_rtcp_rr_received(50, 0, 0.001, 0.0, 0.020);
+    // No packet loss for audio (48 RTP units of jitter at 48 kHz: 1 ms)
+    inbound_acc.on_rtcp_rr_generated(0, 48);
+    outbound_acc.on_receiver_report(&reception_report(50, 0, 48), now);
 
     // Generate stats
     let inbound_stats = inbound_acc.snapshot(now, "RTCInboundRTPStream_audio_11111111");
@@ -322,7 +340,7 @@ fn test_audio_stream_statistics_flow() {
     assert_eq!(inbound_stats.received_rtp_stream_stats.packets_received, 50);
     assert_eq!(inbound_stats.bytes_received, 8000); // 50 * 160
     assert_eq!(inbound_stats.received_rtp_stream_stats.packets_lost, 0);
-    assert_eq!(inbound_stats.received_rtp_stream_stats.jitter, 0.001);
+    assert_eq!(inbound_stats.received_rtp_stream_stats.jitter, Some(0.001));
     assert_eq!(
         inbound_stats
             .received_rtp_stream_stats
@@ -501,11 +519,11 @@ fn test_accumulator_isolation() {
     let stats2 = acc2.snapshot(now, "stream_2");
 
     assert_eq!(stats1.received_rtp_stream_stats.packets_received, 1);
-    assert_eq!(stats1.frames_received, 1);
+    assert_eq!(stats1.frames_received, Some(1));
     assert_eq!(stats1.nack_count, 1);
 
     assert_eq!(stats2.received_rtp_stream_stats.packets_received, 0);
-    assert_eq!(stats2.frames_received, 0);
+    assert_eq!(stats2.frames_received, None);
     assert_eq!(stats2.nack_count, 0);
 }
 
@@ -538,8 +556,8 @@ fn test_high_volume_accumulation() {
         stats.sent_rtp_stream_stats.bytes_sent,
         packet_count * bytes_per_packet as u64
     );
-    assert_eq!(stats.frames_sent, packet_count as u32);
-    assert_eq!(stats.huge_frames_sent, 3600); // 108000 / 30
+    assert_eq!(stats.frames_sent, Some(packet_count as u32));
+    assert_eq!(stats.huge_frames_sent, Some(3600)); // 108000 / 30
 
     // Verify JSON serialization works with large numbers
     let json = serde_json::to_string(&stats).expect("should serialize");
@@ -612,11 +630,11 @@ fn test_master_accumulator_snapshot() {
 
     let inbound_stats = report.inbound_rtp_streams().next().unwrap();
     assert_eq!(inbound_stats.received_rtp_stream_stats.packets_received, 1);
-    assert_eq!(inbound_stats.frames_received, 1);
+    assert_eq!(inbound_stats.frames_received, Some(1));
 
     let outbound_stats = report.outbound_rtp_streams().next().unwrap();
     assert_eq!(outbound_stats.sent_rtp_stream_stats.packets_sent, 1);
-    assert_eq!(outbound_stats.frames_sent, 1);
+    assert_eq!(outbound_stats.frames_sent, Some(1));
 }
 
 /// Test RTX/FEC packet tracking via master accumulator.
@@ -1013,7 +1031,15 @@ fn test_stats_selector_sender_includes_remote_inbound() {
         0,
     );
     outbound.on_rtp_sent(12, 1200, now);
-    outbound.on_rtcp_rr_received(100, 5, 0.003, 0.05, 0.025);
+    outbound.on_sequence_number_sent(0);
+    // Our sender report goes out; the receiver echoes it 275 ms later, having held it 250 ms
+    // (DLSR 16384/65536 s): a 25 ms round trip (RFC 3550 section 6.4.1).
+    let ntp_time: u64 = 0x0001_2345_6789_0000;
+    outbound.on_sender_report_sent(ntp_time, now);
+    let mut report = reception_report(99, 0, 0);
+    report.last_sender_report = (ntp_time >> 16) as u32;
+    report.delay = 16384;
+    outbound.on_receiver_report(&report, now + Duration::from_millis(275));
 
     // Snapshot with Sender selector
     let report = master.snapshot_with_selector(now, StatsSelector::Sender(RTCRtpSenderId(0)));
@@ -1027,7 +1053,8 @@ fn test_stats_selector_sender_includes_remote_inbound() {
 
     if let RTCStatsReportEntry::RemoteInboundRtp(stats) = remote_inbound[0] {
         assert_eq!(stats.received_rtp_stream_stats.packets_received, 100);
-        assert_eq!(stats.round_trip_time, 0.025);
+        assert_eq!(stats.round_trip_time, Some(0.025));
+        assert_eq!(stats.round_trip_time_measurements, 1);
     } else {
         panic!("Expected RemoteInboundRtp");
     }
@@ -1263,7 +1290,7 @@ fn test_stats_selector_bidirectional_call() {
     assert_eq!(video_receiver_stats.inbound_rtp_streams().count(), 1);
     let video_in_stats = video_receiver_stats.inbound_rtp_streams().next().unwrap();
     assert_eq!(video_in_stats.received_rtp_stream_stats.packets_received, 1);
-    assert_eq!(video_in_stats.frames_received, 1);
+    assert_eq!(video_in_stats.frames_received, Some(1));
     // Should have video codec only
     let codecs: Vec<_> = video_receiver_stats
         .iter()

@@ -27,8 +27,8 @@ pub struct RTCMediaSourceStats {
     #[serde(flatten)]
     pub stats: RTCStats,
 
-    /// The identifier of the media track.
-    pub track_id: String,
+    /// The identifier of the media track (webrtc-stats `trackIdentifier`).
+    pub track_identifier: String,
 
     /// The kind of media source (audio or video).
     pub kind: RtpCodecKind,

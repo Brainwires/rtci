@@ -1,3 +1,5 @@
+use super::cumulative_lost;
+use super::inbound::jitter_seconds;
 use crate::rtp_transceiver::RTCRtpTransceiverId;
 use crate::rtp_transceiver::SSRC;
 use crate::rtp_transceiver::rtp_sender::RtpCodecKind;
@@ -7,15 +9,37 @@ use crate::statistics::stats::rtp_stream::received::RTCReceivedRtpStreamStats;
 use crate::statistics::stats::rtp_stream::received::remote_inbound::RTCRemoteInboundRtpStreamStats;
 use crate::statistics::stats::rtp_stream::sent::RTCSentRtpStreamStats;
 use crate::statistics::stats::rtp_stream::sent::outbound::RTCOutboundRtpStreamStats;
-use crate::statistics::stats::{RTCQualityLimitationReason, RTCStats, RTCStatsType};
+use crate::statistics::stats::{RTCStats, RTCStatsType};
+use rtcp::reception_report::ReceptionReport;
 use shared::time::SystemInstant;
-use std::collections::HashMap;
-use std::time::Instant;
+use std::collections::VecDeque;
+use std::time::{Duration, Instant};
+
+/// How many of our own sender reports are remembered per stream, to match a receiver report's
+/// LSR against. Reports go out about once a second, so this covers a report that comes back
+/// many seconds late.
+const SENDER_REPORTS_REMEMBERED: usize = 16;
+
+/// The stats id of the outbound-rtp object for `ssrc`.
+pub(crate) fn outbound_stats_id(kind: RtpCodecKind, ssrc: SSRC) -> String {
+    format!("RTCOutboundRTPStream_{kind}_{ssrc}")
+}
+
+/// The stats id of the remote-inbound-rtp object for `ssrc`.
+pub(crate) fn remote_inbound_stats_id(kind: RtpCodecKind, ssrc: SSRC) -> String {
+    format!("RTCRemoteInboundRTPStream_{kind}_{ssrc}")
+}
+
+/// The middle 32 bits of a 64-bit NTP timestamp: what a reception report's LSR field echoes
+/// (RFC 3550 section 6.4.1).
+pub(crate) fn compact_ntp(ntp_time: u64) -> u32 {
+    (ntp_time >> 16) as u32
+}
 
 /// Accumulated statistics for an outbound RTP stream.
 ///
-/// This struct tracks packet counters, RTCP feedback received,
-/// and video frame metrics for an outgoing RTP stream.
+/// This struct tracks packet counters, RTCP feedback received and what the remote receiver
+/// reports about the stream, plus whatever the application supplied about encoding.
 #[derive(Debug, Default)]
 pub struct OutboundRtpStreamAccumulator {
     // Base identification
@@ -27,6 +51,8 @@ pub struct OutboundRtpStreamAccumulator {
     pub transport_id: String,
     /// Reference to the codec stats.
     pub codec_id: String,
+    /// The codec's clock rate, which the RTCP jitter is counted in (0 until the codec is known).
+    pub clock_rate: u32,
     /// The media stream identification tag from SDP.
     pub mid: String,
     /// The RTP stream ID (RID) for simulcast.
@@ -47,6 +73,9 @@ pub struct OutboundRtpStreamAccumulator {
     pub header_bytes_sent: u64,
     /// Timestamp of the last RTP packet sent.
     pub last_packet_sent_timestamp: Option<Instant>,
+    /// The sequence number of the first RTP packet sent, the base `packetsReceived` of the
+    /// remote-inbound object is counted from.
+    pub first_sequence_number: Option<u16>,
 
     // Retransmission
     /// Retransmitted packets sent (RTX).
@@ -56,14 +85,6 @@ pub struct OutboundRtpStreamAccumulator {
     /// RTX SSRC if available.
     pub rtx_ssrc: Option<u32>,
 
-    // Frame tracking (RTP-level)
-    /// Frames sent.
-    pub frames_sent: u32,
-    /// Huge frames sent (larger than average).
-    pub huge_frames_sent: u32,
-    /// Current frame rate.
-    pub frames_per_second: f64,
-
     // RTCP feedback received
     /// Number of NACKs received for this stream.
     pub nack_count: u32,
@@ -72,39 +93,36 @@ pub struct OutboundRtpStreamAccumulator {
     /// Number of PLIs received for this stream.
     pub pli_count: u32,
 
-    // Timing
-    /// Total packet send delay in seconds.
-    pub total_packet_send_delay: f64,
-
     // State
     /// Whether the stream is actively sending.
     pub active: bool,
 
-    // Quality limitation (from BWE/interceptor)
-    /// Current quality limitation reason.
-    pub quality_limitation_reason: RTCQualityLimitationReason,
-    /// Number of resolution changes due to quality limitations.
-    pub quality_limitation_resolution_changes: u32,
-    /// Target bitrate from bandwidth estimation.
+    /// The congestion controller's target bitrate (0 until it has produced one).
     pub target_bitrate: f64,
 
-    // Remote receiver info (from RTCP RR)
-    /// Packets received by the remote receiver (from RR).
+    // Remote receiver info (from RTCP reception reports about this SSRC)
+    /// Number of reception reports received about this stream.
+    pub remote_reports_received: u64,
+    /// Packets received by the remote receiver, estimated as webrtc-stats defines it.
     pub remote_packets_received: u64,
-    /// Packets lost at the remote receiver (from RR).
-    pub remote_packets_lost: u64,
-    /// Jitter at the remote receiver (from RR).
-    pub remote_jitter: f64,
-    /// Fraction lost at the remote receiver (from RR).
+    /// Cumulative packets lost at the remote receiver (signed, RFC 3550 section 6.4.1).
+    pub remote_packets_lost: i64,
+    /// Interarrival jitter at the remote receiver, in RTP timestamp units.
+    pub remote_jitter: Option<u32>,
+    /// Fraction lost at the remote receiver (0.0 to 1.0).
     pub remote_fraction_lost: f64,
-    /// Round trip time calculated from RR.
-    pub remote_round_trip_time: f64,
+    /// The latest round trip time measured from a reception report's LSR and DLSR, in seconds.
+    pub remote_round_trip_time: Option<f64>,
+    /// The sum of every round trip time measured, in seconds.
+    pub remote_total_round_trip_time: f64,
     /// Number of RTT measurements.
     pub rtt_measurements: u64,
+    /// Our latest sender reports: the compact NTP timestamp each carried and when it was sent.
+    pub sender_reports_sent: VecDeque<(u32, Instant)>,
 
     // Application-provided stats (encoder)
     /// Encoder statistics provided by the application.
-    pub encoder_stats: Option<EncoderStatsUpdate>,
+    pub encoder_stats: EncoderStatsUpdate,
 }
 
 impl OutboundRtpStreamAccumulator {
@@ -114,6 +132,12 @@ impl OutboundRtpStreamAccumulator {
         self.header_bytes_sent += header_bytes as u64;
         self.bytes_sent += payload_bytes as u64;
         self.last_packet_sent_timestamp = Some(now);
+    }
+
+    /// Records the sequence number of a sent RTP packet; the first one is the base of the
+    /// remote receiver's `packetsReceived`.
+    pub fn on_sequence_number_sent(&mut self, sequence_number: u16) {
+        self.first_sequence_number.get_or_insert(sequence_number);
     }
 
     /// Called when a NACK is received.
@@ -137,33 +161,82 @@ impl OutboundRtpStreamAccumulator {
         self.retransmitted_bytes_sent += bytes as u64;
     }
 
-    /// Called when RTCP Receiver Report is received from remote.
-    pub fn on_rtcp_rr_received(
-        &mut self,
-        packets_received: u64,
-        packets_lost: u64,
-        jitter: f64,
-        fraction_lost: f64,
-        rtt: f64,
-    ) {
-        self.remote_packets_received = packets_received;
-        self.remote_packets_lost = packets_lost;
-        self.remote_jitter = jitter;
-        self.remote_fraction_lost = fraction_lost;
-        self.remote_round_trip_time = rtt;
+    /// Called when this side sends an RTCP sender report for the stream: remembers when, so a
+    /// reception report that echoes it can be turned into a round trip time.
+    pub fn on_sender_report_sent(&mut self, ntp_time: u64, now: Instant) {
+        if self.sender_reports_sent.len() == SENDER_REPORTS_REMEMBERED {
+            self.sender_reports_sent.pop_front();
+        }
+        self.sender_reports_sent
+            .push_back((compact_ntp(ntp_time), now));
+    }
+
+    /// Called when a reception report about this stream arrives (in an RTCP RR or SR).
+    ///
+    /// * Loss: the cumulative number of packets lost is signed (RFC 3550 section 6.4.1).
+    /// * `packetsReceived`, as webrtc-stats defines it for the sending side: the extended
+    ///   highest sequence number received, minus the cumulative loss, minus the first sequence
+    ///   number sent, plus one.
+    /// * Round trip time: `A - LSR - DLSR` (RFC 3550 section 6.4.1), where `A - LSR` is the time
+    ///   since we sent the sender report whose compact NTP timestamp the LSR field echoes. A
+    ///   report with LSR 0 (no sender report received yet) or naming a report we no longer
+    ///   remember gives no measurement.
+    pub fn on_receiver_report(&mut self, report: &ReceptionReport, now: Instant) {
+        self.remote_reports_received += 1;
+        self.remote_packets_lost = cumulative_lost(report.total_lost);
+        self.remote_jitter = Some(report.jitter);
+        self.remote_fraction_lost = f64::from(report.fraction_lost) / 256.0;
+        self.remote_packets_received = match self.first_sequence_number {
+            Some(first) => {
+                let received = i64::from(report.last_sequence_number) - i64::from(first) + 1
+                    - self.remote_packets_lost;
+                received.max(0) as u64
+            }
+            None => 0,
+        };
+
+        if report.last_sender_report == 0 {
+            return;
+        }
+        let Some(&(_, sent_at)) = self
+            .sender_reports_sent
+            .iter()
+            .rev()
+            .find(|(lsr, _)| *lsr == report.last_sender_report)
+        else {
+            return;
+        };
+        let Some(since_sent) = now.checked_duration_since(sent_at) else {
+            return;
+        };
+        let delay = Duration::from_secs_f64(f64::from(report.delay) / 65536.0);
+        // DLSR is truncated to 1/65536 s, so on a near-zero path it can exceed the elapsed
+        // time by a fraction of a tick: that is a round trip of 0, not a missing one.
+        let rtt = since_sent.saturating_sub(delay).as_secs_f64();
+        self.remote_round_trip_time = Some(rtt);
+        self.remote_total_round_trip_time += rtt;
         self.rtt_measurements += 1;
     }
 
-    /// Called when a video frame is sent (marker bit set).
+    /// Counts one frame sent (`framesSent`), and a huge one (`hugeFramesSent`).
     pub fn on_frame_sent(&mut self, is_huge: bool) {
-        self.frames_sent += 1;
+        let encoder = &mut self.encoder_stats;
+        encoder.frames_sent = Some(encoder.frames_sent.unwrap_or(0).saturating_add(1));
         if is_huge {
-            self.huge_frames_sent += 1;
+            encoder.huge_frames_sent =
+                Some(encoder.huge_frames_sent.unwrap_or(0).saturating_add(1));
         }
+    }
+
+    /// Whether the remote-inbound object exists: webrtc-stats 6.1 creates it when the first
+    /// reception report about the SSRC arrives.
+    pub fn has_remote(&self) -> bool {
+        self.remote_reports_received > 0
     }
 
     /// Creates a snapshot of the accumulated stats at the given timestamp.
     pub fn snapshot(&self, now: Instant, id: &str) -> RTCOutboundRtpStreamStats {
+        let encoder = &self.encoder_stats;
         RTCOutboundRtpStreamStats {
             sent_rtp_stream_stats: RTCSentRtpStreamStats {
                 rtp_stream_stats: RTCRtpStreamStats {
@@ -182,74 +255,47 @@ impl OutboundRtpStreamAccumulator {
             },
             mid: self.mid.clone(),
             media_source_id: self.media_source_id.clone(),
-            remote_id: format!("RTCRemoteInboundRTPStream_{}_{}", self.kind, self.ssrc),
+            remote_id: self
+                .has_remote()
+                .then(|| remote_inbound_stats_id(self.kind, self.ssrc)),
             rid: self.rid.clone(),
-            encoding_index: self.encoding_index,
+            encoding_index: (self.kind == RtpCodecKind::Video).then_some(self.encoding_index),
             header_bytes_sent: self.header_bytes_sent,
             retransmitted_packets_sent: self.retransmitted_packets_sent,
             retransmitted_bytes_sent: self.retransmitted_bytes_sent,
-            rtx_ssrc: self.rtx_ssrc.unwrap_or(0),
+            rtx_ssrc: self.rtx_ssrc,
             target_bitrate: self.target_bitrate,
-            total_encoded_bytes_target: 0,
-            frame_width: self
-                .encoder_stats
-                .as_ref()
-                .map(|s| s.frame_width)
-                .unwrap_or(0),
-            frame_height: self
-                .encoder_stats
-                .as_ref()
-                .map(|s| s.frame_height)
-                .unwrap_or(0),
-            frames_per_second: self.frames_per_second,
-            frames_sent: self.frames_sent,
-            huge_frames_sent: self.huge_frames_sent,
-            frames_encoded: self
-                .encoder_stats
-                .as_ref()
-                .map(|s| s.frames_encoded)
-                .unwrap_or(0),
-            key_frames_encoded: self
-                .encoder_stats
-                .as_ref()
-                .map(|s| s.key_frames_encoded)
-                .unwrap_or(0),
-            qp_sum: self.encoder_stats.as_ref().map(|s| s.qp_sum).unwrap_or(0),
-            psnr_sum: HashMap::new(),
-            psnr_measurements: 0,
-            total_encode_time: self
-                .encoder_stats
-                .as_ref()
-                .map(|s| s.total_encode_time)
-                .unwrap_or(0.0),
-            total_packet_send_delay: self.total_packet_send_delay,
-            quality_limitation_reason: self.quality_limitation_reason,
-            quality_limitation_durations: HashMap::new(),
-            quality_limitation_resolution_changes: self.quality_limitation_resolution_changes,
+            total_encoded_bytes_target: encoder.total_encoded_bytes_target,
+            frame_width: encoder.frame_width,
+            frame_height: encoder.frame_height,
+            frames_per_second: encoder.frames_per_second,
+            frames_sent: encoder.frames_sent,
+            huge_frames_sent: encoder.huge_frames_sent,
+            frames_encoded: encoder.frames_encoded,
+            key_frames_encoded: encoder.key_frames_encoded,
+            qp_sum: encoder.qp_sum,
+            psnr_sum: None,
+            psnr_measurements: None,
+            total_encode_time: encoder.total_encode_time,
+            total_packet_send_delay: None,
+            quality_limitation_reason: encoder.quality_limitation_reason,
+            quality_limitation_durations: None,
+            quality_limitation_resolution_changes: encoder.quality_limitation_resolution_changes,
             nack_count: self.nack_count,
             fir_count: self.fir_count,
             pli_count: self.pli_count,
-            encoder_implementation: self
-                .encoder_stats
-                .as_ref()
-                .map(|s| s.encoder_implementation.clone())
-                .unwrap_or_default(),
-            power_efficient_encoder: self
-                .encoder_stats
-                .as_ref()
-                .map(|s| s.power_efficient_encoder)
-                .unwrap_or(false),
+            encoder_implementation: encoder.encoder_implementation.clone(),
+            power_efficient_encoder: encoder.power_efficient_encoder,
             active: self.active,
-            scalability_mode: self
-                .encoder_stats
-                .as_ref()
-                .map(|s| s.scalability_mode.clone())
-                .unwrap_or_default(),
-            packets_sent_with_ect1: 0,
+            scalability_mode: encoder.scalability_mode.clone(),
+            packets_sent_with_ect1: None,
         }
     }
 
-    /// Creates a snapshot of remote inbound stats from RTCP RR data.
+    /// Creates a snapshot of remote inbound stats from the reception reports received.
+    ///
+    /// Only meaningful once [`has_remote`](Self::has_remote) is true; the report leaves the
+    /// object out before that.
     pub fn snapshot_remote(&self, now: Instant) -> RTCRemoteInboundRtpStreamStats {
         RTCRemoteInboundRtpStreamStats {
             received_rtp_stream_stats: RTCReceivedRtpStreamStats {
@@ -257,7 +303,7 @@ impl OutboundRtpStreamAccumulator {
                     stats: RTCStats {
                         timestamp: SystemInstant::now(now),
                         typ: RTCStatsType::RemoteInboundRTP,
-                        id: format!("RTCRemoteInboundRTPStream_{}_{}", self.kind, self.ssrc),
+                        id: remote_inbound_stats_id(self.kind, self.ssrc),
                     },
                     ssrc: self.ssrc,
                     kind: self.kind,
@@ -265,19 +311,19 @@ impl OutboundRtpStreamAccumulator {
                     codec_id: self.codec_id.clone(),
                 },
                 packets_received: self.remote_packets_received,
-                packets_received_with_ect1: 0,
-                packets_received_with_ce: 0,
-                packets_reported_as_lost: self.remote_packets_lost,
-                packets_reported_as_lost_but_recovered: 0,
-                packets_lost: self.remote_packets_lost as i64,
-                jitter: self.remote_jitter,
+                packets_received_with_ect1: None,
+                packets_received_with_ce: None,
+                packets_reported_as_lost: None,
+                packets_reported_as_lost_but_recovered: None,
+                packets_lost: self.remote_packets_lost,
+                jitter: jitter_seconds(self.remote_jitter, self.clock_rate),
             },
-            local_id: format!("RTCOutboundRTPStream_{}_{}", self.kind, self.ssrc),
+            local_id: outbound_stats_id(self.kind, self.ssrc),
             round_trip_time: self.remote_round_trip_time,
-            total_round_trip_time: self.remote_round_trip_time * self.rtt_measurements as f64,
+            total_round_trip_time: self.remote_total_round_trip_time,
             fraction_lost: self.remote_fraction_lost,
             round_trip_time_measurements: self.rtt_measurements,
-            packets_with_bleached_ect1_marking: 0,
+            packets_with_bleached_ect1_marking: None,
         }
     }
 }
@@ -285,6 +331,19 @@ impl OutboundRtpStreamAccumulator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::statistics::stats::RTCQualityLimitationReason;
+
+    fn report(last_sequence_number: u32, total_lost: u32, jitter: u32) -> ReceptionReport {
+        ReceptionReport {
+            ssrc: 0,
+            fraction_lost: 0,
+            total_lost,
+            last_sequence_number,
+            jitter,
+            last_sender_report: 0,
+            delay: 0,
+        }
+    }
 
     #[test]
     fn test_default() {
@@ -295,12 +354,13 @@ mod tests {
         assert_eq!(acc.header_bytes_sent, 0);
         assert_eq!(acc.retransmitted_packets_sent, 0);
         assert_eq!(acc.retransmitted_bytes_sent, 0);
-        assert_eq!(acc.frames_sent, 0);
-        assert_eq!(acc.huge_frames_sent, 0);
+        assert_eq!(acc.encoder_stats.frames_sent, None);
+        assert_eq!(acc.encoder_stats.huge_frames_sent, None);
         assert_eq!(acc.nack_count, 0);
         assert_eq!(acc.fir_count, 0);
         assert_eq!(acc.pli_count, 0);
         assert!(!acc.active);
+        assert!(!acc.has_remote());
     }
 
     #[test]
@@ -350,25 +410,28 @@ mod tests {
     }
 
     #[test]
-    fn test_on_rtcp_rr_received() {
-        let mut acc = OutboundRtpStreamAccumulator::default();
+    fn test_on_receiver_report() {
+        let now = Instant::now();
+        let mut acc = OutboundRtpStreamAccumulator {
+            clock_rate: 90000,
+            ..Default::default()
+        };
+        acc.on_sequence_number_sent(1000);
+        acc.on_sequence_number_sent(1001);
 
-        acc.on_rtcp_rr_received(100, 5, 0.003, 0.05, 0.025);
-        assert_eq!(acc.remote_packets_received, 100);
+        let mut first = report(1099, 5, 270);
+        first.fraction_lost = 64;
+        acc.on_receiver_report(&first, now);
+        assert_eq!(acc.remote_reports_received, 1);
+        // 1099 - 1000 + 1 - 5
+        assert_eq!(acc.remote_packets_received, 95);
         assert_eq!(acc.remote_packets_lost, 5);
-        assert_eq!(acc.remote_jitter, 0.003);
-        assert_eq!(acc.remote_fraction_lost, 0.05);
-        assert_eq!(acc.remote_round_trip_time, 0.025);
-        assert_eq!(acc.rtt_measurements, 1);
-
-        // Second RR with updated values
-        acc.on_rtcp_rr_received(200, 8, 0.004, 0.04, 0.030);
-        assert_eq!(acc.remote_packets_received, 200);
-        assert_eq!(acc.remote_packets_lost, 8);
-        assert_eq!(acc.remote_jitter, 0.004);
-        assert_eq!(acc.remote_fraction_lost, 0.04);
-        assert_eq!(acc.remote_round_trip_time, 0.030);
-        assert_eq!(acc.rtt_measurements, 2);
+        assert_eq!(acc.remote_jitter, Some(270));
+        assert_eq!(acc.remote_fraction_lost, 0.25);
+        // LSR 0: no sender report reached the receiver yet, so no round trip either.
+        assert_eq!(acc.remote_round_trip_time, None);
+        assert_eq!(acc.rtt_measurements, 0);
+        assert!(acc.has_remote());
     }
 
     #[test]
@@ -381,54 +444,8 @@ mod tests {
         acc.on_frame_sent(false);
         acc.on_frame_sent(true); // huge frame
 
-        assert_eq!(acc.frames_sent, 5);
-        assert_eq!(acc.huge_frames_sent, 2);
-    }
-
-    #[test]
-    fn test_full_outbound_stream_flow() {
-        let mut acc = OutboundRtpStreamAccumulator {
-            ssrc: 87654321,
-            kind: RtpCodecKind::Video,
-            transport_id: "RTCTransport_0".to_string(),
-            codec_id: "RTCCodec_video_96".to_string(),
-            mid: "0".to_string(),
-            rid: "h".to_string(),
-            rtx_ssrc: Some(87654322),
-            active: true,
-            ..Default::default()
-        };
-
-        let now = Instant::now();
-
-        // Send RTP packets
-        for i in 0..100 {
-            acc.on_rtp_sent(12, 1200, now + std::time::Duration::from_millis(i * 33));
-        }
-
-        // Send frames
-        for _ in 0..30 {
-            acc.on_frame_sent(false);
-        }
-        acc.on_frame_sent(true); // One huge frame
-
-        // Receive NACK and resend
-        acc.on_nack_received();
-        acc.on_rtx_sent(1200);
-
-        // Receive RR from remote
-        acc.on_rtcp_rr_received(95, 5, 0.002, 0.05, 0.020);
-
-        assert_eq!(acc.packets_sent, 100);
-        assert_eq!(acc.bytes_sent, 120000);
-        assert_eq!(acc.frames_sent, 31);
-        assert_eq!(acc.huge_frames_sent, 1);
-        assert_eq!(acc.nack_count, 1);
-        assert_eq!(acc.retransmitted_packets_sent, 1);
-        assert_eq!(acc.retransmitted_bytes_sent, 1200);
-        assert_eq!(acc.remote_packets_received, 95);
-        assert_eq!(acc.remote_packets_lost, 5);
-        assert_eq!(acc.rtt_measurements, 1);
+        assert_eq!(acc.encoder_stats.frames_sent, Some(5));
+        assert_eq!(acc.encoder_stats.huge_frames_sent, Some(2));
     }
 
     #[test]
@@ -457,16 +474,15 @@ mod tests {
             stats.sent_rtp_stream_stats.rtp_stream_stats.stats.typ,
             RTCStatsType::OutboundRTP
         );
-        assert_eq!(stats.sent_rtp_stream_stats.rtp_stream_stats.ssrc, 44444444);
-        assert_eq!(
-            stats.sent_rtp_stream_stats.rtp_stream_stats.kind,
-            RtpCodecKind::Audio
-        );
         assert_eq!(stats.sent_rtp_stream_stats.packets_sent, 2);
         assert_eq!(stats.sent_rtp_stream_stats.bytes_sent, 320);
         assert_eq!(stats.header_bytes_sent, 24);
         assert_eq!(stats.mid, "1");
         assert!(stats.active);
+        // encodingIndex is a video member.
+        assert_eq!(stats.encoding_index, None);
+        // No receiver report yet: no remote-inbound object to name.
+        assert_eq!(stats.remote_id, None);
     }
 
     #[test]
@@ -477,11 +493,13 @@ mod tests {
             kind: RtpCodecKind::Video,
             transport_id: "RTCTransport_0".to_string(),
             codec_id: "RTCCodec_video_96".to_string(),
+            clock_rate: 90000,
             ..Default::default()
         };
+        acc.on_sequence_number_sent(0);
 
-        acc.on_rtcp_rr_received(500, 10, 0.005, 0.02, 0.035);
-        acc.on_rtcp_rr_received(1000, 20, 0.004, 0.02, 0.030);
+        acc.on_receiver_report(&report(509, 10, 450), now);
+        acc.on_receiver_report(&report(1019, 20, 360), now);
 
         let remote_stats = acc.snapshot_remote(now);
 
@@ -494,19 +512,19 @@ mod tests {
             RTCStatsType::RemoteInboundRTP
         );
         assert_eq!(
-            remote_stats.received_rtp_stream_stats.rtp_stream_stats.ssrc,
-            55555555
-        );
-        assert_eq!(
             remote_stats.received_rtp_stream_stats.packets_received,
             1000
         );
         assert_eq!(remote_stats.received_rtp_stream_stats.packets_lost, 20);
-        assert_eq!(remote_stats.received_rtp_stream_stats.jitter, 0.004);
-        assert_eq!(remote_stats.round_trip_time, 0.030);
-        assert_eq!(remote_stats.round_trip_time_measurements, 2);
-        assert_eq!(remote_stats.fraction_lost, 0.02);
-        assert!(remote_stats.local_id.contains("RTCOutboundRTPStream"));
+        // 360 RTP units at 90 kHz is 4 ms.
+        assert_eq!(remote_stats.received_rtp_stream_stats.jitter, Some(0.004));
+        assert_eq!(remote_stats.round_trip_time, None);
+        assert_eq!(remote_stats.round_trip_time_measurements, 0);
+        assert_eq!(remote_stats.local_id, "RTCOutboundRTPStream_video_55555555");
+        assert_eq!(
+            acc.snapshot(now, "x").remote_id.as_deref(),
+            Some("RTCRemoteInboundRTPStream_video_55555555")
+        );
     }
 
     #[test]
@@ -533,14 +551,22 @@ mod tests {
         assert!(json.contains("\"nackCount\":1"));
         assert!(json.contains("\"active\":true"));
         assert!(json.contains("\"type\":\"outbound-rtp\""));
+        // Encoder members were never supplied, and there is no estimate yet.
+        assert!(!json.contains("framesEncoded"));
+        assert!(!json.contains("qualityLimitationReason"));
+        assert!(!json.contains("targetBitrate"));
+        assert!(!json.contains("remoteId"));
     }
 
     #[test]
     fn test_quality_limitation_tracking() {
         let mut acc = OutboundRtpStreamAccumulator::default();
 
-        acc.quality_limitation_reason = RTCQualityLimitationReason::Bandwidth;
-        acc.quality_limitation_resolution_changes = 3;
+        acc.encoder_stats.merge(EncoderStatsUpdate {
+            quality_limitation_reason: Some(RTCQualityLimitationReason::Bandwidth),
+            quality_limitation_resolution_changes: Some(3),
+            ..Default::default()
+        });
         acc.target_bitrate = 1_500_000.0;
 
         let now = Instant::now();
@@ -548,9 +574,9 @@ mod tests {
 
         assert_eq!(
             stats.quality_limitation_reason,
-            RTCQualityLimitationReason::Bandwidth
+            Some(RTCQualityLimitationReason::Bandwidth)
         );
-        assert_eq!(stats.quality_limitation_resolution_changes, 3);
+        assert_eq!(stats.quality_limitation_resolution_changes, Some(3));
         assert_eq!(stats.target_bitrate, 1_500_000.0);
     }
 }

@@ -12,6 +12,9 @@ mod ice_candidate;
 mod ice_candidate_pair;
 mod media;
 mod peer_connection;
+mod rtcp_reports;
+#[cfg(test)]
+mod rtcp_reports_test;
 mod rtp_stream;
 mod transport;
 
@@ -20,12 +23,12 @@ pub(crate) use codec::{CodecDirection, CodecStatsAccumulator};
 pub(crate) use data_channel::DataChannelStatsAccumulator;
 pub(crate) use ice_candidate::IceCandidateAccumulator;
 pub(crate) use ice_candidate_pair::IceCandidatePairAccumulator;
-pub(crate) use media::app_provided::*;
+pub use media::app_provided::*;
 pub(crate) use media::audio_playout::AudioPlayoutStatsAccumulator;
 pub(crate) use media::media_source::MediaSourceStatsAccumulator;
 pub(crate) use peer_connection::PeerConnectionStatsAccumulator;
-pub(crate) use rtp_stream::inbound::InboundRtpStreamAccumulator;
-pub(crate) use rtp_stream::outbound::OutboundRtpStreamAccumulator;
+pub(crate) use rtp_stream::inbound::{InboundRtpStreamAccumulator, inbound_stats_id};
+pub(crate) use rtp_stream::outbound::{OutboundRtpStreamAccumulator, outbound_stats_id};
 pub(crate) use transport::TransportStatsAccumulator;
 
 use crate::data_channel::RTCDataChannelId;
@@ -187,24 +190,28 @@ impl RTCStatsAccumulator {
             ));
         }
 
-        // Inbound RTP stream stats
+        // Inbound RTP stream stats, each with its remote-outbound object once an RTCP SR has
+        // created it (webrtc-stats 6.1)
         for (ssrc, stream) in &self.inbound_rtp_streams {
-            let id = format!("RTCInboundRTPStream_{}_{}", stream.kind, ssrc);
+            let id = inbound_stats_id(stream.kind, *ssrc);
             entries.push(RTCStatsReportEntry::InboundRtp(stream.snapshot(now, &id)));
-            // Also add remote outbound stats derived from RTCP SR
-            entries.push(RTCStatsReportEntry::RemoteOutboundRtp(
-                stream.snapshot_remote(now),
-            ));
+            if stream.has_remote() {
+                entries.push(RTCStatsReportEntry::RemoteOutboundRtp(
+                    stream.snapshot_remote(now),
+                ));
+            }
         }
 
-        // Outbound RTP stream stats
+        // Outbound RTP stream stats, each with its remote-inbound object once a reception
+        // report has created it (webrtc-stats 6.1)
         for (ssrc, stream) in &self.outbound_rtp_streams {
-            let id = format!("RTCOutboundRTPStream_{}_{}", stream.kind, ssrc);
+            let id = outbound_stats_id(stream.kind, *ssrc);
             entries.push(RTCStatsReportEntry::OutboundRtp(stream.snapshot(now, &id)));
-            // Also add remote inbound stats derived from RTCP RR
-            entries.push(RTCStatsReportEntry::RemoteInboundRtp(
-                stream.snapshot_remote(now),
-            ));
+            if stream.has_remote() {
+                entries.push(RTCStatsReportEntry::RemoteInboundRtp(
+                    stream.snapshot_remote(now),
+                ));
+            }
         }
 
         // Media source stats
@@ -277,12 +284,13 @@ impl RTCStatsAccumulator {
         for (ssrc, stream) in &self.outbound_rtp_streams {
             if stream.transceiver_id == transceiver_id {
                 has_streams = true;
-                let id = format!("RTCOutboundRTPStream_{}_{}", stream.kind, ssrc);
+                let id = outbound_stats_id(stream.kind, *ssrc);
                 entries.push(RTCStatsReportEntry::OutboundRtp(stream.snapshot(now, &id)));
-                // Also add remote inbound stats derived from RTCP RR
-                entries.push(RTCStatsReportEntry::RemoteInboundRtp(
-                    stream.snapshot_remote(now),
-                ));
+                if stream.has_remote() {
+                    entries.push(RTCStatsReportEntry::RemoteInboundRtp(
+                        stream.snapshot_remote(now),
+                    ));
+                }
                 // Track referenced codec
                 if !stream.codec_id.is_empty() {
                     referenced_codec_ids.insert(stream.codec_id.clone());
@@ -348,12 +356,13 @@ impl RTCStatsAccumulator {
         for (ssrc, stream) in &self.inbound_rtp_streams {
             if stream.transceiver_id == transceiver_id {
                 has_streams = true;
-                let id = format!("RTCInboundRTPStream_{}_{}", stream.kind, ssrc);
+                let id = inbound_stats_id(stream.kind, *ssrc);
                 entries.push(RTCStatsReportEntry::InboundRtp(stream.snapshot(now, &id)));
-                // Also add remote outbound stats derived from RTCP SR
-                entries.push(RTCStatsReportEntry::RemoteOutboundRtp(
-                    stream.snapshot_remote(now),
-                ));
+                if stream.has_remote() {
+                    entries.push(RTCStatsReportEntry::RemoteOutboundRtp(
+                        stream.snapshot_remote(now),
+                    ));
+                }
                 // Track referenced codec
                 if !stream.codec_id.is_empty() {
                     referenced_codec_ids.insert(stream.codec_id.clone());
@@ -684,72 +693,119 @@ impl RTCStatsAccumulator {
     // Application-provided stats updates
     // ========================================================================
 
-    /// Updates decoder stats for an inbound video stream.
-    pub(crate) fn update_decoder_stats(&mut self, ssrc: SSRC, stats: DecoderStatsUpdate) {
-        if let Some(stream) = self.inbound_rtp_streams.get_mut(&ssrc) {
-            stream.decoder_stats = Some(stats);
+    /// Merges application-provided decoder stats into an inbound stream; `false` when no
+    /// inbound stream has that SSRC.
+    pub(crate) fn update_decoder_stats(&mut self, ssrc: SSRC, stats: DecoderStatsUpdate) -> bool {
+        match self.inbound_rtp_streams.get_mut(&ssrc) {
+            Some(stream) => {
+                stream.decoder_stats.merge(stats);
+                true
+            }
+            None => false,
         }
     }
 
-    /// Updates encoder stats for an outbound video stream.
-    pub(crate) fn update_encoder_stats(&mut self, ssrc: SSRC, stats: EncoderStatsUpdate) {
-        if let Some(stream) = self.outbound_rtp_streams.get_mut(&ssrc) {
-            stream.encoder_stats = Some(stats);
+    /// Merges application-provided encoder stats into an outbound stream; `false` when no
+    /// outbound stream has that SSRC.
+    pub(crate) fn update_encoder_stats(&mut self, ssrc: SSRC, stats: EncoderStatsUpdate) -> bool {
+        match self.outbound_rtp_streams.get_mut(&ssrc) {
+            Some(stream) => {
+                stream.encoder_stats.merge(stats);
+                true
+            }
+            None => false,
         }
     }
 
-    /// Updates audio receiver stats for an inbound audio stream.
+    /// Merges application-provided audio receiver stats into an inbound stream; `false` when
+    /// no inbound stream has that SSRC.
     pub(crate) fn update_audio_receiver_stats(
         &mut self,
         ssrc: SSRC,
         stats: AudioReceiverStatsUpdate,
-    ) {
-        if let Some(stream) = self.inbound_rtp_streams.get_mut(&ssrc) {
-            stream.audio_receiver_stats = Some(stats);
+    ) -> bool {
+        match self.inbound_rtp_streams.get_mut(&ssrc) {
+            Some(stream) => {
+                stream.audio_receiver_stats.merge(stats);
+                true
+            }
+            None => false,
         }
     }
 
-    /// Updates audio source stats.
+    /// Merges application-provided capture stats into an audio media source.
     pub(crate) fn update_audio_source_stats(
         &mut self,
         track_id: &str,
         stats: AudioSourceStatsUpdate,
     ) {
-        if let Some(source) = self.media_sources.get_mut(track_id) {
-            source.audio_level = Some(stats.audio_level);
-            source.total_audio_energy = Some(stats.total_audio_energy);
-            source.total_samples_duration = Some(stats.total_samples_duration);
-            source.echo_return_loss = Some(stats.echo_return_loss);
-            source.echo_return_loss_enhancement = Some(stats.echo_return_loss_enhancement);
+        let source = self.get_or_create_media_source(track_id, RtpCodecKind::Audio);
+        if stats.audio_level.is_some() {
+            source.audio_level = stats.audio_level;
+        }
+        if stats.total_audio_energy.is_some() {
+            source.total_audio_energy = stats.total_audio_energy;
+        }
+        if stats.total_samples_duration.is_some() {
+            source.total_samples_duration = stats.total_samples_duration;
+        }
+        if stats.echo_return_loss.is_some() {
+            source.echo_return_loss = stats.echo_return_loss;
+        }
+        if stats.echo_return_loss_enhancement.is_some() {
+            source.echo_return_loss_enhancement = stats.echo_return_loss_enhancement;
         }
     }
 
-    /// Updates video source stats.
+    /// Merges application-provided capture stats into a video media source.
     pub(crate) fn update_video_source_stats(
         &mut self,
         track_id: &str,
         stats: VideoSourceStatsUpdate,
     ) {
-        if let Some(source) = self.media_sources.get_mut(track_id) {
-            source.width = Some(stats.width);
-            source.height = Some(stats.height);
-            source.frames = Some(stats.frames);
-            source.frames_per_second = Some(stats.frames_per_second);
+        let source = self.get_or_create_media_source(track_id, RtpCodecKind::Video);
+        if stats.width.is_some() {
+            source.width = stats.width;
+        }
+        if stats.height.is_some() {
+            source.height = stats.height;
+        }
+        if stats.frames.is_some() {
+            source.frames = stats.frames;
+        }
+        if stats.frames_per_second.is_some() {
+            source.frames_per_second = stats.frames_per_second;
         }
     }
 
-    /// Updates audio playout stats.
+    /// Merges application-provided playout stats into an audio playout object, creating it on
+    /// first use, and names it as the playout of each inbound stream in `inbound_ssrcs`.
     pub(crate) fn update_audio_playout_stats(
         &mut self,
         playout_id: &str,
+        inbound_ssrcs: &[SSRC],
         stats: AudioPlayoutStatsUpdate,
     ) {
-        if let Some(playout) = self.audio_playouts.get_mut(playout_id) {
+        let playout = self.get_or_create_audio_playout(playout_id);
+        if stats.synthesized_samples_duration.is_some() {
             playout.synthesized_samples_duration = stats.synthesized_samples_duration;
+        }
+        if stats.synthesized_samples_events.is_some() {
             playout.synthesized_samples_events = stats.synthesized_samples_events;
+        }
+        if stats.total_samples_duration.is_some() {
             playout.total_samples_duration = stats.total_samples_duration;
+        }
+        if stats.total_playout_delay.is_some() {
             playout.total_playout_delay = stats.total_playout_delay;
+        }
+        if stats.total_samples_count.is_some() {
             playout.total_samples_count = stats.total_samples_count;
+        }
+        for ssrc in inbound_ssrcs {
+            if let Some(stream) = self.inbound_rtp_streams.get_mut(ssrc) {
+                stream.playout_id = Some(playout_id.to_string());
+            }
         }
     }
 
@@ -812,9 +868,11 @@ impl RTCStatsAccumulator {
             .entry(codec_id.clone())
             .or_insert_with(|| CodecStatsAccumulator::from_codec(codec, payload_type));
 
-        // Link the codec to the inbound RTP stream
+        // Link the codec to the inbound RTP stream; its clock rate is what the RTCP jitter is
+        // counted in
         if let Some(stream) = self.inbound_rtp_streams.get_mut(&ssrc) {
             stream.codec_id = codec_id;
+            stream.clock_rate = codec.clock_rate;
         }
     }
 
@@ -844,9 +902,11 @@ impl RTCStatsAccumulator {
             .entry(codec_id.clone())
             .or_insert_with(|| CodecStatsAccumulator::from_codec(codec, payload_type));
 
-        // Link the codec to the outbound RTP stream
+        // Link the codec to the outbound RTP stream; its clock rate is what the RTCP jitter is
+        // counted in
         if let Some(stream) = self.outbound_rtp_streams.get_mut(&ssrc) {
             stream.codec_id = codec_id;
+            stream.clock_rate = codec.clock_rate;
         }
     }
 
