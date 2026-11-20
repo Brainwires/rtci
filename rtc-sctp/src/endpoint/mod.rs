@@ -1,5 +1,9 @@
 #[cfg(test)]
 mod endpoint_test;
+#[cfg(test)]
+pub(crate) mod link_test;
+#[cfg(test)]
+mod loss_recovery_test;
 
 use std::{
     collections::HashMap,

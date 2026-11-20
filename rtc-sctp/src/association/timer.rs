@@ -18,9 +18,12 @@ pub struct TimerConfig {
     pub max_t1_cookie_retrans: usize,
     /// How many times SHUTDOWN may be retransmitted (T2-shutdown).
     pub max_t2_shutdown_retrans: usize,
-    /// How many times a DATA chunk may be retransmitted on T3-rtx expiry.
+    /// How many consecutive T3-rtx expiries, with no new DATA acknowledged in between, are
+    /// tolerated before the peer is declared unreachable and the association closes with
+    /// [`AssociationError::TimedOut`](crate::AssociationError::TimedOut) (RFC 9260 8.1).
     ///
-    /// Defaults to unlimited, leaving reliability to the per-stream partial-reliability settings.
+    /// Defaults to unlimited, leaving reliability to the per-stream partial-reliability settings
+    /// and path failure to ICE.
     pub max_t3_rtx_retrans: usize,
     /// How many times a RE-CONFIG chunk (stream reset) may be retransmitted.
     pub max_reconfig_retrans: usize,
@@ -34,7 +37,7 @@ impl Default for TimerConfig {
             max_t1_init_retrans: MAX_INIT_RETRANS,
             max_t1_cookie_retrans: MAX_INIT_RETRANS,
             max_t2_shutdown_retrans: NO_MAX_RETRANS,
-            max_t3_rtx_retrans: PATH_MAX_RETRANS,
+            max_t3_rtx_retrans: NO_MAX_RETRANS,
             max_reconfig_retrans: PATH_MAX_RETRANS,
             max_ack_retrans: PATH_MAX_RETRANS,
         }

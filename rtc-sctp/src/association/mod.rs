@@ -3592,11 +3592,15 @@ impl Association {
             }
 
             Timer::T3RTX => {
-                // T3-rtx timer will not fail by design
-                // Justifications:
-                //  * ICE would fail if the connectivity is lost
-                //  * WebRTC spec is not clear how this incident should be reported to ULP
+                // Reached only with a finite `TimerConfig::max_t3_rtx_retrans`; the default
+                // is unlimited because a WebRTC peer learns of a lost path from ICE. RFC 9260
+                // 8.1: once the limit is exceeded the peer is unreachable and the association
+                // ends. Returning without re-arming the timer, as this did, left it running
+                // with no retransmission and no FORWARD TSN for ever.
                 error!("[{}] retransmission failure: T3-rtx (DATA)", self.side);
+                if let Err(err) = self.close(AssociationError::TimedOut) {
+                    error!("[{}] failed to close association: {err}", self.side);
+                }
             }
 
             _ => {}
