@@ -385,7 +385,12 @@ fn rtp_received(p: &EnvPeer) -> impl Iterator<Item = &rtc::rtp::Packet> {
 
 /// Sends `count` 1000-byte RTP packets at 200 packets/s and returns the fraction of distinct
 /// sequence numbers the receiver got (after any recovery the chain does).
+/// The share of the first `count` packets that arrive. A short uncounted tail follows them: a
+/// receiver learns a packet is lost from a later one, so the last packet of a stream, if lost,
+/// can never be NACKed, and the tail keeps that out of the measurement.
 fn rtp_delivery(chain: Chain, count: u16) -> f64 {
+    const TAIL: u16 = 20;
+    let total = count + TAIL;
     common::install_crypto_provider();
     let env = Env::get();
     let (mut a, mut b) = pair(&env, video_pc(chain), video_pc(chain));
@@ -399,7 +404,7 @@ fn rtp_delivery(chain: Chain, count: u16) -> f64 {
     pump(&mut [&mut a, &mut b], Duration::from_secs(60), |p| {
         if p[0].connected()
             && p[1].connected()
-            && sent < count
+            && sent < total
             && last.elapsed() >= Duration::from_millis(5)
         {
             let pt = negotiated_pt(&mut p[0].pc, sender);
@@ -422,7 +427,7 @@ fn rtp_delivery(chain: Chain, count: u16) -> f64 {
             );
             sent += 1;
             last = Instant::now();
-            if sent == count {
+            if sent == total {
                 done_at = Some(Instant::now());
             }
         }
@@ -432,7 +437,7 @@ fn rtp_delivery(chain: Chain, count: u16) -> f64 {
     .unwrap();
     assert_eq!(
         sent,
-        count,
+        total,
         "sender never connected: {:?} / {:?}",
         a.connection_state(),
         b.connection_state()
@@ -440,6 +445,7 @@ fn rtp_delivery(chain: Chain, count: u16) -> f64 {
     let seqs: HashSet<u16> = rtp_received(&b)
         .filter(|p| p.header.ssrc == ssrc)
         .map(|p| p.header.sequence_number)
+        .filter(|&seq| seq.wrapping_sub(start_seq) < count)
         .collect();
     seqs.len() as f64 / count as f64
 }
