@@ -312,7 +312,7 @@ use crate::statistics::StatsSelector;
 use crate::statistics::accumulator::RTCStatsAccumulator;
 use crate::statistics::report::RTCStatsReport;
 use ::sdp::description::common::Attribute;
-use ::sdp::description::session::{ATTR_KEY_END_OF_CANDIDATES, Origin};
+use ::sdp::description::session::{ATTR_KEY_CANDIDATE, ATTR_KEY_END_OF_CANDIDATES, Origin};
 use ::sdp::util::ConnectionRole;
 use ice::AgentConfig;
 use ice::candidate::{Candidate, unmarshal_candidate};
@@ -320,6 +320,10 @@ use interceptor::{Interceptor, Registry};
 use shared::error::{Error, Result};
 use shared::util::math_rand_alpha;
 use std::time::Instant;
+
+/// The most remote candidates `add_remote_candidate` takes per remote description, the ICE
+/// agent's own cap: further ones reach neither the stats nor the stored description.
+const MAX_TRICKLED_REMOTE_CANDIDATES: usize = 256;
 
 /// Builder for creating RTCPeerConnection instances.
 ///
@@ -742,6 +746,9 @@ pub struct RTCPeerConnection {
     pub(crate) signaling_state: RTCSignalingState,
     pub(crate) peer_connection_state: RTCPeerConnectionState,
     can_trickle_ice_candidates: Option<bool>,
+    /// Remote candidates `add_remote_candidate` has taken since the last remote description,
+    /// held at [`MAX_TRICKLED_REMOTE_CANDIDATES`].
+    trickled_remote_candidates: usize,
 
     //////////////////////////////////////////////////
     // PeerConnection Internal State Machine
@@ -1382,6 +1389,9 @@ impl RTCPeerConnection {
             remote_description.parsed = Some(remote_description.unmarshal()?);
         }
         self.set_description(&remote_description, StateChangeOp::SetRemote)?;
+        if remote_description.sdp_type != RTCSdpType::Rollback {
+            self.trickled_remote_candidates = 0;
+        }
 
         if let Some(parsed_remote_description) = &remote_description.parsed {
             self.media_engine
@@ -1792,6 +1802,15 @@ impl RTCPeerConnection {
             Some(s) => s,
             None => remote_candidate.candidate.as_str(),
         };
+        // The value is written into the remote description's text as one line.
+        if candidate_value
+            .bytes()
+            .any(|b| matches!(b, b'\r' | b'\n' | b'\0'))
+        {
+            return Err(Error::SdpInvalidValue(
+                "ICE candidate contains CR, LF or NUL".to_owned(),
+            ));
+        }
 
         // The media description the candidate is for: sdpMid wins over sdpMLineIndex. With
         // neither, an end-of-candidates indication is for every media description; a candidate
@@ -1847,8 +1866,29 @@ impl RTCPeerConnection {
             return Ok(());
         }
 
+        // A candidate its media description already holds adds nothing; past the budget, a
+        // candidate is checked and then ignored, as the ICE agent ignores one past its own cap.
+        // Neither reaches the stats or the description's text.
+        let duplicate = section.is_some_and(|i| {
+            parsed.media_descriptions[i]
+                .attributes
+                .iter()
+                .any(|a| a.key == ATTR_KEY_CANDIDATE && a.value.as_deref() == Some(candidate_value))
+        });
+        if duplicate || self.trickled_remote_candidates >= MAX_TRICKLED_REMOTE_CANDIDATES {
+            unmarshal_candidate(candidate_value)?;
+            if !duplicate {
+                log::warn!(
+                    "ignoring remote candidate: already took {MAX_TRICKLED_REMOTE_CANDIDATES} (the cap)"
+                );
+            }
+            return Ok(());
+        }
+
         let Some(section) = section else {
-            return self.add_ice_remote_candidate(candidate_value);
+            self.add_ice_remote_candidate(candidate_value)?;
+            self.trickled_remote_candidates += 1;
+            return Ok(());
         };
 
         // Only a candidate of the ICE transport in use reaches the agent. One for another
@@ -1874,9 +1914,10 @@ impl RTCPeerConnection {
         self.add_remote_description_attribute(
             section,
             section_ufrag.as_deref(),
-            "candidate",
+            ATTR_KEY_CANDIDATE,
             Some(candidate_value),
         );
+        self.trickled_remote_candidates += 1;
         Ok(())
     }
 
@@ -3680,6 +3721,79 @@ a=rtcp-mux\r\n";
             .unwrap();
         let sdp = &pc.remote_description().unwrap().sdp;
         assert_eq!(sdp.matches("a=end-of-candidates\r\n").count(), 2);
+    }
+
+    #[test]
+    fn trickled_candidates_are_capped_and_single_line() {
+        let mut pc = media_pc();
+        pc.set_remote_description(
+            Instant::now(),
+            remote(RTCSdpType::Offer, PER_SECTION_UFRAG_OFFER),
+        )
+        .unwrap();
+
+        // A line break or NUL inside the value is refused, and nothing is recorded.
+        for bad in [
+            "candidate:1 1 udp 2113929471 203.0.113.100 10100 typ host\r\na=evil",
+            "candidate:1 1 udp 2113929471 203.0.113.100 10100 typ host\na=evil",
+            "candidate:1 1 udp 2113929471 203.0.113.100 10100 typ host\0",
+        ] {
+            assert!(matches!(
+                pc.add_remote_candidate(candidate(bad, Some("a1"), None)),
+                Err(Error::SdpInvalidValue(_))
+            ));
+        }
+        assert!(!pc.remote_description().unwrap().sdp.contains("evil"));
+
+        // The same candidate twice is recorded once.
+        let line = "candidate:1 1 udp 2113929471 203.0.113.100 10100 typ host";
+        pc.add_remote_candidate(candidate(line, Some("a1"), None))
+            .unwrap();
+        pc.add_remote_candidate(candidate(line, Some("a1"), None))
+            .unwrap();
+        assert_eq!(
+            pc.remote_description()
+                .unwrap()
+                .sdp
+                .matches("a=candidate:")
+                .count(),
+            1
+        );
+
+        for i in 0..100_000u32 {
+            let port = 1024 + i % 60_000;
+            let line = format!(
+                "candidate:{i} 1 udp 2113929471 203.0.113.{} {port} typ host",
+                i % 250
+            );
+            pc.add_remote_candidate(candidate(&line, Some("a1"), None))
+                .unwrap();
+        }
+
+        assert!(pc.ice_transport().get_remote_candidates().len() <= MAX_TRICKLED_REMOTE_CANDIDATES);
+        assert!(pc.stats().remote_candidates.len() <= MAX_TRICKLED_REMOTE_CANDIDATES);
+        let description = pc.remote_description().unwrap();
+        assert!(description.sdp.matches("a=candidate:").count() <= MAX_TRICKLED_REMOTE_CANDIDATES);
+        let recorded = description.parsed.as_ref().unwrap().media_descriptions[0]
+            .attributes
+            .iter()
+            .filter(|a| a.key == ATTR_KEY_CANDIDATE)
+            .count();
+        assert!(recorded <= MAX_TRICKLED_REMOTE_CANDIDATES);
+
+        // A malformed candidate past the cap is still refused.
+        assert!(
+            pc.add_remote_candidate(candidate("candidate:garbage", Some("a1"), None))
+                .is_err()
+        );
+
+        // A new remote description starts a new budget.
+        pc.set_remote_description(
+            Instant::now(),
+            remote(RTCSdpType::Offer, PER_SECTION_UFRAG_OFFER),
+        )
+        .unwrap();
+        assert_eq!(pc.trickled_remote_candidates, 0);
     }
 
     #[test]
