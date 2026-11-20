@@ -316,6 +316,8 @@ impl RTCPeerConnection {
             .map(|parsed| parsed.media_descriptions.clone());
 
         if let Some(media_descriptions) = media_descriptions {
+            let transceiver_by_mid =
+                RTCPeerConnection::transceiver_index_by_mid(&self.rtp_transceivers);
             for media in &media_descriptions {
                 if let Some(mid_value) = get_mid_value(media) {
                     if mid_value.is_empty() {
@@ -351,9 +353,7 @@ impl RTCPeerConnection {
                         continue;
                     }
 
-                    if let Some(i) =
-                        RTCPeerConnection::find_by_mid(mid_value, &self.rtp_transceivers)
-                    {
+                    if let Some(&i) = transceiver_by_mid.get(mid_value.as_str()) {
                         if let Some(sender) = self.rtp_transceivers[i].sender_mut() {
                             sender.set_negotiated();
                         }

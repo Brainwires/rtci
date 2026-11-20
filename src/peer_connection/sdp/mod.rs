@@ -309,7 +309,7 @@ use sdp::description::session::*;
 use sdp::extmap::ExtMap;
 use sdp::util::ConnectionRole;
 use shared::error::{Error, Result};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use url::Url;
 
@@ -354,16 +354,16 @@ pub(crate) fn track_details_for_rid<'a>(
         .find(|x| &x.mid == mid && x.rids.contains(rid))
 }
 
-pub(crate) fn filter_track_with_ssrc(incoming_tracks: &mut Vec<TrackDetails>, ssrc: SSRC) {
-    incoming_tracks.retain(|x| x.ssrc != Some(ssrc));
-}
-
 /// extract all TrackDetails from an SDP.
 pub(crate) fn track_details_from_sdp(s: &SessionDescription) -> Vec<TrackDetails> {
     let mut incoming_tracks = vec![];
 
     for media in &s.media_descriptions {
-        let mut tracks_in_media_section = vec![];
+        // Tracks in the order their `a=ssrc` lines first appear. A track a later
+        // `a=ssrc-group` names as a repair flow is removed by clearing its slot, and
+        // `slot_by_ssrc` finds a track by SSRC (unique within the section) without a scan.
+        let mut track_slots: Vec<Option<TrackDetails>> = vec![];
+        let mut slot_by_ssrc: HashMap<SSRC, usize> = HashMap::new();
         let mut rtx_repair_flows = HashMap::new();
         let mut fec_repair_flows = HashMap::new();
 
@@ -418,16 +418,16 @@ pub(crate) fn track_details_from_sdp(s: &SessionDescription) -> Vec<TrackDetails
                                 };
                                 rtx_repair_flows.insert(rtx_repair_flow, base_ssrc);
                                 // Remove if rtx was added as track before
-                                filter_track_with_ssrc(
-                                    &mut tracks_in_media_section,
-                                    rtx_repair_flow as SSRC,
-                                );
+                                if let Some(slot) = slot_by_ssrc.remove(&rtx_repair_flow) {
+                                    track_slots[slot] = None;
+                                }
 
-                                tracks_in_media_section.iter_mut().for_each(|x| {
-                                    if x.ssrc.is_some_and(|ssrc| ssrc == base_ssrc) {
-                                        x.rtx_ssrc = Some(rtx_repair_flow);
-                                    }
-                                });
+                                if let Some(track) = slot_by_ssrc
+                                    .get(&base_ssrc)
+                                    .and_then(|&slot| track_slots[slot].as_mut())
+                                {
+                                    track.rtx_ssrc = Some(rtx_repair_flow);
+                                }
                             }
                         } else if split[0] == SEMANTIC_TOKEN_FORWARD_ERROR_CORRECTION_FRAMEWORK {
                             // Similar to above, lines like `a=ssrc-group:FEC-FR aaaaa bbbbb`
@@ -449,16 +449,16 @@ pub(crate) fn track_details_from_sdp(s: &SessionDescription) -> Vec<TrackDetails
                                 };
                                 fec_repair_flows.insert(fec_repair_flow, base_ssrc);
                                 // Remove if fec was added as track before
-                                filter_track_with_ssrc(
-                                    &mut tracks_in_media_section,
-                                    fec_repair_flow as SSRC,
-                                );
+                                if let Some(slot) = slot_by_ssrc.remove(&fec_repair_flow) {
+                                    track_slots[slot] = None;
+                                }
 
-                                tracks_in_media_section.iter_mut().for_each(|x| {
-                                    if x.ssrc.is_some_and(|ssrc| ssrc == base_ssrc) {
-                                        x.fec_ssrc = Some(fec_repair_flow);
-                                    }
-                                });
+                                if let Some(track) = slot_by_ssrc
+                                    .get(&base_ssrc)
+                                    .and_then(|&slot| track_slots[slot].as_mut())
+                                {
+                                    track.fec_ssrc = Some(fec_repair_flow);
+                                }
                             }
                         }
                     }
@@ -503,20 +503,15 @@ pub(crate) fn track_details_from_sdp(s: &SessionDescription) -> Vec<TrackDetails
                             track_id = split[2];
                         }
 
-                        let mut track_idx = tracks_in_media_section.len();
-                        for (i, t) in tracks_in_media_section.iter().enumerate() {
-                            if t.ssrc == Some(ssrc) {
-                                track_idx = i;
-                                break;
-                            }
-                        }
-
-                        if track_idx < tracks_in_media_section.len() {
-                            tracks_in_media_section[track_idx].mid = mid_value.to_string();
-                            tracks_in_media_section[track_idx].kind = codec_type;
-                            stream_id.clone_into(&mut tracks_in_media_section[track_idx].stream_id);
-                            track_id.clone_into(&mut tracks_in_media_section[track_idx].track_id);
-                            tracks_in_media_section[track_idx].ssrc = Some(ssrc);
+                        if let Some(track) = slot_by_ssrc
+                            .get(&ssrc)
+                            .and_then(|&slot| track_slots[slot].as_mut())
+                        {
+                            track.mid = mid_value.to_string();
+                            track.kind = codec_type;
+                            stream_id.clone_into(&mut track.stream_id);
+                            track_id.clone_into(&mut track.track_id);
+                            track.ssrc = Some(ssrc);
                         } else {
                             let track_details = TrackDetails {
                                 mid: mid_value.to_string(),
@@ -526,7 +521,8 @@ pub(crate) fn track_details_from_sdp(s: &SessionDescription) -> Vec<TrackDetails
                                 ssrc: Some(ssrc),
                                 ..Default::default()
                             };
-                            tracks_in_media_section.push(track_details);
+                            slot_by_ssrc.insert(ssrc, track_slots.len());
+                            track_slots.push(Some(track_details));
                         }
                     }
                 }
@@ -535,20 +531,25 @@ pub(crate) fn track_details_from_sdp(s: &SessionDescription) -> Vec<TrackDetails
         }
 
         for (repair_ssrc, base_ssrc) in rtx_repair_flows {
-            for track in &mut tracks_in_media_section {
-                if track.ssrc == Some(base_ssrc) {
-                    track.rtx_ssrc = Some(repair_ssrc);
-                }
+            if let Some(track) = slot_by_ssrc
+                .get(&base_ssrc)
+                .and_then(|&slot| track_slots[slot].as_mut())
+            {
+                track.rtx_ssrc = Some(repair_ssrc);
             }
         }
 
         for (repair_ssrc, base_ssrc) in fec_repair_flows {
-            for track in &mut tracks_in_media_section {
-                if track.ssrc == Some(base_ssrc) {
-                    track.fec_ssrc = Some(repair_ssrc);
-                }
+            if let Some(track) = slot_by_ssrc
+                .get(&base_ssrc)
+                .and_then(|&slot| track_slots[slot].as_mut())
+            {
+                track.fec_ssrc = Some(repair_ssrc);
             }
         }
+
+        let mut tracks_in_media_section: Vec<TrackDetails> =
+            track_slots.into_iter().flatten().collect();
 
         // If media line is using RTP Stream Identifier Source Description per RFC8851
         // we will need to override tracks, and remove ssrcs.
@@ -617,7 +618,13 @@ pub(crate) fn get_rids(media: &MediaDescription) -> Vec<SimulcastRid> {
         // differently. Note: comma-separated rid-id alternatives within one
         // stream are flattened here, not modeled as a single stream (no shipping
         // browser emits alternatives).
-        let mut simulcast_order: Vec<String> = vec![];
+        // First position of each id in the attribute, and the first rid declared with each id:
+        // both by lookup, so neither pass below scans a list per entry.
+        let mut simulcast_order: HashMap<String, usize> = HashMap::new();
+        let mut rid_by_id: HashMap<String, usize> = HashMap::new();
+        for (i, rid) in rids.iter().enumerate() {
+            rid_by_id.entry(rid.id.clone()).or_insert(i);
+        }
         let mut split = attr.split(' ');
         loop {
             let _dir = split.next();
@@ -631,10 +638,11 @@ pub(crate) fn get_rids(media: &MediaDescription) -> Vec<SimulcastRid> {
                         (sc_id, false)
                     };
 
-                    if let Some(rid) = rids.iter_mut().find(|f| f.id == sc_id) {
-                        rid.paused = paused;
+                    if let Some(&i) = rid_by_id.get(sc_id) {
+                        rids[i].paused = paused;
                     }
-                    simulcast_order.push(sc_id.to_owned());
+                    let position = simulcast_order.len();
+                    simulcast_order.entry(sc_id.to_owned()).or_insert(position);
                 }
             } else {
                 break;
@@ -644,15 +652,113 @@ pub(crate) fn get_rids(media: &MediaDescription) -> Vec<SimulcastRid> {
         // Reorder to match the `a=simulcast` preference order. `sort_by_key` is
         // stable, so any rid not referenced by the attribute (should not happen
         // in a valid offer) keeps its `a=rid` declaration order at the end.
-        rids.sort_by_key(|rid| {
-            simulcast_order
-                .iter()
-                .position(|id| id == &rid.id)
-                .unwrap_or(usize::MAX)
-        });
+        rids.sort_by_key(|rid| simulcast_order.get(&rid.id).copied().unwrap_or(usize::MAX));
     }
 
     rids
+}
+
+#[test]
+fn track_details_from_sdp_pairs_repair_flows_by_lookup() {
+    const PRIMARIES: u32 = 3000;
+    let mut media = MediaDescription::default()
+        .with_value_attribute(ATTR_KEY_MID.to_owned(), "0".to_owned())
+        .with_property_attribute(ATTR_KEY_SEND_RECV.to_owned());
+    media.media_name.media = "video".to_owned();
+    for i in 0..PRIMARIES {
+        let (primary, rtx, fec) = (10_000 + i, 20_000 + i, 30_000 + i);
+        // Half the groups follow their ssrc lines (the repair track is removed again), half
+        // precede them (the repair ssrc is never added).
+        let group_first = i % 2 == 0;
+        if group_first {
+            media = media
+                .with_value_attribute(
+                    ATTR_KEY_SSRC_GROUP.to_owned(),
+                    format!("FID {primary} {rtx}"),
+                )
+                .with_value_attribute(
+                    ATTR_KEY_SSRC_GROUP.to_owned(),
+                    format!("FEC-FR {primary} {fec}"),
+                );
+        }
+        for ssrc in [primary, rtx, fec] {
+            media = media.with_value_attribute(
+                ATTR_KEY_SSRC.to_owned(),
+                format!("{ssrc} msid:stream track{i}"),
+            );
+        }
+        if !group_first {
+            media = media
+                .with_value_attribute(
+                    ATTR_KEY_SSRC_GROUP.to_owned(),
+                    format!("FID {primary} {rtx}"),
+                )
+                .with_value_attribute(
+                    ATTR_KEY_SSRC_GROUP.to_owned(),
+                    format!("FEC-FR {primary} {fec}"),
+                );
+        }
+    }
+    let desc = SessionDescription::default().with_media(media);
+
+    let tracks = track_details_from_sdp(&desc);
+
+    assert_eq!(tracks.len(), PRIMARIES as usize);
+    for (i, track) in tracks.iter().enumerate() {
+        let i = i as u32;
+        assert_eq!(track.ssrc, Some(10_000 + i));
+        assert_eq!(track.rtx_ssrc, Some(20_000 + i));
+        assert_eq!(track.fec_ssrc, Some(30_000 + i));
+        assert_eq!(track.track_id, format!("track{i}"));
+        assert_eq!(track.mid, "0");
+    }
+}
+
+#[test]
+fn get_rids_orders_and_pauses_by_lookup() {
+    const RIDS: usize = 3000;
+    let mut media = MediaDescription::default();
+    media.media_name.media = "video".to_owned();
+    for i in 0..RIDS {
+        media = media.with_value_attribute(SDP_ATTRIBUTE_RID.to_owned(), format!("r{i} send"));
+    }
+    // A duplicate declaration keeps the first rid for pausing, as before.
+    media = media.with_value_attribute(SDP_ATTRIBUTE_RID.to_owned(), "r0 send".to_owned());
+    // Reverse order, every third one paused, one id listed twice and one unknown id.
+    let mut list: Vec<String> = (0..RIDS)
+        .rev()
+        .map(|i| {
+            if i % 3 == 0 {
+                format!("~r{i}")
+            } else {
+                format!("r{i}")
+            }
+        })
+        .collect();
+    list.push("r1".to_owned());
+    list.push("unknown".to_owned());
+    media = media.with_value_attribute(
+        SDP_ATTRIBUTE_SIMULCAST.to_owned(),
+        format!("send {}", list.join(";")),
+    );
+
+    let rids = get_rids(&media);
+
+    assert_eq!(rids.len(), RIDS + 1);
+    for (position, rid) in rids.iter().take(RIDS).enumerate() {
+        let i = RIDS - 1 - position;
+        assert_eq!(rid.id, format!("r{i}"));
+        // r0's first declaration is the one the attribute pauses.
+        if i != 0 {
+            assert_eq!(rid.paused, i % 3 == 0, "rid r{i}");
+        }
+    }
+    // Both r0 entries share r0's first position, so the stable sort keeps their declaration
+    // order: the first one is paused, the duplicate is not.
+    assert_eq!(rids[RIDS - 1].id, "r0");
+    assert!(rids[RIDS - 1].paused);
+    assert_eq!(rids[RIDS].id, "r0");
+    assert!(!rids[RIDS].paused);
 }
 
 pub(crate) fn add_candidates_to_media_descriptions(
@@ -1185,24 +1291,27 @@ pub(crate) struct PopulateSdpParams {
 }
 
 impl RTCPeerConnection {
-    pub(crate) fn find_by_mid(
-        mid: &String,
+    /// Each mid's first transceiver in `local_transceivers`, so a pass over every m-section of
+    /// a description looks mids up instead of scanning the transceivers for each one.
+    pub(crate) fn transceiver_index_by_mid(
         local_transceivers: &[RTCRtpTransceiverInternal],
-    ) -> Option<usize> {
-        local_transceivers
-            .iter()
-            .enumerate()
-            .find(|(_i, t)| t.mid().as_ref() == Some(mid))
-            .map(|(i, _v)| i)
+    ) -> HashMap<String, usize> {
+        let mut by_mid = HashMap::with_capacity(local_transceivers.len());
+        for (i, t) in local_transceivers.iter().enumerate() {
+            if let Some(mid) = t.mid() {
+                by_mid.entry(mid.clone()).or_insert(i);
+            }
+        }
+        by_mid
     }
 
-    /// Given a direction+type pluck a transceiver from the passed list
-    /// if no entry satisfies the requested type+direction return a inactive Transceiver
+    /// Given a direction+type pluck a transceiver from the passed list and return its index;
+    /// `None` when no entry satisfies the requested type+direction
     pub(crate) fn satisfy_type_and_direction(
         remote_kind: RtpCodecKind,
         remote_direction: RTCRtpTransceiverDirection,
-        local_transceivers: &mut [RTCRtpTransceiverInternal],
-    ) -> Option<&mut RTCRtpTransceiverInternal> {
+        local_transceivers: &[RTCRtpTransceiverInternal],
+    ) -> Option<usize> {
         // Get direction order from most preferred to least
         let get_preferred_directions = || -> Vec<RTCRtpTransceiverDirection> {
             match remote_direction {
@@ -1227,7 +1336,7 @@ impl RTCPeerConnection {
                     && t.kind() == remote_kind
                     && possible_direction == t.direction()
             }) {
-                return Some(&mut local_transceivers[index]);
+                return Some(index);
             }
         }
 
@@ -1255,7 +1364,8 @@ impl RTCPeerConnection {
         let mut bundle_value = "BUNDLE".to_owned();
         let mut bundle_count = 0;
         let append_bundle = |mid_value: &str, value: &mut String, count: &mut i32| {
-            *value = value.clone() + " " + mid_value;
+            value.push(' ');
+            value.push_str(mid_value);
             *count += 1;
         };
 
@@ -1592,13 +1702,23 @@ fn check_ice_credentials(ufrag: Option<&str>, pwd: Option<&str>) -> Result<()> {
 /// negotiate yet, such as an offer created before any transceiver or data channel was added).
 pub(crate) fn extract_ice_details(desc: &SessionDescription) -> Result<Option<RemoteIceDetails>> {
     let bundle = bundle_group_mids(desc);
-    let in_bundle =
-        |m: &MediaDescription| get_mid_value(m).is_some_and(|mid| bundle.contains(&mid.as_str()));
-    let tagged = bundle.iter().find_map(|mid| {
-        desc.media_descriptions
-            .iter()
-            .find(|m| get_mid_value(m).is_some_and(|v| v == mid) && !is_rejected_media(m))
-    });
+    let bundle_set: HashSet<&str> = bundle.iter().copied().collect();
+    let in_bundle = |m: &MediaDescription| {
+        get_mid_value(m).is_some_and(|mid| bundle_set.contains(mid.as_str()))
+    };
+    // The first m-section that isn't rejected, for each mid: a lookup per bundle mid instead of
+    // a scan of every m-section.
+    let mut usable_by_mid: HashMap<&str, &MediaDescription> = HashMap::new();
+    for m in &desc.media_descriptions {
+        if let Some(mid) = get_mid_value(m)
+            && !is_rejected_media(m)
+        {
+            usable_by_mid.entry(mid.as_str()).or_insert(m);
+        }
+    }
+    let tagged = bundle
+        .iter()
+        .find_map(|mid| usable_by_mid.get(mid).copied());
 
     // Backup ufrag/pwd is the first inactive credentials found, for the corner case where all
     // media lines/transceivers are set to inactive.

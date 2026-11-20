@@ -1185,6 +1185,8 @@ impl RTCPeerConnection {
         if we_answer && let Some(parsed_local_description) = &local_description.parsed {
             // WebRTC Spec 1.0 https://www.w3.org/TR/webrtc/
             // Section 4.4.1.5
+            let transceiver_by_mid =
+                RTCPeerConnection::transceiver_index_by_mid(&self.rtp_transceivers);
             for media in &parsed_local_description.media_descriptions {
                 let mid_value = match get_mid_value(media) {
                     Some(mid) if !mid.is_empty() => mid,
@@ -1195,8 +1197,8 @@ impl RTCPeerConnection {
                     continue;
                 }
 
-                let i = match RTCPeerConnection::find_by_mid(mid_value, &self.rtp_transceivers) {
-                    Some(i) => i,
+                let i = match transceiver_by_mid.get(mid_value.as_str()) {
+                    Some(&i) => i,
                     None => return Err(Error::ErrPeerConnTransceiverMidNil),
                 };
 
@@ -1425,6 +1427,10 @@ impl RTCPeerConnection {
                 .map(|parsed| parsed.media_descriptions.clone());
 
             if let Some(media_descriptions) = media_descriptions {
+                // Each mid's transceiver, kept up to date as m-sections claim transceivers, so
+                // matching a description's m-sections is one lookup each.
+                let mut transceiver_by_mid =
+                    RTCPeerConnection::transceiver_index_by_mid(&self.rtp_transceivers);
                 if !we_offer {
                     for media in &media_descriptions {
                         let mid_value = match get_mid_value(media) {
@@ -1444,28 +1450,28 @@ impl RTCPeerConnection {
                             continue;
                         }
 
-                        let transceiver = if let Some(i) =
-                            RTCPeerConnection::find_by_mid(mid_value, &self.rtp_transceivers)
-                        {
-                            // An `a=inactive` media section pauses the transceiver; it does not
-                            // stop it (RFC 9429, Section 5.10: only a rejected section, port 0,
-                            // stops one). The answer is inactive, and a later offer, or a rollback
-                            // of this one, has the transceiver send and receive again. Stopping it
-                            // here ended its sender and receiver for good.
-                            if direction == RTCRtpTransceiverDirection::Inactive {
-                                self.rtp_transceivers[i]
-                                    .set_direction(RTCRtpTransceiverDirection::Inactive);
-                            }
-                            Some(&mut self.rtp_transceivers[i])
-                        } else {
-                            RTCPeerConnection::satisfy_type_and_direction(
-                                kind,
-                                direction,
-                                &mut self.rtp_transceivers,
-                            )
-                        };
+                        let transceiver_index =
+                            if let Some(&i) = transceiver_by_mid.get(mid_value.as_str()) {
+                                // An `a=inactive` media section pauses the transceiver; it does not
+                                // stop it (RFC 9429, Section 5.10: only a rejected section, port 0,
+                                // stops one). The answer is inactive, and a later offer, or a rollback
+                                // of this one, has the transceiver send and receive again. Stopping it
+                                // here ended its sender and receiver for good.
+                                if direction == RTCRtpTransceiverDirection::Inactive {
+                                    self.rtp_transceivers[i]
+                                        .set_direction(RTCRtpTransceiverDirection::Inactive);
+                                }
+                                Some(i)
+                            } else {
+                                RTCPeerConnection::satisfy_type_and_direction(
+                                    kind,
+                                    direction,
+                                    &self.rtp_transceivers,
+                                )
+                            };
 
-                        if let Some(transceiver) = transceiver {
+                        if let Some(i) = transceiver_index {
+                            let transceiver = &mut self.rtp_transceivers[i];
                             if direction == RTCRtpTransceiverDirection::Recvonly {
                                 if transceiver.direction() == RTCRtpTransceiverDirection::Sendrecv {
                                     transceiver.set_direction(RTCRtpTransceiverDirection::Sendonly);
@@ -1495,6 +1501,7 @@ impl RTCPeerConnection {
 
                             if transceiver.mid().is_none() {
                                 transceiver.set_mid(mid_value.to_string())?;
+                                transceiver_by_mid.entry(mid_value.to_string()).or_insert(i);
                             }
                         } else {
                             let local_direction =
@@ -1528,7 +1535,8 @@ impl RTCPeerConnection {
                             // (RFC 9429, Section 5.7) — unless a track is attached via add_track.
                             transceiver.set_created_by_remote_description(true);
 
-                            self.add_rtp_transceiver(transceiver);
+                            let i = self.add_rtp_transceiver(transceiver);
+                            transceiver_by_mid.entry(mid_value.to_string()).or_insert(i);
                         }
                     }
                 } else {
@@ -1554,13 +1562,12 @@ impl RTCPeerConnection {
                             continue;
                         }
 
-                        let transceiver = if let Some(i) =
-                            RTCPeerConnection::find_by_mid(mid_value, &self.rtp_transceivers)
-                        {
-                            &mut self.rtp_transceivers[i]
-                        } else {
-                            return Err(Error::ErrPeerConnTransceiverMidNil);
-                        };
+                        let transceiver =
+                            if let Some(&i) = transceiver_by_mid.get(mid_value.as_str()) {
+                                &mut self.rtp_transceivers[i]
+                            } else {
+                                return Err(Error::ErrPeerConnTransceiverMidNil);
+                            };
 
                         // reverse direction if it was a remote answer
                         if direction == RTCRtpTransceiverDirection::Sendonly {
