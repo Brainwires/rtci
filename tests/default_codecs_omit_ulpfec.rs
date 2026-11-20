@@ -1,5 +1,6 @@
-//! The Brainwires fork keeps ULPFEC in the default offer (upstream #837 removed it; the fork
-//! never narrows a default, see FORK.md). End-to-end: the generated SDP carries a ULPFEC rtpmap.
+//! The default offer carries no ULPFEC (RFC 5109): the engine neither encodes nor decodes it, so
+//! offering it would invite repair packets that are dropped (upstream #837 made the same change,
+//! see FORK.md). End-to-end: the generated SDP has video codecs and no ULPFEC rtpmap.
 use rtc::peer_connection::RTCPeerConnectionBuilder;
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 use rtc::peer_connection::configuration::media_engine::MediaEngine;
@@ -8,7 +9,7 @@ use rtc::rtp_transceiver::{RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
 use std::time::Instant;
 
 #[test]
-fn default_offer_sdp_still_contains_ulpfec() {
+fn default_offer_sdp_has_no_ulpfec() {
     let mut me = MediaEngine::default();
     me.register_default_codecs()
         .expect("register default codecs");
@@ -30,11 +31,11 @@ fn default_offer_sdp_still_contains_ulpfec() {
     let offer = pc.create_offer(None).expect("create offer");
     let lower = offer.sdp.to_lowercase();
     assert!(
-        lower.contains("ulpfec/90000"),
-        "the default offer must keep advertising ULPFEC:\n{}",
+        !lower.contains("ulpfec"),
+        "the default offer must not advertise ULPFEC:\n{}",
         offer.sdp
     );
-    // sanity: the offer really does carry video codecs, alongside it
+    // sanity: the offer really does carry video codecs
     assert!(
         lower.contains("vp8"),
         "expected a video offer, got:\n{}",

@@ -417,8 +417,8 @@ impl MediaEngine {
         // type) fmtp parameter points at the primary codec this RTX stream
         // repairs. Browsers offer an RTX codec for every video codec by default
         // and drop RTX negotiation for any primary we do not pair one with, so
-        // register one RTX codec per primary video codec. ulpfec is a FEC codec, not a media
-        // codec, and does not get an RTX pairing.
+        // register one RTX codec per primary video codec. A FEC codec (an application may
+        // register ULPFEC or FlexFEC itself) is not a media codec and gets no RTX pairing.
         let rtx_codec = |payload_type: PayloadType, apt: PayloadType| RTCRtpCodecParameters {
             rtp_codec: RTCRtpCodec {
                 mime_type: MIME_TYPE_RTX.to_owned(),
@@ -565,18 +565,9 @@ impl MediaEngine {
                 payload_type: 126,
             },
             rtx_codec(107, 126),
-            // Kept by the Brainwires fork: upstream stopped advertising ULPFEC by default
-            // (#837). The fork never narrows a default; see FORK.md.
-            RTCRtpCodecParameters {
-                rtp_codec: RTCRtpCodec {
-                    mime_type: MIME_TYPE_ULP_FEC.to_owned(),
-                    clock_rate: 90000,
-                    channels: 0,
-                    sdp_fmtp_line: "".to_owned(),
-                    rtcp_feedback: vec![],
-                },
-                payload_type: 116,
-            },
+            // No ULPFEC (RFC 5109): nothing in this engine encodes or decodes it, so offering
+            // it invited a peer to send repair packets that would be dropped. An application
+            // with its own ULPFEC coder registers `MIME_TYPE_ULP_FEC` itself. See FORK.md.
         ] {
             self.register_codec(codec, RtpCodecKind::Video)?;
         }
@@ -1244,10 +1235,10 @@ impl MediaEngine {
 mod default_fec_codec_test {
     use super::*;
 
-    // The Brainwires fork keeps ULPFEC (PT 116) in the default codecs, as before upstream's
-    // #837 removed it: the fork never narrows a default. See FORK.md.
+    // ULPFEC (RFC 5109) is not in the default codecs: the engine neither encodes nor decodes
+    // it, so it must not be offered (upstream #837 made the same change). See FORK.md.
     #[test]
-    fn default_codecs_still_offer_ulpfec() {
+    fn default_codecs_do_not_offer_ulpfec() {
         let mut me = MediaEngine::default();
         me.register_default_codecs().unwrap();
 
@@ -1260,10 +1251,9 @@ mod default_fec_codec_test {
             .map(|c| c.payload_type)
             .collect();
 
-        assert_eq!(
-            ulpfec,
-            vec![116],
-            "default codecs must keep ULPFEC at PT 116"
+        assert!(
+            ulpfec.is_empty(),
+            "default codecs must not offer ULPFEC: {ulpfec:?}"
         );
     }
 
@@ -1316,8 +1306,8 @@ mod default_rtx_codec_test {
             } else if UniCase::new(codec.rtp_codec.mime_type.as_str())
                 != UniCase::new(MIME_TYPE_ULP_FEC)
             {
-                // ULPFEC (kept in the defaults by the Brainwires fork) is a FEC codec, not a
-                // media codec, and does not get an RTX pairing.
+                // A FEC codec is not a media codec and gets no RTX pairing (none is a
+                // default today; this keeps the check right if one is added).
                 primary_payload_types.push(codec.payload_type);
             }
         }

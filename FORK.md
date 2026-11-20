@@ -140,6 +140,12 @@ reason. Today there are two:
   the maintainer for security. To offer CBC again, list the suites with
   `SettingEngineBuilder::with_dtls_cipher_suites` (for example
   `CipherSuiteId::Tls_Ecdhe_Ecdsa_With_Aes_256_Cbc_Sha`).
+- Codecs: `register_default_codecs` no longer offers ULPFEC (`video/ulpfec`, PT 116). Nothing
+  in the engine encodes or decodes RFC 5109 FEC (and RED, which carries it from browsers, was
+  never offered), so offering it invited repair packets that were dropped: a claim the engine
+  did not keep. This takes upstream's `4d0c5070` (#837), which the fork had reverted under
+  rule 1; the maintainer decided the exception. An application with its own coder registers
+  `MIME_TYPE_ULP_FEC` itself. RED + ULPFEC receive is planned work, not a default.
 
 ### Upstream API replacements taken
 
@@ -153,7 +159,6 @@ shims: `CryptoPrivateKeyKind`, `KeyingMaterialExporter`, `extract_session_keys_f
 | Upstream commit | What it removed or narrowed | What the fork does instead |
 |---|---|---|
 | `14d89bb2` interceptor redesign | Deleted `rtc-interceptor-derive` and `Interceptor::with` | Takes the redesign, keeps the crate and `with` (see above). |
-| `4d0c5070` (#837) | Stopped advertising ULPFEC (PT 116) by default | ULPFEC stays in `register_default_codecs`. |
 | `8080cef3` | `write_rtp` stopped rewriting an un-negotiated payload type to the encoding's codec | The fuzzy-match fallback stays; only a packet with no matching codec at all is an error. |
 | `1f1b0874` (#123) | `write_rtp` errors on header extension ids not negotiated on the sender | They are passed through (with a trace log), as before. |
 | `702ffbc0` | `RTCConfiguration::validate` rejects a Relay policy without a TURN URL | Warns instead; an application may add its own relay candidates. |
