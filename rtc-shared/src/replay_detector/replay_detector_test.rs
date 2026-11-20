@@ -285,3 +285,29 @@ fn test_replay_detector() {
         }
     }
 }
+
+/// A sequence number exactly half the range behind the head is old, as in the SRTP rollover
+/// estimate (RFC 3711 Appendix A).
+#[test]
+fn test_wrapped_half_range_behind_is_too_old() {
+    let mut det = WrappedSlidingWindowDetector::new(64, 0xFFFF);
+    for seq in 32768..=40000u64 {
+        assert!(det.check(seq), "{seq}");
+        det.accept();
+    }
+
+    assert!(
+        !det.check(40000 - 32768),
+        "a packet half the range behind the head must be too old"
+    );
+    det.accept(); // must be a no-op after a failed check
+
+    // The head did not move, so the next packet is still new.
+    assert!(det.check(40001));
+    det.accept();
+
+    // Just under half the range ahead of the head is still a forward jump.
+    assert!(det.check((40001 + 32767) & 0xFFFF));
+    det.accept();
+    assert!(!det.check(40001), "the old head is now behind the window");
+}

@@ -29,13 +29,20 @@ use rtcp::sender_report::SenderReport;
 use rtcp::transport_feedbacks::transport_layer_nack::TransportLayerNack;
 use shared::error::{Error, Result};
 use shared::marshal::MarshalSize;
-use std::collections::VecDeque;
-use std::time::Instant;
+use std::collections::{HashMap, VecDeque};
+use std::time::{Duration, Instant};
+
+/// How soon after a simulcast layer (a `mid`/`rid`) moved to a new SSRC it may move again.
+/// Packets under another SSRC for that layer in between are not attributed to it.
+pub(crate) const MIN_RID_SSRC_REBIND_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Default)]
 pub(crate) struct InterceptorHandlerContext {
     is_dtls_handshake_complete: bool,
     pub(crate) ssrc_owners: SsrcOwners,
+    /// When each (`mid`, `rid`) layer last moved to a new SSRC, for the rebinds of the last
+    /// [`MIN_RID_SSRC_REBIND_INTERVAL`] only.
+    rid_rebinds: HashMap<(String, String), Instant>,
 
     pub(crate) read_outs: VecDeque<TaggedRTCMessageInternal>,
     pub(crate) write_outs: VecDeque<TaggedRTCMessageInternal>,
@@ -682,10 +689,50 @@ impl<'a> InterceptorHandler<'a> {
         };
 
         // Validate rid against SDP. If invalid then drop it.
-        match receiver.get_coding_parameter_mut_by_rid(rid.as_str()) {
+        let previous_ssrc = match receiver.get_coding_parameter_mut_by_rid(rid.as_str()) {
             None => return false,
             Some(coding) if coding.ssrc == Some(ssrc) => return true,
+            Some(coding) => coding.ssrc,
+        };
+
+        // The layer is moving to a new SSRC: at most once per interval, and the stream it leaves
+        // is unbound, so a layer holds one bound stream however often its SSRC changes.
+        if let Some(previous_ssrc) = previous_ssrc {
+            let key = (mid.clone(), rid.clone());
+            if self.ctx.rid_rebinds.get(&key).is_some_and(|last| {
+                now.saturating_duration_since(*last) < MIN_RID_SSRC_REBIND_INTERVAL
+            }) {
+                debug!(
+                    "ignoring ssrc {ssrc} for mid={mid} rid={rid}: the layer moved from ssrc \
+                     {previous_ssrc} too recently"
+                );
+                return false;
+            }
+            self.ctx.rid_rebinds.retain(|_, last| {
+                now.saturating_duration_since(*last) < MIN_RID_SSRC_REBIND_INTERVAL
+            });
+            self.ctx.rid_rebinds.insert(key, now);
+
+            let parameters = receiver.get_parameters(self.media_engine);
+            RTCRtpReceiverInternal::interceptor_remote_stream_op(
+                self.interceptor,
+                false,
+                previous_ssrc,
+                None,
+                None,
+                codec.payload_type,
+                None,
+                None,
+                &codec.rtp_codec,
+                &parameters.rtp_parameters.header_extensions,
+            );
+            self.stats.remove_inbound_rtp_stream(previous_ssrc);
+            self.ctx.ssrc_owners.remove(previous_ssrc);
+        }
+
+        match receiver.get_coding_parameter_mut_by_rid(rid.as_str()) {
             Some(coding) => coding.ssrc = Some(ssrc),
+            None => return false,
         }
 
         // Get RTX and FEC SSRCs from coding parameters.
@@ -1436,6 +1483,7 @@ mod stream_binding_tests {
     #[derive(Clone, Default)]
     struct Recorder {
         bound: Arc<Mutex<Vec<StreamInfo>>>,
+        unbound: Arc<Mutex<Vec<StreamInfo>>>,
     }
 
     impl Recorder {
@@ -1482,7 +1530,9 @@ mod stream_binding_tests {
         fn bind_remote_stream(&mut self, info: &StreamInfo) {
             self.bound.lock().unwrap().push(info.clone());
         }
-        fn unbind_remote_stream(&mut self, _info: &StreamInfo) {}
+        fn unbind_remote_stream(&mut self, info: &StreamInfo) {
+            self.unbound.lock().unwrap().push(info.clone());
+        }
     }
 
     /// A receiver for a remote track whose SSRC was declared in the SDP but whose codec is not yet
@@ -1835,5 +1885,188 @@ mod stream_binding_tests {
             recorder.bound_ssrcs(),
             "the layer and its retransmission stream are both real streams"
         );
+    }
+
+    /// A media engine with VP8 + RTX and the mid / rid header extensions negotiated, and a
+    /// receiving transceiver (mid "0") with one simulcast layer "h" whose SSRC is not yet known.
+    /// Returns the engine, the transceiver and the mid / rid extension ids.
+    fn simulcast_receiver(rtx_ssrc: u32) -> (MediaEngine, RTCRtpTransceiverInternal, u8, u8) {
+        let (payload_type, rtx_payload_type) = (96u8, 97u8);
+        let mut media_engine = media_engine_with_rtx();
+        for uri in [
+            ::sdp::extmap::SDES_MID_URI,
+            ::sdp::extmap::SDES_RTP_STREAM_ID_URI,
+        ] {
+            media_engine
+                .register_header_extension(
+                    RTCRtpHeaderExtensionCapability {
+                        uri: uri.to_owned(),
+                    },
+                    RtpCodecKind::Video,
+                    None,
+                )
+                .expect("extension");
+        }
+        media_engine
+            .update_header_extension(1, ::sdp::extmap::SDES_MID_URI, RtpCodecKind::Video)
+            .expect("negotiate mid");
+        media_engine
+            .update_header_extension(
+                2,
+                ::sdp::extmap::SDES_RTP_STREAM_ID_URI,
+                RtpCodecKind::Video,
+            )
+            .expect("negotiate rid");
+        let (mid_extension_id, _, _) =
+            media_engine.get_header_extension_id(RTCRtpHeaderExtensionCapability {
+                uri: ::sdp::extmap::SDES_MID_URI.to_owned(),
+            });
+        let (rid_extension_id, _, _) =
+            media_engine.get_header_extension_id(RTCRtpHeaderExtensionCapability {
+                uri: ::sdp::extmap::SDES_RTP_STREAM_ID_URI.to_owned(),
+            });
+
+        let layer = RTCRtpCodingParameters {
+            rid: "h".to_owned(),
+            ssrc: None,
+            rtx: Some(RTCRtpRtxParameters { ssrc: rtx_ssrc }),
+            fec: None,
+        };
+        let mut transceiver = RTCRtpTransceiverInternal::new(
+            RtpCodecKind::Video,
+            None,
+            RTCRtpTransceiverInit {
+                direction: RTCRtpTransceiverDirection::Recvonly,
+                streams: vec![],
+                send_encodings: vec![],
+            },
+        );
+        transceiver.set_mid("0".to_owned()).expect("mid");
+        {
+            let receiver = transceiver.receiver_mut().as_mut().unwrap();
+            receiver.set_coding_parameters(vec![layer.clone()]);
+            receiver.set_codec_preferences(vec![
+                codec(payload_type, "video/VP8", ""),
+                codec(
+                    rtx_payload_type,
+                    MIME_TYPE_RTX,
+                    &format!("apt={payload_type}"),
+                ),
+            ]);
+            receiver.set_track(MediaStreamTrack::new(
+                "stream".to_string(),
+                "track".to_string(),
+                "label".to_string(),
+                RtpCodecKind::Video,
+                vec![RTCRtpEncodingParameters {
+                    rtp_coding_parameters: layer,
+                    active: true,
+                    codec: RTCRtpCodec::default(),
+                    max_bitrate: 0,
+                    max_framerate: None,
+                    scale_resolution_down_by: None,
+                }],
+            ));
+        }
+        (
+            media_engine,
+            transceiver,
+            mid_extension_id as u8,
+            rid_extension_id as u8,
+        )
+    }
+
+    /// A simulcast layer that keeps arriving under new SSRCs holds one bound stream: the stream
+    /// it leaves is unbound and its stats dropped, and it moves at most once per
+    /// `MIN_RID_SSRC_REBIND_INTERVAL`, so the bindings, stats entries and `OnTrack` events stay
+    /// bounded.
+    #[test]
+    fn a_simulcast_layer_moving_to_new_ssrcs_holds_one_stream() {
+        let rtx_ssrc = 2000u32;
+        let (media_engine, transceiver, mid_id, rid_id) = simulcast_receiver(rtx_ssrc);
+        let mut transceivers = vec![transceiver];
+        let recorder = Recorder::default();
+        let mut interceptor = recorder.clone();
+        let mut stats = RTCStatsAccumulator::new();
+        let mut ctx = InterceptorHandlerContext {
+            is_dtls_handshake_complete: true,
+            ..Default::default()
+        };
+
+        let start = Instant::now();
+        let mut feed_one = |ctx: &mut InterceptorHandlerContext,
+                            stats: &mut RTCStatsAccumulator,
+                            now: Instant,
+                            ssrc: u32| {
+            let mut header = rtp::Header {
+                extension: true,
+                extension_profile: 0xBEDE,
+                payload_type: 96,
+                sequence_number: 1,
+                timestamp: 12_345,
+                ssrc,
+                ..Default::default()
+            };
+            header
+                .set_extension(mid_id, Bytes::from_static(b"0"))
+                .expect("mid extension");
+            header
+                .set_extension(rid_id, Bytes::from_static(b"h"))
+                .expect("rid extension");
+            let mut handler = InterceptorHandler::new(
+                ctx,
+                &mut transceivers,
+                &media_engine,
+                &mut interceptor,
+                stats,
+            );
+            handler
+                .handle_read(TaggedRTCMessageInternal {
+                    now,
+                    transport: TransportContext::default(),
+                    message: RTCMessageInternal::Rtp(RTPMessage::Packet(Packet::Rtp(
+                        rtp::Packet {
+                            header,
+                            payload: Bytes::from_static(&[0xDE, 0xAD]),
+                        },
+                    ))),
+                })
+                .expect("handle_read");
+        };
+
+        // The first SSRC establishes the layer; a flood of others right after it does not move it.
+        for ssrc in 10_000u32..12_000 {
+            feed_one(&mut ctx, &mut stats, start, ssrc);
+        }
+        assert_eq!(vec![10_000, rtx_ssrc], recorder.bound_ssrcs());
+        assert!(recorder.unbound.lock().unwrap().is_empty());
+        assert_eq!(stats.inbound_rtp_streams.len(), 1);
+        assert!(stats.inbound_rtp_streams.contains_key(&10_000));
+        assert_eq!(ctx.event_outs.len(), 1, "one OnTrack for one layer");
+        assert!(ctx.ssrc_owners.len() <= 1);
+
+        // Once the interval has passed the layer may move, and the stream it leaves is unbound.
+        let later = start + MIN_RID_SSRC_REBIND_INTERVAL;
+        feed_one(&mut ctx, &mut stats, later, 20_000);
+        for ssrc in 20_001u32..21_000 {
+            feed_one(&mut ctx, &mut stats, later, ssrc);
+        }
+        assert_eq!(
+            vec![10_000, rtx_ssrc, 20_000, rtx_ssrc],
+            recorder.bound_ssrcs()
+        );
+        let unbound: Vec<u32> = recorder
+            .unbound
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|info| info.ssrc)
+            .collect();
+        assert_eq!(vec![10_000], unbound);
+        assert_eq!(stats.inbound_rtp_streams.len(), 1);
+        assert!(stats.inbound_rtp_streams.contains_key(&20_000));
+        assert_eq!(ctx.event_outs.len(), 2);
+        assert!(ctx.ssrc_owners.len() <= 1);
+        assert!(ctx.rid_rebinds.len() <= 1);
     }
 }

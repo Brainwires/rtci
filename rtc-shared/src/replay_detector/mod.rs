@@ -140,13 +140,7 @@ impl ReplayDetector for WrappedSlidingWindowDetector {
             self.init = true;
         }
 
-        let mut diff = self.latest_seq as i64 - seq as i64;
-        // Wrap the number.
-        if diff > self.max_seq as i64 / 2 {
-            diff -= (self.max_seq + 1) as i64;
-        } else if diff <= -(self.max_seq as i64 / 2) {
-            diff += (self.max_seq + 1) as i64;
-        }
+        let diff = wrapped_distance(self.latest_seq, seq, self.max_seq);
 
         if diff >= self.window_size as i64 {
             // Too old.
@@ -167,13 +161,7 @@ impl ReplayDetector for WrappedSlidingWindowDetector {
             return;
         }
 
-        let mut diff = self.latest_seq as i64 - self.seq as i64;
-        // Wrap the number.
-        if diff > self.max_seq as i64 / 2 {
-            diff -= (self.max_seq + 1) as i64;
-        } else if diff <= -(self.max_seq as i64 / 2) {
-            diff += (self.max_seq + 1) as i64;
-        }
+        let diff = wrapped_distance(self.latest_seq, self.seq, self.max_seq);
 
         assert!(diff < self.window_size as i64);
 
@@ -186,6 +174,23 @@ impl ReplayDetector for WrappedSlidingWindowDetector {
             self.mask.set_bit(diff as usize);
         }
     }
+}
+
+/// How far `seq` lies behind `latest` on a counter that wraps after `max_seq` (positive: behind,
+/// negative: ahead), in `(-half, half]` where `half = (max_seq + 1) / 2`.
+///
+/// A distance of exactly half the range counts as behind, matching the SRTP rollover estimate
+/// of RFC 3711 Appendix A (`SEQ == s_l - 2^15` keeps the current ROC).
+fn wrapped_distance(latest: u64, seq: u64, max_seq: u64) -> i64 {
+    let range = max_seq as i64 + 1;
+    let half = range / 2;
+    let mut diff = latest as i64 - seq as i64;
+    if diff > half {
+        diff -= range;
+    } else if diff <= -half {
+        diff += range;
+    }
+    diff
 }
 
 #[derive(Default)]

@@ -42,6 +42,8 @@ impl Context {
                 (roc, diff)
             }
             None => {
+                // Refuse a further SSRC before spending a decryption on it.
+                self.check_srtp_ssrc_capacity(header.ssrc)?;
                 let fresh = SrtpSsrcState {
                     ssrc: header.ssrc,
                     ..Default::default()
@@ -54,7 +56,7 @@ impl Context {
         let dst = self.cipher.decrypt_rtp(encrypted, header, roc)?;
         {
             let is_new = !self.srtp_ssrc_states.contains_key(&header.ssrc);
-            let state = self.get_srtp_ssrc_state(header.ssrc);
+            let state = self.get_srtp_ssrc_state(header.ssrc)?;
             if let Some(replay_detector) = &mut state.replay_detector {
                 // A new SSRC's detector has not seen this sequence number yet: check, then accept.
                 if !is_new || replay_detector.check(header.sequence_number as u64) {
@@ -81,27 +83,45 @@ impl Context {
     ///
     /// # Errors
     ///
-    /// Fails if the SRTP context has no key for this SSRC or the cipher rejects the input.
+    /// Fails if the SRTP context has no key for this SSRC, if the cipher rejects the input, or
+    /// with [`Error::SrtpIndexReused`] if this packet index (ROC and sequence number) was already
+    /// encrypted, or lies more than a window behind the highest index sent: an SRTP index is
+    /// used at most once.
     pub fn encrypt_rtp_with_header(
         &mut self,
         plaintext: &[u8],
         header: &rtp::Header,
     ) -> Result<BytesMut> {
-        let (roc, diff, ovf) = self
-            .get_srtp_ssrc_state(header.ssrc)
-            .next_rollover_count(header.sequence_number);
-        if ovf {
-            // ... when 2^48 SRTP packets or 2^31 SRTCP packets have been secured with the same key
-            // (whichever occurs before), the key management MUST be called to provide new master key(s)
-            // (previously stored and used keys MUST NOT be used again), or the session MUST be terminated.
-            // https://www.rfc-editor.org/rfc/rfc3711#section-9.2
-            return Err(Error::ErrExceededMaxPackets);
-        }
+        let (roc, diff) = {
+            let state = self.get_srtp_ssrc_state(header.ssrc)?;
+            let (roc, diff, ovf) = state.next_rollover_count(header.sequence_number);
+            if ovf {
+                // ... when 2^48 SRTP packets or 2^31 SRTCP packets have been secured with the same key
+                // (whichever occurs before), the key management MUST be called to provide new master key(s)
+                // (previously stored and used keys MUST NOT be used again), or the session MUST be terminated.
+                // https://www.rfc-editor.org/rfc/rfc3711#section-9.2
+                return Err(Error::ErrExceededMaxPackets);
+            }
+
+            // Each packet index is protected at most once (RFC 3711 Section 3.3.1, RFC 7714
+            // Section 8.1).
+            let index = ((roc as u64) << 16) | header.sequence_number as u64;
+            let sent = state.sent_indexes.get_or_insert_with(|| {
+                SlidingWindowDetector::new(SRTP_SEND_INDEX_WINDOW, MAX_SRTP_PACKET_INDEX)
+            });
+            if !sent.check(index) {
+                return Err(Error::SrtpIndexReused(header.ssrc, header.sequence_number));
+            }
+            (roc, diff)
+        };
 
         let dst = self.cipher.encrypt_rtp(plaintext, header, roc)?;
 
-        self.get_srtp_ssrc_state(header.ssrc)
-            .update_rollover_count(header.sequence_number, diff);
+        let state = self.get_srtp_ssrc_state(header.ssrc)?;
+        if let Some(sent) = state.sent_indexes.as_mut() {
+            sent.accept();
+        }
+        state.update_rollover_count(header.sequence_number, diff);
 
         Ok(dst)
     }

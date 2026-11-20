@@ -126,7 +126,19 @@ impl<'a>
                 RTPMessage::Packet(Packet::Rtp(rtp_message)) => {
                     if let Some(context) = self.ctx.local_srtp_context.as_mut() {
                         let packet = rtp_message.marshal()?;
-                        context.encrypt_rtp(&packet)?
+                        match context.encrypt_rtp(&packet) {
+                            Ok(encrypted) => encrypted,
+                            // A packet index is protected at most once, so a second packet
+                            // with an already sent sequence number is dropped (a receiver's
+                            // replay check would discard it anyway).
+                            Err(Error::SrtpIndexReused(ssrc, seq)) => {
+                                debug!(
+                                    "srtp write: dropped ssrc={ssrc} seq={seq}, index already used"
+                                );
+                                return Ok(());
+                            }
+                            Err(err) => return Err(err),
+                        }
                     } else {
                         return Err(Error::Other(format!(
                             "local_srtp_context is not set yet for rtp_packet {:?}",

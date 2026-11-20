@@ -312,6 +312,35 @@ fn test_rollover_count_2() -> Result<()> {
     Ok(())
 }
 
+/// RFC 3711 Appendix A: `SEQ == s_l - 2^15` keeps the current ROC (an old packet), and an old
+/// packet never moves the highest index back.
+#[test]
+fn test_rollover_count_half_range_behind_keeps_index() -> Result<()> {
+    let mut s = SrtpSsrcState::default();
+    let (_, diff, _) = s.next_rollover_count(40000);
+    s.update_rollover_count(40000, diff);
+
+    let (roc, diff, ovf) = s.next_rollover_count(40000 - 32768);
+    assert_eq!(roc, 0, "a packet 2^15 behind keeps the current ROC");
+    assert_eq!(diff, -32768);
+    assert!(!ovf);
+    s.update_rollover_count(40000 - 32768, diff);
+    assert_eq!(s.index, 40000, "an old packet moved the index back");
+
+    // A packet just behind the head leaves the index alone too.
+    let (_, diff, _) = s.next_rollover_count(39999);
+    s.update_rollover_count(39999, diff);
+    assert_eq!(s.index, 40000);
+
+    // The next packet still moves it forward.
+    let (roc, diff, _) = s.next_rollover_count(40001);
+    assert_eq!(roc, 0);
+    s.update_rollover_count(40001, diff);
+    assert_eq!(s.index, 40001);
+
+    Ok(())
+}
+
 lazy_static! {
     static ref MASTER_KEY_16_BYTES: Bytes = Bytes::from_static(&[
         0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,

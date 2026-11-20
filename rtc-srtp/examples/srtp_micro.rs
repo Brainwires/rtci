@@ -67,6 +67,11 @@ fn new_ctx_replay() -> Context {
     .unwrap()
 }
 
+/// Rewrites the RTP sequence number (header bytes 2..4) of a marshalled packet.
+fn set_sequence_number(packet: &mut BytesMut, sequence_number: u16) {
+    packet[2..4].copy_from_slice(&sequence_number.to_be_bytes());
+}
+
 /// Build a representative ~1200-byte media RTP packet, matching the criterion bench.
 fn sample_packet() -> BytesMut {
     let mut pld = BytesMut::new();
@@ -94,12 +99,15 @@ fn main() {
     let mode = args.next().unwrap_or_else(|| "encrypt".to_string());
     let iters: u64 = args.next().and_then(|s| s.parse().ok()).unwrap_or(50_000);
 
-    let plaintext = sample_packet();
+    let mut plaintext = sample_packet();
 
     match mode.as_str() {
         "encrypt" => {
             let mut ctx = new_ctx();
-            for _ in 0..iters {
+            for i in 0..iters {
+                // A context protects each packet index once, so every iteration sends the
+                // next sequence number.
+                set_sequence_number(&mut plaintext, i as u16);
                 let out = ctx.encrypt_rtp(black_box(&plaintext)).unwrap();
                 black_box(&out);
             }
@@ -107,10 +115,13 @@ fn main() {
         // Replay protection enabled: isolates the per-call ssrc-state /
         // replay-detector allocation in Context::get_srtp_ssrc_state — the exact
         // allocation production incurs on every decrypted packet. encrypt is
-        // used because it never rejects, so the same packet can be reused.
+        // used because it never rejects a new sequence number.
         "encrypt-replay" => {
             let mut ctx = new_ctx_replay();
-            for _ in 0..iters {
+            for i in 0..iters {
+                // A context protects each packet index once, so every iteration sends the
+                // next sequence number.
+                set_sequence_number(&mut plaintext, i as u16);
                 let out = ctx.encrypt_rtp(black_box(&plaintext)).unwrap();
                 black_box(&out);
             }
@@ -126,7 +137,10 @@ fn main() {
         }
         "gcm-encrypt" => {
             let mut ctx = new_gcm_ctx();
-            for _ in 0..iters {
+            for i in 0..iters {
+                // A context protects each packet index once, so every iteration sends the
+                // next sequence number.
+                set_sequence_number(&mut plaintext, i as u16);
                 let out = ctx.encrypt_rtp(black_box(&plaintext)).unwrap();
                 black_box(&out);
             }

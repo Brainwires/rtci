@@ -25,6 +25,15 @@ pub mod srtp;
 const MAX_ROC: u32 = u32::MAX;
 const SEQ_NUM_MEDIAN: u16 = 1 << 15;
 const SEQ_NUM_MAX: u16 = u16::MAX;
+/// The highest SRTP packet index: a 32-bit ROC over a 16-bit sequence number.
+const MAX_SRTP_PACKET_INDEX: u64 = (1 << 48) - 1;
+/// How many packet indexes behind the highest one sent the sender still tracks individually.
+/// An index is encrypted at most once (RFC 3711 Section 3.3.1, RFC 7714 Section 8.1); an index
+/// older than this window is refused as well. Receivers' replay windows are far narrower.
+pub(crate) const SRTP_SEND_INDEX_WINDOW: usize = 1024;
+/// How many SSRCs one context keeps SRTP state for, and separately SRTCP state for. Packets for
+/// a further SSRC are refused (existing state is never evicted).
+pub(crate) const MAX_SSRC_STATES: usize = 1024;
 
 /// Encrypt/Decrypt state for a single SRTP SSRC
 #[derive(Default)]
@@ -33,6 +42,8 @@ pub(crate) struct SrtpSsrcState {
     index: u64,
     rollover_has_processed: bool,
     replay_detector: Option<Box<dyn ReplayDetector>>,
+    /// The packet indexes this (sending) context has encrypted, created on first encryption.
+    sent_indexes: Option<SlidingWindowDetector>,
 }
 
 /// Encrypt/Decrypt state for a single SRTCP SSRC
@@ -80,11 +91,14 @@ impl SrtpSsrcState {
     }
 
     /// https://tools.ietf.org/html/rfc3550#appendix-A.1
+    ///
+    /// The highest index only moves forward: RFC 3711 Section 3.3.1 and Appendix A update `s_l`
+    /// and the ROC only for a packet ahead of them.
     pub fn update_rollover_count(&mut self, sequence_number: u16, diff: i32) {
         if !self.rollover_has_processed {
             self.index |= sequence_number as u64;
             self.rollover_has_processed = true;
-        } else {
+        } else if diff > 0 {
             self.index = self.index.wrapping_add(diff as _);
         }
     }
@@ -171,30 +185,56 @@ impl Context {
         })
     }
 
-    fn get_srtp_ssrc_state(&mut self, ssrc: u32) -> &mut SrtpSsrcState {
+    /// Fails with [`Error::SrtpTooManySsrcs`] if `ssrc` has no SRTP state yet and the context
+    /// already holds [`MAX_SSRC_STATES`] of them.
+    fn check_srtp_ssrc_capacity(&self, ssrc: u32) -> Result<()> {
+        if self.srtp_ssrc_states.len() >= MAX_SSRC_STATES
+            && !self.srtp_ssrc_states.contains_key(&ssrc)
+        {
+            return Err(Error::SrtpTooManySsrcs(ssrc, MAX_SSRC_STATES));
+        }
+        Ok(())
+    }
+
+    /// Fails with [`Error::SrtpTooManySsrcs`] if `ssrc` has no SRTCP state yet and the context
+    /// already holds [`MAX_SSRC_STATES`] of them.
+    fn check_srtcp_ssrc_capacity(&self, ssrc: u32) -> Result<()> {
+        if self.srtcp_ssrc_states.len() >= MAX_SSRC_STATES
+            && !self.srtcp_ssrc_states.contains_key(&ssrc)
+        {
+            return Err(Error::SrtpTooManySsrcs(ssrc, MAX_SSRC_STATES));
+        }
+        Ok(())
+    }
+
+    fn get_srtp_ssrc_state(&mut self, ssrc: u32) -> Result<&mut SrtpSsrcState> {
+        self.check_srtp_ssrc_capacity(ssrc)?;
         // `or_insert_with` so the replay detector (a boxed sliding-window
         // detector backed by a heap-allocated bit buffer) is only constructed on
         // the first packet for a given SSRC. `or_insert` would build — and then
         // immediately drop — a fresh detector on every decrypted packet.
         let new_srtp_replay_detector = &self.new_srtp_replay_detector;
-        self.srtp_ssrc_states
+        Ok(self
+            .srtp_ssrc_states
             .entry(ssrc)
             .or_insert_with(|| SrtpSsrcState {
                 ssrc,
                 replay_detector: Some(new_srtp_replay_detector()),
                 ..Default::default()
-            })
+            }))
     }
 
-    fn get_srtcp_ssrc_state(&mut self, ssrc: u32) -> &mut SrtcpSsrcState {
+    fn get_srtcp_ssrc_state(&mut self, ssrc: u32) -> Result<&mut SrtcpSsrcState> {
+        self.check_srtcp_ssrc_capacity(ssrc)?;
         let new_srtcp_replay_detector = &self.new_srtcp_replay_detector;
-        self.srtcp_ssrc_states
+        Ok(self
+            .srtcp_ssrc_states
             .entry(ssrc)
             .or_insert_with(|| SrtcpSsrcState {
                 ssrc,
                 replay_detector: Some(new_srtcp_replay_detector()),
                 ..Default::default()
-            })
+            }))
     }
 
     /// roc returns SRTP rollover counter value of specified SSRC.
@@ -206,9 +246,10 @@ impl Context {
 
     /// set_roc sets SRTP rollover counter value of specified SSRC.
     fn set_roc(&mut self, ssrc: u32, roc: u32) {
-        let state = self.get_srtp_ssrc_state(ssrc);
-        state.index = (roc as u64) << 16;
-        state.rollover_has_processed = false;
+        if let Ok(state) = self.get_srtp_ssrc_state(ssrc) {
+            state.index = (roc as u64) << 16;
+            state.rollover_has_processed = false;
+        }
     }
 
     /// index returns SRTCP index value of specified SSRC.
@@ -218,6 +259,8 @@ impl Context {
 
     /// set_index sets SRTCP index value of specified SSRC.
     fn set_index(&mut self, ssrc: u32, index: usize) {
-        self.get_srtcp_ssrc_state(ssrc).srtcp_index = index % (MAX_SRTCP_INDEX + 1);
+        if let Ok(state) = self.get_srtcp_ssrc_state(ssrc) {
+            state.srtcp_index = index % (MAX_SRTCP_INDEX + 1);
+        }
     }
 }
