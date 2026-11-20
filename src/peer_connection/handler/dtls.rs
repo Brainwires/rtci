@@ -21,6 +21,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
+#[cfg(test)]
+mod tls_version_test;
+
 pub(crate) struct DtlsHandlerContext {
     pub(crate) dtls_transport: DtlsTransport,
 

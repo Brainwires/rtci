@@ -2229,12 +2229,27 @@ async fn test_multiple_hello_verify_request() -> Result<()> {
     Ok(())
 }
 
-async fn send_client_hello(
+*/
+
+// --- RenegotiationInfo, re-enabled from the block above and driven without sockets ---
+//
+// The asynchronous original raced a spawned server against wall-clock sleeps and timed out on
+// Windows CI, so it was gated off there. Sans-I/O, the server is a `DTLSConn` fed records
+// directly; nothing waits on the clock, so the gate is gone.
+
+/// One ClientHello record (epoch 0), optionally offering renegotiation_info.
+fn client_hello_record(
     cookie: Vec<u8>,
-    ca: &Arc<dyn Conn>,
     sequence_number: u64,
     send_renegotiation_info: bool,
-) -> Result<()> {
+) -> Result<Vec<u8>> {
+    use crate::cipher_suite::CipherSuiteId;
+    use crate::compression_methods::default_compression_methods;
+    use crate::extension::Extension;
+    use crate::extension::renegotiation_info::ExtensionRenegotiationInfo;
+    use crate::handshake::handshake_message_client_hello::HandshakeMessageClientHello;
+    use crate::handshake::handshake_random::HandshakeRandom;
+
     let mut extensions = vec![];
     if send_renegotiation_info {
         extensions.push(Extension::RenegotiationInfo(ExtensionRenegotiationInfo {
@@ -2257,24 +2272,39 @@ async fn send_client_hello(
     record.record_layer_header.sequence_number = sequence_number;
 
     let mut packet = vec![];
-    {
-        let mut writer = BufWriter::<&mut Vec<u8>>::new(packet.as_mut());
-        record.marshal(&mut writer)?;
-    }
+    record.marshal(&mut packet)?;
+    Ok(packet)
+}
 
-    ca.send(&packet)
-        .await
-        .map_err(|err| Error::Other(err.to_string()))?;
-
-    Ok(())
+/// The first record of `datagram`, parsed.
+fn first_record(datagram: &[u8]) -> Result<RecordLayer> {
+    let records = unpack_datagram(datagram)?;
+    let mut reader = records[0].as_slice();
+    RecordLayer::unmarshal(&mut reader)
 }
 
 // Assert that a DTLS Server always responds with RenegotiationInfo if
 // a ClientHello contained that extension or not
-#[cfg(not(target_os = "windows"))] // this times out in CI on windows.
-#[tokio::test]
-async fn test_renegotation_info() -> Result<()> {
-    let mut resp = vec![0u8; 1024];
+#[test]
+fn test_renegotation_info() -> Result<()> {
+    use crate::cipher_suite::CipherSuiteId;
+    use crate::config::ConfigBuilder;
+    use crate::crypto::Certificate;
+    use crate::extension::Extension;
+
+    let provider = crypto::default_provider().map_err(|err| Error::Crypto(err.to_string()))?;
+    let config = Arc::new(
+        ConfigBuilder::default()
+            .with_crypto_provider(provider.clone())
+            .with_cipher_suites(vec![CipherSuiteId::Tls_Ecdhe_Ecdsa_With_Aes_128_Gcm_Sha256])
+            .with_certificates(vec![Certificate::generate_self_signed(
+                vec!["localhost".to_owned()],
+                provider.crypto(),
+            )?])
+            .build(false, None)?,
+    );
+    // The clock never has to move: every answer is produced by the read that provokes it.
+    let now = Instant::now();
 
     let tests = vec![
         ("Include RenegotiationInfo", true),
@@ -2282,30 +2312,14 @@ async fn test_renegotation_info() -> Result<()> {
     ];
 
     for (name, send_renegotiation_info) in tests {
-        let (ca, cb) = pipe();
+        let mut server = DTLSConn::new(config.clone(), false, None);
 
-        tokio::spawn(async move {
-            let conf = Config::default();
-            let _ = tokio::time::timeout(
-                Duration::from_millis(100),
-                create_test_server(Arc::new(cb), conf, true),
-            )
-            .await;
-        });
-
-        tokio::time::sleep(Duration::from_millis(5)).await;
-
-        let ca: Arc<dyn Conn> = Arc::new(ca);
-        send_client_hello(vec![], &ca, 0, send_renegotiation_info).await?;
-
-        let n = ca
-            .recv(&mut resp)
-            .await
-            .map_err(|err| Error::Other(err.to_string()))?;
-        let mut reader = BufReader::new(&resp[..n]);
-        let record = RecordLayer::unmarshal(&mut reader)?;
-
-        let hello_verify_request = match record.content {
+        server.read(&client_hello_record(vec![], 0, send_renegotiation_info)?)?;
+        server.handshake(now)?;
+        let response = server
+            .outgoing_raw_packet()
+            .expect("the server answers a cookieless ClientHello");
+        let hello_verify_request = match first_record(&response)?.content {
             Content::Handshake(h) => match h.handshake_message {
                 HandshakeMessage::HelloVerifyRequest(hvr) => hvr,
                 _ => {
@@ -2317,23 +2331,17 @@ async fn test_renegotation_info() -> Result<()> {
             }
         };
 
-        send_client_hello(
+        server.read(&client_hello_record(
             hello_verify_request.cookie.clone(),
-            &ca,
             1,
             send_renegotiation_info,
-        )
-        .await?;
-        let n = ca
-            .recv(&mut resp)
-            .await
-            .map_err(|err| Error::Other(err.to_string()))?;
-        let messages = unpack_datagram(&resp[..n])?;
+        )?)?;
+        server.handshake(now)?;
+        let response = server
+            .outgoing_raw_packet()
+            .expect("the server answers the ClientHello with its cookie");
 
-        let mut reader = BufReader::new(&messages[0][..]);
-        let record = RecordLayer::unmarshal(&mut reader)?;
-
-        let server_hello = match record.content {
+        let server_hello = match first_record(&response)?.content {
             Content::Handshake(h) => match h.handshake_message {
                 HandshakeMessage::ServerHello(sh) => sh,
                 _ => {
@@ -2354,15 +2362,10 @@ async fn test_renegotation_info() -> Result<()> {
             got_negotation_info,
             "{name}: Received ServerHello without RenegotiationInfo"
         );
-
-        ca.close()
-            .await
-            .map_err(|err| Error::Other(err.to_string()))?;
     }
 
     Ok(())
 }
-*/
 
 // --- Tests for issue #46: DTLS handshake deadlock when Finished arrives before ChangeCipherSpec ---
 //
