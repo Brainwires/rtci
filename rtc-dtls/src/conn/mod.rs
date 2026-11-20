@@ -8,6 +8,8 @@
 //! Normally an application drives [`Endpoint`](crate::endpoint::Endpoint) instead, which owns one
 //! of these per remote address.
 #[cfg(test)]
+mod conn_ported_test;
+#[cfg(test)]
 mod conn_test;
 
 use crate::alert::*;
