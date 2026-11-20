@@ -2,10 +2,22 @@ use crate::{Packet, TaggedPacket};
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
+#[path = "stream_bound_test.rs"]
+mod stream_bound_test;
+
 /// RTP header extension URI for the playout-delay extension.
 /// <http://www.webrtc.org/experiments/rtp-hdrext/playout-delay>
 pub(crate) const PLAYOUT_DELAY_URI: &str =
     "http://www.webrtc.org/experiments/rtp-hdrext/playout-delay";
+
+/// Packets one stream may hold at once.
+///
+/// At the default 500 ms maximum delay this is room for about 4,000 packets a second, well above
+/// a high-rate video stream. Without a bound, a stream of strictly decreasing sequence numbers
+/// would keep every packet: each sorts first, so the head is always the newest arrival and never
+/// ages enough to be released.
+pub(crate) const MAX_BUFFERED_PACKETS: usize = 2048;
 
 /// Per-SSRC jitter buffer state.
 ///
@@ -150,17 +162,23 @@ impl JitterBufferStream {
             release
         };
 
-        // Reject duplicate sequence numbers already in the buffer.
-        if self.buffer.iter().any(|(s, _, _, _)| *s == seq) {
+        // A full buffer takes nothing more until its head is released.
+        if self.buffer.len() >= MAX_BUFFERED_PACKETS {
             return false;
         }
 
-        // Insert at the correct sorted position (ascending sequence order).
-        let pos = self
+        // Find the sorted position (ascending sequence order) from the back: packets mostly
+        // arrive in order, so this is usually the first comparison. The nearest packet not
+        // after this one is either a duplicate or its predecessor.
+        let pos = match self
             .buffer
             .iter()
-            .position(|(s, _, _, _)| Self::seq_is_after(*s, seq))
-            .unwrap_or(self.buffer.len());
+            .rposition(|(s, _, _, _)| !Self::seq_is_after(*s, seq))
+        {
+            Some(index) if self.buffer[index].0 == seq => return false,
+            Some(index) => index + 1,
+            None => 0,
+        };
         self.buffer.insert(pos, (seq, now, release, pkt));
         true
     }
