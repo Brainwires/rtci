@@ -1791,8 +1791,14 @@ pub(crate) fn codecs_from_media_description(
     let codecs = m.codecs();
 
     let mut out = vec![];
+    // A payload type listed more than once on the m= line describes one codec: keep its first
+    // position and skip the repeats, so the output is at most one entry per payload type.
+    let mut seen = [false; 256];
     for payload_str in &m.media_name.formats {
         let payload_type: PayloadType = payload_str.parse::<u8>()?;
+        if std::mem::replace(&mut seen[payload_type as usize], true) {
+            continue;
+        }
         let Some(codec) = codecs.get(&payload_type) else {
             if payload_type == 0 {
                 continue;
@@ -1864,6 +1870,24 @@ fn codecs_from_media_description_keeps_format_order_and_attributes() {
 
     m.media_name.formats.push("98".to_owned());
     assert!(codecs_from_media_description(&m).is_err());
+}
+
+#[test]
+fn codecs_from_media_description_bounds_repeated_formats_and_feedback() {
+    let mut m = MediaDescription::default()
+        .with_value_attribute("rtpmap".to_owned(), "96 VP8/90000".to_owned());
+    for _ in 0..20_000 {
+        m = m.with_value_attribute("rtcp-fb".to_owned(), "96 nack".to_owned());
+    }
+    m.media_name.media = "video".to_owned();
+    m.media_name.formats = vec!["96".to_owned(); 20_000];
+
+    let codecs = codecs_from_media_description(&m).unwrap();
+
+    assert_eq!(codecs.len(), 1);
+    assert_eq!(codecs[0].payload_type, 96);
+    assert_eq!(codecs[0].rtp_codec.rtcp_feedback.len(), 1);
+    assert_eq!(codecs[0].rtp_codec.rtcp_feedback[0].typ, "nack");
 }
 
 pub(crate) fn rtp_extensions_from_media_description(

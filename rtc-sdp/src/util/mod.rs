@@ -198,6 +198,11 @@ pub(crate) fn parse_rtcp_fb(rtcp_fb: &str) -> Result<Codec> {
     })
 }
 
+/// The most `a=rtcp-fb` values one payload type keeps. Browsers declare well under a dozen per
+/// codec; further lines (and repeats of a value already kept) are dropped, so a description
+/// can't grow a codec's feedback list without bound.
+pub(crate) const MAX_RTCP_FEEDBACK_PER_CODEC: usize = 64;
+
 pub(crate) fn merge_codecs(mut codec: Codec, codecs: &mut HashMap<u8, Codec>) {
     if let Some(saved_codec) = codecs.get_mut(&codec.payload_type) {
         if saved_codec.payload_type == 0 {
@@ -215,8 +220,16 @@ pub(crate) fn merge_codecs(mut codec: Codec, codecs: &mut HashMap<u8, Codec>) {
         if saved_codec.fmtp.is_empty() {
             saved_codec.fmtp = codec.fmtp
         }
-        saved_codec.rtcp_feedback.append(&mut codec.rtcp_feedback);
+        for feedback in codec.rtcp_feedback.drain(..) {
+            if saved_codec.rtcp_feedback.len() >= MAX_RTCP_FEEDBACK_PER_CODEC {
+                break;
+            }
+            if !saved_codec.rtcp_feedback.contains(&feedback) {
+                saved_codec.rtcp_feedback.push(feedback);
+            }
+        }
     } else {
+        codec.rtcp_feedback.truncate(MAX_RTCP_FEEDBACK_PER_CODEC);
         codecs.insert(codec.payload_type, codec);
     }
 }

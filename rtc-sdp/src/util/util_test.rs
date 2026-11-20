@@ -175,3 +175,40 @@ fn test_new_session_id() -> Result<()> {
 
     Ok(())
 }
+
+#[test]
+fn test_rtcp_feedback_is_deduplicated_and_capped() {
+    let mut media = MediaDescription {
+        media_name: MediaName {
+            media: "video".to_string(),
+            port: RangedPort {
+                value: 9,
+                range: None,
+            },
+            protos: vec!["RTP".to_string(), "AVP".to_string()],
+            formats: vec!["96".to_string()],
+        },
+        ..Default::default()
+    };
+    media
+        .attributes
+        .push(Attribute::new("rtpmap:96 VP8/90000".to_string(), None));
+    // The same value many times over keeps one entry.
+    for _ in 0..10_000 {
+        media
+            .attributes
+            .push(Attribute::new("rtcp-fb:96 nack".to_string(), None));
+    }
+    // Distinct values stop at the cap.
+    for i in 0..10_000 {
+        media
+            .attributes
+            .push(Attribute::new(format!("rtcp-fb:96 x-{i}"), None));
+    }
+
+    let codecs = media.codecs();
+    let feedback = &codecs[&96].rtcp_feedback;
+    assert_eq!(feedback.len(), MAX_RTCP_FEEDBACK_PER_CODEC);
+    assert_eq!(feedback.iter().filter(|f| f.as_str() == "nack").count(), 1);
+    assert_eq!(feedback[0], "nack");
+}
