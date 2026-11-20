@@ -1772,6 +1772,25 @@ impl RTCPeerConnection {
         }
     }
 
+    /// The transceiver, id and kind of the track `sender` sends: what the stats of its media
+    /// source are keyed and linked by. `None` for a sender that does not exist.
+    pub(crate) fn sender_track_for_stats(
+        &self,
+        sender: crate::rtp_transceiver::RTCRtpSenderId,
+    ) -> Option<(usize, String, RtpCodecKind)> {
+        let transceiver_id = sender.0;
+        let sender = self
+            .rtp_transceivers
+            .get(transceiver_id)?
+            .sender()
+            .as_ref()?;
+        Some((
+            transceiver_id,
+            sender.track().track_id().clone(),
+            sender.kind(),
+        ))
+    }
+
     /// Update codec stats from transceivers to the stats accumulator.
     ///
     /// This is called automatically by `get_stats()` to ensure codec statistics

@@ -1,5 +1,6 @@
 //! Media source statistics accumulator.
 
+use crate::rtp_transceiver::RTCRtpTransceiverId;
 use crate::rtp_transceiver::rtp_sender::RtpCodecKind;
 use crate::statistics::stats::media::audio_source::RTCAudioSourceStats;
 use crate::statistics::stats::media::media_source::RTCMediaSourceStats;
@@ -18,6 +19,9 @@ pub struct MediaSourceStatsAccumulator {
     pub track_id: String,
     /// The media kind (audio/video).
     pub kind: RtpCodecKind,
+    /// The transceiver whose sender sends the track, which links its outbound streams to this
+    /// source (`mediaSourceId`).
+    pub transceiver_id: Option<RTCRtpTransceiverId>,
 
     // Audio-specific (from application)
     /// Current audio level (0.0 - 1.0).
@@ -40,6 +44,11 @@ pub struct MediaSourceStatsAccumulator {
     pub frames: Option<u32>,
     /// Current frame rate.
     pub frames_per_second: Option<f64>,
+}
+
+/// The stats id of the media-source object for the track `track_id`.
+pub(crate) fn media_source_stats_id(track_id: &str) -> String {
+    format!("RTCMediaSource_{track_id}")
 }
 
 impl MediaSourceStatsAccumulator {

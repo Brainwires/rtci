@@ -4,6 +4,18 @@
 //! - `stats` - W3C WebRTC Statistics API types
 //! - `report` - Statistics report generation
 //!
+//! # Feeding what the engine cannot measure
+//!
+//! The engine is a transport: members that need an encoder, a decoder, capture or playout are
+//! left out of the report until the application supplies them, through
+//! [`RTCPeerConnection::update_decoder_stats`](crate::peer_connection::RTCPeerConnection::update_decoder_stats),
+//! [`update_audio_receiver_stats`](crate::peer_connection::RTCPeerConnection::update_audio_receiver_stats),
+//! [`update_encoder_stats`](crate::peer_connection::RTCPeerConnection::update_encoder_stats),
+//! [`update_audio_source_stats`](crate::peer_connection::RTCPeerConnection::update_audio_source_stats),
+//! [`update_video_source_stats`](crate::peer_connection::RTCPeerConnection::update_video_source_stats)
+//! and
+//! [`update_audio_playout_stats`](crate::peer_connection::RTCPeerConnection::update_audio_playout_stats).
+//!
 //! # Stats Selection
 //!
 //! When calling `get_stats()`, you can optionally provide a [`StatsSelector`]
@@ -30,13 +42,23 @@
 use crate::rtp_transceiver::{RTCRtpReceiverId, RTCRtpSenderId};
 
 #[cfg(test)]
+mod feed_test;
+#[cfg(test)]
 mod members_test;
 #[cfg(test)]
 mod statistics_test;
 
 pub(crate) mod accumulator;
+mod feed;
 pub mod report;
 pub mod stats;
+
+// What the application measures and the engine cannot (encoding, decoding, capture,
+// playout), for the `update_*_stats` methods of `RTCPeerConnection` (see `feed`).
+pub use accumulator::{
+    AudioPlayoutStatsUpdate, AudioReceiverStatsUpdate, AudioSourceStatsUpdate, DecoderStatsUpdate,
+    EncoderStatsUpdate, VideoSourceStatsUpdate,
+};
 
 /// Selector for filtering statistics in `get_stats()`.
 ///

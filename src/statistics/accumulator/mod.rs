@@ -25,7 +25,7 @@ pub(crate) use ice_candidate::IceCandidateAccumulator;
 pub(crate) use ice_candidate_pair::IceCandidatePairAccumulator;
 pub use media::app_provided::*;
 pub(crate) use media::audio_playout::AudioPlayoutStatsAccumulator;
-pub(crate) use media::media_source::MediaSourceStatsAccumulator;
+pub(crate) use media::media_source::{MediaSourceStatsAccumulator, media_source_stats_id};
 pub(crate) use peer_connection::PeerConnectionStatsAccumulator;
 pub(crate) use rtp_stream::inbound::{InboundRtpStreamAccumulator, inbound_stats_id};
 pub(crate) use rtp_stream::outbound::{OutboundRtpStreamAccumulator, outbound_stats_id};
@@ -215,19 +215,9 @@ impl RTCStatsAccumulator {
         }
 
         // Media source stats
-        for (id, source) in &self.media_sources {
-            match source.kind {
-                RtpCodecKind::Audio => {
-                    entries.push(RTCStatsReportEntry::AudioSource(
-                        source.snapshot_audio(now, id),
-                    ));
-                }
-                RtpCodecKind::Video => {
-                    entries.push(RTCStatsReportEntry::VideoSource(
-                        source.snapshot_video(now, id),
-                    ));
-                }
-                _ => {}
+        for (track_id, source) in &self.media_sources {
+            if let Some(entry) = Self::media_source_entry(now, track_id, source) {
+                entries.push(entry);
             }
         }
 
@@ -237,6 +227,24 @@ impl RTCStatsAccumulator {
         }
 
         RTCStatsReport::new(entries)
+    }
+
+    /// The report entry of the media source for the track `track_id`.
+    fn media_source_entry(
+        now: Instant,
+        track_id: &str,
+        source: &MediaSourceStatsAccumulator,
+    ) -> Option<RTCStatsReportEntry> {
+        let id = media_source_stats_id(track_id);
+        match source.kind {
+            RtpCodecKind::Audio => Some(RTCStatsReportEntry::AudioSource(
+                source.snapshot_audio(now, &id),
+            )),
+            RtpCodecKind::Video => Some(RTCStatsReportEntry::VideoSource(
+                source.snapshot_video(now, &id),
+            )),
+            _ => None,
+        }
     }
 
     /// Creates a snapshot of stats based on the provided selector.
@@ -310,6 +318,15 @@ impl RTCStatsAccumulator {
                 }
             }
 
+            // The media source of the sender's track (referenced by the outbound streams)
+            for (track_id, source) in &self.media_sources {
+                if source.transceiver_id == Some(transceiver_id)
+                    && let Some(entry) = Self::media_source_entry(now, track_id, source)
+                {
+                    entries.push(entry);
+                }
+            }
+
             // ICE candidate pair stats (referenced by transport)
             for (id, pair) in &self.ice_candidate_pairs {
                 entries.push(RTCStatsReportEntry::IceCandidatePair(
@@ -350,6 +367,7 @@ impl RTCStatsAccumulator {
 
         let mut entries = Vec::new();
         let mut referenced_codec_ids = HashSet::new();
+        let mut referenced_playout_ids: HashSet<String> = HashSet::new();
         let mut has_streams = false;
 
         // Collect inbound RTP streams for this receiver
@@ -367,6 +385,9 @@ impl RTCStatsAccumulator {
                 if !stream.codec_id.is_empty() {
                     referenced_codec_ids.insert(stream.codec_id.clone());
                 }
+                if let Some(playout_id) = &stream.playout_id {
+                    referenced_playout_ids.insert(playout_id.clone());
+                }
             }
         }
 
@@ -379,6 +400,13 @@ impl RTCStatsAccumulator {
             for (id, codec) in &self.codecs {
                 if referenced_codec_ids.contains(id) {
                     entries.push(RTCStatsReportEntry::Codec(codec.snapshot(now, id)));
+                }
+            }
+
+            // Referenced audio playouts
+            for (id, playout) in &self.audio_playouts {
+                if referenced_playout_ids.contains(id) {
+                    entries.push(RTCStatsReportEntry::AudioPlayout(playout.snapshot(now, id)));
                 }
             }
 
@@ -507,12 +535,21 @@ impl RTCStatsAccumulator {
             self.rtx_ssrc_to_primary.insert(rtx, ssrc);
         }
 
+        // A media source the application already reported for this sender's track.
+        let media_source_id = self
+            .media_sources
+            .iter()
+            .find(|(_, source)| source.transceiver_id == Some(transceiver_id))
+            .map(|(track_id, _)| media_source_stats_id(track_id))
+            .unwrap_or_default();
+
         self.outbound_rtp_streams
             .entry(ssrc)
             .or_insert_with(|| OutboundRtpStreamAccumulator {
                 ssrc,
                 kind,
                 transport_id: self.transport.transport_id.clone(),
+                media_source_id,
                 mid: mid.to_string(),
                 rid: rid.to_string(),
                 encoding_index,
@@ -733,13 +770,28 @@ impl RTCStatsAccumulator {
         }
     }
 
-    /// Merges application-provided capture stats into an audio media source.
+    /// Names the media source for `track_id` as the source of the outbound streams of
+    /// `transceiver_id` (`mediaSourceId`).
+    fn link_media_source(&mut self, track_id: &str, transceiver_id: RTCRtpTransceiverId) {
+        let id = media_source_stats_id(track_id);
+        for stream in self.outbound_rtp_streams.values_mut() {
+            if stream.transceiver_id == transceiver_id {
+                stream.media_source_id = id.clone();
+            }
+        }
+    }
+
+    /// Merges application-provided capture stats into the audio media source of the track
+    /// `track_id`, which the sender of `transceiver_id` sends.
     pub(crate) fn update_audio_source_stats(
         &mut self,
         track_id: &str,
+        transceiver_id: RTCRtpTransceiverId,
         stats: AudioSourceStatsUpdate,
     ) {
+        self.link_media_source(track_id, transceiver_id);
         let source = self.get_or_create_media_source(track_id, RtpCodecKind::Audio);
+        source.transceiver_id = Some(transceiver_id);
         if stats.audio_level.is_some() {
             source.audio_level = stats.audio_level;
         }
@@ -757,13 +809,17 @@ impl RTCStatsAccumulator {
         }
     }
 
-    /// Merges application-provided capture stats into a video media source.
+    /// Merges application-provided capture stats into the video media source of the track
+    /// `track_id`, which the sender of `transceiver_id` sends.
     pub(crate) fn update_video_source_stats(
         &mut self,
         track_id: &str,
+        transceiver_id: RTCRtpTransceiverId,
         stats: VideoSourceStatsUpdate,
     ) {
+        self.link_media_source(track_id, transceiver_id);
         let source = self.get_or_create_media_source(track_id, RtpCodecKind::Video);
+        source.transceiver_id = Some(transceiver_id);
         if stats.width.is_some() {
             source.width = stats.width;
         }
