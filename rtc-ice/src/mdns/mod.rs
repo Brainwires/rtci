@@ -1,4 +1,6 @@
 #[cfg(test)]
+mod mdns_local_name_test;
+#[cfg(test)]
 mod mdns_name_test;
 #[cfg(test)]
 mod mdns_test;
@@ -56,6 +58,21 @@ pub(crate) fn is_ice_mdns_name(name: &str) -> bool {
             8 | 13 | 18 | 23 => *b == b'-',
             _ => b.is_ascii_hexdigit(),
         })
+}
+
+/// Whether `name` can be published as this agent's own mDNS name: exactly one label before
+/// `.local` (RFC 6762 §3: names in the `.local.` domain), the label 1 to 63 letters, digits or
+/// hyphens, not starting or ending with a hyphen (RFC 1123 §2.1). The bare `.local` has an
+/// empty label and is the domain itself, not a host name.
+pub(crate) fn is_valid_local_mdns_name(name: &str) -> bool {
+    let Some(label) = name.strip_suffix(".local") else {
+        return false;
+    };
+    !label.is_empty()
+        && label.len() <= 63
+        && !label.starts_with('-')
+        && !label.ends_with('-')
+        && label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
 pub(crate) fn create_multicast_dns(

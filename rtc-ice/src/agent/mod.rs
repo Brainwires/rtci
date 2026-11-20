@@ -44,6 +44,7 @@ use crate::candidate::candidate_peer_reflexive::CandidatePeerReflexiveConfig;
 use crate::candidate::{candidate_pair::*, *};
 use crate::mdns::{
     MulticastDnsMode, create_multicast_dns, generate_multicast_dns_name, is_ice_mdns_name,
+    is_valid_local_mdns_name,
 };
 use crate::network_type::NetworkType;
 use crate::rand::*;
@@ -265,7 +266,7 @@ impl Agent {
             mdns_local_name = generate_multicast_dns_name();
         }
 
-        if !mdns_local_name.ends_with(".local") || mdns_local_name.split('.').count() != 2 {
+        if !is_valid_local_mdns_name(&mdns_local_name) {
             return Err(Error::ErrInvalidMulticastDnshostName);
         }
 
