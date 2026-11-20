@@ -19,3 +19,20 @@
 pub fn install_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
+
+/// The `webrtc` crate's `SettingEngine` for an upstream peer that talks to an `rtc` peer whose
+/// only host candidate is on `127.0.0.1`.
+///
+/// Upstream leaves loopback addresses out of gathering by default, so its host candidates are the
+/// machine's LAN addresses only. Whether the loopback-bound `rtc` socket can reach those depends
+/// on the OS: Linux routes `127.0.0.1` → own LAN address locally, macOS refuses it
+/// (`EADDRNOTAVAIL`) and Windows refuses it (`WSAENETUNREACH`, os error 10051). Where it is refused
+/// the connection hangs on whether the upstream peer's checks to `127.0.0.1` arrive first and
+/// leave a peer-reflexive pair behind, which races media and the controlling side's nomination.
+/// A loopback host candidate on the upstream side gives both peers a pair that works everywhere.
+#[allow(dead_code)]
+pub fn webrtc_setting_engine() -> webrtc::api::setting_engine::SettingEngine {
+    let mut setting_engine = webrtc::api::setting_engine::SettingEngine::default();
+    setting_engine.set_include_loopback_candidate(true);
+    setting_engine
+}

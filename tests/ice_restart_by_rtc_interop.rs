@@ -59,6 +59,7 @@ async fn test_ice_restart_by_rtc_interop() -> Result<()> {
     let registry = register_default_interceptors(registry, &mut media_engine)?;
 
     let api = APIBuilder::new()
+        .with_setting_engine(common::webrtc_setting_engine())
         .with_media_engine(media_engine)
         .with_interceptor_registry(registry)
         .build();
