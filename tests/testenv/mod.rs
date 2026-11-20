@@ -46,6 +46,10 @@ pub struct Env {
     pub pass: String,
     pub realm: String,
     pub ca_pem: String,
+    /// A second coturn on the same host whose nonces go stale after a few seconds and whose
+    /// allocations live 30 s (`coturn/turnserver-stale.conf`), and its log.
+    pub turn_stale_udp: Option<SocketAddr>,
+    pub turn_stale_log: Option<String>,
 }
 
 impl Env {
@@ -70,7 +74,20 @@ impl Env {
             pass: var("RTC_TESTENV_TURN_PASS"),
             realm: var("RTC_TESTENV_TURN_REALM"),
             ca_pem: std::fs::read_to_string(var("RTC_TESTENV_TURN_CA")).unwrap(),
+            turn_stale_udp: std::env::var("RTC_TESTENV_TURN_STALE_UDP")
+                .ok()
+                .map(|v| v.parse().unwrap()),
+            turn_stale_log: std::env::var("RTC_TESTENV_TURN_STALE_LOG").ok(),
         }
+    }
+
+    /// This environment with the short-nonce coturn as its STUN/TURN server.
+    pub fn with_stale_nonce_turn(&self) -> Env {
+        let mut env = self.clone();
+        env.turn_udp = self.turn_stale_udp.expect(
+            "RTC_TESTENV_TURN_STALE_UDP is not set: scripts/test-env/coturn/start.sh starts that server",
+        );
+        env
     }
 }
 
