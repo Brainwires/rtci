@@ -95,9 +95,10 @@ pub fn convert_twcc(feedback: &TransportLayerCc) -> Vec<Acknowledgement> {
         .iter()
         .flat_map(|chunk| -> Box<dyn Iterator<Item = SymbolTypeTcc> + '_> {
             match chunk {
-                PacketStatusChunk::RunLengthChunk(run) => Box::new(
-                    std::iter::repeat(run.packet_status_symbol).take(run.run_length as usize),
-                ),
+                PacketStatusChunk::RunLengthChunk(run) => Box::new(std::iter::repeat_n(
+                    run.packet_status_symbol,
+                    run.run_length as usize,
+                )),
                 PacketStatusChunk::StatusVectorChunk(vector) => {
                     Box::new(vector.symbol_list.iter().copied())
                 }

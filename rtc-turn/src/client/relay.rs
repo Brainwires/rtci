@@ -596,6 +596,7 @@ impl Relay<'_> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)] // the retry state rides with the request it repeats
     fn channel_bind(
         &mut self,
         now: Instant,

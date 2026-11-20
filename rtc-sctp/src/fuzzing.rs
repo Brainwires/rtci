@@ -4,6 +4,7 @@
 //! benchmark can reach the packet codec without establishing an association first. Gated behind
 //! `cfg(fuzzing)` or the `bench` feature; not part of the supported API and not subject to the
 //! crate's stability guarantees.
+#![allow(missing_docs)] // one-line codec entry points; the module doc covers them
 use bytes::Bytes;
 use shared::error::Result;
 

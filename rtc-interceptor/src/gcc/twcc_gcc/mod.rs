@@ -349,9 +349,10 @@ fn packet_statuses(fb: &TransportLayerCc) -> impl Iterator<Item = SymbolTypeTcc>
         .iter()
         .flat_map(|chunk| -> Box<dyn Iterator<Item = SymbolTypeTcc> + '_> {
             match chunk {
-                PacketStatusChunk::RunLengthChunk(rlc) => Box::new(
-                    std::iter::repeat(rlc.packet_status_symbol).take(rlc.run_length as usize),
-                ),
+                PacketStatusChunk::RunLengthChunk(rlc) => Box::new(std::iter::repeat_n(
+                    rlc.packet_status_symbol,
+                    rlc.run_length as usize,
+                )),
                 PacketStatusChunk::StatusVectorChunk(svc) => {
                     Box::new(svc.symbol_list.iter().copied())
                 }
