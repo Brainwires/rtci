@@ -253,6 +253,8 @@ pub mod message;
 pub mod sdp;
 #[cfg(test)]
 mod set_configuration_test;
+#[cfg(test)]
+mod set_remote_description_test;
 pub mod state;
 pub mod transport;
 #[cfg(test)]
@@ -1395,15 +1397,6 @@ impl RTCPeerConnection {
             return Err(Error::ErrConnectionClosed);
         }
 
-        self.pipeline_context
-            .interceptor_handler_context
-            .ssrc_owners
-            .clear();
-        self.pipeline_context
-            .endpoint_handler_context
-            .ssrc_owners
-            .clear();
-
         let answers = matches!(
             remote_description.sdp_type,
             RTCSdpType::Answer | RTCSdpType::Pranswer
@@ -1417,12 +1410,33 @@ impl RTCPeerConnection {
             self.check_required_cryptex(&parsed)?;
             remote_description.parsed = Some(parsed);
         }
+
+        // The codecs and header extensions the description negotiates, worked out on a copy
+        // and kept only once the description is accepted: a description the media engine
+        // can't read (or the signaling state refuses) changes neither the signaling state nor
+        // the negotiated codecs.
+        let negotiated_media_engine = match &remote_description.parsed {
+            Some(parsed) => {
+                let mut media_engine = self.media_engine.clone();
+                media_engine.update_from_remote_description(parsed)?;
+                Some(media_engine)
+            }
+            None => None,
+        };
         self.set_description(&remote_description, StateChangeOp::SetRemote)?;
+        if let Some(media_engine) = negotiated_media_engine {
+            self.media_engine = media_engine;
+        }
+        self.pipeline_context
+            .interceptor_handler_context
+            .ssrc_owners
+            .clear();
+        self.pipeline_context
+            .endpoint_handler_context
+            .ssrc_owners
+            .clear();
 
         if let Some(parsed_remote_description) = &remote_description.parsed {
-            self.media_engine
-                .update_from_remote_description(parsed_remote_description)?;
-
             // Detect trickle ICE support from remote SDP (RFC 8838/RFC 9429 section 4.1.17)
             // Check for "trickle" in space-separated "ice-options" attribute values
             let has_trickle_ice = has_ice_trickle_option(parsed_remote_description);
