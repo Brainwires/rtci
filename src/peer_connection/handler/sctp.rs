@@ -230,7 +230,21 @@ impl<'a> SctpHandler<'a> {
             // Reassemble straight into the delivered buffer: one copy instead of the
             // scratch-buffer round-trip (`max_len` preserves the max-message-size bound
             // `read()` enforced via `ErrShortBuffer`).
-            let payload = chunks.to_payload(max_len)?;
+            let payload = match chunks.to_payload(max_len) {
+                Ok(payload) => payload,
+                Err(Error::ErrShortBuffer) => {
+                    // Larger than this side advertised (RFC 8841 6.1). Drop this message
+                    // alone: returning the error abandoned the rest of the read, and with it
+                    // the messages already taken out of SCTP in this pass, which SCTP had
+                    // acknowledged and nothing would deliver again.
+                    warn!(
+                        "dropping a {} byte message on stream {id}: over the {max_len} byte                          receive limit",
+                        chunks.len()
+                    );
+                    continue;
+                }
+                Err(err) => return Err(err),
+            };
             // An in-band channel is opened by a DATA_CHANNEL_OPEN on its stream (RFC 8832 §6),
             // so only the first message of a stream the peer created can be the OPEN that
             // describes it. A first message that is not DCEP belongs to an out-of-band
@@ -2454,6 +2468,53 @@ mod tests {
                 })),
             })
             .expect("client write");
+    }
+
+    /// Audit finding R-L12: one message over this side's receive limit is dropped on its own.
+    /// It used to fail the whole read, losing the messages around it that SCTP had already
+    /// acknowledged.
+    #[test]
+    fn an_oversized_message_is_dropped_without_losing_the_others() {
+        let now = Instant::now();
+        let mut e = establish();
+        let dgrams = server_send(
+            &mut e.server_conn,
+            1,
+            &[
+                (
+                    PayloadProtocolIdentifier::Binary,
+                    Bytes::from_static(b"small"),
+                ),
+                (
+                    PayloadProtocolIdentifier::Binary,
+                    Bytes::from(vec![0u8; 64]),
+                ),
+                (
+                    PayloadProtocolIdentifier::Binary,
+                    Bytes::from_static(b"after"),
+                ),
+            ],
+            now,
+        );
+        let mut ctx = client_ctx(now, e.client_ep, e.client_ch, e.client_conn);
+        ctx.sctp_transport.receive_message_limit = 8;
+        {
+            let mut handler = SctpHandler::new(&mut ctx, 0);
+            for dgram in dgrams {
+                handler
+                    .handle_read(raw_read(now, dgram))
+                    .expect("an oversized message is not a read error");
+            }
+        }
+        let payloads: Vec<Vec<u8>> = ctx
+            .read_outs
+            .iter()
+            .filter_map(|m| match &m.message {
+                RTCMessageInternal::Dtls(DTLSMessage::Sctp(msg)) => Some(msg.payload.to_vec()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(vec![b"small".to_vec(), b"after".to_vec()], payloads);
     }
 
     /// Run the deferred flush and return the datagrams the client handler sends.
