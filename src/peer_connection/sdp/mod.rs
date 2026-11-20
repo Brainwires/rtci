@@ -861,9 +861,19 @@ pub(crate) fn add_data_media_section(
     .with_value_attribute(ATTR_KEY_MID.to_owned(), params.mid_value)
     .with_property_attribute(RTCRtpTransceiverDirection::Sendrecv.to_string())
     .with_property_attribute("sctp-port:5000".to_owned())
+    // RFC 8841 6.1: 0 would promise messages of any size, which this endpoint cannot take:
+    // what it accepts is bounded by `SctpMaxMessageSize::MAX_MESSAGE_SIZE`, so that bound is
+    // advertised instead, and it is the limit the SCTP transport receives by.
     .with_value_attribute(
         "max-message-size".to_owned(),
-        format!("{}", params.sctp_max_message_size),
+        format!(
+            "{}",
+            match params.sctp_max_message_size {
+                0 => crate::peer_connection::configuration::setting_engine::SctpMaxMessageSize::MAX_MESSAGE_SIZE
+                    as usize,
+                limit => limit,
+            }
+        ),
     )
     .with_ice_credentials(
         params.ice_params.username_fragment,

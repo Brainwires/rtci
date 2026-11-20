@@ -667,3 +667,7 @@ impl StreamState {
         self.reassembly_queue.get_num_bytes()
     }
 }
+
+#[cfg(test)]
+#[path = "stream_test.rs"]
+mod stream_test;

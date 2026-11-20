@@ -2133,3 +2133,12 @@ fn test_many_streams_do_not_make_each_data_chunk_walk_them_all() -> Result<()> {
     assert!(a.streams_with_data.is_empty());
     Ok(())
 }
+
+#[path = "shutdown_test.rs"]
+mod shutdown_test;
+
+#[path = "recovery_test.rs"]
+mod recovery_test;
+
+#[path = "stream_reset_test.rs"]
+mod stream_reset_test;

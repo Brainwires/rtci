@@ -1,4 +1,6 @@
 #[cfg(test)]
+mod fragment_set_test;
+#[cfg(test)]
 mod queue_test;
 
 pub(crate) mod payload_queue;

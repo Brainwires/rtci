@@ -59,7 +59,9 @@ pub(crate) struct SctpTransport {
     // Streams share the bytes sent by weight (RFC 8260 section 3.6), off by default.
     pub(crate) weighted_fair_queueing: bool,
 
-    pub(crate) internal_buffer: Vec<u8>,
+    // The largest message accepted from the peer: the `max-message-size` this side advertised
+    // (RFC 8841 6.1), which is not the negotiated send limit above. 0 before `start()`.
+    pub(crate) receive_message_limit: usize,
 }
 
 impl SctpTransport {
@@ -83,7 +85,7 @@ impl SctpTransport {
             max_receive_buffer_size,
             mtu,
             weighted_fair_queueing: false,
-            internal_buffer: vec![],
+            receive_message_limit: 0,
         }
     }
 
@@ -117,10 +119,11 @@ impl SctpTransport {
             .or_else(|| self.sctp_associations.values().next())
     }
 
-    /// An association that completed its handshake and has since closed. One still handshaking
-    /// is in SCTP's initial `CLOSED` state too (RFC 9260 section 4), which is not an end.
+    /// An association that is over: closed after its handshake, or during it (an ABORT, a
+    /// handshake that ran out of retransmissions). One still handshaking is in SCTP's initial
+    /// `CLOSED` state too (RFC 9260 section 4), which is not an end.
     fn ended(association: &Association) -> bool {
-        association.is_closed() && !association.is_handshaking()
+        association.is_ended()
     }
 
     /// W3C `SctpTransport.state`.
@@ -129,10 +132,12 @@ impl SctpTransport {
     /// assigned once at construction and never updated or read, so any getter over it would have
     /// reported `Connecting` for the lifetime of the connection.
     pub(crate) fn state(&self) -> RTCSctpTransportState {
+        // An association that ended during its handshake is `closed` (W3C webrtc 6.1.1: the
+        // transport is closed when the association is), not `connecting` for good.
         match self.association() {
             None => RTCSctpTransportState::Connecting,
+            Some(association) if Self::ended(association) => RTCSctpTransportState::Closed,
             Some(association) if association.is_handshaking() => RTCSctpTransportState::Connecting,
-            Some(association) if association.is_closed() => RTCSctpTransportState::Closed,
             Some(_) => RTCSctpTransportState::Connected,
         }
     }
@@ -169,7 +174,7 @@ impl SctpTransport {
         dtls_role: RTCDtlsRole,
         remote_caps: SCTPTransportCapabilities,
         local_port: u16,
-        _remote_port: u16,
+        remote_port: u16,
     ) -> Result<()> {
         if self.is_started {
             return Ok(());
@@ -198,7 +203,14 @@ impl SctpTransport {
         // the buffer and the transport config, and then discarded, which left nothing for
         // `maxMessageSize` to report.
         self.negotiated_max_message_size = Some(max_message_size);
-        self.internal_buffer.resize(max_message_size as usize, 0u8);
+
+        // RFC 8841 6.1: each side's `max-message-size` limits what the *other* side sends. So
+        // what this side accepts is what it advertised (`can_send_size`, which is what
+        // `populate_sdp` writes), not the negotiated minimum: that minimum is only the send
+        // limit, and receiving by it refused every message larger than the peer's own limit
+        // (64 KiB when the peer's SDP omits the attribute) although this side had promised to
+        // take it.
+        self.receive_message_limit = can_send_size as usize;
 
         let mut sctp_endpoint_config = ::sctp::EndpointConfig::default();
         if let Some(mtu) = self.mtu {
@@ -211,12 +223,13 @@ impl SctpTransport {
         };
         let mut sctp_transport_config = ::sctp::TransportConfig::default()
             .with_max_message_size(max_message_size)
+            .with_max_receive_message_size(can_send_size)
             .with_sctp_port(local_port)
+            .with_remote_sctp_port(remote_port)
             .with_stream_scheduler(scheduler);
         if let Some(recv_buf) = self.max_receive_buffer_size {
             sctp_transport_config = sctp_transport_config.with_max_receive_buffer_size(recv_buf);
         }
-        //TODO: add remote_port support
 
         if dtls_role == RTCDtlsRole::Client {
             self.sctp_endpoint = Some(sctp::Endpoint::new(
@@ -269,6 +282,24 @@ mod tests {
         );
     }
 
+    /// An association that ended during its handshake (an ABORT, a handshake that ran out of
+    /// retransmissions) is `closed`, not `connecting` for good (B5).
+    #[test]
+    fn an_association_that_ended_in_its_handshake_is_closed() {
+        let mut transport = started_transport(SctpMaxMessageSize::Bounded(65536), 65536);
+        let mut association = Association::default();
+        association
+            .close(sctp::AssociationError::HandshakeFailed(
+                "no INIT ACK".to_owned(),
+            ))
+            .expect("close");
+        assert!(association.is_handshaking());
+        transport
+            .sctp_associations
+            .insert(AssociationHandle(0), association);
+        assert_eq!(transport.state(), RTCSctpTransportState::Closed);
+    }
+
     fn started_transport(
         configured: SctpMaxMessageSize,
         remote_max_message_size: u32,
@@ -308,11 +339,10 @@ mod tests {
         assert_eq!(Some(16384), transport.max_message_size());
     }
 
-    // Neither side names a limit. This implementation still has one — the working buffer is a
-    // real allocation — so `canSendSize` resolves to `MAX_MESSAGE_SIZE` rather than to
-    // "unlimited" (W3C §6.1.1.2 allows 0 only for an implementation that can handle any size).
-    // Reporting `u32::MAX` here would promise the application 4 GiB messages and then allocate a
-    // 256 KiB buffer.
+    // Neither side names a limit. This implementation still has one, so `canSendSize` resolves
+    // to `MAX_MESSAGE_SIZE` rather than to "unlimited" (W3C §6.1.1.2 allows 0 only for an
+    // implementation that can handle any size). Reporting `u32::MAX` here would promise the
+    // application 4 GiB messages and then refuse them.
     #[test]
     fn no_limit_on_either_side_resolves_to_the_implementation_ceiling() {
         let transport = started_transport(SctpMaxMessageSize::Bounded(0), 0);
@@ -322,9 +352,61 @@ mod tests {
         );
         assert_eq!(
             SctpMaxMessageSize::MAX_MESSAGE_SIZE as usize,
-            transport.internal_buffer.len(),
-            "the reported size and the buffer actually allocated must be the same number"
+            transport.receive_message_limit,
+            "what this side accepts is the ceiling it advertises in place of 0"
         );
+    }
+
+    // RFC 8841 6.1: each side's `max-message-size` limits what the other side sends. Accept
+    // 256 KiB and have the peer accept 16 KiB (or omit the attribute, which means 64 KiB): this
+    // side sends at most the peer's limit, and still takes messages up to its own.
+    #[test]
+    fn receive_limit_is_what_this_side_advertised_not_the_negotiated_minimum() {
+        for remote in [16384, SctpMaxMessageSize::DEFAULT_MESSAGE_SIZE] {
+            let transport = started_transport(SctpMaxMessageSize::Unbounded, remote);
+            assert_eq!(Some(remote), transport.max_message_size(), "send limit");
+            assert_eq!(
+                SctpMaxMessageSize::MAX_MESSAGE_SIZE as usize,
+                transport.receive_message_limit,
+                "receive limit with a remote limit of {remote}"
+            );
+            let config = transport
+                .sctp_transport_config
+                .as_ref()
+                .expect("client transport config");
+            assert_eq!(remote, config.max_message_size());
+            assert_eq!(
+                SctpMaxMessageSize::MAX_MESSAGE_SIZE,
+                config.max_receive_message_size()
+            );
+        }
+    }
+
+    // RFC 8841 5: the remote `a=sctp-port` is the destination port of the INIT.
+    #[test]
+    fn start_applies_the_remote_sctp_port() {
+        let mut transport = SctpTransport::new(
+            SctpMaxMessageSize::default(),
+            None,
+            None,
+            test_transport_id(TransportKind::Sctp),
+            test_transport_id(TransportKind::Dtls),
+        );
+        transport
+            .start(
+                RTCDtlsRole::Client,
+                SCTPTransportCapabilities {
+                    max_message_size: 0,
+                },
+                5000,
+                6000,
+            )
+            .expect("start");
+        let config = transport
+            .sctp_transport_config
+            .expect("client transport config");
+        assert_eq!(5000, config.sctp_port());
+        assert_eq!(6000, config.remote_sctp_port());
     }
 
     #[test]

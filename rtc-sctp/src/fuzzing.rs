@@ -361,3 +361,19 @@ pub fn endpoint_handle_datagrams(mut data: &[u8], start: std::time::Instant) {
         }
     }
 }
+
+/// An association with `count` messages in flight at `now`, for `bench_recovery_flushes`.
+pub fn bench_recovery_setup(count: u32, now: std::time::Instant) -> Result<crate::Association> {
+    crate::association::recovery_bench::recovery_setup(count, now)
+}
+
+/// Runs `count` one-chunk SCTP recovery flushes on an association from `bench_recovery_setup`
+/// (T3-rtx retransmissions, or fast retransmissions with `fast`). The caller times it.
+pub fn bench_recovery_flushes(
+    association: &mut crate::Association,
+    count: u32,
+    fast: bool,
+    now: std::time::Instant,
+) {
+    crate::association::recovery_bench::recovery_flushes(association, count, fast, now)
+}

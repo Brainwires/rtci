@@ -68,8 +68,10 @@ pub enum StreamScheduler {
 #[derive(Debug, Clone)]
 pub struct TransportConfig {
     sctp_port: u16,
+    remote_sctp_port: u16,
     max_receive_buffer_size: u32,
     max_message_size: u32,
+    max_receive_message_size: Option<u32>,
     max_num_outbound_streams: u16,
     max_num_inbound_streams: u16,
     timer_config: TimerConfig,
@@ -80,8 +82,10 @@ impl Default for TransportConfig {
     fn default() -> Self {
         TransportConfig {
             sctp_port: 5000,
+            remote_sctp_port: 5000,
             max_receive_buffer_size: INITIAL_RECV_BUF_SIZE,
             max_message_size: DEFAULT_MAX_MESSAGE_SIZE,
+            max_receive_message_size: None,
             max_num_outbound_streams: u16::MAX,
             max_num_inbound_streams: u16::MAX,
             timer_config: TimerConfig::default(),
@@ -91,9 +95,18 @@ impl Default for TransportConfig {
 }
 
 impl TransportConfig {
-    /// Sets the SCTP port. WebRTC always uses 5000.
+    /// Sets this endpoint's SCTP port, the source port of what it sends (RFC 8841 5: its own
+    /// `a=sctp-port`). Defaults to 5000.
     pub fn with_sctp_port(mut self, value: u16) -> Self {
         self.sctp_port = value;
+        self
+    }
+
+    /// Sets the peer's SCTP port, the destination port of the INIT this endpoint sends when it
+    /// initiates (RFC 8841 5: the remote `a=sctp-port`). Defaults to 5000. An endpoint that
+    /// accepts an association answers on the ports of the INIT it received.
+    pub fn with_remote_sctp_port(mut self, value: u16) -> Self {
+        self.remote_sctp_port = value;
         self
     }
 
@@ -104,9 +117,20 @@ impl TransportConfig {
         self
     }
 
-    /// Sets the largest message this endpoint will accept.
+    /// Sets the largest message this endpoint will send, which is the peer's limit (RFC 8841
+    /// 6.1: the remote `max-message-size`). Also the largest it will accept unless
+    /// [`with_max_receive_message_size`](Self::with_max_receive_message_size) sets that apart.
     pub fn with_max_message_size(mut self, value: u32) -> Self {
         self.max_message_size = value;
+        self
+    }
+
+    /// Sets the largest message this endpoint will accept, which is the limit it advertised
+    /// itself (RFC 8841 6.1: the local `max-message-size`). Each direction has its own limit;
+    /// the receive buffer keeps room for one message of this size beyond its bound, so a
+    /// message larger than the buffer can still be reassembled.
+    pub fn with_max_receive_message_size(mut self, value: u32) -> Self {
+        self.max_receive_message_size = Some(value);
         self
     }
 
@@ -139,14 +163,26 @@ impl TransportConfig {
         self.sctp_port
     }
 
+    /// The configured SCTP port of the peer.
+    pub fn remote_sctp_port(&self) -> u16 {
+        self.remote_sctp_port
+    }
+
     /// The configured receive window in bytes.
     pub fn max_receive_buffer_size(&self) -> u32 {
         self.max_receive_buffer_size
     }
 
-    /// The configured maximum message size in bytes.
+    /// The configured maximum message size to send, in bytes.
     pub fn max_message_size(&self) -> u32 {
         self.max_message_size
+    }
+
+    /// The configured maximum message size to accept, in bytes: the send limit unless set
+    /// apart with [`with_max_receive_message_size`](Self::with_max_receive_message_size).
+    pub fn max_receive_message_size(&self) -> u32 {
+        self.max_receive_message_size
+            .unwrap_or(self.max_message_size)
     }
 
     /// The configured outbound stream count.
