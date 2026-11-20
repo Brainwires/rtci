@@ -1218,6 +1218,17 @@ impl Agent {
 
         self.invalidate_pending_binding_requests(now);
 
+        if self.pending_binding_requests.len() >= MAX_PENDING_BINDING_REQUESTS {
+            let excess = self.pending_binding_requests.len() + 1 - MAX_PENDING_BINDING_REQUESTS;
+            self.pending_binding_requests.drain(..excess);
+            trace!(
+                "[{}]: Discarded {} oldest pending binding requests, over the limit of {}",
+                self.get_name(),
+                excess,
+                MAX_PENDING_BINDING_REQUESTS,
+            );
+        }
+
         self.pending_binding_requests.push(BindingRequest {
             timestamp: now,
             transaction_id: m.transaction_id,
@@ -1357,18 +1368,14 @@ impl Agent {
         let pending_binding_requests = &mut self.pending_binding_requests;
         let initial_size = pending_binding_requests.len();
 
-        let mut temp = vec![];
-        for binding_request in pending_binding_requests.drain(..) {
-            if filter_time
+        // In place: the list is filtered on every send and every response.
+        pending_binding_requests.retain(|binding_request| {
+            filter_time
                 .checked_duration_since(binding_request.timestamp)
                 .map(|duration| duration < MAX_BINDING_REQUEST_TIMEOUT)
                 .unwrap_or(true)
-            {
-                temp.push(binding_request);
-            }
-        }
+        });
 
-        *pending_binding_requests = temp;
         let bind_requests_remaining = pending_binding_requests.len();
         let bind_requests_removed = initial_size - bind_requests_remaining;
         if bind_requests_removed > 0 {

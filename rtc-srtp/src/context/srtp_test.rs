@@ -244,3 +244,224 @@ fn test_encrypt_rtp_extension_overrunning_header_is_an_error() -> Result<()> {
     }
     Ok(())
 }
+
+const HALF_RANGE_SSRC: u32 = 0x5eed_0001;
+
+fn half_range_rtp(sequence_number: u16) -> Result<Vec<u8>> {
+    let pkt = rtp::Packet {
+        header: rtp::Header {
+            version: 2,
+            sequence_number,
+            ssrc: HALF_RANGE_SSRC,
+            ..Default::default()
+        },
+        payload: RTP_TEST_CASE_DECRYPTED.clone(),
+    };
+    Ok(pkt.marshal()?.to_vec())
+}
+
+fn build_replay_protected_test_context() -> Result<Context> {
+    let master_key = Bytes::from_static(&[
+        0x0d, 0xcd, 0x21, 0x3e, 0x4c, 0xbc, 0xf2, 0x8f, 0x01, 0x7f, 0x69, 0x94, 0x40, 0x1e, 0x28,
+        0x89,
+    ]);
+    let master_salt = Bytes::from_static(&[
+        0x62, 0x77, 0x60, 0x38, 0xc0, 0x6d, 0xc9, 0x41, 0x9f, 0x6d, 0xd9, 0x43, 0x3e, 0x7c,
+    ]);
+
+    Context::new(
+        &master_key,
+        &master_salt,
+        ProtectionProfile::Aes128CmHmacSha1_80,
+        Some(srtp_replay_protection(64)),
+        None,
+        test_crypto_provider().crypto(),
+    )
+}
+
+/// A packet exactly 2^15 behind the highest index is old (RFC 3711 Appendix A): it leaves the
+/// index where it is, replay protection refuses it, and later packets keep decrypting.
+#[test]
+fn test_packet_half_range_behind_does_not_rewind_the_index() -> Result<()> {
+    const REPLAYED: u16 = 40000 - 32768;
+
+    for replay_protection in [false, true] {
+        let mut sender = build_test_context()?;
+        let mut receiver = if replay_protection {
+            build_replay_protected_test_context()?
+        } else {
+            build_test_context()?
+        };
+
+        let mut kept = None;
+        for seq in (0..=40000u16).step_by(16) {
+            let protected = sender.encrypt_rtp(&half_range_rtp(seq)?)?;
+            receiver.decrypt_rtp(&protected)?;
+            if seq == REPLAYED {
+                kept = Some(protected);
+            }
+        }
+        let kept = kept.expect("the replayed sequence number is on the stride");
+
+        let replayed = receiver.decrypt_rtp(&kept);
+        if replay_protection {
+            assert!(
+                replayed.is_err(),
+                "a replay half the range behind was accepted"
+            );
+        }
+        assert_eq!(
+            receiver.srtp_ssrc_states[&HALF_RANGE_SSRC].index, 40000,
+            "the index moved (replay protection: {replay_protection})"
+        );
+
+        // Genuine traffic continues, across the sequence number wrap.
+        let after = std::iter::once(40001u16)
+            .chain((41000..=65000u16).step_by(1000))
+            .chain(0..4u16);
+        for seq in after {
+            let protected = sender.encrypt_rtp(&half_range_rtp(seq)?)?;
+            assert_eq!(
+                receiver.decrypt_rtp(&protected)?.to_vec(),
+                half_range_rtp(seq)?,
+                "seq {seq} (replay protection: {replay_protection})"
+            );
+        }
+        assert_eq!(
+            receiver.srtp_ssrc_states[&HALF_RANGE_SSRC].index >> 16,
+            1,
+            "the ROC follows the sender across the wrap"
+        );
+    }
+    Ok(())
+}
+
+/// An SRTP packet index protects one packet only (RFC 3711 Section 3.3.1, RFC 7714 Section
+/// 8.1): the same packet again (a retransmission) is protected again, to the same bytes, and a
+/// different packet under a used index is refused. Indexes not yet sent, in any order within
+/// the window, are still accepted, and so is the sequence number wrap.
+#[test]
+fn test_encrypt_refuses_a_used_packet_index() -> Result<()> {
+    let provider = test_crypto_provider();
+    for profile in [
+        ProtectionProfile::AeadAes128Gcm,
+        ProtectionProfile::AeadAes256Gcm,
+        ProtectionProfile::Aes128CmHmacSha1_80,
+    ] {
+        let key = vec![3u8; profile.key_len()];
+        let salt = vec![4u8; profile.salt_len()];
+        let mut ctx = Context::new(&key, &salt, profile, None, None, provider.crypto())?;
+
+        let packet = |seq: u16, stamp: u8| -> Result<Vec<u8>> {
+            let mut header = rtp::Header {
+                version: 2,
+                payload_type: 96,
+                sequence_number: seq,
+                ssrc: 0xfeed_0002,
+                ..Default::default()
+            };
+            header.set_extension(3, bytes::Bytes::from(vec![stamp, 0]))?;
+            let pkt = rtp::Packet {
+                header,
+                payload: RTP_TEST_CASE_DECRYPTED.clone(),
+            };
+            Ok(pkt.marshal()?.to_vec())
+        };
+
+        let first = ctx.encrypt_rtp(&packet(100, 1)?)?;
+        let second = ctx.encrypt_rtp(&packet(101, 2)?)?;
+
+        // The same index again with a different extension: refused.
+        let err = ctx
+            .encrypt_rtp(&packet(100, 9)?)
+            .expect_err("a used index protected a different packet");
+        assert!(
+            matches!(err, Error::SrtpIndexReused(0xfeed_0002, 100)),
+            "{profile:?}: {err:?}"
+        );
+
+        // The same packet again (a retransmission): protected to the very same bytes, and the
+        // refusal above did not spoil it.
+        assert_eq!(ctx.encrypt_rtp(&packet(100, 1)?)?, first, "{profile:?}");
+        assert_eq!(ctx.encrypt_rtp(&packet(101, 2)?)?, second, "{profile:?}");
+        assert_eq!(ctx.encrypt_rtp(&packet(100, 1)?)?, first, "{profile:?}");
+        assert!(ctx.encrypt_rtp(&packet(100, 9)?).is_err(), "{profile:?}");
+
+        // Neither the refusal nor the retransmissions moved the stream: it continues.
+        ctx.encrypt_rtp(&packet(103, 3)?)?;
+        // An index skipped earlier is new and still in the window.
+        ctx.encrypt_rtp(&packet(102, 4)?)?;
+        assert!(ctx.encrypt_rtp(&packet(102, 5)?).is_err(), "{profile:?}");
+
+        // Further back than the window: refused, it may have been sent before.
+        let far = 103 + SRTP_SEND_INDEX_WINDOW as u16 + 10;
+        ctx.encrypt_rtp(&packet(far, 6)?)?;
+        assert!(ctx.encrypt_rtp(&packet(104, 7)?).is_err(), "{profile:?}");
+
+        // Across the wrap the ROC makes the index new again.
+        let mut seq = far;
+        while seq < 65000 {
+            seq += 20000.min(65000 - seq).max(1);
+            ctx.encrypt_rtp(&packet(seq, 8)?)?;
+        }
+        let wrapped = ctx.encrypt_rtp(&packet(100, 10)?)?;
+        assert_eq!(ctx.srtp_ssrc_states[&0xfeed_0002].index >> 16, 1);
+        assert!(ctx.encrypt_rtp(&packet(100, 11)?).is_err(), "{profile:?}");
+        assert_eq!(ctx.encrypt_rtp(&packet(100, 10)?)?, wrapped, "{profile:?}");
+        assert_ne!(wrapped, first, "{profile:?}: another ROC, another index");
+    }
+    Ok(())
+}
+
+/// One context keeps SRTP state for at most `MAX_SSRC_STATES` SSRCs: a further SSRC is
+/// refused (before decryption on the receiving side) and existing streams keep working.
+#[test]
+fn test_srtp_ssrc_states_are_capped() -> Result<()> {
+    let packet = |ssrc: u32, seq: u16| -> Result<Vec<u8>> {
+        let pkt = rtp::Packet {
+            header: rtp::Header {
+                version: 2,
+                sequence_number: seq,
+                ssrc,
+                ..Default::default()
+            },
+            payload: RTP_TEST_CASE_DECRYPTED.clone(),
+        };
+        Ok(pkt.marshal()?.to_vec())
+    };
+
+    let mut sender = build_test_context()?;
+    let mut receiver = build_replay_protected_test_context()?;
+    for ssrc in 0..MAX_SSRC_STATES as u32 {
+        let protected = sender.encrypt_rtp(&packet(ssrc, 1)?)?;
+        receiver.decrypt_rtp(&protected)?;
+    }
+    assert_eq!(sender.srtp_ssrc_states.len(), MAX_SSRC_STATES);
+    assert_eq!(receiver.srtp_ssrc_states.len(), MAX_SSRC_STATES);
+
+    let extra = MAX_SSRC_STATES as u32;
+    let err = sender
+        .encrypt_rtp(&packet(extra, 1)?)
+        .expect_err("the sender took one SSRC too many");
+    assert!(
+        matches!(err, Error::SrtpTooManySsrcs(s, _) if s == extra),
+        "{err:?}"
+    );
+
+    // A packet for a further SSRC, protected by another sender, is refused by the receiver.
+    let protected = build_test_context()?.encrypt_rtp(&packet(extra, 1)?)?;
+    let err = receiver
+        .decrypt_rtp(&protected)
+        .expect_err("the receiver took one SSRC too many");
+    assert!(
+        matches!(err, Error::SrtpTooManySsrcs(s, _) if s == extra),
+        "{err:?}"
+    );
+    assert_eq!(sender.srtp_ssrc_states.len(), MAX_SSRC_STATES);
+    assert_eq!(receiver.srtp_ssrc_states.len(), MAX_SSRC_STATES);
+
+    // Known SSRCs are unaffected.
+    let protected = sender.encrypt_rtp(&packet(7, 2)?)?;
+    assert_eq!(receiver.decrypt_rtp(&protected)?.to_vec(), packet(7, 2)?);
+    Ok(())
+}

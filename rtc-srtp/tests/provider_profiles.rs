@@ -350,6 +350,9 @@ impl RTCCryptoProvider for CountingProvider {
 #[cfg(feature = "crypto-ring")]
 #[test]
 fn keyed_ciphers_are_constructed_once_per_context_not_per_packet() -> Result<()> {
+    // With the `openssl` feature the AES-CM keystream comes from OpenSSL, not the provider
+    // (`CipherAesCmHmacSha1::new`), so the provider builds no stream cipher at all.
+    let expected_stream_constructions = if cfg!(feature = "openssl") { 0 } else { 2 };
     let stream_provider = Arc::new(CountingProvider::new());
     let mut stream_context = context(
         ProtectionProfile::Aes128CmHmacSha1_80,
@@ -361,7 +364,7 @@ fn keyed_ciphers_are_constructed_once_per_context_not_per_packet() -> Result<()>
             .crypto
             .stream_constructions
             .load(Ordering::Relaxed),
-        2
+        expected_stream_constructions
     );
     // Two MACs (SRTP and SRTCP), keyed once alongside the ciphers.
     assert_eq!(
@@ -379,7 +382,7 @@ fn keyed_ciphers_are_constructed_once_per_context_not_per_packet() -> Result<()>
             .crypto
             .stream_constructions
             .load(Ordering::Relaxed),
-        2
+        expected_stream_constructions
     );
     assert_eq!(
         stream_provider

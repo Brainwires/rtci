@@ -35,8 +35,12 @@ pub(crate) fn is_repair_mime_type(mime_type: &str) -> bool {
         || mt.ends_with("/flexfec-03")
 }
 
+/// The most SSRCs [`SsrcOwners`] remembers; past it the cache starts over.
+pub(crate) const MAX_CACHED_SSRC_OWNERS: usize = 1024;
+
 /// Which transceiver owns an inbound SSRC, so a packet doesn't walk every transceiver to find out.
 /// An entry is only a hint: it is re-checked on use, so a stale one costs a scan, never a wrong hit.
+/// Bounded by [`MAX_CACHED_SSRC_OWNERS`]: SSRCs that stopped being owned are not otherwise removed.
 #[derive(Default)]
 pub(crate) struct SsrcOwners(FxHashMap<SSRC, usize>);
 
@@ -61,8 +65,21 @@ impl SsrcOwners {
             return Some(id);
         }
         let id = transceivers.iter().position(|t| owns(t, ssrc))?;
+        if self.0.len() >= MAX_CACHED_SSRC_OWNERS {
+            self.0.clear();
+        }
         self.0.insert(ssrc, id);
         Some(id)
+    }
+
+    /// Forgets `ssrc`, e.g. when the stream it named was replaced.
+    pub(crate) fn remove(&mut self, ssrc: SSRC) {
+        self.0.remove(&ssrc);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.0.len()
     }
 
     pub(crate) fn clear(&mut self) {

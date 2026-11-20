@@ -478,6 +478,12 @@ pub enum Error {
     /// SRTP SSRC= index=: duplicated.
     #[error("srtp ssrc={0} index={1}: duplicated")]
     SrtpSsrcDuplicated(u32, u16),
+    /// SRTP SSRC= seq=: this packet index was already used to encrypt (RFC 3711 Section 3.3.1).
+    #[error("srtp ssrc={0} seq={1}: packet index already used for encryption")]
+    SrtpIndexReused(u32, u16),
+    /// SRTP/SRTCP SSRC refused: the context already holds state for the maximum number of SSRCs.
+    #[error("srtp ssrc={0}: refused, the context already tracks {1} SSRCs")]
+    SrtpTooManySsrcs(u32, usize),
     /// Srtcp SSRC= index=: duplicated.
     #[error("srtcp ssrc={0} index={1}: duplicated")]
     SrtcpSsrcDuplicated(u32, usize),

@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.1+brainwires.5] - 2026-11-20
+
+Hardening across the stack: bounds on the state a peer can make the stack hold, and stricter
+handling of protocol state in DTLS, SCTP and data channels, SRTP / SRTCP, SDP, ICE and RTP. No
+change to the public API beyond the additions below (`cargo semver-checks` against
+`0.21.1+brainwires.4`: no semver update required). Details follow in advisories.
+
+### Features
+
+- **sctp**: `ServerConfig::concurrent_associations`, the number of associations a server holds at
+  once.
+- **shared**: two `Error` variants (the enum is `#[non_exhaustive]`), `SrtpIndexReused` and
+  `SrtpTooManySsrcs`.
+- **sdp**: limit constants for a session description (`MAX_SDP_SIZE`, `MAX_SDP_LINES`,
+  `MAX_MEDIA_DESCRIPTIONS`, `MAX_ATTRIBUTES_PER_SECTION`, `MAX_FORMATS_PER_MEDIA`).
+
+### Bug Fixes
+
+- **dtls**, **sctp**, **datachannel**, **srtp**, **sdp**, **ice**, **rtp**, **peer_connection**:
+  hardening (bounds on held state, stricter state transitions, linear-time processing).
+
+### Testing
+
+- The workspace with `--all-features`: 2330 tests pass.
+
 ## [0.21.1+brainwires.4] - 2026-11-19
 
 ICE restarts that keep data flowing and four JSEP / webrtc-stats points the Deno WebRTC

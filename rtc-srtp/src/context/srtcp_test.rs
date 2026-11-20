@@ -363,3 +363,57 @@ fn test_unencrypted_srtcp_with_a_forged_tag_is_rejected() -> Result<()> {
     assert!(ctx.srtcp_ssrc_states.is_empty());
     Ok(())
 }
+
+/// One context keeps SRTCP state for at most `MAX_SSRC_STATES` SSRCs: a further SSRC is
+/// refused (before decryption on the receiving side) and existing SSRCs keep working.
+#[test]
+fn test_srtcp_ssrc_states_are_capped() -> Result<()> {
+    let new_context = || {
+        Context::new(
+            &RTCP_TEST_MASTER_KEY,
+            &RTCP_TEST_MASTER_SALT,
+            ProtectionProfile::Aes128CmHmacSha1_80,
+            None,
+            Some(srtcp_replay_protection(64)),
+            test_crypto_provider().crypto(),
+        )
+    };
+    // RTCP receiver report header (V=2, PT=201, length=1) + SSRC.
+    let report = |ssrc: u32| -> Vec<u8> {
+        let mut raw = vec![0x80, 0xc9, 0x00, 0x01];
+        raw.extend_from_slice(&ssrc.to_be_bytes());
+        raw
+    };
+
+    let mut sender = new_context()?;
+    let mut receiver = new_context()?;
+    for ssrc in 0..MAX_SSRC_STATES as u32 {
+        let protected = sender.encrypt_rtcp(&report(ssrc))?;
+        receiver.decrypt_rtcp(&protected)?;
+    }
+    assert_eq!(sender.srtcp_ssrc_states.len(), MAX_SSRC_STATES);
+    assert_eq!(receiver.srtcp_ssrc_states.len(), MAX_SSRC_STATES);
+
+    let extra = MAX_SSRC_STATES as u32;
+    let err = sender
+        .encrypt_rtcp(&report(extra))
+        .expect_err("the sender took one SSRC too many");
+    assert!(
+        matches!(err, Error::SrtpTooManySsrcs(s, _) if s == extra),
+        "{err:?}"
+    );
+
+    let protected = new_context()?.encrypt_rtcp(&report(extra))?;
+    let err = receiver
+        .decrypt_rtcp(&protected)
+        .expect_err("the receiver took one SSRC too many");
+    assert!(
+        matches!(err, Error::SrtpTooManySsrcs(s, _) if s == extra),
+        "{err:?}"
+    );
+    assert_eq!(receiver.srtcp_ssrc_states.len(), MAX_SSRC_STATES);
+
+    let protected = sender.encrypt_rtcp(&report(7))?;
+    assert_eq!(receiver.decrypt_rtcp(&protected)?.to_vec(), report(7));
+    Ok(())
+}

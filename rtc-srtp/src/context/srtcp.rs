@@ -36,11 +36,13 @@ impl Context {
         {
             return Err(Error::SrtcpSsrcDuplicated(ssrc, index));
         }
+        // Refuse a further SSRC before spending a decryption on it.
+        self.check_srtcp_ssrc_capacity(ssrc)?;
 
         let dst = self.cipher.decrypt_rtcp(encrypted, index, ssrc)?;
 
         let is_new = !self.srtcp_ssrc_states.contains_key(&ssrc);
-        if let Some(replay_detector) = &mut self.get_srtcp_ssrc_state(ssrc).replay_detector {
+        if let Some(replay_detector) = &mut self.get_srtcp_ssrc_state(ssrc)?.replay_detector {
             // A new SSRC's detector has not seen this index yet: check, then accept.
             if !is_new || replay_detector.check(index as u64) {
                 replay_detector.accept();
@@ -63,7 +65,7 @@ impl Context {
         let ssrc = u32::from_be_bytes([decrypted[4], decrypted[5], decrypted[6], decrypted[7]]);
 
         let index = {
-            let state = self.get_srtcp_ssrc_state(ssrc);
+            let state = self.get_srtcp_ssrc_state(ssrc)?;
             state.srtcp_index += 1;
             if state.srtcp_index > MAX_SRTCP_INDEX {
                 state.srtcp_index = 0;

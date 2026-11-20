@@ -723,3 +723,137 @@ fn test_unmarshal_real_safari_offer() -> Result<()> {
     );
     Ok(())
 }
+
+const LIMIT_TEST_HEADER: &str = "v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n";
+
+fn unmarshal_str(sdp: &str) -> Result<SessionDescription> {
+    SessionDescription::unmarshal(&mut Cursor::new(sdp.as_bytes()))
+}
+
+fn assert_over_limit(result: Result<SessionDescription>, what: &str) {
+    match result {
+        Err(Error::SdpInvalidValue(message)) => {
+            assert!(message.contains(what), "unexpected error: {message}")
+        }
+        Err(err) => panic!("expected a {what} limit error, got {err:?}"),
+        Ok(_) => panic!("expected a {what} limit error, got a description"),
+    }
+}
+
+#[test]
+fn test_unmarshal_rejects_oversized_description() {
+    let mut sdp = LIMIT_TEST_HEADER.to_owned();
+    sdp.push_str("a=x:");
+    sdp.push_str(&"y".repeat(MAX_SDP_SIZE));
+    sdp.push_str("\r\n");
+    assert_over_limit(unmarshal_str(&sdp), "bytes");
+}
+
+#[test]
+fn test_unmarshal_rejects_too_many_lines() {
+    let mut sdp = LIMIT_TEST_HEADER.to_owned();
+    let per_section = MAX_ATTRIBUTES_PER_SECTION;
+    let sections = MAX_SDP_LINES / per_section + 1;
+    assert!(sections <= MAX_MEDIA_DESCRIPTIONS);
+    for _ in 0..sections {
+        sdp.push_str("m=audio 9 RTP/AVP 0\r\n");
+        for _ in 0..per_section {
+            sdp.push_str("a=x\r\n");
+        }
+    }
+    assert!(sdp.len() <= MAX_SDP_SIZE);
+    assert_over_limit(unmarshal_str(&sdp), "lines");
+}
+
+#[test]
+fn test_unmarshal_media_section_limit() -> Result<()> {
+    let mut sdp = LIMIT_TEST_HEADER.to_owned();
+    for _ in 0..MAX_MEDIA_DESCRIPTIONS {
+        sdp.push_str("m=audio 9 RTP/AVP 0\r\n");
+    }
+    assert_eq!(
+        unmarshal_str(&sdp)?.media_descriptions.len(),
+        MAX_MEDIA_DESCRIPTIONS
+    );
+
+    sdp.push_str("m=audio 9 RTP/AVP 0\r\n");
+    assert_over_limit(unmarshal_str(&sdp), "media sections");
+    Ok(())
+}
+
+#[test]
+fn test_unmarshal_attribute_limits() -> Result<()> {
+    let mut session = LIMIT_TEST_HEADER.to_owned();
+    for _ in 0..MAX_ATTRIBUTES_PER_SECTION {
+        session.push_str("a=x\r\n");
+    }
+    assert_eq!(
+        unmarshal_str(&session)?.attributes.len(),
+        MAX_ATTRIBUTES_PER_SECTION
+    );
+    session.push_str("a=x\r\n");
+    assert_over_limit(unmarshal_str(&session), "session attributes");
+
+    let mut media = LIMIT_TEST_HEADER.to_owned();
+    media.push_str("m=audio 9 RTP/AVP 0\r\n");
+    for _ in 0..MAX_ATTRIBUTES_PER_SECTION {
+        media.push_str("a=x\r\n");
+    }
+    assert_eq!(
+        unmarshal_str(&media)?.media_descriptions[0]
+            .attributes
+            .len(),
+        MAX_ATTRIBUTES_PER_SECTION
+    );
+    media.push_str("a=x\r\n");
+    assert_over_limit(unmarshal_str(&media), "attributes in one media section");
+    Ok(())
+}
+
+#[test]
+fn test_unmarshal_format_limit() -> Result<()> {
+    let formats = |n: usize| {
+        (0..n)
+            .map(|i| (i % 128).to_string())
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let sdp = format!(
+        "{LIMIT_TEST_HEADER}m=video 9 RTP/AVP {}\r\n",
+        formats(MAX_FORMATS_PER_MEDIA)
+    );
+    assert_eq!(
+        unmarshal_str(&sdp)?.media_descriptions[0]
+            .media_name
+            .formats
+            .len(),
+        MAX_FORMATS_PER_MEDIA
+    );
+
+    let sdp = format!(
+        "{LIMIT_TEST_HEADER}m=video 9 RTP/AVP {}\r\n",
+        formats(MAX_FORMATS_PER_MEDIA + 1)
+    );
+    assert_over_limit(unmarshal_str(&sdp), "formats");
+    Ok(())
+}
+
+// 1k sections parse; 10k and 100k are refused at the section cap instead of being parsed (and
+// then walked by the quadratic per-section passes downstream).
+#[test]
+fn test_unmarshal_scales_with_section_count() {
+    for sections in [1_000usize, 10_000, 100_000] {
+        let mut sdp = LIMIT_TEST_HEADER.to_owned();
+        for i in 0..sections {
+            sdp.push_str(&format!("m=audio 9 RTP/AVP 0\r\na=mid:{i}\r\n"));
+        }
+        let result = unmarshal_str(&sdp);
+        if sections <= MAX_MEDIA_DESCRIPTIONS {
+            assert_eq!(result.unwrap().media_descriptions.len(), sections);
+        } else if sdp.len() > MAX_SDP_SIZE {
+            assert_over_limit(result, "bytes");
+        } else {
+            assert_over_limit(result, "media sections");
+        }
+    }
+}

@@ -35,8 +35,9 @@ fn benchmark_encrypt_rtp_aes_128_cm_hmac_sha1(g: &mut BenchmarkGroup<WallTime>) 
         pld.extend_from_slice(&[i as u8]);
     }
 
+    // One counter for every sample: the context refuses to reuse an SRTP index.
+    let mut seq: u16 = 1;
     g.bench_function("Encrypt/RTP", |b| {
-        let mut seq = 1;
         b.iter_batched(
             || {
                 let pkt = rtp::packet::Packet {
@@ -52,7 +53,7 @@ fn benchmark_encrypt_rtp_aes_128_cm_hmac_sha1(g: &mut BenchmarkGroup<WallTime>) 
                     },
                     payload: pld.clone().into(),
                 };
-                seq += 1;
+                seq = seq.wrapping_add(1);
                 pkt.marshal().unwrap()
             },
             |pkt_raw| {
@@ -89,8 +90,9 @@ fn benchmark_decrypt_rtp_aes_128_cm_hmac_sha1(g: &mut BenchmarkGroup<WallTime>) 
         pld.extend_from_slice(&[i as u8]);
     }
 
+    // One counter for every sample: the context refuses to reuse an SRTP index.
+    let mut seq: u16 = 1;
     g.bench_function("Decrypt/RTP", |b| {
-        let mut seq = 1;
         b.iter_batched(
             || {
                 let pkt = rtp::packet::Packet {
@@ -106,7 +108,7 @@ fn benchmark_decrypt_rtp_aes_128_cm_hmac_sha1(g: &mut BenchmarkGroup<WallTime>) 
                     },
                     payload: pld.clone().into(),
                 };
-                seq += 1;
+                seq = seq.wrapping_add(1);
                 setup_ctx.encrypt_rtp(&pkt.marshal().unwrap()).unwrap()
             },
             |encrypted| ctx.decrypt_rtp(&encrypted).unwrap(),
@@ -227,8 +229,9 @@ fn benchmark_aead_aes_128_gcm(g: &mut BenchmarkGroup<WallTime>) {
             pld.extend_from_slice(&[i as u8]);
         }
 
+        // One counter for every sample: the context refuses to reuse an SRTP index.
+        let mut seq: u16 = 1;
         g.bench_function(format!("Encrypt/RTP/AEAD-AES-128-GCM/{name}"), |b| {
-            let mut seq = 1;
             b.iter_batched(
                 || {
                     let pkt = rtp::packet::Packet {
@@ -249,7 +252,10 @@ fn benchmark_aead_aes_128_gcm(g: &mut BenchmarkGroup<WallTime>) {
         });
 
         // Pre-encrypt a run of packets so decryption never replays an index, which the replay
-        // detector would reject.
+        // detector would reject. A fresh sender: the one above already used these indexes, and
+        // a context refuses an index for a different packet.
+        let mut setup_ctx =
+            Context::new(MASTER_KEY, &salt, profile, None, None, provider.crypto()).unwrap();
         let mut encrypted = Vec::new();
         for seq in 1..=1024u16 {
             let pkt = rtp::packet::Packet {
@@ -262,7 +268,7 @@ fn benchmark_aead_aes_128_gcm(g: &mut BenchmarkGroup<WallTime>) {
                 payload: pld.clone().freeze(),
             };
             let raw = pkt.marshal().unwrap();
-            encrypted.push(encrypt_ctx.encrypt_rtp(&raw).unwrap());
+            encrypted.push(setup_ctx.encrypt_rtp(&raw).unwrap());
         }
 
         let mut index = 0usize;

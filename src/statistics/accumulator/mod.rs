@@ -453,6 +453,16 @@ impl RTCStatsAccumulator {
             })
     }
 
+    /// Drops the inbound stream accumulator for `ssrc` and the RTX / FEC lookups that point at
+    /// it, once the stream is no longer bound (its rid moved to another SSRC).
+    pub(crate) fn remove_inbound_rtp_stream(&mut self, ssrc: SSRC) {
+        self.inbound_rtp_streams.remove(&ssrc);
+        self.rtx_ssrc_to_primary
+            .retain(|_, primary| *primary != ssrc);
+        self.fec_ssrc_to_primary
+            .retain(|_, primary| *primary != ssrc);
+    }
+
     /// Updates the RTX SSRC association for an existing inbound RTP stream.
     ///
     /// This is used when `rrid` (repaired RTP stream ID) arrives after the base

@@ -39,6 +39,10 @@ pub(crate) const MAX_BUFFER_SIZE: usize = 1000 * 1000; // 1MB
 /// Wait time before binding requests can be deleted.
 pub(crate) const MAX_BINDING_REQUEST_TIMEOUT: Duration = Duration::from_millis(4000);
 
+/// The most outstanding Binding requests the agent tracks; sending one more forgets the oldest
+/// (its response, if it ever arrives, is then ignored).
+pub(crate) const MAX_PENDING_BINDING_REQUESTS: usize = 50;
+
 pub(crate) fn default_candidate_types() -> Vec<CandidateType> {
     vec![
         CandidateType::Host,
