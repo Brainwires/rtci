@@ -513,11 +513,12 @@ impl RTCStatsAccumulator {
         stream
     }
 
-    /// Drops the inbound stream accumulator for `ssrc` and the RTX / FEC lookups that point at
-    /// it, once the stream is no longer bound (its rid moved to another SSRC).
+    /// Drops the inbound stream accumulator for `ssrc` (its remote-outbound object with it) and
+    /// every RTX / FEC lookup that points at it, once the stream is no longer bound (its rid
+    /// moved to another SSRC).
     pub(crate) fn remove_inbound_rtp_stream(&mut self, ssrc: SSRC) {
         self.inbound_rtp_streams.remove(&ssrc);
-        self.rtx_ssrc_to_primary
+        self.inbound_rtx_ssrc_to_primary
             .retain(|_, primary| *primary != ssrc);
         self.fec_ssrc_to_primary
             .retain(|_, primary| *primary != ssrc);
@@ -1039,15 +1040,6 @@ impl RTCStatsAccumulator {
         if let Some(stream) = self.outbound_rtp_streams.get_mut(&ssrc) {
             stream.codec_id = codec_id;
             stream.clock_rate = codec.clock_rate;
-        }
-    }
-
-    /// Removes an inbound stream's stats, its remote-outbound object with them, and its RTX /
-    /// FEC reverse-lookup entries.
-    pub(crate) fn remove_inbound_rtp_stream(&mut self, ssrc: SSRC) {
-        if let Some(stream) = self.inbound_rtp_streams.remove(&ssrc) {
-            dissociate(&mut self.inbound_rtx_ssrc_to_primary, stream.rtx_ssrc, ssrc);
-            dissociate(&mut self.fec_ssrc_to_primary, stream.fec_ssrc, ssrc);
         }
     }
 
