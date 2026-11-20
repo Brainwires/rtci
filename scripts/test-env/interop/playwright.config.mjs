@@ -4,6 +4,15 @@
 // way). The "-mdns" projects keep each browser's default (hidden) and run only mdns.spec.mjs.
 import { defineConfig } from "@playwright/test";
 
+// Firefox's media decoder log (PlatformDecoderModule / MediaDataDecoder: why a decoder refuses
+// a frame), one file per process, beside the other artifacts.
+const ARTIFACTS = process.env.RTC_TESTENV_ARTIFACTS_DIR || "/artifacts";
+const FIREFOX_ENV = {
+  ...process.env,
+  MOZ_LOG: process.env.RTC_INTEROP_MOZ_LOG || "PlatformDecoderModule:5,MediaDataDecoder:5",
+  MOZ_LOG_FILE: `${ARTIFACTS}/firefox-moz.log`,
+};
+
 export default defineConfig({
   testDir: ".",
   testMatch: /.*\.spec\.mjs/,
@@ -34,6 +43,7 @@ export default defineConfig({
       use: {
         browserName: "firefox",
         launchOptions: {
+          env: FIREFOX_ENV,
           firefoxUserPrefs: {
             "media.peerconnection.ice.obfuscate_host_addresses": false,
             "media.autoplay.default": 0,
