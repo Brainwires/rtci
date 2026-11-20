@@ -58,16 +58,51 @@ variables the tests read.
   - `testenv_mdns`: mDNS host candidates resolved over real multicast (both sides hiding their
     addresses; one hiding, one only querying).
   - `testenv_impairment`: netem loss, delay, jitter, reordering and a rate limit: reliable and
-    unreliable data channels, NACK recovery against the same link without it, the GStreamer VP8
+    unreliable data channels (the unreliable one must deliver 800 to 960 of 1000 messages over
+    10% loss and drain its queue in under 30 s), NACK recovering every packet, the GStreamer VP8
     stream through NACK and the jitter buffer into an IVF file that GStreamer then decodes, and
-    GCC following a 600 kbit/s link.
+    GCC settling between 300 and 660 kbit/s on a 600 kbit/s link.
+  - `testenv_turn`: a relayed call that must keep carrying messages for 50 s through a second
+    coturn (port 3479, `coturn/turnserver-stale.conf`) whose nonces go stale after 10 s and whose
+    allocations last 30 s, so the allocation survives only if a 438 Stale Nonce is retried.
+  - `testenv_dtls`: a wrong `a=fingerprint` in the offer or the answer must end the checking
+    side's connection as `failed`.
+  - `testenv_ice_tcp`: ICE over TCP from an active candidate behind a symmetric NAT to a passive
+    listener on the WAN, both agents TCP-only, each as the offerer.
+  - `testenv_media_fixtures`: a multi-packet-per-page Ogg file and a four-slices-per-picture
+    H.264 file sent over a real connection, checked byte for byte and for the RTP marker, and
+    decoded by GStreamer after the trip.
 - **interop**: `examples/interop-peer` (the Rust side; WebSocket signalling) in `open-b`, and
   Playwright with headless Chromium, Firefox and WebKit in `open-a`: data channels (ordered,
-  unordered, unreliable, negotiated, 64 KiB messages), renegotiation from either side, ICE
-  restart, DTLS / SRTP state, media reflected per codec (VP8, VP9, H.264, Opus), the GStreamer
-  fixtures sent from Rust and decoded by the browser, three-layer simulcast (RIDs), and an
-  encoded transform (an SFrame-style XOR of every frame that the Rust side forwards untouched).
-  A browser without a codec or API shows the test as not applicable, with the reason.
+  unordered, unreliable, negotiated, 64 KiB and 256 KiB messages, both sides' max-message-size),
+  renegotiation from either side, ICE restart, DTLS / SRTP state, media reflected per codec (VP8,
+  VP9, H.264, H.265, AV1, Opus), the GStreamer fixtures sent from Rust and decoded by the browser
+  (multi-slice H.264 and multi-packet Ogg included), three-layer simulcast (RIDs) with and
+  without loss repaired by RTX, an encoded transform, Cryptex, NACK + RTX under netem, relay-only
+  through coturn, ICE-TCP, the browser as answerer for media, transceiver stop and m-line reuse,
+  direction changes, rollback and glare, a wrong fingerprint either way, `getStats()` against the
+  Rust side's counters, and (in the `-mdns` projects, each browser's defaults) mDNS-hidden
+  candidates. The loss tests add a `tc` filter for their own session to a netem band that
+  `interop/run.sh` sets up, so they run beside the others.
+
+  Each cell is a pass, a failure, or one of two kinds of "not applicable", always with the
+  reason and a citation written in the test (`interop/na.mjs`): **na-browser** (the browser
+  lacks the feature, by its own capability API at run time or a release note) and **na-env**
+  (the headless build in this image lacks it). `interop/matrix.mjs` writes the matrix and
+  `interop-summary.json`; `interop/gate.mjs` fails the stage on a failure, a missing cell, a
+  browser that ran nothing, or an uncited skip. An na-env cell is not tested, and the gate lists
+  it as such.
+
+## Limits of this environment
+
+- **Real Safari cannot run here.** Playwright's WebKit is the Linux port with its own media and
+  WebRTC stack; a WebKit cell says nothing about Safari on macOS or iOS.
+- **Firefox has no H.264.** Firefox does H.264 through Cisco's OpenH264 plugin, which it
+  downloads after install; the offline image never fetches it, so those cells are na-env (not
+  tested), not passes.
+- **TURN over TLS is TLS 1.2.** The image's coturn answers every TLS 1.3 ClientHello with a
+  handshake failure, so the test client (`tests/testenv/mod.rs`) offers TLS 1.2 only.
+- **Linux only**: network namespaces.
 
 ## CI
 
