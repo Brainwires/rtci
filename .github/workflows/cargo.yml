@@ -36,6 +36,77 @@ jobs:
       - name: Run tests
         run: cargo test --verbose
 
+  # macOS and Windows: the whole workspace's tests with default features, on our runners first
+  # (GitHub's when ours are busy).
+  #
+  # Self-hosted runners only take a push or a pull request from a branch of this repository. A
+  # pull request from a fork runs `test_platforms_fork` on GitHub's runners and never names our
+  # labels (the fork's run still needs a maintainer's approval, and a fork can edit this file:
+  # review `runs-on` and `.github/` changes before approving one).
+  runners:
+    name: pick runners
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name != 'pull_request_target' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
+    timeout-minutes: 5
+    permissions:
+      actions: read
+    outputs:
+      plan: ${{ steps.pick.outputs.plan }}
+    steps:
+      - id: pick
+        uses: Brainwires/.github/actions/pick-runners@9a9d641a07c2885ba48dfc0bd2e3e9049f486374 # pick-runners
+        with:
+          jobs: test_macos=macos-arm64 test_windows=windows-x64
+          vars: ${{ toJSON(vars) }}
+          runner-token: ${{ secrets.RUNNER_STATUS_TOKEN }}
+
+  test_platforms:
+    name: Test (${{ matrix.name }}, default features)
+    needs: runners
+    runs-on: ${{ fromJSON(needs.runners.outputs.plan || '{}')[matrix.key] || matrix.github }}
+    # Self-hosted only for a push or a same-repository pull request; never for
+    # pull_request_target.
+    if: >-
+      github.event_name != 'pull_request_target' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository) &&
+      !cancelled()
+    timeout-minutes: 90
+    strategy: &platform-strategy
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS
+            key: test_macos
+            github: macos-latest
+          - name: Windows
+            key: test_windows
+            github: windows-latest
+    steps: &platform-steps
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Test workspace
+        run: cargo test --workspace --no-fail-fast --verbose
+      - name: Doctests
+        run: cargo test --workspace --doc --verbose
+
+  # A pull request from a fork: the same tests on GitHub's runners only.
+  test_platforms_fork:
+    name: Test (${{ matrix.name }}, default features, fork pull request)
+    runs-on: ${{ matrix.github }}
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name != github.repository
+    timeout-minutes: 90
+    strategy: *platform-strategy
+    steps: *platform-steps
+
   crypto_backend_baseline:
     name: Crypto baseline (${{ matrix.backend }})
     runs-on: ubuntu-latest
