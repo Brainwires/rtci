@@ -7,6 +7,8 @@
 //! Use [`sample_reader`](crate::io::h26x_reader::sample_reader) instead when you want whole access units — the NAL units making up one
 //! frame — rather than individual units.
 #[cfg(test)]
+mod h264_reader_port_test;
+#[cfg(test)]
 mod h26x_reader_test;
 /// Reads Annex B streams as whole samples rather than individual NAL units.
 pub mod sample_reader;
