@@ -4,6 +4,8 @@
 
 use super::link_test::{Link, first_chunk_type};
 use super::*;
+use crate::AssociationError;
+use crate::association::Event;
 use crate::chunk::chunk_payload_data::PayloadProtocolIdentifier;
 use crate::chunk::chunk_type::CT_PAYLOAD_DATA;
 use shared::error::Result;
@@ -92,5 +94,51 @@ fn test_stats() -> Result<()> {
     assert_eq!(from_client, link.server.conn().bytes_received());
     assert_eq!(from_server, link.server.conn().bytes_sent());
     assert_eq!(from_server, link.client.conn().bytes_received());
+    Ok(())
+}
+
+fn ended_with(events: &[Event], expected: AssociationError) -> bool {
+    events
+        .iter()
+        .any(|e| matches!(e, Event::AssociationClosed { reason } if *reason == expected))
+}
+
+/// A graceful shutdown (RFC 9260 9.2) ends both associations: the initiator once it has sent
+/// SHUTDOWN COMPLETE, the peer once it has received it.
+#[test]
+fn test_association_shutdown() -> Result<()> {
+    let mut link = Link::new(TransportConfig::default(), TransportConfig::default(), 1);
+    link.connect();
+
+    let now = link.now;
+    let n = link
+        .client
+        .conn()
+        .open_stream(1, PayloadProtocolIdentifier::String)?
+        .write_sctp(
+            now,
+            &Bytes::from_static(b"test"),
+            PayloadProtocolIdentifier::String,
+        )?;
+    assert_eq!(4, n);
+    link.run_for(Duration::from_millis(100));
+    assert_eq!(1, link.server.received.len());
+    assert_eq!(&b"test"[..], &link.server.received[0].1[..]);
+
+    link.client.conn().shutdown()?;
+    let deadline = link.now + Duration::from_secs(1);
+    assert!(
+        link.run_until(deadline, |l| l.client.conn().is_ended()
+            && l.server.conn().is_ended()),
+        "shutdown timeout"
+    );
+    assert!(ended_with(
+        &link.client.events,
+        AssociationError::LocallyClosed
+    ));
+    assert!(ended_with(
+        &link.server.events,
+        AssociationError::AssociationClosed
+    ));
     Ok(())
 }

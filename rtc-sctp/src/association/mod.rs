@@ -509,7 +509,15 @@ impl Association {
     /// - a call was made to `handle_timeout`
     #[must_use]
     pub fn poll_transmit(&mut self, now: Instant) -> Option<TransportMessage<Payload>> {
-        let (contents, _) = self.gather_outbound(now);
+        let (contents, keep_open) = self.gather_outbound(now);
+        if !keep_open && !self.ended {
+            // The SHUTDOWN COMPLETE just gathered is the last packet of a graceful shutdown
+            // this side started: RFC 9260 9.2 removes the association once it is sent. It
+            // stayed in SHUTDOWN-SENT for good, with nothing left to happen.
+            if let Err(err) = self.close(AssociationError::LocallyClosed) {
+                error!("[{}] failed to close association: {err}", self.side);
+            }
+        }
         if contents.is_empty() {
             None
         } else {
