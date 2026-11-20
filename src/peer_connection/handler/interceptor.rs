@@ -1,4 +1,5 @@
 use crate::media_stream::track::MediaStreamTrackId;
+use crate::media_stream::track_state::MediaStreamTrackState;
 use crate::peer_connection::configuration::media_engine::MediaEngine;
 use crate::peer_connection::event::RTCPeerConnectionEvent;
 use crate::peer_connection::event::track_event::{RTCTrackEvent, RTCTrackEventInit};
@@ -21,6 +22,7 @@ use crate::rtp_transceiver::{
 use crate::statistics::accumulator::RTCStatsAccumulator;
 use interceptor::{Attribute, Interceptor, Packet, TaggedPacket};
 use log::{debug, trace};
+use rtcp::goodbye::Goodbye;
 use rtcp::header::{FORMAT_CCFB, PacketType};
 use rtcp::payload_feedbacks::full_intra_request::FullIntraRequest;
 use rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
@@ -32,7 +34,7 @@ use rtcp::source_description::{
 use rtcp::transport_feedbacks::transport_layer_nack::TransportLayerNack;
 use shared::error::{Error, Result};
 use shared::marshal::MarshalSize;
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::time::Instant;
 
 #[derive(Default)]
@@ -46,6 +48,8 @@ pub(crate) struct InterceptorHandlerContext {
     /// The CNAME for reports no local sender owns (a receiver report's own SSRC), chosen once
     /// per connection so every compound packet names the same endpoint.
     connection_cname: Option<String>,
+    /// Receiver SSRCs the remote has said BYE for, until every SSRC of their track has.
+    goodbye_ssrcs: HashSet<SSRC>,
 }
 
 fn receiver_declares_ssrc(transceiver: &RTCRtpTransceiverInternal, ssrc: SSRC) -> bool {
@@ -274,6 +278,49 @@ impl<'a> InterceptorHandler<'a> {
             return;
         }
         self.bind_by_rid(now, ssrc, payload_type, rtp_header);
+    }
+
+    /// RFC 3550 6.6: a BYE says a source has left. Once every SSRC of a remote track has said
+    /// so, the track ends and `OnClose` fires for it.
+    fn process_goodbyes(&mut self, now: Instant, rtcp_packets: &[Box<dyn rtcp::Packet>]) {
+        for packet in rtcp_packets {
+            let Some(goodbye) = packet.as_any().downcast_ref::<Goodbye>() else {
+                continue;
+            };
+            for &source in &goodbye.sources {
+                let Some(index) = self.rtp_transceivers.iter().position(|transceiver| {
+                    transceiver
+                        .receiver()
+                        .as_ref()
+                        .is_some_and(|receiver| receiver.track().ssrcs().any(|ssrc| ssrc == source))
+                }) else {
+                    continue;
+                };
+                self.ctx.goodbye_ssrcs.insert(source);
+
+                let Some(receiver) = self.rtp_transceivers[index].receiver_mut() else {
+                    continue;
+                };
+                let track = receiver.track_mut();
+                let all_left = track
+                    .ssrcs()
+                    .all(|ssrc| self.ctx.goodbye_ssrcs.contains(&ssrc));
+                if !all_left || track.ready_state() == MediaStreamTrackState::Ended {
+                    continue;
+                }
+                track.stop();
+                let track_id = track.track_id().clone();
+                for ssrc in track.ssrcs() {
+                    self.ctx.goodbye_ssrcs.remove(&ssrc);
+                }
+                self.ctx.event_outs.push_back(TaggedRTCEventInternal {
+                    now,
+                    event: RTCEventInternal::RTCPeerConnectionEvent(
+                        RTCPeerConnectionEvent::OnTrack(RTCTrackEvent::OnClose(track_id)),
+                    ),
+                });
+            }
+        }
     }
 
     /// RFC 3550 6.1: every compound RTCP packet carries an SDES CNAME after its leading SR or
@@ -993,6 +1040,7 @@ impl<'a>
                     // `poll_read` never sees most incoming SR/RR/NACK/PLI/FIR/CCFB. This is the
                     // read-side counterpart of `process_write_rtcp_for_stats` in `poll_write`.
                     self.process_read_rtcp_for_stats(rtcp_packets, msg.now);
+                    self.process_goodbyes(msg.now, rtcp_packets);
                 }
                 _ => {}
             }
@@ -1148,6 +1196,10 @@ mod interceptor_rtx_test;
 #[cfg(test)]
 #[path = "interceptor_sdes_test.rs"]
 mod interceptor_sdes_test;
+
+#[cfg(test)]
+#[path = "interceptor_goodbye_test.rs"]
+mod interceptor_goodbye_test;
 
 #[cfg(test)]
 mod boundary_tests {

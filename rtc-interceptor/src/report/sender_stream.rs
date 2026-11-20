@@ -74,6 +74,11 @@ impl SenderStream {
         self.counters.count_octets(pkt.payload.len());
     }
 
+    /// Whether this stream has sent anything, so a report about it means something.
+    pub(crate) fn has_sent(&self) -> bool {
+        self.last_rtp_time_time.is_some()
+    }
+
     pub(crate) fn generate_report(
         &mut self,
         now: Instant,

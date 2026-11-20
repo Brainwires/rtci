@@ -148,6 +148,9 @@ pub struct SenderReportInterceptor {
 
     streams: HashMap<u32, SenderStream>,
 
+    /// The latest instant handed in, for stamping the goodbye of a stream unbound without one.
+    last_now: Option<Instant>,
+
     read_queue: VecDeque<TaggedPacket>,
     write_queue: VecDeque<TaggedPacket>,
 }
@@ -162,6 +165,8 @@ impl SenderReportInterceptor {
             use_latest_packet,
 
             streams: HashMap::new(),
+
+            last_now: None,
 
             read_queue: VecDeque::new(),
             write_queue: VecDeque::new(),
@@ -196,6 +201,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for SenderReportInterceptor {
     }
 
     fn handle_write(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
+        self.last_now = Some(self.last_now.map_or(msg.now, |last| last.max(msg.now)));
         if let Packet::Rtp(rtp_packet) = &msg.message.packet
             && let Some(stream) = self.streams.get_mut(&rtp_packet.header.ssrc)
         {
@@ -221,6 +227,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for SenderReportInterceptor {
     }
 
     fn handle_timeout(&mut self, now: Instant) -> Result<(), Error> {
+        self.last_now = Some(self.last_now.map_or(now, |last| last.max(now)));
         if let Some(next_timeout) = self.next_timeout
             && now >= next_timeout
         {
@@ -250,8 +257,38 @@ impl Interceptor for SenderReportInterceptor {
         self.streams.insert(info.ssrc, stream);
     }
 
+    /// A stream that sent and is now unbound (its sender stopped) says goodbye: a final sender
+    /// report and an RTCP BYE for its SSRC and its repair flows, in one compound packet
+    /// (RFC 3550 6.6: a BYE follows a report in a compound packet).
     fn unbind_local_stream(&mut self, info: &StreamInfo) {
-        self.streams.remove(&info.ssrc);
+        let Some(mut stream) = self.streams.remove(&info.ssrc) else {
+            return;
+        };
+        let Some(now) = self.last_now else {
+            return;
+        };
+        if !stream.has_sent() {
+            return;
+        }
+        let Some(report) = stream.generate_report(now) else {
+            return;
+        };
+
+        let sources = std::iter::once(info.ssrc)
+            .chain(info.ssrc_rtx)
+            .chain(info.ssrc_fec)
+            .collect();
+        self.write_queue.push_back(TaggedPacket {
+            now,
+            transport: TransportContext::default(),
+            message: AttributedPacket::new(Packet::Rtcp(vec![
+                Box::new(report),
+                Box::new(rtcp::goodbye::Goodbye {
+                    sources,
+                    reason: Default::default(),
+                }),
+            ])),
+        });
     }
 
     fn bind_remote_stream(&mut self, _info: &StreamInfo) {}
