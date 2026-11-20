@@ -124,6 +124,10 @@ struct Anchor {
     timestamp: u64,
 }
 
+#[cfg(test)]
+#[path = "receiver_deadlines_test.rs"]
+mod receiver_deadlines_test;
+
 /// Everything tracked for one remote stream.
 struct Stream {
     buffer: Buffer,
@@ -260,6 +264,13 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for JitterBufferInterceptor {
         match stream.buffer.push(msg) {
             Ok(extended) => {
                 stream.deadlines.insert(extended, deadline);
+                // A full buffer evicts its oldest packet to take this one; that packet's deadline
+                // goes with it, or the map grows by one per eviction for the stream's life.
+                if stream.deadlines.len() > stream.buffer.len()
+                    && let Some(front) = stream.buffer.front_sequence()
+                {
+                    stream.deadlines.retain(|held, _| *held >= front);
+                }
                 // Held: it leaves later, from `poll_read`, at its playout instant.
                 Ok(())
             }
