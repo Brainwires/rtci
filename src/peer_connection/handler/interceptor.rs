@@ -26,6 +26,9 @@ use rtcp::payload_feedbacks::full_intra_request::FullIntraRequest;
 use rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 use rtcp::receiver_report::ReceiverReport;
 use rtcp::sender_report::SenderReport;
+use rtcp::source_description::{
+    SdesType, SourceDescription, SourceDescriptionChunk, SourceDescriptionItem,
+};
 use rtcp::transport_feedbacks::transport_layer_nack::TransportLayerNack;
 use shared::error::{Error, Result};
 use shared::marshal::MarshalSize;
@@ -40,6 +43,9 @@ pub(crate) struct InterceptorHandlerContext {
     pub(crate) read_outs: VecDeque<TaggedRTCMessageInternal>,
     pub(crate) write_outs: VecDeque<TaggedRTCMessageInternal>,
     pub(crate) event_outs: VecDeque<TaggedRTCEventInternal>,
+    /// The CNAME for reports no local sender owns (a receiver report's own SSRC), chosen once
+    /// per connection so every compound packet names the same endpoint.
+    connection_cname: Option<String>,
 }
 
 fn receiver_declares_ssrc(transceiver: &RTCRtpTransceiverInternal, ssrc: SSRC) -> bool {
@@ -268,6 +274,59 @@ impl<'a> InterceptorHandler<'a> {
             return;
         }
         self.bind_by_rid(now, ssrc, payload_type, rtp_header);
+    }
+
+    /// RFC 3550 6.1: every compound RTCP packet carries an SDES CNAME after its leading SR or
+    /// RR. The report interceptors emit bare reports, so the CNAME is added here, on the way to
+    /// the wire: the CNAME the SDP's `a=ssrc` lines give the sender that owns the reporting SSRC,
+    /// or the connection's own CNAME for a receiver report.
+    fn add_sdes_cname(&mut self, packet: &mut TaggedPacket) {
+        let Packet::Rtcp(rtcp_packets) = &mut packet.message.packet else {
+            return;
+        };
+        let Some(first) = rtcp_packets.first() else {
+            return;
+        };
+        let reporter = if let Some(sr) = first.as_any().downcast_ref::<SenderReport>() {
+            sr.ssrc
+        } else if let Some(rr) = first.as_any().downcast_ref::<ReceiverReport>() {
+            rr.ssrc
+        } else {
+            return;
+        };
+        if rtcp_packets
+            .iter()
+            .any(|packet| packet.as_any().is::<SourceDescription>())
+        {
+            return;
+        }
+
+        let sender_cname = self.rtp_transceivers.iter().find_map(|transceiver| {
+            let track = transceiver.sender().as_ref()?.track();
+            track
+                .ssrcs()
+                .any(|ssrc| ssrc == reporter)
+                .then(|| track.stream_id().to_string())
+        });
+        let cname = sender_cname.unwrap_or_else(|| {
+            self.ctx
+                .connection_cname
+                .get_or_insert_with(|| format!("{:016x}", rand::random::<u64>()))
+                .clone()
+        });
+
+        rtcp_packets.insert(
+            1,
+            Box::new(SourceDescription {
+                chunks: vec![SourceDescriptionChunk {
+                    source: reporter,
+                    items: vec![SourceDescriptionItem {
+                        sdes_type: SdesType::SdesCname,
+                        text: cname.into(),
+                    }],
+                }],
+            }),
+        );
     }
 
     /// Rewrite an RTX packet into the original packet it carries (RFC 4588 4), when it is one.
@@ -1009,7 +1068,8 @@ impl<'a>
 
     fn poll_write(&mut self) -> Option<Self::Wout> {
         if self.ctx.is_dtls_handshake_complete {
-            while let Some(packet) = self.interceptor.poll_write() {
+            while let Some(mut packet) = self.interceptor.poll_write() {
+                self.add_sdes_cname(&mut packet);
                 // Process outgoing packets for stats
                 match &packet.message.packet {
                     Packet::Rtcp(rtcp_packets) => {
@@ -1084,6 +1144,10 @@ impl<'a>
 #[cfg(test)]
 #[path = "interceptor_rtx_test.rs"]
 mod interceptor_rtx_test;
+
+#[cfg(test)]
+#[path = "interceptor_sdes_test.rs"]
+mod interceptor_sdes_test;
 
 #[cfg(test)]
 mod boundary_tests {
