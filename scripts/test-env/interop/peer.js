@@ -123,7 +123,11 @@
         s.sentScenario = true;
       }
       send(msg);
-      await until(() => pc.signalingState === "stable", 15000, "the answer");
+      // A Rust-side error (an {"type":"error"} message) or a refused answer is the reason an
+      // answer never applies: name them instead of only the timeout.
+      await until(() => pc.signalingState === "stable", 15000, "the answer").catch((e) => {
+        throw new Error(`${e.message}; errors: ${JSON.stringify(s.errors)}`);
+      });
     };
     s.negotiate = async (mungeOffer) => {
       await s.makeOffer();
