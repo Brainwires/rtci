@@ -102,7 +102,11 @@ impl Endpoint {
         match event.0 {
             EndpointEventInner::Drained => {
                 let conn = self.associations.remove(ch.0);
-                self.association_ids_init.remove(&conn.init_cid);
+                // Only the accepting side registers its peer's Initiate Tag, and another
+                // association may have registered the same tag since: remove only our own.
+                if self.association_ids_init.get(&conn.init_cid) == Some(&ch) {
+                    self.association_ids_init.remove(&conn.init_cid);
+                }
                 for cid in conn.loc_cids.values() {
                     self.association_ids.remove(cid);
                 }
@@ -139,12 +143,17 @@ impl Endpoint {
             // server_config.concurrent_associations limit enforced during
             // first-packet handling provides coarse-grained protection in the
             // meantime.
+            //
+            // An INIT the peer sends again (its INIT ACK was lost, RFC 9260 5.1 C) carries the
+            // Initiate Tag of the first one, and belongs to the association that INIT started:
+            // that association answers it with the same INIT ACK. Treated as the first packet
+            // of another association instead, it is refused by an endpoint that holds one
+            // association at a time, and the handshake can never complete.
             if partial_decode.first_chunk_type == CT_INIT {
-                if let Some(dst_cid) = partial_decode.initiate_tag {
-                    self.association_ids.get(&dst_cid).cloned()
-                } else {
-                    None
-                }
+                partial_decode
+                    .initiate_tag
+                    .and_then(|initiate_tag| self.association_ids_init.get(&initiate_tag))
+                    .copied()
             } else {
                 None
             }
@@ -256,6 +265,8 @@ impl Endpoint {
             Some(server_config),
             transport_config,
         );
+        // Where a retransmission of this INIT is routed (see `handle`).
+        self.association_ids_init.insert(remote_aid, ch);
 
         conn.handle_event(AssociationEvent(AssociationEventInner::Datagram(
             TransportMessage {
