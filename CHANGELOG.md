@@ -5,6 +5,49 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.1+brainwires.4] - 2026-11-19
+
+ICE restarts that keep data flowing and four JSEP / webrtc-stats points the Deno WebRTC
+extension's web-platform-tests run into (Brainwires/deno `ext/webrtc`). `FORK.md` lists everything
+the fork carries over upstream.
+
+### Features
+
+- **rtp_transceiver**: `RTCRtpTransceiver::set_associable_with_remote_offer` lets an application
+  mark a transceiver it made for `addTransceiver` so a remote offer's new media section does not
+  take it (RFC 9429 §5.10: only one "created by addTrack" is a candidate). The default keeps the
+  old behaviour.
+- **ice**: `Agent::media_path()`, the selected pair's path or, during a restart, the one the
+  session had when the restart was applied.
+
+### Bug Fixes
+
+- **ice**: an ICE restart keeps using the previously selected pair until the restart selects a new
+  one (RFC 8445 §9). `apply_restart` dropped it at once (the offerer at setLocalDescription of the
+  restart offer, the answerer at setRemoteDescription of it), so every DTLS / SRTP packet, and
+  every data channel message, between that point and the new generation's first nomination was
+  lost on both peers. This holds with `discard_local_candidates_during_ice_restart` too, which
+  forgets what was signalled but doesn't close the selected pair's socket.
+- **peer_connection**: `a=msid` is one line per MediaStream of the sender (RFC 9429 §5.2.1),
+  without duplicates; a sender in none writes its track's own stream id. One line with the track's
+  stream id was written whatever `set_streams` had been given.
+- **peer_connection**: a remote `a=inactive` media section sets the transceiver's direction to
+  inactive for the answer and no longer stops it, so a later offer, or a rollback, resumes it. Only
+  a rejected section stops a transceiver.
+- **stats**: the selected candidate pair's local and remote candidates are always in the report; a
+  peer-reflexive remote candidate was never registered, so the pair's `remoteCandidateId` named an
+  object the report did not have.
+
+### Testing
+
+- `tests/ice_restart_keeps_path_rtc2rtc.rs`: two peers on a simulated UDP network in virtual time,
+  a message each way after every signalling step of a restart and on the new pair, with and
+  without discarding the local candidates. `rtp_transceiver` tests for one `a=msid` line per stream
+  and a transceiver that a remote offer may not take.
+- `tests/ice_restart_by_webrtc_interop.rs` treats a datagram its loopback-bound socket can't send
+  to a non-loopback candidate (`EADDRNOTAVAIL`, macOS) as lost, as the sibling tests do, instead
+  of failing.
+
 ## [0.21.1+brainwires.3] - 2026-11-19
 
 W3C WebRTC behaviour the Deno WebRTC extension (Brainwires/deno `ext/webrtc`) relies on: JSEP
@@ -61,6 +104,12 @@ longer stops at a nested interceptor. `FORK.md` lists everything the fork carrie
   were seconds, truncated to whole milliseconds).
 - **peer_connection**: an offer made while an ICE restart is staged carries no candidates of the
   previous generation.
+
+### Dependencies
+
+- The workspace audit ignores RUSTSEC-2026-0543 (`chrono` unmaintained, published after the
+  previous release): `chrono` is a dev-dependency only, for log timestamps in examples and
+  tests. The library's own audit, which ignores nothing, is unaffected.
 
 ### Testing
 
