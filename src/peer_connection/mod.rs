@@ -251,6 +251,8 @@ mod internal;
 mod always_negotiate;
 pub mod message;
 pub mod sdp;
+#[cfg(test)]
+mod set_configuration_test;
 pub mod state;
 pub mod transport;
 #[cfg(test)]
@@ -2133,8 +2135,20 @@ impl RTCPeerConnection {
             self.configuration.ice_candidate_pool_size = configuration.ice_candidate_pool_size;
         }
 
-        // https://www.w3.org/TR/webrtc/#set-the-configuration (step #8)
-
+        // https://www.w3.org/TR/webrtc/#set-the-configuration (step #8): the ICE agent's
+        // transport setting follows; candidates already added stay, and the new setting
+        // applies from the next gathering (RFC 9429, Section 4.1.18).
+        if configuration.ice_transport_policy != self.configuration.ice_transport_policy {
+            let candidate_types =
+                if configuration.ice_transport_policy == RTCIceTransportPolicy::Relay {
+                    vec![ice::candidate::CandidateType::Relay]
+                } else {
+                    vec![]
+                };
+            self.ice_transport_mut()
+                .agent
+                .set_candidate_types(candidate_types);
+        }
         self.configuration.ice_transport_policy = configuration.ice_transport_policy;
 
         // https://www.w3.org/TR/webrtc/#set-the-configuration (step #11)
