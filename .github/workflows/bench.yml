@@ -10,8 +10,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Read-only by default: the benchmark job runs a pull request's code. Only `store`, on a push
+# to master, can write (it pushes the results to the benchmark data branch).
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -67,9 +69,30 @@ jobs:
       - name: Run benchmarks (rtc-media)
         run: cargo bench -p rtc-media --bench bench -- --output-format bencher | tee -a bench-all.txt
 
+      - name: Keep the results for the store job
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: bench-results
+          path: bench-all.txt
+          retention-days: 1
+
+  store:
+    name: Store benchmark results
+    needs: benchmark
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: bench-results
+
       - name: Store benchmark results
         uses: benchmark-action/github-action-benchmark@v1
-        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
         with:
           name: WebRTC-RS Criterion Benchmarks
           tool: cargo
