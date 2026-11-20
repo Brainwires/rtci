@@ -306,7 +306,18 @@ impl World {
 
     /// Writes `PACKETS` RTP packets, 20 ms apart, then lets RTCP run for `settle`.
     fn send_media(&mut self, sender: RTCRtpSenderId, settle: Duration) -> Result<()> {
-        let (ssrc, _, pt) = self.sender_stream(sender);
+        let (_, _, pt) = self.sender_stream(sender);
+        self.send_media_with_pt(sender, pt, settle)
+    }
+
+    /// `send_media`, every packet written with payload type `pt`.
+    fn send_media_with_pt(
+        &mut self,
+        sender: RTCRtpSenderId,
+        pt: u8,
+        settle: Duration,
+    ) -> Result<()> {
+        let (ssrc, _, _) = self.sender_stream(sender);
         for n in 0..PACKETS {
             let now = self.now;
             self.peers[0]
@@ -428,6 +439,31 @@ fn an_encoding_without_a_codec_is_repaired_over_rtx() -> Result<()> {
     assert!(
         world.peers[1].read_rtp.contains(&(ssrc, DROPPED_SEQ)),
         "the receiver got the lost packet back"
+    );
+    Ok(())
+}
+
+/// A packet whose payload type is not negotiated is rewritten to the payload type of the codec
+/// its encoding is sent with. For an encoding that names no codec that is the codec negotiation
+/// picked (the one its stream is bound with), not a refusal.
+#[test]
+fn an_encoding_without_a_codec_rewrites_an_unnegotiated_payload_type() -> Result<()> {
+    let (mut world, sender) = World::connected()?;
+    let (ssrc, _, pt) = world.sender_stream(sender);
+    assert_eq!(pt, VP8_PT);
+    const UNNEGOTIATED_PT: u8 = 120;
+    world.send_media_with_pt(sender, UNNEGOTIATED_PT, Duration::from_millis(200))?;
+
+    let received: Vec<u16> = world.peers[1]
+        .read_rtp
+        .iter()
+        .filter(|&&(s, _)| s == ssrc)
+        .map(|&(_, seq)| seq)
+        .collect();
+    assert_eq!(
+        received.len(),
+        usize::from(PACKETS),
+        "every packet went out with the negotiated payload type and was received"
     );
     Ok(())
 }

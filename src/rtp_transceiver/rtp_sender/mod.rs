@@ -192,7 +192,7 @@ use crate::peer_connection::RTCPeerConnection;
 use crate::peer_connection::message::{RTCMessage, TaggedRTCMessage};
 use crate::peer_connection::transport::RTCDtlsTransport;
 use crate::rtp_transceiver::RTCRtpSenderId;
-use crate::rtp_transceiver::rtp_sender::rtp_codec::{CodecMatch, codec_parameters_fuzzy_search};
+use crate::rtp_transceiver::rtp_sender::rtp_codec::encoding_send_codec;
 use log::trace;
 use sansio::Protocol;
 use shared::error::{Error, Result};
@@ -449,8 +449,9 @@ impl RTCRtpSender<'_> {
             .iter()
             .any(|codec| codec.payload_type == packet.header.payload_type)
         {
-            let (codec, match_type) = codec_parameters_fuzzy_search(&encoding.codec, codecs);
-            if match_type == CodecMatch::None {
+            // An encoding that names no codec is sent with the one negotiation picked, as its
+            // stream is bound (`encoding_send_codec`); one that names a codec, with that codec.
+            let Some(codec) = encoding_send_codec(&encoding.codec, codecs) else {
                 trace!(
                     "rtp_sender {:?} rejecting RTP ssrc {} pt {}: no negotiated codec matches the packet or its encoding; sender codecs [{}]",
                     self.id,
@@ -466,7 +467,7 @@ impl RTCRtpSender<'_> {
                         .join(", ")
                 );
                 return Err(Error::ErrRTPTransceiverCodecUnsupported);
-            }
+            };
             trace!(
                 "rtp_sender {:?} rewriting RTP ssrc {} pt {} to the encoding's negotiated pt {}",
                 self.id, packet.header.ssrc, packet.header.payload_type, codec.payload_type
