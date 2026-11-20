@@ -48,11 +48,15 @@
     return !!caps && caps.codecs.some((c) => c.mimeType.toLowerCase() === mime.toLowerCase());
   }
 
+  // Prefers `mime` and keeps the RTX format (RFC 4588): setCodecPreferences offers only what
+  // its list has, so a list of the primary alone leaves RTX out of the offer, and the answer
+  // then has none either (RFC 9429 section 5.3.1).
   function prefer(transceiver, kind, mime) {
     const caps = RTCRtpReceiver.getCapabilities(kind).codecs;
     const first = caps.filter((c) => c.mimeType.toLowerCase() === mime.toLowerCase());
     if (!first.length) throw new Error(`no ${mime}`);
-    if (transceiver.setCodecPreferences) transceiver.setCodecPreferences(first);
+    const rtx = caps.filter((c) => c.mimeType.toLowerCase() === `${kind}/rtx`);
+    if (transceiver.setCodecPreferences) transceiver.setCodecPreferences([...first, ...rtx]);
   }
 
   // opts: insertableStreams (Chromium's encoded streams), rtc (more RTCConfiguration members:
