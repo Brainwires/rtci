@@ -4,7 +4,7 @@ use crate::peer_connection::event::RTCPeerConnectionEvent;
 use crate::peer_connection::event::track_event::{RTCTrackEvent, RTCTrackEventInit};
 use crate::peer_connection::event::{RTCEventInternal, TaggedRTCEventInternal};
 use crate::peer_connection::handler::endpoint::{
-    SsrcOwners, is_repair_mime_type, resolve_rtx_primary,
+    SsrcOwners, deencapsulate_rtx, is_repair_mime_type, resolve_rtx_primary,
 };
 use crate::peer_connection::message::internal::{
     RTCMessageInternal, RTPMessage, TaggedRTCMessageInternal,
@@ -237,10 +237,9 @@ impl<'a> InterceptorHandler<'a> {
     /// A no-op for every packet after the first of a stream, which is the overwhelming majority:
     /// the declared-SSRC path finds a codec already set and returns immediately.
     fn ensure_remote_stream_bound(&mut self, now: Instant, rtp_header: &rtp::Header) {
-        // An RTX packet identifies the stream it repairs, not one of its own. Resolving it here
-        // rather than de-encapsulating first keeps the packet untouched for the chain — the
-        // endpoint handler still de-encapsulates on its way to the application — while letting a
-        // stream whose first arrival happens to be a retransmission establish anyway.
+        // An RTX packet identifies the stream it repairs, not one of its own. It is resolved back
+        // to that stream here, so a stream whose first arrival happens to be a retransmission
+        // establishes anyway; `handle_read` de-encapsulates it right after, before the chain.
         let known = self.ctx.ssrc_owners.cached(
             rtp_header.ssrc,
             self.rtp_transceivers,
@@ -269,6 +268,27 @@ impl<'a> InterceptorHandler<'a> {
             return;
         }
         self.bind_by_rid(now, ssrc, payload_type, rtp_header);
+    }
+
+    /// Rewrite an RTX packet into the original packet it carries (RFC 4588 4), when it is one.
+    fn deencapsulate_if_rtx(&mut self, rtp_packet: &mut rtp::Packet) {
+        let is_primary = self
+            .ctx
+            .ssrc_owners
+            .cached(
+                rtp_packet.header.ssrc,
+                self.rtp_transceivers,
+                receiver_declares_ssrc,
+            )
+            .is_some();
+        if is_primary {
+            return;
+        }
+        if let Some((primary_ssrc, primary_payload_type)) =
+            self.rtx_primary_for(rtp_packet.header.ssrc, rtp_packet.header.payload_type)
+        {
+            deencapsulate_rtx(rtp_packet, primary_ssrc, primary_payload_type);
+        }
     }
 
     /// RTX SSRC of one of this endpoint's receive codings (declared via
@@ -875,9 +895,9 @@ impl<'a>
 
     fn handle_read(&mut self, msg: TaggedRTCMessageInternal) -> Result<()> {
         if self.ctx.is_dtls_handshake_complete
-            && let RTCMessageInternal::Rtp(RTPMessage::Packet(packet)) = msg.message
+            && let RTCMessageInternal::Rtp(RTPMessage::Packet(mut packet)) = msg.message
         {
-            match &packet {
+            match &mut packet {
                 Packet::Rtp(rtp_packet) => {
                     // Establish the stream *before* the chain is handed the packet. The codec can only
                     // be resolved from an arriving payload type, so this is the first moment it can be
@@ -895,6 +915,18 @@ impl<'a>
                         .on_rtx_packet_received_if_rtx(ssrc, payload_bytes);
                     self.stats
                         .on_fec_packet_received_if_fec(ssrc, payload_bytes);
+
+                    // RFC 4588 5: a retransmission is the original packet again, and the
+                    // receiver's own machinery has to see it as that. De-encapsulated here, before
+                    // the chain, the NACK generator stops asking for a packet RTX repaired, the
+                    // receiver report counts it as received, and a jitter buffer can slot it in.
+                    // De-encapsulated after the chain (in the endpoint handler, as it was), all
+                    // three only ever saw a packet on the RTX SSRC.
+                    //
+                    // A padding-only RTX packet (a bandwidth probe, no OSN) carries nothing to
+                    // recover and goes on unchanged: its transport-wide sequence number still has
+                    // to reach the TWCC recorder, or the probe reads as lost.
+                    self.deencapsulate_if_rtx(rtp_packet);
                 }
                 Packet::Rtcp(rtcp_packets) => {
                     // Counted here, before the chain, for the same reason as the RTP accounting
@@ -1048,6 +1080,10 @@ impl<'a>
         self.interceptor.close()
     }
 }
+
+#[cfg(test)]
+#[path = "interceptor_rtx_test.rs"]
+mod interceptor_rtx_test;
 
 #[cfg(test)]
 mod boundary_tests {
