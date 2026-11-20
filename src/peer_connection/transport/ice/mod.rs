@@ -172,19 +172,19 @@ impl IceTransport {
         Ok(())
     }
 
-    /// Adds a new remote candidate.
-    pub(crate) fn add_remote_candidate(&mut self, c: Candidate) -> Result<()> {
+    /// Adds a new remote candidate. `Ok(false)` when the agent dropped it (past its cap, or of a
+    /// network type it doesn't use); an active TCP candidate, never dialled, is still `Ok(true)`.
+    pub(crate) fn add_remote_candidate(&mut self, c: Candidate) -> Result<bool> {
         // cannot check for network yet because it might not be applied
         // when mDNS hostame is used.
         if c.tcp_type() == TcpType::Active {
             // TCP Candidates with tcptype active will probe server passive ones, so
             // no need to do anything with them.
             log::info!("Ignoring remote candidate with tcpType active: {c}");
-            return Ok(());
+            return Ok(true);
         }
 
-        let _ = self.agent.add_remote_candidate(c)?;
-        Ok(())
+        self.agent.add_remote_candidate(c)
     }
 
     pub(crate) fn add_local_candidate(&mut self, c: Candidate) -> Result<bool> {
