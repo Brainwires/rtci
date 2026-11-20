@@ -1772,6 +1772,39 @@ impl RTCPeerConnection {
         }
     }
 
+    /// Drops the stats of the RTP streams whose SSRC no longer belongs to a receiver's or a
+    /// sender's track (a stopped transceiver, a removed track, a rebound simulcast layer), and
+    /// with them their RTX / FEC reverse lookups.
+    ///
+    /// This is called automatically by `get_stats()`.
+    pub(super) fn retire_rtp_stream_stats(&mut self) {
+        let mut inbound_live = HashSet::new();
+        let mut outbound_live = HashSet::new();
+        for transceiver in &self.rtp_transceivers {
+            if let Some(receiver) = transceiver.receiver() {
+                inbound_live.extend(
+                    receiver
+                        .track()
+                        .codings()
+                        .iter()
+                        .filter_map(|coding| coding.rtp_coding_parameters.ssrc),
+                );
+            }
+            if let Some(sender) = transceiver.sender() {
+                outbound_live.extend(
+                    sender
+                        .track()
+                        .codings()
+                        .iter()
+                        .filter_map(|coding| coding.rtp_coding_parameters.ssrc),
+                );
+            }
+        }
+        self.pipeline_context
+            .stats
+            .retire_rtp_streams(&inbound_live, &outbound_live);
+    }
+
     /// The transceiver, id and kind of the track `sender` sends: what the stats of its media
     /// source are keyed and linked by. `None` for a sender that does not exist.
     pub(crate) fn sender_track_for_stats(

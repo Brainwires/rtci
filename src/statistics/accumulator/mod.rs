@@ -12,6 +12,8 @@ mod ice_candidate;
 mod ice_candidate_pair;
 mod media;
 mod peer_connection;
+#[cfg(test)]
+mod retire_test;
 mod rtcp_reports;
 #[cfg(test)]
 mod rtcp_reports_test;
@@ -95,11 +97,17 @@ pub(crate) struct RTCStatsAccumulator {
     /// Audio playout stats keyed by playout ID.
     pub(crate) audio_playouts: HashMap<String, AudioPlayoutStatsAccumulator>,
 
-    // Reverse lookup maps for O(1) RTX/FEC SSRC detection
-    /// Maps RTX SSRC to primary SSRC for O(1) lookup.
-    rtx_ssrc_to_primary: HashMap<SSRC, SSRC>,
+    // Reverse lookup maps for O(1) RTX/FEC SSRC detection. Each holds at most one entry per
+    // stream: an entry goes when its stream goes, or when the stream is given another RTX / FEC
+    // SSRC.
+    /// Maps an inbound RTX SSRC to its primary SSRC.
+    inbound_rtx_ssrc_to_primary: HashMap<SSRC, SSRC>,
 
-    /// Maps FEC SSRC to primary SSRC for O(1) lookup.
+    /// Maps an outbound RTX SSRC to its primary SSRC. Kept apart from the inbound map: the
+    /// remote's SSRCs and ours are chosen independently and may coincide.
+    outbound_rtx_ssrc_to_primary: HashMap<SSRC, SSRC>,
+
+    /// Maps an inbound FEC SSRC to its primary SSRC.
     fec_ssrc_to_primary: HashMap<SSRC, SSRC>,
 }
 
@@ -466,35 +474,50 @@ impl RTCStatsAccumulator {
         fec_ssrc: Option<u32>,
         transceiver_id: RTCRtpTransceiverId,
     ) -> &mut InboundRtpStreamAccumulator {
-        // Populate reverse lookup maps for O(1) RTX/FEC detection
+        // Populate reverse lookup maps for O(1) RTX/FEC detection, replacing the entry of a
+        // repair SSRC the stream had before
+        let existing = self.inbound_rtp_streams.get(&ssrc);
+        let (old_rtx, old_fec) = (
+            existing.and_then(|s| s.rtx_ssrc),
+            existing.and_then(|s| s.fec_ssrc),
+        );
         if let Some(rtx) = rtx_ssrc {
-            self.rtx_ssrc_to_primary.insert(rtx, ssrc);
+            associate(&mut self.inbound_rtx_ssrc_to_primary, old_rtx, rtx, ssrc);
         }
         if let Some(fec) = fec_ssrc {
-            self.fec_ssrc_to_primary.insert(fec, ssrc);
+            associate(&mut self.fec_ssrc_to_primary, old_fec, fec, ssrc);
         }
 
         let transport_id = self.transport.transport_id.clone();
-        self.inbound_rtp_streams
-            .entry(ssrc)
-            .or_insert_with(|| InboundRtpStreamAccumulator {
-                ssrc,
-                kind,
-                transport_id,
-                track_identifier: track_identifier.to_string(),
-                mid: mid.to_string(),
-                rtx_ssrc,
-                fec_ssrc,
-                transceiver_id,
-                ..Default::default()
-            })
+        let stream =
+            self.inbound_rtp_streams
+                .entry(ssrc)
+                .or_insert_with(|| InboundRtpStreamAccumulator {
+                    ssrc,
+                    kind,
+                    transport_id,
+                    track_identifier: track_identifier.to_string(),
+                    mid: mid.to_string(),
+                    rtx_ssrc,
+                    fec_ssrc,
+                    transceiver_id,
+                    ..Default::default()
+                });
+        // An existing stream takes the repair SSRCs it is given now, as the reverse maps did.
+        if rtx_ssrc.is_some() {
+            stream.rtx_ssrc = rtx_ssrc;
+        }
+        if fec_ssrc.is_some() {
+            stream.fec_ssrc = fec_ssrc;
+        }
+        stream
     }
 
     /// Updates the RTX SSRC association for an existing inbound RTP stream.
     ///
     /// This is used when `rrid` (repaired RTP stream ID) arrives after the base
     /// stream's `InboundRtpStreamAccumulator` has already been created. It updates
-    /// both the reverse-lookup map (`rtx_ssrc_to_primary`) and the inbound stream's
+    /// both the reverse-lookup map (`inbound_rtx_ssrc_to_primary`) and the inbound stream's
     /// `rtx_ssrc` field so that `on_rtx_packet_received_if_rtx()` can recognize
     /// these packets and `getStats()` reports the correct `rtxSsrc`.
     ///
@@ -503,7 +526,16 @@ impl RTCStatsAccumulator {
     /// * `primary_ssrc` - The SSRC of the base/primary stream
     /// * `rtx_ssrc` - The RTX SSRC to associate with the primary stream
     pub(crate) fn update_inbound_rtx_ssrc(&mut self, primary_ssrc: SSRC, rtx_ssrc: SSRC) {
-        self.rtx_ssrc_to_primary.insert(rtx_ssrc, primary_ssrc);
+        let old_rtx = self
+            .inbound_rtp_streams
+            .get(&primary_ssrc)
+            .and_then(|s| s.rtx_ssrc);
+        associate(
+            &mut self.inbound_rtx_ssrc_to_primary,
+            old_rtx,
+            rtx_ssrc,
+            primary_ssrc,
+        );
         if let Some(stream) = self.inbound_rtp_streams.get_mut(&primary_ssrc) {
             stream.rtx_ssrc = Some(rtx_ssrc);
         }
@@ -532,7 +564,11 @@ impl RTCStatsAccumulator {
         transceiver_id: RTCRtpTransceiverId,
     ) -> &mut OutboundRtpStreamAccumulator {
         if let Some(rtx) = rtx_ssrc {
-            self.rtx_ssrc_to_primary.insert(rtx, ssrc);
+            let old_rtx = self
+                .outbound_rtp_streams
+                .get(&ssrc)
+                .and_then(|s| s.rtx_ssrc);
+            associate(&mut self.outbound_rtx_ssrc_to_primary, old_rtx, rtx, ssrc);
         }
 
         // A media source the application already reported for this sender's track.
@@ -677,7 +713,7 @@ impl RTCStatsAccumulator {
         rtx_ssrc: SSRC,
         payload_bytes: usize,
     ) -> bool {
-        if let Some(primary_ssrc) = self.rtx_ssrc_to_primary.get(&rtx_ssrc)
+        if let Some(primary_ssrc) = self.outbound_rtx_ssrc_to_primary.get(&rtx_ssrc)
             && let Some(stream) = self.outbound_rtp_streams.get_mut(primary_ssrc)
         {
             stream.on_rtx_sent(payload_bytes);
@@ -697,7 +733,7 @@ impl RTCStatsAccumulator {
         rtx_ssrc: SSRC,
         payload_bytes: usize,
     ) -> bool {
-        if let Some(primary_ssrc) = self.rtx_ssrc_to_primary.get(&rtx_ssrc)
+        if let Some(primary_ssrc) = self.inbound_rtx_ssrc_to_primary.get(&rtx_ssrc)
             && let Some(stream) = self.inbound_rtp_streams.get_mut(primary_ssrc)
         {
             stream.on_rtx_received(payload_bytes);
@@ -996,6 +1032,67 @@ impl RTCStatsAccumulator {
         }
     }
 
+    /// Removes an inbound stream's stats, its remote-outbound object with them, and its RTX /
+    /// FEC reverse-lookup entries.
+    pub(crate) fn remove_inbound_rtp_stream(&mut self, ssrc: SSRC) {
+        if let Some(stream) = self.inbound_rtp_streams.remove(&ssrc) {
+            dissociate(&mut self.inbound_rtx_ssrc_to_primary, stream.rtx_ssrc, ssrc);
+            dissociate(&mut self.fec_ssrc_to_primary, stream.fec_ssrc, ssrc);
+        }
+    }
+
+    /// Removes an outbound stream's stats, its remote-inbound object with them, and its RTX
+    /// reverse-lookup entry.
+    pub(crate) fn remove_outbound_rtp_stream(&mut self, ssrc: SSRC) {
+        if let Some(stream) = self.outbound_rtp_streams.remove(&ssrc) {
+            dissociate(
+                &mut self.outbound_rtx_ssrc_to_primary,
+                stream.rtx_ssrc,
+                ssrc,
+            );
+        }
+    }
+
+    /// Drops the stats of every RTP stream whose SSRC is no longer bound: inbound streams not
+    /// in `inbound_live`, outbound streams not in `outbound_live`.
+    ///
+    /// webrtc-stats ties an RTP stream's stats objects to the SSRC being in use; without this
+    /// the per-SSRC maps only ever grew, one entry for every SSRC a peer ever had bound.
+    pub(crate) fn retire_rtp_streams(
+        &mut self,
+        inbound_live: &std::collections::HashSet<SSRC>,
+        outbound_live: &std::collections::HashSet<SSRC>,
+    ) {
+        let retired_inbound: Vec<SSRC> = self
+            .inbound_rtp_streams
+            .keys()
+            .filter(|ssrc| !inbound_live.contains(ssrc))
+            .copied()
+            .collect();
+        for ssrc in retired_inbound {
+            self.remove_inbound_rtp_stream(ssrc);
+        }
+        let retired_outbound: Vec<SSRC> = self
+            .outbound_rtp_streams
+            .keys()
+            .filter(|ssrc| !outbound_live.contains(ssrc))
+            .copied()
+            .collect();
+        for ssrc in retired_outbound {
+            self.remove_outbound_rtp_stream(ssrc);
+        }
+        // And any entry left naming a stream that is not there (an RTX SSRC announced for a
+        // stream that never got stats, or one that has gone).
+        let inbound = &self.inbound_rtp_streams;
+        self.inbound_rtx_ssrc_to_primary
+            .retain(|_, primary| inbound.contains_key(primary));
+        self.fec_ssrc_to_primary
+            .retain(|_, primary| inbound.contains_key(primary));
+        let outbound = &self.outbound_rtp_streams;
+        self.outbound_rtx_ssrc_to_primary
+            .retain(|_, primary| outbound.contains_key(primary));
+    }
+
     /// Removes codecs that are no longer referenced by any RTP stream.
     ///
     /// Per W3C spec, when there is no longer any reference to an RTCCodecStats,
@@ -1018,6 +1115,32 @@ impl RTCStatsAccumulator {
 
         // Remove codecs that are not referenced
         self.codecs.retain(|id, _| referenced.contains(id));
+    }
+}
+
+/// Maps `repair_ssrc` to `primary`, dropping the entry of `previous`, the repair SSRC
+/// `primary` had before: a stream has one RTX (or FEC) SSRC at a time, so the map holds no more
+/// entries than there are streams.
+fn associate(
+    map: &mut HashMap<SSRC, SSRC>,
+    previous: Option<SSRC>,
+    repair_ssrc: SSRC,
+    primary: SSRC,
+) {
+    if let Some(previous) = previous
+        && previous != repair_ssrc
+    {
+        dissociate(map, Some(previous), primary);
+    }
+    map.insert(repair_ssrc, primary);
+}
+
+/// Drops `repair_ssrc`'s entry if it still names `primary`.
+fn dissociate(map: &mut HashMap<SSRC, SSRC>, repair_ssrc: Option<SSRC>, primary: SSRC) {
+    if let Some(repair_ssrc) = repair_ssrc
+        && map.get(&repair_ssrc) == Some(&primary)
+    {
+        map.remove(&repair_ssrc);
     }
 }
 

@@ -2843,6 +2843,8 @@ impl RTCPeerConnection {
         // The transport and data channel states, from the objects themselves
         self.update_transport_stats();
         self.update_data_channel_stats();
+        // RTP streams whose SSRC is no longer bound go, before the codecs they referenced
+        self.retire_rtp_stream_stats();
         // Update codec stats from transceivers before taking snapshot
         self.update_codec_stats();
         self.pipeline_context
