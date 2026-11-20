@@ -3,8 +3,8 @@
 # Chromium, Firefox and WebKit (Playwright). Built and run by scripts/test-env/run.sh.
 #
 # Playwright's image carries Node and the three browsers with their system libraries; the
-# version is pinned and matches interop/package.json.
-FROM mcr.microsoft.com/playwright:v1.64.1-noble
+# version is pinned (by digest: the v1.64.1-noble index) and matches interop/package.json.
+FROM mcr.microsoft.com/playwright:v1.64.1-noble@sha256:2f05f8a734509a7b3f26a912639488ee08f58a7b292d14d62271bcff9038768f
 
 ARG RUST_VERSION=1.99.1
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -27,8 +27,9 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/rustup.sh 
         --component clippy,rustfmt \
     && rm /tmp/rustup.sh && chmod -R a+w $RUSTUP_HOME $CARGO_HOME
 
-# Playwright test runner, pinned to the browsers the base image ships.
-COPY interop/package.json /opt/interop/package.json
-RUN cd /opt/interop && npm install --no-audit --no-fund && npx playwright --version
+# Playwright test runner, pinned to the browsers the base image ships, installed exactly as
+# interop/package-lock.json resolved it (integrity-checked; no install scripts).
+COPY interop/package.json interop/package-lock.json /opt/interop/
+RUN cd /opt/interop && npm ci --ignore-scripts --no-audit --no-fund && npx playwright --version
 
 WORKDIR /src

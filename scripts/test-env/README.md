@@ -73,5 +73,9 @@ variables the tests read.
 
 `.github/workflows/test-env.yml` runs it on push, pull request and dispatch: on our self-hosted
 Linux docker pool first (the job's own rootless Docker daemon, so the checkout is copied in),
-GitHub's `ubuntu-latest` when the pool is busy. The image is cached in GHCR by the hash of
-`Dockerfile` and `interop/package.json`.
+GitHub's `ubuntu-latest` when the pool is busy. Self-hosted runners take only a push, a dispatch
+or a pull request from a branch of this repository; a fork's pull request runs on `ubuntu-latest`.
+The image is cached in GHCR by the hash of `Dockerfile`, `interop/package.json` and
+`interop/package-lock.json`, and only a push to `master` publishes it. After changing
+`interop/package.json`, refresh the lockfile with `npm install --package-lock-only` in
+`interop/`.
