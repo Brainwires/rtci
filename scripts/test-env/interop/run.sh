@@ -16,7 +16,9 @@ PEER=${CARGO_TARGET_DIR:-/src/target}/debug/examples/interop-peer
 ip netns exec open-b "$PEER" --listen 203.0.113.51:8080 --ice-ip 203.0.113.51 \
   --media-dir "${RTC_TESTENV_MEDIA:-/run/rtc-env/media}" > "$A/interop-peer.log" 2>&1 &
 PEER_PID=$!
-ip netns exec lan-b "$PEER" --listen 10.99.0.51:8080 --ice-ip 10.99.0.51 \
+# The mDNS peer logs every mDNS packet it parses and each answer it takes or refuses.
+RUST_LOG=${RTC_INTEROP_MDNS_LOG:-error,rtc_mdns=trace,rtc_ice::agent=debug} \
+  ip netns exec lan-b "$PEER" --listen 10.99.0.51:8080 --ice-ip 10.99.0.51 \
   --media-dir "${RTC_TESTENV_MEDIA:-/run/rtc-env/media}" > "$A/interop-peer-mdns.log" 2>&1 &
 MDNS_PEER_PID=$!
 trap 'kill $PEER_PID $MDNS_PEER_PID 2>/dev/null; wait $PEER_PID $MDNS_PEER_PID 2>/dev/null' EXIT
@@ -41,10 +43,14 @@ RTC_INTEROP_WS=ws://203.0.113.51:8080 RTC_INTEROP_JSON="$A/interop-results-wan.j
   ip netns exec open-a npx playwright test --config playwright.config.mjs \
   --project chromium --project firefox --project webkit "$@"
 rc=$?
+# Every mDNS packet on the LAN while the mDNS projects run, seen from the Rust peer's host.
+ip netns exec lan-b tcpdump -i eth0 -n -vvv -l udp port 5353 > "$A/mdns-lan-b.txt" 2>&1 &
+TCPDUMP_PID=$!
 RTC_INTEROP_WS=ws://10.99.0.51:8080 RTC_INTEROP_BROWSER_IP=10.99.0.50 \
   RTC_INTEROP_JSON="$A/interop-results-mdns.json" \
   ip netns exec lan-a npx playwright test --config playwright.config.mjs \
   --project chromium-mdns --project firefox-mdns --project webkit-mdns "$@" || rc=1
+kill "$TCPDUMP_PID" 2>/dev/null; wait "$TCPDUMP_PID" 2>/dev/null
 # One report for the matrix: both runs' suites.
 node -e '
   const fs = require("fs");

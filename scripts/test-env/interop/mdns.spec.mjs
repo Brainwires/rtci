@@ -30,9 +30,27 @@ test("mDNS-hidden browser candidates resolve on the Rust side", async ({ page })
     await s.connected();
     const e = await Interop.echo(dc, 20);
     await e.wait(20, 15000);
-    const report = await s.report();
+    // The name resolves over multicast beside the connectivity checks (which can connect first
+    // through a peer-reflexive candidate), so wait a while for the pair it makes.
+    let report = await s.report();
+    const deadline = Date.now() + 10000;
+    while (!report.stats.candidatePairs.some(resolvedPair) && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 250));
+      report = await s.report();
+    }
     s.close();
-    return { hosts, echoed: e.got.length, remote: report.stats.remoteCandidates };
+    return {
+      hosts,
+      echoed: e.got.length,
+      remote: report.stats.remoteCandidates,
+      pairs: report.stats.candidatePairs,
+    };
+    // A pair whose remote is one of the browser's `.local` host candidates: the agent pairs one
+    // only after its name resolved (its stats address stays the name; the resolved address is
+    // not exposed).
+    function resolvedPair(p) {
+      return p.remoteType === "host" && /\.local$/.test(p.remoteAddress || "") && p.state === "succeeded";
+    }
   }, WS);
   naBrowser(
     r.notHidden,
@@ -40,10 +58,14 @@ test("mDNS-hidden browser candidates resolve on the Rust side", async ({ page })
     `its own icecandidate events with default settings: ${JSON.stringify(r.hosts)}`,
   );
   expect(r.echoed).toBe(20);
-  // The name resolved: Rust holds a host candidate with the browser's address (lan-a), not only
-  // the peer-reflexive one its checks would teach it anyway.
+  // The name resolved: a connectivity check succeeded on a pair whose remote is the browser's
+  // `.local` host candidate, not only on the peer-reflexive one (BROWSER_IP, lan-a) the checks
+  // teach Rust anyway.
   expect(
-    r.remote.some((c) => c.type === "host" && c.address === BROWSER_IP),
-    `Rust's remote candidates: ${JSON.stringify(r.remote)}`,
+    r.pairs.some(
+      (p) => p.remoteType === "host" && /\.local$/.test(p.remoteAddress || "") && p.state === "succeeded",
+    ),
+    `Rust's candidate pairs: ${JSON.stringify(r.pairs)}; remote candidates: ${JSON.stringify(r.remote)} ` +
+      `(browser ${BROWSER_IP})`,
   ).toBe(true);
 });

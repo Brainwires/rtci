@@ -620,8 +620,11 @@ impl Session {
         Ok(())
     }
 
-    /// The W3C stats a test compares with the browser's: RTP counters per SSRC and the remote
-    /// candidates (a resolved `.local` name shows as a host candidate with an address).
+    /// The W3C stats a test compares with the browser's: RTP counters per SSRC, the remote
+    /// candidates and the candidate pairs. A remote `.local` candidate keeps its name as its
+    /// stats address after it resolves (the resolved address is not exposed,
+    /// draft-ietf-mmusic-mdns-ice-candidates); the agent pairs it only once the name resolved,
+    /// so a pair whose remote is that candidate shows the resolution.
     fn stats(&mut self) -> Value {
         let report = self.pc.get_stats(Instant::now(), StatsSelector::None);
         let inbound: Vec<Value> = report
@@ -658,7 +661,32 @@ impl Session {
                 _ => None,
             })
             .collect();
-        json!({"inbound": inbound, "outbound": outbound, "remoteCandidates": remote_candidates})
+        let candidate_pairs: Vec<Value> = report
+            .candidate_pairs()
+            .map(|p| {
+                let remote = report.iter().find_map(|e| match e {
+                    RTCStatsReportEntry::RemoteCandidate(c)
+                        if c.stats.id == p.remote_candidate_id =>
+                    {
+                        Some(c)
+                    }
+                    _ => None,
+                });
+                json!({
+                    "state": p.state,
+                    "nominated": p.nominated,
+                    "remoteType": remote.map(|c| c.candidate_type.to_string()),
+                    "remoteAddress": remote.map(|c| c.address.clone()),
+                    "remotePort": remote.map(|c| c.port),
+                })
+            })
+            .collect();
+        json!({
+            "inbound": inbound,
+            "outbound": outbound,
+            "remoteCandidates": remote_candidates,
+            "candidatePairs": candidate_pairs,
+        })
     }
 
     fn setup_scenario(&mut self) -> Result<()> {
