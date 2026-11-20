@@ -379,3 +379,132 @@ fn a_changed_message_under_an_old_sequence_number_is_not_a_repeat() -> Result<()
     );
     Ok(())
 }
+
+// ---------------------------------------------------------------------------------------------
+// Received alerts are never echoed; a received fatal alert ends the association
+// (RFC 5246 7.2, 7.2.2).
+// ---------------------------------------------------------------------------------------------
+
+/// A plaintext (epoch 0) alert record, as anyone who can spoof the peer's address can send.
+fn plaintext_alert(level: u8, description: u8, sequence_number: u64) -> BytesMut {
+    use crate::content::ContentType;
+    use crate::record_layer::record_layer_header::{PROTOCOL_VERSION1_2, RecordLayerHeader};
+
+    let header = RecordLayerHeader {
+        content_type: ContentType::Alert,
+        protocol_version: PROTOCOL_VERSION1_2,
+        epoch: 0,
+        sequence_number,
+        content_len: 2,
+    };
+    let mut raw = vec![];
+    header.marshal(&mut raw).expect("a record header marshals");
+    raw.extend_from_slice(&[level, description]);
+    BytesMut::from(&raw[..])
+}
+
+const WARNING: u8 = 1;
+const FATAL: u8 = 2;
+const NO_RENEGOTIATION: u8 = 100;
+const HANDSHAKE_FAILURE: u8 = 40;
+
+/// A warning alert is not answered and changes nothing: two instances of this stack used to
+/// bounce one such alert between them, each echoing the other's.
+#[test]
+fn a_received_warning_alert_is_neither_echoed_nor_fatal() -> Result<()> {
+    let now = Instant::now();
+    let mut client = Endpoint::new(client_addr(), TransportProtocol::UDP, None);
+    let mut server = Endpoint::new(
+        server_addr(),
+        TransportProtocol::UDP,
+        Some(server_config()?),
+    );
+    client.connect(now, server_addr(), client_config()?, None)?;
+    let flight1 = take_transmits(&mut client);
+    deliver(&mut server, client_addr(), flight1, now);
+    let flight2 = take_transmits(&mut server);
+    deliver(&mut client, server_addr(), flight2, now);
+
+    // Both ends get one, as a spoofer on either side would send.
+    let events = server.read(
+        now,
+        client_addr(),
+        None,
+        plaintext_alert(WARNING, NO_RENEGOTIATION, 5),
+    )?;
+    assert!(events.is_empty());
+    assert!(
+        take_transmits(&mut server).is_empty(),
+        "the server answered a warning alert"
+    );
+    let flight3 = take_transmits(&mut client);
+    client.read(
+        now,
+        server_addr(),
+        None,
+        plaintext_alert(WARNING, NO_RENEGOTIATION, 5),
+    )?;
+    assert!(
+        take_transmits(&mut client).is_empty(),
+        "the client answered a warning alert"
+    );
+    assert!(!server.is_connection_failed(&client_addr()));
+    assert!(!client.is_connection_failed(&server_addr()));
+
+    // The handshake goes on, and no alert crosses in either direction while it does.
+    deliver(&mut server, client_addr(), flight3, now);
+    for _ in 0..8 {
+        let to_client = take_transmits(&mut server);
+        assert!(
+            to_client
+                .iter()
+                .all(|datagram| !record_content_types(datagram).contains(&ALERT))
+        );
+        deliver(&mut client, server_addr(), to_client, now);
+        let to_server = take_transmits(&mut client);
+        assert!(
+            to_server
+                .iter()
+                .all(|datagram| !record_content_types(datagram).contains(&ALERT))
+        );
+        deliver(&mut server, client_addr(), to_server, now);
+    }
+    assert!(client.connections[&server_addr()].is_handshake_completed());
+    assert!(server.connections[&client_addr()].is_handshake_completed());
+    Ok(())
+}
+
+/// A fatal alert ends the association at once and is not answered.
+#[test]
+fn a_received_fatal_alert_closes_the_association_unanswered() -> Result<()> {
+    let now = Instant::now();
+    let mut client = Endpoint::new(client_addr(), TransportProtocol::UDP, None);
+    let mut server = Endpoint::new(
+        server_addr(),
+        TransportProtocol::UDP,
+        Some(server_config()?),
+    );
+    client.connect(now, server_addr(), client_config()?, None)?;
+    let flight1 = take_transmits(&mut client);
+    deliver(&mut server, client_addr(), flight1, now);
+    take_transmits(&mut server);
+
+    let result = server.read(
+        now,
+        client_addr(),
+        None,
+        plaintext_alert(FATAL, HANDSHAKE_FAILURE, 5),
+    );
+    assert_eq!(result.err(), Some(Error::ErrAlertFatalOrClose));
+    assert!(
+        take_transmits(&mut server).is_empty(),
+        "a fatal alert is not answered"
+    );
+    assert!(server.is_connection_failed(&client_addr()));
+    assert_eq!(
+        server.poll_timeout(&client_addr()),
+        None,
+        "nothing is retransmitted after a fatal alert"
+    );
+    Ok(())
+}

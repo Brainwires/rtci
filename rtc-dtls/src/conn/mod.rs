@@ -884,21 +884,33 @@ impl DTLSConn {
         };
 
         match r.content {
-            Content::Alert(mut a) => {
+            Content::Alert(a) => {
                 debug!("{}: <- {}", srv_cli_str(self.is_client), a);
+                // An alert is never answered with the same alert. Echoing it let two endpoints
+                // bounce one alert between them for as long as both associations lived. The one
+                // reply is the close_notify that answers the peer's own [RFC5246 Section 7.2.1].
                 if a.alert_description == AlertDescription::CloseNotify {
-                    // Respond with a close_notify [RFC5246 Section 7.2.1]
-                    a = Alert {
-                        alert_level: AlertLevel::Warning,
-                        alert_description: AlertDescription::CloseNotify,
-                    };
+                    self.replay_detector[h.epoch as usize].accept();
+                    return (
+                        false,
+                        Some(Alert {
+                            alert_level: AlertLevel::Warning,
+                            alert_description: AlertDescription::CloseNotify,
+                        }),
+                        Some(Error::Other(format!("Error of Alert {a}"))),
+                    );
                 }
-                self.replay_detector[h.epoch as usize].accept();
-                return (
-                    false,
-                    Some(a),
-                    Some(Error::Other(format!("Error of Alert {a}"))),
-                );
+                if a.alert_level == AlertLevel::Fatal {
+                    // A fatal alert ends the association at once, unanswered [RFC5246 Section
+                    // 7.2.2].
+                    self.replay_detector[h.epoch as usize].accept();
+                    self.fail();
+                    return (false, None, Some(Error::ErrAlertFatalOrClose));
+                }
+                // A warning (other than close_notify) asks nothing of us: it is not answered and
+                // changes nothing, not even the replay window, so a forged one with a far-ahead
+                // sequence number cannot push the peer's genuine records out of it.
+                return (false, None, None);
             }
             Content::ChangeCipherSpec(_) => {
                 let invalid_cipher_suite = {
