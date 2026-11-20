@@ -1266,6 +1266,12 @@ impl RTCPeerConnection {
         self.trigger_negotiation_needed();
     }
 
+    /// W3C `RTCRtpTransceiver.stop()` and `RTCRtpSender.setStreams()` end by updating the
+    /// negotiation-needed flag (W3C webrtc 5.4, 5.2).
+    pub(crate) fn on_transceiver_stopped_or_streams_changed(&mut self) {
+        self.trigger_negotiation_needed();
+    }
+
     /// Helper to trigger a negotiation needed.
     pub(super) fn trigger_negotiation_needed(&mut self) {
         if !self.do_negotiation_needed() {
@@ -1355,10 +1361,25 @@ impl RTCPeerConnection {
 
             for transceiver in &self.rtp_transceivers {
                 // https://www.w3.org/TR/webrtc/#dfn-update-the-negotiation-needed-flag
-                // Step 5.1
-                // if t.stopping && !t.stopped {
-                // 	return true
-                // }
+                // Steps 5.1 and 5.4. This engine stops a transceiver at once (no separate
+                // "stopping" state), so `stopped()` covers both: one that never had an m=
+                // section needs none, and one that has needs negotiating until that section is
+                // rejected in both current descriptions (or has gone to another transceiver).
+                if transceiver.stopped() {
+                    let Some(mid) = transceiver.mid().as_deref() else {
+                        continue;
+                    };
+                    let rejected_in = |desc: Option<&RTCSessionDescription>| {
+                        desc.and_then(|desc| get_by_mid(mid, desc))
+                            .is_none_or(is_rejected_media)
+                    };
+                    if rejected_in(Some(local_desc))
+                        && rejected_in(self.current_remote_description.as_ref())
+                    {
+                        continue;
+                    }
+                    return true;
+                }
                 let m = transceiver
                     .mid()
                     .as_ref()
@@ -1378,13 +1399,26 @@ impl RTCPeerConnection {
                     if transceiver.direction().has_send()
                         && let Some(sender) = transceiver.sender()
                     {
-                        let dmsid = match m.attribute(ATTR_KEY_MSID).and_then(|o| o) {
-                            Some(msid) => msid,
-                            None => return true, // doesn't contain a single a=msid line
-                        };
-
-                        let track = sender.track();
-                        if dmsid.split_whitespace().next() != Some(track.stream_id()) {
+                        // The stream ids of the section's a=msid lines (one per stream,
+                        // RFC 8830 section 2) against the sender's associated streams:
+                        // `setStreams` changes those without changing the track.
+                        let mut described: Vec<&str> = m
+                            .attributes
+                            .iter()
+                            .filter(|a| a.key == ATTR_KEY_MSID)
+                            .filter_map(|a| a.value.as_deref())
+                            .filter_map(|msid| msid.split_whitespace().next())
+                            .collect();
+                        if described.is_empty() {
+                            return true; // doesn't contain a single a=msid line
+                        }
+                        described.sort_unstable();
+                        described.dedup();
+                        let mut associated: Vec<&str> =
+                            sender.streams().iter().map(String::as_str).collect();
+                        associated.sort_unstable();
+                        associated.dedup();
+                        if described != associated {
                             return true;
                         }
                     }

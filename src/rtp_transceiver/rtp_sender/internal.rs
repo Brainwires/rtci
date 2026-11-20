@@ -292,9 +292,8 @@ impl RTCRtpSenderInternal {
             streams
         };
         self.associated_media_stream_ids = associated_media_stream_ids;
-
-        //TODO: https://www.w3.org/TR/webrtc/#dom-rtcrtpsender-setstreams
-        // Update the negotiation-needed flag for connection.
+        // The negotiation-needed flag is updated by `RTCRtpSender::set_streams`, which has the
+        // peer connection.
     }
 
     /// Returns whether this sender has been negotiated via SDP.

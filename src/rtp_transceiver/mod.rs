@@ -381,10 +381,18 @@ impl RTCRtpTransceiver<'_> {
     pub fn stop(&mut self) -> Result<()> {
         // peer_connection is mutable borrow, its rtp_transceivers won't be resized,
         // so, [self.id] here is safe.
+        let was_stopped = self.peer_connection.rtp_transceivers[self.id].stopped();
         self.peer_connection.rtp_transceivers[self.id].stop(
             &self.peer_connection.media_engine,
             &mut self.peer_connection.interceptor,
-        )
+        )?;
+        // https://www.w3.org/TR/webrtc/#dom-rtcrtptransceiver-stop, last step: update the
+        // negotiation-needed flag. Stopping a stopped transceiver does nothing.
+        if !was_stopped {
+            self.peer_connection
+                .on_transceiver_stopped_or_streams_changed();
+        }
+        Ok(())
     }
 
     /// Sets the preferred codec list for this transceiver.

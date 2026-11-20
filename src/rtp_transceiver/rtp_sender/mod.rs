@@ -372,6 +372,10 @@ impl RTCRtpSender<'_> {
             .as_mut()
             .unwrap()
             .set_streams(streams);
+        // https://www.w3.org/TR/webrtc/#dom-rtcrtpsender-setstreams: update the
+        // negotiation-needed flag.
+        self.peer_connection
+            .on_transceiver_stopped_or_streams_changed();
     }
 
     /// Writes an RTP packet to the network.
