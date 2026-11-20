@@ -4,7 +4,7 @@ use crate::association::{
 };
 use crate::chunk::chunk_header::CHUNK_HEADER_SIZE;
 use crate::chunk::{
-    Chunk, ErrorCause, ErrorCauseUnrecognizedChunkType, USER_INITIATED_ABORT,
+    Chunk, ErrorCause, ErrorCauseUnrecognizedChunkType, NO_USER_DATA, USER_INITIATED_ABORT,
     chunk_abort::ChunkAbort,
     chunk_cookie_ack::ChunkCookieAck,
     chunk_cookie_echo::ChunkCookieEcho,
@@ -1367,6 +1367,27 @@ impl Association {
             d.unordered,
         );
         self.stats.inc_datas();
+
+        // RFC 9260 section 6.2: a DATA chunk with no user data is answered with an ABORT
+        // carrying the "No User Data" cause. Accepting one would cost receive state without
+        // counting against the byte-based receive window.
+        if d.user_data.is_empty() {
+            debug!(
+                "[{}] DATA tsn={} has no user data: aborting",
+                self.side, d.tsn
+            );
+            let abort = ChunkAbort {
+                error_causes: vec![ErrorCause {
+                    code: NO_USER_DATA,
+                    raw: Bytes::copy_from_slice(&d.tsn.to_be_bytes()),
+                }],
+            };
+            let packet = self.create_packet(vec![Box::new(abort)]);
+            self.control_queue.push_back(packet);
+            self.awake_write_loop();
+            self.close(AssociationError::TransportError)?;
+            return Err(Error::ErrAbortChunk(NO_USER_DATA.to_string()));
+        }
 
         // A stream id at or past the inbound stream count negotiated in INIT/INIT-ACK is not
         // one the peer may use (RFC 9260 6.5); creating state for it would let a peer make us

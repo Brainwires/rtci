@@ -2037,3 +2037,33 @@ fn test_reset_echoes_awaiting_the_peer_are_bounded() -> Result<()> {
     assert!(a.completed_reconfig_requests.len() <= MAX_COMPLETED_RECONFIG_REQUESTS);
     Ok(())
 }
+
+/// RFC 9260 section 6.2: a DATA chunk with no user data is answered with an ABORT carrying
+/// "No User Data", and creates no receive state.
+#[test]
+fn test_handle_data_without_user_data_aborts() -> Result<()> {
+    for unordered in [false, true] {
+        let mut a = create_association(TransportConfig::default());
+        a.set_state(AssociationState::Established);
+        let d = ChunkPayloadData {
+            tsn: a.peer_last_tsn.wrapping_add(1),
+            stream_identifier: 1,
+            unordered,
+            user_data: Bytes::new(),
+            ..Default::default()
+        };
+        assert!(a.handle_data(&d).is_err(), "unordered={unordered}");
+        assert_eq!(a.state(), AssociationState::Closed);
+        assert!(!a.streams.contains_key(&1));
+        assert!(a.payload_queue.is_empty());
+        let aborted = a.control_queue.iter().any(|p| {
+            p.chunks.iter().any(|c| {
+                c.as_any()
+                    .downcast_ref::<ChunkAbort>()
+                    .is_some_and(|abort| abort.error_causes.iter().any(|e| e.code == NO_USER_DATA))
+            })
+        });
+        assert!(aborted, "an ABORT with No User Data is queued");
+    }
+    Ok(())
+}

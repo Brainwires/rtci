@@ -1232,3 +1232,103 @@ fn test_reassembly_queue_fragments_across_the_tsn_wrap() -> Result<()> {
     }
     Ok(())
 }
+
+fn unordered_fragment(tsn: u32, beginning: bool, ending: bool) -> ChunkPayloadData {
+    ChunkPayloadData {
+        payload_type: PayloadProtocolIdentifier::Binary,
+        unordered: true,
+        tsn,
+        beginning_fragment: beginning,
+        ending_fragment: ending,
+        user_data: Bytes::from_static(b"x"),
+        ..Default::default()
+    }
+}
+
+/// Unordered fragments that never form a message are held without rescanning everything
+/// held on each arrival: pushing many costs time linear in their number.
+#[test]
+fn test_reassembly_queue_unordered_fragments_are_linear() -> Result<()> {
+    const N: u32 = 200_000;
+    let mut rq = ReassemblyQueue::new(0);
+    let start = std::time::Instant::now();
+    for tsn in 1..=N {
+        assert!(!rq.push(unordered_fragment(tsn, false, false)));
+    }
+    assert_eq!(N as usize, rq.unordered_chunks.len());
+    assert_eq!(N as usize, rq.get_num_bytes());
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(5),
+        "{} unordered fragments took {:?}",
+        N,
+        start.elapsed()
+    );
+    Ok(())
+}
+
+/// Unordered messages still complete whatever order their fragments arrive in, including
+/// when the fragments of two messages interleave and when TSNs wrap.
+#[test]
+fn test_reassembly_queue_unordered_completes_in_any_order() -> Result<()> {
+    for base in [10u32, u32::MAX - 2] {
+        let t = |i: u32| base.wrapping_add(i);
+        let mut rq = ReassemblyQueue::new(0);
+        // Message A: t(0)..=t(2), message B: t(3)..=t(5).
+        assert!(!rq.push(unordered_fragment(t(5), false, true)));
+        assert!(!rq.push(unordered_fragment(t(1), false, false)));
+        assert!(!rq.push(unordered_fragment(t(3), true, false)));
+        assert!(!rq.push(unordered_fragment(t(2), false, true)));
+        assert!(
+            rq.push(unordered_fragment(t(0), true, false)),
+            "A completes"
+        );
+        assert_eq!(rq.unordered.len(), 1);
+        assert_eq!(rq.unordered[0].chunks.len(), 3);
+        assert!(
+            rq.push(unordered_fragment(t(4), false, false)),
+            "B completes"
+        );
+        assert_eq!(rq.unordered.len(), 2);
+        assert_eq!(rq.unordered[1].chunks.len(), 3);
+        assert!(rq.unordered_chunks.is_empty());
+        // A single-fragment message completes alone.
+        assert!(rq.push(unordered_fragment(t(7), true, true)));
+        // A message with a missing middle does not.
+        assert!(!rq.push(unordered_fragment(t(8), true, false)));
+        assert!(!rq.push(unordered_fragment(t(10), false, true)));
+        assert_eq!(rq.unordered.len(), 3);
+        assert!(rq.push(unordered_fragment(t(9), false, false)));
+        assert_eq!(rq.unordered.len(), 4);
+    }
+    Ok(())
+}
+
+/// An ordered message of many fragments is reassembled without rescanning its fragments on
+/// each arrival.
+#[test]
+fn test_reassembly_queue_ordered_many_fragments_are_linear() -> Result<()> {
+    const N: u32 = 200_000;
+    let mut rq = ReassemblyQueue::new(0);
+    let start = std::time::Instant::now();
+    for tsn in 1..=N {
+        let complete = rq.push(ChunkPayloadData {
+            payload_type: PayloadProtocolIdentifier::Binary,
+            tsn,
+            beginning_fragment: tsn == 1,
+            ending_fragment: tsn == N,
+            user_data: Bytes::from_static(b"x"),
+            ..Default::default()
+        });
+        assert_eq!(complete, tsn == N);
+        assert_eq!(rq.is_readable(), tsn == N);
+    }
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(5),
+        "{} ordered fragments took {:?}",
+        N,
+        start.elapsed()
+    );
+    let msg = rq.read().expect("message is readable");
+    assert_eq!(N as usize, msg.len());
+    Ok(())
+}
