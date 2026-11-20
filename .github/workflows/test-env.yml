@@ -9,6 +9,9 @@ name: test-env
 # repository. A pull request from a fork runs `test_env_fork` on GitHub's ubuntu-latest and never
 # names our labels (the fork's run still needs a maintainer's approval, and a fork can edit this
 # file: review `runs-on` and `.github/` changes before approving one).
+#
+# Only the `image` job, on a push to master, can write packages: the jobs that run the
+# environment (and so a pull request's code) get `packages: read`.
 on:
   push:
     branches: [ master, v0.21.x, v1.x ]
@@ -49,9 +52,41 @@ jobs:
           vars: ${{ toJSON(vars) }}
           runner-token: ${{ secrets.RUNNER_STATUS_TOKEN }}
 
+  # Publishes the environment image for the hash of its inputs, on a push to master only. It
+  # runs no test and none of a pull request's code, so it alone holds `packages: write`.
+  image:
+    name: environment image (publish)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE_REPO: ghcr.io/brainwires/rtc-testenv
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Build and publish the image if the registry lacks it
+        shell: bash
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          TAG=$(cat scripts/test-env/Dockerfile scripts/test-env/interop/package.json scripts/test-env/interop/package-lock.json | sha256sum | cut -c1-12)
+          IMAGE="$IMAGE_REPO:$TAG"
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+          if docker manifest inspect "$IMAGE" >/dev/null 2>&1; then
+            echo "$IMAGE is already published"
+            exit 0
+          fi
+          docker build -t "$IMAGE" -f scripts/test-env/Dockerfile scripts/test-env
+          docker push -q "$IMAGE"
+
   test_env:
     name: test environment (${{ inputs.stages || 'unit env interop' }})
-    needs: runners
+    needs: [runners, image]
     runs-on: ${{ fromJSON(needs.runners.outputs.plan || '{}').test_env || 'ubuntu-latest' }}
     # Self-hosted only for a push, a dispatch or a same-repository pull request; never for
     # pull_request_target.
@@ -63,13 +98,13 @@ jobs:
     timeout-minutes: 120
     permissions:
       contents: read
-      packages: write
+      packages: read
     env:
       IMAGE_REPO: ghcr.io/brainwires/rtc-testenv
     steps: &test-env-steps
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - name: Environment image (pull, or build and publish)
+      - name: Environment image (pull, or build locally)
         shell: bash
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -79,12 +114,9 @@ jobs:
           TAG=$(cat scripts/test-env/Dockerfile scripts/test-env/interop/package.json scripts/test-env/interop/package-lock.json | sha256sum | cut -c1-12)
           IMAGE="$IMAGE_REPO:$TAG"
           printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin || true
+          # This job's token can only read packages; the `image` job publishes.
           if ! docker pull -q "$IMAGE"; then
             docker build -t "$IMAGE" -f scripts/test-env/Dockerfile scripts/test-env
-            # Only a push to master publishes, so a pull request or another branch cannot replace it.
-            if [ "$GITHUB_EVENT_NAME" = push ] && [ "$GITHUB_REF" = refs/heads/master ]; then
-              docker push -q "$IMAGE" || true
-            fi
           fi
           echo "RTC_TESTENV_IMAGE=$IMAGE" >> "$GITHUB_ENV"
 

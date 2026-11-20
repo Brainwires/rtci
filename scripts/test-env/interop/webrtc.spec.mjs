@@ -3,6 +3,8 @@
 // examples/interop-peer at RTC_INTEROP_WS.
 import { test, expect } from "@playwright/test";
 import { readFileSync } from "node:fs";
+import { naBrowser, naEnv, skipUnlessCodec } from "./na.mjs";
+import { fixtureExists } from "./common.mjs";
 
 const WS = process.env.RTC_INTEROP_WS || "ws://127.0.0.1:8080";
 const PEER_JS = readFileSync(new URL("./peer.js", import.meta.url), "utf8");
@@ -17,11 +19,6 @@ test.beforeEach(async ({ page }) => {
   await page.goto("http://localhost/index.html");
   await page.addScriptTag({ content: PEER_JS });
 });
-
-async function skipUnlessCodec(page, kind, mime, dir) {
-  const ok = await page.evaluate(([k, m, d]) => Interop.hasCodec(k, m, d), [kind, mime, dir]);
-  test.skip(!ok, `this browser has no ${mime} ${dir === "receiver" ? "decoder" : "encoder"}`);
-}
 
 // ---- data channels ----
 
@@ -155,7 +152,9 @@ test("DTLS and SRTP are negotiated", async ({ page }) => {
 
 // ---- media: the browser sends, Rust reflects ----
 
-for (const codec of ["VP8", "VP9", "H264"]) {
+// H.265 and AV1 too: a browser without the encoder is na-browser by its own
+// RTCRtpSender.getCapabilities.
+for (const codec of ["VP8", "VP9", "H264", "H265", "AV1"]) {
   test(`reflect video ${codec}`, async ({ page }) => {
     await skipUnlessCodec(page, "video", `video/${codec}`, "sender");
     const r = await page.evaluate(
@@ -202,17 +201,31 @@ test("reflect audio Opus", async ({ page }) => {
 
 // ---- media: Rust sends GStreamer-encoded files, the browser decodes ----
 
-for (const [codec, kind, mime] of [
-  ["VP8", "video", "video/VP8"],
-  ["VP9", "video", "video/VP9"],
-  ["H264", "video", "video/H264"],
-  ["OPUS", "audio", "audio/opus"],
+// [title, codec, kind, mime, fixture]: the fixture is the file interop-peer streams (entry.sh
+// makes them); the multi-slice H.264 and multi-packet Ogg ones check the readers' framing end to
+// end with the browser's decoder as the judge.
+for (const [title, codec, kind, mime, fixture] of [
+  ["VP8", "VP8", "video", "video/VP8", "vp8.ivf"],
+  ["VP9", "VP9", "video", "video/VP9", "vp9.ivf"],
+  ["H264", "H264", "video", "video/H264", "h264.h264"],
+  ["H265", "H265", "video", "video/H265", "h265.h265"],
+  ["AV1", "AV1", "video", "video/AV1", "av1.ivf"],
+  ["OPUS", "OPUS", "audio", "audio/opus", "opus.ogg"],
+  ["H264 with four slices per picture", "H264", "video", "video/H264", "h264-slices.h264"],
+  ["OPUS from multi-packet Ogg pages", "OPUS", "audio", "audio/opus", "opus-multi.ogg"],
 ]) {
-  test(`receive ${codec} from Rust (GStreamer fixture)`, async ({ page }) => {
+  test(`receive ${title} from Rust (GStreamer fixture)`, async ({ page }) => {
     await skipUnlessCodec(page, kind, mime, "receiver");
+    naEnv(
+      !fixtureExists(fixture),
+      `the test image's GStreamer could not encode the ${codec} fixture ${fixture}`,
+      `entry.sh's fixture log (fixture-${codec.toLowerCase()}.log in the artifacts)`,
+    );
     const r = await page.evaluate(
-      async ([ws, codec, kind, mime]) => {
-        const sc = kind === "video" ? { media: "send", video: codec } : { media: "send", audio: true };
+      async ([ws, codec, kind, mime, fixture]) => {
+        const sc = kind === "video"
+          ? { media: "send", video: codec, fixture: { video: fixture } }
+          : { media: "send", audio: true, fixture: { audio: fixture } };
         const s = await Interop.open(ws, sc);
         const tr = s.pc.addTransceiver(kind, { direction: "recvonly" });
         if (kind === "video") Interop.prefer(tr, "video", mime);
@@ -224,13 +237,26 @@ for (const [codec, kind, mime] of [
           return r && (kind === "video" ? r.framesDecoded > 30 : r.packetsReceived > 100) && r;
         }, 25000, "decoded media").catch(async (e) => ({ error: String(e), last: await Interop.inbound(s.pc, kind) }));
         const report = await s.report();
+        const after = await Interop.inbound(s.pc, kind);
         s.close();
-        return { rtp, report };
+        return { rtp, report, after };
       },
-      [WS, codec, kind, mime],
+      [WS, codec, kind, mime, fixture],
     );
     expect(r.rtp.error, JSON.stringify(r)).toBeUndefined();
     expect(r.rtp.mimeType.toLowerCase()).toBe(mime.toLowerCase());
+    if (kind === "audio") {
+      // Every Opus packet is one RTP packet (RFC 7587 4.2): what Rust sent is what arrived,
+      // give or take the ones in flight.
+      const sent = r.report.sent.find((x) => x.mime.toLowerCase() === "audio/opus")?.frames || 0;
+      expect(Math.abs(sent - (r.after?.packetsReceived || 0)), JSON.stringify(r)).toBeLessThanOrEqual(25);
+      // A payload that is not one Opus packet (a whole page, say) does not decode, and the
+      // browser conceals it; a healthy stream conceals little (webrtc-stats concealedSamples).
+      const a = r.after || {};
+      if (a.concealedSamples !== undefined && a.totalSamplesReceived > 0) {
+        expect(a.concealedSamples / a.totalSamplesReceived, JSON.stringify(a)).toBeLessThan(0.2);
+      }
+    }
   });
 }
 
@@ -239,9 +265,9 @@ for (const [codec, kind, mime] of [
 test("simulcast: three RIDs reach Rust", async ({ page }) => {
   const r = await page.evaluate(async (ws) => {
     const s = await Interop.open(ws, { media: "count" });
-    // libwebrtc (Chromium, WebKit) sends as many simulcast layers as the input resolution
-    // allows: one at 320x240, three from 960x540. Each layer's cap keeps the total within the
-    // starting bandwidth estimate.
+    // libwebrtc sends as many simulcast layers as the input resolution allows (one at
+    // 320x240, three from 960x540); the canvas is 1280x720. Each layer's cap keeps the total
+    // within the starting bandwidth estimate.
     const track = Interop.canvasStream(1280, 720).getVideoTracks()[0];
     const tr = s.pc.addTransceiver(track, {
       direction: "sendonly",
@@ -252,7 +278,22 @@ test("simulcast: three RIDs reach Rust", async ({ page }) => {
       ],
     });
     Interop.prefer(tr, "video", "video/VP8");
+    // What the browser kept: webrtc-pc 5.1 addTransceiver lets a user agent drop the
+    // encodings past the number it supports, and getParameters() then shows the rest.
+    const params = tr.sender.getParameters();
+    const acceptedRids = (params.encodings || []).map((e) => e.rid).filter(Boolean);
+    // CPU adaptation lowers the input resolution, and a lower input carries fewer layers:
+    // under a busy container that alone leaves only "q". Keep the resolution, drop frames.
+    let degradation = "unsupported";
+    try {
+      params.degradationPreference = "maintain-resolution";
+      await tr.sender.setParameters(params);
+      degradation = tr.sender.getParameters().degradationPreference || "not reported";
+    } catch (e) {
+      degradation = `refused: ${e.name}`;
+    }
     await s.negotiate();
+    const offeredRids = [...s.pc.localDescription.sdp.matchAll(/^a=rid:(\S+) send/gm)].map((m) => m[1]);
     await s.connected();
     let report;
     await Interop.until(async () => {
@@ -260,18 +301,52 @@ test("simulcast: three RIDs reach Rust", async ({ page }) => {
       const rids = new Set(Object.keys(report.rtp).filter((k) => report.rtp[k] > 20).map((k) => k.split(":")[1]));
       return ["q", "h", "f"].every((x) => rids.has(x));
     }, 25000, "packets on q, h and f").catch(() => {});
-    // What the browser says it sent, per layer.
+    // What the browser says it sent, per layer, and why it held a layer back.
     const sent = {};
+    let availableOutgoingBitrate;
     (await s.pc.getStats()).forEach((x) => {
-      if (x.type === "outbound-rtp" && x.kind === "video" && x.rid) sent[x.rid] = x.packetsSent || 0;
+      if (x.type === "outbound-rtp" && x.kind === "video" && x.rid) {
+        sent[x.rid] = {
+          packets: x.packetsSent || 0,
+          width: x.frameWidth,
+          limit: x.qualityLimitationReason,
+          encoder: x.encoderImplementation,
+        };
+      }
+      if (x.type === "candidate-pair" && x.nominated && x.availableOutgoingBitrate !== undefined) {
+        availableOutgoingBitrate = x.availableOutgoingBitrate;
+      }
     });
     s.close();
-    return { report, sent };
+    return { report, sent, acceptedRids, offeredRids, degradation, availableOutgoingBitrate };
   }, WS);
-  const sentRids = Object.keys(r.sent).filter((k) => r.sent[k] > 20);
-  test.skip(sentRids.length < 3, `the browser sent only ${JSON.stringify(r.sent)} (layers with > 20 packets: ${sentRids.join(",") || "none"})`);
+  naBrowser(
+    r.acceptedRids.length < 3,
+    `the browser kept ${r.acceptedRids.length} of 3 send encodings`,
+    `RTCRtpSender.getParameters().encodings after addTransceiver with three sendEncodings: ${JSON.stringify(r.acceptedRids)}`,
+  );
+  naBrowser(
+    r.offeredRids.length < 3,
+    `the browser's own offer declares ${r.offeredRids.length} send RIDs`,
+    `its offer's a=rid lines (RFC 8853 section 5): ${JSON.stringify(r.offeredRids)}`,
+  );
+  const quiet = ["q", "h", "f"].filter((x) => (r.sent[x]?.packets || 0) <= 20);
+  const cpuLimited = Object.values(r.sent).some((v) => v.limit === "cpu");
+  naEnv(
+    quiet.length > 0 && cpuLimited,
+    `the browser held back layer(s) ${quiet.join(",")} for lack of CPU in the test container ` +
+      `(degradationPreference: ${r.degradation})`,
+    `outbound-rtp.qualityLimitationReason = "cpu" (W3C webrtc-stats 7.3): ${JSON.stringify(r.sent)}`,
+  );
+  // Declared, accepted, and not CPU-starved: the browser must send all three, and every one
+  // must reach Rust. A "bandwidth" limit here means our congestion feedback starved it.
+  expect(
+    quiet,
+    `layers the browser sent 20 packets or fewer on: ${JSON.stringify(r.sent)}, ` +
+      `availableOutgoingBitrate ${r.availableOutgoingBitrate}, degradationPreference ${r.degradation}`,
+  ).toEqual([]);
   const rids = Object.keys(r.report.rtp).filter((k) => r.report.rtp[k] > 20).map((k) => k.split(":")[1]);
-  expect(new Set(rids), JSON.stringify(r)).toEqual(new Set(sentRids));
+  expect(new Set(rids), JSON.stringify(r)).toEqual(new Set(["q", "h", "f"]));
 });
 
 // ---- encoded transforms (an SFrame-style end-to-end transform) ----
@@ -297,6 +372,10 @@ test("encoded transform: Rust forwards transformed VP8 untouched", async ({ page
     s.close();
     return { api, rtp };
   }, WS);
-  test.skip(!!r.unsupported, "this browser has neither createEncodedStreams nor RTCRtpScriptTransform");
+  naBrowser(
+    r.unsupported,
+    "this browser has no encoded transform API",
+    "RTCRtpSender.prototype.createEncodedStreams and window.RTCRtpScriptTransform are both undefined",
+  );
   expect(r.rtp.error, JSON.stringify(r)).toBeUndefined();
 });

@@ -111,14 +111,20 @@ fn dc_messages(p: &EnvPeer) -> Vec<u32> {
         .collect()
 }
 
-/// Sends `count` numbered 1 KiB messages from a to b over a channel made with `init`; returns
-/// the numbers b received, in order of arrival.
+/// What `send_numbered` saw: the numbers b received, in order of arrival, and (when not every
+/// message was expected) how long after the first send a's send queue had given up the last one.
+struct Delivery {
+    got: Vec<u32>,
+    drained_after: Option<Duration>,
+}
+
+/// Sends `count` numbered 1 KiB messages from a to b over a channel made with `init`.
 fn send_numbered(
     init: RTCDataChannelInit,
     count: u32,
     timeout: Duration,
     expect_all: bool,
-) -> Vec<u32> {
+) -> Delivery {
     common::install_crypto_provider();
     let env = Env::get();
     let (mut a, mut b) = pair(&env, plain_pc(), plain_pc());
@@ -191,7 +197,10 @@ fn send_numbered(
         b.sent_direct,
         b.recv_direct
     );
-    dc_messages(&b)
+    Delivery {
+        got: dc_messages(&b),
+        drained_after: drained_at.map(|t| t - started),
+    }
 }
 
 #[test]
@@ -207,7 +216,8 @@ fn reliable_ordered_channel_survives_loss_and_reordering() {
         500,
         Duration::from_secs(90),
         true,
-    );
+    )
+    .got;
     assert_eq!(
         got,
         (0..500).collect::<Vec<_>>(),
@@ -228,7 +238,8 @@ fn reliable_unordered_channel_delivers_everything() {
         500,
         Duration::from_secs(90),
         true,
-    );
+    )
+    .got;
     let unique: HashSet<u32> = got.iter().copied().collect();
     assert_eq!(unique.len(), 500, "every message arrives");
     assert_eq!(got.len(), 500, "and only once");
@@ -239,7 +250,7 @@ fn reliable_unordered_channel_delivers_everything() {
 fn unreliable_channel_loses_without_retransmitting() {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let _netem = Netem::set("delay 20ms loss 10%");
-    let got = send_numbered(
+    let Delivery { got, drained_after } = send_numbered(
         RTCDataChannelInit {
             ordered: false,
             max_retransmits: Some(0),
@@ -251,19 +262,25 @@ fn unreliable_channel_loses_without_retransmitting() {
     );
     let unique: HashSet<u32> = got.iter().copied().collect();
     eprintln!(
-        "unreliable: {} of 1000 delivered over a 10%-loss link (each way)",
+        "unreliable: {} of 1000 delivered over a 10%-loss link (each way), queue drained after {drained_after:?}",
         unique.len()
     );
     assert_eq!(unique.len(), got.len(), "no duplicates");
+    // A link that drops 10% of packets each way delivers about 90% of single-packet messages
+    // sent without retransmission (RFC 3758: an abandoned message is skipped with FORWARD-TSN,
+    // never re-sent). Fewer than 800 means the sender stalled or abandoned messages it never
+    // sent; more than 960 means the loss did not apply or something retransmitted.
     assert!(
-        unique.len() < 990,
-        "a 10% loss link with no retransmissions lost nothing ({})",
+        (800..=960).contains(&unique.len()),
+        "{} of 1000 delivered over a 10%-loss link; expected 800 to 960",
         unique.len()
     );
+    // One message every 2 ms is 2 s of sending; the queue must not hold messages back for
+    // long after (a stall the delivery count alone could hide).
+    let drained_after = drained_after.expect("the send queue never drained");
     assert!(
-        unique.len() > 700,
-        "far more lost than the link drops ({})",
-        unique.len()
+        drained_after < Duration::from_secs(30),
+        "the send queue took {drained_after:?} to drain"
     );
 }
 
@@ -441,7 +458,9 @@ fn nack_recovers_lost_rtp() {
         with * 100.0
     );
     assert!(without < 0.98, "the link is not lossy ({without})");
-    assert!(with > 0.995, "NACK left {:.2}% lost", (1.0 - with) * 100.0);
+    // Every packet: NACK retransmits a lost one until it arrives (RFC 4585 6.2.1), and the
+    // run waits 3 s after the last packet for the repairs.
+    assert!(with >= 1.0, "NACK left {:.2}% lost", (1.0 - with) * 100.0);
 }
 
 /// A VP8 stream GStreamer encoded (`run.sh`: videotestsrc ! vp8enc ! ivfmux) goes through
@@ -612,8 +631,11 @@ fn gcc_follows_a_rate_limited_link() {
     let tail = &samples[samples.len() - 5..];
     let mean = tail.iter().sum::<f64>() / tail.len() as f64;
     assert!(mean > 0.0, "no estimate");
+    // The target settles at or below the bottleneck (draft-ietf-rmcat-gcc-02 5.5: on
+    // overuse the rate drops to 0.85 x the acknowledged rate), with headroom for the
+    // estimate's swing; above 660 kbit/s it overshoots the link, under 300 it collapsed.
     assert!(
-        mean < 1_200_000.0,
-        "GCC stays at {mean:.0} bit/s over a 600 kbit/s link"
+        (300_000.0..=660_000.0).contains(&mean),
+        "GCC's target over the last 5 s is {mean:.0} bit/s on a 600 kbit/s link; expected 300 to 660 kbit/s"
     );
 }

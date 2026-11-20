@@ -55,22 +55,47 @@
     if (transceiver.setCodecPreferences) transceiver.setCodecPreferences(first);
   }
 
+  // opts: insertableStreams (Chromium's encoded streams), rtc (more RTCConfiguration members:
+  // iceServers, iceTransportPolicy, ...).
   async function open(url, scenario, opts = {}) {
-    const pc = new RTCPeerConnection({ encodedInsertableStreams: !!opts.insertableStreams });
+    const pc = new RTCPeerConnection({ encodedInsertableStreams: !!opts.insertableStreams, ...(opts.rtc || {}) });
     const ws = new WebSocket(url);
     await new Promise((res, rej) => {
       ws.onopen = res;
       ws.onerror = () => rej(new Error(`websocket ${url} failed`));
     });
-    const s = { pc, ws, reports: [], errors: [], remoteOffers: 0, makingOffer: false, sentScenario: false };
+    const s = {
+      pc,
+      ws,
+      reports: [],
+      errors: [],
+      remoteOffers: 0,
+      ignoredOffers: 0,
+      makingOffer: false,
+      sentScenario: false,
+      localCandidates: [],
+      // Perfect negotiation's impolite peer: an offer that arrives while ours is outstanding
+      // is ignored (the Rust side is the polite one and rolls back).
+      impolite: false,
+      // Edits the answer from Rust before it is applied (a test of a wrong fingerprint).
+      mungeAnswer: null,
+    };
     const send = (m) => ws.send(JSON.stringify(m));
-    pc.onicecandidate = (e) => send({ type: "candidate", candidate: e.candidate ? e.candidate.toJSON() : null });
+    pc.onicecandidate = (e) => {
+      if (e.candidate && e.candidate.candidate) s.localCandidates.push(e.candidate.candidate);
+      send({ type: "candidate", candidate: e.candidate ? e.candidate.toJSON() : null });
+    };
     ws.onmessage = async (ev) => {
       const m = JSON.parse(ev.data);
       try {
-        if (m.type === "answer") await pc.setRemoteDescription({ type: "answer", sdp: m.sdp });
-        else if (m.type === "offer") {
+        if (m.type === "answer") {
+          await pc.setRemoteDescription({ type: "answer", sdp: s.mungeAnswer ? s.mungeAnswer(m.sdp) : m.sdp });
+        } else if (m.type === "offer") {
           s.remoteOffers++;
+          if (s.impolite && pc.signalingState !== "stable") {
+            s.ignoredOffers++;
+            return;
+          }
           await pc.setRemoteDescription({ type: "offer", sdp: m.sdp });
           await pc.setLocalDescription();
           send({ type: "answer", sdp: pc.localDescription.sdp });
@@ -80,15 +105,25 @@
         s.errors.push(String(e));
       }
     };
-    s.negotiate = async () => {
+    // Makes an offer and applies it locally, without sending it.
+    s.makeOffer = async () => {
       await pc.setLocalDescription(await pc.createOffer());
-      const msg = { type: "offer", sdp: pc.localDescription.sdp };
+    };
+    // Sends the local offer (munged by `mungeOffer` when given: what Rust receives, not what
+    // this side applied) and waits for the answer.
+    s.sendOffer = async (mungeOffer) => {
+      const sdp = mungeOffer ? mungeOffer(pc.localDescription.sdp) : pc.localDescription.sdp;
+      const msg = { type: "offer", sdp };
       if (!s.sentScenario) {
         msg.scenario = scenario;
         s.sentScenario = true;
       }
       send(msg);
       await until(() => pc.signalingState === "stable", 15000, "the answer");
+    };
+    s.negotiate = async (mungeOffer) => {
+      await s.makeOffer();
+      await s.sendOffer(mungeOffer);
     };
     s.send = send;
     s.connected = () =>
@@ -136,6 +171,43 @@
       if (r.type === "codec") codecs[r.id] = r.mimeType;
     });
     return rtp ? { ...rtp, mimeType: codecs[rtp.codecId] } : null;
+  }
+
+  // The selected candidate pair's local and remote candidate stats (transport's
+  // selectedCandidatePairId; Firefox marks the pair itself with `selected`).
+  async function selectedPair(pc) {
+    const stats = await pc.getStats();
+    const all = new Map();
+    let pairId = null;
+    stats.forEach((r) => {
+      all.set(r.id, r);
+      if (r.type === "transport" && r.selectedCandidatePairId) pairId = r.selectedCandidatePairId;
+    });
+    let pair = pairId ? all.get(pairId) : null;
+    if (!pair) {
+      for (const r of all.values()) {
+        if (r.type === "candidate-pair" && (r.selected || (r.nominated && r.state === "succeeded"))) pair = r;
+      }
+    }
+    if (!pair) return null;
+    return { pair, local: all.get(pair.localCandidateId), remote: all.get(pair.remoteCandidateId) };
+  }
+
+  // The first byte of every a=fingerprint hash changed: the certificate no longer matches it.
+  function wrongFingerprint(sdp) {
+    return sdp.replace(/^(a=fingerprint:\S+ )([0-9A-Fa-f]{2})/gm, (_, head, b) =>
+      head + (b.toUpperCase() === "00" ? "FF" : "00"));
+  }
+
+  // The m-lines of a description: kind, port, direction and mid.
+  function mlines(sdp) {
+    return sdp.split(/\r\n(?=m=)/).slice(1).map((sec) => ({
+      kind: sec.match(/^m=(\S+)/)[1],
+      port: Number(sec.match(/^m=\S+ (\d+)/)[1]),
+      dir: (sec.match(/^a=(sendrecv|sendonly|recvonly|inactive)\r?$/m) || [, "sendrecv"])[1],
+      mid: (sec.match(/^a=mid:(\S+)/m) || [, null])[1],
+      rtx: /^a=rtpmap:\d+ rtx\//im.test(sec),
+    }));
   }
 
   async function transport(pc) {
@@ -187,5 +259,8 @@
     return null;
   }
 
-  window.Interop = { open, echo, until, sleep, canvasStream, audioStream, hasCodec, prefer, inbound, transport, sink, attachTransform };
+  window.Interop = {
+    open, echo, until, sleep, canvasStream, audioStream, hasCodec, prefer, inbound, transport, sink, attachTransform,
+    selectedPair, wrongFingerprint, mlines,
+  };
 })();
