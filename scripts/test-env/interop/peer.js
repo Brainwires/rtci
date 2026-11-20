@@ -59,6 +59,22 @@
     if (transceiver.setCodecPreferences) transceiver.setCodecPreferences([...first, ...rtx]);
   }
 
+  // Whether trickled candidate `c` (RTCIceCandidateInit) belongs to description `sdp`: a media
+  // section with its sdpMid (else at its sdpMLineIndex) whose ICE ufrag (the section's, else
+  // the session's) is the candidate's usernameFragment, when it names one.
+  function candidateFits(c, sdp) {
+    if (!sdp) return false;
+    const [session, ...media] = sdp.split(/\r?\nm=/);
+    const ufrag = (text) => (text.match(/^a=ice-ufrag:(\S+)/m) || [])[1];
+    let section;
+    if (c.sdpMid !== null && c.sdpMid !== undefined) {
+      section = media.find((m) => (m.match(/^a=mid:(\S+)/m) || [])[1] === c.sdpMid);
+    } else if (c.sdpMLineIndex !== null && c.sdpMLineIndex !== undefined) section = media[c.sdpMLineIndex];
+    else return true;
+    if (section === undefined) return false;
+    return !c.usernameFragment || (ufrag(section) || ufrag(session)) === c.usernameFragment;
+  }
+
   // opts: insertableStreams (Chromium's encoded streams), rtc (more RTCConfiguration members:
   // iceServers, iceTransportPolicy, ...).
   async function open(url, scenario, opts = {}) {
@@ -85,9 +101,38 @@
       mungeAnswer: null,
     };
     const send = (m) => ws.send(JSON.stringify(m));
+    // Trickled candidates follow the description they belong to (RFC 8838 section 4): one is
+    // sent only once the Rust side has the description whose media section (mid) and ICE
+    // ufrag it names. Until then it waits; one of a description that was never sent (a local
+    // offer rolled back before it went out) is dropped, since Rust would rightly refuse a
+    // candidate naming no media section of its remote description.
+    let sentSdp = null;
+    let held = [];
+    const flushCandidates = () => {
+      const keep = [];
+      for (const c of held) {
+        if (c === null) {
+          if (keep.length === 0) send({ type: "candidate", candidate: null });
+          else keep.push(c);
+        } else if (candidateFits(c, sentSdp)) send({ type: "candidate", candidate: c });
+        else if (candidateFits(c, pc.localDescription && pc.localDescription.sdp)) keep.push(c);
+      }
+      held = keep;
+    };
+    const sendDescription = (type, sdp) => {
+      const msg = { type, sdp };
+      if (type === "offer" && !s.sentScenario) {
+        msg.scenario = scenario;
+        s.sentScenario = true;
+      }
+      send(msg);
+      sentSdp = sdp;
+      flushCandidates();
+    };
     pc.onicecandidate = (e) => {
       if (e.candidate && e.candidate.candidate) s.localCandidates.push(e.candidate.candidate);
-      send({ type: "candidate", candidate: e.candidate ? e.candidate.toJSON() : null });
+      held.push(e.candidate ? e.candidate.toJSON() : null);
+      flushCandidates();
     };
     ws.onmessage = async (ev) => {
       const m = JSON.parse(ev.data);
@@ -102,7 +147,7 @@
           }
           await pc.setRemoteDescription({ type: "offer", sdp: m.sdp });
           await pc.setLocalDescription();
-          send({ type: "answer", sdp: pc.localDescription.sdp });
+          sendDescription("answer", pc.localDescription.sdp);
         } else if (m.type === "report") s.reports.push(m);
         else if (m.type === "error") s.errors.push(m.error);
       } catch (e) {
@@ -117,12 +162,7 @@
     // this side applied) and waits for the answer.
     s.sendOffer = async (mungeOffer) => {
       const sdp = mungeOffer ? mungeOffer(pc.localDescription.sdp) : pc.localDescription.sdp;
-      const msg = { type: "offer", sdp };
-      if (!s.sentScenario) {
-        msg.scenario = scenario;
-        s.sentScenario = true;
-      }
-      send(msg);
+      sendDescription("offer", sdp);
       // A Rust-side error (an {"type":"error"} message) or a refused answer is the reason an
       // answer never applies: name them instead of only the timeout.
       await until(() => pc.signalingState === "stable", 15000, "the answer").catch((e) => {
