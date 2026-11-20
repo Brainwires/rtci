@@ -1934,3 +1934,6 @@ fn test_reset_request_for_an_unknown_stream_is_reported_and_echoed() -> Result<(
     )));
     Ok(())
 }
+
+#[path = "shutdown_test.rs"]
+mod shutdown_test;

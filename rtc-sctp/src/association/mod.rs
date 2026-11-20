@@ -1038,7 +1038,7 @@ impl Association {
         } else if let Some(c) = chunk_any.downcast_ref::<ChunkForwardTsn>() {
             self.handle_forward_tsn(c)?
         } else if let Some(c) = chunk_any.downcast_ref::<ChunkShutdown>() {
-            self.handle_shutdown(c)?
+            self.handle_shutdown(c, now)?
         } else if let Some(c) = chunk_any.downcast_ref::<ChunkShutdownAck>() {
             self.handle_shutdown_ack(c)?
         } else if let Some(c) = chunk_any.downcast_ref::<ChunkShutdownComplete>() {
@@ -1668,10 +1668,21 @@ impl Association {
         self.handle_peer_last_tsn_and_acknowledgement(false)
     }
 
-    fn handle_shutdown(&mut self, _: &ChunkShutdown) -> Result<Vec<Packet>> {
+    fn handle_shutdown(&mut self, c: &ChunkShutdown, now: Instant) -> Result<Vec<Packet>> {
         let state = self.state();
 
-        if state == AssociationState::Established {
+        if state == AssociationState::Established || state == AssociationState::ShutdownReceived {
+            // RFC 9260 9.2: the SHUTDOWN's Cumulative TSN Ack acknowledges our DATA up to it,
+            // and the receiver checks by it that all its outstanding DATA has arrived. A
+            // SHUTDOWN that crossed our last SACK is the only acknowledgement left for the
+            // data in flight, so without this the association waited for T3-rtx.
+            self.acknowledge_by_shutdown(c.cumulative_tsn_ack, now)?;
+            if self.state() != state {
+                // The acknowledgement drained the queue from SHUTDOWN-RECEIVED, which
+                // already moved on to SHUTDOWN-ACK-SENT.
+                return Ok(vec![]);
+            }
+
             if !self.inflight_queue.is_empty() {
                 self.set_state(AssociationState::ShutdownReceived);
             } else {
@@ -1682,8 +1693,6 @@ impl Association {
                 self.awake_write_loop();
             }
         } else if state == AssociationState::ShutdownSent {
-            // self.cumulative_tsn_ack_point = c.cumulative_tsn_ack
-
             self.will_send_shutdown_ack = true;
             self.set_state(AssociationState::ShutdownAckSent);
 
@@ -1691,6 +1700,26 @@ impl Association {
         }
 
         Ok(vec![])
+    }
+
+    /// Processes a SHUTDOWN's Cumulative TSN Ack as a SACK without gap blocks (RFC 9260 9.2).
+    ///
+    /// The peer's receive window is left as it was: a SHUTDOWN does not carry one.
+    fn acknowledge_by_shutdown(&mut self, cumulative_tsn_ack: u32, now: Instant) -> Result<()> {
+        if !sna32gt(cumulative_tsn_ack, self.cumulative_tsn_ack_point)
+            || sna32gte(cumulative_tsn_ack, self.my_next_tsn)
+        {
+            return Ok(());
+        }
+        let outstanding = self.inflight_queue.get_num_bytes() as u32;
+        let sack = ChunkSelectiveAck {
+            cumulative_tsn_ack,
+            advertised_receiver_window_credit: self.rwnd.saturating_add(outstanding),
+            gap_ack_blocks: vec![],
+            duplicate_tsn: vec![],
+        };
+        self.handle_sack(&sack, now)?;
+        Ok(())
     }
 
     fn handle_shutdown_ack(&mut self, _: &ChunkShutdownAck) -> Result<Vec<Packet>> {
@@ -2660,8 +2689,11 @@ impl Association {
         if self.will_send_shutdown {
             self.will_send_shutdown = false;
 
+            // RFC 9260 9.2: the SHUTDOWN carries the TSN of the last DATA chunk received in
+            // sequence from the peer, which is what a SACK would acknowledge, not this side's
+            // own acknowledgement point.
             let shutdown = ChunkShutdown {
-                cumulative_tsn_ack: self.cumulative_tsn_ack_point,
+                cumulative_tsn_ack: self.peer_last_tsn,
             };
 
             if let Ok(raw) = self.create_packet(vec![Box::new(shutdown)]).marshal() {
