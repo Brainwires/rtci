@@ -247,11 +247,8 @@ fn test_rtp_transceiver_set_direction_causing_negotiation() -> Result<()> {
     answer_pc.close()
 }
 
+/// RFC 9429 Section 5.2.2: an offer rejects (port 0) a stopped transceiver's m= section.
 #[test]
-#[ignore = "a stopped transceiver is not rejected (port 0) in later offers: SDP generation \
-            ignores stopped(), and making it reject stopped transceivers turns a remote \
-            a=inactive into a rejection, because set_remote_description stops a transceiver \
-            the remote marks inactive"]
 fn test_rtp_transceiver_stopping() -> Result<()> {
     let (mut offer_pc, mut answer_pc) = new_pair()?;
 
