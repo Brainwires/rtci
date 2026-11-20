@@ -378,8 +378,9 @@ fn test_vp9_per_picture_state_does_not_accumulate() -> Result<()> {
         assert_eq!(pck.pdiff, vec![1, 1]);
     }
 
-    // V=1; SS with N_S=0, G=1, N_G=255 pictures (T=0, U=0, R=0 each).
-    let mut ss = vec![0x02, 0x02, 0xff];
+    // V=1; SS with N_S=0, Y=0, G=1 (bit 3 of `N_S|Y|G|-|-|-|`, RFC 9628 4.2.1), N_G=255
+    // pictures (T=0, U=0, R=0 each).
+    let mut ss = vec![0x02, 0x08, 0xff];
     ss.extend(std::iter::repeat_n(0x00, 255));
     ss.push(0xaa);
     let ss = Bytes::from(ss);
