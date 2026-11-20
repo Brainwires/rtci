@@ -10,6 +10,7 @@ use srtp::cryptex::Cryptex;
 
 use crate::peer_connection::RTCPeerConnection;
 use crate::peer_connection::sdp::RTCSessionDescription;
+use shared::error::{Error, Result};
 
 /// `a=cryptex` (RFC 9335 section 4), a property attribute.
 pub(crate) const ATTR_KEY_CRYPTEX: &str = "cryptex";
@@ -98,6 +99,21 @@ impl RTCPeerConnection {
             return d;
         }
         d.with_property_attribute(ATTR_KEY_CRYPTEX.to_owned())
+    }
+
+    /// Under the `Require` policy, refuses a remote description that has a live RTP section
+    /// without Cryptex for every RTP section. Otherwise the session would negotiate media with
+    /// the header extensions and CSRCs in the clear and no error at all (`require` would only
+    /// apply once Cryptex was negotiated, which it never is). Checked before anything of the
+    /// description is applied.
+    pub(crate) fn check_required_cryptex(&self, remote: &SessionDescription) -> Result<()> {
+        if self.rtp_header_encryption_policy() == RTCRtpHeaderEncryptionPolicy::Require
+            && remote.media_descriptions.iter().any(is_live_rtp_section)
+            && !description_has_cryptex(remote)
+        {
+            return Err(Error::ErrSessionDescriptionMissingCryptex);
+        }
+        Ok(())
     }
 
     /// Hands the SRTP contexts what the current session and policy say: send with Cryptex

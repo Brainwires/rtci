@@ -1930,6 +1930,12 @@ pub enum Error {
     #[error("set_remote_description called with multiple conflicting ice-pwd values")]
     ErrSessionDescriptionConflictingIcePwd,
 
+    /// ErrSessionDescriptionMissingCryptex indicates set_remote_description was called, under
+    /// the `Require` RTP header encryption policy, with a SessionDescription that has an RTP
+    /// media section without Cryptex (RFC 9335 `a=cryptex`)
+    #[error("set_remote_description called without a=cryptex while header encryption is required")]
+    ErrSessionDescriptionMissingCryptex,
+
     /// ErrNoSRTPProtectionProfile indicates that the DTLS handshake completed and no SRTP Protection Profile was chosen
     #[error("DTLS Handshake completed and no SRTP Protection Profile was chosen")]
     ErrNoSRTPProtectionProfile,

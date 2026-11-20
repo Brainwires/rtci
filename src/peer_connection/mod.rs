@@ -1411,6 +1411,8 @@ impl RTCPeerConnection {
         if remote_description.sdp_type != RTCSdpType::Rollback {
             let mut parsed = remote_description.unmarshal()?;
             self.assign_missing_mids(&mut parsed, answers);
+            // `RTCRtpHeaderEncryptionPolicy::Require`: refused before any of it is applied.
+            self.check_required_cryptex(&parsed)?;
             remote_description.parsed = Some(parsed);
         }
         self.set_description(&remote_description, StateChangeOp::SetRemote)?;
