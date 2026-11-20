@@ -281,6 +281,16 @@ impl ServerConfig {
             concurrent_associations: 100_000,
         }
     }
+
+    /// Maximum number of associations the endpoint holds at once. An INIT that would start
+    /// one more is refused.
+    ///
+    /// A transport that carries a single association, such as WebRTC's SCTP over one DTLS
+    /// transport (RFC 8261), should set this to 1.
+    pub fn concurrent_associations(&mut self, value: u32) -> &mut Self {
+        self.concurrent_associations = value;
+        self
+    }
 }
 
 /// Configuration for outgoing associations

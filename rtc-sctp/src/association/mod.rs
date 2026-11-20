@@ -4,7 +4,7 @@ use crate::association::{
 };
 use crate::chunk::chunk_header::CHUNK_HEADER_SIZE;
 use crate::chunk::{
-    Chunk, ErrorCause, ErrorCauseUnrecognizedChunkType, USER_INITIATED_ABORT,
+    Chunk, ErrorCause, ErrorCauseUnrecognizedChunkType, NO_USER_DATA, USER_INITIATED_ABORT,
     chunk_abort::ChunkAbort,
     chunk_cookie_ack::ChunkCookieAck,
     chunk_cookie_echo::ChunkCookieEcho,
@@ -66,6 +66,19 @@ pub(crate) mod timer;
 
 #[cfg(test)]
 mod association_test;
+
+/// Incoming stream reset requests held at once while they wait for the peer's TSN or for the
+/// application to drain a stream. RFC 6525 has a peer keep one request in flight; a request
+/// beyond this many is answered Denied and not stored.
+pub(crate) const MAX_PENDING_RECONFIG_REQUESTS: usize = 64;
+
+/// Sequence numbers of incoming reset requests already performed, remembered so a
+/// retransmission is answered again without being performed a second time.
+pub(crate) const MAX_COMPLETED_RECONFIG_REQUESTS: usize = 64;
+
+/// Reset requests of this side's own, sent in answer to the peer's, that may await the peer's
+/// response at once. Past it a peer request is still performed and answered, but not echoed.
+pub(crate) const MAX_OUTSTANDING_RECONFIGS: usize = 64;
 
 /// Reasons why an association might be lost
 #[derive(Debug, Error, Clone, PartialEq)]
@@ -191,6 +204,7 @@ pub struct Association {
     my_next_rsn: u32,
     reconfigs: HashMap<u32, ChunkReconfig>,
     reconfig_requests: HashMap<u32, ParamOutgoingResetRequest>,
+    completed_reconfig_requests: VecDeque<u32>,
 
     // Non-RFC internal data
     remote_addr: SocketAddr,
@@ -249,6 +263,14 @@ pub struct Association {
     /// Per-chunk lookups on the receive path; SIDs are bounded by the
     /// negotiated stream count, so the faster non-SipHash hasher is safe.
     pub(crate) streams: FxHashMap<StreamId, StreamState>,
+    /// Bytes held in every stream's reassembly queue, kept as a running total so the receive
+    /// window is not recomputed by walking every stream on each DATA chunk.
+    reassembly_bytes: usize,
+    /// Streams whose reassembly queue holds a readable message.
+    readable_streams: FxHashSet<StreamId>,
+    /// Streams whose reassembly queue holds anything at all; the only ones a FORWARD TSN can
+    /// change.
+    streams_with_data: FxHashSet<StreamId>,
 
     events: VecDeque<Event>,
     endpoint_events: VecDeque<EndpointEventInner>,
@@ -295,6 +317,7 @@ impl Default for Association {
             my_next_rsn: 0,
             reconfigs: HashMap::default(),
             reconfig_requests: HashMap::default(),
+            completed_reconfig_requests: VecDeque::new(),
 
             // Non-RFC internal data
             remote_addr: SocketAddr::from_str("0.0.0.0:0").unwrap(),
@@ -342,6 +365,9 @@ impl Default for Association {
             next_stream_generation: 0,
             next_message_id: 0,
             streams: FxHashMap::default(),
+            reassembly_bytes: 0,
+            readable_streams: FxHashSet::default(),
+            streams_with_data: FxHashSet::default(),
 
             events: VecDeque::default(),
             endpoint_events: VecDeque::default(),
@@ -849,6 +875,7 @@ impl Association {
     fn unregister_stream(&mut self, stream_identifier: StreamId, reason: AssociationError) {
         if let Some(mut s) = self.streams.remove(&stream_identifier) {
             debug!("[{}] unregister_stream {}", self.side, stream_identifier);
+            self.reindex_stream(stream_identifier, s.get_num_bytes_in_reassembly_queue());
             self.events.push_back(Event::AssociationLost {
                 reason,
                 id: stream_identifier,
@@ -1353,6 +1380,27 @@ impl Association {
         );
         self.stats.inc_datas();
 
+        // RFC 9260 section 6.2: a DATA chunk with no user data is answered with an ABORT
+        // carrying the "No User Data" cause. Accepting one would cost receive state without
+        // counting against the byte-based receive window.
+        if d.user_data.is_empty() {
+            debug!(
+                "[{}] DATA tsn={} has no user data: aborting",
+                self.side, d.tsn
+            );
+            let abort = ChunkAbort {
+                error_causes: vec![ErrorCause {
+                    code: NO_USER_DATA,
+                    raw: Bytes::copy_from_slice(&d.tsn.to_be_bytes()),
+                }],
+            };
+            let packet = self.create_packet(vec![Box::new(abort)]);
+            self.control_queue.push_back(packet);
+            self.awake_write_loop();
+            self.close(AssociationError::TransportError)?;
+            return Err(Error::ErrAbortChunk(NO_USER_DATA.to_string()));
+        }
+
         // A stream id at or past the inbound stream count negotiated in INIT/INIT-ACK is not
         // one the peer may use (RFC 9260 6.5); creating state for it would let a peer make us
         // hold up to 65536 streams.
@@ -1445,11 +1493,13 @@ impl Association {
 
         if stream_handle_data && let Some(s) = self.streams.get_mut(&d.stream_identifier) {
             self.events.push_back(Event::DatagramReceived);
+            let bytes_before = s.get_num_bytes_in_reassembly_queue();
             if s.handle_data(d) && s.reassembly_queue.is_readable() {
                 self.events.push_back(Event::Stream(StreamEvent::Readable {
                     id: s.stream_identifier,
                 }));
             }
+            self.reindex_stream(d.stream_identifier, bytes_before);
         }
 
         self.handle_peer_last_tsn_and_acknowledgement(immediate_sack)
@@ -1631,6 +1681,7 @@ impl Association {
                 break;
             }
         }
+        let prev_peer_last_tsn = self.peer_last_tsn;
         self.peer_last_tsn = c.new_cumulative_tsn;
 
         // Report new peer_last_tsn value and abandoned largest SSN value to
@@ -1638,29 +1689,43 @@ impl Association {
         // from the reassemblyQueue.
         for forwarded in &c.streams {
             if let Some(s) = self.streams.get_mut(&forwarded.identifier) {
+                let bytes_before = s.get_num_bytes_in_reassembly_queue();
                 s.handle_forward_tsn_for_ordered(forwarded.sequence);
                 if s.reassembly_queue.is_readable() {
                     self.events.push_back(Event::Stream(StreamEvent::Readable {
                         id: s.stream_identifier,
                     }));
                 }
+                self.reindex_stream(forwarded.identifier, bytes_before);
             }
         }
 
         // TSN may be forwarded for unordered chunks. ForwardTSN chunk does not
         // report which stream identifier it skipped for unordered chunks.
         // Therefore, we need to broadcast this event to all existing streams for
-        // unordered chunks.
-        for s in self.streams.values_mut() {
-            s.handle_forward_tsn_for_unordered(c.new_cumulative_tsn);
-            if s.reassembly_queue.is_readable() {
-                self.events.push_back(Event::Stream(StreamEvent::Readable {
-                    id: s.stream_identifier,
-                }));
+        // unordered chunks. A stream with an empty reassembly queue has nothing to
+        // forward and nothing to read, so only the streams holding data are visited.
+        let with_data: Vec<StreamId> = self.streams_with_data.iter().copied().collect();
+        for id in with_data {
+            if let Some(s) = self.streams.get_mut(&id) {
+                let bytes_before = s.get_num_bytes_in_reassembly_queue();
+                s.handle_forward_tsn_for_unordered(c.new_cumulative_tsn);
+                if s.reassembly_queue.is_readable() {
+                    self.events.push_back(Event::Stream(StreamEvent::Readable {
+                        id: s.stream_identifier,
+                    }));
+                }
+                self.reindex_stream(id, bytes_before);
             }
         }
 
-        self.handle_peer_last_tsn_and_acknowledgement(false)
+        // A stored reset request the new cumulative TSN reached is performed now, after the
+        // streams have taken what the FORWARD TSN made readable.
+        let mut reset_reply = vec![];
+        self.reset_streams_reached_since(prev_peer_last_tsn, &mut reset_reply)?;
+        let mut reply = self.handle_peer_last_tsn_and_acknowledgement(false)?;
+        reset_reply.append(&mut reply);
+        Ok(reset_reply)
     }
 
     fn handle_shutdown(&mut self, _: &ChunkShutdown) -> Result<Vec<Packet>> {
@@ -1716,6 +1781,7 @@ impl Association {
         sack_immediately: bool,
     ) -> Result<Vec<Packet>> {
         let mut reply = vec![];
+        let prev_peer_last_tsn = self.peer_last_tsn;
 
         // Try to advance peer_last_tsn
 
@@ -1734,13 +1800,12 @@ impl Association {
         {
             self.peer_last_tsn = self.peer_last_tsn.wrapping_add(1);
             //debug!("[{}] peer_last_tsn = {}", self.side, self.peer_last_tsn);
-
-            let rst_reqs: Vec<ParamOutgoingResetRequest> =
-                self.reconfig_requests.values().cloned().collect();
-            for rst_req in rst_reqs {
-                self.reset_streams_if_any(&rst_req, false, &mut reply)?;
-            }
         }
+
+        // Perform the stored reset requests the cumulative TSN has just reached, each once.
+        // A request reached earlier and still stored waits for its stream to drain
+        // (`retry_deferred_resets`), so it is not answered again here.
+        self.reset_streams_reached_since(prev_peer_last_tsn, &mut reply)?;
 
         let has_packet_loss = !self.payload_queue.is_empty();
         if has_packet_loss {
@@ -1777,8 +1842,28 @@ impl Association {
         reply: &mut Vec<Packet>,
     ) -> Result<()> {
         if let Some(p) = raw.as_any().downcast_ref::<ParamOutgoingResetRequest>() {
-            self.reconfig_requests
-                .insert(p.reconfig_request_sequence_number, p.clone());
+            let rsn = p.reconfig_request_sequence_number;
+            // A retransmission of a request already held or already performed is answered
+            // again, but not performed again (RFC 6525 section 5.2.1).
+            if self.reconfig_requests.contains_key(&rsn) {
+                reply.push(self.create_reconfig_response(rsn, ReconfigResult::InProgress));
+                return Ok(());
+            }
+            if self.completed_reconfig_requests.contains(&rsn) {
+                reply.push(self.create_reconfig_response(rsn, ReconfigResult::SuccessPerformed));
+                return Ok(());
+            }
+            if self.reconfig_requests.len() >= MAX_PENDING_RECONFIG_REQUESTS {
+                debug!(
+                    "[{}] deny reset request rsn={}: {} requests already pending",
+                    self.side,
+                    rsn,
+                    self.reconfig_requests.len()
+                );
+                reply.push(self.create_reconfig_response(rsn, ReconfigResult::Denied));
+                return Ok(());
+            }
+            self.reconfig_requests.insert(rsn, p.clone());
             self.reset_streams_if_any(p, true, reply)?;
             Ok(())
         } else if let Some(p) = raw.as_any().downcast_ref::<ParamReconfigResponse>() {
@@ -2138,9 +2223,10 @@ impl Association {
             );
 
             let draining = self.streams_awaiting_drain(p);
+            let mut seen = FxHashSet::default();
 
             for id in &p.stream_identifiers {
-                if draining.contains(id) {
+                if draining.contains(id) || !seen.insert(*id) {
                     continue;
                 }
                 if let Some(stream) = self.streams.get(id) {
@@ -2154,10 +2240,14 @@ impl Association {
                         sis_to_reset.push(*id);
                     }
                     self.unregister_stream(*id, AssociationError::Reset);
-                } else if respond {
+                } else if respond
+                    && (self.my_max_num_inbound_streams == 0
+                        || *id < self.my_max_num_inbound_streams)
+                {
                     // A stream this side never sent or received on (a pre-negotiated data
                     // channel left idle) has no state here, but the application still
                     // holds it: report the reset, and reset the outgoing direction too.
+                    // An id past the negotiated stream count names no such channel.
                     sis_to_reset.push(*id);
                     self.events.push_back(Event::AssociationLost {
                         reason: AssociationError::Reset,
@@ -2169,12 +2259,30 @@ impl Association {
             if draining.is_empty() {
                 self.reconfig_requests
                     .remove(&p.reconfig_request_sequence_number);
+                if !self
+                    .completed_reconfig_requests
+                    .contains(&p.reconfig_request_sequence_number)
+                {
+                    if self.completed_reconfig_requests.len() >= MAX_COMPLETED_RECONFIG_REQUESTS {
+                        self.completed_reconfig_requests.pop_front();
+                    }
+                    self.completed_reconfig_requests
+                        .push_back(p.reconfig_request_sequence_number);
+                }
             } else {
                 debug!(
                     "[{}] resetStream(): deferring reset of {:?}, application has not drained",
                     self.side, draining
                 );
                 result = ReconfigResult::InProgress;
+                // Keep only the streams still waiting, so a retry performs each reset once.
+                self.reconfig_requests.insert(
+                    p.reconfig_request_sequence_number,
+                    ParamOutgoingResetRequest {
+                        stream_identifiers: draining,
+                        ..p.clone()
+                    },
+                );
             }
         } else {
             debug!(
@@ -2186,7 +2294,14 @@ impl Association {
 
         // Answer incoming reset requests with the same reset request, but with
         // reconfig_response_sequence_number.
-        if !sis_to_reset.is_empty() {
+        if !sis_to_reset.is_empty() && self.reconfigs.len() >= MAX_OUTSTANDING_RECONFIGS {
+            debug!(
+                "[{}] resetStream(): not echoing reset of {:?}, {} requests unanswered",
+                self.side,
+                sis_to_reset,
+                self.reconfigs.len()
+            );
+        } else if !sis_to_reset.is_empty() {
             let rsn = self.generate_next_rsn();
             let tsn = self.my_next_tsn.wrapping_sub(1);
 
@@ -2206,19 +2321,49 @@ impl Association {
             reply.push(p);
         }
 
-        let packet = self.create_packet(vec![Box::new(ChunkReconfig {
-            param_a: Some(Box::new(ParamReconfigResponse {
-                reconfig_response_sequence_number: p.reconfig_request_sequence_number,
-                result,
-            })),
-            param_b: None,
-        })]);
+        let packet = self.create_reconfig_response(p.reconfig_request_sequence_number, result);
 
         debug!("[{}] RESET RESPONSE: {}", self.side, packet);
 
         reply.push(packet);
 
         Ok(())
+    }
+
+    /// Performs the stored reset requests whose sender's last TSN the cumulative TSN reached
+    /// since it stood at `prev_peer_last_tsn`.
+    fn reset_streams_reached_since(
+        &mut self,
+        prev_peer_last_tsn: u32,
+        reply: &mut Vec<Packet>,
+    ) -> Result<()> {
+        if self.peer_last_tsn == prev_peer_last_tsn || self.reconfig_requests.is_empty() {
+            return Ok(());
+        }
+        let peer_last_tsn = self.peer_last_tsn;
+        let reached: Vec<ParamOutgoingResetRequest> = self
+            .reconfig_requests
+            .values()
+            .filter(|p| {
+                sna32gt(p.sender_last_tsn, prev_peer_last_tsn)
+                    && sna32lte(p.sender_last_tsn, peer_last_tsn)
+            })
+            .cloned()
+            .collect();
+        for rst_req in reached {
+            self.reset_streams_if_any(&rst_req, false, reply)?;
+        }
+        Ok(())
+    }
+
+    fn create_reconfig_response(&self, rsn: u32, result: ReconfigResult) -> Packet {
+        self.create_packet(vec![Box::new(ChunkReconfig {
+            param_a: Some(Box::new(ParamReconfigResponse {
+                reconfig_response_sequence_number: rsn,
+                result,
+            })),
+            param_b: None,
+        })])
     }
 
     /// create_packet wraps chunks in a packet.
@@ -2278,7 +2423,11 @@ impl Association {
             }));
         }
 
-        self.streams.insert(stream_identifier, s);
+        let replaced_bytes = self
+            .streams
+            .insert(stream_identifier, s)
+            .map_or(0, |old| old.get_num_bytes_in_reassembly_queue());
+        self.reindex_stream(stream_identifier, replaced_bytes);
 
         Some(Stream {
             stream_identifier,
@@ -2309,16 +2458,41 @@ impl Association {
     /// drain anything however attentive it is. Only the second justifies accepting a chunk
     /// into a full receive buffer.
     fn has_readable_data(&self) -> bool {
-        self.streams
-            .values()
-            .any(|s| s.reassembly_queue.is_readable())
+        !self.readable_streams.is_empty()
     }
 
     fn bytes_in_reassembly_queues(&self) -> usize {
-        self.streams
-            .values()
-            .map(|s| s.get_num_bytes_in_reassembly_queue())
-            .sum()
+        self.reassembly_bytes
+    }
+
+    /// Brings the running totals up to date after stream `id`'s reassembly queue changed
+    /// from holding `bytes_before` bytes. A stream no longer in `streams` counts as empty.
+    ///
+    /// Every change to a reassembly queue goes through here, so the receive window and
+    /// "is anything readable" cost the same however many streams the peer opened.
+    pub(crate) fn reindex_stream(&mut self, id: StreamId, bytes_before: usize) {
+        let (bytes_after, readable, holds_data) = match self.streams.get(&id) {
+            Some(s) => (
+                s.get_num_bytes_in_reassembly_queue(),
+                s.reassembly_queue.is_readable(),
+                !s.reassembly_queue.is_empty(),
+            ),
+            None => (0, false, false),
+        };
+        self.reassembly_bytes = self
+            .reassembly_bytes
+            .saturating_sub(bytes_before)
+            .saturating_add(bytes_after);
+        if readable {
+            self.readable_streams.insert(id);
+        } else {
+            self.readable_streams.remove(&id);
+        }
+        if holds_data {
+            self.streams_with_data.insert(id);
+        } else {
+            self.streams_with_data.remove(&id);
+        }
     }
 
     pub(crate) fn get_my_receiver_window_credit(&self) -> u32 {
