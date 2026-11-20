@@ -2837,3 +2837,99 @@ fn test_change_cipher_spec_moves_epoch_0_to_1_only() {
         assert_eq!(conn.state.remote_epoch, 1);
     }
 }
+
+/// Encrypts one epoch-1 application-data record as the peer would.
+fn encrypt_epoch1_application_data(
+    peer_cipher_suite: &mut dyn crate::cipher_suite::CipherSuite,
+    sequence_number: u64,
+    payload: &[u8],
+) -> Vec<u8> {
+    let mut record = RecordLayer::new(
+        PROTOCOL_VERSION1_2,
+        1,
+        Content::ApplicationData(ApplicationData {
+            data: BytesMut::from(payload),
+        }),
+    );
+    record.record_layer_header.sequence_number = sequence_number;
+    let mut raw = vec![];
+    record.marshal(&mut raw).unwrap();
+    peer_cipher_suite
+        .encrypt(&record.record_layer_header, &raw)
+        .unwrap()
+}
+
+/// Until the handshake completes the sender of epoch-1 records is not authenticated (a server
+/// keys its cipher from the client's key exchange, before Finished and the client-certificate
+/// check). Application data received then must not be held without limit, nor delivered.
+#[test]
+fn test_pre_handshake_application_data_is_bounded() {
+    use crate::cipher_suite::CipherSuite;
+    use crate::cipher_suite::cipher_suite_aes_128_gcm_sha256::CipherSuiteAes128GcmSha256;
+
+    let mut conn = setup_dtls_conn_server_handshake_in_progress();
+    let mut server_cs = Box::new(CipherSuiteAes128GcmSha256::new(false));
+    server_cs
+        .init(
+            crypto::default_provider().unwrap(),
+            &[7u8; 48],
+            &[1u8; 32],
+            &[2u8; 32],
+            false,
+        )
+        .unwrap();
+    let mut client_cs = CipherSuiteAes128GcmSha256::new(false);
+    client_cs
+        .init(
+            crypto::default_provider().unwrap(),
+            &[7u8; 48],
+            &[1u8; 32],
+            &[2u8; 32],
+            true,
+        )
+        .unwrap();
+    conn.state.cipher_suite = Some(server_cs);
+    conn.state.remote_epoch = 1; // the peer's ChangeCipherSpec has been processed
+
+    let payload = vec![0xabu8; 1200];
+    for sequence_number in 0..10_000u64 {
+        let datagram = encrypt_epoch1_application_data(&mut client_cs, sequence_number, &payload);
+        let _ = conn.read(&datagram);
+        assert!(
+            conn.incoming_decrypted_packets.len() <= MAX_PRE_HANDSHAKE_APPLICATION_DATA_PACKETS,
+            "pre-handshake application data grew to {} records",
+            conn.incoming_decrypted_packets.len()
+        );
+        assert!(
+            conn.incoming_decrypted_packets
+                .iter()
+                .map(|p| p.len())
+                .sum::<usize>()
+                <= MAX_PRE_HANDSHAKE_APPLICATION_DATA_BYTES
+        );
+        assert!(
+            conn.incoming_application_data().is_none(),
+            "application data delivered before the handshake completed"
+        );
+    }
+    assert!(
+        !conn.incoming_decrypted_packets.is_empty(),
+        "the first records after the peer's Finished must still be kept"
+    );
+
+    // Once the handshake has completed, application data is no longer capped.
+    conn.set_handshake_completed();
+    let held = conn.incoming_decrypted_packets.len();
+    for sequence_number in 10_000..10_000 + 2 * MAX_PRE_HANDSHAKE_APPLICATION_DATA_PACKETS as u64 {
+        let datagram = encrypt_epoch1_application_data(&mut client_cs, sequence_number, &payload);
+        conn.read(&datagram).unwrap();
+    }
+    assert_eq!(
+        conn.incoming_decrypted_packets.len(),
+        held + 2 * MAX_PRE_HANDSHAKE_APPLICATION_DATA_PACKETS
+    );
+    assert_eq!(
+        conn.incoming_application_data().unwrap().len(),
+        payload.len()
+    );
+}
