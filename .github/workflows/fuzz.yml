@@ -3,6 +3,11 @@ name: Fuzz
 # No schedule (our CI rule: no cron workflows). The stateful targets run, time-boxed, on pull
 # requests that touch the code they reach and on dispatch; a dispatch can also run every target.
 # Our self-hosted Linux pool first, GitHub's ubuntu-latest only when it is busy.
+#
+# Self-hosted runners only take a dispatch or a pull request from a branch of this repository. A
+# pull request from a fork runs `fuzz_fork` on GitHub's ubuntu-latest and never names our labels
+# (the fork's run still needs a maintainer's approval, and a fork can edit this file: review
+# `runs-on` and `.github/` changes before approving one).
 on:
   pull_request:
     branches: [ master, v0.21.x, v1.x ]
@@ -55,6 +60,10 @@ jobs:
   runners:
     name: pick runners
     runs-on: ubuntu-latest
+    if: >-
+      github.event_name != 'pull_request_target' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
     timeout-minutes: 5
     permissions:
       actions: read
@@ -74,10 +83,16 @@ jobs:
     name: Fuzz ${{ matrix.crate }}
     needs: runners
     runs-on: ${{ fromJSON(needs.runners.outputs.plan || '{}')[matrix.key] || 'ubuntu-latest' }}
-    if: ${{ !cancelled() }}
+    # Self-hosted only for a dispatch or a same-repository pull request; never for
+    # pull_request_target.
+    if: >-
+      github.event_name != 'pull_request_target' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository) &&
+      !cancelled()
     # The build (~5 min) plus every target's time box, with margin; a hang cannot hold a runner.
     timeout-minutes: ${{ github.event.inputs.targets == 'all' && 240 || 45 }}
-    strategy:
+    strategy: &fuzz-strategy
       fail-fast: false
       # `stateful` names the targets that drive a whole state machine (handshakes, agents,
       # associations, reassembly). A crate's other targets are single-message parsers and run with
@@ -85,14 +100,14 @@ jobs:
       # crate's own fuzz crate (data-channel handling) is ./fuzz.
       matrix:
         include: ${{ fromJSON(github.event.inputs.targets == 'all' && '[{"crate":"rtc-dtls","key":"dtls","stateful":"conn_handle_records"},{"crate":"rtc-srtp","key":"srtp","stateful":"context_decrypt"},{"crate":"rtc-ice","key":"ice","stateful":"agent_handle_inbound agent_mdns_and_tcp"},{"crate":"rtc-turn","key":"turn","stateful":"client_handle_inbound"},{"crate":"rtc-sctp","key":"sctp","stateful":"endpoint_handle_datagrams"},{"crate":"rtc-rtp","key":"rtp","stateful":"depacketize_sequence"},{"crate":"rtc","key":"rtc","stateful":"data_channel_handle_dcep"},{"crate":"rtc-stun","key":"stun","stateful":""},{"crate":"rtc-rtcp","key":"rtcp","stateful":""},{"crate":"rtc-sdp","key":"sdp","stateful":""}]' || '[{"crate":"rtc-dtls","key":"dtls","stateful":"conn_handle_records"},{"crate":"rtc-srtp","key":"srtp","stateful":"context_decrypt"},{"crate":"rtc-ice","key":"ice","stateful":"agent_handle_inbound agent_mdns_and_tcp"},{"crate":"rtc-turn","key":"turn","stateful":"client_handle_inbound"},{"crate":"rtc-sctp","key":"sctp","stateful":"endpoint_handle_datagrams"},{"crate":"rtc-rtp","key":"rtp","stateful":"depacketize_sequence"},{"crate":"rtc","key":"rtc","stateful":"data_channel_handle_dcep"}]') }}
-    steps:
-      - uses: actions/checkout@v4
+    steps: &fuzz-steps
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install nightly toolchain (required by cargo-fuzz)
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@6a52aad76a94a5fbc50d567bb5be24419801c1fb # nightly
 
       - name: Install cargo-fuzz
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
         with:
           tool: cargo-fuzz
 
@@ -105,6 +120,9 @@ jobs:
           STATEFUL: ${{ matrix.stateful }}
         run: |
           set -euo pipefail
+          # The dispatch inputs arrive through the environment; accept only what they may be.
+          case "$FUZZ_DURATION" in ''|*[!0-9]*) echo "::error::duration must be a whole number of seconds"; exit 1 ;; esac
+          case "$FUZZ_TARGETS" in stateful|all) ;; *) echo "::error::targets must be stateful or all"; exit 1 ;; esac
           if [ "$FUZZ_TARGETS" = all ]; then TARGETS=$(cargo fuzz list); else TARGETS=$STATEFUL; fi
           for TARGET in $TARGETS; do
             echo "==> Fuzzing $TARGET for ${FUZZ_DURATION}s"
@@ -119,8 +137,19 @@ jobs:
 
       - name: Upload crash artifacts
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: fuzz-crashes-${{ matrix.crate }}
           path: ${{ matrix.crate == 'rtc' && '.' || matrix.crate }}/fuzz/artifacts/**
           if-no-files-found: ignore
+
+  # A pull request from a fork: the same targets and time boxes on GitHub's runners.
+  fuzz_fork:
+    name: Fuzz ${{ matrix.crate }} (fork pull request)
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name != github.repository
+    timeout-minutes: 45
+    strategy: *fuzz-strategy
+    steps: *fuzz-steps
