@@ -84,15 +84,17 @@ impl Context {
     /// # Errors
     ///
     /// Fails if the SRTP context has no key for this SSRC, if the cipher rejects the input, or
-    /// with [`Error::SrtpIndexReused`] if this packet index (ROC and sequence number) was already
-    /// encrypted, or lies more than a window behind the highest index sent: an SRTP index is
-    /// used at most once.
+    /// with [`Error::SrtpIndexReused`] if this packet index (ROC and sequence number) already
+    /// protected a different packet, or lies more than a window behind the highest index sent.
+    /// The same packet under the same index (a retransmission) is protected again, which yields
+    /// the same bytes.
     pub fn encrypt_rtp_with_header(
         &mut self,
         plaintext: &[u8],
         header: &rtp::Header,
     ) -> Result<BytesMut> {
-        let (roc, diff) = {
+        let digest = self.sent_digest_hasher.hash_one(plaintext);
+        let (roc, diff, index, is_new) = {
             let state = self.get_srtp_ssrc_state(header.ssrc)?;
             let (roc, diff, ovf) = state.next_rollover_count(header.sequence_number);
             if ovf {
@@ -106,22 +108,26 @@ impl Context {
             // Each packet index is protected at most once (RFC 3711 Section 3.3.1, RFC 7714
             // Section 8.1).
             let index = ((roc as u64) << 16) | header.sequence_number as u64;
-            let sent = state.sent_indexes.get_or_insert_with(|| {
-                SlidingWindowDetector::new(SRTP_SEND_INDEX_WINDOW, MAX_SRTP_PACKET_INDEX)
-            });
-            if !sent.check(index) {
-                return Err(Error::SrtpIndexReused(header.ssrc, header.sequence_number));
-            }
-            (roc, diff)
+            let sent = state.sent_indexes.get_or_insert_with(SentIndexes::new);
+            let is_new = match sent.check(index, digest) {
+                SendIndexUse::New => true,
+                SendIndexUse::SamePacket => false,
+                SendIndexUse::Refused => {
+                    return Err(Error::SrtpIndexReused(header.ssrc, header.sequence_number));
+                }
+            };
+            (roc, diff, index, is_new)
         };
 
         let dst = self.cipher.encrypt_rtp(plaintext, header, roc)?;
 
-        let state = self.get_srtp_ssrc_state(header.ssrc)?;
-        if let Some(sent) = state.sent_indexes.as_mut() {
-            sent.accept();
+        if is_new {
+            let state = self.get_srtp_ssrc_state(header.ssrc)?;
+            if let Some(sent) = state.sent_indexes.as_mut() {
+                sent.record(index, digest);
+            }
+            state.update_rollover_count(header.sequence_number, diff);
         }
-        state.update_rollover_count(header.sequence_number, diff);
 
         Ok(dst)
     }

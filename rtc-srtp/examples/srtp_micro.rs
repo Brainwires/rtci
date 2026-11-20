@@ -105,8 +105,8 @@ fn main() {
         "encrypt" => {
             let mut ctx = new_ctx();
             for i in 0..iters {
-                // A context protects each packet index once, so every iteration sends the
-                // next sequence number.
+                // Each iteration sends the next sequence number: the steady-state path of a
+                // new packet index, not a retransmission.
                 set_sequence_number(&mut plaintext, i as u16);
                 let out = ctx.encrypt_rtp(black_box(&plaintext)).unwrap();
                 black_box(&out);
@@ -119,8 +119,8 @@ fn main() {
         "encrypt-replay" => {
             let mut ctx = new_ctx_replay();
             for i in 0..iters {
-                // A context protects each packet index once, so every iteration sends the
-                // next sequence number.
+                // Each iteration sends the next sequence number: the steady-state path of a
+                // new packet index, not a retransmission.
                 set_sequence_number(&mut plaintext, i as u16);
                 let out = ctx.encrypt_rtp(black_box(&plaintext)).unwrap();
                 black_box(&out);
@@ -138,8 +138,8 @@ fn main() {
         "gcm-encrypt" => {
             let mut ctx = new_gcm_ctx();
             for i in 0..iters {
-                // A context protects each packet index once, so every iteration sends the
-                // next sequence number.
+                // Each iteration sends the next sequence number: the steady-state path of a
+                // new packet index, not a retransmission.
                 set_sequence_number(&mut plaintext, i as u16);
                 let out = ctx.encrypt_rtp(black_box(&plaintext)).unwrap();
                 black_box(&out);

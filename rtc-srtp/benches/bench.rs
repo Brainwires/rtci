@@ -250,7 +250,7 @@ fn benchmark_aead_aes_128_gcm(g: &mut BenchmarkGroup<WallTime>) {
 
         // Pre-encrypt a run of packets so decryption never replays an index, which the replay
         // detector would reject. A fresh sender: the one above already used these indexes, and
-        // a context protects each index once.
+        // a context refuses an index for a different packet.
         let mut setup_ctx =
             Context::new(MASTER_KEY, &salt, profile, None, None, provider.crypto()).unwrap();
         let mut encrypted = Vec::new();

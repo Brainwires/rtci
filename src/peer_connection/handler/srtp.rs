@@ -128,9 +128,9 @@ impl<'a>
                         let packet = rtp_message.marshal()?;
                         match context.encrypt_rtp(&packet) {
                             Ok(encrypted) => encrypted,
-                            // A packet index is protected at most once, so a second packet
-                            // with an already sent sequence number is dropped (a receiver's
-                            // replay check would discard it anyway).
+                            // A packet index protects one packet only: a retransmission of
+                            // the same packet is protected again, but a different packet with an
+                            // already sent sequence number is dropped.
                             Err(Error::SrtpIndexReused(ssrc, seq)) => {
                                 debug!(
                                     "srtp write: dropped ssrc={ssrc} seq={seq}, index already used"
