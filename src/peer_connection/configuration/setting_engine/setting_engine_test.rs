@@ -196,6 +196,8 @@ fn test_set_multicast_dns() {
 }
 
 #[test]
+// Calls a builder method deprecated as a no-op (stored, never read); this checks it still stores.
+#[allow(deprecated)]
 fn test_set_network_types_and_candidates() {
     let s = SettingEngineBuilder::new()
         .with_network_types(vec![NetworkType::Udp4, NetworkType::Tcp4])
@@ -211,6 +213,8 @@ fn test_set_network_types_and_candidates() {
 }
 
 #[test]
+// Calls a builder method deprecated as a no-op (stored, never read); this checks it still stores.
+#[allow(deprecated)]
 fn test_set_verification_flags() {
     let s = SettingEngineBuilder::new()
         .with_disable_certificate_fingerprint_verification(true)
@@ -225,6 +229,8 @@ fn test_set_verification_flags() {
 }
 
 #[test]
+// Calls a builder method deprecated as a no-op (stored, never read); this checks it still stores.
+#[allow(deprecated)]
 fn test_set_dtls_srtp_parameters() {
     let s = SettingEngineBuilder::new()
         .with_srtp_protection_profiles(vec![SrtpProtectionProfile::Srtp_Aead_Aes_128_Gcm])

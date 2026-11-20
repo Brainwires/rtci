@@ -243,6 +243,9 @@ pub struct Candidates {
 
     /// Allow gathering loopback candidates (useful for some VM configurations).
     /// Note: This is non-standard per RFC 8445.
+    ///
+    /// Not read by this engine, which gathers no candidates (see the deprecated
+    /// `SettingEngineBuilder::with_include_loopback_candidate`).
     pub include_loopback_candidate: bool,
 }
 
@@ -332,8 +335,6 @@ impl Default for SctpMaxMessageSize {
 ///         Some(Duration::from_secs(30)),
 ///         Some(Duration::from_secs(3)),
 ///     )
-///     // Enable loopback for testing
-///     .with_include_loopback_candidate(true)
 ///     .build();
 ///
 /// // Use with peer connection configuration
@@ -1087,6 +1088,7 @@ impl SettingEngineBuilder {
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// // Enable for certain VM configurations
+    /// # #[allow(deprecated)]
     /// let setting_engine = SettingEngineBuilder::new()
     ///     .with_include_loopback_candidate(true)
     ///     .build();
@@ -1103,6 +1105,10 @@ impl SettingEngineBuilder {
     ///
     /// The sans-I/O engine gathers no candidates (the application adds them), so this value is
     /// stored for API compatibility with pion and never read.
+    #[deprecated(
+        note = "a no-op: the sans-I/O engine gathers no candidates; add a loopback candidate \
+                with `add_local_candidate` instead"
+    )]
     pub fn with_include_loopback_candidate(mut self, allow_loopback: bool) -> Self {
         self.0.candidates.include_loopback_candidate = allow_loopback;
         self
@@ -1208,6 +1214,7 @@ impl SettingEngineBuilder {
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// // Share MediaEngine across connections
+    /// # #[allow(deprecated)]
     /// let setting_engine = SettingEngineBuilder::new()
     ///     .with_disable_media_engine_copy(true)
     ///     .build();
@@ -1228,6 +1235,10 @@ impl SettingEngineBuilder {
     /// A PeerConnection takes its `MediaEngine` by value from the builder, so it always has
     /// its own; there is no shared engine to copy or not. This value is stored for API
     /// compatibility with pion and never read.
+    #[deprecated(
+        note = "a no-op: a peer connection always owns its MediaEngine (the builder takes it \
+                by value), so there is no copy to disable"
+    )]
     pub fn with_disable_media_engine_copy(mut self, is_disabled: bool) -> Self {
         self.0.disable_media_engine_copy = is_disabled;
         self
@@ -1288,11 +1299,13 @@ impl SettingEngineBuilder {
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// // Use larger MTU for jumbo frames
+    /// # #[allow(deprecated)]
     /// let setting_engine = SettingEngineBuilder::new()
     ///     .with_receive_mtu(9000)
     ///     .build();
     ///
     /// // Or use default
+    /// # #[allow(deprecated)]
     /// let setting_engine = SettingEngineBuilder::new()
     ///     .with_receive_mtu(0)
     ///     .build();
@@ -1305,6 +1318,10 @@ impl SettingEngineBuilder {
     /// The sans-I/O engine reads no sockets: the application receives each datagram into its
     /// own buffer and hands it over whole, so there is no receive buffer to size. This value
     /// is stored for API compatibility with pion and never read.
+    #[deprecated(
+        note = "a no-op: the sans-I/O engine reads no sockets; size the application's own \
+                receive buffer instead"
+    )]
     pub fn with_receive_mtu(mut self, receive_mtu: usize) -> Self {
         self.0.receive_mtu = receive_mtu;
         self
