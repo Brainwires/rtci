@@ -13,6 +13,8 @@ mod agent_consent_test;
 #[cfg(test)]
 mod agent_nat_1to1_test;
 #[cfg(test)]
+mod agent_ported_test;
+#[cfg(test)]
 mod agent_test;
 
 /// Configuration for a new [`Agent`]: servers, timeouts and role.
