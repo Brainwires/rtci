@@ -71,6 +71,9 @@ impl Flight for Flight0 {
 
             negotiate_client_hello(state, client_hello, cfg)?;
 
+            // The ECDHE key pair waits until the client has echoed the cookie (see
+            // `DTLSConn::on_peer_address_verified` and `ensure_local_keypair`): a cookieless
+            // ClientHello costs no key generation, whatever source address it claims.
             Ok(Box::new(Flight2 {}))
         } else {
             Err((
@@ -212,7 +215,16 @@ pub(crate) fn negotiate_client_hello(
             Some(Error::ErrServerRequiredButNoClientEms),
         ));
     }
+    Ok(())
+}
 
+/// Makes the server's ECDHE key pair one for the negotiated curve, generating it if there is
+/// none yet or the curve changed. Run on the cookie-verified ClientHello only: a cookieless one
+/// must cost no key generation (RFC 6347 4.2.1).
+pub(crate) fn ensure_local_keypair(
+    state: &mut State,
+    cfg: &HandshakeConfig,
+) -> Result<(), (Option<Alert>, Option<Error>)> {
     let keypair_matches_curve = state
         .local_keypair
         .as_ref()

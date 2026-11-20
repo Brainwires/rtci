@@ -77,8 +77,12 @@
 //! # }
 //! ```
 
-// media_engine_test.rs does not exist — it was never created for this sans-IO crate.
-// #[cfg(test)] mod media_engine_test;
+#[cfg(test)]
+mod h264_high_profile_test;
+#[cfg(test)]
+mod media_engine_test;
+#[cfg(test)]
+mod multi_codec_test;
 
 use crate::peer_connection::sdp::{
     MediaDescriptionExt, codecs_from_media_description, rtp_extensions_from_media_description,
@@ -86,8 +90,8 @@ use crate::peer_connection::sdp::{
 use crate::rtp_transceiver::direction::RTCRtpTransceiverDirection;
 use crate::rtp_transceiver::fmtp;
 use crate::rtp_transceiver::rtp_sender::rtp_codec::{
-    CodecMatch, RTCRtpCodec, RtpCodecKind, codec_parameters_fuzzy_search,
-    rtcp_feedback_intersection,
+    CodecMatch, RTCRtpCodec, RtpCodecKind, codec_parameters_fuzzy_search, parse_rtx_apt,
+    repair_family, rtcp_feedback_intersection,
 };
 use crate::rtp_transceiver::rtp_sender::rtp_codec_parameters::RTCRtpCodecParameters;
 use crate::rtp_transceiver::rtp_sender::rtp_header_extension_capability::RTCRtpHeaderExtensionCapability;
@@ -417,8 +421,8 @@ impl MediaEngine {
         // type) fmtp parameter points at the primary codec this RTX stream
         // repairs. Browsers offer an RTX codec for every video codec by default
         // and drop RTX negotiation for any primary we do not pair one with, so
-        // register one RTX codec per primary video codec. ulpfec is a FEC codec, not a media
-        // codec, and does not get an RTX pairing.
+        // register one RTX codec per primary video codec. A FEC codec (an application may
+        // register ULPFEC or FlexFEC itself) is not a media codec and gets no RTX pairing.
         let rtx_codec = |payload_type: PayloadType, apt: PayloadType| RTCRtpCodecParameters {
             rtp_codec: RTCRtpCodec {
                 mime_type: MIME_TYPE_RTX.to_owned(),
@@ -541,12 +545,70 @@ impl MediaEngine {
                 payload_type: 123,
             },
             rtx_codec(124, 123),
+            // H.264 High Profile, Level 4.0 (720p60 / 1080p30), as webrtc-rs 0.17 registers it.
+            RTCRtpCodecParameters {
+                rtp_codec: RTCRtpCodec {
+                    mime_type: MIME_TYPE_H264.to_owned(),
+                    clock_rate: 90000,
+                    channels: 0,
+                    sdp_fmtp_line:
+                        "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640028"
+                            .to_owned(),
+                    rtcp_feedback: video_rtcp_feedback.clone(),
+                },
+                payload_type: 118,
+            },
+            rtx_codec(110, 118),
+            // H.264 High Profile, Level 4.1 (1080p60), as webrtc-rs 0.17 registers it.
+            RTCRtpCodecParameters {
+                rtp_codec: RTCRtpCodec {
+                    mime_type: MIME_TYPE_H264.to_owned(),
+                    clock_rate: 90000,
+                    channels: 0,
+                    sdp_fmtp_line:
+                        "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640029"
+                            .to_owned(),
+                    rtcp_feedback: video_rtcp_feedback.clone(),
+                },
+                payload_type: 119,
+            },
+            rtx_codec(113, 119),
+            // H.264 High Profile, Level 4.2 (1080p64), as webrtc-rs 0.17 registers it.
+            RTCRtpCodecParameters {
+                rtp_codec: RTCRtpCodec {
+                    mime_type: MIME_TYPE_H264.to_owned(),
+                    clock_rate: 90000,
+                    channels: 0,
+                    sdp_fmtp_line:
+                        "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=64002a"
+                            .to_owned(),
+                    rtcp_feedback: video_rtcp_feedback.clone(),
+                },
+                payload_type: 120,
+            },
+            rtx_codec(114, 120),
+            // H.264 High Profile, Level 5.1 (4K30), as webrtc-rs 0.17 registers it.
+            RTCRtpCodecParameters {
+                rtp_codec: RTCRtpCodec {
+                    mime_type: MIME_TYPE_H264.to_owned(),
+                    clock_rate: 90000,
+                    channels: 0,
+                    sdp_fmtp_line:
+                        "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640033"
+                            .to_owned(),
+                    rtcp_feedback: video_rtcp_feedback.clone(),
+                },
+                payload_type: 121,
+            },
+            rtx_codec(122, 121),
             RTCRtpCodecParameters {
                 rtp_codec: RTCRtpCodec {
                     mime_type: MIME_TYPE_AV1.to_owned(),
                     clock_rate: 90000,
                     channels: 0,
-                    sdp_fmtp_line: "profile-id=0".to_owned(),
+                    // The AV1 RTP payload format's SDP parameter is `profile` (AV1 RTP spec,
+                    // section 7.2); `profile-id` is VP9's.
+                    sdp_fmtp_line: "profile=0".to_owned(),
                     rtcp_feedback: video_rtcp_feedback.clone(),
                 },
                 payload_type: 41,
@@ -563,18 +625,9 @@ impl MediaEngine {
                 payload_type: 126,
             },
             rtx_codec(107, 126),
-            // Kept by the Brainwires fork: upstream stopped advertising ULPFEC by default
-            // (#837). The fork never narrows a default; see FORK.md.
-            RTCRtpCodecParameters {
-                rtp_codec: RTCRtpCodec {
-                    mime_type: MIME_TYPE_ULP_FEC.to_owned(),
-                    clock_rate: 90000,
-                    channels: 0,
-                    sdp_fmtp_line: "".to_owned(),
-                    rtcp_feedback: vec![],
-                },
-                payload_type: 116,
-            },
+            // No ULPFEC (RFC 5109): nothing in this engine encodes or decodes it, so offering
+            // it invited a peer to send repair packets that would be dropped. An application
+            // with its own ULPFEC coder registers `MIME_TYPE_ULP_FEC` itself. See FORK.md.
         ] {
             self.register_codec(codec, RtpCodecKind::Video)?;
         }
@@ -841,7 +894,9 @@ impl MediaEngine {
             RtpCodecKind::Audio => &self.audio_codecs,
             RtpCodecKind::Video => &self.video_codecs,
             RtpCodecKind::Application => &self.application_codecs,
-            RtpCodecKind::Unspecified => unreachable!(),
+            // A media section of a kind this engine does not know has no codec to match; its
+            // callers already skip such sections, so this is an error, not a panic.
+            RtpCodecKind::Unspecified => return Err(Error::ErrCodecNotFound),
         };
 
         let remote_fmtp = fmtp::parse(
@@ -970,15 +1025,98 @@ impl MediaEngine {
     }
 
     pub(crate) fn push_codecs(&mut self, codecs: Vec<RTCRtpCodecParameters>, typ: RtpCodecKind) {
-        for codec in codecs {
-            if typ == RtpCodecKind::Audio {
-                MediaEngine::add_codec(&mut self.negotiated_audio_codecs, codec);
-            } else if typ == RtpCodecKind::Video {
-                MediaEngine::add_codec(&mut self.negotiated_video_codecs, codec);
-            } else if typ == RtpCodecKind::Application {
-                MediaEngine::add_codec(&mut self.negotiated_application_codecs, codec);
+        let negotiated = match typ {
+            RtpCodecKind::Audio => &mut self.negotiated_audio_codecs,
+            RtpCodecKind::Video => &mut self.negotiated_video_codecs,
+            RtpCodecKind::Application => &mut self.negotiated_application_codecs,
+            RtpCodecKind::Unspecified => return,
+        };
+        MediaEngine::merge_negotiated_codecs(negotiated, codecs);
+    }
+
+    /// Adds the formats of one remote media section to the negotiated list of its kind.
+    ///
+    /// With several media sections of one kind negotiated (the default, see
+    /// `SettingEngineBuilder::with_disable_media_engine_multiple_codecs`), every remote
+    /// description adds each section's formats here, so the list must keep one entry per
+    /// format and one format per payload type. A peer that renumbers a format it already
+    /// negotiated (which RFC 3264 section 8.3.2 forbids) or numbers it differently in another
+    /// section would otherwise put the same format here twice, and every answer would then
+    /// describe it twice under two payload types:
+    ///
+    /// - a payload type already in the list keeps the format it names (first mapping wins;
+    ///   RFC 8843 section 7.5 gives one payload type one format across a BUNDLE group);
+    /// - a media or FEC format already in the list under another number is not added again.
+    ///   Identity is the encoding name, clock rate, channels and fmtp parameters (RFC 8866
+    ///   section 6.6), not the payload type: FEC has no `apt` to tie it to a primary, so
+    ///   matching by payload type alone let a renumbered FlexFEC in twice;
+    /// - an RTX format (RFC 4588 section 8.6) is added only when its `apt` still names, in the
+    ///   list, the very format the remote section gives that number, and that primary has no
+    ///   RTX entry yet. One whose primary was kept under its earlier number is stale.
+    ///
+    /// The entries that are added keep the remote section's order.
+    fn merge_negotiated_codecs(
+        negotiated: &mut Vec<RTCRtpCodecParameters>,
+        incoming: Vec<RTCRtpCodecParameters>,
+    ) {
+        let is_rtx = |codec: &RTCRtpCodecParameters| repair_family(&codec.rtp_codec) == "rtx";
+
+        // What the list holds once this section's formats are in, built primaries (and FEC)
+        // first so that an RTX entry is judged against the primaries this section adds.
+        let mut merged = negotiated.clone();
+        let mut take = vec![false; incoming.len()];
+
+        for (i, codec) in incoming.iter().enumerate() {
+            if is_rtx(codec) {
+                continue;
+            }
+            let known = merged.iter().any(|existing| {
+                existing.payload_type == codec.payload_type
+                    || same_format(&existing.rtp_codec, &codec.rtp_codec)
+            });
+            if !known {
+                take[i] = true;
+                merged.push(codec.clone());
             }
         }
+
+        for (i, codec) in incoming.iter().enumerate() {
+            if !is_rtx(codec)
+                || merged
+                    .iter()
+                    .any(|existing| existing.payload_type == codec.payload_type)
+            {
+                continue;
+            }
+            let Some(apt) = parse_rtx_apt(&codec.rtp_codec.sdp_fmtp_line) else {
+                continue;
+            };
+            // The primary this entry repairs, as the remote section numbers it.
+            let Some(remote_primary) = incoming
+                .iter()
+                .find(|primary| primary.payload_type == apt && !is_rtx(primary))
+            else {
+                continue;
+            };
+            let same_primary = merged.iter().any(|existing| {
+                existing.payload_type == apt
+                    && same_format(&existing.rtp_codec, &remote_primary.rtp_codec)
+            });
+            let already_repaired = merged.iter().any(|existing| {
+                is_rtx(existing) && parse_rtx_apt(&existing.rtp_codec.sdp_fmtp_line) == Some(apt)
+            });
+            if same_primary && !already_repaired {
+                take[i] = true;
+                merged.push(codec.clone());
+            }
+        }
+
+        negotiated.extend(
+            incoming
+                .into_iter()
+                .zip(take)
+                .filter_map(|(codec, take)| take.then_some(codec)),
+        );
     }
 
     /// Update the MediaEngine from a remote description
@@ -1226,26 +1364,61 @@ impl MediaEngine {
         kind: RtpCodecKind,
         direction: RTCRtpTransceiverDirection,
     ) -> bool {
-        for codec in &self.get_rtp_parameters_by_kind(kind, direction).codecs {
-            if UniCase::new(codec.rtp_codec.mime_type.as_str())
-                .contains(*UniCase::new(MIME_TYPE_FLEX_FEC))
-            {
-                return true;
-            }
-        }
-
-        false
+        // Only the FlexFEC this engine implements (draft-03), matched exactly: RFC 8627's
+        // `video/flexfec` is another wire format.
+        self.get_rtp_parameters_by_kind(kind, direction)
+            .codecs
+            .iter()
+            .any(|codec| {
+                crate::rtp_transceiver::rtp_sender::rtp_codec::is_flexfec03_mime_type(
+                    &codec.rtp_codec.mime_type,
+                )
+            })
     }
 }
+
+/// The parameters of an `a=fmtp` line as a set: keys and values compared without case, and
+/// parameter order, spacing and repeats ignored.
+fn fmtp_parameter_set(line: &str) -> Vec<(String, String)> {
+    let mut set: Vec<(String, String)> = line
+        .split(';')
+        .map(str::trim)
+        .filter(|parameter| !parameter.is_empty())
+        .map(|parameter| match parameter.split_once('=') {
+            Some((key, value)) => (
+                key.trim().to_ascii_lowercase(),
+                value.trim().to_ascii_lowercase(),
+            ),
+            None => (parameter.to_ascii_lowercase(), String::new()),
+        })
+        .collect();
+    set.sort();
+    set.dedup();
+    set
+}
+
+/// Whether `a` and `b` describe one format (RFC 8866 section 6.6, `a=rtpmap` and `a=fmtp`):
+/// the same encoding name, clock rate, channels and fmtp parameters. The payload type that
+/// numbers it is not part of the format.
+fn same_format(a: &RTCRtpCodec, b: &RTCRtpCodec) -> bool {
+    a.mime_type.eq_ignore_ascii_case(&b.mime_type)
+        && a.clock_rate == b.clock_rate
+        && a.channels == b.channels
+        && fmtp_parameter_set(&a.sdp_fmtp_line) == fmtp_parameter_set(&b.sdp_fmtp_line)
+}
+
+#[cfg(test)]
+#[path = "media_engine_unspecified_test.rs"]
+mod media_engine_unspecified_test;
 
 #[cfg(test)]
 mod default_fec_codec_test {
     use super::*;
 
-    // The Brainwires fork keeps ULPFEC (PT 116) in the default codecs, as before upstream's
-    // #837 removed it: the fork never narrows a default. See FORK.md.
+    // ULPFEC (RFC 5109) is not in the default codecs: the engine neither encodes nor decodes
+    // it, so it must not be offered (upstream #837 made the same change). See FORK.md.
     #[test]
-    fn default_codecs_still_offer_ulpfec() {
+    fn default_codecs_do_not_offer_ulpfec() {
         let mut me = MediaEngine::default();
         me.register_default_codecs().unwrap();
 
@@ -1258,10 +1431,9 @@ mod default_fec_codec_test {
             .map(|c| c.payload_type)
             .collect();
 
-        assert_eq!(
-            ulpfec,
-            vec![116],
-            "default codecs must keep ULPFEC at PT 116"
+        assert!(
+            ulpfec.is_empty(),
+            "default codecs must not offer ULPFEC: {ulpfec:?}"
         );
     }
 
@@ -1314,8 +1486,8 @@ mod default_rtx_codec_test {
             } else if UniCase::new(codec.rtp_codec.mime_type.as_str())
                 != UniCase::new(MIME_TYPE_ULP_FEC)
             {
-                // ULPFEC (kept in the defaults by the Brainwires fork) is a FEC codec, not a
-                // media codec, and does not get an RTX pairing.
+                // A FEC codec is not a media codec and gets no RTX pairing (none is a
+                // default today; this keeps the check right if one is added).
                 primary_payload_types.push(codec.payload_type);
             }
         }

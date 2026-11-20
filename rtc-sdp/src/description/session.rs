@@ -1282,15 +1282,12 @@ fn unmarshal_media_description<'a, R: io::BufRead + io::Seek>(
     }
 
     // <media>
-    // Set according to currently registered with IANA
-    // https://tools.ietf.org/html/rfc4566#section-5.14
-    // including "image", registered here:
-    // https://datatracker.ietf.org/doc/html/rfc6466
-    let i = index_of(
-        fields[0],
-        &["audio", "video", "text", "application", "message", "image"],
-    );
-    if i == -1 {
+    // RFC 8866 section 5.14: <media> is a token ("audio", "video", "text",
+    // "application", "message", "image" are registered, and new media types
+    // may be), so an unknown one is parsed: it is the offer/answer layer that
+    // rejects a media type it doesn't know (RFC 9429 section 5.3.1 answers
+    // it with port 0), not the parser.
+    if !is_token(fields[0]) {
         return Err(Error::SdpInvalidValue(fields[0].to_owned()));
     }
 
@@ -1343,6 +1340,34 @@ fn unmarshal_media_description<'a, R: io::BufRead + io::Seek>(
     });
 
     Ok(Some(StateFn { f: s12 }))
+}
+
+/// RFC 8866 section 9 `token`: one or more of the visible ASCII characters
+/// other than the separators.
+fn is_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || matches!(
+                    b,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'{'
+                        | b'|'
+                        | b'}'
+                        | b'~'
+                )
+        })
 }
 
 fn unmarshal_media_title<'a, R: io::BufRead + io::Seek>(

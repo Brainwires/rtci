@@ -38,6 +38,8 @@ impl std::fmt::Display for CodecDirection {
 /// - May need separate encode/decode entries if sdpFmtpLine differs
 #[derive(Debug, Default, Clone)]
 pub struct CodecStatsAccumulator {
+    /// The ID of the transport the codec is used on.
+    pub transport_id: String,
     /// The RTP payload type for this codec.
     pub payload_type: PayloadType,
     /// The MIME type of the codec (e.g., "video/VP8", "audio/opus").
@@ -54,6 +56,7 @@ impl CodecStatsAccumulator {
     /// Creates a new codec stats accumulator from RTCRtpCodecParameters.
     pub fn from_codec_parameters(params: &RTCRtpCodecParameters) -> Self {
         Self {
+            transport_id: String::new(),
             payload_type: params.payload_type,
             mime_type: params.rtp_codec.mime_type.clone(),
             channels: params.rtp_codec.channels,
@@ -65,6 +68,7 @@ impl CodecStatsAccumulator {
     /// Creates a new codec stats accumulator from RTCRtpCodec and payload type.
     pub fn from_codec(codec: &RTCRtpCodec, payload_type: PayloadType) -> Self {
         Self {
+            transport_id: String::new(),
             payload_type,
             mime_type: codec.mime_type.clone(),
             channels: codec.channels,
@@ -95,9 +99,11 @@ impl CodecStatsAccumulator {
                 typ: RTCStatsType::Codec,
                 id: id.to_string(),
             },
+            transport_id: self.transport_id.clone(),
             payload_type: self.payload_type,
             mime_type: self.mime_type.clone(),
-            channels: self.channels,
+            // A channel count is an audio codec's (webrtc-stats RTCCodecStats.channels).
+            channels: (self.channels > 0).then_some(self.channels),
             clock_rate: self.clock_rate,
             sdp_fmtp_line: self.sdp_fmtp_line.clone(),
         }
@@ -185,6 +191,7 @@ mod tests {
     fn test_snapshot_video_codec() {
         let now = Instant::now();
         let acc = CodecStatsAccumulator {
+            transport_id: "RTCTransport_0".to_string(),
             payload_type: 96,
             mime_type: "video/H264".to_string(),
             clock_rate: 90000,
@@ -201,7 +208,8 @@ mod tests {
         assert_eq!(stats.payload_type, 96);
         assert_eq!(stats.mime_type, "video/H264");
         assert_eq!(stats.clock_rate, 90000);
-        assert_eq!(stats.channels, 0);
+        assert_eq!(stats.channels, None);
+        assert_eq!(stats.transport_id, "RTCTransport_0");
         assert!(stats.sdp_fmtp_line.contains("profile-level-id=42e01f"));
     }
 
@@ -209,6 +217,7 @@ mod tests {
     fn test_snapshot_audio_codec() {
         let now = Instant::now();
         let acc = CodecStatsAccumulator {
+            transport_id: "RTCTransport_0".to_string(),
             payload_type: 111,
             mime_type: "audio/opus".to_string(),
             clock_rate: 48000,
@@ -222,12 +231,13 @@ mod tests {
         assert_eq!(stats.payload_type, 111);
         assert_eq!(stats.mime_type, "audio/opus");
         assert_eq!(stats.clock_rate, 48000);
-        assert_eq!(stats.channels, 2);
+        assert_eq!(stats.channels, Some(2));
     }
 
     #[test]
     fn test_clone() {
         let acc = CodecStatsAccumulator {
+            transport_id: "RTCTransport_0".to_string(),
             payload_type: 96,
             mime_type: "video/VP9".to_string(),
             clock_rate: 90000,
@@ -247,6 +257,7 @@ mod tests {
     fn test_snapshot_json_serialization() {
         let now = Instant::now();
         let acc = CodecStatsAccumulator {
+            transport_id: "RTCTransport_0".to_string(),
             payload_type: 96,
             mime_type: "video/VP8".to_string(),
             clock_rate: 90000,
@@ -267,6 +278,7 @@ mod tests {
     fn test_different_payload_types_same_codec() {
         // Same codec can have different payload types in different sessions
         let acc1 = CodecStatsAccumulator {
+            transport_id: "RTCTransport_0".to_string(),
             payload_type: 96,
             mime_type: "video/VP8".to_string(),
             clock_rate: 90000,
@@ -275,6 +287,7 @@ mod tests {
         };
 
         let acc2 = CodecStatsAccumulator {
+            transport_id: "RTCTransport_0".to_string(),
             payload_type: 100,
             mime_type: "video/VP8".to_string(),
             clock_rate: 90000,

@@ -20,6 +20,7 @@ use crate::statistics::stats::rtp_stream::sent::remote_outbound::RTCRemoteOutbou
 use crate::statistics::stats::transport::RTCTransportStats;
 use std::collections::HashMap;
 
+#[allow(clippy::large_enum_variant)] // public report type; boxing a variant would change the API
 /// An entry in the stats report representing a single statistics object.
 ///
 /// Each variant corresponds to a different W3C WebRTC stats dictionary type.

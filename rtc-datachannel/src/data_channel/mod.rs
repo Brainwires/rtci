@@ -12,6 +12,8 @@
 //! goes the other way from the W3C `maxPacketLifeTime`/`maxRetransmits` pair.
 #[cfg(test)]
 mod data_channel_test;
+#[cfg(test)]
+mod sctp_link_test;
 
 use crate::message::message_type::{MESSAGE_TYPE_CLOSE, MESSAGE_TYPE_THRESHOLD};
 use crate::message::{
@@ -447,7 +449,7 @@ impl sansio::Protocol<DataChannelMessage, DataChannelMessage, ()> for DataChanne
     /// `true` if the data read is a string.
     fn handle_read(&mut self, msg: DataChannelMessage) -> Result<()> {
         self.messages_received += 1;
-        self.bytes_received += msg.payload.len();
+        self.bytes_received += user_bytes(&msg);
 
         if msg.ppi == PayloadProtocolIdentifier::Dcep {
             let mut data_buf = &msg.payload[..];
@@ -465,7 +467,7 @@ impl sansio::Protocol<DataChannelMessage, DataChannelMessage, ()> for DataChanne
     /// handle_write writes len(p) bytes from p
     fn handle_write(&mut self, mut msg: DataChannelMessage) -> Result<()> {
         self.messages_sent += 1;
-        self.bytes_sent += msg.payload.len();
+        self.bytes_sent += user_bytes(&msg);
 
         msg.association_handle = self.association_handle;
         msg.stream_id = self.stream_id;
@@ -495,6 +497,15 @@ impl sansio::Protocol<DataChannelMessage, DataChannelMessage, ()> for DataChanne
         // Closing resets the handshake-complete flag.
         self.handshake_complete = false;
         self.write_data_channel_close()
+    }
+}
+
+/// The application bytes a message carries: none for an empty message, whose one byte on the
+/// wire is only the placeholder SCTP needs (RFC 8831 6.6).
+fn user_bytes(msg: &DataChannelMessage) -> usize {
+    match msg.ppi {
+        PayloadProtocolIdentifier::StringEmpty | PayloadProtocolIdentifier::BinaryEmpty => 0,
+        _ => msg.payload.len(),
     }
 }
 

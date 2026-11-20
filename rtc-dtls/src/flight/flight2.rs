@@ -24,6 +24,10 @@ impl Flight for Flight2 {
         false
     }
 
+    fn verifies_cookie(&self) -> bool {
+        true
+    }
+
     fn parse(
         &self,
         //tx: &mut mpsc::Sender<mpsc::Sender<()>>,
@@ -92,6 +96,7 @@ impl Flight for Flight2 {
             // Negotiate from the cookie-verified ClientHello, which the handshake transcript
             // covers, not from the first one, which anyone on the path could have sent.
             negotiate_client_hello(state, client_hello, cfg)?;
+            ensure_local_keypair(state, cfg)?;
 
             Ok(Box::new(Flight4 {}))
         } else {

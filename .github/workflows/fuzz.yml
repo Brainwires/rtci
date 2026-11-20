@@ -1,79 +1,170 @@
 name: Fuzz
 
+# No schedule (our CI rule: no cron workflows). The stateful targets run, time-boxed, on pull
+# requests that touch the code they reach and on dispatch; a dispatch can also run every target.
+# Our self-hosted Linux pool first, GitHub's ubuntu-latest only when it is busy.
+#
+# Self-hosted runners only take a dispatch or a pull request from a branch of this repository. A
+# pull request from a fork runs `fuzz_fork` on GitHub's ubuntu-latest and never names our labels
+# (the fork's run still needs a maintainer's approval, and a fork can edit this file: review
+# `runs-on` and `.github/` changes before approving one).
 on:
-  schedule:
-    # Run daily at 02:00 UTC
-    - cron: '0 2 * * *'
+  pull_request:
+    branches: [ master, v0.21.x, v1.x ]
+    paths:
+      - 'rtc-dtls/**'
+      - 'rtc-srtp/**'
+      - 'rtc-ice/**'
+      - 'rtc-turn/**'
+      - 'rtc-stun/**'
+      - 'rtc-sctp/**'
+      - 'rtc-rtp/**'
+      - 'rtc-rtcp/**'
+      - 'rtc-sdp/**'
+      - 'rtc-mdns/**'
+      - 'rtc-datachannel/**'
+      - 'rtc-media/**'
+      - 'rtc-interceptor/**'
+      - 'rtc-shared/**'
+      - 'rtc-crypto/**'
+      # The peer-connection targets (./fuzz) reach the whole of the `rtc` crate.
+      - 'src/**'
+      - 'fuzz/**'
+      - 'oss-fuzz/**'
+      - '.github/workflows/fuzz.yml'
   workflow_dispatch:
     inputs:
       duration:
-        description: 'Fuzzing duration per target in seconds'
+        description: 'Fuzzing time per target, in seconds'
         required: false
-        default: '30'
+        default: '120'
+      targets:
+        description: 'stateful (the state-machine targets) or all (every target of every crate)'
+        required: false
+        default: 'stateful'
+        type: choice
+        options: [ stateful, all ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
-  FUZZ_DURATION: ${{ github.event.inputs.duration || '30' }}
+  # A pull request gets 60 s per target; a dispatch what it asks for.
+  FUZZ_DURATION: ${{ github.event.inputs.duration || '60' }}
+  FUZZ_TARGETS: ${{ github.event.inputs.targets || 'stateful' }}
 
 jobs:
+  runners:
+    name: pick runners
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name != 'pull_request_target' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
+    timeout-minutes: 5
+    permissions:
+      actions: read
+    outputs:
+      plan: ${{ steps.pick.outputs.plan }}
+    steps:
+      - id: pick
+        uses: Brainwires/.github/actions/pick-runners@7475d2c4523faa74d428c3607a8fe195c1f782ac # pick-runners
+        with:
+          jobs: >-
+            dtls=linux-x64 srtp=linux-x64 ice=linux-x64 turn=linux-x64 sctp=linux-x64
+            rtp=linux-x64 rtc=linux-x64 stun=linux-x64 rtcp=linux-x64 sdp=linux-x64
+            mdns=linux-x64 datachannel=linux-x64 media=linux-x64 shared=linux-x64
+          vars: ${{ toJSON(vars) }}
+          runner-token: ${{ secrets.RUNNER_STATUS_TOKEN }}
+
   fuzz:
     name: Fuzz ${{ matrix.crate }}
-    runs-on: ubuntu-latest
-    strategy:
+    needs: runners
+    runs-on: ${{ fromJSON(needs.runners.outputs.plan || '{}')[matrix.key] || 'ubuntu-latest' }}
+    # Self-hosted only for a dispatch or a same-repository pull request; never for
+    # pull_request_target.
+    if: >-
+      github.event_name != 'pull_request_target' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository) &&
+      !cancelled()
+    # The build (~5 min) plus every target's time box, with margin; a hang cannot hold a runner.
+    timeout-minutes: ${{ github.event.inputs.targets == 'all' && 240 || 45 }}
+    strategy: &fuzz-strategy
       fail-fast: false
+      # `stateful` names the targets that drive a whole state machine (handshakes, agents,
+      # associations, reassembly, the readers and decoders that keep state across a stream, a
+      # whole peer connection). A crate's other targets are single-message parsers and run with
+      # `targets: all`, as do rtc-stun, rtc-rtcp and rtc-sdp, which have only parsers there. The
+      # `rtc` crate's own fuzz crate (data channels, remote descriptions, the interceptor chain,
+      # a peer connection's handle_read) is ./fuzz. Every target is also in oss-fuzz/build.sh.
       matrix:
-        crate:
-          - rtc-dtls
-          - rtc-sctp
-          - rtc-rtcp
-          - rtc-sdp
-          - rtc-stun
-          - rtc-rtp
-          - rtc-srtp
-          - rtc-ice
-          - rtc-turn
-          # The `rtc` crate itself (data-channel handling); its fuzz crate is ./fuzz.
-          - rtc
-    steps:
-      - uses: actions/checkout@v4
+        include: ${{ fromJSON(github.event.inputs.targets == 'all' && '[{"crate":"rtc-dtls","key":"dtls","stateful":"conn_handle_records"},{"crate":"rtc-srtp","key":"srtp","stateful":"context_decrypt context_decrypt_cryptex"},{"crate":"rtc-ice","key":"ice","stateful":"agent_handle_inbound agent_mdns_and_tcp"},{"crate":"rtc-turn","key":"turn","stateful":"client_handle_inbound"},{"crate":"rtc-sctp","key":"sctp","stateful":"endpoint_handle_datagrams"},{"crate":"rtc-rtp","key":"rtp","stateful":"depacketize_sequence smpte336m_depacketize"},{"crate":"rtc","key":"rtc","stateful":"data_channel_handle_dcep sdp_set_remote_description interceptor_inbound peer_connection_handle_read"},{"crate":"rtc-mdns","key":"mdns","stateful":"mdns_handle_inbound"},{"crate":"rtc-datachannel","key":"datachannel","stateful":"data_channel_handle_read"},{"crate":"rtc-media","key":"media","stateful":"ogg_reader ivf_reader h26x_reader h26x_sample_reader sample_builder"},{"crate":"rtc-shared","key":"shared","stateful":"tcp_frame_decoder turn_stream_decoder replay_detector"},{"crate":"rtc-stun","key":"stun","stateful":""},{"crate":"rtc-rtcp","key":"rtcp","stateful":""},{"crate":"rtc-sdp","key":"sdp","stateful":""}]' || '[{"crate":"rtc-dtls","key":"dtls","stateful":"conn_handle_records"},{"crate":"rtc-srtp","key":"srtp","stateful":"context_decrypt context_decrypt_cryptex"},{"crate":"rtc-ice","key":"ice","stateful":"agent_handle_inbound agent_mdns_and_tcp"},{"crate":"rtc-turn","key":"turn","stateful":"client_handle_inbound"},{"crate":"rtc-sctp","key":"sctp","stateful":"endpoint_handle_datagrams"},{"crate":"rtc-rtp","key":"rtp","stateful":"depacketize_sequence smpte336m_depacketize"},{"crate":"rtc","key":"rtc","stateful":"data_channel_handle_dcep sdp_set_remote_description interceptor_inbound peer_connection_handle_read"},{"crate":"rtc-mdns","key":"mdns","stateful":"mdns_handle_inbound"},{"crate":"rtc-datachannel","key":"datachannel","stateful":"data_channel_handle_read"},{"crate":"rtc-media","key":"media","stateful":"ogg_reader ivf_reader h26x_reader h26x_sample_reader sample_builder"},{"crate":"rtc-shared","key":"shared","stateful":"tcp_frame_decoder turn_stream_decoder replay_detector"}]') }}
+    steps: &fuzz-steps
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install nightly toolchain (required by cargo-fuzz)
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@6a52aad76a94a5fbc50d567bb5be24419801c1fb # nightly
 
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked
-
-      - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-fuzz-${{ matrix.crate }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-fuzz-${{ matrix.crate }}-
+          tool: cargo-fuzz
 
       - name: Run fuzz targets (${{ matrix.crate }})
         working-directory: ${{ matrix.crate == 'rtc' && '.' || matrix.crate }}/fuzz
-        # pipefail: without it the `| tail` hid every crash (the pipeline's status was tail's).
-        # --debug-assertions plus overflow checks turn silent wraparound into a finding.
+        # --debug-assertions plus overflow checks turn silent wraparound into a finding, and
+        # -malloc_limit_mb turns one allocation sized by the input (a length field believed) into
+        # one too, long before it could exhaust the runner.
         shell: bash
         env:
           RUSTFLAGS: -C overflow-checks=on
+          STATEFUL: ${{ matrix.stateful }}
         run: |
           set -euo pipefail
-          TARGETS=$(cargo fuzz list)
+          # The dispatch inputs arrive through the environment; accept only what they may be.
+          case "$FUZZ_DURATION" in ''|*[!0-9]*) echo "::error::duration must be a whole number of seconds"; exit 1 ;; esac
+          case "$FUZZ_TARGETS" in stateful|all) ;; *) echo "::error::targets must be stateful or all"; exit 1 ;; esac
+          if [ "$FUZZ_TARGETS" = all ]; then TARGETS=$(cargo fuzz list); else TARGETS=$STATEFUL; fi
+          # A stateful target gets the whole duration; a single-message parser saturates sooner and
+          # gets at most 60 s (the 100% budget: 300 s per stateful target, 60 s per parser).
+          PARSER_DURATION=$(( FUZZ_DURATION < 60 ? FUZZ_DURATION : 60 ))
           for TARGET in $TARGETS; do
-            echo "==> Fuzzing $TARGET for ${FUZZ_DURATION}s"
-            cargo fuzz run --debug-assertions "$TARGET" -- \
-              -max_total_time="${FUZZ_DURATION}" \
+            case " $STATEFUL " in
+              *" $TARGET "*) DURATION=$FUZZ_DURATION ;;
+              *) DURATION=$PARSER_DURATION ;;
+            esac
+            echo "==> Fuzzing $TARGET for ${DURATION}s"
+            # pipefail (above): without it the `| tail` hid every crash (the pipeline's status was tail's).
+            # --target: the prebuilt cargo-fuzz is a musl binary and would default to its own
+            # triple, which has no sanitizer runtime here.
+            cargo fuzz run --debug-assertions --target x86_64-unknown-linux-gnu "$TARGET" -- \
+              -max_total_time="${DURATION}" \
+              -malloc_limit_mb=512 \
               -error_exitcode=77 \
               2>&1 | tail -20
           done
 
       - name: Upload crash artifacts
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: fuzz-crashes-${{ matrix.crate }}
           path: ${{ matrix.crate == 'rtc' && '.' || matrix.crate }}/fuzz/artifacts/**
           if-no-files-found: ignore
+
+  # A pull request from a fork: the same targets and time boxes on GitHub's runners.
+  fuzz_fork:
+    name: Fuzz ${{ matrix.crate }} (fork pull request)
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name != github.repository
+    timeout-minutes: 45
+    strategy: *fuzz-strategy
+    steps: *fuzz-steps

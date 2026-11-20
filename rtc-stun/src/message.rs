@@ -10,6 +10,8 @@
 //! it rather than over a re-encoding.
 
 #[cfg(test)]
+mod message_length_test;
+#[cfg(test)]
 mod message_test;
 
 use crate::attributes::*;
@@ -250,19 +252,22 @@ impl Message {
         // Encoding attribute TLV to allocated buffer.
         let buf = &mut self.raw[first..last];
         buf[0..2].copy_from_slice(&t.value().to_be_bytes()); // T
-        buf[2..4].copy_from_slice(&(v.len() as u16).to_be_bytes()); // L
+        // L. A value too long for the field saturates rather than wrapping; the message it
+        // goes into is then too long as well, which `build` refuses.
+        let length = u16::try_from(v.len()).unwrap_or(u16::MAX);
+        buf[2..4].copy_from_slice(&length.to_be_bytes()); // L
 
         let value = &mut buf[ATTRIBUTE_HEADER_SIZE..];
         value.copy_from_slice(v); // V
 
         let attr = RawAttribute {
-            typ: t,                 // T
-            length: v.len() as u16, // L
-            value: value.to_vec(),  // V
+            typ: t,                // T
+            length,                // L
+            value: value.to_vec(), // V
         };
 
         // Checking that attribute value needs padding.
-        if !(attr.length as usize).is_multiple_of(PADDING) {
+        if !v.len().is_multiple_of(PADDING) {
             // Performing padding.
             let bytes_to_add = nearest_padded_value_length(v.len()) - v.len();
             last += bytes_to_add;
@@ -281,9 +286,13 @@ impl Message {
     }
 
     /// WriteLength writes m.Length to m.Raw.
+    ///
+    /// A length past what the 16-bit field holds is written as `u16::MAX` rather than wrapped
+    /// to a small value; [`build`](Self::build) refuses such a message.
     pub fn write_length(&mut self) {
         self.grow(4, false);
-        self.raw[2..4].copy_from_slice(&(self.length as u16).to_be_bytes());
+        let length = u16::try_from(self.length).unwrap_or(u16::MAX);
+        self.raw[2..4].copy_from_slice(&length.to_be_bytes());
     }
 
     /// WriteHeader writes header to underlying buffer. Not goroutine-safe.
@@ -493,11 +502,21 @@ impl Message {
     /// # Ok(())
     /// # }
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// Fails with the first setter's error, or with [`Error::ErrPacketTooBig`] once the
+    /// attributes no longer fit the 16-bit message length (RFC 8489 §5).
     pub fn build(&mut self, setters: &[Box<dyn Setter + '_>]) -> Result<()> {
         self.reset();
         self.write_header();
         for s in setters {
             s.add_to(self)?;
+            // Checked after every setter, so MESSAGE-INTEGRITY and FINGERPRINT are never
+            // computed over a header whose length does not describe the message.
+            if self.length > u32::from(u16::MAX) {
+                return Err(Error::ErrPacketTooBig);
+            }
         }
         Ok(())
     }

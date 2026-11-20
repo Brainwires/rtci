@@ -1,356 +1,329 @@
-use portable_atomic::AtomicUsize;
+//! Ported from the async `webrtc` crate's `rtp_transceiver_test.rs` to the sans-IO API.
+//!
+//! The old tests made transceivers with `APIBuilder` and awaited every peer connection method;
+//! here a transceiver is reached through [`RTCPeerConnection::rtp_transceiver`] and negotiation
+//! is synchronous. Negotiation-needed is an [`RTCPeerConnectionEvent`] to poll rather than a
+//! callback.
 
-use super::*;
-use crate::api::media_engine::{MIME_TYPE_OPUS, MIME_TYPE_VP8, MIME_TYPE_VP9};
-use crate::api::APIBuilder;
-use crate::dtls_transport::DtlsTransport;
-use crate::peer_connection::configuration::RTCConfiguration;
-use crate::peer_connection::peer_connection_test::{close_pair_now, create_vnet_pair};
+use crate::media_stream::MediaStreamTrack;
+use crate::peer_connection::RTCPeerConnection;
+use crate::peer_connection::configuration::media_engine::{
+    MIME_TYPE_OPUS, MIME_TYPE_VP8, MIME_TYPE_VP9,
+};
+use crate::peer_connection::event::RTCPeerConnectionEvent;
+use crate::peer_connection::util_test::{default_media_engine, new_pair, new_pair_with};
+use crate::rtp_transceiver::RTCRtpTransceiverDirection;
+use crate::rtp_transceiver::rtp_sender::{
+    RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters,
+    RtpCodecKind,
+};
+use sansio::Protocol;
+use shared::error::{Error, Result};
+use std::time::Instant;
 
-#[tokio::test]
-async fn test_rtp_transceiver_set_codec_preferences() -> Result<()> {
-    let mut m = MediaEngine::default();
-    m.register_default_codecs()?;
-    m.push_codecs(m.video_codecs.clone(), RTPCodecType::Video)
-        .await;
-    m.push_codecs(m.audio_codecs.clone(), RTPCodecType::Audio)
-        .await;
+fn codec(mime_type: &str, clock_rate: u32, channels: u16, fmtp: &str) -> RTCRtpCodec {
+    RTCRtpCodec {
+        mime_type: mime_type.to_owned(),
+        clock_rate,
+        channels,
+        sdp_fmtp_line: fmtp.to_owned(),
+        rtcp_feedback: vec![],
+    }
+}
 
-    let media_video_codecs = m.video_codecs.clone();
+fn opus() -> RTCRtpCodecParameters {
+    RTCRtpCodecParameters {
+        rtp_codec: codec(MIME_TYPE_OPUS, 48000, 2, "minptime=10;useinbandfec=1"),
+        payload_type: 111,
+    }
+}
 
-    let api = APIBuilder::new().with_media_engine(m).build();
-    let interceptor = api.interceptor_registry.build("")?;
-    let transport = Arc::new(DtlsTransport::default());
-    let receiver = Arc::new(api.new_rtp_receiver(
-        RTPCodecType::Video,
-        Arc::clone(&transport),
-        Arc::clone(&interceptor),
-    ));
+fn vp8(payload_type: u8) -> RTCRtpCodecParameters {
+    RTCRtpCodecParameters {
+        rtp_codec: codec(MIME_TYPE_VP8, 90000, 0, ""),
+        payload_type,
+    }
+}
 
-    let sender = Arc::new(
-        api.new_rtp_sender(None, Arc::clone(&transport), Arc::clone(&interceptor))
-            .await,
-    );
-
-    let tr = RTCRtpTransceiver::new(
-        receiver,
-        sender,
-        RTCRtpTransceiverDirection::Unspecified,
-        RTPCodecType::Video,
-        media_video_codecs.clone(),
-        Arc::clone(&api.media_engine),
-        None,
-    )
-    .await;
-
-    assert_eq!(&tr.get_codecs().await, &media_video_codecs);
-
-    let fail_test_cases = vec![
-        vec![RTCRtpCodecParameters {
-            capability: RTCRtpCodecCapability {
-                mime_type: MIME_TYPE_OPUS.to_string(),
-                clock_rate: 48000,
-                channels: 2,
-                sdp_fmtp_line: "minptime=10;useinbandfec=1".to_string(),
-                rtcp_feedback: vec![],
-            },
-            payload_type: 111,
+fn video_track() -> MediaStreamTrack {
+    MediaStreamTrack::new(
+        "webrtc-rs".to_owned(),
+        "video".to_owned(),
+        "video".to_owned(),
+        RtpCodecKind::Video,
+        vec![RTCRtpEncodingParameters {
+            rtp_coding_parameters: RTCRtpCodingParameters::default(),
+            codec: codec(MIME_TYPE_VP8, 90000, 0, ""),
             ..Default::default()
         }],
-        vec![
-            RTCRtpCodecParameters {
-                capability: RTCRtpCodecCapability {
-                    mime_type: MIME_TYPE_VP8.to_string(),
-                    clock_rate: 90000,
-                    channels: 0,
-                    sdp_fmtp_line: "".to_string(),
-                    rtcp_feedback: vec![],
-                },
-                payload_type: 96,
-                ..Default::default()
-            },
-            RTCRtpCodecParameters {
-                capability: RTCRtpCodecCapability {
-                    mime_type: MIME_TYPE_OPUS.to_string(),
-                    clock_rate: 48000,
-                    channels: 2,
-                    sdp_fmtp_line: "minptime=10;useinbandfec=1".to_string(),
-                    rtcp_feedback: vec![],
-                },
-                payload_type: 111,
-                ..Default::default()
-            },
-        ],
-    ];
+    )
+}
+
+fn drain_negotiation_needed(pc: &mut RTCPeerConnection) -> usize {
+    let mut count = 0;
+    while let Some(event) = pc.poll_event() {
+        if matches!(event, RTCPeerConnectionEvent::OnNegotiationNeededEvent) {
+            count += 1;
+        }
+    }
+    count
+}
+
+#[test]
+fn test_rtp_transceiver_set_codec_preferences() -> Result<()> {
+    let m = default_media_engine();
+    let media_video_codecs = m.get_codecs_by_kind(RtpCodecKind::Video);
+
+    let mut pc = crate::peer_connection::RTCPeerConnectionBuilder::new()
+        .with_media_engine(m)
+        .build(Instant::now())?;
+    let id = pc.add_transceiver_from_kind(RtpCodecKind::Video, None)?;
+    let get_codecs = |pc: &RTCPeerConnection| pc.rtp_transceivers[id].get_codecs(&pc.media_engine);
+
+    assert_eq!(get_codecs(&pc), media_video_codecs);
+
+    let fail_test_cases = vec![vec![opus()], vec![vp8(96), opus()]];
 
     for test_case in fail_test_cases {
-        if let Err(err) = tr.set_codec_preferences(test_case).await {
-            assert_eq!(err, Error::ErrRTPTransceiverCodecUnsupported);
-        } else {
-            panic!();
-        }
+        assert_eq!(
+            pc.rtp_transceiver(id)
+                .expect("transceiver")
+                .set_codec_preferences(test_case)
+                .unwrap_err(),
+            Error::ErrRTPTransceiverCodecUnsupported
+        );
     }
 
     let success_test_cases = vec![
-        vec![RTCRtpCodecParameters {
-            capability: RTCRtpCodecCapability {
-                mime_type: MIME_TYPE_VP8.to_string(),
-                clock_rate: 90000,
-                channels: 0,
-                sdp_fmtp_line: "".to_string(),
-                rtcp_feedback: vec![],
-            },
-            payload_type: 96,
-            ..Default::default()
-        }],
+        vec![vp8(96)],
         vec![
+            vp8(96),
             RTCRtpCodecParameters {
-                capability: RTCRtpCodecCapability {
-                    mime_type: MIME_TYPE_VP8.to_string(),
-                    clock_rate: 90000,
-                    channels: 0,
-                    sdp_fmtp_line: "".to_string(),
-                    rtcp_feedback: vec![],
-                },
-                payload_type: 96,
-                ..Default::default()
-            },
-            RTCRtpCodecParameters {
-                capability: RTCRtpCodecCapability {
-                    mime_type: MIME_TYPE_VP9.to_string(),
-                    clock_rate: 90000,
-                    channels: 0,
-                    sdp_fmtp_line: "profile-id=0".to_string(),
-                    rtcp_feedback: vec![],
-                },
+                rtp_codec: codec(MIME_TYPE_VP9, 90000, 0, "profile-id=0"),
                 payload_type: 98,
-                ..Default::default()
             },
         ],
     ];
 
     for test_case in success_test_cases {
-        tr.set_codec_preferences(test_case).await?;
+        pc.rtp_transceiver(id)
+            .expect("transceiver")
+            .set_codec_preferences(test_case)?;
     }
 
-    tr.set_codec_preferences(vec![]).await?;
-    assert_ne!(0, tr.get_codecs().await.len());
+    pc.rtp_transceiver(id)
+        .expect("transceiver")
+        .set_codec_preferences(vec![])?;
+    assert_ne!(0, get_codecs(&pc).len());
+    assert_eq!(get_codecs(&pc), media_video_codecs);
 
-    Ok(())
+    pc.close()
 }
 
 // Assert that SetCodecPreferences properly filters codecs and PayloadTypes are respected
-#[tokio::test]
-async fn test_rtp_transceiver_set_codec_preferences_payload_type() -> Result<()> {
+#[test]
+fn test_rtp_transceiver_set_codec_preferences_payload_type() -> Result<()> {
     let test_codec = RTCRtpCodecParameters {
-        capability: RTCRtpCodecCapability {
-            mime_type: "video/test_codec".to_string(),
-            clock_rate: 90000,
-            channels: 0,
-            sdp_fmtp_line: "".to_string(),
-            rtcp_feedback: vec![],
-        },
+        rtp_codec: codec("video/test_codec", 90000, 0, ""),
         payload_type: 50,
-        ..Default::default()
     };
 
-    let mut m = MediaEngine::default();
-    m.register_default_codecs()?;
-    let api = APIBuilder::new().with_media_engine(m).build();
-    let offer_pc = api.new_peer_connection(RTCConfiguration::default()).await?;
+    let mut answerer_media_engine = default_media_engine();
+    answerer_media_engine.register_codec(test_codec.clone(), RtpCodecKind::Video)?;
+    let (mut offer_pc, mut answer_pc) =
+        new_pair_with(default_media_engine(), answerer_media_engine)?;
 
-    let mut m = MediaEngine::default();
-    m.register_default_codecs()?;
-    m.register_codec(test_codec.clone(), RTPCodecType::Video)?;
-    let api = APIBuilder::new().with_media_engine(m).build();
-    let answer_pc = api.new_peer_connection(RTCConfiguration::default()).await?;
+    let _ = offer_pc.add_transceiver_from_kind(RtpCodecKind::Video, None)?;
 
-    let _ = offer_pc
-        .add_transceiver_from_kind(RTPCodecType::Video, None)
-        .await?;
+    // The old transceivers were sendrecv by default; the sans-IO default is recvonly, and a
+    // recvonly answerer transceiver cannot take a recvonly offer's m-section. A sending one can.
+    let answer_sender = answer_pc.add_track(video_track())?;
 
-    let answer_transceiver = answer_pc
-        .add_transceiver_from_kind(RTPCodecType::Video, None)
-        .await?;
+    answer_pc
+        .rtp_transceiver(answer_sender.0)
+        .expect("transceiver")
+        .set_codec_preferences(vec![test_codec, vp8(51)])?;
 
-    answer_transceiver
-        .set_codec_preferences(vec![
-            test_codec,
-            RTCRtpCodecParameters {
-                capability: RTCRtpCodecCapability {
-                    mime_type: MIME_TYPE_VP8.to_string(),
-                    clock_rate: 90000,
-                    channels: 0,
-                    sdp_fmtp_line: "".to_string(),
-                    rtcp_feedback: vec![],
-                },
-                payload_type: 51,
-                ..Default::default()
-            },
-        ])
-        .await?;
+    let offer = offer_pc.create_offer(None)?;
 
-    let offer = offer_pc.create_offer(None).await?;
+    offer_pc.set_local_description(Instant::now(), offer.clone())?;
+    answer_pc.set_remote_description(Instant::now(), offer)?;
 
-    offer_pc.set_local_description(offer.clone()).await?;
-    answer_pc.set_remote_description(offer).await?;
+    let answer = answer_pc.create_answer(None)?;
 
-    let answer = answer_pc.create_answer(None).await?;
-
-    // VP8 with proper PayloadType
+    // VP8 with proper PayloadType. The old crate answered with the preference's payload type
+    // (51); this one answers with the offer's (96, VP8 in the default codecs), which is what
+    // RFC 3264 §6.1 asks of an answer ("that same payload type number SHOULD be used for that
+    // codec in the answer"). The preference still selects the codec.
     assert!(
-        answer.sdp.contains("a=rtpmap:51 VP8/90000"),
+        answer.sdp.contains("a=rtpmap:96 VP8/90000"),
         "{}",
         answer.sdp
     );
+    assert!(!answer.sdp.contains("a=rtpmap:51 "), "{}", answer.sdp);
+
+    // The preferences filter the answer: codecs the offerer has but the preferences omit are
+    // left out.
+    assert!(!answer.sdp.contains("VP9"), "{}", answer.sdp);
 
     // test_codec is ignored since offerer doesn't support
     assert!(!answer.sdp.contains("test_codec"));
 
-    close_pair_now(&offer_pc, &answer_pc).await;
-
-    Ok(())
+    offer_pc.close()?;
+    answer_pc.close()
 }
 
-#[tokio::test]
-async fn test_rtp_transceiver_direction_change() -> Result<()> {
-    let (offer_pc, answer_pc, _) = create_vnet_pair().await?;
+#[test]
+fn test_rtp_transceiver_direction_change() -> Result<()> {
+    let (mut offer_pc, mut answer_pc) = new_pair()?;
 
-    let offer_transceiver = offer_pc
-        .add_transceiver_from_kind(RTPCodecType::Video, None)
-        .await?;
+    // Sendrecv on both sides, as the old default transceivers were.
+    let offer_sender = offer_pc.add_track(video_track())?;
+    let _ = answer_pc.add_track(video_track())?;
 
-    let _ = answer_pc
-        .add_transceiver_from_kind(RTPCodecType::Video, None)
-        .await?;
+    let offer = offer_pc.create_offer(None)?;
 
-    let offer = offer_pc.create_offer(None).await?;
+    offer_pc.set_local_description(Instant::now(), offer.clone())?;
+    answer_pc.set_remote_description(Instant::now(), offer)?;
 
-    offer_pc.set_local_description(offer.clone()).await?;
-    answer_pc.set_remote_description(offer).await?;
+    let answer = answer_pc.create_answer(None)?;
+    assert!(answer.sdp.contains("a=sendrecv"), "{}", answer.sdp);
+    answer_pc.set_local_description(Instant::now(), answer.clone())?;
+    offer_pc.set_remote_description(Instant::now(), answer)?;
 
-    let answer = answer_pc.create_answer(None).await?;
-    assert!(answer.sdp.contains("a=sendrecv"),);
-    answer_pc.set_local_description(answer.clone()).await?;
-    offer_pc.set_remote_description(answer).await?;
+    offer_pc
+        .rtp_transceiver(offer_sender.0)
+        .expect("transceiver")
+        .set_direction(RTCRtpTransceiverDirection::Inactive);
 
-    offer_transceiver
-        .set_direction(RTCRtpTransceiverDirection::Inactive)
-        .await;
+    let offer = offer_pc.create_offer(None)?;
+    assert!(offer.sdp.contains("a=inactive"), "{}", offer.sdp);
 
-    let offer = offer_pc.create_offer(None).await?;
-    assert!(offer.sdp.contains("a=inactive"),);
+    offer_pc.set_local_description(Instant::now(), offer.clone())?;
+    answer_pc.set_remote_description(Instant::now(), offer)?;
 
-    offer_pc.set_local_description(offer.clone()).await?;
-    answer_pc.set_remote_description(offer).await?;
+    let answer = answer_pc.create_answer(None)?;
+    assert!(answer.sdp.contains("a=inactive"), "{}", answer.sdp);
+    offer_pc.set_remote_description(Instant::now(), answer)?;
 
-    let answer = answer_pc.create_answer(None).await?;
-    assert!(answer.sdp.contains("a=inactive"),);
-    offer_pc.set_remote_description(answer).await?;
-
-    close_pair_now(&offer_pc, &answer_pc).await;
-
-    Ok(())
+    offer_pc.close()?;
+    answer_pc.close()
 }
 
-#[tokio::test]
-async fn test_rtp_transceiver_set_direction_causing_negotiation() -> Result<()> {
-    let (offer_pc, answer_pc, _) = create_vnet_pair().await?;
+#[test]
+fn test_rtp_transceiver_set_direction_causing_negotiation() -> Result<()> {
+    let (mut offer_pc, mut answer_pc) = new_pair()?;
 
-    let count = Arc::new(AtomicUsize::new(0));
+    let offer_sender = offer_pc.add_track(video_track())?;
+    let _ = answer_pc.add_track(video_track())?;
 
-    {
-        let count = count.clone();
-        offer_pc.on_negotiation_needed(Box::new(move || {
-            let count = count.clone();
-            Box::pin(async move {
-                count.fetch_add(1, Ordering::SeqCst);
-            })
-        }));
-    }
+    let renegotiate =
+        |offer_pc: &mut RTCPeerConnection, answer_pc: &mut RTCPeerConnection| -> Result<()> {
+            let offer = offer_pc.create_offer(None)?;
+            offer_pc.set_local_description(Instant::now(), offer.clone())?;
+            answer_pc.set_remote_description(Instant::now(), offer)?;
 
-    let offer_transceiver = offer_pc
-        .add_transceiver_from_kind(RTPCodecType::Video, None)
-        .await?;
+            let answer = answer_pc.create_answer(None)?;
+            answer_pc.set_local_description(Instant::now(), answer.clone())?;
+            offer_pc.set_remote_description(Instant::now(), answer)
+        };
 
-    let _ = answer_pc
-        .add_transceiver_from_kind(RTPCodecType::Video, None)
-        .await?;
+    renegotiate(&mut offer_pc, &mut answer_pc)?;
+    // The old callback was registered after the first transceiver existed; adding it here fired
+    // negotiation-needed before the exchange, which is what that exchange answered.
+    drain_negotiation_needed(&mut offer_pc);
 
-    let offer = offer_pc.create_offer(None).await?;
-    offer_pc.set_local_description(offer.clone()).await?;
-    answer_pc.set_remote_description(offer).await?;
+    renegotiate(&mut offer_pc, &mut answer_pc)?;
+    assert_eq!(drain_negotiation_needed(&mut offer_pc), 0);
 
-    let answer = answer_pc.create_answer(None).await?;
-    answer_pc.set_local_description(answer.clone()).await?;
-    offer_pc.set_remote_description(answer).await?;
+    offer_pc
+        .rtp_transceiver(offer_sender.0)
+        .expect("transceiver")
+        .set_direction(RTCRtpTransceiverDirection::Inactive);
 
-    assert_eq!(count.load(Ordering::SeqCst), 0);
+    assert_eq!(drain_negotiation_needed(&mut offer_pc), 1);
 
-    let offer = offer_pc.create_offer(None).await?;
-    offer_pc.set_local_description(offer.clone()).await?;
-    answer_pc.set_remote_description(offer).await?;
-
-    let answer = answer_pc.create_answer(None).await?;
-    answer_pc.set_local_description(answer.clone()).await?;
-    offer_pc.set_remote_description(answer).await?;
-
-    assert_eq!(count.load(Ordering::SeqCst), 0);
-
-    offer_transceiver
-        .set_direction(RTCRtpTransceiverDirection::Inactive)
-        .await;
-
-    // wait for negotiation ops queue to finish.
-    offer_pc.internal.ops.done().await;
-
-    assert_eq!(count.load(Ordering::SeqCst), 1);
-
-    close_pair_now(&offer_pc, &answer_pc).await;
-
-    Ok(())
+    offer_pc.close()?;
+    answer_pc.close()
 }
 
-#[ignore]
-#[tokio::test]
-async fn test_rtp_transceiver_stopping() -> Result<()> {
-    let (offer_pc, answer_pc, _) = create_vnet_pair().await?;
+/// RFC 9429 Section 5.2.2: an offer rejects (port 0) a stopped transceiver's m= section.
+#[test]
+fn test_rtp_transceiver_stopping() -> Result<()> {
+    let (mut offer_pc, mut answer_pc) = new_pair()?;
 
-    let offer_transceiver = offer_pc
-        .add_transceiver_from_kind(RTPCodecType::Video, None)
-        .await?;
+    let offer_sender = offer_pc.add_track(video_track())?;
+    let _ = answer_pc.add_track(video_track())?;
 
-    let _ = answer_pc
-        .add_transceiver_from_kind(RTPCodecType::Video, None)
-        .await?;
+    let offer = offer_pc.create_offer(None)?;
 
-    let offer = offer_pc.create_offer(None).await?;
+    offer_pc.set_local_description(Instant::now(), offer.clone())?;
+    answer_pc.set_remote_description(Instant::now(), offer)?;
 
-    offer_pc.set_local_description(offer.clone()).await?;
-    answer_pc.set_remote_description(offer).await?;
-
-    let answer = answer_pc.create_answer(None).await?;
-    assert!(answer.sdp.contains("a=sendrecv"),);
-    answer_pc.set_local_description(answer.clone()).await?;
-    offer_pc.set_remote_description(answer).await?;
+    let answer = answer_pc.create_answer(None)?;
+    assert!(answer.sdp.contains("a=sendrecv"), "{}", answer.sdp);
+    answer_pc.set_local_description(Instant::now(), answer.clone())?;
+    offer_pc.set_remote_description(Instant::now(), answer)?;
 
     assert!(
-        offer_transceiver.mid().is_some(),
+        offer_pc
+            .rtp_transceiver(offer_sender.0)
+            .expect("transceiver")
+            .mid()
+            .is_some(),
         "A mid should have been associated with the transceiver when applying the answer"
     );
     // Stop the transceiver
-    offer_transceiver.stop().await?;
+    offer_pc
+        .rtp_transceiver(offer_sender.0)
+        .expect("transceiver")
+        .stop()?;
 
-    let offer = offer_pc.create_offer(None).await?;
-    assert!(offer.sdp.contains("a=inactive"),);
-    let parsed = offer.parsed.unwrap();
+    let offer = offer_pc.create_offer(None)?;
+    let parsed = offer.parsed.as_ref().expect("a parsed offer");
     let m = &parsed.media_descriptions[0];
     assert_eq!(
         m.media_name.port.value, 0,
-        "After stopping a transceiver it should be rejected in offers"
+        "After stopping a transceiver it should be rejected in offers: {}",
+        offer.sdp
     );
 
-    close_pair_now(&offer_pc, &answer_pc).await;
+    offer_pc.close()?;
+    answer_pc.close()
+}
 
-    Ok(())
+/// Preferences that share no codec with the offer leave the section answered from the whole
+/// engine, as without preferences, rather than with no codec.
+#[test]
+fn test_rtp_transceiver_codec_preferences_without_overlap_fall_back() -> Result<()> {
+    let mut offerer_media_engine =
+        crate::peer_connection::configuration::media_engine::MediaEngine::default();
+    offerer_media_engine.register_codec(vp8(96), RtpCodecKind::Video)?;
+    let (mut offer_pc, mut answer_pc) =
+        new_pair_with(offerer_media_engine, default_media_engine())?;
+
+    let _ = offer_pc.add_transceiver_from_kind(RtpCodecKind::Video, None)?;
+    let answer_sender = answer_pc.add_track(video_track())?;
+    answer_pc
+        .rtp_transceiver(answer_sender.0)
+        .expect("transceiver")
+        .set_codec_preferences(vec![RTCRtpCodecParameters {
+            rtp_codec: codec(MIME_TYPE_VP9, 90000, 0, "profile-id=0"),
+            payload_type: 98,
+        }])?;
+
+    let offer = offer_pc.create_offer(None)?;
+    offer_pc.set_local_description(Instant::now(), offer.clone())?;
+    answer_pc.set_remote_description(Instant::now(), offer)?;
+    let answer = answer_pc.create_answer(None)?;
+
+    assert!(
+        answer.sdp.contains("a=rtpmap:96 VP8/90000"),
+        "{}",
+        answer.sdp
+    );
+    assert!(!answer.sdp.contains("m=video 0 "), "{}", answer.sdp);
+
+    offer_pc.close()?;
+    answer_pc.close()
 }

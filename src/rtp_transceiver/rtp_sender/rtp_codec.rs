@@ -94,7 +94,13 @@ impl RTCRtpCodec {
     pub fn payloader(&self) -> Result<Box<dyn rtp::packetizer::Payloader>> {
         let mime_type = self.mime_type.to_lowercase();
         if mime_type == MIME_TYPE_H264.to_lowercase() {
-            Ok(Box::<rtp::codec::h264::H264Payloader>::default())
+            // RFC 6184 6.2: the negotiated packetization mode decides whether STAP-A and FU-A
+            // may be sent at all; an absent parameter means mode 0.
+            Ok(Box::new(
+                rtp::codec::h264::H264Payloader::with_packetization_mode(h264_packetization_mode(
+                    &self.sdp_fmtp_line,
+                )),
+            ))
         } else if mime_type == MIME_TYPE_HEVC.to_lowercase() {
             Ok(Box::<rtp::codec::h265::HevcPayloader>::default())
         } else if mime_type == MIME_TYPE_VP8.to_lowercase() {
@@ -119,6 +125,16 @@ impl RTCRtpCodec {
             Err(Error::ErrNoPayloaderForCodec)
         }
     }
+}
+
+/// The `packetization-mode` an H.264 fmtp line names, 0 when it names none (RFC 6184 8.1).
+pub(crate) fn h264_packetization_mode(sdp_fmtp_line: &str) -> u8 {
+    sdp_fmtp_line
+        .split(';')
+        .filter_map(|parameter| parameter.trim().split_once('='))
+        .find(|(key, _)| key.trim().eq_ignore_ascii_case("packetization-mode"))
+        .and_then(|(_, value)| value.trim().parse().ok())
+        .unwrap_or(0)
 }
 
 /// Codec match quality result from fuzzy search.
@@ -273,19 +289,38 @@ pub(crate) fn is_repair_codec(codec: &RTCRtpCodec) -> bool {
     matches!(subtype, "rtx" | "ulpfec" | "red") || subtype.starts_with("flexfec")
 }
 
-// For now, only FlexFEC is supported.
-pub(crate) fn find_fec_payload_type(haystack: &[RTCRtpCodecParameters]) -> Option<PayloadType> {
-    for c in haystack {
-        if c.rtp_codec
-            .mime_type
-            .to_lowercase()
-            .contains(MIME_TYPE_FLEX_FEC)
-        {
-            return Some(c.payload_type);
-        }
+/// The kind of a repair format: `"rtx"`, `"ulpfec"`, `"red"` or `"flexfec"` (any FlexFEC
+/// draft); `""` for a media codec.
+pub(crate) fn repair_family(codec: &RTCRtpCodec) -> &'static str {
+    let mime_type = codec.mime_type.to_lowercase();
+    let subtype = mime_type
+        .split_once('/')
+        .map_or(mime_type.as_str(), |(_, subtype)| subtype);
+    match subtype {
+        "rtx" => "rtx",
+        "ulpfec" => "ulpfec",
+        "red" => "red",
+        s if s.starts_with("flexfec") => "flexfec",
+        _ => "",
     }
+}
 
-    None
+/// Whether `mime_type` names the FlexFEC this engine implements: draft-ietf-payload-flexible-fec
+/// -scheme-03 (`video/flexfec-03`), matched exactly.
+///
+/// RFC 8627's `video/flexfec` is a different wire format (its own header layout and masks), so a
+/// substring match, which also took `video/flexfec`, handed RFC 8627 packets to the draft-03
+/// coder.
+pub(crate) fn is_flexfec03_mime_type(mime_type: &str) -> bool {
+    mime_type.eq_ignore_ascii_case(MIME_TYPE_FLEX_FEC03)
+}
+
+/// The payload type of the FlexFEC draft-03 format in `haystack`, the only FEC implemented.
+pub(crate) fn find_fec_payload_type(haystack: &[RTCRtpCodecParameters]) -> Option<PayloadType> {
+    haystack
+        .iter()
+        .find(|c| is_flexfec03_mime_type(&c.rtp_codec.mime_type))
+        .map(|c| c.payload_type)
 }
 
 /// Computes the intersection of two RTCP feedback lists.
@@ -317,6 +352,14 @@ pub(crate) fn rtcp_feedback_intersection(
 
     out
 }
+
+#[cfg(test)]
+#[path = "rtp_codec_packetization_test.rs"]
+mod rtp_codec_packetization_test;
+
+#[cfg(test)]
+#[path = "rtp_codec_flexfec_test.rs"]
+mod rtp_codec_flexfec_test;
 
 #[cfg(test)]
 mod rtx_apt_test {

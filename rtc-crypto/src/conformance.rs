@@ -546,9 +546,10 @@ pub fn assert_random_failure(random: &dyn crate::RTCRandom) {
 
 fn bytes(hex: &str) -> Vec<u8> {
     assert!(hex.len().is_multiple_of(2));
-    hex.as_bytes()
-        .chunks_exact(2)
-        .map(|pair| (nibble(pair[0]) << 4) | nibble(pair[1]))
+    let (pairs, _) = hex.as_bytes().as_chunks::<2>();
+    pairs
+        .iter()
+        .map(|&[hi, lo]| (nibble(hi) << 4) | nibble(lo))
         .collect()
 }
 

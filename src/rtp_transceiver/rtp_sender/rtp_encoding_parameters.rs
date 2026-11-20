@@ -9,11 +9,13 @@ use crate::rtp_transceiver::rtp_sender::rtp_coding_parameters::RTCRtpCodingParam
 /// ## Specifications
 ///
 /// * [ORTC](http://draft.ortc.org/#dom-rtcrtpencodingparameters)
-#[derive(Default, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub struct RTCRtpEncodingParameters {
     /// Base coding parameters (RID, SSRC, RTX, FEC)
     pub rtp_coding_parameters: RTCRtpCodingParameters,
-    /// Whether this encoding is actively being transmitted
+    /// Whether this encoding is sent: `false` drops what is written for it and marks its rid
+    /// paused (`~rid`) in the `a=simulcast` attribute (RFC 8853, Section 5.3). `true` by
+    /// default, as W3C `RTCRtpEncodingParameters.active` is.
     pub active: bool,
     /// Codec to use for this encoding
     pub codec: RTCRtpCodec,
@@ -23,4 +25,17 @@ pub struct RTCRtpEncodingParameters {
     pub max_framerate: Option<f64>,
     /// Resolution scaling factor (must be >= 1.0)
     pub scale_resolution_down_by: Option<f64>,
+}
+
+impl Default for RTCRtpEncodingParameters {
+    fn default() -> Self {
+        Self {
+            rtp_coding_parameters: RTCRtpCodingParameters::default(),
+            active: true,
+            codec: RTCRtpCodec::default(),
+            max_bitrate: 0,
+            max_framerate: None,
+            scale_resolution_down_by: None,
+        }
+    }
 }

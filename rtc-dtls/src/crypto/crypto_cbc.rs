@@ -11,6 +11,7 @@ use std::io::Cursor;
 use std::sync::Arc;
 
 use crate::content::*;
+use crate::crypto::padding;
 use crate::crypto::{authentication_error, crypto_error};
 use crate::prf::*;
 use crate::record_layer::record_layer_header::*;
@@ -88,7 +89,9 @@ impl CryptoCbc {
         payload.extend_from_slice(&mac);
 
         let padding_len = Self::BLOCK_SIZE - (payload.len() % Self::BLOCK_SIZE);
-        payload.resize(payload.len() + padding_len, (padding_len - 1) as u8);
+        let padding_start = payload.len();
+        payload.resize(padding_start + padding_len, 0);
+        padding::pad(&mut payload, padding_start);
 
         let mut iv = [0; Self::BLOCK_SIZE];
         self.provider.random().fill(&mut iv).map_err(crypto_error)?;
@@ -139,34 +142,43 @@ impl CryptoCbc {
             .decrypt_blocks(iv, &mut decrypted)
             .map_err(authentication_error)?;
 
-        let padding_value = decrypted.last().copied().ok_or(Error::ErrInvalidMac)?;
-        let padding_len = padding_value as usize + 1;
-        if padding_len > decrypted.len() {
+        // Lucky Thirteen: how long the padding and MAC checks take must not depend on the padding
+        // the plaintext claims. The record's length is public; the padding length is not. So the
+        // padding is checked without returning early, a record with bad padding is MACed as if it
+        // had none (RFC 5246 6.2.3.2), and the bytes the padding took are run through the MAC
+        // too, so every record of one length MACs the same number of bytes and fails the same
+        // way. (The MAC interface takes whole messages, so the HMAC's own block count is not
+        // made constant beyond that.)
+        if decrypted.len() <= Self::MAC_SIZE {
             return Err(Error::ErrInvalidMac);
         }
-        let padding_start = decrypted.len() - padding_len;
-        let expected_padding = vec![padding_value; padding_len];
-        let padding_valid = constant_time_eq(&decrypted[padding_start..], &expected_padding);
-        decrypted.truncate(padding_start);
+        let (padding_len, padding_valid) = padding::check_padding(&decrypted, Self::MAC_SIZE);
+        let strip = padding_len & 0usize.wrapping_sub(usize::from(padding_valid));
+        let content_len = decrypted.len() - Self::MAC_SIZE - strip;
 
-        if decrypted.len() < Self::MAC_SIZE {
-            return Err(Error::ErrInvalidMac);
-        }
-
-        let recv_mac = &decrypted[decrypted.len() - Self::MAC_SIZE..];
-        let decrypted = &decrypted[0..decrypted.len() - Self::MAC_SIZE];
+        let recv_mac = &decrypted[content_len..content_len + Self::MAC_SIZE];
+        let content = &decrypted[..content_len];
         let mac = prf_mac(
             self.read_mac.as_mut(),
             h.epoch,
             h.sequence_number,
             h.content_type,
             h.protocol_version,
-            decrypted,
+            content,
+        )?;
+        let _equalizer = prf_mac(
+            self.read_mac.as_mut(),
+            h.epoch,
+            h.sequence_number,
+            h.content_type,
+            h.protocol_version,
+            &decrypted[..strip],
         )?;
 
-        if !padding_valid || !constant_time_eq(recv_mac, &mac) {
+        if !(padding_valid & constant_time_eq(recv_mac, &mac)) {
             return Err(Error::ErrInvalidMac);
         }
+        let decrypted = content;
 
         let mut d = Vec::with_capacity(RECORD_LAYER_HEADER_SIZE + decrypted.len());
         d.extend_from_slice(&r[..RECORD_LAYER_HEADER_SIZE]);

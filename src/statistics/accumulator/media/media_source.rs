@@ -1,5 +1,6 @@
 //! Media source statistics accumulator.
 
+use crate::rtp_transceiver::RTCRtpTransceiverId;
 use crate::rtp_transceiver::rtp_sender::RtpCodecKind;
 use crate::statistics::stats::media::audio_source::RTCAudioSourceStats;
 use crate::statistics::stats::media::media_source::RTCMediaSourceStats;
@@ -18,6 +19,9 @@ pub struct MediaSourceStatsAccumulator {
     pub track_id: String,
     /// The media kind (audio/video).
     pub kind: RtpCodecKind,
+    /// The transceiver whose sender sends the track, which links its outbound streams to this
+    /// source (`mediaSourceId`).
+    pub transceiver_id: Option<RTCRtpTransceiverId>,
 
     // Audio-specific (from application)
     /// Current audio level (0.0 - 1.0).
@@ -42,6 +46,11 @@ pub struct MediaSourceStatsAccumulator {
     pub frames_per_second: Option<f64>,
 }
 
+/// The stats id of the media-source object for the track `track_id`.
+pub(crate) fn media_source_stats_id(track_id: &str) -> String {
+    format!("RTCMediaSource_{track_id}")
+}
+
 impl MediaSourceStatsAccumulator {
     /// Creates a snapshot of the accumulated stats at the given timestamp.
     pub fn snapshot(&self, now: Instant, id: &str) -> RTCMediaSourceStats {
@@ -51,7 +60,7 @@ impl MediaSourceStatsAccumulator {
                 typ: RTCStatsType::MediaSource,
                 id: id.to_string(),
             },
-            track_id: self.track_id.clone(),
+            track_identifier: self.track_id.clone(),
             kind: self.kind,
         }
     }
@@ -60,11 +69,11 @@ impl MediaSourceStatsAccumulator {
     pub fn snapshot_audio(&self, now: Instant, id: &str) -> RTCAudioSourceStats {
         RTCAudioSourceStats {
             media_source_stats: self.snapshot(now, id),
-            audio_level: self.audio_level.unwrap_or(0.0),
-            total_audio_energy: self.total_audio_energy.unwrap_or(0.0),
-            total_samples_duration: self.total_samples_duration.unwrap_or(0.0),
-            echo_return_loss: self.echo_return_loss.unwrap_or(0.0),
-            echo_return_loss_enhancement: self.echo_return_loss_enhancement.unwrap_or(0.0),
+            audio_level: self.audio_level,
+            total_audio_energy: self.total_audio_energy,
+            total_samples_duration: self.total_samples_duration,
+            echo_return_loss: self.echo_return_loss,
+            echo_return_loss_enhancement: self.echo_return_loss_enhancement,
         }
     }
 
@@ -72,10 +81,10 @@ impl MediaSourceStatsAccumulator {
     pub fn snapshot_video(&self, now: Instant, id: &str) -> RTCVideoSourceStats {
         RTCVideoSourceStats {
             media_source_stats: self.snapshot(now, id),
-            width: self.width.unwrap_or(0),
-            height: self.height.unwrap_or(0),
-            frames: self.frames.unwrap_or(0),
-            frames_per_second: self.frames_per_second.unwrap_or(0.0),
+            width: self.width,
+            height: self.height,
+            frames: self.frames,
+            frames_per_second: self.frames_per_second,
         }
     }
 }

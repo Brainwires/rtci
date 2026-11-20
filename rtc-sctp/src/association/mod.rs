@@ -66,6 +66,8 @@ pub(crate) mod timer;
 
 #[cfg(test)]
 mod association_test;
+#[cfg(any(fuzzing, feature = "bench"))]
+pub(crate) mod recovery_bench;
 
 /// Incoming stream reset requests held at once while they wait for the peer's TSN or for the
 /// application to drain a stream. RFC 6525 has a peer keep one request in flight; a request
@@ -176,7 +178,8 @@ pub struct Association {
     state: AssociationState,
     handshake_completed: bool,
     max_message_size: u32,
-    inflight_queue_length: usize,
+    /// The largest message accepted from the peer: what this side advertised (RFC 8841 6.1).
+    max_receive_message_size: u32,
     will_send_shutdown: bool,
     bytes_received: usize,
     bytes_sent: usize,
@@ -218,7 +221,7 @@ pub struct Association {
     my_cookie: Option<ParamStateCookie>,
 
     pub(crate) payload_queue: PayloadQueue,
-    inflight_queue: PayloadQueue,
+    pub(crate) inflight_queue: PayloadQueue,
     pub(crate) pending_queue: PendingQueue,
     control_queue: VecDeque<Packet>,
     stream_queue: VecDeque<u16>,
@@ -275,6 +278,8 @@ pub struct Association {
     events: VecDeque<Event>,
     endpoint_events: VecDeque<EndpointEventInner>,
     error: Option<AssociationError>,
+    /// Set by [`close`](Self::close): the association is over, whatever state it was in.
+    ended: bool,
 
     // per inbound packet context
     delayed_ack_triggered: bool,
@@ -294,7 +299,7 @@ impl Default for Association {
             state: AssociationState::default(),
             handshake_completed: false,
             max_message_size: 0,
-            inflight_queue_length: 0,
+            max_receive_message_size: 0,
             will_send_shutdown: false,
             bytes_received: 0,
             bytes_sent: 0,
@@ -372,6 +377,7 @@ impl Default for Association {
             events: VecDeque::default(),
             endpoint_events: VecDeque::default(),
             error: None,
+            ended: false,
 
             // per inbound packet context
             delayed_ack_triggered: false,
@@ -428,9 +434,14 @@ impl Association {
             handshake_completed: false,
             max_receive_buffer_size: config.max_receive_buffer_size(),
             max_message_size: config.max_message_size(),
+            max_receive_message_size: config.max_receive_message_size(),
             my_max_num_outbound_streams: config.max_num_outbound_streams(),
             my_max_num_inbound_streams: config.max_num_inbound_streams(),
             max_payload_size,
+            // RFC 8841 5: each side's `a=sctp-port`. An accepting side takes the INIT's ports
+            // instead (`handle_init`).
+            source_port: config.sctp_port(),
+            destination_port: config.remote_sctp_port(),
 
             rto_mgr: RtoManager::new(),
             timers: TimerTable::new(config.timer_config()),
@@ -522,10 +533,21 @@ impl Association {
     /// - a call was made to `handle_timeout`
     #[must_use]
     pub fn poll_transmit(&mut self, now: Instant) -> Option<TransportMessage<Payload>> {
-        let (contents, _) = self.gather_outbound(now);
+        let (contents, keep_open) = self.gather_outbound(now);
+        if !keep_open && !self.ended {
+            // The SHUTDOWN COMPLETE just gathered is the last packet of a graceful shutdown
+            // this side started: RFC 9260 9.2 removes the association once it is sent. It
+            // stayed in SHUTDOWN-SENT for good, with nothing left to happen.
+            if let Err(err) = self.close(AssociationError::LocallyClosed) {
+                error!("[{}] failed to close association: {err}", self.side);
+            }
+        }
         if contents.is_empty() {
             None
         } else {
+            self.bytes_sent = self
+                .bytes_sent
+                .saturating_add(contents.iter().map(Bytes::len).sum());
             trace!(
                 "[{}] sending {} bytes (total {} datagrams)",
                 self.side,
@@ -595,11 +617,9 @@ impl Association {
                 }*/
 
                 if let Payload::PartialDecode(partial_decode) = transmit.message {
-                    debug!(
-                        "[{}] recving {} bytes",
-                        self.side,
-                        COMMON_HEADER_SIZE as usize + partial_decode.remaining.len()
-                    );
+                    let len = COMMON_HEADER_SIZE as usize + partial_decode.remaining.len();
+                    debug!("[{}] recving {} bytes", self.side, len);
+                    self.bytes_received = self.bytes_received.saturating_add(len);
 
                     let pkt = match partial_decode.finish() {
                         Ok(p) => p,
@@ -666,6 +686,15 @@ impl Association {
         self.state == AssociationState::Closed
     }
 
+    /// Whether the association is over: closed by either side, by an error, or by a handshake
+    /// that failed.
+    ///
+    /// Unlike [`is_closed`](Self::is_closed), false for an association still handshaking in
+    /// SCTP's initial CLOSED state (RFC 9260 section 4), which has not ended.
+    pub fn is_ended(&self) -> bool {
+        self.ended
+    }
+
     /// Whether there is no longer any need to keep the association around
     ///
     /// Closed associations become drained after a brief timeout to absorb any remaining in-flight
@@ -719,19 +748,31 @@ impl Association {
             return Err(Error::ErrShutdownNonEstablished);
         }
 
-        // Attempt a graceful shutdown.
+        // Attempt a graceful shutdown. RFC 9260 9.2: SHUTDOWN-PENDING lasts until everything
+        // the application handed over has been sent and acknowledged. This tested a counter
+        // that was never updated, so SHUTDOWN went out at once, ahead of the DATA still in
+        // flight or queued, and the queued DATA was never sent.
         self.set_state(AssociationState::ShutdownPending);
 
-        if self.inflight_queue_length == 0 {
+        if self.inflight_queue.is_empty() && self.pending_queue.is_empty() {
             // No more outstanding, send shutdown.
-            self.will_send_shutdown = true;
-            self.awake_write_loop();
-            self.set_state(AssociationState::ShutdownSent);
+            self.send_shutdown();
         }
 
-        self.endpoint_events.push_back(EndpointEventInner::Drained);
-
         Ok(())
+    }
+
+    /// Moves SHUTDOWN-PENDING on to SHUTDOWN-SENT and queues the SHUTDOWN.
+    ///
+    /// The endpoint's `Drained` goes out with it, as it always has: the owner flushes this
+    /// association's final packets and may then stop routing to it. It used to be emitted by
+    /// `shutdown()` itself, which with DATA still outstanding cut the association off from the
+    /// SACKs it was waiting for.
+    fn send_shutdown(&mut self) {
+        self.will_send_shutdown = true;
+        self.awake_write_loop();
+        self.set_state(AssociationState::ShutdownSent);
+        self.endpoint_events.push_back(EndpointEventInner::Drained);
     }
 
     /// Aborts the association (RFC 9260 §9.1): queues an ABORT chunk and closes the association.
@@ -745,7 +786,7 @@ impl Association {
     /// `poll_transmit` before this call is discarded, so drain it first if it should still go out.
     /// A no-op on a closed association.
     pub fn abort(&mut self) -> Result<()> {
-        if self.state() == AssociationState::Closed {
+        if self.ended {
             return Ok(());
         }
         let abort = ChunkAbort {
@@ -761,7 +802,11 @@ impl Association {
 
     /// Close ends the SCTP Association and cleans up any state
     pub fn close(&mut self, reason: AssociationError) -> Result<()> {
-        if self.state() != AssociationState::Closed {
+        // Keyed on `ended`, not on the CLOSED state: an accepting association is in SCTP's
+        // initial CLOSED state until the COOKIE ECHO, so an ABORT or an error during its
+        // handshake used to close nothing and leave it handshaking for good.
+        if !self.ended {
+            self.ended = true;
             self.set_state(AssociationState::Closed);
 
             debug!("[{}] closing association..", self.side);
@@ -850,12 +895,12 @@ impl Association {
         self.streams.keys().cloned().collect()
     }
 
-    /// bytes_sent returns the number of bytes sent
+    /// The bytes of every SCTP packet handed out by `poll_transmit`, common headers included.
     pub(crate) fn bytes_sent(&self) -> usize {
         self.bytes_sent
     }
 
-    /// bytes_received returns the number of bytes received
+    /// The bytes of every SCTP packet handed in through `handle_event`, common headers included.
     pub(crate) fn bytes_received(&self) -> usize {
         self.bytes_received
     }
@@ -934,9 +979,6 @@ impl Association {
     fn send_init(&mut self) -> Result<()> {
         if let Some(stored_init) = &self.stored_init {
             debug!("[{}] sending INIT", self.side);
-
-            self.source_port = 5000; // Spec??
-            self.destination_port = 5000; // Spec??
 
             let outbound = Packet {
                 common_header: CommonHeader {
@@ -1065,7 +1107,7 @@ impl Association {
         } else if let Some(c) = chunk_any.downcast_ref::<ChunkForwardTsn>() {
             self.handle_forward_tsn(c)?
         } else if let Some(c) = chunk_any.downcast_ref::<ChunkShutdown>() {
-            self.handle_shutdown(c)?
+            self.handle_shutdown(c, now)?
         } else if let Some(c) = chunk_any.downcast_ref::<ChunkShutdownAck>() {
             self.handle_shutdown_ack(c)?
         } else if let Some(c) = chunk_any.downcast_ref::<ChunkShutdownComplete>() {
@@ -1454,9 +1496,10 @@ impl Association {
                     // Either kind may take the receiver past `max_receive_buffer_size`, which
                     // is what lets a message larger than the buffer be reassembled at all. But
                     // the headroom this needs is one message, so neither kind is taken past
-                    // one `max_message_size` beyond the buffer.
+                    // one inbound message (the size this side advertised) beyond the buffer.
                     let within_headroom = self.bytes_in_reassembly_queues() + d.user_data.len()
-                        <= self.max_receive_buffer_size as usize + self.max_message_size as usize;
+                        <= self.max_receive_buffer_size as usize
+                            + self.max_receive_message_size as usize;
 
                     if (fills_gap || unblocks_reassembly) && within_headroom {
                         debug!(
@@ -1583,7 +1626,22 @@ impl Association {
             self.rwnd = d.advertised_receiver_window_credit - bytes_outstanding;
         }
 
-        self.process_fast_retransmission(d.cumulative_tsn_ack, htna, cum_tsn_ack_point_advanced)?;
+        // The highest TSN this SACK acknowledges: every outstanding TSN below it is one the
+        // SACK reports missing (RFC 9260 7.2.4).
+        let highest_reported = d
+            .gap_ack_blocks
+            .iter()
+            .map(|g| d.cumulative_tsn_ack.wrapping_add(g.end as u32))
+            .fold(d.cumulative_tsn_ack, |highest, tsn| {
+                if sna32gt(tsn, highest) { tsn } else { highest }
+            });
+        self.process_fast_retransmission(
+            d.cumulative_tsn_ack,
+            htna,
+            highest_reported,
+            cum_tsn_ack_point_advanced,
+            now,
+        )?;
 
         if self.use_forward_tsn {
             // RFC 3758 Sec 3.5 C1
@@ -1728,11 +1786,22 @@ impl Association {
         Ok(reset_reply)
     }
 
-    fn handle_shutdown(&mut self, _: &ChunkShutdown) -> Result<Vec<Packet>> {
+    fn handle_shutdown(&mut self, c: &ChunkShutdown, now: Instant) -> Result<Vec<Packet>> {
         let state = self.state();
 
-        if state == AssociationState::Established {
-            if !self.inflight_queue.is_empty() {
+        if state == AssociationState::Established || state == AssociationState::ShutdownReceived {
+            // RFC 9260 9.2: the SHUTDOWN's Cumulative TSN Ack acknowledges our DATA up to it,
+            // and the receiver checks by it that all its outstanding DATA has arrived. A
+            // SHUTDOWN that crossed our last SACK is the only acknowledgement left for the
+            // data in flight, so without this the association waited for T3-rtx.
+            self.acknowledge_by_shutdown(c.cumulative_tsn_ack, now)?;
+            if self.state() != state {
+                // The acknowledgement drained the queue from SHUTDOWN-RECEIVED, which
+                // already moved on to SHUTDOWN-ACK-SENT.
+                return Ok(vec![]);
+            }
+
+            if !self.inflight_queue.is_empty() || !self.pending_queue.is_empty() {
                 self.set_state(AssociationState::ShutdownReceived);
             } else {
                 // No more outstanding, send shutdown ack.
@@ -1742,8 +1811,6 @@ impl Association {
                 self.awake_write_loop();
             }
         } else if state == AssociationState::ShutdownSent {
-            // self.cumulative_tsn_ack_point = c.cumulative_tsn_ack
-
             self.will_send_shutdown_ack = true;
             self.set_state(AssociationState::ShutdownAckSent);
 
@@ -1751,6 +1818,26 @@ impl Association {
         }
 
         Ok(vec![])
+    }
+
+    /// Processes a SHUTDOWN's Cumulative TSN Ack as a SACK without gap blocks (RFC 9260 9.2).
+    ///
+    /// The peer's receive window is left as it was: a SHUTDOWN does not carry one.
+    fn acknowledge_by_shutdown(&mut self, cumulative_tsn_ack: u32, now: Instant) -> Result<()> {
+        if !sna32gt(cumulative_tsn_ack, self.cumulative_tsn_ack_point)
+            || sna32gte(cumulative_tsn_ack, self.my_next_tsn)
+        {
+            return Ok(());
+        }
+        let outstanding = self.inflight_queue.get_num_bytes() as u32;
+        let sack = ChunkSelectiveAck {
+            cumulative_tsn_ack,
+            advertised_receiver_window_credit: self.rwnd.saturating_add(outstanding),
+            gap_ack_blocks: vec![],
+            duplicate_tsn: vec![],
+        };
+        self.handle_sack(&sack, now)?;
+        Ok(())
     }
 
     fn handle_shutdown_ack(&mut self, _: &ChunkShutdownAck) -> Result<Vec<Packet>> {
@@ -1867,13 +1954,40 @@ impl Association {
             self.reset_streams_if_any(p, true, reply)?;
             Ok(())
         } else if let Some(p) = raw.as_any().downcast_ref::<ParamReconfigResponse>() {
-            self.reconfigs.remove(&p.reconfig_response_sequence_number);
+            // RFC 6525 5.1.1: "In progress" is not the outcome. The request stays outstanding
+            // (and its timer running), so the final response still finds it.
+            if p.result != ReconfigResult::InProgress
+                && let Some(request) = self.reconfigs.remove(&p.reconfig_response_sequence_number)
+                && matches!(
+                    p.result,
+                    ReconfigResult::SuccessPerformed | ReconfigResult::SuccessNop
+                )
+            {
+                self.reset_outgoing_sequence_numbers(&request);
+            }
             if self.reconfigs.is_empty() {
                 self.timers.stop(Timer::Reconfig);
             }
             Ok(())
         } else {
             Err(Error::ErrParameterType)
+        }
+    }
+
+    /// RFC 6525 5.1.2: once the peer has performed our Outgoing SSN Reset Request, the
+    /// streams it named send again from SSN 0, which is what the peer now expects. A stream
+    /// still registered here (the peer did not reset its own direction too, or the channel
+    /// above reuses the stream) kept its old SSN, so the peer held every later ordered message
+    /// back waiting for SSN 0.
+    fn reset_outgoing_sequence_numbers(&mut self, request: &ChunkReconfig) {
+        for param in [&request.param_a, &request.param_b].into_iter().flatten() {
+            if let Some(reset) = param.as_any().downcast_ref::<ParamOutgoingResetRequest>() {
+                for id in &reset.stream_identifiers {
+                    if let Some(stream) = self.streams.get_mut(id) {
+                        stream.sequence_number = 0;
+                    }
+                }
+            }
         }
     }
 
@@ -2023,6 +2137,10 @@ impl Association {
     }
 
     fn on_cumulative_tsn_ack_point_advanced(&mut self, total_bytes_acked: i64, now: Instant) {
+        // Every addition below saturates: cwnd doubles per round trip in slow start and is
+        // bounded by nothing else, so after about 2 GiB acknowledged a plain `+=` wrapped it
+        // to a tiny window (and panicked with overflow checks on).
+        let total_bytes_acked = u32::try_from(total_bytes_acked.max(0)).unwrap_or(u32::MAX);
         // RFC 4096, sec 6.3.2.  Retransmission Timer Rules
         //   R2)  Whenever all outstanding data sent to an address have been
         //        acknowledged, turn off the T3-rtx timer of that address.
@@ -2053,7 +2171,9 @@ impl Association {
             //      outstanding DATA chunk(s) acknowledged, and 2) the destination's
             //      path MTU.
             if !self.in_fast_recovery && !self.pending_queue.is_empty() {
-                self.cwnd += std::cmp::min(total_bytes_acked as u32, self.cwnd); // TCP way
+                self.cwnd = self
+                    .cwnd
+                    .saturating_add(std::cmp::min(total_bytes_acked, self.cwnd)); // TCP way
                 // self.cwnd += min32(uint32(total_bytes_acked), self.mtu) // SCTP way (slow)
                 trace!(
                     "[{}] updated cwnd={} ssthresh={} acked={} (SS)",
@@ -2077,7 +2197,7 @@ impl Association {
             //      partial_bytes_acked by the total number of bytes of all new chunks
             //      acknowledged in that SACK including chunks acknowledged by the new
             //      Cumulative TSN Ack and by Gap Ack Blocks.
-            self.partial_bytes_acked += total_bytes_acked as u32;
+            self.partial_bytes_acked = self.partial_bytes_acked.saturating_add(total_bytes_acked);
 
             //   o  When partial_bytes_acked is equal to or greater than cwnd and
             //      before the arrival of the SACK the sender had cwnd or more bytes
@@ -2086,7 +2206,7 @@ impl Association {
             //      reset partial_bytes_acked to (partial_bytes_acked - cwnd).
             if self.partial_bytes_acked >= self.cwnd && !self.pending_queue.is_empty() {
                 self.partial_bytes_acked -= self.cwnd;
-                self.cwnd += self.mtu;
+                self.cwnd = self.cwnd.saturating_add(self.mtu);
                 trace!(
                     "[{}] updated cwnd={} ssthresh={} acked={} (CA)",
                     self.side, self.cwnd, self.ssthresh, total_bytes_acked
@@ -2099,7 +2219,9 @@ impl Association {
         &mut self,
         cum_tsn_ack_point: u32,
         htna: u32,
+        highest_reported: u32,
         cum_tsn_ack_point_advanced: bool,
+        now: Instant,
     ) -> Result<()> {
         // HTNA algorithm - RFC 4960 Sec 7.2.4
         // Increment missIndicator of each chunks that the SACK reported missing
@@ -2115,8 +2237,12 @@ impl Association {
                 // a) increment only for missing TSNs prior to the HTNA
                 htna
             } else {
-                // b) increment for all TSNs reported missing
-                cum_tsn_ack_point.wrapping_add(self.inflight_queue.len() as u32 + 1)
+                // b) increment for all TSNs reported missing, which are those below the
+                //    highest TSN the SACK acknowledges. DATA sent after that is not reported
+                //    missing, only not acknowledged yet: counting it, as the whole in-flight
+                //    queue was counted here, retransmitted DATA that was not lost and
+                //    abandoned partially reliable messages that would have arrived.
+                highest_reported
             };
 
             let mut tsn = cum_tsn_ack_point.wrapping_add(1);
@@ -2150,6 +2276,32 @@ impl Association {
 
                 tsn = tsn.wrapping_add(1);
             }
+        } else if self.use_forward_tsn {
+            // In Fast Recovery with no Cumulative TSN Ack advance, the HTNA
+            // rule above counts no new miss indications, so a later loss of
+            // a partially reliable message waited for T3-rtx (and its cwnd
+            // collapse) before it was abandoned: under steady loss an
+            // unreliable channel then delivered a fraction of its messages.
+            // A missing chunk below the HTNA whose retransmission budget is
+            // already spent (RFC 3758 3.5 A3, RFC 7496 3.1) is never sent
+            // again, so counting it changes no congestion state: it reaches
+            // the fast retransmit path, which abandons it and sends FORWARD
+            // TSN (RFC 3758 3.5 C1-C3) without waiting for the timer.
+            let mut tsn = cum_tsn_ack_point.wrapping_add(1);
+            while sna32lt(tsn, htna) {
+                let exhausted = self.inflight_queue.get(tsn).is_some_and(|c| {
+                    c.is_outstanding()
+                        && c.miss_indicator < 3
+                        && self.retransmission_policy_exhausted(c, now, true)
+                });
+                if exhausted && let Some(c) = self.inflight_queue.get_mut(tsn) {
+                    c.miss_indicator += 1;
+                    if c.miss_indicator == 3 {
+                        self.will_retransmit_fast = true;
+                    }
+                }
+                tsn = tsn.wrapping_add(1);
+            }
         }
 
         if self.in_fast_recovery && cum_tsn_ack_point_advanced {
@@ -2172,11 +2324,12 @@ impl Association {
             trace!("[{}] T3-rtx timer start (pt3)", self.side);
             self.timers
                 .start_if_idle(Timer::T3RTX, now, self.rto_mgr.get_rto());
+        } else if !self.pending_queue.is_empty() {
+            // Queued DATA still goes out before the shutdown proceeds (RFC 9260 9.2).
         } else if state == AssociationState::ShutdownPending {
             // No more outstanding, send shutdown.
             should_awake_write_loop = true;
-            self.will_send_shutdown = true;
-            self.set_state(AssociationState::ShutdownSent);
+            self.send_shutdown();
         } else if state == AssociationState::ShutdownReceived {
             // No more outstanding, send shutdown ack.
             should_awake_write_loop = true;
@@ -2542,12 +2695,31 @@ impl Association {
                 if self.state() == AssociationState::Closed {
                     return (vec![], false);
                 }
+                // RFC 9260 9.2: no new data is accepted, but what is already queued is still
+                // sent, by the endpoint shutting down and by the one that received SHUTDOWN.
+                // (In SHUTDOWN-SENT nothing is queued: SHUTDOWN waited for the queue.)
+                if state != AssociationState::ShutdownSent {
+                    raw_packets = self.gather_outbound_data_and_reconfig_packets(raw_packets, now);
+                    if self.state() == AssociationState::Closed {
+                        return (vec![], false);
+                    }
+                }
                 raw_packets = self.gather_outbound_fast_retransmission_packets(raw_packets, now);
                 if self.state() == AssociationState::Closed {
                     return (vec![], false);
                 }
                 raw_packets = self.gather_outbound_sack_packets(raw_packets);
                 raw_packets = self.gather_outbound_forward_tsn_packets(raw_packets);
+                // Everything handed over is sent and acknowledged (a queue can also empty by
+                // abandonment, with no SACK to notice it): the shutdown proceeds.
+                if self.inflight_queue.is_empty() && self.pending_queue.is_empty() {
+                    if state == AssociationState::ShutdownPending {
+                        self.send_shutdown();
+                    } else if state == AssociationState::ShutdownReceived {
+                        self.will_send_shutdown_ack = true;
+                        self.set_state(AssociationState::ShutdownAckSent);
+                    }
+                }
                 self.gather_outbound_shutdown_packets(raw_packets, now)
             }
             AssociationState::ShutdownAckSent => {
@@ -2802,8 +2974,11 @@ impl Association {
         if self.will_send_shutdown {
             self.will_send_shutdown = false;
 
+            // RFC 9260 9.2: the SHUTDOWN carries the TSN of the last DATA chunk received in
+            // sequence from the peer, which is what a SACK would acknowledge, not this side's
+            // own acknowledgement point.
             let shutdown = ChunkShutdown {
-                cumulative_tsn_ack: self.cumulative_tsn_ack_point,
+                cumulative_tsn_ack: self.peer_last_tsn,
             };
 
             if let Ok(raw) = self.create_packet(vec![Box::new(shutdown)]).marshal() {
@@ -3683,18 +3858,27 @@ impl Association {
 
     fn on_retransmission_failure(&mut self, id: Timer) {
         match id {
+            // A handshake that runs out of retransmissions is over (RFC 9260 5.1 A, C). It
+            // used to only report HandshakeFailed and stay in COOKIE-WAIT / COOKIE-ECHOED, so
+            // whatever watched the association saw it connecting for good.
             Timer::T1Init => {
                 error!("[{}] retransmission failure: T1-init", self.side);
-                self.error = Some(AssociationError::HandshakeFailed(
-                    Error::ErrHandshakeInitAck.to_string(),
-                ));
+                let reason =
+                    AssociationError::HandshakeFailed(Error::ErrHandshakeInitAck.to_string());
+                self.error = Some(reason.clone());
+                if let Err(err) = self.close(reason) {
+                    error!("[{}] failed to close association: {err}", self.side);
+                }
             }
 
             Timer::T1Cookie => {
                 error!("[{}] retransmission failure: T1-cookie", self.side);
-                self.error = Some(AssociationError::HandshakeFailed(
-                    Error::ErrHandshakeCookieEcho.to_string(),
-                ));
+                let reason =
+                    AssociationError::HandshakeFailed(Error::ErrHandshakeCookieEcho.to_string());
+                self.error = Some(reason.clone());
+                if let Err(err) = self.close(reason) {
+                    error!("[{}] failed to close association: {err}", self.side);
+                }
             }
 
             Timer::T2Shutdown => {
@@ -3702,11 +3886,15 @@ impl Association {
             }
 
             Timer::T3RTX => {
-                // T3-rtx timer will not fail by design
-                // Justifications:
-                //  * ICE would fail if the connectivity is lost
-                //  * WebRTC spec is not clear how this incident should be reported to ULP
+                // Reached only with a finite `TimerConfig::max_t3_rtx_retrans`; the default
+                // is unlimited because a WebRTC peer learns of a lost path from ICE. RFC 9260
+                // 8.1: once the limit is exceeded the peer is unreachable and the association
+                // ends. Returning without re-arming the timer, as this did, left it running
+                // with no retransmission and no FORWARD TSN for ever.
                 error!("[{}] retransmission failure: T3-rtx (DATA)", self.side);
+                if let Err(err) = self.close(AssociationError::TimedOut) {
+                    error!("[{}] failed to close association: {err}", self.side);
+                }
             }
 
             _ => {}

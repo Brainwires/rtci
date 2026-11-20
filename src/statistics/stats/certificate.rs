@@ -34,12 +34,13 @@ pub struct RTCCertificateStats {
     /// Common values are "sha-256" or "sha-1".
     pub fingerprint_algorithm: String,
 
-    /// The certificate in base64-encoded DER format.
+    /// The DER certificate, base64-encoded (RFC 4648 section 4, with padding).
     pub base64_certificate: String,
 
     /// The ID of the issuer certificate stats.
     ///
     /// For certificate chains, this references the parent certificate's
     /// statistics object. Empty if this is a root certificate.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub issuer_certificate_id: String,
 }

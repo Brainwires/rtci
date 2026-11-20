@@ -144,9 +144,8 @@
 //! [RFC 9429]: https://datatracker.ietf.org/doc/html/rfc9429
 //! [W3C WebRTC Specification]: https://www.w3.org/TR/webrtc/#session-description-model
 
-// sdp_test.rs imports crate::api::APIBuilder which belongs to the old async API and does not
-// exist in this sans-IO crate. Enabling it requires porting the test file to the new API.
-// #[cfg(test)] mod sdp_test;
+#[cfg(test)]
+mod sdp_test;
 
 #[cfg(test)]
 mod rejected_mline_tests {
@@ -296,7 +295,9 @@ use crate::peer_connection::transport::dtls::fingerprint::RTCDtlsFingerprint;
 use crate::peer_connection::transport::ice::candidate::RTCIceCandidate;
 use crate::peer_connection::transport::ice::parameters::RTCIceParameters;
 use crate::rtp_transceiver::direction::RTCRtpTransceiverDirection;
-use crate::rtp_transceiver::rtp_sender::rtp_codec::{RTCRtpCodec, RtpCodecKind};
+use crate::rtp_transceiver::rtp_sender::rtp_codec::{
+    RTCRtpCodec, RtpCodecKind, is_flexfec03_mime_type, repair_family,
+};
 use crate::rtp_transceiver::rtp_sender::rtp_codec_parameters::RTCRtpCodecParameters;
 use crate::rtp_transceiver::{
     PayloadType, RtpStreamId, SSRC, internal::RTCRtpTransceiverInternal,
@@ -615,12 +616,16 @@ pub(crate) fn get_rids(media: &MediaDescription) -> Vec<SimulcastRid> {
         // reversing send<->recv but does not require preserving order). Without
         // this, the order followed the incidental `a=rid` line order — fine for
         // Firefox/Chrome (which agree) but not for a peer that lists them
-        // differently. Note: comma-separated rid-id alternatives within one
-        // stream are flattened here, not modeled as a single stream (no shipping
-        // browser emits alternatives).
+        // differently.
+        //
+        // Of a layer's comma-separated alternatives only the first is used
+        // (RFC 8853 section 5.2 lets an answerer pick one; W3C webrtc-pc
+        // "set the RTCSessionDescription" uses the first), so the others'
+        // `a=rid` lines are dropped below and never echoed in an answer.
         // First position of each id in the attribute, and the first rid declared with each id:
         // both by lookup, so neither pass below scans a list per entry.
         let mut simulcast_order: HashMap<String, usize> = HashMap::new();
+        let mut alternatives: HashSet<String> = HashSet::new();
         let mut rid_by_id: HashMap<String, usize> = HashMap::new();
         for (i, rid) in rids.iter().enumerate() {
             rid_by_id.entry(rid.id.clone()).or_insert(i);
@@ -630,30 +635,41 @@ pub(crate) fn get_rids(media: &MediaDescription) -> Vec<SimulcastRid> {
             let _dir = split.next();
             let sc_str_list = split.next();
             if let Some(list) = sc_str_list {
-                let sc_list: Vec<&str> = list.split(';').flat_map(|alt| alt.split(',')).collect();
-                for sc_id in sc_list {
-                    let (sc_id, paused) = if let Some(sc_id) = sc_id.strip_prefix('~') {
-                        (sc_id, true)
-                    } else {
-                        (sc_id, false)
-                    };
+                for layer in list.split(';') {
+                    for (n, sc_id) in layer.split(',').enumerate() {
+                        let (sc_id, paused) = if let Some(sc_id) = sc_id.strip_prefix('~') {
+                            (sc_id, true)
+                        } else {
+                            (sc_id, false)
+                        };
+                        if n > 0 {
+                            alternatives.insert(sc_id.to_owned());
+                            continue;
+                        }
 
-                    if let Some(&i) = rid_by_id.get(sc_id) {
-                        rids[i].paused = paused;
+                        if let Some(&i) = rid_by_id.get(sc_id) {
+                            rids[i].paused = paused;
+                        }
+                        let position = simulcast_order.len();
+                        simulcast_order.entry(sc_id.to_owned()).or_insert(position);
                     }
-                    let position = simulcast_order.len();
-                    simulcast_order.entry(sc_id.to_owned()).or_insert(position);
                 }
             } else {
                 break;
             }
         }
+        rids.retain(|rid| simulcast_order.contains_key(&rid.id) || !alternatives.contains(&rid.id));
 
         // Reorder to match the `a=simulcast` preference order. `sort_by_key` is
         // stable, so any rid not referenced by the attribute (should not happen
         // in a valid offer) keeps its `a=rid` declaration order at the end.
         rids.sort_by_key(|rid| simulcast_order.get(&rid.id).copied().unwrap_or(usize::MAX));
     }
+
+    // A rid declared twice (`a=rid:foo recv` on two lines, a layer listed
+    // twice in `a=simulcast`) is one layer: the first declaration stands.
+    let mut seen: HashSet<String> = HashSet::new();
+    rids.retain(|rid| seen.insert(rid.id.clone()));
 
     rids
 }
@@ -722,7 +738,7 @@ fn get_rids_orders_and_pauses_by_lookup() {
     for i in 0..RIDS {
         media = media.with_value_attribute(SDP_ATTRIBUTE_RID.to_owned(), format!("r{i} send"));
     }
-    // A duplicate declaration keeps the first rid for pausing, as before.
+    // A duplicate declaration: the first one stands and the duplicate is dropped.
     media = media.with_value_attribute(SDP_ATTRIBUTE_RID.to_owned(), "r0 send".to_owned());
     // Reverse order, every third one paused, one id listed twice and one unknown id.
     let mut list: Vec<String> = (0..RIDS)
@@ -744,21 +760,15 @@ fn get_rids_orders_and_pauses_by_lookup() {
 
     let rids = get_rids(&media);
 
-    assert_eq!(rids.len(), RIDS + 1);
-    for (position, rid) in rids.iter().take(RIDS).enumerate() {
+    assert_eq!(rids.len(), RIDS);
+    for (position, rid) in rids.iter().enumerate() {
         let i = RIDS - 1 - position;
         assert_eq!(rid.id, format!("r{i}"));
-        // r0's first declaration is the one the attribute pauses.
-        if i != 0 {
-            assert_eq!(rid.paused, i % 3 == 0, "rid r{i}");
-        }
+        assert_eq!(rid.paused, i % 3 == 0, "rid r{i}");
     }
-    // Both r0 entries share r0's first position, so the stable sort keeps their declaration
-    // order: the first one is paused, the duplicate is not.
+    // r0 is one layer: its first declaration, the one the attribute pauses.
     assert_eq!(rids[RIDS - 1].id, "r0");
     assert!(rids[RIDS - 1].paused);
-    assert_eq!(rids[RIDS].id, "r0");
-    assert!(!rids[RIDS].paused);
 }
 
 pub(crate) fn add_candidates_to_media_descriptions(
@@ -847,9 +857,19 @@ pub(crate) fn add_data_media_section(
     .with_value_attribute(ATTR_KEY_MID.to_owned(), params.mid_value)
     .with_property_attribute(RTCRtpTransceiverDirection::Sendrecv.to_string())
     .with_property_attribute("sctp-port:5000".to_owned())
+    // RFC 8841 6.1: 0 would promise messages of any size, which this endpoint cannot take:
+    // what it accepts is bounded by `SctpMaxMessageSize::MAX_MESSAGE_SIZE`, so that bound is
+    // advertised instead, and it is the limit the SCTP transport receives by.
     .with_value_attribute(
         "max-message-size".to_owned(),
-        format!("{}", params.sctp_max_message_size),
+        format!(
+            "{}",
+            match params.sctp_max_message_size {
+                0 => crate::peer_connection::configuration::setting_engine::SctpMaxMessageSize::MAX_MESSAGE_SIZE
+                    as usize,
+                limit => limit,
+            }
+        ),
     )
     .with_ice_credentials(
         params.ice_params.username_fragment,
@@ -875,6 +895,8 @@ pub(crate) struct AddTransceiverSdpParams {
     ice_gathering_state: RTCIceGatheringState,
     ignore_rid_pause_for_recv: bool,
     write_ssrc_attributes_for_simulcast: bool,
+    /// An offer (initial or subsequent) rather than an answer.
+    is_offer: bool,
 }
 
 impl RTCPeerConnection {
@@ -896,6 +918,7 @@ impl RTCPeerConnection {
             ice_gathering_state,
             ignore_rid_pause_for_recv,
             write_ssrc_attributes_for_simulcast,
+            is_offer,
         ) = (
             params.should_add_candidates,
             params.mid_value,
@@ -903,6 +926,7 @@ impl RTCPeerConnection {
             params.ice_gathering_state,
             params.ignore_rid_pause_for_recv,
             params.write_ssrc_attributes_for_simulcast,
+            params.is_offer,
         );
 
         let transceiver = &mut transceivers[media_section.transceiver_index];
@@ -918,6 +942,16 @@ impl RTCPeerConnection {
                 .with_property_attribute(ATTR_KEY_RTCPRSIZE.to_owned());
 
         let codecs = transceiver.get_codecs(media_engine);
+        // Which repair flows the section has a format for: a sender's RTX / FlexFEC SSRCs are
+        // described only then (codec preferences may leave either out). The FEC flow is the
+        // FlexFEC draft-03 coder's (`video/flexfec-03`, matched exactly as the sender's
+        // `find_fec_payload_type` does): RFC 8627's `video/flexfec` is another wire format.
+        let repair_flows = RepairFlows {
+            rtx: codecs.iter().any(|c| repair_family(&c.rtp_codec) == "rtx"),
+            fec: codecs
+                .iter()
+                .any(|c| is_flexfec03_mime_type(&c.rtp_codec.mime_type)),
+        };
         for codec in &codecs {
             let name = codec
                 .rtp_codec
@@ -998,7 +1032,14 @@ impl RTCPeerConnection {
 
         let parameters =
             media_engine.get_rtp_parameters_by_kind(transceiver.kind(), transceiver.direction());
+        let to_negotiate = transceiver.header_extensions_to_negotiate();
+        let mut written: Vec<(u16, String)> = vec![];
         for rtp_extension in &parameters.header_extensions {
+            if let Some(uris) = to_negotiate
+                && !uris.contains(&rtp_extension.uri)
+            {
+                continue;
+            }
             let id = if media_section.match_extensions.is_empty() {
                 rtp_extension.id
             } else if let Some(id) = media_section.match_extensions.get(&rtp_extension.uri) {
@@ -1006,10 +1047,23 @@ impl RTCPeerConnection {
             } else {
                 continue;
             };
-
-            let ext_url = Url::parse(rtp_extension.uri.as_str())?;
+            written.push((id, rtp_extension.uri.clone()));
+        }
+        if is_offer && let Some(uris) = to_negotiate {
+            for (id, uri) in reoffered_header_extensions(
+                media_engine,
+                transceiver.kind(),
+                transceiver.direction(),
+                uris,
+                &written,
+            ) {
+                written.push((id, uri));
+            }
+        }
+        for (id, uri) in &written {
+            let ext_url = Url::parse(uri.as_str())?;
             media = media.with_extmap(sdp::extmap::ExtMap {
-                value: id,
+                value: *id,
                 uri: Some(ext_url),
                 ..Default::default()
             });
@@ -1060,6 +1114,7 @@ impl RTCPeerConnection {
                 transceiver,
                 write_ssrc_attributes_for_simulcast,
                 send_sc_list.is_empty(),
+                repair_flows,
             );
 
             // Simulcast
@@ -1080,7 +1135,13 @@ impl RTCPeerConnection {
             }
         };
 
-        media = media.with_property_attribute(transceiver.direction().to_string());
+        // An answer's direction is the transceiver's [[Direction]] intersected with the reverse
+        // of the offered one (RFC 9429 section 5.3.1, RFC 3264 section 6.1); an offer states
+        // [[Direction]] itself.
+        let direction = media_section
+            .answer_direction
+            .unwrap_or_else(|| transceiver.direction());
+        media = media.with_property_attribute(direction.to_string());
 
         for fingerprint in dtls_fingerprints {
             media = media.with_fingerprint(
@@ -1105,6 +1166,7 @@ impl RTCPeerConnection {
         transceiver: &mut RTCRtpTransceiverInternal,
         write_ssrc_attributes_for_simulcast: bool,
         write_rid_attributes: bool,
+        repair_flows: RepairFlows,
     ) -> (MediaDescription, Vec<RtpStreamId>) {
         let mut send_rids = vec![];
 
@@ -1139,7 +1201,17 @@ impl RTCPeerConnection {
             if write_ssrc_attributes_for_simulcast || !is_simulcast {
                 for encoding in &encodings {
                     if let Some(&ssrc) = encoding.rtp_coding_parameters.ssrc.as_ref() {
-                        if let Some(rtx) = encoding.rtp_coding_parameters.rtx.as_ref() {
+                        let rtx_flow = encoding
+                            .rtp_coding_parameters
+                            .rtx
+                            .as_ref()
+                            .filter(|_| repair_flows.rtx);
+                        let fec_flow = encoding
+                            .rtp_coding_parameters
+                            .fec
+                            .as_ref()
+                            .filter(|_| repair_flows.fec);
+                        if let Some(rtx) = rtx_flow {
                             media = media.with_value_attribute(
                                 ATTR_KEY_SSRC_GROUP.to_owned(),
                                 format!(
@@ -1149,7 +1221,7 @@ impl RTCPeerConnection {
                             );
                         }
 
-                        if let Some(fec) = encoding.rtp_coding_parameters.fec.as_ref() {
+                        if let Some(fec) = fec_flow {
                             // `FEC-FR` (RFC 5956), not the older `FEC` semantic of RFC 4756:
                             // FlexFEC repair flows are grouped under the FEC framework, and
                             // `parse_media_section` below only recognises `FEC-FR`, so writing
@@ -1172,7 +1244,7 @@ impl RTCPeerConnection {
                             track.track_id().to_owned(),
                         );
 
-                        if let Some(rtx) = encoding.rtp_coding_parameters.rtx.as_ref() {
+                        if let Some(rtx) = rtx_flow {
                             media = media.with_media_source(
                                 rtx.ssrc,
                                 track.stream_id().clone(),    /* cname */
@@ -1181,7 +1253,7 @@ impl RTCPeerConnection {
                             );
                         }
 
-                        if let Some(fec) = encoding.rtp_coding_parameters.fec.as_ref() {
+                        if let Some(fec) = fec_flow {
                             media = media.with_media_source(
                                 fec.ssrc,
                                 track.stream_id().clone(),    /* cname */
@@ -1199,13 +1271,26 @@ impl RTCPeerConnection {
                         SDP_ATTRIBUTE_RID.to_owned(),
                         format!("{} send", encoding.rtp_coding_parameters.rid),
                     );
-                    send_rids.push(encoding.rtp_coding_parameters.rid.to_string());
+                    // RFC 8853, Section 5.3: an inactive encoding's rid is paused.
+                    if encoding.active {
+                        send_rids.push(encoding.rtp_coding_parameters.rid.to_string());
+                    } else {
+                        send_rids.push(format!("~{}", encoding.rtp_coding_parameters.rid));
+                    }
                 }
             }
         }
 
         (media, send_rids)
     }
+}
+
+/// Whether an m-section has a format for a sender's RTX (RFC 4588) and FlexFEC
+/// (draft-ietf-payload-flexible-fec-scheme-03, `video/flexfec-03`) flows.
+#[derive(Debug, Copy, Clone)]
+pub(crate) struct RepairFlows {
+    pub(crate) rtx: bool,
+    pub(crate) fec: bool,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -1274,6 +1359,17 @@ pub(crate) struct MediaSection {
     pub(crate) rejected: bool,
     /// Media kind string ("video", "audio", or "application") — only meaningful when `rejected` is true.
     pub(crate) rejected_kind: String,
+    /// A rejected m-line for a stopped transceiver: it also says `a=inactive` (W3C `stop()`,
+    /// RFC 9429 Section 5.2.2), as browsers write it.
+    pub(crate) stopped: bool,
+    /// For a rejected m-section of a media type this endpoint doesn't know:
+    /// the protocol and formats to reproduce (the offer's), since only the
+    /// port changes in an answer (RFC 9429 5.3.1).
+    pub(crate) rejected_name: Option<MediaName>,
+    /// In an answer, the direction the section states: the transceiver's [[Direction]]
+    /// intersected with the reverse of the offered direction (RFC 9429 section 5.3.1). `None`
+    /// in an offer, which states [[Direction]].
+    pub(crate) answer_direction: Option<RTCRtpTransceiverDirection>,
     pub(crate) match_extensions: HashMap<String, u16>,
     pub(crate) rid_map: Vec<SimulcastRid>,
 }
@@ -1332,6 +1428,7 @@ impl RTCPeerConnection {
             // Find the index first to avoid multiple mutable borrows
             if let Some(index) = local_transceivers.iter().position(|t| {
                 t.mid().is_none()
+                    && !t.stopped()
                     && t.associable_with_remote_offer()
                     && t.kind() == remote_kind
                     && possible_direction == t.direction()
@@ -1374,7 +1471,9 @@ impl RTCPeerConnection {
             // RFC 8829 §5.3.1: reflect rejected m-lines (port=0) in the answer.
             // These must appear in the same position as in the offer to preserve m-line indexing.
             if m.rejected {
-                let (rejected_protos, rejected_formats) = if m.rejected_kind == "application" {
+                let (rejected_protos, rejected_formats) = if let Some(name) = &m.rejected_name {
+                    (name.protos.clone(), name.formats.clone())
+                } else if m.rejected_kind == "application" {
                     (
                         vec!["UDP".to_owned(), "DTLS".to_owned(), "SCTP".to_owned()],
                         vec!["webrtc-datachannel".to_owned()],
@@ -1418,6 +1517,12 @@ impl RTCPeerConnection {
                     }
                     .with_value_attribute(ATTR_KEY_MID.to_owned(), m.mid.clone()),
                 );
+                if m.stopped
+                    && let Some(desc) = d.media_descriptions.last_mut()
+                {
+                    let rejected = std::mem::take(desc);
+                    *desc = rejected.with_property_attribute("inactive".to_owned());
+                }
                 continue; // rejected m-lines are not added to BUNDLE
             }
 
@@ -1448,6 +1553,8 @@ impl RTCPeerConnection {
                     ice_gathering_state: params.ice_gathering_state,
                     ignore_rid_pause_for_recv: params.ignore_rid_pause_for_recv,
                     write_ssrc_attributes_for_simulcast: params.write_ssrc_attributes_for_simulcast,
+                    // An answer matches the remote offer's bundle group; an offer has none.
+                    is_offer: params.match_bundle_group.is_none(),
                 };
                 let (d1, should_add_id) = RTCPeerConnection::add_transceiver_sdp(
                     d,
@@ -1919,11 +2026,31 @@ pub(crate) fn codecs_from_media_description(
         if std::mem::replace(&mut seen[payload_type as usize], true) {
             continue;
         }
-        let Some(codec) = codecs.get(&payload_type) else {
-            if payload_type == 0 {
-                continue;
+        // A payload type with no `a=rtpmap` (only `a=fmtp` / `a=rtcp-fb`
+        // lines, or none) is RFC 3551's static assignment for audio, else a
+        // format this description doesn't define: RFC 9429 section 5.3.1 and
+        // 5.8 ignore a format the endpoint doesn't know, rather than
+        // rejecting the whole description.
+        let static_codec;
+        let codec = match codecs.get(&payload_type).filter(|c| !c.name.is_empty()) {
+            Some(codec) => codec,
+            None => {
+                let Some((name, clock_rate)) = static_audio_payload_type(payload_type)
+                    .filter(|_| m.media_name.media == "audio")
+                else {
+                    continue;
+                };
+                let defined = codecs.get(&payload_type);
+                static_codec = sdp::util::Codec {
+                    payload_type,
+                    name: name.to_owned(),
+                    clock_rate,
+                    encoding_parameters: String::new(),
+                    fmtp: defined.map(|c| c.fmtp.clone()).unwrap_or_default(),
+                    rtcp_feedback: defined.map(|c| c.rtcp_feedback.clone()).unwrap_or_default(),
+                };
+                &static_codec
             }
-            return Err(Error::PayloadTypeNotFound);
         };
 
         let channels = codec.encoding_parameters.parse::<u16>().unwrap_or(0);
@@ -1962,6 +2089,51 @@ pub(crate) fn codecs_from_media_description(
     Ok(out)
 }
 
+/// The m= line of a section whose media type this endpoint doesn't know
+/// (not audio, video or application), for a rejection that reproduces it.
+pub(crate) fn unknown_media_name(media: &MediaDescription) -> Option<MediaName> {
+    let kind = media.media_name.media.as_str();
+    if matches!(kind, "audio" | "video" | MEDIA_SECTION_APPLICATION) {
+        return None;
+    }
+    let mut name = media.media_name.clone();
+    if name.formats.is_empty() {
+        name.formats.push("0".to_owned());
+    }
+    Some(name)
+}
+
+/// RFC 3551 section 6's static audio payload types: encoding name and clock
+/// rate.
+fn static_audio_payload_type(payload_type: PayloadType) -> Option<(&'static str, u32)> {
+    match payload_type {
+        0 => Some(("PCMU", 8000)),
+        3 => Some(("GSM", 8000)),
+        4 => Some(("G723", 8000)),
+        8 => Some(("PCMA", 8000)),
+        9 => Some(("G722", 8000)),
+        13 => Some(("CN", 8000)),
+        18 => Some(("G729", 8000)),
+        _ => None,
+    }
+}
+
+#[test]
+fn codecs_from_media_description_reads_static_and_skips_undefined_payload_types() {
+    let mut m = MediaDescription::default()
+        .with_value_attribute("rtpmap".to_owned(), "111 opus/48000/2".to_owned());
+    m.media_name.media = "audio".to_owned();
+    m.media_name.formats = ["111", "103", "9", "0", "8"].map(str::to_owned).to_vec();
+
+    let codecs = codecs_from_media_description(&m).unwrap();
+
+    let payload_types: Vec<_> = codecs.iter().map(|c| c.payload_type).collect();
+    assert_eq!(payload_types, [111, 9, 0, 8]);
+    assert_eq!(codecs[1].rtp_codec.mime_type, "audio/G722");
+    assert_eq!(codecs[2].rtp_codec.mime_type, "audio/PCMU");
+    assert_eq!(codecs[2].rtp_codec.clock_rate, 8000);
+}
+
 #[test]
 fn codecs_from_media_description_keeps_format_order_and_attributes() {
     let mut m = MediaDescription::default()
@@ -1988,8 +2160,70 @@ fn codecs_from_media_description_keeps_format_order_and_attributes() {
     assert_eq!(vp8.rtcp_feedback[1].typ, "goog-remb");
     assert_eq!(codecs[1].rtp_codec.sdp_fmtp_line, "apt=96");
 
+    // A dynamic payload type with no a=rtpmap is left out, not an error.
     m.media_name.formats.push("98".to_owned());
-    assert!(codecs_from_media_description(&m).is_err());
+    assert_eq!(codecs_from_media_description(&m).unwrap().len(), 2);
+}
+
+#[test]
+fn get_rids_uses_each_layers_first_alternative_once() {
+    let mut m = MediaDescription::default();
+    for rid in ["foo", "bar", "1", "2", "foo"] {
+        m = m.with_value_attribute(SDP_ATTRIBUTE_RID.to_owned(), format!("{rid} recv"));
+    }
+    m = m.with_value_attribute(
+        SDP_ATTRIBUTE_SIMULCAST.to_owned(),
+        "recv foo,bar;1,2;foo".to_owned(),
+    );
+    let ids: Vec<String> = get_rids(&m).into_iter().map(|r| r.id).collect();
+    assert_eq!(ids, ["foo", "1"]);
+}
+
+/// The extensions an offer adds back for a transceiver with an explicit list of header
+/// extensions to negotiate (webrtc-extensions: a subsequent offer carries every extension of
+/// `[[HeaderExtensionsToNegotiate]]` that isn't "stopped", not only the ones the last answer
+/// kept): each listed URI the media engine registered for `kind` and `direction` that
+/// `written` doesn't have yet, with the id it was negotiated with, or else the lowest one-byte
+/// id (RFC 8285 section 4.2) that neither the negotiated set nor `written` uses.
+pub(crate) fn reoffered_header_extensions(
+    media_engine: &MediaEngine,
+    kind: RtpCodecKind,
+    direction: RTCRtpTransceiverDirection,
+    uris: &[String],
+    written: &[(u16, String)],
+) -> Vec<(u16, String)> {
+    let mut out: Vec<(u16, String)> = vec![];
+    for uri in uris {
+        if written.iter().any(|(_, u)| u == uri) || out.iter().any(|(_, u)| u == uri) {
+            continue;
+        }
+        let registered = media_engine.header_extensions.iter().any(|e| {
+            e.uri == *uri
+                && e.is_matching_direction(direction)
+                && (e.is_audio && kind == RtpCodecKind::Audio
+                    || e.is_video && kind == RtpCodecKind::Video)
+        });
+        if !registered {
+            continue;
+        }
+        let taken =
+            |id: u16| written.iter().any(|(i, _)| *i == id) || out.iter().any(|(i, _)| *i == id);
+        let negotiated = media_engine
+            .negotiated_header_extensions
+            .iter()
+            .find(|(_, e)| e.uri == *uri)
+            .map(|(id, _)| *id)
+            .filter(|id| !taken(*id));
+        let id = negotiated.or_else(|| {
+            (1u16..15).find(|id| {
+                !taken(*id) && !media_engine.negotiated_header_extensions.contains_key(id)
+            })
+        });
+        if let Some(id) = id {
+            out.push((id, uri.clone()));
+        }
+    }
+    out
 }
 
 #[test]
@@ -2017,6 +2251,17 @@ pub(crate) fn rtp_extensions_from_media_description(
 
     for a in &m.attributes {
         if a.key == ATTR_KEY_EXT_MAP {
+            // RFC 8285 section 5 / JSEP (RFC 9429 section 5.10): an extension the answerer
+            // doesn't understand is left out of the answer, not an error. A URI that isn't
+            // even a URI (`a=extmap:2 bogus`) is such an extension; a malformed id or
+            // direction still fails the description.
+            if a.value
+                .as_deref()
+                .and_then(|v| v.split_whitespace().nth(1))
+                .is_some_and(|uri| Url::parse(uri).is_err())
+            {
+                continue;
+            }
             let a_str = a.to_string();
             let e = ExtMap::unmarshal(&mut a_str.as_bytes())?;
 
@@ -2051,6 +2296,60 @@ fn rtp_extensions_from_media_description_reads_each_extmap_line() {
     let malformed = MediaDescription::default()
         .with_value_attribute(ATTR_KEY_EXT_MAP.to_owned(), "not-a-number urn:x".to_owned());
     assert!(rtp_extensions_from_media_description(&malformed).is_err());
+
+    // An unknown extension whose name isn't a URI is skipped, not an error.
+    let bogus = MediaDescription::default()
+        .with_value_attribute(ATTR_KEY_EXT_MAP.to_owned(), "2 bogus".to_owned())
+        .with_value_attribute(
+            ATTR_KEY_EXT_MAP.to_owned(),
+            "16 urn:ietf:params:rtp-hdrext:sdes:mid".to_owned(),
+        );
+    let extensions = rtp_extensions_from_media_description(&bogus).unwrap();
+    assert_eq!(extensions.len(), 1);
+    assert_eq!(extensions["urn:ietf:params:rtp-hdrext:sdes:mid"], 16);
+}
+
+#[test]
+fn reoffered_header_extensions_adds_listed_extensions_back() {
+    use crate::rtp_transceiver::rtp_sender::RTCRtpHeaderExtensionCapability;
+
+    let mut media_engine = MediaEngine::default();
+    for uri in [
+        "urn:ietf:params:rtp-hdrext:sdes:mid",
+        "urn:3gpp:video-orientation",
+        "urn:ietf:params:rtp-hdrext:ssrc-audio-level",
+    ] {
+        let kind = if uri.ends_with("audio-level") {
+            RtpCodecKind::Audio
+        } else {
+            RtpCodecKind::Video
+        };
+        media_engine
+            .register_header_extension(
+                RTCRtpHeaderExtensionCapability {
+                    uri: uri.to_owned(),
+                },
+                kind,
+                None,
+            )
+            .unwrap();
+    }
+    let listed = vec![
+        "urn:ietf:params:rtp-hdrext:sdes:mid".to_owned(),
+        "urn:3gpp:video-orientation".to_owned(),
+        "urn:ietf:params:rtp-hdrext:ssrc-audio-level".to_owned(),
+        "urn:example:unregistered".to_owned(),
+    ];
+    let written = vec![(1u16, "urn:ietf:params:rtp-hdrext:sdes:mid".to_owned())];
+    let added = reoffered_header_extensions(
+        &media_engine,
+        RtpCodecKind::Video,
+        RTCRtpTransceiverDirection::Sendrecv,
+        &listed,
+        &written,
+    );
+    // Only the registered video extension that isn't written yet, on a free id.
+    assert_eq!(added, vec![(2u16, "urn:3gpp:video-orientation".to_owned())]);
 }
 
 /// update_sdp_origin saves sdp.Origin in PeerConnection when creating 1st local SDP;

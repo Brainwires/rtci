@@ -1,4 +1,6 @@
 #[cfg(test)]
+mod vp9_depacketizer_fields_test;
+#[cfg(test)]
 mod vp9_test;
 
 use crate::packetizer::{Depacketizer, Payloader};
@@ -16,7 +18,15 @@ const MAX_VP9REF_PICS: usize = 3;
 /// InitialPictureIDFn is a function that returns random initial picture ID.
 pub type InitialPictureIDFn = Arc<dyn (Fn() -> u16) + Send + Sync>;
 
-/// Vp9Payloader payloads VP9 packets
+/// Vp9Payloader payloads VP9 packets.
+///
+/// By default it uses the non-flexible mode, as browsers expect from a sender
+/// without SVC (RFC 9628 section 4.2): it reads each frame's uncompressed
+/// header, marks an inter frame with `P=1` (a key frame with `P=0`), and puts
+/// a scalability structure with the frame size on a key frame's first
+/// packet. A frame whose header doesn't parse is sent in flexible mode, as
+/// before. `flexible_mode` forces the flexible mode for every frame (one
+/// 15-bit picture id, no reference indices: `P=0`).
 #[derive(Default, Clone)]
 pub struct Vp9Payloader {
     picture_id: u16,
@@ -24,6 +34,8 @@ pub struct Vp9Payloader {
 
     /// Supplies the starting picture id; randomized when absent.
     pub initial_picture_id_fn: Option<InitialPictureIDFn>,
+    /// Sends every frame in flexible mode (`F=1`) instead.
+    pub flexible_mode: bool,
 }
 
 impl fmt::Debug for Vp9Payloader {
@@ -31,6 +43,7 @@ impl fmt::Debug for Vp9Payloader {
         f.debug_struct("Vp9Payloader")
             .field("picture_id", &self.picture_id)
             .field("initialized", &self.initialized)
+            .field("flexible_mode", &self.flexible_mode)
             .finish()
     }
 }
@@ -93,13 +106,39 @@ impl Payloader for Vp9Payloader {
             self.initialized = true;
         }
 
+        let header = if self.flexible_mode {
+            None
+        } else {
+            Vp9FrameHeader::parse(payload)
+        };
+        let payloads = match header {
+            Some(header) => self.payload_non_flexible(mtu, payload, &header),
+            None => self.payload_flexible(mtu, payload),
+        };
+
+        if !payloads.is_empty() {
+            self.picture_id += 1;
+            self.picture_id &= 0x7FFF;
+        }
+
+        Ok(payloads)
+    }
+
+    fn clone_to(&self) -> Box<dyn Payloader> {
+        Box::new(self.clone())
+    }
+}
+
+impl Vp9Payloader {
+    /// Flexible mode: `I=1` with a 15-bit picture id, `P=0`.
+    fn payload_flexible(&self, mtu: usize, payload: &Bytes) -> Vec<Bytes> {
         let max_fragment_size = mtu as isize - VP9HEADER_SIZE as isize;
         let mut payloads = vec![];
         let mut payload_data_remaining = payload.len();
         let mut payload_data_index = 0;
 
         if std::cmp::min(max_fragment_size, payload_data_remaining as isize) <= 0 {
-            return Ok(vec![]);
+            return vec![];
         }
 
         while payload_data_remaining > 0 {
@@ -129,14 +168,147 @@ impl Payloader for Vp9Payloader {
             payload_data_index += current_fragment_size;
         }
 
-        self.picture_id += 1;
-        self.picture_id &= 0x7FFF;
-
-        Ok(payloads)
+        payloads
     }
 
-    fn clone_to(&self) -> Box<dyn Payloader> {
-        Box::new(self.clone())
+    /// Non-flexible mode (RFC 9628 section 4.2): `I=1` with a 15-bit picture
+    /// id, `P` from the frame type, `Z=1` (one spatial layer), and on a key
+    /// frame's first packet `V=1` with a scalability structure: one spatial
+    /// layer of the frame's size (`N_S=0, Y=1, G=1`) and a picture group of
+    /// one picture (`T=0, U=1, R=1, P_DIFF=1`).
+    fn payload_non_flexible(
+        &self,
+        mtu: usize,
+        payload: &Bytes,
+        header: &Vp9FrameHeader,
+    ) -> Vec<Bytes> {
+        const SS_SIZE: usize = 8;
+        let mut payloads = vec![];
+        let mut payload_data_remaining = payload.len();
+        let mut payload_data_index = 0;
+
+        while payload_data_remaining > 0 {
+            let with_ss = header.key_frame && payload_data_index == 0;
+            let header_size = VP9HEADER_SIZE + if with_ss { SS_SIZE } else { 0 };
+            let max_fragment_size = mtu as isize - header_size as isize;
+            if max_fragment_size <= 0 {
+                return vec![];
+            }
+            let current_fragment_size =
+                std::cmp::min(max_fragment_size as usize, payload_data_remaining);
+
+            let mut out = BytesMut::with_capacity(header_size + current_fragment_size);
+            let mut b0 = 0x80 | 0x01; // I=1, Z=1
+            if !header.key_frame {
+                b0 |= 0x40; // P=1
+            }
+            if payload_data_index == 0 {
+                b0 |= 0x08; // B=1
+            }
+            if payload_data_remaining == current_fragment_size {
+                b0 |= 0x04; // E=1
+            }
+            if with_ss {
+                b0 |= 0x02; // V=1
+            }
+            out.put_u8(b0);
+            out.put_u8((self.picture_id >> 8) as u8 | 0x80);
+            out.put_u8((self.picture_id & 0xFF) as u8);
+            if with_ss {
+                out.put_u8(0x10 | 0x08); // N_S=0, Y=1, G=1
+                out.put_u16(header.width);
+                out.put_u16(header.height);
+                out.put_u8(0x01); // N_G=1
+                out.put_u8((1 << 4) | (1 << 2)); // T=0, U=1, R=1
+                out.put_u8(0x01); // P_DIFF=1
+            }
+            out.put(
+                &*payload.slice(payload_data_index..payload_data_index + current_fragment_size),
+            );
+            payloads.push(out.freeze());
+
+            payload_data_remaining -= current_fragment_size;
+            payload_data_index += current_fragment_size;
+        }
+
+        payloads
+    }
+}
+
+/// What the payloader needs from a VP9 frame's uncompressed header (VP9
+/// bitstream specification 6.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Vp9FrameHeader {
+    /// `frame_type == KEY_FRAME`.
+    pub(crate) key_frame: bool,
+    /// A key frame's size (0 on other frames).
+    pub(crate) width: u16,
+    pub(crate) height: u16,
+}
+
+impl Vp9FrameHeader {
+    /// Parses the header; `None` when the bytes are not a VP9 frame.
+    pub(crate) fn parse(frame: &[u8]) -> Option<Self> {
+        let mut pos = 0usize;
+        let mut bits = |n: usize| -> Option<u32> {
+            let mut v = 0u32;
+            for _ in 0..n {
+                let byte = *frame.get(pos / 8)?;
+                v = (v << 1) | ((byte >> (7 - (pos % 8))) & 1) as u32;
+                pos += 1;
+            }
+            Some(v)
+        };
+        if bits(2)? != 2 {
+            return None; // frame_marker
+        }
+        let low = bits(1)?;
+        let high = bits(1)?;
+        let profile = (high << 1) | low;
+        if profile == 3 {
+            bits(1)?; // reserved_zero
+        }
+        if bits(1)? == 1 {
+            // show_existing_frame: a repeat of an earlier frame, no new data.
+            bits(3)?;
+            return Some(Self {
+                key_frame: false,
+                width: 0,
+                height: 0,
+            });
+        }
+        let key_frame = bits(1)? == 0;
+        bits(2)?; // show_frame, error_resilient_mode
+        if !key_frame {
+            return Some(Self {
+                key_frame,
+                width: 0,
+                height: 0,
+            });
+        }
+        if bits(24)? != 0x49_83_42 {
+            return None; // frame_sync_code
+        }
+        // color_config
+        if profile >= 2 {
+            bits(1)?; // ten_or_twelve_bit
+        }
+        let color_space = bits(3)?;
+        if color_space != 7 {
+            bits(1)?; // color_range
+            if profile == 1 || profile == 3 {
+                bits(3)?; // subsampling_x, subsampling_y, reserved_zero
+            }
+        } else if profile == 1 || profile == 3 {
+            bits(1)?; // reserved_zero
+        }
+        let width = bits(16)? + 1;
+        let height = bits(16)? + 1;
+        Some(Self {
+            key_frame,
+            width: u16::try_from(width).ok()?,
+            height: u16::try_from(height).ok()?,
+        })
     }
 }
 
@@ -378,8 +550,10 @@ impl Vp9Packet {
             b = reader.get_u8();
             payload_index += 1;
 
+            // RFC 9628 4.2: up to three reference indices (P_DIFF) per picture; a fourth is
+            // the error, not the third.
             self.pdiff.push(b >> 1);
-            if self.pdiff.len() >= MAX_VP9REF_PICS {
+            if self.pdiff.len() > MAX_VP9REF_PICS {
                 return Err(Error::ErrTooManyPDiff);
             }
         }
@@ -417,7 +591,9 @@ impl Vp9Packet {
 
         self.ns = b >> 5;
         self.y = b & 0x10 != 0;
-        self.g = (b >> 1) & 0x7 != 0;
+        // `N_S |Y|G|-|-|-|`: G is bit 3 alone. The three low bits are reserved and must not
+        // be read as G (RFC 9628 4.2.1).
+        self.g = b & 0x08 != 0;
 
         let ns = (self.ns + 1) as usize;
         self.ng = 0;

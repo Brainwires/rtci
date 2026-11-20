@@ -10,6 +10,9 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 
+[dependencies.rtc-stun]
+path = "../../rtc-stun"
+
 [dependencies.rtc-turn]
 path = ".."
 
@@ -20,6 +23,13 @@ members = ["."]
 [[bin]]
 name = "client_handle_inbound"
 path = "fuzz_targets/client_handle_inbound.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "proto_attributes"
+path = "fuzz_targets/proto_attributes.rs"
 test = false
 doc = false
 bench = false

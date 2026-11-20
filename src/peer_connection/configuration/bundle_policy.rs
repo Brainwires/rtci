@@ -8,11 +8,21 @@ use serde::{Deserialize, Serialize};
 /// when the remote endpoint may or may not support bundling. Bundling multiple
 /// media streams onto a single transport reduces overhead and improves performance.
 ///
+/// # This engine has one transport
+///
+/// A peer connection here has exactly one ICE and DTLS transport, and every m= section runs on it:
+/// every offer groups all of its non-rejected m= sections in one `a=group:BUNDLE` (RFC 9143).
+/// `Balanced` and `MaxCompat` therefore behave as `MaxBundle`: no candidates are gathered per media
+/// type or per track, and no section gets a transport of its own. The value is stored, returned by
+/// `get_configuration`, and may not be changed by `set_configuration` (W3C webrtc-pc "set the
+/// configuration"); nothing else reads it. A remote endpoint must accept BUNDLE: one that does not
+/// cannot be given separate transports.
+///
 /// # Recommendations
 ///
-/// - **MaxBundle** - Recommended for modern WebRTC (Chrome/Firefox/Safari all support it)
-/// - **Balanced** - Good fallback for legacy compatibility
-/// - **MaxCompat** - Only use if connecting to very old implementations
+/// - **MaxBundle** - Recommended for modern WebRTC (Chrome/Firefox/Safari all support it), and
+///   what this engine does whatever the policy
+/// - **Balanced** / **MaxCompat** - Accepted for API compatibility; behave as `MaxBundle` here
 ///
 /// # Examples
 ///
@@ -45,6 +55,8 @@ pub enum RTCBundlePolicy {
     /// between compatibility and efficiency.
     ///
     /// **Use when:** Connecting to peers that may not support bundling
+    ///
+    /// **In this engine:** behaves as [`MaxBundle`](Self::MaxBundle) (one transport).
     #[serde(rename = "balanced")]
     Balanced = 1,
 
@@ -55,6 +67,8 @@ pub enum RTCBundlePolicy {
     /// performance and resource usage.
     ///
     /// **Use when:** Maximum compatibility with legacy systems is required
+    ///
+    /// **In this engine:** behaves as [`MaxBundle`](Self::MaxBundle) (one transport).
     #[serde(rename = "max-compat")]
     MaxCompat = 2,
 

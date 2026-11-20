@@ -1,5 +1,17 @@
 #[cfg(test)]
+mod association_flow_test;
+#[cfg(test)]
 mod endpoint_test;
+#[cfg(test)]
+mod handshake_failure_test;
+#[cfg(test)]
+mod handshake_loss_test;
+#[cfg(test)]
+pub(crate) mod link_test;
+#[cfg(test)]
+mod loss_recovery_test;
+#[cfg(test)]
+mod sctp_port_test;
 
 use std::{
     collections::HashMap,

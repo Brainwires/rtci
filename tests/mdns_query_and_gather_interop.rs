@@ -51,7 +51,41 @@ mod common;
 
 const DEFAULT_TIMEOUT_DURATION: Duration = Duration::from_secs(30);
 const MDNS_LOCAL_NAME: &str = "webrtc-rs-test-mdns.local";
-const WEBRTC_MDNS_LOCAL_NAME: &str = "webrtc-peer-mdns.local";
+// The receiving agent resolves only `<uuid>.local` names (draft-ietf-mmusic-mdns-ice-candidates),
+// the form browsers publish.
+const WEBRTC_MDNS_LOCAL_NAME: &str = "3f1c2b7e-9a4d-4e6f-8b21-5c0d7a9e1f34.local";
+
+/// The address the rtc peer binds, and hides behind its `.local` name, in the QueryAndGather
+/// tests.
+///
+/// The upstream ICE agent resolves a `.local` candidate to the source address of the mDNS answer
+/// (not its A record), and the upstream responder's A record is the address of its interface
+/// toward the querier. Both are the interface multicast to the mDNS group leaves by, which is a
+/// LAN interface, never loopback. On Linux a socket bound to 127.0.0.1 can still exchange
+/// datagrams with the host's own LAN addresses, so binding loopback works there. Windows refuses
+/// it (WSAENETUNREACH, os error 10051): the rtc peer could not reach the upstream peer's resolved
+/// candidates, and the upstream peer sent its checks to the rtc peer's name resolved to the LAN
+/// address, where nothing listened. On Windows the rtc peer therefore binds that interface's own
+/// address: the one a UDP socket connected to the mDNS group sends from.
+fn query_and_gather_bind_ip() -> std::net::IpAddr {
+    #[cfg(windows)]
+    {
+        let egress = std::net::UdpSocket::bind("0.0.0.0:0")
+            .and_then(|socket| {
+                socket.connect((rtc::mdns::MDNS_MULTICAST_IPV4, MDNS_PORT))?;
+                socket.local_addr()
+            })
+            .map(|addr| addr.ip());
+        match egress {
+            Ok(ip) if !ip.is_unspecified() && !ip.is_loopback() => {
+                log::info!("rtc peer binds the mDNS egress interface address {ip}");
+                return ip;
+            }
+            other => log::warn!("no mDNS egress interface address ({other:?}); binding loopback"),
+        }
+    }
+    std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+}
 
 /// Helper function to create a webrtc peer connection with QueryAndGather mDNS mode
 async fn create_webrtc_peer() -> Result<Arc<WebrtcPeerConnection>> {
@@ -514,7 +548,7 @@ async fn test_mdns_query_and_gather_webrtc_offerer_rtc_answerer() -> Result<()> 
         rtc::peer_connection::sdp::RTCSessionDescription::offer(offer_with_candidates.sdp.clone())?;
 
     // Create RTC peer with QueryAndGather mode
-    let pc_socket = UdpSocket::bind("127.0.0.1:0").await?;
+    let pc_socket = UdpSocket::bind((query_and_gather_bind_ip(), 0)).await?;
     let local_addr = pc_socket.local_addr()?;
     let mdns_socket = UdpSocket::from_std(MulticastSocket::new().into_std()?)?;
 
@@ -796,7 +830,7 @@ async fn test_mdns_query_and_gather_rtc_offerer_webrtc_answerer() -> Result<()> 
     log::info!("Starting mDNS QueryAndGather test: sansio RTC (offerer) -> webrtc (answerer)");
 
     // Create RTC peer (offerer) with QueryAndGather mode
-    let pc_socket = UdpSocket::bind("127.0.0.1:0").await?;
+    let pc_socket = UdpSocket::bind((query_and_gather_bind_ip(), 0)).await?;
     let local_addr = pc_socket.local_addr()?;
     let mdns_socket = UdpSocket::from_std(MulticastSocket::new().into_std()?)?;
 

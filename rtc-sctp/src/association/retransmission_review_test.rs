@@ -236,60 +236,8 @@ fn t2_backoff_does_not_compound_simultaneous_t3_expirations() -> Result<()> {
     Ok(())
 }
 
-// Run this unchanged against the PR head and its replacement in release mode.
-// Only recovery flushes are timed; setup and the single T3 marking pass are
-// excluded. Cumulative progress is applied directly to isolate retry selection
-// from SACK parsing/congestion control. This is not an end-to-end throughput test.
-#[test]
-#[ignore = "manual recovery CPU/scaling comparison"]
-fn benchmark_recovery_flushes() -> Result<()> {
-    for count in [128, 1024, 4096] {
-        for fast in [false, true] {
-            let mut elapsed = 0;
-            let mut lookups = 0;
-            for track_lookups in [false, true] {
-                let now = Instant::now();
-                let mut a = recovery_window(count, now)?;
-                let at = now + Duration::from_secs(1);
-                if !fast {
-                    a.handle_timeout(at);
-                }
-                a.cwnd = a.mtu;
-                a.inflight_queue.track_lookups = track_lookups;
-                a.inflight_queue.lookups.set(0);
-                let started = Instant::now();
-                for _ in 0..count {
-                    let tsn = a.cumulative_tsn_ack_point.wrapping_add(1);
-                    if fast {
-                        a.inflight_queue.get_mut(tsn).unwrap().miss_indicator = 3;
-                        if let Some(next) = a.inflight_queue.get_mut(tsn + 1) {
-                            next.miss_indicator = 3;
-                        }
-                        a.will_retransmit_fast = true;
-                    }
-                    let packets = if fast {
-                        a.gather_outbound_fast_retransmission_packets(vec![], at)
-                    } else {
-                        a.gather_data_packets_to_retransmit(vec![], at)
-                    };
-                    assert_eq!(1, data_chunks(&packets));
-                    a.inflight_queue.pop(tsn).unwrap();
-                    a.cumulative_tsn_ack_point = tsn;
-                }
-                if track_lookups {
-                    lookups = a.inflight_queue.lookups.get();
-                } else {
-                    elapsed = started.elapsed().as_nanos();
-                }
-                assert!(a.inflight_queue.is_empty());
-            }
-            println!(
-                "recovery-bench fast={fast} window={count} elapsed_ns={elapsed} lookups={lookups}"
-            );
-        }
-    }
-    Ok(())
-}
+// The recovery-flush timing comparison that lived here is the `sctp_recovery_bench`
+// example (`association::recovery_bench`), so no test is ignored.
 
 #[test]
 fn public_rtt_reports_measurements_independently_of_backoff() {
@@ -342,5 +290,96 @@ fn invalid_pending_message_closes_without_sending_or_rearming_timers() -> Result
             }
         )));
     }
+    Ok(())
+}
+
+/// A second loss of an exhausted partially reliable message during Fast
+/// Recovery is abandoned (and forwarded) from later SACKs, not at T3-rtx.
+#[test]
+fn exhausted_loss_in_fast_recovery_is_abandoned_without_cumulative_advance() -> Result<()> {
+    use crate::chunk::chunk_selective_ack::GapAckBlock;
+    for unordered in [false, true] {
+        let mut a = timed_test_association();
+        let now = Instant::now();
+        let ppi = PayloadProtocolIdentifier::Binary;
+        a.open_stream(1, ppi)?
+            .set_reliability_params(unordered, ReliabilityType::Rexmit, 0)?;
+        for _ in 0..8 {
+            a.stream(1)?
+                .write_sctp(now, &Bytes::from_static(b"message"), ppi)?;
+        }
+        let sent = transmitted_data(&a.gather_outbound(now).0);
+        assert_eq!(8, sent.len());
+        let first = sent[0].tsn;
+        let sack = |blocks: &[(u16, u16)]| ChunkSelectiveAck {
+            cumulative_tsn_ack: first - 1,
+            advertised_receiver_window_credit: 65536,
+            gap_ack_blocks: blocks
+                .iter()
+                .map(|&(start, end)| GapAckBlock { start, end })
+                .collect(),
+            ..Default::default()
+        };
+        // `first` and `first + 2` are lost. Three reports of the first loss
+        // enter Fast Recovery; the second loss has two by then.
+        a.handle_sack(&sack(&[(2, 2)]), now)?;
+        a.handle_sack(&sack(&[(2, 2), (4, 4)]), now)?;
+        a.handle_sack(&sack(&[(2, 2), (4, 5)]), now)?;
+        assert!(a.in_fast_recovery);
+        assert_eq!(0, data_chunks(&a.gather_outbound(now).0));
+        assert!(a.inflight_queue.get(first).unwrap().abandoned());
+        assert_eq!(2, a.inflight_queue.get(first + 2).unwrap().miss_indicator);
+        // The peer has not processed the FORWARD TSN yet: the next SACK does
+        // not advance the cumulative ack, but reports newer DATA.
+        a.handle_sack(&sack(&[(2, 2), (4, 6)]), now)?;
+        assert!(a.in_fast_recovery);
+        assert_eq!(3, a.inflight_queue.get(first + 2).unwrap().miss_indicator);
+        assert!(a.will_retransmit_fast);
+        let packets = a.gather_outbound_fast_retransmission_packets(vec![], now);
+        assert_eq!(
+            0,
+            data_chunks(&packets),
+            "an exhausted message is not resent"
+        );
+        assert!(a.inflight_queue.get(first + 2).unwrap().abandoned());
+        // Still outstanding, never reported past the HTNA: untouched.
+        assert_eq!(0, a.inflight_queue.get(first + 7).unwrap().miss_indicator);
+        assert!(!a.inflight_queue.get(first + 7).unwrap().abandoned());
+    }
+    Ok(())
+}
+
+/// Reliable DATA keeps RFC 4960's HTNA rule in Fast Recovery.
+#[test]
+fn reliable_loss_in_fast_recovery_keeps_htna_miss_indications() -> Result<()> {
+    use crate::chunk::chunk_selective_ack::GapAckBlock;
+    let mut a = timed_test_association();
+    let now = Instant::now();
+    let ppi = PayloadProtocolIdentifier::Binary;
+    a.open_stream(1, ppi)?;
+    for _ in 0..8 {
+        a.stream(1)?
+            .write_sctp(now, &Bytes::from_static(b"message"), ppi)?;
+    }
+    let sent = transmitted_data(&a.gather_outbound(now).0);
+    assert_eq!(8, sent.len());
+    let first = sent[0].tsn;
+    let sack = |blocks: &[(u16, u16)]| ChunkSelectiveAck {
+        cumulative_tsn_ack: first - 1,
+        advertised_receiver_window_credit: 65536,
+        gap_ack_blocks: blocks
+            .iter()
+            .map(|&(start, end)| GapAckBlock { start, end })
+            .collect(),
+        ..Default::default()
+    };
+    a.handle_sack(&sack(&[(2, 2)]), now)?;
+    a.handle_sack(&sack(&[(2, 2), (4, 4)]), now)?;
+    a.handle_sack(&sack(&[(2, 2), (4, 5)]), now)?;
+    assert!(a.in_fast_recovery);
+    a.gather_outbound(now);
+    a.handle_sack(&sack(&[(2, 2), (4, 6)]), now)?;
+    assert_eq!(2, a.inflight_queue.get(first + 2).unwrap().miss_indicator);
+    assert!(!a.inflight_queue.get(first + 2).unwrap().abandoned());
     Ok(())
 }

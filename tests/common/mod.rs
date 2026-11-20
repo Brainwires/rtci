@@ -19,3 +19,31 @@
 pub fn install_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
+
+/// The `webrtc` crate's `SettingEngine` for an upstream peer that talks to an `rtc` peer whose
+/// only host candidate is on `127.0.0.1`.
+///
+/// Upstream leaves loopback addresses out of gathering by default, so its host candidates are the
+/// machine's LAN addresses only. Whether the loopback-bound `rtc` socket can reach those depends
+/// on the OS: Linux routes `127.0.0.1` → own LAN address locally, macOS refuses it
+/// (`EADDRNOTAVAIL`) and Windows refuses it (`WSAENETUNREACH`, os error 10051). Where it is refused
+/// the connection hangs on whether the upstream peer's checks to `127.0.0.1` arrive first and
+/// leave a peer-reflexive pair behind, which races media and the controlling side's nomination.
+/// A loopback host candidate on the upstream side gives both peers a pair that works everywhere.
+#[allow(dead_code)]
+pub fn webrtc_setting_engine() -> webrtc::api::setting_engine::SettingEngine {
+    let mut setting_engine = webrtc::api::setting_engine::SettingEngine::default();
+    setting_engine.set_include_loopback_candidate(true);
+    setting_engine
+}
+
+/// Whether a UDP `recv_from` error only means a datagram was lost.
+///
+/// On Windows a UDP socket reports an ICMP port-unreachable for an earlier `send_to` as
+/// `WSAECONNRESET` (os error 10054) on its next receive. A connectivity check sent to a candidate
+/// port that is gone (the other peer closed it, for instance after an ICE restart) is just a lost
+/// datagram; the socket is still good and the next receive works.
+#[allow(dead_code)]
+pub fn udp_recv_error_is_lost_datagram(err: &std::io::Error) -> bool {
+    err.kind() == std::io::ErrorKind::ConnectionReset
+}

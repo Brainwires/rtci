@@ -589,10 +589,13 @@ impl RTCConfigurationBuilder {
 
     /// Sets the bundle policy.
     ///
-    /// Controls how media tracks are bundled onto transports:
-    /// - `Balanced` (default): Bundle audio/video separately if peer doesn't support bundling
+    /// The W3C policies are:
+    /// - `Balanced`: Bundle audio/video separately if peer doesn't support bundling
     /// - `MaxCompat`: Separate transports for each track (maximum compatibility)
     /// - `MaxBundle`: Single transport for all media (best performance)
+    ///
+    /// This engine has a single transport, so every policy behaves as `MaxBundle`: all m=
+    /// sections are bundled on one ICE/DTLS transport. See [`RTCBundlePolicy`].
     ///
     /// # Examples
     ///

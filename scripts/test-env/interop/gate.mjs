@@ -1,0 +1,37 @@
+// The C3 gate: reads interop-summary.json (matrix.mjs writes it) and exits non-zero unless
+// every cell of the matrix is a pass or a cited n/a, and every browser ran.
+//
+//   node gate.mjs /artifacts/interop-summary.json
+//
+// RTC_INTEROP_BROWSERS (default "chromium,firefox,webkit") names the browsers that must each
+// have run at least one test. A cell fails the gate when it failed, timed out, is missing (the
+// browser ran the spec file but not that test), or was skipped without a "na-browser:" /
+// "na-env:" reason and citation (na.mjs).
+import { readFileSync } from "node:fs";
+
+const summary = JSON.parse(readFileSync(process.argv[2], "utf8"));
+const browsers = (process.env.RTC_INTEROP_BROWSERS || "chromium,firefox,webkit").split(",").filter(Boolean);
+const problems = [];
+const cells = summary.cells || [];
+if (cells.length === 0) problems.push("the summary has no cells: the matrix did not run");
+for (const b of browsers) {
+  if (!cells.some((c) => c.browser === b)) problems.push(`${b}: ran no test`);
+}
+const ok = new Set(["pass", "na-browser", "na-env"]);
+for (const c of cells) {
+  if (!ok.has(c.status)) problems.push(`${c.test} [${c.browser}]: ${c.status}${c.detail ? ` (${c.detail})` : ""}`);
+}
+const count = (s) => cells.filter((c) => c.status === s).length;
+console.log(
+  `interop gate: ${count("pass")} pass, ${count("na-browser")} na-browser, ${count("na-env")} na-env (not tested), ` +
+    `${cells.length - count("pass") - count("na-browser") - count("na-env")} failing`,
+);
+for (const c of cells.filter((c) => c.status === "na-env")) {
+  console.log(`  not tested: ${c.test} [${c.browser}]: ${c.reason} [${c.cite}]`);
+}
+if (problems.length) {
+  console.log("interop gate FAILED:");
+  for (const p of problems) console.log(`  ${p}`);
+  process.exit(1);
+}
+console.log("interop gate passed");

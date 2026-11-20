@@ -560,20 +560,25 @@ mod test {
         }
     }
 
-    /*TODO: #[tokio::test]
-    async fn test_session_description_answer() -> Result<()> {
-        let mut m = MediaEngine::default();
+    /// A peer connection with the default codecs, for the tests that need a real offer or answer.
+    fn peer_connection() -> Result<crate::peer_connection::RTCPeerConnection> {
+        let mut m = crate::peer_connection::configuration::media_engine::MediaEngine::default();
         m.register_default_codecs()?;
-        let api = APIBuilder::new().with_media_engine(m).build();
+        crate::peer_connection::RTCPeerConnectionBuilder::new()
+            .with_media_engine(m)
+            .build(std::time::Instant::now())
+    }
 
-        let offer_pc = api.new_peer_connection(RTCConfiguration::default()).await?;
-        let answer_pc = api.new_peer_connection(RTCConfiguration::default()).await?;
+    #[test]
+    fn test_session_description_answer() -> Result<()> {
+        let mut offer_pc = peer_connection()?;
+        let mut answer_pc = peer_connection()?;
 
-        let _ = offer_pc.create_data_channel("foo", None).await?;
-        let offer = offer_pc.create_offer(None).await?;
-        answer_pc.set_remote_description(offer).await?;
+        let _ = offer_pc.create_data_channel("foo", None)?;
+        let offer = offer_pc.create_offer(None)?;
+        answer_pc.set_remote_description(std::time::Instant::now(), offer)?;
 
-        let answer = answer_pc.create_answer(None).await?;
+        let answer = answer_pc.create_answer(None)?;
 
         let desc = RTCSessionDescription::answer(answer.sdp.clone())?;
 
@@ -585,14 +590,10 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn test_session_description_offer() -> Result<()> {
-        let mut m = MediaEngine::default();
-        m.register_default_codecs()?;
-        let api = APIBuilder::new().with_media_engine(m).build();
-
-        let pc = api.new_peer_connection(RTCConfiguration::default()).await?;
-        let offer = pc.create_offer(None).await?;
+    #[test]
+    fn test_session_description_offer() -> Result<()> {
+        let mut pc = peer_connection()?;
+        let offer = pc.create_offer(None)?;
 
         let desc = RTCSessionDescription::offer(offer.sdp.clone())?;
 
@@ -604,20 +605,16 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn test_session_description_pranswer() -> Result<()> {
-        let mut m = MediaEngine::default();
-        m.register_default_codecs()?;
-        let api = APIBuilder::new().with_media_engine(m).build();
+    #[test]
+    fn test_session_description_pranswer() -> Result<()> {
+        let mut offer_pc = peer_connection()?;
+        let mut answer_pc = peer_connection()?;
 
-        let offer_pc = api.new_peer_connection(RTCConfiguration::default()).await?;
-        let answer_pc = api.new_peer_connection(RTCConfiguration::default()).await?;
+        let _ = offer_pc.create_data_channel("foo", None)?;
+        let offer = offer_pc.create_offer(None)?;
+        answer_pc.set_remote_description(std::time::Instant::now(), offer)?;
 
-        let _ = offer_pc.create_data_channel("foo", None).await?;
-        let offer = offer_pc.create_offer(None).await?;
-        answer_pc.set_remote_description(offer).await?;
-
-        let answer = answer_pc.create_answer(None).await?;
+        let answer = answer_pc.create_answer(None)?;
 
         let desc = RTCSessionDescription::pranswer(answer.sdp)?;
 
@@ -627,15 +624,11 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn test_session_description_unmarshal() -> Result<()> {
-        let mut m = MediaEngine::default();
-        m.register_default_codecs()?;
-        let api = APIBuilder::new().with_media_engine(m).build();
+    #[test]
+    fn test_session_description_unmarshal() -> Result<()> {
+        let mut pc = peer_connection()?;
 
-        let pc = api.new_peer_connection(RTCConfiguration::default()).await?;
-
-        let offer = pc.create_offer(None).await?;
+        let offer = pc.create_offer(None)?;
 
         let desc = RTCSessionDescription {
             sdp_type: offer.sdp_type,
@@ -648,11 +641,9 @@ mod test {
         let parsed1 = desc.unmarshal()?;
         let parsed2 = desc.unmarshal()?;
 
-        pc.close().await?;
-
         // check if the two parsed results _really_ match, could be affected by internal caching
         assert_eq!(parsed1.marshal(), parsed2.marshal());
 
         Ok(())
-    }*/
+    }
 }

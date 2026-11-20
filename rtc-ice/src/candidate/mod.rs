@@ -17,12 +17,9 @@ mod candidate_pair_test;
 #[cfg(test)]
 mod candidate_test;
 
-// candidate_relay_test and candidate_server_reflexive_test use `turn::auth`,
-// `turn::server`, and `turn::relay` APIs from a different TURN library than
-// rtc-turn. Enabling them requires porting to the rtc-turn API — deferred to a
-// dedicated porting effort.
-// #[cfg(test)] mod candidate_relay_test;
-// #[cfg(test)] mod candidate_server_reflexive_test;
+// Upstream's candidate_relay_test and candidate_server_reflexive_test ran a TURN server in
+// process; they live on as tests/testenv_ice.rs (test_relay_only_connection_{udp,tcp,tls},
+// test_server_reflexive_only_connection), against coturn through real NATs.
 
 /// Host candidates: an address on a local interface.
 pub mod candidate_host;
@@ -197,6 +194,10 @@ pub struct Candidate {
     /// arrived from this candidate. Consent freshness (RFC 7675) is judged on this alone, so
     /// unauthenticated traffic from the address cannot keep a dead pair alive.
     pub(crate) last_authenticated: Option<Instant>,
+    /// When an authenticated success response to one of our own pending Binding requests last
+    /// arrived from this candidate. This is consent (RFC 7675 §5.1): the peer's own requests do
+    /// not grant it.
+    pub(crate) last_consent: Option<Instant>,
 
     pub(crate) foundation_override: String,
     pub(crate) priority_override: u32,
@@ -224,6 +225,7 @@ impl Default for Candidate {
             last_sent: None,
             last_received: None,
             last_authenticated: None,
+            last_consent: None,
 
             foundation_override: String::new(),
             priority_override: 0,
@@ -474,6 +476,12 @@ impl Candidate {
     /// When an authenticated Binding request or response last arrived from this candidate.
     pub fn last_authenticated(&self) -> Option<Instant> {
         self.last_authenticated
+    }
+
+    /// When a success response to one of our Binding requests last arrived from this candidate:
+    /// the last time the peer granted consent (RFC 7675).
+    pub fn last_consent(&self) -> Option<Instant> {
+        self.last_consent
     }
 
     /// Records that traffic was received on this candidate at `now`.

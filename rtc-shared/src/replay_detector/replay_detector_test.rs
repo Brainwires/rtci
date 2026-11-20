@@ -311,3 +311,49 @@ fn test_wrapped_half_range_behind_is_too_old() {
     det.accept();
     assert!(!det.check(40001), "the old head is now behind the window");
 }
+
+/// A number accepted before the head moves on must stay refused while it is inside the window,
+/// for window sizes whose last word is more than half full (`n % 64 > 32`) too.
+#[test]
+fn test_replay_refused_after_head_moves_any_window_size() {
+    // The case the fuzzer found: window 53, accept 0, jump to 12, then 0 again.
+    let mut det = SlidingWindowDetector::new(53, (1 << 48) - 1);
+    assert!(det.check(0));
+    det.accept();
+    assert!(det.check(12));
+    det.accept();
+    assert!(det.check(9));
+    det.accept();
+    assert!(det.check(6));
+    det.accept();
+    assert!(
+        !det.check(0),
+        "0 was accepted already and is inside the window"
+    );
+
+    for window in 1..=200usize {
+        for k in 0..2 {
+            let mut det: Box<dyn ReplayDetector> = if k == 0 {
+                Box::new(SlidingWindowDetector::new(window, (1 << 48) - 1))
+            } else {
+                Box::new(WrappedSlidingWindowDetector::new(window, 0xFFFF))
+            };
+            assert!(det.check(0));
+            det.accept();
+            for head in 1..window as u64 {
+                assert!(det.check(head));
+                det.accept();
+                assert!(
+                    !det.check(0),
+                    "window {window} (detector {k}): 0 replayed with the head at {head}"
+                );
+            }
+            assert!(det.check(window as u64));
+            det.accept();
+            assert!(
+                !det.check(0),
+                "window {window} (detector {k}): 0 is out of the window"
+            );
+        }
+    }
+}

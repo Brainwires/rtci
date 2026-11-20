@@ -33,34 +33,46 @@ pub struct RTCReceivedRtpStreamStats {
     pub rtp_stream_stats: RTCRtpStreamStats,
 
     /// Total number of RTP packets received.
+    ///
+    /// For a `remote-inbound-rtp` object this is estimated as webrtc-stats defines it: the
+    /// extended highest sequence number the receiver report carries, minus the cumulative loss,
+    /// minus the first sequence number sent, plus one (0 before the first report).
     pub packets_received: u64,
 
     /// Number of packets received with ECT(1) marking.
     ///
-    /// ECT (ECN-Capable Transport) indicates congestion-aware transport.
-    pub packets_received_with_ect1: u64,
+    /// The engine does not see ECN marks; left out of the JSON.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub packets_received_with_ect1: Option<u64>,
 
     /// Number of packets received with CE (Congestion Experienced) marking.
     ///
-    /// CE indicates network congestion was experienced.
-    pub packets_received_with_ce: u64,
+    /// The engine does not see ECN marks; left out of the JSON.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub packets_received_with_ce: Option<u64>,
 
-    /// Number of packets reported as lost in RTCP RR.
-    pub packets_reported_as_lost: u64,
-
-    /// Number of packets reported lost but later recovered.
+    /// Number of packets reported as lost in RFC 8888 feedback.
     ///
-    /// This can happen with retransmission or FEC recovery.
-    pub packets_reported_as_lost_but_recovered: u64,
+    /// Not measured; left out of the JSON.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub packets_reported_as_lost: Option<u64>,
 
-    /// Total number of packets lost.
+    /// Number of packets reported lost and later recovered.
     ///
-    /// This value can be negative if more packets are received
-    /// than expected (e.g., due to duplicates).
+    /// Not measured; left out of the JSON.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub packets_reported_as_lost_but_recovered: Option<u64>,
+
+    /// Total number of packets lost (RFC 3550 section 6.4.1, cumulative number of packets
+    /// lost).
+    ///
+    /// Signed: it is negative when duplicates make more packets arrive than were expected.
     pub packets_lost: i64,
 
-    /// Inter-arrival jitter in seconds.
+    /// Inter-arrival jitter in seconds (RFC 3550 section 6.4.1, the report's value divided by
+    /// the codec's clock rate).
     ///
-    /// Measured according to RFC 3550.
-    pub jitter: f64,
+    /// `None`, and left out of the JSON, until a report carries it and the clock rate is known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jitter: Option<f64>,
 }

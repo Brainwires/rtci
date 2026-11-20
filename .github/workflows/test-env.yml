@@ -1,0 +1,153 @@
+name: test-env
+
+# The real-network test environment (scripts/test-env): NAT topologies, coturn, netem,
+# GStreamer media and Chromium / Firefox / WebKit interop, on GitHub's ubuntu-latest: its
+# network namespaces need a rootful Docker daemon, and our docker pool gives each job a rootless
+# one. No schedule: push, pull request and dispatch only. A pull request from a fork runs
+# `test_env_fork` with a read-only token.
+#
+# Only the `image` job, on a push to master, can write packages: the jobs that run the
+# environment (and so a pull request's code) get `packages: read`.
+on:
+  push:
+    branches: [ master, v0.21.x, v1.x ]
+  pull_request:
+    branches: [ master, v0.21.x, v1.x ]
+  workflow_dispatch:
+    inputs:
+      stages:
+        description: 'Stages to run (unit env interop)'
+        required: false
+        default: 'unit env interop'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Publishes the environment image for the hash of its inputs, on a push to master only. It
+  # runs no test and none of a pull request's code, so it alone holds `packages: write`.
+  image:
+    name: environment image (publish)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE_REPO: ghcr.io/brainwires/rtc-testenv
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Build and publish the image if the registry lacks it
+        shell: bash
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          TAG=$(cat scripts/test-env/Dockerfile scripts/test-env/interop/package.json scripts/test-env/interop/package-lock.json | sha256sum | cut -c1-12)
+          IMAGE="$IMAGE_REPO:$TAG"
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+          if docker manifest inspect "$IMAGE" >/dev/null 2>&1; then
+            echo "$IMAGE is already published"
+            exit 0
+          fi
+          docker build -t "$IMAGE" -f scripts/test-env/Dockerfile scripts/test-env
+          docker push -q "$IMAGE"
+
+  test_env:
+    name: test environment (${{ inputs.stages || 'unit env interop' }})
+    needs: [image]
+    # GitHub's runner, not our docker pool: the topology mounts sysfs inside network namespaces
+    # of a nested container, which a rootless Docker daemon (the pool's, by design) cannot allow.
+    runs-on: ubuntu-latest
+    # Never for pull_request_target; a fork's pull request uses the job below.
+    if: >-
+      github.event_name != 'pull_request_target' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository) &&
+      !cancelled()
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: read
+    env:
+      IMAGE_REPO: ghcr.io/brainwires/rtc-testenv
+    steps: &test-env-steps
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Environment image (pull, or build locally)
+        shell: bash
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          TAG=$(cat scripts/test-env/Dockerfile scripts/test-env/interop/package.json scripts/test-env/interop/package-lock.json | sha256sum | cut -c1-12)
+          IMAGE="$IMAGE_REPO:$TAG"
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin || true
+          # This job's token can only read packages; the `image` job publishes.
+          if ! docker pull -q "$IMAGE"; then
+            docker build -t "$IMAGE" -f scripts/test-env/Dockerfile scripts/test-env
+          fi
+          echo "RTC_TESTENV_IMAGE=$IMAGE" >> "$GITHUB_ENV"
+
+      - name: Run the environment
+        shell: bash
+        env:
+          # The docker pool's sidecar has 2 CPUs; a GitHub runner has 4.
+          RTC_TESTENV_CPUS: ${{ runner.environment == 'github-hosted' && '4' || '2' }}
+          # The dispatch input goes through the environment, never into the script's text.
+          STAGES: ${{ inputs.stages || 'unit env interop' }}
+        run: |
+          set -euo pipefail
+          read -r -a stages <<< "$STAGES"
+          for stage in "${stages[@]}"; do
+            case "$stage" in
+              unit|env|interop) ;;
+              *) echo "::error::unknown stage: $stage (expected unit, env or interop)"; exit 1 ;;
+            esac
+          done
+          scripts/test-env/run.sh "${stages[@]}"
+
+      - name: Report
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          if [ -f target/test-env/report.md ]; then cat target/test-env/report.md >> "$GITHUB_STEP_SUMMARY"; fi
+
+      - name: Upload logs
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: test-env-${{ github.run_attempt }}
+          path: |
+            target/test-env/*.md
+            target/test-env/*.log
+            target/test-env/*.json
+            target/test-env/*.txt
+            target/test-env/*.ivf
+            target/test-env/firefox-moz*
+            target/test-env/*.moz_log
+          if-no-files-found: ignore
+
+  # A pull request from a fork: the same steps on GitHub's runners, with a read-only token (a
+  # fork's token is read-only anyway, and nothing is published).
+  test_env_fork:
+    name: test environment (fork pull request)
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name != github.repository
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: read
+    env:
+      IMAGE_REPO: ghcr.io/brainwires/rtc-testenv
+    steps: *test-env-steps

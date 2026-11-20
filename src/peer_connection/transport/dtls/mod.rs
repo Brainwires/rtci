@@ -336,6 +336,27 @@ impl DtlsTransport {
         local_ice_role: RTCIceRole,
         remote_dtls_parameters: RTCDtlsParameters,
     ) -> Result<()> {
+        self.restart_with(local_ice_role, remote_dtls_parameters, true)
+    }
+
+    /// Re-initialise the DTLS transport for a new association whatever its state: the transport
+    /// it ran on was closed (every m-section of its BUNDLE group was rejected, RFC 8843 §7.1.3,
+    /// RFC 9429 §5.10), so the peer starts a new DTLS association on the new one even with the
+    /// same certificate and `setup` role. No-ops if state is `New`.
+    pub(crate) fn restart_new_association(
+        &mut self,
+        local_ice_role: RTCIceRole,
+        remote_dtls_parameters: RTCDtlsParameters,
+    ) -> Result<()> {
+        self.restart_with(local_ice_role, remote_dtls_parameters, false)
+    }
+
+    fn restart_with(
+        &mut self,
+        local_ice_role: RTCIceRole,
+        remote_dtls_parameters: RTCDtlsParameters,
+        keep_unchanged_session: bool,
+    ) -> Result<()> {
         if self.state == RTCDtlsTransportState::New {
             // Not started yet — initial start_transports handles this path.
             return Ok(());
@@ -352,7 +373,7 @@ impl DtlsTransport {
             .is_some_and(|previous| {
                 same_fingerprints(&previous.fingerprints, &remote_dtls_parameters.fingerprints)
             });
-        if healthy && same_remote && new_role == self.dtls_role {
+        if keep_unchanged_session && healthy && same_remote && new_role == self.dtls_role {
             // Nothing DTLS depends on changed: keep the session over the restarted ICE path.
             return Ok(());
         }
@@ -985,6 +1006,27 @@ mod tests {
         t.restart(RTCIceRole::Controlled, params).unwrap();
         assert_eq!(t.state, RTCDtlsTransportState::Connecting);
         assert!(t.dtls_handshake_config.is_some());
+    }
+
+    /// After the transport was closed (every BUNDLE m-section rejected), a description that sets
+    /// up a new one starts a new association even with the same fingerprint and role.
+    #[test]
+    fn restart_new_association_rehandshakes_an_unchanged_connected_session() {
+        let mut t = auto_role_transport();
+        t.start(RTCIceRole::Controlled, dummy_params(RTCDtlsRole::Auto))
+            .unwrap();
+        t.state_change(RTCDtlsTransportState::Connected);
+        t.dtls_handshake_config = None; // a completed client handshake has consumed it
+
+        t.restart_new_association(RTCIceRole::Controlled, dummy_params(RTCDtlsRole::Auto))
+            .unwrap();
+        assert_eq!(t.state, RTCDtlsTransportState::Connecting);
+        assert_eq!(t.dtls_role, RTCDtlsRole::Client);
+        assert!(
+            t.dtls_handshake_config.is_some(),
+            "the client must hold a config for the new handshake"
+        );
+        assert!(t.dtls_endpoint.is_some(), "endpoint must be replaced");
     }
 
     #[test]

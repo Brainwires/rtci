@@ -1,9 +1,12 @@
 pub mod cipher_aead_aes_gcm;
+#[cfg(test)]
+mod cipher_aead_aes_gcm_profile_test;
 pub mod cipher_aes_cm_hmac_sha1;
 
 use bytes::BytesMut;
 use crypto::{CryptoError, RTCCrypto};
 
+use crate::cryptex::CryptexLayout;
 use shared::error::{Error, Result};
 
 type Kdf = fn(&dyn RTCCrypto, u8, &[u8], &[u8], usize, usize) -> Result<Vec<u8>>;
@@ -55,6 +58,27 @@ pub(crate) trait Cipher: Send {
 
     /// Decrypt RTP payload.
     fn decrypt_rtp(&mut self, payload: &[u8], header: &rtp::Header, roc: u32) -> Result<BytesMut>;
+
+    /// Encrypt an RTP packet with Cryptex (RFC 9335 section 6.2): the CSRCs, the header
+    /// extension data and the payload, as one plaintext. `packet` already carries the
+    /// Cryptex profile (see [`crate::cryptex::sender_packet`]).
+    fn encrypt_rtp_cryptex(
+        &mut self,
+        packet: &[u8],
+        header: &rtp::Header,
+        roc: u32,
+        layout: CryptexLayout,
+    ) -> Result<BytesMut>;
+
+    /// Decrypt an RTP packet protected with Cryptex (RFC 9335 section 6.3). The result
+    /// still carries the Cryptex profile.
+    fn decrypt_rtp_cryptex(
+        &mut self,
+        packet: &[u8],
+        header: &rtp::Header,
+        roc: u32,
+        layout: CryptexLayout,
+    ) -> Result<BytesMut>;
 
     /// Encrypt RTCP payload.
     fn encrypt_rtcp(&mut self, payload: &[u8], srtcp_index: usize, ssrc: u32) -> Result<BytesMut>;

@@ -13,6 +13,9 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
 
+permissions:
+  contents: read
+
 jobs:
   grcov:
     name: Coverage (${{ matrix.crypto.name }})
@@ -31,16 +34,16 @@ jobs:
             features: crypto-aws-lc-rs
     steps:
       - name: Checkout source code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
           toolchain: ${{ matrix.toolchain }}
           components: llvm-tools-preview
 
       - name: Install grcov
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
         with:
           tool: grcov
 
@@ -69,14 +72,14 @@ jobs:
               --excl-start "#\\[cfg\\(test\\)\\]" \
               --excl-br-start "#\\[cfg\\(test\\)\\]"
       - name: Upload coverage as artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: lcov-${{ matrix.crypto.name }}.info
           # path: ${{ steps.grcov.outputs.report }}
           path: lcov.info
 
       - name: Upload coverage to codecov.io
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # v5.5.5
         with:
           files: lcov.info
           flags: ${{ matrix.crypto.name }}

@@ -57,7 +57,6 @@ use webrtc::track::track_remote::TrackRemote;
 mod common;
 
 const DEFAULT_TIMEOUT_DURATION: Duration = Duration::from_secs(30);
-const OGG_PAGE_DURATION: Duration = Duration::from_millis(20);
 const RTP_OUTBOUND_MTU: usize = 1200;
 
 /// Test webrtc as RecvOnly offerer, rtc as answerer streaming from disk
@@ -632,33 +631,36 @@ async fn stream_audio(
         codec.rtp_codec.clock_rate,
     );
 
-    let mut ticker = tokio::time::interval(OGG_PAGE_DURATION);
+    // A page may hold several Opus packets and a packet may span pages (RFC 3533 section 6),
+    // so the reader hands over one packet (one RTP payload) at a time, each timed by its own
+    // TOC byte rather than by the page's granule position.
+    let mut next_send = tokio::time::Instant::now();
 
-    // Keep track of last granule
-    let mut last_granule: u64 = 0;
+    // Stream only a limited number of packets for the test
+    let max_packets = 30;
+    let mut packet_count = 0;
 
-    // Stream only a limited number of pages for the test
-    let max_pages = 30;
-    let mut page_count = 0;
-
-    while let Ok((page_data, page_header)) = ogg.parse_next_page() {
-        let sample_count = page_header.granule_position - last_granule;
-        last_granule = page_header.granule_position;
-        let sample_duration = Duration::from_millis(sample_count * 1000 / 48000);
-
-        let samples = (sample_duration.as_secs_f64() * codec.rtp_codec.clock_rate as f64) as u32;
-        let packets = packetizer.packetize(Instant::now(), &page_data.freeze(), samples)?;
+    while let Ok((packet_data, _)) = ogg.next_packet() {
+        // The comment header (RFC 7845 section 5.2) is not audio.
+        if packet_data.starts_with(b"OpusTags") {
+            continue;
+        }
+        let samples = opus_packet_samples(&packet_data);
+        let rtp_samples =
+            (u64::from(samples) * u64::from(codec.rtp_codec.clock_rate) / 48_000) as u32;
+        let packets = packetizer.packetize(Instant::now(), &packet_data.freeze(), rtp_samples)?;
         for packet in packets {
             audio_message_tx.send((audio_sender_id, packet)).await?;
         }
 
-        page_count += 1;
-        if page_count >= max_pages {
-            log::info!("Streamed {} audio pages", page_count);
+        packet_count += 1;
+        if packet_count >= max_packets {
+            log::info!("Streamed {} audio packets", packet_count);
             break;
         }
 
-        let _ = ticker.tick().await;
+        next_send += Duration::from_micros(u64::from(samples) * 1_000_000 / 48_000);
+        tokio::time::sleep_until(next_send).await;
     }
 
     let _ = audio_done_tx.try_send(());
@@ -675,6 +677,7 @@ async fn create_webrtc_peer() -> Result<Arc<WebrtcPeerConnection>> {
     registry = register_default_interceptors(registry, &mut media_engine)?;
 
     let api = APIBuilder::new()
+        .with_setting_engine(common::webrtc_setting_engine())
         .with_media_engine(media_engine)
         .with_interceptor_registry(registry)
         .build();
@@ -689,4 +692,27 @@ async fn create_webrtc_peer() -> Result<Arc<WebrtcPeerConnection>> {
 
     let peer_connection = Arc::new(api.new_peer_connection(config).await?);
     Ok(peer_connection)
+}
+
+/// The number of 48 kHz samples in an Opus packet, read from its TOC byte (RFC 6716 section
+/// 3.1): the frame size its configuration gives, times its frame count.
+fn opus_packet_samples(packet: &[u8]) -> u32 {
+    let Some(&toc) = packet.first() else {
+        return 0;
+    };
+    let config = toc >> 3;
+    let frame: u32 = match config {
+        // SILK-only: 10, 20, 40, 60 ms.
+        0..=11 => [480, 960, 1920, 2880][usize::from(config % 4)],
+        // Hybrid: 10, 20 ms.
+        12..=15 => [480, 960][usize::from(config % 2)],
+        // CELT-only: 2.5, 5, 10, 20 ms.
+        _ => [120, 240, 480, 960][usize::from(config % 4)],
+    };
+    let frames: u32 = match toc & 0x03 {
+        0 => 1,
+        1 | 2 => 2,
+        _ => packet.get(1).map_or(0, |b| u32::from(b & 0x3f)),
+    };
+    frame * frames
 }

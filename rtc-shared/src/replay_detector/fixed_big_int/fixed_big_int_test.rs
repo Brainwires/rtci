@@ -76,3 +76,20 @@ fn test_fixed_big_int_set_bit() {
         "00000000FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
     );
 }
+
+/// A shift keeps every bit below `n`, whatever `n % 64` is, and drops the ones at or above it.
+#[test]
+fn test_fixed_big_int_lsh_keeps_bits_below_n() {
+    for n in 1..=200usize {
+        let mut bi = FixedBigInt::new(n);
+        bi.set_bit(0);
+        for i in 1..n {
+            bi.lsh(1);
+            assert_eq!(bi.bit(i), 1, "n = {n}: bit {i} lost by a shift");
+            assert_eq!(bi.bit(i - 1), 0, "n = {n}: bit {} kept", i - 1);
+        }
+        // One more shift moves the bit out of the window, and out of the storage too.
+        bi.lsh(1);
+        assert!(bi.bits.iter().all(|w| *w == 0), "n = {n}: {bi}");
+    }
+}

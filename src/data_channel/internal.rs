@@ -33,6 +33,9 @@ pub(crate) struct RTCDataChannelInternal {
     /// Read through [`Self::protocol`], like `label`.
     pub(crate) protocol: String,
     pub(crate) negotiated: bool,
+    /// The DCEP priority (RFC 8832 §5.1): what this side's `DATA_CHANNEL_OPEN` carries, or
+    /// what the peer's carried for a channel it opened.
+    pub(crate) priority: u16,
     pub(crate) ready_state: RTCDataChannelState,
     pub(crate) buffered_amount_high_threshold: u32,
     pub(crate) buffered_amount_low_threshold: u32,
@@ -70,6 +73,7 @@ impl Default for RTCDataChannelInternal {
             max_retransmits: None,
             protocol: "".to_string(),
             negotiated: false,
+            priority: ::datachannel::message::message_channel_open::CHANNEL_PRIORITY_NORMAL,
             ready_state: RTCDataChannelState::default(),
             buffered_amount_high_threshold: u32::MAX,
             buffered_amount_low_threshold: 0,
@@ -101,6 +105,7 @@ impl RTCDataChannelInternal {
             ordered: params.ordered,
             max_packet_life_time: params.max_packet_life_time,
             max_retransmits: params.max_retransmits,
+            priority: ::datachannel::message::message_channel_open::CHANNEL_PRIORITY_NORMAL,
             ready_state: RTCDataChannelState::Connecting,
             buffered_amount_high_threshold: u32::MAX,
             buffered_amount_low_threshold: 0,
@@ -145,7 +150,7 @@ impl RTCDataChannelInternal {
 
         let config = ::datachannel::data_channel::DataChannelConfig {
             channel_type,
-            priority: ::datachannel::message::message_channel_open::CHANNEL_PRIORITY_NORMAL,
+            priority: self.priority,
             reliability_parameter,
             label: self.label.clone(),
             protocol: self.protocol.clone(),
@@ -223,6 +228,7 @@ impl RTCDataChannelInternal {
         // Known from the wire: no deferral needed, and it must be registered so locally
         // generated ids cannot collide with it.
         data_channel_internal.stream_id = Some(stream_id);
+        data_channel_internal.priority = data_channel_config.priority;
         data_channel_internal.data_channel = Some(data_channel);
         data_channel_internal.ready_state = RTCDataChannelState::Open;
 
@@ -354,5 +360,32 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// WebRTC Priority Control API 4.3: a channel the peer opened has the priority its
+    /// `DATA_CHANNEL_OPEN` carried; a local one has 256 (low) until it is given another.
+    #[test]
+    fn an_accepted_channel_reports_the_peers_priority() {
+        for priority in [0u16, 128, 256, 512, 1024, 3893] {
+            let open = Message::DataChannelOpen(DataChannelOpen {
+                channel_type: ChannelType::Reliable,
+                priority,
+                reliability_parameter: 0,
+                label: b"peer".to_vec(),
+                protocol: Vec::new(),
+            })
+            .marshal()
+            .expect("DCEP OPEN");
+            let dc = RTCDataChannelInternal::accept(
+                0,
+                PEER_STREAM,
+                PayloadProtocolIdentifier::Dcep,
+                &open,
+            )
+            .expect("accept the peer's OPEN");
+            assert_eq!(dc.priority, priority);
+        }
+        let local = RTCDataChannelInternal::new(DataChannelParameters::default());
+        assert_eq!(local.priority, CHANNEL_PRIORITY_NORMAL);
     }
 }

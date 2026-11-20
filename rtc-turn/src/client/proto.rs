@@ -32,14 +32,13 @@ impl sansio::Protocol<TaggedBytesMut, TaggedBytesMut, ()> for Client {
     }
 
     fn poll_event(&mut self) -> Option<Self::Eout> {
-        while let Some(event) = self.tr_map.poll_event() {
-            self.events.push_back(event);
-        }
         self.events.pop_front()
     }
 
     fn handle_timeout(&mut self, now: Instant) -> Result<(), Self::Error> {
-        self.tr_map.handle_timeout(now);
+        for exhausted in self.tr_map.handle_timeout(now) {
+            self.handle_transaction_timeout(now, exhausted);
+        }
 
         #[allow(clippy::map_clone)]
         let relayed_addrs: Vec<SocketAddr> = self.relays.keys().map(|key| *key).collect();

@@ -113,6 +113,8 @@ pub(crate) mod fmtp;
 pub(crate) mod internal;
 pub mod rtp_receiver;
 pub mod rtp_sender;
+#[cfg(test)]
+mod rtp_transceiver_test;
 
 /// SSRC (Synchronization Source) identifier.
 ///
@@ -302,6 +304,25 @@ impl RTCRtpTransceiver<'_> {
         self.peer_connection.rtp_transceivers[self.id].set_associable_with_remote_offer(associable);
     }
 
+    /// Marks this transceiver as touched by W3C `addTrack`: a rollback of the remote offer that
+    /// created it keeps it (RFC 9429, Section 5.7). For a caller that attaches the track itself,
+    /// to a transceiver that already has a sender.
+    pub fn keep_on_rollback(&mut self) {
+        self.peer_connection.rtp_transceivers[self.id].set_created_by_remote_description(false);
+    }
+
+    /// Sets the RTP header extensions this transceiver's next offers and answers carry
+    /// (webrtc-extensions, RTP header extension control).
+    ///
+    /// `Some(uris)` limits the media section's `a=extmap` lines to these URIs: an answer
+    /// carries an offered extension only when it is listed, and an offer carries each listed
+    /// extension the media engine has registered for this kind, a re-offer included (one
+    /// left out of an earlier answer gets the id it had, or a free one). `None` (the default)
+    /// is every extension the media engine negotiates (RFC 9429, sections 5.2 and 5.3).
+    pub fn set_header_extensions_to_negotiate(&mut self, uris: Option<Vec<String>>) {
+        self.peer_connection.rtp_transceivers[self.id].set_header_extensions_to_negotiate(uris);
+    }
+
     /// Sets the preferred direction of this transceiver.
     ///
     /// Changing the direction may trigger renegotiation to update the session description.
@@ -360,10 +381,18 @@ impl RTCRtpTransceiver<'_> {
     pub fn stop(&mut self) -> Result<()> {
         // peer_connection is mutable borrow, its rtp_transceivers won't be resized,
         // so, [self.id] here is safe.
+        let was_stopped = self.peer_connection.rtp_transceivers[self.id].stopped();
         self.peer_connection.rtp_transceivers[self.id].stop(
             &self.peer_connection.media_engine,
             &mut self.peer_connection.interceptor,
-        )
+        )?;
+        // https://www.w3.org/TR/webrtc/#dom-rtcrtptransceiver-stop, last step: update the
+        // negotiation-needed flag. Stopping a stopped transceiver does nothing.
+        if !was_stopped {
+            self.peer_connection
+                .on_transceiver_stopped_or_streams_changed();
+        }
+        Ok(())
     }
 
     /// Sets the preferred codec list for this transceiver.

@@ -7,7 +7,16 @@ use super::rate_control::RateController;
 use super::slope::SlopeEstimator;
 use crate::cc::estimator::{BandwidthEstimator, EstimatorStats};
 use crate::rtpfb::acknowledgement::PacketReport;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+/// The most delay-gradient readings the trend is scaled by before it meets the threshold.
+///
+/// The detector compares `min(readings, 60) × m(i)` against the adaptive threshold, as pion's
+/// `adaptiveThreshold.compare` and libwebrtc's `OveruseDetector::Detect` do: the Kalman estimate
+/// `m(i)` is a per-group delay gradient, a few milliseconds when a link is oversubscribed by half
+/// again, while the threshold starts at 12.5 ms (draft-ietf-rmcat-gcc-02 5.4). Compared unscaled,
+/// a sender at 1.8 times a 600 kbit/s link never reads as overusing.
+const MAX_SCALED_DELTAS: u32 = 60;
 
 /// Rate to start from when nothing is known yet.
 pub const DEFAULT_INITIAL_BITRATE: f64 = 300_000.0;
@@ -54,6 +63,13 @@ pub struct Gcc {
     min: f64,
     max: f64,
     target: f64,
+    /// Delay-gradient readings so far, capped at [`MAX_SCALED_DELTAS`].
+    deltas: u32,
+    /// One report's arrival on the receiver's clock and the local instant it is placed at, so
+    /// later arrivals can be placed on this endpoint's timeline for the received-rate window.
+    arrival_anchor: Option<(Duration, Instant)>,
+    /// The newest arrival placed so far.
+    newest_arrival: Option<Instant>,
 }
 
 impl Default for Gcc {
@@ -79,6 +95,24 @@ impl Gcc {
             min,
             max,
             target: initial,
+            deltas: 0,
+            arrival_anchor: None,
+            newest_arrival: None,
+        }
+    }
+
+    /// Place an arrival on the receiver's clock onto this endpoint's timeline.
+    ///
+    /// Only differences between arrivals mean anything, so the first one seen is pinned to the
+    /// instant its feedback was read and every later one keeps its distance from it.
+    fn place_arrival(&mut self, now: Instant, arrival: Duration) -> Instant {
+        let (anchor_arrival, anchor_instant) = *self.arrival_anchor.get_or_insert((arrival, now));
+        if arrival >= anchor_arrival {
+            anchor_instant + (arrival - anchor_arrival)
+        } else {
+            anchor_instant
+                .checked_sub(anchor_arrival - arrival)
+                .unwrap_or(anchor_instant)
         }
     }
 
@@ -102,15 +136,29 @@ impl BandwidthEstimator for Gcc {
         // Delay: group, filter, detect, control.
         let mut usage = self.detector.usage();
         for report in reports {
-            if report.arrived {
-                self.rate.add(now, report.size);
+            // The received rate is what arrived per unit of the *receiver's* time
+            // (draft-ietf-rmcat-gcc-02 5.5). Counting acknowledged bytes at the instant their
+            // feedback was read instead measures one more feedback interval of bytes than of
+            // time, which reads 20 to 25% high at a 100 ms cadence — enough that backing off to
+            // 0.85 of it lands above the link.
+            if report.arrived
+                && let Some(arrival) = report.arrival
+            {
+                let at = self.place_arrival(now, arrival);
+                self.rate.add(at, report.size);
+                self.newest_arrival = Some(self.newest_arrival.map_or(at, |newest| newest.max(at)));
             }
             if let Some(trend) = self.slope.accumulate(report) {
-                usage = self.detector.update(trend.at, trend.estimate_ms);
+                self.deltas = (self.deltas + 1).min(MAX_SCALED_DELTAS);
+                usage = self
+                    .detector
+                    .update(trend.at, trend.estimate_ms * f64::from(self.deltas));
             }
         }
 
-        let received = self.rate.rate_bits_per_second(now);
+        let received = self
+            .newest_arrival
+            .and_then(|newest| self.rate.rate_bits_per_second(newest));
         let delay_target = self.delay_control.update(now, usage, received);
 
         // Loss: a fraction over this batch.

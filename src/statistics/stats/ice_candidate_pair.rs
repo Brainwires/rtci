@@ -6,7 +6,6 @@
 use super::RTCStats;
 use ::serde::{Deserialize, Serialize};
 use ice::candidate::candidate_pair::CandidatePairState;
-use shared::serde::instant_to_epoch;
 use shared::time::SystemInstant;
 
 /// The state of an ICE candidate pair.
@@ -92,12 +91,24 @@ pub struct RTCIceCandidatePairStats {
     pub bytes_received: u64,
 
     /// Timestamp of the last packet sent using this candidate pair.
-    #[serde(with = "instant_to_epoch")]
-    pub last_packet_sent_timestamp: SystemInstant,
+    ///
+    /// Left out of the JSON before the first one.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::statistics::stats::optional_instant_to_epoch"
+    )]
+    pub last_packet_sent_timestamp: Option<SystemInstant>,
 
     /// Timestamp of the last packet received using this candidate pair.
-    #[serde(with = "instant_to_epoch")]
-    pub last_packet_received_timestamp: SystemInstant,
+    ///
+    /// Left out of the JSON before the first one.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::statistics::stats::optional_instant_to_epoch"
+    )]
+    pub last_packet_received_timestamp: Option<SystemInstant>,
 
     /// Total round trip time in seconds for all STUN requests.
     ///
@@ -105,7 +116,11 @@ pub struct RTCIceCandidatePairStats {
     pub total_round_trip_time: f64,
 
     /// The most recent round trip time measurement in seconds.
-    pub current_round_trip_time: f64,
+    ///
+    /// `None`, and left out of the JSON, until a connectivity check on this pair has been
+    /// answered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_round_trip_time: Option<f64>,
 
     /// Number of STUN connectivity check requests sent.
     pub requests_sent: u64,
@@ -131,12 +146,18 @@ pub struct RTCIceCandidatePairStats {
     /// Estimated available outgoing bitrate in bits per second.
     ///
     /// Calculated using congestion control feedback.
-    pub available_outgoing_bitrate: f64,
+    ///
+    /// `None`, and left out of the JSON, while no congestion controller estimates it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub available_outgoing_bitrate: Option<f64>,
 
     /// Estimated available incoming bitrate in bits per second.
     ///
     /// Calculated using congestion control feedback.
-    pub available_incoming_bitrate: f64,
+    ///
+    /// `None`, and left out of the JSON, while no congestion controller estimates it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub available_incoming_bitrate: Option<f64>,
 
     /// Current state of the candidate pair.
     pub state: RTCStatsIceCandidatePairState,

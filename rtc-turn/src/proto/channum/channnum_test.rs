@@ -8,32 +8,32 @@ fn test_channel_number_string() -> Result<()> {
     Ok(())
 }
 
-/*
+/// Port of pion's `TestChannelNumber_NoAlloc`, which counts heap allocations with Go's
+/// `testing.AllocsPerRun`. The Rust test harness has no allocation counter, and `Message::add`
+/// does copy each value into its attribute list, so what carries over is the property the Go test
+/// protects: adding CHANNEL-NUMBER to a message and resetting it reuses the message's buffer
+/// instead of growing a new one, whether the number lives on the stack or on the heap.
 #[test]
-fn test_channel_number_NoAlloc() -> Result<()> {
-    let mut m = Message::default();
+fn test_channel_number_no_alloc() -> Result<()> {
+    let mut m = Message::new();
+    let capacity = m.raw.capacity();
 
-        if wasAllocs(func() {
-            // Case with ChannelNumber on stack.
-            n: = ChannelNumber(6)
-            n.AddTo(m) //nolint
-            m.Reset()
-        }) {
-        t.Error("Unexpected allocations")
-    }
+    // Case with ChannelNumber on stack.
+    let n = ChannelNumber(6);
+    n.add_to(&mut m)?;
+    assert_eq!(m.raw.capacity(), capacity, "adding grew the buffer");
+    m.reset();
+    assert_eq!(m.raw.capacity(), capacity, "resetting dropped the buffer");
 
-        n: = ChannelNumber(12)
-        nP: = &n
-        if wasAllocs(func() {
-            // On heap.
-            nP.AddTo(m) //nolint
-            m.Reset()
-        }) {
-        t.Error("Unexpected allocations")
-    }
+    // On heap.
+    let n = Box::new(ChannelNumber(12));
+    n.add_to(&mut m)?;
+    assert_eq!(m.raw.capacity(), capacity, "adding grew the buffer");
+    m.reset();
+    assert_eq!(m.raw.capacity(), capacity, "resetting dropped the buffer");
+
     Ok(())
 }
-*/
 
 #[test]
 fn test_channel_number_add_to() -> Result<()> {

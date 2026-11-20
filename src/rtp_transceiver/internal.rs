@@ -48,6 +48,11 @@ pub(crate) struct RTCRtpTransceiverInternal {
     /// that tells the two kinds apart clears it with
     /// `RTCRtpTransceiver::set_associable_with_remote_offer`.
     associable_with_remote_offer: bool,
+    /// The RTP header extensions (by URI) this transceiver's media section may carry
+    /// (webrtc-extensions, `[[HeaderExtensionsToNegotiate]]` without the "stopped" ones).
+    /// `None`, the default, is every extension the media engine negotiates; see
+    /// `RTCRtpTransceiver::set_header_extensions_to_negotiate`.
+    header_extensions_to_negotiate: Option<Vec<String>>,
 }
 
 impl fmt::Debug for RTCRtpTransceiverInternal {
@@ -95,6 +100,7 @@ impl RTCRtpTransceiverInternal {
             stopped: false,
             created_by_remote_description: false,
             associable_with_remote_offer: true,
+            header_extensions_to_negotiate: None,
         }
     }
 
@@ -104,6 +110,14 @@ impl RTCRtpTransceiverInternal {
 
     pub(crate) fn set_associable_with_remote_offer(&mut self, associable: bool) {
         self.associable_with_remote_offer = associable;
+    }
+
+    pub(crate) fn header_extensions_to_negotiate(&self) -> Option<&[String]> {
+        self.header_extensions_to_negotiate.as_deref()
+    }
+
+    pub(crate) fn set_header_extensions_to_negotiate(&mut self, uris: Option<Vec<String>>) {
+        self.header_extensions_to_negotiate = uris;
     }
 
     /// Returns the media stream identification tag (mid) for this transceiver.
@@ -313,11 +327,34 @@ impl RTCRtpTransceiverInternal {
         media: &MediaDescription,
         media_engine: &MediaEngine,
     ) -> Result<()> {
-        let mut remote_codecs = codecs_from_media_description(media)?;
+        let remote_codecs = codecs_from_media_description(media)?;
 
-        // make a copy as this slice is modified
-        let mut left_codecs = media_engine.get_codecs_by_kind(self.kind);
+        // Codec preferences the application set (W3C `setCodecPreferences`) constrain what is
+        // negotiated (JSEP RFC 8829 §5.3.1), so they are matched first; the remote codecs then
+        // replace them in the remote's order and with the engine's payload types. When nothing
+        // the application preferred was offered, the whole engine is matched instead, as with no
+        // preferences, rather than leaving the section with no codec at all.
+        let mut filtered_codecs = if self.preferred_codecs.is_empty() {
+            vec![]
+        } else {
+            Self::match_remote_codecs(remote_codecs.clone(), self.get_codecs(media_engine))
+        };
+        if filtered_codecs.is_empty() {
+            filtered_codecs = Self::match_remote_codecs(
+                remote_codecs,
+                media_engine.get_codecs_by_kind(self.kind),
+            );
+        }
 
+        self.set_codec_preferences(filtered_codecs, media_engine)
+    }
+
+    /// The remote codecs that match one of `left_codecs`, each with the matching local codec's
+    /// payload type, exact matches first, and the RTX codecs that go with them.
+    fn match_remote_codecs(
+        mut remote_codecs: Vec<RTCRtpCodecParameters>,
+        mut left_codecs: Vec<RTCRtpCodecParameters>,
+    ) -> Vec<RTCRtpCodecParameters> {
         // find codec matches between what is in remote description and
         // the transceivers codecs and use payload type registered to
         // media engine.
@@ -403,6 +440,6 @@ impl RTCRtpTransceiverInternal {
             }
         }
 
-        self.set_codec_preferences(filtered_codecs, media_engine)
+        filtered_codecs
     }
 }

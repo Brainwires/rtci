@@ -55,6 +55,9 @@
 mod rate_controller;
 mod trendline;
 
+#[cfg(test)]
+mod bounds_test;
+
 use crate::stream_info::StreamInfo;
 use crate::{Interceptor, Packet, TaggedPacket, interceptor};
 use log::trace;
@@ -301,36 +304,9 @@ impl<P: Interceptor> GccInterceptor<P> {
         let mut seq = fb.base_sequence_number;
         let mut result = Vec::new();
 
-        for chunk in &fb.packet_chunks {
-            // Iterate chunk contents inline to avoid allocating a Vec per chunk.
-            match chunk {
-                PacketStatusChunk::RunLengthChunk(rlc) => {
-                    for _ in 0..rlc.run_length {
-                        self.process_status(
-                            rlc.packet_status_symbol,
-                            fb,
-                            &mut recv_us,
-                            &mut delta_idx,
-                            seq,
-                            &mut result,
-                        );
-                        seq = seq.wrapping_add(1);
-                    }
-                }
-                PacketStatusChunk::StatusVectorChunk(svc) => {
-                    for &status in &svc.symbol_list {
-                        self.process_status(
-                            status,
-                            fb,
-                            &mut recv_us,
-                            &mut delta_idx,
-                            seq,
-                            &mut result,
-                        );
-                        seq = seq.wrapping_add(1);
-                    }
-                }
-            }
+        for status in packet_statuses(fb) {
+            self.process_status(status, fb, &mut recv_us, &mut delta_idx, seq, &mut result);
+            seq = seq.wrapping_add(1);
         }
 
         result
@@ -363,27 +339,37 @@ impl<P: Interceptor> GccInterceptor<P> {
     }
 }
 
+/// The status of each packet a TWCC feedback packet describes, in sequence order.
+///
+/// The walk stops at the header's packet status count: a run-length chunk may claim a run of up
+/// to 8191 whatever the count says, and following it would turn one small feedback packet into
+/// millions of iterations.
+fn packet_statuses(fb: &TransportLayerCc) -> impl Iterator<Item = SymbolTypeTcc> + '_ {
+    fb.packet_chunks
+        .iter()
+        .flat_map(|chunk| -> Box<dyn Iterator<Item = SymbolTypeTcc> + '_> {
+            match chunk {
+                PacketStatusChunk::RunLengthChunk(rlc) => Box::new(std::iter::repeat_n(
+                    rlc.packet_status_symbol,
+                    rlc.run_length as usize,
+                )),
+                PacketStatusChunk::StatusVectorChunk(svc) => {
+                    Box::new(svc.symbol_list.iter().copied())
+                }
+            }
+        })
+        .take(fb.packet_status_count as usize)
+}
+
 /// Compute the fraction of packets not received in a TWCC feedback packet.
 fn loss_fraction(fb: &TransportLayerCc) -> f64 {
     let mut total = 0u32;
     let mut received = 0u32;
 
-    for chunk in &fb.packet_chunks {
-        match chunk {
-            PacketStatusChunk::RunLengthChunk(rlc) => {
-                total += rlc.run_length as u32;
-                if rlc.packet_status_symbol != SymbolTypeTcc::PacketNotReceived {
-                    received += rlc.run_length as u32;
-                }
-            }
-            PacketStatusChunk::StatusVectorChunk(svc) => {
-                for sym in &svc.symbol_list {
-                    total += 1;
-                    if *sym != SymbolTypeTcc::PacketNotReceived {
-                        received += 1;
-                    }
-                }
-            }
+    for status in packet_statuses(fb) {
+        total += 1;
+        if status != SymbolTypeTcc::PacketNotReceived {
+            received += 1;
         }
     }
 
@@ -600,6 +586,7 @@ mod tests {
             run_length: 10,
         });
         let fb = TransportLayerCc {
+            packet_status_count: 10,
             packet_chunks: vec![chunk],
             recv_deltas: (0..10)
                 .map(|_| RecvDelta {
@@ -637,6 +624,7 @@ mod tests {
             ],
         });
         let fb = TransportLayerCc {
+            packet_status_count: 5,
             packet_chunks: vec![chunk],
             recv_deltas: vec![
                 RecvDelta {
@@ -687,6 +675,7 @@ mod tests {
             run_length: 5,
         });
         let fb = TransportLayerCc {
+            packet_status_count: 5,
             packet_chunks: vec![chunk],
             ..Default::default()
         };

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use stun::message::*;
 
-use crate::client::{Event, RelayedAddr};
+use crate::client::RelayedAddr;
 use shared::{TransportContext, TransportMessage, TransportProtocol};
 use stun::textattrs::TextAttribute;
 
@@ -17,24 +17,76 @@ const MAX_RTX_COUNT: u16 = 7; // total 7 requests (Rc)
 /// this is how long the client waits for its answer.
 const RELIABLE_TRANSACTION_TIMEOUT: Duration = Duration::from_millis(39_500);
 
-/// The id the authenticated retry of an Allocate uses: the anonymous request's, one on.
+/// What a re-sendable TURN request carries from one attempt to the next.
 ///
-/// [`Client::allocate`](crate::client::Client::allocate) hands this one to its caller,
-/// because the anonymous request is answered with 401 and it is the retry that carries the
-/// allocation. Everything the caller is told about that allocation names it.
-pub(crate) fn authenticated_allocate_id(attempt: TransactionId) -> TransactionId {
-    let mut tid = attempt;
-    tid.0[TRANSACTION_ID_SIZE - 1] = tid.0[TRANSACTION_ID_SIZE - 1].wrapping_add(1);
-    tid
+/// A CreatePermission, Refresh or ChannelBind answered with 438 (Stale Nonce) is sent again
+/// with the new nonce under a new transaction id (RFC 8489 §9.2.5, RFC 8656 §4.4), once. A
+/// Refresh or ChannelBind that exhausts its retransmissions is started again, once, as a new
+/// transaction.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Retry {
+    /// The id of the first request of the chain: the one its caller was handed, and the one
+    /// every event about the chain names. `None` on that first request itself.
+    pub(crate) origin: Option<TransactionId>,
+    /// Whether this request already re-sends one that was answered with 438 (Stale Nonce).
+    pub(crate) stale_nonce: bool,
+    /// Whether this request already re-sends one that timed out.
+    pub(crate) timeout: bool,
+}
+
+impl Retry {
+    /// The id events about the request sent as `wire` are reported under.
+    pub(crate) fn report_id(&self, wire: TransactionId) -> TransactionId {
+        self.origin.unwrap_or(wire)
+    }
+
+    /// The state for re-sending the request sent as `wire` after it was answered with 438.
+    pub(crate) fn after_stale_nonce(self, wire: TransactionId) -> Self {
+        Self {
+            origin: Some(self.report_id(wire)),
+            stale_nonce: true,
+            ..self
+        }
+    }
+
+    /// The state for starting the request sent as `wire` again after it timed out.
+    pub(crate) fn after_timeout(self, wire: TransactionId) -> Self {
+        Self {
+            origin: Some(self.report_id(wire)),
+            timeout: true,
+            ..self
+        }
+    }
 }
 
 pub(crate) enum TransactionType {
     BindingRequest,
-    AllocateAttempt,
+    /// The anonymous Allocate. It carries the id the authenticated retry will go out under,
+    /// which [`Client::allocate`](crate::client::Client::allocate) hands to its caller and
+    /// everything the caller is told about that allocation names.
+    AllocateAttempt(TransactionId),
     AllocateRequest(TextAttribute),
-    CreatePermissionRequest(RelayedAddr, Option<SocketAddr>),
-    RefreshRequest(RelayedAddr),
-    ChannelBindRequest(RelayedAddr, SocketAddr),
+    /// The relay, the peer a caller asked for (`None` for a permission refresh), every peer
+    /// the request names, and its retry state.
+    CreatePermissionRequest(RelayedAddr, Option<SocketAddr>, Vec<SocketAddr>, Retry),
+    /// The relay, the LIFETIME the request asks for, and its retry state.
+    RefreshRequest(RelayedAddr, Duration, Retry),
+    /// The relay, the peer being bound, and the retry state.
+    ChannelBindRequest(RelayedAddr, SocketAddr, Retry),
+}
+
+impl TransactionType {
+    /// The id events about the request sent as `wire` are reported under: the id its caller
+    /// was handed, which a retry or the Allocate exchange does not put on the wire.
+    pub(crate) fn report_id(&self, wire: TransactionId) -> TransactionId {
+        match self {
+            Self::AllocateAttempt(allocation_id) => *allocation_id,
+            Self::CreatePermissionRequest(_, _, _, retry)
+            | Self::RefreshRequest(_, _, retry)
+            | Self::ChannelBindRequest(_, _, retry) => retry.report_id(wire),
+            Self::BindingRequest | Self::AllocateRequest(_) => wire,
+        }
+    }
 }
 
 // TransactionConfig is a set of config params used by NewTransaction
@@ -163,7 +215,6 @@ fn is_reliable(transport_protocol: TransportProtocol) -> bool {
 pub(crate) struct TransactionMap {
     tr_map: HashMap<TransactionId, Transaction>,
     transmits: VecDeque<TransportMessage<BytesMut>>,
-    events: VecDeque<Event>,
 }
 
 impl TransactionMap {
@@ -172,7 +223,6 @@ impl TransactionMap {
         TransactionMap {
             tr_map: HashMap::new(),
             transmits: VecDeque::new(),
-            events: VecDeque::new(),
         }
     }
 
@@ -188,7 +238,9 @@ impl TransactionMap {
         eto
     }
 
-    pub(crate) fn handle_timeout(&mut self, now: Instant) {
+    /// Advances every transaction to `now` and removes and returns the ones that exhausted
+    /// their retransmissions. The client decides whether each is started again or reported.
+    pub(crate) fn handle_timeout(&mut self, now: Instant) -> Vec<Transaction> {
         let mut keys = vec![];
         for (key, tr) in self.tr_map.iter_mut() {
             tr.handle_timeout(now);
@@ -197,20 +249,9 @@ impl TransactionMap {
             }
         }
 
-        for key in keys {
-            let exhausted = self.tr_map.remove(&key);
-            // An Allocate nobody answers is the one case where the request on the wire and
-            // the allocation its caller knows have different ids.
-            let timed_out = if matches!(
-                exhausted.as_ref().map(|tr| &tr.transaction_type),
-                Some(TransactionType::AllocateAttempt)
-            ) {
-                authenticated_allocate_id(key)
-            } else {
-                key
-            };
-            self.events.push_back(Event::TransactionTimeout(timed_out));
-        }
+        keys.into_iter()
+            .filter_map(|key| self.tr_map.remove(&key))
+            .collect()
     }
 
     pub(crate) fn poll_transmit(&mut self) -> Option<TransportMessage<BytesMut>> {
@@ -220,10 +261,6 @@ impl TransactionMap {
             }
         }
         self.transmits.pop_front()
-    }
-
-    pub(crate) fn poll_event(&mut self) -> Option<Event> {
-        self.events.pop_front()
     }
 
     // Insert inserts a trasaction to the map

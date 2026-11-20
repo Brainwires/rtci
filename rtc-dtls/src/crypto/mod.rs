@@ -8,6 +8,8 @@
 //! Certificates here are usually self-signed: WebRTC authenticates a peer by comparing the
 //! certificate fingerprint against the one signalled in SDP, not by validating a CA chain.
 #[cfg(test)]
+mod crypto_record_test;
+#[cfg(test)]
 mod crypto_test;
 
 /// AES-CBC with a separate HMAC, for the older CBC suites.
@@ -18,6 +20,7 @@ pub mod crypto_ccm;
 pub mod crypto_chacha20;
 /// AES-GCM authenticated encryption.
 pub mod crypto_gcm;
+pub(crate) mod padding;
 
 use std::convert::TryFrom;
 use std::sync::Arc;
@@ -454,6 +457,19 @@ pub(crate) fn verify_server_cert(
     };
 
     Ok(chains)
+}
+
+/// The explicit nonce an AES-GCM or AES-CCM record carries: its epoch and sequence number, the
+/// eight bytes of the record header between the version and the length. A record's epoch and
+/// sequence number never repeat under one key (a key belongs to one epoch and one direction, and
+/// the sequence number may not wrap, RFC 6347 4.1), so neither does the nonce, as RFC 5288
+/// section 3 requires; RFC 6655 section 3 and RFC 9325 recommend exactly this construction. A
+/// random 64-bit value would be expected to repeat after about 2^32 records under one key.
+pub(crate) fn record_explicit_nonce(h: &RecordLayerHeader) -> [u8; 8] {
+    let mut nonce = [0u8; 8];
+    nonce[..2].copy_from_slice(&h.epoch.to_be_bytes());
+    nonce[2..].copy_from_slice(&h.sequence_number.to_be_bytes()[2..]);
+    nonce
 }
 
 pub(crate) fn generate_aead_additional_data(h: &RecordLayerHeader, payload_len: usize) -> [u8; 13] {

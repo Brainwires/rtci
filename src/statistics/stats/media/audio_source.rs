@@ -25,24 +25,29 @@ pub struct RTCAudioSourceStats {
     /// The current audio level (0.0 to 1.0).
     ///
     /// This is an instantaneous measurement of the audio signal level.
-    pub audio_level: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_level: Option<f64>,
 
     /// Total audio energy in the signal.
     ///
     /// This is the sum of squared audio levels over time.
-    pub total_audio_energy: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_audio_energy: Option<f64>,
 
     /// Total duration of captured audio samples in seconds.
-    pub total_samples_duration: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_samples_duration: Option<f64>,
 
     /// Echo return loss in decibels.
     ///
     /// Measures how much the acoustic echo is attenuated.
     /// Higher values indicate better echo cancellation.
-    pub echo_return_loss: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub echo_return_loss: Option<f64>,
 
     /// Echo return loss enhancement in decibels.
     ///
     /// Measures the improvement provided by the echo canceller.
-    pub echo_return_loss_enhancement: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub echo_return_loss_enhancement: Option<f64>,
 }

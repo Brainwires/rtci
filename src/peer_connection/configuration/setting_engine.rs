@@ -102,8 +102,8 @@
 //! - [RFC 8445 - ICE](https://datatracker.ietf.org/doc/html/rfc8445)
 //! - [RFC 8446 - TLS 1.3 (DTLS basis)](https://datatracker.ietf.org/doc/html/rfc8446)
 
-//TODO:#[cfg(test)]
-//mod setting_engine_test;
+#[cfg(test)]
+mod setting_engine_test;
 
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -112,12 +112,12 @@ use crypto::RTCCryptoProvider;
 use dtls::cipher_suite::CipherSuiteId;
 use dtls::extension::extension_use_srtp::SrtpProtectionProfile;
 //TODO: use ice::agent::agent_config::{InterfaceFilterFn, IpFilterFn};
-//TODO: use ice::mdns::MulticastDnsMode;
+use ice::agent::remote_policy::RemoteAddressFilter;
+use ice::mdns::MulticastDnsMode;
 use ice::network_type::NetworkType;
 //TODO: use ice::udp_network::UDPNetwork;
 use crate::peer_connection::transport::dtls::role::RTCDtlsRole;
 use crate::peer_connection::transport::ice::candidate_type::RTCIceCandidateType;
-use ice::mdns::MulticastDnsMode;
 use std::time::Duration;
 
 /// Equal to UDP MTU
@@ -243,7 +243,19 @@ pub struct Candidates {
 
     /// Allow gathering loopback candidates (useful for some VM configurations).
     /// Note: This is non-standard per RFC 8445.
+    ///
+    /// Not read by this engine, which gathers no candidates (see the deprecated
+    /// `SettingEngineBuilder::with_include_loopback_candidate`).
     pub include_loopback_candidate: bool,
+
+    /// Lets connectivity checks go to loopback / link-local remote addresses from local
+    /// candidates outside that scope. See
+    /// `SettingEngineBuilder::with_remote_candidate_scopes`.
+    pub allow_loopback_remote_candidates: bool,
+    /// See `SettingEngineBuilder::with_remote_candidate_scopes`.
+    pub allow_link_local_remote_candidates: bool,
+    /// See `SettingEngineBuilder::with_remote_address_filter`.
+    pub remote_address_filter: Option<RemoteAddressFilter>,
 }
 
 /// Replay attack protection window sizes.
@@ -332,8 +344,6 @@ impl Default for SctpMaxMessageSize {
 ///         Some(Duration::from_secs(30)),
 ///         Some(Duration::from_secs(3)),
 ///     )
-///     // Enable loopback for testing
-///     .with_include_loopback_candidate(true)
 ///     .build();
 ///
 /// // Use with peer connection configuration
@@ -811,6 +821,16 @@ impl SettingEngineBuilder {
     /// - With `Srflx` type, both private and public IPs are available
     /// - Cannot use STUN servers when using `Srflx` type
     /// - Cannot use with mDNS when using `Host` type
+    ///
+    /// # How it applies
+    ///
+    /// The sans-I/O engine gathers no candidates: the mapping is applied to the host
+    /// candidates the application adds with `add_local_candidate`. With `Host` a mapped host
+    /// candidate is announced on the public address (it stays bound to the local one); with
+    /// `Srflx` a server-reflexive candidate on the public address is announced beside it. Each
+    /// entry is `"<public ip>"` or `"<public ip>/<local ip>"`. An invalid list, `Host` with
+    /// mDNS `QueryAndGather`, or a type the candidate policy excludes fails peer connection
+    /// creation.
     pub fn with_nat_1to1_ips(
         mut self,
         ips: Vec<String>,
@@ -1010,6 +1030,10 @@ impl SettingEngineBuilder {
     /// SRTP replay protection prevents replay attacks on encrypted media packets.
     /// Adjust the window size based on expected packet reordering in your network.
     ///
+    /// The default is 1024 packets. A NACK retransmission sent without RTX reuses the lost
+    /// packet's sequence number and arrives after every packet sent since, so a window smaller
+    /// than the packets sent during a few NACK rounds refuses late repairs as too old.
+    ///
     /// # Parameters
     ///
     /// * `n` - Window size in packets (0 = disabled, not recommended)
@@ -1020,9 +1044,9 @@ impl SettingEngineBuilder {
     /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// // Standard size for most applications
+    /// // A wider window for a high packet rate
     /// let setting_engine = SettingEngineBuilder::new()
-    ///     .with_srtp_replay_protection_window(256)
+    ///     .with_srtp_replay_protection_window(4096)
     ///     .build();
     /// # Ok(())
     /// # }
@@ -1080,6 +1104,7 @@ impl SettingEngineBuilder {
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// // Enable for certain VM configurations
+    /// # #[allow(deprecated)]
     /// let setting_engine = SettingEngineBuilder::new()
     ///     .with_include_loopback_candidate(true)
     ///     .build();
@@ -1091,6 +1116,15 @@ impl SettingEngineBuilder {
     ///
     /// This is non-standard behavior per [RFC 8445 §5.1.1.1](https://datatracker.ietf.org/doc/html/rfc8445#section-5.1.1.1).
     /// Use with caution.
+    ///
+    /// # Not read by this engine
+    ///
+    /// The sans-I/O engine gathers no candidates (the application adds them), so this value is
+    /// stored for API compatibility with pion and never read.
+    #[deprecated(
+        note = "a no-op: the sans-I/O engine gathers no candidates; add a loopback candidate \
+                with `add_local_candidate` instead"
+    )]
     pub fn with_include_loopback_candidate(mut self, allow_loopback: bool) -> Self {
         self.0.candidates.include_loopback_candidate = allow_loopback;
         self
@@ -1137,6 +1171,56 @@ impl SettingEngineBuilder {
         self.0
             .candidates
             .discard_local_candidates_during_ice_restart = discard;
+        self
+    }
+
+    /// Allows connectivity checks to loopback and / or link-local remote addresses.
+    ///
+    /// Remote candidates are chosen by the peer. By default a loopback remote candidate
+    /// (`127.0.0.0/8`, `::1`) is paired only with a loopback local candidate, and a link-local
+    /// one (`169.254.0.0/16`, `fe80::/10`, which includes cloud metadata services) only with a
+    /// link-local local candidate, so a remote peer cannot make this host send checks to its
+    /// own services or its link's metadata address. Candidates that are never a unicast
+    /// destination (unspecified, multicast, broadcast, port 0) are dropped regardless
+    /// ([RFC 8445 §5.1.1.1]).
+    ///
+    /// [RFC 8445 §5.1.1.1]: https://datatracker.ietf.org/doc/html/rfc8445#section-5.1.1.1
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    ///
+    /// // Pair loopback remote candidates with any local candidate; keep link-local ones scoped.
+    /// let _setting_engine = SettingEngineBuilder::new()
+    ///     .with_remote_candidate_scopes(true, false)
+    ///     .build();
+    /// ```
+    pub fn with_remote_candidate_scopes(mut self, loopback: bool, link_local: bool) -> Self {
+        self.0.candidates.allow_loopback_remote_candidates = loopback;
+        self.0.candidates.allow_link_local_remote_candidates = link_local;
+        self
+    }
+
+    /// Sets a filter asked about every remote candidate's address (an mDNS candidate's once it
+    /// resolves) before the ICE agent holds it; `false` drops the candidate, so no check is ever
+    /// sent there. Use it to apply the host's own network policy to peer-chosen destinations.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    /// use std::sync::Arc;
+    ///
+    /// // Drop every remote candidate on a loopback address.
+    /// let _setting_engine = SettingEngineBuilder::new()
+    ///     .with_remote_address_filter(Arc::new(|addr: std::net::SocketAddr| {
+    ///         !addr.ip().is_loopback()
+    ///     }))
+    ///     .build();
+    /// ```
+    pub fn with_remote_address_filter(mut self, filter: RemoteAddressFilter) -> Self {
+        self.0.candidates.remote_address_filter = Some(filter);
         self
     }
 
@@ -1196,6 +1280,7 @@ impl SettingEngineBuilder {
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// // Share MediaEngine across connections
+    /// # #[allow(deprecated)]
     /// let setting_engine = SettingEngineBuilder::new()
     ///     .with_disable_media_engine_copy(true)
     ///     .build();
@@ -1210,6 +1295,16 @@ impl SettingEngineBuilder {
     ///
     /// When disabled, ensure you don't share the same MediaEngine between
     /// multiple PeerConnections unless you specifically intend to do so.
+    ///
+    /// # Not read by this engine
+    ///
+    /// A PeerConnection takes its `MediaEngine` by value from the builder, so it always has
+    /// its own; there is no shared engine to copy or not. This value is stored for API
+    /// compatibility with pion and never read.
+    #[deprecated(
+        note = "a no-op: a peer connection always owns its MediaEngine (the builder takes it \
+                by value), so there is no copy to disable"
+    )]
     pub fn with_disable_media_engine_copy(mut self, is_disabled: bool) -> Self {
         self.0.disable_media_engine_copy = is_disabled;
         self
@@ -1242,6 +1337,16 @@ impl SettingEngineBuilder {
     /// # Deprecation Note
     ///
     /// This setting is targeted for removal in a future release (4.2.0 or later).
+    ///
+    /// # What it changes
+    ///
+    /// By default every remote description adds the formats of each of its audio and video
+    /// sections to the codecs the connection has negotiated, so a second video section that
+    /// offers only H.264 is answered with H.264 even when the first one negotiated VP8
+    /// (RFC 9429, Section 5.10). A format is kept once, under the first payload type that
+    /// named it. With `true`, only the first section of each kind (in the first remote
+    /// description that has one) decides the codecs, and later sections are answered from
+    /// that set.
     pub fn with_disable_media_engine_multiple_codecs(mut self, is_disabled: bool) -> Self {
         self.0.disable_media_engine_multiple_codecs = is_disabled;
         self
@@ -1263,17 +1368,29 @@ impl SettingEngineBuilder {
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// // Use larger MTU for jumbo frames
+    /// # #[allow(deprecated)]
     /// let setting_engine = SettingEngineBuilder::new()
     ///     .with_receive_mtu(9000)
     ///     .build();
     ///
     /// // Or use default
+    /// # #[allow(deprecated)]
     /// let setting_engine = SettingEngineBuilder::new()
     ///     .with_receive_mtu(0)
     ///     .build();
     /// # Ok(())
     /// # }
     /// ```
+    ///
+    /// # Not read by this engine
+    ///
+    /// The sans-I/O engine reads no sockets: the application receives each datagram into its
+    /// own buffer and hands it over whole, so there is no receive buffer to size. This value
+    /// is stored for API compatibility with pion and never read.
+    #[deprecated(
+        note = "a no-op: the sans-I/O engine reads no sockets; size the application's own \
+                receive buffer instead"
+    )]
     pub fn with_receive_mtu(mut self, receive_mtu: usize) -> Self {
         self.0.receive_mtu = receive_mtu;
         self
@@ -1312,6 +1429,10 @@ impl SettingEngineBuilder {
     /// # See Also
     ///
     /// - [RFC 8843 - MID](https://datatracker.ietf.org/doc/html/rfc8843)
+    ///
+    /// `create_offer` calls it for each transceiver that has no mid yet, then moves the
+    /// argument on (to the generated mid when it is a greater number, else by one), so two
+    /// new transceivers of one offer get different arguments.
     pub fn with_mid_generator(
         mut self,
         f: impl Fn(isize) -> String + Send + Sync + 'static,

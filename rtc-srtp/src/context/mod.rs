@@ -1,9 +1,13 @@
 #[cfg(test)]
 mod context_test;
 #[cfg(test)]
+mod cryptex_test;
+#[cfg(test)]
 mod srtcp_test;
 #[cfg(test)]
 mod srtp_test;
+#[cfg(test)]
+mod srtp_upstream_test;
 
 use std::collections::HashMap;
 use std::hash::{BuildHasher, RandomState};
@@ -14,6 +18,7 @@ use shared::replay_detector::*;
 use crate::cipher::cipher_aead_aes_gcm::*;
 use crate::cipher::cipher_aes_cm_hmac_sha1::*;
 use crate::cipher::*;
+use crate::cryptex::Cryptex;
 use crate::option::*;
 use crate::protection_profile::*;
 use shared::error::{Error, Result};
@@ -177,6 +182,7 @@ pub struct Context {
     new_srtp_replay_detector: ContextOption,
     new_srtcp_replay_detector: ContextOption,
 
+    cryptex: Cryptex,
     /// Keys the digests of protected packets kept per sending SSRC (see [`SentIndexes`]).
     sent_digest_hasher: RandomState,
 }
@@ -246,8 +252,19 @@ impl Context {
             srtcp_ssrc_states: HashMap::new(),
             new_srtp_replay_detector: srtp_ctx_opt,
             new_srtcp_replay_detector: srtcp_ctx_opt,
+            cryptex: Cryptex::default(),
             sent_digest_hasher: RandomState::new(),
         })
+    }
+
+    /// How this context uses Cryptex (RFC 9335); see [`Cryptex`].
+    pub fn cryptex(&self) -> Cryptex {
+        self.cryptex
+    }
+
+    /// Sets how this context uses Cryptex (RFC 9335). It applies from the next packet.
+    pub fn set_cryptex(&mut self, cryptex: Cryptex) {
+        self.cryptex = cryptex;
     }
 
     /// Fails with [`Error::SrtpTooManySsrcs`] if `ssrc` has no SRTP state yet and the context

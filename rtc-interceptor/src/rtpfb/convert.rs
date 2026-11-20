@@ -86,31 +86,34 @@ pub fn convert_twcc(feedback: &TransportLayerCc) -> Vec<Acknowledgement> {
         }
     };
 
-    for chunk in &feedback.packet_chunks {
-        match chunk {
-            PacketStatusChunk::RunLengthChunk(run) => {
-                for _ in 0..run.run_length {
-                    push(
-                        run.packet_status_symbol,
-                        &mut offset,
-                        &mut arrival,
-                        &mut delta_index,
-                        &mut acknowledgements,
-                    );
+    // The header's packet status count is the number of packets the report describes. A
+    // run-length chunk can claim a run of up to 8191 whatever the count says, so the chunks are
+    // walked only as far as the count: one small feedback packet must not expand into millions
+    // of acknowledgements.
+    let symbols = feedback
+        .packet_chunks
+        .iter()
+        .flat_map(|chunk| -> Box<dyn Iterator<Item = SymbolTypeTcc> + '_> {
+            match chunk {
+                PacketStatusChunk::RunLengthChunk(run) => Box::new(std::iter::repeat_n(
+                    run.packet_status_symbol,
+                    run.run_length as usize,
+                )),
+                PacketStatusChunk::StatusVectorChunk(vector) => {
+                    Box::new(vector.symbol_list.iter().copied())
                 }
             }
-            PacketStatusChunk::StatusVectorChunk(vector) => {
-                for &symbol in &vector.symbol_list {
-                    push(
-                        symbol,
-                        &mut offset,
-                        &mut arrival,
-                        &mut delta_index,
-                        &mut acknowledgements,
-                    );
-                }
-            }
-        }
+        })
+        .take(feedback.packet_status_count as usize);
+
+    for symbol in symbols {
+        push(
+            symbol,
+            &mut offset,
+            &mut arrival,
+            &mut delta_index,
+            &mut acknowledgements,
+        );
     }
 
     acknowledgements
@@ -208,6 +211,7 @@ mod tests {
         let feedback = TransportLayerCc {
             base_sequence_number: 100,
             reference_time: 0,
+            packet_status_count: 3,
             packet_chunks: vec![run_length(SymbolTypeTcc::PacketNotReceived, 3)],
             recv_deltas: vec![],
             ..Default::default()
@@ -232,6 +236,7 @@ mod tests {
             base_sequence_number: 10,
             // One tick of 64 ms.
             reference_time: 1,
+            packet_status_count: 3,
             packet_chunks: vec![run_length(SymbolTypeTcc::PacketReceivedSmallDelta, 3)],
             recv_deltas: vec![delta(1000), delta(2000), delta(500)],
             ..Default::default()
@@ -261,6 +266,7 @@ mod tests {
         let feedback = TransportLayerCc {
             base_sequence_number: 0,
             reference_time: 1,
+            packet_status_count: 2,
             packet_chunks: vec![run_length(SymbolTypeTcc::PacketReceivedSmallDelta, 2)],
             recv_deltas: vec![delta(5000), delta(-2000)],
             ..Default::default()
@@ -287,6 +293,7 @@ mod tests {
         let feedback = TransportLayerCc {
             base_sequence_number: 500,
             reference_time: 0,
+            packet_status_count: 3,
             packet_chunks: vec![status_vector(vec![
                 SymbolTypeTcc::PacketReceivedSmallDelta,
                 SymbolTypeTcc::PacketNotReceived,
@@ -320,6 +327,7 @@ mod tests {
         let feedback = TransportLayerCc {
             base_sequence_number: 0,
             reference_time: 0,
+            packet_status_count: 1,
             packet_chunks: vec![run_length(SymbolTypeTcc::PacketReceivedWithoutDelta, 1)],
             recv_deltas: vec![],
             ..Default::default()
@@ -337,6 +345,7 @@ mod tests {
         let feedback = TransportLayerCc {
             base_sequence_number: 0,
             reference_time: 0,
+            packet_status_count: 4,
             packet_chunks: vec![run_length(SymbolTypeTcc::PacketReceivedSmallDelta, 4)],
             recv_deltas: vec![delta(100)],
             ..Default::default()
@@ -358,6 +367,7 @@ mod tests {
         let feedback = TransportLayerCc {
             base_sequence_number: 65534,
             reference_time: 0,
+            packet_status_count: 4,
             packet_chunks: vec![run_length(SymbolTypeTcc::PacketNotReceived, 4)],
             recv_deltas: vec![],
             ..Default::default()

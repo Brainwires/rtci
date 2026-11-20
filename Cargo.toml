@@ -23,7 +23,7 @@ resolver = "2"
 opt-level = 0
 
 [workspace.package]
-version = "0.21.1+brainwires.6"
+version = "0.22.0+brainwires.1"
 authors = ["Rain Liu <yliu@webrtc.rs>"]
 edition = "2024"
 license = "MIT/Apache-2.0"
@@ -33,23 +33,23 @@ keywords = ["sansio", "networking", "protocols"]
 categories = ["network-programming"]
 
 [workspace.dependencies]
-crypto = { version = "0.21.1", path = "rtc-crypto", package = "rtc-crypto", default-features = false }
-datachannel = { version = "0.21.1", path = "rtc-datachannel", package = "rtc-datachannel" }
-dtls = { version = "0.21.1", path = "rtc-dtls", package = "rtc-dtls", default-features = false }
-ice = { version = "0.21.1", path = "rtc-ice", package = "rtc-ice", default-features = false }
-interceptor = { version = "0.21.1", path = "rtc-interceptor", package = "rtc-interceptor" }
-interceptor-derive = { version = "0.21.1", path = "rtc-interceptor-derive", package = "rtc-interceptor-derive" }
-mdns = { version = "0.21.1", path = "rtc-mdns", package = "rtc-mdns" }
-media = { version = "0.21.1", path = "rtc-media", package = "rtc-media" }
-rtcp = { version = "0.21.1", path = "rtc-rtcp", package = "rtc-rtcp" }
-rtp = { version = "0.21.1", path = "rtc-rtp", package = "rtc-rtp" }
-sctp = { version = "0.21.1", path = "rtc-sctp", package = "rtc-sctp" }
-sdp = { version = "0.21.1", path = "rtc-sdp", package = "rtc-sdp" }
-shared = { version = "0.21.1", path = "rtc-shared", package = "rtc-shared", default-features = false }
-srtp = { version = "0.21.1", path = "rtc-srtp", package = "rtc-srtp", default-features = false }
-stun = { version = "0.21.1", path = "rtc-stun", package = "rtc-stun", default-features = false }
-turn = { version = "0.21.1", path = "rtc-turn", package = "rtc-turn", default-features = false }
-signal = { version = "0.21.1", path = "examples/signal", package = "rtc-signal" }
+crypto = { version = "0.22.0", path = "rtc-crypto", package = "rtc-crypto", default-features = false }
+datachannel = { version = "0.22.0", path = "rtc-datachannel", package = "rtc-datachannel" }
+dtls = { version = "0.22.0", path = "rtc-dtls", package = "rtc-dtls", default-features = false }
+ice = { version = "0.22.0", path = "rtc-ice", package = "rtc-ice", default-features = false }
+interceptor = { version = "0.22.0", path = "rtc-interceptor", package = "rtc-interceptor" }
+interceptor-derive = { version = "0.22.0", path = "rtc-interceptor-derive", package = "rtc-interceptor-derive" }
+mdns = { version = "0.22.0", path = "rtc-mdns", package = "rtc-mdns" }
+media = { version = "0.22.0", path = "rtc-media", package = "rtc-media" }
+rtcp = { version = "0.22.0", path = "rtc-rtcp", package = "rtc-rtcp" }
+rtp = { version = "0.22.0", path = "rtc-rtp", package = "rtc-rtp" }
+sctp = { version = "0.22.0", path = "rtc-sctp", package = "rtc-sctp" }
+sdp = { version = "0.22.0", path = "rtc-sdp", package = "rtc-sdp" }
+shared = { version = "0.22.0", path = "rtc-shared", package = "rtc-shared", default-features = false }
+srtp = { version = "0.22.0", path = "rtc-srtp", package = "rtc-srtp", default-features = false }
+stun = { version = "0.22.0", path = "rtc-stun", package = "rtc-stun", default-features = false }
+turn = { version = "0.22.0", path = "rtc-turn", package = "rtc-turn", default-features = false }
+signal = { version = "0.22.0", path = "examples/signal", package = "rtc-signal" }
 
 # common dependencies
 sansio = "1"
@@ -195,6 +195,20 @@ futures-util.workspace = true
 # RUSTSEC-2026-0387) and no bincode. webrtc 0.20+ is built on the upstream `rtc` crates, so it
 # would test this stack against its own lineage.
 webrtc = "0.17.3"
+
+# The test environment's TURN-over-TLS client speaks TLS 1.2: the environment's coturn fails
+# every TLS 1.3 handshake (tests/testenv/mod.rs). Dev-only; the library's rustls is unchanged.
+rustls = { workspace = true, features = ["tls12"] }
+
+# The real-network test environment's tests (tests/testenv_*.rs) create sockets inside Linux
+# network namespaces with setns(2).
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+libc = "0.2"
+
+[[example]]
+name = "interop-peer"
+path = "examples/interop-peer/interop-peer.rs"
+bench = false
 
 [[example]]
 name = "broadcast"

@@ -378,8 +378,9 @@ fn test_vp9_per_picture_state_does_not_accumulate() -> Result<()> {
         assert_eq!(pck.pdiff, vec![1, 1]);
     }
 
-    // V=1; SS with N_S=0, G=1, N_G=255 pictures (T=0, U=0, R=0 each).
-    let mut ss = vec![0x02, 0x02, 0xff];
+    // V=1; SS with N_S=0, Y=0, G=1 (bit 3 of `N_S|Y|G|-|-|-|`, RFC 9628 4.2.1), N_G=255
+    // pictures (T=0, U=0, R=0 each).
+    let mut ss = vec![0x02, 0x08, 0xff];
     ss.extend(std::iter::repeat_n(0x00, 255));
     ss.push(0xaa);
     let ss = Bytes::from(ss);
@@ -392,5 +393,107 @@ fn test_vp9_per_picture_state_does_not_accumulate() -> Result<()> {
     // A packet without reference indices reports none.
     pck.depacketize(&Bytes::from_static(&[0x00, 0xaa]))?;
     assert!(pck.pdiff.is_empty());
+    Ok(())
+}
+
+/// A VP9 key frame header: frame_marker 2, profile 0, show_existing_frame 0,
+/// frame_type 0 (key), show_frame 1, error_resilient_mode 0, the sync code,
+/// color_space 1 (BT.601), color_range 0, then width-1 = 639 and
+/// height-1 = 479 (16 bits each), then frame data.
+fn vp9_key_frame_640x480() -> Vec<u8> {
+    // Bits: 10 0 0 0 0 1 0 | 0x49 0x83 0x42 | 001 0 | 0x027F | 0x01DF | pad
+    let mut bits: Vec<u8> = vec![1, 0, 0, 0, 0, 0, 1, 0];
+    for byte in [0x49u8, 0x83, 0x42] {
+        for i in (0..8).rev() {
+            bits.push((byte >> i) & 1);
+        }
+    }
+    bits.extend([0, 0, 1, 0]);
+    for value in [639u16, 479] {
+        for i in (0..16).rev() {
+            bits.push(((value >> i) & 1) as u8);
+        }
+    }
+    while bits.len() % 8 != 0 {
+        bits.push(0);
+    }
+    let mut out: Vec<u8> = bits
+        .chunks(8)
+        .map(|c| c.iter().fold(0u8, |acc, b| (acc << 1) | b))
+        .collect();
+    out.extend([0xaa, 0xbb, 0xcc]);
+    out
+}
+
+#[test]
+fn test_vp9_frame_header_parse() {
+    let header = Vp9FrameHeader::parse(&vp9_key_frame_640x480()).unwrap();
+    assert_eq!(
+        header,
+        Vp9FrameHeader {
+            key_frame: true,
+            width: 640,
+            height: 480
+        }
+    );
+    // An inter frame: frame_type 1.
+    let inter = Vp9FrameHeader::parse(&[0x86, 0x00]).unwrap();
+    assert!(!inter.key_frame);
+    // Not VP9: frame_marker isn't 2.
+    assert!(Vp9FrameHeader::parse(&[0x01, 0x02]).is_none());
+}
+
+/// Firefox decodes only non-flexible VP9 with the scalability structure on
+/// key frames; the payloader used to send flexible mode with P=0 and no SS.
+#[test]
+fn test_vp9_payloader_non_flexible_mode() -> Result<()> {
+    let mut pck = Vp9Payloader {
+        initial_picture_id_fn: Some(Arc::new(|| -> u16 { 8692 })),
+        ..Default::default()
+    };
+    let key = Bytes::from(vp9_key_frame_640x480());
+    let out = pck.payload(100, &key)?;
+    assert_eq!(out.len(), 1);
+    // I=1 B=1 E=1 V=1 Z=1, P=0, F=0; picture id 8692 (M=1).
+    assert_eq!(out[0][0], 0x8F);
+    assert_eq!(
+        &out[0][1..3],
+        &[(8692u16 >> 8) as u8 | 0x80, (8692 & 0xFF) as u8]
+    );
+    // SS: N_S=0 Y=1 G=1, 640x480, N_G=1, T=0 U=1 R=1, P_DIFF=1.
+    assert_eq!(
+        &out[0][3..11],
+        &[0x18, 0x02, 0x80, 0x01, 0xE0, 0x01, 0x14, 0x01]
+    );
+    assert_eq!(&out[0][11..], &key[..]);
+    let mut depacketizer = Vp9Packet::default();
+    assert_eq!(depacketizer.depacketize(&out[0])?, key);
+    assert!(!depacketizer.f && !depacketizer.p && depacketizer.v);
+    assert_eq!(depacketizer.width, vec![640]);
+    assert_eq!(depacketizer.height, vec![480]);
+
+    // An inter frame across two packets: P=1, no SS; B on the first, E on the
+    // last; the next picture id.
+    let inter = Bytes::from_static(&[0x86, 0x01, 0x02, 0x03]);
+    let out = pck.payload(5, &inter)?;
+    assert_eq!(out.len(), 2);
+    assert_eq!(out[0][0], 0xC9); // I P B Z
+    assert_eq!(out[1][0], 0xC5); // I P E Z
+    assert_eq!(
+        &out[0][1..3],
+        &[(8693u16 >> 8) as u8 | 0x80, (8693 & 0xFF) as u8]
+    );
+    assert_eq!(&out[0][3..], &[0x86, 0x01]);
+    assert_eq!(&out[1][3..], &[0x02, 0x03]);
+
+    // flexible_mode keeps the old format.
+    let mut flexible = Vp9Payloader {
+        initial_picture_id_fn: Some(Arc::new(|| -> u16 { 8692 })),
+        flexible_mode: true,
+        ..Default::default()
+    };
+    let out = flexible.payload(100, &key)?;
+    assert_eq!(out[0][0], 0x9C);
+    assert_eq!(&out[0][3..], &key[..]);
     Ok(())
 }

@@ -501,7 +501,7 @@ pub(crate) fn resolve_rtx_primary(
 ///
 /// Returns `false` without modifying the packet when the payload is shorter than
 /// the 2-byte OSN header (e.g. a padding-only bandwidth-probe packet).
-fn deencapsulate_rtx(
+pub(crate) fn deencapsulate_rtx(
     packet: &mut rtp::Packet,
     primary_ssrc: SSRC,
     primary_payload_type: PayloadType,

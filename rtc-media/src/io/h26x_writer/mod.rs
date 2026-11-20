@@ -1,4 +1,6 @@
 #[cfg(test)]
+mod h264_writer_port_test;
+#[cfg(test)]
 mod h26x_writer_test;
 
 use std::io::Write;

@@ -1,4 +1,4 @@
-//! play-from-disk-playlist-control streams Opus pages from single or multi-track Ogg containers,
+//! play-from-disk-playlist-control streams Opus packets from single or multi-track Ogg containers,
 //! exposes the playlist over a DataChannel, and lets the browser switch tracks.
 //!
 //! This example demonstrates:
@@ -82,7 +82,7 @@ struct Cli {
     playlist_file: String,
 }
 
-/// A buffered audio page ready for streaming
+/// A buffered Opus packet (one RTP payload, RFC 7587 4.2) ready for streaming
 #[derive(Clone)]
 struct BufferedPage {
     payload: Vec<u8>,
@@ -223,7 +223,9 @@ fn parse_playlist(path: &str) -> Result<Vec<OggTrack>> {
 
     let mut tracks: HashMap<u32, OggTrack> = HashMap::new();
     let mut order: Vec<u32> = Vec::new();
-    let mut last_granule: HashMap<u32, u64> = HashMap::new();
+    // A packet that continues on the next page of its stream (RFC 3533 section 6), by serial:
+    // the streams' pages interleave, so each has its own.
+    let mut partial: HashMap<u32, Vec<u8>> = HashMap::new();
 
     loop {
         let (payload, page_header) = match ogg_reader.parse_next_page() {
@@ -296,20 +298,35 @@ fn parse_playlist(path: &str) -> Result<Vec<OggTrack>> {
             continue;
         }
 
-        // Calculate page duration
-        let duration = page_duration(
-            track.header.as_ref().unwrap(),
-            page_header.granule_position,
-            *last_granule.get(&serial).unwrap_or(&0),
-        );
-        last_granule.insert(serial, page_header.granule_position);
-
-        track.pages.push(BufferedPage {
-            payload: payload.to_vec(),
-            duration,
-            granule: page_header.granule_position,
-        });
-        track.runtime += duration;
+        // A page may hold several packets and a packet may span pages (RFC 3533 section 6):
+        // split the page by its segment table and time each packet by its TOC byte.
+        let continued = page_header.is_continued_packet();
+        let mut carried = partial.remove(&serial).filter(|_| continued);
+        for (i, (data, complete)) in page_header.packets(&payload).into_iter().enumerate() {
+            let packet = match (i, carried.take()) {
+                (0, Some(mut start)) => {
+                    start.extend_from_slice(data);
+                    start
+                }
+                (0, None) if continued => continue, // its start was lost
+                _ => data.to_vec(),
+            };
+            if !complete {
+                partial.insert(serial, packet);
+                continue;
+            }
+            if packet.is_empty() {
+                continue;
+            }
+            let duration =
+                Duration::from_micros(u64::from(opus_packet_samples(&packet)) * 1_000_000 / 48_000);
+            track.pages.push(BufferedPage {
+                payload: packet,
+                duration,
+                granule: page_header.granule_position,
+            });
+            track.runtime += duration;
+        }
     }
 
     // Build ordered result
@@ -329,24 +346,27 @@ fn parse_playlist(path: &str) -> Result<Vec<OggTrack>> {
     Ok(ordered)
 }
 
-/// Calculate the duration of a page based on granule positions
-fn page_duration(header: &OggHeader, granule: u64, last: u64) -> Duration {
-    let sample_rate = if header.sample_rate == 0 {
-        48000
-    } else {
-        header.sample_rate
+/// The number of 48 kHz samples in an Opus packet, read from its TOC byte (RFC 6716 section
+/// 3.1): the frame size its configuration gives, times its frame count.
+fn opus_packet_samples(packet: &[u8]) -> u32 {
+    let Some(&toc) = packet.first() else {
+        return 0;
     };
-
-    if granule <= last {
-        return Duration::from_millis(20);
-    }
-
-    let sample_count = granule - last;
-    if sample_count == 0 {
-        return Duration::from_millis(20);
-    }
-
-    Duration::from_nanos((sample_count as f64 / sample_rate as f64 * 1_000_000_000.0) as u64)
+    let config = toc >> 3;
+    let frame: u32 = match config {
+        // SILK-only: 10, 20, 40, 60 ms.
+        0..=11 => [480, 960, 1920, 2880][usize::from(config % 4)],
+        // Hybrid: 10, 20 ms.
+        12..=15 => [480, 960][usize::from(config % 2)],
+        // CELT-only: 2.5, 5, 10, 20 ms.
+        _ => [120, 240, 480, 960][usize::from(config % 4)],
+    };
+    let frames: u32 = match toc & 0x03 {
+        0 => 1,
+        1 | 2 => 2,
+        _ => packet.get(1).map_or(0, |b| u32::from(b & 0x3f)),
+    };
+    frame * frames
 }
 
 /// Run the HTTP server for static files and WHEP signaling
@@ -642,6 +662,8 @@ async fn run_peer_connection(
 
     let mut buf = vec![0; 2000];
     let mut last_stream_time = Instant::now();
+    // The duration of the packet sent last: the next one goes out when it has played.
+    let mut last_packet_duration = Duration::from_millis(20);
 
     loop {
         // Send outgoing messages
@@ -715,7 +737,7 @@ async fn run_peer_connection(
         }
 
         // Stream audio if connected
-        if connected && last_stream_time.elapsed() >= Duration::from_millis(20) {
+        if connected && last_stream_time.elapsed() >= last_packet_duration {
             let track_idx = current_track.load(Ordering::SeqCst) as usize;
             if track_idx < tracks.len() {
                 let track = &tracks[track_idx];
@@ -760,6 +782,7 @@ async fn run_peer_connection(
                     }
 
                     last_stream_time = Instant::now();
+                    last_packet_duration = page.duration;
 
                     // Check for track switch
                     let switch = switch_track.swap(-1, Ordering::SeqCst);

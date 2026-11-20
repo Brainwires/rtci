@@ -8,6 +8,7 @@ use sansio::Protocol;
 use shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
@@ -255,12 +256,20 @@ async fn test_save_to_disk_vpx_webrtc_to_rtc() -> Result<()> {
         Arc::new(Mutex::new(HashMap::<RTCRtpReceiverId, RtpCodecKind>::new()));
     let track_id2_receiver_id = Arc::new(Mutex::new(HashMap::new()));
 
-    // Spawn media streaming tasks
+    // Spawn media streaming tasks. They send until the receiver has enough (writes before the
+    // connection is up are dropped, so a fixed count could fall short on a loaded machine),
+    // bounded so a broken run still ends.
+    let enough = Arc::new(AtomicBool::new(false));
+    let video_enough = Arc::clone(&enough);
+    let audio_enough = Arc::clone(&enough);
     let video_track_clone = Arc::clone(&video_track);
     let video_count_clone = Arc::clone(&video_packets_received_clone);
     tokio::spawn(async move {
-        // Send some dummy video frames
-        for i in 0..30 {
+        // Send dummy video frames until the receiver has enough
+        for i in 0..1500 {
+            if video_enough.load(Ordering::Relaxed) {
+                break;
+            }
             let sample = Sample {
                 data: vec![0u8; 100].into(), // Dummy VP8 data
                 duration: Duration::from_millis(33),
@@ -282,8 +291,11 @@ async fn test_save_to_disk_vpx_webrtc_to_rtc() -> Result<()> {
     let audio_track_clone = Arc::clone(&audio_track);
     let audio_count_clone = Arc::clone(&audio_packets_received_clone);
     tokio::spawn(async move {
-        // Send some dummy audio frames
-        for i in 0..30 {
+        // Send dummy audio frames until the receiver has enough
+        for i in 0..1500 {
+            if audio_enough.load(Ordering::Relaxed) {
+                break;
+            }
             let sample = Sample {
                 data: vec![0u8; 100].into(), // Dummy Opus data
                 duration: Duration::from_millis(20),
@@ -432,6 +444,7 @@ async fn test_save_to_disk_vpx_webrtc_to_rtc() -> Result<()> {
 
         // Check if we've received enough packets
         if rtc_connected && webrtc_connected && video_received >= 20 && audio_received >= 20 {
+            enough.store(true, Ordering::Relaxed);
             log::info!("✅ Test completed successfully!");
             log::info!(
                 "   Received {} video packets and {} audio packets",
@@ -515,6 +528,7 @@ async fn create_webrtc_peer() -> Result<Arc<WebrtcPeerConnection>> {
     registry = register_default_interceptors(registry, &mut media_engine)?;
 
     let api = APIBuilder::new()
+        .with_setting_engine(common::webrtc_setting_engine())
         .with_media_engine(media_engine)
         .with_interceptor_registry(registry)
         .build();

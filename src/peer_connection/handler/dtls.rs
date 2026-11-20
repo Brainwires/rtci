@@ -6,7 +6,9 @@ use crate::peer_connection::message::internal::{
 use crate::peer_connection::transport::dtls::DtlsTransport;
 use crate::peer_connection::transport::dtls::role::RTCDtlsRole;
 use crate::peer_connection::transport::dtls::state::RTCDtlsTransportState;
-use crate::statistics::accumulator::{CertificateStatsAccumulator, RTCStatsAccumulator};
+use crate::statistics::accumulator::{
+    CertificateStatsAccumulator, RTCStatsAccumulator, base64_encode,
+};
 use crypto::RTCCryptoProvider;
 use dtls::endpoint::EndpointEvent;
 use dtls::extension::extension_use_srtp::SrtpProtectionProfile;
@@ -20,6 +22,9 @@ use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
+
+#[cfg(test)]
+mod tls_version_test;
 
 pub(crate) struct DtlsHandlerContext {
     pub(crate) dtls_transport: DtlsTransport,
@@ -121,8 +126,10 @@ impl<'a> DtlsHandler<'a> {
         };
         self.stats.transport.srtp_cipher = srtp_cipher.to_string();
 
-        // Update TLS version
-        self.stats.transport.tls_version = "DTLS 1.2".to_string();
+        // webrtc-stats `tlsVersion`: the negotiated version as the uppercase hex of its two
+        // ServerHello bytes; the DTLS stack speaks DTLS 1.2 only (RFC 6347 section 4.1,
+        // `{254, 253}`).
+        self.stats.transport.tls_version = "FEFD".to_string();
 
         // Update DTLS cipher from the negotiated cipher suite
         if let Some(cipher) = dtls_cipher {
@@ -134,15 +141,15 @@ impl<'a> DtlsHandler<'a> {
             let fingerprints =
                 local_cert.get_fingerprints(self.ctx.dtls_transport.crypto_provider.crypto())?;
             if let Some(fp) = fingerprints.first() {
-                // Register certificate in accumulator
-                // Use hex encoding for certificate (base64 would need additional dependency)
+                // Register certificate in accumulator, the DER base64-encoded (webrtc-stats
+                // `base64Certificate`)
                 if let Some(der) = local_cert.dtls_certificate.certificate.first() {
                     self.stats.register_certificate(
                         fp.value.clone(),
                         CertificateStatsAccumulator {
                             fingerprint: fp.value.clone(),
                             fingerprint_algorithm: fp.algorithm.clone(),
-                            base64_certificate: hex::encode(der.as_ref()),
+                            base64_certificate: base64_encode(der.as_ref()),
                             issuer_certificate_id: String::new(),
                         },
                     );
@@ -177,7 +184,7 @@ impl<'a> DtlsHandler<'a> {
                 CertificateStatsAccumulator {
                     fingerprint,
                     fingerprint_algorithm: "sha-256".to_string(),
-                    base64_certificate: hex::encode(peer_cert_der),
+                    base64_certificate: base64_encode(peer_cert_der),
                     issuer_certificate_id: String::new(),
                 },
             );
@@ -203,10 +210,14 @@ impl<'a>
         if let RTCMessageInternal::Dtls(DTLSMessage::Raw(dtls_message)) = msg.message {
             debug!("recv dtls RAW {:?}", msg.transport.peer_addr);
 
-            // Once the transport is closed, by either side, nothing more is exchanged on it. A
-            // late datagram (the peer's close_notify reply, say) must not reach an endpoint whose
-            // connection is gone, where a server would take it for a new handshake.
-            if self.ctx.dtls_transport.state == RTCDtlsTransportState::Closed {
+            // Once the transport is closed, by either side, or has failed, nothing more is
+            // exchanged on it. A late datagram (the peer's close_notify reply, say) must not reach
+            // an endpoint whose connection is gone, where a server would take it for a new
+            // handshake.
+            if matches!(
+                self.ctx.dtls_transport.state,
+                RTCDtlsTransportState::Closed | RTCDtlsTransportState::Failed
+            ) {
                 debug!(
                     "drop dtls datagram from {:?} on a closed transport",
                     msg.transport.peer_addr
@@ -228,12 +239,20 @@ impl<'a>
                 .as_mut()
                 .ok_or(Error::ErrDtlsTransportNotStarted)?;
 
-            for message in dtls_endpoint.read(
+            // The read's error is returned only after the datagrams the endpoint queued (the
+            // fatal alert that answers a failed handshake, say) have been taken and a failure has
+            // been recorded: the pipeline logs that error and goes on.
+            let (events, read_error) = match dtls_endpoint.read(
                 msg.now,
                 msg.transport.peer_addr,
                 msg.transport.ecn,
                 dtls_message,
-            )? {
+            ) {
+                Ok(events) => (events, None),
+                Err(err) => (vec![], Some(err)),
+            };
+            let failed = dtls_endpoint.is_connection_failed(&msg.transport.peer_addr);
+            for message in events {
                 match message {
                     EndpointEvent::HandshakeComplete => {
                         if let Some(state) =
@@ -327,6 +346,12 @@ impl<'a>
                     now: msg.now,
                     event: RTCEventInternal::DTLSClosed,
                 });
+            } else if failed {
+                self.fail_transport(msg.now);
+            }
+
+            if let Some(err) = read_error {
+                return Err(err);
             }
         } else {
             // Bypass
@@ -413,9 +438,20 @@ impl<'a>
             return Ok(());
         };
 
+        // A handshake whose retransmissions run out fails here. That failure is reported as the
+        // transport's state, not as an error, so the other handlers still get their timeout.
         let remotes: Vec<SocketAddr> = dtls_endpoint.get_connections_keys().copied().collect();
+        let mut failed = false;
+        let mut timeout_error = None;
         for remote in remotes {
-            dtls_endpoint.handle_timeout(remote, now)?;
+            if let Err(err) = dtls_endpoint.handle_timeout(remote, now) {
+                if dtls_endpoint.is_connection_failed(&remote) {
+                    debug!("dtls handshake with {} gave up: {}", remote, err);
+                    failed = true;
+                } else if timeout_error.is_none() {
+                    timeout_error = Some(err);
+                }
+            }
         }
         while let Some(transmit) = dtls_endpoint.poll_transmit() {
             self.ctx.write_outs.push_back(TaggedRTCMessageInternal {
@@ -425,6 +461,12 @@ impl<'a>
             });
         }
 
+        if failed {
+            self.fail_transport(now);
+        }
+        if let Some(err) = timeout_error {
+            return Err(err);
+        }
         Ok(())
     }
 
@@ -451,7 +493,47 @@ impl<'a>
 }
 
 impl<'a> DtlsHandler<'a> {
-    const DEFAULT_SESSION_SRTP_REPLAY_PROTECTION_WINDOW: usize = 64;
+    /// W3C webrtc 5.5.1: the DTLS transport goes to "failed" when the association fails — a
+    /// fatal alert sent or received (a certificate fingerprint mismatch included) or a handshake
+    /// that gave up. The peer connection's state follows: `update_connection_state` reports
+    /// "failed" once any DTLS transport has. The SCTP association and every data channel run
+    /// over this transport, so they end with it, exactly as when the peer closes it: the
+    /// `DTLSClosed` event is what tells the SCTP and data channel handlers, and it is also what
+    /// makes the peer connection re-evaluate its state. A no-op once the transport is failed
+    /// or closed.
+    fn fail_transport(&mut self, now: Instant) {
+        if matches!(
+            self.ctx.dtls_transport.state,
+            RTCDtlsTransportState::Failed | RTCDtlsTransportState::Closed
+        ) {
+            return;
+        }
+        warn!("dtls transport failed");
+        self.ctx
+            .dtls_transport
+            .state_change(RTCDtlsTransportState::Failed);
+        self.stats
+            .transport
+            .on_dtls_state_changed(RTCDtlsTransportState::Failed);
+        self.ctx.event_outs.push_back(TaggedRTCEventInternal {
+            now,
+            event: RTCEventInternal::DTLSClosed,
+        });
+    }
+
+    /// The inbound SRTP replay window, in packets, unless the setting engine sets one.
+    ///
+    /// A NACK retransmission without RTX reuses the lost packet's sequence number, so it reaches
+    /// the replay detector behind every packet sent since. It arrives a round trip plus the NACK
+    /// interval late on the first try, and another interval later for each lost NACK or lost
+    /// retransmission: at 200 packets/s a third try is already more than 64 packets behind, and
+    /// a 64-packet window refused it as too old, losing the packet for good. 1024 matches the
+    /// NACK responder's default send buffer and the sender's own index window
+    /// (`SRTP_SEND_INDEX_WINDOW`), so any packet the sender can still retransmit is accepted,
+    /// and is what libwebrtc uses for the same reason. RFC 3711 Section 3.3.2 sets 64 as the
+    /// minimum. Replay protection is unchanged: a duplicate inside the window is still refused,
+    /// and the cost is a 128-byte bitmap per SSRC (at most `MAX_SSRC_STATES` of them).
+    const DEFAULT_SESSION_SRTP_REPLAY_PROTECTION_WINDOW: usize = 1024;
     const DEFAULT_SESSION_SRTCP_REPLAY_PROTECTION_WINDOW: usize = 64;
     pub(crate) fn update_srtp_contexts(
         state: &State,
@@ -531,6 +613,92 @@ impl<'a> DtlsHandler<'a> {
 mod tests {
     use super::*;
     use crate::peer_connection::transport::{RTCTransportId, TransportKind};
+    use shared::marshal::Marshal;
+
+    /// A NACK retransmission (no RTX) carries the lost packet's sequence number and arrives after
+    /// every packet sent since. The session's default inbound window accepts it while it is
+    /// within the window, and still refuses a duplicate and a packet older than the window.
+    #[test]
+    fn default_srtp_replay_window_accepts_a_late_retransmission() -> Result<()> {
+        const WINDOW: u16 =
+            DtlsHandler::<'static>::DEFAULT_SESSION_SRTP_REPLAY_PROTECTION_WINDOW as u16;
+        // Repaired just inside the window: the newest packet is WINDOW - 1 ahead of it.
+        const REPAIRED: u16 = 10;
+        // Repaired just outside it: the newest packet is WINDOW ahead of it.
+        const TOO_OLD: u16 = 20;
+        const LAST: u16 = TOO_OLD + WINDOW;
+
+        let provider =
+            crypto::default_provider().expect("a built-in crypto provider is enabled for tests");
+        let key = [0x0du8; 16];
+        let salt = [0x62u8; 14];
+        let mut sender = srtp::context::Context::new(
+            &key,
+            &salt,
+            ProtectionProfile::Aes128CmHmacSha1_80,
+            None,
+            None,
+            provider.crypto(),
+        )?;
+        let mut receiver = srtp::context::Context::new(
+            &key,
+            &salt,
+            ProtectionProfile::Aes128CmHmacSha1_80,
+            Some(srtp_replay_protection(
+                DtlsHandler::<'static>::DEFAULT_SESSION_SRTP_REPLAY_PROTECTION_WINDOW,
+            )),
+            None,
+            provider.crypto(),
+        )?;
+
+        let mut protect = |seq: u16| -> Result<Vec<u8>> {
+            let packet = rtp::Packet {
+                header: rtp::Header {
+                    version: 2,
+                    payload_type: 96,
+                    sequence_number: seq,
+                    timestamp: u32::from(seq) * 450,
+                    ssrc: 0x1234_5678,
+                    ..Default::default()
+                },
+                payload: bytes::Bytes::from(vec![0x10u8; 100]),
+            };
+            Ok(sender.encrypt_rtp(&packet.marshal()?)?.to_vec())
+        };
+
+        let mut repaired = None;
+        let mut too_old = None;
+        for seq in 1..=LAST {
+            let protected = protect(seq)?;
+            match seq {
+                REPAIRED => repaired = Some(protected),
+                TOO_OLD => too_old = Some(protected),
+                _ => {
+                    receiver.decrypt_rtp(&protected)?;
+                }
+            }
+            if seq == REPAIRED + WINDOW - 1 {
+                let retransmission = repaired.as_ref().expect("protected above");
+                receiver.decrypt_rtp(retransmission).map_err(|e| {
+                    Error::Other(format!(
+                        "a retransmission {} packets late was refused: {e}",
+                        WINDOW - 1
+                    ))
+                })?;
+                assert!(
+                    receiver.decrypt_rtp(retransmission).is_err(),
+                    "a replayed packet inside the window is refused"
+                );
+            }
+        }
+        assert!(
+            receiver
+                .decrypt_rtp(too_old.as_ref().expect("protected above"))
+                .is_err(),
+            "a packet a full window behind the newest is refused"
+        );
+        Ok(())
+    }
 
     /// A fixed nonce keeps test ids deterministic while still distinguishing the kinds.
     fn test_transport_id(kind: TransportKind) -> RTCTransportId {

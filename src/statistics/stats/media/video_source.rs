@@ -23,14 +23,18 @@ pub struct RTCVideoSourceStats {
     pub media_source_stats: RTCMediaSourceStats,
 
     /// The width of video frames in pixels.
-    pub width: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
 
     /// The height of video frames in pixels.
-    pub height: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
 
     /// Total number of frames captured from this source.
-    pub frames: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frames: Option<u32>,
 
     /// Current frame rate in frames per second.
-    pub frames_per_second: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frames_per_second: Option<f64>,
 }

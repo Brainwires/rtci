@@ -138,6 +138,32 @@ pub struct RTCStats {
     pub id: RTCStatsId,
 }
 
+/// `#[serde(with = ...)]` for an optional timestamp: epoch milliseconds when present, and (with
+/// `skip_serializing_if = "Option::is_none"`) no member at all when the engine has none to give.
+pub(crate) mod optional_instant_to_epoch {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use shared::serde::instant_to_epoch;
+    use shared::time::SystemInstant;
+    use std::time::Duration;
+
+    pub(crate) fn serialize<S: Serializer>(
+        instant: &Option<SystemInstant>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        match instant {
+            Some(instant) => instant_to_epoch::serialize(instant, serializer),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<SystemInstant>, D::Error> {
+        Ok(Option::<f64>::deserialize(deserializer)?
+            .map(|ms| SystemInstant::from_epoch(Duration::from_secs_f64(ms / 1000.0))))
+    }
+}
+
 /// The reason for quality limitation in video encoding.
 ///
 /// This enum indicates why the video encoder may have reduced quality

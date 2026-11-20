@@ -88,11 +88,17 @@ impl ReceiverStream {
                     self.seq_num_cycles = self.seq_num_cycles.wrapping_add(1);
                 }
 
-                // set missing packets as not received
-                let mut i = self.last_seq_num.wrapping_add(1);
-                while i != seq {
-                    self.del_received(i);
-                    i = i.wrapping_add(1);
+                // set missing packets as not received; a gap as wide as the bitmap clears all
+                // of it at once rather than walking up to 32,767 sequence numbers
+                if usize::from(diff) > self.index_mask {
+                    self.packets.fill(0);
+                    self.set_received(seq);
+                } else {
+                    let mut i = self.last_seq_num.wrapping_add(1);
+                    while i != seq {
+                        self.del_received(i);
+                        i = i.wrapping_add(1);
+                    }
                 }
 
                 self.last_seq_num = seq;

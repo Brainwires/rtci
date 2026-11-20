@@ -3,12 +3,14 @@ use crate::peer_connection::message::internal::{
     RTCMessageInternal, RTPMessage, TaggedRTCMessageInternal,
 };
 
+use crate::peer_connection::cryptex::RTCRtpHeaderEncryptionPolicy;
 use interceptor::Packet;
 use log::debug;
 use shared::error::{Error, Result};
 use shared::marshal::{Marshal, Unmarshal};
 use shared::util::is_rtcp;
 use srtp::context::Context;
+use srtp::cryptex::Cryptex;
 use std::collections::VecDeque;
 use std::time::Instant;
 
@@ -17,9 +19,28 @@ pub(crate) struct SrtpHandlerContext {
     pub(crate) local_srtp_context: Option<Context>,
     pub(crate) remote_srtp_context: Option<Context>,
 
+    /// `RTCRtpHeaderEncryptionPolicy` (webrtc-extensions); see `peer_connection::cryptex`.
+    pub(crate) rtp_header_encryption_policy: RTCRtpHeaderEncryptionPolicy,
+    /// What the negotiated session says about Cryptex (RFC 9335), applied to the contexts
+    /// now and to ones a DTLS handshake hands over later.
+    pub(crate) cryptex: Cryptex,
+
     pub(crate) read_outs: VecDeque<TaggedRTCMessageInternal>,
     pub(crate) write_outs: VecDeque<TaggedRTCMessageInternal>,
     pub(crate) event_outs: VecDeque<TaggedRTCEventInternal>,
+}
+
+impl SrtpHandlerContext {
+    /// Records how the SRTP contexts use Cryptex and applies it to the ones in place.
+    pub(crate) fn set_cryptex(&mut self, cryptex: Cryptex) {
+        self.cryptex = cryptex;
+        if let Some(context) = self.local_srtp_context.as_mut() {
+            context.set_cryptex(cryptex);
+        }
+        if let Some(context) = self.remote_srtp_context.as_mut() {
+            context.set_cryptex(cryptex);
+        }
+    }
 }
 
 /// SrtpHandler implements SRTP/RTP/RTCP Protocols handling
@@ -187,7 +208,9 @@ impl<'a>
             debug!("srtp recv dtls handshake complete");
 
             self.ctx.local_srtp_context = local_srtp_context.take();
-            self.ctx.remote_srtp_context = remote_srtp_context.take()
+            self.ctx.remote_srtp_context = remote_srtp_context.take();
+            let cryptex = self.ctx.cryptex;
+            self.ctx.set_cryptex(cryptex);
         }
 
         self.ctx.event_outs.push_back(evt);

@@ -169,8 +169,8 @@
 //! * [W3C RTCRtpSender](https://www.w3.org/TR/webrtc/#rtcrtpsender-interface)
 //! * [MDN RTCRtpSender](https://developer.mozilla.org/en-US/docs/Web/API/RTCRtpSender)
 
-//TODO: #[cfg(test)]
-//mod rtp_sender_test;
+#[cfg(test)]
+mod rtp_sender_test;
 
 pub(crate) mod internal;
 pub(crate) mod rtcp_parameters;
@@ -310,6 +310,11 @@ impl RTCRtpSender<'_> {
         parameters: RTCRtpSendParameters,
         set_parameter_options: Option<RTCSetParameterOptions>,
     ) -> Result<()> {
+        // W3C webrtc 5.2 setParameters, step 4: a stopped (or stopping) transceiver's sender
+        // takes no parameters.
+        if self.peer_connection.rtp_transceivers[self.id.0].stopped() {
+            return Err(Error::InvalidStateError);
+        }
         // peer_connection is mutable borrow, its rtp_transceivers won't be resized and
         // the direction won't be changed too, so, unwrap() here is safe.
         self.peer_connection.rtp_transceivers[self.id.0]
@@ -372,6 +377,10 @@ impl RTCRtpSender<'_> {
             .as_mut()
             .unwrap()
             .set_streams(streams);
+        // https://www.w3.org/TR/webrtc/#dom-rtcrtpsender-setstreams: update the
+        // negotiation-needed flag.
+        self.peer_connection
+            .on_transceiver_stopped_or_streams_changed();
     }
 
     /// Writes an RTP packet to the network.
@@ -422,6 +431,15 @@ impl RTCRtpSender<'_> {
                     .is_some_and(|s| s == packet.header.ssrc)
             })
             .ok_or(Error::ErrRTPSenderNoBaseEncoding)?;
+
+        // W3C webrtc 5.2 RTCRtpEncodingParameters.active: an inactive encoding is not sent.
+        if !encoding.active {
+            trace!(
+                "rtp_sender {:?} drops RTP ssrc {}: its encoding is inactive",
+                self.id, packet.header.ssrc
+            );
+            return Ok(());
+        }
 
         // Prefer the packet's negotiated payload type when it identifies a codec. Otherwise
         // fall back to the encoding's codec and rewrite the payload type to the one negotiated

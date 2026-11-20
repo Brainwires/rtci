@@ -154,8 +154,8 @@
 //! * [W3C RTCRtpReceiver](https://www.w3.org/TR/webrtc/#rtcrtpreceiver-interface)
 //! * [MDN RTCRtpReceiver](https://developer.mozilla.org/en-US/docs/Web/API/RTCRtpReceiver)
 
-//TODO: #[cfg(test)]
-//mod rtp_receiver_test;
+#[cfg(test)]
+mod rtp_receiver_test;
 
 pub(crate) mod internal;
 pub(crate) mod rtp_contributing_source;
