@@ -22,10 +22,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # coturn's package starts nothing in a container; the environment runs it per namespace.
     && update-alternatives --set iptables /usr/sbin/iptables-nft
 
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/rustup.sh \
-    && sh /tmp/rustup.sh -y --no-modify-path --profile minimal --default-toolchain ${RUST_VERSION} \
-        --component clippy,rustfmt \
-    && rm /tmp/rustup.sh && chmod -R a+w $RUSTUP_HOME $CARGO_HOME
+# rustup-init by version and SHA-256 (the checksums static.rust-lang.org publishes beside each
+# binary), not the moving sh.rustup.rs script.
+ARG RUSTUP_VERSION=1.28.2
+RUN set -eu; \
+    case "$(dpkg --print-architecture)" in \
+      amd64) triple=x86_64-unknown-linux-gnu; \
+             sum=20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c ;; \
+      arm64) triple=aarch64-unknown-linux-gnu; \
+             sum=e3853c5a252fca15252d07cb23a1bdd9377a8c6f3efa01531109281ae47f841c ;; \
+      *) echo "no pinned rustup-init for $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac; \
+    curl --proto '=https' --tlsv1.2 -sSf -o /tmp/rustup-init \
+      "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/${triple}/rustup-init"; \
+    echo "${sum}  /tmp/rustup-init" | sha256sum -c -; \
+    chmod +x /tmp/rustup-init; \
+    /tmp/rustup-init -y --no-modify-path --profile minimal --default-toolchain ${RUST_VERSION} \
+      --component clippy,rustfmt; \
+    rm /tmp/rustup-init; chmod -R a+w $RUSTUP_HOME $CARGO_HOME
 
 # Playwright test runner, pinned to the browsers the base image ships, installed exactly as
 # interop/package-lock.json resolved it (integrity-checked; no install scripts).

@@ -76,6 +76,9 @@ Linux docker pool first (the job's own rootless Docker daemon, so the checkout i
 GitHub's `ubuntu-latest` when the pool is busy. Self-hosted runners take only a push, a dispatch
 or a pull request from a branch of this repository; a fork's pull request runs on `ubuntu-latest`.
 The image is cached in GHCR by the hash of `Dockerfile`, `interop/package.json` and
-`interop/package-lock.json`, and only a push to `master` publishes it. After changing
+`interop/package-lock.json`. Only the workflow's `image` job, on a push to `master`, publishes it;
+the jobs that run the environment have a read-only package token and build the image locally
+when the registry lacks it. The base image is pinned by digest and `rustup-init` by version and
+SHA-256. After changing
 `interop/package.json`, refresh the lockfile with `npm install --package-lock-only` in
 `interop/`.
