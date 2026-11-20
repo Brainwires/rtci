@@ -194,6 +194,10 @@ pub struct Candidate {
     /// arrived from this candidate. Consent freshness (RFC 7675) is judged on this alone, so
     /// unauthenticated traffic from the address cannot keep a dead pair alive.
     pub(crate) last_authenticated: Option<Instant>,
+    /// When an authenticated success response to one of our own pending Binding requests last
+    /// arrived from this candidate. This is consent (RFC 7675 §5.1): the peer's own requests do
+    /// not grant it.
+    pub(crate) last_consent: Option<Instant>,
 
     pub(crate) foundation_override: String,
     pub(crate) priority_override: u32,
@@ -221,6 +225,7 @@ impl Default for Candidate {
             last_sent: None,
             last_received: None,
             last_authenticated: None,
+            last_consent: None,
 
             foundation_override: String::new(),
             priority_override: 0,
@@ -471,6 +476,12 @@ impl Candidate {
     /// When an authenticated Binding request or response last arrived from this candidate.
     pub fn last_authenticated(&self) -> Option<Instant> {
         self.last_authenticated
+    }
+
+    /// When a success response to one of our Binding requests last arrived from this candidate:
+    /// the last time the peer granted consent (RFC 7675).
+    pub fn last_consent(&self) -> Option<Instant> {
+        self.last_consent
     }
 
     /// Records that traffic was received on this candidate at `now`.

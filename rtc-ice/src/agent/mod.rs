@@ -9,6 +9,8 @@
 //! controlled agent accepts that choice. Which side controls is decided by which offered, and the
 //! two must not agree — see [`Credentials`] and [`Agent::set_role`].
 #[cfg(test)]
+mod agent_consent_test;
+#[cfg(test)]
 mod agent_nat_1to1_test;
 #[cfg(test)]
 mod agent_test;
@@ -1198,11 +1200,19 @@ impl Agent {
                 |&pair_index| {
                     let remote_index = self.candidate_pairs[pair_index].remote_index;
 
-                    // Consent (RFC 7675) is refreshed only by authenticated STUN: non-STUN
-                    // datagrams and unauthenticated indications from the address do not count.
-                    let last_received = self.remote_candidates[remote_index]
-                        .last_authenticated()
-                        .unwrap_or(self.start_time);
+                    // Consent (RFC 7675 §5.1) is refreshed only by an authenticated success
+                    // response to one of our own checks: not by non-STUN datagrams, not by
+                    // unauthenticated indications, and not by the peer's own requests, which
+                    // say the peer is there but not that it still wants our traffic. A lite
+                    // agent sends no checks (RFC 8445 §2.5), so for it an authenticated request
+                    // is the only sign of life.
+                    let remote = &self.remote_candidates[remote_index];
+                    let last_received = if self.lite {
+                        remote.last_authenticated()
+                    } else {
+                        remote.last_consent()
+                    }
+                    .unwrap_or(self.start_time);
                     let disconnected_time = now.saturating_duration_since(last_received);
                     (true, disconnected_time)
                 },
@@ -1670,6 +1680,11 @@ impl Agent {
             }
 
             if let Some(remote_index) = &remote_candidate_index {
+                // Consent is granted by a response to a check we sent, matched by transaction
+                // id (RFC 7675 §5.1); decided before the handler consumes the pending entry.
+                if self.is_pending_binding_request(m.transaction_id, remote_addr) {
+                    self.remote_candidates[*remote_index].last_consent = Some(now);
+                }
                 self.handle_success_response(now, m, local_index, *remote_index, remote_addr);
             } else {
                 warn!(
@@ -1787,6 +1802,13 @@ impl Agent {
         }
 
         Ok(())
+    }
+
+    /// Whether `id` names a Binding request we sent to `destination` and have not had answered.
+    fn is_pending_binding_request(&self, id: TransactionId, destination: SocketAddr) -> bool {
+        self.pending_binding_requests
+            .iter()
+            .any(|r| r.transaction_id == id && r.destination == destination)
     }
 
     // Processes non STUN traffic from a remote candidate, and returns true if it is an actual
