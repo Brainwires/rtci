@@ -30,6 +30,8 @@
 use crate::rtp_transceiver::{RTCRtpReceiverId, RTCRtpSenderId};
 
 #[cfg(test)]
+mod members_test;
+#[cfg(test)]
 mod statistics_test;
 
 pub(crate) mod accumulator;

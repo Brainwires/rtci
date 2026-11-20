@@ -18,7 +18,7 @@ mod rtcp_reports_test;
 mod rtp_stream;
 mod transport;
 
-pub(crate) use certificate::CertificateStatsAccumulator;
+pub(crate) use certificate::{CertificateStatsAccumulator, base64_encode};
 pub(crate) use codec::{CodecDirection, CodecStatsAccumulator};
 pub(crate) use data_channel::DataChannelStatsAccumulator;
 pub(crate) use ice_candidate::IceCandidateAccumulator;
@@ -568,7 +568,7 @@ impl RTCStatsAccumulator {
         remote_id: &str,
     ) -> &mut IceCandidatePairAccumulator {
         self.ice_candidate_pairs
-            .entry(format!("RTCIceCandidatePair_{}_{}", local_id, remote_id))
+            .entry(candidate_pair_stats_id(local_id, remote_id))
             .or_insert_with(|| IceCandidatePairAccumulator {
                 transport_id: self.transport.transport_id.clone(),
                 // W3C RTCIceCandidatePairStats: localCandidateId / remoteCandidateId are the ids
@@ -809,30 +809,54 @@ impl RTCStatsAccumulator {
         }
     }
 
-    /// Updates STUN transaction stats from the ice agent's CandidatePairStats to the RTC accumulator.
+    /// Syncs the candidate pair stats with the ICE agent's pairs: each pair's STUN transaction
+    /// counters, round trip times, state and nomination come from the agent, while the packet
+    /// and byte counters are the ones the pipeline counts on the selected pair.
     ///
-    /// This method merges the STUN-level stats (requests, responses, RTT) from the ice agent
-    /// with the application-level stats (packets, bytes) tracked at the RTC layer.
-    ///
-    /// # Parameters
-    ///
-    /// * `local_id` - The local candidate ID of the pair to sync
-    /// * `remote_id` - The remote candidate ID of the pair to sync
-    /// * `cp_stats` - The ice agent's stats for that candidate pair
-    pub(crate) fn update_ice_agent_stats(
-        &mut self,
-        local_id: &str,
-        remote_id: &str,
-        cp_stats: &CandidatePairStats,
-    ) {
-        let pair = self.get_or_create_candidate_pair(local_id, remote_id);
-        pair.requests_sent = cp_stats.requests_sent;
-        pair.requests_received = cp_stats.requests_received;
-        pair.responses_sent = cp_stats.responses_sent;
-        pair.responses_received = cp_stats.responses_received;
-        pair.consent_requests_sent = cp_stats.consent_requests_sent;
-        pair.total_round_trip_time = cp_stats.total_round_trip_time;
-        pair.current_round_trip_time = cp_stats.current_round_trip_time;
+    /// A pair the agent no longer holds (an ICE restart drops its pairs) is dropped from the
+    /// stats too, except the transport's selected pair, whose counters describe the path still
+    /// in use until another is selected.
+    pub(crate) fn sync_ice_candidate_pairs(&mut self, pairs: &[CandidatePairStats]) {
+        let held: std::collections::HashSet<String> = pairs
+            .iter()
+            .map(|cp| candidate_pair_stats_id(&cp.local_candidate_id, &cp.remote_candidate_id))
+            .collect();
+        let selected = self.transport.selected_candidate_pair_id.clone();
+        self.ice_candidate_pairs
+            .retain(|id, _| held.contains(id) || *id == selected);
+
+        for cp in pairs {
+            let pair =
+                self.get_or_create_candidate_pair(&cp.local_candidate_id, &cp.remote_candidate_id);
+            pair.requests_sent = cp.requests_sent;
+            pair.requests_received = cp.requests_received;
+            pair.responses_sent = cp.responses_sent;
+            pair.responses_received = cp.responses_received;
+            pair.consent_requests_sent = cp.consent_requests_sent;
+            pair.total_round_trip_time = cp.total_round_trip_time;
+            pair.current_round_trip_time = cp.current_round_trip_time;
+            pair.state = cp.state.into();
+            pair.nominated = cp.nominated;
+        }
+    }
+
+    /// Sets the congestion controller's estimate: the target bitrate of the outbound streams
+    /// and the selected candidate pair's `availableOutgoingBitrate` (webrtc-stats: the bitrate
+    /// the congestion control estimates for all the outgoing RTP streams on the pair).
+    pub(crate) fn on_target_bitrate(&mut self, bits_per_second: f64) {
+        // The estimate is one number for the connection, while `target_bitrate` is reported
+        // per outbound stream — with a single stream they are the same thing. Splitting one
+        // estimate across simulcast layers is an allocation problem, and belongs wherever that
+        // allocation is made rather than here.
+        for stream in self.outbound_rtp_streams.values_mut() {
+            stream.target_bitrate = bits_per_second;
+        }
+        if let Some(pair) = self
+            .ice_candidate_pairs
+            .get_mut(&self.transport.selected_candidate_pair_id)
+        {
+            pair.available_outgoing_bitrate = bits_per_second;
+        }
     }
 
     // ========================================================================
@@ -866,7 +890,10 @@ impl RTCStatsAccumulator {
         // Register the codec if not already present
         self.codecs
             .entry(codec_id.clone())
-            .or_insert_with(|| CodecStatsAccumulator::from_codec(codec, payload_type));
+            .or_insert_with(|| CodecStatsAccumulator {
+                transport_id: transport_id.clone(),
+                ..CodecStatsAccumulator::from_codec(codec, payload_type)
+            });
 
         // Link the codec to the inbound RTP stream; its clock rate is what the RTCP jitter is
         // counted in
@@ -900,7 +927,10 @@ impl RTCStatsAccumulator {
         // Register the codec if not already present
         self.codecs
             .entry(codec_id.clone())
-            .or_insert_with(|| CodecStatsAccumulator::from_codec(codec, payload_type));
+            .or_insert_with(|| CodecStatsAccumulator {
+                transport_id: transport_id.clone(),
+                ..CodecStatsAccumulator::from_codec(codec, payload_type)
+            });
 
         // Link the codec to the outbound RTP stream; its clock rate is what the RTCP jitter is
         // counted in
@@ -933,6 +963,12 @@ impl RTCStatsAccumulator {
         // Remove codecs that are not referenced
         self.codecs.retain(|id, _| referenced.contains(id));
     }
+}
+
+/// The stats id of the candidate-pair object for the ICE agent's candidates `local_id` and
+/// `remote_id`.
+pub(crate) fn candidate_pair_stats_id(local_id: &str, remote_id: &str) -> String {
+    format!("RTCIceCandidatePair_{local_id}_{remote_id}")
 }
 
 /// The stats id of the local-candidate object for the ICE agent's candidate `id`.

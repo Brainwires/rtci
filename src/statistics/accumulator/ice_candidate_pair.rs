@@ -60,9 +60,9 @@ pub struct IceCandidatePairAccumulator {
     pub bytes_discarded_on_send: u32,
 
     // Bitrate estimation (from TWCC/congestion control)
-    /// Estimated available outgoing bitrate in bits per second.
+    /// Estimated available outgoing bitrate in bits per second (0: no estimate).
     pub available_outgoing_bitrate: f64,
-    /// Estimated available incoming bitrate in bits per second.
+    /// Estimated available incoming bitrate in bits per second (0: no estimate).
     pub available_incoming_bitrate: f64,
 
     // State
@@ -141,16 +141,19 @@ impl IceCandidatePairAccumulator {
             packets_received: self.packets_received,
             bytes_sent: self.bytes_sent,
             bytes_received: self.bytes_received,
-            last_packet_sent_timestamp: SystemInstant::now(
-                self.last_packet_sent_timestamp.unwrap_or(now),
-            ),
-            last_packet_received_timestamp: SystemInstant::now(
-                self.last_packet_received_timestamp.unwrap_or(now),
-            ),
+            last_packet_sent_timestamp: self.last_packet_sent_timestamp.map(SystemInstant::now),
+            last_packet_received_timestamp: self
+                .last_packet_received_timestamp
+                .map(SystemInstant::now),
             total_round_trip_time: self.total_round_trip_time,
-            current_round_trip_time: self.current_round_trip_time,
-            available_outgoing_bitrate: self.available_outgoing_bitrate,
-            available_incoming_bitrate: self.available_incoming_bitrate,
+            // Only once a check on the pair has been answered is there a round trip to report.
+            current_round_trip_time: (self.responses_received > 0
+                || self.total_round_trip_time > 0.0)
+                .then_some(self.current_round_trip_time),
+            available_outgoing_bitrate: (self.available_outgoing_bitrate > 0.0)
+                .then_some(self.available_outgoing_bitrate),
+            available_incoming_bitrate: (self.available_incoming_bitrate > 0.0)
+                .then_some(self.available_incoming_bitrate),
             requests_received: self.requests_received,
             requests_sent: self.requests_sent,
             responses_received: self.responses_received,
@@ -328,7 +331,8 @@ mod tests {
         assert_eq!(stats.bytes_sent, 500);
         assert_eq!(stats.packets_received, 1);
         assert_eq!(stats.bytes_received, 400);
-        assert_eq!(stats.current_round_trip_time, 0.020);
+        assert_eq!(stats.current_round_trip_time, Some(0.020));
+        assert_eq!(stats.available_outgoing_bitrate, None);
     }
 
     #[test]

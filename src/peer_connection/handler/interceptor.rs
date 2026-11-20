@@ -827,13 +827,9 @@ impl<'a>
                 // one more number about the send side, and it belongs with the rest of them.
                 for attribute in &packet.message.attributes {
                     if let Attribute::TargetBitrateChanged { bits_per_second } = attribute {
-                        // The estimate is one number for the connection, while `target_bitrate` is
-                        // reported per outbound stream — with a single stream they are the same
-                        // thing. Splitting one estimate across simulcast layers is an allocation
-                        // problem, and belongs wherever that allocation is made rather than here.
-                        for stream in self.stats.outbound_rtp_streams.values_mut() {
-                            stream.target_bitrate = *bits_per_second;
-                        }
+                        // The outbound streams' `targetBitrate` and the selected pair's
+                        // `availableOutgoingBitrate` (see `RTCStatsAccumulator::on_target_bitrate`).
+                        self.stats.on_target_bitrate(*bits_per_second);
                     }
                 }
 

@@ -219,7 +219,7 @@ fn test_video_call_statistics_flow() {
     assert_eq!(pair.packets_received, 30);
     assert!(pair.nominated);
     assert_eq!(pair.state, RTCStatsIceCandidatePairState::Succeeded);
-    assert_eq!(pair.current_round_trip_time, 0.025);
+    assert_eq!(pair.current_round_trip_time, Some(0.025));
 
     // Verify inbound RTP stats
     let inbound = report.inbound_rtp_streams().next().unwrap();
@@ -484,7 +484,7 @@ fn test_ice_candidate_pair_state_transitions() {
     assert_eq!(stats3.state, RTCStatsIceCandidatePairState::Succeeded);
     assert!(stats3.nominated);
     assert_eq!(stats3.responses_received, 1);
-    assert_eq!(stats3.current_round_trip_time, 0.020);
+    assert_eq!(stats3.current_round_trip_time, Some(0.020));
 
     // Verify JSON serialization
     let json = serde_json::to_string(&stats3).expect("should serialize");

@@ -26,6 +26,11 @@ pub struct RTCCodecStats {
     #[serde(flatten)]
     pub stats: RTCStats,
 
+    /// The ID of the transport the codec is used on.
+    ///
+    /// References an [`RTCTransportStats`](super::transport::RTCTransportStats) object.
+    pub transport_id: String,
+
     /// The RTP payload type for this codec.
     ///
     /// This is the numeric payload type used in RTP packets.
@@ -39,7 +44,10 @@ pub struct RTCCodecStats {
     /// The number of audio channels for audio codecs.
     ///
     /// For video codecs, this is 0.
-    pub channels: u16,
+    ///
+    /// `None`, and left out of the JSON, for a codec without a channel count (video).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channels: Option<u16>,
 
     /// The codec clock rate in Hz.
     ///
@@ -51,5 +59,6 @@ pub struct RTCCodecStats {
     ///
     /// This contains codec-specific configuration from the SDP.
     /// For example, H.264 profile-level-id or Opus parameters.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub sdp_fmtp_line: String,
 }
