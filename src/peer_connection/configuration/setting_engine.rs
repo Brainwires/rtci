@@ -112,7 +112,7 @@ use crypto::RTCCryptoProvider;
 use dtls::cipher_suite::CipherSuiteId;
 use dtls::extension::extension_use_srtp::SrtpProtectionProfile;
 //TODO: use ice::agent::agent_config::{InterfaceFilterFn, IpFilterFn};
-//TODO: use ice::agent::remote_policy::RemoteAddressFilter;
+use ice::agent::remote_policy::RemoteAddressFilter;
 use ice::mdns::MulticastDnsMode;
 use ice::network_type::NetworkType;
 //TODO: use ice::udp_network::UDPNetwork;
