@@ -114,6 +114,14 @@ impl RTCPeerConnection {
                 .candidates
                 .allow_link_local_remote_candidates,
             remote_address_filter: setting_engine.candidates.remote_address_filter.clone(),
+            nat_1to1_ips: setting_engine.candidates.nat_1to1_ips.clone(),
+            nat_1to1_ip_candidate_type: match setting_engine.candidates.nat_1to1_ip_candidate_type {
+                RTCIceCandidateType::Srflx => ice::candidate::CandidateType::ServerReflexive,
+                RTCIceCandidateType::Prflx => ice::candidate::CandidateType::PeerReflexive,
+                RTCIceCandidateType::Relay => ice::candidate::CandidateType::Relay,
+                RTCIceCandidateType::Host => ice::candidate::CandidateType::Host,
+                _ => ice::candidate::CandidateType::Unspecified,
+            },
 
             ..Default::default()
         };
@@ -1622,34 +1630,43 @@ impl RTCPeerConnection {
         url: Option<&str>,
     ) -> Result<()> {
         let candidate: Candidate = unmarshal_candidate(candidate_value)?;
+        let known = self.ice_transport().agent.get_local_candidates().len();
         if !self.ice_transport_mut().add_local_candidate(candidate)? {
             return Ok(());
         }
 
-        let rtc_candidate = self
+        // Usually one candidate is added; with a server-reflexive 1:1 NAT mapping
+        // (`nat_1to1_ips`) the agent adds a second, on the external address. Each is announced.
+        let added: Vec<RTCIceCandidate> = self
             .ice_transport()
             .agent
             .get_local_candidates()
-            .last()
+            .iter()
+            .skip(known)
             .map(RTCIceCandidate::from)
-            .ok_or_else(|| Error::Other("local candidate missing after registration".to_owned()))?;
+            .collect();
+        if added.is_empty() {
+            return Err(Error::Other(
+                "local candidate missing after registration".to_owned(),
+            ));
+        }
 
-        // Register local candidate with stats accumulator
-        let candidate_id = local_candidate_stats_id(&rtc_candidate.id);
-        let (ufrag, _) = self.ice_transport().get_local_user_credentials();
-        let accumulator = self.candidate_to_accumulator(&rtc_candidate, ufrag, url);
-        self.stats_mut()
-            .register_local_candidate(candidate_id, accumulator);
+        for rtc_candidate in added {
+            // Register local candidate with stats accumulator
+            let candidate_id = local_candidate_stats_id(&rtc_candidate.id);
+            let (ufrag, _) = self.ice_transport().get_local_user_credentials();
+            let accumulator = self.candidate_to_accumulator(&rtc_candidate, ufrag, url);
+            self.stats_mut()
+                .register_local_candidate(candidate_id, accumulator);
 
-        // Emit OnIceCandidateEvent
-        self.pipeline_context
-            .event_outs
-            .push_back(RTCPeerConnectionEvent::OnIceCandidateEvent(
-                RTCPeerConnectionIceEvent {
+            // Emit OnIceCandidateEvent
+            self.pipeline_context.event_outs.push_back(
+                RTCPeerConnectionEvent::OnIceCandidateEvent(RTCPeerConnectionIceEvent {
                     candidate: rtc_candidate,
                     url: url.unwrap_or_default().to_string(),
-                },
-            ));
+                }),
+            );
+        }
 
         Ok(())
     }

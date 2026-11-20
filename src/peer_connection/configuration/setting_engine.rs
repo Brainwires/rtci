@@ -823,12 +823,15 @@ impl SettingEngineBuilder {
     /// - Cannot use STUN servers when using `Srflx` type
     /// - Cannot use with mDNS when using `Host` type
     ///
-    /// # Not read by this engine
+    /// # How it applies
     ///
-    /// The sans-I/O engine gathers no candidates: the application adds its own with
-    /// `add_local_candidate`, so it advertises a public address by adding that candidate
-    /// (a host candidate on the public IP, or a server reflexive one). This value is stored
-    /// for API compatibility with pion and never read.
+    /// The sans-I/O engine gathers no candidates: the mapping is applied to the host
+    /// candidates the application adds with `add_local_candidate`. With `Host` a mapped host
+    /// candidate is announced on the public address (it stays bound to the local one); with
+    /// `Srflx` a server-reflexive candidate on the public address is announced beside it. Each
+    /// entry is `"<public ip>"` or `"<public ip>/<local ip>"`. An invalid list, `Host` with
+    /// mDNS `QueryAndGather`, or a type the candidate policy excludes fails peer connection
+    /// creation.
     pub fn with_nat_1to1_ips(
         mut self,
         ips: Vec<String>,

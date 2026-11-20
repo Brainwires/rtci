@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use super::*;
 use crate::agent::remote_policy::RemoteAddressFilter;
+use crate::external_ip_mapper::ExternalIpMapper;
 use crate::mdns::*;
 use crate::network_type::NetworkType;
 use crate::url::*;
@@ -39,6 +40,36 @@ pub(crate) const MAX_BUFFER_SIZE: usize = 1000 * 1000; // 1MB
 
 /// Wait time before binding requests can be deleted.
 pub(crate) const MAX_BINDING_REQUEST_TIMEOUT: Duration = Duration::from_millis(4000);
+
+impl AgentConfig {
+    /// Builds the 1:1 NAT mapper and checks it can take effect: a `Host` mapping cannot be used
+    /// with mDNS host names (the address would be hidden anyway) and needs host candidates, a
+    /// `ServerReflexive` one needs server-reflexive candidates.
+    pub(crate) fn init_ext_ip_mapping(
+        &self,
+        mdns_mode: MulticastDnsMode,
+        candidate_types: &[CandidateType],
+    ) -> Result<Option<ExternalIpMapper>> {
+        let Some(ext_ip_mapper) =
+            ExternalIpMapper::new(self.nat_1to1_ip_candidate_type, &self.nat_1to1_ips)?
+        else {
+            return Ok(None);
+        };
+        if ext_ip_mapper.candidate_type == CandidateType::Host {
+            if mdns_mode == MulticastDnsMode::QueryAndGather {
+                return Err(Error::ErrMulticastDnsWithNat1to1IpMapping);
+            }
+            if !candidate_types.contains(&CandidateType::Host) {
+                return Err(Error::ErrIneffectiveNat1to1IpMappingHost);
+            }
+        } else if ext_ip_mapper.candidate_type == CandidateType::ServerReflexive
+            && !candidate_types.contains(&CandidateType::ServerReflexive)
+        {
+            return Err(Error::ErrIneffectiveNat1to1IpMappingSrflx);
+        }
+        Ok(Some(ext_ip_mapper))
+    }
+}
 
 pub(crate) fn default_candidate_types() -> Vec<CandidateType> {
     vec![
@@ -124,6 +155,17 @@ pub struct AgentConfig {
     /// Controls if self-signed certificates are accepted when connecting to TURN servers via TLS or
     /// DTLS.
     pub insecure_skip_verify: bool,
+
+    /// External addresses a 1:1 NAT gives this host (a cloud instance's public IP), each
+    /// `"<external ip>"` or `"<external ip>/<local ip>"`. The host candidates the application
+    /// adds are advertised with them, as `nat_1to1_ip_candidate_type` says. Empty: no mapping.
+    pub nat_1to1_ips: Vec<String>,
+
+    /// How `nat_1to1_ips` are advertised: [`CandidateType::Host`] (the default, also for
+    /// `Unspecified`) replaces a mapped host candidate's address with the external one;
+    /// [`CandidateType::ServerReflexive`] adds a server-reflexive candidate on the external
+    /// address beside it. Any other type is refused by [`Agent::new`](crate::Agent::new).
+    pub nat_1to1_ip_candidate_type: CandidateType,
 
     /// Lets connectivity checks go to a loopback remote address (`127.0.0.0/8`, `::1`) from a
     /// local candidate that is not itself on loopback. Off by default: a loopback remote

@@ -9,6 +9,8 @@
 //! controlled agent accepts that choice. Which side controls is decided by which offered, and the
 //! two must not agree — see [`Credentials`] and [`Agent::set_role`].
 #[cfg(test)]
+mod agent_nat_1to1_test;
+#[cfg(test)]
 mod agent_test;
 
 /// Configuration for a new [`Agent`]: servers, timeouts and role.
@@ -41,7 +43,9 @@ use stun::textattrs::*;
 use stun::xoraddr::*;
 
 use crate::candidate::candidate_peer_reflexive::CandidatePeerReflexiveConfig;
+use crate::candidate::candidate_server_reflexive::CandidateServerReflexiveConfig;
 use crate::candidate::{candidate_pair::*, *};
+use crate::external_ip_mapper::ExternalIpMapper;
 use crate::mdns::{
     MulticastDnsMode, create_multicast_dns, generate_multicast_dns_name, is_ice_mdns_name,
     is_valid_local_mdns_name,
@@ -230,6 +234,9 @@ pub struct Agent {
     /// Which remote addresses checks may be sent to. See [`remote_policy`].
     pub(crate) remote_policy: RemotePolicy,
 
+    /// The 1:1 NAT mapping applied to the host candidates the application adds.
+    pub(crate) ext_ip_mapper: Option<ExternalIpMapper>,
+
     pub(crate) write_outs: VecDeque<TaggedBytesMut>,
     pub(crate) event_outs: VecDeque<TaggedEvent>,
 }
@@ -302,6 +309,8 @@ impl Agent {
         {
             return Err(Error::ErrUselessUrlsProvided);
         }
+
+        let ext_ip_mapper = config.init_ext_ip_mapping(mdns_mode, &candidate_types)?;
 
         let mut agent = Self {
             crypto_provider,
@@ -418,6 +427,7 @@ impl Agent {
                 allow_link_local: config.allow_link_local_remote_candidates,
                 filter: config.remote_address_filter.clone(),
             },
+            ext_ip_mapper,
 
             write_outs: VecDeque::new(),
             event_outs: VecDeque::new(),
@@ -483,6 +493,10 @@ impl Agent {
             }
         }
 
+        // 1:1 NAT (`nat_1to1_ips`): the host candidate is advertised on, or joined by a
+        // server-reflexive candidate on, the external address of its local one.
+        let nat_srflx = self.apply_nat_1to1(&mut c);
+
         for cand in &self.local_candidates {
             if cand.equal(&c) {
                 return Ok(false);
@@ -502,7 +516,66 @@ impl Agent {
 
         self.request_connectivity_check();
 
+        if let Some(srflx) = nat_srflx {
+            self.add_local_candidate(srflx)?;
+        }
+
         Ok(true)
+    }
+
+    /// Applies the 1:1 NAT mapping to a host candidate the application adds. With a `Host`
+    /// mapping the candidate's advertised address becomes the external one (its base, the
+    /// socket it is bound to, is kept, as an mDNS name keeps it); with a `ServerReflexive`
+    /// mapping the server-reflexive candidate to add beside it is returned.
+    fn apply_nat_1to1(&self, c: &mut Candidate) -> Option<Candidate> {
+        let mapper = self.ext_ip_mapper.as_ref()?;
+        // An application-added `.local` candidate has no resolved address to map.
+        if c.candidate_type() != CandidateType::Host || c.addr().ip().is_unspecified() {
+            return None;
+        }
+        let local_ip = c.addr().ip();
+        let external_ip = match mapper.find_external(local_ip) {
+            Ok(ip) => ip,
+            Err(_) => {
+                warn!(
+                    "[{}]: 1:1 NAT mapping is enabled but no external IP is found for {}",
+                    self.get_name(),
+                    local_ip
+                );
+                return None;
+            }
+        };
+        if mapper.candidate_type == CandidateType::Host {
+            c.address = external_ip.to_string();
+            return None;
+        }
+        let mut srflx = match (CandidateServerReflexiveConfig {
+            base_config: CandidateConfig {
+                network: c.network.clone(),
+                address: external_ip.to_string(),
+                port: c.port(),
+                component: c.component(),
+                ..CandidateConfig::default()
+            },
+            rel_addr: local_ip.to_string(),
+            rel_port: c.port(),
+            url: None,
+        })
+        .new_candidate_server_reflexive()
+        {
+            Ok(srflx) => srflx,
+            Err(err) => {
+                warn!(
+                    "[{}]: cannot make the 1:1 NAT server-reflexive candidate for {}: {}",
+                    self.get_name(),
+                    c,
+                    err
+                );
+                return None;
+            }
+        };
+        srflx.tcp_type = c.tcp_type();
+        Some(srflx)
     }
 
     /// The name a host candidate on `ip` is published under in `QueryAndGather` mode.
