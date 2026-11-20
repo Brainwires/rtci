@@ -800,7 +800,9 @@ fn test_unmarshal_attribute_limits() -> Result<()> {
         media.push_str("a=x\r\n");
     }
     assert_eq!(
-        unmarshal_str(&media)?.media_descriptions[0].attributes.len(),
+        unmarshal_str(&media)?.media_descriptions[0]
+            .attributes
+            .len(),
         MAX_ATTRIBUTES_PER_SECTION
     );
     media.push_str("a=x\r\n");
