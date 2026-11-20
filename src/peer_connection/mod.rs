@@ -256,6 +256,8 @@ mod set_configuration_test;
 pub mod state;
 pub mod transport;
 #[cfg(test)]
+mod upstream_peer_connection_test;
+#[cfg(test)]
 pub(crate) mod util_test;
 
 use crate::data_channel::init::RTCDataChannelInit;
