@@ -1519,17 +1519,14 @@ impl RTCPeerConnection {
                             continue;
                         }
 
+                        // Applying an offer leaves the transceiver's [[Direction]] alone (W3C
+                        // 4.4.1.6): the answer states it intersected with the reverse of the
+                        // offered direction (RFC 9429 section 5.3.1), so an `a=inactive` or a
+                        // one-way offer pauses it only for that answer, and a later sendrecv
+                        // offer is answered sendrecv again. Only a rejected section, port 0,
+                        // stops a transceiver (RFC 9429 section 5.10).
                         let transceiver_index =
                             if let Some(&i) = transceiver_by_mid.get(mid_value.as_str()) {
-                                // An `a=inactive` media section pauses the transceiver; it does not
-                                // stop it (RFC 9429, Section 5.10: only a rejected section, port 0,
-                                // stops one). The answer is inactive, and a later offer, or a rollback
-                                // of this one, has the transceiver send and receive again. Stopping it
-                                // here ended its sender and receiver for good.
-                                if direction == RTCRtpTransceiverDirection::Inactive {
-                                    self.rtp_transceivers[i]
-                                        .set_direction(RTCRtpTransceiverDirection::Inactive);
-                                }
                                 Some(i)
                             } else {
                                 RTCPeerConnection::satisfy_type_and_direction(
@@ -1541,28 +1538,6 @@ impl RTCPeerConnection {
 
                         if let Some(i) = transceiver_index {
                             let transceiver = &mut self.rtp_transceivers[i];
-                            if direction == RTCRtpTransceiverDirection::Recvonly {
-                                if transceiver.direction() == RTCRtpTransceiverDirection::Sendrecv {
-                                    transceiver.set_direction(RTCRtpTransceiverDirection::Sendonly);
-                                } else if transceiver.direction()
-                                    == RTCRtpTransceiverDirection::Recvonly
-                                {
-                                    transceiver.set_direction(RTCRtpTransceiverDirection::Inactive);
-                                }
-                            } else if direction == RTCRtpTransceiverDirection::Sendrecv {
-                                if transceiver.direction() == RTCRtpTransceiverDirection::Sendonly {
-                                    transceiver.set_direction(RTCRtpTransceiverDirection::Sendrecv);
-                                } else if transceiver.direction()
-                                    == RTCRtpTransceiverDirection::Inactive
-                                {
-                                    transceiver.set_direction(RTCRtpTransceiverDirection::Recvonly);
-                                }
-                            } else if direction == RTCRtpTransceiverDirection::Sendonly
-                                && transceiver.direction() == RTCRtpTransceiverDirection::Inactive
-                            {
-                                transceiver.set_direction(RTCRtpTransceiverDirection::Recvonly);
-                            }
-
                             transceiver.set_codec_preferences_from_remote_description(
                                 media,
                                 &self.media_engine,

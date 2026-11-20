@@ -1135,7 +1135,13 @@ impl RTCPeerConnection {
             }
         };
 
-        media = media.with_property_attribute(transceiver.direction().to_string());
+        // An answer's direction is the transceiver's [[Direction]] intersected with the reverse
+        // of the offered one (RFC 9429 section 5.3.1, RFC 3264 section 6.1); an offer states
+        // [[Direction]] itself.
+        let direction = media_section
+            .answer_direction
+            .unwrap_or_else(|| transceiver.direction());
+        media = media.with_property_attribute(direction.to_string());
 
         for fingerprint in dtls_fingerprints {
             media = media.with_fingerprint(
@@ -1360,6 +1366,10 @@ pub(crate) struct MediaSection {
     /// the protocol and formats to reproduce (the offer's), since only the
     /// port changes in an answer (RFC 9429 5.3.1).
     pub(crate) rejected_name: Option<MediaName>,
+    /// In an answer, the direction the section states: the transceiver's [[Direction]]
+    /// intersected with the reverse of the offered direction (RFC 9429 section 5.3.1). `None`
+    /// in an offer, which states [[Direction]].
+    pub(crate) answer_direction: Option<RTCRtpTransceiverDirection>,
     pub(crate) match_extensions: HashMap<String, u16>,
     pub(crate) rid_map: Vec<SimulcastRid>,
 }

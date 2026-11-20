@@ -496,11 +496,23 @@ impl RTCPeerConnection {
                         }
 
                         let extensions = rtp_extensions_from_media_description(media)?;
+                        // Answering, the section states [[Direction]] intersected with the
+                        // reverse of the offered direction (RFC 9429 section 5.3.1): a sendonly
+                        // offer is answered recvonly or inactive, never sendrecv (RFC 3264
+                        // section 6.1). Applying the offer leaves [[Direction]] alone, so a later
+                        // offer is answered from the application's direction again.
+                        let answer_direction = (!include_unmatched).then(|| {
+                            answered_direction(
+                                self.rtp_transceivers[i].direction(),
+                                get_peer_direction(media),
+                            )
+                        });
                         media_sections.push(MediaSection {
                             mid: mid_value.to_owned(),
                             transceiver_index: i,
                             match_extensions: extensions,
                             rid_map: get_rids(media),
+                            answer_direction,
                             ..Default::default()
                         });
                     } else {
@@ -1460,11 +1472,27 @@ impl RTCPeerConnection {
                                 }
                             }
                         }
-                        RTCSdpType::Answer
-                            if m.attribute(transceiver.direction().to_string().as_str())
-                                .is_none() =>
-                        {
-                            return true;
+                        RTCSdpType::Answer => {
+                            // Step 5.3.3: the answer's direction against [[Direction]]
+                            // intersected with the offered direction (RFC 9429 section 5.3.1),
+                            // the direction an answer made now would state.
+                            let offered = self
+                                .current_remote_description
+                                .as_ref()
+                                .zip(transceiver.mid().as_ref())
+                                .and_then(|(remote_desc, mid)| {
+                                    get_by_mid(mid.as_str(), remote_desc)
+                                })
+                                .map(get_peer_direction);
+                            let expected = match offered {
+                                Some(offered) => {
+                                    answered_direction(transceiver.direction(), offered)
+                                }
+                                None => transceiver.direction(),
+                            };
+                            if m.attribute(expected.to_string().as_str()).is_none() {
+                                return true;
+                            }
                         }
                         _ => {}
                     };
@@ -2141,6 +2169,22 @@ fn free_data_mid(
         }
         n += 1;
     }
+}
+
+/// The direction an answer states for a media section offered with `offered`: `local` (the
+/// transceiver's [[Direction]]) intersected with the reverse of the offered direction (RFC 9429
+/// section 5.3.1, RFC 3264 section 6.1). A section with no direction attribute is sendrecv
+/// (RFC 3264 section 5.1).
+pub(crate) fn answered_direction(
+    local: RTCRtpTransceiverDirection,
+    offered: RTCRtpTransceiverDirection,
+) -> RTCRtpTransceiverDirection {
+    let offered = if offered == RTCRtpTransceiverDirection::Unspecified {
+        RTCRtpTransceiverDirection::Sendrecv
+    } else {
+        offered
+    };
+    local.intersect(offered.reverse())
 }
 
 #[cfg(test)]
