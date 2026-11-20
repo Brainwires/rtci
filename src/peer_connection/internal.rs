@@ -365,6 +365,9 @@ impl RTCPeerConnection {
             .filter_map(|m| get_mid_value(m).cloned())
             .collect();
         let mut recycled: HashSet<usize> = HashSet::new();
+        // The remote mids of the rejected m= lines a new transceiver took over: the stopped
+        // transceiver that had one is done with it, and gets no rejected section of its own.
+        let mut recycled_mids: HashSet<String> = HashSet::new();
 
         if let Some(media_descriptions) = media_descriptions {
             for media in &media_descriptions {
@@ -399,6 +402,7 @@ impl RTCPeerConnection {
                                 sender.set_negotiated();
                             }
                             recycled.insert(j);
+                            recycled_mids.insert(mid_value.to_owned());
                             media_sections.push(MediaSection {
                                 mid: self.rtp_transceivers[j].mid().clone().unwrap_or_default(),
                                 transceiver_index: j,
@@ -490,8 +494,11 @@ impl RTCPeerConnection {
 
         // If we are offering also include unmatched local transceivers
         let match_bundle_group = if include_unmatched {
-            let already_matched: HashSet<String> =
-                media_sections.iter().map(|s| s.mid.clone()).collect();
+            let already_matched: HashSet<String> = media_sections
+                .iter()
+                .map(|s| s.mid.clone())
+                .chain(recycled_mids.iter().cloned())
+                .collect();
 
             // wpt100:hdrext — alwaysNegotiateDataChannels: a data section the session doesn't
             // have yet goes after the negotiated sections, ahead of the new ones.
