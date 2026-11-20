@@ -10,6 +10,8 @@
 #[cfg(test)]
 mod client_allocate_test;
 #[cfg(test)]
+mod client_data_source_test;
+#[cfg(test)]
 mod client_permission_test;
 #[cfg(test)]
 mod client_retry_test;
@@ -273,7 +275,7 @@ impl Client {
                 debug!("discarding STUN message from {from}: not a configured server");
                 return Ok(());
             }
-            self.handle_stun_message(now, data)
+            self.handle_stun_message(now, data, from_turn_server)
         } else if ChannelData::is_channel_data(data) {
             if !from_turn_server {
                 debug!("discarding ChannelData from {from}: not the TURN server");
@@ -305,7 +307,12 @@ impl Client {
                 .is_some_and(|tr| tr.peer_addr == from)
     }
 
-    fn handle_stun_message(&mut self, now: Instant, data: &[u8]) -> Result<()> {
+    fn handle_stun_message(
+        &mut self,
+        now: Instant,
+        data: &[u8],
+        from_turn_server: bool,
+    ) -> Result<()> {
         let mut msg = Message::new();
         msg.raw = data.to_vec();
         msg.decode()?;
@@ -319,6 +326,12 @@ impl Client {
         }
 
         if msg.typ.class == CLASS_INDICATION {
+            // Only the TURN server holding the allocation relays peer data. The STUN server,
+            // when it is a different address, has no allocation and is not believed for it.
+            if msg.typ.method == METHOD_DATA && !from_turn_server {
+                debug!("discarding Data indication: not from the TURN server");
+                return Ok(());
+            }
             if msg.typ.method == METHOD_DATA {
                 let mut peer_addr = PeerAddress::default();
                 peer_addr.get_from(&msg)?;
