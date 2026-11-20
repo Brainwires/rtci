@@ -221,14 +221,19 @@ impl CipherAeadAesGcm {
             ProtectionProfile::AeadAes256Gcm => {
                 (AeadAlgorithm::Aes256Gcm, aes_256_cm_key_derivation)
             }
-            _ => unreachable!(),
+            // Context::new only builds this cipher for the two GCM profiles, so this arm is not
+            // reached; it is an error rather than a panic so that no caller can turn a
+            // negotiated profile into an abort.
+            _ => return Err(Error::ErrNoSuchSrtpProfile),
         };
 
-        assert_eq!(
+        debug_assert_eq!(
             profile.aead_auth_tag_len(),
             CIPHER_AEAD_AES_GCM_AUTH_TAG_LEN
         );
-        assert_eq!(profile.salt_len(), master_salt.len());
+        if master_salt.len() != profile.salt_len() {
+            return Err(Error::SrtpSaltLength(profile.salt_len(), master_salt.len()));
+        }
 
         let build_cipher = |label: u8| -> Result<Box<dyn AeadCipher>> {
             let session_key = SecretVec::new(kdf(

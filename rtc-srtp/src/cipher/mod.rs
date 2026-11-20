@@ -1,4 +1,6 @@
 pub mod cipher_aead_aes_gcm;
+#[cfg(test)]
+mod cipher_aead_aes_gcm_profile_test;
 pub mod cipher_aes_cm_hmac_sha1;
 
 use bytes::BytesMut;
