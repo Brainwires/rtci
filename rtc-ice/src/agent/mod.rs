@@ -953,6 +953,11 @@ impl Agent {
     /// pair, and restarts the agent's timers. With nothing staged, the current credentials are
     /// kept and only the session is restarted.
     pub fn apply_restart(&mut self, now: Instant, keep_local_candidates: bool) -> Result<()> {
+        // A closed agent has shut its mDNS connection and dropped its candidates for good; a
+        // restart must not bring it back to `Checking`.
+        if self.connection_state == ConnectionState::Closed {
+            return Err(Error::ErrClosed);
+        }
         if let Some(credentials) = self.ufrag_pwd.pending_local_credentials.take() {
             self.ufrag_pwd.local_credentials = credentials;
         }
