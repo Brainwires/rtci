@@ -23,3 +23,10 @@ path = "fuzz_targets/context_decrypt.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "context_decrypt_cryptex"
+path = "fuzz_targets/context_decrypt_cryptex.rs"
+test = false
+doc = false
+bench = false

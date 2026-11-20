@@ -9,6 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+bytes = "1"
 
 [dependencies.rtc]
 path = ".."
@@ -20,6 +21,27 @@ members = ["."]
 [[bin]]
 name = "data_channel_handle_dcep"
 path = "fuzz_targets/data_channel_handle_dcep.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sdp_set_remote_description"
+path = "fuzz_targets/sdp_set_remote_description.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "interceptor_inbound"
+path = "fuzz_targets/interceptor_inbound.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "peer_connection_handle_read"
+path = "fuzz_targets/peer_connection_handle_read.rs"
 test = false
 doc = false
 bench = false

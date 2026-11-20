@@ -23,12 +23,14 @@ on:
       - 'rtc-sdp/**'
       - 'rtc-mdns/**'
       - 'rtc-datachannel/**'
+      - 'rtc-media/**'
+      - 'rtc-interceptor/**'
       - 'rtc-shared/**'
       - 'rtc-crypto/**'
-      - 'src/data_channel/**'
-      - 'src/peer_connection/handler/**'
-      - 'src/fuzzing.rs'
+      # The peer-connection targets (./fuzz) reach the whole of the `rtc` crate.
+      - 'src/**'
       - 'fuzz/**'
+      - 'oss-fuzz/**'
       - '.github/workflows/fuzz.yml'
   workflow_dispatch:
     inputs:
@@ -76,6 +78,7 @@ jobs:
           jobs: >-
             dtls=linux-x64 srtp=linux-x64 ice=linux-x64 turn=linux-x64 sctp=linux-x64
             rtp=linux-x64 rtc=linux-x64 stun=linux-x64 rtcp=linux-x64 sdp=linux-x64
+            mdns=linux-x64 datachannel=linux-x64 media=linux-x64 shared=linux-x64
           vars: ${{ toJSON(vars) }}
           runner-token: ${{ secrets.RUNNER_STATUS_TOKEN }}
 
@@ -95,11 +98,13 @@ jobs:
     strategy: &fuzz-strategy
       fail-fast: false
       # `stateful` names the targets that drive a whole state machine (handshakes, agents,
-      # associations, reassembly). A crate's other targets are single-message parsers and run with
-      # `targets: all`, as do rtc-stun, rtc-rtcp and rtc-sdp, which have only parsers. The `rtc`
-      # crate's own fuzz crate (data-channel handling) is ./fuzz.
+      # associations, reassembly, the readers and decoders that keep state across a stream, a
+      # whole peer connection). A crate's other targets are single-message parsers and run with
+      # `targets: all`, as do rtc-stun, rtc-rtcp and rtc-sdp, which have only parsers there. The
+      # `rtc` crate's own fuzz crate (data channels, remote descriptions, the interceptor chain,
+      # a peer connection's handle_read) is ./fuzz. Every target is also in oss-fuzz/build.sh.
       matrix:
-        include: ${{ fromJSON(github.event.inputs.targets == 'all' && '[{"crate":"rtc-dtls","key":"dtls","stateful":"conn_handle_records"},{"crate":"rtc-srtp","key":"srtp","stateful":"context_decrypt"},{"crate":"rtc-ice","key":"ice","stateful":"agent_handle_inbound agent_mdns_and_tcp"},{"crate":"rtc-turn","key":"turn","stateful":"client_handle_inbound"},{"crate":"rtc-sctp","key":"sctp","stateful":"endpoint_handle_datagrams"},{"crate":"rtc-rtp","key":"rtp","stateful":"depacketize_sequence"},{"crate":"rtc","key":"rtc","stateful":"data_channel_handle_dcep"},{"crate":"rtc-stun","key":"stun","stateful":""},{"crate":"rtc-rtcp","key":"rtcp","stateful":""},{"crate":"rtc-sdp","key":"sdp","stateful":""}]' || '[{"crate":"rtc-dtls","key":"dtls","stateful":"conn_handle_records"},{"crate":"rtc-srtp","key":"srtp","stateful":"context_decrypt"},{"crate":"rtc-ice","key":"ice","stateful":"agent_handle_inbound agent_mdns_and_tcp"},{"crate":"rtc-turn","key":"turn","stateful":"client_handle_inbound"},{"crate":"rtc-sctp","key":"sctp","stateful":"endpoint_handle_datagrams"},{"crate":"rtc-rtp","key":"rtp","stateful":"depacketize_sequence"},{"crate":"rtc","key":"rtc","stateful":"data_channel_handle_dcep"}]') }}
+        include: ${{ fromJSON(github.event.inputs.targets == 'all' && '[{"crate":"rtc-dtls","key":"dtls","stateful":"conn_handle_records"},{"crate":"rtc-srtp","key":"srtp","stateful":"context_decrypt context_decrypt_cryptex"},{"crate":"rtc-ice","key":"ice","stateful":"agent_handle_inbound agent_mdns_and_tcp"},{"crate":"rtc-turn","key":"turn","stateful":"client_handle_inbound"},{"crate":"rtc-sctp","key":"sctp","stateful":"endpoint_handle_datagrams"},{"crate":"rtc-rtp","key":"rtp","stateful":"depacketize_sequence smpte336m_depacketize"},{"crate":"rtc","key":"rtc","stateful":"data_channel_handle_dcep sdp_set_remote_description interceptor_inbound peer_connection_handle_read"},{"crate":"rtc-mdns","key":"mdns","stateful":"mdns_handle_inbound"},{"crate":"rtc-datachannel","key":"datachannel","stateful":"data_channel_handle_read"},{"crate":"rtc-media","key":"media","stateful":"ogg_reader ivf_reader h26x_reader h26x_sample_reader sample_builder"},{"crate":"rtc-shared","key":"shared","stateful":"tcp_frame_decoder turn_stream_decoder replay_detector"},{"crate":"rtc-stun","key":"stun","stateful":""},{"crate":"rtc-rtcp","key":"rtcp","stateful":""},{"crate":"rtc-sdp","key":"sdp","stateful":""}]' || '[{"crate":"rtc-dtls","key":"dtls","stateful":"conn_handle_records"},{"crate":"rtc-srtp","key":"srtp","stateful":"context_decrypt context_decrypt_cryptex"},{"crate":"rtc-ice","key":"ice","stateful":"agent_handle_inbound agent_mdns_and_tcp"},{"crate":"rtc-turn","key":"turn","stateful":"client_handle_inbound"},{"crate":"rtc-sctp","key":"sctp","stateful":"endpoint_handle_datagrams"},{"crate":"rtc-rtp","key":"rtp","stateful":"depacketize_sequence smpte336m_depacketize"},{"crate":"rtc","key":"rtc","stateful":"data_channel_handle_dcep sdp_set_remote_description interceptor_inbound peer_connection_handle_read"},{"crate":"rtc-mdns","key":"mdns","stateful":"mdns_handle_inbound"},{"crate":"rtc-datachannel","key":"datachannel","stateful":"data_channel_handle_read"},{"crate":"rtc-media","key":"media","stateful":"ogg_reader ivf_reader h26x_reader h26x_sample_reader sample_builder"},{"crate":"rtc-shared","key":"shared","stateful":"tcp_frame_decoder turn_stream_decoder replay_detector"}]') }}
     steps: &fuzz-steps
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
@@ -124,13 +129,20 @@ jobs:
           case "$FUZZ_DURATION" in ''|*[!0-9]*) echo "::error::duration must be a whole number of seconds"; exit 1 ;; esac
           case "$FUZZ_TARGETS" in stateful|all) ;; *) echo "::error::targets must be stateful or all"; exit 1 ;; esac
           if [ "$FUZZ_TARGETS" = all ]; then TARGETS=$(cargo fuzz list); else TARGETS=$STATEFUL; fi
+          # A stateful target gets the whole duration; a single-message parser saturates sooner and
+          # gets at most 60 s (the 100% budget: 300 s per stateful target, 60 s per parser).
+          PARSER_DURATION=$(( FUZZ_DURATION < 60 ? FUZZ_DURATION : 60 ))
           for TARGET in $TARGETS; do
-            echo "==> Fuzzing $TARGET for ${FUZZ_DURATION}s"
+            case " $STATEFUL " in
+              *" $TARGET "*) DURATION=$FUZZ_DURATION ;;
+              *) DURATION=$PARSER_DURATION ;;
+            esac
+            echo "==> Fuzzing $TARGET for ${DURATION}s"
             # pipefail (above): without it the `| tail` hid every crash (the pipeline's status was tail's).
             # --target: the prebuilt cargo-fuzz is a musl binary and would default to its own
             # triple, which has no sanitizer runtime here.
             cargo fuzz run --debug-assertions --target x86_64-unknown-linux-gnu "$TARGET" -- \
-              -max_total_time="${FUZZ_DURATION}" \
+              -max_total_time="${DURATION}" \
               -error_exitcode=77 \
               2>&1 | tail -20
           done

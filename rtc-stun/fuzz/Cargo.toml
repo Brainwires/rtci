@@ -23,3 +23,10 @@ path = "fuzz_targets/message_unmarshal_binary.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "message_attributes"
+path = "fuzz_targets/message_attributes.rs"
+test = false
+doc = false
+bench = false

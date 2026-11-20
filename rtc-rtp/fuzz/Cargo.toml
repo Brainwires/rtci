@@ -9,6 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+bytes = "1"
 
 [dependencies.rtc-rtp]
 path = ".."
@@ -30,6 +31,27 @@ bench = false
 [[bin]]
 name = "depacketize_sequence"
 path = "fuzz_targets/depacketize_sequence.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "header_extensions"
+path = "fuzz_targets/header_extensions.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "payloaders"
+path = "fuzz_targets/payloaders.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "smpte336m_depacketize"
+path = "fuzz_targets/smpte336m_depacketize.rs"
 test = false
 doc = false
 bench = false

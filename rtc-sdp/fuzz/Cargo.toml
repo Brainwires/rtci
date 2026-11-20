@@ -31,3 +31,10 @@ path = "fuzz_targets/extmap_mod_unmarshal.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "description_roundtrip"
+path = "fuzz_targets/description_roundtrip.rs"
+test = false
+doc = false
+bench = false

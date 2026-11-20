@@ -187,3 +187,31 @@ path = "fuzz_targets/transport_feedbacks_transport_layer_nack_mod_unmarshal.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "transport_feedbacks_transport_layer_cc_unmarshal"
+path = "fuzz_targets/transport_feedbacks_transport_layer_cc_unmarshal.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "transport_feedbacks_cc_feedback_report_unmarshal"
+path = "fuzz_targets/transport_feedbacks_cc_feedback_report_unmarshal.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "extended_report_unmarshal"
+path = "fuzz_targets/extended_report_unmarshal.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "source_description_unmarshal"
+path = "fuzz_targets/source_description_unmarshal.rs"
+test = false
+doc = false
+bench = false
