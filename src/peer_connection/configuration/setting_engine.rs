@@ -388,6 +388,9 @@ pub struct SettingEngine {
     pub(crate) sctp_weighted_fair_queueing: bool,
     pub(crate) ignore_rid_pause_for_recv: bool,
     pub(crate) write_ssrc_attributes_for_simulcast: bool,
+    /// The application's socket layer reports each received datagram's ECN codepoint and
+    /// applies the one each sent datagram carries ([`SettingEngineBuilder::with_ecn`]).
+    pub(crate) ecn: bool,
 }
 
 impl SettingEngine {
@@ -1576,6 +1579,30 @@ impl SettingEngineBuilder {
         write_ssrc_attributes_for_simulcast: bool,
     ) -> Self {
         self.0.write_ssrc_attributes_for_simulcast = write_ssrc_attributes_for_simulcast;
+        self
+    }
+
+    /// Explicit Congestion Notification (RFC 3168) and L4S (RFC 9331) on RTP media.
+    ///
+    /// Turn this on when the application's socket layer carries ECN both ways:
+    ///
+    /// * **Receive**: each datagram handed to `handle_read` names the codepoint it arrived with
+    ///   in [`TransportContext::ecn`](shared::TransportContext::ecn) (from the `IP_RECVTOS` /
+    ///   `IPV6_RECVTCLASS` control message; `None` for Not-ECT).
+    /// * **Send**: each datagram `poll_write` returns names the codepoint to set in
+    ///   [`TransportContext::ecn`](shared::TransportContext::ecn) (`IP_TOS` / `IPV6_TCLASS`;
+    ///   `None` for Not-ECT).
+    ///
+    /// With it on, every RTP packet (RTX included) of a stream whose codec negotiated RFC 8888
+    /// congestion control feedback (`a=rtcp-fb:<pt> ack ccfb`, see
+    /// `configure_congestion_control_feedback`) is sent ECT(1), the L4S identifier: a sender
+    /// marks only where the receiver reports the CE marks back. STUN, DTLS, SCTP and RTCP are
+    /// never marked. Inbound RTP streams count their ECT(1) and CE receptions
+    /// (`packetsReceivedWithEct1`, `packetsReceivedWithCe`) and outbound ones their ECT(1)
+    /// packets (`packetsSentWithEct1`); with it off those members are left out of the stats,
+    /// since the engine cannot see the IP header itself. Off by default.
+    pub fn with_ecn(mut self, enabled: bool) -> Self {
+        self.0.ecn = enabled;
         self
     }
 

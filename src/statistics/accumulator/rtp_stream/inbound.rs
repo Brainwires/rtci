@@ -1,13 +1,15 @@
 use crate::rtp_transceiver::RTCRtpTransceiverId;
 use crate::rtp_transceiver::SSRC;
 use crate::rtp_transceiver::rtp_sender::RtpCodecKind;
-use crate::statistics::accumulator::{AudioReceiverStatsUpdate, DecoderStatsUpdate};
+use crate::statistics::accumulator::{AudioReceiverStatsUpdate, CcfbTally, DecoderStatsUpdate};
 use crate::statistics::stats::rtp_stream::RTCRtpStreamStats;
 use crate::statistics::stats::rtp_stream::received::RTCReceivedRtpStreamStats;
 use crate::statistics::stats::rtp_stream::received::inbound::RTCInboundRtpStreamStats;
 use crate::statistics::stats::rtp_stream::sent::RTCSentRtpStreamStats;
 use crate::statistics::stats::rtp_stream::sent::remote_outbound::RTCRemoteOutboundRtpStreamStats;
 use crate::statistics::stats::{RTCStats, RTCStatsType};
+use rtcp::transport_feedbacks::cc_feedback_report::CcFeedbackReportBlock;
+use shared::EcnCodepoint;
 use shared::time::SystemInstant;
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -74,6 +76,19 @@ pub struct InboundRtpStreamAccumulator {
     pub jitter_rtp_units: Option<u32>,
     /// Timestamp of the last RTP packet received.
     pub last_packet_received_timestamp: Option<Instant>,
+
+    // ECN (RFC 3168) and RFC 8888 congestion control feedback
+    /// The application's socket layer reports each datagram's ECN codepoint, so the ECN
+    /// counts below are measured (`SettingEngineBuilder::with_ecn`).
+    pub ecn: bool,
+    /// RTP packets received with ECT(1).
+    pub packets_received_with_ect1: u64,
+    /// RTP packets received with CE.
+    pub packets_received_with_ce: u64,
+    /// The stream's codec negotiated RFC 8888 feedback (`a=rtcp-fb:<pt> ack ccfb`).
+    pub ccfb_negotiated: bool,
+    /// What the RFC 8888 reports this side sent say about the stream.
+    pub ccfb_sent: Option<Box<CcfbTally>>,
 
     // RTCP feedback sent
     /// Number of NACKs sent for this stream.
@@ -223,6 +238,30 @@ impl InboundRtpStreamAccumulator {
         self.decoder_stats.frames_dropped = Some(frames.saturating_add(1));
     }
 
+    /// Counts the ECN codepoint an RTP packet of the stream arrived with.
+    pub fn on_ecn_received(&mut self, ecn: Option<EcnCodepoint>) {
+        match ecn {
+            Some(EcnCodepoint::Ect1) => self.packets_received_with_ect1 += 1,
+            Some(EcnCodepoint::Ce) => self.packets_received_with_ce += 1,
+            _ => {}
+        }
+    }
+
+    /// Counts what an RFC 8888 report block this side sent says about the stream: the packets
+    /// it reported lost (`packetsReportedAsLost`) and, of those, the ones a later report said
+    /// arrived (`packetsReportedAsLostButRecovered`).
+    pub fn on_ccfb_block_sent(&mut self, block: &CcFeedbackReportBlock) {
+        self.ccfb_sent
+            .get_or_insert_with(|| Box::new(CcfbTally::new()))
+            .on_report_block(block, false);
+    }
+
+    /// Whether the RFC 8888 members exist: webrtc-stats has them only where `ccfb` is
+    /// negotiated.
+    fn reports_ccfb(&self) -> bool {
+        self.ccfb_negotiated || self.ccfb_sent.is_some()
+    }
+
     /// Called when an RTX packet is received.
     pub fn on_rtx_received(&mut self, bytes: usize) {
         self.retransmitted_packets_received += 1;
@@ -259,10 +298,18 @@ impl InboundRtpStreamAccumulator {
                     codec_id: self.codec_id.clone(),
                 },
                 packets_received: self.packets_received,
-                packets_received_with_ect1: None,
-                packets_received_with_ce: None,
-                packets_reported_as_lost: None,
-                packets_reported_as_lost_but_recovered: None,
+                packets_received_with_ect1: self.ecn.then_some(self.packets_received_with_ect1),
+                packets_received_with_ce: self.ecn.then_some(self.packets_received_with_ce),
+                packets_reported_as_lost: self.reports_ccfb().then(|| {
+                    self.ccfb_sent
+                        .as_ref()
+                        .map_or(0, |tally| tally.reported_as_lost)
+                }),
+                packets_reported_as_lost_but_recovered: self.reports_ccfb().then(|| {
+                    self.ccfb_sent
+                        .as_ref()
+                        .map_or(0, |tally| tally.reported_as_lost_but_recovered)
+                }),
                 packets_lost: self.packets_lost,
                 jitter: jitter_seconds(self.jitter_rtp_units, self.clock_rate),
             },

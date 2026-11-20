@@ -19,6 +19,7 @@ use crate::peer_connection::transport::ice::candidate_type::RTCIceCandidateType;
 use crate::peer_connection::transport::{RTCTransportId, TransportKind};
 use crate::rtp_transceiver::rtp_receiver::internal::RTCRtpReceiverInternal;
 use crate::rtp_transceiver::rtp_sender::RTCRtpCodec;
+use crate::rtp_transceiver::rtp_sender::negotiates_ccfb;
 use crate::rtp_transceiver::rtp_sender::rtp_codec::{
     encoding_send_codec, is_repair_codec, parse_rtx_apt,
 };
@@ -195,7 +196,7 @@ impl RTCPeerConnection {
             data_read_outs: VecDeque::new(),
             write_outs: VecDeque::new(),
             event_outs: VecDeque::new(),
-            stats: RTCStatsAccumulator::default(),
+            stats: RTCStatsAccumulator::with_ecn(setting_engine.ecn),
             now,
         };
 
@@ -1186,6 +1187,26 @@ impl RTCPeerConnection {
                     rtx_ssrc,
                     transceiver_id,
                 );
+        }
+
+        // Whether each bound stream negotiated RFC 8888 feedback: its remote-inbound stats
+        // have the RFC 8888 members, and with ECN on its packets go out ECT(1). Taken from what
+        // the streams are bound with now, so a renegotiation that adds or drops `ack ccfb`
+        // takes effect with it.
+        for transceiver in &self.rtp_transceivers {
+            let Some(sender) = transceiver.sender().as_ref() else {
+                continue;
+            };
+            for info in sender.bound_streams() {
+                let ccfb = negotiates_ccfb(
+                    info.rtcp_feedback
+                        .iter()
+                        .map(|f| (f.typ.as_str(), f.parameter.as_str())),
+                );
+                self.pipeline_context
+                    .stats
+                    .set_outbound_ccfb(info.ssrc, ccfb);
+            }
         }
 
         Ok(())

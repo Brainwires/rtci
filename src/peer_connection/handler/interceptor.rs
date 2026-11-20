@@ -11,6 +11,7 @@ use crate::peer_connection::message::internal::{
     RTCMessageInternal, RTPMessage, TaggedRTCMessageInternal,
 };
 use crate::rtp_transceiver::rtp_receiver::internal::RTCRtpReceiverInternal;
+use crate::rtp_transceiver::rtp_sender::negotiates_ccfb;
 use crate::rtp_transceiver::rtp_sender::rtp_codec::{find_fec_payload_type, find_rtx_payload_type};
 use crate::rtp_transceiver::rtp_sender::rtp_coding_parameters::{
     RTCRtpCodingParameters, RTCRtpRtxParameters,
@@ -455,12 +456,19 @@ impl<'a> InterceptorHandler<'a> {
         // assert not inserting new entry
         let track_id = receiver.track().track_id().clone();
         let stream_id = receiver.track().stream_id().to_owned();
+        let ccfb = negotiates_ccfb(
+            codec
+                .rtcp_feedback
+                .iter()
+                .map(|f| (f.typ.as_str(), f.parameter.as_str())),
+        );
         let new_entry = receiver.track_mut().set_codec_by_ssrc(codec, ssrc);
         assert!(!new_entry);
 
         // Create inbound stream accumulator before firing OnOpen event
         self.stats
             .get_or_create_inbound_rtp_streams(ssrc, kind, &track_id, &mid, rtx_ssrc, fec_ssrc, id);
+        self.stats.set_inbound_ccfb(ssrc, ccfb);
 
         self.emit_on_open(now, id, track_id, stream_id, ssrc, None);
         true
@@ -552,6 +560,13 @@ impl<'a> InterceptorHandler<'a> {
 
         let track_id = receiver.track().track_id().to_owned();
         let stream_id = receiver.track().stream_id().to_owned();
+        let ccfb = negotiates_ccfb(
+            codec
+                .rtp_codec
+                .rtcp_feedback
+                .iter()
+                .map(|f| (f.typ.as_str(), f.parameter.as_str())),
+        );
         // assert it inserts a new entry
         let new_entry = receiver
             .track_mut()
@@ -562,6 +577,7 @@ impl<'a> InterceptorHandler<'a> {
         // Note: undeclared SSRC case doesn't have RTX/FEC info
         self.stats
             .get_or_create_inbound_rtp_streams(ssrc, kind, &track_id, &mid, None, None, index);
+        self.stats.set_inbound_ccfb(ssrc, ccfb);
 
         self.emit_on_open(now, index, track_id, stream_id, ssrc, None);
         true
@@ -842,6 +858,13 @@ impl<'a> InterceptorHandler<'a> {
 
         let track_id = receiver.track().track_id().to_owned();
         let stream_id = receiver.track().stream_id().to_owned();
+        let ccfb = negotiates_ccfb(
+            codec
+                .rtp_codec
+                .rtcp_feedback
+                .iter()
+                .map(|f| (f.typ.as_str(), f.parameter.as_str())),
+        );
         let new_entry = receiver
             .track_mut()
             .set_codec_ssrc_by_rid(codec.rtp_codec, ssrc, &rid);
@@ -850,6 +873,7 @@ impl<'a> InterceptorHandler<'a> {
         // Create inbound stream accumulator before firing OnOpen event
         self.stats
             .get_or_create_inbound_rtp_streams(ssrc, kind, &track_id, &mid, rtx_ssrc, fec_ssrc, id);
+        self.stats.set_inbound_ccfb(ssrc, ccfb);
 
         self.emit_on_open(now, id, track_id, stream_id, ssrc, Some(rid));
         true
@@ -985,6 +1009,12 @@ impl<'a>
                     // recover and goes on unchanged: its transport-wide sequence number still has
                     // to reach the TWCC recorder, or the probe reads as lost.
                     self.deencapsulate_if_rtx(rtp_packet);
+
+                    // The ECN codepoint the datagram arrived with (from the application's socket
+                    // layer), counted on the stream the packet belongs to, a repaired one
+                    // included.
+                    self.stats
+                        .on_rtp_ecn_received(rtp_packet.header.ssrc, msg.transport.ecn);
                 }
                 Packet::Rtcp(rtcp_packets) => {
                     // Counted here, before the chain, for the same reason as the RTP accounting
@@ -1088,6 +1118,14 @@ impl<'a>
                     }
                     _ => {}
                 }
+
+                // The ECN codepoint the application's socket layer sets on the datagram: ECT(1)
+                // for the RTP packets of a stream that sends it, Not-ECT for everything else,
+                // whatever context an interceptor copied onto the packet.
+                packet.transport.ecn = match &packet.message.packet {
+                    Packet::Rtp(rtp_packet) => self.stats.ecn_for_rtp_sent(rtp_packet.header.ssrc),
+                    _ => None,
+                };
 
                 self.ctx.write_outs.push_back(TaggedRTCMessageInternal {
                     now: packet.now,

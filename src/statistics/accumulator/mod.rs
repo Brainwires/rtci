@@ -5,6 +5,7 @@
 //! handler pipeline, and snapshots can be taken at any time to produce
 //! immutable stats reports.
 
+mod ccfb;
 mod certificate;
 mod codec;
 mod data_channel;
@@ -20,6 +21,7 @@ mod rtcp_reports_test;
 mod rtp_stream;
 mod transport;
 
+pub(crate) use ccfb::CcfbTally;
 pub(crate) use certificate::{CertificateStatsAccumulator, base64_encode};
 pub(crate) use codec::{CodecDirection, CodecStatsAccumulator};
 pub(crate) use data_channel::DataChannelStatsAccumulator;
@@ -109,6 +111,10 @@ pub(crate) struct RTCStatsAccumulator {
 
     /// Maps an inbound FEC SSRC to its primary SSRC.
     fec_ssrc_to_primary: HashMap<SSRC, SSRC>,
+
+    /// The application's socket layer carries ECN (`SettingEngineBuilder::with_ecn`): RTP
+    /// streams report their ECN counts.
+    pub(crate) ecn: bool,
 }
 
 /// Asserts a stats record was stamped with `expected`, ignoring the wall-clock half.
@@ -135,6 +141,15 @@ impl RTCStatsAccumulator {
     /// Creates a new empty stats accumulator.
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    /// An empty accumulator whose RTP streams report ECN counts when `ecn` is on
+    /// (`SettingEngineBuilder::with_ecn`).
+    pub(crate) fn with_ecn(ecn: bool) -> Self {
+        Self {
+            ecn,
+            ..Self::default()
+        }
     }
 
     /// Creates a snapshot of all accumulated stats at the given timestamp.
@@ -501,6 +516,7 @@ impl RTCStatsAccumulator {
                     rtx_ssrc,
                     fec_ssrc,
                     transceiver_id,
+                    ecn: self.ecn,
                     ..Default::default()
                 });
         // An existing stream takes the repair SSRCs it is given now, as the reverse maps did.
@@ -603,6 +619,7 @@ impl RTCStatsAccumulator {
                 rtx_ssrc,
                 transceiver_id,
                 active: true,
+                ecn: self.ecn,
                 ..Default::default()
             })
     }
@@ -731,6 +748,53 @@ impl RTCStatsAccumulator {
             return true;
         }
         false
+    }
+
+    /// The ECN codepoint to send an outgoing RTP packet with: ECT(1) for a packet (RTX
+    /// included) of a stream that sends ECT(1) ([`OutboundRtpStreamAccumulator::ect1_marking`]),
+    /// counted on the stream when it is the stream's own SSRC; Not-ECT (`None`) otherwise.
+    pub(crate) fn ecn_for_rtp_sent(&mut self, ssrc: SSRC) -> Option<shared::EcnCodepoint> {
+        if !self.ecn {
+            return None;
+        }
+        if let Some(stream) = self.outbound_rtp_streams.get_mut(&ssrc) {
+            if !stream.ect1_marking {
+                return None;
+            }
+            stream.on_ect1_sent();
+            return Some(shared::EcnCodepoint::Ect1);
+        }
+        self.outbound_rtx_ssrc_to_primary
+            .get(&ssrc)
+            .and_then(|primary| self.outbound_rtp_streams.get(primary))
+            .filter(|stream| stream.ect1_marking)
+            .map(|_| shared::EcnCodepoint::Ect1)
+    }
+
+    /// Counts the ECN codepoint an RTP packet of the inbound stream `ssrc` arrived with.
+    pub(crate) fn on_rtp_ecn_received(&mut self, ssrc: SSRC, ecn: Option<shared::EcnCodepoint>) {
+        if self.ecn
+            && let Some(stream) = self.inbound_rtp_streams.get_mut(&ssrc)
+        {
+            stream.on_ecn_received(ecn);
+        }
+    }
+
+    /// Records whether the inbound stream `ssrc`'s codec negotiated RFC 8888 feedback.
+    pub(crate) fn set_inbound_ccfb(&mut self, ssrc: SSRC, negotiated: bool) {
+        if let Some(stream) = self.inbound_rtp_streams.get_mut(&ssrc) {
+            stream.ccfb_negotiated = negotiated;
+        }
+    }
+
+    /// Records whether the outbound stream `ssrc`'s codec negotiated RFC 8888 feedback; with
+    /// ECN on, its packets are then sent ECT(1).
+    pub(crate) fn set_outbound_ccfb(&mut self, ssrc: SSRC, negotiated: bool) {
+        let ecn = self.ecn;
+        if let Some(stream) = self.outbound_rtp_streams.get_mut(&ssrc) {
+            stream.ccfb_negotiated = negotiated;
+            stream.ect1_marking = ecn && negotiated;
+        }
     }
 
     /// Tracks an RTX packet received for an inbound stream.
