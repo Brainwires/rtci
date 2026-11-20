@@ -3,7 +3,7 @@
 // examples/interop-peer at RTC_INTEROP_WS.
 import { test, expect } from "@playwright/test";
 import { readFileSync } from "node:fs";
-import { naBrowser, skipUnlessCodec } from "./na.mjs";
+import { naBrowser, naEnv, skipUnlessCodec } from "./na.mjs";
 
 const WS = process.env.RTC_INTEROP_WS || "ws://127.0.0.1:8080";
 const PEER_JS = readFileSync(new URL("./peer.js", import.meta.url), "utf8");
@@ -235,9 +235,9 @@ for (const [codec, kind, mime] of [
 test("simulcast: three RIDs reach Rust", async ({ page }) => {
   const r = await page.evaluate(async (ws) => {
     const s = await Interop.open(ws, { media: "count" });
-    // libwebrtc (Chromium, WebKit) sends as many simulcast layers as the input resolution
-    // allows: one at 320x240, three from 960x540. Each layer's cap keeps the total within the
-    // starting bandwidth estimate.
+    // libwebrtc sends as many simulcast layers as the input resolution allows (one at
+    // 320x240, three from 960x540); the canvas is 1280x720. Each layer's cap keeps the total
+    // within the starting bandwidth estimate.
     const track = Interop.canvasStream(1280, 720).getVideoTracks()[0];
     const tr = s.pc.addTransceiver(track, {
       direction: "sendonly",
@@ -248,7 +248,22 @@ test("simulcast: three RIDs reach Rust", async ({ page }) => {
       ],
     });
     Interop.prefer(tr, "video", "video/VP8");
+    // What the browser kept: webrtc-pc 5.1 addTransceiver lets a user agent drop the
+    // encodings past the number it supports, and getParameters() then shows the rest.
+    const params = tr.sender.getParameters();
+    const acceptedRids = (params.encodings || []).map((e) => e.rid).filter(Boolean);
+    // CPU adaptation lowers the input resolution, and a lower input carries fewer layers:
+    // under a busy container that alone leaves only "q". Keep the resolution, drop frames.
+    let degradation = "unsupported";
+    try {
+      params.degradationPreference = "maintain-resolution";
+      await tr.sender.setParameters(params);
+      degradation = tr.sender.getParameters().degradationPreference || "not reported";
+    } catch (e) {
+      degradation = `refused: ${e.name}`;
+    }
     await s.negotiate();
+    const offeredRids = [...s.pc.localDescription.sdp.matchAll(/^a=rid:(\S+) send/gm)].map((m) => m[1]);
     await s.connected();
     let report;
     await Interop.until(async () => {
@@ -256,18 +271,52 @@ test("simulcast: three RIDs reach Rust", async ({ page }) => {
       const rids = new Set(Object.keys(report.rtp).filter((k) => report.rtp[k] > 20).map((k) => k.split(":")[1]));
       return ["q", "h", "f"].every((x) => rids.has(x));
     }, 25000, "packets on q, h and f").catch(() => {});
-    // What the browser says it sent, per layer.
+    // What the browser says it sent, per layer, and why it held a layer back.
     const sent = {};
+    let availableOutgoingBitrate;
     (await s.pc.getStats()).forEach((x) => {
-      if (x.type === "outbound-rtp" && x.kind === "video" && x.rid) sent[x.rid] = x.packetsSent || 0;
+      if (x.type === "outbound-rtp" && x.kind === "video" && x.rid) {
+        sent[x.rid] = {
+          packets: x.packetsSent || 0,
+          width: x.frameWidth,
+          limit: x.qualityLimitationReason,
+          encoder: x.encoderImplementation,
+        };
+      }
+      if (x.type === "candidate-pair" && x.nominated && x.availableOutgoingBitrate !== undefined) {
+        availableOutgoingBitrate = x.availableOutgoingBitrate;
+      }
     });
     s.close();
-    return { report, sent };
+    return { report, sent, acceptedRids, offeredRids, degradation, availableOutgoingBitrate };
   }, WS);
-  const sentRids = Object.keys(r.sent).filter((k) => r.sent[k] > 20);
-  test.skip(sentRids.length < 3, `the browser sent only ${JSON.stringify(r.sent)} (layers with > 20 packets: ${sentRids.join(",") || "none"})`);
+  naBrowser(
+    r.acceptedRids.length < 3,
+    `the browser kept ${r.acceptedRids.length} of 3 send encodings`,
+    `RTCRtpSender.getParameters().encodings after addTransceiver with three sendEncodings: ${JSON.stringify(r.acceptedRids)}`,
+  );
+  naBrowser(
+    r.offeredRids.length < 3,
+    `the browser's own offer declares ${r.offeredRids.length} send RIDs`,
+    `its offer's a=rid lines (RFC 8853 section 5): ${JSON.stringify(r.offeredRids)}`,
+  );
+  const quiet = ["q", "h", "f"].filter((x) => (r.sent[x]?.packets || 0) <= 20);
+  const cpuLimited = Object.values(r.sent).some((v) => v.limit === "cpu");
+  naEnv(
+    quiet.length > 0 && cpuLimited,
+    `the browser held back layer(s) ${quiet.join(",")} for lack of CPU in the test container ` +
+      `(degradationPreference: ${r.degradation})`,
+    `outbound-rtp.qualityLimitationReason = "cpu" (W3C webrtc-stats 7.3): ${JSON.stringify(r.sent)}`,
+  );
+  // Declared, accepted, and not CPU-starved: the browser must send all three, and every one
+  // must reach Rust. A "bandwidth" limit here means our congestion feedback starved it.
+  expect(
+    quiet,
+    `layers the browser sent 20 packets or fewer on: ${JSON.stringify(r.sent)}, ` +
+      `availableOutgoingBitrate ${r.availableOutgoingBitrate}, degradationPreference ${r.degradation}`,
+  ).toEqual([]);
   const rids = Object.keys(r.report.rtp).filter((k) => r.report.rtp[k] > 20).map((k) => k.split(":")[1]);
-  expect(new Set(rids), JSON.stringify(r)).toEqual(new Set(sentRids));
+  expect(new Set(rids), JSON.stringify(r)).toEqual(new Set(["q", "h", "f"]));
 });
 
 // ---- encoded transforms (an SFrame-style end-to-end transform) ----
