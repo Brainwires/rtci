@@ -435,6 +435,35 @@ mod tests {
         assert_eq!(None, transport.max_channels());
     }
 
+    // Upstream's test inserts a default `Association`, which its engine reports as closed. Here
+    // a default association is still handshaking (`connecting`, see
+    // `a_handshaking_association_is_connecting`), so the association is closed explicitly: the
+    // transport must then report Closed rather than the Connecting it was constructed with.
+    #[test]
+    fn state_follows_a_closed_association() {
+        let mut transport = SctpTransport::new(
+            SctpMaxMessageSize::default(),
+            None,
+            None,
+            test_transport_id(TransportKind::Sctp),
+            test_transport_id(TransportKind::Dtls),
+        );
+        let mut association = Association::default();
+        association
+            .close(sctp::AssociationError::LocallyClosed)
+            .expect("close");
+        assert!(association.is_ended());
+        transport
+            .sctp_associations
+            .insert(AssociationHandle(0), association);
+        assert_eq!(RTCSctpTransportState::Closed, transport.state());
+        assert_eq!(
+            None,
+            transport.max_channels(),
+            "a closed association negotiated nothing"
+        );
+    }
+
     #[test]
     fn start_applies_configured_receive_buffer_size() {
         let mut transport = SctpTransport::new(
