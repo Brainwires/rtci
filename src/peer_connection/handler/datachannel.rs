@@ -1651,4 +1651,58 @@ mod tests {
             assert_eq!(data_channels.len(), 3);
         }
     }
+
+    /// Commit eb4c4f61, RFC 8831 6.6: an empty message travels as one padding byte under an
+    /// Empty PPID, and counts as one message of 0 bytes received (webrtc-stats
+    /// `bytesReceived`), as the sender counts it as 0 bytes sent. The application gets it empty.
+    #[test]
+    fn an_empty_message_counts_as_zero_bytes_received() {
+        let now = Instant::now();
+        let mut ctx = DataChannelHandlerContext::new(now);
+        let (mut data_channels, handles) = registry(vec![negotiated_channel(4)]);
+        let mut stats = RTCStatsAccumulator::new();
+        {
+            let mut handler = DataChannelHandler::new(
+                &mut ctx,
+                &mut data_channels,
+                &mut stats,
+                None,
+                RTCDtlsRole::Client,
+                None,
+            );
+            handler
+                .handle_event(TaggedRTCEventInternal {
+                    now,
+                    event: RTCEventInternal::SCTPHandshakeComplete(0),
+                })
+                .unwrap();
+            while handler.poll_write().is_some() {}
+            while handler.poll_read().is_some() {}
+            for (ppi, payload) in [
+                (PayloadProtocolIdentifier::StringEmpty, &[0u8][..]),
+                (PayloadProtocolIdentifier::BinaryEmpty, &[0u8][..]),
+                (PayloadProtocolIdentifier::String, &b"hello"[..]),
+            ] {
+                handler
+                    .handle_read(TaggedRTCMessageInternal {
+                        now,
+                        transport: TransportContext::default(),
+                        message: RTCMessageInternal::Dtls(DTLSMessage::Sctp(DataChannelMessage {
+                            association_handle: 0,
+                            stream_id: 4,
+                            ppi,
+                            payload: BytesMut::from(payload),
+                            negotiated: false,
+                        })),
+                    })
+                    .unwrap();
+            }
+        }
+        let dc_stats = &stats.data_channels[&handles[0]];
+        assert_eq!(3, dc_stats.messages_received);
+        assert_eq!(
+            5, dc_stats.bytes_received,
+            "the two empty messages add nothing"
+        );
+    }
 }
