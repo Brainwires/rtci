@@ -1,4 +1,3 @@
-use super::cumulative_lost;
 use super::inbound::jitter_seconds;
 use crate::rtp_transceiver::RTCRtpTransceiverId;
 use crate::rtp_transceiver::SSRC;
@@ -183,7 +182,7 @@ impl OutboundRtpStreamAccumulator {
     ///   remember gives no measurement.
     pub fn on_receiver_report(&mut self, report: &ReceptionReport, now: Instant) {
         self.remote_reports_received += 1;
-        self.remote_packets_lost = cumulative_lost(report.total_lost);
+        self.remote_packets_lost = i64::from(report.cumulative_lost());
         self.remote_jitter = Some(report.jitter);
         self.remote_fraction_lost = f64::from(report.fraction_lost) / 256.0;
         self.remote_packets_received = match self.first_sequence_number {

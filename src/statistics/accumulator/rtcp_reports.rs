@@ -5,7 +5,6 @@
 //! What each packet means for the stats is decided here, next to the accumulators it updates.
 
 use super::RTCStatsAccumulator;
-use super::rtp_stream::cumulative_lost;
 use rtcp::header::{FORMAT_CCFB, PacketType};
 use rtcp::payload_feedbacks::full_intra_request::FullIntraRequest;
 use rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
@@ -109,7 +108,7 @@ impl RTCStatsAccumulator {
 
             for report in reception_reports(packet) {
                 if let Some(stream) = self.inbound_rtp_streams.get_mut(&report.ssrc) {
-                    stream.on_rtcp_rr_generated(cumulative_lost(report.total_lost), report.jitter);
+                    stream.on_rtcp_rr_generated(i64::from(report.cumulative_lost()), report.jitter);
                 }
             }
 
