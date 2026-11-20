@@ -63,6 +63,8 @@ pub mod agent;
 pub mod attributes;
 /// Candidate types, priorities, and SDP `a=candidate` parsing.
 pub mod candidate;
+/// 1:1 NAT address mapping for the host candidates the application adds.
+pub(crate) mod external_ip_mapper;
 /// Entry points for stateful fuzz targets. Gated behind `cfg(fuzzing)`; not part of the
 /// supported API.
 #[cfg(all(fuzzing, any(feature = "crypto-ring", feature = "crypto-aws-lc-rs")))]

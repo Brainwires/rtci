@@ -1,3 +1,4 @@
+use crate::alert::{AlertDescription, AlertLevel};
 use crate::conn::*;
 use crate::content::*;
 use shared::error::*;
@@ -72,7 +73,51 @@ pub(crate) fn srv_cli_str(is_client: bool) -> String {
 }
 
 impl DTLSConn {
+    /// Advances the handshake state machine as far as it can go now.
+    ///
+    /// A handshake that errors has given up: a flight failed to parse or generate (a fatal alert
+    /// has been queued for the peer where one applies), or the retransmissions ran out. The
+    /// association is then failed and stays failed (W3C webrtc 5.5.1 RTCDtlsTransport "failed").
     pub(crate) fn handshake(&mut self, now: Instant) -> Result<()> {
+        if self.failed {
+            return Err(Error::ErrConnClosed);
+        }
+        let peer_repeated_flight = std::mem::take(&mut self.peer_repeated_flight);
+        let flight_before = self.current_flight.to_string();
+        let mut result = self.handshake_steps(now);
+        if result.is_ok()
+            && peer_repeated_flight
+            && self.current_handshake_state == HandshakeState::Waiting
+            && self.current_flight.to_string() == flight_before
+        {
+            result = self.retransmit_for_repeated_flight(now);
+        }
+        if result.is_err() {
+            self.fail();
+        }
+        result
+    }
+
+    /// RFC 6347 4.2.4: the peer sent again a flight we had already processed, so the flight we
+    /// answered it with was lost. Retransmit that flight now instead of when our timer fires;
+    /// sending it restarts the timer. Only while still waiting for the peer's next flight, and
+    /// out of the same retransmission budget the timer uses. A spent budget means no answer
+    /// here: giving up stays the timer's decision.
+    fn retransmit_for_repeated_flight(&mut self, now: Instant) -> Result<()> {
+        if !self.retransmit || self.current_retransmit_count >= self.maximum_retransmit_number {
+            return Ok(());
+        }
+        debug!(
+            "[handshake:{}] {} peer repeated its flight, retransmitting",
+            srv_cli_str(self.state.is_client),
+            self.current_flight
+        );
+        self.current_retransmit_count += 1;
+        self.current_handshake_state = HandshakeState::Sending;
+        self.handshake_steps(now)
+    }
+
+    fn handshake_steps(&mut self, now: Instant) -> Result<()> {
         loop {
             debug!(
                 "[handshake:{}] {}: {}",
@@ -233,6 +278,13 @@ impl DTLSConn {
                     {
                         return Ok(HandshakeState::Finished);
                     }
+                    if self.current_flight.verifies_cookie()
+                        && !next_flight.verifies_cookie()
+                        && let Err(err) = self.on_peer_address_verified()
+                    {
+                        self.notify(AlertLevel::Fatal, AlertDescription::IllegalParameter);
+                        return Err(err);
+                    }
                     self.current_flight = next_flight;
                     return Ok(HandshakeState::Preparing);
                 }
@@ -241,6 +293,22 @@ impl DTLSConn {
 
         Ok(HandshakeState::Waiting)
     }
+
+    /// The client has echoed our cookie, so the address it sends from is its own (RFC 6347
+    /// 4.2.1). Only now does a server do the per-association work a spoofed source address
+    /// must not be able to cause: its ECDHE key pair.
+    fn on_peer_address_verified(&mut self) -> Result<()> {
+        self.address_verified = true;
+        if self.state.local_keypair.is_none() {
+            let keypair = self
+                .state
+                .named_curve
+                .generate_keypair_with_crypto(self.handshake_config.provider().crypto())?;
+            self.state.local_keypair = Some(keypair);
+        }
+        Ok(())
+    }
+
     fn finish(&mut self) -> Result<HandshakeState> {
         if self.handshake_rx.take().is_some() {
             debug!(

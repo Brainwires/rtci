@@ -202,18 +202,44 @@ fn test_xormapped_address_add_to_ipv6() -> Result<()> {
     Ok(())
 }
 
-/*
+/// Port of pion's `TestXORMappedAddress_AddTo_Invalid`, which hands `AddTo` an 8-byte IP and
+/// expects `ErrBadIPLength`. An `IpAddr` cannot hold an address of the wrong length, so encoding
+/// cannot fail that way here: every address is written with its own family's length. The check
+/// that remains is on the wire, where a value longer than its family allows is refused.
 #[test]
-fn TestXORMappedAddress_AddTo_Invalid() -> Result<()> {
+fn test_xormapped_address_add_to_invalid() -> Result<()> {
+    for (ip, value_len) in [
+        ("1.2.3.4", 4 + IPV4LEN),
+        ("fe80::dc2b:44ff:fe20:6009", 4 + IPV6LEN),
+    ] {
+        let mut m = Message::new();
+        m.transaction_id = TransactionId::new();
+        let addr = XorMappedAddress {
+            ip: ip.parse().unwrap(),
+            port: 21254,
+        };
+        addr.add_to(&mut m)?;
+        assert_eq!(m.get(ATTR_XORMAPPED_ADDRESS)?.len(), value_len, "{ip}");
+
+        let mut got = XorMappedAddress::default();
+        got.get_from(&m)?;
+        assert_eq!(got.ip, addr.ip);
+        assert_eq!(got.port, addr.port);
+    }
+
+    // An IPv4 family with an IPv6-sized address.
     let mut m = Message::new();
-    let mut addr = XORMappedAddress{
-        ip:   1, 2, 3, 4, 5, 6, 7, 8},
-        port: 21254,
-    }
-    if err := addr.AddTo(m); !errors.Is(err, ErrBadIPLength) {
-        t.Errorf("AddTo should return %q, got: %v", ErrBadIPLength, err)
-    }
-}*/
+    let mut value = vec![0u8; 4 + IPV6LEN];
+    value[0..2].copy_from_slice(&FAMILY_IPV4.to_be_bytes());
+    m.add(ATTR_XORMAPPED_ADDRESS, &value);
+    let mut got = XorMappedAddress::default();
+    let err = got
+        .get_from(&m)
+        .expect_err("an address longer than its family allows is refused");
+    assert!(is_attr_size_overflow(&err), "{err}");
+
+    Ok(())
+}
 
 #[test]
 fn test_xormapped_address_string() -> Result<()> {

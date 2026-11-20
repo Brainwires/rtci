@@ -8,7 +8,21 @@
 //! The three address kinds are easy to confuse: [`RelayedAddr`] is what peers send to,
 //! [`ReflexiveAddr`] is how the server sees this client, and [`PeerAddr`] is the far end.
 #[cfg(test)]
+mod client_allocate_test;
+#[cfg(test)]
+mod client_data_source_test;
+#[cfg(test)]
+mod client_permission_refresh_test;
+#[cfg(test)]
+mod client_permission_test;
+#[cfg(test)]
+mod client_retry_test;
+#[cfg(test)]
+mod client_stale_nonce_test;
+#[cfg(test)]
 mod client_test;
+#[cfg(test)]
+mod test_server;
 
 /// Channel bindings, which replace the 36-byte Data indication header with a 4-byte one.
 pub mod binding;
@@ -263,7 +277,7 @@ impl Client {
                 debug!("discarding STUN message from {from}: not a configured server");
                 return Ok(());
             }
-            self.handle_stun_message(now, data)
+            self.handle_stun_message(now, data, from_turn_server)
         } else if ChannelData::is_channel_data(data) {
             if !from_turn_server {
                 debug!("discarding ChannelData from {from}: not the TURN server");
@@ -295,7 +309,12 @@ impl Client {
                 .is_some_and(|tr| tr.peer_addr == from)
     }
 
-    fn handle_stun_message(&mut self, now: Instant, data: &[u8]) -> Result<()> {
+    fn handle_stun_message(
+        &mut self,
+        now: Instant,
+        data: &[u8],
+        from_turn_server: bool,
+    ) -> Result<()> {
         let mut msg = Message::new();
         msg.raw = data.to_vec();
         msg.decode()?;
@@ -309,6 +328,12 @@ impl Client {
         }
 
         if msg.typ.class == CLASS_INDICATION {
+            // Only the TURN server holding the allocation relays peer data. The STUN server,
+            // when it is a different address, has no allocation and is not believed for it.
+            if msg.typ.method == METHOD_DATA && !from_turn_server {
+                debug!("discarding Data indication: not from the TURN server");
+                return Ok(());
+            }
             if msg.typ.method == METHOD_DATA {
                 let mut peer_addr = PeerAddress::default();
                 peer_addr.get_from(&msg)?;
@@ -382,34 +407,42 @@ impl Client {
                     self.handle_allocate_response(now, msg, tr.transaction_type)?;
                 }
                 METHOD_CREATE_PERMISSION => {
-                    if let TransactionType::CreatePermissionRequest(relayed_addr, peer_addr) =
-                        tr.transaction_type
+                    if let TransactionType::CreatePermissionRequest(
+                        relayed_addr,
+                        peer_addr,
+                        peer_addrs,
+                        retry,
+                    ) = tr.transaction_type
                     {
                         let mut relay = Relay {
                             relayed_addr,
                             client: self,
                         };
-                        relay.handle_create_permission_response(msg, peer_addr)?;
+                        relay.handle_create_permission_response(
+                            now, msg, peer_addr, peer_addrs, retry,
+                        )?;
                     }
                 }
                 METHOD_REFRESH => {
-                    if let TransactionType::RefreshRequest(relayed_addr) = tr.transaction_type {
-                        let mut relay = Relay {
-                            relayed_addr,
-                            client: self,
-                        };
-                        relay.handle_refresh_allocation_response(now, msg)?;
-                    }
-                }
-                METHOD_CHANNEL_BIND => {
-                    if let TransactionType::ChannelBindRequest(relayed_addr, bind_addr) =
+                    if let TransactionType::RefreshRequest(relayed_addr, lifetime, retry) =
                         tr.transaction_type
                     {
                         let mut relay = Relay {
                             relayed_addr,
                             client: self,
                         };
-                        relay.handle_channel_bind_response(now, msg, bind_addr)?;
+                        relay.handle_refresh_response(now, msg, lifetime, retry)?;
+                    }
+                }
+                METHOD_CHANNEL_BIND => {
+                    if let TransactionType::ChannelBindRequest(relayed_addr, bind_addr, retry) =
+                        tr.transaction_type
+                    {
+                        let mut relay = Relay {
+                            relayed_addr,
+                            client: self,
+                        };
+                        relay.handle_channel_bind_response(now, msg, bind_addr, retry)?;
                     }
                 }
                 _ => {}
@@ -417,6 +450,50 @@ impl Client {
         }
 
         Ok(())
+    }
+
+    /// Deals with a transaction that exhausted its retransmissions.
+    ///
+    /// A Refresh or ChannelBind is started once more as a new transaction, so one lost burst
+    /// does not let the allocation lapse or leave a channel unbound for good. A ChannelBind that
+    /// fails again returns its binding to idle, so the next send binds it again. Anything not
+    /// started again is reported as [`Event::TransactionTimeout`], under the id its caller
+    /// knows.
+    fn handle_transaction_timeout(&mut self, now: Instant, tr: Transaction) {
+        let id = tr.transaction_type.report_id(tr.transaction_id);
+        match tr.transaction_type {
+            TransactionType::RefreshRequest(relayed_addr, lifetime, retry) => {
+                if !retry.timeout
+                    && let Ok(mut relay) = self.relay(relayed_addr)
+                    && relay
+                        .refresh_allocation_with(
+                            now,
+                            lifetime,
+                            retry.after_timeout(tr.transaction_id),
+                        )
+                        .is_ok()
+                {
+                    debug!("refresh timed out; sent again");
+                    return;
+                }
+            }
+            TransactionType::ChannelBindRequest(relayed_addr, bind_addr, retry) => {
+                if !retry.timeout
+                    && let Ok(mut relay) = self.relay(relayed_addr)
+                    && relay
+                        .rebind_channel(now, bind_addr, retry.after_timeout(tr.transaction_id))
+                        .is_ok()
+                {
+                    debug!("channel bind for {bind_addr} timed out; sent again");
+                    return;
+                }
+                if let Some(b) = self.binding_mgr.get_by_addr(&bind_addr) {
+                    b.set_state(BindingState::Idle);
+                }
+            }
+            _ => {}
+        }
+        self.events.push_back(Event::TransactionTimeout(id));
     }
 
     fn handle_channel_data(&mut self, data: &[u8]) -> Result<()> {
@@ -644,15 +721,21 @@ impl Client {
             Box::new(FINGERPRINT),
         ])?;
 
+        // The authenticated retry that follows the 401 goes out under an id of its own, drawn
+        // here at random rather than derived from this request's (RFC 8489 §6.3.1: every new
+        // request takes a new transaction id). It is the one the caller is handed, because the
+        // retry is the request that carries the allocation.
+        let allocation_id = TransactionId::new();
+
         debug!("client.Allocate call PerformTransaction 1");
-        let tid = self.perform_transaction(
+        self.perform_transaction(
             now,
             &msg,
             self.turn_server_addr_or_err()?,
-            TransactionType::AllocateAttempt,
+            TransactionType::AllocateAttempt(allocation_id),
             None,
         );
-        Ok(authenticated_allocate_id(tid))
+        Ok(allocation_id)
     }
 
     fn handle_allocate_response(
@@ -662,26 +745,22 @@ impl Client {
         allocate_state: TransactionType,
     ) -> Result<()> {
         match allocate_state {
-            TransactionType::AllocateAttempt => {
+            TransactionType::AllocateAttempt(allocation_id) => {
                 // Anonymous allocate failed, trying to authenticate. Whatever is reported about
-                // it from here on names the id allocate() handed out, as the response does.
+                // it from here on names the id allocate() handed out.
                 let nonce = match Nonce::get_from_as(&response, ATTR_NONCE) {
                     Ok(nonce) => nonce,
                     Err(err) => {
-                        self.events.push_back(Event::AllocateError(
-                            authenticated_allocate_id(response.transaction_id),
-                            err,
-                        ));
+                        self.events
+                            .push_back(Event::AllocateError(allocation_id, err));
                         return Ok(());
                     }
                 };
                 self.realm = match Realm::get_from_as(&response, ATTR_REALM) {
                     Ok(realm) => realm,
                     Err(err) => {
-                        self.events.push_back(Event::AllocateError(
-                            authenticated_allocate_id(response.transaction_id),
-                            err,
-                        ));
+                        self.events
+                            .push_back(Event::AllocateError(allocation_id, err));
                         return Ok(());
                     }
                 };
@@ -699,13 +778,10 @@ impl Client {
 
                 let mut msg = Message::new();
 
-                // make it same as allocate() return value so that client can retrieve it
-                // from Event::AllocateResponse
-                let tid = authenticated_allocate_id(response.transaction_id);
-
-                // Trying to authorize.
+                // Trying to authorize, under the id allocate() returned, so the caller can
+                // match Event::AllocateResponse with it.
                 msg.build(&[
-                    Box::new(tid),
+                    Box::new(allocation_id),
                     Box::new(MessageType::new(METHOD_ALLOCATE, CLASS_REQUEST)),
                     Box::new(RequestedTransport {
                         // Always a UDP relay, however the server is reached: REQUESTED-TRANSPORT

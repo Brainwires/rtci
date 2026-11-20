@@ -1,4 +1,8 @@
 #[cfg(test)]
+mod mdns_local_name_test;
+#[cfg(test)]
+mod mdns_name_test;
+#[cfg(test)]
 mod mdns_test;
 
 use mdns::Mdns;
@@ -34,6 +38,41 @@ pub(crate) fn generate_multicast_dns_name() -> String {
     // from the UUID crate's secure random source without forcing provider ownership into mDNS.
     let u = Uuid::new_v4();
     format!("{u}.local")
+}
+
+/// Whether `name` is an ICE mDNS candidate name: a UUID in its hyphenated form followed by
+/// `.local` (draft-ietf-mmusic-mdns-ice-candidates §3.1.1: "The unique name MUST consist of a
+/// version 4 UUID as defined in [RFC4122], followed by \".local\""). The version nibble is not
+/// checked, and either case is accepted.
+///
+/// A remote candidate's name is resolved only when it has this shape, so a remote description
+/// cannot make the agent look up arbitrary names on the local network (`printer.local`, or the
+/// bare `.local`).
+pub(crate) fn is_ice_mdns_name(name: &str) -> bool {
+    let Some(label) = name.strip_suffix(".local") else {
+        return false;
+    };
+    let bytes = label.as_bytes();
+    bytes.len() == 36
+        && bytes.iter().enumerate().all(|(i, b)| match i {
+            8 | 13 | 18 | 23 => *b == b'-',
+            _ => b.is_ascii_hexdigit(),
+        })
+}
+
+/// Whether `name` can be published as this agent's own mDNS name: exactly one label before
+/// `.local` (RFC 6762 §3: names in the `.local.` domain), the label 1 to 63 letters, digits or
+/// hyphens, not starting or ending with a hyphen (RFC 1123 §2.1). The bare `.local` has an
+/// empty label and is the domain itself, not a host name.
+pub(crate) fn is_valid_local_mdns_name(name: &str) -> bool {
+    let Some(label) = name.strip_suffix(".local") else {
+        return false;
+    };
+    !label.is_empty()
+        && label.len() <= 63
+        && !label.starts_with('-')
+        && !label.ends_with('-')
+        && label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
 pub(crate) fn create_multicast_dns(

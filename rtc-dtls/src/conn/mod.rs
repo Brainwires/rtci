@@ -8,6 +8,8 @@
 //! Normally an application drives [`Endpoint`](crate::endpoint::Endpoint) instead, which owns one
 //! of these per remote address.
 #[cfg(test)]
+mod conn_ported_test;
+#[cfg(test)]
 mod conn_test;
 
 use crate::alert::*;
@@ -101,6 +103,10 @@ pub struct DTLSConn {
     closed: bool, //  *closer.Closer
     /// The peer sent close_notify. Its reply has been queued; the connection is finished.
     pub(crate) closed_by_peer: bool,
+    /// The association ended in failure: a fatal alert was sent or received, or the handshake
+    /// gave up (an error, or its retransmissions ran out). Terminal: nothing more is read,
+    /// written or retransmitted (RFC 5246 7.2.2, W3C webrtc 5.5.1 RTCDtlsTransport "failed").
+    pub(crate) failed: bool,
     //handshakeLoopsFinished sync.WaitGroup
 
     //readDeadline  :deadline.Deadline,
@@ -127,6 +133,13 @@ pub struct DTLSConn {
     /// Reset on every `read`, unlike the sticky `handshake_rx`, so a completed association can tell
     /// an RFC 6347 §4.2.4 last-flight repeat from ordinary post-handshake application data.
     pub(crate) received_handshake_in_last_datagram: bool,
+    /// The peer sent again a handshake message we had already processed: it is retransmitting
+    /// its flight because ours was lost, so ours is retransmitted at once (RFC 6347 4.2.4).
+    /// Taken by the next `handshake()`.
+    pub(crate) peer_repeated_flight: bool,
+    /// The peer's source address is its own: always for a client (it chose the server's
+    /// address), and for a server once the client has echoed its cookie (RFC 6347 4.2.1).
+    pub(crate) address_verified: bool,
 }
 
 impl DTLSConn {
@@ -141,6 +154,7 @@ impl DTLSConn {
         is_client: bool,
         initial_state: Option<State>,
     ) -> Self {
+        let resumed = initial_state.is_some();
         let (state, flight, initial_fsm_state) = if let Some(state) = initial_state {
             let flight = if is_client {
                 Box::new(Flight5 {}) as Box<dyn Flight>
@@ -182,6 +196,7 @@ impl DTLSConn {
             connection_closed_by_user: false,
             closed: false,
             closed_by_peer: false,
+            failed: false,
 
             current_handshake_state: initial_fsm_state,
             current_retransmit_timer: None,
@@ -193,6 +208,8 @@ impl DTLSConn {
             retransmit: false,
             handshake_rx: None,
             received_handshake_in_last_datagram: false,
+            peer_repeated_flight: false,
+            address_verified: is_client || resumed,
         }
     }
 
@@ -273,7 +290,34 @@ impl DTLSConn {
         self.state.srtp_protection_profile
     }
 
+    /// Whether the association has failed: a fatal alert was sent or received, or the handshake
+    /// gave up (a handshake error, or the retransmissions ran out). A failed association is
+    /// finished: it reads, writes and retransmits nothing more. An ordinary retransmission, or a
+    /// record that is silently discarded, never fails it.
+    pub fn is_failed(&self) -> bool {
+        self.failed
+    }
+
+    /// Whether the peer's source address is known to be its own: a client's always is; a
+    /// server's once the client has echoed its cookie (RFC 6347 4.2.1).
+    pub(crate) fn is_address_verified(&self) -> bool {
+        self.address_verified
+    }
+
+    /// Ends the association after a fatal alert (sent or received) or a handshake that gave up.
+    /// After a fatal alert the connection must be closed at once and nothing more sent on it
+    /// (RFC 5246 7.2.2), so the retransmit timer is cancelled too.
+    pub(crate) fn fail(&mut self) {
+        if !self.failed {
+            debug!("{}: association failed", srv_cli_str(self.is_client));
+        }
+        self.failed = true;
+        self.closed = true;
+        self.current_retransmit_timer = None;
+    }
+
     pub(crate) fn notify(&mut self, level: AlertLevel, desc: AlertDescription) {
+        let is_fatal = level == AlertLevel::Fatal;
         self.write_packets(vec![Packet {
             record: RecordLayer::new(
                 PROTOCOL_VERSION1_2,
@@ -286,6 +330,10 @@ impl DTLSConn {
             should_encrypt: self.is_handshake_completed(),
             reset_local_sequence_number: false,
         }]);
+        if is_fatal {
+            // Sending a fatal alert ends the association (RFC 5246 7.2.2).
+            self.fail();
+        }
     }
 
     pub(crate) fn write_packets(&mut self, pkts: Vec<Packet>) {
@@ -501,6 +549,10 @@ impl DTLSConn {
     ///
     /// Fails if the record is malformed or fails authentication.
     pub fn read(&mut self, buf: &[u8]) -> Result<()> {
+        // A failed association is finished: nothing more is processed on it.
+        if self.failed {
+            return Err(Error::ErrConnClosed);
+        }
         // Per RFC 6347: buffer future-epoch packets only until Finished is received
         // (i.e. until handshake completes). After that, discard them.
         let enqueue = !self.is_handshake_completed();
@@ -524,6 +576,10 @@ impl DTLSConn {
                 if alert.alert_description == AlertDescription::CloseNotify {
                     // A close_notify is only queued here as the reply to the peer's own.
                     self.closed_by_peer = true;
+                }
+                if alert.alert_level == AlertLevel::Fatal {
+                    // A fatal alert ends the association (RFC 5246 7.2.2).
+                    self.fail();
                 }
                 if alert.alert_level == AlertLevel::Fatal
                     || alert.alert_description == AlertDescription::CloseNotify
@@ -579,6 +635,10 @@ impl DTLSConn {
                     if alert.alert_description == AlertDescription::CloseNotify {
                         // A close_notify is only queued here as the reply to the peer's own.
                         self.closed_by_peer = true;
+                    }
+                    if alert.alert_level == AlertLevel::Fatal {
+                        // A fatal alert ends the association (RFC 5246 7.2.2).
+                        self.fail();
                     }
                     if alert.alert_level == AlertLevel::Fatal
                         || alert.alert_description == AlertDescription::CloseNotify
@@ -789,7 +849,13 @@ impl DTLSConn {
             }
         };
         if is_handshake {
-            self.replay_detector[h.epoch as usize].accept();
+            // An epoch-0 record is not authenticated, so it moves the replay window only once it
+            // has delivered something: a new handshake message, or a repeat of one already
+            // received. Otherwise one forged record with a far-ahead sequence number, which
+            // anyone spoofing the peer's address can send before the handshake, would push every
+            // genuine record out of the window and stall the handshake. Later epochs are
+            // authenticated by the decryption above.
+            let mut delivered = h.epoch != 0;
             while let Ok((out, epoch)) = self.fragment_buffer.pop() {
                 //log::debug!("Extension Debug: out.len()={}", out.len());
                 let mut reader = out.as_slice();
@@ -810,11 +876,15 @@ impl DTLSConn {
                             srv_cli_str(self.is_client),
                             err
                         );
+                        // A message that does not parse is forged or corrupt. Its sequence number
+                        // is handed out again, so the genuine message, when the peer retransmits
+                        // it, is still taken instead of being dropped as already seen.
+                        self.fragment_buffer.unpop();
                         continue;
                     }
                 };
 
-                self.cache.push(
+                delivered |= self.cache.push(
                     out,
                     epoch,
                     raw_handshake.handshake_header.message_sequence,
@@ -823,12 +893,45 @@ impl DTLSConn {
                 );
             }
 
+            // RFC 6347 4.2.4: a message the peer sends again after it has been processed (its
+            // sequence number already handed out and parsed) means the flight we answered it
+            // with was lost, so that flight is retransmitted at once rather than when our timer
+            // fires. Only a byte-for-byte repeat of the cached message counts.
+            while let Some((out, epoch, message_sequence)) = self.fragment_buffer.pop_stale() {
+                if isize::from(message_sequence) < self.state.handshake_recv_sequence
+                    && self.cache.contains_message(&out, epoch, !self.is_client)
+                {
+                    debug!(
+                        "{}: peer repeated handshake message (epoch: {}, seq: {})",
+                        srv_cli_str(self.is_client),
+                        epoch,
+                        message_sequence
+                    );
+                    self.peer_repeated_flight = true;
+                    delivered = true;
+                }
+            }
+
+            if delivered {
+                self.replay_detector[h.epoch as usize].accept();
+            }
             return (true, None, None);
         }
 
         let mut reader = pkt.as_slice();
         let r = match RecordLayer::unmarshal(&mut reader) {
             Ok(r) => r,
+            Err(err) if h.epoch == 0 => {
+                // An undecodable plaintext record is silently discarded [RFC6347 Section-4.1.2.7]:
+                // anyone spoofing the peer's address can send one, and answering it with a fatal
+                // alert would end the handshake.
+                debug!(
+                    "{}: discarded undecodable epoch-0 record: {}",
+                    srv_cli_str(self.is_client),
+                    err
+                );
+                return (false, None, None);
+            }
             Err(err) => {
                 return (
                     false,
@@ -842,21 +945,33 @@ impl DTLSConn {
         };
 
         match r.content {
-            Content::Alert(mut a) => {
+            Content::Alert(a) => {
                 debug!("{}: <- {}", srv_cli_str(self.is_client), a);
+                // An alert is never answered with the same alert. Echoing it let two endpoints
+                // bounce one alert between them for as long as both associations lived. The one
+                // reply is the close_notify that answers the peer's own [RFC5246 Section 7.2.1].
                 if a.alert_description == AlertDescription::CloseNotify {
-                    // Respond with a close_notify [RFC5246 Section 7.2.1]
-                    a = Alert {
-                        alert_level: AlertLevel::Warning,
-                        alert_description: AlertDescription::CloseNotify,
-                    };
+                    self.replay_detector[h.epoch as usize].accept();
+                    return (
+                        false,
+                        Some(Alert {
+                            alert_level: AlertLevel::Warning,
+                            alert_description: AlertDescription::CloseNotify,
+                        }),
+                        Some(Error::Other(format!("Error of Alert {a}"))),
+                    );
                 }
-                self.replay_detector[h.epoch as usize].accept();
-                return (
-                    false,
-                    Some(a),
-                    Some(Error::Other(format!("Error of Alert {a}"))),
-                );
+                if a.alert_level == AlertLevel::Fatal {
+                    // A fatal alert ends the association at once, unanswered [RFC5246 Section
+                    // 7.2.2].
+                    self.replay_detector[h.epoch as usize].accept();
+                    self.fail();
+                    return (false, None, Some(Error::ErrAlertFatalOrClose));
+                }
+                // A warning (other than close_notify) asks nothing of us: it is not answered and
+                // changes nothing, not even the replay window, so a forged one with a far-ahead
+                // sequence number cannot push the peer's genuine records out of it.
+                return (false, None, None);
             }
             Content::ChangeCipherSpec(_) => {
                 let invalid_cipher_suite = {

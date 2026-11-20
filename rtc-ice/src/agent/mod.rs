@@ -9,6 +9,12 @@
 //! controlled agent accepts that choice. Which side controls is decided by which offered, and the
 //! two must not agree — see [`Credentials`] and [`Agent::set_role`].
 #[cfg(test)]
+mod agent_consent_test;
+#[cfg(test)]
+mod agent_nat_1to1_test;
+#[cfg(test)]
+mod agent_ported_test;
+#[cfg(test)]
 mod agent_test;
 
 /// Configuration for a new [`Agent`]: servers, timeouts and role.
@@ -18,6 +24,10 @@ mod agent_proto;
 pub mod agent_selector;
 /// Snapshot statistics for an agent's candidates and pairs.
 pub mod agent_stats;
+/// Where connectivity checks may be sent (RFC 8445 §5.1.1.1 address rules).
+pub mod remote_policy;
+#[cfg(test)]
+mod remote_policy_test;
 
 use agent_config::*;
 use bytes::BytesMut;
@@ -37,13 +47,19 @@ use stun::textattrs::*;
 use stun::xoraddr::*;
 
 use crate::candidate::candidate_peer_reflexive::CandidatePeerReflexiveConfig;
+use crate::candidate::candidate_server_reflexive::CandidateServerReflexiveConfig;
 use crate::candidate::{candidate_pair::*, *};
-use crate::mdns::{MulticastDnsMode, create_multicast_dns, generate_multicast_dns_name};
+use crate::external_ip_mapper::ExternalIpMapper;
+use crate::mdns::{
+    MulticastDnsMode, create_multicast_dns, generate_multicast_dns_name, is_ice_mdns_name,
+    is_valid_local_mdns_name,
+};
 use crate::network_type::NetworkType;
 use crate::rand::*;
 use crate::state::*;
 use crate::tcp_type::TcpType;
 use crate::url::*;
+use remote_policy::RemotePolicy;
 use shared::error::*;
 use shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 
@@ -219,6 +235,12 @@ pub struct Agent {
     pub(crate) network_types: Vec<NetworkType>,
     pub(crate) urls: Vec<Url>,
 
+    /// Which remote addresses checks may be sent to. See [`remote_policy`].
+    pub(crate) remote_policy: RemotePolicy,
+
+    /// The 1:1 NAT mapping applied to the host candidates the application adds.
+    pub(crate) ext_ip_mapper: Option<ExternalIpMapper>,
+
     pub(crate) write_outs: VecDeque<TaggedBytesMut>,
     pub(crate) event_outs: VecDeque<TaggedEvent>,
 }
@@ -255,7 +277,7 @@ impl Agent {
             mdns_local_name = generate_multicast_dns_name();
         }
 
-        if !mdns_local_name.ends_with(".local") || mdns_local_name.split('.').count() != 2 {
+        if !is_valid_local_mdns_name(&mdns_local_name) {
             return Err(Error::ErrInvalidMulticastDnshostName);
         }
 
@@ -291,6 +313,8 @@ impl Agent {
         {
             return Err(Error::ErrUselessUrlsProvided);
         }
+
+        let ext_ip_mapper = config.init_ext_ip_mapping(mdns_mode, &candidate_types)?;
 
         let mut agent = Self {
             crypto_provider,
@@ -402,6 +426,13 @@ impl Agent {
             network_types: config.network_types.clone(),
             urls: config.urls.clone(),
 
+            remote_policy: RemotePolicy {
+                allow_loopback: config.allow_loopback_remote_candidates,
+                allow_link_local: config.allow_link_local_remote_candidates,
+                filter: config.remote_address_filter.clone(),
+            },
+            ext_ip_mapper,
+
             write_outs: VecDeque::new(),
             event_outs: VecDeque::new(),
         };
@@ -466,6 +497,10 @@ impl Agent {
             }
         }
 
+        // 1:1 NAT (`nat_1to1_ips`): the host candidate is advertised on, or joined by a
+        // server-reflexive candidate on, the external address of its local one.
+        let nat_srflx = self.apply_nat_1to1(&mut c);
+
         for cand in &self.local_candidates {
             if cand.equal(&c) {
                 return Ok(false);
@@ -485,7 +520,66 @@ impl Agent {
 
         self.request_connectivity_check();
 
+        if let Some(srflx) = nat_srflx {
+            self.add_local_candidate(srflx)?;
+        }
+
         Ok(true)
+    }
+
+    /// Applies the 1:1 NAT mapping to a host candidate the application adds. With a `Host`
+    /// mapping the candidate's advertised address becomes the external one (its base, the
+    /// socket it is bound to, is kept, as an mDNS name keeps it); with a `ServerReflexive`
+    /// mapping the server-reflexive candidate to add beside it is returned.
+    fn apply_nat_1to1(&self, c: &mut Candidate) -> Option<Candidate> {
+        let mapper = self.ext_ip_mapper.as_ref()?;
+        // An application-added `.local` candidate has no resolved address to map.
+        if c.candidate_type() != CandidateType::Host || c.addr().ip().is_unspecified() {
+            return None;
+        }
+        let local_ip = c.addr().ip();
+        let external_ip = match mapper.find_external(local_ip) {
+            Ok(ip) => ip,
+            Err(_) => {
+                warn!(
+                    "[{}]: 1:1 NAT mapping is enabled but no external IP is found for {}",
+                    self.get_name(),
+                    local_ip
+                );
+                return None;
+            }
+        };
+        if mapper.candidate_type == CandidateType::Host {
+            c.address = external_ip.to_string();
+            return None;
+        }
+        let mut srflx = match (CandidateServerReflexiveConfig {
+            base_config: CandidateConfig {
+                network: c.network.clone(),
+                address: external_ip.to_string(),
+                port: c.port(),
+                component: c.component(),
+                ..CandidateConfig::default()
+            },
+            rel_addr: local_ip.to_string(),
+            rel_port: c.port(),
+            url: None,
+        })
+        .new_candidate_server_reflexive()
+        {
+            Ok(srflx) => srflx,
+            Err(err) => {
+                warn!(
+                    "[{}]: cannot make the 1:1 NAT server-reflexive candidate for {}: {}",
+                    self.get_name(),
+                    c,
+                    err
+                );
+                return None;
+            }
+        };
+        srflx.tcp_type = c.tcp_type();
+        Some(srflx)
     }
 
     /// The name a host candidate on `ip` is published under in `QueryAndGather` mode.
@@ -571,6 +665,15 @@ impl Agent {
                 return Err(Error::ErrAddressParseFailed);
             }
 
+            if !is_ice_mdns_name(c.address()) {
+                warn!(
+                    "[{}]: ignoring mDNS candidate {}: not a <uuid>.local name",
+                    self.get_name(),
+                    c.address()
+                );
+                return Ok(false);
+            }
+
             if self.mdns_queries.len() >= MAX_PENDING_MDNS_QUERIES {
                 warn!(
                     "[{}]: ignoring mDNS candidate {}: {} queries already pending (the cap)",
@@ -603,6 +706,17 @@ impl Agent {
                     self.get_name(),
                     c.address(),
                     MAX_REMOTE_CANDIDATES
+                );
+                continue;
+            }
+            // RFC 8445 §5.1.1.1: a candidate is a unicast transport address. One that can't be
+            // a destination, or that the application's filter refuses, is never held or paired.
+            if !self.remote_policy.allows_candidate(c.addr()) {
+                warn!(
+                    "[{}]: ignoring remote candidate {}: its address {} is not an allowed destination",
+                    self.get_name(),
+                    c.address(),
+                    c.addr()
                 );
                 continue;
             }
@@ -839,6 +953,11 @@ impl Agent {
     /// pair, and restarts the agent's timers. With nothing staged, the current credentials are
     /// kept and only the session is restarted.
     pub fn apply_restart(&mut self, now: Instant, keep_local_candidates: bool) -> Result<()> {
+        // A closed agent has shut its mDNS connection and dropped its candidates for good; a
+        // restart must not bring it back to `Checking`.
+        if self.connection_state == ConnectionState::Closed {
+            return Err(Error::ErrClosed);
+        }
         if let Some(credentials) = self.ufrag_pwd.pending_local_credentials.take() {
             self.ufrag_pwd.local_credentials = credentials;
         }
@@ -1042,6 +1161,20 @@ impl Agent {
     }
 
     pub(crate) fn add_pair(&mut self, local_index: usize, remote_index: usize) {
+        // Every check goes out on a pair, so this is where the destination policy holds: a
+        // loopback or link-local remote address is reached only from a local candidate in the
+        // same scope (unless the configuration allows it). See `remote_policy`.
+        let local_base = self.local_candidates[local_index].base_addr();
+        let remote_addr = self.remote_candidates[remote_index].addr();
+        if !self.remote_policy.allows_pair(local_base, remote_addr) {
+            debug!(
+                "[{}]: not pairing local {} with remote {}: destination not allowed from this local candidate",
+                self.get_name(),
+                local_base,
+                remote_addr
+            );
+            return;
+        }
         let p = CandidatePair::new(
             local_index,
             remote_index,
@@ -1074,11 +1207,19 @@ impl Agent {
                 |&pair_index| {
                     let remote_index = self.candidate_pairs[pair_index].remote_index;
 
-                    // Consent (RFC 7675) is refreshed only by authenticated STUN: non-STUN
-                    // datagrams and unauthenticated indications from the address do not count.
-                    let last_received = self.remote_candidates[remote_index]
-                        .last_authenticated()
-                        .unwrap_or(self.start_time);
+                    // Consent (RFC 7675 §5.1) is refreshed only by an authenticated success
+                    // response to one of our own checks: not by non-STUN datagrams, not by
+                    // unauthenticated indications, and not by the peer's own requests, which
+                    // say the peer is there but not that it still wants our traffic. A lite
+                    // agent sends no checks (RFC 8445 §2.5), so for it an authenticated request
+                    // is the only sign of life.
+                    let remote = &self.remote_candidates[remote_index];
+                    let last_received = if self.lite {
+                        remote.last_authenticated()
+                    } else {
+                        remote.last_consent()
+                    }
+                    .unwrap_or(self.start_time);
                     let disconnected_time = now.saturating_duration_since(last_received);
                     (true, disconnected_time)
                 },
@@ -1553,6 +1694,11 @@ impl Agent {
             }
 
             if let Some(remote_index) = &remote_candidate_index {
+                // Consent is granted by a response to a check we sent, matched by transaction
+                // id (RFC 7675 §5.1); decided before the handler consumes the pending entry.
+                if self.is_pending_binding_request(m.transaction_id, remote_addr) {
+                    self.remote_candidates[*remote_index].last_consent = Some(now);
+                }
                 self.handle_success_response(now, m, local_index, *remote_index, remote_addr);
             } else {
                 warn!(
@@ -1670,6 +1816,13 @@ impl Agent {
         }
 
         Ok(())
+    }
+
+    /// Whether `id` names a Binding request we sent to `destination` and have not had answered.
+    fn is_pending_binding_request(&self, id: TransactionId, destination: SocketAddr) -> bool {
+        self.pending_binding_requests
+            .iter()
+            .any(|r| r.transaction_id == id && r.destination == destination)
     }
 
     // Processes non STUN traffic from a remote candidate, and returns true if it is an actual

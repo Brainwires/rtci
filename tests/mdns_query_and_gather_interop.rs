@@ -51,7 +51,9 @@ mod common;
 
 const DEFAULT_TIMEOUT_DURATION: Duration = Duration::from_secs(30);
 const MDNS_LOCAL_NAME: &str = "webrtc-rs-test-mdns.local";
-const WEBRTC_MDNS_LOCAL_NAME: &str = "webrtc-peer-mdns.local";
+// The receiving agent resolves only `<uuid>.local` names (draft-ietf-mmusic-mdns-ice-candidates),
+// the form browsers publish.
+const WEBRTC_MDNS_LOCAL_NAME: &str = "3f1c2b7e-9a4d-4e6f-8b21-5c0d7a9e1f34.local";
 
 /// Helper function to create a webrtc peer connection with QueryAndGather mDNS mode
 async fn create_webrtc_peer() -> Result<Arc<WebrtcPeerConnection>> {

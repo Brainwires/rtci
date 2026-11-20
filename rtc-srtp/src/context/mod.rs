@@ -6,6 +6,8 @@ mod cryptex_test;
 mod srtcp_test;
 #[cfg(test)]
 mod srtp_test;
+#[cfg(test)]
+mod srtp_upstream_test;
 
 use std::collections::HashMap;
 use std::hash::{BuildHasher, RandomState};

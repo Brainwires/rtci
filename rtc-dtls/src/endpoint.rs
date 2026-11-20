@@ -7,6 +7,9 @@
 //! [`EndpointEvent::HandshakeComplete`](crate::endpoint::EndpointEvent::HandshakeComplete) is the signal an application waits for: from that point
 //! application data can be written, and the SRTP keying material can be exported from the
 //! completed handshake.
+#[cfg(test)]
+mod endpoint_test;
+
 use crate::conn::DTLSConn;
 use shared::error::{Error, Result};
 use shared::{EcnCodepoint, TransportContext};
@@ -34,6 +37,12 @@ pub enum EndpointEvent {
     PeerClosed,
 }
 
+/// Most server associations kept for source addresses that have not yet echoed a cookie
+/// (RFC 6347 4.2.1). Until a client does, its address is only a claim anyone can make, so past
+/// this the oldest such association makes way for the new one: spoofed addresses cannot hold
+/// memory without limit, and a verified association is never displaced.
+pub(crate) const MAX_UNVERIFIED_ASSOCIATIONS: usize = 256;
+
 /// The main entry point to the library
 ///
 /// This object performs no I/O whatsoever. Instead, it generates a stream of packets to send via
@@ -45,6 +54,9 @@ pub struct Endpoint {
     transmits: VecDeque<TransportMessage<BytesMut>>,
     connections: HashMap<SocketAddr, DTLSConn>,
     server_config: Option<Arc<HandshakeConfig>>,
+    /// Server associations whose client has not yet echoed a cookie, oldest first. Entries for
+    /// associations since verified or removed are pruned when room is made.
+    unverified: VecDeque<SocketAddr>,
 }
 
 impl Endpoint {
@@ -62,6 +74,7 @@ impl Endpoint {
             transmits: VecDeque::new(),
             connections: HashMap::new(),
             server_config,
+            unverified: VecDeque::new(),
         }
     }
 
@@ -88,6 +101,16 @@ impl Endpoint {
         } else {
             None
         }
+    }
+
+    /// Whether the association with `remote` has failed: a fatal alert was sent or received, or
+    /// its handshake gave up (a handshake error, or the retransmissions ran out). An ordinary
+    /// retransmission or a discarded record never fails it. `false` when there is no such
+    /// association.
+    pub fn is_connection_failed(&self, remote: &SocketAddr) -> bool {
+        self.connections
+            .get(remote)
+            .is_some_and(|conn| conn.is_failed())
     }
 
     /// The connection with `remote`, for the fuzz harness to reach its record state.
@@ -230,14 +253,19 @@ impl Endpoint {
         ecn: Option<EcnCodepoint>,
         data: BytesMut,
     ) -> Result<Vec<EndpointEvent>> {
-        if let Vacant(e) = self.connections.entry(remote) {
-            if let Some(server_config) = &self.server_config {
-                let handshake_config = server_config.clone();
-                let conn = DTLSConn::new(handshake_config, false, None);
-                e.insert(conn);
-            } else {
+        // A failed association is finished. As a server, a later datagram from that address
+        // starts afresh rather than meeting the dead association forever.
+        if self.server_config.is_some() && self.is_connection_failed(&remote) {
+            self.connections.remove(&remote);
+        }
+        if !self.connections.contains_key(&remote) {
+            let Some(handshake_config) = self.server_config.clone() else {
                 return Err(Error::NoServerConfig);
-            }
+            };
+            self.make_room_for_unverified();
+            self.connections
+                .insert(remote, DTLSConn::new(handshake_config, false, None));
+            self.unverified.push_back(remote);
         }
 
         // Handle packet on existing association, if any
@@ -273,6 +301,22 @@ impl Endpoint {
         }
 
         Ok(messages)
+    }
+
+    /// Before a new server association: drops the oldest association still waiting for its
+    /// client to echo the cookie while [`MAX_UNVERIFIED_ASSOCIATIONS`] are.
+    fn make_room_for_unverified(&mut self) {
+        let connections = &self.connections;
+        self.unverified.retain(|addr| {
+            connections
+                .get(addr)
+                .is_some_and(|conn| !conn.is_address_verified())
+        });
+        while self.unverified.len() >= MAX_UNVERIFIED_ASSOCIATIONS {
+            if let Some(oldest) = self.unverified.pop_front() {
+                self.connections.remove(&oldest);
+            }
+        }
     }
 
     /// Queues application data for `remote`.
