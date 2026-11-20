@@ -8,7 +8,7 @@ mod jsep_common;
 
 use jsep_common::{TestResult, default_peer, exchange, media_sections, video_track};
 use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::rtp_transceiver::RTCRtpTransceiverDirection;
+use rtc::rtp_transceiver::{RTCRtpTransceiverDirection, RTCRtpTransceiverId};
 use sansio::Protocol;
 
 fn direction_line(sdp: &str) -> String {
@@ -41,7 +41,7 @@ fn every_offered_direction_is_answered_with_its_complement() -> TestResult {
         (RTCRtpTransceiverDirection::Sendrecv, "a=sendrecv"),
     ] {
         offerer
-            .rtp_transceiver(offered.0)
+            .rtp_transceiver(RTCRtpTransceiverId::from(offered))
             .expect("transceiver")
             .set_direction(offer_dir);
         let (offer, answer) = exchange(&mut offerer, &mut answerer)?;
@@ -53,7 +53,7 @@ fn every_offered_direction_is_answered_with_its_complement() -> TestResult {
         // The answerer's own [[Direction]] is what its application set.
         assert_eq!(
             answerer
-                .rtp_transceiver(answering.0)
+                .rtp_transceiver(RTCRtpTransceiverId::from(answering))
                 .expect("transceiver")
                 .direction(),
             RTCRtpTransceiverDirection::Sendrecv
@@ -61,7 +61,7 @@ fn every_offered_direction_is_answered_with_its_complement() -> TestResult {
         // The offerer's [[CurrentDirection]] is the direction it offered.
         assert_eq!(
             offerer
-                .rtp_transceiver(offered.0)
+                .rtp_transceiver(RTCRtpTransceiverId::from(offered))
                 .expect("transceiver")
                 .current_direction(),
             offer_dir
@@ -83,7 +83,7 @@ fn a_one_way_answer_does_not_ask_for_renegotiation() -> TestResult {
     count_negotiation_needed(&mut answerer);
 
     offerer
-        .rtp_transceiver(offered.0)
+        .rtp_transceiver(RTCRtpTransceiverId::from(offered))
         .expect("transceiver")
         .set_direction(RTCRtpTransceiverDirection::Sendonly);
     let (_, answer) = exchange(&mut offerer, &mut answerer)?;
