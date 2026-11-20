@@ -1,6 +1,8 @@
 //! A sender whose encodings name no codec (W3C `addTransceiver` with `sendEncodings` that leave
 //! `codec` unset, so negotiation picks it) is a sender like any other: its stream is bound to
-//! the interceptors (sender reports, the NACK responder).
+//! the interceptors (sender reports, the NACK responder), and its outbound stream references
+//! the codec it is sent with (so the remote-inbound `jitter`, which needs that codec's clock
+//! rate, is reported).
 //!
 //! Two `rtc` peers on a simulated network, virtual time, no sockets.
 
@@ -333,7 +335,8 @@ impl World {
 }
 
 /// The sender's stream is bound: sender reports reach the receiver (its remote-outbound stats),
-/// and the receiver's reports answer them (a round-trip time from the report's LSR / DLSR).
+/// and the receiver's reports come back to a stream that knows its codec (remote-inbound
+/// `jitter` and a round-trip time from the report's LSR / DLSR).
 #[test]
 fn an_encoding_without_a_codec_sends_reports_and_has_stats() -> Result<()> {
     let (mut world, sender) = World::connected()?;
@@ -367,10 +370,26 @@ fn an_encoding_without_a_codec_sends_reports_and_has_stats() -> Result<()> {
         })
         .expect("the sender got receiver reports for the stream (remote-inbound)");
     assert!(
+        remote_inbound.received_rtp_stream_stats.jitter.is_some(),
+        "the outbound stream knows its codec's clock rate, so jitter is reported: {remote_inbound:?}"
+    );
+    assert!(
         remote_inbound.round_trip_time_measurements > 0,
         "the receiver reports answered sender reports (LSR / DLSR), so the RTT is measured: \
          {remote_inbound:?}"
     );
 
+    let outbound = sender_report
+        .outbound_rtp_streams()
+        .find(|s| s.sent_rtp_stream_stats.rtp_stream_stats.ssrc == ssrc)
+        .expect("an outbound-rtp for the stream");
+    assert!(
+        !outbound
+            .sent_rtp_stream_stats
+            .rtp_stream_stats
+            .codec_id
+            .is_empty(),
+        "the outbound stream references the codec it is sent with: {outbound:?}"
+    );
     Ok(())
 }
