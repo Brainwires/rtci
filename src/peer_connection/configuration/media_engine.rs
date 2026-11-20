@@ -78,6 +78,8 @@
 //! ```
 
 #[cfg(test)]
+mod h264_high_profile_test;
+#[cfg(test)]
 mod media_engine_test;
 #[cfg(test)]
 mod multi_codec_test;
@@ -543,6 +545,58 @@ impl MediaEngine {
                 payload_type: 123,
             },
             rtx_codec(124, 123),
+            // H.264 High Profile, Level 4.0 (720p60 / 1080p30), as webrtc-rs 0.17 registers it.
+            RTCRtpCodecParameters {
+                rtp_codec: RTCRtpCodec {
+                    mime_type: MIME_TYPE_H264.to_owned(),
+                    clock_rate: 90000,
+                    channels: 0,
+                    sdp_fmtp_line:
+                        "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640028"
+                            .to_owned(),
+                    rtcp_feedback: video_rtcp_feedback.clone(),
+                },
+                payload_type: 118,
+            },
+            // H.264 High Profile, Level 4.1 (1080p60), as webrtc-rs 0.17 registers it.
+            RTCRtpCodecParameters {
+                rtp_codec: RTCRtpCodec {
+                    mime_type: MIME_TYPE_H264.to_owned(),
+                    clock_rate: 90000,
+                    channels: 0,
+                    sdp_fmtp_line:
+                        "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640029"
+                            .to_owned(),
+                    rtcp_feedback: video_rtcp_feedback.clone(),
+                },
+                payload_type: 119,
+            },
+            // H.264 High Profile, Level 4.2 (1080p64), as webrtc-rs 0.17 registers it.
+            RTCRtpCodecParameters {
+                rtp_codec: RTCRtpCodec {
+                    mime_type: MIME_TYPE_H264.to_owned(),
+                    clock_rate: 90000,
+                    channels: 0,
+                    sdp_fmtp_line:
+                        "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=64002a"
+                            .to_owned(),
+                    rtcp_feedback: video_rtcp_feedback.clone(),
+                },
+                payload_type: 120,
+            },
+            // H.264 High Profile, Level 5.1 (4K30), as webrtc-rs 0.17 registers it.
+            RTCRtpCodecParameters {
+                rtp_codec: RTCRtpCodec {
+                    mime_type: MIME_TYPE_H264.to_owned(),
+                    clock_rate: 90000,
+                    channels: 0,
+                    sdp_fmtp_line:
+                        "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640033"
+                            .to_owned(),
+                    rtcp_feedback: video_rtcp_feedback.clone(),
+                },
+                payload_type: 121,
+            },
             RTCRtpCodecParameters {
                 rtp_codec: RTCRtpCodec {
                     mime_type: MIME_TYPE_AV1.to_owned(),
