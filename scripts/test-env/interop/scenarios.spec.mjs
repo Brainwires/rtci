@@ -439,6 +439,7 @@ test("simulcast with RTX: every layer is repaired under netem", async ({ page })
         if (x.type === "outbound-rtp" && x.kind === "video" && x.rid) {
           sent[x.rid] = {
             packets: x.packetsSent || 0,
+            width: x.frameWidth,
             retransmitted: x.retransmittedPacketsSent,
             nacks: x.nackCount,
             limit: x.qualityLimitationReason,
@@ -463,6 +464,13 @@ test("simulcast with RTX: every layer is repaired under netem", async ({ page })
     r.accepted.length < 3 || r.offeredRids.length < 3,
     "this browser does not send three simulcast encodings",
     `getParameters().encodings ${JSON.stringify(r.accepted)}, offer a=rid ${JSON.stringify(r.offeredRids)}`,
+  );
+  naBrowser(
+    r.sent.q?.width > 1280 / 2,
+    `the browser encodes layer q at ${r.sent.q?.width} px wide, not a quarter of the 1280 px input: ` +
+      "its encoder does not do simulcast (one stream from the full frame, on the first encoding)",
+    `outbound-rtp.frameWidth of rid "q" against its scaleResolutionDownBy 4 (webrtc-pc 5.2; ` +
+      `W3C webrtc-stats 7.3): ${JSON.stringify(r.sent)}`,
   );
   const quiet = ["q", "h", "f"].filter((x) => (r.sent[x]?.packets || 0) <= 20);
   naEnv(

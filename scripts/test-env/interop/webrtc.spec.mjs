@@ -332,6 +332,13 @@ test("simulcast: three RIDs reach Rust", async ({ page }) => {
     `the browser's own offer declares ${r.offeredRids.length} send RIDs`,
     `its offer's a=rid lines (RFC 8853 section 5): ${JSON.stringify(r.offeredRids)}`,
   );
+  naBrowser(
+    r.sent.q?.width > 1280 / 2,
+    `the browser encodes layer q at ${r.sent.q?.width} px wide, not a quarter of the 1280 px input: ` +
+      "its encoder does not do simulcast (one stream from the full frame, on the first encoding)",
+    `outbound-rtp.frameWidth of rid "q" against its scaleResolutionDownBy 4 (webrtc-pc 5.2; ` +
+      `W3C webrtc-stats 7.3): ${JSON.stringify(r.sent)}`,
+  );
   const quiet = ["q", "h", "f"].filter((x) => (r.sent[x]?.packets || 0) <= 20);
   const cpuLimited = Object.values(r.sent).some((v) => v.limit === "cpu");
   naEnv(
