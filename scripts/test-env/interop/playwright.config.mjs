@@ -5,11 +5,13 @@
 import { defineConfig } from "@playwright/test";
 
 // Firefox's media decoder log (PlatformDecoderModule / MediaDataDecoder: why a decoder refuses
-// a frame), one file per process, beside the other artifacts.
+// a frame) and libwebrtc's warnings (webrtc_trace: the receiver's frame reference finder drops a
+// frame it cannot place, e.g. a VP9 key frame without a usable scalability structure, with a
+// warning), one file per process, beside the other artifacts.
 const ARTIFACTS = process.env.RTC_TESTENV_ARTIFACTS_DIR || "/artifacts";
 const FIREFOX_ENV = {
   ...process.env,
-  MOZ_LOG: process.env.RTC_INTEROP_MOZ_LOG || "PlatformDecoderModule:5,MediaDataDecoder:5",
+  MOZ_LOG: process.env.RTC_INTEROP_MOZ_LOG || "PlatformDecoderModule:5,MediaDataDecoder:5,webrtc_trace:3",
   MOZ_LOG_FILE: `${ARTIFACTS}/firefox-moz.log`,
 };
 
