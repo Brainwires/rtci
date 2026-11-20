@@ -1982,6 +1982,10 @@ impl Association {
     }
 
     fn on_cumulative_tsn_ack_point_advanced(&mut self, total_bytes_acked: i64, now: Instant) {
+        // Every addition below saturates: cwnd doubles per round trip in slow start and is
+        // bounded by nothing else, so after about 2 GiB acknowledged a plain `+=` wrapped it
+        // to a tiny window (and panicked with overflow checks on).
+        let total_bytes_acked = u32::try_from(total_bytes_acked.max(0)).unwrap_or(u32::MAX);
         // RFC 4096, sec 6.3.2.  Retransmission Timer Rules
         //   R2)  Whenever all outstanding data sent to an address have been
         //        acknowledged, turn off the T3-rtx timer of that address.
@@ -2012,7 +2016,9 @@ impl Association {
             //      outstanding DATA chunk(s) acknowledged, and 2) the destination's
             //      path MTU.
             if !self.in_fast_recovery && !self.pending_queue.is_empty() {
-                self.cwnd += std::cmp::min(total_bytes_acked as u32, self.cwnd); // TCP way
+                self.cwnd = self
+                    .cwnd
+                    .saturating_add(std::cmp::min(total_bytes_acked, self.cwnd)); // TCP way
                 // self.cwnd += min32(uint32(total_bytes_acked), self.mtu) // SCTP way (slow)
                 trace!(
                     "[{}] updated cwnd={} ssthresh={} acked={} (SS)",
@@ -2036,7 +2042,7 @@ impl Association {
             //      partial_bytes_acked by the total number of bytes of all new chunks
             //      acknowledged in that SACK including chunks acknowledged by the new
             //      Cumulative TSN Ack and by Gap Ack Blocks.
-            self.partial_bytes_acked += total_bytes_acked as u32;
+            self.partial_bytes_acked = self.partial_bytes_acked.saturating_add(total_bytes_acked);
 
             //   o  When partial_bytes_acked is equal to or greater than cwnd and
             //      before the arrival of the SACK the sender had cwnd or more bytes
@@ -2045,7 +2051,7 @@ impl Association {
             //      reset partial_bytes_acked to (partial_bytes_acked - cwnd).
             if self.partial_bytes_acked >= self.cwnd && !self.pending_queue.is_empty() {
                 self.partial_bytes_acked -= self.cwnd;
-                self.cwnd += self.mtu;
+                self.cwnd = self.cwnd.saturating_add(self.mtu);
                 trace!(
                     "[{}] updated cwnd={} ssthresh={} acked={} (CA)",
                     self.side, self.cwnd, self.ssthresh, total_bytes_acked

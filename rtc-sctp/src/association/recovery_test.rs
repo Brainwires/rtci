@@ -86,3 +86,32 @@ fn fast_recovery_retransmits_only_the_reported_loss() -> Result<()> {
     }
     Ok(())
 }
+
+/// cwnd grows without another bound in slow start (ssthresh is the peer's window, up to
+/// u32::MAX), so its additions saturate instead of wrapping to a tiny window after about
+/// 2 GiB acknowledged (or panicking with overflow checks on).
+#[test]
+fn congestion_window_growth_saturates() -> Result<()> {
+    let now = Instant::now();
+    let mut a = ten_in_flight(now)?;
+    // Something still pending, so slow start and congestion avoidance may grow cwnd.
+    let ppi = PayloadProtocolIdentifier::Binary;
+    a.stream(1)?
+        .write_sctp(now, &Bytes::from(vec![0; 100]), ppi)?;
+    assert!(!a.pending_queue.is_empty());
+
+    // Slow start: cwnd <= ssthresh.
+    a.ssthresh = u32::MAX;
+    a.cwnd = u32::MAX - 10;
+    a.in_fast_recovery = false;
+    a.on_cumulative_tsn_ack_point_advanced(i64::from(u32::MAX), now);
+    assert_eq!(u32::MAX, a.cwnd);
+
+    // Congestion avoidance: cwnd > ssthresh.
+    a.ssthresh = 1;
+    a.cwnd = u32::MAX - 10;
+    a.partial_bytes_acked = u32::MAX - 10;
+    a.on_cumulative_tsn_ack_point_advanced(i64::MAX, now);
+    assert_eq!(u32::MAX, a.cwnd);
+    Ok(())
+}
