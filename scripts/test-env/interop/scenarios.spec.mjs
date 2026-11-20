@@ -168,7 +168,12 @@ test("Rust offers media, the browser answers and decodes it", async ({ page }) =
       const v = await Interop.inbound(s.pc, "video");
       return v && v.framesDecoded > 30 && v;
     }, 25000, "30 decoded frames").catch(async (e) => ({ error: String(e), last: await Interop.inbound(s.pc, "video") }));
-    const audio = await Interop.inbound(s.pc, "audio");
+    // Opus is 50 packets a second: 30 decoded video frames take about a second, so the audio
+    // has its own wait for 100 packets (the check below).
+    const audio = await Interop.until(async () => {
+      const a = await Interop.inbound(s.pc, "audio");
+      return a && a.packetsReceived > 100 && a;
+    }, 15000, "100 audio packets").catch(() => Interop.inbound(s.pc, "audio"));
     const kinds = Interop.mlines(s.pc.remoteDescription.sdp).map((m) => m.kind);
     s.close();
     return { video, audio, kinds, errors: s.errors };
