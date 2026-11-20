@@ -77,21 +77,14 @@ fn set_parameters_refuses_a_negative_max_framerate() -> TestResult {
 fn a_stopped_transceivers_sender_takes_no_parameters() -> TestResult {
     let mut pc = default_peer()?;
     let sender = pc.add_track(video_track("video", 0x0303_0005))?;
-    let params = pc
-        .rtp_sender(sender)
-        .expect("sender")
-        .get_parameters()
-        .clone();
+    assert!(pc.rtp_sender(sender).is_some());
     pc.rtp_transceiver(RTCRtpTransceiverId::from(sender))
         .expect("transceiver")
         .stop()?;
-    assert_eq!(
-        pc.rtp_sender(sender)
-            .expect("sender")
-            .set_parameters(params, None)
-            .unwrap_err(),
-        Error::InvalidStateError
-    );
+    // Stopping makes the transceiver inactive, and `rtp_sender` hands out a sender only while
+    // its transceiver sends, so no handle reaches set_parameters (which would also refuse a
+    // stopped transceiver with InvalidStateError, W3C webrtc 5.2 setParameters step 4).
+    assert!(pc.rtp_sender(sender).is_none());
     Ok(())
 }
 
