@@ -404,3 +404,56 @@ fn test_encrypt_refuses_a_used_packet_index() -> Result<()> {
     }
     Ok(())
 }
+
+/// One context keeps SRTP state for at most `MAX_SSRC_STATES` SSRCs: a further SSRC is
+/// refused (before decryption on the receiving side) and existing streams keep working.
+#[test]
+fn test_srtp_ssrc_states_are_capped() -> Result<()> {
+    let packet = |ssrc: u32, seq: u16| -> Result<Vec<u8>> {
+        let pkt = rtp::Packet {
+            header: rtp::Header {
+                version: 2,
+                sequence_number: seq,
+                ssrc,
+                ..Default::default()
+            },
+            payload: RTP_TEST_CASE_DECRYPTED.clone(),
+        };
+        Ok(pkt.marshal()?.to_vec())
+    };
+
+    let mut sender = build_test_context()?;
+    let mut receiver = build_replay_protected_test_context()?;
+    for ssrc in 0..MAX_SSRC_STATES as u32 {
+        let protected = sender.encrypt_rtp(&packet(ssrc, 1)?)?;
+        receiver.decrypt_rtp(&protected)?;
+    }
+    assert_eq!(sender.srtp_ssrc_states.len(), MAX_SSRC_STATES);
+    assert_eq!(receiver.srtp_ssrc_states.len(), MAX_SSRC_STATES);
+
+    let extra = MAX_SSRC_STATES as u32;
+    let err = sender
+        .encrypt_rtp(&packet(extra, 1)?)
+        .expect_err("the sender took one SSRC too many");
+    assert!(
+        matches!(err, Error::SrtpTooManySsrcs(s, _) if s == extra),
+        "{err:?}"
+    );
+
+    // A packet for a further SSRC, protected by another sender, is refused by the receiver.
+    let protected = build_test_context()?.encrypt_rtp(&packet(extra, 1)?)?;
+    let err = receiver
+        .decrypt_rtp(&protected)
+        .expect_err("the receiver took one SSRC too many");
+    assert!(
+        matches!(err, Error::SrtpTooManySsrcs(s, _) if s == extra),
+        "{err:?}"
+    );
+    assert_eq!(sender.srtp_ssrc_states.len(), MAX_SSRC_STATES);
+    assert_eq!(receiver.srtp_ssrc_states.len(), MAX_SSRC_STATES);
+
+    // Known SSRCs are unaffected.
+    let protected = sender.encrypt_rtp(&packet(7, 2)?)?;
+    assert_eq!(receiver.decrypt_rtp(&protected)?.to_vec(), packet(7, 2)?);
+    Ok(())
+}

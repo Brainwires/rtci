@@ -42,6 +42,8 @@ impl Context {
                 (roc, diff)
             }
             None => {
+                // Refuse a further SSRC before spending a decryption on it.
+                self.check_srtp_ssrc_capacity(header.ssrc)?;
                 let fresh = SrtpSsrcState {
                     ssrc: header.ssrc,
                     ..Default::default()
@@ -54,7 +56,7 @@ impl Context {
         let dst = self.cipher.decrypt_rtp(encrypted, header, roc)?;
         {
             let is_new = !self.srtp_ssrc_states.contains_key(&header.ssrc);
-            let state = self.get_srtp_ssrc_state(header.ssrc);
+            let state = self.get_srtp_ssrc_state(header.ssrc)?;
             if let Some(replay_detector) = &mut state.replay_detector {
                 // A new SSRC's detector has not seen this sequence number yet: check, then accept.
                 if !is_new || replay_detector.check(header.sequence_number as u64) {
@@ -91,7 +93,7 @@ impl Context {
         header: &rtp::Header,
     ) -> Result<BytesMut> {
         let (roc, diff) = {
-            let state = self.get_srtp_ssrc_state(header.ssrc);
+            let state = self.get_srtp_ssrc_state(header.ssrc)?;
             let (roc, diff, ovf) = state.next_rollover_count(header.sequence_number);
             if ovf {
                 // ... when 2^48 SRTP packets or 2^31 SRTCP packets have been secured with the same key
@@ -115,7 +117,7 @@ impl Context {
 
         let dst = self.cipher.encrypt_rtp(plaintext, header, roc)?;
 
-        let state = self.get_srtp_ssrc_state(header.ssrc);
+        let state = self.get_srtp_ssrc_state(header.ssrc)?;
         if let Some(sent) = state.sent_indexes.as_mut() {
             sent.accept();
         }
