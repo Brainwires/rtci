@@ -163,6 +163,8 @@ pub struct Association {
     state: AssociationState,
     handshake_completed: bool,
     max_message_size: u32,
+    /// The largest message accepted from the peer: what this side advertised (RFC 8841 6.1).
+    max_receive_message_size: u32,
     inflight_queue_length: usize,
     will_send_shutdown: bool,
     bytes_received: usize,
@@ -272,6 +274,7 @@ impl Default for Association {
             state: AssociationState::default(),
             handshake_completed: false,
             max_message_size: 0,
+            max_receive_message_size: 0,
             inflight_queue_length: 0,
             will_send_shutdown: false,
             bytes_received: 0,
@@ -402,6 +405,7 @@ impl Association {
             handshake_completed: false,
             max_receive_buffer_size: config.max_receive_buffer_size(),
             max_message_size: config.max_message_size(),
+            max_receive_message_size: config.max_receive_message_size(),
             my_max_num_outbound_streams: config.max_num_outbound_streams(),
             my_max_num_inbound_streams: config.max_num_inbound_streams(),
             max_payload_size,
@@ -1406,9 +1410,10 @@ impl Association {
                     // Either kind may take the receiver past `max_receive_buffer_size`, which
                     // is what lets a message larger than the buffer be reassembled at all. But
                     // the headroom this needs is one message, so neither kind is taken past
-                    // one `max_message_size` beyond the buffer.
+                    // one inbound message (the size this side advertised) beyond the buffer.
                     let within_headroom = self.bytes_in_reassembly_queues() + d.user_data.len()
-                        <= self.max_receive_buffer_size as usize + self.max_message_size as usize;
+                        <= self.max_receive_buffer_size as usize
+                            + self.max_receive_message_size as usize;
 
                     if (fills_gap || unblocks_reassembly) && within_headroom {
                         debug!(
