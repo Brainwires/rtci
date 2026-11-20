@@ -72,7 +72,9 @@ pub(crate) fn is_valid_local_mdns_name(name: &str) -> bool {
         && label.len() <= 63
         && !label.starts_with('-')
         && !label.ends_with('-')
-        && label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        && label
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
 pub(crate) fn create_multicast_dns(
