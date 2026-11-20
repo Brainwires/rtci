@@ -48,7 +48,7 @@ M=$RTC_TESTENV_MEDIA
 mkdir -p "$M"
 gst-launch-1.0 -q videotestsrc num-buffers=300 pattern=ball ! video/x-raw,width=640,height=480,framerate=30/1 \
   ! vp8enc deadline=1 keyframe-max-dist=60 target-bitrate=800000 ! avmux_ivf ! filesink location="$M/vp8.ivf" \
-  && gst-launch-1.0 -q videotestsrc num-buffers=300 pattern=smpte ! video/x-raw,width=320,height=240,framerate=30/1 \
+  && gst-launch-1.0 -q videotestsrc num-buffers=300 pattern=smpte ! video/x-raw,format=I420,width=320,height=240,framerate=30/1 \
   ! vp9enc deadline=1 cpu-used=8 keyframe-max-dist=60 target-bitrate=400000 ! avmux_ivf ! filesink location="$M/vp9.ivf" \
   && gst-launch-1.0 -q videotestsrc num-buffers=300 ! video/x-raw,width=640,height=480,framerate=30/1 \
   ! x264enc speed-preset=ultrafast bframes=0 key-int-max=60 ! video/x-h264,stream-format=byte-stream,profile=constrained-baseline \
