@@ -1,14 +1,10 @@
 name: test-env
 
 # The real-network test environment (scripts/test-env): NAT topologies, coturn, netem,
-# GStreamer media and Chromium / Firefox / WebKit interop. Our self-hosted Linux pool first
-# (its docker pool: the job's own rootless daemon), GitHub's ubuntu-latest only when that pool
-# is busy. No schedule: push, pull request and dispatch only.
-#
-# Self-hosted runners only take a push, a dispatch or a pull request from a branch of this
-# repository. A pull request from a fork runs `test_env_fork` on GitHub's ubuntu-latest and never
-# names our labels (the fork's run still needs a maintainer's approval, and a fork can edit this
-# file: review `runs-on` and `.github/` changes before approving one).
+# GStreamer media and Chromium / Firefox / WebKit interop, on GitHub's ubuntu-latest: its
+# network namespaces need a rootful Docker daemon, and our docker pool gives each job a rootless
+# one. No schedule: push, pull request and dispatch only. A pull request from a fork runs
+# `test_env_fork` with a read-only token.
 #
 # Only the `image` job, on a push to master, can write packages: the jobs that run the
 # environment (and so a pull request's code) get `packages: read`.
@@ -32,26 +28,6 @@ permissions:
   contents: read
 
 jobs:
-  runners:
-    name: pick runners
-    runs-on: ubuntu-latest
-    if: >-
-      github.event_name != 'pull_request_target' &&
-      (github.event_name != 'pull_request' ||
-       github.event.pull_request.head.repo.full_name == github.repository)
-    timeout-minutes: 5
-    permissions:
-      actions: read
-    outputs:
-      plan: ${{ steps.pick.outputs.plan }}
-    steps:
-      - id: pick
-        uses: Brainwires/.github/actions/pick-runners@9a9d641a07c2885ba48dfc0bd2e3e9049f486374 # pick-runners
-        with:
-          jobs: test_env=linux-x64-docker
-          vars: ${{ toJSON(vars) }}
-          runner-token: ${{ secrets.RUNNER_STATUS_TOKEN }}
-
   # Publishes the environment image for the hash of its inputs, on a push to master only. It
   # runs no test and none of a pull request's code, so it alone holds `packages: write`.
   image:
@@ -86,10 +62,11 @@ jobs:
 
   test_env:
     name: test environment (${{ inputs.stages || 'unit env interop' }})
-    needs: [runners, image]
-    runs-on: ${{ fromJSON(needs.runners.outputs.plan || '{}').test_env || 'ubuntu-latest' }}
-    # Self-hosted only for a push, a dispatch or a same-repository pull request; never for
-    # pull_request_target.
+    needs: [image]
+    # GitHub's runner, not our docker pool: the topology mounts sysfs inside network namespaces
+    # of a nested container, which a rootless Docker daemon (the pool's, by design) cannot allow.
+    runs-on: ubuntu-latest
+    # Never for pull_request_target; a fork's pull request uses the job below.
     if: >-
       github.event_name != 'pull_request_target' &&
       (github.event_name != 'pull_request' ||
