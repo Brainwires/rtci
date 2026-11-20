@@ -47,7 +47,6 @@ use tokio::sync::{
 };
 
 const DEFAULT_TIMEOUT_DURATION: Duration = Duration::from_secs(86400); // 1 day duration
-const OGG_PAGE_DURATION: Duration = Duration::from_millis(20);
 const RTP_OUTBOUND_MTU: usize = 1200;
 
 #[derive(Parser)]
@@ -627,26 +626,52 @@ async fn stream_audio(
 
     //TODO: packetizer.enable_abs_send_time(ext_id);
 
-    let mut ticker = tokio::time::interval(OGG_PAGE_DURATION);
+    // A page may hold several Opus packets and a packet may span pages (RFC 3533 section 6),
+    // so the reader hands over one packet (one RTP payload) at a time, each timed by its own
+    // TOC byte rather than by the page's granule position.
+    let mut next_send = tokio::time::Instant::now();
 
-    // Keep track of last granule, the difference is the amount of samples in the buffer
-    let mut last_granule: u64 = 0;
-    while let Ok((page_data, page_header)) = ogg.parse_next_page() {
-        // The amount of samples is the difference between the last and current timestamp
-        let sample_count = page_header.granule_position - last_granule;
-        last_granule = page_header.granule_position;
-        let sample_duration = Duration::from_millis(sample_count * 1000 / 48000);
-
-        let samples = (sample_duration.as_secs_f64() * codec.rtp_codec.clock_rate as f64) as u32;
-        let packets = packetizer.packetize(Instant::now(), &page_data.freeze(), samples)?;
+    while let Ok((packet_data, _)) = ogg.next_packet() {
+        // The comment header (RFC 7845 section 5.2) is not audio.
+        if packet_data.starts_with(b"OpusTags") {
+            continue;
+        }
+        let samples = opus_packet_samples(&packet_data);
+        let rtp_samples =
+            (u64::from(samples) * u64::from(codec.rtp_codec.clock_rate) / 48_000) as u32;
+        let packets = packetizer.packetize(Instant::now(), &packet_data.freeze(), rtp_samples)?;
         for packet in packets {
             audio_message_tx.send((audio_sender_id, packet)).await?;
         }
 
-        let _ = ticker.tick().await;
+        next_send += Duration::from_micros(u64::from(samples) * 1_000_000 / 48_000);
+        tokio::time::sleep_until(next_send).await;
     }
 
     let _ = audio_done_tx.try_send(());
 
     Ok(())
+}
+
+/// The number of 48 kHz samples in an Opus packet, read from its TOC byte (RFC 6716 section
+/// 3.1): the frame size its configuration gives, times its frame count.
+fn opus_packet_samples(packet: &[u8]) -> u32 {
+    let Some(&toc) = packet.first() else {
+        return 0;
+    };
+    let config = toc >> 3;
+    let frame: u32 = match config {
+        // SILK-only: 10, 20, 40, 60 ms.
+        0..=11 => [480, 960, 1920, 2880][usize::from(config % 4)],
+        // Hybrid: 10, 20 ms.
+        12..=15 => [480, 960][usize::from(config % 2)],
+        // CELT-only: 2.5, 5, 10, 20 ms.
+        _ => [120, 240, 480, 960][usize::from(config % 4)],
+    };
+    let frames: u32 = match toc & 0x03 {
+        0 => 1,
+        1 | 2 => 2,
+        _ => packet.get(1).map_or(0, |b| u32::from(b & 0x3f)),
+    };
+    frame * frames
 }

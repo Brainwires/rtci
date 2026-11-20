@@ -130,7 +130,7 @@ fn codec(name: &str) -> Option<(RTCRtpCodec, RtpCodecKind)> {
 enum Source {
     Ivf(IVFReader<BufReader<File>>),
     H264(H26xSampleReader<BufReader<File>>),
-    Ogg(Box<OggReader<BufReader<File>>>, u64),
+    Ogg(Box<OggReader<BufReader<File>>>),
 }
 
 struct Outgoing {
@@ -373,7 +373,7 @@ impl Session {
                     "H264" => {
                         Source::H264(H26xSampleReader::new(open("h264.h264")?, 1 << 20, false))
                     }
-                    _ => Source::Ogg(Box::new(OggReader::new(open("opus.ogg")?, true)?.0), 0),
+                    _ => Source::Ogg(Box::new(OggReader::new(open("opus.ogg")?, true)?.0)),
                 })
             } else {
                 None
@@ -540,7 +540,7 @@ impl Session {
                     o.codec.clock_rate,
                 ))
             });
-            // One frame (or Ogg page) per turn, rewinding at the end of the file.
+            // One frame (an H.264 access unit, or an Opus packet) per turn.
             let (data, samples, step): (Bytes, u32, Duration) = match o.source.as_mut().unwrap() {
                 Source::Ivf(r) => match r.parse_next_frame() {
                     Ok((f, _)) => (f.freeze(), 3000, Duration::from_millis(33)),
@@ -567,14 +567,13 @@ impl Session {
                         continue;
                     }
                 },
-                Source::Ogg(r, last) => match next_audio_page(r) {
-                    Ok((d, h)) => {
-                        let n = h.granule_position.saturating_sub(*last);
-                        *last = h.granule_position;
+                Source::Ogg(r) => match next_audio_packet(r) {
+                    Ok(d) => {
+                        let n = opus_packet_samples(&d);
                         (
                             d.freeze(),
-                            n as u32,
-                            Duration::from_millis(n * 1000 / 48000),
+                            n,
+                            Duration::from_micros(u64::from(n) * 1_000_000 / 48_000),
                         )
                     }
                     Err(_) => {
@@ -597,17 +596,39 @@ impl Session {
     }
 }
 
-/// The next Ogg page that carries audio: OpusHead and OpusTags are stream headers, not packets
-/// to send (RFC 7845 section 3).
-fn next_audio_page(
-    r: &mut OggReader<BufReader<File>>,
-) -> rtc::shared::error::Result<(BytesMut, rtc::media::io::ogg_reader::OggPageHeader)> {
+/// The next Opus packet: one RTP payload (RFC 7587 4.2). A page may hold several packets and a
+/// packet may span pages (RFC 3533 section 6), so packets are read, not pages. OpusHead and
+/// OpusTags are stream headers, not packets to send (RFC 7845 section 3).
+fn next_audio_packet(r: &mut OggReader<BufReader<File>>) -> rtc::shared::error::Result<BytesMut> {
     loop {
-        let (d, h) = r.parse_next_page()?;
-        if h.opus_header_type(&d).is_none() {
-            return Ok((d, h));
+        let (d, _) = r.next_packet()?;
+        if !d.starts_with(b"OpusHead") && !d.starts_with(b"OpusTags") {
+            return Ok(d);
         }
     }
+}
+
+/// The number of 48 kHz samples in an Opus packet, read from its TOC byte (RFC 6716 section
+/// 3.1): the frame size its configuration gives, times its frame count.
+fn opus_packet_samples(packet: &[u8]) -> u32 {
+    let Some(&toc) = packet.first() else {
+        return 0;
+    };
+    let config = toc >> 3;
+    let frame: u32 = match config {
+        // SILK-only: 10, 20, 40, 60 ms.
+        0..=11 => [480, 960, 1920, 2880][usize::from(config % 4)],
+        // Hybrid: 10, 20 ms.
+        12..=15 => [480, 960][usize::from(config % 2)],
+        // CELT-only: 2.5, 5, 10, 20 ms.
+        _ => [120, 240, 480, 960][usize::from(config % 4)],
+    };
+    let frames: u32 = match toc & 0x03 {
+        0 => 1,
+        1 | 2 => 2,
+        _ => packet.get(1).map_or(0, |b| u32::from(b & 0x3f)),
+    };
+    frame * frames
 }
 
 fn codec_kind(c: &RTCRtpCodec) -> RtpCodecKind {
