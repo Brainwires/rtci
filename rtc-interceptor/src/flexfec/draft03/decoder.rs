@@ -3,6 +3,10 @@
 use super::encoder::BASE_RTP_HEADER_SIZE;
 use shared::marshal::{Marshal, MarshalSize, Unmarshal};
 
+#[cfg(test)]
+#[path = "decoder_order_test.rs"]
+mod decoder_order_test;
+
 /// Recovered media packets kept for matching against later repair packets.
 const MAX_MEDIA_PACKETS: usize = 100;
 
@@ -201,17 +205,14 @@ impl FlexFec03Decoder {
             })
             .collect();
 
+        let newest = packet.header.sequence_number;
         self.repair_packets.push(RepairState {
             packet,
             header,
             protected,
         });
-        self.repair_packets.sort_by(|a, b| {
-            sequence_order(
-                a.packet.header.sequence_number,
-                b.packet.header.sequence_number,
-            )
-        });
+        self.repair_packets
+            .sort_by_key(|state| sequence_key(newest, state.packet.header.sequence_number));
         if self.repair_packets.len() > MAX_FEC_PACKETS {
             self.repair_packets.remove(0);
         }
@@ -226,9 +227,10 @@ impl FlexFec03Decoder {
                 }
             }
         }
+        let newest = packet.header.sequence_number;
         self.recovered.push(packet);
         self.recovered
-            .sort_by(|a, b| sequence_order(a.header.sequence_number, b.header.sequence_number));
+            .sort_by_key(|held| sequence_key(newest, held.header.sequence_number));
     }
 
     fn attempt_recovery(&mut self) -> Vec<rtp::Packet> {
@@ -414,25 +416,15 @@ fn append_mask(out: &mut Vec<u16>, mask: u64, bit_count: u16, base: u16) {
     }
 }
 
-/// Whether `value` is later than `previous` in the wrapping 16-bit sequence space.
-fn is_newer(previous: u16, value: u16) -> bool {
-    const HALF: u16 = 0x8000;
-    let forward = value.wrapping_sub(previous);
-    if forward == HALF {
-        return value > previous;
-    }
-    value != previous && forward < HALF
-}
-
-/// Order two sequence numbers oldest first, respecting the wrap.
-fn sequence_order(a: u16, b: u16) -> std::cmp::Ordering {
-    if a == b {
-        std::cmp::Ordering::Equal
-    } else if is_newer(a, b) {
-        std::cmp::Ordering::Less
-    } else {
-        std::cmp::Ordering::Greater
-    }
+/// A sort key that orders sequence numbers oldest first around `newest`, respecting the wrap.
+///
+/// A pairwise "is newer" comparison is not a total order once the held sequence numbers span
+/// more than half the 16-bit space (a < b < c < a), and `sort_by` may panic on such a
+/// comparator. Measuring every number from one anchor half the space behind `newest` gives each
+/// a plain integer key: the numbers within half the space of `newest` keep their wrapping order,
+/// and anything else still sorts somewhere without breaking the sort.
+fn sequence_key(newest: u16, sequence_number: u16) -> u16 {
+    sequence_number.wrapping_sub(newest.wrapping_add(0x8000))
 }
 
 /// The shorter distance between two sequence numbers in either direction.
