@@ -118,7 +118,9 @@ jobs:
 
       - name: Run fuzz targets (${{ matrix.crate }})
         working-directory: ${{ matrix.crate == 'rtc' && '.' || matrix.crate }}/fuzz
-        # --debug-assertions plus overflow checks turn silent wraparound into a finding.
+        # --debug-assertions plus overflow checks turn silent wraparound into a finding, and
+        # -malloc_limit_mb turns one allocation sized by the input (a length field believed) into
+        # one too, long before it could exhaust the runner.
         shell: bash
         env:
           RUSTFLAGS: -C overflow-checks=on
@@ -143,6 +145,7 @@ jobs:
             # triple, which has no sanitizer runtime here.
             cargo fuzz run --debug-assertions --target x86_64-unknown-linux-gnu "$TARGET" -- \
               -max_total_time="${DURATION}" \
+              -malloc_limit_mb=512 \
               -error_exitcode=77 \
               2>&1 | tail -20
           done
