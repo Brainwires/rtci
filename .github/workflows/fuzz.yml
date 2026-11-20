@@ -1,39 +1,90 @@
 name: Fuzz
 
+# No schedule (our CI rule: no cron workflows). The stateful targets run, time-boxed, on pull
+# requests that touch the code they reach and on dispatch; a dispatch can also run every target.
+# Our self-hosted Linux pool first, GitHub's ubuntu-latest only when it is busy.
 on:
-  schedule:
-    # Run daily at 02:00 UTC
-    - cron: '0 2 * * *'
+  pull_request:
+    branches: [ master, v0.21.x, v1.x ]
+    paths:
+      - 'rtc-dtls/**'
+      - 'rtc-srtp/**'
+      - 'rtc-ice/**'
+      - 'rtc-turn/**'
+      - 'rtc-stun/**'
+      - 'rtc-sctp/**'
+      - 'rtc-rtp/**'
+      - 'rtc-rtcp/**'
+      - 'rtc-sdp/**'
+      - 'rtc-mdns/**'
+      - 'rtc-datachannel/**'
+      - 'rtc-shared/**'
+      - 'rtc-crypto/**'
+      - 'src/data_channel/**'
+      - 'src/peer_connection/handler/**'
+      - 'src/fuzzing.rs'
+      - 'fuzz/**'
+      - '.github/workflows/fuzz.yml'
   workflow_dispatch:
     inputs:
       duration:
-        description: 'Fuzzing duration per target in seconds'
+        description: 'Fuzzing time per target, in seconds'
         required: false
-        default: '30'
+        default: '120'
+      targets:
+        description: 'stateful (the state-machine targets) or all (every target of every crate)'
+        required: false
+        default: 'stateful'
+        type: choice
+        options: [ stateful, all ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
-  FUZZ_DURATION: ${{ github.event.inputs.duration || '30' }}
+  # A pull request gets 60 s per target; a dispatch what it asks for.
+  FUZZ_DURATION: ${{ github.event.inputs.duration || '60' }}
+  FUZZ_TARGETS: ${{ github.event.inputs.targets || 'stateful' }}
 
 jobs:
+  runners:
+    name: pick runners
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+    outputs:
+      plan: ${{ steps.pick.outputs.plan }}
+    steps:
+      - id: pick
+        uses: Brainwires/.github/actions/pick-runners@9a9d641a07c2885ba48dfc0bd2e3e9049f486374 # pick-runners
+        with:
+          jobs: >-
+            dtls=linux-x64 srtp=linux-x64 ice=linux-x64 turn=linux-x64 sctp=linux-x64
+            rtp=linux-x64 rtc=linux-x64 stun=linux-x64 rtcp=linux-x64 sdp=linux-x64
+          vars: ${{ toJSON(vars) }}
+          runner-token: ${{ secrets.RUNNER_STATUS_TOKEN }}
+
   fuzz:
     name: Fuzz ${{ matrix.crate }}
-    runs-on: ubuntu-latest
+    needs: runners
+    runs-on: ${{ fromJSON(needs.runners.outputs.plan || '{}')[matrix.key] || 'ubuntu-latest' }}
+    if: ${{ !cancelled() }}
+    # The build (~5 min) plus every target's time box, with margin; a hang cannot hold a runner.
+    timeout-minutes: ${{ github.event.inputs.targets == 'all' && 240 || 45 }}
     strategy:
       fail-fast: false
+      # `stateful` names the targets that drive a whole state machine (handshakes, agents,
+      # associations, reassembly). A crate's other targets are single-message parsers and run with
+      # `targets: all`, as do rtc-stun, rtc-rtcp and rtc-sdp, which have only parsers. The `rtc`
+      # crate's own fuzz crate (data-channel handling) is ./fuzz.
       matrix:
-        crate:
-          - rtc-dtls
-          - rtc-sctp
-          - rtc-rtcp
-          - rtc-sdp
-          - rtc-stun
-          - rtc-rtp
-          - rtc-srtp
-          - rtc-ice
-          - rtc-turn
-          # The `rtc` crate itself (data-channel handling); its fuzz crate is ./fuzz.
-          - rtc
+        include: ${{ fromJSON(github.event.inputs.targets == 'all' && '[{"crate":"rtc-dtls","key":"dtls","stateful":"conn_handle_records"},{"crate":"rtc-srtp","key":"srtp","stateful":"context_decrypt"},{"crate":"rtc-ice","key":"ice","stateful":"agent_handle_inbound agent_mdns_and_tcp"},{"crate":"rtc-turn","key":"turn","stateful":"client_handle_inbound"},{"crate":"rtc-sctp","key":"sctp","stateful":"endpoint_handle_datagrams"},{"crate":"rtc-rtp","key":"rtp","stateful":"depacketize_sequence"},{"crate":"rtc","key":"rtc","stateful":"data_channel_handle_dcep"},{"crate":"rtc-stun","key":"stun","stateful":""},{"crate":"rtc-rtcp","key":"rtcp","stateful":""},{"crate":"rtc-sdp","key":"sdp","stateful":""}]' || '[{"crate":"rtc-dtls","key":"dtls","stateful":"conn_handle_records"},{"crate":"rtc-srtp","key":"srtp","stateful":"context_decrypt"},{"crate":"rtc-ice","key":"ice","stateful":"agent_handle_inbound agent_mdns_and_tcp"},{"crate":"rtc-turn","key":"turn","stateful":"client_handle_inbound"},{"crate":"rtc-sctp","key":"sctp","stateful":"endpoint_handle_datagrams"},{"crate":"rtc-rtp","key":"rtp","stateful":"depacketize_sequence"},{"crate":"rtc","key":"rtc","stateful":"data_channel_handle_dcep"}]') }}
     steps:
       - uses: actions/checkout@v4
 
@@ -41,30 +92,26 @@ jobs:
         uses: dtolnay/rust-toolchain@nightly
 
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked
-
-      - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: taiki-e/install-action@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-fuzz-${{ matrix.crate }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-fuzz-${{ matrix.crate }}-
+          tool: cargo-fuzz
 
       - name: Run fuzz targets (${{ matrix.crate }})
         working-directory: ${{ matrix.crate == 'rtc' && '.' || matrix.crate }}/fuzz
-        # pipefail: without it the `| tail` hid every crash (the pipeline's status was tail's).
         # --debug-assertions plus overflow checks turn silent wraparound into a finding.
         shell: bash
         env:
           RUSTFLAGS: -C overflow-checks=on
+          STATEFUL: ${{ matrix.stateful }}
         run: |
           set -euo pipefail
-          TARGETS=$(cargo fuzz list)
+          if [ "$FUZZ_TARGETS" = all ]; then TARGETS=$(cargo fuzz list); else TARGETS=$STATEFUL; fi
           for TARGET in $TARGETS; do
             echo "==> Fuzzing $TARGET for ${FUZZ_DURATION}s"
-            cargo fuzz run --debug-assertions "$TARGET" -- \
+            # pipefail (above): without it the `| tail` hid every crash (the pipeline's status was tail's).
+            # --target: the prebuilt cargo-fuzz is a musl binary and would default to its own
+            # triple, which has no sanitizer runtime here.
+            cargo fuzz run --debug-assertions --target x86_64-unknown-linux-gnu "$TARGET" -- \
               -max_total_time="${FUZZ_DURATION}" \
               -error_exitcode=77 \
               2>&1 | tail -20
