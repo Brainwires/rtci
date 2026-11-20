@@ -88,7 +88,9 @@ test("loss recovery: NACK and RTX repair a browser's video under netem", async (
   const video = r.report.coverage.filter((c) => c.key.startsWith("video:"));
   expect(video.length, JSON.stringify(r.report.coverage)).toBeGreaterThan(0);
   const v = video.reduce((a, b) => (b.span > a.span ? b : a));
-  expect(v.span, JSON.stringify(v)).toBeGreaterThan(300);
+  // Enough packets that 5% loss drops several: Chromium and WebKit send 30+ a second from the
+  // canvas, Firefox about 20 (250 in the run, a 200-packet span once the newest 50 are left out).
+  expect(v.span, JSON.stringify(v)).toBeGreaterThan(150);
   // After repair nothing older than the newest 50 packets may still be missing.
   expect(v.missing / v.span, `still missing after NACK/RTX: ${JSON.stringify(v)}`).toBeLessThan(0.005);
   // The browser saw our NACKs and answered them (webrtc-stats: nackCount,
