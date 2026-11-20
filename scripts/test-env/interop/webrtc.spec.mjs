@@ -3,6 +3,7 @@
 // examples/interop-peer at RTC_INTEROP_WS.
 import { test, expect } from "@playwright/test";
 import { readFileSync } from "node:fs";
+import { naBrowser, skipUnlessCodec } from "./na.mjs";
 
 const WS = process.env.RTC_INTEROP_WS || "ws://127.0.0.1:8080";
 const PEER_JS = readFileSync(new URL("./peer.js", import.meta.url), "utf8");
@@ -17,11 +18,6 @@ test.beforeEach(async ({ page }) => {
   await page.goto("http://localhost/index.html");
   await page.addScriptTag({ content: PEER_JS });
 });
-
-async function skipUnlessCodec(page, kind, mime, dir) {
-  const ok = await page.evaluate(([k, m, d]) => Interop.hasCodec(k, m, d), [kind, mime, dir]);
-  test.skip(!ok, `this browser has no ${mime} ${dir === "receiver" ? "decoder" : "encoder"}`);
-}
 
 // ---- data channels ----
 
@@ -297,6 +293,10 @@ test("encoded transform: Rust forwards transformed VP8 untouched", async ({ page
     s.close();
     return { api, rtp };
   }, WS);
-  test.skip(!!r.unsupported, "this browser has neither createEncodedStreams nor RTCRtpScriptTransform");
+  naBrowser(
+    r.unsupported,
+    "this browser has no encoded transform API",
+    "RTCRtpSender.prototype.createEncodedStreams and window.RTCRtpScriptTransform are both undefined",
+  );
   expect(r.rtp.error, JSON.stringify(r)).toBeUndefined();
 });

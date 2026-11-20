@@ -97,6 +97,7 @@ stage_interop() {
   local rc=$?
   echo "## interop (exit $rc)" >> "$REPORT"
   [ -f "$A/interop-matrix.md" ] && cat "$A/interop-matrix.md" >> "$REPORT"
+  [ -f "$A/interop-gate.txt" ] && { echo; echo '```'; cat "$A/interop-gate.txt"; echo '```'; } >> "$REPORT"
   return $rc
 }
 
