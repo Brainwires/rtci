@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.1+brainwires.6] - 2026-11-20
+
+### Bug Fixes
+
+- **sctp**: a data channel could fail to open when the first SCTP INIT ACK was lost: the peer's
+  retransmitted INIT was treated as a second association and refused by the one-association limit
+  added in 0.21.1+brainwires.5.
+
 ## [0.21.1+brainwires.5] - 2026-11-20
 
 Hardening across the stack: bounds on the state a peer can make the stack hold, and stricter

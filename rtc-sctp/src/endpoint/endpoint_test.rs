@@ -3961,3 +3961,43 @@ fn test_bytes_dequeued_counts_on_transmission() -> Result<()> {
     );
     Ok(())
 }
+
+/// An INIT the peer retransmits because its INIT ACK was lost (RFC 9260 5.1 C) must reach the
+/// association the first INIT started. On an endpoint that holds one association at a time
+/// (WebRTC: one per DTLS transport) a retransmitted INIT taken for a new association is
+/// refused by `concurrent_associations`, and the handshake never completes.
+#[test]
+fn test_retransmitted_init_reaches_its_association() {
+    let mut server_config = server_config();
+    server_config.concurrent_associations(1);
+    let mut pair = Pair::new(EndpointConfig::default(), server_config);
+
+    let client_ch = pair.begin_connect(client_config());
+
+    // INIT out, the server answers with an INIT ACK that is lost on the wire.
+    pair.drive_client();
+    pair.drive_server();
+    let server_ch = pair.server.assert_accept();
+    assert_eq!(pair.server.associations.len(), 1);
+    assert!(
+        !pair.client.inbound.is_empty(),
+        "the server should have answered the INIT"
+    );
+    pair.client.inbound.clear(); // Lose the INIT ACK.
+
+    // The client's T1-init timer fires (after the initial RTO) and sends the INIT again;
+    // bounded so that a broken build fails instead of retransmitting until it gives up.
+    for _ in 0..1000 {
+        if !pair.step() {
+            break;
+        }
+    }
+
+    assert!(
+        pair.server.accepted.is_none(),
+        "the retransmitted INIT started a second association"
+    );
+    assert_eq!(pair.server.associations.len(), 1);
+    // Both sides connected (the client's first event is `Connected`, not a failed handshake).
+    pair.finish_connect(client_ch, server_ch);
+}
