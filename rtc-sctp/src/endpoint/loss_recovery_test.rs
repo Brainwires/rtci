@@ -107,14 +107,17 @@ fn a_lost_forward_tsn_is_sent_again() -> Result<()> {
 
     let start = link.now;
     let ppi = PayloadProtocolIdentifier::Binary;
-    {
-        let mut stream = link.client.conn().open_stream(1, ppi)?;
-        stream.set_reliability_params(true, ReliabilityType::Rexmit, 0)?;
-        for i in 0..3u32 {
-            stream.write_sctp(start, &message(i, 100), ppi)?;
-            // One message per packet, so the filter can pick the first.
-            link.run_for(Duration::from_millis(1));
-        }
+    link.client
+        .conn()
+        .open_stream(1, ppi)?
+        .set_reliability_params(true, ReliabilityType::Rexmit, 0)?;
+    for i in 0..3u32 {
+        link.client
+            .conn()
+            .stream(1)?
+            .write_sctp(start, &message(i, 100), ppi)?;
+        // One message per packet, so the filter can pick the first.
+        link.run_for(Duration::from_millis(1));
     }
 
     let recovered = link.run_until(start + Duration::from_secs(20), |l| {

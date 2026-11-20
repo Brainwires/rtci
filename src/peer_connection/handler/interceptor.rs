@@ -23,15 +23,11 @@ use crate::statistics::accumulator::RTCStatsAccumulator;
 use interceptor::{Attribute, Interceptor, Packet, TaggedPacket};
 use log::{debug, trace};
 use rtcp::goodbye::Goodbye;
-use rtcp::header::{FORMAT_CCFB, PacketType};
-use rtcp::payload_feedbacks::full_intra_request::FullIntraRequest;
-use rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 use rtcp::receiver_report::ReceiverReport;
 use rtcp::sender_report::SenderReport;
 use rtcp::source_description::{
     SdesType, SourceDescription, SourceDescriptionChunk, SourceDescriptionItem,
 };
-use rtcp::transport_feedbacks::transport_layer_nack::TransportLayerNack;
 use shared::error::{Error, Result};
 use shared::marshal::MarshalSize;
 use std::collections::{HashMap, HashSet, VecDeque};

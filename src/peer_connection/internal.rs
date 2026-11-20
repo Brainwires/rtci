@@ -398,12 +398,14 @@ impl RTCPeerConnection {
                     // transceiver, if any, is stopped) for a transceiver that has no m= section
                     // yet; it keeps its own new mid.
                     if include_unmatched && media.media_name.port.value == 0 {
-                        let free =
-                            match RTCPeerConnection::find_by_mid(mid_value, &self.rtp_transceivers)
-                            {
-                                Some(i) => self.rtp_transceivers[i].stopped(),
-                                None => true,
-                            };
+                        let free = match self
+                            .rtp_transceivers
+                            .iter()
+                            .position(|t| t.mid().as_ref() == Some(mid_value))
+                        {
+                            Some(i) => self.rtp_transceivers[i].stopped(),
+                            None => true,
+                        };
                         let candidate = if free {
                             self.rtp_transceivers.iter().enumerate().position(|(j, t)| {
                                 !t.stopped()

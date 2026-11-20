@@ -7,6 +7,7 @@ use super::*;
 use crate::agent::Agent;
 use crate::agent::agent_config::AgentConfig;
 use crate::candidate::unmarshal_candidate;
+use sansio::Protocol;
 
 fn provider() -> Arc<dyn crypto::RTCCryptoProvider> {
     crypto::default_provider().expect("a built-in crypto provider must be enabled for tests")

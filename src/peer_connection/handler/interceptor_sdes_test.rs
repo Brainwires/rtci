@@ -2,6 +2,7 @@
 
 use super::*;
 use interceptor::{AttributedPacket, StreamInfo};
+use rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 use rtcp::reception_report::ReceptionReport;
 use sansio::Protocol;
 use shared::TransportContext;

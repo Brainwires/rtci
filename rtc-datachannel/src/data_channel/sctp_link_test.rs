@@ -192,12 +192,14 @@ impl Side {
         for (id, ppi, payload) in inbound {
             self.dispatch(now, id, ppi, payload)?;
         }
+        let mut sent = Vec::new();
         let conn = self.conn();
         while let Some(transmit) = conn.poll_transmit(now) {
             if let Payload::RawEncode(datagrams) = transmit.message {
-                self.wire.extend(datagrams);
+                sent.extend(datagrams);
             }
         }
+        self.wire.extend(sent);
         Ok(())
     }
 

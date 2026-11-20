@@ -898,7 +898,7 @@ impl DTLSConn {
             // with was lost, so that flight is retransmitted at once rather than when our timer
             // fires. Only a byte-for-byte repeat of the cached message counts.
             while let Some((out, epoch, message_sequence)) = self.fragment_buffer.pop_stale() {
-                if isize::from(message_sequence) < self.state.handshake_recv_sequence
+                if (message_sequence as isize) < self.state.handshake_recv_sequence
                     && self.cache.contains_message(&out, epoch, !self.is_client)
                 {
                     debug!(

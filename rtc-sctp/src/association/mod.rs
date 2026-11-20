@@ -221,7 +221,7 @@ pub struct Association {
     my_cookie: Option<ParamStateCookie>,
 
     pub(crate) payload_queue: PayloadQueue,
-    inflight_queue: PayloadQueue,
+    pub(crate) inflight_queue: PayloadQueue,
     pub(crate) pending_queue: PendingQueue,
     control_queue: VecDeque<Packet>,
     stream_queue: VecDeque<u16>,
