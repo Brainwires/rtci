@@ -4,6 +4,7 @@
 import { test, expect } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { naBrowser, naEnv, skipUnlessCodec } from "./na.mjs";
+import { fixtureExists } from "./common.mjs";
 
 const WS = process.env.RTC_INTEROP_WS || "ws://127.0.0.1:8080";
 const PEER_JS = readFileSync(new URL("./peer.js", import.meta.url), "utf8");
@@ -151,7 +152,9 @@ test("DTLS and SRTP are negotiated", async ({ page }) => {
 
 // ---- media: the browser sends, Rust reflects ----
 
-for (const codec of ["VP8", "VP9", "H264"]) {
+// H.265 and AV1 too: a browser without the encoder is na-browser by its own
+// RTCRtpSender.getCapabilities.
+for (const codec of ["VP8", "VP9", "H264", "H265", "AV1"]) {
   test(`reflect video ${codec}`, async ({ page }) => {
     await skipUnlessCodec(page, "video", `video/${codec}`, "sender");
     const r = await page.evaluate(
@@ -198,17 +201,31 @@ test("reflect audio Opus", async ({ page }) => {
 
 // ---- media: Rust sends GStreamer-encoded files, the browser decodes ----
 
-for (const [codec, kind, mime] of [
-  ["VP8", "video", "video/VP8"],
-  ["VP9", "video", "video/VP9"],
-  ["H264", "video", "video/H264"],
-  ["OPUS", "audio", "audio/opus"],
+// [title, codec, kind, mime, fixture]: the fixture is the file interop-peer streams (entry.sh
+// makes them); the multi-slice H.264 and multi-packet Ogg ones check the readers' framing end to
+// end with the browser's decoder as the judge.
+for (const [title, codec, kind, mime, fixture] of [
+  ["VP8", "VP8", "video", "video/VP8", "vp8.ivf"],
+  ["VP9", "VP9", "video", "video/VP9", "vp9.ivf"],
+  ["H264", "H264", "video", "video/H264", "h264.h264"],
+  ["H265", "H265", "video", "video/H265", "h265.h265"],
+  ["AV1", "AV1", "video", "video/AV1", "av1.ivf"],
+  ["OPUS", "OPUS", "audio", "audio/opus", "opus.ogg"],
+  ["H264 with four slices per picture", "H264", "video", "video/H264", "h264-slices.h264"],
+  ["OPUS from multi-packet Ogg pages", "OPUS", "audio", "audio/opus", "opus-multi.ogg"],
 ]) {
-  test(`receive ${codec} from Rust (GStreamer fixture)`, async ({ page }) => {
+  test(`receive ${title} from Rust (GStreamer fixture)`, async ({ page }) => {
     await skipUnlessCodec(page, kind, mime, "receiver");
+    naEnv(
+      !fixtureExists(fixture),
+      `the test image's GStreamer could not encode the ${codec} fixture ${fixture}`,
+      `entry.sh's fixture log (fixture-${codec.toLowerCase()}.log in the artifacts)`,
+    );
     const r = await page.evaluate(
-      async ([ws, codec, kind, mime]) => {
-        const sc = kind === "video" ? { media: "send", video: codec } : { media: "send", audio: true };
+      async ([ws, codec, kind, mime, fixture]) => {
+        const sc = kind === "video"
+          ? { media: "send", video: codec, fixture: { video: fixture } }
+          : { media: "send", audio: true, fixture: { audio: fixture } };
         const s = await Interop.open(ws, sc);
         const tr = s.pc.addTransceiver(kind, { direction: "recvonly" });
         if (kind === "video") Interop.prefer(tr, "video", mime);
@@ -220,13 +237,26 @@ for (const [codec, kind, mime] of [
           return r && (kind === "video" ? r.framesDecoded > 30 : r.packetsReceived > 100) && r;
         }, 25000, "decoded media").catch(async (e) => ({ error: String(e), last: await Interop.inbound(s.pc, kind) }));
         const report = await s.report();
+        const after = await Interop.inbound(s.pc, kind);
         s.close();
-        return { rtp, report };
+        return { rtp, report, after };
       },
-      [WS, codec, kind, mime],
+      [WS, codec, kind, mime, fixture],
     );
     expect(r.rtp.error, JSON.stringify(r)).toBeUndefined();
     expect(r.rtp.mimeType.toLowerCase()).toBe(mime.toLowerCase());
+    if (kind === "audio") {
+      // Every Opus packet is one RTP packet (RFC 7587 4.2): what Rust sent is what arrived,
+      // give or take the ones in flight.
+      const sent = r.report.sent.find((x) => x.mime.toLowerCase() === "audio/opus")?.frames || 0;
+      expect(Math.abs(sent - (r.after?.packetsReceived || 0)), JSON.stringify(r)).toBeLessThanOrEqual(25);
+      // A payload that is not one Opus packet (a whole page, say) does not decode, and the
+      // browser conceals it; a healthy stream conceals little (webrtc-stats concealedSamples).
+      const a = r.after || {};
+      if (a.concealedSamples !== undefined && a.totalSamplesReceived > 0) {
+        expect(a.concealedSamples / a.totalSamplesReceived, JSON.stringify(a)).toBeLessThan(0.2);
+      }
+    }
   });
 }
 
