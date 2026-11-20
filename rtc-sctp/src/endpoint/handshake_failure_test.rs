@@ -50,10 +50,14 @@ fn an_abort_during_the_handshake_ends_the_accepting_association() {
     }));
     link.begin_connect();
 
+    // Wait for the dropped COOKIE ECHO, not just for the server's association: until the
+    // INIT ACK arrives the client does not know the server's verification tag, and an ABORT
+    // sent then (tag 0, not an INIT) is routed to no association.
     let deadline = link.now + Duration::from_secs(5);
     assert!(
-        link.run_until(deadline, |l| l.server.association.is_some()),
-        "the INIT reached the server"
+        link.run_until(deadline, |l| l.server.association.is_some()
+            && l.dropped > 0),
+        "the INIT reached the server and the COOKIE ECHO was dropped"
     );
     assert!(!link.server.conn().is_ended());
     assert!(link.server.conn().is_handshaking());
