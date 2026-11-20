@@ -750,6 +750,19 @@ impl MediaStreamTrack {
             .map(|coding| &coding.codec)
     }
 
+    /// Drops the RTX and / or FEC repair SSRCs of every coding, when negotiation left the
+    /// repair format out.
+    pub(crate) fn clear_repair_ssrcs(&mut self, rtx: bool, fec: bool) {
+        for coding in &mut self.codings {
+            if rtx {
+                coding.rtp_coding_parameters.rtx = None;
+            }
+            if fec {
+                coding.rtp_coding_parameters.fec = None;
+            }
+        }
+    }
+
     /// Returns the RTP encoding parameters (codings) configured for this track.
     pub fn codings(&self) -> &[RTCRtpEncodingParameters] {
         &self.codings

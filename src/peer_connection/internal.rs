@@ -217,6 +217,7 @@ impl RTCPeerConnection {
             pipeline_context,
             data_channels: DataChannelRegistry::new(),
             rtp_transceivers: Vec::new(),
+            removed_transceivers: Vec::new(),
             greater_mid: -1,
             sdp_origin: Origin::default(),
             last_offer: String::new(),
@@ -903,6 +904,60 @@ impl RTCPeerConnection {
         self.rtp_transceivers.len() - 1
     }
 
+    /// Removes the transceiver at `i` from the set of transceivers. The ids of the transceivers
+    /// after it move down by one, as the stats' references to them do; the removed id is
+    /// recorded for [`RTCPeerConnection::take_removed_transceivers`].
+    fn remove_rtp_transceiver(&mut self, i: RTCRtpTransceiverId) {
+        self.rtp_transceivers.remove(i);
+        self.removed_transceivers.push(i);
+        self.pipeline_context.stats.transceiver_removed(i);
+        // Cached SSRC owners are transceiver ids, now shifted.
+        self.pipeline_context
+            .interceptor_handler_context
+            .ssrc_owners
+            .clear();
+        self.pipeline_context
+            .endpoint_handler_context
+            .ssrc_owners
+            .clear();
+    }
+
+    /// Whether the m= section with `mid` is rejected (port 0) in the current local or the
+    /// current remote description: the last completed offer/answer exchange rejected it (an
+    /// answer rejects every section its offer rejected, and may reject more).
+    pub(super) fn rejected_in_current_description(&self, mid: &str) -> bool {
+        let rejected_in = |desc: Option<&RTCSessionDescription>| {
+            desc.and_then(|d| d.parsed.as_ref()).is_some_and(|parsed| {
+                parsed.media_descriptions.iter().any(|media| {
+                    get_mid_value(media).is_some_and(|m| m == mid) && is_rejected_media(media)
+                })
+            })
+        };
+        rejected_in(self.current_local_description.as_ref())
+            || rejected_in(self.current_remote_description.as_ref())
+    }
+
+    /// W3C webrtc-pc 4.4.1.6 (set the session description, once an answer is applied and the
+    /// signaling state is stable): every stopped transceiver whose m= section is rejected in
+    /// the current local or the current remote description is removed from the set of
+    /// transceivers (RFC 9429 section 5.2.2: the m= section stays, rejected, and may be
+    /// recycled). A stopped transceiver the exchange still answered (stopped after the offer
+    /// arrived) stays until the next offer rejects its section.
+    pub(super) fn remove_stopped_rejected_transceivers(&mut self) {
+        if self.signaling_state != RTCSignalingState::Stable {
+            return;
+        }
+        for i in (0..self.rtp_transceivers.len()).rev() {
+            let t = &self.rtp_transceivers[i];
+            if t.stopped()
+                && let Some(mid) = t.mid().clone()
+                && self.rejected_in_current_description(&mid)
+            {
+                self.remove_rtp_transceiver(i);
+            }
+        }
+    }
+
     /// Undoes the transceiver changes made by an offer/answer transaction that is being rolled
     /// back, as required by RFC 9429, Section 5.7.
     ///
@@ -934,7 +989,7 @@ impl RTCPeerConnection {
             let t = &self.rtp_transceivers[i];
             if t.created_by_remote_description() {
                 self.rtp_transceivers[i].stop(&self.media_engine, &mut self.interceptor)?;
-                self.rtp_transceivers.remove(i);
+                self.remove_rtp_transceiver(i);
             }
         }
 
@@ -1070,6 +1125,19 @@ impl RTCPeerConnection {
             // Get kind and mid before mutable borrow of sender
             let kind = transceiver.kind();
             let mid = transceiver.mid().clone().unwrap_or_default();
+            let transceiver_stopped = transceiver.stopped();
+
+            // A started sender's streams were bound with what an earlier negotiation decided;
+            // one that changed the codec an encoding is sent with (or its RTX / FEC flow, or the
+            // header extensions) re-binds them, keeping the SSRCs.
+            if let Some(sender) = transceiver.sender_mut()
+                && sender.is_negotiated()
+                && sender.has_sent()
+                && !transceiver_stopped
+            {
+                sender.rebind_local_streams(&self.media_engine, &mut self.interceptor);
+                continue;
+            }
 
             if let Some(sender) = transceiver.sender_mut()
                 && sender.is_negotiated()
@@ -1097,11 +1165,7 @@ impl RTCPeerConnection {
                     }
                 }
 
-                sender.interceptor_local_streams_op(
-                    &self.media_engine,
-                    &mut self.interceptor,
-                    true,
-                );
+                sender.bind_local_streams(&self.media_engine, &mut self.interceptor);
 
                 sender.set_sent();
             }

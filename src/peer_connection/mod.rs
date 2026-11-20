@@ -767,6 +767,9 @@ pub struct RTCPeerConnection {
     pub(crate) pipeline_context: PipelineContext,
     pub(crate) data_channels: DataChannelRegistry,
     pub(super) rtp_transceivers: Vec<RTCRtpTransceiverInternal>,
+    /// The transceivers removed since `take_removed_transceivers` was last called, each by the
+    /// id it had when it was removed, in removal order.
+    pub(super) removed_transceivers: Vec<RTCRtpTransceiverId>,
 
     greater_mid: isize,
     sdp_origin: Origin,
@@ -1246,6 +1249,10 @@ impl RTCPeerConnection {
 
                 let i = match transceiver_by_mid.get(mid_value.as_str()) {
                     Some(&i) => i,
+                    // A rejected section an earlier exchange already rejected has no transceiver
+                    // any more (it was removed), nor has one of a media type this endpoint
+                    // doesn't know.
+                    None if is_rejected_media(media) => continue,
                     None => return Err(Error::ErrPeerConnTransceiverMidNil),
                 };
 
@@ -1268,6 +1275,9 @@ impl RTCPeerConnection {
 
                 self.rtp_transceivers[i].set_current_direction(direction);
             }
+
+            // An answer applied: the stopped transceivers whose sections it left rejected go.
+            self.remove_stopped_rejected_transceivers();
 
             if let Some(remote_description) = self.remote_description().cloned()
                 && let Some(parsed_remote_description) = remote_description.parsed.as_ref()
@@ -1511,14 +1521,24 @@ impl RTCPeerConnection {
                             continue;
                         }
 
-                        // A rejected m= section (port 0) is answered rejected and changes no
-                        // transceiver it already has. One no transceiver has yet gets one, as
-                        // every m= section does (RFC 9429 section 5.10, W3C 4.4.1.6), created
-                        // stopped: no direction, no media, no track event.
+                        // A rejected m= section (port 0) is answered rejected. The transceiver
+                        // it already has is stopped, unless it is already (W3C 4.4.1.6: "if the
+                        // media description is rejected, and transceiver is not already
+                        // stopped, stop the RTCRtpTransceiver"), firing no track event. One no
+                        // transceiver has yet gets one, as every m= section does (RFC 9429
+                        // section 5.10), created stopped: no direction, no media, no track
+                        // event. A rollback of the offer removes a transceiver it created; one
+                        // it stopped stays stopped (the stop algorithm is not undone).
                         if is_rejected_media(media) {
                             let kind = RtpCodecKind::from(media.media_name.media.as_str());
-                            if matches!(kind, RtpCodecKind::Audio | RtpCodecKind::Video)
-                                && !transceiver_by_mid.contains_key(mid_value.as_str())
+                            if let Some(&i) = transceiver_by_mid.get(mid_value.as_str()) {
+                                self.rtp_transceivers[i]
+                                    .stop(&self.media_engine, &mut self.interceptor)?;
+                            } else if matches!(kind, RtpCodecKind::Audio | RtpCodecKind::Video)
+                                // A section the last exchange already rejected, whose stopped
+                                // transceiver was removed then, is not a new section: it gets
+                                // no transceiver again.
+                                && !self.rejected_in_current_description(mid_value)
                             {
                                 let mut transceiver = RTCRtpTransceiverInternal::new(
                                     kind,
@@ -1626,9 +1646,13 @@ impl RTCPeerConnection {
                             continue;
                         }
 
-                        // A rejected m= section in the answer: the transceiver is stopped, not
-                        // given a direction.
+                        // A rejected m= section in the answer: the transceiver is stopped (W3C
+                        // 4.4.1.6), not given a direction; one already stopped stays as it is.
                         if is_rejected_media(media) {
+                            if let Some(&i) = transceiver_by_mid.get(mid_value.as_str()) {
+                                self.rtp_transceivers[i]
+                                    .stop(&self.media_engine, &mut self.interceptor)?;
+                            }
                             continue;
                         }
 
@@ -1665,6 +1689,11 @@ impl RTCPeerConnection {
                         )?;
                     }
                 }
+            }
+
+            // An answer applied: the stopped transceivers whose sections it left rejected go.
+            if is_final_answer {
+                self.remove_stopped_rejected_transceivers();
             }
 
             // The ICE and DTLS transports start with the first description that sets one up,
@@ -2430,6 +2459,20 @@ impl RTCPeerConnection {
     /// See [getTransceivers](https://www.w3.org/TR/webrtc/#dom-peerconnection-gettranseceivers)
     pub fn get_transceivers(&self) -> impl Iterator<Item = RTCRtpTransceiverId> {
         0..self.rtp_transceivers.len()
+    }
+
+    /// Returns the transceivers removed from the set of transceivers since the last call, and
+    /// forgets them.
+    ///
+    /// A transceiver id is its index in [`get_transceivers`](Self::get_transceivers), so a
+    /// removal moves every later transceiver's id down by one. Transceivers are removed when a
+    /// rollback undoes the remote offer that created them (RFC 9429 section 5.7), and when an
+    /// answer (local or remote) leaves a stopped transceiver's m= section rejected (W3C
+    /// webrtc-pc 4.4.1.6). Each id is the one the transceiver had
+    /// when it was removed, in removal order: removing them in this order from a list that
+    /// mirrors the transceivers keeps it in step.
+    pub fn take_removed_transceivers(&mut self) -> Vec<RTCRtpTransceiverId> {
+        std::mem::take(&mut self.removed_transceivers)
     }
 
     /// Adds a media track to the peer connection.

@@ -9,7 +9,12 @@ use crate::statistics::stats::rtp_stream::sent::RTCSentRtpStreamStats;
 use crate::statistics::stats::rtp_stream::sent::remote_outbound::RTCRemoteOutboundRtpStreamStats;
 use crate::statistics::stats::{RTCStats, RTCStatsType};
 use shared::time::SystemInstant;
-use std::time::Instant;
+use std::collections::VecDeque;
+use std::time::{Duration, Instant};
+
+/// How many of our latest RTCP XR receiver reference times (RFC 3611 section 4.4) a stream
+/// remembers, for the DLRR block that echoes one.
+const REFERENCE_TIMES_REMEMBERED: usize = 16;
 
 /// The stats id of the inbound-rtp object for `ssrc`.
 pub(crate) fn inbound_stats_id(kind: RtpCodecKind, ssrc: SSRC) -> String {
@@ -104,6 +109,20 @@ pub struct InboundRtpStreamAccumulator {
     /// Number of RTCP SR reports received.
     pub reports_received: u64,
 
+    // Round trip time from RTCP XR (RFC 3611 sections 4.4, 4.5)
+    /// The SSRC our receiver reports about this stream are sent from, which our XR receiver
+    /// reference time blocks carry and the remote sender's DLRR sub-blocks name.
+    pub receiver_ssrc: Option<u32>,
+    /// Our latest receiver reference times for the stream: the compact NTP timestamp each
+    /// carried and when it was sent.
+    pub reference_times_sent: VecDeque<(u32, Instant)>,
+    /// The latest round trip time measured from a DLRR block, in seconds.
+    pub remote_round_trip_time: Option<f64>,
+    /// Sum of the round trip times measured from DLRR blocks, in seconds.
+    pub remote_total_round_trip_time: f64,
+    /// Number of round trip times measured from DLRR blocks.
+    pub remote_rtt_measurements: u64,
+
     // Application-provided stats
     /// Frame assembly, decoder and renderer statistics provided by the application.
     pub decoder_stats: DecoderStatsUpdate,
@@ -152,6 +171,44 @@ impl InboundRtpStreamAccumulator {
         self.remote_bytes_sent = bytes_sent;
         self.remote_timestamp = Some(now);
         self.reports_received += 1;
+    }
+
+    /// Called when this side sends an RTCP XR receiver reference time block (RFC 3611 section
+    /// 4.4) for the stream: remembers when, so the DLRR sub-block that echoes it gives a round
+    /// trip time.
+    pub fn on_reference_time_sent(&mut self, compact_ntp: u32, now: Instant) {
+        if self.reference_times_sent.len() == REFERENCE_TIMES_REMEMBERED {
+            self.reference_times_sent.pop_front();
+        }
+        self.reference_times_sent.push_back((compact_ntp, now));
+    }
+
+    /// Called when a DLRR sub-block (RFC 3611 section 4.5) answers one of our receiver
+    /// reference times: the round trip time is `A - LRR - DLRR`, where `A - LRR` is the time
+    /// since we sent the reference time the LRR field echoes. A sub-block with LRR 0 (no
+    /// reference time received yet) or naming one we no longer remember gives none.
+    pub fn on_dlrr_received(&mut self, last_rr: u32, dlrr: u32, now: Instant) {
+        if last_rr == 0 {
+            return;
+        }
+        let Some(&(_, sent_at)) = self
+            .reference_times_sent
+            .iter()
+            .rev()
+            .find(|(lrr, _)| *lrr == last_rr)
+        else {
+            return;
+        };
+        let Some(since_sent) = now.checked_duration_since(sent_at) else {
+            return;
+        };
+        let delay = Duration::from_secs_f64(f64::from(dlrr) / 65536.0);
+        // DLRR is truncated to 1/65536 s: on a near-zero path it can exceed the elapsed time by
+        // a fraction of a tick, which is a round trip of 0.
+        let rtt = since_sent.saturating_sub(delay).as_secs_f64();
+        self.remote_round_trip_time = Some(rtt);
+        self.remote_total_round_trip_time += rtt;
+        self.remote_rtt_measurements += 1;
     }
 
     /// Counts one complete frame received (`framesReceived`).
@@ -296,9 +353,9 @@ impl InboundRtpStreamAccumulator {
             local_id: inbound_stats_id(self.kind, self.ssrc),
             remote_timestamp: SystemInstant::now(self.remote_timestamp.unwrap_or(now)),
             reports_sent: self.reports_received,
-            round_trip_time: None,
-            total_round_trip_time: 0.0,
-            round_trip_time_measurements: 0,
+            round_trip_time: self.remote_round_trip_time,
+            total_round_trip_time: self.remote_total_round_trip_time,
+            round_trip_time_measurements: self.remote_rtt_measurements,
         }
     }
 }
@@ -306,6 +363,36 @@ impl InboundRtpStreamAccumulator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_dlrr_answering_a_reference_time_gives_a_round_trip_time() {
+        let mut acc = InboundRtpStreamAccumulator::default();
+        let t0 = Instant::now();
+        acc.on_dlrr_received(0x1234_0000, 0, t0 + Duration::from_millis(50));
+        assert_eq!(acc.remote_rtt_measurements, 0, "nothing was sent yet");
+
+        acc.on_reference_time_sent(0x1234_0000, t0);
+        // Echoed 50 ms after it was sent, held 10 ms by the remote: 40 ms on the wire.
+        acc.on_dlrr_received(
+            0x1234_0000,
+            (0.010 * 65536.0) as u32,
+            t0 + Duration::from_millis(50),
+        );
+        assert_eq!(acc.remote_rtt_measurements, 1);
+        let rtt = acc.remote_round_trip_time.expect("a round trip time");
+        assert!((rtt - 0.040).abs() < 0.001, "{rtt}");
+        acc.on_dlrr_received(0, 0, t0 + Duration::from_millis(60));
+        acc.on_dlrr_received(0x9999_0000, 0, t0 + Duration::from_millis(60));
+        assert_eq!(
+            acc.remote_rtt_measurements, 1,
+            "LRR 0 or unknown gives none"
+        );
+
+        let remote = acc.snapshot_remote(t0);
+        assert_eq!(remote.round_trip_time, Some(rtt));
+        assert_eq!(remote.round_trip_time_measurements, 1);
+        assert!((remote.total_round_trip_time - rtt).abs() < 1e-9);
+    }
 
     #[test]
     fn test_default() {

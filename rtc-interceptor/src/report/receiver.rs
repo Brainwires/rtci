@@ -7,7 +7,8 @@ use crate::{AttributedPacket, Packet, TaggedPacket};
 use sansio::Protocol;
 use shared::TransportContext;
 use shared::error::Error;
-use std::collections::{HashMap, VecDeque};
+use shared::time::SystemInstant;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 /// Builder for the ReceiverReportInterceptor.
@@ -86,10 +87,19 @@ impl ReceiverReportBuilder {
     }
 }
 
+/// The RTCP feedback type (`a=rtcp-fb:<pt> rrtr`) that asks the receiver of a stream to send
+/// RTCP XR receiver reference time blocks (RFC 3611 section 4.4), libwebrtc's name for it.
+pub const RTCP_FB_RRTR: &str = "rrtr";
+
 /// Interceptor that generates RTCP Receiver Reports.
 ///
 /// This interceptor monitors incoming RTP packets, tracks statistics per stream,
 /// and periodically generates RTCP Receiver Reports.
+///
+/// A stream whose negotiated feedback includes [`RTCP_FB_RRTR`] also gets an RTCP XR packet
+/// with a receiver reference time block (RFC 3611 section 4.4) in each report's compound
+/// packet, from the report's SSRC: the sender answers it with a DLRR block (section 4.5),
+/// which gives the receiver a round trip time.
 ///
 /// # Type Parameters
 ///
@@ -109,6 +119,10 @@ pub struct ReceiverReportInterceptor {
     next_timeout: Option<Instant>,
 
     streams: HashMap<u32, ReceiverStream>,
+    /// The remote streams that negotiated receiver reference times.
+    rrtr_streams: HashSet<u32>,
+    /// Wall-clock time taken once, for the NTP timestamps of the reference time blocks.
+    time_baseline: Option<SystemInstant>,
 
     read_queue: VecDeque<TaggedPacket>,
     write_queue: VecDeque<TaggedPacket>,
@@ -122,6 +136,8 @@ impl ReceiverReportInterceptor {
             next_timeout: None,
 
             streams: HashMap::new(),
+            rrtr_streams: HashSet::new(),
+            time_baseline: None,
 
             read_queue: VecDeque::new(),
             write_queue: VecDeque::new(),
@@ -230,12 +246,26 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for ReceiverReportInterceptor {
         {
             self.next_timeout = Some(now + self.interval);
 
-            for stream in self.streams.values_mut() {
+            for (ssrc, stream) in self.streams.iter_mut() {
                 let rr = stream.generate_report(now);
+                let mut compound: Vec<Box<dyn rtcp::Packet>> = vec![Box::new(rr)];
+                if self.rrtr_streams.contains(ssrc) {
+                    let baseline = *self
+                        .time_baseline
+                        .get_or_insert_with(|| SystemInstant::now(now));
+                    compound.push(Box::new(rtcp::extended_report::ExtendedReport {
+                        sender_ssrc: stream.receiver_ssrc(),
+                        reports: vec![Box::new(
+                            rtcp::extended_report::ReceiverReferenceTimeReportBlock {
+                                ntp_timestamp: baseline.ntp(now),
+                            },
+                        )],
+                    }));
+                }
                 self.write_queue.push_back(TaggedPacket {
                     now,
                     transport: TransportContext::default(),
-                    message: AttributedPacket::new(Packet::Rtcp(vec![Box::new(rr)])),
+                    message: AttributedPacket::new(Packet::Rtcp(compound)),
                 });
             }
         }
@@ -251,10 +281,16 @@ impl Interceptor for ReceiverReportInterceptor {
     fn bind_remote_stream(&mut self, info: &StreamInfo) {
         let stream = ReceiverStream::new(info.ssrc, info.clock_rate);
         self.streams.insert(info.ssrc, stream);
+        if info.rtcp_feedback.iter().any(|fb| fb.typ == RTCP_FB_RRTR) {
+            self.rrtr_streams.insert(info.ssrc);
+        } else {
+            self.rrtr_streams.remove(&info.ssrc);
+        }
     }
 
     fn unbind_remote_stream(&mut self, info: &StreamInfo) {
         self.streams.remove(&info.ssrc);
+        self.rrtr_streams.remove(&info.ssrc);
     }
 
     fn bind_local_stream(&mut self, _info: &StreamInfo) {}

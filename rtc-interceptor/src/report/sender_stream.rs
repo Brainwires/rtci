@@ -41,6 +41,15 @@ impl SenderStream {
         }
     }
 
+    pub(crate) fn ssrc(&self) -> u32 {
+        self.ssrc
+    }
+
+    /// The clock rate of the codec the stream is now sent with (a renegotiation changed it).
+    pub(crate) fn set_clock_rate(&mut self, clock_rate: u32) {
+        self.clock_rate = clock_rate as f64;
+    }
+
     pub(crate) fn process_rtp(&mut self, now: Instant, pkt: &rtp::packet::Packet) {
         let seq = pkt.header.sequence_number;
 

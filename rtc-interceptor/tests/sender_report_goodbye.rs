@@ -85,3 +85,43 @@ fn a_stream_that_never_sent_leaves_quietly() {
     chain.unbind_local_stream(&info());
     assert!(chain.poll_write().is_none());
 }
+
+/// A stream unbound and bound again with the same SSRC before the chain is polled (a
+/// renegotiation re-binding it with another codec) goes on: no goodbye, and its sender report
+/// counts carry on.
+#[test]
+fn a_rebound_stream_says_no_goodbye_and_keeps_its_counts() {
+    let mut chain = chain();
+    chain.bind_local_stream(&info());
+    let now = Instant::now();
+    chain.handle_write(rtp(now)).unwrap();
+    while chain.poll_write().is_some() {}
+
+    chain.unbind_local_stream(&info());
+    let rebound = StreamInfo {
+        payload_type: 102,
+        mime_type: "video/H264".to_string(),
+        ..info()
+    };
+    chain.bind_local_stream(&rebound);
+    chain
+        .handle_write(rtp(now + Duration::from_millis(5)))
+        .unwrap();
+
+    let mut reports = vec![];
+    chain.handle_timeout(now + Duration::from_secs(2)).unwrap();
+    while let Some(tagged) = chain.poll_write() {
+        if let Packet::Rtcp(packets) = tagged.message.packet {
+            for packet in packets {
+                assert!(
+                    packet.as_any().downcast_ref::<Goodbye>().is_none(),
+                    "a re-bound stream says no goodbye"
+                );
+                if let Some(sr) = packet.as_any().downcast_ref::<SenderReport>() {
+                    reports.push(sr.packet_count);
+                }
+            }
+        }
+    }
+    assert_eq!(reports, vec![2], "the count carries on over the re-binding");
+}

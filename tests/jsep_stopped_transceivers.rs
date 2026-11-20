@@ -12,6 +12,7 @@ use jsep_common::{
 use rtc::peer_connection::sdp::RTCSessionDescription;
 use rtc::rtp_transceiver::RTCRtpTransceiverDirection;
 use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
+use rtc::sansio::Protocol;
 
 /// A transceiver stopped before it ever had an m= section gets no mid and no m= section.
 #[test]
@@ -199,6 +200,11 @@ a=rtpmap:96 VP8/90000
     answerer.set_remote_description(now, RTCSessionDescription::offer(offer)?)?;
     let answer = answerer.create_answer(None)?;
     answerer.set_local_description(now, answer)?;
+    assert_eq!(
+        answerer.get_transceivers().count(),
+        1,
+        "the rejected section's stopped transceiver goes once the answer is applied"
+    );
 
     let next = answerer.create_offer(None)?;
     let sections = media_sections(&next.sdp);
@@ -267,6 +273,233 @@ a=rtpmap:111 opus/48000/2
     assert_ne!(
         first_ufrag, reopened_ufrag,
         "the new transport is a new ICE session: {first}\n---\n{reopened}"
+    );
+    Ok(())
+}
+
+/// A remote offer with one live video section, mid 0.
+fn live_video_offer() -> String {
+    crlf(&format!(
+        "{SESSION}a=group:BUNDLE 0
+m=video 9 UDP/TLS/RTP/SAVPF 96
+{TRANSPORT}a=mid:0
+a=sendrecv
+a=msid:remote-stream remote-track
+a=ssrc:1111 cname:remote
+a=rtpmap:96 VP8/90000
+"
+    ))
+}
+
+/// The same section, rejected (port 0).
+fn rejected_video_offer() -> String {
+    crlf(&format!(
+        "{SESSION}m=video 0 UDP/TLS/RTP/SAVPF 96
+{TRANSPORT}a=mid:0
+a=inactive
+a=rtpmap:96 VP8/90000
+"
+    ))
+}
+
+/// Whether `pc` has an `OnTrack` event waiting; drains its events.
+fn fired_track(pc: &mut rtc::peer_connection::RTCPeerConnection) -> bool {
+    let mut fired = false;
+    while let Some(event) = pc.poll_event() {
+        if matches!(
+            event,
+            rtc::peer_connection::event::RTCPeerConnectionEvent::OnTrack(_)
+        ) {
+            fired = true;
+        }
+    }
+    fired
+}
+
+/// Answers `offer` on `pc` and applies the answer; returns the answer's SDP.
+fn answer_offer(
+    pc: &mut rtc::peer_connection::RTCPeerConnection,
+    offer: String,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let now = Instant::now();
+    pc.set_remote_description(now, RTCSessionDescription::offer(offer)?)?;
+    let answer = pc.create_answer(None)?;
+    pc.set_local_description(now, answer.clone())?;
+    Ok(answer.sdp)
+}
+
+/// A remote offer that rejects the m= section of an existing transceiver stops that
+/// transceiver (W3C 4.4.1.6), without a track event, and the section is answered rejected.
+#[test]
+fn a_rejected_section_in_a_remote_offer_stops_its_transceiver() -> TestResult {
+    let mut answerer = default_peer()?;
+    answer_offer(&mut answerer, live_video_offer())?;
+    let id = answerer.get_transceivers().next().expect("a transceiver");
+    assert!(!answerer.rtp_transceiver(id).expect("transceiver").stopped());
+    fired_track(&mut answerer);
+
+    let now = Instant::now();
+    answerer.set_remote_description(now, RTCSessionDescription::offer(rejected_video_offer())?)?;
+    assert!(
+        answerer.rtp_transceiver(id).expect("transceiver").stopped(),
+        "the rejected section's transceiver is stopped"
+    );
+    assert!(
+        !fired_track(&mut answerer),
+        "no track event for a rejected section"
+    );
+    let answer = answerer.create_answer(None)?;
+    assert_eq!(
+        port_of(&media_sections(&answer.sdp)[0]),
+        0,
+        "{}",
+        answer.sdp
+    );
+    Ok(())
+}
+
+/// A remote answer that rejects the m= section of one of our transceivers stops it (W3C
+/// 4.4.1.6), and the answer then removes it.
+#[test]
+fn a_rejected_section_in_a_remote_answer_stops_its_transceiver() -> TestResult {
+    let mut offerer = default_peer()?;
+    offerer.add_track(video_track("video", 0x0e0f_0011))?;
+    let now = Instant::now();
+    let offer = offerer.create_offer(None)?;
+    offerer.set_local_description(now, offer.clone())?;
+    let mid = mid_of(&media_sections(&offer.sdp)[0])
+        .expect("a mid")
+        .to_owned();
+
+    let answer = crlf(&format!(
+        "{SESSION}m=video 0 UDP/TLS/RTP/SAVPF 96
+{}a=mid:{mid}
+a=inactive
+a=rtpmap:96 VP8/90000
+",
+        TRANSPORT.replace("a=setup:actpass", "a=setup:active")
+    ));
+    let id = offerer.get_transceivers().next().expect("a transceiver");
+    offerer.set_remote_description(now, RTCSessionDescription::answer(answer)?)?;
+    assert!(
+        !fired_track(&mut offerer),
+        "no track event for a rejected section"
+    );
+    assert_eq!(
+        offerer.get_transceivers().count(),
+        0,
+        "stopped by the answer, and removed: the answer rejected its section"
+    );
+    assert_eq!(offerer.take_removed_transceivers(), vec![id]);
+    Ok(())
+}
+
+/// A rollback of a remote offer that stopped an existing transceiver leaves it stopped (the
+/// stop algorithm is not undone) and does not remove it: the transceiver was not created by the
+/// offer, and no answer rejected its section.
+#[test]
+fn a_rollback_leaves_a_transceiver_the_offer_stopped_stopped() -> TestResult {
+    let mut answerer = default_peer()?;
+    answer_offer(&mut answerer, live_video_offer())?;
+    let now = Instant::now();
+    answerer.set_remote_description(now, RTCSessionDescription::offer(rejected_video_offer())?)?;
+    answerer.set_remote_description(now, RTCSessionDescription::rollback(None)?)?;
+    let ids: Vec<_> = answerer.get_transceivers().collect();
+    assert_eq!(ids.len(), 1);
+    let t = answerer.rtp_transceiver(ids[0]).expect("transceiver");
+    assert!(t.stopped());
+    assert_eq!(t.mid().as_deref(), Some("0"), "still associated");
+    assert!(answerer.take_removed_transceivers().is_empty());
+    Ok(())
+}
+
+/// Once an answer leaves a stopped transceiver's m= section rejected, the transceiver is removed from the set of transceivers (W3C 4.4.1.6), on the
+/// side that stopped it and on the side whose transceiver the offer stopped; the ids of the
+/// others move down, as `take_removed_transceivers` reports.
+#[test]
+fn stopped_transceivers_are_removed_once_their_sections_are_rejected() -> TestResult {
+    let mut offerer = default_peer()?;
+    let mut answerer = default_peer()?;
+    let first = offerer.add_track(video_track("first", 0x0e0f_0021))?;
+    let second = offerer.add_track(video_track("second", 0x0e0f_0022))?;
+    exchange(&mut offerer, &mut answerer)?;
+    assert_eq!(answerer.get_transceivers().count(), 2);
+    let second_mid = offerer
+        .rtp_transceiver(second.into())
+        .expect("transceiver")
+        .mid()
+        .clone();
+
+    offerer
+        .rtp_transceiver(first.into())
+        .expect("transceiver")
+        .stop()?;
+    let now = Instant::now();
+    let offer = offerer.create_offer(None)?;
+    offerer.set_local_description(now, offer.clone())?;
+    assert_eq!(
+        offerer.get_transceivers().count(),
+        2,
+        "kept while the offer is pending"
+    );
+    answerer.set_remote_description(now, offer)?;
+    let answer = answerer.create_answer(None)?;
+    answerer.set_local_description(now, answer.clone())?;
+    offerer.set_remote_description(now, answer)?;
+
+    for (side, pc) in [("offerer", &mut offerer), ("answerer", &mut answerer)] {
+        let ids: Vec<_> = pc.get_transceivers().collect();
+        assert_eq!(ids.len(), 1, "{side}: the stopped transceiver is removed");
+        let t = pc.rtp_transceiver(ids[0]).expect("transceiver");
+        assert!(!t.stopped(), "{side}");
+        assert_eq!(t.mid().clone(), second_mid, "{side}: the live one stays");
+        assert_eq!(pc.take_removed_transceivers(), vec![0], "{side}");
+        assert!(
+            pc.take_removed_transceivers().is_empty(),
+            "{side}: taken once"
+        );
+    }
+
+    // A later exchange keeps the section rejected and creates no transceiver for it again.
+    let (offer, answer) = exchange(&mut offerer, &mut answerer)?;
+    assert_eq!(port_of(&media_sections(&offer)[0]), 0, "{offer}");
+    assert_eq!(port_of(&media_sections(&answer)[0]), 0, "{answer}");
+    assert_eq!(offerer.get_transceivers().count(), 1);
+    assert_eq!(answerer.get_transceivers().count(), 1);
+    Ok(())
+}
+
+/// A rolled-back local offer removes nothing: the stopped transceiver stays, stopped, until an
+/// answer rejects its section.
+#[test]
+fn a_rolled_back_offer_removes_no_stopped_transceiver() -> TestResult {
+    let mut offerer = default_peer()?;
+    let mut answerer = default_peer()?;
+    let first = offerer.add_track(video_track("first", 0x0e0f_0031))?;
+    exchange(&mut offerer, &mut answerer)?;
+    offerer
+        .rtp_transceiver(first.into())
+        .expect("transceiver")
+        .stop()?;
+    let now = Instant::now();
+    let offer = offerer.create_offer(None)?;
+    offerer.set_local_description(now, offer)?;
+    offerer.set_local_description(now, RTCSessionDescription::rollback(None)?)?;
+    let ids: Vec<_> = offerer.get_transceivers().collect();
+    assert_eq!(ids.len(), 1);
+    assert!(
+        offerer
+            .rtp_transceiver(ids[0])
+            .expect("transceiver")
+            .stopped()
+    );
+    assert!(offerer.take_removed_transceivers().is_empty());
+
+    exchange(&mut offerer, &mut answerer)?;
+    assert_eq!(
+        offerer.get_transceivers().count(),
+        0,
+        "the next exchange removes it"
     );
     Ok(())
 }

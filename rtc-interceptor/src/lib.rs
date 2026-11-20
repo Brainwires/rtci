@@ -309,7 +309,7 @@ pub use pacing::sender::{
 pub use packet::{Attribute, AttributedPacket, Packet, TaggedPacket};
 pub use pass_through::PassThroughInterceptor;
 pub use registry::{Registry, Slot};
-pub use report::receiver::{ReceiverReportBuilder, ReceiverReportInterceptor};
+pub use report::receiver::{RTCP_FB_RRTR, ReceiverReportBuilder, ReceiverReportInterceptor};
 pub use report::sender::{SenderReportBuilder, SenderReportInterceptor};
 pub use rfc8888::recorder::CcFeedbackRecorder;
 pub use rfc8888::sender::{

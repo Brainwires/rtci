@@ -1043,6 +1043,31 @@ impl RTCStatsAccumulator {
         }
     }
 
+    /// A transceiver was removed from the peer connection's set of transceivers: the streams
+    /// and media sources of the transceivers after it follow their ids down by one. The
+    /// removed transceiver's own (stopped) streams keep their stats in the full report but
+    /// no longer answer to a sender or receiver selector, which names a live transceiver.
+    pub(crate) fn transceiver_removed(&mut self, removed: RTCRtpTransceiverId) {
+        let remap = |id: &mut RTCRtpTransceiverId| {
+            if *id == removed {
+                *id = RTCRtpTransceiverId::MAX;
+            } else if *id > removed && *id != RTCRtpTransceiverId::MAX {
+                *id -= 1;
+            }
+        };
+        for stream in self.inbound_rtp_streams.values_mut() {
+            remap(&mut stream.transceiver_id);
+        }
+        for stream in self.outbound_rtp_streams.values_mut() {
+            remap(&mut stream.transceiver_id);
+        }
+        for source in self.media_sources.values_mut() {
+            if let Some(id) = source.transceiver_id.as_mut() {
+                remap(id);
+            }
+        }
+    }
+
     /// Removes an outbound stream's stats, its remote-inbound object with them, and its RTX
     /// reverse-lookup entry.
     pub(crate) fn remove_outbound_rtp_stream(&mut self, ssrc: SSRC) {

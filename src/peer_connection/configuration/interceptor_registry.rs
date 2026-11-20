@@ -208,6 +208,7 @@ pub fn register_default_interceptors(
     let registry = configure_twcc_receiver_only(registry, media_engine)?;
 
     let registry = configure_rtcp_reports(registry);
+    configure_receiver_reference_time(media_engine);
 
     let registry = configure_key_frame_requests(registry);
 
@@ -332,6 +333,35 @@ pub fn configure_rtcp_reports(registry: Registry) -> Registry {
     registry
         .with(Slot::ReceiverReport, ReceiverReportBuilder::new().build())
         .with(Slot::SenderReport, SenderReportBuilder::new().build())
+}
+
+/// Negotiates receiver-side round trip time measurement for video (`a=rtcp-fb:<pt> rrtr`,
+/// libwebrtc's feedback name for RTCP XR receiver reference times, RFC 3611 section 4.4).
+///
+/// With it negotiated, the receiver report interceptor ([`configure_rtcp_reports`]) sends a
+/// receiver reference time block with each receiver report of a video stream; the remote sender
+/// answers with a DLRR block (section 4.5), and the stream's `remote-outbound-rtp` stats report
+/// `roundTripTime`, `totalRoundTripTime` and `roundTripTimeMeasurements`. The sender report
+/// interceptor answers reference times whether or not this is negotiated, as libwebrtc does.
+/// Part of [`register_default_interceptors`].
+///
+/// # Examples
+///
+/// ```
+/// use rtc::peer_connection::configuration::interceptor_registry::configure_receiver_reference_time;
+/// use rtc::peer_connection::configuration::media_engine::MediaEngine;
+///
+/// let mut media_engine = MediaEngine::default();
+/// configure_receiver_reference_time(&mut media_engine);
+/// ```
+pub fn configure_receiver_reference_time(media_engine: &mut MediaEngine) {
+    media_engine.register_feedback(
+        RTCPFeedback {
+            typ: interceptor::RTCP_FB_RRTR.to_owned(),
+            parameter: "".to_owned(),
+        },
+        RtpCodecKind::Video,
+    );
 }
 
 /// Registers RTP header extensions required for simulcast streaming.

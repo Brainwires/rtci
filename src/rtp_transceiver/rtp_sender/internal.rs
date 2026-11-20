@@ -12,7 +12,7 @@ use crate::rtp_transceiver::rtp_sender::rtp_encoding_parameters::RTCRtpEncodingP
 use crate::rtp_transceiver::rtp_sender::rtp_header_extension_capability::RTCRtpHeaderExtensionCapability;
 use crate::rtp_transceiver::rtp_sender::rtp_send_parameters::RTCRtpSendParameters;
 use crate::rtp_transceiver::rtp_sender::set_parameter_options::RTCSetParameterOptions;
-use interceptor::Interceptor;
+use interceptor::{Interceptor, StreamInfo};
 use shared::error::{Error, Result};
 use shared::util::math_rand_alpha;
 
@@ -47,6 +47,10 @@ pub(crate) struct RTCRtpSenderInternal {
     /// Whether SDP negotiation has occurred for this sender
     negotiated: bool,
     sent: bool,
+    /// The streams this sender bound to the interceptors, as they were bound: a renegotiation
+    /// that changes one unbinds exactly these before binding the new ones, and `stop` unbinds
+    /// them whatever the parameters are by then.
+    bound_streams: Vec<StreamInfo>,
 }
 
 impl RTCRtpSenderInternal {
@@ -80,6 +84,7 @@ impl RTCRtpSenderInternal {
             last_returned_parameters: None,
             negotiated: false,
             sent: false,
+            bound_streams: Vec::new(),
         }
     }
 
@@ -332,12 +337,10 @@ impl RTCRtpSenderInternal {
     /// Stops the sender (placeholder for future implementation).
     pub(crate) fn stop(
         &mut self,
-        media_engine: &MediaEngine,
+        _media_engine: &MediaEngine,
         interceptor: &mut dyn Interceptor,
     ) -> Result<()> {
-        if self.has_sent() && !self.track().codings().is_empty() {
-            self.interceptor_local_streams_op(media_engine, interceptor, false);
-        }
+        self.unbind_local_streams(interceptor);
 
         self.negotiated = false;
         self.sent = false;
@@ -370,49 +373,113 @@ impl RTCRtpSenderInternal {
                 encoding.rtp_coding_parameters.fec = None;
             }
         }
+        // The streams are bound from the track's codings (`local_stream_infos`), which carry
+        // the same repair SSRCs: dropped there too, or a stream would bind an RTX / FEC SSRC
+        // with no payload type to send it with.
+        self.sender_track
+            .clear_repair_ssrcs(!is_rtx_enabled, !is_fec_enabled);
+        self.last_returned_parameters = None;
     }
 
-    pub(crate) fn interceptor_local_streams_op(
-        &mut self,
-        media_engine: &MediaEngine,
-        interceptor: &mut dyn Interceptor,
-        is_binding: bool,
-    ) {
-        let parameters = self.get_parameters(media_engine).clone();
+    /// The streams this sender sends, as the interceptors are to see them now: each coding's
+    /// SSRCs with the codec it is sent with ([`encoding_send_codec`]), that codec's RTX
+    /// payload type, the FEC payload type and the negotiated header extensions.
+    ///
+    /// Read from the negotiated state directly, not through `get_parameters`, so that neither
+    /// its cache (header extensions do not invalidate it) nor its transaction id is touched.
+    fn local_stream_infos(&self, media_engine: &MediaEngine) -> Vec<StreamInfo> {
+        let codecs = &self.send_codecs;
+        let header_extensions = media_engine
+            .get_rtp_parameters_by_kind(self.kind(), RTCRtpTransceiverDirection::Sendonly)
+            .header_extensions;
 
+        let mut infos = vec![];
         for coding in self.track().codings() {
             // An encoding without a codec of its own is sent with the codec negotiation picked,
             // and its stream is bound like any other: without it the interceptors never see the
             // stream (no sender reports, no NACK responder, no TWCC).
             if let Some(&ssrc) = coding.rtp_coding_parameters.ssrc.as_ref()
-                && let Some(codec) =
-                    encoding_send_codec(&coding.codec, &parameters.rtp_parameters.codecs)
+                && let Some(codec) = encoding_send_codec(&coding.codec, codecs)
             {
-                let stream_info = create_stream_info(
+                let payload_type_rtx = find_rtx_payload_type(codec.payload_type, codecs);
+                let payload_type_fec = find_fec_payload_type(codecs);
+                infos.push(create_stream_info(
                     ssrc,
+                    // A repair SSRC goes with a repair payload type: without one negotiated it
+                    // could not be sent, so the stream does not name it.
                     coding
                         .rtp_coding_parameters
                         .rtx
                         .as_ref()
+                        .filter(|_| payload_type_rtx.is_some())
                         .map(|rtx| rtx.ssrc),
                     coding
                         .rtp_coding_parameters
                         .fec
                         .as_ref()
+                        .filter(|_| payload_type_fec.is_some())
                         .map(|fec| fec.ssrc),
                     codec.payload_type,
-                    find_rtx_payload_type(codec.payload_type, &parameters.rtp_parameters.codecs),
-                    find_fec_payload_type(&parameters.rtp_parameters.codecs),
+                    payload_type_rtx,
+                    payload_type_fec,
                     &codec.rtp_codec,
-                    &parameters.rtp_parameters.header_extensions,
-                );
-
-                if is_binding {
-                    interceptor.bind_local_stream(&stream_info);
-                } else {
-                    interceptor.unbind_local_stream(&stream_info);
-                }
+                    &header_extensions,
+                ));
             }
+        }
+        infos
+    }
+
+    /// Binds this sender's streams to the interceptors, as negotiation left them.
+    pub(crate) fn bind_local_streams(
+        &mut self,
+        media_engine: &MediaEngine,
+        interceptor: &mut dyn Interceptor,
+    ) {
+        let infos = self.local_stream_infos(media_engine);
+        for info in &infos {
+            interceptor.bind_local_stream(info);
+        }
+        self.bound_streams = infos;
+    }
+
+    /// Re-binds this sender's streams when a renegotiation changed what they are bound with
+    /// (the codec an encoding is sent with, so its payload type and clock rate, the RTX payload
+    /// type or SSRC, the FEC flow, the header extensions). The SSRCs stay; each changed stream
+    /// is unbound with the information it was bound with and bound again with the new.
+    ///
+    /// The sender report interceptor sees the unbind and bind back to back and keeps the
+    /// stream (its packet and octet counts and timing carry on, no RTCP BYE is sent). Other
+    /// interceptors reset what they keep for it: the NACK responder's buffer of sent packets is
+    /// emptied (packets sent before the change are no longer resent), and the TWCC and
+    /// congestion control send side forget the stream until its next packet.
+    ///
+    /// # Returns
+    ///
+    /// Whether anything was re-bound.
+    pub(crate) fn rebind_local_streams(
+        &mut self,
+        media_engine: &MediaEngine,
+        interceptor: &mut dyn Interceptor,
+    ) -> bool {
+        let infos = self.local_stream_infos(media_engine);
+        if infos == self.bound_streams {
+            return false;
+        }
+        for info in &self.bound_streams {
+            interceptor.unbind_local_stream(info);
+        }
+        for info in &infos {
+            interceptor.bind_local_stream(info);
+        }
+        self.bound_streams = infos;
+        true
+    }
+
+    /// Unbinds the streams this sender bound, with the information they were bound with.
+    pub(crate) fn unbind_local_streams(&mut self, interceptor: &mut dyn Interceptor) {
+        for info in std::mem::take(&mut self.bound_streams) {
+            interceptor.unbind_local_stream(&info);
         }
     }
 }

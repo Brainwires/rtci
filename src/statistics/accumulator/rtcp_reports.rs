@@ -5,6 +5,7 @@
 //! What each packet means for the stats is decided here, next to the accumulators it updates.
 
 use super::RTCStatsAccumulator;
+use rtcp::extended_report::{DLRRReportBlock, ExtendedReport, ReceiverReferenceTimeReportBlock};
 use rtcp::header::{FORMAT_CCFB, PacketType};
 use rtcp::payload_feedbacks::full_intra_request::FullIntraRequest;
 use rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
@@ -41,6 +42,8 @@ impl RTCStatsAccumulator {
     ///   our outbound streams (the remote-inbound object): loss, jitter, and a round trip time
     ///   when it echoes one of our sender reports.
     /// * NACK, PLI and FIR are feedback about one of our outbound streams.
+    /// * An XR DLRR sub-block (RFC 3611 section 4.5) answers a receiver reference time we sent
+    ///   for one of our inbound streams: the remote-outbound object's round trip time.
     pub(crate) fn on_rtcp_received(&mut self, packets: &[Box<dyn rtcp::Packet>], now: Instant) {
         for packet in packets {
             let packet = packet.as_ref();
@@ -61,6 +64,25 @@ impl RTCStatsAccumulator {
             for report in reception_reports(packet) {
                 if let Some(stream) = self.outbound_rtp_streams.get_mut(&report.ssrc) {
                     stream.on_receiver_report(report, now);
+                }
+            }
+
+            if let Some(xr) = packet.as_any().downcast_ref::<ExtendedReport>() {
+                for block in &xr.reports {
+                    let Some(dlrr) = block.as_any().downcast_ref::<DLRRReportBlock>() else {
+                        continue;
+                    };
+                    for sub in &dlrr.reports {
+                        // A sub-block names the SSRC our reference time came from, which is the
+                        // SSRC our receiver reports about the stream are sent from.
+                        if let Some(stream) = self
+                            .inbound_rtp_streams
+                            .values_mut()
+                            .find(|s| s.receiver_ssrc == Some(sub.ssrc))
+                        {
+                            stream.on_dlrr_received(sub.last_rr, sub.dlrr, now);
+                        }
+                    }
                 }
             }
 
@@ -93,6 +115,9 @@ impl RTCStatsAccumulator {
     /// * A reception report block, in an RR or an SR, is what we tell the remote sender about
     ///   one of our inbound streams: its cumulative loss and jitter are the inbound object's.
     /// * NACK, PLI and FIR are feedback we send about one of our inbound streams.
+    /// * An XR receiver reference time block (RFC 3611 section 4.4) is remembered for the
+    ///   inbound stream whose receiver reports come from the same SSRC, so the DLRR that
+    ///   echoes it gives a round trip time.
     pub(crate) fn on_rtcp_sent(&mut self, packets: &[Box<dyn rtcp::Packet>], now: Instant) {
         for packet in packets {
             let packet = packet.as_ref();
@@ -106,9 +131,35 @@ impl RTCStatsAccumulator {
                 stream.on_sender_report_sent(sr.ntp_time, now);
             }
 
+            let reporter_ssrc = packet
+                .as_any()
+                .downcast_ref::<ReceiverReport>()
+                .map(|rr| rr.ssrc)
+                .or_else(|| {
+                    packet
+                        .as_any()
+                        .downcast_ref::<SenderReport>()
+                        .map(|sr| sr.ssrc)
+                });
             for report in reception_reports(packet) {
                 if let Some(stream) = self.inbound_rtp_streams.get_mut(&report.ssrc) {
                     stream.on_rtcp_rr_generated(i64::from(report.cumulative_lost()), report.jitter);
+                    stream.receiver_ssrc = reporter_ssrc;
+                }
+            }
+
+            if let Some(xr) = packet.as_any().downcast_ref::<ExtendedReport>() {
+                for block in &xr.reports {
+                    if let Some(rrtr) = block
+                        .as_any()
+                        .downcast_ref::<ReceiverReferenceTimeReportBlock>()
+                        && let Some(stream) = self
+                            .inbound_rtp_streams
+                            .values_mut()
+                            .find(|s| s.receiver_ssrc == Some(xr.sender_ssrc))
+                    {
+                        stream.on_reference_time_sent((rrtr.ntp_timestamp >> 16) as u32, now);
+                    }
                 }
             }
 
