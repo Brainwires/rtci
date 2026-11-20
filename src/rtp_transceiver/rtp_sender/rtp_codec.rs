@@ -305,19 +305,22 @@ pub(crate) fn repair_family(codec: &RTCRtpCodec) -> &'static str {
     }
 }
 
-// For now, only FlexFEC is supported.
-pub(crate) fn find_fec_payload_type(haystack: &[RTCRtpCodecParameters]) -> Option<PayloadType> {
-    for c in haystack {
-        if c.rtp_codec
-            .mime_type
-            .to_lowercase()
-            .contains(MIME_TYPE_FLEX_FEC)
-        {
-            return Some(c.payload_type);
-        }
-    }
+/// Whether `mime_type` names the FlexFEC this engine implements: draft-ietf-payload-flexible-fec
+/// -scheme-03 (`video/flexfec-03`), matched exactly.
+///
+/// RFC 8627's `video/flexfec` is a different wire format (its own header layout and masks), so a
+/// substring match, which also took `video/flexfec`, handed RFC 8627 packets to the draft-03
+/// coder.
+pub(crate) fn is_flexfec03_mime_type(mime_type: &str) -> bool {
+    mime_type.eq_ignore_ascii_case(MIME_TYPE_FLEX_FEC03)
+}
 
-    None
+/// The payload type of the FlexFEC draft-03 format in `haystack`, the only FEC implemented.
+pub(crate) fn find_fec_payload_type(haystack: &[RTCRtpCodecParameters]) -> Option<PayloadType> {
+    haystack
+        .iter()
+        .find(|c| is_flexfec03_mime_type(&c.rtp_codec.mime_type))
+        .map(|c| c.payload_type)
 }
 
 /// Computes the intersection of two RTCP feedback lists.
@@ -353,6 +356,10 @@ pub(crate) fn rtcp_feedback_intersection(
 #[cfg(test)]
 #[path = "rtp_codec_packetization_test.rs"]
 mod rtp_codec_packetization_test;
+
+#[cfg(test)]
+#[path = "rtp_codec_flexfec_test.rs"]
+mod rtp_codec_flexfec_test;
 
 #[cfg(test)]
 mod rtx_apt_test {
