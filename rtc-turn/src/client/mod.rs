@@ -8,6 +8,8 @@
 //! The three address kinds are easy to confuse: [`RelayedAddr`] is what peers send to,
 //! [`ReflexiveAddr`] is how the server sees this client, and [`PeerAddr`] is the far end.
 #[cfg(test)]
+mod client_allocate_test;
+#[cfg(test)]
 mod client_permission_test;
 #[cfg(test)]
 mod client_retry_test;
@@ -704,15 +706,21 @@ impl Client {
             Box::new(FINGERPRINT),
         ])?;
 
+        // The authenticated retry that follows the 401 goes out under an id of its own, drawn
+        // here at random rather than derived from this request's (RFC 8489 §6.3.1: every new
+        // request takes a new transaction id). It is the one the caller is handed, because the
+        // retry is the request that carries the allocation.
+        let allocation_id = TransactionId::new();
+
         debug!("client.Allocate call PerformTransaction 1");
-        let tid = self.perform_transaction(
+        self.perform_transaction(
             now,
             &msg,
             self.turn_server_addr_or_err()?,
-            TransactionType::AllocateAttempt,
+            TransactionType::AllocateAttempt(allocation_id),
             None,
         );
-        Ok(authenticated_allocate_id(tid))
+        Ok(allocation_id)
     }
 
     fn handle_allocate_response(
@@ -722,26 +730,22 @@ impl Client {
         allocate_state: TransactionType,
     ) -> Result<()> {
         match allocate_state {
-            TransactionType::AllocateAttempt => {
+            TransactionType::AllocateAttempt(allocation_id) => {
                 // Anonymous allocate failed, trying to authenticate. Whatever is reported about
-                // it from here on names the id allocate() handed out, as the response does.
+                // it from here on names the id allocate() handed out.
                 let nonce = match Nonce::get_from_as(&response, ATTR_NONCE) {
                     Ok(nonce) => nonce,
                     Err(err) => {
-                        self.events.push_back(Event::AllocateError(
-                            authenticated_allocate_id(response.transaction_id),
-                            err,
-                        ));
+                        self.events
+                            .push_back(Event::AllocateError(allocation_id, err));
                         return Ok(());
                     }
                 };
                 self.realm = match Realm::get_from_as(&response, ATTR_REALM) {
                     Ok(realm) => realm,
                     Err(err) => {
-                        self.events.push_back(Event::AllocateError(
-                            authenticated_allocate_id(response.transaction_id),
-                            err,
-                        ));
+                        self.events
+                            .push_back(Event::AllocateError(allocation_id, err));
                         return Ok(());
                     }
                 };
@@ -759,13 +763,10 @@ impl Client {
 
                 let mut msg = Message::new();
 
-                // make it same as allocate() return value so that client can retrieve it
-                // from Event::AllocateResponse
-                let tid = authenticated_allocate_id(response.transaction_id);
-
-                // Trying to authorize.
+                // Trying to authorize, under the id allocate() returned, so the caller can
+                // match Event::AllocateResponse with it.
                 msg.build(&[
-                    Box::new(tid),
+                    Box::new(allocation_id),
                     Box::new(MessageType::new(METHOD_ALLOCATE, CLASS_REQUEST)),
                     Box::new(RequestedTransport {
                         // Always a UDP relay, however the server is reached: REQUESTED-TRANSPORT

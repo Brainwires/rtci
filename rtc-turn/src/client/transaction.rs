@@ -17,17 +17,6 @@ const MAX_RTX_COUNT: u16 = 7; // total 7 requests (Rc)
 /// this is how long the client waits for its answer.
 const RELIABLE_TRANSACTION_TIMEOUT: Duration = Duration::from_millis(39_500);
 
-/// The id the authenticated retry of an Allocate uses: the anonymous request's, one on.
-///
-/// [`Client::allocate`](crate::client::Client::allocate) hands this one to its caller,
-/// because the anonymous request is answered with 401 and it is the retry that carries the
-/// allocation. Everything the caller is told about that allocation names it.
-pub(crate) fn authenticated_allocate_id(attempt: TransactionId) -> TransactionId {
-    let mut tid = attempt;
-    tid.0[TRANSACTION_ID_SIZE - 1] = tid.0[TRANSACTION_ID_SIZE - 1].wrapping_add(1);
-    tid
-}
-
 /// What a re-sendable TURN request carries from one attempt to the next.
 ///
 /// A CreatePermission, Refresh or ChannelBind answered with 438 (Stale Nonce) is sent again
@@ -72,7 +61,10 @@ impl Retry {
 
 pub(crate) enum TransactionType {
     BindingRequest,
-    AllocateAttempt,
+    /// The anonymous Allocate. It carries the id the authenticated retry will go out under,
+    /// which [`Client::allocate`](crate::client::Client::allocate) hands to its caller and
+    /// everything the caller is told about that allocation names.
+    AllocateAttempt(TransactionId),
     AllocateRequest(TextAttribute),
     /// The relay, the peer a caller asked for (`None` for a permission refresh), every peer
     /// the request names, and its retry state.
@@ -88,7 +80,7 @@ impl TransactionType {
     /// was handed, which a retry or the Allocate exchange does not put on the wire.
     pub(crate) fn report_id(&self, wire: TransactionId) -> TransactionId {
         match self {
-            Self::AllocateAttempt => authenticated_allocate_id(wire),
+            Self::AllocateAttempt(allocation_id) => *allocation_id,
             Self::CreatePermissionRequest(_, _, _, retry)
             | Self::RefreshRequest(_, _, retry)
             | Self::ChannelBindRequest(_, _, retry) => retry.report_id(wire),
