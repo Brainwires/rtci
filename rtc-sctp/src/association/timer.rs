@@ -263,6 +263,10 @@ fn calculate_next_timeout(rto: u64, n_rtos: usize) -> u64 {
 }
 
 #[cfg(test)]
+#[path = "timer_test.rs"]
+mod timer_test;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
