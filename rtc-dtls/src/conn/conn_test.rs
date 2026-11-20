@@ -749,12 +749,13 @@ fn test_failed_flight_is_not_parsed_again() {
     ));
     assert!(conn.current_handshake_state == HandshakeState::Errored);
 
-    // More handshake records: the failed flight is not parsed again.
+    // More handshake records: the failed flight is not parsed again. The failed handshake
+    // failed the association, which refuses any further handshake step as closed.
     for _ in 0..100 {
         conn.handshake_rx = Some(());
         assert!(matches!(
             conn.handshake(Instant::now()),
-            Err(Error::ErrInvalidFsmTransition)
+            Err(Error::ErrConnClosed)
         ));
     }
     assert!(conn.current_handshake_state == HandshakeState::Errored);
