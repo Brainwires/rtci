@@ -774,6 +774,10 @@ pub struct RTCPeerConnection {
     last_answer: String,
 
     ice_restart_requested: Option<RTCOfferOptions>,
+    /// The last completed offer/answer rejected every m-section, which closes the transport
+    /// (RFC 8843 §7.1.3, RFC 9429 §5.10): the next description that sets one up with new ICE
+    /// credentials starts new ICE and DTLS associations.
+    transport_closed: bool,
     negotiation_needed_state: NegotiationNeededState,
     is_negotiation_ongoing: bool,
     // wpt100:hdrext — `alwaysNegotiateDataChannels` (see `always_negotiate`).
@@ -1651,6 +1655,8 @@ impl RTCPeerConnection {
                 candidates,
             }) = extract_ice_details(parsed_remote_description)?
             {
+                // A description that sets up a transport consumes the closure of the last one.
+                let new_association = std::mem::take(&mut self.transport_closed);
                 // If one of the agents is lite and the other one is not, the lite agent must be
                 // the controlling agent. If both or neither agents are lite the offering agent
                 // is controlling. RFC 8445 S6.1.1
@@ -1687,9 +1693,18 @@ impl RTCPeerConnection {
 
                     // RFC 8842: on ICE restart the DTLS transport must re-handshake over the new
                     // ICE path. Reset the DTLS endpoint with the description's fingerprints so
-                    // the next ICESelectedCandidatePairChange triggers a fresh handshake.
-                    self.dtls_transport_mut()
-                        .restart(local_ice_role, remote_dtls_parameters.clone())?;
+                    // the next ICESelectedCandidatePairChange triggers a fresh handshake. After
+                    // the transport was closed the peer starts a new association even with the
+                    // same certificate and role, so the session is never kept then.
+                    if new_association {
+                        self.dtls_transport_mut().restart_new_association(
+                            local_ice_role,
+                            remote_dtls_parameters.clone(),
+                        )?;
+                    } else {
+                        self.dtls_transport_mut()
+                            .restart(local_ice_role, remote_dtls_parameters.clone())?;
+                    }
                 }
 
                 for candidate in candidates {

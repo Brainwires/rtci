@@ -220,6 +220,7 @@ impl RTCPeerConnection {
             last_offer: String::new(),
             last_answer: String::new(),
             ice_restart_requested: None,
+            transport_closed: false,
             negotiation_needed_state: NegotiationNeededState::Empty,
             is_negotiation_ongoing: false,
             always_negotiate_data_channels: false,
@@ -717,6 +718,7 @@ impl RTCPeerConnection {
 
                                     self.current_local_description = Some(sd.clone());
                                     self.current_remote_description = pending_remote_description;
+                                    self.transport_closed = rejects_every_media_section(&sd);
                                 }
                                 next_state
                             }
@@ -789,6 +791,7 @@ impl RTCPeerConnection {
 
                                 self.current_remote_description = Some(sd.clone());
                                 self.current_local_description = pending_local_description;
+                                self.transport_closed = rejects_every_media_section(&sd);
                             }
                             next_state
                         }
@@ -2185,6 +2188,43 @@ pub(crate) fn answered_direction(
         offered
     };
     local.intersect(offered.reverse())
+}
+
+/// Whether the description has m-sections and rejects every one (port 0): a completed
+/// offer/answer like that leaves no transport (RFC 8843 §7.1.3, RFC 9429 §5.10).
+fn rejects_every_media_section(desc: &RTCSessionDescription) -> bool {
+    desc.parsed.as_ref().is_some_and(|parsed| {
+        !parsed.media_descriptions.is_empty()
+            && parsed.media_descriptions.iter().all(is_rejected_media)
+    })
+}
+
+#[cfg(test)]
+mod transport_closed_tests {
+    use super::*;
+    use crate::peer_connection::sdp::session_description::RTCSessionDescription;
+
+    fn offer(media: &str) -> RTCSessionDescription {
+        let sdp =
+            format!("v=0\r\no=- 1 2 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 1\r\n{media}");
+        RTCSessionDescription::offer(sdp).expect("offer")
+    }
+
+    /// A description whose every m-section is rejected closes the transport; one live section
+    /// or none at all does not.
+    #[test]
+    fn rejects_every_media_section_only_when_all_are_rejected() {
+        let rejected_video =
+            "m=video 0 UDP/TLS/RTP/SAVPF 120\r\nc=IN IP4 0.0.0.0\r\na=inactive\r\na=mid:0\r\n";
+        let live_audio = "m=audio 9 UDP/TLS/RTP/SAVPF 109\r\nc=IN IP4 0.0.0.0\r\na=mid:1\r\n\
+                          a=ice-ufrag:abcd\r\na=ice-pwd:abcdefghijklmnopqrstuv\r\n\
+                          a=rtpmap:109 opus/48000/2\r\n";
+        assert!(rejects_every_media_section(&offer(rejected_video)));
+        assert!(!rejects_every_media_section(&offer(&format!(
+            "{rejected_video}{live_audio}"
+        ))));
+        assert!(!rejects_every_media_section(&offer("")));
+    }
 }
 
 #[cfg(test)]
