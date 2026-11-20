@@ -2,6 +2,7 @@ use std::net::IpAddr;
 use std::time::Duration;
 
 use super::*;
+use crate::agent::remote_policy::RemoteAddressFilter;
 use crate::mdns::*;
 use crate::network_type::NetworkType;
 use crate::url::*;
@@ -123,4 +124,19 @@ pub struct AgentConfig {
     /// Controls if self-signed certificates are accepted when connecting to TURN servers via TLS or
     /// DTLS.
     pub insecure_skip_verify: bool,
+
+    /// Lets connectivity checks go to a loopback remote address (`127.0.0.0/8`, `::1`) from a
+    /// local candidate that is not itself on loopback. Off by default: a loopback remote
+    /// candidate is then paired only with a loopback local candidate, so a peer cannot make
+    /// this host send checks to its own services. See the [`remote_policy`](super::remote_policy) module.
+    pub allow_loopback_remote_candidates: bool,
+
+    /// Lets connectivity checks go to a link-local remote address (`169.254.0.0/16`,
+    /// `fe80::/10`) from a local candidate that is not itself link-local. Off by default.
+    pub allow_link_local_remote_candidates: bool,
+
+    /// Asked about every remote candidate's address (an mDNS candidate's once resolved) before
+    /// the agent holds it; `false` drops the candidate. Addresses that are never a valid unicast
+    /// destination (unspecified, multicast, broadcast, port 0) are dropped before it is asked.
+    pub remote_address_filter: Option<RemoteAddressFilter>,
 }

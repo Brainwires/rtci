@@ -18,6 +18,10 @@ mod agent_proto;
 pub mod agent_selector;
 /// Snapshot statistics for an agent's candidates and pairs.
 pub mod agent_stats;
+/// Where connectivity checks may be sent (RFC 8445 §5.1.1.1 address rules).
+pub mod remote_policy;
+#[cfg(test)]
+mod remote_policy_test;
 
 use agent_config::*;
 use bytes::BytesMut;
@@ -44,6 +48,7 @@ use crate::rand::*;
 use crate::state::*;
 use crate::tcp_type::TcpType;
 use crate::url::*;
+use remote_policy::RemotePolicy;
 use shared::error::*;
 use shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 
@@ -218,6 +223,9 @@ pub struct Agent {
     pub(crate) candidate_types: Vec<CandidateType>,
     pub(crate) network_types: Vec<NetworkType>,
     pub(crate) urls: Vec<Url>,
+
+    /// Which remote addresses checks may be sent to. See [`remote_policy`].
+    pub(crate) remote_policy: RemotePolicy,
 
     pub(crate) write_outs: VecDeque<TaggedBytesMut>,
     pub(crate) event_outs: VecDeque<TaggedEvent>,
@@ -401,6 +409,12 @@ impl Agent {
             candidate_types,
             network_types: config.network_types.clone(),
             urls: config.urls.clone(),
+
+            remote_policy: RemotePolicy {
+                allow_loopback: config.allow_loopback_remote_candidates,
+                allow_link_local: config.allow_link_local_remote_candidates,
+                filter: config.remote_address_filter.clone(),
+            },
 
             write_outs: VecDeque::new(),
             event_outs: VecDeque::new(),
@@ -603,6 +617,17 @@ impl Agent {
                     self.get_name(),
                     c.address(),
                     MAX_REMOTE_CANDIDATES
+                );
+                continue;
+            }
+            // RFC 8445 §5.1.1.1: a candidate is a unicast transport address. One that can't be
+            // a destination, or that the application's filter refuses, is never held or paired.
+            if !self.remote_policy.allows_candidate(c.addr()) {
+                warn!(
+                    "[{}]: ignoring remote candidate {}: its address {} is not an allowed destination",
+                    self.get_name(),
+                    c.address(),
+                    c.addr()
                 );
                 continue;
             }
@@ -1042,6 +1067,20 @@ impl Agent {
     }
 
     pub(crate) fn add_pair(&mut self, local_index: usize, remote_index: usize) {
+        // Every check goes out on a pair, so this is where the destination policy holds: a
+        // loopback or link-local remote address is reached only from a local candidate in the
+        // same scope (unless the configuration allows it). See `remote_policy`.
+        let local_base = self.local_candidates[local_index].base_addr();
+        let remote_addr = self.remote_candidates[remote_index].addr();
+        if !self.remote_policy.allows_pair(local_base, remote_addr) {
+            debug!(
+                "[{}]: not pairing local {} with remote {}: destination not allowed from this local candidate",
+                self.get_name(),
+                local_base,
+                remote_addr
+            );
+            return;
+        }
         let p = CandidatePair::new(
             local_index,
             remote_index,

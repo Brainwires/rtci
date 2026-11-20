@@ -107,6 +107,13 @@ impl RTCPeerConnection {
             multicast_dns_query_timeout: setting_engine.multicast_dns.timeout,
             local_ufrag: setting_engine.candidates.username_fragment.clone(),
             local_pwd: setting_engine.candidates.password.clone(),
+            allow_loopback_remote_candidates: setting_engine
+                .candidates
+                .allow_loopback_remote_candidates,
+            allow_link_local_remote_candidates: setting_engine
+                .candidates
+                .allow_link_local_remote_candidates,
+            remote_address_filter: setting_engine.candidates.remote_address_filter.clone(),
 
             ..Default::default()
         };

@@ -112,7 +112,8 @@ use crypto::RTCCryptoProvider;
 use dtls::cipher_suite::CipherSuiteId;
 use dtls::extension::extension_use_srtp::SrtpProtectionProfile;
 //TODO: use ice::agent::agent_config::{InterfaceFilterFn, IpFilterFn};
-//TODO: use ice::mdns::MulticastDnsMode;
+//TODO: use ice::agent::remote_policy::RemoteAddressFilter;
+use ice::mdns::MulticastDnsMode;
 use ice::network_type::NetworkType;
 //TODO: use ice::udp_network::UDPNetwork;
 use crate::peer_connection::transport::dtls::role::RTCDtlsRole;
@@ -247,6 +248,15 @@ pub struct Candidates {
     /// Not read by this engine, which gathers no candidates (see the deprecated
     /// `SettingEngineBuilder::with_include_loopback_candidate`).
     pub include_loopback_candidate: bool,
+
+    /// Lets connectivity checks go to loopback / link-local remote addresses from local
+    /// candidates outside that scope. See
+    /// `SettingEngineBuilder::with_remote_candidate_scopes`.
+    pub allow_loopback_remote_candidates: bool,
+    /// See `SettingEngineBuilder::with_remote_candidate_scopes`.
+    pub allow_link_local_remote_candidates: bool,
+    /// See `SettingEngineBuilder::with_remote_address_filter`.
+    pub remote_address_filter: Option<RemoteAddressFilter>,
 }
 
 /// Replay attack protection window sizes.
@@ -1155,6 +1165,56 @@ impl SettingEngineBuilder {
         self.0
             .candidates
             .discard_local_candidates_during_ice_restart = discard;
+        self
+    }
+
+    /// Allows connectivity checks to loopback and / or link-local remote addresses.
+    ///
+    /// Remote candidates are chosen by the peer. By default a loopback remote candidate
+    /// (`127.0.0.0/8`, `::1`) is paired only with a loopback local candidate, and a link-local
+    /// one (`169.254.0.0/16`, `fe80::/10`, which includes cloud metadata services) only with a
+    /// link-local local candidate, so a remote peer cannot make this host send checks to its
+    /// own services or its link's metadata address. Candidates that are never a unicast
+    /// destination (unspecified, multicast, broadcast, port 0) are dropped regardless
+    /// ([RFC 8445 §5.1.1.1]).
+    ///
+    /// [RFC 8445 §5.1.1.1]: https://datatracker.ietf.org/doc/html/rfc8445#section-5.1.1.1
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    ///
+    /// let setting_engine = SettingEngineBuilder::new()
+    ///     .with_remote_candidate_scopes(true, false)
+    ///     .build();
+    /// assert!(setting_engine.candidates.allow_loopback_remote_candidates);
+    /// ```
+    pub fn with_remote_candidate_scopes(mut self, loopback: bool, link_local: bool) -> Self {
+        self.0.candidates.allow_loopback_remote_candidates = loopback;
+        self.0.candidates.allow_link_local_remote_candidates = link_local;
+        self
+    }
+
+    /// Sets a filter asked about every remote candidate's address (an mDNS candidate's once it
+    /// resolves) before the ICE agent holds it; `false` drops the candidate, so no check is ever
+    /// sent there. Use it to apply the host's own network policy to peer-chosen destinations.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    /// use std::sync::Arc;
+    ///
+    /// let setting_engine = SettingEngineBuilder::new()
+    ///     .with_remote_address_filter(Arc::new(|addr: std::net::SocketAddr| {
+    ///         !addr.ip().is_loopback()
+    ///     }))
+    ///     .build();
+    /// assert!(setting_engine.candidates.remote_address_filter.is_some());
+    /// ```
+    pub fn with_remote_address_filter(mut self, filter: RemoteAddressFilter) -> Self {
+        self.0.candidates.remote_address_filter = Some(filter);
         self
     }
 
