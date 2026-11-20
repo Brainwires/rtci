@@ -1,4 +1,6 @@
 #[cfg(test)]
+mod vp9_depacketizer_fields_test;
+#[cfg(test)]
 mod vp9_test;
 
 use crate::packetizer::{Depacketizer, Payloader};
@@ -548,8 +550,10 @@ impl Vp9Packet {
             b = reader.get_u8();
             payload_index += 1;
 
+            // RFC 9628 4.2: up to three reference indices (P_DIFF) per picture; a fourth is
+            // the error, not the third.
             self.pdiff.push(b >> 1);
-            if self.pdiff.len() >= MAX_VP9REF_PICS {
+            if self.pdiff.len() > MAX_VP9REF_PICS {
                 return Err(Error::ErrTooManyPDiff);
             }
         }
@@ -587,7 +591,9 @@ impl Vp9Packet {
 
         self.ns = b >> 5;
         self.y = b & 0x10 != 0;
-        self.g = (b >> 1) & 0x7 != 0;
+        // `N_S |Y|G|-|-|-|`: G is bit 3 alone. The three low bits are reserved and must not
+        // be read as G (RFC 9628 4.2.1).
+        self.g = b & 0x08 != 0;
 
         let ns = (self.ns + 1) as usize;
         self.ng = 0;
