@@ -48,6 +48,8 @@ upstream ones), the fork test still has to fail if the behaviour breaks.
 | `.` | `test_detach_data_channels` | excluded | Detached data channels hand the application a `ReadWrite` stream; the sans-I/O channel is already the application's to read (`poll_read`), so there is nothing to detach. | `webrtc/src/api/setting_engine/setting_engine_test.rs` |
 | `.` | `test_eof_detach`, `test_eof_no_detach` | excluded | Tests end-of-file on a detached or callback-driven channel; the sans-I/O channel has neither (closing is the `OnClose` event, tested by `remote_close_fires_closing_then_close`). | `webrtc/src/data_channel/data_channel_test.rs` |
 | `.` | `test_extension_id_collision` | mapped | `test_media_engine_extension_id_collision` | `webrtc/src/api/media_engine/media_engine_test.rs` |
+| `.` | `test_full_inbound_stream_flow` | mapped | `test_on_rtp_received`, `test_on_rtcp_rr_generated`, `test_on_rtcp_sr_received`, `test_snapshot_remote` | `src/statistics/accumulator/rtp_stream/inbound.rs` |
+| `.` | `test_full_outbound_stream_flow` | mapped | `test_on_rtp_sent`, `test_on_receiver_report`, `test_snapshot_remote` | `src/statistics/accumulator/rtp_stream/outbound.rs` |
 | `.` | `test_generate_certificate_expires_and_stats_id` | mapped | `test_generate_certificate_expires`, `test_snapshot` | `webrtc/src/peer_connection/certificate.rs` |
 | `.` | `test_generate_data_channel_id` | mapped | `stream_id_parity_matches_negotiated_dtls_role_across_all_role_configurations`, `answer_assigns_data_channel_ids_by_dtls_role` | `webrtc/src/sctp_transport/sctp_transport_test.rs` |
 | `.` | `test_get_stats` | mapped | `test_get_stats_selector_none_complete`, `test_stats_report_completeness` | `webrtc/src/peer_connection/peer_connection_test.rs` |
@@ -58,6 +60,7 @@ upstream ones), the fork test still has to fail if the behaviour breaks.
 | `.` | `test_new_api` | excluded | Tests `APIBuilder`; the fork has no `API` object (`RTCPeerConnectionBuilder` takes the media engine, setting engine and registry directly). | `webrtc/src/api/api_test.rs` |
 | `.` | `test_new_ice_gatherer_success` | excluded | Tests `RTCIceGatherer`, which opens sockets to gather; in the sans-I/O engine the application gathers and adds candidates (`add_local_candidate`), tested by `test_host_candidate_event_emission`. | `webrtc/src/ice_transport/ice_gatherer.rs` |
 | `.` | `test_no_endpoints`, `test_non_fatal_dispatch`, `test_non_fatal_read` | mapped | `non_stun_datagrams_from_other_addresses_are_dropped` (the fork demultiplexes in the handler pipeline, not in a socket mux) | `webrtc/src/mux/mux_test.rs` |
+| `.` | `test_on_rtcp_rr_received` | mapped | `test_on_receiver_report` | `src/statistics/accumulator/rtp_stream/outbound.rs` |
 | `.` | `test_operations_done`, `test_operations_enqueue` | excluded | Tests the async operations queue that serialises API calls; sans-I/O calls are synchronous and already serial. | `webrtc/src/peer_connection/operation/operation_test.rs` |
 | `.` | `test_opus_case`, `test_video_case` | mapped | `test_opus_and_video_case` | `webrtc/src/api/media_engine/media_engine_test.rs` |
 | `.` | `test_peer_connection_close_is_send` | excluded | Asserts the `close()` future is `Send`; the sans-I/O `close` is not async. | `webrtc/src/peer_connection/peer_connection_test.rs` |
