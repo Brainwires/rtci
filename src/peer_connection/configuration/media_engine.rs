@@ -834,7 +834,9 @@ impl MediaEngine {
             RtpCodecKind::Audio => &self.audio_codecs,
             RtpCodecKind::Video => &self.video_codecs,
             RtpCodecKind::Application => &self.application_codecs,
-            RtpCodecKind::Unspecified => unreachable!(),
+            // A media section of a kind this engine does not know has no codec to match; its
+            // callers already skip such sections, so this is an error, not a panic.
+            RtpCodecKind::Unspecified => return Err(Error::ErrCodecNotFound),
         };
 
         let remote_fmtp = fmtp::parse(
@@ -1231,6 +1233,10 @@ impl MediaEngine {
             })
     }
 }
+
+#[cfg(test)]
+#[path = "media_engine_unspecified_test.rs"]
+mod media_engine_unspecified_test;
 
 #[cfg(test)]
 mod default_fec_codec_test {
