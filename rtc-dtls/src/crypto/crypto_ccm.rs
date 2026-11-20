@@ -78,12 +78,11 @@ impl CryptoCcm {
         let payload = &raw[RECORD_LAYER_HEADER_SIZE..];
         let raw = &raw[..RECORD_LAYER_HEADER_SIZE];
 
+        // The implicit salt, then the record's epoch and sequence number as the explicit
+        // nonce: unique per record under this key, unlike a random value.
         let mut nonce = [0u8; CRYPTO_CCM_NONCE_LENGTH];
         nonce[..4].copy_from_slice(&self.local_write_iv[..4]);
-        self.provider
-            .random()
-            .fill(&mut nonce[4..])
-            .map_err(crypto_error)?;
+        nonce[4..].copy_from_slice(&record_explicit_nonce(pkt_rlh));
 
         let additional_data = generate_aead_additional_data(pkt_rlh, payload.len());
 
