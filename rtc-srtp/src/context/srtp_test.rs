@@ -335,3 +335,72 @@ fn test_packet_half_range_behind_does_not_rewind_the_index() -> Result<()> {
     }
     Ok(())
 }
+
+/// An SRTP packet index is protected at most once (RFC 3711 Section 3.3.1, RFC 7714 Section
+/// 8.1). Indexes not yet sent, in any order within the window, are still accepted, and so is
+/// the sequence number wrap.
+#[test]
+fn test_encrypt_refuses_a_used_packet_index() -> Result<()> {
+    let provider = test_crypto_provider();
+    for profile in [
+        ProtectionProfile::AeadAes128Gcm,
+        ProtectionProfile::AeadAes256Gcm,
+        ProtectionProfile::Aes128CmHmacSha1_80,
+    ] {
+        let key = vec![3u8; profile.key_len()];
+        let salt = vec![4u8; profile.salt_len()];
+        let mut ctx = Context::new(&key, &salt, profile, None, None, provider.crypto())?;
+
+        let packet = |seq: u16, stamp: u8| -> Result<Vec<u8>> {
+            let mut header = rtp::Header {
+                version: 2,
+                payload_type: 96,
+                sequence_number: seq,
+                ssrc: 0xfeed_0002,
+                ..Default::default()
+            };
+            header.set_extension(3, bytes::Bytes::from(vec![stamp, 0]))?;
+            let pkt = rtp::Packet {
+                header,
+                payload: RTP_TEST_CASE_DECRYPTED.clone(),
+            };
+            Ok(pkt.marshal()?.to_vec())
+        };
+
+        ctx.encrypt_rtp(&packet(100, 1)?)?;
+        ctx.encrypt_rtp(&packet(101, 2)?)?;
+
+        // The same index again, with a different extension (and with the same bytes).
+        for stamp in [9, 1] {
+            let err = ctx
+                .encrypt_rtp(&packet(100, stamp)?)
+                .expect_err("a used index was encrypted again");
+            assert!(
+                matches!(err, Error::SrtpIndexReused(0xfeed_0002, 100)),
+                "{profile:?}: {err:?}"
+            );
+        }
+
+        // A refused packet changes nothing: the stream continues.
+        ctx.encrypt_rtp(&packet(103, 3)?)?;
+        // An index skipped earlier is new and still in the window.
+        ctx.encrypt_rtp(&packet(102, 4)?)?;
+        assert!(ctx.encrypt_rtp(&packet(102, 5)?).is_err(), "{profile:?}");
+
+        // Further back than the window: refused, it may have been sent before.
+        let far = 103 + SRTP_SEND_INDEX_WINDOW as u16 + 10;
+        ctx.encrypt_rtp(&packet(far, 6)?)?;
+        assert!(ctx.encrypt_rtp(&packet(104, 7)?).is_err(), "{profile:?}");
+
+        // Across the wrap the ROC makes the index new again.
+        let mut seq = far;
+        while seq < 65000 {
+            seq += 20000.min(65000 - seq).max(1);
+            ctx.encrypt_rtp(&packet(seq, 8)?)?;
+        }
+        ctx.encrypt_rtp(&packet(100, 10)?)?;
+        assert_eq!(ctx.srtp_ssrc_states[&0xfeed_0002].index >> 16, 1);
+        assert!(ctx.encrypt_rtp(&packet(100, 11)?).is_err(), "{profile:?}");
+    }
+    Ok(())
+}

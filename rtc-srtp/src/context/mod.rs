@@ -25,6 +25,12 @@ pub mod srtp;
 const MAX_ROC: u32 = u32::MAX;
 const SEQ_NUM_MEDIAN: u16 = 1 << 15;
 const SEQ_NUM_MAX: u16 = u16::MAX;
+/// The highest SRTP packet index: a 32-bit ROC over a 16-bit sequence number.
+const MAX_SRTP_PACKET_INDEX: u64 = (1 << 48) - 1;
+/// How many packet indexes behind the highest one sent the sender still tracks individually.
+/// An index is encrypted at most once (RFC 3711 Section 3.3.1, RFC 7714 Section 8.1); an index
+/// older than this window is refused as well. Receivers' replay windows are far narrower.
+pub(crate) const SRTP_SEND_INDEX_WINDOW: usize = 1024;
 
 /// Encrypt/Decrypt state for a single SRTP SSRC
 #[derive(Default)]
@@ -33,6 +39,8 @@ pub(crate) struct SrtpSsrcState {
     index: u64,
     rollover_has_processed: bool,
     replay_detector: Option<Box<dyn ReplayDetector>>,
+    /// The packet indexes this (sending) context has encrypted, created on first encryption.
+    sent_indexes: Option<SlidingWindowDetector>,
 }
 
 /// Encrypt/Decrypt state for a single SRTCP SSRC
