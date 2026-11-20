@@ -79,6 +79,8 @@
 
 #[cfg(test)]
 mod media_engine_test;
+#[cfg(test)]
+mod multi_codec_test;
 
 use crate::peer_connection::sdp::{
     MediaDescriptionExt, codecs_from_media_description, rtp_extensions_from_media_description,
@@ -86,8 +88,8 @@ use crate::peer_connection::sdp::{
 use crate::rtp_transceiver::direction::RTCRtpTransceiverDirection;
 use crate::rtp_transceiver::fmtp;
 use crate::rtp_transceiver::rtp_sender::rtp_codec::{
-    CodecMatch, RTCRtpCodec, RtpCodecKind, codec_parameters_fuzzy_search,
-    rtcp_feedback_intersection,
+    CodecMatch, RTCRtpCodec, RtpCodecKind, codec_parameters_fuzzy_search, parse_rtx_apt,
+    repair_family, rtcp_feedback_intersection,
 };
 use crate::rtp_transceiver::rtp_sender::rtp_codec_parameters::RTCRtpCodecParameters;
 use crate::rtp_transceiver::rtp_sender::rtp_header_extension_capability::RTCRtpHeaderExtensionCapability;
@@ -963,15 +965,98 @@ impl MediaEngine {
     }
 
     pub(crate) fn push_codecs(&mut self, codecs: Vec<RTCRtpCodecParameters>, typ: RtpCodecKind) {
-        for codec in codecs {
-            if typ == RtpCodecKind::Audio {
-                MediaEngine::add_codec(&mut self.negotiated_audio_codecs, codec);
-            } else if typ == RtpCodecKind::Video {
-                MediaEngine::add_codec(&mut self.negotiated_video_codecs, codec);
-            } else if typ == RtpCodecKind::Application {
-                MediaEngine::add_codec(&mut self.negotiated_application_codecs, codec);
+        let negotiated = match typ {
+            RtpCodecKind::Audio => &mut self.negotiated_audio_codecs,
+            RtpCodecKind::Video => &mut self.negotiated_video_codecs,
+            RtpCodecKind::Application => &mut self.negotiated_application_codecs,
+            RtpCodecKind::Unspecified => return,
+        };
+        MediaEngine::merge_negotiated_codecs(negotiated, codecs);
+    }
+
+    /// Adds the formats of one remote media section to the negotiated list of its kind.
+    ///
+    /// With several media sections of one kind negotiated (the default, see
+    /// `SettingEngineBuilder::with_disable_media_engine_multiple_codecs`), every remote
+    /// description adds each section's formats here, so the list must keep one entry per
+    /// format and one format per payload type. A peer that renumbers a format it already
+    /// negotiated (which RFC 3264 section 8.3.2 forbids) or numbers it differently in another
+    /// section would otherwise put the same format here twice, and every answer would then
+    /// describe it twice under two payload types:
+    ///
+    /// - a payload type already in the list keeps the format it names (first mapping wins;
+    ///   RFC 8843 section 7.5 gives one payload type one format across a BUNDLE group);
+    /// - a media or FEC format already in the list under another number is not added again.
+    ///   Identity is the encoding name, clock rate, channels and fmtp parameters (RFC 8866
+    ///   section 6.6), not the payload type: FEC has no `apt` to tie it to a primary, so
+    ///   matching by payload type alone let a renumbered FlexFEC in twice;
+    /// - an RTX format (RFC 4588 section 8.6) is added only when its `apt` still names, in the
+    ///   list, the very format the remote section gives that number, and that primary has no
+    ///   RTX entry yet. One whose primary was kept under its earlier number is stale.
+    ///
+    /// The entries that are added keep the remote section's order.
+    fn merge_negotiated_codecs(
+        negotiated: &mut Vec<RTCRtpCodecParameters>,
+        incoming: Vec<RTCRtpCodecParameters>,
+    ) {
+        let is_rtx = |codec: &RTCRtpCodecParameters| repair_family(&codec.rtp_codec) == "rtx";
+
+        // What the list holds once this section's formats are in, built primaries (and FEC)
+        // first so that an RTX entry is judged against the primaries this section adds.
+        let mut merged = negotiated.clone();
+        let mut take = vec![false; incoming.len()];
+
+        for (i, codec) in incoming.iter().enumerate() {
+            if is_rtx(codec) {
+                continue;
+            }
+            let known = merged.iter().any(|existing| {
+                existing.payload_type == codec.payload_type
+                    || same_format(&existing.rtp_codec, &codec.rtp_codec)
+            });
+            if !known {
+                take[i] = true;
+                merged.push(codec.clone());
             }
         }
+
+        for (i, codec) in incoming.iter().enumerate() {
+            if !is_rtx(codec)
+                || merged
+                    .iter()
+                    .any(|existing| existing.payload_type == codec.payload_type)
+            {
+                continue;
+            }
+            let Some(apt) = parse_rtx_apt(&codec.rtp_codec.sdp_fmtp_line) else {
+                continue;
+            };
+            // The primary this entry repairs, as the remote section numbers it.
+            let Some(remote_primary) = incoming
+                .iter()
+                .find(|primary| primary.payload_type == apt && !is_rtx(primary))
+            else {
+                continue;
+            };
+            let same_primary = merged.iter().any(|existing| {
+                existing.payload_type == apt
+                    && same_format(&existing.rtp_codec, &remote_primary.rtp_codec)
+            });
+            let already_repaired = merged.iter().any(|existing| {
+                is_rtx(existing) && parse_rtx_apt(&existing.rtp_codec.sdp_fmtp_line) == Some(apt)
+            });
+            if same_primary && !already_repaired {
+                take[i] = true;
+                merged.push(codec.clone());
+            }
+        }
+
+        negotiated.extend(
+            incoming
+                .into_iter()
+                .zip(take)
+                .filter_map(|(codec, take)| take.then_some(codec)),
+        );
     }
 
     /// Update the MediaEngine from a remote description
@@ -1229,6 +1314,36 @@ impl MediaEngine {
 
         false
     }
+}
+
+/// The parameters of an `a=fmtp` line as a set: keys and values compared without case, and
+/// parameter order, spacing and repeats ignored.
+fn fmtp_parameter_set(line: &str) -> Vec<(String, String)> {
+    let mut set: Vec<(String, String)> = line
+        .split(';')
+        .map(str::trim)
+        .filter(|parameter| !parameter.is_empty())
+        .map(|parameter| match parameter.split_once('=') {
+            Some((key, value)) => (
+                key.trim().to_ascii_lowercase(),
+                value.trim().to_ascii_lowercase(),
+            ),
+            None => (parameter.to_ascii_lowercase(), String::new()),
+        })
+        .collect();
+    set.sort();
+    set.dedup();
+    set
+}
+
+/// Whether `a` and `b` describe one format (RFC 8866 section 6.6, `a=rtpmap` and `a=fmtp`):
+/// the same encoding name, clock rate, channels and fmtp parameters. The payload type that
+/// numbers it is not part of the format.
+fn same_format(a: &RTCRtpCodec, b: &RTCRtpCodec) -> bool {
+    a.mime_type.eq_ignore_ascii_case(&b.mime_type)
+        && a.clock_rate == b.clock_rate
+        && a.channels == b.channels
+        && fmtp_parameter_set(&a.sdp_fmtp_line) == fmtp_parameter_set(&b.sdp_fmtp_line)
 }
 
 #[cfg(test)]

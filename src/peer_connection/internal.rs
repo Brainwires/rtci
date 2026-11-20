@@ -39,11 +39,16 @@ impl RTCPeerConnection {
     pub(super) fn new(
         now: Instant,
         mut configuration: RTCConfiguration,
-        media_engine: MediaEngine,
+        mut media_engine: MediaEngine,
         mut setting_engine: SettingEngine,
         interceptor: Box<dyn Interceptor>,
     ) -> Result<Self> {
         configuration.validate()?;
+
+        // Each media section negotiates its own codecs unless the application asked for one
+        // codec set (RFC 9429 section 5.10 answers every m= section from its own formats).
+        media_engine
+            .set_multi_codec_negotiation(!setting_engine.disable_media_engine_multiple_codecs);
 
         // The one place in `rtc` that resolves a default crypto provider. The application
         // either supplies one through `SettingEngineBuilder::with_crypto_provider` — which is also how
