@@ -10,6 +10,7 @@ use jsep_common::{
     video_track,
 };
 use rtc::peer_connection::sdp::RTCSessionDescription;
+use rtc::rtp_transceiver::RTCRtpTransceiverDirection;
 use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
 
 /// A transceiver stopped before it ever had an m= section gets no mid and no m= section.
@@ -104,10 +105,10 @@ fn a_rejected_section_is_recycled_for_a_new_transceiver() -> TestResult {
     Ok(())
 }
 
-/// A rejected m= section in a remote offer neither creates nor changes a transceiver, and is
-/// answered rejected.
+/// A rejected m= section in a remote offer gets a transceiver like every m= section (RFC 9429
+/// section 5.10, W3C 4.4.1.6), created stopped and inactive, and is answered rejected.
 #[test]
-fn a_rejected_remote_section_creates_no_transceiver() -> TestResult {
+fn a_rejected_remote_section_creates_a_stopped_transceiver() -> TestResult {
     let mut answerer = default_peer()?;
     let offer = crlf(&format!(
         "{SESSION}a=group:BUNDLE 1
@@ -123,22 +124,30 @@ a=rtpmap:96 VP8/90000
     ));
     answerer.set_remote_description(Instant::now(), RTCSessionDescription::offer(offer)?)?;
 
-    let mids: Vec<Option<String>> = answerer
+    let transceivers: Vec<(Option<String>, bool, RTCRtpTransceiverDirection)> = answerer
         .get_transceivers()
         .collect::<Vec<_>>()
         .into_iter()
         .map(|id| {
-            answerer
-                .rtp_transceiver(id)
-                .expect("transceiver")
-                .mid()
-                .clone()
+            let t = answerer.rtp_transceiver(id).expect("transceiver");
+            (t.mid().clone(), t.stopped(), t.direction())
         })
         .collect();
     assert_eq!(
-        mids,
-        vec![Some("1".to_owned())],
-        "only the live section has a transceiver"
+        transceivers,
+        vec![
+            (
+                Some("0".to_owned()),
+                true,
+                RTCRtpTransceiverDirection::Inactive
+            ),
+            (
+                Some("1".to_owned()),
+                false,
+                RTCRtpTransceiverDirection::Recvonly
+            ),
+        ],
+        "the rejected section's transceiver is stopped"
     );
 
     let answer = answerer.create_answer(None)?;
@@ -146,6 +155,58 @@ a=rtpmap:96 VP8/90000
     assert_eq!(sections.len(), 2, "{}", answer.sdp);
     assert_eq!(port_of(&sections[0]), 0, "{}", answer.sdp);
     assert_ne!(port_of(&sections[1]), 0, "{}", answer.sdp);
+    Ok(())
+}
+
+/// The stopped transceiver a rejected remote section created goes with the offer when that offer
+/// is rolled back (RFC 9429, Section 5.7), like the other transceivers it created.
+#[test]
+fn a_rejected_remote_sections_transceiver_goes_on_rollback() -> TestResult {
+    let mut answerer = default_peer()?;
+    let offer = crlf(&format!(
+        "{SESSION}m=audio 0 UDP/TLS/RTP/SAVPF 111
+{TRANSPORT}a=mid:0
+a=inactive
+a=rtpmap:111 opus/48000/2
+"
+    ));
+    let now = Instant::now();
+    answerer.set_remote_description(now, RTCSessionDescription::offer(offer)?)?;
+    assert_eq!(answerer.get_transceivers().count(), 1);
+    answerer.set_remote_description(now, RTCSessionDescription::rollback(None)?)?;
+    assert_eq!(answerer.get_transceivers().count(), 0);
+    Ok(())
+}
+
+/// After answering a remote offer whose section was rejected, the answerer's own next offer keeps
+/// that section rejected in its place: the stopped transceiver neither revives it nor adds one.
+#[test]
+fn a_rejected_remote_section_stays_rejected_in_the_next_local_offer() -> TestResult {
+    let mut answerer = default_peer()?;
+    let offer = crlf(&format!(
+        "{SESSION}a=group:BUNDLE 1
+m=video 0 UDP/TLS/RTP/SAVPF 96
+{TRANSPORT}a=mid:0
+a=inactive
+a=rtpmap:96 VP8/90000
+m=video 9 UDP/TLS/RTP/SAVPF 96
+{TRANSPORT}a=mid:1
+a=sendrecv
+a=rtpmap:96 VP8/90000
+"
+    ));
+    let now = Instant::now();
+    answerer.set_remote_description(now, RTCSessionDescription::offer(offer)?)?;
+    let answer = answerer.create_answer(None)?;
+    answerer.set_local_description(now, answer)?;
+
+    let next = answerer.create_offer(None)?;
+    let sections = media_sections(&next.sdp);
+    assert_eq!(sections.len(), 2, "{}", next.sdp);
+    assert_eq!(mid_of(&sections[0]), Some("0"), "{}", next.sdp);
+    assert_eq!(port_of(&sections[0]), 0, "{}", next.sdp);
+    assert_eq!(mid_of(&sections[1]), Some("1"), "{}", next.sdp);
+    assert_ne!(port_of(&sections[1]), 0, "{}", next.sdp);
     Ok(())
 }
 

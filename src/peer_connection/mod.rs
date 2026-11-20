@@ -1511,10 +1511,31 @@ impl RTCPeerConnection {
                             continue;
                         }
 
-                        // A rejected m= section (port 0) neither creates nor changes a
-                        // transceiver: the answer rejects it too, and the application stops the
-                        // transceiver it had (W3C 4.4.1.6).
+                        // A rejected m= section (port 0) is answered rejected and changes no
+                        // transceiver it already has. One no transceiver has yet gets one, as
+                        // every m= section does (RFC 9429 section 5.10, W3C 4.4.1.6), created
+                        // stopped: no direction, no media, no track event.
                         if is_rejected_media(media) {
+                            let kind = RtpCodecKind::from(media.media_name.media.as_str());
+                            if matches!(kind, RtpCodecKind::Audio | RtpCodecKind::Video)
+                                && !transceiver_by_mid.contains_key(mid_value.as_str())
+                            {
+                                let mut transceiver = RTCRtpTransceiverInternal::new(
+                                    kind,
+                                    None,
+                                    RTCRtpTransceiverInit {
+                                        direction: RTCRtpTransceiverDirection::Recvonly,
+                                        streams: vec![],
+                                        send_encodings: vec![],
+                                    },
+                                );
+                                transceiver.set_mid(mid_value.to_string())?;
+                                // Gone again if this offer is rolled back (RFC 9429, Section 5.7).
+                                transceiver.set_created_by_remote_description(true);
+                                transceiver.stop(&self.media_engine, &mut self.interceptor)?;
+                                let i = self.add_rtp_transceiver(transceiver);
+                                transceiver_by_mid.entry(mid_value.to_string()).or_insert(i);
+                            }
                             continue;
                         }
 
