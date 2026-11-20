@@ -7,7 +7,7 @@
 mod jsep_common;
 
 use jsep_common::{TestResult, default_peer, exchange, media_sections, video_track};
-use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
+use rtc::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RtpCodecKind};
 use rtc::rtp_transceiver::{RTCRtpReceiverId, RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
 
 #[test]
@@ -88,5 +88,80 @@ fn a_remote_track_is_labelled_remote_and_its_kind() -> TestResult {
         .label()
         .clone();
     assert_eq!(label, "remote video");
+    Ok(())
+}
+
+/// RTX is the implementation's choice (W3C `sendEncodings` has no `rtx` member): encodings the
+/// application gave get a repair flow like the ones derived from a track, and the offer groups
+/// it with its media SSRC (`a=ssrc-group:FID`, RFC 4588 / RFC 5576).
+#[test]
+fn explicit_send_encodings_get_an_rtx_flow() -> TestResult {
+    let mut pc = default_peer()?;
+    let id = pc.add_transceiver_from_track(
+        video_track("explicit", 0x0e0f_1001),
+        Some(RTCRtpTransceiverInit {
+            direction: RTCRtpTransceiverDirection::Sendonly,
+            streams: vec![],
+            send_encodings: vec![RTCRtpEncodingParameters {
+                active: true,
+                ..Default::default()
+            }],
+        }),
+    )?;
+    let sender = pc
+        .rtp_transceiver(id)
+        .expect("transceiver")
+        .sender()
+        .expect("a sending transceiver has a sender");
+    let (ssrc, rtx_ssrc) = {
+        let mut sender = pc.rtp_sender(sender).expect("sender");
+        let coding = &sender.get_parameters().encodings[0].rtp_coding_parameters;
+        (
+            coding.ssrc.expect("an SSRC"),
+            coding.rtx.as_ref().map(|rtx| rtx.ssrc),
+        )
+    };
+    let rtx_ssrc = rtx_ssrc.expect("the default video codecs carry RTX");
+
+    let offer = pc.create_offer(None)?;
+    let section = &media_sections(&offer.sdp)[0];
+    assert!(
+        section
+            .iter()
+            .any(|l| l == &format!("a=ssrc-group:FID {ssrc} {rtx_ssrc}")),
+        "{}",
+        offer.sdp
+    );
+    Ok(())
+}
+
+/// Without an RTX codec for the kind (the default audio codecs have none) there is no repair
+/// flow to give an explicit encoding.
+#[test]
+fn explicit_send_encodings_get_no_rtx_flow_without_an_rtx_codec() -> TestResult {
+    let mut pc = default_peer()?;
+    let id = pc.add_transceiver_from_kind(
+        RtpCodecKind::Audio,
+        Some(RTCRtpTransceiverInit {
+            direction: RTCRtpTransceiverDirection::Sendonly,
+            streams: vec![],
+            send_encodings: vec![RTCRtpEncodingParameters {
+                active: true,
+                ..Default::default()
+            }],
+        }),
+    )?;
+    let sender = pc
+        .rtp_transceiver(id)
+        .expect("transceiver")
+        .sender()
+        .expect("a sending transceiver has a sender");
+    let mut sender = pc.rtp_sender(sender).expect("sender");
+    assert!(
+        sender.get_parameters().encodings[0]
+            .rtp_coding_parameters
+            .rtx
+            .is_none()
+    );
     Ok(())
 }

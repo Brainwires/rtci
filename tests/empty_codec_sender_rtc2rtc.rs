@@ -1,8 +1,8 @@
 //! A sender whose encodings name no codec (W3C `addTransceiver` with `sendEncodings` that leave
 //! `codec` unset, so negotiation picks it) is a sender like any other: its stream is bound to
-//! the interceptors (sender reports, the NACK responder), and its outbound stream references
-//! the codec it is sent with (so the remote-inbound `jitter`, which needs that codec's clock
-//! rate, is reported).
+//! the interceptors (sender reports, the NACK responder), it gets an RTX repair flow when RTX is
+//! negotiated, and its outbound stream references the codec it is sent with (so the
+//! remote-inbound `jitter`, which needs that codec's clock rate, is reported).
 //!
 //! Two `rtc` peers on a simulated network, virtual time, no sockets.
 
@@ -40,6 +40,8 @@ const RTX_PT: u8 = 97;
 /// RTP packets the sender writes, one per 20 ms of virtual time.
 const PACKETS: u16 = 100;
 const FIRST_SEQ: u16 = 4000;
+/// The packet the network drops once, which only a NACK can bring back.
+const DROPPED_SEQ: u16 = FIRST_SEQ + 40;
 
 fn codec(mime_type: &str, sdp_fmtp_line: &str) -> RTCRtpCodec {
     RTCRtpCodec {
@@ -390,6 +392,42 @@ fn an_encoding_without_a_codec_sends_reports_and_has_stats() -> Result<()> {
             .codec_id
             .is_empty(),
         "the outbound stream references the codec it is sent with: {outbound:?}"
+    );
+    Ok(())
+}
+
+/// The encoding gets an RTX repair flow (RTX is negotiated), and a packet the network loses is
+/// NACKed by the receiver and resent over RTX by the sender's NACK responder.
+#[test]
+fn an_encoding_without_a_codec_is_repaired_over_rtx() -> Result<()> {
+    let (mut world, sender) = World::connected()?;
+    let (ssrc, rtx_ssrc, _) = world.sender_stream(sender);
+    let rtx_ssrc = rtx_ssrc.expect("RTX is negotiated, so the encoding has a repair flow");
+
+    let now = world.now;
+    let outbound_rtx = world.peers[0]
+        .pc
+        .get_stats(now, StatsSelector::None)
+        .outbound_rtp_streams()
+        .find(|s| s.sent_rtp_stream_stats.rtp_stream_stats.ssrc == ssrc)
+        .and_then(|s| s.rtx_ssrc);
+    assert_eq!(
+        outbound_rtx,
+        Some(rtx_ssrc),
+        "outbound-rtp names its rtxSsrc"
+    );
+
+    world.drop_once = Some((ssrc, DROPPED_SEQ));
+    world.send_media(sender, Duration::from_secs(2))?;
+
+    assert!(world.drop_once.is_none(), "the packet to drop was sent");
+    assert!(
+        world.sent_on_wire.iter().any(|&(s, _)| s == rtx_ssrc),
+        "the lost packet was resent on the RTX SSRC"
+    );
+    assert!(
+        world.peers[1].read_rtp.contains(&(ssrc, DROPPED_SEQ)),
+        "the receiver got the lost packet back"
     );
     Ok(())
 }
