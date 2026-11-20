@@ -316,6 +316,18 @@ fn test_pending_queue_push_and_pop() -> Result<()> {
     Ok(())
 }
 
+/// Upstream's `append` of three messages is three `push_message` calls here.
+#[test]
+fn test_pending_queue_append() -> Result<()> {
+    let mut pq = PendingQueue::new();
+    pq.push_message(vec![make_data_chunk(0, false, NO_FRAGMENT)]);
+    pq.push_message(vec![make_data_chunk(1, false, NO_FRAGMENT)]);
+    pq.push_message(vec![make_data_chunk(3, false, NO_FRAGMENT)]);
+    assert_eq!(pq.get_num_bytes(), 30, "total bytes mismatch");
+    assert_eq!(pq.len(), 3, "len mismatch");
+    Ok(())
+}
+
 #[test]
 fn test_pending_queue_unordered_wins() -> Result<()> {
     let mut pq = PendingQueue::new();
@@ -595,7 +607,8 @@ fn test_reassembly_queue_unordered_fragments() -> Result<()> {
     Ok(())
 }
 
-/*TODO: reassembly_queue is changed by introducing timestamp for unordered and ordered chunks
+/// An ordered and an unordered message both complete in the queue (upstream's test of the
+/// same name).
 #[test]
 fn test_reassembly_queue_ordered_and_unordered_fragments() -> Result<()> {
     let mut rq = ReassemblyQueue::new(0);
@@ -635,31 +648,26 @@ fn test_reassembly_queue_ordered_and_unordered_fragments() -> Result<()> {
 
     let mut buf = vec![0u8; 16];
 
-    // Should read unordered chunks first
-    if let Some(chunks) = rq.read() {
-        let n = chunks.read(&mut buf)?;
-        assert_eq!(3, n, "should received 3 bytes");
-        assert_eq!(3, rq.get_num_bytes(), "num bytes mismatch");
-        assert_eq!(chunks.ppi, org_ppi, "should have valid ppi");
-        assert_eq!(&buf[..n], b"DEF", "data should match");
-    } else {
-        assert!(false);
-    }
+    // Messages are read in the order they completed (upstream read the unordered one first;
+    // `test_reassembly_queue_read_prefers_earlier_completion` covers the reverse arrival).
+    // The ordered "ABC" completed first.
+    let chunks = rq.read().expect("the ordered message");
+    let n = chunks.read(&mut buf)?;
+    assert_eq!(3, n, "should received 3 bytes");
+    assert_eq!(3, rq.get_num_bytes(), "num bytes mismatch");
+    assert_eq!(chunks.ppi, org_ppi, "should have valid ppi");
+    assert_eq!(&buf[..n], b"ABC", "data should match");
 
-    // Next should read ordered chunks
-    if let Some(chunks) = rq.read() {
-        let n = chunks.read(&mut buf)?;
-        assert_eq!(3, n, "should received 3 bytes");
-        assert_eq!(0, rq.get_num_bytes(), "num bytes mismatch");
-        assert_eq!(chunks.ppi, org_ppi, "should have valid ppi");
-        assert_eq!(&buf[..n], b"ABC", "data should match");
-    } else {
-        assert!(false);
-    }
+    // Then the unordered "DEF".
+    let chunks = rq.read().expect("the unordered message");
+    let n = chunks.read(&mut buf)?;
+    assert_eq!(3, n, "should received 3 bytes");
+    assert_eq!(0, rq.get_num_bytes(), "num bytes mismatch");
+    assert_eq!(chunks.ppi, org_ppi, "should have valid ppi");
+    assert_eq!(&buf[..n], b"DEF", "data should match");
 
     Ok(())
 }
-*/
 
 /// When both an unordered and an ordered message are readable, `read`
 /// returns the one that completed first (timestamp order).
