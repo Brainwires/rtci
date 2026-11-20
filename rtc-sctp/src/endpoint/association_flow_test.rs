@@ -32,19 +32,23 @@ fn test_assoc_congestion_control_fast_retransmission() -> Result<()> {
         },
     ));
 
-    let now = link.now;
-    {
-        let mut stream = link
-            .client
-            .conn()
-            .open_stream(si, PayloadProtocolIdentifier::Binary)?;
-        for i in 0..4u32 {
-            let mut sbuf = vec![0u8; 1000];
-            sbuf[..4].copy_from_slice(&i.to_be_bytes());
-            let n =
-                stream.write_sctp(now, &Bytes::from(sbuf), PayloadProtocolIdentifier::Binary)?;
-            assert_eq!(1000, n);
-        }
+    link.client
+        .conn()
+        .open_stream(si, PayloadProtocolIdentifier::Binary)?;
+    for i in 0..4u32 {
+        let mut sbuf = vec![0u8; 1000];
+        sbuf[..4].copy_from_slice(&i.to_be_bytes());
+        let now = link.now;
+        let n = link.client.conn().stream(si)?.write_sctp(
+            now,
+            &Bytes::from(sbuf),
+            PayloadProtocolIdentifier::Binary,
+        )?;
+        assert_eq!(1000, n);
+        // One packet per instant. The link hands the receiver every datagram due at an instant
+        // before it polls, so packets arriving together would be answered by one SACK, one miss
+        // indication instead of three (RFC 9260 7.2.4 needs three to fast retransmit).
+        link.run_for(Duration::from_millis(1));
     }
 
     // Fast retransmission and recovery complete within 500 ms, well before the 1 s RTO.
