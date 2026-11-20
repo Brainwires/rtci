@@ -1,4 +1,6 @@
 #[cfg(test)]
+mod mdns_name_test;
+#[cfg(test)]
 mod mdns_test;
 
 use mdns::Mdns;
@@ -34,6 +36,26 @@ pub(crate) fn generate_multicast_dns_name() -> String {
     // from the UUID crate's secure random source without forcing provider ownership into mDNS.
     let u = Uuid::new_v4();
     format!("{u}.local")
+}
+
+/// Whether `name` is an ICE mDNS candidate name: a UUID in its hyphenated form followed by
+/// `.local` (draft-ietf-mmusic-mdns-ice-candidates §3.1.1: "The unique name MUST consist of a
+/// version 4 UUID as defined in [RFC4122], followed by \".local\""). The version nibble is not
+/// checked, and either case is accepted.
+///
+/// A remote candidate's name is resolved only when it has this shape, so a remote description
+/// cannot make the agent look up arbitrary names on the local network (`printer.local`, or the
+/// bare `.local`).
+pub(crate) fn is_ice_mdns_name(name: &str) -> bool {
+    let Some(label) = name.strip_suffix(".local") else {
+        return false;
+    };
+    let bytes = label.as_bytes();
+    bytes.len() == 36
+        && bytes.iter().enumerate().all(|(i, b)| match i {
+            8 | 13 | 18 | 23 => *b == b'-',
+            _ => b.is_ascii_hexdigit(),
+        })
 }
 
 pub(crate) fn create_multicast_dns(

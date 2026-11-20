@@ -635,15 +635,24 @@ impl Mdns {
 
     fn process_message(&mut self, msg: &TaggedBytesMut) {
         let mut parser = Parser::default();
-        if let Err(err) = parser.start(&msg.message) {
-            log::error!("Failed to parse mDNS packet: {err}");
-            return;
-        }
+        let header = match parser.start(&msg.message) {
+            Ok(header) => header,
+            Err(err) => {
+                log::error!("Failed to parse mDNS packet: {err}");
+                return;
+            }
+        };
 
         let src = msg.transport.peer_addr;
 
         // Process questions (respond if we have local names)
         self.process_questions(&mut parser, src, msg.now);
+
+        // RFC 6762 §6 / §18.2: only a response (QR = 1) answers a query. The answer section of a
+        // query carries the asker's known answers, which resolve nothing.
+        if !header.response {
+            return;
+        }
 
         // Process answers (check if they match pending queries)
         self.process_answers(&mut parser, src);
@@ -736,44 +745,33 @@ impl Mdns {
                 }
             };
 
-            let aaaa = answer_resource
-                .body
-                .as_ref()
-                .and_then(|body| body.as_any().downcast_ref::<AaaaResource>())
-                .map(|r| IpAddr::V6(Ipv6Addr::from(r.aaaa)));
-            let local_ip = if let Some(ip) = aaaa {
+            // RFC 6762 §10: a TTL of zero is a goodbye, the record is being withdrawn.
+            if answer_header.ttl == 0 {
                 trace!(
-                    "mDNS answers with the IPv6 address {} for query {}",
-                    ip, answer_header.name.data
-                );
-                ip
-            } else if let Some(body) = answer_resource.body
-                && let Some(a) = body.as_any().downcast_ref::<AResource>()
-            {
-                let local_ip = Ipv4Addr::from_octets(a.a).into();
-                if local_ip != src.ip() {
-                    warn!(
-                        "mDNS answers with different local ip on AResource {} vs src ip {} on Socket for query {}",
-                        local_ip,
-                        src.ip(),
-                        answer_header.name.data
-                    );
-                } else {
-                    trace!(
-                        "mDNS answers with the local ip {} on AResource and Socket for query {}",
-                        local_ip, answer_header.name.data
-                    );
-                }
-
-                local_ip
-            } else {
-                warn!(
-                    "mDNS answers without AResource, fallback to use src ip {} on Socket for local ip for query {}",
-                    src.ip(),
+                    "mDNS ignores a goodbye record for {}",
                     answer_header.name.data
                 );
-                src.ip()
+                continue;
+            }
+
+            let Some(local_ip) = answer_address(answer_resource.body.as_deref()) else {
+                continue;
             };
+            if !answer_is_from_its_owner(local_ip, src.ip()) {
+                warn!(
+                    "mDNS ignores an answer for {} with address {} from {}: an answer is taken only from an on-link sender, and an A record only from the address it names",
+                    answer_header.name.data,
+                    local_ip,
+                    src.ip()
+                );
+                continue;
+            }
+            trace!(
+                "mDNS answers {} with {} from {}",
+                answer_header.name.data,
+                local_ip,
+                src.ip()
+            );
 
             // Check if this answer matches any pending queries
             let mut matched_query_ids = HashMap::new();
@@ -794,6 +792,49 @@ impl Mdns {
 
     fn update_next_timeout(&mut self) {
         self.next_timeout = self.queries.iter().map(|q| q.next_retry).min();
+    }
+}
+
+/// The address an A or AAAA answer carries.
+fn answer_address(body: Option<&dyn crate::message::resource::ResourceBody>) -> Option<IpAddr> {
+    let body = body?.as_any();
+    if let Some(r) = body.downcast_ref::<AaaaResource>() {
+        Some(IpAddr::V6(Ipv6Addr::from(r.aaaa)))
+    } else {
+        body.downcast_ref::<AResource>()
+            .map(|r| IpAddr::V4(Ipv4Addr::from(r.a)))
+    }
+}
+
+/// Whether `src` may be on the local link (RFC 6762 §11: mDNS is link-local; responses from
+/// elsewhere are not to be trusted). The receiver sees no TTL or interface here, so this is the
+/// address's scope: private, shared, link-local and loopback IPv4; link-local, unique-local and
+/// loopback IPv6.
+pub(crate) fn is_on_link_source(src: IpAddr) -> bool {
+    match src.to_canonical() {
+        IpAddr::V4(v4) => {
+            let [a, b, ..] = v4.octets();
+            v4.is_private()
+                || v4.is_link_local()
+                || v4.is_loopback()
+                // 100.64.0.0/10, shared address space (RFC 6598).
+                || (a == 100 && (64..128).contains(&b))
+        }
+        IpAddr::V6(v6) => {
+            v6.is_unicast_link_local() || v6.is_loopback() || (v6.segments()[0] & 0xfe00) == 0xfc00
+        }
+    }
+}
+
+/// Whether an answer naming `addr` is believed from `src`: the sender must be on-link, and an
+/// A record must name the sender's own address. A host answers for its IPv6 names over the IPv4
+/// group too, so an AAAA record is not compared with an IPv4 source (an IPv6 source that names
+/// itself is accepted whatever its scope).
+pub(crate) fn answer_is_from_its_owner(addr: IpAddr, src: IpAddr) -> bool {
+    let (addr, src) = (addr.to_canonical(), src.to_canonical());
+    match addr {
+        IpAddr::V4(_) => addr == src && is_on_link_source(src),
+        IpAddr::V6(_) => addr == src || is_on_link_source(src),
     }
 }
 
@@ -1114,5 +1155,7 @@ impl sansio::Protocol<TaggedBytesMut, (), ()> for Mdns {
     }
 }
 
+#[cfg(test)]
+mod mdns_answer_trust_test;
 #[cfg(test)]
 mod mdns_test;

@@ -42,7 +42,9 @@ use stun::xoraddr::*;
 
 use crate::candidate::candidate_peer_reflexive::CandidatePeerReflexiveConfig;
 use crate::candidate::{candidate_pair::*, *};
-use crate::mdns::{MulticastDnsMode, create_multicast_dns, generate_multicast_dns_name};
+use crate::mdns::{
+    MulticastDnsMode, create_multicast_dns, generate_multicast_dns_name, is_ice_mdns_name,
+};
 use crate::network_type::NetworkType;
 use crate::rand::*;
 use crate::state::*;
@@ -583,6 +585,15 @@ impl Agent {
 
             if c.candidate_type() != CandidateType::Host {
                 return Err(Error::ErrAddressParseFailed);
+            }
+
+            if !is_ice_mdns_name(c.address()) {
+                warn!(
+                    "[{}]: ignoring mDNS candidate {}: not a <uuid>.local name",
+                    self.get_name(),
+                    c.address()
+                );
+                return Ok(false);
             }
 
             if self.mdns_queries.len() >= MAX_PENDING_MDNS_QUERIES {
