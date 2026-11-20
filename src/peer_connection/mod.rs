@@ -825,7 +825,10 @@ impl RTCPeerConnection {
             .is_some_and(|options| options.ice_restart)
             || options.take().is_some_and(|options| options.ice_restart);
 
-        if is_ice_restart_requested {
+        // A new transport after the last one was closed (every m-section rejected) is a new ICE
+        // session: the offer carries new credentials and `set_local_description` restarts the
+        // agent, so none of the closed transport's candidates or selected pair carry over.
+        if is_ice_restart_requested || self.transport_closed {
             self.stage_ice_restart()?;
         }
 
@@ -1674,12 +1677,20 @@ impl RTCPeerConnection {
                     fingerprints: extract_fingerprints(parsed_remote_description)?,
                 };
 
+                // After the transport was closed, the description that sets one up again starts
+                // a new ICE session even when the peer keeps its ICE credentials: some browsers
+                // hold one ufrag/pwd per session, not per transport (Firefox), so a new m-section
+                // after every one was rejected arrives with the old credentials but new
+                // candidates and a new DTLS association. Keeping the old session left the agent on
+                // the closed transport's selected pair, sending the DTLS handshake there.
                 if transports_started
-                    && self
-                        .ice_transport()
-                        .have_remote_credentials_change(&remote_ufrag, &remote_pwd)
+                    && (new_association
+                        || self
+                            .ice_transport()
+                            .have_remote_credentials_change(&remote_ufrag, &remote_pwd))
                 {
-                    // An ICE Restart only happens implicitly for a set_remote_description of type offer
+                    // An ICE Restart only happens implicitly for a set_remote_description of type
+                    // offer; as the offerer, `create_offer` staged one for a closed transport.
 
                     if !we_offer {
                         // The answerer restarts in one step: it has `now`, and the answer it

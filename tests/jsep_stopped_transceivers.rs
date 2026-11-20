@@ -148,3 +148,64 @@ a=rtpmap:96 VP8/90000
     assert_ne!(port_of(&sections[1]), 0, "{}", answer.sdp);
     Ok(())
 }
+
+/// The `a=ice-ufrag` of a description.
+fn ice_ufrag(sdp: &str) -> Option<String> {
+    sdp.lines()
+        .find_map(|line| line.strip_prefix("a=ice-ufrag:"))
+        .map(str::to_owned)
+}
+
+/// After an exchange rejected every m= section (closing the transport), a remote offer with a
+/// new m= section sets up a new transport. A peer that keeps one ICE ufrag/pwd per session
+/// (Firefox) offers it with the old credentials; the answerer still starts a new ICE session,
+/// so its answer carries new credentials instead of resuming the closed transport's.
+#[test]
+fn a_new_section_after_every_section_was_rejected_is_a_new_ice_session() -> TestResult {
+    let mut answerer = default_peer()?;
+    let now = Instant::now();
+    let mut answer_to = |offer: String| -> Result<String, Box<dyn std::error::Error>> {
+        answerer.set_remote_description(now, RTCSessionDescription::offer(crlf(&offer))?)?;
+        let answer = answerer.create_answer(None)?;
+        answerer.set_local_description(now, answer.clone())?;
+        Ok(answer.sdp)
+    };
+
+    let first = answer_to(format!(
+        "{SESSION}a=group:BUNDLE 0
+m=video 9 UDP/TLS/RTP/SAVPF 96
+{TRANSPORT}a=mid:0
+a=sendrecv
+a=rtpmap:96 VP8/90000
+"
+    ))?;
+    let stopped = answer_to(format!(
+        "{SESSION}m=video 0 UDP/TLS/RTP/SAVPF 96
+{TRANSPORT}a=mid:0
+a=inactive
+a=rtpmap:96 VP8/90000
+"
+    ))?;
+    assert_eq!(port_of(&media_sections(&stopped)[0]), 0, "{stopped}");
+    let reopened = answer_to(format!(
+        "{SESSION}a=group:BUNDLE 1
+m=video 0 UDP/TLS/RTP/SAVPF 96
+{TRANSPORT}a=mid:0
+a=inactive
+a=rtpmap:96 VP8/90000
+m=audio 9 UDP/TLS/RTP/SAVPF 111
+{TRANSPORT}a=mid:1
+a=sendrecv
+a=rtpmap:111 opus/48000/2
+"
+    ))?;
+
+    let (first_ufrag, reopened_ufrag) = (ice_ufrag(&first), ice_ufrag(&reopened));
+    assert!(first_ufrag.is_some(), "{first}");
+    assert!(reopened_ufrag.is_some(), "{reopened}");
+    assert_ne!(
+        first_ufrag, reopened_ufrag,
+        "the new transport is a new ICE session: {first}\n---\n{reopened}"
+    );
+    Ok(())
+}
