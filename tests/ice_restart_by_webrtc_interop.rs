@@ -314,6 +314,11 @@ async fn test_ice_restart_interop() -> Result<()> {
                     message: BytesMut::from(&buf[..n]),
                 })?;
             }
+            // An ICMP port-unreachable for a check to a candidate port the other peer has closed
+            // (WSAECONNRESET on Windows) is a lost datagram, not a broken socket.
+            Ok(Err(e)) if common::udp_recv_error_is_lost_datagram(&e) => {
+                log::debug!("RTC socket receive error (datagram lost): {}", e);
+            }
             Ok(Err(e)) => return Err(e.into()),
             Err(_) => {
                 rtc_pc.handle_timeout(Instant::now()).ok();
@@ -642,6 +647,11 @@ async fn test_ice_restart_interop() -> Result<()> {
                     },
                     message: BytesMut::from(&buf[..n]),
                 })?;
+            }
+            // An ICMP port-unreachable for a check to a candidate port the other peer has closed
+            // (WSAECONNRESET on Windows) is a lost datagram, not a broken socket.
+            Ok(Err(e)) if common::udp_recv_error_is_lost_datagram(&e) => {
+                log::debug!("RTC socket receive error (datagram lost): {}", e);
             }
             Ok(Err(e)) => return Err(e.into()),
             Err(_) => {

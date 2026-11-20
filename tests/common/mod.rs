@@ -36,3 +36,14 @@ pub fn webrtc_setting_engine() -> webrtc::api::setting_engine::SettingEngine {
     setting_engine.set_include_loopback_candidate(true);
     setting_engine
 }
+
+/// Whether a UDP `recv_from` error only means a datagram was lost.
+///
+/// On Windows a UDP socket reports an ICMP port-unreachable for an earlier `send_to` as
+/// `WSAECONNRESET` (os error 10054) on its next receive. A connectivity check sent to a candidate
+/// port that is gone (the other peer closed it, for instance after an ICE restart) is just a lost
+/// datagram; the socket is still good and the next receive works.
+#[allow(dead_code)]
+pub fn udp_recv_error_is_lost_datagram(err: &std::io::Error) -> bool {
+    err.kind() == std::io::ErrorKind::ConnectionReset
+}
