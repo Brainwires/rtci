@@ -2933,3 +2933,54 @@ fn test_pre_handshake_application_data_is_bounded() {
         payload.len()
     );
 }
+
+/// A flight whose parse failed (and sent a fatal alert) is terminal: further handshake records
+/// must not make the server parse, and verify, it again.
+#[test]
+fn test_failed_flight_is_not_parsed_again() {
+    use crate::cipher_suite::CipherSuiteId;
+    use crate::compression_methods::default_compression_methods;
+    use crate::flight::flight2::Flight2;
+    use crate::handshake::handshake_message_client_hello::HandshakeMessageClientHello;
+    use crate::handshake::handshake_random::HandshakeRandom;
+
+    let mut conn = setup_dtls_conn_server_handshake_in_progress();
+    conn.current_flight = Box::new(Flight2 {});
+    conn.current_handshake_state = HandshakeState::Waiting;
+    conn.state.cookie = vec![1; COOKIE_LENGTH];
+    conn.state.handshake_recv_sequence = 1;
+
+    let mut handshake =
+        Handshake::new(HandshakeMessage::ClientHello(HandshakeMessageClientHello {
+            version: PROTOCOL_VERSION1_2,
+            random: HandshakeRandom::default(),
+            cookie: vec![2; COOKIE_LENGTH],
+            cipher_suites: vec![CipherSuiteId::Tls_Ecdhe_Ecdsa_With_Aes_128_Gcm_Sha256],
+            compression_methods: default_compression_methods(),
+            extensions: vec![],
+        }));
+    handshake.handshake_header.message_sequence = 1;
+    let mut data = vec![];
+    handshake.marshal(&mut data).unwrap();
+    assert!(
+        conn.cache
+            .push(data, 0, 1, HandshakeType::ClientHello, true)
+    );
+
+    conn.handshake_rx = Some(());
+    assert!(matches!(
+        conn.handshake(Instant::now()),
+        Err(Error::ErrCookieMismatch)
+    ));
+    assert!(conn.current_handshake_state == HandshakeState::Errored);
+
+    // More handshake records: the failed flight is not parsed again.
+    for _ in 0..100 {
+        conn.handshake_rx = Some(());
+        assert!(matches!(
+            conn.handshake(Instant::now()),
+            Err(Error::ErrInvalidFsmTransition)
+        ));
+    }
+    assert!(conn.current_handshake_state == HandshakeState::Errored);
+}
