@@ -5,6 +5,158 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.0+brainwires.1] - 2026-11-20
+
+A conformance release: every claim the README, `FORK.md`, a public option, the default SDP or the
+statistics report makes is now a row of [`docs/conformance.md`](docs/conformance.md) with its
+specification section and the test that proves it, and what is not implemented is listed there.
+Fixes across SCTP, JSEP, ICE, TURN, DTLS, SRTP, RTP / RTCP and the statistics report came out of
+that work. The minor version moves because the public API changes (see "Breaking changes").
+
+### Breaking changes
+
+- **rtp**: `Header` has a public `padding_size: u8`, the number of padding octets a parsed packet
+  carried, kept on re-marshal (0 pads as before). Struct literals add `padding_size: 0` or
+  `..Default::default()`.
+- **stats**: members the engine cannot measure are `Option` and left out of the JSON when `None`
+  (webrtc-stats: an unmeasured member is not present), instead of 0 / `""`. This covers the
+  encoder, decoder, frame, audio, jitter buffer, pause / freeze, corruption, PSNR and quality
+  limitation members of `RTCInboundRtpStreamStats` / `RTCOutboundRtpStreamStats`, their
+  `remote_id`, `rtx_ssrc`, `fec_ssrc` and `encoding_index`, the received streams' `jitter` and ECN
+  / RFC 8888 members, `round_trip_time` of the remote-inbound and remote-outbound streams,
+  `RTCCodecStats::channels`, `RTCIceCandidateStats::related_port`, the candidate pair's
+  last-packet timestamps, `current_round_trip_time` and available bitrates, and every member of
+  `RTCAudioSourceStats`, `RTCVideoSourceStats` and `RTCAudioPlayoutStats`. Read them with
+  `if let Some(v)` or `.unwrap_or_default()`.
+- **stats**: `RTCIceCandidateStats::priority` is `u32` (the full RFC 8445 priority; it was
+  truncated to `u16`). Widen the receiving type.
+- **stats**: `RTCMediaSourceStats::track_id` is `track_identifier`, as webrtc-stats names it.
+  Rename the field access.
+- **stats**: `RTCCodecStats` has a `transport_id: String`. Struct literals add it.
+- **ice**: `AgentConfig` has `nat_1to1_ips`, `nat_1to1_ip_candidate_type`,
+  `allow_loopback_remote_candidates`, `allow_link_local_remote_candidates` and
+  `remote_address_filter`; `SettingEngine`'s `Candidates` has the last three. Struct literals add
+  `..Default::default()`.
+- **rtp**: `Vp9Payloader` has a public `flexible_mode: bool`. Struct literals add
+  `..Default::default()`.
+- **data channel**: `RTCDataChannelInit` has `priority: u16` (default 256, W3C Priority
+  Control). Struct literals add `priority: 256` or `..Default::default()`.
+- **rtp_transceiver**: `RTCRtpEncodingParameters::default()` has `active: true`, as W3C defines
+  it; an encoding with `active: false` is not sent and is a paused rid in `a=simulcast`. Code that
+  relied on the old `false` default sets `active` explicitly.
+- **rtcp**: `ReceptionReport::total_lost` holds the 24 wire bits unclamped; read the signed RFC
+  3550 count with `ReceptionReport::cumulative_lost()` and write one with `set_cumulative_lost()`.
+- **setting_engine**: `with_receive_mtu`, `with_include_loopback_candidate` and
+  `with_disable_media_engine_copy` are `#[deprecated]`: they had no effect in the sans-I/O engine.
+  Remove the calls (add a loopback candidate with `add_local_candidate` instead).
+- **media_engine**: `register_default_codecs` no longer offers ULPFEC (nothing encodes or decodes
+  it); an application with its own coder registers `MIME_TYPE_ULP_FEC` itself. The FlexFEC coder
+  is selected only for an exact `video/flexfec-03`.
+- **ice**: only `<uuid>.local` remote candidate names are resolved over mDNS, and remote
+  candidates on unspecified, multicast, broadcast or port-0 addresses are dropped; checks to a
+  loopback or link-local remote address need a local candidate of the same scope unless
+  `SettingEngineBuilder::with_remote_candidate_scopes` allows them.
+
+### Features
+
+- **setting_engine / ice**: `SettingEngineBuilder::with_remote_candidate_scopes` and
+  `with_remote_address_filter` (`ice::agent::remote_policy::RemoteAddressFilter`) decide which
+  remote addresses connectivity checks may reach (RFC 8445 §5.1.1.1).
+- **ice**: `nat_1to1_ips` is applied to the host candidates the application adds: `Host`
+  announces the external address, `Srflx` adds a server-reflexive candidate.
+- **media_engine**: each media section negotiates its own codecs, one entry per format;
+  `with_disable_media_engine_multiple_codecs(true)` restores one shared set. The default codecs
+  carry H.264 High profile at levels 4.0 to 5.1, each with an RTX pairing, and the default AV1
+  fmtp is `profile=0`.
+- **stats**: `RTCPeerConnection::update_decoder_stats`, `update_audio_receiver_stats`,
+  `update_encoder_stats`, `update_audio_source_stats`, `update_video_source_stats` and
+  `update_audio_playout_stats` supply the members only the application can measure (the
+  `*StatsUpdate` types are exported from `statistics`); updates merge.
+- **sctp**: `TransportConfig::with_max_receive_message_size` and `with_remote_sctp_port`;
+  `Association::is_ended`.
+- **rtcp / rtp**: a stopped sender sends a final SR and BYE, and an inbound BYE ends the remote
+  track; `H264Payloader::with_packetization_mode`; `ReceptionReport::cumulative_lost` /
+  `set_cumulative_lost`.
+- **media**: `OggReader::next_packet` and `OggPageHeader::{segment_table, packets,
+  is_continued_packet}`; `MAX_ACCESS_UNIT_NALS` / `MAX_ACCESS_UNIT_BYTES` bound an H.26x access
+  unit.
+- **ice / dtls / srtp**: `Agent::set_candidate_types`, `Candidate::last_consent`,
+  `DTLSConn::is_failed`, `srtp::Context::cryptex` / `set_cryptex`.
+
+### Bug Fixes
+
+- **SCTP and data channels**: SHUTDOWN carries the last TSN received and acknowledges our DATA;
+  a graceful shutdown sends queued DATA first, and the initiator ends after SHUTDOWN COMPLETE. Fast
+  Recovery counts misses only for TSNs a SACK reports missing; T3-rtx keeps recovering past its
+  limit by default (a finite limit closes the association); congestion window arithmetic
+  saturates. A performed outgoing stream reset restarts the stream's SSN. The INIT goes to the
+  remote `a=sctp-port`. A failed handshake closes the association, the transport and its data
+  channels. Messages up to the advertised `max-message-size` are received, and an oversized one is
+  dropped alone instead of ending the read. A fragment set's completeness is checked in constant
+  time.
+- **Peer connection and SDP (JSEP)**: `stop()` and `setStreams()` raise negotiation-needed and a
+  stopped transceiver settles; a recycled m-line drops the stopped transceiver's section;
+  `addTransceiver` accepts `inactive` and `send` without encodings, and remote tracks are labelled
+  `"remote <kind>"`; `setParameters` runs the W3C validation steps and refuses duplicate rids; a
+  new `iceTransportPolicy` from `set_configuration` reaches the ICE agent; a remote description
+  that fails to apply leaves the negotiated codecs alone; codec preferences survive a remote
+  offer; `Require` header encryption refuses a remote description without `a=cryptex`; a FEC
+  repair flow is described only for FlexFEC-03.
+- **ICE, TURN, STUN, mDNS**: consent is granted only by authenticated responses to our own
+  checks; a closed agent refuses an ICE restart; the bare `.local` is not an mDNS host name; an
+  mDNS answer is taken only from an on-link sender that owns the address, and a query ends at its
+  timeout. TURN: a 438 Stale Nonce answer to CreatePermission, Refresh or ChannelBind is retried
+  with the new nonce; a Refresh or ChannelBind that timed out is sent again; permissions are per
+  peer IP; the authenticated Allocate uses a fresh transaction id; Data indications are accepted
+  only from the TURN server; a permission refresh is split into bounded requests. STUN: the
+  message length no longer wraps.
+- **DTLS**: a fatal alert, handshake error or exhausted retransmissions sets
+  `RTCDtlsTransportState::Failed` and fails the peer connection; a repeated peer flight is
+  answered at once; alerts are not echoed; an invalid epoch-0 record cannot stall the handshake;
+  the AES-GCM / CCM explicit nonce is the record's epoch and sequence number (RFC 5288, RFC 6655);
+  CBC padding and MAC checks have a constant structure; a server does no key exchange work for a
+  source address before the cookie exchange.
+- **SRTP**: the AES-GCM cipher constructor returns errors instead of panicking.
+- **RTP, RTCP, codecs, interceptors**: a packet keeps its padding size across unmarshal and
+  marshal; every compound report carries an SDES CNAME; a reception report's cumulative loss is
+  read as signed 24-bit; TWCC receive deltas and status chunks are checked against the packet.
+  RTX is de-encapsulated before the interceptor chain, and NACK retransmissions keep the
+  original's CSRCs and extensions and are held to the stream's own send rate. GCC scales its delay
+  trend and measures the received rate on arrival time. FlexFEC-03 decoder packets are ordered by
+  a total key; the adaptive jitter buffer is bounded per stream and drops an evicted packet's
+  deadline; a wide sequence gap clears in one step. H.264 honours `packetization-mode=0`, and
+  only the last slice of a picture is a timed sample; H.265 tells a continuing fragmentation unit
+  from a partition head; VP9 accepts three reference indices, reads G as one bit and sends
+  non-flexible mode with the scalability structure on key frames; AV1 sets N only at a coded video
+  sequence start. `H26xSampleReader` returns whole access units and `OggReader` reads packets;
+  reads of untrusted media files are bounded.
+- **Statistics**: every id a stats object names resolves in the same report; remote-inbound
+  `roundTripTime`, `packetsReceived` and `jitter` follow RFC 3550 (jitter in seconds); reception
+  reports inside sender reports are counted; remote objects exist only after their first report;
+  every candidate pair is reported with its state, and candidates carry their full priority;
+  `dtlsState`, data channel `state`, `transportId`, `trackIdentifier` and the congestion
+  controller's estimate (`targetBitrate`, `availableOutgoingBitrate`) are reported; `tlsVersion`
+  is the ServerHello version in hex; per-SSRC stream maps shrink with their streams.
+
+### Testing
+
+- Upstream test parity: every test of upstream `webrtc-rs/rtc` and `webrtc-rs/webrtc` v0.17.1 has
+  a fork test, a mapped equivalent, or a recorded reason (`docs/upstream-test-parity.md`);
+  commented-out and never-compiled tests across SCTP, data channels, DTLS, ICE, TURN, STUN, mDNS,
+  SRTP, SDP and media were restored.
+- A Linux network-namespace environment runs ICE across NAT topologies, TURN over UDP / TCP / TLS,
+  mDNS on a LAN, ICE-TCP through a NAT, and data channels, NACK, the jitter buffer and GCC over
+  impaired links; a browser matrix (Chromium, Firefox, WebKit) covers data channels,
+  renegotiation, ICE restart, every codec both ways, simulcast with RTX, Cryptex, TURN, ICE-TCP,
+  mDNS-hidden candidates, JSEP flows, wrong fingerprints and stats.
+- Fuzzing: every parser a peer, a server or an untrusted file reaches has a fuzz target, with
+  stateful targets for the state machines above them; CI checks every target is run and built by
+  OSS-Fuzz.
+- CI fails on hidden tests (ignored, commented out, orphaned or platform-gated without a listed
+  reason) and on conformance rows whose test does not exist, runs the workspace tests on macOS and
+  Windows as well as Linux, and pins every action by commit SHA.
+- The workspace with `--all-features`: 2734 tests pass.
+
 ## [0.21.1+brainwires.5] - 2026-11-20
 
 Hardening across the stack: bounds on the state a peer can make the stack hold, and stricter
