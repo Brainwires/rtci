@@ -257,7 +257,7 @@ fn unreliable_channel_loses_without_retransmitting() {
             ..Default::default()
         },
         1000,
-        Duration::from_secs(90),
+        Duration::from_secs(120),
         false,
     );
     let unique: HashSet<u32> = got.iter().copied().collect();
@@ -275,11 +275,16 @@ fn unreliable_channel_loses_without_retransmitting() {
         "{} of 1000 delivered over a 10%-loss link; expected 800 to 960",
         unique.len()
     );
-    // One message every 2 ms is 2 s of sending; the queue must not hold messages back for
-    // long after (a stall the delivery count alone could hide).
+    // The queue must not hold messages back without end (a stall the delivery count alone
+    // could hide). It is paced by the congestion window, not by the 2 ms between sends: with
+    // 10% loss each way the window stays near four packets, too few for three miss indications,
+    // so most losses can only be found by the T3-rtx timer, at RFC 9260's RTO.Min of 1 s (section 16)
+    // each, and the window restarts from one MTU (section 7.2.3). About a hundred loss events
+    // put the drain near a minute (59 s in the first environment run); 90 s still catches a
+    // stalled queue, which never drains.
     let drained_after = drained_after.expect("the send queue never drained");
     assert!(
-        drained_after < Duration::from_secs(30),
+        drained_after < Duration::from_secs(90),
         "the send queue took {drained_after:?} to drain"
     );
 }

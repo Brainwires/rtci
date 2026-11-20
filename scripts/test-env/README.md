@@ -63,8 +63,8 @@ variables the tests read.
     addresses; one hiding, one only querying).
   - `testenv_impairment`: netem loss, delay, jitter, reordering and a rate limit: reliable and
     unreliable data channels (the unreliable one must deliver 800 to 960 of 1000 messages over
-    10% loss and drain its queue in under 30 s), NACK recovering every packet, the GStreamer VP8
-    stream through NACK and the jitter buffer into an IVF file that GStreamer then decodes, and
+    10% loss and drain its queue in under 90 s, paced by T3-rtx at RTO.Min 1 s), NACK
+    recovering every packet, the GStreamer VP8 stream through NACK and the jitter buffer into an IVF file that GStreamer then decodes, and
     GCC settling between 300 and 660 kbit/s on a 600 kbit/s link.
   - `testenv_turn`: a relayed call that must keep carrying messages for 50 s through a second
     coturn (port 3479, `coturn/turnserver-stale.conf`) whose nonces go stale after 10 s and whose
