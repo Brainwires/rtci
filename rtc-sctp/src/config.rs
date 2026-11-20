@@ -68,6 +68,7 @@ pub enum StreamScheduler {
 #[derive(Debug, Clone)]
 pub struct TransportConfig {
     sctp_port: u16,
+    remote_sctp_port: u16,
     max_receive_buffer_size: u32,
     max_message_size: u32,
     max_receive_message_size: Option<u32>,
@@ -81,6 +82,7 @@ impl Default for TransportConfig {
     fn default() -> Self {
         TransportConfig {
             sctp_port: 5000,
+            remote_sctp_port: 5000,
             max_receive_buffer_size: INITIAL_RECV_BUF_SIZE,
             max_message_size: DEFAULT_MAX_MESSAGE_SIZE,
             max_receive_message_size: None,
@@ -93,9 +95,18 @@ impl Default for TransportConfig {
 }
 
 impl TransportConfig {
-    /// Sets the SCTP port. WebRTC always uses 5000.
+    /// Sets this endpoint's SCTP port, the source port of what it sends (RFC 8841 5: its own
+    /// `a=sctp-port`). Defaults to 5000.
     pub fn with_sctp_port(mut self, value: u16) -> Self {
         self.sctp_port = value;
+        self
+    }
+
+    /// Sets the peer's SCTP port, the destination port of the INIT this endpoint sends when it
+    /// initiates (RFC 8841 5: the remote `a=sctp-port`). Defaults to 5000. An endpoint that
+    /// accepts an association answers on the ports of the INIT it received.
+    pub fn with_remote_sctp_port(mut self, value: u16) -> Self {
+        self.remote_sctp_port = value;
         self
     }
 
@@ -150,6 +161,11 @@ impl TransportConfig {
     /// The configured SCTP port.
     pub fn sctp_port(&self) -> u16 {
         self.sctp_port
+    }
+
+    /// The configured SCTP port of the peer.
+    pub fn remote_sctp_port(&self) -> u16 {
+        self.remote_sctp_port
     }
 
     /// The configured receive window in bytes.

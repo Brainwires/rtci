@@ -4,6 +4,8 @@ mod endpoint_test;
 pub(crate) mod link_test;
 #[cfg(test)]
 mod loss_recovery_test;
+#[cfg(test)]
+mod sctp_port_test;
 
 use std::{
     collections::HashMap,

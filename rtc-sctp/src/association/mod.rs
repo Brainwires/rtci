@@ -409,6 +409,10 @@ impl Association {
             my_max_num_outbound_streams: config.max_num_outbound_streams(),
             my_max_num_inbound_streams: config.max_num_inbound_streams(),
             max_payload_size,
+            // RFC 8841 5: each side's `a=sctp-port`. An accepting side takes the INIT's ports
+            // instead (`handle_init`).
+            source_port: config.sctp_port(),
+            destination_port: config.remote_sctp_port(),
 
             rto_mgr: RtoManager::new(),
             timers: TimerTable::new(config.timer_config()),
@@ -911,9 +915,6 @@ impl Association {
     fn send_init(&mut self) -> Result<()> {
         if let Some(stored_init) = &self.stored_init {
             debug!("[{}] sending INIT", self.side);
-
-            self.source_port = 5000; // Spec??
-            self.destination_port = 5000; // Spec??
 
             let outbound = Packet {
                 common_header: CommonHeader {

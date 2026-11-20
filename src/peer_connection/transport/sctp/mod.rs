@@ -166,7 +166,7 @@ impl SctpTransport {
         dtls_role: RTCDtlsRole,
         remote_caps: SCTPTransportCapabilities,
         local_port: u16,
-        _remote_port: u16,
+        remote_port: u16,
     ) -> Result<()> {
         if self.is_started {
             return Ok(());
@@ -217,11 +217,11 @@ impl SctpTransport {
             .with_max_message_size(max_message_size)
             .with_max_receive_message_size(can_send_size)
             .with_sctp_port(local_port)
+            .with_remote_sctp_port(remote_port)
             .with_stream_scheduler(scheduler);
         if let Some(recv_buf) = self.max_receive_buffer_size {
             sctp_transport_config = sctp_transport_config.with_max_receive_buffer_size(recv_buf);
         }
-        //TODO: add remote_port support
 
         if dtls_role == RTCDtlsRole::Client {
             self.sctp_endpoint = Some(sctp::Endpoint::new(
@@ -352,6 +352,33 @@ mod tests {
                 config.max_receive_message_size()
             );
         }
+    }
+
+    // RFC 8841 5: the remote `a=sctp-port` is the destination port of the INIT.
+    #[test]
+    fn start_applies_the_remote_sctp_port() {
+        let mut transport = SctpTransport::new(
+            SctpMaxMessageSize::default(),
+            None,
+            None,
+            test_transport_id(TransportKind::Sctp),
+            test_transport_id(TransportKind::Dtls),
+        );
+        transport
+            .start(
+                RTCDtlsRole::Client,
+                SCTPTransportCapabilities {
+                    max_message_size: 0,
+                },
+                5000,
+                6000,
+            )
+            .expect("start");
+        let config = transport
+            .sctp_transport_config
+            .expect("client transport config");
+        assert_eq!(5000, config.sctp_port());
+        assert_eq!(6000, config.remote_sctp_port());
     }
 
     #[test]
