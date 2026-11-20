@@ -1511,15 +1511,20 @@ impl RTCPeerConnection {
                             continue;
                         }
 
-                        // A rejected m= section (port 0) is answered rejected and changes no
-                        // transceiver it already has. One no transceiver has yet gets one, as
-                        // every m= section does (RFC 9429 section 5.10, W3C 4.4.1.6), created
-                        // stopped: no direction, no media, no track event.
+                        // A rejected m= section (port 0) is answered rejected. The transceiver
+                        // it already has is stopped, unless it is already (W3C 4.4.1.6: "if the
+                        // media description is rejected, and transceiver is not already
+                        // stopped, stop the RTCRtpTransceiver"), firing no track event. One no
+                        // transceiver has yet gets one, as every m= section does (RFC 9429
+                        // section 5.10), created stopped: no direction, no media, no track
+                        // event. A rollback of the offer removes a transceiver it created; one
+                        // it stopped stays stopped (the stop algorithm is not undone).
                         if is_rejected_media(media) {
                             let kind = RtpCodecKind::from(media.media_name.media.as_str());
-                            if matches!(kind, RtpCodecKind::Audio | RtpCodecKind::Video)
-                                && !transceiver_by_mid.contains_key(mid_value.as_str())
-                            {
+                            if let Some(&i) = transceiver_by_mid.get(mid_value.as_str()) {
+                                self.rtp_transceivers[i]
+                                    .stop(&self.media_engine, &mut self.interceptor)?;
+                            } else if matches!(kind, RtpCodecKind::Audio | RtpCodecKind::Video) {
                                 let mut transceiver = RTCRtpTransceiverInternal::new(
                                     kind,
                                     None,
@@ -1626,9 +1631,13 @@ impl RTCPeerConnection {
                             continue;
                         }
 
-                        // A rejected m= section in the answer: the transceiver is stopped, not
-                        // given a direction.
+                        // A rejected m= section in the answer: the transceiver is stopped (W3C
+                        // 4.4.1.6), not given a direction; one already stopped stays as it is.
                         if is_rejected_media(media) {
+                            if let Some(&i) = transceiver_by_mid.get(mid_value.as_str()) {
+                                self.rtp_transceivers[i]
+                                    .stop(&self.media_engine, &mut self.interceptor)?;
+                            }
                             continue;
                         }
 
