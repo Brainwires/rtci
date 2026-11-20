@@ -93,6 +93,10 @@ pub struct DTLSConn {
     closed: bool, //  *closer.Closer
     /// The peer sent close_notify. Its reply has been queued; the connection is finished.
     pub(crate) closed_by_peer: bool,
+    /// The association ended in failure: a fatal alert was sent or received, or the handshake
+    /// gave up (an error, or its retransmissions ran out). Terminal: nothing more is read,
+    /// written or retransmitted (RFC 5246 7.2.2, W3C webrtc 5.5.1 RTCDtlsTransport "failed").
+    pub(crate) failed: bool,
     //handshakeLoopsFinished sync.WaitGroup
 
     //readDeadline  :deadline.Deadline,
@@ -174,6 +178,7 @@ impl DTLSConn {
             connection_closed_by_user: false,
             closed: false,
             closed_by_peer: false,
+            failed: false,
 
             current_handshake_state: initial_fsm_state,
             current_retransmit_timer: None,
@@ -265,7 +270,28 @@ impl DTLSConn {
         self.state.srtp_protection_profile
     }
 
+    /// Whether the association has failed: a fatal alert was sent or received, or the handshake
+    /// gave up (a handshake error, or the retransmissions ran out). A failed association is
+    /// finished: it reads, writes and retransmits nothing more. An ordinary retransmission, or a
+    /// record that is silently discarded, never fails it.
+    pub fn is_failed(&self) -> bool {
+        self.failed
+    }
+
+    /// Ends the association after a fatal alert (sent or received) or a handshake that gave up.
+    /// After a fatal alert the connection must be closed at once and nothing more sent on it
+    /// (RFC 5246 7.2.2), so the retransmit timer is cancelled too.
+    pub(crate) fn fail(&mut self) {
+        if !self.failed {
+            debug!("{}: association failed", srv_cli_str(self.is_client));
+        }
+        self.failed = true;
+        self.closed = true;
+        self.current_retransmit_timer = None;
+    }
+
     pub(crate) fn notify(&mut self, level: AlertLevel, desc: AlertDescription) {
+        let is_fatal = level == AlertLevel::Fatal;
         self.write_packets(vec![Packet {
             record: RecordLayer::new(
                 PROTOCOL_VERSION1_2,
@@ -278,6 +304,10 @@ impl DTLSConn {
             should_encrypt: self.is_handshake_completed(),
             reset_local_sequence_number: false,
         }]);
+        if is_fatal {
+            // Sending a fatal alert ends the association (RFC 5246 7.2.2).
+            self.fail();
+        }
     }
 
     pub(crate) fn write_packets(&mut self, pkts: Vec<Packet>) {
@@ -493,6 +523,10 @@ impl DTLSConn {
     ///
     /// Fails if the record is malformed or fails authentication.
     pub fn read(&mut self, buf: &[u8]) -> Result<()> {
+        // A failed association is finished: nothing more is processed on it.
+        if self.failed {
+            return Err(Error::ErrConnClosed);
+        }
         // Per RFC 6347: buffer future-epoch packets only until Finished is received
         // (i.e. until handshake completes). After that, discard them.
         let enqueue = !self.is_handshake_completed();
@@ -516,6 +550,10 @@ impl DTLSConn {
                 if alert.alert_description == AlertDescription::CloseNotify {
                     // A close_notify is only queued here as the reply to the peer's own.
                     self.closed_by_peer = true;
+                }
+                if alert.alert_level == AlertLevel::Fatal {
+                    // A fatal alert ends the association (RFC 5246 7.2.2).
+                    self.fail();
                 }
                 if alert.alert_level == AlertLevel::Fatal
                     || alert.alert_description == AlertDescription::CloseNotify
@@ -571,6 +609,10 @@ impl DTLSConn {
                     if alert.alert_description == AlertDescription::CloseNotify {
                         // A close_notify is only queued here as the reply to the peer's own.
                         self.closed_by_peer = true;
+                    }
+                    if alert.alert_level == AlertLevel::Fatal {
+                        // A fatal alert ends the association (RFC 5246 7.2.2).
+                        self.fail();
                     }
                     if alert.alert_level == AlertLevel::Fatal
                         || alert.alert_description == AlertDescription::CloseNotify

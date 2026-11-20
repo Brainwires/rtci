@@ -7,6 +7,9 @@
 //! [`EndpointEvent::HandshakeComplete`](crate::endpoint::EndpointEvent::HandshakeComplete) is the signal an application waits for: from that point
 //! application data can be written, and the SRTP keying material can be exported from the
 //! completed handshake.
+#[cfg(test)]
+mod endpoint_test;
+
 use crate::conn::DTLSConn;
 use shared::error::{Error, Result};
 use shared::{EcnCodepoint, TransportContext};
@@ -88,6 +91,16 @@ impl Endpoint {
         } else {
             None
         }
+    }
+
+    /// Whether the association with `remote` has failed: a fatal alert was sent or received, or
+    /// its handshake gave up (a handshake error, or the retransmissions ran out). An ordinary
+    /// retransmission or a discarded record never fails it. `false` when there is no such
+    /// association.
+    pub fn is_connection_failed(&self, remote: &SocketAddr) -> bool {
+        self.connections
+            .get(remote)
+            .is_some_and(|conn| conn.is_failed())
     }
 
     /// The connection with `remote`, for the fuzz harness to reach its record state.
@@ -230,6 +243,11 @@ impl Endpoint {
         ecn: Option<EcnCodepoint>,
         data: BytesMut,
     ) -> Result<Vec<EndpointEvent>> {
+        // A failed association is finished. As a server, a later datagram from that address
+        // starts afresh rather than meeting the dead association forever.
+        if self.server_config.is_some() && self.is_connection_failed(&remote) {
+            self.connections.remove(&remote);
+        }
         if let Vacant(e) = self.connections.entry(remote) {
             if let Some(server_config) = &self.server_config {
                 let handshake_config = server_config.clone();

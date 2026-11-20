@@ -72,7 +72,23 @@ pub(crate) fn srv_cli_str(is_client: bool) -> String {
 }
 
 impl DTLSConn {
+    /// Advances the handshake state machine as far as it can go now.
+    ///
+    /// A handshake that errors has given up: a flight failed to parse or generate (a fatal alert
+    /// has been queued for the peer where one applies), or the retransmissions ran out. The
+    /// association is then failed and stays failed (W3C webrtc 5.5.1 RTCDtlsTransport "failed").
     pub(crate) fn handshake(&mut self, now: Instant) -> Result<()> {
+        if self.failed {
+            return Err(Error::ErrConnClosed);
+        }
+        let result = self.handshake_steps(now);
+        if result.is_err() {
+            self.fail();
+        }
+        result
+    }
+
+    fn handshake_steps(&mut self, now: Instant) -> Result<()> {
         loop {
             debug!(
                 "[handshake:{}] {}: {}",

@@ -205,10 +205,14 @@ impl<'a>
         if let RTCMessageInternal::Dtls(DTLSMessage::Raw(dtls_message)) = msg.message {
             debug!("recv dtls RAW {:?}", msg.transport.peer_addr);
 
-            // Once the transport is closed, by either side, nothing more is exchanged on it. A
-            // late datagram (the peer's close_notify reply, say) must not reach an endpoint whose
-            // connection is gone, where a server would take it for a new handshake.
-            if self.ctx.dtls_transport.state == RTCDtlsTransportState::Closed {
+            // Once the transport is closed, by either side, or has failed, nothing more is
+            // exchanged on it. A late datagram (the peer's close_notify reply, say) must not reach
+            // an endpoint whose connection is gone, where a server would take it for a new
+            // handshake.
+            if matches!(
+                self.ctx.dtls_transport.state,
+                RTCDtlsTransportState::Closed | RTCDtlsTransportState::Failed
+            ) {
                 debug!(
                     "drop dtls datagram from {:?} on a closed transport",
                     msg.transport.peer_addr
@@ -230,12 +234,20 @@ impl<'a>
                 .as_mut()
                 .ok_or(Error::ErrDtlsTransportNotStarted)?;
 
-            for message in dtls_endpoint.read(
+            // The read's error is returned only after the datagrams the endpoint queued (the
+            // fatal alert that answers a failed handshake, say) have been taken and a failure has
+            // been recorded: the pipeline logs that error and goes on.
+            let (events, read_error) = match dtls_endpoint.read(
                 msg.now,
                 msg.transport.peer_addr,
                 msg.transport.ecn,
                 dtls_message,
-            )? {
+            ) {
+                Ok(events) => (events, None),
+                Err(err) => (vec![], Some(err)),
+            };
+            let failed = dtls_endpoint.is_connection_failed(&msg.transport.peer_addr);
+            for message in events {
                 match message {
                     EndpointEvent::HandshakeComplete => {
                         if let Some(state) =
@@ -329,6 +341,12 @@ impl<'a>
                     now: msg.now,
                     event: RTCEventInternal::DTLSClosed,
                 });
+            } else if failed {
+                self.fail_transport(msg.now);
+            }
+
+            if let Some(err) = read_error {
+                return Err(err);
             }
         } else {
             // Bypass
@@ -415,9 +433,20 @@ impl<'a>
             return Ok(());
         };
 
+        // A handshake whose retransmissions run out fails here. That failure is reported as the
+        // transport's state, not as an error, so the other handlers still get their timeout.
         let remotes: Vec<SocketAddr> = dtls_endpoint.get_connections_keys().copied().collect();
+        let mut failed = false;
+        let mut timeout_error = None;
         for remote in remotes {
-            dtls_endpoint.handle_timeout(remote, now)?;
+            if let Err(err) = dtls_endpoint.handle_timeout(remote, now) {
+                if dtls_endpoint.is_connection_failed(&remote) {
+                    debug!("dtls handshake with {} gave up: {}", remote, err);
+                    failed = true;
+                } else if timeout_error.is_none() {
+                    timeout_error = Some(err);
+                }
+            }
         }
         while let Some(transmit) = dtls_endpoint.poll_transmit() {
             self.ctx.write_outs.push_back(TaggedRTCMessageInternal {
@@ -427,6 +456,12 @@ impl<'a>
             });
         }
 
+        if failed {
+            self.fail_transport(now);
+        }
+        if let Some(err) = timeout_error {
+            return Err(err);
+        }
         Ok(())
     }
 
@@ -453,6 +488,34 @@ impl<'a>
 }
 
 impl<'a> DtlsHandler<'a> {
+    /// W3C webrtc 5.5.1: the DTLS transport goes to "failed" when the association fails — a
+    /// fatal alert sent or received (a certificate fingerprint mismatch included) or a handshake
+    /// that gave up. The peer connection's state follows: `update_connection_state` reports
+    /// "failed" once any DTLS transport has. The SCTP association and every data channel run
+    /// over this transport, so they end with it, exactly as when the peer closes it: the
+    /// `DTLSClosed` event is what tells the SCTP and data channel handlers, and it is also what
+    /// makes the peer connection re-evaluate its state. A no-op once the transport is failed
+    /// or closed.
+    fn fail_transport(&mut self, now: Instant) {
+        if matches!(
+            self.ctx.dtls_transport.state,
+            RTCDtlsTransportState::Failed | RTCDtlsTransportState::Closed
+        ) {
+            return;
+        }
+        warn!("dtls transport failed");
+        self.ctx
+            .dtls_transport
+            .state_change(RTCDtlsTransportState::Failed);
+        self.stats
+            .transport
+            .on_dtls_state_changed(RTCDtlsTransportState::Failed);
+        self.ctx.event_outs.push_back(TaggedRTCEventInternal {
+            now,
+            event: RTCEventInternal::DTLSClosed,
+        });
+    }
+
     const DEFAULT_SESSION_SRTP_REPLAY_PROTECTION_WINDOW: usize = 64;
     const DEFAULT_SESSION_SRTCP_REPLAY_PROTECTION_WINDOW: usize = 64;
     pub(crate) fn update_srtp_contexts(
