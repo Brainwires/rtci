@@ -12,6 +12,8 @@ mod client_allocate_test;
 #[cfg(test)]
 mod client_data_source_test;
 #[cfg(test)]
+mod client_permission_refresh_test;
+#[cfg(test)]
 mod client_permission_test;
 #[cfg(test)]
 mod client_retry_test;

@@ -23,6 +23,10 @@ const PERM_REFRESH_INTERVAL: Duration = Duration::from_secs(120);
 // The Permission Lifetime MUST be 300 seconds (= 5 minutes).
 const PERM_LIFETIME: Duration = Duration::from_secs(300);
 const MAX_RETRY_ATTEMPTS: u16 = 3;
+/// Most peer addresses one CreatePermission names. A refresh of more permissions is split into
+/// several requests, which keeps each well inside one UDP datagram (an IPv6 XOR-PEER-ADDRESS is
+/// 24 bytes) and far from the 64 KiB a STUN length field can describe.
+pub(crate) const MAX_PEERS_PER_CREATE_PERMISSION: usize = 16;
 /// Smallest step the allocation-refresh timer may advance by.
 ///
 /// The timer advances by a fixed cadence from its own previous value, which keeps the refresh
@@ -583,7 +587,9 @@ impl Relay<'_> {
                 debug!("no permission to refresh");
                 return Ok(());
             }
-            let _ = self.create_permissions(now, &addrs, None, Retry::default())?;
+            for peers in addrs.chunks(MAX_PEERS_PER_CREATE_PERMISSION) {
+                let _ = self.create_permissions(now, peers, None, Retry::default())?;
+            }
             Ok(())
         } else {
             Err(Error::ErrConnClosed)
