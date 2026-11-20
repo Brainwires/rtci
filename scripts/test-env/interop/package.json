@@ -1,0 +1,9 @@
+{
+  "name": "rtc-interop",
+  "private": true,
+  "type": "module",
+  "description": "Browser interop tests for webrtc-rs-rtc (scripts/test-env)",
+  "devDependencies": {
+    "@playwright/test": "1.64.1"
+  }
+}

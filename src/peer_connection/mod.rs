@@ -252,6 +252,8 @@ mod always_negotiate;
 pub mod message;
 pub mod sdp;
 pub mod state;
+#[cfg(test)]
+pub(crate) mod test_util;
 pub mod transport;
 
 use crate::data_channel::init::RTCDataChannelInit;

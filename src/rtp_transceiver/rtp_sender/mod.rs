@@ -169,8 +169,8 @@
 //! * [W3C RTCRtpSender](https://www.w3.org/TR/webrtc/#rtcrtpsender-interface)
 //! * [MDN RTCRtpSender](https://developer.mozilla.org/en-US/docs/Web/API/RTCRtpSender)
 
-//TODO: #[cfg(test)]
-//mod rtp_sender_test;
+#[cfg(test)]
+mod rtp_sender_test;
 
 pub(crate) mod internal;
 pub(crate) mod rtcp_parameters;

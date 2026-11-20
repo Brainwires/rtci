@@ -1,5 +1,5 @@
-//#[cfg(test)]
-//mod mdns_test;
+#[cfg(test)]
+mod mdns_test;
 
 use mdns::Mdns;
 use mdns::MdnsConfig;

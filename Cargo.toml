@@ -196,6 +196,20 @@ futures-util.workspace = true
 # would test this stack against its own lineage.
 webrtc = "0.17.3"
 
+# The test environment's TURN-over-TLS client speaks TLS 1.2: the environment's coturn fails
+# every TLS 1.3 handshake (tests/testenv/mod.rs). Dev-only; the library's rustls is unchanged.
+rustls = { workspace = true, features = ["tls12"] }
+
+# The real-network test environment's tests (tests/testenv_*.rs) create sockets inside Linux
+# network namespaces with setns(2).
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+libc = "0.2"
+
+[[example]]
+name = "interop-peer"
+path = "examples/interop-peer/interop-peer.rs"
+bench = false
+
 [[example]]
 name = "broadcast"
 path = "examples/broadcast/broadcast.rs"

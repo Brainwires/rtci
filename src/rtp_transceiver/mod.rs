@@ -113,6 +113,8 @@ pub(crate) mod fmtp;
 pub(crate) mod internal;
 pub mod rtp_receiver;
 pub mod rtp_sender;
+#[cfg(test)]
+mod rtp_transceiver_test;
 
 /// SSRC (Synchronization Source) identifier.
 ///

@@ -204,4 +204,29 @@ mod tests {
         assert_eq!(sample.data, Bytes::from(annex_b(&[sps, pps])));
         Ok(())
     }
+
+    /// x264 with sliced threads (e.g. `tune=zerolatency`) codes each picture as several slices.
+    /// Each was a timed sample, so a sender advanced the timestamp mid-picture and receivers
+    /// assembled only key frames (found by the browser interop tests in scripts/test-env). Each
+    /// picture is now one access unit: one timed sample holding all of its slices.
+    #[test]
+    fn h264_slices_of_one_picture_advance_time_once() -> Result<()> {
+        let idr1: &[u8] = &[0x65, 0x88, 0x84]; // IDR, first_mb_in_slice 0
+        let idr2: &[u8] = &[0x65, 0x40, 0x84]; // IDR, first_mb_in_slice 1: same picture
+        let p1: &[u8] = &[0x41, 0x9a, 0x02]; // P, first_mb_in_slice 0: next picture
+        let p2: &[u8] = &[0x41, 0x20, 0x02]; // P, first_mb_in_slice 3: same picture
+        let stream = annex_b(&[idr1, idr2, p1, p2]);
+        let mut reader = H26xSampleReader::new(Cursor::new(stream), 1024, false);
+
+        let first = reader.next_sample()?;
+        assert!(first.timed);
+        assert_eq!(first.data, Bytes::from(annex_b(&[idr1, idr2])));
+
+        let second = reader.next_sample()?;
+        assert!(second.timed);
+        assert_eq!(second.data, Bytes::from(annex_b(&[p1, p2])));
+
+        assert!(matches!(reader.next_sample(), Err(Error::ErrIoEOF)));
+        Ok(())
+    }
 }

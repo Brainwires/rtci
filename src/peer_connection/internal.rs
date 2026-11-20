@@ -25,7 +25,9 @@ use crate::rtp_transceiver::rtp_sender::rtp_coding_parameters::{
 };
 use crate::rtp_transceiver::rtp_sender::rtp_encoding_parameters::RTCRtpEncodingParameters;
 use crate::rtp_transceiver::{PayloadType, RTCRtpTransceiverDirection, RTCRtpTransceiverId};
-use crate::statistics::accumulator::IceCandidateAccumulator;
+use crate::statistics::accumulator::{
+    IceCandidateAccumulator, local_candidate_stats_id, remote_candidate_stats_id,
+};
 use ::sdp::description::common::Attribute;
 use ::sdp::description::session::*;
 use ::sdp::util::ConnectionRole;
@@ -1597,7 +1599,7 @@ impl RTCPeerConnection {
         // Register remote candidate with stats accumulator
         // Per W3C spec, URL must NOT be present for remote candidates
         let rtc_candidate: RTCIceCandidate = (&candidate).into();
-        let candidate_id = format!("RTCRemoteIceCandidate_{}", rtc_candidate.id);
+        let candidate_id = remote_candidate_stats_id(&rtc_candidate.id);
         let (ufrag, _) = self.ice_transport().get_remote_user_credentials();
         let accumulator = self.candidate_to_accumulator(&rtc_candidate, ufrag, None);
         self.stats_mut()
@@ -1626,7 +1628,7 @@ impl RTCPeerConnection {
             .ok_or_else(|| Error::Other("local candidate missing after registration".to_owned()))?;
 
         // Register local candidate with stats accumulator
-        let candidate_id = format!("RTCLocalIceCandidate_{}", rtc_candidate.id);
+        let candidate_id = local_candidate_stats_id(&rtc_candidate.id);
         let (ufrag, _) = self.ice_transport().get_local_user_credentials();
         let accumulator = self.candidate_to_accumulator(&rtc_candidate, ufrag, url);
         self.stats_mut()
@@ -1650,66 +1652,72 @@ impl RTCPeerConnection {
     /// This is called automatically by `get_stats()` to ensure ICE candidate pair
     /// statistics (RTT, requests/responses sent/received) are up to date.
     pub(super) fn update_ice_agent_stats(&mut self, now: Instant) {
-        // The selected pair's candidates always have stats of their own: a remote candidate
-        // the agent learned from a connectivity check (peer-reflexive, RFC 8445 Section 7.3.1.3)
-        // was never signalled, so `add_ice_remote_candidate` did not register it, and a
-        // candidate-pair entry naming it left `remoteCandidateId` dangling (webrtc-stats: every
-        // id a stats object names resolves in the same report).
-        let selected: Option<(RTCIceCandidate, RTCIceCandidate)> = self
+        let Some((local_id, remote_id, local, remote)) = self
             .pipeline_context
             .ice_handler_context
             .ice_transport
             .agent
             .get_selected_candidate_pair()
-            .map(|(local, remote)| (local.into(), remote.into()));
-        if let Some((local, remote)) = selected {
-            let local_id = format!("RTCLocalIceCandidate_{}", local.id);
-            if !self.stats().local_candidates.contains_key(&local_id) {
-                let (ufrag, _) = self.ice_transport().get_local_user_credentials();
-                let accumulator = self.candidate_to_accumulator(&local, ufrag, None);
-                self.stats_mut()
-                    .register_local_candidate(local_id, accumulator);
-            }
-            let remote_id = format!("RTCRemoteIceCandidate_{}", remote.id);
-            if !self.stats().remote_candidates.contains_key(&remote_id) {
-                let (ufrag, _) = self.ice_transport().get_remote_user_credentials();
-                let accumulator = self.candidate_to_accumulator(&remote, ufrag, None);
-                self.stats_mut()
-                    .register_remote_candidate(remote_id, accumulator);
-            }
+            .map(|(l, r)| {
+                (
+                    l.id().to_owned(),
+                    r.id().to_owned(),
+                    RTCIceCandidate::from(l),
+                    RTCIceCandidate::from(r),
+                )
+            })
+        else {
+            return;
+        };
+
+        // The selected pair's candidates always have stats objects of their own (webrtc-stats:
+        // every id a stats object names resolves in the same report). A local candidate is
+        // normally registered when gathered; register it here if it was not.
+        let local_stats_id = local_candidate_stats_id(&local_id);
+        if !self.stats().local_candidates.contains_key(&local_stats_id) {
+            let ufrag = self
+                .ice_transport()
+                .get_local_user_credentials()
+                .0
+                .to_owned();
+            let accumulator = self.candidate_to_accumulator(&local, &ufrag, None);
+            self.stats_mut()
+                .register_local_candidate(local_stats_id, accumulator);
         }
 
-        if let Some((local, remote)) = self
+        // A remote candidate the agent learned from a connectivity check (peer-reflexive,
+        // RFC 8445 section 7.3.1.3) was never signalled, so it has no remote-candidate stats
+        // object yet; the selected pair must still name one (W3C getStats).
+        let remote_stats_id = remote_candidate_stats_id(&remote_id);
+        if !self
+            .stats()
+            .remote_candidates
+            .contains_key(&remote_stats_id)
+        {
+            let ufrag = self
+                .ice_transport()
+                .get_remote_user_credentials()
+                .0
+                .to_owned();
+            let accumulator = self.candidate_to_accumulator(&remote, &ufrag, None);
+            self.stats_mut()
+                .register_remote_candidate(remote_stats_id, accumulator);
+        }
+
+        // Get candidate pair stats from the ice agent
+        let cp_stats = self
             .pipeline_context
             .ice_handler_context
             .ice_transport
             .agent
-            .get_selected_candidate_pair()
-        {
-            let pair_id = format!("RTCIceCandidatePair_{}_{}", local.id(), remote.id());
-
-            // Get candidate pair stats from the ice agent
-            for cp_stats in self
-                .pipeline_context
-                .ice_handler_context
-                .ice_transport
-                .agent
-                .get_candidate_pairs_stats(now)
-            {
-                let ice_pair_id = format!(
-                    "RTCIceCandidatePair_{}_{}",
-                    cp_stats.local_candidate_id, cp_stats.remote_candidate_id
-                );
-                if ice_pair_id == pair_id {
-                    // Sync STUN stats from ice agent to RTC accumulator
-                    self.pipeline_context.stats.update_ice_agent_stats(
-                        local.id(),
-                        remote.id(),
-                        &cp_stats,
-                    );
-                    break;
-                }
-            }
+            .get_candidate_pairs_stats(now)
+            .into_iter()
+            .find(|cp| cp.local_candidate_id == local_id && cp.remote_candidate_id == remote_id);
+        if let Some(cp_stats) = cp_stats {
+            // Sync STUN stats from ice agent to RTC accumulator
+            self.pipeline_context
+                .stats
+                .update_ice_agent_stats(&local_id, &remote_id, &cp_stats);
         }
     }
 
@@ -1876,6 +1884,18 @@ impl RTCPeerConnection {
         }
 
         let is_simulcast = send_encodings.len() > 1 && all_have_rid;
+        // A rid names one encoding (RFC 8851 §4: rid-ids are unique within the m= section, and
+        // W3C addTransceiver refuses a repeated rid); two alike would be written as duplicate
+        // `a=rid` lines.
+        if is_simulcast
+            && send_encodings.iter().enumerate().any(|(i, encoding)| {
+                send_encodings[..i].iter().any(|earlier| {
+                    earlier.rtp_coding_parameters.rid == encoding.rtp_coding_parameters.rid
+                })
+            })
+        {
+            return Err(Error::ErrRTPSenderRIDCollision);
+        }
         if !is_simulcast {
             send_encodings.truncate(1);
         }

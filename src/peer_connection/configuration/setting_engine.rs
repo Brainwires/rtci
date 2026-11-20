@@ -102,8 +102,8 @@
 //! - [RFC 8445 - ICE](https://datatracker.ietf.org/doc/html/rfc8445)
 //! - [RFC 8446 - TLS 1.3 (DTLS basis)](https://datatracker.ietf.org/doc/html/rfc8446)
 
-//TODO:#[cfg(test)]
-//mod setting_engine_test;
+#[cfg(test)]
+mod setting_engine_test;
 
 use std::net::IpAddr;
 use std::sync::Arc;
