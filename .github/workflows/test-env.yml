@@ -4,6 +4,11 @@ name: test-env
 # GStreamer media and Chromium / Firefox / WebKit interop. Our self-hosted Linux pool first
 # (its docker pool: the job's own rootless daemon), GitHub's ubuntu-latest only when that pool
 # is busy. No schedule: push, pull request and dispatch only.
+#
+# Self-hosted runners only take a push, a dispatch or a pull request from a branch of this
+# repository. A pull request from a fork runs `test_env_fork` on GitHub's ubuntu-latest and never
+# names our labels (the fork's run still needs a maintainer's approval, and a fork can edit this
+# file: review `runs-on` and `.github/` changes before approving one).
 on:
   push:
     branches: [ master, v0.21.x, v1.x ]
@@ -27,6 +32,10 @@ jobs:
   runners:
     name: pick runners
     runs-on: ubuntu-latest
+    if: >-
+      github.event_name != 'pull_request_target' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
     timeout-minutes: 5
     permissions:
       actions: read
@@ -44,27 +53,38 @@ jobs:
     name: test environment (${{ inputs.stages || 'unit env interop' }})
     needs: runners
     runs-on: ${{ fromJSON(needs.runners.outputs.plan || '{}').test_env || 'ubuntu-latest' }}
-    if: ${{ !cancelled() }}
+    # Self-hosted only for a push, a dispatch or a same-repository pull request; never for
+    # pull_request_target.
+    if: >-
+      github.event_name != 'pull_request_target' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository) &&
+      !cancelled()
     timeout-minutes: 120
     permissions:
       contents: read
       packages: write
     env:
       IMAGE_REPO: ghcr.io/brainwires/rtc-testenv
-    steps:
-      - uses: actions/checkout@v4
+    steps: &test-env-steps
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Environment image (pull, or build and publish)
         shell: bash
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
         run: |
           set -euo pipefail
-          TAG=$(cat scripts/test-env/Dockerfile scripts/test-env/interop/package.json | sha256sum | cut -c1-12)
+          TAG=$(cat scripts/test-env/Dockerfile scripts/test-env/interop/package.json scripts/test-env/interop/package-lock.json | sha256sum | cut -c1-12)
           IMAGE="$IMAGE_REPO:$TAG"
-          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin || true
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin || true
           if ! docker pull -q "$IMAGE"; then
             docker build -t "$IMAGE" -f scripts/test-env/Dockerfile scripts/test-env
             # Only a push to master publishes, so a pull request or another branch cannot replace it.
-            if [ "${{ github.ref }}" = refs/heads/master ]; then docker push -q "$IMAGE" || true; fi
+            if [ "$GITHUB_EVENT_NAME" = push ] && [ "$GITHUB_REF" = refs/heads/master ]; then
+              docker push -q "$IMAGE" || true
+            fi
           fi
           echo "RTC_TESTENV_IMAGE=$IMAGE" >> "$GITHUB_ENV"
 
@@ -72,8 +92,19 @@ jobs:
         shell: bash
         env:
           # The docker pool's sidecar has 2 CPUs; a GitHub runner has 4.
-          RTC_TESTENV_CPUS: ${{ startsWith(fromJSON(needs.runners.outputs.plan || '{}').test_env || 'ubuntu-latest', 'ubuntu') && '4' || '2' }}
-        run: scripts/test-env/run.sh ${{ inputs.stages || 'unit env interop' }}
+          RTC_TESTENV_CPUS: ${{ runner.environment == 'github-hosted' && '4' || '2' }}
+          # The dispatch input goes through the environment, never into the script's text.
+          STAGES: ${{ inputs.stages || 'unit env interop' }}
+        run: |
+          set -euo pipefail
+          read -r -a stages <<< "$STAGES"
+          for stage in "${stages[@]}"; do
+            case "$stage" in
+              unit|env|interop) ;;
+              *) echo "::error::unknown stage: $stage (expected unit, env or interop)"; exit 1 ;;
+            esac
+          done
+          scripts/test-env/run.sh "${stages[@]}"
 
       - name: Report
         if: ${{ !cancelled() }}
@@ -83,7 +114,7 @@ jobs:
 
       - name: Upload logs
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: test-env-${{ github.run_attempt }}
           path: |
@@ -93,3 +124,19 @@ jobs:
             target/test-env/*.txt
             target/test-env/*.ivf
           if-no-files-found: ignore
+
+  # A pull request from a fork: the same steps on GitHub's runners, with a read-only token (a
+  # fork's token is read-only anyway, and nothing is published).
+  test_env_fork:
+    name: test environment (fork pull request)
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name != github.repository
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: read
+    env:
+      IMAGE_REPO: ghcr.io/brainwires/rtc-testenv
+    steps: *test-env-steps

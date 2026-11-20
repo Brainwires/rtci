@@ -29,7 +29,7 @@ mkdir -p "$ARTIFACTS" "$TARGET"
 if [ -n "${RTC_TESTENV_IMAGE:-}" ]; then
   IMAGE=$RTC_TESTENV_IMAGE
 else
-  TAG=$(cat "$HERE/Dockerfile" "$HERE/interop/package.json" | sha256sum | cut -c1-12)
+  TAG=$(cat "$HERE/Dockerfile" "$HERE/interop/package.json" "$HERE/interop/package-lock.json" | sha256sum | cut -c1-12)
   IMAGE=rtc-testenv:$TAG
   if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
     echo "== building $IMAGE"
@@ -72,11 +72,12 @@ run_copy() {
 
 run() {
   if [ "$COPY_MODE" = 1 ]; then run_copy "$@"; return; fi
+  # No shared cargo registry volume: crate sources are fetched inside this throwaway container,
+  # so one run (a pull request's) cannot alter the sources a later run builds.
   docker run --rm --name "$NAME" \
     --cpus "${RTC_TESTENV_CPUS:-4}" \
     "${CAPS[@]}" \
     -v "$ROOT:/src" -v "$TARGET:/target" -v "$ARTIFACTS:/artifacts" \
-    -v rtc-testenv-cargo-registry:/usr/local/cargo/registry \
     -e CARGO_TARGET_DIR=/target -e CARGO_INCREMENTAL=0 \
     -e CARGO_PROFILE_DEV_DEBUG=0 -e CARGO_PROFILE_TEST_DEBUG=0 \
     -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
