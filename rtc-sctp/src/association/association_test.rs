@@ -1937,3 +1937,6 @@ fn test_reset_request_for_an_unknown_stream_is_reported_and_echoed() -> Result<(
 
 #[path = "shutdown_test.rs"]
 mod shutdown_test;
+
+#[path = "recovery_test.rs"]
+mod recovery_test;

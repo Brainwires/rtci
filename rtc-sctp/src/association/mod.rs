@@ -1533,9 +1533,19 @@ impl Association {
             self.rwnd = d.advertised_receiver_window_credit - bytes_outstanding;
         }
 
+        // The highest TSN this SACK acknowledges: every outstanding TSN below it is one the
+        // SACK reports missing (RFC 9260 7.2.4).
+        let highest_reported = d
+            .gap_ack_blocks
+            .iter()
+            .map(|g| d.cumulative_tsn_ack.wrapping_add(g.end as u32))
+            .fold(d.cumulative_tsn_ack, |highest, tsn| {
+                if sna32gt(tsn, highest) { tsn } else { highest }
+            });
         self.process_fast_retransmission(
             d.cumulative_tsn_ack,
             htna,
+            highest_reported,
             cum_tsn_ack_point_advanced,
             now,
         )?;
@@ -2048,6 +2058,7 @@ impl Association {
         &mut self,
         cum_tsn_ack_point: u32,
         htna: u32,
+        highest_reported: u32,
         cum_tsn_ack_point_advanced: bool,
         now: Instant,
     ) -> Result<()> {
@@ -2065,8 +2076,12 @@ impl Association {
                 // a) increment only for missing TSNs prior to the HTNA
                 htna
             } else {
-                // b) increment for all TSNs reported missing
-                cum_tsn_ack_point.wrapping_add(self.inflight_queue.len() as u32 + 1)
+                // b) increment for all TSNs reported missing, which are those below the
+                //    highest TSN the SACK acknowledges. DATA sent after that is not reported
+                //    missing, only not acknowledged yet: counting it, as the whole in-flight
+                //    queue was counted here, retransmitted DATA that was not lost and
+                //    abandoned partially reliable messages that would have arrived.
+                highest_reported
             };
 
             let mut tsn = cum_tsn_ack_point.wrapping_add(1);
