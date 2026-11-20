@@ -1,6 +1,7 @@
-//! Two associations over an in-memory link: virtual time, a fixed one-way latency, and a seeded
-//! decision per datagram whether it is lost. No sockets and no wall clock, so a test of loss
-//! recovery is deterministic and takes virtual seconds, not real ones.
+//! Two associations over an in-memory link: virtual time, a one-way latency (with optional
+//! jitter), and seeded decisions per datagram whether it is lost or overtakes the ones before it.
+//! No sockets and no wall clock, so a test of loss recovery is deterministic and takes virtual
+//! seconds, not real ones.
 
 use super::*;
 use crate::association::Event;
@@ -46,13 +47,13 @@ pub(crate) struct Peer {
 }
 
 impl Peer {
-    fn new(addr: SocketAddr, server: Option<TransportConfig>) -> Self {
+    fn new(addr: SocketAddr, server: Option<ServerConfig>) -> Self {
         Peer {
             endpoint: Endpoint::new(
                 addr,
                 TransportProtocol::UDP,
                 Arc::new(EndpointConfig::default()),
-                server.map(|transport| Arc::new(ServerConfig::new(transport))),
+                server.map(Arc::new),
             ),
             addr,
             association: None,
@@ -66,6 +67,11 @@ impl Peer {
     /// The association; panics if the handshake has not created it.
     pub(crate) fn conn(&mut self) -> &mut Association {
         &mut self.association.as_mut().expect("no association").1
+    }
+
+    /// How many associations the endpoint holds, the ones this link does not route to included.
+    pub(crate) fn endpoint_associations(&self) -> usize {
+        self.endpoint.associations.len()
     }
 
     /// Whether `Event::Connected` has been seen.
@@ -155,6 +161,12 @@ pub(crate) struct Link {
     pub(crate) latency: Duration,
     /// Percent of datagrams lost, in each direction.
     pub(crate) loss_percent: u64,
+    /// Up to this much extra one-way delay, drawn per datagram, so datagrams also overtake
+    /// each other the way netem's `delay <latency> <jitter>` makes them.
+    pub(crate) jitter: Duration,
+    /// Percent of datagrams sent without any delay, overtaking the ones still in flight
+    /// (netem's `reorder`).
+    pub(crate) reorder_percent: u64,
     /// Drops chosen datagrams, before the random loss is applied.
     pub(crate) filter: Option<DropFilter>,
     rng: Rng,
@@ -165,6 +177,15 @@ pub(crate) struct Link {
 
 impl Link {
     pub(crate) fn new(client: TransportConfig, server: TransportConfig, seed: u64) -> Self {
+        Self::with_server_config(client, ServerConfig::new(server), seed)
+    }
+
+    /// As `new`, with the accepting endpoint's whole configuration (its association limit, say).
+    pub(crate) fn with_server_config(
+        client: TransportConfig,
+        server: ServerConfig,
+        seed: u64,
+    ) -> Self {
         Link {
             client: Peer::new(SocketAddr::from(([10, 0, 0, 1], 5000)), None),
             server: Peer::new(SocketAddr::from(([10, 0, 0, 2], 5000)), Some(server)),
@@ -172,6 +193,8 @@ impl Link {
             now: Instant::now(),
             latency: Duration::from_millis(10),
             loss_percent: 0,
+            jitter: Duration::ZERO,
+            reorder_percent: 0,
             filter: None,
             rng: Rng::new(seed),
             dropped: 0,
@@ -265,13 +288,24 @@ impl Link {
             self.dropped += 1;
             return;
         }
-        let at = self.now + self.latency;
+        // Neither draws from the generator while it is off, so a link without them loses the
+        // same datagrams for a given seed as it did before they existed.
+        let at = if self.rng.chance(self.reorder_percent) {
+            self.now
+        } else if self.jitter.is_zero() {
+            self.now + self.latency
+        } else {
+            let jitter_us = self.jitter.as_micros() as u64;
+            self.now + self.latency + Duration::from_micros(self.rng.next_u64() % (jitter_us + 1))
+        };
         let to = if from_client {
             &mut self.server
         } else {
             &mut self.client
         };
-        to.inbound.push_back((at, datagram));
+        // Kept in arrival order: `deliver` takes datagrams from the front while they are due.
+        let index = to.inbound.partition_point(|(due, _)| *due <= at);
+        to.inbound.insert(index, (at, datagram));
     }
 }
 
