@@ -80,11 +80,14 @@ impl SrtpSsrcState {
     }
 
     /// https://tools.ietf.org/html/rfc3550#appendix-A.1
+    ///
+    /// The highest index only moves forward: RFC 3711 Section 3.3.1 and Appendix A update `s_l`
+    /// and the ROC only for a packet ahead of them.
     pub fn update_rollover_count(&mut self, sequence_number: u16, diff: i32) {
         if !self.rollover_has_processed {
             self.index |= sequence_number as u64;
             self.rollover_has_processed = true;
-        } else {
+        } else if diff > 0 {
             self.index = self.index.wrapping_add(diff as _);
         }
     }

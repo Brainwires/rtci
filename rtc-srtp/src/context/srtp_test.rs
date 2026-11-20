@@ -244,3 +244,94 @@ fn test_encrypt_rtp_extension_overrunning_header_is_an_error() -> Result<()> {
     }
     Ok(())
 }
+
+const HALF_RANGE_SSRC: u32 = 0x5eed_0001;
+
+fn half_range_rtp(sequence_number: u16) -> Result<Vec<u8>> {
+    let pkt = rtp::Packet {
+        header: rtp::Header {
+            version: 2,
+            sequence_number,
+            ssrc: HALF_RANGE_SSRC,
+            ..Default::default()
+        },
+        payload: RTP_TEST_CASE_DECRYPTED.clone(),
+    };
+    Ok(pkt.marshal()?.to_vec())
+}
+
+fn build_replay_protected_test_context() -> Result<Context> {
+    let master_key = Bytes::from_static(&[
+        0x0d, 0xcd, 0x21, 0x3e, 0x4c, 0xbc, 0xf2, 0x8f, 0x01, 0x7f, 0x69, 0x94, 0x40, 0x1e, 0x28,
+        0x89,
+    ]);
+    let master_salt = Bytes::from_static(&[
+        0x62, 0x77, 0x60, 0x38, 0xc0, 0x6d, 0xc9, 0x41, 0x9f, 0x6d, 0xd9, 0x43, 0x3e, 0x7c,
+    ]);
+
+    Context::new(
+        &master_key,
+        &master_salt,
+        ProtectionProfile::Aes128CmHmacSha1_80,
+        Some(srtp_replay_protection(64)),
+        None,
+        test_crypto_provider().crypto(),
+    )
+}
+
+/// A packet exactly 2^15 behind the highest index is old (RFC 3711 Appendix A): it leaves the
+/// index where it is, replay protection refuses it, and later packets keep decrypting.
+#[test]
+fn test_packet_half_range_behind_does_not_rewind_the_index() -> Result<()> {
+    const REPLAYED: u16 = 40000 - 32768;
+
+    for replay_protection in [false, true] {
+        let mut sender = build_test_context()?;
+        let mut receiver = if replay_protection {
+            build_replay_protected_test_context()?
+        } else {
+            build_test_context()?
+        };
+
+        let mut kept = None;
+        for seq in (0..=40000u16).step_by(16) {
+            let protected = sender.encrypt_rtp(&half_range_rtp(seq)?)?;
+            receiver.decrypt_rtp(&protected)?;
+            if seq == REPLAYED {
+                kept = Some(protected);
+            }
+        }
+        let kept = kept.expect("the replayed sequence number is on the stride");
+
+        let replayed = receiver.decrypt_rtp(&kept);
+        if replay_protection {
+            assert!(
+                replayed.is_err(),
+                "a replay half the range behind was accepted"
+            );
+        }
+        assert_eq!(
+            receiver.srtp_ssrc_states[&HALF_RANGE_SSRC].index, 40000,
+            "the index moved (replay protection: {replay_protection})"
+        );
+
+        // Genuine traffic continues, across the sequence number wrap.
+        let after = std::iter::once(40001u16)
+            .chain((41000..=65000u16).step_by(1000))
+            .chain(0..4u16);
+        for seq in after {
+            let protected = sender.encrypt_rtp(&half_range_rtp(seq)?)?;
+            assert_eq!(
+                receiver.decrypt_rtp(&protected)?.to_vec(),
+                half_range_rtp(seq)?,
+                "seq {seq} (replay protection: {replay_protection})"
+            );
+        }
+        assert_eq!(
+            receiver.srtp_ssrc_states[&HALF_RANGE_SSRC].index >> 16,
+            1,
+            "the ROC follows the sender across the wrap"
+        );
+    }
+    Ok(())
+}
