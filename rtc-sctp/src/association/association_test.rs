@@ -1940,3 +1940,6 @@ mod shutdown_test;
 
 #[path = "recovery_test.rs"]
 mod recovery_test;
+
+#[path = "stream_reset_test.rs"]
+mod stream_reset_test;

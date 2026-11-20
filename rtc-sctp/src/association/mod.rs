@@ -1831,13 +1831,40 @@ impl Association {
             self.reset_streams_if_any(p, true, reply)?;
             Ok(())
         } else if let Some(p) = raw.as_any().downcast_ref::<ParamReconfigResponse>() {
-            self.reconfigs.remove(&p.reconfig_response_sequence_number);
+            // RFC 6525 5.1.1: "In progress" is not the outcome. The request stays outstanding
+            // (and its timer running), so the final response still finds it.
+            if p.result != ReconfigResult::InProgress
+                && let Some(request) = self.reconfigs.remove(&p.reconfig_response_sequence_number)
+                && matches!(
+                    p.result,
+                    ReconfigResult::SuccessPerformed | ReconfigResult::SuccessNop
+                )
+            {
+                self.reset_outgoing_sequence_numbers(&request);
+            }
             if self.reconfigs.is_empty() {
                 self.timers.stop(Timer::Reconfig);
             }
             Ok(())
         } else {
             Err(Error::ErrParameterType)
+        }
+    }
+
+    /// RFC 6525 5.1.2: once the peer has performed our Outgoing SSN Reset Request, the
+    /// streams it named send again from SSN 0, which is what the peer now expects. A stream
+    /// still registered here (the peer did not reset its own direction too, or the channel
+    /// above reuses the stream) kept its old SSN, so the peer held every later ordered message
+    /// back waiting for SSN 0.
+    fn reset_outgoing_sequence_numbers(&mut self, request: &ChunkReconfig) {
+        for param in [&request.param_a, &request.param_b].into_iter().flatten() {
+            if let Some(reset) = param.as_any().downcast_ref::<ParamOutgoingResetRequest>() {
+                for id in &reset.stream_identifiers {
+                    if let Some(stream) = self.streams.get_mut(id) {
+                        stream.sequence_number = 0;
+                    }
+                }
+            }
         }
     }
 
