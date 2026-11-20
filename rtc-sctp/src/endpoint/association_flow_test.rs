@@ -142,3 +142,111 @@ fn test_association_shutdown() -> Result<()> {
     ));
     Ok(())
 }
+
+/// The peer keeps writing while this side shuts down. The peer's queued DATA is still
+/// delivered (RFC 9260 9.2: the SHUTDOWN receiver sends what is queued, accepting nothing
+/// new), its later writes fail, and both associations end.
+#[test]
+fn test_association_shutdown_during_write() -> Result<()> {
+    let mut link = Link::new(TransportConfig::default(), TransportConfig::default(), 1);
+    link.connect();
+
+    let now = link.now;
+    link.client
+        .conn()
+        .open_stream(1, PayloadProtocolIdentifier::String)?
+        .write_sctp(
+            now,
+            &Bytes::from_static(b"test"),
+            PayloadProtocolIdentifier::String,
+        )?;
+    link.run_for(Duration::from_millis(100));
+    assert_eq!(1, link.server.received.len());
+
+    // The server writes 100 one-byte messages per step on stream 1 until a write fails.
+    let mut written = 0u32;
+    let mut write_failed = false;
+    let mut shut_down = false;
+    for step in 0..200 {
+        let now = link.now;
+        if !write_failed {
+            let server = link.server.conn();
+            for _ in 0..100 {
+                let byte = (written % 256) as u8;
+                match server.stream(1).and_then(|mut s| {
+                    s.write_sctp(
+                        now,
+                        &Bytes::from(vec![byte]),
+                        PayloadProtocolIdentifier::String,
+                    )
+                }) {
+                    Ok(_) => written += 1,
+                    Err(_) => {
+                        write_failed = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if step == 2 && !shut_down {
+            link.client.conn().shutdown()?;
+            shut_down = true;
+        }
+        link.run_for(Duration::from_millis(20));
+        if link.client.conn().is_ended() && link.server.conn().is_ended() {
+            break;
+        }
+    }
+
+    assert!(shut_down);
+    assert!(write_failed, "writes after the SHUTDOWN must fail");
+    assert!(link.client.conn().is_ended(), "the initiator ended");
+    assert!(link.server.conn().is_ended(), "the peer ended");
+    // "test" from the client, then every message the server accepted.
+    let from_server = link.client.received.len() as u32;
+    assert_eq!(written, from_server, "every accepted write was delivered");
+    Ok(())
+}
+
+/// `shutdown()` with DATA still queued and in flight: the queue is sent and acknowledged
+/// first, then SHUTDOWN (RFC 9260 9.2). SHUTDOWN used to go out at once and the queued DATA
+/// was never sent.
+#[test]
+fn shutdown_sends_queued_data_first() -> Result<()> {
+    let mut link = Link::new(TransportConfig::default(), TransportConfig::default(), 1);
+    link.connect();
+
+    let now = link.now;
+    {
+        let mut stream = link
+            .client
+            .conn()
+            .open_stream(1, PayloadProtocolIdentifier::Binary)?;
+        // More than the initial congestion window, so most of it is still queued.
+        for i in 0..50u32 {
+            let mut m = vec![0u8; 1000];
+            m[..4].copy_from_slice(&i.to_be_bytes());
+            stream.write_sctp(now, &Bytes::from(m), PayloadProtocolIdentifier::Binary)?;
+        }
+    }
+    link.client.conn().shutdown()?;
+    assert_eq!(
+        crate::association::state::AssociationState::ShutdownPending,
+        link.client.conn().state()
+    );
+
+    let deadline = link.now + Duration::from_secs(10);
+    assert!(
+        link.run_until(deadline, |l| l.client.conn().is_ended()
+            && l.server.conn().is_ended()),
+        "the shutdown never completed"
+    );
+    let received: Vec<u32> = link
+        .server
+        .received
+        .iter()
+        .map(|(_, m)| u32::from_be_bytes([m[0], m[1], m[2], m[3]]))
+        .collect();
+    assert_eq!((0..50).collect::<Vec<_>>(), received, "all 50, in order");
+    Ok(())
+}

@@ -167,7 +167,6 @@ pub struct Association {
     max_message_size: u32,
     /// The largest message accepted from the peer: what this side advertised (RFC 8841 6.1).
     max_receive_message_size: u32,
-    inflight_queue_length: usize,
     will_send_shutdown: bool,
     bytes_received: usize,
     bytes_sent: usize,
@@ -279,7 +278,6 @@ impl Default for Association {
             handshake_completed: false,
             max_message_size: 0,
             max_receive_message_size: 0,
-            inflight_queue_length: 0,
             will_send_shutdown: false,
             bytes_received: 0,
             bytes_sent: 0,
@@ -724,19 +722,31 @@ impl Association {
             return Err(Error::ErrShutdownNonEstablished);
         }
 
-        // Attempt a graceful shutdown.
+        // Attempt a graceful shutdown. RFC 9260 9.2: SHUTDOWN-PENDING lasts until everything
+        // the application handed over has been sent and acknowledged. This tested a counter
+        // that was never updated, so SHUTDOWN went out at once, ahead of the DATA still in
+        // flight or queued, and the queued DATA was never sent.
         self.set_state(AssociationState::ShutdownPending);
 
-        if self.inflight_queue_length == 0 {
+        if self.inflight_queue.is_empty() && self.pending_queue.is_empty() {
             // No more outstanding, send shutdown.
-            self.will_send_shutdown = true;
-            self.awake_write_loop();
-            self.set_state(AssociationState::ShutdownSent);
+            self.send_shutdown();
         }
 
-        self.endpoint_events.push_back(EndpointEventInner::Drained);
-
         Ok(())
+    }
+
+    /// Moves SHUTDOWN-PENDING on to SHUTDOWN-SENT and queues the SHUTDOWN.
+    ///
+    /// The endpoint's `Drained` goes out with it, as it always has: the owner flushes this
+    /// association's final packets and may then stop routing to it. It used to be emitted by
+    /// `shutdown()` itself, which with DATA still outstanding cut the association off from the
+    /// SACKs it was waiting for.
+    fn send_shutdown(&mut self) {
+        self.will_send_shutdown = true;
+        self.awake_write_loop();
+        self.set_state(AssociationState::ShutdownSent);
+        self.endpoint_events.push_back(EndpointEventInner::Drained);
     }
 
     /// Aborts the association (RFC 9260 §9.1): queues an ABORT chunk and closes the association.
@@ -1726,7 +1736,7 @@ impl Association {
                 return Ok(vec![]);
             }
 
-            if !self.inflight_queue.is_empty() {
+            if !self.inflight_queue.is_empty() || !self.pending_queue.is_empty() {
                 self.set_state(AssociationState::ShutdownReceived);
             } else {
                 // No more outstanding, send shutdown ack.
@@ -2229,11 +2239,12 @@ impl Association {
             trace!("[{}] T3-rtx timer start (pt3)", self.side);
             self.timers
                 .start_if_idle(Timer::T3RTX, now, self.rto_mgr.get_rto());
+        } else if !self.pending_queue.is_empty() {
+            // Queued DATA still goes out before the shutdown proceeds (RFC 9260 9.2).
         } else if state == AssociationState::ShutdownPending {
             // No more outstanding, send shutdown.
             should_awake_write_loop = true;
-            self.will_send_shutdown = true;
-            self.set_state(AssociationState::ShutdownSent);
+            self.send_shutdown();
         } else if state == AssociationState::ShutdownReceived {
             // No more outstanding, send shutdown ack.
             should_awake_write_loop = true;
@@ -2510,12 +2521,31 @@ impl Association {
                 if self.state() == AssociationState::Closed {
                     return (vec![], false);
                 }
+                // RFC 9260 9.2: no new data is accepted, but what is already queued is still
+                // sent, by the endpoint shutting down and by the one that received SHUTDOWN.
+                // (In SHUTDOWN-SENT nothing is queued: SHUTDOWN waited for the queue.)
+                if state != AssociationState::ShutdownSent {
+                    raw_packets = self.gather_outbound_data_and_reconfig_packets(raw_packets, now);
+                    if self.state() == AssociationState::Closed {
+                        return (vec![], false);
+                    }
+                }
                 raw_packets = self.gather_outbound_fast_retransmission_packets(raw_packets, now);
                 if self.state() == AssociationState::Closed {
                     return (vec![], false);
                 }
                 raw_packets = self.gather_outbound_sack_packets(raw_packets);
                 raw_packets = self.gather_outbound_forward_tsn_packets(raw_packets);
+                // Everything handed over is sent and acknowledged (a queue can also empty by
+                // abandonment, with no SACK to notice it): the shutdown proceeds.
+                if self.inflight_queue.is_empty() && self.pending_queue.is_empty() {
+                    if state == AssociationState::ShutdownPending {
+                        self.send_shutdown();
+                    } else if state == AssociationState::ShutdownReceived {
+                        self.will_send_shutdown_ack = true;
+                        self.set_state(AssociationState::ShutdownAckSent);
+                    }
+                }
                 self.gather_outbound_shutdown_packets(raw_packets, now)
             }
             AssociationState::ShutdownAckSent => {
