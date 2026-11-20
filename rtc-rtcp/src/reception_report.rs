@@ -8,6 +8,10 @@ use bytes::{Buf, BufMut};
 use std::any::Any;
 use std::fmt;
 
+#[cfg(test)]
+#[path = "reception_report_lost_test.rs"]
+mod reception_report_lost_test;
+
 pub(crate) const RECEPTION_REPORT_LENGTH: usize = 24;
 pub(crate) const FRACTION_LOST_OFFSET: usize = 4;
 pub(crate) const TOTAL_LOST_OFFSET: usize = 5;
@@ -31,10 +35,10 @@ pub struct ReceptionReport {
     /// been lost since the beginning of reception.
     ///
     /// RFC 3550 §6.4.1 defines this as a signed 24-bit integer on the wire
-    /// (negative values can occur when duplicates arrive).  We store it as
-    /// `u32` and clamp to `0x7F_FFFF` so the sign bit stays clear during
-    /// serialisation.  A future revision may switch to `i32` to fully
-    /// represent the negative-loss (duplicate) case.
+    /// (negative values can occur when duplicates arrive). This field holds the
+    /// 24 bits as they are; read the signed count with
+    /// [`cumulative_lost`](Self::cumulative_lost) and write one with
+    /// [`set_cumulative_lost`](Self::set_cumulative_lost).
     pub total_lost: u32,
     /// The least significant 16 bits contain the highest sequence number received
     /// in an RTP data packet from source SSRC, and the most significant 16 bits extend
@@ -52,6 +56,28 @@ pub struct ReceptionReport {
     /// last SR packet from source SSRC and sending this reception report block.
     /// If no SR packet has been received yet from SSRC, the field is set to zero.
     pub delay: u32,
+}
+
+impl ReceptionReport {
+    /// The cumulative number of packets lost, as the signed 24-bit integer RFC 3550 6.4.1 defines.
+    ///
+    /// `total_lost` holds the 24 bits as they are on the wire. Duplicates make the count
+    /// negative, which reads there as a value near 2^24; this sign-extends it.
+    pub fn cumulative_lost(&self) -> i32 {
+        let bits = (self.total_lost & 0xFF_FFFF) as i32;
+        if bits & 0x80_0000 != 0 {
+            bits - 0x100_0000
+        } else {
+            bits
+        }
+    }
+
+    /// Store a signed cumulative loss as its 24-bit two's complement, clamped to the range the
+    /// field can carry (RFC 3550 6.4.1).
+    pub fn set_cumulative_lost(&mut self, lost: i32) {
+        let clamped = lost.clamp(-0x80_0000, 0x7F_FFFF);
+        self.total_lost = (clamped as u32) & 0xFF_FFFF;
+    }
 }
 
 impl fmt::Display for ReceptionReport {
@@ -178,7 +204,7 @@ impl Unmarshal for ReceptionReport {
         let t0 = raw_packet.get_u8();
         let t1 = raw_packet.get_u8();
         let t2 = raw_packet.get_u8();
-        // TODO: The type of `total_lost` should be `i32`, per the RFC:
+        // The 24 bits are kept as they are; `cumulative_lost()` reads them signed, per the RFC:
         // The total number of RTP data packets from source SSRC_n that have
         // been lost since the beginning of reception.  This number is
         // defined to be the number of packets expected less the number of
