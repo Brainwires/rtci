@@ -19,6 +19,14 @@ for _ in $(seq 1 50); do
   sleep 0.2
 done
 
+# A lossy band on the browser host's WAN interface that no packet takes unless a test adds a tc
+# filter for its own session (common.mjs impair()): the loss-recovery tests run beside others.
+# Bands 1-3 are the default priomap's; band 4 (1:4) is netem.
+ip netns exec open-a tc qdisc del dev eth0 root 2>/dev/null || true
+ip netns exec open-a tc qdisc add dev eth0 root handle 1: prio bands 4 priomap 1 2 2 2 1 2 0 0 1 1 1 1 1 1 1 1 \
+  && ip netns exec open-a tc qdisc add dev eth0 parent 1:4 handle 40: netem delay 20ms loss 5% \
+  || { echo "tc setup for the loss tests failed"; exit 1; }
+
 # The runner and its node_modules live in the image; the specs come from the checkout.
 cp "$HERE"/*.mjs "$HERE"/peer.js /opt/interop/
 cd /opt/interop
