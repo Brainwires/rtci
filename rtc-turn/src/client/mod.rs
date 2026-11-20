@@ -8,7 +8,11 @@
 //! The three address kinds are easy to confuse: [`RelayedAddr`] is what peers send to,
 //! [`ReflexiveAddr`] is how the server sees this client, and [`PeerAddr`] is the far end.
 #[cfg(test)]
+mod client_stale_nonce_test;
+#[cfg(test)]
 mod client_test;
+#[cfg(test)]
+mod test_server;
 
 /// Channel bindings, which replace the 36-byte Data indication header with a 4-byte one.
 pub mod binding;
@@ -382,34 +386,42 @@ impl Client {
                     self.handle_allocate_response(now, msg, tr.transaction_type)?;
                 }
                 METHOD_CREATE_PERMISSION => {
-                    if let TransactionType::CreatePermissionRequest(relayed_addr, peer_addr) =
-                        tr.transaction_type
+                    if let TransactionType::CreatePermissionRequest(
+                        relayed_addr,
+                        peer_addr,
+                        peer_addrs,
+                        retry,
+                    ) = tr.transaction_type
                     {
                         let mut relay = Relay {
                             relayed_addr,
                             client: self,
                         };
-                        relay.handle_create_permission_response(msg, peer_addr)?;
+                        relay.handle_create_permission_response(
+                            now, msg, peer_addr, peer_addrs, retry,
+                        )?;
                     }
                 }
                 METHOD_REFRESH => {
-                    if let TransactionType::RefreshRequest(relayed_addr) = tr.transaction_type {
-                        let mut relay = Relay {
-                            relayed_addr,
-                            client: self,
-                        };
-                        relay.handle_refresh_allocation_response(now, msg)?;
-                    }
-                }
-                METHOD_CHANNEL_BIND => {
-                    if let TransactionType::ChannelBindRequest(relayed_addr, bind_addr) =
+                    if let TransactionType::RefreshRequest(relayed_addr, lifetime, retry) =
                         tr.transaction_type
                     {
                         let mut relay = Relay {
                             relayed_addr,
                             client: self,
                         };
-                        relay.handle_channel_bind_response(now, msg, bind_addr)?;
+                        relay.handle_refresh_response(now, msg, lifetime, retry)?;
+                    }
+                }
+                METHOD_CHANNEL_BIND => {
+                    if let TransactionType::ChannelBindRequest(relayed_addr, bind_addr, retry) =
+                        tr.transaction_type
+                    {
+                        let mut relay = Relay {
+                            relayed_addr,
+                            client: self,
+                        };
+                        relay.handle_channel_bind_response(now, msg, bind_addr, retry)?;
                     }
                 }
                 _ => {}

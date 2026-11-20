@@ -28,13 +28,59 @@ pub(crate) fn authenticated_allocate_id(attempt: TransactionId) -> TransactionId
     tid
 }
 
+/// What a re-sendable TURN request carries from one attempt to the next.
+///
+/// A CreatePermission, Refresh or ChannelBind answered with 438 (Stale Nonce) is sent again
+/// with the new nonce under a new transaction id (RFC 8489 §9.2.5, RFC 8656 §4.4), once.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Retry {
+    /// The id of the first request of the chain: the one its caller was handed, and the one
+    /// every event about the chain names. `None` on that first request itself.
+    pub(crate) origin: Option<TransactionId>,
+    /// Whether this request already re-sends one that was answered with 438 (Stale Nonce).
+    pub(crate) stale_nonce: bool,
+}
+
+impl Retry {
+    /// The id events about the request sent as `wire` are reported under.
+    pub(crate) fn report_id(&self, wire: TransactionId) -> TransactionId {
+        self.origin.unwrap_or(wire)
+    }
+
+    /// The state for re-sending the request sent as `wire` after it was answered with 438.
+    pub(crate) fn after_stale_nonce(self, wire: TransactionId) -> Self {
+        Self {
+            origin: Some(self.report_id(wire)),
+            stale_nonce: true,
+        }
+    }
+}
+
 pub(crate) enum TransactionType {
     BindingRequest,
     AllocateAttempt,
     AllocateRequest(TextAttribute),
-    CreatePermissionRequest(RelayedAddr, Option<SocketAddr>),
-    RefreshRequest(RelayedAddr),
-    ChannelBindRequest(RelayedAddr, SocketAddr),
+    /// The relay, the peer a caller asked for (`None` for a permission refresh), every peer
+    /// the request names, and its retry state.
+    CreatePermissionRequest(RelayedAddr, Option<SocketAddr>, Vec<SocketAddr>, Retry),
+    /// The relay, the LIFETIME the request asks for, and its retry state.
+    RefreshRequest(RelayedAddr, Duration, Retry),
+    /// The relay, the peer being bound, and the retry state.
+    ChannelBindRequest(RelayedAddr, SocketAddr, Retry),
+}
+
+impl TransactionType {
+    /// The id events about the request sent as `wire` are reported under: the id its caller
+    /// was handed, which a retry or the Allocate exchange does not put on the wire.
+    pub(crate) fn report_id(&self, wire: TransactionId) -> TransactionId {
+        match self {
+            Self::AllocateAttempt => authenticated_allocate_id(wire),
+            Self::CreatePermissionRequest(_, _, _, retry)
+            | Self::RefreshRequest(_, _, retry)
+            | Self::ChannelBindRequest(_, _, retry) => retry.report_id(wire),
+            Self::BindingRequest | Self::AllocateRequest(_) => wire,
+        }
+    }
 }
 
 // TransactionConfig is a set of config params used by NewTransaction
@@ -199,16 +245,11 @@ impl TransactionMap {
 
         for key in keys {
             let exhausted = self.tr_map.remove(&key);
-            // An Allocate nobody answers is the one case where the request on the wire and
-            // the allocation its caller knows have different ids.
-            let timed_out = if matches!(
-                exhausted.as_ref().map(|tr| &tr.transaction_type),
-                Some(TransactionType::AllocateAttempt)
-            ) {
-                authenticated_allocate_id(key)
-            } else {
-                key
-            };
+            // Reported under the id its caller knows, which an Allocate or a retried request
+            // does not have on the wire.
+            let timed_out = exhausted
+                .as_ref()
+                .map_or(key, |tr| tr.transaction_type.report_id(key));
             self.events.push_back(Event::TransactionTimeout(timed_out));
         }
     }
