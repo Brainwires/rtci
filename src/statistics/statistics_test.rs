@@ -1569,3 +1569,48 @@ fn selected_candidate_pair_names_the_reported_candidates() {
         );
     }
 }
+
+/// When a transceiver is removed, the streams of the transceivers after it follow their ids
+/// down by one (a sender selector still finds them), and the removed one's streams answer to
+/// no selector.
+#[test]
+fn test_stats_follow_a_removed_transceiver() {
+    let now = Instant::now();
+    let mut master = RTCStatsAccumulator::new();
+    master.transport.transport_id = "RTCTransport_0".to_string();
+    for (ssrc, transceiver_id) in [(1000u32, 0usize), (1001, 1), (1002, 2)] {
+        master
+            .get_or_create_outbound_rtp_streams(
+                ssrc,
+                RtpCodecKind::Video,
+                &transceiver_id.to_string(),
+                "",
+                0,
+                None,
+                transceiver_id,
+            )
+            .on_rtp_sent(12, 100, now);
+    }
+
+    master.transceiver_removed(1);
+
+    let ssrcs = |master: &RTCStatsAccumulator, id: usize| -> Vec<u32> {
+        master
+            .snapshot_with_selector(now, StatsSelector::Sender(RTCRtpSenderId(id)))
+            .outbound_rtp_streams()
+            .map(|s| s.sent_rtp_stream_stats.rtp_stream_stats.ssrc)
+            .collect()
+    };
+    assert_eq!(ssrcs(&master, 0), vec![1000]);
+    assert_eq!(
+        ssrcs(&master, 1),
+        vec![1002],
+        "transceiver 2 is now transceiver 1"
+    );
+    assert!(ssrcs(&master, 2).is_empty());
+    assert_eq!(
+        master.snapshot(now).outbound_rtp_streams().count(),
+        3,
+        "the full report keeps every stream"
+    );
+}
