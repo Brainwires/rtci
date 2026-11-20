@@ -738,7 +738,7 @@ fn get_rids_orders_and_pauses_by_lookup() {
     for i in 0..RIDS {
         media = media.with_value_attribute(SDP_ATTRIBUTE_RID.to_owned(), format!("r{i} send"));
     }
-    // A duplicate declaration keeps the first rid for pausing, as before.
+    // A duplicate declaration: the first one stands and the duplicate is dropped.
     media = media.with_value_attribute(SDP_ATTRIBUTE_RID.to_owned(), "r0 send".to_owned());
     // Reverse order, every third one paused, one id listed twice and one unknown id.
     let mut list: Vec<String> = (0..RIDS)
@@ -760,21 +760,15 @@ fn get_rids_orders_and_pauses_by_lookup() {
 
     let rids = get_rids(&media);
 
-    assert_eq!(rids.len(), RIDS + 1);
-    for (position, rid) in rids.iter().take(RIDS).enumerate() {
+    assert_eq!(rids.len(), RIDS);
+    for (position, rid) in rids.iter().enumerate() {
         let i = RIDS - 1 - position;
         assert_eq!(rid.id, format!("r{i}"));
-        // r0's first declaration is the one the attribute pauses.
-        if i != 0 {
-            assert_eq!(rid.paused, i % 3 == 0, "rid r{i}");
-        }
+        assert_eq!(rid.paused, i % 3 == 0, "rid r{i}");
     }
-    // Both r0 entries share r0's first position, so the stable sort keeps their declaration
-    // order: the first one is paused, the duplicate is not.
+    // r0 is one layer: its first declaration, the one the attribute pauses.
     assert_eq!(rids[RIDS - 1].id, "r0");
     assert!(rids[RIDS - 1].paused);
-    assert_eq!(rids[RIDS].id, "r0");
-    assert!(!rids[RIDS].paused);
 }
 
 pub(crate) fn add_candidates_to_media_descriptions(
