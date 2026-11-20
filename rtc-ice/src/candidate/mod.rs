@@ -17,12 +17,9 @@ mod candidate_pair_test;
 #[cfg(test)]
 mod candidate_test;
 
-// candidate_relay_test and candidate_server_reflexive_test use `turn::auth`,
-// `turn::server`, and `turn::relay` APIs from a different TURN library than
-// rtc-turn. Enabling them requires porting to the rtc-turn API — deferred to a
-// dedicated porting effort.
-// #[cfg(test)] mod candidate_relay_test;
-// #[cfg(test)] mod candidate_server_reflexive_test;
+// Upstream's candidate_relay_test and candidate_server_reflexive_test ran a TURN server in
+// process; they live on as tests/testenv_ice.rs (test_relay_only_connection_{udp,tcp,tls},
+// test_server_reflexive_only_connection), against coturn through real NATs.
 
 /// Host candidates: an address on a local interface.
 pub mod candidate_host;
