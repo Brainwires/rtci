@@ -3,6 +3,10 @@
 /// Half of u16 max value, used for sequence number wraparound detection.
 const UINT16_SIZE_HALF: u16 = 1 << 15;
 
+#[cfg(test)]
+#[path = "receive_log_gap_test.rs"]
+mod receive_log_gap_test;
+
 /// Tracks received RTP packets using a bitmap and identifies missing sequence numbers.
 ///
 /// The receive log uses a circular bitmap to track which sequence numbers have been
@@ -64,11 +68,17 @@ impl ReceiveLog {
             }
             d if d < UINT16_SIZE_HALF => {
                 // Positive diff: seq > end (with wraparound handling)
-                // Clear packets between end and seq (they may contain old data)
-                let mut i = self.end.wrapping_add(1);
-                while i != seq {
-                    self.del_received(i);
-                    i = i.wrapping_add(1);
+                // Clear packets between end and seq (they may contain old data). A gap as wide
+                // as the window clears all of it at once rather than walking up to 32,767
+                // sequence numbers one by one.
+                if diff > self.size {
+                    self.packets.fill(0);
+                } else {
+                    let mut i = self.end.wrapping_add(1);
+                    while i != seq {
+                        self.del_received(i);
+                        i = i.wrapping_add(1);
+                    }
                 }
                 self.end = seq;
 
