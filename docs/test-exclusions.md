@@ -16,15 +16,13 @@ no `mod` compiles), `platform` (a test or test module behind a platform `cfg`).
 To remove a row, make the test run where it does not (drop the attribute or the `cfg`, add the
 `mod`), then delete the row; the script tells you when a row has gone stale.
 
+Tests left inside block comments since the sans-I/O port (in `rtc-ice`'s agent tests,
+`rtc-dtls`'s connection tests, `rtc-datachannel`, `rtc-sctp`, `rtc-stun`, `rtc-turn` and the
+session-description tests) are deliberately **not** listed: they are to be restored, and the
+check fails, naming each one, until they are. The same tests are `port` rows in
+[upstream-test-parity.md](upstream-test-parity.md).
+
 | Kind | File | Test | Reason | Covered by |
 |---|---|---|---|---|
 | ignored | `rtc-sctp/src/association/retransmission_review_test.rs` | `benchmark_recovery_flushes` | A timing comparison printed for a person to read (recovery CPU cost at 128, 1,024 and 4,096 outstanding chunks), not an assertion; run by hand with `--ignored`. | `recovery_checks_are_bounded_by_candidates_in_large_windows` asserts the bound the benchmark illustrates |
 | ignored | `src/rtp_transceiver/rtp_sender/rtp_sender_test.rs` | `test_rtp_sender_rtx` | Only the first video m-section's codecs are negotiated until `SettingEngine::with_disable_media_engine_multiple_codecs(false)` is honoured (plan decision D3, stream W2). W2 removes the `#[ignore]` and this row with it. | `test_default_codecs_negotiate_rtx`, `rtx_codec_is_offered_alongside_the_track_codec`, `test_simulcast_rtx_rrid_association` |
-| platform | `rtc-datachannel/src/data_channel/data_channel_test.rs` | `test_data_channel_buffered_amount` | Inherited from upstream, where it timed out on the hosted macOS and Windows runners. The crate is sans-I/O and the test drives a virtual clock, so the gate should go once the macOS / Windows job (`test_platforms`) has run it there. | `rtc-datachannel/src/data_channel/data_channel_test.rs::test_data_channel_buffered_amount` (Linux, four feature sets) |
-| platform | `rtc-datachannel/src/data_channel/data_channel_test.rs` | `test_data_channel_channel_type_partial_reliable_rexmit` | Inherited from upstream ("times out in CI on windows"); see the first `platform` row. | `rtc-datachannel/src/data_channel/data_channel_test.rs::test_data_channel_channel_type_partial_reliable_rexmit` (Linux) |
-| platform | `rtc-datachannel/src/data_channel/data_channel_test.rs` | `test_data_channel_channel_type_partial_reliable_rexmit_unordered` | Inherited from upstream ("times out in CI on windows"); see the first `platform` row. | `rtc-datachannel/src/data_channel/data_channel_test.rs::test_data_channel_channel_type_partial_reliable_rexmit_unordered` (Linux) |
-| platform | `rtc-datachannel/src/data_channel/data_channel_test.rs` | `test_data_channel_channel_type_partial_reliable_timed` | Inherited from upstream ("times out in CI on windows"); see the first `platform` row. | `rtc-datachannel/src/data_channel/data_channel_test.rs::test_data_channel_channel_type_partial_reliable_timed` (Linux) |
-| platform | `rtc-datachannel/src/data_channel/data_channel_test.rs` | `test_data_channel_channel_type_partial_reliable_timed_unordered` | Inherited from upstream ("times out in CI on windows"); see the first `platform` row. | `rtc-datachannel/src/data_channel/data_channel_test.rs::test_data_channel_channel_type_partial_reliable_timed_unordered` (Linux) |
-| platform | `rtc-datachannel/src/data_channel/data_channel_test.rs` | `test_stats` | Inherited from upstream (macOS and Windows); see the first `platform` row. | `rtc-datachannel/src/data_channel/data_channel_test.rs::test_stats` (Linux) |
-| platform | `rtc-dtls/src/conn/conn_test.rs` | `test_renegotation_info` | Inherited from upstream ("times out in CI on windows"); see the first `platform` row. | `rtc-dtls/src/conn/conn_test.rs::test_renegotation_info` (Linux) |
-| platform | `rtc-sctp/src/endpoint/endpoint_test.rs` | `test_association_shutdown` | Inherited from upstream ("TODO: remove this conditional test", Windows); see the first `platform` row. | `rtc-sctp/src/endpoint/endpoint_test.rs::test_association_shutdown` (Linux) |

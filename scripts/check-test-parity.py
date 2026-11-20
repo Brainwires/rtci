@@ -74,8 +74,15 @@ def tests_in(tree: Path) -> list[tuple[str, str]]:
             lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
             pending = False
             depth = 0  # open brackets of an attribute that spans lines
+            comment = 0  # open /* */ block comments (they nest in Rust)
             for line in lines:
                 stripped = line.strip()
+                was_comment = comment > 0
+                comment = max(0, comment + len(re.findall(r"/\*", line)) - len(re.findall(r"\*/", line)))
+                if was_comment or (comment > 0 and stripped.startswith("/*")):
+                    # A test inside a block comment is commented out, not a test.
+                    pending = False
+                    continue
                 if depth > 0:
                     depth += stripped.count("[") - stripped.count("]")
                     continue

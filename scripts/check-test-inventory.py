@@ -103,9 +103,29 @@ def scan_file(path: Path, findings: list[Finding], tests: dict[str, set[str]]) -
     lines = text.splitlines()
     relpath = rel(path)
     is_testenv = relpath.startswith("tests/testenv_") and relpath.endswith(".rs")
+    # Lines inside /* ... */ block comments (not nested; strings are not parsed, which is fine
+    # for test code): a #[test] there is commented out like a `// #[test]`.
+    in_block = []
+    depth = 0
+    for line in lines:
+        starts_inside = depth > 0
+        depth += len(re.findall(r"/\*", line)) - len(re.findall(r"\*/", line))
+        depth = max(depth, 0)
+        in_block.append(starts_inside or (depth > 0 and line.strip().startswith("/*")))
     i = 0
     while i < len(lines):
         line = lines[i]
+        if in_block[i] and not COMMENTED_TEST.match(line):
+            if TEST_ATTR.search(line):
+                name = "*"
+                for follow in lines[i + 1 : i + 6]:
+                    m = re.search(r"fn\s+([A-Za-z_][A-Za-z0-9_]*)", follow)
+                    if m:
+                        name = m.group(1)
+                        break
+                findings.append(Finding("commented", relpath, name, f"line {i + 1}, in a block comment"))
+            i += 1
+            continue
         if COMMENTED_TEST.match(line):
             name = "*"
             for follow in lines[i + 1 : i + 4]:
