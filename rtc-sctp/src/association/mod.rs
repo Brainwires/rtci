@@ -513,6 +513,9 @@ impl Association {
         if contents.is_empty() {
             None
         } else {
+            self.bytes_sent = self
+                .bytes_sent
+                .saturating_add(contents.iter().map(Bytes::len).sum());
             trace!(
                 "[{}] sending {} bytes (total {} datagrams)",
                 self.side,
@@ -582,11 +585,9 @@ impl Association {
                 }*/
 
                 if let Payload::PartialDecode(partial_decode) = transmit.message {
-                    debug!(
-                        "[{}] recving {} bytes",
-                        self.side,
-                        COMMON_HEADER_SIZE as usize + partial_decode.remaining.len()
-                    );
+                    let len = COMMON_HEADER_SIZE as usize + partial_decode.remaining.len();
+                    debug!("[{}] recving {} bytes", self.side, len);
+                    self.bytes_received = self.bytes_received.saturating_add(len);
 
                     let pkt = match partial_decode.finish() {
                         Ok(p) => p,
@@ -850,12 +851,12 @@ impl Association {
         self.streams.keys().cloned().collect()
     }
 
-    /// bytes_sent returns the number of bytes sent
+    /// The bytes of every SCTP packet handed out by `poll_transmit`, common headers included.
     pub(crate) fn bytes_sent(&self) -> usize {
         self.bytes_sent
     }
 
-    /// bytes_received returns the number of bytes received
+    /// The bytes of every SCTP packet handed in through `handle_event`, common headers included.
     pub(crate) fn bytes_received(&self) -> usize {
         self.bytes_received
     }

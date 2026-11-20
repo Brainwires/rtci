@@ -1,4 +1,6 @@
 #[cfg(test)]
+mod association_flow_test;
+#[cfg(test)]
 mod endpoint_test;
 #[cfg(test)]
 mod handshake_failure_test;

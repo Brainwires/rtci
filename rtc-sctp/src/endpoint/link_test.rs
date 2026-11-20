@@ -159,6 +159,8 @@ pub(crate) struct Link {
     pub(crate) filter: Option<DropFilter>,
     rng: Rng,
     pub(crate) dropped: usize,
+    /// Bytes each side put on the link, lost ones included: `[client, server]`.
+    pub(crate) bytes_sent: [usize; 2],
 }
 
 impl Link {
@@ -173,6 +175,7 @@ impl Link {
             filter: None,
             rng: Rng::new(seed),
             dropped: 0,
+            bytes_sent: [0, 0],
         }
     }
 
@@ -253,6 +256,7 @@ impl Link {
     }
 
     fn send(&mut self, from_client: bool, datagram: Bytes) {
+        self.bytes_sent[usize::from(!from_client)] += datagram.len();
         let filtered = self
             .filter
             .as_mut()
