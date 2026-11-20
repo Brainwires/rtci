@@ -1141,7 +1141,8 @@ impl RTCPeerConnection {
                     receiver.set_track(MediaStreamTrack::new(
                         incoming_track.stream_id.clone(),
                         incoming_track.track_id.clone(),
-                        format!("remote-{}-{}", incoming_track.kind, math_rand_alpha(16)), //TODO:// Label
+                        // W3C webrtc 4.4.1.6 (create an RTCRtpReceiver): "remote " + kind.
+                        format!("remote {}", incoming_track.kind),
                         incoming_track.kind,
                         codings,
                     ));
@@ -1162,7 +1163,8 @@ impl RTCPeerConnection {
                     receiver.set_track(MediaStreamTrack::new(
                         incoming_track.stream_id,
                         incoming_track.track_id,
-                        format!("remote-{}-{}", incoming_track.kind, math_rand_alpha(16)), //TODO:// Label
+                        // W3C webrtc 4.4.1.6 (create an RTCRtpReceiver): "remote " + kind.
+                        format!("remote {}", incoming_track.kind),
                         incoming_track.kind,
                         vec![RTCRtpEncodingParameters {
                             rtp_coding_parameters,
@@ -1188,7 +1190,8 @@ impl RTCPeerConnection {
                     receiver.set_track(MediaStreamTrack::new(
                         incoming_track.stream_id,
                         incoming_track.track_id,
-                        format!("remote-{}-{}", incoming_track.kind, math_rand_alpha(16)), //TODO:// Label
+                        // W3C webrtc 4.4.1.6 (create an RTCRtpReceiver): "remote " + kind.
+                        format!("remote {}", incoming_track.kind),
                         incoming_track.kind,
                         vec![], // Defer receiver's track's codec until received the first RTP packet with payload_type in endpoint handler
                     ));

@@ -2646,8 +2646,11 @@ impl RTCPeerConnection {
     ///
     /// Returns an error if:
     /// - The peer connection is closed (`ErrConnectionClosed`)
-    /// - The requested direction is not supported for a transceiver created this way
+    /// - The direction is `Unspecified` (`ErrPeerConnAddTransceiverFromKindSupport`)
     /// - No codec is registered in the media engine for `kind`
+    ///
+    /// A sending direction with no `send_encodings` gets one encoding the engine fills in;
+    /// `recvonly` and `inactive` create a transceiver without a sender.
     ///
     /// # Specification
     ///
@@ -2661,19 +2664,21 @@ impl RTCPeerConnection {
             return Err(Error::ErrConnectionClosed);
         }
 
-        let init = if let Some(init) = init {
-            if init.direction.has_send() && init.send_encodings.is_empty() {
-                return Err(Error::ErrInvalidDirection);
-            }
-
-            init
-        } else {
-            RTCRtpTransceiverInit {
-                direction: RTCRtpTransceiverDirection::Recvonly,
-                streams: vec![],
-                send_encodings: vec![],
-            }
-        };
+        let mut init = init.unwrap_or(RTCRtpTransceiverInit {
+            direction: RTCRtpTransceiverDirection::Recvonly,
+            streams: vec![],
+            send_encodings: vec![],
+        });
+        // W3C addTransceiver: with no `sendEncodings` the sender has one encoding, which the
+        // engine fills in (SSRC, codec), as for a track added without encodings.
+        if init.direction.has_send() && init.send_encodings.is_empty() {
+            init.send_encodings = vec![
+                crate::rtp_transceiver::rtp_sender::rtp_encoding_parameters::RTCRtpEncodingParameters {
+                    active: true,
+                    ..Default::default()
+                },
+            ];
+        }
 
         let transceiver = match init.direction {
             RTCRtpTransceiverDirection::Sendonly | RTCRtpTransceiverDirection::Sendrecv => {
@@ -2695,7 +2700,9 @@ impl RTCPeerConnection {
                 }
                 transceiver
             }
-            RTCRtpTransceiverDirection::Recvonly => {
+            // W3C addTransceiver takes any direction; like `recvonly`, an `inactive` transceiver
+            // has no sender until a track is added to it.
+            RTCRtpTransceiverDirection::Recvonly | RTCRtpTransceiverDirection::Inactive => {
                 RTCRtpTransceiverInternal::new(kind, None, init)
             }
             _ => return Err(Error::ErrPeerConnAddTransceiverFromKindSupport),
