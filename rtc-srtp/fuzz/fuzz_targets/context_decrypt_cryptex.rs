@@ -9,7 +9,6 @@
 //! packets can be tampered with before decryption. Fixed keys, no clock: every input replays
 //! identically.
 
-use bytes::BytesMut;
 use libfuzzer_sys::fuzz_target;
 use rtc_srtp::context::Context;
 use rtc_srtp::cryptex::Cryptex;
@@ -111,7 +110,8 @@ fuzz_target!(|data: &[u8]| {
         require: config & 0x20 != 0,
     });
 
-    let mut last: Option<BytesMut> = None;
+    // The last protected packet, owned, so it can be replayed and tampered with again.
+    let mut last: Option<Vec<u8>> = None;
     let mut ops = 0;
     while let Some((&op, rest)) = data.split_first() {
         data = rest;
@@ -120,7 +120,7 @@ fuzz_target!(|data: &[u8]| {
             break;
         }
         let arg = take_arg(&mut data);
-        let tamper = |packet: &mut BytesMut| {
+        let tamper = |packet: &mut [u8]| {
             if op & 0x80 != 0 && !packet.is_empty() {
                 let at = usize::from(byte(arg, 0)) % packet.len();
                 packet[at] ^= 0x01 | (op & 0x70);
@@ -131,7 +131,8 @@ fuzz_target!(|data: &[u8]| {
                 let _ = receiver.decrypt_rtp(arg);
             }
             1 => {
-                if let Ok(mut packet) = sender.encrypt_rtp(&shaped_packet(arg)) {
+                if let Ok(protected) = sender.encrypt_rtp(&shaped_packet(arg)) {
+                    let mut packet = protected.to_vec();
                     last = Some(packet.clone());
                     tamper(&mut packet);
                     let _ = receiver.decrypt_rtp(&packet);
