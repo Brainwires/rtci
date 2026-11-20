@@ -508,3 +508,114 @@ fn a_received_fatal_alert_closes_the_association_unanswered() -> Result<()> {
     );
     Ok(())
 }
+
+// ---------------------------------------------------------------------------------------------
+// One forged epoch-0 record before the handshake must not stall it (RFC 6347 4.1.2.6, 4.1.2.7).
+// ---------------------------------------------------------------------------------------------
+
+/// An epoch-0 handshake record whose body is a well-formed fragment header (type 0xff, an
+/// unknown message, so it never parses) over a four-byte payload, at message sequence 0.
+fn junk_handshake_datagram(record_sequence: u64) -> BytesMut {
+    use crate::content::ContentType;
+    use crate::record_layer::record_layer_header::{PROTOCOL_VERSION1_2, RecordLayerHeader};
+
+    let header = RecordLayerHeader {
+        content_type: ContentType::Handshake,
+        protocol_version: PROTOCOL_VERSION1_2,
+        epoch: 0,
+        sequence_number: record_sequence,
+        content_len: 16,
+    };
+    let mut raw = vec![];
+    header.marshal(&mut raw).expect("a record header marshals");
+    raw.extend_from_slice(&[
+        0xff, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00,
+        0x00,
+    ]);
+    BytesMut::from(&raw[..])
+}
+
+/// A forged record far ahead in the record sequence used to move the replay window past every
+/// genuine record, and its unparseable message used to take message sequence 0 for good.
+#[test]
+fn a_forged_record_before_the_handshake_does_not_stall_it() -> Result<()> {
+    let now = Instant::now();
+    let mut client = Endpoint::new(client_addr(), TransportProtocol::UDP, None);
+    let mut server = Endpoint::new(
+        server_addr(),
+        TransportProtocol::UDP,
+        Some(server_config()?),
+    );
+    client.connect(now, server_addr(), client_config()?, None)?;
+
+    let _ = server.read(now, client_addr(), None, junk_handshake_datagram(1 << 40));
+    assert!(
+        take_transmits(&mut server).is_empty(),
+        "a forged record is not answered"
+    );
+    assert!(!server.is_connection_failed(&client_addr()));
+
+    complete_handshake(&mut client, &mut server, now);
+    Ok(())
+}
+
+/// A forged first fragment of the client's first message, disagreeing with its real length, used
+/// to win offset 0 and keep the real ClientHello from ever reassembling.
+#[test]
+fn a_forged_conflicting_fragment_before_the_handshake_does_not_stall_it() -> Result<()> {
+    let now = Instant::now();
+    let mut client = Endpoint::new(client_addr(), TransportProtocol::UDP, None);
+    let mut server = Endpoint::new(
+        server_addr(),
+        TransportProtocol::UDP,
+        Some(server_config()?),
+    );
+    client.connect(now, server_addr(), client_config()?, None)?;
+
+    // ClientHello (1), length 1000, message sequence 0, offset 0, ten bytes of it.
+    let mut forged = vec![
+        HANDSHAKE, 0xfe, 0xfd, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, 0x00, 22,
+    ];
+    forged.extend_from_slice(&[
+        0x01, 0x00, 0x03, 0xe8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0a,
+    ]);
+    forged.extend_from_slice(&[0xee; 10]);
+    let _ = server.read(now, client_addr(), None, BytesMut::from(&forged[..]));
+    assert!(take_transmits(&mut server).is_empty());
+
+    complete_handshake(&mut client, &mut server, now);
+    Ok(())
+}
+
+/// An undecodable plaintext record (a one-byte alert) is silently discarded, not answered with a
+/// fatal alert that would end the handshake.
+#[test]
+fn an_undecodable_plaintext_record_is_discarded_not_fatal() -> Result<()> {
+    let now = Instant::now();
+    let mut client = Endpoint::new(client_addr(), TransportProtocol::UDP, None);
+    let mut server = Endpoint::new(
+        server_addr(),
+        TransportProtocol::UDP,
+        Some(server_config()?),
+    );
+    client.connect(now, server_addr(), client_config()?, None)?;
+    let flight1 = take_transmits(&mut client);
+    deliver(&mut server, client_addr(), flight1, now);
+    let flight2 = take_transmits(&mut server);
+    deliver(&mut client, server_addr(), flight2, now);
+
+    let truncated_alert = BytesMut::from(
+        &[
+            ALERT, 0xfe, 0xfd, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x09, 0x00, 0x01, FATAL,
+        ][..],
+    );
+    let _ = server.read(now, client_addr(), None, truncated_alert);
+    assert!(
+        take_transmits(&mut server).is_empty(),
+        "an undecodable plaintext record is not answered"
+    );
+    assert!(!server.is_connection_failed(&client_addr()));
+
+    complete_handshake(&mut client, &mut server, now);
+    Ok(())
+}

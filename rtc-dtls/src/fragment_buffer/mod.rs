@@ -1,7 +1,10 @@
 #[cfg(test)]
+mod fragment_buffer_robustness_test;
+#[cfg(test)]
 mod fragment_buffer_test;
 
 use crate::content::*;
+use crate::handshake::HandshakeType;
 use crate::handshake::handshake_header::*;
 use crate::record_layer::record_layer_header::*;
 use shared::error::*;
@@ -20,6 +23,17 @@ pub(crate) const MAX_FRAGMENTS_PER_MESSAGE: usize = 256;
 /// Most handshake messages buffered at once, counted by message sequence. A flight holds a
 /// handful; fragments for further sequence numbers are dropped until earlier ones are popped.
 pub(crate) const MAX_BUFFERED_MESSAGES: usize = 32;
+
+/// How far ahead of the next expected message sequence number fragments are kept. A peer sends
+/// one flight at a time, and a flight holds a handful of messages, so fragments further ahead can
+/// only be forged or corrupt; kept, they would hold buffer slots (see `MAX_BUFFERED_MESSAGES`)
+/// for good and stall the handshake.
+pub(crate) const MESSAGE_SEQUENCE_WINDOW: u16 = 16;
+
+/// Most distinct (type, length) readings of one message sequence number tried when reassembling
+/// it. The genuine fragments agree on both; a forged fragment that disagrees must not block them,
+/// but each extra reading costs a reassembly pass.
+const MAX_ASSEMBLY_CANDIDATES: usize = 8;
 
 pub(crate) struct Fragment {
     record_layer_header: RecordLayerHeader,
@@ -103,6 +117,7 @@ impl FragmentBuffer {
     }
 
     pub fn pop(&mut self) -> Result<(Vec<u8>, u16)> {
+        self.evict_out_of_window();
         let seq_num = self.current_message_sequence_number;
         // message_seq is 16 bits and no handshake comes near using them all, but a peer can
         // push empty messages that each consume one; the last one is never handed out, so the
@@ -118,6 +133,23 @@ impl FragmentBuffer {
         self.current_message_sequence_number = next_seq_num;
 
         Ok((content, epoch))
+    }
+
+    /// Hands the sequence number [`Self::pop`] last returned out again. The message it returned
+    /// did not parse, so it was forged or corrupt; the genuine one, when the peer retransmits it,
+    /// must still be taken rather than kept forever as already seen.
+    pub fn unpop(&mut self) {
+        self.current_message_sequence_number =
+            self.current_message_sequence_number.saturating_sub(1);
+    }
+
+    /// Drops fragments too far ahead of the next expected message to belong to the peer's
+    /// current flight (see [`MESSAGE_SEQUENCE_WINDOW`]).
+    fn evict_out_of_window(&mut self) {
+        let limit = self
+            .current_message_sequence_number
+            .saturating_add(MESSAGE_SEQUENCE_WINDOW);
+        self.cache.retain(|seq, _| *seq < limit);
     }
 
     /// Takes a complete message whose sequence number [`Self::pop`] has already handed out: the
@@ -146,9 +178,9 @@ impl FragmentBuffer {
     /// epoch it arrived in. `None` while fragments are missing.
     fn assemble(&self, seq_num: u16) -> Option<(Vec<u8>, u16)> {
         let frags = self.cache.get(&seq_num)?;
-        let raw_message = assemble_message(frags)?;
+        let (raw_message, first) = assemble_message(frags)?;
 
-        let mut first_header = frags[0].handshake_header;
+        let mut first_header = frags[first].handshake_header;
         first_header.fragment_offset = 0;
         first_header.fragment_length = first_header.length;
 
@@ -158,7 +190,7 @@ impl FragmentBuffer {
             first_header.marshal(&mut writer).ok()?;
         }
 
-        let message_epoch = frags[0].record_layer_header.epoch;
+        let message_epoch = frags[first].record_layer_header.epoch;
 
         raw_header.extend_from_slice(&raw_message);
 
@@ -175,31 +207,75 @@ impl FragmentBuffer {
 
 /// Reassembles one handshake message from its fragments: start at offset 0 and follow each
 /// fragment's end to the next, until the message length is reached (or a zero-length fragment
-/// ends it). The first fragment buffered for an offset wins, as before.
+/// ends it). Returns the message body and the index of the fragment it starts with.
+///
+/// The fragments of one message agree on its type and length. One that disagrees (forged, or
+/// corrupt) used to win its offset for good if it arrived first, so the genuine fragments could
+/// never complete the message. Each (type, length) reading is tried instead, newest first, and
+/// within it first the earliest then the latest fragment for each offset, so a later genuine
+/// fragment can replace a conflicting one.
 ///
 /// Iterative: the previous recursive version used one stack frame per fragment, so a peer that
 /// sent enough tiny fragments could overflow the stack and abort the process.
-fn assemble_message(frags: &[Fragment]) -> Option<Vec<u8>> {
-    let mut by_offset: HashMap<u32, &Fragment> = HashMap::with_capacity(frags.len());
-    for f in frags {
-        by_offset
-            .entry(f.handshake_header.fragment_offset)
-            .or_insert(f);
+fn assemble_message(frags: &[Fragment]) -> Option<(Vec<u8>, usize)> {
+    let mut tried: Vec<(HandshakeType, u32)> = Vec::new();
+    for candidate in frags.iter().rev() {
+        let reading = (
+            candidate.handshake_header.handshake_type,
+            candidate.handshake_header.length,
+        );
+        if tried.contains(&reading) {
+            continue;
+        }
+        if tried.len() >= MAX_ASSEMBLY_CANDIDATES {
+            break;
+        }
+        tried.push(reading);
+        for latest_wins in [false, true] {
+            if let Some(assembled) = assemble_reading(frags, reading, latest_wins) {
+                return Some(assembled);
+            }
+        }
+    }
+    None
+}
+
+/// Reassembles the message from the fragments that agree with `reading` (type, length), taking
+/// for each offset the earliest fragment, or the latest when `latest_wins`.
+fn assemble_reading(
+    frags: &[Fragment],
+    reading: (HandshakeType, u32),
+    latest_wins: bool,
+) -> Option<(Vec<u8>, usize)> {
+    let mut by_offset: HashMap<u32, (usize, &Fragment)> = HashMap::with_capacity(frags.len());
+    for (index, f) in frags.iter().enumerate() {
+        if (f.handshake_header.handshake_type, f.handshake_header.length) != reading {
+            continue;
+        }
+        if latest_wins {
+            by_offset.insert(f.handshake_header.fragment_offset, (index, f));
+        } else {
+            by_offset
+                .entry(f.handshake_header.fragment_offset)
+                .or_insert((index, f));
+        }
     }
 
     let mut raw_message = vec![];
+    let mut first = None;
     let mut target_offset = 0u32;
-    // Each step consumes a distinct offset, so this ends within `frags.len()` steps even if
+    // Each step consumes a distinct offset, so this ends within `by_offset.len()` steps even if
     // fragment lengths point back at an offset already visited.
-    for _ in 0..frags.len() {
-        let f = by_offset.remove(&target_offset)?;
+    for _ in 0..by_offset.len() {
+        let (index, f) = by_offset.remove(&target_offset)?;
+        first.get_or_insert(index);
         raw_message.extend_from_slice(&f.data);
         let fragment_end = f
             .handshake_header
             .fragment_offset
             .checked_add(f.handshake_header.fragment_length)?;
         if fragment_end == f.handshake_header.length || f.handshake_header.fragment_length == 0 {
-            return Some(raw_message);
+            return Some((raw_message, first?));
         }
         target_offset = fragment_end;
     }

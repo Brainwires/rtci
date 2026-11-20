@@ -813,7 +813,13 @@ impl DTLSConn {
             }
         };
         if is_handshake {
-            self.replay_detector[h.epoch as usize].accept();
+            // An epoch-0 record is not authenticated, so it moves the replay window only once it
+            // has delivered something: a new handshake message, or a repeat of one already
+            // received. Otherwise one forged record with a far-ahead sequence number, which
+            // anyone spoofing the peer's address can send before the handshake, would push every
+            // genuine record out of the window and stall the handshake. Later epochs are
+            // authenticated by the decryption above.
+            let mut delivered = h.epoch != 0;
             while let Ok((out, epoch)) = self.fragment_buffer.pop() {
                 //log::debug!("Extension Debug: out.len()={}", out.len());
                 let mut reader = out.as_slice();
@@ -834,11 +840,15 @@ impl DTLSConn {
                             srv_cli_str(self.is_client),
                             err
                         );
+                        // A message that does not parse is forged or corrupt. Its sequence number
+                        // is handed out again, so the genuine message, when the peer retransmits
+                        // it, is still taken instead of being dropped as already seen.
+                        self.fragment_buffer.unpop();
                         continue;
                     }
                 };
 
-                self.cache.push(
+                delivered |= self.cache.push(
                     out,
                     epoch,
                     raw_handshake.handshake_header.message_sequence,
@@ -862,15 +872,30 @@ impl DTLSConn {
                         message_sequence
                     );
                     self.peer_repeated_flight = true;
+                    delivered = true;
                 }
             }
 
+            if delivered {
+                self.replay_detector[h.epoch as usize].accept();
+            }
             return (true, None, None);
         }
 
         let mut reader = pkt.as_slice();
         let r = match RecordLayer::unmarshal(&mut reader) {
             Ok(r) => r,
+            Err(err) if h.epoch == 0 => {
+                // An undecodable plaintext record is silently discarded [RFC6347 Section-4.1.2.7]:
+                // anyone spoofing the peer's address can send one, and answering it with a fatal
+                // alert would end the handshake.
+                debug!(
+                    "{}: discarded undecodable epoch-0 record: {}",
+                    srv_cli_str(self.is_client),
+                    err
+                );
+                return (false, None, None);
+            }
             Err(err) => {
                 return (
                     false,
