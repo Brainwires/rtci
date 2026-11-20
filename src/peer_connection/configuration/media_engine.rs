@@ -558,6 +558,7 @@ impl MediaEngine {
                 },
                 payload_type: 118,
             },
+            rtx_codec(110, 118),
             // H.264 High Profile, Level 4.1 (1080p60), as webrtc-rs 0.17 registers it.
             RTCRtpCodecParameters {
                 rtp_codec: RTCRtpCodec {
@@ -571,6 +572,7 @@ impl MediaEngine {
                 },
                 payload_type: 119,
             },
+            rtx_codec(113, 119),
             // H.264 High Profile, Level 4.2 (1080p64), as webrtc-rs 0.17 registers it.
             RTCRtpCodecParameters {
                 rtp_codec: RTCRtpCodec {
@@ -584,6 +586,7 @@ impl MediaEngine {
                 },
                 payload_type: 120,
             },
+            rtx_codec(114, 120),
             // H.264 High Profile, Level 5.1 (4K30), as webrtc-rs 0.17 registers it.
             RTCRtpCodecParameters {
                 rtp_codec: RTCRtpCodec {
@@ -597,6 +600,7 @@ impl MediaEngine {
                 },
                 payload_type: 121,
             },
+            rtx_codec(122, 121),
             RTCRtpCodecParameters {
                 rtp_codec: RTCRtpCodec {
                     mime_type: MIME_TYPE_AV1.to_owned(),
