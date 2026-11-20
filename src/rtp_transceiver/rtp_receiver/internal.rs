@@ -244,7 +244,7 @@ impl RTCRtpReceiverInternal {
     /// RTX ([RFC 4588]) and FEC ([RFC 8888]/FlexFEC) both repair a media stream from a *separate*
     /// SSRC, so both are described the same way: the association travels on the media stream's
     /// `StreamInfo`, telling an interceptor which SSRC carries repair for it. This mirrors what
-    /// the sender side already does in `interceptor_local_streams_op`.
+    /// the sender side already does in `local_stream_infos`.
     ///
     /// [RFC 4588]: https://datatracker.ietf.org/doc/html/rfc4588
     /// [RFC 8888]: https://datatracker.ietf.org/doc/html/rfc8888

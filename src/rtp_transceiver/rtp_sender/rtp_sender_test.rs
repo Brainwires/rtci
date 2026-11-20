@@ -696,3 +696,126 @@ fn test_rtp_sender_rtx() -> Result<()> {
 
     Ok(())
 }
+
+/// A recording offerer (sendonly video, one encoding that names no codec, W3C `sendEncodings`
+/// leaving the codec to negotiation) and a default answerer.
+fn empty_codec_sender() -> Result<(
+    RTCPeerConnection,
+    RTCPeerConnection,
+    crate::peer_connection::util_test::StreamLog,
+    crate::rtp_transceiver::RTCRtpTransceiverId,
+)> {
+    let (registry, log) = RecordingInterceptor::registry();
+    let mut sender = new_peer(
+        default_media_engine(),
+        SettingEngineBuilder::new()
+            .with_answering_dtls_role(RTCDtlsRole::Server)
+            .build(),
+        Some(registry),
+        crate::peer_connection::util_test::OFFERER_ADDR,
+    )?;
+    let (_, receiver) = new_pair()?;
+    let transceiver = sender.add_transceiver_from_kind(
+        RtpCodecKind::Video,
+        Some(RTCRtpTransceiverInit {
+            direction: RTCRtpTransceiverDirection::Sendonly,
+            streams: vec![],
+            send_encodings: vec![RTCRtpEncodingParameters {
+                active: true,
+                ..Default::default()
+            }],
+        }),
+    )?;
+    Ok((sender, receiver, log, transceiver))
+}
+
+/// The engine's H.264 codecs (its first fmtp only) and the RTX that goes with it.
+fn h264_preferences(pc: &RTCPeerConnection) -> Vec<RTCRtpCodecParameters> {
+    let codecs = pc.media_engine.get_codecs_by_kind(RtpCodecKind::Video);
+    let h264 = codecs
+        .iter()
+        .find(|c| c.rtp_codec.mime_type == MIME_TYPE_H264)
+        .expect("the default engine has H.264")
+        .clone();
+    let rtx = codecs
+        .iter()
+        .find(|c| {
+            c.rtp_codec.mime_type == MIME_TYPE_RTX
+                && c.rtp_codec.sdp_fmtp_line == format!("apt={}", h264.payload_type)
+        })
+        .expect("the default engine has RTX for H.264")
+        .clone();
+    vec![h264, rtx]
+}
+
+/// A renegotiation that changes the codec an encoding without a codec of its own is sent with
+/// (here: the sender's codec preferences now list H.264 only) re-binds its stream with the new
+/// payload type, clock rate and RTX payload type, keeping its SSRCs; one that changes nothing
+/// leaves the binding alone.
+#[test]
+fn a_renegotiated_codec_rebinds_the_senders_stream() -> Result<()> {
+    let (mut sender, mut receiver, log, transceiver) = empty_codec_sender()?;
+    signal_pair(&mut sender, &mut receiver)?;
+
+    let bound: Vec<interceptor::StreamInfo> = log.bound_local.lock().unwrap().clone();
+    assert_eq!(bound.len(), 1, "{bound:?}");
+    let first = bound[0].clone();
+    assert_eq!(first.mime_type, MIME_TYPE_VP8, "{first:?}");
+    assert!(first.ssrc_rtx.is_some() && first.payload_type_rtx.is_some());
+
+    let preferences = h264_preferences(&sender);
+    let (h264_pt, rtx_pt) = (preferences[0].payload_type, preferences[1].payload_type);
+    sender
+        .rtp_transceiver(transceiver)
+        .expect("transceiver")
+        .set_codec_preferences(preferences)?;
+    signal_pair(&mut sender, &mut receiver)?;
+
+    let unbound: Vec<interceptor::StreamInfo> = log.unbound_local.lock().unwrap().clone();
+    assert_eq!(
+        unbound,
+        vec![first.clone()],
+        "the stream is unbound as it was bound"
+    );
+    let bound: Vec<interceptor::StreamInfo> = log.bound_local.lock().unwrap().clone();
+    assert_eq!(bound.len(), 2, "{bound:?}");
+    let second = &bound[1];
+    assert_eq!(second.ssrc, first.ssrc, "the SSRC stays");
+    assert_eq!(second.ssrc_rtx, first.ssrc_rtx, "the RTX SSRC stays");
+    assert_eq!(second.mime_type, MIME_TYPE_H264, "{second:?}");
+    assert_eq!(second.payload_type, h264_pt);
+    assert_eq!(second.payload_type_rtx, Some(rtx_pt));
+    assert_eq!(second.clock_rate, 90000);
+
+    signal_pair(&mut sender, &mut receiver)?;
+    assert_eq!(
+        log.bound_local.lock().unwrap().len(),
+        2,
+        "a renegotiation that changes nothing does not re-bind"
+    );
+    assert_eq!(log.unbound_local.lock().unwrap().len(), 1);
+
+    // The stats reference the codec the stream is now sent with.
+    let ssrc = first.ssrc;
+    let report = sender.get_stats(Instant::now(), crate::statistics::StatsSelector::None);
+    let codec_id = report
+        .outbound_rtp_streams()
+        .find(|s| s.sent_rtp_stream_stats.rtp_stream_stats.ssrc == ssrc)
+        .map(|s| s.sent_rtp_stream_stats.rtp_stream_stats.codec_id.clone())
+        .expect("an outbound-rtp for the stream");
+    let codec = report
+        .iter()
+        .find_map(|entry| match entry {
+            crate::statistics::report::RTCStatsReportEntry::Codec(c)
+                if c.stats.id == codec_id =>
+            {
+                Some(c)
+            }
+            _ => None,
+        })
+        .expect("the codec the stream references");
+    assert_eq!(codec.payload_type, h264_pt, "{codec:?}");
+
+    sender.close()?;
+    receiver.close()
+}

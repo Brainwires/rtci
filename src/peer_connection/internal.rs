@@ -1070,6 +1070,19 @@ impl RTCPeerConnection {
             // Get kind and mid before mutable borrow of sender
             let kind = transceiver.kind();
             let mid = transceiver.mid().clone().unwrap_or_default();
+            let transceiver_stopped = transceiver.stopped();
+
+            // A started sender's streams were bound with what an earlier negotiation decided;
+            // one that changed the codec an encoding is sent with (or its RTX / FEC flow, or the
+            // header extensions) re-binds them, keeping the SSRCs.
+            if let Some(sender) = transceiver.sender_mut()
+                && sender.is_negotiated()
+                && sender.has_sent()
+                && !transceiver_stopped
+            {
+                sender.rebind_local_streams(&self.media_engine, &mut self.interceptor);
+                continue;
+            }
 
             if let Some(sender) = transceiver.sender_mut()
                 && sender.is_negotiated()
@@ -1097,11 +1110,7 @@ impl RTCPeerConnection {
                     }
                 }
 
-                sender.interceptor_local_streams_op(
-                    &self.media_engine,
-                    &mut self.interceptor,
-                    true,
-                );
+                sender.bind_local_streams(&self.media_engine, &mut self.interceptor);
 
                 sender.set_sent();
             }

@@ -32,7 +32,7 @@
 /// | `urn:ietf:params:rtp-hdrext:toffset` | Transmission time offset |
 /// | `http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time` | Absolute send time |
 /// | `http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01` | TWCC sequence number |
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct RTPHeaderExtension {
     /// URI identifying the extension type (e.g., "urn:ietf:params:rtp-hdrext:ssrc-audio-level")
     pub uri: String,
@@ -57,7 +57,7 @@ pub struct RTPHeaderExtension {
 /// | `transport-cc` | (empty) | Transport-wide CC feedback | draft-holmer |
 ///
 /// See: <https://draft.ortc.org/#dom-rtcrtcpfeedback>
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct RTCPFeedback {
     /// Type of feedback mechanism.
     ///
@@ -102,7 +102,7 @@ pub struct RTCPFeedback {
 ///     ..Default::default()
 /// };
 /// ```
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct StreamInfo {
     /// Synchronization Source identifier (SSRC) of the stream.
     ///
