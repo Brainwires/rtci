@@ -1,6 +1,7 @@
 // Headless Chromium, Firefox and WebKit as the remote peer of examples/interop-peer.
-// Host candidates are not hidden behind mDNS names, so the ICE pair is host/host on the
-// environment's WAN (the Rust side learns peer-reflexive candidates either way).
+// In the main projects host candidates are not hidden behind mDNS names, so the ICE pair is
+// host/host on the environment's WAN (the Rust side learns peer-reflexive candidates either
+// way). The "-mdns" projects keep each browser's default (hidden) and run only mdns.spec.mjs.
 import { defineConfig } from "@playwright/test";
 
 export default defineConfig({
@@ -15,6 +16,7 @@ export default defineConfig({
   projects: [
     {
       name: "chromium",
+      testIgnore: /mdns\.spec\.mjs/,
       use: {
         browserName: "chromium",
         launchOptions: {
@@ -28,6 +30,7 @@ export default defineConfig({
     },
     {
       name: "firefox",
+      testIgnore: /mdns\.spec\.mjs/,
       use: {
         browserName: "firefox",
         launchOptions: {
@@ -40,6 +43,13 @@ export default defineConfig({
         },
       },
     },
-    { name: "webkit", use: { browserName: "webkit" } },
+    { name: "webkit", testIgnore: /mdns\.spec\.mjs/, use: { browserName: "webkit" } },
+    {
+      name: "chromium-mdns",
+      testMatch: /mdns\.spec\.mjs/,
+      use: { browserName: "chromium", launchOptions: { args: ["--autoplay-policy=no-user-gesture-required"] } },
+    },
+    { name: "firefox-mdns", testMatch: /mdns\.spec\.mjs/, use: { browserName: "firefox" } },
+    { name: "webkit-mdns", testMatch: /mdns\.spec\.mjs/, use: { browserName: "webkit" } },
   ],
 });
