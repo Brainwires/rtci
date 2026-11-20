@@ -35,7 +35,11 @@ ipset / tc, coturn and GStreamer.
   `restricted` (address-dependent filtering, an ipset of the addresses the host sent to),
   `portrestricted` (address-and-port-dependent filtering) and `symmetric` (a new external port
   per destination, `MASQUERADE --random-fully`);
-- **an mDNS LAN** (`br-mdns`, 10.99.0.0/24) with `m-a` and `m-b`, where multicast works.
+- **an mDNS LAN** (`br-mdns`, 10.99.0.0/24) with `m-a` and `m-b` (.2, .3; the Rust mDNS tests)
+  and `lan-a` and `lan-b` (.50, .51; the browser and Rust peer of the `-mdns` interop projects),
+  where multicast works. mDNS resolves names on a link, and an mDNS answer is believed only from
+  an on-link sender (private, link-local or loopback, naming its own address), so the hosts that
+  resolve each other's names sit on this private LAN, as on a real one.
 
 `coturn/` runs STUN and TURN on 203.0.113.10: UDP and TCP on 3478, TLS on 5349 with a CA made
 for the run (user `test`, password `test`, realm `rtc.test`).
@@ -82,7 +86,8 @@ variables the tests read.
   through coturn, ICE-TCP, the browser as answerer for media, transceiver stop and m-line reuse,
   direction changes, rollback and glare, a wrong fingerprint either way, `getStats()` against the
   Rust side's counters, and (in the `-mdns` projects, each browser's defaults) mDNS-hidden
-  candidates. The loss tests add a `tc` filter for their own session to a netem band that
+  candidates, which run apart on the mDNS LAN: a second interop-peer in `lan-b` and the
+  browsers in `lan-a`. The loss tests add a `tc` filter for their own session to a netem band that
   `interop/run.sh` sets up, so they run beside the others.
 
   Each cell is a pass, a failure, or one of two kinds of "not applicable", always with the

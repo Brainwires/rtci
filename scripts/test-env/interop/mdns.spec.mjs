@@ -1,11 +1,17 @@
 // The browser's default host candidates: hidden behind an mDNS name (draft-ietf-mmusic-mdns-
 // ice-candidates, a random UUID ".local"). Runs in the "-mdns" projects of
 // playwright.config.mjs, which leave each browser's default in place (the other projects turn
-// the hiding off). The Rust side resolves the name over multicast on the WAN segment
-// (interop-peer's mDNS socket, MulticastDnsMode::QueryOnly).
+// the hiding off). interop/run.sh runs these projects on the private mDNS LAN (the browser in
+// lan-a, 10.99.0.50; a second interop-peer in lan-b, 10.99.0.51): the Rust side resolves the
+// name over multicast there (interop-peer's mDNS socket, MulticastDnsMode::QueryOnly) and, as
+// it should, believes an answer only from an on-link sender naming its own address, which a
+// public (TEST-NET) WAN host is not.
 import { test, expect } from "@playwright/test";
 import { naBrowser } from "./na.mjs";
 import { WS, setupPage } from "./common.mjs";
+
+// The browser host's address on the mDNS LAN (interop/run.sh).
+const BROWSER_IP = process.env.RTC_INTEROP_BROWSER_IP || "10.99.0.50";
 
 setupPage();
 
@@ -34,10 +40,10 @@ test("mDNS-hidden browser candidates resolve on the Rust side", async ({ page })
     `its own icecandidate events with default settings: ${JSON.stringify(r.hosts)}`,
   );
   expect(r.echoed).toBe(20);
-  // The name resolved: Rust holds a host candidate with the browser's address (open-a is
-  // 203.0.113.50), not only the peer-reflexive one its checks would teach it anyway.
+  // The name resolved: Rust holds a host candidate with the browser's address (lan-a), not only
+  // the peer-reflexive one its checks would teach it anyway.
   expect(
-    r.remote.some((c) => c.type === "host" && c.address === "203.0.113.50"),
+    r.remote.some((c) => c.type === "host" && c.address === BROWSER_IP),
     `Rust's remote candidates: ${JSON.stringify(r.remote)}`,
   ).toBe(true);
 });

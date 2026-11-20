@@ -9,7 +9,11 @@
 #   (STUN/TURN      (public hosts: browser            |
 #    UDP/TCP/TLS)    and Rust peers, netem)        h-<nat>-<x>   10.<n>.0.2 (a host behind it)
 #
-#   mdns: bridge br-mdns (10.99.0.0/24, a LAN with multicast) joining m-a (.2) and m-b (.3).
+#   mdns: bridge br-mdns (10.99.0.0/24, a LAN with multicast) joining m-a (.2) and m-b (.3)
+#   (the Rust mDNS tests) and lan-a (.50) and lan-b (.51) (the browser and the Rust peer of the
+#   mDNS interop projects). mDNS works on a link, and an mDNS answer is believed only from an
+#   on-link sender (a private, link-local or loopback address naming itself), so the hosts that
+#   resolve each other's names sit on a private LAN, as on a real one, not on the TEST-NET WAN.
 #
 # NAT types (iptables in the router namespace, RFC 4787 behaviour):
 #   fullcone        endpoint-independent mapping and filtering: SNAT, every inbound packet to
@@ -27,6 +31,8 @@ SIDES=(a b)
 TURN_IP=203.0.113.10
 OPEN_A_IP=203.0.113.50
 OPEN_B_IP=203.0.113.51
+LAN_A_IP=10.99.0.50
+LAN_B_IP=10.99.0.51
 
 VETH_N=0
 ns() { ip netns exec "$@"; }
@@ -104,9 +110,17 @@ up() {
   attach m-a eth0 10.99.0.2/24 br-mdns mdns
   add_ns m-b
   attach m-b eth0 10.99.0.3/24 br-mdns mdns
-  for h in m-a m-b; do
+  add_ns lan-a
+  attach lan-a eth0 "$LAN_A_IP/24" br-mdns mdns
+  add_ns lan-b
+  attach lan-b eth0 "$LAN_B_IP/24" br-mdns mdns
+  for h in m-a m-b lan-a lan-b; do
     # Multicast (mDNS, 224.0.0.251) leaves through the LAN interface.
     ns "$h" ip route add 224.0.0.0/4 dev eth0
+  done
+  # Firefox gathers no ICE candidates without a default route (as on the WAN).
+  for h in lan-a lan-b; do
+    ns "$h" ip route add default dev eth0
   done
 }
 
