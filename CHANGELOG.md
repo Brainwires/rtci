@@ -5,6 +5,55 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.0+brainwires.3] - 2026-11-20
+
+### Behaviour changes
+
+- **jsep**: once an answer (local or remote) is applied, a stopped transceiver whose m= section is
+  rejected is removed from the set of transceivers (W3C webrtc-pc 4.4.1.6). A transceiver id is
+  its index, so the ids after it move down by one. Mirror the list with the new
+  `RTCPeerConnection::take_removed_transceivers()`, which returns the removed ids (rollback
+  removals included) in removal order.
+- **interceptor**: `register_default_interceptors` now also calls
+  `configure_receiver_reference_time`, so the default SDP offers `a=rtcp-fb:<pt> rrtr` on video
+  codecs.
+
+### Features
+
+- **stats**: remote-outbound-rtp `roundTripTime`, `totalRoundTripTime` and
+  `roundTripTimeMeasurements` are measured over RTCP XR (RFC 3611): the receiver of a stream
+  that negotiated `rrtr` sends a receiver reference time block with each receiver report, the
+  sender answers every one with a DLRR block (as libwebrtc does), and the receiver turns the
+  answer into a round trip time. New: `configure_receiver_reference_time`,
+  `rtc_interceptor::RTCP_FB_RRTR`.
+- **peer_connection**: `RTCPeerConnection::take_removed_transceivers()`.
+- **interceptor**: `StreamInfo`, `RTPHeaderExtension` and `RTCPFeedback` implement `PartialEq`
+  and `Eq`.
+
+### Bug Fixes
+
+- **rtp_sender**: a renegotiation that changed the codec a sender's encoding is sent with (the
+  first negotiated media codec for an encoding that names none, or the matched codec), its RTX
+  payload type or SSRC, its FEC flow or the header extensions left the interceptors on the old
+  stream info. The streams are now unbound and bound again with the new information, keeping
+  their SSRCs; a negotiation that changes nothing re-binds nothing. The NACK responder's buffer
+  and the TWCC send side start again for a re-bound stream; the stats reference the new codec.
+- **interceptor**: the sender report interceptor keeps a stream that is unbound and bound again
+  with the same SSRC (its counts and timing carry on) and sends no RTCP BYE for it; a sender that
+  really stops still says goodbye.
+- **rtp_sender**: when RTX is not negotiated, the RTX SSRC is dropped from the track's codings
+  too (it was dropped from the sender's encodings only), so no stream is bound with an RTX SSRC
+  and no RTX payload type.
+- **rtp_sender**: `write_rtp` refused every packet of an encoding that names no codec whose
+  payload type was not negotiated; it now rewrites it to the payload type of the codec the
+  encoding is sent with, as for an encoding that names one.
+- **jsep**: a rejected m= section in a remote offer or answer now stops the transceiver it
+  belongs to (W3C 4.4.1.6), firing no track event; a rollback leaves it stopped. A remote offer
+  that keeps a section the last exchange rejected creates no transceiver for it again.
+- **stats**: when a rollback removed a transceiver, the stats kept the old transceiver ids, so a
+  sender or receiver selector could pick another transceiver's streams; they now follow the
+  removal.
+
 ## [0.22.0+brainwires.2] - 2026-11-20
 
 ### Features
