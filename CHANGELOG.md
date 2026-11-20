@@ -155,7 +155,15 @@ that work. The minor version moves because the public API changes (see "Breaking
 - CI fails on hidden tests (ignored, commented out, orphaned or platform-gated without a listed
   reason) and on conformance rows whose test does not exist, runs the workspace tests on macOS and
   Windows as well as Linux, and pins every action by commit SHA.
-- The workspace with `--all-features`: 2734 tests pass.
+- The workspace with `--all-features`: 2746 tests pass.
+
+## [0.21.1+brainwires.6] - 2026-11-20
+
+### Bug Fixes
+
+- **sctp**: a data channel could fail to open when the first SCTP INIT ACK was lost: the peer's
+  retransmitted INIT was treated as a second association and refused by the one-association limit
+  added in 0.21.1+brainwires.5.
 
 ## [0.21.1+brainwires.5] - 2026-11-20
 
