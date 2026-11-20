@@ -40,18 +40,20 @@ fn recovery_window(count: u32, now: Instant) -> Result<Association> {
     Ok(a)
 }
 
-/// Times `count` one-chunk recovery flushes over a window of `count` outstanding messages:
-/// T3-rtx retransmissions when `fast` is false, fast retransmissions otherwise. Returns the
-/// elapsed nanoseconds.
-pub(crate) fn recovery_flushes(count: u32, fast: bool) -> Result<u128> {
-    let now = Instant::now();
-    let mut a = recovery_window(count, now)?;
+/// The association `recovery_flushes` works on: `count` messages in flight at `now`. Set up
+/// apart so the caller times only the flushes, with its own clock (protocol code reads none).
+pub(crate) fn recovery_setup(count: u32, now: Instant) -> Result<Association> {
+    recovery_window(count, now)
+}
+
+/// Runs `count` one-chunk recovery flushes on `a` (from `recovery_setup` at `now`): T3-rtx
+/// retransmissions when `fast` is false, fast retransmissions otherwise.
+pub(crate) fn recovery_flushes(a: &mut Association, count: u32, fast: bool, now: Instant) {
     let at = now + Duration::from_secs(1);
     if !fast {
         a.handle_timeout(at);
     }
     a.cwnd = a.mtu;
-    let started = Instant::now();
     for _ in 0..count {
         let tsn = a.cumulative_tsn_ack_point.wrapping_add(1);
         if fast {
@@ -72,5 +74,4 @@ pub(crate) fn recovery_flushes(count: u32, fast: bool) -> Result<u128> {
         let _ = a.inflight_queue.pop(tsn);
         a.cumulative_tsn_ack_point = tsn;
     }
-    Ok(started.elapsed().as_nanos())
 }

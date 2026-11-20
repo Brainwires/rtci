@@ -6,10 +6,16 @@
 
 #[cfg(feature = "bench")]
 fn main() {
+    use rtc_sctp::fuzzing;
+    use std::time::Instant;
     for count in [128, 1024, 4096] {
         for fast in [false, true] {
-            let elapsed =
-                rtc_sctp::fuzzing::bench_recovery_flushes(count, fast).expect("recovery window");
+            let now = Instant::now();
+            let mut association =
+                fuzzing::bench_recovery_setup(count, now).expect("recovery window");
+            let started = Instant::now();
+            fuzzing::bench_recovery_flushes(&mut association, count, fast, now);
+            let elapsed = started.elapsed().as_nanos();
             println!("recovery-bench fast={fast} window={count} elapsed_ns={elapsed}");
         }
     }
