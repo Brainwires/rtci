@@ -24,4 +24,3 @@ check fails, naming each one, until they are. The same tests are `port` rows in
 
 | Kind | File | Test | Reason | Covered by |
 |---|---|---|---|---|
-| ignored | `rtc-sctp/src/association/retransmission_review_test.rs` | `benchmark_recovery_flushes` | A timing comparison printed for a person to read (recovery CPU cost at 128, 1,024 and 4,096 outstanding chunks), not an assertion; run by hand with `--ignored`. | `recovery_checks_are_bounded_by_candidates_in_large_windows` asserts the bound the benchmark illustrates |
