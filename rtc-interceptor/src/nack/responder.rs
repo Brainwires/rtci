@@ -56,6 +56,19 @@ impl NackResponderBuilder {
     }
 }
 
+/// The RID header extension (RFC 8852 3.1).
+const RTP_STREAM_ID_URI: &str = "urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id";
+/// The repaired-RID header extension (RFC 8852 3.2), which an RTX packet carries instead.
+const REPAIRED_RTP_STREAM_ID_URI: &str = "urn:ietf:params:rtp-hdrext:sdes:repaired-rtp-stream-id";
+
+/// The one-byte or two-byte id `info` negotiated for `uri`.
+fn extension_id(info: &StreamInfo, uri: &str) -> Option<u8> {
+    info.rtp_header_extensions
+        .iter()
+        .find(|extension| extension.uri == uri)
+        .and_then(|extension| u8::try_from(extension.id).ok())
+}
+
 /// Per-stream state for the responder.
 struct LocalStream {
     /// Buffer of sent packets for retransmission.
@@ -69,6 +82,17 @@ struct LocalStream {
     /// When each sequence number was last retransmitted, so a repeated NACK within
     /// [`MIN_RETRANSMIT_INTERVAL`] does not resend it again.
     last_retransmit: HashMap<u16, Instant>,
+    /// The RID extension id, if negotiated.
+    rid_extension_id: Option<u8>,
+    /// The repaired-RID extension id, if negotiated.
+    repaired_rid_extension_id: Option<u8>,
+    /// Retransmissions this stream may still send: one more for each original packet sent, up
+    /// to the send buffer's size, and one less per retransmission. A NACK naming the whole buffer
+    /// may be answered once in full, but repeated NACKs cannot make the stream retransmit faster
+    /// than it sends, so the peer cannot turn its NACKs into a multiple of our send rate.
+    retransmit_budget: usize,
+    /// The budget's ceiling: the send buffer's size.
+    retransmit_budget_max: usize,
 }
 
 /// A sequence number is retransmitted at most once per this interval, however often it is
@@ -152,10 +176,14 @@ impl NackResponderInterceptor {
             if stream.last_retransmit.contains_key(&seq) {
                 continue;
             }
+            if stream.retransmit_budget == 0 {
+                break;
+            }
             let Some(original_packet) = stream.send_buffer.get(seq) else {
                 continue;
             };
             stream.last_retransmit.insert(seq, now);
+            stream.retransmit_budget -= 1;
             self.retransmissions_queued += 1;
 
             let packet = if let (Some(ssrc_rtx), Some(pt_rtx)) =
@@ -173,21 +201,32 @@ impl NackResponderInterceptor {
                 let rtx_seq = stream.rtx_sequence_number;
                 stream.rtx_sequence_number = stream.rtx_sequence_number.wrapping_add(1);
 
+                // RFC 4588 4: the RTX packet carries the original's header "as is" apart from
+                // the SSRC, payload type and sequence number, so its CSRCs and header extensions
+                // (audio level, abs-send-time, mid, ...) go with it. Building a fresh header used
+                // to drop them. Version is set explicitly: a buffered packet built with a
+                // defaulted header is version 0, which receivers discard on arrival. Padding is
+                // not carried: the RTX payload is the original payload alone.
+                let mut header = original_packet.header.clone();
+                header.version = 2;
+                header.ssrc = ssrc_rtx;
+                header.payload_type = pt_rtx;
+                header.sequence_number = rtx_seq;
+                header.padding = false;
+                // RFC 8852 3.2: a repair packet names the stream it repairs with the
+                // repaired-RID, not the RID, so a receiver never takes the RTX SSRC for a
+                // simulcast layer of its own.
+                if let Some(rid_id) = stream.rid_extension_id
+                    && let Some(rid) = header.get_extension(rid_id)
+                {
+                    let _ = header.del_extension(rid_id);
+                    if let Some(repaired_id) = stream.repaired_rid_extension_id {
+                        let _ = header.set_extension(repaired_id, rid);
+                    }
+                }
+
                 rtp::Packet {
-                    header: rtp::header::Header {
-                        // Not left to `..Default::default()`: the default
-                        // header is version 0, and receivers discard
-                        // version != 2 before examining anything else, so a
-                        // defaulted RTX packet is dropped on arrival and the
-                        // NACKed gap never repairs.
-                        version: 2,
-                        ssrc: ssrc_rtx,
-                        payload_type: pt_rtx,
-                        sequence_number: rtx_seq,
-                        timestamp: original_packet.header.timestamp,
-                        marker: original_packet.header.marker,
-                        ..Default::default()
-                    },
+                    header,
                     payload: rtx_payload.into(),
                 }
             } else {
@@ -243,6 +282,8 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for NackResponderInterceptor {
             && let Some(stream) = self.streams.get_mut(&rtp_packet.header.ssrc)
         {
             stream.send_buffer.add(rtp_packet.clone());
+            stream.retransmit_budget =
+                (stream.retransmit_budget + 1).min(stream.retransmit_budget_max);
         }
 
         self.write_queue.push_back(msg);
@@ -281,6 +322,10 @@ impl Interceptor for NackResponderInterceptor {
                     payload_type_rtx: info.payload_type_rtx,
                     rtx_sequence_number: 0,
                     last_retransmit: HashMap::new(),
+                    rid_extension_id: extension_id(info, RTP_STREAM_ID_URI),
+                    repaired_rid_extension_id: extension_id(info, REPAIRED_RTP_STREAM_ID_URI),
+                    retransmit_budget: usize::from(self.size),
+                    retransmit_budget_max: usize::from(self.size),
                 },
             );
         }

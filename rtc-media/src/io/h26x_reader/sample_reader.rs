@@ -4,7 +4,21 @@ use std::io::Read;
 
 use super::H26xReader;
 
+#[cfg(test)]
+#[path = "sample_reader_bound_test.rs"]
+mod sample_reader_bound_test;
+
 const ANNEXB_START_CODE: [u8; 4] = [0x00, 0x00, 0x00, 0x01];
+
+/// The most NAL units one access unit may hold.
+///
+/// A picture split into one slice per macroblock row is a few hundred slices at 4K; the bound
+/// leaves an order of magnitude above that. A stream whose slices never start a new picture
+/// (`first_mb_in_slice` never 0), or of non-VCL NAL units only, would otherwise be buffered whole.
+pub const MAX_ACCESS_UNIT_NALS: usize = 4096;
+
+/// The most bytes one access unit may hold, start codes excluded.
+pub const MAX_ACCESS_UNIT_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// One access unit read from an Annex B stream — the NAL units making up a single frame.
@@ -30,6 +44,8 @@ pub struct H26xSampleReader<R: Read> {
     pending: Vec<BytesMut>,
     /// Whether `pending` holds a coded slice.
     pending_has_vcl: bool,
+    /// The bytes of the NAL units in `pending`.
+    pending_bytes: usize,
 }
 
 impl<R: Read> H26xSampleReader<R> {
@@ -42,6 +58,7 @@ impl<R: Read> H26xSampleReader<R> {
             is_hevc,
             pending: vec![],
             pending_has_vcl: false,
+            pending_bytes: 0,
         }
     }
 
@@ -49,7 +66,9 @@ impl<R: Read> H26xSampleReader<R> {
     ///
     /// # Errors
     ///
-    /// Fails on an I/O error, or at end of stream.
+    /// Fails on an I/O error, or at end of stream. Fails with [`Error::ErrBufferFull`] when an
+    /// access unit would exceed [`MAX_ACCESS_UNIT_NALS`] NAL units or [`MAX_ACCESS_UNIT_BYTES`]
+    /// bytes; the partial access unit is dropped and the next call reads on from there.
     pub fn next_sample(&mut self) -> Result<H26xSample> {
         loop {
             let nal = match self.reader.next_nal() {
@@ -66,10 +85,20 @@ impl<R: Read> H26xSampleReader<R> {
             let vcl = is_vcl(self.is_hevc, data);
             if self.pending_has_vcl && starts_access_unit(self.is_hevc, data) {
                 let sample = self.take_access_unit();
+                self.pending_bytes = data.len();
                 self.pending.push(data.clone());
                 self.pending_has_vcl = vcl;
                 return Ok(sample);
             }
+            if self.pending.len() >= MAX_ACCESS_UNIT_NALS
+                || self.pending_bytes.saturating_add(data.len()) > MAX_ACCESS_UNIT_BYTES
+            {
+                self.pending.clear();
+                self.pending_has_vcl = false;
+                self.pending_bytes = 0;
+                return Err(Error::ErrBufferFull);
+            }
+            self.pending_bytes += data.len();
             self.pending.push(data.clone());
             self.pending_has_vcl |= vcl;
         }
@@ -78,6 +107,7 @@ impl<R: Read> H26xSampleReader<R> {
     fn take_access_unit(&mut self) -> H26xSample {
         let timed = self.pending_has_vcl;
         self.pending_has_vcl = false;
+        self.pending_bytes = 0;
         H26xSample {
             data: build_access_unit(&mut self.pending),
             timed,

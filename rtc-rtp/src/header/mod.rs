@@ -105,6 +105,11 @@ pub struct Header {
     pub extensions: Vec<Extension>,
     /// Padding bytes appended to the extension block so it ends on a 32-bit boundary.
     pub extensions_padding: usize,
+    /// How many padding octets follow the payload when `padding` is set, the count octet
+    /// included (RFC 3550 5.1). Filled in by [`Packet`](crate::packet::Packet) unmarshal so a
+    /// packet re-marshals with the padding it arrived with; 0 lets marshal pad to the next
+    /// 32-bit boundary, as it always did.
+    pub padding_size: u8,
 }
 
 impl Unmarshal for Header {
@@ -262,6 +267,7 @@ impl Unmarshal for Header {
             extension_profile,
             extensions,
             extensions_padding,
+            padding_size: 0,
         })
     }
 }

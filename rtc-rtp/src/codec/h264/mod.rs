@@ -8,6 +8,8 @@
 //! [RFC 6184]: https://datatracker.ietf.org/doc/html/rfc6184
 #[cfg(test)]
 mod h264_test;
+#[cfg(test)]
+mod packetization_mode_test;
 
 use crate::packetizer::{Depacketizer, Payloader};
 use shared::error::{Error, Result};
@@ -19,6 +21,9 @@ use bytes::{BufMut, Bytes, BytesMut};
 pub struct H264Payloader {
     sps_nalu: Option<Bytes>,
     pps_nalu: Option<Bytes>,
+    /// `packetization-mode=0` (RFC 6184 6.2): every NAL unit in a packet of its own, no STAP-A
+    /// and no FU-A.
+    single_nal_unit_mode: bool,
 }
 
 /// NAL type 24: STAP-A, which aggregates several small NAL units into one payload.
@@ -63,6 +68,38 @@ pub const OUTPUT_STAP_AHEADER: u8 = 0x78;
 pub static ANNEXB_NALUSTART_CODE: Bytes = Bytes::from_static(&[0x00, 0x00, 0x00, 0x01]);
 
 impl H264Payloader {
+    /// A payloader for the negotiated `packetization-mode` (RFC 6184 6.2).
+    ///
+    /// Mode 1 (non-interleaved) is the default: STAP-A for the parameter sets, FU-A for NAL units
+    /// over the MTU. Mode 0 (single NAL unit) sends every NAL unit in a packet of its own and
+    /// refuses one that does not fit the MTU, since a mode-0 receiver cannot reassemble
+    /// fragments. Mode 2 (interleaved) is not supported and is treated as mode 1.
+    pub fn with_packetization_mode(packetization_mode: u8) -> Self {
+        Self {
+            single_nal_unit_mode: packetization_mode == 0,
+            ..Default::default()
+        }
+    }
+
+    /// Mode 0: each NAL unit as it is, or an error for one over the MTU.
+    fn emit_single_nal_unit(nalu: &Bytes, mtu: usize, payloads: &mut Vec<Bytes>) -> Result<()> {
+        if nalu.is_empty() {
+            return Ok(());
+        }
+        let nalu_type = nalu[0] & NALU_TYPE_BITMASK;
+        if nalu_type == AUD_NALU_TYPE || nalu_type == FILLER_NALU_TYPE {
+            return Ok(());
+        }
+        if nalu.len() > mtu {
+            return Err(Error::Other(format!(
+                "H.264 packetization-mode=0: a {}-byte NAL unit does not fit the {mtu}-byte MTU",
+                nalu.len()
+            )));
+        }
+        payloads.push(nalu.clone());
+        Ok(())
+    }
+
     fn next_ind(nalu: &Bytes, start: usize) -> (isize, isize) {
         let mut zero_count = 0;
 
@@ -259,11 +296,11 @@ impl Payloader for H264Payloader {
             return Ok(vec![]);
         }
 
-        let mut payloads = vec![];
-
+        // The NAL units of the access unit, split at their Annex B start codes.
+        let mut nalus = vec![];
         let (mut next_ind_start, mut next_ind_len) = H264Payloader::next_ind(payload, 0);
         if next_ind_start == -1 {
-            self.emit(payload, mtu, &mut payloads);
+            nalus.push(payload.clone());
         } else {
             while next_ind_start != -1 {
                 let prev_start = (next_ind_start + next_ind_len) as usize;
@@ -271,15 +308,20 @@ impl Payloader for H264Payloader {
                 next_ind_start = next_ind_start2;
                 next_ind_len = next_ind_len2;
                 if next_ind_start != -1 {
-                    self.emit(
-                        &payload.slice(prev_start..next_ind_start as usize),
-                        mtu,
-                        &mut payloads,
-                    );
+                    nalus.push(payload.slice(prev_start..next_ind_start as usize));
                 } else {
-                    // Emit until end of stream, no end indicator found
-                    self.emit(&payload.slice(prev_start..), mtu, &mut payloads);
+                    // Until end of stream, no end indicator found
+                    nalus.push(payload.slice(prev_start..));
                 }
+            }
+        }
+
+        let mut payloads = vec![];
+        for nalu in &nalus {
+            if self.single_nal_unit_mode {
+                Self::emit_single_nal_unit(nalu, mtu, &mut payloads)?;
+            } else {
+                self.emit(nalu, mtu, &mut payloads);
             }
         }
 

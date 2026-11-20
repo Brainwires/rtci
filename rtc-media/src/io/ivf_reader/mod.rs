@@ -4,6 +4,8 @@
 //! and frame size, then a 12-byte header before each frame giving its length and timestamp.
 //! [`IVFReader`](crate::io::ivf_reader::IVFReader) yields one frame at a time, which is the unit an RTP payloader wants.
 #[cfg(test)]
+mod ivf_reader_bound_test;
+#[cfg(test)]
 mod ivf_reader_test;
 
 use std::io::Read;
@@ -95,9 +97,16 @@ impl<R: Read> IVFReader<R> {
             timestamp,
         };
 
-        let mut payload = BytesMut::with_capacity(header.frame_size as usize);
-        payload.resize(header.frame_size as usize, 0);
-        self.reader.read_exact(&mut payload)?;
+        // Read what is there rather than allocating the declared size first: a header can
+        // claim up to 4 GiB, and the buffer should grow only with bytes that actually arrive.
+        let mut frame = Vec::new();
+        (&mut self.reader)
+            .take(u64::from(header.frame_size))
+            .read_to_end(&mut frame)?;
+        if frame.len() != header.frame_size as usize {
+            return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into());
+        }
+        let payload = BytesMut::from(frame.as_slice());
 
         self.bytes_read += IVF_FRAME_HEADER_SIZE + header.frame_size as usize;
 

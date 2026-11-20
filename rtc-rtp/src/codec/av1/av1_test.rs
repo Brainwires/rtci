@@ -319,19 +319,42 @@ fn test_split_two_obus_into_two_packet_force_split_obu_header() -> Result<()> {
     Ok(())
 }
 
+/// The first frame header byte of a shown key frame: show_existing_frame 0, frame_type
+/// KEY_FRAME (0), show_frame 1.
+const SHOWN_KEY_FRAME: u8 = 0x10;
+/// The same for a shown inter frame (frame_type 1).
+const SHOWN_INTER_FRAME: u8 = 0x30;
+
 #[test]
 fn test_sets_n_bit_at_the_first_packet_of_a_key_frame_with_sequence_header() -> Result<()> {
     let frame = build_av1_frame(&vec![
         Av1Obu::new(OBU_TYPE_SEQUENCE_HEADER).with_payload(vec![1, 2, 3, 4, 5, 6, 7]),
+        Av1Obu::new(OBU_TYPE_FRAME).with_payload(vec![SHOWN_KEY_FRAME, 2, 3]),
     ]);
     let mut payloader = Av1Payloader {};
     let result = payloader.payload(6, &frame)?;
-    assert_eq!(result.len(), 2);
+    assert!(result.len() >= 2);
     assert_eq!(
         result[0][0] & NEW_CODED_VIDEO_SEQUENCE_BIT,
         NEW_CODED_VIDEO_SEQUENCE_BIT
     );
-    assert_eq!(result[1][0] & NEW_CODED_VIDEO_SEQUENCE_BIT, 0);
+    for packet in &result[1..] {
+        assert_eq!(packet[0] & NEW_CODED_VIDEO_SEQUENCE_BIT, 0);
+    }
+    Ok(())
+}
+
+/// A sequence header with no frame header after it does not start a coded video sequence
+/// (AV1 spec 7.5 needs the frame header to be a shown key frame).
+#[test]
+fn test_doesnt_set_n_bit_for_a_sequence_header_alone() -> Result<()> {
+    let frame = build_av1_frame(&vec![
+        Av1Obu::new(OBU_TYPE_SEQUENCE_HEADER).with_payload(vec![1, 2, 3, 4, 5, 6, 7]),
+    ]);
+    let mut payloader = Av1Payloader {};
+    for packet in payloader.payload(6, &frame)? {
+        assert_eq!(packet[0] & NEW_CODED_VIDEO_SEQUENCE_BIT, 0);
+    }
     Ok(())
 }
 
@@ -350,7 +373,31 @@ fn test_doesnt_set_n_bit_at_the_packets_of_a_key_frame_without_sequence_header()
 
 #[test]
 fn test_doesnt_set_n_bit_at_the_packets_of_a_delta_frame() -> Result<()> {
-    // TODO: implement delta frame detection.
+    // A sequence header repeated on an inter frame starts nothing.
+    let frame = build_av1_frame(&vec![
+        Av1Obu::new(OBU_TYPE_SEQUENCE_HEADER).with_payload(vec![1, 2, 3, 4, 5, 6, 7]),
+        Av1Obu::new(OBU_TYPE_FRAME).with_payload(vec![SHOWN_INTER_FRAME, 2, 3]),
+    ]);
+    let mut payloader = Av1Payloader {};
+    for packet in payloader.payload(6, &frame)? {
+        assert_eq!(packet[0] & NEW_CODED_VIDEO_SEQUENCE_BIT, 0);
+    }
+    Ok(())
+}
+
+#[test]
+fn test_doesnt_set_n_bit_for_a_key_frame_of_a_higher_temporal_layer() -> Result<()> {
+    // Extension header temporal_id 1 (bits 7-5).
+    let frame = build_av1_frame(&vec![
+        Av1Obu::new(OBU_TYPE_SEQUENCE_HEADER).with_payload(vec![1, 2, 3, 4, 5, 6, 7]),
+        Av1Obu::new(OBU_TYPE_FRAME)
+            .with_extension(0x20)
+            .with_payload(vec![SHOWN_KEY_FRAME, 2, 3]),
+    ]);
+    let mut payloader = Av1Payloader {};
+    for packet in payloader.payload(6, &frame)? {
+        assert_eq!(packet[0] & NEW_CODED_VIDEO_SEQUENCE_BIT, 0);
+    }
     Ok(())
 }
 

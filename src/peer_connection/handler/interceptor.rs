@@ -1,10 +1,11 @@
 use crate::media_stream::track::MediaStreamTrackId;
+use crate::media_stream::track_state::MediaStreamTrackState;
 use crate::peer_connection::configuration::media_engine::MediaEngine;
 use crate::peer_connection::event::RTCPeerConnectionEvent;
 use crate::peer_connection::event::track_event::{RTCTrackEvent, RTCTrackEventInit};
 use crate::peer_connection::event::{RTCEventInternal, TaggedRTCEventInternal};
 use crate::peer_connection::handler::endpoint::{
-    SsrcOwners, is_repair_mime_type, resolve_rtx_primary,
+    SsrcOwners, deencapsulate_rtx, is_repair_mime_type, resolve_rtx_primary,
 };
 use crate::peer_connection::message::internal::{
     RTCMessageInternal, RTPMessage, TaggedRTCMessageInternal,
@@ -21,9 +22,19 @@ use crate::rtp_transceiver::{
 use crate::statistics::accumulator::RTCStatsAccumulator;
 use interceptor::{Attribute, Interceptor, Packet, TaggedPacket};
 use log::{debug, trace};
+use rtcp::goodbye::Goodbye;
+use rtcp::header::{FORMAT_CCFB, PacketType};
+use rtcp::payload_feedbacks::full_intra_request::FullIntraRequest;
+use rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
+use rtcp::receiver_report::ReceiverReport;
+use rtcp::sender_report::SenderReport;
+use rtcp::source_description::{
+    SdesType, SourceDescription, SourceDescriptionChunk, SourceDescriptionItem,
+};
+use rtcp::transport_feedbacks::transport_layer_nack::TransportLayerNack;
 use shared::error::{Error, Result};
 use shared::marshal::MarshalSize;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 /// How soon after a simulcast layer (a `mid`/`rid`) was bound to an SSRC it may move to another.
@@ -41,6 +52,11 @@ pub(crate) struct InterceptorHandlerContext {
     pub(crate) read_outs: VecDeque<TaggedRTCMessageInternal>,
     pub(crate) write_outs: VecDeque<TaggedRTCMessageInternal>,
     pub(crate) event_outs: VecDeque<TaggedRTCEventInternal>,
+    /// The CNAME for reports no local sender owns (a receiver report's own SSRC), chosen once
+    /// per connection so every compound packet names the same endpoint.
+    connection_cname: Option<String>,
+    /// Receiver SSRCs the remote has said BYE for, until every SSRC of their track has.
+    goodbye_ssrcs: HashSet<SSRC>,
 }
 
 fn receiver_declares_ssrc(transceiver: &RTCRtpTransceiverInternal, ssrc: SSRC) -> bool {
@@ -144,10 +160,9 @@ impl<'a> InterceptorHandler<'a> {
     /// A no-op for every packet after the first of a stream, which is the overwhelming majority:
     /// the declared-SSRC path finds a codec already set and returns immediately.
     fn ensure_remote_stream_bound(&mut self, now: Instant, rtp_header: &rtp::Header) {
-        // An RTX packet identifies the stream it repairs, not one of its own. Resolving it here
-        // rather than de-encapsulating first keeps the packet untouched for the chain — the
-        // endpoint handler still de-encapsulates on its way to the application — while letting a
-        // stream whose first arrival happens to be a retransmission establish anyway.
+        // An RTX packet identifies the stream it repairs, not one of its own. It is resolved back
+        // to that stream here, so a stream whose first arrival happens to be a retransmission
+        // establishes anyway; `handle_read` de-encapsulates it right after, before the chain.
         let known = self.ctx.ssrc_owners.cached(
             rtp_header.ssrc,
             self.rtp_transceivers,
@@ -176,6 +191,123 @@ impl<'a> InterceptorHandler<'a> {
             return;
         }
         self.bind_by_rid(now, ssrc, payload_type, rtp_header);
+    }
+
+    /// RFC 3550 6.6: a BYE says a source has left. Once every SSRC of a remote track has said
+    /// so, the track ends and `OnClose` fires for it.
+    fn process_goodbyes(&mut self, now: Instant, rtcp_packets: &[Box<dyn rtcp::Packet>]) {
+        for packet in rtcp_packets {
+            let Some(goodbye) = packet.as_any().downcast_ref::<Goodbye>() else {
+                continue;
+            };
+            for &source in &goodbye.sources {
+                let Some(index) = self.rtp_transceivers.iter().position(|transceiver| {
+                    transceiver
+                        .receiver()
+                        .as_ref()
+                        .is_some_and(|receiver| receiver.track().ssrcs().any(|ssrc| ssrc == source))
+                }) else {
+                    continue;
+                };
+                self.ctx.goodbye_ssrcs.insert(source);
+
+                let Some(receiver) = self.rtp_transceivers[index].receiver_mut() else {
+                    continue;
+                };
+                let track = receiver.track_mut();
+                let all_left = track
+                    .ssrcs()
+                    .all(|ssrc| self.ctx.goodbye_ssrcs.contains(&ssrc));
+                if !all_left || track.ready_state() == MediaStreamTrackState::Ended {
+                    continue;
+                }
+                track.stop();
+                let track_id = track.track_id().clone();
+                for ssrc in track.ssrcs() {
+                    self.ctx.goodbye_ssrcs.remove(&ssrc);
+                }
+                self.ctx.event_outs.push_back(TaggedRTCEventInternal {
+                    now,
+                    event: RTCEventInternal::RTCPeerConnectionEvent(
+                        RTCPeerConnectionEvent::OnTrack(RTCTrackEvent::OnClose(track_id)),
+                    ),
+                });
+            }
+        }
+    }
+
+    /// RFC 3550 6.1: every compound RTCP packet carries an SDES CNAME after its leading SR or
+    /// RR. The report interceptors emit bare reports, so the CNAME is added here, on the way to
+    /// the wire: the CNAME the SDP's `a=ssrc` lines give the sender that owns the reporting SSRC,
+    /// or the connection's own CNAME for a receiver report.
+    fn add_sdes_cname(&mut self, packet: &mut TaggedPacket) {
+        let Packet::Rtcp(rtcp_packets) = &mut packet.message.packet else {
+            return;
+        };
+        let Some(first) = rtcp_packets.first() else {
+            return;
+        };
+        let reporter = if let Some(sr) = first.as_any().downcast_ref::<SenderReport>() {
+            sr.ssrc
+        } else if let Some(rr) = first.as_any().downcast_ref::<ReceiverReport>() {
+            rr.ssrc
+        } else {
+            return;
+        };
+        if rtcp_packets
+            .iter()
+            .any(|packet| packet.as_any().is::<SourceDescription>())
+        {
+            return;
+        }
+
+        let sender_cname = self.rtp_transceivers.iter().find_map(|transceiver| {
+            let track = transceiver.sender().as_ref()?.track();
+            track
+                .ssrcs()
+                .any(|ssrc| ssrc == reporter)
+                .then(|| track.stream_id().to_string())
+        });
+        let cname = sender_cname.unwrap_or_else(|| {
+            self.ctx
+                .connection_cname
+                .get_or_insert_with(|| format!("{:016x}", rand::random::<u64>()))
+                .clone()
+        });
+
+        rtcp_packets.insert(
+            1,
+            Box::new(SourceDescription {
+                chunks: vec![SourceDescriptionChunk {
+                    source: reporter,
+                    items: vec![SourceDescriptionItem {
+                        sdes_type: SdesType::SdesCname,
+                        text: cname.into(),
+                    }],
+                }],
+            }),
+        );
+    }
+
+    /// Rewrite an RTX packet into the original packet it carries (RFC 4588 4), when it is one.
+    fn deencapsulate_if_rtx(&mut self, rtp_packet: &mut rtp::Packet) {
+        let is_primary = self
+            .ctx
+            .ssrc_owners
+            .cached(
+                rtp_packet.header.ssrc,
+                self.rtp_transceivers,
+                receiver_declares_ssrc,
+            )
+            .is_some();
+        if is_primary {
+            return;
+        }
+        if let Some((primary_ssrc, primary_payload_type)) =
+            self.rtx_primary_for(rtp_packet.header.ssrc, rtp_packet.header.payload_type)
+        {
+            deencapsulate_rtx(rtp_packet, primary_ssrc, primary_payload_type);
+        }
     }
 
     /// RTX SSRC of one of this endpoint's receive codings (declared via
@@ -825,9 +957,9 @@ impl<'a>
 
     fn handle_read(&mut self, msg: TaggedRTCMessageInternal) -> Result<()> {
         if self.ctx.is_dtls_handshake_complete
-            && let RTCMessageInternal::Rtp(RTPMessage::Packet(packet)) = msg.message
+            && let RTCMessageInternal::Rtp(RTPMessage::Packet(mut packet)) = msg.message
         {
-            match &packet {
+            match &mut packet {
                 Packet::Rtp(rtp_packet) => {
                     // Establish the stream *before* the chain is handed the packet. The codec can only
                     // be resolved from an arriving payload type, so this is the first moment it can be
@@ -845,6 +977,18 @@ impl<'a>
                         .on_rtx_packet_received_if_rtx(ssrc, payload_bytes);
                     self.stats
                         .on_fec_packet_received_if_fec(ssrc, payload_bytes);
+
+                    // RFC 4588 5: a retransmission is the original packet again, and the
+                    // receiver's own machinery has to see it as that. De-encapsulated here, before
+                    // the chain, the NACK generator stops asking for a packet RTX repaired, the
+                    // receiver report counts it as received, and a jitter buffer can slot it in.
+                    // De-encapsulated after the chain (in the endpoint handler, as it was), all
+                    // three only ever saw a packet on the RTX SSRC.
+                    //
+                    // A padding-only RTX packet (a bandwidth probe, no OSN) carries nothing to
+                    // recover and goes on unchanged: its transport-wide sequence number still has
+                    // to reach the TWCC recorder, or the probe reads as lost.
+                    self.deencapsulate_if_rtx(rtp_packet);
                 }
                 Packet::Rtcp(rtcp_packets) => {
                     // Counted here, before the chain, for the same reason as the RTP accounting
@@ -852,6 +996,7 @@ impl<'a>
                     // `poll_read` never sees most incoming SR/RR/NACK/PLI/FIR/CCFB. This is the
                     // read-side counterpart of `process_write_rtcp_for_stats` in `poll_write`.
                     self.process_read_rtcp_for_stats(rtcp_packets, msg.now);
+                    self.process_goodbyes(msg.now, rtcp_packets);
                 }
                 _ => {}
             }
@@ -923,7 +1068,8 @@ impl<'a>
 
     fn poll_write(&mut self) -> Option<Self::Wout> {
         if self.ctx.is_dtls_handshake_complete {
-            while let Some(packet) = self.interceptor.poll_write() {
+            while let Some(mut packet) = self.interceptor.poll_write() {
+                self.add_sdes_cname(&mut packet);
                 // Process outgoing packets for stats
                 match &packet.message.packet {
                     Packet::Rtcp(rtcp_packets) => {
@@ -995,6 +1141,18 @@ impl<'a>
         self.interceptor.close()
     }
 }
+
+#[cfg(test)]
+#[path = "interceptor_rtx_test.rs"]
+mod interceptor_rtx_test;
+
+#[cfg(test)]
+#[path = "interceptor_sdes_test.rs"]
+mod interceptor_sdes_test;
+
+#[cfg(test)]
+#[path = "interceptor_goodbye_test.rs"]
+mod interceptor_goodbye_test;
 
 #[cfg(test)]
 mod boundary_tests {

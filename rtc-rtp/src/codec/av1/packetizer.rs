@@ -4,7 +4,10 @@
 use std::cmp::min;
 
 use crate::codec::av1::leb128::leb128_size;
-use crate::codec::av1::obu::{OBU_TYPE_SEQUENCE_HEADER, Obu, obu_type};
+use crate::codec::av1::obu::{
+    OBU_TYPE_FRAME, OBU_TYPE_FRAME_HEADER, OBU_TYPE_SEQUENCE_HEADER, Obu, obu_has_extension,
+    obu_type,
+};
 
 /// When there are 3 or less OBU (fragments) in a packet, size of the last one
 /// can be omitted.
@@ -203,27 +206,60 @@ pub fn get_aggregation_header(obus: &[Obu], packets: &[PacketMetadata], packet_i
         header |= (packet.num_obu_elements as u8) << 4;
     }
 
-    // Set N flag: beginning of a new coded video sequence.
-    // Encoder may produce key frame without a sequence header, thus double check
-    // incoming frame includes the sequence header. Since Temporal delimiter is
-    // already filtered out, sequence header should be the first obu when present.
-    //
-    // TODO: This is technically incorrect, since sequence headers may be present in delta frames.
-    //      However, unlike the Chromium implementation: https://chromium.googlesource.com/external/webrtc/+/4e513346ec56c829b3a6010664998469fc237b35/modules/rtp_rtcp/source/rtp_packetizer_av1.cc#345,
-    //      we do not have direct access to the whether this is a keyframe or a delta frame.
-    //      Thus for now we assume that every frame that starts with a sequence header is a keyframe,
-    //      which is not always true. This is the best we can do for now until implementing
-    //      a proper frame type detection, perhaps by parsing the FRAME_HEADER OBUs according to
-    //      https://aomediacodec.github.io/av1-spec/#ordering-of-obus:
-    //              A new coded video sequence is defined to start at each temporal unit which
-    //              satisfies both of the following conditions:
-    //                  - A sequence header OBU appears before the first frame header.
-    //                  - The first frame header has frame_type equal to KEY_FRAME, show_frame equal
-    //                    to 1, show_existing_frame equal to 0, and temporal_id equal to 0.
-    if packet_index == 0 && obu_type(obus.first().unwrap().header) == OBU_TYPE_SEQUENCE_HEADER {
+    // Set N flag: beginning of a new coded video sequence (AV1 RTP 4.4). The AV1 spec (7.5)
+    // defines one to start at a temporal unit where a sequence header OBU comes before the first
+    // frame header, and that frame header is a shown key frame (`frame_type == KEY_FRAME`,
+    // `show_frame == 1`, `show_existing_frame == 0`) of temporal layer 0. A sequence header alone
+    // used to be taken for this, so a sequence header repeated on a delta frame set N.
+    if packet_index == 0 && starts_coded_video_sequence(obus) {
         header |= 1 << 3;
     }
     header
+}
+
+/// Whether the temporal unit in `obus` starts a new coded video sequence (AV1 spec 7.5).
+///
+/// Reads only the leading bits of the sequence header (`reduced_still_picture_header`) and of
+/// the first frame header (`show_existing_frame`, `frame_type`, `show_frame`), which come before
+/// anything that needs the sequence header's other fields to parse.
+fn starts_coded_video_sequence(obus: &[Obu]) -> bool {
+    let mut reduced_still_picture_header = None;
+    for obu in obus {
+        match obu_type(obu.header) {
+            OBU_TYPE_SEQUENCE_HEADER => {
+                // seq_profile f(3), still_picture f(1), reduced_still_picture_header f(1).
+                reduced_still_picture_header = obu.payload.first().map(|b| b & 0x08 != 0);
+            }
+            OBU_TYPE_FRAME_HEADER | OBU_TYPE_FRAME => {
+                let Some(reduced) = reduced_still_picture_header else {
+                    // No sequence header before the first frame header.
+                    return false;
+                };
+                let temporal_id = if obu_has_extension(obu.header) {
+                    obu.extension_header >> 5
+                } else {
+                    0
+                };
+                if temporal_id != 0 {
+                    return false;
+                }
+                if reduced {
+                    // A reduced still picture header has no such fields: every frame is a
+                    // shown key frame.
+                    return true;
+                }
+                let Some(&first) = obu.payload.first() else {
+                    return false;
+                };
+                let show_existing_frame = first & 0x80 != 0;
+                let frame_type = (first >> 5) & 0x3;
+                let show_frame = first & 0x10 != 0;
+                return !show_existing_frame && frame_type == 0 && show_frame;
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Returns the number of additional bytes needed to store the previous OBU

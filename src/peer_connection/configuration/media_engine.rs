@@ -834,7 +834,9 @@ impl MediaEngine {
             RtpCodecKind::Audio => &self.audio_codecs,
             RtpCodecKind::Video => &self.video_codecs,
             RtpCodecKind::Application => &self.application_codecs,
-            RtpCodecKind::Unspecified => unreachable!(),
+            // A media section of a kind this engine does not know has no codec to match; its
+            // callers already skip such sections, so this is an error, not a panic.
+            RtpCodecKind::Unspecified => return Err(Error::ErrCodecNotFound),
         };
 
         let remote_fmtp = fmtp::parse(
@@ -1219,17 +1221,22 @@ impl MediaEngine {
         kind: RtpCodecKind,
         direction: RTCRtpTransceiverDirection,
     ) -> bool {
-        for codec in &self.get_rtp_parameters_by_kind(kind, direction).codecs {
-            if UniCase::new(codec.rtp_codec.mime_type.as_str())
-                .contains(*UniCase::new(MIME_TYPE_FLEX_FEC))
-            {
-                return true;
-            }
-        }
-
-        false
+        // Only the FlexFEC this engine implements (draft-03), matched exactly: RFC 8627's
+        // `video/flexfec` is another wire format.
+        self.get_rtp_parameters_by_kind(kind, direction)
+            .codecs
+            .iter()
+            .any(|codec| {
+                crate::rtp_transceiver::rtp_sender::rtp_codec::is_flexfec03_mime_type(
+                    &codec.rtp_codec.mime_type,
+                )
+            })
     }
 }
+
+#[cfg(test)]
+#[path = "media_engine_unspecified_test.rs"]
+mod media_engine_unspecified_test;
 
 #[cfg(test)]
 mod default_fec_codec_test {

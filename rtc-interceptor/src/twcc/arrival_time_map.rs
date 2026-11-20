@@ -96,6 +96,11 @@ impl PacketArrivalTimeMap {
     }
 
     fn set_not_received(&mut self, start_inclusive: i64, end_exclusive: i64) {
+        // A gap covering the whole ring is one fill rather than a walk of up to 32,767 slots.
+        if end_exclusive - start_inclusive >= self.arrival_times.len() as i64 {
+            self.arrival_times.fill(-1);
+            return;
+        }
         for sn in start_inclusive..end_exclusive {
             let idx = self.index(sn);
             self.arrival_times[idx] = -1;

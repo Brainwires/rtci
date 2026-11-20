@@ -1,5 +1,7 @@
 #[cfg(test)]
 mod packet_test;
+#[cfg(test)]
+mod padding_size_test;
 
 use crate::header::*;
 use shared::{
@@ -43,13 +45,16 @@ impl Unmarshal for Packet {
         Self: Sized,
         B: Buf,
     {
-        let header = Header::unmarshal(raw_packet)?;
+        let mut header = Header::unmarshal(raw_packet)?;
         let payload_len = raw_packet.remaining();
         let payload = raw_packet.copy_to_bytes(payload_len);
         if header.padding {
             if payload_len > 0 {
                 let padding_len = payload[payload_len - 1] as usize;
                 if padding_len <= payload_len {
+                    // Kept, so the packet re-marshals with the padding it arrived with
+                    // (RFC 3550 5.1); a count of 0 is not valid padding and is not kept.
+                    header.padding_size = padding_len as u8;
                     Ok(Packet {
                         header,
                         payload: payload.slice(..payload_len - padding_len),
@@ -70,13 +75,7 @@ impl MarshalSize for Packet {
     /// MarshalSize returns the size of the packet once marshaled.
     fn marshal_size(&self) -> usize {
         let payload_len = self.payload.len();
-        let padding_len = if self.header.padding {
-            let padding_len = get_padding(payload_len);
-            if padding_len == 0 { 4 } else { padding_len }
-        } else {
-            0
-        };
-        self.header.marshal_size() + payload_len + padding_len
+        self.header.marshal_size() + payload_len + self.padding_len()
     }
 }
 
@@ -91,10 +90,7 @@ impl Marshal for Packet {
         buf = &mut buf[n..];
         buf.put(&*self.payload);
         let padding_len = if self.header.padding {
-            let mut padding_len = get_padding(self.payload.len());
-            if padding_len == 0 {
-                padding_len = 4;
-            }
+            let padding_len = self.padding_len();
             for i in 0..padding_len {
                 if i != padding_len - 1 {
                     buf.put_u8(0);
@@ -108,6 +104,23 @@ impl Marshal for Packet {
         };
 
         Ok(n + self.payload.len() + padding_len)
+    }
+}
+
+impl Packet {
+    /// The padding octets marshal appends: the header's `padding_size` when set, else enough to
+    /// reach the next 32-bit boundary (at least one block of 4).
+    fn padding_len(&self) -> usize {
+        if !self.header.padding {
+            return 0;
+        }
+        if self.header.padding_size > 0 {
+            return usize::from(self.header.padding_size);
+        }
+        match get_padding(self.payload.len()) {
+            0 => 4,
+            padding_len => padding_len,
+        }
     }
 }
 

@@ -7,6 +7,8 @@
 //! Status is run-length or bit-vector encoded ([`StatusChunkTypeTcc`](crate::transport_feedbacks::transport_layer_cc::StatusChunkTypeTcc)) so a report covering
 //! hundreds of packets stays small.
 #[cfg(test)]
+mod delta_bounds_test;
+#[cfg(test)]
 mod transport_layer_cc_test;
 
 use crate::{header::*, packet::*, util::*};
@@ -620,6 +622,10 @@ impl Unmarshal for TransportLayerCc {
 
         let mut packet_status_pos = HEADER_LENGTH + PACKET_CHUNK_OFFSET;
         let mut processed_packet_num = 0u16;
+        // The receive-delta bytes the chunks read so far call for: one per small delta, two per
+        // large one. Checked against the packet before any delta is queued, so a few chunk bytes
+        // cannot claim tens of thousands of deltas the packet does not carry.
+        let mut delta_bytes_needed = 0usize;
         while processed_packet_num < packet_status_count {
             if packet_status_pos + PACKET_STATUS_CHUNK_LENGTH >= total_length {
                 return Err(Error::PacketTooShort);
@@ -640,6 +646,20 @@ impl Unmarshal for TransportLayerCc {
                         || packet_status.packet_status_symbol
                             == SymbolTypeTcc::PacketReceivedLargeDelta
                     {
+                        let delta_size = if packet_status.packet_status_symbol
+                            == SymbolTypeTcc::PacketReceivedLargeDelta
+                        {
+                            2
+                        } else {
+                            1
+                        };
+                        delta_bytes_needed += packet_number_to_process as usize * delta_size;
+                        if packet_status_pos + PACKET_STATUS_CHUNK_LENGTH + delta_bytes_needed
+                            > total_length
+                        {
+                            return Err(Error::PacketTooShort);
+                        }
+
                         let mut j = 0u16;
 
                         while j < packet_number_to_process {
@@ -660,6 +680,25 @@ impl Unmarshal for TransportLayerCc {
 
                 StatusChunkTypeTcc::StatusVectorChunk => {
                     let packet_status = StatusVectorChunk::unmarshal(&mut chunk_reader)?;
+
+                    delta_bytes_needed += packet_status
+                        .symbol_list
+                        .iter()
+                        .map(|sym| match sym {
+                            SymbolTypeTcc::PacketReceivedLargeDelta
+                                if packet_status.symbol_size == SymbolSizeTypeTcc::TwoBit =>
+                            {
+                                2
+                            }
+                            SymbolTypeTcc::PacketReceivedSmallDelta => 1,
+                            _ => 0,
+                        })
+                        .sum::<usize>();
+                    if packet_status_pos + PACKET_STATUS_CHUNK_LENGTH + delta_bytes_needed
+                        > total_length
+                    {
+                        return Err(Error::PacketTooShort);
+                    }
 
                     match packet_status.symbol_size {
                         SymbolSizeTypeTcc::OneBit => {

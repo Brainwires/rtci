@@ -9,6 +9,8 @@
 //! input rate; Opus itself always decodes at 48 kHz.
 #[cfg(test)]
 mod ogg_reader_test;
+#[cfg(test)]
+mod opus_tags_bound_test;
 
 use std::collections::VecDeque;
 use std::io::{Cursor, Read};
@@ -293,7 +295,10 @@ pub fn parse_opus_tags(payload: &[u8]) -> Result<OpusTags> {
     ]) as usize;
 
     let mut pos = vendor_end + U32_SIZE;
-    let mut user_comments = Vec::with_capacity(comment_count);
+    // Each comment takes at least its 4-byte length, so the payload bounds how many there can
+    // be; the declared count alone (up to 2^32) must not size the allocation.
+    let mut user_comments =
+        Vec::with_capacity(comment_count.min(payload.len().saturating_sub(pos) / U32_SIZE));
 
     for _ in 0..comment_count {
         if pos + U32_SIZE > payload.len() {
