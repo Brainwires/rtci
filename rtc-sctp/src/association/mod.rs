@@ -66,6 +66,8 @@ pub(crate) mod timer;
 
 #[cfg(test)]
 mod association_test;
+#[cfg(any(fuzzing, feature = "bench"))]
+pub(crate) mod recovery_bench;
 
 /// Reasons why an association might be lost
 #[derive(Debug, Error, Clone, PartialEq)]

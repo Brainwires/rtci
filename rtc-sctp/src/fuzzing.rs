@@ -361,3 +361,10 @@ pub fn endpoint_handle_datagrams(mut data: &[u8], start: std::time::Instant) {
         }
     }
 }
+
+/// Times `count` one-chunk SCTP recovery flushes over a window of `count` outstanding
+/// messages (T3-rtx retransmissions, or fast retransmissions with `fast`); returns the elapsed
+/// nanoseconds. For the `sctp_recovery_bench` example.
+pub fn bench_recovery_flushes(count: u32, fast: bool) -> Result<u128> {
+    crate::association::recovery_bench::recovery_flushes(count, fast)
+}

@@ -236,60 +236,8 @@ fn t2_backoff_does_not_compound_simultaneous_t3_expirations() -> Result<()> {
     Ok(())
 }
 
-// Run this unchanged against the PR head and its replacement in release mode.
-// Only recovery flushes are timed; setup and the single T3 marking pass are
-// excluded. Cumulative progress is applied directly to isolate retry selection
-// from SACK parsing/congestion control. This is not an end-to-end throughput test.
-#[test]
-#[ignore = "manual recovery CPU/scaling comparison"]
-fn benchmark_recovery_flushes() -> Result<()> {
-    for count in [128, 1024, 4096] {
-        for fast in [false, true] {
-            let mut elapsed = 0;
-            let mut lookups = 0;
-            for track_lookups in [false, true] {
-                let now = Instant::now();
-                let mut a = recovery_window(count, now)?;
-                let at = now + Duration::from_secs(1);
-                if !fast {
-                    a.handle_timeout(at);
-                }
-                a.cwnd = a.mtu;
-                a.inflight_queue.track_lookups = track_lookups;
-                a.inflight_queue.lookups.set(0);
-                let started = Instant::now();
-                for _ in 0..count {
-                    let tsn = a.cumulative_tsn_ack_point.wrapping_add(1);
-                    if fast {
-                        a.inflight_queue.get_mut(tsn).unwrap().miss_indicator = 3;
-                        if let Some(next) = a.inflight_queue.get_mut(tsn + 1) {
-                            next.miss_indicator = 3;
-                        }
-                        a.will_retransmit_fast = true;
-                    }
-                    let packets = if fast {
-                        a.gather_outbound_fast_retransmission_packets(vec![], at)
-                    } else {
-                        a.gather_data_packets_to_retransmit(vec![], at)
-                    };
-                    assert_eq!(1, data_chunks(&packets));
-                    a.inflight_queue.pop(tsn).unwrap();
-                    a.cumulative_tsn_ack_point = tsn;
-                }
-                if track_lookups {
-                    lookups = a.inflight_queue.lookups.get();
-                } else {
-                    elapsed = started.elapsed().as_nanos();
-                }
-                assert!(a.inflight_queue.is_empty());
-            }
-            println!(
-                "recovery-bench fast={fast} window={count} elapsed_ns={elapsed} lookups={lookups}"
-            );
-        }
-    }
-    Ok(())
-}
+// The recovery-flush timing comparison that lived here is the `sctp_recovery_bench`
+// example (`association::recovery_bench`), so no test is ignored.
 
 #[test]
 fn public_rtt_reports_measurements_independently_of_backoff() {
