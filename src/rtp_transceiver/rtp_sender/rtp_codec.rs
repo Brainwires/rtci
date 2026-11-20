@@ -94,7 +94,13 @@ impl RTCRtpCodec {
     pub fn payloader(&self) -> Result<Box<dyn rtp::packetizer::Payloader>> {
         let mime_type = self.mime_type.to_lowercase();
         if mime_type == MIME_TYPE_H264.to_lowercase() {
-            Ok(Box::<rtp::codec::h264::H264Payloader>::default())
+            // RFC 6184 6.2: the negotiated packetization mode decides whether STAP-A and FU-A
+            // may be sent at all; an absent parameter means mode 0.
+            Ok(Box::new(
+                rtp::codec::h264::H264Payloader::with_packetization_mode(h264_packetization_mode(
+                    &self.sdp_fmtp_line,
+                )),
+            ))
         } else if mime_type == MIME_TYPE_HEVC.to_lowercase() {
             Ok(Box::<rtp::codec::h265::HevcPayloader>::default())
         } else if mime_type == MIME_TYPE_VP8.to_lowercase() {
@@ -119,6 +125,16 @@ impl RTCRtpCodec {
             Err(Error::ErrNoPayloaderForCodec)
         }
     }
+}
+
+/// The `packetization-mode` an H.264 fmtp line names, 0 when it names none (RFC 6184 8.1).
+pub(crate) fn h264_packetization_mode(sdp_fmtp_line: &str) -> u8 {
+    sdp_fmtp_line
+        .split(';')
+        .filter_map(|parameter| parameter.trim().split_once('='))
+        .find(|(key, _)| key.trim().eq_ignore_ascii_case("packetization-mode"))
+        .and_then(|(_, value)| value.trim().parse().ok())
+        .unwrap_or(0)
 }
 
 /// Codec match quality result from fuzzy search.
@@ -333,6 +349,10 @@ pub(crate) fn rtcp_feedback_intersection(
 
     out
 }
+
+#[cfg(test)]
+#[path = "rtp_codec_packetization_test.rs"]
+mod rtp_codec_packetization_test;
 
 #[cfg(test)]
 mod rtx_apt_test {
