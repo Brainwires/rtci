@@ -47,7 +47,19 @@ export default defineConfig({
     {
       name: "chromium-mdns",
       testMatch: /mdns\.spec\.mjs/,
-      use: { browserName: "chromium", launchOptions: { args: ["--autoplay-policy=no-user-gesture-required"] } },
+      use: {
+        browserName: "chromium",
+        launchOptions: {
+          // The page (http://localhost, served by a Playwright route) reaches the peer on the
+          // private mDNS LAN (10.99.0.51); Chromium's Local Network Access checks block that
+          // WebSocket (net::ERR_BLOCKED_BY_LOCAL_NETWORK_ACCESS_CHECKS) behind a permission a
+          // headless run never grants. mDNS hiding (WebRtcHideLocalIpsWithMdns) stays on.
+          args: [
+            "--autoplay-policy=no-user-gesture-required",
+            "--disable-features=LocalNetworkAccessChecks,BlockInsecurePrivateNetworkRequests,PrivateNetworkAccessSendPreflights,PrivateNetworkAccessRespectPreflightResults",
+          ],
+        },
+      },
     },
     { name: "firefox-mdns", testMatch: /mdns\.spec\.mjs/, use: { browserName: "firefox" } },
     { name: "webkit-mdns", testMatch: /mdns\.spec\.mjs/, use: { browserName: "webkit" } },
