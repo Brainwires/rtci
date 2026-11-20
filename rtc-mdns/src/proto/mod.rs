@@ -1159,3 +1159,5 @@ impl sansio::Protocol<TaggedBytesMut, (), ()> for Mdns {
 mod mdns_answer_trust_test;
 #[cfg(test)]
 mod mdns_test;
+#[cfg(test)]
+mod mdns_timeout_test;
