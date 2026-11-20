@@ -263,6 +263,14 @@ pub struct Association {
     /// Per-chunk lookups on the receive path; SIDs are bounded by the
     /// negotiated stream count, so the faster non-SipHash hasher is safe.
     pub(crate) streams: FxHashMap<StreamId, StreamState>,
+    /// Bytes held in every stream's reassembly queue, kept as a running total so the receive
+    /// window is not recomputed by walking every stream on each DATA chunk.
+    reassembly_bytes: usize,
+    /// Streams whose reassembly queue holds a readable message.
+    readable_streams: FxHashSet<StreamId>,
+    /// Streams whose reassembly queue holds anything at all; the only ones a FORWARD TSN can
+    /// change.
+    streams_with_data: FxHashSet<StreamId>,
 
     events: VecDeque<Event>,
     endpoint_events: VecDeque<EndpointEventInner>,
@@ -357,6 +365,9 @@ impl Default for Association {
             next_stream_generation: 0,
             next_message_id: 0,
             streams: FxHashMap::default(),
+            reassembly_bytes: 0,
+            readable_streams: FxHashSet::default(),
+            streams_with_data: FxHashSet::default(),
 
             events: VecDeque::default(),
             endpoint_events: VecDeque::default(),
@@ -864,6 +875,7 @@ impl Association {
     fn unregister_stream(&mut self, stream_identifier: StreamId, reason: AssociationError) {
         if let Some(mut s) = self.streams.remove(&stream_identifier) {
             debug!("[{}] unregister_stream {}", self.side, stream_identifier);
+            self.reindex_stream(stream_identifier, s.get_num_bytes_in_reassembly_queue());
             self.events.push_back(Event::AssociationLost {
                 reason,
                 id: stream_identifier,
@@ -1481,11 +1493,13 @@ impl Association {
 
         if stream_handle_data && let Some(s) = self.streams.get_mut(&d.stream_identifier) {
             self.events.push_back(Event::DatagramReceived);
+            let bytes_before = s.get_num_bytes_in_reassembly_queue();
             if s.handle_data(d) && s.reassembly_queue.is_readable() {
                 self.events.push_back(Event::Stream(StreamEvent::Readable {
                     id: s.stream_identifier,
                 }));
             }
+            self.reindex_stream(d.stream_identifier, bytes_before);
         }
 
         self.handle_peer_last_tsn_and_acknowledgement(immediate_sack)
@@ -1675,25 +1689,33 @@ impl Association {
         // from the reassemblyQueue.
         for forwarded in &c.streams {
             if let Some(s) = self.streams.get_mut(&forwarded.identifier) {
+                let bytes_before = s.get_num_bytes_in_reassembly_queue();
                 s.handle_forward_tsn_for_ordered(forwarded.sequence);
                 if s.reassembly_queue.is_readable() {
                     self.events.push_back(Event::Stream(StreamEvent::Readable {
                         id: s.stream_identifier,
                     }));
                 }
+                self.reindex_stream(forwarded.identifier, bytes_before);
             }
         }
 
         // TSN may be forwarded for unordered chunks. ForwardTSN chunk does not
         // report which stream identifier it skipped for unordered chunks.
         // Therefore, we need to broadcast this event to all existing streams for
-        // unordered chunks.
-        for s in self.streams.values_mut() {
-            s.handle_forward_tsn_for_unordered(c.new_cumulative_tsn);
-            if s.reassembly_queue.is_readable() {
-                self.events.push_back(Event::Stream(StreamEvent::Readable {
-                    id: s.stream_identifier,
-                }));
+        // unordered chunks. A stream with an empty reassembly queue has nothing to
+        // forward and nothing to read, so only the streams holding data are visited.
+        let with_data: Vec<StreamId> = self.streams_with_data.iter().copied().collect();
+        for id in with_data {
+            if let Some(s) = self.streams.get_mut(&id) {
+                let bytes_before = s.get_num_bytes_in_reassembly_queue();
+                s.handle_forward_tsn_for_unordered(c.new_cumulative_tsn);
+                if s.reassembly_queue.is_readable() {
+                    self.events.push_back(Event::Stream(StreamEvent::Readable {
+                        id: s.stream_identifier,
+                    }));
+                }
+                self.reindex_stream(id, bytes_before);
             }
         }
 
@@ -2401,7 +2423,11 @@ impl Association {
             }));
         }
 
-        self.streams.insert(stream_identifier, s);
+        let replaced_bytes = self
+            .streams
+            .insert(stream_identifier, s)
+            .map_or(0, |old| old.get_num_bytes_in_reassembly_queue());
+        self.reindex_stream(stream_identifier, replaced_bytes);
 
         Some(Stream {
             stream_identifier,
@@ -2432,16 +2458,41 @@ impl Association {
     /// drain anything however attentive it is. Only the second justifies accepting a chunk
     /// into a full receive buffer.
     fn has_readable_data(&self) -> bool {
-        self.streams
-            .values()
-            .any(|s| s.reassembly_queue.is_readable())
+        !self.readable_streams.is_empty()
     }
 
     fn bytes_in_reassembly_queues(&self) -> usize {
-        self.streams
-            .values()
-            .map(|s| s.get_num_bytes_in_reassembly_queue())
-            .sum()
+        self.reassembly_bytes
+    }
+
+    /// Brings the running totals up to date after stream `id`'s reassembly queue changed
+    /// from holding `bytes_before` bytes. A stream no longer in `streams` counts as empty.
+    ///
+    /// Every change to a reassembly queue goes through here, so the receive window and
+    /// "is anything readable" cost the same however many streams the peer opened.
+    pub(crate) fn reindex_stream(&mut self, id: StreamId, bytes_before: usize) {
+        let (bytes_after, readable, holds_data) = match self.streams.get(&id) {
+            Some(s) => (
+                s.get_num_bytes_in_reassembly_queue(),
+                s.reassembly_queue.is_readable(),
+                !s.reassembly_queue.is_empty(),
+            ),
+            None => (0, false, false),
+        };
+        self.reassembly_bytes = self
+            .reassembly_bytes
+            .saturating_sub(bytes_before)
+            .saturating_add(bytes_after);
+        if readable {
+            self.readable_streams.insert(id);
+        } else {
+            self.readable_streams.remove(&id);
+        }
+        if holds_data {
+            self.streams_with_data.insert(id);
+        } else {
+            self.streams_with_data.remove(&id);
+        }
     }
 
     pub(crate) fn get_my_receiver_window_credit(&self) -> u32 {

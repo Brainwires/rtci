@@ -130,8 +130,12 @@ impl Stream<'_> {
         if let Some(s) = self.association.streams.get_mut(&self.stream_identifier)
             && (s.state == RecvSendState::ReadWritable || s.state == RecvSendState::Readable)
         {
+            let bytes_before = s.get_num_bytes_in_reassembly_queue();
             let chunks = s.reassembly_queue.read();
-            if !s.reassembly_queue.is_readable() {
+            let drained = !s.reassembly_queue.is_readable();
+            self.association
+                .reindex_stream(self.stream_identifier, bytes_before);
+            if drained {
                 self.association
                     .retry_deferred_resets(self.stream_identifier);
             }

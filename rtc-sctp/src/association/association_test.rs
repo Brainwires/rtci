@@ -2067,3 +2067,69 @@ fn test_handle_data_without_user_data_aborts() -> Result<()> {
     }
     Ok(())
 }
+
+/// With the peer holding data on every one of 65,535 streams, a DATA chunk costs the same as
+/// with one stream: the receive window and readability are running totals, not a walk over
+/// every stream, and they stay equal to what the streams hold.
+#[test]
+fn test_many_streams_do_not_make_each_data_chunk_walk_them_all() -> Result<()> {
+    let mut a = create_association(TransportConfig::default());
+    a.set_state(AssociationState::Established);
+    a.my_max_num_inbound_streams = u16::MAX;
+    let n_streams = u16::MAX as u32;
+
+    let start = std::time::Instant::now();
+    for i in 0..n_streams {
+        let d = ChunkPayloadData {
+            tsn: a.peer_last_tsn.wrapping_add(1),
+            stream_identifier: i as u16,
+            beginning_fragment: true,
+            ending_fragment: false,
+            user_data: Bytes::from_static(b"x"),
+            ..Default::default()
+        };
+        a.handle_data(&d)?;
+    }
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(10),
+        "{} DATA chunks over as many streams took {:?}",
+        n_streams,
+        start.elapsed()
+    );
+
+    assert_eq!(a.streams.len(), n_streams as usize);
+    let summed: usize = a
+        .streams
+        .values()
+        .map(|s| s.get_num_bytes_in_reassembly_queue())
+        .sum();
+    assert_eq!(a.bytes_in_reassembly_queues(), summed);
+    assert_eq!(summed, n_streams as usize);
+    assert!(!a.has_readable_data(), "no message is complete");
+
+    // A complete message on one stream makes that stream readable.
+    let d = ChunkPayloadData {
+        tsn: a.peer_last_tsn.wrapping_add(1),
+        stream_identifier: 7,
+        unordered: true,
+        beginning_fragment: true,
+        ending_fragment: true,
+        user_data: Bytes::from_static(b"yz"),
+        ..Default::default()
+    };
+    a.handle_data(&d)?;
+    assert!(a.has_readable_data());
+    assert_eq!(a.bytes_in_reassembly_queues(), summed + 2);
+
+    // Reading it, then closing, brings the totals back to what the streams hold.
+    let chunks = a.stream(7)?.read_sctp()?.expect("readable");
+    assert_eq!(chunks.len(), 2);
+    assert!(!a.has_readable_data());
+    assert_eq!(a.bytes_in_reassembly_queues(), summed);
+
+    a.close(AssociationError::LocallyClosed)?;
+    assert_eq!(a.bytes_in_reassembly_queues(), 0);
+    assert!(!a.has_readable_data());
+    assert!(a.streams_with_data.is_empty());
+    Ok(())
+}

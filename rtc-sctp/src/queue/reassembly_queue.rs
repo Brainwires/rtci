@@ -474,4 +474,12 @@ impl ReassemblyQueue {
     pub(crate) fn get_num_bytes(&self) -> usize {
         self.n_bytes
     }
+
+    /// Whether the queue holds no fragment and no message.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.n_bytes == 0
+            && self.ordered.is_empty()
+            && self.unordered.is_empty()
+            && self.unordered_chunks.is_empty()
+    }
 }
