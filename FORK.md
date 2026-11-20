@@ -12,7 +12,7 @@ below. It is what ReachMyDevice pins, and what the Deno WebRTC extension (Brainw
 | Last upstream commit merged | `0fbcaa74` (after v0.21.1, 2026-11-12) |
 | Previous sync point (original fork point) | `bf30a00c` (2026-04-06) |
 | Fork master before this sync | `81bc7c6b` |
-| Fork release | `0.21.1+brainwires.4` (build metadata marks the fork; it orders with upstream 0.21.1) |
+| Fork release | `0.21.1+brainwires.5` (build metadata marks the fork; it orders with upstream 0.21.1) |
 
 The fork is kept in sync by **merging** upstream into a branch (never rebasing), so the fork's
 history stays intact.

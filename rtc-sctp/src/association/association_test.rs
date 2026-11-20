@@ -1934,3 +1934,202 @@ fn test_reset_request_for_an_unknown_stream_is_reported_and_echoed() -> Result<(
     )));
     Ok(())
 }
+
+fn reset_request_chunk(rsn: u32, sender_last_tsn: u32, ids: Vec<u16>) -> ChunkReconfig {
+    ChunkReconfig {
+        param_a: Some(Box::new(ParamOutgoingResetRequest {
+            reconfig_request_sequence_number: rsn,
+            reconfig_response_sequence_number: 0,
+            sender_last_tsn,
+            stream_identifiers: ids,
+        })),
+        param_b: None,
+    }
+}
+
+/// Reset requests waiting on a TSN far ahead are held only up to a bound, and a DATA chunk
+/// that advances the cumulative TSN does not answer every one of them again.
+#[test]
+fn test_pending_reset_requests_are_bounded_and_not_replayed() -> Result<()> {
+    let mut a = create_association(TransportConfig::default());
+    a.set_state(AssociationState::Established);
+    a.my_max_num_inbound_streams = 16;
+    let ahead = a.peer_last_tsn.wrapping_add(0x7FFF_0000);
+    let ids: Vec<u16> = (0..1000).collect();
+
+    for rsn in 0..10_000u32 {
+        let reply = a.handle_reconfig(&reset_request_chunk(rsn, ahead, ids.clone()))?;
+        assert_eq!(reply.len(), 1, "one response per request");
+    }
+    assert!(
+        a.reconfig_requests.len() <= MAX_PENDING_RECONFIG_REQUESTS,
+        "{} reset requests held",
+        a.reconfig_requests.len()
+    );
+    assert!(a.reconfigs.is_empty(), "nothing was performed yet");
+
+    let d = ChunkPayloadData {
+        tsn: a.peer_last_tsn.wrapping_add(1),
+        stream_identifier: 0,
+        beginning_fragment: true,
+        ending_fragment: true,
+        user_data: Bytes::from_static(b"x"),
+        ..Default::default()
+    };
+    let reply = a.handle_data(&d)?;
+    assert!(
+        reply.len() <= 1,
+        "one DATA chunk produced {} packets",
+        reply.len()
+    );
+    assert!(a.control_queue.len() <= 2);
+    Ok(())
+}
+
+/// A retransmitted reset request is answered again but not performed again: no second
+/// report of the reset and no second reset of this side's own.
+#[test]
+fn test_retransmitted_reset_request_is_performed_once() -> Result<()> {
+    let mut a = create_association(TransportConfig::default());
+    a.set_state(AssociationState::Established);
+    let req = reset_request_chunk(7, a.peer_last_tsn, vec![4, 4, 4]);
+
+    let reply = a.handle_reconfig(&req)?;
+    assert_eq!(reply.len(), 2, "a response and this side's own reset");
+    let lost = |a: &Association| {
+        a.events
+            .iter()
+            .filter(|e| matches!(e, Event::AssociationLost { id: 4, .. }))
+            .count()
+    };
+    assert_eq!(lost(&a), 1, "a repeated id is reported once");
+    assert_eq!(a.reconfigs.len(), 1);
+
+    for _ in 0..100 {
+        let reply = a.handle_reconfig(&req)?;
+        assert_eq!(
+            reply.len(),
+            1,
+            "a retransmission is answered with a response alone"
+        );
+    }
+    assert_eq!(lost(&a), 1);
+    assert_eq!(a.reconfigs.len(), 1);
+    assert!(a.reconfig_requests.is_empty());
+    Ok(())
+}
+
+/// Distinct reset requests for streams this side holds no state for are echoed only up to a
+/// bound of unanswered requests of this side's own.
+#[test]
+fn test_reset_echoes_awaiting_the_peer_are_bounded() -> Result<()> {
+    let mut a = create_association(TransportConfig::default());
+    a.set_state(AssociationState::Established);
+    for rsn in 0..1000u32 {
+        a.handle_reconfig(&reset_request_chunk(rsn, a.peer_last_tsn, vec![4]))?;
+    }
+    assert!(
+        a.reconfigs.len() <= MAX_OUTSTANDING_RECONFIGS,
+        "{} unanswered resets of this side's own",
+        a.reconfigs.len()
+    );
+    assert!(a.reconfig_requests.is_empty());
+    assert!(a.completed_reconfig_requests.len() <= MAX_COMPLETED_RECONFIG_REQUESTS);
+    Ok(())
+}
+
+/// RFC 9260 section 6.2: a DATA chunk with no user data is answered with an ABORT carrying
+/// "No User Data", and creates no receive state.
+#[test]
+fn test_handle_data_without_user_data_aborts() -> Result<()> {
+    for unordered in [false, true] {
+        let mut a = create_association(TransportConfig::default());
+        a.set_state(AssociationState::Established);
+        let d = ChunkPayloadData {
+            tsn: a.peer_last_tsn.wrapping_add(1),
+            stream_identifier: 1,
+            unordered,
+            user_data: Bytes::new(),
+            ..Default::default()
+        };
+        assert!(a.handle_data(&d).is_err(), "unordered={unordered}");
+        assert_eq!(a.state(), AssociationState::Closed);
+        assert!(!a.streams.contains_key(&1));
+        assert!(a.payload_queue.is_empty());
+        let aborted = a.control_queue.iter().any(|p| {
+            p.chunks.iter().any(|c| {
+                c.as_any()
+                    .downcast_ref::<ChunkAbort>()
+                    .is_some_and(|abort| abort.error_causes.iter().any(|e| e.code == NO_USER_DATA))
+            })
+        });
+        assert!(aborted, "an ABORT with No User Data is queued");
+    }
+    Ok(())
+}
+
+/// With the peer holding data on every one of 65,535 streams, a DATA chunk costs the same as
+/// with one stream: the receive window and readability are running totals, not a walk over
+/// every stream, and they stay equal to what the streams hold.
+#[test]
+fn test_many_streams_do_not_make_each_data_chunk_walk_them_all() -> Result<()> {
+    let mut a = create_association(TransportConfig::default());
+    a.set_state(AssociationState::Established);
+    a.my_max_num_inbound_streams = u16::MAX;
+    let n_streams = u16::MAX as u32;
+
+    let start = std::time::Instant::now();
+    for i in 0..n_streams {
+        let d = ChunkPayloadData {
+            tsn: a.peer_last_tsn.wrapping_add(1),
+            stream_identifier: i as u16,
+            beginning_fragment: true,
+            ending_fragment: false,
+            user_data: Bytes::from_static(b"x"),
+            ..Default::default()
+        };
+        a.handle_data(&d)?;
+    }
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(10),
+        "{} DATA chunks over as many streams took {:?}",
+        n_streams,
+        start.elapsed()
+    );
+
+    assert_eq!(a.streams.len(), n_streams as usize);
+    let summed: usize = a
+        .streams
+        .values()
+        .map(|s| s.get_num_bytes_in_reassembly_queue())
+        .sum();
+    assert_eq!(a.bytes_in_reassembly_queues(), summed);
+    assert_eq!(summed, n_streams as usize);
+    assert!(!a.has_readable_data(), "no message is complete");
+
+    // A complete message on one stream makes that stream readable.
+    let d = ChunkPayloadData {
+        tsn: a.peer_last_tsn.wrapping_add(1),
+        stream_identifier: 7,
+        unordered: true,
+        beginning_fragment: true,
+        ending_fragment: true,
+        user_data: Bytes::from_static(b"yz"),
+        ..Default::default()
+    };
+    a.handle_data(&d)?;
+    assert!(a.has_readable_data());
+    assert_eq!(a.bytes_in_reassembly_queues(), summed + 2);
+
+    // Reading it, then closing, brings the totals back to what the streams hold.
+    let chunks = a.stream(7)?.read_sctp()?.expect("readable");
+    assert_eq!(chunks.len(), 2);
+    assert!(!a.has_readable_data());
+    assert_eq!(a.bytes_in_reassembly_queues(), summed);
+
+    a.close(AssociationError::LocallyClosed)?;
+    assert_eq!(a.bytes_in_reassembly_queues(), 0);
+    assert!(!a.has_readable_data());
+    assert!(a.streams_with_data.is_empty());
+    Ok(())
+}

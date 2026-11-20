@@ -111,8 +111,7 @@ impl RTCDataChannel<'_> {
             .data_channels
             .get(&self.id)
             .unwrap()
-            .label
-            .as_str()
+            .label()
     }
 
     /// Whether the DataChannel delivers messages in order.
@@ -161,8 +160,7 @@ impl RTCDataChannel<'_> {
             .data_channels
             .get(&self.id)
             .unwrap()
-            .protocol
-            .as_str()
+            .protocol()
     }
 
     /// The channel's DCEP priority (RFC 8832 §5.1): the one it was created with, or for a

@@ -24,10 +24,13 @@ pub(crate) struct RTCDataChannelInternal {
     /// the server. Out-of-band (`negotiated`) channels and channels accepted from the peer
     /// have it from birth, since their id is already fixed by the application or the wire.
     pub(crate) stream_id: Option<StreamId>,
+    /// Read through [`Self::label`]: empty for a channel the peer opened, whose label is held
+    /// once, by the DCEP channel.
     pub(crate) label: String,
     pub(crate) ordered: bool,
     pub(crate) max_packet_life_time: Option<u16>,
     pub(crate) max_retransmits: Option<u16>,
+    /// Read through [`Self::protocol`], like `label`.
     pub(crate) protocol: String,
     pub(crate) negotiated: bool,
     /// The DCEP priority (RFC 8832 §5.1): what this side's `DATA_CHANNEL_OPEN` carries, or
@@ -114,6 +117,22 @@ impl RTCDataChannelInternal {
         }
     }
 
+    /// The channel's label: the DCEP channel's once it exists, else the one given at creation.
+    pub(crate) fn label(&self) -> &str {
+        match &self.data_channel {
+            Some(data_channel) => &data_channel.config().label,
+            None => &self.label,
+        }
+    }
+
+    /// The channel's sub-protocol, resolved like [`Self::label`].
+    pub(crate) fn protocol(&self) -> &str {
+        match &self.data_channel {
+            Some(data_channel) => &data_channel.config().protocol,
+            None => &self.protocol,
+        }
+    }
+
     pub(crate) fn dial(&mut self, association_handle: usize) -> Result<()> {
         // A channel cannot be dialed before its stream id exists, and the stream id cannot
         // exist before the DTLS role does. Making that an error rather than a fallback is the
@@ -196,9 +215,11 @@ impl RTCDataChannelInternal {
         // `negotiated: None` — the peer opened this channel in-band over DCEP, so it is not an
         // out-of-band channel however well-known its stream id now is. The stream id is set
         // below instead of through `negotiated`, which would also flip the `negotiated` flag.
+        // Label and protocol stay with the DCEP channel (see `label()`): a peer's, up to 64 KiB
+        // each, is not copied.
         let mut data_channel_internal = RTCDataChannelInternal::new(DataChannelParameters {
-            label: data_channel_config.label.clone(),
-            protocol: data_channel_config.protocol.clone(),
+            label: String::new(),
+            protocol: String::new(),
             ordered: !unordered,
             max_packet_life_time,
             max_retransmits,
@@ -291,7 +312,7 @@ mod tests {
             assert!(!dc.negotiated, "{channel_type:?}: opened in-band");
             assert_eq!(dc.stream_id, Some(PEER_STREAM));
             assert_eq!(dc.ready_state, RTCDataChannelState::Open);
-            assert_eq!((dc.label.as_str(), dc.protocol.as_str()), ("peer", "proto"));
+            assert_eq!((dc.label(), dc.protocol()), ("peer", "proto"));
         }
     }
 

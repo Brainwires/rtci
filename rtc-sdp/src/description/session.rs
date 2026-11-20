@@ -76,6 +76,24 @@ pub const SEMANTIC_TOKEN_FORWARD_ERROR_CORRECTION_FRAMEWORK: &str = "FEC-FR";
 /// `WMS`: WebRTC media streams, used with `a=msid-semantic`.
 pub const SEMANTIC_TOKEN_WEBRTC_MEDIA_STREAMS: &str = "WMS";
 
+/// The largest session description, in bytes, [`SessionDescription::unmarshal`] accepts. Real
+/// offers and answers are a few to a few hundred kilobytes.
+pub const MAX_SDP_SIZE: usize = 1 << 20;
+/// The most lines [`SessionDescription::unmarshal`] accepts in one session description.
+pub const MAX_SDP_LINES: usize = 65_536;
+/// The most `m=` sections [`SessionDescription::unmarshal`] accepts in one session description.
+pub const MAX_MEDIA_DESCRIPTIONS: usize = 1024;
+/// The most `a=` lines [`SessionDescription::unmarshal`] accepts at the session level, and in
+/// each `m=` section.
+pub const MAX_ATTRIBUTES_PER_SECTION: usize = 4096;
+/// The most formats [`SessionDescription::unmarshal`] accepts on one `m=` line. RTP payload
+/// types are 7 bits, so 128 distinct values exist.
+pub const MAX_FORMATS_PER_MEDIA: usize = 256;
+
+fn over_limit(what: &str, limit: usize) -> Error {
+    Error::SdpInvalidValue(format!("session description has more than {limit} {what}"))
+}
+
 /// Version describes the value provided by the "v=" field which gives
 /// the version of the Session Description Protocol.
 pub type Version = isize;
@@ -577,6 +595,13 @@ impl SessionDescription {
     /// +--------+----+-------+----+-----+----+-----+---+----+----+---+---+-----+---+---+----+---+----+
     /// ```
     pub fn unmarshal<R: io::BufRead + io::Seek>(reader: &mut R) -> Result<Self> {
+        let start = reader.stream_position()?;
+        let end = reader.seek(io::SeekFrom::End(0))?;
+        reader.seek(io::SeekFrom::Start(start))?;
+        if end.saturating_sub(start) > MAX_SDP_SIZE as u64 {
+            return Err(over_limit("bytes", MAX_SDP_SIZE));
+        }
+
         let mut lexer = Lexer {
             desc: SessionDescription {
                 version: 0,
@@ -597,8 +622,15 @@ impl SessionDescription {
             reader,
         };
 
+        // Each line takes two steps (its type, then its value), plus one to read the end.
+        let max_steps = 2 * MAX_SDP_LINES + 1;
+        let mut steps = 0usize;
         let mut state = Some(StateFn { f: s1 });
         while let Some(s) = state {
+            steps += 1;
+            if steps > max_steps {
+                return Err(over_limit("lines", MAX_SDP_LINES));
+            }
             state = (s.f)(&mut lexer)?;
         }
 
@@ -1224,6 +1256,9 @@ fn unmarshal_session_attribute<'a, R: io::BufRead + io::Seek>(
             value: None,
         }
     };
+    if lexer.desc.attributes.len() >= MAX_ATTRIBUTES_PER_SECTION {
+        return Err(over_limit("session attributes", MAX_ATTRIBUTES_PER_SECTION));
+    }
     lexer.desc.attributes.push(attribute);
 
     Ok(Some(StateFn { f: s11 }))
@@ -1234,9 +1269,16 @@ fn unmarshal_media_description<'a, R: io::BufRead + io::Seek>(
 ) -> Result<Option<StateFn<'a, R>>> {
     let (value, _) = read_value(lexer.reader)?;
 
+    if lexer.desc.media_descriptions.len() >= MAX_MEDIA_DESCRIPTIONS {
+        return Err(over_limit("media sections", MAX_MEDIA_DESCRIPTIONS));
+    }
+
     let fields: Vec<&str> = value.split_whitespace().collect();
     if fields.len() < 4 {
         return Err(Error::SdpInvalidSyntax(format!("`m={value}`")));
+    }
+    if fields.len() - 3 > MAX_FORMATS_PER_MEDIA {
+        return Err(over_limit("formats on one m= line", MAX_FORMATS_PER_MEDIA));
     }
 
     // <media>
@@ -1400,6 +1442,12 @@ fn unmarshal_media_attribute<'a, R: io::BufRead + io::Seek>(
     };
 
     if let Some(latest_media_desc) = lexer.desc.media_descriptions.last_mut() {
+        if latest_media_desc.attributes.len() >= MAX_ATTRIBUTES_PER_SECTION {
+            return Err(over_limit(
+                "attributes in one media section",
+                MAX_ATTRIBUTES_PER_SECTION,
+            ));
+        }
         latest_media_desc.attributes.push(attribute);
         Ok(Some(StateFn { f: s14 }))
     } else {

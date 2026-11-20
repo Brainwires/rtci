@@ -89,6 +89,10 @@ impl Flight for Flight2 {
                 ));
             }
 
+            // Negotiate from the cookie-verified ClientHello, which the handshake transcript
+            // covers, not from the first one, which anyone on the path could have sent.
+            negotiate_client_hello(state, client_hello, cfg)?;
+
             Ok(Box::new(Flight4 {}))
         } else {
             Err((
@@ -122,5 +126,115 @@ impl Flight for Flight2 {
             should_encrypt: false,
             reset_local_sequence_number: false,
         }])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cipher_suite::CipherSuiteId;
+    use crate::compression_methods::default_compression_methods;
+    use crate::curve::named_curve::NamedCurve;
+    use crate::extension::Extension;
+    use crate::extension::extension_supported_elliptic_curves::ExtensionSupportedEllipticCurves;
+    use crate::extension::extension_use_srtp::{ExtensionUseSrtp, SrtpProtectionProfile};
+    use crate::handshake::handshake_message_client_hello::HandshakeMessageClientHello;
+    use crate::handshake::handshake_random::HandshakeRandom;
+    use std::sync::Arc;
+
+    fn push_client_hello(
+        cache: &mut HandshakeCache,
+        message_sequence: u16,
+        cookie: Vec<u8>,
+        random_byte: u8,
+        curves: Vec<NamedCurve>,
+        profiles: Vec<SrtpProtectionProfile>,
+    ) {
+        let mut random = HandshakeRandom::default();
+        random.random_bytes = [random_byte; 28];
+        let mut handshake =
+            Handshake::new(HandshakeMessage::ClientHello(HandshakeMessageClientHello {
+                version: PROTOCOL_VERSION1_2,
+                random,
+                cookie,
+                cipher_suites: vec![CipherSuiteId::Tls_Ecdhe_Ecdsa_With_Aes_128_Gcm_Sha256],
+                compression_methods: default_compression_methods(),
+                extensions: vec![
+                    Extension::SupportedEllipticCurves(ExtensionSupportedEllipticCurves {
+                        elliptic_curves: curves,
+                    }),
+                    Extension::UseSrtp(ExtensionUseSrtp {
+                        protection_profiles: profiles,
+                    }),
+                ],
+            }));
+        handshake.handshake_header.message_sequence = message_sequence;
+        let mut data = vec![];
+        handshake.marshal(&mut data).unwrap();
+        assert!(cache.push(data, 0, message_sequence, HandshakeType::ClientHello, true));
+    }
+
+    /// The first ClientHello carries no cookie, so anyone on the path can send it in place of the
+    /// genuine one. The parameters must come from the cookie-verified ClientHello.
+    #[test]
+    fn test_parameters_come_from_the_cookie_verified_client_hello() {
+        let provider = ::crypto::default_provider().unwrap();
+        let mut cfg = HandshakeConfig::new(provider.clone());
+        cfg.local_cipher_suites = vec![CipherSuiteId::Tls_Ecdhe_Ecdsa_With_Aes_128_Gcm_Sha256];
+        cfg.local_named_curves = vec![NamedCurve::X25519, NamedCurve::P256];
+        cfg.local_srtp_protection_profiles = vec![
+            SrtpProtectionProfile::Srtp_Aead_Aes_128_Gcm,
+            SrtpProtectionProfile::Srtp_Aes128_Cm_Hmac_Sha1_80,
+            SrtpProtectionProfile::Srtp_Aes128_Cm_Hmac_Sha1_32,
+        ];
+        let cfg = Arc::new(cfg);
+        let mut state = State::new(provider, false);
+        let mut cache = HandshakeCache::new();
+
+        Flight0 {}.generate(&mut state, &cache, &cfg).unwrap();
+
+        // A forged first ClientHello offering only the weakest options.
+        push_client_hello(
+            &mut cache,
+            0,
+            vec![],
+            1,
+            vec![NamedCurve::P256],
+            vec![SrtpProtectionProfile::Srtp_Aes128_Cm_Hmac_Sha1_32],
+        );
+        let next = Flight0 {}.parse(&mut state, &cache, &cfg).unwrap();
+        assert_eq!(next.to_string(), Flight2 {}.to_string());
+        assert_eq!(
+            state.srtp_protection_profile,
+            SrtpProtectionProfile::Srtp_Aes128_Cm_Hmac_Sha1_32
+        );
+
+        // The genuine client's ClientHello, answering our HelloVerifyRequest.
+        let cookie = state.cookie.clone();
+        push_client_hello(
+            &mut cache,
+            1,
+            cookie,
+            2,
+            vec![NamedCurve::X25519, NamedCurve::P256],
+            vec![
+                SrtpProtectionProfile::Srtp_Aead_Aes_128_Gcm,
+                SrtpProtectionProfile::Srtp_Aes128_Cm_Hmac_Sha1_80,
+                SrtpProtectionProfile::Srtp_Aes128_Cm_Hmac_Sha1_32,
+            ],
+        );
+        let next = Flight2 {}.parse(&mut state, &cache, &cfg).unwrap();
+        assert_eq!(next.to_string(), "Flight 4");
+
+        assert_eq!(
+            state.srtp_protection_profile,
+            SrtpProtectionProfile::Srtp_Aead_Aes_128_Gcm
+        );
+        assert_eq!(state.named_curve, NamedCurve::X25519);
+        assert_eq!(
+            state.local_keypair.as_ref().map(|keypair| keypair.curve),
+            Some(NamedCurve::X25519)
+        );
+        assert_eq!(state.remote_random.random_bytes, [2u8; 28]);
     }
 }

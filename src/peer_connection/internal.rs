@@ -191,6 +191,7 @@ impl RTCPeerConnection {
             signaling_state: RTCSignalingState::Stable,
             peer_connection_state: RTCPeerConnectionState::New,
             can_trickle_ice_candidates: None,
+            trickled_remote_candidates: 0,
             pipeline_context,
             data_channels: DataChannelRegistry::new(),
             rtp_transceivers: Vec::new(),
@@ -362,6 +363,8 @@ impl RTCPeerConnection {
         let mut recycled: HashSet<usize> = HashSet::new();
 
         if let Some(media_descriptions) = media_descriptions {
+            let transceiver_by_mid =
+                RTCPeerConnection::transceiver_index_by_mid(&self.rtp_transceivers);
             for media in &media_descriptions {
                 if let Some(mid_value) = get_mid_value(media) {
                     if mid_value.is_empty() {
@@ -446,9 +449,7 @@ impl RTCPeerConnection {
                         continue;
                     }
 
-                    if let Some(i) =
-                        RTCPeerConnection::find_by_mid(mid_value, &self.rtp_transceivers)
-                    {
+                    if let Some(&i) = transceiver_by_mid.get(mid_value.as_str()) {
                         // RFC 9429 Section 5.2.2: an offer rejects a stopped transceiver's m=
                         // section. An answer doesn't: a transceiver stopped after the offer
                         // arrived answers inactive, and is rejected by the next offer (W3C
@@ -1596,16 +1597,18 @@ impl RTCPeerConnection {
     pub(super) fn add_ice_remote_candidate(&mut self, candidate_value: &str) -> Result<()> {
         let candidate: Candidate = unmarshal_candidate(candidate_value)?;
 
-        // Register remote candidate with stats accumulator
+        // Register remote candidate with stats accumulator, only once the agent keeps it (one
+        // past its cap is dropped there and here).
         // Per W3C spec, URL must NOT be present for remote candidates
         let rtc_candidate: RTCIceCandidate = (&candidate).into();
         let candidate_id = remote_candidate_stats_id(&rtc_candidate.id);
         let (ufrag, _) = self.ice_transport().get_remote_user_credentials();
         let accumulator = self.candidate_to_accumulator(&rtc_candidate, ufrag, None);
-        self.stats_mut()
-            .register_remote_candidate(candidate_id, accumulator);
 
-        self.ice_transport_mut().add_remote_candidate(candidate)?;
+        if self.ice_transport_mut().add_remote_candidate(candidate)? {
+            self.stats_mut()
+                .register_remote_candidate(candidate_id, accumulator);
+        }
         Ok(())
     }
 

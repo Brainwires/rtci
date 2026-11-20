@@ -3577,6 +3577,97 @@ fn test_controlling_rechecks_failed_pair_on_inbound_binding_request() -> Result<
     Ok(())
 }
 
+/// Every authenticated Binding request on a pair that has not succeeded triggers a check, and
+/// each check is a pending transaction. The pending list stays bounded however many requests
+/// arrive, keeps the newest transactions, and still matches their responses.
+#[test]
+fn test_pending_binding_requests_are_bounded() -> Result<()> {
+    let now = Instant::now();
+    let config = AgentConfig {
+        is_controlling: true,
+        ..Default::default()
+    };
+    let mut a = Agent::new(now, Arc::new(config), test_crypto_provider())?;
+
+    let local_candidate = CandidateHostConfig {
+        base_config: CandidateConfig {
+            network: "udp".to_owned(),
+            address: "192.168.0.2".to_owned(),
+            port: 7777,
+            component: 1,
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+    .new_candidate_host()?;
+    a.add_local_candidate(local_candidate)?;
+    let remote_candidate = CandidateHostConfig {
+        base_config: CandidateConfig {
+            network: "udp".to_owned(),
+            address: "172.17.0.3".to_owned(),
+            port: 9999,
+            component: 1,
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+    .new_candidate_host()?;
+    a.add_remote_candidate(remote_candidate)?;
+    a.ufrag_pwd.remote_credentials = Some(Credentials {
+        ufrag: "remote_ufrag".to_string(),
+        pwd: "remote_pwd".to_string(),
+    });
+    assert_eq!(a.candidate_pairs.len(), 1);
+    a.pending_binding_requests.clear();
+
+    let username = a.ufrag_pwd.local_credentials.ufrag.clone() + ":remote_ufrag";
+    let local_pwd = a.ufrag_pwd.local_credentials.pwd.clone();
+    for _ in 0..(MAX_PENDING_BINDING_REQUESTS * 20) {
+        let mut msg = Message::new();
+        msg.build(&[
+            Box::new(BINDING_REQUEST),
+            Box::new(TransactionId::new()),
+            Box::new(Username::new(ATTR_USERNAME, username.clone())),
+            Box::new(AttrControlled(1)),
+            Box::new(PriorityAttr(1000)),
+            Box::new(MessageIntegrity::new_short_term_integrity_with_provider(
+                local_pwd.clone(),
+                test_crypto_provider().crypto(),
+            )),
+            Box::new(FINGERPRINT),
+        ])?;
+        a.handle_binding_request(now, &msg, 0, 0);
+        assert!(
+            a.pending_binding_requests.len() <= MAX_PENDING_BINDING_REQUESTS,
+            "{} pending binding requests",
+            a.pending_binding_requests.len()
+        );
+        a.write_outs.clear();
+    }
+    assert_eq!(
+        a.pending_binding_requests.len(),
+        MAX_PENDING_BINDING_REQUESTS,
+        "every request triggered a check"
+    );
+
+    // The newest transaction is still tracked and its response matches once.
+    let newest = a
+        .pending_binding_requests
+        .last()
+        .expect("a pending request")
+        .transaction_id;
+    assert!(a.handle_inbound_binding_success(now, newest).is_some());
+    assert!(a.handle_inbound_binding_success(now, newest).is_none());
+
+    // Pending requests still expire.
+    let later = now + MAX_BINDING_REQUEST_TIMEOUT + Duration::from_millis(1);
+    a.invalidate_pending_binding_requests(later);
+    assert!(a.pending_binding_requests.is_empty());
+
+    a.close()?;
+    Ok(())
+}
+
 /// A role conflict is acted on only for an authenticated request: a forged Binding request
 /// carrying ICE-CONTROLLING with a larger tiebreaker must not make us switch roles.
 #[test]

@@ -205,29 +205,59 @@ impl Flight for Flight4 {
                 ));
             }
 
-            if let Err(err) = verify_certificate_verify(
-                cfg.provider().crypto(),
-                &plain_text,
-                &h.algorithm,
-                &h.signature,
-                &state.peer_certificates,
-                cfg.insecure_verification,
-            ) {
-                return Err((
-                    Some(Alert {
-                        alert_level: AlertLevel::Fatal,
-                        alert_description: AlertDescription::BadCertificate,
-                    }),
-                    Some(err),
-                ));
-            }
+            // This flight is parsed again on every handshake record that arrives until it
+            // completes, so the signature is checked only once for a given CertificateVerify
+            // over a given transcript.
+            let mut verified_key = plain_text;
+            verified_key.push(h.algorithm.hash as u8);
+            verified_key.push(h.algorithm.signature as u8);
+            verified_key.extend_from_slice(&h.signature);
+            if state.verified_certificate_verify.as_deref() != Some(verified_key.as_slice()) {
+                let plain_text = &verified_key[..verified_key.len() - 2 - h.signature.len()];
 
-            let mut chains = vec![];
-            let mut verified = false;
-            if cfg.client_auth as u8 >= ClientAuthType::VerifyClientCertIfGiven as u8 {
-                if let Some(client_cert_verifier) = &cfg.client_cert_verifier {
-                    chains =
-                        match verify_client_cert(&state.peer_certificates, client_cert_verifier) {
+                // Without chain verification the peer-certificate callback (the WebRTC
+                // fingerprint check) gets no chains, so it does not depend on the signature
+                // check and, being far cheaper, runs first.
+                let verifies_chain =
+                    cfg.client_auth as u8 >= ClientAuthType::VerifyClientCertIfGiven as u8;
+                let mut chains = vec![];
+                if !verifies_chain
+                    && let Some(verify_peer_certificate) = &cfg.verify_peer_certificate
+                    && let Err(err) = verify_peer_certificate(&state.peer_certificates, &chains)
+                {
+                    return Err((
+                        Some(Alert {
+                            alert_level: AlertLevel::Fatal,
+                            alert_description: AlertDescription::BadCertificate,
+                        }),
+                        Some(err),
+                    ));
+                }
+
+                if let Err(err) = verify_certificate_verify(
+                    cfg.provider().crypto(),
+                    plain_text,
+                    &h.algorithm,
+                    &h.signature,
+                    &state.peer_certificates,
+                    cfg.insecure_verification,
+                ) {
+                    return Err((
+                        Some(Alert {
+                            alert_level: AlertLevel::Fatal,
+                            alert_description: AlertDescription::BadCertificate,
+                        }),
+                        Some(err),
+                    ));
+                }
+
+                let mut verified = false;
+                if verifies_chain {
+                    if let Some(client_cert_verifier) = &cfg.client_cert_verifier {
+                        chains = match verify_client_cert(
+                            &state.peer_certificates,
+                            client_cert_verifier,
+                        ) {
                             Ok(chains) => chains,
                             Err(err) => {
                                 return Err((
@@ -239,30 +269,33 @@ impl Flight for Flight4 {
                                 ));
                             }
                         };
-                } else {
-                    return Err((
-                        Some(Alert {
-                            alert_level: AlertLevel::Fatal,
-                            alert_description: AlertDescription::BadCertificate,
-                        }),
-                        Some(Error::ErrInvalidCertificate),
-                    ));
-                }
+                    } else {
+                        return Err((
+                            Some(Alert {
+                                alert_level: AlertLevel::Fatal,
+                                alert_description: AlertDescription::BadCertificate,
+                            }),
+                            Some(Error::ErrInvalidCertificate),
+                        ));
+                    }
 
-                verified = true
+                    verified = true;
+
+                    if let Some(verify_peer_certificate) = &cfg.verify_peer_certificate
+                        && let Err(err) = verify_peer_certificate(&state.peer_certificates, &chains)
+                    {
+                        return Err((
+                            Some(Alert {
+                                alert_level: AlertLevel::Fatal,
+                                alert_description: AlertDescription::BadCertificate,
+                            }),
+                            Some(err),
+                        ));
+                    }
+                }
+                state.peer_certificates_verified = verified;
+                state.verified_certificate_verify = Some(verified_key);
             }
-            if let Some(verify_peer_certificate) = &cfg.verify_peer_certificate
-                && let Err(err) = verify_peer_certificate(&state.peer_certificates, &chains)
-            {
-                return Err((
-                    Some(Alert {
-                        alert_level: AlertLevel::Fatal,
-                        alert_description: AlertDescription::BadCertificate,
-                    }),
-                    Some(err),
-                ));
-            }
-            state.peer_certificates_verified = verified
         } else if !state.peer_certificates.is_empty() {
             // A certificate was received, but we haven't seen a CertificateVerify
             // keep reading until we receive one
@@ -867,5 +900,170 @@ mod tests {
         let f = Flight4 {};
         let res = f.parse(&mut state, &cache, &cfg);
         assert!(res.is_err());
+    }
+
+    /// The client's Certificate, ClientKeyExchange and CertificateVerify (signed over the
+    /// first two, the only transcript messages in this cache) as message sequences 0 to 2.
+    fn client_flight_cache(
+        certificate: &Certificate,
+        algorithm: SignatureHashAlgorithm,
+        valid_signature: bool,
+    ) -> HandshakeCache {
+        use crate::handshake::handshake_message_certificate_verify::HandshakeMessageCertificateVerify;
+        use crate::handshake::handshake_message_client_key_exchange::HandshakeMessageClientKeyExchange;
+
+        fn marshal(message: HandshakeMessage, message_sequence: u16) -> Vec<u8> {
+            let mut handshake = Handshake::new(message);
+            handshake.handshake_header.message_sequence = message_sequence;
+            let mut data = vec![];
+            handshake.marshal(&mut data).unwrap();
+            data
+        }
+
+        let raw_certificate = marshal(
+            HandshakeMessage::Certificate(HandshakeMessageCertificate {
+                certificate: certificate
+                    .certificate
+                    .iter()
+                    .map(|c| c.as_ref().to_vec())
+                    .collect(),
+            }),
+            0,
+        );
+        let raw_client_key_exchange = marshal(
+            HandshakeMessage::ClientKeyExchange(HandshakeMessageClientKeyExchange {
+                identity_hint: vec![],
+                public_key: vec![0x42; 32],
+            }),
+            1,
+        );
+        let signature = if valid_signature {
+            let mut plain_text = raw_certificate.clone();
+            plain_text.extend_from_slice(&raw_client_key_exchange);
+            generate_certificate_verify(&plain_text, &algorithm, &certificate.private_key).unwrap()
+        } else {
+            vec![0x30; 70]
+        };
+        let raw_certificate_verify = marshal(
+            HandshakeMessage::CertificateVerify(HandshakeMessageCertificateVerify {
+                algorithm,
+                signature,
+            }),
+            2,
+        );
+
+        let mut cache = HandshakeCache::new();
+        assert!(cache.push(raw_certificate, 0, 0, HandshakeType::Certificate, true));
+        assert!(cache.push(
+            raw_client_key_exchange,
+            0,
+            1,
+            HandshakeType::ClientKeyExchange,
+            true,
+        ));
+        assert!(cache.push(
+            raw_certificate_verify,
+            0,
+            2,
+            HandshakeType::CertificateVerify,
+            true,
+        ));
+        cache
+    }
+
+    fn config_counting_peer_checks(
+        algorithm: SignatureHashAlgorithm,
+        peer_check: Result<()>,
+    ) -> (HandshakeConfig, Arc<std::sync::atomic::AtomicUsize>) {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut cfg = HandshakeConfig::new(
+            crypto::default_provider().expect("a built-in crypto provider is enabled for tests"),
+        );
+        cfg.local_signature_schemes = vec![algorithm];
+        cfg.client_auth = ClientAuthType::RequireAnyClientCert;
+        let counter = Arc::clone(&calls);
+        let peer_check = peer_check.map_err(|err| err.to_string());
+        let check: VerifyPeerCertificateFn = Arc::new(
+            move |_certificates: &[Vec<u8>],
+                  _chains: &[rustls::pki_types::CertificateDer<'static>]| {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                peer_check.clone().map_err(Error::Other)
+            },
+        );
+        cfg.verify_peer_certificate = Some(check);
+        (cfg, calls)
+    }
+
+    const ECDSA_SHA256: SignatureHashAlgorithm = SignatureHashAlgorithm {
+        hash: HashAlgorithm::Sha256,
+        signature: SignatureAlgorithm::Ecdsa,
+    };
+
+    /// Until Finished arrives this flight is parsed again on every handshake record. A
+    /// CertificateVerify whose check passed is not verified again for the same transcript.
+    #[test]
+    fn test_flight4_verifies_a_certificate_verify_once() {
+        let provider =
+            crypto::default_provider().expect("a built-in crypto provider is enabled for tests");
+        let certificate =
+            Certificate::generate_self_signed(vec!["localhost".to_owned()], provider.crypto())
+                .unwrap();
+        let cache = client_flight_cache(&certificate, ECDSA_SHA256, true);
+        let (cfg, calls) = config_counting_peer_checks(ECDSA_SHA256, Ok(()));
+        let mut state = State::new(provider, false);
+
+        for _ in 0..5 {
+            // No Finished yet: keep reading.
+            let res = Flight4 {}.parse(&mut state, &cache, &cfg);
+            assert!(matches!(res, Err((None, None))));
+        }
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(state.verified_certificate_verify.is_some());
+    }
+
+    /// Without chain verification the peer-certificate callback (the WebRTC fingerprint check)
+    /// runs before the signature check, so a rejected certificate costs no signature check.
+    #[test]
+    fn test_flight4_checks_the_peer_certificate_before_the_signature() {
+        let provider =
+            crypto::default_provider().expect("a built-in crypto provider is enabled for tests");
+        let certificate =
+            Certificate::generate_self_signed(vec!["localhost".to_owned()], provider.crypto())
+                .unwrap();
+        let cache = client_flight_cache(&certificate, ECDSA_SHA256, false);
+        let (cfg, calls) = config_counting_peer_checks(
+            ECDSA_SHA256,
+            Err(Error::Other("fingerprint mismatch".to_owned())),
+        );
+        let mut state = State::new(provider, false);
+
+        let res = Flight4 {}.parse(&mut state, &cache, &cfg);
+        match res {
+            Err((Some(alert), Some(Error::Other(message)))) => {
+                assert_eq!(alert.alert_level, AlertLevel::Fatal);
+                assert_eq!(message, "fingerprint mismatch");
+            }
+            Err((alert, err)) => panic!("unexpected result: {alert:?} {err:?}"),
+            Ok(next) => panic!("unexpected flight {next}"),
+        }
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(state.verified_certificate_verify.is_none());
+    }
+
+    /// A junk CertificateVerify fails the flight, and is never remembered as verified.
+    #[test]
+    fn test_flight4_bad_certificate_verify_fails() {
+        let provider =
+            crypto::default_provider().expect("a built-in crypto provider is enabled for tests");
+        let certificate =
+            Certificate::generate_self_signed(vec!["localhost".to_owned()], provider.crypto())
+                .unwrap();
+        let cache = client_flight_cache(&certificate, ECDSA_SHA256, false);
+        let (cfg, _calls) = config_counting_peer_checks(ECDSA_SHA256, Ok(()));
+        let mut state = State::new(provider, false);
+
+        let res = Flight4 {}.parse(&mut state, &cache, &cfg);
+        assert!(matches!(res, Err((Some(_), Some(_)))));
+        assert!(state.verified_certificate_verify.is_none());
     }
 }

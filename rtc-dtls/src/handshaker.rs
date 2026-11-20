@@ -211,7 +211,10 @@ impl DTLSConn {
                         self.notify(alert.alert_level, alert.alert_description);
                     }
                     if let Some(err) = err {
+                        // A flight that failed (a fatal alert has been sent) stays failed: it is
+                        // never parsed again, however many more handshake records arrive.
                         self.current_retransmit_timer = None;
+                        self.current_handshake_state = HandshakeState::Errored;
                         return Err(err);
                     }
                 }

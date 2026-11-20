@@ -170,27 +170,23 @@ impl Chunks {
             return false;
         }
 
-        // 3.
-        let mut last_tsn = 0u32;
-        for (i, c) in self.chunks.iter().enumerate() {
-            if i > 0 {
-                // Fragments must have contiguous TSN
-                // From RFC 4960 Section 3.3.1:
-                //   When a user message is fragmented into multiple chunks, the TSNs are
-                //   used by the receiver to reassemble the message.  This means that the
-                //   TSNs for each fragment of a fragmented user message MUST be strictly
-                //   sequential.
-                if c.tsn != last_tsn.wrapping_add(1) {
-                    // mid or end fragment is missing
-                    return false;
-                }
-            }
-
-            last_tsn = c.tsn;
-        }
-
-        true
+        // 3. Fragments must have contiguous TSN
+        // From RFC 4960 Section 3.3.1:
+        //   When a user message is fragmented into multiple chunks, the TSNs are
+        //   used by the receiver to reassemble the message.  This means that the
+        //   TSNs for each fragment of a fragmented user message MUST be strictly
+        //   sequential.
+        // The fragments are kept sorted by TSN with no duplicates (`push`), so they are
+        // contiguous exactly when the first and last TSNs span one less than their count.
+        // Checking that in constant time keeps a message of many fragments from costing a
+        // full rescan on every arrival.
+        contiguous_span(self.chunks[0].tsn, self.chunks[n_chunks - 1].tsn, n_chunks)
     }
+}
+
+/// Whether `n` distinct TSNs, sorted, running from `first` to `last` are contiguous.
+fn contiguous_span(first: u32, last: u32, n: usize) -> bool {
+    n > 0 && last.wrapping_sub(first) as usize == n - 1
 }
 
 #[derive(Default, Debug)]
@@ -204,6 +200,11 @@ pub(crate) struct ReassemblyQueue {
     pub(crate) ordered: VecDeque<Chunks>,
     pub(crate) unordered: VecDeque<Chunks>,
     pub(crate) unordered_chunks: Vec<ChunkPayloadData>,
+    /// TSNs of the beginning fragments in `unordered_chunks`, sorted, so the message a new
+    /// fragment may complete is found without rescanning every fragment held.
+    unordered_begins: Vec<u32>,
+    /// TSNs of the ending fragments in `unordered_chunks`, sorted.
+    unordered_ends: Vec<u32>,
     pub(crate) n_bytes: usize,
     /// Monotonic counter stamped onto each reassembled message so `read` can tell which of a
     /// ready ordered and a ready unordered message arrived first.
@@ -223,6 +224,8 @@ impl ReassemblyQueue {
             ordered: VecDeque::new(),
             unordered: VecDeque::new(),
             unordered_chunks: vec![],
+            unordered_begins: vec![],
+            unordered_ends: vec![],
             n_bytes: 0,
             next_arrival: 0,
         }
@@ -235,16 +238,27 @@ impl ReassemblyQueue {
 
         if chunk.unordered {
             // First, insert into unordered_chunks array
-            //atomic.AddUint64(&r.n_bytes, uint64(len(chunk.userData)))
-            self.n_bytes += chunk.user_data.len();
+            let tsn = chunk.tsn;
             let idx = self
                 .unordered_chunks
-                .partition_point(|c| sna32lt(c.tsn, chunk.tsn));
+                .partition_point(|c| sna32lt(c.tsn, tsn));
+            if idx < self.unordered_chunks.len() && self.unordered_chunks[idx].tsn == tsn {
+                return false;
+            }
+            self.n_bytes += chunk.user_data.len();
+            if chunk.beginning_fragment {
+                let i = self.unordered_begins.partition_point(|&t| sna32lt(t, tsn));
+                self.unordered_begins.insert(i, tsn);
+            }
+            if chunk.ending_fragment {
+                let i = self.unordered_ends.partition_point(|&t| sna32lt(t, tsn));
+                self.unordered_ends.insert(i, tsn);
+            }
             self.unordered_chunks.insert(idx, chunk);
 
-            // Scan unordered_chunks that are contiguous (in TSN)
-            // If found, append the complete set to the unordered array
-            if let Some(cset) = self.find_complete_unordered_chunk_set() {
+            // Find the message this chunk completes, if any, and append it to the
+            // unordered array.
+            if let Some(cset) = self.find_complete_unordered_chunk_set(tsn) {
                 self.unordered.push_back(cset);
                 return true;
             }
@@ -280,54 +294,44 @@ impl ReassemblyQueue {
         }
     }
 
-    pub(crate) fn find_complete_unordered_chunk_set(&mut self) -> Option<Chunks> {
-        let mut start_idx = -1isize;
-        let mut n_chunks = 0usize;
-        let mut last_tsn = 0u32;
-        let mut found = false;
-
-        for (i, c) in self.unordered_chunks.iter().enumerate() {
-            // seek beginning
-            if c.beginning_fragment {
-                start_idx = i as isize;
-                n_chunks = 1;
-                last_tsn = c.tsn;
-
-                if c.ending_fragment {
-                    found = true;
-                    break;
-                }
-                continue;
-            }
-
-            if start_idx < 0 {
-                continue;
-            }
-
-            // Check if contiguous in TSN
-            if c.tsn != last_tsn.wrapping_add(1) {
-                start_idx = -1;
-                continue;
-            }
-
-            last_tsn = c.tsn;
-            n_chunks += 1;
-
-            if c.ending_fragment {
-                found = true;
-                break;
-            }
+    /// Takes out the complete message that holds the fragment with `tsn`, if there is one.
+    ///
+    /// Every complete message is taken out as soon as its last fragment arrives, so a new
+    /// fragment can complete only the message it belongs to: the one from the nearest
+    /// beginning fragment at or before it to the nearest ending fragment at or after it, if
+    /// the TSNs between them are all held. Each step is a binary search, so a peer sending
+    /// many fragments that never complete costs no rescan of what is already held.
+    pub(crate) fn find_complete_unordered_chunk_set(&mut self, tsn: u32) -> Option<Chunks> {
+        let bi = self.unordered_begins.partition_point(|&t| sna32lte(t, tsn));
+        if bi == 0 {
+            return None;
         }
+        let begin_tsn = self.unordered_begins[bi - 1];
+        let ei = self.unordered_ends.partition_point(|&t| sna32lt(t, tsn));
+        if ei == self.unordered_ends.len() {
+            return None;
+        }
+        let end_tsn = self.unordered_ends[ei];
 
-        if !found {
+        let start_idx = self
+            .unordered_chunks
+            .partition_point(|c| sna32lt(c.tsn, begin_tsn));
+        let end_idx = self
+            .unordered_chunks
+            .partition_point(|c| sna32lt(c.tsn, end_tsn));
+        if end_idx >= self.unordered_chunks.len()
+            || self.unordered_chunks[start_idx].tsn != begin_tsn
+            || self.unordered_chunks[end_idx].tsn != end_tsn
+            || !contiguous_span(begin_tsn, end_tsn, end_idx - start_idx + 1)
+        {
             return None;
         }
 
         // Extract the range of chunks
-        let chunks: Vec<ChunkPayloadData> = self
-            .unordered_chunks
-            .drain(start_idx as usize..(start_idx as usize) + n_chunks)
-            .collect();
+        self.unordered_begins.remove(bi - 1);
+        self.unordered_ends.remove(ei);
+        let chunks: Vec<ChunkPayloadData> =
+            self.unordered_chunks.drain(start_idx..=end_idx).collect();
         let arrival = self.next_arrival;
         self.next_arrival += 1;
         Some(Chunks::new(arrival, 0, chunks[0].payload_type, chunks))
@@ -449,6 +453,14 @@ impl ReassemblyQueue {
             }
             self.unordered_chunks.drain(..(last_idx + 1) as usize);
         }
+        let n = self
+            .unordered_begins
+            .partition_point(|&t| sna32lte(t, new_cumulative_tsn));
+        self.unordered_begins.drain(..n);
+        let n = self
+            .unordered_ends
+            .partition_point(|&t| sna32lte(t, new_cumulative_tsn));
+        self.unordered_ends.drain(..n);
     }
 
     pub(crate) fn subtract_num_bytes(&mut self, n_bytes: usize) {
@@ -461,5 +473,13 @@ impl ReassemblyQueue {
 
     pub(crate) fn get_num_bytes(&self) -> usize {
         self.n_bytes
+    }
+
+    /// Whether the queue holds no fragment and no message.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.n_bytes == 0
+            && self.ordered.is_empty()
+            && self.unordered.is_empty()
+            && self.unordered_chunks.is_empty()
     }
 }

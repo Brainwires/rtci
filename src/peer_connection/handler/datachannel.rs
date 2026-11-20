@@ -105,9 +105,8 @@ impl<'a> DataChannelHandler<'a> {
         }
         let channel_id = dc.id;
         self.stats.peer_connection.on_data_channel_closed();
-        if let Some(dc_stats) = self.stats.data_channels.get_mut(&channel_id) {
-            dc_stats.on_state_changed(RTCDataChannelState::Closed);
-        }
+        // The channel is gone from the registry: drop its statistics with it.
+        self.stats.data_channels.remove(&channel_id);
         self.ctx.event_outs.push_back(TaggedRTCEventInternal {
             now,
             event: RTCEventInternal::RTCPeerConnectionEvent(RTCPeerConnectionEvent::OnDataChannel(
@@ -156,6 +155,20 @@ impl<'a> DataChannelHandler<'a> {
         Ok(())
     }
 
+    /// Creates the statistics entry of channel `id` if it has none, copying its label and
+    /// protocol once rather than for every message. A closed channel's entry is not recreated.
+    fn ensure_data_channel_stats(&mut self, id: RTCDataChannelId) {
+        if self.stats.data_channels.contains_key(&id) {
+            return;
+        }
+        if let Some(dc) = self.data_channels.get(&id)
+            && dc.ready_state != RTCDataChannelState::Closed
+        {
+            self.stats
+                .get_or_create_data_channel(id, dc.label(), dc.protocol());
+        }
+    }
+
     /// Emit the `DataChannelEvent::Open` application message and record the
     /// corresponding peer-connection and per-channel statistics.
     ///
@@ -184,11 +197,10 @@ impl<'a> DataChannelHandler<'a> {
         // W3C `dataChannelIdentifier`, which is the wire value rather than the handle the
         // accumulator is keyed by.
         let stream_id = dc.stream_id;
-        let (label, protocol) = (dc.label.clone(), dc.protocol.clone());
 
         self.stats.peer_connection.on_data_channel_opened();
         self.stats
-            .get_or_create_data_channel(id, &label, &protocol)
+            .get_or_create_data_channel(id, dc.label(), dc.protocol())
             .on_state_changed(RTCDataChannelState::Open);
         if let Some(stream_id) = stream_id {
             self.stats.set_data_channel_stream_id(id, stream_id);
@@ -282,15 +294,6 @@ impl<'a>
                 self.emit_data_channel_opened(now, transport, channel_id)?;
             }
 
-            // Get label/protocol before taking mutable borrow for the loop
-            let (label, protocol) = {
-                let dc = self
-                    .data_channels
-                    .get(&channel_id)
-                    .ok_or(Error::ErrDataChannelNotExisted)?;
-                (dc.label.clone(), dc.protocol.clone())
-            };
-
             // Only deliver application messages once the channel is Open. Messages that
             // arrive while it is still Connecting stay buffered in the underlying
             // DataChannel's read queue; they drain once the channel opens, or are
@@ -299,6 +302,9 @@ impl<'a>
                 .data_channels
                 .get(&channel_id)
                 .is_some_and(|dc| dc.ready_state == RTCDataChannelState::Open);
+            if is_open {
+                self.ensure_data_channel_stats(channel_id);
+            }
 
             let data_channel = self
                 .data_channels
@@ -327,9 +333,9 @@ impl<'a>
                     debug!("recv application message {:?}", msg.transport.peer_addr);
 
                     // Track received message stats
-                    self.stats
-                        .get_or_create_data_channel(channel_id, &label, &protocol)
-                        .on_message_received(payload_len);
+                    if let Some(dc_stats) = self.stats.data_channels.get_mut(&channel_id) {
+                        dc_stats.on_message_received(payload_len);
+                    }
 
                     // https://datatracker.ietf.org/doc/html/rfc8831#section-6.6
                     // When receiving an SCTP user message with one of these [Empty]
@@ -396,13 +402,10 @@ impl<'a>
                 let data_len = data.len();
                 let channel_id = message.data_channel_id;
 
-                // Get label/protocol before taking mutable borrow
-                let dc_internal = self
-                    .data_channels
-                    .get(&channel_id)
-                    .ok_or(Error::ErrDataChannelNotExisted)?;
-                let label = dc_internal.label.clone();
-                let protocol = dc_internal.protocol.clone();
+                if self.data_channels.get(&channel_id).is_none() {
+                    return Err(Error::ErrDataChannelNotExisted);
+                }
+                self.ensure_data_channel_stats(channel_id);
 
                 let data_channel = self
                     .data_channels
@@ -419,9 +422,9 @@ impl<'a>
                 data_channel.handle_write(data_channel_message)?;
 
                 // Track sent message stats
-                self.stats
-                    .get_or_create_data_channel(channel_id, &label, &protocol)
-                    .on_message_sent(data_len);
+                if let Some(dc_stats) = self.stats.data_channels.get_mut(&channel_id) {
+                    dc_stats.on_message_sent(data_len);
+                }
 
                 while let Some(data_channel_message) = data_channel.poll_write() {
                     debug!("send data channel message from handle_write");
@@ -690,9 +693,8 @@ impl<'a>
                 }
 
                 self.stats.peer_connection.on_data_channel_closed();
-                self.stats
-                    .get_or_create_data_channel(id, &dc.label, &dc.protocol)
-                    .on_state_changed(RTCDataChannelState::Closed);
+                // Closed for good: its statistics go with it.
+                self.stats.data_channels.remove(&id);
 
                 dc.close_emitted = true;
                 self.ctx.event_outs.push_back(TaggedRTCEventInternal {
@@ -1595,5 +1597,96 @@ mod tests {
             drop(handler);
             assert_eq!(data_channels.len(), 3);
         }
+    }
+
+    /// A peer that opens, uses and resets channels in a loop leaves no statistics behind: a
+    /// channel's entry goes when it closes. Its label is held by the DCEP channel alone, and
+    /// messages are counted against the existing entry.
+    #[test]
+    fn peer_channel_statistics_are_freed_on_close() {
+        use datachannel::message::message_channel_open::{
+            CHANNEL_PRIORITY_NORMAL, ChannelType, DataChannelOpen,
+        };
+        const PEER_STREAM: u16 = 3; // odd: the peer's parity when this side is the DTLS client
+        let label = vec![b'l'; 32 * 1024];
+        let protocol = vec![b'p'; 1024];
+        let open = Message::DataChannelOpen(DataChannelOpen {
+            channel_type: ChannelType::Reliable,
+            priority: CHANNEL_PRIORITY_NORMAL,
+            reliability_parameter: 0,
+            label: label.clone(),
+            protocol: protocol.clone(),
+        })
+        .marshal()
+        .unwrap();
+
+        let now = Instant::now();
+        let mut ctx = DataChannelHandlerContext::new(now);
+        let mut data_channels = DataChannelRegistry::new();
+        let mut stats = RTCStatsAccumulator::new();
+        let mut handler = DataChannelHandler::new(
+            &mut ctx,
+            &mut data_channels,
+            &mut stats,
+            None,
+            RTCDtlsRole::Client,
+            None,
+        );
+        let read = |handler: &mut DataChannelHandler<'_>, message: DataChannelMessage| {
+            handler
+                .handle_read(TaggedRTCMessageInternal {
+                    now,
+                    transport: TransportContext::default(),
+                    message: RTCMessageInternal::Dtls(DTLSMessage::Sctp(message)),
+                })
+                .unwrap()
+        };
+
+        for _ in 0..200 {
+            read(
+                &mut handler,
+                DataChannelMessage {
+                    association_handle: 0,
+                    stream_id: PEER_STREAM,
+                    ppi: PayloadProtocolIdentifier::Dcep,
+                    payload: BytesMut::from(&open[..]),
+                    negotiated: false,
+                },
+            );
+            for _ in 0..3 {
+                read(&mut handler, data_message(0, PEER_STREAM, b"x"));
+            }
+
+            let handle = handler
+                .data_channels
+                .handle_of_stream(&PEER_STREAM)
+                .expect("the peer's channel is open");
+            let dc = handler.data_channels.get(&handle).unwrap();
+            assert_eq!(dc.label().as_bytes(), &label[..]);
+            assert_eq!(dc.protocol().as_bytes(), &protocol[..]);
+            assert!(dc.label.is_empty() && dc.protocol.is_empty(), "held twice");
+            assert_eq!(handler.stats.data_channels.len(), 1);
+            let dc_stats = &handler.stats.data_channels[&handle];
+            assert_eq!(dc_stats.messages_received, 3);
+            assert_eq!(dc_stats.label.as_bytes(), &label[..]);
+
+            handler
+                .handle_event(TaggedRTCEventInternal {
+                    now,
+                    event: RTCEventInternal::SCTPStreamClosed(0, PEER_STREAM),
+                })
+                .unwrap();
+            assert!(
+                handler.stats.data_channels.is_empty(),
+                "a closed channel's statistics were kept"
+            );
+            while handler.poll_read().is_some() {}
+            while handler.poll_write().is_some() {}
+            while handler.poll_event().is_some() {}
+        }
+        drop(handler);
+        assert_eq!(data_channels.len(), 0);
+        assert_eq!(stats.peer_connection.data_channels_opened, 200);
+        assert_eq!(stats.peer_connection.data_channels_closed, 200);
     }
 }

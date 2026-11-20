@@ -48,6 +48,14 @@ pub(crate) const DEFAULT_REPLAY_PROTECTION_WINDOW: usize = 64;
 /// Most not-yet-decryptable records held for later (next epoch / cipher suite not ready).
 /// A flight needs only a few; the rest are unauthenticated until decrypted.
 pub(crate) const MAX_EARLY_ENCRYPTED_PACKETS: usize = 64;
+/// Most application-data records held before the handshake completes. A genuine peer sends them
+/// only after its Finished (the first ones can arrive just before we have processed it); until
+/// the handshake completes the sender is not authenticated, so past this cap (or
+/// [`MAX_PRE_HANDSHAKE_APPLICATION_DATA_BYTES`]) further records are dropped, as lost datagrams
+/// would be.
+pub(crate) const MAX_PRE_HANDSHAKE_APPLICATION_DATA_PACKETS: usize = 16;
+/// Most application-data bytes held before the handshake completes.
+pub(crate) const MAX_PRE_HANDSHAKE_APPLICATION_DATA_BYTES: usize = 64 * 1024;
 /// The highest epoch a peer's records move to. A DTLS 1.2 handshake has one epoch transition,
 /// 0 to 1, and this stack does not renegotiate (a DTLS restart builds a new connection), so a
 /// ChangeCipherSpec is honoured only for that transition. It also bounds the per-epoch replay
@@ -603,6 +611,21 @@ impl DTLSConn {
         self.incoming_encrypted_packets.push_back(pkt);
     }
 
+    /// Whether one more application-data record fits the pre-handshake budget
+    /// ([`MAX_PRE_HANDSHAKE_APPLICATION_DATA_PACKETS`] records,
+    /// [`MAX_PRE_HANDSHAKE_APPLICATION_DATA_BYTES`] bytes).
+    fn has_room_for_early_application_data(&self, a: &ApplicationData) -> bool {
+        if self.incoming_decrypted_packets.len() >= MAX_PRE_HANDSHAKE_APPLICATION_DATA_PACKETS {
+            return false;
+        }
+        let held: usize = self
+            .incoming_decrypted_packets
+            .iter()
+            .map(|p| p.len())
+            .sum();
+        held.saturating_add(a.data.len()) <= MAX_PRE_HANDSHAKE_APPLICATION_DATA_BYTES
+    }
+
     fn handle_incoming_packet(
         &mut self,
         mut pkt: Vec<u8>,
@@ -897,6 +920,14 @@ impl DTLSConn {
                         }),
                         Some(Error::ErrApplicationDataEpochZero),
                     );
+                }
+
+                if !self.is_handshake_completed() && !self.has_room_for_early_application_data(&a) {
+                    debug!(
+                        "{}: pre-handshake application data budget spent, dropping record",
+                        srv_cli_str(self.is_client)
+                    );
+                    return (false, None, None);
                 }
 
                 self.replay_detector[h.epoch as usize].accept();
