@@ -17,6 +17,11 @@ pub(crate) mod state;
 /// [`SctpTransport::max_channels`]. This is only the "no constraint known" fallback.
 pub(crate) const SCTP_MAX_CHANNELS: u16 = u16::MAX;
 
+/// Associations one DTLS transport carries. WebRTC runs exactly one SCTP association over
+/// each DTLS transport (RFC 8261 section 4, RFC 8831 section 6.1), so an INIT for a second
+/// one is refused.
+pub(crate) const MAX_SCTP_ASSOCIATIONS_PER_DTLS_TRANSPORT: u32 = 1;
+
 /// SCTPTransport provides details about the SCTP transport.
 ///
 /// Not `Default`: `id` and `dtls_transport_id` identify *this* connection's transports, and a
@@ -222,11 +227,13 @@ impl SctpTransport {
             ));
             self.sctp_transport_config = Some(sctp_transport_config);
         } else {
+            let mut server_config = ::sctp::ServerConfig::new(sctp_transport_config);
+            server_config.concurrent_associations(MAX_SCTP_ASSOCIATIONS_PER_DTLS_TRANSPORT);
             self.sctp_endpoint = Some(::sctp::Endpoint::new(
                 TransportContext::default().local_addr, // placeholder; rewritten per-transmit by the ICE handler
                 TransportProtocol::UDP, // placeholder; rewritten per-transmit by the ICE handler
                 sctp_endpoint_config.into(),
-                Some(::sctp::ServerConfig::new(sctp_transport_config).into()),
+                Some(server_config.into()),
             ));
         }
 
@@ -482,5 +489,65 @@ mod tests {
             ::sctp::StreamScheduler::FirstComeFirstServed,
             scheduler_after_start(transport)
         );
+    }
+
+    /// One DTLS transport carries one SCTP association: INITs that would start more on the
+    /// accepting side are refused, whatever tags they carry.
+    #[test]
+    fn the_accepting_side_holds_one_association_per_dtls_transport() {
+        let mut transport = SctpTransport::new(
+            SctpMaxMessageSize::Bounded(65536),
+            None,
+            None,
+            test_transport_id(TransportKind::Sctp),
+            test_transport_id(TransportKind::Dtls),
+        );
+        transport
+            .start(
+                RTCDtlsRole::Server,
+                SCTPTransportCapabilities {
+                    max_message_size: 65536,
+                },
+                5000,
+                5000,
+            )
+            .expect("start");
+
+        let now = std::time::Instant::now();
+        let peer: std::net::SocketAddr = "127.0.0.1:4444".parse().unwrap();
+        let mut client_ep = ::sctp::Endpoint::new(
+            peer,
+            TransportProtocol::UDP,
+            ::sctp::EndpointConfig::default().into(),
+            None,
+        );
+
+        let mut new_associations = 0;
+        for _ in 0..1000 {
+            let (_ch, mut conn) = client_ep
+                .connect(
+                    now,
+                    ::sctp::ClientConfig::new(::sctp::TransportConfig::default()),
+                    "127.0.0.1:5000".parse().unwrap(),
+                )
+                .expect("connect");
+            while let Some(t) = conn.poll_transmit(now) {
+                let ::sctp::Payload::RawEncode(contents) = t.message else {
+                    continue;
+                };
+                for dgram in contents {
+                    let server_ep = transport.sctp_endpoint.as_mut().expect("endpoint");
+                    if let Some((ch, ::sctp::DatagramEvent::NewAssociation(a))) =
+                        server_ep.handle(now, peer, None, dgram)
+                    {
+                        new_associations += 1;
+                        transport.sctp_associations.insert(ch, a);
+                    }
+                }
+            }
+        }
+
+        assert_eq!(new_associations, 1);
+        assert_eq!(transport.sctp_associations.len(), 1);
     }
 }
