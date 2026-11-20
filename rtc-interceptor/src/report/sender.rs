@@ -120,6 +120,14 @@ impl SenderReportBuilder {
     }
 }
 
+/// A stream unbound since the chain was last polled.
+struct Departing {
+    ssrc: u32,
+    stream: SenderStream,
+    /// Its final sender report and BYE, if it ever sent.
+    goodbye: Option<TaggedPacket>,
+}
+
 /// Interceptor that filters hop-by-hop RTCP reports.
 ///
 /// This interceptor filters out RTCP Receiver Reports and Transport-Specific
@@ -151,6 +159,11 @@ pub struct SenderReportInterceptor {
     /// The latest instant handed in, for stamping the goodbye of a stream unbound without one.
     last_now: Option<Instant>,
 
+    /// Streams unbound since the chain was last polled, with the goodbye each says. A stream
+    /// bound again with the same SSRC before then (a renegotiation re-binding it with a new
+    /// codec) takes its state back and says no goodbye: it goes on.
+    departing: Vec<Departing>,
+
     read_queue: VecDeque<TaggedPacket>,
     write_queue: VecDeque<TaggedPacket>,
 }
@@ -168,8 +181,19 @@ impl SenderReportInterceptor {
 
             last_now: None,
 
+            departing: Vec::new(),
+
             read_queue: VecDeque::new(),
             write_queue: VecDeque::new(),
+        }
+    }
+
+    /// Queues the goodbye of every stream that was unbound and not bound again.
+    fn flush_departing(&mut self) {
+        for departing in self.departing.drain(..) {
+            if let Some(goodbye) = departing.goodbye {
+                self.write_queue.push_back(goodbye);
+            }
         }
     }
 
@@ -201,6 +225,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for SenderReportInterceptor {
     }
 
     fn handle_write(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
+        self.flush_departing();
         self.last_now = Some(self.last_now.map_or(msg.now, |last| last.max(msg.now)));
         if let Packet::Rtp(rtp_packet) = &msg.message.packet
             && let Some(stream) = self.streams.get_mut(&rtp_packet.header.ssrc)
@@ -219,6 +244,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for SenderReportInterceptor {
     }
 
     fn poll_write(&mut self) -> Option<TaggedPacket> {
+        self.flush_departing();
         // First drain generated RTCP reports
         if let Some(pkt) = self.write_queue.pop_front() {
             return Some(pkt);
@@ -227,6 +253,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for SenderReportInterceptor {
     }
 
     fn handle_timeout(&mut self, now: Instant) -> Result<(), Error> {
+        self.flush_departing();
         self.last_now = Some(self.last_now.map_or(now, |last| last.max(now)));
         if let Some(next_timeout) = self.next_timeout
             && now >= next_timeout
@@ -252,42 +279,54 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for SenderReportInterceptor {
 }
 
 impl Interceptor for SenderReportInterceptor {
+    /// A stream unbound a moment ago (since the chain was last polled) and bound again with the
+    /// same SSRC is the same stream re-bound by a renegotiation: it keeps its packet and octet
+    /// counts and RTP / NTP timing, takes the new clock rate, and its goodbye is withdrawn.
     fn bind_local_stream(&mut self, info: &StreamInfo) {
-        let stream = SenderStream::new(info.ssrc, info.clock_rate, self.use_latest_packet);
+        let stream = match self.departing.iter().position(|d| d.ssrc == info.ssrc) {
+            Some(i) => {
+                let mut stream = self.departing.remove(i).stream;
+                stream.set_clock_rate(info.clock_rate);
+                stream
+            }
+            None => SenderStream::new(info.ssrc, info.clock_rate, self.use_latest_packet),
+        };
         self.streams.insert(info.ssrc, stream);
     }
 
     /// A stream that sent and is now unbound (its sender stopped) says goodbye: a final sender
     /// report and an RTCP BYE for its SSRC and its repair flows, in one compound packet
-    /// (RFC 3550 6.6: a BYE follows a report in a compound packet).
+    /// (RFC 3550 6.6: a BYE follows a report in a compound packet). The goodbye goes out when
+    /// the chain is next polled, unless the stream is bound again first.
     fn unbind_local_stream(&mut self, info: &StreamInfo) {
         let Some(mut stream) = self.streams.remove(&info.ssrc) else {
             return;
         };
-        let Some(now) = self.last_now else {
-            return;
+        let goodbye = match self.last_now {
+            Some(now) if stream.has_sent() => stream.generate_report(now).map(|report| {
+                let sources = std::iter::once(info.ssrc)
+                    .chain(info.ssrc_rtx)
+                    .chain(info.ssrc_fec)
+                    .collect();
+                TaggedPacket {
+                    now,
+                    transport: TransportContext::default(),
+                    message: AttributedPacket::new(Packet::Rtcp(vec![
+                        Box::new(report),
+                        Box::new(rtcp::goodbye::Goodbye {
+                            sources,
+                            reason: Default::default(),
+                        }),
+                    ])),
+                }
+            }),
+            _ => None,
         };
-        if !stream.has_sent() {
-            return;
-        }
-        let Some(report) = stream.generate_report(now) else {
-            return;
-        };
-
-        let sources = std::iter::once(info.ssrc)
-            .chain(info.ssrc_rtx)
-            .chain(info.ssrc_fec)
-            .collect();
-        self.write_queue.push_back(TaggedPacket {
-            now,
-            transport: TransportContext::default(),
-            message: AttributedPacket::new(Packet::Rtcp(vec![
-                Box::new(report),
-                Box::new(rtcp::goodbye::Goodbye {
-                    sources,
-                    reason: Default::default(),
-                }),
-            ])),
+        self.departing.retain(|d| d.ssrc != info.ssrc);
+        self.departing.push(Departing {
+            ssrc: info.ssrc,
+            stream,
+            goodbye,
         });
     }
 

@@ -448,10 +448,11 @@ impl RTCRtpSenderInternal {
     /// type or SSRC, the FEC flow, the header extensions). The SSRCs stay; each changed stream
     /// is unbound with the information it was bound with and bound again with the new.
     ///
-    /// Unbinding resets what the interceptors keep for the stream: the sender report's packet
-    /// and octet counts start again, the NACK responder's buffer of sent packets is emptied
-    /// (packets sent before the change are no longer resent), and the TWCC and congestion
-    /// control send side forget the stream until its next packet.
+    /// The sender report interceptor sees the unbind and bind back to back and keeps the
+    /// stream (its packet and octet counts and timing carry on, no RTCP BYE is sent). Other
+    /// interceptors reset what they keep for it: the NACK responder's buffer of sent packets is
+    /// emptied (packets sent before the change are no longer resent), and the TWCC and
+    /// congestion control send side forget the stream until its next packet.
     ///
     /// # Returns
     ///
