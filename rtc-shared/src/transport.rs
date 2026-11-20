@@ -2,15 +2,16 @@ use bytes::BytesMut;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Instant;
 
-/// Explicit congestion notification codepoint
+/// Explicit congestion notification codepoint (RFC 3168 section 5): the low two bits of the
+/// IPv4 TOS byte or the IPv6 Traffic Class. Not-ECT (`00`) is the absence of one, `None`.
 #[repr(u8)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum EcnCodepoint {
-    #[doc(hidden)]
+    /// `10`: ECN-Capable Transport, ECT(0).
     Ect0 = 0b10,
-    #[doc(hidden)]
+    /// `01`: ECN-Capable Transport, ECT(1), the L4S identifier (RFC 9331).
     Ect1 = 0b01,
-    #[doc(hidden)]
+    /// `11`: Congestion Experienced.
     Ce = 0b11,
 }
 
@@ -49,7 +50,11 @@ pub struct TransportContext {
     pub peer_addr: SocketAddr,
     /// Type of transport protocol, either UDP or TCP
     pub transport_protocol: TransportProtocol,
-    /// Explicit congestion notification bits to set on the packet
+    /// Explicit congestion notification codepoint (`None` is Not-ECT).
+    ///
+    /// On a received datagram, the codepoint it arrived with, as the socket layer read it
+    /// (`IP_RECVTOS` / `IPV6_RECVTCLASS`); on a datagram to send, the codepoint to set on it
+    /// (`IP_TOS` / `IPV6_TCLASS`).
     pub ecn: Option<EcnCodepoint>,
 }
 
