@@ -255,6 +255,8 @@ pub struct Association {
     events: VecDeque<Event>,
     endpoint_events: VecDeque<EndpointEventInner>,
     error: Option<AssociationError>,
+    /// Set by [`close`](Self::close): the association is over, whatever state it was in.
+    ended: bool,
 
     // per inbound packet context
     delayed_ack_triggered: bool,
@@ -349,6 +351,7 @@ impl Default for Association {
             events: VecDeque::default(),
             endpoint_events: VecDeque::default(),
             error: None,
+            ended: false,
 
             // per inbound packet context
             delayed_ack_triggered: false,
@@ -648,6 +651,15 @@ impl Association {
         self.state == AssociationState::Closed
     }
 
+    /// Whether the association is over: closed by either side, by an error, or by a handshake
+    /// that failed.
+    ///
+    /// Unlike [`is_closed`](Self::is_closed), false for an association still handshaking in
+    /// SCTP's initial CLOSED state (RFC 9260 section 4), which has not ended.
+    pub fn is_ended(&self) -> bool {
+        self.ended
+    }
+
     /// Whether there is no longer any need to keep the association around
     ///
     /// Closed associations become drained after a brief timeout to absorb any remaining in-flight
@@ -727,7 +739,7 @@ impl Association {
     /// `poll_transmit` before this call is discarded, so drain it first if it should still go out.
     /// A no-op on a closed association.
     pub fn abort(&mut self) -> Result<()> {
-        if self.state() == AssociationState::Closed {
+        if self.ended {
             return Ok(());
         }
         let abort = ChunkAbort {
@@ -743,7 +755,11 @@ impl Association {
 
     /// Close ends the SCTP Association and cleans up any state
     pub fn close(&mut self, reason: AssociationError) -> Result<()> {
-        if self.state() != AssociationState::Closed {
+        // Keyed on `ended`, not on the CLOSED state: an accepting association is in SCTP's
+        // initial CLOSED state until the COOKIE ECHO, so an ABORT or an error during its
+        // handshake used to close nothing and leave it handshaking for good.
+        if !self.ended {
+            self.ended = true;
             self.set_state(AssociationState::Closed);
 
             debug!("[{}] closing association..", self.side);
@@ -3627,18 +3643,27 @@ impl Association {
 
     fn on_retransmission_failure(&mut self, id: Timer) {
         match id {
+            // A handshake that runs out of retransmissions is over (RFC 9260 5.1 A, C). It
+            // used to only report HandshakeFailed and stay in COOKIE-WAIT / COOKIE-ECHOED, so
+            // whatever watched the association saw it connecting for good.
             Timer::T1Init => {
                 error!("[{}] retransmission failure: T1-init", self.side);
-                self.error = Some(AssociationError::HandshakeFailed(
-                    Error::ErrHandshakeInitAck.to_string(),
-                ));
+                let reason =
+                    AssociationError::HandshakeFailed(Error::ErrHandshakeInitAck.to_string());
+                self.error = Some(reason.clone());
+                if let Err(err) = self.close(reason) {
+                    error!("[{}] failed to close association: {err}", self.side);
+                }
             }
 
             Timer::T1Cookie => {
                 error!("[{}] retransmission failure: T1-cookie", self.side);
-                self.error = Some(AssociationError::HandshakeFailed(
-                    Error::ErrHandshakeCookieEcho.to_string(),
-                ));
+                let reason =
+                    AssociationError::HandshakeFailed(Error::ErrHandshakeCookieEcho.to_string());
+                self.error = Some(reason.clone());
+                if let Err(err) = self.close(reason) {
+                    error!("[{}] failed to close association: {err}", self.side);
+                }
             }
 
             Timer::T2Shutdown => {

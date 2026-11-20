@@ -263,6 +263,135 @@ impl<'a> SctpHandler<'a> {
         }
     }
 
+    /// Turns one association's pending events into this handler's events and reads.
+    ///
+    /// Both `handle_read` and `handle_timeout` come through here. Events a timer raises (a
+    /// handshake that ran out of retransmissions, an association closed by its T3-rtx limit,
+    /// buffers released by abandoning messages) used to wait for the next inbound datagram,
+    /// which after a failed handshake never comes.
+    #[allow(clippy::too_many_arguments)]
+    fn process_association_events(
+        conn: &mut Association,
+        ch: AssociationHandle,
+        now: Instant,
+        event_outs: &mut VecDeque<TaggedRTCEventInternal>,
+        pending_readable: &mut HashSet<(AssociationHandle, StreamId)>,
+        peer_opened: &mut HashSet<(AssociationHandle, StreamId)>,
+        unannounced: &mut HashSet<AssociationHandle>,
+        max_len: usize,
+        budget: &mut usize,
+        messages: &mut Vec<SctpMessage>,
+    ) -> Result<()> {
+        while let Some(event) = conn.poll() {
+            match event {
+                Event::HandshakeFailed { reason } => {
+                    // The association closed with it, and its `AssociationClosed` (with this
+                    // reason) fails the transport and the channels.
+                    debug!(
+                        "association_handle {} handshake failed due to {}",
+                        ch.0, reason
+                    );
+                }
+                Event::Connected => {
+                    debug!("association_handle {} is connected", ch.0);
+                    event_outs.push_back(TaggedRTCEventInternal {
+                        now,
+                        event: RTCEventInternal::SCTPHandshakeComplete(ch.0),
+                    });
+                    // Its data waits for the event (see `unannounced`).
+                    unannounced.insert(ch);
+                }
+                Event::AssociationLost { reason, id } => {
+                    debug!("association_handle {} is closed due to {}", ch.0, reason);
+                    // A stream reset (either side's close) is the channel's own
+                    // closing procedure; the association going away under it is
+                    // a failure the channel reports first.
+                    if matches!(
+                        reason,
+                        AssociationError::AssociationClosed
+                            | AssociationError::TransportError
+                            | AssociationError::TimedOut
+                            | AssociationError::HandshakeFailed(_)
+                    ) {
+                        event_outs.push_back(TaggedRTCEventInternal {
+                            now,
+                            event: RTCEventInternal::SCTPStreamFailed(ch.0, id),
+                        });
+                    }
+                    event_outs.push_back(TaggedRTCEventInternal {
+                        now,
+                        event: RTCEventInternal::SCTPStreamClosed(ch.0, id),
+                    });
+                }
+                Event::AssociationClosed { reason } => {
+                    if matches!(
+                        reason,
+                        AssociationError::AssociationClosed
+                            | AssociationError::TransportError
+                            | AssociationError::TimedOut
+                            | AssociationError::HandshakeFailed(_)
+                    ) {
+                        event_outs.push_back(TaggedRTCEventInternal {
+                            now,
+                            event: RTCEventInternal::SCTPAssociationFailed(ch.0),
+                        });
+                    }
+                }
+                Event::Stream(StreamEvent::Opened { id }) => {
+                    // The peer's DATA created this stream. Its first message
+                    // may be the OPEN this side's sends must follow.
+                    peer_opened.insert((ch, id));
+                }
+                Event::Stream(StreamEvent::Readable { id }) => {
+                    // Bounded: what is not read stays in the reassembly queue,
+                    // which is what lowers `a_rwnd` and throttles the peer.
+                    Self::drain_stream(
+                        pending_readable,
+                        peer_opened,
+                        unannounced,
+                        conn,
+                        ch,
+                        id,
+                        max_len,
+                        budget,
+                        messages,
+                    )?;
+                }
+                Event::Stream(StreamEvent::BufferedAmountLow { id }) => {
+                    debug!(
+                        "association_handle {} stream id {} is buffered amount low",
+                        ch.0, id
+                    );
+                    event_outs.push_back(TaggedRTCEventInternal {
+                        now,
+                        event: RTCEventInternal::SCTPBufferedAmountLow(ch.0, id),
+                    });
+                }
+                Event::Stream(StreamEvent::BufferedAmountHigh { id }) => {
+                    debug!(
+                        "association_handle {} stream id {} is buffered amount high",
+                        ch.0, id
+                    );
+                    event_outs.push_back(TaggedRTCEventInternal {
+                        now,
+                        event: RTCEventInternal::SCTPBufferedAmountHigh(ch.0, id),
+                    });
+                }
+                Event::Stream(StreamEvent::BufferedAmountReleased { id, n_bytes }) => {
+                    // Forward the exact released byte count so the data
+                    // channel handler can decrement its synchronous
+                    // send back-pressure counter (see DataChannelHandler).
+                    event_outs.push_back(TaggedRTCEventInternal {
+                        now,
+                        event: RTCEventInternal::SCTPBufferReleased(ch.0, id, n_bytes),
+                    });
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
     /// Configures this side's outgoing direction of a peer-opened stream from the peer's
     /// `DATA_CHANNEL_OPEN`.
     ///
@@ -502,110 +631,18 @@ impl<'a>
                         }
                     }
 
-                    while let Some(event) = conn.poll() {
-                        match event {
-                            Event::HandshakeFailed { reason } => {
-                                debug!(
-                                    "association_handle {} handshake failed due to {}",
-                                    ch.0, reason
-                                );
-                                //TODO: put it into event_outs?
-                            }
-                            Event::Connected => {
-                                debug!("association_handle {} is connected", ch.0);
-                                self.ctx.event_outs.push_back(TaggedRTCEventInternal {
-                                    now,
-                                    event: RTCEventInternal::SCTPHandshakeComplete(ch.0),
-                                });
-                                // Its data waits for the event (see `unannounced`).
-                                self.ctx.unannounced.insert(*ch);
-                            }
-                            Event::AssociationLost { reason, id } => {
-                                debug!("association_handle {} is closed due to {}", ch.0, reason);
-                                // A stream reset (either side's close) is the channel's own
-                                // closing procedure; the association going away under it is
-                                // a failure the channel reports first.
-                                if matches!(
-                                    reason,
-                                    AssociationError::AssociationClosed
-                                        | AssociationError::TransportError
-                                        | AssociationError::TimedOut
-                                ) {
-                                    self.ctx.event_outs.push_back(TaggedRTCEventInternal {
-                                        now,
-                                        event: RTCEventInternal::SCTPStreamFailed(ch.0, id),
-                                    });
-                                }
-                                self.ctx.event_outs.push_back(TaggedRTCEventInternal {
-                                    now,
-                                    event: RTCEventInternal::SCTPStreamClosed(ch.0, id),
-                                });
-                            }
-                            Event::AssociationClosed { reason } => {
-                                if matches!(
-                                    reason,
-                                    AssociationError::AssociationClosed
-                                        | AssociationError::TransportError
-                                        | AssociationError::TimedOut
-                                ) {
-                                    self.ctx.event_outs.push_back(TaggedRTCEventInternal {
-                                        now,
-                                        event: RTCEventInternal::SCTPAssociationFailed(ch.0),
-                                    });
-                                }
-                            }
-                            Event::Stream(StreamEvent::Opened { id }) => {
-                                // The peer's DATA created this stream. Its first message
-                                // may be the OPEN this side's sends must follow.
-                                self.ctx.peer_opened_streams.insert((*ch, id));
-                            }
-                            Event::Stream(StreamEvent::Readable { id }) => {
-                                // Bounded: what is not read stays in the reassembly queue,
-                                // which is what lowers `a_rwnd` and throttles the peer.
-                                Self::drain_stream(
-                                    &mut self.ctx.pending_readable,
-                                    &mut self.ctx.peer_opened_streams,
-                                    &self.ctx.unannounced,
-                                    conn,
-                                    *ch,
-                                    id,
-                                    max_len,
-                                    &mut budget,
-                                    &mut messages,
-                                )?;
-                            }
-                            Event::Stream(StreamEvent::BufferedAmountLow { id }) => {
-                                debug!(
-                                    "association_handle {} stream id {} is buffered amount low",
-                                    ch.0, id
-                                );
-                                self.ctx.event_outs.push_back(TaggedRTCEventInternal {
-                                    now,
-                                    event: RTCEventInternal::SCTPBufferedAmountLow(ch.0, id),
-                                });
-                            }
-                            Event::Stream(StreamEvent::BufferedAmountHigh { id }) => {
-                                debug!(
-                                    "association_handle {} stream id {} is buffered amount high",
-                                    ch.0, id
-                                );
-                                self.ctx.event_outs.push_back(TaggedRTCEventInternal {
-                                    now,
-                                    event: RTCEventInternal::SCTPBufferedAmountHigh(ch.0, id),
-                                });
-                            }
-                            Event::Stream(StreamEvent::BufferedAmountReleased { id, n_bytes }) => {
-                                // Forward the exact released byte count so the data
-                                // channel handler can decrement its synchronous
-                                // send back-pressure counter (see DataChannelHandler).
-                                self.ctx.event_outs.push_back(TaggedRTCEventInternal {
-                                    now,
-                                    event: RTCEventInternal::SCTPBufferReleased(ch.0, id, n_bytes),
-                                });
-                            }
-                            _ => {}
-                        }
-                    }
+                    Self::process_association_events(
+                        conn,
+                        *ch,
+                        now,
+                        &mut self.ctx.event_outs,
+                        &mut self.ctx.pending_readable,
+                        &mut self.ctx.peer_opened_streams,
+                        &mut self.ctx.unannounced,
+                        max_len,
+                        &mut budget,
+                        &mut messages,
+                    )?;
 
                     while let Some(event) = conn.poll_endpoint_event() {
                         endpoint_events.push((*ch, event));
@@ -948,6 +985,8 @@ impl<'a>
         }
 
         let mut transmits = vec![];
+        let max_len = self.ctx.sctp_transport.receive_message_limit;
+        let mut budget = self.read_budget();
 
         let (sctp_endpoint, sctp_associations) = (
             self.ctx
@@ -961,6 +1000,37 @@ impl<'a>
         let mut endpoint_events: Vec<(AssociationHandle, EndpointEvent)> = vec![];
         for (ch, conn) in sctp_associations.iter_mut() {
             conn.handle_timeout(now);
+
+            let mut messages = vec![];
+            Self::process_association_events(
+                conn,
+                *ch,
+                now,
+                &mut self.ctx.event_outs,
+                &mut self.ctx.pending_readable,
+                &mut self.ctx.peer_opened_streams,
+                &mut self.ctx.unannounced,
+                max_len,
+                &mut budget,
+                &mut messages,
+            )?;
+            // No datagram triggered these reads: stamp them with the association's own 5-tuple,
+            // as a resumed drain is.
+            let transport = self
+                .ctx
+                .association_transport
+                .get(ch)
+                .copied()
+                .unwrap_or_default();
+            for message in messages {
+                if let SctpMessage::Inbound(message) = message {
+                    self.ctx.read_outs.push_back(TaggedRTCMessageInternal {
+                        now,
+                        transport,
+                        message: RTCMessageInternal::Dtls(DTLSMessage::Sctp(message)),
+                    });
+                }
+            }
 
             while let Some(event) = conn.poll_endpoint_event() {
                 endpoint_events.push((*ch, event));
@@ -2468,6 +2538,54 @@ mod tests {
                 })),
             })
             .expect("client write");
+    }
+
+    /// A client handshake that nobody answers ends when INIT runs out of retransmissions.
+    /// Its failure is raised by a timer, with no datagram ever arriving, so `handle_timeout` has
+    /// to surface it: the transport becomes `closed` and the channels are failed (B5). The
+    /// events used to wait for a `handle_read` that never came.
+    #[test]
+    fn a_handshake_that_times_out_fails_the_association() {
+        let start = Instant::now();
+        let mut client_ep = Endpoint::new(
+            client_addr(),
+            TransportProtocol::UDP,
+            EndpointConfig::default().into(),
+            None,
+        );
+        let (ch, conn) = client_ep
+            .connect(
+                start,
+                ClientConfig::new(TransportConfig::default()),
+                server_addr(),
+            )
+            .expect("client connect");
+        let mut ctx = client_ctx(start, client_ep, ch, conn);
+
+        let mut failed = false;
+        for _ in 0..64 {
+            let mut handler = SctpHandler::new(&mut ctx, 0);
+            while handler.poll_write().is_some() {}
+            let Some(at) = handler.poll_timeout() else {
+                break;
+            };
+            handler.handle_timeout(at).expect("timeout");
+            while let Some(evt) = handler.poll_event() {
+                failed |=
+                    matches!(evt.event, RTCEventInternal::SCTPAssociationFailed(h) if h == ch.0);
+            }
+            if failed {
+                break;
+            }
+        }
+        assert!(
+            failed,
+            "the failed handshake never reached the data channels"
+        );
+        assert_eq!(
+            crate::peer_connection::transport::sctp::state::RTCSctpTransportState::Closed,
+            ctx.sctp_transport.state()
+        );
     }
 
     /// Audit finding R-L12: one message over this side's receive limit is dropped on its own.

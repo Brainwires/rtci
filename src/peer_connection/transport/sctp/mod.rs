@@ -114,10 +114,11 @@ impl SctpTransport {
             .or_else(|| self.sctp_associations.values().next())
     }
 
-    /// An association that completed its handshake and has since closed. One still handshaking
-    /// is in SCTP's initial `CLOSED` state too (RFC 9260 section 4), which is not an end.
+    /// An association that is over: closed after its handshake, or during it (an ABORT, a
+    /// handshake that ran out of retransmissions). One still handshaking is in SCTP's initial
+    /// `CLOSED` state too (RFC 9260 section 4), which is not an end.
     fn ended(association: &Association) -> bool {
-        association.is_closed() && !association.is_handshaking()
+        association.is_ended()
     }
 
     /// W3C `SctpTransport.state`.
@@ -126,10 +127,12 @@ impl SctpTransport {
     /// assigned once at construction and never updated or read, so any getter over it would have
     /// reported `Connecting` for the lifetime of the connection.
     pub(crate) fn state(&self) -> RTCSctpTransportState {
+        // An association that ended during its handshake is `closed` (W3C webrtc 6.1.1: the
+        // transport is closed when the association is), not `connecting` for good.
         match self.association() {
             None => RTCSctpTransportState::Connecting,
+            Some(association) if Self::ended(association) => RTCSctpTransportState::Closed,
             Some(association) if association.is_handshaking() => RTCSctpTransportState::Connecting,
-            Some(association) if association.is_closed() => RTCSctpTransportState::Closed,
             Some(_) => RTCSctpTransportState::Connected,
         }
     }
@@ -270,6 +273,24 @@ mod tests {
             transport.max_channels(),
             "a handshaking association negotiated nothing"
         );
+    }
+
+    /// An association that ended during its handshake (an ABORT, a handshake that ran out of
+    /// retransmissions) is `closed`, not `connecting` for good (B5).
+    #[test]
+    fn an_association_that_ended_in_its_handshake_is_closed() {
+        let mut transport = started_transport(SctpMaxMessageSize::Bounded(65536), 65536);
+        let mut association = Association::default();
+        association
+            .close(sctp::AssociationError::HandshakeFailed(
+                "no INIT ACK".to_owned(),
+            ))
+            .expect("close");
+        assert!(association.is_handshaking());
+        transport
+            .sctp_associations
+            .insert(AssociationHandle(0), association);
+        assert_eq!(transport.state(), RTCSctpTransportState::Closed);
     }
 
     fn started_transport(

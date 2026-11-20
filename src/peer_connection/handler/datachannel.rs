@@ -538,24 +538,25 @@ impl<'a>
             }
 
             RTCEventInternal::SCTPAssociationFailed(_association_handle) => {
-                // One association per connection: every channel still open fails with it.
-                let mut failed = Vec::new();
-                for dc in self.data_channels.values_mut() {
+                // One association per connection: every channel over it fails with it and is
+                // closed, its underlying data transport being gone (W3C webrtc 6.2, "announce
+                // the data channel as closed" with an error). Channels with a stream were
+                // closed by their own `SCTPStreamClosed` already; this reaches the rest: a
+                // pre-negotiated channel that never carried data, and every channel of an
+                // association that failed in its handshake, which never opened a stream and
+                // so stayed `connecting` for good.
+                for dc in self.data_channels.drain() {
                     if !dc.close_emitted && !dc.failed {
-                        dc.failed = true;
-                        failed.push(dc.id);
+                        self.ctx.event_outs.push_back(TaggedRTCEventInternal {
+                            now,
+                            event: RTCEventInternal::RTCPeerConnectionEvent(
+                                RTCPeerConnectionEvent::OnDataChannel(
+                                    RTCDataChannelEvent::OnError(dc.id),
+                                ),
+                            ),
+                        });
                     }
-                }
-                failed.sort_unstable();
-                for channel_id in failed {
-                    self.ctx.event_outs.push_back(TaggedRTCEventInternal {
-                        now,
-                        event: RTCEventInternal::RTCPeerConnectionEvent(
-                            RTCPeerConnectionEvent::OnDataChannel(RTCDataChannelEvent::OnError(
-                                channel_id,
-                            )),
-                        ),
-                    });
+                    self.announce_closed(now, dc);
                 }
             }
 
@@ -1196,7 +1197,8 @@ mod tests {
     }
 
     /// An association lost to an error fails every channel over it, a pre-negotiated one that
-    /// never carried data (and so has no SCTP stream to report) included, once each.
+    /// never carried data (and so has no SCTP stream to report) included, once each, and
+    /// closes it: its underlying data transport is gone.
     #[test]
     fn association_failure_fails_idle_negotiated_channels() {
         let mut ctx = DataChannelHandlerContext::new(Instant::now());
@@ -1213,7 +1215,60 @@ mod tests {
         );
         assert_eq!(
             channel_events(&ctx),
-            vec![RTCDataChannelEvent::OnError(handles[0])]
+            vec![
+                RTCDataChannelEvent::OnError(handles[0]),
+                RTCDataChannelEvent::OnClose(handles[0]),
+            ]
+        );
+        assert!(data_channels.is_empty());
+    }
+
+    /// An association that fails in its handshake opened no stream, so no stream event closes
+    /// its channels: the association's own failure must (B5). They were left `connecting`.
+    #[test]
+    fn handshake_failure_closes_connecting_channels() {
+        let mut ctx = DataChannelHandlerContext::new(Instant::now());
+        let (mut data_channels, handles) =
+            registry(vec![in_band_channel(1), negotiated_channel(2)]);
+        feed(
+            &mut ctx,
+            &mut data_channels,
+            vec![RTCEventInternal::SCTPAssociationFailed(0)],
+        );
+        assert_eq!(
+            channel_events(&ctx),
+            vec![
+                RTCDataChannelEvent::OnError(handles[0]),
+                RTCDataChannelEvent::OnClose(handles[0]),
+                RTCDataChannelEvent::OnError(handles[1]),
+                RTCDataChannelEvent::OnClose(handles[1]),
+            ]
+        );
+        assert!(data_channels.is_empty());
+    }
+
+    /// A channel the stream path already closed is not closed (or failed) twice.
+    #[test]
+    fn association_failure_after_stream_failure_closes_once() {
+        let mut ctx = DataChannelHandlerContext::new(Instant::now());
+        let mut dc = negotiated_channel(3);
+        dc.ready_state = RTCDataChannelState::Open;
+        let (mut data_channels, handles) = registry(vec![dc]);
+        feed(
+            &mut ctx,
+            &mut data_channels,
+            vec![
+                RTCEventInternal::SCTPStreamFailed(0, 3),
+                RTCEventInternal::SCTPStreamClosed(0, 3),
+                RTCEventInternal::SCTPAssociationFailed(0),
+            ],
+        );
+        assert_eq!(
+            channel_events(&ctx),
+            vec![
+                RTCDataChannelEvent::OnError(handles[0]),
+                RTCDataChannelEvent::OnClose(handles[0]),
+            ]
         );
     }
 

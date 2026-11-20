@@ -176,8 +176,8 @@ impl Link {
         }
     }
 
-    /// Starts the client's handshake and runs until both sides are connected.
-    pub(crate) fn connect(&mut self) {
+    /// Starts the client's handshake without waiting for it.
+    pub(crate) fn begin_connect(&mut self) {
         let (ch, conn) = self
             .client
             .endpoint
@@ -188,6 +188,11 @@ impl Link {
             )
             .expect("connect");
         self.client.association = Some((ch, conn));
+    }
+
+    /// Starts the client's handshake and runs until both sides are connected.
+    pub(crate) fn connect(&mut self) {
+        self.begin_connect();
         let deadline = self.now + Duration::from_secs(60);
         assert!(
             self.run_until(deadline, |l| l.client.connected() && l.server.connected()),
