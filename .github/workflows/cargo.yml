@@ -10,6 +10,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -21,20 +24,105 @@ jobs:
         os: [ 'ubuntu-latest', 'macos-latest', 'windows-latest' ]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Build
         run: cargo build --verbose
 
   test:
     name: Test (default backend)
-    strategy:
-      matrix:
-        os: [ 'ubuntu-latest' ] #, 'macos-latest', 'windows-latest' ]
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Run tests
         run: cargo test --verbose
+
+  # macOS and Windows: the whole workspace's tests with default features, on our runners first
+  # (GitHub's when ours are busy).
+  #
+  # Self-hosted runners only take a push or a pull request from a branch of this repository. A
+  # pull request from a fork runs `test_platforms_fork` on GitHub's runners and never names our
+  # labels (the fork's run still needs a maintainer's approval, and a fork can edit this file:
+  # review `runs-on` and `.github/` changes before approving one).
+  runners:
+    name: pick runners
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name != 'pull_request_target' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
+    timeout-minutes: 5
+    permissions:
+      actions: read
+    outputs:
+      plan: ${{ steps.pick.outputs.plan }}
+    steps:
+      - id: pick
+        uses: Brainwires/.github/actions/pick-runners@9a9d641a07c2885ba48dfc0bd2e3e9049f486374 # pick-runners
+        with:
+          jobs: test_macos=macos-arm64 test_windows=windows-x64
+          vars: ${{ toJSON(vars) }}
+          runner-token: ${{ secrets.RUNNER_STATUS_TOKEN }}
+
+  test_platforms:
+    name: Test (${{ matrix.name }}, default features)
+    needs: runners
+    runs-on: ${{ fromJSON(needs.runners.outputs.plan || '{}')[matrix.key] || matrix.github }}
+    # Self-hosted only for a push or a same-repository pull request; never for
+    # pull_request_target.
+    if: >-
+      github.event_name != 'pull_request_target' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository) &&
+      !cancelled()
+    timeout-minutes: 90
+    strategy: &platform-strategy
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS
+            key: test_macos
+            github: macos-latest
+          - name: Windows
+            key: test_windows
+            github: windows-latest
+    steps: &platform-steps
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Test workspace
+        run: cargo test --workspace --no-fail-fast --verbose
+      - name: Doctests
+        run: cargo test --workspace --doc --verbose
+
+  # A pull request from a fork: the same tests on GitHub's runners only.
+  test_platforms_fork:
+    name: Test (${{ matrix.name }}, default features, fork pull request)
+    runs-on: ${{ matrix.github }}
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name != github.repository
+    timeout-minutes: 90
+    strategy: *platform-strategy
+    steps: *platform-steps
+
+  # The test inventory (no hidden or orphaned tests), upstream test parity, the fuzz target
+  # registry and workflow hygiene (actions pinned by SHA, no self-hosted runner for a fork pull
+  # request). Python only: no build.
+  test_inventory:
+    name: Test inventory, upstream parity, fuzz registry, workflows
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: No hidden tests
+        run: python3 scripts/check-test-inventory.py
+      - name: Upstream test parity
+        run: python3 scripts/check-test-parity.py
+      - name: Every fuzz target is built and run
+        run: python3 scripts/check-fuzz-registry.py
+      - name: Actions pinned, self-hosted runners kept from fork pull requests
+        run: python3 scripts/check-workflow-pins.py
 
   crypto_backend_baseline:
     name: Crypto baseline (${{ matrix.backend }})
@@ -44,9 +132,11 @@ jobs:
       matrix:
         backend: [ crypto-ring, crypto-aws-lc-rs ]
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Test workspace
         run: cargo test --workspace --no-fail-fast --lib --bins --examples --tests --no-default-features --features rtc/${{ matrix.backend }} --verbose
       - name: Test workspace documentation
@@ -74,9 +164,11 @@ jobs:
           - name: ring + aws-lc-rs
             args: --no-default-features --features crypto-ring,crypto-aws-lc-rs,test-support
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Test provider configuration
         run: cargo test --package rtc-crypto ${{ matrix.args }} --verbose
 
@@ -84,9 +176,11 @@ jobs:
     name: rtc-crypto (no built-in, custom provider)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Test downstream-style provider
         run: cargo test --package rtc-crypto --no-default-features --features test-support --test custom_provider --verbose
       - name: Verify publishable package
@@ -111,9 +205,11 @@ jobs:
           - name: ring + aws-lc-rs
             args: --features crypto-ring,crypto-aws-lc-rs
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       # Compiles the `assert_dyn_compatible` guard in rtc-crypto/src/lib.rs under this feature
       # set. `Arc<dyn RTCCryptoProvider>` is load-bearing for the whole design, and object
       # safety is lost silently by adding one generic method — possibly behind a feature flag.
@@ -132,9 +228,11 @@ jobs:
       matrix:
         backend: [ crypto-ring, crypto-aws-lc-rs ]
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       # Crates that forward provider features must build on their own, not only as part of the
       # workspace, since standalone protocol users are a supported audience.
       - name: Check provider-forwarding crates
@@ -159,7 +257,7 @@ jobs:
     name: Crypto dependency boundary
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       # Enforces the G3 invariant: rtc-crypto is the only crate naming a crypto implementation.
       # The script parses dependency sections so that provider-feature forwarding
       # (`ring = ["crypto/ring"]`) and the root `[workspace.dependencies]` table are not
@@ -183,7 +281,7 @@ jobs:
     name: Sans-I/O deterministic time boundary
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       # Enforces the G4 invariant: sans-I/O protocol code is told the time, it does not ask.
       # An `Instant::now()` in the core cannot be driven by a virtual clock, which is what makes
       # timing-dependent behaviour untestable without sleeping. The allow-list is a ratchet:
@@ -196,9 +294,11 @@ jobs:
     name: cargo package (publication order)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       # rtc-crypto is new in this release and has no intra-workspace dependencies, so it is the
       # first crate in publication order and the only one whose packaging can be verified from
       # a clean checkout today.
@@ -231,24 +331,13 @@ jobs:
     name: Check rustfmt style && run clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions-rs/toolchain@v1
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
           toolchain: stable
-          profile: minimal
           components: clippy, rustfmt
-          override: true
-      - name: Cache cargo registry
-        uses: actions/cache@v3
-        with:
-          path: ~/.cargo/registry
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Run clippy
-        uses: actions-rs/cargo@v1
-        with:
-          command: clippy
-      - name: Check formating
-        uses: actions-rs/cargo@v1
-        with:
-          command: fmt
-          args: --all -- --check
+        run: cargo clippy
+      - name: Check formatting
+        run: cargo fmt --all -- --check

@@ -24,6 +24,10 @@ FUZZ_CRATES=(
     rtc-srtp
     rtc-ice
     rtc-turn
+    rtc-mdns
+    rtc-datachannel
+    rtc-media
+    rtc-shared
     rtc
 )
 

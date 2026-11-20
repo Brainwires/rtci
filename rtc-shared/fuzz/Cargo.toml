@@ -1,0 +1,39 @@
+[package]
+name = "rtc-shared-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.rtc-shared]
+path = ".."
+
+# Prevent this from interfering with workspaces
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "tcp_frame_decoder"
+path = "fuzz_targets/tcp_frame_decoder.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "turn_stream_decoder"
+path = "fuzz_targets/turn_stream_decoder.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "replay_detector"
+path = "fuzz_targets/replay_detector.rs"
+test = false
+doc = false
+bench = false
