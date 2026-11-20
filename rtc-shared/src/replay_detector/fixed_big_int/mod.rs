@@ -31,10 +31,12 @@ impl FixedBigInt {
         FixedBigInt {
             bits: vec![0; chunk_size],
             n,
+            // The top word holds the window's last `n % 64` bits; a shift must clear only
+            // the bits above them.
             msb_mask: if n.is_multiple_of(64) {
                 u64::MAX
             } else {
-                (1 << (64 - n % 64)) - 1
+                (1 << (n % 64)) - 1
             },
         }
     }
