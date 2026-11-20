@@ -57,6 +57,11 @@ impl ReceiverStream {
         }
     }
 
+    /// The SSRC this stream's receiver reports (and XR blocks) are sent from.
+    pub(crate) fn receiver_ssrc(&self) -> u32 {
+        self.receiver_ssrc
+    }
+
     fn set_received(&mut self, seq: u16) {
         let pos = (seq as usize) & self.index_mask;
         self.packets[pos / PACKETS_PER_ENTRY] |= 1 << (pos % PACKETS_PER_ENTRY);

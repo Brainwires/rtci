@@ -120,6 +120,9 @@ impl SenderReportBuilder {
     }
 }
 
+/// The most receiver reference times held for answering at once.
+const MAX_REFERENCE_TIMES: usize = 64;
+
 /// A stream unbound since the chain was last polled.
 struct Departing {
     ssrc: u32,
@@ -159,6 +162,12 @@ pub struct SenderReportInterceptor {
     /// The latest instant handed in, for stamping the goodbye of a stream unbound without one.
     last_now: Option<Instant>,
 
+    /// The receiver reference times (RFC 3611 section 4.4) received since the last sender
+    /// reports went out, by the SSRC they came from: the compact NTP timestamp and when it
+    /// arrived. Answered with a DLRR block (section 4.5) in the next sender report's compound
+    /// packet, as libwebrtc does whether or not anything was negotiated.
+    reference_times: HashMap<u32, (u32, Instant)>,
+
     /// Streams unbound since the chain was last polled, with the goodbye each says. A stream
     /// bound again with the same SSRC before then (a renegotiation re-binding it with a new
     /// codec) takes its state back and says no goodbye: it goes on.
@@ -182,6 +191,8 @@ impl SenderReportInterceptor {
             last_now: None,
 
             departing: Vec::new(),
+
+            reference_times: HashMap::new(),
 
             read_queue: VecDeque::new(),
             write_queue: VecDeque::new(),
@@ -216,6 +227,32 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for SenderReportInterceptor {
     type Time = Instant;
 
     fn handle_read(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
+        if let Packet::Rtcp(rtcp_packets) = &msg.message.packet {
+            for packet in rtcp_packets {
+                let Some(xr) = packet
+                    .as_any()
+                    .downcast_ref::<rtcp::extended_report::ExtendedReport>()
+                else {
+                    continue;
+                };
+                for block in &xr.reports {
+                    if let Some(rrtr) = block
+                        .as_any()
+                        .downcast_ref::<rtcp::extended_report::ReceiverReferenceTimeReportBlock>()
+                    {
+                        // A remote that sends from many SSRCs is held to a bounded table.
+                        if self.reference_times.len() < MAX_REFERENCE_TIMES
+                            || self.reference_times.contains_key(&xr.sender_ssrc)
+                        {
+                            self.reference_times.insert(
+                                xr.sender_ssrc,
+                                ((rrtr.ntp_timestamp >> 16) as u32, msg.now),
+                            );
+                        }
+                    }
+                }
+            }
+        }
         self.read_queue.push_back(msg);
         Ok(())
     }
@@ -261,11 +298,34 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for SenderReportInterceptor {
             self.next_timeout = Some(now + self.interval);
 
             for stream in self.streams.values_mut() {
-                if let Some(rr) = stream.generate_report(now) {
+                if let Some(sr) = stream.generate_report(now) {
+                    let mut compound: Vec<Box<dyn rtcp::Packet>> = vec![Box::new(sr)];
+                    // The DLRR block answers every reference time received since the last
+                    // reports, once, from the first stream that reports (RFC 3611 section 4.5).
+                    if !self.reference_times.is_empty() {
+                        let reports = self
+                            .reference_times
+                            .drain()
+                            .map(|(ssrc, (last_rr, arrived))| {
+                                rtcp::extended_report::DLRRReport {
+                                    ssrc,
+                                    last_rr,
+                                    dlrr: (now.saturating_duration_since(arrived).as_secs_f64()
+                                        * 65536.0) as u32,
+                                }
+                            })
+                            .collect();
+                        compound.push(Box::new(rtcp::extended_report::ExtendedReport {
+                            sender_ssrc: stream.ssrc(),
+                            reports: vec![Box::new(rtcp::extended_report::DLRRReportBlock {
+                                reports,
+                            })],
+                        }));
+                    }
                     self.write_queue.push_back(TaggedPacket {
                         now,
                         transport: TransportContext::default(),
-                        message: AttributedPacket::new(Packet::Rtcp(vec![Box::new(rr)])),
+                        message: AttributedPacket::new(Packet::Rtcp(compound)),
                     });
                 }
             }

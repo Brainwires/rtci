@@ -2,7 +2,9 @@
 //! `codec` unset, so negotiation picks it) is a sender like any other: its stream is bound to
 //! the interceptors (sender reports, the NACK responder), it gets an RTX repair flow when RTX is
 //! negotiated, and its outbound stream references the codec it is sent with (so the
-//! remote-inbound `jitter`, which needs that codec's clock rate, is reported).
+//! remote-inbound `jitter`, which needs that codec's clock rate, is reported). With receiver
+//! reference times negotiated (`a=rtcp-fb:<pt> rrtr`), the receiver's remote-outbound stats
+//! carry a round trip time measured over RTCP XR (RFC 3611 sections 4.4, 4.5).
 //!
 //! Two `rtc` peers on a simulated network, virtual time, no sockets.
 
@@ -11,7 +13,7 @@ use bytes::Bytes;
 use rtc::interceptor::Registry;
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 use rtc::peer_connection::configuration::interceptor_registry::{
-    configure_nack, configure_rtcp_reports,
+    configure_nack, configure_receiver_reference_time, configure_rtcp_reports,
 };
 use rtc::peer_connection::configuration::media_engine::{
     MIME_TYPE_RTX, MIME_TYPE_VP8, MediaEngine,
@@ -63,7 +65,8 @@ struct Peer {
 }
 
 impl Peer {
-    fn new(addr: &str) -> Result<Self> {
+    /// A peer that, with `rrtr`, negotiates receiver reference times.
+    fn with_rrtr(addr: &str, rrtr: bool) -> Result<Self> {
         let mut media_engine = MediaEngine::default();
         media_engine.register_codec(
             RTCRtpCodecParameters {
@@ -79,6 +82,9 @@ impl Peer {
             },
             RtpCodecKind::Video,
         )?;
+        if rrtr {
+            configure_receiver_reference_time(&mut media_engine);
+        }
         let registry = configure_rtcp_reports(configure_nack(Registry::new(), &mut media_engine));
         let pc = RTCPeerConnectionBuilder::new()
             .with_configuration(RTCConfigurationBuilder::new().build())
@@ -213,8 +219,16 @@ impl World {
     /// The offerer sends video from a transceiver whose one encoding names no codec; the
     /// answerer receives it. Connected over host candidates.
     fn connected() -> Result<(Self, RTCRtpSenderId)> {
+        Self::connected_with_rrtr(false)
+    }
+
+    /// `connected`, both peers negotiating receiver reference times with `rrtr`.
+    fn connected_with_rrtr(rrtr: bool) -> Result<(Self, RTCRtpSenderId)> {
         let mut world = World {
-            peers: [Peer::new("10.0.0.1:5000")?, Peer::new("10.0.0.2:5000")?],
+            peers: [
+                Peer::with_rrtr("10.0.0.1:5000", rrtr)?,
+                Peer::with_rrtr("10.0.0.2:5000", rrtr)?,
+            ],
             now: Instant::now(),
             drop_once: None,
             sent_on_wire: Vec::new(),
@@ -465,5 +479,65 @@ fn an_encoding_without_a_codec_rewrites_an_unnegotiated_payload_type() -> Result
         usize::from(PACKETS),
         "every packet went out with the negotiated payload type and was received"
     );
+    Ok(())
+}
+
+/// The receiver's remote-outbound round trip time for `ssrc`: (`roundTripTime`,
+/// `totalRoundTripTime`, `roundTripTimeMeasurements`), or `None` without remote-outbound stats.
+fn remote_outbound_rtt(world: &mut World, ssrc: u32) -> Option<(Option<f64>, f64, u64)> {
+    let now = world.now;
+    world.peers[1]
+        .pc
+        .get_stats(now, StatsSelector::None)
+        .iter()
+        .find_map(|entry| match entry {
+            RTCStatsReportEntry::RemoteOutboundRtp(s)
+                if s.sent_rtp_stream_stats.rtp_stream_stats.ssrc == ssrc =>
+            {
+                Some((
+                    s.round_trip_time,
+                    s.total_round_trip_time,
+                    s.round_trip_time_measurements,
+                ))
+            }
+            _ => None,
+        })
+}
+
+/// With receiver reference times negotiated, the receiver sends RTCP XR receiver reference time
+/// blocks, the sender answers with DLRR blocks, and the receiver's remote-outbound stats carry
+/// the round trip time (`roundTripTime`, `totalRoundTripTime`, `roundTripTimeMeasurements`).
+#[test]
+fn the_receiver_measures_a_round_trip_time_over_rtcp_xr() -> Result<()> {
+    let (mut world, sender) = World::connected_with_rrtr(true)?;
+    let (ssrc, _, _) = world.sender_stream(sender);
+    world.send_media(sender, Duration::from_secs(3))?;
+
+    let (rtt, total, measurements) =
+        remote_outbound_rtt(&mut world, ssrc).expect("remote-outbound stats");
+    assert!(
+        measurements > 0,
+        "the DLRR blocks gave round trip times: {rtt:?} {total} {measurements}"
+    );
+    let rtt = rtt.expect("a round trip time");
+    assert!(
+        (0.0..1.0).contains(&rtt),
+        "a plausible round trip time on a virtual network: {rtt}"
+    );
+    assert!(total >= rtt);
+    Ok(())
+}
+
+/// Without it negotiated, no reference times are sent and the round trip time stays unmeasured.
+#[test]
+fn without_rrtr_the_remote_outbound_round_trip_time_is_unmeasured() -> Result<()> {
+    let (mut world, sender) = World::connected()?;
+    let (ssrc, _, _) = world.sender_stream(sender);
+    world.send_media(sender, Duration::from_secs(3))?;
+
+    let (rtt, _, measurements) =
+        remote_outbound_rtt(&mut world, ssrc).expect("remote-outbound stats");
+    assert_eq!(rtt, None);
+    assert_eq!(measurements, 0);
     Ok(())
 }

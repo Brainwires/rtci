@@ -40,10 +40,10 @@ pub struct RTCRemoteOutboundRtpStreamStats {
     /// Number of RTCP Sender Reports sent.
     pub reports_sent: u64,
 
-    /// The most recent round trip time in seconds.
+    /// The most recent round trip time in seconds, measured from an RTCP XR DLRR block
+    /// (RFC 3611 section 4.5) answering one of our receiver reference time blocks.
     ///
-    /// Measuring it needs RTCP XR DLRR (RFC 3611), which the engine does not send, so it is
-    /// always `None` and left out of the JSON.
+    /// `None`, and left out of the JSON, until the remote sender has answered one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub round_trip_time: Option<f64>,
 
