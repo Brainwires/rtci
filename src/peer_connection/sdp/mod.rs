@@ -295,7 +295,9 @@ use crate::peer_connection::transport::dtls::fingerprint::RTCDtlsFingerprint;
 use crate::peer_connection::transport::ice::candidate::RTCIceCandidate;
 use crate::peer_connection::transport::ice::parameters::RTCIceParameters;
 use crate::rtp_transceiver::direction::RTCRtpTransceiverDirection;
-use crate::rtp_transceiver::rtp_sender::rtp_codec::{RTCRtpCodec, RtpCodecKind, repair_family};
+use crate::rtp_transceiver::rtp_sender::rtp_codec::{
+    RTCRtpCodec, RtpCodecKind, is_flexfec03_mime_type, repair_family,
+};
 use crate::rtp_transceiver::rtp_sender::rtp_codec_parameters::RTCRtpCodecParameters;
 use crate::rtp_transceiver::{
     PayloadType, RtpStreamId, SSRC, internal::RTCRtpTransceiverInternal,
@@ -947,12 +949,14 @@ impl RTCPeerConnection {
 
         let codecs = transceiver.get_codecs(media_engine);
         // Which repair flows the section has a format for: a sender's RTX / FlexFEC SSRCs are
-        // described only then (codec preferences may leave either out).
+        // described only then (codec preferences may leave either out). The FEC flow is the
+        // FlexFEC draft-03 coder's (`video/flexfec-03`, matched exactly as the sender's
+        // `find_fec_payload_type` does): RFC 8627's `video/flexfec` is another wire format.
         let repair_flows = RepairFlows {
             rtx: codecs.iter().any(|c| repair_family(&c.rtp_codec) == "rtx"),
             fec: codecs
                 .iter()
-                .any(|c| repair_family(&c.rtp_codec) == "flexfec"),
+                .any(|c| is_flexfec03_mime_type(&c.rtp_codec.mime_type)),
         };
         for codec in &codecs {
             let name = codec
@@ -1281,8 +1285,8 @@ impl RTCPeerConnection {
     }
 }
 
-/// Whether an m-section has a format for a sender's RTX (RFC 4588) and FlexFEC (RFC 8627)
-/// flows.
+/// Whether an m-section has a format for a sender's RTX (RFC 4588) and FlexFEC
+/// (draft-ietf-payload-flexible-fec-scheme-03, `video/flexfec-03`) flows.
 #[derive(Debug, Copy, Clone)]
 pub(crate) struct RepairFlows {
     pub(crate) rtx: bool,
