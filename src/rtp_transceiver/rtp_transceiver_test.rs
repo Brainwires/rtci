@@ -11,7 +11,7 @@ use crate::peer_connection::configuration::media_engine::{
     MIME_TYPE_OPUS, MIME_TYPE_VP8, MIME_TYPE_VP9,
 };
 use crate::peer_connection::event::RTCPeerConnectionEvent;
-use crate::peer_connection::test_util::{default_media_engine, new_pair, new_pair_with};
+use crate::peer_connection::util_test::{default_media_engine, new_pair, new_pair_with};
 use crate::rtp_transceiver::RTCRtpTransceiverDirection;
 use crate::rtp_transceiver::rtp_sender::{
     RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters,

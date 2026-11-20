@@ -1499,7 +1499,7 @@ fn test_update_inbound_rtx_ssrc_no_existing_stream() {
 /// resolved to its candidates (found by `tests/testenv_ice.rs`).
 #[test]
 fn selected_candidate_pair_names_the_reported_candidates() {
-    use crate::peer_connection::test_util::{Pair, new_pair, signal_pair};
+    use crate::peer_connection::util_test::{Pair, new_pair, signal_pair};
 
     let (mut offerer, mut answerer) = new_pair().expect("pair");
     offerer

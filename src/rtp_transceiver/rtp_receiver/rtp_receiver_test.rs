@@ -2,14 +2,14 @@
 //!
 //! The old tests connected two peers over a virtual network and handled the remote track in an
 //! `on_track` callback; here the pair is driven in memory by
-//! [`crate::peer_connection::test_util::Pair`] and the remote track is announced by
+//! [`crate::peer_connection::util_test::Pair`] and the remote track is announced by
 //! [`RTCTrackEvent::OnOpen`].
 
 use super::*;
 use crate::media_stream::MediaStreamTrack;
 use crate::peer_connection::configuration::media_engine::{MIME_TYPE_VP8, MediaEngine};
 use crate::peer_connection::event::{RTCPeerConnectionEvent, RTCTrackEvent, RTCTrackEventInit};
-use crate::peer_connection::test_util::{Pair, new_pair_with, send_until_seen, signal_pair};
+use crate::peer_connection::util_test::{Pair, new_pair_with, send_until_seen, signal_pair};
 use crate::rtp_transceiver::rtp_sender::{
     RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters,
     RTCRtpHeaderExtensionCapability,

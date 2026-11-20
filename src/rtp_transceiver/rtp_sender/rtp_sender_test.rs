@@ -2,7 +2,7 @@
 //!
 //! The old tests connected two peers over a virtual network (`create_vnet_pair`) and wrote
 //! samples through `TrackLocalStaticSample`; here two peer connections are driven against each
-//! other in memory by [`crate::peer_connection::test_util::Pair`], and media is RTP written with
+//! other in memory by [`crate::peer_connection::util_test::Pair`], and media is RTP written with
 //! [`RTCRtpSender::write_rtp`].
 
 use super::*;
@@ -12,11 +12,11 @@ use crate::peer_connection::configuration::media_engine::{
 };
 use crate::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use crate::peer_connection::event::{RTCPeerConnectionEvent, RTCTrackEvent};
-use crate::peer_connection::test_util::{
+use crate::peer_connection::transport::RTCDtlsRole;
+use crate::peer_connection::util_test::{
     Pair, RecordingInterceptor, default_media_engine, new_pair, new_pair_with, new_peer,
     send_until_seen, signal_pair,
 };
-use crate::peer_connection::transport::RTCDtlsRole;
 use crate::rtp_transceiver::{RTCRtpTransceiverDirection, RTCRtpTransceiverInit, SSRC};
 
 fn codec(mime_type: &str) -> RTCRtpCodec {
@@ -386,7 +386,7 @@ fn test_rtp_sender_send() -> Result<()> {
             .with_answering_dtls_role(RTCDtlsRole::Server)
             .build(),
         Some(registry),
-        crate::peer_connection::test_util::OFFERER_ADDR,
+        crate::peer_connection::util_test::OFFERER_ADDR,
     )?;
     let (_, mut receiver) = new_pair()?;
 
@@ -399,7 +399,7 @@ fn test_rtp_sender_send() -> Result<()> {
     assert!(log.bound_local.lock().unwrap().is_empty());
 
     signal_pair(&mut sender, &mut receiver)?;
-    let bound = |log: &crate::peer_connection::test_util::StreamLog| {
+    let bound = |log: &crate::peer_connection::util_test::StreamLog| {
         log.bound_local
             .lock()
             .unwrap()
@@ -436,7 +436,7 @@ fn test_rtp_sender_send_track_removed() -> Result<()> {
             .with_answering_dtls_role(RTCDtlsRole::Server)
             .build(),
         Some(registry),
-        crate::peer_connection::test_util::OFFERER_ADDR,
+        crate::peer_connection::util_test::OFFERER_ADDR,
     )?;
     let (_, mut receiver) = new_pair()?;
 
@@ -629,7 +629,7 @@ fn test_rtp_sender_rtx() -> Result<()> {
             .with_answering_dtls_role(RTCDtlsRole::Server)
             .build(),
         Some(registry),
-        crate::peer_connection::test_util::OFFERER_ADDR,
+        crate::peer_connection::util_test::OFFERER_ADDR,
     )?;
     let (_, mut answerer) = new_pair_with(rtx_media_engine()?, rtx_media_engine()?)?;
 
