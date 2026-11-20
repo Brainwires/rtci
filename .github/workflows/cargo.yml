@@ -107,6 +107,23 @@ jobs:
     strategy: *platform-strategy
     steps: *platform-steps
 
+  # The test inventory (no hidden or orphaned tests), upstream test parity, the fuzz target
+  # registry and workflow hygiene (actions pinned by SHA, no self-hosted runner for a fork pull
+  # request). Python only: no build.
+  test_inventory:
+    name: Test inventory, upstream parity, fuzz registry, workflows
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: No hidden tests
+        run: python3 scripts/check-test-inventory.py
+      - name: Upstream test parity
+        run: python3 scripts/check-test-parity.py
+      - name: Every fuzz target is built and run
+        run: python3 scripts/check-fuzz-registry.py
+      - name: Actions pinned, self-hosted runners kept from fork pull requests
+        run: python3 scripts/check-workflow-pins.py
+
   crypto_backend_baseline:
     name: Crypto baseline (${{ matrix.backend }})
     runs-on: ubuntu-latest
