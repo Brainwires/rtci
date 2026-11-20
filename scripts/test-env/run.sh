@@ -38,7 +38,15 @@ else
 fi
 
 NAME=rtc-testenv-$$
-cleanup() { docker rm -f "$NAME" >/dev/null 2>&1 || true; }
+RUN_IMAGE=rtc-testenv-run:$$
+CTX=
+# Whatever a run leaves behind, even when it is interrupted: the container, copy mode's
+# layered image and its build context.
+cleanup() {
+  docker rm -f "$NAME" >/dev/null 2>&1 || true
+  if [ "${COPY_MODE:-0}" = 1 ]; then docker rmi "$RUN_IMAGE" >/dev/null 2>&1 || true; fi
+  if [ -n "$CTX" ]; then rm -rf "$CTX"; fi
+}
 trap cleanup EXIT INT TERM
 
 COPY_MODE=${RTC_TESTENV_COPY:-}
@@ -51,22 +59,25 @@ CAPS=(--cap-add NET_ADMIN --cap-add SYS_ADMIN --cap-add NET_RAW
 
 run_copy() {
   # The checkout (tracked and untracked-but-not-ignored files) as the build context of an image
-  # layered on the environment's.
-  local ctx run_image=rtc-testenv-run:$$
-  ctx=$(mktemp -d)
-  (cd "$ROOT" && git ls-files -co --exclude-standard -z | tar --null -T - -cf "$ctx/src.tar")
-  printf 'FROM %s\nADD src.tar /src/\n' "$IMAGE" > "$ctx/Dockerfile"
-  docker build -q -t "$run_image" "$ctx" >/dev/null
-  rm -rf "$ctx"
+  # layered on the environment's. A tracked file deleted from the working tree is skipped
+  # (--ignore-failed-read) rather than failing the run; tar keeps the scripts' modes.
+  CTX=$(mktemp -d)
+  (cd "$ROOT" && git ls-files -co --exclude-standard -z \
+    | tar --null --ignore-failed-read -T - -cf "$CTX/src.tar")
+  printf 'FROM %s\nADD src.tar /src/\n' "$IMAGE" > "$CTX/Dockerfile"
+  docker build -q -t "$RUN_IMAGE" "$CTX" >/dev/null
+  rm -rf "$CTX"
+  CTX=
   local rc=0
   docker run --name "$NAME" --cpus "${RTC_TESTENV_CPUS:-4}" "${CAPS[@]}" \
     -e CARGO_TARGET_DIR=/target -e CARGO_INCREMENTAL=0 \
     -e CARGO_PROFILE_DEV_DEBUG=0 -e CARGO_PROFILE_TEST_DEBUG=0 \
     -e CARGO_BUILD_JOBS="${RTC_TESTENV_CPUS:-4}" \
-    -w /src "$run_image" bash /src/scripts/test-env/entry.sh "$@" || rc=$?
-  docker cp "$NAME:/artifacts/." "$ARTIFACTS/" || true
+    -w /src "$RUN_IMAGE" bash /src/scripts/test-env/entry.sh "$@" || rc=$?
+  # The artifacts come back even when a stage failed; a container that never started has none.
+  docker cp "$NAME:/artifacts/." "$ARTIFACTS/" || echo "== no artifacts to copy back from $NAME"
   docker rm -f "$NAME" >/dev/null 2>&1 || true
-  docker rmi "$run_image" >/dev/null 2>&1 || true
+  docker rmi "$RUN_IMAGE" >/dev/null 2>&1 || true
   return $rc
 }
 
