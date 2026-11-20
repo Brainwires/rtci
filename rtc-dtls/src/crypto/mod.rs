@@ -20,6 +20,7 @@ pub mod crypto_ccm;
 pub mod crypto_chacha20;
 /// AES-GCM authenticated encryption.
 pub mod crypto_gcm;
+pub(crate) mod padding;
 
 use std::convert::TryFrom;
 use std::sync::Arc;
