@@ -383,7 +383,10 @@ mod tests {
         assert!((rtt - 0.040).abs() < 0.001, "{rtt}");
         acc.on_dlrr_received(0, 0, t0 + Duration::from_millis(60));
         acc.on_dlrr_received(0x9999_0000, 0, t0 + Duration::from_millis(60));
-        assert_eq!(acc.remote_rtt_measurements, 1, "LRR 0 or unknown gives none");
+        assert_eq!(
+            acc.remote_rtt_measurements, 1,
+            "LRR 0 or unknown gives none"
+        );
 
         let remote = acc.snapshot_remote(t0);
         assert_eq!(remote.round_trip_time, Some(rtt));

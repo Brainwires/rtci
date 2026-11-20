@@ -238,8 +238,8 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for SenderReportInterceptor {
                 for block in &xr.reports {
                     if let Some(rrtr) = block
                         .as_any()
-                        .downcast_ref::<rtcp::extended_report::ReceiverReferenceTimeReportBlock>()
-                    {
+                        .downcast_ref::<rtcp::extended_report::ReceiverReferenceTimeReportBlock>(
+                    ) {
                         // A remote that sends from many SSRCs is held to a bounded table.
                         if self.reference_times.len() < MAX_REFERENCE_TIMES
                             || self.reference_times.contains_key(&xr.sender_ssrc)
@@ -306,14 +306,14 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for SenderReportInterceptor {
                         let reports = self
                             .reference_times
                             .drain()
-                            .map(|(ssrc, (last_rr, arrived))| {
-                                rtcp::extended_report::DLRRReport {
+                            .map(
+                                |(ssrc, (last_rr, arrived))| rtcp::extended_report::DLRRReport {
                                     ssrc,
                                     last_rr,
                                     dlrr: (now.saturating_duration_since(arrived).as_secs_f64()
                                         * 65536.0) as u32,
-                                }
-                            })
+                                },
+                            )
                             .collect();
                         compound.push(Box::new(rtcp::extended_report::ExtendedReport {
                             sender_ssrc: stream.ssrc(),

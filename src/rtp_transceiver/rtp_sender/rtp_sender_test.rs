@@ -806,9 +806,7 @@ fn a_renegotiated_codec_rebinds_the_senders_stream() -> Result<()> {
     let codec = report
         .iter()
         .find_map(|entry| match entry {
-            crate::statistics::report::RTCStatsReportEntry::Codec(c)
-                if c.stats.id == codec_id =>
-            {
+            crate::statistics::report::RTCStatsReportEntry::Codec(c) if c.stats.id == codec_id => {
                 Some(c)
             }
             _ => None,

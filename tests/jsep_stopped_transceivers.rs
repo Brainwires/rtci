@@ -11,8 +11,8 @@ use jsep_common::{
 };
 use rtc::peer_connection::sdp::RTCSessionDescription;
 use rtc::rtp_transceiver::RTCRtpTransceiverDirection;
-use rtc::sansio::Protocol;
 use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
+use rtc::sansio::Protocol;
 
 /// A transceiver stopped before it ever had an m= section gets no mid and no m= section.
 #[test]
@@ -344,9 +344,17 @@ fn a_rejected_section_in_a_remote_offer_stops_its_transceiver() -> TestResult {
         answerer.rtp_transceiver(id).expect("transceiver").stopped(),
         "the rejected section's transceiver is stopped"
     );
-    assert!(!fired_track(&mut answerer), "no track event for a rejected section");
+    assert!(
+        !fired_track(&mut answerer),
+        "no track event for a rejected section"
+    );
     let answer = answerer.create_answer(None)?;
-    assert_eq!(port_of(&media_sections(&answer.sdp)[0]), 0, "{}", answer.sdp);
+    assert_eq!(
+        port_of(&media_sections(&answer.sdp)[0]),
+        0,
+        "{}",
+        answer.sdp
+    );
     Ok(())
 }
 
@@ -373,7 +381,10 @@ a=rtpmap:96 VP8/90000
     ));
     let id = offerer.get_transceivers().next().expect("a transceiver");
     offerer.set_remote_description(now, RTCSessionDescription::answer(answer)?)?;
-    assert!(!fired_track(&mut offerer), "no track event for a rejected section");
+    assert!(
+        !fired_track(&mut offerer),
+        "no track event for a rejected section"
+    );
     assert_eq!(
         offerer.get_transceivers().count(),
         0,
@@ -443,7 +454,10 @@ fn stopped_transceivers_are_removed_once_their_sections_are_rejected() -> TestRe
         assert!(!t.stopped(), "{side}");
         assert_eq!(t.mid().clone(), second_mid, "{side}: the live one stays");
         assert_eq!(pc.take_removed_transceivers(), vec![0], "{side}");
-        assert!(pc.take_removed_transceivers().is_empty(), "{side}: taken once");
+        assert!(
+            pc.take_removed_transceivers().is_empty(),
+            "{side}: taken once"
+        );
     }
 
     // A later exchange keeps the section rejected and creates no transceiver for it again.
@@ -473,10 +487,19 @@ fn a_rolled_back_offer_removes_no_stopped_transceiver() -> TestResult {
     offerer.set_local_description(now, RTCSessionDescription::rollback(None)?)?;
     let ids: Vec<_> = offerer.get_transceivers().collect();
     assert_eq!(ids.len(), 1);
-    assert!(offerer.rtp_transceiver(ids[0]).expect("transceiver").stopped());
+    assert!(
+        offerer
+            .rtp_transceiver(ids[0])
+            .expect("transceiver")
+            .stopped()
+    );
     assert!(offerer.take_removed_transceivers().is_empty());
 
     exchange(&mut offerer, &mut answerer)?;
-    assert_eq!(offerer.get_transceivers().count(), 0, "the next exchange removes it");
+    assert_eq!(
+        offerer.get_transceivers().count(),
+        0,
+        "the next exchange removes it"
+    );
     Ok(())
 }

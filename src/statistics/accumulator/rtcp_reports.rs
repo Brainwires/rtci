@@ -5,9 +5,7 @@
 //! What each packet means for the stats is decided here, next to the accumulators it updates.
 
 use super::RTCStatsAccumulator;
-use rtcp::extended_report::{
-    DLRRReportBlock, ExtendedReport, ReceiverReferenceTimeReportBlock,
-};
+use rtcp::extended_report::{DLRRReportBlock, ExtendedReport, ReceiverReferenceTimeReportBlock};
 use rtcp::header::{FORMAT_CCFB, PacketType};
 use rtcp::payload_feedbacks::full_intra_request::FullIntraRequest;
 use rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;

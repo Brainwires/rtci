@@ -104,7 +104,9 @@ fn a_rebound_stream_says_no_goodbye_and_keeps_its_counts() {
         ..info()
     };
     chain.bind_local_stream(&rebound);
-    chain.handle_write(rtp(now + Duration::from_millis(5))).unwrap();
+    chain
+        .handle_write(rtp(now + Duration::from_millis(5)))
+        .unwrap();
 
     let mut reports = vec![];
     chain.handle_timeout(now + Duration::from_secs(2)).unwrap();
