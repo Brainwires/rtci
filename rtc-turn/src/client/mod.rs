@@ -8,6 +8,8 @@
 //! The three address kinds are easy to confuse: [`RelayedAddr`] is what peers send to,
 //! [`ReflexiveAddr`] is how the server sees this client, and [`PeerAddr`] is the far end.
 #[cfg(test)]
+mod client_permission_test;
+#[cfg(test)]
 mod client_retry_test;
 #[cfg(test)]
 mod client_stale_nonce_test;
