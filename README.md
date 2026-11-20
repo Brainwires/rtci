@@ -322,14 +322,21 @@ over SRTP and is subject to none of SCTP's flow control.
 - ✅ **RTP/RTCP** - Real-time media transport and control
 - ✅ **SDP** (Session Description Protocol) - Offer/answer negotiation, Unified Plan
 - ✅ **Data Channels** - Bidirectional peer-to-peer data transfer, in-band (DCEP) and out-of-band
-- ✅ **Media Tracks** - Audio/video transmission
+- ✅ **Media Tracks** - Audio/video RTP transport (encoding, decoding, capture and playout are the application's)
 - ✅ **Trickle ICE** - Progressive candidate gathering, and ICE restart
 - ✅ **ICE over TCP** - Active and passive
-- ✅ **Simulcast & SVC** - Simulcast and scalable video coding
-- ✅ **RTX & FEC** - Retransmission and forward error correction
-- ✅ **Statistics** - `getStats` per the W3C WebRTC Statistics API
-- ✅ **Interceptors** - Composable RTP/RTCP pipeline (NACK, TWCC, reports, bandwidth estimation)
+- ✅ **Simulcast** - RID-based simulcast, sending and receiving (no SVC layer packetization for VP9 / AV1)
+- ✅ **RTX & FEC** - RFC 4588 retransmission; FlexFEC (draft-ietf-payload-flexible-fec-scheme-03, not RFC 8627) through an
+  opt-in interceptor; ULPFEC can be registered for an application with its own coder but is not encoded or decoded
+- ✅ **Statistics** - `getStats` per the W3C WebRTC Statistics API, for what a transport measures (members that need an
+  encoder, decoder or playout are left out, not reported as 0)
+- ✅ **Interceptors** - Composable RTP/RTCP pipeline: NACK, TWCC feedback, RTCP reports and key-frame requests by default;
+  bandwidth estimation (GCC), pacing, the jitter buffer and FlexFEC are opt-in
 - ✅ **Pluggable crypto** - `ring` or `aws-lc-rs` built in, or bring your own provider
+
+Each claim above, with its specification section, where it is implemented and the test that proves it, is in
+[docs/conformance.md](docs/conformance.md), which also lists what is not implemented on purpose (media coding, DTLS 1.3,
+I-DATA, a TURN server and others).
 
 ## What's New in 0.21
 
@@ -573,9 +580,14 @@ This implementation follows these specifications:
 | Data | [RFC 9260](https://datatracker.ietf.org/doc/html/rfc9260) (SCTP), [RFC 8261](https://datatracker.ietf.org/doc/html/rfc8261) (SCTP over DTLS), [RFC 8831](https://datatracker.ietf.org/doc/html/rfc8831) (Data Channels), [RFC 8832](https://datatracker.ietf.org/doc/html/rfc8832) (DCEP) |
 | Media | [RFC 3550](https://datatracker.ietf.org/doc/html/rfc3550) (RTP/RTCP), [RFC 4588](https://datatracker.ietf.org/doc/html/rfc4588) (RTX), [RFC 8285](https://datatracker.ietf.org/doc/html/rfc8285) (Header Extensions), [RFC 5761](https://datatracker.ietf.org/doc/html/rfc5761) (RTP/RTCP Mux) |
 
+Which sections of each are implemented, and which are not, is in [docs/conformance.md](docs/conformance.md).
+
 ## Documentation
 
 - [API Documentation](https://docs.rs/rtc) - Complete API reference
+- [Conformance](docs/conformance.md) - Every claim with its spec section and test, and what is not implemented
+- [Test exclusions](docs/test-exclusions.md) and [upstream test parity](docs/upstream-test-parity.md) - Every test runs,
+  and every upstream test is accounted for
 - [Examples](https://github.com/webrtc-rs/rtc/tree/master/examples) - Working code examples
 - [Sans-I/O Pattern](https://sans-io.readthedocs.io/) - Detailed explanation of the sans-I/O design
 - [WebRTC for the Curious](https://webrtcforthecurious.com/) - Comprehensive WebRTC guide
@@ -597,6 +609,15 @@ cargo doc --open
 
 # Run an example
 cargo run --example data-channels-answer
+
+# The repository's own checks (no build needed)
+python3 scripts/check-test-inventory.py   # no ignored, commented-out, orphaned or platform-gated test
+python3 scripts/check-test-parity.py      # every upstream test has a fork test, a mapping or a reason
+python3 scripts/check-fuzz-registry.py    # every fuzz target is built by OSS-Fuzz and run by CI
+python3 scripts/check-workflow-pins.py    # actions pinned by SHA, no self-hosted runner for a fork PR
+
+# Fuzz one target (nightly toolchain and cargo-fuzz; each crate's fuzz/ directory, ./fuzz for `rtc`)
+cd rtc-sctp/fuzz && cargo fuzz run --debug-assertions endpoint_handle_datagrams
 ```
 
 ## Semantic Versioning

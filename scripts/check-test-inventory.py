@@ -223,7 +223,10 @@ def backticked(cell: str) -> list[str]:
 
 
 def test_exists(ref: str, tests: dict[str, set[str]]) -> bool:
-    """`name`, or `path.rs::name`, names a test the scan found."""
+    """`name`, `path.rs::name`, or a test file `path.rs`, names a test (or a file holding tests)
+    the scan found. A path may be given from any directory down (`tests/x.rs`, `x_test.rs`)."""
+    if ref.endswith(".rs"):
+        return any(p == ref or p.endswith("/" + ref) for paths in tests.values() for p in paths)
     if "::" in ref:
         file, _, name = ref.rpartition("::")
         return name in tests and any(p == file or p.endswith("/" + file) for p in tests[name])
