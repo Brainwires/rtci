@@ -19,7 +19,9 @@ use crate::peer_connection::transport::ice::candidate_type::RTCIceCandidateType;
 use crate::peer_connection::transport::{RTCTransportId, TransportKind};
 use crate::rtp_transceiver::rtp_receiver::internal::RTCRtpReceiverInternal;
 use crate::rtp_transceiver::rtp_sender::RTCRtpCodec;
-use crate::rtp_transceiver::rtp_sender::rtp_codec::{is_repair_codec, parse_rtx_apt};
+use crate::rtp_transceiver::rtp_sender::rtp_codec::{
+    encoding_send_codec, is_repair_codec, parse_rtx_apt,
+};
 use crate::rtp_transceiver::rtp_sender::rtp_coding_parameters::{
     RTCRtpCodingParameters, RTCRtpFecParameters, RTCRtpRtxParameters,
 };
@@ -1976,19 +1978,24 @@ impl RTCPeerConnection {
                 for coding in track.codings() {
                     if let Some(ssrc) = coding.rtp_coding_parameters.ssrc {
                         let codec = &coding.codec;
-                        if !codec.mime_type.is_empty() {
-                            // Find matching payload type from send codecs
-                            if let Some(codec_params) = send_codecs.iter().find(|cp| {
-                                cp.rtp_codec.mime_type == codec.mime_type
-                                    && (cp.rtp_codec.sdp_fmtp_line.is_empty()
-                                        || cp.rtp_codec.sdp_fmtp_line == codec.sdp_fmtp_line)
-                            }) {
+                        if codec.mime_type.is_empty() {
+                            // An encoding without a codec of its own is sent with the codec
+                            // negotiation picked; its stream references that one (and takes its
+                            // clock rate, which the remote-inbound jitter is converted with).
+                            if let Some(codec_params) = encoding_send_codec(codec, send_codecs) {
                                 outbound_codecs.push((
                                     ssrc,
-                                    codec.clone(),
+                                    codec_params.rtp_codec,
                                     codec_params.payload_type,
                                 ));
                             }
+                        } else if let Some(codec_params) = send_codecs.iter().find(|cp| {
+                            // Find matching payload type from send codecs
+                            cp.rtp_codec.mime_type == codec.mime_type
+                                && (cp.rtp_codec.sdp_fmtp_line.is_empty()
+                                    || cp.rtp_codec.sdp_fmtp_line == codec.sdp_fmtp_line)
+                        }) {
+                            outbound_codecs.push((ssrc, codec.clone(), codec_params.payload_type));
                         }
                     }
                 }
@@ -2077,9 +2084,23 @@ impl RTCPeerConnection {
         Vec<RTCRtpEncodingParameters>,
         Vec<RTCRtpCodecParameters>,
     )> {
+        // RTX is the implementation's choice, not the application's (W3C webrtc-pc has no
+        // `rtx` member in `sendEncodings`): encodings the application gave get a repair flow
+        // whenever the media engine can carry one, as those `send_encodings_from_track` derives
+        // from the track do. Without it, NACKed packets could only be resent on the media SSRC
+        // and the outbound stream would have no `rtxSsrc`. A negotiation without RTX drops it
+        // again (`configure_rtx_and_fec`).
+        let is_rtx_enabled = self
+            .media_engine
+            .is_rtx_enabled(track.kind(), RTCRtpTransceiverDirection::Sendonly);
         for encoding in &mut send_encodings {
             if encoding.rtp_coding_parameters.ssrc.is_none() {
                 encoding.rtp_coding_parameters.ssrc = Some(rand::random::<u32>());
+            }
+            if is_rtx_enabled && encoding.rtp_coding_parameters.rtx.is_none() {
+                encoding.rtp_coding_parameters.rtx = Some(RTCRtpRtxParameters {
+                    ssrc: rand::random::<u32>(),
+                });
             }
         }
 

@@ -283,6 +283,16 @@ impl RTCRtpTransceiver<'_> {
         self.peer_connection.rtp_transceivers[self.id].direction()
     }
 
+    /// Whether the transceiver is stopped: by [`stop`](Self::stop), or created stopped for a
+    /// rejected m= section of a remote offer. A stopped transceiver sends and receives nothing.
+    ///
+    /// # Specification
+    ///
+    /// See [RTCRtpTransceiver.stopped](https://www.w3.org/TR/webrtc/#dfn-stopped).
+    pub fn stopped(&self) -> bool {
+        self.peer_connection.rtp_transceivers[self.id].stopped()
+    }
+
     /// Whether a remote offer's new media section may be associated with this transceiver.
     ///
     /// See [`RTCRtpTransceiver::set_associable_with_remote_offer`].

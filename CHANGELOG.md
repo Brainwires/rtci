@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.0+brainwires.2] - 2026-11-20
+
+### Features
+
+- **rtp_transceiver**: `RTCRtpTransceiver::stopped()`, whether the transceiver is stopped (by
+  `stop()`, or created stopped for a rejected m= section of a remote offer).
+
+### Bug Fixes
+
+- **rtp_sender**: a sender whose encoding names no codec (W3C `sendEncodings` that leave the codec
+  to negotiation) was never bound to the interceptors: it sent no RTCP sender reports and had no
+  NACK responder, RTX or TWCC send side. Such an encoding is now sent with the first media codec
+  of the sender's negotiated codecs, and its stream is bound with it.
+- **stats**: the outbound stream of such an encoding referenced no codec, so its clock rate was 0
+  and the remote-inbound `jitter` was missing; it now references the codec it is sent with.
+- **peer_connection**: encodings the application passes (`sendEncodings`, and the encoding
+  `add_transceiver_from_kind` fills in) got no RTX repair flow; they get one whenever the media
+  engine carries RTX, as encodings derived from a track do (`rtxSsrc`, NACK repairs over RTX).
+- **jsep**: a rejected m= section (port 0) of a remote offer got no transceiver; it now gets one,
+  created stopped, with no track event (RFC 9429 section 5.10, W3C setRemoteDescription). A
+  rollback of the offer removes it.
+
 ## [0.22.0+brainwires.1] - 2026-11-20
 
 A conformance release: every claim the README, `FORK.md`, a public option, the default SDP or the
