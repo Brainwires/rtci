@@ -317,8 +317,10 @@ test("simulcast: three RIDs reach Rust", async ({ page }) => {
         availableOutgoingBitrate = x.availableOutgoingBitrate;
       }
     });
+    const offer = s.pc.localDescription.sdp;
+    const answer = s.pc.remoteDescription.sdp;
     s.close();
-    return { report, sent, acceptedRids, offeredRids, degradation, availableOutgoingBitrate };
+    return { report, sent, acceptedRids, offeredRids, degradation, availableOutgoingBitrate, offer, answer };
   }, WS);
   naBrowser(
     r.acceptedRids.length < 3,
@@ -343,7 +345,8 @@ test("simulcast: three RIDs reach Rust", async ({ page }) => {
   expect(
     quiet,
     `layers the browser sent 20 packets or fewer on: ${JSON.stringify(r.sent)}, ` +
-      `availableOutgoingBitrate ${r.availableOutgoingBitrate}, degradationPreference ${r.degradation}`,
+      `availableOutgoingBitrate ${r.availableOutgoingBitrate}, degradationPreference ${r.degradation}` +
+      `\noffer:\n${r.offer}\nanswer:\n${r.answer}`,
   ).toEqual([]);
   const rids = Object.keys(r.report.rtp).filter((k) => r.report.rtp[k] > 20).map((k) => k.split(":")[1]);
   expect(new Set(rids), JSON.stringify(r)).toEqual(new Set(["q", "h", "f"]));

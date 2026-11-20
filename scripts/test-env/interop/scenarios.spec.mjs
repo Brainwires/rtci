@@ -205,8 +205,20 @@ test("transceiver stop, then a new transceiver reuses or keeps the m-line", asyn
       report = await s.report();
       return Object.keys(report.rtp).some((k) => k.startsWith("audio:") && report.rtp[k] > 50);
     }, 15000, "50 audio packets at Rust").catch(() => {});
+    // What a failure needs to be read: both descriptions, both sides' states, what the browser
+    // says it sent.
+    const diag = {
+      offer: s.pc.localDescription.sdp,
+      answer: s.pc.remoteDescription.sdp,
+      browser: { connection: s.pc.connectionState, ice: s.pc.iceConnectionState },
+      rust: { state: report?.state, stats: report?.stats, errors: report?.errors },
+      sent: [],
+    };
+    (await s.pc.getStats()).forEach((x) => {
+      if (x.type === "outbound-rtp") diag.sent.push({ kind: x.kind, ssrc: x.ssrc, mid: x.mid, packetsSent: x.packetsSent });
+    });
     s.close();
-    return { afterStop, afterAdd, rtp: report?.rtp, errors: s.errors };
+    return { afterStop, afterAdd, rtp: report?.rtp, errors: s.errors, diag };
   }, WS);
   expect(r.errors).toEqual([]);
   for (const step of [r.afterStop, r.afterAdd]) {
@@ -218,7 +230,10 @@ test("transceiver stop, then a new transceiver reuses or keeps the m-line", asyn
     });
   }
   expect(r.afterStop.offer[0].port, "the stopped transceiver's m-line is rejected").toBe(0);
-  expect(Object.keys(r.rtp || {}).some((k) => k.startsWith("audio:") && r.rtp[k] > 50), JSON.stringify(r.rtp)).toBe(true);
+  expect(
+    Object.keys(r.rtp || {}).some((k) => k.startsWith("audio:") && r.rtp[k] > 50),
+    `${JSON.stringify(r.rtp)} ${JSON.stringify(r.diag)}`,
+  ).toBe(true);
 });
 
 // ---- direction changes (RFC 9429 5.3.1, RFC 3264 6.1) ----
