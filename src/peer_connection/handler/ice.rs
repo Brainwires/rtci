@@ -105,7 +105,18 @@ impl<'a>
             // When ICE restarts and the selected candidate pair changes,
             // WebRTC treats this as a path migration, and DTLS continues unchanged, bound to the ICE transport, not to a fixed 5-tuple.
             // Use default for transport to make DTLS tunneled
-            msg.transport = TransportContext::default();
+            //
+            // The ECN codepoint the datagram arrived with stays on SRTP / SRTCP: the RTP
+            // receive side counts it and RFC 8888 feedback reports it. DTLS does not use it.
+            let ecn = if matches!(msg.message, RTCMessageInternal::Rtp(_)) {
+                msg.transport.ecn
+            } else {
+                None
+            };
+            msg.transport = TransportContext {
+                ecn,
+                ..TransportContext::default()
+            };
             self.ctx.read_outs.push_back(msg);
         } else {
             trace!(
@@ -137,6 +148,11 @@ impl<'a>
             msg.transport.local_addr = path.local_addr;
             msg.transport.peer_addr = path.peer_addr;
             msg.transport.transport_protocol = path.transport_protocol;
+            // Only RTP media is ever ECN-marked (the interceptor handler decides which);
+            // DTLS and SCTP go out Not-ECT whatever context their endpoints carried.
+            if !matches!(msg.message, RTCMessageInternal::Rtp(_)) {
+                msg.transport.ecn = None;
+            }
             debug!("Bypass ice write {:?}", msg.transport.peer_addr);
 
             // Track packets/bytes sent on the selected candidate pair. Look the

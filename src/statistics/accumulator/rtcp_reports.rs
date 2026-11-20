@@ -12,6 +12,7 @@ use rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 use rtcp::receiver_report::ReceiverReport;
 use rtcp::reception_report::ReceptionReport;
 use rtcp::sender_report::SenderReport;
+use rtcp::transport_feedbacks::cc_feedback_report::CcFeedbackReport;
 use rtcp::transport_feedbacks::transport_layer_nack::TransportLayerNack;
 use std::time::Instant;
 
@@ -44,11 +45,21 @@ impl RTCStatsAccumulator {
     /// * NACK, PLI and FIR are feedback about one of our outbound streams.
     /// * An XR DLRR sub-block (RFC 3611 section 4.5) answers a receiver reference time we sent
     ///   for one of our inbound streams: the remote-outbound object's round trip time.
+    /// * An RFC 8888 report block describes, packet by packet, how the remote received one of
+    ///   our outbound streams: ECN marks, losses and recoveries (the remote-inbound object).
     pub(crate) fn on_rtcp_received(&mut self, packets: &[Box<dyn rtcp::Packet>], now: Instant) {
         for packet in packets {
             let packet = packet.as_ref();
             if is_ccfb(packet) {
                 self.transport.on_ccfb_received();
+            }
+
+            if let Some(ccfb) = packet.as_any().downcast_ref::<CcFeedbackReport>() {
+                for block in &ccfb.report_blocks {
+                    if let Some(stream) = self.outbound_rtp_streams.get_mut(&block.media_ssrc) {
+                        stream.on_ccfb_block_received(block);
+                    }
+                }
             }
 
             if let Some(sr) = packet.as_any().downcast_ref::<SenderReport>()
@@ -118,11 +129,21 @@ impl RTCStatsAccumulator {
     /// * An XR receiver reference time block (RFC 3611 section 4.4) is remembered for the
     ///   inbound stream whose receiver reports come from the same SSRC, so the DLRR that
     ///   echoes it gives a round trip time.
+    /// * An RFC 8888 report block we send about one of our inbound streams counts the packets
+    ///   it reports lost, and later recovered.
     pub(crate) fn on_rtcp_sent(&mut self, packets: &[Box<dyn rtcp::Packet>], now: Instant) {
         for packet in packets {
             let packet = packet.as_ref();
             if is_ccfb(packet) {
                 self.transport.on_ccfb_sent();
+            }
+
+            if let Some(ccfb) = packet.as_any().downcast_ref::<CcFeedbackReport>() {
+                for block in &ccfb.report_blocks {
+                    if let Some(stream) = self.inbound_rtp_streams.get_mut(&block.media_ssrc) {
+                        stream.on_ccfb_block_sent(block);
+                    }
+                }
             }
 
             if let Some(sr) = packet.as_any().downcast_ref::<SenderReport>()

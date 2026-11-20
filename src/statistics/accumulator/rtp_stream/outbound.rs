@@ -2,7 +2,7 @@ use super::inbound::jitter_seconds;
 use crate::rtp_transceiver::RTCRtpTransceiverId;
 use crate::rtp_transceiver::SSRC;
 use crate::rtp_transceiver::rtp_sender::RtpCodecKind;
-use crate::statistics::accumulator::EncoderStatsUpdate;
+use crate::statistics::accumulator::{CcfbTally, EncoderStatsUpdate};
 use crate::statistics::stats::rtp_stream::RTCRtpStreamStats;
 use crate::statistics::stats::rtp_stream::received::RTCReceivedRtpStreamStats;
 use crate::statistics::stats::rtp_stream::received::remote_inbound::RTCRemoteInboundRtpStreamStats;
@@ -10,6 +10,7 @@ use crate::statistics::stats::rtp_stream::sent::RTCSentRtpStreamStats;
 use crate::statistics::stats::rtp_stream::sent::outbound::RTCOutboundRtpStreamStats;
 use crate::statistics::stats::{RTCStats, RTCStatsType};
 use rtcp::reception_report::ReceptionReport;
+use rtcp::transport_feedbacks::cc_feedback_report::CcFeedbackReportBlock;
 use shared::time::SystemInstant;
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -96,6 +97,20 @@ pub struct OutboundRtpStreamAccumulator {
     /// Whether the stream is actively sending.
     pub active: bool,
 
+    // ECN (RFC 3168, L4S RFC 9331) and RFC 8888 congestion control feedback
+    /// The application's socket layer applies the ECN codepoint each datagram names, so
+    /// `packetsSentWithEct1` is measured (`SettingEngineBuilder::with_ecn`).
+    pub ecn: bool,
+    /// The stream's codec negotiated RFC 8888 feedback (`a=rtcp-fb:<pt> ack ccfb`).
+    pub ccfb_negotiated: bool,
+    /// The stream's RTP packets (and its RTX packets) are sent ECT(1): ECN is on and RFC 8888
+    /// feedback, which reports CE marks back, is negotiated.
+    pub ect1_marking: bool,
+    /// RTP packets sent with ECT(1).
+    pub packets_sent_with_ect1: u64,
+    /// What the RFC 8888 reports received from the remote say about the stream.
+    pub ccfb_received: Option<Box<CcfbTally>>,
+
     /// The congestion controller's target bitrate (0 until it has produced one).
     pub target_bitrate: f64,
 
@@ -137,6 +152,26 @@ impl OutboundRtpStreamAccumulator {
     /// remote receiver's `packetsReceived`.
     pub fn on_sequence_number_sent(&mut self, sequence_number: u16) {
         self.first_sequence_number.get_or_insert(sequence_number);
+    }
+
+    /// Counts an RTP packet of the stream sent with ECT(1).
+    pub fn on_ect1_sent(&mut self) {
+        self.packets_sent_with_ect1 += 1;
+    }
+
+    /// Counts what an RFC 8888 report block from the remote says about the stream.
+    pub fn on_ccfb_block_received(&mut self, block: &CcFeedbackReportBlock) {
+        let sent_with_ect1 = self.packets_sent_with_ect1 > 0;
+        self.ccfb_received
+            .get_or_insert_with(|| Box::new(CcfbTally::new()))
+            .on_report_block(block, sent_with_ect1);
+    }
+
+    /// The remote-inbound RFC 8888 member `pick` selects, where `ccfb` is negotiated (or
+    /// reports came anyway); 0 until the first report.
+    fn ccfb_member(&self, pick: impl Fn(&CcfbTally) -> u64) -> Option<u64> {
+        (self.ccfb_negotiated || self.ccfb_received.is_some())
+            .then(|| self.ccfb_received.as_deref().map_or(0, pick))
     }
 
     /// Called when a NACK is received.
@@ -228,9 +263,9 @@ impl OutboundRtpStreamAccumulator {
     }
 
     /// Whether the remote-inbound object exists: webrtc-stats 6.1 creates it when the first
-    /// reception report about the SSRC arrives.
+    /// reception report about the SSRC arrives, here an RFC 8888 report block too.
     pub fn has_remote(&self) -> bool {
-        self.remote_reports_received > 0
+        self.remote_reports_received > 0 || self.ccfb_received.is_some()
     }
 
     /// Creates a snapshot of the accumulated stats at the given timestamp.
@@ -287,7 +322,7 @@ impl OutboundRtpStreamAccumulator {
             power_efficient_encoder: encoder.power_efficient_encoder,
             active: self.active,
             scalability_mode: encoder.scalability_mode.clone(),
-            packets_sent_with_ect1: None,
+            packets_sent_with_ect1: self.ecn.then_some(self.packets_sent_with_ect1),
         }
     }
 
@@ -310,10 +345,11 @@ impl OutboundRtpStreamAccumulator {
                     codec_id: self.codec_id.clone(),
                 },
                 packets_received: self.remote_packets_received,
-                packets_received_with_ect1: None,
-                packets_received_with_ce: None,
-                packets_reported_as_lost: None,
-                packets_reported_as_lost_but_recovered: None,
+                packets_received_with_ect1: self.ccfb_member(|t| t.received_with_ect1),
+                packets_received_with_ce: self.ccfb_member(|t| t.received_with_ce),
+                packets_reported_as_lost: self.ccfb_member(|t| t.reported_as_lost),
+                packets_reported_as_lost_but_recovered: self
+                    .ccfb_member(|t| t.reported_as_lost_but_recovered),
                 packets_lost: self.remote_packets_lost,
                 jitter: jitter_seconds(self.remote_jitter, self.clock_rate),
             },
@@ -322,7 +358,7 @@ impl OutboundRtpStreamAccumulator {
             total_round_trip_time: self.remote_total_round_trip_time,
             fraction_lost: self.remote_fraction_lost,
             round_trip_time_measurements: self.rtt_measurements,
-            packets_with_bleached_ect1_marking: None,
+            packets_with_bleached_ect1_marking: self.ccfb_member(|t| t.bleached_ect1),
         }
     }
 }

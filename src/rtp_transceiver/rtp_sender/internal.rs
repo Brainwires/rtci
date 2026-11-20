@@ -430,6 +430,11 @@ impl RTCRtpSenderInternal {
         infos
     }
 
+    /// The streams this sender bound to the interceptors, as they were bound.
+    pub(crate) fn bound_streams(&self) -> &[StreamInfo] {
+        &self.bound_streams
+    }
+
     /// Binds this sender's streams to the interceptors, as negotiation left them.
     pub(crate) fn bind_local_streams(
         &mut self,

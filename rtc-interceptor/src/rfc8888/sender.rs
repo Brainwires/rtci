@@ -6,9 +6,9 @@ use crate::stream_info::StreamInfo;
 use crate::{AttributedPacket, Packet, TaggedPacket};
 use rtcp::transport_feedbacks::cc_feedback_report::Ecn;
 use sansio::Protocol;
-use shared::TransportContext;
 use shared::error::Error;
 use shared::time::SystemInstant;
+use shared::{EcnCodepoint, TransportContext};
 use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -18,6 +18,16 @@ pub const DEFAULT_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Byte budget for one report, chosen to sit inside a conservative path MTU.
 pub const DEFAULT_MAX_REPORT_SIZE: usize = 1200;
+
+/// The RFC 8888 marking for the codepoint a datagram arrived with (`None` is Not-ECT).
+fn ecn_of(codepoint: Option<EcnCodepoint>) -> Ecn {
+    match codepoint {
+        None => Ecn::NotEct,
+        Some(EcnCodepoint::Ect0) => Ecn::Ect0,
+        Some(EcnCodepoint::Ect1) => Ecn::Ect1,
+        Some(EcnCodepoint::Ce) => Ecn::Ce,
+    }
+}
 
 /// Builder for [`Rfc8888Interceptor`].
 ///
@@ -151,14 +161,15 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for Rfc8888Interceptor {
         if let Packet::Rtp(rtp_packet) = &msg.message.packet
             && self.streams.contains(&rtp_packet.header.ssrc)
         {
-            // ECN lives in the IP header, which a sans-I/O interceptor never sees. Until the
-            // transport surfaces it, every packet is reported as Not-ECT — which is what an
-            // endpoint without ECN support would report anyway.
+            // ECN lives in the IP header, which a sans-I/O interceptor never sees: the
+            // application's socket layer reads it and hands it over in the transport context.
+            // A datagram without one is reported Not-ECT, which is what an endpoint without ECN
+            // support reports anyway.
             self.recorder.add_packet(
                 msg.now,
                 rtp_packet.header.ssrc,
                 rtp_packet.header.sequence_number,
-                Ecn::NotEct,
+                ecn_of(msg.transport.ecn),
             );
             self.arm(msg.now);
         }

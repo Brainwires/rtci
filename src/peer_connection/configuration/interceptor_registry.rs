@@ -131,7 +131,7 @@
 
 use crate::peer_connection::configuration::media_engine::MediaEngine;
 use crate::rtp_transceiver::rtp_sender::rtcp_parameters::{
-    TYPE_RTCP_FB_ACK, TYPE_RTCP_FB_NACK, TYPE_RTCP_FB_TRANSPORT_CC,
+    RTCP_FB_ACK_CCFB, TYPE_RTCP_FB_ACK, TYPE_RTCP_FB_NACK, TYPE_RTCP_FB_TRANSPORT_CC,
 };
 use crate::rtp_transceiver::rtp_sender::{
     RTCPFeedback, RTCRtpCodec, RTCRtpHeaderExtensionCapability, RTCRtpHeaderExtensionParameters,
@@ -657,6 +657,57 @@ pub fn configure_twcc_receiver_only(
     Ok(registry.with(Slot::TwccReceiver, TwccReceiverBuilder::new().build()))
 }
 
+/// `a=rtcp-fb:<pt> ack ccfb` (RFC 8888 section 5) on every codec of `kind`.
+fn register_ccfb_feedback(media_engine: &mut MediaEngine, kind: RtpCodecKind) {
+    media_engine.register_feedback(
+        RTCPFeedback {
+            typ: TYPE_RTCP_FB_ACK.to_owned(),
+            parameter: RTCP_FB_ACK_CCFB.to_owned(),
+        },
+        kind,
+    );
+}
+
+/// Negotiates RFC 8888 congestion control feedback and reports arrivals with it, without a
+/// congestion controller.
+///
+/// Registers `a=rtcp-fb:<pt> ack ccfb` (RFC 8888 section 5) on audio and video codecs and the
+/// RFC 8888 recorder in [`Slot::Rfc8888`], which reports every received packet of a stream that
+/// negotiated it, with the ECN codepoint it arrived with, about every 100 ms. What the reports
+/// say becomes statistics on both sides: the receiver's `inbound-rtp`
+/// `packetsReportedAsLost` / `packetsReportedAsLostButRecovered`, the sender's
+/// `remote-inbound-rtp` `packetsReceivedWithEct1`, `packetsReceivedWithCe`,
+/// `packetsReportedAsLost`, `packetsReportedAsLostButRecovered` and
+/// `packetsWithBleachedEct1Marking`. With ECN on
+/// ([`SettingEngineBuilder::with_ecn`](crate::peer_connection::configuration::setting_engine::SettingEngineBuilder::with_ecn)),
+/// a stream that negotiated it is sent ECT(1) (L4S).
+///
+/// Opt-in, and not part of [`register_default_interceptors`]: TWCC stays the default feedback,
+/// as browsers negotiate it. A peer that does not offer or accept `ack ccfb` negotiates
+/// without it, and nothing changes for that stream. Use [`configure_congestion_control`] with
+/// [`CongestionFeedback::Rfc8888`] instead to also run a congestion controller on the reports;
+/// never both, or every packet is reported twice.
+///
+/// # Examples
+///
+/// ```
+/// use rtc::interceptor::Registry;
+/// use rtc::peer_connection::configuration::interceptor_registry::configure_congestion_control_feedback;
+/// use rtc::peer_connection::configuration::media_engine::MediaEngine;
+///
+/// let mut media_engine = MediaEngine::default();
+/// let registry = configure_congestion_control_feedback(Registry::new(), &mut media_engine);
+/// ```
+pub fn configure_congestion_control_feedback(
+    registry: Registry,
+    media_engine: &mut MediaEngine,
+) -> Registry {
+    for kind in [RtpCodecKind::Video, RtpCodecKind::Audio] {
+        register_ccfb_feedback(media_engine, kind);
+    }
+    registry.with(Slot::Rfc8888, Rfc8888Builder::new().build())
+}
+
 /// Which feedback format the remote should report arrivals with.
 ///
 /// **One or the other, never both** (D7). Both resolve into the same `PacketReport`s and the
@@ -753,13 +804,7 @@ pub fn configure_congestion_control<E: BandwidthEstimator + 'static>(
                 //
                 // No header extension: RFC 8888 reports against the RTP sequence number, which is
                 // in every packet already.
-                media_engine.register_feedback(
-                    RTCPFeedback {
-                        typ: TYPE_RTCP_FB_ACK.to_owned(),
-                        parameter: "ccfb".to_owned(),
-                    },
-                    kind,
-                );
+                register_ccfb_feedback(media_engine, kind);
             }
         }
     }

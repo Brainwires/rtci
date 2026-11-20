@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.0+brainwires.4] - 2026-11-20
+
+### Features
+
+- **ecn**: ECN (RFC 3168) and L4S (RFC 9331) on RTP media. The engine is sans-I/O, so the
+  application's socket layer carries the codepoint in `TransportContext::ecn`: on a datagram
+  handed to `handle_read`, the codepoint it arrived with (`IP_RECVTOS` / `IPV6_RECVTCLASS`,
+  `None` for Not-ECT); on a datagram from `poll_write`, the codepoint to set (`IP_TOS` /
+  `IPV6_TCLASS`, `None` for Not-ECT). New `SettingEngineBuilder::with_ecn(bool)` (off by
+  default) says the socket layer does both: RTP packets (RTX included) of a stream whose codec
+  negotiated RFC 8888 feedback are then sent ECT(1); STUN, DTLS, SCTP and RTCP never are, and
+  nothing is marked without `ack ccfb` negotiated.
+- **interceptor**: `configure_congestion_control_feedback` negotiates
+  `a=rtcp-fb:<pt> ack ccfb` (RFC 8888 section 5) and registers the RFC 8888 recorder without a
+  congestion controller. Opt-in: TWCC stays the default and the default SDP is unchanged. New
+  constant `RTCP_FB_ACK_CCFB`.
+- **rfc8888**: the recorder reports each packet with the ECN codepoint its datagram arrived with
+  (it reported Not-ECT for every packet).
+- **stats**: inbound-rtp `packetsReceivedWithEct1` / `packetsReceivedWithCe` and outbound-rtp
+  `packetsSentWithEct1` (with ECN on); inbound-rtp `packetsReportedAsLost` /
+  `packetsReportedAsLostButRecovered` from the RFC 8888 reports this side sends, and
+  remote-inbound-rtp `packetsReceivedWithEct1`, `packetsReceivedWithCe`, `packetsReportedAsLost`,
+  `packetsReportedAsLostButRecovered` and `packetsWithBleachedEct1Marking` from the ones it
+  receives (where `ack ccfb` is negotiated), each packet counted once however many reports
+  describe it. An RFC 8888 report also creates the remote-inbound object.
+- **shared**: `EcnCodepoint`'s variants are documented (they were hidden).
+
 ## [0.22.0+brainwires.3] - 2026-11-20
 
 ### Behaviour changes

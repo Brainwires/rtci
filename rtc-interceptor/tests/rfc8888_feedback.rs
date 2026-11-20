@@ -9,9 +9,10 @@ use rtc_interceptor::{
     AttributedPacket, Interceptor, Packet, Registry, Rfc8888Builder, Slot, StreamInfo, TaggedPacket,
 };
 use rtcp::transport_feedbacks::cc_feedback_report::CcFeedbackReport;
+use rtcp::transport_feedbacks::cc_feedback_report::Ecn;
 use sansio::Protocol;
-use shared::TransportContext;
 use shared::marshal::{Marshal, MarshalSize, Unmarshal};
+use shared::{EcnCodepoint, TransportContext};
 use std::time::{Duration, Instant};
 
 const SSRC: u32 = 1000;
@@ -50,10 +51,24 @@ impl Harness {
     }
 
     fn arrive(&mut self, at: Duration, ssrc: u32, sequence_number: u16) {
+        self.arrive_with_ecn(at, ssrc, sequence_number, None);
+    }
+
+    /// A packet whose datagram arrived with the ECN codepoint `ecn` (from the socket layer).
+    fn arrive_with_ecn(
+        &mut self,
+        at: Duration,
+        ssrc: u32,
+        sequence_number: u16,
+        ecn: Option<EcnCodepoint>,
+    ) {
         self.chain
             .handle_read(TaggedPacket {
                 now: self.epoch + at,
-                transport: TransportContext::default(),
+                transport: TransportContext {
+                    ecn,
+                    ..TransportContext::default()
+                },
                 message: AttributedPacket::new(Packet::Rtp(rtp::Packet {
                     header: rtp::header::Header {
                         version: 2,
@@ -132,6 +147,28 @@ fn arrivals_are_reported_on_the_interval() {
     assert_eq!(SSRC, reports[0].report_blocks[0].media_ssrc);
     assert_eq!(100, reports[0].report_blocks[0].begin_sequence);
     assert_eq!(vec![true, true], received(&reports[0], 0));
+}
+
+/// Each packet is reported with the ECN codepoint its datagram arrived with, which the
+/// application's socket layer hands over in the transport context (RFC 8888 section 3.1).
+#[test]
+fn each_packet_is_reported_with_the_ecn_codepoint_it_arrived_with() {
+    let mut harness = Harness::new();
+    harness.bind(SSRC);
+
+    harness.arrive_with_ecn(ms(0), SSRC, 100, Some(EcnCodepoint::Ect1));
+    harness.arrive_with_ecn(ms(1), SSRC, 101, Some(EcnCodepoint::Ce));
+    harness.arrive_with_ecn(ms(2), SSRC, 102, Some(EcnCodepoint::Ect0));
+    harness.arrive_with_ecn(ms(3), SSRC, 103, None);
+
+    harness.tick(ms(100));
+    let reports = harness.drain_reports();
+    let ecn: Vec<Ecn> = reports[0].report_blocks[0]
+        .metric_blocks
+        .iter()
+        .map(|metric| metric.ecn)
+        .collect();
+    assert_eq!(vec![Ecn::Ect1, Ecn::Ce, Ecn::Ect0, Ecn::NotEct], ecn);
 }
 
 /// The whole point of the format: telling the sender which packets did *not* arrive.
