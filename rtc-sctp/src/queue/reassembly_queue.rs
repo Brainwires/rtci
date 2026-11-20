@@ -170,23 +170,24 @@ impl Chunks {
             return false;
         }
 
-        // 3.
-        let mut last_tsn = 0u32;
-        for (i, c) in self.chunks.iter().enumerate() {
-            if i > 0 {
-                // Fragments must have contiguous TSN
-                // From RFC 4960 Section 3.3.1:
-                //   When a user message is fragmented into multiple chunks, the TSNs are
-                //   used by the receiver to reassemble the message.  This means that the
-                //   TSNs for each fragment of a fragmented user message MUST be strictly
-                //   sequential.
-                if c.tsn != last_tsn.wrapping_add(1) {
-                    // mid or end fragment is missing
-                    return false;
-                }
-            }
-
-            last_tsn = c.tsn;
+        // 3. Fragments must have contiguous TSNs. From RFC 4960 Section 3.3.1:
+        //   When a user message is fragmented into multiple chunks, the TSNs are
+        //   used by the receiver to reassemble the message.  This means that the
+        //   TSNs for each fragment of a fragmented user message MUST be strictly
+        //   sequential.
+        //
+        // `push` keeps the fragments sorted by TSN and free of duplicates, so they are
+        // contiguous exactly when the first and last TSNs are `n_chunks - 1` apart. Checked
+        // in constant time: this runs on every fragment pushed and on every readability
+        // check, and walking the set each time made reassembling a message quadratic in its
+        // fragment count.
+        if self.chunks[n_chunks - 1]
+            .tsn
+            .wrapping_sub(self.chunks[0].tsn) as usize
+            != n_chunks - 1
+        {
+            // mid or end fragment is missing
+            return false;
         }
 
         true
