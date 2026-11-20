@@ -190,6 +190,35 @@ pub(crate) fn codec_parameters_fuzzy_search(
     (RTCRtpCodecParameters::default(), CodecMatch::None)
 }
 
+/// The negotiated codec an encoding is sent with.
+///
+/// An encoding that names a codec is sent with the negotiated codec matching it
+/// ([`codec_parameters_fuzzy_search`]). One that names none (an empty `codec`, the
+/// `RTCRtpCodec` default: W3C `addTransceiver` lets `sendEncodings` leave the codec to
+/// negotiation) is sent with the first media codec of the negotiated list, the codec the
+/// sender's parameters prefer; repair formats (RTX, RED, ULPFEC, FlexFEC) only accompany
+/// a media codec and are never it.
+///
+/// # Returns
+///
+/// `None` when the encoding names a codec that was not negotiated, or names none and the
+/// negotiated list has no media codec.
+pub(crate) fn encoding_send_codec(
+    codec: &RTCRtpCodec,
+    negotiated: &[RTCRtpCodecParameters],
+) -> Option<RTCRtpCodecParameters> {
+    if codec.mime_type.is_empty() {
+        return negotiated
+            .iter()
+            .find(|c| !c.rtp_codec.mime_type.is_empty() && !is_repair_codec(&c.rtp_codec))
+            .cloned();
+    }
+    match codec_parameters_fuzzy_search(codec, negotiated) {
+        (_, CodecMatch::None) => None,
+        (matched, _) => Some(matched),
+    }
+}
+
 /// Searches for a matching encoding in available codecs.
 ///
 /// Iterates through encodings looking for the best codec match, preferring exact matches.
@@ -363,7 +392,65 @@ mod rtp_codec_flexfec_test;
 
 #[cfg(test)]
 mod rtx_apt_test {
-    use super::{RTCRtpCodec, RTCRtpCodecParameters, find_rtx_payload_type, parse_rtx_apt};
+    use super::{
+        RTCRtpCodec, RTCRtpCodecParameters, encoding_send_codec, find_rtx_payload_type,
+        parse_rtx_apt,
+    };
+
+    fn media(mime_type: &str, payload_type: u8) -> RTCRtpCodecParameters {
+        RTCRtpCodecParameters {
+            rtp_codec: RTCRtpCodec {
+                mime_type: mime_type.to_owned(),
+                clock_rate: 90000,
+                ..Default::default()
+            },
+            payload_type,
+        }
+    }
+
+    #[test]
+    fn an_encoding_without_a_codec_is_sent_with_the_first_media_codec() {
+        // Repair formats only accompany a media codec: one listed first is passed over.
+        let negotiated = vec![
+            rtx(97, "apt=96"),
+            media("video/red", 63),
+            media("video/ulpfec", 116),
+            media("video/flexfec-03", 118),
+            media("video/VP8", 96),
+            media("video/H264", 102),
+        ];
+        let chosen = encoding_send_codec(&RTCRtpCodec::default(), &negotiated);
+        assert_eq!(chosen.map(|c| c.payload_type), Some(96));
+        assert_eq!(
+            encoding_send_codec(&RTCRtpCodec::default(), &[rtx(97, "apt=96")]),
+            None,
+            "nothing to send with"
+        );
+    }
+
+    #[test]
+    fn an_encoding_naming_a_codec_is_sent_with_that_codec_or_not_at_all() {
+        let negotiated = vec![media("video/VP8", 96), media("video/H264", 102)];
+        let h264 = RTCRtpCodec {
+            mime_type: "video/H264".to_owned(),
+            clock_rate: 90000,
+            ..Default::default()
+        };
+        assert_eq!(
+            encoding_send_codec(&h264, &negotiated).map(|c| c.payload_type),
+            Some(102)
+        );
+        let vp9 = RTCRtpCodec {
+            mime_type: "video/VP9".to_owned(),
+            clock_rate: 90000,
+            ..Default::default()
+        };
+        assert_eq!(
+            encoding_send_codec(&vp9, &negotiated),
+            None,
+            "a codec that was not negotiated is not replaced by another"
+        );
+    }
 
     fn rtx(payload_type: u8, fmtp: &str) -> RTCRtpCodecParameters {
         RTCRtpCodecParameters {

@@ -5,8 +5,7 @@ use crate::peer_connection::configuration::media_engine::MediaEngine;
 use crate::rtp_transceiver::direction::RTCRtpTransceiverDirection;
 use crate::rtp_transceiver::rtp_sender::rtp_capabilities::RTCRtpCapabilities;
 use crate::rtp_transceiver::rtp_sender::rtp_codec::{
-    CodecMatch, RtpCodecKind, codec_parameters_fuzzy_search, find_fec_payload_type,
-    find_rtx_payload_type,
+    RtpCodecKind, encoding_send_codec, find_fec_payload_type, find_rtx_payload_type,
 };
 use crate::rtp_transceiver::rtp_sender::rtp_codec_parameters::RTCRtpCodecParameters;
 use crate::rtp_transceiver::rtp_sender::rtp_encoding_parameters::RTCRtpEncodingParameters;
@@ -382,10 +381,12 @@ impl RTCRtpSenderInternal {
         let parameters = self.get_parameters(media_engine).clone();
 
         for coding in self.track().codings() {
-            let (codec, match_type) =
-                codec_parameters_fuzzy_search(&coding.codec, &parameters.rtp_parameters.codecs);
+            // An encoding without a codec of its own is sent with the codec negotiation picked,
+            // and its stream is bound like any other: without it the interceptors never see the
+            // stream (no sender reports, no NACK responder, no TWCC).
             if let Some(&ssrc) = coding.rtp_coding_parameters.ssrc.as_ref()
-                && match_type != CodecMatch::None
+                && let Some(codec) =
+                    encoding_send_codec(&coding.codec, &parameters.rtp_parameters.codecs)
             {
                 let stream_info = create_stream_info(
                     ssrc,
