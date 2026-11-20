@@ -373,6 +373,12 @@ impl RTCRtpSenderInternal {
                 encoding.rtp_coding_parameters.fec = None;
             }
         }
+        // The streams are bound from the track's codings (`local_stream_infos`), which carry
+        // the same repair SSRCs: dropped there too, or a stream would bind an RTX / FEC SSRC
+        // with no payload type to send it with.
+        self.sender_track
+            .clear_repair_ssrcs(!is_rtx_enabled, !is_fec_enabled);
+        self.last_returned_parameters = None;
     }
 
     /// The streams this sender sends, as the interceptors are to see them now: each coding's
@@ -399,15 +405,19 @@ impl RTCRtpSenderInternal {
                 let payload_type_fec = find_fec_payload_type(codecs);
                 infos.push(create_stream_info(
                     ssrc,
+                    // A repair SSRC goes with a repair payload type: without one negotiated it
+                    // could not be sent, so the stream does not name it.
                     coding
                         .rtp_coding_parameters
                         .rtx
                         .as_ref()
+                        .filter(|_| payload_type_rtx.is_some())
                         .map(|rtx| rtx.ssrc),
                     coding
                         .rtp_coding_parameters
                         .fec
                         .as_ref()
+                        .filter(|_| payload_type_fec.is_some())
                         .map(|fec| fec.ssrc),
                     codec.payload_type,
                     payload_type_rtx,

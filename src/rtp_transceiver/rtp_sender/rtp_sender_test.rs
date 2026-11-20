@@ -819,3 +819,69 @@ fn a_renegotiated_codec_rebinds_the_senders_stream() -> Result<()> {
     sender.close()?;
     receiver.close()
 }
+
+/// When the answer leaves RTX out, the stream is bound without the RTX SSRC (there is no RTX
+/// payload type to send it with), and the track's codings, which the binding reads, no longer
+/// carry it either.
+#[test]
+fn a_negotiation_without_rtx_binds_no_rtx_ssrc() -> Result<()> {
+    let (registry, log) = RecordingInterceptor::registry();
+    let mut sender = new_peer(
+        default_media_engine(),
+        SettingEngineBuilder::new()
+            .with_answering_dtls_role(RTCDtlsRole::Server)
+            .build(),
+        Some(registry),
+        crate::peer_connection::util_test::OFFERER_ADDR,
+    )?;
+    let mut no_rtx = MediaEngine::default();
+    no_rtx.register_codec(
+        RTCRtpCodecParameters {
+            rtp_codec: codec(MIME_TYPE_VP8),
+            payload_type: 96,
+        },
+        RtpCodecKind::Video,
+    )?;
+    let (_, mut receiver) = new_pair_with(default_media_engine(), no_rtx)?;
+
+    let ssrc = 0x5555_5555;
+    let sender_id = sender.add_track(track(MIME_TYPE_VP8, "", Some(ssrc)))?;
+    assert!(
+        sender.rtp_transceivers[sender_id.0]
+            .sender()
+            .as_ref()
+            .unwrap()
+            .track()
+            .codings()[0]
+            .rtp_coding_parameters
+            .rtx
+            .is_some(),
+        "the engine carries RTX, so the encoding starts with a repair flow"
+    );
+    signal_pair(&mut sender, &mut receiver)?;
+
+    let bound: Vec<interceptor::StreamInfo> = log.bound_local.lock().unwrap().clone();
+    let info = bound
+        .iter()
+        .find(|info| info.ssrc == ssrc)
+        .expect("the stream is bound");
+    assert_eq!(info.payload_type_rtx, None, "{info:?}");
+    assert_eq!(
+        info.ssrc_rtx, None,
+        "no RTX SSRC without an RTX payload type: {info:?}"
+    );
+    let rtp_sender = sender.rtp_transceivers[sender_id.0]
+        .sender()
+        .as_ref()
+        .unwrap();
+    assert!(
+        rtp_sender.track().codings()[0]
+            .rtp_coding_parameters
+            .rtx
+            .is_none(),
+        "the track's codings drop the RTX SSRC too"
+    );
+
+    sender.close()?;
+    receiver.close()
+}
