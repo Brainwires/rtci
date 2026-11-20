@@ -37,6 +37,12 @@ pub enum EndpointEvent {
     PeerClosed,
 }
 
+/// Most server associations kept for source addresses that have not yet echoed a cookie
+/// (RFC 6347 4.2.1). Until a client does, its address is only a claim anyone can make, so past
+/// this the oldest such association makes way for the new one: spoofed addresses cannot hold
+/// memory without limit, and a verified association is never displaced.
+pub(crate) const MAX_UNVERIFIED_ASSOCIATIONS: usize = 256;
+
 /// The main entry point to the library
 ///
 /// This object performs no I/O whatsoever. Instead, it generates a stream of packets to send via
@@ -48,6 +54,9 @@ pub struct Endpoint {
     transmits: VecDeque<TransportMessage<BytesMut>>,
     connections: HashMap<SocketAddr, DTLSConn>,
     server_config: Option<Arc<HandshakeConfig>>,
+    /// Server associations whose client has not yet echoed a cookie, oldest first. Entries for
+    /// associations since verified or removed are pruned when room is made.
+    unverified: VecDeque<SocketAddr>,
 }
 
 impl Endpoint {
@@ -65,6 +74,7 @@ impl Endpoint {
             transmits: VecDeque::new(),
             connections: HashMap::new(),
             server_config,
+            unverified: VecDeque::new(),
         }
     }
 
@@ -248,14 +258,14 @@ impl Endpoint {
         if self.server_config.is_some() && self.is_connection_failed(&remote) {
             self.connections.remove(&remote);
         }
-        if let Vacant(e) = self.connections.entry(remote) {
-            if let Some(server_config) = &self.server_config {
-                let handshake_config = server_config.clone();
-                let conn = DTLSConn::new(handshake_config, false, None);
-                e.insert(conn);
-            } else {
+        if !self.connections.contains_key(&remote) {
+            let Some(handshake_config) = self.server_config.clone() else {
                 return Err(Error::NoServerConfig);
-            }
+            };
+            self.make_room_for_unverified();
+            self.connections
+                .insert(remote, DTLSConn::new(handshake_config, false, None));
+            self.unverified.push_back(remote);
         }
 
         // Handle packet on existing association, if any
@@ -291,6 +301,22 @@ impl Endpoint {
         }
 
         Ok(messages)
+    }
+
+    /// Before a new server association: drops the oldest association still waiting for its
+    /// client to echo the cookie while [`MAX_UNVERIFIED_ASSOCIATIONS`] are.
+    fn make_room_for_unverified(&mut self) {
+        let connections = &self.connections;
+        self.unverified.retain(|addr| {
+            connections
+                .get(addr)
+                .is_some_and(|conn| !conn.is_address_verified())
+        });
+        while self.unverified.len() >= MAX_UNVERIFIED_ASSOCIATIONS {
+            if let Some(oldest) = self.unverified.pop_front() {
+                self.connections.remove(&oldest);
+            }
+        }
     }
 
     /// Queues application data for `remote`.

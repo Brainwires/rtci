@@ -66,6 +66,12 @@ pub(crate) trait Flight: fmt::Display + fmt::Debug + Send + Sync {
     fn has_retransmit(&self) -> bool {
         true
     }
+    /// Whether this server flight waits for the client to echo its cookie (RFC 6347 4.2.1).
+    /// Leaving it means the client's address is its own, and only then does the server do the
+    /// per-association work: its ECDHE key pair.
+    fn verifies_cookie(&self) -> bool {
+        false
+    }
 
     fn parse(
         &self,

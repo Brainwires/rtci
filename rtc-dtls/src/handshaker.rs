@@ -1,3 +1,4 @@
+use crate::alert::{AlertDescription, AlertLevel};
 use crate::conn::*;
 use crate::content::*;
 use shared::error::*;
@@ -274,6 +275,13 @@ impl DTLSConn {
                     {
                         return Ok(HandshakeState::Finished);
                     }
+                    if self.current_flight.verifies_cookie()
+                        && !next_flight.verifies_cookie()
+                        && let Err(err) = self.on_peer_address_verified()
+                    {
+                        self.notify(AlertLevel::Fatal, AlertDescription::IllegalParameter);
+                        return Err(err);
+                    }
                     self.current_flight = next_flight;
                     return Ok(HandshakeState::Preparing);
                 }
@@ -282,6 +290,21 @@ impl DTLSConn {
 
         Ok(HandshakeState::Waiting)
     }
+    /// The client has echoed our cookie, so the address it sends from is its own (RFC 6347
+    /// 4.2.1). Only now does a server do the per-association work a spoofed source address
+    /// must not be able to cause: its ECDHE key pair.
+    fn on_peer_address_verified(&mut self) -> Result<()> {
+        self.address_verified = true;
+        if self.state.local_keypair.is_none() {
+            let keypair = self
+                .state
+                .named_curve
+                .generate_keypair_with_crypto(self.handshake_config.provider().crypto())?;
+            self.state.local_keypair = Some(keypair);
+        }
+        Ok(())
+    }
+
     fn finish(&mut self) -> Result<HandshakeState> {
         if self.handshake_rx.take().is_some() {
             debug!(

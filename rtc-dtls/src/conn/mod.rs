@@ -127,6 +127,9 @@ pub struct DTLSConn {
     /// its flight because ours was lost, so ours is retransmitted at once (RFC 6347 4.2.4).
     /// Taken by the next `handshake()`.
     pub(crate) peer_repeated_flight: bool,
+    /// The peer's source address is its own: always for a client (it chose the server's
+    /// address), and for a server once the client has echoed its cookie (RFC 6347 4.2.1).
+    pub(crate) address_verified: bool,
 }
 
 impl DTLSConn {
@@ -141,6 +144,7 @@ impl DTLSConn {
         is_client: bool,
         initial_state: Option<State>,
     ) -> Self {
+        let resumed = initial_state.is_some();
         let (state, flight, initial_fsm_state) = if let Some(state) = initial_state {
             let flight = if is_client {
                 Box::new(Flight5 {}) as Box<dyn Flight>
@@ -195,6 +199,7 @@ impl DTLSConn {
             handshake_rx: None,
             received_handshake_in_last_datagram: false,
             peer_repeated_flight: false,
+            address_verified: is_client || resumed,
         }
     }
 
@@ -281,6 +286,12 @@ impl DTLSConn {
     /// record that is silently discarded, never fails it.
     pub fn is_failed(&self) -> bool {
         self.failed
+    }
+
+    /// Whether the peer's source address is known to be its own: a client's always is; a
+    /// server's once the client has echoed its cookie (RFC 6347 4.2.1).
+    pub(crate) fn is_address_verified(&self) -> bool {
+        self.address_verified
     }
 
     /// Ends the association after a fatal alert (sent or received) or a handshake that gave up.

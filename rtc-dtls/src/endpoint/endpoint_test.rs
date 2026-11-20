@@ -619,3 +619,69 @@ fn an_undecodable_plaintext_record_is_discarded_not_fatal() -> Result<()> {
     complete_handshake(&mut client, &mut server, now);
     Ok(())
 }
+
+// ---------------------------------------------------------------------------------------------
+// A standalone server does per-association work only for addresses that echoed a cookie
+// (RFC 6347 4.2.1).
+// ---------------------------------------------------------------------------------------------
+
+fn spoofed_addr(index: usize) -> SocketAddr {
+    SocketAddr::from(([10, 0, (index >> 8) as u8, index as u8], 7000))
+}
+
+/// One cookieless ClientHello replayed from more source addresses than the cap: the server keeps
+/// at most `MAX_UNVERIFIED_ASSOCIATIONS` of them, generates no key pair for any, still answers
+/// each with a HelloVerifyRequest, and still completes a genuine client's handshake, which then
+/// survives a second flood.
+#[test]
+fn unverified_source_addresses_are_capped_and_cost_no_key_pair() -> Result<()> {
+    let now = Instant::now();
+    let mut genuine = Endpoint::new(client_addr(), TransportProtocol::UDP, None);
+    let mut server = Endpoint::new(
+        server_addr(),
+        TransportProtocol::UDP,
+        Some(server_config()?),
+    );
+
+    let mut prober = Endpoint::new(client_addr(), TransportProtocol::UDP, None);
+    prober.connect(now, server_addr(), client_config()?, None)?;
+    let client_hello = take_transmits(&mut prober);
+    assert!(!client_hello.is_empty());
+
+    let flood = MAX_UNVERIFIED_ASSOCIATIONS + 10;
+    for index in 0..flood {
+        let (_, errored) = deliver(&mut server, spoofed_addr(index), client_hello.clone(), now);
+        assert!(!errored, "a cookieless ClientHello is not an error");
+        assert!(
+            !take_transmits(&mut server).is_empty(),
+            "each one is answered with a HelloVerifyRequest"
+        );
+    }
+    assert!(
+        server.connections.len() <= MAX_UNVERIFIED_ASSOCIATIONS,
+        "{} associations kept for unverified addresses",
+        server.connections.len()
+    );
+    assert!(
+        server
+            .connections
+            .values()
+            .all(|conn| conn.state.local_keypair.is_none()),
+        "no key pair is generated before the cookie comes back"
+    );
+
+    genuine.connect(now, server_addr(), client_config()?, None)?;
+    complete_handshake(&mut genuine, &mut server, now);
+    assert!(server.connections[&client_addr()].is_address_verified());
+
+    for index in flood..2 * flood {
+        deliver(&mut server, spoofed_addr(index), client_hello.clone(), now);
+        take_transmits(&mut server);
+    }
+    assert!(
+        server.connections.contains_key(&client_addr()),
+        "a verified association is never displaced by unverified ones"
+    );
+    assert!(server.connections.len() <= MAX_UNVERIFIED_ASSOCIATIONS + 1);
+    Ok(())
+}

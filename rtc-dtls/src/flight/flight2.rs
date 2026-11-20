@@ -24,6 +24,10 @@ impl Flight for Flight2 {
         false
     }
 
+    fn verifies_cookie(&self) -> bool {
+        true
+    }
+
     fn parse(
         &self,
         //tx: &mut mpsc::Sender<mpsc::Sender<()>>,

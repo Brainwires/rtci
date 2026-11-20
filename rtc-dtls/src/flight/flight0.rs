@@ -150,24 +150,9 @@ impl Flight for Flight0 {
                 ));
             }
 
-            if state.local_keypair.is_none() {
-                state.local_keypair = match state
-                    .named_curve
-                    .generate_keypair_with_crypto(cfg.provider().crypto())
-                {
-                    Ok(local_keypar) => Some(local_keypar),
-                    Err(err) => {
-                        return Err((
-                            Some(Alert {
-                                alert_level: AlertLevel::Fatal,
-                                alert_description: AlertDescription::IllegalParameter,
-                            }),
-                            Some(err),
-                        ));
-                    }
-                };
-            }
-
+            // The ECDHE key pair waits until the client has echoed the cookie (see
+            // `DTLSConn::on_peer_address_verified`): a cookieless ClientHello costs no key
+            // generation, whatever source address it claims.
             Ok(Box::new(Flight2 {}))
         } else {
             Err((
