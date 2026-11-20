@@ -10,6 +10,16 @@ use crate::peer_connection::transport::ice::candidate::{
 };
 use serde::{Deserialize, Serialize};
 
+/// Not a relay candidate (or the relay protocol is unknown): `relayProtocol` is left out.
+fn relay_protocol_unknown(protocol: &RTCIceServerTransportProtocol) -> bool {
+    *protocol == RTCIceServerTransportProtocol::Unspecified
+}
+
+/// Not a TCP candidate: `tcpType` is left out.
+fn tcp_type_unknown(tcp_type: &RTCIceTcpCandidateType) -> bool {
+    *tcp_type == RTCIceTcpCandidateType::Unspecified
+}
+
 /// Statistics for an ICE candidate.
 ///
 /// This struct corresponds to the `RTCIceCandidateStats` dictionary in the
@@ -46,42 +56,49 @@ pub struct RTCIceCandidateStats {
     /// Values: host, srflx (server-reflexive), prflx (peer-reflexive), relay.
     pub candidate_type: RTCIceCandidateType,
 
-    /// The priority of the candidate.
+    /// The priority of the candidate (RFC 8445 section 5.1.2), all 32 bits.
     ///
     /// Higher values indicate higher priority candidates.
-    pub priority: u16,
+    pub priority: u32,
 
     /// The URL of the ICE server used to gather this candidate.
     ///
     /// For host candidates, this is empty.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub url: String,
 
     /// The protocol used to communicate with the TURN server.
     ///
     /// Only applicable for relay candidates.
+    #[serde(default, skip_serializing_if = "relay_protocol_unknown")]
     pub relay_protocol: RTCIceServerTransportProtocol,
 
     /// The foundation string for the candidate.
     ///
     /// Candidates with the same foundation can potentially be
     /// used for candidate pair pruning.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub foundation: String,
 
     /// The related address for derived candidates.
     ///
     /// For server-reflexive candidates, this is the host address.
     /// For relay candidates, this is the server-reflexive address.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub related_address: String,
 
     /// The related port for derived candidates.
-    pub related_port: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub related_port: Option<u16>,
 
     /// The username fragment from ICE credentials.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub username_fragment: String,
 
     /// The TCP candidate type.
     ///
     /// Only applicable when protocol is "tcp".
     /// Values: active, passive, so (simultaneous-open).
+    #[serde(default, skip_serializing_if = "tcp_type_unknown")]
     pub tcp_type: RTCIceTcpCandidateType,
 }

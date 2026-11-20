@@ -50,6 +50,8 @@ pub struct RTCRtpStreamStats {
 
     /// The ID of the codec used for this stream.
     ///
-    /// References an [`RTCCodecStats`](super::codec::RTCCodecStats) object.
+    /// References an [`RTCCodecStats`](super::codec::RTCCodecStats) object. Empty, and left out
+    /// of the JSON, until the stream's codec is known.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub codec_id: String,
 }

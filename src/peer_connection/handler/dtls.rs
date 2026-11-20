@@ -6,7 +6,9 @@ use crate::peer_connection::message::internal::{
 use crate::peer_connection::transport::dtls::DtlsTransport;
 use crate::peer_connection::transport::dtls::role::RTCDtlsRole;
 use crate::peer_connection::transport::dtls::state::RTCDtlsTransportState;
-use crate::statistics::accumulator::{CertificateStatsAccumulator, RTCStatsAccumulator};
+use crate::statistics::accumulator::{
+    CertificateStatsAccumulator, RTCStatsAccumulator, base64_encode,
+};
 use crypto::RTCCryptoProvider;
 use dtls::endpoint::EndpointEvent;
 use dtls::extension::extension_use_srtp::SrtpProtectionProfile;
@@ -139,15 +141,15 @@ impl<'a> DtlsHandler<'a> {
             let fingerprints =
                 local_cert.get_fingerprints(self.ctx.dtls_transport.crypto_provider.crypto())?;
             if let Some(fp) = fingerprints.first() {
-                // Register certificate in accumulator
-                // Use hex encoding for certificate (base64 would need additional dependency)
+                // Register certificate in accumulator, the DER base64-encoded (webrtc-stats
+                // `base64Certificate`)
                 if let Some(der) = local_cert.dtls_certificate.certificate.first() {
                     self.stats.register_certificate(
                         fp.value.clone(),
                         CertificateStatsAccumulator {
                             fingerprint: fp.value.clone(),
                             fingerprint_algorithm: fp.algorithm.clone(),
-                            base64_certificate: hex::encode(der.as_ref()),
+                            base64_certificate: base64_encode(der.as_ref()),
                             issuer_certificate_id: String::new(),
                         },
                     );
@@ -182,7 +184,7 @@ impl<'a> DtlsHandler<'a> {
                 CertificateStatsAccumulator {
                     fingerprint,
                     fingerprint_algorithm: "sha-256".to_string(),
-                    base64_certificate: hex::encode(peer_cert_der),
+                    base64_certificate: base64_encode(peer_cert_der),
                     issuer_certificate_id: String::new(),
                 },
             );

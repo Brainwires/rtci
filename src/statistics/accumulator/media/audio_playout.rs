@@ -15,15 +15,15 @@ pub struct AudioPlayoutStatsAccumulator {
     /// The media kind (always Audio for this type).
     pub kind: RtpCodecKind,
     /// Duration of synthesized samples in seconds.
-    pub synthesized_samples_duration: f64,
+    pub synthesized_samples_duration: Option<f64>,
     /// Number of sample synthesis events.
-    pub synthesized_samples_events: u32,
+    pub synthesized_samples_events: Option<u32>,
     /// Total duration of samples played in seconds.
-    pub total_samples_duration: f64,
+    pub total_samples_duration: Option<f64>,
     /// Total playout delay in seconds.
-    pub total_playout_delay: f64,
+    pub total_playout_delay: Option<f64>,
     /// Total number of samples played.
-    pub total_samples_count: u64,
+    pub total_samples_count: Option<u64>,
 }
 
 impl AudioPlayoutStatsAccumulator {

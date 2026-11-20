@@ -25,8 +25,8 @@ pub struct IceCandidateAccumulator {
     pub protocol: String,
     /// The type of candidate (host, srflx, prflx, relay).
     pub candidate_type: RTCIceCandidateType,
-    /// The priority of the candidate.
-    pub priority: u16,
+    /// The priority of the candidate (RFC 8445 section 5.1.2), all 32 bits.
+    pub priority: u32,
     /// The URL of the STUN/TURN server used to gather this candidate.
     pub url: String,
     /// The relay protocol used for TURN candidates.
@@ -66,7 +66,8 @@ impl IceCandidateAccumulator {
             relay_protocol: self.relay_protocol,
             foundation: self.foundation.clone(),
             related_address: self.related_address.clone(),
-            related_port: self.related_port,
+            // A related port only means something beside a related address.
+            related_port: (!self.related_address.is_empty()).then_some(self.related_port),
             username_fragment: self.username_fragment.clone(),
             tcp_type: self.tcp_type,
         }
@@ -113,7 +114,7 @@ mod tests {
             port: 50000,
             protocol: "udp".to_string(),
             candidate_type: RTCIceCandidateType::Host,
-            priority: 65535, // Max u16 value for testing
+            priority: 2_130_706_431, // A host candidate's: type preference 126, all 32 bits
             foundation: "1234567890".to_string(),
             username_fragment: "abcd1234".to_string(),
             ..Default::default()
@@ -132,7 +133,7 @@ mod tests {
         assert_eq!(stats.port, 50000);
         assert_eq!(stats.protocol, "udp");
         assert_eq!(stats.candidate_type, RTCIceCandidateType::Host);
-        assert_eq!(stats.priority, 65535);
+        assert_eq!(stats.priority, 2_130_706_431);
         assert_eq!(stats.foundation, "1234567890");
         assert_eq!(stats.username_fragment, "abcd1234");
     }
@@ -162,7 +163,7 @@ mod tests {
         assert_eq!(stats.port, 60000);
         assert_eq!(stats.candidate_type, RTCIceCandidateType::Srflx);
         assert_eq!(stats.related_address, "192.168.1.100");
-        assert_eq!(stats.related_port, 50000);
+        assert_eq!(stats.related_port, Some(50000));
         assert_eq!(stats.url, "stun:stun.example.com:3478");
     }
 

@@ -30,21 +30,26 @@ pub struct RTCAudioPlayoutStats {
     ///
     /// Synthesized samples are generated to fill gaps when
     /// packets are lost or delayed.
-    pub synthesized_samples_duration: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synthesized_samples_duration: Option<f64>,
 
     /// Number of sample synthesis events.
     ///
     /// Each event represents a gap that required sample synthesis.
-    pub synthesized_samples_events: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synthesized_samples_events: Option<u32>,
 
     /// Total duration of samples played in seconds.
-    pub total_samples_duration: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_samples_duration: Option<f64>,
 
     /// Total playout delay in seconds.
     ///
     /// The accumulated delay from the jitter buffer.
-    pub total_playout_delay: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_playout_delay: Option<f64>,
 
     /// Total number of samples played.
-    pub total_samples_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_samples_count: Option<u64>,
 }

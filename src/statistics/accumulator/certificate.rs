@@ -21,6 +21,34 @@ pub struct CertificateStatsAccumulator {
     pub issuer_certificate_id: String,
 }
 
+/// Base64 (RFC 4648 section 4, standard alphabet, with padding), as webrtc-stats
+/// `RTCCertificateStats.base64Certificate` carries the DER certificate.
+pub(crate) fn base64_encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            chunk.get(1).copied().unwrap_or(0),
+            chunk.get(2).copied().unwrap_or(0),
+        ];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        out.push(char::from(ALPHABET[(n >> 18) as usize & 0x3F]));
+        out.push(char::from(ALPHABET[(n >> 12) as usize & 0x3F]));
+        out.push(if chunk.len() > 1 {
+            char::from(ALPHABET[(n >> 6) as usize & 0x3F])
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            char::from(ALPHABET[n as usize & 0x3F])
+        } else {
+            '='
+        });
+    }
+    out
+}
+
 impl CertificateStatsAccumulator {
     /// Creates a snapshot of the accumulated stats at the given timestamp.
     pub fn snapshot(&self, now: Instant, id: &str) -> RTCCertificateStats {

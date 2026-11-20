@@ -1598,7 +1598,7 @@ impl RTCPeerConnection {
             port: candidate.port,
             protocol: candidate.protocol.to_string(),
             candidate_type: candidate.typ,
-            priority: (candidate.priority >> 16) as u16, // Take high 16 bits for stats priority
+            priority: candidate.priority,
             url: url_for_stats,
             relay_protocol: candidate.relay_protocol,
             foundation: candidate.foundation.clone(),
@@ -1674,78 +1674,181 @@ impl RTCPeerConnection {
         Ok(())
     }
 
-    /// Update STUN transaction stats from the ICE agent to the stats accumulator.
+    /// Update the candidate pair stats from the ICE agent: every pair it holds, with its state,
+    /// nomination and STUN transaction counters.
     ///
-    /// This is called automatically by `get_stats()` to ensure ICE candidate pair
-    /// statistics (RTT, requests/responses sent/received) are up to date.
+    /// This is called automatically by `get_stats()`. webrtc-stats reports a
+    /// `RTCIceCandidatePairStats` for each pair of the ICE transport, not only the selected one,
+    /// and every candidate a pair names has a candidate stats object of its own (every id a
+    /// stats object names resolves in the same report). Pairs the agent no longer holds (an ICE
+    /// restart drops them) are dropped from the stats too.
     pub(super) fn update_ice_agent_stats(&mut self, now: Instant) {
-        let Some((local_id, remote_id, local, remote)) = self
+        let agent = &self
             .pipeline_context
             .ice_handler_context
             .ice_transport
-            .agent
-            .get_selected_candidate_pair()
-            .map(|(l, r)| {
-                (
-                    l.id().to_owned(),
-                    r.id().to_owned(),
-                    RTCIceCandidate::from(l),
-                    RTCIceCandidate::from(r),
-                )
-            })
-        else {
-            return;
-        };
+            .agent;
+        let pairs = agent.get_candidate_pairs_stats(now);
 
-        // The selected pair's candidates always have stats objects of their own (webrtc-stats:
-        // every id a stats object names resolves in the same report). A local candidate is
-        // normally registered when gathered; register it here if it was not.
-        let local_stats_id = local_candidate_stats_id(&local_id);
-        if !self.stats().local_candidates.contains_key(&local_stats_id) {
+        // A local candidate is normally registered when gathered, a remote one when signalled;
+        // one the agent learned from a connectivity check (peer-reflexive, RFC 8445 section
+        // 7.3.1.3) was never signalled, so it has no stats object yet.
+        let unregistered_local: Vec<RTCIceCandidate> = agent
+            .get_local_candidates()
+            .iter()
+            .filter(|c| {
+                pairs.iter().any(|p| p.local_candidate_id == c.id())
+                    && !self
+                        .pipeline_context
+                        .stats
+                        .local_candidates
+                        .contains_key(&local_candidate_stats_id(c.id()))
+            })
+            .map(RTCIceCandidate::from)
+            .collect();
+        let unregistered_remote: Vec<RTCIceCandidate> = agent
+            .get_remote_candidates()
+            .iter()
+            .filter(|c| {
+                pairs.iter().any(|p| p.remote_candidate_id == c.id())
+                    && !self
+                        .pipeline_context
+                        .stats
+                        .remote_candidates
+                        .contains_key(&remote_candidate_stats_id(c.id()))
+            })
+            .map(RTCIceCandidate::from)
+            .collect();
+
+        if !unregistered_local.is_empty() {
             let ufrag = self
                 .ice_transport()
                 .get_local_user_credentials()
                 .0
                 .to_owned();
-            let accumulator = self.candidate_to_accumulator(&local, &ufrag, None);
-            self.stats_mut()
-                .register_local_candidate(local_stats_id, accumulator);
+            for candidate in unregistered_local {
+                let accumulator = self.candidate_to_accumulator(&candidate, &ufrag, None);
+                self.stats_mut()
+                    .register_local_candidate(local_candidate_stats_id(&candidate.id), accumulator);
+            }
         }
-
-        // A remote candidate the agent learned from a connectivity check (peer-reflexive,
-        // RFC 8445 section 7.3.1.3) was never signalled, so it has no remote-candidate stats
-        // object yet; the selected pair must still name one (W3C getStats).
-        let remote_stats_id = remote_candidate_stats_id(&remote_id);
-        if !self
-            .stats()
-            .remote_candidates
-            .contains_key(&remote_stats_id)
-        {
+        if !unregistered_remote.is_empty() {
             let ufrag = self
                 .ice_transport()
                 .get_remote_user_credentials()
                 .0
                 .to_owned();
-            let accumulator = self.candidate_to_accumulator(&remote, &ufrag, None);
-            self.stats_mut()
-                .register_remote_candidate(remote_stats_id, accumulator);
+            for candidate in unregistered_remote {
+                let accumulator = self.candidate_to_accumulator(&candidate, &ufrag, None);
+                self.stats_mut().register_remote_candidate(
+                    remote_candidate_stats_id(&candidate.id),
+                    accumulator,
+                );
+            }
         }
 
-        // Get candidate pair stats from the ice agent
-        let cp_stats = self
-            .pipeline_context
-            .ice_handler_context
-            .ice_transport
-            .agent
-            .get_candidate_pairs_stats(now)
-            .into_iter()
-            .find(|cp| cp.local_candidate_id == local_id && cp.remote_candidate_id == remote_id);
-        if let Some(cp_stats) = cp_stats {
-            // Sync STUN stats from ice agent to RTC accumulator
+        // Sync each pair's STUN stats, state and nomination from the agent, and drop the pairs
+        // it no longer holds.
+        self.pipeline_context.stats.sync_ice_candidate_pairs(&pairs);
+    }
+
+    /// Update the transport stats from the DTLS transport itself: webrtc-stats
+    /// `RTCTransportStats.dtlsState` is the `RTCDtlsTransport`'s state, which goes through
+    /// `new`, `connecting`, `connected`, `closed` and `failed`, not only `connected`. (The ICE
+    /// state follows the agent's events already.)
+    ///
+    /// This is called automatically by `get_stats()`.
+    pub(super) fn update_transport_stats(&mut self) {
+        let dtls_state = self.dtls_transport().state();
+        self.pipeline_context
+            .stats
+            .transport
+            .on_dtls_state_changed(dtls_state);
+    }
+
+    /// Update the data channel stats from the data channels themselves: every channel the peer
+    /// connection holds has a stats object, from `connecting` (before it opens) through
+    /// `closing` (once `close()` is called), not only from its open.
+    ///
+    /// This is called automatically by `get_stats()`. A channel that has gone from the registry
+    /// keeps the stats object its close left (`closed`), as webrtc-stats keeps a closed channel's.
+    pub(super) fn update_data_channel_stats(&mut self) {
+        let channels: Vec<_> = self
+            .data_channels
+            .values()
+            .map(|dc| {
+                (
+                    dc.id,
+                    dc.label.clone(),
+                    dc.protocol.clone(),
+                    dc.ready_state,
+                    dc.stream_id,
+                )
+            })
+            .collect();
+        for (id, label, protocol, state, stream_id) in channels {
             self.pipeline_context
                 .stats
-                .update_ice_agent_stats(&local_id, &remote_id, &cp_stats);
+                .get_or_create_data_channel(id, &label, &protocol)
+                .on_state_changed(state);
+            if let Some(stream_id) = stream_id {
+                self.pipeline_context
+                    .stats
+                    .set_data_channel_stream_id(id, stream_id);
+            }
         }
+    }
+
+    /// Drops the stats of the RTP streams whose SSRC no longer belongs to a receiver's or a
+    /// sender's track (a stopped transceiver, a removed track, a rebound simulcast layer), and
+    /// with them their RTX / FEC reverse lookups.
+    ///
+    /// This is called automatically by `get_stats()`.
+    pub(super) fn retire_rtp_stream_stats(&mut self) {
+        let mut inbound_live = HashSet::new();
+        let mut outbound_live = HashSet::new();
+        for transceiver in &self.rtp_transceivers {
+            if let Some(receiver) = transceiver.receiver() {
+                inbound_live.extend(
+                    receiver
+                        .track()
+                        .codings()
+                        .iter()
+                        .filter_map(|coding| coding.rtp_coding_parameters.ssrc),
+                );
+            }
+            if let Some(sender) = transceiver.sender() {
+                outbound_live.extend(
+                    sender
+                        .track()
+                        .codings()
+                        .iter()
+                        .filter_map(|coding| coding.rtp_coding_parameters.ssrc),
+                );
+            }
+        }
+        self.pipeline_context
+            .stats
+            .retire_rtp_streams(&inbound_live, &outbound_live);
+    }
+
+    /// The transceiver, id and kind of the track `sender` sends: what the stats of its media
+    /// source are keyed and linked by. `None` for a sender that does not exist.
+    pub(crate) fn sender_track_for_stats(
+        &self,
+        sender: crate::rtp_transceiver::RTCRtpSenderId,
+    ) -> Option<(usize, String, RtpCodecKind)> {
+        let transceiver_id = sender.0;
+        let sender = self
+            .rtp_transceivers
+            .get(transceiver_id)?
+            .sender()
+            .as_ref()?;
+        Some((
+            transceiver_id,
+            sender.track().track_id().clone(),
+            sender.kind(),
+        ))
     }
 
     /// Update codec stats from transceivers to the stats accumulator.

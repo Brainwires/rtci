@@ -44,17 +44,21 @@ pub struct RTCTransportStats {
     /// The ICE role of this peer.
     ///
     /// Either "controlling" or "controlled".
+    #[serde(with = "w3c_ice_role")]
     pub ice_role: RTCIceRole,
 
     /// The local ICE username fragment.
     ///
     /// Used to identify this peer in ICE connectivity checks.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub ice_local_username_fragment: String,
 
     /// The current state of the ICE transport.
+    #[serde(default, skip_serializing_if = "ice_state_unknown")]
     pub ice_state: RTCIceTransportState,
 
     /// The current state of the DTLS transport.
+    #[serde(default, skip_serializing_if = "dtls_state_unknown")]
     pub dtls_state: RTCDtlsTransportState,
 
     /// The DTLS role of this peer.
@@ -66,21 +70,25 @@ pub struct RTCTransportStats {
     /// The negotiated TLS version.
     ///
     /// The uppercase hex of the ServerHello version bytes, "FEFD" for DTLS 1.2.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub tls_version: String,
 
     /// The negotiated DTLS cipher suite.
     ///
     /// For example: "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256".
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub dtls_cipher: String,
 
     /// The negotiated SRTP cipher suite.
     ///
     /// For example: "AES_CM_128_HMAC_SHA1_80".
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub srtp_cipher: String,
 
     /// The ID of the selected ICE candidate pair.
     ///
     /// References an [`RTCIceCandidatePairStats`](super::ice_candidate_pair::RTCIceCandidatePairStats) object.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub selected_candidate_pair_id: String,
 
     /// Number of times the selected candidate pair has changed.
@@ -89,11 +97,13 @@ pub struct RTCTransportStats {
     /// The ID of the local certificate stats.
     ///
     /// References an [`RTCCertificateStats`](super::certificate::RTCCertificateStats) object.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub local_certificate_id: String,
 
     /// The ID of the remote certificate stats.
     ///
     /// References an [`RTCCertificateStats`](super::certificate::RTCCertificateStats) object.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub remote_certificate_id: String,
 
     /// Number of RTCP congestion control feedback messages sent.
@@ -101,6 +111,40 @@ pub struct RTCTransportStats {
 
     /// Number of RTCP congestion control feedback messages received.
     pub ccfb_messages_received: u32,
+}
+
+/// No ICE transport state to report yet: left out of the JSON rather than written as a value
+/// the W3C enum doesn't have.
+fn ice_state_unknown(state: &RTCIceTransportState) -> bool {
+    *state == RTCIceTransportState::Unspecified
+}
+
+/// No DTLS transport state to report yet: left out of the JSON.
+fn dtls_state_unknown(state: &RTCDtlsTransportState) -> bool {
+    *state == RTCDtlsTransportState::Unspecified
+}
+
+/// The W3C `RTCIceRole` enum of `RTCTransportStats.iceRole`: "controlling", "controlled", or
+/// "unknown" before the role is decided (this crate's `Unspecified`).
+mod w3c_ice_role {
+    use super::RTCIceRole;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub(super) fn serialize<S: Serializer>(role: &RTCIceRole, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(match role {
+            RTCIceRole::Controlling => "controlling",
+            RTCIceRole::Controlled => "controlled",
+            _ => "unknown",
+        })
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<RTCIceRole, D::Error> {
+        Ok(match String::deserialize(d)?.as_str() {
+            "controlling" => RTCIceRole::Controlling,
+            "controlled" => RTCIceRole::Controlled,
+            _ => RTCIceRole::Unspecified,
+        })
+    }
 }
 
 /// The W3C `RTCDtlsRole` enum of `RTCTransportStats.dtlsRole`: "client", "server", or
