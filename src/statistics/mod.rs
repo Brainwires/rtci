@@ -46,6 +46,8 @@ mod feed_test;
 #[cfg(test)]
 mod members_test;
 #[cfg(test)]
+mod report_integrity_test;
+#[cfg(test)]
 mod statistics_test;
 
 pub(crate) mod accumulator;
