@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795219848089,
+  "lastUpdate": 1795226665001,
   "repoUrl": "https://github.com/Brainwires/webrtc-rs-rtc",
   "entries": {
     "WebRTC-RS Criterion Benchmarks": [
@@ -5039,6 +5039,510 @@ window.BENCHMARK_DATA = {
             "name": "Media/Buffer/Deinterleaved to Interleaved",
             "value": 187219,
             "range": "± 716",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "joshguyette@yahoo.com",
+            "name": "Josh Guyette",
+            "username": "nightness"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "8916bc3048c2b2a53788639f57e4a64a4a4b4696",
+          "message": "Release 0.22.0+brainwires.5: the controlled ICE agent follows a later nomination\n\nRelease 0.22.0+brainwires.5: the controlled ICE agent follows a later nomination (Chrome pair switch)",
+          "timestamp": "2026-11-20T19:47:50-06:00",
+          "tree_id": "8d50dab0c223d6d6a93589c77cc20484b290c536",
+          "url": "https://github.com/Brainwires/webrtc-rs-rtc/commit/8916bc3048c2b2a53788639f57e4a64a4a4b4696"
+        },
+        "date": 1795226664095,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Benchmark MarshalTo",
+            "value": 25,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Benchmark Marshal",
+            "value": 46,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Benchmark Unmarshal",
+            "value": 159,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SenderReport MarshalTo",
+            "value": 18,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SenderReport Marshal",
+            "value": 35,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SenderReport Unmarshal",
+            "value": 193,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "ReceiverReport MarshalTo",
+            "value": 15,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "ReceiverReport Marshal",
+            "value": 34,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "ReceiverReport Unmarshal",
+            "value": 181,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "PictureLossIndication MarshalTo",
+            "value": 2,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "PictureLossIndication Marshal",
+            "value": 27,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "PictureLossIndication Unmarshal",
+            "value": 35,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "TransportLayerNack MarshalTo",
+            "value": 5,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "TransportLayerNack Marshal",
+            "value": 30,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "TransportLayerNack Unmarshal",
+            "value": 74,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Goodbye MarshalTo",
+            "value": 13,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Goodbye Marshal",
+            "value": 34,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Goodbye Unmarshal",
+            "value": 91,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SourceDescription MarshalTo",
+            "value": 72,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SourceDescription Marshal",
+            "value": 98,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SourceDescription Unmarshal",
+            "value": 249,
+            "range": "± 3",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compound Unmarshal",
+            "value": 202,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compound Marshal",
+            "value": 49,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkMappedAddress_AddTo",
+            "value": 50,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkAlternateServer_AddTo",
+            "value": 50,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkMessage_GetNotFound",
+            "value": 3,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkMessage_Get",
+            "value": 15,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkErrorCode_AddTo",
+            "value": 74,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkErrorCodeAttribute_AddTo",
+            "value": 48,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkErrorCodeAttribute_GetFrom",
+            "value": 29,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkFingerprint_AddTo",
+            "value": 61,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkFingerprint_Check",
+            "value": 42,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkBuildOverhead/Build",
+            "value": 239,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkBuildOverhead/Raw",
+            "value": 159,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkMessageIntegrity_AddTo",
+            "value": 283,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkMessageIntegrity_Check",
+            "value": 280,
+            "range": "± 10",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkMessage_Write",
+            "value": 43,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkMessageType_Value",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkMessage_WriteTo",
+            "value": 3,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkMessage_ReadFrom",
+            "value": 37,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkMessage_ReadBytes",
+            "value": 13,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkIsMessage",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkMessage_NewTransactionID",
+            "value": 14,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkMessageFull",
+            "value": 189,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkMessageFullHardcore",
+            "value": 77,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkMessage_WriteHeader",
+            "value": 3,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkMessage_CloneTo",
+            "value": 54,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkMessage_AddTo",
+            "value": 2,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkDecode",
+            "value": 34,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkUsername_AddTo",
+            "value": 29,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkUsername_GetFrom",
+            "value": 24,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkNonce_AddTo",
+            "value": 37,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkNonce_AddTo_BadLength",
+            "value": 6,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkNonce_GetFrom",
+            "value": 24,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkUnknownAttributes/AddTo",
+            "value": 39,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkUnknownAttributes/GetFrom",
+            "value": 18,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkXOR",
+            "value": 28,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkXORMappedAddress_AddTo",
+            "value": 47,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkXORMappedAddress_GetFrom",
+            "value": 27,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Benchmark Marshal",
+            "value": 1835,
+            "range": "± 13",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Benchmark Unmarshal",
+            "value": 6021,
+            "range": "± 101",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SRTP/Encrypt/RTP",
+            "value": 1666,
+            "range": "± 14",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SRTP/Decrypt/RTP",
+            "value": 1393,
+            "range": "± 13",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SRTP/Encrypt/RTCP",
+            "value": 249,
+            "range": "± 3",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SRTP/Decrypt/RTCP",
+            "value": 288,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SRTP/Encrypt/RTP/AEAD-AES-128-GCM/ring",
+            "value": 697,
+            "range": "± 5",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SRTP/Decrypt/RTP/AEAD-AES-128-GCM/ring",
+            "value": 405,
+            "range": "± 12",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SRTP/Setup/AES-128-CM-HMAC-SHA1-80/ring",
+            "value": 1154,
+            "range": "± 23",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SRTP/Setup/AEAD-AES-128-GCM/ring",
+            "value": 980,
+            "range": "± 19",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkIsChannelData",
+            "value": 2,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkChannelData_Encode",
+            "value": 4,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkChannelData_Decode",
+            "value": 28,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkChannelNumber/AddTo",
+            "value": 38,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkChannelNumber/GetFrom",
+            "value": 18,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkData/AddTo",
+            "value": 37,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkData/AddToRaw",
+            "value": 35,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkLifetime/AddTo",
+            "value": 38,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "BenchmarkLifetime/GetFrom",
+            "value": 18,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Media/Buffer/Interleaved to Deinterleaved",
+            "value": 227403,
+            "range": "± 23258",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Media/Buffer/Deinterleaved to Interleaved",
+            "value": 282878,
+            "range": "± 1189",
             "unit": "ns/iter"
           }
         ]
