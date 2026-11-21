@@ -8,7 +8,7 @@ use stun::integrity::*;
 use stun::message::*;
 use stun::textattrs::*;
 
-use crate::attributes::{control::*, priority::*, use_candidate::*};
+use crate::attributes::{control::*, nomination::nomination_of, priority::*, use_candidate::*};
 use crate::candidate::{candidate_pair::*, *};
 
 trait ControllingSelector {
@@ -78,6 +78,46 @@ impl Agent {
             }
         };
         now.saturating_duration_since(self.start_time) > min_wait
+    }
+
+    /// Controlled agent: makes `pair_index`, which the controlling agent nominated and whose
+    /// check has succeeded here, the selected pair, unless the selected pair carries a higher
+    /// nomination (libwebrtc's renomination: the highest `NOMINATION` value wins, so a delayed
+    /// earlier one does not move the session back). Between regular nominations, all value 1,
+    /// the latest one wins.
+    ///
+    /// Switching emits `SelectedCandidatePairChange`, and `media_path` follows at once: DTLS,
+    /// SRTP and SCTP go out on, and are accepted from, the new pair from the next datagram.
+    fn accept_nomination(&mut self, now: Instant, pair_index: usize) {
+        match self.get_selected_pair() {
+            Some(selected) if selected == pair_index => {}
+            Some(selected) => {
+                let current = self.candidate_pairs[selected].remote_nomination;
+                let offered = self.candidate_pairs[pair_index].remote_nomination;
+                if offered >= current {
+                    debug!(
+                        "[{}]: peer renominated: switching selected pair from {} to {} (nomination {} -> {})",
+                        self.get_name(),
+                        self.candidate_pairs[selected],
+                        self.candidate_pairs[pair_index],
+                        current,
+                        offered
+                    );
+                    self.candidate_pairs[selected].nominated = false;
+                    self.set_selected_pair(Some(now), Some(pair_index));
+                } else {
+                    debug!(
+                        "[{}]: ignoring nomination {} of {}: selected pair {} carries nomination {}",
+                        self.get_name(),
+                        offered,
+                        self.candidate_pairs[pair_index],
+                        self.candidate_pairs[selected],
+                        current
+                    );
+                }
+            }
+            None => self.set_selected_pair(Some(now), Some(pair_index)),
+        }
     }
 
     fn nominate_pair(&mut self, now: Instant) {
@@ -518,6 +558,12 @@ impl ControlledSelector for Agent {
                     self.remote_candidates[p.remote_index].addr(),
                     rtt.as_millis()
                 );
+
+                // RFC 8445 Section 7.3.1.5: the peer nominated this pair before our check on it
+                // succeeded; the check has now produced a valid pair, so the nomination applies.
+                if std::mem::take(&mut self.candidate_pairs[pair_index].nomination_pending) {
+                    self.accept_nomination(now, pair_index);
+                }
             } else {
                 // This shouldn't happen
                 error!("Success response from invalid candidate pair");
@@ -545,33 +591,36 @@ impl ControlledSelector for Agent {
             // Track request received on the candidate pair
             self.candidate_pairs[pair_index].on_request_received();
 
-            let p = &self.candidate_pairs[pair_index];
-            let use_candidate = m.contains(ATTR_USE_CANDIDATE);
-            if use_candidate {
-                // https://tools.ietf.org/html/rfc8445#section-7.3.1.5
+            // A nomination is `USE-CANDIDATE` (value 1) or libwebrtc's `NOMINATION` value,
+            // read only from the part of the request MESSAGE-INTEGRITY covers.
+            let nomination = nomination_of(m);
+            let p = &mut self.candidate_pairs[pair_index];
+            p.remote_nomination = p.remote_nomination.max(nomination);
+            let succeeded = p.state == CandidatePairState::Succeeded;
 
-                if p.state == CandidatePairState::Succeeded {
-                    // If the state of this pair is Succeeded, it means that the check
-                    // previously sent by this pair produced a successful response and
-                    // generated a valid pair (Section 7.2.5.3.2).  The agent sets the
-                    // nominated flag value of the valid pair to true.
-                    if self.get_selected_pair().is_none() {
-                        self.set_selected_pair(Some(now), Some(pair_index));
-                    }
-                    self.send_binding_success(now, m, local_index, remote_index);
-                } else {
-                    // If the received Binding request triggered a new check to be
-                    // enqueued in the triggered-check queue (Section 7.3.1.4), once the
-                    // check is sent and if it generates a successful response, and
-                    // generates a valid pair, the agent sets the nominated flag of the
-                    // pair to true.  If the request fails (Section 7.2.5.2), the agent
-                    // MUST remove the candidate pair from the valid list, set the
-                    // candidate pair state to Failed, and set the checklist state to
-                    // Failed.
-                    self.ping_candidate(now, local_index, remote_index);
-                }
+            // RFC 8445 Section 7.3.1.4: an authenticated request is answered whatever the
+            // pair's state. (A nomination on a pair whose check had not succeeded went
+            // unanswered, so the peer could only retransmit it.)
+            self.send_binding_success(now, m, local_index, remote_index);
+
+            if nomination > 0 && succeeded {
+                // RFC 8445 Section 7.3.1.5: "If the state of this pair is Succeeded, it means
+                // that the check previously sent by this pair produced a successful response
+                // and generated a valid pair. The agent sets the nominated flag value of the
+                // valid pair to true." The controlled agent follows the controlling agent's
+                // nomination, a later one included: libwebrtc moves the session to another
+                // pair after it connects (regular nomination on the new pair, or a higher
+                // NOMINATION value), and the pair it leaves stops carrying media. The first
+                // nomination used to be final.
+                self.accept_nomination(now, pair_index);
             } else {
-                self.send_binding_success(now, m, local_index, remote_index);
+                if nomination > 0 {
+                    // The nomination takes effect once our triggered check on this pair
+                    // succeeds (see `handle_success_response`). If the check fails, the pair
+                    // is not used.
+                    self.candidate_pairs[pair_index].nomination_pending = true;
+                }
+                // Triggered check (RFC 8445 Section 7.3.1.4).
                 self.ping_candidate(now, local_index, remote_index);
             }
         }
