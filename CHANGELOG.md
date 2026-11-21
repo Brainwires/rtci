@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.0+brainwires.5] - 2026-11-20
+
+### Bug Fixes
+
+- **ice**: the controlled agent follows a later nomination (RFC 8445 sections 7.3.1.5 and
+  8.1.1). It took only the first USE-CANDIDATE and ignored every later one, so when the
+  controlling agent moved the session to another pair, this side kept sending DTLS / SRTP / SCTP
+  on the pair the peer had left and dropped the peer's packets from the new one: media and data
+  stopped. Chrome does this about a second after connecting when it has camera / microphone
+  permission and gathers on more interfaces. A USE-CANDIDATE on another succeeded pair now makes
+  it the selected pair, emits `SelectedCandidatePairChange`, and the media path follows at once
+  (the DTLS session is kept).
+- **ice**: libwebrtc's renomination attribute (`NOMINATION`, 0xC001,
+  draft-thatcher-ice-renomination) is honoured: the pair with the highest value is used, so a
+  delayed earlier nomination does not move the session back. A plain USE-CANDIDATE counts as 1,
+  as libwebrtc counts it.
+- **ice**: a nomination on a pair whose check has not succeeded is answered (RFC 8445 section
+  7.3.1.4; it went unanswered, so the peer could only retransmit it) and takes effect when the
+  triggered check succeeds.
+- **ice**: USE-CANDIDATE and `NOMINATION` count only ahead of MESSAGE-INTEGRITY (RFC 8489
+  section 14.5); appended after it they are not authenticated.
+
+### Features
+
+- **ice**: `rtc_ice::attributes::nomination` (`ATTR_NOMINATION`, `NominationAttr`,
+  `nomination_of`).
+
 ## [0.22.0+brainwires.4] - 2026-11-20
 
 ### Features
