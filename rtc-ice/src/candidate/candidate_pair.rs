@@ -79,6 +79,12 @@ pub struct CandidatePair {
     pub(crate) binding_request_count: u16,
     pub(crate) state: CandidatePairState,
     pub(crate) nominated: bool,
+    /// The highest nomination the controlling peer has sent on this pair (controlled agent):
+    /// 1 for `USE-CANDIDATE`, or libwebrtc's `NOMINATION` value. 0 until it nominates the pair.
+    pub(crate) remote_nomination: u32,
+    /// The peer nominated this pair before its check succeeded here; the nomination takes
+    /// effect when the triggered check does (RFC 8445 Section 7.3.1.5).
+    pub(crate) nomination_pending: bool,
 
     // STUN transaction stats
     /// Total number of STUN connectivity check requests sent (not including retransmissions).
@@ -154,6 +160,8 @@ impl CandidatePair {
             state: CandidatePairState::Waiting,
             binding_request_count: 0,
             nominated: false,
+            remote_nomination: 0,
+            nomination_pending: false,
             // STUN transaction stats
             requests_sent: 0,
             requests_received: 0,
