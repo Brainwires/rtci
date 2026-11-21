@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Bug Fixes
+
+- **twcc**: a NACK retransmission sent without RTX keeps the transport-wide sequence number it
+  was first given. `TwccSenderInterceptor` numbered it as a new packet, so its header extension
+  changed and the SRTP sender, which protects one packet per index (RFC 3711 section 3.3.1,
+  RFC 7714 section 8.1), refused it after the congestion controller had counted it as sent: no
+  lost packet was repaired, the NACK generator asked again every 100 ms, and the phantom losses
+  drove the estimate to its floor. The sender now remembers the number it gave each of a
+  stream's last 1024 RTP sequence numbers; an RTX retransmission is still numbered as a new
+  packet.
+
 ## [0.22.0+brainwires.5] - 2026-11-20
 
 ### Bug Fixes
