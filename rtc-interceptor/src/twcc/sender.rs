@@ -246,6 +246,35 @@ mod tests {
         assert_eq!(None, tag_of(&out, 5));
     }
 
+    /// A packet that passes again unchanged (a NACK retransmission without RTX) keeps the
+    /// number it was first given, so that it is byte for byte the packet SRTP protected the
+    /// first time. With a new number its header extension differs, and the SRTP sender, which
+    /// protects one packet per index (RFC 3711 3.3.1, RFC 7714 8.1), refuses it: every
+    /// retransmission is then dropped after the congestion controller has counted it as sent.
+    #[test]
+    fn a_repeated_packet_keeps_its_number() {
+        use shared::marshal::Marshal;
+        let mut chain = chain();
+        let mut sent = Vec::new();
+        // Packets 10, 11, 12, then 11 again (the peer NACKed it), then 13.
+        for sequence_number in [10u16, 11, 12, 11, 13] {
+            chain.handle_write(packet(sequence_number, 1)).unwrap();
+            while let Some(out) = chain.poll_write() {
+                let Packet::Rtp(rtp) = &out.message.packet else {
+                    panic!("an RTP packet");
+                };
+                sent.push((sequence_number, tag_of(&out, 5), rtp.marshal().unwrap()));
+            }
+        }
+        let tags: Vec<Option<u16>> = sent.iter().map(|s| s.1).collect();
+        assert_eq!(
+            vec![Some(0), Some(1), Some(2), Some(1), Some(3)],
+            tags,
+            "the retransmission of 11 carries 11's number; new packets go on counting"
+        );
+        assert_eq!(sent[1].2, sent[3].2, "and is the same bytes");
+    }
+
     /// The counter is transport-wide: one sequence across every stream, not one per SSRC.
     #[test]
     fn the_counter_is_shared_across_streams() {
