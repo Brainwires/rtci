@@ -1,6 +1,12 @@
 //! Which mDNS answers resolve a query (RFC 6762 §6, §10, §11, §18.2).
 
 use super::*;
+use crate::message::header::Header;
+use crate::message::name::Name;
+use crate::message::resource::a::AResource;
+use crate::message::resource::aaaa::AaaaResource;
+use crate::message::resource::{Resource, ResourceHeader};
+use crate::message::{DNSCLASS_INET, DnsType, Message};
 use sansio::Protocol;
 
 const NAME: &str = "61b445d2-6503-41ac-96ce-ee3edac00e9f.local";

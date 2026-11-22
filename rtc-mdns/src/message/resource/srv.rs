@@ -9,7 +9,9 @@ pub(crate) struct SrvResource {
     pub(crate) priority: u16,
     pub(crate) weight: u16,
     pub(crate) port: u16,
-    pub(crate) target: Name, // Not compressed as per RFC 2782.
+    // Written uncompressed, as RFC 2782 has it. Read compressed or not: mDNS senders compress
+    // the target, and a receiver must decode it (RFC 6762 section 18.14).
+    pub(crate) target: Name,
 }
 
 impl fmt::Display for SrvResource {
@@ -51,9 +53,7 @@ impl ResourceBody for SrvResource {
         let (port, off) = unpack_uint16(msg, off)?;
         self.port = port;
 
-        let off = self
-            .target
-            .unpack_compressed(msg, off, false /* allowCompression */)?;
+        let off = self.target.unpack(msg, off)?;
 
         Ok(off)
     }

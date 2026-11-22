@@ -4,11 +4,20 @@
 //! using the sans-I/O pattern without actual network I/O.
 
 use bytes::BytesMut;
-use rtc_mdns::{MDNS_DEST_ADDR, Mdns, MdnsConfig, MdnsEvent};
+use rtc_mdns::{MDNS_DEST_ADDR, Mdns, MdnsConfig, MdnsEvent, MdnsProbePolicy};
 use sansio::Protocol;
 use shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
+
+/// The configuration these tests start from. They exchange packets at one instant, so the
+/// names are taken as unique without probing (probing has its own tests, in
+/// `src/proto/mdns_responder_test.rs` and below), and the jitter is seeded.
+fn test_config() -> MdnsConfig {
+    MdnsConfig::default()
+        .with_probe_policy(MdnsProbePolicy::Never)
+        .with_jitter_seed(1)
+}
 
 /// Helper to create a transport context for a message
 fn create_transport_context(local: SocketAddr, peer: SocketAddr) -> TransportContext {
@@ -101,14 +110,14 @@ fn test_server_responds_to_query() {
     let now = Instant::now();
     // Server configuration
     let server_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)), 5353);
-    let config_server = MdnsConfig::default()
+    let config_server = test_config()
         .with_local_names(vec!["test-server.local".to_string()])
         .with_local_ip(server_addr.ip());
     let mut server = Mdns::new(now, config_server);
 
     // Client configuration
     let client_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 200)), 5353);
-    let config_client = MdnsConfig::default().with_query_interval(Duration::from_secs(1));
+    let config_client = test_config().with_query_interval(Duration::from_secs(1));
     let mut client = Mdns::new(now, config_client);
 
     // Client starts a query
@@ -141,7 +150,7 @@ fn test_multiple_local_names() {
     let now = Instant::now();
     // Server with multiple local names
     let server_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50)), 5353);
-    let config_server = MdnsConfig::default()
+    let config_server = test_config()
         .with_local_names(vec![
             "name1.local".to_string(),
             "name2.local".to_string(),
@@ -151,7 +160,7 @@ fn test_multiple_local_names() {
     let mut server = Mdns::new(now, config_server);
 
     let client_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)), 5353);
-    let config_client = MdnsConfig::default();
+    let config_client = test_config();
     let mut client = Mdns::new(now, config_client);
 
     // Query for each name
@@ -187,13 +196,13 @@ fn test_query_for_unknown_name_remains_pending() {
     let now = Instant::now();
     // Server only knows about "known.local"
     let server_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 5353);
-    let config_server = MdnsConfig::default()
+    let config_server = test_config()
         .with_local_names(vec!["known.local".to_string()])
         .with_local_ip(server_addr.ip());
     let mut server = Mdns::new(now, config_server);
 
     let client_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 2)), 5353);
-    let config_client = MdnsConfig::default();
+    let config_client = test_config();
     let mut client = Mdns::new(now, config_client);
 
     // Query for unknown name
@@ -213,7 +222,7 @@ fn test_query_for_unknown_name_remains_pending() {
 #[test]
 fn test_query_timeout() {
     let now = Instant::now();
-    let config = MdnsConfig::default()
+    let config = test_config()
         .with_query_interval(Duration::from_millis(100))
         .with_query_timeout(Duration::from_millis(300));
     let mut client = Mdns::new(now, config);
@@ -249,34 +258,36 @@ fn test_query_timeout() {
 #[test]
 fn test_query_retry() {
     let now = Instant::now();
-    let config = MdnsConfig::default().with_query_interval(Duration::from_millis(100));
+    let config = test_config().without_query_timeout();
     let mut client = Mdns::new(now, config);
 
     let _query_id = client.query_now(now, "retry-test.local");
 
-    // Drain initial packet
+    // Get initial query packet
     let initial_packet = client.poll_write();
     assert!(initial_packet.is_some());
+
+    // No more packets until the retry interval
     assert!(client.poll_write().is_none());
 
-    // Not enough time for retry
-    let time_50ms = now + Duration::from_millis(50);
-    client.handle_timeout(time_50ms).unwrap();
-    assert!(client.poll_write().is_none());
-
-    // Enough time for retry
-    let time_150ms = now + Duration::from_millis(150);
-    client.handle_timeout(time_150ms).unwrap();
-
-    // Should have a retry packet
-    let retry_packet = client.poll_write();
-    assert!(retry_packet.is_some());
+    // RFC 6762 section 5.2: the first retry comes a second after the query, and each
+    // interval is twice the one before: retries at 1 s, 3 s, 7 s.
+    let mut retries = Vec::new();
+    for tenth in 1..=80 {
+        client
+            .handle_timeout(now + Duration::from_millis(tenth * 100))
+            .unwrap();
+        while client.poll_write().is_some() {
+            retries.push(tenth * 100);
+        }
+    }
+    assert_eq!(retries, vec![1000, 3000, 7000]);
 }
 
 #[test]
 fn test_cancel_query() {
     let now = Instant::now();
-    let config = MdnsConfig::default();
+    let config = test_config();
     let mut client = Mdns::new(now, config);
 
     let query1 = client.query_now(now, "host1.local");
@@ -304,12 +315,12 @@ fn test_cancel_query() {
 fn test_server_without_local_addr_logs_warning() {
     let now = Instant::now();
     // Server with local names but no local_addr - should not crash
-    let config_server = MdnsConfig::default().with_local_names(vec!["test.local".to_string()]);
+    let config_server = test_config().with_local_names(vec!["test.local".to_string()]);
     // Note: local_addr is not set
     let mut server = Mdns::new(now, config_server);
 
     let client_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 2)), 5353);
-    let config_client = MdnsConfig::default();
+    let config_client = test_config();
     let mut client = Mdns::new(now, config_client);
 
     let _query_id = client.query_now(now, "test.local");
@@ -334,7 +345,7 @@ fn test_server_without_local_addr_logs_warning() {
 fn test_close_clears_all_state() {
     let now = Instant::now();
     let server_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 5353);
-    let config = MdnsConfig::default()
+    let config = test_config()
         .with_local_names(vec!["host.local".to_string()])
         .with_local_ip(server_addr.ip())
         .with_query_interval(Duration::from_secs(1));
@@ -363,7 +374,7 @@ fn test_close_clears_all_state() {
 #[test]
 fn test_closed_connection_rejects_operations() {
     let now = Instant::now();
-    let mut conn = Mdns::new(now, MdnsConfig::default());
+    let mut conn = Mdns::new(now, test_config());
 
     conn.close().unwrap();
 
@@ -387,13 +398,13 @@ fn test_sequential_queries() {
     let now = Instant::now();
     // Similar to mdns_server_query.rs example: query1, wait for answer, then query2
     let server_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10)), 5353);
-    let config_server = MdnsConfig::default()
+    let config_server = test_config()
         .with_local_names(vec!["first.local".to_string(), "second.local".to_string()])
         .with_local_ip(server_addr.ip());
     let mut server = Mdns::new(now, config_server);
 
     let client_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 20)), 5353);
-    let config_client = MdnsConfig::default();
+    let config_client = test_config();
     let mut client = Mdns::new(now, config_client);
 
     // First query
@@ -438,13 +449,13 @@ fn test_name_normalization() {
     let server_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5)), 5353);
 
     // Server configured with name without trailing dot
-    let config_server = MdnsConfig::default()
+    let config_server = test_config()
         .with_local_names(vec!["nodot.local".to_string()])
         .with_local_ip(server_addr.ip());
     let mut server = Mdns::new(now, config_server);
 
     let client_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 10)), 5353);
-    let config_client = MdnsConfig::default();
+    let config_client = test_config();
     let mut client = Mdns::new(now, config_client);
 
     // Query with trailing dot
@@ -469,7 +480,7 @@ fn test_multiple_clients_single_server() {
     let now = Instant::now();
     // One server, multiple clients querying
     let server_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1)), 5353);
-    let config_server = MdnsConfig::default()
+    let config_server = test_config()
         .with_local_names(vec!["shared-server.local".to_string()])
         .with_local_ip(server_addr.ip());
     let mut server = Mdns::new(now, config_server);
@@ -477,8 +488,8 @@ fn test_multiple_clients_single_server() {
     let client1_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 0, 10)), 5353);
     let client2_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 0, 20)), 5353);
 
-    let mut client1 = Mdns::new(now, MdnsConfig::default());
-    let mut client2 = Mdns::new(now, MdnsConfig::default());
+    let mut client1 = Mdns::new(now, test_config());
+    let mut client2 = Mdns::new(now, test_config());
 
     // Both clients query
     let query1 = client1.query_now(now, "shared-server.local");
@@ -528,13 +539,13 @@ fn test_bidirectional_server_client() {
     let addr_b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 1, 1, 2)), 5353);
 
     // Connection A: serves "hostA.local", queries for "hostB.local"
-    let config_a = MdnsConfig::default()
+    let config_a = test_config()
         .with_local_names(vec!["hostA.local".to_string()])
         .with_local_ip(addr_a.ip());
     let mut conn_a = Mdns::new(now, config_a);
 
     // Connection B: serves "hostB.local", queries for "hostA.local"
-    let config_b = MdnsConfig::default()
+    let config_b = test_config()
         .with_local_names(vec!["hostB.local".to_string()])
         .with_local_ip(addr_b.ip());
     let mut conn_b = Mdns::new(now, config_b);
@@ -575,7 +586,7 @@ fn test_bidirectional_server_client() {
 #[test]
 fn test_poll_timeout_scheduling() {
     let now = Instant::now();
-    let config = MdnsConfig::default().with_query_interval(Duration::from_secs(2));
+    let config = test_config().with_query_interval(Duration::from_secs(2));
     let mut conn = Mdns::new(now, config);
 
     // No queries, no timeout
@@ -607,13 +618,13 @@ fn test_resolves_safari_style_mdns_candidate() {
     let server_ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 42));
     let server_addr = SocketAddr::new(server_ip, 5353);
     let safari_name = "61b445d2-6503-41ac-96ce-ee3edac00e9f.local";
-    let config_server = MdnsConfig::default()
+    let config_server = test_config()
         .with_local_names(vec![safari_name.to_string()])
         .with_local_ip(server_ip);
     let mut server = Mdns::new(now, config_server);
 
     let client_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 99)), 5353);
-    let mut client = Mdns::new(now, MdnsConfig::default());
+    let mut client = Mdns::new(now, test_config());
 
     let query_id = client.query_now(now, safari_name);
 
@@ -628,4 +639,66 @@ fn test_resolves_safari_style_mdns_candidate() {
         "expected QueryAnswered({query_id}, {server_ip}), got {event:?}"
     );
     assert!(!client.is_query_pending(query_id));
+}
+
+/// Carries what `from` (at `from_addr`) has queued to `to`, as the multicast group would.
+fn carry(from: &mut Mdns, from_addr: SocketAddr, to: &mut Mdns, now: Instant) -> usize {
+    let mut count = 0;
+    while let Some(packet) = from.poll_write() {
+        assert_eq!(packet.transport.peer_addr, MDNS_DEST_ADDR);
+        let msg = create_message(now, MDNS_DEST_ADDR, from_addr, &packet.message);
+        to.handle_read(msg).unwrap();
+        count += 1;
+    }
+    count
+}
+
+/// A name's life between two connections, through the public API: probed for and announced
+/// (RFC 6762 section 8), resolved by a neighbour from the announcement alone (section 18.1),
+/// withdrawn with a goodbye on close (section 10.1).
+#[test]
+fn test_name_is_probed_announced_resolved_and_withdrawn() {
+    let start = Instant::now();
+    let owner_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 7)), 5353);
+    let mut owner = Mdns::new(
+        start,
+        MdnsConfig::default()
+            .with_jitter_seed(3)
+            .with_local_names(vec!["workshop.local".to_string()])
+            .with_local_ip(owner_addr.ip()),
+    );
+    let mut neighbour = Mdns::new(start, MdnsConfig::default().with_jitter_seed(4));
+
+    // Drive the owner's timers for five seconds; the neighbour hears everything.
+    let mut now = start;
+    let mut carried = 0;
+    while let Some(next) = owner.poll_timeout() {
+        if next > start + Duration::from_secs(5) {
+            break;
+        }
+        now = next.max(now);
+        owner.handle_timeout(now).unwrap();
+        carried += carry(&mut owner, owner_addr, &mut neighbour, now);
+    }
+    assert_eq!(carried, 5, "three probes and two announcements");
+    assert!(owner.poll_timeout().is_none());
+
+    // The neighbour heard the announcement: the name resolves without a query.
+    let id = neighbour.query_now(now, "Workshop.local");
+    assert!(neighbour.poll_write().is_none());
+    assert!(matches!(
+        neighbour.poll_event(),
+        Some(MdnsEvent::QueryAnswered(answered, addr)) if answered == id && addr == owner_addr.ip()
+    ));
+
+    // The owner closes: its goodbye empties the neighbour's cache a second later.
+    owner.close().unwrap();
+    assert_eq!(carry(&mut owner, owner_addr, &mut neighbour, now), 1);
+    let later = now + Duration::from_secs(2);
+    let id = neighbour.query_now(later, "workshop.local");
+    assert!(neighbour.is_query_pending(id));
+    assert!(
+        neighbour.poll_write().is_some(),
+        "the name is asked for again"
+    );
 }

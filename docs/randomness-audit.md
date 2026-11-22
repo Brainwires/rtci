@@ -15,6 +15,7 @@
 | Candidate ID | Local uniqueness and diagnostics | Retains the direct CSPRNG helper. It is neither a credential nor a cryptographic identity, and passing a provider solely for this field would add unnecessary coupling. |
 | Candidate foundation | Candidate grouping and redundancy elimination | Deterministic CRC32C over candidate properties. It is intentionally not random or secret. |
 | mDNS host name | Privacy-preserving local alias | Retains UUID v4 generation through the UUID crate's secure random source. The mDNS subsystem does not naturally own the provider. |
+| mDNS delays (first query, probe start, delayed responses) | Desynchronising hosts on a link (RFC 6762 sections 5.2, 6, 8.1); nothing secret | `rtc-mdns` draws them from a SplitMix64 generator seeded from the process's hash seed (`std::collections::hash_map::RandomState`), or from `MdnsConfig::with_jitter_seed` for a reproducible run. Not a CSPRNG and not routed through the provider: predictability of a delay gains an attacker nothing. |
 | Explicit configuration and test values | Application policy and deterministic fixtures | Preserved exactly as supplied. Tests may use deterministic `RTCRandom` implementations to verify provider routing and error propagation. |
 
 ## SCTP

@@ -32,9 +32,13 @@
 //! ## Features
 //!
 //! - **Query Support**: Send mDNS queries and receive answers
-//! - **Server Support**: Respond to mDNS questions for configured local names
-//! - **Automatic Retries**: Queries are automatically retried at configurable intervals
+//! - **Server Support**: Publish local names: probing, announcing, answering, defending a
+//!   name, and goodbyes (RFC 6762 sections 6 to 10)
+//! - **Automatic Retries**: Queries are retried at doubling intervals, and end at a timeout
 //! - **Multiple Queries**: Track multiple concurrent queries by ID
+//! - **Cache**: Addresses heard in responses answer later queries until their TTL runs out
+//! - **Flood Control**: One message budget ([`MdnsRateLimit`]) over everything sent, and a
+//!   bound on everything a host on the link can make the connection hold
 //!
 //! ## Quick Start
 //!
@@ -47,7 +51,7 @@
 //!
 //! // Create an mDNS connection
 //! let config = MdnsConfig::default()
-//!     .with_query_interval(Duration::from_secs(1));
+//!     .with_query_timeout(Duration::from_secs(10));
 //! let mut conn = Mdns::new(Instant::now(), config);
 //!
 //! // Start a query - returns a unique ID to track this query
@@ -78,9 +82,10 @@
 //!
 //! let conn = Mdns::new(Instant::now(), config);
 //!
-//! // When queries for "myhost.local" arrive via handle_read(),
-//! // the connection will automatically queue response packets
-//! // that can be retrieved via poll_write()
+//! // Drive handle_timeout() as poll_timeout() asks: the name is probed for
+//! // (three queries, 250 ms apart) and then announced. From then on, when
+//! // queries for "myhost.local" arrive via handle_read(), the connection
+//! // queues response packets that can be retrieved via poll_write()
 //! ```
 //!
 //! ## Integration with Tokio
@@ -174,6 +179,7 @@
 //!         match event {
 //!             MdnsEvent::QueryAnswered(id, addr) => { /* handle answer */ }
 //!             MdnsEvent::QueryTimeout(id) => { /* handle timeout */ }
+//!             _ => {}
 //!         }
 //!     }
 //! }
@@ -182,9 +188,12 @@
 //! ## Protocol Details
 //!
 //! - **Multicast Address**: 224.0.0.251:5353 (IPv4)
-//! - **Record Types**: Supports A (IPv4) and AAAA (IPv6) queries
-//! - **TTL**: Responses use a default TTL of 120 seconds
-//! - **Compression**: DNS name compression is supported for efficiency
+//! - **Record Types**: A (IPv4) and AAAA (IPv6) records, each name with one address; NSEC
+//!   records say which of the two a name has
+//! - **TTL**: Records are published with a TTL of 120 seconds
+//! - **Compression**: DNS name compression is used and understood
+//! - **Conformance**: `docs/conformance/audit/rfc6762.md` in the repository lists every
+//!   clause of RFC 6762 with the code and the test behind it
 
 #![warn(rust_2018_idioms)]
 #![warn(missing_docs)]
@@ -195,9 +204,10 @@ pub(crate) mod message;
 pub(crate) mod proto;
 pub(crate) mod socket;
 
-pub use config::MdnsConfig;
+pub use config::{MdnsConfig, MdnsProbePolicy};
 pub use proto::{
-    MAX_LOCAL_NAMES, MDNS_DEST_ADDR, MDNS_MULTICAST_IPV4, MDNS_PORT, Mdns, MdnsEvent, QueryId,
+    MAX_CACHED_ADDRESSES, MAX_LOCAL_NAMES, MDNS_DEST_ADDR, MDNS_MULTICAST_IPV4, MDNS_PORT, Mdns,
+    MdnsEvent, MdnsRateLimit, QueryId,
 };
 
 // Re-export socket utilities for convenience
