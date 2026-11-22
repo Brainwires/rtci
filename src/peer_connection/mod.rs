@@ -244,6 +244,7 @@
 pub mod certificate;
 pub mod configuration;
 pub mod cryptex;
+mod dtls_sdp;
 pub mod event;
 pub(crate) mod handler;
 mod internal;
@@ -282,10 +283,11 @@ use crate::peer_connection::handler::sctp::SctpHandlerContext;
 use crate::peer_connection::sdp::MediaDescriptionExt;
 use crate::peer_connection::sdp::session_description::RTCSessionDescription;
 use crate::peer_connection::sdp::{
-    RemoteIceDetails, extract_fingerprints, extract_ice_details, get_application_media,
-    get_application_media_section_max_message_size, get_application_media_section_sctp_port,
-    get_mid_value, get_peer_direction, has_ice_trickle_option, insert_media_line, is_lite_set,
-    is_rejected_media, media_ice_credentials, sdp_type::RTCSdpType, update_sdp_origin,
+    RemoteIceDetails, extract_fingerprints, extract_ice_details, extract_tls_id,
+    get_application_media, get_application_media_section_max_message_size,
+    get_application_media_section_sctp_port, get_mid_value, get_peer_direction,
+    has_ice_trickle_option, has_rtp_media, insert_media_line, is_lite_set, is_rejected_media,
+    media_ice_credentials, sdp_type::RTCSdpType, update_sdp_origin, validate_dtls_attributes,
 };
 use crate::peer_connection::state::RTCIceGatheringState;
 use crate::peer_connection::state::ice_connection_state::RTCIceConnectionState;
@@ -294,12 +296,17 @@ use crate::peer_connection::state::peer_connection_state::{
 };
 use crate::peer_connection::state::signaling_state::{RTCSignalingState, StateChangeOp};
 use crate::peer_connection::transport::RTCSctpTransport;
-use crate::peer_connection::transport::dtls::fingerprint::RTCDtlsFingerprint;
+use crate::peer_connection::transport::dtls::fingerprint::{
+    RTCDtlsFingerprint, preferred_fingerprints,
+};
 use crate::peer_connection::transport::dtls::parameters::RTCDtlsParameters;
 use crate::peer_connection::transport::dtls::role::{
     DEFAULT_DTLS_ROLE_ANSWER, DEFAULT_DTLS_ROLE_OFFER, RTCDtlsRole,
 };
-use crate::peer_connection::transport::dtls::{DtlsTransport, RTCDtlsTransportConfig};
+use crate::peer_connection::transport::dtls::state::RTCDtlsTransportState;
+use crate::peer_connection::transport::dtls::{
+    DtlsAssociationUpdate, DtlsRemoteUpdate, DtlsTransport, RTCDtlsTransportConfig,
+};
 use crate::peer_connection::transport::ice::IceTransport;
 use crate::peer_connection::transport::ice::candidate::RTCIceCandidateInit;
 use crate::peer_connection::transport::ice::parameters::RTCIceParameters;
@@ -781,6 +788,9 @@ pub struct RTCPeerConnection {
     /// (RFC 8843 §7.1.3, RFC 9429 §5.10): the next description that sets one up with new ICE
     /// credentials starts new ICE and DTLS associations.
     transport_closed: bool,
+    /// The value of the `a=identity` attribute offers and answers carry (RFC 8827 section 5);
+    /// see `dtls_sdp`.
+    identity_assertion: Option<String>,
     negotiation_needed_state: NegotiationNeededState,
     is_negotiation_ongoing: bool,
     // wpt100:hdrext — `alwaysNegotiateDataChannels` (see `always_negotiate`).
@@ -898,7 +908,9 @@ impl RTCPeerConnection {
         };
 
         // wpt100:hdrext — `a=cryptex` per the RTCRtpHeaderEncryptionPolicy (RFC 9335).
-        let mut d = self.add_cryptex_attribute(d, true);
+        let d = self.add_cryptex_attribute(d, true);
+        // `a=tls-id` (RFC 8842) and `a=identity` (RFC 8827).
+        let mut d = self.add_dtls_association_attributes(d, true)?;
 
         update_sdp_origin(&mut self.sdp_origin, &mut d);
 
@@ -1004,6 +1016,10 @@ impl RTCPeerConnection {
     /// # DTLS Role Selection
     ///
     /// The answer automatically determines the appropriate DTLS role:
+    /// - Keeps the role of the DTLS association the connection has (RFC 8842 section 5.3: an
+    ///   answer does not change the negotiated roles), whatever the settings say
+    /// - For a new association: takes the role an offer with `a=setup:active` or `passive`
+    ///   leaves
     /// - Uses `answering_dtls_role` from settings if configured
     /// - Defaults to `Client` (active) for lower latency
     /// - Uses `Server` (passive) if remote is ICE-Lite
@@ -1070,6 +1086,22 @@ impl RTCPeerConnection {
             }
         }
 
+        // The transport that applying the offer started, kept or set up anew has its role:
+        // the answer states that one. For an association that is kept this is RFC 8842
+        // section 5.3 ("a setup attribute with a value that does not change the previously
+        // negotiated DTLS roles"): the endpoint that was the offerer, and so the DTLS server,
+        // when the association was set up stays the server when it answers a later offer,
+        // whatever its configured answering role and its ICE role say.
+        match self.dtls_transport().role() {
+            RTCDtlsRole::Client if self.dtls_transport().is_started() => {
+                connection_role = ConnectionRole::Active
+            }
+            RTCDtlsRole::Server if self.dtls_transport().is_started() => {
+                connection_role = ConnectionRole::Passive
+            }
+            _ => {}
+        }
+
         let d = self.generate_matched_sdp(
             false, /*includeUnmatched */
             connection_role,
@@ -1077,7 +1109,9 @@ impl RTCPeerConnection {
         )?;
 
         // wpt100:hdrext — `a=cryptex` when the offer had it (RFC 9335 section 4).
-        let mut d = self.add_cryptex_attribute(d, false);
+        let d = self.add_cryptex_attribute(d, false);
+        // `a=tls-id` when the offer had one (RFC 8842 section 5.3), and `a=identity`.
+        let mut d = self.add_dtls_association_attributes(d, false)?;
 
         update_sdp_origin(&mut self.sdp_origin, &mut d);
 
@@ -1434,6 +1468,34 @@ impl RTCPeerConnection {
             self.assign_missing_mids(&mut parsed, answers);
             // `RTCRtpHeaderEncryptionPolicy::Require`: refused before any of it is applied.
             self.check_required_cryptex(&parsed)?;
+            // So is a description whose DTLS attributes are malformed (RFC 8122 section 5,
+            // RFC 4145 section 4, RFC 8842 sections 4 and 5.1), or that has media sections
+            // on a DTLS transport that cannot key SRTP (RFC 8827 section 6.5).
+            validate_dtls_attributes(&parsed)?;
+            // RFC 8122 section 5: a certificate is verified with the most preferred hash
+            // function the peer offers; MD5, MD2 and functions the crypto provider lacks are
+            // never used. A description that offers nothing else cannot be verified at all.
+            if !self
+                .dtls_transport()
+                .disable_certificate_fingerprint_verification
+                && let Ok(fingerprints) = extract_fingerprints(&parsed)
+                && preferred_fingerprints(
+                    &fingerprints,
+                    self.dtls_transport().crypto_provider.crypto(),
+                )
+                .is_none()
+            {
+                return Err(Error::ErrUnsupportedFingerprintAlgorithm);
+            }
+            if has_rtp_media(&parsed) {
+                let dtls_transport = self.dtls_transport();
+                if !dtls_transport.use_srtp
+                    || (dtls_transport.state() == RTCDtlsTransportState::Connected
+                        && dtls_transport.srtp_negotiated == Some(false))
+                {
+                    return Err(Error::ErrSessionDescriptionMediaWithoutSrtp);
+                }
+            }
             remote_description.parsed = Some(parsed);
         }
 
@@ -1727,18 +1789,20 @@ impl RTCPeerConnection {
                     fingerprints: extract_fingerprints(parsed_remote_description)?,
                 };
 
+                let remote_tls_id = extract_tls_id(parsed_remote_description)?;
+
                 // After the transport was closed, the description that sets one up again starts
                 // a new ICE session even when the peer keeps its ICE credentials: some browsers
                 // hold one ufrag/pwd per session, not per transport (Firefox), so a new m-section
                 // after every one was rejected arrives with the old credentials but new
                 // candidates and a new DTLS association. Keeping the old session left the agent on
                 // the closed transport's selected pair, sending the DTLS handshake there.
-                if transports_started
+                let ice_restart = transports_started
                     && (new_association
                         || self
                             .ice_transport()
-                            .have_remote_credentials_change(&remote_ufrag, &remote_pwd))
-                {
+                            .have_remote_credentials_change(&remote_ufrag, &remote_pwd));
+                if ice_restart {
                     // An ICE Restart only happens implicitly for a set_remote_description of type
                     // offer; as the offerer, `create_offer` staged one for a closed transport.
 
@@ -1751,20 +1815,36 @@ impl RTCPeerConnection {
 
                     self.ice_transport_mut()
                         .set_remote_credentials(remote_ufrag.clone(), remote_pwd.clone())?;
+                }
 
-                    // RFC 8842: on ICE restart the DTLS transport must re-handshake over the new
-                    // ICE path. Reset the DTLS endpoint with the description's fingerprints so
-                    // the next ICESelectedCandidatePairChange triggers a fresh handshake. After
-                    // the transport was closed the peer starts a new association even with the
-                    // same certificate and role, so the session is never kept then.
-                    if new_association {
-                        self.dtls_transport_mut().restart_new_association(
-                            local_ice_role,
-                            remote_dtls_parameters.clone(),
-                        )?;
-                    } else {
-                        self.dtls_transport_mut()
-                            .restart(local_ice_role, remote_dtls_parameters.clone())?;
+                if transports_started {
+                    // RFC 8842 section 3.1: the DTLS association goes on, across an ICE restart
+                    // too, unless the description changes the roles, the fingerprints or the
+                    // `tls-id`, or sets up a transport that was closed; then a new association
+                    // replaces it, with or without an ICE restart.
+                    let association = self.dtls_transport_mut().update_remote(
+                        local_ice_role,
+                        remote_dtls_parameters.clone(),
+                        remote_tls_id.clone(),
+                        DtlsRemoteUpdate {
+                            we_offer,
+                            ice_restart,
+                            transport_closed: new_association,
+                        },
+                    )?;
+                    if association == DtlsAssociationUpdate::New {
+                        self.pipeline_context
+                            .stats
+                            .transport
+                            .on_dtls_state_changed(RTCDtlsTransportState::Connecting);
+                        // An ICE restart starts the client's handshake when it selects its
+                        // pair. Without one no pair change is coming: the handshake starts now,
+                        // on the pair ICE has (or with the first pair, if it has none yet).
+                        if !ice_restart && self.ice_transport().agent.media_path().is_some() {
+                            self.pipeline_context.dtls_handler_context.connect_requested =
+                                Some(now);
+                        }
+                        self.update_connection_state(false);
                     }
                 }
 
@@ -1788,7 +1868,11 @@ impl RTCPeerConnection {
                         },
                         remote_dtls_parameters,
                     )?;
+                    self.dtls_transport_mut().remote_tls_id = remote_tls_id;
                 }
+
+                // A session with media sections needs SRTP keys from the association.
+                self.dtls_transport_mut().srtp_required = has_rtp_media(parsed_remote_description);
             }
 
             if is_final_answer

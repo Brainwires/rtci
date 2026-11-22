@@ -15,6 +15,7 @@ fn handshake_completion_reports_the_tls_version_as_server_hello_hex() -> Result<
             certificates: vec![],
             answering_dtls_role: Default::default(),
             srtp_protection_profiles: vec![],
+            use_srtp: true,
             dtls_cipher_suites: vec![],
             allow_insecure_verification_algorithm: false,
             disable_certificate_fingerprint_verification: false,

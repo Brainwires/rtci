@@ -3,6 +3,7 @@ use std::fmt;
 use sdp::description::session::SessionDescription;
 use sdp::util::ConnectionRole;
 use serde::{Deserialize, Serialize};
+use shared::error::{Error, Result};
 
 /// Indicates the role of the DTLS transport in the handshake.
 ///
@@ -142,29 +143,60 @@ impl fmt::Display for RTCDtlsRole {
     }
 }
 
-/// Iterate a SessionDescription from a remote to determine if an explicit
-/// role can been determined from it. The decision is made from the first role we we parse.
-/// If no role can be found we return DTLSRoleAuto
+/// The DTLS role a remote description states with `a=setup` (RFC 4145 section 4, RFC 8842
+/// section 5): the first media-level value, else the session-level one (the attribute may sit
+/// at either level, and a media-level one overrides it). `active` is the DTLS client, `passive`
+/// the server; `actpass`, no attribute or anything else is [`RTCDtlsRole::Auto`], "no role
+/// taken". `set_remote_description` refuses the values RFC 8842 does not allow before this is
+/// used (`validate_setup_attributes`).
 impl From<&SessionDescription> for RTCDtlsRole {
     fn from(session_description: &SessionDescription) -> Self {
-        for media_section in &session_description.media_descriptions {
-            for attribute in &media_section.attributes {
-                if attribute.key == "setup" {
-                    if let Some(value) = &attribute.value {
-                        match value.as_str() {
-                            "active" => return RTCDtlsRole::Client,
-                            "passive" => return RTCDtlsRole::Server,
-                            _ => return RTCDtlsRole::Auto,
-                        };
-                    } else {
-                        return RTCDtlsRole::Auto;
-                    }
-                }
-            }
+        let media_level = session_description
+            .media_descriptions
+            .iter()
+            .flat_map(|media_section| media_section.attributes.iter())
+            .find(|attribute| attribute.key == "setup");
+        let session_level = session_description
+            .attributes
+            .iter()
+            .find(|attribute| attribute.key == "setup");
+        match media_level
+            .or(session_level)
+            .and_then(|attribute| attribute.value.as_deref())
+        {
+            Some("active") => RTCDtlsRole::Client,
+            Some("passive") => RTCDtlsRole::Server,
+            _ => RTCDtlsRole::Auto,
         }
-
-        RTCDtlsRole::Auto
     }
+}
+
+/// Checks every `a=setup` of a remote description (RFC 4145 section 4, RFC 8842 section 5.1).
+///
+/// The value is `active`, `passive` or `actpass`. `holdconn` is refused: RFC 8842 section 5.1
+/// bars it from a DTLS association, and taking it for "no preference" would start a handshake
+/// the peer said not to start. A level states one value. Sections may differ from each other:
+/// with BUNDLE the transport takes the first one's (the attribute's multiplexing category is
+/// TRANSPORT, RFC 8859 section 5.9), which is the one [`RTCDtlsRole::from`] reads.
+pub(crate) fn validate_setup_attributes(session_description: &SessionDescription) -> Result<()> {
+    let check = |attributes: &[sdp::description::common::Attribute]| -> Result<()> {
+        let mut stated = None;
+        for attribute in attributes.iter().filter(|a| a.key == "setup") {
+            let value = attribute.value.as_deref();
+            if !matches!(value, Some("active" | "passive" | "actpass"))
+                || stated.is_some_and(|stated| stated != value)
+            {
+                return Err(Error::ErrSessionDescriptionInvalidSetup);
+            }
+            stated = Some(value);
+        }
+        Ok(())
+    };
+    check(&session_description.attributes)?;
+    session_description
+        .media_descriptions
+        .iter()
+        .try_for_each(|media_section| check(&media_section.attributes))
 }
 
 impl RTCDtlsRole {
@@ -183,7 +215,6 @@ mod test {
     use std::io::Cursor;
 
     use super::*;
-    use shared::error::Result;
 
     #[test]
     fn test_dtls_role_string() {
@@ -223,6 +254,15 @@ m=application 47299 DTLS/SCTP 5000
 c=IN IP4 192.168.20.129
 a=setup:";
 
+        const SESSION_SETUP_PASSIVE: &str = "v=0
+o=- 4596489990601351948 2 IN IP4 127.0.0.1
+s=-
+t=0 0
+a=setup:passive
+m=application 47299 DTLS/SCTP 5000
+c=IN IP4 192.168.20.129
+";
+
         let tests = vec![
             (
                 "No MediaDescriptions",
@@ -249,6 +289,23 @@ a=setup:";
                 format!("{}{}\n", MEDIA_SETUP_DECLARED, "active"),
                 RTCDtlsRole::Client,
             ),
+            // RFC 4145 section 4: the attribute may be given at session level.
+            (
+                "Session-level setup:passive",
+                SESSION_SETUP_PASSIVE.to_owned(),
+                RTCDtlsRole::Server,
+            ),
+            (
+                "Session-level setup:passive, no MediaDescriptions",
+                format!("{NO_MEDIA}a=setup:passive\n"),
+                RTCDtlsRole::Server,
+            ),
+            // A media-level value overrides the session-level one.
+            (
+                "Session-level setup:passive, MediaDescription setup:active",
+                format!("{SESSION_SETUP_PASSIVE}a=setup:active\n"),
+                RTCDtlsRole::Client,
+            ),
         ];
 
         for (name, session_description_str, expected_role) in tests {
@@ -262,5 +319,94 @@ a=setup:";
         }
 
         Ok(())
+    }
+
+    fn parse(sdp: &str) -> SessionDescription {
+        SessionDescription::unmarshal(&mut Cursor::new(sdp.as_bytes())).unwrap()
+    }
+
+    const TWO_SECTIONS: &str = "v=0
+o=- 4596489990601351948 2 IN IP4 127.0.0.1
+s=-
+t=0 0
+SESSION
+m=audio 9 UDP/TLS/RTP/SAVPF 111
+c=IN IP4 0.0.0.0
+FIRST
+m=application 9 UDP/DTLS/SCTP webrtc-datachannel
+c=IN IP4 0.0.0.0
+SECOND
+";
+
+    /// The two-section description with the given lines (each empty, or `\n`-terminated) at
+    /// session level, in the first section and in the second.
+    fn with_lines(session: &str, first: &str, second: &str) -> SessionDescription {
+        parse(
+            &TWO_SECTIONS
+                .replace("SESSION\n", session)
+                .replace("FIRST\n", first)
+                .replace("SECOND\n", second),
+        )
+    }
+
+    fn two_sections(session: &str, first: &str, second: &str) -> SessionDescription {
+        let line = |value: &str| {
+            if value.is_empty() {
+                String::new()
+            } else {
+                format!("a=setup:{value}\n")
+            }
+        };
+        with_lines(&line(session), &line(first), &line(second))
+    }
+
+    /// RFC 8842 section 5.1: `holdconn` is never used for a DTLS association; RFC 4145 section
+    /// 4 defines no other value than the four.
+    #[test]
+    fn setup_holdconn_and_unknown_values_are_refused() {
+        for (session, first, second) in [
+            ("", "holdconn", ""),
+            ("holdconn", "", ""),
+            ("holdconn", "active", "active"),
+            ("", "active", "holdconn"),
+            ("", "both", ""),
+            ("", "ACTIVE", ""),
+        ] {
+            assert_eq!(
+                validate_setup_attributes(&two_sections(session, first, second)),
+                Err(Error::ErrSessionDescriptionInvalidSetup),
+                "session {session:?}, sections {first:?} / {second:?}"
+            );
+        }
+        let valueless = with_lines("a=setup\n", "", "");
+        assert_eq!(
+            validate_setup_attributes(&valueless),
+            Err(Error::ErrSessionDescriptionInvalidSetup)
+        );
+    }
+
+    /// Valid values pass, at either level; a level that states two different values does not.
+    #[test]
+    fn valid_setup_values_are_accepted() {
+        for (session, first, second) in [
+            ("", "", ""),
+            ("", "actpass", "actpass"),
+            ("", "active", "active"),
+            ("", "passive", ""),
+            ("passive", "", ""),
+            ("passive", "active", "active"),
+            ("actpass", "", "passive"),
+        ] {
+            assert_eq!(
+                validate_setup_attributes(&two_sections(session, first, second)),
+                Ok(()),
+                "session {session:?}, sections {first:?} / {second:?}"
+            );
+        }
+        let twice = with_lines("", "a=setup:active\na=setup:passive\n", "");
+        assert_eq!(
+            validate_setup_attributes(&twice),
+            Err(Error::ErrSessionDescriptionInvalidSetup)
+        );
     }
 }

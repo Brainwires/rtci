@@ -36,6 +36,12 @@ pub(crate) struct DtlsHandlerContext {
     /// Set by [`DtlsHandler::request_close`]: queue a `close_notify`, stamped with this instant,
     /// at the next `poll_write`.
     pub(crate) close_requested: Option<Instant>,
+
+    /// Set when a new DTLS association replaces the old one on an ICE transport that already
+    /// has a selected pair (RFC 8842 section 3.1: a changed fingerprint, `tls-id` or role with
+    /// no ICE restart): no `ICESelectedCandidatePairChange` will come to start the client's
+    /// handshake, so the next `poll_write` starts it, stamped with this instant.
+    pub(crate) connect_requested: Option<Instant>,
 }
 
 impl DtlsHandlerContext {
@@ -46,6 +52,7 @@ impl DtlsHandlerContext {
             write_outs: VecDeque::new(),
             event_outs: VecDeque::new(),
             close_requested: None,
+            connect_requested: None,
         }
     }
 }
@@ -93,6 +100,40 @@ impl<'a> DtlsHandler<'a> {
         DtlsHandler { ctx, stats }
     }
 
+    /// Starts the client's handshake (RFC 8842 section 5.3 / 5.4: the endpoint that is
+    /// `active` sends the ClientHello) and queues its first flight. A no-op for a server, and
+    /// for a client whose handshake has started: the config is held only until then.
+    fn connect_client(&mut self, now: Instant) -> Result<()> {
+        if self.ctx.dtls_transport.dtls_role != RTCDtlsRole::Client {
+            return Ok(());
+        }
+        // dtls_endpoint only connect once when acts as DTLSRole::Client
+        let Some(dtls_handshake_config) = self.ctx.dtls_transport.dtls_handshake_config.take()
+        else {
+            return Ok(());
+        };
+        let dtls_endpoint = self
+            .ctx
+            .dtls_transport
+            .dtls_endpoint
+            .as_mut()
+            .ok_or(Error::ErrDtlsTransportNotStarted)?;
+        dtls_endpoint.connect(
+            now,
+            TransportContext::default().peer_addr, // always use default for transport to make DTLS tunneled
+            dtls_handshake_config,
+            None,
+        )?;
+        while let Some(transmit) = dtls_endpoint.poll_transmit() {
+            self.ctx.write_outs.push_back(TaggedRTCMessageInternal {
+                now: transmit.now,
+                transport: transmit.transport,
+                message: RTCMessageInternal::Dtls(DTLSMessage::Raw(transmit.message)),
+            });
+        }
+        Ok(())
+    }
+
     pub(crate) fn name(&self) -> &'static str {
         "DtlsHandler"
     }
@@ -122,6 +163,8 @@ impl<'a> DtlsHandler<'a> {
             SrtpProtectionProfile::Srtp_Aead_Aes_256_Gcm => "SRTP_AEAD_AES_256_GCM",
             SrtpProtectionProfile::Srtp_Aes128_Cm_Hmac_Sha1_80 => "SRTP_AES128_CM_HMAC_SHA1_80",
             SrtpProtectionProfile::Srtp_Aes128_Cm_Hmac_Sha1_32 => "SRTP_AES128_CM_HMAC_SHA1_32",
+            // No `use_srtp` on this association (a data-channel-only peer): no SRTP cipher.
+            SrtpProtectionProfile::Unsupported => "",
             _ => "Unknown",
         };
         self.stats.transport.srtp_cipher = srtp_cipher.to_string();
@@ -227,11 +270,15 @@ impl<'a>
 
             let mut messages = vec![];
             let mut peer_closed = false;
-            let mut srtp_contexts = None;
+            // `Some` once the handshake completed: the SRTP contexts it keyed, or `None` for an
+            // association without `use_srtp`.
+            let mut handshake_complete = None;
+            let mut handshake_error = None;
             let mut srtp_profile_for_stats: Option<SrtpProtectionProfile> = None;
             let mut peer_certificates_for_stats: Vec<Vec<u8>> = vec![];
             let mut dtls_cipher_for_stats: Option<String> = None;
 
+            let srtp_required = self.ctx.dtls_transport.srtp_required;
             let dtls_endpoint = self
                 .ctx
                 .dtls_transport
@@ -260,22 +307,46 @@ impl<'a>
                         {
                             debug!("dtls handshake complete");
 
-                            // Save profile for stats update after borrow ends
-                            srtp_profile_for_stats = Some(state.srtp_protection_profile());
-
-                            // Save peer certificates for stats
-                            peer_certificates_for_stats = state.peer_certificates.clone();
-
-                            // Save DTLS cipher suite for stats
-                            dtls_cipher_for_stats = state.cipher_suite().map(|cs| cs.to_string());
-
-                            let (local_srtp_context, remote_srtp_context) =
+                            // RFC 5764 section 4.1: `use_srtp` is for associations that carry
+                            // RTP. A peer that did not negotiate it (a data-channel-only
+                            // stack) gives an association without SRTP keys: enough for data
+                            // channels, not for a session with media sections (RFC 8827
+                            // section 6.5), which fails here instead of sitting in
+                            // `connecting`.
+                            let srtp_contexts = if state.srtp_protection_profile()
+                                == SrtpProtectionProfile::Unsupported
+                            {
+                                if srtp_required {
+                                    Err(Error::ErrRequestedButNoSrtpExtension)
+                                } else {
+                                    Ok(None)
+                                }
+                            } else {
                                 DtlsHandler::update_srtp_contexts(
                                     state,
                                     &self.ctx.dtls_transport.replay_protection,
                                     &self.ctx.dtls_transport.crypto_provider,
-                                )?;
-                            srtp_contexts = Some((local_srtp_context, remote_srtp_context));
+                                )
+                                .map(Some)
+                            };
+                            match srtp_contexts {
+                                Ok(srtp_contexts) => {
+                                    // Save profile for stats update after borrow ends
+                                    srtp_profile_for_stats = Some(state.srtp_protection_profile());
+
+                                    // Save peer certificates for stats
+                                    peer_certificates_for_stats = state.peer_certificates.clone();
+
+                                    // Save DTLS cipher suite for stats
+                                    dtls_cipher_for_stats =
+                                        state.cipher_suite().map(|cs| cs.to_string());
+
+                                    handshake_complete = Some(srtp_contexts);
+                                }
+                                // Reported after the queued datagrams have been taken, as a
+                                // failed transport.
+                                Err(err) => handshake_error = Some(err),
+                            }
                         } else {
                             warn!(
                                 "Unable to find connection state for {}",
@@ -303,16 +374,23 @@ impl<'a>
                 });
             }
 
-            if let Some((local_srtp_context, remote_srtp_context)) = srtp_contexts {
+            if let Some(err) = handshake_error {
+                self.fail_transport(msg.now);
+                return Err(err);
+            }
+
+            if let Some(srtp_contexts) = handshake_complete {
+                self.ctx.dtls_transport.srtp_negotiated = Some(srtp_contexts.is_some());
                 self.ctx
                     .dtls_transport
                     .state_change(RTCDtlsTransportState::Connected);
 
+                let (local_srtp_context, remote_srtp_context) = srtp_contexts.unzip();
                 self.ctx.event_outs.push_back(TaggedRTCEventInternal {
                     now: msg.now,
                     event: RTCEventInternal::DTLSHandshakeComplete(
-                        Some(local_srtp_context),
-                        Some(remote_srtp_context),
+                        local_srtp_context,
+                        remote_srtp_context,
                     ),
                 });
             }
@@ -393,6 +471,11 @@ impl<'a>
     }
 
     fn poll_write(&mut self) -> Option<Self::Wout> {
+        if let Some(now) = self.ctx.connect_requested.take()
+            && let Err(err) = self.connect_client(now)
+        {
+            warn!("failed to start the dtls handshake: {}", err);
+        }
         if let Some(now) = self.ctx.close_requested.take()
             && let Err(err) = self.queue_close_notify(now)
         {
@@ -404,25 +487,7 @@ impl<'a>
     fn handle_event(&mut self, evt: TaggedRTCEventInternal) -> Result<()> {
         let now = evt.now;
         if let RTCEventInternal::ICESelectedCandidatePairChange = evt.event {
-            if self.ctx.dtls_transport.dtls_role == RTCDtlsRole::Client {
-                // dtls_endpoint only connect once when acts as DTLSRole::Client
-                if let Some(dtls_handshake_config) =
-                    self.ctx.dtls_transport.dtls_handshake_config.take()
-                {
-                    let dtls_endpoint = self
-                        .ctx
-                        .dtls_transport
-                        .dtls_endpoint
-                        .as_mut()
-                        .ok_or(Error::ErrDtlsTransportNotStarted)?;
-                    dtls_endpoint.connect(
-                        now,
-                        TransportContext::default().peer_addr, // always use default for transport to make DTLS tunneled
-                        dtls_handshake_config,
-                        None,
-                    )?;
-                };
-            }
+            self.connect_client(now)?;
         } else {
             self.ctx.event_outs.push_back(evt);
         }
@@ -716,6 +781,7 @@ mod tests {
                 certificates: vec![],
                 answering_dtls_role: Default::default(),
                 srtp_protection_profiles: vec![],
+                use_srtp: true,
                 dtls_cipher_suites: vec![],
                 allow_insecure_verification_algorithm: false,
                 disable_certificate_fingerprint_verification: false,
@@ -745,6 +811,7 @@ mod tests {
                 certificates: vec![],
                 answering_dtls_role: Default::default(),
                 srtp_protection_profiles: vec![],
+                use_srtp: true,
                 dtls_cipher_suites: vec![],
                 allow_insecure_verification_algorithm: false,
                 disable_certificate_fingerprint_verification: false,
@@ -772,6 +839,249 @@ mod tests {
             context.dtls_transport.get_remote_certificates(),
             "the whole chain is retained, not just the first entry the stats path consumes"
         );
+        Ok(())
+    }
+
+    /// A `DtlsHandler` whose transport is started in `role` (fingerprint verification off: the
+    /// peer below is a bare DTLS endpoint with a certificate of its own), and a bare DTLS
+    /// endpoint in the other role that offers or accepts the given SRTP profiles.
+    struct HandlerAndPeer {
+        context: DtlsHandlerContext,
+        stats: RTCStatsAccumulator,
+        peer: dtls::endpoint::Endpoint,
+        now: Instant,
+        events: Vec<RTCEventInternal>,
+    }
+
+    impl HandlerAndPeer {
+        fn new(
+            role: RTCDtlsRole,
+            peer_profiles: Vec<SrtpProtectionProfile>,
+            srtp_required: bool,
+        ) -> Result<Self> {
+            use crate::peer_connection::transport::dtls::parameters::RTCDtlsParameters;
+            use crate::peer_connection::transport::ice::role::RTCIceRole;
+            use dtls::config::{ConfigBuilder, ExtendedMasterSecretType};
+
+            let provider = crypto::default_provider().expect("a built-in crypto provider");
+            let mut transport = DtlsTransport::new(
+                crate::peer_connection::transport::dtls::RTCDtlsTransportConfig {
+                    id: test_transport_id(TransportKind::Dtls),
+                    ice_transport_id: test_transport_id(TransportKind::Ice),
+                    certificates: vec![],
+                    answering_dtls_role: Default::default(),
+                    srtp_protection_profiles: vec![],
+                    use_srtp: true,
+                    dtls_cipher_suites: vec![],
+                    allow_insecure_verification_algorithm: false,
+                    disable_certificate_fingerprint_verification: true,
+                    replay_protection: Default::default(),
+                    crypto_provider: provider.clone(),
+                },
+            )?;
+            transport.srtp_required = srtp_required;
+            // The remote role is the inverse of the one the transport takes.
+            let remote_role = if role == RTCDtlsRole::Client {
+                RTCDtlsRole::Server
+            } else {
+                RTCDtlsRole::Client
+            };
+            transport.start(
+                RTCIceRole::Controlling,
+                RTCDtlsParameters {
+                    role: remote_role,
+                    fingerprints: vec![],
+                },
+            )?;
+            assert_eq!(transport.role(), role);
+
+            let peer_certificate = dtls::crypto::Certificate::generate_self_signed(
+                vec!["peer".into()],
+                provider.crypto(),
+            )?;
+            let peer_config = Arc::new(
+                ConfigBuilder::default()
+                    .with_crypto_provider(provider)
+                    .with_certificates(vec![peer_certificate])
+                    .with_srtp_protection_profiles(peer_profiles)
+                    .with_insecure_skip_verify(true)
+                    .with_extended_master_secret(ExtendedMasterSecretType::Require)
+                    .build(role == RTCDtlsRole::Server, None)?,
+            );
+            // The handler's endpoint is tunnelled: it knows its peer by the placeholder
+            // address. The peer knows the handler by an address of its own choosing.
+            let handler_addr = Self::handler_addr();
+            let peer_addr = TransportContext::default().peer_addr;
+            let now = Instant::now();
+            let peer = if role == RTCDtlsRole::Server {
+                let mut peer =
+                    dtls::endpoint::Endpoint::new(peer_addr, shared::TransportProtocol::UDP, None);
+                peer.connect(now, handler_addr, peer_config, None)?;
+                peer
+            } else {
+                dtls::endpoint::Endpoint::new(
+                    peer_addr,
+                    shared::TransportProtocol::UDP,
+                    Some(peer_config),
+                )
+            };
+            Ok(Self {
+                context: DtlsHandlerContext::new(transport),
+                stats: RTCStatsAccumulator::default(),
+                peer,
+                now,
+                events: vec![],
+            })
+        }
+
+        fn handler_addr() -> SocketAddr {
+            "10.0.0.1:4000".parse().unwrap()
+        }
+
+        /// Exchanges datagrams until neither side has any to send. Returns the first error
+        /// the handler's `handle_read` gave.
+        fn run(&mut self) -> Option<Error> {
+            use sansio::Protocol;
+            let mut first_error = None;
+            let handler_addr = Self::handler_addr();
+            let now = self.now;
+            {
+                let mut handler = DtlsHandler::new(&mut self.context, &mut self.stats);
+                handler
+                    .handle_event(TaggedRTCEventInternal {
+                        now,
+                        event: RTCEventInternal::ICESelectedCandidatePairChange,
+                    })
+                    .expect("the selected pair starts a client's handshake");
+            }
+            for _ in 0..20 {
+                let mut progressed = false;
+                while let Some(transmit) = self.peer.poll_transmit() {
+                    progressed = true;
+                    let mut handler = DtlsHandler::new(&mut self.context, &mut self.stats);
+                    if let Err(err) = handler.handle_read(TaggedRTCMessageInternal {
+                        now,
+                        transport: TransportContext::default(),
+                        message: RTCMessageInternal::Dtls(DTLSMessage::Raw(transmit.message)),
+                    }) && first_error.is_none()
+                    {
+                        first_error = Some(err);
+                    }
+                }
+                let mut handler = DtlsHandler::new(&mut self.context, &mut self.stats);
+                while let Some(written) = handler.poll_write() {
+                    progressed = true;
+                    if let RTCMessageInternal::Dtls(DTLSMessage::Raw(message)) = written.message {
+                        let _ = self.peer.read(now, handler_addr, None, message);
+                    }
+                }
+                while let Some(event) = handler.poll_event() {
+                    self.events.push(event.event);
+                }
+                if !progressed {
+                    break;
+                }
+            }
+            first_error
+        }
+    }
+
+    /// RFC 5764 section 4.1: `use_srtp` is for associations that carry RTP. A peer that does
+    /// not negotiate it (a data-channel-only DTLS stack: it offers none as the client, or
+    /// leaves it out of its ServerHello) is connected when the session has no media section:
+    /// the transport reports `Connected` and the handshake completes without SRTP contexts.
+    /// Before, the server side returned `ErrNoSuchSrtpProfile` and stayed in `Connecting`,
+    /// and the client side aborted the handshake.
+    #[test]
+    fn a_peer_without_use_srtp_connects_a_session_without_media() -> Result<()> {
+        for role in [RTCDtlsRole::Server, RTCDtlsRole::Client] {
+            let mut pair = HandlerAndPeer::new(role, vec![], false)?;
+            let error = pair.run();
+            assert!(error.is_none(), "{role}: {error:?}");
+            assert_eq!(
+                pair.context.dtls_transport.state(),
+                RTCDtlsTransportState::Connected,
+                "{role}"
+            );
+            assert_eq!(pair.context.dtls_transport.srtp_negotiated, Some(false));
+            assert!(
+                pair.events.iter().any(|event| matches!(
+                    event,
+                    RTCEventInternal::DTLSHandshakeComplete(None, None)
+                )),
+                "{role}: the handshake completed without SRTP contexts"
+            );
+            assert_eq!(pair.stats.transport.srtp_cipher, "", "{role}");
+            assert!(
+                !pair
+                    .context
+                    .dtls_transport
+                    .get_remote_certificates()
+                    .is_empty()
+            );
+        }
+        Ok(())
+    }
+
+    /// With `use_srtp` negotiated the handshake hands over both SRTP contexts, as before.
+    #[test]
+    fn a_peer_with_use_srtp_keys_the_srtp_contexts() -> Result<()> {
+        for role in [RTCDtlsRole::Server, RTCDtlsRole::Client] {
+            let mut pair = HandlerAndPeer::new(
+                role,
+                vec![SrtpProtectionProfile::Srtp_Aes128_Cm_Hmac_Sha1_80],
+                true,
+            )?;
+            let error = pair.run();
+            assert!(error.is_none(), "{role}: {error:?}");
+            assert_eq!(
+                pair.context.dtls_transport.state(),
+                RTCDtlsTransportState::Connected
+            );
+            assert_eq!(pair.context.dtls_transport.srtp_negotiated, Some(true));
+            assert!(pair.events.iter().any(|event| matches!(
+                event,
+                RTCEventInternal::DTLSHandshakeComplete(Some(_), Some(_))
+            )));
+            assert_eq!(
+                pair.stats.transport.srtp_cipher,
+                "SRTP_AES128_CM_HMAC_SHA1_80"
+            );
+        }
+        Ok(())
+    }
+
+    /// RFC 8827 section 6.5: media is always protected with SRTP keyed by DTLS. A session with
+    /// a media section whose peer negotiates no `use_srtp` cannot carry it: the transport
+    /// fails (and the peer connection with it) instead of connecting without keys.
+    #[test]
+    fn a_peer_without_use_srtp_fails_a_session_with_media() -> Result<()> {
+        for role in [RTCDtlsRole::Server, RTCDtlsRole::Client] {
+            let mut pair = HandlerAndPeer::new(role, vec![], true)?;
+            assert_eq!(
+                pair.run(),
+                Some(Error::ErrRequestedButNoSrtpExtension),
+                "{role}"
+            );
+            assert_eq!(
+                pair.context.dtls_transport.state(),
+                RTCDtlsTransportState::Failed,
+                "{role}"
+            );
+            assert!(
+                !pair
+                    .events
+                    .iter()
+                    .any(|event| matches!(event, RTCEventInternal::DTLSHandshakeComplete(_, _))),
+                "{role}"
+            );
+            assert!(
+                pair.events
+                    .iter()
+                    .any(|event| matches!(event, RTCEventInternal::DTLSClosed)),
+                "{role}: the handlers above are told the transport is gone"
+            );
+        }
         Ok(())
     }
 }

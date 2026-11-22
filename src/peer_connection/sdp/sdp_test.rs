@@ -122,24 +122,27 @@ fn populate(
 
 #[test]
 fn test_extract_fingerprint() -> Result<()> {
+    const SHA256_A: &str = "sha-256 AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA";
+    const SHA256_B: &str = "sha-256 BB:BB:BB:BB:BB:BB:BB:BB:BB:BB:BB:BB:BB:BB:BB:BB:BB:BB:BB:BB:BB:BB:BB:BB:BB:BB:BB:BB:BB:BB:BB:BB";
+
     //"Good Session Fingerprint"
     {
         let s = SessionDescription {
-            attributes: vec![attr("fingerprint", Some("foo bar"))],
+            attributes: vec![attr("fingerprint", Some(SHA256_A))],
             ..Default::default()
         };
 
         let fingerprints = extract_fingerprints(&s)?;
         assert_eq!(fingerprints.len(), 1);
-        assert_eq!(fingerprints[0].value, "bar");
-        assert_eq!(fingerprints[0].algorithm, "foo");
+        assert_eq!(fingerprints[0].value, &SHA256_A[8..]);
+        assert_eq!(fingerprints[0].algorithm, "sha-256");
     }
 
     //"Good Media Fingerprint"
     {
         let s = SessionDescription {
             media_descriptions: vec![MediaDescription {
-                attributes: vec![attr("fingerprint", Some("foo bar"))],
+                attributes: vec![attr("fingerprint", Some(SHA256_A))],
                 ..Default::default()
             }],
             ..Default::default()
@@ -147,8 +150,8 @@ fn test_extract_fingerprint() -> Result<()> {
 
         let fingerprints = extract_fingerprints(&s)?;
         assert_eq!(fingerprints.len(), 1);
-        assert_eq!(fingerprints[0].value, "bar");
-        assert_eq!(fingerprints[0].algorithm, "foo");
+        assert_eq!(fingerprints[0].value, &SHA256_A[8..]);
+        assert_eq!(fingerprints[0].algorithm, "sha-256");
     }
 
     //"No Fingerprint"
@@ -161,31 +164,42 @@ fn test_extract_fingerprint() -> Result<()> {
         );
     }
 
-    //"Invalid Fingerprint"
-    {
+    //"Invalid Fingerprint": no value, a value that is not hex bytes (RFC 8122 section 5), a
+    // value of the wrong length for its hash function, an attribute without a value.
+    for invalid in [Some("foo"), Some("foo bar"), Some("sha-256 AA:BB"), None] {
         let s = SessionDescription {
-            attributes: vec![attr("fingerprint", Some("foo"))],
+            attributes: vec![attr("fingerprint", invalid)],
             ..Default::default()
         };
 
         assert_eq!(
             extract_fingerprints(&s).expect_err("invalid fingerprint text must be detected"),
-            Error::ErrSessionDescriptionInvalidFingerprint
+            Error::ErrSessionDescriptionInvalidFingerprint,
+            "{invalid:?}"
         );
     }
 
     //"Conflicting Fingerprint"
     //
-    // The old case paired an unparsable session fingerprint ("foo") with a valid media one; every
-    // level is now parsed before the levels are compared, so that input is the "Invalid" case
-    // above. Two well-formed fingerprints that disagree are what a conflict is.
+    // Two m-sections of the one transport with different fingerprints are a conflict. (A
+    // session-level fingerprint next to a different media-level one is not: the media level
+    // overrides it, RFC 8122 section 5.)
     {
+        let live = |fingerprint| MediaDescription {
+            media_name: MediaName {
+                media: "audio".to_owned(),
+                port: RangedPort {
+                    value: 9,
+                    range: None,
+                },
+                protos: vec![],
+                formats: vec![],
+            },
+            attributes: vec![attr("fingerprint", Some(fingerprint))],
+            ..Default::default()
+        };
         let s = SessionDescription {
-            attributes: vec![attr("fingerprint", Some("foo baz"))],
-            media_descriptions: vec![MediaDescription {
-                attributes: vec![attr("fingerprint", Some("foo bar"))],
-                ..Default::default()
-            }],
+            media_descriptions: vec![live(SHA256_B), live(SHA256_A)],
             ..Default::default()
         };
 
@@ -193,6 +207,15 @@ fn test_extract_fingerprint() -> Result<()> {
             extract_fingerprints(&s).expect_err("mismatching fingerprint texts must be detected"),
             Error::ErrSessionDescriptionConflictingFingerprints
         );
+
+        let s = SessionDescription {
+            attributes: vec![attr("fingerprint", Some(SHA256_B))],
+            media_descriptions: vec![live(SHA256_A)],
+            ..Default::default()
+        };
+        let fingerprints = extract_fingerprints(&s)?;
+        assert_eq!(fingerprints.len(), 1);
+        assert_eq!(fingerprints[0].value, &SHA256_A[8..]);
     }
 
     Ok(())

@@ -291,7 +291,10 @@ use crate::media_stream::track::MediaStreamTrackId;
 use crate::peer_connection::RTCPeerConnection;
 use crate::peer_connection::configuration::media_engine::MediaEngine;
 use crate::peer_connection::state::ice_gathering_state::RTCIceGatheringState;
-use crate::peer_connection::transport::dtls::fingerprint::RTCDtlsFingerprint;
+use crate::peer_connection::transport::dtls::fingerprint::{
+    RTCDtlsFingerprint, parse_fingerprint_attribute,
+};
+use crate::peer_connection::transport::dtls::role::validate_setup_attributes;
 use crate::peer_connection::transport::ice::candidate::RTCIceCandidate;
 use crate::peer_connection::transport::ice::parameters::RTCIceParameters;
 use crate::rtp_transceiver::direction::RTCRtpTransceiverDirection;
@@ -1635,31 +1638,105 @@ pub(crate) fn get_peer_direction(media: &MediaDescription) -> RTCRtpTransceiverD
     RTCRtpTransceiverDirection::Unspecified
 }
 
+/// The `a=tls-id` attribute of RFC 8842 section 4.
+pub(crate) const ATTR_KEY_TLS_ID: &str = "tls-id";
+
+/// RFC 8842 section 4: `tls-id-value = 20*255(tls-id-char)`,
+/// `tls-id-char = ALPHA / DIGIT / "+" / "/" / "-" / "_"`.
+pub(crate) fn is_valid_tls_id(value: &str) -> bool {
+    (20..=255).contains(&value.len())
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"+/-_".contains(&b))
+}
+
+/// The remote `a=tls-id` (RFC 8842 section 4), if the description has one.
+///
+/// The attribute is media-level and its multiplexing category is IDENTICAL: it sits on the
+/// BUNDLE-tag m-section, and any other section that repeats it must give the same value. A
+/// value outside the syntax, or two sections of the one transport that disagree, make the
+/// description [`Error::ErrSessionDescriptionInvalidTlsId`]. No peer is required to send it.
+pub(crate) fn extract_tls_id(desc: &SessionDescription) -> Result<Option<String>> {
+    let mut found: Option<&str> = None;
+    for m in &desc.media_descriptions {
+        for attribute in m.attributes.iter().filter(|a| a.key == ATTR_KEY_TLS_ID) {
+            let value = attribute
+                .value
+                .as_deref()
+                .filter(|value| is_valid_tls_id(value))
+                .ok_or(Error::ErrSessionDescriptionInvalidTlsId)?;
+            if is_rejected_media(m) {
+                continue;
+            }
+            if found.is_some_and(|found| found != value) {
+                return Err(Error::ErrSessionDescriptionInvalidTlsId);
+            }
+            found = Some(value);
+        }
+    }
+    Ok(found.map(str::to_owned))
+}
+
+/// Whether the description has an RTP media section that is not rejected: such a session needs
+/// SRTP keys from the DTLS association (RFC 5764, RFC 8827 section 6.5).
+pub(crate) fn has_rtp_media(desc: &SessionDescription) -> bool {
+    desc.media_descriptions
+        .iter()
+        .any(|m| !is_rejected_media(m) && matches!(m.media_name.media.as_str(), "audio" | "video"))
+}
+
+/// Checks the syntax of every DTLS attribute of a remote description, at session level and in
+/// every m-section, before any of the description is applied: `a=fingerprint` (RFC 8122 section
+/// 5), `a=setup` (RFC 4145 section 4, RFC 8842 section 5.1) and `a=tls-id` (RFC 8842 section
+/// 4). Whether the description has the fingerprints it needs is [`extract_fingerprints`]'s
+/// question.
+pub(crate) fn validate_dtls_attributes(desc: &SessionDescription) -> Result<()> {
+    let fingerprints = |attributes: &[sdp::description::common::Attribute]| -> Result<()> {
+        for attribute in attributes.iter().filter(|a| a.key == "fingerprint") {
+            parse_fingerprint_attribute(
+                attribute
+                    .value
+                    .as_deref()
+                    .ok_or(Error::ErrSessionDescriptionInvalidFingerprint)?,
+            )?;
+        }
+        Ok(())
+    };
+    fingerprints(&desc.attributes)?;
+    for m in &desc.media_descriptions {
+        fingerprints(&m.attributes)?;
+    }
+    validate_setup_attributes(desc)?;
+    extract_tls_id(desc)?;
+    Ok(())
+}
+
 /// Extracts the remote DTLS fingerprints (RFC 8122 §5).
 ///
 /// A section carries one `a=fingerprint` line per certificate and hash function (W3C
 /// `RTCPeerConnection` writes one for each of its certificates), and the peer's certificate must
-/// match one of them, so all of them are returned, the sha-256 ones (the algorithm DTLS
-/// verification uses) first. Fingerprints may be given at session level and in every m-section;
-/// the levels must agree on the sha-256 values when they have any (else on every value), or the
-/// description is [`Error::ErrSessionDescriptionConflictingFingerprints`].
+/// match one of them, so all of them are returned, the sha-256 ones first (which of them DTLS
+/// verification uses is `preferred_fingerprints`' choice).
+///
+/// "If it is a session-level attribute, it applies to all TLS sessions for which no media-level
+/// fingerprint attribute is defined": each m-section that is not rejected has its own
+/// fingerprints, or the session-level ones when it has none. All of them share one transport,
+/// so their sets must agree on the sha-256 values when they have any (else on every value), or
+/// the description is [`Error::ErrSessionDescriptionConflictingFingerprints`]; a session-level
+/// set that every section overrides applies to nothing and is not compared. A value that does
+/// not follow the attribute's syntax is [`Error::ErrSessionDescriptionInvalidFingerprint`],
+/// wherever it sits.
 pub(crate) fn extract_fingerprints(desc: &SessionDescription) -> Result<Vec<RTCDtlsFingerprint>> {
     let parse =
         |attributes: &[sdp::description::common::Attribute]| -> Result<Vec<RTCDtlsFingerprint>> {
             let mut fingerprints = vec![];
-            for value in attributes
-                .iter()
-                .filter(|a| a.key == "fingerprint")
-                .filter_map(|a| a.value.as_deref())
-            {
-                let parts: Vec<&str> = value.split(' ').collect();
-                if parts.len() != 2 {
-                    return Err(Error::ErrSessionDescriptionInvalidFingerprint);
-                }
-                fingerprints.push(RTCDtlsFingerprint {
-                    algorithm: parts[0].to_owned(),
-                    value: parts[1].to_owned(),
-                });
+            for attribute in attributes.iter().filter(|a| a.key == "fingerprint") {
+                fingerprints.push(parse_fingerprint_attribute(
+                    attribute
+                        .value
+                        .as_deref()
+                        .ok_or(Error::ErrSessionDescriptionInvalidFingerprint)?,
+                )?);
             }
             // sha-256 first; the order within an algorithm is kept.
             fingerprints.sort_by_key(|f| !f.algorithm.eq_ignore_ascii_case("sha-256"));
@@ -1679,21 +1756,40 @@ pub(crate) fn extract_fingerprints(desc: &SessionDescription) -> Result<Vec<RTCD
         set
     };
 
-    let mut levels = vec![parse(&desc.attributes)?];
+    let session_level = parse(&desc.attributes)?;
+    // The fingerprints in force for each m-section that has a transport, and those of the
+    // rejected ones, which only count when nothing else gives any.
+    let mut in_force = vec![];
+    let mut rejected = vec![];
     for m in &desc.media_descriptions {
-        levels.push(parse(&m.attributes)?);
+        let media_level = parse(&m.attributes)?;
+        if is_rejected_media(m) {
+            rejected.push(media_level);
+        } else if media_level.is_empty() {
+            in_force.push(session_level.clone());
+        } else {
+            in_force.push(media_level);
+        }
     }
-    levels.retain(|level| !level.is_empty());
+    in_force.retain(|level| !level.is_empty());
+    if in_force.is_empty() {
+        in_force.push(session_level);
+        in_force.append(&mut rejected);
+        in_force.retain(|level| !level.is_empty());
+    }
 
-    let Some(first) = levels.first() else {
+    let Some(first) = in_force.first() else {
         return Err(Error::ErrSessionDescriptionNoFingerprint);
     };
     let expected = compared(first);
-    if levels[1..].iter().any(|level| compared(level) != expected) {
+    if in_force[1..]
+        .iter()
+        .any(|level| compared(level) != expected)
+    {
         return Err(Error::ErrSessionDescriptionConflictingFingerprints);
     }
 
-    Ok(levels.swap_remove(0))
+    Ok(in_force.swap_remove(0))
 }
 
 /// Inserts `a=<key>[:<value>]` at the end of m-section `index` of an SDP text, keeping every
@@ -2435,11 +2531,11 @@ mod fingerprint_tests {
                 attributes: vec![
                     Attribute {
                         key: "fingerprint".to_owned(),
-                        value: Some("sha-384 AA:BB".to_owned()),
+                        value: Some(format!("sha-384 {}", ["AB"; 48].join(":"))),
                     },
                     Attribute {
                         key: "fingerprint".to_owned(),
-                        value: Some("sha-256 CC:DD".to_owned()),
+                        value: Some(format!("sha-256 {}", ["CD"; 32].join(":"))),
                     },
                 ],
                 ..Default::default()
@@ -2448,7 +2544,7 @@ mod fingerprint_tests {
         };
         let fingerprints = extract_fingerprints(&s)?;
         assert_eq!(fingerprints[0].algorithm, "sha-256");
-        assert_eq!(fingerprints[0].value, "CC:DD");
+        assert_eq!(fingerprints[0].value, ["CD"; 32].join(":"));
         assert_eq!(fingerprints.len(), 2);
         Ok(())
     }
@@ -2550,11 +2646,13 @@ a=candidate:1 1 udp 1 10.0.0.2 2000 typ host\r\n";
 
     #[test]
     fn extract_fingerprints_keeps_one_per_certificate_and_checks_levels() -> Result<()> {
-        let two = "a=fingerprint:sha-256 AA:AA\r\na=fingerprint:sha-256 BB:BB\r\n";
+        let a = ["AA"; 32].join(":");
+        let b = ["BB"; 32].join(":");
+        let two = format!("a=fingerprint:sha-256 {a}\r\na=fingerprint:sha-256 {b}\r\n");
         let s = parse(&format!(
             "{HEAD}{}{}",
-            section("audio", "0", 9, two),
-            section("video", "1", 9, two)
+            section("audio", "0", 9, &two),
+            section("video", "1", 9, &two)
         ));
         let fingerprints = extract_fingerprints(&s)?;
         assert_eq!(
@@ -2562,19 +2660,214 @@ a=candidate:1 1 udp 1 10.0.0.2 2000 typ host\r\n";
                 .iter()
                 .map(|f| f.value.as_str())
                 .collect::<Vec<_>>(),
-            ["AA:AA", "BB:BB"]
+            [a.as_str(), b.as_str()]
         );
 
         let s = parse(&format!(
             "{HEAD}{}{}",
-            section("audio", "0", 9, two),
-            section("video", "1", 9, "a=fingerprint:sha-256 AA:AA\r\n")
+            section("audio", "0", 9, &two),
+            section("video", "1", 9, &format!("a=fingerprint:sha-256 {a}\r\n"))
         ));
         assert_eq!(
             extract_fingerprints(&s).unwrap_err(),
             Error::ErrSessionDescriptionConflictingFingerprints
         );
         Ok(())
+    }
+
+    /// RFC 8122 section 5: a session-level fingerprint "applies to all TLS sessions for which
+    /// no media-level fingerprint attribute is defined": a media-level one overrides it, and a
+    /// section without one takes the session's. The sections share one transport, so what is
+    /// in force for each must be the same.
+    #[test]
+    fn a_media_level_fingerprint_overrides_the_session_level_one() -> Result<()> {
+        let a = format!("a=fingerprint:sha-256 {}\r\n", ["AA"; 32].join(":"));
+        let b = format!("a=fingerprint:sha-256 {}\r\n", ["BB"; 32].join(":"));
+        let values = |sdp: String| -> Result<Vec<String>> {
+            Ok(extract_fingerprints(&parse(&sdp))?
+                .into_iter()
+                .map(|f| f.value)
+                .collect())
+        };
+        let aa = vec![["AA"; 32].join(":")];
+        let bb = vec![["BB"; 32].join(":")];
+
+        // Session level only: both sections take it.
+        assert_eq!(
+            values(format!(
+                "{HEAD}{a}{}{}",
+                section("audio", "0", 9, ""),
+                section("video", "1", 9, "")
+            ))?,
+            aa
+        );
+        // Every section overrides the session-level value: that one applies to nothing.
+        assert_eq!(
+            values(format!(
+                "{HEAD}{a}{}{}",
+                section("audio", "0", 9, &b),
+                section("video", "1", 9, &b)
+            ))?,
+            bb
+        );
+        // One section overrides it and the other takes it: two fingerprints for one transport.
+        assert_eq!(
+            extract_fingerprints(&parse(&format!(
+                "{HEAD}{a}{}{}",
+                section("audio", "0", 9, &b),
+                section("video", "1", 9, "")
+            )))
+            .unwrap_err(),
+            Error::ErrSessionDescriptionConflictingFingerprints
+        );
+        // A rejected section has no transport: what it carries is not compared.
+        assert_eq!(
+            values(format!(
+                "{HEAD}{}{}",
+                section("audio", "0", 0, &b),
+                section("video", "1", 9, &a)
+            ))?,
+            aa
+        );
+        // With no fingerprint in force anywhere, the description has none.
+        assert_eq!(
+            extract_fingerprints(&parse(&format!("{HEAD}{}", section("audio", "0", 9, ""))))
+                .unwrap_err(),
+            Error::ErrSessionDescriptionNoFingerprint
+        );
+        Ok(())
+    }
+
+    const TLS_ID: &str = "abc3de65cddef001be82";
+
+    /// RFC 8842 section 4: `tls-id-value = 20*255(ALPHA / DIGIT / "+" / "/" / "-" / "_")`.
+    #[test]
+    fn tls_id_syntax() {
+        assert!(is_valid_tls_id(TLS_ID));
+        assert!(is_valid_tls_id(&"a".repeat(255)));
+        assert!(is_valid_tls_id("ABCxyz0123456789+/-_ABCxyz"));
+        assert!(!is_valid_tls_id(&TLS_ID[1..]));
+        assert!(!is_valid_tls_id(&"a".repeat(256)));
+        assert!(!is_valid_tls_id(""));
+        for other in ["=", " ", ".", ":", "\u{e9}"] {
+            assert!(!is_valid_tls_id(&format!("{TLS_ID}{other}")), "{other:?}");
+        }
+    }
+
+    /// The remote `tls-id` is the one of the transport's sections: media-level only, the same
+    /// on every section that has it, not that of a rejected section.
+    #[test]
+    fn extract_tls_id_reads_the_transports_value() -> Result<()> {
+        let line = |value: &str| format!("a=tls-id:{value}\r\n");
+        let sdp = |audio: &str, video: &str| {
+            parse(&format!(
+                "{HEAD}{}{}",
+                section("audio", "0", 9, audio),
+                section("video", "1", 9, video)
+            ))
+        };
+        assert_eq!(extract_tls_id(&sdp("", ""))?, None);
+        assert_eq!(
+            extract_tls_id(&sdp(&line(TLS_ID), ""))?.as_deref(),
+            Some(TLS_ID)
+        );
+        assert_eq!(
+            extract_tls_id(&sdp("", &line(TLS_ID)))?.as_deref(),
+            Some(TLS_ID)
+        );
+        assert_eq!(
+            extract_tls_id(&sdp(&line(TLS_ID), &line(TLS_ID)))?.as_deref(),
+            Some(TLS_ID)
+        );
+        assert_eq!(
+            extract_tls_id(&sdp(&line(TLS_ID), &line("abc3de65cddef001be83"))),
+            Err(Error::ErrSessionDescriptionInvalidTlsId)
+        );
+        assert_eq!(
+            extract_tls_id(&sdp(&line("tooshort"), "")),
+            Err(Error::ErrSessionDescriptionInvalidTlsId)
+        );
+        assert_eq!(
+            extract_tls_id(&sdp("a=tls-id\r\n", "")),
+            Err(Error::ErrSessionDescriptionInvalidTlsId)
+        );
+        // A session-level attribute is not the media-level `tls-id`.
+        assert_eq!(
+            extract_tls_id(&parse(&format!(
+                "{HEAD}{}{}",
+                line(TLS_ID),
+                section("audio", "0", 9, "")
+            )))?,
+            None
+        );
+        // A rejected section's value is not the transport's.
+        let rejected = parse(&format!(
+            "{HEAD}{}{}",
+            section("audio", "0", 0, &line("abc3de65cddef001be83")),
+            section("video", "1", 9, &line(TLS_ID))
+        ));
+        assert_eq!(extract_tls_id(&rejected)?.as_deref(), Some(TLS_ID));
+        Ok(())
+    }
+
+    /// The DTLS attributes of a description are checked wherever they sit.
+    #[test]
+    fn validate_dtls_attributes_checks_every_level() {
+        let good = format!("a=fingerprint:sha-256 {}\r\n", ["AA"; 32].join(":"));
+        let sdp = |session: &str, audio: &str, video: &str| {
+            parse(&format!(
+                "{HEAD}{session}{}{}",
+                section("audio", "0", 9, audio),
+                section("video", "1", 0, video)
+            ))
+        };
+        assert_eq!(validate_dtls_attributes(&sdp("", "", "")), Ok(()));
+        assert_eq!(validate_dtls_attributes(&sdp(&good, &good, &good)), Ok(()));
+        let bad = "a=fingerprint:sha-256 AA:BB\r\n";
+        for (session, audio, video) in [(bad, "", ""), ("", bad, ""), ("", "", bad)] {
+            assert_eq!(
+                validate_dtls_attributes(&sdp(session, audio, video)),
+                Err(Error::ErrSessionDescriptionInvalidFingerprint)
+            );
+        }
+        assert_eq!(
+            validate_dtls_attributes(&sdp("a=fingerprint\r\n", "", "")),
+            Err(Error::ErrSessionDescriptionInvalidFingerprint)
+        );
+        let holdconn = "a=setup:holdconn\r\n";
+        for (session, audio, video) in [(holdconn, "", ""), ("", holdconn, ""), ("", "", holdconn)]
+        {
+            assert_eq!(
+                validate_dtls_attributes(&sdp(session, audio, video)),
+                Err(Error::ErrSessionDescriptionInvalidSetup)
+            );
+        }
+        for (audio, video) in [("a=tls-id:short\r\n", ""), ("", "a=tls-id:short\r\n")] {
+            assert_eq!(
+                validate_dtls_attributes(&sdp("", audio, video)),
+                Err(Error::ErrSessionDescriptionInvalidTlsId)
+            );
+        }
+    }
+
+    #[test]
+    fn has_rtp_media_is_about_live_audio_and_video_sections() {
+        let application = "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n\
+c=IN IP4 0.0.0.0\r\na=mid:2\r\n";
+        assert!(!has_rtp_media(&parse(HEAD)));
+        assert!(!has_rtp_media(&parse(&format!("{HEAD}{application}"))));
+        assert!(!has_rtp_media(&parse(&format!(
+            "{HEAD}{}{application}",
+            section("audio", "0", 0, "")
+        ))));
+        assert!(has_rtp_media(&parse(&format!(
+            "{HEAD}{application}{}",
+            section("video", "1", 9, "")
+        ))));
+        assert!(has_rtp_media(&parse(&format!(
+            "{HEAD}{}",
+            section("audio", "0", 0, "a=bundle-only\r\n")
+        ))));
     }
 
     #[test]
