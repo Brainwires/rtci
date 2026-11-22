@@ -316,6 +316,7 @@ a=rtcp-xr:rcvr-rtt=all
     let first = pc.rtp_transceiver(ids[0]).expect("transceiver");
     let bandwidth = first.remote_bandwidth();
     assert_eq!(bandwidth.max_bitrate, Some(400_000), "TIAS wins over AS");
+    assert_eq!(bandwidth.session_bitrate, Some(400_000));
     assert_eq!(bandwidth.rtcp_senders_bitrate, Some(2000));
     assert_eq!(bandwidth.rtcp_receivers_bitrate, Some(0));
     assert_eq!(
@@ -326,7 +327,16 @@ a=rtcp-xr:rcvr-rtt=all
 
     let second = pc.rtp_transceiver(ids[1]).expect("transceiver");
     let bandwidth = second.remote_bandwidth();
-    assert_eq!(bandwidth.max_bitrate, Some(300_000), "AS is in kilobits");
+    assert_eq!(
+        bandwidth.max_bitrate,
+        Some(269_000),
+        "TIAS = AS * 1000 * 0.95 - (50 * 40 * 8)"
+    );
+    assert_eq!(
+        bandwidth.session_bitrate,
+        Some(300_000),
+        "AS is in kilobits"
+    );
     assert_eq!(bandwidth.rtcp_senders_bitrate, None);
     assert_eq!(
         second.remote_rtcp_xr().map(<[String]>::to_vec),

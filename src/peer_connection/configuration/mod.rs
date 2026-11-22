@@ -227,6 +227,7 @@ pub(crate) mod ice_transport_policy;
 pub mod interceptor_registry;
 pub mod media_engine;
 pub(crate) mod offer_answer_options;
+pub mod remote_bitrate_limit;
 pub(crate) mod rtcp_mux_policy;
 pub(crate) mod sdp_semantics;
 pub mod setting_engine;

@@ -1403,7 +1403,12 @@ impl RTCPeerConnection {
                 let negotiated =
                     negotiated_sctp(parsed_local_description, parsed_remote_description);
                 self.apply_sctp_negotiation(now, negotiated)?;
-                self.start_rtp(remote_description)?;
+                self.start_rtp(remote_description.clone())?;
+                self.apply_negotiated_session(
+                    now,
+                    parsed_local_description,
+                    parsed_remote_description,
+                )?;
             }
 
             // An answer applied: the stopped transceivers whose sections it left rejected go.
@@ -2120,7 +2125,12 @@ impl RTCPeerConnection {
                 let negotiated =
                     negotiated_sctp(parsed_local_description, parsed_remote_description);
                 self.apply_sctp_negotiation(now, negotiated)?;
-                self.start_rtp(remote_description)?;
+                self.start_rtp(remote_description.clone())?;
+                self.apply_negotiated_session(
+                    now,
+                    parsed_local_description,
+                    parsed_remote_description,
+                )?;
             }
 
             // An answer applied: the stopped transceivers whose sections it left rejected go.

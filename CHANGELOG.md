@@ -14,6 +14,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is signalled: regular reports are spaced by the RTCP bandwidth (5% of the session's, RFC
   3550 section 6.2), no longer at least a second apart. The browsers' one second is
   `configure_rtcp_reports_with(registry, RtcpSessionBuilder::new())`.
+- **media_engine**: `MediaEngine::register_codec` refuses a payload type of 64 to 95
+  (`Error::SdpInvalidValue`), and a format a remote description numbers so is not used: RFC 5761
+  section 4, "RTP payload types in the range 64-95 MUST NOT be used" where RTP and RTCP share a
+  port. With the marker bit set such a packet was demultiplexed as RTCP.
+- **jsep**: `a=ssrc:<ssrc> cname:` carries the connection's RTCP CNAME
+  (`RTCPeerConnection::rtcp_cname()`, RFC 7022), the one its RTCP SDES packets carry (RFC 5576
+  section 6.1); it carried the track's stream id. `RTCRtcpParameters::cname` of senders and
+  receivers reports it; it was empty.
+- **transceiver**: `RTCRemoteBandwidth` has a new field, `session_bitrate` (`b=TIAS`, else
+  `b=AS` times 1000: what `max_bitrate` was), and `max_bitrate` derived from `b=AS` follows RFC
+  9429 section 5.10: `AS * 1000 * 0.95 - 16000`. A struct literal needs the new field.
+- **jsep**: an answer states this endpoint's own `trr-int` for a format offered with one; it
+  left the feedback out unless the two numbers were equal (RFC 4585 section 4.2: the value is
+  each side's own minimum interval).
 
 - **jsep**: answers and subsequent offers carry the BUNDLE attributes (`a=ice-ufrag`,
   `a=ice-pwd`, `a=setup`, a media-level `a=fingerprint`, `a=rtcp-mux`, `a=rtcp-mux-only`,
@@ -662,6 +676,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+- **jsep**: what an applied answer negotiates reaches the interceptors that act on it, as
+  control messages written into the chain (`RTCPeerConnection` did not feed them):
+  `a=rtcp-rsize` in the offer and the answer as `RtcpSessionControl::ReducedSize`; the remote
+  `b=TIAS` / `b=AS`, `b=RS` and `b=RR`, summed over the media sections (RFC 8859 section 6), as
+  `RtcpSessionControl::Bandwidth`; the local `trr-int` as `RtcpSessionControl::TrrInt`; and
+  `rtx-time` of the RTX formats as the new `NackControl`.
+- **interceptor**: `NackControl::{LocalRtxTime, RemoteRtxTime}` (RFC 4588 section 8.1), by
+  retransmission payload type: the NACK responder keeps a sent packet for the `rtx-time` this
+  endpoint announced, and the NACK generator stops asking for a packet the remote sender no
+  longer keeps (the shorter of its `rtx-time` and `with_max_packet_age`).
+- **congestion control**: the remote description's send limit (`b=TIAS`, else the value derived
+  from `b=AS`; the sum over the sections this endpoint sends in) bounds the congestion
+  controller's estimate on its way to the pacer and the statistics:
+  `configuration::remote_bitrate_limit::{RemoteBitrateLimitInterceptor, RemoteBitrateLimit,
+  REMOTE_BITRATE_LIMIT_SLOT}`, part of `configure_congestion_control`.
+- **sctp**: the peer connection sends what the SCTP endpoint answers a packet for none of its
+  associations with (RFC 9260 section 8.4: an ABORT, or a SHUTDOWN COMPLETE to a SHUTDOWN ACK);
+  `Endpoint::poll_transmit` was never polled. And an association whose packets start to arrive
+  over another 5-tuple (ICE selected another candidate pair) starts its congestion control and
+  RTO over (`Association::on_path_change`, RFC 9260 section 7.2.5).
+
 - **ice**: `Agent::checklist_state` (`ChecklistState`: Running, Completed, Failed), the state of
   the checklist in RFC 8445's terms. The transport state reaches `Completed` (it never did):
   a nominated pair, local gathering complete and end-of-candidates received.
@@ -1232,6 +1267,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **shared**: `SystemInstant::at`, `Error::InvalidAccessError`.
 
 ### Bug Fixes
+
+- **jsep**: a remote description with `a=extmap:256 ...` (the `appbits` mapping) or an id of
+  4096 to 4351 (an extension left for the answerer to number, RFC 8285 section 6) is applied;
+  `set_remote_description` failed on it. This endpoint uses neither and leaves them out of its
+  answer.
 
 - **ice**: attributes after MESSAGE-INTEGRITY are ignored (RFC 8489 section 14.5). The HMAC does
   not cover them, so someone who saw one valid check could replay it with ICE-CONTROLLED or

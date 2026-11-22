@@ -743,6 +743,17 @@ impl<'a>
                 routed = Some((ch, DatagramEvent::AssociationEvent(event)));
             }
 
+            // What the endpoint itself answers a packet that belongs to none of its
+            // associations with (RFC 9260 section 8.4: an ABORT, or a SHUTDOWN COMPLETE to a
+            // SHUTDOWN ACK, reflecting the packet's Verification Tag). It goes back the way
+            // the packet came.
+            let mut endpoint_answers = vec![];
+            while let Some(transmit) = sctp_endpoint.poll_transmit() {
+                if let Payload::RawEncode(raw_data) = transmit.message {
+                    endpoint_answers.extend(raw_data);
+                }
+            }
+
             let mut sctp_events: HashMap<AssociationHandle, VecDeque<AssociationEvent>> =
                 HashMap::new();
             if let Some((ch, event)) = routed {
@@ -861,10 +872,43 @@ impl<'a>
                 }
             }
 
+            for raw in endpoint_answers {
+                self.ctx.write_outs.push_back(TaggedRTCMessageInternal {
+                    now,
+                    transport: msg.transport,
+                    message: RTCMessageInternal::Dtls(DTLSMessage::Raw(BytesMut::from(&raw[..]))),
+                });
+            }
+
             if let Some((ch, transport)) = inbound_transport
-                && self.ctx.sctp_transport.sctp_associations.contains_key(&ch)
+                && let Some(conn) = self.ctx.sctp_transport.sctp_associations.get_mut(&ch)
             {
-                self.ctx.association_transport.insert(ch, transport);
+                // The association's packets arrive over another 5-tuple than before: the
+                // transport underneath moved (ICE selected another candidate pair), and what
+                // the association learned about the old path says nothing about this one
+                // (RFC 9260 section 7.2.5): its congestion control and RTO start over.
+                if self
+                    .ctx
+                    .association_transport
+                    .insert(ch, transport)
+                    .is_some_and(|before| {
+                        (
+                            before.local_addr,
+                            before.peer_addr,
+                            before.transport_protocol,
+                        ) != (
+                            transport.local_addr,
+                            transport.peer_addr,
+                            transport.transport_protocol,
+                        )
+                    })
+                {
+                    debug!(
+                        "sctp association {} moved to {:?}",
+                        ch.0, transport.peer_addr
+                    );
+                    conn.on_path_change(now);
+                }
             }
 
             // The application may have drained while this packet was in flight, so retry
@@ -2478,6 +2522,146 @@ mod tests {
                 "the INIT carries the instant of the event that caused it, not the wall clock"
             );
         }
+    }
+
+    /// RFC 9260 section 8.4: a packet that belongs to no association of the endpoint is "out
+    /// of the blue", and one carrying DATA is answered with an ABORT that reflects its
+    /// Verification Tag. `Endpoint::handle` queues that answer in the endpoint, not in an
+    /// association, so the handler has to poll the endpoint for it.
+    #[test]
+    fn a_packet_for_no_association_is_answered_with_the_endpoints_abort() {
+        let now = Instant::now();
+        let mut e = establish();
+        let dgrams = server_datagrams_carrying(&mut e, 1, 1, now);
+        assert!(!dgrams.is_empty());
+        let tag = dgrams[0][4..8].to_vec();
+
+        // An endpoint that has lost the association the server still holds.
+        let mut transport = SctpTransport::new(
+            SctpMaxMessageSize::default(),
+            None,
+            None,
+            test_transport_id(TransportKind::Sctp),
+            test_transport_id(TransportKind::Dtls),
+        );
+        transport.sctp_endpoint = Some(Endpoint::new(
+            client_addr(),
+            TransportProtocol::UDP,
+            EndpointConfig::default().into(),
+            None,
+        ));
+        let mut ctx = SctpHandlerContext::new(now, transport);
+        let mut handler = SctpHandler::new(&mut ctx, 0);
+        for dgram in dgrams {
+            handler.handle_read(raw_read(now, dgram)).expect("read");
+        }
+        let mut sent = vec![];
+        while let Some(m) = handler.poll_write() {
+            sent.push(m);
+        }
+        assert_eq!(sent.len(), 1, "one answer");
+        let RTCMessageInternal::Dtls(DTLSMessage::Raw(raw)) = &sent[0].message else {
+            panic!("an SCTP packet");
+        };
+        assert_eq!(raw[12], CT_ABORT, "an ABORT");
+        assert_eq!(&raw[4..8], &tag[..], "with the packet's Verification Tag");
+        // RFC 9260 section 8.4 rule 8: the T bit says the tag is reflected.
+        assert_eq!(raw[13] & 1, 1, "T bit");
+        // Back the way the packet came.
+        assert_eq!(sent[0].transport.peer_addr, server_addr());
+    }
+
+    /// RFC 9260 section 7.2.5 as `Association::on_path_change` implements it: when the
+    /// association's packets start to arrive over another 5-tuple (ICE selected another
+    /// candidate pair), the congestion window goes back to its initial value. Packets that
+    /// keep arriving over the same 5-tuple leave it alone.
+    #[test]
+    fn an_association_whose_packets_arrive_over_another_path_starts_congestion_control_over() {
+        let now = Instant::now();
+        let mut e = establish();
+        let initial = e.client_conn.congestion_window();
+
+        // The client sends enough for slow start to open the window, and the server
+        // acknowledges it.
+        {
+            let mut stream = e
+                .client_conn
+                .open_stream(1, PayloadProtocolIdentifier::Binary)
+                .expect("open client stream");
+            for _ in 0..24 {
+                stream
+                    .write_sctp(
+                        now,
+                        &Bytes::from(vec![7u8; 1000]),
+                        PayloadProtocolIdentifier::Binary,
+                    )
+                    .expect("client write");
+            }
+        }
+        let mut sacks = vec![];
+        let mut at = now;
+        for _ in 0..40 {
+            let out = drain_transmits(&mut e.client_conn, at);
+            for dgram in out {
+                if let Some((_, DatagramEvent::AssociationEvent(event))) =
+                    e.server_ep.handle(at, client_addr(), None, dgram)
+                {
+                    e.server_conn.handle_event(event);
+                }
+            }
+            while e.server_conn.poll().is_some() {}
+            at += Duration::from_millis(250);
+            e.server_conn.handle_timeout(at);
+            let acks = drain_transmits(&mut e.server_conn, at);
+            if acks.is_empty() {
+                break;
+            }
+            for dgram in &acks {
+                if let Some((_, DatagramEvent::AssociationEvent(event))) =
+                    e.client_ep.handle(at, server_addr(), None, dgram.clone())
+                {
+                    e.client_conn.handle_event(event);
+                }
+            }
+            sacks = acks;
+        }
+        let opened = e.client_conn.congestion_window();
+        assert!(
+            opened > initial,
+            "slow start opened the window: {initial} -> {opened}"
+        );
+        assert!(!sacks.is_empty());
+
+        // One more datagram from the server, over the path every packet took so far.
+        let same_path = server_datagrams_carrying(&mut e, 3, 1, at);
+        let other_path = server_datagrams_carrying(&mut e, 5, 1, at);
+        let ch = e.client_ch;
+        let mut ctx = client_ctx(at, e.client_ep, e.client_ch, e.client_conn);
+        let mut handler = SctpHandler::new(&mut ctx, 0);
+        // The first datagram the handler sees records the path; the second confirms it.
+        handler
+            .handle_read(raw_read(at, sacks[0].clone()))
+            .expect("read");
+        for dgram in same_path {
+            handler.handle_read(raw_read(at, dgram)).expect("read");
+        }
+        assert_eq!(
+            handler.ctx.sctp_transport.sctp_associations[&ch].congestion_window(),
+            opened,
+            "the same path: nothing starts over"
+        );
+
+        let moved = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 5556);
+        for dgram in other_path {
+            let mut read = raw_read(at, dgram);
+            read.transport.peer_addr = moved;
+            handler.handle_read(read).expect("read");
+        }
+        assert_eq!(
+            handler.ctx.sctp_transport.sctp_associations[&ch].congestion_window(),
+            initial,
+            "another path: the congestion window is the initial one again"
+        );
     }
 
     // C4-04 replaced `last_now: Option<Instant>` + `unwrap_or_else(Instant::now)` with a

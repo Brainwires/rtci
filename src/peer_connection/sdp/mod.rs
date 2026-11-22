@@ -300,7 +300,9 @@ use crate::media_stream::MediaStreamId;
 use crate::media_stream::track::{MediaStreamTrack, MediaStreamTrackId};
 use crate::peer_connection::RTCPeerConnection;
 use crate::peer_connection::configuration::RTCBundlePolicy;
-use crate::peer_connection::configuration::media_engine::MediaEngine;
+use crate::peer_connection::configuration::media_engine::{
+    MediaEngine, is_rtcp_conflicting_payload_type,
+};
 use crate::peer_connection::state::ice_gathering_state::RTCIceGatheringState;
 use crate::peer_connection::transport::dtls::fingerprint::{
     RTCDtlsFingerprint, parse_fingerprint_attribute,
@@ -1295,6 +1297,7 @@ impl RTCPeerConnection {
     ) -> (MediaDescription, Vec<RtpStreamId>) {
         let mut send_rids = vec![];
 
+        let cname = media_engine.rtcp_cname.as_str();
         if let Some(sender) = transceiver.sender_mut() {
             let (encodings, track) = (
                 sender.get_parameters(media_engine).encodings.clone(),
@@ -1362,12 +1365,12 @@ impl RTCPeerConnection {
                             );
                         }
 
-                        media = with_source_attributes(media, ssrc, track);
+                        media = with_source_attributes(media, ssrc, track, cname);
                         if let Some(rtx) = rtx_flow {
-                            media = with_source_attributes(media, rtx.ssrc, track);
+                            media = with_source_attributes(media, rtx.ssrc, track, cname);
                         }
                         if let Some(fec) = fec_flow {
-                            media = with_source_attributes(media, fec.ssrc, track);
+                            media = with_source_attributes(media, fec.ssrc, track, cname);
                         }
                     }
                 }
@@ -1394,19 +1397,19 @@ impl RTCPeerConnection {
 }
 
 /// The source attributes of one of a sender's SSRCs (RFC 5576 section 4.1): `cname` (section
-/// 6.1) and `msid` (RFC 8830 appendix A, registered as a source attribute). The Plan B
+/// 6.1: "the same as the CNAME that the source uses in RTCP", so the connection's one CNAME,
+/// RFC 7022, whatever the track) and `msid` (RFC 8830 appendix A, registered as a source
+/// attribute). The Plan B
 /// `mslabel` and `label` attributes are not written: RFC 5576 section 4.1 has source
 /// attributes registered with IANA, and neither is.
 fn with_source_attributes(
     media: MediaDescription,
     ssrc: SSRC,
     track: &MediaStreamTrack,
+    cname: &str,
 ) -> MediaDescription {
     media
-        .with_value_attribute(
-            ATTR_KEY_SSRC.to_owned(),
-            format!("{ssrc} cname:{}", track.stream_id()),
-        )
+        .with_value_attribute(ATTR_KEY_SSRC.to_owned(), format!("{ssrc} cname:{cname}"))
         .with_value_attribute(
             ATTR_KEY_SSRC.to_owned(),
             format!("{ssrc} msid:{} {}", track.stream_id(), track.track_id()),
@@ -2791,6 +2794,12 @@ pub(crate) fn codecs_from_media_description(
         if std::mem::replace(&mut seen[payload_type as usize], true) {
             continue;
         }
+        // RFC 5761 section 4: "RTP payload types in the range 64-95 MUST NOT be used" where
+        // RTP and RTCP share a port, as they always do here. A format numbered so is one this
+        // endpoint cannot receive or send: left out, like a format it does not know.
+        if is_rtcp_conflicting_payload_type(payload_type) {
+            continue;
+        }
         // A payload type with no `a=rtpmap` (only `a=fmtp` / `a=rtcp-fb`
         // lines, or none) is RFC 3551's static assignment for audio, else a
         // format this description doesn't define: RFC 9429 section 5.3.1 and
@@ -3019,6 +3028,19 @@ pub(crate) fn rtp_extensions_from_media_description(
                 .as_deref()
                 .and_then(|v| v.split_whitespace().nth(1))
                 .is_some_and(|uri| Url::parse(uri).is_err())
+            {
+                continue;
+            }
+            // RFC 8285 sections 5 and 6: 256 is the `appbits` mapping and 4096 to 4351 are
+            // extensions the offerer left for the answerer to number. Neither is an id a
+            // packet carries (`ExtMap::is_element_id`). They are valid in a description, so
+            // they do not fail it; this endpoint does not use them, which leaves them out of
+            // the answer (an answerer "MAY" take a 4096+ extension by renumbering it).
+            if a.value
+                .as_deref()
+                .and_then(|v| v.split([' ', '/']).next())
+                .and_then(|id| id.parse::<u32>().ok())
+                .is_some_and(|id| id == 256 || (4096..=4351).contains(&id))
             {
                 continue;
             }

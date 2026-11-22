@@ -168,6 +168,11 @@ a=rtpmap:96 VP8/90000
 /// W3C `[[LastStableStateSctpTransport]]`: an offer does not create or change the SCTP
 /// transport here (an answer does), so a rollback leaves `sctp()` as the last completed
 /// exchange had it: absent before the first, present after one that negotiated data.
+///
+/// This holds by construction, not by a restore step: nothing an offer does touches the
+/// transport, so the test passed before the rollback work too. It is here to keep that true:
+/// it fails the day applying an offer (one with a data section, or one that rejects it)
+/// starts, replaces or closes the transport without the rollback undoing it.
 #[test]
 fn a_rollback_leaves_the_sctp_transport_of_the_last_stable_state() -> TestResult {
     let mut a = default_peer()?;
@@ -185,6 +190,7 @@ fn a_rollback_leaves_the_sctp_transport_of_the_last_stable_state() -> TestResult
 
     exchange(&mut a, &mut b)?;
     let transport = b.sctp().expect("the exchange negotiated data").id();
+    let a_transport = a.sctp().expect("the exchange negotiated data").id();
 
     // A renegotiation, abandoned: the transport of the completed exchange stays.
     a.add_track(video_track("later", 0x0505_0505))?;
@@ -193,6 +199,48 @@ fn a_rollback_leaves_the_sctp_transport_of_the_last_stable_state() -> TestResult
     b.set_local_description(Instant::now(), rollback())?;
     assert_eq!(b.sctp().expect("still negotiated").id(), transport);
     assert_eq!(b.get_transceivers().count(), 0);
+
+    // An abandoned re-offer that rejects the data section, which an answer would close the
+    // association for: rolled back, it closes nothing.
+    let offer = a.create_offer(None)?;
+    let sections = media_sections(&offer.sdp);
+    let data_mid = sections
+        .iter()
+        .find(|section| section[0].starts_with("m=application 9 "))
+        .and_then(|section| jsep_common::mid_of(section))
+        .expect("a data section with a mid");
+    // Port zero, and out of the BUNDLE group (RFC 9143 section 7.3.3).
+    let rejecting: String = offer
+        .sdp
+        .split_inclusive("\r\n")
+        .map(|line| {
+            if let Some(tags) = line.trim_end().strip_prefix("a=group:BUNDLE ") {
+                let kept: Vec<&str> = tags.split(' ').filter(|tag| *tag != data_mid).collect();
+                format!("a=group:BUNDLE {}\r\n", kept.join(" "))
+            } else {
+                line.replace("m=application 9 ", "m=application 0 ")
+            }
+        })
+        .collect();
+    assert!(rejecting.contains("m=application 0 "), "{rejecting}");
+    b.set_remote_description(Instant::now(), RTCSessionDescription::offer(rejecting)?)?;
+    assert_eq!(b.sctp().expect("an offer closes nothing").id(), transport);
+    b.set_remote_description(Instant::now(), rollback())?;
+    assert_eq!(b.sctp().expect("still negotiated").id(), transport);
+
+    // And the exchange that follows keeps the transport of the last stable state.
+    exchange(&mut a, &mut b)?;
+    assert_eq!(b.sctp().expect("renegotiated").id(), transport);
+    assert_eq!(a.sctp().expect("negotiated").id(), a_transport);
+
+    // The offerer's side: its own offer, applied and rolled back, creates no transport.
+    let mut c = default_peer()?;
+    c.create_data_channel("data", None)?;
+    let offer = c.create_offer(None)?;
+    c.set_local_description(Instant::now(), offer)?;
+    assert!(c.sctp().is_none());
+    c.set_local_description(Instant::now(), rollback())?;
+    assert!(c.sctp().is_none());
     Ok(())
 }
 

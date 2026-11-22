@@ -137,6 +137,10 @@ pub struct NackResponderInterceptor {
 
     /// How long a sent packet stays available for retransmission (`rtx-time`).
     max_packet_age: Option<Duration>,
+    /// The `rtx-time` this endpoint announced, by retransmission payload type
+    /// ([`NackControl::LocalRtxTime`](super::NackControl::LocalRtxTime)): it replaces
+    /// `max_packet_age` for the streams repaired under that payload type.
+    local_rtx_times: HashMap<u8, Duration>,
 
     /// Send buffers per local stream SSRC
     streams: HashMap<u32, LocalStream>,
@@ -162,6 +166,7 @@ impl NackResponderInterceptor {
             read_queue: VecDeque::new(),
             size,
             max_packet_age: None,
+            local_rtx_times: HashMap::new(),
             streams: HashMap::new(),
             rtx_sequence_numbers: HashMap::new(),
             write_queue: VecDeque::new(),
@@ -217,8 +222,14 @@ impl NackResponderInterceptor {
             let Some(original_packet) = stream.send_buffer.get(seq) else {
                 continue;
             };
-            // RFC 4588 8.1 (`rtx-time`): a packet is kept for retransmission that long.
-            if let Some(max_packet_age) = self.max_packet_age
+            // RFC 4588 8.1 (`rtx-time`): a packet is kept for retransmission that long. What
+            // the session description announced for the stream's retransmission format is
+            // the value; without one, the configured age.
+            if let Some(max_packet_age) = stream
+                .payload_type_rtx
+                .and_then(|payload_type_rtx| self.local_rtx_times.get(&payload_type_rtx))
+                .copied()
+                .or(self.max_packet_age)
                 && let Some((_, sent)) = stream.sent_at[usize::from(seq) % stream.sent_at.len()]
                     .filter(|(sequence_number, _)| *sequence_number == seq)
                 && now.saturating_duration_since(sent) > max_packet_age
@@ -320,6 +331,16 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for NackResponderInterceptor {
     }
 
     fn handle_write(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
+        if let Some(super::NackControl::LocalRtxTime {
+            payload_type_rtx,
+            rtx_time,
+        }) = msg.message.custom::<super::NackControl>()
+        {
+            match rtx_time {
+                Some(rtx_time) => self.local_rtx_times.insert(*payload_type_rtx, *rtx_time),
+                None => self.local_rtx_times.remove(payload_type_rtx),
+            };
+        }
         // Buffer outgoing RTP packets
         if let Packet::Rtp(ref rtp_packet) = msg.message.packet
             && let Some(stream) = self.streams.get_mut(&rtp_packet.header.ssrc)

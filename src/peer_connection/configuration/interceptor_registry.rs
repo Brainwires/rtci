@@ -130,6 +130,9 @@
 //! - [draft-holmer-rmcat-transport-wide-cc](https://datatracker.ietf.org/doc/html/draft-holmer-rmcat-transport-wide-cc-extensions-01) - TWCC
 
 use crate::peer_connection::configuration::media_engine::MediaEngine;
+use crate::peer_connection::configuration::remote_bitrate_limit::{
+    REMOTE_BITRATE_LIMIT_SLOT, RemoteBitrateLimitInterceptor,
+};
 use crate::rtp_transceiver::rtp_sender::rtcp_parameters::{
     RTCP_FB_ACK_CCFB, TYPE_RTCP_FB_ACK, TYPE_RTCP_FB_NACK, TYPE_RTCP_FB_TRANSPORT_CC,
 };
@@ -780,6 +783,7 @@ pub enum CongestionFeedback {
 /// |---|---|---|
 /// | [`Slot::CongestionControl`] | send history and feedback ingest | the only position that sees every byte that leaves |
 /// | [`Slot::TwccSender`] | transport-wide sequence numbers | so the history keys on a number that already exists |
+/// | [`REMOTE_BITRATE_LIMIT_SLOT`] | bounds the estimate by the remote description's `b=TIAS` / `b=AS` | between the controller, which announces the estimate, and the pacer, which reads it |
 /// | [`Slot::Pacer`] | paces departures | above the two, so `packet.now` is the release instant |
 /// | [`Slot::TwccReceiver`] or [`Slot::Rfc8888`] | records arrivals, reports them to the remote | an arrival recorder, so it precedes the jitter buffer |
 ///
@@ -866,6 +870,12 @@ pub fn configure_congestion_control<E: BandwidthEstimator + 'static>(
         .with(
             Slot::CongestionControl,
             CongestionControlBuilder::new(estimator).build(),
+        )
+        // The remote description's `b=TIAS` / `b=AS` bounds the estimate on its way to the
+        // pacer (RFC 9429 section 5.10).
+        .with(
+            Slot::Custom(REMOTE_BITRATE_LIMIT_SLOT),
+            RemoteBitrateLimitInterceptor::new(initial_target),
         )
         .with(
             Slot::Pacer,
