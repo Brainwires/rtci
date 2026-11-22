@@ -1111,45 +1111,85 @@ impl RTCPeerConnection {
         let parameters =
             media_engine.get_rtp_parameters_by_kind(transceiver.kind(), transceiver.direction());
         let to_negotiate = transceiver.header_extensions_to_negotiate();
-        let mut written: Vec<(u16, String)> = vec![];
+        // (id, URI, encrypted form): one form per URI in an answer, both in an offer that
+        // offers best-effort encryption (RFC 6904 section 4.1).
+        let mut written: Vec<(u16, String, bool)> = vec![];
         for rtp_extension in &parameters.header_extensions {
             if let Some(uris) = to_negotiate
                 && !uris.contains(&rtp_extension.uri)
             {
                 continue;
             }
-            let id = if media_section.match_extensions.is_empty() {
-                rtp_extension.id
-            } else if let Some(id) = media_section.match_extensions.get(&rtp_extension.uri) {
-                *id
+            let (id, encrypted) = if media_section.match_extensions.is_empty() {
+                (rtp_extension.id, rtp_extension.encrypted)
+            } else if let Some(offered) = media_section.match_extensions.get(&rtp_extension.uri)
+            {
+                (offered.id, offered.encrypted)
             } else {
                 continue;
             };
-            written.push((id, rtp_extension.uri.clone()));
+            if written.iter().any(|(i, u, e)| {
+                *i == id || (u == &rtp_extension.uri && (*e == encrypted || !is_offer))
+            }) {
+                continue;
+            }
+            written.push((id, rtp_extension.uri.clone(), encrypted));
         }
         if is_offer && let Some(uris) = to_negotiate {
-            for (id, uri) in reoffered_header_extensions(
+            let taken: Vec<(u16, String)> =
+                written.iter().map(|(i, u, _)| (*i, u.clone())).collect();
+            for (id, uri, encrypted) in reoffered_header_extensions(
                 media_engine,
                 transceiver.kind(),
                 transceiver.direction(),
                 uris,
-                &written,
+                &taken,
             ) {
-                written.push((id, uri));
+                written.push((id, uri, encrypted));
             }
         }
-        for (id, uri) in &written {
-            let ext_url = Url::parse(uri.as_str())?;
+        for (id, uri, encrypted) in &written {
+            // RFC 8285 section 7: an extension may be restricted to a direction. An offer
+            // states the one the extension was registered for when the section sends and
+            // receives (RFC 6465 section 5: a client that does not mix "would hence have to
+            // always include the direction parameter ... with a value of 'recvonly'"); an
+            // answer reverses what the offer restricted, within what was registered, and
+            // leaves out an extension it can use in neither direction.
+            let registered = media_engine
+                .header_extensions
+                .iter()
+                .find(|e| e.uri == *uri)
+                .and_then(|e| e.allowed_direction);
+            let Some(direction) = extension_direction(
+                registered,
+                media_section.match_extension_directions.get(uri).cloned(),
+                transceiver.direction(),
+            ) else {
+                continue;
+            };
+            let (ext_uri, ext_attr) = if *encrypted {
+                (Url::parse(ENCRYPT_URI)?, Some(uri.clone()))
+            } else {
+                (Url::parse(uri.as_str())?, None)
+            };
             media = media.with_extmap(sdp::extmap::ExtMap {
                 value: *id,
-                uri: Some(ext_url),
-                direction: media_section
-                    .match_extension_directions
-                    .get(uri)
-                    .cloned()
-                    .unwrap_or_default(),
-                ..Default::default()
+                uri: Some(ext_uri),
+                direction,
+                ext_attr,
             });
+        }
+        // RFC 6904 section 4.1: the clear form of an extension answered encrypted is
+        // answered "inactive".
+        for (id, uri) in &media_section.superseded_extensions {
+            if written.iter().any(|(_, u, e)| u == uri && *e) {
+                media = media.with_extmap(sdp::extmap::ExtMap {
+                    value: *id,
+                    uri: Some(Url::parse(uri)?),
+                    direction: sdp::direction::Direction::Inactive,
+                    ext_attr: None,
+                });
+            }
         }
 
         // The section's direction: an answer's is the transceiver's [[Direction]] intersected
@@ -1558,7 +1598,10 @@ pub(crate) struct MediaSection {
     /// intersected with the reverse of the offered direction (RFC 9429 section 5.3.1). `None`
     /// in an offer, which states [[Direction]].
     pub(crate) answer_direction: Option<RTCRtpTransceiverDirection>,
-    pub(crate) match_extensions: HashMap<String, u16>,
+    pub(crate) match_extensions: HashMap<String, SectionExtension>,
+    /// Answering: the offer's clear mappings of extensions it also offered encrypted
+    /// ([`superseded_clear_extensions`]), answered `inactive`.
+    pub(crate) superseded_extensions: Vec<(u16, String)>,
     /// In an answer, the direction each extension (by URI) is answered with when the offer
     /// restricted it: the reverse of the offered one (RFC 8285 section 7: "if an extension
     /// map is offered as 'sendonly', and the answerer wishes to use it, it MUST be marked as
@@ -2972,10 +3015,10 @@ pub(crate) fn reoffered_header_extensions(
     direction: RTCRtpTransceiverDirection,
     uris: &[String],
     written: &[(u16, String)],
-) -> Vec<(u16, String)> {
-    let mut out: Vec<(u16, String)> = vec![];
+) -> Vec<(u16, String, bool)> {
+    let mut out: Vec<(u16, String, bool)> = vec![];
     for uri in uris {
-        if written.iter().any(|(_, u)| u == uri) || out.iter().any(|(_, u)| u == uri) {
+        if written.iter().any(|(_, u)| u == uri) || out.iter().any(|(_, u, _)| u == uri) {
             continue;
         }
         let registered = media_engine.header_extensions.iter().any(|e| {
@@ -2987,24 +3030,69 @@ pub(crate) fn reoffered_header_extensions(
         if !registered {
             continue;
         }
-        let taken =
-            |id: u16| written.iter().any(|(i, _)| *i == id) || out.iter().any(|(i, _)| *i == id);
+        let taken = |id: u16| {
+            written.iter().any(|(i, _)| *i == id) || out.iter().any(|(i, _, _)| *i == id)
+        };
         let negotiated = media_engine
             .negotiated_header_extensions
             .iter()
             .find(|(_, e)| e.uri == *uri)
-            .map(|(id, _)| *id)
-            .filter(|id| !taken(*id));
+            .map(|(id, e)| (*id, e.encrypted))
+            .filter(|(id, _)| !taken(*id));
         let id = negotiated.or_else(|| {
-            (1u16..15).find(|id| {
-                !taken(*id) && !media_engine.negotiated_header_extensions.contains_key(id)
-            })
+            local_extension_ids()
+                .find(|id| {
+                    !taken(*id) && !media_engine.negotiated_header_extensions.contains_key(id)
+                })
+                .map(|id| (id, false))
         });
-        if let Some(id) = id {
-            out.push((id, uri.clone()));
+        if let Some((id, encrypted)) = id {
+            out.push((id, uri.clone(), encrypted));
         }
     }
     out
+}
+
+/// The direction an `a=extmap` line states (RFC 8285 section 7), or `None` when the
+/// extension is left out of the description.
+///
+/// - `registered`: the transceiver directions the extension was registered for
+///   ([`MediaEngine::register_header_extension`]), `None` for all.
+/// - `answered`: answering, the reverse of the direction the offer gave the extension
+///   ([`answered_extension_directions`]), `None` when the offer gave none (it then has the
+///   section's direction).
+/// - `section`: the transceiver's direction.
+///
+/// An extension registered to send only or receive only says so when the section does both.
+/// An answer to a restricted extension keeps the reversed direction when the registration
+/// allows it, and otherwise drops the extension (RFC 8285 section 7: an answerer that does
+/// not want to receive an extension offered sendonly, or cannot send one offered recvonly,
+/// "SHOULD remove it from the SDP answer").
+pub(crate) fn extension_direction(
+    registered: Option<RTCRtpTransceiverDirection>,
+    answered: Option<sdp::direction::Direction>,
+    section: RTCRtpTransceiverDirection,
+) -> Option<sdp::direction::Direction> {
+    use sdp::direction::Direction;
+    let registered = registered.filter(|r| {
+        matches!(
+            r,
+            RTCRtpTransceiverDirection::Sendonly | RTCRtpTransceiverDirection::Recvonly
+        )
+    });
+    match (answered, registered) {
+        (Some(Direction::SendOnly), Some(RTCRtpTransceiverDirection::Recvonly))
+        | (Some(Direction::RecvOnly), Some(RTCRtpTransceiverDirection::Sendonly)) => None,
+        (Some(answered), _) => Some(answered),
+        (None, Some(r)) if section == RTCRtpTransceiverDirection::Sendrecv => {
+            Some(if r == RTCRtpTransceiverDirection::Sendonly {
+                Direction::SendOnly
+            } else {
+                Direction::RecvOnly
+            })
+        }
+        (None, _) => Some(Direction::Unspecified),
+    }
 }
 
 #[test]
@@ -3025,47 +3113,125 @@ fn codecs_from_media_description_bounds_repeated_formats_and_feedback() {
     assert_eq!(codecs[0].rtp_codec.rtcp_feedback[0].typ, "nack");
 }
 
+/// The RFC 6904 URI that marks an `a=extmap` line as the encrypted form of the extension it
+/// names next (`a=extmap:<id> urn:ietf:params:rtp-hdrext:encrypt <uri> [attributes]`).
+pub(crate) const ENCRYPT_URI: &str = "urn:ietf:params:rtp-hdrext:encrypt";
+
+/// One header extension mapping of a media section, as negotiation uses it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct SectionExtension {
+    /// The id (1 to 255, never 15).
+    pub(crate) id: u16,
+    /// The mapping is the encrypted form (RFC 6904 section 4).
+    pub(crate) encrypted: bool,
+    /// The extension attributes after the URI, if any (`vad=off`, RFC 6464 section 4).
+    pub(crate) attributes: Option<String>,
+}
+
+/// Whether a section's transport protocol is an SRTP-based RTP profile (`RTP/SAVP`,
+/// `RTP/SAVPF`, `UDP/TLS/RTP/SAVPF`, ...).
+fn is_srtp_section(m: &MediaDescription) -> bool {
+    m.media_name
+        .protos
+        .iter()
+        .any(|p| p.eq_ignore_ascii_case("SAVP") || p.eq_ignore_ascii_case("SAVPF"))
+}
+
+/// The usable `a=extmap` lines of a section, in order, as (extension URI, mapping); several
+/// lines may name one URI. Left out: what RFC 8285 does not let a packet carry (256, the
+/// 4096 to 4351 range, and 15, which is reserved: "A usable mapping MUST use IDs in the valid
+/// range", section 5), a URI that is not a URI (an extension the answerer does not
+/// understand, RFC 8285 section 7, RFC 9429 section 5.10), and RFC 6904 lines that cannot
+/// apply: on a section without an SRTP profile (RFC 6904 section 4: "it MUST be specified
+/// only for media that use SRTP-based RTP profiles"), or encrypting the `encrypt` URI itself
+/// ("MUST NOT be recursively applied to itself").
+pub(crate) fn section_extmap_lines(m: &MediaDescription) -> Result<Vec<(String, SectionExtension)>> {
+    let srtp = is_srtp_section(m);
+    let mut out = vec![];
+    for a in &m.attributes {
+        if a.key != ATTR_KEY_EXT_MAP {
+            continue;
+        }
+        let value = a.value.as_deref().unwrap_or("");
+        let mut tokens = value.split_whitespace();
+        let entry = tokens.next().unwrap_or("");
+        let uri = tokens.next();
+        if uri.is_some_and(|uri| Url::parse(uri).is_err()) {
+            continue;
+        }
+        if entry
+            .split('/')
+            .next()
+            .and_then(|id| id.parse::<u32>().ok())
+            .is_some_and(|id| id == 15 || id == 256 || (4096..=4351).contains(&id))
+        {
+            continue;
+        }
+        let a_str = a.to_string();
+        let e = ExtMap::unmarshal(&mut a_str.as_bytes())?;
+        let Some(uri) = e.uri else {
+            continue;
+        };
+        let (uri, encrypted, attributes) = if uri.as_str() == ENCRYPT_URI {
+            let mut inner = e.ext_attr.as_deref().unwrap_or("").splitn(2, ' ');
+            let Some(inner_uri) = inner.next().filter(|u| Url::parse(u).is_ok()) else {
+                continue;
+            };
+            if !srtp || inner_uri == ENCRYPT_URI {
+                continue;
+            }
+            (
+                inner_uri.to_owned(),
+                true,
+                inner.next().map(str::to_owned),
+            )
+        } else {
+            (uri.to_string(), false, e.ext_attr.clone())
+        };
+        out.push((
+            uri,
+            SectionExtension {
+                id: e.value,
+                encrypted,
+                attributes,
+            },
+        ));
+    }
+    Ok(out)
+}
+
+/// The header extensions a section maps, one mapping per URI: the encrypted form when the
+/// section has both (RFC 6904 section 4.1: an answerer that understands header extension
+/// encryption "SHOULD choose the encrypted form of the offered header extension element and
+/// mark the unencrypted form 'inactive'"; [`superseded_clear_extensions`] gives the latter),
+/// otherwise the first line for the URI.
 pub(crate) fn rtp_extensions_from_media_description(
     m: &MediaDescription,
-) -> Result<HashMap<String, u16>> {
-    let mut out = HashMap::new();
-
-    for a in &m.attributes {
-        if a.key == ATTR_KEY_EXT_MAP {
-            // RFC 8285 section 5 / JSEP (RFC 9429 section 5.10): an extension the answerer
-            // doesn't understand is left out of the answer, not an error. A URI that isn't
-            // even a URI (`a=extmap:2 bogus`) is such an extension; a malformed id or
-            // direction still fails the description.
-            if a.value
-                .as_deref()
-                .and_then(|v| v.split_whitespace().nth(1))
-                .is_some_and(|uri| Url::parse(uri).is_err())
-            {
-                continue;
-            }
-            // RFC 8285 sections 5 and 6: 256 is the `appbits` mapping and 4096 to 4351 are
-            // extensions the offerer left for the answerer to number. Neither is an id a
-            // packet carries (`ExtMap::is_element_id`). They are valid in a description, so
-            // they do not fail it; this endpoint does not use them, which leaves them out of
-            // the answer (an answerer "MAY" take a 4096+ extension by renumbering it).
-            if a.value
-                .as_deref()
-                .and_then(|v| v.split([' ', '/']).next())
-                .and_then(|id| id.parse::<u32>().ok())
-                .is_some_and(|id| id == 256 || (4096..=4351).contains(&id))
-            {
-                continue;
-            }
-            let a_str = a.to_string();
-            let e = ExtMap::unmarshal(&mut a_str.as_bytes())?;
-
-            if let Some(uri) = e.uri {
-                out.insert(uri.to_string(), e.value);
+) -> Result<HashMap<String, SectionExtension>> {
+    let mut out: HashMap<String, SectionExtension> = HashMap::new();
+    for (uri, mapping) in section_extmap_lines(m)? {
+        match out.get(&uri) {
+            Some(current) if current.encrypted || !mapping.encrypted => {}
+            _ => {
+                out.insert(uri, mapping);
             }
         }
     }
-
     Ok(out)
+}
+
+/// The clear mappings of a section that [`rtp_extensions_from_media_description`] passed
+/// over for the encrypted form of the same extension, as (id, URI): an answer marks them
+/// `inactive` (RFC 6904 section 4.1).
+pub(crate) fn superseded_clear_extensions(m: &MediaDescription) -> Result<Vec<(u16, String)>> {
+    let chosen = rtp_extensions_from_media_description(m)?;
+    Ok(section_extmap_lines(m)?
+        .into_iter()
+        .filter(|(uri, mapping)| {
+            !mapping.encrypted && chosen.get(uri).is_some_and(|c| c.encrypted)
+        })
+        .map(|(uri, mapping)| (mapping.id, uri))
+        .collect())
 }
 
 #[test]

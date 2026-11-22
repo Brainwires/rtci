@@ -211,7 +211,9 @@ pub use rtp_coding_parameters::{
     RTCRtpCodingParameters, RTCRtpFecParameters, RTCRtpRidRestrictions, RTCRtpRtxParameters,
 };
 pub use rtp_encoding_parameters::RTCRtpEncodingParameters;
-pub use rtp_header_extension_capability::RTCRtpHeaderExtensionCapability;
+pub use rtp_header_extension_capability::{
+    RTCRtpHeaderExtensionCapability, RTCRtpHeaderExtensionEncryption,
+};
 pub use rtp_header_extension_parameters::RTCRtpHeaderExtensionParameters;
 pub use rtp_parameters::RTCRtpParameters;
 pub use rtp_receiver_parameters::RTCRtpReceiveParameters;

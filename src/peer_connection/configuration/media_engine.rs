@@ -137,8 +137,8 @@ mod media_engine_test;
 mod multi_codec_test;
 
 use crate::peer_connection::sdp::{
-    MediaDescriptionExt, codecs_from_media_description, is_unknown_application_media,
-    rtp_extensions_from_media_description,
+    ENCRYPT_URI, MediaDescriptionExt, SectionExtension, codecs_from_media_description,
+    is_unknown_application_media, rtp_extensions_from_media_description,
 };
 use crate::rtp_transceiver::direction::RTCRtpTransceiverDirection;
 use crate::rtp_transceiver::fmtp;
@@ -147,7 +147,9 @@ use crate::rtp_transceiver::rtp_sender::rtp_codec::{
     is_repair_codec, parse_rtx_apt, repair_family, rtcp_feedback_intersection,
 };
 use crate::rtp_transceiver::rtp_sender::rtp_codec_parameters::RTCRtpCodecParameters;
-use crate::rtp_transceiver::rtp_sender::rtp_header_extension_capability::RTCRtpHeaderExtensionCapability;
+use crate::rtp_transceiver::rtp_sender::rtp_header_extension_capability::{
+    RTCRtpHeaderExtensionCapability, RTCRtpHeaderExtensionEncryption,
+};
 use crate::rtp_transceiver::rtp_sender::rtp_header_extension_parameters::RTCRtpHeaderExtensionParameters;
 use crate::rtp_transceiver::rtp_sender::rtp_parameters::RTCRtpParameters;
 use crate::rtp_transceiver::{
@@ -158,7 +160,6 @@ use sdp::MediaDescription;
 use sdp::description::session::SessionDescription;
 use shared::error::{Error, Result};
 use std::collections::HashMap;
-use std::ops::Range;
 use unicase::UniCase;
 
 /// H.264 video codec MIME type.
@@ -259,7 +260,18 @@ pub const MIME_TYPE_TELEPHONE_EVENT: &str = "audio/telephone-event";
 /// Note: MIME type matching is case-insensitive.
 pub const MIME_TYPE_SMPTE336M: &str = "application/smpte336m";
 
-const VALID_EXT_IDS: Range<u16> = 1..15;
+/// The ids this endpoint gives the header extensions it offers, in the order it takes them:
+/// the one-byte ids 1 to 14 first (RFC 8285 section 4.1.2: "the one-byte header form is
+/// preferred"), then 16 to 255, which need the two-byte form (section 4.3; 15 is reserved in
+/// the one-byte form and not used, section 5). An offer only takes an id above 14 when the
+/// one-byte ids are all taken, so a stream is two-byte only when it has to be.
+pub(crate) fn local_extension_ids() -> impl Iterator<Item = u16> {
+    (1..=14).chain(16..=255)
+}
+
+/// The most header extensions that can be registered: one per id of
+/// [`local_extension_ids`].
+const MAX_HEADER_EXTENSIONS: usize = 254;
 
 #[derive(Default, Clone)]
 pub(crate) struct MediaEngineHeaderExtension {
@@ -267,6 +279,14 @@ pub(crate) struct MediaEngineHeaderExtension {
     pub(crate) is_audio: bool,
     pub(crate) is_video: bool,
     pub(crate) allowed_direction: Option<RTCRtpTransceiverDirection>,
+    /// A registered extension: how offers signal it (RFC 6904).
+    pub(crate) encryption: RTCRtpHeaderExtensionEncryption,
+    /// A negotiated mapping: whether it is the encrypted form (`a=extmap:<id>
+    /// urn:ietf:params:rtp-hdrext:encrypt <uri>`, RFC 6904 section 4).
+    pub(crate) encrypted: bool,
+    /// A negotiated mapping: the extension attributes the peer's description gave it (for
+    /// the client-to-mixer audio level, `vad=on` or `vad=off`, RFC 6464 section 4).
+    pub(crate) attributes: Option<String>,
 }
 
 impl MediaEngineHeaderExtension {
@@ -829,8 +849,14 @@ impl MediaEngine {
     ///
     /// - [`Error::ErrRegisterHeaderExtensionInvalidDirection`] if `allowed_direction` is
     ///   `Unspecified`.
-    /// - [`Error::ErrRegisterHeaderExtensionNoFreeID`] if every valid one-byte extension id
-    ///   (RFC 8285) is already taken.
+    /// - [`Error::ErrRegisterHeaderExtensionNoFreeID`] if 254 extensions are registered
+    ///   already: one for each id RFC 8285 lets an RTP header carry (1 to 14 in the one-byte
+    ///   form, 16 to 255 in the two-byte form). Offers take the one-byte ids first.
+    /// - [`Error::TypeError`] for an audio level extension (RFC 6464, RFC 6465) registered for
+    ///   a kind other than audio (RFC 6465 section 5: "They MUST NOT be advertised with other
+    ///   media types"), and for `urn:ietf:params:rtp-hdrext:encrypt`, which is not an
+    ///   extension of its own (RFC 6904 section 4; see
+    ///   [`set_header_extension_encryption`](Self::set_header_extension_encryption)).
     pub fn register_header_extension(
         &mut self,
         extension: RTCRtpHeaderExtensionCapability,
@@ -843,6 +869,23 @@ impl MediaEngine {
         {
             return Err(Error::ErrRegisterHeaderExtensionInvalidDirection);
         }
+        if typ != RtpCodecKind::Audio
+            && matches!(
+                extension.uri.as_str(),
+                ::sdp::extmap::AUDIO_LEVEL_URI | rtp::extension::CSRC_AUDIO_LEVEL_URI
+            )
+        {
+            return Err(Error::TypeError(format!(
+                "{} is defined for audio only (RFC 6464 section 4, RFC 6465 section 5)",
+                extension.uri
+            )));
+        }
+        if extension.uri == ENCRYPT_URI {
+            return Err(Error::TypeError(format!(
+                "{ENCRYPT_URI} encrypts another extension (RFC 6904 section 4): use \
+                 MediaEngine::set_header_extension_encryption"
+            )));
+        }
 
         let ext = {
             match self
@@ -853,7 +896,7 @@ impl MediaEngine {
                 Some(ext) => ext,
                 None => {
                     // We have registered too many extensions
-                    if self.header_extensions.len() > VALID_EXT_IDS.end as usize {
+                    if self.header_extensions.len() >= MAX_HEADER_EXTENSIONS {
                         return Err(Error::ErrRegisterHeaderExtensionNoFreeID);
                     }
                     self.header_extensions
@@ -874,6 +917,38 @@ impl MediaEngine {
         ext.uri = extension.uri;
         ext.allowed_direction = allowed_direction;
 
+        Ok(())
+    }
+
+    /// Sets how offers signal a registered header extension with respect to RFC 6904
+    /// header extension encryption: in the clear (the default for an extension the
+    /// application registers), encrypted, or both, with the peer choosing (RFC 6904 section
+    /// 4.1 "best-effort encryption").
+    ///
+    /// The encrypted form is `a=extmap:<id> urn:ietf:params:rtp-hdrext:encrypt <uri>`; once
+    /// negotiated, the SRTP contexts encrypt and decrypt that element's payload (RFC 6904
+    /// section 3) and its [`RTCRtpHeaderExtensionParameters::encrypted`] is true. Answering,
+    /// the engine takes the encrypted form whenever the offer has it, whatever this says
+    /// (section 4.1: answerers "SHOULD choose the encrypted form ... and mark the
+    /// unencrypted form 'inactive'"). The default interceptors set
+    /// [`BestEffort`](RTCRtpHeaderExtensionEncryption::BestEffort) for the audio level
+    /// extensions (RFC 8834 sections 5.2.2 and 5.2.3: their encryption is RECOMMENDED);
+    /// [`Clear`](RTCRtpHeaderExtensionEncryption::Clear) turns that off.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ErrUnknownType`] when `uri` is not a registered header extension.
+    pub fn set_header_extension_encryption(
+        &mut self,
+        uri: &str,
+        encryption: RTCRtpHeaderExtensionEncryption,
+    ) -> Result<()> {
+        let ext = self
+            .header_extensions
+            .iter_mut()
+            .find(|ext| ext.uri == uri)
+            .ok_or(Error::ErrUnknownType)?;
+        ext.encryption = encryption;
         Ok(())
     }
 
@@ -1106,8 +1181,8 @@ impl MediaEngine {
 
         let extensions = rtp_extensions_from_media_description(media)?;
 
-        for (extension, id) in extensions {
-            self.update_header_extension(id, extension.as_str(), typ)?;
+        for (extension, mapping) in extensions {
+            self.update_header_extension(mapping.id, extension.as_str(), typ, &mapping)?;
         }
 
         Ok(())
@@ -1119,6 +1194,7 @@ impl MediaEngine {
         id: u16,
         extension: &str,
         typ: RtpCodecKind,
+        mapping: &SectionExtension,
     ) -> Result<()> {
         for local_extension in &self.header_extensions {
             if local_extension.uri == extension {
@@ -1132,6 +1208,10 @@ impl MediaEngine {
                         allowed_direction: local_extension.allowed_direction,
                         ..Default::default()
                     });
+                // One form of an extension is negotiated (RFC 6904 section 4.1: "answerers
+                // MUST NOT negotiate the use of ... both encrypted and unencrypted forms").
+                negotiated.encrypted = mapping.encrypted;
+                negotiated.attributes.clone_from(&mapping.attributes);
                 // A retired section cannot retain a conflicting ID or duplicate
                 // this URI at its previous ID. RTP and SDP use the same mapping.
                 self.negotiated_header_extensions
@@ -1480,37 +1560,40 @@ impl MediaEngine {
                     header_extensions.push(RTCRtpHeaderExtensionParameters {
                         id: *id,
                         uri: e.uri.clone(),
-                        ..Default::default()
+                        encrypted: e.encrypted,
                     });
                 }
             }
         } else {
-            let mut media_header_extensions = HashMap::new();
-
+            // Each registered extension in each form its encryption setting offers (RFC 6904
+            // section 4.1), with the id it was negotiated with or the first free one.
+            let mut assigned: Vec<(u16, &MediaEngineHeaderExtension, bool)> = vec![];
             for ext in &self.header_extensions {
-                let mut using_negotiated_id = false;
-                for (id, negotiated_extension) in &self.negotiated_header_extensions {
-                    if negotiated_extension.uri == ext.uri {
-                        using_negotiated_id = true;
-                        media_header_extensions.insert(*id, ext);
-                        break;
-                    }
-                }
-                if !using_negotiated_id {
-                    for id in 1..15 {
-                        let mut id_available = true;
-                        if media_header_extensions.contains_key(&id) {
-                            id_available = false
-                        }
-                        if id_available && !self.negotiated_header_extensions.contains_key(&id) {
-                            media_header_extensions.insert(id, ext);
-                            break;
-                        }
+                let forms: &[bool] = match ext.encryption {
+                    RTCRtpHeaderExtensionEncryption::Clear => &[false],
+                    RTCRtpHeaderExtensionEncryption::BestEffort => &[false, true],
+                    RTCRtpHeaderExtensionEncryption::Encrypted => &[true],
+                };
+                for &encrypted in forms {
+                    let negotiated_id = self
+                        .negotiated_header_extensions
+                        .iter()
+                        .find(|(_, n)| n.uri == ext.uri && n.encrypted == encrypted)
+                        .map(|(id, _)| *id);
+                    let id = negotiated_id.or_else(|| {
+                        local_extension_ids().find(|id| {
+                            !assigned.iter().any(|(taken, _, _)| taken == id)
+                                && !self.negotiated_header_extensions.contains_key(id)
+                        })
+                    });
+                    if let Some(id) = id {
+                        assigned.push((id, ext, encrypted));
                     }
                 }
             }
+            assigned.sort_by_key(|(id, _, _)| *id);
 
-            for (id, e) in media_header_extensions {
+            for (id, e, encrypted) in assigned {
                 if e.is_matching_direction(direction)
                     && (e.is_audio && typ == RtpCodecKind::Audio
                         || e.is_video && typ == RtpCodecKind::Video)
@@ -1518,7 +1601,7 @@ impl MediaEngine {
                     header_extensions.push(RTCRtpHeaderExtensionParameters {
                         id,
                         uri: e.uri.clone(),
-                        ..Default::default()
+                        encrypted,
                     })
                 }
             }
@@ -1547,7 +1630,7 @@ impl MediaEngine {
                 header_extensions.push(RTCRtpHeaderExtensionParameters {
                     uri: e.uri.clone(),
                     id: *id,
-                    ..Default::default()
+                    encrypted: e.encrypted,
                 });
             }
         }
