@@ -93,7 +93,12 @@ impl MarshalSize for SliceLossIndication {
 impl Marshal for SliceLossIndication {
     /// Marshal encodes the SliceLossIndication in binary
     fn marshal_to(&self, mut buf: &mut [u8]) -> Result<usize> {
-        if (self.sli_entries.len() + SLI_LENGTH) as u8 > u8::MAX {
+        // RFC 4585 6.3.2: "The FCI field MUST contain at least one SLI."
+        if self.sli_entries.is_empty() {
+            return Err(Error::PacketTooShort);
+        }
+        // The length field counts 32-bit words in 16 bits.
+        if self.sli_entries.len() + SLI_LENGTH > u16::MAX as usize {
             return Err(Error::TooManyReports);
         }
         if buf.remaining_mut() < self.marshal_size() {
@@ -130,41 +135,24 @@ impl Unmarshal for SliceLossIndication {
         Self: Sized,
         B: Buf,
     {
-        let raw_packet_len = raw_packet.remaining();
-        if raw_packet_len < (HEADER_LENGTH + SLI_OFFSET) {
+        let (sender_ssrc, media_ssrc, mut fci) =
+            read_feedback(raw_packet, PacketType::PayloadSpecificFeedback, FORMAT_SLI)?;
+        // RFC 4585 6.3.2: "The FCI field MUST contain at least one SLI."
+        if fci.is_empty() {
             return Err(Error::PacketTooShort);
         }
-
-        let h = Header::unmarshal(raw_packet)?;
-
-        if raw_packet_len < (HEADER_LENGTH + (4 * h.length as usize)) {
-            return Err(Error::PacketTooShort);
+        if !fci.len().is_multiple_of(4) {
+            return Err(Error::WrongPadding);
         }
 
-        if h.packet_type != PacketType::PayloadSpecificFeedback || h.count != FORMAT_SLI {
-            return Err(Error::WrongType);
-        }
-
-        let sender_ssrc = raw_packet.get_u32();
-        let media_ssrc = raw_packet.get_u32();
-
-        let mut i = HEADER_LENGTH + SLI_OFFSET;
-        let mut sli_entries = vec![];
-        while i < HEADER_LENGTH + h.length as usize * 4 {
-            let sli = raw_packet.get_u32();
+        let mut sli_entries = Vec::with_capacity(fci.len() / 4);
+        while fci.has_remaining() {
+            let sli = fci.get_u32();
             sli_entries.push(SliEntry {
                 first: ((sli >> 19) & 0x1FFF) as u16,
                 number: ((sli >> 6) & 0x1FFF) as u16,
                 picture: (sli & 0x3F) as u8,
             });
-
-            i += 4;
-        }
-
-        if
-        /*h.padding &&*/
-        raw_packet.has_remaining() {
-            raw_packet.advance(raw_packet.remaining());
         }
 
         Ok(SliceLossIndication {

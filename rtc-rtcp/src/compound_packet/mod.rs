@@ -1,5 +1,7 @@
 #[cfg(test)]
 mod compound_packet_test;
+#[cfg(test)]
+mod validation_test;
 
 use crate::{
     header::*, packet::*, receiver_report::*, sender_report::*, source_description::*, util::*,
@@ -93,15 +95,21 @@ impl Marshal for CompoundPacket {
 }
 
 impl Unmarshal for CompoundPacket {
+    /// Reads a datagram as the compound packet RFC 3550 defines, and nothing less: the header
+    /// checks of Appendix A.2 ([`validate_compound`]), then every packet, then the rules of
+    /// §6.1 ([`CompoundPacket::validate`]). A reduced-size datagram (RFC 5506) fails here; read
+    /// one with [`crate::packet::unmarshal`].
     fn unmarshal<B>(raw_packet: &mut B) -> Result<Self>
     where
         Self: Sized,
         B: Buf,
     {
-        let mut packets = vec![];
+        let mut raw = raw_packet.copy_to_bytes(raw_packet.remaining());
+        validate_headers(&raw, Datagram::Compound)?;
 
-        while raw_packet.has_remaining() {
-            let p = unmarshaller(raw_packet)?;
+        let mut packets = vec![];
+        while raw.has_remaining() {
+            let p = unmarshaller(&mut raw)?;
             packets.push(p);
         }
 
@@ -110,6 +118,110 @@ impl Unmarshal for CompoundPacket {
 
         Ok(c)
     }
+}
+
+/// The two kinds of RTCP datagram.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Datagram {
+    /// A compound packet, RFC 3550 §6.1.
+    Compound,
+    /// A reduced-size packet, RFC 5506 §4.1.
+    ReducedSize,
+}
+
+/// Walks the headers of the packets in a datagram without parsing what they carry.
+fn validate_headers(raw: &[u8], kind: Datagram) -> Result<()> {
+    if raw.is_empty() {
+        return Err(Error::EmptyCompound);
+    }
+
+    let mut rest = raw;
+    let mut first = true;
+    while !rest.is_empty() {
+        // "The length fields of the individual RTCP packets must add up to the overall length
+        // of the compound RTCP packet as received."
+        if rest.len() < HEADER_LENGTH {
+            return Err(Error::PacketTooShort);
+        }
+        // "RTP version field must equal 2", on every packet (the loop of the A.2 code).
+        if (rest[0] >> VERSION_SHIFT) & VERSION_MASK != RTP_VERSION {
+            return Err(Error::BadVersion);
+        }
+        let padding = (rest[0] >> PADDING_SHIFT) & PADDING_MASK != 0;
+        let packet_type = rest[1];
+        let length = u16::from_be_bytes([rest[2], rest[3]]) as usize * 4;
+        if rest.len() < HEADER_LENGTH + length {
+            return Err(Error::PacketTooShort);
+        }
+        let last = rest.len() == HEADER_LENGTH + length;
+
+        if first {
+            match kind {
+                // "The payload type field of the first RTCP packet in a compound packet must
+                // be equal to SR or RR."
+                Datagram::Compound => {
+                    if packet_type != u8::from(PacketType::SenderReport)
+                        && packet_type != u8::from(PacketType::ReceiverReport)
+                    {
+                        return Err(Error::BadFirstPacket);
+                    }
+                    // "The padding bit (P) should be zero for the first packet of a compound
+                    // RTCP packet", also when it is the only one.
+                    if padding {
+                        return Err(Error::WrongPadding);
+                    }
+                }
+                // RFC 5506 3.4.2: any RTCP packet type may come first, which leaves little to
+                // tell RTCP from anything else; "the best possible validation" left is that
+                // the type is one RTCP can have next to RTP (RFC 5761 4).
+                Datagram::ReducedSize => {
+                    if !(192..=223).contains(&packet_type) {
+                        return Err(Error::BadFirstPacket);
+                    }
+                }
+            }
+        }
+
+        // RFC 3550 6.4.1: "padding MUST only be added to the last individual packet, and if
+        // padding is added to that packet, the padding bit MUST be set only on that packet."
+        if padding {
+            if !last {
+                return Err(Error::WrongPadding);
+            }
+            // The last octet counts the padding octets, itself included.
+            let count = rest[HEADER_LENGTH + length - 1] as usize;
+            if count == 0 || count > length {
+                return Err(Error::WrongPadding);
+            }
+        }
+
+        rest = &rest[HEADER_LENGTH + length..];
+        first = false;
+    }
+
+    Ok(())
+}
+
+/// Checks that `raw`, one datagram, is a compound RTCP packet as RFC 3550 defines it.
+///
+/// Appendix A.2: every packet is version 2, the first is an SR or an RR with the padding bit
+/// clear, and the lengths add up to the datagram. §6.4.1: only the last packet is padded.
+/// §6.1: an SDES packet with a CNAME follows the reports.
+///
+/// A receiver that negotiated reduced-size RTCP (RFC 5506) does not apply this to what it
+/// receives: see [`validate_reduced_size`].
+pub fn validate_compound(raw: &[u8]) -> Result<()> {
+    CompoundPacket::unmarshal(&mut &raw[..]).map(|_| ())
+}
+
+/// Checks that `raw`, one datagram, is acceptable as reduced-size RTCP (RFC 5506 §4.1): one
+/// or more RTCP packets of any type, with no SR or RR in front and no SDES required.
+///
+/// What is left of the checks of RFC 3550 Appendix A.2 (RFC 5506 §3.4.2): every packet is
+/// version 2, the lengths add up to the datagram, only the last packet is padded, and the
+/// first packet's type is in the RTCP range 192 to 223. A compound packet passes too.
+pub fn validate_reduced_size(raw: &[u8]) -> Result<()> {
+    validate_headers(raw, Datagram::ReducedSize)
 }
 
 impl CompoundPacket {
@@ -128,6 +240,13 @@ impl CompoundPacket {
                 .is_none()
         {
             return Err(Error::BadFirstPacket);
+        }
+
+        // RFC 3550 6.4.1: only the last packet of a compound packet is padded.
+        if let Some((_, all_but_last)) = self.0.split_last()
+            && all_but_last.iter().any(|pkt| pkt.header().padding)
+        {
+            return Err(Error::WrongPadding);
         }
 
         for pkt in &self.0[1..] {

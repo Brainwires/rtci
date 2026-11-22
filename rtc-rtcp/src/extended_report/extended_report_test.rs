@@ -11,7 +11,8 @@ fn decoded_packet() -> ExtendedReport {
                 ssrc: 0x12345689,
                 begin_seq: 5,
                 end_seq: 12,
-                chunks: vec![Chunk(0x4006), Chunk(0x0006), Chunk(0x8765), Chunk(0x0000)],
+                // Three chunks; the fourth on the wire is the terminating null chunk.
+                chunks: vec![Chunk(0x4006), Chunk(0x0006), Chunk(0x8765)],
             }),
             Box::new(DuplicateRLEReportBlock {
                 is_loss_rle: false,
@@ -20,7 +21,7 @@ fn decoded_packet() -> ExtendedReport {
                 ssrc: 0x12345689,
                 begin_seq: 5,
                 end_seq: 12,
-                chunks: vec![Chunk(0x4123), Chunk(0x3FFF), Chunk(0xFFFF), Chunk(0x0000)],
+                chunks: vec![Chunk(0x4123), Chunk(0x3FFF), Chunk(0xFFFF)],
             }),
             Box::new(PacketReceiptTimesReportBlock {
                 t: 3,
@@ -87,9 +88,10 @@ fn decoded_packet() -> ExtendedReport {
                 rerl: 0x33,
                 gmin: 0x44,
                 rfactor: 0x55,
-                ext_rfactor: 0x66,
-                mos_lq: 0x77,
-                mos_cq: 0x88,
+                // R factors are 0 to 100 and MOS scores 10 to 50 (RFC 3611 4.7.5).
+                ext_rfactor: 0x64,
+                mos_lq: 0x2D,
+                mos_cq: 0x32,
                 rx_config: 0x99,
                 reserved: 0x00,
                 jb_nominal: 0x1122,
@@ -159,7 +161,7 @@ fn encoded_packet() -> Bytes {
         // Various statistics
         0x05, 0x06, 0x07, 0x08, 0x11, 0x11, 0x22, 0x22, // byte 184 - 187
         0x33, 0x33, 0x44, 0x44, 0x11, 0x22, 0x33, 0x44, // byte 192 - 195
-        0x55, 0x66, 0x77, 0x88, 0x99, 0x00, 0x11, 0x22, // byte 200 - 203
+        0x55, 0x64, 0x2D, 0x32, 0x99, 0x00, 0x11, 0x22, // byte 200 - 203
         0x33, 0x44, 0x55, 0x66, // byte 204 - 207
     ])
 }

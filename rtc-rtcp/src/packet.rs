@@ -1,10 +1,13 @@
 use crate::{
-    goodbye::*, header::*, payload_feedbacks::full_intra_request::*,
-    payload_feedbacks::picture_loss_indication::*,
+    application_defined::*, goodbye::*, header::*,
+    payload_feedbacks::application_layer_feedback::*, payload_feedbacks::full_intra_request::*,
+    payload_feedbacks::layer_refresh_request::*, payload_feedbacks::picture_loss_indication::*,
     payload_feedbacks::receiver_estimated_maximum_bitrate::*,
-    payload_feedbacks::slice_loss_indication::*, raw_packet::*, receiver_report::*,
+    payload_feedbacks::reference_picture_selection_indication::*,
+    payload_feedbacks::slice_loss_indication::*, payload_feedbacks::temporal_spatial_tradeoff::*,
+    payload_feedbacks::video_back_channel_message::*, raw_packet::*, receiver_report::*,
     sender_report::*, source_description::*, transport_feedbacks::cc_feedback_report::*,
-    transport_feedbacks::rapid_resynchronization_request::*,
+    transport_feedbacks::rapid_resynchronization_request::*, transport_feedbacks::tmmb::*,
     transport_feedbacks::transport_layer_cc::*, transport_feedbacks::transport_layer_nack::*,
 };
 use shared::{
@@ -13,7 +16,7 @@ use shared::{
 };
 
 use crate::extended_report::ExtendedReport;
-use bytes::{Buf, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use std::any::Any;
 use std::fmt;
 
@@ -67,9 +70,13 @@ pub fn marshal(packets: &[Box<dyn Packet>]) -> Result<BytesMut> {
 /// Unmarshal takes an entire udp datagram (which may consist of multiple RTCP packets) and
 /// returns the unmarshaled packets it contains.
 ///
-/// If this is a reduced-size RTCP packet a feedback packet (Goodbye, SliceLossIndication, etc)
-/// will be returned. Otherwise, the underlying type of the returned packet will be
-/// CompoundPacket.
+/// The datagram may be a compound packet (RFC 3550 §6.1) or a reduced-size one (RFC 5506): no
+/// leading SR or RR is required. Use [`crate::compound_packet::validate_compound`] for the
+/// header checks of RFC 3550 Appendix A.2.
+///
+/// A packet of a type or feedback format this crate does not model comes back as a
+/// [`RawPacket`] holding its bytes. A packet of a known type that is malformed fails the whole
+/// datagram; [`unmarshal_lenient`] keeps the others.
 pub fn unmarshal<B>(raw_data: &mut B) -> Result<Vec<Box<dyn Packet>>>
 where
     B: Buf,
@@ -90,52 +97,134 @@ where
     }
 }
 
+/// Like [`unmarshal`], but a packet of a known type that fails its own parse does not cost the
+/// datagram: it comes back as a [`RawPacket`] with its bytes, and the packets around it are
+/// parsed as usual.
+///
+/// The framing is not negotiable: a bad version, or a length that runs past the datagram,
+/// leaves no way to find the next packet and fails the datagram here too.
+pub fn unmarshal_lenient<B>(raw_data: &mut B) -> Result<Vec<Box<dyn Packet>>>
+where
+    B: Buf,
+{
+    let mut packets: Vec<Box<dyn Packet>> = vec![];
+
+    while raw_data.has_remaining() {
+        let framed = next_packet(raw_data)?;
+        match parse_packet(&framed) {
+            Ok(p) => packets.push(p),
+            Err(_) => packets.push(Box::new(RawPacket(framed.whole()))),
+        }
+    }
+
+    if packets.is_empty() {
+        return Err(Error::InvalidHeader);
+    }
+    Ok(packets)
+}
+
+/// One RTCP packet cut off a datagram: its four header octets and the `length` words after
+/// them.
+///
+/// The two are kept apart so that the body of a packet read from a `Bytes` stays a view of
+/// the datagram: nothing is copied or allocated to frame a packet of a type this crate parses.
+pub(crate) struct FramedPacket {
+    header: [u8; HEADER_LENGTH],
+    body: Bytes,
+}
+
+impl FramedPacket {
+    /// The packet as it arrived, in one buffer: what an unparsed packet keeps.
+    fn whole(&self) -> Bytes {
+        let mut packet = BytesMut::with_capacity(HEADER_LENGTH + self.body.len());
+        packet.put_slice(&self.header);
+        packet.put_slice(&self.body);
+        packet.freeze()
+    }
+
+    /// The packet as a reader for the type-specific parser, which reads the header again.
+    fn reader(&self) -> impl Buf + '_ {
+        self.header.as_slice().chain(self.body.clone())
+    }
+}
+
+/// Cuts the first RTCP packet off a datagram by the header's length field.
+pub(crate) fn next_packet<B>(raw_data: &mut B) -> Result<FramedPacket>
+where
+    B: Buf,
+{
+    if raw_data.remaining() < HEADER_LENGTH {
+        return Err(Error::PacketTooShort);
+    }
+    let mut header = [0u8; HEADER_LENGTH];
+    raw_data.copy_to_slice(&mut header);
+    if (header[0] >> VERSION_SHIFT) & VERSION_MASK != RTP_VERSION {
+        return Err(Error::BadVersion);
+    }
+
+    let length = u16::from_be_bytes([header[2], header[3]]) as usize * 4;
+    if length > raw_data.remaining() {
+        return Err(Error::PacketTooShort);
+    }
+
+    Ok(FramedPacket {
+        header,
+        body: raw_data.copy_to_bytes(length),
+    })
+}
+
+/// Parses one RTCP packet.
+fn parse_packet(framed: &FramedPacket) -> Result<Box<dyn Packet>> {
+    let format = (framed.header[0] >> COUNT_SHIFT) & COUNT_MASK;
+    let in_packet = &mut framed.reader();
+
+    let p: Box<dyn Packet> = match PacketType::from(framed.header[1]) {
+        PacketType::SenderReport => Box::new(SenderReport::unmarshal(in_packet)?),
+        PacketType::ReceiverReport => Box::new(ReceiverReport::unmarshal(in_packet)?),
+        PacketType::SourceDescription => Box::new(SourceDescription::unmarshal(in_packet)?),
+        PacketType::Goodbye => Box::new(Goodbye::unmarshal(in_packet)?),
+        PacketType::ApplicationDefined => Box::new(ApplicationDefined::unmarshal(in_packet)?),
+
+        PacketType::TransportSpecificFeedback => match format {
+            FORMAT_TLN => Box::new(TransportLayerNack::unmarshal(in_packet)?),
+            FORMAT_TMMBR => Box::new(TemporaryMaximumBitrateRequest::unmarshal(in_packet)?),
+            FORMAT_TMMBN => Box::new(TemporaryMaximumBitrateNotification::unmarshal(in_packet)?),
+            FORMAT_RRR => Box::new(RapidResynchronizationRequest::unmarshal(in_packet)?),
+            FORMAT_TCC => Box::new(TransportLayerCc::unmarshal(in_packet)?),
+            FORMAT_CCFB => Box::new(CcFeedbackReport::unmarshal(in_packet)?),
+            _ => Box::new(RawPacket(framed.whole())),
+        },
+        PacketType::PayloadSpecificFeedback => match format {
+            FORMAT_PLI => Box::new(PictureLossIndication::unmarshal(in_packet)?),
+            FORMAT_SLI => Box::new(SliceLossIndication::unmarshal(in_packet)?),
+            FORMAT_RPSI => Box::new(ReferencePictureSelectionIndication::unmarshal(in_packet)?),
+            FORMAT_FIR => Box::new(FullIntraRequest::unmarshal(in_packet)?),
+            FORMAT_TSTR => Box::new(TemporalSpatialTradeoffRequest::unmarshal(in_packet)?),
+            FORMAT_TSTN => Box::new(TemporalSpatialTradeoffNotification::unmarshal(in_packet)?),
+            FORMAT_VBCM => Box::new(VideoBackChannelMessage::unmarshal(in_packet)?),
+            FORMAT_LRR => Box::new(LayerRefreshRequest::unmarshal(in_packet)?),
+            // RFC 4585 6.4: the application identifies its own messages. REMB does so by the
+            // four octets that open its FCI; anything else is some other application's.
+            FORMAT_AFB if is_remb(&framed.body) => {
+                Box::new(ReceiverEstimatedMaximumBitrate::unmarshal(in_packet)?)
+            }
+            FORMAT_AFB => Box::new(ApplicationLayerFeedback::unmarshal(in_packet)?),
+            _ => Box::new(RawPacket(framed.whole())),
+        },
+        PacketType::ExtendedReport => Box::new(ExtendedReport::unmarshal(in_packet)?),
+        _ => Box::new(RawPacket(framed.whole())),
+    };
+
+    Ok(p)
+}
+
 /// unmarshaller is a factory which pulls the first RTCP packet from a bytestream,
 /// and returns it's parsed representation, and the amount of data that was processed.
 pub(crate) fn unmarshaller<B>(raw_data: &mut B) -> Result<Box<dyn Packet>>
 where
     B: Buf,
 {
-    let h = Header::unmarshal(raw_data)?;
-
-    let length = (h.length as usize) * 4;
-    if length > raw_data.remaining() {
-        return Err(Error::PacketTooShort);
-    }
-
-    // Re-serialize the just-parsed header into a stack buffer rather than a fresh
-    // heap `BytesMut` (`h.marshal()`), then chain it with the body so the
-    // sub-packet unmarshaller re-reads the same bytes -- one fewer heap
-    // allocation per RTCP sub-packet on the receive path.
-    let mut header_buf = [0u8; HEADER_LENGTH];
-    h.marshal_to(&mut header_buf[..])?;
-    let mut in_packet = header_buf.as_slice().chain(raw_data.take(length));
-
-    let p: Box<dyn Packet> = match h.packet_type {
-        PacketType::SenderReport => Box::new(SenderReport::unmarshal(&mut in_packet)?),
-        PacketType::ReceiverReport => Box::new(ReceiverReport::unmarshal(&mut in_packet)?),
-        PacketType::SourceDescription => Box::new(SourceDescription::unmarshal(&mut in_packet)?),
-        PacketType::Goodbye => Box::new(Goodbye::unmarshal(&mut in_packet)?),
-
-        PacketType::TransportSpecificFeedback => match h.count {
-            FORMAT_TLN => Box::new(TransportLayerNack::unmarshal(&mut in_packet)?),
-            FORMAT_RRR => Box::new(RapidResynchronizationRequest::unmarshal(&mut in_packet)?),
-            FORMAT_TCC => Box::new(TransportLayerCc::unmarshal(&mut in_packet)?),
-            FORMAT_CCFB => Box::new(CcFeedbackReport::unmarshal(&mut in_packet)?),
-            _ => Box::new(RawPacket::unmarshal(&mut in_packet)?),
-        },
-        PacketType::PayloadSpecificFeedback => match h.count {
-            FORMAT_PLI => Box::new(PictureLossIndication::unmarshal(&mut in_packet)?),
-            FORMAT_SLI => Box::new(SliceLossIndication::unmarshal(&mut in_packet)?),
-            FORMAT_REMB => Box::new(ReceiverEstimatedMaximumBitrate::unmarshal(&mut in_packet)?),
-            FORMAT_FIR => Box::new(FullIntraRequest::unmarshal(&mut in_packet)?),
-            _ => Box::new(RawPacket::unmarshal(&mut in_packet)?),
-        },
-        PacketType::ExtendedReport => Box::new(ExtendedReport::unmarshal(&mut in_packet)?),
-        _ => Box::new(RawPacket::unmarshal(&mut in_packet)?),
-    };
-
-    Ok(p)
+    parse_packet(&next_packet(raw_data)?)
 }
 
 #[cfg(test)]

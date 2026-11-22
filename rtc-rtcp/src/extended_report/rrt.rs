@@ -100,6 +100,9 @@ impl Unmarshal for ReceiverReferenceTimeReportBlock {
         }
 
         let xr_header = XRHeader::unmarshal(raw_packet)?;
+        if xr_header.block_type != BlockType::ReceiverReferenceTime {
+            return Err(Error::WrongType);
+        }
         let block_length = match xr_header.block_length.checked_mul(4) {
             Some(length) => length,
             None => return Err(Error::InvalidBlockSize),

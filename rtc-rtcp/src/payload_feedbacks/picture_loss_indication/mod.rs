@@ -108,23 +108,12 @@ impl Unmarshal for PictureLossIndication {
         Self: Sized,
         B: Buf,
     {
-        let raw_packet_len = raw_packet.remaining();
-        if raw_packet_len < (HEADER_LENGTH + (SSRC_LENGTH * 2)) {
-            return Err(Error::PacketTooShort);
-        }
-
-        let h = Header::unmarshal(raw_packet)?;
-        if h.packet_type != PacketType::PayloadSpecificFeedback || h.count != FORMAT_PLI {
-            return Err(Error::WrongType);
-        }
-
-        let sender_ssrc = raw_packet.get_u32();
-        let media_ssrc = raw_packet.get_u32();
-
-        if
-        /*h.padding &&*/
-        raw_packet.has_remaining() {
-            raw_packet.advance(raw_packet.remaining());
+        let (sender_ssrc, media_ssrc, fci) =
+            read_feedback(raw_packet, PacketType::PayloadSpecificFeedback, FORMAT_PLI)?;
+        // RFC 4585 6.3.1.2: "the length field MUST be 2, and there MUST NOT be any Feedback
+        // Control Information."
+        if !fci.is_empty() {
+            return Err(Error::InvalidHeader);
         }
 
         Ok(PictureLossIndication {

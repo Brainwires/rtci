@@ -159,8 +159,8 @@ fn test_source_description_unmarshal() {
         (
             "two chunks",
             Bytes::from_static(&[
-                // v=2, p=0, count=2, SDES, len=24
-                0x82, 0xca, 0x00, 0x18, // ssrc=0x01020304
+                // v=2, p=0, count=2, SDES, len=5 (24 octets)
+                0x82, 0xca, 0x00, 0x05, // ssrc=0x01020304
                 0x01, 0x02, 0x03, 0x04,
                 // Chunk 1
                 // CNAME, len=1, content=A

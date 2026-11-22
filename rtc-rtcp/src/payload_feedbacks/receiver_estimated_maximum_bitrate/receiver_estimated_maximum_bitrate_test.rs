@@ -116,5 +116,23 @@ fn test_receiver_estimated_maximum_bitrate_overflow() {
         143, 206, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 82, 69, 77, 66, 0, 188, 0, 0,
     ]);
     let packet = ReceiverEstimatedMaximumBitrate::unmarshal(&mut input).unwrap();
-    assert_eq!(packet.bitrate, f32::from_bits(0x62800000));
+    // exp = 47, mantissa = 0: the bit rate is mantissa * 2^exp, which is zero. (This used to
+    // expect 2^70, the value of the float bit pattern built without a leading mantissa bit.)
+    assert_eq!(packet.bitrate, 0.0);
+}
+
+// A peer may state any bit rate up to 0x3FFFF * 2^63; printing the packet must not panic.
+#[test]
+fn test_receiver_estimated_maximum_bitrate_display_of_the_largest_value() {
+    let packet = ReceiverEstimatedMaximumBitrate {
+        bitrate: f32::MAX,
+        ..Default::default()
+    };
+    assert!(packet.to_string().ends_with("Eb/s"));
+
+    let mut input = Bytes::from_static(&[
+        143, 206, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 82, 69, 77, 66, 0, 255, 255, 255,
+    ]);
+    let packet = ReceiverEstimatedMaximumBitrate::unmarshal(&mut input).unwrap();
+    assert!(packet.to_string().ends_with("Eb/s"));
 }

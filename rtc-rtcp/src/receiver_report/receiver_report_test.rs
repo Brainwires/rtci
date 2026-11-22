@@ -264,3 +264,48 @@ fn test_receiver_report_roundtrip() {
         }
     }
 }
+
+// RFC 3550 6.4.2 with the padding rule of 6.4.1: padding is neither a report block nor a
+// profile-specific extension.
+#[test]
+fn rtcp_padding_of_a_receiver_report_is_cut_off() {
+    let mut raw = Bytes::from_static(&[
+        0xa0, 0xc9, 0x00, 0x02, // v=2, p=1, count=0, RR, len=2
+        0x90, 0x2f, 0x9e, 0x2e, // ssrc
+        0x00, 0x00, 0x00, 0x04, // four padding octets
+    ]);
+    let rr = ReceiverReport::unmarshal(&mut raw).unwrap();
+    assert!(rr.reports.is_empty());
+    assert!(rr.profile_extensions.is_empty());
+    // An empty RR is the header and the SSRC (RFC 3550 6.4.2: RC may be zero).
+    assert_eq!(
+        &[0x80, 0xc9, 0x00, 0x01, 0x90, 0x2f, 0x9e, 0x2e][..],
+        &rr.marshal().unwrap()[..]
+    );
+
+    // A padding count that reaches into a report block the count field promises.
+    let mut raw = Bytes::from_static(&[
+        0xa1, 0xc9, 0x00, 0x07, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 5,
+    ]);
+    assert_eq!(
+        Err(Error::PacketTooShort),
+        ReceiverReport::unmarshal(&mut raw)
+    );
+    // A padding count of zero.
+    let mut raw = Bytes::from_static(&[0xa0, 0xc9, 0x00, 0x02, 0, 0, 0, 1, 0, 0, 0, 0]);
+    assert_eq!(
+        Err(Error::WrongPadding),
+        ReceiverReport::unmarshal(&mut raw)
+    );
+}
+
+#[test]
+fn a_receiver_report_extension_that_is_not_whole_words_is_not_marshalled() {
+    let rr = ReceiverReport {
+        ssrc: 1,
+        profile_extensions: Bytes::from_static(&[1, 2]),
+        ..Default::default()
+    };
+    assert_eq!(Err(Error::WrongMarshalSize), rr.marshal());
+}

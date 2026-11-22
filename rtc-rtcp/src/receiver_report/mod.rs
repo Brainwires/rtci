@@ -99,6 +99,13 @@ impl Marshal for ReceiverReport {
             return Err(Error::TooManyReports);
         }
 
+        // A profile-specific extension is a whole number of 32-bit words. It is not filled up
+        // with RTCP padding: this packet opens a compound packet, where the P bit must be
+        // clear (RFC 3550 Appendix A.2).
+        if !self.profile_extensions.len().is_multiple_of(4) {
+            return Err(Error::WrongMarshalSize);
+        }
+
         if buf.remaining_mut() < self.marshal_size() {
             return Err(Error::BufferTooShort);
         }
@@ -185,15 +192,17 @@ impl Unmarshal for ReceiverReport {
          *        |                  profile-specific extensions                  |
          *        +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
          */
-        let raw_packet_len = raw_packet.remaining();
-        if raw_packet_len < (HEADER_LENGTH + SSRC_LENGTH) {
-            return Err(Error::PacketTooShort);
-        }
-
-        let header = Header::unmarshal(raw_packet)?;
+        // Padding the P bit announces is cut off here: it is not control information
+        // (RFC 3550 6.4.1), so it is not a profile-specific extension either.
+        let (header, mut body) = read_packet(raw_packet)?;
         if header.packet_type != PacketType::ReceiverReport {
             return Err(Error::WrongType);
         }
+        let raw_packet_len = HEADER_LENGTH + body.len();
+        if raw_packet_len < (HEADER_LENGTH + SSRC_LENGTH) {
+            return Err(Error::PacketTooShort);
+        }
+        let raw_packet = &mut body;
 
         let ssrc = raw_packet.get_u32();
 
@@ -207,12 +216,12 @@ impl Unmarshal for ReceiverReport {
             reports.push(reception_report);
             offset += RECEPTION_REPORT_LENGTH;
         }
-        let profile_extensions = raw_packet.copy_to_bytes(raw_packet.remaining());
-        /*
-        if header.padding && raw_packet.has_remaining() {
-            raw_packet.advance(raw_packet.remaining());
+        // RFC 3550 6.4.1 / 6.4.2: what follows the report blocks is a profile-specific
+        // extension, a whole number of 32-bit words.
+        if !raw_packet.remaining().is_multiple_of(4) {
+            return Err(Error::WrongPadding);
         }
-         */
+        let profile_extensions = raw_packet.copy_to_bytes(raw_packet.remaining());
 
         Ok(ReceiverReport {
             ssrc,

@@ -27,13 +27,16 @@ pub struct FirEntry {
 pub struct FullIntraRequest {
     /// The SSRC of the requesting receiver.
     pub sender_ssrc: u32,
-    /// The media source being addressed.
+    /// The "SSRC of media source" of the feedback header, as a peer wrote it. RFC 5104 §4.3.1.2
+    /// does not use the field and has it sent as 0, so it is written as 0 whatever is here; the
+    /// sources the request is for are the entries of `fir`.
     pub media_ssrc: u32,
     /// One entry per SSRC an intra frame is requested from.
     pub fir: Vec<FirEntry>,
 }
 
 const FIR_OFFSET: usize = 8;
+const FIR_ENTRY_LENGTH: usize = 8;
 
 impl fmt::Display for FullIntraRequest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -92,26 +95,32 @@ impl MarshalSize for FullIntraRequest {
 impl Marshal for FullIntraRequest {
     /// Marshal encodes the FullIntraRequest
     fn marshal_to(&self, mut buf: &mut [u8]) -> Result<usize> {
+        // RFC 5104 4.3.1.1: "The FCI field MUST contain one or more FIR entries."
+        if self.fir.is_empty() {
+            return Err(Error::PacketTooShort);
+        }
         if buf.remaining_mut() < self.marshal_size() {
             return Err(Error::BufferTooShort);
         }
 
-        let h = self.header();
+        let h = header_for(
+            PacketType::PayloadSpecificFeedback,
+            FORMAT_FIR,
+            self.raw_size(),
+        )?;
         let n = h.marshal_to(buf)?;
         buf = &mut buf[n..];
 
         buf.put_u32(self.sender_ssrc);
-        buf.put_u32(self.media_ssrc);
+        // RFC 5104 4.3.1.2: the "SSRC of media source" is not used and SHALL be set to 0; the
+        // sources the request is for are in the FCI.
+        buf.put_u32(0);
 
         for fir in self.fir.iter() {
             buf.put_u32(fir.ssrc);
             buf.put_u8(fir.sequence_number);
             buf.put_u8(0);
             buf.put_u16(0);
-        }
-
-        if h.padding {
-            put_padding(buf, self.raw_size());
         }
 
         Ok(self.marshal_size())
@@ -125,49 +134,28 @@ impl Unmarshal for FullIntraRequest {
         Self: Sized,
         B: Buf,
     {
-        let raw_packet_len = raw_packet.remaining();
-        if raw_packet_len < FIR_MIN_OCTET_COUNT {
+        if raw_packet.remaining() < FIR_MIN_OCTET_COUNT {
             return Err(Error::PacketTooShort);
         }
 
-        let h = Header::unmarshal(raw_packet)?;
-        if (HEADER_LENGTH + 4 * (h.length as usize)) < FIR_MIN_OCTET_COUNT {
+        let (sender_ssrc, media_ssrc, mut fci) =
+            read_feedback(raw_packet, PacketType::PayloadSpecificFeedback, FORMAT_FIR)?;
+        // RFC 5104 4.3.1.1: one or more entries, the length being 2 + 2 * N.
+        if fci.is_empty() {
+            return Err(Error::PacketTooShort);
+        }
+        if !fci.len().is_multiple_of(FIR_ENTRY_LENGTH) {
             return Err(Error::InvalidHeader);
         }
 
-        if raw_packet_len < (HEADER_LENGTH + 4 * (h.length as usize)) {
-            return Err(Error::PacketTooShort);
-        }
-
-        if h.packet_type != PacketType::PayloadSpecificFeedback || h.count != FORMAT_FIR {
-            return Err(Error::WrongType);
-        }
-
-        let sender_ssrc = raw_packet.get_u32();
-        let media_ssrc = raw_packet.get_u32();
-
-        let mut i = HEADER_LENGTH + FIR_OFFSET;
-        let mut fir = vec![];
-        while i < HEADER_LENGTH + h.length as usize * 4 {
-            // An FIR entry is 8 bytes
-            if raw_packet.remaining() < 8 {
-                return Err(Error::PacketTooShort);
-            }
-
+        let mut fir = Vec::with_capacity(fci.len() / FIR_ENTRY_LENGTH);
+        while fci.has_remaining() {
             fir.push(FirEntry {
-                ssrc: raw_packet.get_u32(),
-                sequence_number: raw_packet.get_u8(),
+                ssrc: fci.get_u32(),
+                sequence_number: fci.get_u8(),
             });
-            raw_packet.get_u8();
-            raw_packet.get_u16();
-
-            i += 8;
-        }
-
-        if
-        /*h.padding &&*/
-        raw_packet.has_remaining() {
-            raw_packet.advance(raw_packet.remaining());
+            // 24 reserved bits, ignored on reception.
+            fci.advance(3);
         }
 
         Ok(FullIntraRequest {

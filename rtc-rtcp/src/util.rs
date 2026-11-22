@@ -22,6 +22,24 @@ pub(crate) fn put_padding(mut buf: &mut [u8], len: usize) {
     }
 }
 
+/// The three `Packet` methods that are the same for every packet type.
+macro_rules! packet_any {
+    ($t:ty) => {
+        fn as_any(&self) -> &dyn ::std::any::Any {
+            self
+        }
+
+        fn equal(&self, other: &dyn $crate::packet::Packet) -> bool {
+            other.as_any().downcast_ref::<$t>() == Some(self)
+        }
+
+        fn cloned(&self) -> Box<dyn $crate::packet::Packet> {
+            Box::new(self.clone())
+        }
+    };
+}
+pub(crate) use packet_any;
+
 // set_nbits_of_uint16 will truncate the value to size, left-shift to start_index position and set
 pub(crate) fn set_nbits_of_uint16(
     src: u16,
