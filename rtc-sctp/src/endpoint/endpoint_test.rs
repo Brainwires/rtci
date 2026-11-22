@@ -1445,8 +1445,9 @@ fn test_assoc_timed_reliability_bounds_time_spent_in_pending_queue() -> Result<(
     )?;
 
     // Shrink the congestion window so exactly one message fits in flight. The
-    // second write then has to wait in the pending queue behind the first.
-    pair.client_conn_mut(client_ch).cwnd = 1200;
+    // second write then has to wait in the pending queue behind the first: new DATA
+    // goes out only while less than cwnd is outstanding (RFC 9260 6.1 B).
+    pair.client_conn_mut(client_ch).cwnd = 1000;
 
     // Message 0 leaves immediately and occupies the whole window.
     sbuf[0..4].copy_from_slice(&0u32.to_be_bytes());
@@ -2116,8 +2117,14 @@ fn test_assoc_congestion_control_congestion_avoidance() -> Result<()> {
 
     establish_session_pair(&mut pair, client_ch, server_ch, si)?;
 
+    // The initial ssthresh is the peer's whole window, which a sender held back by that
+    // same window never grows past (RFC 9260 7.2.1: cwnd grows only when it is in full
+    // use). A lower threshold lets slow start hand over to congestion avoidance here.
+    let ssthresh: u32 = 16 * 1024;
     {
-        pair.client_conn_mut(client_ch).stats.reset();
+        let a = pair.client_conn_mut(client_ch);
+        a.ssthresh = ssthresh;
+        a.stats.reset();
         pair.server_conn_mut(server_ch).stats.reset();
     }
 
@@ -2185,11 +2192,9 @@ fn test_assoc_congestion_control_congestion_avoidance() -> Result<()> {
             a.cwnd > a.ssthresh,
             "should be in congestion avoidance mode"
         );
-        assert!(
-            a.ssthresh >= max_receive_buffer_size,
-            "{} should not be less than the initial size of 128KB {}",
-            a.ssthresh,
-            max_receive_buffer_size
+        assert_eq!(
+            ssthresh, a.ssthresh,
+            "no loss: the slow start threshold is as it was set"
         );
 
         debug!("nSACKs      : {}", a.stats.get_num_sacks());
@@ -2599,6 +2604,7 @@ fn test_assoc_abort() -> Result<()> {
                 code: PROTOCOL_VIOLATION,
                 ..Default::default()
             }],
+            tag_reflected: false,
         };
 
         let packet = pair
@@ -2769,6 +2775,7 @@ fn test_assoc_abort_bundled_after_error_chunk() -> Result<()> {
             code: PROTOCOL_VIOLATION,
             ..Default::default()
         }],
+        tag_reflected: false,
     };
 
     debug!("send ChunkError + ChunkAbort");
@@ -3032,8 +3039,9 @@ fn test_old_rtx_on_regular_acks() -> Result<()> {
         pair.time += Duration::from_millis(500);
     }
 
-    pair.drive_client();
-    pair.drive_server();
+    // What was lost is recovered one packet per round trip after the timeout (RFC 9260
+    // 7.2.3), not in one burst: run until it is.
+    pair.drive();
 
     let mut buf = vec![0u8; 3000];
 

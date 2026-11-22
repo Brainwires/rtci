@@ -337,7 +337,7 @@ fn test_assoc_create_new_stream() -> Result<()> {
     Ok(())
 }
 
-fn handle_init_test(name: &str, initial_state: AssociationState, expect_err: bool) {
+fn handle_init_test(name: &str, initial_state: AssociationState, unexpected: bool) {
     let mut a = create_association(TransportConfig::default());
     a.set_state(initial_state);
     let pkt = Packet {
@@ -358,12 +358,19 @@ fn handle_init_test(name: &str, initial_state: AssociationState, expect_err: boo
     };
     init.set_supported_extensions();
 
-    let result = a.handle_init(&pkt, &init);
-    if expect_err {
-        assert!(result.is_err(), "{} should fail", name);
+    let before = (a.peer_verification_tag, a.peer_last_tsn);
+    let result = a.handle_init(&pkt, &init, Instant::now());
+    assert!(result.is_ok(), "{} should be ok", name);
+    if unexpected {
+        // RFC 9260 5.2.2, 9.2: an INIT for an association that exists changes nothing.
+        assert_eq!(initial_state, a.state(), "{} keeps its state", name);
+        assert_eq!(
+            before,
+            (a.peer_verification_tag, a.peer_last_tsn),
+            "{} keeps its TCB",
+            name
+        );
         return;
-    } else {
-        assert!(result.is_ok(), "{} should be ok", name);
     }
     assert_eq!(
         if init.initial_tsn == 0 {
@@ -375,8 +382,9 @@ fn handle_init_test(name: &str, initial_state: AssociationState, expect_err: boo
         "{} should match",
         name
     );
-    assert_eq!(1001, a.my_max_num_outbound_streams, "{} should match", name);
-    assert_eq!(1002, a.my_max_num_inbound_streams, "{} should match", name);
+    // RFC 9260 5.1.1: own outbound streams against the peer's MIS, own inbound against its OS.
+    assert_eq!(1002, a.my_max_num_outbound_streams, "{} should match", name);
+    assert_eq!(1001, a.my_max_num_inbound_streams, "{} should match", name);
     assert_eq!(5678, a.peer_verification_tag, "{} should match", name);
     assert_eq!(
         pkt.common_header.source_port, a.destination_port,
@@ -468,7 +476,7 @@ fn test_assoc_negotiated_max_streams() -> Result<()> {
         ..Default::default()
     };
     init.set_supported_extensions();
-    a.handle_init(&pkt, &init)?;
+    a.handle_init(&pkt, &init, Instant::now())?;
 
     // `handle_init` narrowed the counts to 1001 outbound / 1002 inbound (see
     // `handle_init_test`), but the handshake is still in flight.
@@ -704,10 +712,12 @@ fn initial_cwnd_is_computed_safely_for_non_default_mtus() {
     // `(2 * mtu).clamp(4380, 4 * mtu)`, which panicked for effective MTUs
     // below ~1095 (`Ord::clamp` with min > max) and overflowed near
     // `u32::MAX` — reachable through `EndpointConfig::max_payload_size`
-    // and MTU-derived payload budgets. RFC 4960 §7.2.1:
-    // cwnd = min(4*MTU, max(2*MTU, 4380)); for a small MTU that is 4*MTU.
+    // and MTU-derived payload budgets. RFC 9260 7.2.1:
+    // cwnd = min(4 x PMDCS, max(2 x PMDCS, 4404)); for a small packet that is 4 x PMDCS,
+    // where PMDCS is the packet less the 12-byte common header.
     let a = create_association_with_mtu(100);
-    assert_eq!(a.cwnd, 4 * a.mtu);
+    assert_eq!(a.pmdcs, a.mtu - 12);
+    assert_eq!(a.cwnd, 4 * a.pmdcs);
 
     // Directly via the low-level `max_payload_size` setter path: the
     // effective-MTU reconstruction (`max_payload_size + 28`) must saturate
@@ -1814,9 +1824,11 @@ fn test_handle_forward_tsn_far_ahead_is_bounded() -> Result<()> {
     Ok(())
 }
 
-/// A SACK whose cumulative TSN acknowledges DATA this side never sent is ignored.
+/// A SACK whose cumulative TSN acknowledges DATA this side never sent is refused, and nothing
+/// is taken from it (the association is then aborted: RFC 9260 12.4,
+/// `a_sack_for_data_never_sent_aborts_the_association`).
 #[test]
-fn test_handle_sack_beyond_sent_tsns_is_ignored() -> Result<()> {
+fn test_handle_sack_beyond_sent_tsns_is_refused() -> Result<()> {
     let mut a = create_association(TransportConfig::default());
     a.set_state(AssociationState::Established);
     let before = a.cumulative_tsn_ack_point;
@@ -1826,7 +1838,7 @@ fn test_handle_sack_beyond_sent_tsns_is_ignored() -> Result<()> {
         gap_ack_blocks: vec![],
         duplicate_tsn: vec![],
     };
-    a.handle_sack(&sack, Instant::now())?;
+    assert!(a.handle_sack(&sack, Instant::now()).is_err());
     assert_eq!(
         a.cumulative_tsn_ack_point, before,
         "a SACK for never-sent DATA must not move the ack point"
@@ -1834,13 +1846,16 @@ fn test_handle_sack_beyond_sent_tsns_is_ignored() -> Result<()> {
     Ok(())
 }
 
-/// DATA on a stream id past the negotiated inbound stream count creates no stream.
+/// DATA on a stream id past the negotiated inbound stream count creates no stream and takes no
+/// receive window, but its TSN is recorded (RFC 9260 6.5: the chunk is acknowledged and then
+/// discarded), so the cumulative TSN moves past it.
 #[test]
-fn test_handle_data_beyond_stream_limit_is_discarded() -> Result<()> {
+fn test_handle_data_beyond_stream_limit_is_acknowledged_and_discarded() -> Result<()> {
     let mut a = create_association(TransportConfig::default());
     a.my_max_num_inbound_streams = 16;
+    let tsn = a.peer_last_tsn.wrapping_add(1);
     let d = ChunkPayloadData {
-        tsn: a.peer_last_tsn.wrapping_add(1),
+        tsn,
         stream_identifier: 1000,
         beginning_fragment: true,
         ending_fragment: true,
@@ -1852,6 +1867,9 @@ fn test_handle_data_beyond_stream_limit_is_discarded() -> Result<()> {
         !a.streams.contains_key(&1000),
         "a stream past the negotiated limit was created"
     );
+    assert_eq!(tsn, a.peer_last_tsn, "the chunk is acknowledged");
+    assert!(a.payload_queue.is_empty(), "nothing is kept of it");
+    assert_eq!(0, a.bytes_in_reassembly_queues());
     Ok(())
 }
 
@@ -2142,3 +2160,21 @@ mod recovery_test;
 
 #[path = "stream_reset_test.rs"]
 mod stream_reset_test;
+
+#[path = "robustness_test.rs"]
+mod robustness_test;
+
+#[path = "handshake_teardown_test.rs"]
+mod handshake_teardown_test;
+
+#[path = "heartbeat_test.rs"]
+mod heartbeat_test;
+
+#[path = "congestion_control_test.rs"]
+mod congestion_control_test;
+
+#[path = "partial_reliability_test.rs"]
+mod partial_reliability_test;
+
+#[path = "stream_reconfig_test.rs"]
+mod stream_reconfig_test;

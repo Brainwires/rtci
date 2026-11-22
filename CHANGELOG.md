@@ -985,6 +985,174 @@ Each bug below was confirmed by a failing test first (`rtc-rtcp/tests/audit_bugs
   strictly and written back byte for byte, and a deterministic mutation test of the parse and
   marshal fixed point. Fuzzing: `description_roundtrip` checks that fixed point (strict and
   lenient) and reads every typed accessor; new target `attribute_parse`.
+- **sctp**: Gap Ack Blocks are offsets in serial number arithmetic (RFC 9260 section 3.3.4).
+  Once the received TSNs had wrapped past zero and the cumulative TSN had not, a SACK named a
+  TSN the peer never sent, and a peer running this engine closed the association over it.
+- **sctp**: the stream counts are negotiated as RFC 9260 section 5.1.1 says: own outbound
+  streams against the peer's inbound count, own inbound streams against the peer's outbound
+  count. They were paired outbound with outbound, so DATA on a stream the peer was entitled to
+  use was thrown away. `open_stream` refuses a stream past the negotiated outbound count.
+- **sctp**: a chunk of an unrecognized type is handled by the upper two bits of its type (RFC
+  9260 section 3.2: stop or skip, with or without an ERROR "Unrecognized Chunk Type") and an
+  unrecognized INIT / INIT ACK parameter by the upper two bits of its (section 3.2.1; reported
+  in the INIT ACK, or in an ERROR bundled with the COOKIE ECHO). Either one used to drop the
+  whole packet: DATA bundled with a PAD chunk was lost, and a peer whose INIT carried
+  Supported Address Types, an address or a Cookie Preservative could not connect. HEARTBEAT
+  ACK is parsed. INIT and INIT ACK chunk flags are ignored, and a partial chunk at the end of
+  a packet no longer costs the complete chunks before it (section 6.10).
+- **sctp**: an established association survives a late copy of the peer's INIT (RFC 9260
+  section 5.2.2: it is answered with an INIT ACK and changes nothing) and an INIT or INIT ACK
+  that fails its validity checks (sections 3.3.2, 3.3.3: the packet is discarded). Both closed
+  the association with a transport error. An INIT in SHUTDOWN-ACK-SENT repeats the SHUTDOWN
+  ACK (section 9.2).
+- **sctp**: an association that has ended processes nothing more (RFC 9260 sections 3.3.7,
+  9.1): chunks after an ABORT in its packet, and later packets, are discarded. A copy of the
+  COOKIE ECHO re-established an aborted association and reported `Connected` again. The
+  endpoint stops routing to an ended association and gives its place to the next one, so with
+  one association allowed (SCTP over DTLS) a peer can connect again.
+- **sctp**: an accepting association that never gets a COOKIE ECHO ends after 120 seconds
+  (`HandshakeFailed`), and a new INIT from the same peer restarts it. It lasted for ever and
+  every later INIT with another Initiate Tag was refused.
+- **sctp**: DATA on a stream the peer may not use is acknowledged and answered with ERROR
+  "Invalid Stream Identifier" (RFC 9260 section 6.5). It was dropped unrecorded: the
+  cumulative TSN could never pass it and the peer retransmitted it for ever.
+- **sctp**: at most 32767 TSNs are outstanding at a time, so the ordered messages of a stream
+  in flight never span the Stream Sequence Number space (RFC 9260 section 6.1). With small
+  messages and a large window the receiver could not tell SSN n from n + 65536 after a loss.
+- **sctp**: a SHUTDOWN (or SHUTDOWN ACK) that reaches its retransmission limit ends the
+  association with `TimedOut` (RFC 9260 section 9.2); it stayed in SHUTDOWN-SENT with no
+  timer running.
+- **sctp**: error causes are read and written with their padding (RFC 9260 section 3.3.10),
+  so the cause after one of odd length is no longer read from the wrong offset.
+- **sctp**: a zero-length write is an error and uses no Stream Sequence Number (RFC 9260
+  section 3.3.1). It was accepted, sent nothing, and held back every later ordered message of
+  the stream at the receiver.
+- **sctp**: any Payload Protocol Identifier is carried unchanged (RFC 9260 section 3.3.1).
+  Values other than the five WebRTC ones were received as `Unknown` and sent as 58.
+- **sctp**: the Forward-TSN-Supported parameter (RFC 3758 section 3.3) is honoured in an INIT
+  as it was in an INIT ACK.
+
+- **sctp**: the association checks the Verification Tag of what it receives (RFC 9260
+  sections 8.5, 8.5.1): its own tag, 0 for a lone INIT, and for ABORT and SHUTDOWN COMPLETE
+  its own tag or the peer's with the T bit. The T bit was never read, and nothing but the
+  endpoint's routing looked at the tag. A packet that carries an ABORT is not answered.
+- **sctp**: packets that belong to no association are handled as RFC 9260 section 8.4 says: a
+  SHUTDOWN ACK is answered with SHUTDOWN COMPLETE and anything else that calls for it with
+  ABORT, the tag reflected and the T bit set; `Endpoint::poll_transmit` returns the answers.
+  A SHUTDOWN ACK received while an association is being set up is answered the same way.
+- **sctp**: ABORT is sent where RFC 9260 asks for one: an INIT the endpoint cannot accept
+  (to its Initiate Tag), an INIT or INIT ACK with invalid values, a Host Name Address, an INIT
+  ACK without a State Cookie, a SACK that acknowledges a TSN never sent ("Protocol
+  Violation"). These were dropped or closed the association without a word to the peer, and
+  a SACK with a Cumulative TSN Ack past the last TSN sent was ignored.
+- **sctp**: a State Cookie has a lifetime (`TransportConfig::with_valid_cookie_life`, 60 s):
+  echoed later it is refused with "Stale Cookie", and the side that receives that error in
+  COOKIE-ECHOED starts over with a new INIT (RFC 9260 sections 5.1.5, 5.2.6). A COOKIE ECHO
+  with a cookie that was not sent, or between other ports, has its whole packet discarded;
+  the cookie of the association that exists is acknowledged again in every state.
+- **sctp**: an INIT that crosses this side's own is answered without touching the TCB, and
+  the peer's tag is taken when the cookie comes back (RFC 9260 sections 5.2.1, 5.2.4 B). It
+  overwrote the peer's tag, ports, window and stream counts at once.
+- **sctp**: the first DATA chunk of an association and DATA bundled with the COOKIE ECHO are
+  acknowledged at once (RFC 9260 sections 5.1, 5.1.5).
+- **sctp**: shutdown (RFC 9260 section 9.2): DATA received in SHUTDOWN-SENT is answered at
+  once with a SACK and the SHUTDOWN again; a packet from the peer restarts the SHUTDOWN
+  retransmissions; a SHUTDOWN received in SHUTDOWN-PENDING is taken; T5-shutdown-guard (300
+  s) aborts a shutdown that never finishes; SHUTDOWN is retransmitted at most 10 times by
+  default (`TimerConfig::max_t2_shutdown_retrans`, it was unlimited).
+
+- **sctp**: an established association whose path is idle sends a HEARTBEAT every RTO +
+  HB.interval (30 s, `TransportConfig::with_heartbeat_interval`; RFC 9260 section 8.3). The
+  HEARTBEAT ACK measures the round trip, so an idle association no longer keeps a stale RTO,
+  and a HEARTBEAT without an answer counts against the peer. None was ever sent.
+- **sctp**: the peer is given up after Association.Max.Retrans (10) consecutive T3-rtx
+  expiries or unanswered HEARTBEATs (RFC 9260 section 8.1), with `TimedOut`; past
+  Path.Max.Retrans (5) the path is reported inactive (`Event::PathInactive`, then
+  `Event::PathActive` when it answers again). `TimerConfig::max_t3_rtx_retrans` was unlimited
+  by default, so SCTP itself never declared a peer unreachable.
+
+- **sctp**: congestion control follows RFC 9260 section 7.2. The initial cwnd is min(4 x
+  PMDCS, max(2 x PMDCS, 4404)) (4344 over IPv6). In slow start a SACK grows cwnd by at most
+  one packet, and only when cwnd was in full use (a single SACK could double it); new DATA is
+  sent while less than cwnd is outstanding, so the last chunk may cross it (section 6.1 B).
+  In congestion avoidance `partial_bytes_acked` counts every SACK, is capped while cwnd is not
+  in full use, and starts over when everything is acknowledged. Fast Recovery lasts until all
+  that was outstanding at the loss is acknowledged (it ended at the highest TSN newly
+  acknowledged, so a second loss in the window cut cwnd again); a Fast Retransmit of the
+  first outstanding chunk restarts T3-rtx, and chunks that do not fit its one packet wait
+  for the window. An idle cwnd decays, once per RTO, to no less than 4 x PMDCS.
+- **sctp**: after a T3-rtx expiry one packet is in flight until it is acknowledged (RFC 9260
+  sections 6.3.3, 7.2.3). Retransmissions were bounded by cwnd per call, and each poll sent
+  another window's worth: everything outstanding was retransmitted at once.
+- **sctp**: a SACK announces the receive window when the application drains a window that
+  was advertised as closed (RFC 9260 section 6.2). Reading never sent a SACK, so a sender
+  stopped by a_rwnd 0 waited for its next window probe, a retransmission timeout later.
+- **sctp**: a DATA chunk dropped for lack of receive window is answered with a SACK at once,
+  and a window smaller than a packet is advertised as closed (RFC 9260 section 6.2, silly
+  window syndrome avoidance).
+
+- **sctp**: PR-SCTP is announced with the Forward-TSN-Supported parameter (RFC 3758 section
+  3.3) in INIT and INIT ACK, beside chunk 192 in Supported Extensions; a peer that reports
+  the parameter as unrecognized gets no FORWARD TSN.
+- **sctp**: a received FORWARD TSN is applied whatever this side's own setting for the stream
+  (RFC 3758 section 3.6). On a stream this side sends ordered, abandoned unordered fragments
+  stayed in the receive buffer for the life of the stream; on a stream this side sends
+  unordered, the stream sequence numbers were ignored and ordered data stayed held back.
+- **sctp**: an ordered message whose lifetime ran out while it waited for the window is not
+  sent (RFC 3758 section 4.1); only unordered ones were dropped.
+- **sctp**: a FORWARD TSN fits one packet (RFC 3758 section 3.5, C4): with abandoned messages
+  on more streams than fit, it covers the TSNs whose streams do and the next one goes on.
+
+- **sctp**: the Outgoing SSN Reset Request sent in answer to a peer's reset is retransmitted
+  (RFC 6525 section 5.1.1); lost once, the peer's data channel stayed closing for good. No
+  request is given up after five timer expiries any more, and "In progress" answers restart
+  its timer without counting (section 5.2.7).
+- **sctp**: an Outgoing SSN Reset Request without stream numbers resets every stream (RFC
+  6525 section 5.2.2); it reset none and was answered "Success - Performed".
+- **sctp**: the re-configuration requests that are not performed (Incoming SSN Reset, SSN/TSN
+  Reset, Add Streams) are answered "Denied" (RFC 6525 section 5.2.1) instead of not at all.
+
+### Features
+
+- **sctp**: `Stream::write_sctp_with_ppid` and `Chunks::ppid` for a Payload Protocol
+  Identifier `PayloadProtocolIdentifier` has no name for; `PayloadProtocolIdentifier::number`;
+  `ChunkPayloadData::ppid`; `Association::verification_tag`.
+- **sctp**: `Endpoint::poll_transmit` (the endpoint's answers to out-of-the-blue packets);
+  `TransportConfig::with_valid_cookie_life` / `valid_cookie_life`.
+- **sctp**: `TransportConfig::with_heartbeat_interval` / `heartbeat_interval`,
+  `Association::set_heartbeat_interval`, `Event::PathInactive`, `Event::PathActive`.
+- **sctp**: `Association::on_path_change` restarts congestion control and the RTO when the
+  transport underneath moves to another path (RFC 9260 section 7.2.5; for the peer
+  connection to call when ICE selects another candidate pair).
+  `Association::congestion_window`, `slow_start_threshold`, `rto`.
+- **sctp**: `TransportConfig::with_slow_start_growth_limit` (L of RFC 9260 section 7.2.1,
+  default 1), `with_max_burst` (Max.Burst, off by default), `with_sack_delay` (200 ms by
+  default, at most 500 ms).
+- **sctp**: `Association::partial_reliability` (whether PR-SCTP is in use),
+  `TransportConfig::with_partial_reliability`.
+- **fuzz**: `rtc-sctp` targets `association_handle_chunks` (an established association fed
+  chunks, timers running) and `chunk_chunk_unknown_unmarshal`.
+
+### Breaking Changes
+
+- **sctp**: `PayloadProtocolIdentifier::Unknown` is sent as 0 ("not specified", RFC 9260
+  section 3.3.1), not 58. `Chunks` has a new public field, `ppid`.
+- **sctp**: `Stream::write*` with an empty message returns an error.
+- **sctp**: `Association::open_stream` fails for a stream id at or past the negotiated
+  outbound stream count.
+- **sctp**: `TimerConfig::default().max_t2_shutdown_retrans` is 10, not unlimited.
+- **sctp**: `TimerConfig::default().max_t3_rtx_retrans` is 10, not unlimited: an association
+  whose peer answers nothing for about five minutes ends with `TimedOut`. `usize::MAX` keeps
+  the old behaviour.
+- **sctp**: an established association sends HEARTBEATs when idle and so always has a timer
+  running; `with_heartbeat_interval(None)` turns them off.
+- **sctp**: slow start grows the congestion window by one packet per SACK, as the RFC has
+  it, not by everything the SACK acknowledges. A receiver that acknowledges many packets with
+  one SACK slows the sender's ramp; `with_slow_start_growth_limit` sets a larger L.
+- **sctp**: the retransmissions after a timeout are paced by the congestion window (one
+  packet, then slow start) instead of leaving at once.
+- **sctp**: a SACK for a TSN never sent, and an INIT ACK without a State Cookie, end the
+  association with an ABORT (`TransportError`, `HandshakeFailed`).
 
 ## [0.22.0+brainwires.5] - 2026-11-20
 

@@ -100,18 +100,18 @@ fn congestion_window_growth_saturates() -> Result<()> {
         .write_sctp(now, &Bytes::from(vec![0; 100]), ppi)?;
     assert!(!a.pending_queue.is_empty());
 
-    // Slow start: cwnd <= ssthresh.
+    // Slow start: cwnd <= ssthresh, and in full use.
     a.ssthresh = u32::MAX;
     a.cwnd = u32::MAX - 10;
     a.in_fast_recovery = false;
-    a.on_cumulative_tsn_ack_point_advanced(i64::from(u32::MAX), now);
+    a.grow_congestion_window(i64::from(u32::MAX), u32::MAX, true);
     assert_eq!(u32::MAX, a.cwnd);
 
     // Congestion avoidance: cwnd > ssthresh.
     a.ssthresh = 1;
     a.cwnd = u32::MAX - 10;
     a.partial_bytes_acked = u32::MAX - 10;
-    a.on_cumulative_tsn_ack_point_advanced(i64::MAX, now);
+    a.grow_congestion_window(i64::MAX, u32::MAX, true);
     assert_eq!(u32::MAX, a.cwnd);
     Ok(())
 }

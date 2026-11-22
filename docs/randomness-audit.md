@@ -25,6 +25,9 @@
 | Verification tag / association ID | Unpredictable nonzero SCTP verification tag | Generated with `rand`'s thread-local CSPRNG and rejected if zero. `rtc-sctp` remains independently usable and does not otherwise need an RTC crypto provider. |
 | Initial TSN | Unpredictable starting sequence number | Generated with `rand`'s thread-local CSPRNG and adjusted to be nonzero. Provider propagation would add ownership solely for this field. |
 | State-cookie bytes | Unpredictable 256-bit challenge echoed by the peer | Generated with `rand`'s thread-local CSPRNG. Received cookies are compared in constant time. The current in-memory cookie design does not encrypt, authenticate, or serialize server state into the value. |
+| Initiate Tag of the INIT ACK that answers an INIT for an existing association (RFC 9260 5.2.2) | Unpredictable nonzero tag, never used by the association | Generated with `rand`'s thread-local CSPRNG and adjusted to be nonzero. |
+| HEARTBEAT nonce | 64 bits that tie a HEARTBEAT ACK to the HEARTBEAT sent, so a forged acknowledgement cannot clear the error count or feed the RTT estimate | Generated with `rand`'s thread-local CSPRNG; compared in constant time. |
+| HEARTBEAT timer jitter (RFC 9260 8.3) | None: it spreads HEARTBEATs within one RTO | Drawn from `rand`. Tests assert the range, not the value. |
 | Retransmission counters, sequence arithmetic, and timers | Derived protocol state | Deterministic values derived from negotiated state and elapsed time; no random source is appropriate. |
 | `ParamRandom` | Peer-provided extension negotiation input | Parsed from the peer rather than generated locally. It is not an application randomness boundary. |
 | Unit-test packets and fixtures | Reproducible protocol inputs | Fixed constants remain intentional. Tests for generated values check invariants rather than depending on exact output. |

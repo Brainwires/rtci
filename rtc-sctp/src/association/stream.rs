@@ -135,6 +135,9 @@ impl Stream<'_> {
             let drained = !s.reassembly_queue.is_readable();
             self.association
                 .reindex_stream(self.stream_identifier, bytes_before);
+            if chunks.is_some() {
+                self.association.on_receive_buffer_drained();
+            }
             if drained {
                 self.association
                     .retry_deferred_resets(self.stream_identifier);
@@ -155,7 +158,16 @@ impl Stream<'_> {
         p: &Bytes,
         ppi: PayloadProtocolIdentifier,
     ) -> Result<usize> {
-        self.write_source(now, &mut BytesChunk::new(p), ppi)
+        self.write_source(now, &mut BytesChunk::new(p), ppi, ppi.number())
+    }
+
+    /// Sends a message with any Payload Protocol Identifier (RFC 9260 section 3.3.1: the
+    /// value is the application's and SCTP passes it through unchanged). The receiver reads
+    /// it from [`Chunks::ppid`].
+    ///
+    /// [`PayloadProtocolIdentifier`] names only the WebRTC values; this takes the number.
+    pub fn write_sctp_with_ppid(&mut self, now: Instant, p: &Bytes, ppid: u32) -> Result<usize> {
+        self.write_source(now, &mut BytesChunk::new(p), ppid.into(), ppid)
     }
 
     /// Send data on the given stream.
@@ -176,16 +188,13 @@ impl Stream<'_> {
         data: &[u8],
         ppi: PayloadProtocolIdentifier,
     ) -> Result<usize> {
-        self.write_source(now, &mut ByteSlice::from_slice(data), ppi)
+        self.write_source(now, &mut ByteSlice::from_slice(data), ppi, ppi.number())
     }
 
     /// write writes len(p) bytes from p with the default Payload Protocol Identifier
     pub fn write_chunk(&mut self, now: Instant, p: &Bytes) -> Result<usize> {
-        self.write_source(
-            now,
-            &mut BytesChunk::new(p),
-            self.get_default_payload_type()?,
-        )
+        let ppi = self.get_default_payload_type()?;
+        self.write_source(now, &mut BytesChunk::new(p), ppi, ppi.number())
     }
 
     /// Send an owned [`Bytes`] on the stream with a specific payload protocol.
@@ -202,7 +211,7 @@ impl Stream<'_> {
         data: &Bytes,
         ppi: PayloadProtocolIdentifier,
     ) -> Result<usize> {
-        self.write_source(now, &mut BytesChunk::new(data), ppi)
+        self.write_source(now, &mut BytesChunk::new(data), ppi, ppi.number())
     }
 
     /// Send data on the given stream
@@ -212,11 +221,8 @@ impl Stream<'_> {
     /// it will not count this chunk as fully written. However
     /// the chunk will be advanced and contain only non-written data after the call.
     pub fn write_chunks(&mut self, now: Instant, data: &mut [Bytes]) -> Result<usize> {
-        self.write_source(
-            now,
-            &mut BytesArray::from_chunks(data),
-            self.get_default_payload_type()?,
-        )
+        let ppi = self.get_default_payload_type()?;
+        self.write_source(now, &mut BytesArray::from_chunks(data), ppi, ppi.number())
     }
 
     /// write_source writes BytesSource to the DTLS connection
@@ -225,9 +231,20 @@ impl Stream<'_> {
         now: Instant,
         source: &mut B,
         ppi: PayloadProtocolIdentifier,
+        ppid: u32,
     ) -> Result<usize> {
         if !self.is_writable() {
             return Err(Error::ErrStreamClosed);
+        }
+
+        // RFC 9260 3.3.1: a DATA chunk carries at least one byte of user data, so there is no
+        // empty user message. Refused before anything is consumed: an empty write used to
+        // take a Stream Sequence Number and send nothing, and the receiver waited for that
+        // number for ever.
+        if source.remaining() == 0 {
+            return Err(Error::OtherSctpErr(
+                "an empty user message cannot be sent (RFC 9260 3.3.1)".into(),
+            ));
         }
 
         if source.remaining() > self.association.max_message_size() as usize {
@@ -247,7 +264,7 @@ impl Stream<'_> {
         let (p, _) = source.pop_chunk(self.association.max_message_size() as usize);
 
         if let Some(s) = self.association.streams.get_mut(&self.stream_identifier) {
-            let (is_buffered_amount_high, chunks) = s.packetize(now, &p, ppi);
+            let (is_buffered_amount_high, chunks) = s.packetize(now, &p, ppi, ppid);
 
             if is_buffered_amount_high {
                 trace!("StreamEvent::BufferedAmountHigh");
@@ -529,21 +546,15 @@ impl StreamState {
         self.reassembly_queue.push(pd.clone())
     }
 
+    /// RFC 3758 3.6: what the peer's FORWARD TSN says is applied whatever this side's own
+    /// setting for the stream: `unordered` is how this side sends, not how the peer does.
     pub(crate) fn handle_forward_tsn_for_ordered(&mut self, ssn: u16) {
-        if self.unordered {
-            return; // unordered chunks are handled by handleForwardUnordered method
-        }
-
         // Remove all chunks older than or equal to the new TSN from
         // the reassembly_queue.
         self.reassembly_queue.forward_tsn_for_ordered(ssn);
     }
 
     pub(crate) fn handle_forward_tsn_for_unordered(&mut self, new_cumulative_tsn: u32) {
-        if !self.unordered {
-            return; // ordered chunks are handled by handleForwardTSNOrdered method
-        }
-
         // Remove all chunks older than or equal to the new TSN from
         // the reassembly_queue.
         self.reassembly_queue
@@ -555,6 +566,7 @@ impl StreamState {
         now: Instant,
         raw: &Bytes,
         ppi: PayloadProtocolIdentifier,
+        ppid: u32,
     ) -> (bool, Vec<ChunkPayloadData>) {
         let mut i = 0;
         let mut remaining = raw.len();
@@ -599,6 +611,7 @@ impl StreamState {
                 ending_fragment: remaining - fragment_size == 0,
                 immediate_sack: false,
                 payload_type: ppi,
+                payload_protocol_id: ppid,
                 stream_sequence_number: self.sequence_number,
                 ..Default::default()
             };

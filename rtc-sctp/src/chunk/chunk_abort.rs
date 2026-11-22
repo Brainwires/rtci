@@ -25,6 +25,9 @@ use std::fmt;
 #[derive(Default, Debug, Clone)]
 pub(crate) struct ChunkAbort {
     pub(crate) error_causes: Vec<ErrorCause>,
+    /// The T bit (RFC 9260 3.3.7): the sender had no TCB and filled in the Verification Tag
+    /// of the packet it answers ("reflected") instead of the receiver's own tag.
+    pub(crate) tag_reflected: bool,
 }
 
 /// String makes chunkAbort printable
@@ -44,7 +47,7 @@ impl Chunk for ChunkAbort {
     fn header(&self) -> ChunkHeader {
         ChunkHeader {
             typ: CT_ABORT,
-            flags: 0,
+            flags: u8::from(self.tag_reflected),
             value_length: self.value_length() as u16,
         }
     }
@@ -58,22 +61,23 @@ impl Chunk for ChunkAbort {
 
         let mut error_causes = vec![];
         let mut offset = CHUNK_HEADER_SIZE;
-        while offset + 4 <= raw.len() {
-            let e = ErrorCause::unmarshal(
-                &raw.slice(offset..CHUNK_HEADER_SIZE + header.value_length()),
-            )?;
-            offset += e.length();
+        let end = CHUNK_HEADER_SIZE + header.value_length();
+        while offset + ERROR_CAUSE_HEADER_LENGTH <= end {
+            let e = ErrorCause::unmarshal(&raw.slice(offset..end))?;
+            // RFC 9260 3.3.10: causes are padded to four bytes, as parameters are.
+            offset += e.length() + get_padding_size(e.length());
             error_causes.push(e);
         }
 
-        Ok(ChunkAbort { error_causes })
+        Ok(ChunkAbort {
+            error_causes,
+            tag_reflected: header.flags & 1 != 0,
+        })
     }
 
     fn marshal_to(&self, buf: &mut BytesMut) -> Result<usize> {
         self.header().marshal_to(buf)?;
-        for ec in &self.error_causes {
-            buf.extend_from_slice(&ec.marshal());
-        }
+        marshal_error_causes(&self.error_causes, buf);
         Ok(buf.len())
     }
 
@@ -82,9 +86,7 @@ impl Chunk for ChunkAbort {
     }
 
     fn value_length(&self) -> usize {
-        self.error_causes
-            .iter()
-            .fold(0, |length, ec| length + ec.length())
+        error_causes_length(&self.error_causes)
     }
 
     fn as_any(&self) -> &dyn Any {

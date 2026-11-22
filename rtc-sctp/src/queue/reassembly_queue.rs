@@ -20,6 +20,10 @@ pub struct Chunks {
     pub ssn: u16,
     /// The payload protocol identifier shared by every fragment of this message.
     pub ppi: PayloadProtocolIdentifier,
+    /// The Payload Protocol Identifier as the number the peer sent (RFC 9260 3.3.1): the
+    /// value of `ppi` when that has a name for it, and the only way to tell apart the values
+    /// it calls `Unknown`.
+    pub ppid: u32,
     /// The fragments, in order, that make up one complete message.
     pub chunks: Vec<ChunkPayloadData>,
     offset: usize,
@@ -126,6 +130,7 @@ impl Chunks {
         Chunks {
             ssn,
             ppi,
+            ppid: chunks.first().map_or(ppi.number(), ChunkPayloadData::ppid),
             chunks,
             offset: 0,
             index: 0,
@@ -140,6 +145,9 @@ impl Chunks {
         let idx = self.chunks.partition_point(|c| sna32lt(c.tsn, chunk.tsn));
         if idx < self.chunks.len() && self.chunks[idx].tsn == chunk.tsn {
             return false;
+        }
+        if self.chunks.is_empty() {
+            self.ppid = chunk.ppid();
         }
         self.chunks.insert(idx, chunk);
 

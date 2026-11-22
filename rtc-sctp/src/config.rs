@@ -3,6 +3,7 @@ use crate::util::{AssociationIdGenerator, RandomAssociationIdGenerator};
 use crate::TimerConfig;
 use std::fmt;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// MTU for inbound packet (from DTLS)
 pub(crate) const RECEIVE_MTU: usize = 8192;
@@ -76,6 +77,12 @@ pub struct TransportConfig {
     max_num_inbound_streams: u16,
     timer_config: TimerConfig,
     stream_scheduler: StreamScheduler,
+    valid_cookie_life: Duration,
+    heartbeat_interval: Option<Duration>,
+    slow_start_growth_limit: u32,
+    max_burst: Option<u32>,
+    sack_delay: Duration,
+    partial_reliability: bool,
 }
 
 impl Default for TransportConfig {
@@ -90,11 +97,103 @@ impl Default for TransportConfig {
             max_num_inbound_streams: u16::MAX,
             timer_config: TimerConfig::default(),
             stream_scheduler: StreamScheduler::default(),
+            valid_cookie_life: Duration::from_secs(60),
+            heartbeat_interval: Some(Duration::from_secs(30)),
+            slow_start_growth_limit: 1,
+            max_burst: None,
+            sack_delay: Duration::from_millis(200),
+            partial_reliability: true,
         }
     }
 }
 
 impl TransportConfig {
+    /// Sets L of RFC 9260 section 7.2.1: in slow start one SACK grows the congestion window
+    /// by at most the bytes it acknowledges and at most L packets (L x PMDCS). The RFC says L
+    /// SHOULD be 1 and MAY be larger (RFC 3465 discusses the choice): 1 is the default. A
+    /// receiver that acknowledges many packets with one SACK, as one that reads its socket in
+    /// batches does, makes a sender with L = 1 leave slow start slowly; a larger L restores
+    /// the faster ramp at the price the RFC names (a burst after such a SACK, and trust in
+    /// the receiver not to split its acknowledgements). Zero counts as one.
+    pub fn with_slow_start_growth_limit(mut self, value: u32) -> Self {
+        self.slow_start_growth_limit = value.max(1);
+        self
+    }
+
+    /// L, see [`with_slow_start_growth_limit`](Self::with_slow_start_growth_limit).
+    pub fn slow_start_growth_limit(&self) -> u32 {
+        self.slow_start_growth_limit
+    }
+
+    /// Whether PR-SCTP (RFC 3758) is announced to the peer and used. On by default, as WebRTC
+    /// data channels need it (RFC 8831 section 6.1). Off, neither chunk 192 nor the
+    /// Forward-TSN-Supported parameter is announced, no message is ever abandoned, and a
+    /// FORWARD TSN from the peer is answered as an unrecognized chunk.
+    pub fn with_partial_reliability(mut self, value: bool) -> Self {
+        self.partial_reliability = value;
+        self
+    }
+
+    /// See [`with_partial_reliability`](Self::with_partial_reliability).
+    pub fn partial_reliability(&self) -> bool {
+        self.partial_reliability
+    }
+
+    /// Sets SACK.Delay (RFC 9260 sections 6.2 and 16): how long the acknowledgement of a DATA
+    /// chunk may wait for a second one. Defaults to 200 ms. The RFC forbids more than 500 ms,
+    /// so a longer delay is taken as 500 ms.
+    pub fn with_sack_delay(mut self, value: Duration) -> Self {
+        self.sack_delay = value.min(Duration::from_millis(500));
+        self
+    }
+
+    /// SACK.Delay, see [`with_sack_delay`](Self::with_sack_delay).
+    pub fn sack_delay(&self) -> Duration {
+        self.sack_delay
+    }
+
+    /// Sets Max.Burst (RFC 9260 sections 6.1 D and 16, where the recommended value is 4):
+    /// before DATA is sent the congestion window is brought down to what is outstanding plus
+    /// this many packets. `None`, the default, applies no such limit: an owner that
+    /// acknowledges in batches would have its peer's window cut on every SACK.
+    pub fn with_max_burst(mut self, value: Option<u32>) -> Self {
+        self.max_burst = value;
+        self
+    }
+
+    /// Max.Burst, see [`with_max_burst`](Self::with_max_burst).
+    pub fn max_burst(&self) -> Option<u32> {
+        self.max_burst
+    }
+
+    /// Sets HB.interval (RFC 9260 8.3, 16): an association whose path has been idle for an RTO
+    /// plus this long sends a HEARTBEAT, which measures the round trip and shows that the peer
+    /// is still there. One left unanswered counts toward
+    /// [`TimerConfig::max_t3_rtx_retrans`](crate::TimerConfig). Defaults to 30 seconds; `None`
+    /// sends no HEARTBEAT.
+    pub fn with_heartbeat_interval(mut self, value: Option<Duration>) -> Self {
+        self.heartbeat_interval = value;
+        self
+    }
+
+    /// HB.interval, see [`with_heartbeat_interval`](Self::with_heartbeat_interval).
+    pub fn heartbeat_interval(&self) -> Option<Duration> {
+        self.heartbeat_interval
+    }
+
+    /// Sets Valid.Cookie.Life: how long after an INIT ACK its State Cookie is accepted in a
+    /// COOKIE ECHO (RFC 9260 5.1.3, 16). Later it is refused with a "Stale Cookie" error and
+    /// the peer starts again. Defaults to 60 seconds.
+    pub fn with_valid_cookie_life(mut self, value: Duration) -> Self {
+        self.valid_cookie_life = value;
+        self
+    }
+
+    /// Valid.Cookie.Life, see [`with_valid_cookie_life`](Self::with_valid_cookie_life).
+    pub fn valid_cookie_life(&self) -> Duration {
+        self.valid_cookie_life
+    }
+
     /// Sets this endpoint's SCTP port, the source port of what it sends (RFC 8841 5: its own
     /// `a=sctp-port`). Defaults to 5000.
     pub fn with_sctp_port(mut self, value: u16) -> Self {

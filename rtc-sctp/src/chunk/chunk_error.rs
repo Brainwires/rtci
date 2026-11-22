@@ -42,6 +42,26 @@ impl fmt::Display for ChunkError {
     }
 }
 
+impl ChunkError {
+    /// The cause codes in the value of an ERROR chunk, as far as the causes are sound.
+    pub(crate) fn causes(value: &Bytes) -> Vec<ErrorCauseCode> {
+        let mut out = vec![];
+        let mut offset = 0;
+        while offset + ERROR_CAUSE_HEADER_LENGTH <= value.len() {
+            let length = u16::from_be_bytes([value[offset + 2], value[offset + 3]]) as usize;
+            if length < ERROR_CAUSE_HEADER_LENGTH || offset + length > value.len() {
+                break;
+            }
+            out.push(ErrorCauseCode(u16::from_be_bytes([
+                value[offset],
+                value[offset + 1],
+            ])));
+            offset += length + get_padding_size(length);
+        }
+        out
+    }
+}
+
 impl Chunk for ChunkError {
     fn header(&self) -> ChunkHeader {
         ChunkHeader {
@@ -60,11 +80,11 @@ impl Chunk for ChunkError {
 
         let mut error_causes = vec![];
         let mut offset = CHUNK_HEADER_SIZE;
-        while offset + 4 <= raw.len() {
-            let e = ErrorCause::unmarshal(
-                &raw.slice(offset..CHUNK_HEADER_SIZE + header.value_length()),
-            )?;
-            offset += e.length();
+        let end = CHUNK_HEADER_SIZE + header.value_length();
+        while offset + ERROR_CAUSE_HEADER_LENGTH <= end {
+            let e = ErrorCause::unmarshal(&raw.slice(offset..end))?;
+            // RFC 9260 3.3.10: causes are padded to four bytes, as parameters are.
+            offset += e.length() + get_padding_size(e.length());
             error_causes.push(e);
         }
 
@@ -73,9 +93,7 @@ impl Chunk for ChunkError {
 
     fn marshal_to(&self, buf: &mut BytesMut) -> Result<usize> {
         self.header().marshal_to(buf)?;
-        for ec in &self.error_causes {
-            buf.extend_from_slice(&ec.marshal());
-        }
+        marshal_error_causes(&self.error_causes, buf);
         Ok(buf.len())
     }
 
@@ -84,9 +102,7 @@ impl Chunk for ChunkError {
     }
 
     fn value_length(&self) -> usize {
-        self.error_causes
-            .iter()
-            .fold(0, |length, ec| length + ec.length())
+        error_causes_length(&self.error_causes)
     }
 
     fn as_any(&self) -> &dyn Any {

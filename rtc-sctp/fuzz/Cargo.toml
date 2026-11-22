@@ -246,3 +246,17 @@ path = "fuzz_targets/endpoint_handle_datagrams.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "chunk_chunk_unknown_unmarshal"
+path = "fuzz_targets/chunk_chunk_unknown_unmarshal.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "association_handle_chunks"
+path = "fuzz_targets/association_handle_chunks.rs"
+test = false
+doc = false
+bench = false

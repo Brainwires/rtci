@@ -30,6 +30,10 @@ use shared::error::{Error, Result};
 use bytes::{Buf, Bytes, BytesMut};
 use std::{any::Any, fmt};
 
+/// The type of the Unrecognized Parameter parameter (RFC 9260 3.3.3.1): its value is the
+/// parameter the receiver of an INIT did not recognize, as it arrived.
+pub(crate) const UNRECOGNIZED_PARAMETER: u16 = 8;
+
 pub(crate) trait Param: fmt::Display + fmt::Debug + Send + Sync {
     fn header(&self) -> ParamHeader;
     fn unmarshal(raw: &Bytes) -> Result<Self>
@@ -71,16 +75,10 @@ pub(crate) fn build_param(raw_param: &Bytes) -> Result<Box<dyn Param>> {
         ParamType::HeartbeatInfo => Ok(Box::new(ParamHeartbeatInfo::unmarshal(raw_param)?)),
         ParamType::OutSsnResetReq => Ok(Box::new(ParamOutgoingResetRequest::unmarshal(raw_param)?)),
         ParamType::ReconfigResp => Ok(Box::new(ParamReconfigResponse::unmarshal(raw_param)?)),
-        _ => {
-            // According to RFC https://datatracker.ietf.org/doc/html/rfc4960#section-3.2.1
-            let stop_processing = ((raw_type >> 15) & 0x01) == 0;
-            if stop_processing {
-                Err(Error::ErrParamTypeUnhandled { typ: raw_type })
-            } else {
-                // We still might need to report this param as unrecognized.
-                // This depends on the context though.
-                Ok(Box::new(ParamUnknown::unmarshal(raw_param)?))
-            }
-        }
+        // A parameter the engine has no parser for is kept as it arrived. What becomes of it
+        // depends on the chunk it is in and on the upper two bits of its type (RFC 9260
+        // 3.2.1), which is for the code that handles that chunk to decide: failing the parse
+        // here dropped the whole packet for a parameter the peer is entitled to send.
+        _ => Ok(Box::new(ParamUnknown::unmarshal(raw_param)?)),
     }
 }
