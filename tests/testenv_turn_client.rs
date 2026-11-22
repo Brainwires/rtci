@@ -16,7 +16,9 @@ use bytes::BytesMut;
 use rtc::sansio::Protocol;
 use rtc::shared::turn_framing::TurnStreamDecoder;
 use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
-use rtc::stun::error_code::{CODE_ADDR_FAMILY_NOT_SUPPORTED, CODE_WRONG_CREDENTIALS};
+use rtc::stun::error_code::{
+    CODE_ADDR_FAMILY_NOT_SUPPORTED, CODE_UNAUTHORIZED, CODE_WRONG_CREDENTIALS,
+};
 use rtc::turn::client::data_connection::{DataConnection, DataConnectionEvent};
 use rtc::turn::client::{AllocateOptions, Client, ClientConfig, Event, RelayTransport};
 use rtc::turn::proto::connid::ConnectionId;
@@ -546,6 +548,88 @@ fn a_refresh_under_another_username_is_refused_with_441() {
     assert!(
         events.is_empty(),
         "the owner's Refresh is accepted: {events:?}"
+    );
+    a.release(relayed);
+}
+
+/// RFC 8489 9.2.5: a 401 (Unauthenticated) to a request that carried the credential is the
+/// answer, not a challenge: the client reports it and does not send the same credential
+/// again. coturn answers a wrong password that way.
+#[test]
+#[ignore = "needs the real-network test environment (the TURN client's coturn, namespaces): scripts/test-env/run.sh"]
+fn a_wrong_password_is_refused_with_401_and_not_sent_again() {
+    common::install_crypto_provider();
+    let env = Env::get();
+    let server = client_server();
+    let mut a = TurnPeer::new("open-a", server, &env.user, "not the password").expect("client");
+
+    let tid = a
+        .client
+        .allocate_with(Instant::now(), AllocateOptions::default())
+        .unwrap();
+    let code = a.wait_for("AllocateError", |e| match e {
+        Event::AllocateError(id, err) if *id == tid => Some(err.code().map(|c| c.0)),
+        Event::AllocateResponse(id, addr) if *id == tid => {
+            panic!("a wrong password allocated {addr}")
+        }
+        _ => None,
+    });
+    eprintln!("TURN client: Allocate with a wrong password: {code:?}");
+    assert_eq!(code, Some(CODE_UNAUTHORIZED.0));
+
+    let events = a.run_for(Duration::from_secs(1));
+    assert!(events.is_empty(), "nothing follows the 401: {events:?}");
+    assert!(
+        !a.client.has_transaction(&tid),
+        "the refused request is not outstanding again"
+    );
+
+    // The same client with the right password is served: nothing was remembered against it.
+    a.client
+        .update_credentials(env.user.clone(), env.pass.clone())
+        .unwrap();
+    let relayed = a.allocate(AllocateOptions::default());
+    a.release(relayed);
+}
+
+/// RFC 8489 6.2.1: the RTO follows the server's round-trip time (RFC 6298), never below the
+/// initial 500 ms. On the test network a round trip takes a few milliseconds, so after the
+/// answered Allocate exchange a request is still retransmitted 500 ms after it was sent, not
+/// sooner: a Refresh that is held back from the socket is queued once in its first 400 ms.
+#[test]
+#[ignore = "needs the real-network test environment (the TURN client's coturn, namespaces): scripts/test-env/run.sh"]
+fn requests_to_a_real_server_keep_the_500_ms_initial_rto() {
+    common::install_crypto_provider();
+    let env = Env::get();
+    let server = client_server();
+    let mut a = TurnPeer::new("open-a", server, &env.user, &env.pass).expect("client");
+    let relayed = a.allocate(AllocateOptions::default());
+
+    // Nothing answers a Refresh that never leaves: count what the client queues for it.
+    a.client.refresh_allocations(Instant::now()).unwrap();
+    let sent_at = Instant::now();
+    let mut copies = 0;
+    while Instant::now() < sent_at + Duration::from_millis(400) {
+        while a.client.poll_write().is_some() {
+            copies += 1;
+        }
+        let now = Instant::now();
+        if a.client.poll_timeout().is_some_and(|at| at <= now) {
+            a.client.handle_timeout(now).unwrap();
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    eprintln!("TURN client: {copies} copy of an unanswered Refresh in 400 ms");
+    assert_eq!(copies, 1, "retransmitted before the initial RTO");
+
+    // The allocation is still the server's: a Refresh that is delivered is answered.
+    a.client.refresh_allocations(Instant::now()).unwrap();
+    let events = a.run_for(Duration::from_secs(1));
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, Event::RefreshError(..) | Event::AllocationLost(..))),
+        "{events:?}"
     );
     a.release(relayed);
 }
