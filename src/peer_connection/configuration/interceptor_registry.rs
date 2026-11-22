@@ -271,6 +271,13 @@ pub fn register_default_interceptors_with_handles(
         .build_with_handle();
     let registry = registry
         .with(Slot::CongestionControl, congestion_control)
+        // The remote description's `b=TIAS` / `b=AS` bounds the estimate on its way to the
+        // pacer (RFC 9429 section 5.10); the peer connection feeds it when an answer is
+        // applied.
+        .with(
+            Slot::Custom(REMOTE_BITRATE_LIMIT_SLOT),
+            RemoteBitrateLimitInterceptor::new(initial_target),
+        )
         .with(
             Slot::Pacer,
             PacerBuilder::new()
@@ -282,6 +289,9 @@ pub fn register_default_interceptors_with_handles(
     configure_receiver_reference_time(media_engine);
 
     let registry = configure_key_frame_requests(registry);
+
+    // Last, so the ids of the extensions registered above stay what they were.
+    configure_default_header_extensions(media_engine)?;
 
     Ok((
         registry,
@@ -325,17 +335,6 @@ pub fn register_default_interceptors_without_congestion_control(
     Ok(registry)
 }
 
-/// Installs the RTP circuit breaker (RFC 8083) at [`Slot::CircuitBreaker`] with the RFC's
-/// recommended parameters, and returns the handle that reports what it stopped.
-///
-/// It needs nothing negotiated: it reads the report blocks of the RTCP sender and receiver
-/// reports every RTP endpoint sends. A flow it stops is restarted only by the application,
-/// through the handle.
-pub fn configure_circuit_breaker(registry: Registry) -> (Registry, CircuitBreakerHandle) {
-    let (breaker, handle) = CircuitBreakerBuilder::new().build();
-    (registry.with(Slot::CircuitBreaker, breaker), handle)
-}
-
 /// Registers the header extensions every WebRTC endpoint is expected to offer, beside the
 /// ones the interceptors above need:
 ///
@@ -371,6 +370,17 @@ pub fn configure_default_header_extensions(media_engine: &mut MediaEngine) -> Re
         )?;
     }
     Ok(())
+}
+
+/// Installs the RTP circuit breaker (RFC 8083) at [`Slot::CircuitBreaker`] with the RFC's
+/// recommended parameters, and returns the handle that reports what it stopped.
+///
+/// It needs nothing negotiated: it reads the report blocks of the RTCP sender and receiver
+/// reports every RTP endpoint sends. A flow it stops is restarted only by the application,
+/// through the handle.
+pub fn configure_circuit_breaker(registry: Registry) -> (Registry, CircuitBreakerHandle) {
+    let (breaker, handle) = CircuitBreakerBuilder::new().build();
+    (registry.with(Slot::CircuitBreaker, breaker), handle)
 }
 
 /// Delivers inbound key-frame requests (RTCP PLI and FIR) to the application.
@@ -1210,6 +1220,7 @@ mod slot_order_tests {
                 Slot::CongestionControl,
                 Slot::TwccSender,
                 Slot::CircuitBreaker,
+                Slot::Custom(REMOTE_BITRATE_LIMIT_SLOT),
                 Slot::Pacer,
                 Slot::NackResponder,
                 Slot::TwccReceiver,
@@ -1369,6 +1380,10 @@ mod slot_order_tests {
                 ),
                 (Slot::TwccSender, "TwccSenderInterceptor".to_owned()),
                 (Slot::CircuitBreaker, "CircuitBreakerInterceptor".to_owned()),
+                (
+                    Slot::Custom(REMOTE_BITRATE_LIMIT_SLOT),
+                    "RemoteBitrateLimitInterceptor".to_owned()
+                ),
                 (Slot::Pacer, "PacerInterceptor".to_owned()),
                 (Slot::NackResponder, "NackResponderInterceptor".to_owned()),
                 (Slot::TwccReceiver, "TwccReceiverInterceptor".to_owned()),
