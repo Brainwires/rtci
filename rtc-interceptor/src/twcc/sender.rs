@@ -50,10 +50,41 @@ impl TwccSenderBuilder {
     }
 }
 
+/// How many recently numbered packets a stream remembers, to recognise one that passes again.
+///
+/// A retransmission follows its original by a few NACK rounds; the NACK responder's own send
+/// buffer holds 1024 packets by default, and nothing older can be asked for again.
+pub(crate) const REMEMBERED: usize = 1024;
+
 /// Per-stream state.
 struct LocalStream {
     /// Header extension ID for transport-wide CC.
     hdr_ext_id: u8,
+    /// RTP sequence number → the transport-wide number it was given, for the last
+    /// [`REMEMBERED`] packets of the stream.
+    numbers: HashMap<u16, u16>,
+    /// The same packets in the order they were numbered, oldest first.
+    order: VecDeque<u16>,
+}
+
+impl LocalStream {
+    fn new(hdr_ext_id: u8) -> Self {
+        Self {
+            hdr_ext_id,
+            numbers: HashMap::new(),
+            order: VecDeque::new(),
+        }
+    }
+
+    fn remember(&mut self, rtp_sequence_number: u16, transport_sequence: u16) {
+        if self.order.len() == REMEMBERED
+            && let Some(oldest) = self.order.pop_front()
+        {
+            self.numbers.remove(&oldest);
+        }
+        self.numbers.insert(rtp_sequence_number, transport_sequence);
+        self.order.push_back(rtp_sequence_number);
+    }
 }
 
 /// Numbers every departing RTP packet so the remote can report on it
@@ -110,10 +141,24 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for TwccSenderInterceptor {
 
     fn handle_write(&mut self, mut msg: TaggedPacket) -> Result<(), Self::Error> {
         if let Packet::Rtp(ref mut rtp_packet) = msg.message.packet
-            && let Some(stream) = self.streams.get(&rtp_packet.header.ssrc)
+            && let Some(stream) = self.streams.get_mut(&rtp_packet.header.ssrc)
         {
-            let seq = self.next_sequence_number;
-            self.next_sequence_number = self.next_sequence_number.wrapping_add(1);
+            // A packet of this stream with a sequence number that was numbered a moment ago
+            // is that packet again: a retransmission sent as it was (no RTX negotiated). It
+            // keeps its number. A new number would change its header extension, and the SRTP
+            // sender refuses a second, different packet under one index, so the
+            // retransmission would be dropped below this interceptor, after the congestion
+            // controller recorded it as sent. An RTX retransmission never comes here with the
+            // original's SSRC and sequence number: it is a new packet and gets a new number.
+            let seq = match stream.numbers.get(&rtp_packet.header.sequence_number) {
+                Some(seq) => *seq,
+                None => {
+                    let seq = self.next_sequence_number;
+                    self.next_sequence_number = self.next_sequence_number.wrapping_add(1);
+                    stream.remember(rtp_packet.header.sequence_number, seq);
+                    seq
+                }
+            };
 
             let tcc_ext = rtp::extension::transport_cc_extension::TransportCcExtension {
                 transport_sequence: seq,
@@ -146,7 +191,7 @@ impl Interceptor for TwccSenderInterceptor {
         if let Some(hdr_ext_id) = stream_supports_twcc(info)
             && hdr_ext_id != 0
         {
-            self.streams.insert(info.ssrc, LocalStream { hdr_ext_id });
+            self.streams.insert(info.ssrc, LocalStream::new(hdr_ext_id));
         }
     }
 
@@ -246,6 +291,55 @@ mod tests {
         assert_eq!(None, tag_of(&out, 5));
     }
 
+    /// A packet that passes again unchanged (a NACK retransmission without RTX) keeps the
+    /// number it was first given, so that it is byte for byte the packet SRTP protected the
+    /// first time. With a new number its header extension differs, and the SRTP sender, which
+    /// protects one packet per index (RFC 3711 3.3.1, RFC 7714 8.1), refuses it: every
+    /// retransmission is then dropped after the congestion controller has counted it as sent.
+    #[test]
+    fn a_repeated_packet_keeps_its_number() {
+        use shared::marshal::Marshal;
+        let mut chain = chain();
+        let mut sent = Vec::new();
+        // Packets 10, 11, 12, then 11 again (the peer NACKed it), then 13.
+        for sequence_number in [10u16, 11, 12, 11, 13] {
+            chain.handle_write(packet(sequence_number, 1)).unwrap();
+            while let Some(out) = chain.poll_write() {
+                let Packet::Rtp(rtp) = &out.message.packet else {
+                    panic!("an RTP packet");
+                };
+                sent.push((sequence_number, tag_of(&out, 5), rtp.marshal().unwrap()));
+            }
+        }
+        let tags: Vec<Option<u16>> = sent.iter().map(|s| s.1).collect();
+        assert_eq!(
+            vec![Some(0), Some(1), Some(2), Some(1), Some(3)],
+            tags,
+            "the retransmission of 11 carries 11's number; new packets go on counting"
+        );
+        assert_eq!(sent[1].2, sent[3].2, "and is the same bytes");
+    }
+
+    /// Only a recent packet is recognised: an RTP sequence number that comes round again
+    /// after a wrap is a new packet.
+    #[test]
+    fn a_sequence_number_seen_long_ago_is_a_new_packet() {
+        let mut chain = chain();
+        let mut tags = Vec::new();
+        chain.handle_write(packet(7, 1)).unwrap();
+        for sequence_number in 0..(REMEMBERED as u16 + 8) {
+            chain
+                .handle_write(packet(1000 + sequence_number, 1))
+                .unwrap();
+        }
+        chain.handle_write(packet(7, 1)).unwrap();
+        while let Some(out) = chain.poll_write() {
+            tags.push(tag_of(&out, 5).unwrap());
+        }
+        assert_eq!(tags.first(), Some(&0));
+        assert_eq!(tags.last(), Some(&(REMEMBERED as u16 + 9)));
+    }
+
     /// The counter is transport-wide: one sequence across every stream, not one per SSRC.
     #[test]
     fn the_counter_is_shared_across_streams() {
@@ -253,8 +347,10 @@ mod tests {
         chain.bind_local_stream(&stream_info(2, 5));
 
         let mut tags = Vec::new();
-        for ssrc in [1, 2, 1] {
-            chain.handle_write(packet(0, ssrc)).unwrap();
+        // (Each stream's own sequence numbers advance: the same number again on one stream
+        // would be that packet again, which keeps its number.)
+        for (sequence_number, ssrc) in [(0, 1), (0, 2), (1, 1)] {
+            chain.handle_write(packet(sequence_number, ssrc)).unwrap();
             while let Some(out) = chain.poll_write() {
                 tags.push(tag_of(&out, 5));
             }
