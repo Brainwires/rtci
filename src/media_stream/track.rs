@@ -102,6 +102,8 @@ pub struct MediaStreamTrack {
     capabilities: MediaTrackCapabilities,
     constraints: MediaTrackConstraints,
     settings: MediaTrackSettings,
+    /// Whether the track is sourced from a remote source: a receiver's track (webrtc-pc 9.3).
+    remote: bool,
 }
 
 impl MediaStreamTrack {
@@ -183,6 +185,40 @@ impl MediaStreamTrack {
 
             ..Default::default()
         }
+    }
+
+    /// mediacapture-main 4.3: a new track with a generated id
+    /// ([`generate_id`](crate::media_stream::generate_id)), live, enabled and unmuted; the
+    /// other arguments are those of [`new`](Self::new).
+    pub fn with_generated_id(
+        stream_id: MediaStreamId,
+        label: String,
+        kind: RtpCodecKind,
+        codings: Vec<RTCRtpEncodingParameters>,
+    ) -> Self {
+        Self::new(
+            stream_id,
+            crate::media_stream::generate_id(),
+            label,
+            kind,
+            codings,
+        )
+    }
+
+    /// mediacapture-main 4.3.3 `clone()`: a new track with a new id and the same source
+    /// (its codings), kind, label, ready state, enabled flag, muted state, constraints,
+    /// capabilities and settings. A clone is a track of its own: a sender that sends this
+    /// one does not send it.
+    pub fn clone_track(&self) -> Self {
+        self.clone_track_into(self.stream_id.clone())
+    }
+
+    /// [`clone_track`](Self::clone_track), in the stream `stream_id`.
+    pub(crate) fn clone_track_into(&self, stream_id: MediaStreamId) -> Self {
+        let mut clone = self.clone();
+        clone.track_id = crate::media_stream::generate_id();
+        clone.stream_id = stream_id;
+        clone
     }
 
     /// Returns the stream ID this track belongs to.
@@ -655,21 +691,64 @@ impl MediaStreamTrack {
     /// # fn example(mut track: MediaStreamTrack) {
     /// // Apply new constraints
     /// let constraints = MediaTrackConstraints::default();
-    /// track.apply_constraints(Some(constraints));
+    /// track.apply_constraints(Some(constraints)).expect("a local track takes them");
     ///
     /// // Remove all constraints
-    /// track.apply_constraints(None);
+    /// track.apply_constraints(None).expect("a local track takes them");
     /// # }
     /// ```
-    pub fn apply_constraints(&mut self, constraints: Option<MediaTrackConstraints>) {
+    ///
+    /// # Errors
+    ///
+    /// [`Error::OverconstrainedError`](shared::error::Error::OverconstrainedError), naming
+    /// the property, when the track is a remote one (a receiver's) and the constraints name
+    /// `width`, `height`, `frameRate` or `aspectRatio` (webrtc-pc 9.3.1: applyConstraints
+    /// "MUST always reject with OverconstrainedError on remote tracks" for them). The
+    /// constraints are then left as they were.
+    pub fn apply_constraints(
+        &mut self,
+        constraints: Option<MediaTrackConstraints>,
+    ) -> shared::error::Result<()> {
+        if self.remote
+            && let Some(property) = constraints
+                .as_ref()
+                .and_then(MediaTrackConstraints::remote_video_property)
+        {
+            return Err(shared::error::Error::OverconstrainedError(
+                property.to_owned(),
+            ));
+        }
         if self.ready_state == MediaStreamTrackState::Ended {
-            return;
+            return Ok(());
         }
+        self.constraints = constraints.unwrap_or_default();
+        Ok(())
+    }
 
-        if let Some(constraints) = constraints {
-            //TODO: https://www.w3.org/TR/mediacapture-streams/#dom-mediastreamtrack-applyconstraints
-            self.constraints = constraints;
-        }
+    /// Whether the track is sourced from a remote source (a receiver's track).
+    pub fn is_remote(&self) -> bool {
+        self.remote
+    }
+
+    /// Marks the track as a receiver's: sourced from a remote source.
+    pub(crate) fn set_remote(&mut self) {
+        self.remote = true;
+    }
+
+    /// Records a received video frame of `width` x `height` and the frame-rate estimate in the
+    /// track's settings (webrtc-pc 9.3.1).
+    pub(crate) fn record_received_frame(
+        &mut self,
+        width: u32,
+        height: u32,
+        frame_rate: Option<f64>,
+    ) {
+        self.settings.set_received_video(width, height, frame_rate);
+    }
+
+    /// The settings, for a receiver that replaces its track with one a description describes.
+    pub(crate) fn take_settings_from(&mut self, other: &MediaStreamTrack) {
+        self.settings = other.settings.clone();
     }
 
     /// Sets the codec for this track by ssrc (internal use only).

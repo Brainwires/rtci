@@ -10,15 +10,15 @@ Totals (rows 957):
 
 The section 8 rows (statistics) carry the verdicts of branch `conf/stats-conformance`; the totals include them.
 
-- MUST: tested 759 / untested 25 / partial 57 / missing 26 / violated 1 / n-a 61
+- MUST: tested 767 / untested 22 / partial 57 / missing 22 / violated 0 / n-a 61
 - SHOULD: tested 4 / untested 0 / partial 1 / missing 0 / violated 0 / n-a 5
 - MAY: tested 3 / untested 2 / partial 0 / missing 0 / violated 0 / n-a 13
 
 By pass:
 
 - sections 1 to 4: rows 399; MUST: tested 290 / untested 11 / partial 25 / missing 21 / violated 0 / n-a 35
-- section 5: rows 258; MUST: tested 216 / untested 8 / partial 12 / missing 1 / violated 0 / n-a 13
-- sections 6 to 12: rows 300; MUST: tested 253 / untested 6 / partial 20 / missing 4 / violated 1 / n-a 13
+- section 5: rows 258; MUST: tested 219 / untested 5 / partial 12 / missing 1 / violated 0 / n-a 13
+- sections 6 to 12: rows 300; MUST: tested 258 / untested 6 / partial 20 / missing 0 / violated 0 / n-a 13
 
 | ID | § | Level | Clause (short paraphrase) | Verdict | Code | Test | Note |
 |---|---|---|---|---|---|---|---|
@@ -569,7 +569,7 @@ By pass:
 | WEBRTC-5.3-23 | 5.3 | MUST | RTCRtpContributingSource.rtpTimestamp of the media played out | tested | `src/rtp_transceiver/rtp_receiver/internal.rs:174` | `the_csrcs_of_a_received_packet_are_contributing_sources` | - |
 | WEBRTC-5.3-24 | 5.3 | MUST | RTCRtpSynchronizationSource dictionary | tested | `src/rtp_transceiver/rtp_receiver/rtp_contributing_source.rs:14` | `the_ssrc_of_a_received_packet_is_a_synchronization_source` | A type alias of RTCRtpContributingSource (the dictionaries have the same members) |
 | WEBRTC-5.3-25 | 5.3 | MUST | receiver.getStats: the stats selection algorithm with the receiver as selector | tested | `src/statistics/accumulator/mod.rs:384` | `test_stats_selector_receiver_filters_inbound` | - |
-| WEBRTC-5.3-26 | 5.3 | MUST | Stopping the receiver's track does not stop the receiver: receiver reports continue | untested | `src/media_stream/track.rs:557` | - | - |
+| WEBRTC-5.3-26 | 5.3 | MUST | Stopping the receiver's track does not stop the receiver: receiver reports continue | tested | `src/media_stream/track.rs:557` | `stopping_the_receivers_track_keeps_the_receiver_reporting` | media still read, receiver reports still sent |
 | WEBRTC-5.4-1 | 5.4 | MUST | create an RTCRtpTransceiver: slots Sender, Receiver, Stopping, Stopped, Direction, Receptive, CurrentDirection, FiredDirection, PreferredCodecs, JsepMid, Mid | tested | src/rtp_transceiver/internal.rs, src/rtp_transceiver/mod.rs (current_direction) | current_direction_is_null_until_negotiated, stop_is_stopping_until_a_rejecting_exchange_completes, the_track_event_follows_fired_direction_and_added_streams | currentDirection is `Option` (null before negotiation) |
 | WEBRTC-5.4-2 | 5.4 | MUST | Creating a transceiver creates no DTLS or ICE transport objects | n/a | - | - | One transport, always present |
 | WEBRTC-5.4-3 | 5.4 | MUST | mid attribute returns [[Mid]], null until negotiated | tested | `src/rtp_transceiver/mod.rs:235` | `tests/jsep_sections_without_mid.rs` | - |
@@ -584,8 +584,8 @@ By pass:
 | WEBRTC-5.4-12 | 5.4 | MUST | stop(): InvalidStateError when the connection is closed | tested | `src/rtp_transceiver/mod.rs:487` | `a_closed_connection_refuses_the_object_model_methods` | - |
 | WEBRTC-5.4-13 | 5.4 | MUST | stop(): no-op when already stopping | tested | `src/rtp_transceiver/internal.rs:215`, `src/rtp_transceiver/mod.rs:397` | `stop_raises_negotiation_needed_and_settles_once_rejected` | - |
 | WEBRTC-5.4-14 | 5.4 | MUST | stop(): stop sending and receiving, then update the negotiation-needed flag | tested | `src/rtp_transceiver/mod.rs:391` | `stop_raises_negotiation_needed_and_settles_once_rejected` | - |
-| WEBRTC-5.4-15 | 5.4 | MUST | stop sending and receiving: stop the sender and send an RTCP BYE for each RTP stream it sent | untested | `src/rtp_transceiver/rtp_sender/internal.rs:338`, `rtc-interceptor/src/report/sender.rs:376` | - | The sender-report interceptor emits a BYE on unbind; no test reads a BYE after stop() |
-| WEBRTC-5.4-16 | 5.4 | MUST | stop sending and receiving: stop receiving media | untested | `src/rtp_transceiver/rtp_receiver/internal.rs:232` | - | Remote streams are unbound |
+| WEBRTC-5.4-15 | 5.4 | MUST | stop sending and receiving: stop the sender and send an RTCP BYE for each RTP stream it sent | tested | `src/rtp_transceiver/rtp_sender/internal.rs` (stop), `rtc-interceptor/src/report/sender.rs` | `stop_says_bye_for_the_senders_streams_and_stops_receiving` | the BYE goes out with the next RTCP compound packet; the receiver's track is muted by it |
+| WEBRTC-5.4-16 | 5.4 | MUST | stop sending and receiving: stop receiving media | tested | `src/peer_connection/handler/endpoint.rs` (find_track_id) | `stop_says_bye_for_the_senders_streams_and_stops_receiving` | bug fixed: a stopping transceiver's receiver still handed RTP to the application; it is now dropped |
 | WEBRTC-5.4-17 | 5.4 | MUST | stop sending and receiving: the receiver's track ends (event) unless disappear | tested | `src/rtp_transceiver/mod.rs:487`, `src/peer_connection/remote_tracks.rs:265` | `stop_is_stopping_until_a_rejecting_exchange_completes`, `a_rejected_section_ends_the_receivers_track`, `a_rollback_ends_the_track_of_a_transceiver_it_removes_and_restores_streams` | stop(), a rejected section and a rollback that removes the transceiver all end the track (OnClose) |
 | WEBRTC-5.4-18 | 5.4 | MUST | stop sending and receiving: [[Direction]] becomes inactive, [[Stopping]] true | tested | `src/rtp_transceiver/internal.rs:226` | `test_rtp_transceiver_stopping` | - |
 | WEBRTC-5.4-19 | 5.4 | MUST | A stopping transceiver is offered with a zero port but does not affect createAnswer until stopped | tested | `src/rtp_transceiver/internal.rs:270` | `an_answer_made_while_stopping_still_answers_the_section`, `stop_is_stopping_until_a_rejecting_exchange_completes` | - |
@@ -938,11 +938,11 @@ By pass:
 | WEBRTC-9.3-3 | 9.3 | MUST | setRemoteDescription can set a receiver track muted | tested | `src/peer_connection/remote_tracks.rs:198` | `a_remote_description_that_stops_the_sending_mutes_the_track` | - |
 | WEBRTC-9.3-4 | 9.3 | MAY | Resources of an ended receiver track may be freed | n/a | - | - | No decoder in the engine |
 | WEBRTC-9.3.1-1 | 9.3.1 | MUST | getCapabilities returns the empty set for a remote track | tested | `src/media_stream/track.rs:581` | a_remote_track_has_no_capabilities | Returns the stored capabilities, empty by default |
-| WEBRTC-9.3.1-2 | 9.3.1 | MUST | applyConstraints rejects with OverconstrainedError on a remote track | violated | `src/media_stream/track.rs:664` | - | Stores the constraints and returns nothing, for any track |
-| WEBRTC-9.3.1-3 | 9.3.1 | MUST | Remote video track setting width: latest received frame | missing | `src/media_stream/track_settings.rs:1` | - | No frame information reaches the settings; no feed |
-| WEBRTC-9.3.1-4 | 9.3.1 | MUST | Remote video track setting height | missing | `src/media_stream/track_settings.rs:1` | - | - |
-| WEBRTC-9.3.1-5 | 9.3.1 | MUST | Remote video track setting frameRate | missing | `src/media_stream/track_settings.rs:1` | - | - |
-| WEBRTC-9.3.1-6 | 9.3.1 | MUST | Remote video track setting aspectRatio | missing | `src/media_stream/track_settings.rs:1` | - | - |
+| WEBRTC-9.3.1-2 | 9.3.1 | MUST | applyConstraints rejects with OverconstrainedError on a remote track | tested | `src/media_stream/track.rs` (apply_constraints, is_remote) | `a_remote_track_refuses_constraints_on_its_video_properties` | a receiver's track is remote; width, height, frameRate or aspectRatio in any set is `Error::OverconstrainedError(<name>)`, constraints unchanged |
+| WEBRTC-9.3.1-3 | 9.3.1 | MUST | Remote video track setting width: latest received frame | tested | `src/rtp_transceiver/rtp_receiver/mod.rs` (report_received_frame), `src/media_stream/track_settings.rs` | `a_remote_video_tracks_settings_follow_the_frames_received` | the application's decoder or depacketizer reports each frame's size |
+| WEBRTC-9.3.1-4 | 9.3.1 | MUST | Remote video track setting height | tested | `src/rtp_transceiver/rtp_receiver/mod.rs` (report_received_frame) | `a_remote_video_tracks_settings_follow_the_frames_received` |  |
+| WEBRTC-9.3.1-5 | 9.3.1 | MUST | Remote video track setting frameRate | tested | `src/rtp_transceiver/rtp_receiver/internal.rs` (report_received_frame) | `a_remote_video_tracks_settings_follow_the_frames_received` | frame intervals over the span of the last second's frames |
+| WEBRTC-9.3.1-6 | 9.3.1 | MUST | Remote video track setting aspectRatio | tested | `src/media_stream/track_settings.rs` (set_received_video) | `a_remote_video_tracks_settings_follow_the_frames_received` | rounded to the tenth decimal place |
 | WEBRTC-11.1-1 | 11.1 | MUST | RTCError: an OperationError carrying errorDetail | tested | src/peer_connection/rtc_error.rs | an_sdp_syntax_error_carries_its_line_number | `RTCError`, `RTCErrorDetailType`; `RTCError::from_error` maps a returned error |
 | WEBRTC-11.1-2 | 11.1 | MUST | RTCError.sdpLineNumber for an SDP syntax error | tested | src/peer_connection/rtc_error.rs, rtc-sdp/src/description/session.rs (parse_located) | an_sdp_syntax_error_carries_its_line_number, a_parse_error_names_the_line_it_is_on |  |
 | WEBRTC-11.1-3 | 11.1 | MUST | RTCError.sctpCauseCode for an SCTP failure | tested | rtc-sctp/src/association/mod.rs (abort_cause_code) | a_data_channel_failed_by_an_abort_reports_the_sctp_cause_code |  |

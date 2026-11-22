@@ -37,6 +37,30 @@ pub struct RTCRemoteStreamsChange {
     pub added: Vec<MediaStreamId>,
 }
 
+impl RTCRemoteStreamsChange {
+    /// The mediacapture-main 4.4 `MediaStreamTrackEvent`s this change fires: `removetrack`
+    /// at each stream the track left, then `addtrack` at each it joined (W3C webrtc-pc
+    /// "set the associated remote streams").
+    pub fn media_stream_track_events(
+        &self,
+    ) -> impl Iterator<Item = crate::media_stream::MediaStreamTrackEvent> + '_ {
+        use crate::media_stream::{MediaStreamTrackEvent, MediaStreamTrackEventKind};
+        let event = move |kind, stream_id: &MediaStreamId| MediaStreamTrackEvent {
+            kind,
+            stream_id: stream_id.clone(),
+            track_id: self.track_id.clone(),
+        };
+        self.removed
+            .iter()
+            .map(move |s| event(MediaStreamTrackEventKind::RemoveTrack, s))
+            .chain(
+                self.added
+                    .iter()
+                    .map(move |s| event(MediaStreamTrackEventKind::AddTrack, s)),
+            )
+    }
+}
+
 /// Initialization data for a track event.
 ///
 /// Contains IDs needed to access the track, receiver, transceiver, and

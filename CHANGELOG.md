@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **media_stream**: remote tracks and the mediacapture-main model (pc-16).
+  - `MediaStreamTrack::apply_constraints` returns `Result<()>`: on a remote track (a
+    receiver's; new `is_remote()`) constraints naming `width`, `height`, `frameRate` or
+    `aspectRatio` are `Error::OverconstrainedError(<property>)` (webrtc-pc 9.3.1);
+    `apply_constraints(None)` now clears the constraints. New error variant
+    `Error::OverconstrainedError` in rtc-shared.
+  - `Constrain` and `ConstrainRange` are public (`ConstrainRange`'s members are `Option`);
+    `MediaTrackConstraintSet::with_width` / `with_height` / `with_aspect_ratio` /
+    `with_frame_rate` and getters, `MediaTrackConstraints::new` / `basic` / `advanced`.
+  - Remote video settings (webrtc-pc 9.3.1): new `RTCRtpReceiver::report_received_frame(now,
+    width, height)`, the feed the application's decoder or depacketizer supplies; the
+    track's `MediaTrackSettings::width` / `height` / `aspect_ratio` / `frame_rate` report the
+    latest frame and an estimate over the last second. New `RTCRtpReceiver::track_mut`.
+  - mediacapture-main: `generate_id()` (UUID version 4), `MediaStream::with_generated_id`,
+    `MediaStream::clone_stream`, `MediaStreamTrack::with_generated_id`,
+    `MediaStreamTrack::clone_track`; `MediaStreamTrackEvent` / `MediaStreamTrackEventKind`
+    and `RTCRemoteStreamsChange::media_stream_track_events` (addtrack / removetrack).
+  - Fixed: a transceiver that `stop()` made stopping still handed the RTP that kept arriving
+    to the application; its receiver receives nothing any more (webrtc-pc 5.4).
 - **peer_connection**: the open webrtc-pc rows of the W3C object model (pc-15).
   - `RTCRtpTransceiver::current_direction()` returns `Option<RTCRtpTransceiverDirection>`:
     `None` (W3C null) before an exchange has negotiated the transceiver.

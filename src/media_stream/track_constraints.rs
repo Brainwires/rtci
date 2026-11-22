@@ -20,16 +20,16 @@
 ///
 /// See [ConstrainULongRange](https://www.w3.org/TR/mediacapture-streams/#dom-constrainulongrange)
 /// and related constraint range types.
-#[derive(Default, Debug, Clone)]
-pub(crate) struct ConstrainRange<T> {
+#[derive(Default, Debug, Clone, PartialEq)]
+pub struct ConstrainRange<T> {
     /// Maximum acceptable value.
-    pub(crate) max: T,
+    pub max: Option<T>,
     /// Minimum acceptable value.
-    pub(crate) min: T,
+    pub min: Option<T>,
     /// Exact required value. If set, only this value is acceptable.
-    pub(crate) exact: T,
+    pub exact: Option<T>,
     /// Ideal target value. The user agent will try to get as close as possible.
-    pub(crate) ideal: T,
+    pub ideal: Option<T>,
 }
 
 /// Represents a constraint that can be either a single value or a range.
@@ -37,8 +37,8 @@ pub(crate) struct ConstrainRange<T> {
 /// # Specification
 ///
 /// See [Constrainable properties](https://www.w3.org/TR/mediacapture-streams/#constrainable-properties).
-#[derive(Debug, Clone)]
-pub(crate) enum Constrain<T> {
+#[derive(Debug, Clone, PartialEq)]
+pub enum Constrain<T> {
     /// A single value constraint.
     Value(T),
     /// A range-based constraint with min, max, exact, and ideal values.
@@ -62,28 +62,28 @@ pub struct MediaTrackConstraintSet {
     /// # Specification
     ///
     /// See [width](https://www.w3.org/TR/mediacapture-streams/#def-constraint-width).
-    width: Constrain<u32>,
+    width: Option<Constrain<u32>>,
 
     /// Video height constraint in pixels.
     ///
     /// # Specification
     ///
     /// See [height](https://www.w3.org/TR/mediacapture-streams/#def-constraint-height).
-    height: Constrain<u32>,
+    height: Option<Constrain<u32>>,
 
     /// Aspect ratio constraint (width/height).
     ///
     /// # Specification
     ///
     /// See [aspectRatio](https://www.w3.org/TR/mediacapture-streams/#def-constraint-aspectRatio).
-    aspect_ratio: Constrain<f64>,
+    aspect_ratio: Option<Constrain<f64>>,
 
     /// Frame rate constraint in frames per second.
     ///
     /// # Specification
     ///
     /// See [frameRate](https://www.w3.org/TR/mediacapture-streams/#def-constraint-frameRate).
-    frame_rate: Constrain<f64>,
+    frame_rate: Option<Constrain<f64>>,
 
     /// Camera facing mode constraint.
     ///
@@ -170,13 +170,72 @@ pub struct MediaTrackConstraintSet {
     background_blur: Constrain<bool>,
 }
 
+impl MediaTrackConstraintSet {
+    /// Sets the `width` constraint.
+    pub fn with_width(mut self, width: Constrain<u32>) -> Self {
+        self.width = Some(width);
+        self
+    }
+
+    /// Sets the `height` constraint.
+    pub fn with_height(mut self, height: Constrain<u32>) -> Self {
+        self.height = Some(height);
+        self
+    }
+
+    /// Sets the `aspectRatio` constraint.
+    pub fn with_aspect_ratio(mut self, aspect_ratio: Constrain<f64>) -> Self {
+        self.aspect_ratio = Some(aspect_ratio);
+        self
+    }
+
+    /// Sets the `frameRate` constraint.
+    pub fn with_frame_rate(mut self, frame_rate: Constrain<f64>) -> Self {
+        self.frame_rate = Some(frame_rate);
+        self
+    }
+
+    /// The `width` constraint, if set.
+    pub fn width(&self) -> Option<&Constrain<u32>> {
+        self.width.as_ref()
+    }
+
+    /// The `height` constraint, if set.
+    pub fn height(&self) -> Option<&Constrain<u32>> {
+        self.height.as_ref()
+    }
+
+    /// The `aspectRatio` constraint, if set.
+    pub fn aspect_ratio(&self) -> Option<&Constrain<f64>> {
+        self.aspect_ratio.as_ref()
+    }
+
+    /// The `frameRate` constraint, if set.
+    pub fn frame_rate(&self) -> Option<&Constrain<f64>> {
+        self.frame_rate.as_ref()
+    }
+
+    /// The first of the constrainable properties webrtc-pc 9.3.1 defines for a remote video
+    /// track (`width`, `height`, `frameRate`, `aspectRatio`) this set constrains.
+    fn remote_video_property(&self) -> Option<&'static str> {
+        [
+            ("width", self.width.is_some()),
+            ("height", self.height.is_some()),
+            ("frameRate", self.frame_rate.is_some()),
+            ("aspectRatio", self.aspect_ratio.is_some()),
+        ]
+        .into_iter()
+        .find_map(|(name, set)| set.then_some(name))
+    }
+}
+
 impl Default for MediaTrackConstraintSet {
     fn default() -> Self {
         Self {
-            width: Constrain::Value(0),
-            height: Constrain::Value(0),
-            aspect_ratio: Constrain::Value(0.0),
-            frame_rate: Constrain::Value(0.0),
+            width: None,
+            height: None,
+            aspect_ratio: None,
+            frame_rate: None,
             facing_mode: Constrain::Value("".to_string()),
             resize_mode: Constrain::Value("".to_string()),
             sample_rate: Constrain::Value(0),
@@ -215,7 +274,7 @@ impl Default for MediaTrackConstraintSet {
 /// let constraints = MediaTrackConstraints::default();
 ///
 /// // Apply to track
-/// track.apply_constraints(Some(constraints));
+/// track.apply_constraints(Some(constraints)).expect("a local track takes them");
 /// # }
 /// ```
 #[derive(Default, Debug, Clone)]
@@ -236,4 +295,30 @@ pub struct MediaTrackConstraints {
     ///
     /// See [advanced](https://www.w3.org/TR/mediacapture-streams/#dfn-advanced).
     advanced: Vec<MediaTrackConstraintSet>,
+}
+
+impl MediaTrackConstraints {
+    /// Constraints with a basic set and advanced sets, in order.
+    pub fn new(basic: MediaTrackConstraintSet, advanced: Vec<MediaTrackConstraintSet>) -> Self {
+        Self { basic, advanced }
+    }
+
+    /// The basic constraint set.
+    pub fn basic(&self) -> &MediaTrackConstraintSet {
+        &self.basic
+    }
+
+    /// The advanced constraint sets.
+    pub fn advanced(&self) -> &[MediaTrackConstraintSet] {
+        &self.advanced
+    }
+
+    /// The first property webrtc-pc 9.3.1 defines for a remote video track that these
+    /// constraints name, in the basic set or an advanced one: the property an
+    /// `OverconstrainedError` names when they are applied to a remote track.
+    pub(crate) fn remote_video_property(&self) -> Option<&'static str> {
+        std::iter::once(&self.basic)
+            .chain(&self.advanced)
+            .find_map(MediaTrackConstraintSet::remote_video_property)
+    }
 }
