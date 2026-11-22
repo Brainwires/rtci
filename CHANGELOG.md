@@ -5,6 +5,73 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Bug Fixes
+
+- **sctp**: Gap Ack Blocks are offsets in serial number arithmetic (RFC 9260 section 3.3.4).
+  Once the received TSNs had wrapped past zero and the cumulative TSN had not, a SACK named a
+  TSN the peer never sent, and a peer running this engine closed the association over it.
+- **sctp**: the stream counts are negotiated as RFC 9260 section 5.1.1 says: own outbound
+  streams against the peer's inbound count, own inbound streams against the peer's outbound
+  count. They were paired outbound with outbound, so DATA on a stream the peer was entitled to
+  use was thrown away. `open_stream` refuses a stream past the negotiated outbound count.
+- **sctp**: a chunk of an unrecognized type is handled by the upper two bits of its type (RFC
+  9260 section 3.2: stop or skip, with or without an ERROR "Unrecognized Chunk Type") and an
+  unrecognized INIT / INIT ACK parameter by the upper two bits of its (section 3.2.1; reported
+  in the INIT ACK, or in an ERROR bundled with the COOKIE ECHO). Either one used to drop the
+  whole packet: DATA bundled with a PAD chunk was lost, and a peer whose INIT carried
+  Supported Address Types, an address or a Cookie Preservative could not connect. HEARTBEAT
+  ACK is parsed. INIT and INIT ACK chunk flags are ignored, and a partial chunk at the end of
+  a packet no longer costs the complete chunks before it (section 6.10).
+- **sctp**: an established association survives a late copy of the peer's INIT (RFC 9260
+  section 5.2.2: it is answered with an INIT ACK and changes nothing) and an INIT or INIT ACK
+  that fails its validity checks (sections 3.3.2, 3.3.3: the packet is discarded). Both closed
+  the association with a transport error. An INIT in SHUTDOWN-ACK-SENT repeats the SHUTDOWN
+  ACK (section 9.2).
+- **sctp**: an association that has ended processes nothing more (RFC 9260 sections 3.3.7,
+  9.1): chunks after an ABORT in its packet, and later packets, are discarded. A copy of the
+  COOKIE ECHO re-established an aborted association and reported `Connected` again. The
+  endpoint stops routing to an ended association and gives its place to the next one, so with
+  one association allowed (SCTP over DTLS) a peer can connect again.
+- **sctp**: an accepting association that never gets a COOKIE ECHO ends after 120 seconds
+  (`HandshakeFailed`), and a new INIT from the same peer restarts it. It lasted for ever and
+  every later INIT with another Initiate Tag was refused.
+- **sctp**: DATA on a stream the peer may not use is acknowledged and answered with ERROR
+  "Invalid Stream Identifier" (RFC 9260 section 6.5). It was dropped unrecorded: the
+  cumulative TSN could never pass it and the peer retransmitted it for ever.
+- **sctp**: at most 32767 TSNs are outstanding at a time, so the ordered messages of a stream
+  in flight never span the Stream Sequence Number space (RFC 9260 section 6.1). With small
+  messages and a large window the receiver could not tell SSN n from n + 65536 after a loss.
+- **sctp**: a SHUTDOWN (or SHUTDOWN ACK) that reaches its retransmission limit ends the
+  association with `TimedOut` (RFC 9260 section 9.2); it stayed in SHUTDOWN-SENT with no
+  timer running.
+- **sctp**: error causes are read and written with their padding (RFC 9260 section 3.3.10),
+  so the cause after one of odd length is no longer read from the wrong offset.
+- **sctp**: a zero-length write is an error and uses no Stream Sequence Number (RFC 9260
+  section 3.3.1). It was accepted, sent nothing, and held back every later ordered message of
+  the stream at the receiver.
+- **sctp**: any Payload Protocol Identifier is carried unchanged (RFC 9260 section 3.3.1).
+  Values other than the five WebRTC ones were received as `Unknown` and sent as 58.
+- **sctp**: the Forward-TSN-Supported parameter (RFC 3758 section 3.3) is honoured in an INIT
+  as it was in an INIT ACK.
+
+### Features
+
+- **sctp**: `Stream::write_sctp_with_ppid` and `Chunks::ppid` for a Payload Protocol
+  Identifier `PayloadProtocolIdentifier` has no name for; `PayloadProtocolIdentifier::number`;
+  `ChunkPayloadData::ppid`; `Association::verification_tag`.
+- **fuzz**: `rtc-sctp` targets `association_handle_chunks` (an established association fed
+  chunks, timers running) and `chunk_chunk_unknown_unmarshal`.
+
+### Breaking Changes
+
+- **sctp**: `PayloadProtocolIdentifier::Unknown` is sent as 0 ("not specified", RFC 9260
+  section 3.3.1), not 58. `Chunks` has a new public field, `ppid`.
+- **sctp**: `Stream::write*` with an empty message returns an error.
+- **sctp**: `Association::open_stream` fails for a stream id at or past the negotiated
+  outbound stream count.
+
 ## [0.22.0+brainwires.5] - 2026-11-20
 
 ### Bug Fixes
