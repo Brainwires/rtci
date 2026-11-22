@@ -2135,6 +2135,33 @@ impl RTCPeerConnection {
         self.ice_restart_requested = Some(RTCOfferOptions { ice_restart: true });
     }
 
+    /// The RTCP canonical name (CNAME) of this connection: the one name every SSRC it sends
+    /// from is described with in RTCP (RFC 3550 6.5.1), so that a receiver can tell which
+    /// streams come from one endpoint and synchronise them.
+    ///
+    /// It is generated with the connection as RFC 7022 section 4.2 defines a short-term
+    /// persistent CNAME (96 random bits, Base64: 16 characters), is the same for senders,
+    /// retransmission and FEC streams and receiver reports, and does not change (RFC 8834
+    /// 4.9).
+    pub fn rtcp_cname(&self) -> &str {
+        &self.pipeline_context.interceptor_handler_context.cname
+    }
+
+    /// The RTCP canonical name the remote source `ssrc` named in its SDES, once one has
+    /// arrived (RFC 3550 6.5.1). Remote streams with the same CNAME come from one endpoint
+    /// and share a clock, which is what makes them synchronisable (audio with video).
+    ///
+    /// Recorded by the RTCP session interceptor
+    /// ([`configure_rtcp_reports`](crate::peer_connection::configuration::interceptor_registry::configure_rtcp_reports),
+    /// part of the default interceptors); `None` without it.
+    pub fn remote_rtcp_cname(&self, ssrc: crate::rtp_transceiver::SSRC) -> Option<&str> {
+        self.pipeline_context
+            .interceptor_handler_context
+            .remote_cnames
+            .get(&ssrc)
+            .map(String::as_str)
+    }
+
     /// Returns the current configuration of this peer connection.
     ///
     /// The returned reference is to the current configuration. To modify the configuration,

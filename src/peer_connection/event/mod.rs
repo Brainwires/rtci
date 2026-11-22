@@ -516,6 +516,18 @@ pub enum RTCPeerConnectionEvent {
     ///
     /// See [track](https://www.w3.org/TR/webrtc/#event-track)
     OnTrack(RTCTrackEvent),
+
+    /// Fired when a remote source is heard using one of this connection's sender SSRCs
+    /// (RFC 3550 section 8.2), once per SSRC.
+    ///
+    /// Two sources of one RTP session cannot share an SSRC. The SSRC of a sender is part of
+    /// the session description, so the engine does not change it by itself: stop the sender
+    /// (or replace its transceiver) and renegotiate, which says BYE for the SSRC and signals
+    /// a new one. Inbound packets carrying the SSRC are dropped meanwhile. The SSRC the
+    /// connection reports from when it sends no media is replaced without this event.
+    ///
+    /// Not a W3C event: a fork addition.
+    OnSsrcCollision(crate::rtp_transceiver::SSRC),
 }
 
 /// Reserved for future use.

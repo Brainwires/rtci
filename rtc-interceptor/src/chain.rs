@@ -24,6 +24,7 @@
 //!
 //! | # | Interceptor | Why there |
 //! |---|---|---|
+//! | wire | RTCP session | counts what left and arrived per SSRC; every RTCP packet written above leaves in its compound packets |
 //! | 0 | congestion control — send history, feedback ingest | records what actually left, after everything |
 //! | 1 | TWCC sender | tags every departing packet, before the history keys on it |
 //! | 2 | pacer | gates departures; everything that generates a packet sits above it |

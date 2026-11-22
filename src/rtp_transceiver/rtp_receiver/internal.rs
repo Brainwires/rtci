@@ -1,6 +1,7 @@
 use crate::media_stream::track::MediaStreamTrack;
 use crate::peer_connection::configuration::interceptor_registry::create_stream_info;
 use crate::peer_connection::configuration::media_engine::MediaEngine;
+use crate::peer_connection::handler::endpoint::repair_flow_codec;
 use crate::rtp_transceiver::direction::RTCRtpTransceiverDirection;
 use crate::rtp_transceiver::rtp_receiver::rtp_contributing_source::{
     RTCRtpContributingSource, RTCRtpSynchronizationSource,
@@ -18,7 +19,25 @@ use crate::rtp_transceiver::rtp_sender::{RTCRtpCodec, RTCRtpHeaderExtensionParam
 use crate::rtp_transceiver::{PayloadType, SSRC};
 use interceptor::Interceptor;
 use shared::error::Result;
-use std::time::Duration;
+use shared::time::SystemInstant;
+use std::time::{Duration, Instant};
+
+/// How long a source stays in `get_contributing_sources` / `get_synchronization_sources`
+/// after its last packet (W3C webrtc 5.3: sources of "the last 10 seconds").
+pub(crate) const SOURCE_LIFETIME: Duration = Duration::from_secs(10);
+
+/// The most contributing sources a receiver lists; a packet carries at most 15 and a mixer
+/// rotates through its participants, so the least recent make room past this.
+pub(crate) const MAX_CONTRIBUTING_SOURCES: usize = 64;
+
+/// The linear audio level (0 to 1) of an RFC 6464 / RFC 6465 level in -dBov, as W3C webrtc
+/// 5.3 defines the conversion: 127 is silence, otherwise `10^(-level / 20)`.
+pub(crate) fn linear_audio_level(level: u8) -> f64 {
+    match level & 0x7F {
+        127 => 0.0,
+        level => 10f64.powf(-f64::from(level) / 20.0),
+    }
+}
 
 /// RTPReceiver allows an application to inspect the receipt of a TrackRemote
 ///
@@ -117,6 +136,63 @@ impl RTCRtpReceiverInternal {
         }
 
         self.last_returned_parameters.as_ref().unwrap()
+    }
+
+    /// Records the sources of an RTP packet delivered to this receiver's track: its SSRC as a
+    /// synchronization source and each CSRC as a contributing source (RFC 3550 5.1; W3C
+    /// webrtc 5.3 `getSynchronizationSources`, `getContributingSources`). One entry per
+    /// source, the most recent packet's; entries older than [`SOURCE_LIFETIME`] are dropped.
+    ///
+    /// `audio_level` is the packet's RFC 6464 level (-dBov) when its header carries one; the
+    /// per-CSRC levels of RFC 6465 are not read, and a source without a level reports 0.
+    pub(crate) fn record_sources(
+        &mut self,
+        now: Instant,
+        wall_clock: SystemInstant,
+        header: &rtp::Header,
+        audio_level: Option<u8>,
+    ) {
+        let timestamp = wall_clock.unix(now);
+        let live = |source: &RTCRtpContributingSource| {
+            timestamp.saturating_sub(source.timestamp) < SOURCE_LIFETIME
+        };
+        let entry = |source: u32, audio_level: f64| RTCRtpContributingSource {
+            timestamp,
+            source,
+            audio_level,
+            rtp_timestamp: header.timestamp,
+        };
+
+        self.synchronization_sources
+            .retain(|source| source.source != header.ssrc && live(source));
+        self.synchronization_sources.push(entry(
+            header.ssrc,
+            audio_level.map(linear_audio_level).unwrap_or_default(),
+        ));
+
+        self.contributing_sources
+            .retain(|source| !header.csrc.contains(&source.source) && live(source));
+        for &csrc in &header.csrc {
+            if !self
+                .contributing_sources
+                .iter()
+                .any(|source| source.source == csrc)
+            {
+                self.contributing_sources.push(entry(csrc, 0.0));
+            }
+        }
+        if self.contributing_sources.len() > MAX_CONTRIBUTING_SOURCES {
+            let excess = self.contributing_sources.len() - MAX_CONTRIBUTING_SOURCES;
+            self.contributing_sources.drain(..excess);
+        }
+    }
+
+    /// A source said BYE (RFC 3550 6.6): it is no longer a source of this receiver.
+    pub(crate) fn forget_source(&mut self, source: u32) {
+        self.contributing_sources
+            .retain(|entry| entry.source != source);
+        self.synchronization_sources
+            .retain(|entry| entry.source != source);
     }
 
     pub(crate) fn get_contributing_sources(
@@ -332,7 +408,7 @@ impl RTCRtpReceiverInternal {
                         payload_type_rtx,
                         None,
                         None,
-                        &codec.rtp_codec,
+                        &repair_flow_codec(&codec.rtp_codec),
                         &parameters.rtp_parameters.header_extensions,
                     );
                 }
@@ -347,7 +423,7 @@ impl RTCRtpReceiverInternal {
                         payload_type_fec,
                         None,
                         None,
-                        &codec.rtp_codec,
+                        &repair_flow_codec(&codec.rtp_codec),
                         &parameters.rtp_parameters.header_extensions,
                     );
                 }

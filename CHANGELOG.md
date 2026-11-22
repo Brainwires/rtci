@@ -806,6 +806,90 @@ Each bug below was confirmed by a failing test first (`rtc-rtcp/tests/audit_bugs
 - `Vp9Payloader` sends a frame that is not VP9 with `P=1` and a reference index, unless it is
   the stream's first frame (it was `P=0`).
 - `ErrTooManySpatialLayers` is no longer returned by `Vp9Packet`.
+### Features
+
+- **rtcp**: the RTCP session of a connection (`RtcpSessionInterceptor`, `Slot::RtcpSession`,
+  registered by `configure_rtcp_reports` and so by `register_default_interceptors`). One
+  interceptor closest to the wire is the connection's whole RTCP voice:
+  - one identity: one CNAME per connection (RFC 7022: 96 random bits, Base64) in every SDES,
+    for senders, RTX and FEC SSRCs and receiver reports; reports and feedback from the
+    connection's media SSRCs, or from one reporting SSRC (never zero, never one in use) when
+    it sends no media; `RTCPeerConnection::rtcp_cname` and `remote_rtcp_cname`;
+  - reports: a sender report for every SSRC that sent in the last two report intervals (RTX
+    and FEC included), a receiver report otherwise, the reception report blocks inside them,
+    an empty RR when there is nothing to report, BYE for an SSRC that stops and for all of
+    them on `close()`;
+  - timing: RFC 3550 6.3 (interval from the members, senders, average packet size and RTCP
+    bandwidth, randomised, timer and reverse reconsideration, source timeout, BYE back-off)
+    and the RTP/AVPF rules of RFC 4585 3.5 (early feedback, `T_rr_interval`), one timer per
+    local SSRC aggregated into one compound packet (RFC 8108 5.3); sans-I/O, with an
+    injectable random source (`RtcpRandom`);
+  - packets: everything leaves as a compound packet, reduced-size (RFC 5506) only when the
+    session is told it was negotiated;
+  - membership: sources and their CNAMEs, BYE, timeouts, and SSRC collisions (RFC 3550 8.2).
+  Inputs for what a session description negotiates: `RtcpSessionBuilder` and
+  `RtcpSessionControl` (`Bandwidth` for `b=AS` / `b=TIAS` / `b=RS` / `b=RR`, `ReducedSize` for
+  `a=rtcp-rsize`, `TrrInt` for `trr-int`, `Cname`). Outputs: `RtcpSessionEvent`.
+- **nack**: a request policy (RFC 4588 6.3, Appendix A): a lost packet is asked for at most ten
+  times and for two seconds (`with_max_nacks_per_packet`, `with_max_packet_age`), not again
+  before a round trip has passed (measured by the RTCP session, or `with_round_trip_time`),
+  optionally after a reordering delay (`with_reorder_delay`). `NackResponderBuilder::
+  with_max_packet_age` is the sender's `rtx-time`.
+- **rtcp**: `FirCommands` numbers the FIR commands an application sends (RFC 5104 4.3.1); a
+  repeated FIR command is delivered to the application once.
+- **rtcp**: `RTCPeerConnectionEvent::OnSsrcCollision` when a remote source uses a sender's SSRC.
+- **interceptor**: `Attribute::Retransmitted` carries what a de-encapsulated RTX packet was on
+  the wire.
+
+### Changed
+
+- **rtcp**: `configure_rtcp_reports` registers the RTCP session instead of
+  `SenderReportInterceptor` and `ReceiverReportInterceptor` (both stay, for a chain built by
+  hand: fixed timers, no scheduling). What changes on the wire with the default interceptors:
+  - every feedback packet (NACK, PLI, FIR, TWCC, REMB, anything the application writes) leaves
+    inside a compound packet behind an RR or SR and an SDES, with the connection's SSRC as
+    packet sender (it left bare, from a random or zero SSRC);
+  - feedback is held to the RTCP bandwidth (5% of the measured media bitrate, 64 kbit/s at
+    least): one early packet per regular interval, the rest merged into the next packet. With
+    little media this spaces TWCC feedback out; give the session bandwidth or a larger
+    `with_rtcp_fraction` to change it;
+  - receiver reports come from one SSRC per connection, with all report blocks in one packet;
+    sender reports stop two seconds after a stream falls silent; the CNAME in RTCP is the
+    connection's, not the MediaStream id (the SDP still writes that one);
+  - a retransmission is counted in the report of the RTX stream, not of the stream it repairs;
+  - an SR, RR or SDES the application writes is dropped (the session's own stand for it);
+  - `close()` sends a BYE.
+- **nack**: `NackGeneratorBuilder` defaults to ten requests per packet and a two second age
+  (they were unlimited); `with_max_nacks_per_packet(0)` and `with_max_packet_age(None)` lift
+  them.
+- **rtcp**: a sender report's SDES written by the peer connection for a chain without the
+  session names the connection's CNAME, not the MediaStream id.
+
+### Bug Fixes
+
+- **rtcp**: each packet of an inbound compound RTCP packet reaches the application with the track
+  it is about (RFC 3550 6.1). The whole datagram was routed by its first packet, so a PLI behind
+  an empty receiver report was dropped and one behind a report about another stream arrived
+  tagged with that stream's track.
+- **rtcp**: reception reports follow RFC 3550 Appendix A.1 / A.3: the cumulative loss is expected
+  less received (a late packet is no longer lost, duplicates make it negative, it is clamped to
+  the signed 24 bits at both ends) and a source that restarts starts the statistics again. Loss
+  was counted per report from a bitmap and never revisited.
+- **rtcp**: a stream that stopped sending issues no sender report after two report intervals
+  (RFC 3550 6.4). It issued one every interval for as long as it was bound.
+- **rtcp**: a sender report's RTP timestamp wraps modulo 2^32; it stopped at `u32::MAX` once a
+  stream had been idle for 2^32 ticks.
+- **nack**: no NACK is sent for an RTX or FEC SSRC (RFC 4588 6.3). Repair flows were bound with
+  their primary's feedback, so the gaps between padding-only RTX probes were asked for every
+  100 ms, for ever.
+- **nack**: retransmission requests for a source stop at its BYE (RFC 4588 5.3).
+- **rtx**: an RTX stream's sequence numbers carry on when its stream is bound again by a
+  renegotiation, and start at a random value (RFC 4588 4). They restarted at 0, repeating SRTP
+  packet indices of a live SSRC, which the SRTP layer refuses: retransmissions stopped until the
+  counter passed its old high-water mark.
+- **receiver**: `RTCRtpReceiver::get_synchronization_sources` and `get_contributing_sources` list
+  the sources of the packets delivered in the last ten seconds (W3C webrtc 5.3). They were always
+  empty.
 
 ## [0.22.0+brainwires.5] - 2026-11-20
 

@@ -114,6 +114,8 @@ history stays intact.
 | SCTP association lifecycle by `a=sctp-port` (RFC 8841) | `src/peer_connection/transport/sctp/mod.rs` (`negotiate`, `offer_port`, `answer_port`), `src/peer_connection/handler/sctp.rs` (`connect`, `close_for_renegotiation`, `init_for_existing_association`), `src/peer_connection/mod.rs` (`apply_sctp_negotiation`, `replace_sctp_association`, `close_sctp_association`), `src/peer_connection/sdp/mod.rs` (`negotiated_sctp`) | Both endpoints initiate, crossing INITs make one association, a rejected data section or `a=sctp-port:0` closes it, a new `a=sctp-port` replaces it over the same DTLS transport. Upstream starts the transport once with the DTLS client initiating, and never looks at a later description. `init_for_existing_association` is a workaround to remove when `rtc-sctp`'s `Endpoint::handle` routes a peer's INIT to the association this side initiated. |
 | DCEP error handling (RFC 8832 section 6, RFC 8831 section 6.6) | `src/peer_connection/handler/datachannel.rs` (`fail_channel`, `reset_stream`), `src/peer_connection/handler/sctp.rs` (`ordered_until_reply`), `rtc-datachannel/src/data_channel/mod.rs` | An OPEN on a stream in use, a malformed OPEN, data on a stream never opened and an unsupported PPID close the channel; data before the ACK is sent ordered; the channel priority weighs the stream. |
 | CI: benchmarks, fuzzing, OSS-Fuzz, git-cliff release notes | `.github/workflows/{bench,fuzz,release}.yml`, `oss-fuzz/`, `cliff.toml` | |
+| RTCP and RTX conformance fixes | `rtc-interceptor/src/report/{receiver_stream,sender_stream,sender}.rs`, `rtc-interceptor/src/nack/{generator,responder}.rs`, `src/peer_connection/handler/{endpoint,interceptor}.rs`, `src/rtp_transceiver/rtp_receiver/internal.rs` | Reception reports per RFC 3550 Appendix A.1 / A.3 (signed cumulative loss, source restart); no sender report from a stream silent for two intervals; no NACK for RTX / FEC SSRCs or after a BYE; RTX sequence numbers random and kept over a re-bind; every packet of an inbound compound RTCP packet delivered with its own track; `get_synchronization_sources` / `get_contributing_sources` filled. Rows in `docs/conformance/w4.md`. |
+| RTCP session: one identity, RFC 3550 / RFC 4585 timing, compound packets | `rtc-interceptor/src/rtcp_session/` (`RtcpSessionInterceptor`, `RtcpSessionBuilder`, `RtcpSessionControl`, `RtcpSessionEvent`, `RtcpRandom`, `Slot::RtcpSession`), `src/peer_connection/handler/interceptor.rs`, `configure_rtcp_reports` | Upstream reports from each interceptor on a fixed timer and sends feedback bare. Here one interceptor at the wire end owns RTCP: one RFC 7022 CNAME per connection, SR / RR / SDES / BYE (RTX and FEC SSRCs included), the RFC 3550 6.3 interval with reconsideration, RFC 4585 3.5 early feedback and `T_rr_interval`, RFC 8108 aggregation, RFC 5506 only when told it was negotiated, member timeouts, SSRC collisions (`OnSsrcCollision`). `SenderReportInterceptor` / `ReceiverReportInterceptor` remain for hand-built chains. NACK request policy (`NackGeneratorBuilder::with_max_packet_age`, `with_reorder_delay`, `with_round_trip_time`), `rtx-time` (`NackResponderBuilder::with_max_packet_age`), `FirCommands`, `Attribute::Retransmitted`, `RTCPeerConnection::rtcp_cname` / `remote_rtcp_cname`. Rows in `docs/conformance/w4.md`. |
 
 ### Hardening (fork only)
 
@@ -180,9 +182,16 @@ reason. Today there are two:
 
 ### Defaults the fork widens
 
+- `configure_rtcp_reports` (and so `register_default_interceptors`) registers the RTCP session:
+  all RTCP leaves in compound packets from the connection's SSRC, timed by RFC 3550 6.3 and
+  RFC 4585 3.5, with a BYE on close. Register `SenderReportBuilder` / `ReceiverReportBuilder`
+  at their slots instead to keep upstream's fixed-timer reports and bare feedback.
+- `NackGeneratorBuilder` gives a lost packet up after ten requests or two seconds (upstream
+  asks for ever); `with_max_nacks_per_packet(0).with_max_packet_age(None)` keeps upstream's.
 - `register_default_interceptors` includes `KeyFrameRequestInterceptor`: an application on the
-  defaults now receives the compound RTCP packets that carry a PLI or FIR as
-  `RTCMessage::RtcpPacket` (upstream delivers no RTCP by default). Build the chain without it to
+  defaults now receives the RTCP packets of a compound packet that carries a PLI or FIR as
+  `RTCMessage::RtcpPacket`, each with the track it is about (upstream delivers no RTCP by
+  default). Build the chain without it to
   keep upstream's behaviour.
 - `register_default_interceptors` registers `configure_receiver_reference_time`: the default
   SDP offers `a=rtcp-fb:<pt> rrtr` on video, and a video stream's receiver sends RTCP XR

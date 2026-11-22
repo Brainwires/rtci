@@ -6,12 +6,14 @@
 //!
 //! # Available Interceptors
 //!
-//! ## RTCP Reports
+//! ## RTCP
 //!
 //! | Interceptor | Description |
 //! |-------------|-------------|
-//! | [`SenderReportInterceptor`] | Generates RTCP Sender Reports (SR) for local streams and filters hop-by-hop RTCP feedback |
-//! | [`ReceiverReportInterceptor`] | Generates RTCP Receiver Reports (RR) based on incoming RTP statistics |
+//! | [`RtcpSessionInterceptor`] | The endpoint's RTCP session: one CNAME and reporting identity, SR / RR / SDES / BYE, the timing of RFC 3550 6.3 and RFC 4585 3.5, every outbound RTCP packet in a compound packet (RFC 8108, RFC 5506) |
+//! | [`SenderReportInterceptor`] | Sender Reports (SR) for local streams on a fixed timer, for a chain built without the session |
+//! | [`ReceiverReportInterceptor`] | Receiver Reports (RR) on a fixed timer, for a chain built without the session |
+//! | [`KeyFrameRequestInterceptor`] | Delivers inbound PLI and FIR (each FIR command once) to the application |
 //!
 //! ## NACK (Negative Acknowledgement)
 //!
@@ -238,6 +240,7 @@ pub(crate) mod pacing;
 pub(crate) mod packet;
 pub(crate) mod report;
 pub(crate) mod rfc8888;
+pub(crate) mod rtcp_session;
 pub(crate) mod rtpfb;
 pub(crate) mod stream_info;
 pub(crate) mod twcc;
@@ -297,8 +300,12 @@ pub use jitterbuffer::receiver::{
     DEFAULT_CAPACITY as JITTER_BUFFER_DEFAULT_CAPACITY,
     DEFAULT_DEPTH as JITTER_BUFFER_DEFAULT_DEPTH, JitterBufferBuilder, JitterBufferInterceptor,
 };
-pub use keyframe::KeyFrameRequestInterceptor;
-pub use nack::generator::{NackGeneratorBuilder, NackGeneratorInterceptor};
+pub use keyframe::{FirCommands, KeyFrameRequestInterceptor};
+pub use nack::generator::{
+    DEFAULT_MAX_NACKS_PER_PACKET as NACK_DEFAULT_MAX_NACKS_PER_PACKET,
+    DEFAULT_MAX_PACKET_AGE as NACK_DEFAULT_MAX_PACKET_AGE, NackGeneratorBuilder,
+    NackGeneratorInterceptor,
+};
 pub use nack::responder::{NackResponderBuilder, NackResponderInterceptor};
 pub use noop::NoopInterceptor;
 pub use pacing::pacer::{MIN_BURST_BITS as PACER_MIN_BURST_BITS, Pacer};
@@ -315,6 +322,12 @@ pub use rfc8888::recorder::CcFeedbackRecorder;
 pub use rfc8888::sender::{
     DEFAULT_INTERVAL as RFC8888_DEFAULT_INTERVAL,
     DEFAULT_MAX_REPORT_SIZE as RFC8888_DEFAULT_MAX_REPORT_SIZE, Rfc8888Builder, Rfc8888Interceptor,
+};
+pub use rtcp_session::identity::{RtcpRandom, generate_rtcp_cname};
+pub use rtcp_session::{
+    RTCP_SESSION_DEFAULT_MTU, RTCP_SESSION_DEFAULT_T_RR_INTERVAL, RTCP_SESSION_MIN_BANDWIDTH,
+    RtcpBandwidth, RtcpProfile, RtcpSessionBuilder, RtcpSessionControl, RtcpSessionEvent,
+    RtcpSessionInterceptor,
 };
 pub use rtpfb::acknowledgement::{Acknowledgement, PacketReport, Report};
 pub use rtpfb::convert::{convert_ccfb, convert_twcc};

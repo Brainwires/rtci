@@ -546,6 +546,8 @@ impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCP
         // selected candidate pair every outbound packet is addressed with; the packets wait in
         // `write_outs` for the caller's next `poll_write`.
         let now = self.pipeline_context.now;
+        // RFC 3550 6.6: the SSRCs of a participant that leaves say BYE.
+        self.get_interceptor_handler().request_goodbye(now);
         self.get_sctp_handler().request_abort();
         self.get_dtls_handler().request_close(now);
         self.flush_writes();

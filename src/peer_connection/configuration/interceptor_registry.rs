@@ -117,7 +117,7 @@
 //! |----------|-------------|
 //! | [`register_default_interceptors`] | Standard WebRTC setup (NACK + Reports + TWCC Receiver) |
 //! | [`configure_nack`] | NACK generator and responder for loss recovery |
-//! | [`configure_rtcp_reports`] | Sender and Receiver Reports |
+//! | [`configure_rtcp_reports`] | The RTCP session: reports, CNAME, BYE, RFC 3550 / RFC 4585 timing |
 //! | [`configure_twcc`] | Full TWCC (sender + receiver) |
 //! | [`configure_twcc_sender_only`] | TWCC sender only (remote generates feedback) |
 //! | [`configure_twcc_receiver_only`] | TWCC receiver only (generates feedback for remote) |
@@ -140,8 +140,8 @@ use crate::rtp_transceiver::rtp_sender::{
 use crate::rtp_transceiver::{PayloadType, SSRC};
 use interceptor::{
     BandwidthEstimator, CongestionControlBuilder, KeyFrameRequestInterceptor, NackGeneratorBuilder,
-    NackResponderBuilder, PacerBuilder, ReceiverReportBuilder, Rfc8888Builder, SenderReportBuilder,
-    TwccReceiverBuilder, TwccSenderBuilder,
+    NackResponderBuilder, PacerBuilder, Rfc8888Builder, RtcpSessionBuilder, TwccReceiverBuilder,
+    TwccSenderBuilder,
 };
 
 /// The chain registry these helpers take and return, and the positions they place interceptors at.
@@ -290,27 +290,45 @@ pub fn configure_nack(registry: Registry, media_engine: &mut MediaEngine) -> Reg
         .with(Slot::NackGenerator, NackGeneratorBuilder::new().build())
 }
 
-/// Configures RTCP Sender and Receiver Report interceptors.
+/// Configures RTCP: the RTCP session of the connection.
 ///
-/// This function registers:
-/// - **Receiver Report Interceptor**: Generates RR packets with reception statistics
-/// - **Sender Report Interceptor**: Generates SR packets with transmission statistics
+/// Registers [`RtcpSessionInterceptor`](interceptor::RtcpSessionInterceptor) at
+/// [`Slot::RtcpSession`], closest to the wire. It is the connection's whole RTCP voice:
 ///
-/// # Sender Reports (SR)
+/// - **Sender reports (SR)** for every SSRC that sent RTP in the last two report intervals
+///   (RTX and FEC SSRCs included): NTP and RTP timestamps, packet and octet counts.
+/// - **Receiver reports (RR)** otherwise, and reception report blocks for every remote stream:
+///   fraction lost, cumulative loss, extended highest sequence number, interarrival jitter,
+///   last SR and the delay since (RFC 3550 6.4, Appendix A.3).
+/// - **One CNAME** (RFC 7022) in an SDES for every reporting SSRC, and a BYE for an SSRC that
+///   stops and for all of them when the connection closes.
+/// - **Timing** by RFC 3550 6.3 (interval from the member count, the average packet size and
+///   the RTCP bandwidth, randomised, with timer reconsideration) and the RTP/AVPF rules of
+///   RFC 4585 3.5: feedback the other interceptors and the application write (NACK, PLI, FIR,
+///   TWCC, REMB, ...) leaves as early RTCP inside the same bandwidth, in compound packets
+///   (reduced-size only when negotiated), from this connection's SSRC.
 ///
-/// Sent by active senders, containing:
-/// - NTP timestamp (wall-clock time for synchronization)
-/// - RTP timestamp (media time)
-/// - Packet and octet counts
+/// The peer connection starts the session when DTLS is up and gives it the connection's
+/// CNAME. What a session description negotiates beyond that reaches it as an
+/// [`RtcpSessionControl`](interceptor::RtcpSessionControl) (bandwidth from `b=` lines,
+/// `a=rtcp-rsize`, `trr-int`) or through
+/// [`RtcpSessionBuilder`](interceptor::RtcpSessionBuilder) when the chain is built by hand:
 ///
-/// # Receiver Reports (RR)
+/// ```
+/// use rtc::interceptor::{Registry, RtcpBandwidth, RtcpSessionBuilder, Slot};
+/// use std::time::Duration;
 ///
-/// Sent by receivers, containing per-source:
-/// - Fraction of packets lost since last report
-/// - Cumulative packets lost
-/// - Extended highest sequence number received
-/// - Interarrival jitter estimate
-/// - Last SR timestamp and delay since last SR
+/// let registry = Registry::new().with(
+///     Slot::RtcpSession,
+///     RtcpSessionBuilder::new()
+///         .with_bandwidth(RtcpBandwidth {
+///             session: Some(1_500_000),
+///             ..Default::default()
+///         })
+///         .with_t_rr_interval(Duration::from_millis(500))
+///         .build(),
+/// );
+/// ```
 ///
 /// # Parameters
 ///
@@ -328,11 +346,11 @@ pub fn configure_nack(registry: Registry, media_engine: &mut MediaEngine) -> Reg
 ///
 /// # References
 ///
-/// - [RFC 3550 Section 6](https://datatracker.ietf.org/doc/html/rfc3550#section-6) - RTCP Sender and Receiver Reports
+/// - [RFC 3550 Section 6](https://datatracker.ietf.org/doc/html/rfc3550#section-6) - RTCP
+/// - [RFC 4585 Section 3](https://datatracker.ietf.org/doc/html/rfc4585#section-3) - RTP/AVPF timing
+/// - [RFC 8108](https://datatracker.ietf.org/doc/html/rfc8108) - several SSRCs in one session
 pub fn configure_rtcp_reports(registry: Registry) -> Registry {
-    registry
-        .with(Slot::ReceiverReport, ReceiverReportBuilder::new().build())
-        .with(Slot::SenderReport, SenderReportBuilder::new().build())
+    registry.with(Slot::RtcpSession, RtcpSessionBuilder::new().build())
 }
 
 /// Negotiates receiver-side round trip time measurement for video (`a=rtcp-fb:<pt> rrtr`,
@@ -922,11 +940,10 @@ mod slot_order_tests {
         );
         assert_eq!(
             vec![
+                Slot::RtcpSession,
                 Slot::NackResponder,
                 Slot::NackGenerator,
                 Slot::TwccReceiver,
-                Slot::ReceiverReport,
-                Slot::SenderReport,
                 Slot::KeyFrameRequests,
             ],
             slots
@@ -1042,11 +1059,10 @@ mod slot_order_tests {
 
         assert_eq!(
             vec![
+                (Slot::RtcpSession, "RtcpSessionInterceptor".to_owned()),
                 (Slot::NackResponder, "NackResponderInterceptor".to_owned()),
                 (Slot::NackGenerator, "NackGeneratorInterceptor".to_owned()),
                 (Slot::TwccReceiver, "TwccReceiverInterceptor".to_owned()),
-                (Slot::ReceiverReport, "ReceiverReportInterceptor".to_owned()),
-                (Slot::SenderReport, "SenderReportInterceptor".to_owned()),
                 (
                     Slot::KeyFrameRequests,
                     "KeyFrameRequestInterceptor".to_owned()
