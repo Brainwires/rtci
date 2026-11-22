@@ -305,7 +305,7 @@ use crate::media_stream::track::{MediaStreamTrack, MediaStreamTrackId};
 use crate::peer_connection::RTCPeerConnection;
 use crate::peer_connection::configuration::RTCBundlePolicy;
 use crate::peer_connection::configuration::media_engine::{
-    MediaEngine, is_rtcp_conflicting_payload_type, local_extension_ids,
+    MediaEngine, RTCPacketTime, is_rtcp_conflicting_payload_type, local_extension_ids,
 };
 use crate::peer_connection::state::ice_gathering_state::RTCIceGatheringState;
 use crate::peer_connection::transport::dtls::fingerprint::{
@@ -344,6 +344,37 @@ pub(crate) const ATTR_KEY_BUNDLE_ONLY: &str = "bundle-only";
 pub(crate) const ATTR_KEY_ICE_OPTIONS: &str = "ice-options";
 /// `a=ice-pacing` (RFC 8839 §5.5).
 pub(crate) const ATTR_KEY_ICE_PACING: &str = "ice-pacing";
+/// `a=ptime` (RFC 8866 section 6.4).
+pub(crate) const ATTR_KEY_PTIME: &str = "ptime";
+/// `a=maxptime` (RFC 8866 section 6.5).
+pub(crate) const ATTR_KEY_MAXPTIME: &str = "maxptime";
+
+/// The packet times a media section states (`a=ptime`, `a=maxptime`; RFC 8866 sections 6.4,
+/// 6.5); a value that is not a whole number of milliseconds is not stated. RFC 8866 allows a
+/// decimal `a=ptime`: it is rounded up.
+pub(crate) fn media_packet_time(media: &MediaDescription) -> RTCPacketTime {
+    let value = |key: &str| -> Option<u32> {
+        let value = media.attribute(key)??.trim();
+        match value.split_once('.') {
+            None => value.parse().ok(),
+            Some((whole, fraction)) => {
+                let whole: u32 = if whole.is_empty() {
+                    0
+                } else {
+                    whole.parse().ok()?
+                };
+                if !fraction.bytes().all(|b| b.is_ascii_digit()) {
+                    return None;
+                }
+                Some(whole + u32::from(fraction.bytes().any(|b| b != b'0')))
+            }
+        }
+    };
+    RTCPacketTime {
+        ptime: value(ATTR_KEY_PTIME),
+        maxptime: value(ATTR_KEY_MAXPTIME),
+    }
+}
 
 /// The Ta a description proposes (`a=ice-pacing`, RFC 8839 section 5.5: session level, a
 /// value in milliseconds of 1 to 10 digits); `None` when it proposes none or the value is not
@@ -1040,6 +1071,7 @@ impl RTCPeerConnection {
                 .any(|c| is_fec_mime_type(&c.rtp_codec.mime_type)),
         };
         let mut ccfb = false;
+        let mut rrtr = false;
         for codec in &codecs {
             let name = codec
                 .rtp_codec
@@ -1077,6 +1109,14 @@ impl RTCPeerConnection {
                     ccfb = true;
                     continue;
                 }
+                // Receiver reference times: `a=rtcp-xr`, below; an `a=rtcp-fb ... rrtr` line
+                // only where the offer had one.
+                if feedback.typ == interceptor::RTCP_FB_RRTR {
+                    rrtr = true;
+                    if feedback.parameter == RRTR_FROM_RTCP_XR {
+                        continue;
+                    }
+                }
                 media = media.with_value_attribute(
                     "rtcp-fb".to_owned(),
                     if feedback.parameter.is_empty() {
@@ -1095,6 +1135,40 @@ impl RTCPeerConnection {
                 ATTR_KEY_RTCP_FB.to_owned(),
                 format!("* {TYPE_RTCP_FB_ACK} {RTCP_FB_ACK_CCFB}"),
             );
+        }
+        // RFC 3611 section 5: XR use is signalled with `a=rtcp-xr`. An offer asks for
+        // receiver reference times when this endpoint takes them (`rcvr-rtt=all`, both ways);
+        // an answer to an offer with the attribute states what it takes of it, an empty
+        // attribute for nothing (section 5.2: "it SHOULD include an empty 'a=rtcp-xr'
+        // attribute"); an answer to an offer without it has none (section 5.1: omitted when
+        // XR is not used).
+        let rtcp_xr = match &media_section.offered_rtcp_xr {
+            None if is_offer => rrtr.then(|| format!("{XR_FORMAT_RCVR_RTT}=all")),
+            None => None,
+            Some(offered) => Some(if rrtr {
+                offered
+                    .iter()
+                    .find(|f| is_rcvr_rtt(f))
+                    .cloned()
+                    .unwrap_or_else(|| format!("{XR_FORMAT_RCVR_RTT}=all"))
+            } else {
+                String::new()
+            }),
+        };
+        if let Some(rtcp_xr) = rtcp_xr {
+            media = media.with_value_attribute(ATTR_KEY_RTCP_XR.to_owned(), rtcp_xr);
+        }
+        // RFC 8866 sections 6.4, 6.5 (RFC 7587 section 7 for Opus): the packet times this
+        // endpoint wants to receive.
+        if transceiver.kind() == RtpCodecKind::Audio && !codecs.is_empty() {
+            let packet_time = media_engine.audio_packet_time;
+            if let Some(ptime) = packet_time.ptime {
+                media = media.with_value_attribute(ATTR_KEY_PTIME.to_owned(), ptime.to_string());
+            }
+            if let Some(maxptime) = packet_time.maxptime {
+                media =
+                    media.with_value_attribute(ATTR_KEY_MAXPTIME.to_owned(), maxptime.to_string());
+            }
         }
         if codecs.is_empty() {
             // If we are sender and have no codecs throw an error early
@@ -1666,6 +1740,9 @@ pub(crate) struct MediaSection {
     /// MUST NOT add feedback parameters"), also when the transceiver's codecs still carry
     /// what an earlier offer had. `None` in an offer.
     pub(crate) offered_codecs: Option<Vec<RTCRtpCodecParameters>>,
+    /// In an answer, the `xr-format`s of the offered section's `a=rtcp-xr` (RFC 3611 section
+    /// 5.2), `None` when it had none or in an offer.
+    pub(crate) offered_rtcp_xr: Option<Vec<String>>,
 }
 
 /// `a=rtcp-mux-only` (RFC 8858 section 3).
@@ -2371,6 +2448,53 @@ pub(crate) fn is_sdp_token(s: &str) -> bool {
         })
 }
 
+/// `a=rtcp-xr` (RFC 3611 section 5.1).
+pub(crate) const ATTR_KEY_RTCP_XR: &str = "rtcp-xr";
+/// The `xr-format` of `a=rtcp-xr` that asks for receiver reference times and DLRR responses
+/// (RFC 3611 section 5.1, `rcvr-rtt=<mode>`).
+const XR_FORMAT_RCVR_RTT: &str = "rcvr-rtt";
+/// The feedback parameter that marks `rrtr` as coming from `a=rtcp-xr:rcvr-rtt` rather
+/// than from an `a=rtcp-fb` line (libwebrtc's name for the same thing).
+pub(crate) const RRTR_FROM_RTCP_XR: &str = "rcvr-rtt";
+
+/// Whether an `xr-format` is `rcvr-rtt` (with its mode and maximum size).
+fn is_rcvr_rtt(format: &str) -> bool {
+    format.split(['=', ':']).next() == Some(XR_FORMAT_RCVR_RTT)
+}
+
+/// The `xr-format`s of a section's `a=rtcp-xr`, `None` without one.
+pub(crate) fn media_rtcp_xr(media: &MediaDescription) -> Option<Vec<String>> {
+    media.attribute(ATTR_KEY_RTCP_XR).map(|value| {
+        value
+            .unwrap_or_default()
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect()
+    })
+}
+
+/// Gives each audio and video section of a received description the session-level
+/// `a=rtcp-xr` when it has none of its own (RFC 3611 section 5.1: the attribute "can be used
+/// at the session or media level", and at media level it replaces the session's). Only the
+/// parsed description changes.
+pub(crate) fn inherit_session_rtcp_xr(desc: &mut SessionDescription) {
+    let Some(session) = desc
+        .attributes
+        .iter()
+        .find(|a| a.key == ATTR_KEY_RTCP_XR)
+        .cloned()
+    else {
+        return;
+    };
+    for media in &mut desc.media_descriptions {
+        if matches!(media.media_name.media.as_str(), "audio" | "video")
+            && media.attribute(ATTR_KEY_RTCP_XR).is_none()
+        {
+            media.attributes.push(session.clone());
+        }
+    }
+}
+
 /// Gives each audio and video section of a received description the session-level
 /// `a=extmap` lines it does not override (RFC 8285 section 5: the mappings may be "provided
 /// per media stream ... or globally for all streams"; RFC 9429 section 5.8.1 stores them, and
@@ -3035,6 +3159,15 @@ pub(crate) fn codecs_from_media_description(
         .filter_map(|value| value.strip_prefix("* "))
         .filter_map(parse_rtcp_feedback)
         .collect();
+    // RFC 3611 section 5.1: `a=rtcp-xr:rcvr-rtt=<mode>` asks for receiver reference times,
+    // what libwebrtc's `a=rtcp-fb:<pt> rrtr` asks for: taken as that feedback for each
+    // format, marked as coming from here. A section whose `a=rtcp-xr` does not list it wants
+    // no such blocks (section 5.1: "it SHOULD NOT send XR blocks other than those listed"),
+    // whatever its `a=rtcp-fb` lines say.
+    let rtcp_xr = media_rtcp_xr(m);
+    let xr_rrtr = rtcp_xr
+        .as_ref()
+        .map(|formats| formats.iter().any(|f| is_rcvr_rtt(f)));
 
     let mut out = vec![];
     // A payload type listed more than once on the m= line describes one codec: keep its first
@@ -3089,6 +3222,14 @@ pub(crate) fn codecs_from_media_description(
             if !feedback.contains(entry) {
                 feedback.push(entry.clone());
             }
+        }
+        match xr_rrtr {
+            Some(true) => feedback.push(RTCPFeedback {
+                typ: interceptor::RTCP_FB_RRTR.to_owned(),
+                parameter: RRTR_FROM_RTCP_XR.to_owned(),
+            }),
+            Some(false) => feedback.retain(|f| f.typ != interceptor::RTCP_FB_RRTR),
+            None => {}
         }
 
         out.push(RTCRtpCodecParameters {

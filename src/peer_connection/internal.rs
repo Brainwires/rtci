@@ -19,6 +19,7 @@ use crate::peer_connection::sdp::{
     rtp_extensions_from_media_description, superseded_clear_extensions, track_details_from_sdp,
     unknown_media_name,
 };
+use crate::peer_connection::sdp::{media_packet_time, media_rtcp_xr};
 use crate::peer_connection::state::signaling_state::check_next_signaling_state;
 use crate::peer_connection::transport::dtls::state::RTCDtlsTransportState;
 use crate::peer_connection::transport::ice::candidate::RTCIceServerTransportProtocol;
@@ -736,6 +737,11 @@ impl RTCPeerConnection {
                             renegotiated: include_unmatched,
                             offered_codecs: (!include_unmatched)
                                 .then(|| codecs_from_media_description(media).unwrap_or_default()),
+                            offered_rtcp_xr: if include_unmatched {
+                                None
+                            } else {
+                                media_rtcp_xr(media)
+                            },
                             ..Default::default()
                         });
                     } else {
@@ -1338,24 +1344,22 @@ impl RTCPeerConnection {
                     .map(|b| b.bandwidth)
             };
             // RFC 3611 section 5.1: "a=rtcp-xr" at media level replaces the session's.
-            let rtcp_xr = media
-                .attribute(ATTR_KEY_RTCP_XR)
-                .map(|value| value.map(str::to_owned))
-                .or_else(|| {
-                    remote
-                        .attributes
-                        .iter()
-                        .find(|a| a.key == ATTR_KEY_RTCP_XR)
-                        .map(|a| a.value.clone())
-                })
-                .map(|value| {
-                    value
-                        .unwrap_or_default()
-                        .split_whitespace()
-                        .map(str::to_owned)
-                        .collect()
-                });
+            let rtcp_xr = media_rtcp_xr(media).or_else(|| {
+                remote
+                    .attributes
+                    .iter()
+                    .find(|a| a.key == ATTR_KEY_RTCP_XR)
+                    .map(|a| {
+                        a.value
+                            .as_deref()
+                            .unwrap_or_default()
+                            .split_whitespace()
+                            .map(str::to_owned)
+                            .collect()
+                    })
+            });
             self.rtp_transceivers[i].set_remote_rtcp_xr(rtcp_xr);
+            self.rtp_transceivers[i].set_remote_packet_time(media_packet_time(media));
             let application_specific = of("AS").map(|kbps| kbps.saturating_mul(1000));
             self.rtp_transceivers[i].set_remote_bandwidth(RTCRemoteBandwidth {
                 // RFC 9429 section 5.10: "TIAS = AS * 1000 * 0.95 - (50 * 40 * 8)".

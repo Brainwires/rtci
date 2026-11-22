@@ -1,6 +1,7 @@
 pub(crate) mod av1;
 pub(crate) mod generic;
 pub(crate) mod h264;
+pub(crate) mod h265;
 pub(crate) mod vp9;
 
 use std::any::Any;
@@ -10,6 +11,7 @@ use std::fmt;
 use av1::Av1Fmtp;
 use generic::GenericFmtp;
 use h264::H264Fmtp;
+use h265::H265Fmtp;
 use vp9::Vp9Fmtp;
 
 /// Fmtp interface for implementing custom
@@ -57,6 +59,8 @@ pub(crate) fn parse(mime_type: &str, line: &str) -> Box<dyn Fmtp> {
         Box::new(Vp9Fmtp { parameters })
     } else if mime_type.eq_ignore_ascii_case("video/av1") {
         Box::new(Av1Fmtp { parameters })
+    } else if mime_type.eq_ignore_ascii_case("video/h265") {
+        Box::new(H265Fmtp { parameters })
     } else {
         Box::new(GenericFmtp {
             mime_type: mime_type.to_owned(),

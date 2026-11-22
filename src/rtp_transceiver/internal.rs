@@ -1,6 +1,6 @@
 use crate::media_stream::MediaStreamTrack;
 use crate::peer_connection::configuration::media_engine::{
-    MIME_TYPE_RTX, MediaEngine, has_symmetric_configuration,
+    MIME_TYPE_RTX, MediaEngine, RTCPacketTime, has_symmetric_configuration,
 };
 use crate::peer_connection::sdp::codecs_from_media_description;
 use crate::rtp_transceiver::rtp_receiver::internal::RTCRtpReceiverInternal;
@@ -77,6 +77,8 @@ pub(crate) struct RTCRtpTransceiverInternal {
     /// The `xr-format`s of the remote description's `a=rtcp-xr` for this section (RFC 3611
     /// section 5.1); `None` when it has no such attribute.
     remote_rtcp_xr: Option<Vec<String>>,
+    /// The `a=ptime` / `a=maxptime` of this transceiver's section of the remote description.
+    remote_packet_time: RTCPacketTime,
 }
 
 impl fmt::Debug for RTCRtpTransceiverInternal {
@@ -130,6 +132,7 @@ impl RTCRtpTransceiverInternal {
             rtcp_reduced_size: false,
             remote_bandwidth: RTCRemoteBandwidth::default(),
             remote_rtcp_xr: None,
+            remote_packet_time: RTCPacketTime::default(),
         }
     }
 
@@ -470,6 +473,7 @@ impl RTCRtpTransceiverInternal {
         self.preferred_codecs.clone_from(&saved.preferred_codecs);
         self.remote_bandwidth = saved.remote_bandwidth;
         self.remote_rtcp_xr.clone_from(&saved.remote_rtcp_xr);
+        self.remote_packet_time = saved.remote_packet_time;
         if let (Some(sender), Some(saved)) = (self.sender.as_mut(), saved.sender.as_ref()) {
             sender.restore_negotiated_state(saved);
         }
@@ -484,6 +488,14 @@ impl RTCRtpTransceiverInternal {
 
     pub(crate) fn set_remote_rtcp_xr(&mut self, formats: Option<Vec<String>>) {
         self.remote_rtcp_xr = formats;
+    }
+
+    pub(crate) fn remote_packet_time(&self) -> RTCPacketTime {
+        self.remote_packet_time
+    }
+
+    pub(crate) fn set_remote_packet_time(&mut self, packet_time: RTCPacketTime) {
+        self.remote_packet_time = packet_time;
     }
 
     pub(crate) fn remote_bandwidth(&self) -> RTCRemoteBandwidth {

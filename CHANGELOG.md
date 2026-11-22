@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **jsep**: codec parameters, the rest.
+  - H.265 formats match by their configuration (RFC 7798 section 7.2.2: `profile-space`,
+    `profile-id`, `tier-flag`, `interop-constraints`, `profile-compatibility-indicator` and
+    `tx-mode`, each with its section 7.1 default; `level-id` and the `sprop-*` parameters do
+    not count), and an answer's `level-id` is not above the offer's. The default H.265 format
+    states `level-id=93;profile-id=1;tier-flag=0;tx-mode=SRST`, so an offer of Main 10 or of
+    MRST / MRMT is no longer answered with it.
+  - H.264: a `packetization-mode` other than 0, 1 or 2 matches no format and has no payloader
+    (it was sent as mode 1). New `RTCRtpCodec::h264_depacketizer` (mode 2 de-interleaving
+    from `sprop-interleaving-depth` / `sprop-max-don-diff`), `h265_depacketizer` (DONL and
+    the de-packetization buffer from `sprop-max-don-diff` / `sprop-depack-buf-nalus`; SRST
+    only) and `sprop_parameter_sets` (the decoded `sprop-parameter-sets`, `sprop-vps` /
+    `sprop-sps` / `sprop-pps` / `sprop-sei`).
+  - `a=ptime` / `a=maxptime` (RFC 8866 sections 6.4, 6.5; Opus's `ptime` / `maxptime`, RFC
+    7587 section 7): written in audio sections when set with the new
+    `MediaEngine::set_audio_packet_time(RTCPacketTime)`, and the remote side's read into
+    `RTCRtpTransceiver::remote_packet_time`.
+  - `ccm tmmbr smaxpr=<n>` (RFC 5104 section 7.2) is answered as `ccm tmmbr` with the higher
+    `smaxpr` of the two sides, and without `smaxpr` when the offer has none (an offer with
+    `smaxpr` lost TMMBR before).
+  - `a=rtcp-xr` (RFC 3611 section 5): an offer whose video formats take receiver reference
+    times (`configure_receiver_reference_time`, part of the default interceptors) says
+    `a=rtcp-xr:rcvr-rtt=all` beside `a=rtcp-fb:<pt> rrtr`, so default video offers have one
+    more line. A remote `a=rtcp-xr:rcvr-rtt=<mode>` negotiates them as the `rrtr` feedback
+    does; a remote `a=rtcp-xr` that does not list `rcvr-rtt` turns them off whatever its
+    `a=rtcp-fb` lines say (section 5.1). An answer to an offer with the attribute states the
+    offered mode it takes, or an empty `a=rtcp-xr:` (section 5.2); a session-level attribute
+    applies to sections without their own.
 - **jsep**: ICE options. Every description says `a=ice-options:trickle ice2` (a lite agent
   `ice2`; RFC 8445 section 10), so the line differs from before. A Ta configured with the new
   `SettingEngineBuilder::with_ice_pacing` (it was not reachable before) is proposed as
