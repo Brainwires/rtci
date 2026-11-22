@@ -332,7 +332,8 @@ impl ConfigBuilder {
     /// `Some(0)`, as RFC 9147 section 5.1 asks of a client that wants no connection id.
     ///
     /// With DTLS 1.3 only: the DTLS 1.2 record format of RFC 9146 (`tls12_cid`) is not
-    /// implemented, so a hello that also offers DTLS 1.2 leaves the extension out.
+    /// implemented, so a ClientHello that also offers DTLS 1.2 leaves the extension out, and
+    /// a server answers it only when it negotiates DTLS 1.3.
     pub fn with_connection_id(mut self, length: Option<usize>) -> Self {
         self.connection_id = length;
         self
@@ -845,7 +846,9 @@ impl ConfigBuilder {
             // here. Where a hello is for DTLS 1.3 alone it carries the extension even when
             // no connection id was asked for (RFC 9147 section 5.1: so that the peer can
             // ask for one), unless that is switched off.
-            connection_id: if min_version == DtlsVersion::Dtls1_3 {
+            // A server answers the offer of a DTLS 1.3 client whatever else it speaks: its
+            // DTLS 1.2 handshake does not know the extension.
+            connection_id: if !is_client || min_version == DtlsVersion::Dtls1_3 {
                 self.connection_id
             } else {
                 None

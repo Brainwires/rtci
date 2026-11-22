@@ -145,6 +145,20 @@ fn a_side_can_ask_for_no_connection_id_and_a_side_can_leave_the_extension_out() 
         .with_connection_id(Some(4))
         .build(true, None)?;
     assert_eq!(both.connection_id, None);
+    // A server that also speaks DTLS 1.2 answers a DTLS 1.3 client's offer all the same.
+    let mut pair = Pair::new(
+        dtls13(client_builder(), Some(4)),
+        server_builder().with_cookie_exchange(false),
+    )?
+    .complete();
+    let ((client_local, _), (server_local, server_remote)) = connection_ids(&mut pair);
+    assert_eq!(client_local.len(), 4);
+    assert_eq!(server_remote, client_local);
+    assert!(
+        server_local.is_empty(),
+        "the server asks for none by default"
+    );
+    assert_eq!(pair.server_sends(b"to the id"), vec![b"to the id".to_vec()]);
     Ok(())
 }
 
