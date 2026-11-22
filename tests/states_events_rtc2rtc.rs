@@ -579,6 +579,90 @@ fn gathering_is_announced_once_per_ice_generation() -> Result<()> {
     Ok(())
 }
 
+/// W3C 5.6 and restartIce: every ICE generation gathers anew and ends anew. Two restarts in a
+/// row (each completed by an answer) give three generations, and each announces "gathering",
+/// its own candidates with its own ufrag, then the empty candidate, "complete" and the null
+/// candidate. A candidate the agent kept across the restart and the application gathers
+/// again is announced for the new generation (it was dropped silently as a duplicate, so the
+/// peer, which discards the old generation's candidates, never learned it).
+#[test]
+fn each_ice_restart_gathers_and_ends_its_own_generation() -> Result<()> {
+    let now = Instant::now();
+    let mut offerer = RTCPeerConnectionBuilder::new().build(now)?;
+    let mut answerer = RTCPeerConnectionBuilder::new().build(now)?;
+    offerer.create_data_channel("d", None)?;
+    let drain = |pc: &mut RTCPeerConnection| {
+        let mut sequence = Vec::new();
+        while let Some(event) = pc.poll_event() {
+            match &event {
+                RTCPeerConnectionEvent::OnIceCandidateEvent(e) => {
+                    sequence.push(match &e.candidate {
+                        Some(c) if c.end_of_candidates => {
+                            format!("end:{}", c.username_fragment.clone().unwrap_or_default())
+                        }
+                        Some(c) => format!(
+                            "candidate:{}",
+                            c.username_fragment.clone().unwrap_or_default()
+                        ),
+                        None => "null".to_owned(),
+                    })
+                }
+                other => {
+                    if let Some(l) = label(other).filter(|l| l.starts_with("gathering:")) {
+                        sequence.push(l);
+                    }
+                }
+            }
+        }
+        sequence
+    };
+    let mut ufrags = Vec::new();
+    for generation in 0..3 {
+        if generation > 0 {
+            offerer.restart_ice();
+        }
+        let offer = offerer.create_offer(None)?;
+        offerer.set_local_description(now, offer.clone())?;
+        let ufrag = offer
+            .sdp
+            .lines()
+            .find_map(|l| l.strip_prefix("a=ice-ufrag:"))
+            .map(str::to_owned)
+            .expect("ufrag");
+        assert!(
+            !ufrags.contains(&ufrag),
+            "generation {generation} reuses {ufrag}"
+        );
+        ufrags.push(ufrag.clone());
+        assert_eq!(
+            drain(&mut offerer),
+            ["gathering:gathering"],
+            "generation {generation}"
+        );
+        // The same host candidate every generation (the agent keeps it across a restart): it
+        // is announced once per generation, a second add in the same one is silent.
+        offerer.add_local_candidate(host("10.0.0.1:5000".parse()?)?)?;
+        offerer.add_local_candidate(host("10.0.0.1:5000".parse()?)?)?;
+        offerer.add_local_candidate(RTCIceCandidateInit::default())?;
+        assert_eq!(
+            drain(&mut offerer),
+            [
+                format!("candidate:{ufrag}"),
+                format!("end:{ufrag}"),
+                "gathering:complete".to_owned(),
+                "null".to_owned()
+            ],
+            "generation {generation}"
+        );
+        answerer.set_remote_description(now, offer)?;
+        let answer = answerer.create_answer(None)?;
+        answerer.set_local_description(now, answer.clone())?;
+        offerer.set_remote_description(now, answer)?;
+        drain(&mut offerer);
+    }
+    Ok(())
+}
+
 /// W3C restartIce (4.4.2-69 to -71) and the negotiation-needed check's credentials step: the
 /// call raises negotiation-needed, and every offer restarts ICE until an answer has replaced
 /// the credentials, even after an offer was discarded. The new generation gathers anew.
@@ -728,5 +812,159 @@ fn gathering_finished_before_the_local_description_stays_complete() -> Result<()
     let offer = pc.create_offer(None)?;
     pc.set_local_description(now, offer)?;
     assert_eq!(pc.ice_gathering_state(), RTCIceGatheringState::Complete);
+    Ok(())
+}
+
+/// W3C 4.3.4 / 5.6.4 "completed": the ICE transport finished gathering, received the remote
+/// end-of-candidates and found a connection. Before both indications it stays "connected";
+/// after them both sides complete. Each state is announced once (4.4.1.3: no event when the
+/// derived state equals the current one). The ICE transport reports its local candidates and
+/// the selected pair names this side's candidate as `local` and the peer's as `remote` (5.6,
+/// 5.6.2).
+#[test]
+fn ice_completes_only_after_both_ends_of_candidates() -> Result<()> {
+    let start = Instant::now();
+    let (offerer_addr, answerer_addr): (SocketAddr, SocketAddr) =
+        ("127.0.0.1:51110".parse()?, "127.0.0.1:51111".parse()?);
+    let mut offerer = Peer::new(offerer_addr, RTCDtlsRole::Client, start)?;
+    let mut answerer = Peer::new(answerer_addr, RTCDtlsRole::Server, start)?;
+    offerer.pc.create_data_channel("probe", None)?;
+    negotiate(&mut offerer, &mut answerer, start, |sdp| sdp)?;
+    let connected = |p: &Peer| p.pc.connection_state() == RTCPeerConnectionState::Connected;
+    let now = run(&mut offerer, &mut answerer, start, start, |a, b| {
+        connected(a) && connected(b)
+    })?;
+    for peer in [&offerer, &answerer] {
+        assert_eq!(
+            peer.pc.ice_connection_state(),
+            RTCIceConnectionState::Connected,
+            "no end-of-candidates yet"
+        );
+    }
+
+    for peer in [&mut offerer, &mut answerer] {
+        peer.pc
+            .add_local_candidate(RTCIceCandidateInit::default())?;
+        peer.pc.add_remote_candidate(RTCIceCandidateInit {
+            sdp_mid: Some("0".to_owned()),
+            ..Default::default()
+        })?;
+    }
+    let completed = |p: &Peer| p.pc.ice_connection_state() == RTCIceConnectionState::Completed;
+    run(&mut offerer, &mut answerer, now, now, |a, b| {
+        completed(a) && completed(b)
+    })?;
+    for (peer, own, other) in [
+        (&mut offerer, offerer_addr, answerer_addr),
+        (&mut answerer, answerer_addr, offerer_addr),
+    ] {
+        peer.drain_events();
+        assert_eq!(
+            peer.pc.ice_connection_state(),
+            RTCIceConnectionState::Completed
+        );
+        let labels = peer.state_labels();
+        for once in ["ice:connected", "ice:completed", "connection:connected"] {
+            assert_eq!(
+                labels.iter().filter(|l| *l == once).count(),
+                1,
+                "{once} once: {labels:?}"
+            );
+        }
+        let ice = peer.pc.sctp().expect("sctp").transport().ice_transport();
+        assert_eq!(ice.state(), RTCIceTransportState::Completed);
+        let local = ice.get_local_candidates();
+        assert!(
+            local
+                .iter()
+                .any(|c| c.address == own.ip().to_string() && c.port == own.port()),
+            "{local:?}"
+        );
+        let pair = ice.get_selected_candidate_pair().expect("a selected pair");
+        assert_eq!(
+            (pair.local().address.as_str(), pair.local().port),
+            (own.ip().to_string().as_str(), own.port())
+        );
+        assert_eq!(
+            (pair.remote().address.as_str(), pair.remote().port),
+            (other.ip().to_string().as_str(), other.port())
+        );
+    }
+    Ok(())
+}
+
+/// W3C 6.1.1.3 SCTP connected procedure: the transport's `statechange` to "connected" fires
+/// before the `open` events of the channels it carries.
+#[test]
+fn the_sctp_transport_connects_before_its_channels_open() -> Result<()> {
+    let start = Instant::now();
+    let mut offerer = Peer::new("127.0.0.1:51120".parse()?, RTCDtlsRole::Client, start)?;
+    let mut answerer = Peer::new("127.0.0.1:51121".parse()?, RTCDtlsRole::Server, start)?;
+    offerer.pc.create_data_channel("first", None)?;
+    negotiate(&mut offerer, &mut answerer, start, |sdp| sdp)?;
+    let opened = |p: &Peer| {
+        p.events.iter().any(|e| {
+            matches!(
+                e,
+                RTCPeerConnectionEvent::OnDataChannel(RTCDataChannelEvent::OnOpen(_))
+            )
+        })
+    };
+    run(&mut offerer, &mut answerer, start, start, |a, b| {
+        opened(a) && opened(b)
+    })?;
+    for peer in [&offerer, &answerer] {
+        let sctp = peer
+            .events
+            .iter()
+            .position(|e| {
+                matches!(
+                    e,
+                    RTCPeerConnectionEvent::OnSctpTransportStateChange(
+                        RTCSctpTransportState::Connected
+                    )
+                )
+            })
+            .expect("sctp connected");
+        let open = peer
+            .events
+            .iter()
+            .position(|e| {
+                matches!(
+                    e,
+                    RTCPeerConnectionEvent::OnDataChannel(RTCDataChannelEvent::OnOpen(_))
+                )
+            })
+            .expect("open");
+        assert!(sctp < open, "{:?}", peer.events);
+    }
+    Ok(())
+}
+
+/// W3C 6.1.2 "closed": the SCTP transport is closed when its DTLS transport goes to "closed",
+/// here because the peer closed its connection (close_notify).
+#[test]
+fn the_sctp_transport_closes_with_its_dtls_transport() -> Result<()> {
+    let start = Instant::now();
+    let mut offerer = Peer::new("127.0.0.1:51130".parse()?, RTCDtlsRole::Client, start)?;
+    let mut answerer = Peer::new("127.0.0.1:51131".parse()?, RTCDtlsRole::Server, start)?;
+    offerer.pc.create_data_channel("probe", None)?;
+    negotiate(&mut offerer, &mut answerer, start, |sdp| sdp)?;
+    let sctp_connected = |p: &Peer| {
+        p.pc.sctp()
+            .is_some_and(|s| s.state() == RTCSctpTransportState::Connected)
+    };
+    let now = run(&mut offerer, &mut answerer, start, start, |a, b| {
+        sctp_connected(a) && sctp_connected(b)
+    })?;
+    offerer.pc.close()?;
+    let dtls_closed = |p: &Peer| {
+        p.pc.sctp()
+            .is_some_and(|s| s.transport().state() == RTCDtlsTransportState::Closed)
+    };
+    run(&mut offerer, &mut answerer, now, now, |_, b| dtls_closed(b))?;
+    let sctp = answerer.pc.sctp().expect("sctp");
+    assert_eq!(sctp.transport().state(), RTCDtlsTransportState::Closed);
+    assert_eq!(sctp.state(), RTCSctpTransportState::Closed);
     Ok(())
 }

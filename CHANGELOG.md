@@ -1013,6 +1013,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behaviour changes
 
+- **rtp receiver** (W3C webrtc-pc 4.4.1.4): `RTCRtpReceiver::get_parameters` lists no codecs
+  once a description negotiated a direction that does not receive (sendonly, inactive): W3C
+  `[[ReceiveCodecs]]` is then empty. It listed every engine codec
+  (`get_parameters_reports_the_codecs_negotiated_for_each_way`).
+
+- **ice restart**: a local candidate the agent kept across an ICE restart (the default,
+  `discard_local_candidates_during_ice_restart` off) and the application gathers again for the
+  new generation is announced in an `OnIceCandidateEvent` with the new username fragment, once
+  per generation. It was dropped silently as a duplicate, so a trickling peer, which discards
+  the old generation's candidates (RFC 8838 section 9), never learned it
+  (`each_ice_restart_gathers_and_ends_its_own_generation`).
+
 - **rtcp_session**: without `b=` lines the session bandwidth is the nominal one of the media
   bound (`RTCP_SESSION_NOMINAL_VIDEO_BANDWIDTH` 1 Mbit/s with video,
   `RTCP_SESSION_NOMINAL_AUDIO_BANDWIDTH` 64 kbit/s with audio), or the measured media rate when

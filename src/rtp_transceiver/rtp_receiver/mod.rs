@@ -302,13 +302,21 @@ impl RTCRtpReceiver<'_> {
     ///
     /// Returns a reference to the RTP receive parameters.
     pub fn get_parameters(&mut self) -> &RTCRtpReceiveParameters {
+        use crate::rtp_transceiver::RTCRtpTransceiverDirection;
+        // W3C 4.4.1.4: once a description negotiated a direction without receiving
+        // (sendonly, inactive), [[ReceiveCodecs]] is empty.
+        let transceiver = &mut self.peer_connection.rtp_transceivers[self.id.0];
+        let receiving = !matches!(
+            transceiver.current_direction(),
+            RTCRtpTransceiverDirection::Sendonly | RTCRtpTransceiverDirection::Inactive
+        );
         // peer_connection is mutable borrow, its rtp_transceivers won't be resized and
         // the direction won't be changed too, so, unwrap() here is safe.
-        self.peer_connection.rtp_transceivers[self.id.0]
+        transceiver
             .receiver_mut()
             .as_mut()
             .unwrap()
-            .get_parameters(&self.peer_connection.media_engine)
+            .get_public_parameters(&self.peer_connection.media_engine, receiving)
     }
 
     /// Returns an iterator over the contributing sources for this receiver.

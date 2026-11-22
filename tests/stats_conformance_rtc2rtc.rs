@@ -122,6 +122,8 @@ struct Datagram {
     stun: Option<u16>,
     /// The network dropped it.
     dropped: bool,
+    /// When the network handed it to the receiving peer (`handle_read`), if it did.
+    delivered: Option<Instant>,
 }
 
 /// The STUN message type of a datagram that is STUN.
@@ -349,7 +351,8 @@ struct World {
     /// How long the network takes to deliver a datagram.
     delay: Duration,
     /// The datagrams on their way: when each arrives, at which peer, and the datagram.
-    in_transit: Vec<(Instant, usize, TransportContext, BytesMut)>,
+    /// (arrival, receiving peer, transport, datagram, index in `wire`).
+    in_transit: Vec<(Instant, usize, TransportContext, BytesMut, usize)>,
     /// A failed connection is an error (off for a test that makes one fail).
     fail_on_failed: bool,
     /// The offerer's transceiver.
@@ -388,23 +391,26 @@ impl World {
                         rtcp,
                         stun: stun_type(&data),
                         dropped: dropped || to.is_none(),
+                        delivered: None,
                     });
+                    let index = self.wire.len() - 1;
                     if let Some(to) = to
                         && !dropped
                     {
                         self.in_transit
-                            .push((self.now + self.delay, to, transport, data));
+                            .push((self.now + self.delay, to, transport, data, index));
                     }
                 }
             }
             // Delivered in the order they were sent.
             let mut waiting = Vec::new();
-            for (arrives, to, transport, data) in std::mem::take(&mut self.in_transit) {
+            for (arrives, to, transport, data, index) in std::mem::take(&mut self.in_transit) {
                 if arrives > self.now {
-                    waiting.push((arrives, to, transport, data));
+                    waiting.push((arrives, to, transport, data, index));
                     continue;
                 }
                 progressed = true;
+                self.wire[index].delivered = Some(self.now);
                 let _ = self.peers[to].pc.handle_read(TaggedBytesMut {
                     now: self.now,
                     transport: TransportContext {
@@ -1554,7 +1560,7 @@ fn a_candidate_pairs_counters_are_the_checks_and_the_payload_on_the_wire() -> Re
             .wire
             .iter()
             .filter(|d| d.from == other && d.class != Class::Stun)
-            .filter(arrived)
+            .filter(|d| d.delivered.is_some())
             .collect();
         assert_eq!(
             u(pair, "packetsSent"),
@@ -1574,14 +1580,21 @@ fn a_candidate_pairs_counters_are_the_checks_and_the_payload_on_the_wire() -> Re
             received.iter().map(|d| d.len as u64).sum::<u64>()
         );
         let last_sent = sent.last().expect("payload was sent").at;
-        let last_received = received.last().expect("payload was received").at + ONE_WAY;
+        // The instant the network handed the datagram to the engine, which can be later than
+        // `at + ONE_WAY` (the clock moves at least 1 ms a step): the engine stamps the pair
+        // with the `now` of that `handle_read`, read from no clock.
+        let last_received = received
+            .last()
+            .and_then(|d| d.delivered)
+            .expect("payload was received");
         for (member, at) in [
             ("lastPacketSentTimestamp", last_sent),
             ("lastPacketReceivedTimestamp", last_received),
         ] {
             let ago = f(pair, "timestamp") - f(pair, member);
+            // Exact up to the f64 rounding of epoch milliseconds (about 0.2 us here).
             assert!(
-                close_to(ago, millis(now - at), 0.5),
+                close_to(ago, millis(now - at), 0.001),
                 "{member} is {ago} ms before the report, the wire says {} ms",
                 millis(now - at)
             );
