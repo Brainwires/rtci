@@ -374,3 +374,230 @@ fn flexfec_recovery_fields_at_their_extremes_recover_nothing_and_do_not_panic() 
     all_ones.payload = Bytes::from(vec![0xFF; whole.payload.len()]);
     assert!(recover_with(&media, all_ones).is_empty());
 }
+
+// ---------------------------------------------------------------------------------------------
+// Window bookkeeping: sequence-number wrap, masks that reach outside the window, floods
+// ---------------------------------------------------------------------------------------------
+
+/// A one-level ULPFEC packet protecting the packets `mask` names from `sn_base`, carrying
+/// `payload` as its level and the recovery fields of a single 8-octet packet.
+fn ulpfec_for(sn_base: u16, mask: u16, payload: &[u8]) -> Vec<u8> {
+    let mut packet = vec![0x00, 0x60];
+    packet.extend_from_slice(&sn_base.to_be_bytes());
+    packet.extend_from_slice(&[0, 0, 0, 0]);
+    packet.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+    packet.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+    packet.extend_from_slice(&mask.to_be_bytes());
+    packet.extend_from_slice(payload);
+    packet
+}
+
+/// The mask counts from the SN base modulo 2^16: a block that straddles 65535 is one block.
+#[test]
+fn a_ulpfec_mask_that_straddles_the_sequence_number_wrap_recovers_across_it() {
+    // Packets 65534, 65535, 0, 1 of equal size; FEC is their XOR, computed here by hand.
+    let packets: Vec<rtp::Packet> = [65534u16, 65535, 0, 1]
+        .iter()
+        .map(|sequence| media(*sequence, 16))
+        .collect();
+    let mut level = vec![0u8; 16];
+    let mut timestamp = 0u32;
+    for packet in &packets {
+        for (target, octet) in level.iter_mut().zip(packet.payload.iter()) {
+            *target ^= octet;
+        }
+        timestamp ^= packet.header.timestamp;
+    }
+    let mut fec = ulpfec_for(65534, 0xF000, &level);
+    fec[1] = 0x00; // four equal payload types and markers cancel
+    fec[4..8].copy_from_slice(&timestamp.to_be_bytes());
+    fec[8..10].copy_from_slice(&[0, 0]); // four equal lengths cancel
+
+    // Packet 0, just past the wrap, is the one lost.
+    let mut decoder = UlpfecDecoder::new(MEDIA_SSRC);
+    for packet in packets
+        .iter()
+        .filter(|packet| packet.header.sequence_number != 0)
+    {
+        assert!(decoder.push_media(packet).is_empty());
+    }
+    let recovered = decoder.push_fec(&fec).expect("well formed");
+    assert_eq!(1, recovered.len());
+    assert_eq!(0, recovered[0].header.sequence_number);
+    assert_eq!(packets[2].payload, recovered[0].payload);
+    assert_eq!(packets[2].header.timestamp, recovered[0].header.timestamp);
+}
+
+/// A FEC packet whose SN base is at the edge of the window and whose mask names a packet
+/// beyond it: nothing is rebuilt out there and no state is kept for it. (A mask of a single
+/// packet "recovers" that packet from the FEC payload alone, so without the bound a peer could
+/// place packets, and table entries, up to 47 sequence numbers outside the window.)
+#[test]
+fn a_ulpfec_mask_that_names_a_packet_outside_the_window_rebuilds_nothing() {
+    let window = rtc_interceptor::ULPFEC_MEDIA_WINDOW;
+    for newest in [1000u16, 65_500, 20] {
+        let mut decoder = UlpfecDecoder::new(MEDIA_SSRC);
+        decoder.push_media(&media(newest, 8));
+
+        // SN base inside the window, bit 15 of the mask 15 packets further: outside.
+        let outside = ulpfec_for(newest.wrapping_add(window - 5), 0x0001, &[7u8; 8]);
+        let recovered = decoder.push_fec(&outside).unwrap_or_default();
+        assert!(recovered.is_empty(), "newest {newest}: {recovered:?}");
+        assert_eq!(1, decoder.held_media_packets(), "no entry for the stranger");
+
+        // The same mask one window nearer is inside, and that packet is rebuilt.
+        let inside = ulpfec_for(newest.wrapping_add(window - 20), 0x0001, &[7u8; 8]);
+        let recovered = decoder.push_fec(&inside).unwrap_or_default();
+        assert_eq!(1, recovered.len(), "newest {newest}");
+        assert_eq!(
+            newest.wrapping_add(window - 5),
+            recovered[0].header.sequence_number
+        );
+    }
+}
+
+/// Floods of FEC packets that protect nothing the decoder has: the tables stay at their bounds
+/// whatever the SN base, the mask and the lengths say.
+#[test]
+fn a_flood_of_ulpfec_packets_that_reference_nothing_keeps_the_tables_bounded() {
+    let window = usize::from(rtc_interceptor::ULPFEC_MEDIA_WINDOW);
+    let mut decoder = UlpfecDecoder::new(MEDIA_SSRC);
+    decoder.push_media(&media(30_000, 8));
+
+    let mut state = 0x1234_5678u32;
+    let mut next = || {
+        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        state
+    };
+    for _ in 0..20_000 {
+        let sn_base = (next() >> 8) as u16;
+        let mask = (next() >> 12) as u16 | 1;
+        let length = (next() >> 20) as usize % 64;
+        let payload = vec![(next() >> 16) as u8; length];
+        let mut fec = ulpfec_for(sn_base, mask, &payload);
+        // Length recovery at random too.
+        fec[8..10].copy_from_slice(&((next() >> 10) as u16).to_be_bytes());
+        for packet in decoder.push_fec(&fec).unwrap_or_default() {
+            assert_eq!(MEDIA_SSRC, packet.header.ssrc);
+        }
+        assert!(decoder.held_fec_packets() <= rtc_interceptor::ULPFEC_MAX_HELD_FEC);
+        assert!(decoder.held_media_packets() <= 2 * window + 1);
+    }
+}
+
+fn flexfec_decoder() -> rtc_interceptor::FlexFecDecoder {
+    let mut decoder = rtc_interceptor::FlexFecDecoder::new(
+        rtc_interceptor::FlexFecDecoderConfig::for_repair_window(std::time::Duration::from_secs(1)),
+    );
+    decoder.add_source_stream(MEDIA_SSRC);
+    decoder
+}
+
+/// A flexible-mask repair packet protecting the single packet `sn_base`, whose payload is
+/// `body`: with one packet in the mask the repair packet is that packet's own image.
+fn flexfec_repair_of_one(sequence_number: u16, sn_base: u16, body: &[u8]) -> rtp::Packet {
+    let mut payload = vec![0x00, 0x60];
+    payload.extend_from_slice(&(body.len() as u16).to_be_bytes());
+    payload.extend_from_slice(&[0, 0, 0, 1]);
+    payload.extend_from_slice(&sn_base.to_be_bytes());
+    payload.extend_from_slice(&[0x40, 0x00]); // k=0, bit 0: the packet at the SN base
+    payload.extend_from_slice(body);
+    rtp::Packet {
+        header: rtp::header::Header {
+            version: 2,
+            payload_type: 98,
+            sequence_number,
+            ssrc: REPAIR_SSRC,
+            csrc: vec![MEDIA_SSRC],
+            ..Default::default()
+        },
+        payload: Bytes::from(payload),
+    }
+}
+
+/// RFC 8627 section 4.2.2.1: the SN base is a 16-bit sequence number, and the block it starts
+/// may run across 65535. A repair packet for the packet after 65535 rebuilds sequence number 0.
+#[test]
+fn a_flexfec_block_across_the_sequence_number_wrap_is_placed_after_it() {
+    let now = Instant::now();
+    let mut decoder = flexfec_decoder();
+    for sequence_number in [65_533u16, 65_534, 65_535] {
+        decoder.push_source(now, &media(sequence_number, 10));
+    }
+
+    let recovered = decoder.push_repair(now, &flexfec_repair_of_one(1, 0, &[5u8; 10]));
+    assert_eq!(1, recovered.len());
+    assert_eq!(0, recovered[0].header.sequence_number);
+    assert_eq!(MEDIA_SSRC, recovered[0].header.ssrc);
+
+    // And the stream carries on past the wrap: 1 is new, 0 is now held.
+    assert!(decoder.push_source(now, &media(1, 10)).is_empty());
+    assert_eq!(5, decoder.held_source_packets());
+}
+
+/// A repair packet whose block lies outside what the stream's buffer holds, behind or ahead,
+/// is not kept and rebuilds nothing; the same packet next to the stream does.
+#[test]
+fn a_flexfec_block_outside_the_window_is_ignored() {
+    let now = Instant::now();
+    let mut decoder = flexfec_decoder();
+    let window = decoder.config().max_source_packets as u16;
+    decoder.push_source(now, &media(10_000, 10));
+
+    for (index, sn_base) in [
+        10_000u16.wrapping_add(window + 1),
+        10_000u16.wrapping_sub(window + 1),
+        10_000u16.wrapping_add(20_000),
+        10_000u16.wrapping_sub(20_000),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let recovered = decoder.push_repair(
+            now,
+            &flexfec_repair_of_one(index as u16, sn_base, &[5u8; 10]),
+        );
+        assert!(recovered.is_empty(), "a block at {sn_base} was rebuilt");
+        assert_eq!(0, decoder.pending_repair_packets());
+    }
+    assert_eq!(4, decoder.stats().ignored_repair_packets);
+    assert_eq!(1, decoder.held_source_packets());
+
+    let recovered = decoder.push_repair(now, &flexfec_repair_of_one(9, 10_001, &[5u8; 10]));
+    assert_eq!(1, recovered.len());
+    assert_eq!(10_001, recovered[0].header.sequence_number);
+}
+
+/// Floods of repair packets that protect nothing the decoder holds, in both layouts and with
+/// every field at random: the tables stay inside the configured bounds.
+#[test]
+fn a_flood_of_flexfec_repair_packets_that_reference_nothing_keeps_the_tables_bounded() {
+    let now = Instant::now();
+    let mut decoder = flexfec_decoder();
+    let bounds = *decoder.config();
+    for sequence_number in 0..8u16 {
+        decoder.push_source(now, &media(5_000 + sequence_number, 20));
+    }
+
+    let mut state = 0x9E37_79B9u32;
+    let mut next = || {
+        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        state
+    };
+    for index in 0..20_000u32 {
+        let length = 12 + (next() >> 20) as usize % 80;
+        let mut payload: Vec<u8> = (0..length).map(|_| (next() >> 16) as u8).collect();
+        // R = 0 always (a repair packet); F at random.
+        payload[0] &= 0x7F;
+        let mut packet = flexfec_repair_of_one(index as u16, 0, &[]);
+        packet.payload = Bytes::from(payload);
+        if index % 3 == 0 {
+            packet.header.csrc = vec![MEDIA_SSRC, MEDIA_SSRC];
+        }
+        for recovered in decoder.push_repair(now, &packet) {
+            assert_eq!(MEDIA_SSRC, recovered.header.ssrc);
+        }
+        assert!(decoder.pending_repair_packets() <= bounds.max_repair_packets);
+        assert!(decoder.held_source_packets() <= bounds.max_source_packets);
+    }
+}

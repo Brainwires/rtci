@@ -404,6 +404,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (scaled by the response time), and back to multiplicative increase when the received rate
   rises above them; the controller stayed additive for ever after the first over-use. It starts
   in the Increase state.
+- **fec**: the ULPFEC encoder protects the packets as sent, in RED carriage and as a separate
+  stream (`UlpfecSendInterceptor::wire_tap`). With the tap, a media packet gets its wire
+  sequence number and RED wrapping as it passes the encoder, the sequence numbers its block's
+  FEC packets will take are set aside there, and the FEC is computed from the wire images when
+  the block's last packet has left and sent in those numbers: no gap and no duplicate on the
+  media stream, and a FEC packet may leave a few packets after its number when a pacer holds
+  media in between. A media packet dropped before the wire does not stall the encoder.
+- **fec decoders**: the ULPFEC decoder keeps no state for, and rebuilds nothing at, a sequence
+  number its window does not cover (a mask reaches 47 packets past an SN base at the window's
+  edge); the RFC 8627 decoder ignores a repair packet whose block lies wholly outside what the
+  stream's buffer holds.
 - **fec**: the RFC 8627 encoder protects the packets as sent too
   (`FlexFecSendInterceptor::wire_tap`), and keeps the wire image for its retransmissions.
 - **cc**: TMMBR is read from, and TMMBN written as, the typed packets of `rtc-rtcp`
