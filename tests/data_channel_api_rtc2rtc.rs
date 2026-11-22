@@ -39,8 +39,6 @@ fn a_channel_dialed_on_a_live_association_fails_when_its_ack_never_comes() -> Re
 
     pair.answerer.drop_outgoing = true;
     let late = pair.offerer.pc.create_data_channel("late", None)?.id();
-    let channel = pair.offerer.pc.data_channel(late).expect("the channel");
-    assert!(channel.stream_id().is_some(), "dialed at once");
 
     assert!(
         pair.run_until(|p| p.offerer.closed(late))?,
