@@ -33,13 +33,13 @@ The subcrates are in scope for this policy, not an afterthought.
 
 ## Inventory
 
-123 public enums, all with an explicit decision:
+125 public enums, all with an explicit decision:
 
 | Area | `#[non_exhaustive]` | Kept exhaustive |
 |---|---:|---:|
 | `rtc/src` | 34 | 0 |
-| protocol subcrates | 70 | 19 |
-| **total** | **104** | **19** |
+| protocol subcrates | 72 | 19 |
+| **total** | **106** | **19** |
 
 ### `rtc/src` — all 34 marked
 

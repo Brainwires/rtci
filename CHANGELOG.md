@@ -105,9 +105,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (ADDRESS-ERROR-CODE, 0x8001), `proto::icmp` (ICMP, 0x8004); `EvenPort::reserve_port` is
   public; `Lifetime` sends a duration past 32 bits of seconds as the largest value instead of
   its low bits.
+- **turn**: TCP allocations, client side (RFC 6062). On a client that reaches the server over
+  TCP or TLS, `allocate_with` with `AllocateOptions::transport = RelayTransport::Tcp` asks for
+  a TCP relayed address (REQUESTED-TRANSPORT 6; refused over UDP and with DONT-FRAGMENT,
+  EVEN-PORT or RESERVATION-TOKEN). `Relay::connect` sends Connect for a peer (one outstanding
+  per peer address, ten seconds after a 447) and `Event::ConnectResponse` carries the
+  CONNECTION-ID; `Event::ConnectionAttempt` reports a permitted peer's connection.
+  `Relay::data_connection` gives a sans-I/O `DataConnection` for a new TCP connection the
+  application opens to the same server address from another local address: it sends
+  ConnectionBind with the CONNECTION-ID and the control connection's credential (30 s to be
+  answered; a 401 or 438 with a nonce is answered once), reports
+  `DataConnectionEvent::Bound`, and from then on passes the peer's bytes as they are, both
+  ways. `Event::ConnectError`; `proto::connid` (CONNECTION-ID, 0x002a); a
+  `data_connection_handle_read` fuzz target.
 - **test-env**: a third coturn (port 3480, an IPv4 and an IPv6 relay address, two users) and
   `tests/testenv_turn_client.rs`: the TURN client's Allocate options, IPv6 and dual
-  allocations, 440 and 441 against a real server.
+  allocations, 440 and 441, and a TCP allocation with a connection out and one in, against a
+  real server.
 
 ## [0.22.0+brainwires.5] - 2026-11-20
 
