@@ -1,7 +1,7 @@
 use crate::peer_connection::configuration::UNSPECIFIED_STR;
 use crate::peer_connection::configuration::media_engine::*;
 use crate::rtp_transceiver::rtp_sender::rtcp_parameters::{
-    RTCP_FB_ACK_CCFB, RTCPFeedback, TYPE_RTCP_FB_ACK, TYPE_RTCP_FB_TRANSPORT_CC,
+    RTCP_FB_ACK_CCFB, RTCPFeedback, TYPE_RTCP_FB_ACK, TYPE_RTCP_FB_CCM, TYPE_RTCP_FB_TRANSPORT_CC,
 };
 use crate::rtp_transceiver::rtp_sender::rtp_codec_parameters::RTCRtpCodecParameters;
 use crate::rtp_transceiver::rtp_sender::rtp_encoding_parameters::RTCRtpEncodingParameters;
@@ -97,11 +97,12 @@ impl RTCRtpCodec {
         let mime_type = self.mime_type.to_lowercase();
         if mime_type == MIME_TYPE_H264.to_lowercase() {
             // RFC 6184 6.2: the negotiated packetization mode decides whether STAP-A and FU-A
-            // may be sent at all; an absent parameter means mode 0.
+            // may be sent at all; an absent parameter means mode 0, mode 2 is interleaved
+            // (section 6.4), and a value above 2 is no mode (section 8.1).
             Ok(Box::new(
-                rtp::codec::h264::H264Payloader::with_packetization_mode(h264_packetization_mode(
-                    &self.sdp_fmtp_line,
-                )),
+                rtp::codec::h264::H264Payloader::try_with_packetization_mode(
+                    h264_packetization_mode(&self.sdp_fmtp_line),
+                )?,
             ))
         } else if mime_type == MIME_TYPE_HEVC.to_lowercase() {
             Ok(Box::<rtp::codec::h265::HevcPayloader>::default())
@@ -129,16 +130,121 @@ impl RTCRtpCodec {
             Err(Error::ErrNoPayloaderForCodec)
         }
     }
+
+    /// Creates an H.264 depacketizer for a stream received with this codec, configured from
+    /// the sender's stream properties in its fmtp line: with `packetization-mode=2` NAL units
+    /// leave in decoding order through a de-interleaving buffer sized by
+    /// `sprop-interleaving-depth` and `sprop-max-don-diff` (RFC 6184 sections 7.2.2, 8.1).
+    ///
+    /// Use it on a remote track's codec: its fmtp line is the one the sender described.
+    ///
+    /// # Errors
+    ///
+    /// `Error::ErrNoPayloaderForCodec` for a codec other than H.264; an error for a
+    /// `packetization-mode` other than 0, 1 or 2.
+    pub fn h264_depacketizer(&self) -> Result<rtp::codec::h264::H264Packet> {
+        if !self.mime_type.eq_ignore_ascii_case(MIME_TYPE_H264) {
+            return Err(Error::ErrNoPayloaderForCodec);
+        }
+        let packet = rtp::codec::h264::H264Packet::default();
+        match h264_packetization_mode(&self.sdp_fmtp_line) {
+            0 | 1 => Ok(packet),
+            2 => Ok(
+                packet.with_deinterleaving(rtp::codec::h264::H264DeinterleavingBuffer::new(
+                    fmtp_number(&self.sdp_fmtp_line, "sprop-interleaving-depth").unwrap_or(0),
+                    fmtp_number(&self.sdp_fmtp_line, "sprop-max-don-diff"),
+                )),
+            ),
+            other => Err(Error::Other(format!(
+                "H.264 packetization-mode is 0, 1 or 2, not {other}"
+            ))),
+        }
+    }
+
+    /// Creates an H.265 depacketizer for a stream received with this codec, configured from
+    /// the sender's stream properties in its fmtp line: with `sprop-max-don-diff` above 0
+    /// the DONL and DOND fields are read and NAL units leave in decoding order through a
+    /// de-packetization buffer of `sprop-depack-buf-nalus` (RFC 7798 sections 6, 7.1).
+    ///
+    /// # Errors
+    ///
+    /// `Error::ErrNoPayloaderForCodec` for a codec other than H.265; an error for a `tx-mode`
+    /// other than SRST, which the depacketizer does not do (RFC 7798 section 7.1: "If the
+    /// value is equal to "MRST", MRST MUST be in use").
+    pub fn h265_depacketizer(&self) -> Result<rtp::codec::h265::H265Packet> {
+        if !self.mime_type.eq_ignore_ascii_case(MIME_TYPE_HEVC) {
+            return Err(Error::ErrNoPayloaderForCodec);
+        }
+        let tx_mode = fmtp_value(&self.sdp_fmtp_line, "tx-mode");
+        if tx_mode.is_some_and(|mode| !mode.eq_ignore_ascii_case("SRST")) {
+            return Err(Error::Other(format!(
+                "H.265 tx-mode {} is not supported, only SRST",
+                tx_mode.unwrap_or_default()
+            )));
+        }
+        let mut packet = rtp::codec::h265::H265Packet::default();
+        let max_don_diff = fmtp_number(&self.sdp_fmtp_line, "sprop-max-don-diff").unwrap_or(0);
+        if max_don_diff > 0 {
+            packet.with_depacketization_buffer(rtp::codec::h265::H265DepacketizationBuffer::new(
+                max_don_diff,
+                fmtp_number(&self.sdp_fmtp_line, "sprop-depack-buf-nalus").unwrap_or(0),
+            ));
+        }
+        Ok(packet)
+    }
+
+    /// The out-of-band parameter sets of the sender's stream, in the order the fmtp line
+    /// gives them: H.264 `sprop-parameter-sets` (RFC 6184 section 8.1, base64 NAL units
+    /// separated by commas), H.265 `sprop-vps`, `sprop-sps`, `sprop-pps` and `sprop-sei`
+    /// (RFC 7798 section 7.1). A decoder takes them before the first NAL unit of the stream
+    /// (RFC 6184 section 8.2.2, RFC 7798 section 7.2.2). Empty for another codec or a line
+    /// without them.
+    ///
+    /// # Errors
+    ///
+    /// A value that is not base64.
+    pub fn sprop_parameter_sets(&self) -> Result<Vec<bytes::Bytes>> {
+        use base64::Engine as _;
+        let keys: &[&str] = if self.mime_type.eq_ignore_ascii_case(MIME_TYPE_H264) {
+            &["sprop-parameter-sets"]
+        } else if self.mime_type.eq_ignore_ascii_case(MIME_TYPE_HEVC) {
+            &["sprop-vps", "sprop-sps", "sprop-pps", "sprop-sei"]
+        } else {
+            &[]
+        };
+        let mut sets = vec![];
+        for key in keys {
+            let Some(value) = fmtp_value(&self.sdp_fmtp_line, key) else {
+                continue;
+            };
+            for set in value.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                let nal_unit = base64::engine::general_purpose::STANDARD
+                    .decode(set)
+                    .map_err(|e| Error::Other(format!("{key}: {e}")))?;
+                sets.push(bytes::Bytes::from(nal_unit));
+            }
+        }
+        Ok(sets)
+    }
+}
+
+/// The value of an fmtp parameter, trimmed; parameter names compare without regard to case.
+fn fmtp_value<'a>(sdp_fmtp_line: &'a str, key: &str) -> Option<&'a str> {
+    sdp_fmtp_line
+        .split(';')
+        .filter_map(|parameter| parameter.trim().split_once('='))
+        .find(|(k, _)| k.trim().eq_ignore_ascii_case(key))
+        .map(|(_, value)| value.trim())
+}
+
+fn fmtp_number<T: std::str::FromStr>(sdp_fmtp_line: &str, key: &str) -> Option<T> {
+    fmtp_value(sdp_fmtp_line, key)?.parse().ok()
 }
 
 /// The `packetization-mode` an H.264 fmtp line names, 0 when it names none (RFC 6184 8.1).
 pub(crate) fn h264_packetization_mode(sdp_fmtp_line: &str) -> u8 {
-    sdp_fmtp_line
-        .split(';')
-        .filter_map(|parameter| parameter.trim().split_once('='))
-        .find(|(key, _)| key.trim().eq_ignore_ascii_case("packetization-mode"))
-        .and_then(|(_, value)| value.trim().parse().ok())
-        .unwrap_or(0)
+    fmtp_number::<u32>(sdp_fmtp_line, "packetization-mode")
+        .map_or(0, |mode| u8::try_from(mode).unwrap_or(u8::MAX))
 }
 
 /// Codec match quality result from fuzzy search.
@@ -470,6 +576,32 @@ pub(crate) fn find_fec_payload_type(haystack: &[RTCRtpCodecParameters]) -> Optio
 /// # Returns
 ///
 /// Vector of common feedback mechanisms
+/// `ccm tmmbr` of both lists, whatever their `smaxpr` (RFC 5104 section 7.1: "tmmbr
+/// smaxpr=<n>", the session maximum packet rate). Section 7.2: "the highest value from offer
+/// and answer SHALL be used. If the session maximum packet rate parameter is not present in an
+/// offer, it SHALL NOT be included by the answerer": `b` is the remote side's list, and
+/// without its `smaxpr` the result has none. `None` when the two are not both `ccm tmmbr`.
+fn tmmbr_intersection(a: &RTCPFeedback, b: &RTCPFeedback) -> Option<RTCPFeedback> {
+    let smaxpr = |f: &RTCPFeedback| -> Option<Option<u64>> {
+        if f.typ != TYPE_RTCP_FB_CCM {
+            return None;
+        }
+        let mut tokens = f.parameter.split_whitespace();
+        if tokens.next() != Some("tmmbr") {
+            return None;
+        }
+        Some(tokens.find_map(|t| t.strip_prefix("smaxpr=")?.parse().ok()))
+    };
+    let (ours, theirs) = (smaxpr(a)?, smaxpr(b)?);
+    Some(RTCPFeedback {
+        typ: TYPE_RTCP_FB_CCM.to_owned(),
+        parameter: match theirs {
+            Some(theirs) => format!("tmmbr smaxpr={}", ours.unwrap_or(0).max(theirs)),
+            None => "tmmbr".to_owned(),
+        },
+    })
+}
+
 pub(crate) fn rtcp_feedback_intersection(
     a: &[RTCPFeedback],
     b: &[RTCPFeedback],
@@ -481,6 +613,17 @@ pub(crate) fn rtcp_feedback_intersection(
                 && (a_feedback.parameter == b_feeback.parameter || a_feedback.typ == "trr-int")
             {
                 out.push(a_feedback.clone());
+                break;
+            }
+            // Receiver reference times, from an `a=rtcp-fb ... rrtr` line or from
+            // `a=rtcp-xr:rcvr-rtt` (RFC 3611 section 5.1): the remote side's form is kept, so
+            // that an answer repeats the form the offer used.
+            if a_feedback.typ == interceptor::RTCP_FB_RRTR && b_feeback.typ == a_feedback.typ {
+                out.push(b_feeback.clone());
+                break;
+            }
+            if let Some(tmmbr) = tmmbr_intersection(a_feedback, b_feeback) {
+                out.push(tmmbr);
                 break;
             }
         }
