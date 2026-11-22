@@ -207,9 +207,12 @@ fn channels_of_different_priority_deliver_in_order_under_either_scheduler() -> R
     Ok(())
 }
 
+/// A setting engine to build a peer from.
+type Settings = fn() -> SettingEngineBuilder;
+
 /// The DTLS versions the tests run under: the default, with which two engines negotiate
 /// DTLS 1.3, and a cipher suite list without the TLS 1.3 suites, which gives DTLS 1.2.
-fn dtls_versions() -> [(&'static str, fn() -> SettingEngineBuilder); 2] {
+fn dtls_versions() -> [(&'static str, Settings); 2] {
     [
         ("DTLS 1.3", default),
         ("DTLS 1.2", || {
