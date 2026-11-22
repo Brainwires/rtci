@@ -775,9 +775,23 @@ mod tests {
         };
         h.client.allocate(start).unwrap();
         h.drain();
-        // 401 with NONCE and REALM, then success with a relayed address and a lifetime.
+        // 401 with NONCE and REALM, then a signed success with a relayed address and a
+        // lifetime.
         h.response(&[0x01 | 0x08 | 0x10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, b'n']);
-        h.response(&[0x02 | 0x04, 1, 192, 0, 2, 99, 0x13, 0x88, 0, 2, 0x58, 0]);
+        h.response(&[
+            0x02 | 0x04 | 0x20,
+            1,
+            192,
+            0,
+            2,
+            99,
+            0x13,
+            0x88,
+            0,
+            2,
+            0x58,
+            0,
+        ]);
         assert_eq!(h.relays.len(), 1, "allocation did not complete");
     }
 }

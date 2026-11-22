@@ -75,8 +75,9 @@ variables the tests read.
   - `testenv_turn_client`: the TURN client alone against coturn (port 3480): Allocate with
     LIFETIME, DONT-FRAGMENT and EVEN-PORT, the reserved port taken with its RESERVATION-TOKEN, a
     Send indication with DONT-FRAGMENT relayed to a peer, an IPv6 and a dual (IPv4 + IPv6)
-    allocation with one family released, 440 from the IPv4-only server, 441 for a Refresh
-    under another username, a 401 for a wrong password that is not answered again, and the
+    allocation request (coturn 4.6.1 ignores ADDITIONAL-ADDRESS-FAMILY and gives the IPv4
+    address alone), 440 from the IPv4-only server and an IPv4 address from it afterwards, a
+    Refresh under another username that is not accepted, a 401 for a wrong password that is not answered again, and the
     500 ms initial RTO kept after the server's round-trip time was measured; and a TCP allocation (RFC 6062) over a TCP control connection: a
     Connect to a listener in `open-b`, a connection from `open-b` to the relayed address
     accepted from its ConnectionAttempt, bytes both ways over each data connection.

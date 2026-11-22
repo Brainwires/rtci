@@ -14,13 +14,17 @@ mod testenv;
 
 use bytes::BytesMut;
 use rtc::sansio::Protocol;
+use rtc::shared::error::Error;
 use rtc::shared::turn_framing::TurnStreamDecoder;
 use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use rtc::stun::error_code::{
     CODE_ADDR_FAMILY_NOT_SUPPORTED, CODE_UNAUTHORIZED, CODE_WRONG_CREDENTIALS,
 };
 use rtc::turn::client::data_connection::{DataConnection, DataConnectionEvent};
-use rtc::turn::client::{AllocateOptions, Client, ClientConfig, Event, RelayTransport};
+use rtc::turn::client::{
+    AllocateOptions, Client, ClientConfig, Event, RelayTransport, RequestError,
+    RetransmissionConfig,
+};
 use rtc::turn::proto::connid::ConnectionId;
 use rtc::turn::proto::evenport::EvenPort;
 use rtc::turn::proto::reqfamily::{REQUESTED_FAMILY_IPV4, REQUESTED_FAMILY_IPV6};
@@ -107,6 +111,33 @@ impl TurnPeer {
             user,
             pass,
         )
+    }
+
+    /// A client over UDP whose requests give up after 700 ms (sent at 0, 100 and 300 ms), for
+    /// a test that waits for a request to fail.
+    fn impatient(ns: &'static str, server: SocketAddr, user: &str, pass: &str) -> io::Result<Self> {
+        let mut peer = Self::new(ns, server, user, pass)?;
+        let retransmission = RetransmissionConfig {
+            rc: 3,
+            rm: 4,
+            ..Default::default()
+        };
+        peer.client = Client::new(
+            ClientConfig {
+                turn_serv_addr: server.to_string(),
+                local_addr: peer.local,
+                transport_protocol: TransportProtocol::UDP,
+                username: user.to_owned(),
+                password: pass.to_owned(),
+                software: "rtc test-env".to_owned(),
+                rto_in_ms: 100,
+                retransmission,
+                ..Default::default()
+            },
+            rtc::crypto::default_provider().map_err(io::Error::other)?,
+        )
+        .map_err(io::Error::other)?;
+        Ok(peer)
     }
 
     fn on(
@@ -418,6 +449,27 @@ fn ipv6_and_dual_allocations_on_coturn() {
     });
     let addrs = dual.client.relay(first).unwrap().relayed_addrs();
     eprintln!("TURN client: dual allocation {addrs:?}");
+    if addrs.len() == 1 {
+        // ADDITIONAL-ADDRESS-FAMILY is comprehension-optional (0x8000, RFC 8656 18.11): a
+        // server that does not implement it ignores it and allocates as if it were absent.
+        // coturn 4.6.1 does: the allocation is the IPv4 address alone, and it works.
+        eprintln!("TURN client: the server ignored ADDITIONAL-ADDRESS-FAMILY; one address");
+        assert!(addrs[0].is_ipv4(), "{addrs:?}");
+        assert_eq!(addrs[0], first);
+        dual.client.refresh_allocations(Instant::now()).unwrap();
+        let events = dual.run_for(Duration::from_secs(1));
+        assert!(events.is_empty(), "the Refresh is accepted: {events:?}");
+        assert!(
+            dual.client
+                .relay(first)
+                .unwrap()
+                .release_family(Instant::now(), REQUESTED_FAMILY_IPV6)
+                .is_err(),
+            "a family the allocation does not hold is never named"
+        );
+        dual.release(first);
+        return;
+    }
     assert_eq!(addrs.len(), 2, "an IPv4 and an IPv6 relayed address");
     assert!(addrs[0].is_ipv4() && addrs[1].is_ipv6(), "{addrs:?}");
     assert!(dual.client.relay(first).unwrap().address_error().is_none());
@@ -516,29 +568,49 @@ fn an_ipv6_relay_is_refused_by_a_server_without_one() {
     a.release(relayed);
 }
 
-/// RFC 8656 5: an allocation belongs to the username that made it. A Refresh under another
-/// username is answered 441 (Wrong Credentials), which the client reports; the allocation is
-/// kept, and the old credential still refreshes it.
+/// RFC 8656 5: an allocation belongs to the username that made it, and a server answers a
+/// request for it under another username with 441 (Wrong Credentials). What the client makes
+/// of that answer is RFC 8489 9.2.5's: a response counts only when it is signed with the key
+/// the request was signed with. A server that signs its 441 that way has it reported with
+/// its code; coturn 4.6.1 does not (its log shows the 441, the client finds no valid
+/// integrity in it), so the request ends as an integrity violation. Either way the Refresh
+/// is not accepted, the allocation is kept, and the owner's credential still refreshes it.
 #[test]
 #[ignore = "needs the real-network test environment (the TURN client's coturn, namespaces): scripts/test-env/run.sh"]
-fn a_refresh_under_another_username_is_refused_with_441() {
+fn a_refresh_under_another_username_is_not_accepted() {
     common::install_crypto_provider();
     let env = Env::get();
     let server = client_server();
-    let mut a = TurnPeer::new("open-a", server, &env.user, &env.pass).expect("client");
+    let mut a = TurnPeer::impatient("open-a", server, &env.user, &env.pass).expect("client");
     let relayed = a.allocate(AllocateOptions::default());
 
     a.client
         .update_credentials("other".to_owned(), "other".to_owned())
         .unwrap();
     a.client.refresh_allocations(Instant::now()).unwrap();
-    let code = a.wait_for("RefreshError", |e| match e {
-        Event::RefreshError(addr, err) if *addr == relayed => Some(err.code().map(|c| c.0)),
+    let outcome = a.wait_for("RefreshError", |e| match e {
+        Event::RefreshError(addr, err) if *addr == relayed => Some(match err {
+            RequestError::Rejected(rejected) => format!("rejected with {}", rejected.code.0),
+            RequestError::Failed(Error::ErrIntegrityMismatch) => "integrity violation".to_owned(),
+            other => format!("failed: {other}"),
+        }),
         _ => None,
     });
-    eprintln!("TURN client: Refresh under another username: {code:?}");
-    assert_eq!(code, Some(CODE_WRONG_CREDENTIALS.0));
+    eprintln!("TURN client: Refresh under another username: {outcome}");
+    assert!(
+        outcome == format!("rejected with {}", CODE_WRONG_CREDENTIALS.0)
+            || outcome == "integrity violation",
+        "{outcome}"
+    );
     assert!(a.client.relay(relayed).is_ok(), "the allocation is kept");
+    // Whether the server's log already shows its 441 (it is written through a buffer).
+    if let Ok(path) = std::env::var("RTC_TESTENV_TURN_CLIENT_LOG") {
+        let log = std::fs::read_to_string(&path).unwrap_or_default();
+        eprintln!(
+            "TURN client: the server's log shows a 441: {}",
+            log.contains("error 441")
+        );
+    }
 
     a.client
         .update_credentials(env.user.clone(), env.pass.clone())
