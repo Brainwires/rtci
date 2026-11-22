@@ -30,10 +30,15 @@ pub struct RTCRtpContributingSource {
     /// The audio level of the contributing source, ranging from 0 to 1.
     /// A value of 0 indicates silence, and 1 indicates the maximum audio level.
     ///
+    /// `None` when the packet carried no level for the source: for a synchronization source
+    /// the RFC 6464 client-to-mixer extension, for a contributing source the RFC 6465
+    /// mixer-to-client extension (each has to be negotiated). A level `l` in -dBov is
+    /// `10^(-l/20)`, and 127 (digital silence) is 0.
+    ///
     /// # Specification
     /// Corresponds to the `audioLevel` attribute in
     /// [RTCRtpContributingSource](https://www.w3.org/TR/webrtc/#dom-rtcrtpcontributingsource-audiolevel).
-    pub audio_level: f64,
+    pub audio_level: Option<f64>,
 
     /// The RTP timestamp of the media. This is the timestamp at which the media was sampled,
     /// as defined in RFC 3550 section 5.1.

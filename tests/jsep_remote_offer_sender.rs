@@ -1,4 +1,4 @@
-//! A transceiver created while applying a remote offer has no sender; W3C `addTrack` may
+//! A transceiver created while applying a remote offer has a sender without a track; W3C `addTrack` may
 //! reuse it, and the application may make it send with a direction change and
 //! `replaceTrack`. Both need a real sender (SSRCs in the answer). Only `addTrack` keeps the
 //! transceiver through a rollback of that offer (W3C 4.4.1.6, RFC 9429 section 5.7).
@@ -31,11 +31,11 @@ fn after_remote_offer()
         .expect("the offer created a transceiver");
     assert!(
         answerer
-            .rtp_transceiver(id)
-            .expect("transceiver")
-            .sender()
+            .rtp_sender(id.into())
+            .expect("every transceiver has a sender")
+            .track()
             .is_none(),
-        "a transceiver a remote offer creates has no sender"
+        "a transceiver a remote offer creates has a sender without a track"
     );
     Ok((answerer, id))
 }

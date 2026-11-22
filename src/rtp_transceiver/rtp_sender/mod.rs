@@ -207,7 +207,9 @@ pub use rtcp_parameters::{RTCPFeedback, RTCRtcpParameters};
 pub use rtp_capabilities::RTCRtpCapabilities;
 pub use rtp_codec::{RTCRtpCodec, RtpCodecKind};
 pub use rtp_codec_parameters::RTCRtpCodecParameters;
-pub use rtp_coding_parameters::{RTCRtpCodingParameters, RTCRtpFecParameters, RTCRtpRtxParameters};
+pub use rtp_coding_parameters::{
+    RTCRtpCodingParameters, RTCRtpFecParameters, RTCRtpRidRestrictions, RTCRtpRtxParameters,
+};
 pub use rtp_encoding_parameters::RTCRtpEncodingParameters;
 pub use rtp_header_extension_capability::RTCRtpHeaderExtensionCapability;
 pub use rtp_header_extension_parameters::RTCRtpHeaderExtensionParameters;
@@ -485,6 +487,17 @@ impl RTCRtpSender<'_> {
 
         if sender.track_removed() {
             return Err(Error::ErrRTPSenderTrackRemoved);
+        }
+
+        // RFC 8853 section 5.3.3: no RTP for a simulcast stream the answer removed. Dropped
+        // like an inactive encoding's packet, so an encoder that has not re-read the
+        // parameters yet does not fail.
+        if sender.is_removed_ssrc(packet.header.ssrc) {
+            trace!(
+                "rtp_sender {:?} drops RTP ssrc {}: the answer removed its simulcast stream",
+                self.id, packet.header.ssrc
+            );
+            return Ok(());
         }
 
         if !sender

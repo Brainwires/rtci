@@ -568,6 +568,7 @@ mod rtx_test {
             ssrc: Some(primary_ssrc),
             rtx: rtx_ssrc.map(|ssrc| RTCRtpRtxParameters { ssrc }),
             fec: None,
+            ..Default::default()
         }
     }
 

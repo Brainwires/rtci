@@ -45,6 +45,7 @@ fn track(kind: RtpCodecKind, id: &str, ssrc: u32) -> MediaStreamTrack {
                 ssrc: Some(ssrc),
                 rtx: None,
                 fec: None,
+                ..Default::default()
             },
             active: true,
             codec: codec(kind),
