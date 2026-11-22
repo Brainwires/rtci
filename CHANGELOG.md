@@ -2039,6 +2039,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+- **ice**: a Binding success response without XOR-MAPPED-ADDRESS was taken as a success: it
+  made the checked pair valid and refreshed consent. RFC 8489 section 6.3.3 has the client
+  check the attribute is present and process the response only if the checks succeed: it is
+  now discarded (the transaction goes on), also for the consent checks of a restart's
+  previous path. A response whose address cannot be decoded is still processed, the value
+  ignored. Test: `agent_rfc8445_test.rs::test_a_success_response_without_xor_mapped_address_is_discarded`;
+  with `test_a_retransmitted_check_gets_the_same_answer_and_changes_nothing` and
+  `test_every_message_the_agent_sends_ends_with_fingerprint` for RFC 8489 6.3.1, 6.3.1.1, 7
+  and 9.1.3.
+- **test**: `tests/ice_restart_by_webrtc_interop.rs` failed now and then on macOS with "ICE
+  Agent can not be restarted when gathering": the webrtc 0.17 peer refuses a restart while it
+  still gathers (its server-reflexive candidate from the public STUN server can take longer
+  than the connection did). The test waits for the peer's gathering to complete before the
+  restart.
+- **test**: `tests/lossy_link_rtc2rtc.rs` at 30 % loss could pass or fail with the same seed
+  and crypto backend (it failed the crypto-ring baseline job of round 18cd90cd with every seed
+  lapsing): the engine's randomness (ICE credentials, the tie-breaker, the 4 to 6 s consent
+  intervals, DTLS randoms, SCTP) changes each run's datagram sequence and so which datagrams
+  the seeded link drops, and whether consent lapses at 30 % loss is chance. Every run is now
+  judged by RFC 7675 section 5.1 on every datagram, whatever the number a run takes: no
+  application data before the first Binding success response or more than 30 s after the
+  last; both peers are built at the virtual start time. New:
+  `ice_does_not_fail_while_consent_is_fresh_over_thirty_percent_loss` (seeds 0xa, 0x1c, 0x21,
+  0x24), where the peer connection fails at 30 s with ICE connected: the DTLS handshake's
+  deadline, not ICE.
+- **test**: ICE on a relayed TCP candidate through coturn
+  (`tests/testenv_turn_client.rs::ice_connects_on_a_relayed_tcp_candidate_through_coturn`,
+  environment test): the active relayed candidate's checks over a Connect and its data
+  connection; the TCP allocation's XOR-MAPPED-ADDRESS as an active server-reflexive TCP
+  candidate is paired and checked (RFC 6544 section 5).
 - **sctp**: a stream parked by back-pressure resumed only from `poll_read` or the peer's next
   datagram, and the SACK that reopens the window waited for the next `poll_write`, which a
   caller has usually made before it reads: a sender stopped by a zero window then waited for

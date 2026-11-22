@@ -33,8 +33,16 @@
 //! ceiling), and Karn's algorithm (C5) takes no RTT sample from a retransmitted chunk, so once
 //! every message is out the RTO stays backed off until the last is acknowledged.
 //!
-//! The engine draws random numbers of its own (ICE tie-breakers, SCTP tags, heartbeat jitter),
-//! so a seed fixes the link, not the whole run: the same seed can take a different course.
+//! The engine draws random numbers of its own (ICE credentials and tie-breakers, the 4 to 6
+//! second consent intervals, DTLS randoms, SCTP tags and heartbeat jitter), so a seed fixes
+//! the link, not the whole run: the same seed can take a different course. Both peers are
+//! built at the virtual start time.
+//!
+//! At every loss rate the consent rule is judged on every datagram, whatever the number of
+//! datagrams a run takes: a peer sends no application data (anything but STUN, RFC 7983)
+//! before a Binding success response has reached it or more than 30 seconds after the last
+//! one (RFC 7675 Section 5.1: no data "until consent is obtained", and "the endpoint MUST cease
+//! transmission" when it expires).
 
 use anyhow::{Result, bail};
 use bytes::BytesMut;
@@ -95,13 +103,16 @@ struct Peer {
     /// When a Binding success response last reached this peer (RFC 7675: only such a response
     /// refreshes consent).
     last_binding_success: Option<Instant>,
+    /// The first application datagram (not STUN) this peer sent without consent: when, and
+    /// how long it had been since the last Binding success response reached it.
+    sent_without_consent: Option<(Instant, Option<Duration>)>,
 }
 
 impl Peer {
-    fn new(addr: &str) -> Result<Self> {
+    fn new(addr: &str, now: Instant) -> Result<Self> {
         let pc = RTCPeerConnectionBuilder::new()
             .with_configuration(RTCConfigurationBuilder::new().build())
-            .build(Instant::now())?;
+            .build(now)?;
         Ok(Self {
             pc,
             addr: addr.parse()?,
@@ -111,6 +122,7 @@ impl Peer {
             closed_before_open: Vec::new(),
             received: Vec::new(),
             last_binding_success: None,
+            sent_without_consent: None,
         })
     }
 
@@ -150,9 +162,13 @@ struct World {
 
 impl World {
     fn new(link: Link, seed: u64) -> Result<Self> {
+        let now = Instant::now();
         Ok(Self {
-            peers: [Peer::new("10.0.0.1:5000")?, Peer::new("10.0.0.2:5000")?],
-            now: Instant::now(),
+            peers: [
+                Peer::new("10.0.0.1:5000", now)?,
+                Peer::new("10.0.0.2:5000", now)?,
+            ],
+            now,
             link,
             rng: Rng(seed),
             in_flight: BTreeMap::new(),
@@ -172,6 +188,17 @@ impl World {
                     let Some(dest) = self.peers.iter().position(|p| p.addr == to) else {
                         continue;
                     };
+                    // RFC 7983: a first byte of 0 to 3 is STUN; anything else (DTLS here) is
+                    // application data, which needs consent (RFC 7675 Section 5.1).
+                    let peer = &mut self.peers[i];
+                    let is_stun = msg.message.first().is_some_and(|b| *b <= 3);
+                    let silent_for = peer.last_binding_success.map(|at| self.now - at);
+                    if !is_stun
+                        && peer.sent_without_consent.is_none()
+                        && silent_for.is_none_or(|s| s > CONSENT_EXPIRY + VIRTUAL_TICK)
+                    {
+                        peer.sent_without_consent = Some((self.now, silent_for));
+                    }
                     self.sent += 1;
                     if self.rng.unit() < self.link.loss {
                         self.dropped += 1;
@@ -258,7 +285,7 @@ impl World {
             next = Some(next.map_or(wake, |n| n.min(wake)));
         }
         let next = next.expect("two peers");
-        self.now = next.max(self.now + Duration::from_micros(100));
+        self.now = next.max(self.now + VIRTUAL_TICK);
         for peer in self.peers.iter_mut() {
             peer.pc.handle_timeout(self.now)?;
         }
@@ -293,10 +320,18 @@ enum Outcome {
     /// The SCTP association gave up by its retransmission limits before the channel opened,
     /// and the channel failed with an error (only where `lapse_allowed`, see the module docs).
     AssociationFailed,
+    /// The peer connection went `failed` while ICE stayed up: the DTLS handshake was given up
+    /// at its deadline (30 s, `rtc-dtls` `DEFAULT_HANDSHAKE_TIMEOUT`) before the channel
+    /// opened. Not ICE's doing; only where `dtls_give_up_allowed`.
+    DtlsGaveUp,
 }
 
 /// RFC 7675 Section 5.1: "Consent expires after 30 seconds."
 const CONSENT_EXPIRY: Duration = Duration::from_secs(30);
+
+/// The smallest step [`World::advance`] takes; a deadline that close to the current instant
+/// fires up to this much late.
+const VIRTUAL_TICK: Duration = Duration::from_micros(100);
 
 /// Sets up a session over `link` (seeded with `seed`), opens a reliable unordered data channel
 /// and sends `count` numbered messages over it. An error if either peer reports `failed`
@@ -312,6 +347,7 @@ fn session_over(
     open_within: Duration,
     deliver_within: Duration,
     lapse_allowed: bool,
+    dtls_give_up_allowed: bool,
 ) -> Result<Outcome> {
     let mut world = World::new(link, seed)?;
     world.peers[0].pc.create_data_channel(
@@ -344,10 +380,34 @@ fn session_over(
     let mut next_send = start;
     loop {
         world.pump();
+        if let Some((i, (at, silent_for))) = world
+            .peers
+            .iter()
+            .enumerate()
+            .find_map(|(i, p)| p.sent_without_consent.map(|v| (i, v)))
+        {
+            bail!(
+                "seed {seed}, {link:?}: peer {i} sent application data {:?} into the session \
+                 without consent ({}): {}",
+                at - start,
+                match silent_for {
+                    Some(silent_for) =>
+                        format!("{silent_for:?} after the last Binding success response reached it"),
+                    None => "no Binding success response had reached it".to_owned(),
+                },
+                world.describe()
+            );
+        }
         if let Some(failed) = world.peers.iter().find(|p| p.failed()) {
             let silent_for = world.now - failed.last_binding_success.unwrap_or(start).max(start);
             if lapse_allowed && silent_for >= CONSENT_EXPIRY {
                 return Ok(Outcome::ConsentLapsed);
+            }
+            if dtls_give_up_allowed
+                && !failed.ice_states.contains(&RTCIceConnectionState::Failed)
+                && world.peers.iter().all(|p| p.open.is_none())
+            {
+                return Ok(Outcome::DtlsGaveUp);
             }
             bail!(
                 "seed {seed}, {link:?}: a peer failed after {:?}, {silent_for:?} after the last \
@@ -447,6 +507,7 @@ fn a_session_over_a_link_with_loss_and_reordering_connects_and_delivers_everythi
             Duration::from_secs(30),
             Duration::from_secs(60),
             false,
+            false,
         )?;
     }
     Ok(())
@@ -468,6 +529,7 @@ fn a_session_over_a_link_with_ten_percent_loss_connects_and_delivers_everything(
             Duration::from_secs(30),
             Duration::from_secs(90),
             false,
+            false,
         )?;
     }
     Ok(())
@@ -488,6 +550,7 @@ fn a_session_over_a_link_with_thirty_percent_loss_fails_only_when_consent_lapses
             // delivery is slow; the bound is about the session not ending, not about speed.
             Duration::from_secs(900),
             true,
+            false,
         )?;
     }
     Ok(())
@@ -515,6 +578,34 @@ fn the_channel_opens_over_thirty_percent_loss_while_the_path_stays_up() -> Resul
         Duration::from_secs(400),
         Duration::from_secs(900),
         true,
+        false,
     )?;
+    Ok(())
+}
+
+/// Seeds of a 41-seed sweep at 30 % loss where the session went `failed` at about 30 seconds
+/// while a Binding success response had reached the peer less than 30 seconds before. ICE is
+/// not what fails there: it stays connected (a connected pair fails only when its consent
+/// expires, RFC 7675 Section 5.1, and the consent rule is judged on every datagram); the peer
+/// connection fails because the DTLS handshake is given up at its 30 second deadline. This
+/// test holds ICE to the rule on those seeds and lets the DTLS deadline end the run.
+#[test]
+fn ice_does_not_fail_while_consent_is_fresh_over_thirty_percent_loss() -> Result<()> {
+    let mut outcomes = Vec::new();
+    for seed in [0xa, 0x1c, 0x21, 0x24] {
+        outcomes.push((
+            seed,
+            session_over(
+                THIRTY_PERCENT,
+                seed,
+                50,
+                Duration::from_secs(400),
+                Duration::from_secs(900),
+                true,
+                true,
+            )?,
+        ));
+    }
+    println!("30 % loss, outcome by seed: {outcomes:?}");
     Ok(())
 }

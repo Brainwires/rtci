@@ -1575,3 +1575,132 @@ fn test_data_can_be_sent_on_a_valid_pair_before_the_nomination() {
     nominate(&mut a, now + Duration::from_secs(1), REMOTE_A);
     assert_eq!(a.media_path().unwrap().peer_addr, addr(REMOTE_A));
 }
+
+// --- RFC 8489 Sections 6.3.1, 6.3.3, 7 and 9.1.3: the Binding transactions of ICE ---
+
+/// RFC 8489 Section 6.3.1: a retransmitted request (the same transaction id) is answered
+/// again, and the answer leaves the same state (Binding is idempotent: recomputed). Each
+/// success response carries XOR-MAPPED-ADDRESS with the request's source (6.3.1.1), no
+/// USERNAME (9.1.3), MESSAGE-INTEGRITY with the local password and FINGERPRINT last (7).
+#[test]
+fn test_a_retransmitted_check_gets_the_same_answer_and_changes_nothing() {
+    let now = Instant::now();
+    let mut a = started_agent(now, config(false), &[REMOTE_A]);
+    let _ = sent(&mut a);
+    let request = peer_request(
+        &a,
+        vec![Box::new(AttrControlling(1)), Box::new(PriorityAttr(1234))],
+    );
+    let mut answers = vec![];
+    for at in [now, now + Duration::from_millis(500)] {
+        deliver(&mut a, at, &request, REMOTE_A).unwrap();
+        let out = sent(&mut a);
+        let responses: Vec<_> = out
+            .iter()
+            .filter(|(m, _)| m.typ == BINDING_SUCCESS)
+            .cloned()
+            .collect();
+        assert_eq!(
+            responses.len(),
+            1,
+            "each copy of the request is answered once"
+        );
+        answers.push(responses[0].clone());
+        assert_eq!(
+            a.remote_candidates.len(),
+            1,
+            "no candidate learned from a copy"
+        );
+        assert_eq!(a.candidate_pairs.len(), 1);
+    }
+    for (response, to) in &answers {
+        assert_eq!(*to, addr(REMOTE_A));
+        assert_eq!(response.transaction_id, request.transaction_id);
+        let mut mapped = XorMappedAddress::default();
+        mapped.get_from(response).unwrap();
+        assert_eq!(SocketAddr::new(mapped.ip, mapped.port), addr(REMOTE_A));
+        assert!(
+            !response.contains(ATTR_USERNAME),
+            "a response carries no USERNAME"
+        );
+        let mut copy = response.clone();
+        MessageIntegrity::check(
+            &mut copy,
+            a.ufrag_pwd.local_credentials.pwd.as_bytes(),
+            provider().crypto(),
+        )
+        .unwrap();
+        FINGERPRINT.check(response).unwrap();
+        assert_eq!(
+            response.attributes.0.last().unwrap().typ,
+            stun::attributes::ATTR_FINGERPRINT
+        );
+    }
+    let types = |m: &Message| m.attributes.0.iter().map(|a| a.typ).collect::<Vec<_>>();
+    assert_eq!(
+        types(&answers[0].0),
+        types(&answers[1].0),
+        "the same answer"
+    );
+}
+
+/// RFC 8489 Section 7: where FINGERPRINT is used, every message sent carries it: the checks,
+/// their retransmissions and the answers of an agent.
+#[test]
+fn test_every_message_the_agent_sends_ends_with_fingerprint() {
+    let now = Instant::now();
+    let mut a = started_agent(now, config(true), &[REMOTE_A, REMOTE_B]);
+    let mut out = run(&mut a, now, now + Duration::from_secs(3));
+    let request = peer_request(
+        &a,
+        vec![Box::new(AttrControlled(1)), Box::new(PriorityAttr(1234))],
+    );
+    deliver(&mut a, now + Duration::from_secs(3), &request, REMOTE_A).unwrap();
+    out.extend(sent(&mut a));
+    assert!(
+        out.iter().filter(|(m, _)| m.typ == BINDING_REQUEST).count() > 2,
+        "checks and retransmissions"
+    );
+    assert!(out.iter().any(|(m, _)| m.typ == BINDING_SUCCESS));
+    for (m, _) in &out {
+        FINGERPRINT.check(m).unwrap();
+        assert_eq!(
+            m.attributes.0.last().unwrap().typ,
+            stun::attributes::ATTR_FINGERPRINT
+        );
+    }
+}
+
+/// RFC 8489 Section 6.3.3: "For the Binding method, the client checks that the
+/// XOR-MAPPED-ADDRESS attribute is present in the response", and processes it only if the
+/// checks succeed. A success response without it, otherwise authentic, makes no pair valid
+/// and refreshes nothing; the transaction goes on, and a proper response to it is taken.
+#[test]
+fn test_a_success_response_without_xor_mapped_address_is_discarded() {
+    let now = Instant::now();
+    let mut a = started_agent(now, config(true), &[REMOTE_A]);
+    let (check, to) = first_check(&mut a, now);
+    let provider = provider();
+    let mut bare = Message::new();
+    bare.build(&[
+        Box::new(BINDING_SUCCESS),
+        Box::new(check.transaction_id),
+        Box::new(MessageIntegrity::new_short_term_integrity_with_provider(
+            REMOTE_PWD.to_owned(),
+            provider.crypto(),
+        )),
+        Box::new(FINGERPRINT),
+    ])
+    .unwrap();
+    let at = now + Duration::from_millis(150);
+    deliver(&mut a, at, &bare, &to.to_string()).unwrap();
+    assert_eq!(a.get_best_valid_candidate_pair(), None, "no valid pair");
+    assert!(a.remote_candidates[0].last_consent.is_none());
+
+    let response = peer_response(BINDING_SUCCESS, check.transaction_id, addr(LOCAL), None);
+    deliver(&mut a, at, &response, &to.to_string()).unwrap();
+    assert!(
+        a.get_best_valid_candidate_pair().is_some(),
+        "the transaction was still open"
+    );
+}

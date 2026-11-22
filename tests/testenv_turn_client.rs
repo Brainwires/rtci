@@ -13,8 +13,19 @@ mod common;
 mod testenv;
 
 use bytes::BytesMut;
+use rtc::ice::agent::agent_config::AgentConfig;
+use rtc::ice::agent::{Agent, Event as IceEvent};
+use rtc::ice::candidate::candidate_host::CandidateHostConfig;
+use rtc::ice::candidate::candidate_relay::CandidateRelayConfig;
+use rtc::ice::candidate::candidate_server_reflexive::CandidateServerReflexiveConfig;
+use rtc::ice::candidate::{CandidateConfig, CandidateType};
+use rtc::ice::mdns::MulticastDnsMode;
+use rtc::ice::network_type::NetworkType;
+use rtc::ice::state::ConnectionState;
+use rtc::ice::tcp_type::TcpType;
 use rtc::sansio::Protocol;
 use rtc::shared::error::Error;
+use rtc::shared::tcp_framing::{TcpFrameDecoder, frame_packet};
 use rtc::shared::turn_framing::TurnStreamDecoder;
 use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use rtc::stun::error_code::{
@@ -30,6 +41,7 @@ use rtc::turn::proto::evenport::EvenPort;
 use rtc::turn::proto::reqfamily::{REQUESTED_FAMILY_IPV4, REQUESTED_FAMILY_IPV6};
 use std::io::{self, ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use testenv::{Env, in_netns, source_ip};
 
@@ -968,4 +980,286 @@ fn a_tcp_allocation_connects_and_accepts_through_coturn() {
     );
 
     a.release(relayed);
+}
+
+/// An ICE agent of this test: TCP only, no mDNS.
+fn tcp_agent(controlling: bool) -> Agent {
+    Agent::new(
+        Instant::now(),
+        Arc::new(AgentConfig {
+            is_controlling: controlling,
+            network_types: vec![NetworkType::Tcp4],
+            multicast_dns_mode: MulticastDnsMode::Disabled,
+            ..Default::default()
+        }),
+        rtc::crypto::default_provider().expect("a crypto provider"),
+    )
+    .expect("an agent")
+}
+
+/// Runs an agent's due timer and collects its connection states.
+fn agent_step(agent: &mut Agent, states: &mut Vec<ConnectionState>) {
+    let now = Instant::now();
+    if agent.poll_timeout().is_some_and(|at| at <= now) {
+        agent.handle_timeout(now).expect("the agent's timer");
+    }
+    while let Some(event) = agent.poll_event() {
+        if let IceEvent::ConnectionStateChange(state) = event.event {
+            states.push(state);
+        }
+    }
+}
+
+/// One of the passive peer's accepted connections.
+struct PassiveConn {
+    stream: TcpStream,
+    from: SocketAddr,
+    decoder: TcpFrameDecoder,
+}
+
+/// RFC 6544 Sections 4.1, 4.5 and 5 over a real TURN server (RFC 6062): ICE connects on a
+/// relayed TCP candidate. Peer A holds a TCP allocation and has two TCP candidates from it, both
+/// active (port 9, Section 4.5): the relayed address, and the server-reflexive one its
+/// XOR-MAPPED-ADDRESS gives (`Relay::mapped_addr`, the address-discovery technique of
+/// Section 5). Peer B has a passive host candidate, a real listener. A's checks on the relayed
+/// pair go out from the relayed address: the application turns the first into a Connect, binds
+/// a data connection to it, and from then carries the pair's RFC 4571 frames on it as they
+/// are. B sees the server's connection come from the relayed address and answers on it. A,
+/// controlling, nominates the relayed pair, and both agents are connected on it.
+#[test]
+#[ignore = "needs the real-network test environment (the TURN client's coturn, namespaces): scripts/test-env/run.sh"]
+fn ice_connects_on_a_relayed_tcp_candidate_through_coturn() {
+    common::install_crypto_provider();
+    let env = Env::get();
+    let server = client_server();
+
+    let mut turn = TurnPeer::over_tcp("open-a", server, &env.user, &env.pass).expect("client a");
+    let relayed = turn.allocate(AllocateOptions {
+        transport: RelayTransport::Tcp,
+        ..Default::default()
+    });
+    let mapped = turn
+        .client
+        .relay(relayed)
+        .unwrap()
+        .mapped_addr()
+        .expect("the Allocate response's XOR-MAPPED-ADDRESS");
+    eprintln!("ICE over TURN TCP: relayed {relayed}, server-reflexive {mapped}");
+
+    // B: a passive host candidate on a listener in open-b.
+    let b_ip = source_ip("open-b", server).unwrap();
+    let listener = in_netns("open-b", move || TcpListener::bind((b_ip, 0))).expect("listener");
+    listener.set_nonblocking(true).unwrap();
+    let b_addr = listener.local_addr().unwrap();
+    let passive = || {
+        CandidateHostConfig {
+            base_config: CandidateConfig {
+                network: "tcp".to_owned(),
+                address: b_addr.ip().to_string(),
+                port: b_addr.port(),
+                component: 1,
+                ..Default::default()
+            },
+            tcp_type: TcpType::Passive,
+        }
+        .new_candidate_host()
+        .unwrap()
+    };
+    // A: the relayed and the server-reflexive candidate of the allocation, both active.
+    let relay_active = || {
+        let mut c = CandidateRelayConfig {
+            base_config: CandidateConfig {
+                network: "tcp".to_owned(),
+                address: relayed.ip().to_string(),
+                port: 9,
+                component: 1,
+                ..Default::default()
+            },
+            rel_addr: turn.local.ip().to_string(),
+            rel_port: turn.local.port(),
+            url: None,
+        }
+        .new_candidate_relay()
+        .unwrap();
+        c.set_tcp_type(TcpType::Active);
+        c
+    };
+    let srflx_active = || {
+        let mut c = CandidateServerReflexiveConfig {
+            base_config: CandidateConfig {
+                network: "tcp".to_owned(),
+                address: mapped.ip().to_string(),
+                port: 9,
+                component: 1,
+                ..Default::default()
+            },
+            rel_addr: turn.local.ip().to_string(),
+            rel_port: 9,
+            url: None,
+        }
+        .new_candidate_server_reflexive()
+        .unwrap();
+        c.set_tcp_type(TcpType::Active);
+        c
+    };
+
+    let mut a = tcp_agent(true);
+    let mut b = tcp_agent(false);
+    a.add_local_candidate(relay_active()).unwrap();
+    a.add_local_candidate(srflx_active()).unwrap();
+    b.add_local_candidate(passive()).unwrap();
+    a.add_remote_candidate(passive()).unwrap();
+    // A's active candidates are signalled too; B reaches them as the peer-reflexive candidates
+    // their connections make.
+    b.add_remote_candidate(relay_active()).unwrap();
+    b.add_remote_candidate(srflx_active()).unwrap();
+    let (a_cred, b_cred) = (
+        a.get_local_credentials().clone(),
+        b.get_local_credentials().clone(),
+    );
+    a.start_connectivity_checks(Instant::now(), true, b_cred.ufrag, b_cred.pwd)
+        .unwrap();
+    b.start_connectivity_checks(Instant::now(), false, a_cred.ufrag, a_cred.pwd)
+        .unwrap();
+
+    let (mut a_events, mut b_events) = (vec![], vec![]);
+    let mut link: Option<DataLink> = None;
+    // The local address A's agent sent the relayed pair's checks from.
+    let mut a_relayed_local = None;
+    let mut a_decoder = TcpFrameDecoder::new();
+    let mut b_conns: Vec<PassiveConn> = vec![];
+    // Checks from the server-reflexive candidate's base to B's passive candidate.
+    let mut srflx_checks = 0u32;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let connected = |states: &[ConnectionState]| states.last() == Some(&ConnectionState::Connected);
+    while !(connected(&a_events) && connected(&b_events)) {
+        assert!(
+            Instant::now() < deadline,
+            "ICE did not connect over the relayed TCP candidate in 30 s: A {a_events:?}, B \
+             {b_events:?} ({srflx_checks} server-reflexive checks)"
+        );
+        turn.step().expect("control connection I/O");
+
+        // A's writes: the relayed pair's go over the data connection.
+        while let Some(out) = a.poll_write() {
+            assert_eq!(out.transport.transport_protocol, TransportProtocol::TCP);
+            if out.transport.peer_addr != b_addr {
+                continue;
+            }
+            if out.transport.local_addr.ip() != relayed.ip() {
+                srflx_checks += 1;
+                continue;
+            }
+            a_relayed_local = Some(out.transport.local_addr);
+            if link.is_none() {
+                turn.permit(relayed, b_addr);
+                let tid = turn
+                    .client
+                    .relay(relayed)
+                    .unwrap()
+                    .connect(Instant::now(), b_addr)
+                    .expect("the Connect is sent");
+                let connection_id = turn.wait_for("ConnectResponse", |e| match e {
+                    Event::ConnectResponse(id, _, connection_id) if *id == tid => {
+                        Some(*connection_id)
+                    }
+                    Event::ConnectError(id, _, err) if *id == tid => {
+                        panic!("the Connect failed: {err}")
+                    }
+                    _ => None,
+                });
+                let mut opened =
+                    DataLink::open("open-a", &mut turn, relayed, connection_id).expect("data link");
+                opened.wait_bound();
+                link = Some(opened);
+            }
+            link.as_mut().unwrap().send(&frame_packet(&out.message));
+        }
+        // What came back on the data connection, to A's relayed candidate.
+        if let Some(l) = link.as_mut() {
+            l.step().expect("data connection I/O");
+            a_decoder.extend_from_slice(&std::mem::take(&mut l.received));
+            while let Some(packet) = a_decoder.next_packet() {
+                let _ = a.handle_read(TaggedBytesMut {
+                    now: Instant::now(),
+                    transport: TransportContext {
+                        local_addr: a_relayed_local.expect("A sent first"),
+                        peer_addr: b_addr,
+                        transport_protocol: TransportProtocol::TCP,
+                        ecn: None,
+                    },
+                    message: BytesMut::from(&packet[..]),
+                });
+            }
+        }
+
+        // B: the server's connections from the relayed address, and the frames on them.
+        while let Ok((stream, from)) = listener.accept() {
+            stream.set_nonblocking(true).unwrap();
+            assert_eq!(
+                from.ip(),
+                relayed.ip(),
+                "the server connects from the relayed address"
+            );
+            b_conns.push(PassiveConn {
+                stream,
+                from,
+                decoder: TcpFrameDecoder::new(),
+            });
+        }
+        let mut buf = [0u8; 4096];
+        for conn in b_conns.iter_mut() {
+            loop {
+                match conn.stream.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => conn.decoder.extend_from_slice(&buf[..n]),
+                    Err(e) if e.kind() == ErrorKind::WouldBlock => break,
+                    Err(e) => panic!("B's connection: {e}"),
+                }
+            }
+            while let Some(packet) = conn.decoder.next_packet() {
+                let _ = b.handle_read(TaggedBytesMut {
+                    now: Instant::now(),
+                    transport: TransportContext {
+                        local_addr: b_addr,
+                        peer_addr: conn.from,
+                        transport_protocol: TransportProtocol::TCP,
+                        ecn: None,
+                    },
+                    message: BytesMut::from(&packet[..]),
+                });
+            }
+        }
+        while let Some(out) = b.poll_write() {
+            if let Some(conn) = b_conns
+                .iter_mut()
+                .find(|c| c.from == out.transport.peer_addr)
+            {
+                write_all(&mut conn.stream, &frame_packet(&out.message)).expect("B writes");
+            }
+        }
+
+        agent_step(&mut a, &mut a_events);
+        agent_step(&mut b, &mut b_events);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    let (local, remote) = a.get_selected_candidate_pair().expect("A selected a pair");
+    assert_eq!(
+        local.candidate_type(),
+        CandidateType::Relay,
+        "on the relayed candidate"
+    );
+    assert_eq!(local.addr().ip(), relayed.ip());
+    assert_eq!(remote.addr(), b_addr);
+    let (b_local, _) = b.get_selected_candidate_pair().expect("B selected a pair");
+    assert_eq!(b_local.addr(), b_addr);
+    // Section 5: the server-reflexive candidate the allocation gave was paired and checked
+    // too, from its base (this test does not open that direct connection).
+    assert!(
+        srflx_checks > 0,
+        "the server-reflexive TCP candidate was not checked"
+    );
+    drop(link);
+    turn.release(relayed);
 }
