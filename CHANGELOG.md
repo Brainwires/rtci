@@ -5,6 +5,72 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Bug Fixes
+
+- **mdns**: a record the resolver does not read no longer hides the records after it. A TXT or
+  NSEC record ahead of the address record in a response ended the scan, so the name did not
+  resolve (RFC 6762 section 6.1).
+- **mdns**: every record of a response is read, in the Answer and Additional sections; only
+  the first four Answer records were, so a responder that aggregates (RFC 6762 section 6.4)
+  resolved nothing past the fourth.
+- **mdns**: query retries back off: after one second, then at doubling intervals up to an hour
+  (RFC 6762 section 5.2). They came every second for the life of the query. A query nobody
+  answers ends after 30 seconds unless a timeout is configured (`without_query_timeout`
+  restores the endless query); it never ended.
+- **mdns**: names compare without regard to ASCII case (RFC 1035 section 2.3.3), in questions
+  and in answers. A peer that spelled a `<uuid>.local` name in upper case got no answer, and
+  an answer in another case than the question's resolved nothing.
+- **mdns**: questions inside a response are ignored (RFC 6762 section 6); they were answered,
+  so two responders could be made to answer each other. Messages with a non-zero OPCODE or
+  RCODE, responses from a port other than 5353 and datagrams over 9000 bytes are ignored
+  (sections 18.3, 18.11, 6, 17).
+- **mdns**: a record is multicast at most once a second (RFC 6762 section 6). Every question
+  was answered at once, and the fixed-IP responder answered a query for A and AAAA twice. A
+  question for a record type the name lacks gets the NSEC record (section 6.1), not the
+  address record the fixed-IP responder sent for any type.
+- **mdns**: `MulticastSocket` sends with IP TTL 255 (RFC 6762 section 11); it sent multicast
+  with the system default, 1.
+- **mdns**: a compressed SRV target decodes (RFC 6762 section 18.14).
+
+### Features
+
+- **mdns**: the responder life cycle of RFC 6762. A name is probed for (section 8.1; not a
+  random `<uuid>.local` name, which draft-ietf-mmusic-mdns-ice-candidates exempts), announced
+  twice with the cache-flush bit (sections 8.3, 10.2), defended against probes, sent back to
+  probing by a conflicting record (section 9; a name lost to another host is reported as
+  `MdnsEvent::LocalNameConflict`), and withdrawn with a goodbye when it is removed
+  (`Mdns::remove_local_name`) or the connection closes (section 10.1).
+  `Mdns::network_changed` starts every name over and empties the cache.
+- **mdns**: responses follow RFC 6762 sections 5.4 to 7.2: known-answer suppression,
+  truncated queries and their follow-up packets, the 20 to 120 ms delay for a message another
+  host may also answer, unicast replies to questions that ask for them, conventional replies
+  to legacy queriers, NSEC records, aggregation, messages split to fit a datagram.
+- **mdns**: the resolver caches the addresses it hears for their TTL (at most
+  `MAX_CACHED_ADDRESSES`, 256), so a name its owner announced resolves without a query;
+  honours goodbyes and the cache-flush bit; counts another host's identical question as its
+  own sent (section 7.3); and does not resolve a name with more than one address
+  (draft-ietf-mmusic-mdns-ice-candidates section 3.2.2).
+- **mdns**: `MdnsRateLimit`, a token bucket over every message an `Mdns` sends (40 at once,
+  10 a second by default), shareable between connections: the rate limit
+  draft-ietf-mmusic-mdns-ice-candidates section 7.1 requires.
+- **mdns**: `MdnsConfig` options `with_probe_policy` (`MdnsProbePolicy`),
+  `with_announce_count`, `with_rate_limit`, `with_first_query_delay`,
+  `with_unicast_response`, `with_unicast_replies`, `with_destination_reported`,
+  `with_multiple_addresses`, `with_on_link_subnets`, `with_jitter_seed`,
+  `without_query_timeout`.
+
+### Breaking Changes
+
+- **mdns**: `MdnsConfig` has private fields: build it with `MdnsConfig::default()` and the
+  `with_*` methods, not as a struct literal. `MdnsConfig::query_timeout` defaults to 30
+  seconds (was `None`), and `query_interval` under one second is taken as one second.
+- **mdns**: a local name that is not `<uuid>.local` is answered only after probing for it,
+  about 750 ms after the first `handle_timeout` (`MdnsProbePolicy::Never` restores the old
+  behaviour). `MdnsEvent::QueryTimeout` also ends a query whose name has more than one
+  address. `Mdns::close` leaves goodbye packets in `poll_write`.
+
 ## [0.22.0+brainwires.5] - 2026-11-20
 
 ### Bug Fixes

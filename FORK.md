@@ -49,6 +49,7 @@ history stays intact.
 | Inbound key-frame requests reach the application | `rtc-interceptor/src/keyframe.rs` (`KeyFrameRequestInterceptor`, `Slot::KeyFrameRequests`), `src/peer_connection/configuration/interceptor_registry.rs` (`configure_key_frame_requests`, in `register_default_interceptors`) | Upstream's terminus ends every inbound RTCP packet no interceptor vouches for, PLI and FIR included, though only the application (the encoder) can answer them. The fork marks them `DeliverToApplication` by default. |
 | ICE over TCP between `rtc` peers in both role assignments | `rtc-ice/src/agent/mod.rs` (`handle_inbound`, `add_remote_candidate`, `find_local_candidate`), `rtc-ice/src/tcp_type` (`complement`) | A peer-reflexive candidate learned over TCP takes the complementary TCP type, so a controlling agent with a passive candidate pairs with (and nominates) the peer that dialled it; exact local address matches win over an active candidate's IP-only match. `tests/ice_tcp_rtc2rtc.rs`. |
 | mDNS host candidates per address | `rtc-ice/src/agent/mod.rs` (`mdns_name_for`), `rtc-ice/src/mdns`, `rtc-mdns/src/proto` (`add_local_name`, AAAA) | `QueryAndGather` without a fixed IP publishes each local address (IPv4 and IPv6, UDP and TCP) under its own `<uuid>.local` name, as browsers do; queries ask for A and AAAA. The fixed-IP form also hides that address's TCP candidates. |
+| mDNS responder and resolver per RFC 6762 | `rtc-mdns/src/proto` (`responder.rs`, `resolver.rs`, `wire.rs`, `rate.rs`), `rtc-mdns/src/config.rs` | Upstream's `Mdns` resends a query every second and answers every question at once. The fork's probes for chosen names, announces, defends, withdraws with goodbyes, answers by the rules of RFC 6762 sections 5.4 to 7.2 (rate limit per record, known answers, unicast and legacy replies, NSEC), backs queries off, caches answers for their TTL and limits its message rate (`MdnsRateLimit`). Clause by clause: `docs/conformance/audit/rfc6762.md`. |
 | mDNS datagrams reach ICE whatever their first byte | `src/peer_connection/handler/demuxer.rs` | Port 5353 on both ends goes to the agent before RFC 7983 demultiplexing. |
 | Bounded RFC 4571 decoding | `rtc-shared/src/tcp_framing.rs` (`TcpFrameDecoder::push`, `try_frame_packet`) | `push` refuses data past two frames' worth; packets are taken without shifting the buffer each time. |
 | Data channel ids when the DTLS role is negotiated (W3C webrtc-pc) | `src/peer_connection/mod.rs` (`assign_data_channel_ids`, `create_data_channel`) | Applying an answer (local or remote) gives every in-band channel its RFC 8832 id, and a channel created after that gets one at once, before SCTP connects; the SCTP connected procedure still assigns any left. |
@@ -103,7 +104,9 @@ and handshake cache; AEAD-only default DTLS suites; ChangeCipherSpec honoured on
 handshake's one epoch transition; SRTP state only after authentication, and SRTCP authenticated
 whatever its E flag; ICE source filtering, authenticated role conflicts and consent, candidate
 caps (mDNS-resolved ones included), mDNS answers only from the mDNS socket, at most 64 published
-mDNS names (a host candidate past them is dropped, not sent with its address); bounded RFC 4571
+mDNS names (a host candidate past them is dropped, not sent with its address), a bounded mDNS
+cache (256 addresses), bounded reading of an mDNS message (256 questions, 512 records, 9000
+bytes) and one message budget over everything the mDNS connection sends; bounded RFC 4571
 frame decoding; bounded SCTP
 FORWARD-TSN/SACK/receive window and stream-id checks; DCEP stream-id parity and internal message
 types refused from the wire; TURN client server-address filtering and response MESSAGE-INTEGRITY
@@ -145,6 +148,10 @@ reason. Today there are two:
   upstream's SDP.
 - `MulticastDnsMode::QueryAndGather` without `multicast_dns_local_ip` hides every host candidate
   (upstream's points one name at 127.0.0.1 and hides none).
+- `rtc-mdns` puts packets on the wire that upstream's never sent: two announcements for each
+  local name, probes for a name that is not `<uuid>.local`, NSEC records, goodbyes on
+  `close()`. `MdnsProbePolicy::Never` and `MdnsConfig::with_announce_count` are the knobs;
+  announcing and goodbyes are what RFC 6762 requires and cannot be turned off.
 
 ### Defaults the fork narrows on purpose
 
@@ -159,6 +166,11 @@ reason. Today there are two:
   did not keep. This takes upstream's `4d0c5070` (#837), which the fork had reverted under
   rule 1; the maintainer decided the exception. An application with its own coder registers
   `MIME_TYPE_ULP_FEC` itself. RED + ULPFEC receive is planned work, not a default.
+- `rtc-mdns`: an unanswered query ends after 30 seconds by default (upstream: never) and is
+  retried at doubling intervals from one second (upstream: every `query_interval`, any
+  value). `MdnsConfig::without_query_timeout` keeps a query alive; the interval floor is RFC
+  6762 section 5.2 and has no switch. A name with more than one address does not resolve
+  (`MdnsConfig::with_multiple_addresses(true)` takes the first, as upstream does).
 
 ### Upstream API replacements taken
 
