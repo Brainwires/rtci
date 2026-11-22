@@ -96,8 +96,16 @@ impl Peer {
         }
         let mut registry = register_default_interceptors(Registry::new(), &mut media_engine)?;
         if fec {
+            // A fixed amount of repair: by default it follows the receiver's reported loss
+            // (draft-03 section 8), and on a lossless path the first receiver report can stop
+            // it before the first block is closed, so that the FEC SSRC never sends at all.
             registry = registry
-                .with(Slot::FecEncoder, FlexFec03SendBuilder::new().build())
+                .with(
+                    Slot::FecEncoder,
+                    FlexFec03SendBuilder::new()
+                        .with_adaptive_rate(false)
+                        .build(),
+                )
                 .with(Slot::FecDecoder, FlexFec03ReceiveBuilder::new().build());
         }
         let pc = RTCPeerConnectionBuilder::new()
@@ -154,6 +162,8 @@ struct World {
     now: Instant,
     /// Drop the sender's RTP packet with this SSRC and sequence number, once.
     drop_once: Option<(u32, u16)>,
+    /// The sender's RTP packets with [`FEC_SSRC`] put on the wire.
+    fec_on_wire: usize,
 }
 
 impl World {
@@ -177,6 +187,9 @@ impl World {
                 break;
             }
             for (i, from, to, data) in in_flight {
+                if i == 0 && wire_rtp(&data).is_some_and(|(ssrc, _)| ssrc == FEC_SSRC) {
+                    self.fec_on_wire += 1;
+                }
                 if i == 0
                     && let Some(rtp) = wire_rtp(&data)
                     && self.drop_once == Some(rtp)
@@ -262,6 +275,7 @@ impl World {
             ],
             now: Instant::now(),
             drop_once: None,
+            fec_on_wire: 0,
         };
         let transceiver = world.peers[0].pc.add_transceiver_from_kind(
             RtpCodecKind::Video,
@@ -433,18 +447,34 @@ fn the_receiver_learns_the_cname_of_the_fec_ssrc_from_its_rtcp() -> Result<()> {
     assert_ne!(fec_ssrc, ssrc);
     let cname = world.peers[0].pc.rtcp_cname().to_owned();
 
-    world.send_media(sender, FIRST_SEQ, 150)?;
-    let until = world.now + Duration::from_secs(3);
-    world.run_until(until)?;
+    // Half a second of media: a repair block closes every five packets (100 ms).
+    world.send_media(sender, FIRST_SEQ, 25)?;
+    assert!(world.fec_on_wire > 0, "the FEC SSRC sent repair packets");
 
-    assert_eq!(
-        Some(cname.as_str()),
-        world.peers[1].pc.remote_rtcp_cname(ssrc)
-    );
+    // The sender's regular compound packets are spaced by the randomised interval of RFC 3550
+    // 6.3.1 and, under RTP/AVPF, at least `T_rr_interval` (one second here) times a random
+    // factor in [0.5, 1.5) (RFC 4585 3.5.3): the first one after the repair SSRC joined
+    // carries its SR and SDES (RFC 8108 5.3.2), so the CNAME arrives within about 1.5 s.
+    // Ten seconds of virtual time is a bound several intervals wide.
+    let deadline = world.now + Duration::from_secs(10);
+    let mut next_seq = FIRST_SEQ + 25;
+    let learned = |world: &World| {
+        [ssrc, fec_ssrc]
+            .iter()
+            .all(|&ssrc| world.peers[1].pc.remote_rtcp_cname(ssrc).is_some())
+    };
+    while world.now < deadline && !learned(&world) {
+        world.send_media(sender, next_seq, 5)?;
+        next_seq = next_seq.wrapping_add(5);
+    }
     assert_eq!(
         Some(cname.as_str()),
         world.peers[1].pc.remote_rtcp_cname(fec_ssrc),
         "the FEC SSRC is described with the source flow's CNAME"
+    );
+    assert_eq!(
+        Some(cname.as_str()),
+        world.peers[1].pc.remote_rtcp_cname(ssrc)
     );
     Ok(())
 }

@@ -3120,7 +3120,11 @@ Found by the seeded lossy-link test (`tests/lossy_link_rtc2rtc.rs`).
   a panic in `FecRate::fec_packets` with a bound of zero (`clamp(1, 0)`), fixed before release.
 - **fec**: a FlexFEC repair SSRC is an RTCP participant between two peer connections: it sends
   sender reports and the connection's CNAME once it has sent, and the receiver learns that CNAME
-  for it (`the_receiver_learns_the_cname_of_the_fec_ssrc_from_its_rtcp`).
+  for it (`the_receiver_learns_the_cname_of_the_fec_ssrc_from_its_rtcp`). The test fixes the
+  amount of FEC (`with_adaptive_rate(false)`): with the loss-driven rate a lossless path's first
+  receiver report could stop the repair before the first block closed, so the FEC SSRC never
+  sent and never became a participant (about one run in four). It now checks that repair
+  packets were sent and waits for both CNAMEs, within ten seconds of virtual time.
 - **interceptor (nack)**: the test environment's `nack_recovers_lost_rtp` counts from the
   first packet that arrives, as its virtual-clock twin `nack_recovery_under_loss.rs` does: a
   receiver knows of no packet sent before the first it receives, and a Generic NACK names
