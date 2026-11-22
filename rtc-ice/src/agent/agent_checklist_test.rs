@@ -928,16 +928,11 @@ fn test_controlling_agent_nominates_once_and_the_checklist_completes() {
         .into_iter()
         .filter(|s| s.message.contains(ATTR_USE_CANDIDATE))
         .collect();
-    // One pair is nominated, with one request; USE-CANDIDATE never goes to another pair. (The
-    // consent checks on the nominated pair repeat it.)
-    assert!(nominations.iter().all(|s| s.to == remote_addr(1)));
+    // One pair is nominated, with one request: the consent checks that follow are plain
+    // Binding requests (RFC 8445 Section 7.1.2: USE-CANDIDATE is sent "in order to nominate").
+    assert_eq!(nominations.len(), 1, "one nomination, one request");
+    assert_eq!(nominations[0].to, remote_addr(1));
     let nominated_at = nominations[0].at;
-    assert!(
-        nominations[1..]
-            .iter()
-            .all(|s| s.at >= nominated_at + Duration::from_secs(4)),
-        "the nomination itself is one request"
-    );
 
     // After the nomination nothing more goes to 2 or 3: no ordinary check for 3, no
     // retransmission for 2, and neither is failed by a timeout.
@@ -962,15 +957,19 @@ fn test_controlling_agent_nominates_once_and_the_checklist_completes() {
     );
 }
 
-/// A peer that lost its state without an ICE restart (a new peer connection on the same
-/// address with the same credentials) is a controlled agent that never heard the nomination.
-/// The controlling agent's consent checks carry USE-CANDIDATE, so it learns the pair in use
-/// from the next one; the controlled agent's consent checks never carry it.
+/// Consent checks are plain Binding requests (RFC 7675 Section 5.1; RFC 8445 Section 7.1.2
+/// has USE-CANDIDATE sent to nominate, and "the controlled agent MUST NOT include" it).
+/// `nominate_on_consent_checks` is libwebrtc's behaviour: the controlling agent's consent
+/// checks carry USE-CANDIDATE. The controlled agent's never do.
 #[test]
-fn test_consent_checks_of_the_controlling_agent_repeat_the_nomination() {
-    for controlling in [true, false] {
+fn test_consent_checks_carry_use_candidate_only_when_set_to_and_controlling() {
+    for (controlling, setting) in [(true, false), (true, true), (false, false), (false, true)] {
         let start = Instant::now();
-        let mut a = agent_with(start, config(controlling), &[(1, 500)]);
+        let cfg = AgentConfig {
+            nominate_on_consent_checks: setting,
+            ..config(controlling)
+        };
+        let mut a = agent_with(start, cfg, &[(1, 500)]);
         if !controlling {
             let nominate = peer_request(
                 &a,
@@ -995,8 +994,8 @@ fn test_consent_checks_of_the_controlling_agent_repeat_the_nomination() {
         assert!(
             consent
                 .iter()
-                .all(|s| s.message.contains(ATTR_USE_CANDIDATE) == controlling),
-            "controlling: {controlling}"
+                .all(|s| s.message.contains(ATTR_USE_CANDIDATE) == (controlling && setting)),
+            "controlling: {controlling}, nominate_on_consent_checks: {setting}"
         );
         assert_eq!(a.state(), ConnectionState::Connected);
     }

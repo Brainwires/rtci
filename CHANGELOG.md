@@ -52,6 +52,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **sctp**: an association that signalling closed by rejecting the data section takes a new
   `a=sctp-port` when a data section is negotiated again (RFC 8841 section 10.5).
 
+- **ice**: where the fork followed libwebrtc or its own hardening instead of the RFC, the RFC is
+  now the default and the other behaviour a setting (`AgentConfig`, and
+  `SettingEngineBuilder::with_ice_*`):
+  - a controlled agent uses the nominated pair with the highest priority (RFC 8445 section
+    8.1.1) and moves to a nominated pair of lower priority only when consent is lost on the
+    selected one. Following the latest nomination and libwebrtc's `NOMINATION` value, as
+    before, is `NominationAcceptance::Latest` (`with_ice_nomination_acceptance`);
+  - data (DTLS, SRTP) is accepted on any local candidate from the remote candidate of every
+    valid pair (section 12.2), no longer from the selected pair's address only;
+    `data_from_selected_pair_only` (`with_ice_data_from_selected_pair_only`) restores that.
+    `Agent::data_path` / `accepts_data` are the test the engine applies;
+  - consent checks are plain Binding requests: the controlling agent's no longer carry
+    USE-CANDIDATE (`nominate_on_consent_checks`, `with_ice_nomination_on_consent_checks`, turns
+    it back on). A controlling agent that wins a role conflict (section 7.3.1.1) after it
+    nominated sends its nomination again by itself, which is what the attribute on consent
+    checks was there for;
+  - a Binding request that fails the short-term credential check is answered 400 or 401 (RFC
+    8489 section 9.1.3) instead of being dropped: unsigned, never longer than the request, at
+    most five in a burst and one more per 200 ms. `UnauthenticatedRequests::Drop`
+    (`with_ice_unauthenticated_requests`) keeps the drop.
+- **ice**: `Agent::set_role` re-prioritises the pairs and drops a nomination in the making (it
+  only stored the flag). The peer connection sets the role again at an ICE restart only when
+  one agent is lite and the other is not (RFC 8445 section 6.1.1), and for a transport set up
+  again after it was closed.
+- **api**: `rtc_ice::AgentConfig` has new public fields (`tie_breaker`,
+  `nomination_acceptance`, `nominate_on_consent_checks`, `unauthenticated_requests`,
+  `data_from_selected_pair_only`, `send_data_before_nomination`): a struct literal without
+  `..Default::default()` no longer compiles.
 - **dtls**: `use_srtp` follows RFC 5764 section 4.1 by default: the DTLS client offers it only
   when the session has an audio or video section. A data-channel-only session is set up
   without it, and when it gains a media section a new DTLS association with `use_srtp`
@@ -935,6 +963,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it was closing (`OnError`, `OnClose`) instead of leaving it `closing`; an inactive path
   (RFC 9260 section 8.2) changes neither the transport's state nor a channel's.
 
+- **ice**: `AgentConfig::tie_breaker` / `SettingEngineBuilder::with_ice_tie_breaker` fix the ICE
+  tiebreaker (RFC 8445 section 5.2); `Agent::tie_breaker`, `Agent::is_lite`.
+- **ice**: `AgentConfig::send_data_before_nomination` /
+  `SettingEngineBuilder::with_ice_data_before_nomination`: data on the best valid pair before
+  a pair is selected (RFC 8445 section 12.1).
 - **congestion control is on by default** (RFC 8834 section 7). `register_default_interceptors`
   now installs `Gcc` over the receiver's TWCC or RFC 8888 feedback, the pacer that releases
   media at its target, the TWCC sender, and the RTP circuit breaker.

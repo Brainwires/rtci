@@ -116,20 +116,29 @@ impl<'a>
                 transport: msg.transport,
                 message,
             })?;
-        } else if let Some(path) = self.ctx.ice_transport.agent.media_path() {
-            // Only the selected pair's remote may send DTLS/SRTP: a datagram from any other
-            // address is not part of this connection (ICE consent covers that one address), so
-            // drop it rather than hand it to DTLS, where it would cost a decrypt attempt or
-            // reach handshake processing. During an ICE restart that is the pair the session
-            // had before it, until the restart selects one (RFC 8445 Section 9).
-            let remote_addr = path.peer_addr;
-            if msg.transport.peer_addr != remote_addr {
-                trace!(
-                    "drop non-STUN message from {:?}: not the selected pair's remote {:?}",
-                    msg.transport.peer_addr, remote_addr
-                );
-                return Ok(());
-            }
+        } else if self.ctx.ice_transport.agent.media_path().is_some() {
+            // Data is taken from the path it is sent on (the selected pair's; during an ICE
+            // restart the pair the session had before it, RFC 8445 Section 9) and from the
+            // remote candidate of any other valid pair (Section 12.2: an agent is "prepared to
+            // receive data on any of the candidates" it provided, and knows the data is the
+            // peer's "as a consequence of the STUN exchange"). A datagram from an address no
+            // check of ours was answered from is not part of this connection: it is dropped
+            // rather than handed to DTLS, where it would cost a decrypt attempt or reach
+            // handshake processing. With `with_ice_data_from_selected_pair_only` only the
+            // selected pair's remote address is accepted.
+            let other_pair = match self.ctx.ice_transport.agent.data_path(msg.transport) {
+                None => {
+                    trace!(
+                        "drop non-STUN message from {:?}: not from a valid pair",
+                        msg.transport.peer_addr
+                    );
+                    return Ok(());
+                }
+                Some(::ice::DataPath::InUse) => None,
+                Some(::ice::DataPath::Valid(local, remote)) => {
+                    Some((local.id().to_owned(), remote.id().to_owned()))
+                }
+            };
 
             // only ICE connection is ready and bypass it
             debug!("bypass ice read {:?}", msg.transport.peer_addr);
@@ -139,7 +148,14 @@ impl<'a>
             // SelectedCandidatePairChange) to avoid allocating the key per packet.
             let bytes = msg.message.len();
             let now = msg.now;
-            self.count_on_pair_in_use(|pair| pair.on_packet_received(bytes, now));
+            match other_pair {
+                None => self.count_on_pair_in_use(|pair| pair.on_packet_received(bytes, now)),
+                // (Off the path in use: rare, so the key is made per packet.)
+                Some((local_id, remote_id)) => self
+                    .stats
+                    .get_or_create_candidate_pair(&local_id, &remote_id)
+                    .on_packet_received(bytes, now),
+            }
 
             // When ICE restarts and the selected candidate pair changes,
             // WebRTC treats this as a path migration, and DTLS continues unchanged, bound to the ICE transport, not to a fixed 5-tuple.
