@@ -227,11 +227,16 @@ pub struct RTCRtpTransceiver<'a> {
 /// second. `None`: the section has no such line.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct RTCRemoteBandwidth {
-    /// The most the remote side accepts from this endpoint in the section: `b=TIAS` (RFC
-    /// 3890, the bit rate without transport overhead), else `b=AS` (RFC 8866 section 5.8,
-    /// kilobits per second, here times 1000). The input a congestion controller or an
-    /// encoder caps its target with.
+    /// The most RTP the remote side accepts from this endpoint in the section: `b=TIAS` (RFC
+    /// 3890, the bit rate without transport overhead), else the value RFC 9429 section 5.10
+    /// derives from `b=AS` (kilobits per second, RFC 8866 section 5.8): "TIAS = AS * 1000 *
+    /// 0.95 - (50 * 40 * 8)", which takes out RTCP's 5% and an estimate of the header
+    /// overhead. The bound of the congestion controller's estimate, and what an encoder caps
+    /// its target with.
     pub max_bitrate: Option<u64>,
+    /// The session bandwidth of the section (RFC 3550 section 6.2), which RTCP's share is
+    /// taken from: `b=TIAS`, else `b=AS` times 1000.
+    pub session_bitrate: Option<u64>,
     /// `b=RS` (RFC 3556): the RTCP bandwidth allocated to active data senders.
     pub rtcp_senders_bitrate: Option<u64>,
     /// `b=RR` (RFC 3556): the RTCP bandwidth allocated to receivers; 0 turns their RTCP off.

@@ -421,6 +421,10 @@ fn rtcp_is_a_few_packets_a_second() -> Result<()> {
     world.send_media(sender, FIRST_SEQ, 250)?;
 
     for (name, peer) in ["sender", "receiver"].iter().zip(&world.peers) {
+        println!(
+            "the {name} sent {} RTCP datagrams in five seconds",
+            peer.rtcp_datagrams
+        );
         assert!(
             (3..=80).contains(&peer.rtcp_datagrams),
             "the {name} sent {} RTCP datagrams in five seconds",

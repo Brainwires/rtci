@@ -13,6 +13,56 @@ pub(crate) mod responder;
 pub(crate) mod send_buffer;
 
 use crate::stream_info::StreamInfo;
+use crate::{Attribute, AttributedPacket, Packet, TaggedPacket};
+use shared::TransportContext;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+/// What a session description negotiated for retransmission (RFC 4588), told to the NACK
+/// interceptors while they run.
+///
+/// It travels as an [`Attribute::Custom`] on an empty RTCP packet written into the chain
+/// ([`NackControl::into_packet`]). Each NACK interceptor reads what is its own and hands the
+/// packet on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum NackControl {
+    /// The `rtx-time` (RFC 4588 8.1) this endpoint announced for its retransmission format
+    /// `payload_type_rtx`: how long the [`NackResponderInterceptor`](crate::NackResponderInterceptor)
+    /// keeps a sent packet of a stream repaired under that payload type available. It replaces
+    /// the builder's `with_max_packet_age` for those streams; `None` returns them to it.
+    LocalRtxTime {
+        /// The payload type of the retransmission format.
+        payload_type_rtx: u8,
+        /// The announced `rtx-time`.
+        rtx_time: Option<Duration>,
+    },
+    /// The `rtx-time` the remote endpoint announced for its retransmission format
+    /// `payload_type_rtx`: past it the remote sender no longer has the packet, so the
+    /// [`NackGeneratorInterceptor`](crate::NackGeneratorInterceptor) stops asking for a packet
+    /// of a stream repaired under that payload type that has been missing for longer, or for
+    /// longer than the builder's `with_max_packet_age`, whichever is shorter. `None` leaves
+    /// the builder's value alone.
+    RemoteRtxTime {
+        /// The payload type of the retransmission format.
+        payload_type_rtx: u8,
+        /// The announced `rtx-time`.
+        rtx_time: Option<Duration>,
+    },
+}
+
+impl NackControl {
+    /// The packet that carries this to the NACK interceptors when written into the chain at
+    /// `now`.
+    pub fn into_packet(self, now: Instant) -> TaggedPacket {
+        TaggedPacket {
+            now,
+            transport: TransportContext::default(),
+            message: AttributedPacket::new(Packet::Rtcp(vec![]))
+                .with(Attribute::Custom(Arc::new(self))),
+        }
+    }
+}
 
 /// Check if a stream supports NACK feedback.
 ///

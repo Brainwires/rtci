@@ -103,7 +103,7 @@ impl<'a> DtlsHandler<'a> {
     /// Starts the client's handshake (RFC 8842 section 5.3 / 5.4: the endpoint that is
     /// `active` sends the ClientHello) and queues its first flight. A no-op for a server, and
     /// for a client whose handshake has started: the config is held only until then.
-    fn connect_client(&mut self, now: Instant) -> Result<()> {
+    fn connect_client(&mut self, now: Instant, queue_flight: bool) -> Result<()> {
         if self.ctx.dtls_transport.dtls_role != RTCDtlsRole::Client {
             return Ok(());
         }
@@ -124,12 +124,17 @@ impl<'a> DtlsHandler<'a> {
             dtls_handshake_config,
             None,
         )?;
-        while let Some(transmit) = dtls_endpoint.poll_transmit() {
-            self.ctx.write_outs.push_back(TaggedRTCMessageInternal {
-                now: transmit.now,
-                transport: transmit.transport,
-                message: RTCMessageInternal::Dtls(DTLSMessage::Raw(transmit.message)),
-            });
+        // On a pair change the first flight is left in the endpoint and goes out with the
+        // next read or timeout, once every handler has seen the event (the ICE handler counts
+        // a pair's packets from then). Asked for outside an event, it is queued here.
+        if queue_flight {
+            while let Some(transmit) = dtls_endpoint.poll_transmit() {
+                self.ctx.write_outs.push_back(TaggedRTCMessageInternal {
+                    now: transmit.now,
+                    transport: transmit.transport,
+                    message: RTCMessageInternal::Dtls(DTLSMessage::Raw(transmit.message)),
+                });
+            }
         }
         Ok(())
     }
@@ -509,7 +514,7 @@ impl<'a>
 
     fn poll_write(&mut self) -> Option<Self::Wout> {
         if let Some(now) = self.ctx.connect_requested.take()
-            && let Err(err) = self.connect_client(now)
+            && let Err(err) = self.connect_client(now, true)
         {
             warn!("failed to start the dtls handshake: {}", err);
         }
@@ -524,7 +529,7 @@ impl<'a>
     fn handle_event(&mut self, evt: TaggedRTCEventInternal) -> Result<()> {
         let now = evt.now;
         if let RTCEventInternal::ICESelectedCandidatePairChange = evt.event {
-            self.connect_client(now)?;
+            self.connect_client(now, false)?;
         } else {
             self.ctx.event_outs.push_back(evt);
         }
@@ -819,7 +824,7 @@ mod tests {
                 certificates: vec![],
                 answering_dtls_role: Default::default(),
                 srtp_protection_profiles: vec![],
-                use_srtp: true,
+                use_srtp_always: true,
                 dtls_cipher_suites: vec![],
                 allow_insecure_verification_algorithm: false,
                 disable_certificate_fingerprint_verification: false,
@@ -849,7 +854,7 @@ mod tests {
                 certificates: vec![],
                 answering_dtls_role: Default::default(),
                 srtp_protection_profiles: vec![],
-                use_srtp: true,
+                use_srtp_always: true,
                 dtls_cipher_suites: vec![],
                 allow_insecure_verification_algorithm: false,
                 disable_certificate_fingerprint_verification: false,
@@ -932,7 +937,7 @@ mod tests {
                     certificates: vec![],
                     answering_dtls_role: Default::default(),
                     srtp_protection_profiles: vec![],
-                    use_srtp: true,
+                    use_srtp_always: true,
                     dtls_cipher_suites: vec![],
                     allow_insecure_verification_algorithm: false,
                     disable_certificate_fingerprint_verification: true,
@@ -1014,6 +1019,8 @@ mod tests {
                         event: RTCEventInternal::ICESelectedCandidatePairChange,
                     })
                     .expect("the selected pair starts a client's handshake");
+                // The client's first flight goes out with the next timeout.
+                handler.handle_timeout(now).expect("no timeout error");
             }
             for _ in 0..20 {
                 let mut progressed = false;

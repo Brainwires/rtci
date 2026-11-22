@@ -11,15 +11,30 @@ use jsep_common::{
     SESSION, TRANSPORT, TestResult, crlf, exchange, media_sections, port_of, video_track,
 };
 use rtc::peer_connection::configuration::media_engine::MediaEngine;
+use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtc::peer_connection::configuration::{RTCBundlePolicy, RTCConfigurationBuilder};
 use rtc::peer_connection::sdp::RTCSessionDescription;
 use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
 use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
 
 fn peer(policy: Option<RTCBundlePolicy>) -> Result<RTCPeerConnection, Box<dyn std::error::Error>> {
+    peer_with(policy, false)
+}
+
+/// `max_bundle_alias`: `SettingEngineBuilder::with_max_bundle_as_must_bundle`.
+fn peer_with(
+    policy: Option<RTCBundlePolicy>,
+    max_bundle_alias: bool,
+) -> Result<RTCPeerConnection, Box<dyn std::error::Error>> {
     let mut media_engine = MediaEngine::default();
     media_engine.register_default_codecs()?;
-    let mut builder = RTCPeerConnectionBuilder::new().with_media_engine(media_engine);
+    let mut builder = RTCPeerConnectionBuilder::new()
+        .with_media_engine(media_engine)
+        .with_setting_engine(
+            SettingEngineBuilder::new()
+                .with_max_bundle_as_must_bundle(max_bundle_alias)
+                .build(),
+        );
     if let Some(policy) = policy {
         builder = builder.with_configuration(
             RTCConfigurationBuilder::new()
@@ -34,7 +49,14 @@ fn peer(policy: Option<RTCBundlePolicy>) -> Result<RTCPeerConnection, Box<dyn st
 fn offerer(
     policy: Option<RTCBundlePolicy>,
 ) -> Result<RTCPeerConnection, Box<dyn std::error::Error>> {
-    let mut pc = peer(policy)?;
+    offerer_with(policy, false)
+}
+
+fn offerer_with(
+    policy: Option<RTCBundlePolicy>,
+    max_bundle_alias: bool,
+) -> Result<RTCPeerConnection, Box<dyn std::error::Error>> {
+    let mut pc = peer_with(policy, max_bundle_alias)?;
     pc.add_transceiver_from_kind(RtpCodecKind::Audio, None)?;
     pc.add_track(video_track("first", 0x0101_0101))?;
     pc.add_track(video_track("second", 0x0202_0202))?;
@@ -104,8 +126,8 @@ fn balanced_is_the_default_and_bundles_later_sections_of_a_type() -> TestResult 
 }
 
 #[test]
-fn max_bundle_gives_only_the_first_section_a_transport() -> TestResult {
-    let mut pc = offerer(Some(RTCBundlePolicy::MaxBundle))?;
+fn must_bundle_gives_only_the_first_section_a_transport() -> TestResult {
+    let mut pc = offerer(Some(RTCBundlePolicy::MustBundle))?;
     let offer = pc.create_offer(None)?;
     assert_eq!(
         shape(&offer.sdp)
@@ -114,6 +136,38 @@ fn max_bundle_gives_only_the_first_section_a_transport() -> TestResult {
             .collect::<Vec<_>>(),
         vec![false, true, true, true],
         "{}",
+        offer.sdp
+    );
+    Ok(())
+}
+
+/// RFC 9429 section 4.1.1: "'max-bundle' is considered deprecated, and implementations
+/// compliant with this specification SHOULD ignore attempts by the application to select this
+/// bundle policy": the default, balanced, stays in effect. The setting engine can make it the
+/// alias of must-bundle it was defined as.
+#[test]
+fn max_bundle_is_ignored_unless_made_an_alias_of_must_bundle() -> TestResult {
+    let mut pc = offerer(Some(RTCBundlePolicy::MaxBundle))?;
+    let offer = pc.create_offer(None)?;
+    assert_eq!(
+        shape(&offer.sdp)
+            .into_iter()
+            .map(|(_, bundle_only)| bundle_only)
+            .collect::<Vec<_>>(),
+        vec![false, false, true, false],
+        "balanced:\n{}",
+        offer.sdp
+    );
+
+    let mut pc = offerer_with(Some(RTCBundlePolicy::MaxBundle), true)?;
+    let offer = pc.create_offer(None)?;
+    assert_eq!(
+        shape(&offer.sdp)
+            .into_iter()
+            .map(|(_, bundle_only)| bundle_only)
+            .collect::<Vec<_>>(),
+        vec![false, true, true, true],
+        "must-bundle:\n{}",
         offer.sdp
     );
     Ok(())
@@ -136,7 +190,7 @@ fn max_compat_marks_no_section_bundle_only() -> TestResult {
 /// 9429 section 5.3.1); a later offer does not mark any section bundle-only (section 5.2.2).
 #[test]
 fn bundle_only_sections_are_answered_and_not_marked_again() -> TestResult {
-    for policy in [None, Some(RTCBundlePolicy::MaxBundle)] {
+    for policy in [None, Some(RTCBundlePolicy::MustBundle)] {
         let mut a = offerer(policy)?;
         let mut b = peer(None)?;
         let (offer, answer) = exchange(&mut a, &mut b)?;
@@ -182,13 +236,19 @@ a=rtpmap:{format}
         section("video", "1", "96 VP8/90000"),
         section("video", "2", "96 VP8/90000"),
     ));
-    for (policy, accepted) in [
-        (None, [true, true, false]),
-        (Some(RTCBundlePolicy::Balanced), [true, true, false]),
-        (Some(RTCBundlePolicy::MaxBundle), [true, false, false]),
-        (Some(RTCBundlePolicy::MaxCompat), [true, true, true]),
+    for (policy, alias, accepted) in [
+        (None, false, [true, true, false]),
+        (Some(RTCBundlePolicy::Balanced), false, [true, true, false]),
+        (
+            Some(RTCBundlePolicy::MustBundle),
+            false,
+            [true, false, false],
+        ),
+        (Some(RTCBundlePolicy::MaxBundle), false, [true, true, false]),
+        (Some(RTCBundlePolicy::MaxBundle), true, [true, false, false]),
+        (Some(RTCBundlePolicy::MaxCompat), false, [true, true, true]),
     ] {
-        let mut pc = peer(policy)?;
+        let mut pc = peer_with(policy, alias)?;
         pc.set_remote_description(Instant::now(), RTCSessionDescription::offer(offer.clone())?)?;
         let answer = pc.create_answer(None)?;
         let ports: Vec<bool> = media_sections(&answer.sdp)

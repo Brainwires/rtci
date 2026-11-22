@@ -184,6 +184,9 @@ pub struct InboundRtpStreamAccumulator {
     pub remote_total_round_trip_time: f64,
     /// Number of round trip times measured from DLRR blocks.
     pub remote_rtt_measurements: u64,
+    /// When the latest of them was measured: a sender report arriving at that instant came
+    /// with the block.
+    pub remote_rtt_measured_at: Option<Instant>,
 
     // Application-provided stats
     /// Frame assembly, decoder and renderer statistics provided by the application.
@@ -251,8 +254,12 @@ impl InboundRtpStreamAccumulator {
         self.reports_received += 1;
         // webrtc-stats: `roundTripTime` does not exist "if the latest SR does not contain the
         // DLRR report block". The block comes after the sender report in the compound packet
-        // and sets it again; the total and the count of measurements stay.
-        self.remote_round_trip_time = None;
+        // and sets it again; the total and the count of measurements stay. A block that
+        // arrived at this very instant is this report's too, in whichever RTCP packet or
+        // datagram of the sender's burst it travelled.
+        if self.remote_rtt_measured_at != Some(now) {
+            self.remote_round_trip_time = None;
+        }
     }
 
     /// Called when this side sends an RTCP XR receiver reference time block (RFC 3611 section
@@ -291,6 +298,7 @@ impl InboundRtpStreamAccumulator {
         // a fraction of a tick, which is a round trip of 0.
         let rtt = since_sent.saturating_sub(delay).as_secs_f64();
         self.remote_round_trip_time = Some(rtt);
+        self.remote_rtt_measured_at = Some(now);
         self.remote_total_round_trip_time += rtt;
         self.remote_rtt_measurements += 1;
     }

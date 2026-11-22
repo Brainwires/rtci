@@ -894,6 +894,21 @@ impl Agent {
             return Ok(false);
         }
 
+        // The agent has one component (RTP; the engine is rtcp-mux only), and candidates are
+        // paired within a component (RFC 8445 Section 6.1.2.2). A peer that also signals each
+        // candidate for the RTCP component (pion and webrtc-rs do, with the same address)
+        // gets those ignored: held, they could never be paired, and they would stand in the
+        // way of the RTP candidate with the same transport address.
+        if c.component() != COMPONENT_RTP {
+            debug!(
+                "[{}]: ignoring remote candidate {} of component {}",
+                self.get_name(),
+                c.address(),
+                c.component()
+            );
+            return Ok(false);
+        }
+
         // Filter by network type if network_types is configured
         if !self.network_types.is_empty() {
             let candidate_network_type = c.network_type();
@@ -1770,7 +1785,13 @@ impl Agent {
                 self.next_consent_at = Some(now + self.next_consent_interval());
                 self.consent_unanswered_since.get_or_insert(now);
                 self.candidate_pairs[pair_index].on_consent_request_sent();
-                self.send_check(now, pair_index, false, true);
+                // The controlling agent's consent checks repeat the nomination of the pair
+                // they are sent on (USE-CANDIDATE), as libwebrtc's do. It nominates no other
+                // pair (RFC 8445 Section 8.1.1), and a peer that lost its state without an
+                // ICE restart (a new peer connection that takes over the address and the
+                // credentials) learns from them which pair is in use: as the controlled
+                // agent it would otherwise wait for a nomination that was made long ago.
+                self.send_check(now, pair_index, self.is_controlling, true);
             }
             Some(_) => {}
         }

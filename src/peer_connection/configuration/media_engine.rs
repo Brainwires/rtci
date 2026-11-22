@@ -150,7 +150,10 @@ use crate::rtp_transceiver::rtp_sender::rtp_codec_parameters::RTCRtpCodecParamet
 use crate::rtp_transceiver::rtp_sender::rtp_header_extension_capability::RTCRtpHeaderExtensionCapability;
 use crate::rtp_transceiver::rtp_sender::rtp_header_extension_parameters::RTCRtpHeaderExtensionParameters;
 use crate::rtp_transceiver::rtp_sender::rtp_parameters::RTCRtpParameters;
-use crate::rtp_transceiver::{PayloadType, rtp_sender::rtcp_parameters::RTCPFeedback};
+use crate::rtp_transceiver::{
+    PayloadType,
+    rtp_sender::rtcp_parameters::{RTCPFeedback, RTCRtcpParameters},
+};
 use sdp::MediaDescription;
 use sdp::description::session::SessionDescription;
 use shared::error::{Error, Result};
@@ -370,6 +373,18 @@ pub struct MediaEngine {
 
     pub(crate) header_extensions: Vec<MediaEngineHeaderExtension>,
     pub(crate) negotiated_header_extensions: HashMap<u16, MediaEngineHeaderExtension>,
+
+    /// The RTCP CNAME of the connection this media engine belongs to (RFC 7022), set when the
+    /// connection is built: what `a=ssrc:<ssrc> cname:` lines and `RTCRtcpParameters::cname`
+    /// say. Empty in a media engine no connection has taken yet.
+    pub(crate) rtcp_cname: String,
+}
+
+/// Whether an RTP payload type cannot be told from an RTCP packet type once RTP and RTCP share
+/// a port (RFC 5761 section 4): with the marker bit set, payload types 64 to 95 give the second
+/// octet the values 192 to 223, the RTCP packet types.
+pub(crate) fn is_rtcp_conflicting_payload_type(payload_type: PayloadType) -> bool {
+    (64..=95).contains(&payload_type)
 }
 
 impl MediaEngine {
@@ -738,12 +753,23 @@ impl MediaEngine {
     /// ```
     /// # Errors
     ///
-    /// Returns [`Error::ErrUnknownType`] if `typ` is not `Audio`, `Video` or `Application`.
+    /// Returns [`Error::ErrUnknownType`] if `typ` is not `Audio`, `Video` or `Application`,
+    /// and [`Error::SdpInvalidValue`] for a payload type of 64 to 95: RFC 5761 section 4,
+    /// "RTP payload types in the range 64-95 MUST NOT be used". With the marker bit set such
+    /// a packet has the second octet of an RTCP packet (types 192 to 223), and this endpoint
+    /// always multiplexes RTP and RTCP on one port.
     pub fn register_codec(
         &mut self,
         codec: RTCRtpCodecParameters,
         typ: RtpCodecKind,
     ) -> Result<()> {
+        if is_rtcp_conflicting_payload_type(codec.payload_type) {
+            return Err(Error::SdpInvalidValue(format!(
+                "payload type {} of {}: 64 to 95 cannot be used with RTP/RTCP multiplexing \
+                 (RFC 5761 section 4)",
+                codec.payload_type, codec.rtp_codec.mime_type
+            )));
+        }
         match typ {
             RtpCodecKind::Audio => {
                 MediaEngine::add_codec(&mut self.audio_codecs, codec);
@@ -1438,7 +1464,10 @@ impl MediaEngine {
         RTCRtpParameters {
             header_extensions,
             codecs: found_codecs,
-            ..Default::default()
+            rtcp: RTCRtcpParameters {
+                cname: self.rtcp_cname.clone(),
+                reduced_size: false,
+            },
         }
     }
 

@@ -645,9 +645,14 @@ fn gcc_ignores_loss_inside_the_band() {
 #[test]
 fn gcc_climbs_back_after_the_path_widens() {
     let widen_after = Duration::from_secs(3);
+    // 24 seconds. This fixture's sender offers 1.2 Mbit/s whatever the target says, so the
+    // queue it built overflows between the fifth and the seventh second (180 packets lost). The
+    // loss-based controller answers that from the rate being sent, down to the floor, and
+    // climbs back 5% per 200 ms once the loss stops: the recovery asked for here is complete a
+    // few seconds after that, not at the twelfth second.
     let trajectory = gcc_trajectory(
         PathProfile::recovering(),
-        1_200,
+        2_400,
         Some(widen_after),
         1_200_000.0,
     );

@@ -853,6 +853,10 @@ impl Agent {
             self.candidate_pairs[selected].remote_index == request.remote_index
         }) {
             self.consent_unanswered_since = None;
+            // Consent is back: the state is looked at now, not at the next consent check.
+            if self.connection_state == ConnectionState::Disconnected {
+                self.request_connectivity_check();
+            }
         }
 
         // Round-trip time, from a request that was sent once (a retransmitted one does not say

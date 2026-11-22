@@ -168,6 +168,11 @@ pub struct NackGeneratorInterceptor {
     receive_logs: HashMap<u32, ReceiveLog>,
 
     max_packet_age: Option<Duration>,
+    /// The retransmission payload type of each bound stream that has one, by SSRC.
+    rtx_payload_types: HashMap<u32, u8>,
+    /// The `rtx-time` the remote endpoint announced, by retransmission payload type
+    /// ([`NackControl::RemoteRtxTime`](super::NackControl::RemoteRtxTime)).
+    remote_rtx_times: HashMap<u8, Duration>,
     reorder_delay: Duration,
     /// The round-trip time to the senders, measured by the RTCP session when there is one.
     round_trip_time: Option<Duration>,
@@ -193,6 +198,8 @@ impl NackGeneratorInterceptor {
             sender_ssrc: rand::random(),
             receive_logs: HashMap::new(),
             max_packet_age: Some(DEFAULT_MAX_PACKET_AGE),
+            rtx_payload_types: HashMap::new(),
+            remote_rtx_times: HashMap::new(),
             reorder_delay: Duration::ZERO,
             round_trip_time: None,
             requests: HashMap::new(),
@@ -208,6 +215,18 @@ impl NackGeneratorInterceptor {
                 self.requests.remove(&ssrc);
                 continue;
             }
+
+            // RFC 4588 8.1: past the sender's `rtx-time` it no longer has the packet. The
+            // shorter of that and the configured age is how long a packet is asked for.
+            let rtx_time = self
+                .rtx_payload_types
+                .get(&ssrc)
+                .and_then(|payload_type_rtx| self.remote_rtx_times.get(payload_type_rtx))
+                .copied();
+            let max_packet_age = match (self.max_packet_age, rtx_time) {
+                (Some(age), Some(rtx_time)) => Some(age.min(rtx_time)),
+                (age, rtx_time) => age.or(rtx_time),
+            };
 
             let requests = self.requests.entry(ssrc).or_default();
             // A packet that arrived, or that the log no longer covers, is forgotten.
@@ -227,7 +246,7 @@ impl NackGeneratorInterceptor {
                         return false;
                     }
                     let missing_for = now.saturating_duration_since(request.missing_since);
-                    if self.max_packet_age.is_some_and(|max| missing_for > max) {
+                    if max_packet_age.is_some_and(|max| missing_for > max) {
                         return false;
                     }
                     let due = match request.last_asked {
@@ -333,6 +352,16 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for NackGeneratorInterceptor {
     }
 
     fn handle_write(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
+        if let Some(super::NackControl::RemoteRtxTime {
+            payload_type_rtx,
+            rtx_time,
+        }) = msg.message.custom::<super::NackControl>()
+        {
+            match rtx_time {
+                Some(rtx_time) => self.remote_rtx_times.insert(*payload_type_rtx, *rtx_time),
+                None => self.remote_rtx_times.remove(payload_type_rtx),
+            };
+        }
         self.write_queue.push_back(msg);
         Ok(())
     }
@@ -366,12 +395,19 @@ impl Interceptor for NackGeneratorInterceptor {
             && let Some(receive_log) = ReceiveLog::new(self.size)
         {
             self.receive_logs.insert(info.ssrc, receive_log);
+            match info.payload_type_rtx {
+                Some(payload_type_rtx) => {
+                    self.rtx_payload_types.insert(info.ssrc, payload_type_rtx)
+                }
+                None => self.rtx_payload_types.remove(&info.ssrc),
+            };
         }
     }
 
     fn unbind_remote_stream(&mut self, info: &StreamInfo) {
         self.receive_logs.remove(&info.ssrc);
         self.requests.remove(&info.ssrc);
+        self.rtx_payload_types.remove(&info.ssrc);
     }
 
     fn bind_local_stream(&mut self, _info: &StreamInfo) {}

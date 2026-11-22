@@ -283,17 +283,16 @@ use crate::peer_connection::handler::dtls::DtlsHandlerContext;
 use crate::peer_connection::handler::ice::IceHandlerContext;
 use crate::peer_connection::handler::sctp::SctpHandlerContext;
 use crate::peer_connection::sdp::MediaDescriptionExt;
-use crate::peer_connection::sdp::has_bundle_attribute;
+use crate::peer_connection::sdp::section_multiplexes_rtcp;
 use crate::peer_connection::sdp::session_description::RTCSessionDescription;
 use crate::peer_connection::sdp::{
-    ATTR_KEY_BUNDLE_ONLY, ATTR_KEY_RTCP_MUX_ONLY, RemoteIceDetails, SctpNegotiation,
-    check_answer_against_offer, codecs_from_media_description, discard_stray_bundle_only,
-    effective_direction, extract_fingerprints, extract_ice_details, extract_tls_id, get_mid_value,
-    get_peer_direction, has_ice_trickle_option, has_rtcp_mux, has_rtp_media,
-    inherit_session_extmap, insert_media_line, is_lite_set, is_live_rtp_section, is_rejected_media,
-    is_sdp_token, is_unknown_application_media, media_ice_credentials, negotiated_sctp,
-    sdp_type::RTCSdpType, update_sdp_origin, validate_application_media_section,
-    validate_dtls_attributes,
+    ATTR_KEY_RTCP_MUX_ONLY, RemoteIceDetails, SctpNegotiation, check_answer_against_offer,
+    codecs_from_media_description, discard_stray_bundle_only, effective_direction,
+    extract_fingerprints, extract_ice_details, extract_tls_id, get_mid_value, get_peer_direction,
+    has_ice_trickle_option, has_rtcp_mux, has_rtp_media, inherit_session_extmap, insert_media_line,
+    is_lite_set, is_live_rtp_section, is_rejected_media, is_sdp_token,
+    is_unknown_application_media, media_ice_credentials, negotiated_sctp, sdp_type::RTCSdpType,
+    update_sdp_origin, validate_application_media_section, validate_dtls_attributes,
 };
 use crate::peer_connection::state::RTCIceGatheringState;
 use crate::peer_connection::state::ice_connection_state::RTCIceConnectionState;
@@ -1404,7 +1403,12 @@ impl RTCPeerConnection {
                 let negotiated =
                     negotiated_sctp(parsed_local_description, parsed_remote_description);
                 self.apply_sctp_negotiation(now, negotiated)?;
-                self.start_rtp(remote_description)?;
+                self.start_rtp(remote_description.clone())?;
+                self.apply_negotiated_session(
+                    now,
+                    parsed_local_description,
+                    parsed_remote_description,
+                )?;
             }
 
             // An answer applied: the stopped transceivers whose sections it left rejected go.
@@ -1537,9 +1541,8 @@ impl RTCPeerConnection {
             // RFC 8841 section 5.1: a data section without a valid `a=sctp-port` is invalid.
             validate_application_media_section(&parsed)?;
             // So is a description whose DTLS attributes are malformed (RFC 8122 section 5,
-            // RFC 4145 section 4, RFC 8842 sections 4 and 5.1), or that has media sections
-            // on a DTLS transport that cannot key SRTP (RFC 8827 section 6.5).
-            validate_dtls_attributes(&parsed)?;
+            // RFC 4145 section 4, RFC 8842 sections 4 and 5.1).
+            validate_dtls_attributes(&parsed, self.setting_engine.accept_lowercase_fingerprints)?;
             // RFC 8122 section 5: a certificate is verified with the most preferred hash
             // function the peer offers; MD5, MD2 and functions the crypto provider lacks are
             // never used. A description that offers nothing else cannot be verified at all.
@@ -1554,15 +1557,6 @@ impl RTCPeerConnection {
                 .is_none()
             {
                 return Err(Error::ErrUnsupportedFingerprintAlgorithm);
-            }
-            if has_rtp_media(&parsed) {
-                let dtls_transport = self.dtls_transport();
-                if !dtls_transport.use_srtp
-                    || (dtls_transport.state() == RTCDtlsTransportState::Connected
-                        && dtls_transport.srtp_negotiated == Some(false))
-                {
-                    return Err(Error::ErrSessionDescriptionMediaWithoutSrtp);
-                }
             }
             remote_description.parsed = Some(parsed);
         }
@@ -1683,15 +1677,11 @@ impl RTCPeerConnection {
                     "m= section {index}: a=rtcp-mux-only without a=rtcp-mux (RFC 8858 section 4.2)"
                 )));
             }
-            // A bundled section may leave the attribute to the tagged section of its group
-            // (RFC 9143 section 7.1.3), and a bundle-only one does (section 9.3.1.1).
+            // In a subsequent offer or an answer a bundled section leaves the attribute to the
+            // tagged section of its group (RFC 9143 section 7.1.3). In an initial offer only a
+            // bundle-only section does (section 9.3.1.1).
             if !is_live_rtp_section(media)
-                || has_bundle_attribute(
-                    parsed,
-                    media,
-                    ::sdp::description::session::ATTR_KEY_RTCPMUX,
-                )
-                || media.has_attribute(ATTR_KEY_BUNDLE_ONLY)
+                || section_multiplexes_rtcp(parsed, media, !answers && self.is_initial_exchange())
             {
                 continue;
             }
@@ -2014,6 +2004,10 @@ impl RTCPeerConnection {
                 };
 
                 let remote_tls_id = extract_tls_id(parsed_remote_description)?;
+                // A session with media sections needs SRTP keys from the association: it is
+                // set up with `use_srtp`, and one that was not is replaced (RFC 5764 section
+                // 4.1).
+                self.dtls_transport_mut().srtp_required = has_rtp_media(parsed_remote_description);
 
                 // After the transport was closed, the description that sets one up again starts
                 // a new ICE session even when the peer keeps its ICE credentials: some browsers
@@ -2104,9 +2098,6 @@ impl RTCPeerConnection {
                     )?;
                     self.dtls_transport_mut().remote_tls_id = remote_tls_id;
                 }
-
-                // A session with media sections needs SRTP keys from the association.
-                self.dtls_transport_mut().srtp_required = has_rtp_media(parsed_remote_description);
             }
 
             if is_final_answer
@@ -2125,7 +2116,12 @@ impl RTCPeerConnection {
                 let negotiated =
                     negotiated_sctp(parsed_local_description, parsed_remote_description);
                 self.apply_sctp_negotiation(now, negotiated)?;
-                self.start_rtp(remote_description)?;
+                self.start_rtp(remote_description.clone())?;
+                self.apply_negotiated_session(
+                    now,
+                    parsed_local_description,
+                    parsed_remote_description,
+                )?;
             }
 
             // An answer applied: the stopped transceivers whose sections it left rejected go.
