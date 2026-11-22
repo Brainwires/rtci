@@ -133,6 +133,8 @@ pub mod opaque;
 pub mod password_algorithm;
 /// Text-valued attributes such as `USERNAME`, `REALM` and `SOFTWARE`.
 pub mod textattrs;
+/// The retransmission timer of RFC 8489 section 6.2, shared by every transaction layer.
+pub mod timer;
 /// The `UNKNOWN-ATTRIBUTES` attribute, listing attributes a server could not process.
 pub mod uattrs;
 /// Parsing `stun:` and `stuns:` URIs.

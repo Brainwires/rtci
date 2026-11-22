@@ -21,27 +21,15 @@ use crate::agent::*;
 use crate::attributes::*;
 use crate::error_code::ErrorCodeAttribute;
 use crate::message::*;
+use crate::timer::{
+    DEFAULT_MAX_OUTSTANDING, DEFAULT_RC, DEFAULT_RM, DEFAULT_RTO, DEFAULT_TI, RtoEstimator,
+    Schedule,
+};
 use crate::validated::{Rejection, Validator};
 use crypto::{RTCCryptoProvider, SecretVec};
 use shared::{TaggedBytesMut, TransportContext, TransportMessage, TransportProtocol};
 
 const DEFAULT_TIMEOUT_RATE: Duration = Duration::from_millis(5);
-/// RFC 8489 section 6.2.1: the initial RTO "SHOULD be greater than or equal to 500 ms".
-const DEFAULT_RTO: Duration = Duration::from_millis(500);
-/// RFC 8489 section 6.2.1: Rc, the number of times a request is sent.
-const DEFAULT_RC: u32 = 7;
-/// RFC 8489 section 6.2.1: Rm, the last wait in units of RTO.
-const DEFAULT_RM: u32 = 16;
-/// RFC 8489 section 6.2.2: Ti, how long a request over a reliable transport waits.
-const DEFAULT_TI: Duration = Duration::from_millis(39_500);
-/// RFC 8489 section 6.2: outstanding transactions to one server.
-const DEFAULT_MAX_OUTSTANDING: usize = 10;
-/// RFC 8489 section 6.2.1: a cached RTO is stale after ten minutes without a transaction.
-const RTO_CACHE_LIFETIME: Duration = Duration::from_secs(600);
-/// RFC 6298 section 2: the clock granularity G; RFC 8489 asks for 1 ms accuracy.
-const CLOCK_GRANULARITY: Duration = Duration::from_millis(1);
-/// RFC 6298 section 2.5: an upper bound on the RTO.
-const MAX_RTO: Duration = Duration::from_secs(60);
 const DEFAULT_MAX_BUFFER_SIZE: usize = 8;
 /// RFC 8489 section 6.1: with an unknown path MTU, the IP packet of a STUN message over UDP is
 /// at most 576 bytes for IPv4 and 1280 bytes for IPv6.
@@ -83,71 +71,6 @@ pub struct ClientTransaction {
     /// A response was discarded because its integrity did not hold.
     discarded: bool,
     raw: Vec<u8>,
-}
-
-/// `now + d`, without the panic `Instant` reserves for an overflow.
-fn after(now: Instant, d: Duration) -> Instant {
-    now.checked_add(d)
-        .or_else(|| now.checked_add(Duration::from_secs(86_400)))
-        .unwrap_or(now)
-}
-
-/// The retransmission timeout of RFC 6298, as RFC 8489 section 6.2.1 uses it: kept per
-/// server, to 1 ms, never below the configured initial value, and forgotten after ten minutes
-/// without a transaction.
-#[derive(Debug, Clone)]
-struct RtoEstimator {
-    initial: Duration,
-    enabled: bool,
-    /// Smoothed round-trip time and its variation, once a round trip has been measured.
-    estimate: Option<(Duration, Duration)>,
-    rto: Duration,
-    last_transaction: Option<Instant>,
-}
-
-impl RtoEstimator {
-    fn new(initial: Duration, enabled: bool) -> Self {
-        Self {
-            initial,
-            enabled,
-            estimate: None,
-            rto: initial,
-            last_transaction: None,
-        }
-    }
-
-    /// The RTO a transaction that starts at `now` uses.
-    fn start(&mut self, now: Instant) -> Duration {
-        if let Some(last) = self.last_transaction
-            && now.saturating_duration_since(last) > RTO_CACHE_LIFETIME
-        {
-            self.estimate = None;
-            self.rto = self.initial;
-        }
-        self.last_transaction = Some(now);
-        self.rto
-    }
-
-    /// Takes the round-trip time of a request that was answered without being retransmitted
-    /// (RFC 6298 sections 2.2, 2.3 and 3).
-    fn sample(&mut self, rtt: Duration, now: Instant) {
-        self.last_transaction = Some(now);
-        if !self.enabled {
-            return;
-        }
-        let (srtt, rttvar) = match self.estimate {
-            None => (rtt, rtt / 2),
-            Some((srtt, rttvar)) => {
-                let rttvar = (rttvar * 3 + srtt.abs_diff(rtt)) / 4;
-                let srtt = (srtt * 7 + rtt) / 8;
-                (srtt, rttvar)
-            }
-        };
-        self.estimate = Some((srtt, rttvar));
-        self.rto = (srtt + (rttvar * 4).max(CLOCK_GRANULARITY))
-            .max(self.initial)
-            .min(MAX_RTO.max(self.initial));
-    }
 }
 
 struct ClientSettings {
@@ -405,7 +328,7 @@ impl Client {
     /// The RTO the next transaction starts with: the initial RTO, or what the server's
     /// round-trip times have made of it.
     pub fn rto(&self) -> Duration {
-        self.rto.rto
+        self.rto.rto()
     }
 
     /// How many transactions are waiting for their response.
@@ -451,17 +374,12 @@ impl Client {
     /// When the request of `ct`, just sent at `now` for the `ct.sent`-th time, is due again
     /// (RFC 8489 sections 6.2.1 and 6.2.2).
     fn next_deadline(&self, ct: &ClientTransaction, now: Instant) -> Instant {
-        if self.is_reliable() {
-            // Sent once; the transaction fails Ti after it started.
-            after(ct.start, self.settings.ti)
-        } else if ct.sent < self.settings.rc {
-            // The interval doubles after each retransmission: RTO, 2 RTO, 4 RTO, ...
-            let doublings = 1u32.checked_shl(ct.sent - 1).unwrap_or(u32::MAX);
-            after(now, ct.rto.saturating_mul(doublings))
-        } else {
-            // The last request waits Rm x RTO.
-            after(now, ct.rto.saturating_mul(self.settings.rm))
+        Schedule {
+            rc: self.settings.rc,
+            rm: self.settings.rm,
+            ti: self.settings.ti,
         }
+        .next_deadline(self.is_reliable(), ct.start, ct.rto, ct.sent, now)
     }
 
     /// Ends a transaction with `event`.
