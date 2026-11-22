@@ -36,6 +36,9 @@ pub const TYPE_RTCP_FB_CCM: &str = "ccm";
 /// Negative Acknowledgment feedback type
 pub const TYPE_RTCP_FB_NACK: &str = "nack";
 
+/// The `nack` parameter of the RFC 6679 RTCP ECN feedback packet: `a=rtcp-fb:<pt> nack ecn`.
+pub const RTCP_FB_NACK_ECN: &str = "ecn";
+
 /// RTCP feedback parameters for specifying additional packet types.
 ///
 /// Used to signal support for specific RTCP feedback mechanisms such as NACK, PLI, FIR, etc.

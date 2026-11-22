@@ -80,9 +80,11 @@
 /// Whether a codec's fmtp parameters are part of what the format is, so that a format with
 /// other parameters is another format, not a variant to fall back to: H.264
 /// (`profile-level-id`, `packetization-mode`; RFC 6184 section 8.2.2), VP9 (`profile-id`;
-/// RFC 9628 section 6) and AV1 (`profile`; AV1 RTP section 7.2).
+/// RFC 9628 section 6), AV1 (`profile`; AV1 RTP section 7.2) and H.265 (`profile-space`,
+/// `profile-id`, `tier-flag`, `interop-constraints`, `profile-compatibility-indicator`,
+/// `tx-mode`; RFC 7798 section 7.2.2).
 pub(crate) fn has_symmetric_configuration(codec: &RTCRtpCodec) -> bool {
-    [MIME_TYPE_H264, MIME_TYPE_VP9, MIME_TYPE_AV1]
+    [MIME_TYPE_H264, MIME_TYPE_VP9, MIME_TYPE_AV1, MIME_TYPE_HEVC]
         .iter()
         .any(|mime_type| codec.mime_type.eq_ignore_ascii_case(mime_type))
 }
@@ -127,6 +129,42 @@ fn h264_answer_fmtp(local: &str, offered: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(";")
+}
+
+/// The fmtp line of an H.265 answer: this endpoint's parameters (`local`) with a `level-id`
+/// no higher than the offer's (RFC 7798 section 7.2.2: "the value of level-id is changeable
+/// as long as the highest level indicated by the answer is not higher than that indicated by
+/// the offer"); an absent `level-id` is 93 (section 7.1).
+fn h265_answer_fmtp(local: &str, offered: &str) -> String {
+    let level = |line: &str| -> Option<u8> {
+        let fmtp = crate::rtp_transceiver::fmtp::parse(MIME_TYPE_HEVC, line);
+        fmtp.as_any()
+            .downcast_ref::<crate::rtp_transceiver::fmtp::h265::H265Fmtp>()?
+            .level_id()
+    };
+    let (Some(local_level), Some(offered_level)) = (level(local), level(offered)) else {
+        return local.to_owned();
+    };
+    if local_level <= offered_level {
+        return local.to_owned();
+    }
+    let mut written = false;
+    let mut parameters: Vec<String> = local
+        .split(';')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(|p| match p.split_once('=') {
+            Some((k, _)) if k.trim().eq_ignore_ascii_case("level-id") => {
+                written = true;
+                format!("{}={offered_level}", k.trim())
+            }
+            _ => p.to_owned(),
+        })
+        .collect();
+    if !written {
+        parameters.insert(0, format!("level-id={offered_level}"));
+    }
+    parameters.join(";")
 }
 
 #[cfg(test)]
@@ -409,6 +447,22 @@ pub struct MediaEngine {
     /// connection is built: what `a=ssrc:<ssrc> cname:` lines and `RTCRtcpParameters::cname`
     /// say. Empty in a media engine no connection has taken yet.
     pub(crate) rtcp_cname: String,
+
+    /// The packet times this endpoint states in its audio sections; see
+    /// [`MediaEngine::set_audio_packet_time`].
+    pub(crate) audio_packet_time: RTCPacketTime,
+}
+
+/// The packet times of a media section, in milliseconds: `a=ptime`, the length of media one
+/// packet should carry, and `a=maxptime`, the most it may carry (RFC 8866 sections 6.4, 6.5).
+/// They are what the endpoint that states them would like to receive (RFC 3264 section 5);
+/// for Opus they are its `ptime` and `maxptime` parameters (RFC 7587 section 7).
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RTCPacketTime {
+    /// `a=ptime`; `None` when not stated.
+    pub ptime: Option<u32>,
+    /// `a=maxptime`; `None` when not stated.
+    pub maxptime: Option<u32>,
 }
 
 /// Whether an RTP payload type cannot be told from an RTCP packet type once RTP and RTCP share
@@ -756,7 +810,10 @@ impl MediaEngine {
                     mime_type: MIME_TYPE_HEVC.to_owned(),
                     clock_rate: 90000,
                     channels: 0,
-                    sdp_fmtp_line: "".to_owned(),
+                    // Main profile, main tier, level 3.1, one RTP stream (RFC 7798 section
+                    // 7.1): stated, so that another configuration is not matched by name
+                    // (section 7.2.2), in the form browsers offer it.
+                    sdp_fmtp_line: "level-id=93;profile-id=1;tier-flag=0;tx-mode=SRST".to_owned(),
                     rtcp_feedback: video_rtcp_feedback,
                 },
                 payload_type: 126,
@@ -1042,6 +1099,17 @@ impl MediaEngine {
     /// treatment.
     pub fn set_flexfec_with_retransmission(&mut self, allowed: bool) {
         self.flexfec_with_retransmission = allowed;
+    }
+
+    /// The packet times this endpoint states in each audio section it offers or answers, as
+    /// `a=ptime` and `a=maxptime` (RFC 8866 sections 6.4, 6.5; RFC 7587 section 7 maps Opus's
+    /// `ptime` and `maxptime` to them, and section 7.1 handles `maxptime` "in the same way as
+    /// ptime": each side states what it wants to receive, RFC 3264 section 5). Neither is
+    /// stated by default. What the remote side states is
+    /// [`RTCRtpTransceiver::remote_packet_time`](crate::rtp_transceiver::RTCRtpTransceiver::remote_packet_time),
+    /// which an application that packetizes audio follows.
+    pub fn set_audio_packet_time(&mut self, packet_time: RTCPacketTime) {
+        self.audio_packet_time = packet_time;
     }
 
     /// set_multi_codec_negotiation enables or disables the negotiation of multiple codecs.
@@ -1545,15 +1613,24 @@ impl MediaEngine {
             return codec.rtp_codec.sdp_fmtp_line.clone();
         }
         let local_line = local.rtp_codec.sdp_fmtp_line;
-        if !answering
-            || !codec
-                .rtp_codec
-                .mime_type
-                .eq_ignore_ascii_case(MIME_TYPE_H264)
-        {
+        if !answering {
             return local_line;
         }
-        h264_answer_fmtp(&local_line, &codec.rtp_codec.sdp_fmtp_line)
+        if codec
+            .rtp_codec
+            .mime_type
+            .eq_ignore_ascii_case(MIME_TYPE_H264)
+        {
+            h264_answer_fmtp(&local_line, &codec.rtp_codec.sdp_fmtp_line)
+        } else if codec
+            .rtp_codec
+            .mime_type
+            .eq_ignore_ascii_case(MIME_TYPE_HEVC)
+        {
+            h265_answer_fmtp(&local_line, &codec.rtp_codec.sdp_fmtp_line)
+        } else {
+            local_line
+        }
     }
 
     pub(crate) fn get_codecs_by_kind(&self, typ: RtpCodecKind) -> Vec<RTCRtpCodecParameters> {

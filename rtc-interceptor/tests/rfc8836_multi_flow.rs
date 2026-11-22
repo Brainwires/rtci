@@ -829,7 +829,8 @@ fn gcc_regains_its_share_after_a_short_burst_of_cross_traffic() {
     println!(
         "short burst: share before {before:.2}, regained 80% of it {regained:?} s after; p95 queueing delay during {p95_during:?}, after {p95_after:?}"
     );
-    // Measured: 2 s. Without the probe after a large drop
+    // Measured: 4 s (2 s before the Kalman filter's noise weight followed the group rate,
+    // draft-ietf-rmcat-gcc-02 5.3). Without the probe after a large drop
     // (`ProbeController::with_probe_after_drop`) it was 23 s: the back-off is prompt, and the
     // climb back was the additive increase of draft-ietf-rmcat-gcc-02 section 5.5 near the
     // convergence band, about half a packet per response time, until the received rate left

@@ -904,6 +904,22 @@ impl Agent {
         local_index: usize,
         remote_addr: SocketAddr,
     ) {
+        // RFC 8489 Section 6.3.3: "For the Binding method, the client checks that the
+        // XOR-MAPPED-ADDRESS attribute is present in the response", and processes the success
+        // response only "if all the checks succeed". Without it the response is discarded: the
+        // transaction goes on (retransmissions, its timeout) as if it had not arrived, and it
+        // refreshes no consent. (One whose address family cannot be decoded is processed; the
+        // value is ignored, Section 6.3.3's SHOULD, and the pair is valid on the sent local
+        // candidate.)
+        if !m.contains(ATTR_XORMAPPED_ADDRESS) {
+            debug!(
+                "[{}]: discard Binding success response from {} without XOR-MAPPED-ADDRESS",
+                self.get_name(),
+                remote_addr
+            );
+            return;
+        }
+
         // Section 7.2.5: the response belongs to the transaction with its id, and so to that
         // transaction's pair.
         let Some(request) = self.handle_inbound_binding_success(now, m.transaction_id) else {

@@ -127,7 +127,11 @@ impl Flight for Flight1 {
         // extensions. The key shares are kept until the server has answered.
         state.tls13_offer = None;
         if cfg.supports_dtls13() {
-            match crate::dtls13::hello::ClientOffer::new(cfg, state.clock) {
+            match crate::dtls13::hello::ClientOffer::new(
+                cfg,
+                state.clock,
+                &std::mem::take(&mut state.early_data),
+            ) {
                 Ok(offer) => state.tls13_offer = Some(offer),
                 Err(error) => return Err((None, Some(error))),
             }
@@ -158,6 +162,26 @@ impl Flight for Flight1 {
         };
         if let Err(error) = bind_client_hello(cfg, state.tls13_offer.as_ref(), &mut client_hello) {
             return Err((None, Some(error)));
+        }
+        // RFC 9147 section 6.1: the 0-RTT data, in epoch 1, goes out after the ClientHello.
+        state.early_datagrams.clear();
+        state.early_data_accepted = None;
+        if let Some(offer) = &state.tls13_offer
+            && let (Some(data), Some(psk)) = (&offer.early_data, offer.psks.first())
+        {
+            let mut body = vec![];
+            let record = client_hello.marshal(&mut body).and_then(|()| {
+                crate::dtls13::psk::early_data_record(cfg.provider().crypto(), psk, &body, data)
+            });
+            match record {
+                Ok(record) => {
+                    state
+                        .early_datagrams
+                        .push(bytes::BytesMut::from(&record[..]));
+                    state.early_data_accepted = Some(false);
+                }
+                Err(error) => return Err((None, Some(error))),
+            }
         }
 
         Ok(vec![Packet {

@@ -173,6 +173,7 @@ rcgen.workspace = true
 rustls.workspace = true
 url.workspace = true
 hex.workspace = true
+base64.workspace = true
 pem.workspace = true
 x509-parser.workspace = true
 unicase.workspace = true

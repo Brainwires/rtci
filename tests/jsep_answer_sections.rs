@@ -79,7 +79,13 @@ a=group:BUNDLE 0 1 2
     for section in &sections {
         assert_ne!(port_of(section), 0, "{answer}");
     }
-    assert_eq!(groups(&answer), vec!["a=group:BUNDLE 0 1 2"], "{answer}");
+    // RFC 9429 section 5.3.1: the LS group is answered too, the answerer's transceivers
+    // having no stream to reference.
+    assert_eq!(
+        groups(&answer),
+        vec!["a=group:BUNDLE 0 1 2", "a=group:LS 0 1"],
+        "{answer}"
+    );
     Ok(())
 }
 
