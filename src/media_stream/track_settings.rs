@@ -39,28 +39,28 @@ pub struct MediaTrackSettings {
     /// # Specification
     ///
     /// See [width](https://www.w3.org/TR/mediacapture-streams/#dom-mediatracksettings-width).
-    width: u32,
+    width: Option<u32>,
 
     /// Actual video height in pixels.
     ///
     /// # Specification
     ///
     /// See [height](https://www.w3.org/TR/mediacapture-streams/#dom-mediatracksettings-height).
-    height: u32,
+    height: Option<u32>,
 
     /// Actual aspect ratio (width/height).
     ///
     /// # Specification
     ///
     /// See [aspectRatio](https://www.w3.org/TR/mediacapture-streams/#dom-mediatracksettings-aspectratio).
-    aspect_ratio: f64,
+    aspect_ratio: Option<f64>,
 
     /// Actual frame rate in frames per second.
     ///
     /// # Specification
     ///
     /// See [frameRate](https://www.w3.org/TR/mediacapture-streams/#dom-mediatracksettings-framerate).
-    frame_rate: f64,
+    frame_rate: Option<f64>,
 
     /// Actual camera facing mode.
     ///
@@ -147,4 +147,41 @@ pub struct MediaTrackSettings {
 
     /// Whether background blur is currently enabled.
     background_blur: bool,
+}
+
+impl MediaTrackSettings {
+    /// `width`: for a remote video track, the width in pixels of the latest frame received
+    /// (webrtc-pc 9.3.1); `None` until one is known.
+    pub fn width(&self) -> Option<u32> {
+        self.width
+    }
+
+    /// `height`: for a remote video track, the height in pixels of the latest frame
+    /// received; `None` until one is known.
+    pub fn height(&self) -> Option<u32> {
+        self.height
+    }
+
+    /// `aspectRatio`: width divided by height of the latest frame, rounded to the tenth
+    /// decimal place; `None` until a frame is known.
+    pub fn aspect_ratio(&self) -> Option<f64> {
+        self.aspect_ratio
+    }
+
+    /// `frameRate`: for a remote video track, an estimate from the frames received in the
+    /// last second; `None` until two frames are known.
+    pub fn frame_rate(&self) -> Option<f64> {
+        self.frame_rate
+    }
+
+    /// Records the latest received frame's size and the frame-rate estimate.
+    pub(crate) fn set_received_video(&mut self, width: u32, height: u32, frame_rate: Option<f64>) {
+        self.width = Some(width);
+        self.height = Some(height);
+        self.aspect_ratio =
+            (height > 0).then(|| (f64::from(width) / f64::from(height) * 1e10).round() / 1e10);
+        if frame_rate.is_some() {
+            self.frame_rate = frame_rate;
+        }
+    }
 }

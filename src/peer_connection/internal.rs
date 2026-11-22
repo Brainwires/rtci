@@ -345,6 +345,7 @@ impl RTCPeerConnection {
             last_offer: String::new(),
             last_answer: String::new(),
             ice_credentials_to_replace: Vec::new(),
+            local_description_was_set: false,
             transport_closed: false,
             identity_assertion: None,
             last_stable_state: None,
@@ -2334,9 +2335,17 @@ impl RTCPeerConnection {
         {
             return true;
         }
-        // Step 3
-
-        if let Some(local_desc) = &self.current_local_description {
+        // Step 3: "Let description be connection.[[CurrentLocalDescription]]."
+        let Some(local_desc) = &self.current_local_description else {
+            // Without a current local description nothing has been negotiated yet: step 4
+            // (data channels without a data section) and step 5.2 (a transceiver that is not
+            // stopped and has no section) are the only checks that can hold, and when neither
+            // does there is nothing to negotiate (step 6). A rollback to a stable state with
+            // nothing in it fires no negotiationneeded.
+            return !self.data_channels.is_empty()
+                || self.rtp_transceivers.iter().any(|t| !t.stopped());
+        };
+        {
             let len_data_channel = self.data_channels.len();
 
             if len_data_channel != 0 && have_data_channel(local_desc).is_none() {
@@ -2457,8 +2466,6 @@ impl RTCPeerConnection {
             }
             // Step 6
             false
-        } else {
-            true
         }
     }
 
@@ -2719,6 +2726,16 @@ impl RTCPeerConnection {
         // all the same, so that the report does not say whether the name resolved
         // (draft-ietf-mmusic-mdns-ice-candidates section 3.3.1).
         let is_mdns = candidate.address().ends_with(".local");
+        // W3C 4.4.2: an administratively prohibited candidate behaves exactly as if it were
+        // added, its statistics included, but the agent never checks connectivity to it.
+        if super::prohibited::is_administratively_prohibited(
+            &candidate,
+            self.configuration.ice_transport_policy,
+        ) {
+            self.stats_mut()
+                .register_remote_candidate(candidate_id, accumulator);
+            return Ok(());
+        }
         let kept = self.ice_transport_mut().add_remote_candidate(candidate)?;
         if kept
             || (is_mdns
@@ -2964,7 +2981,9 @@ impl RTCPeerConnection {
             .collect();
         // The mDNS candidates that were submitted for this ICE generation stay in the report
         // whether their name has resolved, has not yet, or never will (mDNS draft section
-        // 3.3.1: the report does not leak whether resolution succeeded).
+        // 3.3.1: the report does not leak whether resolution succeeded). So do those on a
+        // bad port, which the agent never holds (W3C 4.4.2: an administratively prohibited
+        // candidate behaves exactly as if it were added).
         let remote_ufrag = agent
             .get_remote_credentials()
             .map(|credentials| credentials.ufrag.as_str())
@@ -2977,10 +2996,11 @@ impl RTCPeerConnection {
                 .filter(|(_, known)| {
                     known.signalled
                         && known.username_fragment == remote_ufrag
-                        && known
+                        && (known
                             .address
                             .as_deref()
                             .is_some_and(|address| address.ends_with(".local"))
+                            || super::prohibited::BAD_PORTS.contains(&known.port))
                 })
                 .map(|(id, _)| id.clone()),
         );

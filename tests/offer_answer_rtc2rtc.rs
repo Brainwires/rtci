@@ -150,6 +150,7 @@ async fn test_offer_answer_rtc_to_rtc() -> Result<()> {
     // Add remote candidates (these are actually local candidates for the remote peer)
     // In sansio API, we add the remote peer's local candidate as our remote candidate
     let offer_remote_candidate_init = RTCIceCandidateInit {
+        sdp_mline_index: Some(0),
         candidate: format!(
             "candidate:1 1 udp 2130706431 {} {} typ host",
             answer_local_addr.ip(),
@@ -161,6 +162,7 @@ async fn test_offer_answer_rtc_to_rtc() -> Result<()> {
     log::info!("Offer peer added remote peer's candidate");
 
     let answer_remote_candidate_init = RTCIceCandidateInit {
+        sdp_mline_index: Some(0),
         candidate: format!(
             "candidate:1 1 udp 2130706431 {} {} typ host",
             offer_local_addr.ip(),
