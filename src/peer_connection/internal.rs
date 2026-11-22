@@ -20,7 +20,8 @@ use crate::peer_connection::sdp::{
     unknown_media_name,
 };
 use crate::peer_connection::sdp::{
-    described_ssrcs, ls_groups, media_packet_time, media_rtcp_xr, share_bundle_destination,
+    described_ssrcs, is_lite_set, ls_groups, media_packet_time, media_rtcp_xr, remote_candidates,
+    share_bundle_destination,
 };
 use crate::peer_connection::state::signaling_state::check_next_signaling_state;
 use crate::peer_connection::transport::dtls::state::RTCDtlsTransportState;
@@ -169,6 +170,7 @@ impl RTCPeerConnection {
 
         let agent_config = AgentConfig {
             lite: setting_engine.candidates.ice_lite,
+            candidate_pair_proposals: setting_engine.candidates.candidate_pair_proposals,
             urls: validated_servers,
             disconnected_timeout: setting_engine.timeout.ice_disconnected_timeout,
             failed_timeout: setting_engine.timeout.ice_failed_timeout,
@@ -279,6 +281,7 @@ impl RTCPeerConnection {
         .with_cookie_provider(crypto_provider)
         .with_max_buffer_size(setting_engine.data_channel_max_buffer_size);
 
+        let always_negotiate = configuration.always_negotiate_data_channels;
         // Create Pipeline Context
         let ice_handler_context = IceHandlerContext::new(ice_transport);
         let dtls_handler_context = DtlsHandlerContext::new(dtls_transport);
@@ -297,7 +300,10 @@ impl RTCPeerConnection {
             dtls_handler_context,
             sctp_handler_context,
             datachannel_handler_context: DataChannelHandlerContext::new(now),
-            srtp_handler_context: SrtpHandlerContext::default(),
+            srtp_handler_context: SrtpHandlerContext {
+                rtp_header_encryption_policy: configuration.rtp_header_encryption_policy,
+                ..Default::default()
+            },
             interceptor_handler_context: InterceptorHandlerContext::default(),
             endpoint_handler_context: EndpointHandlerContext::default(),
             media_read_outs: VecDeque::new(),
@@ -344,13 +350,14 @@ impl RTCPeerConnection {
             last_offer: String::new(),
             last_answer: String::new(),
             ice_credentials_to_replace: Vec::new(),
+            local_description_was_set: false,
             transport_closed: false,
             identity_assertion: None,
             last_stable_state: None,
             pending_remote_transport: None,
             negotiation_needed_state: NegotiationNeededState::Empty,
             is_negotiation_ongoing: false,
-            always_negotiate_data_channels: false,
+            always_negotiate_data_channels: always_negotiate,
             announced: super::states_events::AnnouncedStates::new(),
             last_data_dscp: None,
         })
@@ -403,16 +410,16 @@ impl RTCPeerConnection {
             })
     }
 
-    fn offered_local_candidates(&self) -> Result<Vec<RTCIceCandidate>> {
+    fn offered_local_candidates(&self, offer: bool) -> Result<Vec<RTCIceCandidate>> {
         if self.ice_transport().has_pending_restart() {
-            // An answer to a restart offer (only an answer has a remote offer pending): the
-            // restart is applied with the answer (`defer_remote_transport`), and keeps the
-            // local candidates unless they are to be discarded; they are the new
-            // generation's, so the answer lists them.
-            let answers_restart = self
-                .pending_remote_transport
-                .as_ref()
-                .is_some_and(|pending| pending.ice_restart);
+            // An answer to a restart offer: the restart is applied with the answer
+            // (`defer_remote_transport`), and keeps the local candidates unless they are to
+            // be discarded; they are the new generation's, so the answer lists them.
+            let answers_restart = !offer
+                && self
+                    .pending_remote_transport
+                    .as_ref()
+                    .is_some_and(|pending| pending.ice_restart);
             if answers_restart
                 && !self
                     .setting_engine
@@ -423,7 +430,96 @@ impl RTCPeerConnection {
             }
             return Ok(Vec::new());
         }
-        self.ice_transport().get_local_candidates()
+        let candidates = self.ice_transport().get_local_candidates()?;
+        // Two lite agents (RFC 8445 section 8.2, RFC 8839 sections 4.4.1.3 and 4.4.2.2): the
+        // controlling agent's updated offer lists the local candidate of the pair it chose,
+        // and the answer to it the local candidate its `a=remote-candidates` names.
+        let only = if offer {
+            self.pipeline_context
+                .ice_handler_context
+                .lite_candidate_update
+                .as_ref()
+                .map(|(local, _)| (local.address().to_owned(), local.port()))
+        } else if self.setting_engine.candidates.ice_lite {
+            self.remote_description()
+                .and_then(|r| r.parsed.as_ref())
+                .filter(|parsed| is_lite_set(parsed))
+                .and_then(|parsed| remote_candidates(parsed).ok())
+                .and_then(|named| named.into_iter().next())
+        } else {
+            None
+        };
+        Ok(match only {
+            Some((address, port)) => candidates
+                .into_iter()
+                .filter(|c| c.address == address && c.port == port)
+                .collect(),
+            None => candidates,
+        })
+    }
+
+    /// What a description this side makes says of the pair ICE selected (RFC 8839 sections
+    /// 4.2.1.2, 4.3.4, 4.4.1.2.2 and 4.4.2): the `m=` / `c=` destination of the sections that
+    /// carry the candidates, the selected pair's local candidate (in an answer to an offer
+    /// with `a=remote-candidates`, the local candidate it names), and, in an offer of the
+    /// controlling agent, the `a=remote-candidates` values: the pair's remote candidate.
+    /// Nothing while no pair is selected, or while an ICE restart is staged (its description
+    /// is an initial one again).
+    fn selected_pair_in_sdp(&self, offer: bool) -> (Option<(std::net::IpAddr, u16)>, Vec<String>) {
+        let ice = self.ice_transport();
+        if ice.has_pending_restart() {
+            return (None, vec![]);
+        }
+        if !offer
+            && let Some((address, port)) = self
+                .remote_description()
+                .and_then(|r| r.parsed.as_ref())
+                .and_then(|parsed| remote_candidates(parsed).ok())
+                .and_then(|named| named.into_iter().next())
+            && let Ok(ip) = address.parse::<std::net::IpAddr>()
+            && ice
+                .agent
+                .get_local_candidates()
+                .iter()
+                .any(|c| c.address() == address && c.port() == port)
+        {
+            return (Some((ip, port)), vec![]);
+        }
+        let Some((local, remote)) = ice.agent.get_selected_candidate_pair() else {
+            return (None, vec![]);
+        };
+        let destination = local
+            .address()
+            .parse::<std::net::IpAddr>()
+            .ok()
+            .map(|ip| (ip, local.port()));
+        let remote_candidates = if offer && ice.role() == RTCIceRole::Controlling {
+            vec![format!("1 {} {}", remote.address(), remote.port())]
+        } else {
+            vec![]
+        };
+        (destination, remote_candidates)
+    }
+
+    /// The controlling one of two lite agents chose a pair among several, or a sender moved to
+    /// another SSRC after a collision: the negotiation-needed flag is updated, for the offer
+    /// that conveys it.
+    pub(crate) fn announce_lite_candidate_update(&mut self) {
+        let lite = std::mem::take(
+            &mut self
+                .pipeline_context
+                .ice_handler_context
+                .lite_candidate_update_raised,
+        );
+        let ssrcs = std::mem::take(
+            &mut self
+                .pipeline_context
+                .interceptor_handler_context
+                .ssrcs_replaced,
+        );
+        if lite || ssrcs {
+            self.trigger_negotiation_needed();
+        }
     }
 
     /// The fingerprints of every local certificate: W3C `RTCPeerConnection` writes an
@@ -451,7 +547,8 @@ impl RTCPeerConnection {
         let d = SessionDescription::new_jsep_session_description(false);
 
         let ice_params = self.ice_transport().get_local_parameters()?;
-        let candidates = self.offered_local_candidates()?;
+        let candidates = self.offered_local_candidates(true)?;
+        let (selected_destination, remote_candidates) = self.selected_pair_in_sdp(true);
 
         let local_mids = self.local_description_mids();
         let mut media_sections = vec![];
@@ -535,6 +632,8 @@ impl RTCPeerConnection {
                 .write_ssrc_attributes_for_simulcast,
             ice_pacing: self.ice_transport().agent.proposed_pacing(),
             ls_groups: vec![],
+            selected_destination,
+            remote_candidates,
         };
         RTCPeerConnection::populate_sdp(
             d,
@@ -560,7 +659,9 @@ impl RTCPeerConnection {
         d = d.with_value_attribute(ATTR_KEY_MSID_SEMANTIC.to_owned(), "WMS *".to_owned());
 
         let ice_params = self.ice_transport().get_local_parameters()?;
-        let candidates = self.offered_local_candidates()?;
+        let candidates = self.offered_local_candidates(include_unmatched)?;
+        let (selected_destination, remote_candidates) =
+            self.selected_pair_in_sdp(include_unmatched);
 
         let mut media_sections = vec![];
         let mut already_have_application_media_section = false;
@@ -944,6 +1045,8 @@ impl RTCPeerConnection {
             } else {
                 remote_parsed.as_ref().map(ls_groups).unwrap_or_default()
             },
+            selected_destination,
+            remote_candidates,
         };
         RTCPeerConnection::populate_sdp(
             d,
@@ -1421,6 +1524,7 @@ impl RTCPeerConnection {
             else {
                 continue;
             };
+            self.rtp_transceivers[i].note_remote_sframe(media.has_attribute("sframe"));
             let of = |bandwidth_type: &str| {
                 media
                     .bandwidth
@@ -1469,6 +1573,7 @@ impl RTCPeerConnection {
         &mut self,
         offer: &SessionDescription,
         answer: &SessionDescription,
+        we_offered: bool,
     ) {
         let transceiver_by_mid =
             RTCPeerConnection::transceiver_index_by_mid(&self.rtp_transceivers);
@@ -1493,6 +1598,11 @@ impl RTCPeerConnection {
                 && extmap_allow_mixed_in(offer, offered)
                 && extmap_allow_mixed_in(answer, answered);
             self.rtp_transceivers[i].set_extmap_allow_mixed(mixed);
+            self.rtp_transceivers[i].apply_sframe_answer(
+                we_offered,
+                offered.has_attribute("sframe"),
+                answered.has_attribute("sframe"),
+            );
         }
     }
 
@@ -2235,9 +2345,46 @@ impl RTCPeerConnection {
         if self.ice_restart_pending() {
             return true;
         }
-        // Step 3
-
-        if let Some(local_desc) = &self.current_local_description {
+        // A sender moved to an SSRC after a collision that the current local description does
+        // not have: the description that signals it (`previous-ssrc`, RFC 5576 section 5) is
+        // an offer.
+        if let Some(local) = self
+            .current_local_description
+            .as_ref()
+            .and_then(|d| d.parsed.as_ref())
+        {
+            let described = described_ssrcs(local);
+            if self.rtp_transceivers.iter().any(|transceiver| {
+                transceiver.sender().as_ref().is_some_and(|sender| {
+                    sender.replacement_ssrcs().any(|ssrc| {
+                        !described.contains(&ssrc) && sender.track().ssrcs().any(|s| s == ssrc)
+                    })
+                })
+            }) {
+                return true;
+            }
+        }
+        // Two lite agents, this one controlling, chose a pair among several: the updated
+        // candidate exchange of RFC 8445 section 8.2 is an offer.
+        if self
+            .pipeline_context
+            .ice_handler_context
+            .lite_candidate_update
+            .is_some()
+        {
+            return true;
+        }
+        // Step 3: "Let description be connection.[[CurrentLocalDescription]]."
+        let Some(local_desc) = &self.current_local_description else {
+            // Without a current local description nothing has been negotiated yet: step 4
+            // (data channels without a data section) and step 5.2 (a transceiver that is not
+            // stopped and has no section) are the only checks that can hold, and when neither
+            // does there is nothing to negotiate (step 6). A rollback to a stable state with
+            // nothing in it fires no negotiationneeded.
+            return !self.data_channels.is_empty()
+                || self.rtp_transceivers.iter().any(|t| !t.stopped());
+        };
+        {
             let len_data_channel = self.data_channels.len();
 
             if len_data_channel != 0 && have_data_channel(local_desc).is_none() {
@@ -2358,8 +2505,6 @@ impl RTCPeerConnection {
             }
             // Step 6
             false
-        } else {
-            true
         }
     }
 
@@ -2387,6 +2532,56 @@ impl RTCPeerConnection {
     /// mentions: RFC 5576 section 5, "an endpoint MUST NOT use as its own any SSRC identifiers
     /// mentioned in media descriptions it has received", and section 8, the SSRCs of an answer
     /// and of an updated offer are new.
+    /// RFC 5576 section 5: "collisions between two signalled sources MUST be resolved
+    /// immediately". A remote description that describes one of this side's sender SSRCs moves
+    /// that sender to a new one at once, as a collision the RTCP session detects does
+    /// (`InterceptorHandler::process_session_event`): its streams are bound again if they were
+    /// bound, its statistics start over, the application gets `OnSsrcCollision`, and the next
+    /// description of this side signals the new SSRC with `previous-ssrc`.
+    pub(super) fn resolve_signalled_ssrc_collisions(
+        &mut self,
+        parsed: &::sdp::description::session::SessionDescription,
+    ) {
+        let remote = described_ssrcs(parsed);
+        let collided: Vec<(usize, SSRC)> = self
+            .rtp_transceivers
+            .iter()
+            .enumerate()
+            .filter_map(|(i, transceiver)| Some((i, transceiver.sender().as_ref()?)))
+            .flat_map(|(i, sender)| {
+                sender
+                    .track()
+                    .ssrcs()
+                    .filter(|ssrc| remote.contains(ssrc))
+                    .map(move |ssrc| (i, ssrc))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        let mut minted = vec![];
+        for (i, old) in collided {
+            let new = self.unused_ssrc(&mut minted);
+            let Some(sender) = self.rtp_transceivers[i].sender_mut() else {
+                continue;
+            };
+            let Some(primary) = sender.replace_ssrc(old, new) else {
+                continue;
+            };
+            log::warn!("ssrc collision: the remote description describes the local ssrc {old}");
+            if !sender.bound_streams().is_empty() {
+                sender.rebind_local_streams(&self.media_engine, self.interceptor.as_mut());
+            }
+            if primary == old {
+                self.stats_mut().replace_outbound_rtp_stream(old, new);
+            }
+            self.pipeline_context
+                .interceptor_handler_context
+                .ssrcs_replaced = true;
+            self.pipeline_context
+                .event_outs
+                .push_back(RTCPeerConnectionEvent::OnSsrcCollision(old));
+        }
+    }
+
     pub(super) fn unused_ssrc(&self, minted: &mut Vec<SSRC>) -> SSRC {
         let mut taken: HashSet<SSRC> = minted.iter().copied().collect();
         for transceiver in &self.rtp_transceivers {
@@ -2620,6 +2815,16 @@ impl RTCPeerConnection {
         // all the same, so that the report does not say whether the name resolved
         // (draft-ietf-mmusic-mdns-ice-candidates section 3.3.1).
         let is_mdns = candidate.address().ends_with(".local");
+        // W3C 4.4.2: an administratively prohibited candidate behaves exactly as if it were
+        // added, its statistics included, but the agent never checks connectivity to it.
+        if super::prohibited::is_administratively_prohibited(
+            &candidate,
+            self.configuration.ice_transport_policy,
+        ) {
+            self.stats_mut()
+                .register_remote_candidate(candidate_id, accumulator);
+            return Ok(());
+        }
         let kept = self.ice_transport_mut().add_remote_candidate(candidate)?;
         if kept
             || (is_mdns
@@ -2865,7 +3070,9 @@ impl RTCPeerConnection {
             .collect();
         // The mDNS candidates that were submitted for this ICE generation stay in the report
         // whether their name has resolved, has not yet, or never will (mDNS draft section
-        // 3.3.1: the report does not leak whether resolution succeeded).
+        // 3.3.1: the report does not leak whether resolution succeeded). So do those on a
+        // bad port, which the agent never holds (W3C 4.4.2: an administratively prohibited
+        // candidate behaves exactly as if it were added).
         let remote_ufrag = agent
             .get_remote_credentials()
             .map(|credentials| credentials.ufrag.as_str())
@@ -2878,10 +3085,11 @@ impl RTCPeerConnection {
                 .filter(|(_, known)| {
                     known.signalled
                         && known.username_fragment == remote_ufrag
-                        && known
+                        && (known
                             .address
                             .as_deref()
                             .is_some_and(|address| address.ends_with(".local"))
+                            || super::prohibited::BAD_PORTS.contains(&known.port))
                 })
                 .map(|(id, _)| id.clone()),
         );

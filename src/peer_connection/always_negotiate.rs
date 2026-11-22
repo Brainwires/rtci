@@ -10,8 +10,20 @@ impl RTCPeerConnection {
     /// the `m=application` section first, and a subsequent offer that has none yet puts it
     /// after the sections already negotiated and before the new ones, with or without a data
     /// channel. Off (the default) offers it, last, only once a data channel exists.
-    pub fn set_always_negotiate_data_channels(&mut self, always: bool) {
+    ///
+    /// The W3C member is `RTCConfiguration`'s (`with_always_negotiate_data_channels`), which
+    /// cannot change after construction (webrtc-extensions 13.2); this engine setting may
+    /// until a description has been set, and is then refused (`InvalidModificationError`).
+    pub fn set_always_negotiate_data_channels(
+        &mut self,
+        always: bool,
+    ) -> shared::error::Result<()> {
+        if always != self.always_negotiate_data_channels && self.a_description_was_set() {
+            return Err(shared::error::Error::InvalidModificationError);
+        }
         self.always_negotiate_data_channels = always;
+        self.configuration.always_negotiate_data_channels = always;
+        Ok(())
     }
 
     /// Whether `alwaysNegotiateDataChannels` is on.
@@ -77,7 +89,7 @@ mod tests {
             .with_media_engine(media_engine)
             .build(Instant::now())
             .expect("build peer connection");
-        pc.set_always_negotiate_data_channels(true);
+        pc.set_always_negotiate_data_channels(true).unwrap();
 
         let offer = pc.create_offer(None).expect("offer");
         let kinds: Vec<String> = sections(&offer.sdp).into_iter().map(|s| s.0).collect();

@@ -288,6 +288,14 @@ pub struct AgentConfig {
     /// lite agents do not perform connectivity check and only provide host candidates.
     pub lite: bool,
 
+    /// webrtc-extensions 7 `icecandidatepairnominate`, cancelable: when true, a controlling
+    /// agent that has picked a pair to nominate proposes it first
+    /// ([`Event::CandidatePairNominationProposed`](crate::agent::Event)) and waits for
+    /// [`Agent::resolve_nomination_proposal`](crate::agent::Agent::resolve_nomination_proposal);
+    /// a declined pair is not nominated, and the agent keeps checking. False (the default):
+    /// the agent nominates at once, as for an event nobody cancels.
+    pub candidate_pair_proposals: bool,
+
     /// Specify a minimum wait time before selecting host candidates.
     pub host_acceptance_min_wait: Option<Duration>,
     /// Specify a minimum wait time before selecting srflx candidates.

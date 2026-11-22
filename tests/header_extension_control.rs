@@ -328,3 +328,63 @@ fn without_a_list_every_common_extension_is_negotiated_sendrecv() -> TestResult 
     );
     Ok(())
 }
+
+/// webrtc-extensions 4.1: an extension the answer negotiates but that the negotiated
+/// direction of its media section leaves no use for (a send-only extension on a section
+/// this side only receives) is "stopped"; one the section can use keeps its direction, and
+/// a held (inactive) section stops nothing.
+#[test]
+fn an_extension_the_section_direction_cannot_use_is_stopped() -> TestResult {
+    let mut offerer = peer()?;
+    let mut answerer = peer()?;
+    let v = offerer.add_transceiver_from_kind(
+        RtpCodecKind::Video,
+        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+    )?;
+    set(
+        &mut offerer,
+        v,
+        &[(MID, Sendrecv), (ABS, Recvonly), (ORIENTATION, Sendonly)],
+    )?;
+    // The answerer sends, so the section is negotiated recvonly here (not inactive).
+    answerer.add_track(jsep_common::video_track("v", 0x0b0b_0b0b))?;
+    exchange(&mut offerer, &mut answerer)?;
+    let listed = negotiated(&mut offerer, v);
+    let direction_of = |uri: &str| {
+        listed
+            .iter()
+            .find(|(u, _)| u == uri)
+            .map(|(_, d)| *d)
+            .expect("listed")
+    };
+    assert_eq!(direction_of(MID), Sendrecv);
+    assert_eq!(
+        direction_of(ABS),
+        Recvonly,
+        "received on a receiving section"
+    );
+    assert_eq!(
+        direction_of(ORIENTATION),
+        Stopped,
+        "sent, on a section that only receives: {listed:?}"
+    );
+
+    // A held section keeps its extensions for when it resumes.
+    let mut offerer = peer()?;
+    let mut answerer = peer()?;
+    let v = video(&mut offerer)?;
+    exchange(&mut offerer, &mut answerer)?;
+    offerer
+        .rtp_transceiver(v)
+        .expect("transceiver")
+        .set_direction(Inactive)?;
+    exchange(&mut offerer, &mut answerer)?;
+    assert!(
+        negotiated(&mut offerer, v)
+            .iter()
+            .all(|(_, d)| *d != Stopped),
+        "{:?}",
+        negotiated(&mut offerer, v)
+    );
+    Ok(())
+}

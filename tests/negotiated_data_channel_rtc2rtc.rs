@@ -179,6 +179,7 @@ async fn test_negotiated_data_channel_rtc_to_rtc() -> Result<()> {
 
     // Exchange ICE candidates between peers
     let offerer_remote_candidate = RTCIceCandidateInit {
+        sdp_mline_index: Some(0),
         candidate: format!(
             "candidate:1 1 udp 2130706431 {} {} typ host",
             answerer_local_addr.ip(),
@@ -190,6 +191,7 @@ async fn test_negotiated_data_channel_rtc_to_rtc() -> Result<()> {
     log::info!("Offerer added answerer's candidate");
 
     let answerer_remote_candidate = RTCIceCandidateInit {
+        sdp_mline_index: Some(0),
         candidate: format!(
             "candidate:1 1 udp 2130706431 {} {} typ host",
             offerer_local_addr.ip(),

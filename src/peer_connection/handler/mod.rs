@@ -575,6 +575,7 @@ impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCP
         // A description or a timeout may have moved a transport's state (DTLS to "connecting"
         // when its handshake starts, say): announce it behind what is queued.
         self.announce_transport_states();
+        self.announce_lite_candidate_update();
         // Drain the backlog before sweeping the pipeline again: anything a sweep adds lands
         // behind it anyway, and the sweep runs once the backlog is empty.
         if let Some(evt) = self.pipeline_context.event_outs.pop_front() {
@@ -670,6 +671,11 @@ impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCP
             {
                 close_errs.push(err);
             }
+        }
+        // Step 7: every data channel's [[ReadyState]] becomes "closed", without the closing
+        // procedure and without an event.
+        for channel in self.data_channels.values_mut() {
+            channel.ready_state = crate::data_channel::RTCDataChannelState::Closed;
         }
         self.ice_transport_mut().ice_connection_state =
             crate::peer_connection::state::ice_connection_state::RTCIceConnectionState::Closed;

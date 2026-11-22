@@ -528,12 +528,14 @@ pub enum RTCPeerConnectionEvent {
     OnTrack(RTCTrackEvent),
 
     /// Fired when a remote source is heard using one of this connection's sender SSRCs
-    /// (RFC 3550 section 8.2), once per SSRC.
+    /// (RFC 3550 section 8.2), or a remote description describes one (RFC 5576 section 5),
+    /// once per SSRC.
     ///
-    /// Two sources of one RTP session cannot share an SSRC. The SSRC of a sender is part of
-    /// the session description, so the engine does not change it by itself: stop the sender
-    /// (or replace its transceiver) and renegotiate, which says BYE for the SSRC and signals
-    /// a new one. Inbound packets carrying the SSRC are dropped meanwhile. The SSRC the
+    /// Two sources of one RTP session cannot share an SSRC. The engine has already moved the
+    /// sender to a new SSRC: the old one says BYE, what the application still writes with it
+    /// goes out with the new one, the sender's parameters and statistics show the new one, and
+    /// negotiation-needed is raised so that the next description signals it with
+    /// `previous-ssrc`. Inbound packets carrying the old SSRC are dropped. The SSRC the
     /// connection reports from when it sends no media is replaced without this event.
     ///
     /// Not a W3C event: a fork addition.
@@ -558,10 +560,25 @@ pub enum RTCPeerConnectionEvent {
     /// put it on its list (`RTCIceTransport::get_candidate_pairs`).
     OnIceCandidatePairAdd(RTCIceCandidatePair),
 
+    /// webrtc-extensions 7 `icecandidatepairnominate`, cancelable: with
+    /// `SettingEngineBuilder::with_candidate_pair_proposals(true)`, the ICE agent picked this
+    /// pair to nominate and waits: `RTCPeerConnection::resolve_candidate_pair_nomination`
+    /// accepts it or cancels it (`[[ProposalPending]]` until then).
+    OnIceCandidatePairNominate(RTCIceCandidatePair),
+
     /// webrtc-extensions 7 `icecandidatepairremove`: a candidate pair left the ICE agent's
     /// list: replaced on a full checklist, dropped by an ICE restart, or removed by
     /// `RTCPeerConnection::remove_candidate_pair`. Not cancelable here.
     OnIceCandidatePairRemove(RTCIceCandidatePair),
+
+    /// webrtc-extensions 11 `ssrcchange` on a receiver: the synchronization source of the
+    /// last frame it received changed (`RTCRtpReceiver::get_synchronization_sources`). After
+    /// both lists were updated, and before the `OnCsrcChange` of the same packet.
+    OnSsrcChange(crate::rtp_transceiver::RTCRtpReceiverId),
+
+    /// webrtc-extensions 11 `csrcchange` on a receiver: the contributing sources of the last
+    /// frame it received changed (`RTCRtpReceiver::get_contributing_sources`).
+    OnCsrcChange(crate::rtp_transceiver::RTCRtpReceiverId),
 
     /// W3C `RTCDtlsTransport` `statechange`. Comes before the `OnConnectionStateChangeEvent` it
     /// causes, and after the `OnDtlsTransportError` of a failure. Not fired by `close()`.

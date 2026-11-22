@@ -235,6 +235,12 @@ pub struct Candidates {
     /// Enable ICE Lite mode (only respond to connectivity checks, don't initiate).
     pub ice_lite: bool,
 
+    /// webrtc-extensions 7: propose each nomination to the application first
+    /// (`OnIceCandidatePairNominate`, answered with
+    /// `RTCPeerConnection::resolve_candidate_pair_nomination`), the cancelable
+    /// `icecandidatepairnominate`. Off by default: the agent nominates at once.
+    pub candidate_pair_proposals: bool,
+
     /// Restrict candidate gathering to specific network types (e.g., UDP4, UDP6, TCP4).
     pub ice_network_types: Vec<NetworkType>,
     //TODO: pub interface_filter: Arc<Option<InterfaceFilterFn>>,
@@ -771,6 +777,17 @@ impl SettingEngineBuilder {
     pub fn with_udp_network(mut self, udp_network: UDPNetwork) -> Self {
         self.0.udp_network = udp_network;
     }*/
+
+    /// webrtc-extensions 7 `icecandidatepairnominate`, cancelable: with `true`, the
+    /// controlling agent proposes the pair it picked to nominate
+    /// (`RTCPeerConnectionEvent::OnIceCandidatePairNominate`) and nominates it only when the
+    /// application accepts (`RTCPeerConnection::resolve_candidate_pair_nomination`); a
+    /// declined pair is not nominated and checks go on. Off by default (an event nobody
+    /// cancels).
+    pub fn with_candidate_pair_proposals(mut self, proposals: bool) -> Self {
+        self.0.candidates.candidate_pair_proposals = proposals;
+        self
+    }
 
     /// Configures ICE Lite mode.
     ///

@@ -293,6 +293,10 @@ pub enum Event {
     /// on a full checklist, an ICE restart dropped the pairs, or the application removed it
     /// with [`Agent::remove_candidate_pair`] (webrtc-extensions 7, `icecandidatepairremove`).
     CandidatePairRemoved(Box<Candidate>, Box<Candidate>),
+    /// With [`AgentConfig::candidate_pair_proposals`]: the controlling agent picked this pair
+    /// (local, remote) to nominate and waits for [`Agent::resolve_nomination_proposal`]
+    /// (webrtc-extensions 7, `icecandidatepairnominate`).
+    CandidatePairNominationProposed(Box<Candidate>, Box<Candidate>),
 }
 
 /// An [`Event`] together with the instant its condition was observed at.
@@ -348,6 +352,12 @@ pub struct Agent {
     pub(crate) remote_candidates: Vec<Candidate>,
     pub(crate) candidate_pairs: Vec<CandidatePair>,
     pub(crate) nominated_pair: Option<usize>,
+    /// [`AgentConfig::candidate_pair_proposals`].
+    pub(crate) candidate_pair_proposals: bool,
+    /// The pair proposed for nomination, waiting for the application's decision.
+    pub(crate) nomination_proposal: Option<usize>,
+    /// Pairs whose nomination the application declined (this ICE session).
+    pub(crate) declined_nominations: Vec<usize>,
     /// When the controlling agent nominated `nominated_pair`.
     pub(crate) nomination_started: Option<Instant>,
     pub(crate) selected_pair: Option<usize>,
@@ -549,6 +559,9 @@ impl Agent {
             start_time: now,
 
             nominated_pair: None,
+            candidate_pair_proposals: config.candidate_pair_proposals,
+            nomination_proposal: None,
+            declined_nominations: Vec::new(),
             nomination_started: None,
             selected_pair: None,
             previous_media_path: None,
@@ -1433,6 +1446,30 @@ impl Agent {
         Ok(())
     }
 
+    /// Whether a nomination proposal waits for [`Self::resolve_nomination_proposal`]
+    /// (webrtc-extensions 7 `[[ProposalPending]]`).
+    pub fn proposal_pending(&self) -> bool {
+        self.nomination_proposal.is_some()
+    }
+
+    /// Answers the pending nomination proposal: `accept` nominates the pair (a check with
+    /// USE-CANDIDATE); otherwise the pair is not nominated and the agent keeps checking
+    /// (webrtc-extensions 7, a cancelled `icecandidatepairnominate`). Nothing when no
+    /// proposal is pending.
+    pub fn resolve_nomination_proposal(&mut self, now: Instant, accept: bool) {
+        let Some(pair_index) = self.nomination_proposal.take() else {
+            return;
+        };
+        if accept && self.selected_pair.is_none() && self.nominated_pair.is_none() {
+            self.candidate_pairs[pair_index].nominate = true;
+            self.nominated_pair = Some(pair_index);
+            self.enqueue_triggered(pair_index);
+        } else if !accept {
+            self.declined_nominations.push(pair_index);
+        }
+        let _ = now;
+    }
+
     /// webrtc-extensions 7 `selectCandidatePair(pair)`: the agent sends data on the pair of
     /// `local` and `remote` from now on; the selected pair changes, with its
     /// `SelectedCandidatePairChange` event, and the state with its event when it was not
@@ -1544,6 +1581,8 @@ impl Agent {
             pair.nominate = false;
         }
         self.nominated_pair = None;
+        self.nomination_proposal = None;
+        self.declined_nominations.clear();
     }
 
     /// The tiebreaker the agent's checks carry (RFC 8445 Section 5.2).
@@ -1608,6 +1647,8 @@ impl Agent {
         self.announce_all_pairs_removed();
         self.candidate_pairs = Vec::new();
         self.nominated_pair = None;
+        self.nomination_proposal = None;
+        self.declined_nominations.clear();
         self.triggered_queue.clear();
         self.remote_candidates.clear();
         self.remote_end_of_candidates = false;
@@ -2598,6 +2639,8 @@ impl Agent {
         self.candidate_pairs = Vec::new();
         self.selected_pair = None;
         self.nominated_pair = None;
+        self.nomination_proposal = None;
+        self.declined_nominations.clear();
     }
 
     pub(crate) fn find_remote_candidate(&self, addr: SocketAddr) -> Option<usize> {
@@ -2806,6 +2849,8 @@ impl Agent {
 
         // Clear nominated pair when switching roles: only the controlling agent nominates.
         self.nominated_pair = None;
+        self.nomination_proposal = None;
+        self.declined_nominations.clear();
         for pair in &mut self.candidate_pairs {
             pair.nominate = false;
         }

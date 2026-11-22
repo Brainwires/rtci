@@ -182,7 +182,7 @@ a=rtpmap:96 VP8/90000
         pc.rtp_transceiver(ids[0])
             .expect("transceiver")
             .current_direction(),
-        RTCRtpTransceiverDirection::Stopped
+        Some(RTCRtpTransceiverDirection::Stopped)
     );
     assert_eq!(
         pc.get_senders().map(usize::from).collect::<Vec<_>>(),
@@ -586,6 +586,46 @@ fn set_streams_sets_exactly_the_given_streams() -> TestResult {
     Ok(())
 }
 
+/// W3C 5.1 `addTrack(track, ...streams)`: a new sender, and a reused trackless one, get
+/// exactly the given streams as their associated media stream ids, signalled as `a=msid`.
+#[test]
+fn add_track_with_streams_associates_exactly_those_streams() -> TestResult {
+    let mut pc = default_peer()?;
+    let fresh = pc.add_track_with_streams(
+        video_track("video", 0x0d05_0505),
+        vec!["a".to_owned(), "b".to_owned()],
+    )?;
+    assert_eq!(
+        pc.rtp_sender(fresh).expect("sender").streams(),
+        ["a".to_owned(), "b".to_owned()]
+    );
+
+    let reused = pc.add_transceiver_from_kind(RtpCodecKind::Audio, None)?;
+    let sender =
+        pc.add_track_with_streams(audio_track("audio", 0x0d05_0506), vec!["c".to_owned()])?;
+    assert_eq!(
+        RTCRtpTransceiverId::from(sender),
+        reused,
+        "the trackless sender is reused"
+    );
+    assert_eq!(
+        pc.rtp_sender(sender).expect("sender").streams(),
+        ["c".to_owned()]
+    );
+
+    let offer = pc.create_offer(None)?;
+    let sections = media_sections(&offer.sdp);
+    for (section, streams) in [(0, vec!["a", "b"]), (1, vec!["c"])] {
+        let msids: Vec<&str> = sections[section]
+            .iter()
+            .filter_map(|l| l.strip_prefix("a=msid:"))
+            .filter_map(|v| v.split_whitespace().next())
+            .collect();
+        assert_eq!(msids, streams, "{}", offer.sdp);
+    }
+    Ok(())
+}
+
 #[test]
 fn get_capabilities_lists_the_engine_codecs_without_any_negotiation() -> TestResult {
     let mut media_engine = MediaEngine::default();
@@ -670,6 +710,34 @@ fn get_parameters_keeps_its_transaction_until_set_parameters() -> TestResult {
         Err(Error::InvalidModificationError),
         "a stale transaction id"
     );
+    Ok(())
+}
+
+/// W3C 5.2 setParameters: encodings in another order than [[SendEncodings]] are an
+/// InvalidModificationError; an encoding is told by its rid and SSRCs, so the members of the
+/// encodings themselves may still change.
+#[test]
+fn set_parameters_refuses_reordered_encodings() -> TestResult {
+    let mut pc = default_peer()?;
+    let id = pc.add_transceiver_from_kind(
+        RtpCodecKind::Video,
+        init(
+            RTCRtpTransceiverDirection::Sendonly,
+            vec![with_rid("lo"), with_rid("hi")],
+        ),
+    )?;
+    let mut handle = pc.rtp_sender(id.into()).expect("sender");
+    let mut reordered = handle.get_parameters().clone();
+    assert_eq!(reordered.encodings.len(), 2);
+    reordered.encodings.swap(0, 1);
+    assert_eq!(
+        handle.set_parameters(reordered, None),
+        Err(Error::InvalidModificationError)
+    );
+    let mut changed = handle.get_parameters().clone();
+    changed.encodings[1].active = false;
+    handle.set_parameters(changed, None)?;
+    assert!(!handle.get_parameters().encodings[1].active);
     Ok(())
 }
 
@@ -773,6 +841,43 @@ fn jitter_buffer_target_is_stored_within_its_range() -> TestResult {
 /// track ends, currentDirection still reads the negotiated direction, and an answer made
 /// now still answers the section. Once an exchange rejects the section it is stopped and
 /// removed.
+/// W3C 5.4 `currentDirection`: null until an offer/answer exchange has negotiated the
+/// transceiver, then the negotiated direction.
+#[test]
+fn current_direction_is_null_until_negotiated() -> TestResult {
+    let mut offerer = default_peer()?;
+    let mut answerer = default_peer()?;
+    let sender = offerer.add_track(video_track("video", 0x0c06_0606))?;
+    let id = RTCRtpTransceiverId::from(sender);
+    assert_eq!(
+        offerer
+            .rtp_transceiver(id)
+            .expect("transceiver")
+            .current_direction(),
+        None
+    );
+    let offer = offerer.create_offer(None)?;
+    offerer.set_local_description(Instant::now(), offer)?;
+    assert_eq!(
+        offerer
+            .rtp_transceiver(id)
+            .expect("transceiver")
+            .current_direction(),
+        None,
+        "an offer alone negotiates nothing"
+    );
+    offerer.set_local_description(Instant::now(), RTCSessionDescription::rollback(None)?)?;
+    exchange(&mut offerer, &mut answerer)?;
+    assert_eq!(
+        offerer
+            .rtp_transceiver(id)
+            .expect("transceiver")
+            .current_direction(),
+        Some(RTCRtpTransceiverDirection::Sendonly)
+    );
+    Ok(())
+}
+
 #[test]
 fn stop_is_stopping_until_a_rejecting_exchange_completes() -> TestResult {
     let (mut offerer, mut answerer, sender) = negotiated_both_ways()?;
@@ -790,7 +895,7 @@ fn stop_is_stopping_until_a_rejecting_exchange_completes() -> TestResult {
     assert!(!transceiver.is_stopped(), "stopping, not stopped");
     assert_eq!(
         transceiver.current_direction(),
-        RTCRtpTransceiverDirection::Sendrecv
+        Some(RTCRtpTransceiverDirection::Sendrecv)
     );
     assert_eq!(ended_tracks(&mut offerer), vec![receiver_track]);
     assert_eq!(offerer.get_senders().count(), 1, "still collected");
@@ -924,5 +1029,160 @@ fn set_codec_preferences_with_an_empty_list_resets_to_the_engine_codecs() -> Tes
         .set_codec_preferences(vec![])?;
     let reset = media_sections(&pc.create_offer(None)?.sdp)[0][0].clone();
     assert_eq!(reset, all);
+    Ok(())
+}
+
+// --- webrtc-extensions 5 -----------------------------------------------------------------
+
+fn down_to(rid: &str, max_width: u32, max_height: u32) -> RTCRtpEncodingParameters {
+    RTCRtpEncodingParameters {
+        scale_resolution_down_to: Some(
+            rtc::rtp_transceiver::rtp_sender::RTCResolutionRestriction {
+                max_width,
+                max_height,
+            },
+        ),
+        ..with_rid(rid)
+    }
+}
+
+/// webrtc-extensions 5 and 5.1: `scaleResolutionDownTo` overrides `scaleResolutionDownBy`;
+/// the factor is the same for both dimensions, orientation agnostic, and never upscales.
+#[test]
+fn scale_resolution_down_to_gives_one_factor_and_never_upscales() {
+    let encoding = RTCRtpEncodingParameters {
+        scale_resolution_down_by: Some(4.0),
+        ..down_to("", 640, 360)
+    };
+    assert_eq!(
+        encoding.scale_down_factor(1280, 720),
+        2.0,
+        "scaleResolutionDownBy is ignored"
+    );
+    assert_eq!(
+        encoding.scale_down_factor(720, 1280),
+        2.0,
+        "orientation agnostic"
+    );
+    assert_eq!(
+        encoding.scale_down_factor(1280, 1280),
+        3.5555555555555554,
+        "one factor for both"
+    );
+    assert_eq!(
+        encoding.scale_down_factor(320, 180),
+        1.0,
+        "never an upscale"
+    );
+    let by = RTCRtpEncodingParameters {
+        scale_resolution_down_by: Some(4.0),
+        ..Default::default()
+    };
+    assert_eq!(by.scale_down_factor(1280, 720), 4.0);
+}
+
+/// webrtc-extensions 5: in addTransceiver, `scaleResolutionDownTo` on some but not all
+/// active encodings, or with a dimension of 0, is an OperationError; `adaptivePtime` with
+/// `ptime` is an InvalidModificationError; an audio encoding loses `scaleResolutionDownTo`.
+#[test]
+fn add_transceiver_validates_the_extension_members() -> TestResult {
+    let mut pc = default_peer()?;
+    let video = |encodings| init(RTCRtpTransceiverDirection::Sendonly, encodings);
+    let partly = pc.add_transceiver_from_kind(
+        RtpCodecKind::Video,
+        video(vec![down_to("a", 640, 360), with_rid("b")]),
+    );
+    assert!(
+        matches!(partly, Err(Error::ErrOperationError(_))),
+        "{partly:?}"
+    );
+    let inactive_without = RTCRtpEncodingParameters {
+        active: false,
+        ..with_rid("b")
+    };
+    pc.add_transceiver_from_kind(
+        RtpCodecKind::Video,
+        video(vec![down_to("a", 640, 360), inactive_without]),
+    )?;
+    let zero = pc.add_transceiver_from_kind(
+        RtpCodecKind::Video,
+        video(vec![down_to("a", 0, 360), down_to("b", 320, 180)]),
+    );
+    assert!(matches!(zero, Err(Error::ErrOperationError(_))), "{zero:?}");
+    let both = RTCRtpEncodingParameters {
+        ptime: Some(20),
+        adaptive_ptime: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        pc.add_transceiver_from_kind(
+            RtpCodecKind::Audio,
+            init(RTCRtpTransceiverDirection::Sendonly, vec![both])
+        )
+        .err(),
+        Some(Error::InvalidModificationError)
+    );
+    let audio = pc.add_transceiver_from_kind(
+        RtpCodecKind::Audio,
+        init(
+            RTCRtpTransceiverDirection::Sendonly,
+            vec![RTCRtpEncodingParameters {
+                ptime: Some(40),
+                ..down_to("", 640, 360)
+            }],
+        ),
+    )?;
+    let parameters = pc
+        .rtp_sender(audio.into())
+        .expect("sender")
+        .get_parameters()
+        .clone();
+    assert_eq!(parameters.encodings[0].scale_resolution_down_to, None);
+    assert_eq!(parameters.encodings[0].ptime, Some(40));
+    assert!(
+        !parameters.encodings[0].adaptive_ptime,
+        "fixed frame length by default"
+    );
+    Ok(())
+}
+
+/// webrtc-extensions 5: setParameters refuses the same with InvalidModificationError, and
+/// keeps a valid `scaleResolutionDownTo` for getParameters to return.
+#[test]
+fn set_parameters_validates_the_extension_members() -> TestResult {
+    let mut pc = default_peer()?;
+    let id = pc.add_transceiver_from_kind(
+        RtpCodecKind::Video,
+        init(
+            RTCRtpTransceiverDirection::Sendonly,
+            vec![with_rid("a"), with_rid("b")],
+        ),
+    )?;
+    let mut sender = pc.rtp_sender(id.into()).expect("sender");
+    let mut partly = sender.get_parameters().clone();
+    partly.encodings[0].scale_resolution_down_to = down_to("a", 640, 360).scale_resolution_down_to;
+    assert_eq!(
+        sender.set_parameters(partly, None),
+        Err(Error::InvalidModificationError)
+    );
+    let mut adaptive = sender.get_parameters().clone();
+    adaptive.encodings[0].ptime = Some(20);
+    adaptive.encodings[0].adaptive_ptime = true;
+    assert_eq!(
+        sender.set_parameters(adaptive, None),
+        Err(Error::InvalidModificationError)
+    );
+    let mut all = sender.get_parameters().clone();
+    for encoding in &mut all.encodings {
+        encoding.scale_resolution_down_to = down_to("", 640, 360).scale_resolution_down_to;
+    }
+    sender.set_parameters(all, None)?;
+    assert!(
+        sender
+            .get_parameters()
+            .encodings
+            .iter()
+            .all(|e| e.scale_resolution_down_to.is_some())
+    );
     Ok(())
 }

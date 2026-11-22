@@ -2081,6 +2081,17 @@ pub enum Error {
     #[error("Type error {0}")]
     TypeError(String),
 
+    /// Media Capture `OverconstrainedError`: constraints that cannot be satisfied, naming the
+    /// constraint (W3C mediacapture-main 4.3.3 applyConstraints; webrtc-pc 9.3.1: always for
+    /// the video properties of a remote track).
+    #[error("Overconstrained: {0}")]
+    OverconstrainedError(String),
+
+    /// draft-ietf-avtcore-rtp-sframe-03 section 6: the section's SFrame offer was answered
+    /// without `a=sframe`; its media is not sent (no unencrypted fallback).
+    #[error("SFrame was offered and the answer refused it: no media is sent")]
+    ErrSFrameRefused,
+
     /// A session description that does not parse (W3C webrtc-pc section 11.1, an `RTCError`
     /// with `errorDetail` `sdp-syntax-error`): what the SDP parser found, and on which line.
     #[error("SDP syntax error{}: {error}", .line_number.map(|n| format!(" on line {n}")).unwrap_or_default())]
