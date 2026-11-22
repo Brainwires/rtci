@@ -516,20 +516,29 @@ fn the_receiver_measures_a_round_trip_time_over_rtcp_xr() -> Result<()> {
     // webrtc-stats: `roundTripTime` exists while the latest sender report came with a DLRR
     // block that measures one. When reports go out is the RTCP schedule's business, so the
     // clock is driven until the latest report is such a one, not for a fixed time.
-    let give_up = world.now + Duration::from_secs(30);
-    while world.now < give_up
-        && !matches!(remote_outbound_rtt(&mut world, ssrc), Some((Some(_), _, _)))
-    {
-        let until = world.now + Duration::from_millis(50);
+    let started = world.now;
+    let give_up = started + Duration::from_secs(30);
+    // What the report said each time it changed: (ms, roundTripTime, measurements).
+    let mut seen: Vec<(u128, Option<f64>, u64)> = Vec::new();
+    loop {
+        let (rtt, _, measurements) =
+            remote_outbound_rtt(&mut world, ssrc).expect("remote-outbound stats");
+        if seen.last().map(|(_, rtt, n)| (*rtt, *n)) != Some((rtt, measurements)) {
+            seen.push(((world.now - started).as_millis(), rtt, measurements));
+        }
+        if rtt.is_some() || world.now >= give_up {
+            break;
+        }
+        let until = world.now + Duration::from_millis(5);
         world.run_until(until)?;
     }
     let (rtt, total, measurements) =
         remote_outbound_rtt(&mut world, ssrc).expect("remote-outbound stats");
     assert!(
         measurements > 0,
-        "the DLRR blocks gave round trip times: {rtt:?} {total} {measurements}"
+        "the DLRR blocks gave round trip times: {rtt:?} {total} {measurements}; {seen:?}"
     );
-    let rtt = rtt.expect("a round trip time");
+    let rtt = rtt.unwrap_or_else(|| panic!("a round trip time; the report over time: {seen:?}"));
     assert!(
         (0.0..1.0).contains(&rtt),
         "a plausible round trip time on a virtual network: {rtt}"
