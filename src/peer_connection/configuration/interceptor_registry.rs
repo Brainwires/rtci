@@ -384,6 +384,7 @@ pub fn register_default_interceptors_with_options(
 
     // Last, so the ids of the extensions registered above stay what they were.
     configure_default_header_extensions(media_engine)?;
+    configure_abs_send_time(media_engine)?;
 
     Ok((
         registry,
@@ -509,9 +510,8 @@ pub fn configure_default_header_extensions(media_engine: &mut MediaEngine) -> Re
 /// congestion control nor RFC 8888, so a sender that only understands REMB still hears what
 /// the path carries; and the abs-send-time header extension stamped on the packets of every
 /// local stream that negotiated it, as they leave the pacer. Part of
-/// [`register_default_interceptors`]. The default media engine offers `goog-remb` on video but
-/// does not register abs-send-time: a peer's offer of it is answered only when the
-/// application registers it.
+/// [`register_default_interceptors`], which also registers abs-send-time on video
+/// ([`configure_abs_send_time`]).
 pub fn configure_remb(registry: Registry) -> Registry {
     registry
         .with(
@@ -522,6 +522,25 @@ pub fn configure_remb(registry: Registry) -> Registry {
             Slot::Custom(interceptor::ABS_SEND_TIME_SLOT),
             interceptor::AbsSendTimeInterceptor::new(),
         )
+}
+
+/// Registers the abs-send-time header extension
+/// (`http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time`) on video, so that it is
+/// offered beside transport-wide congestion control and `ack ccfb`, and answered when a peer
+/// offers it: a peer that runs neither (REMB with abs-send-time, the receive-side variant of
+/// draft-ietf-rmcat-gcc-02 section 3) gets its send times, stamped by the
+/// [`configure_remb`] interceptor, and REMB from this side. Part of
+/// [`register_default_interceptors`]; registered after the other extensions, so their ids
+/// stay as they were.
+pub fn configure_abs_send_time(media_engine: &mut MediaEngine) -> Result<()> {
+    media_engine.register_header_extension(
+        RTCRtpHeaderExtensionCapability {
+            uri: sdp::extmap::ABS_SEND_TIME_URI.to_owned(),
+        },
+        RtpCodecKind::Video,
+        None,
+    )?;
+    Ok(())
 }
 
 /// Offers TMMBR for audio and video: `a=rtcp-fb:<pt> ccm tmmbr` (RFC 5104 section 7.1).

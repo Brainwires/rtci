@@ -1784,6 +1784,21 @@ impl RTCPeerConnection {
             .into_packet(now),
         );
         controls.push(RemoteBitrateLimit(send_limit.map(|limit| limit as f64)).into_packet(now));
+        // RFC 5104 section 4.2.1.2: a TMMBR "MUST NOT exceed the negotiated value": what this
+        // endpoint's own description says it receives (`b=TIAS`, else `b=AS`).
+        let receiving: HashSet<String> = self
+            .rtp_transceivers
+            .iter()
+            .filter(live)
+            .filter(|t| t.current_direction().has_recv())
+            .filter_map(|t| t.mid().clone())
+            .collect();
+        controls.push(
+            interceptor::TmmbrControl::NegotiatedMaximum(negotiated_receive_maximum(
+                local, &receiving,
+            ))
+            .into_packet(now),
+        );
         for (payload_type_rtx, rtx_time) in rtx_times(&local_sections) {
             controls.push(
                 NackControl::LocalRtxTime {
@@ -3945,6 +3960,31 @@ a=mid:2\r\n";
 const MAX_UNRESOLVED_MDNS_CANDIDATE_STATS: usize = 320;
 
 /// The first of `draws` that is not in `taken` (and not 0, which some peers treat as unset).
+/// The most this endpoint has said it receives in the sections `mids` of its description
+/// `local`: per section `b=TIAS` (bits per second, RFC 3890), else `b=AS` times 1000 (RFC 8866
+/// section 5.8), the smallest of the sections that state one, so that no TMMBR exceeds any of
+/// them (RFC 5104 section 4.2.1.2). `None` when none does.
+pub(crate) fn negotiated_receive_maximum(
+    local: &SessionDescription,
+    mids: &HashSet<String>,
+) -> Option<u64> {
+    local
+        .media_descriptions
+        .iter()
+        .filter(|media| get_mid_value(media).is_some_and(|mid| mids.contains(mid)))
+        .filter_map(|media| {
+            let of = |bandwidth_type: &str| {
+                media
+                    .bandwidth
+                    .iter()
+                    .find(|b| !b.experimental && b.bandwidth_type == bandwidth_type)
+                    .map(|b| b.bandwidth)
+            };
+            of("TIAS").or_else(|| of("AS").map(|kbps| kbps.saturating_mul(1000)))
+        })
+        .min()
+}
+
 pub(crate) fn unused_ssrc_from(
     draws: impl IntoIterator<Item = SSRC>,
     taken: &HashSet<SSRC>,
@@ -3961,6 +4001,27 @@ mod unused_ssrc_test {
 
     /// RFC 5576 sections 5 and 8: a drawn SSRC that a remote description mentions or another
     /// local stream has is drawn again.
+    /// RFC 5104 section 4.2.1.2: the negotiated maximum is the local description's `b=TIAS`,
+    /// else `b=AS` times 1000, of the receiving sections, the smallest when several state one.
+    #[test]
+    fn the_negotiated_receive_maximum_is_the_smallest_local_limit() {
+        let sdp = "v=0\r\no=- 1 1 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\n\
+m=video 9 UDP/TLS/RTP/SAVPF 96\r\nb=AS:800\r\na=mid:0\r\n\
+m=video 9 UDP/TLS/RTP/SAVPF 96\r\nb=TIAS:500000\r\nb=AS:900\r\na=mid:1\r\n\
+m=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:2\r\n";
+        let local = SessionDescription::unmarshal(&mut std::io::Cursor::new(sdp)).unwrap();
+        let mids = |m: &[&str]| m.iter().map(|m| (*m).to_owned()).collect::<HashSet<_>>();
+        assert_eq!(
+            negotiated_receive_maximum(&local, &mids(&["0"])),
+            Some(800_000)
+        );
+        assert_eq!(
+            negotiated_receive_maximum(&local, &mids(&["0", "1", "2"])),
+            Some(500_000)
+        );
+        assert_eq!(negotiated_receive_maximum(&local, &mids(&["2"])), None);
+    }
+
     #[test]
     fn a_taken_ssrc_is_drawn_again() {
         let taken: HashSet<SSRC> = [7, 9].into_iter().collect();

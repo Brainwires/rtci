@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **jsep**: congestion control signalling. `register_default_interceptors` registers the
+  abs-send-time header extension on video (new `configure_abs_send_time`): offers carry it
+  beside transport-wide congestion control and `ack ccfb`, and an answer to a REMB peer that
+  offers it keeps it; video `a=extmap` lines differ on the wire. Each applied answer writes
+  the local description's `b=TIAS` (else `b=AS` times 1000) of the receiving sections into the
+  chain as `TmmbrControl::NegotiatedMaximum` (RFC 5104 section 4.2.1.2).
 - **jsep**: simulcast leftovers.
   - New `RTCRtpTransceiver::set_receive_simulcast(rids)`: offers ask to receive simulcast
     (`a=rid:<rid> recv`, `a=simulcast:recv ...`, RFC 8853 section 5.3.1); the answer's send
