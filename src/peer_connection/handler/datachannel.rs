@@ -584,8 +584,43 @@ impl<'a>
                 // the DTLS role is resolved and the negotiated stream count is known. This is
                 // the first moment a stream id can be chosen correctly, and therefore the
                 // moment it is chosen at all (RFC 8832 §6).
-                self.data_channels
-                    .assign_stream_ids(self.dtls_role, self.max_channels)?;
+                //
+                // W3C 6.1.1.3: a channel that could be given no id, or whose id is not below
+                // [[MaxChannels]], is closed with a failure; the others go on. Running out of
+                // ids used to fail the whole event, which dialed no channel at all.
+                if let Err(err) = self
+                    .data_channels
+                    .assign_stream_ids(self.dtls_role, self.max_channels)
+                {
+                    debug!("data channel ids not assigned: {err}");
+                }
+                let max_channels = self.max_channels.unwrap_or(u16::MAX);
+                let mut unusable: Vec<RTCDataChannelId> = self
+                    .data_channels
+                    .values()
+                    .filter(|dc| {
+                        dc.ready_state == RTCDataChannelState::Connecting
+                            && dc.data_channel.is_none()
+                            && dc.stream_id.is_none_or(|id| id >= max_channels)
+                    })
+                    .map(|dc| dc.id)
+                    .collect();
+                unusable.sort_unstable();
+                for id in unusable {
+                    if let Some(dc) = self.data_channels.remove(&id) {
+                        Self::push_channel_error(
+                            &mut self.ctx.event_outs,
+                            self.data_channels,
+                            now,
+                            id,
+                            RTCError::new(
+                                RTCErrorDetailType::DataChannelFailure,
+                                "no stream id below the SCTP transport's maxChannels",
+                            ),
+                        );
+                        self.announce_closed(now, dc);
+                    }
+                }
 
                 // Out-of-band negotiated channels have no DCEP handshake, so they are
                 // open immediately and fire the open event here. In-band channels stay
@@ -850,11 +885,22 @@ impl<'a>
                     data_channel.close()?;
                 }
 
-                // Closed for good: its statistics go with it. It never opened, so it is not
-                // one of `dataChannelsClosed`.
+                // Closed for good. It never opened, so it is not one of `dataChannelsClosed`.
                 self.stats.on_data_channel_gone(id);
 
                 dc.close_emitted = true;
+                // W3C 6.2.7 "unable to create the underlying data transport": the channel is
+                // closed with an error (`data-channel-failure`), then the close event.
+                Self::push_channel_error(
+                    &mut self.ctx.event_outs,
+                    self.data_channels,
+                    now,
+                    id,
+                    RTCError::new(
+                        RTCErrorDetailType::DataChannelFailure,
+                        "the DCEP handshake did not complete in time",
+                    ),
+                );
                 self.ctx.event_outs.push_back(TaggedRTCEventInternal {
                     now,
                     event: RTCEventInternal::RTCPeerConnectionEvent(
@@ -1069,6 +1115,76 @@ mod tests {
         assert_eq!(
             stats.peer_connection.data_channels_opened, 1,
             "open stats recorded exactly once"
+        );
+    }
+
+    /// W3C 6.1.1.3, the connected procedure: a channel whose id is not below [[MaxChannels]],
+    /// or that could be given none, is closed with a failure (`error` with
+    /// `data-channel-failure`, then `close`); the others are dialed as usual. Running out of
+    /// ids used to fail the whole event, so no channel was dialed at all.
+    #[test]
+    fn channels_without_a_usable_id_are_closed_with_a_failure_at_connect() {
+        let now = Instant::now();
+        let mut ctx = DataChannelHandlerContext::new(now);
+        // Two streams: ids 0 and 1. The negotiated id 5 is above them; the DTLS server's
+        // in-band channels take odd ids, so the second one finds none.
+        let (mut data_channels, handles) = registry(vec![
+            negotiated_channel(5),
+            negotiated_channel(0),
+            in_band_channel(0),
+            in_band_channel(0),
+        ]);
+        for handle in &handles[2..] {
+            data_channels.get_mut(handle).unwrap().stream_id = None;
+        }
+        let mut stats = RTCStatsAccumulator::new();
+        let mut handler = DataChannelHandler::new(
+            &mut ctx,
+            &mut data_channels,
+            &mut stats,
+            None,
+            RTCDtlsRole::Server,
+            Some(2),
+        );
+        handler
+            .handle_event(TaggedRTCEventInternal {
+                now,
+                event: RTCEventInternal::SCTPHandshakeComplete(0),
+            })
+            .unwrap();
+        let events: Vec<RTCDataChannelEvent> = std::iter::from_fn(|| handler.poll_event())
+            .filter_map(|e| match e.event {
+                RTCEventInternal::RTCPeerConnectionEvent(
+                    RTCPeerConnectionEvent::OnDataChannel(e),
+                ) => Some(e),
+                _ => None,
+            })
+            .collect();
+        for failed in [handles[0], handles[3]] {
+            let error = events
+                .iter()
+                .position(|e| *e == RTCDataChannelEvent::OnError(failed))
+                .unwrap_or_else(|| panic!("an error for {failed}: {events:?}"));
+            let close = events
+                .iter()
+                .position(|e| *e == RTCDataChannelEvent::OnClose(failed))
+                .unwrap_or_else(|| panic!("a close for {failed}: {events:?}"));
+            assert!(error < close, "{events:?}");
+            assert_eq!(
+                data_channels.error(failed).map(|e| e.error_detail),
+                Some(RTCErrorDetailType::DataChannelFailure)
+            );
+        }
+        assert_eq!(
+            data_channels.get(&handles[1]).map(|dc| dc.ready_state),
+            Some(RTCDataChannelState::Open),
+            "the negotiated channel on stream 0 opened"
+        );
+        assert!(
+            data_channels
+                .get(&handles[2])
+                .is_some_and(|dc| dc.data_channel.is_some() && dc.stream_id == Some(1)),
+            "the first in-band channel was dialed on stream 1"
         );
     }
 
@@ -1526,8 +1642,11 @@ mod tests {
         assert_eq!(stats.peer_connection.data_channels_opened, 0);
         assert_eq!(stats.peer_connection.data_channels_closed, 0);
         assert!(
-            stats.data_channels.is_empty(),
-            "its statistics went with it"
+            stats
+                .data_channels
+                .values()
+                .all(|c| c.state == RTCDataChannelState::Closed),
+            "its statistics stay, closed (webrtc-stats lifetime)"
         );
 
         // No further deadlines remain.
@@ -1883,7 +2002,14 @@ mod tests {
             assert_eq!(dc.label().as_bytes(), &label[..]);
             assert_eq!(dc.protocol().as_bytes(), &protocol[..]);
             assert!(dc.label.is_empty() && dc.protocol.is_empty(), "held twice");
-            assert_eq!(handler.stats.data_channels.len(), 1);
+            let live = |stats: &RTCStatsAccumulator| {
+                stats
+                    .data_channels
+                    .values()
+                    .filter(|c| c.state != RTCDataChannelState::Closed)
+                    .count()
+            };
+            assert_eq!(live(handler.stats), 1);
             let dc_stats = &handler.stats.data_channels[&handle];
             assert_eq!(dc_stats.messages_received, 3);
             assert_eq!(dc_stats.label.as_bytes(), &label[..]);
@@ -1894,9 +2020,18 @@ mod tests {
                     event: RTCEventInternal::SCTPStreamClosed(0, PEER_STREAM),
                 })
                 .unwrap();
+            // webrtc-stats lifetime: the closed channel's object stays, "closed", among the
+            // last MAX_CLOSED_DATA_CHANNEL_STATS channels closed; older ones go.
+            assert_eq!(live(handler.stats), 0);
+            assert_eq!(
+                handler.stats.data_channels[&handle].state,
+                RTCDataChannelState::Closed,
+                "a closed channel's statistics are kept, closed"
+            );
             assert!(
-                handler.stats.data_channels.is_empty(),
-                "a closed channel's statistics were kept"
+                handler.stats.data_channels.len()
+                    <= crate::statistics::accumulator::MAX_CLOSED_DATA_CHANNEL_STATS,
+                "the closed channels kept are bounded"
             );
             while handler.poll_read().is_some() {}
             while handler.poll_write().is_some() {}

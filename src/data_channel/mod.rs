@@ -316,20 +316,28 @@ impl RTCDataChannel<'_> {
             .get(&self.id)
             .ok_or(Error::ErrDataChannelClosed)?;
 
-        if dc.data_channel.is_none() {
-            // No stream yet: either it is still being negotiated, or it is already gone.
-            return Err(if dc.ready_state == RTCDataChannelState::Connecting {
-                Error::ErrDataChannelNotOpen
-            } else {
-                Error::ErrDataChannelClosed
-            });
+        // W3C `send()`: "If channel.[[ReadyState]] is not "open", throw an
+        // InvalidStateError". An in-band channel waiting for its DATA_CHANNEL_ACK is
+        // "connecting" although it has a stream, and a closing one still has its stream too.
+        match dc.ready_state {
+            RTCDataChannelState::Open if dc.data_channel.is_some() => {}
+            RTCDataChannelState::Closed => return Err(Error::ErrDataChannelClosed),
+            _ => return Err(Error::ErrDataChannelNotOpen),
         }
 
-        // W3C `send()`: data larger than `maxMessageSize` throws.
+        // W3C `send()`: data larger than `maxMessageSize` throws (a TypeError).
         if let Some(max_message_size) = self.peer_connection.sctp_transport().max_message_size()
             && data_len > max_message_size as usize
         {
             return Err(Error::ErrOutboundPacketTooLarge);
+        }
+
+        // W3C `send()`: "If the value of [[BufferedAmount]] increased by the byte size of data
+        // is above [[MaxBufferSize]], throw an OperationError."
+        if let Some(max_buffer_size) = self.peer_connection.sctp_transport().max_buffer_size()
+            && self.buffered_amount() + data_len as u64 > u64::from(max_buffer_size)
+        {
+            return Err(Error::ErrDataChannelBufferFull);
         }
 
         Ok(())
@@ -370,6 +378,7 @@ impl RTCDataChannel<'_> {
         // is the synchronous send-boundary accounting used for back-pressure.
         if let Some(dc) = self.peer_connection.data_channels.get_mut(&self.id) {
             dc.outstanding_bytes += data_len;
+            dc.bytes_queued += data_len as u64;
         }
         Ok(())
     }
@@ -396,8 +405,22 @@ impl RTCDataChannel<'_> {
         })?;
         if let Some(dc) = self.peer_connection.data_channels.get_mut(&self.id) {
             dc.outstanding_bytes += data_len;
+            dc.bytes_queued += data_len as u64;
         }
         Ok(())
+    }
+
+    /// W3C `bufferedAmount`: the application bytes `send()` queued that SCTP has not yet
+    /// taken from the stream's queue to send ("the underlying data transport sends data from
+    /// its queue"), framing excluded. It rises at each `send()` and falls as packets go out,
+    /// not when the peer acknowledges them (that is [`Self::outstanding_bytes`]).
+    pub fn buffered_amount(&self) -> u64 {
+        let queued = self
+            .peer_connection
+            .data_channels
+            .get(&self.id)
+            .map_or(0, |dc| dc.bytes_queued);
+        queued.saturating_sub(self.bytes_dequeued())
     }
 
     /// Application bytes of this channel that SCTP has taken from its send queue: sent for
@@ -438,7 +461,7 @@ impl RTCDataChannel<'_> {
     /// Closes the data channel.
     ///
     /// Moves the channel to `Closing` and starts the DCEP/SCTP teardown. Closing a channel that
-    /// is already `Closed` is a no-op and succeeds.
+    /// is already `Closing` or `Closed` is a no-op and succeeds.
     ///
     /// # Errors
     ///
@@ -446,7 +469,12 @@ impl RTCDataChannel<'_> {
     /// peer connection any more.
     pub fn close(&mut self) -> Result<()> {
         if let Some(dc) = self.peer_connection.data_channels.get_mut(&self.id) {
-            if dc.ready_state == RTCDataChannelState::Closed {
+            // W3C close(): "If channel.[[ReadyState]] is "closing" or "closed", then abort
+            // these steps": a second close() while closing starts nothing again.
+            if matches!(
+                dc.ready_state,
+                RTCDataChannelState::Closing | RTCDataChannelState::Closed
+            ) {
                 return Ok(());
             }
             dc.ready_state = RTCDataChannelState::Closing;

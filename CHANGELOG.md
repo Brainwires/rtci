@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **data channels** (W3C webrtc-pc 6.1, 6.2): `send()` / `send_text()` refuse unless the
+  channel is "open" (`ErrDataChannelNotOpen` while connecting, also with a stream, and while
+  closing); they refuse data that would take `buffered_amount()` above the SCTP transport's
+  `[[MaxBufferSize]]` (new `Error::ErrDataChannelBufferFull`): the larger of the two sides'
+  `max-message-size`, 256 KiB between default peers, unless
+  `SettingEngineBuilder::with_data_channel_max_buffer_size` sets a limit. A negotiated id at
+  or above the connected transport's `maxChannels` is refused (new
+  `Error::ErrDataChannelIdAboveMaxChannels`). A closed channel's stats object stays in the
+  report, closed (the last 64 channels).
 - **states and events** (W3C webrtc-pc 4.3, 4.4.1.3, 4.4.1.5, 4.8, 4.9, 5.5, 5.6, 11, 12):
   - `RTCPeerConnectionIceEvent::candidate` is `Option<RTCIceCandidate>` (`None` is the
     "gathering complete" indication) and `url` is `Option<String>`. `RTCIceCandidate` has new
@@ -1079,6 +1088,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+- **data channels**: `RTCDataChannel::buffered_amount()` (W3C `bufferedAmount`). At the
+  SCTP connected procedure a channel without a usable id fails alone (`OnError` with
+  `data-channel-failure`, then `OnClose`) instead of the whole event failing; the DCEP
+  handshake timeout fires `OnError` before `OnClose`; a second `close()` while closing does
+  nothing.
 - **states and events** (W3C webrtc-pc): the getters `signaling_state()`,
   `ice_gathering_state()`, `ice_connection_state()`, `connection_state()`; the transport
   events `OnIceTransportStateChange`, `OnIceGathererStateChange`,
@@ -1878,6 +1892,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+- **data channels**: an in-band channel created once the SCTP association is up had no DCEP
+  handshake deadline, so a lost `DATA_CHANNEL_ACK` left it connecting for ever; it has the
+  deadline now. Stream id assignment refused the last id below `maxChannels`.
 - **ice**: a controlling agent could lose the nomination it had queued: an answer to a second
   check on the same pair (one the peer's request triggered) took the pair off the
   triggered-check queue, so no request with USE-CANDIDATE left and the agent stayed in

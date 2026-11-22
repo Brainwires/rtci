@@ -442,6 +442,8 @@ pub struct SettingEngine {
     /// A message over 16 KB is refused on an association without message interleaving
     /// (RFC 8831 section 6.6). `None` is the default, on.
     pub(crate) sctp_message_size_limit_without_interleaving: Option<bool>,
+    /// [`SettingEngineBuilder::with_data_channel_max_buffer_size`].
+    pub(crate) data_channel_max_buffer_size: Option<u32>,
     pub(crate) ignore_rid_pause_for_recv: bool,
     /// [`SettingEngineBuilder::with_rid_pause_marks`].
     pub(crate) rid_pause_marks: bool,
@@ -1919,6 +1921,18 @@ impl SettingEngineBuilder {
     /// this to `false`.
     pub fn with_sctp_message_size_limit_without_interleaving(mut self, enabled: bool) -> Self {
         self.0.sctp_message_size_limit_without_interleaving = Some(enabled);
+        self
+    }
+
+    /// Replaces the SCTP transport's `[[MaxBufferSize]]` with a fixed limit: `send()` refuses
+    /// data that would take a channel's `bufferedAmount` above `limit` bytes
+    /// (`ErrDataChannelBufferFull`). `None`, the default, is the W3C rule (webrtc-pc 6.1.1.2):
+    /// the larger of the peer's `max-message-size` and this side's, typically 256 KiB.
+    ///
+    /// Chromium buffers up to 16 MiB per channel instead (and closes the channel past it);
+    /// `Some(16 * 1024 * 1024)` is the setting for an application written to that.
+    pub fn with_data_channel_max_buffer_size(mut self, limit: Option<u32>) -> Self {
+        self.0.data_channel_max_buffer_size = limit;
         self
     }
 

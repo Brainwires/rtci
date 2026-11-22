@@ -1929,6 +1929,16 @@ pub enum Error {
     #[error("label is larger than 65535 bytes")]
     ErrLabelTooLarge,
 
+    /// A send would take a data channel's `bufferedAmount` above the SCTP transport's
+    /// `[[MaxBufferSize]]` (W3C `send()`: an `OperationError`).
+    #[error("the data channel's send buffer is full")]
+    ErrDataChannelBufferFull,
+
+    /// A negotiated data channel id at or above the connected SCTP transport's `maxChannels`
+    /// (W3C createDataChannel: an `OperationError`).
+    #[error("the data channel id is not below the SCTP transport's maxChannels")]
+    ErrDataChannelIdAboveMaxChannels,
+
     /// ErrDataChannelIdInUse indicates that a data channel was created with a negotiated id
     /// whose SCTP stream already carries a data channel (RFC 8831 section 6.5)
     #[error("data channel id is already in use")]

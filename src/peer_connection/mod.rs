@@ -2849,6 +2849,16 @@ impl RTCPeerConnection {
             if self.data_channels.stream_id_in_use(&id) {
                 return Err(Error::ErrDataChannelIdInUse);
             }
+            // W3C createDataChannel: "If [[DataChannelId]] is equal to or greater than the
+            // transport's [[MaxChannels]] ... throw an OperationError": once the association
+            // is connected and the stream count known.
+            if self
+                .sctp_transport()
+                .max_channels()
+                .is_some_and(|max_channels| id >= max_channels)
+            {
+                return Err(Error::ErrDataChannelIdAboveMaxChannels);
+            }
         }
 
         // The registry assigns the handle. Note this happens before any dial: the channel is
@@ -2906,6 +2916,16 @@ impl RTCPeerConnection {
                 && data_channel.data_channel.is_none()
             {
                 data_channel.dial(handle.0)?;
+                // An in-band channel waits for its DATA_CHANNEL_ACK under the same deadline
+                // as one dialed when the association came up: a lost ACK must not leave it
+                // connecting for ever.
+                if !data_channel.negotiated {
+                    data_channel.handshake_deadline = self
+                        .setting_engine
+                        .data_channel
+                        .dcep_handshake_timeout
+                        .map(|timeout| self.pipeline_context.now + timeout);
+                }
             }
         }
 

@@ -245,7 +245,8 @@ impl RTCPeerConnection {
                 .sctp_message_size_limit_without_interleaving
                 .unwrap_or(true),
         )
-        .with_cookie_provider(crypto_provider);
+        .with_cookie_provider(crypto_provider)
+        .with_max_buffer_size(setting_engine.data_channel_max_buffer_size);
 
         // Create Pipeline Context
         let ice_handler_context = IceHandlerContext::new(ice_transport);
