@@ -460,3 +460,53 @@ fn closing_the_sender_ends_the_receivers_track() -> Result<()> {
     assert_eq!(1, world.peers[1].closed, "the BYE ended the remote track");
     Ok(())
 }
+
+/// RFC 9143 section 15: "The RTCP MID SDES item SHOULD be sent in the first few RTCP packets
+/// after joining the session and SHOULD be sent regularly thereafter": the receiver reads the
+/// sender's media SSRC described with the mid of its m= section, in each SDES of the sender.
+#[test]
+fn the_sender_describes_its_ssrc_with_the_mid_of_its_section() -> Result<()> {
+    use rtc::rtcp::source_description::{SdesType, SourceDescription};
+
+    let (mut world, sender) = World::connected()?;
+    let (ssrc, _, _) = world.sender_stream(sender);
+    let sdp = world.peers[0]
+        .pc
+        .local_description()
+        .expect("a local description")
+        .sdp
+        .clone();
+    let mid = sdp
+        .lines()
+        .find_map(|line| line.strip_prefix("a=mid:"))
+        .expect("a mid")
+        .trim()
+        .to_owned();
+
+    world.send_media(sender, FIRST_SEQ, 100)?;
+    let until = world.now + Duration::from_secs(3);
+    world.run_until(until)?;
+
+    let described: Vec<Option<String>> = world.peers[1]
+        .read_rtcp
+        .iter()
+        .filter_map(|packet| packet.as_any().downcast_ref::<SourceDescription>())
+        .flat_map(|sdes| &sdes.chunks)
+        .filter(|chunk| chunk.source == ssrc)
+        .map(|chunk| {
+            chunk
+                .items
+                .iter()
+                .find(|item| item.sdes_type == SdesType::SdesMid)
+                .map(|item| String::from_utf8_lossy(&item.text).into_owned())
+        })
+        .collect();
+    assert!(!described.is_empty(), "the sender's SSRC is described");
+    assert!(
+        described
+            .iter()
+            .all(|item| item.as_deref() == Some(mid.as_str())),
+        "every SDES chunk of the SSRC names mid {mid}: {described:?}"
+    );
+    Ok(())
+}

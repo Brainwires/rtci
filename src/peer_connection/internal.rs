@@ -1464,6 +1464,10 @@ impl RTCPeerConnection {
     ///   description's is how long the NACK responder keeps a sent packet, the remote
     ///   description's how long the NACK generator asks for a missing one
     ///   ([`NackControl`](interceptor::NackControl)).
+    /// - What identifies each stream this endpoint sends, for the SDES chunk of its SSRC: the
+    ///   mid of its m= section (RFC 9143 section 15.1), the encoding's rid as RtpStreamId and,
+    ///   on its RTX and FEC SSRCs, as RepairedRtpStreamId (RFC 8852 sections 3.1, 3.2):
+    ///   [`RtcpSessionControl::StreamIdentifiers`](interceptor::RtcpSessionControl).
     pub(super) fn apply_negotiated_session(
         &mut self,
         now: Instant,
@@ -1571,6 +1575,47 @@ impl RTCPeerConnection {
                 }
                 .into_packet(now),
             );
+        }
+        for transceiver in self.rtp_transceivers.iter().filter(live) {
+            let (Some(mid), Some(sender)) = (transceiver.mid(), transceiver.sender()) else {
+                continue;
+            };
+            if !sender.has_sent() {
+                continue;
+            }
+            for encoding in sender.send_encodings() {
+                let coding = &encoding.rtp_coding_parameters;
+                let Some(ssrc) = coding.ssrc else {
+                    continue;
+                };
+                let rid = (!coding.rid.is_empty()).then(|| coding.rid.clone());
+                let repair = coding
+                    .rtx
+                    .as_ref()
+                    .map(|rtx| rtx.ssrc)
+                    .into_iter()
+                    .chain(coding.fec.as_ref().map(|fec| fec.ssrc));
+                controls.push(
+                    RtcpSessionControl::StreamIdentifiers {
+                        ssrc,
+                        mid: Some(mid.clone()),
+                        rid: rid.clone(),
+                        repaired_rid: None,
+                    }
+                    .into_packet(now),
+                );
+                for repair_ssrc in repair {
+                    controls.push(
+                        RtcpSessionControl::StreamIdentifiers {
+                            ssrc: repair_ssrc,
+                            mid: Some(mid.clone()),
+                            rid: None,
+                            repaired_rid: rid.clone(),
+                        }
+                        .into_packet(now),
+                    );
+                }
+            }
         }
         for control in controls {
             self.interceptor.handle_write(control)?;

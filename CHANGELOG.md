@@ -752,6 +752,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behaviour changes
 
+- **rtcp_session**: the SDES chunk of each local SSRC carries, after the CNAME, the MID of
+  its m= section (RFC 9143 section 15.1: "SHOULD be sent in the first few RTCP packets ... and
+  regularly thereafter"), the encoding's rid as RtpStreamId and, on RTX and FEC SSRCs, as
+  RepairedRtpStreamId (RFC 8852 sections 3.1, 3.2), in every compound packet. The peer
+  connection hands them over after each negotiation with the new
+  `RtcpSessionControl::StreamIdentifiers`.
+- **association**: an RtpStreamId / RepairedRtpStreamId SDES item from the remote names the
+  rid of a stream whose packets carry no RID / RRID header extension, as an SDES MID item
+  already named its m= section (RFC 8852 section 3). A value that is not 1 to 255
+  alphanumerics is ignored.
 - **sctp, sdp**: both endpoints initiate the SCTP association (RFC 8841 section 9.3), in either
   DTLS role; only the DTLS client did. The peer's INIT is answered by the association this side
   initiated (RFC 9260 section 5.2.1), so the two make one association, and an association no

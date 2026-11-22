@@ -66,6 +66,10 @@ pub(crate) struct InterceptorHandlerContext {
     /// 15.1): the m= section of a stream whose packets carry no MID header extension and whose
     /// SSRC no description declares.
     pub(crate) sdes_mids: HashMap<SSRC, String>,
+    /// The RtpStreamId and RepairedRtpStreamId each remote SSRC named in RTCP SDES items (RFC
+    /// 8852 sections 3.1, 3.2): the rid of a stream whose packets carry no RID / RRID header
+    /// extension.
+    pub(crate) sdes_rids: HashMap<SSRC, (String, String)>,
     /// Local SSRCs another source was heard using (RFC 3550 8.2), until their stream is
     /// replaced.
     pub(crate) ssrc_collisions: HashSet<SSRC>,
@@ -97,6 +101,7 @@ impl Default for InterceptorHandlerContext {
             cname: interceptor::generate_rtcp_cname(),
             remote_cnames: Default::default(),
             sdes_mids: Default::default(),
+            sdes_rids: Default::default(),
             ssrc_collisions: Default::default(),
             goodbye_ssrcs: Default::default(),
             wall_clock: None,
@@ -231,34 +236,79 @@ impl<'a> InterceptorHandler<'a> {
 
     /// RFC 9143 section 9.2: "If the RTCP packet is an SDES packet containing a MID item,
     /// update the ... SSRC mapping table" with the SSRC of the chunk and the m= section the
-    /// MID names. The mapping is used when a stream of that SSRC arrives that nothing else
-    /// places ([`Self::bind_undeclared_ssrc`]); a MID that names no m= section is not kept.
+    /// MID names; RFC 8852 sections 3.1 and 3.2: the RtpStreamId and RepairedRtpStreamId SDES
+    /// items name the rid of a stream as the header extensions do. Each is used when a stream
+    /// of that SSRC arrives without the header extension ([`Self::stream_ids`]). A MID that
+    /// names no m= section is not kept, nor a rid that is not 1 to 255 alphanumerics (RFC 8852
+    /// section 3).
     fn process_sdes_mids(&mut self, rtcp_packets: &[Box<dyn rtcp::Packet>]) {
+        let is_rid = |rid: &str| {
+            !rid.is_empty() && rid.len() <= 255 && rid.bytes().all(|b| b.is_ascii_alphanumeric())
+        };
         for packet in rtcp_packets {
             let Some(sdes) = packet.as_any().downcast_ref::<SourceDescription>() else {
                 continue;
             };
             for chunk in &sdes.chunks {
                 for item in &chunk.items {
-                    if item.sdes_type != SdesType::SdesMid {
-                        continue;
-                    }
-                    let Ok(mid) = std::str::from_utf8(&item.text) else {
+                    let Ok(text) = std::str::from_utf8(&item.text) else {
                         continue;
                     };
-                    let known = self
-                        .rtp_transceivers
-                        .iter()
-                        .any(|t| t.mid().as_deref() == Some(mid));
-                    if known
-                        && (self.ctx.sdes_mids.len() < MAX_REMOTE_CNAMES
-                            || self.ctx.sdes_mids.contains_key(&chunk.source))
-                    {
-                        self.ctx.sdes_mids.insert(chunk.source, mid.to_owned());
+                    match item.sdes_type {
+                        SdesType::SdesMid => {
+                            let known = self
+                                .rtp_transceivers
+                                .iter()
+                                .any(|t| t.mid().as_deref() == Some(text));
+                            if known
+                                && (self.ctx.sdes_mids.len() < MAX_REMOTE_CNAMES
+                                    || self.ctx.sdes_mids.contains_key(&chunk.source))
+                            {
+                                self.ctx.sdes_mids.insert(chunk.source, text.to_owned());
+                            }
+                        }
+                        SdesType::SdesRtpStreamId | SdesType::SdesRepairedRtpStreamId
+                            if is_rid(text) =>
+                        {
+                            if self.ctx.sdes_rids.len() >= MAX_REMOTE_CNAMES
+                                && !self.ctx.sdes_rids.contains_key(&chunk.source)
+                            {
+                                continue;
+                            }
+                            let ids = self.ctx.sdes_rids.entry(chunk.source).or_default();
+                            if item.sdes_type == SdesType::SdesRtpStreamId {
+                                text.clone_into(&mut ids.0);
+                            } else {
+                                text.clone_into(&mut ids.1);
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
         }
+    }
+
+    /// The MID, RID and RRID of a received packet: its header extensions', each one it does
+    /// not carry taken from what an RTCP SDES item said for its SSRC
+    /// ([`Self::process_sdes_mids`]). Empty when neither says.
+    fn stream_ids(&self, rtp_header: &rtp::Header) -> (String, String, String) {
+        let (mut mid, mut rid, mut rrid) = self
+            .get_rtp_header_extension_ids(rtp_header)
+            .unwrap_or_default();
+        if mid.is_empty()
+            && let Some(learned) = self.ctx.sdes_mids.get(&rtp_header.ssrc)
+        {
+            mid.clone_from(learned);
+        }
+        if rid.is_empty()
+            && rrid.is_empty()
+            && let Some((learned_rid, learned_rrid)) = self.ctx.sdes_rids.get(&rtp_header.ssrc)
+        {
+            rid.clone_from(learned_rid);
+            rrid.clone_from(learned_rrid);
+        }
+        (mid, rid, rrid)
     }
 
     /// RFC 3550 6.6: a BYE says a source has left. Once every SSRC of a remote track has said
@@ -604,15 +654,8 @@ impl<'a> InterceptorHandler<'a> {
         let index = if self.rtp_transceivers.len() == 1 {
             0
         } else {
-            let (mut mid, rid, rrid) = self
-                .get_rtp_header_extension_ids(rtp_header)
-                .unwrap_or_default();
-            // No MID in the packet: the one an RTCP SDES MID item gave this SSRC.
-            if mid.is_empty()
-                && let Some(learned) = self.ctx.sdes_mids.get(&ssrc)
-            {
-                mid.clone_from(learned);
-            }
+            // No MID (RID, RRID) in the packet: the one an RTCP SDES item gave its SSRC.
+            let (mid, rid, rrid) = self.stream_ids(rtp_header);
             // A RID (or RRID) means simulcast: that is the rid path's.
             if !rid.is_empty() || !rrid.is_empty() {
                 return false;
@@ -831,9 +874,7 @@ impl<'a> InterceptorHandler<'a> {
         payload_type: PayloadType,
         rtp_header: &rtp::Header,
     ) -> bool {
-        let Some((mid, rid, rrid)) = self.get_rtp_header_extension_ids(rtp_header) else {
-            return false;
-        };
+        let (mid, rid, rrid) = self.stream_ids(rtp_header);
         if mid.is_empty() || (rid.is_empty() && rrid.is_empty()) {
             return false;
         }
