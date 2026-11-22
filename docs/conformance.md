@@ -41,7 +41,7 @@ The rest of the evidence that the claims hold:
 
 | # | Claim | What the engine does |
 |---|---|---|
-| D1 | ULPFEC (RFC 5109) | Not offered by default: nothing encodes or decodes it. `MIME_TYPE_ULP_FEC` stays, and an application with its own coder registers it explicitly. RED is not implemented. |
+| D1 | ULPFEC (RFC 5109) | Not offered by default: nothing encodes or decodes it. `MIME_TYPE_ULP_FEC` stays, and an application with its own coder registers it explicitly. The RED payload format (RFC 2198) is in `rtc-rtp` (`codec::red`); the engine neither offers `red` nor wraps or unwraps media in it. |
 | D2 | `bundle_policy` | The engine has one transport, so `balanced` and `max-compat` behave as `max-bundle`. A remote offer without BUNDLE gets a defined error, never a half-working session. |
 | D3 | `SettingEngine` options with no effect in a sans-I/O engine (`receive_mtu`, `include_loopback_candidate`, `disable_media_engine_copy`) | `#[deprecated]` with the reason; no option is silently a no-op. `nat_1to1_ips` and `disable_media_engine_multiple_codecs` are implemented. |
 
@@ -58,9 +58,9 @@ README.
 | TURN | TCP allocations (RFC 6062), a TURN server | Never claimed. The TURN client is implemented. |
 | SRTP | AEAD double (RFC 8723), MKI, EKT | Never claimed. |
 | FEC | FlexFEC as RFC 8627 | Only draft-ietf-payload-flexible-fec-scheme-03 is implemented, and the codec name is matched exactly so RFC 8627 `flexfec` is never fed to it. |
-| RTP | H.264 STAP-B / MTAP / FU-B (interleaved mode, never offered); SVC layer packetization for VP9 and AV1 | Simulcast is implemented; SVC is not claimed. |
+| RTP | H.264 interleaved mode in negotiation (`rtc-rtp` packetizes and depacketizes STAP-B / MTAP / FU-B and de-interleaves; no codec the engine registers offers `packetization-mode=2`); SVC layer packetization for VP9 and AV1 | Simulcast is implemented; SVC is not claimed. |
 | Identity | `peer_identity`, identity providers | Applications (Deno, for one) implement webrtc-identity above the engine. |
-| W3C API | `RTCDTMFSender` | Applications implement DTMF above the engine; the engine sends the telephone-event packets it is given. |
+| W3C API | `RTCDTMFSender` | Applications implement DTMF above the engine, with `rtc-rtp`'s telephone-event packets and sender state machine (`codec::telephone_event`); the engine sends the packets it is given. |
 | Test platforms | The real-network environment and browser interop run on Linux only | They need network namespaces. Unit and integration tests run on Linux, macOS and Windows. |
 | Web platform tests | WPT | They test a browser API, not this crate; the Deno integration runs them. |
 
