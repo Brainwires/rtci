@@ -16,6 +16,8 @@ pub(crate) mod record;
 pub(crate) mod suite;
 
 #[cfg(test)]
+mod connection_id_test;
+#[cfg(test)]
 mod handshake_test;
 #[cfg(test)]
 mod key_schedule_test;

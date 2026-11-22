@@ -576,6 +576,18 @@ impl Conn13 {
         Ok(number)
     }
 
+    /// One record of `content_type` holding `content`, protected under this side's current
+    /// keys and not queued: for a fuzz harness to hand to the peer.
+    #[cfg(any(fuzzing, test))]
+    pub(crate) fn seal_for_fuzzing(&mut self, content_type: u8, content: &[u8]) -> Option<Vec<u8>> {
+        let epoch = self.send_epoch();
+        if epoch == 0 {
+            return None;
+        }
+        self.write_record(epoch, content_type, content).ok()?;
+        self.pending_records.pop()
+    }
+
     /// Packs the queued records into datagrams no larger than the MTU, in order.
     fn flush(&mut self) {
         let mtu = self.cfg.maximum_transmission_unit;

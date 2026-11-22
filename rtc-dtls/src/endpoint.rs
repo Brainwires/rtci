@@ -529,11 +529,16 @@ impl Endpoint {
 
     /// RFC 9146 section 6, RFC 9147 section 9: a datagram from an address without an
     /// association, under a connection id of an association at another address. When the
-    /// configuration allows it, the association takes the datagram where it is; if a record
-    /// of it authenticates and is newer than any before, the association is at `remote`
-    /// from now on. Returns whether the association is.
-    fn migrate(&mut self, now: Instant, remote: SocketAddr, data: &[u8]) -> bool {
-        let Some(previous) = self.connections.iter().find_map(|(address, conn)| {
+    /// configuration allows it, that association takes the datagram; if a record of it
+    /// authenticates and is newer than any before, the association is at `remote` from now
+    /// on. `None` when no association owns the datagram.
+    fn migrate(
+        &mut self,
+        now: Instant,
+        remote: SocketAddr,
+        data: &[u8],
+    ) -> Option<Vec<EndpointEvent>> {
+        let previous = self.connections.iter().find_map(|(address, conn)| {
             let migrates = conn.handshake_config.connection_id_migration
                 && conn.is_handshake_completed()
                 && !conn.is_failed()
@@ -542,27 +547,33 @@ impl Endpoint {
                     .as_ref()
                     .is_some_and(|v13| v13.owns_connection_id(data));
             migrates.then_some(*address)
-        }) else {
-            return false;
-        };
-        let Some(conn) = self.connections.get_mut(&previous) else {
-            return false;
-        };
-        // An authentic, newer record is what moves the association; anything else leaves
-        // it where it was (and the datagram is processed there, which a replay or a forgery
-        // survives like any other).
+        })?;
+        let conn = self.connections.get_mut(&previous)?;
+        // An authentic, newer record is what moves the association. A replay or a forgery
+        // is dropped by it like any other, and leaves it where it was.
         let authenticated = conn.authenticated_records;
         let _ = conn.read(data);
         let _ = conn.handshake(now);
         let newest = conn.v13.as_ref().is_some_and(|v13| v13.newest_record_read);
-        if conn.authenticated_records == authenticated || !newest {
-            return false;
+        let moves = conn.authenticated_records != authenticated && newest;
+        let mut events = vec![];
+        while let Some(message) = conn.incoming_application_data() {
+            events.push(EndpointEvent::ApplicationData(message));
         }
-        // The datagram has been read; what it held is delivered with the next read.
-        if let Some(conn) = self.connections.remove(&previous) {
+        let destination = if moves { remote } else { previous };
+        Self::queue_transmits(
+            &mut self.transmits,
+            conn,
+            now,
+            self.local_addr,
+            destination,
+            None,
+            self.transport_protocol,
+        );
+        if moves && let Some(conn) = self.connections.remove(&previous) {
             self.connections.insert(remote, conn);
         }
-        true
+        Some(events)
     }
 
     /// Hands the peer at `remote` `count` new connection ids: see
@@ -648,6 +659,12 @@ impl Endpoint {
         ecn: Option<EcnCodepoint>,
         data: BytesMut,
     ) -> Result<Vec<EndpointEvent>> {
+        if !self.connections.contains_key(&remote)
+            && !self.pending.contains_key(&remote)
+            && let Some(events) = self.migrate(now, remote, &data)
+        {
+            return Ok(events);
+        }
         if let Some(config) = self.server_config.clone() {
             if let Admission::Done = self.admit(now, remote, ecn, &data, &config)? {
                 return Ok(vec![]);
@@ -670,7 +687,7 @@ impl Endpoint {
                 }
                 return Ok(vec![]);
             }
-        } else if !self.connections.contains_key(&remote) && !self.migrate(now, remote, &data) {
+        } else if !self.connections.contains_key(&remote) {
             return Err(Error::NoServerConfig);
         }
 

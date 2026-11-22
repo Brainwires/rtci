@@ -798,3 +798,96 @@ fn a_handshake_nobody_answers_fails_at_its_deadline() -> Result<()> {
     assert!(now.duration_since(pair.now) >= Duration::from_secs(5));
     Ok(())
 }
+
+/// A self-signed certificate over the RSA test key.
+fn rsa_certificate() -> Certificate {
+    let key_pair = rcgen::KeyPair::from_pem(include_str!("testdata/rsa-2048.pkcs8.pem"))
+        .expect("an RSA key pair");
+    let certificate = rcgen::CertificateParams::new(vec!["localhost".to_owned()])
+        .expect("certificate parameters")
+        .self_signed(&key_pair)
+        .expect("a self-signed certificate");
+    Certificate {
+        certificate: vec![certificate.der().to_owned()],
+        private_key: crate::crypto::CryptoPrivateKey::from_key_pair(&key_pair, provider().crypto())
+            .expect("the key imports"),
+    }
+}
+
+/// RFC 8446 section 4.2.3: an RSA key signs the handshake with RSASSA-PSS, always in DTLS 1.3
+/// and, where both ends list it and the server prefers it, in DTLS 1.2.
+#[test]
+fn an_rsa_certificate_signs_with_rsassa_pss() -> Result<()> {
+    use crate::signature_hash_algorithm::{SignatureAlgorithm, SignatureScheme};
+
+    let server = || {
+        ConfigBuilder::default()
+            .with_crypto_provider(provider())
+            .with_certificates(vec![rsa_certificate()])
+    };
+    let mut pair = Pair::new(client_builder(), server())?.complete();
+    assert_eq!(pair.versions().0, Some(DtlsVersion::Dtls1_3));
+    assert_eq!(
+        pair.client_conn()
+            .peer_signature_scheme
+            .map(|scheme| scheme.signature),
+        Some(SignatureAlgorithm::RsaPssRsaeSha256)
+    );
+    assert_eq!(pair.client_sends(b"pss"), vec![b"pss".to_vec()]);
+
+    // A client that lists only PKCS#1 v1.5 for RSA cannot be served in DTLS 1.3, which has
+    // no such CertificateVerify: handshake_failure.
+    let mut pair = Pair::new(
+        client_builder()
+            .with_protocol_versions(DtlsVersion::Dtls1_3, DtlsVersion::Dtls1_3)
+            .with_signature_schemes(vec![
+                SignatureScheme::Pkcs1WithSha256,
+                SignatureScheme::EcdsaWithP256AndSha256,
+            ]),
+        server().with_cookie_exchange(false),
+    )?;
+    pair.run();
+    assert!(!pair.client_complete && !pair.server_complete);
+    assert!(matches!(
+        pair.server_error,
+        Some(Error::ErrNoAvailableSignatureSchemes)
+    ));
+
+    // DTLS 1.2, ECDHE_RSA: the ServerKeyExchange is signed with the pair the server prefers
+    // among those the client lists.
+    let suite = CipherSuiteId::Tls_Ecdhe_Rsa_With_Aes_128_Gcm_Sha256;
+    for (schemes, expected) in [
+        (
+            vec![
+                SignatureScheme::PssWithSha256,
+                SignatureScheme::Pkcs1WithSha256,
+            ],
+            SignatureAlgorithm::RsaPssRsaeSha256,
+        ),
+        (
+            vec![
+                SignatureScheme::Pkcs1WithSha256,
+                SignatureScheme::PssWithSha256,
+            ],
+            SignatureAlgorithm::Rsa,
+        ),
+    ] {
+        let mut pair = Pair::new(
+            client_builder().with_cipher_suites(vec![suite]),
+            server()
+                .with_cipher_suites(vec![suite])
+                .with_signature_schemes(schemes),
+        )?
+        .complete();
+        assert_eq!(pair.versions().0, Some(DtlsVersion::Dtls1_2));
+        let scheme = pair
+            .server
+            .connection_mut(&client_addr())
+            .unwrap()
+            .state
+            .local_signature_scheme;
+        assert_eq!(scheme.map(|scheme| scheme.signature), Some(expected));
+        assert_eq!(pair.client_sends(b"rsa"), vec![b"rsa".to_vec()]);
+    }
+    Ok(())
+}
