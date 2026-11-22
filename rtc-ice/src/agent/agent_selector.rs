@@ -120,6 +120,35 @@ impl Agent {
         }
     }
 
+    /// A lite agent's keepalive (RFC 8445 Section 11): it sends no Binding requests, so when
+    /// it has sent nothing on the selected pair for Tr (15 seconds) it sends a Binding
+    /// indication: no authentication, FINGERPRINT only.
+    fn lite_keepalive(&mut self, now: Instant) {
+        let Some(pair_index) = self.selected_pair else {
+            return;
+        };
+        if self.keepalive_interval == std::time::Duration::ZERO {
+            return;
+        }
+        let p = self.candidate_pairs[pair_index];
+        let last_sent = self.local_candidates[p.local_index]
+            .last_sent()
+            .unwrap_or(self.start_time);
+        if now.saturating_duration_since(last_sent) < crate::agent::agent_config::KEEPALIVE_TR {
+            return;
+        }
+        let mut msg = Message::new();
+        if let Err(err) = msg.build(&[
+            Box::new(MessageType::new(METHOD_BINDING, CLASS_INDICATION)),
+            Box::new(TransactionId::new()),
+            Box::new(FINGERPRINT),
+        ]) {
+            error!("{}", err);
+            return;
+        }
+        self.send_stun(now, &msg, p.local_index, p.remote_index);
+    }
+
     fn nominate_pair(&mut self, now: Instant) {
         let result = {
             let Some(remote_credentials) = &self.ufrag_pwd.remote_credentials else {
@@ -493,7 +522,9 @@ impl ControlledSelector for Agent {
     fn contact_candidates(&mut self, now: Instant) {
         // A lite selector should not contact candidates
         if self.lite {
-            self.validate_selected_pair(now);
+            if self.validate_selected_pair(now) {
+                self.lite_keepalive(now);
+            }
         } else if self.get_selected_pair().is_some() {
             if self.validate_selected_pair(now) {
                 self.check_keepalive(now);

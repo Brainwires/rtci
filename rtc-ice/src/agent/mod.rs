@@ -17,6 +17,8 @@ mod agent_nomination_test;
 #[cfg(test)]
 mod agent_ported_test;
 #[cfg(test)]
+mod agent_rfc7675_test;
+#[cfg(test)]
 mod agent_rfc8445_test;
 #[cfg(test)]
 mod agent_test;
@@ -93,6 +95,32 @@ pub(crate) struct EarlyRequest {
     pub(crate) transport_protocol: TransportProtocol,
     pub(crate) remote_addr: SocketAddr,
 }
+
+/// What an ICE restart keeps of the generation it replaces, for as long as data still flows on
+/// that generation's selected pair ([`Agent::media_path`]).
+///
+/// RFC 7675 Section 5.1: "an endpoint that continues to send traffic on the previously
+/// validated candidate pair during ICE restart MUST continue to perform consent freshness on
+/// that candidate pair". Consent on that pair is asked for, and given to the peer, with the
+/// credentials the pair was validated with: the old ones, on both sides.
+#[derive(Clone)]
+pub(crate) struct PreviousGeneration {
+    /// The local credentials of the replaced generation: the peer's consent requests on the
+    /// old pair name this fragment and are signed with this password.
+    pub(crate) local_credentials: Credentials,
+    /// The peer's credentials of the replaced generation, for our own consent requests.
+    pub(crate) remote_credentials: Credentials,
+    /// The PRIORITY attribute of the consent requests.
+    pub(crate) priority: u32,
+    /// When the peer last consented (a lite agent: when it last sent an authenticated request).
+    pub(crate) last_consent: Instant,
+    pub(crate) next_consent_at: Instant,
+    /// Consent requests sent on the old pair that may still be answered.
+    pub(crate) pending: Vec<TransactionId>,
+}
+
+/// Most consent transactions of a replaced generation kept open at a time.
+pub(crate) const MAX_PREVIOUS_GENERATION_TRANSACTIONS: usize = 8;
 
 /// Most early requests remembered: one per (local, remote) address pair, so this bounds how
 /// many paths a peer can have probed before its description arrives.
@@ -242,6 +270,8 @@ pub struct Agent {
     /// The selected pair's path at the moment an ICE restart was applied, kept until the
     /// restart selects a pair (or the agent fails or closes). See [`Agent::media_path`].
     pub(crate) previous_media_path: Option<MediaPath>,
+    /// The credentials and consent state that go with `previous_media_path`.
+    pub(crate) previous_generation: Option<PreviousGeneration>,
 
     // LRU of outbound Binding request Transaction IDs
     pub(crate) pending_binding_requests: Vec<BindingRequest>,
@@ -261,11 +291,15 @@ pub struct Agent {
     // How long connectivity checks can fail before the ICE Agent
     // goes to failed
     pub(crate) failed_timeout: Duration,
-    // How often should we send keepalive packets?
+    // The basic period of the consent checks (RFC 7675 Section 5.1), at least 5 seconds.
     // 0 means never
     pub(crate) keepalive_interval: Duration,
-    // When the last STUN consent ping was sent.
-    pub(crate) last_consent_sent: Instant,
+    /// When the next consent request goes out on the selected pair: the last one plus an
+    /// interval drawn from 0.8 to 1.2 times the period. `None` until a pair is selected.
+    pub(crate) next_consent_at: Option<Instant>,
+    /// When the oldest consent request that no response has followed was sent. `None` while
+    /// the peer answers. The agent is `Disconnected` once this is `disconnected_timeout` old.
+    pub(crate) consent_unanswered_since: Option<Instant>,
     // How often should we run our internal taskLoop to check for state changes when connecting
     pub(crate) check_interval: Duration,
     pub(crate) checking_duration: Instant,
@@ -383,6 +417,7 @@ impl Agent {
             nominated_pair: None,
             selected_pair: None,
             previous_media_path: None,
+            previous_generation: None,
             candidate_pairs: vec![],
 
             connection_state: ConnectionState::New,
@@ -442,12 +477,14 @@ impl Agent {
                 DEFAULT_FAILED_TIMEOUT
             },
 
-            // How often should we send keepalive packets?
-            // 0 means never
-            keepalive_interval: if let Some(keepalive_interval) = config.keepalive_interval {
-                keepalive_interval
-            } else {
-                DEFAULT_KEEPALIVE_INTERVAL
+            // The basic period of the consent checks; 0 means never. RFC 7675 Section 5.1:
+            // "Implementations MUST NOT set the period between checks to less than 4 seconds",
+            // and each interval is 0.8 to 1.2 times the basic period, so the basic period is
+            // at least 5 seconds.
+            keepalive_interval: match config.keepalive_interval {
+                Some(ZERO_DURATION) => ZERO_DURATION,
+                Some(keepalive_interval) => keepalive_interval.max(DEFAULT_KEEPALIVE_INTERVAL),
+                None => DEFAULT_KEEPALIVE_INTERVAL,
             },
 
             // How often should we run our internal taskLoop to check for state changes when connecting
@@ -456,7 +493,8 @@ impl Agent {
             } else {
                 config.check_interval
             },
-            last_consent_sent: now,
+            next_consent_at: None,
+            consent_unanswered_since: None,
             checking_duration: now,
             last_checking_time: now,
             force_candidate_contact: false,
@@ -1097,6 +1135,37 @@ impl Agent {
         if self.connection_state == ConnectionState::Closed {
             return Err(Error::ErrClosed);
         }
+        // Data keeps the path it has until the new generation selects a pair (RFC 8445
+        // Section 9), whether or not the local candidates are kept: discarding them forgets
+        // what was signalled, not the socket the path's packets leave from. An application
+        // that closed that socket (a rebind) drops what is written to it, as before.
+        let previous_media_path = self.media_path();
+        // Consent goes on being checked on that path (RFC 7675 Section 5.1), with the
+        // credentials of the generation that validated it. A second restart before the first
+        // one selected a pair keeps what the first one kept.
+        let previous_generation = match (self.selected_pair, &self.ufrag_pwd.remote_credentials) {
+            (Some(pair_index), Some(remote_credentials)) => {
+                let pair = self.candidate_pairs[pair_index];
+                let remote = &self.remote_candidates[pair.remote_index];
+                let last_consent = if self.lite {
+                    remote.last_authenticated()
+                } else {
+                    remote.last_consent()
+                };
+                Some(PreviousGeneration {
+                    local_credentials: self.ufrag_pwd.local_credentials.clone(),
+                    remote_credentials: remote_credentials.clone(),
+                    priority: self.local_candidates[pair.local_index].peer_reflexive_priority(),
+                    last_consent: last_consent.unwrap_or(now),
+                    next_consent_at: self
+                        .next_consent_at
+                        .unwrap_or_else(|| now + self.next_consent_interval()),
+                    pending: vec![],
+                })
+            }
+            _ => self.previous_generation.take(),
+        };
+
         if let Some(credentials) = self.ufrag_pwd.pending_local_credentials.take() {
             self.ufrag_pwd.local_credentials = credentials;
         }
@@ -1105,17 +1174,12 @@ impl Agent {
         self.pending_binding_requests = vec![];
         self.early_requests = vec![];
 
-        // Data keeps the path it has until the new generation selects a pair (RFC 8445
-        // Section 9), whether or not the local candidates are kept: discarding them forgets
-        // what was signalled, not the socket the path's packets leave from. An application
-        // that closed that socket (a rebind) drops what is written to it, as before.
-        let previous_media_path = self.media_path();
-
         self.candidate_pairs = vec![];
 
         self.set_selected_pair(Some(now), None);
         self.delete_all_candidates(keep_local_candidates);
         self.previous_media_path = previous_media_path;
+        self.previous_generation = previous_media_path.and(previous_generation);
         self.start(now);
 
         // Restart is used by NewAgent. Accept/Connect should be used to move to checking
@@ -1202,9 +1266,15 @@ impl Agent {
                 self.set_selected_pair(now, None);
                 self.delete_all_candidates(false);
             }
-            // A failed or closed agent has no path, a restart's previous one included.
+            // A failed or closed agent has no path, a restart's previous one included, and no
+            // open transactions (RFC 7675 Section 5.1: "All outstanding STUN consent
+            // transactions for a candidate pair MUST be discarded when consent expires").
             if matches!(new_state, ConnectionState::Failed | ConnectionState::Closed) {
                 self.previous_media_path = None;
+                self.previous_generation = None;
+                self.pending_binding_requests.clear();
+                self.next_consent_at = None;
+                self.consent_unanswered_since = None;
             }
 
             info!(
@@ -1231,9 +1301,16 @@ impl Agent {
             );
 
             self.candidate_pairs[pair_index].nominated = true;
+            if self.selected_pair != Some(pair_index) {
+                // Consent on the new pair was given by the response that validated it; the
+                // first consent check follows one interval later.
+                self.next_consent_at = now.map(|now| now + self.next_consent_interval());
+                self.consent_unanswered_since = None;
+            }
             self.selected_pair = Some(pair_index);
             // The restart (if any) has its pair: the previous generation's path is retired.
             self.previous_media_path = None;
+            self.previous_generation = None;
 
             self.update_connection_state(now, ConnectionState::Connected);
 
@@ -1250,6 +1327,8 @@ impl Agent {
             }
         } else {
             self.selected_pair = None;
+            self.next_consent_at = None;
+            self.consent_unanswered_since = None;
         }
     }
 
@@ -1334,82 +1413,344 @@ impl Agent {
         None
     }
 
+    /// One interval between two consent checks: 0.8 to 1.2 times the basic period, drawn from
+    /// the crypto provider's RNG, and never under 4 seconds (RFC 7675 Section 5.1: "To prevent
+    /// synchronization of consent checks, each interval MUST be randomized from between 0.8
+    /// and 1.2 times the basic period. [...] Implementations MUST NOT set the period between
+    /// checks to less than 4 seconds").
+    pub(crate) fn next_consent_interval(&self) -> Duration {
+        let mut bytes = [0_u8; 4];
+        // Without randomness the period itself is the interval.
+        let r = match self.crypto_provider.random().fill(&mut bytes) {
+            Ok(()) => u64::from(u32::from_be_bytes(bytes)),
+            Err(_) => u64::from(u32::MAX / 2),
+        };
+        // 0.8 + 0.4 * r / (2^32 - 1), in millionths.
+        let factor = 800_000 + (r * 400_000) / u64::from(u32::MAX);
+        let nanos = self.keepalive_interval.as_nanos() * u128::from(factor) / 1_000_000;
+        Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX)).max(MIN_CONSENT_INTERVAL)
+    }
+
+    /// How long after the last consent response the agent stops sending: the configured
+    /// `disconnected_timeout + failed_timeout`, and 30 seconds at most (RFC 7675 Section 5.1:
+    /// "Consent expires after 30 seconds. That is, if a valid STUN binding response has not
+    /// been received from the remote peer's transport address in 30 seconds, the endpoint MUST
+    /// cease transmission on that 5-tuple"). A `failed_timeout` of zero, which keeps a
+    /// checking agent from failing, does not keep consent alive.
+    pub(crate) fn consent_expiry(&self) -> Duration {
+        if self.failed_timeout == ZERO_DURATION {
+            CONSENT_EXPIRY
+        } else {
+            (self.disconnected_timeout + self.failed_timeout).min(CONSENT_EXPIRY)
+        }
+    }
+
     /// Checks if the selected pair is (still) valid.
-    /// Note: the caller should hold the agent lock.
     /// Re-evaluates the selected pair's liveness as of `now`.
     ///
     /// `now` comes from the caller so that this decision and the keepalive decision below are
     /// made against the same instant as the `contact(now)` that reached them.
     pub(crate) fn validate_selected_pair(&mut self, now: Instant) -> bool {
-        let (valid, disconnected_time) = {
-            self.selected_pair.as_ref().map_or_else(
-                || (false, Duration::from_secs(0)),
-                |&pair_index| {
-                    let remote_index = self.candidate_pairs[pair_index].remote_index;
-
-                    // Consent (RFC 7675 §5.1) is refreshed only by an authenticated success
-                    // response to one of our own checks: not by non-STUN datagrams, not by
-                    // unauthenticated indications, and not by the peer's own requests, which
-                    // say the peer is there but not that it still wants our traffic. A lite
-                    // agent sends no checks (RFC 8445 §2.5), so for it an authenticated request
-                    // is the only sign of life.
-                    let remote = &self.remote_candidates[remote_index];
-                    let last_received = if self.lite {
-                        remote.last_authenticated()
-                    } else {
-                        remote.last_consent()
-                    }
-                    .unwrap_or(self.start_time);
-                    let disconnected_time = now.saturating_duration_since(last_received);
-                    (true, disconnected_time)
-                },
-            )
+        let Some(pair_index) = self.selected_pair else {
+            return false;
         };
+        let remote_index = self.candidate_pairs[pair_index].remote_index;
+        let remote = &self.remote_candidates[remote_index];
 
-        if valid {
+        if self.lite {
+            // A lite agent sends no checks (RFC 8445 §2.5), so for it an authenticated request
+            // from the peer is the only sign of life, judged by the configured timeouts.
+            let last_received = remote.last_authenticated().unwrap_or(self.start_time);
+            let disconnected_time = now.saturating_duration_since(last_received);
+
             // Only allow transitions to fail if a.failedTimeout is non-zero
             let mut total_time_to_failure = self.failed_timeout;
-            if total_time_to_failure != Duration::from_secs(0) {
+            if total_time_to_failure != ZERO_DURATION {
                 total_time_to_failure += self.disconnected_timeout;
             }
 
-            if total_time_to_failure != Duration::from_secs(0)
-                && disconnected_time > total_time_to_failure
-            {
+            if total_time_to_failure != ZERO_DURATION && disconnected_time > total_time_to_failure {
                 self.update_connection_state(Some(now), ConnectionState::Failed);
-            } else if self.disconnected_timeout != Duration::from_secs(0)
+            } else if self.disconnected_timeout != ZERO_DURATION
                 && disconnected_time > self.disconnected_timeout
             {
                 self.update_connection_state(Some(now), ConnectionState::Disconnected);
             } else {
                 self.update_connection_state(Some(now), ConnectionState::Connected);
             }
+            return true;
         }
 
-        valid
-    }
+        // Consent (RFC 7675 §5.1) is refreshed only by an authenticated success response to
+        // one of our own checks: not by non-STUN datagrams, not by unauthenticated
+        // indications, and not by the peer's own requests, which say the peer is there but not
+        // that it still wants our traffic.
+        let last_consent = remote.last_consent().unwrap_or(self.start_time);
+        let since_consent = now.saturating_duration_since(last_consent);
 
-    /// Sends STUN Binding Requests to the selected pair at `keepalive_interval` to
-    /// maintain consent freshness (RFC 7675).
-    pub(crate) fn check_keepalive(&mut self, now: Instant) {
-        let (local_index, remote_index, pair_index) = {
-            self.selected_pair
-                .as_ref()
-                .map_or((None, None, None), |&pair_index| {
-                    let p = &self.candidate_pairs[pair_index];
-                    (Some(p.local_index), Some(p.remote_index), Some(pair_index))
-                })
+        // Disconnected: a consent request has gone unanswered for `disconnected_timeout`.
+        // (Consent requests are at least 4 seconds apart, so "no response for 5 seconds" alone
+        // would be true between two answered requests.) With keepalives off nothing is ever
+        // asked, and the time since the last response decides.
+        let unanswered = if self.keepalive_interval == ZERO_DURATION {
+            since_consent
+        } else {
+            self.consent_unanswered_since
+                .map(|since| now.saturating_duration_since(since))
+                .unwrap_or(ZERO_DURATION)
         };
 
-        if let (Some(local_index), Some(remote_index), Some(pair_index)) =
-            (local_index, remote_index, pair_index)
-            && self.keepalive_interval != Duration::from_secs(0)
-            && now.saturating_duration_since(self.last_consent_sent) >= self.keepalive_interval
+        if since_consent >= self.consent_expiry() {
+            self.update_connection_state(Some(now), ConnectionState::Failed);
+        } else if self.disconnected_timeout != ZERO_DURATION
+            && unanswered >= self.disconnected_timeout
         {
-            self.last_consent_sent = now;
-            self.candidate_pairs[pair_index].on_consent_request_sent();
-            self.ping_candidate(now, local_index, remote_index);
+            self.update_connection_state(Some(now), ConnectionState::Disconnected);
+        } else {
+            self.update_connection_state(Some(now), ConnectionState::Connected);
         }
+
+        true
+    }
+
+    /// Sends a STUN Binding request on the selected pair when the consent interval has run
+    /// out (RFC 7675). Each one is a new transaction, sent once.
+    pub(crate) fn check_keepalive(&mut self, now: Instant) {
+        if self.keepalive_interval == ZERO_DURATION {
+            return;
+        }
+        let Some(pair_index) = self.selected_pair else {
+            return;
+        };
+        match self.next_consent_at {
+            None => self.next_consent_at = Some(now + self.next_consent_interval()),
+            Some(at) if now >= at => {
+                self.next_consent_at = Some(now + self.next_consent_interval());
+                self.consent_unanswered_since.get_or_insert(now);
+                let p = &mut self.candidate_pairs[pair_index];
+                p.on_consent_request_sent();
+                let (local_index, remote_index) = (p.local_index, p.remote_index);
+                self.ping_candidate(now, local_index, remote_index);
+            }
+            Some(_) => {}
+        }
+    }
+
+    /// When the agent next has something to do for its selected pair: send a consent request,
+    /// notice that one went unanswered, or let consent expire. `None` without a selected pair
+    /// and for a lite agent, whose timer is the periodic one.
+    pub(crate) fn selected_pair_deadline(&self) -> Option<Instant> {
+        let pair_index = self.selected_pair?;
+        if self.lite {
+            return None;
+        }
+        let remote = &self.remote_candidates[self.candidate_pairs[pair_index].remote_index];
+        let last_consent = remote.last_consent().unwrap_or(self.start_time);
+
+        let mut deadline = last_consent + self.consent_expiry();
+        if self.keepalive_interval != ZERO_DURATION {
+            // Before the first `handle_timeout` after selection there is no schedule yet.
+            deadline = deadline.min(self.next_consent_at.unwrap_or(self.last_checking_time));
+        }
+        if self.disconnected_timeout != ZERO_DURATION
+            && self.connection_state != ConnectionState::Disconnected
+        {
+            let unanswered_since = if self.keepalive_interval == ZERO_DURATION {
+                Some(last_consent)
+            } else {
+                self.consent_unanswered_since
+            };
+            if let Some(since) = unanswered_since {
+                deadline = deadline.min(since + self.disconnected_timeout);
+            }
+        }
+        Some(deadline)
+    }
+
+    /// Consent on the path an ICE restart left in use (RFC 7675 Section 5.1): sends the consent
+    /// requests of the replaced generation, and retires the path when its consent expires.
+    pub(crate) fn maintain_previous_generation(&mut self, now: Instant) {
+        let Some(path) = self.previous_media_path else {
+            self.previous_generation = None;
+            return;
+        };
+        let expiry = self.consent_expiry();
+        let interval = self.next_consent_interval();
+        let (lite, keepalive, controlling, tie_breaker) = (
+            self.lite,
+            self.keepalive_interval != ZERO_DURATION,
+            self.is_controlling,
+            self.tie_breaker,
+        );
+        let Some(previous) = &mut self.previous_generation else {
+            return;
+        };
+
+        if now.saturating_duration_since(previous.last_consent) >= expiry {
+            warn!(
+                "consent expired on the path kept across the ICE restart ({} -> {}): no longer sending on it",
+                path.local_addr, path.peer_addr
+            );
+            self.previous_media_path = None;
+            self.previous_generation = None;
+            return;
+        }
+
+        if lite || !keepalive || now < previous.next_consent_at {
+            return;
+        }
+        previous.next_consent_at = now + interval;
+
+        let username = previous.remote_credentials.ufrag.clone()
+            + ":"
+            + previous.local_credentials.ufrag.as_str();
+        let role: Box<dyn Setter> = if controlling {
+            Box::new(crate::attributes::control::AttrControlling(tie_breaker))
+        } else {
+            Box::new(crate::attributes::control::AttrControlled(tie_breaker))
+        };
+        let mut msg = Message::new();
+        if let Err(err) = msg.build(&[
+            Box::new(BINDING_REQUEST),
+            Box::new(TransactionId::new()),
+            Box::new(Username::new(ATTR_USERNAME, username)),
+            role,
+            Box::new(crate::attributes::priority::PriorityAttr(previous.priority)),
+            Box::new(MessageIntegrity::new_short_term_integrity_with_provider(
+                previous.remote_credentials.pwd.clone(),
+                self.crypto_provider.crypto(),
+            )),
+            Box::new(FINGERPRINT),
+        ]) {
+            error!("{}", err);
+            return;
+        }
+        if previous.pending.len() >= MAX_PREVIOUS_GENERATION_TRANSACTIONS {
+            previous.pending.remove(0);
+        }
+        previous.pending.push(msg.transaction_id);
+        self.write_outs.push_back(TaggedBytesMut {
+            now,
+            transport: TransportContext {
+                local_addr: path.local_addr,
+                peer_addr: path.peer_addr,
+                ecn: None,
+                transport_protocol: path.transport_protocol,
+            },
+            message: BytesMut::from(&msg.raw[..]),
+        });
+    }
+
+    /// When `maintain_previous_generation` next has something to do.
+    pub(crate) fn previous_generation_deadline(&self) -> Option<Instant> {
+        let previous = self.previous_generation.as_ref()?;
+        self.previous_media_path?;
+        let expires = previous.last_consent + self.consent_expiry();
+        if self.lite || self.keepalive_interval == ZERO_DURATION {
+            Some(expires)
+        } else {
+            Some(expires.min(previous.next_consent_at))
+        }
+    }
+
+    /// STUN on the path an ICE restart left in use that belongs to the replaced generation:
+    /// the peer's consent requests, which name the old local fragment and are answered with
+    /// the old password, and the responses to ours. Returns whether `msg` was one of them.
+    pub(crate) fn handle_previous_generation(&mut self, msg: &TaggedBytesMut) -> bool {
+        let (Some(path), Some(previous)) = (self.previous_media_path, &self.previous_generation)
+        else {
+            return false;
+        };
+        if msg.transport.local_addr != path.local_addr
+            || msg.transport.peer_addr != path.peer_addr
+            || msg.transport.transport_protocol != path.transport_protocol
+            || !is_stun_message(&msg.message)
+        {
+            return false;
+        }
+        let mut m = Message {
+            raw: msg.message.to_vec(),
+            ..Message::default()
+        };
+        if m.decode().is_err() || m.typ.method != METHOD_BINDING {
+            return false;
+        }
+
+        if m.typ.class == CLASS_REQUEST {
+            if assert_inbound_username(&m, &previous.local_credentials.ufrag).is_err()
+                || assert_inbound_message_integrity(
+                    &mut m,
+                    previous.local_credentials.pwd.as_bytes(),
+                    self.crypto_provider.crypto(),
+                )
+                .is_err()
+            {
+                return false;
+            }
+            let mut out = Message::new();
+            if let Err(err) = out.build(&[
+                Box::new(m.clone()),
+                Box::new(BINDING_SUCCESS),
+                Box::new(XorMappedAddress {
+                    ip: path.peer_addr.ip(),
+                    port: path.peer_addr.port(),
+                }),
+                Box::new(MessageIntegrity::new_short_term_integrity_with_provider(
+                    previous.local_credentials.pwd.clone(),
+                    self.crypto_provider.crypto(),
+                )),
+                Box::new(FINGERPRINT),
+            ]) {
+                error!("{}", err);
+                return true;
+            }
+            self.write_outs.push_back(TaggedBytesMut {
+                now: msg.now,
+                transport: TransportContext {
+                    local_addr: path.local_addr,
+                    peer_addr: path.peer_addr,
+                    ecn: None,
+                    transport_protocol: path.transport_protocol,
+                },
+                message: BytesMut::from(&out.raw[..]),
+            });
+            if self.lite
+                && let Some(previous) = &mut self.previous_generation
+            {
+                previous.last_consent = msg.now;
+            }
+            return true;
+        }
+
+        if m.typ.class == CLASS_SUCCESS_RESPONSE || m.typ.class == CLASS_ERROR_RESPONSE {
+            let Some(position) = previous
+                .pending
+                .iter()
+                .position(|id| *id == m.transaction_id)
+            else {
+                return false;
+            };
+            if assert_inbound_message_integrity(
+                &mut m,
+                previous.remote_credentials.pwd.as_bytes(),
+                self.crypto_provider.crypto(),
+            )
+            .is_err()
+            {
+                // Claims to answer our transaction but is not signed by the peer: dropped.
+                return true;
+            }
+            let is_success = m.typ.class == CLASS_SUCCESS_RESPONSE;
+            if let Some(previous) = &mut self.previous_generation {
+                previous.pending.remove(position);
+                if is_success {
+                    previous.last_consent = msg.now;
+                }
+            }
+            return true;
+        }
+
+        false
     }
 
     fn request_connectivity_check(&mut self) {
@@ -1820,6 +2161,12 @@ impl Agent {
                 // id (RFC 7675 §5.1); decided before the handler consumes the pending entry.
                 if self.is_pending_binding_request(m.transaction_id, remote_addr) {
                     self.remote_candidates[remote_index].last_consent = Some(now);
+                    if self
+                        .selected_pair
+                        .is_some_and(|p| self.candidate_pairs[p].remote_index == remote_index)
+                    {
+                        self.consent_unanswered_since = None;
+                    }
                 }
                 self.handle_success_response(now, m, local_index, remote_index, remote_addr);
             } else {

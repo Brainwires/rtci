@@ -11,8 +11,22 @@ use crate::url::*;
 /// The interval at which the agent performs candidate checks in the connecting phase.
 pub(crate) const DEFAULT_CHECK_INTERVAL: Duration = Duration::from_millis(200);
 
-/// The interval used to keep candidates alive.
-pub(crate) const DEFAULT_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(2);
+/// The basic period of the consent checks on the selected pair (RFC 7675 Section 5.1:
+/// "Implementations SHOULD set a default interval of 5 seconds, resulting in a period between
+/// checks of 4 to 6 seconds"). Also the smallest period that can be configured.
+pub(crate) const DEFAULT_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(5);
+
+/// RFC 7675 Section 5.1: "Implementations MUST NOT set the period between checks to less than 4
+/// seconds."
+pub(crate) const MIN_CONSENT_INTERVAL: Duration = Duration::from_secs(4);
+
+/// RFC 8445 Section 11: "Tr SHOULD be configurable and SHOULD have a default of 15 seconds",
+/// and never less. A full agent's consent checks are its keepalives and come sooner; this is
+/// how long a lite agent stays silent on its selected pair before a Binding indication.
+pub(crate) const KEEPALIVE_TR: Duration = Duration::from_secs(15);
+
+/// RFC 7675 Section 5.1: "Consent expires after 30 seconds."
+pub(crate) const CONSENT_EXPIRY: Duration = Duration::from_secs(30);
 
 /// The default time till an Agent transitions disconnected.
 pub(crate) const DEFAULT_DISCONNECTED_TIMEOUT: Duration = Duration::from_secs(5);
@@ -112,17 +126,27 @@ pub struct AgentConfig {
     /// Control mDNS local IP address
     pub multicast_dns_local_ip: Option<IpAddr>,
 
+    /// How long a consent request on the selected pair may go unanswered before the agent is
+    /// `Disconnected` (a lite agent: how long without an authenticated request from the peer).
     /// Defaults to 5 seconds when this property is nil.
     /// If the duration is 0, the ICE Agent will never go to disconnected.
     pub disconnected_timeout: Option<Duration>,
 
-    /// Defaults to 25 seconds when this property is nil.
-    /// If the duration is 0, we will never go to failed.
+    /// With `disconnected_timeout`, how long the agent goes without the peer's consent before
+    /// it is `Failed`, and how long it may stay `Checking`. Defaults to 25 seconds when this
+    /// property is nil. If the duration is 0, a checking agent never goes to failed.
+    ///
+    /// A connected full agent fails 30 seconds after the last consent response at the latest,
+    /// whatever is configured here, a zero included: RFC 7675 Section 5.1 forbids sending
+    /// without consent for longer. A shorter sum fails it sooner.
     pub failed_timeout: Option<Duration>,
 
-    /// Determines how often should we send ICE keepalives (should be less than connection timeout
-    /// above) when this is nil, it defaults to 10 seconds.
-    /// A keepalive interval of 0 means we never send keepalive packets
+    /// The basic period of the consent checks on the selected pair (RFC 7675), which are also
+    /// the keepalives of RFC 8445 Section 11. Each interval is drawn from 0.8 to 1.2 times
+    /// this. Defaults to 5 seconds when this is nil, and a shorter period is raised to 5
+    /// seconds: RFC 7675 forbids less than 4 seconds between two checks.
+    /// A keepalive interval of 0 means we never send keepalive packets (and consent then
+    /// expires 30 seconds after the pair was validated).
     pub keepalive_interval: Option<Duration>,
 
     /// An optional configuration for disabling or enabling support for specific candidate types.

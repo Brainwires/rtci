@@ -1020,10 +1020,9 @@ fn test_keepalive_sent_during_media_flow() -> Result<()> {
 
     // Virtual time: the agent is told the instant, so nothing here sleeps or samples a clock.
     let base = Instant::now();
-    let keepalive_interval = a.keepalive_interval;
 
-    // Pretend the last consent ping was long ago such that the interval has elapsed
-    a.last_consent_sent = base - Duration::from_secs(10);
+    // The consent interval has run out.
+    a.next_consent_at = Some(base);
 
     // Drain any events/writes from setup
     a.write_outs.clear();
@@ -1041,14 +1040,18 @@ fn test_keepalive_sent_during_media_flow() -> Result<()> {
     a.check_keepalive(base);
     assert!(
         a.write_outs.is_empty(),
-        "check_keepalive must not send again before keepalive_interval elapses"
+        "check_keepalive must not send again before the consent interval elapses"
     );
+    // RFC 7675 Section 5.1: never less than 4 seconds between two checks.
+    a.check_keepalive(base + Duration::from_millis(3999));
+    assert!(a.write_outs.is_empty());
 
-    // Advance virtual time past the interval: the next ping goes out, instantly and reproducibly.
-    a.check_keepalive(base + keepalive_interval + Duration::from_millis(1));
+    // Advance virtual time past the longest interval (1.2 times 5 seconds): the next ping goes
+    // out, instantly and reproducibly.
+    a.check_keepalive(base + Duration::from_millis(6001));
     assert!(
         !a.write_outs.is_empty(),
-        "check_keepalive must send again once keepalive_interval has elapsed"
+        "check_keepalive must send again once the consent interval has elapsed"
     );
 
     a.close()?;
