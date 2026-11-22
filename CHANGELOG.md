@@ -5,6 +5,74 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Breaking changes
+
+- **turn**: `Event::AllocateError` and `Event::CreatePermissionError` carry a
+  `rtc_turn::client::RequestError` instead of a `shared::error::Error`: `Rejected(ErrorResponse)`
+  with the server's error code, reason, ALTERNATE-SERVER and UNKNOWN-ATTRIBUTES, or
+  `Failed(Error)`. It implements `Display` and converts into `Error` (`err.into()`).
+- **turn**: `ChannelData::encode` and `ChannelData::write_header` return `Result<()>`: data longer
+  than 65 535 bytes is refused (see below).
+- **turn**: the client delivers a Data indication or ChannelData only from a peer address it
+  holds a permission for (asked for or installed), as RFC 8656 sections 11.4 and 12.6 recommend.
+- **turn**: `Relay::send_to` fails with `ErrNoPermission` once a permission's 300 s have run out
+  without a refresh, and with `ErrConnClosed` after `Relay::close`.
+
+### Bug Fixes
+
+- **turn**: a 437 (Allocation Mismatch) to a Refresh, CreatePermission or ChannelBind ends the
+  allocation (RFC 8656 sections 5 and 8.3). The error was returned from `handle_read` or logged,
+  the relay stayed in the client and a Refresh went out every half lifetime for ever. The client
+  now drops the allocation, with its permissions, channel bindings and outstanding requests, and
+  raises `Event::AllocationLost`.
+- **turn**: an allocation released with `Relay::close` stays released. If the Refresh with
+  LIFETIME 0 and its retry went unanswered, or the server answered 437, the next periodic
+  refresh asked for the old lifetime again and kept the allocation alive. `close` now stops
+  every refresh at once; `Event::AllocationReleased` reports the end (success, 437, or no
+  answer).
+- **turn**: channel bindings belong to their allocation (RFC 8656 section 12). They were kept per
+  client, so a new allocation sent ChannelData on channel numbers only the previous one had
+  bound, which the server drops.
+- **turn**: permissions and channel bindings follow the RFC's timers. A permission lasts 300 s
+  from its last accepted CreatePermission or ChannelBind: one whose refresh the server refuses
+  is dropped (`Event::PermissionLost`), and a refused refresh of several addresses is repeated
+  address by address so only the refused ones end. A channel binding lasts 10 minutes: one that
+  carried data is rebound from a timer, one left idle is bound again (with the data in Send
+  indications) before ChannelData is used on it, and a channel number is reused for another
+  peer address only 15 minutes after the last ChannelBind sent for it.
+- **turn**: the first Allocate response is read for what it is. A success (a server that asks
+  for no credential, RFC 8656 section 7.2) is an allocation; an error other than 401 keeps its
+  code. Both were reported as `AllocateError(attribute not found)`, the first while the server
+  held the allocation.
+- **turn**: an Allocate success response without XOR-RELAYED-ADDRESS or LIFETIME is reported as
+  `AllocateError` under the caller's id and the allocation is deleted with a Refresh of
+  LIFETIME 0. It ended `handle_read` with an error and no event, and left the allocation on the
+  server.
+- **turn**: with all 4096 channel numbers taken, data to one more peer address goes as Send
+  indications; the send failed.
+- **turn**: ChannelData cannot carry more than 65 535 bytes; `Relay::send_to` and
+  `ChannelData::encode` refuse a longer payload instead of writing a wrapped length, which over
+  TCP or TLS broke the framing of every later message.
+- **turn**: an allocation whose Refresh requests all fail is refreshed again at half the time
+  it has left, and is dropped (`Event::AllocationLost`) when its lifetime has run out.
+- **turn**: a ChannelBind the server refuses is reported (`Event::ChannelBindError`) and tried
+  again after a minute; it was sent again with every packet. A 400 (the channels of client and
+  server are out of step) deletes the allocation, as RFC 8656 section 12.3 recommends.
+- **turn**: a ChannelBind success refreshes the peer's permission (RFC 8656 section 12.3).
+- **turn**: `Client::update_credentials` documents that a live allocation takes a new password,
+  not a new username (the server answers 441, RFC 8656 section 5).
+- **turn**: the `turn_client_tcp` example no longer names RFC 6062; it is a UDP allocation
+  reached over TCP (RFC 8656 section 3.1).
+
+### Features
+
+- **turn**: `Event::AllocationLost`, `AllocationReleased`, `RefreshError`, `PermissionLost` and
+  `ChannelBindError`; `RequestError` and `ErrorResponse` with the typed STUN error code.
+- **turn**: an allocation a server gave without a credential is used without one, and takes the
+  long-term credential when the server asks with a 401.
+
 ## [0.22.0+brainwires.5] - 2026-11-20
 
 ### Bug Fixes

@@ -94,6 +94,7 @@ history stays intact.
 | A renegotiated codec re-binds a sender's streams | `src/rtp_transceiver/rtp_sender/internal.rs` (`rebind_local_streams`, `local_stream_infos`), `src/peer_connection/internal.rs` (`start_rtp_senders`), `rtc-interceptor/src/report/sender.rs` | A negotiation that changes the codec an encoding is sent with (or its RTX / FEC flow or header extensions) unbinds and re-binds its streams with the same SSRCs; the sender report keeps its counts and sends no BYE over it; the NACK responder's buffer and the TWCC send side restart. Bound streams name no RTX / FEC SSRC without the repair payload type. |
 | Remote-outbound round trip time over RTCP XR | `rtc-interceptor/src/report/{receiver,sender}.rs` (`RTCP_FB_RRTR`), `src/statistics/accumulator/{rtcp_reports.rs,rtp_stream/inbound.rs}`, `src/peer_connection/configuration/interceptor_registry.rs` (`configure_receiver_reference_time`) | A stream that negotiated `a=rtcp-fb:<pt> rrtr` (libwebrtc's name) gets an XR receiver reference time block with each receiver report (RFC 3611 section 4.4); the sender answers every one with a DLRR block (section 4.5), as libwebrtc does; the receiver's remote-outbound stats report `roundTripTime`, `totalRoundTripTime`, `roundTripTimeMeasurements`. |
 | ECN / L4S on RTP media and the ECN / RFC 8888 statistics | `rtc-shared/src/transport.rs` (`TransportContext::ecn`), `SettingEngineBuilder::with_ecn`, `src/peer_connection/handler/{ice,interceptor}.rs`, `rtc-interceptor/src/rfc8888/sender.rs`, `src/statistics/accumulator/{ccfb,rtcp_reports}.rs`, `configure_congestion_control_feedback` | The sans-I/O engine takes each received datagram's ECN codepoint in `TransportContext::ecn` and names the one to set on each datagram it sends. With `with_ecn(true)`, RTP media (RTX included) of a stream that negotiated `a=rtcp-fb:<pt> ack ccfb` (RFC 8888) is sent ECT(1), the L4S identifier; nothing else is marked. RFC 8888 reports carry each packet's codepoint. Stats: inbound `packetsReceivedWithEct1` / `packetsReceivedWithCe` / `packetsReportedAsLost` / `packetsReportedAsLostButRecovered`, outbound `packetsSentWithEct1`, remote-inbound `packetsReceivedWithEct1` / `packetsReceivedWithCe` / `packetsReportedAsLost` / `packetsReportedAsLostButRecovered` / `packetsWithBleachedEct1Marking`. Opt-in: off by default, TWCC stays the default feedback and the default SDP is unchanged. `tests/ecn_l4s_rtc2rtc.rs`. |
+| The TURN client's copy of an allocation follows the server's (RFC 8656 sections 5, 8, 9, 12) | `rtc-turn/src/client/{mod,relay,binding,permission,error}.rs` (`RequestError`, `Event::{AllocationLost, AllocationReleased, RefreshError, PermissionLost, ChannelBindError}`) | A 437 ends the allocation; a release is never undone by a refresh; permissions (300 s) and channel bindings (10 minutes, per allocation) end and are refreshed by the RFC's timers; error responses reach the application with their code. Upstream keeps bindings per client, has no expiry, and reports errors as text. |
 | CI: benchmarks, fuzzing, OSS-Fuzz, git-cliff release notes | `.github/workflows/{bench,fuzz,release}.yml`, `oss-fuzz/`, `cliff.toml` | |
 
 ### Hardening (fork only)
@@ -106,8 +107,8 @@ caps (mDNS-resolved ones included), mDNS answers only from the mDNS socket, at m
 mDNS names (a host candidate past them is dropped, not sent with its address); bounded RFC 4571
 frame decoding; bounded SCTP
 FORWARD-TSN/SACK/receive window and stream-id checks; DCEP stream-id parity and internal message
-types refused from the wire; TURN client server-address filtering and response MESSAGE-INTEGRITY
-checks; errors instead of panics on malformed DTLS/SCTP/DCEP/ICE/SDP/RTCP input; NACK
+types refused from the wire; TURN client server-address filtering, response MESSAGE-INTEGRITY
+checks and relayed data only from peers with a permission; errors instead of panics on malformed DTLS/SCTP/DCEP/ICE/SDP/RTCP input; NACK
 retransmission de-duplication and rate limit; bounded H.264 FU-A and AV1 reassembly, AV1 OBU
 checks, VP9 per-picture state; RTP extension blocks consumed whole; SLI on PT 206; bounded IVF and
 H.265 writer buffers; sha-256 fingerprint selection; fuzzing CI fixes and stateful SCTP targets.
@@ -118,7 +119,15 @@ responses without MESSAGE-INTEGRITY (RFC 8489 §9.2.4; a server cannot sign a re
 credential or nonce it would sign with). So a forged 438 can still end the request it answers
 with a stale-nonce error and replace the allocation's nonce; the server's own 438 on the next
 request restores it. Only a sender that passes the server-address filter can do this, and it
-cannot release the allocation or forge any other response.
+cannot release the allocation or forge any other response. An unsigned 401 or 438 to a
+permission refresh ends that refresh only: the permissions keep the time the server last
+granted and are asked for again.
+
+Also as the RFC has it: a success response to the first, unauthenticated Allocate is an
+allocation (RFC 8656 section 7.2 step 1 lets a server ask for no credential). Nothing can sign
+that response, so a sender that passes the server-address filter and knows the request's
+transaction id can make the client believe in an allocation; requests for such an allocation
+carry no credential until the server asks for one with a 401.
 
 ### Dependency audit (fork only)
 
