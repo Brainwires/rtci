@@ -17,6 +17,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   drove the estimate to its floor. The sender now remembers the number it gave each of a
   stream's last 1024 RTP sequence numbers; an RTX retransmission is still numbered as a new
   packet.
+- **twcc**: a lost TWCC feedback packet no longer turns the packets it would have described
+  into losses (draft-holmer-rmcat-transport-wide-cc-extensions-01 section 3). The send history
+  reported every unacknowledged packet below the highest acknowledged one as lost, so one lost
+  feedback read as a burst of loss, and so did every stream the receiver does not report on (an
+  audio stream without the transport-cc extension, an SSRC outside an RFC 8888 report). Only a
+  packet a feedback described is reported now; the rest are released without a verdict
+  (`History::unreported`), and gaps in the feedback packet count are counted
+  (`CongestionControlInterceptor::lost_feedback`).
+- **twcc**: RTX and FEC packets get a transport-wide sequence number and a place in the send
+  history (section 2.2: the number is attached to every packet sent). The TWCC sender and the
+  congestion controller registered a stream's media SSRC only, so retransmissions and repair
+  packets were invisible to the receiver's feedback and to the estimator.
+- **twcc / rfc8888**: the receiver's clock is followed through its wraps
+  (`FeedbackTimeline`): the 24-bit TWCC reference time every 12.4 days, the RFC 8888 report
+  timestamp every 18.2 hours. An RFC 8888 arrival time is now the report timestamp minus the
+  arrival time offset; the offset itself was handed to the estimator, so within every report
+  arrivals ran backwards and GCC over RFC 8888 saw a queue draining for ever. The over-range
+  offset 0x1FFE is no longer taken as an arrival 8 seconds before the report.
+- **rfc8888**: feedback is sent only for streams that negotiated `ack ccfb` (RFC 8888 section 6,
+  RFC 4585 section 4.2), from a real SSRC instead of 0 (the first local stream's, or a random
+  one for a receive-only endpoint), and covers a stream's FEC SSRC. A duplicate keeps the first
+  copy's arrival time and reports ECN-CE if any copy carried it (section 3.1). A packet that
+  never arrives no longer makes every later report repeat everything since: each arrival is
+  reported once, a late one in an overlapping report within 500 ms, and feedback larger than
+  the report size is split into several packets instead of being cut.
+- **fec**: the FlexFEC encoder protects the packets as they are sent. It read them above the
+  TWCC sender, which then wrote the transport-wide sequence number into them (adding the header
+  extension when the packet had none), so the receiver XORed different bytes and recovered a
+  corrupt packet. The encoder now reads the wire image from a tap below the TWCC sender
+  (`FlexFec03SendInterceptor::wire_tap`, `Slot::FecWireImage`).
+- **fec**: the arrival recorders (TWCC receiver, RFC 8888, receiver reports) run before the FEC
+  decoder. A repair packet was swallowed before they saw it and reported lost for ever, and a
+  packet rebuilt from FEC was reported as arrived, hiding the loss from the sender's congestion
+  controller and from `fraction lost`.
+- **gcc**: the delay-based estimate stays below 1.5 times the received rate
+  (draft-ietf-rmcat-gcc-02 section 5.5); an application-limited sender let it climb 8% per
+  second to the configured maximum. "Close to convergence" is now the draft's: the average and
+  deviation of the received rate at each decrease, additive increase within three deviations
+  (scaled by the response time), and back to multiplicative increase when the received rate
+  rises above them; the controller stayed additive for ever after the first over-use. It starts
+  in the Increase state.
+- **pacer**: the pacer starts at the estimator's rate. `configure_congestion_control` builds it
+  with the estimator's starting target, and `CongestionControlInterceptor` announces the target
+  on the first inbound packet, not only when it changes; the pacer ran at 1 Mbit/s against
+  GCC's 300 kbit/s until the first change.
+
+### Breaking Changes
+
+- **interceptor**: `Slot::FecDecoder` moves from 6_000 to 10_300 and `Slot::NackGenerator` from
+  7_000 to 10_600, after the arrival recorders; an interceptor placed with `Slot::from(n)`
+  relative to either has to move with them. `Slot::FecWireImage` (1_500) is new.
+- **interceptor**: an RFC 8888 arrival time from `convert_ccfb` is the report timestamp minus
+  the offset, not the offset. `Rfc8888Interceptor` reports only streams bound with `ack ccfb`
+  in `rtcp_feedback`. `History::take_reports` returns only packets a feedback described.
+  `RateControlState::default()` is `Increase`.
 
 ## [0.22.0+brainwires.5] - 2026-11-20
 
