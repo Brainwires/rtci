@@ -29,8 +29,10 @@ fn assert_basic_capabilities(crypto: &dyn RTCCrypto) {
         CryptoAlgorithm::Hmac(HmacAlgorithm::Sha256),
         CryptoAlgorithm::BlockCipher(BlockCipherAlgorithm::Aes128),
         CryptoAlgorithm::BlockCipher(BlockCipherAlgorithm::Aes256),
+        CryptoAlgorithm::BlockCipher(BlockCipherAlgorithm::Aes192),
         CryptoAlgorithm::StreamCipher(StreamCipherAlgorithm::Aes128Ctr),
         CryptoAlgorithm::StreamCipher(StreamCipherAlgorithm::Aes256Ctr),
+        CryptoAlgorithm::StreamCipher(StreamCipherAlgorithm::Aes192Ctr),
         CryptoAlgorithm::Cbc(CbcAlgorithm::Aes256Cbc),
         CryptoAlgorithm::Aead(AeadAlgorithm::Aes128Gcm),
         CryptoAlgorithm::Aead(AeadAlgorithm::Aes256Gcm),
@@ -180,6 +182,29 @@ pub fn assert_block_and_stream_ciphers(crypto: &dyn RTCCrypto) {
         .apply_keystream(&iv, &mut encrypted)
         .unwrap();
     assert_eq!(encrypted, bytes("601ec313775789a5b7a7f504bbf3d228"));
+
+    // AES-192 (RFC 6188): FIPS 197 Appendix C.2 and NIST SP 800-38A F.5.3.
+    let mut block = bytes("00112233445566778899aabbccddeeff");
+    crypto
+        .block_encrypt(
+            BlockCipherAlgorithm::Aes192,
+            &bytes("000102030405060708090a0b0c0d0e0f1011121314151617"),
+            &mut block,
+        )
+        .unwrap();
+    assert_eq!(block, bytes("dda97ca4864cdfe06eaf70a0ec0d7191"));
+    let key = bytes("8e73b0f7da0e6452c810f32b809079e562f8ead2522c6b7b");
+    let mut encrypted = plaintext.clone();
+    crypto
+        .new_stream_cipher(StreamCipherAlgorithm::Aes192Ctr, &key)
+        .unwrap()
+        .apply_keystream(&iv, &mut encrypted)
+        .unwrap();
+    assert_eq!(encrypted, bytes("1abc932417521ca24f2b0459fe7e6e0b"));
+    assert!(matches!(
+        crypto.new_stream_cipher(StreamCipherAlgorithm::Aes192Ctr, &[0; 16]),
+        Err(CryptoError::InvalidKeyLength { .. })
+    ));
 
     assert!(matches!(
         crypto.block_encrypt(BlockCipherAlgorithm::Aes128, &[0; 15], &mut [0; 16]),

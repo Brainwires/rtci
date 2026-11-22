@@ -4,7 +4,7 @@ use crate::{
 };
 use aes::cipher::generic_array::GenericArray;
 use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit, KeyIvInit};
-use aes::{Aes128, Aes256};
+use aes::{Aes128, Aes192, Aes256};
 use ccm::Ccm;
 use ccm::aead::AeadInPlace;
 use ccm::consts::{U8, U12, U16};
@@ -20,6 +20,7 @@ type Aes128Ccm8 = Ccm<Aes128, U8, U12>;
 // SRTP counter mode (RFC 3711 section 4.1.1) is AES-CTR with a big-endian 128-bit counter.
 type Aes128Ctr = ctr::Ctr128BE<Aes128>;
 type Aes256Ctr = ctr::Ctr128BE<Aes256>;
+type Aes192Ctr = ctr::Ctr128BE<Aes192>;
 
 /// Fills `output` from the thread-local CSPRNG shared by the built-in providers.
 ///
@@ -61,6 +62,12 @@ pub(crate) fn block_encrypt(
                 .map_err(|_| invalid_key(32, key.len()))?
                 .encrypt_block(GenericArray::from_mut_slice(block));
         }
+        BlockCipherAlgorithm::Aes192 => {
+            check_key_len(24, key.len())?;
+            Aes192::new_from_slice(key)
+                .map_err(|_| invalid_key(24, key.len()))?
+                .encrypt_block(GenericArray::from_mut_slice(block));
+        }
     }
     Ok(())
 }
@@ -77,6 +84,10 @@ pub(crate) fn new_stream_cipher(
         StreamCipherAlgorithm::Aes256Ctr => {
             check_key_len(32, key.len())?;
             AesKeyBits::Aes256
+        }
+        StreamCipherAlgorithm::Aes192Ctr => {
+            check_key_len(24, key.len())?;
+            AesKeyBits::Aes192
         }
     };
     Ok(Box::new(AesCtr {
@@ -165,6 +176,7 @@ struct AesCtr {
 enum AesKeyBits {
     Aes128,
     Aes256,
+    Aes192,
 }
 
 impl StreamCipher for AesCtr {
@@ -179,6 +191,10 @@ impl StreamCipher for AesCtr {
             }
             AesKeyBits::Aes256 => {
                 let mut stream = Aes256Ctr::new(GenericArray::from_slice(key), nonce);
+                stream.apply_keystream(data);
+            }
+            AesKeyBits::Aes192 => {
+                let mut stream = Aes192Ctr::new(GenericArray::from_slice(key), nonce);
                 stream.apply_keystream(data);
             }
         }

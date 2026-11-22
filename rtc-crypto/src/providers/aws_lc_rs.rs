@@ -73,10 +73,14 @@ impl RTCCrypto for AwsLcRsCrypto {
                         | AeadAlgorithm::ChaCha20Poly1305,
                 )
                 | CryptoAlgorithm::StreamCipher(
-                    StreamCipherAlgorithm::Aes128Ctr | StreamCipherAlgorithm::Aes256Ctr,
+                    StreamCipherAlgorithm::Aes128Ctr
+                        | StreamCipherAlgorithm::Aes256Ctr
+                        | StreamCipherAlgorithm::Aes192Ctr,
                 )
                 | CryptoAlgorithm::BlockCipher(
-                    BlockCipherAlgorithm::Aes128 | BlockCipherAlgorithm::Aes256,
+                    BlockCipherAlgorithm::Aes128
+                        | BlockCipherAlgorithm::Aes256
+                        | BlockCipherAlgorithm::Aes192,
                 )
                 | CryptoAlgorithm::Cbc(CbcAlgorithm::Aes256Cbc)
                 | CryptoAlgorithm::KeyExchange(

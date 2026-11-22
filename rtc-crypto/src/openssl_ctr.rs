@@ -11,7 +11,7 @@ use crate::{CryptoError, StreamCipher, StreamCipherAlgorithm};
 use openssl::cipher::Cipher;
 use openssl::cipher_ctx::CipherCtx;
 
-/// Builds an AES-128/256-CTR [`StreamCipher`] backed by OpenSSL, keyed once.
+/// Builds an AES-128/192/256-CTR [`StreamCipher`] backed by OpenSSL, keyed once.
 ///
 /// # Errors
 ///
@@ -23,7 +23,7 @@ pub fn openssl_aes_ctr(
     Ok(Box::new(OpensslAesCtr::new(algorithm, key)?))
 }
 
-/// AES-128/256-CTR from OpenSSL.
+/// AES-128/192/256-CTR from OpenSSL.
 struct OpensslAesCtr {
     ctx: CipherCtx,
 }
@@ -37,6 +37,7 @@ impl OpensslAesCtr {
         let (cipher, key_len) = match algorithm {
             StreamCipherAlgorithm::Aes128Ctr => (Cipher::aes_128_ctr(), 16),
             StreamCipherAlgorithm::Aes256Ctr => (Cipher::aes_256_ctr(), 32),
+            StreamCipherAlgorithm::Aes192Ctr => (Cipher::aes_192_ctr(), 24),
             #[allow(unreachable_patterns)]
             _ => {
                 return Err(CryptoError::Provider(format!(
@@ -102,6 +103,7 @@ mod tests {
         for (algorithm, key_len) in [
             (StreamCipherAlgorithm::Aes128Ctr, 16),
             (StreamCipherAlgorithm::Aes256Ctr, 32),
+            (StreamCipherAlgorithm::Aes192Ctr, 24),
         ] {
             let key: Vec<u8> = (0..key_len as u8).collect();
             let iv = [7u8; 16];
