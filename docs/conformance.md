@@ -54,12 +54,13 @@ README.
 |---|---|---|
 | Media | Encoding, decoding, capture, playout | The engine is a transport. Statistics members that need them are left out of the report, not reported as 0. |
 | DTLS | DTLS 1.3, RSA-PSS, connection id | Never claimed. Browsers negotiate DTLS 1.2 with it. |
+| DTLS in SDP | Listening for a ClientHello before the answer (RFC 8842 5.2); a new 3-tuple for a new association (RFC 8842 5.1, 6); the old association kept while a new one forms (RFC 8842 5.5) | Transports start with the remote description, and the answerer's retransmitted ClientHello is what the offerer takes. The engine has no sockets: the application decides which candidates a new association runs on. |
 | SCTP | I-DATA (RFC 8260), Add Streams (RFC 6525 4.5), path MTU discovery, zero checksum (RFC 9653), RACK-TLP | Never claimed; none is needed for a browser data channel. |
 | TURN | TCP allocations (RFC 6062), a TURN server | Never claimed. The TURN client is implemented. |
 | SRTP | AEAD double (RFC 8723), MKI, EKT | Never claimed. |
 | FEC | FlexFEC as RFC 8627 | Only draft-ietf-payload-flexible-fec-scheme-03 is implemented, and the codec name is matched exactly so RFC 8627 `flexfec` is never fed to it. |
 | RTP | H.264 STAP-B / MTAP / FU-B (interleaved mode, never offered); SVC layer packetization for VP9 and AV1 | Simulcast is implemented; SVC is not claimed. |
-| Identity | `peer_identity`, identity providers | Applications (Deno, for one) implement webrtc-identity above the engine. |
+| Identity | `peer_identity`, identity providers, making and verifying assertions | Applications (Deno, for one) implement webrtc-identity above the engine, which carries the `a=identity` attribute for them (`set_identity_assertion`, `remote_identity_assertion`). |
 | W3C API | `RTCDTMFSender` | Applications implement DTMF above the engine; the engine sends the telephone-event packets it is given. |
 | Test platforms | The real-network environment and browser interop run on Linux only | They need network namespaces. Unit and integration tests run on Linux, macOS and Windows. |
 | Web platform tests | WPT | They test a browser API, not this crate; the Deno integration runs them. |
