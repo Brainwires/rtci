@@ -594,6 +594,9 @@ impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCP
 
     fn handle_timeout(&mut self, now: Instant) -> Result<(), Self::Error> {
         self.pipeline_context.observe(now);
+        // RFC 8837 section 5: the association's congestion control starts over when its
+        // codepoint changed (a channel of another priority came or went).
+        self.restart_sctp_congestion_control_on_dscp_change(now);
         for_each_handler!(forward: process_handler!(self, handler, {
             handler.handle_timeout(now)?;
         }));

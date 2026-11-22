@@ -318,6 +318,7 @@ impl RTCPeerConnection {
             is_negotiation_ongoing: false,
             always_negotiate_data_channels: false,
             announced: super::states_events::AnnouncedStates::new(),
+            last_data_dscp: None,
         })
     }
 

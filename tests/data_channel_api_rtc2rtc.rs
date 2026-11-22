@@ -448,3 +448,127 @@ fn a_16_mib_burst_and_back_pressure_deliver_everything() -> Result<()> {
     assert_eq!(order, (0..target).collect::<Vec<_>>());
     Ok(())
 }
+
+/// RFC 8837 section 5: "if the DSCP of an SCTP association is changed, the congestion
+/// controller MUST be reset". The association's codepoint is its highest-priority channel's;
+/// a channel of higher priority changes it, and the congestion window, grown by a bulk
+/// transfer, starts again from its initial value.
+#[test]
+fn a_new_codepoint_restarts_the_associations_congestion_control() -> Result<()> {
+    use rtc::sansio::Protocol;
+    let (mut pair, first) = Pair::connected(RTCDtlsRole::Client, "low")?;
+    let initial = pair
+        .offerer
+        .pc
+        .sctp()
+        .and_then(|s| s.congestion_window())
+        .expect("an association");
+    let now = pair.now;
+    let mut channel = pair.offerer.pc.data_channel(first).expect("open");
+    for _ in 0..64 {
+        channel.send(now, BytesMut::from(&[5u8; 16 * 1024][..]))?;
+    }
+    assert!(pair.run_until(|p| p.answerer.received.len() >= 64)?);
+    let grown = pair
+        .offerer
+        .pc
+        .sctp()
+        .and_then(|s| s.congestion_window())
+        .expect("an association");
+    assert!(
+        grown > 2 * initial,
+        "slow start grew the window: {initial} -> {grown}"
+    );
+
+    // The default priority is "low" (DSCP 0 for data, RFC 8837 Table 1); a "high" channel
+    // makes it AF21.
+    let low = pair.offerer.pc.dscp(&rtc::shared::TaggedBytesMut {
+        now,
+        transport: Default::default(),
+        message: BytesMut::from(&[23u8, 0xfe, 0xfd][..]),
+    });
+    pair.offerer.pc.create_data_channel(
+        "high",
+        Some(RTCDataChannelInit {
+            priority: 1024,
+            ..Default::default()
+        }),
+    )?;
+    let now = pair.now + Duration::from_millis(1);
+    pair.now = now;
+    pair.offerer.pc.handle_timeout(now)?;
+    let high = pair.offerer.pc.dscp(&rtc::shared::TaggedBytesMut {
+        now,
+        transport: Default::default(),
+        message: BytesMut::from(&[23u8, 0xfe, 0xfd][..]),
+    });
+    assert_ne!(low, high, "the association's codepoint changed");
+    let reset = pair
+        .offerer
+        .pc
+        .sctp()
+        .and_then(|s| s.congestion_window())
+        .expect("an association");
+    assert_eq!(reset, initial, "the congestion control starts over");
+    Ok(())
+}
+
+/// webrtc-priority 4.2: RTCDataChannelInit.priority defaults to "low" (DCEP normal, 256);
+/// a channel created "medium" reports it on both sides, the peer's from the
+/// DATA_CHANNEL_OPEN it received.
+#[test]
+fn a_data_channels_priority_defaults_to_low_and_reaches_the_peer() -> Result<()> {
+    use rtc::peer_connection::priority::RTCPriorityType;
+    let (mut pair, first) = Pair::connected(RTCDtlsRole::Client, "default")?;
+    assert_eq!(
+        pair.offerer
+            .pc
+            .data_channel(first)
+            .expect("open")
+            .priority_type(),
+        RTCPriorityType::Low
+    );
+    let theirs = *pair
+        .answerer
+        .opened()
+        .last()
+        .expect("the answerer's channel");
+    assert_eq!(
+        pair.answerer
+            .pc
+            .data_channel(theirs)
+            .expect("open")
+            .priority_type(),
+        RTCPriorityType::Low
+    );
+    let before = pair.answerer.opened().len();
+    let medium = pair
+        .offerer
+        .pc
+        .create_data_channel(
+            "medium",
+            Some(RTCDataChannelInit {
+                priority: 512,
+                ..Default::default()
+            }),
+        )?
+        .id();
+    assert!(pair.run_until(|p| p.answerer.opened().len() > before)?);
+    assert_eq!(
+        pair.offerer
+            .pc
+            .data_channel(medium)
+            .expect("open")
+            .priority_type(),
+        RTCPriorityType::Medium
+    );
+    let theirs = *pair
+        .answerer
+        .opened()
+        .last()
+        .expect("the answerer's channel");
+    let channel = pair.answerer.pc.data_channel(theirs).expect("open");
+    assert_eq!(channel.priority(), 512);
+    assert_eq!(channel.priority_type(), RTCPriorityType::Medium);
+    Ok(())
+}

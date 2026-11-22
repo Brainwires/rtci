@@ -176,11 +176,23 @@ impl World {
         kind: RtpCodecKind,
         edit: impl Fn(String) -> String,
     ) -> Result<(Self, RTCRtpSenderId)> {
+        Self::connected_prepared(kind, edit, |_| {})
+    }
+
+    /// [`Self::connected`], each peer passed through `prepare` before the offer.
+    fn connected_prepared(
+        kind: RtpCodecKind,
+        edit: impl Fn(String) -> String,
+        prepare: impl Fn(&mut RTCPeerConnection),
+    ) -> Result<(Self, RTCRtpSenderId)> {
         let mut world = World {
             peers: [Peer::new("10.0.0.1:5000")?, Peer::new("10.0.0.2:5000")?],
             now: Instant::now(),
             wire: Vec::new(),
         };
+        for peer in world.peers.iter_mut() {
+            prepare(&mut peer.pc);
+        }
         let transceiver = world.peers[0].pc.add_transceiver_from_kind(
             kind,
             Some(RTCRtpTransceiverInit {
@@ -431,5 +443,91 @@ fn the_absolute_capture_time_reaches_the_receivers_synchronization_source() -> R
         source(&mut world),
         Some((Some(capture_ms + 100.0), Some(500.0)))
     );
+    Ok(())
+}
+
+/// RFC 9335 (Cryptex) end to end: with header encryption negotiated by both peers the header
+/// extension block travels encrypted under the Cryptex profile (0xC0DE for the one-byte
+/// form), and the receiver reads the elements as they were sent: here the absolute capture
+/// time, which its synchronization source reports.
+#[test]
+fn with_cryptex_the_extensions_are_encrypted_on_the_wire_and_read_in_the_clear() -> Result<()> {
+    use rtc::peer_connection::cryptex::RTCRtpHeaderEncryptionPolicy;
+    let (mut world, sender) = World::connected_prepared(
+        RtpCodecKind::Video,
+        |sdp| sdp,
+        |pc| pc.set_rtp_header_encryption_policy(RTCRtpHeaderEncryptionPolicy::Negotiate),
+    )?;
+    assert!(world.peers[0].pc.cryptex_negotiated());
+    assert!(world.peers[1].pc.cryptex_negotiated());
+    let (ssrc, pt) = {
+        let mut sender = world.peers[0].pc.rtp_sender(sender).expect("sender");
+        let parameters = sender.get_parameters();
+        (
+            parameters.encodings[0]
+                .rtp_coding_parameters
+                .ssrc
+                .expect("an SSRC"),
+            parameters.rtp_parameters.codecs[0].payload_type,
+        )
+    };
+    let capture_ntp: u64 = 0x1122_3344_5566_7788;
+    let now = world.now;
+    let before = world.wire.len();
+    world.peers[0]
+        .pc
+        .rtp_sender(sender)
+        .expect("sender")
+        .write_rtp_with_capture_time(
+            now,
+            rtc::rtp::Packet {
+                header: Header {
+                    version: 2,
+                    payload_type: pt,
+                    sequence_number: 7,
+                    timestamp: 90_000,
+                    ssrc,
+                    marker: true,
+                    ..Default::default()
+                },
+                payload: Bytes::from(vec![0x10u8; 100]),
+            },
+            capture_ntp,
+            None,
+        )?;
+    world.pump()?;
+    world.run_until(now + Duration::from_millis(20))?;
+    let on_wire: Vec<&Header> = world.wire[before..]
+        .iter()
+        .filter(|h| h.ssrc == ssrc)
+        .collect();
+    assert_eq!(on_wire.len(), 1);
+    assert!(
+        matches!(on_wire[0].extension_profile, 0xC0DE | 0xC2DE),
+        "the Cryptex profile: {:#x}",
+        on_wire[0].extension_profile
+    );
+    let clear = capture_ntp.to_be_bytes();
+    assert!(
+        on_wire[0]
+            .extensions
+            .iter()
+            .all(|e| !e.payload.windows(8).any(|w| w == clear)),
+        "no element is in the clear on the wire"
+    );
+    let receiver = world.peers[1]
+        .pc
+        .get_receivers()
+        .next()
+        .expect("a receiver");
+    let capture = world.peers[1]
+        .pc
+        .rtp_receiver(receiver)
+        .expect("receiver")
+        .get_synchronization_sources()
+        .find(|s| s.source == ssrc)
+        .and_then(|s| s.capture_timestamp);
+    let expected = capture_ntp as f64 / 4_294_967_296.0 * 1000.0;
+    assert_eq!(capture, Some(expected));
     Ok(())
 }

@@ -432,6 +432,18 @@ impl<'a> RTCSctpTransport<'a> {
     pub fn max_channels(&self) -> Option<u16> {
         self.peer_connection.sctp_transport().max_channels()
     }
+
+    /// The SCTP association's congestion window in bytes (RFC 9260 section 7.2), `None`
+    /// without a live association. A diagnostic, not a W3C member (earlier webrtc-stats drafts
+    /// had `RTCSctpTransportStats.congestionWindow`).
+    pub fn congestion_window(&self) -> Option<u32> {
+        self.peer_connection
+            .sctp_transport()
+            .sctp_associations
+            .values()
+            .find(|association| !association.is_ended())
+            .map(|association| association.congestion_window())
+    }
 }
 
 #[cfg(test)]

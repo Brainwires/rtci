@@ -830,6 +830,9 @@ pub struct RTCPeerConnection {
     always_negotiate_data_channels: bool,
     /// What the application has been told of the transports' states (`states_events`).
     pub(crate) announced: states_events::AnnouncedStates,
+    /// The data channels' DSCP as last seen (RFC 8837 section 5: a change resets the SCTP
+    /// congestion control; `priority.rs`).
+    pub(crate) last_data_dscp: Option<u8>,
 }
 
 impl RTCPeerConnection {
