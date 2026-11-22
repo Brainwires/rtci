@@ -49,6 +49,18 @@ impl fmt::Display for PayloadProtocolIdentifier {
     }
 }
 
+impl PayloadProtocolIdentifier {
+    /// The identifier's number on the wire. `Unknown` is 0, "not specified by the upper
+    /// layer" (RFC 9260 3.3.1); a value without a name is sent with
+    /// [`Stream::write_sctp_with_ppid`](crate::Stream::write_sctp_with_ppid).
+    pub fn number(self) -> u32 {
+        match self {
+            PayloadProtocolIdentifier::Unknown => 0,
+            named => named as u32,
+        }
+    }
+}
+
 impl From<u32> for PayloadProtocolIdentifier {
     fn from(v: u32) -> PayloadProtocolIdentifier {
         match v {
@@ -143,6 +155,9 @@ pub struct ChunkPayloadData {
     pub(crate) stream_identifier: u16,
     pub(crate) stream_sequence_number: u16,
     pub(crate) payload_type: PayloadProtocolIdentifier,
+    /// The Payload Protocol Identifier as a number, used when `payload_type` has no name for
+    /// it (`Unknown`): RFC 9260 3.3.1 passes any value through unchanged.
+    pub(crate) payload_protocol_id: u32,
     pub(crate) user_data: Bytes,
 
     /// Acknowledged by a peer SACK, independently of local payload release.
@@ -189,6 +204,7 @@ impl Default for ChunkPayloadData {
             stream_identifier: 0,
             stream_sequence_number: 0,
             payload_type: PayloadProtocolIdentifier::default(),
+            payload_protocol_id: 0,
             user_data: Bytes::new(),
             acknowledged: false,
             miss_indicator: 0,
@@ -259,7 +275,8 @@ impl Chunk for ChunkPayloadData {
         let tsn = reader.get_u32();
         let stream_identifier = reader.get_u16();
         let stream_sequence_number = reader.get_u16();
-        let payload_type: PayloadProtocolIdentifier = reader.get_u32().into();
+        let payload_protocol_id = reader.get_u32();
+        let payload_type: PayloadProtocolIdentifier = payload_protocol_id.into();
         let user_data = raw.slice(
             CHUNK_HEADER_SIZE + PAYLOAD_DATA_HEADER_SIZE..CHUNK_HEADER_SIZE + header.value_length(),
         );
@@ -273,6 +290,7 @@ impl Chunk for ChunkPayloadData {
             stream_identifier,
             stream_sequence_number,
             payload_type,
+            payload_protocol_id,
             user_data,
 
             acknowledged: false,
@@ -294,7 +312,7 @@ impl Chunk for ChunkPayloadData {
         writer.put_u32(self.tsn);
         writer.put_u16(self.stream_identifier);
         writer.put_u16(self.stream_sequence_number);
-        writer.put_u32(self.payload_type as u32);
+        writer.put_u32(self.ppid());
         // NB: `extend(Bytes)` iterates the payload one byte at a time (Bytes is
         // `IntoIterator<Item = u8>`); `extend_from_slice` does a single bulk copy.
         writer.extend_from_slice(&self.user_data);
@@ -316,6 +334,15 @@ impl Chunk for ChunkPayloadData {
 }
 
 impl ChunkPayloadData {
+    /// The Payload Protocol Identifier on the wire: the named value, or the number given for
+    /// one that has no name.
+    pub fn ppid(&self) -> u32 {
+        match self.payload_type {
+            PayloadProtocolIdentifier::Unknown => self.payload_protocol_id,
+            named => named.number(),
+        }
+    }
+
     pub(crate) fn abandoned(&self) -> bool {
         self.abandoned
     }

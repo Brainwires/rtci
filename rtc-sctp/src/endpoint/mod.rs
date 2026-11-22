@@ -19,6 +19,7 @@ use std::{
     net::SocketAddr,
     ops::{Index, IndexMut},
     sync::Arc,
+    sync::atomic::{AtomicBool, Ordering},
     time::Instant,
 };
 
@@ -57,8 +58,17 @@ pub struct Endpoint {
     ///
     /// Uses a cheaper hash function since keys are locally created
     association_ids: FxHashMap<AssociationId, AssociationHandle>,
+    /// Identifies associations by the peer's address and the two SCTP ports, which is what an
+    /// association is between (RFC 9260 1.3). An INIT with an Initiate Tag not seen before
+    /// finds the association it is for here.
+    ///
+    /// A standard `HashMap`: the keys are the peer's.
+    association_peers: HashMap<PeerKey, AssociationHandle>,
 
     associations: Slab<AssociationMeta>,
+    /// Associations that have not ended: what `concurrent_associations` bounds. An ended
+    /// association may keep its entry in `associations` until its owner reports it drained.
+    live: usize,
     local_cid_generator: Box<dyn AssociationIdGenerator>,
     endpoint_config: Arc<EndpointConfig>,
     server_config: Option<Arc<ServerConfig>>,
@@ -96,7 +106,9 @@ impl Endpoint {
             transport_protocol,
             association_ids_init: HashMap::default(),
             association_ids: FxHashMap::default(),
+            association_peers: HashMap::default(),
             associations: Slab::new(),
+            live: 0,
             local_cid_generator: (endpoint_config.aid_generator_factory.as_ref())(),
             reject_new_associations: false,
             endpoint_config,
@@ -113,17 +125,90 @@ impl Endpoint {
     pub fn handle_event(&mut self, ch: AssociationHandle, event: EndpointEvent) {
         match event.0 {
             EndpointEventInner::Drained => {
-                let conn = self.associations.remove(ch.0);
-                // Only the accepting side registers its peer's Initiate Tag, and another
-                // association may have registered the same tag since: remove only our own.
-                if self.association_ids_init.get(&conn.init_cid) == Some(&ch) {
-                    self.association_ids_init.remove(&conn.init_cid);
-                }
-                for cid in conn.loc_cids.values() {
-                    self.association_ids.remove(cid);
-                }
+                // A handle the endpoint does not hold (reported twice, or never its own) is
+                // ignored: removing a vacant entry panics.
+                self.release(ch);
+                self.associations.try_remove(ch.0);
             }
         }
+    }
+
+    /// Stops routing to an association and frees its place under `concurrent_associations`.
+    /// Its entry stays, so the handle is not given to another association while the owner
+    /// may still report this one drained.
+    fn release(&mut self, ch: AssociationHandle) {
+        let Some(meta) = self.associations.get_mut(ch.0) else {
+            return;
+        };
+        if meta.released {
+            return;
+        }
+        meta.released = true;
+        self.live = self.live.saturating_sub(1);
+        // Only the accepting side registers its peer's Initiate Tag, and another
+        // association may have registered the same tag since: remove only our own.
+        if self.association_ids_init.get(&meta.init_cid) == Some(&ch) {
+            self.association_ids_init.remove(&meta.init_cid);
+        }
+        if self.association_peers.get(&meta.peer) == Some(&ch) {
+            self.association_peers.remove(&meta.peer);
+        }
+        for cid in meta.loc_cids.values() {
+            self.association_ids.remove(cid);
+        }
+    }
+
+    /// Whether the association behind `ch` has ended (RFC 9260 9.1: it is then removed from
+    /// the record). Releases it if so.
+    fn release_if_ended(&mut self, ch: AssociationHandle) -> bool {
+        let ended = self
+            .associations
+            .get(ch.0)
+            .is_none_or(|meta| meta.ended.load(Ordering::Relaxed));
+        if ended {
+            self.release(ch);
+        }
+        ended
+    }
+
+    /// Releases every association that has ended. Linear in the associations held, so it runs
+    /// only when the endpoint would otherwise refuse a new one.
+    fn release_ended(&mut self) {
+        let ended: Vec<AssociationHandle> = self
+            .associations
+            .iter()
+            .filter(|(_, meta)| !meta.released && meta.ended.load(Ordering::Relaxed))
+            .map(|(id, _)| AssociationHandle(id))
+            .collect();
+        for ch in ended {
+            self.release(ch);
+        }
+    }
+
+    /// The association an INIT without a known Initiate Tag is for: the one between the same
+    /// peer address and ports. An endpoint that holds a single association and can take no
+    /// other (SCTP over one DTLS transport, RFC 8261) takes any INIT between the same ports as
+    /// its peer's: the address is the DTLS transport's affair and may have changed under it.
+    fn association_for_init(
+        &self,
+        remote: SocketAddr,
+        ports: (u16, u16),
+    ) -> Option<AssociationHandle> {
+        if let Some(ch) = self.association_peers.get(&(remote, ports.0, ports.1)) {
+            return Some(*ch);
+        }
+        let single = self
+            .server_config
+            .as_ref()
+            .is_some_and(|config| config.concurrent_associations == 1);
+        if single && self.live == 1 {
+            return self
+                .associations
+                .iter()
+                .find(|(_, meta)| !meta.released && (meta.peer.1, meta.peer.2) == ports)
+                .map(|(id, _)| AssociationHandle(id));
+        }
+        None
     }
 
     /// Process an incoming UDP datagram
@@ -161,15 +246,27 @@ impl Endpoint {
             // that association answers it with the same INIT ACK. Treated as the first packet
             // of another association instead, it is refused by an endpoint that holds one
             // association at a time, and the handshake can never complete.
+            //
+            // An INIT with another Initiate Tag from a peer this endpoint has an association
+            // with belongs to that association too (RFC 9260 5.2.1, 5.2.2: the association
+            // answers an unexpected INIT). A peer that starts over before its COOKIE ECHO
+            // would otherwise be refused for as long as the half-open association lasts.
             if partial_decode.first_chunk_type == CT_INIT {
+                let ports = (
+                    partial_decode.common_header.source_port,
+                    partial_decode.common_header.destination_port,
+                );
                 partial_decode
                     .initiate_tag
                     .and_then(|initiate_tag| self.association_ids_init.get(&initiate_tag))
                     .copied()
+                    .or_else(|| self.association_for_init(remote, ports))
             } else {
                 None
             }
         };
+        // An association that has ended takes no more packets (RFC 9260 9.1).
+        let known_ch = known_ch.filter(|ch| !self.release_if_ended(*ch));
 
         if let Some(ch) = known_ch {
             return Some((
@@ -213,8 +310,19 @@ impl Endpoint {
         let remote_aid = RandomAssociationIdGenerator::new().generate_aid();
         let local_aid = self.new_aid();
 
-        let (ch, conn) =
-            self.add_association(remote_aid, local_aid, remote, now, None, config.transport);
+        let ports = (
+            config.transport.remote_sctp_port(),
+            config.transport.sctp_port(),
+        );
+        let (ch, conn) = self.add_association(
+            remote_aid,
+            local_aid,
+            remote,
+            ports,
+            now,
+            None,
+            config.transport,
+        );
         Ok((ch, conn))
     }
 
@@ -248,10 +356,13 @@ impl Endpoint {
             return None;
         };
 
-        if self.associations.len() >= server_config.concurrent_associations as usize
-            || self.reject_new_associations
-            || self.is_full()
-        {
+        let limit = server_config.concurrent_associations as usize;
+        if self.live >= limit {
+            // An association that ended has given its place back.
+            self.release_ended();
+        }
+        let server_config = self.server_config.as_ref()?;
+        if self.live >= limit || self.reject_new_associations || self.is_full() {
             debug!("refusing association");
             //TODO: self.initial_close();
             return None;
@@ -269,10 +380,15 @@ impl Endpoint {
         let remote_aid = *initiate_tag;
         let local_aid = self.new_aid();
 
+        let ports = (
+            partial_decode.common_header.source_port,
+            partial_decode.common_header.destination_port,
+        );
         let (ch, mut conn) = self.add_association(
             remote_aid,
             local_aid,
             remote,
+            ports,
             now,
             Some(server_config),
             transport_config,
@@ -302,6 +418,7 @@ impl Endpoint {
         remote_aid: AssociationId,
         local_aid: AssociationId,
         remote_addr: SocketAddr,
+        ports: (u16, u16),
         now: Instant,
         server_config: Option<Arc<ServerConfig>>,
         transport_config: Arc<TransportConfig>,
@@ -317,15 +434,21 @@ impl Endpoint {
             now,
         );
 
+        let peer = (remote_addr, ports.0, ports.1);
         let id = self.associations.insert(AssociationMeta {
             init_cid: remote_aid,
             cids_issued: 0,
             loc_cids: iter::once((0, local_aid)).collect(),
             initial_remote: remote_addr,
+            peer,
+            ended: conn.ended_flag(),
+            released: false,
         });
+        self.live += 1;
 
         let ch = AssociationHandle(id);
         self.association_ids.insert(local_aid, ch);
+        self.association_peers.insert(peer, ch);
 
         (ch, conn)
     }
@@ -344,6 +467,12 @@ impl Endpoint {
     fn is_full(&self) -> bool {
         (((u32::MAX >> 1) + (u32::MAX >> 2)) as usize) < self.association_ids.len()
     }
+
+    /// How many associations the endpoint routes to: the ones that have not ended.
+    #[cfg(test)]
+    pub(crate) fn live_associations(&self) -> usize {
+        self.live
+    }
 }
 
 #[derive(Debug)]
@@ -357,7 +486,16 @@ pub(crate) struct AssociationMeta {
     /// Only needed to support associations with zero-length AIDs, which cannot migrate, so we don't
     /// bother keeping it up to date.
     initial_remote: SocketAddr,
+    /// The peer's address, its SCTP port and this side's.
+    peer: PeerKey,
+    /// Set by the association when it ends.
+    ended: Arc<AtomicBool>,
+    /// No longer routed to nor counted; the entry only keeps the handle from being reused.
+    released: bool,
 }
+
+/// The peer's address, the peer's SCTP port, this side's SCTP port.
+type PeerKey = (SocketAddr, u16, u16);
 
 /// Internal identifier for an `Association` currently associated with an endpoint
 #[derive(Default, Debug, Copy, Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]

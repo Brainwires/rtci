@@ -210,11 +210,11 @@ impl PayloadQueue {
         let mut b = GapAckBlock::default();
         let mut gap_ack_blocks = vec![];
         for (i, tsn) in self.sorted.iter().enumerate() {
-            let diff = if *tsn >= cumulative_tsn {
-                (*tsn - cumulative_tsn) as u16
-            } else {
-                0
-            };
+            // RFC 9260 3.3.4: an offset from the Cumulative TSN Ack, in serial number arithmetic
+            // (the queued TSNs may have wrapped past zero while the cumulative TSN has not). A
+            // queued TSN is within `MAX_RECEIVE_TSN_WINDOW` of the cumulative TSN, so the offset
+            // fits its 16 bits.
+            let diff = tsn.wrapping_sub(cumulative_tsn) as u16;
 
             if i == 0 {
                 b.start = diff;

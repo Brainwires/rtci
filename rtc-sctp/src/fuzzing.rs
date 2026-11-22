@@ -25,6 +25,7 @@ use crate::chunk::chunk_selective_ack::ChunkSelectiveAck;
 use crate::chunk::chunk_shutdown::ChunkShutdown;
 use crate::chunk::chunk_shutdown_ack::ChunkShutdownAck;
 use crate::chunk::chunk_shutdown_complete::ChunkShutdownComplete;
+use crate::chunk::chunk_unknown::ChunkUnknown;
 use crate::packet::{Packet, PartialDecode};
 use crate::param::Param;
 use crate::param::param_chunk_list::ParamChunkList;
@@ -124,6 +125,17 @@ pub fn chunk_chunk_header_unmarshal(data: &[u8]) -> Result<()> {
 pub fn chunk_chunk_abort_unmarshal(data: &[u8]) -> Result<()> {
     let raw = to_bytes(data);
     let _ = ChunkAbort::unmarshal(&raw)?;
+    Ok(())
+}
+
+/// A chunk of a type the engine does not recognize is kept as it arrived (RFC 9260 3.2): it
+/// must parse whatever its type and be written back as it was read.
+pub fn chunk_chunk_unknown_unmarshal(data: &[u8]) -> Result<()> {
+    let raw = to_bytes(data);
+    let chunk = ChunkUnknown::unmarshal(&raw)?;
+    let written = chunk.marshal()?;
+    assert_eq!(&raw[..written.len()], &written[..]);
+    let _ = (chunk.stops_processing(), chunk.is_reported());
     Ok(())
 }
 
@@ -347,18 +359,148 @@ pub fn endpoint_handle_datagrams(mut data: &[u8], start: std::time::Instant) {
         let now = start + Duration::from_millis(step * 10);
 
         match endpoint.handle(now, remote, None, Bytes::from(datagram)) {
-            Some((_, DatagramEvent::NewAssociation(a))) => association = Some(a),
+            Some((ch, DatagramEvent::NewAssociation(a))) => association = Some((ch, a)),
             Some((_, DatagramEvent::AssociationEvent(event))) => {
-                if let Some(a) = association.as_mut() {
+                if let Some((_, a)) = association.as_mut() {
                     a.handle_event(event);
                 }
             }
             None => {}
         }
-        if let Some(a) = association.as_mut() {
+        if let Some((ch, a)) = association.as_mut() {
             a.handle_timeout(now);
             while a.poll().is_some() {}
             while a.poll_transmit(now).is_some() {}
+            // An association that ends gives its place back to the endpoint, which then
+            // accepts the next INIT: the fuzzer reaches more than one handshake per input.
+            let mut drained = false;
+            while let Some(event) = a.poll_endpoint_event() {
+                drained |= event.is_drained();
+                endpoint.handle_event(*ch, event);
+            }
+            if drained || a.is_ended() {
+                association = None;
+            }
+        }
+    }
+}
+
+/// Stateful target: an association that has completed its handshake, fed a sequence of
+/// packets as its peer would send them.
+///
+/// [`endpoint_handle_datagrams`] cannot get past the handshake: the Verification Tag and the
+/// State Cookie are random. Here a real client completes it first, then every input datagram
+/// (the same framing: a big-endian `u16` length, then the datagram) gets the Verification Tag
+/// the association expects and a correct checksum, so its chunks reach the handlers of an
+/// established association: DATA, SACK, FORWARD TSN, RE-CONFIG, HEARTBEAT, ERROR, ABORT, the
+/// shutdown chunks, and chunks and parameters of types the engine does not know. Time moves
+/// with each datagram, by an amount the input chooses, so the timers run too.
+pub fn association_handle_chunks(mut data: &[u8], start: std::time::Instant) {
+    use crate::{ClientConfig, DatagramEvent, Endpoint, EndpointConfig, Payload, ServerConfig};
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    let client_addr: SocketAddr = "127.0.0.1:5001".parse().unwrap();
+    let server_addr: SocketAddr = "127.0.0.1:5000".parse().unwrap();
+    let mut client_endpoint = Endpoint::new(
+        client_addr,
+        shared::TransportProtocol::UDP,
+        Arc::new(EndpointConfig::default()),
+        None,
+    );
+    let mut server_endpoint = Endpoint::new(
+        server_addr,
+        shared::TransportProtocol::UDP,
+        Arc::new(EndpointConfig::default()),
+        Some(Arc::new(ServerConfig::default())),
+    );
+    let Ok((_, mut client)) = client_endpoint.connect(start, ClientConfig::default(), server_addr)
+    else {
+        return;
+    };
+    let mut server: Option<(crate::AssociationHandle, crate::Association)> = None;
+
+    fn drain(a: &mut crate::Association, now: std::time::Instant) -> Vec<Bytes> {
+        let mut out = vec![];
+        while let Some(transmit) = a.poll_transmit(now) {
+            if let Payload::RawEncode(datagrams) = transmit.message {
+                out.extend(datagrams);
+            }
+        }
+        out
+    }
+
+    // INIT, INIT ACK, COOKIE ECHO, COOKIE ACK.
+    for _ in 0..4 {
+        for datagram in drain(&mut client, start) {
+            match server_endpoint.handle(start, client_addr, None, datagram) {
+                Some((ch, DatagramEvent::NewAssociation(a))) => server = Some((ch, a)),
+                Some((_, DatagramEvent::AssociationEvent(event))) => {
+                    if let Some((_, a)) = server.as_mut() {
+                        a.handle_event(event);
+                    }
+                }
+                None => {}
+            }
+        }
+        let Some((_, a)) = server.as_mut() else {
+            return;
+        };
+        for datagram in drain(a, start) {
+            if let Some((_, DatagramEvent::AssociationEvent(event))) =
+                client_endpoint.handle(start, server_addr, None, datagram)
+            {
+                client.handle_event(event);
+            }
+        }
+    }
+    let Some((ch, mut association)) = server else {
+        return;
+    };
+    if association.is_handshaking() {
+        return;
+    }
+    let tag = association.verification_tag();
+    // A stream with something to send, so SACKs and resets have state to act on.
+    if let Ok(mut stream) = association.open_stream(1, crate::PayloadProtocolIdentifier::Binary) {
+        let _ = stream.write_sctp(
+            start,
+            &Bytes::from_static(&[0x5a; 3000]),
+            crate::PayloadProtocolIdentifier::Binary,
+        );
+    }
+
+    let mut now = start;
+    while data.len() >= 3 {
+        let len = u16::from_be_bytes([data[0], data[1]]) as usize;
+        // 0 to 255 steps of 250 ms: up to about a minute, enough for any timer to expire.
+        now += Duration::from_millis(u64::from(data[2]) * 250);
+        data = &data[3..];
+        let len = len.min(data.len());
+        let mut datagram = data[..len].to_vec();
+        data = &data[len..];
+        if datagram.len() >= 12 {
+            datagram[4..8].copy_from_slice(&tag.to_be_bytes());
+        }
+        let datagram = fix_checksum(&datagram);
+
+        if let Some((_, DatagramEvent::AssociationEvent(event))) =
+            server_endpoint.handle(now, client_addr, None, Bytes::from(datagram))
+        {
+            association.handle_event(event);
+        }
+        association.handle_timeout(now);
+        while let Some(event) = association.poll() {
+            if let crate::Event::Stream(crate::StreamEvent::Readable { id }) = event
+                && let Ok(mut stream) = association.stream(id)
+            {
+                while let Ok(Some(_)) = stream.read_sctp() {}
+            }
+        }
+        while association.poll_transmit(now).is_some() {}
+        while let Some(event) = association.poll_endpoint_event() {
+            server_endpoint.handle_event(ch, event);
         }
     }
 }

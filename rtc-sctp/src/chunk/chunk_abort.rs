@@ -58,11 +58,11 @@ impl Chunk for ChunkAbort {
 
         let mut error_causes = vec![];
         let mut offset = CHUNK_HEADER_SIZE;
-        while offset + 4 <= raw.len() {
-            let e = ErrorCause::unmarshal(
-                &raw.slice(offset..CHUNK_HEADER_SIZE + header.value_length()),
-            )?;
-            offset += e.length();
+        let end = CHUNK_HEADER_SIZE + header.value_length();
+        while offset + ERROR_CAUSE_HEADER_LENGTH <= end {
+            let e = ErrorCause::unmarshal(&raw.slice(offset..end))?;
+            // RFC 9260 3.3.10: causes are padded to four bytes, as parameters are.
+            offset += e.length() + get_padding_size(e.length());
             error_causes.push(e);
         }
 
@@ -71,9 +71,7 @@ impl Chunk for ChunkAbort {
 
     fn marshal_to(&self, buf: &mut BytesMut) -> Result<usize> {
         self.header().marshal_to(buf)?;
-        for ec in &self.error_causes {
-            buf.extend_from_slice(&ec.marshal());
-        }
+        marshal_error_causes(&self.error_causes, buf);
         Ok(buf.len())
     }
 
@@ -82,9 +80,7 @@ impl Chunk for ChunkAbort {
     }
 
     fn value_length(&self) -> usize {
-        self.error_causes
-            .iter()
-            .fold(0, |length, ec| length + ec.length())
+        error_causes_length(&self.error_causes)
     }
 
     fn as_any(&self) -> &dyn Any {

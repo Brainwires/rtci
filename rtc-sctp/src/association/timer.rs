@@ -4,7 +4,7 @@ pub(crate) const ACK_INTERVAL: u64 = 200;
 const MAX_INIT_RETRANS: usize = 8;
 const PATH_MAX_RETRANS: usize = 5;
 const NO_MAX_RETRANS: usize = usize::MAX;
-const TIMER_COUNT: usize = 6;
+const TIMER_COUNT: usize = 7;
 
 #[derive(Debug, Copy, Clone)]
 /// Retransmission limits for the association's timers.
@@ -52,6 +52,9 @@ pub(crate) enum Timer {
     T3RTX = 3,
     Reconfig = 4,
     Ack = 5,
+    /// How long an accepting association waits for the COOKIE ECHO. Its first expiry ends
+    /// the association.
+    HalfOpen = 6,
 }
 
 impl Timer {
@@ -62,6 +65,7 @@ impl Timer {
         Timer::T3RTX,
         Timer::Reconfig,
         Timer::Ack,
+        Timer::HalfOpen,
     ];
 }
 
@@ -85,6 +89,7 @@ impl TimerTable {
                 time_config.max_t3_rtx_retrans,      //T3RTX
                 time_config.max_reconfig_retrans,    //Reconfig
                 time_config.max_ack_retrans,         //Ack
+                0,                                   //HalfOpen
             ],
             ..Default::default()
         }
@@ -119,7 +124,7 @@ impl TimerTable {
             // compound T3 backoff nor apply this control timer's backoff twice.
             // See RFC 9260 9.2 and RFC 6525 5.1.1.
             *current.get_or_insert(interval)
-        } else if matches!(timer, Timer::Ack | Timer::T3RTX) {
+        } else if matches!(timer, Timer::Ack | Timer::T3RTX | Timer::HalfOpen) {
             interval
         } else {
             calculate_next_timeout(interval, self.retrans[timer as usize])

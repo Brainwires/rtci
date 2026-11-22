@@ -140,12 +140,8 @@ impl Chunk for ChunkInit {
             return Err(Error::ErrChunkTypeInitUnmarshalFailed);
         }
 
-        // The Chunk Flags field in INIT is reserved, and all bits in it should
-        // be set to 0 by the sender and ignored by the receiver.  The sequence
-        // of parameters within an INIT can be processed in any order.
-        if header.flags != 0 {
-            return Err(Error::ErrChunkTypeInitFlagZero);
-        }
+        // RFC 9260 3.3.2, 3.3.3: the Chunk Flags field of INIT and INIT ACK is reserved, set
+        // to 0 by the sender and ignored by the receiver.
 
         let reader = &mut raw.slice(CHUNK_HEADER_SIZE..CHUNK_HEADER_SIZE + header.value_length());
 

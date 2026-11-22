@@ -6,6 +6,7 @@ use crate::chunk::chunk_error::ChunkError;
 use crate::chunk::chunk_forward_tsn::ChunkForwardTsn;
 use crate::chunk::chunk_header::*;
 use crate::chunk::chunk_heartbeat::ChunkHeartbeat;
+use crate::chunk::chunk_heartbeat_ack::ChunkHeartbeatAck;
 use crate::chunk::chunk_init::ChunkInit;
 use crate::chunk::chunk_payload_data::ChunkPayloadData;
 use crate::chunk::chunk_reconfig::ChunkReconfig;
@@ -14,6 +15,7 @@ use crate::chunk::chunk_shutdown::ChunkShutdown;
 use crate::chunk::chunk_shutdown_ack::ChunkShutdownAck;
 use crate::chunk::chunk_shutdown_complete::ChunkShutdownComplete;
 use crate::chunk::chunk_type::*;
+use crate::chunk::chunk_unknown::ChunkUnknown;
 use crate::util::*;
 use shared::error::{Error, Result};
 
@@ -125,57 +127,58 @@ impl PartialDecode {
     }
 
     pub(crate) fn finish(self) -> Result<Packet> {
-        let mut chunks = vec![];
-        let mut offset = 0;
-        loop {
-            // Exact match, no more chunks
-            if offset == self.remaining.len() {
-                break;
-            } else if offset + CHUNK_HEADER_SIZE > self.remaining.len() {
-                return Err(Error::ErrParseSctpChunkNotEnoughData);
-            }
-
-            let chunk_buf = slice_chunk(&self.remaining, offset)?;
-            let ct = ChunkType(self.remaining[offset]);
-            let c: Box<dyn Chunk> = match ct {
-                CT_INIT => Box::new(ChunkInit::unmarshal(&chunk_buf)?),
-                CT_INIT_ACK => Box::new(ChunkInit::unmarshal(&chunk_buf)?),
-                CT_ABORT => Box::new(ChunkAbort::unmarshal(&chunk_buf)?),
-                CT_COOKIE_ECHO => Box::new(ChunkCookieEcho::unmarshal(&chunk_buf)?),
-                CT_COOKIE_ACK => Box::new(ChunkCookieAck::unmarshal(&chunk_buf)?),
-                CT_HEARTBEAT => Box::new(ChunkHeartbeat::unmarshal(&chunk_buf)?),
-                CT_PAYLOAD_DATA => Box::new(ChunkPayloadData::unmarshal(&chunk_buf)?),
-                CT_SACK => Box::new(ChunkSelectiveAck::unmarshal(&chunk_buf)?),
-                CT_RECONFIG => Box::new(ChunkReconfig::unmarshal(&chunk_buf)?),
-                CT_FORWARD_TSN => Box::new(ChunkForwardTsn::unmarshal(&chunk_buf)?),
-                CT_ERROR => Box::new(ChunkError::unmarshal(&chunk_buf)?),
-                CT_SHUTDOWN => Box::new(ChunkShutdown::unmarshal(&chunk_buf)?),
-                CT_SHUTDOWN_ACK => Box::new(ChunkShutdownAck::unmarshal(&chunk_buf)?),
-                CT_SHUTDOWN_COMPLETE => Box::new(ChunkShutdownComplete::unmarshal(&chunk_buf)?),
-                _ => return Err(Error::ErrUnmarshalUnknownChunkType),
-            };
-
-            let chunk_value_padding = get_padding_size(c.value_length());
-            offset += CHUNK_HEADER_SIZE + c.value_length() + chunk_value_padding;
-            chunks.push(c);
-        }
-
         Ok(Packet {
+            chunks: parse_chunks(&self.remaining, 0)?,
             common_header: self.common_header,
-            chunks,
         })
     }
 }
 
-fn slice_chunk(raw: &Bytes, offset: usize) -> Result<Bytes> {
-    let chunk_length = u16::from_be_bytes([raw[offset + 2], raw[offset + 3]]) as usize;
-    if chunk_length < CHUNK_HEADER_SIZE {
-        return Err(Error::ErrChunkHeaderInvalidLength);
+/// Parses the chunks of a packet, from `offset` in `raw` to its end.
+///
+/// A chunk of a type the engine has no parser for becomes a [`ChunkUnknown`]: RFC 9260 3.2
+/// has the receiver act on the upper two bits of its type, which is the association's work.
+/// A partial chunk at the end (one the packet is too short to hold) is dropped and the chunks
+/// before it stand (RFC 9260 6.10). A chunk of a known type that does not parse fails the
+/// packet.
+fn parse_chunks(raw: &Bytes, mut offset: usize) -> Result<Vec<Box<dyn Chunk>>> {
+    let mut chunks: Vec<Box<dyn Chunk>> = vec![];
+    while offset + CHUNK_HEADER_SIZE <= raw.len() {
+        let chunk_length = u16::from_be_bytes([raw[offset + 2], raw[offset + 3]]) as usize;
+        if chunk_length < CHUNK_HEADER_SIZE {
+            return Err(Error::ErrChunkHeaderInvalidLength);
+        }
+        if offset + chunk_length > raw.len() {
+            // A partial chunk: with nothing before it the packet holds no chunk at all.
+            if chunks.is_empty() {
+                return Err(Error::ErrChunkHeaderNotEnoughSpace);
+            }
+            break;
+        }
+        let chunk_buf = raw.slice(offset..offset + chunk_length);
+        let c: Box<dyn Chunk> = match ChunkType(raw[offset]) {
+            CT_INIT => Box::new(ChunkInit::unmarshal(&chunk_buf)?),
+            CT_INIT_ACK => Box::new(ChunkInit::unmarshal(&chunk_buf)?),
+            CT_ABORT => Box::new(ChunkAbort::unmarshal(&chunk_buf)?),
+            CT_COOKIE_ECHO => Box::new(ChunkCookieEcho::unmarshal(&chunk_buf)?),
+            CT_COOKIE_ACK => Box::new(ChunkCookieAck::unmarshal(&chunk_buf)?),
+            CT_HEARTBEAT => Box::new(ChunkHeartbeat::unmarshal(&chunk_buf)?),
+            CT_HEARTBEAT_ACK => Box::new(ChunkHeartbeatAck::unmarshal(&chunk_buf)?),
+            CT_PAYLOAD_DATA => Box::new(ChunkPayloadData::unmarshal(&chunk_buf)?),
+            CT_SACK => Box::new(ChunkSelectiveAck::unmarshal(&chunk_buf)?),
+            CT_RECONFIG => Box::new(ChunkReconfig::unmarshal(&chunk_buf)?),
+            CT_FORWARD_TSN => Box::new(ChunkForwardTsn::unmarshal(&chunk_buf)?),
+            CT_ERROR => Box::new(ChunkError::unmarshal(&chunk_buf)?),
+            CT_SHUTDOWN => Box::new(ChunkShutdown::unmarshal(&chunk_buf)?),
+            CT_SHUTDOWN_ACK => Box::new(ChunkShutdownAck::unmarshal(&chunk_buf)?),
+            CT_SHUTDOWN_COMPLETE => Box::new(ChunkShutdownComplete::unmarshal(&chunk_buf)?),
+            _ => Box::new(ChunkUnknown::unmarshal(&chunk_buf)?),
+        };
+        // By the length on the wire, not the one the parsed chunk would be written with.
+        offset += chunk_length + get_padding_size(chunk_length);
+        chunks.push(c);
     }
-    if offset + chunk_length > raw.len() {
-        return Err(Error::ErrChunkHeaderNotEnoughSpace);
-    }
-    Ok(raw.slice(offset..offset + chunk_length))
+    Ok(chunks)
 }
 
 #[derive(Default, Debug)]
@@ -222,40 +225,7 @@ impl Packet {
             return Err(Error::ErrChecksumMismatch);
         }
 
-        let mut chunks = vec![];
-        let mut offset = PACKET_HEADER_SIZE;
-        loop {
-            // Exact match, no more chunks
-            if offset == raw.len() {
-                break;
-            } else if offset + CHUNK_HEADER_SIZE > raw.len() {
-                return Err(Error::ErrParseSctpChunkNotEnoughData);
-            }
-
-            let chunk_buf = slice_chunk(raw, offset)?;
-            let ct = ChunkType(raw[offset]);
-            let c: Box<dyn Chunk> = match ct {
-                CT_INIT => Box::new(ChunkInit::unmarshal(&chunk_buf)?),
-                CT_INIT_ACK => Box::new(ChunkInit::unmarshal(&chunk_buf)?),
-                CT_ABORT => Box::new(ChunkAbort::unmarshal(&chunk_buf)?),
-                CT_COOKIE_ECHO => Box::new(ChunkCookieEcho::unmarshal(&chunk_buf)?),
-                CT_COOKIE_ACK => Box::new(ChunkCookieAck::unmarshal(&chunk_buf)?),
-                CT_HEARTBEAT => Box::new(ChunkHeartbeat::unmarshal(&chunk_buf)?),
-                CT_PAYLOAD_DATA => Box::new(ChunkPayloadData::unmarshal(&chunk_buf)?),
-                CT_SACK => Box::new(ChunkSelectiveAck::unmarshal(&chunk_buf)?),
-                CT_RECONFIG => Box::new(ChunkReconfig::unmarshal(&chunk_buf)?),
-                CT_FORWARD_TSN => Box::new(ChunkForwardTsn::unmarshal(&chunk_buf)?),
-                CT_ERROR => Box::new(ChunkError::unmarshal(&chunk_buf)?),
-                CT_SHUTDOWN => Box::new(ChunkShutdown::unmarshal(&chunk_buf)?),
-                CT_SHUTDOWN_ACK => Box::new(ChunkShutdownAck::unmarshal(&chunk_buf)?),
-                CT_SHUTDOWN_COMPLETE => Box::new(ChunkShutdownComplete::unmarshal(&chunk_buf)?),
-                _ => return Err(Error::ErrUnmarshalUnknownChunkType),
-            };
-
-            let chunk_value_padding = get_padding_size(c.value_length());
-            offset += CHUNK_HEADER_SIZE + c.value_length() + chunk_value_padding;
-            chunks.push(c);
-        }
+        let chunks = parse_chunks(raw, PACKET_HEADER_SIZE)?;
 
         Ok(Packet {
             common_header: CommonHeader {

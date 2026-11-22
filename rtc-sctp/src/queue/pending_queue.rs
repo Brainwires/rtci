@@ -23,6 +23,7 @@ struct MessageSnapshot {
     stream_generation: u64,
     unordered: bool,
     payload_type: PayloadProtocolIdentifier,
+    payload_protocol_id: u32,
     created_at: Option<Instant>,
     reliability: MessageReliability,
 }
@@ -36,6 +37,7 @@ impl MessageSnapshot {
             stream_generation: c.stream_generation,
             unordered: c.unordered,
             payload_type: c.payload_type,
+            payload_protocol_id: c.payload_protocol_id,
             created_at: c.created_at,
             reliability: c.reliability,
         }
@@ -51,6 +53,7 @@ impl MessageSnapshot {
 
     fn apply(&self, c: &mut ChunkPayloadData) {
         c.payload_type = self.payload_type;
+        c.payload_protocol_id = self.payload_protocol_id;
         c.created_at = self.created_at;
         c.reliability = self.reliability;
     }
