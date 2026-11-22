@@ -158,3 +158,15 @@ fn test_generic_fmtp_compare_mime_type_case_mismatch() {
         "fmtp lines should match even if they use different casing"
     );
 }
+
+/// RFC 4588 section 8.1: `rtx-time` is each sender's own; it does not make two retransmission
+/// formats with the same `apt` different. Another format's parameter of that name still does.
+#[test]
+fn retransmission_formats_that_differ_in_rtx_time_match() {
+    let rtx = |line: &str| parse("video/rtx", line);
+    assert!(rtx("apt=96;rtx-time=3000").match_fmtp(&*rtx("apt=96;rtx-time=1500")));
+    assert!(rtx("apt=96;rtx-time=3000").match_fmtp(&*rtx("apt=96")));
+    assert!(!rtx("apt=96;rtx-time=3000").match_fmtp(&*rtx("apt=98;rtx-time=3000")));
+    let other = |line: &str| parse("video/other", line);
+    assert!(!other("rtx-time=3000").match_fmtp(&*other("rtx-time=1500")));
+}

@@ -200,3 +200,44 @@ fn an_answer_with_the_bundle_attributes_in_the_tagged_section_only_is_applied() 
     assert!(every_transceiver_uses_reduced_size_rtcp(&mut a));
     Ok(())
 }
+
+/// RFC 9143 section 7.1.3, the note, and section 9.3.1.2: the tagged section carries
+/// `a=rtcp-mux` for the group "even if the tagged 'm=' section does not describe RTP-based
+/// media". A connection that began with a data channel has the data section tagged; the
+/// subsequent offer that adds video, and its answer, say `a=rtcp-mux` (and `a=rtcp-rsize`)
+/// there, and both sides take it for the video section.
+#[test]
+fn a_tagged_data_section_carries_rtcp_mux_for_the_rtp_sections() -> TestResult {
+    let mut a = default_peer()?;
+    let mut b = default_peer()?;
+    a.create_data_channel("data", None)?;
+    jsep_common::exchange(&mut a, &mut b)?;
+
+    a.add_track(video_track("later", 0x0303_0303))?;
+    let (offer, answer) = jsep_common::exchange(&mut a, &mut b)?;
+    for sdp in [&offer, &answer] {
+        let sections = media_sections(sdp);
+        assert_eq!(sections.len(), 2, "{sdp}");
+        assert!(sections[0][0].starts_with("m=application"), "{sdp}");
+        for attribute in ["a=rtcp-mux", "a=rtcp-rsize", "a=ice-ufrag:"] {
+            assert!(
+                sections[0].iter().any(|l| l.starts_with(attribute)),
+                "{attribute} in the tagged section:\n{sdp}"
+            );
+            assert!(
+                !sections[1].iter().any(|l| l.starts_with(attribute)),
+                "{attribute} not in the video section:\n{sdp}"
+            );
+        }
+        assert_ne!(port_of(&sections[1]), 0, "{sdp}");
+    }
+    for pc in [&mut a, &mut b] {
+        let id = pc.get_transceivers().next().expect("the video transceiver");
+        assert!(
+            pc.rtp_transceiver(id)
+                .expect("transceiver")
+                .rtcp_reduced_size()
+        );
+    }
+    Ok(())
+}

@@ -36,7 +36,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   write, is `SettingEngineBuilder::with_bundle_attributes_repeated(true)`.
   `with_bundle_attributes_in_tagged_section_only` is gone (it selected what is now the
   default). An initial offer is unchanged. A remote endpoint that needs `a=rtcp-mux` or ICE
-  credentials in each section of an answer needs the setting.
+  credentials in each section of an answer needs the setting. A tagged section that is the
+  data section carries `a=rtcp-mux` (and `a=rtcp-rsize`) for the RTP sections of its group
+  (the note of RFC 9143 section 7.1.3).
 - **jsep**: `RTCBundlePolicy::MaxBundle` is ignored, as RFC 9429 section 4.1.1 says of the
   deprecated `max-bundle`: the default policy (`balanced`) stays in effect. The policy it was
   an alias of is the new `RTCBundlePolicy::MustBundle` (`must-bundle`);
@@ -1268,6 +1270,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+- **jsep**: two retransmission formats that differ only in `rtx-time` are one format (RFC
+  4588 section 8.1: each sender's own figure); an offer whose RTX `fmtp` had another
+  `rtx-time` than the local one was answered without RTX.
 - **jsep**: a remote description with `a=extmap:256 ...` (the `appbits` mapping) or an id of
   4096 to 4351 (an extension left for the answerer to number, RFC 8285 section 6) is applied;
   `set_remote_description` failed on it. This endpoint uses neither and leaves them out of its

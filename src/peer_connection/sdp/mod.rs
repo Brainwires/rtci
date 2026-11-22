@@ -2023,6 +2023,47 @@ impl RTCPeerConnection {
         // (the first of the group) carries the BUNDLE attributes, unless the application
         // asked for the browsers' repeated form.
         if params.bundle_attributes_in_tagged_section_only && !params.initial_offer {
+            // The tagged section speaks for the group, also when it is not RTP itself (RFC
+            // 9143 section 7.1.3, the note: "the tagged 'm=' section might contain an SDP
+            // 'rtcp-mux' attribute even if the tagged 'm=' section does not describe
+            // RTP-based media"; section 9.3.1.2: "MUST include an SDP 'rtcp-mux' attribute
+            // in the answerer-tagged 'm=' section"). So when the tagged section is the data
+            // section it takes `a=rtcp-mux` from the RTP sections that are about to lose it,
+            // and `a=rtcp-rsize` when each of them has it.
+            let others: Vec<&MediaDescription> = bundled
+                .iter()
+                .skip(1)
+                .filter_map(|mid| {
+                    d.media_descriptions
+                        .iter()
+                        .find(|media| get_mid_value(media) == Some(mid))
+                })
+                .filter(|media| media.media_name.media != MEDIA_SECTION_APPLICATION)
+                .collect();
+            let mux = others
+                .iter()
+                .any(|media| media.has_attribute(ATTR_KEY_RTCPMUX));
+            let rsize = !others.is_empty()
+                && others
+                    .iter()
+                    .all(|media| media.has_attribute(ATTR_KEY_RTCPRSIZE));
+            if let Some(tagged) = bundled.first().and_then(|tag| {
+                d.media_descriptions
+                    .iter_mut()
+                    .find(|media| get_mid_value(media) == Some(tag))
+            }) && tagged.media_name.media == MEDIA_SECTION_APPLICATION
+            {
+                for (key, wanted) in [(ATTR_KEY_RTCPMUX, mux), (ATTR_KEY_RTCPRSIZE, rsize)] {
+                    if wanted && !tagged.has_attribute(key) {
+                        tagged
+                            .attributes
+                            .push(sdp::description::common::Attribute::new(
+                                key.to_owned(),
+                                None,
+                            ));
+                    }
+                }
+            }
             for mid in bundled.iter().skip(1) {
                 if let Some(media) = d
                     .media_descriptions

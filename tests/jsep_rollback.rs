@@ -169,10 +169,11 @@ a=rtpmap:96 VP8/90000
 /// transport here (an answer does), so a rollback leaves `sctp()` as the last completed
 /// exchange had it: absent before the first, present after one that negotiated data.
 ///
-/// This holds by construction, not by a restore step: nothing an offer does touches the
-/// transport, so the test passed before the rollback work too. It is here to keep that true:
-/// it fails the day applying an offer (one with a data section, or one that rejects it)
-/// starts, replaces or closes the transport without the rollback undoing it.
+/// The transport part holds by construction, not by a restore step: nothing an offer does
+/// touches the transport. Before the rollback work this test failed for the method alone (a
+/// remote offer could not be rolled back through `set_local_description`); what it keeps
+/// true since is that applying an offer (one with a data section, or one that renumbers it)
+/// never starts or replaces the transport without the rollback undoing it.
 #[test]
 fn a_rollback_leaves_the_sctp_transport_of_the_last_stable_state() -> TestResult {
     let mut a = default_peer()?;
@@ -200,31 +201,22 @@ fn a_rollback_leaves_the_sctp_transport_of_the_last_stable_state() -> TestResult
     assert_eq!(b.sctp().expect("still negotiated").id(), transport);
     assert_eq!(b.get_transceivers().count(), 0);
 
-    // An abandoned re-offer that rejects the data section, which an answer would close the
-    // association for: rolled back, it closes nothing.
+    // An abandoned re-offer with another `a=sctp-port`, which an answer would replace the
+    // association for (RFC 8841 section 10.5): rolled back, it replaces nothing.
     let offer = a.create_offer(None)?;
-    let sections = media_sections(&offer.sdp);
-    let data_mid = sections
-        .iter()
-        .find(|section| section[0].starts_with("m=application 9 "))
-        .and_then(|section| jsep_common::mid_of(section))
-        .expect("a data section with a mid");
-    // Port zero, and out of the BUNDLE group (RFC 9143 section 7.3.3).
-    let rejecting: String = offer
+    let port: u16 = offer
         .sdp
-        .split_inclusive("\r\n")
-        .map(|line| {
-            if let Some(tags) = line.trim_end().strip_prefix("a=group:BUNDLE ") {
-                let kept: Vec<&str> = tags.split(' ').filter(|tag| *tag != data_mid).collect();
-                format!("a=group:BUNDLE {}\r\n", kept.join(" "))
-            } else {
-                line.replace("m=application 9 ", "m=application 0 ")
-            }
-        })
-        .collect();
-    assert!(rejecting.contains("m=application 0 "), "{rejecting}");
-    b.set_remote_description(Instant::now(), RTCSessionDescription::offer(rejecting)?)?;
-    assert_eq!(b.sctp().expect("an offer closes nothing").id(), transport);
+        .lines()
+        .find_map(|l| l.strip_prefix("a=sctp-port:"))
+        .expect("an sctp-port")
+        .parse()?;
+    let replacing = offer.sdp.replace(
+        &format!("a=sctp-port:{port}\r\n"),
+        &format!("a=sctp-port:{}\r\n", port + 1),
+    );
+    assert_ne!(replacing, offer.sdp);
+    b.set_remote_description(Instant::now(), RTCSessionDescription::offer(replacing)?)?;
+    assert_eq!(b.sctp().expect("an offer replaces nothing").id(), transport);
     b.set_remote_description(Instant::now(), rollback())?;
     assert_eq!(b.sctp().expect("still negotiated").id(), transport);
 
