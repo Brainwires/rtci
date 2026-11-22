@@ -33,6 +33,7 @@ use crate::flight::*;
 use crate::fragment_buffer::*;
 use crate::handshake::handshake_cache::*;
 use crate::handshake::handshake_header::{HANDSHAKE_HEADER_LENGTH, HandshakeHeader};
+use crate::handshake::handshake_random::HandshakeRandom;
 use crate::handshake::*;
 use crate::handshaker::*;
 use crate::record_layer::record_layer_header::*;
@@ -192,6 +193,28 @@ pub struct DTLSConn {
     /// The current flight has been sent again because protected application data arrived
     /// ahead of the peer's Finished (RFC 6347 4.2.4); it is not done twice for one flight.
     pub(crate) early_data_retransmit_done: bool,
+    /// The association negotiated DTLS 1.3 and is run from there: every entry point below
+    /// hands over to it.
+    pub(crate) v13: Option<Box<crate::dtls13::conn::Conn13>>,
+    /// Server: the HelloRetryRequest cookie the endpoint verified for the ClientHello this
+    /// association was made for (RFC 9147 5.1), with what it holds.
+    pub(crate) verified_retry: Option<(Vec<u8>, crate::dtls13::hello::RetryCookie)>,
+    /// Client: datagrams that start with a DTLS 1.3 protected record and arrived before the
+    /// ServerHello that selects DTLS 1.3 (the server's flight, reordered).
+    early_dtls13_datagrams: Vec<Vec<u8>>,
+}
+
+/// The most datagrams a client holds for a DTLS 1.3 handshake whose ServerHello is late.
+const MAX_EARLY_DTLS13_DATAGRAMS: usize = 4;
+
+/// What the hello of a handshake settles about the version (RFC 9147 5.3, RFC 8446 4.2.1).
+enum VersionOutcome {
+    /// The DTLS 1.2 handshake goes on with the message.
+    Dtls12,
+    /// DTLS 1.3 took the message and the association.
+    Dtls13,
+    /// The handshake ends with this alert.
+    Refuse(AlertDescription, Error),
 }
 
 impl Drop for DTLSConn {
@@ -275,6 +298,289 @@ impl DTLSConn {
             peer_repeated_flight: false,
             address_verified: is_client || resumed,
             early_data_retransmit_done: false,
+            v13: None,
+            verified_retry: None,
+            early_dtls13_datagrams: vec![],
+        }
+    }
+
+    /// Whether the association negotiated DTLS 1.3.
+    pub fn is_dtls13(&self) -> bool {
+        self.v13.is_some()
+    }
+
+    /// Copies what the DTLS 1.3 association has reached into the state callers read.
+    pub(crate) fn sync_dtls13(&mut self) {
+        let Some(v13) = &self.v13 else {
+            return;
+        };
+        self.authenticated_records = v13.authenticated_records;
+        self.closed_by_peer = v13.closed_by_peer;
+        self.address_verified |= v13.address_verified;
+        if v13.established && !self.handshake_completed {
+            self.handshake_completed = true;
+            self.state
+                .peer_certificates
+                .clone_from(&v13.peer_certificates);
+            self.state.srtp_protection_profile = v13.srtp_profile;
+            if !self.is_client {
+                self.state.server_name.clone_from(&v13.server_name);
+            }
+            if let (Some(suite), Some(exporter_secret)) = (v13.suite, &v13.exporter_secret) {
+                self.state.cipher_suite = Some(Box::new(suite));
+                self.state.tls13 = Some((suite, exporter_secret.clone()));
+            }
+            self.state.local_epoch = crate::dtls13::conn::EPOCH_APPLICATION as u16;
+            self.state.remote_epoch = crate::dtls13::conn::EPOCH_APPLICATION as u16;
+        }
+        if v13.failed && !self.failed {
+            self.failed = true;
+            self.closed = true;
+            self.current_retransmit_timer = None;
+            self.state.forget_secrets();
+        }
+    }
+
+    /// Hands a datagram, or what is left of one, to the DTLS 1.3 association.
+    fn read_dtls13(&mut self, datagram: &[u8]) -> Result<()> {
+        let Some(v13) = &mut self.v13 else {
+            return Ok(());
+        };
+        let result = v13.read(datagram);
+        self.sync_dtls13();
+        result
+    }
+
+    /// Starts a key update (RFC 9147 section 8, DTLS 1.3 only): this side moves to new
+    /// sending keys once the peer has acknowledged its KeyUpdate. With `request_peer` the
+    /// peer is asked to update its own as well.
+    ///
+    /// # Errors
+    ///
+    /// Fails for a DTLS 1.2 association (which has no key update), before the handshake is
+    /// complete, and while an earlier KeyUpdate is still unacknowledged.
+    pub fn update_keys(&mut self, request_peer: bool) -> Result<()> {
+        match &mut self.v13 {
+            Some(v13) => v13.send_key_update(request_peer),
+            None => Err(Error::ErrUnsupportedProtocolVersion),
+        }
+    }
+
+    /// Hands the peer new connection ids to use in records to this side (RFC 9147 section 9,
+    /// DTLS 1.3 with negotiated connection ids): `count` fresh random ones. With `immediate`
+    /// the peer switches to one of them at once; otherwise they are spares.
+    ///
+    /// # Errors
+    ///
+    /// Fails when no non-empty connection id was negotiated for this direction, while an
+    /// earlier NewConnectionId is unacknowledged, and before the handshake is complete.
+    pub fn new_connection_ids(&mut self, count: usize, immediate: bool) -> Result<()> {
+        let Some(v13) = &mut self.v13 else {
+            return Err(Error::ErrUnsupportedProtocolVersion);
+        };
+        let length = v13.local_connection_id.len();
+        let mut connection_ids = vec![];
+        for _ in 0..count {
+            let mut connection_id = vec![0u8; length];
+            self.handshake_config
+                .provider()
+                .random()
+                .fill(&mut connection_id)
+                .map_err(|err| Error::Crypto(err.to_string()))?;
+            connection_ids.push(connection_id);
+        }
+        v13.send_new_connection_id(connection_ids, immediate)
+    }
+
+    /// Asks the peer for `count` more connection ids (RFC 9147 section 9).
+    ///
+    /// # Errors
+    ///
+    /// Fails when this side sends no connection id, and while an earlier request is
+    /// unfulfilled.
+    pub fn request_connection_ids(&mut self, count: u8) -> Result<()> {
+        match &mut self.v13 {
+            Some(v13) => v13.send_request_connection_id(count),
+            None => Err(Error::ErrUnsupportedProtocolVersion),
+        }
+    }
+
+    /// Switches to the next spare connection id the peer has provided, as RFC 9147 section 9
+    /// asks of an endpoint that starts sending on a new path. `false` when it has none.
+    pub fn use_next_connection_id(&mut self) -> bool {
+        self.v13
+            .as_mut()
+            .is_some_and(|v13| v13.use_next_connection_id())
+    }
+
+    /// The connection ids in use (DTLS 1.3): the one this side expects in records it
+    /// receives, and the one it puts in records it sends. Empty where none is used.
+    pub fn connection_ids(&self) -> Option<(&[u8], &[u8])> {
+        self.v13.as_ref().map(|v13| {
+            (
+                v13.local_connection_id.as_slice(),
+                v13.remote_connection_id.as_slice(),
+            )
+        })
+    }
+
+    /// Settles the version from a hello: `message` is one whole ClientHello (to a server)
+    /// or ServerHello (to a client), with its handshake header, from `record`.
+    fn negotiate_version(
+        &mut self,
+        handshake_type: HandshakeType,
+        message: &[u8],
+        record: &RecordLayerHeader,
+    ) -> VersionOutcome {
+        use crate::config::DtlsVersion;
+        use crate::dtls13::conn::Conn13;
+        use crate::dtls13::handshake::ServerStart;
+        use crate::dtls13::messages;
+
+        let cfg = self.handshake_config.clone();
+        let Some(body) = message.get(HANDSHAKE_HEADER_LENGTH..) else {
+            return VersionOutcome::Dtls12;
+        };
+        let message_seq = u16::from_be_bytes([message[4], message[5]]);
+        match handshake_type {
+            HandshakeType::ClientHello if !self.is_client && !self.is_handshake_completed() => {
+                // A ClientHello that does not parse is the DTLS 1.2 code's to judge.
+                let Ok(hello) = messages::ClientHello::parse(body) else {
+                    return VersionOutcome::Dtls12;
+                };
+                if cfg.supports_dtls13() && hello.offers_dtls13() {
+                    let mut reader = hello.random;
+                    if let Ok(random) = HandshakeRandom::unmarshal(&mut reader) {
+                        self.state.remote_random = random;
+                    }
+                    let start = ServerStart {
+                        message_seq,
+                        record_sequence: record.sequence_number,
+                        address_verified: self.address_verified,
+                        verified_retry: self.verified_retry.take(),
+                    };
+                    self.v13 = Some(Box::new(Conn13::server(cfg, body, start)));
+                    self.state.negotiated_version = Some(DtlsVersion::Dtls1_3);
+                    self.current_retransmit_timer = None;
+                    self.sync_dtls13();
+                    return VersionOutcome::Dtls13;
+                }
+                if !cfg.supports_dtls12() {
+                    // RFC 8446 4.2.1: no version in common is a protocol_version.
+                    return VersionOutcome::Refuse(
+                        AlertDescription::ProtocolVersion,
+                        Error::ErrUnsupportedProtocolVersion,
+                    );
+                }
+                if cfg.supports_dtls13() {
+                    // RFC 8446 4.1.3, RFC 9147 5.3: a server that speaks DTLS 1.3 and
+                    // negotiates DTLS 1.2 says so in the last eight bytes of its random.
+                    let random = &mut self.state.local_random.random_bytes;
+                    let at = random.len() - messages::DOWNGRADE_TO_1_2.len();
+                    random[at..].copy_from_slice(&messages::DOWNGRADE_TO_1_2);
+                }
+                self.state.negotiated_version = Some(DtlsVersion::Dtls1_2);
+                VersionOutcome::Dtls12
+            }
+            HandshakeType::ServerHello if self.is_client && !self.is_handshake_completed() => {
+                let Ok(hello) = messages::ServerHello::parse(body) else {
+                    return VersionOutcome::Dtls12;
+                };
+                if self.state.tls13_offer.is_none() {
+                    self.state.negotiated_version = Some(DtlsVersion::Dtls1_2);
+                    return VersionOutcome::Dtls12;
+                }
+                if hello.selected_version() == Some(crate::dtls13::DTLS1_3_WIRE_VERSION) {
+                    // RFC 9147 5.2: DTLS 1.3 has no HelloVerifyRequest; a server that sent
+                    // one and now selects DTLS 1.3 is no server of either version.
+                    let client_hello = self.cache.pull_and_merge(&[HandshakeCachePullRule {
+                        typ: HandshakeType::ClientHello,
+                        epoch: 0,
+                        is_client: true,
+                        optional: false,
+                    }]);
+                    let offer = self.state.tls13_offer.take();
+                    let (Some(offer), true, Some(client_hello_body)) = (
+                        offer,
+                        self.state.cookie.is_empty(),
+                        client_hello.get(HANDSHAKE_HEADER_LENGTH..),
+                    ) else {
+                        return VersionOutcome::Refuse(
+                            AlertDescription::IllegalParameter,
+                            Error::ErrUnsupportedProtocolVersion,
+                        );
+                    };
+                    let client_hello_seq = u16::from_be_bytes([client_hello[4], client_hello[5]]);
+                    let next_sequence = self.state.local_sequence_number.first().copied();
+                    let mut v13 = Conn13::client(
+                        cfg,
+                        offer,
+                        client_hello_body.to_vec(),
+                        client_hello_seq,
+                        next_sequence.unwrap_or(0),
+                    );
+                    v13.set_next_receive_seq(message_seq);
+                    let server_hello = crate::dtls13::record::plaintext_record(
+                        crate::dtls13::record::CONTENT_TYPE_HANDSHAKE,
+                        record.sequence_number,
+                        &messages::handshake_fragment(
+                            messages::SERVER_HELLO,
+                            body.len(),
+                            message_seq,
+                            0,
+                            body,
+                        ),
+                    );
+                    let _ = v13.read(&server_hello);
+                    // What arrived of the server's flight ahead of its ServerHello.
+                    for datagram in std::mem::take(&mut self.early_dtls13_datagrams) {
+                        let _ = v13.read(&datagram);
+                    }
+                    self.v13 = Some(Box::new(v13));
+                    self.state.negotiated_version = Some(DtlsVersion::Dtls1_3);
+                    self.current_retransmit_timer = None;
+                    self.sync_dtls13();
+                    return VersionOutcome::Dtls13;
+                }
+                // RFC 8446 4.2.1: supported_versions in a ServerHello selects DTLS 1.3 and
+                // nothing else; any other value there is an illegal_parameter.
+                if hello.extension(messages::EXT_SUPPORTED_VERSIONS).is_some() {
+                    return VersionOutcome::Refuse(
+                        AlertDescription::IllegalParameter,
+                        Error::ErrUnsupportedProtocolVersion,
+                    );
+                }
+                if !cfg.supports_dtls12() {
+                    return VersionOutcome::Refuse(
+                        AlertDescription::ProtocolVersion,
+                        Error::ErrUnsupportedProtocolVersion,
+                    );
+                }
+                // RFC 8446 4.1.3: this client offered DTLS 1.3, so a ServerHello for an
+                // older version whose random ends in the downgrade sentinel was made by a
+                // server that speaks DTLS 1.3 too: something in between took the offer out.
+                let sentinel = &hello.random[hello.random.len() - 8..];
+                if sentinel == messages::DOWNGRADE_TO_1_2 || sentinel == messages::DOWNGRADE_TO_1_0
+                {
+                    return VersionOutcome::Refuse(
+                        AlertDescription::IllegalParameter,
+                        Error::ErrUnsupportedProtocolVersion,
+                    );
+                }
+                self.state.tls13_offer = None;
+                self.state.negotiated_version = Some(DtlsVersion::Dtls1_2);
+                VersionOutcome::Dtls12
+            }
+            // RFC 9147 5.2: DTLS 1.3 has no HelloVerifyRequest, so one comes from a server
+            // of an older version: to a client that accepts DTLS 1.3 only, no version in
+            // common, as a DTLS 1.2 ServerHello would be.
+            HandshakeType::HelloVerifyRequest if self.is_client && !cfg.supports_dtls12() => {
+                VersionOutcome::Refuse(
+                    AlertDescription::ProtocolVersion,
+                    Error::ErrUnsupportedProtocolVersion,
+                )
+            }
+            _ => VersionOutcome::Dtls12,
         }
     }
 
@@ -324,6 +630,9 @@ impl DTLSConn {
     // Read reads data from the connection.
     /// Takes the next decrypted application payload, if one is ready.
     pub fn incoming_application_data(&mut self) -> Option<BytesMut> {
+        if let Some(v13) = &mut self.v13 {
+            return v13.poll_application_data();
+        }
         if !self.is_handshake_completed() {
             None
         } else {
@@ -333,6 +642,14 @@ impl DTLSConn {
 
     /// Takes the next datagram the caller should send.
     pub fn outgoing_raw_packet(&mut self) -> Option<BytesMut> {
+        // What the DTLS 1.2 code queued before DTLS 1.3 was selected (nothing, as a rule)
+        // goes first.
+        if let Some(datagram) = self.outgoing_compacted_raw_packets.pop_front() {
+            return Some(datagram);
+        }
+        if let Some(v13) = &mut self.v13 {
+            return v13.poll_datagram();
+        }
         if let Err(err) = self.handle_outgoing_packets() {
             warn!(
                 "handle_outgoing_packets [{}] with error {}",
@@ -353,6 +670,9 @@ impl DTLSConn {
     ///
     /// Fails if the connection is closed, or if `p` is longer than [`MAX_RECORD_PAYLOAD`].
     pub fn write(&mut self, p: &[u8]) -> Result<()> {
+        if let Some(v13) = &mut self.v13 {
+            return v13.write(p);
+        }
         if self.is_connection_closed() {
             return Err(Error::ErrConnClosed);
         }
@@ -387,6 +707,10 @@ impl DTLSConn {
     // Close closes the connection.
     /// Begins an orderly shutdown by queueing a `close_notify` alert.
     pub fn close(&mut self) {
+        if let Some(v13) = &mut self.v13 {
+            self.closed = true;
+            return v13.close();
+        }
         if !self.closed {
             self.closed = true;
 
@@ -427,6 +751,9 @@ impl DTLSConn {
     pub(crate) fn fail(&mut self) {
         if !self.failed {
             debug!("{}: association failed", srv_cli_str(self.is_client));
+        }
+        if let Some(v13) = &mut self.v13 {
+            v13.fail();
         }
         self.failed = true;
         self.closed = true;
@@ -744,6 +1071,9 @@ impl DTLSConn {
     ///
     /// Fails if the record is malformed or fails authentication.
     pub fn read(&mut self, buf: &[u8]) -> Result<()> {
+        if self.v13.is_some() {
+            return self.read_dtls13(buf);
+        }
         // A failed association is finished: nothing more is processed on it. One thing is
         // still said: if this side ended it with a fatal alert and the peer goes on sending
         // handshake records, it has not seen the alert (alerts are not retransmitted on a
@@ -760,14 +1090,34 @@ impl DTLSConn {
         // datagram does not cost the valid records in front of it [RFC6347 Section-4.1.2.7].
         let (records, well_formed) = split_datagram(buf);
         if !well_formed {
+            // A client that offered DTLS 1.3 may be sent the server's protected flight
+            // ahead of the ServerHello that selects it: held, a few datagrams of it, until
+            // the ServerHello says what it is.
+            if records.is_empty()
+                && self.state.tls13_offer.is_some()
+                && buf
+                    .first()
+                    .is_some_and(|first| crate::dtls13::record::is_unified_header(*first))
+            {
+                if self.early_dtls13_datagrams.len() < MAX_EARLY_DTLS13_DATAGRAMS {
+                    self.early_dtls13_datagrams.push(buf.to_vec());
+                }
+                return Ok(());
+            }
             debug!(
                 "{}: discarded the malformed end of a datagram ({} whole records before it)",
                 srv_cli_str(self.is_client),
                 records.len()
             );
         }
+        let mut consumed = 0;
         for pkt in records {
+            consumed += pkt.len();
             let (hs, alert, err) = self.handle_incoming_packet(pkt, enqueue);
+            if self.v13.is_some() {
+                // The record selected DTLS 1.3: the rest of the datagram is in its format.
+                return self.read_dtls13(&buf[consumed.min(buf.len())..]);
+            }
             if let Some(alert) = alert {
                 self.outgoing_packets.push_back(Packet {
                     record: RecordLayer::new(
@@ -839,6 +1189,9 @@ impl DTLSConn {
     }
 
     pub(crate) fn handle_incoming_queued_packets(&mut self) -> Result<bool> {
+        if self.v13.is_some() {
+            return Ok(false);
+        }
         // Drain queued future-epoch packets once the cipher suite is initialized,
         // which may happen before handshake_completed (e.g. Finished arrived before
         // ChangeCipherSpec bumped remote_epoch, so Finished was queued).
@@ -1222,6 +1575,20 @@ impl DTLSConn {
                     );
                     self.fragment_buffer.unpop();
                     continue;
+                }
+                match self.negotiate_version(handshake_type, &out, &h) {
+                    VersionOutcome::Dtls12 => {}
+                    VersionOutcome::Dtls13 => return (true, None, None),
+                    VersionOutcome::Refuse(alert_description, err) => {
+                        return (
+                            true,
+                            Some(Alert {
+                                alert_level: AlertLevel::Fatal,
+                                alert_description,
+                            }),
+                            Some(err),
+                        );
+                    }
                 }
                 let mut reader = out.as_slice();
                 let raw_handshake = match Handshake::unmarshal(&mut reader) {

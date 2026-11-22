@@ -229,6 +229,24 @@ impl CookieSecrets {
         Ok(cookie)
     }
 
+    /// The secrets cookies are accepted under at `now`: the current one, which new cookies
+    /// are made with, first, then the one before it. The DTLS 1.3 cookie exchange (RFC 9147
+    /// section 5.1) shares them with the DTLS 1.2 one.
+    pub(crate) fn secrets(
+        &mut self,
+        now: Instant,
+        provider: &dyn RTCCryptoProvider,
+    ) -> Result<Vec<crypto::SecretVec>> {
+        self.rotate(now, provider)?;
+        Ok(self
+            .current
+            .iter()
+            .map(|(secret, _)| secret)
+            .chain(self.previous.iter())
+            .map(|secret| crypto::SecretVec::new(secret.to_vec()))
+            .collect())
+    }
+
     /// The cookie to send `remote` for `hello`, under the current secret.
     pub(crate) fn issue(
         &mut self,

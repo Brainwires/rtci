@@ -74,6 +74,14 @@ pub struct State {
     /// by the endpoint, statelessly (RFC 6347 4.2.1), so the association itself keeps no
     /// cookie and takes that ClientHello as the one to negotiate from.
     pub(crate) cookie_verified_by_endpoint: bool,
+    /// Client: the DTLS 1.3 part of the ClientHello (its key shares), until the server has
+    /// chosen a version.
+    pub(crate) tls13_offer: Option<crate::dtls13::hello::ClientOffer>,
+    /// The association negotiated DTLS 1.3: its suite and exporter secret (RFC 8446
+    /// section 7.5), once the handshake is complete.
+    pub(crate) tls13: Option<(crate::dtls13::suite::Suite13, SecretVec)>,
+    /// The version negotiated, once a ServerHello has settled it.
+    pub(crate) negotiated_version: Option<crate::config::DtlsVersion>,
     //pub(crate) replay_detector: Vec<Box<dyn ReplayDetector>>,
 }
 
@@ -138,12 +146,20 @@ impl State {
             local_signature_scheme: None,
             secrets_forgotten: false,
             cookie_verified_by_endpoint: false,
+            tls13_offer: None,
+            tls13: None,
+            negotiated_version: None,
         }
     }
 }
 
 impl State {
     fn serialize(&self) -> Result<SerializedState> {
+        // The serialized form is the DTLS 1.2 session (master secret and randoms). A DTLS
+        // 1.3 association has neither, and its epochs and traffic secrets are not exported.
+        if self.tls13.is_some() {
+            return Err(Error::ErrUnsupportedProtocolVersion);
+        }
         let mut local_rand = vec![];
         {
             let mut writer = BufWriter::<&mut Vec<u8>>::new(local_rand.as_mut());
@@ -309,6 +325,10 @@ impl State {
     /// secret once the master secret exists). Nothing can be exported or resumed afterwards.
     pub(crate) fn forget_secrets(&mut self) {
         self.secrets_forgotten = true;
+        self.tls13_offer = None;
+        if let Some((_, exporter_secret)) = &mut self.tls13 {
+            *exporter_secret = SecretVec::new(vec![]);
+        }
         self.forget_pre_master_secret();
         drop(SecretVec::new(std::mem::take(&mut self.master_secret)));
     }
@@ -321,6 +341,14 @@ impl State {
     /// The SRTP protection profile negotiated through `use_srtp`.
     pub fn srtp_protection_profile(&self) -> SrtpProtectionProfile {
         self.srtp_protection_profile
+    }
+
+    /// The DTLS version the handshake negotiated, once it has: `None` before the ServerHello.
+    /// [`DtlsVersion::protocol_version`](crate::config::DtlsVersion::protocol_version) gives
+    /// the two bytes webrtc-stats reports as `tlsVersion` (`FEFD` for DTLS 1.2, `FEFC` for
+    /// DTLS 1.3).
+    pub fn negotiated_version(&self) -> Option<crate::config::DtlsVersion> {
+        self.negotiated_version
     }
 
     /// Whether this endpoint took the client role.
@@ -345,16 +373,37 @@ impl State {
     ///
     /// # Errors
     ///
-    /// Returns an error before the handshake completes, when `context` is non-empty, when the
-    /// label is reserved by TLS, when the negotiated cipher suite is unavailable, or when the
-    /// session was established without the extended master secret: such a master secret is not
-    /// bound to the handshake, and RFC 7627 5.4 forbids exporting from it.
+    /// Returns an error before the handshake completes, when the label is reserved by TLS,
+    /// when the negotiated cipher suite is unavailable, and for DTLS 1.2 when `context` is
+    /// non-empty or the session was established without the extended master secret: such a
+    /// master secret is not bound to the handshake, and RFC 7627 5.4 forbids exporting from
+    /// it.
+    ///
+    /// For DTLS 1.3 this is the exporter of RFC 8446 section 7.5, which always takes a
+    /// context (the empty one by default): DTLS-SRTP keys are exported the same way from
+    /// either version, with the label `EXTRACTOR-dtls_srtp` and no context.
     pub fn export_keying_material(
         &self,
         label: &str,
         context: &[u8],
         length: usize,
     ) -> Result<SecretVec> {
+        if let Some((suite, exporter_secret)) = &self.tls13 {
+            if self.secrets_forgotten || exporter_secret.is_empty() {
+                return Err(Error::ErrConnClosed);
+            }
+            if INVALID_KEYING_LABELS.contains(&label) {
+                return Err(Error::ReservedExportKeyingMaterial);
+            }
+            return crate::dtls13::key_schedule::export_keying_material(
+                self.crypto_provider.crypto(),
+                *suite,
+                exporter_secret.as_ref(),
+                label,
+                context,
+                length,
+            );
+        }
         if self.local_epoch == 0 {
             return Err(Error::HandshakeInProgress);
         } else if !context.is_empty() {
