@@ -587,35 +587,39 @@ fn a_minted_fec_ssrc_carries_the_repair_flow_that_recovers_a_lost_packet() -> Re
 }
 
 /// RFC 5104 TMMBR from the receiving application: `RTCRtpReceiver::set_remote_bitrate_limit`
-/// has the receiver's congestion control send a TMMBR for the sender's media SSRC, which the
-/// sending application reads; `None` lifts it with another TMMBR.
+/// has the receiver's congestion control send a TMMBR for the sender's media SSRC, and the
+/// sender, which negotiated `ccm tmmbr`, holds its estimate under it: its candidate pair's
+/// `availableOutgoingBitrate` falls to the limit; `None` lifts it.
 #[test]
 fn a_receiver_asks_the_sender_to_limit_its_rate_with_tmmbr() -> Result<()> {
-    use rtc::rtcp::transport_feedbacks::tmmb::TemporaryMaximumBitrateRequest;
+    use rtc::statistics::StatsSelector;
+    use rtc::statistics::report::RTCStatsReportEntry;
+    const LIMIT: u64 = 100_000;
+    let outgoing = |pc: &mut RTCPeerConnection, now: Instant| -> Option<f64> {
+        pc.get_stats(now, StatsSelector::None)
+            .iter()
+            .find_map(|entry| match entry {
+                RTCStatsReportEntry::IceCandidatePair(pair) if pair.nominated => {
+                    pair.available_outgoing_bitrate
+                }
+                _ => None,
+            })
+    };
     let (mut world, sender) = World::connected()?;
-    let (ssrc, _, _) = world.sender_stream(sender);
-    world.send_media(sender, FIRST_SEQ, 10)?;
-    let receiver = *world.peers[1].opened.first().expect("the track opened");
+    world.send_media(sender, FIRST_SEQ, 25)?;
     let now = world.now;
+    let before = outgoing(&mut world.peers[0].pc, now).expect("an estimate");
+    assert!(before > LIMIT as f64, "{before}");
+    let receiver = *world.peers[1].opened.first().expect("the track opened");
     world.peers[1]
         .pc
         .rtp_receiver(receiver)
         .expect("receiver")
-        .set_remote_bitrate_limit(now, Some(250_000))?;
+        .set_remote_bitrate_limit(now, Some(LIMIT))?;
     world.pump()?;
-    let until = world.now + Duration::from_secs(3);
-    world.run_until(until)?;
-    let tmmbrs: Vec<&TemporaryMaximumBitrateRequest> = world.peers[0]
-        .read_rtcp
-        .iter()
-        .filter_map(|p| p.as_any().downcast_ref::<TemporaryMaximumBitrateRequest>())
-        .collect();
-    assert!(!tmmbrs.is_empty(), "{:?}", world.peers[0].read_rtcp);
-    assert!(
-        tmmbrs
-            .iter()
-            .any(|t| format!("{t:?}").contains(&ssrc.to_string())),
-        "{tmmbrs:?}"
-    );
+    world.send_media(sender, FIRST_SEQ + 25, 50)?;
+    let now = world.now;
+    let limited = outgoing(&mut world.peers[0].pc, now).expect("an estimate");
+    assert!(limited <= LIMIT as f64, "{before} -> {limited}");
     Ok(())
 }
