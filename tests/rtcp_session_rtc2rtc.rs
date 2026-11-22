@@ -395,7 +395,19 @@ fn a_pli_arrives_from_the_receivers_own_ssrc() -> Result<()> {
             })],
         )?;
     world.pump()?;
-    world.run_until(now + Duration::from_millis(500))?;
+    // RFC 4585 section 3.5.2: the PLI leaves as an Early packet, or, when an Early packet
+    // (a NACK, say) already went out since the last Regular one (`allow_early` is false until
+    // then, and that Regular packet is put off to `tp + 2 * T_rr`), with the next Regular
+    // packet, a randomised interval away. Either way it arrives, once.
+    let is_pli =
+        |packet: &Box<dyn rtc::rtcp::Packet>| packet.as_any().is::<PictureLossIndication>();
+    let deadline = now + Duration::from_secs(20);
+    while world.now < deadline && !world.peers[0].read_rtcp.iter().any(is_pli) {
+        let next = world.now + Duration::from_millis(100);
+        world.run_until(next)?;
+    }
+    let settle = world.now + Duration::from_millis(500);
+    world.run_until(settle)?;
 
     let plis: Vec<&PictureLossIndication> = world.peers[0]
         .read_rtcp
