@@ -58,6 +58,8 @@ pub(crate) fn relay_candidate() -> Result<Candidate> {
     .new_candidate_relay()
 }
 
+/// RFC 8445 Section 6.1.2.3: pair priority = 2^32 * MIN(G,D) + 2 * MAX(G,D) + (G > D ? 1 : 0),
+/// G the controlling agent's candidate priority, D the controlled agent's.
 #[test]
 fn test_candidate_pair_priority() -> Result<()> {
     const HOST_INDEX: usize = 0;
@@ -81,7 +83,7 @@ fn test_candidate_pair_priority() -> Result<()> {
                 candidates[HOST_INDEX].priority(),
                 false,
             ),
-            9151314440652587007,
+            9151314442783293438,
         ),
         (
             CandidatePair::new(
@@ -91,7 +93,7 @@ fn test_candidate_pair_priority() -> Result<()> {
                 candidates[HOST_INDEX].priority(),
                 true,
             ),
-            9151314440652587007,
+            9151314442783293438,
         ),
         (
             CandidatePair::new(
@@ -101,7 +103,7 @@ fn test_candidate_pair_priority() -> Result<()> {
                 candidates[PRFLX_INDEX].priority(),
                 true,
             ),
-            7998392936314175488,
+            7998392938176446463,
         ),
         (
             CandidatePair::new(
@@ -111,7 +113,7 @@ fn test_candidate_pair_priority() -> Result<()> {
                 candidates[PRFLX_INDEX].priority(),
                 false,
             ),
-            7998392936314175487,
+            7998392938176446462,
         ),
         (
             CandidatePair::new(
@@ -121,7 +123,7 @@ fn test_candidate_pair_priority() -> Result<()> {
                 candidates[SRFLX_INDEX].priority(),
                 true,
             ),
-            7277816996102668288,
+            7277816997797167103,
         ),
         (
             CandidatePair::new(
@@ -131,7 +133,7 @@ fn test_candidate_pair_priority() -> Result<()> {
                 candidates[SRFLX_INDEX].priority(),
                 false,
             ),
-            7277816996102668287,
+            7277816997797167102,
         ),
         (
             CandidatePair::new(
@@ -141,7 +143,7 @@ fn test_candidate_pair_priority() -> Result<()> {
                 candidates[RELAY_INDEX].priority(),
                 true,
             ),
-            72057593987596288,
+            72057594004373503,
         ),
         (
             CandidatePair::new(
@@ -151,7 +153,7 @@ fn test_candidate_pair_priority() -> Result<()> {
                 candidates[RELAY_INDEX].priority(),
                 false,
             ),
-            72057593987596287,
+            72057594004373502,
         ),
     ];
 
@@ -198,4 +200,32 @@ fn test_candidate_pair_equality() -> Result<()> {
     assert_eq!(pair_a, pair_b, "Expected {pair_a} to equal {pair_b}");
 
     Ok(())
+}
+
+/// RFC 8445 Section 6.1.2.3 with the largest and smallest priorities a candidate can have
+/// (Section 5.1.2: 1 to 2^31 - 1): the formula's 2^32 factor, and no overflow of 64 bits.
+#[test]
+fn test_candidate_pair_priority_bounds_and_role_bit() {
+    const MAX: u32 = (1 << 31) - 1;
+    let both_max = CandidatePair::new(0, 0, MAX, MAX, true);
+    assert_eq!(
+        both_max.priority(),
+        (1u64 << 32) * u64::from(MAX) + 2 * u64::from(MAX)
+    );
+    assert_eq!(both_max.priority(), 9223372036854775806);
+
+    // G = 5 (controlling), D = 3: 2^32 * 3 + 2 * 5 + 1.
+    let controlling = CandidatePair::new(0, 0, 5, 3, true);
+    assert_eq!(controlling.priority(), 12884901888 + 10 + 1);
+    // The peer computes the same value from its side: its local candidate is D.
+    let controlled = CandidatePair::new(0, 0, 3, 5, false);
+    assert_eq!(controlled.priority(), controlling.priority());
+    // G < D: no role bit.
+    assert_eq!(
+        CandidatePair::new(0, 0, 3, 5, true).priority(),
+        12884901888 + 10
+    );
+
+    let both_min = CandidatePair::new(0, 0, 1, 1, false);
+    assert_eq!(both_min.priority(), (1u64 << 32) + 2);
 }

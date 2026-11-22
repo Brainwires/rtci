@@ -306,7 +306,8 @@ fn test_inbound_validity() -> Result<()> {
         a.close()?;
     }
 
-    // Non-binding messages are discarded: an error response, and a request of another method.
+    // An error response the peer did not sign (this one carries our own password, not the
+    // peer's) is discarded, and so is a request of another method.
     {
         let mut a = inbound_agent(base)?;
         let local_pwd = a.ufrag_pwd.local_credentials.pwd.clone();
@@ -317,7 +318,7 @@ fn test_inbound_validity() -> Result<()> {
         )?;
         assert_eq!(
             a.handle_inbound(base, &mut msg, 0, remote).unwrap_err(),
-            Error::ErrUnhandledStunpacket
+            Error::ErrIntegrityMismatch
         );
         assert_eq!(
             a.remote_candidates.len(),
@@ -807,6 +808,9 @@ fn test_binding_request_timeout() -> Result<()> {
             transaction_id: TransactionId::new(),
             destination,
             is_use_candidate: false,
+            local_index: 0,
+            remote_index: 0,
+            sent_as_controlling: true,
         });
     }
 

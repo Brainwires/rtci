@@ -554,3 +554,158 @@ fn test_unmarshal_candidate_component_out_of_range() {
     let c = unmarshal_candidate("candidate:1 256 udp 0 1.2.3.4 9 typ host").unwrap();
     assert_eq!(c.priority() & 0xff, 0);
 }
+
+fn srflx(address: &str, port: u16, rel_addr: &str, rel_port: u16, url: Option<&str>) -> Candidate {
+    CandidateServerReflexiveConfig {
+        base_config: CandidateConfig {
+            network: "udp".to_owned(),
+            address: address.to_owned(),
+            port,
+            component: COMPONENT_RTP,
+            ..Default::default()
+        },
+        rel_addr: rel_addr.to_owned(),
+        rel_port,
+        url: url.map(str::to_owned),
+    }
+    .new_candidate_server_reflexive()
+    .unwrap()
+}
+
+/// RFC 8445 Section 5.1.1.3: same foundation when the type, the base's IP address (not its
+/// port), the server and the transport are the same; different when one of them differs.
+#[test]
+fn test_candidate_foundation_follows_base_and_server() {
+    let a = srflx(
+        "203.0.113.1",
+        5000,
+        "10.0.0.1",
+        4000,
+        Some("stun:one.example"),
+    );
+    // Another mapping from the same base IP (another port) through the same server.
+    let same = srflx(
+        "203.0.113.9",
+        6000,
+        "10.0.0.1",
+        4001,
+        Some("stun:one.example"),
+    );
+    assert_eq!(a.foundation(), same.foundation());
+    // The same base through another server.
+    let other_server = srflx(
+        "203.0.113.1",
+        5000,
+        "10.0.0.1",
+        4000,
+        Some("stun:two.example"),
+    );
+    assert_ne!(a.foundation(), other_server.foundation());
+    // Another base behind the same mapped address.
+    let other_base = srflx(
+        "203.0.113.1",
+        5000,
+        "10.0.0.2",
+        4000,
+        Some("stun:one.example"),
+    );
+    assert_ne!(a.foundation(), other_base.foundation());
+
+    // Host candidates: the base is the candidate; two ports of one address share it.
+    let host = |address: &str, port: u16, network: &str| {
+        CandidateHostConfig {
+            base_config: CandidateConfig {
+                network: network.to_owned(),
+                address: address.to_owned(),
+                port,
+                component: COMPONENT_RTP,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+        .new_candidate_host()
+        .unwrap()
+    };
+    assert_eq!(
+        host("10.0.0.1", 4000, "udp").foundation(),
+        host("10.0.0.1", 4001, "udp").foundation()
+    );
+    assert_ne!(
+        host("10.0.0.1", 4000, "udp").foundation(),
+        host("10.0.0.2", 4000, "udp").foundation()
+    );
+    assert_ne!(
+        host("10.0.0.1", 4000, "udp").foundation(),
+        host("10.0.0.1", 4000, "tcp").foundation()
+    );
+    // Type: a server-reflexive candidate does not share its host candidate's foundation.
+    assert_ne!(host("10.0.0.1", 4000, "udp").foundation(), a.foundation());
+}
+
+/// RFC 8445 Section 5.1.2.1: a component is 1 to 256. The constructors take the `Default` (0)
+/// as RTP, component 1, and refuse anything above 256; the RTCP component is 2.
+#[test]
+fn test_candidate_constructors_check_component_and_priority() {
+    let build = |component: u16, priority: u32| {
+        CandidateHostConfig {
+            base_config: CandidateConfig {
+                network: "udp".to_owned(),
+                address: "192.0.2.1".to_owned(),
+                port: 1,
+                component,
+                priority,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+        .new_candidate_host()
+    };
+    let default_component = build(0, 0).unwrap();
+    assert_eq!(default_component.component(), 1);
+    assert_eq!(default_component.priority(), 2130706431);
+    let rtcp = build(COMPONENT_RTCP, 0).unwrap();
+    assert_eq!(rtcp.component(), 2);
+    // 2^24 * 126 + 2^8 * 65535 + (256 - 2)
+    assert_eq!(rtcp.priority(), 2130706430);
+    assert_eq!(build(256, 0).unwrap().priority(), 2130706176);
+    assert!(build(257, 0).is_err());
+    // Section 5.1.2: a priority is at most 2^31 - 1.
+    assert!(build(1, (1 << 31) - 1).is_ok());
+    assert!(build(1, 1 << 31).is_err());
+    assert!(unmarshal_candidate("1 1 udp 2147483648 192.0.2.1 1 typ host").is_err());
+}
+
+/// RFC 8445 Section 7.1.1: the PRIORITY of a check is the candidate's priority with the
+/// peer-reflexive type preference in place of its own.
+#[test]
+fn test_peer_reflexive_priority_keeps_local_preference_and_component() {
+    let relay = Candidate {
+        candidate_type: CandidateType::Relay,
+        component: COMPONENT_RTP,
+        ..Default::default()
+    };
+    assert_eq!(relay.priority(), 16777215);
+    assert_eq!(relay.peer_reflexive_priority(), (110 << 24) + 16777215);
+    let tcp = Candidate {
+        candidate_type: CandidateType::Host,
+        network_type: NetworkType::Tcp4,
+        tcp_type: TcpType::Passive,
+        component: COMPONENT_RTP,
+        ..Default::default()
+    };
+    assert_eq!(
+        tcp.peer_reflexive_priority(),
+        (110 << 24) + (u32::from(tcp.local_preference()) << 8) + 255
+    );
+    // A priority the application chose keeps its low 24 bits.
+    let chosen = Candidate {
+        candidate_type: CandidateType::Host,
+        priority_override: (126 << 24) + (1234 << 8) + 255,
+        component: COMPONENT_RTP,
+        ..Default::default()
+    };
+    assert_eq!(
+        chosen.peer_reflexive_priority(),
+        (110 << 24) + (1234 << 8) + 255
+    );
+}

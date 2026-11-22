@@ -129,6 +129,12 @@ impl sansio::Protocol<TaggedBytesMut, (), ()> for Agent {
         };
         self.trigger_request_connectivity_check(remote_candidates);
 
+        // Requests that were answered before the peer's credentials arrived (RFC 8445
+        // Section 7.3) are processed now that there are some.
+        if !self.early_requests.is_empty() {
+            self.process_early_requests(now);
+        }
+
         if self.ufrag_pwd.remote_credentials.is_some()
             && (self.force_candidate_contact
                 || self.last_checking_time + self.get_timeout_interval() <= now)
