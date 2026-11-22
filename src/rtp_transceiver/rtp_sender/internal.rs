@@ -774,7 +774,7 @@ pub(crate) fn rtp_capabilities(
     direction: RTCRtpTransceiverDirection,
     media_engine: &MediaEngine,
 ) -> Option<RTCRtpCapabilities> {
-    if !matches!(kind, RtpCodecKind::Audio | RtpCodecKind::Video) {
+    if kind == RtpCodecKind::Unspecified {
         return None;
     }
     let mut codecs: Vec<RTCRtpCodec> = vec![];

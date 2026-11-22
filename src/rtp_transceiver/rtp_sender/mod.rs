@@ -23,10 +23,12 @@
 //! let mut peer_connection = RTCPeerConnectionBuilder::new().build(Instant::now())?;
 //!
 //! // Get sender and access its track
-//! if let Some(mut sender) = peer_connection.rtp_sender(sender_id) {
-//!     let track = sender.track();
-//!     println!("Track ID: {}", track.track_id());
-//!     println!("Track kind: {:?}", track.kind());
+//! if let Some(sender) = peer_connection.rtp_sender(sender_id) {
+//!     // `None` for a sender without a track (W3C `track` is nullable).
+//!     if let Some(track) = sender.track() {
+//!         println!("Track ID: {}", track.track_id());
+//!         println!("Track kind: {:?}", track.kind());
+//!     }
 //! }
 //! # Ok(())
 //! # }
@@ -72,8 +74,8 @@
 //! let mut peer_connection = RTCPeerConnectionBuilder::new().build(Instant::now())?;
 //!
 //! if let Some(mut sender) = peer_connection.rtp_sender(sender_id) {
-//!     // Replace with new track (same kind required)
-//!     sender.replace_track(new_track)?;
+//!     // Replace with new track (same kind required); `None` stops sending.
+//!     sender.replace_track(Some(new_track))?;
 //! }
 //! # Ok(())
 //! # }
@@ -97,7 +99,6 @@
 //!     // Write RTP packet directly
 //!     // The sender will set the correct payload type and SSRC
 //!     rtp_packet.header.ssrc = sender
-//!         .track()
 //!         .ssrcs()
 //!         .last()
 //!         .ok_or(Error::ErrSenderWithNoSSRCs)?;
