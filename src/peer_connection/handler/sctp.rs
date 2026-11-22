@@ -46,9 +46,24 @@ pub(crate) struct SctpHandlerContext {
     /// remains. So a handler that stops mid-stream gets no further notification, and the
     /// moment back-pressure works the peer stops sending, so no new chunk arrives, so no new
     /// `Readable` fires: **the stream would deadlock exactly when the feature engages.**
-    /// Remembering the stream here, and retrying from `handle_read`/`handle_timeout`, is the
-    /// level-triggered re-arm that closes that hole.
+    /// Remembering the stream here is the level-triggered re-arm that closes that hole: a
+    /// parked stream is retried from `poll_read` (the application asks for data), from
+    /// `handle_read`, and from `handle_timeout`, for which `poll_timeout` reports a deadline as
+    /// soon as the pipeline has room for it again (see [`SctpHandler::resumable`]).
     pending_readable: HashSet<(AssociationHandle, StreamId)>,
+
+    /// A drain from `poll_read` took data out of a receive buffer, and the SACK that tells
+    /// the peer about the space has not been flushed yet.
+    ///
+    /// RFC 9260 section 6.2: a receiver sends a SACK "to update the offered window as the
+    /// receiving application consumes new data", and once the window advertised as closed
+    /// opens again the association queues that SACK at once
+    /// (`Association::on_receive_buffer_drained`). The flush runs in `poll_write`, which a
+    /// caller has usually already made when it reads: without a deadline the SACK waited for
+    /// whatever woke the caller next, and the peer, stopped by a zero window, for its window
+    /// probe a retransmission timeout later. `poll_timeout` reports the deadline while this is
+    /// set; `poll_write` and `handle_timeout` clear it.
+    window_update_due: bool,
 
     /// Streams the peer created whose first message has not been drained yet.
     ///
@@ -137,6 +152,7 @@ impl SctpHandlerContext {
             flush_dirty: false,
             abort_requested: false,
             pending_readable: HashSet::new(),
+            window_update_due: false,
             peer_opened_streams: HashSet::new(),
             ordered_until_reply: HashMap::new(),
             unannounced: HashSet::new(),
@@ -552,13 +568,18 @@ impl<'a> SctpHandler<'a> {
     }
 
     /// Retry streams parked by a full pipeline. The level-triggered half of the drain.
-    fn resume_pending_reads(&mut self, now: Instant) -> Result<()> {
+    ///
+    /// Returns whether any message was taken out of SCTP. A stream that cannot be read (its
+    /// association or the stream itself is gone) is forgotten rather than retried: it has
+    /// nothing left to deliver, and a parked stream that never drains would keep
+    /// [`Self::resumable`], and with it `poll_timeout`, reporting work that never gets done.
+    fn resume_pending_reads(&mut self, now: Instant) -> Result<bool> {
         if self.ctx.pending_readable.is_empty() {
-            return Ok(());
+            return Ok(false);
         }
         let mut budget = self.read_budget();
         if budget == 0 {
-            return Ok(());
+            return Ok(false);
         }
 
         let max_len = self.ctx.sctp_transport.receive_message_limit;
@@ -589,7 +610,7 @@ impl<'a> SctpHandler<'a> {
             // Drained per association, and stamped with *that* association's 5-tuple: a
             // shared batch would let one association's messages inherit another's transport.
             let mut messages = vec![];
-            Self::drain_stream(
+            if let Err(err) = Self::drain_stream(
                 &mut self.ctx.pending_readable,
                 &mut self.ctx.peer_opened_streams,
                 &mut self.ctx.ordered_until_reply,
@@ -600,7 +621,10 @@ impl<'a> SctpHandler<'a> {
                 max_len,
                 &mut budget,
                 &mut messages,
-            )?;
+            ) {
+                warn!("parked sctp stream {id} cannot be read, forgetting it: {err}");
+                self.ctx.pending_readable.remove(&(ch, id));
+            }
 
             for message in messages {
                 if let SctpMessage::Inbound(message) = message {
@@ -619,7 +643,33 @@ impl<'a> SctpHandler<'a> {
             // receiver-window credit — the peer only learns that from a SACK, so flush.
             self.ctx.flush_dirty = true;
         }
-        Ok(())
+        Ok(drained_any)
+    }
+
+    /// Whether a parked stream can be drained now: the pipeline has room again and the
+    /// stream's association is up and announced (data held back for the handshake is resumed
+    /// by the event that announces it, not by a timer).
+    ///
+    /// While this holds, `poll_timeout` reports a deadline, so that a stream parked by
+    /// back-pressure resumes by itself once the application has caught up, also when it
+    /// drained the pipeline without a `poll_read` (`RTCPeerConnection::poll_data_read`) and
+    /// no datagram arrives: the peer, stopped by the window, sends nothing until it hears of
+    /// the space. Each `handle_timeout` for it drains at least one message, forgets a stream
+    /// that cannot be read, or uses the room up, so the deadline never repeats without
+    /// progress.
+    fn resumable(&self) -> bool {
+        !self.ctx.pending_readable.is_empty()
+            && self.read_budget() > 0
+            && self.ctx.pending_readable.iter().any(|(ch, _)| {
+                !self.ctx.unannounced.contains(ch)
+                    && self.ctx.association_transport.contains_key(ch)
+                    && self
+                        .ctx
+                        .sctp_transport
+                        .sctp_associations
+                        .get(ch)
+                        .is_some_and(|conn| !conn.is_handshaking())
+            })
     }
 
     pub(crate) fn name(&self) -> &'static str {
@@ -1042,7 +1092,7 @@ impl<'a>
             }
 
             // The application may have drained while this packet was in flight, so retry
-            // anything parked before giving up until the retry timer.
+            // anything parked now rather than at the deadline `poll_timeout` reports for it.
             self.resume_pending_reads(now)?;
 
             // Ingest done — mark dirty so poll_write runs the single flush.
@@ -1058,8 +1108,7 @@ impl<'a>
 
     fn poll_read(&mut self) -> Option<Self::Rout> {
         // Top up from streams parked by back-pressure. This is exactly when capacity has
-        // appeared — somebody is asking for data, so the pipeline ahead has drained — and it
-        // needs no timer, no invented interval and no influence on `poll_timeout`.
+        // appeared: somebody is asking for data, so the pipeline ahead has drained.
         //
         // It is also the level-triggered half of the bounded drain. `StreamEvent::Readable`
         // is edge-triggered: it fires on a *new* DATA chunk, never because unread data
@@ -1068,8 +1117,13 @@ impl<'a>
         // feature engages.
         if self.ctx.read_outs.is_empty() && !self.ctx.pending_readable.is_empty() {
             let now = self.ctx.now;
-            if let Err(err) = self.resume_pending_reads(now) {
-                warn!("failed to resume parked SCTP streams: {}", err);
+            match self.resume_pending_reads(now) {
+                // The window the peer was stopped by may have opened: the SACK saying so is
+                // due now (RFC 9260 section 6.2), and the caller has most likely made its
+                // `poll_write` for this turn already, so `poll_timeout` asks for another.
+                Ok(true) => self.ctx.window_update_due = true,
+                Ok(false) => {}
+                Err(err) => warn!("failed to resume parked SCTP streams: {}", err),
             }
         }
         self.ctx.read_outs.pop_front()
@@ -1089,14 +1143,28 @@ impl<'a>
             // message interleaving (RFC 8831 section 6.6, `SctpTransport::max_message_size`);
             // a DCEP message is not the application's, and its label and protocol may take
             // more than that (RFC 8832 section 5.1).
-            let send_limit = if message.ppi == PayloadProtocolIdentifier::Dcep {
-                self.ctx.sctp_transport.negotiated_max_message_size
+            if message.ppi == PayloadProtocolIdentifier::Dcep {
+                let send_limit = self
+                    .ctx
+                    .sctp_transport
+                    .negotiated_max_message_size
+                    .unwrap_or(0) as usize;
+                if message.payload.len() > send_limit {
+                    return Err(Error::ErrOutboundPacketTooLarge);
+                }
+            } else if self
+                .ctx
+                .sctp_transport
+                .negotiated_max_message_size
+                .is_none()
+            {
+                if !message.payload.is_empty() {
+                    return Err(Error::ErrOutboundPacketTooLarge);
+                }
             } else {
-                self.ctx.sctp_transport.max_message_size()
-            }
-            .unwrap_or(0) as usize;
-            if message.payload.len() > send_limit {
-                return Err(Error::ErrOutboundPacketTooLarge);
+                self.ctx
+                    .sctp_transport
+                    .check_message_size(message.payload.len())?;
             }
 
             if let Some(conn) = self
@@ -1260,6 +1328,7 @@ impl<'a>
         // iteration before serving queued outbound.
         if self.ctx.flush_dirty || self.ctx.abort_requested {
             self.ctx.flush_dirty = false;
+            self.ctx.window_update_due = false;
             self.flush_transmits(self.ctx.now);
         }
         // After the flush above, so data the associations still held is sent before the ABORT.
@@ -1415,14 +1484,29 @@ impl<'a>
             }
         }
 
-        // Timer processed — mark dirty so poll_write runs the single flush.
+        // The deadline `poll_timeout` reported for a parked stream the pipeline has room for
+        // again (see `resumable`): drain it, so that it resumes with no datagram arriving.
+        self.resume_pending_reads(now)?;
+
+        // Timer processed — mark dirty so poll_write runs the single flush, which carries a
+        // window update that was due (`window_update_due`): this deadline was for it.
         self.ctx.flush_dirty = true;
+        self.ctx.window_update_due = false;
         self.ctx.observe(now);
 
         Ok(())
     }
 
     fn poll_timeout(&mut self) -> Option<Instant> {
+        // Work that is due now: a window update to flush, or a parked stream the pipeline has
+        // room for again. Reported as the newest instant the handler has seen, which is no
+        // later than the caller's clock; neither repeats once handled (`handle_timeout`
+        // clears the first and drains the second), so a caller that answers a due deadline
+        // with `handle_timeout` and its next `poll_write` does not spin.
+        if self.ctx.window_update_due || self.resumable() {
+            return Some(self.ctx.now);
+        }
+
         let mut eto = None;
 
         for conn in self.ctx.sctp_transport.sctp_associations.values() {
@@ -2287,16 +2371,17 @@ mod tests {
         }
     }
 
-    /// `poll_timeout` must stay silent about parked streams.
+    /// A parked stream resumes by itself once the pipeline has room again: `poll_timeout`
+    /// reports a deadline for it, `handle_timeout` drains it, and the SACK that reopens the
+    /// window is flushed with no inbound datagram (RFC 9260 section 6.2).
     ///
-    /// Reporting a deadline for them was tried and reverted. The only instant available here
-    /// is the *retained* one, which is always in the past relative to the caller's clock, and
-    /// a caller that computes `deadline - now` gets zero. `tests/ice_tcp_active_passive.rs`
-    /// treats a zero delay as "handle the timeout and `continue`", skipping its socket reads
-    /// — so a past deadline starved the connection of I/O for the test's full 30 s budget and
-    /// no data-channel message was ever delivered.
+    /// While the pipeline is full the deadline must not be reported. The only instant here
+    /// is the retained one, never later than the caller's clock, and a caller that answers a
+    /// due deadline with `handle_timeout` and `continue` (`tests/ice_tcp_active_passive.rs`)
+    /// would skip its socket reads for as long as it repeated: so it is reported only when
+    /// handling it makes progress, and not again once it has.
     #[test]
-    fn poll_timeout_reports_nothing_for_a_parked_stream() {
+    fn a_parked_stream_resumes_from_the_timer_once_the_pipeline_has_room() {
         let now = Instant::now();
         let mut e = establish();
         let dgrams = server_datagrams_carrying(&mut e, 1, 8, now);
@@ -2307,20 +2392,77 @@ mod tests {
             for dgram in dgrams {
                 handler.handle_read(raw_read(now, dgram)).expect("read");
             }
+            while handler.poll_write().is_some() {}
         }
         assert!(!ctx.pending_readable.is_empty(), "precondition: parked");
 
-        // With room, and with none: neither may produce a deadline at or before `now`.
-        for backlog in [0, SCTP_PIPELINE_READ_BACKLOG_LIMIT] {
-            let mut handler = SctpHandler::new(&mut ctx, backlog);
+        // No room: nothing the timer could do, so no deadline at or before `now`.
+        {
+            let mut handler = SctpHandler::new(&mut ctx, SCTP_PIPELINE_READ_BACKLOG_LIMIT);
             if let Some(eto) = handler.poll_timeout() {
                 assert!(
                     eto > now,
-                    "a parked stream must not put a past deadline in front of the caller \
-                     (backlog {backlog}): callers read that as zero delay and skip their I/O"
+                    "a parked stream with no room must not put a due deadline in front of \
+                     the caller: callers read that as zero delay and skip their I/O"
                 );
             }
         }
+
+        // The application drained the pipeline without a `poll_read` here, and nothing
+        // arrives: the deadline is due at once, and handling it drains the stream.
+        let later = now + Duration::from_millis(10);
+        let mut handler = SctpHandler::new(&mut ctx, 0);
+        assert!(
+            handler.poll_timeout().is_some_and(|eto| eto <= now),
+            "a parked stream the pipeline has room for must report a due deadline"
+        );
+        handler.handle_timeout(later).expect("timeout");
+        let mut resumed = 0;
+        while handler.poll_read().is_some() {
+            resumed += 1;
+        }
+        assert!(resumed > 0, "the timer did not resume the parked stream");
+        assert!(
+            handler.ctx.pending_readable.is_empty(),
+            "a fully drained stream must stop being remembered"
+        );
+        // Handled: the deadline is not repeated.
+        assert!(
+            handler.poll_timeout().is_none_or(|eto| eto > later),
+            "a handled deadline must not stay due"
+        );
+    }
+
+    /// A drain from `poll_read` that took data out of SCTP makes the next `poll_write` due:
+    /// the caller has usually made its `poll_write` for this turn before it reads, and the
+    /// SACK telling the peer of the space (RFC 9260 section 6.2) must not wait for whatever
+    /// wakes the caller next.
+    #[test]
+    fn a_resume_from_poll_read_makes_the_window_update_due() {
+        let now = Instant::now();
+        let mut e = establish();
+        let dgrams = server_datagrams_carrying(&mut e, 1, 8, now);
+
+        let mut ctx = client_ctx(now, e.client_ep, e.client_ch, e.client_conn);
+        {
+            let mut handler = SctpHandler::new(&mut ctx, SCTP_PIPELINE_READ_BACKLOG_LIMIT);
+            for dgram in dgrams {
+                handler.handle_read(raw_read(now, dgram)).expect("read");
+            }
+            while handler.poll_write().is_some() {}
+        }
+        let mut handler = SctpHandler::new(&mut ctx, 0);
+        assert!(handler.poll_read().is_some(), "precondition: resumed");
+        assert!(
+            handler.poll_timeout().is_some_and(|eto| eto <= now),
+            "the window update after a resumed drain must be due at once"
+        );
+        while handler.poll_write().is_some() {}
+        while handler.poll_read().is_some() {}
+        assert!(
+            handler.poll_timeout().is_none_or(|eto| eto > now),
+            "once flushed, the window update is not due any more"
+        );
     }
 
     // handle_timeout teardown-safety block: a graceful shutdown queues both the
@@ -5096,9 +5238,19 @@ mod tests {
         .expect("DCEP OPEN");
         try_client_write(&mut a, now, ch, 4, PayloadProtocolIdentifier::Dcep, &open)
             .expect("a DATA_CHANNEL_OPEN over 16 KB is sent");
+        let refused = try_client_write(&mut a, now, ch, 4, binary, &big);
         assert_eq!(
-            try_client_write(&mut a, now, ch, 4, binary, &big),
-            Err(Error::ErrOutboundPacketTooLarge)
+            refused,
+            Err(Error::ErrMessageTooLargeWithoutInterleaving {
+                size: 16 * 1024 + 1,
+                limit: 16 * 1024,
+            })
+        );
+        let text = refused.unwrap_err().to_string();
+        assert!(
+            text.contains("16384")
+                && text.contains("with_sctp_message_size_limit_without_interleaving(false)"),
+            "the error names the limit and the setting that lifts it: {text}"
         );
         try_client_write(&mut a, now, ch, 4, binary, &fits).expect("16 KB is within the limit");
 

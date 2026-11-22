@@ -908,6 +908,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with `T_rr_interval` zero spends its RTCP share). The TWCC and RFC 8888 generators' cadence
   reads the same nominal figure. A `Gcc` sender fed by the engine's receiver reaches 2 Mbit/s
   from 300 kbit/s in 0.24 s (0.58 s before).
+- **data_channel**: no DCEP handshake timeout by default
+  (`SettingEngine::data_channel.dcep_handshake_timeout` is `None`; it was 30 s). RFC 8832 has
+  none: the DATA_CHANNEL_OPEN and DATA_CHANNEL_ACK travel on a reliable stream. Under heavy
+  loss (`tests/lossy_link_rtc2rtc.rs`, 30 % each way, seed 0x5eed) the ACK took longer than
+  30 s, because the peer's half of the SCTP handshake was still in progress (its COOKIE ACK
+  lost, the OPEN discarded in COOKIE-ECHOED until a retransmitted COOKIE ECHO was answered) or
+  the OPEN was retransmitted at a doubling RTO, and the timeout closed the channel, with no
+  error, while ICE, DTLS and SCTP were up. A timeout configured with
+  `with_dcep_handshake_timeout(Some(..))` now fails the channel with `OnError` before
+  `OnClose`. Test: `a_channel_whose_ack_takes_longer_than_thirty_seconds_still_opens`.
+- **data_channel**: a send over 16 KB to a peer without message interleaving (RFC 8831
+  section 6.6; every current browser) is refused with the new
+  `Error::ErrMessageTooLargeWithoutInterleaving { size, limit }` instead of
+  `ErrOutboundPacketTooLarge`, so the message says what the limit is and that
+  `SettingEngineBuilder::with_sctp_message_size_limit_without_interleaving(false)` lifts it.
+  A send over the peer's `max-message-size` still gets `ErrOutboundPacketTooLarge`. Test:
+  `the_16_kb_limit_applies_only_when_i_data_was_not_negotiated`.
 - **interceptor**: bandwidth probing is on in the default interceptor set
   (`DefaultInterceptorOptions::bandwidth_probing` now `true`; `false` is the opt-out). RFC 8836
   section 2 (requirement 4, a SHOULD) asks a congestion controller to adapt as quickly as
@@ -1977,6 +1994,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+- **sctp**: a stream parked by back-pressure resumed only from `poll_read` or the peer's next
+  datagram, and the SACK that reopens the window waited for the next `poll_write`, which a
+  caller has usually made before it reads: a sender stopped by a zero window then waited for
+  its own window probe, a retransmission timeout later, or for whatever woke the caller
+  (RFC 9260 section 6.2). `poll_timeout` now reports a deadline when a drain from `poll_read`
+  has made a window update due, and while a parked stream's pipeline has room again
+  (`handle_timeout` drains it, also for a caller that empties the pipeline with
+  `poll_data_read`); never while the pipeline is full, and never twice for the same work. The
+  two comments that spoke of a retry timer that did not exist are corrected. Tests:
+  `a_receiver_that_reads_again_reopens_the_window_without_an_inbound_datagram`,
+  `a_parked_stream_resumes_from_its_deadline_when_the_pipeline_is_drained_directly`.
 - **jsep**: an answer has only the `a=rtcp-fb` the offer has for each format (RFC 4585 section
   4.2: "The answerer MUST NOT add feedback parameters"). A renegotiation whose offer dropped a
   feedback type (or `trr-int`) was answered with what the first offer had, because the
