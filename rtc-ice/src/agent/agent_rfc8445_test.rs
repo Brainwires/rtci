@@ -257,7 +257,10 @@ fn test_role_attribute_after_message_integrity_is_ignored() {
     m.add(ATTR_ICE_CONTROLLED, &0u64.to_be_bytes());
     assert!(m.contains(ATTR_ICE_CONTROLLED));
 
-    deliver(&mut a, now, &m, REMOTE_A).unwrap();
+    // The appended attribute also follows FINGERPRINT, which RFC 8489 section 14.7 has as the
+    // last attribute: the STUN layer may refuse the whole message for that. Refused or taken
+    // without the attribute, the role stands.
+    let _ = deliver(&mut a, now, &m, REMOTE_A);
 
     assert!(
         !a.is_controlling,
