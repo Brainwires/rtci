@@ -252,27 +252,44 @@ impl RTCRtpReceiver<'_> {
             .track()
     }
 
-    /// Returns the RTP capabilities for the specified codec kind.
-    ///
-    /// The static [`get_capabilities`](RTCRtpReceiver::get_capabilities) method returns the most
-    /// optimistic view of the capabilities of the system for receiving media of the given kind
-    /// as defined in the [W3C WebRTC specification](https://www.w3.org/TR/webrtc/#dom-rtcrtpreceiver-getcapabilities).
+    /// The RTP capabilities of the engine for receiving `kind`: every codec the media engine
+    /// has registered for it (the retransmission format once, without an `sdpFmtpLine`) and
+    /// the header extensions registered for receiving. Nothing negotiated is read (W3C
+    /// `RTCRtpReceiver.getCapabilities`, a static method). `None` for a kind that is neither
+    /// audio nor video.
     ///
     /// # Parameters
     ///
     /// * `kind` - The codec kind (audio or video)
-    ///
-    /// # Returns
-    ///
-    /// Returns the RTP capabilities supported by this receiver for the specified codec kind.
     pub fn get_capabilities(&self, kind: RtpCodecKind) -> Option<RTCRtpCapabilities> {
-        // peer_connection is mutable borrow, its rtp_transceivers won't be resized and
-        // the direction won't be changed too, so, unwrap() here is safe.
+        internal::RTCRtpReceiverInternal::get_capabilities(kind, &self.peer_connection.media_engine)
+    }
+
+    /// The jitter buffer target the application asked for (W3C `jitterBufferTarget`): `None`
+    /// (null) leaves the delay to the engine.
+    ///
+    /// The engine keeps the value for the application's jitter buffer to read; the jitter
+    /// buffer interceptors take their delay when they are built.
+    pub fn jitter_buffer_target(&self) -> Option<std::time::Duration> {
         self.peer_connection.rtp_transceivers[self.id.0]
             .receiver()
             .as_ref()
-            .unwrap()
-            .get_capabilities(kind, &self.peer_connection.media_engine)
+            .and_then(|receiver| receiver.jitter_buffer_target())
+    }
+
+    /// Sets the jitter buffer target; `None` resets it to the engine's choice.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::RangeError`](shared::error::Error::RangeError) for a target above 4000
+    /// milliseconds (a `Duration` cannot be negative, the other value W3C refuses); the
+    /// stored target is then unchanged.
+    pub fn set_jitter_buffer_target(&mut self, target: Option<std::time::Duration>) -> Result<()> {
+        self.peer_connection.rtp_transceivers[self.id.0]
+            .receiver_mut()
+            .as_mut()
+            .expect("every transceiver has a receiver")
+            .set_jitter_buffer_target(target)
     }
 
     /// Returns the RTP receive parameters for this receiver.

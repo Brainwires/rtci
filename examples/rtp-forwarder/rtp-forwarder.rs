@@ -296,8 +296,14 @@ async fn run_peer_connection(
         .build(Instant::now())?;
 
     // Add transceivers for receiving audio and video
-    peer_connection.add_transceiver_from_kind(RtpCodecKind::Audio, None)?;
-    peer_connection.add_transceiver_from_kind(RtpCodecKind::Video, None)?;
+    peer_connection.add_transceiver_from_kind(
+        RtpCodecKind::Audio,
+        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+    )?;
+    peer_connection.add_transceiver_from_kind(
+        RtpCodecKind::Video,
+        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+    )?;
 
     peer_connection.set_remote_description(Instant::now(), offer)?;
 

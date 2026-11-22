@@ -57,7 +57,10 @@ fn offerer_with(
     max_bundle_alias: bool,
 ) -> Result<RTCPeerConnection, Box<dyn std::error::Error>> {
     let mut pc = peer_with(policy, max_bundle_alias)?;
-    pc.add_transceiver_from_kind(RtpCodecKind::Audio, None)?;
+    pc.add_transceiver_from_kind(
+        RtpCodecKind::Audio,
+        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+    )?;
     pc.add_track(video_track("first", 0x0101_0101))?;
     pc.add_track(video_track("second", 0x0202_0202))?;
     pc.create_data_channel("data", None)?;

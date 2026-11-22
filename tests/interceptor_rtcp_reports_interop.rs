@@ -295,7 +295,6 @@ async fn test_custom_interceptor_registry_with_rtcp_reports() -> Result<()> {
                 .ok_or(Error::ErrRTPSenderNotExisted)?;
 
             let ssrc = rtp_sender
-                .track()
                 .ssrcs()
                 .last()
                 .ok_or(Error::ErrSenderWithNoSSRCs)?;
@@ -579,7 +578,6 @@ async fn test_sender_report_generation_on_rtp_send() -> Result<()> {
                 .ok_or(Error::ErrRTPSenderNotExisted)?;
 
             let ssrc = rtp_sender
-                .track()
                 .ssrcs()
                 .last()
                 .ok_or(Error::ErrSenderWithNoSSRCs)?;
@@ -867,7 +865,6 @@ async fn test_register_default_interceptors_helper() -> Result<()> {
                 .ok_or(Error::ErrRTPSenderNotExisted)?;
 
             let ssrc = rtp_sender
-                .track()
                 .ssrcs()
                 .last()
                 .ok_or(Error::ErrSenderWithNoSSRCs)?;

@@ -82,12 +82,14 @@ fn the_initial_offer_carries_a_random_tls_id() -> Result<()> {
 #[test]
 fn the_tls_id_sits_on_the_bundle_tag_section_only() -> Result<()> {
     let mut world = world()?;
-    world.peers[0]
-        .pc
-        .add_transceiver_from_kind(RtpCodecKind::Audio, None)?;
-    world.peers[0]
-        .pc
-        .add_transceiver_from_kind(RtpCodecKind::Video, None)?;
+    world.peers[0].pc.add_transceiver_from_kind(
+        RtpCodecKind::Audio,
+        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+    )?;
+    world.peers[0].pc.add_transceiver_from_kind(
+        RtpCodecKind::Video,
+        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+    )?;
     world.peers[0].pc.create_data_channel("data", None)?;
     let (offer, answer) = world.exchange(0)?;
     for sdp in [offer, answer] {
@@ -170,9 +172,10 @@ fn the_tls_id_is_kept_while_the_association_is() -> Result<()> {
 #[test]
 fn a_new_association_gets_new_tls_ids() -> Result<()> {
     let mut world = world()?;
-    let audio = world.peers[0]
-        .pc
-        .add_transceiver_from_kind(RtpCodecKind::Audio, None)?;
+    let audio = world.peers[0].pc.add_transceiver_from_kind(
+        RtpCodecKind::Audio,
+        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+    )?;
     let (offer, answer) = world.exchange(0)?;
     let ids = [tls_id(&offer), tls_id(&answer)];
     world.trickle()?;
@@ -192,9 +195,10 @@ fn a_new_association_gets_new_tls_ids() -> Result<()> {
     assert!(attribute_values(&offer, "tls-id").is_empty(), "{offer}");
     assert!(attribute_values(&answer, "tls-id").is_empty(), "{answer}");
 
-    world.peers[0]
-        .pc
-        .add_transceiver_from_kind(RtpCodecKind::Video, None)?;
+    world.peers[0].pc.add_transceiver_from_kind(
+        RtpCodecKind::Video,
+        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+    )?;
     let first_try = tls_id(&world.peers[0].pc.create_offer(None)?.sdp);
     assert_ne!(first_try, ids[0], "the offer asks for a new association");
     let (offer, answer) = world.exchange(0)?;
@@ -249,9 +253,10 @@ fn a_new_association_gets_new_tls_ids() -> Result<()> {
 #[test]
 fn a_malformed_tls_id_is_refused() -> Result<()> {
     let mut offerer = peer("10.0.0.1:5000")?;
-    offerer
-        .pc
-        .add_transceiver_from_kind(RtpCodecKind::Audio, None)?;
+    offerer.pc.add_transceiver_from_kind(
+        RtpCodecKind::Audio,
+        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+    )?;
     offerer.pc.create_data_channel("data", None)?;
     let offer = offerer.pc.create_offer(None)?.sdp;
     let apply = |sdp: String| -> Result<bool> {

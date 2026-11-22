@@ -7,6 +7,7 @@ use crate::rtp_transceiver::direction::RTCRtpTransceiverDirection;
 use crate::rtp_transceiver::rtp_receiver::rtp_contributing_source::{
     RTCRtpContributingSource, RTCRtpSynchronizationSource,
 };
+use crate::rtp_transceiver::rtp_sender::internal::rtp_capabilities;
 use crate::rtp_transceiver::rtp_sender::rtp_capabilities::RTCRtpCapabilities;
 use crate::rtp_transceiver::rtp_sender::rtp_codec::{
     CodecMatch, FecFormat, RtpCodecKind, codec_parameters_fuzzy_search, find_fec_format,
@@ -14,7 +15,6 @@ use crate::rtp_transceiver::rtp_sender::rtp_codec::{
 };
 use crate::rtp_transceiver::rtp_sender::rtp_codec_parameters::RTCRtpCodecParameters;
 use crate::rtp_transceiver::rtp_sender::rtp_coding_parameters::RTCRtpCodingParameters;
-use crate::rtp_transceiver::rtp_sender::rtp_header_extension_capability::RTCRtpHeaderExtensionCapability;
 use crate::rtp_transceiver::rtp_sender::rtp_receiver_parameters::RTCRtpReceiveParameters;
 use crate::rtp_transceiver::rtp_sender::{RTCRtpCodec, RTCRtpHeaderExtensionParameters};
 use crate::rtp_transceiver::{PayloadType, SSRC};
@@ -26,6 +26,10 @@ use std::time::{Duration, Instant};
 /// How long a source stays in `get_contributing_sources` / `get_synchronization_sources`
 /// after its last packet (W3C webrtc 5.3: sources of "the last 10 seconds").
 pub(crate) const SOURCE_LIFETIME: Duration = Duration::from_secs(10);
+
+/// The greatest `jitterBufferTarget` (W3C webrtc 5.3: a target above 4000 milliseconds is a
+/// `RangeError`).
+pub(crate) const MAX_JITTER_BUFFER_TARGET: Duration = Duration::from_millis(4000);
 
 /// The most contributing sources a receiver lists; a packet carries at most 15 and a mixer
 /// rotates through its participants, so the least recent make room past this.
@@ -55,7 +59,7 @@ pub(crate) struct RTCRtpReceiverInternal {
     track: MediaStreamTrack,
     contributing_sources: Vec<RTCRtpContributingSource>,
     synchronization_sources: Vec<RTCRtpSynchronizationSource>,
-    jitter_buffer_target: Duration,
+    jitter_buffer_target: Option<Duration>,
 
     receive_codings: Vec<RTCRtpCodingParameters>,
     receive_codecs: Vec<RTCRtpCodecParameters>,
@@ -75,7 +79,7 @@ impl RTCRtpReceiverInternal {
             track: Default::default(),
             contributing_sources: vec![],
             synchronization_sources: vec![],
-            jitter_buffer_target: Default::default(),
+            jitter_buffer_target: None,
             receive_codings,
 
             receive_codecs: vec![],
@@ -112,36 +116,29 @@ impl RTCRtpReceiverInternal {
         &mut self.track
     }
 
+    /// The RTP capabilities of the engine for receiving `kind` (W3C webrtc 5.3
+    /// `RTCRtpReceiver.getCapabilities`, a static method); `None` for a kind that is neither
+    /// audio nor video.
     pub(crate) fn get_capabilities(
-        &self,
         kind: RtpCodecKind,
         media_engine: &MediaEngine,
     ) -> Option<RTCRtpCapabilities> {
-        if kind == RtpCodecKind::Unspecified {
-            return None;
+        rtp_capabilities(kind, RTCRtpTransceiverDirection::Recvonly, media_engine)
+    }
+
+    /// W3C `[[JitterBufferTarget]]`: `None` is null, the engine's own choice.
+    pub(crate) fn jitter_buffer_target(&self) -> Option<Duration> {
+        self.jitter_buffer_target
+    }
+
+    pub(crate) fn set_jitter_buffer_target(&mut self, target: Option<Duration>) -> Result<()> {
+        if target.is_some_and(|target| target > MAX_JITTER_BUFFER_TARGET) {
+            return Err(shared::error::Error::RangeError(
+                "jitterBufferTarget must be at most 4000 ms".to_string(),
+            ));
         }
-
-        let rtp_parameters = media_engine
-            .get_rtp_parameters_by_kind(self.kind(), RTCRtpTransceiverDirection::Recvonly);
-
-        Some(RTCRtpCapabilities {
-            codecs: self
-                .receive_codecs
-                .iter()
-                .filter(|codec| {
-                    codec
-                        .rtp_codec
-                        .mime_type
-                        .contains(kind.to_string().as_str())
-                })
-                .map(|codec| codec.rtp_codec.clone())
-                .collect(),
-            header_extensions: rtp_parameters
-                .header_extensions
-                .into_iter()
-                .map(|h| RTCRtpHeaderExtensionCapability { uri: h.uri })
-                .collect(),
-        })
+        self.jitter_buffer_target = target;
+        Ok(())
     }
 
     pub(crate) fn get_parameters(
@@ -334,6 +331,20 @@ impl RTCRtpReceiverInternal {
 
     pub(crate) fn set_track(&mut self, track: MediaStreamTrack) {
         self.track = track;
+    }
+
+    /// Ends the receiver's track (W3C webrtc 5.4 "stop sending and receiving").
+    ///
+    /// # Returns
+    ///
+    /// Whether the track was live, so that its end is announced once.
+    pub(crate) fn end_track(&mut self) -> bool {
+        use crate::media_stream::track_state::MediaStreamTrackState;
+        if self.track.ready_state() == MediaStreamTrackState::Ended {
+            return false;
+        }
+        self.track.stop();
+        true
     }
 
     pub(crate) fn stop(

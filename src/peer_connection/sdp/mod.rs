@@ -1106,7 +1106,7 @@ impl RTCPeerConnection {
         }
         if codecs.is_empty() {
             // If we are sender and have no codecs throw an error early
-            if transceiver.sender().is_some() {
+            if transceiver.describes_sender() {
                 return Err(Error::ErrSenderWithNoCodecs);
             }
 
@@ -1298,7 +1298,11 @@ impl RTCPeerConnection {
         let mut send_rids = vec![];
 
         let cname = media_engine.rtcp_cname.as_str();
-        if let Some(sender) = transceiver.sender_mut() {
+        // Every transceiver has a sender; one that has neither a track nor a sending
+        // direction is not described (RFC 9429 section 5.2.1).
+        if transceiver.describes_sender()
+            && let Some(sender) = transceiver.sender_mut()
+        {
             let (encodings, track) = (
                 sender.get_parameters(media_engine).encodings.clone(),
                 sender.track(),

@@ -159,12 +159,13 @@ fn test_rtp_sender_replace_track() -> Result<()> {
     pair.offerer
         .rtp_sender(sender_id)
         .expect("sender")
-        .replace_track(track(MIME_TYPE_H264, "", Some(ssrc)))?;
+        .replace_track(Some(track(MIME_TYPE_H264, "", Some(ssrc))))?;
     assert_eq!(
         pair.offerer
             .rtp_sender(sender_id)
             .expect("sender")
             .track()
+            .expect("the sender has a track")
             .codings()[0]
             .codec
             .mime_type,
@@ -215,7 +216,7 @@ fn test_rtp_sender_get_parameters() -> Result<()> {
         .sender()
         .expect("a sending transceiver has a sender");
     let mut sender = offerer.rtp_sender(sender_id).expect("sender");
-    let track_ssrc = sender.track().ssrcs().next();
+    let track_ssrc = sender.ssrcs().next();
     assert!(track_ssrc.is_some());
     let parameters = sender.get_parameters();
     assert_ne!(0, parameters.rtp_parameters.codecs.len());
@@ -242,7 +243,7 @@ fn test_rtp_sender_get_parameters_with_rid() -> Result<()> {
     signal_pair(&mut offerer, &mut answerer)?;
 
     let mut sender = offerer.rtp_sender(sender_id).expect("sender");
-    let track_ssrc = sender.track().ssrcs().next();
+    let track_ssrc = sender.ssrcs().next();
     assert!(track_ssrc.is_some());
     let parameters = sender.get_parameters();
     assert_ne!(0, parameters.rtp_parameters.codecs.len());
@@ -280,7 +281,7 @@ fn test_rtp_sender_replace_track_invalid_track_kind_change() -> Result<()> {
         sender
             .rtp_sender(sender_id)
             .expect("sender")
-            .replace_track(audio_track)
+            .replace_track(Some(audio_track))
             .unwrap_err(),
         Error::ErrRTPSenderNewTrackHasIncorrectKind
     );
@@ -316,7 +317,7 @@ fn test_rtp_sender_replace_track_invalid_codec_change() -> Result<()> {
     pair.offerer
         .rtp_sender(sender_id)
         .expect("sender")
-        .replace_track(track(MIME_TYPE_VP9, "", Some(ssrc)))?;
+        .replace_track(Some(track(MIME_TYPE_VP9, "", Some(ssrc))))?;
 
     let codecs = pair
         .offerer
@@ -345,26 +346,37 @@ fn test_rtp_sender_replace_track_invalid_codec_change() -> Result<()> {
     pair.close()
 }
 
-/// Replaced: the old test cleared the sender's track (`replace_track(None)`) and expected no
-/// encodings. A sans-IO `replace_track` takes a track, not an `Option`; a sender stops having a
-/// track when it is removed. After that the transceiver no longer sends and the sender is gone,
-/// so it reports no parameters at all.
+/// W3C webrtc 5.1 `removeTrack` / 5.2 `replaceTrack(null)`: the sender's track becomes null,
+/// and the sender stays: it is still in `getSenders`, keeps its encodings and parameters, and
+/// its transceiver stops offering to send.
 #[test]
 fn test_rtp_sender_get_parameters_replaced() -> Result<()> {
     let (mut sender, mut receiver) = new_pair()?;
     let sender_id = sender.add_track(track(MIME_TYPE_VP8, "", None))?;
-    {
+    let ssrc = {
         let mut rtp_sender = sender.rtp_sender(sender_id).expect("sender");
         assert_eq!(1, rtp_sender.get_parameters().encodings.len());
-    }
+        rtp_sender.get_parameters().encodings[0]
+            .rtp_coding_parameters
+            .ssrc
+    };
 
     sender.remove_track(sender_id)?;
-    assert!(sender.rtp_sender(sender_id).is_none());
-    assert!(sender.get_senders().all(|id| id != sender_id));
+    {
+        let mut rtp_sender = sender
+            .rtp_sender(sender_id)
+            .expect("the sender outlives its track");
+        assert!(rtp_sender.track().is_none());
+        let parameters = rtp_sender.get_parameters().clone();
+        assert_eq!(1, parameters.encodings.len());
+        assert_eq!(ssrc, parameters.encodings[0].rtp_coding_parameters.ssrc);
+        rtp_sender.set_parameters(parameters, None)?;
+    }
+    assert!(sender.get_senders().any(|id| id == sender_id));
     assert_eq!(
         sender
             .rtp_transceiver(sender_id.0)
-            .expect("the transceiver outlives its sender")
+            .expect("transceiver")
             .direction(),
         RTCRtpTransceiverDirection::Recvonly
     );
@@ -373,10 +385,6 @@ fn test_rtp_sender_get_parameters_replaced() -> Result<()> {
     receiver.close()
 }
 
-/// Replaced: the old test called `send` twice and expected `ErrRTPSenderSendAlreadyCalled` on
-/// the second. The sans-IO sender has no `send`: negotiation starts it, binding its streams to
-/// the interceptor chain. What the error protected against is a sender started twice, which
-/// here would bind its streams twice; a second negotiation must not.
 #[test]
 fn test_rtp_sender_send() -> Result<()> {
     let (registry, log) = RecordingInterceptor::registry();
@@ -423,10 +431,9 @@ fn test_rtp_sender_send() -> Result<()> {
     receiver.close()
 }
 
-/// Replaced: the old test expected `send` on a removed sender to fail with
-/// `ErrRTPSenderTrackRemoved`. Without `send`, the sans-IO equivalents are that removing the
-/// track unbinds the sender's streams from the interceptor chain and leaves no sender to write
-/// through.
+/// Removing the track unbinds the sender's streams from the interceptor chain (which has the
+/// sender report interceptor say BYE), and RTP written to the sender is then refused with
+/// `ErrRTPSenderTrackRemoved` until `replace_track` gives it a track again.
 #[test]
 fn test_rtp_sender_send_track_removed() -> Result<()> {
     let (registry, log) = RecordingInterceptor::registry();
@@ -457,7 +464,34 @@ fn test_rtp_sender_send_track_removed() -> Result<()> {
             .any(|info| info.ssrc == ssrc),
         "removing the track unbinds its stream"
     );
-    assert!(sender.rtp_sender(sender_id).is_none());
+    let packet = rtp::Packet {
+        header: rtp::Header {
+            version: 2,
+            ssrc,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut rtp_sender = sender.rtp_sender(sender_id).expect("sender");
+    assert_eq!(
+        rtp_sender.write_rtp(Instant::now(), packet.clone()),
+        Err(Error::ErrRTPSenderTrackRemoved)
+    );
+    // With a track again the sender sends, on the SSRC it had, without negotiation.
+    rtp_sender.replace_track(Some(track(MIME_TYPE_VP8, "", None)))?;
+    assert_eq!(rtp_sender.ssrcs().collect::<Vec<_>>(), vec![ssrc]);
+    assert_eq!(
+        rtp_sender
+            .track()
+            .expect("track")
+            .ssrcs()
+            .collect::<Vec<_>>(),
+        vec![ssrc]
+    );
+    assert_ne!(
+        rtp_sender.write_rtp(Instant::now(), packet),
+        Err(Error::ErrRTPSenderTrackRemoved)
+    );
 
     sender.close()?;
     receiver.close()
@@ -660,12 +694,7 @@ fn test_rtp_sender_rtx() -> Result<()> {
     // used is decided by the codec the encoding sends, below.
     assert!(rtx_ssrc(&mut offerer, sender_b).is_some());
 
-    let vp8_ssrc = offerer
-        .rtp_sender(sender_a)
-        .expect("sender")
-        .track()
-        .ssrcs()
-        .next();
+    let vp8_ssrc = offerer.rtp_sender(sender_a).expect("sender").ssrcs().next();
 
     offerer.close()?;
     answerer.close()?;

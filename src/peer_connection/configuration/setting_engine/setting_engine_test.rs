@@ -27,10 +27,16 @@ fn pc_with(setting_engine: SettingEngine) -> crate::peer_connection::RTCPeerConn
 /// An offer with an audio and a video section, from a peer with `setting_engine`.
 fn offer_with(setting_engine: SettingEngine) -> String {
     let mut pc = pc_with(setting_engine);
-    pc.add_transceiver_from_kind(RtpCodecKind::Audio, None)
-        .expect("audio");
-    pc.add_transceiver_from_kind(RtpCodecKind::Video, None)
-        .expect("video");
+    pc.add_transceiver_from_kind(
+        RtpCodecKind::Audio,
+        Some(crate::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+    )
+    .expect("audio");
+    pc.add_transceiver_from_kind(
+        RtpCodecKind::Video,
+        Some(crate::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+    )
+    .expect("video");
     pc.create_offer(None).expect("offer").sdp
 }
 
@@ -150,7 +156,10 @@ fn test_answering_dtls_role_in_answer() {
     ] {
         let mut offerer = pc_with(SettingEngine::default());
         offerer
-            .add_transceiver_from_kind(RtpCodecKind::Video, None)
+            .add_transceiver_from_kind(
+                RtpCodecKind::Video,
+                Some(crate::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+            )
             .expect("video");
         let offer = offerer.create_offer(None).expect("offer");
 

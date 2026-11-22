@@ -104,7 +104,10 @@ fn test_set_direction_change_triggers_renegotiation() {
 
     // Add a recvonly audio transceiver on the offer side.
     let tid = offer_pc
-        .add_transceiver_from_kind(RtpCodecKind::Audio, None)
+        .add_transceiver_from_kind(
+            RtpCodecKind::Audio,
+            Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+        )
         .unwrap();
 
     // Complete an initial offer/answer cycle to clear is_negotiation_ongoing.
@@ -134,7 +137,8 @@ fn test_set_direction_change_triggers_renegotiation() {
             RTCRtpTransceiverDirection::Recvonly,
             "precondition: direction should be Recvonly"
         );
-        t.set_direction(RTCRtpTransceiverDirection::Sendrecv);
+        t.set_direction(RTCRtpTransceiverDirection::Sendrecv)
+            .expect("the change is accepted");
     }
 
     let events = drain_events(&mut offer_pc);
@@ -149,7 +153,8 @@ fn test_set_direction_change_triggers_renegotiation() {
     drain_events(&mut offer_pc);
     {
         let mut t = offer_pc.rtp_transceiver(tid).unwrap();
-        t.set_direction(RTCRtpTransceiverDirection::Sendrecv);
+        t.set_direction(RTCRtpTransceiverDirection::Sendrecv)
+            .expect("the change is accepted");
     }
     let events = drain_events(&mut offer_pc);
     assert!(

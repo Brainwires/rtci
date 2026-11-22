@@ -167,7 +167,10 @@ fn test_answer_to_renumbering_peer_is_well_formed() -> Result<(), Box<dyn std::e
     let mut answerer = RTCPeerConnectionBuilder::new()
         .with_media_engine(video_engine(&local))
         .build(Instant::now())?;
-    offerer.add_transceiver_from_kind(RtpCodecKind::Video, None)?;
+    offerer.add_transceiver_from_kind(
+        RtpCodecKind::Video,
+        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+    )?;
 
     let first_answer = VideoSection::parse(&exchange(&mut offerer, &mut answerer)?);
     assert_eq!(
@@ -180,7 +183,10 @@ fn test_answer_to_renumbering_peer_is_well_formed() -> Result<(), Box<dyn std::e
     let mut offerer2 = RTCPeerConnectionBuilder::new()
         .with_media_engine(video_engine(&second))
         .build(Instant::now())?;
-    offerer2.add_transceiver_from_kind(RtpCodecKind::Video, None)?;
+    offerer2.add_transceiver_from_kind(
+        RtpCodecKind::Video,
+        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+    )?;
 
     let offer2 = offerer2.create_offer(None)?;
     let offered = VideoSection::parse(&offer2.sdp);
