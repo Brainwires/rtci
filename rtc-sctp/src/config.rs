@@ -79,6 +79,9 @@ pub struct TransportConfig {
     stream_scheduler: StreamScheduler,
     valid_cookie_life: Duration,
     heartbeat_interval: Option<Duration>,
+    slow_start_growth_limit: u32,
+    max_burst: Option<u32>,
+    sack_delay: Duration,
 }
 
 impl Default for TransportConfig {
@@ -95,11 +98,58 @@ impl Default for TransportConfig {
             stream_scheduler: StreamScheduler::default(),
             valid_cookie_life: Duration::from_secs(60),
             heartbeat_interval: Some(Duration::from_secs(30)),
+            slow_start_growth_limit: 1,
+            max_burst: None,
+            sack_delay: Duration::from_millis(200),
         }
     }
 }
 
 impl TransportConfig {
+    /// Sets L of RFC 9260 section 7.2.1: in slow start one SACK grows the congestion window
+    /// by at most the bytes it acknowledges and at most L packets (L x PMDCS). The RFC says L
+    /// SHOULD be 1 and MAY be larger (RFC 3465 discusses the choice): 1 is the default. A
+    /// receiver that acknowledges many packets with one SACK, as one that reads its socket in
+    /// batches does, makes a sender with L = 1 leave slow start slowly; a larger L restores
+    /// the faster ramp at the price the RFC names (a burst after such a SACK, and trust in
+    /// the receiver not to split its acknowledgements). Zero counts as one.
+    pub fn with_slow_start_growth_limit(mut self, value: u32) -> Self {
+        self.slow_start_growth_limit = value.max(1);
+        self
+    }
+
+    /// L, see [`with_slow_start_growth_limit`](Self::with_slow_start_growth_limit).
+    pub fn slow_start_growth_limit(&self) -> u32 {
+        self.slow_start_growth_limit
+    }
+
+    /// Sets SACK.Delay (RFC 9260 sections 6.2 and 16): how long the acknowledgement of a DATA
+    /// chunk may wait for a second one. Defaults to 200 ms. The RFC forbids more than 500 ms,
+    /// so a longer delay is taken as 500 ms.
+    pub fn with_sack_delay(mut self, value: Duration) -> Self {
+        self.sack_delay = value.min(Duration::from_millis(500));
+        self
+    }
+
+    /// SACK.Delay, see [`with_sack_delay`](Self::with_sack_delay).
+    pub fn sack_delay(&self) -> Duration {
+        self.sack_delay
+    }
+
+    /// Sets Max.Burst (RFC 9260 sections 6.1 D and 16, where the recommended value is 4):
+    /// before DATA is sent the congestion window is brought down to what is outstanding plus
+    /// this many packets. `None`, the default, applies no such limit: an owner that
+    /// acknowledges in batches would have its peer's window cut on every SACK.
+    pub fn with_max_burst(mut self, value: Option<u32>) -> Self {
+        self.max_burst = value;
+        self
+    }
+
+    /// Max.Burst, see [`with_max_burst`](Self::with_max_burst).
+    pub fn max_burst(&self) -> Option<u32> {
+        self.max_burst
+    }
+
     /// Sets HB.interval (RFC 9260 8.3, 16): an association whose path has been idle for an RTO
     /// plus this long sends a HEARTBEAT, which measures the round trip and shows that the peer
     /// is still there. One left unanswered counts toward

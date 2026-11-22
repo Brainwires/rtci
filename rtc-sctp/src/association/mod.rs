@@ -368,6 +368,24 @@ pub struct Association {
     partial_bytes_acked: u32,
     pub(crate) in_fast_recovery: bool,
     fast_recover_exit_point: u32,
+    /// The Path Maximum DATA Chunk Size (RFC 9260 2.2): the largest DATA chunk, header
+    /// included, that fits a packet. The unit of the congestion window rules.
+    pub(crate) pmdcs: u32,
+    /// L of RFC 9260 7.2.1: in slow start one SACK grows cwnd by at most L x PMDCS.
+    slow_start_growth_limit: u32,
+    /// Max.Burst (RFC 9260 6.1 D), when applied.
+    max_burst: Option<u32>,
+    /// When DATA was last sent, for the decay of an idle congestion window (7.2.1).
+    last_data_sent: Option<Instant>,
+    /// Set by a T3-rtx expiry: the retransmission that follows is one packet (6.3.3 E3).
+    t3_single_packet: bool,
+    /// The TSNs marked for Fast Retransmit (their third miss indication) since the last
+    /// Fast Retransmit packet. What of them does not fit that packet waits for cwnd.
+    fast_retransmit_marked: Vec<u32>,
+    /// The a_rwnd of the last SACK sent (of the INIT or INIT ACK before any).
+    last_advertised_window: u32,
+    /// SACK.Delay (RFC 9260 6.2, 16), in milliseconds.
+    sack_delay: u64,
 
     // Chunks stored for retransmission
     stored_init: Option<ChunkInit>,
@@ -496,6 +514,14 @@ impl Default for Association {
             partial_bytes_acked: 0,
             in_fast_recovery: false,
             fast_recover_exit_point: 0,
+            pmdcs: 0,
+            slow_start_growth_limit: 1,
+            max_burst: None,
+            last_data_sent: None,
+            t3_single_packet: false,
+            fast_retransmit_marked: vec![],
+            last_advertised_window: 0,
+            sack_delay: ACK_INTERVAL,
 
             // Chunks stored for retransmission
             stored_init: None,
@@ -550,14 +576,8 @@ impl Association {
         // config.rs to get max_payload_size from INITIAL_MTU.
         let mtu = max_payload_size.saturating_add(COMMON_HEADER_SIZE + DATA_CHUNK_HEADER_SIZE);
 
-        // RFC 4960 Sec 7.2.1
-        // The initial cwnd before DATA transmission or after a sufficiently
-        // long idle period MUST be set to min(4*MTU, max (2*MTU, 4380bytes)).
-        // Written in total form: the previous `(2 * mtu).clamp(4380, 4 * mtu)`
-        // panicked for effective MTUs below ~1095 (`Ord::clamp` with
-        // min > max) and overflowed near `u32::MAX`, both reachable through
-        // `EndpointConfig::max_payload_size` and MTU-derived payload budgets.
-        let cwnd = mtu.saturating_mul(2).max(4380).min(mtu.saturating_mul(4));
+        let pmdcs = mtu.saturating_sub(COMMON_HEADER_SIZE);
+        let cwnd = Self::initial_cwnd(pmdcs, remote_addr.is_ipv6());
         // RFC 4960 requires an unpredictable initial TSN. SCTP remains usable without an RTC
         // crypto provider, so this deliberately uses `rand`'s thread-local CSPRNG.
         let mut tsn = random::<u32>();
@@ -590,6 +610,11 @@ impl Association {
 
             mtu,
             cwnd,
+            pmdcs,
+            slow_start_growth_limit: config.slow_start_growth_limit(),
+            max_burst: config.max_burst(),
+            last_advertised_window: config.max_receive_buffer_size(),
+            sack_delay: config.sack_delay().as_millis() as u64,
             remote_addr,
             local_addr,
             transport_protocol: protocol,
@@ -631,6 +656,65 @@ impl Association {
         }
 
         this
+    }
+
+    /// RFC 9260 7.2.1: the initial cwnd, before DATA is sent and after a change of path, is
+    /// min(4 x PMDCS, max(2 x PMDCS, 4404)), with 4344 in place of 4404 over IPv6.
+    ///
+    /// Written in total form: `clamp` panics when the bounds cross, which a small PMDCS
+    /// makes them do, and the products saturate.
+    fn initial_cwnd(pmdcs: u32, ipv6: bool) -> u32 {
+        let floor = if ipv6 { 4344 } else { 4404 };
+        pmdcs
+            .saturating_mul(2)
+            .max(floor)
+            .min(pmdcs.saturating_mul(4))
+    }
+
+    /// The congestion window, in bytes of user data.
+    pub fn congestion_window(&self) -> u32 {
+        self.cwnd
+    }
+
+    /// The slow start threshold, in bytes of user data.
+    pub fn slow_start_threshold(&self) -> u32 {
+        self.ssthresh
+    }
+
+    /// The current retransmission timeout.
+    pub fn rto(&self) -> Duration {
+        Duration::from_millis(self.rto_mgr.get_rto())
+    }
+
+    /// Tells the association that its packets take another path from now on: the transport
+    /// underneath switched (for WebRTC, ICE selected another candidate pair).
+    ///
+    /// RFC 9260 7.2.5: what was learned about the old path says nothing about the new one, so
+    /// the congestion control state and the RTO start again from their initial values. DATA
+    /// outstanding stays outstanding, and its retransmission timer runs on with the initial
+    /// RTO.
+    pub fn on_path_change(&mut self, now: Instant) {
+        debug!(
+            "[{}] path change: congestion control starts over",
+            self.side
+        );
+        self.cwnd = Self::initial_cwnd(self.pmdcs, self.remote_addr.is_ipv6());
+        // RFC 9260 7.2.1: the initial ssthresh is arbitrarily high; the peer's window is.
+        self.ssthresh = self
+            .rwnd
+            .saturating_add(self.inflight_queue.get_num_bytes() as u32);
+        self.partial_bytes_acked = 0;
+        self.in_fast_recovery = false;
+        self.will_retransmit_fast = false;
+        self.last_data_sent = None;
+        self.rto_mgr.reset();
+        // No RTT sample of the old path may be taken for the new one.
+        self.min_tsn2measure_rtt = self.my_next_tsn;
+        self.path_error_count = 0;
+        if self.timers.get(Timer::T3RTX).is_some() {
+            self.timers.stop(Timer::T3RTX);
+            self.timers.start(Timer::T3RTX, now, self.rto_mgr.get_rto());
+        }
     }
 
     /// Returns application-facing event
@@ -1419,7 +1503,7 @@ impl Association {
         } else if self.delayed_ack_triggered {
             // Will send delayed ack in the next ack timeout
             self.ack_state = AckState::Delay;
-            self.timers.start(Timer::Ack, now, ACK_INTERVAL);
+            self.timers.start(Timer::Ack, now, self.sack_delay);
         }
     }
 
@@ -2374,6 +2458,7 @@ impl Association {
 
         let can_push = self.payload_queue.can_push(d, self.peer_last_tsn);
         let mut stream_handle_data = false;
+        let mut dropped_for_window = false;
         if can_push {
             if self.get_or_create_stream(d.stream_identifier).is_some() {
                 if self.get_my_receiver_window_credit() > 0 {
@@ -2436,6 +2521,10 @@ impl Association {
                             "[{}] receive buffer full. dropping DATA with tsn={} ssn={}",
                             self.side, d.tsn, d.stream_sequence_number
                         );
+                        // RFC 9260 6.2: a DATA chunk dropped for lack of window is
+                        // answered with a SACK at once, which shows the sender the window
+                        // and that the chunk is not held.
+                        dropped_for_window = true;
                     }
                 }
             } else {
@@ -2453,8 +2542,11 @@ impl Association {
         // again.
         let first = !self.first_data_received;
         self.first_data_received = true;
-        let mut immediate_sack =
-            d.immediate_sack || !can_push || first || self.sack_packet_immediately;
+        let mut immediate_sack = d.immediate_sack
+            || !can_push
+            || first
+            || self.sack_packet_immediately
+            || dropped_for_window;
         if self.state() == AssociationState::ShutdownSent {
             immediate_sack = true;
             self.will_send_shutdown = true;
@@ -2520,6 +2612,10 @@ impl Association {
             return Err(Error::ErrTsnRequestNotExist);
         }
 
+        // The bytes outstanding before this SACK: the congestion window may grow only when
+        // it was in full use (RFC 9260 7.2.1, 7.2.2).
+        let flight_before = u32::try_from(self.inflight_queue.get_num_bytes()).unwrap_or(u32::MAX);
+
         // Process selective ack
         let (bytes_acked_per_stream, total_bytes_acked, htna) =
             self.process_selective_ack(d, now)?;
@@ -2533,8 +2629,11 @@ impl Association {
 
             self.cumulative_tsn_ack_point = d.cumulative_tsn_ack;
             cum_tsn_ack_point_advanced = true;
-            self.on_cumulative_tsn_ack_point_advanced(total_bytes_acked, now);
+            self.on_cumulative_tsn_ack_point_advanced(now);
         }
+        // RFC 9260 7.2.4: the window growth of 7.2.1 and 7.2.2 comes before the adjustments
+        // for loss this SACK may bring.
+        self.grow_congestion_window(total_bytes_acked, flight_before, cum_tsn_ack_point_advanced);
 
         self.release_stream_buffers(&bytes_acked_per_stream);
 
@@ -3072,11 +3171,7 @@ impl Association {
         Ok((bytes_acked_per_stream, total_bytes_acked, htna))
     }
 
-    fn on_cumulative_tsn_ack_point_advanced(&mut self, total_bytes_acked: i64, now: Instant) {
-        // Every addition below saturates: cwnd doubles per round trip in slow start and is
-        // bounded by nothing else, so after about 2 GiB acknowledged a plain `+=` wrapped it
-        // to a tiny window (and panicked with overflow checks on).
-        let total_bytes_acked = u32::try_from(total_bytes_acked.max(0)).unwrap_or(u32::MAX);
+    fn on_cumulative_tsn_ack_point_advanced(&mut self, now: Instant) {
         // RFC 4096, sec 6.3.2.  Retransmission Timer Rules
         //   R2)  Whenever all outstanding data sent to an address have been
         //        acknowledged, turn off the T3-rtx timer of that address.
@@ -3092,63 +3187,92 @@ impl Association {
             self.timers
                 .start_if_idle(Timer::T3RTX, now, self.rto_mgr.get_rto());
         }
+    }
 
-        // Update congestion control parameters
+    /// RFC 9260 7.2.1 and 7.2.2: what a SACK does to the congestion window.
+    ///
+    /// `total_bytes_acked` is what the SACK newly acknowledged, by its Cumulative TSN Ack and
+    /// by Gap Ack Blocks; `flight_before` the bytes outstanding before it.
+    fn grow_congestion_window(
+        &mut self,
+        total_bytes_acked: i64,
+        flight_before: u32,
+        cum_tsn_ack_point_advanced: bool,
+    ) {
+        // Every addition below saturates: cwnd is bounded by nothing else, and a plain `+=`
+        // wrapped it to a tiny window (and panicked with overflow checks on).
+        let acked = u32::try_from(total_bytes_acked.max(0)).unwrap_or(u32::MAX);
+        // The window was in full use if as much as it allows was outstanding. Rule B of 6.1
+        // lets the last chunk sent cross it, so a sender with data to send gets there.
+        let fully_utilized = flight_before >= self.cwnd;
+
         if self.cwnd <= self.ssthresh {
-            // RFC 4096, sec 7.2.1.  Slow-Start
-            //   o  When cwnd is less than or equal to ssthresh, an SCTP endpoint MUST
-            //		use the slow-start algorithm to increase cwnd only if the current
-            //      congestion window is being fully utilized, an incoming SACK
-            //      advances the Cumulative TSN Ack Point, and the data sender is not
-            //      in Fast Recovery.  Only when these three conditions are met can
-            //      the cwnd be increased; otherwise, the cwnd MUST not be increased.
-            //		If these conditions are met, then cwnd MUST be increased by, at
-            //      most, the lesser of 1) the total size of the previously
-            //      outstanding DATA chunk(s) acknowledged, and 2) the destination's
-            //      path MTU.
-            if !self.in_fast_recovery && !self.pending_queue.is_empty() {
-                self.cwnd = self
-                    .cwnd
-                    .saturating_add(std::cmp::min(total_bytes_acked, self.cwnd)); // TCP way
-                // self.cwnd += min32(uint32(total_bytes_acked), self.mtu) // SCTP way (slow)
+            // 7.2.1, slow start: cwnd grows only if it is fully utilized, the SACK advances
+            // the Cumulative TSN Ack Point and the sender is not in Fast Recovery, and then
+            // by at most the lesser of the bytes acknowledged and L x PMDCS. The second bound
+            // is what keeps a receiver from growing the window by splitting its SACKs.
+            if fully_utilized && cum_tsn_ack_point_advanced && !self.in_fast_recovery {
+                let limit = self.slow_start_growth_limit.saturating_mul(self.pmdcs);
+                self.cwnd = self.cwnd.saturating_add(acked.min(limit));
                 trace!(
                     "[{}] updated cwnd={} ssthresh={} acked={} (SS)",
-                    self.side, self.cwnd, self.ssthresh, total_bytes_acked
-                );
-            } else {
-                trace!(
-                    "[{}] cwnd did not grow: cwnd={} ssthresh={} acked={} FR={} pending={}",
-                    self.side,
-                    self.cwnd,
-                    self.ssthresh,
-                    total_bytes_acked,
-                    self.in_fast_recovery,
-                    self.pending_queue.len()
+                    self.side, self.cwnd, self.ssthresh, acked
                 );
             }
         } else {
-            // RFC 4096, sec 7.2.2.  Congestion Avoidance
-            //   o  Whenever cwnd is greater than ssthresh, upon each SACK arrival
-            //      that advances the Cumulative TSN Ack Point, increase
-            //      partial_bytes_acked by the total number of bytes of all new chunks
-            //      acknowledged in that SACK including chunks acknowledged by the new
-            //      Cumulative TSN Ack and by Gap Ack Blocks.
-            self.partial_bytes_acked = self.partial_bytes_acked.saturating_add(total_bytes_acked);
-
-            //   o  When partial_bytes_acked is equal to or greater than cwnd and
-            //      before the arrival of the SACK the sender had cwnd or more bytes
-            //      of data outstanding (i.e., before arrival of the SACK, flight size
-            //      was greater than or equal to cwnd), increase cwnd by MTU, and
-            //      reset partial_bytes_acked to (partial_bytes_acked - cwnd).
-            if self.partial_bytes_acked >= self.cwnd && !self.pending_queue.is_empty() {
-                self.partial_bytes_acked -= self.cwnd;
-                self.cwnd = self.cwnd.saturating_add(self.mtu);
-                trace!(
-                    "[{}] updated cwnd={} ssthresh={} acked={} (CA)",
-                    self.side, self.cwnd, self.ssthresh, total_bytes_acked
-                );
+            // 7.2.2, congestion avoidance: partial_bytes_acked counts what every SACK newly
+            // acknowledges. Once it reaches cwnd, and cwnd was in full use, cwnd grows by one
+            // PMDCS: at most one per round trip. When cwnd was not in full use the count is
+            // held at cwnd.
+            self.partial_bytes_acked = self.partial_bytes_acked.saturating_add(acked);
+            if fully_utilized {
+                if self.partial_bytes_acked >= self.cwnd {
+                    self.partial_bytes_acked -= self.cwnd;
+                    self.cwnd = self.cwnd.saturating_add(self.pmdcs);
+                    trace!(
+                        "[{}] updated cwnd={} ssthresh={} acked={} (CA)",
+                        self.side, self.cwnd, self.ssthresh, acked
+                    );
+                }
+            } else if self.partial_bytes_acked > self.cwnd {
+                self.partial_bytes_acked = self.cwnd;
             }
         }
+
+        // 7.2.2: when all the data sent has been acknowledged the count starts over.
+        if self.inflight_queue.is_empty() {
+            self.partial_bytes_acked = 0;
+        }
+    }
+
+    /// RFC 9260 7.2.1: a congestion window that is not used decays, to max(cwnd / 2,
+    /// 4 x PMDCS) once per RTO without DATA sent, and ssthresh takes the value cwnd had
+    /// before the first of those steps. Applied when DATA is about to be sent after the
+    /// pause, which is when the window matters.
+    fn decay_idle_congestion_window(&mut self, now: Instant) {
+        let Some(last) = self.last_data_sent else {
+            return;
+        };
+        if !self.inflight_queue.is_empty() {
+            return;
+        }
+        let rto = self.rto_mgr.get_rto().max(1);
+        let idle = now.saturating_duration_since(last).as_millis() as u64;
+        let floor = self.pmdcs.saturating_mul(4);
+        let mut periods = idle / rto;
+        if periods == 0 || self.cwnd <= floor {
+            return;
+        }
+        self.ssthresh = self.cwnd;
+        while periods > 0 && self.cwnd > floor {
+            self.cwnd = (self.cwnd / 2).max(floor);
+            periods -= 1;
+        }
+        self.partial_bytes_acked = 0;
+        trace!(
+            "[{}] updated cwnd={} ssthresh={} after {} ms idle",
+            self.side, self.cwnd, self.ssthresh, idle
+        );
     }
 
     fn process_fast_retransmission(
@@ -3186,13 +3310,21 @@ impl Association {
                 if let Some(c) = self.inflight_queue.get_mut(tsn) {
                     if c.is_outstanding() && c.miss_indicator < 3 {
                         c.miss_indicator += 1;
+                        if c.miss_indicator == 3 {
+                            self.fast_retransmit_marked.push(tsn);
+                        }
                         if c.miss_indicator == 3 && !self.in_fast_recovery {
                             // 2)  If not in Fast Recovery, adjust the ssthresh and cwnd of the
                             //     destination address(es) to which the missing DATA chunks were
                             //     last sent, according to the formula described in Section 7.2.3.
                             self.in_fast_recovery = true;
-                            self.fast_recover_exit_point = htna;
-                            self.ssthresh = std::cmp::max(self.cwnd / 2, 4 * self.mtu);
+                            // RFC 9260 7.2.4 step 6: Fast Recovery lasts until everything
+                            // outstanding now is acknowledged. The exit point was the highest
+                            // TSN this SACK newly acknowledged, below it, so recovery ended
+                            // early and a second loss in the same window cut cwnd again.
+                            self.fast_recover_exit_point = self.my_next_tsn.wrapping_sub(1);
+                            self.ssthresh =
+                                std::cmp::max(self.cwnd / 2, self.pmdcs.saturating_mul(4));
                             self.cwnd = self.ssthresh;
                             self.partial_bytes_acked = 0;
                             self.will_retransmit_fast = true;
@@ -3233,6 +3365,7 @@ impl Association {
                 if exhausted && let Some(c) = self.inflight_queue.get_mut(tsn) {
                     c.miss_indicator += 1;
                     if c.miss_indicator == 3 {
+                        self.fast_retransmit_marked.push(tsn);
                         self.will_retransmit_fast = true;
                     }
                 }
@@ -3844,6 +3977,40 @@ impl Association {
                 i += 1;
             }
 
+            // RFC 9260 7.2.4 step 5: the chunks marked for retransmission that did not fit
+            // this one packet are no longer eligible for Fast Retransmit. They go out as
+            // retransmissions when cwnd allows, instead of in a later burst that ignores it.
+            // Only the chunks marked since the last Fast Retransmit are looked at, not the
+            // window.
+            for tsn in std::mem::take(&mut self.fast_retransmit_marked) {
+                if to_fast_retrans.iter().any(|c| c.tsn == tsn) {
+                    continue;
+                }
+                if let Some(c) = self.inflight_queue.get_mut(tsn)
+                    && c.is_fast_retransmit_candidate()
+                {
+                    c.no_fast_retransmit = true;
+                    c.retransmit = true;
+                    self.t3_retransmit_pending = true;
+                }
+            }
+
+            // RFC 9260 7.2.4 step 4: T3-rtx starts over when the first outstanding chunk is
+            // among those retransmitted (the count of its expiries is kept).
+            let earliest_outstanding = self.inflight_queue.sorted.iter().copied().find(|tsn| {
+                self.inflight_queue
+                    .get(*tsn)
+                    .is_some_and(ChunkPayloadData::is_outstanding)
+            });
+            if earliest_outstanding.is_some()
+                && to_fast_retrans.first().map(|c| c.tsn) == earliest_outstanding
+            {
+                self.timers.set(
+                    Timer::T3RTX,
+                    Some(now + Duration::from_millis(self.rto_mgr.get_rto())),
+                );
+            }
+
             for chunk in &mut to_fast_retrans {
                 if let Some(c) = self.inflight_queue.get_mut(chunk.tsn) {
                     c.nsent += 1;
@@ -3967,8 +4134,21 @@ impl Association {
         raw_packets: &mut Vec<Bytes>,
     ) -> Result<()> {
         let awnd = std::cmp::min(self.cwnd, self.rwnd);
+        // RFC 9260 6.3.3 E3, 7.2.3: the retransmission that follows a T3-rtx expiry is the
+        // earliest outstanding chunks that fit one packet, and that packet is alone in flight
+        // until it is acknowledged. cwnd (one PMDCS) is counted in user bytes, which a second
+        // packet of small chunks could still fit under.
+        let single_packet = std::mem::take(&mut self.t3_single_packet);
+        let mut packet_size = COMMON_HEADER_SIZE as usize;
+        // RFC 9260 6.1: retransmissions are limited by cwnd too. What is marked for
+        // retransmission is taken as lost, not as in flight; each chunk retransmitted is in
+        // flight again. Counting only the bytes of one call, as this did, retransmitted a
+        // window's worth on every poll, the whole of what was outstanding in the end.
+        let mut in_flight = self
+            .inflight_queue
+            .get_num_bytes()
+            .saturating_sub(self.inflight_queue.marked_for_retransmission_bytes());
         let mut chunks: Vec<ChunkPayloadData> = vec![];
-        let mut bytes_to_send = 0;
         let mut done = false;
         let mut i = 0;
         // Assume we will re-send every flagged chunk; flip back on if we stop
@@ -3991,7 +4171,20 @@ impl Association {
                             .get(chunk.tsn)
                             .is_some_and(|c| !c.abandoned())
                     });
-                    bytes_to_send = chunks.iter().map(|c| c.user_data.len()).sum();
+                    // The abandonment released payload and cleared marks: count again.
+                    in_flight = self
+                        .inflight_queue
+                        .get_num_bytes()
+                        .saturating_sub(self.inflight_queue.marked_for_retransmission_bytes())
+                        + chunks.iter().map(|c| c.user_data.len()).sum::<usize>();
+                    packet_size = COMMON_HEADER_SIZE as usize
+                        + chunks
+                            .iter()
+                            .map(|c| {
+                                (DATA_CHUNK_HEADER_SIZE as usize + c.user_data.len())
+                                    .next_multiple_of(4)
+                            })
+                            .sum::<usize>();
                     i += 1;
                     continue;
                 }
@@ -3999,16 +4192,25 @@ impl Association {
                     break;
                 };
 
+                let wire =
+                    (DATA_CHUNK_HEADER_SIZE as usize + c.user_data.len()).next_multiple_of(4);
+                if single_packet && !chunks.is_empty() && packet_size + wire > self.mtu as usize {
+                    chunks_remaining = true;
+                    break;
+                }
+                packet_size += wire;
+
                 if i == 0 && self.rwnd < c.user_data.len() as u32 {
                     // Send it as a zero window probe
                     done = true;
                     chunks_remaining = true;
-                } else if bytes_to_send + c.user_data.len() > awnd as usize {
+                } else if in_flight + c.user_data.len() > awnd as usize && in_flight > 0 {
+                    // With nothing in flight one chunk always goes, whatever its size.
                     chunks_remaining = true;
                     break;
                 }
 
-                bytes_to_send += c.user_data.len();
+                in_flight += c.user_data.len();
             } else {
                 break; // end of pending data
             }
@@ -4314,6 +4516,17 @@ impl Association {
         let mut chunks = vec![];
         let mut sis_to_reset = vec![]; // stream identifiers to reset
         if !self.pending_queue.is_empty() {
+            self.decay_idle_congestion_window(now);
+            // RFC 9260 6.1 D: with Max.Burst, cwnd is brought down to what is outstanding
+            // plus Max.Burst packets before DATA is sent, so that a SACK for many chunks at
+            // once does not release them all at once.
+            if let Some(max_burst) = self.max_burst {
+                let flight = u32::try_from(self.inflight_queue.get_num_bytes()).unwrap_or(u32::MAX);
+                let limit = flight.saturating_add(max_burst.saturating_mul(self.pmdcs));
+                if limit < self.cwnd {
+                    self.cwnd = limit;
+                }
+            }
             // RFC 4960 sec 6.1.  Transmission of DATA Chunks
             //   A) At any given time, the data sender MUST NOT transmit new data to
             //      any destination transport address if its peer's rwnd indicates
@@ -4360,8 +4573,12 @@ impl Association {
                     continue;
                 }
 
-                if self.inflight_queue.get_num_bytes() + data_len > self.cwnd as usize {
-                    break; // would exceeds cwnd
+                // RFC 9260 6.1 B: new DATA is sent while less than cwnd is outstanding. The
+                // chunk that crosses cwnd is still sent (by less than one PMDCS), and it is
+                // the last: a window that the next chunk does not fit exactly would
+                // otherwise never be in full use, and so never grow.
+                if self.inflight_queue.get_num_bytes() >= self.cwnd as usize {
+                    break; // cwnd is in full use
                 }
 
                 if self.my_next_tsn.wrapping_sub(self.cumulative_tsn_ack_point)
@@ -4517,11 +4734,41 @@ impl Association {
         gap_ack_blocks.truncate(room);
         let mut duplicate_tsn = self.payload_queue.pop_duplicates();
         duplicate_tsn.truncate(room - gap_ack_blocks.len());
+        self.last_advertised_window = self.advertised_window();
         ChunkSelectiveAck {
             cumulative_tsn_ack: self.peer_last_tsn,
-            advertised_receiver_window_credit: self.get_my_receiver_window_credit(),
+            advertised_receiver_window_credit: self.last_advertised_window,
             gap_ack_blocks,
             duplicate_tsn,
+        }
+    }
+
+    /// The a_rwnd to advertise. RFC 9260 6.2 asks the receiver for silly window syndrome
+    /// avoidance (RFC 1122 4.2.3.3): a window too small for a full packet is advertised as
+    /// closed, so the sender does not fill it with scraps.
+    fn advertised_window(&self) -> u32 {
+        let free = self.get_my_receiver_window_credit();
+        let threshold = (self.max_receive_buffer_size / 2).min(self.pmdcs);
+        if free < threshold { 0 } else { free }
+    }
+
+    /// The application took data from the receive buffer. RFC 9260 6.2: when the window that
+    /// was advertised as closed has reopened, a SACK says so at once. Without it the sender,
+    /// stopped by a_rwnd 0, learns of the space only from its next window probe, a
+    /// retransmission timeout later (and that timeout doubles).
+    pub(crate) fn on_receive_buffer_drained(&mut self) {
+        if self.last_advertised_window == 0
+            && self.advertised_window() > 0
+            && matches!(
+                self.state(),
+                AssociationState::Established
+                    | AssociationState::ShutdownPending
+                    | AssociationState::ShutdownSent
+            )
+        {
+            self.ack_state = AckState::Immediate;
+            self.timers.stop(Timer::Ack);
+            self.awake_write_loop();
         }
     }
 
@@ -4606,6 +4853,7 @@ impl Association {
             // RTT baseline only; maxPacketLifeTime measures from `created_at`.
             c.since = Some(now);
             self.last_rtt_probe = Some(now);
+            self.last_data_sent = Some(now);
             c.nsent = 1; // being sent for the first time
 
             trace!(
@@ -4764,8 +5012,14 @@ impl Association {
                 //      ssthresh = max(cwnd/2, 4*MTU)
                 //      cwnd = 1*MTU
 
-                self.ssthresh = std::cmp::max(self.cwnd / 2, 4 * self.mtu);
-                self.cwnd = self.mtu;
+                // RFC 9260 7.2.3: ssthresh = max(cwnd / 2, 4 x PMDCS), cwnd = PMDCS,
+                // partial_bytes_acked = 0, and one packet in flight until it is acknowledged.
+                self.ssthresh = std::cmp::max(self.cwnd / 2, self.pmdcs.saturating_mul(4));
+                self.cwnd = self.pmdcs;
+                self.partial_bytes_acked = 0;
+                self.t3_single_packet = true;
+                // A retransmission timeout ends Fast Recovery: the window is one packet now.
+                self.in_fast_recovery = false;
                 trace!(
                     "[{}] updated cwnd={} ssthresh={} inflight={} (RTO)",
                     self.side,

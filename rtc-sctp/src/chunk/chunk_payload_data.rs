@@ -191,6 +191,10 @@ pub struct ChunkPayloadData {
     /// Retransmission flag set when T1-RTX timeout occurred and this
     /// chunk is still in the inflight queue
     pub(crate) retransmit: bool,
+
+    /// Marked for Fast Retransmit when the one packet of that Fast Retransmit was full (RFC
+    /// 9260 7.2.4 step 5): not eligible for another, and retransmitted when cwnd allows.
+    pub(crate) no_fast_retransmit: bool,
 }
 
 impl Default for ChunkPayloadData {
@@ -216,6 +220,7 @@ impl Default for ChunkPayloadData {
             nsent: 0,
             abandoned: false,
             retransmit: false,
+            no_fast_retransmit: false,
         }
     }
 }
@@ -303,6 +308,7 @@ impl Chunk for ChunkPayloadData {
             nsent: 0,
             abandoned: false,
             retransmit: false,
+            no_fast_retransmit: false,
         })
     }
 
@@ -352,7 +358,10 @@ impl ChunkPayloadData {
     }
 
     pub(crate) fn is_fast_retransmit_candidate(&self) -> bool {
-        self.is_outstanding() && self.nsent == 1 && self.miss_indicator >= 3
+        self.is_outstanding()
+            && self.nsent == 1
+            && self.miss_indicator >= 3
+            && !self.no_fast_retransmit
     }
 
     /// Record peer progress without changing payload ownership.

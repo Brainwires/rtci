@@ -712,10 +712,12 @@ fn initial_cwnd_is_computed_safely_for_non_default_mtus() {
     // `(2 * mtu).clamp(4380, 4 * mtu)`, which panicked for effective MTUs
     // below ~1095 (`Ord::clamp` with min > max) and overflowed near
     // `u32::MAX` — reachable through `EndpointConfig::max_payload_size`
-    // and MTU-derived payload budgets. RFC 4960 §7.2.1:
-    // cwnd = min(4*MTU, max(2*MTU, 4380)); for a small MTU that is 4*MTU.
+    // and MTU-derived payload budgets. RFC 9260 7.2.1:
+    // cwnd = min(4 x PMDCS, max(2 x PMDCS, 4404)); for a small packet that is 4 x PMDCS,
+    // where PMDCS is the packet less the 12-byte common header.
     let a = create_association_with_mtu(100);
-    assert_eq!(a.cwnd, 4 * a.mtu);
+    assert_eq!(a.pmdcs, a.mtu - 12);
+    assert_eq!(a.cwnd, 4 * a.pmdcs);
 
     // Directly via the low-level `max_payload_size` setter path: the
     // effective-MTU reconstruction (`max_payload_size + 28`) must saturate
@@ -2167,3 +2169,6 @@ mod handshake_teardown_test;
 
 #[path = "heartbeat_test.rs"]
 mod heartbeat_test;
+
+#[path = "congestion_control_test.rs"]
+mod congestion_control_test;

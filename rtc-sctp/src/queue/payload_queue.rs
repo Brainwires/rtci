@@ -273,6 +273,16 @@ impl PayloadQueue {
         }
     }
 
+    /// The bytes of the chunks marked for retransmission: taken as lost, they are outstanding
+    /// but not in flight (RFC 9260 6.1, 7.2.3).
+    pub(crate) fn marked_for_retransmission_bytes(&self) -> usize {
+        self.chunk_map
+            .values()
+            .filter(|c| c.retransmit)
+            .map(|c| c.user_data.len())
+            .sum()
+    }
+
     pub(crate) fn get_num_bytes(&self) -> usize {
         self.n_bytes
     }

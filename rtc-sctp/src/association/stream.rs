@@ -135,6 +135,9 @@ impl Stream<'_> {
             let drained = !s.reassembly_queue.is_readable();
             self.association
                 .reindex_stream(self.stream_identifier, bytes_before);
+            if chunks.is_some() {
+                self.association.on_receive_buffer_drained();
+            }
             if drained {
                 self.association
                     .retry_deferred_resets(self.stream_identifier);
