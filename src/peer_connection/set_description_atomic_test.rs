@@ -161,7 +161,10 @@ fn pending_offer() -> Result<(RTCPeerConnection, String)> {
             send_encodings: vec![],
         }),
     )?;
-    offerer.add_transceiver_from_kind(RtpCodecKind::Video, None)?;
+    offerer.add_transceiver_from_kind(
+        RtpCodecKind::Video,
+        Some(crate::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+    )?;
     let offer = offerer.create_offer(None)?;
     offerer.set_local_description(Instant::now(), offer.clone())?;
 
@@ -295,7 +298,10 @@ fn a_remote_answer_that_does_not_answer_the_offer_changes_nothing() -> Result<()
 #[test]
 fn a_refused_local_description_applies_no_staged_ice_restart() -> Result<()> {
     let mut pc = peer()?;
-    pc.add_transceiver_from_kind(RtpCodecKind::Video, None)?;
+    pc.add_transceiver_from_kind(
+        RtpCodecKind::Video,
+        Some(crate::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+    )?;
     let before = pc.ice_transport().get_local_parameters()?;
 
     let offer = pc.create_offer(Some(RTCOfferOptions { ice_restart: true }))?;
@@ -327,7 +333,10 @@ fn a_refused_local_description_applies_no_staged_ice_restart() -> Result<()> {
 #[test]
 fn a_rollback_applies_no_staged_ice_restart() -> Result<()> {
     let mut pc = peer()?;
-    pc.add_transceiver_from_kind(RtpCodecKind::Video, None)?;
+    pc.add_transceiver_from_kind(
+        RtpCodecKind::Video,
+        Some(crate::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+    )?;
     let offer = pc.create_offer(None)?;
     pc.set_local_description(Instant::now(), offer)?;
 
@@ -346,7 +355,10 @@ fn a_rollback_applies_no_staged_ice_restart() -> Result<()> {
 #[test]
 fn create_offer_needs_the_stable_or_have_local_offer_state() -> Result<()> {
     let mut offerer = peer()?;
-    offerer.add_transceiver_from_kind(RtpCodecKind::Video, None)?;
+    offerer.add_transceiver_from_kind(
+        RtpCodecKind::Video,
+        Some(crate::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+    )?;
     let offer = offerer.create_offer(None)?;
     offerer.set_local_description(Instant::now(), offer.clone())?;
     // have-local-offer: another offer may be created.
@@ -355,7 +367,10 @@ fn create_offer_needs_the_stable_or_have_local_offer_state() -> Result<()> {
     let mut answerer = peer()?;
     answerer.set_remote_description(Instant::now(), offer)?;
     // A transceiver of the application's with no m= section yet.
-    answerer.add_transceiver_from_kind(RtpCodecKind::Audio, None)?;
+    answerer.add_transceiver_from_kind(
+        RtpCodecKind::Audio,
+        Some(crate::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+    )?;
     answerer.restart_ice();
 
     // have-remote-offer.
@@ -410,7 +425,10 @@ fn create_offer_needs_the_stable_or_have_local_offer_state() -> Result<()> {
 #[test]
 fn signalingstatechange_fires_only_when_the_state_changes() -> Result<()> {
     let mut offerer = peer()?;
-    offerer.add_transceiver_from_kind(RtpCodecKind::Video, None)?;
+    offerer.add_transceiver_from_kind(
+        RtpCodecKind::Video,
+        Some(crate::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+    )?;
     let offer = offerer.create_offer(None)?;
     offerer.set_local_description(Instant::now(), offer.clone())?;
     // The same offer applied again: have-local-offer stays have-local-offer.
@@ -464,7 +482,10 @@ fn a_rollback_is_refused_outside_the_offer_states() -> Result<()> {
     }
     assert_eq!(offerer.signaling_state, RTCSignalingState::Stable);
 
-    offerer.add_transceiver_from_kind(RtpCodecKind::Video, None)?;
+    offerer.add_transceiver_from_kind(
+        RtpCodecKind::Video,
+        Some(crate::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+    )?;
     let offer = offerer.create_offer(None)?;
     offerer.set_local_description(Instant::now(), offer.clone())?;
     let mut answerer = peer()?;
@@ -517,7 +538,10 @@ fn a_rollback_is_refused_outside_the_offer_states() -> Result<()> {
 #[test]
 fn an_answer_resets_the_last_created_offer_and_answer() -> Result<()> {
     let mut offerer = peer()?;
-    offerer.add_transceiver_from_kind(RtpCodecKind::Video, None)?;
+    offerer.add_transceiver_from_kind(
+        RtpCodecKind::Video,
+        Some(crate::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+    )?;
     let offer = offerer.create_offer(None)?;
     offerer.set_local_description(Instant::now(), offer.clone())?;
     let mut answerer = peer()?;

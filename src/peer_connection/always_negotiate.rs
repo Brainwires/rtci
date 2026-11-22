@@ -83,8 +83,11 @@ mod tests {
         let kinds: Vec<String> = sections(&offer.sdp).into_iter().map(|s| s.0).collect();
         assert_eq!(kinds, vec!["application".to_owned()]);
 
-        pc.add_transceiver_from_kind(RtpCodecKind::Audio, None)
-            .expect("audio transceiver");
+        pc.add_transceiver_from_kind(
+            RtpCodecKind::Audio,
+            Some(crate::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+        )
+        .expect("audio transceiver");
         let offer = pc.create_offer(None).expect("offer");
         let found = sections(&offer.sdp);
         assert_eq!(found.len(), 2);

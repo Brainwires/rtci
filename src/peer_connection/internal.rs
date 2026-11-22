@@ -1431,7 +1431,7 @@ impl RTCPeerConnection {
             .rtp_transceivers
             .iter()
             .filter(live)
-            .filter(|t| t.sender().is_some() && t.current_direction().has_send())
+            .filter(|t| t.describes_sender() && t.current_direction().has_send())
             .map(|t| t.remote_bandwidth().max_bitrate)
             .collect());
 
@@ -1600,7 +1600,7 @@ impl RTCPeerConnection {
         mids
     }
 
-    fn start_rtp_senders(&mut self) -> Result<()> {
+    pub(super) fn start_rtp_senders(&mut self) -> Result<()> {
         // Collect SSRCs, kinds, mids, rids, encoding indices, rtx_ssrc, and transceiver_id for outbound stream accumulators
         // We do this in two phases to avoid borrow conflicts
         #[allow(clippy::type_complexity)]
@@ -2024,6 +2024,7 @@ impl RTCPeerConnection {
                     // nothing a renegotiation could settle - claiming otherwise re-offers on
                     // every return to a stable signaling state, forever.
                     if transceiver.direction().has_send()
+                        && transceiver.describes_sender()
                         && let Some(sender) = transceiver.sender()
                     {
                         // The stream ids of the section's a=msid lines (one per stream,
@@ -2483,7 +2484,7 @@ impl RTCPeerConnection {
                 let sender = transceiver.sender().as_ref()?;
                 Some((
                     transceiver_id,
-                    sender.track().track_id().clone(),
+                    sender.attached_track()?.track_id().clone(),
                     sender.kind(),
                 ))
             })
@@ -2617,7 +2618,7 @@ impl RTCPeerConnection {
             .as_ref()?;
         Some((
             transceiver_id,
-            sender.track().track_id().clone(),
+            sender.attached_track()?.track_id().clone(),
             sender.kind(),
         ))
     }

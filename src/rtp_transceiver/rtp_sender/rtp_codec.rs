@@ -198,6 +198,33 @@ pub(crate) fn codec_parameters_fuzzy_search(
     (RTCRtpCodecParameters::default(), CodecMatch::None)
 }
 
+/// W3C webrtc 5.4 "codec dictionary match": whether two codec dictionaries name the same
+/// codec. The MIME types are equal without regard to case, the clock rates equal, the
+/// channels both absent (0) or equal, and the `sdpFmtpLine`s both absent (empty) or
+/// matching: compared by the format's own rules where it has key-value parameters
+/// (`fmtp::match_fmtp`: H.264 profile and packetization mode, and so on) and as strings
+/// otherwise.
+pub(crate) fn codec_dictionary_match(first: &RTCRtpCodec, second: &RTCRtpCodec) -> bool {
+    if !first.mime_type.eq_ignore_ascii_case(&second.mime_type)
+        || first.clock_rate != second.clock_rate
+        || first.channels != second.channels
+    {
+        return false;
+    }
+    let (first_fmtp, second_fmtp) = (first.sdp_fmtp_line.trim(), second.sdp_fmtp_line.trim());
+    if first_fmtp.is_empty() != second_fmtp.is_empty() {
+        return false;
+    }
+    if first_fmtp.is_empty() {
+        return true;
+    }
+    if !first_fmtp.contains('=') || !second_fmtp.contains('=') {
+        return first_fmtp == second_fmtp;
+    }
+    fmtp::parse(&first.mime_type, first_fmtp)
+        .match_fmtp(&*fmtp::parse(&second.mime_type, second_fmtp))
+}
+
 /// The negotiated codec an encoding is sent with.
 ///
 /// An encoding that names a codec is sent with the negotiated codec matching it

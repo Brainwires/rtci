@@ -40,7 +40,10 @@ fn tagged_only_peer() -> Result<RTCPeerConnection, Box<dyn std::error::Error>> {
 
 /// Audio, video and video.
 fn add_media(pc: &mut RTCPeerConnection) -> TestResult {
-    pc.add_transceiver_from_kind(RtpCodecKind::Audio, None)?;
+    pc.add_transceiver_from_kind(
+        RtpCodecKind::Audio,
+        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+    )?;
     pc.add_track(video_track("first", 0x0101_0101))?;
     pc.add_track(video_track("second", 0x0202_0202))?;
     Ok(())

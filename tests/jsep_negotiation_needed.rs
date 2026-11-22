@@ -67,7 +67,10 @@ fn stop_raises_negotiation_needed_and_settles_once_rejected() -> TestResult {
 #[test]
 fn a_stopped_transceiver_that_never_had_a_section_needs_none() -> TestResult {
     let (mut offerer, mut answerer, _) = negotiated()?;
-    let unused = offerer.add_transceiver_from_kind(RtpCodecKind::Video, None)?;
+    let unused = offerer.add_transceiver_from_kind(
+        RtpCodecKind::Video,
+        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+    )?;
     offerer
         .rtp_transceiver(unused)
         .expect("transceiver")
@@ -92,7 +95,8 @@ fn set_streams_raises_negotiation_needed_until_the_msid_follows() -> TestResult 
     offerer
         .rtp_sender(sender)
         .expect("sender")
-        .set_streams(vec!["another-stream".to_owned()]);
+        .set_streams(vec!["another-stream".to_owned()])
+        .expect("the change is accepted");
     assert_eq!(
         negotiation_needed(&mut offerer),
         1,
@@ -107,7 +111,8 @@ fn set_streams_raises_negotiation_needed_until_the_msid_follows() -> TestResult 
     offerer
         .rtp_sender(sender)
         .expect("sender")
-        .set_streams(vec!["another-stream".to_owned()]);
+        .set_streams(vec!["another-stream".to_owned()])
+        .expect("the change is accepted");
     assert_eq!(negotiation_needed(&mut offerer), 0);
     Ok(())
 }

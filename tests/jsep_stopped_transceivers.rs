@@ -18,8 +18,14 @@ use rtc::sansio::Protocol;
 #[test]
 fn a_stopped_transceiver_without_a_mid_gets_no_section() -> TestResult {
     let mut pc = default_peer()?;
-    let kept = pc.add_transceiver_from_kind(RtpCodecKind::Video, None)?;
-    let stopped = pc.add_transceiver_from_kind(RtpCodecKind::Video, None)?;
+    let kept = pc.add_transceiver_from_kind(
+        RtpCodecKind::Video,
+        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+    )?;
+    let stopped = pc.add_transceiver_from_kind(
+        RtpCodecKind::Video,
+        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+    )?;
     pc.rtp_transceiver(stopped).expect("transceiver").stop()?;
 
     let offer = pc.create_offer(None)?;

@@ -39,12 +39,19 @@ pub enum RTCRtpTransceiverDirection {
     ///
     /// Neither the RTP sender nor receiver will be active.
     Inactive,
+
+    /// The transceiver neither sends nor receives and will not again: what
+    /// `RTCRtpTransceiver.direction` reads once `stop()` was called, and `currentDirection`
+    /// once the transceiver is stopped. Never written in a description (an m= section's
+    /// direction attribute) and not a value to set.
+    Stopped,
 }
 
 const RTP_TRANSCEIVER_DIRECTION_SENDRECV_STR: &str = "sendrecv";
 const RTP_TRANSCEIVER_DIRECTION_SENDONLY_STR: &str = "sendonly";
 const RTP_TRANSCEIVER_DIRECTION_RECVONLY_STR: &str = "recvonly";
 const RTP_TRANSCEIVER_DIRECTION_INACTIVE_STR: &str = "inactive";
+const RTP_TRANSCEIVER_DIRECTION_STOPPED_STR: &str = "stopped";
 
 /// defines a procedure for creating a new
 /// RTPTransceiverDirection from a raw string naming the transceiver direction.
@@ -55,6 +62,7 @@ impl From<&str> for RTCRtpTransceiverDirection {
             RTP_TRANSCEIVER_DIRECTION_SENDONLY_STR => RTCRtpTransceiverDirection::Sendonly,
             RTP_TRANSCEIVER_DIRECTION_RECVONLY_STR => RTCRtpTransceiverDirection::Recvonly,
             RTP_TRANSCEIVER_DIRECTION_INACTIVE_STR => RTCRtpTransceiverDirection::Inactive,
+            RTP_TRANSCEIVER_DIRECTION_STOPPED_STR => RTCRtpTransceiverDirection::Stopped,
             _ => RTCRtpTransceiverDirection::Unspecified,
         }
     }
@@ -86,6 +94,9 @@ impl fmt::Display for RTCRtpTransceiverDirection {
             }
             RTCRtpTransceiverDirection::Inactive => {
                 write!(f, "{RTP_TRANSCEIVER_DIRECTION_INACTIVE_STR}")
+            }
+            RTCRtpTransceiverDirection::Stopped => {
+                write!(f, "{RTP_TRANSCEIVER_DIRECTION_STOPPED_STR}")
             }
             _ => write!(f, "{}", UNSPECIFIED_STR),
         }

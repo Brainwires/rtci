@@ -1245,6 +1245,7 @@ fn a_stream_names_its_transport_codec_track_mid_and_source() -> Result<()> {
         .rtp_sender(sender)
         .expect("sender")
         .track()
+        .expect("the sender has a track")
         .track_id()
         .clone();
     let (receiver_id, receiver_track) = world.peers[1].tracks[0].clone();
@@ -2485,7 +2486,8 @@ fn an_inactive_transceiver_keeps_its_stream_objects() -> Result<()> {
         .pc
         .rtp_transceiver(transceiver)
         .expect("transceiver")
-        .set_direction(RTCRtpTransceiverDirection::Inactive);
+        .set_direction(RTCRtpTransceiverDirection::Inactive)
+        .expect("the change is accepted");
     world.negotiate()?;
     world.run_for(Duration::from_secs(3))?;
     let now = world.now;

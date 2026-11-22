@@ -10,7 +10,10 @@ use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
 #[test]
 fn the_default_av1_codec_offers_profile_not_profile_id() -> TestResult {
     let mut pc = default_peer()?;
-    pc.add_transceiver_from_kind(RtpCodecKind::Video, None)?;
+    pc.add_transceiver_from_kind(
+        RtpCodecKind::Video,
+        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+    )?;
     let offer = pc.create_offer(None)?;
     let sdp = &offer.sdp;
 

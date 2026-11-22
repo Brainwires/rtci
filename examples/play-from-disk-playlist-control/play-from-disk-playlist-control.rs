@@ -762,7 +762,6 @@ async fn run_peer_connection(
                             .ok_or(Error::ErrRTPSenderNotExisted)?;
 
                         packet.header.ssrc = rtp_sender
-                            .track()
                             .ssrcs()
                             .last()
                             .ok_or(Error::ErrSenderWithNoSSRCs)?;

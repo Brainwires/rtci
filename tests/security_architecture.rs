@@ -31,9 +31,10 @@ fn world() -> Result<World> {
 #[test]
 fn only_stun_is_sent_before_ice_has_verified_consent() -> Result<()> {
     let mut world = world()?;
-    world.peers[0]
-        .pc
-        .add_transceiver_from_kind(RtpCodecKind::Audio, None)?;
+    world.peers[0].pc.add_transceiver_from_kind(
+        RtpCodecKind::Audio,
+        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+    )?;
     world.peers[0].pc.create_data_channel("data", None)?;
     world.exchange(0)?;
     world.trickle()?;
@@ -110,12 +111,14 @@ fn every_connection_has_a_new_key_pair_by_default() -> Result<()> {
 #[test]
 fn dtls_srtp_is_offered_for_every_media_section() -> Result<()> {
     let mut world = world()?;
-    world.peers[0]
-        .pc
-        .add_transceiver_from_kind(RtpCodecKind::Audio, None)?;
-    world.peers[0]
-        .pc
-        .add_transceiver_from_kind(RtpCodecKind::Video, None)?;
+    world.peers[0].pc.add_transceiver_from_kind(
+        RtpCodecKind::Audio,
+        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+    )?;
+    world.peers[0].pc.add_transceiver_from_kind(
+        RtpCodecKind::Video,
+        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+    )?;
     world.peers[0].pc.create_data_channel("data", None)?;
     let (offer, answer) = world.exchange(0)?;
     // RFC 8859 puts `a=setup` and `a=fingerprint` in the TRANSPORT category: the one of the
@@ -157,9 +160,10 @@ fn sdp_security_descriptions_are_not_used() -> Result<()> {
         |sdp: &str| sdp.replace("a=rtcp-mux\r\n", &format!("a=rtcp-mux\r\n{CRYPTO}\r\n"));
 
     let mut world = world()?;
-    world.peers[0]
-        .pc
-        .add_transceiver_from_kind(RtpCodecKind::Audio, None)?;
+    world.peers[0].pc.add_transceiver_from_kind(
+        RtpCodecKind::Audio,
+        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+    )?;
     world.peers[0].pc.create_data_channel("data", None)?;
     let (offer, answer) = world.exchange_with(0, with_crypto, keep)?;
     assert!(with_crypto(&offer).contains(CRYPTO));
@@ -175,9 +179,10 @@ fn sdp_security_descriptions_are_not_used() -> Result<()> {
     }
 
     let mut offerer = peer("10.0.0.1:5000")?;
-    offerer
-        .pc
-        .add_transceiver_from_kind(RtpCodecKind::Audio, None)?;
+    offerer.pc.add_transceiver_from_kind(
+        RtpCodecKind::Audio,
+        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+    )?;
     let offer = offerer.pc.create_offer(None)?.sdp;
     let sdes_only = replace_lines(&with_crypto(&offer), "a=fingerprint:", None);
     let mut answerer = peer("10.0.0.2:5000")?;

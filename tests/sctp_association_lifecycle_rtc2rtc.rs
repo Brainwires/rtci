@@ -168,9 +168,10 @@ fn sctp_port_zero_closes_the_association_and_a_later_offer_brings_one_back() -> 
 fn a_data_channel_added_to_a_connected_session_gets_its_association() -> Result<()> {
     for answerer_role in [RTCDtlsRole::Client, RTCDtlsRole::Server] {
         let mut pair = Pair::new(answerer_role)?;
-        pair.offerer
-            .pc
-            .add_transceiver_from_kind(RtpCodecKind::Video, None)?;
+        pair.offerer.pc.add_transceiver_from_kind(
+            RtpCodecKind::Video,
+            Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+        )?;
         pair.negotiate()?;
         assert!(
             pair.run_until(|p| p.offerer.connected() && p.answerer.connected())?,
