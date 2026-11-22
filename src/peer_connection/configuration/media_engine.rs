@@ -77,6 +77,58 @@
 //! # }
 //! ```
 
+/// Whether a codec's fmtp parameters are part of what the format is, so that a format with
+/// other parameters is another format, not a variant to fall back to: H.264
+/// (`profile-level-id`, `packetization-mode`; RFC 6184 section 8.2.2), VP9 (`profile-id`;
+/// RFC 9628 section 6) and AV1 (`profile`; AV1 RTP section 7.2).
+pub(crate) fn has_symmetric_configuration(codec: &RTCRtpCodec) -> bool {
+    [MIME_TYPE_H264, MIME_TYPE_VP9, MIME_TYPE_AV1]
+        .iter()
+        .any(|mime_type| codec.mime_type.eq_ignore_ascii_case(mime_type))
+}
+
+/// The fmtp line of an H.264 answer: this endpoint's parameters (`local`), with the offer's
+/// profile and the level RFC 6184 section 8.2.2 allows: this endpoint's own when both sides
+/// say `level-asymmetry-allowed=1`, else the lower of the two.
+fn h264_answer_fmtp(local: &str, offered: &str) -> String {
+    let parameter = |line: &str, key: &str| -> Option<String> {
+        line.split(';').find_map(|p| {
+            let (k, v) = p.trim().split_once('=')?;
+            k.trim()
+                .eq_ignore_ascii_case(key)
+                .then(|| v.trim().to_owned())
+        })
+    };
+    let asymmetric =
+        |line: &str| parameter(line, "level-asymmetry-allowed").as_deref() == Some("1");
+    let (Some(local_id), Some(offered_id)) = (
+        parameter(local, "profile-level-id").filter(|id| id.len() == 6 && id.is_ascii()),
+        parameter(offered, "profile-level-id").filter(|id| id.len() == 6 && id.is_ascii()),
+    ) else {
+        return local.to_owned();
+    };
+    let level = |id: &str| u8::from_str_radix(&id[4..], 16).ok();
+    let (Some(local_level), Some(offered_level)) = (level(&local_id), level(&offered_id)) else {
+        return local.to_owned();
+    };
+    let answered_level = if asymmetric(local) && asymmetric(offered) {
+        local_level
+    } else {
+        local_level.min(offered_level)
+    };
+    let answered_id = format!("{}{answered_level:02x}", &offered_id[..4]);
+    local
+        .split(';')
+        .map(|p| match p.trim().split_once('=') {
+            Some((k, _)) if k.trim().eq_ignore_ascii_case("profile-level-id") => {
+                format!("{}={answered_id}", k.trim())
+            }
+            _ => p.trim().to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
 #[cfg(test)]
 mod h264_high_profile_test;
 #[cfg(test)]
@@ -91,8 +143,8 @@ use crate::peer_connection::sdp::{
 use crate::rtp_transceiver::direction::RTCRtpTransceiverDirection;
 use crate::rtp_transceiver::fmtp;
 use crate::rtp_transceiver::rtp_sender::rtp_codec::{
-    CodecMatch, RTCRtpCodec, RtpCodecKind, codec_parameters_fuzzy_search, parse_rtx_apt,
-    repair_family, rtcp_feedback_intersection,
+    CodecMatch, RTCRtpCodec, RtpCodecKind, codec_parameters_fuzzy_search, is_repair_codec,
+    parse_rtx_apt, repair_family, rtcp_feedback_intersection,
 };
 use crate::rtp_transceiver::rtp_sender::rtp_codec_parameters::RTCRtpCodecParameters;
 use crate::rtp_transceiver::rtp_sender::rtp_header_extension_capability::RTCRtpHeaderExtensionCapability;
@@ -1207,6 +1259,23 @@ impl MediaEngine {
                 }
             }
 
+            // A format matched by its name alone has parameters this endpoint did not register.
+            // For H.264, VP9 and AV1 those parameters say what the bitstream is (profile,
+            // packetization mode), and "the answerer MUST either maintain all configuration
+            // parameters or remove the media format (payload type) completely" (RFC 6184
+            // section 8.2.2; RFC 9628 section 6; AV1 RTP section 7.2): such a format is not
+            // negotiated, nor is its RTX.
+            partial_matches.retain(|codec| {
+                !has_symmetric_configuration(&codec.rtp_codec)
+                    && !parse_rtx_apt(&codec.rtp_codec.sdp_fmtp_line).is_some_and(|apt| {
+                        is_repair_codec(&codec.rtp_codec)
+                            && codecs.iter().any(|primary| {
+                                primary.payload_type == apt
+                                    && has_symmetric_configuration(&primary.rtp_codec)
+                            })
+                    })
+            });
+
             // use exact matches when they exist, otherwise fall back to partial
             if !exact_matches.is_empty() {
                 self.push_codecs(exact_matches, typ);
@@ -1221,6 +1290,52 @@ impl MediaEngine {
         }
 
         Ok(())
+    }
+
+    /// The `a=fmtp` parameters this endpoint states for `codec`, a format of a media section it
+    /// is describing. `codec` may be a negotiated format, whose fmtp line is the remote
+    /// side's; a description states this endpoint's own parameters, not the peer's (RFC 3264
+    /// section 6.1: the answerer's "own" parameters; RFC 7587 section 7.1: Opus parameters
+    /// are "declarative" and each side's own; AV1 RTP section 7.2.3; RFC 9628 section 6.1.2).
+    ///
+    /// - A repair format (RTX, its `apt`) keeps its line.
+    /// - A format one of the registered codecs matches is described with that codec's line.
+    /// - H.264 (RFC 6184 section 8.2.2): the profile and `packetization-mode` are symmetric,
+    ///   so an answer keeps the offer's profile; the level is this endpoint's own when both
+    ///   sides say `level-asymmetry-allowed=1`, else the lower of the two ("the level ... in
+    ///   the answer MUST NOT be higher than the level in the offer").
+    /// - A format no registered codec matches keeps its line.
+    pub(crate) fn local_fmtp_line(
+        &self,
+        typ: RtpCodecKind,
+        codec: &RTCRtpCodecParameters,
+        answering: bool,
+    ) -> String {
+        let registered = match typ {
+            RtpCodecKind::Audio => &self.audio_codecs,
+            RtpCodecKind::Video => &self.video_codecs,
+            RtpCodecKind::Application => &self.application_codecs,
+            RtpCodecKind::Unspecified => return codec.rtp_codec.sdp_fmtp_line.clone(),
+        };
+        if is_repair_codec(&codec.rtp_codec) {
+            return codec.rtp_codec.sdp_fmtp_line.clone();
+        }
+        let (local, matched) = codec_parameters_fuzzy_search(&codec.rtp_codec, registered);
+        if matched == CodecMatch::None
+            || (matched == CodecMatch::Partial && has_symmetric_configuration(&codec.rtp_codec))
+        {
+            return codec.rtp_codec.sdp_fmtp_line.clone();
+        }
+        let local_line = local.rtp_codec.sdp_fmtp_line;
+        if !answering
+            || !codec
+                .rtp_codec
+                .mime_type
+                .eq_ignore_ascii_case(MIME_TYPE_H264)
+        {
+            return local_line;
+        }
+        h264_answer_fmtp(&local_line, &codec.rtp_codec.sdp_fmtp_line)
     }
 
     pub(crate) fn get_codecs_by_kind(&self, typ: RtpCodecKind) -> Vec<RTCRtpCodecParameters> {

@@ -1,5 +1,7 @@
 use crate::media_stream::MediaStreamTrack;
-use crate::peer_connection::configuration::media_engine::{MIME_TYPE_RTX, MediaEngine};
+use crate::peer_connection::configuration::media_engine::{
+    MIME_TYPE_RTX, MediaEngine, has_symmetric_configuration,
+};
 use crate::peer_connection::sdp::codecs_from_media_description;
 use crate::rtp_transceiver::rtp_receiver::internal::RTCRtpReceiverInternal;
 use crate::rtp_transceiver::rtp_sender::internal::RTCRtpSenderInternal;
@@ -437,6 +439,13 @@ impl RTCRtpTransceiverInternal {
 
                 let (match_codec, match_type) =
                     codec_parameters_fuzzy_search(&remote_codec.rtp_codec, &left_codecs);
+                // A format whose parameters are its configuration (H.264, VP9, AV1) is not
+                // matched by name alone: see `has_symmetric_configuration`.
+                if match_type == CodecMatch::Partial
+                    && has_symmetric_configuration(&remote_codec.rtp_codec)
+                {
+                    continue;
+                }
                 if match_type == match_filter {
                     pass_mapping.insert(0, (remote_codec.payload_type, match_codec.payload_type));
 
