@@ -63,6 +63,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on the first inbound packet, not only when it changes; the pacer ran at 1 Mbit/s against
   GCC's 300 kbit/s until the first change.
 
+### Features
+
+- **congestion control is on by default** (RFC 8834 section 7). `register_default_interceptors`
+  now installs `Gcc` over the receiver's TWCC or RFC 8888 feedback, the pacer that releases
+  media at its target, the TWCC sender, and the RTP circuit breaker.
+  `register_default_interceptors_with_handles` also returns the handles
+  (`DefaultInterceptorHandles`); `register_default_interceptors_without_congestion_control` is
+  the explicit opt-out and is the set the default used to be. The fork's pull-style `GccHandle`
+  / `GccInterceptor` stays: placed in `Slot::CongestionControl` it replaces the default
+  estimator, and it now announces its estimate so the default pacer follows it.
+- **RTP circuit breaker** (RFC 8083; RFC 8834 section 7.1): `CircuitBreakerInterceptor` at the
+  new `Slot::CircuitBreaker`, with all four breakers (RTCP timeout, media timeout, congestion
+  against ten times the TCP throughput, media usability), ceasing transmission per flow or per
+  group, the optional reduction by ten before ceasing, and restart only on request and not
+  before the triggering interval (`CircuitBreakerHandle`). `configure_circuit_breaker` installs
+  it on its own.
+- **external limits on the estimate**: `CongestionControlInterceptor` holds the target under
+  the tightest of the negotiated session bit rate
+  (`CongestionControlHandle::set_session_bitrate_limit`, for `b=AS` / `b=TIAS`), the receiver's
+  REMB (advertised as `goog-remb` and ignored until now; it lapses after 3 s without a repeat),
+  the TMMBR bounding set (RFC 5104 sections 3.5.4 and 4.2: bounding set, owners, overhead at
+  the packet rate in use, the `2 * RTT` hold-off before a looser limit, and a TMMBN for every
+  TMMBR, on owner BYE and on owner timeout), and the circuit breaker's reduced rate.
+  `BandwidthEstimator` gains `on_packet_sent`, `on_round_trip_time`, `set_external_bounds`,
+  `on_receiver_report` and `on_path_change`, all with defaults.
+- **gcc**: missing feedback is treated as over-use (RFC 8888 section 5, RFC 8836 requirement
+  10): 500 ms without feedback while packets are being sent halves the target, and again for
+  each further 500 ms; the change reaches the pacer on an empty RTCP carrier. The round trip
+  time measured from feedback scales the additive increase and is in `EstimatorStats`. The
+  loss-based controller runs on the fraction lost of receiver reports when the receiver sends
+  no per-packet feedback (draft section 7). `CongestionControlHandle::notify_path_change` restarts the delay side.
+- **pacer**: the burst is one 5 ms group at the target rate (draft-ietf-rmcat-gcc-02 section
+  4), floored at one 1500-byte packet; it was 100 ms of the target.
+
 ### Breaking Changes
 
 - **interceptor**: `Slot::FecDecoder` moves from 6_000 to 10_300 and `Slot::NackGenerator` from
@@ -72,6 +106,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the offset, not the offset. `Rfc8888Interceptor` reports only streams bound with `ack ccfb`
   in `rtcp_feedback`. `History::take_reports` returns only packets a feedback described.
   `RateControlState::default()` is `Increase`.
+- **defaults**: `register_default_interceptors` adds congestion control, a pacer and the RTP
+  circuit breaker. Media written faster than the estimate (300 kbit/s until feedback raises
+  it) is queued by the pacer and released on `handle_timeout`, outgoing packets carry the
+  transport-cc extension, and a flow whose receiver sends no RTCP for 15 s stops. An
+  application that relied on the old set calls
+  `register_default_interceptors_without_congestion_control`.
+- **pacer**: the derived burst is 5 ms of the target instead of 100 ms; `with_burst_bits` still
+  pins one.
 
 ## [0.22.0+brainwires.5] - 2026-11-20
 
