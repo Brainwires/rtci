@@ -281,3 +281,24 @@ path = "fuzz_targets/association_handle_chunks.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "chunk_chunk_i_data_unmarshal"
+path = "fuzz_targets/chunk_chunk_i_data_unmarshal.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "chunk_chunk_i_forward_tsn_unmarshal"
+path = "fuzz_targets/chunk_chunk_i_forward_tsn_unmarshal.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "association_handle_chunks_interleaved"
+path = "fuzz_targets/association_handle_chunks_interleaved.rs"
+test = false
+doc = false
+bench = false

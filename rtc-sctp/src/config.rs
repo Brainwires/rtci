@@ -52,15 +52,35 @@ pub fn max_payload_size_for_mtu(mtu: u32) -> u32 {
 }
 pub(crate) const DEFAULT_MAX_MESSAGE_SIZE: u32 = 262144;
 
-/// How an association picks the stream whose message it sends next.
+/// How an association picks the stream whose data it sends next: the stream schedulers of
+/// RFC 8260 section 3.
+///
+/// Without user message interleaving a message that is part sent is finished before another
+/// stream is served, so a scheduler chooses between messages. With interleaving
+/// ([`TransportConfig::with_message_interleaving`], when the peer supports it too) it chooses
+/// for every chunk, and a large message no longer holds the others up.
+///
+/// A stream's priority is set with [`Stream::set_priority`](crate::Stream::set_priority).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum StreamScheduler {
-    /// One queue in the order messages were written, unordered messages first.
+    /// Messages leave in the order they were written, whatever their stream (RFC 8260
+    /// section 3.1).
     #[default]
     FirstComeFirstServed,
-    /// Each stream gets a share of the bytes sent in proportion to its weight, a whole message
-    /// at a time (RFC 8260 section 3.6, which RFC 8831 section 6.4 asks of WebRTC).
+    /// The streams with something to send take turns: a message each, or a chunk each when
+    /// interleaving (section 3.2).
+    RoundRobin,
+    /// Round robin that changes stream only when a new packet is started, so a packet
+    /// carries the data of one stream and its loss holds up that stream alone (section 3.3).
+    RoundRobinPerPacket,
+    /// The stream with the highest priority goes first, as long as it has something to send;
+    /// streams of equal priority take turns (section 3.4).
+    Priority,
+    /// Each stream gets the same share of the bytes sent (section 3.5).
+    FairCapacity,
+    /// Each stream gets a share of the bytes sent in proportion to its priority, taken as
+    /// its weight (section 3.6, which RFC 8831 section 6.4 asks of WebRTC).
     WeightedFairQueueing,
 }
 
@@ -83,6 +103,7 @@ pub struct TransportConfig {
     max_burst: Option<u32>,
     sack_delay: Duration,
     partial_reliability: bool,
+    message_interleaving: bool,
 }
 
 impl Default for TransportConfig {
@@ -103,6 +124,7 @@ impl Default for TransportConfig {
             max_burst: None,
             sack_delay: Duration::from_millis(200),
             partial_reliability: true,
+            message_interleaving: false,
         }
     }
 }
@@ -137,6 +159,23 @@ impl TransportConfig {
     /// See [`with_partial_reliability`](Self::with_partial_reliability).
     pub fn partial_reliability(&self) -> bool {
         self.partial_reliability
+    }
+
+    /// Whether user message interleaving (RFC 8260) is announced to the peer. When the peer
+    /// announces it too, user data travels in I-DATA chunks: the fragments of messages on
+    /// different streams may be interleaved, so a large message on one stream no longer
+    /// holds up the others, and the [stream scheduler](Self::with_stream_scheduler) chooses
+    /// the stream for every chunk. RFC 8831 section 6.1 says WebRTC data channels SHOULD use
+    /// it. Off by default; an application reads whole messages either way, so it needs no
+    /// change to turn it on.
+    pub fn with_message_interleaving(mut self, value: bool) -> Self {
+        self.message_interleaving = value;
+        self
+    }
+
+    /// See [`with_message_interleaving`](Self::with_message_interleaving).
+    pub fn message_interleaving(&self) -> bool {
+        self.message_interleaving
     }
 
     /// Sets SACK.Delay (RFC 9260 sections 6.2 and 16): how long the acknowledgement of a DATA

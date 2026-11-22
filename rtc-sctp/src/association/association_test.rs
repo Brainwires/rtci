@@ -2197,3 +2197,6 @@ mod untested_rows_test;
 
 #[path = "reconfig_test.rs"]
 mod reconfig_test;
+
+#[path = "interleaving_test.rs"]
+mod interleaving_test;

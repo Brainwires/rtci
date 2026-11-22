@@ -15,6 +15,7 @@ use crate::chunk::{
     chunk_forward_tsn::ChunkForwardTsnStream,
     chunk_heartbeat::ChunkHeartbeat,
     chunk_heartbeat_ack::ChunkHeartbeatAck,
+    chunk_i_forward_tsn::ChunkIForwardTsn,
     chunk_init::ChunkInit,
     chunk_init::ChunkInitAck,
     chunk_payload_data::ChunkPayloadData,
@@ -24,7 +25,7 @@ use crate::chunk::{
     chunk_shutdown::ChunkShutdown,
     chunk_shutdown_ack::ChunkShutdownAck,
     chunk_shutdown_complete::ChunkShutdownComplete,
-    chunk_type::{CT_FORWARD_TSN, CT_RECONFIG},
+    chunk_type::{CT_FORWARD_TSN, CT_I_DATA, CT_I_FORWARD_TSN, CT_RECONFIG},
     chunk_unknown::ChunkUnknown,
 };
 use crate::config::{COMMON_HEADER_SIZE, DATA_CHUNK_HEADER_SIZE, ServerConfig, TransportConfig};
@@ -68,6 +69,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use thiserror::Error;
 
+pub(crate) mod interleaving;
 pub(crate) mod reconfig;
 pub(crate) mod state;
 pub(crate) mod stats;
@@ -136,6 +138,8 @@ struct CookieTcb {
     inbound_streams: u16,
     outbound_streams: u16,
     use_forward_tsn: bool,
+    /// User message interleaving is used: both sides listed I-DATA (RFC 8260 2.2.1).
+    use_interleaving: bool,
     /// The INIT listed the RE-CONFIG chunk among its supported extensions (RFC 6525 5.1.1).
     reconfig: bool,
     /// This side's port and the peer's, as the INIT's packet had them.
@@ -156,6 +160,10 @@ struct HandshakeParams {
     forward_tsn_rejected: bool,
     /// The Supported Extensions parameter lists the RE-CONFIG chunk (RFC 6525 5.1.1).
     reconfig: bool,
+    /// The Supported Extensions parameter lists the I-DATA chunk (RFC 8260 2.2.1).
+    i_data: bool,
+    /// The Supported Extensions parameter lists the I-FORWARD-TSN chunk (RFC 8260 2.3.1).
+    i_forward_tsn: bool,
 }
 
 /// The Forward-TSN-Supported parameter (RFC 3758 3.1).
@@ -417,6 +425,15 @@ pub struct Association {
     use_forward_tsn: bool,
     /// PR-SCTP is announced and used at all (`TransportConfig::with_partial_reliability`).
     partial_reliability_enabled: bool,
+    /// User message interleaving is announced (`TransportConfig::with_message_interleaving`).
+    interleaving_enabled: bool,
+    /// User message interleaving is in use: both sides announced it (RFC 8260 2.2.1). DATA
+    /// and FORWARD TSN are then replaced by I-DATA and I-FORWARD-TSN.
+    use_interleaving: bool,
+    /// As `fwd_tsn_stream_map`, for I-FORWARD-TSN: the greatest Message Identifier among the
+    /// abandoned chunks of each stream, for its ordered (`false`) and its unordered (`true`)
+    /// messages (RFC 8260 2.3.1).
+    i_fwd_tsn_stream_map: FxHashMap<(u16, bool), u32>,
     /// Max stream-sequence-number per *ordered* stream among abandoned chunks
     /// currently in the forward-TSN window `(cumulative_tsn_ack_point,
     /// advanced_peer_tsn_ack_point]`. Maintained incrementally as chunks are
@@ -585,6 +602,9 @@ impl Default for Association {
             advanced_peer_tsn_ack_point: 0,
             use_forward_tsn: false,
             partial_reliability_enabled: true,
+            interleaving_enabled: false,
+            use_interleaving: false,
+            i_fwd_tsn_stream_map: FxHashMap::default(),
             fwd_tsn_stream_map: FxHashMap::default(),
 
             rto_mgr: RtoManager::default(),
@@ -684,6 +704,7 @@ impl Association {
             configured_inbound_streams: config.max_num_inbound_streams(),
             valid_cookie_life: config.valid_cookie_life(),
             partial_reliability_enabled: config.partial_reliability(),
+            interleaving_enabled: config.message_interleaving(),
             heartbeat_interval: config.heartbeat_interval(),
             created_at: Some(now),
             max_payload_size,
@@ -694,7 +715,11 @@ impl Association {
 
             rto_mgr: RtoManager::new(),
             timers: TimerTable::new(config.timer_config()),
-            pending_queue: PendingQueue::with_scheduler(config.stream_scheduler()),
+            pending_queue: {
+                let mut queue = PendingQueue::with_scheduler(config.stream_scheduler());
+                queue.set_packet_budget(mtu.saturating_sub(COMMON_HEADER_SIZE) as usize);
+                queue
+            },
 
             mtu,
             cwnd,
@@ -734,7 +759,7 @@ impl Association {
                 advertised_receiver_window_credit: this.max_receive_buffer_size,
                 ..Default::default()
             };
-            init.announce_extensions(this.partial_reliability_enabled);
+            init.announce_extensions(this.partial_reliability_enabled, this.interleaving_enabled);
 
             this.set_state(AssociationState::CookieWait);
             this.stored_init = Some(init);
@@ -1654,6 +1679,8 @@ impl Association {
             self.handle_reconfig(c)?
         } else if let Some(c) = chunk_any.downcast_ref::<ChunkForwardTsn>() {
             self.handle_forward_tsn(c)?
+        } else if let Some(c) = chunk_any.downcast_ref::<ChunkIForwardTsn>() {
+            self.handle_i_forward_tsn(c)?
         } else if let Some(c) = chunk_any.downcast_ref::<ChunkShutdown>() {
             self.handle_shutdown(c, now)?
         } else if let Some(c) = chunk_any.downcast_ref::<ChunkShutdownAck>() {
@@ -1785,7 +1812,7 @@ impl Association {
             advertised_receiver_window_credit: self.max_receive_buffer_size,
             ..Default::default()
         };
-        init.announce_extensions(self.partial_reliability_enabled);
+        init.announce_extensions(self.partial_reliability_enabled, self.interleaving_enabled);
         self.stored_init = Some(init);
         self.set_state(AssociationState::CookieWait);
         let _ = self.send_init();
@@ -1810,6 +1837,12 @@ impl Association {
                 }
                 if v.chunk_types.contains(&CT_RECONFIG) {
                     out.reconfig = true;
+                }
+                if v.chunk_types.contains(&CT_I_DATA) {
+                    out.i_data = true;
+                }
+                if v.chunk_types.contains(&CT_I_FORWARD_TSN) {
+                    out.i_forward_tsn = true;
                 }
             } else if any.downcast_ref::<ParamForwardTsnSupported>().is_some() {
                 // RFC 3758 3.3.1: this parameter alone announces PR-SCTP.
@@ -1914,7 +1947,8 @@ impl Association {
             peer_rwnd: i.advertised_receiver_window_credit,
             inbound_streams,
             outbound_streams,
-            use_forward_tsn: params.forward_tsn && self.partial_reliability_enabled,
+            use_forward_tsn: self.negotiated_partial_reliability(&params),
+            use_interleaving: self.negotiated_interleaving(&params),
             reconfig: params.reconfig,
             source_port,
             destination_port,
@@ -1954,7 +1988,7 @@ impl Association {
                 .push(Box::new(ParamUnknown::new(UNRECOGNIZED_PARAMETER, raw)));
         }
 
-        init_ack.announce_extensions(self.partial_reliability_enabled);
+        init_ack.announce_extensions(self.partial_reliability_enabled, self.interleaving_enabled);
 
         if state == AssociationState::Closed {
             // The accepting side holds this association from the INIT on. If no COOKIE ECHO
@@ -1997,6 +2031,7 @@ impl Association {
         debug!("[{}] initial rwnd={}", self.side, self.rwnd);
         self.ssthresh = self.rwnd;
         self.use_forward_tsn = tcb.use_forward_tsn;
+        self.set_interleaving(tcb.use_interleaving);
         self.peer_supports_reconfig = tcb.reconfig;
         // RFC 6525 4.1: the peer's request sequence numbers start at its initial TSN.
         self.peer_rsn_window = Some((tcb.peer_initial_tsn, tcb.peer_initial_tsn));
@@ -2022,7 +2057,7 @@ impl Association {
             advertised_receiver_window_credit: self.max_receive_buffer_size,
             params: vec![Box::new(ParamStateCookie::new())],
         };
-        init_ack.announce_extensions(self.partial_reliability_enabled);
+        init_ack.announce_extensions(self.partial_reliability_enabled, self.interleaving_enabled);
         Packet {
             common_header: CommonHeader {
                 verification_tag: i.initiate_tag,
@@ -2090,8 +2125,8 @@ impl Association {
         let params = self.process_handshake_params(&i.params);
         // RFC 3758 3.3.2, 3.3.3: PR-SCTP is used when the peer announced it too, and not when
         // the peer reported this side's Forward-TSN-Supported parameter as unrecognized.
-        self.use_forward_tsn =
-            params.forward_tsn && self.partial_reliability_enabled && !params.forward_tsn_rejected;
+        self.use_forward_tsn = self.negotiated_partial_reliability(&params);
+        self.set_interleaving(self.negotiated_interleaving(&params));
         if !self.use_forward_tsn {
             warn!("[{}] not using ForwardTSN (on initAck)", self.side);
         }
@@ -2490,6 +2525,25 @@ impl Association {
         );
         self.stats.inc_datas();
 
+        // RFC 8260 2.2.3: with user message interleaving negotiated a DATA chunk is a
+        // violation, and without it an I-DATA chunk is: the association is aborted.
+        if d.i_data != self.use_interleaving {
+            warn!(
+                "[{}] {} chunk on an association that uses the other: aborting",
+                self.side,
+                if d.i_data { "I-DATA" } else { "DATA" }
+            );
+            self.abort_with(
+                vec![Self::protocol_violation(if d.i_data {
+                    "I-DATA without user message interleaving (RFC 8260 2.2.3)"
+                } else {
+                    "DATA with user message interleaving (RFC 8260 2.2.3)"
+                })],
+                AssociationError::TransportError,
+            )?;
+            return Ok(vec![]);
+        }
+
         // RFC 9260 section 6.2: a DATA chunk with no user data is answered with an ABORT
         // carrying the "No User Data" cause. Accepting one would cost receive state without
         // counting against the byte-based receive window.
@@ -2794,6 +2848,7 @@ impl Association {
                 // Window reset: everything previously tracked is now at/below
                 // the cumulative ack point, so start the stream map fresh.
                 self.fwd_tsn_stream_map.clear();
+                self.i_fwd_tsn_stream_map.clear();
             }
 
             self.advance_peer_ack_point();
@@ -2808,6 +2863,18 @@ impl Association {
 
     fn handle_forward_tsn(&mut self, c: &ChunkForwardTsn) -> Result<Vec<Packet>> {
         trace!("[{}] FwdTSN: {}", self.side, c);
+
+        if self.use_interleaving {
+            // RFC 8260 2.3.1: FORWARD TSN is not used with I-DATA.
+            warn!("[{}] FORWARD TSN with I-DATA in use: aborting", self.side);
+            self.abort_with(
+                vec![Self::protocol_violation(
+                    "FORWARD-TSN with user message interleaving (RFC 8260 2.3.1)",
+                )],
+                AssociationError::TransportError,
+            )?;
+            return Ok(vec![]);
+        }
 
         if !self.use_forward_tsn {
             warn!("[{}] received FwdTSN but not enabled", self.side);
@@ -2832,13 +2899,9 @@ impl Association {
             "[{}] should send ack? newCumTSN={} peer_last_tsn={}",
             self.side, c.new_cumulative_tsn, self.peer_last_tsn
         );
-        if sna32lte(c.new_cumulative_tsn, self.peer_last_tsn) {
-            trace!("[{}] sending ack on Forward TSN", self.side);
-            self.ack_state = AckState::Immediate;
-            self.timers.stop(Timer::Ack);
-            self.awake_write_loop();
+        let Some(prev_peer_last_tsn) = self.forward_cumulative_tsn(c.new_cumulative_tsn) else {
             return Ok(vec![]);
-        }
+        };
 
         // From RFC 3758 Sec 3.6:
         //   the receiver MUST perform the same TSN handling, including duplicate
@@ -2849,17 +2912,6 @@ impl Association {
         //   When a FORWARD TSN chunk arrives, the data receiver MUST first update
         //   its cumulative TSN point to the value carried in the FORWARD TSN
         //   chunk,
-
-        // Advance peer_last_tsn. Drop only the chunks actually queued below the new point and
-        // jump straight to it: stepping one TSN at a time let a FORWARD-TSN about 2^31 ahead
-        // spin for billions of iterations.
-        while let Some(&front) = self.payload_queue.sorted.front() {
-            if !sna32lte(front, c.new_cumulative_tsn) || self.payload_queue.pop(front).is_none() {
-                break;
-            }
-        }
-        let prev_peer_last_tsn = self.peer_last_tsn;
-        self.peer_last_tsn = c.new_cumulative_tsn;
 
         // Report new peer_last_tsn value and abandoned largest SSN value to
         // corresponding streams so that the abandoned chunks can be removed
@@ -3482,6 +3534,8 @@ impl Association {
 
         s.generation = self.next_stream_generation;
         self.next_stream_generation = self.next_stream_generation.wrapping_add(1);
+        s.reassembly_queue.interleaved = self.use_interleaving;
+        self.pending_queue.forget_weight(stream_identifier);
 
         if accept {
             self.stream_queue.push_back(stream_identifier);
@@ -3676,7 +3730,25 @@ impl Association {
             self.timers
                 .start_if_idle(Timer::T3RTX, now, self.rto_mgr.get_rto());
 
-            self.bundle_data_chunks_into_packets(chunks, &mut raw_packets);
+            if self.pending_queue.one_stream_per_packet() {
+                // RFC 8260 3.3: only chunks of the same stream are bundled in a packet.
+                let mut run: Vec<ChunkPayloadData> = vec![];
+                for chunk in chunks {
+                    if run
+                        .last()
+                        .is_some_and(|last| last.stream_identifier != chunk.stream_identifier)
+                    {
+                        self.bundle_data_chunks_into_packets(
+                            std::mem::take(&mut run),
+                            &mut raw_packets,
+                        );
+                    }
+                    run.push(chunk);
+                }
+                self.bundle_data_chunks_into_packets(run, &mut raw_packets);
+            } else {
+                self.bundle_data_chunks_into_packets(chunks, &mut raw_packets);
+            }
         }
 
         // RFC 6525 5.1.1: the request in flight is sent again when its timer has expired.
@@ -3760,10 +3832,7 @@ impl Association {
                             fast_retrans_size = COMMON_HEADER_SIZE
                                 + to_fast_retrans
                                     .iter()
-                                    .map(|c| {
-                                        (DATA_CHUNK_HEADER_SIZE + c.user_data.len() as u32)
-                                            .next_multiple_of(4)
-                                    })
+                                    .map(|c| c.wire_size() as u32)
                                     .sum::<u32>();
                             i += 1;
                             continue;
@@ -3791,8 +3860,7 @@ impl Association {
                     // Padded wire size, the same accounting
                     // bundle_data_chunks_into_packets uses for bundle
                     // decisions.
-                    let data_chunk_size =
-                        (DATA_CHUNK_HEADER_SIZE + c.user_data.len() as u32).next_multiple_of(4);
+                    let data_chunk_size = c.wire_size() as u32;
                     if self.mtu < fast_retrans_size + data_chunk_size {
                         break;
                     }
@@ -3886,8 +3954,15 @@ impl Association {
                 self.advanced_peer_tsn_ack_point,
                 self.cumulative_tsn_ack_point,
             ) {
-                let fwd_tsn = self.create_forward_tsn();
-                if let Ok(raw) = self.marshal_control_chunk(&fwd_tsn) {
+                // RFC 8260 2.3.1: with I-DATA the chunk is I-FORWARD-TSN.
+                let raw = if self.use_interleaving {
+                    let fwd_tsn = self.create_i_forward_tsn();
+                    self.marshal_control_chunk(&fwd_tsn)
+                } else {
+                    let fwd_tsn = self.create_forward_tsn();
+                    self.marshal_control_chunk(&fwd_tsn)
+                };
+                if let Ok(raw) = raw {
                     raw_packets.push(raw);
                 } else {
                     warn!("[{}] failed to serialize a Forward TSN packet", self.side);
@@ -4009,13 +4084,7 @@ impl Association {
                         .saturating_sub(self.inflight_queue.marked_for_retransmission_bytes())
                         + chunks.iter().map(|c| c.user_data.len()).sum::<usize>();
                     packet_size = COMMON_HEADER_SIZE as usize
-                        + chunks
-                            .iter()
-                            .map(|c| {
-                                (DATA_CHUNK_HEADER_SIZE as usize + c.user_data.len())
-                                    .next_multiple_of(4)
-                            })
-                            .sum::<usize>();
+                        + chunks.iter().map(|c| c.wire_size()).sum::<usize>();
                     i += 1;
                     continue;
                 }
@@ -4023,8 +4092,7 @@ impl Association {
                     break;
                 };
 
-                let wire =
-                    (DATA_CHUNK_HEADER_SIZE as usize + c.user_data.len()).next_multiple_of(4);
+                let wire = c.wire_size();
                 if single_packet && !chunks.is_empty() && packet_size + wire > self.mtu as usize {
                     chunks_remaining = true;
                     break;
@@ -4105,8 +4173,13 @@ impl Association {
                 break;
             }
             let (unordered, si, ssn) = (c.unordered, c.stream_identifier, c.stream_sequence_number);
+            let (i_data, mid) = (c.i_data, c.mid);
             self.advanced_peer_tsn_ack_point = tsn;
-            self.note_abandoned_for_forward_tsn(unordered, si, ssn);
+            if i_data {
+                self.note_abandoned_for_i_forward_tsn(unordered, si, mid);
+            } else {
+                self.note_abandoned_for_forward_tsn(unordered, si, ssn);
+            }
             tsn = tsn.wrapping_add(1);
         }
         if sna32gt(
@@ -4116,6 +4189,7 @@ impl Association {
             self.will_send_forward_tsn = true;
         } else {
             self.fwd_tsn_stream_map.clear();
+            self.i_fwd_tsn_stream_map.clear();
         }
     }
 
@@ -4372,15 +4446,20 @@ impl Association {
             //      is 0), the data sender can always have one DATA chunk in flight to
             //      the receiver if allowed by cwnd (see rule B, below).
 
+            // What is sent now starts a new packet (RFC 8260 3.3, for the scheduler that
+            // gives a packet to one stream).
+            self.pending_queue.start_packet();
+            self.pending_queue.set_only_part_sent(suspended);
             loop {
                 if suspended && !self.pending_queue.is_mid_message() {
                     break;
                 }
+                // A reset whose stream has sent what was written before it takes no window.
+                if !suspended && let Some(reset) = self.pending_queue.pop_ready_reset() {
+                    resets.push(reset);
+                    continue;
+                }
                 let Some(c) = self.pending_queue.peek() else {
-                    if let Some(reset) = self.pending_queue.pop_ready_reset() {
-                        resets.push(reset);
-                        continue;
-                    }
                     break;
                 };
                 let (beginning_fragment, unordered, data_len) =
@@ -4527,8 +4606,7 @@ impl Association {
             // deciding on raw payload sizes admitted bundles that marshalled
             // past the MTU (e.g. payloads of 1147 + 16 pass a payload-only
             // check at an MTU of 1191 but serialize to a 1208-byte packet).
-            let wire =
-                (DATA_CHUNK_HEADER_SIZE as usize + chunk.user_data.len()).next_multiple_of(4);
+            let wire = chunk.wire_size();
             // Close the current bundle before a chunk whose padded wire size
             // would push the datagram past the MTU.
             if bundle_len + wire > self.mtu as usize && i > bundle_start {
