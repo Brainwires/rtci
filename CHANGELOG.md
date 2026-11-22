@@ -72,9 +72,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **jsep**: the unregistered `mslabel` and `label` source attributes are no longer written
   (RFC 5576 section 4.1); `a=ssrc` carries `cname` and `msid`.
 
+- **jsep**: `a=msid:<stream>` without appdata, the form RFC 9429 section 5.2.1 has senders
+  write, is read (RFC 8830 section 3): it was dropped, leaving the remote track without a
+  stream or, with no `a=ssrc` lines, no track at all. The recipient names the track and keeps
+  the name across descriptions. Every `a=msid` line of a section counts (a track in several
+  streams, RFC 8830 section 2); only the last did. The `a=msid` lines win over a legacy
+  `a=ssrc:<n> msid:` attribute.
+
 ### Features
 
 - **shared**: `Error::ErrAnswerDoesNotMatchOffer(String)`.
+- **receiver**: `RTCRtpReceiver::streams()`, the ids of the remote MediaStreams the track is
+  in (W3C `[[AssociatedRemoteMediaStreams]]`).
 
 ## [0.22.0+brainwires.5] - 2026-11-20
 
