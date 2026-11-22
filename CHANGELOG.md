@@ -2664,6 +2664,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   handshake and reports `EndpointEvent::PeerAuthenticated`; `State::peer_certificates` then
   holds the new chain.
 
+### DTLS 1.3 0-RTT
+
+- **dtls**: 0-RTT data for DTLS 1.3 (RFC 8446 sections 2.3 and 4.2.10), off by default on
+  both sides. `ConfigBuilder::with_max_early_data(n)` makes a server's tickets allow n bytes
+  and has it take them: only with the first PSK, a ticket of its own used for the first time
+  (section 8.1), of the same suite, in a first ClientHello, whose age agrees with the
+  server's within ten seconds (section 8.3); it is delivered as `EndpointEvent::EarlyData`
+  before the handshake completes. `Endpoint::connect_with_early_data` sends it from a client
+  whose session store has such a ticket; `State::early_data_accepted` says whether it was
+  taken. A HelloRetryRequest rules 0-RTT out, so it needs `with_cookie_exchange(false)`.
+
 ### DTLS 1.2: the RFC by default
 
 - **dtls**: `HelloVerifyRequest.server_version` is DTLS 1.0, as RFC 6347 section 4.2.1 asks

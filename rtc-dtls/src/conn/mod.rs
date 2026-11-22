@@ -330,6 +330,9 @@ impl DTLSConn {
         self.authenticated_records = v13.authenticated_records;
         self.closed_by_peer = v13.closed_by_peer;
         self.state.resumed = v13.resumed;
+        if v13.early_data_accepted.is_some() {
+            self.state.early_data_accepted = v13.early_data_accepted;
+        }
         self.post_handshake_authentications = v13.post_handshake_authentications;
         if let Some(chain) = v13.post_handshake_peer_certificates.take() {
             // RFC 8446 section 4.6.2: the client authenticated after the handshake; an
@@ -713,6 +716,12 @@ impl DTLSConn {
         Ok(conn)
     }
 
+    /// DTLS 1.3 server: the next piece of 0-RTT data the client sent with its ClientHello
+    /// (see [`EndpointEvent::EarlyData`](crate::endpoint::EndpointEvent::EarlyData)).
+    pub fn incoming_early_data(&mut self) -> Option<BytesMut> {
+        self.v13.as_mut()?.early_data.pop_front()
+    }
+
     // Read reads data from the connection.
     /// Takes the next decrypted application payload, if one is ready.
     pub fn incoming_application_data(&mut self) -> Option<BytesMut> {
@@ -1012,6 +1021,10 @@ impl DTLSConn {
             for compacted_raw_packets in compacted_raw_packets {
                 self.outgoing_compacted_raw_packets
                     .push_back(compacted_raw_packets);
+            }
+            // A DTLS 1.3 client's 0-RTT record goes once, after its first ClientHello.
+            for datagram in std::mem::take(&mut self.state.early_datagrams) {
+                self.outgoing_compacted_raw_packets.push_back(datagram);
             }
         }
 
