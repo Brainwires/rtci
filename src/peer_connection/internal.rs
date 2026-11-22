@@ -20,7 +20,8 @@ use crate::peer_connection::sdp::{
     unknown_media_name,
 };
 use crate::peer_connection::sdp::{
-    described_ssrcs, ls_groups, media_packet_time, media_rtcp_xr, share_bundle_destination,
+    described_ssrcs, is_lite_set, ls_groups, media_packet_time, media_rtcp_xr, remote_candidates,
+    share_bundle_destination,
 };
 use crate::peer_connection::state::signaling_state::check_next_signaling_state;
 use crate::peer_connection::transport::dtls::state::RTCDtlsTransportState;
@@ -401,11 +402,108 @@ impl RTCPeerConnection {
             })
     }
 
-    fn offered_local_candidates(&self) -> Result<Vec<RTCIceCandidate>> {
+    fn offered_local_candidates(&self, offer: bool) -> Result<Vec<RTCIceCandidate>> {
         if self.ice_transport().has_pending_restart() {
+            // An answer to a restart offer: the restart is applied with the answer
+            // (`defer_remote_transport`), and keeps the local candidates unless they are to
+            // be discarded; they are the new generation's, so the answer lists them.
+            let answers_restart = !offer
+                && self
+                    .pending_remote_transport
+                    .as_ref()
+                    .is_some_and(|pending| pending.ice_restart);
+            if answers_restart
+                && !self
+                    .setting_engine
+                    .candidates
+                    .discard_local_candidates_during_ice_restart
+            {
+                return self.ice_transport().get_local_candidates();
+            }
             return Ok(Vec::new());
         }
-        self.ice_transport().get_local_candidates()
+        let candidates = self.ice_transport().get_local_candidates()?;
+        // Two lite agents (RFC 8445 section 8.2, RFC 8839 sections 4.4.1.3 and 4.4.2.2): the
+        // controlling agent's updated offer lists the local candidate of the pair it chose,
+        // and the answer to it the local candidate its `a=remote-candidates` names.
+        let only = if offer {
+            self.pipeline_context
+                .ice_handler_context
+                .lite_candidate_update
+                .as_ref()
+                .map(|(local, _)| (local.address().to_owned(), local.port()))
+        } else if self.setting_engine.candidates.ice_lite {
+            self.remote_description()
+                .and_then(|r| r.parsed.as_ref())
+                .filter(|parsed| is_lite_set(parsed))
+                .and_then(|parsed| remote_candidates(parsed).ok())
+                .and_then(|named| named.into_iter().next())
+        } else {
+            None
+        };
+        Ok(match only {
+            Some((address, port)) => candidates
+                .into_iter()
+                .filter(|c| c.address == address && c.port == port)
+                .collect(),
+            None => candidates,
+        })
+    }
+
+    /// What a description this side makes says of the pair ICE selected (RFC 8839 sections
+    /// 4.2.1.2, 4.3.4, 4.4.1.2.2 and 4.4.2): the `m=` / `c=` destination of the sections that
+    /// carry the candidates, the selected pair's local candidate (in an answer to an offer
+    /// with `a=remote-candidates`, the local candidate it names), and, in an offer of the
+    /// controlling agent, the `a=remote-candidates` values: the pair's remote candidate.
+    /// Nothing while no pair is selected, or while an ICE restart is staged (its description
+    /// is an initial one again).
+    fn selected_pair_in_sdp(&self, offer: bool) -> (Option<(std::net::IpAddr, u16)>, Vec<String>) {
+        let ice = self.ice_transport();
+        if ice.has_pending_restart() {
+            return (None, vec![]);
+        }
+        if !offer
+            && let Some((address, port)) = self
+                .remote_description()
+                .and_then(|r| r.parsed.as_ref())
+                .and_then(|parsed| remote_candidates(parsed).ok())
+                .and_then(|named| named.into_iter().next())
+            && let Ok(ip) = address.parse::<std::net::IpAddr>()
+            && ice
+                .agent
+                .get_local_candidates()
+                .iter()
+                .any(|c| c.address() == address && c.port() == port)
+        {
+            return (Some((ip, port)), vec![]);
+        }
+        let Some((local, remote)) = ice.agent.get_selected_candidate_pair() else {
+            return (None, vec![]);
+        };
+        let destination = local
+            .address()
+            .parse::<std::net::IpAddr>()
+            .ok()
+            .map(|ip| (ip, local.port()));
+        let remote_candidates = if offer && ice.role() == RTCIceRole::Controlling {
+            vec![format!("1 {} {}", remote.address(), remote.port())]
+        } else {
+            vec![]
+        };
+        (destination, remote_candidates)
+    }
+
+    /// The controlling one of two lite agents chose a pair among several: the
+    /// negotiation-needed flag is updated, for the offer that conveys it.
+    pub(crate) fn announce_lite_candidate_update(&mut self) {
+        if std::mem::take(
+            &mut self
+                .pipeline_context
+                .ice_handler_context
+                .lite_candidate_update_raised,
+        ) {
+            self.trigger_negotiation_needed();
+        }
     }
 
     /// The fingerprints of every local certificate: W3C `RTCPeerConnection` writes an
@@ -433,7 +531,8 @@ impl RTCPeerConnection {
         let d = SessionDescription::new_jsep_session_description(false);
 
         let ice_params = self.ice_transport().get_local_parameters()?;
-        let candidates = self.offered_local_candidates()?;
+        let candidates = self.offered_local_candidates(true)?;
+        let (selected_destination, remote_candidates) = self.selected_pair_in_sdp(true);
 
         let local_mids = self.local_description_mids();
         let mut media_sections = vec![];
@@ -517,6 +616,8 @@ impl RTCPeerConnection {
                 .write_ssrc_attributes_for_simulcast,
             ice_pacing: self.ice_transport().agent.proposed_pacing(),
             ls_groups: vec![],
+            selected_destination,
+            remote_candidates,
         };
         RTCPeerConnection::populate_sdp(
             d,
@@ -542,7 +643,9 @@ impl RTCPeerConnection {
         d = d.with_value_attribute(ATTR_KEY_MSID_SEMANTIC.to_owned(), "WMS *".to_owned());
 
         let ice_params = self.ice_transport().get_local_parameters()?;
-        let candidates = self.offered_local_candidates()?;
+        let candidates = self.offered_local_candidates(include_unmatched)?;
+        let (selected_destination, remote_candidates) =
+            self.selected_pair_in_sdp(include_unmatched);
 
         let mut media_sections = vec![];
         let mut already_have_application_media_section = false;
@@ -926,6 +1029,8 @@ impl RTCPeerConnection {
             } else {
                 remote_parsed.as_ref().map(ls_groups).unwrap_or_default()
             },
+            selected_destination,
+            remote_candidates,
         };
         RTCPeerConnection::populate_sdp(
             d,
@@ -2214,6 +2319,16 @@ impl RTCPeerConnection {
         // Skip 1, 2 steps
         // Step 4: "If connection.[[LocalIceCredentialsToReplace]] is not empty, return true."
         if self.ice_restart_pending() {
+            return true;
+        }
+        // Two lite agents, this one controlling, chose a pair among several: the updated
+        // candidate exchange of RFC 8445 section 8.2 is an offer.
+        if self
+            .pipeline_context
+            .ice_handler_context
+            .lite_candidate_update
+            .is_some()
+        {
             return true;
         }
         // Step 3
