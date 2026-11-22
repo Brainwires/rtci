@@ -134,13 +134,13 @@ fn test_set_direction_change_triggers_renegotiation() {
             RTCRtpTransceiverDirection::Recvonly,
             "precondition: direction should be Recvonly"
         );
-        t.set_direction(RTCRtpTransceiverDirection::Inactive);
+        t.set_direction(RTCRtpTransceiverDirection::Sendrecv);
     }
 
     let events = drain_events(&mut offer_pc);
     assert!(
         has_negotiation_needed(&events),
-        "changing direction from Recvonly to Inactive should trigger OnNegotiationNeededEvent, \
+        "changing direction from Recvonly to Sendrecv should trigger OnNegotiationNeededEvent, \
          but got: {:?}",
         events
     );
@@ -149,12 +149,12 @@ fn test_set_direction_change_triggers_renegotiation() {
     drain_events(&mut offer_pc);
     {
         let mut t = offer_pc.rtp_transceiver(tid).unwrap();
-        t.set_direction(RTCRtpTransceiverDirection::Inactive);
+        t.set_direction(RTCRtpTransceiverDirection::Sendrecv);
     }
     let events = drain_events(&mut offer_pc);
     assert!(
         !has_negotiation_needed(&events),
-        "setting the same direction (Inactive -> Inactive) should NOT trigger \
+        "setting the same direction (Sendrecv -> Sendrecv) should NOT trigger \
          OnNegotiationNeededEvent, but got: {:?}",
         events
     );

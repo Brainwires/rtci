@@ -538,7 +538,7 @@ mod tests {
         offerer
             .rtp_transceiver(tid)
             .expect("transceiver exists")
-            .set_direction(RTCRtpTransceiverDirection::Inactive);
+            .set_direction(RTCRtpTransceiverDirection::Sendrecv);
 
         assert_eq!(
             count_negotiation_needed(&mut offerer),

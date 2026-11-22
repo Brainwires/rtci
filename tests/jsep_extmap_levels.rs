@@ -81,14 +81,14 @@ a=sendrecv
 fn a_session_level_extmap_is_every_rtp_sections() -> TestResult {
     let answered = answered_extmaps(
         &format!("a=extmap:3 {MID}\na=extmap:5 {ABS}\n"),
-        // The video section has its own mapping of the MID extension.
-        &["", &format!("a=extmap:7 {MID}\n")],
+        // The video section maps the MID extension itself: it is not added a second time.
+        &["", &format!("a=extmap:3 {MID}\n")],
     )?;
     assert_eq!(
         answered,
         vec![
             vec![format!("3 {MID}"), format!("5 {ABS}")],
-            vec![format!("5 {ABS}"), format!("7 {MID}")],
+            vec![format!("3 {MID}"), format!("5 {ABS}")],
         ]
     );
     Ok(())

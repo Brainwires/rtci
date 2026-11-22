@@ -443,6 +443,7 @@ impl RTCRtpTransceiverInternal {
                 // matched by name alone: see `has_symmetric_configuration`.
                 if match_type == CodecMatch::Partial
                     && has_symmetric_configuration(&remote_codec.rtp_codec)
+                    && !match_codec.rtp_codec.sdp_fmtp_line.trim().is_empty()
                 {
                     continue;
                 }
