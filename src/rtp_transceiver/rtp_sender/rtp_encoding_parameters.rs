@@ -25,6 +25,13 @@ pub struct RTCRtpEncodingParameters {
     pub max_framerate: Option<f64>,
     /// Resolution scaling factor (must be >= 1.0)
     pub scale_resolution_down_by: Option<f64>,
+    /// W3C webrtc-priority `priority`: the encoding's priority relative to the other flows of
+    /// the connection, `low` by default. It sets the DSCP of its packets unless
+    /// [`network_priority`](Self::network_priority) does (RFC 8837).
+    pub priority: crate::peer_connection::priority::RTCPriorityType,
+    /// W3C webrtc-priority `networkPriority`: the priority its packets are marked with (the
+    /// DSCP, RFC 8837), when it is to differ from [`priority`](Self::priority).
+    pub network_priority: Option<crate::peer_connection::priority::RTCPriorityType>,
 }
 
 impl Default for RTCRtpEncodingParameters {
@@ -36,6 +43,8 @@ impl Default for RTCRtpEncodingParameters {
             max_bitrate: 0,
             max_framerate: None,
             scale_resolution_down_by: None,
+            priority: Default::default(),
+            network_priority: None,
         }
     }
 }

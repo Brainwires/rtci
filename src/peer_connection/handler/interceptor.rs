@@ -2092,6 +2092,8 @@ mod stream_binding_tests {
                 max_bitrate: 0,
                 max_framerate: None,
                 scale_resolution_down_by: None,
+                priority: Default::default(),
+                network_priority: None,
             }],
         ));
         transceiver
@@ -2343,6 +2345,8 @@ mod stream_binding_tests {
                     max_bitrate: 0,
                     max_framerate: None,
                     scale_resolution_down_by: None,
+                    priority: Default::default(),
+                    network_priority: None,
                 }],
             ));
         }
@@ -2482,6 +2486,8 @@ mod stream_binding_tests {
                     max_bitrate: 0,
                     max_framerate: None,
                     scale_resolution_down_by: None,
+                    priority: Default::default(),
+                    network_priority: None,
                 }],
             ));
         }

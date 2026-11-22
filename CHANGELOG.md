@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **priority**: `RTCRtpEncodingParameters` has two new public members, `priority`
+  (`RTCPriorityType`, `low` by default) and `network_priority` (`Option<RTCPriorityType>`): a
+  struct literal without `..Default::default()` needs them.
 - **data channels** (W3C webrtc-pc 6.1, 6.2): `send()` / `send_text()` refuse on a closing
   channel (`ErrDataChannelNotOpen`; an in-band channel awaiting its ACK still accepts data, as
   RFC 8832 section 6 allows); they refuse data that would take `buffered_amount()` above the SCTP transport's
@@ -1128,6 +1131,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+- **priority** (W3C webrtc-priority, RFC 8837): `RTCPriorityType` with its DCEP values,
+  encodings' `priority` / `network_priority` (set with `setParameters`),
+  `RTCDataChannel::priority_type()`, and `RTCPeerConnection::dscp(&datagram)`: the DSCP of
+  RFC 8837 Table 1 the socket layer sets on each datagram `poll_write` returned (per RTP
+  stream, one for the SCTP association, one for everything over TCP).
+  `SettingEngineBuilder::with_non_interactive_video` selects the AF3x video codepoints.
 - **dtmf**: `RTCDTMFSender` (W3C webrtc-pc section 7) as `RTCRtpSender::dtmf()` for an audio
   sender: `insert_dtmf(now, tones, duration, inter_tone_gap)`, `tone_buffer()`,
   `can_insert_dtmf()`; `RTCPeerConnectionEvent::OnDtmfToneChange`. The tones play out on the

@@ -446,6 +446,8 @@ pub struct SettingEngine {
     pub(crate) sctp_message_size_limit_without_interleaving: Option<bool>,
     /// [`SettingEngineBuilder::with_data_channel_max_buffer_size`].
     pub(crate) data_channel_max_buffer_size: Option<u32>,
+    /// [`SettingEngineBuilder::with_non_interactive_video`].
+    pub(crate) non_interactive_video: bool,
     pub(crate) ignore_rid_pause_for_recv: bool,
     /// [`SettingEngineBuilder::with_rid_pause_marks`].
     pub(crate) rid_pause_marks: bool,
@@ -1934,6 +1936,18 @@ impl SettingEngineBuilder {
     /// `Some(16 * 1024 * 1024)` is the setting for an application written to that.
     pub fn with_data_channel_max_buffer_size(mut self, limit: Option<u32>) -> Self {
         self.0.data_channel_max_buffer_size = limit;
+        self
+    }
+
+    /// Marks video as non-interactive for [`RTCPeerConnection::dscp`]: the AF3x codepoints of
+    /// RFC 8837 Table 1 instead of the AF4x ones. RFC 8837 section 5: "Non-browser
+    /// implementations of WebRTC MAY use the AF3x DSCP values for video that is known not to
+    /// be interactive, e.g., all video in a WebRTC video playback application". The default
+    /// is `false`: all WebRTC video is interactive.
+    ///
+    /// [`RTCPeerConnection::dscp`]: crate::peer_connection::RTCPeerConnection::dscp
+    pub fn with_non_interactive_video(mut self, non_interactive: bool) -> Self {
+        self.0.non_interactive_video = non_interactive;
         self
     }
 

@@ -163,6 +163,12 @@ impl RTCDataChannel<'_> {
             .protocol()
     }
 
+    /// W3C webrtc-priority `RTCDataChannel.priority`: the class of [`Self::priority`]
+    /// (webrtc-priority 4.3: 0 to 128 very-low, to 256 low, to 512 medium, above high).
+    pub fn priority_type(&self) -> crate::peer_connection::priority::RTCPriorityType {
+        crate::peer_connection::priority::RTCPriorityType::from_dcep_priority(self.priority())
+    }
+
     /// The channel's DCEP priority (RFC 8832 §5.1): the one it was created with, or for a
     /// channel the peer opened, the one in the peer's `DATA_CHANNEL_OPEN`.
     pub fn priority(&self) -> u16 {

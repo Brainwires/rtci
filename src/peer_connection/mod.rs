@@ -249,6 +249,7 @@ pub mod event;
 pub(crate) mod handler;
 mod internal;
 mod object_model;
+pub mod priority;
 mod remote_tracks;
 pub mod rtc_error;
 mod states_events;
