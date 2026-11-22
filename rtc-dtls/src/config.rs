@@ -361,9 +361,9 @@ impl ConfigBuilder {
     /// does not use the extension. Negotiated when both sides send it. The default is
     /// `Some(0)`, as RFC 9147 section 5.1 asks of a client that wants no connection id.
     ///
-    /// With DTLS 1.3 only: the DTLS 1.2 record format of RFC 9146 (`tls12_cid`) is not
-    /// implemented, so a ClientHello that also offers DTLS 1.2 leaves the extension out, and
-    /// a server answers it only when it negotiates DTLS 1.3.
+    /// Both versions: DTLS 1.2 uses RFC 9146 (`tls12_cid` records), DTLS 1.3 its own record
+    /// header. A ClientHello that offers both carries the extension once, for both (RFC 9147
+    /// section 5.1).
     pub fn with_connection_id(mut self, length: Option<usize>) -> Self {
         self.connection_id = length;
         self
@@ -760,13 +760,7 @@ impl ConfigBuilder {
         // The groups of DTLS 1.3: the hybrid with ML-KEM first where the provider has it
         // (and the configuration does not switch it off), then the curves.
         let mut local_tls13_groups = vec![];
-        if self.post_quantum_key_share
-            && crypto_provider
-                .crypto()
-                .supports(crypto::CryptoAlgorithm::KeyExchange(
-                    crypto::KeyExchangeAlgorithm::X25519MlKem768,
-                ))
-        {
+        if self.post_quantum_key_share && hybrid_key_share_works(crypto_provider.crypto()) {
             local_tls13_groups.push(NamedCurve::X25519MlKem768);
         }
         local_tls13_groups.extend_from_slice(&local_named_curves);
@@ -910,12 +904,10 @@ impl ConfigBuilder {
             max_version,
             local_tls13_cipher_suites,
             local_tls13_groups,
-            // The extension belongs to both versions, and only DTLS 1.3 has its records
-            // here. Where a hello is for DTLS 1.3 alone it carries the extension even when
-            // no connection id was asked for (RFC 9147 section 5.1: so that the peer can
-            // ask for one), unless that is switched off.
-            // A server answers the offer of a DTLS 1.3 client whatever else it speaks: its
-            // DTLS 1.2 handshake does not know the extension.
+            // The extension belongs to both versions (RFC 9146 for DTLS 1.2, RFC 9147
+            // section 9 for 1.3). A hello carries it even when no connection id is asked for
+            // (RFC 9147 section 5.1: so that the peer can ask for one), unless that is
+            // switched off.
             connection_id: self.connection_id,
             connection_id_migration: self.connection_id_migration,
             invalid_record_limit: self.invalid_record_limit,
@@ -1160,4 +1152,27 @@ impl HandshakeConfig {
         // If nothing matches, return the first certificate.
         Ok(self.local_certificates[0].clone())
     }
+}
+
+/// Whether `crypto` can do both ends of the X25519MLKEM768 exchange: it says so, and one
+/// exchange made at once with it (a client share, the server's answer by encapsulation, the
+/// client's decapsulation) gives both sides the same secret. A provider that wraps another
+/// and passes `supports` through while leaving `key_exchange_respond` at its Diffie-Hellman
+/// default says yes and cannot answer a hybrid share; such a provider is not offered the
+/// group, rather than failing every handshake that picks it.
+fn hybrid_key_share_works(crypto: &dyn crypto::RTCCrypto) -> bool {
+    let algorithm = crypto::KeyExchangeAlgorithm::X25519MlKem768;
+    if !crypto.supports(crypto::CryptoAlgorithm::KeyExchange(algorithm)) {
+        return false;
+    }
+    let Ok(client) = crypto.start_key_exchange(algorithm) else {
+        return false;
+    };
+    let Ok((share, server_secret)) = crypto.key_exchange_respond(algorithm, client.public_key())
+    else {
+        return false;
+    };
+    client
+        .complete(&share)
+        .is_ok_and(|client_secret| client_secret.as_ref() == server_secret.as_ref())
 }

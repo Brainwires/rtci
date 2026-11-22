@@ -153,6 +153,9 @@ pub(crate) fn negotiate_client_hello(
     state.remote_offered_point_formats = false;
     state.local_signature_scheme = None;
     state.server_name.clear();
+    // RFC 9146 section 3: what this ClientHello says, not an earlier one's. (The server's
+    // own id, once chosen in flight 4, is kept: a repeated ClientHello gets the same.)
+    state.remote_connection_id = None;
 
     state.remote_random = client_hello.random.clone();
 

@@ -539,22 +539,37 @@ impl Endpoint {
         data: &[u8],
     ) -> Option<Vec<EndpointEvent>> {
         let previous = self.connections.iter().find_map(|(address, conn)| {
+            let owns = match conn.v13.as_ref() {
+                Some(v13) => v13.owns_connection_id(data),
+                // DTLS 1.2 (RFC 9146 section 4): a `tls12_cid` record with this side's
+                // connection id between its sequence number and its length.
+                None => conn
+                    .state
+                    .receive_connection_id()
+                    .is_some_and(|connection_id| {
+                        let at =
+                            crate::record_layer::record_layer_header::RECORD_LAYER_HEADER_SIZE - 2;
+                        data.first() == Some(&(crate::content::ContentType::Tls12Cid as u8))
+                            && data.get(at..at + connection_id.len()) == Some(connection_id)
+                    }),
+            };
             let migrates = conn.handshake_config.connection_id_migration
                 && conn.is_handshake_completed()
                 && !conn.is_failed()
-                && conn
-                    .v13
-                    .as_ref()
-                    .is_some_and(|v13| v13.owns_connection_id(data));
+                && owns;
             migrates.then_some(*address)
         })?;
         let conn = self.connections.get_mut(&previous)?;
         // An authentic, newer record is what moves the association. A replay or a forgery
         // is dropped by it like any other, and leaves it where it was.
         let authenticated = conn.authenticated_records;
+        let newest_before = conn.newest_authenticated_record;
         let _ = conn.read(data);
         let _ = conn.handshake(now);
-        let newest = conn.v13.as_ref().is_some_and(|v13| v13.newest_record_read);
+        let newest = match conn.v13.as_ref() {
+            Some(v13) => v13.newest_record_read,
+            None => conn.newest_authenticated_record > newest_before,
+        };
         let moves = conn.authenticated_records != authenticated && newest;
         let mut events = vec![];
         while let Some(message) = conn.incoming_application_data() {

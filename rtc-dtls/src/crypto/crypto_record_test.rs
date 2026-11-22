@@ -315,3 +315,109 @@ fn cbc_rejects_bad_padding_and_bad_macs_alike() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// RFC 9146 section 5: a `tls12_cid` record's MAC or AEAD input covers its connection id.
+// ---------------------------------------------------------------------------------------------
+
+/// RFC 9146 has no test vectors; this is section 5.3's `additional_data` (and section 5.1's
+/// MAC input in front of the content) built byte by byte from the text.
+#[test]
+fn tls12_cid_additional_data_is_the_rfc9146_layout() {
+    let header = RecordLayerHeader {
+        content_type: ContentType::Tls12Cid,
+        protocol_version: PROTOCOL_VERSION1_2,
+        epoch: 0x0102,
+        sequence_number: 0x0000_0304_0506_0708,
+        content_len: 0,
+    };
+    let cid = [0xc1, 0xc2, 0xc3];
+    let mut expected = vec![0xff; 8]; // seq_num_placeholder
+    expected.extend_from_slice(&[25, 3, 25]); // tls12_cid, cid_length, tls12_cid
+    expected.extend_from_slice(&[0xfe, 0xfd]); // DTLSCiphertext.version
+    expected.extend_from_slice(&[0x01, 0x02]); // epoch
+    expected.extend_from_slice(&[0x03, 0x04, 0x05, 0x06, 0x07, 0x08]); // sequence_number
+    expected.extend_from_slice(&cid);
+    expected.extend_from_slice(&[0x01, 0x23]); // length_of_DTLSInnerPlaintext
+    assert_eq!(
+        record_additional_data(&header, 0x0123, Some(&cid)),
+        expected
+    );
+    // An empty connection id still has its length byte.
+    let empty = record_additional_data(&header, 1, Some(&[]));
+    assert_eq!(&empty[8..11], &[25, 0, 25]);
+    assert_eq!(empty.len(), 23);
+    // Without a connection id it is RFC 5246's 13 bytes.
+    assert_eq!(
+        record_additional_data(&header, 7, None),
+        generate_aead_additional_data(&header, 7).to_vec()
+    );
+}
+
+/// Each record cipher family seals a `tls12_cid` record that opens only under the same
+/// connection id: one byte of it changed, or the record opened as an ordinary one, fails.
+#[test]
+fn a_tls12_cid_record_opens_only_under_its_connection_id() -> Result<()> {
+    use crate::cipher_suite::{CipherSuiteId, cipher_suite_for_id};
+    let master_secret = [0x5au8; 48];
+    let (client_random, server_random) = ([0x01u8; 32], [0x02u8; 32]);
+    for id in [
+        CipherSuiteId::Tls_Ecdhe_Ecdsa_With_Aes_128_Gcm_Sha256,
+        CipherSuiteId::Tls_Ecdhe_Ecdsa_With_Aes_128_Ccm,
+        CipherSuiteId::Tls_Ecdhe_Ecdsa_With_Aes_128_Ccm_8,
+        CipherSuiteId::Tls_Ecdhe_Ecdsa_With_ChaCha20_Poly1305_Sha256,
+        CipherSuiteId::Tls_Ecdhe_Ecdsa_With_Aes_256_Cbc_Sha,
+    ] {
+        let mut sender = cipher_suite_for_id(id)?;
+        let mut receiver = cipher_suite_for_id(id)?;
+        sender.init(
+            provider(),
+            &master_secret,
+            &client_random,
+            &server_random,
+            true,
+        )?;
+        receiver.init(
+            provider(),
+            &master_secret,
+            &client_random,
+            &server_random,
+            false,
+        )?;
+        // The DTLSInnerPlaintext: content, then the real type.
+        let mut inner = b"under a connection id".to_vec();
+        inner.push(ContentType::ApplicationData as u8);
+        let (mut header, mut raw) = record(1, 9, &inner);
+        header.content_type = ContentType::Tls12Cid;
+        raw[0] = ContentType::Tls12Cid as u8;
+        let cid = [0xaa, 0xbb, 0xcc, 0xdd];
+        let sealed = sender.encrypt_with_connection_id(&header, &raw, &cid)?;
+
+        let opened = receiver.decrypt_with_connection_id(&sealed, &cid)?;
+        assert_eq!(&opened[RECORD_LAYER_HEADER_SIZE..], &inner[..], "{id}");
+        let mut other = cid;
+        other[3] ^= 1;
+        assert!(
+            receiver
+                .decrypt_with_connection_id(&sealed, &other)
+                .is_err(),
+            "{id}: another connection id"
+        );
+        assert!(
+            receiver.decrypt_with_connection_id(&sealed, &[]).is_err(),
+            "{id}: an empty connection id"
+        );
+        assert!(
+            receiver.decrypt(&sealed).is_err(),
+            "{id}: opened as an ordinary record"
+        );
+        // The same content sealed as an ordinary record does not open as a tls12_cid one.
+        let (plain_header, plain_raw) = record(1, 10, &inner);
+        let plain = sender.encrypt(&plain_header, &plain_raw)?;
+        assert!(
+            receiver.decrypt_with_connection_id(&plain, &cid).is_err(),
+            "{id}"
+        );
+    }
+    Ok(())
+}

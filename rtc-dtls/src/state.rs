@@ -108,6 +108,9 @@ struct SerializedState {
     identity_hint: Vec<u8>,
     is_client: bool,
     extended_master_secret: bool,
+    /// RFC 9146: the connection ids negotiated, as `State` holds them.
+    local_connection_id: Option<Vec<u8>>,
+    remote_connection_id: Option<Vec<u8>>,
 }
 
 impl State {
@@ -229,6 +232,8 @@ impl State {
             identity_hint: self.identity_hint.clone(),
             is_client: self.is_client,
             extended_master_secret: self.extended_master_secret,
+            local_connection_id: self.local_connection_id.clone(),
+            remote_connection_id: self.remote_connection_id.clone(),
         })
     }
 
@@ -253,6 +258,10 @@ impl State {
 
         self.is_client = serialized.is_client;
         self.extended_master_secret = serialized.extended_master_secret;
+        self.local_connection_id
+            .clone_from(&serialized.local_connection_id);
+        self.remote_connection_id
+            .clone_from(&serialized.remote_connection_id);
 
         // Set master secret
         self.master_secret.clone_from(&serialized.master_secret);
