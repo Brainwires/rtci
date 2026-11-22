@@ -189,6 +189,9 @@ pub struct DTLSConn {
     /// The peer's source address is its own: always for a client (it chose the server's
     /// address), and for a server once the client has echoed its cookie (RFC 6347 4.2.1).
     pub(crate) address_verified: bool,
+    /// The current flight has been sent again because protected application data arrived
+    /// ahead of the peer's Finished (RFC 6347 4.2.4); it is not done twice for one flight.
+    pub(crate) early_data_retransmit_done: bool,
 }
 
 impl Drop for DTLSConn {
@@ -271,6 +274,7 @@ impl DTLSConn {
             received_handshake_in_last_datagram: false,
             peer_repeated_flight: false,
             address_verified: is_client || resumed,
+            early_data_retransmit_done: false,
         }
     }
 
@@ -845,7 +849,18 @@ impl DTLSConn {
             .is_some_and(|cs| cs.is_initialized());
         let mut is_handshake = false;
         if cipher_ready {
-            while let Some(p) = self.incoming_encrypted_packets.pop_front() {
+            let queued = std::mem::take(&mut self.incoming_encrypted_packets);
+            for p in queued {
+                // A record of an epoch the peer has not switched to yet (its
+                // ChangeCipherSpec is still to come) stays held: it used to be dropped here,
+                // which lost application data that arrived ahead of the peer's last flight.
+                let record_epoch = p
+                    .get(3..5)
+                    .map(|epoch| u16::from_be_bytes([epoch[0], epoch[1]]));
+                if record_epoch.is_some_and(|epoch| epoch > self.state.remote_epoch) {
+                    self.incoming_encrypted_packets.push_back(p);
+                    continue;
+                }
                 let (hs, alert, err) = self.handle_incoming_packet(p, false); // don't re-enqueue
                 if hs {
                     is_handshake = true;
@@ -902,6 +917,33 @@ impl DTLSConn {
             return;
         }
         self.incoming_encrypted_packets.push_back(pkt);
+    }
+
+    /// RFC 6347 4.2.4 (MAY): application data of the next epoch that arrives while this side
+    /// still waits for the peer's ChangeCipherSpec and Finished means the peer has completed
+    /// and that flight was lost or is late, so our final flight is sent again at once rather
+    /// than when the timer fires. Only a record that authenticates under the negotiated keys
+    /// counts (anyone can send a record that merely claims the next epoch), and only once per
+    /// flight; the retransmission comes out of the flight's ordinary budget.
+    fn note_early_application_data(&mut self, h: &RecordLayerHeader, pkt: &[u8]) {
+        if !self.handshake_config.early_data_retransmit
+            || self.early_data_retransmit_done
+            || h.content_type != ContentType::ApplicationData
+            || self.current_handshake_state != HandshakeState::Waiting
+        {
+            return;
+        }
+        let Some(cipher_suite) = &mut self.state.cipher_suite else {
+            return;
+        };
+        if cipher_suite.is_initialized() && cipher_suite.decrypt(pkt).is_ok() {
+            debug!(
+                "{}: application data before the peer's Finished, retransmitting the flight",
+                srv_cli_str(self.is_client)
+            );
+            self.early_data_retransmit_done = true;
+            self.peer_repeated_flight = true;
+        }
     }
 
     /// Whether one more application-data record fits the pre-handshake budget
@@ -976,6 +1018,7 @@ impl DTLSConn {
                     "{}: received packet of next epoch, queuing packet",
                     srv_cli_str(self.is_client)
                 );
+                self.note_early_application_data(&h, &pkt);
                 self.enqueue_early_encrypted(pkt);
             }
             return (false, None, None);

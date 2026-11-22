@@ -2,8 +2,9 @@
 
 use crate::{
     AeadAlgorithm, BlockCipherAlgorithm, CbcAlgorithm, CryptoAlgorithm, CryptoError, HashAlgorithm,
-    HmacAlgorithm, KeyExchangeAlgorithm, PublicKey, PublicKeyEncoding, RTCCrypto,
-    RTCCryptoProvider, SignatureScheme, StreamCipherAlgorithm,
+    HeaderMaskAlgorithm, HmacAlgorithm, KeyExchangeAlgorithm, PublicKey, PublicKeyEncoding,
+    RTCCrypto, RTCCryptoProvider, SignatureScheme, StreamCipherAlgorithm, hkdf_expand,
+    hkdf_expand_label, hkdf_extract,
 };
 
 /// Exercises the complete initial RTC crypto contract implemented by the built-in providers.
@@ -18,6 +19,9 @@ pub fn assert_provider(provider: &dyn RTCCryptoProvider) {
     assert_aead(provider.crypto());
     assert_key_exchange(provider.crypto());
     assert_signatures(provider.crypto());
+    assert_tls13_key_schedule(provider.crypto());
+    assert_header_masks(provider.crypto());
+    assert_rsa_pss(provider.crypto());
     assert_random(provider);
 }
 
@@ -25,9 +29,17 @@ fn assert_basic_capabilities(crypto: &dyn RTCCrypto) {
     let capabilities = [
         CryptoAlgorithm::Hash(HashAlgorithm::Md5),
         CryptoAlgorithm::Hash(HashAlgorithm::Sha256),
+        CryptoAlgorithm::Hash(HashAlgorithm::Sha384),
         CryptoAlgorithm::Hmac(HmacAlgorithm::Sha1),
         CryptoAlgorithm::Hmac(HmacAlgorithm::Sha256),
         CryptoAlgorithm::Hmac(HmacAlgorithm::Sha512),
+        CryptoAlgorithm::Hmac(HmacAlgorithm::Sha384),
+        CryptoAlgorithm::HeaderMask(HeaderMaskAlgorithm::Aes128),
+        CryptoAlgorithm::HeaderMask(HeaderMaskAlgorithm::Aes256),
+        CryptoAlgorithm::HeaderMask(HeaderMaskAlgorithm::ChaCha20),
+        CryptoAlgorithm::Signature(SignatureScheme::RsaPssSha256),
+        CryptoAlgorithm::Signature(SignatureScheme::RsaPssSha384),
+        CryptoAlgorithm::Signature(SignatureScheme::RsaPssSha512),
         CryptoAlgorithm::BlockCipher(BlockCipherAlgorithm::Aes128),
         CryptoAlgorithm::BlockCipher(BlockCipherAlgorithm::Aes256),
         CryptoAlgorithm::BlockCipher(BlockCipherAlgorithm::Aes192),
@@ -594,6 +606,350 @@ fn assert_verification_only_schemes(crypto: &dyn RTCCrypto) {
                 &bytes(signature),
             )
             .unwrap();
+    }
+}
+
+/// Checks SHA-384, HMAC-SHA-384, HKDF and the TLS 1.3 key schedule against FIPS 180-4,
+/// RFC 4231, RFC 5869 and the RFC 8448 section 3 trace.
+pub fn assert_tls13_key_schedule(crypto: &dyn RTCCrypto) {
+    assert_eq!(
+        crypto.hash(HashAlgorithm::Sha384, b"abc").unwrap(),
+        bytes(
+            "cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed\
+             8086072ba1e7cc2358baeca134c825a7"
+        )
+    );
+    assert_eq!(HashAlgorithm::Sha384.output_len(), 48);
+    assert_eq!(HmacAlgorithm::Sha384.output_len(), 48);
+
+    // RFC 4231 test case 1.
+    let mut tag = [0u8; 48];
+    let mut mac = crypto.new_hmac(HmacAlgorithm::Sha384, &[0x0b; 20]).unwrap();
+    assert_eq!(mac.output_len(), 48);
+    mac.sign(&[b"Hi ", b"There"], &mut tag).unwrap();
+    assert_eq!(
+        tag.as_slice(),
+        bytes(
+            "afd03944d84895626b0825f4ab46907f15f9dadbe4101ec682aa034c7cebc59c\
+             faea9ea9076ede7f4af152e8b2fa9cb6"
+        )
+    );
+    mac.verify(&[b"Hi There"], &tag).unwrap();
+
+    // RFC 5869 appendix A.1.
+    let pseudorandom_key = hkdf_extract(
+        crypto,
+        HmacAlgorithm::Sha256,
+        &bytes("000102030405060708090a0b0c"),
+        &[0x0b; 22],
+    )
+    .unwrap();
+    assert_eq!(
+        pseudorandom_key.as_ref(),
+        bytes("077709362c2e32df0ddc3f0dc47bba6390b6c73bb50f9c3122ec844ad7c2b3e5")
+    );
+    // The info in two pieces: where it is cut must not matter.
+    let output = hkdf_expand(
+        crypto,
+        HmacAlgorithm::Sha256,
+        pseudorandom_key.as_ref(),
+        &[&bytes("f0f1f2f3"), &bytes("f4f5f6f7f8f9")],
+        42,
+    )
+    .unwrap();
+    assert_eq!(
+        output.as_ref(),
+        bytes(
+            "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf\
+             34007208d5b887185865"
+        )
+    );
+    // RFC 5869 appendix A.3: no salt and no info.
+    let pseudorandom_key = hkdf_extract(crypto, HmacAlgorithm::Sha256, &[], &[0x0b; 22]).unwrap();
+    assert_eq!(
+        pseudorandom_key.as_ref(),
+        bytes("19ef24a32c717b167f33a91d6f648bdf96596776afdb6377ac434c1c293ccb04")
+    );
+    assert_eq!(
+        hkdf_expand(
+            crypto,
+            HmacAlgorithm::Sha256,
+            pseudorandom_key.as_ref(),
+            &[],
+            42
+        )
+        .unwrap()
+        .as_ref(),
+        bytes(
+            "8da4e775a563c18f715f802a063c5a31b8a11f5c5ee1879ec3454e5f3c738d2d\
+             9d201395faa4b61a96c8"
+        )
+    );
+    assert!(matches!(
+        hkdf_expand(
+            crypto,
+            HmacAlgorithm::Sha256,
+            pseudorandom_key.as_ref(),
+            &[],
+            255 * 32 + 1
+        ),
+        Err(CryptoError::OutputTooSmall { .. })
+    ));
+
+    // RFC 8448 section 3, the simple 1-RTT handshake.
+    let sha256 = HmacAlgorithm::Sha256;
+    let empty_hash = crypto.hash(HashAlgorithm::Sha256, b"").unwrap();
+    let early = hkdf_extract(crypto, sha256, &[], &[0; 32]).unwrap();
+    assert_eq!(
+        early.as_ref(),
+        bytes("33ad0a1c607ec03b09e6cd9893680ce210adf300aa1f2660e1b22e10f170f92a")
+    );
+    let derived = hkdf_expand_label(
+        crypto,
+        sha256,
+        early.as_ref(),
+        "tls13 ",
+        "derived",
+        &empty_hash,
+        32,
+    )
+    .unwrap();
+    assert_eq!(
+        derived.as_ref(),
+        bytes("6f2615a108c702c5678f54fc9dbab69716c076189c48250cebeac3576c3611ba")
+    );
+    let handshake = hkdf_extract(
+        crypto,
+        sha256,
+        derived.as_ref(),
+        &bytes("8bd4054fb55b9d63fdfbacf9f04b9f0d35e6d63f537563efd46272900f89492d"),
+    )
+    .unwrap();
+    assert_eq!(
+        handshake.as_ref(),
+        bytes("1dc826e93606aa6fdc0aadc12f741b01046aa6b99f691ed221a9f0ca043fbeac")
+    );
+    let transcript = bytes("860c06edc07858ee8e78f0e7428c58edd6b43f2ca3e6e95f02ed063cf0e1cad8");
+    let client_handshake = hkdf_expand_label(
+        crypto,
+        sha256,
+        handshake.as_ref(),
+        "tls13 ",
+        "c hs traffic",
+        &transcript,
+        32,
+    )
+    .unwrap();
+    assert_eq!(
+        client_handshake.as_ref(),
+        bytes("b3eddb126e067f35a780b3abf45e2d8f3b1a950738f52e9600746a0e27a55a21")
+    );
+    let server_handshake = hkdf_expand_label(
+        crypto,
+        sha256,
+        handshake.as_ref(),
+        "tls13 ",
+        "s hs traffic",
+        &transcript,
+        32,
+    )
+    .unwrap();
+    assert_eq!(
+        server_handshake.as_ref(),
+        bytes("b67b7d690cc16c4e75e54213cb2d37b4e9c912bcded9105d42befd59d391ad38")
+    );
+    let derived = hkdf_expand_label(
+        crypto,
+        sha256,
+        handshake.as_ref(),
+        "tls13 ",
+        "derived",
+        &empty_hash,
+        32,
+    )
+    .unwrap();
+    assert_eq!(
+        derived.as_ref(),
+        bytes("43de77e0c77713859a944db9db2590b53190a65b3ee2e4f12dd7a0bb7ce254b4")
+    );
+    let master = hkdf_extract(crypto, sha256, derived.as_ref(), &[0; 32]).unwrap();
+    assert_eq!(
+        master.as_ref(),
+        bytes("18df06843d13a08bf2a449844c5f8a478001bc4d4c627984d5a41da8d0402919")
+    );
+    let key = hkdf_expand_label(
+        crypto,
+        sha256,
+        server_handshake.as_ref(),
+        "tls13 ",
+        "key",
+        &[],
+        16,
+    )
+    .unwrap();
+    assert_eq!(key.as_ref(), bytes("3fce516009c21727d0f2e4e86ee403bc"));
+    let iv = hkdf_expand_label(
+        crypto,
+        sha256,
+        server_handshake.as_ref(),
+        "tls13 ",
+        "iv",
+        &[],
+        12,
+    )
+    .unwrap();
+    assert_eq!(iv.as_ref(), bytes("5d313eb2671276ee13000b30"));
+
+    // The DTLS 1.3 prefix (RFC 9147 section 5.9) gives different keys from the same secret.
+    let dtls_key = hkdf_expand_label(
+        crypto,
+        sha256,
+        server_handshake.as_ref(),
+        "dtls13",
+        "key",
+        &[],
+        16,
+    )
+    .unwrap();
+    assert_ne!(dtls_key.as_ref(), key.as_ref());
+    assert!(
+        hkdf_expand_label(
+            crypto,
+            sha256,
+            early.as_ref(),
+            "dtls13",
+            "key",
+            &[0; 256],
+            16
+        )
+        .is_err()
+    );
+}
+
+/// Checks the record-number masks against the header-protection samples of RFC 9001
+/// appendix A, which are the computation RFC 9147 section 4.2.3 defines.
+pub fn assert_header_masks(crypto: &dyn RTCCrypto) {
+    // RFC 9001 A.2: AES-128.
+    let mut mask = crypto
+        .new_header_mask(
+            HeaderMaskAlgorithm::Aes128,
+            &bytes("9f50449e04a0e810283a1e9933adedd2"),
+        )
+        .unwrap();
+    let sample: [u8; 16] = bytes("d1b1c98dd7689fb8ec11d242b123dc9b")
+        .try_into()
+        .unwrap();
+    assert_eq!(mask.mask(&sample).unwrap().as_slice(), bytes("437b9aec36"));
+    // A keyed mask is reusable.
+    assert_eq!(mask.mask(&sample).unwrap().as_slice(), bytes("437b9aec36"));
+
+    // RFC 9001 A.5: ChaCha20, the sample's first four bytes the block counter and the rest
+    // the nonce.
+    let mut mask = crypto
+        .new_header_mask(
+            HeaderMaskAlgorithm::ChaCha20,
+            &bytes("25a282b9e82f06f21f488917a4fc8f1b73573685608597d0efcb076b0ab7a7a4"),
+        )
+        .unwrap();
+    let sample: [u8; 16] = bytes("5e5cd55c41f69080575d7999c25a5bfb")
+        .try_into()
+        .unwrap();
+    assert_eq!(mask.mask(&sample).unwrap().as_slice(), bytes("aefefe7d03"));
+
+    // AES-256 is AES-ECB of the sample under a 256-bit key: the block cipher's own answer.
+    let key = [0x42u8; 32];
+    let mut block = sample;
+    crypto
+        .block_encrypt(BlockCipherAlgorithm::Aes256, &key, &mut block)
+        .unwrap();
+    let mut mask = crypto
+        .new_header_mask(HeaderMaskAlgorithm::Aes256, &key)
+        .unwrap();
+    assert_eq!(mask.mask(&sample).unwrap().as_slice(), &block[..5]);
+
+    assert!(matches!(
+        crypto.new_header_mask(HeaderMaskAlgorithm::Aes128, &[0; 32]),
+        Err(CryptoError::InvalidKeyLength { .. })
+    ));
+}
+
+/// Checks RSASSA-PSS verification (the TLS 1.3 `rsa_pss_rsae` schemes: MGF1 with the same
+/// hash, a salt as long as the digest) against signatures made with OpenSSL.
+pub fn assert_rsa_pss(crypto: &dyn RTCCrypto) {
+    let message = b"rtc-crypto RSASSA-PSS verification vector";
+    let rsa_public_key = bytes(
+        "3082010a0282010100b0f8c4868ce9bcd4d11632162c0376bb09dce2facadaa27a6d4ad01b217c0a29\
+         e036b1bfd0052254ec3d349383019d8fd2d5c895ac6790bcc6c4dfca7c26bbcf570ee3bdff70826f80\
+         e8254776d8e73b431e2bece3d7d515edd23ada88e2c7136ac796685df8a40ed38ce59eaefc2509e1b2\
+         77a0363938eb8e998a3f9fd6f2ed011b969e48d89d76508904961f8d83756466eff0f1fd5e4621e8ff\
+         083fd0d6aa87b31e560c185a1862059ba0fa95f8125ac96bfc7e051c3996587dc1271bb3ebf4930331\
+         4ee888ccc8441de13a59b0646d9375dfbcbd66c1435398e164bc4672fd63a2eef162a7c1ac7ddb3e9c\
+         db68cfeacff01f036a557477b45172593727f50203010001",
+    );
+    let vectors = [
+        (
+            SignatureScheme::RsaPssSha256,
+            "a793bca49825413a688eaac91393ae1f80c08853f95bc2754deda4e816d3d4c2fb26090c3cabcad1\
+             e2af65c7948263e5c2bbf1442cc6c42c95c61dce9b10ceb7114f6bc7390e29cea19d0f439d5dcb27\
+             56a4669d09da0a27463a65e1ccb25a6c3d320cc337641530352a71ea6db92b9fcabe97e658a645da\
+             f6f21aeff8581cba9e5c7e66579ab15c6c277585228b20bc531ec9551af3cc11d64d0e836b69d452\
+             7822fc56b8add10cf786b450a94eeef397276f5731ddec78f5ffa5a1d40f6552060520603e48e310\
+             38fa9c96952de4dade0723ef7a4947f8cc8916fded1da2215988616433fbb0d2f084173590c23dd9\
+             a36fa5283c98a4227226b03fb0b211bd",
+        ),
+        (
+            SignatureScheme::RsaPssSha384,
+            "15d74fcf1000dbfaaf843ad0ab3353d4c6c704e12434bd2e323efa9e59dfd913f70ecb5cf487b1e8\
+             e1b1980e3d49a01f7f35bacff46c3c361ea22ecf641d1bfee69f63b7bd97d1c7a317a53d9e5eb3ec\
+             2ed9ef29bb6004457262f34de89c15db3bbe3f1b3da0dfda8c63f4813cf790a0ed92b942440cf05f\
+             fccff518f3af096cda08c417c98351fe7f15cfbf96d73468ac88e390e3e950846d0e70ac665678b2\
+             021668e4a3996c498e1f1784c98a9ede2f4b3cbff7fb1fed61266946180248106841acdc3349de98\
+             4f956df683773f622efbf79c1863559ba40538c7f3a6e36af5d302e8a0275dc37c0acb34587db107\
+             b4db640fb2a78371e768b16fa790ad1c",
+        ),
+        (
+            SignatureScheme::RsaPssSha512,
+            "a47446283b0cac22decb44c283fb93d90b50f6a79fe04d83f2484332861d5c9bee21e2b0b16e0d8e\
+             7630777b06f821cd4504dc2fcc93c4f39b728d7cb0e81470fbd15b5edf3da1f7194e73ff34d08440\
+             240aeda34b7003d393354e00878e61ae9e6d3473e7d3932b8e05d7dc62932af9d65d8be84600654d\
+             5be161daac8403e3c2b11a092494e3b9a7ce6a45092b239332443c0baa3e93b01ebb77d0e36f77eb\
+             951c9ee95ba859997f5bf7865d0fb5ed7af5e447d8c935721eea0b3941dadbc119a6c2b1d2db198e\
+             11735206b2263c8ce87d22065938b7fdc0e73c7857571a5fd8b289f5133c388427b6042b26f62ba9\
+             8f70ffb70294b193e079494c1f5674cc",
+        ),
+    ];
+    for (scheme, signature) in vectors {
+        let public_key = PublicKey {
+            encoding: PublicKeyEncoding::RsaPkcs1Der,
+            bytes: &rsa_public_key,
+        };
+        let signature = bytes(signature);
+        crypto
+            .verify_signature(scheme, public_key, message, &signature)
+            .unwrap();
+        assert_eq!(
+            crypto.verify_signature(scheme, public_key, b"another message", &signature),
+            Err(CryptoError::InvalidSignature)
+        );
+        // A PSS signature is not a PKCS#1 v1.5 one, and the hash is part of the scheme.
+        assert_eq!(
+            crypto.verify_signature(
+                SignatureScheme::RsaPkcs1Sha256,
+                public_key,
+                message,
+                &signature
+            ),
+            Err(CryptoError::InvalidSignature)
+        );
+        let other = if scheme == SignatureScheme::RsaPssSha256 {
+            SignatureScheme::RsaPssSha384
+        } else {
+            SignatureScheme::RsaPssSha256
+        };
+        assert_eq!(
+            crypto.verify_signature(other, public_key, message, &signature),
+            Err(CryptoError::InvalidSignature)
+        );
     }
 }
 

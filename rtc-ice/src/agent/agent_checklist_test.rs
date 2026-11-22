@@ -1185,11 +1185,14 @@ fn test_signalled_candidate_replaces_the_peer_reflexive_one_it_duplicates() {
     );
     answered(&mut a, start, Duration::ZERO, 100 * MS);
     assert_eq!(a.candidate_pairs[0].state, CandidatePairState::Succeeded);
+    let id = a.remote_candidates[0].id().to_owned();
 
     assert!(
         a.add_remote_candidate(host_with_priority(addr(REMOTE_A), 2130706431))
             .unwrap()
     );
+    // The pair keeps its identity (its statistics are keyed by the candidates' ids).
+    assert_eq!(a.remote_candidates[0].id(), id);
     assert_eq!(a.remote_candidates.len(), 1);
     assert_eq!(a.remote_candidates[0].candidate_type(), CandidateType::Host);
     assert_eq!(a.remote_candidates[0].priority(), 2130706431);

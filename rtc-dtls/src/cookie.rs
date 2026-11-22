@@ -11,7 +11,7 @@ use crate::handshake::handshake_header::HANDSHAKE_HEADER_LENGTH;
 use crate::handshake::handshake_message_client_hello::MAX_SESSION_ID_LENGTH;
 use crate::handshake::handshake_random::HANDSHAKE_RANDOM_LENGTH;
 use crate::record_layer::record_layer_header::{
-    DTLS_VERSION_MAJOR, PROTOCOL_VERSION1_2, RECORD_LAYER_HEADER_SIZE,
+    DTLS_VERSION_MAJOR, PROTOCOL_VERSION1_2, ProtocolVersion, RECORD_LAYER_HEADER_SIZE,
 };
 use crypto::{HmacAlgorithm, RTCCryptoProvider};
 use shared::error::{Error, Result};
@@ -113,10 +113,17 @@ impl<'a> ClientHelloPrefix<'a> {
     ///
     /// Its record carries the ClientHello's record sequence number, so that several
     /// HelloVerifyRequests never repeat one (RFC 6347 4.2.1), and its message the ClientHello's
-    /// message_seq. server_version is the version the ServerHello will carry, DTLS 1.2, which
-    /// RFC 6347 4.2.1 requires in one sentence (and advises against, for DTLS 1.0, in
-    /// another; clients are told to ignore the field either way).
-    pub(crate) fn hello_verify_request(&self, cookie: &[u8]) -> Vec<u8> {
+    /// message_seq. `server_version` is the message's server_version field: DTLS 1.0 by
+    /// default, as RFC 6347 4.2.1 advises whatever version is negotiated afterwards, or
+    /// DTLS 1.2 when the configuration asks for it
+    /// ([`ConfigBuilder::with_hello_verify_request_version`](crate::config::ConfigBuilder::with_hello_verify_request_version)).
+    /// Clients are told to ignore the field either way. The record itself says DTLS 1.2, as
+    /// every record of this stack does.
+    pub(crate) fn hello_verify_request(
+        &self,
+        cookie: &[u8],
+        server_version: ProtocolVersion,
+    ) -> Vec<u8> {
         let body_len = 2 + 1 + cookie.len();
         let mut out =
             Vec::with_capacity(RECORD_LAYER_HEADER_SIZE + HANDSHAKE_HEADER_LENGTH + body_len);
@@ -137,7 +144,7 @@ impl<'a> ClientHelloPrefix<'a> {
         out.extend_from_slice(&[0, 0, 0]);
         out.extend_from_slice(&length[1..]);
 
-        out.extend_from_slice(&[PROTOCOL_VERSION1_2.major, PROTOCOL_VERSION1_2.minor]);
+        out.extend_from_slice(&[server_version.major, server_version.minor]);
         out.push(cookie.len() as u8);
         out.extend_from_slice(cookie);
         out
@@ -331,7 +338,7 @@ mod tests {
     fn a_hello_verify_request_repeats_the_sequence_numbers_of_its_client_hello() {
         let datagram = client_hello(&[], 0, 0);
         let hello = ClientHelloPrefix::parse(&datagram).unwrap();
-        let answer = hello.hello_verify_request(&[0x5c; 20]);
+        let answer = hello.hello_verify_request(&[0x5c; 20], PROTOCOL_VERSION1_2);
         assert_eq!(&answer[..5], &[22, 0xfe, 0xfd, 0, 0]);
         assert_eq!(
             &answer[5..11],

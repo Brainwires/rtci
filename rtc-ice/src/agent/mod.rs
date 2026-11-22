@@ -1060,6 +1060,11 @@ impl Agent {
         c.last_received = learned.last_received;
         c.last_authenticated = learned.last_authenticated;
         c.last_consent = learned.last_consent;
+        // The candidate keeps the identity its pairs are known by: the statistics of a pair
+        // (and its packet counters) are keyed by the two candidates' ids, and a pair that is
+        // carrying data must not become another pair because its remote candidate was
+        // signalled after all.
+        c.id = learned.id.clone();
         if c.tcp_type() == TcpType::Unspecified {
             c.tcp_type = learned.tcp_type();
         }

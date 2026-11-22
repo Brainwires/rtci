@@ -42,3 +42,25 @@ rustls/webpki certificate-chain verification remains an explicitly separate adap
 `ring` remains the default built-in provider. `ring` and `aws-lc-rs` become additive in P1-09: enabling both compiles both and does not silently select AWS-LC-RS. Construction resolves the chosen provider once and protocol objects store an `Arc<dyn RTCCryptoProvider>`; packet paths do not read a mutable global or repeatedly resolve defaults.
 
 The protocol crates still intentionally reject both built-ins together and cannot yet build the full RTC stack without one while their direct backend calls remain. P1-09 makes these configurations pass for `rtc-crypto`; P2 through P6 migrate the consumers, and P7 adds the corresponding full-workspace matrix. This sequencing keeps the new provider contract independently testable without claiming that unmigrated protocol crates are already additive.
+
+## TLS 1.3 primitives (DTLS 1.3)
+
+DTLS 1.3 reaches its cryptography through the same boundary; nothing in `rtc-dtls` names a
+backend. What it added to the provider contract, and why each piece sits where it does:
+
+| Need | Where | Decision |
+|---|---|---|
+| SHA-384, HMAC-SHA-384 | `HashAlgorithm::Sha384`, `HmacAlgorithm::Sha384` | Provider operations, for `TLS_AES_256_GCM_SHA384`. |
+| HKDF-Extract, HKDF-Expand, HKDF-Expand-Label | `rtc_crypto::{hkdf_extract, hkdf_expand, hkdf_expand_label}` | Not provider operations. HKDF (RFC 5869) is HMAC and nothing else, so it is written once on `RTCCrypto::new_hmac`; a provider that has HMAC for a hash has HKDF for it, a downstream one included, and the built-ins cannot disagree. Outputs are `SecretVec`. The label prefix is a parameter: `"dtls13"` (RFC 9147 section 5.9), and `"tls13 "` for the RFC 8448 trace the conformance suite checks. |
+| Record AEADs | `AeadAlgorithm` (unchanged) | AES-128-GCM, AES-256-GCM, ChaCha20-Poly1305, AES-128-CCM and AES-128-CCM-8 were all there for DTLS 1.2 and SRTP. |
+| Record sequence number encryption (RFC 9147 section 4.2.3) | `RTCCrypto::new_header_mask`, `HeaderMask`, `HeaderMaskAlgorithm::{Aes128, Aes256, ChaCha20}` | A provider operation of its own: the mask is AES-ECB of a 16-byte sample or the ChaCha20 block function keyed by it, which is QUIC header protection (RFC 9001 section 5.4). Both built-ins implement it on their `aead::quic::HeaderProtectionKey`, so the key is expanded once and AES uses the hardware. `block_encrypt` would have re-expanded the key per record and has no ChaCha20. |
+| Key shares | `KeyExchangeAlgorithm` (unchanged) | X25519, P-256, P-384. Neither built-in offers a hybrid ML-KEM group through its stable API in the versions pinned here (aws-lc-rs has ML-KEM itself; ring has none), so `X25519MLKEM768` is not offered. Adding it is a new `KeyExchangeAlgorithm` variant whose `ActiveKeyExchange` concatenates the two shares; the handshake code is indifferent to the group. |
+| RSASSA-PSS | `SignatureScheme::{RsaPssSha256, RsaPssSha384, RsaPssSha512}` | The `rsa_pss_rsae_*` schemes of RFC 8446 section 4.2.3: MGF1 with the same hash, salt as long as the digest, key with the rsaEncryption OID. Verified from `RsaPkcs1Der` like PKCS#1 v1.5. An imported RSA key signs both paddings: `SigningKey::supports` is true for the PSS schemes on a key imported as `RsaPkcs1Sha256`. `rsa_pss_pss_*` (keys with the RSASSA-PSS OID) is not implemented: neither backend imports such keys. |
+| Ed25519, ECDSA P-256 / P-384 | `SignatureScheme` (unchanged) | In TLS 1.3 an ECDSA scheme names its curve; the handshake asks for `EcdsaP256Sha256` or `EcdsaP384Sha384` and never for the P-384 / SHA-256 pairing DTLS 1.2 allows. |
+
+The conformance suite (`rtc_crypto::conformance`) checks each against published values:
+FIPS 180-4 and RFC 4231 (SHA-384, HMAC-SHA-384), RFC 5869 appendix A (HKDF), the RFC 8448
+section 3 trace (the TLS 1.3 key schedule down to a traffic key and IV), RFC 9001 appendix A
+(the AES-128 and ChaCha20 masks) and RSASSA-PSS signatures made with OpenSSL. RFC 9147 itself
+publishes no test vectors; what is specific to DTLS 1.3 is checked against handshakes
+recorded with OpenSSL in `rtc-dtls`.

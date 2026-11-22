@@ -184,11 +184,25 @@ pub(crate) fn client_hello_extensions(cfg: &HandshakeConfig) -> Vec<Extension> {
         ));
     }
 
-    if !cfg.server_name.is_empty() {
+    if let Some(host_name) = sni_host_name(&cfg.server_name) {
         extensions.push(Extension::ServerName(ExtensionServerName {
-            server_name: cfg.server_name.clone(),
+            server_name: host_name.to_owned(),
         }));
     }
 
     extensions
+}
+
+/// The HostName a client puts in its server_name extension for `server_name`, if it may send
+/// one: RFC 6066 section 3 permits DNS host names only, not literal IPv4 or IPv6 addresses,
+/// and writes them without a trailing dot. The configured name still names the certificate
+/// that is expected; an address is simply not announced.
+pub(crate) fn sni_host_name(server_name: &str) -> Option<&str> {
+    let host_name = server_name.strip_suffix('.').unwrap_or(server_name);
+    let is_address = host_name.parse::<std::net::IpAddr>().is_ok()
+        || host_name
+            .strip_prefix('[')
+            .and_then(|rest| rest.strip_suffix(']'))
+            .is_some_and(|inner| inner.parse::<std::net::Ipv6Addr>().is_ok());
+    (!host_name.is_empty() && !is_address).then_some(host_name)
 }
