@@ -170,6 +170,7 @@ mod rejected_mline_tests {
             ignore_rid_pause_for_recv: false,
             write_ssrc_attributes_for_simulcast: false,
             ice_pacing: None,
+            ls_groups: vec![],
             rid_pause_marks: false,
         }
     }
@@ -864,6 +865,103 @@ fn get_rids_orders_and_pauses_by_lookup() {
     );
 }
 
+/// `a=rtcp` (RFC 3605 section 2.1).
+pub(crate) const ATTR_KEY_RTCP: &str = "rtcp";
+
+/// The default candidate of a section (RFC 8839 section 4.2.1.2: the one "most likely to
+/// work": a relayed candidate, else a server-reflexive one, else a host candidate; RTP,
+/// component 1), as (address, port). UDP candidates are preferred, as the m= line says UDP.
+/// A candidate whose address is not an IP address (an mDNS name) is never the default (the
+/// mDNS ICE candidates draft, section 3.1.2.2: the `c=` line then says 0.0.0.0 and port 9).
+fn default_candidate(candidates: &[RTCIceCandidate]) -> Option<(std::net::IpAddr, u16)> {
+    use crate::peer_connection::transport::ice::candidate_type::RTCIceCandidateType as Type;
+    use crate::peer_connection::transport::ice::protocol::RTCIceProtocol;
+    let rank = |c: &RTCIceCandidate| -> u8 {
+        match c.typ {
+            Type::Relay => 0,
+            Type::Srflx => 1,
+            Type::Prflx => 2,
+            _ => 3,
+        }
+    };
+    candidates
+        .iter()
+        .filter_map(|c| Some((c, c.address.parse::<std::net::IpAddr>().ok()?)))
+        .filter(|(c, _)| c.port != 0)
+        .min_by_key(|(c, _)| {
+            (
+                c.protocol != RTCIceProtocol::Udp,
+                rank(c),
+                std::cmp::Reverse(c.priority),
+            )
+        })
+        .map(|(c, ip)| (ip, c.port))
+}
+
+/// Puts a default destination in a section: the `m=` port and `c=` address, and the `a=rtcp`
+/// line when the section has one (RTCP is multiplexed, so it is the RTP destination too; RFC
+/// 5761 section 5.1.3).
+fn set_default_destination(m: &mut MediaDescription, ip: std::net::IpAddr, port: u16) {
+    m.media_name.port = RangedPort {
+        value: port as isize,
+        range: None,
+    };
+    let address_type = if ip.is_ipv4() { "IP4" } else { "IP6" };
+    m.connection_information = Some(ConnectionInformation {
+        network_type: "IN".to_owned(),
+        address_type: address_type.to_owned(),
+        address: Some(Address {
+            address: ip.to_string(),
+            ttl: None,
+            range: None,
+        }),
+    });
+    for a in &mut m.attributes {
+        if a.key == ATTR_KEY_RTCP {
+            a.value = Some(format!("{port} IN {address_type} {ip}"));
+        }
+    }
+}
+
+/// RFC 9143 section 7.2 (and 7.5.1 for later offers): the bundled sections that are not
+/// bundle-only share the BUNDLE transport's address and port, the default destination of the
+/// section that carries the candidates.
+pub(crate) fn share_bundle_destination(d: &mut SessionDescription) {
+    let group: Vec<String> = bundle_group_mids(d)
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    let Some(carrier) = d
+        .media_descriptions
+        .iter()
+        .find(|m| m.attribute("candidate").is_some() && m.media_name.port.value != 0)
+    else {
+        return;
+    };
+    let Some(ip) = carrier
+        .connection_information
+        .as_ref()
+        .and_then(|c| c.address.as_ref())
+        .and_then(|a| a.address.parse::<std::net::IpAddr>().ok())
+    else {
+        return;
+    };
+    let Ok(port) = u16::try_from(carrier.media_name.port.value) else {
+        return;
+    };
+    if ip.is_unspecified() {
+        return;
+    }
+    for m in &mut d.media_descriptions {
+        if m.media_name.port.value != 0
+            && !m.has_attribute(ATTR_KEY_BUNDLE_ONLY)
+            && get_mid_value(m).is_some_and(|mid| group.contains(mid))
+        {
+            set_default_destination(m, ip, port);
+        }
+    }
+}
+
 pub(crate) fn add_candidates_to_media_descriptions(
     candidates: &[RTCIceCandidate],
     mut m: MediaDescription,
@@ -890,6 +988,14 @@ pub(crate) fn add_candidates_to_media_descriptions(
         let mut candidate = c.to_ice()?;
         candidate.set_component(1);
         m = append_candidate_if_new(&candidate, m);
+    }
+    // RFC 8839 section 4.2.1.2 and RFC 9429 sections 5.2.2, 5.3.2: once there are candidates,
+    // the m= and c= lines carry the default candidate's port and address (the dummy 9 and
+    // 0.0.0.0 stand for "no candidates yet").
+    if m.media_name.port.value != 0
+        && let Some((ip, port)) = default_candidate(candidates)
+    {
+        set_default_destination(&mut m, ip, port);
     }
 
     if ice_gathering_state != RTCIceGatheringState::Complete {
@@ -1053,6 +1159,15 @@ impl RTCPeerConnection {
         // adds.
         if is_offer && params.rtcp_mux_only && !media_section.renegotiated {
             media = media.with_property_attribute(ATTR_KEY_RTCP_MUX_ONLY.to_owned());
+        }
+        // RFC 9429 section 5.2.1: an offer's new section has "An "a=rtcp" line ... containing
+        // the default value "9 IN IP4 0.0.0.0"" (the default candidate's once there is one);
+        // section 5.2.2: "The "a=rtcp" line MUST NOT be added if the most recent answer
+        // included an "a=rtcp-mux" line", which this endpoint's answers always do. An answer
+        // to an offer with `a=rtcp-mux` has none either (section 5.3.1).
+        if is_offer && !media_section.renegotiated {
+            media =
+                media.with_value_attribute(ATTR_KEY_RTCP.to_owned(), "9 IN IP4 0.0.0.0".to_owned());
         }
         // Reduced-size RTCP (RFC 5506 section 5).
         if media_section.offered_rtcp_rsize.unwrap_or(true) {
@@ -1648,7 +1763,8 @@ fn tagged_section<'a>(
 }
 
 /// The BUNDLE attributes this endpoint writes (RFC 8859 categories IDENTICAL and TRANSPORT).
-const BUNDLE_ATTRIBUTES: [&str; 9] = [
+const BUNDLE_ATTRIBUTES: [&str; 10] = [
+    ATTR_KEY_RTCP,
     "ice-ufrag",
     "ice-pwd",
     "ice-options",
@@ -1818,6 +1934,9 @@ pub(crate) struct PopulateSdpParams {
     /// The Ta this endpoint proposes (`ice::Agent::proposed_pacing`): `a=ice-pacing` when it is
     /// not the default.
     pub(crate) ice_pacing: Option<std::time::Duration>,
+    /// In an offer, the `a=group:LS` groups of the most recent answer; in an answer, the
+    /// offer's (RFC 9429 sections 5.2.2, 5.3.1).
+    pub(crate) ls_groups: Vec<Vec<String>>,
 }
 
 impl RTCPeerConnection {
@@ -2207,6 +2326,36 @@ impl RTCPeerConnection {
             );
         }
 
+        share_bundle_destination(&mut d);
+
+        // Lip synchronization groups (RFC 5888 section 7; RFC 9429 sections 5.2.1, 5.2.2,
+        // 5.3.1), of the accepted RTP sections.
+        let live: Vec<(String, Vec<String>)> = media_sections
+            .iter()
+            .filter(|m| !m.rejected && !m.data && m.transceiver_index < transceivers.len())
+            .filter(|m| {
+                d.media_descriptions.iter().any(|media| {
+                    get_mid_value(media) == Some(&m.mid)
+                        && (media.media_name.port.value != 0
+                            || media.has_attribute(ATTR_KEY_BUNDLE_ONLY))
+                })
+            })
+            .map(|m| {
+                let streams = transceivers[m.transceiver_index]
+                    .sender()
+                    .as_ref()
+                    .map(|sender| sender.associated_streams().to_vec())
+                    .unwrap_or_default();
+                (m.mid.clone(), streams)
+            })
+            .collect();
+        for group in
+            generated_ls_groups(&live, &params.ls_groups, params.bundle == BundleMode::Offer)
+        {
+            d = d
+                .with_value_attribute(ATTR_KEY_GROUP.to_owned(), format!("LS {}", group.join(" ")));
+        }
+
         Ok(d)
     }
 }
@@ -2500,6 +2649,24 @@ pub(crate) fn inherit_session_rtcp_xr(desc: &mut SessionDescription) {
 /// per media stream ... or globally for all streams"; RFC 9429 section 5.8.1 stores them, and
 /// section 5.3.1 has session-level attributes count as present in each m= section). A
 /// section's own mapping for an id or a URI wins. Only the parsed description changes.
+/// RFC 8285 section 5: "The definitions MUST be either all session level or all media level;
+/// it is not permitted to mix the two styles." A received description that has `a=extmap`
+/// lines at both levels is refused.
+pub(crate) fn check_extmap_levels(desc: &SessionDescription) -> Result<()> {
+    let at_session = desc.attributes.iter().any(|a| a.key == ATTR_KEY_EXT_MAP);
+    if at_session
+        && desc
+            .media_descriptions
+            .iter()
+            .any(|m| m.attributes.iter().any(|a| a.key == ATTR_KEY_EXT_MAP))
+    {
+        return Err(Error::SdpInvalidValue(
+            "a=extmap at both session and media level (RFC 8285 section 5)".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn inherit_session_extmap(desc: &mut SessionDescription) {
     let session: Vec<(String, String, String)> = desc
         .attributes
@@ -2755,6 +2922,135 @@ pub(crate) fn discard_stray_bundle_only(desc: &mut SessionDescription, answers: 
 }
 
 /// The mids of the description's first `a=group:BUNDLE` (RFC 8843 §7.1), in order.
+/// The SSRCs a description mentions (`a=ssrc` and `a=ssrc-group` lines, RFC 5576 sections 4.1,
+/// 4.2), in any section.
+pub(crate) fn described_ssrcs(desc: &SessionDescription) -> HashSet<SSRC> {
+    let mut ssrcs = HashSet::new();
+    for media in &desc.media_descriptions {
+        for a in &media.attributes {
+            let Some(value) = a.value.as_deref() else {
+                continue;
+            };
+            match a.key.as_str() {
+                "ssrc" => ssrcs.extend(
+                    value
+                        .split_whitespace()
+                        .next()
+                        .and_then(|id| id.parse::<SSRC>().ok()),
+                ),
+                "ssrc-group" => ssrcs.extend(
+                    value
+                        .split_whitespace()
+                        .skip(1)
+                        .filter_map(|id| id.parse::<SSRC>().ok()),
+                ),
+                _ => {}
+            }
+        }
+    }
+    ssrcs
+}
+
+/// The lip synchronization groups of a description (`a=group:LS`, RFC 5888 section 7), each
+/// its mids in order.
+pub(crate) fn ls_groups(desc: &SessionDescription) -> Vec<Vec<String>> {
+    desc.attributes
+        .iter()
+        .filter(|a| a.key == ATTR_KEY_GROUP)
+        .filter_map(|a| a.value.as_deref())
+        .filter_map(|value| {
+            let mut tokens = value.split_whitespace();
+            (tokens.next() == Some("LS")).then(|| tokens.map(str::to_owned).collect())
+        })
+        .collect()
+}
+
+/// The `a=group:LS` groups of a description being generated (RFC 9429 sections 5.2.1, 5.2.2,
+/// 5.3.1). `live` are its accepted RTP sections in order, each with the streams its sender is
+/// associated with (empty: none). An offer has a group for each stream more than one of them
+/// is associated with, and keeps each group of the most recent answer (`previous`) with the
+/// mids still live, when two remain; an answer has, for each offered group (`previous`), the
+/// sections of the group that share one stream or have none, when there are two.
+fn generated_ls_groups(
+    live: &[(String, Vec<String>)],
+    previous: &[Vec<String>],
+    is_offer: bool,
+) -> Vec<Vec<String>> {
+    let position = |mid: &String| live.iter().position(|(m, _)| m == mid);
+    let ordered = |mut group: Vec<String>| {
+        group.sort_by_key(position);
+        group.dedup();
+        group
+    };
+    let mut groups: Vec<Vec<String>> = vec![];
+    if is_offer {
+        for group in previous {
+            let kept: Vec<String> = group
+                .iter()
+                .filter(|mid| position(mid).is_some())
+                .cloned()
+                .collect();
+            if kept.len() >= 2 {
+                groups.push(ordered(kept));
+            }
+        }
+        let mut streams: Vec<&String> = vec![];
+        for (_, ids) in live {
+            for id in ids {
+                if !streams.contains(&id) {
+                    streams.push(id);
+                }
+            }
+        }
+        for stream in streams {
+            let members: Vec<String> = live
+                .iter()
+                .filter(|(_, ids)| ids.contains(stream))
+                .map(|(mid, _)| mid.clone())
+                .collect();
+            if members.len() < 2 {
+                continue;
+            }
+            // A stream's sections join the group of the last answer they are in, if any.
+            match groups
+                .iter_mut()
+                .find(|group| group.iter().any(|mid| members.contains(mid)))
+            {
+                Some(group) => {
+                    let mut joined = group.clone();
+                    joined.extend(members);
+                    *group = ordered(joined);
+                }
+                None => groups.push(members),
+            }
+        }
+    } else {
+        for group in previous {
+            let members: Vec<&(String, Vec<String>)> =
+                live.iter().filter(|(mid, _)| group.contains(mid)).collect();
+            // The stream most of them share; the first in section order on a tie.
+            let mut common: Option<(&String, usize)> = None;
+            for (_, ids) in &members {
+                for id in ids {
+                    let count = members.iter().filter(|(_, i)| i.contains(id)).count();
+                    if common.is_none_or(|(_, best)| count > best) {
+                        common = Some((id, count));
+                    }
+                }
+            }
+            let kept: Vec<String> = members
+                .iter()
+                .filter(|(_, ids)| ids.is_empty() || common.is_some_and(|(id, _)| ids.contains(id)))
+                .map(|(mid, _)| mid.clone())
+                .collect();
+            if kept.len() >= 2 {
+                groups.push(kept);
+            }
+        }
+    }
+    groups
+}
+
 pub(crate) fn bundle_group_mids(desc: &SessionDescription) -> Vec<&str> {
     desc.attributes
         .iter()

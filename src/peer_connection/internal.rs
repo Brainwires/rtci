@@ -19,7 +19,9 @@ use crate::peer_connection::sdp::{
     rtp_extensions_from_media_description, superseded_clear_extensions, track_details_from_sdp,
     unknown_media_name,
 };
-use crate::peer_connection::sdp::{media_packet_time, media_rtcp_xr};
+use crate::peer_connection::sdp::{
+    described_ssrcs, ls_groups, media_packet_time, media_rtcp_xr, share_bundle_destination,
+};
 use crate::peer_connection::state::signaling_state::check_next_signaling_state;
 use crate::peer_connection::transport::dtls::state::RTCDtlsTransportState;
 use crate::peer_connection::transport::ice::candidate::RTCIceServerTransportProtocol;
@@ -28,6 +30,7 @@ use crate::peer_connection::transport::ice::candidate::{
 };
 use crate::peer_connection::transport::ice::candidate_type::RTCIceCandidateType;
 use crate::peer_connection::transport::{RTCTransportId, TransportKind};
+use crate::rtp_transceiver::SSRC;
 use crate::rtp_transceiver::rtp_receiver::internal::RTCRtpReceiverInternal;
 use crate::rtp_transceiver::rtp_sender::RTCRtpCodec;
 use crate::rtp_transceiver::rtp_sender::negotiates_ccfb;
@@ -485,6 +488,7 @@ impl RTCPeerConnection {
                 .setting_engine
                 .write_ssrc_attributes_for_simulcast,
             ice_pacing: self.ice_transport().agent.proposed_pacing(),
+            ls_groups: vec![],
         };
         RTCPeerConnection::populate_sdp(
             d,
@@ -880,6 +884,20 @@ impl RTCPeerConnection {
                 .setting_engine
                 .write_ssrc_attributes_for_simulcast,
             ice_pacing: self.ice_transport().agent.proposed_pacing(),
+            ls_groups: if include_unmatched {
+                [
+                    &self.current_local_description,
+                    &self.current_remote_description,
+                ]
+                .into_iter()
+                .flatten()
+                .find(|d| d.sdp_type == RTCSdpType::Answer)
+                .and_then(|d| d.parsed.as_ref())
+                .map(ls_groups)
+                .unwrap_or_default()
+            } else {
+                remote_parsed.as_ref().map(ls_groups).unwrap_or_default()
+            },
         };
         RTCPeerConnection::populate_sdp(
             d,
@@ -924,6 +942,7 @@ impl RTCPeerConnection {
                     Err(_) => return Some(sd.clone()),
                 };
                 parsed.media_descriptions.insert(0, m);
+                share_bundle_destination(&mut parsed);
             }
 
             Some(RTCSessionDescription {
@@ -2299,6 +2318,36 @@ impl RTCPeerConnection {
         }
     }
 
+    /// A new random SSRC for a local stream that no other local stream has (the encodings of
+    /// every sender, and `minted`, which it is added to) and that no remote description
+    /// mentions: RFC 5576 section 5, "an endpoint MUST NOT use as its own any SSRC identifiers
+    /// mentioned in media descriptions it has received", and section 8, the SSRCs of an answer
+    /// and of an updated offer are new.
+    pub(super) fn unused_ssrc(&self, minted: &mut Vec<SSRC>) -> SSRC {
+        let mut taken: HashSet<SSRC> = minted.iter().copied().collect();
+        for transceiver in &self.rtp_transceivers {
+            if let Some(sender) = transceiver.sender() {
+                for encoding in sender.send_encodings() {
+                    let coding = &encoding.rtp_coding_parameters;
+                    taken.extend(coding.ssrc);
+                    taken.extend(coding.rtx.as_ref().map(|rtx| rtx.ssrc));
+                    taken.extend(coding.fec.as_ref().map(|fec| fec.ssrc));
+                }
+            }
+        }
+        for description in [
+            &self.current_remote_description,
+            &self.pending_remote_description,
+        ] {
+            if let Some(parsed) = description.as_ref().and_then(|d| d.parsed.as_ref()) {
+                taken.extend(described_ssrcs(parsed));
+            }
+        }
+        let ssrc = unused_ssrc_from(std::iter::repeat_with(rand::random::<u32>), &taken);
+        minted.push(ssrc);
+        ssrc
+    }
+
     pub(super) fn send_encodings_from_track(
         &self,
         track: &MediaStreamTrack,
@@ -2310,6 +2359,8 @@ impl RTCPeerConnection {
                 .is_fec_enabled(track.kind(), RTCRtpTransceiverDirection::Sendonly),
         );
 
+        let mut minted: Vec<SSRC> = vec![];
+        let mut new_ssrc = || self.unused_ssrc(&mut minted);
         track
             .codings()
             .iter()
@@ -2325,18 +2376,18 @@ impl RTCPeerConnection {
                     // above: what the application named is what gets used, and one is minted only
                     // when the track left it unset.
                     rtx: is_rtx_enabled.then(|| {
-                        coding.rtp_coding_parameters.rtx.clone().unwrap_or_else(|| {
-                            RTCRtpRtxParameters {
-                                ssrc: rand::random::<u32>(),
-                            }
-                        })
+                        coding
+                            .rtp_coding_parameters
+                            .rtx
+                            .clone()
+                            .unwrap_or_else(|| RTCRtpRtxParameters { ssrc: new_ssrc() })
                     }),
                     fec: is_fec_enabled.then(|| {
-                        coding.rtp_coding_parameters.fec.clone().unwrap_or_else(|| {
-                            RTCRtpFecParameters {
-                                ssrc: rand::random::<u32>(),
-                            }
-                        })
+                        coding
+                            .rtp_coding_parameters
+                            .fec
+                            .clone()
+                            .unwrap_or_else(|| RTCRtpFecParameters { ssrc: new_ssrc() })
                     }),
                     rid_restrictions: coding.rtp_coding_parameters.rid_restrictions.clone(),
                 },
@@ -3069,13 +3120,25 @@ impl RTCPeerConnection {
         let is_rtx_enabled = self
             .media_engine
             .is_rtx_enabled(track.kind(), RTCRtpTransceiverDirection::Sendonly);
+        let mut minted: Vec<SSRC> = send_encodings
+            .iter()
+            .flat_map(|encoding| {
+                let coding = &encoding.rtp_coding_parameters;
+                [
+                    coding.ssrc,
+                    coding.rtx.as_ref().map(|rtx| rtx.ssrc),
+                    coding.fec.as_ref().map(|fec| fec.ssrc),
+                ]
+            })
+            .flatten()
+            .collect();
         for encoding in &mut send_encodings {
             if encoding.rtp_coding_parameters.ssrc.is_none() {
-                encoding.rtp_coding_parameters.ssrc = Some(rand::random::<u32>());
+                encoding.rtp_coding_parameters.ssrc = Some(self.unused_ssrc(&mut minted));
             }
             if is_rtx_enabled && encoding.rtp_coding_parameters.rtx.is_none() {
                 encoding.rtp_coding_parameters.rtx = Some(RTCRtpRtxParameters {
-                    ssrc: rand::random::<u32>(),
+                    ssrc: self.unused_ssrc(&mut minted),
                 });
             }
         }
@@ -3578,3 +3641,28 @@ a=mid:2\r\n";
 /// does not hold (unresolved, or ignored) is still given one: what a remote description can
 /// make the report grow to.
 const MAX_UNRESOLVED_MDNS_CANDIDATE_STATS: usize = 320;
+
+/// The first of `draws` that is not in `taken` (and not 0, which some peers treat as unset).
+pub(crate) fn unused_ssrc_from(
+    draws: impl IntoIterator<Item = SSRC>,
+    taken: &HashSet<SSRC>,
+) -> SSRC {
+    draws
+        .into_iter()
+        .find(|ssrc| *ssrc != 0 && !taken.contains(ssrc))
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod unused_ssrc_test {
+    use super::*;
+
+    /// RFC 5576 sections 5 and 8: a drawn SSRC that a remote description mentions or another
+    /// local stream has is drawn again.
+    #[test]
+    fn a_taken_ssrc_is_drawn_again() {
+        let taken: HashSet<SSRC> = [7, 9].into_iter().collect();
+        assert_eq!(11, unused_ssrc_from([7, 0, 9, 11, 13], &taken));
+        assert_eq!(7, unused_ssrc_from([7], &HashSet::new()));
+    }
+}

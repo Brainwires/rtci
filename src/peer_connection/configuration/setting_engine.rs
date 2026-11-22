@@ -454,6 +454,9 @@ pub struct SettingEngine {
     pub(crate) ignore_rid_pause_for_recv: bool,
     /// [`SettingEngineBuilder::with_rid_pause_marks`].
     pub(crate) rid_pause_marks: bool,
+    /// Whether `write_rtp` sends header extension elements whose id is not negotiated; see
+    /// [`SettingEngineBuilder::with_unnegotiated_header_extensions`].
+    pub(crate) unnegotiated_header_extensions: bool,
     pub(crate) write_ssrc_attributes_for_simulcast: bool,
     /// The application's socket layer reports each received datagram's ECN codepoint and
     /// applies the one each sent datagram carries ([`SettingEngineBuilder::with_ecn`]).
@@ -1995,6 +1998,18 @@ impl SettingEngineBuilder {
     /// does for inactive layers.
     pub fn with_rid_pause_marks(mut self, rid_pause_marks: bool) -> Self {
         self.0.rid_pause_marks = rid_pause_marks;
+        self
+    }
+
+    /// Sends the header extension elements an application puts in a packet whose id is not
+    /// negotiated for the sender, as the fork did before. The default is `false`.
+    ///
+    /// RFC 8285 section 4.1.2: "the local identifier ... MUST be one that has been negotiated"
+    /// for an element that appears in a stream, so by default `RTCRtpSender::write_rtp` takes
+    /// such an element out of the packet (with a trace log) and sends the rest. `true` passes
+    /// them through.
+    pub fn with_unnegotiated_header_extensions(mut self, pass_through: bool) -> Self {
+        self.0.unnegotiated_header_extensions = pass_through;
         self
     }
 

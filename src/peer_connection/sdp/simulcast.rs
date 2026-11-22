@@ -374,6 +374,23 @@ pub(crate) fn get_rids(media: &MediaDescription) -> Vec<SimulcastRid> {
     section_rids(media).rids
 }
 
+/// RFC 9429 section 5.8: "if any line is not well formed ... the entire session description
+/// MUST be rejected". The error of the first `a=simulcast` line of `media` that is not: one
+/// that does not parse, or names a rid-id twice (RFC 8853 section 5.2: "a single rid-id MUST
+/// NOT occur more than once per 'a=simulcast' line"), or a direction twice.
+pub(crate) fn malformed_simulcast_line(media: &MediaDescription) -> Option<String> {
+    media
+        .attributes
+        .iter()
+        .filter(|attr| attr.key == SDP_ATTRIBUTE_SIMULCAST)
+        .find_map(|attr| {
+            let value = attr.value.as_deref().unwrap_or_default();
+            Simulcast::parse(value)
+                .err()
+                .map(|err| format!("a=simulcast:{value}: {err}"))
+        })
+}
+
 /// RFC 9429 section 5.8.3: "All rid-ids referenced in an 'a=simulcast' line MUST exist as
 /// 'a=rid' lines", or the description is refused. The first rid-id of `media` that has
 /// none.
