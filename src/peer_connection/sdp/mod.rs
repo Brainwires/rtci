@@ -1055,7 +1055,8 @@ impl RTCPeerConnection {
                 name,
                 codec.rtp_codec.clock_rate,
                 codec.rtp_codec.channels,
-                codec.rtp_codec.sdp_fmtp_line.clone(),
+                // This endpoint's own parameters, not the ones the peer stated for the format.
+                media_engine.local_fmtp_line(transceiver.kind(), codec, !is_offer),
             );
 
             for feedback in &codec.rtp_codec.rtcp_feedback {

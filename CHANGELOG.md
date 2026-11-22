@@ -100,6 +100,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   follows the RFC now negotiates it. A feedback value keeps everything after its type as its
   parameter.
 
+- **jsep**: a description states this endpoint's own `a=fmtp` parameters for a negotiated
+  format, not the ones the peer stated (RFC 3264 section 6.1). An answer echoed the offer's
+  line, and so did every later offer: Opus parameters the peer asked for itself (RFC 7587
+  section 7.1), the peer's AV1 level and tier, its H.264 level. An H.264 answer keeps the
+  offered profile and states this endpoint's level when both sides allow level asymmetry, else
+  the lower of the two (RFC 6184 section 8.2.2).
+- **jsep**: an H.264, VP9 or AV1 format whose configuration this endpoint did not register is
+  no longer negotiated because its name matches (RFC 6184 section 8.2.2: "maintain all
+  configuration parameters or remove the media format"); when it was the section's only
+  format the section is rejected. Other codecs keep the name-only match.
+- **media_engine**: the H.264 default listed twice under payload type 127 is listed once (the
+  second was discarded at registration; the registered codecs do not change).
+
 ### Features
 
 - **shared**: `Error::ErrAnswerDoesNotMatchOffer(String)`.
