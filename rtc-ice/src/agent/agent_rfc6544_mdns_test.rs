@@ -116,6 +116,7 @@ fn test_relay_only_agent_does_not_resolve_mdns_candidates() {
         let cfg = AgentConfig {
             candidate_types,
             multicast_dns_mode: crate::mdns::MulticastDnsMode::QueryOnly,
+            multicast_dns_first_query_delay: Some(false),
             ..config(true)
         };
         let mut a = Agent::new(now, Arc::new(cfg), provider()).unwrap();

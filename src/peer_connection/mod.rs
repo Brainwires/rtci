@@ -1396,6 +1396,11 @@ impl RTCPeerConnection {
                 && let Some(parsed_remote_description) = remote_description.parsed.as_ref()
             {
                 self.apply_negotiated_rtcp(parsed_remote_description, parsed_local_description);
+                self.apply_negotiated_simulcast(
+                    parsed_remote_description,
+                    parsed_local_description,
+                    true,
+                );
 
                 // we_answer: we first call set_remote_description,
                 // then, we create_answer() and set_local_description() here
@@ -1696,6 +1701,13 @@ impl RTCPeerConnection {
                 && RtpCodecKind::from(media.media_name.media.as_str()) != RtpCodecKind::Unspecified
             {
                 codecs_from_media_description(media)?;
+                // RFC 9429 section 5.8.3: "All rid-ids referenced in an 'a=simulcast' line
+                // MUST exist as 'a=rid' lines."
+                if let Some(rid) = sdp::simulcast::simulcast_rid_without_line(media) {
+                    return Err(Error::SdpInvalidValue(format!(
+                        "a=simulcast names rid {rid} without an a=rid line (RFC 9429 section 5.8.3)"
+                    )));
+                }
             }
         }
 
@@ -2077,6 +2089,9 @@ impl RTCPeerConnection {
                     // time, by who offers. (`local_ice_role`, which follows the offerer, is
                     // what the DTLS role is derived from when `a=setup` leaves it open.)
                     let local_is_lite = self.setting_engine.candidates.ice_lite;
+                    self.ice_transport_mut()
+                        .agent
+                        .set_remote_lite(remote_is_lite);
                     let role = if remote_is_lite != local_is_lite {
                         Some(if local_is_lite {
                             RTCIceRole::Controlled
@@ -2167,6 +2182,11 @@ impl RTCPeerConnection {
                     .as_ref()
             {
                 self.apply_negotiated_rtcp(parsed_local_description, parsed_remote_description);
+                self.apply_negotiated_simulcast(
+                    parsed_local_description,
+                    parsed_remote_description,
+                    false,
+                );
 
                 // we_offer: we create_offer() and set_local_description() first
                 // then, after call set_remote_description here,
@@ -2455,6 +2475,23 @@ impl RTCPeerConnection {
                 .push(Attribute::new(key.to_owned(), value.map(str::to_owned)));
             description.sdp = insert_media_line(&description.sdp, index, key, value);
         }
+    }
+
+    /// Reports what the transport learned about the path of a connectivity check: a hard ICMP
+    /// error for a datagram sent on it (RFC 8445 section 7.2.5.2.2), a TCP connection that
+    /// could not be established, or one whose first answer was not STUN (RFC 6544 section
+    /// 7.1). `transport` names the path: the local address a candidate is based on and the
+    /// remote candidate's address. Returns whether a candidate pair failed for it; a pair a
+    /// check has validated never does (ICMP is not authenticated).
+    pub fn handle_ice_transport_error(
+        &mut self,
+        now: Instant,
+        transport: shared::TransportContext,
+        error: ::ice::TransportError,
+    ) -> bool {
+        self.ice_transport_mut()
+            .agent
+            .handle_transport_error(now, transport, error)
     }
 
     /// Adds a local ICE candidate to the peer connection.

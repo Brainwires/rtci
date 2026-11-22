@@ -196,6 +196,14 @@ pub struct MulticastDNS {
     pub local_name: String,
     /// Control mDNS local IP address
     pub local_ip: Option<IpAddr>,
+    /// See [`SettingEngineBuilder::with_multicast_dns_first_query_delay`]. `None`: on.
+    pub first_query_delay: Option<bool>,
+    /// See [`SettingEngineBuilder::with_multicast_dns_destination_reported`].
+    pub destination_reported: bool,
+    /// See [`SettingEngineBuilder::with_multicast_dns_unicast_response`].
+    pub unicast_response: bool,
+    /// See [`SettingEngineBuilder::with_multicast_dns_rate_limit`].
+    pub rate_limit: Option<ice::mdns::MdnsRateLimit>,
 }
 
 impl Default for MulticastDNS {
@@ -211,6 +219,10 @@ impl Default for MulticastDNS {
             mode: MulticastDnsMode::QueryOnly,
             local_name: "".to_string(),
             local_ip: None,
+            first_query_delay: None,
+            destination_reported: false,
+            unicast_response: false,
+            rate_limit: None,
         }
     }
 }
@@ -431,6 +443,8 @@ pub struct SettingEngine {
     /// (RFC 8831 section 6.6). `None` is the default, on.
     pub(crate) sctp_message_size_limit_without_interleaving: Option<bool>,
     pub(crate) ignore_rid_pause_for_recv: bool,
+    /// [`SettingEngineBuilder::with_rid_pause_marks`].
+    pub(crate) rid_pause_marks: bool,
     pub(crate) write_ssrc_attributes_for_simulcast: bool,
     /// The application's socket layer reports each received datagram's ECN codepoint and
     /// applies the one each sent datagram carries ([`SettingEngineBuilder::with_ecn`]).
@@ -1249,6 +1263,45 @@ impl SettingEngineBuilder {
         self
     }
 
+    /// Whether the first mDNS query for a remote `.local` candidate waits a random 20 to 120
+    /// ms (RFC 6762 section 5.2). On by default; `false` sends it at once.
+    pub fn with_multicast_dns_first_query_delay(mut self, delay: bool) -> Self {
+        self.0.multicast_dns.first_query_delay = Some(delay);
+        self
+    }
+
+    /// Declares that the application hands every datagram of its mDNS socket to `handle_read`
+    /// with the datagram's destination address in `local_addr` (`IP_PKTINFO` /
+    /// `IPV6_PKTINFO`): the mDNS group's (`224.0.0.251:5353`, `[ff02::fb]:5353`) for one that
+    /// arrived by multicast, the host's own for one sent to it by unicast. A unicast arrival
+    /// is then held to RFC 6762's rules for it (a query is answered by unicast and only to an
+    /// on-link sender, section 5.5; a response is taken only when a recent question asked for
+    /// a unicast response, section 6). Off by default.
+    pub fn with_multicast_dns_destination_reported(mut self, reported: bool) -> Self {
+        self.0.multicast_dns.destination_reported = reported;
+        self
+    }
+
+    /// Makes the first mDNS query for a name ask for a unicast response (the QU bit, RFC 6762
+    /// section 5.4; draft-ietf-mmusic-mdns-ice-candidates section 3.2.1). Off by default: a
+    /// unicast response reaches only one of the sockets bound to port 5353 on a host (RFC 6762
+    /// section 15.1). Use it with
+    /// [`with_multicast_dns_destination_reported`](Self::with_multicast_dns_destination_reported)
+    /// when the application's socket is the only one.
+    pub fn with_multicast_dns_unicast_response(mut self, unicast: bool) -> Self {
+        self.0.multicast_dns.unicast_response = unicast;
+        self
+    }
+
+    /// Shares one limit on mDNS messages between peer connections
+    /// (draft-ietf-mmusic-mdns-ice-candidates section 7.1: the limit is the implementation's).
+    /// Give every peer connection of the process a clone of one `MdnsRateLimit`. Without it
+    /// each peer connection has a limit of its own.
+    pub fn with_multicast_dns_rate_limit(mut self, limit: ice::mdns::MdnsRateLimit) -> Self {
+        self.0.multicast_dns.rate_limit = Some(limit);
+        self
+    }
+
     /// Fixes the ICE tiebreaker (RFC 8445 section 5.2), which is random otherwise. It decides
     /// who keeps the controlling role when both agents claim it (section 7.3.1.1): the larger
     /// one. For reproducible sessions and tests.
@@ -1869,14 +1922,28 @@ impl SettingEngineBuilder {
         self
     }
 
-    /// Controls whether to ignore RID pause signals for receiving transceivers.
+    /// Writes the pause mark `~` of `a=simulcast` (RFC 8853 section 5.2) although RTP stream
+    /// pause and resume (RFC 7728) is not negotiated: for an inactive encoding of a sender,
+    /// and for a stream the offer being answered marks. The default is `false`.
     ///
-    /// RID (RTP Stream Identifier) can signal pause/resume for individual streams
-    /// in simulcast scenarios. This setting controls whether to honor those signals.
+    /// RFC 8853 section 5.2: "The use of [the pause mark] MUST be accompanied by support
+    /// for RTP stream pause/resume [RFC7728] ... signaled under the same 'm=' line", and
+    /// section 5.3.2: an answerer "MUST NOT" mark a stream paused when the offer shows no
+    /// such support. The engine does not implement RFC 7728 and never signals it, so by
+    /// default it writes no `~`: an inactive encoding is listed and not sent, and an offered
+    /// `~` is answered without the mark. `true` writes the mark all the same, as libwebrtc
+    /// does for inactive layers.
+    pub fn with_rid_pause_marks(mut self, rid_pause_marks: bool) -> Self {
+        self.0.rid_pause_marks = rid_pause_marks;
+        self
+    }
+
+    /// With [`Self::with_rid_pause_marks`], controls whether the `~` an offer puts on a
+    /// stream it asks to receive is left out of the answer's `send` list.
     ///
     /// # Parameters
     ///
-    /// * `ignore_rid_pause_for_recv` - `true` to ignore pause signals, `false` to honor them
+    /// * `ignore_rid_pause_for_recv` - `true` to leave the mark out, `false` to repeat it
     pub fn with_ignore_rid_pause_for_recv(mut self, ignore_rid_pause_for_recv: bool) -> Self {
         self.0.ignore_rid_pause_for_recv = ignore_rid_pause_for_recv;
         self

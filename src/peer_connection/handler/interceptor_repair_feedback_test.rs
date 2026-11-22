@@ -64,6 +64,7 @@ fn coding() -> RTCRtpCodingParameters {
         ssrc: Some(SSRC),
         rtx: Some(RTCRtpRtxParameters { ssrc: RTX_SSRC }),
         fec: None,
+        ..Default::default()
     }
 }
 

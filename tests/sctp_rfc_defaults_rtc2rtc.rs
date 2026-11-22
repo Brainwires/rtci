@@ -256,24 +256,47 @@ fn largest_datagram_of_a_large_message(
         .unwrap_or(0))
 }
 
+/// The address families the datagrams `peer` wrote since its record was last cleared went
+/// to: (to an IPv4 address, to an IPv6 address).
+fn families_written_to(peer: &dc_common::Peer) -> (bool, bool) {
+    (
+        peer.written_to.iter().any(|to| to.is_ipv4()),
+        peer.written_to.iter().any(|to| to.is_ipv6()),
+    )
+}
+
 /// RFC 8831 section 5: "The ICE/UDP layer can handle IP address changes during a session
 /// without needing interaction with the DTLS and SCTP layers. However, SCTP SHOULD be notified
 /// when an address change has happened. In this case, SCTP SHOULD retest the Path MTU and
 /// reset the congestion state to the initial state." Two connected peers move from IPv4 to
-/// IPv6 addresses by an ICE restart: the association, which goes on with its channel open,
-/// learns of the new selected pair and sends packets of the size that fits it (an IPv6
-/// packet of 1280 bytes, where it was an IPv4 packet of 1200). Nothing used to tell SCTP of a
-/// new pair.
+/// IPv6 addresses by an ICE restart that discards the old local candidates, so the new
+/// generation has IPv6 candidates only and the pair it selects is an IPv6 pair. The
+/// association, which goes on with its channel open, learns of the new selected pair and
+/// sends packets of the size that fits it (an IPv6 packet of 1280 bytes, where it was an
+/// IPv4 packet of 1200: RFC 9260 section 7.2 counts congestion control in packets of the
+/// path's PMTU, and RFC 8261 section 5 has the SCTP packet fit the DTLS record the path
+/// carries). Nothing used to tell SCTP of a new pair.
+///
+/// RFC 8841 section 12.2: "the SCTP association MUST NOT be affected by such a change in the
+/// candidate pair. The DTLS and SCTP handshakes MUST NOT be repeated": no DTLS handshake
+/// record leaves either peer after the move, and the channel opened before it is the only one
+/// and stays open.
 #[test]
 fn a_move_to_another_candidate_pair_reaches_sctp() -> Result<()> {
+    let settings = || default().with_discard_local_candidates_during_ice_restart(true);
     let (mut pair, local, remote) =
-        connected_at("127.0.0.1:50010", default(), "127.0.0.1:50011", default())?;
+        connected_at("127.0.0.1:50010", settings(), "127.0.0.1:50011", settings())?;
+    pair.offerer.written_to.clear();
+    pair.answerer.written_to.clear();
     let over_ipv4 = largest_datagram_of_a_large_message(&mut pair, local, remote)?;
     assert!(
         (1169..=1172).contains(&over_ipv4),
         "over IPv4 the largest datagram is {over_ipv4} bytes"
     );
+    assert_eq!(families_written_to(&pair.offerer), (true, false));
 
+    pair.offerer.written_first_bytes.clear();
+    pair.answerer.written_first_bytes.clear();
     pair.offerer.move_to("[fd00::1]:50010".parse()?);
     pair.answerer.move_to("[fd00::2]:50011".parse()?);
     pair.offerer.pc.restart_ice();
@@ -283,10 +306,21 @@ fn a_move_to_another_candidate_pair_reaches_sctp() -> Result<()> {
     let mut over_ipv6 = 0;
     for _ in 0..20 {
         pair.run_for(std::time::Duration::from_millis(500))?;
+        pair.offerer.written_to.clear();
+        pair.answerer.written_to.clear();
         over_ipv6 = largest_datagram_of_a_large_message(&mut pair, local, remote)?;
-        if over_ipv6 > 1172 {
+        if families_written_to(&pair.offerer) == (false, true)
+            && families_written_to(&pair.answerer) == (false, true)
+        {
             break;
         }
+    }
+    for peer in [&pair.offerer, &pair.answerer] {
+        assert_eq!(
+            families_written_to(peer),
+            (false, true),
+            "the restart moved the session to the IPv6 pair"
+        );
     }
     assert!(
         (1229..=1232).contains(&over_ipv6),
@@ -298,6 +332,14 @@ fn a_move_to_another_candidate_pair_reaches_sctp() -> Result<()> {
             RTCSctpTransportState::Connected
         );
         assert!(peer.connected());
+    }
+    // RFC 7983 section 7: a DTLS handshake record has content type 22.
+    for peer in [&pair.offerer, &pair.answerer] {
+        assert!(
+            !peer.written_first_bytes.contains(&22),
+            "no DTLS handshake after the move"
+        );
+        assert_eq!(peer.opened().len(), 1, "no channel opened again");
     }
     let closed = |peer: &dc_common::Peer| {
         peer.events.iter().any(|event| {

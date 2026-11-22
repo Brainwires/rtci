@@ -957,6 +957,51 @@ fn test_controlling_agent_nominates_once_and_the_checklist_completes() {
     );
 }
 
+/// Section 8.1.1: the nomination the controlling agent queued is sent, also when a second
+/// success response for the same pair arrives before Ta starts it. Here the pair's first
+/// check is cancelled by the peer's request (Section 7.3.1.4) and checked again, and both
+/// transactions are answered: the first answer makes the pair valid and queues its
+/// nomination, the second used to take the pair off the triggered-check queue as a check
+/// done, so the nomination never left and the agent stayed in checking until its failed
+/// timeout (seen against the `webrtc` 0.17 peer in `test_data_channel_create_rtc_to_webrtc`).
+#[test]
+fn test_a_second_success_response_does_not_drop_the_queued_nomination() {
+    let start = Instant::now();
+    let mut a = agent_with(start, config(true), &[(1, 500)]);
+    let out = silent(&mut a, start, Duration::ZERO, 60 * MS);
+    let first = checks_started(&out)[0].message.transaction_id;
+
+    let request = peer_request(
+        &a,
+        vec![Box::new(AttrControlled(1)), Box::new(PriorityAttr(1000))],
+    );
+    deliver(&mut a, start + 60 * MS, &request, "10.0.0.1:5000").unwrap();
+    let out = silent(&mut a, start, 60 * MS, 70 * MS);
+    let second = checks_started(&out)
+        .iter()
+        .map(|s| s.message.transaction_id)
+        .find(|id| *id != first)
+        .expect("the triggered check");
+
+    for (at, id) in [(71, first), (72, second)] {
+        let response = peer_response(BINDING_SUCCESS, id, addr(LOCAL), None);
+        deliver(&mut a, start + at * MS, &response, "10.0.0.1:5000").unwrap();
+    }
+    assert_eq!(state_of(&a, 1), CandidatePairState::Succeeded);
+
+    let out = answered(&mut a, start, 72 * MS, Duration::from_secs(2));
+    let nomination = requests_of(&out)
+        .into_iter()
+        .find(|s| s.message.contains(ATTR_USE_CANDIDATE))
+        .expect("the nomination is sent");
+    assert!(
+        nomination.at <= 200 * MS,
+        "the nomination leaves at the next Ta, not at {:?}",
+        nomination.at
+    );
+    assert_eq!(a.state(), ConnectionState::Connected);
+}
+
 /// Consent checks are plain Binding requests (RFC 7675 Section 5.1; RFC 8445 Section 7.1.2
 /// has USE-CANDIDATE sent to nominate, and "the controlled agent MUST NOT include" it).
 /// `nominate_on_consent_checks` is libwebrtc's behaviour: the controlling agent's consent

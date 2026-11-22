@@ -99,7 +99,7 @@
 //!     // Get CSRC information for mixed audio
 //!     for csrc in receiver.get_contributing_sources() {
 //!         println!("CSRC: {}, timestamp: {:?}", csrc.source, csrc.timestamp);
-//!         println!("  Audio level: {}", csrc.audio_level);
+//!         println!("  Audio level: {:?}", csrc.audio_level);
 //!         println!("  RTP timestamp: {}", csrc.rtp_timestamp);
 //!     }
 //! }
@@ -325,13 +325,24 @@ impl RTCRtpReceiver<'_> {
     ///
     /// Returns an iterator over [`RTCRtpContributingSource`] objects.
     pub fn get_contributing_sources(&self) -> impl Iterator<Item = &RTCRtpContributingSource> {
-        // peer_connection is mutable borrow, its rtp_transceivers won't be resized and
-        // the direction won't be changed too, so, unwrap() here is safe.
+        let now = self.sources_now();
         self.peer_connection.rtp_transceivers[self.id.0]
             .receiver()
             .as_ref()
-            .unwrap()
-            .get_contributing_sources()
+            .expect("every transceiver has a receiver")
+            .live_contributing_sources(now)
+    }
+
+    /// The wall-clock time (since the Unix epoch) of the newest instant the connection has
+    /// been given, which the sources' timestamps are compared with: a source not heard in the
+    /// ten seconds before it is not listed.
+    fn sources_now(&self) -> std::time::Duration {
+        let context = &self.peer_connection.pipeline_context;
+        context
+            .interceptor_handler_context
+            .wall_clock
+            .map(|wall_clock| wall_clock.unix(context.now))
+            .unwrap_or_default()
     }
 
     /// Returns an iterator over the synchronization sources for this receiver.
@@ -349,13 +360,12 @@ impl RTCRtpReceiver<'_> {
     pub fn get_synchronization_sources(
         &self,
     ) -> impl Iterator<Item = &RTCRtpSynchronizationSource> {
-        // peer_connection is mutable borrow, its rtp_transceivers won't be resized and
-        // the direction won't be changed too, so, unwrap() here is safe.
+        let now = self.sources_now();
         self.peer_connection.rtp_transceivers[self.id.0]
             .receiver()
             .as_ref()
-            .unwrap()
-            .get_synchronization_sources()
+            .expect("every transceiver has a receiver")
+            .live_synchronization_sources(now)
     }
 
     /// Writes RTCP feedback packets for this receiver.
