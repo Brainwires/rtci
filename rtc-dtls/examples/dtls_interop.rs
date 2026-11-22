@@ -18,6 +18,7 @@
 //! * `DTLS_SECONDS`: how long to run after starting (default 6).
 //! * `DTLS_TICKETS=<n>`: a server that sends `n` session tickets after each handshake
 //!   (DTLS 1.3; one RFC 5077 ticket in DTLS 1.2), and takes them back in later ones.
+//! * `DTLS_DUMP=1`: print every datagram sent (`out <hex>`) and received (`in <hex>`).
 //! * `DTLS_SRTP_OPTIONAL=1`: a client that goes on when the server leaves `use_srtp` out.
 //! * `DTLS_CID=<n>`: ask the peer for an `n`-byte connection id (RFC 9146 for DTLS 1.2,
 //!   RFC 9147 section 9 for 1.3); at the end the count of `tls12_cid` records (content type
@@ -168,11 +169,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     const TLS12_CID: u8 = 25;
     let mut cid_sent = 0usize;
     let mut cid_received = 0usize;
+    let dump = std::env::var("DTLS_DUMP").as_deref() == Ok("1");
 
     loop {
         while let Some(transmit) = endpoint.poll_transmit() {
             socket.send_to(&transmit.message, transmit.transport.peer_addr)?;
             cid_sent += usize::from(transmit.message.first() == Some(&TLS12_CID));
+            if dump {
+                println!("out {}", hex(&transmit.message));
+            }
         }
         let now = Instant::now();
         if now >= deadline {
@@ -257,6 +262,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     remote = Some(from);
                 }
                 cid_received += usize::from(buffer[0] == TLS12_CID);
+                if dump {
+                    println!("in {}", hex(&buffer[..length]));
+                }
                 match endpoint.read(
                     Instant::now(),
                     from,
