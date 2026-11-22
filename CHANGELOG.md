@@ -2685,6 +2685,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whose session store has such a ticket; `State::early_data_accepted` says whether it was
   taken. A HelloRetryRequest rules 0-RTT out, so it needs `with_cookie_exchange(false)`.
 
+### Robustness under loss (DTLS, SCTP)
+
+Found by the seeded lossy-link test (`tests/lossy_link_rtc2rtc.rs`).
+
+- **dtls**: a DTLS 1.3 server that answered a ClientHello too long for one datagram (the
+  X25519MLKEM768 hybrid key share makes it two) sent its HelloRetryRequest once and forgot
+  it: when it was lost, every retransmitted ClientHello was taken for a repeat and answered
+  with nothing, and the handshake stalled until its deadline. The association keeps the
+  HelloRetryRequest and sends it again for every repeat of the ClientHello it answered (RFC
+  9147 sections 5.1 and 5.8.1), never on a timer of its own. Its cookies are now the
+  endpoint's, bound to the client's address, so the endpoint or any later association
+  verifies the second ClientHello (a second ClientHello that no longer fitted one datagram used
+  to be refused with illegal_parameter). Such an association for an unverified address is
+  dropped, silently, two minutes after the last datagram from that address, whatever the
+  handshake deadline: long enough for fragments of several transmissions to add up when the
+  client, at full backoff, cuts its ClientHello smaller (`hello_loss_test.rs`).
+- **dtls** (behaviour change): no handshake deadline by default. RFC 6347 section 4.2.4 and
+  RFC 9147 section 5.8 define the retransmission timer (doubling to 60 seconds) and no total
+  limit; a handshake nobody answers is retransmitted at most once a minute for as long as the
+  association lives. `ConfigBuilder::with_handshake_timeout(Some(..))` sets a deadline (it was
+  30 seconds by default). In a peer connection the handshake now ends only on ICE failure
+  (consent expiry), a fatal alert or a close: at 30 % loss with ICE connected and consent
+  fresh, the peer connection used to go `failed` 30 seconds in. New:
+  `Endpoint::handshake_retransmissions`, `DTLSConn::handshake_retransmissions`, for a
+  handshake that goes on and on.
+- **dtls**: the Finished of a DTLS 1.3 post-handshake authentication is checked with the
+  client's traffic secret of the epoch it arrived in: a client that answered while its own
+  KeyUpdate was unacknowledged keys it from its old secret (its new keys take effect on the
+  acknowledgement, RFC 9147 section 8), and the server used its newest one and refused the
+  answer with decrypt_error.
+- **sctp**: `EndpointConfig::random_source(provider)` draws every random value of an
+  endpoint and its associations (verification tags, initial TSNs, unauthenticated State
+  Cookies, the Initiate Tag of an INIT ACK for an existing association, HEARTBEAT nonces and
+  jitter) from `provider.random()`, as ICE and DTLS take theirs; without it they still come
+  from `rand`. The peer connection passes its crypto provider, so a seeded provider makes a
+  whole session reproducible.
+
 ### DTLS 1.2: the RFC by default
 
 - **dtls**: `HelloVerifyRequest.server_version` is DTLS 1.0, as RFC 6347 section 4.2.1 asks
