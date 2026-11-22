@@ -1039,10 +1039,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
-- **dtls**: `DtlsVersion::record_overhead(suite, connection_id_len)`,
-  `DTLSConn::record_overhead` and `Endpoint::record_overhead`: what each protected record adds
-  to its content (the record header, the DTLS 1.3 unified header with the peer's connection
-  id, and the suite's expansion), for a layer above that sizes its datagrams for a path MTU
+- **dtls**: `DTLSConn::record_overhead` and `Endpoint::record_overhead`: what each protected
+  record adds to its content (the record header, the connection id it carries under DTLS 1.3
+  or a DTLS 1.2 `tls12_cid` record, and the suite's expansion), for a layer above that sizes
+  its datagrams for a path MTU
   (RFC 6347 section 4.1.1.1, RFC 9147 section 4.4). The peer connection sizes SCTP packets by
   it.
 - **sctp**: `RTCPeerConnection::reject_data_section` asks for the data section to be rejected
