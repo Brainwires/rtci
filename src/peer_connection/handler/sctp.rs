@@ -389,6 +389,12 @@ impl<'a> SctpHandler<'a> {
                             | AssociationError::TimedOut
                             | AssociationError::HandshakeFailed(_)
                     ) {
+                        if let Some(cause) = conn.abort_cause_code() {
+                            event_outs.push_back(TaggedRTCEventInternal {
+                                now,
+                                event: RTCEventInternal::SCTPFailureCause(cause),
+                            });
+                        }
                         event_outs.push_back(TaggedRTCEventInternal {
                             now,
                             event: RTCEventInternal::SCTPStreamFailed(ch.0, id),
@@ -407,6 +413,12 @@ impl<'a> SctpHandler<'a> {
                             | AssociationError::TimedOut
                             | AssociationError::HandshakeFailed(_)
                     ) {
+                        if let Some(cause) = conn.abort_cause_code() {
+                            event_outs.push_back(TaggedRTCEventInternal {
+                                now,
+                                event: RTCEventInternal::SCTPFailureCause(cause),
+                            });
+                        }
                         event_outs.push_back(TaggedRTCEventInternal {
                             now,
                             event: RTCEventInternal::SCTPAssociationFailed(ch.0),

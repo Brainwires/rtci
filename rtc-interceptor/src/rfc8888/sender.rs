@@ -312,12 +312,14 @@ impl Interceptor for Rfc8888Interceptor {
     /// The stream's retransmission and FEC SSRCs are reported with it: the feedback covers
     /// every packet of the session's negotiated payload types, repair included (section 6).
     fn bind_remote_stream(&mut self, info: &StreamInfo) {
+        self.cadence.on_bind(info);
         if stream_supports_ccfb(info) {
             self.streams.extend(flow_ssrcs(info));
         }
     }
 
     fn unbind_remote_stream(&mut self, info: &StreamInfo) {
+        self.cadence.on_unbind(info);
         for ssrc in flow_ssrcs(info) {
             self.streams.remove(&ssrc);
             self.recorder.remove_stream(ssrc);
@@ -328,12 +330,14 @@ impl Interceptor for Rfc8888Interceptor {
     }
 
     fn bind_local_stream(&mut self, info: &StreamInfo) {
+        self.cadence.on_bind(info);
         if !self.local_ssrcs.contains(&info.ssrc) {
             self.local_ssrcs.push(info.ssrc);
         }
     }
 
     fn unbind_local_stream(&mut self, info: &StreamInfo) {
+        self.cadence.on_unbind(info);
         self.local_ssrcs.retain(|ssrc| *ssrc != info.ssrc);
     }
 }

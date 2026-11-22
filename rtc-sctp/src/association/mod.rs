@@ -523,6 +523,9 @@ pub struct Association {
     error: Option<AssociationError>,
     /// Set by [`close`](Self::close): the association is over, whatever state it was in.
     ended: bool,
+    /// The cause code (RFC 9260 section 3.3.10) the association was aborted with: the first
+    /// cause of the ABORT it received or sent.
+    abort_cause_code: Option<u16>,
     /// `ended`, as the endpoint that routes to this association sees it: an ended association
     /// takes no more packets and no longer counts against the endpoint's limit.
     ended_flag: Arc<AtomicBool>,
@@ -672,6 +675,7 @@ impl Default for Association {
             endpoint_events: VecDeque::default(),
             error: None,
             ended: false,
+            abort_cause_code: None,
             ended_flag: Arc::new(AtomicBool::new(false)),
             drained_emitted: false,
             pending_error_causes: vec![],
@@ -1264,6 +1268,9 @@ impl Association {
         if self.ended {
             return Ok(());
         }
+        if let Some(cause) = causes.first() {
+            self.abort_cause_code.get_or_insert(cause.code.0);
+        }
         if self.peer_verification_tag != 0 {
             let packet = self.abort_packet(self.peer_verification_tag, false, causes);
             self.control_queue.push_back(packet);
@@ -1294,6 +1301,14 @@ impl Association {
             code: PROTOCOL_VIOLATION,
             raw: Bytes::copy_from_slice(text.as_bytes()),
         }
+    }
+
+    /// The cause code (RFC 9260 section 3.3.10) of the ABORT that ended the association: the
+    /// first error cause of the one received, or of the one this side sent. `None` when no
+    /// ABORT ended it, or the ABORT carried no cause. What W3C webrtc-pc reports as an
+    /// `RTCError`'s `sctpCauseCode`.
+    pub fn abort_cause_code(&self) -> Option<u16> {
+        self.abort_cause_code
     }
 
     /// Close ends the SCTP Association and cleans up any state
@@ -1701,6 +1716,9 @@ impl Association {
                 self.handle_init(p, c, now)?
             }
         } else if let Some(c) = chunk_any.downcast_ref::<ChunkAbort>() {
+            if let Some(cause) = c.error_causes.first() {
+                self.abort_cause_code.get_or_insert(cause.code.0);
+            }
             let mut err_str = String::new();
             for e in &c.error_causes {
                 if matches!(e.code, USER_INITIATED_ABORT) {

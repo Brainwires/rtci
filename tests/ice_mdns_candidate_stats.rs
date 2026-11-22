@@ -341,7 +341,7 @@ fn an_announced_local_candidate_names_its_ice_generation() -> Result<()> {
     pc.add_local_candidate(RTCIceCandidate::from(&local).to_json()?)?;
     let announced = std::iter::from_fn(|| pc.poll_event())
         .find_map(|event| match event {
-            RTCPeerConnectionEvent::OnIceCandidateEvent(e) => Some(e.candidate),
+            RTCPeerConnectionEvent::OnIceCandidateEvent(e) => e.candidate,
             _ => None,
         })
         .expect("the candidate is announced");

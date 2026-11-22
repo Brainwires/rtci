@@ -105,6 +105,8 @@ pub mod handshaker;
 pub mod prf;
 /// The record layer: framing, sequence numbers and epochs.
 pub mod record_layer;
+/// DTLS 1.3 pre-shared keys: session tickets and their store, external PSKs.
+pub mod session;
 /// Signature and hash algorithm pairs, as negotiated for certificate verification.
 pub mod signature_hash_algorithm;
 /// The negotiated connection state: keys, sequence numbers and peer identity.

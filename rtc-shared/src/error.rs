@@ -1821,6 +1821,11 @@ pub enum Error {
     #[error("x509Cert expired")]
     ErrCertificateExpired,
 
+    /// An ICE server with no url (W3C "set a configuration": "If urls is empty, throw a
+    /// SyntaxError").
+    #[error("an ICE server has no url")]
+    ErrNoIceServerUrls,
+
     /// ErrNoTurnCredentials indicates that a TURN server URL was provided
     /// without required credentials.
     #[error("turn server credentials required")]
@@ -2049,6 +2054,16 @@ pub enum Error {
     #[error("Type error {0}")]
     TypeError(String),
 
+    /// A session description that does not parse (W3C webrtc-pc section 11.1, an `RTCError`
+    /// with `errorDetail` `sdp-syntax-error`): what the SDP parser found, and on which line.
+    #[error("SDP syntax error{}: {error}", .line_number.map(|n| format!(" on line {n}")).unwrap_or_default())]
+    SdpSyntaxError {
+        /// The line the error is about, from 1; `None` when it is about the whole description.
+        line_number: Option<usize>,
+        /// The parser's error.
+        error: Box<Error>,
+    },
+
     /// ErrSenderWithNoCodecs indicates that a RTPSender was created without any codecs. To send media the MediaEngine needs at
     /// least one configured codec.
     #[error("unable to populate media section, RTPSender created with no codecs")]
@@ -2093,9 +2108,10 @@ pub enum Error {
     ErrInvalidDirection,
 
     /// ErrRegisterHeaderExtensionNoFreeID indicates that there was no extension ID available which
-    /// in turn means that all 15 available id(1 through 14) have been used.
+    /// in turn means that all 254 ids an RTP header can carry (1 to 14, and 16 to 255 in the
+    /// two-byte form, RFC 8285) have been used.
     #[error(
-        "no header extension ID was free to use(this means the maximum of 15 extensions have been registered)"
+        "no header extension ID was free to use (the maximum of 254 extensions have been registered)"
     )]
     ErrRegisterHeaderExtensionNoFreeID,
 

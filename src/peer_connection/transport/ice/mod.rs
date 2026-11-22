@@ -34,6 +34,11 @@ pub(crate) struct IceTransport {
 
     pub(crate) ice_gathering_state: RTCIceGatheringState,
     pub(crate) ice_connection_state: RTCIceConnectionState,
+
+    /// The media section (mid, index) of the local description whose transport this is: the
+    /// first section of the BUNDLE group. The `sdpMid` / `sdpMLineIndex` of the candidates the
+    /// connection surfaces (W3C webrtc-pc section 5.6, "surface the candidate").
+    pub(crate) local_media_section: Option<(String, u16)>,
 }
 
 impl IceTransport {
@@ -50,8 +55,20 @@ impl IceTransport {
             agent,
             id,
             ice_gathering_state: RTCIceGatheringState::New,
-            ice_connection_state: RTCIceConnectionState::default(),
+            // W3C 4.4.1.1: [[IceConnectionState]] starts "new".
+            ice_connection_state: RTCIceConnectionState::New,
+            local_media_section: None,
         })
+    }
+
+    /// Fills in what a local candidate the connection surfaces carries besides itself: the
+    /// ICE generation (`usernameFragment`) and the media section (`sdpMid`, `sdpMLineIndex`).
+    pub(crate) fn describe_local_candidate(&self, candidate: &mut RTCIceCandidate) {
+        candidate.username_fragment = Some(self.agent.get_local_credentials().ufrag.clone());
+        if let Some((mid, index)) = &self.local_media_section {
+            candidate.sdp_mid = Some(mid.clone());
+            candidate.sdp_mline_index = Some(*index);
+        }
     }
 
     /// get_local_parameters returns the ICE parameters of the ICEGatherer.

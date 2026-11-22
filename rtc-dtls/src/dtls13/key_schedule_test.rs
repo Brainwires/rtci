@@ -92,6 +92,29 @@ fn the_key_schedule_reproduces_the_rfc_8448_trace() -> Result<()> {
         )?,
         hex("a8ec436d677634ae525ac1fcebe11a039ec17694fac6e98527b642f2edd5ce61")
     );
+
+    // "derive secret tls13 res master" over the transcript through the client's Finished,
+    // and "generate resumption secret tls13 resumption" for the ticket of nonce 00 00.
+    let resumption_master = schedule.take_resumption_master_secret(
+        crypto,
+        &hex("209145a96ee8e2a122ff810047cc952684658d6049e86429426db87c54ad143d"),
+    )?;
+    assert_eq!(
+        resumption_master.as_ref(),
+        hex("7df235f2031d2a051287d02b0241b0bfdaf86cc856231f2d5aba46c434ec196c")
+    );
+    assert_eq!(
+        schedule
+            .resumption_psk(crypto, resumption_master.as_ref(), &[0, 0])?
+            .as_ref(),
+        hex("4ecd0eb6ec3b4d87f5d6028f922ca4c5851a277fd41311c9e62d2c9492e1c4f3")
+    );
+    // The Main Secret has no use left and is gone.
+    assert!(
+        schedule
+            .take_resumption_master_secret(crypto, &[0; 32])
+            .is_err()
+    );
     Ok(())
 }
 

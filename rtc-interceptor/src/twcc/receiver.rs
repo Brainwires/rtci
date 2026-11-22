@@ -252,6 +252,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for TwccReceiverInterceptor {
 
 impl Interceptor for TwccReceiverInterceptor {
     fn bind_remote_stream(&mut self, info: &StreamInfo) {
+        self.cadence.on_bind(info);
         // One feedback mechanism per stream: a stream that negotiated RFC 8888 is reported by
         // the RFC 8888 recorder and not here as well.
         if negotiated_congestion_feedback(info) == Some(CongestionFeedbackFormat::Rfc8888) {
@@ -276,6 +277,7 @@ impl Interceptor for TwccReceiverInterceptor {
     }
 
     fn unbind_remote_stream(&mut self, info: &StreamInfo) {
+        self.cadence.on_unbind(info);
         for ssrc in flow_ssrcs(info) {
             self.rfc8888_ssrcs.remove(&ssrc);
         }
@@ -288,7 +290,11 @@ impl Interceptor for TwccReceiverInterceptor {
         }
     }
 
-    fn bind_local_stream(&mut self, _info: &StreamInfo) {}
+    fn bind_local_stream(&mut self, info: &StreamInfo) {
+        self.cadence.on_bind(info);
+    }
 
-    fn unbind_local_stream(&mut self, _info: &StreamInfo) {}
+    fn unbind_local_stream(&mut self, info: &StreamInfo) {
+        self.cadence.on_unbind(info);
+    }
 }
