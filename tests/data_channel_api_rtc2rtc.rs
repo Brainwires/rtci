@@ -232,3 +232,119 @@ fn a_closed_channel_keeps_its_stats_object() -> Result<()> {
     assert_eq!(channel.messages_sent, 1);
     Ok(())
 }
+
+/// W3C 6.2 `bufferedamountlow`: fired when `bufferedAmount` falls from above
+/// `bufferedAmountLowThreshold` to at or below it, once per crossing.
+#[test]
+fn buffered_amount_low_fires_when_the_queue_falls_to_the_threshold() -> Result<()> {
+    let (mut pair, first) = Pair::connected(RTCDtlsRole::Client, "first")?;
+    let now = pair.now;
+    let mut channel = pair.offerer.pc.data_channel(first).expect("open");
+    channel.set_buffered_amount_low_threshold(4096);
+    for _ in 0..16 {
+        channel.send(now, BytesMut::from(&[3u8; 4096][..]))?;
+    }
+    assert!(channel.buffered_amount() > 4096);
+    let lows = |p: &Pair| {
+        p.offerer
+            .events
+            .iter()
+            .filter(|e| matches!(e, RTCDataChannelEvent::OnBufferedAmountLow(id) if *id == first))
+            .count()
+    };
+    assert_eq!(lows(&pair), 0, "not below the threshold yet");
+    assert!(pair.run_until(|p| lows(p) > 0)?);
+    let channel = pair.offerer.pc.data_channel(first).expect("open");
+    assert!(channel.buffered_amount() <= 4096);
+    pair.run_for(Duration::from_millis(500))?;
+    assert_eq!(lows(&pair), 1, "one crossing, one event");
+    Ok(())
+}
+
+/// W3C 6.2.4 closing procedure: messages sent before `close()` are sent first; the peer
+/// receives them all before the channel closes.
+#[test]
+fn close_sends_what_was_queued_before_it() -> Result<()> {
+    let (mut pair, first) = Pair::connected(RTCDtlsRole::Client, "first")?;
+    let now = pair.now;
+    // W3C 6.2.3 announce a data channel instance: the peer's channel is not negotiated.
+    let theirs = *pair
+        .answerer
+        .opened()
+        .last()
+        .expect("the answerer's channel");
+    assert!(
+        !pair
+            .answerer
+            .pc
+            .data_channel(theirs)
+            .expect("open")
+            .negotiated()
+    );
+    let mut channel = pair.offerer.pc.data_channel(first).expect("open");
+    for i in 0..5u8 {
+        channel.send(now, BytesMut::from(&[i; 2000][..]))?;
+    }
+    channel.close()?;
+    assert!(pair.run_until(|p| p.offerer.closed(first))?);
+    pair.run_for(Duration::from_millis(200))?;
+    let received: Vec<u8> = pair
+        .answerer
+        .received
+        .iter()
+        .map(|(_, _, d)| d[0])
+        .collect();
+    assert_eq!(received, [0, 1, 2, 3, 4]);
+    Ok(())
+}
+
+/// W3C 6.1.1.2 update the data max message size: the remote value is the description's
+/// `max-message-size`, 65536 when the attribute is missing; when one of the two is 0 ("any
+/// size") the result is the larger, this side's.
+#[test]
+fn max_message_size_follows_the_remote_attribute() -> Result<()> {
+    use rtc::peer_connection::configuration::setting_engine::SctpMaxMessageSize;
+    let without = |sdp: &str| {
+        sdp.lines()
+            .filter(|l| !l.starts_with("a=max-message-size:"))
+            .map(|l| format!("{l}\r\n"))
+            .collect::<String>()
+    };
+    let zero = |sdp: &str| {
+        sdp.lines()
+            .map(|l| {
+                if l.starts_with("a=max-message-size:") {
+                    "a=max-message-size:0\r\n".to_owned()
+                } else {
+                    format!("{l}\r\n")
+                }
+            })
+            .collect::<String>()
+    };
+    let cases: [(&dyn Fn(&str) -> String, u32); 2] = [(&without, 65536), (&zero, 262_144)];
+    for (i, (munge, expected)) in cases.into_iter().enumerate() {
+        let port = 52040 + 2 * i as u16;
+        let mut pair = Pair::with_setting_engines(
+            &format!("127.0.0.1:{port}"),
+            engine(RTCDtlsRole::Client),
+            &format!("127.0.0.1:{}", port + 1),
+            engine(RTCDtlsRole::Server)
+                .with_sctp_max_message_size(SctpMaxMessageSize::Bounded(262_144)),
+        )?;
+        pair.offerer.pc.create_data_channel("m", None)?;
+        pair.exchange_with(false, munge, |a| a.to_owned())?;
+        let connected = |p: &Pair| {
+            p.answerer
+                .pc
+                .sctp()
+                .is_some_and(|s| s.state() == RTCSctpTransportState::Connected)
+        };
+        assert!(pair.run_until(connected)?);
+        assert_eq!(
+            pair.answerer.pc.sctp().and_then(|s| s.max_message_size()),
+            Some(expected),
+            "case {i}"
+        );
+    }
+    Ok(())
+}

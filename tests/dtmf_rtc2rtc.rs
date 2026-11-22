@@ -13,16 +13,17 @@ use rtc::peer_connection::configuration::media_engine::{MIME_TYPE_OPUS, MediaEng
 use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtc::peer_connection::event::RTCPeerConnectionEvent;
 use rtc::peer_connection::message::RTCMessage;
+use rtc::peer_connection::sdp::RTCSessionDescription;
 use rtc::peer_connection::state::RTCPeerConnectionState;
 use rtc::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, RTCDtlsRole, RTCIceCandidate, RTCIceCandidateInit,
 };
 use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
 use rtc::rtp::codec::telephone_event::TelephoneEvent;
-use rtc::rtp_transceiver::RTCRtpSenderId;
 use rtc::rtp_transceiver::rtp_sender::{
     RTCRtpCodec, RTCRtpCodingParameters, RTCRtpEncodingParameters, RtpCodecKind,
 };
+use rtc::rtp_transceiver::{RTCRtpSenderId, RTCRtpTransceiverDirection, RTCRtpTransceiverId};
 use rtc::sansio::Protocol;
 use rtc::shared::error::Error;
 use rtc::shared::marshal::Unmarshal;
@@ -134,6 +135,11 @@ struct Call {
 impl Call {
     /// A connected call: the caller sends one Opus stream with SSRC `AUDIO_SSRC`.
     fn connected(port: u16) -> Result<Self> {
+        Self::connected_with(port, |sdp| sdp)
+    }
+
+    /// As [`Self::connected`], the callee's answer passed through `edit` first.
+    fn connected_with(port: u16, edit: impl Fn(String) -> String) -> Result<Self> {
         let now = Instant::now();
         let mut caller = Peer::new(
             format!("127.0.0.1:{port}").parse()?,
@@ -184,7 +190,9 @@ impl Call {
         call.callee.pc.set_remote_description(now, offer)?;
         let answer = call.callee.pc.create_answer(None)?;
         call.callee.pc.set_local_description(now, answer.clone())?;
-        call.caller.pc.set_remote_description(now, answer)?;
+        call.caller
+            .pc
+            .set_remote_description(now, RTCSessionDescription::answer(edit(answer.sdp))?)?;
         let (a, b) = (call.caller.addr, call.callee.addr);
         call.caller.pc.add_local_candidate(host(a)?)?;
         call.callee.pc.add_local_candidate(host(b)?)?;
@@ -449,6 +457,156 @@ fn event_packets_share_the_audio_streams_sequence_numbers() -> Result<()> {
             .iter()
             .all(|(_, p, _)| p.header.timestamp.wrapping_sub(96_000) < 48_000),
         "timestamps follow the audio packet's"
+    );
+    Ok(())
+}
+
+impl Call {
+    /// A new offer from the caller and the callee's answer, applied on both sides.
+    fn renegotiate(&mut self) -> Result<()> {
+        let now = self.now;
+        let offer = self.caller.pc.create_offer(None)?;
+        self.caller.pc.set_local_description(now, offer.clone())?;
+        self.callee.pc.set_remote_description(now, offer)?;
+        let answer = self.callee.pc.create_answer(None)?;
+        self.callee.pc.set_local_description(now, answer.clone())?;
+        self.caller.pc.set_remote_description(now, answer)?;
+        self.run_until(Duration::from_millis(200), |_| false)
+    }
+
+    fn set_first_encoding_active(&mut self, active: bool) -> Result<()> {
+        let mut sender = self.caller.pc.rtp_sender(self.sender).expect("sender");
+        let mut parameters = sender.get_parameters().clone();
+        parameters.encodings[0].active = active;
+        sender.set_parameters(parameters, None)?;
+        Ok(())
+    }
+}
+
+/// `sdp` without the telephone-event formats.
+fn without_telephone_event(sdp: String) -> String {
+    let pts: Vec<String> = sdp
+        .lines()
+        .filter_map(|l| l.strip_prefix("a=rtpmap:"))
+        .filter(|v| v.to_ascii_lowercase().contains("telephone-event/"))
+        .filter_map(|v| v.split_whitespace().next().map(str::to_owned))
+        .collect();
+    sdp.lines()
+        .filter(|l| {
+            !pts.iter().any(|pt| {
+                l.starts_with(&format!("a=rtpmap:{pt} ")) || l.starts_with(&format!("a=fmtp:{pt} "))
+            })
+        })
+        .map(|l| {
+            if l.starts_with("m=audio") {
+                l.split(' ')
+                    .filter(|f| !pts.iter().any(|pt| pt == f))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            } else {
+                l.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\r\n")
+        + "\r\n"
+}
+
+/// W3C 7.3 canInsertDTMF ("determine if DTMF can be sent") is false when telephone-event was
+/// not negotiated for sending, and insertDTMF is then an InvalidStateError.
+#[test]
+fn dtmf_cannot_be_sent_without_a_negotiated_telephone_event() -> Result<()> {
+    let mut call = Call::connected_with(53110, without_telephone_event)?;
+    assert!(!call.can_insert());
+    assert!(matches!(
+        call.insert("1", None, None),
+        Err(Error::InvalidStateError)
+    ));
+    Ok(())
+}
+
+/// W3C 7.3 canInsertDTMF is false when the sender's first encoding is inactive, and true
+/// again once it is active.
+#[test]
+fn dtmf_cannot_be_sent_while_the_first_encoding_is_inactive() -> Result<()> {
+    let mut call = Call::connected(53120)?;
+    assert!(call.can_insert());
+    call.set_first_encoding_active(false)?;
+    assert!(!call.can_insert());
+    call.set_first_encoding_active(true)?;
+    assert!(call.can_insert());
+    Ok(())
+}
+
+/// W3C 7.3 canInsertDTMF is false when the sender has no track.
+#[test]
+fn dtmf_cannot_be_sent_without_a_track() -> Result<()> {
+    let mut call = Call::connected(53130)?;
+    let sender = call.sender;
+    call.caller.pc.remove_track(sender)?;
+    assert!(!call.can_insert());
+    Ok(())
+}
+
+/// W3C 7.3 canInsertDTMF is false unless the transceiver's currentDirection sends: after a
+/// renegotiation to recvonly it is false.
+#[test]
+fn dtmf_cannot_be_sent_unless_the_current_direction_sends() -> Result<()> {
+    let mut call = Call::connected(53140)?;
+    let transceiver = RTCRtpTransceiverId::from(call.sender);
+    call.caller
+        .pc
+        .rtp_transceiver(transceiver)
+        .expect("transceiver")
+        .set_direction(RTCRtpTransceiverDirection::Recvonly)?;
+    assert!(
+        call.can_insert(),
+        "currentDirection changes with the answer only"
+    );
+    call.renegotiate()?;
+    assert!(!call.can_insert());
+    Ok(())
+}
+
+/// W3C 7.3 canInsertDTMF is false once the transceiver is stopping.
+#[test]
+fn dtmf_cannot_be_sent_by_a_stopping_transceiver() -> Result<()> {
+    let mut call = Call::connected(53150)?;
+    let transceiver = RTCRtpTransceiverId::from(call.sender);
+    call.caller
+        .pc
+        .rtp_transceiver(transceiver)
+        .expect("transceiver")
+        .stop()?;
+    let can = call
+        .caller
+        .pc
+        .rtp_sender(call.sender)
+        .and_then(|mut s| s.dtmf().map(|mut d| d.can_insert_dtmf()))
+        .unwrap_or(false);
+    assert!(!can);
+    Ok(())
+}
+
+/// W3C 7.2 playout task: when DTMF can no longer be sent the task aborts: the tones left are
+/// not played.
+#[test]
+fn the_playout_stops_when_dtmf_can_no_longer_be_sent() -> Result<()> {
+    let mut call = Call::connected(53160)?;
+    call.insert("123", None, None)?;
+    call.run_until(Duration::from_millis(50), |_| false)?;
+    assert_eq!(call.caller.tone_changes().len(), 1, "the first tone began");
+    call.set_first_encoding_active(false)?;
+    call.run_until(Duration::from_secs(2), |_| false)?;
+    let tones: Vec<String> = call
+        .caller
+        .tone_changes()
+        .into_iter()
+        .map(|(_, t)| t)
+        .collect();
+    assert!(
+        !tones.iter().any(|t| t == "2" || t == "3"),
+        "no tone after the sender stopped: {tones:?}"
     );
     Ok(())
 }

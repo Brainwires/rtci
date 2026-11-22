@@ -3667,6 +3667,56 @@ mod tests {
         );
     }
 
+    /// W3C 4.9: the certificates a connection generates when none is configured include an
+    /// ECDSA P-256 one signed with SHA-256; its fingerprint values are lowercase hex in the
+    /// RFC 4572 syntax (W3C 5.5.1 `RTCDtlsFingerprint.value`).
+    #[test]
+    fn the_generated_certificate_is_ecdsa_p256_with_sha256() {
+        use x509_parser::prelude::FromDer;
+        let pc = RTCPeerConnectionBuilder::new()
+            .build(Instant::now())
+            .unwrap();
+        let certificates = &pc.dtls_transport().certificates;
+        assert_eq!(certificates.len(), 1);
+        let der = certificates[0]
+            .dtls_certificate
+            .certificate
+            .first()
+            .expect("a certificate")
+            .clone();
+        let (_, parsed) =
+            x509_parser::certificate::X509Certificate::from_der(der.as_ref()).expect("X.509");
+        assert_eq!(
+            parsed.signature_algorithm.algorithm,
+            x509_parser::oid_registry::OID_SIG_ECDSA_WITH_SHA256
+        );
+        let key = parsed.public_key();
+        assert_eq!(
+            key.algorithm.algorithm,
+            x509_parser::oid_registry::OID_KEY_TYPE_EC_PUBLIC_KEY
+        );
+        let curve = key
+            .algorithm
+            .parameters
+            .as_ref()
+            .and_then(|p| p.as_oid().ok())
+            .expect("a named curve");
+        assert_eq!(curve, x509_parser::oid_registry::OID_EC_P256);
+
+        let crypto = crypto::default_provider().unwrap();
+        let fingerprints = certificates[0].get_fingerprints(crypto.crypto()).unwrap();
+        assert_eq!(fingerprints[0].algorithm, "sha-256");
+        let value = &fingerprints[0].value;
+        assert_eq!(value.len(), 32 * 3 - 1, "{value}");
+        assert!(
+            value.split(':').all(|byte| byte.len() == 2
+                && byte
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))),
+            "lowercase hex pairs separated by colons: {value}"
+        );
+    }
+
     #[test]
     fn the_transport_graph_is_walkable_and_ids_identify() {
         let mut pc = RTCPeerConnectionBuilder::new()
