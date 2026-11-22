@@ -21,7 +21,10 @@ use crate::rtp_transceiver::{
     PayloadType, RTCRtpReceiverId, SSRC, internal::RTCRtpTransceiverInternal,
 };
 use crate::statistics::accumulator::RTCStatsAccumulator;
-use interceptor::{Attribute, Interceptor, Packet, TaggedPacket};
+use interceptor::{
+    Attribute, AttributedPacket, Interceptor, Packet, RtcpSessionControl, RtcpSessionEvent,
+    TaggedPacket,
+};
 use log::{debug, trace};
 use rtcp::goodbye::Goodbye;
 use rtcp::receiver_report::ReceiverReport;
@@ -39,7 +42,9 @@ use std::time::{Duration, Instant};
 /// Packets under another SSRC for that layer in between are not attributed to it.
 pub(crate) const MIN_RID_SSRC_REBIND_INTERVAL: Duration = Duration::from_secs(1);
 
-#[derive(Default)]
+/// The most remote SSRCs whose CNAME is remembered.
+pub(crate) const MAX_REMOTE_CNAMES: usize = 1024;
+
 pub(crate) struct InterceptorHandlerContext {
     is_dtls_handshake_complete: bool,
     pub(crate) ssrc_owners: SsrcOwners,
@@ -50,9 +55,16 @@ pub(crate) struct InterceptorHandlerContext {
     pub(crate) read_outs: VecDeque<TaggedRTCMessageInternal>,
     pub(crate) write_outs: VecDeque<TaggedRTCMessageInternal>,
     pub(crate) event_outs: VecDeque<TaggedRTCEventInternal>,
-    /// The CNAME for reports no local sender owns (a receiver report's own SSRC), chosen once
-    /// per connection so every compound packet names the same endpoint.
-    connection_cname: Option<String>,
+    /// The RTCP CNAME of this connection (RFC 7022 4.2, RFC 8834 4.9): one for every SSRC it
+    /// sends from, senders, repair flows and receiver reports alike, generated with the
+    /// connection and kept for its life.
+    pub(crate) cname: String,
+    /// The CNAME each remote SSRC named in its SDES (RFC 3550 6.5.1), which is what binds the
+    /// streams of one remote endpoint together for synchronisation.
+    pub(crate) remote_cnames: HashMap<SSRC, String>,
+    /// Local SSRCs another source was heard using (RFC 3550 8.2), until their stream is
+    /// replaced.
+    pub(crate) ssrc_collisions: HashSet<SSRC>,
     /// Receiver SSRCs the remote has said BYE for, until every SSRC of their track has.
     goodbye_ssrcs: HashSet<SSRC>,
     /// The wall clock paired with the engine's clock, taken once, for the timestamps of the
@@ -67,6 +79,24 @@ fn receiver_declares_ssrc(transceiver: &RTCRtpTransceiverInternal, ssrc: SSRC) -
             .iter()
             .any(|coding| coding.ssrc == Some(ssrc))
     })
+}
+
+impl Default for InterceptorHandlerContext {
+    fn default() -> Self {
+        Self {
+            is_dtls_handshake_complete: false,
+            ssrc_owners: Default::default(),
+            rid_rebinds: Default::default(),
+            read_outs: Default::default(),
+            write_outs: Default::default(),
+            event_outs: Default::default(),
+            cname: interceptor::generate_rtcp_cname(),
+            remote_cnames: Default::default(),
+            ssrc_collisions: Default::default(),
+            goodbye_ssrcs: Default::default(),
+            wall_clock: None,
+        }
+    }
 }
 
 /// InterceptorHandler implements RTCP feedback handling
@@ -245,9 +275,9 @@ impl<'a> InterceptorHandler<'a> {
     }
 
     /// RFC 3550 6.1: every compound RTCP packet carries an SDES CNAME after its leading SR or
-    /// RR. The report interceptors emit bare reports, so the CNAME is added here, on the way to
-    /// the wire: the CNAME the SDP's `a=ssrc` lines give the sender that owns the reporting SSRC,
-    /// or the connection's own CNAME for a receiver report.
+    /// RR. The RTCP session writes it; this covers a chain built without one, whose report
+    /// interceptors emit bare reports. The CNAME is the connection's, whichever SSRC reports
+    /// (RFC 8834 4.9: one CNAME per connection).
     fn add_sdes_cname(&mut self, packet: &mut TaggedPacket) {
         let Packet::Rtcp(rtcp_packets) = &mut packet.message.packet else {
             return;
@@ -269,20 +299,6 @@ impl<'a> InterceptorHandler<'a> {
             return;
         }
 
-        let sender_cname = self.rtp_transceivers.iter().find_map(|transceiver| {
-            let track = transceiver.sender().as_ref()?.track();
-            track
-                .ssrcs()
-                .any(|ssrc| ssrc == reporter)
-                .then(|| track.stream_id().to_string())
-        });
-        let cname = sender_cname.unwrap_or_else(|| {
-            self.ctx
-                .connection_cname
-                .get_or_insert_with(|| format!("{:016x}", rand::random::<u64>()))
-                .clone()
-        });
-
         rtcp_packets.insert(
             1,
             Box::new(SourceDescription {
@@ -290,15 +306,65 @@ impl<'a> InterceptorHandler<'a> {
                     source: reporter,
                     items: vec![SourceDescriptionItem {
                         sdes_type: SdesType::SdesCname,
-                        text: cname.into(),
+                        text: self.ctx.cname.clone().into(),
                     }],
                 }],
             }),
         );
     }
 
+    /// What the RTCP session reports about the session, recorded for the connection.
+    fn process_session_event(&mut self, now: Instant, event: &RtcpSessionEvent) {
+        match event {
+            RtcpSessionEvent::RemoteCname { ssrc, cname } => {
+                if self.ctx.remote_cnames.len() < MAX_REMOTE_CNAMES
+                    || self.ctx.remote_cnames.contains_key(ssrc)
+                {
+                    self.ctx.remote_cnames.insert(*ssrc, cname.clone());
+                }
+            }
+            RtcpSessionEvent::SsrcCollision { ssrc, .. } => {
+                // RFC 3550 8.2. The session's own reporting SSRC has already moved. A
+                // sender's SSRC is signalled in the session description, so replacing it is a
+                // renegotiation: the application is told, once per SSRC, and stops or
+                // replaces the sender, which says BYE for the SSRC.
+                let is_sender = self.rtp_transceivers.iter().any(|transceiver| {
+                    transceiver.sender().as_ref().is_some_and(|sender| {
+                        sender.track().codings().iter().any(|coding| {
+                            let coding = &coding.rtp_coding_parameters;
+                            coding.ssrc == Some(*ssrc)
+                                || coding.rtx.as_ref().is_some_and(|rtx| rtx.ssrc == *ssrc)
+                                || coding.fec.as_ref().is_some_and(|fec| fec.ssrc == *ssrc)
+                        })
+                    })
+                });
+                log::warn!("ssrc collision: a remote source uses the local ssrc {ssrc}");
+                if is_sender && self.ctx.ssrc_collisions.insert(*ssrc) {
+                    self.ctx.event_outs.push_back(TaggedRTCEventInternal {
+                        now,
+                        event: RTCEventInternal::RTCPeerConnectionEvent(
+                            RTCPeerConnectionEvent::OnSsrcCollision(*ssrc),
+                        ),
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// RFC 3550 6.6: the connection is closing, so every local SSRC says BYE. Called before
+    /// the transports are torn down, while the BYE can still be routed.
+    pub(crate) fn request_goodbye(&mut self, now: Instant) {
+        if self.ctx.is_dtls_handshake_complete {
+            let _ = self
+                .interceptor
+                .handle_write(RtcpSessionControl::Leave.into_packet(now));
+        }
+    }
+
     /// Rewrite an RTX packet into the original packet it carries (RFC 4588 4), when it is one.
-    fn deencapsulate_if_rtx(&mut self, rtp_packet: &mut rtp::Packet) {
+    /// Returns the SSRC and sequence number it had on the wire when it was rewritten.
+    fn deencapsulate_if_rtx(&mut self, rtp_packet: &mut rtp::Packet) -> Option<(SSRC, u16)> {
         let is_primary = self
             .ctx
             .ssrc_owners
@@ -309,13 +375,12 @@ impl<'a> InterceptorHandler<'a> {
             )
             .is_some();
         if is_primary {
-            return;
+            return None;
         }
-        if let Some((primary_ssrc, primary_payload_type)) =
-            self.rtx_primary_for(rtp_packet.header.ssrc, rtp_packet.header.payload_type)
-        {
-            deencapsulate_rtx(rtp_packet, primary_ssrc, primary_payload_type);
-        }
+        let (primary_ssrc, primary_payload_type) =
+            self.rtx_primary_for(rtp_packet.header.ssrc, rtp_packet.header.payload_type)?;
+        let arrived_as = (rtp_packet.header.ssrc, rtp_packet.header.sequence_number);
+        deencapsulate_rtx(rtp_packet, primary_ssrc, primary_payload_type).then_some(arrived_as)
     }
 
     /// RTX SSRC of one of this endpoint's receive codings (declared via
@@ -1023,6 +1088,7 @@ impl<'a>
         if self.ctx.is_dtls_handshake_complete
             && let RTCMessageInternal::Rtp(RTPMessage::Packet(mut packet)) = msg.message
         {
+            let mut retransmitted = None;
             match &mut packet {
                 Packet::Rtp(rtp_packet) => {
                     // Establish the stream *before* the chain is handed the packet. The codec can only
@@ -1052,7 +1118,12 @@ impl<'a>
                     // A padding-only RTX packet (a bandwidth probe, no OSN) carries nothing to
                     // recover and goes on unchanged: its transport-wide sequence number still has
                     // to reach the TWCC recorder, or the probe reads as lost.
-                    self.deencapsulate_if_rtx(rtp_packet);
+                    //
+                    // What the retransmission was on the wire travels with it
+                    // (`Attribute::Retransmitted`): reception statistics count it on the RTX
+                    // stream it arrived on, so the primary stream's receiver report keeps
+                    // showing the loss the path had (RFC 4588 3).
+                    retransmitted = self.deencapsulate_if_rtx(rtp_packet);
 
                     // The ECN codepoint the datagram arrived with (from the application's socket
                     // layer), counted on the stream the packet belongs to, a repaired one
@@ -1071,10 +1142,17 @@ impl<'a>
                 _ => {}
             }
 
+            let mut message: AttributedPacket = packet.into();
+            if let Some((ssrc, sequence_number)) = retransmitted {
+                message.add(Attribute::Retransmitted {
+                    ssrc,
+                    sequence_number,
+                });
+            }
             self.interceptor.handle_read(TaggedPacket {
                 now: msg.now,
                 transport: msg.transport,
-                message: packet.into(),
+                message,
             })?;
         } else {
             debug!("interceptor read bypass {:?}", msg.transport.peer_addr);
@@ -1091,10 +1169,20 @@ impl<'a>
                 // application through `get_stats` rather than through an event of its own: it is
                 // one more number about the send side, and it belongs with the rest of them.
                 for attribute in &packet.message.attributes {
-                    if let Attribute::TargetBitrateChanged { bits_per_second } = attribute {
-                        // The outbound streams' `targetBitrate` and the selected pair's
-                        // `availableOutgoingBitrate` (see `RTCStatsAccumulator::on_target_bitrate`).
-                        self.stats.on_target_bitrate(*bits_per_second);
+                    match attribute {
+                        Attribute::TargetBitrateChanged { bits_per_second } => {
+                            // The outbound streams' `targetBitrate` and the selected pair's
+                            // `availableOutgoingBitrate` (see
+                            // `RTCStatsAccumulator::on_target_bitrate`).
+                            self.stats.on_target_bitrate(*bits_per_second);
+                        }
+                        Attribute::Custom(value) => {
+                            if let Some(event) = value.downcast_ref::<RtcpSessionEvent>() {
+                                let event = event.clone();
+                                self.process_session_event(packet.now, &event);
+                            }
+                        }
+                        _ => {}
                     }
                 }
 
@@ -1147,6 +1235,11 @@ impl<'a>
     fn poll_write(&mut self) -> Option<Self::Wout> {
         if self.ctx.is_dtls_handshake_complete {
             while let Some(mut packet) = self.interceptor.poll_write() {
+                // An empty RTCP packet is an attribute carrier (a control message no
+                // interceptor took): nothing to send.
+                if matches!(&packet.message.packet, Packet::Rtcp(packets) if packets.is_empty()) {
+                    continue;
+                }
                 self.add_sdes_cname(&mut packet);
                 // Process outgoing packets for stats
                 match &packet.message.packet {
@@ -1194,7 +1287,20 @@ impl<'a>
     fn handle_event(&mut self, evt: TaggedRTCEventInternal) -> Result<()> {
         if let RTCEventInternal::DTLSHandshakeComplete(_, _) = &evt.event {
             debug!("interceptor recv dtls handshake complete");
+            let first = !self.ctx.is_dtls_handshake_complete;
             self.ctx.is_dtls_handshake_complete = true;
+            if first {
+                // The RTCP session joins when the transport is up, under the connection's
+                // CNAME: an endpoint that only receives reports from then on, not from its
+                // first inbound packet (RFC 3550 6.2).
+                for control in [
+                    RtcpSessionControl::Cname(self.ctx.cname.clone()),
+                    RtcpSessionControl::Start,
+                ] {
+                    self.interceptor
+                        .handle_write(control.into_packet(evt.now))?;
+                }
+            }
         }
 
         self.ctx.event_outs.push_back(evt);
@@ -1247,6 +1353,10 @@ mod interceptor_repair_feedback_test;
 #[cfg(test)]
 #[path = "interceptor_sources_test.rs"]
 mod interceptor_sources_test;
+
+#[cfg(test)]
+#[path = "interceptor_session_test.rs"]
+mod interceptor_session_test;
 
 #[cfg(test)]
 mod boundary_tests {
