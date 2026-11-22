@@ -452,7 +452,7 @@ const ECN_CCFB: Setup = Setup {
 fn media_is_sent_ect1_and_both_sides_count_what_the_path_did() -> Result<()> {
     let (mut world, sender, offer) = World::connected(ECN_CCFB, ECN_CCFB)?;
     assert!(
-        offer.contains(&format!("a=rtcp-fb:{VP8_PT} ack ccfb")),
+        offer.contains("a=rtcp-fb:* ack ccfb"),
         "the offer negotiates RFC 8888 feedback:\n{offer}"
     );
     let (ssrc, _) = world.sender_stream(sender);

@@ -304,8 +304,11 @@ use crate::rtp_transceiver::rtp_sender::rtp_codec::{
 };
 use crate::rtp_transceiver::rtp_sender::rtp_codec_parameters::RTCRtpCodecParameters;
 use crate::rtp_transceiver::{
-    PayloadType, RtpStreamId, SSRC, internal::RTCRtpTransceiverInternal,
-    rtp_sender::rtcp_parameters::RTCPFeedback,
+    PayloadType, RtpStreamId, SSRC,
+    internal::RTCRtpTransceiverInternal,
+    rtp_sender::rtcp_parameters::{
+        RTCP_FB_ACK_CCFB, RTCPFeedback, TYPE_RTCP_FB_ACK, negotiates_ccfb,
+    },
 };
 use ice::candidate::{Candidate, unmarshal_candidate};
 use sdp::description::common::{Address, ConnectionInformation};
@@ -1034,6 +1037,7 @@ impl RTCPeerConnection {
                 .iter()
                 .any(|c| is_flexfec03_mime_type(&c.rtp_codec.mime_type)),
         };
+        let mut ccfb = false;
         for codec in &codecs {
             let name = codec
                 .rtp_codec
@@ -1051,6 +1055,12 @@ impl RTCPeerConnection {
             );
 
             for feedback in &codec.rtp_codec.rtcp_feedback {
+                // RFC 8888 section 6: "The payload type used with 'ccfb' feedback MUST be the
+                // wildcard type ('*')": written once, below.
+                if negotiates_ccfb([(feedback.typ.as_str(), feedback.parameter.as_str())]) {
+                    ccfb = true;
+                    continue;
+                }
                 media = media.with_value_attribute(
                     "rtcp-fb".to_owned(),
                     if feedback.parameter.is_empty() {
@@ -1063,6 +1073,12 @@ impl RTCPeerConnection {
                     },
                 );
             }
+        }
+        if ccfb {
+            media = media.with_value_attribute(
+                ATTR_KEY_RTCP_FB.to_owned(),
+                format!("* {TYPE_RTCP_FB_ACK} {RTCP_FB_ACK_CCFB}"),
+            );
         }
         if codecs.is_empty() {
             // If we are sender and have no codecs throw an error early
@@ -2240,10 +2256,35 @@ pub(crate) fn have_data_channel(
     get_application_media(desc.parsed.as_ref()?)
 }
 
+const ATTR_KEY_RTCP_FB: &str = "rtcp-fb";
+
+/// One feedback value of an `a=rtcp-fb` line, the payload type removed: the type (`nack`,
+/// `ccm`, `ack`, `goog-remb`, ...) and everything after it as the parameter (`pli`, `fir`,
+/// `ccfb`, `100` of `trr-int 100`). `None` for an empty value.
+fn parse_rtcp_feedback(value: &str) -> Option<RTCPFeedback> {
+    let mut tokens = value.split_whitespace();
+    let typ = tokens.next()?.to_owned();
+    Some(RTCPFeedback {
+        typ,
+        parameter: tokens.collect::<Vec<_>>().join(" "),
+    })
+}
+
 pub(crate) fn codecs_from_media_description(
     m: &MediaDescription,
 ) -> Result<Vec<RTCRtpCodecParameters>> {
     let codecs = m.codecs();
+    // Feedback for the wildcard payload type applies to every format of the section (RFC 4585
+    // section 4.2: "'*' ... indicates that the RTCP feedback attribute applies to all payload
+    // types"); RFC 8888 section 6 has `ack ccfb` signalled only that way.
+    let wildcard_feedback: Vec<RTCPFeedback> = m
+        .attributes
+        .iter()
+        .filter(|a| a.key == ATTR_KEY_RTCP_FB)
+        .filter_map(|a| a.value.as_deref())
+        .filter_map(|value| value.strip_prefix("* "))
+        .filter_map(parse_rtcp_feedback)
+        .collect();
 
     let mut out = vec![];
     // A payload type listed more than once on the m= line describes one codec: keep its first
@@ -2283,23 +2324,15 @@ pub(crate) fn codecs_from_media_description(
 
         let channels = codec.encoding_parameters.parse::<u16>().unwrap_or(0);
 
-        let mut feedback = vec![];
-        for raw in &codec.rtcp_feedback {
-            let split: Vec<&str> = raw.split(' ').collect();
-
-            let entry = if split.len() == 2 {
-                RTCPFeedback {
-                    typ: split[0].to_string(),
-                    parameter: split[1].to_string(),
-                }
-            } else {
-                RTCPFeedback {
-                    typ: split[0].to_string(),
-                    parameter: String::new(),
-                }
-            };
-
-            feedback.push(entry);
+        let mut feedback: Vec<RTCPFeedback> = codec
+            .rtcp_feedback
+            .iter()
+            .filter_map(|raw| parse_rtcp_feedback(raw))
+            .collect();
+        for entry in &wildcard_feedback {
+            if !feedback.contains(entry) {
+                feedback.push(entry.clone());
+            }
         }
 
         out.push(RTCRtpCodecParameters {
