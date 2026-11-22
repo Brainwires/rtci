@@ -19,6 +19,7 @@ fn create_association(config: TransportConfig) -> Association {
         SocketAddr::from_str("0.0.0.0:0").unwrap(),
         TransportProtocol::UDP,
         Instant::now(),
+        crate::util::RandomSource::default(),
     );
     if default_burst {
         a.max_burst = None;
@@ -634,6 +635,7 @@ fn create_association_with_mtu(mtu: u32) -> Association {
         SocketAddr::from_str("0.0.0.0:0").unwrap(),
         TransportProtocol::UDP,
         Instant::now(),
+        crate::util::RandomSource::default(),
     )
 }
 
@@ -741,6 +743,7 @@ fn initial_cwnd_is_computed_safely_for_non_default_mtus() {
         SocketAddr::from_str("0.0.0.0:0").unwrap(),
         TransportProtocol::UDP,
         Instant::now(),
+        crate::util::RandomSource::default(),
     );
     assert_eq!(a.mtu, u32::MAX);
     assert_eq!(a.cwnd, u32::MAX);

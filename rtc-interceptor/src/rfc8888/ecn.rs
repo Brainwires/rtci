@@ -551,4 +551,76 @@ mod tests {
         });
         assert_eq!(v.state(), EcnState::Active, "congestion, not ECN");
     }
+
+    /// A fixed corpus of arbitrary send / report sequences (sequence numbers that jump, wrap,
+    /// repeat; reports out of order, duplicated, for unknown packets): nothing panics, a stream
+    /// that is initiating never marks two packets in a row nor more than a quarter of them,
+    /// and one that is disabled never marks again.
+    #[test]
+    fn arbitrary_send_and_report_sequences_keep_the_invariants() {
+        let mut state = 0x0EC0_0001u32;
+        let mut next = move || {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            state >> 8
+        };
+        for _ in 0..400 {
+            let mut v = if next() % 2 == 0 {
+                EcnValidation::default()
+            } else {
+                EcnValidation::new(EcnInitiation::LeapOfFaith)
+            }
+            .with_retry_after(Duration::from_millis(u64::from(next() % 3000)));
+            let mut at = Instant::now();
+            let mut seq = next() as u16;
+            let mut sent: Vec<u16> = vec![];
+            let mut run_marked = 0u32;
+            let mut initiating = (0u32, 0u32);
+            for _ in 0..600 {
+                at += Duration::from_millis(u64::from(next() % 60));
+                match next() % 10 {
+                    0..=5 => {
+                        seq = match next() % 20 {
+                            0 => seq.wrapping_add(next() as u16),
+                            1 => seq,
+                            _ => seq.wrapping_add(1),
+                        };
+                        let was = v.state();
+                        let marked = v.on_send(at, seq);
+                        sent.push(seq);
+                        if was == EcnState::Disabled {
+                            assert!(!marked, "a disabled stream marks nothing");
+                        }
+                        if v.state() == EcnState::Initiating && was == EcnState::Initiating {
+                            initiating.0 += 1;
+                            initiating.1 += u32::from(marked);
+                            run_marked = if marked { run_marked + 1 } else { 0 };
+                            assert!(run_marked <= 1, "two probes in a row");
+                        } else {
+                            run_marked = 0;
+                        }
+                    }
+                    _ => {
+                        let target = if sent.is_empty() || next() % 8 == 0 {
+                            next() as u16
+                        } else {
+                            sent[(next() as usize) % sent.len()]
+                        };
+                        let ecn = match next() % 4 {
+                            0 => Ecn::NotEct,
+                            1 => Ecn::Ect1,
+                            2 => Ecn::Ect0,
+                            _ => Ecn::Ce,
+                        };
+                        v.on_report(at, target, next() % 5 != 0, ecn);
+                    }
+                }
+            }
+            if initiating.0 >= 40 {
+                assert!(
+                    initiating.1 * 4 <= initiating.0 + 4,
+                    "a small fraction while initiating: {initiating:?}"
+                );
+            }
+        }
+    }
 }

@@ -2,11 +2,13 @@
 
 use super::encoder::FlexFec03Encoder;
 use crate::Interceptor;
+use crate::cc::fec_rate::FecRate;
 use crate::stream_info::StreamInfo;
 use crate::wire_image::{WireImageTap, WireImages, wire_image_tap};
 use crate::{AttributedPacket, Packet, TaggedPacket};
 use sansio::Protocol;
 use shared::error::Error;
+use shared::marshal::MarshalSize;
 use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
 
@@ -34,6 +36,7 @@ pub const DEFAULT_NUM_FEC_PACKETS: u32 = 2;
 pub struct FlexFec03SendBuilder {
     num_media_packets: u32,
     num_fec_packets: u32,
+    adaptive_rate: bool,
     initial_sequence_number: Option<u16>,
     initial_timestamp: Option<u32>,
 }
@@ -43,6 +46,7 @@ impl Default for FlexFec03SendBuilder {
         Self {
             num_media_packets: DEFAULT_NUM_MEDIA_PACKETS,
             num_fec_packets: DEFAULT_NUM_FEC_PACKETS,
+            adaptive_rate: true,
             initial_sequence_number: None,
             initial_timestamp: None,
         }
@@ -91,10 +95,24 @@ impl FlexFec03SendBuilder {
         self
     }
 
+    /// Whether the amount of FEC follows the loss the receiver reports (the default), or
+    /// stays as configured. See [`FecRate`](crate::FecRate): no repair under 0.5% loss, enough
+    /// for twice the loss above it, at most half the block; the FEC sent is taken out of the
+    /// target the application encodes at.
+    pub fn with_adaptive_rate(mut self, adaptive: bool) -> Self {
+        self.adaptive_rate = adaptive;
+        self
+    }
+
     /// Build the interceptor.
     pub fn build(self) -> FlexFec03SendInterceptor {
         let mut interceptor =
             FlexFec03SendInterceptor::new(self.num_media_packets, self.num_fec_packets);
+        interceptor.rate = FecRate::new(
+            self.num_media_packets,
+            self.num_fec_packets,
+            self.adaptive_rate,
+        );
         interceptor.initial_sequence_number = self.initial_sequence_number;
         interceptor.initial_timestamp = self.initial_timestamp;
         interceptor
@@ -140,6 +158,8 @@ impl RepairClock {
 pub struct FlexFec03SendInterceptor {
     num_media_packets: u32,
     num_fec_packets: u32,
+    /// The loss-driven amount of FEC.
+    rate: FecRate,
     /// Keyed by the **media** SSRC being protected.
     streams: HashMap<u32, ProtectedStream>,
     /// Pinned by the builder; random per repair stream when unset.
@@ -163,6 +183,7 @@ impl FlexFec03SendInterceptor {
             write_queue: VecDeque::new(),
             num_media_packets: num_media_packets.max(1),
             num_fec_packets,
+            rate: FecRate::new(num_media_packets, num_fec_packets, true),
             streams: HashMap::new(),
             initial_sequence_number: None,
             initial_timestamp: None,
@@ -212,14 +233,20 @@ impl FlexFec03SendInterceptor {
         // The repair packets carry the send clock at `now`: the instant the block's last packet
         // was written with (from the wire tap, the instant the pacer released it).
         let timestamp = stream.clock.timestamp_at(now);
-        let repair_packets = stream
-            .encoder
-            .encode(&stream.block, self.num_fec_packets, timestamp);
+        self.num_fec_packets = self.rate.fec_packets();
+        let repair_packets = if self.num_fec_packets == 0 {
+            Vec::new()
+        } else {
+            stream
+                .encoder
+                .encode(&stream.block, self.num_fec_packets, timestamp)
+        };
         // Cleared either way: a block the encoder refused — a gap, or one longer than the
         // masks describe — must not be retried packet by packet as more arrive.
         stream.block.clear();
 
         for packet in repair_packets {
+            self.rate.on_repair_sent(now, packet.marshal_size());
             // Queued for `poll_write`, which puts them back on the belt: a repair packet is a real
             // outgoing RTP packet and still needs every interceptor ahead — a transport-wide sequence
             // number, the pacer, and a place in the send history congestion control reads.
@@ -257,7 +284,10 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for FlexFec03SendInterceptor {
     type Error = Error;
     type Time = Instant;
 
-    fn handle_read(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
+    fn handle_read(&mut self, mut msg: TaggedPacket) -> Result<(), Self::Error> {
+        let streams = &self.streams;
+        self.rate
+            .on_read(&mut msg, |ssrc| streams.contains_key(&ssrc));
         self.read_queue.push_back(msg);
         Ok(())
     }

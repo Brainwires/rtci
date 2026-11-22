@@ -142,7 +142,12 @@ fn media_added_to_a_data_channel_session_gets_an_association_with_use_srtp() -> 
                 Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
             )?;
             let (offer, answer) = world.exchange(offering)?;
-            assert!(offer.contains("m=audio 9 "), "{what}: {offer}");
+            // The port is the default candidate's once candidates exist (RFC 9429 section
+            // 5.2.2), 9 before: only the section matters here.
+            assert!(
+                offer.lines().any(|line| line.starts_with("m=audio ")),
+                "{what}: {offer}"
+            );
             assert_ne!(
                 attribute_values(&offer, "tls-id"),
                 first_ids[offering],

@@ -2983,6 +2983,7 @@ fn test_association_handle_packet_before_init() -> Result<()> {
             local,
             TransportProtocol::UDP,
             Instant::now(),
+            crate::util::RandomSource::default(),
         );
 
         let packet = packet.marshal()?;

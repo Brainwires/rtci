@@ -1,4 +1,7 @@
-use crate::util::{AssociationIdGenerator, RandomAssociationIdGenerator};
+use crate::util::{
+    AssociationIdGenerator, RandomAssociationIdGenerator, RandomSource,
+    SourcedAssociationIdGenerator,
+};
 
 use crate::TimerConfig;
 use std::fmt;
@@ -382,6 +385,9 @@ pub struct EndpointConfig {
     /// Create a aid generator for local aid in Endpoint struct
     pub(crate) aid_generator_factory:
         Arc<dyn (Fn() -> Box<dyn AssociationIdGenerator + Send>) + Send + Sync>,
+
+    /// Where the endpoint's associations draw their random values from.
+    pub(crate) random: RandomSource,
 }
 
 impl Default for EndpointConfig {
@@ -398,7 +404,28 @@ impl EndpointConfig {
         Self {
             max_payload_size: max_payload_size_for_mtu(INITIAL_MTU),
             aid_generator_factory: Arc::new(aid_factory),
+            random: RandomSource::default(),
         }
+    }
+
+    /// Draws every random value of the endpoint and its associations from `provider`'s
+    /// `random()`: the verification tags (with the default generator, which this replaces;
+    /// set [`Self::aid_generator`] after this call for another), the initial TSNs, the State
+    /// Cookies made without [`ServerConfig::cookie_authentication`], the Initiate Tag of an
+    /// INIT ACK for an existing association, HEARTBEAT nonces and the HEARTBEAT timer's
+    /// jitter.
+    ///
+    /// Without it (the default) they come from `rand`'s thread-local CSPRNG. This is how the
+    /// other crates of the workspace take their randomness (`docs/randomness-audit.md`), and
+    /// what lets a test that seeds the provider replay a run exactly.
+    pub fn random_source(&mut self, provider: Arc<dyn crypto::RTCCryptoProvider>) -> &mut Self {
+        let random = RandomSource::new(Some(provider));
+        self.random = random.clone();
+        self.aid_generator_factory = Arc::new(move || {
+            Box::new(SourcedAssociationIdGenerator(random.clone()))
+                as Box<dyn AssociationIdGenerator + Send>
+        });
+        self
     }
 
     /// Supply a custom Association ID generator factory
@@ -448,6 +475,7 @@ impl fmt::Debug for EndpointConfig {
         fmt.debug_struct("EndpointConfig")
             .field("max_payload_size", &self.max_payload_size)
             .field("aid_generator_factory", &"[ elided ]")
+            .field("random", &self.random)
             .finish()
     }
 }

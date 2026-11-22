@@ -11,6 +11,8 @@ pub(crate) mod link_test;
 #[cfg(test)]
 mod loss_recovery_test;
 #[cfg(test)]
+mod random_source_test;
+#[cfg(test)]
 mod sctp_port_test;
 
 use std::{
@@ -41,7 +43,7 @@ use crate::packet::{CommonHeader, Packet};
 use crate::shared::{
     AssociationEvent, AssociationEventInner, AssociationId, EndpointEvent, EndpointEventInner,
 };
-use crate::util::{AssociationIdGenerator, RandomAssociationIdGenerator};
+use crate::util::AssociationIdGenerator;
 use shared::{EcnCodepoint, TransportContext, TransportMessage, TransportProtocol};
 
 use bytes::Bytes;
@@ -332,7 +334,27 @@ impl Endpoint {
 
         // RFC 9653 5.2, 5.3: a packet for no association has a correct CRC32c (an INIT
         // always has), so one with a checksum of zero is dropped unless zero is its CRC32c.
+        // Section 5.3 lets an endpoint process an out-of-the-blue packet with a zero
+        // checksum, "faster SCTP association failure detection": one that announces the
+        // DTLS method (it runs under DTLS, which authenticates every packet, section 6)
+        // does, so that a peer that still sends to an association that ended here (a
+        // handshake that ran out of retransmissions while the peer, whose COOKIE ACK was
+        // lost, took the association for established) is told with an ABORT, instead of
+        // sending its DATA and HEARTBEATs into the void until its own limits run out. An
+        // INIT or a COOKIE ECHO always has its CRC32c (5.2 1.a, 2), so neither is taken.
         if !partial_decode.checksum_ok(false) {
+            let announces_zero_checksum = self
+                .server_config
+                .as_ref()
+                .is_some_and(|config| config.transport.zero_checksum());
+            if announces_zero_checksum
+                && partial_decode.first_chunk_type != CT_INIT
+                && partial_decode.first_chunk_type != CT_COOKIE_ECHO
+                && partial_decode.checksum_ok(true)
+            {
+                self.handle_out_of_the_blue(now, remote, &partial_decode);
+                return None;
+            }
             trace!("discarding a packet with a zero checksum that belongs to no association");
             return None;
         }
@@ -477,6 +499,7 @@ impl Endpoint {
             self.local_addr,
             self.transport_protocol,
             now,
+            self.endpoint_config.random.clone(),
         );
         association.set_cookie_signer(signer);
         association.handle_event(AssociationEvent(AssociationEventInner::Datagram(
@@ -725,7 +748,7 @@ impl Endpoint {
             return Err(ConnectError::InvalidRemoteAddress(remote));
         }
 
-        let remote_aid = RandomAssociationIdGenerator::new().generate_aid();
+        let remote_aid = self.endpoint_config.random.nonzero_u32();
         let local_aid = self.new_aid();
 
         let ports = (
@@ -850,6 +873,7 @@ impl Endpoint {
             self.local_addr,
             self.transport_protocol,
             now,
+            self.endpoint_config.random.clone(),
         );
 
         let peer = (remote_addr, ports.0, ports.1);

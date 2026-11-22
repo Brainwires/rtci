@@ -356,3 +356,61 @@ fn several_certificate_requests_go_out_at_once_and_are_answered() -> Result<()> 
     assert!(pair.server_conn().pending_certificate_requests.is_empty());
     Ok(())
 }
+
+/// RFC 8446 section 4.4: the Finished of a post-handshake answer is keyed from the client's
+/// current application traffic secret. In DTLS (RFC 9147 section 8) a client that sent a
+/// KeyUpdate keeps sending under its old keys until the KeyUpdate is acknowledged, while the
+/// server reads the client's next keys from the KeyUpdate on. A client that answers in that
+/// window keys its Finished from the old secret, the one its answer is protected under, and
+/// the server checks it with the secret of the epoch the answer arrived in: before, it used
+/// its newest secret of the client's and refused a genuine answer with decrypt_error.
+#[test]
+fn an_answer_sent_while_the_clients_key_update_is_unacknowledged_verifies() -> Result<()> {
+    let client_certificate = certificate("client");
+    let mut pair = Pair::new(
+        authenticating_client(Some(client_certificate.clone())),
+        server_builder(),
+    )?
+    .complete();
+
+    // The client's KeyUpdate reaches the server; the server's ACK of it is lost.
+    pair.client.update_keys(pair.now, server_addr(), false)?;
+    let key_update = take(&mut pair.client);
+    assert!(!key_update.is_empty());
+    pair.deliver_to_server(key_update);
+    let _lost_ack = take(&mut pair.server);
+    assert_eq!(
+        pair.client_conn().unacknowledged_post_handshake_messages(),
+        1
+    );
+
+    pair.server
+        .request_client_certificate(pair.now, client_addr())?;
+    let request = take(&mut pair.server);
+    pair.deliver_to_client(request);
+    assert_eq!(
+        pair.client_conn().unacknowledged_post_handshake_messages(),
+        2,
+        "the KeyUpdate, still unacknowledged, and the answer"
+    );
+    let answer = take(&mut pair.client);
+    pair.deliver_to_server(answer);
+    assert!(
+        pair.server_error.is_none(),
+        "the answer verifies: {:?}",
+        pair.server_error
+    );
+    assert_eq!(authenticated(&pair), 1);
+    assert_eq!(
+        pair.server
+            .get_connection_state(client_addr())
+            .map(|state| state.peer_certificates.clone()),
+        Some(der_chain(&client_certificate))
+    );
+
+    // Everything is acknowledged in the end, and data goes both ways under the new keys.
+    pair.run();
+    assert_eq!(pair.client_sends(b"after"), vec![b"after".to_vec()]);
+    assert_eq!(pair.server_sends(b"back"), vec![b"back".to_vec()]);
+    Ok(())
+}

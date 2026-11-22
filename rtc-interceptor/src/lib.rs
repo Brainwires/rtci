@@ -255,6 +255,7 @@ pub use adaptive_jitter_buffer::{
     JitterBufferInterceptor as AdaptiveJitterBufferInterceptor,
 };
 pub use cc::estimator::{BandwidthEstimator, ConstantBitrate, EstimatorStats};
+pub use cc::fec_rate::{FecRate, MIN_LOSS as FEC_MIN_LOSS};
 pub use cc::feedback::{CongestionFeedbackFormat, negotiated_congestion_feedback};
 pub use cc::interceptor::{
     CongestionControlBuilder, CongestionControlHandle, CongestionControlInterceptor,

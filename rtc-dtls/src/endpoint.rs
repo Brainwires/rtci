@@ -23,7 +23,7 @@ use std::collections::hash_map::Keys;
 use std::collections::{HashMap, VecDeque, hash_map::Entry::Vacant};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// What the endpoint reports to its caller.
 #[non_exhaustive]
@@ -56,6 +56,18 @@ pub enum EndpointEvent {
 /// of ClientHellos too long for one record, which have to be put together before the cookie
 /// exchange can be run (RFC 9147 section 5.1).
 const MAX_UNVERIFIED_ASSOCIATIONS: usize = 32;
+
+/// How long such an association lives without a datagram from its address while the address
+/// is not verified. It holds state for an address nobody has verified, so it does not stay for
+/// as long as the application lets handshakes run (by default with no limit), but each datagram
+/// that reaches it gives it this long again: twice the longest retransmission interval (60
+/// seconds), so that a client retransmitting at full backoff, which by then cuts its
+/// ClientHello into more and smaller fragments (RFC 9147 section 4.4), is put together from
+/// several transmissions, not only from one that arrives whole. Its HelloRetryRequest cookies
+/// are the endpoint's (`RetryKeys`): one that goes costs a client nothing while the endpoint's
+/// cookie secret lasts, and a repeated first ClientHello gets a new association.
+const UNVERIFIED_ASSOCIATION_LIFETIME: Duration =
+    Duration::from_secs(2 * crate::conn::MAXIMUM_RETRANSMIT_INTERVAL.as_secs());
 
 /// What a server endpoint makes of a datagram before an association sees it.
 enum Admission {
@@ -140,6 +152,15 @@ impl Endpoint {
     /// [`DTLSConn::record_overhead`]. `None` without an association, or before it has keys.
     pub fn record_overhead(&self, remote: SocketAddr) -> Option<usize> {
         self.connections.get(&remote)?.record_overhead()
+    }
+
+    /// How often the handshake flight under way with `remote` has been sent again; zero once
+    /// the handshake is complete, `None` without an association. See
+    /// [`DTLSConn::handshake_retransmissions`].
+    pub fn handshake_retransmissions(&self, remote: &SocketAddr) -> Option<usize> {
+        self.connections
+            .get(remote)
+            .map(DTLSConn::handshake_retransmissions)
     }
 
     /// Whether the association with `remote` has failed: a fatal alert was sent or received, or
@@ -454,6 +475,7 @@ impl Endpoint {
             // that puts it together and runs the exchange itself, for either version; that
             // is state for an address nobody has verified, so only a bounded number exist.
             if prefix.cookie.is_empty() && config.cookie_exchange {
+                self.drop_expired_unverified(now);
                 let unverified = self
                     .connections
                     .values()
@@ -463,7 +485,16 @@ impl Endpoint {
                 if unverified >= MAX_UNVERIFIED_ASSOCIATIONS {
                     return Ok(Some(Admission::Done));
                 }
-                let conn = DTLSConn::new(config.clone(), false, None);
+                let mut conn = DTLSConn::new(config.clone(), false, None);
+                // A DTLS 1.3 ClientHello that answers a HelloRetryRequest has message_seq 1
+                // (RFC 9147 section 5.2): it is put together from there.
+                conn.start_reassembly_at(prefix.message_sequence);
+                let provider = config.provider().clone();
+                conn.retry_keys = Some(crate::dtls13::hello::RetryKeys {
+                    secrets: self.cookie_secrets.secrets(now, provider.as_ref())?,
+                    remote,
+                });
+                conn.unverified_until = Some(now + UNVERIFIED_ASSOCIATION_LIFETIME);
                 if established {
                     self.pending.insert(remote, conn);
                 } else {
@@ -573,6 +604,21 @@ impl Endpoint {
             self.connections.insert(remote, conn);
         }
         Ok(Some(Admission::Deliver))
+    }
+
+    /// Whether `conn` is an association for an unverified address that has outlived
+    /// [`UNVERIFIED_ASSOCIATION_LIFETIME`] at `now`.
+    fn unverified_expired(conn: &DTLSConn, now: Instant) -> bool {
+        !conn.is_address_verified() && conn.unverified_until.is_some_and(|until| now >= until)
+    }
+
+    /// Forgets the associations for unverified addresses that have outlived their time.
+    /// Nothing is sent and nothing is reported: there was never a verified peer.
+    fn drop_expired_unverified(&mut self, now: Instant) {
+        self.connections
+            .retain(|_, conn| !Self::unverified_expired(conn, now));
+        self.pending
+            .retain(|_, conn| !Self::unverified_expired(conn, now));
     }
 
     /// RFC 9146 section 6, RFC 9147 section 9: a datagram from an address without an
@@ -738,6 +784,18 @@ impl Endpoint {
         if let Some(config) = self.server_config.clone() {
             if let Admission::Done = self.admit(now, remote, ecn, &data, &config)? {
                 return Ok(vec![]);
+            }
+            // An association for an unverified address lives on while datagrams come.
+            for conn in [
+                self.connections.get_mut(&remote),
+                self.pending.get_mut(&remote),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                if !conn.is_address_verified() && conn.unverified_until.is_some() {
+                    conn.unverified_until = Some(now + UNVERIFIED_ASSOCIATION_LIFETIME);
+                }
             }
             // A failed server association takes no more input. It still says its fatal alert
             // again when the peer repeats a flight (RFC 6347 4.2.7), which is not an error
@@ -908,6 +966,23 @@ impl Endpoint {
     /// `ErrHandshakeTimeout` when the handshake did not complete in time; the association has
     /// then failed.
     pub fn handle_timeout(&mut self, remote: SocketAddr, now: Instant) -> Result<()> {
+        // An association for an address the client has not verified goes at the end of its
+        // time, silently (`UNVERIFIED_ASSOCIATION_LIFETIME`).
+        if self
+            .pending
+            .get(&remote)
+            .is_some_and(|conn| Self::unverified_expired(conn, now))
+        {
+            self.pending.remove(&remote);
+        }
+        if self
+            .connections
+            .get(&remote)
+            .is_some_and(|conn| Self::unverified_expired(conn, now))
+        {
+            self.connections.remove(&remote);
+            return Ok(());
+        }
         // An association in the making beside an established one has its own timers; when it
         // gives up, it goes and nothing else changes.
         if let Some(conn) = self.pending.get_mut(&remote) {
@@ -953,14 +1028,17 @@ impl Endpoint {
     /// When `remote`'s association next needs [`Self::handle_timeout`]: the retransmission
     /// timer or the handshake deadline, whichever comes first.
     pub fn poll_timeout(&self, remote: &SocketAddr) -> Option<Instant> {
-        let established = self
-            .connections
-            .get(remote)
-            .and_then(|conn| conn.next_timeout());
-        let pending = self
-            .pending
-            .get(remote)
-            .and_then(|conn| conn.next_timeout());
+        let next = |conn: &DTLSConn| {
+            let expiry = conn
+                .unverified_until
+                .filter(|_| !conn.is_address_verified());
+            match (conn.next_timeout(), expiry) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            }
+        };
+        let established = self.connections.get(remote).and_then(next);
+        let pending = self.pending.get(remote).and_then(next);
         match (established, pending) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),

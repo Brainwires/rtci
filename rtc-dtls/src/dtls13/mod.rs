@@ -27,6 +27,8 @@ mod fuzz_corpus_test;
 #[cfg(test)]
 pub(crate) mod handshake_test;
 #[cfg(test)]
+mod hello_loss_test;
+#[cfg(test)]
 mod key_schedule_test;
 #[cfg(test)]
 mod openssl_kat_test;

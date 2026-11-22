@@ -48,7 +48,7 @@ use crate::queue::{
 };
 use crate::shared::{AssociationEventInner, AssociationId, EndpointEvent, EndpointEventInner};
 use crate::util::{
-    constant_time_eq, get_padding_size, sna16lt, sna32gt, sna32gte, sna32lt, sna32lte,
+    RandomSource, constant_time_eq, get_padding_size, sna16lt, sna32gt, sna32gte, sna32lt, sna32lte,
 };
 use crate::{AssociationEvent, Payload, Side};
 use shared::error::{Error, Result};
@@ -59,7 +59,6 @@ use timer::{ACK_INTERVAL, RtoManager, Timer, TimerTable};
 use crate::association::stream::RecvSendState;
 use bytes::{Bytes, BytesMut};
 use log::{debug, error, trace, warn};
-use rand::random;
 pub use reconfig::ReconfigEvent;
 use reconfig::{IncomingResetWaiting, OwnRequest};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -398,6 +397,10 @@ pub struct Association {
     /// was given a crypto provider for it. Without one a cookie is random bytes, good only
     /// because this association remembers them.
     cookie_signer: Option<Arc<CookieSigner>>,
+    /// Where the random values come from: the initial TSN, an unauthenticated State Cookie,
+    /// the Initiate Tag of an INIT ACK for an existing association, HEARTBEAT nonces and
+    /// jitter (`EndpointConfig::random_source`).
+    random: RandomSource,
     /// Valid.Cookie.Life (RFC 9260 16): how long a State Cookie is accepted after it was made.
     valid_cookie_life: Duration,
     /// How many times a Stale Cookie error sent this side back to a new INIT.
@@ -604,6 +607,7 @@ impl Default for Association {
             my_cookie: None,
             cookie_tcb: None,
             cookie_signer: None,
+            random: RandomSource::default(),
             valid_cookie_life: Duration::from_secs(60),
             stale_cookie_restarts: 0,
             first_data_received: false,
@@ -704,6 +708,7 @@ impl Association {
         local_addr: SocketAddr,
         protocol: TransportProtocol,
         now: Instant,
+        random: RandomSource,
     ) -> Self {
         let side = if server_config.is_some() {
             Side::Server
@@ -717,12 +722,9 @@ impl Association {
 
         let pmdcs = mtu.saturating_sub(COMMON_HEADER_SIZE);
         let cwnd = Self::initial_cwnd(pmdcs, remote_addr.is_ipv6());
-        // RFC 4960 requires an unpredictable initial TSN. SCTP remains usable without an RTC
-        // crypto provider, so this deliberately uses `rand`'s thread-local CSPRNG.
-        let mut tsn = random::<u32>();
-        if tsn == 0 {
-            tsn += 1;
-        }
+        // RFC 9260 3.3.2: an unpredictable initial TSN, from the endpoint's random source
+        // (`rand`'s thread-local CSPRNG unless a provider was given).
+        let tsn = random.nonzero_u32();
 
         let mut this = Association {
             side,
@@ -740,6 +742,7 @@ impl Association {
             zero_checksum_enabled: config.zero_checksum(),
             heartbeat_interval: config.heartbeat_interval(),
             created_at: Some(now),
+            random,
             max_payload_size,
             // RFC 8841 5: each side's `a=sctp-port`. An accepting side takes the INIT's ports
             // instead (`handle_init`).
@@ -2077,7 +2080,7 @@ impl Association {
                 .and_then(|signer| signer.seal(&self.cookie_fields(&tcb, signer.timestamp(now))));
             self.my_cookie = Some(match sealed {
                 Some(cookie) => ParamStateCookie { cookie },
-                None => ParamStateCookie::new(),
+                None => ParamStateCookie::random(&self.random),
             });
         }
         self.cookie_tcb = Some(tcb);
@@ -2265,10 +2268,7 @@ impl Association {
     /// The cookie it carries is not one this association will accept, so a COOKIE ECHO that
     /// answers it is discarded: restarting an association (5.2.4, action A) is not supported.
     fn answer_unexpected_init(&self, i: &ChunkInit) -> Packet {
-        let mut initiate_tag = random::<u32>();
-        if initiate_tag == 0 {
-            initiate_tag = 1;
-        }
+        let initiate_tag = self.random.nonzero_u32();
         let mut init_ack = ChunkInit {
             is_ack: true,
             initial_tsn: self.my_next_tsn,
@@ -2276,7 +2276,7 @@ impl Association {
             num_inbound_streams: self.my_max_num_inbound_streams,
             initiate_tag,
             advertised_receiver_window_credit: self.max_receive_buffer_size,
-            params: vec![Box::new(ParamStateCookie::new())],
+            params: vec![Box::new(ParamStateCookie::random(&self.random))],
         };
         init_ack.announce_extensions(
             self.partial_reliability_enabled,
@@ -2599,7 +2599,7 @@ impl Association {
     fn heartbeat_period(&self) -> Option<Duration> {
         let interval = self.heartbeat_interval?;
         let rto = self.rto_mgr.get_rto();
-        let jitter = u64::from(random::<u32>()) % (rto + 1);
+        let jitter = u64::from(self.random.u32()) % (rto + 1);
         Some(interval + Duration::from_millis(rto / 2 + jitter))
     }
 
@@ -2655,7 +2655,7 @@ impl Association {
 
         // RFC 9260 8.3: the HEARTBEAT carries the time it is sent, and a nonce, so that the
         // HEARTBEAT ACK can be told from any other.
-        let nonce = random::<u64>();
+        let nonce = self.random.u64();
         let sent_ms = self.created_at.map_or(0, |start| {
             now.saturating_duration_since(start).as_millis() as u64
         });

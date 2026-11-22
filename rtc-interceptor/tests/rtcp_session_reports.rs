@@ -626,6 +626,55 @@ fn reports_that_do_not_fit_the_mtu_take_turns() {
     );
 }
 
+/// RFC 8083 section 4.3: when the reports do not all fit, "priority SHOULD be given to
+/// reports on sources that have high packet loss rates". Of twenty streams, two lose a quarter
+/// of their packets; they are in every compound packet, and the others still take turns.
+#[test]
+fn reports_on_lossy_sources_go_first_when_not_all_fit() {
+    let mut chain = chain(builder().with_mtu(300).with_bandwidth(busy_session()));
+    let base = Instant::now();
+    control(&mut chain, base, RtcpSessionControl::Start);
+    for stream in 0..20u32 {
+        chain.bind_remote_stream(&video(1000 + stream));
+    }
+    // Every stream sends one packet each 50 ms; 1007 and 1013 lose one in four.
+    let mut seq = 0u16;
+    let mut at = base;
+    let mut sent = Vec::new();
+    while at < base + secs(6.0) {
+        seq = seq.wrapping_add(1);
+        for stream in 0..20u32 {
+            let ssrc = 1000 + stream;
+            if (ssrc == 1007 || ssrc == 1013) && seq % 4 == 0 {
+                continue;
+            }
+            chain.handle_read(rtp(at, ssrc, seq, 0)).unwrap();
+        }
+        read(&mut chain);
+        at += Duration::from_millis(50);
+        sent.extend(run(&mut chain, at));
+    }
+    let with_blocks: Vec<&Sent> = sent.iter().filter(|s| !s.reported().is_empty()).collect();
+    assert!(with_blocks.len() >= 3);
+    for packet in &with_blocks[1..] {
+        let reported = packet.reported();
+        assert!(reported.len() < 20, "not all fit");
+        assert!(
+            reported.contains(&1007) && reported.contains(&1013),
+            "the lossy sources in every report: {reported:?}"
+        );
+    }
+    let mut seen = std::collections::HashSet::new();
+    for packet in &with_blocks {
+        seen.extend(packet.reported());
+    }
+    assert_eq!(
+        20,
+        seen.len(),
+        "every stream is still reported over the intervals"
+    );
+}
+
 /// RFC 8108 5.1 to the letter, as an option: every local SSRC reports on every remote one.
 #[test]
 fn every_local_ssrc_can_report_on_every_remote_one() {

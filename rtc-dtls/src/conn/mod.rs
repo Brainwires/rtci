@@ -56,10 +56,6 @@ use std::time::{Duration, Instant};
 pub(crate) const INITIAL_TICKER_INTERVAL: Duration = Duration::from_secs(1);
 /// What the retransmission timer doubles up to (RFC 6347 4.2.4.1, the RFC 6298 maximum).
 pub(crate) const MAXIMUM_RETRANSMIT_INTERVAL: Duration = Duration::from_secs(60);
-/// How long a handshake may take before it is given up, unless configured otherwise. RFC 6347
-/// sets no limit; with the timer doubling from one second this allows the first transmission
-/// of a flight and four more.
-pub(crate) const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 /// The most bytes a record carries before protection (RFC 5246 6.2.1).
 pub const MAX_RECORD_PAYLOAD: usize = 1 << 14;
 /// The most bytes a protected record's fragment may hold (RFC 5246 6.2.3).
@@ -209,6 +205,12 @@ pub struct DTLSConn {
     /// Server: the HelloRetryRequest cookie the endpoint verified for the ClientHello this
     /// association was made for (RFC 9147 5.1), with what it holds.
     pub(crate) verified_retry: Option<(Vec<u8>, crate::dtls13::hello::RetryCookie)>,
+    /// Server: the endpoint's cookie secrets and the client's address, for an association
+    /// the endpoint made to run the DTLS 1.3 cookie exchange of a fragmented ClientHello.
+    pub(crate) retry_keys: Option<crate::dtls13::hello::RetryKeys>,
+    /// Server: when the endpoint drops this association if the client's address has not
+    /// been verified by then (see `Endpoint`'s `UNVERIFIED_ASSOCIATION_LIFETIME`).
+    pub(crate) unverified_until: Option<Instant>,
     /// Client: datagrams that start with a DTLS 1.3 protected record and arrived before the
     /// ServerHello that selects DTLS 1.3 (the server's flight, reordered).
     early_dtls13_datagrams: Vec<Vec<u8>>,
@@ -313,6 +315,8 @@ impl DTLSConn {
             early_data_retransmit_done: false,
             v13: None,
             verified_retry: None,
+            retry_keys: None,
+            unverified_until: None,
             early_dtls13_datagrams: vec![],
         }
     }
@@ -545,6 +549,7 @@ impl DTLSConn {
                         record_sequence: record.sequence_number,
                         address_verified: self.address_verified,
                         verified_retry: self.verified_retry.take(),
+                        retry_keys: self.retry_keys.take(),
                         now: self.state.clock,
                     };
                     self.v13 = Some(Box::new(Conn13::server(cfg, body, start)));
@@ -855,6 +860,26 @@ impl DTLSConn {
             self.fatal_alert_received
                 .map(|alert| alert.alert_description as u8),
         )
+    }
+
+    /// Server: the peer's first handshake message is put together from `message_sequence`
+    /// on (a DTLS 1.3 ClientHello that answers a HelloRetryRequest has 1).
+    pub(crate) fn start_reassembly_at(&mut self, message_sequence: u16) {
+        self.fragment_buffer.start_at(message_sequence);
+    }
+
+    /// How often the handshake flight under way has been sent again: zero once the handshake
+    /// is complete. A handshake that goes on and on (none is given up on its own clock by
+    /// default, see [`ConfigBuilder::with_handshake_timeout`](crate::config::ConfigBuilder::with_handshake_timeout))
+    /// shows here, with the retransmission timer that `next_timeout` reports.
+    pub fn handshake_retransmissions(&self) -> usize {
+        if self.is_handshake_completed() {
+            return 0;
+        }
+        match &self.v13 {
+            Some(v13) => v13.handshake_retransmissions(),
+            None => self.current_retransmit_count,
+        }
     }
 
     /// Whether the peer's source address is known to be its own: a client's always is; a

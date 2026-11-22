@@ -310,9 +310,11 @@ fn the_ulpfec_receive_fuzz_logic_holds_over_a_fixed_corpus() {
     ] {
         ulpfec_receive(input);
     }
-    let mut rng = Lcg(0x0A0A_0A0A);
-    for _ in 0..3_000 {
-        ulpfec_receive(&ulpfec_input(&mut rng));
+    for seed in [0x0A0A_0A0A, 0x5EED_FEC1, 0x5EED_FEC2, 0x5EED_FEC3] {
+        let mut rng = Lcg(seed);
+        for _ in 0..3_000 {
+            ulpfec_receive(&ulpfec_input(&mut rng));
+        }
     }
 }
 
@@ -545,8 +547,10 @@ fn the_flexfec_receive_fuzz_logic_holds_over_a_fixed_corpus() {
     for input in [&[][..], &[0], &[1], &[3, 5, 0, 0], &[1, 0, 0, 0]] {
         flexfec_receive(input);
     }
-    let mut rng = Lcg(0xF1E8_FEC0);
-    for _ in 0..3_000 {
-        flexfec_receive(&flexfec_input(&mut rng));
+    for seed in [0xF1E8_FEC0, 0x5EED_F1E1, 0x5EED_F1E2, 0x5EED_F1E3] {
+        let mut rng = Lcg(seed);
+        for _ in 0..3_000 {
+            flexfec_receive(&flexfec_input(&mut rng));
+        }
     }
 }

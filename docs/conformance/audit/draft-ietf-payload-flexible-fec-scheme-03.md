@@ -18,7 +18,7 @@ congestion-control PR.
 Totals:
 
 - MUST: tested 30 / untested 1 / partial 0 / missing 3 / violated 3 / n-a 2 (total 39)
-- SHOULD: tested 2 / untested 0 / partial 1 / missing 4 / violated 0 / n-a 3 (total 10)
+- SHOULD: tested 5 / untested 0 / partial 0 / missing 2 / violated 0 / n-a 3 (total 10)
 - MAY: tested 0 / untested 1 / partial 0 / missing 6 / violated 0 / n-a 0 (total 7)
 
 Paths are relative to the repo root; `fec/` abbreviates `rtc-interceptor/src/flexfec/`, `it/` abbreviates
@@ -34,7 +34,7 @@ Paths are relative to the repo root; `fec/` abbreviates `rtc-interceptor/src/fle
 | FLEXFEC03-4.2-5 | 4.2 | SHOULD | Initial repair sequence number is random | tested | `fec/draft03/sender.rs` (`bind_local_stream`: `rand::random` unless `FlexFec03SendBuilder::with_initial_sequence_number`) | `it/flexfec03_conformance.rs::the_initial_repair_sequence_number_is_random_unless_pinned` | The bare `FlexFec03Encoder` still starts at 0 unless `with_base_sequence_number` is called; the interceptor, the production path, draws a random one per repair stream |
 | FLEXFEC03-4.2-6 | 4.2 | MUST | Repair timestamp SHALL correspond to the repair packet's transmission time | tested | `fec/draft03/encoder.rs` (`encode(.., timestamp)`), `fec/draft03/sender.rs` (`RepairClock::timestamp_at`) | `it/flexfec03_conformance.rs::the_repair_timestamp_follows_the_send_clock`, `it/flexfec03_conformance.rs::the_repair_timestamp_wraps`, `encoder.rs::the_repair_timestamp_is_the_send_clock_not_the_media_clock` | The timestamp is the instant the block is written with (`TaggedPacket::now`), in ticks of the stream clock rate since the first repair packet, from a random offset. Was the media timestamp of the first covered packet (Bug 6, fixed) |
 | FLEXFEC03-4.2-7 | 4.2 | MUST | Repair SSRC SHALL be randomly assigned | untested | `src/peer_connection/internal.rs:1651-1657` (`rand::random` when the track names none) | none (`tests/repair_codec_negotiation.rs::explicit_repair_ssrcs_are_used_verbatim` covers the application-supplied case) | An application-supplied SSRC is used verbatim |
-| FLEXFEC03-4.2-8 | 4.2 | SHOULD | Repair flow uses the RTCP CNAME to associate itself with the source flow | partial | `src/peer_connection/sdp/mod.rs:1256-1263` (same `a=ssrc ... cname` for the FEC SSRC) | `tests/repair_codec_negotiation.rs::flexfec_repair_flow_is_grouped_with_fec_fr` (SDP only) | No SR or SDES is ever sent for the repair SSRC: the FEC SSRC is not bound as a local stream (`rtp_sender/internal.rs:395-430`), so the RTCP half is missing |
+| FLEXFEC03-4.2-8 | 4.2 | SHOULD | Repair flow uses the RTCP CNAME to associate itself with the source flow | tested | `src/peer_connection/sdp/mod.rs` (same `a=ssrc ... cname` for the FEC SSRC), `src/rtp_transceiver/rtp_sender/internal.rs` (`local_stream_infos` binds the FEC SSRC), `rtc-interceptor/src/rtcp_session/mod.rs` (`Role::Repair`) | `flexfec_repair_flow_is_grouped_with_fec_fr`, `the_receiver_learns_the_cname_of_the_fec_ssrc_from_its_rtcp`, `media_rtx_and_fec_ssrcs_all_send_sender_reports` | The FEC SSRC is bound with the media stream and, from its first repair packet, sends sender reports and an SDES chunk with the connection's CNAME; between two peer connections the receiver learns that CNAME for it (the audit's "not bound as a local stream" no longer holds) |
 | FLEXFEC03-4.2-9 | 4.2 | MUST | SSRC collisions of the repair flow are resolved as in RFC 3550 | missing | none | none | No SSRC collision handling anywhere in the engine |
 | FLEXFEC03-4.2-10 | 4.2 | MUST | R bit is 0 in repair packets | tested | `fec/draft03/encoder.rs:203` | `encoder.rs::the_version_bits_are_not_recovered` | |
 | FLEXFEC03-4.2-11 | 4.2 | MAY | Retransmission packets (R=1, Figure 15 layout) | missing | `fec/draft03/decoder.rs:333-335` (discarded) | `it/flexfec03_conformance.rs::retransmission_and_fixed_offset_repair_packets_are_discarded` (the discard) | Never sent; a received one is discarded, and that is now tested |
@@ -77,9 +77,9 @@ Paths are relative to the repo root; `fec/` abbreviates `rtc-interceptor/src/fle
 | FLEXFEC03-6.3.3-1 | 6.3.3 | MUST | Payload recovery: XOR Y octets from octet 13 of each received packet, shorter ones zero padded at the end | tested | `fec/draft03/decoder.rs:299-311` | `it/flexfec_round_trip.rs::packets_of_different_lengths_are_recovered_at_their_own_length` | |
 | FLEXFEC03-6.3.4-1 | 6.3.4 | MUST | Iterative decoding: a recovered packet is fed back so other repair packets can complete | tested | `fec/draft03/decoder.rs:232-257` (loop) | `it/flexfec03_conformance.rs::a_recovered_packet_completes_another_repair_packet` |  |
 | FLEXFEC03-8-1 | 8 | SHOULD | Consider the impact of FEC in congested networks before injecting repair flows | n/a | none | none | Application decides to register the interceptor |
-| FLEXFEC03-8-2 | 8 | MUST | MUST NOT arbitrarily increase the amount of FEC | tested | `fec/draft03/sender.rs:12-16, 89-108` (fixed ratio) | `it/flexfec03_conformance.rs::the_amount_of_fec_stays_at_the_configured_ratio` | The ratio never changes after build |
-| FLEXFEC03-8-3 | 8 | SHOULD | Do not send repair flows when they would not help recover anything | missing | none | none | No loss feedback reaches the FEC sender |
-| FLEXFEC03-8-4 | 8 | SHOULD | Adjust the amount of FEC dynamically from the observed loss rate | missing | `fec/draft03/sender.rs:89-108` | none | The ratio is fixed at build time; there is no runtime setter |
+| FLEXFEC03-8-2 | 8 | MUST | MUST NOT arbitrarily increase the amount of FEC | tested | `rtc-interceptor/src/cc/fec_rate.rs` (`FecRate`), `fec/draft03/sender.rs` | `the_amount_of_fec_stays_at_the_configured_ratio`, `the_receivers_loss_sets_how_much_flexfec_is_sent`, `the_fec_bit_rate_is_taken_out_of_the_target_the_application_sees` | The amount changes only with the loss the receiver reports, at most half the block, and the repair bit rate is taken out of the target the application encodes at, so media and FEC together stay at the congestion controller's target. Without reports (or `with_adaptive_rate(false)`) the configured ratio |
+| FLEXFEC03-8-3 | 8 | SHOULD | Do not send repair flows when they would not help recover anything | tested | `rtc-interceptor/src/cc/fec_rate.rs` (`MIN_LOSS`), `fec/draft03/sender.rs` (`protect`) | `the_receivers_loss_sets_how_much_flexfec_is_sent`, `no_loss_means_no_repair_and_more_loss_more_repair_up_to_the_bound` | Under 0.5% reported loss no repair packet is sent |
+| FLEXFEC03-8-4 | 8 | SHOULD | Adjust the amount of FEC dynamically from the observed loss rate | tested | `rtc-interceptor/src/cc/fec_rate.rs` (`FecRate::on_read`, `fec_packets`) | `the_receivers_loss_sets_how_much_flexfec_is_sent`, `the_loss_is_smoothed_over_reports`, `a_fixed_flexfec_rate_ignores_the_loss` | Repair packets per block from the smoothed receiver-report loss: ceil(2 x loss x block), at most half the block. `FlexFec03SendBuilder::with_adaptive_rate(false)` keeps the configured ratio |
 | FLEXFEC03-8-5 | 8 | SHOULD | Multicast: offer several repair flows with different protection | n/a | none | none | No multicast |
 | FLEXFEC03-9-1 | 9 | SHOULD | Repair packets get the same confidentiality, integrity and source authentication as media (SRTP) | tested | chain write path to the SRTP handler | `tests/flexfec03_encoder_decoder.rs::flexfec03_recovers_every_dropped_packet` | End to end over DTLS-SRTP |
 
@@ -93,11 +93,12 @@ Paths are relative to the repo root; `fec/` abbreviates `rtc-interceptor/src/fle
 2. **Wire-format corrections (S).** Done on `conf/cc-fec-flexfec`: FLEXFEC03-4.2-19 (blocks capped at 109),
    FLEXFEC03-6.2-4 (per-packet SN base), FLEXFEC03-4.2-6 (timestamp from the send clock), FLEXFEC03-4.2-5
    (random initial sequence number), FLEXFEC03-4.2-2 (marker = 0 asserted).
-3. **Repair stream as an RTP source (M).** FLEXFEC03-4.2-8, FLEXFEC03-4.2-9: sender reports and SDES CNAME
-   for the repair SSRC, reception reports for an inbound repair SSRC, SSRC collision handling.
+3. **Repair stream as an RTP source (M).** FLEXFEC03-4.2-8 done (sender reports and SDES CNAME for the
+   repair SSRC, `the_receiver_learns_the_cname_of_the_fec_ssrc_from_its_rtcp`); FLEXFEC03-4.2-9 (SSRC
+   collision handling of the repair flow) open.
 4. **`repair-window` (M).** FLEXFEC03-5.1-3, FLEXFEC03-5.2.1-2: generate the parameter, parse the peer's,
    size the decoder's buffers from it instead of fixed packet counts, never send a block spanning more.
-5. **Adaptive protection (M).** FLEXFEC03-8-3, FLEXFEC03-8-4: a runtime control (or a loss-driven
+5. **Adaptive protection (M).** Done (`FecRate`): FLEXFEC03-8-3, FLEXFEC03-8-4: a runtime control (or a loss-driven
    controller fed from receiver reports) for the media/repair ratio, and an MTU check
    (FLEXFEC03-6.2-7) so a repair packet is not built larger than the path allows.
 6. **Receive-side generality (M).** FLEXFEC03-4.2-16 (several SSRCs per repair packet), FLEXFEC03-4.2-12 /

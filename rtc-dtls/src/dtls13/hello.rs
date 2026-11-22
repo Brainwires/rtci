@@ -508,6 +508,18 @@ pub(crate) struct RetryCookie {
 
 const COOKIE_MAC_LENGTH: usize = 32;
 
+/// The secrets an [`Endpoint`](crate::endpoint::Endpoint) makes its stateless
+/// HelloRetryRequest cookies with, and the client address they are bound to, handed to an
+/// association that runs the cookie exchange for a ClientHello the endpoint could not judge
+/// on its own (one cut into fragments). Its cookies are then the endpoint's: whichever
+/// association, or the endpoint itself, sees the second ClientHello can verify it, so an
+/// association that goes before the second ClientHello arrives costs the client nothing.
+pub(crate) struct RetryKeys {
+    /// The current secret, which new cookies are made with, first.
+    pub(crate) secrets: Vec<crypto::SecretVec>,
+    pub(crate) remote: SocketAddr,
+}
+
 impl RetryCookie {
     fn mac(
         provider: &dyn RTCCryptoProvider,

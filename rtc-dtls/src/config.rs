@@ -18,9 +18,8 @@ mod config_test;
 
 use crate::cipher_suite::*;
 use crate::conn::{
-    DEFAULT_HANDSHAKE_TIMEOUT, DEFAULT_MAXIMUM_RETRANSMIT_NUMBER, DEFAULT_REPLAY_PROTECTION_WINDOW,
-    INITIAL_TICKER_INTERVAL, MAXIMUM_RETRANSMIT_INTERVAL, MINIMUM_MTU,
-    MINIMUM_REPLAY_PROTECTION_WINDOW,
+    DEFAULT_MAXIMUM_RETRANSMIT_NUMBER, DEFAULT_REPLAY_PROTECTION_WINDOW, INITIAL_TICKER_INTERVAL,
+    MAXIMUM_RETRANSMIT_INTERVAL, MINIMUM_MTU, MINIMUM_REPLAY_PROTECTION_WINDOW,
 };
 use crate::crypto::*;
 use crate::curve::named_curve::NamedCurve;
@@ -169,7 +168,7 @@ impl Default for ConfigBuilder {
             extended_master_secret: ExtendedMasterSecretType::default(),
             flight_interval: Duration::default(),
             maximum_flight_interval: MAXIMUM_RETRANSMIT_INTERVAL,
-            handshake_timeout: Some(DEFAULT_HANDSHAKE_TIMEOUT),
+            handshake_timeout: None,
             cookie_exchange: true,
             hello_verify_request_version: PROTOCOL_VERSION1_0,
             early_data_retransmit: true,
@@ -307,10 +306,18 @@ impl ConfigBuilder {
     }
 
     /// How long a handshake may take, from the first flight sent or received, before the
-    /// association fails with `ErrHandshakeTimeout`. `None` never gives up: the flight is
-    /// retransmitted for as long as the association exists. Defaults to 30 seconds.
+    /// association fails with `ErrHandshakeTimeout`. `None`, the default, never gives up:
+    /// the flight is retransmitted, at the timer that doubles up to
+    /// [`Self::with_maximum_flight_interval`], for as long as the association exists.
     ///
-    /// RFC 6347 sets no limit; this is the one rule that ends a handshake nobody answers.
+    /// RFC 6347 section 4.2.4 and RFC 9147 section 5.8 define the retransmission timer and
+    /// set no total limit, so by default none is set here either: what ends a handshake is
+    /// the transport under it (in a peer connection, ICE: consent expiry or the failure of
+    /// every candidate pair, RFC 7675), a fatal alert, or the application closing the
+    /// association. An application that runs DTLS over a transport that cannot tell it that
+    /// the peer is gone sets a limit here. A server endpoint drops an association it made
+    /// for an address the client has not verified after a fixed time whatever this says
+    /// (the cookie exchange of a fragmented DTLS 1.3 ClientHello).
     pub fn with_handshake_timeout(mut self, handshake_timeout: Option<Duration>) -> Self {
         self.handshake_timeout = handshake_timeout;
         self

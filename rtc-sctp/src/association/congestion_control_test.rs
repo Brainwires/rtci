@@ -98,6 +98,7 @@ fn the_initial_congestion_window_is_the_rfc_9260_formula() {
             "0.0.0.0:0".parse().unwrap(),
             TransportProtocol::UDP,
             Instant::now(),
+            crate::util::RandomSource::default(),
         );
         assert_eq!(pmdcs, a.pmdcs, "a packet less the common header");
         assert_eq!(cwnd, a.congestion_window(), "payload {payload} to {peer}");
@@ -489,6 +490,7 @@ fn max_burst_limits_what_is_released_at_once() {
         SocketAddr::from_str("0.0.0.0:0").unwrap(),
         TransportProtocol::UDP,
         Instant::now(),
+        crate::util::RandomSource::default(),
     );
     assert_eq!(None, unlimited.max_burst);
     let now = Instant::now();

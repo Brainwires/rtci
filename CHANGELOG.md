@@ -1075,6 +1075,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with `T_rr_interval` zero spends its RTCP share). The TWCC and RFC 8888 generators' cadence
   reads the same nominal figure. A `Gcc` sender fed by the engine's receiver reaches 2 Mbit/s
   from 300 kbit/s in 0.24 s (0.58 s before).
+- **gcc**: a pause in sending lowers the estimate the flow resumes at, the more the longer
+  the pause (RFC 8836 section 2, requirement 5a): up to 2 s it is kept, beyond that each 10 s
+  halves it, never below the starting estimate (`PAUSE_KEEPS_SHARE`, `PAUSE_HALVING`). It was
+  kept across any pause.
+- **rtcp_session**: when the report blocks do not all fit the MTU, streams losing 10% or more
+  since their last report go first, worst first, in up to half the blocks; the rest stay round
+  robin (RFC 8083 section 4.3).
+- **fec**: the amount of FEC follows the loss the receiver reports (draft-ietf-payload-flexible-fec-scheme-03
+  section 8, RFC 8627 section 8, RFC 5109 section 12). The FlexFEC draft-03, RFC 8627 FlexFEC and
+  ULPFEC senders read the receiver reports of their protected streams (smoothed, weight 0.3) and
+  give each block `ceil(2 x loss x block)` repair packets, none under 0.5% loss and at most half
+  the block; flexible masks take the number, the fixed RFC 8627 shapes are sent or not. Before
+  any report the configured amount is sent. The repair bit rate of the last second is taken out
+  of the congestion controller's target (`Attribute::TargetBitrateChanged`) on its way to the
+  application, so media and FEC together stay at the target. New `rtc_interceptor::FecRate`,
+  `FEC_MIN_LOSS` and `with_adaptive_rate(bool)` on `FlexFec03SendBuilder`, `FlexFecSendBuilder`
+  and `UlpfecSendBuilder` (`false`: the configured amount whatever the loss, as before).
 - **ecn**: ECN is initiated and watched as RFC 8888 section 7 requires (RFC 6679 sections
   7.2-7.4). With `SettingEngineBuilder::with_ecn(true)` and `ack ccfb` negotiated, a stream
   no longer sends every packet ECT(1) from the first: one packet in ten (and one at least every
@@ -1093,6 +1110,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   had arrived, at the retransmission's arrival time.
 - **jsep**: offered both `ack ccfb` and `nack ecn`, an answer keeps `ack ccfb` only (RFC 8888
   section 7). New `RTCP_FB_NACK_ECN`.
+- **rtcp_session**: without `b=` lines the session bandwidth is the nominal one of the media
+  bound (`RTCP_SESSION_NOMINAL_VIDEO_BANDWIDTH` 1 Mbit/s with video,
+  `RTCP_SESSION_NOMINAL_AUDIO_BANDWIDTH` 64 kbit/s with audio), or the measured media rate when
+  that is more (RFC 3550 section 6.2: a share of the *session* bandwidth). It was the measured
+  rate alone, so a sender that started low got little RTCP from its receiver, hence little
+  congestion feedback, and climbed slowly: a browser sending three simulcast layers to the
+  engine was held near 300 kbit/s (6.3 feedback datagrams a second, gaps to 387 ms). Now 10 a
+  second at every rate from 64 kbit/s, no gap over 110 ms, the receiver's RTCP 2.4% of the
+  session bandwidth (37% of a 64 kbit/s stream, 8% of 300 kbit/s, 2.4% of 1 Mbit/s: RTP/AVPF
+  with `T_rr_interval` zero spends its RTCP share). The TWCC and RFC 8888 generators' cadence
+  reads the same nominal figure. A `Gcc` sender fed by the engine's receiver reaches 2 Mbit/s
+  from 300 kbit/s in 0.24 s (0.58 s before).
 - **rtcp_session**: congestion control feedback (TWCC, RFC 8888) leaves as its generator
   builds it, outside RFC 4585's one Early packet per regular interval and outside the
   regular reports' timing (`RtcpSessionBuilder::with_immediate_congestion_feedback`, default
@@ -2269,6 +2298,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+- **test**: `tests/lossy_link_rtc2rtc.rs` seeds the engine's provider randomness: each peer's
+  `RTCCryptoProvider::random()` (ICE credentials, the tie-breaker, the consent intervals, DTLS
+  randoms and cookies) is a generator seeded from the test's seed, so ICE takes the same course
+  under every crypto provider. Still drawn from the OS: the providers' own key generation and
+  signatures, STUN transaction IDs, SCTP's tags and heartbeat jitter (`rtc-sctp` uses `rand`
+  directly). Seeded, two failures outside ICE reproduce on every run: with aws-lc-rs only
+  (DTLS 1.3, X25519MLKEM768 key share, a two-datagram ClientHello) the 5 % and 10 % sessions
+  of seed 1 never open: the server's HelloRetryRequest is lost and no retransmitted
+  ClientHello is answered for 30 s; and seed 0x5eed at 30 % does not open its channel within
+  400 s, on every backend, with the path up.
 - **ice**: a Binding success response without XOR-MAPPED-ADDRESS was taken as a success: it
   made the checked pair valid and refreshed consent. RFC 8489 section 6.3.3 has the client
   check the attribute is present and process the response only if the checks succeed: it is
@@ -2920,6 +2959,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whose session store has such a ticket; `State::early_data_accepted` says whether it was
   taken. A HelloRetryRequest rules 0-RTT out, so it needs `with_cookie_exchange(false)`.
 
+### Robustness under loss (DTLS, SCTP)
+
+Found by the seeded lossy-link test (`tests/lossy_link_rtc2rtc.rs`).
+
+- **dtls**: a DTLS 1.3 server that answered a ClientHello too long for one datagram (the
+  X25519MLKEM768 hybrid key share makes it two) sent its HelloRetryRequest once and forgot
+  it: when it was lost, every retransmitted ClientHello was taken for a repeat and answered
+  with nothing, and the handshake stalled until its deadline. The association keeps the
+  HelloRetryRequest and sends it again for every repeat of the ClientHello it answered (RFC
+  9147 sections 5.1 and 5.8.1), never on a timer of its own. Its cookies are now the
+  endpoint's, bound to the client's address, so the endpoint or any later association
+  verifies the second ClientHello (a second ClientHello that no longer fitted one datagram used
+  to be refused with illegal_parameter). Such an association for an unverified address is
+  dropped, silently, two minutes after the last datagram from that address, whatever the
+  handshake deadline: long enough for fragments of several transmissions to add up when the
+  client, at full backoff, cuts its ClientHello smaller (`hello_loss_test.rs`).
+- **dtls** (behaviour change): no handshake deadline by default. RFC 6347 section 4.2.4 and
+  RFC 9147 section 5.8 define the retransmission timer (doubling to 60 seconds) and no total
+  limit; a handshake nobody answers is retransmitted at most once a minute for as long as the
+  association lives. `ConfigBuilder::with_handshake_timeout(Some(..))` sets a deadline (it was
+  30 seconds by default). In a peer connection the handshake now ends only on ICE failure
+  (consent expiry), a fatal alert or a close: at 30 % loss with ICE connected and consent
+  fresh, the peer connection used to go `failed` 30 seconds in. New:
+  `Endpoint::handshake_retransmissions`, `DTLSConn::handshake_retransmissions`, for a
+  handshake that goes on and on.
+- **dtls**: the Finished of a DTLS 1.3 post-handshake authentication is checked with the
+  client's traffic secret of the epoch it arrived in: a client that answered while its own
+  KeyUpdate was unacknowledged keys it from its old secret (its new keys take effect on the
+  acknowledgement, RFC 9147 section 8), and the server used its newest one and refused the
+  answer with decrypt_error.
+- **sctp**: an endpoint that announces the zero checksum over DTLS (RFC 9653, as a peer
+  connection's does) answers an out-of-the-blue packet with a zero checksum as RFC 9260
+  section 8.4 says, with an ABORT (RFC 9653 section 5.3 allows it: "faster SCTP association
+  failure detection"); it used to drop it. A data channel neither opened nor failed for
+  minutes over a lossy path: the INITs crossed, one side (its COOKIE ACKs lost) was
+  established and sent DATA_CHANNEL_OPEN, the other discarded it in COOKIE-ECHOED until its
+  handshake ran out and its association ended, and the established side's DATA and
+  HEARTBEATs then reached no association and were dropped unanswered. It is now aborted by
+  its next packet, and the channel fails with an error. INIT and COOKIE ECHO still need their
+  CRC32c (`a_peer_whose_association_ended_here_is_aborted_by_its_next_packet`).
+- **sctp**: `EndpointConfig::random_source(provider)` draws every random value of an
+  endpoint and its associations (verification tags, initial TSNs, unauthenticated State
+  Cookies, the Initiate Tag of an INIT ACK for an existing association, HEARTBEAT nonces and
+  jitter) from `provider.random()`, as ICE and DTLS take theirs; without it they still come
+  from `rand`. The peer connection passes its crypto provider, so a seeded provider makes a
+  whole session reproducible.
+
 ### DTLS 1.2: the RFC by default
 
 - **dtls**: `HelloVerifyRequest.server_version` is DTLS 1.0, as RFC 6347 section 4.2.1 asks
@@ -3066,6 +3152,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Testing
 
+- **interceptor**: larger fixed corpora for the fuzz targets' logic (ULPFEC and FlexFEC receive:
+  four seeds of 3000 inputs; the inbound interceptor chain: three seeds of 1500 sessions), and
+  fixed-corpus invariant tests for the ECN validation and the FEC rate. Writing the latter found
+  a panic in `FecRate::fec_packets` with a bound of zero (`clamp(1, 0)`), fixed before release.
+- **fec**: a FlexFEC repair SSRC is an RTCP participant between two peer connections: it sends
+  sender reports and the connection's CNAME once it has sent, and the receiver learns that CNAME
+  for it (`the_receiver_learns_the_cname_of_the_fec_ssrc_from_its_rtcp`).
 - **interceptor (nack)**: the test environment's `nack_recovers_lost_rtp` counts from the
   first packet that arrives, as its virtual-clock twin `nack_recovery_under_loss.rs` does: a
   receiver knows of no packet sent before the first it receives, and a Generic NACK names
