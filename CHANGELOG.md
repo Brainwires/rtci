@@ -23,7 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `[[MaxBufferSize]]` (new `Error::ErrDataChannelBufferFull`): the larger of the peer's
   `max-message-size` and this side's send buffer, which the spec leaves to the implementation
   ("the size of the local send buffer", 6.1.1.2) and which is 16 MiB, Chromium's, unless
-  `SettingEngineBuilder::with_data_channel_max_buffer_size` sets a limit. A negotiated id at
+  `SettingEngineBuilder::with_data_channel_max_buffer_size` sets a limit (64 KiB, the
+  larger max-message-size between two default engines, broke the browser interop echo of
+  twenty 64 KiB messages; `twenty_64_kib_messages_are_echoed`,
+  `a_16_mib_burst_and_back_pressure_deliver_everything`). A negotiated id at
   or above the connected transport's `maxChannels` is refused (new
   `Error::ErrDataChannelIdAboveMaxChannels`). A closed channel's stats object stays in the
   report, closed (the last 64 channels).
