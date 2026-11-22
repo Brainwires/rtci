@@ -1822,9 +1822,11 @@ fn test_handle_forward_tsn_far_ahead_is_bounded() -> Result<()> {
     Ok(())
 }
 
-/// A SACK whose cumulative TSN acknowledges DATA this side never sent is ignored.
+/// A SACK whose cumulative TSN acknowledges DATA this side never sent is refused, and nothing
+/// is taken from it (the association is then aborted: RFC 9260 12.4,
+/// `a_sack_for_data_never_sent_aborts_the_association`).
 #[test]
-fn test_handle_sack_beyond_sent_tsns_is_ignored() -> Result<()> {
+fn test_handle_sack_beyond_sent_tsns_is_refused() -> Result<()> {
     let mut a = create_association(TransportConfig::default());
     a.set_state(AssociationState::Established);
     let before = a.cumulative_tsn_ack_point;
@@ -1834,7 +1836,7 @@ fn test_handle_sack_beyond_sent_tsns_is_ignored() -> Result<()> {
         gap_ack_blocks: vec![],
         duplicate_tsn: vec![],
     };
-    a.handle_sack(&sack, Instant::now())?;
+    assert!(a.handle_sack(&sack, Instant::now()).is_err());
     assert_eq!(
         a.cumulative_tsn_ack_point, before,
         "a SACK for never-sent DATA must not move the ack point"
@@ -2159,3 +2161,6 @@ mod stream_reset_test;
 
 #[path = "robustness_test.rs"]
 mod robustness_test;
+
+#[path = "handshake_teardown_test.rs"]
+mod handshake_teardown_test;

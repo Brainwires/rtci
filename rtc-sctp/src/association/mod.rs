@@ -4,8 +4,10 @@ use crate::association::{
 };
 use crate::chunk::chunk_header::CHUNK_HEADER_SIZE;
 use crate::chunk::{
-    Chunk, ErrorCause, ErrorCauseUnrecognizedChunkType, INVALID_STREAM_IDENTIFIER, NO_USER_DATA,
-    UNRECOGNIZED_CHUNK_TYPE, UNRECOGNIZED_PARAMETERS, USER_INITIATED_ABORT,
+    Chunk, ErrorCause, ErrorCauseUnrecognizedChunkType, INVALID_MANDATORY_PARAMETER,
+    INVALID_STREAM_IDENTIFIER, MISSING_MANDATORY_PARAMETER, NO_USER_DATA, PROTOCOL_VIOLATION,
+    STALE_COOKIE_ERROR, UNRECOGNIZED_CHUNK_TYPE, UNRECOGNIZED_PARAMETERS, UNRESOLVABLE_ADDRESS,
+    USER_INITIATED_ABORT,
     chunk_abort::ChunkAbort,
     chunk_cookie_ack::ChunkCookieAck,
     chunk_cookie_echo::ChunkCookieEcho,
@@ -102,6 +104,45 @@ pub(crate) const HALF_OPEN_LIFETIME: u64 = 120_000;
 /// bounding the TSNs bounds the messages of every stream. It also keeps the receiver's Gap Ack
 /// Blocks within their 16-bit offsets.
 pub(crate) const MAX_OUTSTANDING_TSNS: u32 = 0x7fff;
+
+/// The Host Name Address parameter (RFC 9260 3.3.2.1.4), deprecated: an INIT or INIT ACK that
+/// carries one is answered with an ABORT.
+const PARAM_HOST_NAME_ADDRESS: u16 = 11;
+
+/// The State Cookie parameter, for the "Missing Mandatory Parameter" cause.
+const PARAM_STATE_COOKIE: u16 = 7;
+
+/// T5-shutdown-guard (RFC 9260 9.2, 16): five times RTO.Max, in milliseconds.
+pub(crate) const T5_SHUTDOWN_GUARD: u64 = 5 * 60_000;
+
+/// What an accepted INIT said about its sender, kept with the State Cookie sent in answer
+/// and taken into the TCB when that cookie comes back (RFC 9260 5.1.3: "the State Cookie
+/// carries the information needed to create the association"; here the association holds
+/// it, see the note on [`Association::handle_cookie_echo`]).
+#[derive(Debug, Clone)]
+struct CookieTcb {
+    created_at: Instant,
+    peer_verification_tag: u32,
+    peer_initial_tsn: u32,
+    peer_rwnd: u32,
+    inbound_streams: u16,
+    outbound_streams: u16,
+    use_forward_tsn: bool,
+    /// This side's port and the peer's, as the INIT's packet had them.
+    source_port: u16,
+    destination_port: u16,
+}
+
+/// The optional parameters of an INIT or INIT ACK, as far as the engine reads them.
+#[derive(Default)]
+struct HandshakeParams {
+    cookie: Option<Bytes>,
+    /// Unrecognized parameters the sender asked to hear about, each as it arrived.
+    unrecognized: Vec<Bytes>,
+    /// A Host Name Address parameter, as it arrived.
+    host_name: Option<Bytes>,
+    forward_tsn: bool,
+}
 
 /// Error causes reported for one received packet, at most.
 const MAX_ERROR_CAUSES_PER_PACKET: usize = 16;
@@ -253,6 +294,19 @@ pub struct Association {
     configured_inbound_streams: u16,
     configured_outbound_streams: u16,
     my_cookie: Option<ParamStateCookie>,
+    /// What the INIT answered with `my_cookie` said, applied when the cookie is echoed.
+    cookie_tcb: Option<CookieTcb>,
+    /// Valid.Cookie.Life (RFC 9260 16): how long a State Cookie is accepted after it was made.
+    valid_cookie_life: Duration,
+    /// How many times a Stale Cookie error sent this side back to a new INIT.
+    stale_cookie_restarts: usize,
+    /// The first DATA chunk of an association is acknowledged at once (RFC 9260 5.1).
+    first_data_received: bool,
+    /// Set while a packet is processed whose DATA must be acknowledged at once: it came with
+    /// the COOKIE ECHO (RFC 9260 5.1.5), or in SHUTDOWN-SENT (9.2).
+    sack_packet_immediately: bool,
+    /// Set by a chunk handler: the chunks after it in the packet are discarded.
+    discard_rest_of_packet: bool,
 
     pub(crate) payload_queue: PayloadQueue,
     pub(crate) inflight_queue: PayloadQueue,
@@ -378,6 +432,12 @@ impl Default for Association {
             configured_inbound_streams: 0,
             configured_outbound_streams: 0,
             my_cookie: None,
+            cookie_tcb: None,
+            valid_cookie_life: Duration::from_secs(60),
+            stale_cookie_restarts: 0,
+            first_data_received: false,
+            sack_packet_immediately: false,
+            discard_rest_of_packet: false,
 
             payload_queue: PayloadQueue::default(),
             inflight_queue: PayloadQueue::default(),
@@ -486,6 +546,7 @@ impl Association {
             my_max_num_inbound_streams: config.max_num_inbound_streams(),
             configured_outbound_streams: config.max_num_outbound_streams(),
             configured_inbound_streams: config.max_num_inbound_streams(),
+            valid_cookie_life: config.valid_cookie_life(),
             max_payload_size,
             // RFC 8841 5: each side's `a=sctp-port`. An accepting side takes the INIT's ports
             // instead (`handle_init`).
@@ -837,6 +898,15 @@ impl Association {
         self.emit_drained();
     }
 
+    /// RFC 9260 9.2: the T5-shutdown-guard timer bounds the whole shutdown, however often the
+    /// peer's packets restart T2-shutdown.
+    fn start_shutdown_guard(&mut self, now: Instant) {
+        if self.timers.get(Timer::T5ShutdownGuard).is_none() {
+            self.timers
+                .start(Timer::T5ShutdownGuard, now, T5_SHUTDOWN_GUARD);
+        }
+    }
+
     /// Tells the endpoint to stop routing to this association, once.
     fn emit_drained(&mut self) {
         if !self.drained_emitted {
@@ -864,15 +934,52 @@ impl Association {
         if self.ended {
             return Ok(());
         }
-        let abort = ChunkAbort {
-            error_causes: vec![ErrorCause {
+        self.abort_with(
+            vec![ErrorCause {
                 code: USER_INITIATED_ABORT,
                 ..Default::default()
             }],
-        };
-        let packet = self.create_packet(vec![Box::new(abort)]);
-        self.control_queue.push_back(packet);
-        self.close(AssociationError::LocallyClosed)
+            AssociationError::LocallyClosed,
+        )
+    }
+
+    /// Sends an ABORT with `causes` to the peer and ends the association with `reason`
+    /// (RFC 9260 9.1). The ABORT goes alone in its packet, with the peer's tag; before the
+    /// peer's tag is known (no INIT ACK yet) there is no one to send it to.
+    fn abort_with(&mut self, causes: Vec<ErrorCause>, reason: AssociationError) -> Result<()> {
+        if self.ended {
+            return Ok(());
+        }
+        if self.peer_verification_tag != 0 {
+            let packet = self.abort_packet(self.peer_verification_tag, false, causes);
+            self.control_queue.push_back(packet);
+            self.awake_write_loop();
+        }
+        self.close(reason)
+    }
+
+    /// A packet holding one ABORT chunk, sent with Verification Tag `tag`. `reflected` sets
+    /// the T bit: the tag is the one of the packet being answered, not the receiver's own
+    /// (RFC 9260 8.4, 8.5.1).
+    fn abort_packet(&self, tag: u32, reflected: bool, causes: Vec<ErrorCause>) -> Packet {
+        Packet {
+            common_header: CommonHeader {
+                verification_tag: tag,
+                source_port: self.source_port,
+                destination_port: self.destination_port,
+            },
+            chunks: vec![Box::new(ChunkAbort {
+                error_causes: causes,
+                tag_reflected: reflected,
+            })],
+        }
+    }
+
+    fn protocol_violation(text: &str) -> ErrorCause {
+        ErrorCause {
+            code: PROTOCOL_VIOLATION,
+            raw: Bytes::copy_from_slice(text.as_bytes()),
+        }
     }
 
     /// Close ends the SCTP Association and cleans up any state
@@ -1125,12 +1232,62 @@ impl Association {
             return Ok(());
         }
 
+        // RFC 9260 8.5.1 E: a SHUTDOWN ACK while this side is still setting the association
+        // up belongs to an association it no longer has. It is answered as an out-of-the-blue
+        // packet (8.4): SHUTDOWN COMPLETE with the tag of the SHUTDOWN ACK and the T bit.
+        if matches!(
+            self.state(),
+            AssociationState::CookieWait | AssociationState::CookieEchoed
+        ) && p.chunks.iter().any(|c| c.as_any().is::<ChunkShutdownAck>())
+        {
+            let packet = Packet {
+                common_header: CommonHeader {
+                    verification_tag: p.common_header.verification_tag,
+                    source_port: self.source_port,
+                    destination_port: self.destination_port,
+                },
+                chunks: vec![Box::new(ChunkShutdownComplete {
+                    tag_reflected: true,
+                })],
+            };
+            self.control_queue.push_back(packet);
+            self.awake_write_loop();
+            return Ok(());
+        }
+
+        if !self.accepts_verification_tag(&p) {
+            debug!(
+                "[{}] discarding a packet with Verification Tag {}",
+                self.side, p.common_header.verification_tag
+            );
+            return Ok(());
+        }
+
         self.handle_chunk_start();
+
+        // RFC 9260 9.1: a packet that carries an ABORT is not answered. The ABORT is taken
+        // first, so nothing queued for the chunks bundled before it goes out.
+        if let Some(abort) = p.chunks.iter().find(|c| c.as_any().is::<ChunkAbort>()) {
+            self.handle_chunk(&p, abort, now)?;
+            return Ok(());
+        }
+
+        // RFC 9260 9.2: in SHUTDOWN-SENT any packet from the peer shows it is still there
+        // (it is sending what it had queued): the retransmission count starts over and so
+        // does T2-shutdown.
+        if self.state() == AssociationState::ShutdownSent {
+            self.timers.reset_retrans(Timer::T2Shutdown);
+            if self.timers.get(Timer::T2Shutdown).is_some() {
+                self.timers.stop(Timer::T2Shutdown);
+                self.timers
+                    .start(Timer::T2Shutdown, now, self.rto_mgr.get_rto());
+            }
+        }
 
         for c in &p.chunks {
             // `false`: the rest of the packet is discarded. An association that a chunk ended
-            // (ABORT, RFC 9260 3.3.7) processes none of the chunks after it either.
-            if !self.handle_chunk(&p, c, now)? || self.ended {
+            // processes none of the chunks after it either.
+            if !self.handle_chunk(&p, c, now)? || self.ended || self.discard_rest_of_packet {
                 break;
             }
         }
@@ -1140,10 +1297,43 @@ impl Association {
         Ok(())
     }
 
+    /// RFC 9260 8.5, 8.5.1: whether a received packet carries the Verification Tag it must.
+    ///
+    /// A packet with an INIT has tag 0 (and nothing else: `check_packet`). A packet with an
+    /// ABORT or a SHUTDOWN COMPLETE has this side's tag, or the peer's tag with the T bit set
+    /// (the sender had no TCB and reflected the tag it was sent). Every other packet has this
+    /// side's tag.
+    fn accepts_verification_tag(&self, p: &Packet) -> bool {
+        let tag = p.common_header.verification_tag;
+        for chunk in &p.chunks {
+            let any = chunk.as_any();
+            if any.downcast_ref::<ChunkInit>().is_some_and(|c| !c.is_ack) {
+                return tag == 0;
+            }
+            let reflected = any
+                .downcast_ref::<ChunkAbort>()
+                .map(|c| c.tag_reflected)
+                .or_else(|| {
+                    any.downcast_ref::<ChunkShutdownComplete>()
+                        .map(|c| c.tag_reflected)
+                });
+            if let Some(reflected) = reflected {
+                return if reflected {
+                    tag != 0 && tag == self.peer_verification_tag
+                } else {
+                    tag == self.my_verification_tag
+                };
+            }
+        }
+        tag == self.my_verification_tag
+    }
+
     fn handle_chunk_start(&mut self) {
         self.delayed_ack_triggered = false;
         self.immediate_ack_triggered = false;
         self.pending_error_causes.clear();
+        self.sack_packet_immediately = false;
+        self.discard_rest_of_packet = false;
     }
 
     /// Queues an error cause for the ERROR chunk that answers the packet being processed.
@@ -1209,19 +1399,8 @@ impl Association {
         // close an association: anyone who can reach this endpoint can send one.
         if let Err(err) = chunk.check() {
             warn!("[{}] discarding an invalid chunk: {}", self.side, err);
-            // The one exception, RFC 9260 3.3.3: an INIT ACK in COOKIE-WAIT with a zero
-            // Initiate Tag or no streams is the answer to this side's INIT, and it ends the
-            // attempt: the TCB is destroyed.
-            if let Some(c) = chunk.as_any().downcast_ref::<ChunkInit>()
-                && c.is_ack
-                && self.state() == AssociationState::CookieWait
-                && (c.initiate_tag == 0
-                    || c.num_outbound_streams == 0
-                    || c.num_inbound_streams == 0)
-            {
-                let reason = AssociationError::HandshakeFailed(err.to_string());
-                self.error = Some(reason.clone());
-                self.close(reason)?;
+            if let Some(c) = chunk.as_any().downcast_ref::<ChunkInit>() {
+                self.refuse_invalid_init(p, c, &err);
             }
             return Ok(false);
         }
@@ -1246,6 +1425,7 @@ impl Association {
             }
             return Err(Error::ErrAbortChunk(err_str));
         } else if let Some(c) = chunk_any.downcast_ref::<ChunkError>() {
+            self.handle_error(c, now);
             // RFC 9260 §3.3.10 (RFC 4960 §3.3.10): "An Operation Error is not considered fatal
             // in and of itself". Only an ABORT ends the association, so report the causes and
             // carry on with the rest of the packet.
@@ -1265,13 +1445,28 @@ impl Association {
             trace!("[{}] HEARTBEAT ACK", self.side);
             vec![]
         } else if let Some(c) = chunk_any.downcast_ref::<ChunkCookieEcho>() {
-            self.handle_cookie_echo(c)?
+            self.handle_cookie_echo(p, c, now)?
         } else if chunk_any.downcast_ref::<ChunkCookieAck>().is_some() {
             self.handle_cookie_ack()?
         } else if let Some(c) = chunk_any.downcast_ref::<ChunkPayloadData>() {
             self.handle_data(c)?
         } else if let Some(c) = chunk_any.downcast_ref::<ChunkSelectiveAck>() {
-            self.handle_sack(c, now)?
+            match self.handle_sack(c, now) {
+                Ok(packets) => packets,
+                Err(err) => {
+                    // RFC 9260 6.2.1, 12.4: a SACK that acknowledges a TSN this side never
+                    // sent is a protocol violation, and the association is aborted. It was
+                    // closed without telling the peer (or, for the cumulative TSN, ignored).
+                    warn!("[{}] aborting on an invalid SACK: {}", self.side, err);
+                    self.abort_with(
+                        vec![Self::protocol_violation(
+                            "SACK acknowledges a TSN that was not sent",
+                        )],
+                        AssociationError::TransportError,
+                    )?;
+                    return Ok(false);
+                }
+            }
         } else if let Some(c) = chunk_any.downcast_ref::<ChunkReconfig>() {
             self.handle_reconfig(c)?
         } else if let Some(c) = chunk_any.downcast_ref::<ChunkForwardTsn>() {
@@ -1319,56 +1514,134 @@ impl Association {
         !c.stops_processing()
     }
 
+    /// RFC 9260 3.3.2, 3.3.3: what follows the discarding of an INIT or INIT ACK that failed
+    /// its checks. A zero Initiate Tag in an INIT is discarded silently. The other failures
+    /// (a_rwnd below 1500, no outbound or no inbound streams) are answered with an ABORT sent
+    /// to the chunk's Initiate Tag. The state of an existing association does not change,
+    /// with the one exception the RFC makes: an INIT ACK in COOKIE-WAIT with a zero Initiate
+    /// Tag or no streams is the answer to this side's INIT, and destroys the TCB.
+    fn refuse_invalid_init(&mut self, p: &Packet, c: &ChunkInit, err: &Error) {
+        let cause = ErrorCause {
+            code: INVALID_MANDATORY_PARAMETER,
+            ..Default::default()
+        };
+        let ends_handshake = c.is_ack
+            && self.state() == AssociationState::CookieWait
+            && (c.initiate_tag == 0 || c.num_outbound_streams == 0 || c.num_inbound_streams == 0);
+        let abort = if c.initiate_tag != 0 {
+            Some(self.abort_packet(c.initiate_tag, false, vec![cause]))
+        } else if ends_handshake {
+            // The peer gave no tag to send to: its own packet's tag is reflected.
+            Some(self.abort_packet(p.common_header.verification_tag, true, vec![cause]))
+        } else {
+            None
+        };
+        if c.is_ack && self.state() != AssociationState::CookieWait {
+            // RFC 9260 3.3.3: outside COOKIE-WAIT such an INIT ACK is discarded silently.
+            return;
+        }
+        if let Some(mut abort) = abort {
+            if !c.is_ack {
+                // The answer to an INIT goes between the ports its packet came between.
+                abort.common_header.source_port = p.common_header.destination_port;
+                abort.common_header.destination_port = p.common_header.source_port;
+            }
+            self.control_queue.push_back(abort);
+            self.awake_write_loop();
+        }
+        // An accepting association that was made for this INIT and has seen no valid one has
+        // nothing to keep: it ends now and gives its place back.
+        let unused_acceptor = !c.is_ack
+            && self.side == Side::Server
+            && self.state() == AssociationState::Closed
+            && self.cookie_tcb.is_none();
+        if ends_handshake || unused_acceptor {
+            let reason = AssociationError::HandshakeFailed(err.to_string());
+            self.error = Some(reason.clone());
+            let _ = self.close(reason);
+        }
+    }
+
+    /// RFC 9260 3.3.10: an ERROR is not fatal in itself. One cause is acted on: "Stale Cookie
+    /// Error" in COOKIE-ECHOED (5.2.6), where the cookie this side echoed had outlived its
+    /// lifetime. The setup is tried again with a new INIT, a bounded number of times.
+    fn handle_error(&mut self, c: &ChunkError, now: Instant) {
+        if self.state() != AssociationState::CookieEchoed
+            || !c.error_causes.iter().any(|e| e.code == STALE_COOKIE_ERROR)
+        {
+            return;
+        }
+        self.timers.stop(Timer::T1Cookie);
+        self.stored_cookie_echo = None;
+        self.stale_cookie_restarts += 1;
+        if self.stale_cookie_restarts > self.timers.max_retrans(Timer::T1Init) {
+            let reason =
+                AssociationError::HandshakeFailed(Error::ErrHandshakeCookieEcho.to_string());
+            self.error = Some(reason.clone());
+            let _ = self.close(reason);
+            return;
+        }
+        debug!("[{}] stale cookie: sending a new INIT", self.side);
+        // What the INIT ACK said is void with its cookie.
+        self.peer_verification_tag = 0;
+        let mut init = ChunkInit {
+            initial_tsn: self.my_next_tsn,
+            num_outbound_streams: self.configured_outbound_streams,
+            num_inbound_streams: self.configured_inbound_streams,
+            initiate_tag: self.my_verification_tag,
+            advertised_receiver_window_credit: self.max_receive_buffer_size,
+            ..Default::default()
+        };
+        init.set_supported_extensions();
+        self.stored_init = Some(init);
+        self.set_state(AssociationState::CookieWait);
+        let _ = self.send_init();
+        self.timers
+            .start(Timer::T1Init, now, self.rto_mgr.get_rto());
+    }
+
     /// Reads the optional parameters of a received INIT or INIT ACK (RFC 9260 3.3.2, 3.3.3).
     ///
-    /// Returns the State Cookie, if there is one, and the unrecognized parameters the peer
-    /// asked to hear about, each as it arrived. An unrecognized parameter is handled by the
-    /// upper two bits of its type (RFC 9260 3.2.1): it ends the processing of the parameters
-    /// after it or is skipped, and is reported or not.
-    fn process_handshake_params(
-        &mut self,
-        params: &[Box<dyn Param>],
-    ) -> (Option<Bytes>, Vec<Bytes>) {
-        let mut cookie = None;
-        let mut unrecognized = vec![];
+    /// An unrecognized parameter is handled by the upper two bits of its type (RFC 9260
+    /// 3.2.1): it ends the processing of the parameters after it or is skipped, and is
+    /// reported or not.
+    fn process_handshake_params(&self, params: &[Box<dyn Param>]) -> HandshakeParams {
+        let mut out = HandshakeParams::default();
         for param in params {
             let any = param.as_any();
             if let Some(v) = any.downcast_ref::<ParamStateCookie>() {
-                cookie = Some(v.cookie.clone());
+                out.cookie = Some(v.cookie.clone());
             } else if let Some(v) = any.downcast_ref::<ParamSupportedExtensions>() {
                 if v.chunk_types.contains(&CT_FORWARD_TSN) {
-                    self.use_forward_tsn = true;
+                    out.forward_tsn = true;
                 }
             } else if any.downcast_ref::<ParamForwardTsnSupported>().is_some() {
                 // RFC 3758 3.3.1: this parameter alone announces PR-SCTP.
-                self.use_forward_tsn = true;
+                out.forward_tsn = true;
             } else if let Some(v) = any.downcast_ref::<ParamUnknown>() {
+                if v.typ() == PARAM_HOST_NAME_ADDRESS {
+                    out.host_name = param.marshal().ok();
+                    continue;
+                }
                 if IGNORED_HANDSHAKE_PARAMS.contains(&v.typ()) {
                     continue;
                 }
                 if v.is_reported()
                     && let Ok(raw) = param.marshal()
                 {
-                    unrecognized.push(raw);
+                    out.unrecognized.push(raw);
                 }
                 if v.stops_processing() {
                     break;
                 }
             }
         }
-        (cookie, unrecognized)
+        out
     }
 
     fn handle_init(&mut self, p: &Packet, i: &ChunkInit, now: Instant) -> Result<Vec<Packet>> {
         let state = self.state();
         debug!("[{}] chunkInit received in state '{}'", self.side, state);
-
-        // https://tools.ietf.org/html/rfc4960#section-5.2.1
-        // Upon receipt of an INIT in the COOKIE-WAIT state, an endpoint MUST
-        // respond with an INIT ACK using the same parameters it sent in its
-        // original INIT chunk (including its Initiate Tag, unchanged).  When
-        // responding, the endpoint MUST send the INIT ACK back to the same
-        // address that the original INIT (sent by this endpoint) was sent.
 
         if state == AssociationState::ShutdownAckSent {
             // RFC 9260 9.2: an INIT in SHUTDOWN-ACK-SENT (the SHUTDOWN COMPLETE was lost and
@@ -1387,61 +1660,87 @@ impl Association {
             return Ok(vec![self.answer_unexpected_init(i)]);
         }
 
+        let params = self.process_handshake_params(&i.params);
+        if let Some(host_name) = params.host_name {
+            // RFC 9260 5.1.2: an INIT with a Host Name Address is answered with an ABORT.
+            debug!("[{}] INIT with a Host Name Address: ABORT", self.side);
+            let mut abort = self.abort_packet(
+                i.initiate_tag,
+                false,
+                vec![ErrorCause {
+                    code: UNRESOLVABLE_ADDRESS,
+                    raw: host_name,
+                }],
+            );
+            abort.common_header.source_port = p.common_header.destination_port;
+            abort.common_header.destination_port = p.common_header.source_port;
+            if state == AssociationState::Closed && self.cookie_tcb.is_none() {
+                let reason =
+                    AssociationError::HandshakeFailed(Error::ErrHandshakeInitAck.to_string());
+                self.error = Some(reason.clone());
+                self.close(reason)?;
+            }
+            return Ok(vec![abort]);
+        }
+
         // RFC 9260 5.1.1: this side sends on min(own OS, peer's MIS) streams and receives on
         // min(own MIS, peer's OS). Taken from the configured counts each time, so an INIT sent
         // again with other values is not narrowed by the one before it.
-        self.my_max_num_inbound_streams =
+        let inbound_streams =
             std::cmp::min(i.num_outbound_streams, self.configured_inbound_streams);
-        self.my_max_num_outbound_streams =
+        let outbound_streams =
             std::cmp::min(i.num_inbound_streams, self.configured_outbound_streams);
-        self.peer_verification_tag = i.initiate_tag;
-        self.source_port = p.common_header.destination_port;
-        self.destination_port = p.common_header.source_port;
+        let source_port = p.common_header.destination_port;
+        let destination_port = p.common_header.source_port;
 
-        // 13.2 This is the last TSN received in sequence.  This value
-        // is set initially by taking the peer's initial TSN,
-        // received in the INIT or INIT ACK chunk, and
-        // subtracting one from it.
-        self.peer_last_tsn = i.initial_tsn.wrapping_sub(1);
-
-        // Adopt the peer's advertised receive window and seed ssthresh from it,
-        // mirroring handle_init_ack (and Pion's shared init path). RFC 4960
-        // §7.2.1 (Slow-Start) permits initialising ssthresh to the advertised
-        // receiver window; without this the answerer keeps ssthresh at its
-        // initial 0, so cwnd never starts below it, slow-start never runs, and
-        // cwnd only grows linearly under congestion avoidance (§7.2.2).
-        self.rwnd = i.advertised_receiver_window_credit;
-        debug!("[{}] initial rwnd={}", self.side, self.rwnd);
-        self.ssthresh = self.rwnd;
-
-        self.use_forward_tsn = false;
-        let (_, unrecognized) = self.process_handshake_params(&i.params);
-        if !self.use_forward_tsn {
-            warn!("[{}] not using ForwardTSN (on init)", self.side);
+        // A State Cookie for this INIT: a new one for a new attempt (another Initiate Tag) or
+        // when the one in hand has outlived its lifetime, the same one for an INIT sent again,
+        // so that the cookie of an INIT ACK already under way stays good.
+        let reuse = self.my_cookie.is_some()
+            && self.cookie_tcb.as_ref().is_some_and(|tcb| {
+                tcb.peer_verification_tag == i.initiate_tag
+                    && now.saturating_duration_since(tcb.created_at) < self.valid_cookie_life
+            });
+        if !reuse {
+            self.my_cookie = Some(ParamStateCookie::new());
         }
-
-        let mut outbound = Packet {
-            common_header: CommonHeader {
-                verification_tag: self.peer_verification_tag,
-                source_port: self.source_port,
-                destination_port: self.destination_port,
-            },
-            chunks: vec![],
+        let created_at = match (&self.cookie_tcb, reuse) {
+            (Some(tcb), true) => tcb.created_at,
+            _ => now,
         };
+        let tcb = CookieTcb {
+            created_at,
+            peer_verification_tag: i.initiate_tag,
+            peer_initial_tsn: i.initial_tsn,
+            peer_rwnd: i.advertised_receiver_window_credit,
+            inbound_streams,
+            outbound_streams,
+            use_forward_tsn: params.forward_tsn,
+            source_port,
+            destination_port,
+        };
+
+        // RFC 9260 5.2.1: in COOKIE-WAIT and COOKIE-ECHOED the INIT is answered with this
+        // side's own INIT parameters and nothing in the TCB changes: what the INIT said is
+        // kept with the cookie and taken when the cookie comes back. In CLOSED the accepting
+        // association has no TCB to protect, and takes it now.
+        if state == AssociationState::Closed {
+            self.apply_cookie_tcb(&tcb);
+            if !self.use_forward_tsn {
+                warn!("[{}] not using ForwardTSN (on init)", self.side);
+            }
+        }
+        self.cookie_tcb = Some(tcb);
 
         let mut init_ack = ChunkInit {
             is_ack: true,
             initial_tsn: self.my_next_tsn,
-            num_outbound_streams: self.my_max_num_outbound_streams,
-            num_inbound_streams: self.my_max_num_inbound_streams,
+            num_outbound_streams: outbound_streams,
+            num_inbound_streams: inbound_streams,
             initiate_tag: self.my_verification_tag,
             advertised_receiver_window_credit: self.max_receive_buffer_size,
             ..Default::default()
         };
-
-        if self.my_cookie.is_none() {
-            self.my_cookie = Some(ParamStateCookie::new());
-        }
 
         if let Some(my_cookie) = &self.my_cookie {
             init_ack.params = vec![Box::new(my_cookie.clone())];
@@ -1449,15 +1748,13 @@ impl Association {
 
         // RFC 9260 3.2.2, 3.3.3: the unrecognized parameters the INIT asked to hear about go
         // back in the INIT ACK, each in an Unrecognized Parameter parameter.
-        for raw in unrecognized {
+        for raw in params.unrecognized {
             init_ack
                 .params
                 .push(Box::new(ParamUnknown::new(UNRECOGNIZED_PARAMETER, raw)));
         }
 
         init_ack.set_supported_extensions();
-
-        outbound.chunks = vec![Box::new(init_ack)];
 
         if state == AssociationState::Closed {
             // The accepting side holds this association from the INIT on. If no COOKIE ECHO
@@ -1466,7 +1763,40 @@ impl Association {
             self.timers.start(Timer::HalfOpen, now, HALF_OPEN_LIFETIME);
         }
 
-        Ok(vec![outbound])
+        Ok(vec![Packet {
+            common_header: CommonHeader {
+                verification_tag: i.initiate_tag,
+                source_port,
+                destination_port,
+            },
+            chunks: vec![Box::new(init_ack)],
+        }])
+    }
+
+    /// Takes into the TCB what the peer's INIT said (RFC 9260 5.1 B, 5.2.4 B).
+    fn apply_cookie_tcb(&mut self, tcb: &CookieTcb) {
+        self.my_max_num_inbound_streams = tcb.inbound_streams;
+        self.my_max_num_outbound_streams = tcb.outbound_streams;
+        self.peer_verification_tag = tcb.peer_verification_tag;
+        self.source_port = tcb.source_port;
+        self.destination_port = tcb.destination_port;
+
+        // 13.2 This is the last TSN received in sequence.  This value
+        // is set initially by taking the peer's initial TSN,
+        // received in the INIT or INIT ACK chunk, and
+        // subtracting one from it.
+        self.peer_last_tsn = tcb.peer_initial_tsn.wrapping_sub(1);
+
+        // Adopt the peer's advertised receive window and seed ssthresh from it,
+        // mirroring handle_init_ack (and Pion's shared init path). RFC 4960
+        // §7.2.1 (Slow-Start) permits initialising ssthresh to the advertised
+        // receiver window; without this the answerer keeps ssthresh at its
+        // initial 0, so cwnd never starts below it, slow-start never runs, and
+        // cwnd only grows linearly under congestion avoidance (§7.2.2).
+        self.rwnd = tcb.peer_rwnd;
+        debug!("[{}] initial rwnd={}", self.side, self.rwnd);
+        self.ssthresh = self.rwnd;
+        self.use_forward_tsn = tcb.use_forward_tsn;
     }
 
     /// RFC 9260 5.2.2: the INIT ACK for an INIT that arrives while the association exists. It
@@ -1554,52 +1884,83 @@ impl Association {
         self.timers.stop(Timer::T1Init);
         self.stored_init = None;
 
-        let (cookie, unrecognized) = self.process_handshake_params(&i.params);
+        let params = self.process_handshake_params(&i.params);
+        self.use_forward_tsn |= params.forward_tsn;
         if !self.use_forward_tsn {
             warn!("[{}] not using ForwardTSN (on initAck)", self.side);
         }
 
-        if let Some(cookie) = cookie {
-            self.stored_cookie_echo = Some(ChunkCookieEcho { cookie });
-
-            if unrecognized.is_empty() {
-                self.send_cookie_echo()?;
-            } else {
-                // RFC 9260 3.2.2, 3.3.3: the unrecognized parameters the INIT ACK asked to
-                // hear about are reported in an ERROR chunk bundled with the COOKIE ECHO,
-                // which stays the first chunk of the packet. A retransmission carries the
-                // COOKIE ECHO alone.
-                let mut raw = BytesMut::new();
-                for (n, param) in unrecognized.iter().enumerate() {
-                    raw.extend_from_slice(param);
-                    if n + 1 != unrecognized.len() {
-                        raw.extend_from_slice(&[0u8; 3][..get_padding_size(param.len())]);
-                    }
-                }
-                let error = ChunkError {
-                    error_causes: vec![ErrorCause {
-                        code: UNRECOGNIZED_PARAMETERS,
-                        raw: raw.freeze(),
-                    }],
-                };
-                let cookie_echo = self
-                    .stored_cookie_echo
-                    .clone()
-                    .ok_or(Error::ErrCookieEchoNotStoredToSend)?;
-                let packet = self.create_packet(vec![Box::new(cookie_echo), Box::new(error)]);
-                self.control_queue.push_back(packet);
-                self.awake_write_loop();
-            }
-
-            self.timers
-                .start(Timer::T1Cookie, now, self.rto_mgr.get_rto());
-
-            self.set_state(AssociationState::CookieEchoed);
-
-            Ok(vec![])
-        } else {
-            Err(Error::ErrInitAckNoCookie)
+        if let Some(host_name) = params.host_name {
+            // RFC 9260 3.3.3, 5.1.2: an INIT ACK with a Host Name Address is answered with
+            // an ABORT, and the attempt is over.
+            let reason = AssociationError::HandshakeFailed(Error::ErrHandshakeInitAck.to_string());
+            self.error = Some(reason.clone());
+            self.abort_with(
+                vec![ErrorCause {
+                    code: UNRESOLVABLE_ADDRESS,
+                    raw: host_name,
+                }],
+                reason,
+            )?;
+            return Ok(vec![]);
         }
+
+        let Some(cookie) = params.cookie else {
+            // RFC 9260 3.3.3: the State Cookie is mandatory. An INIT ACK without one cannot
+            // be answered: ABORT "Missing Mandatory Parameter" (one parameter, type 7), and
+            // the attempt is over.
+            let mut raw = BytesMut::with_capacity(6);
+            raw.extend_from_slice(&1u32.to_be_bytes());
+            raw.extend_from_slice(&PARAM_STATE_COOKIE.to_be_bytes());
+            let reason = AssociationError::HandshakeFailed(Error::ErrInitAckNoCookie.to_string());
+            self.error = Some(reason.clone());
+            self.abort_with(
+                vec![ErrorCause {
+                    code: MISSING_MANDATORY_PARAMETER,
+                    raw: raw.freeze(),
+                }],
+                reason,
+            )?;
+            return Ok(vec![]);
+        };
+
+        self.stored_cookie_echo = Some(ChunkCookieEcho { cookie });
+
+        if params.unrecognized.is_empty() {
+            self.send_cookie_echo()?;
+        } else {
+            // RFC 9260 3.2.2, 3.3.3: the unrecognized parameters the INIT ACK asked to
+            // hear about are reported in an ERROR chunk bundled with the COOKIE ECHO,
+            // which stays the first chunk of the packet. A retransmission carries the
+            // COOKIE ECHO alone.
+            let mut raw = BytesMut::new();
+            for (n, param) in params.unrecognized.iter().enumerate() {
+                raw.extend_from_slice(param);
+                if n + 1 != params.unrecognized.len() {
+                    raw.extend_from_slice(&[0u8; 3][..get_padding_size(param.len())]);
+                }
+            }
+            let error = ChunkError {
+                error_causes: vec![ErrorCause {
+                    code: UNRECOGNIZED_PARAMETERS,
+                    raw: raw.freeze(),
+                }],
+            };
+            let cookie_echo = self
+                .stored_cookie_echo
+                .clone()
+                .ok_or(Error::ErrCookieEchoNotStoredToSend)?;
+            let packet = self.create_packet(vec![Box::new(cookie_echo), Box::new(error)]);
+            self.control_queue.push_back(packet);
+            self.awake_write_loop();
+        }
+
+        self.timers
+            .start(Timer::T1Cookie, now, self.rto_mgr.get_rto());
+
+        self.set_state(AssociationState::CookieEchoed);
+
+        Ok(vec![])
     }
 
     fn handle_heartbeat(&self, c: &ChunkHeartbeat) -> Result<Vec<Packet>> {
@@ -1629,41 +1990,93 @@ impl Association {
         Ok(vec![])
     }
 
-    fn handle_cookie_echo(&mut self, c: &ChunkCookieEcho) -> Result<Vec<Packet>> {
+    /// RFC 9260 5.1.5 and 5.2.4: a COOKIE ECHO.
+    ///
+    /// The State Cookie of this implementation is not a self-contained, MAC-protected TCB:
+    /// the association exists from the INIT on (see `HALF_OPEN_LIFETIME`), so the cookie is
+    /// 32 random bytes and what it stands for is kept beside it (`CookieTcb`). It is
+    /// authenticated by comparing it, in constant time, with the one this association sent,
+    /// which no one who has not seen the INIT ACK can produce; that is what the MAC is for.
+    /// Its creation time and the peer's tag and ports are checked from the kept copy.
+    ///
+    /// With one cookie per association there is no cookie whose tags differ from the TCB's,
+    /// so of Table 12 only the actions for matching tags arise: B and D (enter or stay in
+    /// ESTABLISHED, send COOKIE ACK) for the cookie in hand, and the silent discard of C for
+    /// any other. Restarting an association (action A) is not supported.
+    fn handle_cookie_echo(
+        &mut self,
+        p: &Packet,
+        c: &ChunkCookieEcho,
+        now: Instant,
+    ) -> Result<Vec<Packet>> {
         let state = self.state();
         debug!("[{}] COOKIE-ECHO received in state '{}'", self.side, state);
 
-        if let Some(my_cookie) = &self.my_cookie {
-            match state {
-                AssociationState::Established => {
-                    if !constant_time_eq(&my_cookie.cookie, &c.cookie) {
-                        return Ok(vec![]);
-                    }
-                }
-                AssociationState::Closed
-                | AssociationState::CookieWait
-                | AssociationState::CookieEchoed => {
-                    if !constant_time_eq(&my_cookie.cookie, &c.cookie) {
-                        return Ok(vec![]);
-                    }
-
-                    self.timers.stop(Timer::T1Init);
-                    self.stored_init = None;
-
-                    self.timers.stop(Timer::T1Cookie);
-                    self.stored_cookie_echo = None;
-                    self.timers.stop(Timer::HalfOpen);
-
-                    self.events.push_back(Event::Connected);
-                    self.set_state(AssociationState::Established);
-                    self.handshake_completed = true;
-                }
-                _ => return Ok(vec![]),
-            };
-        } else {
+        // RFC 9260 5.1.5 2), 3): a cookie that is not the one sent, or that comes between
+        // other ports, has its whole packet discarded, DATA included.
+        let (Some(my_cookie), Some(tcb)) = (&self.my_cookie, self.cookie_tcb.clone()) else {
             debug!("[{}] COOKIE-ECHO received before initialization", self.side);
+            self.discard_rest_of_packet = true;
+            return Ok(vec![]);
+        };
+        if !constant_time_eq(&my_cookie.cookie, &c.cookie)
+            || p.common_header.source_port != tcb.destination_port
+            || p.common_header.destination_port != tcb.source_port
+        {
+            self.discard_rest_of_packet = true;
             return Ok(vec![]);
         }
+
+        match state {
+            AssociationState::Closed
+            | AssociationState::CookieWait
+            | AssociationState::CookieEchoed => {
+                // RFC 9260 5.1.5 4): past its lifetime the cookie is refused with an ERROR
+                // "Stale Cookie", which tells the peer by how many microseconds.
+                let age = now.saturating_duration_since(tcb.created_at);
+                if age > self.valid_cookie_life {
+                    let staleness = (age - self.valid_cookie_life).as_micros();
+                    let staleness = u32::try_from(staleness).unwrap_or(u32::MAX);
+                    self.discard_rest_of_packet = true;
+                    return Ok(vec![Packet {
+                        common_header: CommonHeader {
+                            verification_tag: tcb.peer_verification_tag,
+                            source_port: tcb.source_port,
+                            destination_port: tcb.destination_port,
+                        },
+                        chunks: vec![Box::new(ChunkError {
+                            error_causes: vec![ErrorCause {
+                                code: STALE_COOKIE_ERROR,
+                                raw: Bytes::copy_from_slice(&staleness.to_be_bytes()),
+                            }],
+                        })],
+                    }]);
+                }
+
+                // RFC 9260 5.2.4 B: after an INIT collision the peer's tag is the one that
+                // came with this cookie.
+                if state != AssociationState::Closed {
+                    self.apply_cookie_tcb(&tcb);
+                }
+
+                self.timers.stop(Timer::T1Init);
+                self.stored_init = None;
+
+                self.timers.stop(Timer::T1Cookie);
+                self.stored_cookie_echo = None;
+                self.timers.stop(Timer::HalfOpen);
+
+                self.events.push_back(Event::Connected);
+                self.set_state(AssociationState::Established);
+                self.handshake_completed = true;
+                // RFC 9260 5.1.5 7): DATA that came with the COOKIE ECHO is acknowledged
+                // at once.
+                self.sack_packet_immediately = true;
+            }
+            // RFC 9260 5.2.4 D, and case E of 5.2: the cookie of the association that exists
+            // (the COOKIE ACK was lost) is acknowledged again, whatever its age.
+            _ => {}
+        };
 
         Ok(vec![Packet {
             common_header: CommonHeader {
@@ -1721,6 +2134,7 @@ impl Association {
                     code: NO_USER_DATA,
                     raw: Bytes::copy_from_slice(&d.tsn.to_be_bytes()),
                 }],
+                ..Default::default()
             };
             let packet = self.create_packet(vec![Box::new(abort)]);
             self.control_queue.push_back(packet);
@@ -1841,8 +2255,19 @@ impl Association {
             self.payload_queue.record_duplicate(d.tsn);
         }
 
-        // RFC 9260 section 6.2: a repeat is listed in a SACK sent at once.
-        let immediate_sack = d.immediate_sack || !can_push;
+        // RFC 9260 section 6.2: a repeat is listed in a SACK sent at once. So is the first
+        // DATA chunk of the association (5.1), DATA that came with the COOKIE ECHO (5.1.5),
+        // and DATA received in SHUTDOWN-SENT (9.2), which is also answered with the SHUTDOWN
+        // again.
+        let first = !self.first_data_received;
+        self.first_data_received = true;
+        let mut immediate_sack =
+            d.immediate_sack || !can_push || first || self.sack_packet_immediately;
+        if self.state() == AssociationState::ShutdownSent {
+            immediate_sack = true;
+            self.will_send_shutdown = true;
+            self.awake_write_loop();
+        }
 
         if stream_handle_data && let Some(s) = self.streams.get_mut(&d.stream_identifier) {
             self.events.push_back(Event::DatagramReceived);
@@ -1893,14 +2318,14 @@ impl Association {
             return Ok(vec![]);
         }
 
-        // A SACK may not acknowledge DATA this side never sent (RFC 9260 6.2.1). Ignore one
-        // that does instead of walking toward its cumulative TSN.
+        // A SACK may not acknowledge DATA this side never sent (RFC 9260 6.2.1, 12.4): it is
+        // an error, and the caller aborts the association. Nothing is taken from it.
         if sna32gte(d.cumulative_tsn_ack, self.my_next_tsn) {
             debug!(
-                "[{}] SACK Cumulative ACK {} is beyond the next TSN {}; ignored",
+                "[{}] SACK Cumulative ACK {} is beyond the next TSN {}",
                 self.side, d.cumulative_tsn_ack, self.my_next_tsn
             );
-            return Ok(vec![]);
+            return Err(Error::ErrTsnRequestNotExist);
         }
 
         // Process selective ack
@@ -2099,7 +2524,13 @@ impl Association {
     fn handle_shutdown(&mut self, c: &ChunkShutdown, now: Instant) -> Result<Vec<Packet>> {
         let state = self.state();
 
-        if state == AssociationState::Established || state == AssociationState::ShutdownReceived {
+        if state == AssociationState::Established
+            || state == AssociationState::ShutdownReceived
+            || state == AssociationState::ShutdownPending
+        {
+            // RFC 9260 9.2: a SHUTDOWN is taken in SHUTDOWN-PENDING too (both sides are
+            // shutting down and the peer's SHUTDOWN came first).
+            //
             // RFC 9260 9.2: the SHUTDOWN's Cumulative TSN Ack acknowledges our DATA up to it,
             // and the receiver checks by it that all its outstanding DATA has arrived. A
             // SHUTDOWN that crossed our last SACK is the only acknowledgement left for the
@@ -3296,6 +3727,7 @@ impl Association {
             if let Ok(raw) = self.create_packet(vec![Box::new(shutdown)]).marshal() {
                 self.timers
                     .start(Timer::T2Shutdown, now, self.rto_mgr.get_rto());
+                self.start_shutdown_guard(now);
                 raw_packets.push(raw);
             } else {
                 warn!("[{}] failed to serialize a Shutdown packet", self.side);
@@ -3315,7 +3747,7 @@ impl Association {
         } else if self.will_send_shutdown_complete {
             self.will_send_shutdown_complete = false;
 
-            let shutdown_complete = ChunkShutdownComplete {};
+            let shutdown_complete = ChunkShutdownComplete::default();
 
             if let Ok(raw) = self
                 .create_packet(vec![Box::new(shutdown_complete)])
@@ -4205,6 +4637,15 @@ impl Association {
                 // stayed in SHUTDOWN-SENT (or SHUTDOWN-ACK-SENT) for good.
                 error!("[{}] retransmission failure: T2-shutdown", self.side);
                 if let Err(err) = self.close(AssociationError::TimedOut) {
+                    error!("[{}] failed to close association: {err}", self.side);
+                }
+            }
+
+            Timer::T5ShutdownGuard => {
+                // RFC 9260 9.2: the shutdown did not finish in time. The association is
+                // aborted and the upper layer told.
+                error!("[{}] T5-shutdown-guard expired", self.side);
+                if let Err(err) = self.abort_with(vec![], AssociationError::TimedOut) {
                     error!("[{}] failed to close association: {err}", self.side);
                 }
             }

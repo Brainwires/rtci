@@ -52,6 +52,7 @@ fn test_abort_chunk_one_error_cause() -> Result<()> {
             code: PROTOCOL_VIOLATION,
             ..Default::default()
         }],
+        tag_reflected: false,
     };
 
     let b = abort1.marshal()?;
@@ -84,6 +85,7 @@ fn test_abort_chunk_many_error_causes() -> Result<()> {
                 ..Default::default()
             },
         ],
+        tag_reflected: false,
     };
 
     let b = abort1.marshal()?;

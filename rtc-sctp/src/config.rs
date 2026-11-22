@@ -3,6 +3,7 @@ use crate::util::{AssociationIdGenerator, RandomAssociationIdGenerator};
 use crate::TimerConfig;
 use std::fmt;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// MTU for inbound packet (from DTLS)
 pub(crate) const RECEIVE_MTU: usize = 8192;
@@ -76,6 +77,7 @@ pub struct TransportConfig {
     max_num_inbound_streams: u16,
     timer_config: TimerConfig,
     stream_scheduler: StreamScheduler,
+    valid_cookie_life: Duration,
 }
 
 impl Default for TransportConfig {
@@ -90,11 +92,25 @@ impl Default for TransportConfig {
             max_num_inbound_streams: u16::MAX,
             timer_config: TimerConfig::default(),
             stream_scheduler: StreamScheduler::default(),
+            valid_cookie_life: Duration::from_secs(60),
         }
     }
 }
 
 impl TransportConfig {
+    /// Sets Valid.Cookie.Life: how long after an INIT ACK its State Cookie is accepted in a
+    /// COOKIE ECHO (RFC 9260 5.1.3, 16). Later it is refused with a "Stale Cookie" error and
+    /// the peer starts again. Defaults to 60 seconds.
+    pub fn with_valid_cookie_life(mut self, value: Duration) -> Self {
+        self.valid_cookie_life = value;
+        self
+    }
+
+    /// Valid.Cookie.Life, see [`with_valid_cookie_life`](Self::with_valid_cookie_life).
+    pub fn valid_cookie_life(&self) -> Duration {
+        self.valid_cookie_life
+    }
+
     /// Sets this endpoint's SCTP port, the source port of what it sends (RFC 8841 5: its own
     /// `a=sctp-port`). Defaults to 5000.
     pub fn with_sctp_port(mut self, value: u16) -> Self {

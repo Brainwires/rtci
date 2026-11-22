@@ -2599,6 +2599,7 @@ fn test_assoc_abort() -> Result<()> {
                 code: PROTOCOL_VIOLATION,
                 ..Default::default()
             }],
+            tag_reflected: false,
         };
 
         let packet = pair
@@ -2769,6 +2770,7 @@ fn test_assoc_abort_bundled_after_error_chunk() -> Result<()> {
             code: PROTOCOL_VIOLATION,
             ..Default::default()
         }],
+        tag_reflected: false,
     };
 
     debug!("send ChunkError + ChunkAbort");

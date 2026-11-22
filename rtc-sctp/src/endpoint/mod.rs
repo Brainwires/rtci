@@ -14,7 +14,7 @@ mod loss_recovery_test;
 mod sctp_port_test;
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     fmt, iter,
     net::SocketAddr,
     ops::{Index, IndexMut},
@@ -27,9 +27,16 @@ use rustc_hash::FxHashMap;
 
 use crate::Payload;
 use crate::association::Association;
-use crate::chunk::chunk_type::CT_INIT;
+use crate::chunk::chunk_abort::ChunkAbort;
+use crate::chunk::chunk_shutdown_complete::ChunkShutdownComplete;
+use crate::chunk::chunk_type::{
+    CT_ABORT, CT_COOKIE_ACK, CT_COOKIE_ECHO, CT_ERROR, CT_INIT, CT_SHUTDOWN_ACK,
+    CT_SHUTDOWN_COMPLETE,
+};
+use crate::chunk::{Chunk, ErrorCause, OUT_OF_RESOURCE, STALE_COOKIE_ERROR};
 use crate::config::{ClientConfig, EndpointConfig, ServerConfig, TransportConfig};
 use crate::packet::PartialDecode;
+use crate::packet::{CommonHeader, Packet};
 use crate::shared::{
     AssociationEvent, AssociationEventInner, AssociationId, EndpointEvent, EndpointEventInner,
 };
@@ -76,7 +83,13 @@ pub struct Endpoint {
     ///
     /// Equivalent to a `ServerConfig.accept_buffer` of `0`, but can be changed after the endpoint is constructed.
     reject_new_associations: bool,
+    /// Answers to packets that belong to no association (RFC 9260 8.4), for `poll_transmit`.
+    transmits: VecDeque<TransportMessage<Payload>>,
 }
+
+/// Answers to out-of-the-blue packets kept until the owner collects them. An answer past
+/// this many is not made: the endpoint must not be a store for whoever sends it packets.
+const MAX_QUEUED_OOTB_RESPONSES: usize = 16;
 
 impl fmt::Debug for Endpoint {
     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -111,6 +124,7 @@ impl Endpoint {
             live: 0,
             local_cid_generator: (endpoint_config.aid_generator_factory.as_ref())(),
             reject_new_associations: false,
+            transmits: VecDeque::new(),
             endpoint_config,
             server_config,
         }
@@ -189,7 +203,7 @@ impl Endpoint {
     /// peer address and ports. An endpoint that holds a single association and can take no
     /// other (SCTP over one DTLS transport, RFC 8261) takes any INIT between the same ports as
     /// its peer's: the address is the DTLS transport's affair and may have changed under it.
-    fn association_for_init(
+    fn association_for_peer(
         &self,
         remote: SocketAddr,
         ports: (u16, u16),
@@ -232,7 +246,18 @@ impl Endpoint {
         //
         let dst_cid = partial_decode.common_header.verification_tag;
         let known_ch = if dst_cid > 0 {
-            self.association_ids.get(&dst_cid).cloned()
+            // A packet whose tag is not an association's own still belongs to the association
+            // between its addresses and ports (RFC 9260 8.5): that association discards it,
+            // or takes it under one of the exceptions of 8.5.1 (an ABORT or SHUTDOWN COMPLETE
+            // that reflects the peer's tag). It is not an out-of-the-blue packet.
+            let ports = (
+                partial_decode.common_header.source_port,
+                partial_decode.common_header.destination_port,
+            );
+            self.association_ids
+                .get(&dst_cid)
+                .cloned()
+                .or_else(|| self.association_for_peer(remote, ports))
         } else {
             // INIT packets arrive with verification_tag=0 (per RFC 4960 §8.5.1).
             // Full DoS hardening would require per-source-address rate limiting or
@@ -260,7 +285,7 @@ impl Endpoint {
                     .initiate_tag
                     .and_then(|initiate_tag| self.association_ids_init.get(&initiate_tag))
                     .copied()
-                    .or_else(|| self.association_for_init(remote, ports))
+                    .or_else(|| self.association_for_peer(remote, ports))
             } else {
                 None
             }
@@ -289,8 +314,134 @@ impl Endpoint {
         //
         // Potentially create a new association
         //
-        self.handle_first_packet(now, remote, ecn, partial_decode)
-            .map(|(ch, a)| (ch, DatagramEvent::NewAssociation(a)))
+        if partial_decode.first_chunk_type == CT_INIT && dst_cid == 0 {
+            let common_header = CommonHeader {
+                source_port: partial_decode.common_header.source_port,
+                destination_port: partial_decode.common_header.destination_port,
+                verification_tag: 0,
+            };
+            let initiate_tag = partial_decode.initiate_tag;
+            let accepted = self.handle_first_packet(now, remote, ecn, partial_decode);
+            if accepted.is_none()
+                && let Some(tag) = initiate_tag.filter(|tag| *tag != 0)
+            {
+                // RFC 9260 5.1, 8.4 3): an INIT that cannot be accepted is answered with an
+                // ABORT sent to its Initiate Tag, T bit clear.
+                self.respond(
+                    now,
+                    remote,
+                    &common_header,
+                    tag,
+                    Box::new(ChunkAbort {
+                        error_causes: vec![ErrorCause {
+                            code: OUT_OF_RESOURCE,
+                            ..Default::default()
+                        }],
+                        tag_reflected: false,
+                    }),
+                );
+            }
+            return accepted.map(|(ch, a)| (ch, DatagramEvent::NewAssociation(a)));
+        }
+
+        self.handle_out_of_the_blue(now, remote, &partial_decode);
+        None
+    }
+
+    /// RFC 9260 8.4: a packet that belongs to no association of this endpoint.
+    ///
+    /// Nothing is answered to a packet with an ABORT, a SHUTDOWN COMPLETE, a COOKIE ACK or a
+    /// "Stale Cookie" ERROR, nor to one with Verification Tag 0 (8.5.1 A: only a lone INIT
+    /// has that) or an INIT with another tag. A COOKIE ECHO is for an association made by
+    /// its INIT, which this endpoint no longer has: its cookie cannot be good. A SHUTDOWN
+    /// ACK is answered with SHUTDOWN COMPLETE and anything else with ABORT, each with the
+    /// packet's own tag and the T bit set.
+    fn handle_out_of_the_blue(
+        &mut self,
+        now: Instant,
+        remote: SocketAddr,
+        partial_decode: &PartialDecode,
+    ) {
+        let header = &partial_decode.common_header;
+        if header.verification_tag == 0 || header.source_port == 0 || header.destination_port == 0 {
+            return;
+        }
+        let chunks = partial_decode.chunk_headers();
+        let has = |typ: crate::chunk::chunk_type::ChunkType| chunks.iter().any(|(t, _)| *t == typ);
+        let stale_cookie = chunks.iter().any(|(typ, value)| {
+            *typ == CT_ERROR
+                && crate::chunk::chunk_error::ChunkError::causes(value)
+                    .contains(&STALE_COOKIE_ERROR)
+        });
+        if has(CT_ABORT) || has(CT_INIT) {
+            return;
+        }
+        if partial_decode.first_chunk_type == CT_COOKIE_ECHO {
+            return;
+        }
+        let response: Box<dyn Chunk> = if has(CT_SHUTDOWN_ACK) {
+            Box::new(ChunkShutdownComplete {
+                tag_reflected: true,
+            })
+        } else if has(CT_SHUTDOWN_COMPLETE) || has(CT_COOKIE_ACK) || stale_cookie {
+            return;
+        } else {
+            Box::new(ChunkAbort {
+                error_causes: vec![],
+                tag_reflected: true,
+            })
+        };
+        let tag = header.verification_tag;
+        self.respond(now, remote, header, tag, response);
+    }
+
+    /// Queues `chunk`, alone in a packet with Verification Tag `tag`, as the answer to the
+    /// packet with header `received`.
+    fn respond(
+        &mut self,
+        now: Instant,
+        remote: SocketAddr,
+        received: &CommonHeader,
+        tag: u32,
+        chunk: Box<dyn Chunk>,
+    ) {
+        if self.transmits.len() >= MAX_QUEUED_OOTB_RESPONSES {
+            trace!("too many answers to out-of-the-blue packets queued; not answering");
+            return;
+        }
+        let packet = Packet {
+            common_header: CommonHeader {
+                source_port: received.destination_port,
+                destination_port: received.source_port,
+                verification_tag: tag,
+            },
+            chunks: vec![chunk],
+        };
+        let Ok(raw) = packet.marshal() else {
+            return;
+        };
+        self.transmits.push_back(TransportMessage {
+            now,
+            transport: TransportContext {
+                local_addr: self.local_addr,
+                peer_addr: remote,
+                ecn: None,
+                transport_protocol: self.transport_protocol,
+            },
+            message: Payload::RawEncode(vec![raw]),
+        });
+    }
+
+    /// Returns a packet the endpoint itself has to send: the answer to a packet that belongs
+    /// to none of its associations (RFC 9260 section 8.4: an ABORT or a SHUTDOWN COMPLETE
+    /// that reflects the packet's Verification Tag, or the ABORT that refuses an INIT).
+    ///
+    /// To be polled after [`handle`](Self::handle). An owner that never polls it sends no such
+    /// answers, which costs a peer that kept an association this side has lost nothing but
+    /// time: its retransmissions run out instead of being cut short.
+    #[must_use]
+    pub fn poll_transmit(&mut self) -> Option<TransportMessage<Payload>> {
+        self.transmits.pop_front()
     }
 
     /// Initiate an Association

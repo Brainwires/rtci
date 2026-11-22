@@ -3,8 +3,10 @@ use std::time::{Duration, Instant};
 pub(crate) const ACK_INTERVAL: u64 = 200;
 const MAX_INIT_RETRANS: usize = 8;
 const PATH_MAX_RETRANS: usize = 5;
+/// Association.Max.Retrans (RFC 9260 16).
+const ASSOCIATION_MAX_RETRANS: usize = 10;
 const NO_MAX_RETRANS: usize = usize::MAX;
-const TIMER_COUNT: usize = 7;
+const TIMER_COUNT: usize = 8;
 
 #[derive(Debug, Copy, Clone)]
 /// Retransmission limits for the association's timers.
@@ -16,7 +18,10 @@ pub struct TimerConfig {
     pub max_t1_init_retrans: usize,
     /// How many times COOKIE-ECHO may be retransmitted (T1-cookie).
     pub max_t1_cookie_retrans: usize,
-    /// How many times SHUTDOWN may be retransmitted (T2-shutdown).
+    /// How many times SHUTDOWN (or SHUTDOWN ACK) may be retransmitted without a packet from
+    /// the peer (T2-shutdown) before the association ends with
+    /// [`AssociationError::TimedOut`](crate::AssociationError::TimedOut). Defaults to
+    /// Association.Max.Retrans, 10 (RFC 9260 9.2).
     pub max_t2_shutdown_retrans: usize,
     /// How many consecutive T3-rtx expiries, with no new DATA acknowledged in between, are
     /// tolerated before the peer is declared unreachable and the association closes with
@@ -36,7 +41,7 @@ impl Default for TimerConfig {
         Self {
             max_t1_init_retrans: MAX_INIT_RETRANS,
             max_t1_cookie_retrans: MAX_INIT_RETRANS,
-            max_t2_shutdown_retrans: NO_MAX_RETRANS,
+            max_t2_shutdown_retrans: ASSOCIATION_MAX_RETRANS,
             max_t3_rtx_retrans: NO_MAX_RETRANS,
             max_reconfig_retrans: PATH_MAX_RETRANS,
             max_ack_retrans: PATH_MAX_RETRANS,
@@ -55,6 +60,9 @@ pub(crate) enum Timer {
     /// How long an accepting association waits for the COOKIE ECHO. Its first expiry ends
     /// the association.
     HalfOpen = 6,
+    /// T5-shutdown-guard (RFC 9260 9.2): bounds a graceful shutdown. Its first expiry aborts
+    /// the association.
+    T5ShutdownGuard = 7,
 }
 
 impl Timer {
@@ -66,6 +74,7 @@ impl Timer {
         Timer::Reconfig,
         Timer::Ack,
         Timer::HalfOpen,
+        Timer::T5ShutdownGuard,
     ];
 }
 
@@ -90,6 +99,7 @@ impl TimerTable {
                 time_config.max_reconfig_retrans,    //Reconfig
                 time_config.max_ack_retrans,         //Ack
                 0,                                   //HalfOpen
+                0,                                   //T5ShutdownGuard
             ],
             ..Default::default()
         }
@@ -124,7 +134,10 @@ impl TimerTable {
             // compound T3 backoff nor apply this control timer's backoff twice.
             // See RFC 9260 9.2 and RFC 6525 5.1.1.
             *current.get_or_insert(interval)
-        } else if matches!(timer, Timer::Ack | Timer::T3RTX | Timer::HalfOpen) {
+        } else if matches!(
+            timer,
+            Timer::Ack | Timer::T3RTX | Timer::HalfOpen | Timer::T5ShutdownGuard
+        ) {
             interval
         } else {
             calculate_next_timeout(interval, self.retrans[timer as usize])
@@ -150,6 +163,11 @@ impl TimerTable {
         if let Some(interval) = self.control_interval(timer) {
             *interval = None;
         }
+    }
+
+    /// How many times `timer` may expire before it fails.
+    pub fn max_retrans(&self, timer: Timer) -> usize {
+        self.max_retrans[timer as usize]
     }
 
     pub fn reset_retrans(&mut self, timer: Timer) {

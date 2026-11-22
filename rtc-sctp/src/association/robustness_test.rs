@@ -170,7 +170,7 @@ pub(super) fn connected_link(seed: u64) -> Link {
     link
 }
 
-fn read_all(a: &mut Association, stream: u16) -> Vec<Bytes> {
+pub(super) fn read_all(a: &mut Association, stream: u16) -> Vec<Bytes> {
     let mut out = vec![];
     let Ok(mut s) = a.stream(stream) else {
         return out;
@@ -477,7 +477,7 @@ fn a_packet_with_a_heartbeat_ack_is_processed() {
 
 // ---- B5: INIT parameters ----------------------------------------------------------------------
 
-fn accepting_endpoint() -> Endpoint {
+pub(super) fn accepting_endpoint() -> Endpoint {
     let mut server = ServerConfig::new(TransportConfig::default());
     server.concurrent_associations(1);
     Endpoint::new(
@@ -488,12 +488,12 @@ fn accepting_endpoint() -> Endpoint {
     )
 }
 
-fn remote() -> SocketAddr {
+pub(super) fn remote() -> SocketAddr {
     "10.0.0.1:5000".parse().unwrap()
 }
 
 /// Delivers an INIT to a fresh accepting endpoint and returns the association and its answer.
-fn accept_init(params: &[Vec<u8>]) -> (Endpoint, Option<Association>, Vec<Bytes>) {
+pub(super) fn accept_init(params: &[Vec<u8>]) -> (Endpoint, Option<Association>, Vec<Bytes>) {
     let mut endpoint = accepting_endpoint();
     let now = Instant::now();
     let init = raw_packet(
@@ -685,12 +685,13 @@ fn a_chunk_that_fails_its_checks_does_not_close_an_established_association() {
 
 // ---- B8: a closed association -----------------------------------------------------------------
 
-fn user_initiated_abort() -> Vec<u8> {
+pub(super) fn user_initiated_abort() -> Vec<u8> {
     chunk_bytes(&ChunkAbort {
         error_causes: vec![ErrorCause {
             code: USER_INITIATED_ABORT,
             ..Default::default()
         }],
+        tag_reflected: false,
     })
 }
 
@@ -1323,33 +1324,6 @@ fn invalid_handshake_chunks_leave_the_association_as_it_is() {
             );
         }
     }
-}
-
-/// An INIT that is not valid starts no handshake: nothing is answered, and the association
-/// the endpoint made for it does not stay for ever.
-#[test]
-fn an_invalid_first_init_is_not_answered_and_its_association_ends() {
-    let mut endpoint = accepting_endpoint();
-    let mut now = Instant::now();
-    let mut value = vec![];
-    value.extend_from_slice(&7u32.to_be_bytes());
-    value.extend_from_slice(&100u32.to_be_bytes()); // a_rwnd below 1500
-    value.extend_from_slice(&[0, 1, 0, 1]);
-    value.extend_from_slice(&9u32.to_be_bytes());
-    let init = raw_packet(5000, 5000, 0, &[raw_chunk(CT_INIT.0, 0, &value)]);
-    let Some((_, DatagramEvent::NewAssociation(mut a))) =
-        endpoint.handle(now, remote(), None, init)
-    else {
-        panic!("no association");
-    };
-    assert!(
-        sent_datagrams(&mut a, now).is_empty(),
-        "nothing is answered"
-    );
-    let at = a.poll_timeout().expect("the wait for a handshake is timed");
-    now = at;
-    a.handle_timeout(now);
-    assert!(a.is_ended());
 }
 
 /// RFC 3758 3.3.2: the Forward-TSN-Supported parameter in an INIT announces PR-SCTP by

@@ -126,6 +126,26 @@ impl PartialDecode {
         })
     }
 
+    /// The type and value of each chunk in the packet, as far as their headers are sound.
+    /// For a packet no association will parse (RFC 9260 8.4).
+    pub(crate) fn chunk_headers(&self) -> Vec<(ChunkType, Bytes)> {
+        let raw = &self.remaining;
+        let mut out = vec![];
+        let mut offset = 0;
+        while offset + CHUNK_HEADER_SIZE <= raw.len() {
+            let length = u16::from_be_bytes([raw[offset + 2], raw[offset + 3]]) as usize;
+            if length < CHUNK_HEADER_SIZE || offset + length > raw.len() {
+                break;
+            }
+            out.push((
+                ChunkType(raw[offset]),
+                raw.slice(offset + CHUNK_HEADER_SIZE..offset + length),
+            ));
+            offset += length + get_padding_size(length);
+        }
+        out
+    }
+
     pub(crate) fn finish(self) -> Result<Packet> {
         Ok(Packet {
             chunks: parse_chunks(&self.remaining, 0)?,
@@ -348,14 +368,15 @@ impl Packet {
 
         // Check values on the packet that are specific to a particular chunk type
         for c in &self.chunks {
-            if let Some(ci) = c.as_any().downcast_ref::<ChunkInit>()
-                && !ci.is_ack
-            {
+            if let Some(ci) = c.as_any().downcast_ref::<ChunkInit>() {
                 // An INIT or INIT ACK chunk MUST NOT be bundled with any other chunk.
                 // They MUST be the only chunks present in the SCTP packets that carry
                 // them.
                 if self.chunks.len() != 1 {
                     return Err(Error::ErrInitChunkBundled);
+                }
+                if ci.is_ack {
+                    continue;
                 }
 
                 // A packet containing an INIT chunk MUST have a zero Verification
@@ -589,6 +610,7 @@ mod test {
                         code: PROTOCOL_VIOLATION,
                         ..Default::default()
                     }],
+                    tag_reflected: false,
                 }),
                 Box::new(ChunkError {
                     error_causes: vec![ErrorCause {

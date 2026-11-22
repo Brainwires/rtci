@@ -367,6 +367,8 @@ pub fn endpoint_handle_datagrams(mut data: &[u8], start: std::time::Instant) {
             }
             None => {}
         }
+        // The endpoint's own answers to packets that belong to no association (RFC 9260 8.4).
+        while endpoint.poll_transmit().is_some() {}
         if let Some((ch, a)) = association.as_mut() {
             a.handle_timeout(now);
             while a.poll().is_some() {}
@@ -490,6 +492,7 @@ pub fn association_handle_chunks(mut data: &[u8], start: std::time::Instant) {
         {
             association.handle_event(event);
         }
+        while server_endpoint.poll_transmit().is_some() {}
         association.handle_timeout(now);
         while let Some(event) = association.poll() {
             if let crate::Event::Stream(crate::StreamEvent::Readable { id }) = event

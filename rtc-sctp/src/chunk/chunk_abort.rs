@@ -25,6 +25,9 @@ use std::fmt;
 #[derive(Default, Debug, Clone)]
 pub(crate) struct ChunkAbort {
     pub(crate) error_causes: Vec<ErrorCause>,
+    /// The T bit (RFC 9260 3.3.7): the sender had no TCB and filled in the Verification Tag
+    /// of the packet it answers ("reflected") instead of the receiver's own tag.
+    pub(crate) tag_reflected: bool,
 }
 
 /// String makes chunkAbort printable
@@ -44,7 +47,7 @@ impl Chunk for ChunkAbort {
     fn header(&self) -> ChunkHeader {
         ChunkHeader {
             typ: CT_ABORT,
-            flags: 0,
+            flags: u8::from(self.tag_reflected),
             value_length: self.value_length() as u16,
         }
     }
@@ -66,7 +69,10 @@ impl Chunk for ChunkAbort {
             error_causes.push(e);
         }
 
-        Ok(ChunkAbort { error_causes })
+        Ok(ChunkAbort {
+            error_causes,
+            tag_reflected: header.flags & 1 != 0,
+        })
     }
 
     fn marshal_to(&self, buf: &mut BytesMut) -> Result<usize> {

@@ -42,6 +42,26 @@ impl fmt::Display for ChunkError {
     }
 }
 
+impl ChunkError {
+    /// The cause codes in the value of an ERROR chunk, as far as the causes are sound.
+    pub(crate) fn causes(value: &Bytes) -> Vec<ErrorCauseCode> {
+        let mut out = vec![];
+        let mut offset = 0;
+        while offset + ERROR_CAUSE_HEADER_LENGTH <= value.len() {
+            let length = u16::from_be_bytes([value[offset + 2], value[offset + 3]]) as usize;
+            if length < ERROR_CAUSE_HEADER_LENGTH || offset + length > value.len() {
+                break;
+            }
+            out.push(ErrorCauseCode(u16::from_be_bytes([
+                value[offset],
+                value[offset + 1],
+            ])));
+            offset += length + get_padding_size(length);
+        }
+        out
+    }
+}
+
 impl Chunk for ChunkError {
     fn header(&self) -> ChunkHeader {
         ChunkHeader {
