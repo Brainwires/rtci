@@ -600,7 +600,7 @@ fn shared_ssrc_world(signal: fn(&str) -> String) -> Result<(World, Vec<RTCRtpSen
             RtpCodecKind::Video,
             Some(RTCRtpTransceiverInit {
                 direction: RTCRtpTransceiverDirection::Sendrecv,
-                streams: vec![],
+                streams: vec!["shared".to_owned()],
                 send_encodings: vec![RTCRtpEncodingParameters {
                     active: true,
                     rtp_coding_parameters: RTCRtpCodingParameters {
@@ -678,6 +678,10 @@ fn a_sender_moves_to_a_new_ssrc_after_a_collision() -> Result<()> {
     let (_, rtx_before) = encoding_ssrcs(&mut world, 0, senders[0]);
     for peer in world.peers.iter_mut() {
         while peer.pc.poll_event().is_some() {}
+        assert_eq!(
+            peer.negotiation_needed, 1,
+            "asked for the first exchange only: nothing else is pending"
+        );
         peer.negotiation_needed = 0;
     }
 
