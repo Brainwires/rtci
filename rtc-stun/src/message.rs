@@ -99,11 +99,14 @@ pub trait Checker {
     fn check(&self, m: &Message) -> Result<()>;
 }
 
-/// Is_stun_message returns true if b looks like STUN message.
+/// Is_stun_message returns true if b looks like STUN message: at least a header, the first two
+/// bits zero and the magic cookie in place (RFC 8489 section 6.3).
 /// Useful for multiplexing. is_stun_message does not guarantee
 /// that decoding will be successful.
 pub fn is_stun_message(b: &[u8]) -> bool {
-    b.len() >= MESSAGE_HEADER_SIZE && u32::from_be_bytes([b[4], b[5], b[6], b[7]]) == MAGIC_COOKIE
+    b.len() >= MESSAGE_HEADER_SIZE
+        && b[0] & 0xc0 == 0
+        && u32::from_be_bytes([b[4], b[5], b[6], b[7]]) == MAGIC_COOKIE
 }
 // Message represents a single STUN packet. It uses aggressive internal
 // buffering to enable zero-allocation encoding and decoding,
@@ -342,6 +345,15 @@ impl Message {
     }
 
     /// Decode decodes m.Raw into m.
+    ///
+    /// `raw` is one whole message, as a datagram or a framed stream delivers it. The checks of
+    /// RFC 8489 section 6.3 that need no context are made here: the first two bits are zero,
+    /// the magic cookie is in place, and the length is a multiple of four (section 5) that
+    /// describes all of `raw`, no more and no less.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `raw` is not such a message, or an attribute runs past its end.
     pub fn decode(&mut self) -> Result<()> {
         // decoding message header
         let buf = &self.raw;
@@ -354,14 +366,32 @@ impl Message {
         let cookie = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]); // last 4 bytes
         let full_size = MESSAGE_HEADER_SIZE + size; // len(m.Raw)
 
+        if buf[0] & 0xc0 != 0 {
+            return Err(Error::Other(format!(
+                "the first two bits of a STUN message are zero, got first byte {:#04x}",
+                buf[0]
+            )));
+        }
         if cookie != MAGIC_COOKIE {
             return Err(Error::Other(format!(
                 "{cookie:x} is invalid magic cookie (should be {MAGIC_COOKIE:x})"
             )));
         }
+        if !size.is_multiple_of(PADDING) {
+            return Err(Error::Other(format!(
+                "message length {size} is not a multiple of {PADDING}"
+            )));
+        }
         if buf.len() < full_size {
             return Err(Error::Other(format!(
                 "buffer length {} is less than {} (expected message size)",
+                buf.len(),
+                full_size
+            )));
+        }
+        if buf.len() > full_size {
+            return Err(Error::Other(format!(
+                "buffer length {} is more than {} (expected message size)",
                 buf.len(),
                 full_size
             )));
@@ -429,10 +459,16 @@ impl Message {
     /// ErrUnexpectedEOF, ErrUnexpectedHeaderEOF or *DecodeErr.
     ///
     /// Can return *DecodeErr while decoding too.
+    ///
+    /// The reader is read to its end: it holds one message, of any length the 16-bit length
+    /// field allows.
     pub fn read_from<R: Read>(&mut self, reader: &mut R) -> Result<usize> {
-        let mut t_buf = vec![0; DEFAULT_RAW_CAPACITY];
-        let n = reader.read(&mut t_buf)?;
-        self.raw = t_buf[..n].to_vec();
+        let mut t_buf = Vec::with_capacity(DEFAULT_RAW_CAPACITY);
+        // One byte past the largest message, so that an oversized input is refused by `decode`
+        // rather than read without bound.
+        let limit = (MESSAGE_HEADER_SIZE + usize::from(u16::MAX) + 1) as u64;
+        let n = reader.take(limit).read_to_end(&mut t_buf)?;
+        self.raw = t_buf;
         self.decode()?;
         Ok(n)
     }
@@ -474,6 +510,47 @@ impl Message {
         } else {
             Err(Error::ErrAttributeNotFound)
         }
+    }
+
+    /// The offset in [`raw`](Self::raw) of the attribute at `index` (its type field), or of the
+    /// end of the attributes when `index` is their count.
+    ///
+    /// Computed from the attribute list, which mirrors `raw` after `decode`, `build` or `add`.
+    pub(crate) fn attribute_offset(&self, index: usize) -> usize {
+        MESSAGE_HEADER_SIZE
+            + self
+                .attributes
+                .0
+                .iter()
+                .take(index)
+                .map(|a| ATTRIBUTE_HEADER_SIZE + nearest_padded_value_length(a.value.len()))
+                .sum::<usize>()
+    }
+
+    /// The position of the first attribute of type `t`.
+    pub(crate) fn position(&self, t: AttrType) -> Option<usize> {
+        self.attributes.0.iter().position(|a| a.typ == t)
+    }
+
+    /// The comprehension-required attributes of this message (types below `0x8000`) that are
+    /// not in `known`, in the order they appear, each once.
+    ///
+    /// RFC 8489 section 6.3: a request that has any is answered 420 (Unknown Attribute) with
+    /// them in UNKNOWN-ATTRIBUTES (section 6.3.1); an indication or a response that has any is
+    /// discarded (sections 6.3.2 to 6.3.4). `known` is what the usage understands:
+    /// [`STUN_ATTRIBUTES`] plus its own.
+    ///
+    /// This looks at every attribute. In an authenticated message only the attributes ahead
+    /// of the integrity attribute count: use
+    /// [`Validator`](crate::validated::Validator), which does both.
+    pub fn unknown_required_attributes(&self, known: &[AttrType]) -> Vec<AttrType> {
+        let mut unknown: Vec<AttrType> = vec![];
+        for a in &self.attributes.0 {
+            if a.typ.required() && !known.contains(&a.typ) && !unknown.contains(&a.typ) {
+                unknown.push(a.typ);
+            }
+        }
+        unknown
     }
 
     /// Resets the message and applies `setters` to it in order, returning on the first
