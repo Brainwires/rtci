@@ -260,6 +260,11 @@ pub use cc::interceptor::{
     CongestionControlBuilder, CongestionControlHandle, CongestionControlInterceptor,
     DEFAULT_PRUNE_HORIZON as CONGESTION_CONTROL_DEFAULT_PRUNE_HORIZON, REMB_TIMEOUT,
 };
+pub use cc::probe::{
+    PROBE_AFTER_DROP_TIMEOUT, PROBE_APPLICATION_LIMITED_INTERVAL, PROBE_MAX_OCTETS,
+    PROBE_MIN_DURATION, PROBE_MIN_PACKETS, PROBE_RESULT_TIMEOUT, ProbeController, ProbePacket,
+    ProbeRequest, probe_estimate,
+};
 pub use cc::tmmbr::{TMMBR_OWNER_TIMEOUT, TmmbEntry};
 pub use circuit_breaker::{
     CircuitBreakerBuilder, CircuitBreakerHandle, CircuitBreakerInterceptor, CircuitBreakerReason,
@@ -308,6 +313,10 @@ pub use gcc::loss::{
     DEFAULT_LOW_LOSS as GCC_LOW_LOSS, LossController,
 };
 pub use gcc::overuse::{DEFAULT_OVERUSE_TIME as GCC_DEFAULT_OVERUSE_TIME, OveruseDetector, Usage};
+pub use gcc::queue_limit::{
+    QUEUE_AT_LIMIT_MIN_DELAY, QUEUE_AT_LIMIT_SHARE, QUEUE_BASE_WINDOW, QUEUE_HIGH_WINDOW,
+    QueueLimitDetector,
+};
 pub use gcc::rate_calc::{DEFAULT_WINDOW as GCC_RATE_WINDOW, RateCalculator};
 pub use gcc::rate_control::{
     DEFAULT_DECREASE_FACTOR as GCC_DECREASE_FACTOR, DEFAULT_INCREASE_FACTOR as GCC_INCREASE_FACTOR,
@@ -336,7 +345,7 @@ pub use nack::generator::{
     DEFAULT_MAX_PACKET_AGE as NACK_DEFAULT_MAX_PACKET_AGE, NackGeneratorBuilder,
     NackGeneratorInterceptor,
 };
-pub use nack::responder::{NackResponderBuilder, NackResponderInterceptor};
+pub use nack::responder::{NackResponderBuilder, NackResponderInterceptor, PROBE_PADDING_OCTETS};
 pub use noop::NoopInterceptor;
 pub use pacing::pacer::{
     BURST_TIME as PACER_BURST_TIME, MIN_BURST_BITS as PACER_MIN_BURST_BITS, Pacer,

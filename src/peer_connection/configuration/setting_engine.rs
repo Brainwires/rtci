@@ -400,7 +400,9 @@ pub struct SettingEngine {
     pub(crate) replay_protection: ReplayProtection,
     pub(crate) sdp_media_level_fingerprints: bool,
     pub(crate) disable_sdp_tls_id: bool,
-    pub(crate) dtls_use_srtp_on_every_association: bool,
+    /// `use_srtp` only on an association that carries SRTP media (RFC 5764 section 4.1);
+    /// inverted so that the derived `Default` is the browsers' form, the default.
+    pub(crate) dtls_use_srtp_only_with_media: bool,
     pub(crate) accept_lowercase_fingerprints: bool,
     /// Answers and subsequent offers repeat the BUNDLE attributes in every bundled m=
     /// section instead of carrying them in the tagged one only (RFC 9143 section 7.1.3); see
@@ -1453,21 +1455,20 @@ impl SettingEngineBuilder {
         self
     }
 
-    /// Offers the DTLS `use_srtp` extension on every association, as browsers do, instead of
-    /// only on one that carries SRTP media.
+    /// Offers the DTLS `use_srtp` extension on every association, as browsers do (the
+    /// default), or, with `false`, only on one that carries SRTP media.
     ///
     /// RFC 5764 section 4.1: "The use_srtp extension MUST only be used when the data being
-    /// transported is RTP or RTCP". By default the engine follows it: as the DTLS client it
+    /// transported is RTP or RTCP". With `false` the engine follows it: as the DTLS client it
     /// offers `use_srtp` when the session has an audio or video section, and a
-    /// data-channel-only session is set up without it. When such a session gains a media
+    /// data-channel-only session is set up without it; when such a session gains a media
     /// section later, a new DTLS association is established for it (the offer carries a new
-    /// `a=tls-id`, RFC 8842): a peer that does not act on `tls-id`, a browser for one, will
-    /// not follow, and the media cannot flow. (As the DTLS server the engine takes a profile
-    /// whenever the client offers one.)
-    ///
-    /// Set `true` to talk to such peers when media may be added to a data-channel-only
-    /// session, or to peers that refuse an association without `use_srtp` (pion-lineage
-    /// stacks fail their DTLS transport when no SRTP profile was negotiated).
+    /// `a=tls-id`, RFC 8842). No browser acts on that `tls-id`: Chromium, Firefox and WebKit
+    /// keep the first association, so the engine's new handshake never completes and neither
+    /// the media nor the data channels flow afterwards (the browser matrix's "Rust offers
+    /// media", "rollback" and "glare" cells, train round 8). The browsers' form is therefore
+    /// the default, and the RFC form the setting, for peers that handle `tls-id` (this engine
+    /// does). (As the DTLS server the engine takes a profile whenever the client offers one.)
     ///
     /// # Examples
     ///
@@ -1479,7 +1480,7 @@ impl SettingEngineBuilder {
     ///     .build();
     /// ```
     pub fn with_dtls_use_srtp_on_every_association(mut self, on_every_association: bool) -> Self {
-        self.0.dtls_use_srtp_on_every_association = on_every_association;
+        self.0.dtls_use_srtp_only_with_media = !on_every_association;
         self
     }
 

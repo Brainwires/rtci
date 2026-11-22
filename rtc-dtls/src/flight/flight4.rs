@@ -578,6 +578,20 @@ impl Flight for Flight4 {
         // RFC 5746 3.6: an empty renegotiation_info when the client signalled secure
         // renegotiation, by the extension or by the signalling suite (the one case where the
         // ClientHello need not have carried the type).
+        // RFC 9146 section 3: the client offered connection ids and this server has them
+        // configured: its own, which may be empty, goes in the ServerHello, and from the
+        // first protected record on both use `tls12_cid` records where the receiver's
+        // connection id is not empty.
+        if state.remote_connection_id.is_some() {
+            if state.local_connection_id.is_none() {
+                state.local_connection_id = cfg.connection_id_offer();
+            }
+            if let Some(connection_id) = &state.local_connection_id {
+                extensions.push(Extension::connection_id(connection_id));
+            } else {
+                state.remote_connection_id = None;
+            }
+        }
         if state.secure_renegotiation {
             extensions.push(Extension::RenegotiationInfo(
                 ExtensionRenegotiationInfo::default(),

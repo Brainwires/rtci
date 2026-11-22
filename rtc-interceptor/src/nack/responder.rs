@@ -3,11 +3,13 @@
 use super::send_buffer::SendBuffer;
 use super::stream_supports_nack;
 use crate::Interceptor;
+use crate::cc::probe::ProbeRequest;
 use crate::stream_info::StreamInfo;
 use crate::{Attribute, AttributedPacket, Packet, TaggedPacket};
 use sansio::Protocol;
 use shared::TransportContext;
 use shared::error::Error;
+use shared::marshal::MarshalSize;
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
@@ -95,6 +97,8 @@ struct LocalStream {
     payload_type_rtx: Option<u8>,
     /// Sequence number counter for RTX packets.
     rtx_sequence_number: u16,
+    /// The sequence number of the packet sent last, and when.
+    last_sent: Option<(u16, Instant)>,
     /// When each sequence number was last retransmitted, so a repeated NACK within
     /// [`MIN_RETRANSMIT_INTERVAL`] does not resend it again.
     last_retransmit: HashMap<u16, Instant>,
@@ -113,6 +117,16 @@ struct LocalStream {
     /// number modulo the buffer size), with the sequence number the entry is for.
     sent_at: Vec<Option<(u16, Instant)>>,
 }
+
+/// The most octets one probe cluster is filled with.
+const MAX_PROBE_FILL_OCTETS: usize = crate::cc::probe::PROBE_MAX_OCTETS;
+
+/// The most packets one probe cluster is filled with.
+const MAX_PROBE_FILL_PACKETS: usize = 128;
+
+/// The padding octets of one probe packet: the most RFC 3550 section 5.1 padding holds (its
+/// count is one octet).
+pub const PROBE_PADDING_OCTETS: u8 = 255;
 
 /// A sequence number is retransmitted at most once per this interval, however often it is
 /// NACKed. Receivers repeat NACKs while the repair is in flight; without this a peer can make
@@ -171,6 +185,65 @@ impl NackResponderInterceptor {
             rtx_sequence_numbers: HashMap::new(),
             write_queue: VecDeque::new(),
             retransmissions_queued: 0,
+        }
+    }
+
+    /// Fills a probe cluster ([`ProbeRequest`]) with padding-only packets on the RTX stream of
+    /// the media stream that sent most recently.
+    ///
+    /// A probe needs a burst of packets at a multiple of the target rate, and an application
+    /// that follows the target does not have one waiting. Each packet is an RTP packet of the
+    /// RTX stream with no payload and [`PROBE_PADDING_OCTETS`] of padding (RFC 3550 section
+    /// 5.1): an RTX packet too short to hold the original sequence number of RFC 4588 section
+    /// 4 carries no media, and every receiver drops it after its transport-wide sequence
+    /// number has been recorded (this crate's endpoint, libwebrtc's `RtxReceiveStream`). A
+    /// retransmission of a packet already delivered would be a duplicate the receiving
+    /// application may play twice. The header is the newest packet's, with its extensions
+    /// (MID, the repaired RID in place of the RID), so the packet is demultiplexed as that
+    /// stream's repair flow. Without RTX negotiated nothing is added: padding under the media
+    /// SSRC would take sequence numbers the application owns. Not charged to the NACK budget:
+    /// it answers no NACK.
+    fn fill_probe(&mut self, now: Instant, request: &ProbeRequest) {
+        let Some(stream) = self
+            .streams
+            .values_mut()
+            .filter(|stream| stream.ssrc_rtx.is_some() && stream.payload_type_rtx.is_some())
+            .filter(|stream| stream.last_sent.is_some())
+            .max_by_key(|stream| stream.last_sent.map(|(_, at)| at))
+        else {
+            return;
+        };
+        let (Some(ssrc_rtx), Some(pt_rtx), Some((newest, _))) =
+            (stream.ssrc_rtx, stream.payload_type_rtx, stream.last_sent)
+        else {
+            return;
+        };
+
+        // The newest packet still held gives the header.
+        let Some(template) = stream.send_buffer.get(newest).cloned() else {
+            return;
+        };
+
+        let wanted = request.octets.min(MAX_PROBE_FILL_OCTETS);
+        let mut filled = 0usize;
+        for _ in 0..MAX_PROBE_FILL_PACKETS {
+            if filled >= wanted || self.retransmissions_queued >= MAX_QUEUED_RETRANSMISSIONS {
+                break;
+            }
+            let packet = padding_packet(
+                &mut stream.rtx_sequence_number,
+                (stream.rid_extension_id, stream.repaired_rid_extension_id),
+                &template,
+                ssrc_rtx,
+                pt_rtx,
+            );
+            filled += packet.marshal_size();
+            self.retransmissions_queued += 1;
+            self.write_queue.push_back(TaggedPacket {
+                now,
+                transport: TransportContext::default(),
+                message: AttributedPacket::new(Packet::Rtp(packet)).with(Attribute::Retransmission),
+            });
         }
     }
 
@@ -243,46 +316,13 @@ impl NackResponderInterceptor {
             let packet = if let (Some(ssrc_rtx), Some(pt_rtx)) =
                 (stream.ssrc_rtx, stream.payload_type_rtx)
             {
-                // RFC4588: Create RTX packet
-                // - Use RTX SSRC and payload type
-                // - Prepend original sequence number (2 bytes big-endian) to payload
-                // - Use separate RTX sequence number counter
-                let original_seq = original_packet.header.sequence_number;
-                let mut rtx_payload = Vec::with_capacity(2 + original_packet.payload.len());
-                rtx_payload.extend_from_slice(&original_seq.to_be_bytes());
-                rtx_payload.extend_from_slice(&original_packet.payload);
-
-                let rtx_seq = stream.rtx_sequence_number;
-                stream.rtx_sequence_number = stream.rtx_sequence_number.wrapping_add(1);
-
-                // RFC 4588 4: the RTX packet carries the original's header "as is" apart from
-                // the SSRC, payload type and sequence number, so its CSRCs and header extensions
-                // (audio level, abs-send-time, mid, ...) go with it. Building a fresh header used
-                // to drop them. Version is set explicitly: a buffered packet built with a
-                // defaulted header is version 0, which receivers discard on arrival. Padding is
-                // not carried: the RTX payload is the original payload alone.
-                let mut header = original_packet.header.clone();
-                header.version = 2;
-                header.ssrc = ssrc_rtx;
-                header.payload_type = pt_rtx;
-                header.sequence_number = rtx_seq;
-                header.padding = false;
-                // RFC 8852 3.2: a repair packet names the stream it repairs with the
-                // repaired-RID, not the RID, so a receiver never takes the RTX SSRC for a
-                // simulcast layer of its own.
-                if let Some(rid_id) = stream.rid_extension_id
-                    && let Some(rid) = header.get_extension(rid_id)
-                {
-                    let _ = header.del_extension(rid_id);
-                    if let Some(repaired_id) = stream.repaired_rid_extension_id {
-                        let _ = header.set_extension(repaired_id, rid);
-                    }
-                }
-
-                rtp::Packet {
-                    header,
-                    payload: rtx_payload.into(),
-                }
+                rtx_packet(
+                    &mut stream.rtx_sequence_number,
+                    (stream.rid_extension_id, stream.repaired_rid_extension_id),
+                    original_packet,
+                    ssrc_rtx,
+                    pt_rtx,
+                )
             } else {
                 // No RTX: retransmit original packet as-is
                 original_packet.clone()
@@ -301,6 +341,78 @@ impl NackResponderInterceptor {
     }
 }
 
+/// The RTX packet (RFC 4588 section 4) that carries `original` again: the RTX SSRC and
+/// payload type, the next sequence number of the RTX stream, and the original sequence number
+/// ahead of the payload.
+fn rtx_packet(
+    rtx_sequence_number: &mut u16,
+    rid_extension_ids: (Option<u8>, Option<u8>),
+    original_packet: &rtp::Packet,
+    ssrc_rtx: u32,
+    pt_rtx: u8,
+) -> rtp::Packet {
+    let (rid_extension_id, repaired_rid_extension_id) = rid_extension_ids;
+    let original_seq = original_packet.header.sequence_number;
+    let mut rtx_payload = Vec::with_capacity(2 + original_packet.payload.len());
+    rtx_payload.extend_from_slice(&original_seq.to_be_bytes());
+    rtx_payload.extend_from_slice(&original_packet.payload);
+
+    let rtx_seq = *rtx_sequence_number;
+    *rtx_sequence_number = rtx_sequence_number.wrapping_add(1);
+
+    // RFC 4588 4: the RTX packet carries the original's header "as is" apart from the SSRC,
+    // payload type and sequence number, so its CSRCs and header extensions (audio level,
+    // abs-send-time, mid, ...) go with it. Building a fresh header used to drop them. Version
+    // is set explicitly: a buffered packet built with a defaulted header is version 0, which
+    // receivers discard on arrival. Padding is not carried: the RTX payload is the original
+    // payload alone.
+    let mut header = original_packet.header.clone();
+    header.version = 2;
+    header.ssrc = ssrc_rtx;
+    header.payload_type = pt_rtx;
+    header.sequence_number = rtx_seq;
+    header.padding = false;
+    // RFC 8852 3.2: a repair packet names the stream it repairs with the repaired-RID, not
+    // the RID, so a receiver never takes the RTX SSRC for a simulcast layer of its own.
+    if let Some(rid_id) = rid_extension_id
+        && let Some(rid) = header.get_extension(rid_id)
+    {
+        let _ = header.del_extension(rid_id);
+        if let Some(repaired_id) = repaired_rid_extension_id {
+            let _ = header.set_extension(repaired_id, rid);
+        }
+    }
+
+    rtp::Packet {
+        header,
+        payload: rtx_payload.into(),
+    }
+}
+
+/// A padding-only packet of the RTX stream (a bandwidth probe): `template`'s header on the RTX
+/// SSRC and payload type with the next RTX sequence number, no payload, and
+/// [`PROBE_PADDING_OCTETS`] of padding.
+fn padding_packet(
+    rtx_sequence_number: &mut u16,
+    rid_extension_ids: (Option<u8>, Option<u8>),
+    template: &rtp::Packet,
+    ssrc_rtx: u32,
+    pt_rtx: u8,
+) -> rtp::Packet {
+    let mut packet = rtx_packet(
+        rtx_sequence_number,
+        rid_extension_ids,
+        template,
+        ssrc_rtx,
+        pt_rtx,
+    );
+    packet.payload = bytes::Bytes::new();
+    packet.header.marker = false;
+    packet.header.padding = true;
+    packet.header.padding_size = PROBE_PADDING_OCTETS;
+    packet
+}
+
 impl Protocol<TaggedPacket, TaggedPacket, ()> for NackResponderInterceptor {
     type Rout = TaggedPacket;
     type Wout = TaggedPacket;
@@ -309,6 +421,11 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for NackResponderInterceptor {
     type Time = Instant;
 
     fn handle_read(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
+        // A probe cluster the congestion controller asks for: fill it.
+        if let Some(request) = msg.message.custom::<ProbeRequest>().copied() {
+            self.fill_probe(msg.now, &request);
+        }
+
         // Process NACK packets
         if let Packet::Rtcp(ref rtcp_packets) = msg.message.packet {
             for rtcp_packet in rtcp_packets {
@@ -346,6 +463,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for NackResponderInterceptor {
             && let Some(stream) = self.streams.get_mut(&rtp_packet.header.ssrc)
         {
             stream.send_buffer.add(rtp_packet.clone());
+            stream.last_sent = Some((rtp_packet.header.sequence_number, msg.now));
             let slot = usize::from(rtp_packet.header.sequence_number) % stream.sent_at.len();
             stream.sent_at[slot] = Some((rtp_packet.header.sequence_number, msg.now));
             stream.retransmit_budget =
@@ -394,6 +512,7 @@ impl Interceptor for NackResponderInterceptor {
                     ssrc_rtx: info.ssrc_rtx,
                     payload_type_rtx: info.payload_type_rtx,
                     rtx_sequence_number,
+                    last_sent: None,
                     last_retransmit: HashMap::new(),
                     rid_extension_id: extension_id(info, RTP_STREAM_ID_URI),
                     repaired_rid_extension_id: extension_id(info, REPAIRED_RTP_STREAM_ID_URI),

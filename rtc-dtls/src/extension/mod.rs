@@ -95,7 +95,38 @@ pub enum Extension {
     },
 }
 
+/// The `connection_id` extension type (RFC 9146 section 3, RFC 9147 section 9).
+pub(crate) const EXTENSION_CONNECTION_ID: u16 = 54;
+
 impl Extension {
+    /// A `connection_id` extension (RFC 9146 section 3): `opaque cid<0..2^8-1>`, the
+    /// connection id the sender wants in the records it receives.
+    pub(crate) fn connection_id(connection_id: &[u8]) -> Self {
+        let mut data = vec![connection_id.len() as u8];
+        data.extend_from_slice(connection_id);
+        Extension::Unknown {
+            extension_type: EXTENSION_CONNECTION_ID,
+            data,
+        }
+    }
+
+    /// The connection id of a `connection_id` extension: `None` for another extension,
+    /// an error when its contents are not one length-prefixed connection id.
+    pub(crate) fn as_connection_id(&self) -> Option<Result<&[u8]>> {
+        match self {
+            Extension::Unknown {
+                extension_type: EXTENSION_CONNECTION_ID,
+                data,
+            } => Some(match data.split_first() {
+                Some((length, connection_id)) if usize::from(*length) == connection_id.len() => {
+                    Ok(connection_id)
+                }
+                _ => Err(Error::Other("malformed connection_id extension".to_owned())),
+            }),
+            _ => None,
+        }
+    }
+
     /// The extension type code point this value is carried under.
     pub fn extension_type(&self) -> u16 {
         match self {

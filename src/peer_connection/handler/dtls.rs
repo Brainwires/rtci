@@ -1184,4 +1184,41 @@ mod tests {
         }
         Ok(())
     }
+
+    /// RFC 9147 section 5.8.2: the client's retransmission timer starts at 400 ms, the value
+    /// for DTLS-SRTP, unless ICE has measured the round trip time of the selected pair; then
+    /// at 1.5 times that, and never under 100 ms.
+    #[test]
+    fn the_client_flight_interval_follows_the_ice_round_trip_time() -> Result<()> {
+        use std::time::Duration;
+        for (round_trip_time, expected) in [
+            (None, Duration::from_millis(400)),
+            (Some(0.2), Duration::from_millis(300)),
+            (Some(0.01), Duration::from_millis(100)),
+        ] {
+            let mut pair = HandlerAndPeer::new(RTCDtlsRole::Client, vec![], false)?;
+            if let Some(round_trip_time) = round_trip_time {
+                pair.stats.transport.selected_candidate_pair_id = "pair".to_owned();
+                pair.stats.ice_candidate_pairs.insert(
+                    "pair".to_owned(),
+                    crate::statistics::accumulator::IceCandidatePairAccumulator {
+                        current_round_trip_time: round_trip_time,
+                        ..Default::default()
+                    },
+                );
+            }
+            let error = pair.run();
+            assert!(error.is_none(), "{round_trip_time:?}: {error:?}");
+            assert_eq!(
+                pair.context.dtls_transport.flight_interval,
+                Some(expected),
+                "{round_trip_time:?}"
+            );
+            assert_eq!(
+                pair.context.dtls_transport.state(),
+                RTCDtlsTransportState::Connected
+            );
+        }
+        Ok(())
+    }
 }

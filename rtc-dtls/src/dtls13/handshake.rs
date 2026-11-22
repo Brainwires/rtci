@@ -442,7 +442,7 @@ impl Conn13 {
         if let Some(group) = group {
             // Section 4.2.8: the group is one this client supports and sent no share for.
             let curve = NamedCurve::from(group);
-            if !self.cfg.local_named_curves.contains(&curve)
+            if !self.cfg.local_tls13_groups.contains(&curve)
                 || offer
                     .key_shares
                     .iter()
@@ -804,14 +804,12 @@ impl Conn13 {
         let Some(client_share) = &negotiated.client_share else {
             return Err(internal(Error::ErrNoSupportedEllipticCurves));
         };
-        let mut keypair = negotiated
+        // RFC 8446 section 4.2.8.2: a share that is not a valid point (or, for the hybrid
+        // group, not a key of the right form) is an illegal_parameter.
+        let (server_share, shared_secret) = negotiated
             .group
-            .generate_keypair_with_crypto(self.provider.crypto())
-            .map_err(internal)?;
-        let server_share = keypair.public_key.clone();
-        // RFC 8446 section 4.2.8.2: a share that is not a valid point is an
-        // illegal_parameter.
-        let shared_secret = SecretVec::new(keypair.complete(client_share).map_err(illegal)?);
+            .respond_with_crypto(self.provider.crypto(), client_share)
+            .map_err(illegal)?;
 
         // Connection ids (RFC 9146 section 3, RFC 9147 section 9): only if both sides use
         // the extension.

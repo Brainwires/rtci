@@ -211,6 +211,12 @@ fn the_record_expansion_of_each_suite_is_what_its_records_add() {
                 Some(exact) => {
                     assert_eq!(expansion, exact, "{suite}");
                     assert_eq!(added, expansion, "{suite}, {len} bytes");
+                    // What the connection reports for the layer above: header and expansion.
+                    assert_eq!(
+                        client.record_overhead(),
+                        Some(record.len() - len),
+                        "{suite}, {len} bytes"
+                    );
                 }
                 None => assert!(added <= expansion, "{suite}, {len} bytes: {added}"),
             }
