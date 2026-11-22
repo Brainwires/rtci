@@ -307,6 +307,11 @@ fn a_rolled_back_ice_restart_offer_leaves_the_ice_session_as_it_was() -> Result<
     // The answer it would make carries new credentials, staged for it.
     let restart_answer = world.peers[1].pc.create_answer(None)?;
     assert_ne!(attribute(&restart_answer.sdp, "ice-ufrag"), ufrag);
+    assert!(
+        restart_answer.sdp.contains("a=candidate:"),
+        "the restart keeps the local candidates, so its answer lists them: {}",
+        restart_answer.sdp
+    );
     world.peers[1]
         .pc
         .set_local_description(world.now, rollback())?;
