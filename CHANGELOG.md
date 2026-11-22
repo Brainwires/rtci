@@ -56,11 +56,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **sctp**: the Forward-TSN-Supported parameter (RFC 3758 section 3.3) is honoured in an INIT
   as it was in an INIT ACK.
 
+- **sctp**: the association checks the Verification Tag of what it receives (RFC 9260
+  sections 8.5, 8.5.1): its own tag, 0 for a lone INIT, and for ABORT and SHUTDOWN COMPLETE
+  its own tag or the peer's with the T bit. The T bit was never read, and nothing but the
+  endpoint's routing looked at the tag. A packet that carries an ABORT is not answered.
+- **sctp**: packets that belong to no association are handled as RFC 9260 section 8.4 says: a
+  SHUTDOWN ACK is answered with SHUTDOWN COMPLETE and anything else that calls for it with
+  ABORT, the tag reflected and the T bit set; `Endpoint::poll_transmit` returns the answers.
+  A SHUTDOWN ACK received while an association is being set up is answered the same way.
+- **sctp**: ABORT is sent where RFC 9260 asks for one: an INIT the endpoint cannot accept
+  (to its Initiate Tag), an INIT or INIT ACK with invalid values, a Host Name Address, an INIT
+  ACK without a State Cookie, a SACK that acknowledges a TSN never sent ("Protocol
+  Violation"). These were dropped or closed the association without a word to the peer, and
+  a SACK with a Cumulative TSN Ack past the last TSN sent was ignored.
+- **sctp**: a State Cookie has a lifetime (`TransportConfig::with_valid_cookie_life`, 60 s):
+  echoed later it is refused with "Stale Cookie", and the side that receives that error in
+  COOKIE-ECHOED starts over with a new INIT (RFC 9260 sections 5.1.5, 5.2.6). A COOKIE ECHO
+  with a cookie that was not sent, or between other ports, has its whole packet discarded;
+  the cookie of the association that exists is acknowledged again in every state.
+- **sctp**: an INIT that crosses this side's own is answered without touching the TCB, and
+  the peer's tag is taken when the cookie comes back (RFC 9260 sections 5.2.1, 5.2.4 B). It
+  overwrote the peer's tag, ports, window and stream counts at once.
+- **sctp**: the first DATA chunk of an association and DATA bundled with the COOKIE ECHO are
+  acknowledged at once (RFC 9260 sections 5.1, 5.1.5).
+- **sctp**: shutdown (RFC 9260 section 9.2): DATA received in SHUTDOWN-SENT is answered at
+  once with a SACK and the SHUTDOWN again; a packet from the peer restarts the SHUTDOWN
+  retransmissions; a SHUTDOWN received in SHUTDOWN-PENDING is taken; T5-shutdown-guard (300
+  s) aborts a shutdown that never finishes; SHUTDOWN is retransmitted at most 10 times by
+  default (`TimerConfig::max_t2_shutdown_retrans`, it was unlimited).
+
 ### Features
 
 - **sctp**: `Stream::write_sctp_with_ppid` and `Chunks::ppid` for a Payload Protocol
   Identifier `PayloadProtocolIdentifier` has no name for; `PayloadProtocolIdentifier::number`;
   `ChunkPayloadData::ppid`; `Association::verification_tag`.
+- **sctp**: `Endpoint::poll_transmit` (the endpoint's answers to out-of-the-blue packets);
+  `TransportConfig::with_valid_cookie_life` / `valid_cookie_life`.
 - **fuzz**: `rtc-sctp` targets `association_handle_chunks` (an established association fed
   chunks, timers running) and `chunk_chunk_unknown_unmarshal`.
 
@@ -71,6 +102,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **sctp**: `Stream::write*` with an empty message returns an error.
 - **sctp**: `Association::open_stream` fails for a stream id at or past the negotiated
   outbound stream count.
+- **sctp**: `TimerConfig::default().max_t2_shutdown_retrans` is 10, not unlimited.
+- **sctp**: a SACK for a TSN never sent, and an INIT ACK without a State Cookie, end the
+  association with an ABORT (`TransportError`, `HandshakeFailed`).
 
 ## [0.22.0+brainwires.5] - 2026-11-20
 
