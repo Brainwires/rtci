@@ -447,6 +447,21 @@ fn rtp_delivery(chain: Chain, count: u16) -> f64 {
         .map(|p| p.header.sequence_number)
         .filter(|&seq| seq.wrapping_sub(start_seq) < count)
         .collect();
+    if chain.nack {
+        // Which packets stayed lost tells a NACK failure from a start-up one: a receiver
+        // cannot ask for packets sent before the first it receives (RFC 4585 6.2.1 NACKs
+        // name gaps, and there is no gap before the first packet).
+        let first = (0..count).find(|n| seqs.contains(&start_seq.wrapping_add(*n)));
+        let missing: Vec<u16> = (0..count)
+            .filter(|n| !seqs.contains(&start_seq.wrapping_add(*n)))
+            .collect();
+        if !missing.is_empty() {
+            eprintln!(
+                "NACK: first packet received is #{first:?}; never received: {:?}",
+                &missing[..missing.len().min(32)]
+            );
+        }
+    }
     seqs.len() as f64 / count as f64
 }
 
