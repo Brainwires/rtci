@@ -254,6 +254,13 @@ pub const MIME_TYPE_ULP_FEC: &str = "video/ulpfec";
 /// Note: MIME type matching is case-insensitive.
 pub const MIME_TYPE_TELEPHONE_EVENT: &str = "audio/telephone-event";
 
+/// Comfort noise MIME type (RFC 3389).
+///
+/// Used for the noise parameters a sender of G.711 (or another codec without comfort noise of
+/// its own) sends during silence; static payload type 13 at 8000 Hz.
+/// Note: MIME type matching is case-insensitive.
+pub const MIME_TYPE_CN: &str = "audio/CN";
+
 /// SMPTE ST 336 (KLV) metadata MIME type
 ///
 /// Used for transmitting KLV (key-length-value) metadata.
@@ -493,6 +500,22 @@ impl MediaEngine {
                     rtcp_feedback: vec![],
                 },
                 payload_type: 8,
+            },
+            // Comfort noise (RFC 3389), which RFC 7874 section 3 has every WebRTC endpoint
+            // support "for streams encoded with G.711 or any other supported codec that does
+            // not provide its own CN": at 8000 Hz, the clock of G.711 and of G.722's RTP
+            // timestamps, on its static payload type (RFC 3389 section 4: "Other clock rates
+            // MUST use dynamic payload types", RFC 3551 table 4). None for Opus, which has its
+            // own (RFC 7874: RFC 3389 CN with Opus is "NOT RECOMMENDED").
+            RTCRtpCodecParameters {
+                rtp_codec: RTCRtpCodec {
+                    mime_type: MIME_TYPE_CN.to_owned(),
+                    clock_rate: 8000,
+                    channels: 0,
+                    sdp_fmtp_line: "".to_owned(),
+                    rtcp_feedback: vec![],
+                },
+                payload_type: 13,
             },
             // DTMF as named telephone events (RFC 4733), which RFC 7874 section 3 has every
             // WebRTC endpoint implement, with events 0 to 15, the DTMF digits. One format per

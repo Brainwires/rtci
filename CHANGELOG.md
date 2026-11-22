@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **jsep**: codec parameters.
+  - The default audio formats include comfort noise, `CN/8000` on payload type 13 (RFC 7874
+    section 3, RFC 3389): default audio offers have one more format. New `MIME_TYPE_CN`,
+    with a payloader. A track that names its codec keeps the telephone-event and CN formats on
+    that codec's clock in the offer (they were dropped). A CN or telephone-event packet the
+    application writes when its format is not negotiated is dropped, not rewritten to the
+    media payload type.
+  - Codec matching compares the channel count when both formats state one (RFC 7587 section
+    7: Opus is `opus/48000/2`; a remote `opus/48000/1` is not answered).
+  - H.264: an absent `packetization-mode` is 0 and an absent `profile-level-id` is `42000a`
+    (RFC 6184 section 8.1); profiles compare by RFC 6184 Table 5, so `42e01f` and `4d801f`
+    (both Constrained Baseline) match. Offers without these parameters are now answered.
+  - AV1: formats match by `profile` (absent: 0), and an answer states this endpoint's own
+    `level-idx` / `tier` (AV1 RTP section 7.2); a remote `profile=1` no longer matches a
+    `profile=0` codec.
 - **jsep**: header extensions per RFC 8285, RFC 6904, RFC 6464 and RFC 6465.
   - Ids up to 255: offers take 1 to 14, then 16 to 255 (never 15), and up to 254 extensions
     can be registered (`ErrRegisterHeaderExtensionNoFreeID` beyond that; it was 15).

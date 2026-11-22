@@ -2965,9 +2965,33 @@ impl RTCPeerConnection {
 
         // The encodings name media codecs; the repair formats that accompany them (RTX for a
         // named primary, FEC, RED) stay offered, so they are listed too (a preference list
-        // keeps only the repair kinds it lists, RTCRtpReceiverInternal::get_codecs).
+        // keeps only the repair kinds it lists, RTCRtpReceiverInternal::get_codecs). So do
+        // the formats that run in the stream of an audio codec on its clock: telephone events
+        // (RFC 4733 section 2.1, which RFC 7874 section 3 has every WebRTC endpoint support)
+        // and comfort noise (RFC 3389 section 5, required with G.711 by RFC 7874 section 3).
+        let named_clock_rates: Vec<u32> = codec_preferences
+            .iter()
+            .map(|c| c.rtp_codec.clock_rate)
+            .collect();
+        let rides_the_stream = |codec: &RTCRtpCodecParameters| {
+            let mime_type = &codec.rtp_codec.mime_type;
+            use crate::peer_connection::configuration::media_engine::{
+                MIME_TYPE_CN, MIME_TYPE_TELEPHONE_EVENT,
+            };
+            (mime_type.eq_ignore_ascii_case(MIME_TYPE_TELEPHONE_EVENT)
+                || mime_type.eq_ignore_ascii_case(MIME_TYPE_CN))
+                && named_clock_rates.contains(&codec.rtp_codec.clock_rate)
+        };
         if !codec_preferences.is_empty() {
             for codec in &media_engine_codecs {
+                if rides_the_stream(codec)
+                    && !codec_preferences
+                        .iter()
+                        .any(|preference| preference.payload_type == codec.payload_type)
+                {
+                    codec_preferences.push(codec.clone());
+                    continue;
+                }
                 if !is_repair_codec(&codec.rtp_codec)
                     || codec_preferences
                         .iter()

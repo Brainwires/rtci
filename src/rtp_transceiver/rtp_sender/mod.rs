@@ -511,6 +511,24 @@ impl RTCRtpSender<'_> {
             return Err(Error::ErrSenderWithNoSSRCs);
         }
 
+        // The payload types of comfort noise (13, and any the application registered) and of
+        // telephone events: formats that ride an audio stream and are not media.
+        let auxiliary_payload_types: Vec<u8> = std::iter::once(13)
+            .chain(
+                media_engine
+                    .audio_codecs
+                    .iter()
+                    .filter(|codec| {
+                        let mime_type = &codec.rtp_codec.mime_type;
+                        mime_type.eq_ignore_ascii_case(
+                            crate::peer_connection::configuration::media_engine::MIME_TYPE_CN,
+                        ) || mime_type.eq_ignore_ascii_case(
+                            crate::peer_connection::configuration::media_engine::MIME_TYPE_TELEPHONE_EVENT,
+                        )
+                    })
+                    .map(|codec| codec.payload_type),
+            )
+            .collect();
         let mixed = sender.extmap_allow_mixed();
         let two_byte_stream = sender.is_two_byte_stream(packet.header.ssrc);
         let parameters = sender.get_parameters(media_engine);
@@ -544,6 +562,18 @@ impl RTCRtpSender<'_> {
             .iter()
             .any(|codec| codec.payload_type == packet.header.payload_type)
         {
+            // A comfort noise or telephone event packet whose format this leg did not
+            // negotiate is not media: rewritten to the media payload type, its noise
+            // parameters or event would be decoded as audio (RFC 3389 section 5.1, RFC 4733
+            // section 2.1: each is sent only when its format was negotiated). It is dropped.
+            let pt = packet.header.payload_type;
+            if auxiliary_payload_types.contains(&pt) {
+                trace!(
+                    "rtp_sender {:?} drops RTP ssrc {} pt {}: comfort noise or telephone events, not negotiated on this sender leg",
+                    self.id, packet.header.ssrc, pt
+                );
+                return Ok(());
+            }
             // An encoding that names no codec is sent with the one negotiation picked, as its
             // stream is bound (`encoding_send_codec`); one that names a codec, with that codec.
             let Some(codec) = encoding_send_codec(&encoding.codec, codecs) else {
