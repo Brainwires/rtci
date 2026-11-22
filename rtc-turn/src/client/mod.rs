@@ -1060,15 +1060,15 @@ impl Client {
         to: SocketAddr,
     ) -> Result<TransactionId> {
         let msg = {
-            let attrs: Vec<Box<dyn Setter + '_>> = if !self.software.text.is_empty() {
-                vec![
-                    Box::new(TransactionId::new()),
-                    Box::new(BINDING_REQUEST),
-                    Box::new(self.software.clone()),
-                ]
-            } else {
-                vec![Box::new(TransactionId::new()), Box::new(BINDING_REQUEST)]
-            };
+            // RFC 8489 section 7: "When the FINGERPRINT extension is used, an agent includes
+            // the FINGERPRINT attribute in messages it sends to another agent": the client
+            // ends every other message with it, and this one shares their socket.
+            let mut attrs: Vec<Box<dyn Setter + '_>> =
+                vec![Box::new(TransactionId::new()), Box::new(BINDING_REQUEST)];
+            if !self.software.text.is_empty() {
+                attrs.push(Box::new(self.software.clone()));
+            }
+            attrs.push(Box::new(FINGERPRINT));
 
             let mut msg = Message::new();
             msg.build(&attrs)?;
