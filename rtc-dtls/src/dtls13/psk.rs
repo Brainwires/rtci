@@ -7,7 +7,7 @@ use super::key_schedule::{DTLS13_LABEL_PREFIX, KeySchedule, Transcript};
 use super::messages::CLIENT_HELLO;
 use super::suite::Suite13;
 use crate::cipher_suite::{CipherSuiteHash, CipherSuiteId};
-use crate::session::{ExternalPsk, MAX_TICKET_LIFETIME, Tls13Session};
+use crate::session::{Dtls12Session, ExternalPsk, MAX_TICKET_LIFETIME, Tls13Session};
 use crypto::{AeadAlgorithm, HashAlgorithm, RTCCrypto, RTCCryptoProvider, SecretVec};
 use shared::error::{Error, Result};
 use std::collections::HashMap;
@@ -34,6 +34,12 @@ const TICKET_NONCE_LEN: usize = 12;
 const TICKET_TAG_LEN: usize = 16;
 const TICKET_KEY_LEN: usize = 32;
 const TICKET_AAD: &[u8] = b"rtc-dtls dtls13 ticket";
+/// A DTLS 1.2 ticket (RFC 5077) has a version and additional data of its own, so that the
+/// one kind can never be opened as the other.
+const DTLS12_TICKET_VERSION: u8 = 0x12;
+const DTLS12_TICKET_AAD: &[u8] = b"rtc-dtls dtls12 ticket";
+const DTLS12_TICKET_EMS: u8 = 1;
+const DTLS12_TICKET_PEER_VERIFIED: u8 = 2;
 
 fn crypto_error(error: crypto::CryptoError) -> Error {
     Error::Crypto(error.to_string())
@@ -394,8 +400,17 @@ impl TicketIssuer {
             }
         });
         plaintext.extend_from_slice(&max_early_data.to_be_bytes());
-        let plaintext = SecretVec::new(plaintext);
+        self.seal_plaintext(provider, TICKET_AAD, SecretVec::new(plaintext))
+    }
 
+    /// Encrypts `plaintext` under the issuer's key with a random nonce: nonce, ciphertext,
+    /// tag.
+    fn seal_plaintext(
+        &self,
+        provider: &dyn RTCCryptoProvider,
+        aad: &[u8],
+        plaintext: SecretVec,
+    ) -> Result<Vec<u8>> {
         let mut nonce = [0u8; TICKET_NONCE_LEN];
         provider.random().fill(&mut nonce).map_err(crypto_error)?;
         let mut aead = provider
@@ -405,24 +420,20 @@ impl TicketIssuer {
         let mut ticket = nonce.to_vec();
         ticket.extend_from_slice(plaintext.as_ref());
         let mut tag = [0u8; TICKET_TAG_LEN];
-        aead.seal_in_place(
-            &nonce,
-            TICKET_AAD,
-            &mut ticket[TICKET_NONCE_LEN..],
-            &mut tag,
-        )
-        .map_err(crypto_error)?;
+        aead.seal_in_place(&nonce, aad, &mut ticket[TICKET_NONCE_LEN..], &mut tag)
+            .map_err(crypto_error)?;
         ticket.extend_from_slice(&tag);
         Ok(ticket)
     }
 
-    /// Opens a ticket of this issuer. `None` for anything else: another server's ticket, a
-    /// forged or altered one, or one of an unknown version.
-    pub(crate) fn open(
+    /// Decrypts a ticket sealed by [`Self::seal_plaintext`] with `aad`: its id (the nonce)
+    /// and plaintext, `None` when it does not authenticate.
+    fn open_plaintext(
         &self,
         provider: &dyn RTCCryptoProvider,
+        aad: &[u8],
         ticket: &[u8],
-    ) -> Option<TicketContents> {
+    ) -> Option<([u8; TICKET_NONCE_LEN], SecretVec)> {
         if ticket.len() < TICKET_NONCE_LEN + TICKET_TAG_LEN + 1 {
             return None;
         }
@@ -433,8 +444,104 @@ impl TicketIssuer {
             .new_aead(AeadAlgorithm::Aes256Gcm, self.key.as_ref())
             .ok()?;
         let mut plaintext = SecretVec::new(ciphertext.to_vec());
-        aead.open_in_place(nonce, TICKET_AAD, plaintext.as_mut(), tag)
+        aead.open_in_place(nonce, aad, plaintext.as_mut(), tag)
             .ok()?;
+        let mut id = [0u8; TICKET_NONCE_LEN];
+        id.copy_from_slice(nonce);
+        Some((id, plaintext))
+    }
+
+    /// Seals a DTLS 1.2 session into a ticket (RFC 5077 section 4 recommends the contents:
+    /// the cipher suite, the master secret, the client's identity and when it was issued).
+    pub(crate) fn seal_dtls12(
+        &self,
+        provider: &dyn RTCCryptoProvider,
+        now: Instant,
+        session: &Dtls12Session,
+    ) -> Result<Vec<u8>> {
+        let mut plaintext = vec![DTLS12_TICKET_VERSION];
+        put_u16(&mut plaintext, session.cipher_suite as u16);
+        plaintext.extend_from_slice(&self.ms(now).to_be_bytes());
+        plaintext.extend_from_slice(&(self.lifetime.as_secs() as u32).to_be_bytes());
+        let mut flags = 0;
+        if session.extended_master_secret {
+            flags |= DTLS12_TICKET_EMS;
+        }
+        if session.peer_certificates_verified {
+            flags |= DTLS12_TICKET_PEER_VERIFIED;
+        }
+        plaintext.push(flags);
+        put_vec8(&mut plaintext, |out| {
+            out.extend_from_slice(session.master_secret.as_ref())
+        });
+        put_vec16(&mut plaintext, |out| {
+            out.extend_from_slice(session.server_name.as_bytes())
+        });
+        put_vec24(&mut plaintext, |list| {
+            for der in &session.peer_certificates {
+                put_vec24(list, |out| out.extend_from_slice(der));
+            }
+        });
+        self.seal_plaintext(provider, DTLS12_TICKET_AAD, SecretVec::new(plaintext))
+    }
+
+    /// Opens a DTLS 1.2 ticket of this issuer that is still valid at `now`: its id, when it
+    /// stops being valid (ms from the issuer's origin) and the session. `None` for anything
+    /// else: another server's ticket, a DTLS 1.3 one, a forged, altered or expired one.
+    pub(crate) fn open_dtls12(
+        &self,
+        provider: &dyn RTCCryptoProvider,
+        ticket: &[u8],
+        now: Instant,
+    ) -> Option<([u8; TICKET_NONCE_LEN], u64, Dtls12Session)> {
+        let (id, plaintext) = self.open_plaintext(provider, DTLS12_TICKET_AAD, ticket)?;
+        let mut reader = Reader::new(plaintext.as_ref());
+        let parse = |reader: &mut Reader<'_>| -> Result<(u64, Dtls12Session)> {
+            if reader.u8()? != DTLS12_TICKET_VERSION {
+                return Err(Error::ErrInvalidCipherSuite);
+            }
+            let cipher_suite = CipherSuiteId::from(reader.u16()?);
+            let issued_ms = reader.u64()?;
+            let lifetime = reader.u32()?;
+            let flags = reader.u8()?;
+            let master_secret = SecretVec::new(reader.vec8()?.to_vec());
+            let server_name = String::from_utf8(reader.vec16()?.to_vec())
+                .map_err(|_| Error::ErrInvalidSniFormat)?;
+            let mut chain_reader = Reader::new(reader.vec24()?);
+            let mut peer_certificates = vec![];
+            while !chain_reader.is_empty() {
+                peer_certificates.push(chain_reader.vec24()?.to_vec());
+            }
+            reader.finish()?;
+            let expires_ms = issued_ms.saturating_add(u64::from(lifetime) * 1000);
+            Ok((
+                expires_ms,
+                Dtls12Session {
+                    session_id: vec![],
+                    ticket: None,
+                    master_secret,
+                    cipher_suite,
+                    extended_master_secret: flags & DTLS12_TICKET_EMS != 0,
+                    peer_certificates,
+                    peer_certificates_verified: flags & DTLS12_TICKET_PEER_VERIFIED != 0,
+                    server_name,
+                    created: now,
+                    lifetime: Duration::from_secs(u64::from(lifetime)),
+                },
+            ))
+        };
+        let (expires_ms, session) = parse(&mut reader).ok()?;
+        (self.ms(now) < expires_ms).then_some((id, expires_ms, session))
+    }
+
+    /// Opens a ticket of this issuer. `None` for anything else: another server's ticket, a
+    /// forged or altered one, or one of an unknown version.
+    pub(crate) fn open(
+        &self,
+        provider: &dyn RTCCryptoProvider,
+        ticket: &[u8],
+    ) -> Option<TicketContents> {
+        let (id, plaintext) = self.open_plaintext(provider, TICKET_AAD, ticket)?;
         let mut reader = Reader::new(plaintext.as_ref());
         let parse = |reader: &mut Reader<'_>| -> Result<TicketContents> {
             if reader.u8()? != TICKET_VERSION {
@@ -454,8 +561,6 @@ impl TicketIssuer {
             }
             let max_early_data = reader.u32()?;
             reader.finish()?;
-            let mut id = [0u8; TICKET_NONCE_LEN];
-            id.copy_from_slice(nonce);
             Ok(TicketContents {
                 id,
                 suite,

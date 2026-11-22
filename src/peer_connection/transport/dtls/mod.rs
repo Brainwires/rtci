@@ -454,13 +454,16 @@ impl DtlsTransport {
                 // for DTLS-SRTP. A client that knows the round trip time of the selected
                 // pair from ICE starts from 1.5 times that instead (`DtlsHandler`).
                 .with_flight_interval(DTLS_SRTP_FLIGHT_INTERVAL)
-                // No session resumption (RFC 8446 section 2.2): WebRTC authenticates each
-                // association by the certificate fingerprints of its SDP (RFC 8827 section
-                // 6.5) and makes a new one per session, so a ticket would have no caller and
-                // a resumed handshake would carry no certificate to check. As a server this
-                // side issues no tickets (and accepts none: it has no key to open one with);
-                // as a client it keeps none and offers no PSK.
+                // No session resumption, in either version (RFC 8446 section 2.2, RFC 5246
+                // section 7.3): WebRTC authenticates each association by the certificate
+                // fingerprints of its SDP (RFC 8827 section 6.5) and makes a new one per
+                // session, so a ticket or session id would have no caller and a resumed
+                // handshake would carry no certificate to check. As a server this side issues
+                // no tickets and keeps no session cache (and so accepts no resumption: it has
+                // no key to open a ticket with and no session to find); as a client it keeps
+                // nothing and offers no PSK, session id or ticket.
                 .with_session_tickets(0)
+                .with_session_cache(None)
                 .with_session_store(None)
                 .with_external_psks(vec![])
                 .build(self.dtls_role == RTCDtlsRole::Client, None)?,
@@ -1754,6 +1757,138 @@ mod tests {
             "the certificate matches its sha-512 fingerprint"
         );
         assert!(!handshake(false)?, "another certificate's fingerprint");
+        Ok(())
+    }
+
+    /// RFC 5246 section 7.3 is not used by the engine (WebRTC authenticates each association by
+    /// its SDP fingerprints, RFC 8827 section 6.5): as a DTLS 1.2 client its ClientHello offers
+    /// no session id and asks for no ticket (RFC 5077); as a server it gives no session id and
+    /// no ticket, and a client that offers a session it holds from another server (by id and
+    /// by ticket) gets a full handshake.
+    #[test]
+    fn the_engine_neither_offers_nor_accepts_a_dtls12_resumption() -> Result<()> {
+        use ::dtls::config::{ConfigBuilder, DtlsVersion};
+        use ::dtls::endpoint::{Endpoint, EndpointEvent};
+        use ::dtls::session::{MemorySessionCache, MemorySessionStore, SessionCache};
+        use std::net::SocketAddr;
+
+        let provider = crypto::default_provider().map_err(|e| Error::Other(e.to_string()))?;
+        let client_addr: SocketAddr = "127.0.0.1:45011".parse().unwrap();
+        let server_addr: SocketAddr = "127.0.0.1:45012".parse().unwrap();
+
+        // The engine as the client: its first ClientHello.
+        let mut transport_client = transport(vec![]);
+        let engine_client = transport_client
+            .prepare_transport(RTCIceRole::Controlled, dummy_params(RTCDtlsRole::Server))?;
+        let mut client = Endpoint::new(client_addr, TransportProtocol::UDP, None);
+        client.connect(std::time::Instant::now(), server_addr, engine_client, None)?;
+        let hello = client.poll_transmit().expect("a ClientHello").message;
+        // Record header (13), handshake header (12), version (2), random (32).
+        let body = &hello[25..];
+        let session_id_length = body[34] as usize;
+        assert_eq!(session_id_length, 0, "no session id offered");
+        let mut at = 35;
+        at += 1 + body[at] as usize; // cookie
+        at += 2 + u16::from_be_bytes([body[at], body[at + 1]]) as usize; // cipher suites
+        at += 1 + body[at] as usize; // compression methods
+        let end = at + 2 + u16::from_be_bytes([body[at], body[at + 1]]) as usize;
+        at += 2;
+        let mut extension_types = vec![];
+        while at < end {
+            extension_types.push(u16::from_be_bytes([body[at], body[at + 1]]));
+            at += 4 + u16::from_be_bytes([body[at + 2], body[at + 3]]) as usize;
+        }
+        assert!(!extension_types.is_empty());
+        assert!(
+            !extension_types.contains(&35),
+            "no SessionTicket extension: {extension_types:?}"
+        );
+
+        // The engine as the server, against a DTLS 1.2 client that resumes where it can.
+        let client_certificate = ::dtls::crypto::Certificate::generate_self_signed(
+            vec!["localhost".into()],
+            provider.crypto(),
+        )?;
+        let hashed = provider
+            .crypto()
+            .hash(HashAlgorithm::Sha256, &client_certificate.certificate[0])
+            .map_err(|e| Error::Other(e.to_string()))?;
+        let fingerprint: Vec<String> = hashed.iter().map(|b| format!("{b:02x}")).collect();
+        let mut transport_server = transport(vec![]);
+        let engine_server = transport_server.prepare_transport(
+            RTCIceRole::Controlling,
+            RTCDtlsParameters {
+                role: RTCDtlsRole::Client,
+                fingerprints: vec![RTCDtlsFingerprint {
+                    algorithm: "sha-256".to_owned(),
+                    value: fingerprint.join(":"),
+                }],
+            },
+        )?;
+        let store = Arc::new(MemorySessionStore::new());
+        let client_config = Arc::new(
+            ConfigBuilder::default()
+                .with_crypto_provider(provider.clone())
+                .with_certificates(vec![client_certificate.clone()])
+                .with_srtp_protection_profiles(default_srtp_protection_profiles())
+                .with_insecure_skip_verify(true)
+                .with_server_name("localhost".to_owned())
+                .with_protocol_versions(DtlsVersion::Dtls1_2, DtlsVersion::Dtls1_2)
+                .with_session_store(Some(store.clone()))
+                .build(true, None)?,
+        );
+        let handshake = |server_config: Arc<::dtls::config::HandshakeConfig>| -> Result<bool> {
+            let mut client = Endpoint::new(client_addr, TransportProtocol::UDP, None);
+            let mut server =
+                Endpoint::new(server_addr, TransportProtocol::UDP, Some(server_config));
+            let now = std::time::Instant::now();
+            client.connect(now, server_addr, client_config.clone(), None)?;
+            let mut completed = false;
+            for _ in 0..8 {
+                while let Some(packet) = client.poll_transmit() {
+                    if let Ok(events) =
+                        server.read(now, client_addr, packet.transport.ecn, packet.message)
+                    {
+                        completed |= events
+                            .iter()
+                            .any(|e| matches!(e, EndpointEvent::HandshakeComplete));
+                    }
+                }
+                while let Some(packet) = server.poll_transmit() {
+                    let _ = client.read(now, server_addr, packet.transport.ecn, packet.message);
+                }
+            }
+            assert!(completed, "the handshake completes");
+            Ok(server
+                .get_connection_state(client_addr)
+                .is_some_and(|state| state.resumed()))
+        };
+
+        // Nothing to resume from the engine.
+        assert!(!handshake(engine_server.clone())?);
+        assert_eq!(store.len_dtls12("localhost"), 0, "no session id, no ticket");
+
+        // A session from a server that keeps one, offered to the engine: a full handshake.
+        let resuming_server = Arc::new(
+            ConfigBuilder::default()
+                .with_crypto_provider(provider.clone())
+                .with_certificates(vec![client_certificate])
+                .with_srtp_protection_profiles(default_srtp_protection_profiles())
+                .with_insecure_skip_verify(true)
+                .with_protocol_versions(DtlsVersion::Dtls1_2, DtlsVersion::Dtls1_2)
+                .with_session_cache(Some(
+                    Arc::new(MemorySessionCache::default()) as Arc<dyn SessionCache>
+                ))
+                .with_session_tickets(1)
+                .build(false, None)?,
+        );
+        assert!(!handshake(resuming_server.clone())?);
+        assert_eq!(store.len_dtls12("localhost"), 1);
+        assert!(
+            handshake(resuming_server.clone())?,
+            "that server resumes it"
+        );
+        assert!(!handshake(engine_server)?, "the engine does not");
         Ok(())
     }
 

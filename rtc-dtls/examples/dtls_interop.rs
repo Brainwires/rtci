@@ -17,10 +17,12 @@
 //!   handshake (DTLS 1.3).
 //! * `DTLS_SECONDS`: how long to run after starting (default 6).
 //! * `DTLS_TICKETS=<n>`: a server that sends `n` session tickets after each handshake
-//!   (DTLS 1.3), and takes them back in later ones.
-//! * `DTLS_RESUME=1`: a client that keeps the tickets it is sent and, 1.5 s after its first
-//!   handshake, closes the association and makes a second one from the same port, which
-//!   offers one of them.
+//!   (DTLS 1.3; one RFC 5077 ticket in DTLS 1.2), and takes them back in later ones.
+//! * `DTLS_SESSION_CACHE=1`: a DTLS 1.2 server that gives each handshake a session id and
+//!   resumes it (RFC 5246 section 7.3).
+//! * `DTLS_RESUME=1`: a client that keeps the tickets it is sent (and its DTLS 1.2 sessions)
+//!   and, 1.5 s after its first handshake, closes the association and makes a second one
+//!   from the same port, which offers one of them.
 //! * `DTLS_MAX_EARLY_DATA=<n>`: a server whose tickets allow `n` bytes of 0-RTT data (it
 //!   takes them only without the cookie exchange: `DTLS_COOKIE=0`).
 //! * `DTLS_EARLY_DATA=<text>`: with `DTLS_RESUME=1`, the second association sends `text` as
@@ -94,6 +96,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         builder = builder.with_max_early_data(size);
     }
     let early_data = std::env::var("DTLS_EARLY_DATA").unwrap_or_default();
+    if !is_client && std::env::var("DTLS_SESSION_CACHE").as_deref() == Ok("1") {
+        builder = builder.with_session_cache(Some(Arc::new(
+            rtc_dtls::session::MemorySessionCache::default(),
+        )));
+    }
     if let Some(tickets) = std::env::var("DTLS_TICKETS")
         .ok()
         .and_then(|count| count.parse().ok())

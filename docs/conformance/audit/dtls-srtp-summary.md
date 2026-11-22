@@ -13,6 +13,7 @@ Clause-level audit of 18 specifications against fork master 8916bc3, read-only (
 | RFC 7983 | Demultiplexing | [rfc7983.md](rfc7983.md) | 3 / 1 / 0 / 0 / 0 / 1 | 0 / 0 / 0 / 0 / 0 / 0 | 0 / 1 / 0 / 0 / 0 / 2 |
 | RFC 9443 | Demultiplexing update (QUIC) | [rfc9443.md](rfc9443.md) | 3 / 2 / 0 / 0 / 0 / 2 | 0 / 0 / 0 / 0 / 0 / 0 | 0 / 1 / 0 / 1 / 0 / 1 |
 | RFC 7627 | Extended master secret | [rfc7627.md](rfc7627.md) | 6 / 1 / 1 / 0 / 0 / 3 | 5 / 0 / 0 / 0 / 0 / 0 | 0 / 0 / 0 / 0 / 0 / 0 |
+| RFC 5077 | Session tickets, as DTLS 1.2 uses them (added with `conf/ice-12-dtls12-resumption`) | [rfc5077.md](rfc5077.md) | 18 / 0 / 0 / 0 / 0 / 1 | 3 / 0 / 1 / 0 / 0 / 0 | 2 / 0 / 0 / 0 / 0 / 2 |
 | RFC 5746 | Renegotiation indication | [rfc5746.md](rfc5746.md) | 2 / 1 / 3 / 6 / 0 / 6 | 2 / 2 / 0 / 0 / 0 / 1 | 0 / 0 / 0 / 0 / 0 / 0 |
 | RFC 9146 | Connection ID for DTLS 1.2 (feature rows) | [rfc9146.md](rfc9146.md) | 2 / 1 / 0 / 10 / 0 / 0 | 0 / 0 / 0 / 0 / 0 / 1 | 0 / 0 / 0 / 1 / 0 / 0 |
 | RFC 3711 | SRTP | [rfc3711.md](rfc3711.md) | 55 / 10 / 7 / 6 / 3 / 12 | 7 / 3 / 3 / 1 / 0 / 2 | 3 / 0 / 1 / 8 / 0 / 3 |

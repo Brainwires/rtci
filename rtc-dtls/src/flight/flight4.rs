@@ -573,57 +573,7 @@ impl Flight for Flight4 {
         _cache: &HandshakeCache,
         cfg: &HandshakeConfig,
     ) -> Result<Vec<Packet>, (Option<Alert>, Option<Error>)> {
-        // RFC 5246 7.4.1.4: only extension types the ClientHello carried.
-        let mut extensions = vec![];
-        // RFC 5746 3.6: an empty renegotiation_info when the client signalled secure
-        // renegotiation, by the extension or by the signalling suite (the one case where the
-        // ClientHello need not have carried the type).
-        // RFC 9146 section 3: the client offered connection ids and this server has them
-        // configured: its own, which may be empty, goes in the ServerHello, and from the
-        // first protected record on both use `tls12_cid` records where the receiver's
-        // connection id is not empty.
-        if state.remote_connection_id.is_some() {
-            if state.local_connection_id.is_none() {
-                state.local_connection_id = cfg.connection_id_offer();
-            }
-            if let Some(connection_id) = &state.local_connection_id {
-                extensions.push(Extension::connection_id(connection_id));
-            } else {
-                state.remote_connection_id = None;
-            }
-        }
-        if state.secure_renegotiation {
-            extensions.push(Extension::RenegotiationInfo(
-                ExtensionRenegotiationInfo::default(),
-            ));
-        }
-        if (cfg.extended_master_secret == ExtendedMasterSecretType::Request
-            || cfg.extended_master_secret == ExtendedMasterSecretType::Require)
-            && state.extended_master_secret
-        {
-            extensions.push(Extension::UseExtendedMasterSecret(
-                ExtensionUseExtendedMasterSecret { supported: true },
-            ));
-        }
-
-        if state.srtp_protection_profile != SrtpProtectionProfile::Unsupported {
-            // RFC 5764 4.1.1: the one chosen profile. 4.1.3: an empty MKI, whatever the client
-            // offered.
-            extensions.push(Extension::UseSrtp(ExtensionUseSrtp {
-                protection_profiles: vec![state.srtp_protection_profile],
-                mki: vec![],
-            }));
-        }
-
-        // RFC 8422 5.2: ec_point_formats answers the client's; supported_groups is not a
-        // ServerHello extension.
-        if !state.is_cipher_suite_psk() && state.remote_offered_point_formats {
-            extensions.push(Extension::SupportedPointFormats(
-                ExtensionSupportedPointFormats {
-                    point_formats: vec![ELLIPTIC_CURVE_POINT_FORMAT_UNCOMPRESSED],
-                },
-            ));
-        }
+        let extensions = server_hello_extensions(state, cfg);
 
         let mut pkts = vec![Packet {
             record: RecordLayer::new(
@@ -631,6 +581,8 @@ impl Flight for Flight4 {
                 0,
                 Content::Handshake(Handshake::new(HandshakeMessage::ServerHello(
                     HandshakeMessageServerHello {
+                        // RFC 5246 7.4.1.3: the new session's id, if this server keeps it.
+                        session_id: state.session_id.clone(),
                         version: PROTOCOL_VERSION1_2,
                         random: state.local_random.clone(),
                         cipher_suite: {
@@ -815,6 +767,68 @@ impl Flight for Flight4 {
 
         Ok(pkts)
     }
+}
+
+/// The extensions of this server's ServerHello, in a full or an abbreviated handshake: only
+/// extension types the ClientHello carried (RFC 5246 7.4.1.4), and of those defined by RFC 6066
+/// none (section 3: not server_name, which this server never answers anyway).
+pub(crate) fn server_hello_extensions(state: &mut State, cfg: &HandshakeConfig) -> Vec<Extension> {
+    // RFC 5246 7.4.1.4: only extension types the ClientHello carried.
+    let mut extensions = vec![];
+    // RFC 5746 3.6: an empty renegotiation_info when the client signalled secure
+    // renegotiation, by the extension or by the signalling suite (the one case where the
+    // ClientHello need not have carried the type).
+    // RFC 9146 section 3: the client offered connection ids and this server has them
+    // configured: its own, which may be empty, goes in the ServerHello, and from the
+    // first protected record on both use `tls12_cid` records where the receiver's
+    // connection id is not empty.
+    if state.remote_connection_id.is_some() {
+        if state.local_connection_id.is_none() {
+            state.local_connection_id = cfg.connection_id_offer();
+        }
+        if let Some(connection_id) = &state.local_connection_id {
+            extensions.push(Extension::connection_id(connection_id));
+        } else {
+            state.remote_connection_id = None;
+        }
+    }
+    if state.secure_renegotiation {
+        extensions.push(Extension::RenegotiationInfo(
+            ExtensionRenegotiationInfo::default(),
+        ));
+    }
+    if (cfg.extended_master_secret == ExtendedMasterSecretType::Request
+        || cfg.extended_master_secret == ExtendedMasterSecretType::Require)
+        && state.extended_master_secret
+    {
+        extensions.push(Extension::UseExtendedMasterSecret(
+            ExtensionUseExtendedMasterSecret { supported: true },
+        ));
+    }
+
+    if state.srtp_protection_profile != SrtpProtectionProfile::Unsupported {
+        // RFC 5764 4.1.1: the one chosen profile. 4.1.3: an empty MKI, whatever the client
+        // offered.
+        extensions.push(Extension::UseSrtp(ExtensionUseSrtp {
+            protection_profiles: vec![state.srtp_protection_profile],
+            mki: vec![],
+        }));
+    }
+
+    // RFC 8422 5.2: ec_point_formats answers the client's; supported_groups is not a
+    // ServerHello extension.
+    if !state.is_cipher_suite_psk() && state.remote_offered_point_formats {
+        extensions.push(Extension::SupportedPointFormats(
+            ExtensionSupportedPointFormats {
+                point_formats: vec![ELLIPTIC_CURVE_POINT_FORMAT_UNCOMPRESSED],
+            },
+        ));
+    }
+    // RFC 5077 section 3.2: an empty SessionTicket extension announces a NewSessionTicket.
+    if state.new_session_ticket {
+        extensions.push(crate::resumption::session_ticket_extension(&[]));
+    }
+    extensions
 }
 
 /// RFC 5246 7.4.9: checks the client's Finished against the handshake messages this server

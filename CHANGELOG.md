@@ -2975,6 +2975,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of failing every record (`isolates_crypto_providers_across_simultaneous_peer_connections`
   failed on the train).
 
+### DTLS 1.2 session resumption
+
+- **dtls**: DTLS 1.2 session resumption (RFC 5246 section 7.3, RFC 6347 section 4.2.4 figure
+  2), off unless configured, and off in the peer connection. A server resumes by session id from
+  a `session::SessionCache` (`ConfigBuilder::with_session_cache`, `MemorySessionCache`) and by
+  RFC 5077 ticket when `with_session_tickets` is above 0 (sealed by the DTLS 1.3 ticket key,
+  with a version and additional data of their own, each accepted once); a client keeps its
+  `Dtls12Session`s in its `SessionStore` (new provided methods `put_dtls12`, `take_dtls12`,
+  `forget_dtls12`, which keep nothing by default; `MemorySessionStore` implements them, and
+  `len_dtls12`). The abbreviated handshake is two new flights: the server's ServerHello,
+  NewSessionTicket, ChangeCipherSpec and Finished, the client's ChangeCipherSpec and Finished
+  as the last flight. Only sessions made with the extended master secret are kept, and RFC 7627
+  section 5.3 applies on both sides; a session is not resumed for another server name (RFC 6066
+  section 3), a suite the ClientHello does not offer, or a configured client authentication it
+  would not have met; it is kept once its handshake completes and forgotten when a connection
+  that used it fails (RFC 5246 sections 7.2, 7.2.2). `State::resumed` also reports a DTLS 1.2
+  resumption. New handshake message `HandshakeMessageNewSessionTicket` (type 4) and
+  `HandshakeType::NewSessionTicket`; the hellos carry their `session_id`. Interop with OpenSSL
+  3.5.4, both roles, by session id (`-no_ticket`) and by ticket.
+
 ### DTLS 1.3 pre-shared keys
 
 - **dtls**: session resumption with tickets for DTLS 1.3 (RFC 8446 sections 2.2, 4.2.9,
