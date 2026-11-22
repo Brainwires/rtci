@@ -25,6 +25,9 @@ use crate::conn::{
 use crate::crypto::*;
 use crate::curve::named_curve::NamedCurve;
 use crate::extension::extension_use_srtp::SrtpProtectionProfile;
+use crate::record_layer::record_layer_header::{
+    PROTOCOL_VERSION1_0, PROTOCOL_VERSION1_2, ProtocolVersion,
+};
 use crate::signature_hash_algorithm::{
     SignatureHashAlgorithm, SignatureScheme, parse_signature_schemes,
 };
@@ -121,6 +124,8 @@ pub struct ConfigBuilder {
     maximum_flight_interval: Duration,
     handshake_timeout: Option<Duration>,
     cookie_exchange: bool,
+    hello_verify_request_version: ProtocolVersion,
+    early_data_retransmit: bool,
     psk: Option<PskCallback>,
     psk_identity_hint: Option<Vec<u8>>,
     insecure_skip_verify: bool,
@@ -149,6 +154,8 @@ impl Default for ConfigBuilder {
             maximum_flight_interval: MAXIMUM_RETRANSMIT_INTERVAL,
             handshake_timeout: Some(DEFAULT_HANDSHAKE_TIMEOUT),
             cookie_exchange: true,
+            hello_verify_request_version: PROTOCOL_VERSION1_0,
+            early_data_retransmit: true,
             psk: None,
             psk_identity_hint: None,
             insecure_skip_verify: false,
@@ -262,6 +269,29 @@ impl ConfigBuilder {
     /// amplifier and a holder of state for spoofed addresses where nothing has.
     pub fn with_cookie_exchange(mut self, cookie_exchange: bool) -> Self {
         self.cookie_exchange = cookie_exchange;
+        self
+    }
+
+    /// The server_version a server writes into its HelloVerifyRequest. The default is DTLS 1.0
+    /// ([`PROTOCOL_VERSION1_0`]): RFC 6347 4.2.1 says a server should use it there whatever
+    /// version it goes on to negotiate, so that a client of any version takes the message.
+    /// [`PROTOCOL_VERSION1_2`] writes the version the ServerHello will carry instead, which is
+    /// what this stack sent before and what some stacks do. A client is required to ignore the
+    /// field, and this one does, so the setting changes nothing but that field.
+    ///
+    /// [`Self::build`] refuses any other version.
+    pub fn with_hello_verify_request_version(mut self, version: ProtocolVersion) -> Self {
+        self.hello_verify_request_version = version;
+        self
+    }
+
+    /// Whether a client that receives protected application data while it still waits for the
+    /// server's Finished sends its final flight again at once, instead of when its timer fires
+    /// (RFC 6347 4.2.4, a MAY: such data means the server has its keys and its Finished was
+    /// lost or is late). On by default. Only a record that authenticates under the negotiated
+    /// keys counts, and a flight is sent again for this reason once at most.
+    pub fn with_early_data_retransmit(mut self, early_data_retransmit: bool) -> Self {
+        self.early_data_retransmit = early_data_retransmit;
         self
     }
 
@@ -511,17 +541,21 @@ impl ConfigBuilder {
             local_cipher_suites.retain(|(id, is_psk)| {
                 *is_psk
                     || local_signature_schemes.iter().any(|algorithm| {
-                        let signature_family_matches =
-                            match id {
-                                CipherSuiteId::Tls_Ecdhe_Rsa_With_Aes_128_Gcm_Sha256
-                                | CipherSuiteId::Tls_Ecdhe_Rsa_With_Aes_256_Cbc_Sha
-                                | CipherSuiteId::Tls_Ecdhe_Rsa_With_ChaCha20_Poly1305_Sha256 => {
-                                    algorithm.signature
-                                        == crate::signature_hash_algorithm::SignatureAlgorithm::Rsa
-                                }
-                                _ => algorithm.signature
-                                    == crate::signature_hash_algorithm::SignatureAlgorithm::Ecdsa,
-                            };
+                        let signature_family_matches = match id {
+                            CipherSuiteId::Tls_Ecdhe_Rsa_With_Aes_128_Gcm_Sha256
+                            | CipherSuiteId::Tls_Ecdhe_Rsa_With_Aes_256_Cbc_Sha
+                            | CipherSuiteId::Tls_Ecdhe_Rsa_With_ChaCha20_Poly1305_Sha256 => {
+                                algorithm.signature
+                                    == crate::signature_hash_algorithm::SignatureAlgorithm::Rsa
+                            }
+                            // RFC 8422 5.1.1, 5.2: an ECDHE_ECDSA suite takes a
+                            // certificate with an ECDSA- or EdDSA-capable key.
+                            _ => matches!(
+                                algorithm.signature,
+                                crate::signature_hash_algorithm::SignatureAlgorithm::Ecdsa
+                                    | crate::signature_hash_algorithm::SignatureAlgorithm::Ed25519
+                            ),
+                        };
                         signature_family_matches
                             && algorithm
                                 .crypto_scheme()
@@ -552,6 +586,11 @@ impl ConfigBuilder {
             )));
         }
         let maximum_retransmit_interval = self.maximum_flight_interval.max(retransmit_interval);
+        if self.hello_verify_request_version != PROTOCOL_VERSION1_0
+            && self.hello_verify_request_version != PROTOCOL_VERSION1_2
+        {
+            return Err(Error::ErrUnsupportedProtocolVersion);
+        }
 
         // `..Default::default()` used to supply this; when P7 replaced that with an explicit
         // field list it wrote `0`, which means *no retransmits are permitted at all*. The very
@@ -650,6 +689,8 @@ impl ConfigBuilder {
             maximum_retransmit_interval,
             handshake_timeout: self.handshake_timeout,
             cookie_exchange: self.cookie_exchange,
+            hello_verify_request_version: self.hello_verify_request_version,
+            early_data_retransmit: self.early_data_retransmit,
             initial_epoch: 0,
             maximum_transmission_unit,
             maximum_retransmit_number,
@@ -712,6 +753,8 @@ pub struct HandshakeConfig {
     pub(crate) maximum_retransmit_interval: Duration,
     pub(crate) handshake_timeout: Option<Duration>,
     pub(crate) cookie_exchange: bool,
+    pub(crate) hello_verify_request_version: ProtocolVersion,
+    pub(crate) early_data_retransmit: bool,
     pub(crate) initial_epoch: u16,
     pub(crate) maximum_transmission_unit: usize,
     pub(crate) maximum_retransmit_number: usize,
@@ -774,6 +817,8 @@ impl HandshakeConfig {
             maximum_retransmit_interval: MAXIMUM_RETRANSMIT_INTERVAL,
             handshake_timeout: None,
             cookie_exchange: true,
+            hello_verify_request_version: PROTOCOL_VERSION1_0,
+            early_data_retransmit: true,
             initial_epoch: 0,
             maximum_transmission_unit: DEFAULT_MTU,
             maximum_retransmit_number: DEFAULT_MAXIMUM_RETRANSMIT_NUMBER,
