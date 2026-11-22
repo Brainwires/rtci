@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+- **sctp**: the default stream scheduler sends messages in the order they were written (RFC
+  8260 section 3.1). Unordered messages used to go ahead of every ordered one, so a steady
+  flow of them kept ordered messages, DCEP and stream resets included, from ever leaving. A
+  stream reset now waits for the messages of its own stream only.
+- **sctp**: an I-DATA or I-FORWARD-TSN chunk on an association that did not negotiate user
+  message interleaving is answered with an ABORT, "Protocol Violation" (RFC 8260 sections
+  2.2.3, 2.3.1). The packet was dropped whole and unanswered.
 - **sctp**: stream resets follow the rest of RFC 6525. One re-configuration request is in
   flight at a time and the others wait (section 5.1.1); closing several data channels put
   several in flight. A request names the peer's last request sequence number (5.1.2), and the
@@ -151,6 +158,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+- **sctp**: user message interleaving (RFC 8260 section 2). With
+  `TransportConfig::with_message_interleaving(true)` on both sides, user data travels in
+  I-DATA chunks and abandoned messages are reported with I-FORWARD-TSN: the fragments of
+  messages on different streams interleave, so a large message no longer holds up the other
+  streams. Off by default. `Association::message_interleaving` says whether it is in use.
+- **sctp**: the stream schedulers of RFC 8260 section 3: `StreamScheduler::RoundRobin`,
+  `RoundRobinPerPacket`, `Priority` and `FairCapacity` beside `FirstComeFirstServed` and
+  `WeightedFairQueueing`. They choose between messages, and between chunks when
+  interleaving. `Stream::set_priority` is the rank under `Priority` and the weight under
+  `WeightedFairQueueing`, and applies to what the stream has queued.
+- **fuzz**: `rtc-sctp` targets `chunk_chunk_i_data_unmarshal`,
+  `chunk_chunk_i_forward_tsn_unmarshal`, `association_handle_chunks_interleaved` and the three
+  RE-CONFIG request parameters.
 - **sctp**: the other re-configuration requests of RFC 6525, in both directions: Incoming SSN
   Reset (`Association::request_incoming_stream_reset`), SSN/TSN Reset
   (`request_ssn_tsn_reset`) and Add Outgoing / Incoming Streams (`add_outgoing_streams`,
