@@ -146,6 +146,12 @@ impl Endpoint {
             .is_some_and(|conn| conn.is_failed())
     }
 
+    /// The fatal alerts that ended the association with `remote`, as alert description codes:
+    /// (sent, received). `None` when there is no such association.
+    pub fn connection_fatal_alerts(&self, remote: &SocketAddr) -> Option<(Option<u8>, Option<u8>)> {
+        self.connections.get(remote).map(|conn| conn.fatal_alerts())
+    }
+
     /// The connection with `remote`, for the fuzz harness to reach its record state.
     #[cfg(any(fuzzing, test))]
     pub(crate) fn connection_mut(&mut self, remote: &SocketAddr) -> Option<&mut DTLSConn> {

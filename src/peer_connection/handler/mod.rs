@@ -438,22 +438,40 @@ impl RTCPeerConnection {
             }
         }));
 
-        // Finally, put intermediate_eouts into RTCPeerConnection's eouts
+        // Finally, put intermediate_eouts into RTCPeerConnection's eouts, with the transport
+        // and connection state events each causes, in the spec's order: the transport's own
+        // event, then the connection's (W3C webrtc-pc 4.4.1.3, 5.5, 5.6).
         while let Some(evt_internal) = intermediate_eouts.pop_front() {
-            match &evt_internal.event {
+            match evt_internal.event {
                 RTCEventInternal::RTCPeerConnectionEvent(
-                    RTCPeerConnectionEvent::OnIceConnectionStateChangeEvent(_),
-                )
-                | RTCEventInternal::DTLSHandshakeComplete(_, _)
-                | RTCEventInternal::DTLSClosed => {
+                    RTCPeerConnectionEvent::OnIceConnectionStateChangeEvent(state),
+                ) => {
+                    // `close()` sets the ICE connection state without an event; what the
+                    // agent reports once it is closed is not told either.
+                    if self.is_closed() {
+                        continue;
+                    }
+                    self.announce_ice_transport_state(state);
+                    self.pipeline_context.event_outs.push_back(
+                        RTCPeerConnectionEvent::OnIceConnectionStateChangeEvent(state),
+                    );
                     self.update_connection_state(false);
                 }
+                RTCEventInternal::DTLSHandshakeComplete(_, _) | RTCEventInternal::DTLSClosed => {
+                    self.announce_transport_states();
+                    self.update_connection_state(false);
+                }
+                RTCEventInternal::RTCPeerConnectionEvent(evt) => {
+                    self.pipeline_context.event_outs.push_back(evt);
+                }
                 _ => {}
-            };
-
-            if let RTCEventInternal::RTCPeerConnectionEvent(evt) = evt_internal.event {
-                self.pipeline_context.event_outs.push_back(evt);
             }
+        }
+        // The SCTP transport's state follows its association, which any event may have moved;
+        // the selected pair is the agent's, whose change event the DTLS handler consumes.
+        self.announce_transport_states();
+        if !self.is_closed() {
+            self.announce_selected_candidate_pair();
         }
 
         raised
@@ -539,6 +557,9 @@ impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCP
     }
 
     fn poll_event(&mut self) -> Option<Self::Eout> {
+        // A description or a timeout may have moved a transport's state (DTLS to "connecting"
+        // when its handshake starts, say): announce it behind what is queued.
+        self.announce_transport_states();
         // Drain the backlog before sweeping the pipeline again: anything a sweep adds lands
         // behind it anyway, and the sweep runs once the backlog is empty.
         if let Some(evt) = self.pipeline_context.event_outs.pop_front() {
@@ -617,7 +638,20 @@ impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCP
         //   DtlsHandler::close()        → dtls_transport.stop()
         //   IceHandler::close()         → ice_transport.agent.close()
 
-        self.update_connection_state(true);
+        // https://www.w3.org/TR/webrtc/#dom-rtcpeerconnection-close (steps #6 to #11): every
+        // transceiver is stopped, and the transports' and the connection's states become
+        // "closed", all without an event.
+        for transceiver in &mut self.rtp_transceivers {
+            if !transceiver.is_stopped()
+                && let Err(err) = transceiver.stop(&self.media_engine, &mut *self.interceptor)
+            {
+                close_errs.push(err);
+            }
+        }
+        self.ice_transport_mut().ice_connection_state =
+            crate::peer_connection::state::ice_connection_state::RTCIceConnectionState::Closed;
+        self.peer_connection_state = RTCPeerConnectionState::Closed;
+        self.close_announced_states();
 
         flatten_errs(close_errs)
     }

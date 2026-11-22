@@ -1821,6 +1821,11 @@ pub enum Error {
     #[error("x509Cert expired")]
     ErrCertificateExpired,
 
+    /// An ICE server with no url (W3C "set a configuration": "If urls is empty, throw a
+    /// SyntaxError").
+    #[error("an ICE server has no url")]
+    ErrNoIceServerUrls,
+
     /// ErrNoTurnCredentials indicates that a TURN server URL was provided
     /// without required credentials.
     #[error("turn server credentials required")]
@@ -2048,6 +2053,16 @@ pub enum Error {
     /// Type error: an argument is not a value the operation takes (W3C / WebIDL `TypeError`).
     #[error("Type error {0}")]
     TypeError(String),
+
+    /// A session description that does not parse (W3C webrtc-pc section 11.1, an `RTCError`
+    /// with `errorDetail` `sdp-syntax-error`): what the SDP parser found, and on which line.
+    #[error("SDP syntax error{}: {error}", .line_number.map(|n| format!(" on line {n}")).unwrap_or_default())]
+    SdpSyntaxError {
+        /// The line the error is about, from 1; `None` when it is about the whole description.
+        line_number: Option<usize>,
+        /// The parser's error.
+        error: Box<Error>,
+    },
 
     /// ErrSenderWithNoCodecs indicates that a RTPSender was created without any codecs. To send media the MediaEngine needs at
     /// least one configured codec.

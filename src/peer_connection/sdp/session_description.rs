@@ -1,11 +1,10 @@
 use std::fmt::Display;
-use std::io::Cursor;
 
 use sdp::description::session::SessionDescription;
 use serde::{Deserialize, Serialize};
 
 use super::sdp_type::RTCSdpType;
-use shared::error::Result;
+use shared::error::{Error, Result};
 
 /// Represents a session description in the SDP offer/answer model.
 ///
@@ -490,10 +489,18 @@ impl RTCSessionDescription {
     /// # Errors
     ///
     /// Returns an error if the stored SDP text is not valid SDP.
+    ///
+    /// A description that does not parse is an [`Error::SdpSyntaxError`], with the number of
+    /// the line the parser stopped at (W3C webrtc-pc section 11.1, `sdp-syntax-error`).
     pub fn unmarshal(&self) -> Result<SessionDescription> {
-        let mut reader = Cursor::new(self.sdp.as_bytes());
-        let parsed = SessionDescription::unmarshal(&mut reader)?;
-        Ok(parsed)
+        SessionDescription::parse_located(
+            &self.sdp,
+            &sdp::description::session::ParseOptions::strict(),
+        )
+        .map_err(|err| Error::SdpSyntaxError {
+            line_number: err.line_number,
+            error: Box::new(err.error),
+        })
     }
 }
 

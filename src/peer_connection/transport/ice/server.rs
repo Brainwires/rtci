@@ -26,8 +26,69 @@ impl RTCIceServer {
         ice::url::Url::parse_url(url_str)
     }
 
+    /// W3C "set a configuration", for one server: `urls` is not empty, and each url passes
+    /// "validate an ICE server URL" (webrtc-pc section 4.4.1.5).
+    ///
+    /// # Errors
+    ///
+    /// The W3C `SyntaxError` cases: no url ([`Error::ErrNoIceServerUrls`]), a scheme other than
+    /// `stun`, `stuns`, `turn` and `turns` ([`Error::ErrSchemeType`]), no opaque path, or one
+    /// with `/` or `@`, or a fragment ([`Error::ErrInvalidUrl`]), a query on a STUN url
+    /// ([`Error::ErrStunQuery`]) or one other than `transport=udp` / `transport=tcp` on a TURN
+    /// url ([`Error::ErrInvalidQuery`]), and a host and port that do not parse. The
+    /// `InvalidAccessError` cases: a TURN url without a username or credential
+    /// ([`Error::ErrNoTurnCredentials`]), or with a username of 509 bytes or more (RFC 8489
+    /// section 14.3) or a credential that is not an RFC 8265 OpaqueString
+    /// ([`Error::InvalidAccessError`]).
     pub(crate) fn validate(&self) -> Result<()> {
+        if self.urls.is_empty() {
+            return Err(Error::ErrNoIceServerUrls);
+        }
+        for url in &self.urls {
+            self.validate_url(url)?;
+        }
         self.urls()?;
+        Ok(())
+    }
+
+    /// The textual checks of W3C "validate an ICE server URL" that the URL parser of the ICE
+    /// agent does not make.
+    fn validate_url(&self, url: &str) -> Result<()> {
+        let Some((scheme, opaque_path)) = url.split_once(':') else {
+            return Err(Error::ErrSchemeType);
+        };
+        let scheme = scheme.to_ascii_lowercase();
+        let turn = match scheme.as_str() {
+            "stun" | "stuns" => false,
+            "turn" | "turns" => true,
+            _ => return Err(Error::ErrSchemeType),
+        };
+        // An opaque path: not empty, not starting with `/` (that is a hierarchical URL), and
+        // with neither `/` nor `@` in it; and no fragment.
+        let (path, query) = match opaque_path.split_once('?') {
+            Some((path, query)) => (path, Some(query)),
+            None => (opaque_path, None),
+        };
+        if path.is_empty() || path.contains(['/', '@']) || url.contains('#') {
+            return Err(Error::ErrInvalidUrl);
+        }
+        match query {
+            Some(_) if !turn => return Err(Error::ErrStunQuery),
+            Some(query) if query != "transport=udp" && query != "transport=tcp" => {
+                return Err(Error::ErrInvalidQuery);
+            }
+            _ => {}
+        }
+        if turn {
+            if self.username.is_empty() || self.credential.is_empty() {
+                return Err(Error::ErrNoTurnCredentials);
+            }
+            // RFC 8489 section 14.3: "fewer than 509 bytes". RFC 8265 section 4.1: an
+            // OpaqueString has at least one character and no control character.
+            if self.username.len() >= 509 || self.credential.chars().any(char::is_control) {
+                return Err(Error::InvalidAccessError);
+            }
+        }
         Ok(())
     }
 
