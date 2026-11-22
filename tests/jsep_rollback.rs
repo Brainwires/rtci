@@ -287,7 +287,7 @@ fn pending(pc: &RTCPeerConnection) -> RTCSignalingState {
     }
 }
 
-fn peer_with_implicit_rollback() -> Result<RTCPeerConnection, Box<dyn std::error::Error>> {
+fn peer_with_explicit_rollback_only() -> Result<RTCPeerConnection, Box<dyn std::error::Error>> {
     use rtc::peer_connection::RTCPeerConnectionBuilder;
     use rtc::peer_connection::configuration::media_engine::MediaEngine;
     use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
@@ -297,17 +297,20 @@ fn peer_with_implicit_rollback() -> Result<RTCPeerConnection, Box<dyn std::error
         .with_media_engine(media_engine)
         .with_setting_engine(
             SettingEngineBuilder::new()
-                .with_implicit_rollback(true)
+                .with_implicit_rollback(false)
                 .build(),
         )
         .build(Instant::now())?)
 }
 
-/// RFC 9429 sections 5.6 and 5.7: a remote offer is not applied while a local offer is
-/// pending; the application rolls its own offer back first. W3C webrtc-pc does that rollback
-/// implicitly, which is `SettingEngineBuilder::with_implicit_rollback`.
+/// W3C webrtc-pc section 4.4.1.6: a remote offer that arrives while a local offer is pending
+/// rolls the local offer back and is applied, in one call; that is the default. RFC 9429
+/// sections 5.6 and 5.7 leave the rollback to the application, which is
+/// `SettingEngineBuilder::with_implicit_rollback(false)`: the offer is then refused until
+/// the application has rolled its own back.
 #[test]
-fn a_remote_offer_over_a_local_offer_needs_a_rollback_or_the_implicit_one() -> TestResult {
+fn a_remote_offer_over_a_local_offer_rolls_it_back_unless_rollback_is_left_to_the_application()
+-> TestResult {
     let glare =
         |pc: &mut RTCPeerConnection| -> Result<RTCSessionDescription, Box<dyn std::error::Error>> {
             let mut other = default_peer()?;
@@ -320,8 +323,8 @@ fn a_remote_offer_over_a_local_offer_needs_a_rollback_or_the_implicit_one() -> T
             Ok(theirs)
         };
 
-    // The RFC's state machine, the default.
-    let mut pc = default_peer()?;
+    // Rollback left to the application: RFC 9429's state machine with nothing added.
+    let mut pc = peer_with_explicit_rollback_only()?;
     let theirs = glare(&mut pc)?;
     assert!(
         pc.set_remote_description(Instant::now(), theirs.clone())
@@ -334,8 +337,8 @@ fn a_remote_offer_over_a_local_offer_needs_a_rollback_or_the_implicit_one() -> T
     pc.set_remote_description(Instant::now(), theirs)?;
     assert_eq!(pending(&pc), RTCSignalingState::HaveRemoteOffer);
 
-    // The implicit rollback.
-    let mut pc = peer_with_implicit_rollback()?;
+    // The implicit rollback, the default.
+    let mut pc = default_peer()?;
     let theirs = glare(&mut pc)?;
     pc.set_remote_description(Instant::now(), theirs)?;
     assert_eq!(pending(&pc), RTCSignalingState::HaveRemoteOffer);
@@ -353,7 +356,7 @@ fn a_remote_offer_over_a_local_offer_needs_a_rollback_or_the_implicit_one() -> T
     assert_eq!(pending(&pc), RTCSignalingState::Stable);
 
     // A remote offer that is refused rolls nothing back.
-    let mut pc = peer_with_implicit_rollback()?;
+    let mut pc = default_peer()?;
     let theirs = glare(&mut pc)?;
     let without_fingerprint: String = theirs
         .sdp

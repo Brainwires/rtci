@@ -292,12 +292,12 @@ impl RTCPeerConnection {
     /// because the description advertises the new credentials and the candidates gathered
     /// so far belong to the old ones (RFC 8839 section 5.4, JSEP section 5.2.3.1: a restart
     /// starts a new gathering phase, whose candidates are signalled as they come).
-    /// The bundle policy in effect (RFC 9429 section 4.1.1): the deprecated `max-bundle` is
-    /// ignored, which leaves the default, unless the application made it an alias of
-    /// `must-bundle`.
+    /// The bundle policy in effect: `max-bundle` (W3C webrtc-pc section 4.2.5) is the policy
+    /// RFC 9429 section 4.1.1 names `must-bundle`, unless the application has it ignored as
+    /// that section's SHOULD says, which leaves the default.
     fn effective_bundle_policy(&self) -> RTCBundlePolicy {
         match self.configuration.bundle_policy {
-            RTCBundlePolicy::MaxBundle if self.setting_engine.max_bundle_as_must_bundle => {
+            RTCBundlePolicy::MaxBundle if !self.setting_engine.max_bundle_ignored => {
                 RTCBundlePolicy::MustBundle
             }
             RTCBundlePolicy::MaxBundle => RTCBundlePolicy::Unspecified,

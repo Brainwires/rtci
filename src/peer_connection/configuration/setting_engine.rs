@@ -374,9 +374,11 @@ pub struct SettingEngine {
     /// [`SettingEngineBuilder::with_bundle_attributes_repeated`].
     pub(crate) bundle_attributes_repeated: bool,
     /// [`SettingEngineBuilder::with_max_bundle_as_must_bundle`].
-    pub(crate) max_bundle_as_must_bundle: bool,
+    /// Inverted so that the derived default is "honoured".
+    pub(crate) max_bundle_ignored: bool,
     /// [`SettingEngineBuilder::with_implicit_rollback`].
-    pub(crate) implicit_rollback: bool,
+    /// Inverted so that the derived default is "implicit rollback on".
+    pub(crate) explicit_rollback_only: bool,
     pub(crate) answering_dtls_role: RTCDtlsRole,
     pub(crate) disable_certificate_fingerprint_verification: bool,
     pub(crate) allow_insecure_verification_algorithm: bool,
@@ -1356,31 +1358,46 @@ impl SettingEngineBuilder {
         self
     }
 
-    /// Lets a remote offer that arrives while a local offer is pending roll the local offer
-    /// back and be applied, in one `set_remote_description` call: the implicit rollback of
-    /// W3C webrtc-pc ("set a session description"), which browsers perform and "perfect
-    /// negotiation" relies on.
+    /// Whether a remote offer that arrives while a local offer is pending rolls the local
+    /// offer back and is applied, in one `set_remote_description` call. The default is `true`.
     ///
-    /// RFC 9429 has no implicit rollback: a remote offer in the `have-local-offer` state is
-    /// an error (section 5.6), and the application rolls its offer back first (section 5.7).
-    /// That is the default (`false`). With `true`, an offer that is refused after the
-    /// rollback leaves the local offer pending, as if nothing had been called; one that is
-    /// applied emits the `stable` and then the `have-remote-offer` signaling state.
+    /// W3C webrtc-pc section 4.4.1.6 ("set the session description", the
+    /// `setRemoteDescription` steps): "If description.type is "offer" and
+    /// connection.[[SignalingState]] is "have-local-offer" ... set a local session
+    /// description of type rollback, then set the remote description". This engine's
+    /// `set_remote_description` is that operation, browsers perform it and "perfect
+    /// negotiation" relies on it. RFC 9429 does not forbid it: its state machine (section
+    /// 3.2) is kept, because the rollback is applied first (section 5.7) and the offer is
+    /// then applied in `stable` (section 5.6).
+    ///
+    /// With `false` the layer above does the rollback: a remote offer in `have-local-offer`
+    /// is refused, as RFC 9429 section 5.6 has it for a description whose type is not valid
+    /// in the current state.
+    ///
+    /// An offer that is refused after the implicit rollback leaves the local offer pending,
+    /// as if nothing had been called; one that is applied emits the `stable` and then the
+    /// `have-remote-offer` signaling state.
     pub fn with_implicit_rollback(mut self, implicit_rollback: bool) -> Self {
-        self.0.implicit_rollback = implicit_rollback;
+        self.0.explicit_rollback_only = !implicit_rollback;
         self
     }
 
-    /// Honours the deprecated bundle policy `max-bundle` as an alias of `must-bundle`.
+    /// Whether the bundle policy `max-bundle` is honoured as the policy RFC 9429 names
+    /// `must-bundle`. The default is `true`.
     ///
-    /// RFC 9429 section 4.1.1: "'max-bundle' is considered deprecated, and implementations
-    /// compliant with this specification SHOULD ignore attempts by the application to
-    /// select this bundle policy". That is the default (`false`): a configuration with
-    /// `RTCBundlePolicy::MaxBundle` behaves as the default policy, `balanced`. `true` gives
-    /// `MaxBundle` the definition RFC 8829 gave it, which is `must-bundle`'s: every m=
-    /// section of an initial offer but the first is bundle-only.
+    /// W3C webrtc-pc section 4.2.5 (`RTCBundlePolicy`) defines `max-bundle` ("Gather ICE
+    /// candidates for only one track. If the remote endpoint is not bundle-aware, negotiate
+    /// only one media track") and has no `must-bundle`; RFC 9429 section 4.1.1 introduces
+    /// "an identically defined 'must-bundle' policy". So both names select the one policy:
+    /// every m= section of an initial offer but the first is bundle-only.
+    ///
+    /// RFC 9429 section 4.1.1 also says "'max-bundle' is considered deprecated, and
+    /// implementations compliant with this specification SHOULD ignore attempts by the
+    /// application to select this bundle policy (although some phase-out period may be
+    /// necessary to avoid application breakage)". `false` does that: a configuration with
+    /// `RTCBundlePolicy::MaxBundle` then behaves as the default policy, `balanced`.
     pub fn with_max_bundle_as_must_bundle(mut self, honoured: bool) -> Self {
-        self.0.max_bundle_as_must_bundle = honoured;
+        self.0.max_bundle_ignored = !honoured;
         self
     }
 

@@ -71,10 +71,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   credentials in each section of an answer needs the setting. A tagged section that is the
   data section carries `a=rtcp-mux` (and `a=rtcp-rsize`) for the RTP sections of its group
   (the note of RFC 9143 section 7.1.3).
-- **jsep**: `RTCBundlePolicy::MaxBundle` is ignored, as RFC 9429 section 4.1.1 says of the
-  deprecated `max-bundle`: the default policy (`balanced`) stays in effect. The policy it was
-  an alias of is the new `RTCBundlePolicy::MustBundle` (`must-bundle`);
-  `SettingEngineBuilder::with_max_bundle_as_must_bundle(true)` restores the alias.
+- **jsep**: `RTCBundlePolicy::MustBundle` (`must-bundle`, RFC 9429 section 4.1.1) is new, and
+  `RTCBundlePolicy::MaxBundle` selects it: W3C webrtc-pc section 4.2.5 defines `max-bundle`,
+  and RFC 9429 `must-bundle` as "identically defined". Every m= section of an initial offer
+  but the first is then bundle-only.
+  `SettingEngineBuilder::with_max_bundle_as_must_bundle(false)` has `max-bundle` ignored (the
+  SHOULD of RFC 9429 section 4.1.1): the default policy (`balanced`) then stays in effect.
+- **jsep**: a remote offer applied while a local offer is pending rolls the local offer back
+  first, in the one `set_remote_description` call (W3C webrtc-pc section 4.4.1.6); it was
+  refused. `SettingEngineBuilder::with_implicit_rollback(false)` leaves the rollback to the
+  application (RFC 9429 sections 5.6 and 5.7).
 - **jsep**: an initial remote offer whose bundled RTP section is not bundle-only and has no
   `a=rtcp-mux` of its own is refused under the RTCP mux policy `require` and has that section
   rejected under `negotiate` (RFC 9143 section 9.3.1.1). The offerer-tagged section's
@@ -805,7 +811,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **setting_engine**: `SettingEngineBuilder::with_implicit_rollback`: a remote offer applied
   while a local offer is pending rolls the local offer back first (W3C webrtc-pc "set a session
   description"), in one call; an offer that is then refused leaves the local offer pending.
-  Off by default: RFC 9429 sections 5.6 and 5.7 have the application roll back.
+  On by default; `false` has the application roll back (RFC 9429 sections 5.6 and 5.7).
 - **media_engine**: a VP9 format without `profile-id` is the same format as one with
   `profile-id=0` when negotiated codecs are merged (RFC 9628 section 6).
 
