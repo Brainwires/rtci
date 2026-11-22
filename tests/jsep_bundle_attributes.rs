@@ -151,8 +151,10 @@ fn an_answer_with_the_bundle_attributes_in_the_tagged_section_only_is_applied() 
         .collect();
     let section = |media: &str, mid: usize, transport: &str| {
         let (pt, rtpmap) = formats[mid].split_once('\n').expect("format");
+        // The audio transceiver only receives, the video ones send and receive.
+        let direction = if mid == 0 { "sendonly" } else { "recvonly" };
         format!(
-            "m={media} 9 UDP/TLS/RTP/SAVPF {pt}\r\nc=IN IP4 0.0.0.0\r\n{transport}a=mid:{mid}\r\na=recvonly\r\n{rtpmap}\r\n"
+            "m={media} 9 UDP/TLS/RTP/SAVPF {pt}\r\nc=IN IP4 0.0.0.0\r\n{transport}a=mid:{mid}\r\na={direction}\r\n{rtpmap}\r\n"
         )
     };
     let transport = "a=ice-ufrag:4ZcD\r\na=ice-pwd:2/1muCWoOi3uLifh0NuRHlkwz\r\na=fingerprint:sha-256 F2:1C:F2:9E:B4:BE:58:19:C9:48:1A:D9:C4:A7:5D:5A:1F:61:7C:17:6B:07:8E:39:A2:E2:B2:BB:BF:4B:D2:16\r\na=setup:active\r\na=rtcp-mux\r\na=rtcp-rsize\r\n";
