@@ -74,6 +74,18 @@ pub(crate) struct RTCRtpReceiverInternal {
     rtcp_reduced_size: bool,
 
     last_returned_parameters: Option<RTCRtpReceiveParameters>,
+
+    /// The track id the remote description's `a=msid` gives the track (its appdata), which
+    /// identifies the remote sender's track across descriptions. Not the id of this
+    /// receiver's track: that one is the engine's own (W3C webrtc 5.3).
+    remote_track_id: String,
+    /// W3C `[[AssociatedRemoteMediaStreams]]`, as "process remote tracks" sets it.
+    remote_streams: Vec<MediaStreamId>,
+    /// W3C `[[LastStableStateAssociatedRemoteMediaStreams]]`.
+    last_stable_remote_streams: Vec<MediaStreamId>,
+    /// The track ended and the application has not been told yet
+    /// ([`take_unannounced_end`](Self::take_unannounced_end)).
+    end_unannounced: bool,
 }
 
 impl RTCRtpReceiverInternal {
@@ -90,7 +102,99 @@ impl RTCRtpReceiverInternal {
             associated_media_stream_ids: vec![],
             rtcp_reduced_size: false,
             last_returned_parameters: None,
+            remote_track_id: String::new(),
+            remote_streams: vec![],
+            last_stable_remote_streams: vec![],
+            end_unannounced: false,
         }
+        .with_own_track()
+    }
+
+    /// W3C webrtc 5.3 "create an RTCRtpReceiver": the receiver's track has an id the engine
+    /// generates (not one a remote description names), is labelled "remote " + kind, and
+    /// starts muted, live.
+    fn with_own_track(mut self) -> Self {
+        let mut track = MediaStreamTrack::new(
+            String::new(),
+            shared::util::math_rand_alpha(16),
+            format!("remote {}", self.kind),
+            self.kind,
+            vec![],
+        );
+        track.set_muted(true);
+        self.track = track;
+        self
+    }
+
+    /// Takes the track a remote description describes (its stream, codings and the msid
+    /// track id) while keeping what makes it this receiver's track: its id, label, muted
+    /// state and ready state (W3C webrtc 5.3: the track is created with the receiver and
+    /// keeps its identity).
+    pub(crate) fn set_remote_track(&mut self, mut track: MediaStreamTrack) {
+        self.remote_track_id = std::mem::take(&mut track.track_id);
+        track.track_id = self.track.track_id.clone();
+        track.label = self.track.label.clone();
+        track.set_muted(self.track.muted());
+        if self.track.ready_state()
+            == crate::media_stream::track_state::MediaStreamTrackState::Ended
+        {
+            track.stop();
+        }
+        self.track = track;
+    }
+
+    /// The msid track id of the remote sender's track, as the last remote description named
+    /// it; empty when none did.
+    pub(crate) fn remote_track_id(&self) -> &str {
+        &self.remote_track_id
+    }
+
+    /// W3C `[[AssociatedRemoteMediaStreams]]`.
+    pub(crate) fn remote_streams(&self) -> &[MediaStreamId] {
+        &self.remote_streams
+    }
+
+    /// W3C "set the associated remote streams": the streams become `msids` (deduplicated);
+    /// returns the stream ids removed from and added to the track's streams.
+    pub(crate) fn set_remote_streams(
+        &mut self,
+        msids: Vec<MediaStreamId>,
+    ) -> (Vec<MediaStreamId>, Vec<MediaStreamId>) {
+        let mut streams: Vec<MediaStreamId> = Vec::with_capacity(msids.len());
+        for msid in msids {
+            if !streams.contains(&msid) {
+                streams.push(msid);
+            }
+        }
+        let removed = self
+            .remote_streams
+            .iter()
+            .filter(|stream| !streams.contains(stream))
+            .cloned()
+            .collect();
+        let added = streams
+            .iter()
+            .filter(|stream| !self.remote_streams.contains(stream))
+            .cloned()
+            .collect();
+        self.remote_streams = streams;
+        (removed, added)
+    }
+
+    pub(crate) fn last_stable_remote_streams(&self) -> &[MediaStreamId] {
+        &self.last_stable_remote_streams
+    }
+
+    /// Signaling is stable: the associated remote streams are what a rollback returns to.
+    pub(crate) fn save_stable_remote_streams(&mut self) {
+        self.last_stable_remote_streams = self.remote_streams.clone();
+    }
+
+    /// W3C "stop the RTCRtpTransceiver": no associated remote streams, now or after a
+    /// rollback.
+    pub(crate) fn clear_remote_streams(&mut self) {
+        self.remote_streams.clear();
+        self.last_stable_remote_streams.clear();
     }
 
     pub(crate) fn kind(&self) -> RtpCodecKind {
@@ -374,7 +478,14 @@ impl RTCRtpReceiverInternal {
             return false;
         }
         self.track.stop();
+        self.end_unannounced = true;
         true
+    }
+
+    /// Whether the track ended since the application was last told (once: the flag is
+    /// cleared).
+    pub(crate) fn take_unannounced_end(&mut self) -> bool {
+        std::mem::take(&mut self.end_unannounced)
     }
 
     pub(crate) fn stop(

@@ -934,7 +934,7 @@ By pass:
 | WEBRTC-9.1-3 | 9.1 | MUST | All channels a codec encodes jointly are in one track | n/a | - | - | Media encoding is the application's |
 | WEBRTC-9.2.1-1 | 9.2.1 | MUST | A remote stream's id is initialized from the remote description | untested | `src/media_stream/track.rs:193` | - | No test asserts the stream id of a remote track against the offered msid |
 | WEBRTC-9.3-1 | 9.3 | MUST | RTP arriving for a muted, not ended, receptive receiver track sets muted to false | missing | `src/media_stream/track.rs:526` | - | `muted` is only ever set by the application |
-| WEBRTC-9.3-2 | 9.3 | MUST | A BYE removing one of the receiver's SSRCs sets the track muted | violated | `src/peer_connection/handler/interceptor.rs:195` | `a_bye_for_the_tracks_ssrc_ends_it` | The track is ended (`stop()`, `OnClose`) once every SSRC said BYE; it should be muted and able to resume |
+| WEBRTC-9.3-2 | 9.3 | MUST | A BYE removing one of the receiver's SSRCs sets the track muted | violated | `src/peer_connection/handler/interceptor.rs:195` | `a_bye_for_the_tracks_ssrc_mutes_it_and_does_not_end_it` | The track is ended (`stop()`, `OnClose`) once every SSRC said BYE; it should be muted and able to resume |
 | WEBRTC-9.3-3 | 9.3 | MUST | setRemoteDescription can set a receiver track muted | missing | `src/media_stream/track.rs:526` | - | No muted transition on a direction change |
 | WEBRTC-9.3-4 | 9.3 | MAY | Resources of an ended receiver track may be freed | n/a | - | - | No decoder in the engine |
 | WEBRTC-9.3.1-1 | 9.3.1 | MUST | getCapabilities returns the empty set for a remote track | untested | `src/media_stream/track.rs:581` | - | Returns the stored capabilities, empty by default |

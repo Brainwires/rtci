@@ -90,8 +90,8 @@ pub type MediaStreamTrackId = String;
 #[derive(Default, Debug, Clone)]
 pub struct MediaStreamTrack {
     stream_id: MediaStreamId,
-    track_id: MediaStreamTrackId,
-    label: String,
+    pub(crate) track_id: MediaStreamTrackId,
+    pub(crate) label: String,
     kind: RtpCodecKind,
     codings: Vec<RTCRtpEncodingParameters>,
 

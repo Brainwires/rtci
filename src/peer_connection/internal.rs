@@ -290,6 +290,7 @@ impl RTCPeerConnection {
             data_channels: DataChannelRegistry::new(),
             rtp_transceivers: Vec::new(),
             removed_transceivers: Vec::new(),
+            default_remote_stream_id: None,
             greater_mid: -1,
             sdp_origin: Origin::default(),
             last_generated_sdp: String::new(),
@@ -1184,7 +1185,8 @@ impl RTCPeerConnection {
     /// after it move down by one, as the stats' references to them do; the removed id is
     /// recorded for [`RTCPeerConnection::take_removed_transceivers`].
     fn remove_rtp_transceiver(&mut self, i: RTCRtpTransceiverId) {
-        self.rtp_transceivers.remove(i);
+        let mut removed = self.rtp_transceivers.remove(i);
+        self.end_removed_transceivers_track(&mut removed);
         self.removed_transceivers.push(i);
         self.pipeline_context.stats.transceiver_removed(i);
         // Cached SSRC owners are transceiver ids, now shifted.
@@ -1771,7 +1773,7 @@ impl RTCPeerConnection {
                         })
                     }
 
-                    receiver.set_track(MediaStreamTrack::new(
+                    receiver.set_remote_track(MediaStreamTrack::new(
                         incoming_track.stream_id.clone(),
                         incoming_track.track_id.clone(),
                         // W3C webrtc 4.4.1.6 (create an RTCRtpReceiver): "remote " + kind.
@@ -1793,7 +1795,7 @@ impl RTCPeerConnection {
 
                     receive_codings.push(rtp_coding_parameters.clone());
 
-                    receiver.set_track(MediaStreamTrack::new(
+                    receiver.set_remote_track(MediaStreamTrack::new(
                         incoming_track.stream_id,
                         incoming_track.track_id,
                         // W3C webrtc 4.4.1.6 (create an RTCRtpReceiver): "remote " + kind.
@@ -1820,7 +1822,7 @@ impl RTCPeerConnection {
                     // extension says which. Add a track with no coding as a placeholder, carrying
                     // the stream and track ids, until the first RTP packet binds its SSRC in the
                     // interceptor handler (`bind_undeclared_ssrc`).
-                    receiver.set_track(MediaStreamTrack::new(
+                    receiver.set_remote_track(MediaStreamTrack::new(
                         incoming_track.stream_id,
                         incoming_track.track_id,
                         // W3C webrtc 4.4.1.6 (create an RTCRtpReceiver): "remote " + kind.
@@ -2846,7 +2848,8 @@ fn is_same_remote_track(
     let track = receiver.track();
     // A description without msid-appdata leaves the track id to this side: any id it gave
     // the track is the same track.
-    if (!incoming_track.track_id.is_empty() && track.track_id() != &incoming_track.track_id)
+    if (!incoming_track.track_id.is_empty()
+        && receiver.remote_track_id() != incoming_track.track_id)
         || track.track_id().is_empty()
         || track.stream_id() != &incoming_track.stream_id
     {
