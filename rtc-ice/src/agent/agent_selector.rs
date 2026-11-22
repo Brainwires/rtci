@@ -35,6 +35,24 @@ use crate::candidate::candidate_peer_reflexive::CandidatePeerReflexiveConfig;
 use crate::candidate::{candidate_pair::*, *};
 use crate::state::ConnectionState;
 
+/// What a transport reports about the path of a connectivity check. See
+/// [`Agent::handle_transport_error`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TransportError {
+    /// A hard ICMP error (destination, port or protocol unreachable) for a datagram sent on
+    /// the path.
+    IcmpHardError,
+    /// The TCP connection of the path could not be established.
+    ConnectionFailed,
+    /// What arrived on the path's TCP connection, in answer to the first check, is not STUN.
+    NotStun,
+}
+
+/// RFC 6544 Section 12: "an ICE agent SHOULD NOT have more than 5 outstanding TCP connection
+/// attempts with the same peer to the same IP address."
+pub(crate) const MAX_TCP_CONNECTION_ATTEMPTS_PER_ADDRESS: usize = 5;
+
 /// The state of the checklist (RFC 8445 Section 6.1.2.1). With one checklist it is also the
 /// state of the ICE session (Section 6.1.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -402,7 +420,9 @@ impl Agent {
     /// lite one answering a full agent (Section 6.2: no checks).
     fn ordinary_checks_allowed(&self) -> bool {
         self.selected_pair.is_none()
-            && !(self.lite && !self.is_controlling)
+            // (Nor a lite one with a lite peer, Section 6.1.1: "no connectivity checks are
+            // ever sent".)
+            && !(self.lite && (!self.is_controlling || self.remote_lite))
             && !matches!(
                 self.connection_state,
                 ConnectionState::Failed | ConnectionState::Closed
@@ -416,11 +436,41 @@ impl Agent {
             if p.state != CandidatePairState::Waiting || p.triggered {
                 continue;
             }
+            if self.tcp_attempts_exhausted(p) {
+                continue;
+            }
             if best.is_none_or(|b| self.candidate_pairs[b].priority() < p.priority()) {
                 best = Some(index);
             }
         }
         best
+    }
+
+    /// Whether the pair is one this agent opens a TCP connection for (an active local
+    /// candidate, RFC 6544 Section 7.1).
+    fn opens_tcp_connection(&self, p: &CandidatePair) -> bool {
+        let local = &self.local_candidates[p.local_index];
+        local.network_type().is_tcp() && local.tcp_type() == crate::tcp_type::TcpType::Active
+    }
+
+    /// RFC 6544 Section 12: whether as many connection attempts as allowed are outstanding to
+    /// the IP address of this pair's remote candidate, so that its check has to wait. An
+    /// attempt is outstanding while its check is In-Progress: it ends with the response, or
+    /// with the transaction (Ti, 39.5 s, or a failure the transport reports).
+    fn tcp_attempts_exhausted(&self, p: &CandidatePair) -> bool {
+        if !self.opens_tcp_connection(p) {
+            return false;
+        }
+        let ip = self.remote_candidates[p.remote_index].addr().ip();
+        self.candidate_pairs
+            .iter()
+            .filter(|q| {
+                q.state == CandidatePairState::InProgress
+                    && self.opens_tcp_connection(q)
+                    && self.remote_candidates[q.remote_index].addr().ip() == ip
+            })
+            .count()
+            >= MAX_TCP_CONNECTION_ATTEMPTS_PER_ADDRESS
     }
 
     /// The Frozen pairs step 2 of Section 6.1.4.2 would unfreeze: with no pair Waiting, for
@@ -895,7 +945,10 @@ impl Agent {
             let c = &mut self.candidate_pairs[checked];
             c.state = CandidatePairState::Succeeded;
             c.valid_pair = Some(valid);
-            c.triggered = false;
+            // A triggered check still queued for the pair is not needed any more, but a
+            // nomination queued for it is (Section 8.1.1): an answer to an earlier check
+            // must not take it off the queue.
+            c.triggered = c.triggered && c.nominate;
         }
         {
             let v = &mut self.candidate_pairs[valid];
@@ -1361,6 +1414,165 @@ impl Agent {
             self.set_selected_pair(Some(now), Some(pair_index));
             self.conclude();
         }
+    }
+
+    /// What the transport learned about the path `transport` (its local address the base of
+    /// a local candidate, its peer address a remote candidate):
+    ///
+    /// - [`TransportError::IcmpHardError`], RFC 8445 Section 7.2.5.2.2: "if a Binding request
+    ///   generates a hard ICMP error, the agent SHOULD set the state of the candidate pair to
+    ///   Failed". Only a pair whose check is in flight fails, and never a valid one: an ICMP
+    ///   error is not authenticated ("ICMP errors can be used as a method for
+    ///   Denial-of-Service attacks"), so it cannot take away a pair a check has validated.
+    ///   Consent decides for those.
+    /// - [`TransportError::ConnectionFailed`], RFC 6544 Section 7.1: "If the TCP connection
+    ///   cannot be established, the check is considered to have failed, and a full-mode agent
+    ///   MUST update the pair state to Failed". The pair fails whether or not its check has
+    ///   started; a valid pair is left to consent, as above.
+    /// - [`TransportError::NotStun`], RFC 6544 Section 7.1: "If the response to the first
+    ///   connectivity check on the established TCP connection is something other than a STUN
+    ///   message, the remote candidate address apparently was not one of the peer's addresses,
+    ///   and the agent SHOULD close the connection and consider all pairs with that remote
+    ///   candidate as failed." Every pair with that remote candidate that is not valid fails;
+    ///   closing the connection is the caller's.
+    ///
+    /// Returns whether a pair failed.
+    pub fn handle_transport_error(
+        &mut self,
+        now: Instant,
+        transport: shared::TransportContext,
+        error: TransportError,
+    ) -> bool {
+        let Some(local_index) =
+            self.find_local_candidate(transport.local_addr, transport.transport_protocol)
+        else {
+            return false;
+        };
+        let Some(remote_index) = self.remote_candidates.iter().position(|c| {
+            c.addr() == transport.peer_addr
+                && c.network_type().to_protocol() == transport.transport_protocol
+        }) else {
+            return false;
+        };
+        let is_tcp = transport.transport_protocol == shared::TransportProtocol::TCP;
+        let mut failed = vec![];
+        for (index, p) in self.candidate_pairs.iter().enumerate() {
+            if p.remote_index != remote_index
+                || p.valid
+                || p.state == CandidatePairState::Succeeded
+                || p.state == CandidatePairState::Failed
+                || Some(index) == self.selected_pair
+            {
+                continue;
+            }
+            let on_path = self.same_base(p.local_index, local_index);
+            let fails = match error {
+                TransportError::IcmpHardError => {
+                    on_path && p.state == CandidatePairState::InProgress
+                }
+                TransportError::ConnectionFailed => is_tcp && on_path,
+                TransportError::NotStun => is_tcp,
+            };
+            if fails {
+                failed.push(index);
+            }
+        }
+        if error == TransportError::NotStun
+            && !failed.iter().any(|&index| {
+                self.candidate_pairs[index].state == CandidatePairState::InProgress
+                    && self.same_base(self.candidate_pairs[index].local_index, local_index)
+            })
+        {
+            // Not the answer to a first check: nothing is concluded from it.
+            return false;
+        }
+        for &index in &failed {
+            let p = self.candidate_pairs[index];
+            debug!(
+                "[{}]: {:?} on {}: the pair failed",
+                self.get_name(),
+                error,
+                p
+            );
+            self.pending_binding_requests
+                .retain(|r| !(r.local_index == p.local_index && r.remote_index == p.remote_index));
+            self.fail_pair(index);
+        }
+        if !failed.is_empty() {
+            self.maybe_nominate(now);
+            self.request_connectivity_check();
+        }
+        !failed.is_empty()
+    }
+
+    /// Two lite agents (RFC 8445 Sections 6.2 and 8.2): "the agent pairs local candidates
+    /// with remote candidates that are of the same data stream and have the same component,
+    /// transport protocol, and IP address family. [...] if there is only one candidate pair,
+    /// that pair is added to the valid list. If there is more than one pair, it is
+    /// RECOMMENDED that an agent follow the procedures of RFC 6724 to select a pair and add it
+    /// to the valid list." The pair chosen is the selected pair: there is no nomination
+    /// between two agents that send no checks.
+    ///
+    /// With more than one pair "the controlling agent MUST send an updated candidate list":
+    /// it raises [`Event::LiteCandidateUpdate`], once, with the pair it chose; the peer takes
+    /// the update with [`Agent::replace_remote_candidates`].
+    pub(crate) fn conclude_lite_to_lite(&mut self, now: Instant) {
+        if self.selected_pair.is_some()
+            || self.ufrag_pwd.remote_credentials.is_none()
+            || matches!(
+                self.connection_state,
+                ConnectionState::Failed | ConnectionState::Closed
+            )
+        {
+            return;
+        }
+        let Some(chosen) =
+            (0..self.candidate_pairs.len()).max_by_key(|&index| self.lite_pair_preference(index))
+        else {
+            return;
+        };
+        let several = self.candidate_pairs.len() > 1;
+        {
+            let p = &mut self.candidate_pairs[chosen];
+            p.state = CandidatePairState::Succeeded;
+            p.valid = true;
+            p.valid_pair = Some(chosen);
+        }
+        self.set_selected_pair(Some(now), Some(chosen));
+        if several && self.is_controlling && !self.lite_update_raised {
+            self.lite_update_raised = true;
+            let p = self.candidate_pairs[chosen];
+            self.event_outs.push_back(crate::agent::TaggedEvent {
+                now,
+                event: crate::agent::Event::LiteCandidateUpdate(
+                    Box::new(self.local_candidates[p.local_index].clone()),
+                    Box::new(self.remote_candidates[p.remote_index].clone()),
+                ),
+            });
+        }
+    }
+
+    /// How a pair ranks among the pairs of two lite agents, larger first: the destination
+    /// address selection of RFC 6724 Section 6, as far as it applies to two transport
+    /// addresses that are given: Rule 2, prefer matching scope (link-local with link-local,
+    /// loopback with loopback, global with global); Rule 6, prefer higher precedence (the
+    /// default policy table puts IPv6 above IPv4); Rule 9, the longest matching prefix
+    /// between source and destination. What is left is decided by the pair priority, which
+    /// both agents compute alike.
+    fn lite_pair_preference(&self, index: usize) -> (bool, bool, u32, u64) {
+        use crate::agent::remote_policy::ip_scope;
+
+        let p = &self.candidate_pairs[index];
+        let local = self.local_candidates[p.local_index].base_addr().ip();
+        let remote = self.remote_candidates[p.remote_index].addr().ip();
+        let matching_scope = ip_scope(local) == ip_scope(remote);
+        let is_v6 = matches!(remote.to_canonical(), IpAddr::V6(_));
+        let common_prefix = match (local.to_canonical(), remote.to_canonical()) {
+            (IpAddr::V4(a), IpAddr::V4(b)) => (u32::from(a) ^ u32::from(b)).leading_zeros(),
+            (IpAddr::V6(a), IpAddr::V6(b)) => (u128::from(a) ^ u128::from(b)).leading_zeros(),
+            _ => 0,
+        };
+        (matching_scope, is_v6, common_prefix, p.priority())
     }
 
     /// Controlling agent that has concluded: sends the nomination of its selected pair again

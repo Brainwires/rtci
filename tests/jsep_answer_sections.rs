@@ -360,6 +360,10 @@ fn a_feedback_type_a_later_offer_drops_is_not_answered() -> TestResult {
     answerer.set_remote_description(now, RTCSessionDescription::offer(without_pli)?)?;
     let answer = answerer.create_answer(None)?;
     assert!(!answer.sdp.contains(" nack pli\r\n"), "{}", answer.sdp);
-    assert!(answer.sdp.contains(" nack\r\n"), "the rest stays: {}", answer.sdp);
+    assert!(
+        answer.sdp.contains(" nack\r\n"),
+        "the rest stays: {}",
+        answer.sdp
+    );
     Ok(())
 }

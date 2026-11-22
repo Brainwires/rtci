@@ -35,6 +35,10 @@ pub(crate) const MAX_JITTER_BUFFER_TARGET: Duration = Duration::from_millis(4000
 /// rotates through its participants, so the least recent make room past this.
 pub(crate) const MAX_CONTRIBUTING_SOURCES: usize = 64;
 
+/// The mixer-to-client audio level extension (RFC 6465 section 6): the level of each
+/// contributing source of a mixed packet.
+pub(crate) const CSRC_AUDIO_LEVEL_URI: &str = "urn:ietf:params:rtp-hdrext:csrc-audio-level";
+
 /// The linear audio level (0 to 1) of an RFC 6464 / RFC 6465 level in -dBov, as W3C webrtc
 /// 5.3 defines the conversion: 127 is silence, otherwise `10^(-level / 20)`.
 pub(crate) fn linear_audio_level(level: u8) -> f64 {
@@ -164,20 +168,22 @@ impl RTCRtpReceiverInternal {
     /// webrtc 5.3 `getSynchronizationSources`, `getContributingSources`). One entry per
     /// source, the most recent packet's; entries older than [`SOURCE_LIFETIME`] are dropped.
     ///
-    /// `audio_level` is the packet's RFC 6464 level (-dBov) when its header carries one; the
-    /// per-CSRC levels of RFC 6465 are not read, and a source without a level reports 0.
+    /// `audio_level` is the packet's RFC 6464 level (-dBov) when its header carries one, and
+    /// `csrc_levels` its RFC 6465 levels, one per CSRC in the order of the CSRC list (a list
+    /// of another length is not attributed); a source without a level reports none.
     pub(crate) fn record_sources(
         &mut self,
         now: Instant,
         wall_clock: SystemInstant,
         header: &rtp::Header,
         audio_level: Option<u8>,
+        csrc_levels: Option<&[u8]>,
     ) {
         let timestamp = wall_clock.unix(now);
         let live = |source: &RTCRtpContributingSource| {
             timestamp.saturating_sub(source.timestamp) < SOURCE_LIFETIME
         };
-        let entry = |source: u32, audio_level: f64| RTCRtpContributingSource {
+        let entry = |source: u32, audio_level: Option<f64>| RTCRtpContributingSource {
             timestamp,
             source,
             audio_level,
@@ -186,20 +192,20 @@ impl RTCRtpReceiverInternal {
 
         self.synchronization_sources
             .retain(|source| source.source != header.ssrc && live(source));
-        self.synchronization_sources.push(entry(
-            header.ssrc,
-            audio_level.map(linear_audio_level).unwrap_or_default(),
-        ));
+        self.synchronization_sources
+            .push(entry(header.ssrc, audio_level.map(linear_audio_level)));
+        let csrc_levels = csrc_levels.filter(|levels| levels.len() == header.csrc.len());
 
         self.contributing_sources
             .retain(|source| !header.csrc.contains(&source.source) && live(source));
-        for &csrc in &header.csrc {
+        for (n, &csrc) in header.csrc.iter().enumerate() {
             if !self
                 .contributing_sources
                 .iter()
                 .any(|source| source.source == csrc)
             {
-                self.contributing_sources.push(entry(csrc, 0.0));
+                let level = csrc_levels.map(|levels| linear_audio_level(levels[n]));
+                self.contributing_sources.push(entry(csrc, level));
             }
         }
         if self.contributing_sources.len() > MAX_CONTRIBUTING_SOURCES {
@@ -219,13 +225,37 @@ impl RTCRtpReceiverInternal {
     pub(crate) fn get_contributing_sources(
         &self,
     ) -> impl Iterator<Item = &RTCRtpContributingSource> {
-        self.contributing_sources.iter()
+        // Kept oldest first (a source heard again moves to the end): W3C webrtc 5.3 lists
+        // them in descending timestamp order.
+        self.contributing_sources.iter().rev()
     }
 
     pub(crate) fn get_synchronization_sources(
         &self,
     ) -> impl Iterator<Item = &RTCRtpSynchronizationSource> {
-        self.synchronization_sources.iter()
+        self.synchronization_sources.iter().rev()
+    }
+
+    /// The contributing sources heard in the [`SOURCE_LIFETIME`] before `now` (the wall-clock
+    /// time since the Unix epoch, as the entries' timestamps are), most recent first. Entries
+    /// are otherwise dropped only when a packet arrives, so a receiver that hears nothing
+    /// more would keep listing its last sources.
+    pub(crate) fn live_contributing_sources(
+        &self,
+        now: Duration,
+    ) -> impl Iterator<Item = &RTCRtpContributingSource> {
+        self.get_contributing_sources()
+            .filter(move |source| now.saturating_sub(source.timestamp) < SOURCE_LIFETIME)
+    }
+
+    /// [`live_contributing_sources`](Self::live_contributing_sources) for the synchronization
+    /// sources.
+    pub(crate) fn live_synchronization_sources(
+        &self,
+        now: Duration,
+    ) -> impl Iterator<Item = &RTCRtpSynchronizationSource> {
+        self.get_synchronization_sources()
+            .filter(move |source| now.saturating_sub(source.timestamp) < SOURCE_LIFETIME)
     }
 
     pub(crate) fn get_codecs(

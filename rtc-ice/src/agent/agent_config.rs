@@ -326,6 +326,34 @@ pub struct AgentConfig {
     /// succeeded on). See [`Agent::accepts_data`].
     pub data_from_selected_pair_only: bool,
 
+    /// Whether the first mDNS query for a remote `.local` candidate waits a random 20 to 120
+    /// ms (RFC 6762 Section 5.2: every participant of a call is told of the name at the same
+    /// moment). `None` is on, as the RFC recommends; `Some(false)` sends it from the
+    /// `handle_timeout` that follows the candidate.
+    pub multicast_dns_first_query_delay: Option<bool>,
+
+    /// The driver hands every mDNS datagram to `handle_read` with the datagram's destination
+    /// in `local_addr` (from `IP_PKTINFO` / `IPV6_PKTINFO`): `224.0.0.251:5353` or
+    /// `[ff02::fb]:5353` for one that arrived on the group, the host's own address for one
+    /// sent to it by unicast. The mDNS connection then holds a unicast arrival to the rules
+    /// RFC 6762 has for it (Sections 5.5 and 6). Off by default: a socket's bound address
+    /// says nothing about how a datagram reached it.
+    pub multicast_dns_destination_reported: bool,
+
+    /// The first query for a name asks for a unicast response (the QU bit, RFC 6762 Section
+    /// 5.4, which draft-ietf-mmusic-mdns-ice-candidates Section 3.2.1 suggests). Off by
+    /// default: a unicast response reaches one socket on port 5353 only (RFC 6762 Section
+    /// 15.1), so beside a system responder the answer can be lost. Turn it on, with
+    /// `multicast_dns_destination_reported`, when the application's socket is the only one.
+    pub multicast_dns_unicast_response: bool,
+
+    /// The limit on the mDNS messages sent, to share between every agent of a process
+    /// (draft-ietf-mmusic-mdns-ice-candidates Section 7.1: the limit is the implementation's,
+    /// not one agent's): give each agent a clone of one [`mdns::MdnsRateLimit`]. `None`: a
+    /// limit of this agent's own (40 messages at once, 10 a second). The crate keeps no
+    /// process-wide state of its own, so it cannot share one unasked.
+    pub multicast_dns_rate_limit: Option<mdns::MdnsRateLimit>,
+
     /// Send data on the best valid pair before a pair is selected (RFC 8445 Section 12.1: "An
     /// ICE agent MAY send data on any valid pair before selected pairs have been produced").
     /// Off by default: data is sent once a pair is selected.

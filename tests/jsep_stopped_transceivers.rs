@@ -146,7 +146,7 @@ a=rtpmap:96 VP8/90000
             (
                 Some("0".to_owned()),
                 true,
-                RTCRtpTransceiverDirection::Inactive
+                RTCRtpTransceiverDirection::Stopped
             ),
             (
                 Some("1".to_owned()),
