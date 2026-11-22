@@ -193,3 +193,57 @@ impl RTCPeerConnection {
             )));
     }
 }
+
+impl RTCPeerConnection {
+    /// webrtc-extensions 4.1, an answer applied: each transceiver with a section in it sets
+    /// `[[NegotiatedHeaderExtensions]]` and `[[HeaderExtensionsToNegotiate]]` from the
+    /// section's `a=extmap` lines (reversed when `remote`; "stopped" for one left out).
+    pub(super) fn apply_answer_header_extensions(
+        &mut self,
+        answer: &sdp::SessionDescription,
+        remote: bool,
+    ) {
+        for media in &answer.media_descriptions {
+            let Some(mid) = crate::peer_connection::sdp::get_mid_value(media) else {
+                continue;
+            };
+            let Some(transceiver) = self
+                .rtp_transceivers
+                .iter_mut()
+                .find(|t| t.mid().as_deref() == Some(mid))
+            else {
+                continue;
+            };
+            if transceiver.stopped() || media.media_name.port.value == 0 {
+                continue;
+            }
+            let to_negotiate = transceiver.header_extensions_to_negotiate_list(&self.media_engine);
+            let negotiated =
+                crate::rtp_transceiver::header_extension_control::negotiated_from_answer(
+                    &to_negotiate,
+                    media,
+                    remote,
+                );
+            transceiver.set_negotiated_header_extensions(negotiated);
+        }
+    }
+
+    /// webrtc-extensions 4.1: a new transceiver's `[[HeaderExtensionsToNegotiate]]` is that of
+    /// the first transceiver of its kind that is not stopping, when that one has a list of
+    /// its own (otherwise both have the media engine's defaults).
+    pub(super) fn inherit_header_extensions_to_negotiate(
+        &self,
+        transceiver: &mut crate::rtp_transceiver::internal::RTCRtpTransceiverInternal,
+    ) {
+        if let Some(first) = self
+            .rtp_transceivers
+            .iter()
+            .find(|t| t.kind() == transceiver.kind() && !t.stopped())
+            && first.has_header_extensions_to_negotiate()
+        {
+            transceiver.set_header_extensions_to_negotiate(
+                first.header_extensions_to_negotiate_list(&self.media_engine),
+            );
+        }
+    }
+}

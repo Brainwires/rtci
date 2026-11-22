@@ -1413,6 +1413,7 @@ impl RTCPeerConnection {
         let parameters =
             media_engine.get_rtp_parameters_by_kind(transceiver.kind(), transceiver.direction());
         let to_negotiate = transceiver.header_extensions_to_negotiate();
+        let to_negotiate = to_negotiate.as_deref();
         // (id, URI, encrypted form): one form per URI in an answer, both in an offer that
         // offers best-effort encryption (RFC 6904 section 4.1).
         let mut written: Vec<(u16, String, bool)> = vec![];
@@ -1456,11 +1457,32 @@ impl RTCPeerConnection {
             // always include the direction parameter ... with a value of 'recvonly'"); an
             // answer reverses what the offer restricted, within what was registered, and
             // leaves out an extension it can use in neither direction.
-            let registered = media_engine
-                .header_extensions
-                .iter()
-                .find(|e| e.uri == *uri)
-                .and_then(|e| e.allowed_direction);
+            // webrtc-extensions 4.1: the direction `[[HeaderExtensionsToNegotiate]]` gives
+            // the extension, when the application set the list or an answer did.
+            let registered = transceiver.header_extension_direction(uri).or_else(|| {
+                media_engine
+                    .header_extensions
+                    .iter()
+                    .find(|e| e.uri == *uri)
+                    .and_then(|e| e.allowed_direction)
+            });
+            if registered == Some(RTCRtpTransceiverDirection::Inactive) {
+                // Offered inactive; in an answer, only as the offer allowed.
+                if is_offer || media_section.match_extensions.contains_key(uri) {
+                    let (ext_uri, ext_attr) = if *encrypted {
+                        (Url::parse(ENCRYPT_URI)?, Some(uri.clone()))
+                    } else {
+                        (Url::parse(uri.as_str())?, None)
+                    };
+                    media = media.with_extmap(sdp::extmap::ExtMap {
+                        value: *id,
+                        uri: Some(ext_uri),
+                        direction: sdp::direction::Direction::Inactive,
+                        ext_attr,
+                    });
+                }
+                continue;
+            }
             let Some(direction) = extension_direction(
                 registered,
                 media_section.match_extension_directions.get(uri).cloned(),

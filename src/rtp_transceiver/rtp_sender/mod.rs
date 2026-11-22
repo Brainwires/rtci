@@ -215,6 +215,7 @@ pub use rtp_coding_parameters::{
 pub use rtp_encoding_parameters::RTCRtpEncodingParameters;
 pub use rtp_header_extension_capability::{
     RTCRtpHeaderExtensionCapability, RTCRtpHeaderExtensionEncryption,
+    RTCRtpHeaderExtensionToNegotiate,
 };
 pub use rtp_header_extension_parameters::RTCRtpHeaderExtensionParameters;
 pub use rtp_parameters::RTCRtpParameters;
@@ -519,6 +520,43 @@ impl RTCRtpSender<'_> {
     /// rewritten to its encoding's negotiated payload type.
     pub fn write_rtp(&mut self, now: Instant, packet: rtp::Packet) -> Result<()> {
         self.write_rtp_inner(now, packet, true)
+    }
+
+    /// [`Self::write_rtp`] with the packet's absolute capture time (webrtc-extensions 8, the
+    /// `abs-capture-time` header extension): `capture_ntp` is when its first frame was
+    /// captured, an NTP timestamp (32.32 fixed point seconds since 1900) on the capture
+    /// system's clock, and `clock_offset` the sender's estimate of that clock's offset from
+    /// its own (signed 32.32), when it knows it. The element goes in only when the extension
+    /// was negotiated for the sender; the packet is sent either way.
+    ///
+    /// libwebrtc stamps the first packet of a frame and then one about every second; the
+    /// receiver interpolates the others from the RTP timestamps.
+    pub fn write_rtp_with_capture_time(
+        &mut self,
+        now: Instant,
+        mut packet: rtp::Packet,
+        capture_ntp: u64,
+        clock_offset: Option<i64>,
+    ) -> Result<()> {
+        use shared::marshal::Marshal;
+        let id = self
+            .get_parameters()
+            .rtp_parameters
+            .header_extensions
+            .iter()
+            .find(|e| e.uri == rtp::extension::ABS_CAPTURE_TIME_URI && !e.encrypted)
+            .map(|e| e.id);
+        if let Some(id) = id.and_then(|id| u8::try_from(id).ok()) {
+            let element = rtp::extension::abs_capture_time_extension::AbsCaptureTimeExtension {
+                timestamp: capture_ntp,
+                estimated_capture_clock_offset: clock_offset,
+            }
+            .marshal()?;
+            packet
+                .header
+                .set_extension_upgrading(id, element.freeze())?;
+        }
+        self.write_rtp(now, packet)
     }
 
     /// W3C `RTCRtpSender.dtmf`: the DTMF sender of an audio sender, `None` for a video one.

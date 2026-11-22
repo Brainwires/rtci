@@ -10,7 +10,7 @@ Totals (rows 957):
 
 The section 8 rows (statistics) carry the verdicts of branch `conf/stats-conformance`; the totals include them.
 
-- MUST: tested 704 / untested 32 / partial 84 / missing 42 / violated 6 / n-a 61
+- MUST: tested 705 / untested 31 / partial 84 / missing 42 / violated 6 / n-a 61
 - SHOULD: tested 4 / untested 0 / partial 1 / missing 0 / violated 0 / n-a 5
 - MAY: tested 3 / untested 2 / partial 0 / missing 0 / violated 0 / n-a 13
 
@@ -18,7 +18,7 @@ By pass:
 
 - sections 1 to 4: rows 399; MUST: tested 258 / untested 15 / partial 40 / missing 32 / violated 2 / n-a 35
 - section 5: rows 258; MUST: tested 194 / untested 10 / partial 24 / missing 6 / violated 3 / n-a 13
-- sections 6 to 12: rows 300; MUST: tested 252 / untested 7 / partial 20 / missing 4 / violated 1 / n-a 13
+- sections 6 to 12: rows 300; MUST: tested 253 / untested 6 / partial 20 / missing 4 / violated 1 / n-a 13
 
 | ID | § | Level | Clause (short paraphrase) | Verdict | Code | Test | Note |
 |---|---|---|---|---|---|---|---|
@@ -937,7 +937,7 @@ By pass:
 | WEBRTC-9.3-2 | 9.3 | MUST | A BYE removing one of the receiver's SSRCs sets the track muted | tested | `src/peer_connection/handler/interceptor.rs:264` | `rtp_unmutes_the_remote_track_and_a_bye_mutes_it_without_ending_it`, `a_bye_for_the_tracks_ssrc_mutes_it_and_does_not_end_it`, `closing_the_sender_mutes_the_receivers_track` | Audit finding confirmed (the BYE ended the track); now mutes, RTP unmutes |
 | WEBRTC-9.3-3 | 9.3 | MUST | setRemoteDescription can set a receiver track muted | tested | `src/peer_connection/remote_tracks.rs:198` | `a_remote_description_that_stops_the_sending_mutes_the_track` | - |
 | WEBRTC-9.3-4 | 9.3 | MAY | Resources of an ended receiver track may be freed | n/a | - | - | No decoder in the engine |
-| WEBRTC-9.3.1-1 | 9.3.1 | MUST | getCapabilities returns the empty set for a remote track | untested | `src/media_stream/track.rs:581` | - | Returns the stored capabilities, empty by default |
+| WEBRTC-9.3.1-1 | 9.3.1 | MUST | getCapabilities returns the empty set for a remote track | tested | `src/media_stream/track.rs:581` | a_remote_track_has_no_capabilities | Returns the stored capabilities, empty by default |
 | WEBRTC-9.3.1-2 | 9.3.1 | MUST | applyConstraints rejects with OverconstrainedError on a remote track | violated | `src/media_stream/track.rs:664` | - | Stores the constraints and returns nothing, for any track |
 | WEBRTC-9.3.1-3 | 9.3.1 | MUST | Remote video track setting width: latest received frame | missing | `src/media_stream/track_settings.rs:1` | - | No frame information reaches the settings; no feed |
 | WEBRTC-9.3.1-4 | 9.3.1 | MUST | Remote video track setting height | missing | `src/media_stream/track_settings.rs:1` | - | - |
