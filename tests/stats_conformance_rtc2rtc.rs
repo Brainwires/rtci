@@ -2436,20 +2436,29 @@ fn a_candidate_reports_what_it_was_gathered_as() -> Result<()> {
         "a pair for each remote candidate the local one can reach: {pairs:#?}"
     );
     let selected = &one(&answerer, "transport")["selectedCandidatePairId"];
+    let mut failed = 0;
     for pair in &pairs {
         let reachable = by_id(&answerer, &pair["remoteCandidateId"])["port"] == 5000;
-        assert_eq!(
-            pair["state"],
-            if reachable { "succeeded" } else { "failed" },
-            "{pair}"
-        );
         assert_eq!(pair["id"] == *selected, reachable, "{pair}");
-        if !reachable {
-            assert!(u(pair, "requestsSent") >= 1, "it was checked: {pair}");
-            assert_eq!(u(pair, "responsesReceived"), 0, "{pair}");
-            assert!(!has(pair, "currentRoundTripTime"), "{pair}");
+        if reachable {
+            assert_eq!(pair["state"], "succeeded", "{pair}");
+            continue;
+        }
+        assert_eq!(u(pair, "responsesReceived"), 0, "{pair}");
+        assert!(!has(pair, "currentRoundTripTime"), "{pair}");
+        // A pair that was checked and never answered failed; one the agent never got to
+        // check (the UDP candidate against the TCP one) is still waiting.
+        if u(pair, "requestsSent") >= 1 {
+            assert_eq!(pair["state"], "failed", "{pair}");
+            failed += 1;
+        } else {
+            assert_eq!(pair["state"], "waiting", "{pair}");
         }
     }
+    assert!(
+        failed >= 3,
+        "the three UDP candidates nobody answers at: {pairs:#?}"
+    );
     Ok(())
 }
 
