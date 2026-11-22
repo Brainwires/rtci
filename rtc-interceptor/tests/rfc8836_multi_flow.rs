@@ -308,9 +308,11 @@ struct TcpFlow {
     window: f64,
     slow_start_threshold: f64,
     sequence: u64,
-    /// Sent packets: when the sender hears about each (an acknowledgement or a loss).
-    outstanding: BTreeMap<u64, (Duration, bool)>,
+    /// Sent packets: when the sender hears about each (an acknowledgement or a loss),
+    /// whether it was delivered, and when it was sent.
+    outstanding: BTreeMap<u64, (Duration, bool, Duration)>,
     last_cut: Option<Duration>,
+    /// The smoothed round-trip time, queueing included (RFC 6298).
     round_trip: Duration,
     goodput: Goodput,
 }
@@ -337,12 +339,14 @@ impl TcpFlow {
         let heard: Vec<u64> = self
             .outstanding
             .iter()
-            .filter(|(_, (at, _))| *at <= now)
+            .filter(|(_, (at, _, _))| *at <= now)
             .map(|(sequence, _)| *sequence)
             .collect();
         for sequence in heard {
-            let (_, delivered) = self.outstanding.remove(&sequence).expect("heard");
+            let (heard_at, delivered, sent) = self.outstanding.remove(&sequence).expect("heard");
             if delivered {
+                let sample = heard_at.saturating_sub(sent);
+                self.round_trip = self.round_trip.mul_f64(0.875) + sample.mul_f64(0.125);
                 if self.window < self.slow_start_threshold {
                     self.window += 1.0;
                 } else {
@@ -352,7 +356,7 @@ impl TcpFlow {
                 .last_cut
                 .is_none_or(|cut| now.saturating_sub(cut) >= self.round_trip)
             {
-                // One cut per loss episode.
+                // One cut per loss episode: a round trip, queueing included.
                 self.window = (self.window / 2.0).max(2.0);
                 self.slow_start_threshold = self.window;
                 self.last_cut = Some(now);
@@ -364,10 +368,10 @@ impl TcpFlow {
             let heard = match path.offer(now, PACKET_BITS) {
                 Some(arrival) => {
                     self.goodput.add(arrival, PACKET_BITS);
-                    (arrival + path.propagation, true)
+                    (arrival + path.propagation, true, now)
                 }
-                // Three duplicate acknowledgements later: about a round trip and a bit.
-                None => (now + self.round_trip + path.propagation, false),
+                // The duplicate acknowledgements of the packets behind it: about a round trip.
+                None => (now + self.round_trip, false, now),
             };
             self.outstanding.insert(sequence, heard);
         }
@@ -502,6 +506,17 @@ fn a_flow_that_joins_late_gets_a_useful_share() {
             CAPACITY,
         ) >= 0.2
     });
+    let targets: Vec<String> = (0..30)
+        .map(|n| {
+            let at = join + Duration::from_secs(2 * n);
+            format!(
+                "{:.0}/{:.0}",
+                world.gcc[0].target_at(at) / 1000.0,
+                world.gcc[1].target_at(at) / 1000.0
+            )
+        })
+        .collect();
+    println!("a late flow: targets in kbit/s every 2 s from the join: {targets:?}");
     let (from, until) = (Duration::from_secs(80), Duration::from_secs(100));
     let old = share(world.gcc[0].goodput.rate(from, until), CAPACITY);
     let new = share(world.gcc[1].goodput.rate(from, until), CAPACITY);

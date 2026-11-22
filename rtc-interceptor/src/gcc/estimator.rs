@@ -46,8 +46,13 @@ pub const FEEDBACK_TIMEOUT_DECREASE: f64 = 0.5;
 /// five seconds: the result stands until the next one is due and has had its second to
 /// arrive, so the estimate rests on a measurement no older than that instead of falling back
 /// to one and a half times what the application happens to send and jumping up again with
-/// every probe. Over-use lowers it with the estimate.
+/// every probe. A probe that confirms the estimate renews it; over-use lowers it with the
+/// estimate.
 pub const PROBE_RESULT_HOLD: Duration = Duration::from_secs(6);
+
+/// A probe result at least this share of the estimate confirms it (see
+/// [`PROBE_RESULT_HOLD`]): the cluster arrived at about the rate the estimate already is.
+pub const PROBE_CONFIRMS_ESTIMATE: f64 = 0.9;
 
 /// Google Congestion Control.
 ///
@@ -323,9 +328,21 @@ impl BandwidthEstimator for Gcc {
     }
 
     fn on_probe_result(&mut self, now: Instant, bits_per_second: f64) {
-        // A probe only ever raises the estimate: one that came out below it says the cluster
-        // met a queue, which the delay-based controller hears about by itself.
-        if !bits_per_second.is_finite() || bits_per_second <= self.target {
+        if !bits_per_second.is_finite() || bits_per_second <= 0.0 {
+            return;
+        }
+        if bits_per_second <= self.target {
+            // A probe only ever raises the estimate: one that came out well below it says the
+            // cluster met a queue, which the delay-based controller hears about by itself.
+            // One that the path carried at about the estimate confirms it: the measurement is
+            // renewed, so that an application sending less than the target keeps resting on
+            // it rather than falling back, once the last raise is older than the hold, to one
+            // and a half times what it sends (and from there, by the same bound, lower with
+            // every update).
+            if bits_per_second >= PROBE_CONFIRMS_ESTIMATE * self.target {
+                self.delay_control.set_measured_rate(Some(bits_per_second));
+                self.probed_at = Some(now);
+            }
             return;
         }
         // The path carried the cluster at this rate. Both halves start from it, the climb
