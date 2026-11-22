@@ -2766,14 +2766,11 @@ impl Association {
         }
 
         // RFC 9260 section 6: DATA is received by the normal rules in ESTABLISHED,
-        // SHUTDOWN-PENDING and SHUTDOWN-SENT. COOKIE-ECHOED is kept with them on purpose:
-        // the peer is established once it has sent its COOKIE ACK, and DATA that overtakes
-        // the COOKIE ACK would otherwise wait for a retransmission timeout.
+        // SHUTDOWN-PENDING and SHUTDOWN-SENT, and discarded in any other state.
         match self.state() {
             AssociationState::Established
             | AssociationState::ShutdownPending
-            | AssociationState::ShutdownSent
-            | AssociationState::CookieEchoed => {}
+            | AssociationState::ShutdownSent => {}
             AssociationState::Closed if self.side == Side::Server => {
                 // An accepting association that has seen no COOKIE ECHO has no association
                 // to receive on: the DATA is out of the blue (8.4), answered with an ABORT
@@ -2787,8 +2784,9 @@ impl Association {
                 )]);
             }
             state => {
-                // COOKIE-WAIT; SHUTDOWN-RECEIVED and SHUTDOWN-ACK-SENT, where the peer has
-                // said it sends nothing more: discarded.
+                // COOKIE-WAIT and COOKIE-ECHOED (DATA that overtook the COOKIE ACK is sent
+                // again by the peer); SHUTDOWN-RECEIVED and SHUTDOWN-ACK-SENT, where the peer
+                // has said it sends nothing more: discarded.
                 debug!("[{}] discarding DATA in state '{}'", self.side, state);
                 return Ok(vec![]);
             }

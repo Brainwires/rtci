@@ -122,7 +122,7 @@ impl Default for TransportConfig {
             valid_cookie_life: Duration::from_secs(60),
             heartbeat_interval: Some(Duration::from_secs(30)),
             slow_start_growth_limit: 1,
-            max_burst: None,
+            max_burst: Some(4),
             sack_delay: Duration::from_millis(200),
             partial_reliability: true,
             message_interleaving: false,
@@ -216,10 +216,11 @@ impl TransportConfig {
         self.sack_delay
     }
 
-    /// Sets Max.Burst (RFC 9260 sections 6.1 D and 16, where the recommended value is 4):
-    /// before DATA is sent the congestion window is brought down to what is outstanding plus
-    /// this many packets. `None`, the default, applies no such limit: an owner that
-    /// acknowledges in batches would have its peer's window cut on every SACK.
+    /// Sets Max.Burst (RFC 9260 sections 6.1 D and 16): before DATA is sent the congestion
+    /// window is brought down to what is outstanding plus this many packets, so that one
+    /// SACK for many packets does not release as many at once. Defaults to 4, the value the
+    /// RFC recommends. `None` applies no limit: a peer that acknowledges in batches (one that
+    /// reads its socket in bursts) otherwise has this side's window cut back on every SACK.
     pub fn with_max_burst(mut self, value: Option<u32>) -> Self {
         self.max_burst = value;
         self

@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+- **sctp**: one received packet is answered with one packet of control chunks (RFC 9260
+  section 12.4); a packet of HEARTBEATs got a packet per HEARTBEAT ACK. A SACK that is due
+  and a FORWARD TSN travel with outbound DATA when the packet has room (sections 6.1, 6.10;
+  RFC 3758 section 3.5).
+- **sctp**: DATA is received only in ESTABLISHED, SHUTDOWN-PENDING and SHUTDOWN-SENT, and a
+  SACK or DATA for an association that has seen no COOKIE ECHO is answered as out of the
+  blue (RFC 9260 section 6). DATA was taken in every state.
+- **sctp**: RTT measurement follows RFC 9260 section 6.3.1: one per round trip for
+  gap-acknowledged chunks too (C4), none with a chunk sent before a retransmission (C5), and
+  an RTTVAR of zero becomes the clock granularity (G1).
 - **sctp**: the default stream scheduler sends messages in the order they were written (RFC
   8260 section 3.1). Unordered messages used to go ahead of every ordered one, so a steady
   flow of them kept ordered messages, DCEP and stream resets included, from ever leaving. A
@@ -158,6 +168,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+- **sctp**: State Cookie with a MAC (RFC 9260 section 5.1.3).
+  `ServerConfig::cookie_authentication` takes a crypto provider (`rtc-crypto`); the cookie
+  then holds the association's parameters, its creation time and an HMAC-SHA-256 under a
+  random key replaced hourly, and the accepting endpoint keeps nothing between INIT and
+  COOKIE ECHO: the INIT ACK leaves by `Endpoint::poll_transmit` and the association is
+  returned when the cookie verifies. Without a provider the handshake is unchanged.
+- **sctp**: zero checksum for SCTP over DTLS (RFC 9653): `TransportConfig::with_zero_checksum`,
+  `Association::zero_checksum`.
+- **sctp**: `Association::set_path_mtu` / `path_mtu`, the entry point for a transport that
+  learns the path MTU.
 - **sctp**: user message interleaving (RFC 8260 section 2). With
   `TransportConfig::with_message_interleaving(true)` on both sides, user data travels in
   I-DATA chunks and abandoned messages are reported with I-FORWARD-TSN: the fragments of
@@ -198,6 +218,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking Changes
 
+- **sctp**: Max.Burst is 4 by default (RFC 9260 sections 6.1 D and 16);
+  `TransportConfig::with_max_burst(None)` restores the unlimited burst.
+- **sctp**: `rtc-sctp` depends on `rtc-crypto` (the traits only, no backend).
+  `ServerConfig` no longer derives `Debug` (it implements it).
+- **sctp**: `Stream::stop` and `close` return an error when the peer did not announce
+  RE-CONFIG; `TimerConfig::max_reconfig_retrans` is no longer a limit of its own.
 - **sctp**: `PayloadProtocolIdentifier::Unknown` is sent as 0 ("not specified", RFC 9260
   section 3.3.1), not 58. `Chunks` has a new public field, `ppid`.
 - **sctp**: `Stream::write*` with an empty message returns an error.

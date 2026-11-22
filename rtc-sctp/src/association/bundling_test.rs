@@ -32,7 +32,7 @@ fn types_of(datagram: &Bytes) -> Vec<u8> {
 // ---- section 6: states --------------------------------------------------------------------
 
 /// RFC 9260 section 6: DATA is received by the normal rules in ESTABLISHED,
-/// SHUTDOWN-PENDING and SHUTDOWN-SENT (and, kept on purpose, COOKIE-ECHOED). Elsewhere it is
+/// SHUTDOWN-PENDING and SHUTDOWN-SENT. Elsewhere it is
 /// discarded; for an association that has seen no COOKIE ECHO it is out of the blue and
 /// answered with an ABORT, and so is a SACK. DATA used to be taken in every state.
 #[test]
@@ -41,7 +41,7 @@ fn data_is_received_only_in_the_states_that_take_it() {
         (AssociationState::Established, true),
         (AssociationState::ShutdownPending, true),
         (AssociationState::ShutdownSent, true),
-        (AssociationState::CookieEchoed, true),
+        (AssociationState::CookieEchoed, false),
         (AssociationState::CookieWait, false),
         (AssociationState::ShutdownReceived, false),
         (AssociationState::ShutdownAckSent, false),
@@ -75,14 +75,11 @@ fn data_is_received_only_in_the_states_that_take_it() {
             );
         } else {
             assert!(aborts.is_empty(), "{state}");
-            if state != AssociationState::CookieEchoed {
-                // (In COOKIE-ECHOED the SACK waits for the association to be established.)
-                assert_eq!(
-                    taken,
-                    !chunks_of_type(&sent, CT_SACK.0).is_empty(),
-                    "{state}: only DATA that is taken is acknowledged"
-                );
-            }
+            assert_eq!(
+                taken,
+                !chunks_of_type(&sent, CT_SACK.0).is_empty(),
+                "{state}: only DATA that is taken is acknowledged"
+            );
         }
     }
 }
@@ -291,6 +288,35 @@ fn a_sack_travels_with_outbound_data() -> Result<()> {
         out.iter().map(types_of).collect::<Vec<_>>()
     );
     assert!(out.iter().all(|p| p.len() <= a.mtu as usize));
+    Ok(())
+}
+
+/// RFC 3758 3.5 F4: a SACK is out of order when its Cumulative TSN Ack is behind the
+/// Cumulative TSN Ack Point, not when it is behind the Advanced.Peer.Ack.Point: one that
+/// lies between the two is processed.
+#[test]
+fn a_sack_between_the_ack_point_and_the_advanced_point_is_processed() -> Result<()> {
+    let mut a = timed_test_association();
+    let now = Instant::now();
+    let first = a.my_next_tsn;
+    let mut stream = a.open_stream(1, PPI)?;
+    stream.set_reliability_params(false, ReliabilityType::Rexmit, 0)?;
+    for _ in 0..3 {
+        stream.write_sctp(now, &Bytes::from_static(b"unreliable"), PPI)?;
+    }
+    assert_eq!(3, transmitted_data(&a.gather_outbound(now).0).len());
+    let expiry = a.timers.get(Timer::T3RTX).expect("T3-rtx runs");
+    a.handle_timeout(expiry);
+    let _ = a.gather_outbound(expiry);
+    assert_eq!(first.wrapping_add(2), a.advanced_peer_tsn_ack_point);
+    assert_eq!(first.wrapping_sub(1), a.cumulative_tsn_ack_point);
+
+    a.handle_sack(&sack(first.wrapping_add(1), &[]), expiry)?;
+    assert_eq!(first.wrapping_add(1), a.cumulative_tsn_ack_point);
+    assert_eq!(first.wrapping_add(2), a.advanced_peer_tsn_ack_point);
+    // One behind the Cumulative TSN Ack Point is out of order and changes nothing.
+    a.handle_sack(&sack(first, &[]), expiry)?;
+    assert_eq!(first.wrapping_add(1), a.cumulative_tsn_ack_point);
     Ok(())
 }
 

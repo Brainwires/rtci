@@ -5,8 +5,12 @@ use crate::param::param_forward_tsn_supported::ParamForwardTsnSupported;
 
 const ACCEPT_CH_SIZE: usize = 16;
 
+/// An association driven by hand. Max.Burst is off unless the test's configuration sets one
+/// of its own: these tests send what a window allows in one call and say so by setting the
+/// window, which Max.Burst (4 packets by default, RFC 9260 6.1 D) would cut back first.
 fn create_association(config: TransportConfig) -> Association {
-    Association::new(
+    let default_burst = config.max_burst() == TransportConfig::default().max_burst();
+    let mut a = Association::new(
         None,
         Arc::new(config),
         1400,
@@ -15,7 +19,11 @@ fn create_association(config: TransportConfig) -> Association {
         SocketAddr::from_str("0.0.0.0:0").unwrap(),
         TransportProtocol::UDP,
         Instant::now(),
-    )
+    );
+    if default_burst {
+        a.max_burst = None;
+    }
+    a
 }
 
 // `create_forward_tsn` no longer rescans the in-flight window; it emits the
@@ -619,7 +627,7 @@ use crate::config::{INITIAL_MTU, max_payload_size_for_mtu};
 fn create_association_with_mtu(mtu: u32) -> Association {
     Association::new(
         None,
-        Arc::new(TransportConfig::default()),
+        Arc::new(TransportConfig::default().with_max_burst(None)),
         mtu - (COMMON_HEADER_SIZE + DATA_CHUNK_HEADER_SIZE),
         0,
         SocketAddr::from_str("0.0.0.0:0").unwrap(),

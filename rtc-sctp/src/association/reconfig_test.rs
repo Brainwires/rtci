@@ -309,6 +309,32 @@ fn one_request_is_in_flight_and_the_others_wait() -> Result<()> {
     Ok(())
 }
 
+/// RFC 9260 6.10: a RE-CONFIG fits one packet. Resets of more streams than a packet has room
+/// for leave as several requests, one after the other; they used to leave as one chunk of
+/// any size.
+#[test]
+fn a_reset_of_many_streams_is_split_to_fit_the_packet() -> Result<()> {
+    let mut a = timed_test_association();
+    let now = Instant::now();
+    for id in 0..800u16 {
+        a.open_stream(id, PPI)?.stop(now)?;
+    }
+    let out = a.gather_outbound(now).0;
+    assert!(out.iter().all(|p| p.len() <= a.mtu as usize));
+    let sent = reconfig_params(&out);
+    assert_eq!(1, sent.len());
+    let first = (sent[0].1.len() - 12) / 2;
+    assert!(first > 600 && first < 800, "{first} streams in the request");
+    let rsn = u32_at(&sent[0].1, 0);
+
+    a.handle_reconfig(&response(rsn, ReconfigResult::SuccessPerformed))?;
+    let out = a.gather_outbound(now).0;
+    let sent = reconfig_params(&out);
+    assert_eq!(1, sent.len());
+    assert_eq!(800, first + (sent[0].1.len() - 12) / 2, "the rest of them");
+    Ok(())
+}
+
 /// RFC 6525 5.1.2 A1 and 5.2.7 H4: data written to a stream while its reset is not answered
 /// gets no Stream Sequence Number and waits. It used to go out at once with the old
 /// sequence, which the peer, having reset to 0, held back for good.
