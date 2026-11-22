@@ -17,10 +17,8 @@ congestion-control PR.
 
 Totals:
 
-- MUST: tested 29 / untested 1 / partial 1 / missing 3 / violated 3 / n-a 2 (total 39)
+- MUST: tested 30 / untested 1 / partial 0 / missing 3 / violated 3 / n-a 2 (total 39)
 - SHOULD: tested 2 / untested 0 / partial 1 / missing 4 / violated 0 / n-a 3 (total 10)
-- MUST: tested 20 / untested 8 / partial 0 / missing 3 / violated 6 / n-a 2 (total 39)
-- SHOULD: tested 1 / untested 0 / partial 1 / missing 5 / violated 0 / n-a 3 (total 10)
 - MAY: tested 0 / untested 1 / partial 0 / missing 6 / violated 0 / n-a 0 (total 7)
 
 Paths are relative to the repo root; `fec/` abbreviates `rtc-interceptor/src/flexfec/`, `it/` abbreviates

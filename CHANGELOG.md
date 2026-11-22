@@ -7,16 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Bug Fixes
-
-- **twcc**: a NACK retransmission sent without RTX keeps the transport-wide sequence number it
-  was first given. `TwccSenderInterceptor` numbered it as a new packet, so its header extension
-  changed and the SRTP sender, which protects one packet per index (RFC 3711 section 3.3.1,
-  RFC 7714 section 8.1), refused it after the congestion controller had counted it as sent: no
-  lost packet was repaired, the NACK generator asked again every 100 ms, and the phantom losses
-  drove the estimate to its floor. The sender now remembers the number it gave each of a
-  stream's last 1024 RTP sequence numbers; an RTX retransmission is still numbered as a new
-  packet.
 ### Breaking changes
 
 - **stun**: `Message::decode` (and `unmarshal_binary`, `write`, `read_from`, `clone_to`) refuses
@@ -50,23 +40,422 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ClientBuilder::with_timeout_rate` and `with_buffer_size`, which had no effect, are
   deprecated.
 
-### Bug Fixes
+- **ice**: candidate constructors and `unmarshal_candidate` return an error for a priority above
+  2^31 - 1 or a component above 256.
+- **ice**: a local candidate added without a priority after another of its type no longer has
+  the same priority as that one (its local preference is lower by its rank), and foundations of
+  server-reflexive candidates change (they follow the base, not the mapped address).
 
-- **stun**: `Client` delivers a response of any length. It read into a 120-byte buffer, so a
-  132-byte Binding response (what coturn sends over IPv6) failed to decode and the transaction
-  timed out. `Message::read_from` reads its reader to the end.
-- **stun**: `Client` takes as the response only a success or error response of the request's
-  method that comes from the server (RFC 8489 section 6.3). Any message with a known
-  transaction id, a request or an indication from any address included, ended the transaction.
-- **stun**: a truncated MAPPED-ADDRESS or XOR-MAPPED-ADDRESS is an error; it decoded to an
-  address filled up with zeros. The first byte of the value is ignored (RFC 8489 section 14.1);
-  a non-zero one failed the attribute.
-- **stun**: the reserved bits of ERROR-CODE are ignored (RFC 8489 section 14.8). With one set
-  next to the class, a 438 decoded as 1238 and a stale nonce went unrecognised.
-- **stun**: `Uri`'s `Display` writes every IPv6 host in brackets; one without `::` came out as
-  `stun:2001:db8:1:2:3:4:5:6:3478`, which does not parse back.
-- **stun**: `MessageIntegrity::check` no longer rewrites the message's length field while it
-  runs, and checks by the attribute's position, whatever follows it.
+- **ice**: `AgentConfig::keepalive_interval` (`with_ice_timeouts`) is the basic period of the
+  consent checks: default 5 seconds (was 2), a shorter non-zero value is raised to 5 seconds,
+  and each interval is 0.8 to 1.2 times it.
+- **ice**: a connected full agent is `Disconnected` when a consent request has gone unanswered
+  for `disconnected_timeout` (9 to 11 seconds after the last response by default; it was 5
+  seconds after it), and `Failed` 30 seconds after the last response at the latest:
+  `disconnected_timeout + failed_timeout` above 30 seconds, or a zero `failed_timeout`, no
+  longer keeps it alive longer. A shorter sum still fails it sooner.
+
+- **turn**: `Event::AllocateError` and `Event::CreatePermissionError` carry a
+  `rtc_turn::client::RequestError` instead of a `shared::error::Error`: `Rejected(ErrorResponse)`
+  with the server's error code, reason, ALTERNATE-SERVER and UNKNOWN-ATTRIBUTES, or
+  `Failed(Error)`. It implements `Display` and converts into `Error` (`err.into()`).
+- **turn**: `ChannelData::encode` and `ChannelData::write_header` return `Result<()>`: data longer
+  than 65 535 bytes is refused (see below).
+- **turn**: the client delivers a Data indication or ChannelData only from a peer address it
+  holds a permission for (asked for or installed), as RFC 8656 sections 11.4 and 12.6 recommend.
+- **turn**: `Relay::send_to` fails with `ErrNoPermission` once a permission's 300 s have run out
+  without a refresh, and with `ErrConnClosed` after `Relay::close`.
+
+- **mdns**: `MdnsConfig` has private fields: build it with `MdnsConfig::default()` and the
+  `with_*` methods, not as a struct literal. `MdnsConfig::query_timeout` defaults to 30
+  seconds (was `None`), and `query_interval` under one second is taken as one second.
+- **mdns**: a local name that is not `<uuid>.local` is answered only after probing for it,
+  about 750 ms after the first `handle_timeout` (`MdnsProbePolicy::Never` restores the old
+  behaviour). `MdnsEvent::QueryTimeout` also ends a query whose name has more than one
+  address. `Mdns::close` leaves goodbye packets in `poll_write`.
+
+- **dtls**: a server `Endpoint` makes no association for a datagram that is not a ClientHello
+  with a valid cookie (such a datagram from an unknown address is dropped), and reports
+  `HandshakeComplete` a second time for an address when its client completes a new handshake
+  (RFC 6347 section 4.2.8). A datagram for a failed server association returns `Ok` (it was fed
+  to a fresh association). New: `ConfigBuilder::with_cookie_exchange`.
+- **dtls**: a handshake nobody answers fails after 30 seconds with `ErrHandshakeTimeout`, where
+  it failed after 8 seconds with `ErrInvalidFsmTransition`; its retransmissions are 1, 3, 7 and
+  15 seconds in instead of every second.
+- **dtls**: `CipherSuite` has a new required method, `record_expansion`. `DTLSConn::write` and
+  `Endpoint::write` return `ErrRecordOverflow` above 2^14 bytes. `ConfigBuilder::build` refuses
+  an MTU below 128. New: `ConfigBuilder::{with_maximum_flight_interval, with_handshake_timeout}`,
+  `conn::MAX_RECORD_PAYLOAD`, `Error::{ErrHandshakeTimeout, ErrRecordOverflow}`.
+- **dtls**: a ServerHello no longer carries renegotiation_info, supported_groups or
+  ec_point_formats to a client that did not offer them; a client that sends no
+  signature_algorithms extension is no longer served by a certificate suite unless SHA-1
+  signatures are enabled (`with_insecure_hashes`).
+- **dtls**: `State::export_keying_material` returns `ErrExportWithoutExtendedMasterSecret` for a
+  session without the extended master secret. The serialized `State`
+  (`marshal_binary` / `unmarshal_binary`) carries the flag, so a state serialized by an earlier
+  version does not load.
+- **dtls**: new variants on non-exhaustive enums: `Extension::Unknown`,
+  `CipherSuiteId::Tls_Empty_Renegotiation_Info_Scsv`, and seven `shared::error::Error` variants
+  (`ErrRenegotiationInfoNotEmpty`, `ErrUnsolicitedExtension`, `ErrCompressionMethodNotOffered`,
+  `ErrNoNullCompressionMethod`, `ErrInvalidUseSrtpAnswer`, `ErrExportWithoutExtendedMasterSecret`,
+  `ErrDuplicateExtension`). `Extension::extension_type` is new.
+
+- **srtp**: `srtp_replay_protection` and `srtcp_replay_protection` return `Result<ContextOption>`
+  and refuse a window below 64 packets (RFC 3711 section 3.3.2). With
+  `SettingEngineBuilder::with_srtp_replay_protection_window` / `with_srtcp_replay_protection_window`
+  set to 1..=63, the SRTP contexts now fail to build when the DTLS handshake completes.
+- **srtp**: `Context::new` with `None` for a replay option gives replay protection with a
+  64-packet window, as its documentation said; it gave none. Pass `srtp_no_replay_protection()` /
+  `srtcp_no_replay_protection()` to go without. Peer connections are not affected (they pass
+  their windows).
+- **srtp**: the first SRTCP packet of an SSRC carries index 0 (RFC 3711 section 3.4), not 1.
+  Receivers accept any first index.
+- **srtp**: a master key stops at its lifetime: `encrypt_rtp`, `encrypt_rtcp`, `decrypt_rtp` and
+  `decrypt_rtcp` fail with `ErrExceededMaxPackets` after 2^48 SRTP or 2^31 SRTCP packets under
+  one key (2^31 of each for the AES-256 counter-mode profiles, RFC 6188 section 4), counted over
+  all the SSRCs that share it.
+- **srtp**: with `Cryptex { require: true, .. }`, `encrypt_rtp` fails for a packet that has
+  CSRCs or a header extension and cannot be protected with Cryptex. A received clear packet under
+  the same setting is authenticated before it is refused.
+- **srtp**: `SessionKeys` no longer prints its keys (`Debug` shows lengths) and has a `Drop`
+  that zeroizes them, so its fields can no longer be moved out of it.
+- **srtp**: the AES-GCM profiles require the provider's AES-CTR as well (for RFC 6904), and
+  `ProtectionProfile::Aes256CmHmacSha1_*` are documented as having no DTLS-SRTP code point (their
+  discriminants 0x0003 / 0x0004 are not wire values; see `ProtectionProfile::dtls_srtp_id`).
+- **srtp**: an AES-CM packet whose encrypted portion is over 2^16 AES blocks (1 MiB) is refused
+  (RFC 3711 section 4.1.1).
+
+- **rtcp**: `PacketType`, `SdesType` and `extended_report::BlockType` gain an `Other(u8)` variant that
+  keeps a value the crate does not model, so they are no longer `#[repr(u8)]`: convert with
+  `u8::from(x)` / `X::from(octet)` instead of `as u8`. `SdesType::from` no longer maps an unknown
+  type to `SdesEnd`, `PacketType::from` no longer maps one to `Unsupported`, `BlockType::from` no
+  longer maps one to `Unknown` (each of those is now the octet 0 only).
+- **rtcp**: `extended_report::UnknownReportBlock` has two more fields, `block_type` and
+  `type_specific`, and refuses to marshal a body that is not a whole number of 32-bit words.
+- **rtcp**: `VoIPMetricsReportBlock::default()` is "nothing available" (127 for the levels, the R
+  factors and the MOS scores, Gmin 16), not all zeros.
+- **rtcp**: a typed `unmarshal` reads the one packet its header describes: it fails
+  (`PacketTooShort`) when the length field runs past the buffer, and it leaves what follows the
+  packet in the buffer. `SenderReport` / `ReceiverReport` used to take everything left in the buffer
+  as a profile-specific extension.
+- **rtcp**: stricter writers. Refused now: a generic NACK, an SLI or a FIR with no entry; a profile
+  extension, APP data or an unparsed XR block that is not whole words; an RLE block with a null chunk
+  among its chunks, a run of length zero or a range of 65,534 or more; VoIP metrics with an R factor
+  or a MOS score outside its range, or Gmin 0; a compound packet with a padded packet that is not its
+  last. `FullIntraRequest` writes the header's media SSRC as 0 whatever `media_ssrc` holds
+  (RFC 5104 section 4.3.1.2).
+- **rtcp**: stricter readers. Refused now: a PLI or an RRR with FCI; an SLI with no entry; a REMB whose
+  SSRC count does not match its length; a padding count of zero or beyond the packet; transport-cc
+  feedback whose chunks or deltas reach into its padding; an SDES whose chunks do not match its source
+  count. A BYE without a reason is written without a length octet (8 octets for one source, was 12).
+- **rtcp**: the parsed `chunks` of a Loss / Duplicate RLE block no longer include the terminating null
+  chunk; statistics-summary fields whose flag is clear read as zero; the reserved octet of VoIP
+  metrics reads as zero.
+
+- **sdp**: `SessionDescription::unmarshal` is the RFC 8866 section 9 grammar and nothing else
+  (RFC 9429 section 5.8: a description that is not well formed is rejected). It now refuses what
+  it used to let through: empty lines between lines, `i=` / `c=` / `b=` / `k=` after `a=` lines in
+  a media section, fields separated by more than one space or with white space around them, a
+  `c=` line without an address or with an address that does not fit its address type, a unicast
+  address with a `/`, a `t=` time that is neither 0 nor ten digits or more, a negative `r=` value,
+  extra fields after the stop time, an empty `s=` or `i=`, `e=` / `p=` text that is not an email
+  address or a phone number, an attribute name or a format that is not a token, a NUL or a bare CR
+  in a line. An application that reads SDP from software that writes such things asks for it:
+  `SessionDescription::unmarshal_with_options` with `ParseOptions { blank_lines,
+  unordered_media_lines, loose_fields }`, or `ParseOptions::lenient()` for all three. What every
+  mode still accepts beyond the grammar (a bare LF line ending, a last line without one, `z=`
+  where RFC 4566 put it, `a=name:` with an empty value) is listed in the `ParseOptions`
+  documentation.
+- **sdp**: values are no longer trimmed. `s= ` is a session name of one space, and an attribute
+  value keeps its leading and trailing white space (`a=msid-semantic: WMS` has the value
+  `" WMS"`). Structured lines never had any to trim.
+- **sdp**: `SessionDescription::email_address` and `phone_number` (`Option<String>`) are
+  `email_addresses` and `phone_numbers` (`Vec<String>`): RFC 8866 allows any number of `e=` and
+  `p=` lines, and a second one was a parse error.
+- **sdp**: `SessionDescription::time_zones` is `TimeDescription::time_zones`: a `z=` line belongs
+  to the time description it follows (RFC 8866 section 9) and is written there. A `z=` may now be
+  followed by another `t=`.
+- **sdp**: `k=` lines are parsed, checked and dropped, and never written (RFC 8866 section 5.12).
+  The `encryption_key` fields of `SessionDescription` and `MediaDescription` remain so that code
+  naming them builds; the parser never sets them and `marshal` ignores them.
+- **sdp**: `MediaDescription::with_media_source` writes the `cname` and `msid` source attributes
+  only. `a=ssrc:<n> mslabel:...` and `a=ssrc:<n> label:...` (Plan B, never registered; RFC 5576
+  section 4.1) are no longer in the engine's offers and answers.
+- **sdp**: `SessionDescription::new_jsep_session_description(true)` no longer adds a bare
+  `a=identity` line, which was not valid SDP (RFC 8827 section 5: the attribute is an assertion).
+  The parameter is ignored.
+- **sdp**: an `a=rtpmap` without a clock rate (`a=rtpmap:96 VP8`) is malformed and gives no codec
+  (it gave one with clock rate 0); a payload type above 127 in `a=rtpmap`, `a=fmtp` or `a=rtcp-fb`
+  gives none either. Any network and address type token is accepted in `o=` and `c=` (only `IN`,
+  `IP4` and `IP6` were).
+- **sdp**: `ExtMap::unmarshal` accepts only `extmap:` / `a=extmap:` in front of the value (it took
+  any text before the first colon), and an `a=extmap` with nothing or only a space after the URI
+  is refused.
+
+- **sctp**: `PayloadProtocolIdentifier::Unknown` is sent as 0 ("not specified", RFC 9260
+  section 3.3.1), not 58. `Chunks` has a new public field, `ppid`.
+- **sctp**: `Stream::write*` with an empty message returns an error.
+- **sctp**: `Association::open_stream` fails for a stream id at or past the negotiated
+  outbound stream count.
+- **sctp**: `TimerConfig::default().max_t2_shutdown_retrans` is 10, not unlimited.
+- **sctp**: `TimerConfig::default().max_t3_rtx_retrans` is 10, not unlimited: an association
+  whose peer answers nothing for about five minutes ends with `TimedOut`. `usize::MAX` keeps
+  the old behaviour.
+- **sctp**: an established association sends HEARTBEATs when idle and so always has a timer
+  running; `with_heartbeat_interval(None)` turns them off.
+- **sctp**: slow start grows the congestion window by one packet per SACK, as the RFC has
+  it, not by everything the SACK acknowledges. A receiver that acknowledges many packets with
+  one SACK slows the sender's ramp; `with_slow_start_growth_limit` sets a larger L.
+- **sctp**: the retransmissions after a timeout are paced by the congestion window (one
+  packet, then slow start) instead of leaving at once.
+- **sctp**: a SACK for a TSN never sent, and an INIT ACK without a State Cookie, end the
+  association with an ABORT (`TransportError`, `HandshakeFailed`).
+
+- **flexfec-03**: `FlexFec03Encoder::encode` takes the repair stream's RTP timestamp as a third
+  argument.
+- **interceptor**: `StreamInfo` has two more public fields (`mime_type_fec`,
+  `sdp_fmtp_line_fec`); a struct literal without `..Default::default()` needs them. The draft-03
+  FlexFEC interceptors bind a stream whose `mime_type_fec` is empty or `<type>/flexfec-03`, and
+  no longer one that names another FEC format.
+- **codecs**: with `video/flexfec` registered and negotiated, a sender's FEC SSRC is now
+  described (`a=ssrc-group:FEC-FR`) and its streams are bound with the repair flow, as for
+  `video/flexfec-03`. Before, `video/flexfec` was written to SDP with nothing behind it.
+- **dtls**: the roles of a DTLS association are fixed for its life (RFC 8842 section 5.3). The
+  answer to a later offer took its `a=setup` from the answering configuration and the offer
+  alone, so the peer that had offered first (the DTLS server) answered `active` and flipped the
+  roles: libwebrtc refuses such an answer, and with an ICE restart in the same exchange two
+  `rtc` peers tore their own association down. The answer now states the role the transport
+  has, and an `actpass` offer never changes it, whatever the ICE role and
+  `answering_dtls_role` say.
+- **dtls**: a new association is established when a description changes the fingerprints, the
+  `tls-id` or the roles, with or without an ICE restart (RFC 8842 section 3.1). A changed
+  fingerprint or role on the same ICE session was accepted and ignored. The DTLS client of the
+  new association starts its handshake at once when ICE already has a pair.
+- **dtls**: a peer that negotiates no `use_srtp` connects when the session has no audio or
+  video section (RFC 5764 section 4.1). As the DTLS server the engine left its transport in
+  `connecting`; as the client it aborted the handshake. A session with a media section still
+  needs it: the transport fails, and a description that adds media to an association without
+  SRTP keys is refused (`ErrSessionDescriptionMediaWithoutSrtp`).
+- **dtls**: a certificate is verified with any fingerprint hash function of RFC 8122 section 5
+  (sha-256, sha-512, sha-384, sha-224, sha-1; never md5 or md2), using the most preferred one
+  the peer offers. Only sha-256 was compared, so a peer that gave another one could not connect.
+- **dtls**: `RTCCertificate::get_fingerprints` gives the fingerprints of the end-entity
+  certificate only (it gave one per certificate of a chain, the issuer's included), with the
+  hash function of the certificate's signature next to sha-256 when that is sha-384, sha-512 or
+  sha-224 (RFC 8122 section 5.1).
+- **sdp**: malformed DTLS attributes are refused by `set_remote_description`, before anything
+  is applied: an `a=fingerprint` that is not colon-separated hex of its hash function's length,
+  an `a=setup` that is not `active`, `passive` or `actpass` (`holdconn` is not used with DTLS,
+  RFC 8842 section 5.1), an `a=tls-id` outside its syntax, and a description whose only
+  fingerprints are md5 / md2 or unknown.
+- **sdp**: a session-level `a=setup` is read (RFC 4145 section 4); a media-level
+  `a=fingerprint` overrides the session-level one (RFC 8122 section 5) instead of conflicting
+  with it.
+- **demux**: datagrams whose first byte is in no RFC 7983 / RFC 9443 range (4 to 19, 64 to 127,
+  192 to 255) are dropped by the demultiplexer. They went to the ICE agent, which recorded the
+  remote candidate as heard from and logged a warning for each.
+- **srtp**: a serialized RTP packet written into the pipeline is refused instead of leaving
+  unprotected (RFC 8827 section 6.5; nothing in the engine writes one).
+
+- **rtp**: `Header::unmarshal` and `Header::marshal_to` refuse a version other than 2
+  (`Error::BadVersion`), and `marshal_to` a payload type above 127. `Header::default().version`
+  is 2.
+- **rtp**: `Header::set_extension` on a header without extensions returns an error for ID 0 and
+  for an element over 255 bytes (it made a header that could not be marshalled).
+  `del_extension` of the last element clears `extension`.
+- **rtp**: `HevcPayloader` is no longer a unit struct: write `HevcPayloader::default()`.
+- **rtp**: `H265Packet::depacketize` returns NAL units behind Annex B start codes, not the RTP
+  payload.
+- **rtp**: `H264Packet::depacketize` returns an empty result, not an error, for reserved packet
+  types; `H264Payloader` drops NAL units of types 0 and 24 to 31; parameter sets given alone are
+  all held, and sent with the next call that has another NAL unit.
+- **rtp**: a `Packetizer` built on an audio payloader no longer sets the marker bit on every
+  packet.
+- **twcc**: a lost TWCC feedback packet no longer turns the packets it would have described
+  into losses (draft-holmer-rmcat-transport-wide-cc-extensions-01 section 3). The send history
+  reported every unacknowledged packet below the highest acknowledged one as lost, so one lost
+  feedback read as a burst of loss, and so did every stream the receiver does not report on (an
+  audio stream without the transport-cc extension, an SSRC outside an RFC 8888 report). Only a
+  packet a feedback described is reported now; the rest are released without a verdict
+  (`History::unreported`), and gaps in the feedback packet count are counted
+  (`CongestionControlInterceptor::lost_feedback`).
+- **twcc**: RTX and FEC packets get a transport-wide sequence number and a place in the send
+  history (section 2.2: the number is attached to every packet sent). The TWCC sender and the
+  congestion controller registered a stream's media SSRC only, so retransmissions and repair
+  packets were invisible to the receiver's feedback and to the estimator.
+- **twcc / rfc8888**: the receiver's clock is followed through its wraps
+  (`FeedbackTimeline`): the 24-bit TWCC reference time every 12.4 days, the RFC 8888 report
+  timestamp every 18.2 hours. An RFC 8888 arrival time is now the report timestamp minus the
+  arrival time offset; the offset itself was handed to the estimator, so within every report
+  arrivals ran backwards and GCC over RFC 8888 saw a queue draining for ever. The over-range
+  offset 0x1FFE is no longer taken as an arrival 8 seconds before the report.
+- **rfc8888**: feedback is sent only for streams that negotiated `ack ccfb` (RFC 8888 section 6,
+  RFC 4585 section 4.2), from a real SSRC instead of 0 (the first local stream's, or a random
+  one for a receive-only endpoint), and covers a stream's FEC SSRC. A duplicate keeps the first
+  copy's arrival time and reports ECN-CE if any copy carried it (section 3.1). A packet that
+  never arrives no longer makes every later report repeat everything since: each arrival is
+  reported once, a late one in an overlapping report within 500 ms, and feedback larger than
+  the report size is split into several packets instead of being cut.
+- **fec**: the FlexFEC encoder protects the packets as they are sent. It read them above the
+  TWCC sender, which then wrote the transport-wide sequence number into them (adding the header
+  extension when the packet had none), so the receiver XORed different bytes and recovered a
+  corrupt packet. The encoder now reads the wire image from a tap below the TWCC sender
+  (`FlexFec03SendInterceptor::wire_tap`, `Slot::FecWireImage`).
+- **fec**: the arrival recorders (TWCC receiver, RFC 8888, receiver reports) run before the FEC
+  decoder. A repair packet was swallowed before they saw it and reported lost for ever, and a
+  packet rebuilt from FEC was reported as arrived, hiding the loss from the sender's congestion
+  controller and from `fraction lost`.
+- **gcc**: the delay-based estimate stays below 1.5 times the received rate
+  (draft-ietf-rmcat-gcc-02 section 5.5); an application-limited sender let it climb 8% per
+  second to the configured maximum. "Close to convergence" is now the draft's: the average and
+  deviation of the received rate at each decrease, additive increase within three deviations
+  (scaled by the response time), and back to multiplicative increase when the received rate
+  rises above them; the controller stayed additive for ever after the first over-use. It starts
+  in the Increase state.
+- **pacer**: the pacer starts at the estimator's rate. `configure_congestion_control` builds it
+  with the estimator's starting target, and `CongestionControlInterceptor` announces the target
+  on the first inbound packet, not only when it changes; the pacer ran at 1 Mbit/s against
+  GCC's 300 kbit/s until the first change.
+
+- **interceptor**: `Slot::FecDecoder` moves from 6_000 to 10_300 and `Slot::NackGenerator` from
+  7_000 to 10_600, after the arrival recorders; an interceptor placed with `Slot::from(n)`
+  relative to either has to move with them. `Slot::FecWireImage` (1_500) is new.
+- **interceptor**: an RFC 8888 arrival time from `convert_ccfb` is the report timestamp minus
+  the offset, not the offset. `Rfc8888Interceptor` reports only streams bound with `ack ccfb`
+  in `rtcp_feedback`. `History::take_reports` returns only packets a feedback described.
+  `RateControlState::default()` is `Increase`.
+
+### Security
+
+- **dtls**: the server verifies the client's Finished (RFC 5246 section 7.4.9). `Flight4` only
+  checked that a Finished message had arrived, so nothing confirmed to the server that the client
+  had seen the same handshake: a ClientHello altered on the way (cipher suites, SRTP profiles,
+  extensions) was noticed by the client alone, after the server had completed, exported SRTP keys
+  and started sending. Both sides now compare verify_data in constant time and answer a mismatch
+  with decrypt_error; the client's alert, sent after its ChangeCipherSpec, is protected so that
+  the server can read it.
+- **dtls**: unauthenticated input no longer ends a handshake (RFC 6347 sections 4.1.2.7 and
+  4.2.1). A plaintext application-data record during the handshake was answered with a fatal
+  unexpected_message, and a ClientHello with a wrong cookie with a fatal access_denied; either
+  failed the association, and the wrong-cookie one also took the place of the genuine
+  ClientHello, so one spoofed datagram denied the handshake. Both are now discarded without an
+  alert, the server answers the cookieless one with HelloVerifyRequest again, and the genuine
+  ClientHello is still accepted. Nothing is negotiated (and no alert sent) from a ClientHello
+  that does not echo the cookie.
+- **dtls**: `State::export_keying_material` refuses a session without the extended master secret
+  (RFC 7627 section 5.4), so DTLS-SRTP keys never come from a master secret that is not bound to
+  the handshake, whatever `ExtendedMasterSecretType` a crate user picks. The engine already
+  requires the extension.
+- **dtls**: a non-empty renegotiation_info in an initial handshake is a fatal handshake_failure on
+  both sides (RFC 5746 sections 3.4 and 3.6); it was skipped with a warning. The server recognises
+  `TLS_EMPTY_RENEGOTIATION_INFO_SCSV`.
+
+### Behaviour changes
+
+- **sctp, sdp**: both endpoints initiate the SCTP association (RFC 8841 section 9.3), in either
+  DTLS role; only the DTLS client did. The peer's INIT is answered by the association this side
+  initiated (RFC 9260 section 5.2.1), so the two make one association, and an association no
+  longer waits for a retransmission when one of the two INITs is lost.
+- **sdp**: a data channel section without a valid `a=sctp-port` is refused with
+  `ErrSDPSctpPortInvalid` (RFC 8841 section 5.1); it was taken with port 5000 assumed, and
+  `a=sctpmap` is no longer read as a port. A section is a data channel section only with
+  proto `UDP/DTLS/SCTP` or `TCP/DTLS/SCTP`.
+- **sctp**: an SCTP packet that is not between the two negotiated `a=sctp-port` values is
+  dropped (RFC 8841 section 9.3).
+- **datachannel**: an in-band channel that the peer resets before acknowledging it reports
+  `OnError` before `OnClose`, and no `OnClosing` (RFC 8832 section 6: its setup failed).
+- **datachannel**: `rtc_datachannel::DataChannel::handle_read` returns an error for a
+  DATA_CHANNEL_OPEN on a channel in use (it answered with a DATA_CHANNEL_ACK) and for a message
+  under a PPID that is not a data channel's (it queued it for `poll_read`); a refused message
+  is not counted. `DataChannelOpen::marshal` returns an error for a label or protocol over 65535
+  bytes.
+
+- `Vp8Packet` and `Vp9Packet` have a new public field `picture_id_15_bits`, and every field
+  describes the packet last parsed (a field the packet did not carry reads 0 / empty; they kept
+  the previous packet's values). `Vp9Packet::f` is false when `I` is 0.
+- `Av1Payloader` has a public field (`sequence_header_per_spatial_layer`): `Av1Payloader {}`
+  no longer compiles, `Av1Payloader::default()` does. It refuses a buffer with two temporal
+  units.
+- `Vp9Payloader` sends a frame that is not VP9 with `P=1` and a reference index, unless it is
+  the stream's first frame (it was `P=0`).
+- `ErrTooManySpatialLayers` is no longer returned by `Vp9Packet`.
+
+### Changed
+
+- **rtcp**: `configure_rtcp_reports` registers the RTCP session instead of
+  `SenderReportInterceptor` and `ReceiverReportInterceptor` (both stay, for a chain built by
+  hand: fixed timers, no scheduling). What changes on the wire with the default interceptors:
+  - every feedback packet (NACK, PLI, FIR, TWCC, REMB, anything the application writes) leaves
+    inside a compound packet behind an RR or SR and an SDES, with the connection's SSRC as
+    packet sender (it left bare, from a random or zero SSRC);
+  - feedback is held to the RTCP bandwidth (5% of the measured media bitrate, 64 kbit/s at
+    least): one early packet per regular interval, the rest merged into the next packet. With
+    little media this spaces TWCC feedback out; give the session bandwidth or a larger
+    `with_rtcp_fraction` to change it;
+  - receiver reports come from one SSRC per connection, with all report blocks in one packet;
+    sender reports stop two seconds after a stream falls silent; the CNAME in RTCP is the
+    connection's, not the MediaStream id (the SDP still writes that one);
+  - a retransmission is counted in the report of the RTX stream, not of the stream it repairs;
+  - an SR, RR or SDES the application writes is dropped (the session's own stand for it);
+  - `close()` sends a BYE.
+- **nack**: `NackGeneratorBuilder` defaults to ten requests per packet and a two second age
+  (they were unlimited); `with_max_nacks_per_packet(0)` and `with_max_packet_age(None)` lift
+  them.
+- **rtcp**: a sender report's SDES written by the peer connection for a chain without the
+  session names the connection's CNAME, not the MediaStream id.
+
+- **dtls**: an `rtc-dtls` server configured with no SRTP profile ignores a client's `use_srtp`
+  (RFC 5764 section 4.1.1) instead of aborting with `ErrServerNoMatchingSrtpProfile`; the
+  client, which asked for SRTP, is the one that aborts (`ErrRequestedButNoSrtpExtension`)
+  unless built with `with_use_srtp_optional`.
+- **sdp**: errors `ErrSessionDescriptionInvalidSetup`, `ErrSessionDescriptionInvalidTlsId`,
+  `ErrSessionDescriptionMediaWithoutSrtp`, `ErrInvalidIdentityAssertion`.
+- **rtp**: a two-byte header-extension block is parsed whatever its appbits (RFC 8285 section
+  4.3). Only the exact profile `0x1000` selected the two-byte parser; `0x1001` to `0x100F` came
+  back as one opaque element with ID 0, so MID, RID and the transport-wide number in it were not
+  found.
+- **rtp**: ID 0 with a non-zero length ends a one-byte extension block and the elements before
+  it are kept (RFC 8285 section 4.1.2). It was parsed as an element with ID 0, and the header
+  could then not be marshalled again.
+- **rtp**: `Header::set_extension` on a header without extensions takes the two-byte form for an
+  ID above 14 or an empty element (RFC 8285 section 4.2). It chose the form from the length
+  alone, so `set_extension(20, ..)` returned `Ok` and the header could not be marshalled. The
+  TWCC sender stamped packets that way when the peer mapped transport-cc above 14 and discarded
+  the error; it now converts a one-byte header, so every packet of such a stream is two-byte.
+- **rtp**: `Header::default()` is version 2, and `Header` marshals and unmarshals version 2 only
+  (RFC 3550 section 5.1). A header built from `Default` went out as version 0, which a peer reads
+  as STUN or DTLS.
+- **rtp**: a marshalled extension block is as long as `marshal_size()` says when a parsed block
+  had more than three bytes after its elements (an ignored tail after ID 15).
+- **rtp**: the packetizer sets the marker bit as the payload format has it. Every Opus, G.711
+  and G.722 packet carried it (the video rule); audio now carries it only on the first packet
+  after a silence skipped with `skip_samples` (RFC 3551 section 4.1, RFC 7587 section 4.1).
+- **rtp**: a G.711 / G.722 buffer split over several packets gets a timestamp per packet (RFC
+  3551 section 4.3); the fragments shared one.
+- **rtp**: `packetize` returns an error for an MTU that leaves no room after the RTP header; an
+  MTU below 12 underflowed (a panic in debug builds, a huge MTU in release builds).
+- **rtp**: the H.264 payloader sends NAL units in the order given and loses none (RFC 6184
+  sections 5.5 and 6.3). `SPS, SEI, PPS, IDR` went out as `SEI, STAP-A, IDR`; a second SPS or PPS
+  of an access unit replaced the first; an SPS without a PPS was never sent. The STAP-A header
+  has the highest NRI and the OR of the F bits of what it aggregates (it was the constant
+  `0x78`), an FU-A keeps the F bit, and NAL units of reserved or packet types (0, 24 to 31) are
+  not sent.
+- **rtp**: the H.264 depacketizer takes a NAL unit that is its header octet alone (end of
+  sequence, end of stream) and an FU-A with an empty payload (RFC 6184 section 5.8); both were
+  `ErrShortPacket`. Reserved packet types are ignored instead of an error that made
+  `SampleBuilder` drop the sample (section 5.4).
+- **rtp**: `H265Packet::depacketize` returns NAL units (RFC 7798 section 6). It returned the RTP
+  payload unchanged, so a `SampleBuilder<H265Packet>` sample held AP and FU headers. Single NAL
+  units, the units of an aggregation packet, a NAL unit reassembled from its fragmentation
+  units (bounded at 4 MiB) and what a PACI packet carries come out as Annex B; nothing of type
+  48 to 63 does. A NAL unit that is its two-byte header alone is accepted.
+- **rtp**: `H265PACIPacket::tsci()` reads TL0PICIDX, IrapPicID, S, E and RES from the first
+  three octets of the PHES (RFC 7798 section 4.5); it read the first octet twice and never the
+  third.
+- **rtp**: the H.265 payloader splits an Annex B stream at start codes of either length; a
+  four-byte code followed by three-byte ones made one "NAL unit" of the whole access unit.
+- **media**: `H26xWriter` writes what the H.265 depacketizer returns, so the media in a PACI
+  packet is written and reserved packet types are not.
 
 ### Features
 
@@ -108,144 +497,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `Uri::parse_uri_strict`, which refuses a `stuns` URI with an IP address (RFC 8489 section
   8.1; `parse_uri` keeps accepting it, as browsers do). `Message::unknown_required_attributes`.
 
-### Dependencies
-
-- **stun**: `precis-profiles` 0.2 (MIT / Apache-2.0, pure Rust) for the OpaqueString profile.
-- **ice**: attributes after MESSAGE-INTEGRITY are ignored (RFC 8489 section 14.5). The HMAC does
-  not cover them, so someone who saw one valid check could replay it with ICE-CONTROLLED or
-  ICE-CONTROLLING appended and flip the agent's role.
-- **ice**: role conflicts follow RFC 8445 section 7.3.1.1. A conflicting request gets one
-  answer: the 487 when this agent keeps its role (and then nothing else comes of the request),
-  the success response when it switches. It got both. A controlled agent switches on an equal
-  tiebreaker (`>=`, it was `>`).
-- **ice**: a 487 (Role Conflict) response is acted on (section 7.2.5.1): the role switches, the
-  tiebreaker changes and the pair is checked again. Error responses were dropped unread, so an
-  agent whose peer answered 487 never left the conflict. Any other authenticated error response
-  fails the pair (section 7.2.5.2.4).
-- **ice**: a Binding request that arrives before the remote description is answered at once and
-  finished when the peer's credentials arrive: peer-reflexive candidate, triggered check,
-  nomination (section 7.3). It was dropped, so an offerer whose answerer started checking first
-  left those checks to time out. A request's USERNAME is valid when its first part is the local
-  fragment.
-- **ice**: pair priority is `2^32 * MIN(G,D) + 2 * MAX(G,D) + (G > D)` (section 6.1.2.3); it
-  multiplied MIN by `2^32 - 1`. `test_candidate_pair_priority` pinned the wrong values.
-- **ice**: PRIORITY in a check is the local candidate's priority as a peer-reflexive candidate
-  (section 7.1.1), not its own; a peer-reflexive remote candidate takes its priority from the
-  request (section 7.3.1.3) and is paired only with the local candidate the request arrived on.
-- **ice**: local candidates of one type get unique local preferences, IPv4 and IPv6 interleaved
-  (RFC 8445 section 5.1.2.1, RFC 8421 section 4; RFC 6544 section 4.2 for a TCP candidate's
-  other-pref). Two host candidates on two interfaces had the same priority.
-- **ice**: a candidate's foundation is made of its type, its base's IP address, its server and
-  its transport (section 5.1.1.3); it used the candidate's own address and no server.
-- **ice**: a nomination that gets no answer is given up after `max_binding_requests` requests
-  and the controlling agent nominates its next valid pair. It repeated the nomination until the
-  agent failed.
-- **ice**: a lite agent sends no connectivity checks (sections 6.2 and 7.3.2): a request with
-  USE-CANDIDATE selects the pair. It sent a triggered check and waited for the answer.
-- **ice**: a request on a pair that already succeeded triggers no check from the controlled
-  agent (section 7.3.1.4; every consent check of the peer cost a check back), and a request on a
-  Failed pair gives the pair a fresh budget on the controlled side too.
-- **ice**: an ICE restart given the credentials in use (`SettingEngine::set_ice_credentials`)
-  generates new ones (section 9). The offer carried the old pair, so the peer saw no restart
-  while this side had flushed its state.
-- **ice**: candidate constructors take component 0 (the `Default`) as 1 and refuse a component
-  above 256 or a priority above 2^31 - 1; `COMPONENT_RTCP` is 2.
-
-- **ice**: consent freshness follows RFC 7675 section 5.1. Consent checks on the selected pair
-  are 0.8 to 1.2 times the period apart, drawn anew each time, the period 5 seconds by default
-  and never less (it was a fixed 2 seconds); `poll_timeout` returns the drawn instant. Consent
-  expires 30 seconds after the last response whatever the configured timeouts (a zero
-  `failed_timeout` kept a connected agent sending for ever), and the open transactions go with
-  it.
-- **ice**: consent is kept up on the path an ICE restart leaves in use (RFC 7675 section 5.1).
-  The agent goes on sending consent requests there with the replaced generation's credentials,
-  answers the peer's, and gives the path up 30 seconds after the last response. Until now data
-  flowed on it unchecked until the restart selected a pair or failed.
-- **ice**: a lite agent keeps its selected pair alive with a Binding indication after 15
-  silent seconds (RFC 8445 section 11); it sent nothing.
-
-### Features
-
 - **ice**: `Candidate::set_local_preference_rank` / `local_preference_rank` (rank a local
   candidate among those of its type, for example an unreliable interface last, RFC 8421
   section 3) and `Candidate::peer_reflexive_priority`.
-
-### Breaking Changes
-
-- **ice**: candidate constructors and `unmarshal_candidate` return an error for a priority above
-  2^31 - 1 or a component above 256.
-- **ice**: a local candidate added without a priority after another of its type no longer has
-  the same priority as that one (its local preference is lower by its rank), and foundations of
-  server-reflexive candidates change (they follow the base, not the mapped address).
-
-- **ice**: `AgentConfig::keepalive_interval` (`with_ice_timeouts`) is the basic period of the
-  consent checks: default 5 seconds (was 2), a shorter non-zero value is raised to 5 seconds,
-  and each interval is 0.8 to 1.2 times it.
-- **ice**: a connected full agent is `Disconnected` when a consent request has gone unanswered
-  for `disconnected_timeout` (9 to 11 seconds after the last response by default; it was 5
-  seconds after it), and `Failed` 30 seconds after the last response at the latest:
-  `disconnected_timeout + failed_timeout` above 30 seconds, or a zero `failed_timeout`, no
-  longer keeps it alive longer. A shorter sum still fails it sooner.
-### Breaking changes
-
-- **turn**: `Event::AllocateError` and `Event::CreatePermissionError` carry a
-  `rtc_turn::client::RequestError` instead of a `shared::error::Error`: `Rejected(ErrorResponse)`
-  with the server's error code, reason, ALTERNATE-SERVER and UNKNOWN-ATTRIBUTES, or
-  `Failed(Error)`. It implements `Display` and converts into `Error` (`err.into()`).
-- **turn**: `ChannelData::encode` and `ChannelData::write_header` return `Result<()>`: data longer
-  than 65 535 bytes is refused (see below).
-- **turn**: the client delivers a Data indication or ChannelData only from a peer address it
-  holds a permission for (asked for or installed), as RFC 8656 sections 11.4 and 12.6 recommend.
-- **turn**: `Relay::send_to` fails with `ErrNoPermission` once a permission's 300 s have run out
-  without a refresh, and with `ErrConnClosed` after `Relay::close`.
-
-### Bug Fixes
-
-- **turn**: a 437 (Allocation Mismatch) to a Refresh, CreatePermission or ChannelBind ends the
-  allocation (RFC 8656 sections 5 and 8.3). The error was returned from `handle_read` or logged,
-  the relay stayed in the client and a Refresh went out every half lifetime for ever. The client
-  now drops the allocation, with its permissions, channel bindings and outstanding requests, and
-  raises `Event::AllocationLost`.
-- **turn**: an allocation released with `Relay::close` stays released. If the Refresh with
-  LIFETIME 0 and its retry went unanswered, or the server answered 437, the next periodic
-  refresh asked for the old lifetime again and kept the allocation alive. `close` now stops
-  every refresh at once; `Event::AllocationReleased` reports the end (success, 437, or no
-  answer).
-- **turn**: channel bindings belong to their allocation (RFC 8656 section 12). They were kept per
-  client, so a new allocation sent ChannelData on channel numbers only the previous one had
-  bound, which the server drops.
-- **turn**: permissions and channel bindings follow the RFC's timers. A permission lasts 300 s
-  from its last accepted CreatePermission or ChannelBind: one whose refresh the server refuses
-  is dropped (`Event::PermissionLost`), and a refused refresh of several addresses is repeated
-  address by address so only the refused ones end. A channel binding lasts 10 minutes: one that
-  carried data is rebound from a timer, one left idle is bound again (with the data in Send
-  indications) before ChannelData is used on it, and a channel number is reused for another
-  peer address only 15 minutes after the last ChannelBind sent for it.
-- **turn**: the first Allocate response is read for what it is. A success (a server that asks
-  for no credential, RFC 8656 section 7.2) is an allocation; an error other than 401 keeps its
-  code. Both were reported as `AllocateError(attribute not found)`, the first while the server
-  held the allocation.
-- **turn**: an Allocate success response without XOR-RELAYED-ADDRESS or LIFETIME is reported as
-  `AllocateError` under the caller's id and the allocation is deleted with a Refresh of
-  LIFETIME 0. It ended `handle_read` with an error and no event, and left the allocation on the
-  server.
-- **turn**: with all 4096 channel numbers taken, data to one more peer address goes as Send
-  indications; the send failed.
-- **turn**: ChannelData cannot carry more than 65 535 bytes; `Relay::send_to` and
-  `ChannelData::encode` refuse a longer payload instead of writing a wrapped length, which over
-  TCP or TLS broke the framing of every later message.
-- **turn**: an allocation whose Refresh requests all fail is refreshed again at half the time
-  it has left, and is dropped (`Event::AllocationLost`) when its lifetime has run out.
-- **turn**: a ChannelBind the server refuses is reported (`Event::ChannelBindError`) and tried
-  again after a minute; it was sent again with every packet. A 400 (the channels of client and
-  server are out of step) deletes the allocation, as RFC 8656 section 12.3 recommends.
-- **turn**: a ChannelBind success refreshes the peer's permission (RFC 8656 section 12.3).
-- **turn**: `Client::update_credentials` documents that a live allocation takes a new password,
-  not a new username (the server answers 441, RFC 8656 section 5).
-- **turn**: the `turn_client_tcp` example no longer names RFC 6062; it is a UDP allocation
-  reached over TCP (RFC 8656 section 3.1).
-
-### Features
 
 - **turn**: `Event::AllocationLost`, `AllocationReleased`, `RefreshError`, `PermissionLost` and
   `ChannelBindError`; `RequestError` and `ErrorResponse` with the typed STUN error code.
@@ -326,8 +580,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with the system default, 1.
 - **mdns**: a compressed SRV target decodes (RFC 6762 section 18.14).
 
-### Features
-
 - **mdns**: the responder life cycle of RFC 6762. A name is probed for (section 8.1; not a
   random `<uuid>.local` name, which draft-ietf-mmusic-mdns-ice-candidates exempts), announced
   twice with the cache-flush bit (sections 8.3, 10.2), defended against probes, sent back to
@@ -353,41 +605,450 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `with_multiple_addresses`, `with_on_link_subnets`, `with_jitter_seed`,
   `without_query_timeout`.
 
-### Breaking Changes
+- **srtp**: key exhaustion is reported. `Context::poll_event` yields
+  `ContextEvent::KeyLifetimeExpiring` when a sixteenth of a master key's lifetime is left and
+  `KeyExhausted` at the first refused packet, so the application can re-key;
+  `Context::set_key_lifetime`, `key_lifetime`, `key_usage` (`keying::{KeyLifetime, KeyUsage,
+  PacketKind}`).
+- **srtp**: encrypted header extensions (RFC 6904, and RFC 7714 section 8.3 for AES-GCM),
+  selectable per extension id: `Context::set_encrypted_header_extensions`,
+  `header_extension::EncryptedHeaderExtensions`. Not signalled by a peer connection.
+- **srtp**: Master Key Identifier, sending and receiving, with a master-key table:
+  `Context::with_keying`, `add_master_key`, `set_sending_mki`, `remove_master_key`,
+  `sending_mki`, `mkis`, `key_usage_of` (`keying::Keying`).
+- **srtp**: key derivation rate (RFC 3711 section 4.3.1): `keying::KeyDerivationRate`.
+- **srtp**: AES-192 counter mode (RFC 6188): `ProtectionProfile::Aes192CmHmacSha1_80` / `_32`;
+  **crypto**: `BlockCipherAlgorithm::Aes192`, `StreamCipherAlgorithm::Aes192Ctr`.
+- **srtp**: the NULL cipher with HMAC-SHA1, which RFC 3711 section 5.1 makes mandatory to
+  implement: `ProtectionProfile::NullHmacSha1_80` / `_32`. Never offered by a peer connection
+  (RFC 8827 section 6.5).
+- **srtp**: unencrypted SRTCP can be sent: `Context::set_srtcp_encryption`.
+- **srtp**: `ProtectionProfile::dtls_srtp_id`, `from_dtls_srtp_id` (the IANA code points),
+  `ALL`, `is_aead`, `is_null_cipher`, `default_key_lifetime`; it is `PartialEq`, `Eq`, `Hash`.
+  `ContextEvent::CryptexRequiredViolation`; `Context::profile`.
+- **srtp**: known-answer tests from RFC 3711 Appendix B, RFC 6188 section 7, RFC 6904 Appendix
+  A, RFC 7714 sections 16 and 17, and libsrtp's RFC 6904 vectors.
 
-- **mdns**: `MdnsConfig` has private fields: build it with `MdnsConfig::default()` and the
-  `with_*` methods, not as a struct literal. `MdnsConfig::query_timeout` defaults to 30
-  seconds (was `None`), and `query_interval` under one second is taken as one second.
-- **mdns**: a local name that is not `<uuid>.local` is answered only after probing for it,
-  about 750 ms after the first `handle_timeout` (`MdnsProbePolicy::Never` restores the old
-  behaviour). `MdnsEvent::QueryTimeout` also ends a query whose name has more than one
-  address. `Mdns::close` leaves goodbye packets in `poll_write`.
-### Security
+- **sctp**: `RTCPeerConnection::replace_sctp_association` (the next offer carries a new
+  `a=sctp-port`) and `RTCPeerConnection::close_sctp_association` (it carries
+  `a=sctp-port:0`), RFC 8841 section 10.5.
+- **shared**: `Error::ErrLabelTooLarge`, `Error::ErrDataChannelIdInUse`,
+  `Error::ErrSDPSctpPortInvalid`.
 
-- **dtls**: the server verifies the client's Finished (RFC 5246 section 7.4.9). `Flight4` only
-  checked that a Finished message had arrived, so nothing confirmed to the server that the client
-  had seen the same handshake: a ClientHello altered on the way (cipher suites, SRTP profiles,
-  extensions) was noticed by the client alone, after the server had completed, exported SRTP keys
-  and started sending. Both sides now compare verify_data in constant time and answer a mismatch
-  with decrypt_error; the client's alert, sent after its ChangeCipherSpec, is protected so that
-  the server can read it.
-- **dtls**: unauthenticated input no longer ends a handshake (RFC 6347 sections 4.1.2.7 and
-  4.2.1). A plaintext application-data record during the handshake was answered with a fatal
-  unexpected_message, and a ClientHello with a wrong cookie with a fatal access_denied; either
-  failed the association, and the wrong-cookie one also took the place of the genuine
-  ClientHello, so one spoofed datagram denied the handshake. Both are now discarded without an
-  alert, the server answers the cookieless one with HelloVerifyRequest again, and the genuine
-  ClientHello is still accepted. Nothing is negotiated (and no alert sent) from a ClientHello
-  that does not echo the cookie.
-- **dtls**: `State::export_keying_material` refuses a session without the extended master secret
-  (RFC 7627 section 5.4), so DTLS-SRTP keys never come from a master secret that is not bound to
-  the handshake, whatever `ExtendedMasterSecretType` a crate user picks. The engine already
-  requires the extension.
-- **dtls**: a non-empty renegotiation_info in an initial handshake is a fatal handshake_failure on
-  both sides (RFC 5746 sections 3.4 and 3.6); it was skipped with a warning. The server recognises
-  `TLS_EMPTY_RENEGOTIATION_INFO_SCSV`.
+- **rtcp**: new packet types, each with marshal, unmarshal and a fuzz target: `ApplicationDefined`
+  (APP, RFC 3550 section 6.7); `TemporaryMaximumBitrateRequest` / `Notification` (TMMBR, TMMBN,
+  RFC 5104 section 4.2); `TemporalSpatialTradeoffRequest` / `Notification` (TSTR, TSTN, section
+  4.3.2 and 4.3.3); `VideoBackChannelMessage` (VBCM, section 4.3.4);
+  `ReferencePictureSelectionIndication` (RPSI, RFC 4585 section 6.3.3); `LayerRefreshRequest` (LRR,
+  RFC 9627); `ApplicationLayerFeedback` (PSFB FMT 15 that is not REMB). These are wire
+  codecs: nothing negotiates or acts on the new messages yet.
+- **rtcp**: SDES items MID (15), RtpStreamId (12) and RepairedRtpStreamId (13) (RFC 7941, RFC 8852);
+  `SourceDescriptionItem::private` / `as_private` for PRIV items.
+- **rtcp**: `compound_packet::validate_compound` (the header checks of RFC 3550 Appendix A.2 and the
+  rules of section 6.1) and `validate_reduced_size` (what RFC 5506 leaves of them).
+- **rtcp**: `packet::unmarshal_lenient`: a malformed packet of a known type comes back as a
+  `RawPacket` and the packets around it are read. `packet::unmarshal` still fails the datagram.
+- **rtcp**: `TransportLayerCc::reference_time_signed` and `ReferenceTimeUnwrapper`, which follows the
+  24-bit reference time across its wrap (every 12.4 days).
+- **rtcp**: `StatisticsSummaryReportBlock::reported`, `ApplicationDefined::name_str`, the `FORMAT_*`
+  constants of the new feedback messages.
+
+- **rtp: SVC**. `rtc_rtp::codec::svc`: `ScalabilityMode`, the 36 modes of the W3C webrtc-svc
+  table (case sensitive, `supported_by(mime_type)` per codec), and `ScalabilityPattern`, each
+  mode's dependency structure as a generator of `LayerFrame`s that feed the payloaders.
+- **rtp: Dependency Descriptor** (AV1 RTP appendix A). `rtc_rtp::codec::dependency_descriptor`:
+  `DependencyDescriptor` (marshal / unmarshal), `FrameDependencyStructure`,
+  `DependencyDescriptorWriter`, `DependencyDescriptorReader`, `DecodeTargetSelector`,
+  `DEPENDENCY_DESCRIPTOR_URI`.
+- **rtp (VP8)**: `Vp8Payloader::payload_frame` with `Vp8FrameInfo` (N, TID, Y, KEYIDX; the
+  payloader counts TL0PICIDX), `set_initial_picture_id`, `set_initial_tl0_pic_idx`;
+  `Vp8TemporalLayerFilter`.
+- **rtp (VP9)**: `Vp9Payloader::payload_layer_frame` with `Vp9FrameInfo` (TID, U, SID, D, Z,
+  end of picture, reference indices), `set_scalability_structure` with
+  `Vp9ScalabilityStructure`, `initial_tl0_pic_idx`; `Vp9Packet::scalability_structure`,
+  `referenced_picture_id`; `Vp9LayerFilter`.
+- **rtp (AV1)**: `Av1Payloader::payload_frames` (a temporal unit's packets by frame),
+  `Av1Payloader::sequence_header_per_spatial_layer`.
+
+- **rtcp**: the RTCP session of a connection (`RtcpSessionInterceptor`, `Slot::RtcpSession`,
+  registered by `configure_rtcp_reports` and so by `register_default_interceptors`). One
+  interceptor closest to the wire is the connection's whole RTCP voice:
+  - one identity: one CNAME per connection (RFC 7022: 96 random bits, Base64) in every SDES,
+    for senders, RTX and FEC SSRCs and receiver reports; reports and feedback from the
+    connection's media SSRCs, or from one reporting SSRC (never zero, never one in use) when
+    it sends no media; `RTCPeerConnection::rtcp_cname` and `remote_rtcp_cname`;
+  - reports: a sender report for every SSRC that sent in the last two report intervals (RTX
+    and FEC included), a receiver report otherwise, the reception report blocks inside them,
+    an empty RR when there is nothing to report, BYE for an SSRC that stops and for all of
+    them on `close()`;
+  - timing: RFC 3550 6.3 (interval from the members, senders, average packet size and RTCP
+    bandwidth, randomised, timer and reverse reconsideration, source timeout, BYE back-off)
+    and the RTP/AVPF rules of RFC 4585 3.5 (early feedback, `T_rr_interval`), one timer per
+    local SSRC aggregated into one compound packet (RFC 8108 5.3); sans-I/O, with an
+    injectable random source (`RtcpRandom`);
+  - packets: everything leaves as a compound packet, reduced-size (RFC 5506) only when the
+    session is told it was negotiated;
+  - membership: sources and their CNAMEs, BYE, timeouts, and SSRC collisions (RFC 3550 8.2).
+  Inputs for what a session description negotiates: `RtcpSessionBuilder` and
+  `RtcpSessionControl` (`Bandwidth` for `b=AS` / `b=TIAS` / `b=RS` / `b=RR`, `ReducedSize` for
+  `a=rtcp-rsize`, `TrrInt` for `trr-int`, `Cname`). Outputs: `RtcpSessionEvent`.
+- **nack**: a request policy (RFC 4588 6.3, Appendix A): a lost packet is asked for at most ten
+  times and for two seconds (`with_max_nacks_per_packet`, `with_max_packet_age`), not again
+  before a round trip has passed (measured by the RTCP session, or `with_round_trip_time`),
+  optionally after a reordering delay (`with_reorder_delay`). `NackResponderBuilder::
+  with_max_packet_age` is the sender's `rtx-time`.
+- **rtcp**: `FirCommands` numbers the FIR commands an application sends (RFC 5104 4.3.1); a
+  repeated FIR command is delivered to the application once.
+- **rtcp**: `RTCPeerConnectionEvent::OnSsrcCollision` when a remote source uses a sender's SSRC.
+- **interceptor**: `Attribute::Retransmitted` carries what a de-encapsulated RTX packet was on
+  the wire.
+
+- **sdp**: typed, validated attributes (`rtc_sdp::attribute`, re-exported as
+  `rtc::sdp::attribute`). Each type parses the value of one attribute against the ABNF of the RFC
+  that defines it and prints it back: `Group`, `Mid`, `Msid`, `MsidSemantic`, `Ssrc` (with
+  `cname`, `previous-ssrc`, `fmtp`, `msid`), `SsrcGroup`, `Rid` (with `pt=` and every
+  restriction), `Simulcast` (alternatives and `~`), `ExtMap`, `Rtcp`, `RtcpFb` (wildcard, and
+  every feedback type through `RtcpFb::kind`), `RtcpXr`, `RtpMap`, `Fmtp` (`parameter_list` keeps
+  order and text), `Ptime`, `MaxPtime`, `FrameRate`, `ImageAttr`, `Content`, `Candidate`,
+  `RemoteCandidates`, `IceUfrag`, `IcePwd`, `IceOptions`, `IcePacing`, `Fingerprint`, `Setup`,
+  `TlsId`, `Identity`, `SctpPort`, `MaxMessageSize`, `SctpMap`. `SessionDescription` and
+  `MediaDescription` have an accessor for each (`mid()`, `msids()`, `rids()`, `simulcast()`,
+  `rtcp_fbs()`, `candidates()`, `fingerprints()`, `direction()`, `rtcp_mux()`, `bundle_only()`,
+  ...), the generic `typed::<T>()` / `typed_all::<T>()` / `flag(name)`, and `with_typed(&T)` to
+  write one. An accessor returns `Err` when the attribute is present and malformed.
+- **sdp**: `SessionDescription::validate` checks a whole description: a `c=` line for every media
+  section, the value of every attribute with a type, the level each attribute is defined for,
+  attributes a level holds once (one direction, one `mid`, ...), unique `a=mid`, `a=rid` /
+  `a=simulcast` consistency, payload types as the formats of an RTP section.
+- **sdp**: the RFC 8859 multiplexing category and level of every attribute as data
+  (`rtc_sdp::attribute::mux`): the attribute table of RFC 8859 section 15.2.2 plus the attributes
+  registered since (`msid`, `rid`, `simulcast`, `extmap-allow-mixed`, `rtcp-mux-only`,
+  `ice-pacing`, `end-of-candidates`, `tls-id`, `sctp-port`, `max-message-size`, `identity`,
+  `cryptex`, `bundle-only`), and the tables for `b=` modifiers, `rtcp-fb` values, grouping
+  semantics and source attributes.
+- **sdp**: `ParseOptions`, `SessionDescription::unmarshal_with_options`, `parse_with_options` and
+  `impl FromStr for SessionDescription`.
+- **sdp**: `a=extmap` ids 256 (the appbits) and 4096 to 4351 (extensions the offerer leaves the
+  answerer to number, RFC 8285 section 6) parse through `ExtMap::parse` and `extmaps()`, with
+  `ExtMap::is_element_id`, `is_answerer_assigned` and `fits_one_byte_header` to tell them apart.
+  `ExtMap::unmarshal`, whose id callers put into RTP headers, still returns only 1 to 255.
+- **sdp**: `ConnectionInformation::parse`, `Address::parse`, `Bandwidth::parse`,
+  `Bandwidth::kind` (`BandwidthKind`), `Bandwidth::bits_per_second`, `bandwidth_of` on both
+  description levels, `Attribute::parts`, and `ATTR_KEY_*` constants for the attributes above.
+
+- **sctp**: `Stream::write_sctp_with_ppid` and `Chunks::ppid` for a Payload Protocol
+  Identifier `PayloadProtocolIdentifier` has no name for; `PayloadProtocolIdentifier::number`;
+  `ChunkPayloadData::ppid`; `Association::verification_tag`.
+- **sctp**: `Endpoint::poll_transmit` (the endpoint's answers to out-of-the-blue packets);
+  `TransportConfig::with_valid_cookie_life` / `valid_cookie_life`.
+- **sctp**: `TransportConfig::with_heartbeat_interval` / `heartbeat_interval`,
+  `Association::set_heartbeat_interval`, `Event::PathInactive`, `Event::PathActive`.
+- **sctp**: `Association::on_path_change` restarts congestion control and the RTO when the
+  transport underneath moves to another path (RFC 9260 section 7.2.5; for the peer
+  connection to call when ICE selects another candidate pair).
+  `Association::congestion_window`, `slow_start_threshold`, `rto`.
+- **sctp**: `TransportConfig::with_slow_start_growth_limit` (L of RFC 9260 section 7.2.1,
+  default 1), `with_max_burst` (Max.Burst, off by default), `with_sack_delay` (200 ms by
+  default, at most 500 ms).
+- **sctp**: `Association::partial_reliability` (whether PR-SCTP is in use),
+  `TransportConfig::with_partial_reliability`.
+- **fuzz**: `rtc-sctp` targets `association_handle_chunks` (an established association fed
+  chunks, timers running) and `chunk_chunk_unknown_unmarshal`.
+
+- **sframe**: new crate `rtc-sframe`, SFrame (RFC 9605) for end-to-end encrypted media. The
+  header codec; key derivation; the five cipher suites of the RFC and the three AES-256-CTR
+  suites of the IANA registry (0x0006 to 0x0008, which the W3C Encoded Transform API lists);
+  `SFrameContext` with a key store in which a key encrypts or decrypts, never both, a counter per
+  sending key (a (key, nonce) pair is never used twice, and a key that has used every counter
+  stops) and an anti-replay window per receiving key; the sender-keys ratchet of section 5.1
+  (`SenderKeyRatchet`, `SenderKeyReceiver`) and MLS-keyed contexts of section 5.2 (`MlsContext`,
+  which takes each epoch's exported secret; no MLS in the engine); `PendingCiphertexts` for
+  frames whose key has not arrived. Checked against every test vector of RFC 9605 Appendix C.
+  Sans-I/O, on the `rtc-crypto` provider. Standalone: the application applies it to a frame
+  before packetizing or to a packet's payload; there is no SFrame RTP payload format or SDP
+  signalling yet.
+- **crypto**: `HmacAlgorithm::Sha512`, implemented by both built-in providers and part of the
+  provider conformance suite (`conformance::assert_provider`). A downstream provider that runs
+  the suite has to implement it.
+
+- **flexfec**: RFC 8627 FlexFEC as its own coder, negotiated as `video/flexfec` (the draft-03
+  coder keeps `video/flexfec-03`; the two wire formats are not compatible and each name selects
+  its coder exactly). `FlexFecEncoder` builds flexible-mask repair packets (15, 46 or 110 bits),
+  fixed L columns / D rows packets (row, column and 2-D protection, `FlexFecProtection`) and
+  retransmission packets (R=1), with the protected SSRCs in the CSRC list. `FlexFecDecoder`
+  recovers under all of them, iteratively for 2-D, for several source streams per repair packet,
+  and takes retransmissions; its buffers follow the negotiated `repair-window`
+  (`FlexFecParameters`, `FlexFecDecoderConfig`) and are bounded against the peer (RFC 8627
+  section 9). `FlexFecSendBuilder` / `FlexFecReceiveBuilder` install the interceptors at
+  `Slot::FecEncoder` / `Slot::FecDecoder`; both are opt-in, like the draft-03 pair. A sender
+  protects no block that outlasts the repair window; FlexFEC retransmission in answer to NACK
+  is `with_retransmissions(true)`; in-band SSRC mapping (section 7.1.1) is
+  `with_in_band_ssrc_mapping`.
+- **interceptor**: `StreamInfo::mime_type_fec` and `StreamInfo::sdp_fmtp_line_fec` name a
+  stream's FEC format and its parameters, with `fec_is_flexfec03()` / `fec_is_flexfec()`.
+- **flexfec-03**: `FlexFec03SendBuilder::with_initial_sequence_number` and
+  `with_initial_timestamp`; `FLEXFEC03_MAX_MEDIA_PACKETS` (109).
+- **fuzz**: targets `flexfec_header_parse`, `flexfec_decoders` and `flexfec_receive`.
+
+- **sdp**: `a=tls-id` (RFC 8842 section 4). Offers carry the association's value on the
+  BUNDLE-tag m-section, answers carry one when the offer did; the value is kept while the
+  association is and replaced with it; a changed remote value asks for a new association.
+  `SettingEngineBuilder::with_disable_sdp_tls_id` leaves it out.
+- **sdp**: `a=identity` (RFC 8827 section 5) is carried: `RTCPeerConnection::
+  set_identity_assertion` and `remote_identity_assertion`. Making and verifying an assertion
+  stays the application's.
+- **dtls**: `SettingEngineBuilder::with_disable_dtls_use_srtp` for a data-channel-only
+  endpoint (no `use_srtp`, media sections refused); `RTCCertificate::fingerprint` for one hash
+  function; `rtc_dtls::config::ConfigBuilder::with_use_srtp_optional`.
+- **crypto**: `HashAlgorithm::{Sha1, Sha224, Sha384, Sha512}` in the built-in providers, for
+  certificate fingerprints.
+
+- **rtp**: `Header::set_extension_upgrading` and `Header::upgrade_to_two_byte` convert a
+  one-byte extension block to the two-byte form, for a stream that negotiated
+  `a=extmap-allow-mixed` or is two-byte throughout; `Header::extension_form`, `ExtensionForm`.
+  `Header::del_extension` clears the X bit with the last element (RFC 8285 section 4.1.1).
+- **rtp**: `header::validity::check_rtp_validity`, the header validity checks of RFC 3550
+  Appendix A.1 on raw bytes, and `sequence::SourceSequence`, its per-source sequence number state
+  (probation, restart after a jump, loss by Appendix A.3).
+- **rtp**: `Payloader::marker_rule` (`MarkerRule`) and `Payloader::payload_duration`, provided
+  methods a payload format overrides to say which packets carry the marker and how long a
+  sample-based payload is.
+- **rtp**: typed header extensions: `CsrcAudioLevelExtension` (RFC 6465), `Mid`, `RtpStreamId`,
+  `RepairedRtpStreamId` (RFC 7941, RFC 8852: UTF-8 checked, stream ids alphanumeric),
+  `AbsCaptureTimeExtension`, `TransmissionOffsetExtension` (RFC 5450);
+  `AudioLevelExtension::voice_activity` and `parse_vad_attribute` (RFC 6464 `vad`); URI
+  constants and `HeaderExtension` variants for each.
+- **rtp**: H.264 interleaved mode (RFC 6184 section 6.4). `H264Payloader::with_packetization_mode(2)`
+  sends STAP-B and FU-B / FU-A with consecutive decoding order numbers
+  (`with_initial_don`); `H264Packet` receives STAP-B, MTAP16, MTAP24 and FU-B
+  (`H264Packet::nal_units` gives each NAL unit's DON and timestamp offset);
+  `H264DeinterleavingBuffer` puts NAL units back in decoding order (section 7.2.2); `stap_a`,
+  `stap_b`, `mtap` and `don_diff` are public. `try_with_packetization_mode` refuses a mode
+  above 2.
+- **rtp**: H.265 decoding order numbers (RFC 7798 sections 4.4.1 to 4.4.3, 4.6, 6):
+  `HevcPayloader::with_donl` writes DONL and DOND, `H265Packet::nal_units` derives each NAL
+  unit's DON, `H265DepacketizationBuffer` passes NAL units on by AbsDon.
+  `H265Packet::with_length_prefix` for length-prefixed output.
+- **rtp**: `H264Packet::depacketize_with_sequence_number` and
+  `H265Packet::depacketize_with_sequence_number` drop a NAL unit when one of its fragments was
+  lost, instead of splicing over the gap (RFC 6184 section 5.8, RFC 7798 section 4.4.3).
+- **rtp**: `codec::telephone_event` (RFC 4733): the event payload, the DTMF codes, the `events`
+  list, and sender and receiver state machines for an application or a DTMF sender to drive
+  (marker on the first packet, cumulative duration, segments of 0xFFFF for long events, the end
+  packet three times).
+- **rtp**: `codec::comfort_noise` (RFC 3389): the CN payload, its reflection coefficients, one
+  payload per channel.
+- **rtp**: `codec::red` (RFC 2198): block headers, `RedEncoder` (the last N primaries as
+  redundancy), `RedDecoder` (recovers a lost primary once), the fmtp list.
+- **rtp**: `clock_rate` (RFC 7160): `ClockRateHistory`, `MultiRateTimestamp`,
+  `interarrival_difference`, `JitterEstimator`.
+- **rtp**: `codec::opus::opus_packet_samples`, the duration of an Opus packet from its TOC;
+  static payload type and clock constants for PCMU, PCMA, G722 and Opus.
+
+- **ulpfec**: ULPFEC (RFC 5109), new in `rtc-interceptor` (`ulpfec` module) and opt-in.
+  `UlpfecPacket` reads and writes the FEC header and the level headers (16- and 48-bit masks, any
+  number of levels); `UlpfecEncoder` is the protection operation of section 8, with
+  `validate_ulpfec_scheme` for the mask rules of 7.4; `UlpfecDecoder` recovers level by level,
+  iterating until nothing more can be rebuilt, over a bounded window, and does not hand out a
+  packet rebuilt only in part. The examples of RFC 5109 section 10 are test vectors.
+- **ulpfec**: two carriages as interceptors (`UlpfecSendBuilder`, `UlpfecReceiveBuilder`). In RED
+  (RFC 2198; `video/red` + `video/ulpfec`, what browsers negotiate) media leaves as RED primary
+  blocks and FEC either as a RED packet of its own in the media stream's sequence space
+  (`RedPlacement::OwnPacket`, libwebrtc's form; later media packets are renumbered to make room)
+  or as a redundant block of the next media packet (`RedPlacement::WithNextMedia`, RFC 5109
+  10.3). Received RED is delivered as the media it carries, with lost packets rebuilt and marked
+  `Attribute::RecoveredByFec`; a RED packet that held only FEC travels the read leg emptied and
+  marked `UlpfecRepair`, so sequence-number accounting stays whole, and is not delivered to the
+  application. As a separate stream the FEC goes on the stream's repair SSRC
+  (`StreamInfo::ssrc_fec`). `onelevelonly` is honoured (`with_one_level_only`,
+  `ulpfec_one_level_only_from_fmtp`).
+- **ulpfec**: `configure_ulpfec(registry, red_payload_type, ulpfec_payload_type)` adds the RED
+  carriage in both directions. The default codecs still do not offer `ulpfec` or `red`; register
+  them and pass the negotiated payload types.
+- **fuzz**: targets `ulpfec_packet` and `ulpfec_receive` (crate `rtc`).
+- **jsep**: a description is checked in full before any of it is applied (RFC 9429 sections 5.9
+  and 5.10, W3C webrtc-pc "set a session description"). `set_remote_description` changed the
+  signaling state, stored the description and created transceivers, and only then looked at
+  the ICE credentials, the candidates and the fingerprints: a remote offer without
+  `a=fingerprint` returned an error and left the connection in `have-remote-offer`. The checks
+  now run first; a description that is refused changes nothing, and should a transport fail
+  while one is applied, the signaling state, the descriptions, the transceivers, the negotiated
+  codecs and the queued events are put back.
+- **jsep**: a remote answer is checked against the offer it answers (RFC 3264 section 6, RFC
+  9429 section 5.8.3, RFC 5888 section 9.1, RFC 9143 section 7.4, RFC 4585 section 4.2): the
+  number and order of the m= sections, each one's media type, proto and mid, a direction the
+  offered direction allows, and BUNDLE groups that bundle only what the offer bundled. An
+  answer with fewer or swapped sections was applied. It is now
+  `Error::ErrAnswerDoesNotMatchOffer`, and the offer stays pending. An `a=rtcp-fb` line the
+  offer did not have does not refuse the answer (real peers answer with their own list): it is
+  logged and never enabled, the negotiated feedback of a format being what both sides have.
+  The transceiver's codecs used to take the remote description's feedback as it came.
+- **jsep**: a rollback is taken through either `set_local_description` or
+  `set_remote_description` (RFC 9429 section 5.7: "the same effect"). A local offer could be
+  rolled back only through the first and a remote offer only through the second.
+- **jsep**: a rollback restores what the last completed exchange negotiated: the negotiated
+  codecs and header extensions, each transceiver's codecs, and the RTX / FEC flows of the
+  senders' encodings. An abandoned remote offer left its codecs negotiated (the next local offer
+  listed only those) and the senders without the repair flows it lacked.
+- **jsep**: a staged ICE restart is applied only by the description that carries it.
+  `set_local_description` applied it before it looked at the description, so a refused
+  description and a rollback restarted ICE.
+- **jsep**: `create_offer` is refused outside the `stable` and `have-local-offer` states
+  (`Error::ErrIncorrectSignalingState`; W3C createOffer, RFC 9429 section 5.2.2). It made an
+  offer in any state, gave transceivers mids and used up a requested ICE restart.
+- **jsep**: `OnSignalingStateChangeEvent` is emitted only when the state changes; an offer
+  applied over a pending one and a repeated provisional answer emitted it again.
+- **jsep**: an applied answer forgets the last created offer and answer (W3C "set a session
+  description"), so the offer of a finished exchange is not accepted for the next
+  (`Error::ErrSDPDoesNotMatchOffer`).
+
+- **jsep**: the `o=` session version goes up by one with each generated description that
+  differs from the one before (RFC 9429 sections 5.2.2 and 5.3.2, RFC 3264 section 8). It was
+  the clock's sub-second nanoseconds plus one on every call, so versions were unrelated and
+  could go down.
+- **jsep**: the answer's BUNDLE group is the offered BUNDLE group, in its tag order (RFC 9429
+  section 5.3.1, RFC 9143 sections 7.3 and 7.3.1). It was read from the first `a=group` line
+  of any semantics, so an offer listing `a=group:LS` first had sections rejected; and an offer
+  with no group at all had every section answered with port 0. It is now answered without a
+  group, accepted.
+- **jsep**: an answer repeats the `<proto>` of each offered m= line (RFC 9429 section 5.1.2),
+  rejected and data sections included; it said `UDP/TLS/RTP/SAVPF` / `UDP/DTLS/SCTP` whatever
+  was offered. An audio or video section whose profile is none of the eight RTP profiles of
+  that section is rejected.
+- **jsep**: a media section with no direction attribute is sendrecv, and a session-level
+  direction is the section's when it has none (RFC 8866 section 6.7, RFC 3264 section 6.1).
+  Such a section was skipped when the offer was applied, and `create_answer` then failed with
+  `ErrPeerConnTransceiverMidNil`.
+- **jsep**: the transceiver created for a remote m= section has direction `recvonly` whatever
+  was offered (W3C "set a session description"); for a section offered recvonly it was
+  `sendonly`, with no sender. Such a section is answered `inactive` until `add_track`.
+- **jsep**: a remote description that repeats a mid, or whose mid is not a token, is refused
+  (RFC 5888 section 4, RFC 9429 section 5.8.2); both sections used to share one transceiver.
+- **jsep**: `a=bundle-only` in a section outside every BUNDLE group, or in an answer, is
+  discarded (RFC 9143 section 6): a port-zero section is then rejected, as port zero says.
+- **jsep**: local descriptions list each candidate once, for the RTP component (RFC 8858
+  section 5.3, RFC 5761 section 5.1.3); every candidate was repeated as component 2.
+- **jsep**: the unregistered `mslabel` and `label` source attributes are no longer written
+  (RFC 5576 section 4.1); `a=ssrc` carries `cname` and `msid`.
+
+- **jsep**: `a=msid:<stream>` without appdata, the form RFC 9429 section 5.2.1 has senders
+  write, is read (RFC 8830 section 3): it was dropped, leaving the remote track without a
+  stream or, with no `a=ssrc` lines, no track at all. The recipient names the track and keeps
+  the name across descriptions. Every `a=msid` line of a section counts (a track in several
+  streams, RFC 8830 section 2); only the last did. The `a=msid` lines win over a legacy
+  `a=ssrc:<n> msid:` attribute.
+
+- **jsep**: `a=rtcp-mux` of a remote description is read (RFC 9429 sections 5.8.3 and 5.11, RFC
+  8858, RFC 5761 section 5.1.1). The engine has no RTCP component, and it multiplexed whatever
+  the peer said. A remote offer whose RTP section lacks the attribute is now refused under the
+  RTCP mux policy `require` (the default; `RTCRtcpMuxPolicy` had no effect) and has that
+  section answered rejected under `negotiate`; a remote answer without it is refused, the offer
+  staying pending. `a=rtcp-mux-only` without `a=rtcp-mux` is refused.
+- **jsep**: new m= sections of an offer say `a=rtcp-mux-only` under the `require` policy (RFC
+  9429 sections 4.1.1 and 5.2.1); the answerer-tagged section repeats it when the
+  offerer-tagged one had it (RFC 9143 section 9.3.1.2).
+- **jsep**: `a=rtcp-rsize` is answered only when offered, kept in a subsequent offer only when
+  the most recent answer had it, and reduced-size RTCP counts as negotiated only when both
+  descriptions carry it (RFC 5506 section 5, RFC 9429 sections 5.2.2, 5.3.1 and 5.11). It was
+  written in every description and never read.
+- **jsep**: `a=rtcp-fb:*` (the wildcard payload type, RFC 4585 section 4.2) is read and applies
+  to every format of the section; such lines were dropped. RFC 8888 feedback is written as
+  `a=rtcp-fb:* ack ccfb`, as its section 6 requires, not once per payload type, so a peer that
+  follows the RFC now negotiates it. A feedback value keeps everything after its type as its
+  parameter.
+
+- **jsep**: a description states this endpoint's own `a=fmtp` parameters for a negotiated
+  format, not the ones the peer stated (RFC 3264 section 6.1). An answer echoed the offer's
+  line, and so did every later offer: Opus parameters the peer asked for itself (RFC 7587
+  section 7.1), the peer's AV1 level and tier, its H.264 level. An H.264 answer keeps the
+  offered profile and states this endpoint's level when both sides allow level asymmetry, else
+  the lower of the two (RFC 6184 section 8.2.2).
+- **jsep**: an H.264, VP9 or AV1 format whose configuration this endpoint did not register is
+  no longer negotiated because its name matches (RFC 6184 section 8.2.2: "maintain all
+  configuration parameters or remove the media format"); when it was the section's only
+  format the section is rejected. Other codecs keep the name-only match.
+- **media_engine**: the H.264 default listed twice under payload type 127 is listed once (the
+  second was discarded at registration; the registered codecs do not change).
+
+- **shared**: `Error::ErrAnswerDoesNotMatchOffer(String)`.
+- **transceiver**: `RTCRtpTransceiver::remote_bandwidth()` (`RTCRemoteBandwidth`: `b=TIAS` /
+  `b=AS`, `b=RS`, `b=RR` of the remote media section, RFC 9429 section 5.10),
+  `RTCRtpTransceiver::remote_rtcp_xr()` (the remote `a=rtcp-xr` formats, RFC 3611 section 5.1)
+  and `RTCRtpTransceiver::rtcp_reduced_size()`; `RTCRtcpParameters::reduced_size` of the
+  sender's and receiver's parameters is the negotiated value.
+- **receiver**: `RTCRtpReceiver::streams()`, the ids of the remote MediaStreams the track is
+  in (W3C `[[AssociatedRemoteMediaStreams]]`).
 
 ### Bug Fixes
+
+- **twcc**: a NACK retransmission sent without RTX keeps the transport-wide sequence number it
+  was first given. `TwccSenderInterceptor` numbered it as a new packet, so its header extension
+  changed and the SRTP sender, which protects one packet per index (RFC 3711 section 3.3.1,
+  RFC 7714 section 8.1), refused it after the congestion controller had counted it as sent: no
+  lost packet was repaired, the NACK generator asked again every 100 ms, and the phantom losses
+  drove the estimate to its floor. The sender now remembers the number it gave each of a
+  stream's last 1024 RTP sequence numbers; an RTX retransmission is still numbered as a new
+  packet.
+
+- **stun**: `Client` delivers a response of any length. It read into a 120-byte buffer, so a
+  132-byte Binding response (what coturn sends over IPv6) failed to decode and the transaction
+  timed out. `Message::read_from` reads its reader to the end.
+- **stun**: `Client` takes as the response only a success or error response of the request's
+  method that comes from the server (RFC 8489 section 6.3). Any message with a known
+  transaction id, a request or an indication from any address included, ended the transaction.
+- **stun**: a truncated MAPPED-ADDRESS or XOR-MAPPED-ADDRESS is an error; it decoded to an
+  address filled up with zeros. The first byte of the value is ignored (RFC 8489 section 14.1);
+  a non-zero one failed the attribute.
+- **stun**: the reserved bits of ERROR-CODE are ignored (RFC 8489 section 14.8). With one set
+  next to the class, a 438 decoded as 1238 and a stale nonce went unrecognised.
+- **stun**: `Uri`'s `Display` writes every IPv6 host in brackets; one without `::` came out as
+  `stun:2001:db8:1:2:3:4:5:6:3478`, which does not parse back.
+- **stun**: `MessageIntegrity::check` no longer rewrites the message's length field while it
+  runs, and checks by the attribute's position, whatever follows it.
+
+- **turn**: a 437 (Allocation Mismatch) to a Refresh, CreatePermission or ChannelBind ends the
+  allocation (RFC 8656 sections 5 and 8.3). The error was returned from `handle_read` or logged,
+  the relay stayed in the client and a Refresh went out every half lifetime for ever. The client
+  now drops the allocation, with its permissions, channel bindings and outstanding requests, and
+  raises `Event::AllocationLost`.
+- **turn**: an allocation released with `Relay::close` stays released. If the Refresh with
+  LIFETIME 0 and its retry went unanswered, or the server answered 437, the next periodic
+  refresh asked for the old lifetime again and kept the allocation alive. `close` now stops
+  every refresh at once; `Event::AllocationReleased` reports the end (success, 437, or no
+  answer).
+- **turn**: channel bindings belong to their allocation (RFC 8656 section 12). They were kept per
+  client, so a new allocation sent ChannelData on channel numbers only the previous one had
+  bound, which the server drops.
+- **turn**: permissions and channel bindings follow the RFC's timers. A permission lasts 300 s
+  from its last accepted CreatePermission or ChannelBind: one whose refresh the server refuses
+  is dropped (`Event::PermissionLost`), and a refused refresh of several addresses is repeated
+  address by address so only the refused ones end. A channel binding lasts 10 minutes: one that
+  carried data is rebound from a timer, one left idle is bound again (with the data in Send
+  indications) before ChannelData is used on it, and a channel number is reused for another
+  peer address only 15 minutes after the last ChannelBind sent for it.
+- **turn**: the first Allocate response is read for what it is. A success (a server that asks
+  for no credential, RFC 8656 section 7.2) is an allocation; an error other than 401 keeps its
+  code. Both were reported as `AllocateError(attribute not found)`, the first while the server
+  held the allocation.
+- **turn**: an Allocate success response without XOR-RELAYED-ADDRESS or LIFETIME is reported as
+  `AllocateError` under the caller's id and the allocation is deleted with a Refresh of
+  LIFETIME 0. It ended `handle_read` with an error and no event, and left the allocation on the
+  server.
+- **turn**: with all 4096 channel numbers taken, data to one more peer address goes as Send
+  indications; the send failed.
+- **turn**: ChannelData cannot carry more than 65 535 bytes; `Relay::send_to` and
+  `ChannelData::encode` refuse a longer payload instead of writing a wrapped length, which over
+  TCP or TLS broke the framing of every later message.
+- **turn**: an allocation whose Refresh requests all fail is refreshed again at half the time
+  it has left, and is dropped (`Event::AllocationLost`) when its lifetime has run out.
+- **turn**: a ChannelBind the server refuses is reported (`Event::ChannelBindError`) and tried
+  again after a minute; it was sent again with every packet. A 400 (the channels of client and
+  server are out of step) deletes the allocation, as RFC 8656 section 12.3 recommends.
+- **turn**: a ChannelBind success refreshes the peer's permission (RFC 8656 section 12.3).
+- **turn**: `Client::update_credentials` documents that a live allocation takes a new password,
+  not a new username (the server answers 441, RFC 8656 section 5).
+- **turn**: the `turn_client_tcp` example no longer names RFC 6062; it is a UDP allocation
+  reached over TCP (RFC 8656 section 3.1).
 
 - **dtls**: a ClientHello with a session id is parsed (RFC 5246 section 7.4.1.2). The length byte
   was read and the id left in place, so the cookie, cipher suites and extensions of a client
@@ -421,6 +1082,182 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   SRTP profiles ignores a client's `use_srtp` instead of aborting.
 - **dtls**: a ClientHello offering a later DTLS version than 1.2 is answered with 1.2, under any
   record-layer version of the family in epoch 0 (RFC 5246 section E.1); it was refused.
+
+- **srtp** (security): the SRTCP index wrapped to 0 after 2^31 − 1 and sending went on under the
+  same master key, reusing the AES-CM keystream, or the AES-GCM nonce, of the first packets
+  (RFC 3711 section 9.2, RFC 7714 section 9.4). The context now counts packets per master key and
+  refuses the one past the limit.
+- **srtp** (security): the receiver followed a rollover counter past 2^32 − 1: after ROC
+  0xFFFFFFFF a packet with a low sequence number was tried, and accepted, with ROC 0
+  (RFC 3711 section 3.3.1, RFC 7714 section 13.1).
+- **srtp** (security): with Cryptex required, a packet whose extension profile is not RFC 8285's
+  (or has two-byte "appbits") left with its header extension and CSRCs in the clear
+  (RFC 9335 section 5.2).
+- **srtp**: a valid unencrypted (E = 0) SRTCP packet under AEAD_AES_128_GCM / AEAD_AES_256_GCM
+  failed authentication: the receiver always treated the body as ciphertext (RFC 7714 section
+  9.3). It is now authenticated as the RFC has it, and still refused with a wrong tag or a
+  flipped E flag.
+
+- **datachannel**: a DATA_CHANNEL_OPEN on a stream that already carries a channel closes that
+  channel and is not acknowledged (RFC 8832 section 6). It was acknowledged and the channel left
+  open.
+- **datachannel**: a malformed DATA_CHANNEL_OPEN, and user data or a stray ACK on a stream no
+  OPEN opened, reset the stream (RFC 8832 section 6). The error was returned and dropped, and
+  the stream stayed half open.
+- **datachannel**: user data sent before the DATA_CHANNEL_ACK arrives is sent ordered on an
+  unordered channel too (RFC 8832 section 6). It left unordered, could overtake the OPEN, and
+  the peer then dropped it: between two of these engines none of it arrived.
+- **datachannel**: a message under an unsupported PPID (the deprecated partial PPIDs 52 and 54
+  included) and a DCEP message that does not parse close the channel (RFC 8831 section 6.6).
+  The first was delivered to the application as binary data, the second left the channel open.
+- **datachannel**: `create_data_channel` refuses a label over 65535 bytes (`ErrLabelTooLarge`;
+  the OPEN went out with a length taken modulo 65536), a negotiated id whose stream already
+  carries a channel (`ErrDataChannelIdInUse`; the second channel took the stream over, RFC
+  8831 section 6.5) and the id 65535 (`ErrMaxDataChannelID`).
+- **datachannel**: the channel priority is the weight of its SCTP stream under weighted fair
+  queueing (RFC 8831 section 6.4), for channels opened locally, by the peer and out of band.
+  It was carried in the OPEN and reported, never applied.
+- **sdp**: a rejected data section (m= port zero, in the offer or the answer) and an
+  `a=sctp-port` of zero start no SCTP transport, and close the association that exists (RFC
+  8841 sections 10.3 and 10.4). A rejected section started it all the same, port 0 became the
+  destination port of the INIT, and the data channels stayed `connecting`: they now fail with
+  `OnError` and `OnClose`.
+- **sdp**: the answer to an offer with a new `a=sctp-port` carries a new port, to one with
+  port zero carries zero (RFC 8841 section 10.3), and repeats the offer's proto, so
+  `TCP/DTLS/SCTP` is answered as such; it always said `UDP/DTLS/SCTP` and 5000.
+- **sdp**: an `m=application` line that is neither a data channel section nor RTP (the
+  pre-RFC `DTLS/SCTP 5000` form with `a=sctpmap`, which no current browser sends) is answered
+  like a media type the endpoint does not know: rejected, with its own proto and fmt. It was
+  taken for application media over RTP, and no answer could be made.
+- **sctp**: a new `a=sctp-port` on either side closes the association and establishes a new
+  one over the same DTLS transport (RFC 8841 section 9.3); later descriptions never reached the
+  SCTP transport. An association added to a session whose DTLS transport is already connected
+  is initiated at once.
+- **sctp**: a DTLS handshake that completes again starts no second association (RFC 8841
+  section 10.5); the SCTP transport stays `closed`, not `connecting`, once a lost association
+  has been let go of, and the next offer carries a new `a=sctp-port` for a new one.
+
+- **rtcp**: an SDES item of a type above 8 (MID, RID, anything registered later) ended the chunk and
+  failed the whole datagram, the SR or RR in it included. Items are read by their length whatever
+  their type (RFC 3550 section 6.5).
+- **rtcp**: a padded XR packet failed to parse and took the datagram with it; one XR block with a
+  length its type does not allow did the same. Padding is cut first, and such a block is kept
+  unparsed with its type (RFC 3611 sections 2 and 4).
+- **rtcp**: an RTCP packet of an unknown type was written back as type 0, and an XR block of an
+  unknown type as block type 0. Both keep what they arrived with.
+- **rtcp**: transport-cc feedback with an even number of chunks and no delta was rejected; the
+  symbols of a status vector beyond the packet status count consumed deltas.
+- **rtcp**: application layer feedback that is not REMB failed the datagram.
+- **rtcp**: RTCP padding was read as content: as a profile extension of an SR / RR, as report blocks
+  of an XR, as the report timestamp of RFC 8888 feedback.
+- **rtcp**: an SDES chunk and a BYE reason were padded with a count octet, as if by the P bit, and
+  the BYE set the P bit. Both are padded with null octets (RFC 3550 sections 6.5 and 6.6).
+- **rtcp**: an RLE block with an odd number of chunks was written misaligned with a truncated block
+  length; it now ends with the terminating null chunk (RFC 3611 section 4.1).
+- **rtcp**: a generic NACK or an SLI could not hold more than 253 entries; the limit is the 16-bit
+  length field.
+- **rtcp**: a REMB with a zero mantissa was read as 2^(exp + 23) bit/s, not zero; printing a REMB
+  above 1000 Eb/s panicked (an index past the unit table, on a value a peer chooses).
+
+- **rtcp**: each packet of an inbound compound RTCP packet reaches the application with the track
+  it is about (RFC 3550 6.1). The whole datagram was routed by its first packet, so a PLI behind
+  an empty receiver report was dropped and one behind a report about another stream arrived
+  tagged with that stream's track.
+- **rtcp**: reception reports follow RFC 3550 Appendix A.1 / A.3: the cumulative loss is expected
+  less received (a late packet is no longer lost, duplicates make it negative, it is clamped to
+  the signed 24 bits at both ends) and a source that restarts starts the statistics again. Loss
+  was counted per report from a bitmap and never revisited.
+- **rtcp**: a stream that stopped sending issues no sender report after two report intervals
+  (RFC 3550 6.4). It issued one every interval for as long as it was bound.
+- **rtcp**: a sender report's RTP timestamp wraps modulo 2^32; it stopped at `u32::MAX` once a
+  stream had been idle for 2^32 ticks.
+- **nack**: no NACK is sent for an RTX or FEC SSRC (RFC 4588 6.3). Repair flows were bound with
+  their primary's feedback, so the gaps between padding-only RTX probes were asked for every
+  100 ms, for ever.
+- **nack**: retransmission requests for a source stop at its BYE (RFC 4588 5.3).
+- **rtx**: an RTX stream's sequence numbers carry on when its stream is bound again by a
+  renegotiation, and start at a random value (RFC 4588 4). They restarted at 0, repeating SRTP
+  packet indices of a live SSRC, which the SRTP layer refuses: retransmissions stopped until the
+  counter passed its old high-water mark.
+- **receiver**: `RTCRtpReceiver::get_synchronization_sources` and `get_contributing_sources` list
+  the sources of the packets delivered in the last ten seconds (W3C webrtc 5.3). They were always
+  empty.
+
+- **sdp**: `a=fmtp` parameters that contain a space were dropped
+  (`a=fmtp:96 level-asymmetry-allowed=1; packetization-mode=1; profile-level-id=42e01f` left the
+  codec without parameters, so H.264 profiles did not match). The parameters are everything
+  after the first space (RFC 8866 section 6.15).
+- **sdp**: `a=rtcp-fb:* <type>` was dropped. It applies to every format of the media section
+  (RFC 4585 section 4.2), in its place among the other `a=rtcp-fb` lines.
+- **sdp**: the extension attributes of `a=extmap` are everything after the URI (RFC 8285 section
+  5); they were cut at their first space.
+
+- **flexfec-03**: a block of 110 media packets is refused. Draft-03's masks hold 109 bits
+  (15 + 31 + 63); the 110th packet was XORed into the repair data without being named in the
+  mask, so anything recovered from that repair packet was corrupt.
+- **flexfec-03**: SN base is the lowest sequence number each repair packet protects (draft-03
+  section 4.2). Every repair packet of a block carried the block's first sequence number.
+- **flexfec-03**: the repair packet's timestamp is its transmission time on the repair stream's
+  clock, from the instant the block is written with (section 4.2). It was the media timestamp
+  of the first protected packet.
+- **flexfec-03**: the initial sequence number of a repair stream is random (section 4.2). It
+  was 0.
+
+### Dependencies
+
+- **stun**: `precis-profiles` 0.2 (MIT / Apache-2.0, pure Rust) for the OpaqueString profile.
+- **ice**: attributes after MESSAGE-INTEGRITY are ignored (RFC 8489 section 14.5). The HMAC does
+  not cover them, so someone who saw one valid check could replay it with ICE-CONTROLLED or
+  ICE-CONTROLLING appended and flip the agent's role.
+- **ice**: role conflicts follow RFC 8445 section 7.3.1.1. A conflicting request gets one
+  answer: the 487 when this agent keeps its role (and then nothing else comes of the request),
+  the success response when it switches. It got both. A controlled agent switches on an equal
+  tiebreaker (`>=`, it was `>`).
+- **ice**: a 487 (Role Conflict) response is acted on (section 7.2.5.1): the role switches, the
+  tiebreaker changes and the pair is checked again. Error responses were dropped unread, so an
+  agent whose peer answered 487 never left the conflict. Any other authenticated error response
+  fails the pair (section 7.2.5.2.4).
+- **ice**: a Binding request that arrives before the remote description is answered at once and
+  finished when the peer's credentials arrive: peer-reflexive candidate, triggered check,
+  nomination (section 7.3). It was dropped, so an offerer whose answerer started checking first
+  left those checks to time out. A request's USERNAME is valid when its first part is the local
+  fragment.
+- **ice**: pair priority is `2^32 * MIN(G,D) + 2 * MAX(G,D) + (G > D)` (section 6.1.2.3); it
+  multiplied MIN by `2^32 - 1`. `test_candidate_pair_priority` pinned the wrong values.
+- **ice**: PRIORITY in a check is the local candidate's priority as a peer-reflexive candidate
+  (section 7.1.1), not its own; a peer-reflexive remote candidate takes its priority from the
+  request (section 7.3.1.3) and is paired only with the local candidate the request arrived on.
+- **ice**: local candidates of one type get unique local preferences, IPv4 and IPv6 interleaved
+  (RFC 8445 section 5.1.2.1, RFC 8421 section 4; RFC 6544 section 4.2 for a TCP candidate's
+  other-pref). Two host candidates on two interfaces had the same priority.
+- **ice**: a candidate's foundation is made of its type, its base's IP address, its server and
+  its transport (section 5.1.1.3); it used the candidate's own address and no server.
+- **ice**: a nomination that gets no answer is given up after `max_binding_requests` requests
+  and the controlling agent nominates its next valid pair. It repeated the nomination until the
+  agent failed.
+- **ice**: a lite agent sends no connectivity checks (sections 6.2 and 7.3.2): a request with
+  USE-CANDIDATE selects the pair. It sent a triggered check and waited for the answer.
+- **ice**: a request on a pair that already succeeded triggers no check from the controlled
+  agent (section 7.3.1.4; every consent check of the peer cost a check back), and a request on a
+  Failed pair gives the pair a fresh budget on the controlled side too.
+- **ice**: an ICE restart given the credentials in use (`SettingEngine::set_ice_credentials`)
+  generates new ones (section 9). The offer carried the old pair, so the peer saw no restart
+  while this side had flushed its state.
+- **ice**: candidate constructors take component 0 (the `Default`) as 1 and refuse a component
+  above 256 or a priority above 2^31 - 1; `COMPONENT_RTCP` is 2.
+
+- **ice**: consent freshness follows RFC 7675 section 5.1. Consent checks on the selected pair
+  are 0.8 to 1.2 times the period apart, drawn anew each time, the period 5 seconds by default
+  and never less (it was a fixed 2 seconds); `poll_timeout` returns the drawn instant. Consent
+  expires 30 seconds after the last response whatever the configured timeouts (a zero
+  `failed_timeout` kept a connected agent sending for ever), and the open transactions go with
+  it.
+- **ice**: consent is kept up on the path an ICE restart leaves in use (RFC 7675 section 5.1).
+  The agent goes on sending consent requests there with the replaced generation's credentials,
+  answers the peer's, and gives the path up 30 seconds after the last response. Until now data
+  flowed on it unchecked until the restart selected a pair or failed.
+- **ice**: a lite agent keeps its selected pair alive with a Binding indication after 15
+  silent seconds (RFC 8445 section 11); it sent nothing.
 
 ### Record layer and handshake transport
 
@@ -466,15 +1303,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **dtls**: `CipherSuite::record_expansion` reports what a suite adds to a record's payload, so an
   application can size its datagrams (RFC 6347 section 4.1.1.1).
 
-### Tests
-
-- **dtls**: known-answer tests against handshakes recorded from OpenSSL 3.5.4 (`openssl s_client`
-  against `openssl s_server -dtls1_2 -listen`, five cipher suites): the Finished values, the
-  extended master secret, the `EXTRACTOR-dtls_srtp` exporter output and the protected records
-  OpenSSL produced are recomputed by this crate from the recorded messages
-  (`rtc-dtls/src/conn/openssl_kat_test.rs`). Until now the PRF had vectors and everything above
-  it was tested only against this crate itself.
-
 ### Cookie exchange and new associations
 
 - **dtls**: a server `Endpoint` performs the cookie exchange without keeping state (RFC 6347
@@ -494,253 +1322,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   then replaced: `EndpointEvent::HandshakeComplete` is reported again. A new handshake that fails
   or times out changes nothing. A failed server association is replaced the same way.
 
-### Breaking changes
-
-- **dtls**: a server `Endpoint` makes no association for a datagram that is not a ClientHello
-  with a valid cookie (such a datagram from an unknown address is dropped), and reports
-  `HandshakeComplete` a second time for an address when its client completes a new handshake
-  (RFC 6347 section 4.2.8). A datagram for a failed server association returns `Ok` (it was fed
-  to a fresh association). New: `ConfigBuilder::with_cookie_exchange`.
-- **dtls**: a handshake nobody answers fails after 30 seconds with `ErrHandshakeTimeout`, where
-  it failed after 8 seconds with `ErrInvalidFsmTransition`; its retransmissions are 1, 3, 7 and
-  15 seconds in instead of every second.
-- **dtls**: `CipherSuite` has a new required method, `record_expansion`. `DTLSConn::write` and
-  `Endpoint::write` return `ErrRecordOverflow` above 2^14 bytes. `ConfigBuilder::build` refuses
-  an MTU below 128. New: `ConfigBuilder::{with_maximum_flight_interval, with_handshake_timeout}`,
-  `conn::MAX_RECORD_PAYLOAD`, `Error::{ErrHandshakeTimeout, ErrRecordOverflow}`.
-- **dtls**: a ServerHello no longer carries renegotiation_info, supported_groups or
-  ec_point_formats to a client that did not offer them; a client that sends no
-  signature_algorithms extension is no longer served by a certificate suite unless SHA-1
-  signatures are enabled (`with_insecure_hashes`).
-- **dtls**: `State::export_keying_material` returns `ErrExportWithoutExtendedMasterSecret` for a
-  session without the extended master secret. The serialized `State`
-  (`marshal_binary` / `unmarshal_binary`) carries the flag, so a state serialized by an earlier
-  version does not load.
-- **dtls**: new variants on non-exhaustive enums: `Extension::Unknown`,
-  `CipherSuiteId::Tls_Empty_Renegotiation_Info_Scsv`, and seven `shared::error::Error` variants
-  (`ErrRenegotiationInfoNotEmpty`, `ErrUnsolicitedExtension`, `ErrCompressionMethodNotOffered`,
-  `ErrNoNullCompressionMethod`, `ErrInvalidUseSrtpAnswer`, `ErrExportWithoutExtendedMasterSecret`,
-  `ErrDuplicateExtension`). `Extension::extension_type` is new.
-### Breaking changes
-
-- **srtp**: `srtp_replay_protection` and `srtcp_replay_protection` return `Result<ContextOption>`
-  and refuse a window below 64 packets (RFC 3711 section 3.3.2). With
-  `SettingEngineBuilder::with_srtp_replay_protection_window` / `with_srtcp_replay_protection_window`
-  set to 1..=63, the SRTP contexts now fail to build when the DTLS handshake completes.
-- **srtp**: `Context::new` with `None` for a replay option gives replay protection with a
-  64-packet window, as its documentation said; it gave none. Pass `srtp_no_replay_protection()` /
-  `srtcp_no_replay_protection()` to go without. Peer connections are not affected (they pass
-  their windows).
-- **srtp**: the first SRTCP packet of an SSRC carries index 0 (RFC 3711 section 3.4), not 1.
-  Receivers accept any first index.
-- **srtp**: a master key stops at its lifetime: `encrypt_rtp`, `encrypt_rtcp`, `decrypt_rtp` and
-  `decrypt_rtcp` fail with `ErrExceededMaxPackets` after 2^48 SRTP or 2^31 SRTCP packets under
-  one key (2^31 of each for the AES-256 counter-mode profiles, RFC 6188 section 4), counted over
-  all the SSRCs that share it.
-- **srtp**: with `Cryptex { require: true, .. }`, `encrypt_rtp` fails for a packet that has
-  CSRCs or a header extension and cannot be protected with Cryptex. A received clear packet under
-  the same setting is authenticated before it is refused.
-- **srtp**: `SessionKeys` no longer prints its keys (`Debug` shows lengths) and has a `Drop`
-  that zeroizes them, so its fields can no longer be moved out of it.
-- **srtp**: the AES-GCM profiles require the provider's AES-CTR as well (for RFC 6904), and
-  `ProtectionProfile::Aes256CmHmacSha1_*` are documented as having no DTLS-SRTP code point (their
-  discriminants 0x0003 / 0x0004 are not wire values; see `ProtectionProfile::dtls_srtp_id`).
-- **srtp**: an AES-CM packet whose encrypted portion is over 2^16 AES blocks (1 MiB) is refused
-  (RFC 3711 section 4.1.1).
-
-### Bug Fixes
-
-- **srtp** (security): the SRTCP index wrapped to 0 after 2^31 − 1 and sending went on under the
-  same master key, reusing the AES-CM keystream, or the AES-GCM nonce, of the first packets
-  (RFC 3711 section 9.2, RFC 7714 section 9.4). The context now counts packets per master key and
-  refuses the one past the limit.
-- **srtp** (security): the receiver followed a rollover counter past 2^32 − 1: after ROC
-  0xFFFFFFFF a packet with a low sequence number was tried, and accepted, with ROC 0
-  (RFC 3711 section 3.3.1, RFC 7714 section 13.1).
-- **srtp** (security): with Cryptex required, a packet whose extension profile is not RFC 8285's
-  (or has two-byte "appbits") left with its header extension and CSRCs in the clear
-  (RFC 9335 section 5.2).
-- **srtp**: a valid unencrypted (E = 0) SRTCP packet under AEAD_AES_128_GCM / AEAD_AES_256_GCM
-  failed authentication: the receiver always treated the body as ciphertext (RFC 7714 section
-  9.3). It is now authenticated as the RFC has it, and still refused with a wrong tag or a
-  flipped E flag.
-
-### Features
-
-- **srtp**: key exhaustion is reported. `Context::poll_event` yields
-  `ContextEvent::KeyLifetimeExpiring` when a sixteenth of a master key's lifetime is left and
-  `KeyExhausted` at the first refused packet, so the application can re-key;
-  `Context::set_key_lifetime`, `key_lifetime`, `key_usage` (`keying::{KeyLifetime, KeyUsage,
-  PacketKind}`).
-- **srtp**: encrypted header extensions (RFC 6904, and RFC 7714 section 8.3 for AES-GCM),
-  selectable per extension id: `Context::set_encrypted_header_extensions`,
-  `header_extension::EncryptedHeaderExtensions`. Not signalled by a peer connection.
-- **srtp**: Master Key Identifier, sending and receiving, with a master-key table:
-  `Context::with_keying`, `add_master_key`, `set_sending_mki`, `remove_master_key`,
-  `sending_mki`, `mkis`, `key_usage_of` (`keying::Keying`).
-- **srtp**: key derivation rate (RFC 3711 section 4.3.1): `keying::KeyDerivationRate`.
-- **srtp**: AES-192 counter mode (RFC 6188): `ProtectionProfile::Aes192CmHmacSha1_80` / `_32`;
-  **crypto**: `BlockCipherAlgorithm::Aes192`, `StreamCipherAlgorithm::Aes192Ctr`.
-- **srtp**: the NULL cipher with HMAC-SHA1, which RFC 3711 section 5.1 makes mandatory to
-  implement: `ProtectionProfile::NullHmacSha1_80` / `_32`. Never offered by a peer connection
-  (RFC 8827 section 6.5).
-- **srtp**: unencrypted SRTCP can be sent: `Context::set_srtcp_encryption`.
-- **srtp**: `ProtectionProfile::dtls_srtp_id`, `from_dtls_srtp_id` (the IANA code points),
-  `ALL`, `is_aead`, `is_null_cipher`, `default_key_lifetime`; it is `PartialEq`, `Eq`, `Hash`.
-  `ContextEvent::CryptexRequiredViolation`; `Context::profile`.
-- **srtp**: known-answer tests from RFC 3711 Appendix B, RFC 6188 section 7, RFC 6904 Appendix
-  A, RFC 7714 sections 16 and 17, and libsrtp's RFC 6904 vectors.
-### Behaviour changes
-
-- **sctp, sdp**: both endpoints initiate the SCTP association (RFC 8841 section 9.3), in either
-  DTLS role; only the DTLS client did. The peer's INIT is answered by the association this side
-  initiated (RFC 9260 section 5.2.1), so the two make one association, and an association no
-  longer waits for a retransmission when one of the two INITs is lost.
-- **sdp**: a data channel section without a valid `a=sctp-port` is refused with
-  `ErrSDPSctpPortInvalid` (RFC 8841 section 5.1); it was taken with port 5000 assumed, and
-  `a=sctpmap` is no longer read as a port. A section is a data channel section only with
-  proto `UDP/DTLS/SCTP` or `TCP/DTLS/SCTP`.
-- **sctp**: an SCTP packet that is not between the two negotiated `a=sctp-port` values is
-  dropped (RFC 8841 section 9.3).
-- **datachannel**: an in-band channel that the peer resets before acknowledging it reports
-  `OnError` before `OnClose`, and no `OnClosing` (RFC 8832 section 6: its setup failed).
-- **datachannel**: `rtc_datachannel::DataChannel::handle_read` returns an error for a
-  DATA_CHANNEL_OPEN on a channel in use (it answered with a DATA_CHANNEL_ACK) and for a message
-  under a PPID that is not a data channel's (it queued it for `poll_read`); a refused message
-  is not counted. `DataChannelOpen::marshal` returns an error for a label or protocol over 65535
-  bytes.
-
-### Bug Fixes
-
-- **datachannel**: a DATA_CHANNEL_OPEN on a stream that already carries a channel closes that
-  channel and is not acknowledged (RFC 8832 section 6). It was acknowledged and the channel left
-  open.
-- **datachannel**: a malformed DATA_CHANNEL_OPEN, and user data or a stray ACK on a stream no
-  OPEN opened, reset the stream (RFC 8832 section 6). The error was returned and dropped, and
-  the stream stayed half open.
-- **datachannel**: user data sent before the DATA_CHANNEL_ACK arrives is sent ordered on an
-  unordered channel too (RFC 8832 section 6). It left unordered, could overtake the OPEN, and
-  the peer then dropped it: between two of these engines none of it arrived.
-- **datachannel**: a message under an unsupported PPID (the deprecated partial PPIDs 52 and 54
-  included) and a DCEP message that does not parse close the channel (RFC 8831 section 6.6).
-  The first was delivered to the application as binary data, the second left the channel open.
-- **datachannel**: `create_data_channel` refuses a label over 65535 bytes (`ErrLabelTooLarge`;
-  the OPEN went out with a length taken modulo 65536), a negotiated id whose stream already
-  carries a channel (`ErrDataChannelIdInUse`; the second channel took the stream over, RFC
-  8831 section 6.5) and the id 65535 (`ErrMaxDataChannelID`).
-- **datachannel**: the channel priority is the weight of its SCTP stream under weighted fair
-  queueing (RFC 8831 section 6.4), for channels opened locally, by the peer and out of band.
-  It was carried in the OPEN and reported, never applied.
-- **sdp**: a rejected data section (m= port zero, in the offer or the answer) and an
-  `a=sctp-port` of zero start no SCTP transport, and close the association that exists (RFC
-  8841 sections 10.3 and 10.4). A rejected section started it all the same, port 0 became the
-  destination port of the INIT, and the data channels stayed `connecting`: they now fail with
-  `OnError` and `OnClose`.
-- **sdp**: the answer to an offer with a new `a=sctp-port` carries a new port, to one with
-  port zero carries zero (RFC 8841 section 10.3), and repeats the offer's proto, so
-  `TCP/DTLS/SCTP` is answered as such; it always said `UDP/DTLS/SCTP` and 5000.
-- **sdp**: an `m=application` line that is neither a data channel section nor RTP (the
-  pre-RFC `DTLS/SCTP 5000` form with `a=sctpmap`, which no current browser sends) is answered
-  like a media type the endpoint does not know: rejected, with its own proto and fmt. It was
-  taken for application media over RTP, and no answer could be made.
-- **sctp**: a new `a=sctp-port` on either side closes the association and establishes a new
-  one over the same DTLS transport (RFC 8841 section 9.3); later descriptions never reached the
-  SCTP transport. An association added to a session whose DTLS transport is already connected
-  is initiated at once.
-- **sctp**: a DTLS handshake that completes again starts no second association (RFC 8841
-  section 10.5); the SCTP transport stays `closed`, not `connecting`, once a lost association
-  has been let go of, and the next offer carries a new `a=sctp-port` for a new one.
-
-### Features
-
-- **sctp**: `RTCPeerConnection::replace_sctp_association` (the next offer carries a new
-  `a=sctp-port`) and `RTCPeerConnection::close_sctp_association` (it carries
-  `a=sctp-port:0`), RFC 8841 section 10.5.
-- **shared**: `Error::ErrLabelTooLarge`, `Error::ErrDataChannelIdInUse`,
-  `Error::ErrSDPSctpPortInvalid`.
-
 ### Testing
+
+- **dtls**: known-answer tests against handshakes recorded from OpenSSL 3.5.4 (`openssl s_client`
+  against `openssl s_server -dtls1_2 -listen`, five cipher suites): the Finished values, the
+  extended master secret, the `EXTRACTOR-dtls_srtp` exporter output and the protected records
+  OpenSSL produced are recomputed by this crate from the recorded messages
+  (`rtc-dtls/src/conn/openssl_kat_test.rs`). Until now the PRF had vectors and everything above
+  it was tested only against this crate itself.
 
 - **conformance**: the clause audits of RFC 8831, RFC 8832, RFC 8841 and RFC 8261 under
   `docs/conformance/audit/`, with the rows this change closes.
 `rtc-rtcp` becomes a complete codec for the RTCP packets and blocks of the WebRTC spec set, from the
 clause audit of RFC 3550, 4585, 5104, 5506, 3611, 8888, 7941, 8852, 5761 and the transport-cc draft.
 Each bug below was confirmed by a failing test first (`rtc-rtcp/tests/audit_bugs.rs`).
-
-### Breaking changes
-
-- **rtcp**: `PacketType`, `SdesType` and `extended_report::BlockType` gain an `Other(u8)` variant that
-  keeps a value the crate does not model, so they are no longer `#[repr(u8)]`: convert with
-  `u8::from(x)` / `X::from(octet)` instead of `as u8`. `SdesType::from` no longer maps an unknown
-  type to `SdesEnd`, `PacketType::from` no longer maps one to `Unsupported`, `BlockType::from` no
-  longer maps one to `Unknown` (each of those is now the octet 0 only).
-- **rtcp**: `extended_report::UnknownReportBlock` has two more fields, `block_type` and
-  `type_specific`, and refuses to marshal a body that is not a whole number of 32-bit words.
-- **rtcp**: `VoIPMetricsReportBlock::default()` is "nothing available" (127 for the levels, the R
-  factors and the MOS scores, Gmin 16), not all zeros.
-- **rtcp**: a typed `unmarshal` reads the one packet its header describes: it fails
-  (`PacketTooShort`) when the length field runs past the buffer, and it leaves what follows the
-  packet in the buffer. `SenderReport` / `ReceiverReport` used to take everything left in the buffer
-  as a profile-specific extension.
-- **rtcp**: stricter writers. Refused now: a generic NACK, an SLI or a FIR with no entry; a profile
-  extension, APP data or an unparsed XR block that is not whole words; an RLE block with a null chunk
-  among its chunks, a run of length zero or a range of 65,534 or more; VoIP metrics with an R factor
-  or a MOS score outside its range, or Gmin 0; a compound packet with a padded packet that is not its
-  last. `FullIntraRequest` writes the header's media SSRC as 0 whatever `media_ssrc` holds
-  (RFC 5104 section 4.3.1.2).
-- **rtcp**: stricter readers. Refused now: a PLI or an RRR with FCI; an SLI with no entry; a REMB whose
-  SSRC count does not match its length; a padding count of zero or beyond the packet; transport-cc
-  feedback whose chunks or deltas reach into its padding; an SDES whose chunks do not match its source
-  count. A BYE without a reason is written without a length octet (8 octets for one source, was 12).
-- **rtcp**: the parsed `chunks` of a Loss / Duplicate RLE block no longer include the terminating null
-  chunk; statistics-summary fields whose flag is clear read as zero; the reserved octet of VoIP
-  metrics reads as zero.
-
-### Features
-
-- **rtcp**: new packet types, each with marshal, unmarshal and a fuzz target: `ApplicationDefined`
-  (APP, RFC 3550 section 6.7); `TemporaryMaximumBitrateRequest` / `Notification` (TMMBR, TMMBN,
-  RFC 5104 section 4.2); `TemporalSpatialTradeoffRequest` / `Notification` (TSTR, TSTN, section
-  4.3.2 and 4.3.3); `VideoBackChannelMessage` (VBCM, section 4.3.4);
-  `ReferencePictureSelectionIndication` (RPSI, RFC 4585 section 6.3.3); `LayerRefreshRequest` (LRR,
-  RFC 9627); `ApplicationLayerFeedback` (PSFB FMT 15 that is not REMB). These are wire
-  codecs: nothing negotiates or acts on the new messages yet.
-- **rtcp**: SDES items MID (15), RtpStreamId (12) and RepairedRtpStreamId (13) (RFC 7941, RFC 8852);
-  `SourceDescriptionItem::private` / `as_private` for PRIV items.
-- **rtcp**: `compound_packet::validate_compound` (the header checks of RFC 3550 Appendix A.2 and the
-  rules of section 6.1) and `validate_reduced_size` (what RFC 5506 leaves of them).
-- **rtcp**: `packet::unmarshal_lenient`: a malformed packet of a known type comes back as a
-  `RawPacket` and the packets around it are read. `packet::unmarshal` still fails the datagram.
-- **rtcp**: `TransportLayerCc::reference_time_signed` and `ReferenceTimeUnwrapper`, which follows the
-  24-bit reference time across its wrap (every 12.4 days).
-- **rtcp**: `StatisticsSummaryReportBlock::reported`, `ApplicationDefined::name_str`, the `FORMAT_*`
-  constants of the new feedback messages.
-
-### Bug Fixes
-
-- **rtcp**: an SDES item of a type above 8 (MID, RID, anything registered later) ended the chunk and
-  failed the whole datagram, the SR or RR in it included. Items are read by their length whatever
-  their type (RFC 3550 section 6.5).
-- **rtcp**: a padded XR packet failed to parse and took the datagram with it; one XR block with a
-  length its type does not allow did the same. Padding is cut first, and such a block is kept
-  unparsed with its type (RFC 3611 sections 2 and 4).
-- **rtcp**: an RTCP packet of an unknown type was written back as type 0, and an XR block of an
-  unknown type as block type 0. Both keep what they arrived with.
-- **rtcp**: transport-cc feedback with an even number of chunks and no delta was rejected; the
-  symbols of a status vector beyond the packet status count consumed deltas.
-- **rtcp**: application layer feedback that is not REMB failed the datagram.
-- **rtcp**: RTCP padding was read as content: as a profile extension of an SR / RR, as report blocks
-  of an XR, as the report timestamp of RFC 8888 feedback.
-- **rtcp**: an SDES chunk and a BYE reason were padded with a count octet, as if by the P bit, and
-  the BYE set the P bit. Both are padded with null octets (RFC 3550 sections 6.5 and 6.6).
-- **rtcp**: an RLE block with an odd number of chunks was written misaligned with a truncated block
-  length; it now ends with the terminating null chunk (RFC 3611 section 4.1).
-- **rtcp**: a generic NACK or an SLI could not hold more than 253 entries; the limit is the 16-bit
-  length field.
-- **rtcp**: a REMB with a zero mantissa was read as 2^(exp + 23) bit/s, not zero; printing a REMB
-  above 1000 Eb/s panicked (an index past the unit table, on a value a peer chooses).
-
-### Testing
 
 - **rtcp**: 117 new tests (wire layout, round trip and malformed input for every packet and block
   type; a fixed set of 60,000 damaged datagrams that must not panic and must keep one wire form) and
@@ -775,210 +1370,6 @@ Each bug below was confirmed by a failing test first (`rtc-rtcp/tests/audit_bugs
   drops the OBU being reassembled.
 - **VP9 fmtp**: a format without `profile-id` is profile 0 (RFC 9628 section 6); it matched
   every profile. `max-fr` and `max-fs` no longer count in the match.
-
-### Features
-
-- **rtp: SVC**. `rtc_rtp::codec::svc`: `ScalabilityMode`, the 36 modes of the W3C webrtc-svc
-  table (case sensitive, `supported_by(mime_type)` per codec), and `ScalabilityPattern`, each
-  mode's dependency structure as a generator of `LayerFrame`s that feed the payloaders.
-- **rtp: Dependency Descriptor** (AV1 RTP appendix A). `rtc_rtp::codec::dependency_descriptor`:
-  `DependencyDescriptor` (marshal / unmarshal), `FrameDependencyStructure`,
-  `DependencyDescriptorWriter`, `DependencyDescriptorReader`, `DecodeTargetSelector`,
-  `DEPENDENCY_DESCRIPTOR_URI`.
-- **rtp (VP8)**: `Vp8Payloader::payload_frame` with `Vp8FrameInfo` (N, TID, Y, KEYIDX; the
-  payloader counts TL0PICIDX), `set_initial_picture_id`, `set_initial_tl0_pic_idx`;
-  `Vp8TemporalLayerFilter`.
-- **rtp (VP9)**: `Vp9Payloader::payload_layer_frame` with `Vp9FrameInfo` (TID, U, SID, D, Z,
-  end of picture, reference indices), `set_scalability_structure` with
-  `Vp9ScalabilityStructure`, `initial_tl0_pic_idx`; `Vp9Packet::scalability_structure`,
-  `referenced_picture_id`; `Vp9LayerFilter`.
-- **rtp (AV1)**: `Av1Payloader::payload_frames` (a temporal unit's packets by frame),
-  `Av1Payloader::sequence_header_per_spatial_layer`.
-
-### Behaviour changes
-
-- `Vp8Packet` and `Vp9Packet` have a new public field `picture_id_15_bits`, and every field
-  describes the packet last parsed (a field the packet did not carry reads 0 / empty; they kept
-  the previous packet's values). `Vp9Packet::f` is false when `I` is 0.
-- `Av1Payloader` has a public field (`sequence_header_per_spatial_layer`): `Av1Payloader {}`
-  no longer compiles, `Av1Payloader::default()` does. It refuses a buffer with two temporal
-  units.
-- `Vp9Payloader` sends a frame that is not VP9 with `P=1` and a reference index, unless it is
-  the stream's first frame (it was `P=0`).
-- `ErrTooManySpatialLayers` is no longer returned by `Vp9Packet`.
-### Features
-
-- **rtcp**: the RTCP session of a connection (`RtcpSessionInterceptor`, `Slot::RtcpSession`,
-  registered by `configure_rtcp_reports` and so by `register_default_interceptors`). One
-  interceptor closest to the wire is the connection's whole RTCP voice:
-  - one identity: one CNAME per connection (RFC 7022: 96 random bits, Base64) in every SDES,
-    for senders, RTX and FEC SSRCs and receiver reports; reports and feedback from the
-    connection's media SSRCs, or from one reporting SSRC (never zero, never one in use) when
-    it sends no media; `RTCPeerConnection::rtcp_cname` and `remote_rtcp_cname`;
-  - reports: a sender report for every SSRC that sent in the last two report intervals (RTX
-    and FEC included), a receiver report otherwise, the reception report blocks inside them,
-    an empty RR when there is nothing to report, BYE for an SSRC that stops and for all of
-    them on `close()`;
-  - timing: RFC 3550 6.3 (interval from the members, senders, average packet size and RTCP
-    bandwidth, randomised, timer and reverse reconsideration, source timeout, BYE back-off)
-    and the RTP/AVPF rules of RFC 4585 3.5 (early feedback, `T_rr_interval`), one timer per
-    local SSRC aggregated into one compound packet (RFC 8108 5.3); sans-I/O, with an
-    injectable random source (`RtcpRandom`);
-  - packets: everything leaves as a compound packet, reduced-size (RFC 5506) only when the
-    session is told it was negotiated;
-  - membership: sources and their CNAMEs, BYE, timeouts, and SSRC collisions (RFC 3550 8.2).
-  Inputs for what a session description negotiates: `RtcpSessionBuilder` and
-  `RtcpSessionControl` (`Bandwidth` for `b=AS` / `b=TIAS` / `b=RS` / `b=RR`, `ReducedSize` for
-  `a=rtcp-rsize`, `TrrInt` for `trr-int`, `Cname`). Outputs: `RtcpSessionEvent`.
-- **nack**: a request policy (RFC 4588 6.3, Appendix A): a lost packet is asked for at most ten
-  times and for two seconds (`with_max_nacks_per_packet`, `with_max_packet_age`), not again
-  before a round trip has passed (measured by the RTCP session, or `with_round_trip_time`),
-  optionally after a reordering delay (`with_reorder_delay`). `NackResponderBuilder::
-  with_max_packet_age` is the sender's `rtx-time`.
-- **rtcp**: `FirCommands` numbers the FIR commands an application sends (RFC 5104 4.3.1); a
-  repeated FIR command is delivered to the application once.
-- **rtcp**: `RTCPeerConnectionEvent::OnSsrcCollision` when a remote source uses a sender's SSRC.
-- **interceptor**: `Attribute::Retransmitted` carries what a de-encapsulated RTX packet was on
-  the wire.
-
-### Changed
-
-- **rtcp**: `configure_rtcp_reports` registers the RTCP session instead of
-  `SenderReportInterceptor` and `ReceiverReportInterceptor` (both stay, for a chain built by
-  hand: fixed timers, no scheduling). What changes on the wire with the default interceptors:
-  - every feedback packet (NACK, PLI, FIR, TWCC, REMB, anything the application writes) leaves
-    inside a compound packet behind an RR or SR and an SDES, with the connection's SSRC as
-    packet sender (it left bare, from a random or zero SSRC);
-  - feedback is held to the RTCP bandwidth (5% of the measured media bitrate, 64 kbit/s at
-    least): one early packet per regular interval, the rest merged into the next packet. With
-    little media this spaces TWCC feedback out; give the session bandwidth or a larger
-    `with_rtcp_fraction` to change it;
-  - receiver reports come from one SSRC per connection, with all report blocks in one packet;
-    sender reports stop two seconds after a stream falls silent; the CNAME in RTCP is the
-    connection's, not the MediaStream id (the SDP still writes that one);
-  - a retransmission is counted in the report of the RTX stream, not of the stream it repairs;
-  - an SR, RR or SDES the application writes is dropped (the session's own stand for it);
-  - `close()` sends a BYE.
-- **nack**: `NackGeneratorBuilder` defaults to ten requests per packet and a two second age
-  (they were unlimited); `with_max_nacks_per_packet(0)` and `with_max_packet_age(None)` lift
-  them.
-- **rtcp**: a sender report's SDES written by the peer connection for a chain without the
-  session names the connection's CNAME, not the MediaStream id.
-
-### Bug Fixes
-
-- **rtcp**: each packet of an inbound compound RTCP packet reaches the application with the track
-  it is about (RFC 3550 6.1). The whole datagram was routed by its first packet, so a PLI behind
-  an empty receiver report was dropped and one behind a report about another stream arrived
-  tagged with that stream's track.
-- **rtcp**: reception reports follow RFC 3550 Appendix A.1 / A.3: the cumulative loss is expected
-  less received (a late packet is no longer lost, duplicates make it negative, it is clamped to
-  the signed 24 bits at both ends) and a source that restarts starts the statistics again. Loss
-  was counted per report from a bitmap and never revisited.
-- **rtcp**: a stream that stopped sending issues no sender report after two report intervals
-  (RFC 3550 6.4). It issued one every interval for as long as it was bound.
-- **rtcp**: a sender report's RTP timestamp wraps modulo 2^32; it stopped at `u32::MAX` once a
-  stream had been idle for 2^32 ticks.
-- **nack**: no NACK is sent for an RTX or FEC SSRC (RFC 4588 6.3). Repair flows were bound with
-  their primary's feedback, so the gaps between padding-only RTX probes were asked for every
-  100 ms, for ever.
-- **nack**: retransmission requests for a source stop at its BYE (RFC 4588 5.3).
-- **rtx**: an RTX stream's sequence numbers carry on when its stream is bound again by a
-  renegotiation, and start at a random value (RFC 4588 4). They restarted at 0, repeating SRTP
-  packet indices of a live SSRC, which the SRTP layer refuses: retransmissions stopped until the
-  counter passed its old high-water mark.
-- **receiver**: `RTCRtpReceiver::get_synchronization_sources` and `get_contributing_sources` list
-  the sources of the packets delivered in the last ten seconds (W3C webrtc 5.3). They were always
-  empty.
-### Breaking changes
-
-- **sdp**: `SessionDescription::unmarshal` is the RFC 8866 section 9 grammar and nothing else
-  (RFC 9429 section 5.8: a description that is not well formed is rejected). It now refuses what
-  it used to let through: empty lines between lines, `i=` / `c=` / `b=` / `k=` after `a=` lines in
-  a media section, fields separated by more than one space or with white space around them, a
-  `c=` line without an address or with an address that does not fit its address type, a unicast
-  address with a `/`, a `t=` time that is neither 0 nor ten digits or more, a negative `r=` value,
-  extra fields after the stop time, an empty `s=` or `i=`, `e=` / `p=` text that is not an email
-  address or a phone number, an attribute name or a format that is not a token, a NUL or a bare CR
-  in a line. An application that reads SDP from software that writes such things asks for it:
-  `SessionDescription::unmarshal_with_options` with `ParseOptions { blank_lines,
-  unordered_media_lines, loose_fields }`, or `ParseOptions::lenient()` for all three. What every
-  mode still accepts beyond the grammar (a bare LF line ending, a last line without one, `z=`
-  where RFC 4566 put it, `a=name:` with an empty value) is listed in the `ParseOptions`
-  documentation.
-- **sdp**: values are no longer trimmed. `s= ` is a session name of one space, and an attribute
-  value keeps its leading and trailing white space (`a=msid-semantic: WMS` has the value
-  `" WMS"`). Structured lines never had any to trim.
-- **sdp**: `SessionDescription::email_address` and `phone_number` (`Option<String>`) are
-  `email_addresses` and `phone_numbers` (`Vec<String>`): RFC 8866 allows any number of `e=` and
-  `p=` lines, and a second one was a parse error.
-- **sdp**: `SessionDescription::time_zones` is `TimeDescription::time_zones`: a `z=` line belongs
-  to the time description it follows (RFC 8866 section 9) and is written there. A `z=` may now be
-  followed by another `t=`.
-- **sdp**: `k=` lines are parsed, checked and dropped, and never written (RFC 8866 section 5.12).
-  The `encryption_key` fields of `SessionDescription` and `MediaDescription` remain so that code
-  naming them builds; the parser never sets them and `marshal` ignores them.
-- **sdp**: `MediaDescription::with_media_source` writes the `cname` and `msid` source attributes
-  only. `a=ssrc:<n> mslabel:...` and `a=ssrc:<n> label:...` (Plan B, never registered; RFC 5576
-  section 4.1) are no longer in the engine's offers and answers.
-- **sdp**: `SessionDescription::new_jsep_session_description(true)` no longer adds a bare
-  `a=identity` line, which was not valid SDP (RFC 8827 section 5: the attribute is an assertion).
-  The parameter is ignored.
-- **sdp**: an `a=rtpmap` without a clock rate (`a=rtpmap:96 VP8`) is malformed and gives no codec
-  (it gave one with clock rate 0); a payload type above 127 in `a=rtpmap`, `a=fmtp` or `a=rtcp-fb`
-  gives none either. Any network and address type token is accepted in `o=` and `c=` (only `IN`,
-  `IP4` and `IP6` were).
-- **sdp**: `ExtMap::unmarshal` accepts only `extmap:` / `a=extmap:` in front of the value (it took
-  any text before the first colon), and an `a=extmap` with nothing or only a space after the URI
-  is refused.
-
-### Bug Fixes
-
-- **sdp**: `a=fmtp` parameters that contain a space were dropped
-  (`a=fmtp:96 level-asymmetry-allowed=1; packetization-mode=1; profile-level-id=42e01f` left the
-  codec without parameters, so H.264 profiles did not match). The parameters are everything
-  after the first space (RFC 8866 section 6.15).
-- **sdp**: `a=rtcp-fb:* <type>` was dropped. It applies to every format of the media section
-  (RFC 4585 section 4.2), in its place among the other `a=rtcp-fb` lines.
-- **sdp**: the extension attributes of `a=extmap` are everything after the URI (RFC 8285 section
-  5); they were cut at their first space.
-
-### Features
-
-- **sdp**: typed, validated attributes (`rtc_sdp::attribute`, re-exported as
-  `rtc::sdp::attribute`). Each type parses the value of one attribute against the ABNF of the RFC
-  that defines it and prints it back: `Group`, `Mid`, `Msid`, `MsidSemantic`, `Ssrc` (with
-  `cname`, `previous-ssrc`, `fmtp`, `msid`), `SsrcGroup`, `Rid` (with `pt=` and every
-  restriction), `Simulcast` (alternatives and `~`), `ExtMap`, `Rtcp`, `RtcpFb` (wildcard, and
-  every feedback type through `RtcpFb::kind`), `RtcpXr`, `RtpMap`, `Fmtp` (`parameter_list` keeps
-  order and text), `Ptime`, `MaxPtime`, `FrameRate`, `ImageAttr`, `Content`, `Candidate`,
-  `RemoteCandidates`, `IceUfrag`, `IcePwd`, `IceOptions`, `IcePacing`, `Fingerprint`, `Setup`,
-  `TlsId`, `Identity`, `SctpPort`, `MaxMessageSize`, `SctpMap`. `SessionDescription` and
-  `MediaDescription` have an accessor for each (`mid()`, `msids()`, `rids()`, `simulcast()`,
-  `rtcp_fbs()`, `candidates()`, `fingerprints()`, `direction()`, `rtcp_mux()`, `bundle_only()`,
-  ...), the generic `typed::<T>()` / `typed_all::<T>()` / `flag(name)`, and `with_typed(&T)` to
-  write one. An accessor returns `Err` when the attribute is present and malformed.
-- **sdp**: `SessionDescription::validate` checks a whole description: a `c=` line for every media
-  section, the value of every attribute with a type, the level each attribute is defined for,
-  attributes a level holds once (one direction, one `mid`, ...), unique `a=mid`, `a=rid` /
-  `a=simulcast` consistency, payload types as the formats of an RTP section.
-- **sdp**: the RFC 8859 multiplexing category and level of every attribute as data
-  (`rtc_sdp::attribute::mux`): the attribute table of RFC 8859 section 15.2.2 plus the attributes
-  registered since (`msid`, `rid`, `simulcast`, `extmap-allow-mixed`, `rtcp-mux-only`,
-  `ice-pacing`, `end-of-candidates`, `tls-id`, `sctp-port`, `max-message-size`, `identity`,
-  `cryptex`, `bundle-only`), and the tables for `b=` modifiers, `rtcp-fb` values, grouping
-  semantics and source attributes.
-- **sdp**: `ParseOptions`, `SessionDescription::unmarshal_with_options`, `parse_with_options` and
-  `impl FromStr for SessionDescription`.
-- **sdp**: `a=extmap` ids 256 (the appbits) and 4096 to 4351 (extensions the offerer leaves the
-  answerer to number, RFC 8285 section 6) parse through `ExtMap::parse` and `extmaps()`, with
-  `ExtMap::is_element_id`, `is_answerer_assigned` and `fits_one_byte_header` to tell them apart.
-  `ExtMap::unmarshal`, whose id callers put into RTP headers, still returns only 1 to 255.
-- **sdp**: `ConnectionInformation::parse`, `Address::parse`, `Bandwidth::parse`,
-  `Bandwidth::kind` (`BandwidthKind`), `Bandwidth::bits_per_second`, `bandwidth_of` on both
-  description levels, `Attribute::parts`, and `ATTR_KEY_*` constants for the attributes above.
-
-### Testing
 
 - **sdp**: the RFC 8866 grammar line type by line type, every typed attribute against its ABNF
   with the examples of its RFC, the Safari and Firefox captures and a Chrome-format offer parsed
@@ -1111,469 +1502,6 @@ Each bug below was confirmed by a failing test first (`rtc-rtcp/tests/audit_bugs
   6525 section 5.2.2); it reset none and was answered "Success - Performed".
 - **sctp**: the re-configuration requests that are not performed (Incoming SSN Reset, SSN/TSN
   Reset, Add Streams) are answered "Denied" (RFC 6525 section 5.2.1) instead of not at all.
-
-### Features
-
-- **sctp**: `Stream::write_sctp_with_ppid` and `Chunks::ppid` for a Payload Protocol
-  Identifier `PayloadProtocolIdentifier` has no name for; `PayloadProtocolIdentifier::number`;
-  `ChunkPayloadData::ppid`; `Association::verification_tag`.
-- **sctp**: `Endpoint::poll_transmit` (the endpoint's answers to out-of-the-blue packets);
-  `TransportConfig::with_valid_cookie_life` / `valid_cookie_life`.
-- **sctp**: `TransportConfig::with_heartbeat_interval` / `heartbeat_interval`,
-  `Association::set_heartbeat_interval`, `Event::PathInactive`, `Event::PathActive`.
-- **sctp**: `Association::on_path_change` restarts congestion control and the RTO when the
-  transport underneath moves to another path (RFC 9260 section 7.2.5; for the peer
-  connection to call when ICE selects another candidate pair).
-  `Association::congestion_window`, `slow_start_threshold`, `rto`.
-- **sctp**: `TransportConfig::with_slow_start_growth_limit` (L of RFC 9260 section 7.2.1,
-  default 1), `with_max_burst` (Max.Burst, off by default), `with_sack_delay` (200 ms by
-  default, at most 500 ms).
-- **sctp**: `Association::partial_reliability` (whether PR-SCTP is in use),
-  `TransportConfig::with_partial_reliability`.
-- **fuzz**: `rtc-sctp` targets `association_handle_chunks` (an established association fed
-  chunks, timers running) and `chunk_chunk_unknown_unmarshal`.
-
-### Breaking Changes
-
-- **sctp**: `PayloadProtocolIdentifier::Unknown` is sent as 0 ("not specified", RFC 9260
-  section 3.3.1), not 58. `Chunks` has a new public field, `ppid`.
-- **sctp**: `Stream::write*` with an empty message returns an error.
-- **sctp**: `Association::open_stream` fails for a stream id at or past the negotiated
-  outbound stream count.
-- **sctp**: `TimerConfig::default().max_t2_shutdown_retrans` is 10, not unlimited.
-- **sctp**: `TimerConfig::default().max_t3_rtx_retrans` is 10, not unlimited: an association
-  whose peer answers nothing for about five minutes ends with `TimedOut`. `usize::MAX` keeps
-  the old behaviour.
-- **sctp**: an established association sends HEARTBEATs when idle and so always has a timer
-  running; `with_heartbeat_interval(None)` turns them off.
-- **sctp**: slow start grows the congestion window by one packet per SACK, as the RFC has
-  it, not by everything the SACK acknowledges. A receiver that acknowledges many packets with
-  one SACK slows the sender's ramp; `with_slow_start_growth_limit` sets a larger L.
-- **sctp**: the retransmissions after a timeout are paced by the congestion window (one
-  packet, then slow start) instead of leaving at once.
-- **sctp**: a SACK for a TSN never sent, and an INIT ACK without a State Cookie, end the
-  association with an ABORT (`TransportError`, `HandshakeFailed`).
-### Features
-
-- **sframe**: new crate `rtc-sframe`, SFrame (RFC 9605) for end-to-end encrypted media. The
-  header codec; key derivation; the five cipher suites of the RFC and the three AES-256-CTR
-  suites of the IANA registry (0x0006 to 0x0008, which the W3C Encoded Transform API lists);
-  `SFrameContext` with a key store in which a key encrypts or decrypts, never both, a counter per
-  sending key (a (key, nonce) pair is never used twice, and a key that has used every counter
-  stops) and an anti-replay window per receiving key; the sender-keys ratchet of section 5.1
-  (`SenderKeyRatchet`, `SenderKeyReceiver`) and MLS-keyed contexts of section 5.2 (`MlsContext`,
-  which takes each epoch's exported secret; no MLS in the engine); `PendingCiphertexts` for
-  frames whose key has not arrived. Checked against every test vector of RFC 9605 Appendix C.
-  Sans-I/O, on the `rtc-crypto` provider. Standalone: the application applies it to a frame
-  before packetizing or to a packet's payload; there is no SFrame RTP payload format or SDP
-  signalling yet.
-- **crypto**: `HmacAlgorithm::Sha512`, implemented by both built-in providers and part of the
-  provider conformance suite (`conformance::assert_provider`). A downstream provider that runs
-  the suite has to implement it.
-### Features
-
-- **flexfec**: RFC 8627 FlexFEC as its own coder, negotiated as `video/flexfec` (the draft-03
-  coder keeps `video/flexfec-03`; the two wire formats are not compatible and each name selects
-  its coder exactly). `FlexFecEncoder` builds flexible-mask repair packets (15, 46 or 110 bits),
-  fixed L columns / D rows packets (row, column and 2-D protection, `FlexFecProtection`) and
-  retransmission packets (R=1), with the protected SSRCs in the CSRC list. `FlexFecDecoder`
-  recovers under all of them, iteratively for 2-D, for several source streams per repair packet,
-  and takes retransmissions; its buffers follow the negotiated `repair-window`
-  (`FlexFecParameters`, `FlexFecDecoderConfig`) and are bounded against the peer (RFC 8627
-  section 9). `FlexFecSendBuilder` / `FlexFecReceiveBuilder` install the interceptors at
-  `Slot::FecEncoder` / `Slot::FecDecoder`; both are opt-in, like the draft-03 pair. A sender
-  protects no block that outlasts the repair window; FlexFEC retransmission in answer to NACK
-  is `with_retransmissions(true)`; in-band SSRC mapping (section 7.1.1) is
-  `with_in_band_ssrc_mapping`.
-- **interceptor**: `StreamInfo::mime_type_fec` and `StreamInfo::sdp_fmtp_line_fec` name a
-  stream's FEC format and its parameters, with `fec_is_flexfec03()` / `fec_is_flexfec()`.
-- **flexfec-03**: `FlexFec03SendBuilder::with_initial_sequence_number` and
-  `with_initial_timestamp`; `FLEXFEC03_MAX_MEDIA_PACKETS` (109).
-- **fuzz**: targets `flexfec_header_parse`, `flexfec_decoders` and `flexfec_receive`.
-
-### Bug Fixes
-
-- **flexfec-03**: a block of 110 media packets is refused. Draft-03's masks hold 109 bits
-  (15 + 31 + 63); the 110th packet was XORed into the repair data without being named in the
-  mask, so anything recovered from that repair packet was corrupt.
-- **flexfec-03**: SN base is the lowest sequence number each repair packet protects (draft-03
-  section 4.2). Every repair packet of a block carried the block's first sequence number.
-- **flexfec-03**: the repair packet's timestamp is its transmission time on the repair stream's
-  clock, from the instant the block is written with (section 4.2). It was the media timestamp
-  of the first protected packet.
-- **flexfec-03**: the initial sequence number of a repair stream is random (section 4.2). It
-  was 0.
-
-### Breaking Changes
-
-- **flexfec-03**: `FlexFec03Encoder::encode` takes the repair stream's RTP timestamp as a third
-  argument.
-- **interceptor**: `StreamInfo` has two more public fields (`mime_type_fec`,
-  `sdp_fmtp_line_fec`); a struct literal without `..Default::default()` needs them. The draft-03
-  FlexFEC interceptors bind a stream whose `mime_type_fec` is empty or `<type>/flexfec-03`, and
-  no longer one that names another FEC format.
-- **codecs**: with `video/flexfec` registered and negotiated, a sender's FEC SSRC is now
-  described (`a=ssrc-group:FEC-FR`) and its streams are bound with the repair flow, as for
-  `video/flexfec-03`. Before, `video/flexfec` was written to SDP with nothing behind it.
-- **dtls**: the roles of a DTLS association are fixed for its life (RFC 8842 section 5.3). The
-  answer to a later offer took its `a=setup` from the answering configuration and the offer
-  alone, so the peer that had offered first (the DTLS server) answered `active` and flipped the
-  roles: libwebrtc refuses such an answer, and with an ICE restart in the same exchange two
-  `rtc` peers tore their own association down. The answer now states the role the transport
-  has, and an `actpass` offer never changes it, whatever the ICE role and
-  `answering_dtls_role` say.
-- **dtls**: a new association is established when a description changes the fingerprints, the
-  `tls-id` or the roles, with or without an ICE restart (RFC 8842 section 3.1). A changed
-  fingerprint or role on the same ICE session was accepted and ignored. The DTLS client of the
-  new association starts its handshake at once when ICE already has a pair.
-- **dtls**: a peer that negotiates no `use_srtp` connects when the session has no audio or
-  video section (RFC 5764 section 4.1). As the DTLS server the engine left its transport in
-  `connecting`; as the client it aborted the handshake. A session with a media section still
-  needs it: the transport fails, and a description that adds media to an association without
-  SRTP keys is refused (`ErrSessionDescriptionMediaWithoutSrtp`).
-- **dtls**: a certificate is verified with any fingerprint hash function of RFC 8122 section 5
-  (sha-256, sha-512, sha-384, sha-224, sha-1; never md5 or md2), using the most preferred one
-  the peer offers. Only sha-256 was compared, so a peer that gave another one could not connect.
-- **dtls**: `RTCCertificate::get_fingerprints` gives the fingerprints of the end-entity
-  certificate only (it gave one per certificate of a chain, the issuer's included), with the
-  hash function of the certificate's signature next to sha-256 when that is sha-384, sha-512 or
-  sha-224 (RFC 8122 section 5.1).
-- **sdp**: malformed DTLS attributes are refused by `set_remote_description`, before anything
-  is applied: an `a=fingerprint` that is not colon-separated hex of its hash function's length,
-  an `a=setup` that is not `active`, `passive` or `actpass` (`holdconn` is not used with DTLS,
-  RFC 8842 section 5.1), an `a=tls-id` outside its syntax, and a description whose only
-  fingerprints are md5 / md2 or unknown.
-- **sdp**: a session-level `a=setup` is read (RFC 4145 section 4); a media-level
-  `a=fingerprint` overrides the session-level one (RFC 8122 section 5) instead of conflicting
-  with it.
-- **demux**: datagrams whose first byte is in no RFC 7983 / RFC 9443 range (4 to 19, 64 to 127,
-  192 to 255) are dropped by the demultiplexer. They went to the ICE agent, which recorded the
-  remote candidate as heard from and logged a warning for each.
-- **srtp**: a serialized RTP packet written into the pipeline is refused instead of leaving
-  unprotected (RFC 8827 section 6.5; nothing in the engine writes one).
-
-### Features
-
-- **sdp**: `a=tls-id` (RFC 8842 section 4). Offers carry the association's value on the
-  BUNDLE-tag m-section, answers carry one when the offer did; the value is kept while the
-  association is and replaced with it; a changed remote value asks for a new association.
-  `SettingEngineBuilder::with_disable_sdp_tls_id` leaves it out.
-- **sdp**: `a=identity` (RFC 8827 section 5) is carried: `RTCPeerConnection::
-  set_identity_assertion` and `remote_identity_assertion`. Making and verifying an assertion
-  stays the application's.
-- **dtls**: `SettingEngineBuilder::with_disable_dtls_use_srtp` for a data-channel-only
-  endpoint (no `use_srtp`, media sections refused); `RTCCertificate::fingerprint` for one hash
-  function; `rtc_dtls::config::ConfigBuilder::with_use_srtp_optional`.
-- **crypto**: `HashAlgorithm::{Sha1, Sha224, Sha384, Sha512}` in the built-in providers, for
-  certificate fingerprints.
-
-### Changed
-
-- **dtls**: an `rtc-dtls` server configured with no SRTP profile ignores a client's `use_srtp`
-  (RFC 5764 section 4.1.1) instead of aborting with `ErrServerNoMatchingSrtpProfile`; the
-  client, which asked for SRTP, is the one that aborts (`ErrRequestedButNoSrtpExtension`)
-  unless built with `with_use_srtp_optional`.
-- **sdp**: errors `ErrSessionDescriptionInvalidSetup`, `ErrSessionDescriptionInvalidTlsId`,
-  `ErrSessionDescriptionMediaWithoutSrtp`, `ErrInvalidIdentityAssertion`.
-- **rtp**: a two-byte header-extension block is parsed whatever its appbits (RFC 8285 section
-  4.3). Only the exact profile `0x1000` selected the two-byte parser; `0x1001` to `0x100F` came
-  back as one opaque element with ID 0, so MID, RID and the transport-wide number in it were not
-  found.
-- **rtp**: ID 0 with a non-zero length ends a one-byte extension block and the elements before
-  it are kept (RFC 8285 section 4.1.2). It was parsed as an element with ID 0, and the header
-  could then not be marshalled again.
-- **rtp**: `Header::set_extension` on a header without extensions takes the two-byte form for an
-  ID above 14 or an empty element (RFC 8285 section 4.2). It chose the form from the length
-  alone, so `set_extension(20, ..)` returned `Ok` and the header could not be marshalled. The
-  TWCC sender stamped packets that way when the peer mapped transport-cc above 14 and discarded
-  the error; it now converts a one-byte header, so every packet of such a stream is two-byte.
-- **rtp**: `Header::default()` is version 2, and `Header` marshals and unmarshals version 2 only
-  (RFC 3550 section 5.1). A header built from `Default` went out as version 0, which a peer reads
-  as STUN or DTLS.
-- **rtp**: a marshalled extension block is as long as `marshal_size()` says when a parsed block
-  had more than three bytes after its elements (an ignored tail after ID 15).
-- **rtp**: the packetizer sets the marker bit as the payload format has it. Every Opus, G.711
-  and G.722 packet carried it (the video rule); audio now carries it only on the first packet
-  after a silence skipped with `skip_samples` (RFC 3551 section 4.1, RFC 7587 section 4.1).
-- **rtp**: a G.711 / G.722 buffer split over several packets gets a timestamp per packet (RFC
-  3551 section 4.3); the fragments shared one.
-- **rtp**: `packetize` returns an error for an MTU that leaves no room after the RTP header; an
-  MTU below 12 underflowed (a panic in debug builds, a huge MTU in release builds).
-- **rtp**: the H.264 payloader sends NAL units in the order given and loses none (RFC 6184
-  sections 5.5 and 6.3). `SPS, SEI, PPS, IDR` went out as `SEI, STAP-A, IDR`; a second SPS or PPS
-  of an access unit replaced the first; an SPS without a PPS was never sent. The STAP-A header
-  has the highest NRI and the OR of the F bits of what it aggregates (it was the constant
-  `0x78`), an FU-A keeps the F bit, and NAL units of reserved or packet types (0, 24 to 31) are
-  not sent.
-- **rtp**: the H.264 depacketizer takes a NAL unit that is its header octet alone (end of
-  sequence, end of stream) and an FU-A with an empty payload (RFC 6184 section 5.8); both were
-  `ErrShortPacket`. Reserved packet types are ignored instead of an error that made
-  `SampleBuilder` drop the sample (section 5.4).
-- **rtp**: `H265Packet::depacketize` returns NAL units (RFC 7798 section 6). It returned the RTP
-  payload unchanged, so a `SampleBuilder<H265Packet>` sample held AP and FU headers. Single NAL
-  units, the units of an aggregation packet, a NAL unit reassembled from its fragmentation
-  units (bounded at 4 MiB) and what a PACI packet carries come out as Annex B; nothing of type
-  48 to 63 does. A NAL unit that is its two-byte header alone is accepted.
-- **rtp**: `H265PACIPacket::tsci()` reads TL0PICIDX, IrapPicID, S, E and RES from the first
-  three octets of the PHES (RFC 7798 section 4.5); it read the first octet twice and never the
-  third.
-- **rtp**: the H.265 payloader splits an Annex B stream at start codes of either length; a
-  four-byte code followed by three-byte ones made one "NAL unit" of the whole access unit.
-- **media**: `H26xWriter` writes what the H.265 depacketizer returns, so the media in a PACI
-  packet is written and reserved packet types are not.
-
-### Features
-
-- **rtp**: `Header::set_extension_upgrading` and `Header::upgrade_to_two_byte` convert a
-  one-byte extension block to the two-byte form, for a stream that negotiated
-  `a=extmap-allow-mixed` or is two-byte throughout; `Header::extension_form`, `ExtensionForm`.
-  `Header::del_extension` clears the X bit with the last element (RFC 8285 section 4.1.1).
-- **rtp**: `header::validity::check_rtp_validity`, the header validity checks of RFC 3550
-  Appendix A.1 on raw bytes, and `sequence::SourceSequence`, its per-source sequence number state
-  (probation, restart after a jump, loss by Appendix A.3).
-- **rtp**: `Payloader::marker_rule` (`MarkerRule`) and `Payloader::payload_duration`, provided
-  methods a payload format overrides to say which packets carry the marker and how long a
-  sample-based payload is.
-- **rtp**: typed header extensions: `CsrcAudioLevelExtension` (RFC 6465), `Mid`, `RtpStreamId`,
-  `RepairedRtpStreamId` (RFC 7941, RFC 8852: UTF-8 checked, stream ids alphanumeric),
-  `AbsCaptureTimeExtension`, `TransmissionOffsetExtension` (RFC 5450);
-  `AudioLevelExtension::voice_activity` and `parse_vad_attribute` (RFC 6464 `vad`); URI
-  constants and `HeaderExtension` variants for each.
-- **rtp**: H.264 interleaved mode (RFC 6184 section 6.4). `H264Payloader::with_packetization_mode(2)`
-  sends STAP-B and FU-B / FU-A with consecutive decoding order numbers
-  (`with_initial_don`); `H264Packet` receives STAP-B, MTAP16, MTAP24 and FU-B
-  (`H264Packet::nal_units` gives each NAL unit's DON and timestamp offset);
-  `H264DeinterleavingBuffer` puts NAL units back in decoding order (section 7.2.2); `stap_a`,
-  `stap_b`, `mtap` and `don_diff` are public. `try_with_packetization_mode` refuses a mode
-  above 2.
-- **rtp**: H.265 decoding order numbers (RFC 7798 sections 4.4.1 to 4.4.3, 4.6, 6):
-  `HevcPayloader::with_donl` writes DONL and DOND, `H265Packet::nal_units` derives each NAL
-  unit's DON, `H265DepacketizationBuffer` passes NAL units on by AbsDon.
-  `H265Packet::with_length_prefix` for length-prefixed output.
-- **rtp**: `H264Packet::depacketize_with_sequence_number` and
-  `H265Packet::depacketize_with_sequence_number` drop a NAL unit when one of its fragments was
-  lost, instead of splicing over the gap (RFC 6184 section 5.8, RFC 7798 section 4.4.3).
-- **rtp**: `codec::telephone_event` (RFC 4733): the event payload, the DTMF codes, the `events`
-  list, and sender and receiver state machines for an application or a DTMF sender to drive
-  (marker on the first packet, cumulative duration, segments of 0xFFFF for long events, the end
-  packet three times).
-- **rtp**: `codec::comfort_noise` (RFC 3389): the CN payload, its reflection coefficients, one
-  payload per channel.
-- **rtp**: `codec::red` (RFC 2198): block headers, `RedEncoder` (the last N primaries as
-  redundancy), `RedDecoder` (recovers a lost primary once), the fmtp list.
-- **rtp**: `clock_rate` (RFC 7160): `ClockRateHistory`, `MultiRateTimestamp`,
-  `interarrival_difference`, `JitterEstimator`.
-- **rtp**: `codec::opus::opus_packet_samples`, the duration of an Opus packet from its TOC;
-  static payload type and clock constants for PCMU, PCMA, G722 and Opus.
-
-### Breaking Changes
-
-- **rtp**: `Header::unmarshal` and `Header::marshal_to` refuse a version other than 2
-  (`Error::BadVersion`), and `marshal_to` a payload type above 127. `Header::default().version`
-  is 2.
-- **rtp**: `Header::set_extension` on a header without extensions returns an error for ID 0 and
-  for an element over 255 bytes (it made a header that could not be marshalled).
-  `del_extension` of the last element clears `extension`.
-- **rtp**: `HevcPayloader` is no longer a unit struct: write `HevcPayloader::default()`.
-- **rtp**: `H265Packet::depacketize` returns NAL units behind Annex B start codes, not the RTP
-  payload.
-- **rtp**: `H264Packet::depacketize` returns an empty result, not an error, for reserved packet
-  types; `H264Payloader` drops NAL units of types 0 and 24 to 31; parameter sets given alone are
-  all held, and sent with the next call that has another NAL unit.
-- **rtp**: a `Packetizer` built on an audio payloader no longer sets the marker bit on every
-  packet.
-- **twcc**: a lost TWCC feedback packet no longer turns the packets it would have described
-  into losses (draft-holmer-rmcat-transport-wide-cc-extensions-01 section 3). The send history
-  reported every unacknowledged packet below the highest acknowledged one as lost, so one lost
-  feedback read as a burst of loss, and so did every stream the receiver does not report on (an
-  audio stream without the transport-cc extension, an SSRC outside an RFC 8888 report). Only a
-  packet a feedback described is reported now; the rest are released without a verdict
-  (`History::unreported`), and gaps in the feedback packet count are counted
-  (`CongestionControlInterceptor::lost_feedback`).
-- **twcc**: RTX and FEC packets get a transport-wide sequence number and a place in the send
-  history (section 2.2: the number is attached to every packet sent). The TWCC sender and the
-  congestion controller registered a stream's media SSRC only, so retransmissions and repair
-  packets were invisible to the receiver's feedback and to the estimator.
-- **twcc / rfc8888**: the receiver's clock is followed through its wraps
-  (`FeedbackTimeline`): the 24-bit TWCC reference time every 12.4 days, the RFC 8888 report
-  timestamp every 18.2 hours. An RFC 8888 arrival time is now the report timestamp minus the
-  arrival time offset; the offset itself was handed to the estimator, so within every report
-  arrivals ran backwards and GCC over RFC 8888 saw a queue draining for ever. The over-range
-  offset 0x1FFE is no longer taken as an arrival 8 seconds before the report.
-- **rfc8888**: feedback is sent only for streams that negotiated `ack ccfb` (RFC 8888 section 6,
-  RFC 4585 section 4.2), from a real SSRC instead of 0 (the first local stream's, or a random
-  one for a receive-only endpoint), and covers a stream's FEC SSRC. A duplicate keeps the first
-  copy's arrival time and reports ECN-CE if any copy carried it (section 3.1). A packet that
-  never arrives no longer makes every later report repeat everything since: each arrival is
-  reported once, a late one in an overlapping report within 500 ms, and feedback larger than
-  the report size is split into several packets instead of being cut.
-- **fec**: the FlexFEC encoder protects the packets as they are sent. It read them above the
-  TWCC sender, which then wrote the transport-wide sequence number into them (adding the header
-  extension when the packet had none), so the receiver XORed different bytes and recovered a
-  corrupt packet. The encoder now reads the wire image from a tap below the TWCC sender
-  (`FlexFec03SendInterceptor::wire_tap`, `Slot::FecWireImage`).
-- **fec**: the arrival recorders (TWCC receiver, RFC 8888, receiver reports) run before the FEC
-  decoder. A repair packet was swallowed before they saw it and reported lost for ever, and a
-  packet rebuilt from FEC was reported as arrived, hiding the loss from the sender's congestion
-  controller and from `fraction lost`.
-- **gcc**: the delay-based estimate stays below 1.5 times the received rate
-  (draft-ietf-rmcat-gcc-02 section 5.5); an application-limited sender let it climb 8% per
-  second to the configured maximum. "Close to convergence" is now the draft's: the average and
-  deviation of the received rate at each decrease, additive increase within three deviations
-  (scaled by the response time), and back to multiplicative increase when the received rate
-  rises above them; the controller stayed additive for ever after the first over-use. It starts
-  in the Increase state.
-- **pacer**: the pacer starts at the estimator's rate. `configure_congestion_control` builds it
-  with the estimator's starting target, and `CongestionControlInterceptor` announces the target
-  on the first inbound packet, not only when it changes; the pacer ran at 1 Mbit/s against
-  GCC's 300 kbit/s until the first change.
-
-### Breaking Changes
-
-- **interceptor**: `Slot::FecDecoder` moves from 6_000 to 10_300 and `Slot::NackGenerator` from
-  7_000 to 10_600, after the arrival recorders; an interceptor placed with `Slot::from(n)`
-  relative to either has to move with them. `Slot::FecWireImage` (1_500) is new.
-- **interceptor**: an RFC 8888 arrival time from `convert_ccfb` is the report timestamp minus
-  the offset, not the offset. `Rfc8888Interceptor` reports only streams bound with `ack ccfb`
-  in `rtcp_feedback`. `History::take_reports` returns only packets a feedback described.
-  `RateControlState::default()` is `Increase`.
-### Features
-
-- **ulpfec**: ULPFEC (RFC 5109), new in `rtc-interceptor` (`ulpfec` module) and opt-in.
-  `UlpfecPacket` reads and writes the FEC header and the level headers (16- and 48-bit masks, any
-  number of levels); `UlpfecEncoder` is the protection operation of section 8, with
-  `validate_ulpfec_scheme` for the mask rules of 7.4; `UlpfecDecoder` recovers level by level,
-  iterating until nothing more can be rebuilt, over a bounded window, and does not hand out a
-  packet rebuilt only in part. The examples of RFC 5109 section 10 are test vectors.
-- **ulpfec**: two carriages as interceptors (`UlpfecSendBuilder`, `UlpfecReceiveBuilder`). In RED
-  (RFC 2198; `video/red` + `video/ulpfec`, what browsers negotiate) media leaves as RED primary
-  blocks and FEC either as a RED packet of its own in the media stream's sequence space
-  (`RedPlacement::OwnPacket`, libwebrtc's form; later media packets are renumbered to make room)
-  or as a redundant block of the next media packet (`RedPlacement::WithNextMedia`, RFC 5109
-  10.3). Received RED is delivered as the media it carries, with lost packets rebuilt and marked
-  `Attribute::RecoveredByFec`; a RED packet that held only FEC travels the read leg emptied and
-  marked `UlpfecRepair`, so sequence-number accounting stays whole, and is not delivered to the
-  application. As a separate stream the FEC goes on the stream's repair SSRC
-  (`StreamInfo::ssrc_fec`). `onelevelonly` is honoured (`with_one_level_only`,
-  `ulpfec_one_level_only_from_fmtp`).
-- **ulpfec**: `configure_ulpfec(registry, red_payload_type, ulpfec_payload_type)` adds the RED
-  carriage in both directions. The default codecs still do not offer `ulpfec` or `red`; register
-  them and pass the negotiated payload types.
-- **fuzz**: targets `ulpfec_packet` and `ulpfec_receive` (crate `rtc`).
-- **jsep**: a description is checked in full before any of it is applied (RFC 9429 sections 5.9
-  and 5.10, W3C webrtc-pc "set a session description"). `set_remote_description` changed the
-  signaling state, stored the description and created transceivers, and only then looked at
-  the ICE credentials, the candidates and the fingerprints: a remote offer without
-  `a=fingerprint` returned an error and left the connection in `have-remote-offer`. The checks
-  now run first; a description that is refused changes nothing, and should a transport fail
-  while one is applied, the signaling state, the descriptions, the transceivers, the negotiated
-  codecs and the queued events are put back.
-- **jsep**: a remote answer is checked against the offer it answers (RFC 3264 section 6, RFC
-  9429 section 5.8.3, RFC 5888 section 9.1, RFC 9143 section 7.4, RFC 4585 section 4.2): the
-  number and order of the m= sections, each one's media type, proto and mid, a direction the
-  offered direction allows, and BUNDLE groups that bundle only what the offer bundled. An
-  answer with fewer or swapped sections was applied. It is now
-  `Error::ErrAnswerDoesNotMatchOffer`, and the offer stays pending. An `a=rtcp-fb` line the
-  offer did not have does not refuse the answer (real peers answer with their own list): it is
-  logged and never enabled, the negotiated feedback of a format being what both sides have.
-  The transceiver's codecs used to take the remote description's feedback as it came.
-- **jsep**: a rollback is taken through either `set_local_description` or
-  `set_remote_description` (RFC 9429 section 5.7: "the same effect"). A local offer could be
-  rolled back only through the first and a remote offer only through the second.
-- **jsep**: a rollback restores what the last completed exchange negotiated: the negotiated
-  codecs and header extensions, each transceiver's codecs, and the RTX / FEC flows of the
-  senders' encodings. An abandoned remote offer left its codecs negotiated (the next local offer
-  listed only those) and the senders without the repair flows it lacked.
-- **jsep**: a staged ICE restart is applied only by the description that carries it.
-  `set_local_description` applied it before it looked at the description, so a refused
-  description and a rollback restarted ICE.
-- **jsep**: `create_offer` is refused outside the `stable` and `have-local-offer` states
-  (`Error::ErrIncorrectSignalingState`; W3C createOffer, RFC 9429 section 5.2.2). It made an
-  offer in any state, gave transceivers mids and used up a requested ICE restart.
-- **jsep**: `OnSignalingStateChangeEvent` is emitted only when the state changes; an offer
-  applied over a pending one and a repeated provisional answer emitted it again.
-- **jsep**: an applied answer forgets the last created offer and answer (W3C "set a session
-  description"), so the offer of a finished exchange is not accepted for the next
-  (`Error::ErrSDPDoesNotMatchOffer`).
-
-- **jsep**: the `o=` session version goes up by one with each generated description that
-  differs from the one before (RFC 9429 sections 5.2.2 and 5.3.2, RFC 3264 section 8). It was
-  the clock's sub-second nanoseconds plus one on every call, so versions were unrelated and
-  could go down.
-- **jsep**: the answer's BUNDLE group is the offered BUNDLE group, in its tag order (RFC 9429
-  section 5.3.1, RFC 9143 sections 7.3 and 7.3.1). It was read from the first `a=group` line
-  of any semantics, so an offer listing `a=group:LS` first had sections rejected; and an offer
-  with no group at all had every section answered with port 0. It is now answered without a
-  group, accepted.
-- **jsep**: an answer repeats the `<proto>` of each offered m= line (RFC 9429 section 5.1.2),
-  rejected and data sections included; it said `UDP/TLS/RTP/SAVPF` / `UDP/DTLS/SCTP` whatever
-  was offered. An audio or video section whose profile is none of the eight RTP profiles of
-  that section is rejected.
-- **jsep**: a media section with no direction attribute is sendrecv, and a session-level
-  direction is the section's when it has none (RFC 8866 section 6.7, RFC 3264 section 6.1).
-  Such a section was skipped when the offer was applied, and `create_answer` then failed with
-  `ErrPeerConnTransceiverMidNil`.
-- **jsep**: the transceiver created for a remote m= section has direction `recvonly` whatever
-  was offered (W3C "set a session description"); for a section offered recvonly it was
-  `sendonly`, with no sender. Such a section is answered `inactive` until `add_track`.
-- **jsep**: a remote description that repeats a mid, or whose mid is not a token, is refused
-  (RFC 5888 section 4, RFC 9429 section 5.8.2); both sections used to share one transceiver.
-- **jsep**: `a=bundle-only` in a section outside every BUNDLE group, or in an answer, is
-  discarded (RFC 9143 section 6): a port-zero section is then rejected, as port zero says.
-- **jsep**: local descriptions list each candidate once, for the RTP component (RFC 8858
-  section 5.3, RFC 5761 section 5.1.3); every candidate was repeated as component 2.
-- **jsep**: the unregistered `mslabel` and `label` source attributes are no longer written
-  (RFC 5576 section 4.1); `a=ssrc` carries `cname` and `msid`.
-
-- **jsep**: `a=msid:<stream>` without appdata, the form RFC 9429 section 5.2.1 has senders
-  write, is read (RFC 8830 section 3): it was dropped, leaving the remote track without a
-  stream or, with no `a=ssrc` lines, no track at all. The recipient names the track and keeps
-  the name across descriptions. Every `a=msid` line of a section counts (a track in several
-  streams, RFC 8830 section 2); only the last did. The `a=msid` lines win over a legacy
-  `a=ssrc:<n> msid:` attribute.
-
-- **jsep**: `a=rtcp-mux` of a remote description is read (RFC 9429 sections 5.8.3 and 5.11, RFC
-  8858, RFC 5761 section 5.1.1). The engine has no RTCP component, and it multiplexed whatever
-  the peer said. A remote offer whose RTP section lacks the attribute is now refused under the
-  RTCP mux policy `require` (the default; `RTCRtcpMuxPolicy` had no effect) and has that
-  section answered rejected under `negotiate`; a remote answer without it is refused, the offer
-  staying pending. `a=rtcp-mux-only` without `a=rtcp-mux` is refused.
-- **jsep**: new m= sections of an offer say `a=rtcp-mux-only` under the `require` policy (RFC
-  9429 sections 4.1.1 and 5.2.1); the answerer-tagged section repeats it when the
-  offerer-tagged one had it (RFC 9143 section 9.3.1.2).
-- **jsep**: `a=rtcp-rsize` is answered only when offered, kept in a subsequent offer only when
-  the most recent answer had it, and reduced-size RTCP counts as negotiated only when both
-  descriptions carry it (RFC 5506 section 5, RFC 9429 sections 5.2.2, 5.3.1 and 5.11). It was
-  written in every description and never read.
-- **jsep**: `a=rtcp-fb:*` (the wildcard payload type, RFC 4585 section 4.2) is read and applies
-  to every format of the section; such lines were dropped. RFC 8888 feedback is written as
-  `a=rtcp-fb:* ack ccfb`, as its section 6 requires, not once per payload type, so a peer that
-  follows the RFC now negotiates it. A feedback value keeps everything after its type as its
-  parameter.
-
-- **jsep**: a description states this endpoint's own `a=fmtp` parameters for a negotiated
-  format, not the ones the peer stated (RFC 3264 section 6.1). An answer echoed the offer's
-  line, and so did every later offer: Opus parameters the peer asked for itself (RFC 7587
-  section 7.1), the peer's AV1 level and tier, its H.264 level. An H.264 answer keeps the
-  offered profile and states this endpoint's level when both sides allow level asymmetry, else
-  the lower of the two (RFC 6184 section 8.2.2).
-- **jsep**: an H.264, VP9 or AV1 format whose configuration this endpoint did not register is
-  no longer negotiated because its name matches (RFC 6184 section 8.2.2: "maintain all
-  configuration parameters or remove the media format"); when it was the section's only
-  format the section is rejected. Other codecs keep the name-only match.
-- **media_engine**: the H.264 default listed twice under payload type 127 is listed once (the
-  second was discarded at registration; the registered codecs do not change).
-
-### Features
-
-- **shared**: `Error::ErrAnswerDoesNotMatchOffer(String)`.
-- **transceiver**: `RTCRtpTransceiver::remote_bandwidth()` (`RTCRemoteBandwidth`: `b=TIAS` /
-  `b=AS`, `b=RS`, `b=RR` of the remote media section, RFC 9429 section 5.10),
-  `RTCRtpTransceiver::remote_rtcp_xr()` (the remote `a=rtcp-xr` formats, RFC 3611 section 5.1)
-  and `RTCRtpTransceiver::rtcp_reduced_size()`; `RTCRtcpParameters::reduced_size` of the
-  sender's and receiver's parameters is the negotiated value.
-- **receiver**: `RTCRtpReceiver::streams()`, the ids of the remote MediaStreams the track is
-  in (W3C `[[AssociatedRemoteMediaStreams]]`).
 
 ## [0.22.0+brainwires.5] - 2026-11-20
 
