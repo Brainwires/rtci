@@ -1698,7 +1698,10 @@ fn test_agent_events_carry_the_instant_they_were_observed_at() -> Result<()> {
 
     // Selecting a pair emits Connected *and* SelectedCandidatePairChange; both are stamped
     // with the instant that caused them, not with a reading taken at drain time.
-    let stamped: Vec<_> = std::iter::from_fn(|| a.poll_event()).collect();
+    // (The pair itself was announced when it was formed, at the agent's clock then.)
+    let stamped: Vec<_> = std::iter::from_fn(|| a.poll_event())
+        .filter(|e| !matches!(e.event, Event::CandidatePairAdded(..)))
+        .collect();
     assert!(!stamped.is_empty(), "selecting a pair emits events");
     for e in &stamped {
         assert_eq!(
