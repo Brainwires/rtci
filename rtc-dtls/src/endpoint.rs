@@ -126,6 +126,12 @@ impl Endpoint {
         }
     }
 
+    /// How many bytes a protected record to `remote` adds to its content: see
+    /// [`DTLSConn::record_overhead`]. `None` without an association, or before it has keys.
+    pub fn record_overhead(&self, remote: SocketAddr) -> Option<usize> {
+        self.connections.get(&remote)?.record_overhead()
+    }
+
     /// Whether the association with `remote` has failed: a fatal alert was sent or received, or
     /// its handshake gave up (a handshake error, or its deadline passed). An ordinary
     /// retransmission or a discarded record never fails it. `false` when there is no such

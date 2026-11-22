@@ -2311,8 +2311,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `HeaderMaskAlgorithm` (record number encryption); `SignatureScheme::RsaPssSha256/384/512`,
   which an imported RSA key signs with.
 - Not in it: pre-shared keys in DTLS 1.3 (resumption, external PSKs, 0-RTT), post-handshake
-  authentication, the DTLS 1.2 record format of RFC 9146. A configuration with a pre-shared key
-  negotiates DTLS 1.2.
+  authentication. A configuration with a pre-shared key negotiates DTLS 1.2.
 
 - **dtls**: DTLS 1.3 (RFC 9147, on the TLS 1.3 handshake of RFC 8446), next to DTLS 1.2. A
   client offers both in one ClientHello and a server takes 1.3 from a client that offers it;
@@ -2344,8 +2343,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `HeaderMaskAlgorithm` (record number encryption); `SignatureScheme::RsaPssSha256/384/512`,
   which an imported RSA key signs with.
 - Not in it: pre-shared keys in DTLS 1.3 (resumption, external PSKs, 0-RTT), post-handshake
-  authentication, the DTLS 1.2 record format of RFC 9146. A configuration with a pre-shared key
-  negotiates DTLS 1.2.
+  authentication. A configuration with a pre-shared key negotiates DTLS 1.2.
+
+### DTLS 1.3 in the peer connection, connection ids for DTLS 1.2
+
+- **peer connection**: the TLS 1.3 suites come first in the default cipher suite list, so two
+  engines negotiate DTLS 1.3 and a peer without it (webrtc 0.17, which ignores the extensions)
+  gets DTLS 1.2 from the same ClientHello. `tlsVersion` is `FEFC` for DTLS 1.3. The client's
+  retransmission timer starts at 400 ms (RFC 9147 section 5.8.2, DTLS-SRTP), or at 1.5 times
+  the selected pair's ICE round trip time, at least 100 ms
+  (`HandshakeConfig::with_flight_interval`).
+- **peer connection**: an SCTP packet is sized by the record overhead of the DTLS version and
+  suite negotiated (`Endpoint::record_overhead`, `DTLSConn::record_overhead`): a DTLS 1.3 record
+  adds 22 bytes where a DTLS 1.2 AES-GCM record adds 37, and packets were 15 bytes short of the
+  path MTU under DTLS 1.3.
+- **dtls**: RFC 9146 for DTLS 1.2: the `connection_id` extension in the DTLS 1.2 hellos (a
+  ClientHello for both versions carries one, for whichever is negotiated; by default it asks
+  for no id), `tls12_cid` records with the additional data and MAC input of section 5 for
+  every cipher family, records without the negotiated id discarded, and the peer address
+  update of section 6 behind `with_connection_id_migration` (off by default).
+- **dtls**: a DTLS 1.3 client that authenticates completes only on the server's ACK or first
+  application-epoch record; a DTLS 1.3 server picks a certificate chain signed with algorithms
+  the client lists (RFC 8446 section 4.4.2.2); the retransmission timer returns to its start
+  after ten intervals of quiet (RFC 9147 section 5.8.2); too_many_cids_requested ends an
+  association after 32 RequestConnectionId messages; `ConfigBuilder::with_invalid_record_limit`
+  gives up on a peer that keeps sending records that fail (opt-in: they are unauthenticated).
+- **dtls**, **crypto**: the hybrid post-quantum key share X25519MLKEM768 (0x11EC,
+  draft-ietf-tls-ecdhe-mlkem) in DTLS 1.3, offered first where the provider has ML-KEM
+  (aws-lc-rs; ring has none and does not offer it): `ConfigBuilder::with_post_quantum_key_share`
+  (default on), `KeyExchangeAlgorithm::X25519MlKem768`, `RTCCrypto::key_exchange_respond` (the
+  server's side of a KEM; the default is the Diffie-Hellman key pair and agreement). Its
+  1216-byte share makes the ClientHello two fragments; the stateless cookie exchange reassembles
+  them. Checked against OpenSSL 4.1 in both roles. The group is offered only where one exchange
+  through the provider gives both ends the same secret.
+- **dtls**: a DTLS 1.3 suite is offered only if the provider can make its record-number mask,
+  so a provider that wraps another and leaves `new_header_mask` at its default gets DTLS 1.2
+  instead of failing every record (`isolates_crypto_providers_across_simultaneous_peer_connections`
+  failed on the train).
 
 ### DTLS 1.2: the RFC by default
 

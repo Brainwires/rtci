@@ -538,6 +538,12 @@ impl Conn13 {
     // Writing records.
     // ------------------------------------------------------------------------------------
 
+    /// How many bytes a protected record adds to its content, once the suite is known.
+    pub(crate) fn protected_record_overhead(&self) -> Option<usize> {
+        self.suite?;
+        Some(self.record_overhead(1))
+    }
+
     /// How many bytes a record of `epoch` adds to its content.
     fn record_overhead(&self, epoch: u64) -> usize {
         if epoch == 0 {

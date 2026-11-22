@@ -420,6 +420,24 @@ impl DTLSConn {
             .is_some_and(|v13| v13.use_next_connection_id())
     }
 
+    /// How many bytes a protected record this side sends adds to its content: the record
+    /// header, the connection id if one is sent, and what the cipher suite adds (an explicit
+    /// nonce, the tag or MAC and padding, the inner content type of DTLS 1.3 and of a
+    /// `tls12_cid` record). A DTLS 1.3 record with a 16-byte tag adds 22 bytes, a DTLS 1.2
+    /// AES-GCM record 37. `None` before the cipher suite is known. CBC padding is counted at
+    /// its largest.
+    pub fn record_overhead(&self) -> Option<usize> {
+        if let Some(v13) = &self.v13 {
+            return v13.protected_record_overhead();
+        }
+        let cipher_suite = self.state.cipher_suite.as_ref()?;
+        let connection_id = self
+            .state
+            .send_connection_id()
+            .map_or(0, |connection_id| connection_id.len() + 1);
+        Some(RECORD_LAYER_HEADER_SIZE + cipher_suite.record_expansion() + connection_id)
+    }
+
     /// The connection ids in use: the one this side expects in records it receives, and the
     /// one it puts in records it sends. Empty where none is used. `None` for a DTLS 1.2
     /// association that did not negotiate the extension (RFC 9146 section 3).

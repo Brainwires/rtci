@@ -365,7 +365,8 @@ fn a_configured_sctp_mtu_takes_the_place_of_the_paths() -> Result<()> {
     let (mut pair, local, _) = connected(default().with_sctp_mtu(900), default())?;
     pair.offerer.written_sizes.clear();
     assert!(pair.deliver(false, local, &vec![1u8; 65536])?);
-    // 900 bytes of SCTP in a DTLS record: 13 bytes of header, 8 of explicit nonce, 16 of tag.
-    assert_eq!(pair.offerer.written_sizes.iter().copied().max(), Some(937));
+    // 900 bytes of SCTP in a DTLS 1.3 record (two engine peers negotiate it): a five-byte
+    // unified header, the inner content type, a 16-byte tag.
+    assert_eq!(pair.offerer.written_sizes.iter().copied().max(), Some(922));
     Ok(())
 }

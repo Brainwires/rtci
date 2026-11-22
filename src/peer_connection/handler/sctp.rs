@@ -5285,7 +5285,7 @@ mod tests {
             ipv6: false,
             tcp: false,
             relayed: false,
-            dtls_record_expansion: SctpPath::DEFAULT_DTLS_RECORD_EXPANSION,
+            dtls_record_overhead: SctpPath::DEFAULT_DTLS_RECORD_OVERHEAD,
         };
         let ipv6 = SctpPath { ipv6: true, ..ipv4 };
 

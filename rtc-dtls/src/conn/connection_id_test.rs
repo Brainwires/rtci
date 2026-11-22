@@ -429,3 +429,44 @@ fn a_tls12_cid_record_holds_at_most_two_to_the_fourteen_inner_bytes() -> Result<
     assert!(pair.server.is_connection_failed(&client_addr()));
     Ok(())
 }
+
+/// `record_overhead` is what a protected record adds to its content on the wire, for each
+/// version and with a connection id: what an SCTP association above sizes its packets by.
+#[test]
+fn the_record_overhead_is_what_a_record_adds_on_the_wire() -> Result<()> {
+    let cases = [
+        // DTLS 1.3 (a unified header of five bytes, the inner type, a 16-byte tag).
+        (
+            client_builder(),
+            server_builder().with_cookie_exchange(false),
+            22,
+        ),
+        // DTLS 1.2 AES-GCM: 13 + 8 + 16.
+        (
+            dtls12(client_builder(), Some(0)),
+            dtls12(server_builder(), Some(0)),
+            37,
+        ),
+        // DTLS 1.2 with a four-byte connection id to the server: 37 + 4 + the inner type.
+        (
+            dtls12(client_builder(), Some(0)),
+            dtls12(server_builder(), Some(4)),
+            42,
+        ),
+    ];
+    for (client, server, expected) in cases {
+        let mut pair = Pair::new(client, server)?.complete();
+        let overhead = pair.client.record_overhead(server_addr());
+        assert_eq!(overhead, Some(expected));
+        pair.client.write(pair.now, server_addr(), &[0x55; 100])?;
+        let datagrams = take(&mut pair.client);
+        assert_eq!(datagrams[0].len(), 100 + expected);
+    }
+    let pair = Pair::new(client_builder(), server_builder())?;
+    assert_eq!(
+        pair.client.record_overhead(server_addr()),
+        None,
+        "no keys yet"
+    );
+    Ok(())
+}
