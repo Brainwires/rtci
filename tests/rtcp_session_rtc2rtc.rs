@@ -68,6 +68,8 @@ struct Peer {
     collisions: Vec<u32>,
     /// How many times negotiation was asked for.
     negotiation_needed: usize,
+    /// `OnSsrcCollision` and `OnNegotiationNeededEvent`, in the order they came.
+    log: Vec<&'static str>,
 }
 
 impl Peer {
@@ -129,6 +131,7 @@ impl Peer {
             rtcp_datagrams: 0,
             collisions: Vec::new(),
             negotiation_needed: 0,
+            log: Vec::new(),
         })
     }
 
@@ -237,9 +240,13 @@ impl World {
                     RTCPeerConnectionEvent::OnTrack(RTCTrackEvent::OnMute(_)) => {
                         peer.muted += 1;
                     }
-                    RTCPeerConnectionEvent::OnSsrcCollision(ssrc) => peer.collisions.push(ssrc),
+                    RTCPeerConnectionEvent::OnSsrcCollision(ssrc) => {
+                        peer.collisions.push(ssrc);
+                        peer.log.push("collision");
+                    }
                     RTCPeerConnectionEvent::OnNegotiationNeededEvent => {
-                        peer.negotiation_needed += 1
+                        peer.negotiation_needed += 1;
+                        peer.log.push("negotiation-needed");
                     }
                     _ => {}
                 }
@@ -676,14 +683,6 @@ fn a_sender_moves_to_a_new_ssrc_after_a_collision() -> Result<()> {
         world.run_until(step)?;
     }
     let (_, rtx_before) = encoding_ssrcs(&mut world, 0, senders[0]);
-    for peer in world.peers.iter_mut() {
-        while peer.pc.poll_event().is_some() {}
-        assert_eq!(
-            peer.negotiation_needed, 1,
-            "asked for the first exchange only: nothing else is pending"
-        );
-        peer.negotiation_needed = 0;
-    }
 
     // Both write with the shared SSRC, as the application keeps doing.
     let mut wire_ssrcs = vec![];
@@ -728,9 +727,12 @@ fn a_sender_moves_to_a_new_ssrc_after_a_collision() -> Result<()> {
         world.run_until(step)?;
     }
     assert_eq!(world.peers[0].collisions, vec![SHARED], "reported once");
+    // (Each may hear the other's sender report on the shared SSRC before any media.)
+    let log = &world.peers[0].log;
+    let collided = log.iter().position(|e| *e == "collision");
     assert!(
-        world.peers[0].negotiation_needed >= 1,
-        "the new SSRC is to be signalled"
+        collided.is_some_and(|at| log[at..].contains(&"negotiation-needed")),
+        "the new SSRC is to be signalled: {log:?}"
     );
 
     let (moved, rtx_after) = encoding_ssrcs(&mut world, 0, senders[0]);
