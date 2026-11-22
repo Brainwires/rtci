@@ -105,7 +105,8 @@ and handshake cache; AEAD-only default DTLS suites; ChangeCipherSpec honoured on
 handshake's one epoch transition; SRTP state only after authentication, and SRTCP authenticated
 whatever its E flag; ICE source filtering, authenticated role conflicts and consent (role
 attributes, PRIORITY and nominations are read only from what MESSAGE-INTEGRITY covers; a 487
-is obeyed only when signed and matched to a pending check), candidate
+is obeyed only when signed and matched to a pending check; consent expires after 30 seconds
+whatever the timeouts, also on the path an ICE restart leaves in use), candidate
 caps (mDNS-resolved ones included), mDNS answers only from the mDNS socket, at most 64 published
 mDNS names (a host candidate past them is dropped, not sent with its address); bounded RFC 4571
 frame decoding; bounded SCTP

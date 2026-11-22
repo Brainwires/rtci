@@ -151,6 +151,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **ice**: candidate constructors take component 0 (the `Default`) as 1 and refuse a component
   above 256 or a priority above 2^31 - 1; `COMPONENT_RTCP` is 2.
 
+- **ice**: consent freshness follows RFC 7675 section 5.1. Consent checks on the selected pair
+  are 0.8 to 1.2 times the period apart, drawn anew each time, the period 5 seconds by default
+  and never less (it was a fixed 2 seconds); `poll_timeout` returns the drawn instant. Consent
+  expires 30 seconds after the last response whatever the configured timeouts (a zero
+  `failed_timeout` kept a connected agent sending for ever), and the open transactions go with
+  it.
+- **ice**: consent is kept up on the path an ICE restart leaves in use (RFC 7675 section 5.1).
+  The agent goes on sending consent requests there with the replaced generation's credentials,
+  answers the peer's, and gives the path up 30 seconds after the last response. Until now data
+  flowed on it unchecked until the restart selected a pair or failed.
+- **ice**: a lite agent keeps its selected pair alive with a Binding indication after 15
+  silent seconds (RFC 8445 section 11); it sent nothing.
+
 ### Features
 
 - **ice**: `Candidate::set_local_preference_rank` / `local_preference_rank` (rank a local
@@ -164,6 +177,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **ice**: a local candidate added without a priority after another of its type no longer has
   the same priority as that one (its local preference is lower by its rank), and foundations of
   server-reflexive candidates change (they follow the base, not the mapped address).
+
+- **ice**: `AgentConfig::keepalive_interval` (`with_ice_timeouts`) is the basic period of the
+  consent checks: default 5 seconds (was 2), a shorter non-zero value is raised to 5 seconds,
+  and each interval is 0.8 to 1.2 times it.
+- **ice**: a connected full agent is `Disconnected` when a consent request has gone unanswered
+  for `disconnected_timeout` (9 to 11 seconds after the last response by default; it was 5
+  seconds after it), and `Failed` 30 seconds after the last response at the latest:
+  `disconnected_timeout + failed_timeout` above 30 seconds, or a zero `failed_timeout`, no
+  longer keeps it alive longer. A shorter sum still fails it sooner.
 
 ## [0.22.0+brainwires.5] - 2026-11-20
 

@@ -53,6 +53,10 @@ impl sansio::Protocol<TaggedBytesMut, (), ()> for Agent {
             self.trigger_request_connectivity_check(remote_candidates);
 
             Ok(())
+        } else if self.handle_previous_generation(&msg) {
+            // Consent traffic of the generation an ICE restart replaced, on the path that is
+            // still in use.
+            Ok(())
         } else if let Some(local_index) =
             self.find_local_candidate(msg.transport.local_addr, msg.transport.transport_protocol)
         {
@@ -135,8 +139,15 @@ impl sansio::Protocol<TaggedBytesMut, (), ()> for Agent {
             self.process_early_requests(now);
         }
 
+        // The path an ICE restart left in use keeps its consent checks, with or without the
+        // peer's new credentials.
+        self.maintain_previous_generation(now);
+
         if self.ufrag_pwd.remote_credentials.is_some()
             && (self.force_candidate_contact
+                || self
+                    .selected_pair_deadline()
+                    .is_some_and(|deadline| deadline <= now)
                 || self.last_checking_time + self.get_timeout_interval() <= now)
         {
             self.contact(now);
@@ -161,6 +172,9 @@ impl sansio::Protocol<TaggedBytesMut, (), ()> for Agent {
                 // `handle_timeout` as soon as possible. `last_checking_time` is in the
                 // past, so the resulting deadline is immediate.
                 Some(self.last_checking_time)
+            } else if let Some(deadline) = self.selected_pair_deadline() {
+                // Connected: the next consent request, or the moment its silence counts.
+                Some(deadline)
             } else {
                 Some(self.last_checking_time + self.get_timeout_interval())
             }
@@ -168,8 +182,15 @@ impl sansio::Protocol<TaggedBytesMut, (), ()> for Agent {
             None
         };
 
-        // This treats the two options as a collection and picks the minimum
-        [mdns_timeout, ice_timeout].into_iter().flatten().min()
+        // This treats the options as a collection and picks the minimum
+        [
+            mdns_timeout,
+            ice_timeout,
+            self.previous_generation_deadline(),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     fn close(&mut self) -> std::result::Result<(), Self::Error> {
