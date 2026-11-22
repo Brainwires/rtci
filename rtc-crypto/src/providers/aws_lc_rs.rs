@@ -7,9 +7,10 @@ use aws_lc_rs::{aead, agreement, digest, hmac};
 use crate::common;
 use crate::{
     ActiveKeyExchange, AeadAlgorithm, AeadCipher, BlockCipherAlgorithm, CbcAlgorithm, CbcCipher,
-    CryptoAlgorithm, CryptoError, HashAlgorithm, HmacAlgorithm, KeyExchangeAlgorithm, Mac,
-    PublicKey, PublicKeyEncoding, RTCCrypto, RTCCryptoProvider, RTCRandom, SecretVec,
-    SignatureScheme, SigningKey, StreamCipher, StreamCipherAlgorithm, constant_time_eq,
+    CryptoAlgorithm, CryptoError, HEADER_MASK_LEN, HEADER_MASK_SAMPLE_LEN, HashAlgorithm,
+    HeaderMask, HeaderMaskAlgorithm, HmacAlgorithm, KeyExchangeAlgorithm, Mac, PublicKey,
+    PublicKeyEncoding, RTCCrypto, RTCCryptoProvider, RTCRandom, SecretVec, SignatureScheme,
+    SigningKey, StreamCipher, StreamCipherAlgorithm, constant_time_eq,
 };
 
 /// The built-in AWS-LC-RS provider bundle.
@@ -63,22 +64,25 @@ impl RTCCrypto for AwsLcRsCrypto {
     fn supports(&self, algorithm: CryptoAlgorithm) -> bool {
         matches!(
             algorithm,
-            CryptoAlgorithm::Hash(HashAlgorithm::Md5 | HashAlgorithm::Sha256)
-                | CryptoAlgorithm::Hmac(HmacAlgorithm::Sha1 | HmacAlgorithm::Sha256)
-                | CryptoAlgorithm::Aead(
-                    AeadAlgorithm::Aes128Gcm
-                        | AeadAlgorithm::Aes256Gcm
-                        | AeadAlgorithm::Aes128Ccm
-                        | AeadAlgorithm::Aes128Ccm8
-                        | AeadAlgorithm::ChaCha20Poly1305,
-                )
-                | CryptoAlgorithm::StreamCipher(
-                    StreamCipherAlgorithm::Aes128Ctr | StreamCipherAlgorithm::Aes256Ctr,
-                )
-                | CryptoAlgorithm::BlockCipher(
-                    BlockCipherAlgorithm::Aes128 | BlockCipherAlgorithm::Aes256,
-                )
-                | CryptoAlgorithm::Cbc(CbcAlgorithm::Aes256Cbc)
+            CryptoAlgorithm::Hash(
+                HashAlgorithm::Md5 | HashAlgorithm::Sha256 | HashAlgorithm::Sha384
+            ) | CryptoAlgorithm::Hmac(
+                HmacAlgorithm::Sha1 | HmacAlgorithm::Sha256 | HmacAlgorithm::Sha384
+            ) | CryptoAlgorithm::HeaderMask(
+                HeaderMaskAlgorithm::Aes128
+                    | HeaderMaskAlgorithm::Aes256
+                    | HeaderMaskAlgorithm::ChaCha20
+            ) | CryptoAlgorithm::Aead(
+                AeadAlgorithm::Aes128Gcm
+                    | AeadAlgorithm::Aes256Gcm
+                    | AeadAlgorithm::Aes128Ccm
+                    | AeadAlgorithm::Aes128Ccm8
+                    | AeadAlgorithm::ChaCha20Poly1305,
+            ) | CryptoAlgorithm::StreamCipher(
+                StreamCipherAlgorithm::Aes128Ctr | StreamCipherAlgorithm::Aes256Ctr,
+            ) | CryptoAlgorithm::BlockCipher(
+                BlockCipherAlgorithm::Aes128 | BlockCipherAlgorithm::Aes256,
+            ) | CryptoAlgorithm::Cbc(CbcAlgorithm::Aes256Cbc)
                 | CryptoAlgorithm::KeyExchange(
                     KeyExchangeAlgorithm::P256
                         | KeyExchangeAlgorithm::P384
@@ -92,7 +96,10 @@ impl RTCCrypto for AwsLcRsCrypto {
                         | SignatureScheme::RsaPkcs1Sha1
                         | SignatureScheme::RsaPkcs1Sha256
                         | SignatureScheme::RsaPkcs1Sha384
-                        | SignatureScheme::RsaPkcs1Sha512,
+                        | SignatureScheme::RsaPkcs1Sha512
+                        | SignatureScheme::RsaPssSha256
+                        | SignatureScheme::RsaPssSha384
+                        | SignatureScheme::RsaPssSha512,
                 )
                 | CryptoAlgorithm::SigningKeyGeneration(
                     SignatureScheme::Ed25519 | SignatureScheme::EcdsaP256Sha256,
@@ -109,6 +116,7 @@ impl RTCCrypto for AwsLcRsCrypto {
         match algorithm {
             HashAlgorithm::Md5 => Ok(common::md5(data)),
             HashAlgorithm::Sha256 => Ok(digest::digest(&digest::SHA256, data).as_ref().to_vec()),
+            HashAlgorithm::Sha384 => Ok(digest::digest(&digest::SHA384, data).as_ref().to_vec()),
         }
     }
 
@@ -147,6 +155,22 @@ impl RTCCrypto for AwsLcRsCrypto {
             AeadAlgorithm::Aes256Gcm => AwsLcRsAead::create(&aead::AES_256_GCM, key),
             AeadAlgorithm::ChaCha20Poly1305 => AwsLcRsAead::create(&aead::CHACHA20_POLY1305, key),
         }
+    }
+
+    fn new_header_mask(
+        &self,
+        algorithm: HeaderMaskAlgorithm,
+        key: &[u8],
+    ) -> Result<Box<dyn HeaderMask>, CryptoError> {
+        common::check_key_len(algorithm.key_len(), key.len())?;
+        let backend_algorithm = match algorithm {
+            HeaderMaskAlgorithm::Aes128 => &aead::quic::AES_128,
+            HeaderMaskAlgorithm::Aes256 => &aead::quic::AES_256,
+            HeaderMaskAlgorithm::ChaCha20 => &aead::quic::CHACHA20,
+        };
+        let key = aead::quic::HeaderProtectionKey::new(backend_algorithm, key)
+            .map_err(|_| CryptoError::InvalidPrivateKey)?;
+        Ok(Box::new(AwsLcRsHeaderMask { key }))
     }
 
     fn new_cbc(
@@ -233,6 +257,25 @@ fn hmac_algorithm(algorithm: HmacAlgorithm) -> hmac::Algorithm {
     match algorithm {
         HmacAlgorithm::Sha1 => hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY,
         HmacAlgorithm::Sha256 => hmac::HMAC_SHA256,
+        HmacAlgorithm::Sha384 => hmac::HMAC_SHA384,
+    }
+}
+
+/// A record-number mask generator on the backend's QUIC header-protection key, which is the
+/// computation RFC 9147 section 4.2.3 defines (AES-ECB of the sample, or the ChaCha20 block
+/// function keyed by it).
+struct AwsLcRsHeaderMask {
+    key: aead::quic::HeaderProtectionKey,
+}
+
+impl HeaderMask for AwsLcRsHeaderMask {
+    fn mask(
+        &mut self,
+        sample: &[u8; HEADER_MASK_SAMPLE_LEN],
+    ) -> Result<[u8; HEADER_MASK_LEN], CryptoError> {
+        self.key
+            .new_mask(sample)
+            .map_err(|_| CryptoError::Provider("header mask generation failed".into()))
     }
 }
 
@@ -438,7 +481,16 @@ impl AwsLcRsSigningKey {
 
 impl SigningKey for AwsLcRsSigningKey {
     fn supports(&self, scheme: SignatureScheme) -> bool {
+        // An RSA key with the rsaEncryption OID signs PKCS#1 v1.5 and RSASSA-PSS alike
+        // (RFC 8446 section 4.2.3, the rsa_pss_rsae schemes).
         self.scheme == scheme
+            || (matches!(self.kind, AwsLcRsSigningKeyKind::Rsa(_))
+                && matches!(
+                    scheme,
+                    SignatureScheme::RsaPssSha256
+                        | SignatureScheme::RsaPssSha384
+                        | SignatureScheme::RsaPssSha512
+                ))
     }
 
     fn public_key(&self) -> PublicKey<'_> {
@@ -461,14 +513,15 @@ impl SigningKey for AwsLcRsSigningKey {
                 .map(|signature| signature.as_ref().to_vec())
                 .map_err(|_| CryptoError::Provider("signature generation failed".into())),
             AwsLcRsSigningKeyKind::Rsa(key) => {
+                let encoding: &'static dyn signature::RsaEncoding = match scheme {
+                    SignatureScheme::RsaPssSha256 => &signature::RSA_PSS_SHA256,
+                    SignatureScheme::RsaPssSha384 => &signature::RSA_PSS_SHA384,
+                    SignatureScheme::RsaPssSha512 => &signature::RSA_PSS_SHA512,
+                    _ => &signature::RSA_PKCS1_SHA256,
+                };
                 let mut signature = vec![0; key.public_modulus_len()];
-                key.sign(
-                    &signature::RSA_PKCS1_SHA256,
-                    &SystemRandom::new(),
-                    message,
-                    &mut signature,
-                )
-                .map_err(|_| CryptoError::Provider("signature generation failed".into()))?;
+                key.sign(encoding, &SystemRandom::new(), message, &mut signature)
+                    .map_err(|_| CryptoError::Provider("signature generation failed".into()))?;
                 Ok(signature)
             }
         }
@@ -503,6 +556,9 @@ fn verification_algorithm(
         SignatureScheme::RsaPkcs1Sha512 => {
             &signature::RSA_PKCS1_1024_8192_SHA512_FOR_LEGACY_USE_ONLY
         }
+        SignatureScheme::RsaPssSha256 => &signature::RSA_PSS_2048_8192_SHA256,
+        SignatureScheme::RsaPssSha384 => &signature::RSA_PSS_2048_8192_SHA384,
+        SignatureScheme::RsaPssSha512 => &signature::RSA_PSS_2048_8192_SHA512,
     }
 }
 
@@ -523,7 +579,10 @@ fn verify_public_key_encoding(
                 SignatureScheme::RsaPkcs1Sha1
                     | SignatureScheme::RsaPkcs1Sha256
                     | SignatureScheme::RsaPkcs1Sha384
-                    | SignatureScheme::RsaPkcs1Sha512,
+                    | SignatureScheme::RsaPkcs1Sha512
+                    | SignatureScheme::RsaPssSha256
+                    | SignatureScheme::RsaPssSha384
+                    | SignatureScheme::RsaPssSha512,
                 PublicKeyEncoding::RsaPkcs1Der
             )
     );

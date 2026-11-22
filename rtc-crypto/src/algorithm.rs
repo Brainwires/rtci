@@ -6,6 +6,20 @@ pub enum HashAlgorithm {
     Md5,
     /// SHA-256.
     Sha256,
+    /// SHA-384, the hash of the TLS 1.3 `_SHA384` cipher suites.
+    Sha384,
+}
+
+impl HashAlgorithm {
+    /// Returns the digest length in bytes.
+    #[must_use]
+    pub const fn output_len(self) -> usize {
+        match self {
+            Self::Md5 => 16,
+            Self::Sha256 => 32,
+            Self::Sha384 => 48,
+        }
+    }
 }
 
 /// Algorithms accepted by the HMAC operations.
@@ -16,6 +30,8 @@ pub enum HmacAlgorithm {
     Sha1,
     /// HMAC-SHA256.
     Sha256,
+    /// HMAC-SHA384, for HKDF with the TLS 1.3 `_SHA384` cipher suites.
+    Sha384,
 }
 
 impl HmacAlgorithm {
@@ -25,6 +41,7 @@ impl HmacAlgorithm {
         match self {
             Self::Sha1 => 20,
             Self::Sha256 => 32,
+            Self::Sha384 => 48,
         }
     }
 }
@@ -63,6 +80,31 @@ pub enum BlockCipherAlgorithm {
     Aes128,
     /// AES-256.
     Aes256,
+}
+
+/// The ciphers a record-number (header-protection) mask is made with: the block cipher or
+/// stream cipher underneath an AEAD, keyed separately (RFC 9147 section 4.2.3; the same
+/// construction as QUIC header protection, RFC 9001 section 5.4).
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HeaderMaskAlgorithm {
+    /// AES-128 in ECB mode over the 16-byte sample.
+    Aes128,
+    /// AES-256 in ECB mode over the 16-byte sample.
+    Aes256,
+    /// The ChaCha20 block function, the sample giving the block counter and the nonce.
+    ChaCha20,
+}
+
+impl HeaderMaskAlgorithm {
+    /// Returns the key length in bytes.
+    #[must_use]
+    pub const fn key_len(self) -> usize {
+        match self {
+            Self::Aes128 => 16,
+            Self::Aes256 | Self::ChaCha20 => 32,
+        }
+    }
 }
 
 /// CBC algorithms.
@@ -105,6 +147,13 @@ pub enum SignatureScheme {
     RsaPkcs1Sha512,
     /// ECDSA P-384 with SHA-256 and ASN.1 DER signatures.
     EcdsaP384Sha256,
+    /// RSASSA-PSS with SHA-256, MGF1 with SHA-256 and a salt as long as the digest, over a
+    /// key with the rsaEncryption OID (TLS 1.3 `rsa_pss_rsae_sha256`, RFC 8446 section 4.2.3).
+    RsaPssSha256,
+    /// RSASSA-PSS with SHA-384 (TLS 1.3 `rsa_pss_rsae_sha384`).
+    RsaPssSha384,
+    /// RSASSA-PSS with SHA-512 (TLS 1.3 `rsa_pss_rsae_sha512`).
+    RsaPssSha512,
 }
 
 /// The encoding of public-key bytes.
@@ -144,6 +193,8 @@ pub enum CryptoAlgorithm {
     StreamCipher(StreamCipherAlgorithm),
     /// Single-block encryption.
     BlockCipher(BlockCipherAlgorithm),
+    /// Record-number (header-protection) masks.
+    HeaderMask(HeaderMaskAlgorithm),
     /// CBC encryption and decryption.
     Cbc(CbcAlgorithm),
     /// Ephemeral key agreement.

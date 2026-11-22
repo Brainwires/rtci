@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use crate::{
     AeadAlgorithm, BlockCipherAlgorithm, CbcAlgorithm, CryptoAlgorithm, CryptoError, HashAlgorithm,
-    HmacAlgorithm, KeyExchangeAlgorithm, PublicKey, SecretVec, SignatureScheme,
-    StreamCipherAlgorithm,
+    HeaderMaskAlgorithm, HmacAlgorithm, KeyExchangeAlgorithm, PublicKey, SecretVec,
+    SignatureScheme, StreamCipherAlgorithm,
 };
 
 /// A bundle of cryptographic operations and cryptographically secure randomness.
@@ -80,6 +80,17 @@ pub trait RTCCrypto: Send + Sync {
         Err(CryptoError::UnsupportedAlgorithm(CryptoAlgorithm::Aead(
             algorithm,
         )))
+    }
+
+    /// Creates a keyed record-number mask generator (RFC 9147 section 4.2.3).
+    fn new_header_mask(
+        &self,
+        algorithm: HeaderMaskAlgorithm,
+        _key: &[u8],
+    ) -> Result<Box<dyn HeaderMask>, CryptoError> {
+        Err(CryptoError::UnsupportedAlgorithm(
+            CryptoAlgorithm::HeaderMask(algorithm),
+        ))
     }
 
     /// Creates a keyed CBC cipher.
@@ -190,6 +201,27 @@ pub trait AeadCipher: Send {
         ciphertext_and_plaintext: &mut [u8],
         tag: &[u8],
     ) -> Result<(), CryptoError>;
+}
+
+/// The length of the ciphertext sample a [`HeaderMask`] is computed from.
+pub const HEADER_MASK_SAMPLE_LEN: usize = 16;
+/// The length of the mask a [`HeaderMask`] returns.
+pub const HEADER_MASK_LEN: usize = 5;
+
+/// A keyed generator of record-number masks.
+///
+/// DTLS 1.3 encrypts the sequence number of a protected record by XORing it with the leading
+/// bytes of a mask computed from the first 16 bytes of the record's ciphertext (RFC 9147
+/// section 4.2.3): AES-ECB of the sample for the AES suites, and for ChaCha20 the keystream
+/// the block function gives with the sample's first four bytes as the block counter and the
+/// other twelve as the nonce. QUIC header protection (RFC 9001 section 5.4) is the same
+/// computation, which is why five bytes come back; DTLS uses one or two of them.
+pub trait HeaderMask: Send {
+    /// Computes the mask for `sample`.
+    fn mask(
+        &mut self,
+        sample: &[u8; HEADER_MASK_SAMPLE_LEN],
+    ) -> Result<[u8; HEADER_MASK_LEN], CryptoError>;
 }
 
 /// A keyed CBC block cipher with a reusable expanded key.
