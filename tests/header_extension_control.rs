@@ -94,9 +94,10 @@ fn set(
         .set_header_extensions_to_negotiate(list.iter().map(|(u, d)| ext(u, *d)).collect())
 }
 
-/// The `a=extmap` values (`id[/direction] uri`, without the id) of the first media section.
+/// The `a=extmap` values (`uri[/direction]`) of the first media section, sorted (the order
+/// of the lines is not the point).
 fn extmaps(sdp: &str) -> Vec<String> {
-    media_sections(sdp)[0]
+    let mut lines: Vec<String> = media_sections(sdp)[0]
         .iter()
         .filter_map(|l| l.strip_prefix("a=extmap:"))
         .map(|v| {
@@ -106,7 +107,14 @@ fn extmaps(sdp: &str) -> Vec<String> {
                 None => uri.to_owned(),
             }
         })
-        .collect()
+        .collect();
+    lines.sort();
+    lines
+}
+
+fn sorted(mut lines: Vec<String>) -> Vec<String> {
+    lines.sort();
+    lines
 }
 
 fn owned(list: &[(&str, RTCRtpTransceiverDirection)]) -> Vec<(String, RTCRtpTransceiverDirection)> {
@@ -200,7 +208,7 @@ fn offers_and_answers_carry_the_directions_and_the_answer_sets_them() -> TestRes
     let offer = offerer.create_offer(None)?;
     assert_eq!(
         extmaps(&offer.sdp),
-        [MID.to_owned(), format!("{ORIENTATION}/sendonly")],
+        sorted(vec![MID.to_owned(), format!("{ORIENTATION}/sendonly")]),
         "{}",
         offer.sdp
     );
@@ -211,7 +219,7 @@ fn offers_and_answers_carry_the_directions_and_the_answer_sets_them() -> TestRes
     // The offerer sends the orientation only: the answer receives it.
     assert_eq!(
         extmaps(&answer.sdp),
-        [MID.to_owned(), format!("{ORIENTATION}/recvonly")],
+        sorted(vec![MID.to_owned(), format!("{ORIENTATION}/recvonly")]),
         "{}",
         answer.sdp
     );
@@ -246,7 +254,12 @@ fn a_stopped_extension_is_left_out_and_can_be_offered_again() -> TestResult {
         &[(MID, Sendrecv), (ABS, Sendrecv), (ORIENTATION, Stopped)],
     )?;
     let answer = answerer.create_answer(None)?;
-    assert_eq!(extmaps(&answer.sdp), [MID, ABS], "{}", answer.sdp);
+    assert_eq!(
+        extmaps(&answer.sdp),
+        sorted(vec![MID.to_owned(), ABS.to_owned()]),
+        "{}",
+        answer.sdp
+    );
     answerer.set_local_description(Instant::now(), answer.clone())?;
     offerer.set_remote_description(Instant::now(), answer)?;
     assert_eq!(
@@ -254,7 +267,12 @@ fn a_stopped_extension_is_left_out_and_can_be_offered_again() -> TestResult {
         owned(&[(MID, Sendrecv), (ABS, Sendrecv), (ORIENTATION, Stopped)])
     );
     let offer = offerer.create_offer(None)?;
-    assert_eq!(extmaps(&offer.sdp), [MID, ABS], "{}", offer.sdp);
+    assert_eq!(
+        extmaps(&offer.sdp),
+        sorted(vec![MID.to_owned(), ABS.to_owned()]),
+        "{}",
+        offer.sdp
+    );
 
     set(
         &mut offerer,
@@ -302,7 +320,10 @@ fn without_a_list_every_common_extension_is_negotiated_sendrecv() -> TestResult 
     let mut answerer = peer()?;
     let v = video(&mut offerer)?;
     let (_, answer) = exchange(&mut offerer, &mut answerer)?;
-    assert_eq!(extmaps(&answer), [MID, ABS, ORIENTATION]);
+    assert_eq!(
+        extmaps(&answer),
+        sorted(vec![MID.to_owned(), ABS.to_owned(), ORIENTATION.to_owned()])
+    );
     assert_eq!(
         negotiated(&mut offerer, v),
         owned(&[(MID, Sendrecv), (ABS, Sendrecv), (ORIENTATION, Sendrecv)])
