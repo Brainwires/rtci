@@ -64,7 +64,9 @@ impl RTCCrypto for AwsLcRsCrypto {
         matches!(
             algorithm,
             CryptoAlgorithm::Hash(HashAlgorithm::Md5 | HashAlgorithm::Sha256)
-                | CryptoAlgorithm::Hmac(HmacAlgorithm::Sha1 | HmacAlgorithm::Sha256)
+                | CryptoAlgorithm::Hmac(
+                    HmacAlgorithm::Sha1 | HmacAlgorithm::Sha256 | HmacAlgorithm::Sha512
+                )
                 | CryptoAlgorithm::Aead(
                     AeadAlgorithm::Aes128Gcm
                         | AeadAlgorithm::Aes256Gcm
@@ -237,6 +239,7 @@ fn hmac_algorithm(algorithm: HmacAlgorithm) -> hmac::Algorithm {
     match algorithm {
         HmacAlgorithm::Sha1 => hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY,
         HmacAlgorithm::Sha256 => hmac::HMAC_SHA256,
+        HmacAlgorithm::Sha512 => hmac::HMAC_SHA512,
     }
 }
 

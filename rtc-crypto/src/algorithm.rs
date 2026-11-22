@@ -16,6 +16,8 @@ pub enum HmacAlgorithm {
     Sha1,
     /// HMAC-SHA256.
     Sha256,
+    /// HMAC-SHA512, for the SFrame cipher suites keyed with SHA-512 (RFC 9605 section 4.5).
+    Sha512,
 }
 
 impl HmacAlgorithm {
@@ -25,6 +27,7 @@ impl HmacAlgorithm {
         match self {
             Self::Sha1 => 20,
             Self::Sha256 => 32,
+            Self::Sha512 => 64,
         }
     }
 }

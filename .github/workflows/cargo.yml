@@ -159,6 +159,7 @@ jobs:
           cargo check --package rtc-dtls --no-default-features --features ${{ matrix.backend }} --verbose
           cargo check --package rtc-srtp --no-default-features --features ${{ matrix.backend }} --verbose
           cargo check --package rtc-stun --no-default-features --features ${{ matrix.backend }} --verbose
+          cargo check --package rtc-sframe --no-default-features --features ${{ matrix.backend }} --verbose
 
   rtc_crypto_provider_matrix:
     name: rtc-crypto (${{ matrix.name }})
@@ -255,6 +256,7 @@ jobs:
           cargo check --package rtc-stun   --no-default-features --features ${{ matrix.backend }} --all-targets --verbose
           cargo check --package rtc-ice    --no-default-features --features ${{ matrix.backend }} --all-targets --verbose
           cargo check --package rtc-turn   --no-default-features --features ${{ matrix.backend }} --all-targets --verbose
+          cargo check --package rtc-sframe --no-default-features --features ${{ matrix.backend }} --all-targets --verbose
       # These perform no cryptography and must not have acquired a provider dependency.
       - name: Check crates that must stay crypto-free
         run: |

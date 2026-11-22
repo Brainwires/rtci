@@ -1153,6 +1153,23 @@ Each bug below was confirmed by a failing test first (`rtc-rtcp/tests/audit_bugs
   packet, then slow start) instead of leaving at once.
 - **sctp**: a SACK for a TSN never sent, and an INIT ACK without a State Cookie, end the
   association with an ABORT (`TransportError`, `HandshakeFailed`).
+### Features
+
+- **sframe**: new crate `rtc-sframe`, SFrame (RFC 9605) for end-to-end encrypted media. The
+  header codec; key derivation; the five cipher suites of the RFC and the three AES-256-CTR
+  suites of the IANA registry (0x0006 to 0x0008, which the W3C Encoded Transform API lists);
+  `SFrameContext` with a key store in which a key encrypts or decrypts, never both, a counter per
+  sending key (a (key, nonce) pair is never used twice, and a key that has used every counter
+  stops) and an anti-replay window per receiving key; the sender-keys ratchet of section 5.1
+  (`SenderKeyRatchet`, `SenderKeyReceiver`) and MLS-keyed contexts of section 5.2 (`MlsContext`,
+  which takes each epoch's exported secret; no MLS in the engine); `PendingCiphertexts` for
+  frames whose key has not arrived. Checked against every test vector of RFC 9605 Appendix C.
+  Sans-I/O, on the `rtc-crypto` provider. Standalone: the application applies it to a frame
+  before packetizing or to a packet's payload; there is no SFrame RTP payload format or SDP
+  signalling yet.
+- **crypto**: `HmacAlgorithm::Sha512`, implemented by both built-in providers and part of the
+  provider conformance suite (`conformance::assert_provider`). A downstream provider that runs
+  the suite has to implement it.
 
 ## [0.22.0+brainwires.5] - 2026-11-20
 

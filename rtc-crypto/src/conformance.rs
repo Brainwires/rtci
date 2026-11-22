@@ -27,6 +27,7 @@ fn assert_basic_capabilities(crypto: &dyn RTCCrypto) {
         CryptoAlgorithm::Hash(HashAlgorithm::Sha256),
         CryptoAlgorithm::Hmac(HmacAlgorithm::Sha1),
         CryptoAlgorithm::Hmac(HmacAlgorithm::Sha256),
+        CryptoAlgorithm::Hmac(HmacAlgorithm::Sha512),
         CryptoAlgorithm::BlockCipher(BlockCipherAlgorithm::Aes128),
         CryptoAlgorithm::BlockCipher(BlockCipherAlgorithm::Aes256),
         CryptoAlgorithm::BlockCipher(BlockCipherAlgorithm::Aes192),
@@ -132,6 +133,20 @@ pub fn assert_hashes_and_hmac(crypto: &dyn RTCCrypto) {
         sha256_mac.sign(&[b"x"], &mut [0; 31]),
         Err(CryptoError::InvalidTagLength { .. })
     ));
+
+    // RFC 4231 test case 1, HMAC-SHA-512.
+    let mut sha512 = [0; 64];
+    let mut sha512_mac = crypto.new_hmac(HmacAlgorithm::Sha512, &key).unwrap();
+    assert_eq!(sha512_mac.output_len(), 64);
+    sha512_mac.sign(&[b"Hi ", b"There"], &mut sha512).unwrap();
+    assert_eq!(
+        sha512.as_slice(),
+        bytes(concat!(
+            "87aa7cdea5ef619d4ff0b4241a1d6cb02379f4e2ce4ec2787ad0b30545e17cde",
+            "daa833b7d6b8a702038b274eaea3f4e4be9d914eeb61f1702e696c203a126854"
+        ))
+    );
+    sha512_mac.verify(&[b"Hi There"], &sha512).unwrap();
 }
 
 /// Checks AES block and stream-cipher known-answer vectors and malformed inputs.

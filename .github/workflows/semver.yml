@@ -28,5 +28,8 @@ jobs:
       - name: Install cargo-semver-checks
         run: cargo install cargo-semver-checks --locked
 
+      # rtc-sframe has no release on crates.io yet, so it has no baseline to compare with and
+      # cargo-semver-checks fails on it ("not found in registry"). Drop the exclusion once it
+      # has been published.
       - name: Run cargo-semver-checks
-        run: cargo semver-checks --workspace --default-features
+        run: cargo semver-checks --workspace --default-features --exclude rtc-sframe

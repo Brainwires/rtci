@@ -32,6 +32,8 @@ The rest of the evidence that the claims hold:
 | Data channels, SCTP | [conformance/w1.md](conformance/w1.md) |
 | JSEP negotiation, codecs, transceivers, API state rules; SDP syntax and typed attributes (rtc-sdp) | [conformance/w2.md](conformance/w2.md) |
 | ICE, TURN, STUN, DTLS, mDNS, SRTP | [conformance/w3.md](conformance/w3.md) |
+| JSEP negotiation, codecs, transceivers, API state rules | [conformance/w2.md](conformance/w2.md) |
+| ICE, TURN, STUN, DTLS, mDNS, SRTP, SFrame | [conformance/w3.md](conformance/w3.md) |
 | RTP, RTCP, interceptors, payloaders, FEC | [conformance/w4.md](conformance/w4.md) |
 | Statistics | [conformance/w5.md](conformance/w5.md) |
 | The real-network environment and the browser matrix | [conformance/w6.md](conformance/w6.md) |
@@ -64,6 +66,7 @@ README.
 | SRTP | AES-f8 (RFC 3711 4.1.2) | Optional in RFC 3711 (section 5 makes AES-CM, the NULL cipher and HMAC-SHA1 mandatory), with no DTLS-SRTP code point in the IANA registry. To add it: `k_e`, `k_s`, `k_a` as for AES-CM; `IV' = E(k_e XOR m, IV)` with `m = k_s \|\| 0x555..5`; `S(j) = E(k_e, IV' XOR j XOR S(j-1))`, `S(-1) = 0`; the SRTP IV is `0x00 \|\| M \|\| PT \|\| SEQ \|\| TS \|\| SSRC \|\| ROC` and the SRTCP IV `0..0 \|\| E \|\| SRTCP index \|\| V \|\| P \|\| RC \|\| PT \|\| length \|\| SSRC` (4.1.2.2, 4.1.2.3); at most 2^32 blocks per IV; test vectors in Appendix B.1. It needs only `RTCCrypto::block_encrypt` and a third `Cipher` implementation beside the two in `rtc-srtp/src/cipher/`. |
 | SRTP | `<From, To>` master key lifetimes (RFC 3711 8.1.1) | Optional. Re-keying is by MKI (`Context::add_master_key`) or a new DTLS-SRTP handshake. |
 | SRTP | Negotiation of an MKI (`use_srtp` `srtp_mki`), of RFC 6904 (`urn:ietf:params:rtp-hdrext:encrypt`), and of the NULL-cipher and RFC 6188 counter-mode profiles by a peer connection | `rtc-srtp` implements all of them ([SRTP claims](conformance/w3.md)); a peer connection negotiates none. The NULL cipher is forbidden in WebRTC (RFC 8827 6.5), the RFC 6188 suites have no DTLS-SRTP code point, and browsers use Cryptex (RFC 9335), not RFC 6904. |
+| SFrame | An SFrame RTP payload format (draft-ietf-avtcore-rtp-sframe), its SDP signalling, a transceiver switch | `rtc-sframe` encrypts and decrypts; the application packetizes the ciphertext and signals its use. |
 | FEC | FlexFEC as RFC 8627 | Only draft-ietf-payload-flexible-fec-scheme-03 is implemented, and the codec name is matched exactly so RFC 8627 `flexfec` is never fed to it. |
 | RTP | H.264 STAP-B / MTAP / FU-B (interleaved mode, never offered); `scalabilityMode` on an encoding | Simulcast is implemented. The SVC modes, their layer structures and their signalling (VP8 / VP9 payload descriptors, AV1 with the Dependency Descriptor) are in `rtc-rtp` for an application to use ([conformance/w4.md](conformance/w4.md)); the encoding parameter, its validation and offering the Dependency Descriptor by default are not. |
 | Identity | `peer_identity`, identity providers | Applications (Deno, for one) implement webrtc-identity above the engine. |
