@@ -2050,6 +2050,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+- **twcc**: a transport-wide feedback packet is kept within `MAX_FEEDBACK_OCTETS` (1100); a
+  longer reporting window continues in the next packet (draft-holmer-rmcat-transport-wide-cc-
+  extensions-01 section 3.1.5). A long window yielded one packet of any size.
 - **gcc**: the pre-filter and the Kalman filter as draft-ietf-rmcat-gcc-02 sections 5.1 to 5.3
   have them: a packet that arrives within burst_time of its group with a negative delay
   variation joins the group (a backlog delivered at once after an outage was read as a draining
