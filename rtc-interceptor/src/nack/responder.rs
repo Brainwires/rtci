@@ -122,10 +122,11 @@ struct LocalStream {
 const MAX_PROBE_FILL_OCTETS: usize = crate::cc::probe::PROBE_MAX_OCTETS;
 
 /// The most packets one probe cluster is filled with.
-const MAX_PROBE_FILL_PACKETS: usize = 64;
+const MAX_PROBE_FILL_PACKETS: usize = 128;
 
-/// How far back from the newest packet a probe cluster reaches for packets to send again.
-const MAX_PROBE_FILL_DEPTH: u16 = 16;
+/// The padding octets of one probe packet: the most RFC 3550 section 5.1 padding holds (its
+/// count is one octet).
+pub const PROBE_PADDING_OCTETS: u8 = 255;
 
 /// A sequence number is retransmitted at most once per this interval, however often it is
 /// NACKed. Receivers repeat NACKs while the repair is in flight; without this a peer can make
@@ -187,15 +188,21 @@ impl NackResponderInterceptor {
         }
     }
 
-    /// Fills a probe cluster ([`ProbeRequest`]) with retransmissions of the packets sent
-    /// last, on the RTX stream of the media stream that sent most recently.
+    /// Fills a probe cluster ([`ProbeRequest`]) with padding-only packets on the RTX stream of
+    /// the media stream that sent most recently.
     ///
     /// A probe needs a burst of packets at a multiple of the target rate, and an application
-    /// that follows the target does not have one waiting. Recent packets sent again are
-    /// payload the receiver can use (a second copy of what may yet be lost) and cost no
-    /// sequence number of the media stream. Without RTX negotiated nothing is added: a second
-    /// copy under the media SSRC is a duplicate, and padding would need sequence numbers the
-    /// application owns. Not charged to the NACK budget: it answers no NACK.
+    /// that follows the target does not have one waiting. Each packet is an RTP packet of the
+    /// RTX stream with no payload and [`PROBE_PADDING_OCTETS`] of padding (RFC 3550 section
+    /// 5.1): an RTX packet too short to hold the original sequence number of RFC 4588 section
+    /// 4 carries no media, and every receiver drops it after its transport-wide sequence
+    /// number has been recorded (this crate's endpoint, libwebrtc's `RtxReceiveStream`). A
+    /// retransmission of a packet already delivered would be a duplicate the receiving
+    /// application may play twice. The header is the newest packet's, with its extensions
+    /// (MID, the repaired RID in place of the RID), so the packet is demultiplexed as that
+    /// stream's repair flow. Without RTX negotiated nothing is added: padding under the media
+    /// SSRC would take sequence numbers the application owns. Not charged to the NACK budget:
+    /// it answers no NACK.
     fn fill_probe(&mut self, now: Instant, request: &ProbeRequest) {
         let Some(stream) = self
             .streams
@@ -212,25 +219,21 @@ impl NackResponderInterceptor {
             return;
         };
 
-        // The packets sent last, newest first, as far back as the buffer still holds them.
-        let recent: Vec<rtp::Packet> = (0..MAX_PROBE_FILL_DEPTH)
-            .map_while(|back| stream.send_buffer.get(newest.wrapping_sub(back)).cloned())
-            .collect();
-        if recent.is_empty() {
+        // The newest packet still held gives the header.
+        let Some(template) = stream.send_buffer.get(newest).cloned() else {
             return;
-        }
+        };
 
         let wanted = request.octets.min(MAX_PROBE_FILL_OCTETS);
         let mut filled = 0usize;
-        // Around again while the cluster is not full: the buffer may hold less than one.
-        for original in recent.iter().cycle().take(MAX_PROBE_FILL_PACKETS) {
+        for _ in 0..MAX_PROBE_FILL_PACKETS {
             if filled >= wanted || self.retransmissions_queued >= MAX_QUEUED_RETRANSMISSIONS {
                 break;
             }
-            let packet = rtx_packet(
+            let packet = padding_packet(
                 &mut stream.rtx_sequence_number,
                 (stream.rid_extension_id, stream.repaired_rid_extension_id),
-                original,
+                &template,
                 ssrc_rtx,
                 pt_rtx,
             );
@@ -384,6 +387,30 @@ fn rtx_packet(
         header,
         payload: rtx_payload.into(),
     }
+}
+
+/// A padding-only packet of the RTX stream (a bandwidth probe): `template`'s header on the RTX
+/// SSRC and payload type with the next RTX sequence number, no payload, and
+/// [`PROBE_PADDING_OCTETS`] of padding.
+fn padding_packet(
+    rtx_sequence_number: &mut u16,
+    rid_extension_ids: (Option<u8>, Option<u8>),
+    template: &rtp::Packet,
+    ssrc_rtx: u32,
+    pt_rtx: u8,
+) -> rtp::Packet {
+    let mut packet = rtx_packet(
+        rtx_sequence_number,
+        rid_extension_ids,
+        template,
+        ssrc_rtx,
+        pt_rtx,
+    );
+    packet.payload = bytes::Bytes::new();
+    packet.header.marker = false;
+    packet.header.padding = true;
+    packet.header.padding_size = PROBE_PADDING_OCTETS;
+    packet
 }
 
 impl Protocol<TaggedPacket, TaggedPacket, ()> for NackResponderInterceptor {

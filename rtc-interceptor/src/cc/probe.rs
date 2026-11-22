@@ -6,22 +6,26 @@
 //! for some milliseconds; if the receiver reports them arriving as closely spaced as they left,
 //! the path carries that rate and the estimate moves there at once.
 //!
-//! No RFC requires it. RFC 8836 section 2 asks that a congestion controller "adapt as quickly
-//! as possible to initial network conditions" and "allow for different modes of adaptation",
-//! naming "probing during setup" as one (requirement 4, both SHOULD); draft-ietf-rmcat-gcc-02
-//! has no probing at all. It is what libwebrtc does, in outline, and so it is an option that is
-//! off by default.
+//! RFC 8836 section 2 asks that a congestion controller "adapt as quickly as possible to
+//! initial network conditions" and "allow for different modes of adaptation", naming "probing
+//! during setup" as one (requirement 4, both SHOULD); draft-ietf-rmcat-gcc-02 has no probing at
+//! all. It is what libwebrtc does, in outline. The peer connection's default interceptor set
+//! probes (a SHOULD is met by default); `DefaultInterceptorOptions::bandwidth_probing` turns it
+//! off, and a chain built by hand probes only with
+//! [`CongestionControlBuilder::with_bandwidth_probing`](crate::CongestionControlBuilder::with_bandwidth_probing).
 //!
 //! The parts:
 //!
 //! - [`ProbeController`] decides when a cluster is sent and at what rate: two at the start
 //!   (three and six times the starting rate), a further one at twice the result while results
 //!   keep confirming the rate probed, and one every few seconds while the application sends
-//!   less than the target allows, when nothing else would show that the path has grown.
+//!   less than the target allows, when nothing else would show that the path has grown; and,
+//!   for a few seconds after the target dropped by a third or more, the rate before the drop.
 //! - [`ProbeRequest`] is what travels through the chain: the congestion controller announces
 //!   it on the read leg, the pacer releases the next packets at its rate and marks them
-//!   ([`ProbePacket`]), and the NACK responder fills the cluster with retransmissions of recent
-//!   packets on the RTX stream when the application's own media is not enough.
+//!   ([`ProbePacket`]), and the NACK responder fills the cluster with padding-only packets on
+//!   the RTX stream when the application's own media is not enough: they carry no media, so a
+//!   receiver never has a packet twice.
 //! - [`probe_estimate`] turns the receiver's reports on a cluster into a bit rate.
 
 use crate::rtpfb::acknowledgement::PacketReport;
@@ -53,6 +57,18 @@ const APPLICATION_LIMITED_SHARE: f64 = 0.65;
 pub const PROBE_RESULT_TIMEOUT: Duration = Duration::from_secs(1);
 /// The least time between two clusters.
 const PROBE_SPACING: Duration = Duration::from_millis(100);
+/// The target falling below this share of its recent high is a large drop.
+const LARGE_DROP_SHARE: f64 = 0.66;
+/// How long the recent high of the target is remembered for drop detection.
+const LARGE_DROP_WINDOW: Duration = Duration::from_secs(2);
+/// How long after a large drop the old rate is probed for.
+pub const PROBE_AFTER_DROP_TIMEOUT: Duration = Duration::from_secs(5);
+/// The first probe after a large drop waits this long: the back-off has to take effect.
+const PROBE_AFTER_DROP_DELAY: Duration = Duration::from_secs(1);
+/// And they are this far apart.
+const PROBE_AFTER_DROP_INTERVAL: Duration = Duration::from_secs(1);
+/// A probe after a drop asks for this share of the rate before it.
+const PROBE_AFTER_DROP_SHARE: f64 = 0.85;
 
 /// A probe cluster the congestion controller asks for.
 ///
@@ -175,6 +191,17 @@ pub struct ProbeController {
     /// A further cluster owed after a result that confirmed its rate.
     further: Option<f64>,
     max_bitrate: f64,
+    /// Whether the rate before a large drop is probed for (see
+    /// [`with_probe_after_drop`](Self::with_probe_after_drop)).
+    after_drop: bool,
+    /// The highest target of the last [`LARGE_DROP_WINDOW`], and when it was.
+    peak: Option<(f64, Instant)>,
+    /// The last large drop: the target before it, and when it happened.
+    drop: Option<(f64, Instant)>,
+    /// Whether the outstanding cluster probes for the rate before a drop.
+    drop_probe: bool,
+    /// When [`poll`](Self::poll) was last called.
+    polled_at: Option<Instant>,
 }
 
 impl ProbeController {
@@ -193,7 +220,30 @@ impl ProbeController {
             last_probe: None,
             further: None,
             max_bitrate,
+            after_drop: true,
+            peak: None,
+            drop: None,
+            drop_probe: false,
+            polled_at: None,
         }
+    }
+
+    /// Whether the rate the target had before a large drop is probed for, for a few seconds
+    /// after it (the default), as libwebrtc's `ProbeController::RequestProbe` does.
+    ///
+    /// A short burst of competing traffic, or a moment of loss, makes the delay-based
+    /// controller back off by a third or more; once it has passed, the climb back is the
+    /// controller's additive increase near the old operating point, half a packet per
+    /// response time, and takes tens of seconds (23 s after a 2 s burst at half the capacity,
+    /// in `rtc-interceptor/tests/rfc8836_multi_flow.rs`), against RFC 8836 section 2
+    /// (requirement 1f: the flow "regains its share quickly"). With this, a drop of the
+    /// target below two thirds of its high of the last two seconds is followed, from a second
+    /// on and once a second for five seconds, by a cluster at 85% of the rate before the drop
+    /// while the target is still below that. A result above the target raises it (as every
+    /// probe does); one below it changes nothing: the competing traffic is still there.
+    pub fn with_probe_after_drop(mut self, enabled: bool) -> Self {
+        self.after_drop = enabled;
+        self
     }
 
     /// The ceiling of what is probed for: the estimator's own maximum, or a limit from
@@ -214,8 +264,12 @@ impl ProbeController {
         sending: f64,
         media_flowing: bool,
     ) -> Option<ProbeRequest> {
+        self.polled_at = Some(now);
         if !media_flowing {
             return None;
+        }
+        if self.after_drop {
+            self.track_drops(now, target);
         }
         if let Some((_, _, asked)) = self.outstanding {
             if now.saturating_duration_since(asked) < PROBE_RESULT_TIMEOUT {
@@ -225,6 +279,7 @@ impl ProbeController {
             // was part of.
             self.outstanding = None;
             self.further = None;
+            self.drop_probe = false;
         }
         if self
             .last_probe
@@ -238,6 +293,17 @@ impl ProbeController {
             Some(rate)
         } else if let Some(rate) = self.further.take() {
             Some(rate)
+        } else if let Some((before, at)) = self.drop
+            && now.saturating_duration_since(at) >= PROBE_AFTER_DROP_DELAY
+            && target < PROBE_AFTER_DROP_SHARE * before
+            && self
+                .last_probe
+                .is_none_or(|last| now.saturating_duration_since(last) >= PROBE_AFTER_DROP_INTERVAL)
+        {
+            // The rate before a large drop, while the drop is recent: if what caused it has
+            // gone, the path carries it again.
+            self.drop_probe = true;
+            Some(PROBE_AFTER_DROP_SHARE * before)
         } else if sending < APPLICATION_LIMITED_SHARE * target
             && self.last_probe.is_none_or(|last| {
                 now.saturating_duration_since(last) >= PROBE_APPLICATION_LIMITED_INTERVAL
@@ -253,6 +319,7 @@ impl ProbeController {
         let rate = rate.min(self.max_bitrate);
         if rate <= target {
             // Nothing above the target is allowed, so there is nothing to ask.
+            self.drop_probe = false;
             return None;
         }
         let cluster = self.next_cluster;
@@ -264,6 +331,27 @@ impl ProbeController {
             bits_per_second: rate,
             octets: cluster_octets(rate),
         })
+    }
+
+    /// Follows the target's recent high, and notes a large drop below it.
+    fn track_drops(&mut self, now: Instant, target: f64) {
+        match self.peak {
+            Some((peak, at))
+                if target < peak && now.saturating_duration_since(at) <= LARGE_DROP_WINDOW =>
+            {
+                if target < LARGE_DROP_SHARE * peak {
+                    self.drop = Some((peak, now));
+                    self.peak = Some((target, now));
+                }
+            }
+            _ => self.peak = Some((target, now)),
+        }
+        if self
+            .drop
+            .is_some_and(|(_, at)| now.saturating_duration_since(at) > PROBE_AFTER_DROP_TIMEOUT)
+        {
+            self.drop = None;
+        }
     }
 
     /// The number of the cluster whose result is awaited.
@@ -279,8 +367,10 @@ impl ProbeController {
             return None;
         }
         self.outstanding = None;
-        // The path carried what was asked of it: it may carry more.
-        if estimate >= FURTHER_PROBE_THRESHOLD * rate && self.initial.is_empty() {
+        // The path carried what was asked of it: it may carry more. Not after a probe for the
+        // rate before a drop: that asks only whether the path is back where it was.
+        let drop_probe = std::mem::take(&mut self.drop_probe);
+        if !drop_probe && estimate >= FURTHER_PROBE_THRESHOLD * rate && self.initial.is_empty() {
             let next = estimate * FURTHER_PROBE;
             if next <= self.max_bitrate * FURTHER_PROBE {
                 self.further = Some(next);
@@ -290,19 +380,40 @@ impl ProbeController {
     }
 
     /// When [`poll`](Self::poll) next has something to say without anything else happening.
+    ///
+    /// Never an instant `poll` has already been called at or after: a deadline that passed
+    /// with nothing to send (no media flowing, a sender that is no longer application
+    /// limited, a target that recovered by itself) waits for the next write instead of
+    /// asking to be woken again at once.
     pub fn poll_timeout(&self) -> Option<Instant> {
+        self.deadlines()
+            .into_iter()
+            .flatten()
+            .filter(|deadline| self.polled_at.is_none_or(|polled| *deadline > polled))
+            .min()
+    }
+
+    /// The instants something may be due: a result to give up, the next cluster of a
+    /// sequence or of an application-limited sender, the next probe after a drop.
+    fn deadlines(&self) -> [Option<Instant>; 2] {
         if !self.started {
-            return None;
+            return [None, None];
         }
         if let Some((_, _, asked)) = self.outstanding {
-            return Some(asked + PROBE_RESULT_TIMEOUT);
+            return [Some(asked + PROBE_RESULT_TIMEOUT), None];
         }
-        let last = self.last_probe?;
-        if !self.initial.is_empty() || self.further.is_some() {
-            Some(last + PROBE_SPACING)
+        let Some(last) = self.last_probe else {
+            return [None, None];
+        };
+        let next = if !self.initial.is_empty() || self.further.is_some() {
+            last + PROBE_SPACING
         } else {
-            Some(last + PROBE_APPLICATION_LIMITED_INTERVAL)
-        }
+            last + PROBE_APPLICATION_LIMITED_INTERVAL
+        };
+        let after_drop = self
+            .drop
+            .map(|(_, at)| (at + PROBE_AFTER_DROP_DELAY).max(last + PROBE_AFTER_DROP_INTERVAL));
+        [Some(next), after_drop]
     }
 }
 
@@ -512,5 +623,120 @@ mod tests {
         // target has reached by then.
         assert_eq!(None, controller.poll(after, 600_000.0, 600_000.0, true));
         assert_eq!(None, controller.outstanding());
+    }
+
+    /// Settles a controller after its start-up sequence: two clusters answered at the
+    /// bottleneck, so no further cluster is owed.
+    fn settled(epoch: Instant) -> ProbeController {
+        let mut controller = ProbeController::new(300_000.0, 100_000_000.0);
+        for at in [epoch, epoch + Duration::from_millis(150)] {
+            let request = controller
+                .poll(at, 300_000.0, 300_000.0, true)
+                .expect("start-up cluster");
+            controller.on_result(request.cluster, 500_000.0);
+        }
+        controller
+    }
+
+    /// RFC 8836 section 2 (1f): after a large drop of the target (a burst of competing
+    /// traffic), the rate before it is probed for, from a second after the drop and once a
+    /// second, and a result never asks for a further cluster above it.
+    #[test]
+    fn a_large_drop_is_followed_by_a_probe_at_the_rate_before_it() {
+        let epoch = Instant::now();
+        let mut controller = settled(epoch);
+        let at = |ms: u64| epoch + Duration::from_millis(ms);
+        // At 2 Mbit/s, sending at the target, for a while.
+        for ms in (1_000..2_000).step_by(100) {
+            assert_eq!(
+                None,
+                controller.poll(at(ms), 2_000_000.0, 2_000_000.0, true)
+            );
+        }
+        // Down to 900 kbit/s: a drop of more than a third.
+        assert_eq!(None, controller.poll(at(2_000), 900_000.0, 900_000.0, true));
+        assert_eq!(
+            None,
+            controller.poll(at(2_500), 900_000.0, 900_000.0, true),
+            "the back-off is given a second first"
+        );
+        assert_eq!(Some(at(3_000)), controller.poll_timeout());
+        let request = controller
+            .poll(at(3_000), 900_000.0, 900_000.0, true)
+            .expect("the rate before the drop");
+        assert_eq!(0.85 * 2_000_000.0, request.bits_per_second);
+        // The path carries it again: the estimator takes it, and nothing above it is asked.
+        assert_eq!(
+            Some(1_700_000.0),
+            controller.on_result(request.cluster, 1_700_000.0)
+        );
+        assert_eq!(
+            None,
+            controller.poll(at(3_200), 1_700_000.0, 1_700_000.0, true)
+        );
+        assert_eq!(
+            None,
+            controller.poll(at(4_500), 1_700_000.0, 1_700_000.0, true)
+        );
+    }
+
+    /// While the competing traffic is still there the probe shows less than the rate before
+    /// the drop: it is asked again a second later, and not after the drop is five seconds old.
+    #[test]
+    fn probes_after_a_drop_stop_after_a_few_seconds() {
+        let epoch = Instant::now();
+        let mut controller = settled(epoch);
+        let at = |ms: u64| epoch + Duration::from_millis(ms);
+        assert_eq!(
+            None,
+            controller.poll(at(1_000), 2_000_000.0, 2_000_000.0, true)
+        );
+        assert_eq!(None, controller.poll(at(1_100), 900_000.0, 900_000.0, true));
+        let mut probes = 0;
+        for ms in (1_200..9_000).step_by(100) {
+            if let Some(request) = controller.poll(at(ms), 900_000.0, 900_000.0, true) {
+                probes += 1;
+                assert!(ms <= 1_100 + 5_000, "at {ms} ms");
+                controller.on_result(request.cluster, 950_000.0);
+            }
+        }
+        assert!((3..=5).contains(&probes), "{probes} probes");
+    }
+
+    /// `with_probe_after_drop(false)`: a drop is left to the delay-based controller's climb.
+    #[test]
+    fn without_the_option_a_drop_is_not_probed() {
+        let epoch = Instant::now();
+        let mut controller = settled(epoch).with_probe_after_drop(false);
+        let at = |ms: u64| epoch + Duration::from_millis(ms);
+        assert_eq!(
+            None,
+            controller.poll(at(1_000), 2_000_000.0, 2_000_000.0, true)
+        );
+        for ms in (1_100..8_000).step_by(100) {
+            assert_eq!(None, controller.poll(at(ms), 900_000.0, 900_000.0, true));
+        }
+    }
+
+    /// A deadline that came with nothing to send (here: an application-limited probe falls due
+    /// while the sender has caught up with its target) is not asked for again: a driver that
+    /// sleeps until `poll_timeout` would otherwise be woken at once, over and over.
+    #[test]
+    fn a_deadline_that_passed_with_nothing_due_is_not_asked_again() {
+        let epoch = Instant::now();
+        let mut controller = settled(epoch);
+        let due = controller
+            .poll_timeout()
+            .expect("the next application-limited probe");
+        assert_eq!(None, controller.poll(due, 1_000_000.0, 1_000_000.0, true));
+        assert!(
+            controller.poll_timeout().is_none_or(|next| next > due),
+            "{:?}",
+            controller.poll_timeout()
+        );
+        // Not flowing at all: nothing to wake for either.
+        let later = due + Duration::from_secs(10);
+        assert_eq!(None, controller.poll(later, 1_000_000.0, 0.0, false));
+        assert!(controller.poll_timeout().is_none_or(|next| next > later));
     }
 }

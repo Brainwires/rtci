@@ -283,10 +283,13 @@ pub struct DefaultInterceptorOptions {
     /// [`PacerBuilder::with_immediate_release`](interceptor::PacerBuilder::with_immediate_release).
     pub pacer_immediate_release: bool,
     /// Whether the path is probed for capacity above the target with short clusters of
-    /// packets, as libwebrtc does. `false` by default: no RFC requires it (RFC 8836 section 2
-    /// names probing as one way to start faster), and it sends traffic the application did
-    /// not write. With it a path of 2.5 Mbit/s is found in under a second from a 300 kbit/s
-    /// start; without, in about 27 seconds. See
+    /// packets, as libwebrtc does. `true` by default: RFC 8836 section 2 asks that a
+    /// congestion controller "adapt as quickly as possible to initial network conditions"
+    /// (requirement 4, a SHOULD) and names probing during setup as one way, and with it a
+    /// path of 2.5 Mbit/s is found in under a second from a 300 kbit/s start, against about
+    /// 26 seconds without. A cluster the application's own media does not fill is filled with
+    /// padding-only packets on the RTX stream, which carry no media and which receivers drop
+    /// (none without RTX negotiated). `false` sends only what the application writes. See
     /// [`CongestionControlBuilder::with_bandwidth_probing`](interceptor::CongestionControlBuilder::with_bandwidth_probing).
     pub bandwidth_probing: bool,
 }
@@ -297,7 +300,7 @@ impl Default for DefaultInterceptorOptions {
             congestion_feedback: CongestionFeedback::default(),
             unnegotiated_tmmbr: false,
             pacer_immediate_release: true,
-            bandwidth_probing: false,
+            bandwidth_probing: true,
         }
     }
 }

@@ -834,6 +834,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behaviour changes
 
+- **interceptor**: bandwidth probing is on in the default interceptor set
+  (`DefaultInterceptorOptions::bandwidth_probing` now `true`; `false` is the opt-out). RFC 8836
+  section 2 (requirement 4, a SHOULD) asks a congestion controller to adapt as quickly as
+  possible to the initial conditions: 90% of a 2.5 Mbit/s path from a 300 kbit/s start in 0.2 s,
+  against 26 s without. `CongestionControlBuilder::with_bandwidth_probing` stays off for a chain
+  built by hand.
+- **nack**: a probe cluster the application's media does not fill is filled with padding-only
+  packets on the RTX stream (no original sequence number, `PROBE_PADDING_OCTETS` = 255 octets of
+  RFC 3550 padding), which receivers drop; they were retransmissions of recent packets, which a
+  receiver hands to its application again (this crate's endpoint does, after de-encapsulating
+  RTX). An application sending a fifth of the path spends 3.7% of its octets on probes (3.8% with
+  the retransmissions).
+- **cc**: after a large drop of the target (below two thirds of its high of the last two
+  seconds) the rate before the drop is probed for, once a second from a second after it, for
+  five seconds (`ProbeController::with_probe_after_drop`, default `true`; libwebrtc's
+  `RequestProbe` in outline). A 2 s burst of cross traffic at half the capacity costs 2 s of
+  share instead of 23 s (RFC 8836 section 2, requirement 1f).
+- **gcc**: a packet lost out of a queue at its limit is over-use for the delay-based controller
+  (`Gcc::with_loss_at_queue_limit_as_overuse`, default `true`; `QueueLimitDetector`): a feedback
+  batch with a loss whose arrived packets all waited at least 75% of the highest queueing delay
+  of the last five seconds, and at least 10 ms. At a full tail-drop queue the delay gradient is
+  zero and the loss-based controller holds between 2% and 10% loss (draft-ietf-rmcat-gcc-02
+  section 6), so `Gcc` held the queue full: on a shared bottleneck it took 0.97 of the path from
+  a TCP-like transfer and held a late-joining flow at the floor (RFC 8836 section 2, 3 and 2a).
+  Now 0.21 / 0.79 against the transfer and 0.49 / 0.45 with the late flow. The adaptive
+  threshold (section 5.4) was checked for the late-joiner case and is not the cause: it is the
+  draft's, bounded to 6..600 ms and quick to fall back.
+- **gcc**: over-use that lasts cuts the target once per round trip (10 to 200 ms), at once
+  when the received rate has fallen below half the target
+  (`Gcc::with_one_decrease_per_round_trip`, `RateController::with_one_decrease_per_round_trip`,
+  default `true`; libwebrtc's `TimeToReduceFurther`). draft-ietf-rmcat-gcc-02 section 5.5 cuts on
+  every update while over-use lasts; `false` is that.
+- **cc**: `ProbeController::poll_timeout` no longer names an instant `poll` has already been
+  called at: a deadline that passed with nothing to send (the application caught up with its
+  target, or stopped sending) asked to be woken again at once, over and over.
 - **rtcp_session**: the SDES chunk of each local SSRC carries, after the CNAME, the MID of
   its m= section (RFC 9143 section 15.1: "SHOULD be sent in the first few RTCP packets ... and
   regularly thereafter"), the encoding's rid as RtpStreamId and, on RTX and FEC SSRCs, as
@@ -1054,11 +1089,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   times what the application sent, and with it what the application was told to send, to the
   floor (0.04 of the capacity after 30 s; now 0.95).
 - **test**: `rtc-interceptor/tests/rfc8836_multi_flow.rs`, a deterministic multi-flow
-  bottleneck (FIFO with tail drop or random early drop, capacity changes, `Gcc` flows, a
-  TCP-like transfer, cross traffic) for the RFC 8836 section 2 properties. Two flows share
-  evenly, bursts leave no queue, a pause and an AQM leave the flow stable. Two requirements
-  are not met and are recorded as ignored tests and `violated` rows: a flow that joins late
-  is held to the floor (2 (2a)), and `Gcc` starves a TCP-like transfer (2 (3)).
+  bottleneck (FIFO with tail drop or random early drop, capacity changes, `Gcc` flows probed as
+  in the default set, a TCP-like transfer, cross traffic) for the RFC 8836 section 2
+  properties. Two flows share evenly, a late flow gets its share, `Gcc` and TCP neither starve
+  the other, bursts leave no queue, a pause and an AQM leave the flow stable. The TCP-like model
+  is checked on its own (it fills a path alone and takes what a constant-rate flow leaves).
 - **test**: `rtc-interceptor/tests/nack_recovery_under_loss.rs`: NACK recovers every packet
   over 5% loss each way with jitter on the virtual clock, with and without the RTCP session.
   `tests/testenv_impairment.rs` prints the packets NACK left lost, and the first one received.

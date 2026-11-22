@@ -5,7 +5,7 @@
 //! multiple of the target show within a second what the path carries. Everything runs on a
 //! virtual clock through the chain the default interceptor set builds for a sender: the
 //! congestion controller, the TWCC sender, the pacer and the NACK responder, whose RTX stream
-//! fills the clusters.
+//! fills the clusters with padding-only packets.
 //!
 //! Run with `--nocapture` to read the ramp.
 
@@ -124,6 +124,9 @@ struct Run {
     /// stream.
     probe_packets: usize,
     probe_rtx_packets: usize,
+    /// Probe packets on the RTX stream that carry a payload (an original sequence number and
+    /// media): a receiver would hand those to its application again.
+    probe_rtx_with_payload: usize,
     /// Octets on the RTX stream over the whole run, as a share of all octets sent.
     rtx_share: f64,
     /// Share of the offered packets the path dropped.
@@ -165,6 +168,7 @@ fn run(probing: bool, with_rtx: bool, media_share: f64, duration: Duration) -> R
     let mut peak: f64 = 0.0;
     let mut probe_packets = 0usize;
     let mut probe_rtx_packets = 0usize;
+    let mut probe_rtx_with_payload = 0usize;
     let mut rtx_octets = 0usize;
     let mut octets = 0usize;
     let mut offered = 0u64;
@@ -228,6 +232,9 @@ fn run(probing: bool, with_rtx: bool, media_share: f64, duration: Duration) -> R
                 probe_packets += 1;
                 if on_rtx {
                     probe_rtx_packets += 1;
+                    if !packet.payload.is_empty() {
+                        probe_rtx_with_payload += 1;
+                    }
                 }
             }
             let mut extension = packet
@@ -279,6 +286,7 @@ fn run(probing: bool, with_rtx: bool, media_share: f64, duration: Duration) -> R
         final_share: handle.target_bitrate() / CAPACITY,
         probe_packets,
         probe_rtx_packets,
+        probe_rtx_with_payload,
         rtx_share: rtx_octets as f64 / octets.max(1) as f64,
         loss: dropped as f64 / offered.max(1) as f64,
     }
@@ -298,14 +306,15 @@ fn print(title: &str, run: &Run) {
     );
 }
 
-/// The default: no probing, no probe packet ever, and the climb from 300 kbit/s to 2.5 Mbit/s
-/// is the delay-based controller's own, 8% a second: more than fifteen seconds.
+/// Without probing (a builder's default; the peer connection's default set probes): no probe
+/// packet ever, and the climb from 300 kbit/s to 2.5 Mbit/s is the delay-based controller's
+/// own, 8% a second: more than fifteen seconds.
 #[test]
 fn without_probing_the_estimate_climbs_at_the_controllers_pace() {
     let outcome = run(false, true, 1.0, Duration::from_secs(60));
     print("without probing", &outcome);
 
-    assert_eq!(0, outcome.probe_packets, "probing is off by default");
+    assert_eq!(0, outcome.probe_packets, "probing is off");
     assert_eq!(
         0.0, outcome.rtx_share,
         "and nothing is sent that was not written"
@@ -320,7 +329,7 @@ fn without_probing_the_estimate_climbs_at_the_controllers_pace() {
 /// With probing the same path is found in under three seconds (measured: 0.4 s, against 26.1 s
 /// without): the clusters at three and six times the starting rate arrive as they left, the
 /// one after them meets the bottleneck, and the estimate is what that one measured. The
-/// clusters are filled with retransmissions on the RTX stream (18 packets in the whole run),
+/// clusters are filled with padding-only packets on the RTX stream, none carrying media,
 /// the estimate does not run past the capacity, and the path drops no more than it does under
 /// the controller's own search around the capacity (3% here over a minute at the capacity,
 /// 1.8% without probing over the half minute it spends there).
@@ -335,6 +344,10 @@ fn with_probing_the_capacity_is_found_within_seconds() {
     assert!(
         outcome.probe_rtx_packets > 0,
         "the clusters were filled from the RTX stream"
+    );
+    assert_eq!(
+        0, outcome.probe_rtx_with_payload,
+        "padding only: nothing a receiver would play twice"
     );
     assert!(
         outcome.peak <= 1.2 * CAPACITY,
@@ -367,8 +380,9 @@ fn without_rtx_probing_adds_no_packet_of_its_own() {
 /// about the room above what is sent, and without probing the estimate is bound to one and a
 /// half times the received rate (draft-ietf-rmcat-gcc-02 section 5.5). With it, a cluster
 /// every five seconds measures the path, and the estimate rests on the last measurement: near
-/// the capacity, never past it (measured: 0.95 of it at the end, peak 2.37 Mbit/s). The price
-/// is the clusters, here on the RTX stream: 58 packets in 30 s, 3.8% of the octets.
+/// the capacity, never past it. The price is the clusters, padding on the RTX stream (3.81% of
+/// the octets when they were retransmissions of 1200-octet packets; see the printed share
+/// for padding).
 #[test]
 fn an_application_limited_sender_is_probed_now_and_then() {
     let outcome = run(true, true, 0.2, Duration::from_secs(30));
@@ -385,6 +399,7 @@ fn an_application_limited_sender_is_probed_now_and_then() {
         "{}",
         outcome.final_share
     );
-    assert!(outcome.rtx_share < 0.3, "{}", outcome.rtx_share);
+    assert!(outcome.rtx_share < 0.1, "{}", outcome.rtx_share);
+    assert_eq!(0, outcome.probe_rtx_with_payload);
     assert!(outcome.loss < 0.02, "{}", outcome.loss);
 }
