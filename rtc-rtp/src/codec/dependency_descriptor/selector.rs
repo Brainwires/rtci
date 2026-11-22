@@ -96,7 +96,7 @@ impl DecodeTargetSelector {
             .into_iter()
             .enumerate()
             .filter(|(dt, (s, t))| {
-                (active_decode_targets >> dt) & 1 == 1
+                active_decode_targets.checked_shr(*dt as u32).unwrap_or(0) & 1 == 1
                     && *s <= self.target_spatial_id
                     && *t <= self.target_temporal_id
             })
@@ -160,7 +160,10 @@ impl DecodeTargetSelector {
 
         // What the receiver has of each chain, and what this forwarder has.
         let mut chains_forwarded = 0u32;
-        for (chain, chain_fdiff) in descriptor.chain_fdiffs.iter().enumerate().take(32) {
+        // (A descriptor read with this reader's structure has one difference per chain; one
+        // from elsewhere is not trusted to.)
+        let chains = self.missing.len().min(32);
+        for (chain, chain_fdiff) in descriptor.chain_fdiffs.iter().enumerate().take(chains) {
             if self.missing[chain] == Some(frame_number) {
                 self.missing[chain] = None;
             }
@@ -212,7 +215,9 @@ impl DecodeTargetSelector {
             let chain_intact = structure
                 .decode_target_protected_by
                 .get(wanted)
-                .is_some_and(|chain| (chains_forwarded >> chain) & 1 == 1);
+                .is_some_and(|chain| {
+                    chains_forwarded.checked_shr(*chain as u32).unwrap_or(0) & 1 == 1
+                });
             if dti(wanted) == DecodeTargetIndication::Switch || chain_intact {
                 self.current = Some(wanted);
             }

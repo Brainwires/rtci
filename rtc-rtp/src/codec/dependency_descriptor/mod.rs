@@ -266,7 +266,7 @@ impl FrameDependencyStructure {
     /// `decode_target_layers()`: for each decode target the highest spatial and temporal layer
     /// of the frames that are part of it, which is the fidelity it stands for.
     pub fn decode_target_layers(&self) -> Vec<(u8, u8)> {
-        (0..self.num_decode_targets)
+        (0..self.num_decode_targets.min(MAX_DECODE_TARGETS))
             .map(|dt| {
                 let mut spatial_id = 0;
                 let mut temporal_id = 0;
@@ -544,6 +544,9 @@ impl DependencyDescriptor {
                 return invalid("the attached structure is not the one in force");
             }
             attached.validate()?;
+        }
+        if structure.num_decode_targets == 0 || structure.num_decode_targets > MAX_DECODE_TARGETS {
+            return invalid("1 to 32 decode targets");
         }
         let Some(template_index) = structure.template_index(self.template_id) else {
             // "MUST be in the range of template_id_offset to (template_id_offset +
@@ -836,7 +839,8 @@ fn chain_has_active_decode_target(
             .iter()
             .enumerate()
             .any(|(dt, protected_by)| {
-                *protected_by as usize == chain && (active_decode_targets >> dt) & 1 == 1
+                *protected_by as usize == chain
+                    && active_decode_targets.checked_shr(dt as u32).unwrap_or(0) & 1 == 1
             })
     })
 }
