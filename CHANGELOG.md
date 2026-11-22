@@ -981,8 +981,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `max-compat` all of them. **The default offer changes**: a second audio or video section of
   an initial offer now has port 0 and `a=bundle-only`.
 
-### Features
-
 - **shared**: `Error::ErrAnswerDoesNotMatchOffer(String)`.
 - **transceiver**: `RTCRtpTransceiver::remote_bandwidth()` (`RTCRemoteBandwidth`: `b=TIAS` /
   `b=AS`, `b=RS`, `b=RR` of the remote media section, RFC 9429 section 5.10),
