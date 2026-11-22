@@ -1,5 +1,7 @@
 /// AV1 payload format ([RFC 9628]).
 pub mod av1;
+/// The Dependency Descriptor RTP header extension (AV1 RTP specification, appendix A).
+pub mod dependency_descriptor;
 /// G.711 and G.722 payload formats, which need no fragmentation.
 pub mod g7xx;
 /// H.264 payload format ([RFC 6184]): STAP-A aggregation and FU-A fragmentation.
