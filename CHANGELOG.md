@@ -107,6 +107,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **dtls**: `CipherSuite::record_expansion` reports what a suite adds to a record's payload, so an
   application can size its datagrams (RFC 6347 section 4.1.1.1).
 
+### Tests
+
+- **dtls**: known-answer tests against handshakes recorded from OpenSSL 3.5.4 (`openssl s_client`
+  against `openssl s_server -dtls1_2 -listen`, five cipher suites): the Finished values, the
+  extended master secret, the `EXTRACTOR-dtls_srtp` exporter output and the protected records
+  OpenSSL produced are recomputed by this crate from the recorded messages
+  (`rtc-dtls/src/conn/openssl_kat_test.rs`). Until now the PRF had vectors and everything above
+  it was tested only against this crate itself.
+
 ### Cookie exchange and new associations
 
 - **dtls**: a server `Endpoint` performs the cookie exchange without keeping state (RFC 6347

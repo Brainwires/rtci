@@ -15,6 +15,10 @@ mod conn_ported_test;
 mod conn_test;
 #[cfg(test)]
 mod conn_transport_test;
+#[cfg(test)]
+mod openssl_kat_test;
+#[cfg(test)]
+mod openssl_recordings;
 
 use crate::alert::*;
 use crate::application_data::*;
