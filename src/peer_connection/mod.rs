@@ -3295,6 +3295,28 @@ impl RTCPeerConnection {
         self.trigger_negotiation_needed();
     }
 
+    /// Asks for the data section to be rejected, which closes the SCTP association and the
+    /// DTLS association under it.
+    ///
+    /// RFC 8841 section 10.5: "If the offerer wants to close an existing SCTP association and
+    /// the underlying DTLS association ..., it MUST assign a zero port value to the 'm=' line
+    /// associated with the SCTP and DTLS associations". The next offer carries the data
+    /// section with port zero; so does the answer to the peer's next offer, should that come
+    /// first (section 10.3: an answerer that does not accept the "m=" line). When the
+    /// exchange completes the association is closed and every data channel with it. The DTLS
+    /// association is closed too when the data section was the only one that used it: the
+    /// next description that sets a section up establishes a new DTLS association, with a
+    /// new `a=tls-id`. With BUNDLE and media sections the transport is theirs as well, and
+    /// stays; to close the SCTP association alone, whatever the session carries, use
+    /// [`Self::close_sctp_association`].
+    ///
+    /// A data channel created afterwards brings a new data section with the next offer, and
+    /// a new association on a new `a=sctp-port`.
+    pub fn reject_data_section(&mut self) {
+        self.sctp_transport_mut().staged = Some(SctpRenegotiation::Reject);
+        self.trigger_negotiation_needed();
+    }
+
     /// Brings the SCTP transport in line with what a completed offer/answer exchange
     /// negotiated for the data section (RFC 8841 sections 10.3 and 10.4).
     ///
