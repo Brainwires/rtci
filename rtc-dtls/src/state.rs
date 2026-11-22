@@ -65,6 +65,15 @@ pub struct State {
     pub(crate) remote_certificate_types: Vec<ClientCertificateType>,
     /// Server: the ClientHello carried ec_point_formats, so the ServerHello may (RFC 8422 5.2).
     pub(crate) remote_offered_point_formats: bool,
+    /// RFC 9146, DTLS 1.2. The connection id this client put in its ClientHello, kept so
+    /// that a repeated ClientHello carries the same one.
+    pub(crate) connection_id_offer: Option<Vec<u8>>,
+    /// The connection id the peer puts in the records it sends here, once the extension
+    /// is negotiated (both hellos carried it). Empty: its records come without one.
+    pub(crate) local_connection_id: Option<Vec<u8>>,
+    /// The connection id this side puts in the records it sends, once negotiated. Empty:
+    /// they go without one.
+    pub(crate) remote_connection_id: Option<Vec<u8>>,
     /// Server: the pair chosen for the ServerKeyExchange signature, one the client listed and
     /// the certificate's key can produce (RFC 5246 7.4.3).
     pub(crate) local_signature_scheme: Option<SignatureHashAlgorithm>,
@@ -82,6 +91,12 @@ pub struct State {
     pub(crate) tls13: Option<(crate::dtls13::suite::Suite13, SecretVec)>,
     /// The version negotiated, once a ServerHello has settled it.
     pub(crate) negotiated_version: Option<crate::config::DtlsVersion>,
+    /// The DTLS 1.3 handshake resumed a session, or used an external PSK, in place of
+    /// certificates (RFC 8446 section 2.2).
+    pub(crate) resumed: bool,
+    /// The latest `now` the association was given: what a ClientHello dates its ticket's
+    /// age by (the engine reads no clock).
+    pub(crate) clock: Option<std::time::Instant>,
     //pub(crate) replay_detector: Vec<Box<dyn ReplayDetector>>,
 }
 
@@ -99,9 +114,29 @@ struct SerializedState {
     identity_hint: Vec<u8>,
     is_client: bool,
     extended_master_secret: bool,
+    /// RFC 9146: the connection ids negotiated, as `State` holds them.
+    local_connection_id: Option<Vec<u8>>,
+    remote_connection_id: Option<Vec<u8>>,
 }
 
 impl State {
+    /// The connection id a protected record sent to the peer carries (RFC 9146): `None`
+    /// unless the extension was negotiated and the peer asked for a non-empty one.
+    pub(crate) fn send_connection_id(&self) -> Option<&[u8]> {
+        self.local_connection_id.as_ref()?;
+        self.remote_connection_id
+            .as_deref()
+            .filter(|connection_id| !connection_id.is_empty())
+    }
+
+    /// The connection id a protected record from the peer carries, likewise.
+    pub(crate) fn receive_connection_id(&self) -> Option<&[u8]> {
+        self.remote_connection_id.as_ref()?;
+        self.local_connection_id
+            .as_deref()
+            .filter(|connection_id| !connection_id.is_empty())
+    }
+
     /// Creates the initial handshake state for a connection.
     ///
     /// The crypto provider comes from the caller — `rtc-dtls` never resolves a default. This
@@ -143,12 +178,17 @@ impl State {
             remote_signature_schemes: vec![],
             remote_certificate_types: vec![],
             remote_offered_point_formats: false,
+            connection_id_offer: None,
+            local_connection_id: None,
+            remote_connection_id: None,
             local_signature_scheme: None,
             secrets_forgotten: false,
             cookie_verified_by_endpoint: false,
             tls13_offer: None,
             tls13: None,
             negotiated_version: None,
+            resumed: false,
+            clock: None,
         }
     }
 }
@@ -200,6 +240,8 @@ impl State {
             identity_hint: self.identity_hint.clone(),
             is_client: self.is_client,
             extended_master_secret: self.extended_master_secret,
+            local_connection_id: self.local_connection_id.clone(),
+            remote_connection_id: self.remote_connection_id.clone(),
         })
     }
 
@@ -224,6 +266,10 @@ impl State {
 
         self.is_client = serialized.is_client;
         self.extended_master_secret = serialized.extended_master_secret;
+        self.local_connection_id
+            .clone_from(&serialized.local_connection_id);
+        self.remote_connection_id
+            .clone_from(&serialized.remote_connection_id);
 
         // Set master secret
         self.master_secret.clone_from(&serialized.master_secret);
@@ -349,6 +395,12 @@ impl State {
     /// DTLS 1.3).
     pub fn negotiated_version(&self) -> Option<crate::config::DtlsVersion> {
         self.negotiated_version
+    }
+
+    /// Whether the DTLS 1.3 handshake was made with a pre-shared key, a ticket of an earlier
+    /// session or an external PSK, rather than with certificates (RFC 8446 section 2.2).
+    pub fn resumed(&self) -> bool {
+        self.resumed
     }
 
     /// Whether this endpoint took the client role.

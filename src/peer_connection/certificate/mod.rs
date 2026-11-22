@@ -226,6 +226,15 @@ use crate::peer_connection::transport::dtls::fingerprint::{
 };
 use shared::error::{Error, Result};
 
+/// The lifetime of a certificate [`RTCCertificate::generate_certificate`] makes when none is
+/// given: 30 days (W3C webrtc-pc section 4.9.1: "a user agent ... SHOULD set it to 30 days";
+/// the generateCertificate algorithm uses it as the default expiry).
+pub const DEFAULT_CERTIFICATE_LIFETIME: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+
+/// The longest lifetime a generated certificate gets (W3C webrtc-pc section 4.9: "the user
+/// agent MUST cap the value at 365 days").
+pub const MAX_CERTIFICATE_LIFETIME: Duration = Duration::from_secs(365 * 24 * 60 * 60);
+
 /// X.509 certificate used to authenticate WebRTC peer-to-peer communications.
 ///
 /// RTCCertificate encapsulates a DTLS certificate and its associated private key,
@@ -384,6 +393,46 @@ impl RTCCertificate {
     ) -> Result<Self> {
         let signing_key = crypto.generate_signing_key(scheme).map_err(crypto_error)?;
         Self::generate_from_signing_key(params, scheme, signing_key)
+    }
+
+    /// W3C `RTCPeerConnection.generateCertificate()` (webrtc-pc section 4.9): a self-signed
+    /// certificate with a new key of `scheme`, that holds nothing linkable to a user or an
+    /// application (a random common name, subject alternative name and serial number), valid
+    /// from `now` for `expires` ([`DEFAULT_CERTIFICATE_LIFETIME`], 30 days, when `None`; at most
+    /// [`MAX_CERTIFICATE_LIFETIME`], 365 days, which a longer one is cut to). `expires` is the
+    /// spec's `RTCCertificateExpiration.expires`; [`Self::expires`] is `now` plus the lifetime.
+    ///
+    /// `now` is the wall-clock time of generation, which the caller supplies: the engine reads
+    /// no clock.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::generate`]: `scheme` not supported by `crypto` (the spec's
+    /// `NotSupportedError`), or key generation failing.
+    pub fn generate_certificate(
+        crypto: &dyn RTCCrypto,
+        scheme: SignatureScheme,
+        expires: Option<Duration>,
+        now: SystemTime,
+    ) -> Result<Self> {
+        let lifetime = expires
+            .unwrap_or(DEFAULT_CERTIFICATE_LIFETIME)
+            .min(MAX_CERTIFICATE_LIFETIME);
+        let name = shared::util::math_rand_alpha(16);
+        let mut params =
+            CertificateParams::new(vec![name.clone()]).map_err(|e| Error::Other(e.to_string()))?;
+        let mut distinguished_name = rcgen::DistinguishedName::new();
+        distinguished_name.push(rcgen::DnType::CommonName, name);
+        params.distinguished_name = distinguished_name;
+        // RFC 5280 section 4.1.2.2: a positive serial of at most 20 octets.
+        let mut serial: [u8; 16] = rand::random();
+        serial[0] &= 0x7f;
+        params.serial_number = Some(serial.to_vec().into());
+        params.not_before = now.into();
+        params.not_after = params.not_before + lifetime;
+        let mut certificate = Self::generate(crypto, scheme, params)?;
+        certificate.expires = now + lifetime;
+        Ok(certificate)
     }
 
     /// Imports a PKCS#8 private key through `provider` and associates it with an existing chain.
@@ -1000,6 +1049,53 @@ mod test {
 
         assert_ne!(cert1, cert2);
 
+        Ok(())
+    }
+
+    /// W3C 4.9: generateCertificate's expiry is 30 days by default, the given lifetime
+    /// otherwise, capped at 365 days; [[Expires]] is generation time plus the lifetime; the
+    /// name and serial are random (nothing linkable).
+    #[test]
+    fn generate_certificate_follows_the_w3c_lifetime_rules() -> Result<()> {
+        let provider = default_test_provider()?;
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let make = |expires| {
+            RTCCertificate::generate_certificate(
+                provider.crypto(),
+                SignatureScheme::EcdsaP256Sha256,
+                expires,
+                now,
+            )
+        };
+        assert_eq!(make(None)?.expires, now + DEFAULT_CERTIFICATE_LIFETIME);
+        assert_eq!(
+            DEFAULT_CERTIFICATE_LIFETIME,
+            Duration::from_secs(30 * 86400)
+        );
+        let hour = Duration::from_secs(3600);
+        assert_eq!(make(Some(hour))?.expires, now + hour);
+        assert_eq!(
+            make(Some(Duration::from_secs(1000 * 86400)))?.expires,
+            now + Duration::from_secs(365 * 86400),
+            "capped at 365 days"
+        );
+        let (a, b) = (make(None)?, make(None)?);
+        let der = |c: &RTCCertificate| c.dtls_certificate.certificate[0].as_ref().to_vec();
+        let (a, b) = (der(&a), der(&b));
+        let parse = |der: &[u8]| {
+            let (_, cert) = x509_parser::parse_x509_certificate(der).expect("x509");
+            (
+                cert.serial.clone(),
+                cert.subject().to_string(),
+                cert.validity().not_after.timestamp(),
+            )
+        };
+        let (serial_a, subject_a, not_after) = parse(&a);
+        let (serial_b, subject_b, _) = parse(&b);
+        assert_ne!(serial_a, serial_b, "random serial numbers");
+        assert_ne!(subject_a, subject_b, "random names");
+        assert!(!subject_a.contains("rcgen"), "{subject_a}");
+        assert_eq!(not_after, 1_800_000_000 + 30 * 86400);
         Ok(())
     }
 

@@ -14,6 +14,7 @@ pub(crate) mod handshake;
 pub(crate) mod hello;
 pub(crate) mod key_schedule;
 pub(crate) mod messages;
+pub(crate) mod psk;
 pub(crate) mod record;
 pub(crate) mod suite;
 
@@ -22,13 +23,17 @@ mod connection_id_test;
 #[cfg(test)]
 mod fuzz_corpus_test;
 #[cfg(test)]
-mod handshake_test;
+pub(crate) mod handshake_test;
 #[cfg(test)]
 mod key_schedule_test;
 #[cfg(test)]
 mod openssl_kat_test;
 #[cfg(test)]
 mod openssl_recordings;
+#[cfg(test)]
+mod post_handshake_auth_test;
+#[cfg(test)]
+mod psk_test;
 #[cfg(test)]
 mod record_test;
 #[cfg(test)]

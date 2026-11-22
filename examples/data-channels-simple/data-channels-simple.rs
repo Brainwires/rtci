@@ -231,7 +231,10 @@ async fn run_webrtc(
                         _ => {}
                     },
                     RTCPeerConnectionEvent::OnIceCandidateEvent(ice_event) => {
-                        info!("New ICE candidate: {:?}", ice_event.candidate.address);
+                        info!(
+                            "New ICE candidate: {:?}",
+                            ice_event.candidate.map(|candidate| candidate.address)
+                        );
                     }
                     _ => {}
                 }

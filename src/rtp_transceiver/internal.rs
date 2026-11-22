@@ -500,6 +500,14 @@ impl RTCRtpTransceiverInternal {
         self.rtcp_reduced_size
     }
 
+    /// Records whether the last answer allows this transceiver's sender to mix one- and
+    /// two-byte header extensions in a stream (RFC 8285 section 6).
+    pub(crate) fn set_extmap_allow_mixed(&mut self, mixed: bool) {
+        if let Some(sender) = self.sender.as_mut() {
+            sender.set_extmap_allow_mixed(mixed);
+        }
+    }
+
     pub(crate) fn set_rtcp_reduced_size(&mut self, reduced_size: bool) {
         self.rtcp_reduced_size = reduced_size;
         if let Some(sender) = self.sender.as_mut() {

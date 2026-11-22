@@ -188,10 +188,14 @@ impl Flight for Flight3 {
 
             // RFC 5246 7.4.1.4: an extension type the ClientHello did not carry is answered
             // with unsupported_extension.
-            let offered: Vec<u16> = client_hello_extensions(cfg, state.tls13_offer.as_ref())
-                .iter()
-                .map(|extension| extension.extension_type())
-                .collect();
+            let offered: Vec<u16> = client_hello_extensions(
+                cfg,
+                state.tls13_offer.as_ref(),
+                state.connection_id_offer.as_deref(),
+            )
+            .iter()
+            .map(|extension| extension.extension_type())
+            .collect();
             if h.extensions
                 .iter()
                 .any(|extension| !offered.contains(&extension.extension_type()))
@@ -208,6 +212,32 @@ impl Flight for Flight3 {
             state.srtp_protection_profile = SrtpProtectionProfile::Unsupported;
             state.extended_master_secret = false;
             state.secure_renegotiation = false;
+            // RFC 9146 section 3: with the extension in both hellos, connection ids are
+            // negotiated. The server's is what this client puts in its records; the one
+            // this client offered is what the server puts in its own. (An extension the
+            // ClientHello did not carry was refused above.)
+            state.local_connection_id = None;
+            state.remote_connection_id = None;
+            for extension in &h.extensions {
+                match extension.as_connection_id() {
+                    Some(Ok(connection_id)) => {
+                        state.remote_connection_id = Some(connection_id.to_vec());
+                        state
+                            .local_connection_id
+                            .clone_from(&state.connection_id_offer);
+                    }
+                    Some(Err(error)) => {
+                        return Err((
+                            Some(Alert {
+                                alert_level: AlertLevel::Fatal,
+                                alert_description: AlertDescription::DecodeError,
+                            }),
+                            Some(error),
+                        ));
+                    }
+                    None => {}
+                }
+            }
             for extension in &h.extensions {
                 match extension {
                     Extension::UseSrtp(e) => {
@@ -397,23 +427,33 @@ impl Flight for Flight3 {
         cfg: &HandshakeConfig,
     ) -> Result<Vec<Packet>, (Option<Alert>, Option<Error>)> {
         // RFC 6347 4.2.1: the same parameters as the first ClientHello, plus the cookie.
-        let extensions = client_hello_extensions(cfg, state.tls13_offer.as_ref());
+        let extensions = client_hello_extensions(
+            cfg,
+            state.tls13_offer.as_ref(),
+            state.connection_id_offer.as_deref(),
+        );
+
+        let mut client_hello = HandshakeMessageClientHello {
+            version: PROTOCOL_VERSION1_2,
+            random: state.local_random.clone(),
+            cookie: state.cookie.clone(),
+
+            cipher_suites: super::flight1::client_hello_cipher_suites(cfg),
+            compression_methods: default_compression_methods(),
+            extensions,
+        };
+        // The PSK binders cover the cookie too.
+        if let Err(error) =
+            super::flight1::bind_client_hello(cfg, state.tls13_offer.as_ref(), &mut client_hello)
+        {
+            return Err((None, Some(error)));
+        }
 
         Ok(vec![Packet {
             record: RecordLayer::new(
                 PROTOCOL_VERSION1_2,
                 0,
-                Content::Handshake(Handshake::new(HandshakeMessage::ClientHello(
-                    HandshakeMessageClientHello {
-                        version: PROTOCOL_VERSION1_2,
-                        random: state.local_random.clone(),
-                        cookie: state.cookie.clone(),
-
-                        cipher_suites: super::flight1::client_hello_cipher_suites(cfg),
-                        compression_methods: default_compression_methods(),
-                        extensions,
-                    },
-                ))),
+                Content::Handshake(Handshake::new(HandshakeMessage::ClientHello(client_hello))),
             ),
             should_encrypt: false,
             reset_local_sequence_number: false,

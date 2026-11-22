@@ -148,6 +148,9 @@ pub enum RtcpSessionControl {
     ReducedSize(bool),
     /// The negotiated `trr-int` (RFC 4585 4.2), the minimum interval between regular reports.
     TrrInt(Duration),
+    /// The negotiation has no `trr-int` (any more): the interval the session was built with
+    /// ([`RtcpSessionBuilder::with_t_rr_interval`]) applies again.
+    TrrIntCleared,
     /// The endpoint leaves the session: every local SSRC says BYE.
     Leave,
     /// What identifies the local stream `ssrc` beyond the CNAME: the identification-tag of
@@ -377,6 +380,7 @@ impl RtcpSessionBuilder {
         RtcpSessionInterceptor {
             profile: self.profile,
             t_rr_interval: self.t_rr_interval.as_secs_f64(),
+            configured_t_rr_interval: self.t_rr_interval.as_secs_f64(),
             bandwidth: self.bandwidth,
             rtcp_fraction: self.rtcp_fraction,
             reduced_minimum: self.reduced_minimum,
@@ -607,6 +611,8 @@ pub struct RtcpSessionInterceptor {
     profile: RtcpProfile,
     /// Seconds.
     t_rr_interval: f64,
+    /// Seconds: the builder's, which [`RtcpSessionControl::TrrIntCleared`] goes back to.
+    configured_t_rr_interval: f64,
     bandwidth: RtcpBandwidth,
     rtcp_fraction: f64,
     reduced_minimum: bool,
@@ -2071,6 +2077,9 @@ impl RtcpSessionInterceptor {
             RtcpSessionControl::ReducedSize(reduced_size) => self.reduced_size = *reduced_size,
             RtcpSessionControl::TrrInt(t_rr_interval) => {
                 self.t_rr_interval = t_rr_interval.as_secs_f64();
+            }
+            RtcpSessionControl::TrrIntCleared => {
+                self.t_rr_interval = self.configured_t_rr_interval;
             }
             RtcpSessionControl::StreamIdentifiers {
                 ssrc,

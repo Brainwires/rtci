@@ -40,6 +40,10 @@ pub enum EndpointEvent {
     /// matching `close_notify` reply is queued for [`Endpoint::poll_transmit`], and the connection
     /// has been removed.
     PeerClosed,
+    /// DTLS 1.3 server: the client answered a post-handshake CertificateRequest
+    /// ([`Endpoint::request_client_certificate`]) and the answer verified. The chain is in
+    /// [`State::peer_certificates`]; a client that declined left the earlier one there.
+    PeerAuthenticated,
 }
 
 /// The most associations a server endpoint holds for addresses it has not verified: those
@@ -126,6 +130,12 @@ impl Endpoint {
         }
     }
 
+    /// How many bytes a protected record to `remote` adds to its content: see
+    /// [`DTLSConn::record_overhead`]. `None` without an association, or before it has keys.
+    pub fn record_overhead(&self, remote: SocketAddr) -> Option<usize> {
+        self.connections.get(&remote)?.record_overhead()
+    }
+
     /// Whether the association with `remote` has failed: a fatal alert was sent or received, or
     /// its handshake gave up (a handshake error, or its deadline passed). An ordinary
     /// retransmission or a discarded record never fails it. `false` when there is no such
@@ -134,6 +144,12 @@ impl Endpoint {
         self.connections
             .get(remote)
             .is_some_and(|conn| conn.is_failed())
+    }
+
+    /// The fatal alerts that ended the association with `remote`, as alert description codes:
+    /// (sent, received). `None` when there is no such association.
+    pub fn connection_fatal_alerts(&self, remote: &SocketAddr) -> Option<(Option<u8>, Option<u8>)> {
+        self.connections.get(remote).map(|conn| conn.fatal_alerts())
     }
 
     /// The connection with `remote`, for the fuzz harness to reach its record state.
@@ -250,6 +266,8 @@ impl Endpoint {
         messages: &mut Vec<EndpointEvent>,
     ) -> Result<()> {
         let is_handshake_completed_before = conn.is_handshake_completed();
+        let authentications_before = conn.post_handshake_authentications;
+        conn.set_clock(now);
         conn.read(data)?;
         if conn.is_dtls13() {
             // DTLS 1.3 has handshake messages after the handshake too (ACKs, key updates),
@@ -283,6 +301,10 @@ impl Endpoint {
         }
         if !is_handshake_completed_before && conn.is_handshake_completed() {
             messages.push(EndpointEvent::HandshakeComplete)
+        }
+        // One event per answer verified.
+        for _ in authentications_before..conn.post_handshake_authentications {
+            messages.push(EndpointEvent::PeerAuthenticated)
         }
         Ok(())
     }
@@ -539,22 +561,38 @@ impl Endpoint {
         data: &[u8],
     ) -> Option<Vec<EndpointEvent>> {
         let previous = self.connections.iter().find_map(|(address, conn)| {
+            let owns = match conn.v13.as_ref() {
+                Some(v13) => v13.owns_connection_id(data),
+                // DTLS 1.2 (RFC 9146 section 4): a `tls12_cid` record with this side's
+                // connection id between its sequence number and its length.
+                None => conn
+                    .state
+                    .receive_connection_id()
+                    .is_some_and(|connection_id| {
+                        let at =
+                            crate::record_layer::record_layer_header::RECORD_LAYER_HEADER_SIZE - 2;
+                        data.first() == Some(&(crate::content::ContentType::Tls12Cid as u8))
+                            && data.get(at..at + connection_id.len()) == Some(connection_id)
+                    }),
+            };
             let migrates = conn.handshake_config.connection_id_migration
                 && conn.is_handshake_completed()
                 && !conn.is_failed()
-                && conn
-                    .v13
-                    .as_ref()
-                    .is_some_and(|v13| v13.owns_connection_id(data));
+                && owns;
             migrates.then_some(*address)
         })?;
         let conn = self.connections.get_mut(&previous)?;
         // An authentic, newer record is what moves the association. A replay or a forgery
         // is dropped by it like any other, and leaves it where it was.
         let authenticated = conn.authenticated_records;
+        let newest_before = conn.newest_authenticated_record;
+        conn.set_clock(now);
         let _ = conn.read(data);
         let _ = conn.handshake(now);
-        let newest = conn.v13.as_ref().is_some_and(|v13| v13.newest_record_read);
+        let newest = match conn.v13.as_ref() {
+            Some(v13) => v13.newest_record_read,
+            None => conn.newest_authenticated_record > newest_before,
+        };
         let moves = conn.authenticated_records != authenticated && newest;
         let mut events = vec![];
         while let Some(message) = conn.incoming_application_data() {
@@ -624,6 +662,12 @@ impl Endpoint {
             self.transport_protocol,
         );
         Ok(())
+    }
+
+    /// Asks the client at `remote` for its certificate after the handshake (RFC 8446 section
+    /// 4.6.2): see [`DTLSConn::request_client_certificate`].
+    pub fn request_client_certificate(&mut self, now: Instant, remote: SocketAddr) -> Result<()> {
+        self.with_dtls13(now, remote, DTLSConn::request_client_certificate)
     }
 
     /// Starts a key update on the DTLS 1.3 association with `remote` (RFC 9147 section 8):

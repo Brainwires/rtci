@@ -155,6 +155,11 @@ pub(crate) enum FlightKind {
     KeyUpdate,
     NewConnectionId,
     RequestConnectionId,
+    NewSessionTicket,
+    /// A server's post-handshake CertificateRequest.
+    CertificateRequest,
+    /// A client's answer to one: Certificate, CertificateVerify, Finished.
+    Authentication,
 }
 
 /// Messages sent together and retransmitted until acknowledged (RFC 9147 section 5.7).
@@ -248,6 +253,31 @@ pub(crate) struct Conn13 {
     pub(crate) server_name: String,
     pub(crate) client_random: Vec<u8>,
     pub(crate) exporter_secret: Option<SecretVec>,
+    /// The PSK the key schedule starts from, when the handshake uses one (RFC 8446 section
+    /// 2.2), and whether it came without an (EC)DHE exchange (psk_ke).
+    pub(crate) psk: Option<SecretVec>,
+    pub(crate) psk_without_key_exchange: bool,
+    /// The handshake was made with a PSK, so neither side sent a certificate.
+    pub(crate) resumed: bool,
+    /// `resumption_master_secret`, kept while tickets are to be made or taken from it.
+    pub(crate) resumption_secret: Option<SecretVec>,
+    /// Server: the PSK key exchange modes the client offered; tickets are sent only to a
+    /// client that offered one this server accepts (RFC 8446 section 4.2.9).
+    pub(crate) client_psk_modes: Vec<u8>,
+    /// How many tickets this association has issued: their nonces.
+    pub(crate) tickets_issued: u8,
+    /// The latest `now` this association was given (it reads no clock).
+    pub(crate) clock: Option<Instant>,
+    /// Server: the post-handshake CertificateRequests not yet answered, by context, each with
+    /// the transcript its answer continues (RFC 8446 section 4.6.2).
+    pub(crate) pending_certificate_requests: Vec<(Vec<u8>, Transcript)>,
+    /// Server: the answer to one of them, while it comes in.
+    pub(crate) client_authentication: Option<super::handshake::ClientAuthentication>,
+    /// Server: the client's certificates from its latest post-handshake answer, until the
+    /// association's state has taken them.
+    pub(crate) post_handshake_peer_certificates: Option<Vec<Vec<u8>>>,
+    /// Server: how many post-handshake answers have been verified.
+    pub(crate) post_handshake_authentications: u64,
 
     // The record layer.
     plaintext_send_sequence: u64,
@@ -285,7 +315,7 @@ pub(crate) struct Conn13 {
     // Sending the handshake.
     pub(crate) next_send_seq: u16,
     pub(crate) flight: Option<Flight>,
-    post_handshake: Vec<Flight>,
+    pub(crate) post_handshake: Vec<Flight>,
     retransmit_interval: Duration,
     handshake_mtu: usize,
     handshake_started: Option<Instant>,
@@ -317,6 +347,8 @@ pub(crate) struct Conn13 {
     pub(crate) closed: bool,
     pub(crate) closed_by_peer: bool,
     fatal_alert_sent: Option<(u8, usize)>,
+    /// The error alert the peer ended the association with, if it did.
+    fatal_alert_received: Option<u8>,
     /// A KeyUpdate of this side is waiting for its ACK, and whether another was asked for
     /// meanwhile.
     key_update_requested_by_peer: bool,
@@ -352,6 +384,14 @@ impl Drop for Conn13 {
     }
 }
 
+/// How many bytes a protected DTLS 1.3 record, as this stack writes it (the full unified
+/// header of RFC 9147 section 4 with a 16-bit sequence number and the length, and
+/// `connection_id_len` bytes of the peer's connection id), adds to its content under `suite`:
+/// the header, the inner content type and the tag.
+pub(crate) fn protected_record_overhead(suite: Suite13, connection_id_len: usize) -> usize {
+    HeaderForm::FULL.header_len(connection_id_len) + 1 + suite.tag_len()
+}
+
 impl Conn13 {
     pub(crate) fn new(cfg: Arc<HandshakeConfig>, is_client: bool, state: HandshakeState) -> Self {
         let provider = cfg.provider().clone();
@@ -366,6 +406,17 @@ impl Conn13 {
             server_name: String::new(),
             client_random: vec![],
             exporter_secret: None,
+            psk: None,
+            psk_without_key_exchange: false,
+            resumed: false,
+            resumption_secret: None,
+            client_psk_modes: vec![],
+            tickets_issued: 0,
+            clock: None,
+            pending_certificate_requests: vec![],
+            client_authentication: None,
+            post_handshake_peer_certificates: None,
+            post_handshake_authentications: 0,
             plaintext_send_sequence: 0,
             plaintext_replay: SlidingWindowDetector::new(
                 cfg.replay_protection_window,
@@ -412,6 +463,7 @@ impl Conn13 {
             closed: false,
             closed_by_peer: false,
             fatal_alert_sent: None,
+            fatal_alert_received: None,
             key_update_requested_by_peer: false,
             connection_id_request_outstanding: false,
             connection_id_requests_received: 0,
@@ -483,6 +535,16 @@ impl Conn13 {
         Ok(())
     }
 
+    /// This side's current application traffic secret (`..._application_traffic_secret_N`).
+    pub(crate) fn local_application_secret(&self) -> Option<&SecretVec> {
+        self.local_traffic_secret.as_ref()
+    }
+
+    /// The peer's current application traffic secret.
+    pub(crate) fn remote_application_secret(&self) -> Option<&SecretVec> {
+        self.remote_traffic_secret.as_ref()
+    }
+
     pub(crate) fn set_application_secrets(&mut self, local: SecretVec, remote: SecretVec) {
         self.local_traffic_secret = Some(local);
         self.remote_traffic_secret = Some(remote);
@@ -528,6 +590,8 @@ impl Conn13 {
             schedule.forget();
         }
         self.exporter_secret = None;
+        self.psk = None;
+        self.resumption_secret = None;
         self.local_traffic_secret = None;
         self.remote_traffic_secret = None;
         self.cookie_secret = None;
@@ -538,13 +602,21 @@ impl Conn13 {
     // Writing records.
     // ------------------------------------------------------------------------------------
 
+    /// How many bytes a protected record adds to its content, once the suite is known.
+    pub(crate) fn protected_record_overhead(&self) -> Option<usize> {
+        self.suite?;
+        Some(self.record_overhead(1))
+    }
+
     /// How many bytes a record of `epoch` adds to its content.
     fn record_overhead(&self, epoch: u64) -> usize {
         if epoch == 0 {
             PLAINTEXT_HEADER_LEN
         } else {
-            let tag_len = self.suite.map_or(16, |suite| suite.tag_len());
-            HeaderForm::FULL.header_len(self.remote_connection_id.len()) + 1 + tag_len
+            match self.suite {
+                Some(suite) => protected_record_overhead(suite, self.remote_connection_id.len()),
+                None => HeaderForm::FULL.header_len(self.remote_connection_id.len()) + 1 + 16,
+            }
         }
     }
 
@@ -880,7 +952,11 @@ impl Conn13 {
                     let _ = self.send_key_update(false);
                 }
             }
-            FlightKind::NewConnectionId | FlightKind::RequestConnectionId => {}
+            FlightKind::NewConnectionId
+            | FlightKind::RequestConnectionId
+            | FlightKind::NewSessionTicket
+            | FlightKind::CertificateRequest
+            | FlightKind::Authentication => {}
         }
         self.prune_write_epochs();
     }
@@ -949,6 +1025,7 @@ impl Conn13 {
         if self.failed {
             return Err(Error::ErrConnClosed);
         }
+        self.clock = Some(now);
         self.handshake_started.get_or_insert(now);
 
         // RFC 9147 section 5.8.2: when a flight got through without being sent again, the
@@ -1234,6 +1311,7 @@ impl Conn13 {
                 {
                     self.plaintext_replay.accept();
                     debug!("<- plaintext alert {description}");
+                    self.fatal_alert_received = Some(*description);
                     self.fail();
                 }
                 Ok(())
@@ -1457,6 +1535,7 @@ impl Conn13 {
             alert::USER_CANCELED => Ok(()),
             // Section 6.2: every other alert is an error alert, whatever its level says.
             _ => {
+                self.fatal_alert_received = Some(*description);
                 self.fail();
                 Ok(())
             }
@@ -1633,6 +1712,14 @@ impl Conn13 {
 
     /// The association is over: nothing more is read, written or retransmitted, and its
     /// secrets are forgotten (RFC 8446 section 6.2).
+    /// The fatal (error) alerts that ended the association: (sent, received).
+    pub(crate) fn fatal_alerts(&self) -> (Option<u8>, Option<u8>) {
+        (
+            self.fatal_alert_sent.map(|(description, _)| description),
+            self.fatal_alert_received,
+        )
+    }
+
     pub(crate) fn fail(&mut self) {
         self.failed = true;
         self.closed = true;
@@ -1716,6 +1803,23 @@ impl Conn13 {
         let mut flight = Flight::new(kind);
         flight.push(self.next_send_seq, self.send_epoch(), handshake_type, body);
         self.next_send_seq = self.next_send_seq.wrapping_add(1);
+        self.transmit(&mut flight)?;
+        self.post_handshake.push(flight);
+        Ok(())
+    }
+
+    /// Sends `messages` as one post-handshake flight: in order, and acknowledged together.
+    pub(crate) fn send_post_handshake_messages(
+        &mut self,
+        kind: FlightKind,
+        messages: Vec<(u8, Vec<u8>)>,
+    ) -> Result<()> {
+        let mut flight = Flight::new(kind);
+        let epoch = self.send_epoch();
+        for (handshake_type, body) in messages {
+            flight.push(self.next_send_seq, epoch, handshake_type, body);
+            self.next_send_seq = self.next_send_seq.wrapping_add(1);
+        }
         self.transmit(&mut flight)?;
         self.post_handshake.push(flight);
         Ok(())
@@ -1894,11 +1998,26 @@ impl Conn13 {
         body: &[u8],
     ) -> std::result::Result<(), Refusal> {
         let unexpected = || refuse(alert::UNEXPECTED_MESSAGE, Error::ErrUnhandledContextType);
+        // RFC 8446 section 4.6.2: the messages of a client's answer to a CertificateRequest
+        // come together, with nothing of another type in between.
+        if self.client_authentication.is_some()
+            && !matches!(handshake_type, CERTIFICATE_VERIFY | FINISHED)
+        {
+            return Err(unexpected());
+        }
         match handshake_type {
+            // RFC 8446 section 4.6.2: only to a client that sent post_handshake_auth; to any
+            // other it is an unexpected_message (the arm below).
+            CERTIFICATE_REQUEST if self.is_client && self.cfg.post_handshake_auth => {
+                self.on_post_handshake_certificate_request(body)?;
+            }
+            CERTIFICATE | CERTIFICATE_VERIFY | FINISHED if !self.is_client => {
+                self.on_post_handshake_authentication(handshake_type, body)?;
+            }
             NEW_SESSION_TICKET if self.is_client => {
-                // Tickets are not used: this stack does not resume. Acknowledged, so that
-                // the server stops sending it.
-                parse_new_session_ticket(body)?;
+                // Kept if this client resumes, dropped otherwise; acknowledged either way,
+                // so that the server stops sending it.
+                self.on_new_session_ticket(body)?;
             }
             KEY_UPDATE => {
                 let update_requested = parse_key_update(body)?;

@@ -387,8 +387,10 @@ fn create_offer_needs_the_stable_or_have_local_offer_state() -> Result<()> {
         "the refused createOffer gave no transceiver a mid"
     );
     assert!(
-        answerer.ice_restart_requested.is_some() && !answerer.ice_transport().has_pending_restart(),
-        "the refused createOffer kept the restart request and staged nothing"
+        answerer.ice_credentials_to_replace.is_empty()
+            && !answerer.ice_transport().has_pending_restart(),
+        "restartIce before any local description has no credentials to replace (W3C), and \
+         the refused createOffer staged nothing"
     );
 
     // have-local-pranswer.

@@ -75,6 +75,17 @@ impl CryptoCcm {
     ///
     /// Fails if the cipher rejects the input.
     pub fn encrypt(&mut self, pkt_rlh: &RecordLayerHeader, raw: &[u8]) -> Result<Vec<u8>> {
+        self.encrypt_with(pkt_rlh, raw, None)
+    }
+
+    /// [`Self::encrypt`], for a `tls12_cid` record when `cid` is given (RFC 9146): the
+    /// additional data then covers the connection id, which is not in `raw`.
+    pub(crate) fn encrypt_with(
+        &mut self,
+        pkt_rlh: &RecordLayerHeader,
+        raw: &[u8],
+        cid: Option<&[u8]>,
+    ) -> Result<Vec<u8>> {
         let payload = &raw[RECORD_LAYER_HEADER_SIZE..];
         let raw = &raw[..RECORD_LAYER_HEADER_SIZE];
 
@@ -84,7 +95,7 @@ impl CryptoCcm {
         nonce[..4].copy_from_slice(&self.local_write_iv[..4]);
         nonce[4..].copy_from_slice(&record_explicit_nonce(pkt_rlh));
 
-        let additional_data = generate_aead_additional_data(pkt_rlh, payload.len());
+        let additional_data = record_additional_data(pkt_rlh, payload.len(), cid);
 
         let mut buffer = payload.to_vec();
         let mut tag = vec![0; self.local_ccm.tag_len()];
@@ -113,6 +124,12 @@ impl CryptoCcm {
     ///
     /// Fails if authentication fails or the record is too short.
     pub fn decrypt(&mut self, r: &[u8]) -> Result<Vec<u8>> {
+        self.decrypt_with(r, None)
+    }
+
+    /// [`Self::decrypt`], for a `tls12_cid` record when `cid` is given (RFC 9146); `r` is
+    /// the record without its connection id.
+    pub(crate) fn decrypt_with(&mut self, r: &[u8], cid: Option<&[u8]>) -> Result<Vec<u8>> {
         let mut reader = Cursor::new(r);
         let h = RecordLayerHeader::unmarshal(&mut reader)?;
         if h.content_type == ContentType::ChangeCipherSpec {
@@ -135,7 +152,7 @@ impl CryptoCcm {
             return Err(Error::ErrInvalidMac);
         }
         let tag_start = out.len() - tag_len;
-        let additional_data = generate_aead_additional_data(&h, tag_start);
+        let additional_data = record_additional_data(&h, tag_start, cid);
         let mut buffer = out[..tag_start].to_vec();
         self.remote_ccm
             .open_in_place(&nonce, &additional_data, &mut buffer, &out[tag_start..])

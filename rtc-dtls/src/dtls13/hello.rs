@@ -4,6 +4,10 @@
 
 use super::codec::*;
 use super::messages::*;
+use super::psk::{
+    OfferedPsk, PSK_DHE_KE, PSK_KE, placeholder_binders, pre_shared_key_data,
+    psk_key_exchange_modes_data,
+};
 use super::suite::Suite13;
 use super::{DTLS1_2_WIRE_VERSION, DTLS1_3_WIRE_VERSION};
 use crate::cipher_suite::CipherSuiteId;
@@ -16,6 +20,7 @@ use crate::signature_hash_algorithm::SignatureHashAlgorithm;
 use crypto::{HmacAlgorithm, RTCCryptoProvider};
 use shared::error::{Error, Result};
 use std::net::{IpAddr, SocketAddr};
+use std::time::Instant;
 
 /// How many of its groups a client sends a key share for: the first two it prefers, so that
 /// a server which supports either answers without a HelloRetryRequest.
@@ -28,21 +33,72 @@ pub(crate) struct ClientOffer {
     /// The connection id this client asks the server to put in its records, if it asks for
     /// connection ids at all (empty: it offers the extension and wants none itself).
     pub(crate) connection_id: Option<Vec<u8>>,
+    /// The PSKs offered (RFC 8446 section 4.2.11), in the order of the identities: a ticket
+    /// first, if the session store had one, then the external PSKs.
+    pub(crate) psks: Vec<OfferedPsk>,
+}
+
+impl HandshakeConfig {
+    /// The PSK key exchange modes this side offers or accepts (RFC 8446 section 4.2.9):
+    /// `psk_dhe_ke`, and `psk_ke` only where the configuration allows it.
+    pub(crate) fn psk_key_exchange_modes(&self) -> Vec<u8> {
+        #[cfg(test)]
+        if let Some(modes) = &self.psk_modes_for_test {
+            return modes.clone();
+        }
+        let mut modes = vec![PSK_DHE_KE];
+        if self.psk_without_key_exchange {
+            modes.push(PSK_KE);
+        }
+        modes
+    }
+
+    /// Whether a client sends psk_key_exchange_modes: it can resume, or has PSKs to offer.
+    /// Without the extension a server sends it no tickets (RFC 8446 section 4.2.9).
+    pub(crate) fn uses_psks(&self) -> bool {
+        self.session_store.is_some() || !self.external_psks.is_empty()
+    }
 }
 
 impl ClientOffer {
-    /// Makes the key shares of a ClientHello.
-    pub(crate) fn new(cfg: &HandshakeConfig) -> Result<Self> {
+    /// Makes the key shares of a ClientHello, and takes the PSKs it offers: one ticket from
+    /// the session store for the server name, if it has one that is valid at `now` and of a
+    /// hash this client's suites have, and the external PSKs.
+    pub(crate) fn new(cfg: &HandshakeConfig, now: Option<Instant>) -> Result<Self> {
         let mut key_shares = vec![];
-        for curve in cfg.local_named_curves.iter().take(KEY_SHARES_OFFERED) {
+        for curve in cfg.local_tls13_groups.iter().take(KEY_SHARES_OFFERED) {
             key_shares.push(curve.generate_keypair_with_crypto(cfg.provider().crypto())?);
         }
         if key_shares.is_empty() {
             return Err(Error::ErrNoSupportedEllipticCurves);
         }
+        let mut psks = vec![];
+        if let (Some(store), Some(now)) = (&cfg.session_store, now) {
+            // A ticket is taken, and so used, once (RFC 8446 appendix C.4); an expired one,
+            // or one of a hash none of this client's suites has, is dropped on the way.
+            while let Some(session) = store.take(&cfg.server_name) {
+                let usable = session.is_valid_at(now)
+                    && Suite13::for_id(session.suite).is_some_and(|suite| {
+                        cfg.local_tls13_cipher_suites
+                            .iter()
+                            .filter_map(|id| Suite13::for_id(*id))
+                            .any(|own| own.hash() == suite.hash())
+                    });
+                if usable && let Some(psk) = OfferedPsk::from_session(session, now) {
+                    psks.push(psk);
+                    break;
+                }
+            }
+        }
+        for external in &cfg.external_psks {
+            if let Some(psk) = OfferedPsk::from_external(external, &cfg.local_tls13_cipher_suites) {
+                psks.push(psk);
+            }
+        }
         Ok(Self {
             key_shares,
             connection_id: cfg.connection_id_offer(),
+            psks,
         })
     }
 
@@ -79,17 +135,56 @@ impl ClientOffer {
                 data,
             });
         }
+        // RFC 8446 section 4.2.6: this client answers a CertificateRequest after the
+        // handshake.
+        if cfg.post_handshake_auth {
+            extensions.push(Extension::Unknown {
+                extension_type: EXT_POST_HANDSHAKE_AUTH,
+                data: vec![],
+            });
+        }
+        if cfg.uses_psks() {
+            extensions.push(Extension::Unknown {
+                extension_type: EXT_PSK_KEY_EXCHANGE_MODES,
+                data: psk_key_exchange_modes_data(&cfg.psk_key_exchange_modes()),
+            });
+        }
+        // RFC 8446 section 4.2.11: the last extension of the ClientHello. Its binders are
+        // written once the ClientHello they cover is ([`super::psk::bind`]).
+        if !self.psks.is_empty() {
+            extensions.push(Extension::Unknown {
+                extension_type: EXT_PRE_SHARED_KEY,
+                data: pre_shared_key_data(&self.psks, &placeholder_binders(&self.psks)),
+            });
+        }
         extensions
+    }
+
+    /// Writes the binders of the PSKs into `client_hello` (its body, which ends with the
+    /// pre_shared_key extension), a first ClientHello: nothing comes before it in the
+    /// transcript.
+    pub(crate) fn bind(&self, cfg: &HandshakeConfig, client_hello: &mut [u8]) -> Result<()> {
+        if self.psks.is_empty() {
+            return Ok(());
+        }
+        super::psk::bind(
+            cfg.provider().crypto(),
+            &self.psks,
+            &super::key_schedule::Transcript::default(),
+            client_hello,
+        )
     }
 }
 
 /// Rewrites a first ClientHello into the one that answers a HelloRetryRequest (RFC 8446
 /// section 4.1.2): the same message, with the key_share replaced when the server named a
-/// group, early_data removed, and the cookie added.
+/// group, early_data removed, and the cookie added. `pre_shared_key` stays the last
+/// extension, with `psk` as its data (placeholder binders), or goes when that is `None`.
 pub(crate) fn second_client_hello(
     first: &ClientHello<'_>,
     key_share: Option<(u16, &[u8])>,
     cookie: Option<&[u8]>,
+    psk: Option<&[u8]>,
 ) -> Vec<u8> {
     let mut body = Vec::with_capacity(512);
     put_u16(&mut body, first.legacy_version);
@@ -109,7 +204,7 @@ pub(crate) fn second_client_hello(
     put_vec16(&mut body, |out| {
         for (extension_type, data) in &first.extensions {
             match *extension_type {
-                EXT_EARLY_DATA | EXT_COOKIE => {}
+                EXT_EARLY_DATA | EXT_COOKIE | EXT_PRE_SHARED_KEY => {}
                 EXT_KEY_SHARE => match key_share {
                     Some(share) => put_extension(out, EXT_KEY_SHARE, |data| {
                         data.extend_from_slice(&client_key_share_data(&[share]))
@@ -123,6 +218,9 @@ pub(crate) fn second_client_hello(
             put_extension(out, EXT_COOKIE, |data| {
                 put_vec16(data, |out| out.extend_from_slice(cookie))
             });
+        }
+        if let Some(psk) = psk {
+            put_extension(out, EXT_PRE_SHARED_KEY, |data| data.extend_from_slice(psk));
         }
     });
     body
@@ -187,18 +285,28 @@ pub(crate) fn negotiate(
     }
 
     // The first suite of the client's list that this server has.
-    let suite = hello
-        .cipher_suites
-        .iter()
-        .map(|suite| CipherSuiteId::from(*suite))
-        .find(|suite| cfg.local_tls13_cipher_suites.contains(suite))
-        .and_then(Suite13::for_id)
-        .ok_or_else(|| {
-            refuse(
-                alert::HANDSHAKE_FAILURE,
-                Error::ErrCipherSuiteNoIntersection,
-            )
-        })?;
+    let shared_suites = || {
+        hello
+            .cipher_suites
+            .iter()
+            .map(|suite| CipherSuiteId::from(*suite))
+            .filter(|suite| cfg.local_tls13_cipher_suites.contains(suite))
+            .filter_map(Suite13::for_id)
+    };
+    let suite = shared_suites().next().ok_or_else(|| {
+        refuse(
+            alert::HANDSHAKE_FAILURE,
+            Error::ErrCipherSuiteNoIntersection,
+        )
+    })?;
+    // RFC 8446 section 4.2.11: an external PSK the client offers and this server holds
+    // influences the suite, so that it can be used: the client's first of the PSK's hash.
+    let suite = match external_psk_hash(cfg, hello) {
+        Some(hash) if hash != suite.hash() => shared_suites()
+            .find(|candidate| candidate.hash() == hash)
+            .unwrap_or(suite),
+        _ => suite,
+    };
 
     // RFC 8446 section 9.2: a ClientHello for (EC)DHE without supported_groups, key_share
     // or signature_algorithms is answered with missing_extension.
@@ -232,7 +340,7 @@ pub(crate) fn negotiate(
     }
     // The group: the first of the client's that this server has and the client sent a share
     // for; failing that, the first this server has, which costs a HelloRetryRequest.
-    let supported = |group: &u16| cfg.local_named_curves.contains(&NamedCurve::from(*group));
+    let supported = |group: &u16| cfg.local_tls13_groups.contains(&NamedCurve::from(*group));
     let with_share = groups
         .iter()
         .filter(|group| supported(group))
@@ -339,6 +447,24 @@ pub(crate) fn negotiate(
         server_name,
         client_connection_id,
         offered_extensions: hello.extensions.iter().map(|(t, _)| *t).collect(),
+    })
+}
+
+/// The hash of the first external PSK of this server that `hello` offers, if any.
+fn external_psk_hash(
+    cfg: &HandshakeConfig,
+    hello: &ClientHello<'_>,
+) -> Option<crypto::HashAlgorithm> {
+    if cfg.external_psks.is_empty() {
+        return None;
+    }
+    let offered =
+        super::psk::parse_client_pre_shared_key(hello.extension(EXT_PRE_SHARED_KEY)?).ok()?;
+    offered.identities.iter().find_map(|(identity, _)| {
+        cfg.external_psks
+            .iter()
+            .find(|psk| psk.identity == *identity)
+            .map(|psk| super::psk::hash_of(psk.hash))
     })
 }
 

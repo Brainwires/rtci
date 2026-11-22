@@ -4,7 +4,7 @@ use crate::peer_connection::transport::RTCTransportId;
 use crate::peer_connection::transport::sctp::capabilities::SCTPTransportCapabilities;
 use crate::peer_connection::transport::sctp::state::RTCSctpTransportState;
 use sctp::{Association, AssociationHandle};
-use shared::error::Result;
+use shared::error::{Error, Result};
 use shared::{TransportContext, TransportProtocol};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -46,26 +46,26 @@ pub(crate) struct SctpPath {
     pub(crate) tcp: bool,
     /// The local candidate is a relayed one: the data travels in TURN ChannelData.
     pub(crate) relayed: bool,
-    /// What the negotiated DTLS cipher suite adds to a record's payload (explicit nonce, tag,
-    /// padding), without the record header.
-    pub(crate) dtls_record_expansion: usize,
+    /// What a protected DTLS record adds to its payload: its header, and what the negotiated
+    /// version and cipher suite add (explicit nonce, tag, padding; for DTLS 1.3 the inner
+    /// content type; a connection id).
+    pub(crate) dtls_record_overhead: usize,
 }
 
 impl SctpPath {
     /// RFC 8831 section 5: the IP-layer path MTU an association starts from.
     const IPV4_PATH_MTU: u32 = 1200;
     const IPV6_PATH_MTU: u32 = 1280;
-    /// The DTLS record header (RFC 6347 section 4.1): type, version, epoch, sequence number,
-    /// length.
-    const DTLS_RECORD_HEADER: u32 = 13;
-    /// The record expansion assumed while no cipher suite is negotiated: an AEAD suite with
-    /// an 8-byte explicit nonce and a 16-byte tag (AES-GCM), the largest of the AEAD suites.
-    pub(crate) const DEFAULT_DTLS_RECORD_EXPANSION: usize = 24;
+    /// The record overhead assumed while no cipher suite is negotiated: a DTLS 1.2 record
+    /// (RFC 6347 section 4.1: a 13-byte header) of an AEAD suite with an 8-byte explicit
+    /// nonce and a 16-byte tag (AES-GCM), the largest of the AEAD records; a DTLS 1.3 record
+    /// is smaller.
+    pub(crate) const DEFAULT_DTLS_RECORD_OVERHEAD: usize = 13 + 24;
 
     /// The largest SCTP packet (common header and chunks) that fits the path: the IP-layer
     /// MTU less the IP header, the UDP header (or the TCP header and the two-byte frame
     /// length of RFC 4571), the four-byte TURN ChannelData header on a relayed candidate, and
-    /// the DTLS record header and expansion.
+    /// the DTLS record overhead.
     pub(crate) fn packet_budget(&self) -> u32 {
         let (path_mtu, ip_header) = if self.ipv6 {
             (Self::IPV6_PATH_MTU, 40)
@@ -74,10 +74,9 @@ impl SctpPath {
         };
         let transport_header = if self.tcp { 20 + 2 } else { 8 };
         let turn_header = if self.relayed { 4 } else { 0 };
-        let dtls = Self::DTLS_RECORD_HEADER + self.dtls_record_expansion as u32;
         path_mtu
             .saturating_sub(ip_header + transport_header + turn_header)
-            .saturating_sub(dtls)
+            .saturating_sub(u32::try_from(self.dtls_record_overhead).unwrap_or(u32::MAX))
             .max(::sctp::MIN_DATA_PACKET_MTU)
     }
 }
@@ -501,17 +500,45 @@ impl SctpTransport {
     /// (`SettingEngineBuilder::with_sctp_message_size_limit_without_interleaving`).
     pub(crate) fn max_message_size(&self) -> Option<u32> {
         let negotiated = self.negotiated_max_message_size?;
-        let without_interleaving = self.limit_message_size_without_interleaving
-            && self.association().is_some_and(|association| {
-                !Self::ended(association)
-                    && !association.is_handshaking()
-                    && !association.message_interleaving()
-            });
-        Some(if without_interleaving {
+        Some(if self.limits_message_size_without_interleaving() {
             negotiated.min(MAX_MESSAGE_SIZE_WITHOUT_INTERLEAVING)
         } else {
             negotiated
         })
+    }
+
+    /// Whether the 16 KB limit of RFC 8831 section 6.6 applies: it is on, and the association
+    /// is established without user message interleaving.
+    fn limits_message_size_without_interleaving(&self) -> bool {
+        self.limit_message_size_without_interleaving
+            && self.association().is_some_and(|association| {
+                !Self::ended(association)
+                    && !association.is_handshaking()
+                    && !association.message_interleaving()
+            })
+    }
+
+    /// Refuses an application message of `size` bytes over [`Self::max_message_size`], with
+    /// an error that says which limit it is over: the negotiated one
+    /// (`ErrOutboundPacketTooLarge`), or the 16 KB of an association without message
+    /// interleaving (`ErrMessageTooLargeWithoutInterleaving`, which names the limit and the
+    /// setting that lifts it). Before negotiation nothing is refused here.
+    pub(crate) fn check_message_size(&self, size: usize) -> Result<()> {
+        let Some(negotiated) = self.negotiated_max_message_size else {
+            return Ok(());
+        };
+        if size > negotiated as usize {
+            return Err(Error::ErrOutboundPacketTooLarge);
+        }
+        if size > MAX_MESSAGE_SIZE_WITHOUT_INTERLEAVING as usize
+            && self.limits_message_size_without_interleaving()
+        {
+            return Err(Error::ErrMessageTooLargeWithoutInterleaving {
+                size,
+                limit: MAX_MESSAGE_SIZE_WITHOUT_INTERLEAVING,
+            });
+        }
+        Ok(())
     }
 
     /// W3C `SctpTransport.maxChannels`: the minimum of the negotiated inbound and outbound
@@ -1002,12 +1029,21 @@ mod tests {
     /// RFC 8831 section 5: "The initial Path MTU at the IP layer SHOULD NOT exceed 1200 bytes
     /// for IPv4 and 1280 bytes for IPv6." An SCTP packet of the budget, in its DTLS record,
     /// under the headers of the path, is exactly that large at the IP layer, whatever the
-    /// path and the cipher suite; the fixed 1191 gave 1256 bytes over IPv4.
+    /// path, the DTLS version and the cipher suite; the fixed 1191 gave 1256 bytes over IPv4.
     #[test]
     fn the_packet_budget_keeps_the_ip_packet_within_the_initial_path_mtu() {
-        const DTLS_RECORD_HEADER: u32 = 13;
-        // AES-GCM, ChaCha20-Poly1305, AES-CCM-8, AES-256-CBC-SHA.
-        for dtls_record_expansion in [24usize, 16, 16, 52] {
+        // DTLS 1.2: AES-GCM, ChaCha20-Poly1305, AES-CCM-8, AES-256-CBC-SHA; DTLS 1.3 (a
+        // five-byte unified header and the inner content type): a 16-byte tag, AES-CCM-8, and a
+        // 16-byte tag with an eight-byte connection id.
+        for dtls_record_overhead in [
+            13 + 24usize,
+            13 + 16,
+            13 + 16,
+            13 + 52,
+            5 + 17,
+            5 + 9,
+            5 + 8 + 17,
+        ] {
             for ipv6 in [false, true] {
                 for tcp in [false, true] {
                     for relayed in [false, true] {
@@ -1015,18 +1051,14 @@ mod tests {
                             ipv6,
                             tcp,
                             relayed,
-                            dtls_record_expansion,
+                            dtls_record_overhead,
                         };
                         let budget = path.packet_budget();
                         let ip_header = if ipv6 { 40 } else { 20 };
                         let transport = if tcp { 20 + 2 } else { 8 };
                         let turn = if relayed { 4 } else { 0 };
-                        let on_the_wire = budget
-                            + DTLS_RECORD_HEADER
-                            + dtls_record_expansion as u32
-                            + turn
-                            + transport
-                            + ip_header;
+                        let on_the_wire =
+                            budget + dtls_record_overhead as u32 + turn + transport + ip_header;
                         assert_eq!(on_the_wire, if ipv6 { 1280 } else { 1200 }, "{path:?}");
                     }
                 }
@@ -1036,7 +1068,7 @@ mod tests {
             ipv6,
             tcp: false,
             relayed: false,
-            dtls_record_expansion: SctpPath::DEFAULT_DTLS_RECORD_EXPANSION,
+            dtls_record_overhead: SctpPath::DEFAULT_DTLS_RECORD_OVERHEAD,
         };
         assert_eq!(udp_gcm(false).packet_budget(), 1135);
         assert_eq!(udp_gcm(true).packet_budget(), 1195);

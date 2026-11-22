@@ -69,3 +69,133 @@ fn an_all_policy_set_later_lifts_relay() -> Result<()> {
     assert_eq!(pc.ice_transport().agent.get_local_candidates().len(), 1);
     Ok(())
 }
+
+fn server(url: &str) -> crate::peer_connection::transport::RTCIceServer {
+    crate::peer_connection::transport::RTCIceServer {
+        urls: vec![url.to_owned()],
+        username: "user".to_owned(),
+        credential: "secret".to_owned(),
+    }
+}
+
+fn with_servers(
+    servers: Vec<crate::peer_connection::transport::RTCIceServer>,
+) -> crate::peer_connection::configuration::RTCConfiguration {
+    RTCConfigurationBuilder::new()
+        .with_ice_servers(servers)
+        .build()
+}
+
+/// W3C 4.4.1.5 (bug B6): every check runs before anything is stored. A configuration whose
+/// ICE server is invalid changes nothing, not even the transport policy that came before it.
+#[test]
+fn a_refused_configuration_changes_nothing() -> Result<()> {
+    let mut pc = RTCPeerConnectionBuilder::new().build(Instant::now())?;
+    let mut refused = with_servers(vec![server("stun:")]);
+    refused.ice_transport_policy = RTCIceTransportPolicy::Relay;
+    assert!(pc.set_configuration(refused).is_err());
+    assert_ne!(
+        pc.get_configuration().ice_transport_policy,
+        RTCIceTransportPolicy::Relay,
+        "the policy of a refused configuration is not stored"
+    );
+    Ok(())
+}
+
+/// W3C "validate an ICE server URL" and "set a configuration": the SyntaxError and
+/// InvalidAccessError cases, in set_configuration and in the constructor.
+#[test]
+fn ice_server_urls_are_validated_as_the_spec_says() -> Result<()> {
+    use shared::error::Error;
+    let mut pc = RTCPeerConnectionBuilder::new().build(Instant::now())?;
+    let empty = crate::peer_connection::transport::RTCIceServer::default();
+    for (servers, expected) in [
+        (vec![empty], Error::ErrNoIceServerUrls),
+        (vec![server("http:example.org")], Error::ErrSchemeType),
+        (vec![server("stun:example.org#frag")], Error::ErrInvalidUrl),
+        (vec![server("turn:user@example.org")], Error::ErrInvalidUrl),
+        (vec![server("turn:example.org/path")], Error::ErrInvalidUrl),
+        (
+            vec![server("stun:example.org?transport=udp")],
+            Error::ErrStunQuery,
+        ),
+        (
+            vec![server("turn:example.org?transport=sctp")],
+            Error::ErrInvalidQuery,
+        ),
+        (
+            vec![crate::peer_connection::transport::RTCIceServer {
+                username: "u".repeat(509),
+                ..server("turn:example.org")
+            }],
+            Error::InvalidAccessError,
+        ),
+    ] {
+        let refused = pc.set_configuration(with_servers(servers.clone()));
+        assert_eq!(refused.as_ref().err(), Some(&expected), "{servers:?}");
+        let built = RTCPeerConnectionBuilder::new()
+            .with_configuration(with_servers(servers.clone()))
+            .build(Instant::now());
+        assert_eq!(built.err(), Some(expected), "constructor, {servers:?}");
+    }
+    pc.set_configuration(with_servers(vec![server("turn:example.org?transport=tcp")]))?;
+    Ok(())
+}
+
+/// W3C 4.2.1 / 4.4.1.5: ICE servers past the supported maximum (at least 32) are ignored, and
+/// an empty list clears the servers.
+#[test]
+fn ice_servers_past_the_maximum_are_ignored_and_an_empty_list_clears_them() -> Result<()> {
+    use crate::peer_connection::configuration::MAX_ICE_SERVERS;
+    assert!(MAX_ICE_SERVERS >= 32);
+    let mut pc = RTCPeerConnectionBuilder::new().build(Instant::now())?;
+    let many: Vec<_> = (0..MAX_ICE_SERVERS + 3)
+        .map(|n| server(&format!("stun:stun{n}.example.org")))
+        .collect();
+    pc.set_configuration(with_servers(many))?;
+    assert_eq!(pc.get_configuration().ice_servers.len(), MAX_ICE_SERVERS);
+    pc.set_configuration(with_servers(vec![]))?;
+    assert!(pc.get_configuration().ice_servers.is_empty());
+    Ok(())
+}
+
+/// W3C 4.4.1.5 steps on certificates (bug B4): the configuration keeps the constructor's
+/// certificates; passing them again is accepted, a different one or a different count is an
+/// InvalidModificationError; getConfiguration reports them.
+#[test]
+fn the_certificates_cannot_change_and_are_reported() -> Result<()> {
+    use crate::peer_connection::certificate::RTCCertificate;
+    use shared::error::Error;
+    let crypto = crypto::default_provider().expect("crypto provider");
+    let generate = || {
+        RTCCertificate::generate_certificate(
+            crypto.crypto(),
+            crypto::SignatureScheme::EcdsaP256Sha256,
+            None,
+            std::time::SystemTime::now(), // Exemption: usage in #test code
+        )
+    };
+    let original = generate()?;
+    let configuration = RTCConfigurationBuilder::new()
+        .with_certificates(vec![original.clone()])
+        .build();
+    let mut pc = RTCPeerConnectionBuilder::new()
+        .with_configuration(configuration.clone())
+        .build(Instant::now())?;
+    assert_eq!(pc.get_configuration().certificates(), &[original.clone()]);
+    pc.set_configuration(configuration)?;
+
+    let other = RTCConfigurationBuilder::new()
+        .with_certificates(vec![generate()?])
+        .build();
+    assert_eq!(
+        pc.set_configuration(other),
+        Err(Error::ErrModifyingCertificates)
+    );
+    assert_eq!(
+        pc.set_configuration(RTCConfigurationBuilder::new().build()),
+        Err(Error::ErrModifyingCertificates),
+        "dropping the certificates is a change too"
+    );
+    Ok(())
+}

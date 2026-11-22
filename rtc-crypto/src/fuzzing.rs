@@ -48,6 +48,9 @@ impl FixedKeyExchange {
             // Uncompressed SEC1 points: the tag byte followed by two coordinates.
             KeyExchangeAlgorithm::P256 => [&[0x04][..], &[0x11; 64][..]].concat(),
             KeyExchangeAlgorithm::P384 => [&[0x04][..], &[0x22; 96][..]].concat(),
+            // The length of an initiator's share; a responder's is shorter, and this
+            // stand-in takes either.
+            KeyExchangeAlgorithm::X25519MlKem768 => vec![0x33; 1216],
         };
         Self {
             algorithm,
@@ -71,6 +74,7 @@ impl ActiveKeyExchange for FixedKeyExchange {
         }
         let len = match self.algorithm {
             KeyExchangeAlgorithm::P384 => 48,
+            KeyExchangeAlgorithm::X25519MlKem768 => 64,
             _ => 32,
         };
         Ok(SecretVec::new(vec![0x5a; len]))

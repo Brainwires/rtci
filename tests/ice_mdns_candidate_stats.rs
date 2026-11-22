@@ -155,6 +155,158 @@ fn a_remote_mdns_candidate_has_its_statistics_before_and_after_its_name_resolves
     Ok(())
 }
 
+/// The order browsers usually produce: the browser's checks arrive (from the address its name
+/// hides) before the name resolves, so the agent first learns a peer-reflexive candidate and
+/// connects on it; then the name resolves to that address, and the signalled candidate takes
+/// the learned one's place, keeping its id and its pairs. The report must then show what was
+/// signalled, a `host` candidate with the name, and that candidate's pair must be the
+/// succeeded one: the browser interop cell read a `host` candidate with a null address there.
+#[test]
+fn a_learned_candidate_that_a_resolved_name_replaces_shows_the_name() -> Result<()> {
+    let mut now = Instant::now();
+    let pc_addr: SocketAddr = "192.168.0.2:5000".parse()?;
+    let owner_ice: SocketAddr = format!("{OWNER}:61163").parse()?;
+    let mut pc = RTCPeerConnectionBuilder::new().build(now)?;
+    let mut browser = RTCPeerConnectionBuilder::new().build(now)?;
+    browser.create_data_channel("mdns", None)?;
+    let offer = browser.create_offer(None)?;
+    browser.set_local_description(now, offer.clone())?;
+    pc.set_remote_description(now, offer)?;
+    let answer = pc.create_answer(None)?;
+    pc.set_local_description(now, answer.clone())?;
+    browser.set_remote_description(now, answer)?;
+
+    let host = |addr: SocketAddr| -> Result<RTCIceCandidateInit> {
+        let candidate = CandidateHostConfig {
+            base_config: CandidateConfig {
+                network: "udp".to_owned(),
+                address: addr.ip().to_string(),
+                port: addr.port(),
+                component: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+        .new_candidate_host()?;
+        Ok(RTCIceCandidate::from(&candidate).to_json()?)
+    };
+    pc.add_local_candidate(host(pc_addr)?)?;
+    browser.add_local_candidate(host(owner_ice)?)?;
+    browser.add_remote_candidate(host(pc_addr)?)?;
+    // The browser signals its candidate under its name only.
+    pc.add_remote_candidate(RTCIceCandidateInit {
+        candidate: format!("candidate:1114572465 1 udp 2113939711 {NAME} 61163 typ host"),
+        ..Default::default()
+    })?;
+
+    let mut owner = Mdns::new(
+        now,
+        MdnsConfig::new()
+            .with_local_names(vec![NAME.to_owned()])
+            .with_local_ip(OWNER.parse()?),
+    );
+    let group: SocketAddr = GROUP.parse()?;
+    let owner_mdns: SocketAddr = format!("{OWNER}:5353").parse()?;
+    let path = |local_addr: SocketAddr, peer_addr: SocketAddr| TransportContext {
+        local_addr,
+        peer_addr,
+        ecn: None,
+        transport_protocol: TransportProtocol::UDP,
+    };
+    let succeeded_pair = |pc: &mut RTCPeerConnection, now: Instant| {
+        pc.get_stats(now, StatsSelector::None)
+            .candidate_pairs()
+            .filter(|p| p.state == rtc::statistics::stats::ice_candidate_pair::RTCStatsIceCandidatePairState::Succeeded)
+            .map(|p| p.remote_candidate_id.clone())
+            .collect::<Vec<_>>()
+    };
+
+    // Run the checks with mDNS held back, then let the name resolve.
+    let mut mdns_held = Vec::new();
+    let mut learned = None;
+    let until = now + Duration::from_secs(10);
+    while now < until {
+        pc.handle_timeout(now)?;
+        browser.handle_timeout(now)?;
+        owner.handle_timeout(now)?;
+        while let Some(out) = pc.poll_write() {
+            if out.transport.peer_addr == group {
+                mdns_held.push(out.message);
+            } else if out.transport.peer_addr == owner_ice {
+                browser.handle_read(TaggedBytesMut {
+                    now,
+                    transport: path(owner_ice, pc_addr),
+                    message: out.message,
+                })?;
+            }
+        }
+        while let Some(out) = browser.poll_write() {
+            if out.transport.peer_addr == pc_addr {
+                pc.handle_read(TaggedBytesMut {
+                    now,
+                    transport: path(pc_addr, owner_ice),
+                    message: out.message,
+                })?;
+            }
+        }
+        if learned.is_none() {
+            let report = remote_candidates(&mut pc, now);
+            if let Some(prflx) = report
+                .iter()
+                .find(|c| c.3 == RTCIceCandidateType::Prflx)
+                .filter(|c| succeeded_pair(&mut pc, now).contains(&c.0))
+            {
+                learned = Some(prflx.0.clone());
+            }
+        } else {
+            for query in mdns_held.drain(..) {
+                owner.handle_read(TaggedBytesMut {
+                    now,
+                    transport: path(group, "192.168.0.2:5353".parse()?),
+                    message: query,
+                })?;
+            }
+            while let Some(out) = owner.poll_write() {
+                pc.handle_read(TaggedBytesMut {
+                    now,
+                    transport: path(group, owner_mdns),
+                    message: out.message,
+                })?;
+            }
+            let report = remote_candidates(&mut pc, now);
+            if report.iter().all(|c| c.3 != RTCIceCandidateType::Prflx) {
+                break;
+            }
+        }
+        now += Duration::from_millis(10);
+    }
+    let learned = learned.expect("the browser's checks taught a peer-reflexive candidate");
+
+    let report = remote_candidates(&mut pc, now);
+    let shown: Vec<_> = report.iter().filter(|c| c.0 == learned).collect();
+    assert_eq!(
+        shown.len(),
+        1,
+        "the learned candidate's id is kept: {report:?}"
+    );
+    assert_eq!(
+        (shown[0].1.as_deref(), shown[0].2, shown[0].3),
+        (Some(NAME), 61163, RTCIceCandidateType::Host),
+        "{report:?}"
+    );
+    assert_eq!(
+        report.len(),
+        1,
+        "the object made when the name was submitted gives way: {report:?}"
+    );
+    assert!(
+        succeeded_pair(&mut pc, now).contains(&learned),
+        "the succeeded pair names the candidate that shows the name"
+    );
+    assert!(report.iter().all(|c| c.1.as_deref() != Some(OWNER)));
+    Ok(())
+}
+
 /// A local candidate the peer connection announces carries the username fragment of its ICE
 /// generation (RFC 8838 section 9: trickled candidates are tied to their ICE session, so a
 /// stale one is recognised), and `to_json` hands it on.
@@ -189,7 +341,7 @@ fn an_announced_local_candidate_names_its_ice_generation() -> Result<()> {
     pc.add_local_candidate(RTCIceCandidate::from(&local).to_json()?)?;
     let announced = std::iter::from_fn(|| pc.poll_event())
         .find_map(|event| match event {
-            RTCPeerConnectionEvent::OnIceCandidateEvent(e) => Some(e.candidate),
+            RTCPeerConnectionEvent::OnIceCandidateEvent(e) => e.candidate,
             _ => None,
         })
         .expect("the candidate is announced");

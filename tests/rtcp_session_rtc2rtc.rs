@@ -55,6 +55,8 @@ struct Peer {
     opened: Vec<RTCRtpReceiverId>,
     /// How many tracks closed.
     closed: usize,
+    /// How many tracks were muted.
+    muted: usize,
     /// The RTCP packets `poll_read` yielded.
     read_rtcp: Vec<Box<dyn rtc::rtcp::Packet>>,
     /// The RTCP datagrams this peer put on the wire.
@@ -91,6 +93,7 @@ impl Peer {
             states: Vec::new(),
             opened: Vec::new(),
             closed: 0,
+            muted: 0,
             read_rtcp: Vec::new(),
             rtcp_datagrams: 0,
         })
@@ -192,6 +195,9 @@ impl World {
                     }
                     RTCPeerConnectionEvent::OnTrack(RTCTrackEvent::OnClose(_)) => {
                         peer.closed += 1;
+                    }
+                    RTCPeerConnectionEvent::OnTrack(RTCTrackEvent::OnMute(_)) => {
+                        peer.muted += 1;
                     }
                     _ => {}
                 }
@@ -447,17 +453,19 @@ fn rtcp_is_a_few_packets_a_second() -> Result<()> {
     Ok(())
 }
 
-/// RFC 3550 6.6: closing a connection says BYE for its SSRCs, and the peer's track ends.
+/// RFC 3550 6.6: closing a connection says BYE for its SSRCs, and the peer's track is muted
+/// (W3C webrtc 9.3); only negotiation ends a remote track.
 #[test]
-fn closing_the_sender_ends_the_receivers_track() -> Result<()> {
+fn closing_the_sender_mutes_the_receivers_track() -> Result<()> {
     let (mut world, sender) = World::connected()?;
     world.send_media(sender, FIRST_SEQ, 50)?;
     assert_eq!(1, world.peers[1].opened.len());
-    assert_eq!(0, world.peers[1].closed);
+    assert_eq!(0, world.peers[1].muted);
 
     world.peers[0].pc.close()?;
     world.pump()?;
 
-    assert_eq!(1, world.peers[1].closed, "the BYE ended the remote track");
+    assert_eq!(1, world.peers[1].muted, "the BYE muted the remote track");
+    assert_eq!(0, world.peers[1].closed, "and did not end it");
     Ok(())
 }

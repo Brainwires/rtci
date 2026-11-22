@@ -1,4 +1,5 @@
-//! RFC 3550 6.6: an inbound BYE for every SSRC of a remote track ends the track with `OnClose`.
+//! RFC 3550 6.6 and W3C webrtc 9.3: an inbound BYE for an SSRC of a remote track mutes the
+//! track (`OnMute`); it does not end it.
 
 use super::*;
 use crate::media_stream::track::MediaStreamTrack;
@@ -124,8 +125,9 @@ fn goodbye(sources: Vec<u32>) -> TaggedRTCMessageInternal {
     }
 }
 
-/// Feed `message`; return the track ids `OnClose` fired for and the track's state after.
-fn closes_after(message: TaggedRTCMessageInternal) -> (Vec<String>, MediaStreamTrackState) {
+/// Feed `message`; return the track events (as "mute:<id>" / "close:<id>") and the track's
+/// state and muted flag after.
+fn events_after(message: TaggedRTCMessageInternal) -> (Vec<String>, MediaStreamTrackState, bool) {
     let mut ctx = InterceptorHandlerContext {
         is_dtls_handshake_complete: true,
         ..Default::default()
@@ -143,33 +145,33 @@ fn closes_after(message: TaggedRTCMessageInternal) -> (Vec<String>, MediaStreamT
     );
     handler.handle_read(message).expect("handle_read");
 
-    let closed = std::iter::from_fn(|| handler.poll_event())
+    let events = std::iter::from_fn(|| handler.poll_event())
         .filter_map(|event| match event.event {
             RTCEventInternal::RTCPeerConnectionEvent(RTCPeerConnectionEvent::OnTrack(
                 RTCTrackEvent::OnClose(track_id),
-            )) => Some(track_id),
+            )) => Some(format!("close:{track_id}")),
+            RTCEventInternal::RTCPeerConnectionEvent(RTCPeerConnectionEvent::OnTrack(
+                RTCTrackEvent::OnMute(track_id),
+            )) => Some(format!("mute:{track_id}")),
             _ => None,
         })
         .collect();
-    let state = transceivers[0]
-        .receiver()
-        .as_ref()
-        .unwrap()
-        .track()
-        .ready_state();
-    (closed, state)
+    let track = transceivers[0].receiver().as_ref().unwrap().track();
+    (events, track.ready_state(), track.muted())
 }
 
 #[test]
-fn a_bye_for_the_tracks_ssrc_ends_it() {
-    let (closed, state) = closes_after(goodbye(vec![SSRC]));
-    assert_eq!(vec!["remote-track".to_string()], closed);
-    assert_eq!(MediaStreamTrackState::Ended, state);
-}
-
-#[test]
-fn a_bye_for_another_ssrc_ends_nothing() {
-    let (closed, state) = closes_after(goodbye(vec![4242]));
-    assert!(closed.is_empty());
+fn a_bye_for_the_tracks_ssrc_mutes_it_and_does_not_end_it() {
+    let (events, state, muted) = events_after(goodbye(vec![SSRC]));
+    assert_eq!(vec!["mute:remote-track".to_string()], events);
     assert_eq!(MediaStreamTrackState::Live, state);
+    assert!(muted);
+}
+
+#[test]
+fn a_bye_for_another_ssrc_changes_nothing() {
+    let (events, state, muted) = events_after(goodbye(vec![4242]));
+    assert!(events.is_empty());
+    assert_eq!(MediaStreamTrackState::Live, state);
+    assert!(!muted);
 }

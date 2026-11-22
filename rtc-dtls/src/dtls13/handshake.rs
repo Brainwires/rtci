@@ -23,6 +23,11 @@ use super::conn::*;
 use super::hello::*;
 use super::key_schedule::{DTLS13_LABEL_PREFIX, KeySchedule, certificate_verify_input};
 use super::messages::*;
+use super::psk::{
+    PSK_DHE_KE, PSK_KE, TicketIssuer, binder, hash_of, new_session_ticket,
+    parse_client_pre_shared_key, parse_psk_key_exchange_modes, placeholder_binders,
+    pre_shared_key_data,
+};
 use super::suite::Suite13;
 use super::{DTLS1_2_WIRE_VERSION, DTLS1_3_WIRE_VERSION};
 use crate::cipher_suite::CipherSuiteId;
@@ -36,6 +41,7 @@ use log::debug;
 use shared::error::{Error, Result};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 fn internal(error: Error) -> Refusal {
     refuse(alert::INTERNAL_ERROR, error)
@@ -61,6 +67,16 @@ pub(crate) struct ServerStart {
     pub(crate) address_verified: bool,
     /// The cookie of this ClientHello, already verified by the endpoint, with what it holds.
     pub(crate) verified_retry: Option<(Vec<u8>, RetryCookie)>,
+    /// The time the ClientHello arrived at, which a ticket it offers is checked against.
+    pub(crate) now: Option<Instant>,
+}
+
+/// The PSK a server accepts from a ClientHello's pre_shared_key.
+struct SelectedPsk {
+    index: u16,
+    secret: SecretVec,
+    without_key_exchange: bool,
+    peer_certificates: Vec<Vec<u8>>,
 }
 
 impl Conn13 {
@@ -101,6 +117,7 @@ impl Conn13 {
         conn.set_next_receive_seq(start.message_seq.wrapping_add(1));
         conn.set_plaintext_send_sequence(start.record_sequence);
         conn.address_verified = start.address_verified;
+        conn.clock = start.now;
         if start.verified_retry.is_some() {
             // The HelloRetryRequest was message 0 of this server.
             conn.next_send_seq = 1;
@@ -180,8 +197,13 @@ impl Conn13 {
     fn enter_handshake_keys(&mut self, shared_secret: &[u8]) -> std::result::Result<(), Refusal> {
         let suite = self.suite().map_err(internal)?;
         let hash = self.transcript_hash()?;
-        let mut schedule =
-            KeySchedule::new(self.crypto(), suite, DTLS13_LABEL_PREFIX).map_err(internal)?;
+        let mut schedule = match &self.psk {
+            Some(psk) => {
+                KeySchedule::with_psk(self.crypto(), suite, DTLS13_LABEL_PREFIX, psk.as_ref())
+            }
+            None => KeySchedule::new(self.crypto(), suite, DTLS13_LABEL_PREFIX),
+        }
+        .map_err(internal)?;
         schedule
             .enter_handshake(self.crypto(), shared_secret, &hash)
             .map_err(internal)?;
@@ -228,6 +250,42 @@ impl Conn13 {
         } else {
             (server, client)
         })
+    }
+
+    /// Derives `resumption_master_secret` from the transcript through the client's Finished,
+    /// which ends the Main Secret; it is kept where tickets are made (a server that issues
+    /// them) or taken (a client with a session store).
+    fn derive_resumption_secret(&mut self) -> std::result::Result<(), Refusal> {
+        let hash = self.transcript_hash()?;
+        let provider = self.provider.clone();
+        let keeps = if self.is_client {
+            self.cfg.session_store.is_some()
+        } else {
+            self.cfg.ticket_issuer.is_some()
+        };
+        if let Some(schedule) = self.schedule.as_mut() {
+            let secret = schedule
+                .take_resumption_master_secret(provider.crypto(), &hash)
+                .map_err(internal)?;
+            if keeps {
+                self.resumption_secret = Some(secret);
+            }
+        }
+        Ok(())
+    }
+
+    /// Runs the configured peer-certificate check again on the certificates a PSK carries
+    /// from the handshake that made it: a resumed association is the same peer only if the
+    /// application still accepts that one.
+    fn verify_resumed_peer(&self) -> std::result::Result<(), Refusal> {
+        if self.peer_certificates.is_empty() {
+            return Ok(());
+        }
+        if let Some(verify_peer_certificate) = &self.cfg.verify_peer_certificate {
+            verify_peer_certificate(&self.peer_certificates, &[])
+                .map_err(|error| refuse(alert::BAD_CERTIFICATE, error))?;
+        }
+        Ok(())
     }
 
     fn finished_verify_data(&self, of_client: bool) -> std::result::Result<Vec<u8>, Refusal> {
@@ -279,36 +337,14 @@ impl Conn13 {
         signature: &[u8],
         from_server: bool,
     ) -> std::result::Result<(), Refusal> {
-        let bad_certificate = |error| refuse(alert::BAD_CERTIFICATE, error);
-        let end_entity = self
-            .peer_certificates
-            .first()
-            .ok_or_else(|| bad_certificate(Error::ErrLengthMismatch))?;
-        let (_, certificate) = x509_parser::parse_x509_certificate(end_entity)
-            .map_err(|err| bad_certificate(Error::Other(err.to_string())))?;
-        let encoding = match scheme.signature {
-            SignatureAlgorithm::Ed25519 => PublicKeyEncoding::Ed25519Raw,
-            SignatureAlgorithm::Ecdsa => PublicKeyEncoding::EcUncompressedPoint,
-            _ => PublicKeyEncoding::RsaPkcs1Der,
-        };
-        let crypto_scheme = scheme.crypto_scheme().map_err(illegal)?;
-        let input = certificate_verify_input(from_server, &self.transcript_hash()?);
-        // RFC 8446 section 6.2: a signature that does not verify is a decrypt_error.
-        self.crypto()
-            .verify_signature(
-                crypto_scheme,
-                PublicKey {
-                    encoding,
-                    bytes: &certificate
-                        .tbs_certificate
-                        .subject_pki
-                        .subject_public_key
-                        .data,
-                },
-                &input,
-                signature,
-            )
-            .map_err(|_| refuse(alert::DECRYPT_ERROR, Error::ErrKeySignatureMismatch))
+        let transcript_hash = self.transcript_hash()?;
+        self.verify_signature_over(
+            &self.peer_certificates,
+            scheme,
+            signature,
+            from_server,
+            &transcript_hash,
+        )
     }
 
     // ------------------------------------------------------------------------------------
@@ -342,10 +378,16 @@ impl Conn13 {
         // RFC 8446 section 4.2: an extension that does not belong in a ServerHello is an
         // illegal_parameter, one that was not offered an unsupported_extension.
         let mut key_share = None;
+        let mut selected_psk = None;
         for (extension_type, data) in &hello.extensions {
             match *extension_type {
                 EXT_SUPPORTED_VERSIONS => {}
                 EXT_KEY_SHARE => key_share = Some(*data),
+                EXT_PRE_SHARED_KEY if self.offered_extensions.contains(&EXT_PRE_SHARED_KEY) => {
+                    let mut reader = Reader::new(data);
+                    selected_psk = Some(reader.u16().map_err(decode_error)?);
+                    reader.finish().map_err(decode_error)?;
+                }
                 EXT_CONNECTION_ID if self.offered_extensions.contains(&EXT_CONNECTION_ID) => {
                     let connection_id = parse_connection_id(data).map_err(decode_error)?;
                     self.remote_connection_id = connection_id.to_vec();
@@ -371,25 +413,61 @@ impl Conn13 {
         if self.connection_ids_negotiated {
             self.local_connection_id = offer.connection_id.clone().unwrap_or_default();
         }
-        // RFC 8446 section 4.2.8: the server's share is for a group this client sent a
-        // share for; anything else is an illegal_parameter. Without one there is no key
-        // exchange this client can do.
-        let key_share = key_share.ok_or_else(|| {
-            refuse(
-                alert::MISSING_EXTENSION,
-                Error::ErrNoSupportedEllipticCurves,
-            )
-        })?;
-        let mut reader = Reader::new(key_share);
-        let group = reader.u16().map_err(decode_error)?;
-        let key_exchange = reader.vec16().map_err(decode_error)?;
-        reader.finish().map_err(decode_error)?;
-        let mut keypair = offer
-            .key_shares
-            .into_iter()
-            .find(|keypair| keypair.curve as u16 == group)
-            .ok_or_else(|| illegal(Error::ErrInvalidNamedCurve))?;
-        let shared_secret = SecretVec::new(keypair.complete(key_exchange).map_err(illegal)?);
+        // RFC 8446 section 4.2.11: a PSK the server selects is one this client offered, of
+        // the hash of the suite selected, and comes with a key_share unless this client
+        // offered psk_ke; anything else is an illegal_parameter.
+        let mut offer = offer;
+        let psk = match selected_psk {
+            Some(index) => {
+                let psk = offer
+                    .psks
+                    .drain(..)
+                    .nth(usize::from(index))
+                    .ok_or_else(|| illegal(Error::ErrInvalidExtensionType))?;
+                if psk.suite.hash() != suite.hash()
+                    || (key_share.is_none() && !self.cfg.psk_without_key_exchange)
+                {
+                    return Err(illegal(Error::ErrInvalidCipherSuite));
+                }
+                Some(psk)
+            }
+            None => None,
+        };
+        let shared_secret = match key_share {
+            Some(key_share) => {
+                // RFC 8446 section 4.2.8: the server's share is for a group this client sent
+                // a share for; anything else is an illegal_parameter.
+                let mut reader = Reader::new(key_share);
+                let group = reader.u16().map_err(decode_error)?;
+                let key_exchange = reader.vec16().map_err(decode_error)?;
+                reader.finish().map_err(decode_error)?;
+                let mut keypair = offer
+                    .key_shares
+                    .into_iter()
+                    .find(|keypair| keypair.curve as u16 == group)
+                    .ok_or_else(|| illegal(Error::ErrInvalidNamedCurve))?;
+                SecretVec::new(keypair.complete(key_exchange).map_err(illegal)?)
+            }
+            // psk_ke: the (EC)DHE input of the key schedule is zeros (RFC 8446 section 7.1).
+            None if psk.is_some() => {
+                self.psk_without_key_exchange = true;
+                SecretVec::new(vec![0u8; suite.hash_len()])
+            }
+            // Without a share and without a PSK there is no key exchange this client can do.
+            None => {
+                return Err(refuse(
+                    alert::MISSING_EXTENSION,
+                    Error::ErrNoSupportedEllipticCurves,
+                ));
+            }
+        };
+        if let Some(psk) = psk {
+            // The server is the one that made the ticket (or holds the external PSK): its
+            // certificates are those of the handshake the ticket came from.
+            self.psk = Some(psk.secret);
+            self.resumed = true;
+            self.peer_certificates = psk.peer_certificates;
+        }
 
         self.suite = Some(suite);
         self.transcript.add(SERVER_HELLO, body);
@@ -442,7 +520,7 @@ impl Conn13 {
         if let Some(group) = group {
             // Section 4.2.8: the group is one this client supports and sent no share for.
             let curve = NamedCurve::from(group);
-            if !self.cfg.local_named_curves.contains(&curve)
+            if !self.cfg.local_tls13_groups.contains(&curve)
                 || offer
                     .key_shares
                     .iter()
@@ -457,9 +535,16 @@ impl Conn13 {
             new_share = Some(group);
         }
 
+        // RFC 8446 section 4.2.11: the PSKs of another hash than the suite's are not offered
+        // again.
+        offer.psks.retain(|psk| psk.suite.hash() == suite.hash());
+        let psks = offer.psks.clone();
+
         let first = ClientHello::parse(&self.client_hello).map_err(internal)?;
         let share = new_share.map(|group| (group, offer.key_shares[0].public_key.as_slice()));
-        let second = second_client_hello(&first, share, cookie);
+        let psk_data =
+            (!psks.is_empty()).then(|| pre_shared_key_data(&psks, &placeholder_binders(&psks)));
+        let mut second = second_client_hello(&first, share, cookie, psk_data.as_deref());
 
         self.suite = Some(suite);
         self.hello_retry_seen = true;
@@ -469,6 +554,15 @@ impl Conn13 {
             .map_err(internal)?;
         self.transcript.add(SERVER_HELLO, body);
         self.offered_extensions.push(EXT_COOKIE);
+        if psks.is_empty() {
+            self.offered_extensions
+                .retain(|extension| *extension != EXT_PRE_SHARED_KEY);
+        } else {
+            // Section 4.2.11.2: the binders of the second ClientHello cover the transcript
+            // from the message_hash on.
+            super::psk::bind(self.provider.crypto(), &psks, &self.transcript, &mut second)
+                .map_err(internal)?;
+        }
 
         let mut flight = Flight::new(FlightKind::Handshake);
         self.client_hello.clone_from(&second);
@@ -519,7 +613,13 @@ impl Conn13 {
             ));
         }
         self.transcript.add(ENCRYPTED_EXTENSIONS, body);
-        self.state = HandshakeState::ClientWaitCertificateOrRequest;
+        // RFC 8446 section 2.2: a server that authenticates with a PSK sends no certificate,
+        // and asks for none (section 4.3.2).
+        self.state = if self.resumed {
+            HandshakeState::ClientWaitFinished
+        } else {
+            HandshakeState::ClientWaitCertificateOrRequest
+        };
         Ok(())
     }
 
@@ -641,6 +741,9 @@ impl Conn13 {
         if !crypto::constant_time_eq(&expected, body) {
             return Err(refuse(alert::DECRYPT_ERROR, Error::ErrVerifyDataMismatch));
         }
+        if self.resumed {
+            self.verify_resumed_peer()?;
+        }
         self.transcript.add(FINISHED, body);
         let (local, remote) = self.enter_application_secrets()?;
         self.install_read_epoch(EPOCH_APPLICATION, remote.as_ref())
@@ -651,23 +754,7 @@ impl Conn13 {
         let mut flight = Flight::new(FlightKind::ClientFinal);
         let authenticates = self.certificate_requested.is_some();
         if let Some(schemes) = self.certificate_requested.take() {
-            let credentials = self
-                .cfg
-                .get_certificate(&self.cfg.server_name)
-                .ok()
-                .and_then(|certificate| {
-                    self.cfg
-                        .local_signature_schemes
-                        .iter()
-                        .find(|scheme| {
-                            scheme.is_tls13_signature()
-                                && schemes.contains(&scheme.scheme_code())
-                                && scheme.is_compatible(&certificate.private_key)
-                        })
-                        .copied()
-                        .map(|scheme| (certificate, scheme))
-                });
-            match credentials {
+            match self.client_credentials(&schemes) {
                 Some((certificate, scheme)) => {
                     let chain: Vec<&[u8]> = certificate
                         .certificate
@@ -704,6 +791,7 @@ impl Conn13 {
         }
         let verify_data = self.finished_verify_data(true)?;
         self.add_to_flight(&mut flight, EPOCH_HANDSHAKE, FINISHED, verify_data);
+        self.derive_resumption_secret()?;
         self.send_flight(flight).map_err(internal)?;
 
         self.install_write_epoch(EPOCH_APPLICATION, local.as_ref())
@@ -793,25 +881,44 @@ impl Conn13 {
         }
 
         self.suite = Some(suite);
+        // A PSK, if the client offers one this server takes (RFC 8446 section 4.2.11): its
+        // binder covers the transcript up to here and the ClientHello.
+        let selected = self.select_psk(&hello, body, suite, &negotiated)?;
         self.transcript.add(CLIENT_HELLO, body);
         self.client_random = hello.random.to_vec();
         self.srtp_profile = negotiated.srtp_profile;
         self.server_name.clone_from(&negotiated.server_name);
         self.offered_extensions
             .clone_from(&negotiated.offered_extensions);
+        if let Some(modes) = hello.extension(EXT_PSK_KEY_EXCHANGE_MODES) {
+            self.client_psk_modes = parse_psk_key_exchange_modes(modes)
+                .map_err(decode_error)?
+                .to_vec();
+        }
+        let selected_index = selected.as_ref().map(|selected| selected.index);
+        if let Some(selected) = selected {
+            self.psk = Some(selected.secret);
+            self.psk_without_key_exchange = selected.without_key_exchange;
+            self.resumed = true;
+            self.peer_certificates = selected.peer_certificates;
+        }
 
-        // The key exchange: this server's share for the group, and the shared secret.
-        let Some(client_share) = &negotiated.client_share else {
-            return Err(internal(Error::ErrNoSupportedEllipticCurves));
+        // The key exchange: this server's share for the group, and the shared secret; with
+        // psk_ke, none, and zeros in its place (RFC 8446 section 7.1).
+        let (server_share, shared_secret) = if self.psk_without_key_exchange {
+            (None, SecretVec::new(vec![0u8; suite.hash_len()]))
+        } else {
+            let Some(client_share) = &negotiated.client_share else {
+                return Err(internal(Error::ErrNoSupportedEllipticCurves));
+            };
+            // RFC 8446 section 4.2.8.2: a share that is not a valid point (or, for the
+            // hybrid group, not a key of the right form) is an illegal_parameter.
+            let (share, secret) = negotiated
+                .group
+                .respond_with_crypto(self.provider.crypto(), client_share)
+                .map_err(illegal)?;
+            (Some(share), secret)
         };
-        let mut keypair = negotiated
-            .group
-            .generate_keypair_with_crypto(self.provider.crypto())
-            .map_err(internal)?;
-        let server_share = keypair.public_key.clone();
-        // RFC 8446 section 4.2.8.2: a share that is not a valid point is an
-        // illegal_parameter.
-        let shared_secret = SecretVec::new(keypair.complete(client_share).map_err(illegal)?);
 
         // Connection ids (RFC 9146 section 3, RFC 9147 section 9): only if both sides use
         // the extension.
@@ -830,10 +937,15 @@ impl Conn13 {
             .fill(&mut random)
             .map_err(|err| internal(Error::Crypto(err.to_string())))?;
         let server_hello = server_hello(&random, suite.id as u16, |extensions| {
-            put_extension(extensions, EXT_KEY_SHARE, |data| {
-                put_u16(data, negotiated.group as u16);
-                put_vec16(data, |out| out.extend_from_slice(&server_share));
-            });
+            if let Some(server_share) = &server_share {
+                put_extension(extensions, EXT_KEY_SHARE, |data| {
+                    put_u16(data, negotiated.group as u16);
+                    put_vec16(data, |out| out.extend_from_slice(server_share));
+                });
+            }
+            if let Some(index) = selected_index {
+                put_extension(extensions, EXT_PRE_SHARED_KEY, |data| put_u16(data, index));
+            }
             if let Some(connection_id) = &connection_id {
                 put_extension(extensions, EXT_CONNECTION_ID, |data| {
                     put_vec8(data, |out| out.extend_from_slice(connection_id))
@@ -870,43 +982,11 @@ impl Conn13 {
             encrypted_extensions,
         );
 
-        if cfg.client_auth as u8 > ClientAuthType::NoClientCert as u8 {
-            let request = certificate_request(&[], &self.local_scheme_codes());
-            self.add_to_flight(&mut flight, EPOCH_HANDSHAKE, CERTIFICATE_REQUEST, request);
-            self.client_certificate_expected = true;
+        // RFC 8446 section 2.2: with a PSK the server sends no certificate, and section
+        // 4.3.2 asks for none.
+        if !self.resumed {
+            self.add_certificate_messages(&mut flight, &negotiated)?;
         }
-
-        let chain: Vec<&[u8]> = negotiated
-            .certificate
-            .certificate
-            .iter()
-            .map(|der| der.as_ref())
-            .collect();
-        self.add_to_flight(
-            &mut flight,
-            EPOCH_HANDSHAKE,
-            CERTIFICATE,
-            super::messages::certificate(&[], &chain),
-        );
-        let input = certificate_verify_input(true, &self.transcript_hash()?);
-        let signature = negotiated
-            .certificate
-            .private_key
-            .signing_key
-            .sign(
-                negotiated
-                    .signature_scheme
-                    .crypto_scheme()
-                    .map_err(internal)?,
-                &input,
-            )
-            .map_err(|err| internal(Error::Crypto(err.to_string())))?;
-        self.add_to_flight(
-            &mut flight,
-            EPOCH_HANDSHAKE,
-            CERTIFICATE_VERIFY,
-            certificate_verify(negotiated.signature_scheme.scheme_code(), &signature),
-        );
         let verify_data = self.finished_verify_data(false)?;
         self.add_to_flight(&mut flight, EPOCH_HANDSHAKE, FINISHED, verify_data);
 
@@ -925,6 +1005,268 @@ impl Conn13 {
         } else {
             HandshakeState::ServerWaitFinished
         };
+        Ok(())
+    }
+
+    /// The CertificateRequest (if the configuration authenticates clients), Certificate and
+    /// CertificateVerify of a server's flight.
+    fn add_certificate_messages(
+        &mut self,
+        flight: &mut Flight,
+        negotiated: &Negotiated,
+    ) -> std::result::Result<(), Refusal> {
+        if self.cfg.client_auth as u8 > ClientAuthType::NoClientCert as u8 {
+            let request = certificate_request(&[], &self.local_scheme_codes());
+            self.add_to_flight(flight, EPOCH_HANDSHAKE, CERTIFICATE_REQUEST, request);
+            self.client_certificate_expected = true;
+        }
+
+        let chain: Vec<&[u8]> = negotiated
+            .certificate
+            .certificate
+            .iter()
+            .map(|der| der.as_ref())
+            .collect();
+        self.add_to_flight(
+            flight,
+            EPOCH_HANDSHAKE,
+            CERTIFICATE,
+            super::messages::certificate(&[], &chain),
+        );
+        let input = certificate_verify_input(true, &self.transcript_hash()?);
+        let signature = negotiated
+            .certificate
+            .private_key
+            .signing_key
+            .sign(
+                negotiated
+                    .signature_scheme
+                    .crypto_scheme()
+                    .map_err(internal)?,
+                &input,
+            )
+            .map_err(|err| internal(Error::Crypto(err.to_string())))?;
+        self.add_to_flight(
+            flight,
+            EPOCH_HANDSHAKE,
+            CERTIFICATE_VERIFY,
+            certificate_verify(negotiated.signature_scheme.scheme_code(), &signature),
+        );
+        Ok(())
+    }
+
+    /// The PSK of a ClientHello this server accepts, if any (RFC 8446 section 4.2.11): the
+    /// first identity that is an external PSK of this server or one of its tickets, still
+    /// valid, unused, for the hash of the suite negotiated and the same server name, in a key
+    /// exchange mode both sides take. Its binder must verify, or the handshake ends with a
+    /// decrypt_error. Any other offer is ignored: the handshake is a full one.
+    fn select_psk(
+        &mut self,
+        hello: &ClientHello<'_>,
+        body: &[u8],
+        suite: Suite13,
+        negotiated: &Negotiated,
+    ) -> std::result::Result<Option<SelectedPsk>, Refusal> {
+        let Some(data) = hello.extension(EXT_PRE_SHARED_KEY) else {
+            return Ok(None);
+        };
+        // `negotiate` has seen that the extension is the last and comes with the modes.
+        let modes = hello
+            .extension(EXT_PSK_KEY_EXCHANGE_MODES)
+            .ok_or_else(|| refuse(alert::MISSING_EXTENSION, Error::ErrInvalidExtensionType))?;
+        let modes = parse_psk_key_exchange_modes(modes).map_err(decode_error)?;
+        let offered = parse_client_pre_shared_key(data).map_err(decode_error)?;
+        // psk_dhe_ke where the client sent a share for the group; psk_ke only if this server
+        // allows it and the client offers it (RFC 8446 section 4.2.9).
+        let without_key_exchange =
+            if modes.contains(&PSK_DHE_KE) && negotiated.client_share.is_some() {
+                false
+            } else if modes.contains(&PSK_KE) && self.cfg.psk_without_key_exchange {
+                true
+            } else {
+                return Ok(None);
+            };
+        let cfg = self.cfg.clone();
+        let provider = self.provider.clone();
+        let requires_certificate = matches!(
+            cfg.client_auth,
+            ClientAuthType::RequireAnyClientCert | ClientAuthType::RequireAndVerifyClientCert
+        );
+        for (index, (identity, _obfuscated_age)) in offered.identities.iter().enumerate() {
+            // An external PSK of this identity, or a ticket of this server (RFC 8446 section
+            // 4.6.1: of the same hash, within its lifetime; the name it was made for).
+            let mut claim = None;
+            let candidate = if let Some(external) = cfg
+                .external_psks
+                .iter()
+                .find(|external| external.identity == *identity)
+            {
+                (hash_of(external.hash) == suite.hash())
+                    .then(|| (external.secret.clone(), true, vec![]))
+            } else if let (Some(issuer), Some(now)) = (&cfg.ticket_issuer, self.clock) {
+                issuer.open(provider.as_ref(), identity).and_then(|ticket| {
+                    let now_ms = issuer.ms(now);
+                    let expires = ticket
+                        .issued_ms
+                        .saturating_add(u64::from(ticket.lifetime) * 1000);
+                    let usable = Suite13::for_id(ticket.suite)
+                        .is_some_and(|issued| issued.hash() == suite.hash())
+                        && ticket.issued_ms <= now_ms
+                        && now_ms < expires
+                        && ticket.server_name == negotiated.server_name
+                        && (!requires_certificate || !ticket.peer_certificates.is_empty());
+                    claim = Some((ticket.id, now_ms, expires));
+                    usable.then_some((ticket.secret, false, ticket.peer_certificates))
+                })
+            } else {
+                None
+            };
+            let Some((secret, external, peer_certificates)) = candidate else {
+                continue;
+            };
+            // RFC 8446 section 4.2.11: the binder of the PSK selected is verified before it
+            // is accepted, and one that does not verify ends the handshake.
+            let expected = binder(
+                provider.crypto(),
+                suite,
+                secret.as_ref(),
+                external,
+                &self.transcript,
+                body,
+                offered.binders_len,
+            )
+            .map_err(internal)?;
+            if !crypto::constant_time_eq(&expected, offered.binders[index]) {
+                return Err(refuse(alert::DECRYPT_ERROR, Error::ErrVerifyDataMismatch));
+            }
+            // A ticket is accepted once (RFC 8446 section 8.1): one seen before gets a full
+            // handshake.
+            if let (Some(issuer), Some((id, now_ms, expires))) = (&cfg.ticket_issuer, claim)
+                && !issuer.claim(id, now_ms, expires)
+            {
+                debug!("server: a ticket offered again; full handshake");
+                return Ok(None);
+            }
+            let selected = SelectedPsk {
+                index: index as u16,
+                secret,
+                without_key_exchange,
+                peer_certificates,
+            };
+            // The client is the peer of the handshake the ticket came from: the
+            // application's check of it runs again.
+            let earlier = std::mem::replace(
+                &mut self.peer_certificates,
+                selected.peer_certificates.clone(),
+            );
+            let checked = self.verify_resumed_peer();
+            self.peer_certificates = earlier;
+            checked?;
+            return Ok(Some(selected));
+        }
+        Ok(None)
+    }
+
+    /// Sends the configured number of NewSessionTicket messages (RFC 8446 section 4.6.1),
+    /// after the client's Finished: to a client that offered a PSK key exchange mode this
+    /// server takes (section 4.2.9), each with its own nonce and ticket_age_add.
+    fn send_session_tickets(&mut self) -> std::result::Result<(), Refusal> {
+        let cfg = self.cfg.clone();
+        let (Some(issuer), Some(now), Some(secret)) = (
+            cfg.ticket_issuer.as_ref(),
+            self.clock,
+            self.resumption_secret.take(),
+        ) else {
+            return Ok(());
+        };
+        let takes_a_mode = self.client_psk_modes.contains(&PSK_DHE_KE)
+            || (cfg.psk_without_key_exchange && self.client_psk_modes.contains(&PSK_KE));
+        if !takes_a_mode || !TicketIssuer::carries(&self.peer_certificates) {
+            return Ok(());
+        }
+        let suite = self.suite().map_err(internal)?;
+        let provider = self.provider.clone();
+        for _ in 0..issuer.count {
+            let nonce = [self.tickets_issued];
+            self.tickets_issued = self.tickets_issued.wrapping_add(1);
+            let psk = self
+                .schedule
+                .as_ref()
+                .ok_or_else(|| internal(Error::ErrCipherSuiteUnset))?
+                .resumption_psk(provider.crypto(), secret.as_ref(), &nonce)
+                .map_err(internal)?;
+            let mut age_add = [0u8; 4];
+            provider
+                .random()
+                .fill(&mut age_add)
+                .map_err(|err| internal(Error::Crypto(err.to_string())))?;
+            let age_add = u32::from_be_bytes(age_add);
+            let ticket = issuer
+                .seal(
+                    provider.as_ref(),
+                    suite.id,
+                    now,
+                    age_add,
+                    psk.as_ref(),
+                    &self.server_name,
+                    &self.peer_certificates,
+                    0,
+                )
+                .map_err(internal)?;
+            let body = new_session_ticket(
+                issuer.lifetime.as_secs() as u32,
+                age_add,
+                &nonce,
+                &ticket,
+                None,
+            );
+            self.send_post_handshake(FlightKind::NewSessionTicket, NEW_SESSION_TICKET, body)
+                .map_err(internal)?;
+        }
+        Ok(())
+    }
+
+    /// A client's NewSessionTicket (RFC 8446 section 4.6.1): with a session store, the
+    /// ticket is kept with its PSK, `HKDF-Expand-Label(resumption_master_secret,
+    /// "resumption", ticket_nonce)`, for the next handshake with this server name. A lifetime
+    /// of zero says to keep it not at all; one beyond seven days is cut to seven days.
+    pub(crate) fn on_new_session_ticket(
+        &mut self,
+        body: &[u8],
+    ) -> std::result::Result<(), Refusal> {
+        let ticket = super::psk::parse_new_session_ticket(body).map_err(decode_error)?;
+        let cfg = self.cfg.clone();
+        let (Some(store), Some(secret), Some(now)) = (
+            cfg.session_store.as_ref(),
+            self.resumption_secret.as_ref(),
+            self.clock,
+        ) else {
+            return Ok(());
+        };
+        if ticket.lifetime == 0 {
+            return Ok(());
+        }
+        let suite = self.suite().map_err(internal)?;
+        let psk = self
+            .schedule
+            .as_ref()
+            .ok_or_else(|| internal(Error::ErrCipherSuiteUnset))?
+            .resumption_psk(self.provider.crypto(), secret.as_ref(), ticket.nonce)
+            .map_err(internal)?;
+        store.put(
+            &cfg.server_name,
+            crate::session::Tls13Session {
+                ticket: ticket.ticket.to_vec(),
+                secret: psk,
+                suite: suite.id,
+                received: now,
+                lifetime: Duration::from_secs(u64::from(ticket.lifetime))
+                    .min(crate::session::MAX_TICKET_LIFETIME),
+                age_add: ticket.age_add,
+                max_early_data: ticket.max_early_data.unwrap_or(0),
+                peer_certificates: self.peer_certificates.clone(),
+            },
+        );
         Ok(())
     }
 
@@ -970,14 +1312,313 @@ impl Conn13 {
             return Err(refuse(alert::DECRYPT_ERROR, Error::ErrVerifyDataMismatch));
         }
         self.transcript.add(FINISHED, body);
+        self.derive_resumption_secret()?;
         debug!("server: handshake complete");
         self.establish().map_err(internal)?;
         // RFC 9147 section 7.1: the client's last flight is answered by nothing else, so it
         // is acknowledged, at once.
         self.acknowledge_now();
-        Ok(())
+        self.send_session_tickets()
     }
 }
+
+impl Conn13 {
+    // ------------------------------------------------------------------------------------
+    // Post-handshake authentication (RFC 8446 sections 4.2.6 and 4.6.2).
+    // ------------------------------------------------------------------------------------
+
+    /// The certificate a client answers a CertificateRequest listing `schemes` with, and the
+    /// scheme it signs with: one TLS 1.3 signs with, that the request lists and its key can
+    /// make (RFC 8446 section 4.4.2.3). `None` when it has none.
+    fn client_credentials(
+        &self,
+        schemes: &[u16],
+    ) -> Option<(crate::crypto::Certificate, SignatureHashAlgorithm)> {
+        let certificate = self.cfg.get_certificate(&self.cfg.server_name).ok()?;
+        self.cfg
+            .local_signature_schemes
+            .iter()
+            .find(|scheme| {
+                scheme.is_tls13_signature()
+                    && schemes.contains(&scheme.scheme_code())
+                    && scheme.is_compatible(&certificate.private_key)
+            })
+            .copied()
+            .map(|scheme| (certificate, scheme))
+    }
+
+    /// Whether the client sent post_handshake_auth (RFC 8446 section 4.2.6).
+    pub(crate) fn post_handshake_auth_offered(&self) -> bool {
+        self.offered_extensions.contains(&EXT_POST_HANDSHAKE_AUTH)
+    }
+
+    /// Server: asks the client to authenticate, after the handshake (RFC 8446 section 4.6.2):
+    /// a CertificateRequest with a fresh, non-empty certificate_request_context, under the
+    /// application keys, acknowledged like any post-handshake message. The client's answer
+    /// is checked as its Certificate and CertificateVerify would be in the handshake, and its
+    /// Finished with the key of its current application traffic secret.
+    ///
+    /// # Errors
+    ///
+    /// For a client, before the handshake is complete, when the client did not send
+    /// post_handshake_auth (RFC 8446 section 4.2.6 forbids the request then), and with
+    /// [`MAX_PENDING_CERTIFICATE_REQUESTS`] unanswered.
+    pub(crate) fn request_client_certificate(&mut self) -> Result<()> {
+        if !self.established || self.closed {
+            return Err(Error::ErrConnClosed);
+        }
+        if self.is_client || !self.post_handshake_auth_offered() {
+            return Err(Error::Other(
+                "the client did not offer post-handshake authentication".to_owned(),
+            ));
+        }
+        if self.pending_certificate_requests.len() >= MAX_PENDING_CERTIFICATE_REQUESTS {
+            return Err(Error::Other(
+                "too many unanswered CertificateRequests".to_owned(),
+            ));
+        }
+        let mut context = vec![0u8; 16];
+        self.provider
+            .random()
+            .fill(&mut context)
+            .map_err(|err| Error::Crypto(err.to_string()))?;
+        let body = certificate_request(&context, &self.local_scheme_codes());
+        // RFC 8446 section 4.4: the context of the answer is the handshake through the
+        // client's Finished, and this CertificateRequest.
+        let mut transcript = self.transcript.clone();
+        transcript.add(CERTIFICATE_REQUEST, &body);
+        self.pending_certificate_requests
+            .push((context, transcript));
+        self.send_post_handshake(FlightKind::CertificateRequest, CERTIFICATE_REQUEST, body)
+    }
+
+    /// Client: answers a post-handshake CertificateRequest at once (RFC 8446 section 4.6.2):
+    /// Certificate, CertificateVerify and Finished, one flight, or an empty Certificate and
+    /// Finished when this client has no certificate the request allows.
+    pub(crate) fn on_post_handshake_certificate_request(
+        &mut self,
+        body: &[u8],
+    ) -> std::result::Result<(), Refusal> {
+        let (context, schemes) = parse_certificate_request(body)?;
+        // RFC 8446 section 4.3.2: after the handshake the context is not empty.
+        if context.is_empty() {
+            return Err(illegal(Error::ErrLengthMismatch));
+        }
+        let suite = self.suite().map_err(internal)?;
+        let crypto = self.provider.clone();
+        let crypto = crypto.crypto();
+        let mut transcript = self.transcript.clone();
+        transcript.add(CERTIFICATE_REQUEST, body);
+        let mut messages = vec![];
+        match self.client_credentials(&schemes) {
+            Some((certificate, scheme)) => {
+                let chain: Vec<&[u8]> = certificate
+                    .certificate
+                    .iter()
+                    .map(|der| der.as_ref())
+                    .collect();
+                let certificate_message = super::messages::certificate(context, &chain);
+                transcript.add(CERTIFICATE, &certificate_message);
+                messages.push((CERTIFICATE, certificate_message));
+                let input = certificate_verify_input(
+                    false,
+                    &transcript.hash(crypto, suite).map_err(internal)?,
+                );
+                let signature = certificate
+                    .private_key
+                    .signing_key
+                    .sign(scheme.crypto_scheme().map_err(internal)?, &input)
+                    .map_err(|err| internal(Error::Crypto(err.to_string())))?;
+                let verify = certificate_verify(scheme.scheme_code(), &signature);
+                transcript.add(CERTIFICATE_VERIFY, &verify);
+                messages.push((CERTIFICATE_VERIFY, verify));
+            }
+            None => {
+                // RFC 8446 section 4.6.2: one that declines sends a Certificate with no
+                // certificates, and its Finished.
+                let certificate_message = super::messages::certificate(context, &[]);
+                transcript.add(CERTIFICATE, &certificate_message);
+                messages.push((CERTIFICATE, certificate_message));
+            }
+        }
+        // RFC 8446 section 4.4: the Finished of a post-handshake answer is keyed from
+        // client_application_traffic_secret_N.
+        let base_key = self
+            .local_application_secret()
+            .ok_or_else(|| internal(Error::ErrCipherSuiteUnset))?;
+        let schedule = self
+            .schedule
+            .as_ref()
+            .ok_or_else(|| internal(Error::ErrCipherSuiteUnset))?;
+        let finished = schedule
+            .finished_verify_data(
+                crypto,
+                base_key.as_ref(),
+                &transcript.hash(crypto, suite).map_err(internal)?,
+            )
+            .map_err(internal)?;
+        messages.push((FINISHED, finished));
+        self.send_post_handshake_messages(FlightKind::Authentication, messages)
+            .map_err(internal)
+    }
+
+    /// Server: one message of a client's answer to a post-handshake CertificateRequest (RFC
+    /// 8446 section 4.6.2). They come in order and together: a Certificate with the context of
+    /// a request outstanding, its CertificateVerify when it holds a certificate, and the
+    /// Finished. Anything else in between is an unexpected_message.
+    pub(crate) fn on_post_handshake_authentication(
+        &mut self,
+        handshake_type: u8,
+        body: &[u8],
+    ) -> std::result::Result<(), Refusal> {
+        let suite = self.suite().map_err(internal)?;
+        let provider = self.provider.clone();
+        let crypto = provider.crypto();
+        let bad_certificate = |error| refuse(alert::BAD_CERTIFICATE, error);
+        match (handshake_type, self.client_authentication.take()) {
+            (CERTIFICATE, None) => {
+                let (context, chain) = parse_certificate(body)?;
+                let Some(index) = self
+                    .pending_certificate_requests
+                    .iter()
+                    .position(|(pending, _)| pending.as_slice() == context)
+                else {
+                    // A context of no request this server made.
+                    return Err(illegal(Error::ErrLengthMismatch));
+                };
+                let (_, mut transcript) = self.pending_certificate_requests.remove(index);
+                transcript.add(CERTIFICATE, body);
+                if chain.is_empty()
+                    && matches!(
+                        self.cfg.client_auth,
+                        ClientAuthType::RequireAnyClientCert
+                            | ClientAuthType::RequireAndVerifyClientCert
+                    )
+                {
+                    return Err(refuse(
+                        alert::CERTIFICATE_REQUIRED,
+                        Error::ErrClientCertificateRequired,
+                    ));
+                }
+                self.client_authentication = Some(ClientAuthentication {
+                    verified: chain.is_empty(),
+                    chain,
+                    transcript,
+                });
+                Ok(())
+            }
+            (CERTIFICATE_VERIFY, Some(mut answer)) if !answer.verified => {
+                let (code, signature) = parse_certificate_verify(body).map_err(decode_error)?;
+                let scheme = SignatureHashAlgorithm::from_scheme_code(code);
+                if !scheme.is_tls13_signature()
+                    || !self.cfg.local_signature_schemes.contains(&scheme)
+                {
+                    return Err(illegal(Error::ErrNoAvailableSignatureSchemes));
+                }
+                let hash = answer.transcript.hash(crypto, suite).map_err(internal)?;
+                self.verify_signature_over(&answer.chain, scheme, signature, false, &hash)?;
+                // As in the handshake: the CA chain if the configuration verifies one, and
+                // the application's check.
+                let mut chains = vec![];
+                if self.cfg.client_auth as u8 >= ClientAuthType::VerifyClientCertIfGiven as u8 {
+                    let verifier = self
+                        .cfg
+                        .client_cert_verifier
+                        .as_ref()
+                        .ok_or_else(|| bad_certificate(Error::ErrInvalidCertificate))?;
+                    chains =
+                        verify_client_cert(&answer.chain, verifier).map_err(bad_certificate)?;
+                }
+                if let Some(verify_peer_certificate) = &self.cfg.verify_peer_certificate {
+                    verify_peer_certificate(&answer.chain, &chains).map_err(bad_certificate)?;
+                }
+                answer.transcript.add(CERTIFICATE_VERIFY, body);
+                answer.verified = true;
+                self.client_authentication = Some(answer);
+                Ok(())
+            }
+            (FINISHED, Some(answer)) if answer.verified => {
+                let base_key = self
+                    .remote_application_secret()
+                    .ok_or_else(|| internal(Error::ErrCipherSuiteUnset))?;
+                let schedule = self
+                    .schedule
+                    .as_ref()
+                    .ok_or_else(|| internal(Error::ErrCipherSuiteUnset))?;
+                let expected = schedule
+                    .finished_verify_data(
+                        crypto,
+                        base_key.as_ref(),
+                        &answer.transcript.hash(crypto, suite).map_err(internal)?,
+                    )
+                    .map_err(internal)?;
+                if !crypto::constant_time_eq(&expected, body) {
+                    return Err(refuse(alert::DECRYPT_ERROR, Error::ErrVerifyDataMismatch));
+                }
+                debug!(
+                    "server: post-handshake authentication with {} certificates",
+                    answer.chain.len()
+                );
+                self.post_handshake_peer_certificates = Some(answer.chain);
+                self.post_handshake_authentications += 1;
+                Ok(())
+            }
+            _ => Err(unexpected()),
+        }
+    }
+
+    /// Checks a CertificateVerify signature by the end-entity certificate of `chain` over
+    /// the transcript hash given (RFC 8446 section 4.4.3).
+    fn verify_signature_over(
+        &self,
+        chain: &[Vec<u8>],
+        scheme: SignatureHashAlgorithm,
+        signature: &[u8],
+        from_server: bool,
+        transcript_hash: &[u8],
+    ) -> std::result::Result<(), Refusal> {
+        let bad_certificate = |error| refuse(alert::BAD_CERTIFICATE, error);
+        let end_entity = chain
+            .first()
+            .ok_or_else(|| bad_certificate(Error::ErrLengthMismatch))?;
+        let (_, certificate) = x509_parser::parse_x509_certificate(end_entity)
+            .map_err(|err| bad_certificate(Error::Other(err.to_string())))?;
+        let encoding = match scheme.signature {
+            SignatureAlgorithm::Ed25519 => PublicKeyEncoding::Ed25519Raw,
+            SignatureAlgorithm::Ecdsa => PublicKeyEncoding::EcUncompressedPoint,
+            _ => PublicKeyEncoding::RsaPkcs1Der,
+        };
+        let crypto_scheme = scheme.crypto_scheme().map_err(illegal)?;
+        let input = certificate_verify_input(from_server, transcript_hash);
+        self.crypto()
+            .verify_signature(
+                crypto_scheme,
+                PublicKey {
+                    encoding,
+                    bytes: &certificate
+                        .tbs_certificate
+                        .subject_pki
+                        .subject_public_key
+                        .data,
+                },
+                &input,
+                signature,
+            )
+            .map_err(|_| refuse(alert::DECRYPT_ERROR, Error::ErrKeySignatureMismatch))
+    }
+}
+
+/// A client's answer to a post-handshake CertificateRequest, while it comes in.
+pub(crate) struct ClientAuthentication {
+    chain: Vec<Vec<u8>>,
+    /// The transcript of the answer so far: the handshake, the request, and what came.
+    transcript: super::key_schedule::Transcript,
+    /// Its CertificateVerify has been checked, or it has no certificate to check one for.
+    verified: bool,
+}
+
+/// How many post-handshake CertificateRequests a server leaves unanswered at once.
+pub(crate) const MAX_PENDING_CERTIFICATE_REQUESTS: usize = 4;
 
 /// The HelloRetryRequest that answers `client_hello` (its body), and the cookie in it:
 /// stateless, in that the second ClientHello and the cookie are all a server needs to go on

@@ -9,6 +9,92 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **jsep**: codec parameters.
+  - The default audio formats include comfort noise, `CN/8000` on payload type 13 (RFC 7874
+    section 3, RFC 3389): default audio offers have one more format. New `MIME_TYPE_CN`,
+    with a payloader. A track that names its codec keeps the telephone-event and CN formats on
+    that codec's clock in the offer (they were dropped). A CN or telephone-event packet the
+    application writes when its format is not negotiated is dropped, not rewritten to the
+    media payload type.
+  - Codec matching compares the channel count when both formats state one (RFC 7587 section
+    7: Opus is `opus/48000/2`; a remote `opus/48000/1` is not answered).
+  - H.264: an absent `packetization-mode` is 0 and an absent `profile-level-id` is `42000a`
+    (RFC 6184 section 8.1); profiles compare by RFC 6184 Table 5, so `42e01f` and `4d801f`
+    (both Constrained Baseline) match. Offers without these parameters are now answered.
+  - AV1: formats match by `profile` (absent: 0), and an answer states this endpoint's own
+    `level-idx` / `tier` (AV1 RTP section 7.2); a remote `profile=1` no longer matches a
+    `profile=0` codec.
+- **jsep**: header extensions per RFC 8285, RFC 6904, RFC 6464 and RFC 6465.
+  - Ids up to 255: offers take 1 to 14, then 16 to 255 (never 15), and up to 254 extensions
+    can be registered (`ErrRegisterHeaderExtensionNoFreeID` beyond that; it was 15).
+  - `a=extmap-allow-mixed` is read at media level too and reaches the sender: without it on
+    both sides a stream stays in one form (two-byte throughout once an id above 14 is
+    negotiated for it, or from its first two-byte packet on); the stamped MID / RtpStreamId
+    take the two-byte form when they need it instead of failing `write_rtp`.
+  - A received description whose `a=extmap` lines map one id to two extensions, or one
+    extension to two ids, in a section or a BUNDLE group, is refused (`SdpInvalidValue`); a
+    mapping to the reserved id 15 is not used.
+  - An offer's extensions numbered 4096 to 4351 are remapped to a free id and answered
+    (RFC 8285 section 7), the first registered alternative of each id.
+  - An extension registered for one direction says so (`a=extmap:N/recvonly`); an answer
+    keeps a reversed direction only where the registration allows it, and drops the extension
+    otherwise.
+  - RFC 6904 header extension encryption is negotiated: `a=extmap:N
+    urn:ietf:params:rtp-hdrext:encrypt <uri>` is written and read, an answer takes the
+    encrypted form whenever it is offered (the clear one answered `inactive`), and the SRTP
+    contexts encrypt and decrypt the negotiated ids. New
+    `MediaEngine::set_header_extension_encryption` with `RTCRtpHeaderExtensionEncryption`
+    (`Clear`, the default for application extensions, `BestEffort`, `Encrypted`).
+  - The default interceptors register the mixer-to-client audio level
+    (`urn:ietf:params:rtp-hdrext:csrc-audio-level`, receive only) and offer both audio level
+    extensions encrypted as well as in the clear (RFC 8834 sections 5.2.2, 5.2.3): default
+    audio offers have four more `a=extmap` lines. Registering an audio level extension for
+    video, or the `encrypt` URI itself, is a `TypeError`.
+  - `RTCRtpHeaderExtensionParameters` has a new public field `attributes` (the peer's
+    extension attributes, e.g. `vad=off`); `encrypted` is now set.
+- **states and events** (W3C webrtc-pc 4.3, 4.4.1.3, 4.4.1.5, 4.8, 4.9, 5.5, 5.6, 11, 12):
+  - `RTCPeerConnectionIceEvent::candidate` is `Option<RTCIceCandidate>` (`None` is the
+    "gathering complete" indication) and `url` is `Option<String>`. `RTCIceCandidate` has new
+    public members `sdp_mid`, `sdp_mline_index` and `end_of_candidates`; `to_json` gives the
+    candidate's own mid and index, and an empty `candidate` for an end-of-candidates
+    candidate. New `RTCIceCandidate::candidate()` and `end_of_candidates_for()`.
+  - The end of gathering (an empty local candidate) is an `OnIceCandidateEvent` with the
+    generation's end-of-candidates candidate, the gathering state "complete" with
+    `OnIceGathererStateChange` and `OnIceGatheringStateChangeEvent`, then an
+    `OnIceCandidateEvent` with no candidate; once per ICE generation (a second empty candidate
+    changes nothing). Gathering begins, with its events, at the first local description and
+    after an ICE restart only: a later local description no longer resets the state to
+    "gathering".
+  - `close()` fires no `OnConnectionStateChangeEvent(Closed)` (W3C: the states are set
+    "without firing any event"); it stops every transceiver and sets the ICE connection state
+    to closed. What the ICE agent reports after `close()` is not delivered.
+  - `RTCPeerConnectionEvent::OnIceConnectionStateChangeEvent` now comes before the
+    `OnConnectionStateChangeEvent` it causes (it came after).
+  - `set_configuration` is atomic and compares the certificates with the constructor's (a
+    different or missing list is `ErrModifyingCertificates`); the configuration keeps its
+    certificates (`get_configuration` reports them). ICE server urls are validated as W3C
+    "validate an ICE server URL" says, in the constructor too: a STUN url with a query, a
+    fragment, userinfo, a path, an unknown query and an empty `urls` (new
+    `Error::ErrNoIceServerUrls`) are refused; a TURN username of 509 bytes or more is
+    `InvalidAccessError`. At most 32 servers are kept (`MAX_ICE_SERVERS`).
+  - `restart_ice` raises negotiation-needed, and every offer restarts ICE until an answer has
+    replaced the credentials (an offer that was discarded no longer consumes the request).
+  - A description that does not parse is `Error::SdpSyntaxError { line_number, error }`
+    (the parser's error inside); `RTCError::from_error` maps it to `sdp-syntax-error`.
+  - The connection's default certificate expires 30 days after the connection is created.
+  - Internal `RTCEventInternal::SCTPFailureCause` added.
+- **remote tracks**: by description, not by media (W3C webrtc-pc 4.4.1.6, 5.1.1, 5.3, 9.3).
+  New `RTCTrackEvent` variants: `OnRemoteTrack(RTCRemoteTrackEventInit)` (the W3C `track`
+  event, queued when a description makes a transceiver receive or adds streams, with the
+  receiver, transceiver, track and every msid stream), `OnMute` / `OnUnmute`,
+  `OnStreamsChanged(RTCRemoteStreamsChange)`. `OnOpen` still fires per RTP stream. A
+  receiver's track has an id the engine generates (not the msid appdata) and keeps it across
+  descriptions; it starts muted and its first RTP packet unmutes it. An RTCP BYE mutes the
+  track instead of ending it (`OnClose` no longer follows a BYE); a remote track ends only
+  by negotiation: `stop()`, a rejected section, or a rollback that removes its transceiver.
+  A section without `a=msid` puts the track in one random "default" stream per session
+  (RFC 9429 5.8). `MediaStream` keys its tracks by track id (tracks of one stream no longer
+  overwrite each other), does not add a track twice, and computes `active`.
 - **rtp_transceiver**: the W3C object model (webrtc-pc 5.1 to 5.4). Every transceiver has a
   sender and a receiver: `get_senders` / `get_receivers` list those of every transceiver that
   is not stopped, whatever its direction, and `rtp_sender(id)` / `rtp_receiver(id)` exist for
@@ -31,6 +117,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     the receiver's track (`RTCTrackEvent::OnClose`). New `is_stopped()`.
   - `add_transceiver_from_kind(kind, None)` is sendrecv (W3C default) with a sender without a
     track; `RTCRtpTransceiverInit::recvonly()` and `with_direction()` give the old behaviour.
+    Only the `Unspecified` kind is refused: `Application` (the fork's RTP in `m=application`,
+    SMPTE ST 336) stays accepted, an extension beyond the W3C kinds.
     `add_transceiver_from_track` takes any direction. `sendEncodings` are validated (rid
     syntax: new `Error::TypeError(String)`; `RangeError`s) and normalised (audio members
     removed, at most `MAX_SEND_ENCODINGS` = 16, `scale_resolution_down_by` filled, a lone rid
@@ -115,7 +203,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **the size of an SCTP packet follows the path** (RFC 8831 section 5: an initial path MTU
     of at most 1200 bytes at the IP layer over IPv4 and 1280 over IPv6): 1135 bytes over
     IPv4 and UDP with AES-GCM where it was 1191 on every path, 1195 over IPv6, less on a
-    relayed or a TCP candidate. `with_sctp_mtu` still sets it outright.
+    relayed or a TCP candidate. What a DTLS record adds is the DTLS association's own figure
+    for the negotiated version, suite and connection id (`Endpoint::record_overhead`): over
+    DTLS 1.3 with AES-GCM and no connection id (a 5-byte unified header, the inner content
+    type and the tag) 1150 and 1210. `with_sctp_mtu` still sets it outright.
   - **State Cookies carry a MAC** from the connection's crypto provider and the accepting
     side keeps nothing for an INIT (RFC 9260 sections 5.1 and 5.1.3); the association is made
     when the COOKIE ECHO arrives. No setting: nothing a peer can tell changes.
@@ -223,15 +314,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **media engine**: a remote description that carries both RFC 8627 `flexfec` and `rtx`
   negotiates no `rtx` (RFC 8627 section 1.1.7); `MediaEngine::set_flexfec_with_retransmission`
   is the setting that keeps it. `flexfec-03` is not affected.
-- **dtls**: `use_srtp` follows RFC 5764 section 4.1 by default: the DTLS client offers it only
-  when the session has an audio or video section. A data-channel-only session is set up
-  without it, and when it gains a media section a new DTLS association with `use_srtp`
-  replaces it (the offer carries a new `a=tls-id`, RFC 8842 section 5.5; the DTLS roles are
-  kept). Offering it on every association, as browsers and the engine until now did, is
-  `SettingEngineBuilder::with_dtls_use_srtp_on_every_association(true)`: set it for a peer that
-  fails an association without an SRTP profile (pion-lineage stacks) or that does not act on
-  `tls-id` when media is added later (browsers). The earlier, never released, setting to turn
-  `use_srtp` off and the error for media on an association without SRTP keys are gone.
+- **dtls**: `SettingEngineBuilder::with_dtls_use_srtp_on_every_association(false)` follows RFC
+  5764 section 4.1: the DTLS client offers `use_srtp` only when the session has an audio or
+  video section, a data-channel-only session is set up without it, and when it gains a media
+  section a new DTLS association with `use_srtp` replaces it (the offer carries a new
+  `a=tls-id`, RFC 8842 section 5.5; the DTLS roles are kept). The default offers it on every
+  association, as browsers and the engine always did: the RFC form was the default for a
+  while, and Chromium, Firefox and WebKit do not act on the new `tls-id`, so media added to a
+  data-channel-only session never flowed and the data channels stopped too (browser matrix,
+  train round 8: "Rust offers media, the browser answers and decodes it", "rollback",
+  "glare"). The earlier, never released, setting to turn `use_srtp` off and the error for
+  media on an association without SRTP keys are gone.
 - **sdp**: a remote `a=fingerprint` with lower-case hex digits is refused (RFC 8122 section 5:
   `UHEX`); `SettingEngineBuilder::with_lowercase_fingerprints_accepted(true)` reads it, as
   browsers do.
@@ -850,6 +943,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   kbit/s, 3.1% at 1 Mbit/s, 2.5% at 2.5 Mbit/s; a `Gcc` sender fed by it reaches 2 Mbit/s from
   300 kbit/s in 0.49 s. Regular reports at 1 and 2.5 Mbit/s are 50 and 125 a second (RTP/AVPF
   with `T_rr_interval` zero spends the RTCP share).
+- **data_channel**: no DCEP handshake timeout by default
+  (`SettingEngine::data_channel.dcep_handshake_timeout` is `None`; it was 30 s). RFC 8832 has
+  none: the DATA_CHANNEL_OPEN and DATA_CHANNEL_ACK travel on a reliable stream. Under heavy
+  loss (`tests/lossy_link_rtc2rtc.rs`, 30 % each way, seed 0x5eed) the ACK took longer than
+  30 s, because the peer's half of the SCTP handshake was still in progress (its COOKIE ACK
+  lost, the OPEN discarded in COOKIE-ECHOED until a retransmitted COOKIE ECHO was answered) or
+  the OPEN was retransmitted at a doubling RTO, and the timeout closed the channel, with no
+  error, while ICE, DTLS and SCTP were up. A timeout configured with
+  `with_dcep_handshake_timeout(Some(..))` now fails the channel with `OnError` before
+  `OnClose`. Test: `a_channel_whose_ack_takes_longer_than_thirty_seconds_still_opens`.
+- **data_channel**: a send over 16 KB to a peer without message interleaving (RFC 8831
+  section 6.6; every current browser) is refused with the new
+  `Error::ErrMessageTooLargeWithoutInterleaving { size, limit }` instead of
+  `ErrOutboundPacketTooLarge`, so the message says what the limit is and that
+  `SettingEngineBuilder::with_sctp_message_size_limit_without_interleaving(false)` lifts it.
+  A send over the peer's `max-message-size` still gets `ErrOutboundPacketTooLarge`. Test:
+  `the_16_kb_limit_applies_only_when_i_data_was_not_negotiated`.
 - **interceptor**: bandwidth probing is on in the default interceptor set
   (`DefaultInterceptorOptions::bandwidth_probing` now `true`; `false` is the opt-out). RFC 8836
   section 2 (requirement 4, a SHOULD) asks a congestion controller to adapt as quickly as
@@ -1085,6 +1195,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+- **states and events** (W3C webrtc-pc): the getters `signaling_state()`,
+  `ice_gathering_state()`, `ice_connection_state()`, `connection_state()`; the transport
+  events `OnIceTransportStateChange`, `OnIceGathererStateChange`,
+  `OnSelectedCandidatePairChange`, `OnDtlsTransportStateChange`, `OnDtlsTransportError` and
+  `OnSctpTransportStateChange`, each before the connection-level event it causes; `RTCError`
+  and `RTCErrorDetailType` (`rtc::peer_connection::rtc_error`), on the DTLS error event (with
+  the fatal alert sent or received, or `fingerprint-failure`) and for data channels through
+  `RTCPeerConnection::data_channel_error(id)` (`sctp-failure` with the SCTP cause code,
+  `data-channel-failure`); `report_ice_candidate_error` for the application that gathers
+  (`icecandidateerror`: 701 once per URL, the address withheld unless exposed);
+  `RTCCertificate::generate_certificate` (W3C generateCertificate: 30 days by default, at most
+  365, random name and serial). rtc-sdp: `SessionDescription::parse_located` and
+  `SdpParseError` give the line of a parse error. rtc-dtls: `Endpoint::connection_fatal_alerts`.
+  rtc-sctp: `Association::abort_cause_code`.
+- **dtls**: `DTLSConn::record_overhead` and `Endpoint::record_overhead`: what each protected
+  record adds to its content (the record header, the connection id it carries under DTLS 1.3
+  or a DTLS 1.2 `tls12_cid` record, and the suite's expansion), for a layer above that sizes
+  its datagrams for a path MTU
+  (RFC 6347 section 4.1.1.1, RFC 9147 section 4.4). The peer connection sizes SCTP packets by
+  it.
 - **interceptor**: bandwidth probing, as an option that is off by default
   (`CongestionControlBuilder::with_bandwidth_probing`, `bandwidth_probing` in
   `DefaultInterceptorOptions`). The congestion controller asks for clusters of packets at a
@@ -1166,6 +1296,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `set_remote_pacing`, `pacing`. (Writing and reading `a=ice-pacing` is not wired yet.)
 - **ice**: at most five TCP connection attempts are outstanding to one remote IP address (RFC
   6544 section 12).
+- **ice**: the peer connection fails the pairs of a remote TCP candidate whose first answer, on
+  a connection its active candidate opened, is not STUN (RFC 6544 section 7.1);
+  `Agent::handle_non_stun_before_validation` for other drivers.
 - **ice**: an mDNS name lost to another host (RFC 6762 section 9) is replaced by a new
   `<uuid>.local` name and the candidate announced again (`Event::LocalCandidateRenamed`,
   `OnIceCandidateEvent`).
@@ -1910,6 +2043,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+- **sctp**: a stream parked by back-pressure resumed only from `poll_read` or the peer's next
+  datagram, and the SACK that reopens the window waited for the next `poll_write`, which a
+  caller has usually made before it reads: a sender stopped by a zero window then waited for
+  its own window probe, a retransmission timeout later, or for whatever woke the caller
+  (RFC 9260 section 6.2). `poll_timeout` now reports a deadline when a drain from `poll_read`
+  has made a window update due, and while a parked stream's pipeline has room again
+  (`handle_timeout` drains it, also for a caller that empties the pipeline with
+  `poll_data_read`); never while the pipeline is full, and never twice for the same work. The
+  two comments that spoke of a retry timer that did not exist are corrected. Tests:
+  `a_receiver_that_reads_again_reopens_the_window_without_an_inbound_datagram`,
+  `a_parked_stream_resumes_from_its_deadline_when_the_pipeline_is_drained_directly`.
+- **jsep**: an answer has only the `a=rtcp-fb` the offer has for each format (RFC 4585 section
+  4.2: "The answerer MUST NOT add feedback parameters"). A renegotiation whose offer dropped a
+  feedback type (or `trr-int`) was answered with what the first offer had, because the
+  transceiver kept the codecs of that first exchange.
+- **rtcp_session**: a `trr-int` that a renegotiation no longer has is undone: the peer
+  connection sends the new `RtcpSessionControl::TrrIntCleared` and the session goes back to the
+  interval it was built with (RFC 4585 section 4.2). The negotiated value used to stay.
+- **association**: a DTMF (`telephone-event`, RFC 4733) or comfort-noise (`CN`, RFC 3389)
+  packet that arrives before any media on an SSRC no longer becomes the receiver track's codec;
+  the stream is established by its first media packet.
 - **ice**: a controlling agent could lose the nomination it had queued: an answer to a second
   check on the same pair (one the peer's request triggered) took the pair off the
   triggered-check queue, so no request with USE-CANDIDATE left and the agent stayed in
@@ -1926,7 +2080,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   place of a peer-reflexive one (it keeps that one's id and pairs) now shows its own type and
   its signalled address.
 - **test**: the four mDNS interop tests share the host's mDNS group, port and names; they run
-  one at a time.
+  one at a time. On a timeout they report the rtc peer's candidates and pairs, and they log
+  the mDNS traffic.
+- **test**: sessions over a simulated lossy, reordering link in virtual time
+  (`tests/lossy_link_rtc2rtc.rs`): nothing fails at 5 % (with reordering) or 10 % loss, and at
+  30 % a peer fails only after 30 s without a Binding success response (RFC 7675 section 5.1).
+  The netem impairment test prints both peers' state changes when it fails.
+- **test**: relayed TCP candidates (RFC 6544 sections 4.1, 4.5 over RFC 6062 allocations) pair
+  by `tcptype` and are checked on the relayed path; server-reflexive TCP direction preferences.
+- **test**: the mDNS interop tests' upstream peer gathers on the mDNS egress interface only: it
+  publishes every host candidate under one name, and on a host with a second interface the
+  wrong one froze the right one past the timeout (hosted Linux runners). The browser cell's
+  WebKit `na-env` rule asks whether the `.local` candidate got a pair, now that every submitted
+  mDNS candidate is in the report. `stats_conformance_rtc2rtc` adds its late candidates before
+  the nomination (RFC 8838 section 13).
 - **jsep**: two retransmission formats that differ only in `rtx-time` are one format (RFC
   4588 section 8.1: each sender's own figure); an offer whose RTX `fmtp` had another
   `rtx-time` than the local one was answered without RTX.
@@ -2402,41 +2569,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `HeaderMaskAlgorithm` (record number encryption); `SignatureScheme::RsaPssSha256/384/512`,
   which an imported RSA key signs with.
 - Not in it: pre-shared keys in DTLS 1.3 (resumption, external PSKs, 0-RTT), post-handshake
-  authentication, the DTLS 1.2 record format of RFC 9146. A configuration with a pre-shared key
-  negotiates DTLS 1.2.
+  authentication. A configuration with a pre-shared key negotiates DTLS 1.2.
 
-- **dtls**: DTLS 1.3 (RFC 9147, on the TLS 1.3 handshake of RFC 8446), next to DTLS 1.2. A
-  client offers both in one ClientHello and a server takes 1.3 from a client that offers it;
-  the downgrade sentinel of RFC 8446 section 4.1.3 is set and checked.
-  `ConfigBuilder::with_protocol_versions` sets the range (default 1.2 to 1.3), and
-  `State::negotiated_version` says which was negotiated (`DtlsVersion::protocol_version` gives
-  the bytes of webrtc-stats' `tlsVersion`: `FEFC` for 1.3).
-- **dtls**: the record layer of RFC 9147 section 4: the unified header, record number
-  encryption, epochs with their own keys and replay windows, ACK records.
-- **dtls**: the handshake with certificates (ECDSA P-256, Ed25519, RSASSA-PSS), a stateless
-  cookie exchange by HelloRetryRequest (on by default), client certificates, `use_srtp` in
-  EncryptedExtensions and the exporter of RFC 8446 section 7.5 behind the same
-  `State::export_keying_material` (which takes a context for a DTLS 1.3 association).
-  Suites: `TLS_AES_128_GCM_SHA256`, `TLS_CHACHA20_POLY1305_SHA256`, `TLS_AES_256_GCM_SHA384`
-  by default, `TLS_AES_128_CCM_SHA256` and `TLS_AES_128_CCM_8_SHA256` when named. Groups:
-  P-256, X25519, P-384.
-- **dtls**: flights, retransmission and ACKs as RFC 9147 sections 5.8 and 7 define them; the
-  timer follows the measured round trip once a flight gets through without loss.
-- **dtls**: key update (`Endpoint::update_keys`, `DTLSConn::update_keys`), started by
-  itself before a key reaches the number of records its AEAD allows; an association is closed
-  when too many records fail authentication under one key (RFC 9147 section 4.5.3).
-- **dtls**: connection ids for DTLS 1.3 (RFC 9147 section 9): `ConfigBuilder::with_connection_id`,
-  `Endpoint::{new_connection_ids, request_connection_ids}`, `DTLSConn::use_next_connection_id`,
-  and `with_connection_id_migration` for an endpoint that may follow a peer to a new address.
-- **dtls**: RSASSA-PSS (`rsa_pss_rsae_sha256/384/512`) in DTLS 1.2 as well: listed by default
-  after PKCS#1 v1.5, verified and signed.
-- **crypto**: `hkdf_extract`, `hkdf_expand`, `hkdf_expand_label`; `HashAlgorithm::Sha384`,
-  `HmacAlgorithm::Sha384`; `RTCCrypto::new_header_mask` with `HeaderMask` and
-  `HeaderMaskAlgorithm` (record number encryption); `SignatureScheme::RsaPssSha256/384/512`,
-  which an imported RSA key signs with.
-- Not in it: pre-shared keys in DTLS 1.3 (resumption, external PSKs, 0-RTT), post-handshake
-  authentication, the DTLS 1.2 record format of RFC 9146. A configuration with a pre-shared key
-  negotiates DTLS 1.2.
+### DTLS 1.3 in the peer connection, connection ids for DTLS 1.2
+
+- **peer connection**: the TLS 1.3 suites come first in the default cipher suite list, so two
+  engines negotiate DTLS 1.3 and a peer without it (webrtc 0.17, which ignores the extensions)
+  gets DTLS 1.2 from the same ClientHello. `tlsVersion` is `FEFC` for DTLS 1.3. The client's
+  retransmission timer starts at 400 ms (RFC 9147 section 5.8.2, DTLS-SRTP), or at 1.5 times
+  the selected pair's ICE round trip time, at least 100 ms
+  (`HandshakeConfig::with_flight_interval`).
+- **peer connection**: an SCTP packet is sized by the record overhead of the DTLS version and
+  suite negotiated (`Endpoint::record_overhead`, `DTLSConn::record_overhead`): a DTLS 1.3 record
+  adds 22 bytes where a DTLS 1.2 AES-GCM record adds 37, and packets were 15 bytes short of the
+  path MTU under DTLS 1.3.
+- **dtls**: RFC 9146 for DTLS 1.2: the `connection_id` extension in the DTLS 1.2 hellos (a
+  ClientHello for both versions carries one, for whichever is negotiated; by default it asks
+  for no id), `tls12_cid` records with the additional data and MAC input of section 5 for
+  every cipher family, records without the negotiated id discarded, and the peer address
+  update of section 6 behind `with_connection_id_migration` (off by default).
+- **dtls**: a DTLS 1.3 client that authenticates completes only on the server's ACK or first
+  application-epoch record; a DTLS 1.3 server picks a certificate chain signed with algorithms
+  the client lists (RFC 8446 section 4.4.2.2); the retransmission timer returns to its start
+  after ten intervals of quiet (RFC 9147 section 5.8.2); too_many_cids_requested ends an
+  association after 32 RequestConnectionId messages; `ConfigBuilder::with_invalid_record_limit`
+  gives up on a peer that keeps sending records that fail (opt-in: they are unauthenticated).
+- **dtls**, **crypto**: the hybrid post-quantum key share X25519MLKEM768 (0x11EC,
+  draft-ietf-tls-ecdhe-mlkem) in DTLS 1.3, offered first where the provider has ML-KEM
+  (aws-lc-rs; ring has none and does not offer it): `ConfigBuilder::with_post_quantum_key_share`
+  (default on), `KeyExchangeAlgorithm::X25519MlKem768`, `RTCCrypto::key_exchange_respond` (the
+  server's side of a KEM; the default is the Diffie-Hellman key pair and agreement). Its
+  1216-byte share makes the ClientHello two fragments; the stateless cookie exchange reassembles
+  them. Checked against OpenSSL 4.1 in both roles. The group is offered only where one exchange
+  through the provider gives both ends the same secret.
+- **dtls**: a DTLS 1.3 suite is offered only if the provider can make its record-number mask,
+  so a provider that wraps another and leaves `new_header_mask` at its default gets DTLS 1.2
+  instead of failing every record (`isolates_crypto_providers_across_simultaneous_peer_connections`
+  failed on the train).
+
+### DTLS 1.3 pre-shared keys
+
+- **dtls**: session resumption with tickets for DTLS 1.3 (RFC 8446 sections 2.2, 4.2.9,
+  4.2.11, 4.6.1). A server sends `ConfigBuilder::with_session_tickets(n)` NewSessionTicket
+  messages after each handshake (default 0: none), sealed under a key its configuration makes
+  at random and valid for `with_session_ticket_lifetime` (two hours by default, seven days at
+  most); each ticket is accepted once. A client given a `SessionStore`
+  (`with_session_store`; `session::MemorySessionStore`) keeps them by server name and offers
+  one, with its binder, as the last extension of its next ClientHello to that name (computed
+  again after a HelloRetryRequest). A resumed handshake has no Certificate or
+  CertificateVerify; the association reports the certificates of the handshake the ticket
+  came from (`State::resumed`), and the peer-certificate check runs on them again.
+- **dtls**: external PSKs for DTLS 1.3 (`with_external_psks`, `session::ExternalPsk`, with
+  their hash, which steers the suite a server picks). `psk_dhe_ke` is the only mode by
+  default; `with_psk_without_key_exchange` allows `psk_ke` as well.
+- **dtls**: `DTLSConn::set_clock` gives an association the time ahead of a datagram (the
+  endpoint calls it): what tickets are dated by. The engine reads no clock.
+- **peer connection**: no session tickets, no session store and no PSK in the DTLS
+  configuration: WebRTC authenticates every association by the fingerprints of its SDP and
+  makes a new one per session (`the_peer_connection_neither_sends_nor_accepts_session_tickets`).
+
+### DTLS 1.3 post-handshake authentication
+
+- **dtls**: post-handshake authentication for DTLS 1.3 (RFC 8446 sections 4.2.6 and 4.6.2).
+  A client configured with `ConfigBuilder::with_post_handshake_auth` offers it; a server asks
+  with `Endpoint::request_client_certificate` (`DTLSConn::request_client_certificate`), and
+  the client answers at once with its certificate (or an empty Certificate where it has none
+  the request allows). The server checks the answer as it checks a client certificate in the
+  handshake and reports `EndpointEvent::PeerAuthenticated`; `State::peer_certificates` then
+  holds the new chain.
 
 ### DTLS 1.2: the RFC by default
 
@@ -2451,28 +2651,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ConfigBuilder::with_early_data_retransmit`), and that data is delivered when the handshake
   completes: it used to be dropped when the early-record queue was drained.
 
-- **dtls**: `HelloVerifyRequest.server_version` is DTLS 1.0, as RFC 6347 section 4.2.1 asks
-  whatever version follows; `ConfigBuilder::with_hello_verify_request_version` restores DTLS 1.2.
-- **dtls**: the `server_name` extension is not sent for an IP address (RFC 6066 section 3),
-  and is sent without a trailing dot.
-- **dtls**: a server with an Ed25519 certificate offers the ECDHE_ECDSA suites (RFC 8422
-  section 5.1.1); its configuration used to fail to build.
-- **dtls**: a client that receives authentic application data before the server's Finished
-  sends its last flight again at once (RFC 6347 section 4.2.4;
-  `ConfigBuilder::with_early_data_retransmit`), and that data is delivered when the handshake
-  completes: it used to be dropped when the early-record queue was drained.
-
 ### Breaking changes (DTLS 1.3)
-
-- **dtls**: a `ConfigBuilder` without a cipher suite list negotiates DTLS 1.3 with a peer that
-  has it. A list is exact: one without a TLS 1.3 suite negotiates DTLS 1.2 only, as before.
-- **dtls**: `CipherSuiteId` has the five TLS 1.3 suites, `CipherSuiteHash` has `Sha384`,
-  `SignatureAlgorithm` has the three RSASSA-PSS values (and `Unsupported` is `0xff`), and the
-  default signature schemes list them.
-- **dtls**: a HelloVerifyRequest says DTLS 1.0 (see above).
-- **dtls**: `State::marshal_binary` fails for a DTLS 1.3 association.
-- **crypto**: `HashAlgorithm`, `HmacAlgorithm`, `SignatureScheme` and `CryptoAlgorithm` have
-  new variants (all `non_exhaustive`).
 
 - **dtls**: a `ConfigBuilder` without a cipher suite list negotiates DTLS 1.3 with a peer that
   has it. A list is exact: one without a TLS 1.3 suite negotiates DTLS 1.2 only, as before.

@@ -34,6 +34,10 @@ pub(crate) fn client_builder() -> ConfigBuilder {
     ConfigBuilder::default()
         .with_crypto_provider(provider())
         .with_insecure_skip_verify(true)
+        // The hybrid key share makes a ClientHello two datagrams long, with the provider
+        // that has it; the tests that look at flights are written for one. It has its own
+        // tests below.
+        .with_post_quantum_key_share(false)
 }
 
 pub(crate) fn server_builder() -> ConfigBuilder {
@@ -567,8 +571,8 @@ fn a_hello_retry_request_asks_for_another_key_share() -> Result<()> {
             .with_cookie_exchange(cookie_exchange)
             .build(false, None)?;
         // The client sends shares for its first two groups; the server has the third only.
-        assert_eq!(client.local_named_curves.len(), 3);
-        server.local_named_curves = vec![NamedCurve::P384];
+        assert_eq!(client.local_tls13_groups.len(), 3);
+        server.local_tls13_groups = vec![NamedCurve::P384];
         let mut pair = Pair::with(client, Arc::new(server))?;
         let (_, hello_retry_request) = pair.round();
         assert_eq!(
@@ -974,5 +978,309 @@ fn the_server_sends_a_chain_signed_with_algorithms_the_client_lists() -> Result<
     // With nothing better to offer the server sends what it has, and the client decides.
     let pair = Pair::new(ecdsa_only(), server(vec![issued]))?.complete();
     assert_eq!(sent(&pair), vec![issued_der]);
+    Ok(())
+}
+
+/// X25519MLKEM768 (draft-ietf-tls-ecdhe-mlkem, 0x11EC) with a provider that has ML-KEM: it is
+/// offered first and negotiated, its 1216-byte share makes the ClientHello two fragments,
+/// and a peer without it still gets a handshake.
+#[cfg(feature = "crypto-aws-lc-rs")]
+#[test]
+fn the_hybrid_post_quantum_group_is_negotiated_where_the_provider_has_it() -> Result<()> {
+    use crate::curve::named_curve::NamedCurve;
+
+    let aws: Arc<dyn RTCCryptoProvider> = Arc::new(crypto::providers::AwsLcRsProvider::new());
+    let client = |provider: &Arc<dyn RTCCryptoProvider>| {
+        ConfigBuilder::default()
+            .with_crypto_provider(provider.clone())
+            .with_insecure_skip_verify(true)
+    };
+    let server = |provider: &Arc<dyn RTCCryptoProvider>| {
+        ConfigBuilder::default()
+            .with_crypto_provider(provider.clone())
+            .with_insecure_skip_verify(true)
+            .with_certificates(vec![
+                Certificate::generate_self_signed(vec!["localhost".to_owned()], provider.crypto())
+                    .expect("a certificate"),
+            ])
+    };
+    let config = client(&aws).build(true, None)?;
+    assert_eq!(config.local_tls13_groups[0], NamedCurve::X25519MlKem768);
+    assert_eq!(config.local_tls13_groups.len(), 4);
+    // Not a curve of DTLS 1.2.
+    assert!(
+        !config
+            .local_named_curves
+            .contains(&NamedCurve::X25519MlKem768)
+    );
+    let off = client(&aws)
+        .with_post_quantum_key_share(false)
+        .build(true, None)?;
+    assert!(!off.local_tls13_groups.contains(&NamedCurve::X25519MlKem768));
+
+    for cookie_exchange in [true, false] {
+        let mut pair = Pair::new(
+            client(&aws),
+            server(&aws).with_cookie_exchange(cookie_exchange),
+        )?;
+        let client_hello = take(&mut pair.client);
+        // Two fragments of one ClientHello (message_seq 0), each within the MTU.
+        assert_eq!(client_hello.len(), 2, "cookies: {cookie_exchange}");
+        for datagram in &client_hello {
+            assert!(datagram.len() <= 1200);
+            assert_eq!((datagram[13], &datagram[17..19]), (1, &[0u8, 0][..]));
+        }
+        assert!(client_hello[0].len() + client_hello[1].len() > 1216 + 65);
+        pair.deliver_to_server(client_hello);
+        let mut pair = pair.complete();
+        assert_eq!(pair.versions().0, Some(DtlsVersion::Dtls1_3));
+        // The ServerHello's key share was the hybrid's: an ML-KEM ciphertext and an X25519
+        // key. The secret both ends derived from it carries data.
+        assert_eq!(pair.client_sends(b"hybrid"), vec![b"hybrid".to_vec()]);
+        assert_eq!(pair.server_sends(b"back"), vec![b"back".to_vec()]);
+    }
+
+    // A server that does not have the group takes the client's other share (P-256), with
+    // no HelloRetryRequest for it.
+    let mut pair = Pair::new(
+        client(&aws),
+        server(&aws)
+            .with_cookie_exchange(false)
+            .with_post_quantum_key_share(false),
+    )?;
+    let client_hello = take(&mut pair.client);
+    pair.deliver_to_server(client_hello);
+    let flight = take(&mut pair.server);
+    assert_ne!(
+        &flight[0][27..59],
+        &super::messages::HELLO_RETRY_REQUEST_RANDOM
+    );
+    pair.deliver_to_client(flight);
+    let mut pair = pair.complete();
+    assert_eq!(pair.client_sends(b"p256"), vec![b"p256".to_vec()]);
+
+    // A client that has only curves and a server that prefers the hybrid.
+    let mut pair = Pair::new(
+        client(&aws).with_post_quantum_key_share(false),
+        server(&aws),
+    )?
+    .complete();
+    assert_eq!(pair.client_sends(b"curve"), vec![b"curve".to_vec()]);
+
+    // DTLS 1.2 with the same ClientHello: the group is not one of its curves.
+    let mut pair = Pair::new(
+        client(&aws),
+        server(&aws).with_protocol_versions(DtlsVersion::Dtls1_2, DtlsVersion::Dtls1_2),
+    )?
+    .complete();
+    assert_eq!(pair.versions().0, Some(DtlsVersion::Dtls1_2));
+    assert_eq!(pair.client_sends(b"1.2"), vec![b"1.2".to_vec()]);
+    Ok(())
+}
+
+/// The provider without ML-KEM does not offer the group, whatever the setting.
+#[cfg(feature = "crypto-ring")]
+#[test]
+fn the_hybrid_group_is_not_offered_without_a_provider_for_it() -> Result<()> {
+    use crate::curve::named_curve::NamedCurve;
+
+    let ring: Arc<dyn RTCCryptoProvider> = Arc::new(crypto::providers::RingProvider::new());
+    let config = ConfigBuilder::default()
+        .with_crypto_provider(ring)
+        .with_insecure_skip_verify(true)
+        .with_post_quantum_key_share(true)
+        .build(true, None)?;
+    assert!(
+        !config
+            .local_tls13_groups
+            .contains(&NamedCurve::X25519MlKem768)
+    );
+    assert_eq!(config.local_tls13_groups, config.local_named_curves);
+    Ok(())
+}
+
+/// A provider that wraps another and passes `supports` and the older operations through,
+/// but leaves the operations only DTLS 1.3 uses at the trait's defaults unless told to
+/// forward them: what an application's wrapper written before DTLS 1.3 looks like.
+struct PassThrough {
+    inner: Arc<dyn RTCCryptoProvider>,
+    header_mask: bool,
+    respond: bool,
+}
+
+impl RTCCryptoProvider for PassThrough {
+    fn name(&self) -> &'static str {
+        "pass-through"
+    }
+    fn crypto(&self) -> &dyn crypto::RTCCrypto {
+        self
+    }
+    fn random(&self) -> &dyn crypto::RTCRandom {
+        self.inner.random()
+    }
+}
+
+impl crypto::RTCCrypto for PassThrough {
+    fn supports(&self, algorithm: crypto::CryptoAlgorithm) -> bool {
+        self.inner.crypto().supports(algorithm)
+    }
+    fn hash(
+        &self,
+        algorithm: crypto::HashAlgorithm,
+        data: &[u8],
+    ) -> std::result::Result<Vec<u8>, crypto::CryptoError> {
+        self.inner.crypto().hash(algorithm, data)
+    }
+    fn block_encrypt(
+        &self,
+        algorithm: crypto::BlockCipherAlgorithm,
+        key: &[u8],
+        block: &mut [u8],
+    ) -> std::result::Result<(), crypto::CryptoError> {
+        self.inner.crypto().block_encrypt(algorithm, key, block)
+    }
+    fn new_hmac(
+        &self,
+        algorithm: crypto::HmacAlgorithm,
+        key: &[u8],
+    ) -> std::result::Result<Box<dyn crypto::Mac>, crypto::CryptoError> {
+        self.inner.crypto().new_hmac(algorithm, key)
+    }
+    fn new_stream_cipher(
+        &self,
+        algorithm: crypto::StreamCipherAlgorithm,
+        key: &[u8],
+    ) -> std::result::Result<Box<dyn crypto::StreamCipher>, crypto::CryptoError> {
+        self.inner.crypto().new_stream_cipher(algorithm, key)
+    }
+    fn new_aead(
+        &self,
+        algorithm: crypto::AeadAlgorithm,
+        key: &[u8],
+    ) -> std::result::Result<Box<dyn crypto::AeadCipher>, crypto::CryptoError> {
+        self.inner.crypto().new_aead(algorithm, key)
+    }
+    fn new_header_mask(
+        &self,
+        algorithm: crypto::HeaderMaskAlgorithm,
+        key: &[u8],
+    ) -> std::result::Result<Box<dyn crypto::HeaderMask>, crypto::CryptoError> {
+        if !self.header_mask {
+            return Err(crypto::CryptoError::UnsupportedAlgorithm(
+                crypto::CryptoAlgorithm::HeaderMask(algorithm),
+            ));
+        }
+        self.inner.crypto().new_header_mask(algorithm, key)
+    }
+    fn new_cbc(
+        &self,
+        algorithm: crypto::CbcAlgorithm,
+        key: &[u8],
+    ) -> std::result::Result<Box<dyn crypto::CbcCipher>, crypto::CryptoError> {
+        self.inner.crypto().new_cbc(algorithm, key)
+    }
+    fn start_key_exchange(
+        &self,
+        algorithm: crypto::KeyExchangeAlgorithm,
+    ) -> std::result::Result<Box<dyn crypto::ActiveKeyExchange>, crypto::CryptoError> {
+        self.inner.crypto().start_key_exchange(algorithm)
+    }
+    fn key_exchange_respond(
+        &self,
+        algorithm: crypto::KeyExchangeAlgorithm,
+        peer_share: &[u8],
+    ) -> std::result::Result<(Vec<u8>, crypto::SecretVec), crypto::CryptoError> {
+        if self.respond {
+            return self
+                .inner
+                .crypto()
+                .key_exchange_respond(algorithm, peer_share);
+        }
+        // The trait's default: a key pair and an agreement.
+        let exchange = self.start_key_exchange(algorithm)?;
+        let share = exchange.public_key().to_vec();
+        Ok((share, exchange.complete(peer_share)?))
+    }
+    fn generate_signing_key(
+        &self,
+        scheme: crypto::SignatureScheme,
+    ) -> std::result::Result<Arc<dyn crypto::SigningKey>, crypto::CryptoError> {
+        self.inner.crypto().generate_signing_key(scheme)
+    }
+    fn import_signing_key(
+        &self,
+        scheme: crypto::SignatureScheme,
+        pkcs8_der: &[u8],
+    ) -> std::result::Result<Arc<dyn crypto::SigningKey>, crypto::CryptoError> {
+        self.inner.crypto().import_signing_key(scheme, pkcs8_der)
+    }
+    fn verify_signature(
+        &self,
+        scheme: crypto::SignatureScheme,
+        public_key: crypto::PublicKey<'_>,
+        message: &[u8],
+        signature: &[u8],
+    ) -> std::result::Result<(), crypto::CryptoError> {
+        self.inner
+            .crypto()
+            .verify_signature(scheme, public_key, message, signature)
+    }
+}
+
+/// A provider that says it has a TLS 1.3 suite's algorithms but cannot make its
+/// record-number mask is not offered DTLS 1.3, and connects with DTLS 1.2, rather than
+/// negotiating DTLS 1.3 and failing every record (the train's
+/// `isolates_crypto_providers_across_simultaneous_peer_connections` did that).
+#[test]
+fn a_provider_without_record_number_masks_falls_back_to_dtls_1_2() -> Result<()> {
+    for header_mask in [false, true] {
+        let wrapped: Arc<dyn RTCCryptoProvider> = Arc::new(PassThrough {
+            inner: provider(),
+            header_mask,
+            respond: true,
+        });
+        let client = client_builder().with_crypto_provider(wrapped);
+        assert_eq!(
+            client
+                .clone()
+                .build(true, None)?
+                .local_tls13_cipher_suites
+                .is_empty(),
+            !header_mask
+        );
+        let pair = Pair::new(client, server_builder())?.complete();
+        let expected = if header_mask {
+            DtlsVersion::Dtls1_3
+        } else {
+            DtlsVersion::Dtls1_2
+        };
+        assert_eq!(pair.versions(), (Some(expected), Some(expected)));
+    }
+    Ok(())
+}
+
+/// Likewise a provider that says it has X25519MLKEM768 but answers a share with the
+/// Diffie-Hellman default of `key_exchange_respond` is not offered the group.
+#[cfg(feature = "crypto-aws-lc-rs")]
+#[test]
+fn a_provider_that_cannot_answer_a_hybrid_share_is_not_offered_the_group() -> Result<()> {
+    use crate::curve::named_curve::NamedCurve;
+    for respond in [false, true] {
+        let wrapped: Arc<dyn RTCCryptoProvider> = Arc::new(PassThrough {
+            inner: Arc::new(crypto::providers::AwsLcRsProvider::new()),
+            header_mask: true,
+            respond,
+        });
+        let config = ConfigBuilder::default()
+            .with_crypto_provider(wrapped)
+            .with_insecure_skip_verify(true)
+            .build(true, None)?;
+        assert_eq!(
+            config
+                .local_tls13_groups
+                .contains(&NamedCurve::X25519MlKem768),
+            respond
+        );
+    }
     Ok(())
 }

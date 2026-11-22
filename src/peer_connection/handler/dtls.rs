@@ -646,6 +646,7 @@ impl<'a> DtlsHandler<'a> {
             return;
         }
         warn!("dtls transport failed");
+        self.ctx.dtls_transport.failure = Some(self.ctx.dtls_transport.failure_error());
         self.ctx
             .dtls_transport
             .state_change(RTCDtlsTransportState::Failed);
@@ -948,6 +949,8 @@ mod tests {
         peer: dtls::endpoint::Endpoint,
         now: Instant,
         events: Vec<RTCEventInternal>,
+        /// What the handler sent the peer, in order.
+        sent: Vec<bytes::BytesMut>,
     }
 
     impl HandlerAndPeer {
@@ -955,6 +958,16 @@ mod tests {
             role: RTCDtlsRole,
             peer_profiles: Vec<SrtpProtectionProfile>,
             srtp_required: bool,
+        ) -> Result<Self> {
+            Self::new_with(role, peer_profiles, srtp_required, |builder| builder)
+        }
+
+        /// As [`Self::new`], with the peer's configuration changed by `peer`.
+        fn new_with(
+            role: RTCDtlsRole,
+            peer_profiles: Vec<SrtpProtectionProfile>,
+            srtp_required: bool,
+            peer: impl FnOnce(dtls::config::ConfigBuilder) -> dtls::config::ConfigBuilder,
         ) -> Result<Self> {
             use crate::peer_connection::transport::dtls::parameters::RTCDtlsParameters;
             use crate::peer_connection::transport::ice::role::RTCIceRole;
@@ -997,13 +1010,15 @@ mod tests {
                 provider.crypto(),
             )?;
             let peer_config = Arc::new(
-                ConfigBuilder::default()
-                    .with_crypto_provider(provider)
-                    .with_certificates(vec![peer_certificate])
-                    .with_srtp_protection_profiles(peer_profiles)
-                    .with_insecure_skip_verify(true)
-                    .with_extended_master_secret(ExtendedMasterSecretType::Require)
-                    .build(role == RTCDtlsRole::Server, None)?,
+                peer(
+                    ConfigBuilder::default()
+                        .with_crypto_provider(provider)
+                        .with_certificates(vec![peer_certificate])
+                        .with_srtp_protection_profiles(peer_profiles)
+                        .with_insecure_skip_verify(true)
+                        .with_extended_master_secret(ExtendedMasterSecretType::Require),
+                )
+                .build(role == RTCDtlsRole::Server, None)?,
             );
             // The handler's endpoint is tunnelled: it knows its peer by the placeholder
             // address. The peer knows the handler by an address of its own choosing.
@@ -1028,6 +1043,7 @@ mod tests {
                 peer,
                 now,
                 events: vec![],
+                sent: vec![],
             })
         }
 
@@ -1071,6 +1087,7 @@ mod tests {
                 while let Some(written) = handler.poll_write() {
                     progressed = true;
                     if let RTCMessageInternal::Dtls(DTLSMessage::Raw(message)) = written.message {
+                        self.sent.push(message.clone());
                         let _ = self.peer.read(now, handler_addr, None, message);
                     }
                 }
@@ -1150,6 +1167,137 @@ mod tests {
         Ok(())
     }
 
+    /// Whether the handler's association was resumed from a PSK.
+    fn handler_resumed(pair: &HandlerAndPeer) -> bool {
+        pair.context
+            .dtls_transport
+            .dtls_endpoint
+            .as_ref()
+            .and_then(|endpoint| {
+                endpoint.get_connection_state(TransportContext::default().peer_addr)
+            })
+            .is_some_and(State::resumed)
+    }
+
+    /// The extension types of the ClientHello that starts `datagram` (an unfragmented one in
+    /// the first plaintext record), read field by field (RFC 6347 section 4.2.2).
+    fn client_hello_extensions(datagram: &[u8]) -> Vec<u16> {
+        assert_eq!(datagram[0], 22, "a handshake record");
+        assert_eq!(datagram[13], 1, "a ClientHello");
+        let body = &datagram[13 + 12..];
+        let mut at = 2 + 32;
+        at += 1 + usize::from(body[at]); // session_id
+        at += 1 + usize::from(body[at]); // cookie
+        at += 2 + usize::from(u16::from_be_bytes([body[at], body[at + 1]])); // cipher_suites
+        at += 1 + usize::from(body[at]); // compression_methods
+        let end = at + 2 + usize::from(u16::from_be_bytes([body[at], body[at + 1]]));
+        at += 2;
+        let mut types = vec![];
+        while at < end {
+            types.push(u16::from_be_bytes([body[at], body[at + 1]]));
+            at += 4 + usize::from(u16::from_be_bytes([body[at + 2], body[at + 3]]));
+        }
+        types
+    }
+
+    /// RFC 8446 section 2.2 in WebRTC: the peer connection authenticates every association by
+    /// the fingerprints of its SDP and makes a new one per session, so resumption is off. As
+    /// the server the transport sends no NewSessionTicket to a client that asks for them, and
+    /// a ticket offered to it (made by a server that issues them) gets a full handshake; as
+    /// the client it offers no PSK and asks for no ticket (no psk_key_exchange_modes), so a
+    /// server that issues them sends it none.
+    #[test]
+    fn the_peer_connection_neither_sends_nor_accepts_session_tickets() -> Result<()> {
+        use dtls::session::{MemorySessionStore, SessionStore};
+        let provider = crypto::default_provider().expect("a built-in crypto provider");
+        let store = Arc::new(MemorySessionStore::new());
+
+        // A ticket of another server for the name the peer client uses ("localhost").
+        {
+            use dtls::config::ConfigBuilder;
+            let certificate = dtls::crypto::Certificate::generate_self_signed(
+                vec!["localhost".into()],
+                provider.crypto(),
+            )?;
+            let issuing = Arc::new(
+                ConfigBuilder::default()
+                    .with_crypto_provider(provider.clone())
+                    .with_certificates(vec![certificate])
+                    .with_insecure_skip_verify(true)
+                    .with_session_tickets(1)
+                    .build(false, None)?,
+            );
+            let client = Arc::new(
+                ConfigBuilder::default()
+                    .with_crypto_provider(provider.clone())
+                    .with_insecure_skip_verify(true)
+                    .with_session_store(Some(store.clone()))
+                    .build(true, None)?,
+            );
+            let (client_addr, server_addr): (SocketAddr, SocketAddr) =
+                ("10.0.0.2:1".parse().unwrap(), "10.0.0.3:1".parse().unwrap());
+            let mut a =
+                dtls::endpoint::Endpoint::new(client_addr, shared::TransportProtocol::UDP, None);
+            let mut b = dtls::endpoint::Endpoint::new(
+                server_addr,
+                shared::TransportProtocol::UDP,
+                Some(issuing),
+            );
+            let now = Instant::now();
+            a.connect(now, server_addr, client, None)?;
+            for _ in 0..16 {
+                while let Some(transmit) = a.poll_transmit() {
+                    let _ = b.read(now, client_addr, None, transmit.message);
+                }
+                while let Some(transmit) = b.poll_transmit() {
+                    let _ = a.read(now, server_addr, None, transmit.message);
+                }
+            }
+        }
+        assert_eq!(store.len("localhost"), 1, "the issuing server's ticket");
+
+        // The transport as the server, the peer a client with that store.
+        let mut pair = HandlerAndPeer::new_with(RTCDtlsRole::Server, vec![], false, |builder| {
+            builder.with_session_store(Some(store.clone()))
+        })?;
+        assert!(pair.run().is_none());
+        assert_eq!(
+            pair.context.dtls_transport.state(),
+            RTCDtlsTransportState::Connected
+        );
+        assert!(
+            !handler_resumed(&pair),
+            "the ticket offered was not accepted"
+        );
+        assert_eq!(
+            store.len("localhost"),
+            0,
+            "it was taken, and none came back"
+        );
+        assert!(store.take("localhost").is_none());
+
+        // The transport as the client, the peer a server that issues tickets.
+        let mut pair = HandlerAndPeer::new_with(RTCDtlsRole::Client, vec![], false, |builder| {
+            builder.with_session_tickets(2)
+        })?;
+        assert!(pair.run().is_none());
+        assert_eq!(
+            pair.context.dtls_transport.state(),
+            RTCDtlsTransportState::Connected
+        );
+        assert!(!handler_resumed(&pair));
+        let extensions = client_hello_extensions(&pair.sent[0]);
+        assert!(
+            extensions.contains(&43),
+            "supported_versions: a DTLS 1.3 offer"
+        );
+        assert!(
+            !extensions.contains(&41) && !extensions.contains(&45),
+            "no pre_shared_key, no psk_key_exchange_modes: {extensions:?}"
+        );
+        Ok(())
+    }
+
     /// RFC 8827 section 6.5: media is always protected with SRTP keyed by DTLS. A session with
     /// a media section whose peer negotiates no `use_srtp` cannot carry it: the transport
     /// fails (and the peer connection with it) instead of connecting without keys.
@@ -1179,6 +1327,43 @@ mod tests {
                     .iter()
                     .any(|event| matches!(event, RTCEventInternal::DTLSClosed)),
                 "{role}: the handlers above are told the transport is gone"
+            );
+        }
+        Ok(())
+    }
+
+    /// RFC 9147 section 5.8.2: the client's retransmission timer starts at 400 ms, the value
+    /// for DTLS-SRTP, unless ICE has measured the round trip time of the selected pair; then
+    /// at 1.5 times that, and never under 100 ms.
+    #[test]
+    fn the_client_flight_interval_follows_the_ice_round_trip_time() -> Result<()> {
+        use std::time::Duration;
+        for (round_trip_time, expected) in [
+            (None, Duration::from_millis(400)),
+            (Some(0.2), Duration::from_millis(300)),
+            (Some(0.01), Duration::from_millis(100)),
+        ] {
+            let mut pair = HandlerAndPeer::new(RTCDtlsRole::Client, vec![], false)?;
+            if let Some(round_trip_time) = round_trip_time {
+                pair.stats.transport.selected_candidate_pair_id = "pair".to_owned();
+                pair.stats.ice_candidate_pairs.insert(
+                    "pair".to_owned(),
+                    crate::statistics::accumulator::IceCandidatePairAccumulator {
+                        current_round_trip_time: round_trip_time,
+                        ..Default::default()
+                    },
+                );
+            }
+            let error = pair.run();
+            assert!(error.is_none(), "{round_trip_time:?}: {error:?}");
+            assert_eq!(
+                pair.context.dtls_transport.flight_interval,
+                Some(expected),
+                "{round_trip_time:?}"
+            );
+            assert_eq!(
+                pair.context.dtls_transport.state(),
+                RTCDtlsTransportState::Connected
             );
         }
         Ok(())

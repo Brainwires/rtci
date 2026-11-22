@@ -23,10 +23,12 @@
 //! let mut peer_connection = RTCPeerConnectionBuilder::new().build(Instant::now())?;
 //!
 //! // Get sender and access its track
-//! if let Some(mut sender) = peer_connection.rtp_sender(sender_id) {
-//!     let track = sender.track();
-//!     println!("Track ID: {}", track.track_id());
-//!     println!("Track kind: {:?}", track.kind());
+//! if let Some(sender) = peer_connection.rtp_sender(sender_id) {
+//!     // `None` for a sender without a track (W3C `track` is nullable).
+//!     if let Some(track) = sender.track() {
+//!         println!("Track ID: {}", track.track_id());
+//!         println!("Track kind: {:?}", track.kind());
+//!     }
 //! }
 //! # Ok(())
 //! # }
@@ -72,8 +74,8 @@
 //! let mut peer_connection = RTCPeerConnectionBuilder::new().build(Instant::now())?;
 //!
 //! if let Some(mut sender) = peer_connection.rtp_sender(sender_id) {
-//!     // Replace with new track (same kind required)
-//!     sender.replace_track(new_track)?;
+//!     // Replace with new track (same kind required); `None` stops sending.
+//!     sender.replace_track(Some(new_track))?;
 //! }
 //! # Ok(())
 //! # }
@@ -97,7 +99,6 @@
 //!     // Write RTP packet directly
 //!     // The sender will set the correct payload type and SSRC
 //!     rtp_packet.header.ssrc = sender
-//!         .track()
 //!         .ssrcs()
 //!         .last()
 //!         .ok_or(Error::ErrSenderWithNoSSRCs)?;
@@ -211,7 +212,9 @@ pub use rtp_coding_parameters::{
     RTCRtpCodingParameters, RTCRtpFecParameters, RTCRtpRidRestrictions, RTCRtpRtxParameters,
 };
 pub use rtp_encoding_parameters::RTCRtpEncodingParameters;
-pub use rtp_header_extension_capability::RTCRtpHeaderExtensionCapability;
+pub use rtp_header_extension_capability::{
+    RTCRtpHeaderExtensionCapability, RTCRtpHeaderExtensionEncryption,
+};
 pub use rtp_header_extension_parameters::RTCRtpHeaderExtensionParameters;
 pub use rtp_parameters::RTCRtpParameters;
 pub use rtp_receiver_parameters::RTCRtpReceiveParameters;
@@ -508,6 +511,26 @@ impl RTCRtpSender<'_> {
             return Err(Error::ErrSenderWithNoSSRCs);
         }
 
+        // The payload types of comfort noise (13, and any the application registered) and of
+        // telephone events: formats that ride an audio stream and are not media.
+        let auxiliary_payload_types: Vec<u8> = std::iter::once(13)
+            .chain(
+                media_engine
+                    .audio_codecs
+                    .iter()
+                    .filter(|codec| {
+                        let mime_type = &codec.rtp_codec.mime_type;
+                        mime_type.eq_ignore_ascii_case(
+                            crate::peer_connection::configuration::media_engine::MIME_TYPE_CN,
+                        ) || mime_type.eq_ignore_ascii_case(
+                            crate::peer_connection::configuration::media_engine::MIME_TYPE_TELEPHONE_EVENT,
+                        )
+                    })
+                    .map(|codec| codec.payload_type),
+            )
+            .collect();
+        let mixed = sender.extmap_allow_mixed();
+        let two_byte_stream = sender.is_two_byte_stream(packet.header.ssrc);
         let parameters = sender.get_parameters(media_engine);
         let (codecs, encodings) = (&parameters.rtp_parameters.codecs, &parameters.encodings);
 
@@ -539,6 +562,18 @@ impl RTCRtpSender<'_> {
             .iter()
             .any(|codec| codec.payload_type == packet.header.payload_type)
         {
+            // A comfort noise or telephone event packet whose format this leg did not
+            // negotiate is not media: rewritten to the media payload type, its noise
+            // parameters or event would be decoded as audio (RFC 3389 section 5.1, RFC 4733
+            // section 2.1: each is sent only when its format was negotiated). It is dropped.
+            let pt = packet.header.payload_type;
+            if auxiliary_payload_types.contains(&pt) {
+                trace!(
+                    "rtp_sender {:?} drops RTP ssrc {} pt {}: comfort noise or telephone events, not negotiated on this sender leg",
+                    self.id, packet.header.ssrc, pt
+                );
+                return Ok(());
+            }
             // An encoding that names no codec is sent with the one negotiation picked, as its
             // stream is bound (`encoding_send_codec`); one that names a codec, with that codec.
             let Some(codec) = encoding_send_codec(&encoding.codec, codecs) else {
@@ -610,9 +645,32 @@ impl RTCRtpSender<'_> {
                 continue;
             };
             if packet.header.get_extension(id).is_none() {
+                // The element may need the two-byte form (an id above 14, a value over 16
+                // bytes): the packet takes it. It is on every packet of the stream, so the
+                // stream stays in one form without mixing too (RFC 8285 section 4.1.2).
                 packet
                     .header
-                    .set_extension(id, bytes::Bytes::copy_from_slice(value.as_bytes()))?;
+                    .set_extension_upgrading(id, bytes::Bytes::copy_from_slice(value.as_bytes()))?;
+            }
+        }
+
+        // RFC 8285 sections 4.1.2 and 6: without `a=extmap-allow-mixed` on both sides, a
+        // stream is all one-byte or all two-byte. It is two-byte throughout when the session
+        // negotiated an id above 14 for it (section 4.1.2: a transmitter that intends the
+        // two-byte form "SHOULD negotiate the use of IDs above 14"), and from the first packet
+        // that needed the two-byte form on. With mixing, each packet takes the smallest form
+        // its elements fit.
+        if !mixed && packet.header.extension {
+            let two_byte_ids = parameters
+                .rtp_parameters
+                .header_extensions
+                .iter()
+                .any(|negotiated| negotiated.id > 14);
+            if two_byte_ids || two_byte_stream {
+                packet.header.upgrade_to_two_byte()?;
+            }
+            if packet.header.extension_form() == Some(rtp::header::ExtensionForm::TwoByte) {
+                sender.set_two_byte_stream(packet.header.ssrc);
             }
         }
 

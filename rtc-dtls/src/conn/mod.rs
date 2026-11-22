@@ -16,6 +16,8 @@ mod conn_test;
 #[cfg(test)]
 mod conn_transport_test;
 #[cfg(test)]
+mod connection_id_test;
+#[cfg(test)]
 mod openssl_kat_test;
 #[cfg(test)]
 mod openssl_recordings;
@@ -168,10 +170,18 @@ pub struct DTLSConn {
     /// sent again when the peer keeps sending handshake records (RFC 6347 4.2.7: alerts are
     /// not retransmitted on a timer, but the offending record arriving again draws a new one).
     pub(crate) fatal_alert_sent: Option<(Alert, usize)>,
+    /// The fatal alert the peer ended the association with, if it did.
+    pub(crate) fatal_alert_received: Option<Alert>,
     /// How many records of an epoch after 0 have authenticated. An endpoint that holds two
     /// associations for one address (RFC 6347 4.2.8) reads from it which of them a protected
     /// record belongs to.
     pub(crate) authenticated_records: u64,
+    /// DTLS 1.3 server: the client's post-handshake authentications verified so far.
+    pub(crate) post_handshake_authentications: u64,
+    /// DTLS 1.2: the newest (epoch, sequence number) of a record that authenticated. RFC 9146
+    /// section 6 lets an association follow its peer to a new address only for a record
+    /// newer than every one before.
+    pub(crate) newest_authenticated_record: Option<(u16, u64)>,
 
     pub(crate) current_flight: Box<dyn Flight>,
     pub(crate) flights: Option<Vec<Packet>>,
@@ -287,7 +297,10 @@ impl DTLSConn {
             handshake_started: None,
             handshake_mtu: handshake_config.maximum_transmission_unit,
             fatal_alert_sent: None,
+            fatal_alert_received: None,
             authenticated_records: 0,
+            post_handshake_authentications: 0,
+            newest_authenticated_record: None,
 
             current_flight: flight,
             flights: None,
@@ -311,11 +324,21 @@ impl DTLSConn {
 
     /// Copies what the DTLS 1.3 association has reached into the state callers read.
     pub(crate) fn sync_dtls13(&mut self) {
-        let Some(v13) = &self.v13 else {
+        let Some(v13) = &mut self.v13 else {
             return;
         };
         self.authenticated_records = v13.authenticated_records;
         self.closed_by_peer = v13.closed_by_peer;
+        self.state.resumed = v13.resumed;
+        self.post_handshake_authentications = v13.post_handshake_authentications;
+        if let Some(chain) = v13.post_handshake_peer_certificates.take() {
+            // RFC 8446 section 4.6.2: the client authenticated after the handshake; an
+            // empty chain (it declined) leaves the earlier one.
+            if !chain.is_empty() {
+                v13.peer_certificates.clone_from(&chain);
+                self.state.peer_certificates = chain;
+            }
+        }
         self.address_verified |= v13.address_verified;
         if v13.established && !self.handshake_completed {
             self.handshake_completed = true;
@@ -346,6 +369,9 @@ impl DTLSConn {
         let Some(v13) = &mut self.v13 else {
             return Ok(());
         };
+        if self.state.clock.is_some() {
+            v13.clock = self.state.clock;
+        }
         let result = v13.read(datagram);
         self.sync_dtls13();
         result
@@ -392,6 +418,30 @@ impl DTLSConn {
         v13.send_new_connection_id(connection_ids, immediate)
     }
 
+    /// DTLS 1.3 server: asks the client for its certificate now (post-handshake
+    /// authentication, RFC 8446 section 4.6.2). The answer is checked as the handshake checks
+    /// a client certificate; once verified, [`State::peer_certificates`] holds the chain and
+    /// the endpoint reports [`EndpointEvent::PeerAuthenticated`](crate::endpoint::EndpointEvent::PeerAuthenticated).
+    /// One that is refused ends the association with the alert RFC 8446 names.
+    ///
+    /// # Errors
+    ///
+    /// For DTLS 1.2, for a client, before the handshake is complete, when the client did not
+    /// offer post_handshake_auth
+    /// ([`ConfigBuilder::with_post_handshake_auth`](crate::config::ConfigBuilder::with_post_handshake_auth)),
+    /// and with four requests unanswered.
+    pub fn request_client_certificate(&mut self) -> Result<()> {
+        match &mut self.v13 {
+            Some(v13) => v13.request_client_certificate(),
+            None => Err(Error::ErrUnsupportedProtocolVersion),
+        }
+    }
+
+    /// How many post-handshake authentications of the client this server has verified.
+    pub fn post_handshake_authentications(&self) -> u64 {
+        self.post_handshake_authentications
+    }
+
     /// Asks the peer for `count` more connection ids (RFC 9147 section 9).
     ///
     /// # Errors
@@ -413,15 +463,49 @@ impl DTLSConn {
             .is_some_and(|v13| v13.use_next_connection_id())
     }
 
-    /// The connection ids in use (DTLS 1.3): the one this side expects in records it
-    /// receives, and the one it puts in records it sends. Empty where none is used.
+    /// How many bytes a protected record this side sends adds to its content: the record
+    /// header, the connection id if one is sent, and what the cipher suite adds (an explicit
+    /// nonce, the tag or MAC and padding, the inner content type of DTLS 1.3 and of a
+    /// `tls12_cid` record). A DTLS 1.3 record with a 16-byte tag adds 22 bytes, a DTLS 1.2
+    /// AES-GCM record 37. `None` before the cipher suite is known. CBC padding is counted at
+    /// its largest.
+    pub fn record_overhead(&self) -> Option<usize> {
+        if let Some(v13) = &self.v13 {
+            return v13.protected_record_overhead();
+        }
+        let cipher_suite = self.state.cipher_suite.as_ref()?;
+        let connection_id = self
+            .state
+            .send_connection_id()
+            .map_or(0, |connection_id| connection_id.len() + 1);
+        Some(RECORD_LAYER_HEADER_SIZE + cipher_suite.record_expansion() + connection_id)
+    }
+
+    /// The connection ids in use: the one this side expects in records it receives, and the
+    /// one it puts in records it sends. Empty where none is used. `None` for a DTLS 1.2
+    /// association that did not negotiate the extension (RFC 9146 section 3).
     pub fn connection_ids(&self) -> Option<(&[u8], &[u8])> {
-        self.v13.as_ref().map(|v13| {
-            (
+        if let Some(v13) = &self.v13 {
+            return Some((
                 v13.local_connection_id.as_slice(),
                 v13.remote_connection_id.as_slice(),
-            )
-        })
+            ));
+        }
+        match (
+            &self.state.local_connection_id,
+            &self.state.remote_connection_id,
+        ) {
+            (Some(local), Some(remote)) => Some((local.as_slice(), remote.as_slice())),
+            _ => None,
+        }
+    }
+
+    /// Tells the association the time, ahead of a datagram: what a DTLS 1.3 handshake dates
+    /// session tickets by (it reads no clock of its own). [`Endpoint`](crate::endpoint::Endpoint)
+    /// calls it before every datagram it delivers; a caller that drives a `DTLSConn` itself
+    /// calls it, or [`Self::read`] goes by the `now` of the last timer call.
+    pub fn set_clock(&mut self, now: Instant) {
+        self.state.clock = Some(now);
     }
 
     /// Settles the version from a hello: `message` is one whole ClientHello (to a server)
@@ -458,6 +542,7 @@ impl DTLSConn {
                         record_sequence: record.sequence_number,
                         address_verified: self.address_verified,
                         verified_retry: self.verified_retry.take(),
+                        now: self.state.clock,
                     };
                     self.v13 = Some(Box::new(Conn13::server(cfg, body, start)));
                     self.state.negotiated_version = Some(DtlsVersion::Dtls1_3);
@@ -520,6 +605,7 @@ impl DTLSConn {
                         next_sequence.unwrap_or(0),
                     );
                     v13.set_next_receive_seq(message_seq);
+                    v13.clock = self.state.clock;
                     let server_hello = crate::dtls13::record::plaintext_record(
                         crate::dtls13::record::CONTENT_TYPE_HANDSHAKE,
                         record.sequence_number,
@@ -668,7 +754,8 @@ impl DTLSConn {
     ///
     /// # Errors
     ///
-    /// Fails if the connection is closed, or if `p` is longer than [`MAX_RECORD_PAYLOAD`].
+    /// Fails if the connection is closed, or if `p` is longer than [`MAX_RECORD_PAYLOAD`] (one
+    /// byte less in a `tls12_cid` record, RFC 9146 section 5).
     pub fn write(&mut self, p: &[u8]) -> Result<()> {
         if let Some(v13) = &mut self.v13 {
             return v13.write(p);
@@ -679,7 +766,14 @@ impl DTLSConn {
         // RFC 5246 6.2.1: a record carries at most 2^14 bytes. A longer write is refused rather
         // than split: an application datagram is one record, and whoever sizes datagrams for
         // the path (SCTP, for a data channel) relies on that.
-        if p.len() > MAX_RECORD_PAYLOAD {
+        // RFC 9146 section 5: a `tls12_cid` record's DTLSInnerPlaintext, the content and its
+        // type, is at most 2^14 bytes, so its content is one byte shorter.
+        let limit = if self.state.send_connection_id().is_some() {
+            MAX_RECORD_PAYLOAD - 1
+        } else {
+            MAX_RECORD_PAYLOAD
+        };
+        if p.len() > limit {
             return Err(Error::ErrRecordOverflow);
         }
 
@@ -737,6 +831,21 @@ impl DTLSConn {
     /// record that is silently discarded, never fails it.
     pub fn is_failed(&self) -> bool {
         self.failed
+    }
+
+    /// The fatal alerts that ended the association, as their `AlertDescription` codes (RFC
+    /// 5246 section 7.2, RFC 8446 section 6): (sent, received). `None` for a side that sent or
+    /// received none, as when the handshake gave up after its retransmissions.
+    pub fn fatal_alerts(&self) -> (Option<u8>, Option<u8>) {
+        if let Some(v13) = &self.v13 {
+            return v13.fatal_alerts();
+        }
+        (
+            self.fatal_alert_sent
+                .map(|(alert, _)| alert.alert_description as u8),
+            self.fatal_alert_received
+                .map(|alert| alert.alert_description as u8),
+        )
     }
 
     /// Whether the peer's source address is known to be its own: a client's always is; a
@@ -909,6 +1018,33 @@ impl DTLSConn {
         Ok(())
     }
 
+    /// Protects one record (`raw`: its 13-byte header and content) with the cipher suite,
+    /// if there is one. With a connection id negotiated for the peer (RFC 9146) it becomes
+    /// a `tls12_cid` record: the content, then its type, are protected as the
+    /// DTLSInnerPlaintext (no padding is added), the outer type is `tls12_cid`, and the
+    /// connection id goes between the sequence number and the length.
+    fn protect(&mut self, header: &RecordLayerHeader, mut raw: Vec<u8>) -> Result<Vec<u8>> {
+        let connection_id = self.state.send_connection_id().map(<[u8]>::to_vec);
+        let Some(cipher_suite) = &mut self.state.cipher_suite else {
+            return Ok(raw);
+        };
+        let Some(connection_id) = connection_id else {
+            return cipher_suite.encrypt(header, &raw);
+        };
+        let mut header = *header;
+        raw.push(header.content_type as u8);
+        header.content_type = ContentType::Tls12Cid;
+        raw[0] = ContentType::Tls12Cid as u8;
+        let protected = cipher_suite.encrypt_with_connection_id(&header, &raw, &connection_id)?;
+        // The connection id sits after the sequence number, in front of the length.
+        let at = RECORD_LAYER_HEADER_SIZE - 2;
+        let mut record = Vec::with_capacity(protected.len() + connection_id.len());
+        record.extend_from_slice(&protected[..at]);
+        record.extend_from_slice(&connection_id);
+        record.extend_from_slice(&protected[at..]);
+        Ok(record)
+    }
+
     fn process_packet(&mut self, mut p: Packet) -> Result<Vec<u8>> {
         let epoch = p.record.record_layer_header.epoch as usize;
         let seq = {
@@ -934,10 +1070,8 @@ impl DTLSConn {
         let mut raw_packet = vec![];
         p.record.marshal(&mut raw_packet)?;
 
-        if p.should_encrypt
-            && let Some(cipher_suite) = &mut self.state.cipher_suite
-        {
-            raw_packet = cipher_suite.encrypt(&p.record.record_layer_header, &raw_packet)?;
+        if p.should_encrypt {
+            raw_packet = self.protect(&p.record.record_layer_header, raw_packet)?;
         }
 
         Ok(raw_packet)
@@ -949,8 +1083,15 @@ impl DTLSConn {
         // RFC 6347 4.1.1, 4.2.3: each fragment travels in one record, and the record in one
         // datagram of at most the MTU, so a fragment has the MTU less the record header, the
         // handshake header and what protecting the record adds.
+        // A `tls12_cid` record (RFC 9146) adds its connection id and the inner content type.
+        let connection_id_expansion = self
+            .state
+            .send_connection_id()
+            .map_or(0, |connection_id| connection_id.len() + 1);
         let record_expansion = match &self.state.cipher_suite {
-            Some(cipher_suite) if p.should_encrypt => cipher_suite.record_expansion(),
+            Some(cipher_suite) if p.should_encrypt => {
+                cipher_suite.record_expansion() + connection_id_expansion
+            }
             _ => 0,
         };
         let fragment_room = self
@@ -994,10 +1135,8 @@ impl DTLSConn {
             let mut raw_packet = vec![];
             raw_packet.extend_from_slice(&record_layer_header_bytes);
             raw_packet.extend_from_slice(handshake_fragment);
-            if p.should_encrypt
-                && let Some(cipher_suite) = &mut self.state.cipher_suite
-            {
-                raw_packet = cipher_suite.encrypt(&record_layer_header, &raw_packet)?;
+            if p.should_encrypt {
+                raw_packet = self.protect(&record_layer_header, raw_packet)?;
             }
 
             raw_packets.push(raw_packet);
@@ -1088,7 +1227,10 @@ impl DTLSConn {
         self.received_handshake_in_last_datagram = false;
         // An invalid record is discarded alone: what follows the last whole record of the
         // datagram does not cost the valid records in front of it [RFC6347 Section-4.1.2.7].
-        let (records, well_formed) = split_datagram(buf);
+        let (records, well_formed) = split_datagram(
+            buf,
+            self.state.receive_connection_id().map_or(0, <[u8]>::len),
+        );
         if !well_formed {
             // A client that offered DTLS 1.3 may be sent the server's protected flight
             // ahead of the ServerHello that selects it: held, a few datagrams of it, until
@@ -1169,7 +1311,10 @@ impl DTLSConn {
         let Some((alert, remaining)) = self.fatal_alert_sent else {
             return;
         };
-        let (records, _) = split_datagram(datagram);
+        let (records, _) = split_datagram(
+            datagram,
+            self.state.receive_connection_id().map_or(0, <[u8]>::len),
+        );
         let carries_handshake = records
             .iter()
             .any(|record| ContentType::from(record[0]) == ContentType::Handshake);
@@ -1278,10 +1423,24 @@ impl DTLSConn {
     /// than when the timer fires. Only a record that authenticates under the negotiated keys
     /// counts (anyone can send a record that merely claims the next epoch), and only once per
     /// flight; the retransmission comes out of the flight's ordinary budget.
-    fn note_early_application_data(&mut self, h: &RecordLayerHeader, pkt: &[u8]) {
+    ///
+    /// With a connection id (`connection_id`: the record is `tls12_cid`, given without its
+    /// id, RFC 9146) the content type is inside the protection: the record counts when it
+    /// opens to application data.
+    fn note_early_application_data(
+        &mut self,
+        h: &RecordLayerHeader,
+        pkt: &[u8],
+        connection_id: Option<&[u8]>,
+    ) {
+        let expected_type = if connection_id.is_some() {
+            ContentType::Tls12Cid
+        } else {
+            ContentType::ApplicationData
+        };
         if !self.handshake_config.early_data_retransmit
             || self.early_data_retransmit_done
-            || h.content_type != ContentType::ApplicationData
+            || h.content_type != expected_type
             || self.current_handshake_state != HandshakeState::Waiting
         {
             return;
@@ -1289,7 +1448,22 @@ impl DTLSConn {
         let Some(cipher_suite) = &mut self.state.cipher_suite else {
             return;
         };
-        if cipher_suite.is_initialized() && cipher_suite.decrypt(pkt).is_ok() {
+        if !cipher_suite.is_initialized() {
+            return;
+        }
+        let opened = match connection_id {
+            Some(connection_id) => cipher_suite
+                .decrypt_with_connection_id(pkt, connection_id)
+                .ok()
+                .filter(|opened| {
+                    inner_content_type(&opened[RECORD_LAYER_HEADER_SIZE.min(opened.len())..])
+                        .is_some_and(|(content_type, _)| {
+                            content_type == ContentType::ApplicationData
+                        })
+                }),
+            None => cipher_suite.decrypt(pkt).ok(),
+        };
+        if opened.is_some() {
             debug!(
                 "{}: application data before the peer's Finished, retransmitting the flight",
                 srv_cli_str(self.is_client)
@@ -1319,10 +1493,34 @@ impl DTLSConn {
         mut pkt: Vec<u8>,
         enqueue: bool,
     ) -> (bool, Option<Alert>, Option<Error>) {
+        // RFC 9146 section 4: a `tls12_cid` record has this side's connection id between
+        // its sequence number and its length. It is taken out here (what follows works on
+        // a record with the ordinary 13-byte header and the outer type `tls12_cid`) and
+        // goes into the additional data when the record is opened. A record with another
+        // connection id, or one when none was negotiated, is not this association's and is
+        // discarded (section 3: without an alert). `wire` is the record as it came, which
+        // is what is queued when it cannot be opened yet.
+        let mut wire = None;
+        let mut connection_id = None;
+        if pkt.first() == Some(&(ContentType::Tls12Cid as u8)) {
+            let Some(expected) = self.state.receive_connection_id().map(<[u8]>::to_vec) else {
+                return (false, None, None);
+            };
+            let at = RECORD_LAYER_HEADER_SIZE - 2;
+            if pkt.len() < RECORD_LAYER_HEADER_SIZE + expected.len()
+                || pkt[at..at + expected.len()] != expected[..]
+            {
+                return (false, None, None);
+            }
+            wire = Some(pkt.clone());
+            pkt.drain(at..at + expected.len());
+            connection_id = Some(expected);
+        }
+
         // Parse the 13-byte header from the slice directly: `BufReader` would
         // heap-allocate an 8 KiB buffer for every inbound record.
         let mut reader = pkt.as_slice();
-        let h = match RecordLayerHeader::unmarshal(&mut reader) {
+        let mut h = match RecordLayerHeader::unmarshal(&mut reader) {
             Ok(h) => h,
             Err(err) => {
                 // Decode error must be silently discarded
@@ -1335,6 +1533,26 @@ impl DTLSConn {
                 return (false, None, None);
             }
         };
+
+        // RFC 9146 section 4: a `tls12_cid` record is always protected; one in epoch 0 is
+        // not the peer's. Section 3: once this side has asked for a non-empty connection id,
+        // every protected record the peer sends carries it, so a protected record without
+        // one is not this association's. Neither is authenticated: both are discarded
+        // without an alert [RFC6347 Section-4.1.2.7].
+        if (connection_id.is_some() && h.epoch == 0)
+            || (connection_id.is_none()
+                && h.epoch != 0
+                && h.content_type != ContentType::ChangeCipherSpec
+                && self.state.receive_connection_id().is_some())
+        {
+            debug!(
+                "{}: discarded {:?} record in epoch {}: its connection id does not match",
+                srv_cli_str(self.is_client),
+                h.content_type,
+                h.epoch,
+            );
+            return (false, None, None);
+        }
 
         // RFC 5246 6.2.1, 6.2.3: a record holds at most 2^14 bytes, 2^14 + 2048 once protected.
         // A header that announces more is not this protocol's; it is unauthenticated, so the
@@ -1371,8 +1589,8 @@ impl DTLSConn {
                     "{}: received packet of next epoch, queuing packet",
                     srv_cli_str(self.is_client)
                 );
-                self.note_early_application_data(&h, &pkt);
-                self.enqueue_early_encrypted(pkt);
+                self.note_early_application_data(&h, &pkt, connection_id.as_deref());
+                self.enqueue_early_encrypted(wire.clone().unwrap_or(pkt));
             }
             return (false, None, None);
         }
@@ -1435,13 +1653,19 @@ impl DTLSConn {
                         "{}: handshake not finished, queuing packet",
                         srv_cli_str(self.is_client)
                     );
-                    self.enqueue_early_encrypted(pkt);
+                    self.enqueue_early_encrypted(wire.clone().unwrap_or(pkt));
                 }
                 return (false, None, None);
             }
 
             if let Some(cipher_suite) = &mut self.state.cipher_suite {
-                pkt = match cipher_suite.decrypt(&pkt) {
+                let opened = match &connection_id {
+                    Some(connection_id) => {
+                        cipher_suite.decrypt_with_connection_id(&pkt, connection_id)
+                    }
+                    None => cipher_suite.decrypt(&pkt),
+                };
+                pkt = match opened {
                     Ok(pkt) => pkt,
                     Err(err) => {
                         debug!("{}: decrypt failed: {}", srv_cli_str(self.is_client), err);
@@ -1467,6 +1691,58 @@ impl DTLSConn {
             }
 
             self.authenticated_records += 1;
+            let record_number = (h.epoch, h.sequence_number);
+            if self
+                .newest_authenticated_record
+                .is_none_or(|newest| record_number > newest)
+            {
+                self.newest_authenticated_record = Some(record_number);
+            }
+
+            // RFC 9146 section 4: the DTLSInnerPlaintext is the content, its real type and
+            // zeros. The type is the last byte that is not zero. A record without one, or
+            // with a type that is not one of the four a DTLS 1.2 record carries (a
+            // `tls12_cid` inside a `tls12_cid`), is the peer's error (it authenticated):
+            // unexpected_message, as for an unknown type (RFC 5246 6).
+            if connection_id.is_some() {
+                // Section 5: the DTLSInnerPlaintext is at most 2^14 bytes; more, authenticated,
+                // is the peer's error, as for any record (RFC 5246 6.2.1).
+                if pkt.len() - RECORD_LAYER_HEADER_SIZE > MAX_RECORD_PAYLOAD {
+                    return (
+                        false,
+                        Some(Alert {
+                            alert_level: AlertLevel::Fatal,
+                            alert_description: AlertDescription::RecordOverflow,
+                        }),
+                        Some(Error::ErrRecordOverflow),
+                    );
+                }
+                let inner = inner_content_type(&pkt[RECORD_LAYER_HEADER_SIZE..]).filter(
+                    |(content_type, _)| {
+                        !matches!(content_type, ContentType::Invalid | ContentType::Tls12Cid)
+                    },
+                );
+                let Some((content_type, content_len)) = inner else {
+                    return (
+                        false,
+                        Some(Alert {
+                            alert_level: AlertLevel::Fatal,
+                            alert_description: AlertDescription::UnexpectedMessage,
+                        }),
+                        Some(Error::Other(
+                            "tls12_cid record without a known content type".to_owned(),
+                        )),
+                    );
+                };
+                let at = RECORD_LAYER_HEADER_SIZE + content_len;
+                h.content_type = content_type;
+                pkt[0] = content_type as u8;
+                pkt.truncate(at);
+                let length = (pkt.len() - RECORD_LAYER_HEADER_SIZE) as u16;
+                h.content_len = length;
+                pkt[RECORD_LAYER_HEADER_SIZE - 2..RECORD_LAYER_HEADER_SIZE]
+                    .copy_from_slice(&length.to_be_bytes());
+            }
 
             // RFC 5246 6.2.1, 7.2.2: an authenticated record that opens to more than 2^14
             // bytes is the peer's error, and fatal: record_overflow.
@@ -1714,6 +1990,7 @@ impl DTLSConn {
                     // A fatal alert ends the association at once, unanswered [RFC5246 Section
                     // 7.2.2].
                     self.replay_detector[h.epoch as usize].accept();
+                    self.fatal_alert_received = Some(a);
                     self.fail();
                     return (false, None, Some(Error::ErrAlertFatalOrClose));
                 }
@@ -1737,7 +2014,7 @@ impl DTLSConn {
                             "{}: CipherSuite not initialized, queuing packet",
                             srv_cli_str(self.is_client)
                         );
-                        self.enqueue_early_encrypted(pkt);
+                        self.enqueue_early_encrypted(wire.clone().unwrap_or(pkt));
                     }
                     return (false, None, None);
                 }
@@ -1862,4 +2139,12 @@ fn split_bytes(bytes: &[u8], split_len: usize) -> Vec<Vec<u8>> {
     }
 
     splits
+}
+
+/// The real content type of a DTLSInnerPlaintext (RFC 9146 section 4: the content, its type,
+/// then zeros) and the length of its content: the type is the last byte that is not zero.
+/// `None` when every byte is zero.
+pub(crate) fn inner_content_type(inner_plaintext: &[u8]) -> Option<(ContentType, usize)> {
+    let at = inner_plaintext.iter().rposition(|byte| *byte != 0)?;
+    Some((ContentType::from(inner_plaintext[at]), at))
 }

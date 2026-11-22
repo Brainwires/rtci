@@ -133,8 +133,15 @@ pub struct ConfigBuilder {
     connection_id: Option<usize>,
     connection_id_migration: bool,
     invalid_record_limit: Option<u64>,
+    post_quantum_key_share: bool,
     psk: Option<PskCallback>,
     psk_identity_hint: Option<Vec<u8>>,
+    session_tickets: u8,
+    session_ticket_lifetime: Duration,
+    session_store: Option<Arc<dyn crate::session::SessionStore>>,
+    external_psks: Vec<crate::session::ExternalPsk>,
+    psk_without_key_exchange: bool,
+    post_handshake_auth: bool,
     insecure_skip_verify: bool,
     insecure_hashes: bool,
     insecure_verification: bool,
@@ -170,8 +177,15 @@ impl Default for ConfigBuilder {
             connection_id: Some(0),
             connection_id_migration: false,
             invalid_record_limit: None,
+            post_quantum_key_share: true,
             psk: None,
             psk_identity_hint: None,
+            session_tickets: 0,
+            session_ticket_lifetime: crate::dtls13::psk::DEFAULT_TICKET_LIFETIME,
+            session_store: None,
+            external_psks: vec![],
+            psk_without_key_exchange: false,
+            post_handshake_auth: false,
             insecure_skip_verify: false,
             insecure_hashes: false,
             insecure_verification: false,
@@ -359,9 +373,9 @@ impl ConfigBuilder {
     /// does not use the extension. Negotiated when both sides send it. The default is
     /// `Some(0)`, as RFC 9147 section 5.1 asks of a client that wants no connection id.
     ///
-    /// With DTLS 1.3 only: the DTLS 1.2 record format of RFC 9146 (`tls12_cid`) is not
-    /// implemented, so a ClientHello that also offers DTLS 1.2 leaves the extension out, and
-    /// a server answers it only when it negotiates DTLS 1.3.
+    /// Both versions: DTLS 1.2 uses RFC 9146 (`tls12_cid` records), DTLS 1.3 its own record
+    /// header. A ClientHello that offers both carries the extension once, for both (RFC 9147
+    /// section 5.1).
     pub fn with_connection_id(mut self, length: Option<usize>) -> Self {
         self.connection_id = length;
         self
@@ -379,6 +393,16 @@ impl ConfigBuilder {
         self
     }
 
+    /// Whether DTLS 1.3 offers and accepts the hybrid post-quantum group X25519MLKEM768
+    /// (draft-ietf-tls-ecdhe-mlkem, code point 0x11EC), preferred over the curves. On by
+    /// default; it takes effect only with a crypto provider that has ML-KEM (the built-in
+    /// aws-lc-rs one; ring has none). Its key share is 1216 bytes, so a ClientHello that
+    /// carries it does not fit one datagram and is sent as two fragments.
+    pub fn with_post_quantum_key_share(mut self, post_quantum_key_share: bool) -> Self {
+        self.post_quantum_key_share = post_quantum_key_share;
+        self
+    }
+
     /// How many invalid records (malformed, or failing authentication) a DTLS 1.3
     /// association takes before it gives its peer up as persistently misbehaving and fails,
     /// without an alert (RFC 9147 section 5.10). `None`, the default, never does: over UDP
@@ -387,6 +411,59 @@ impl ConfigBuilder {
     /// selected pair with consent checks narrows it to on-path senders).
     pub fn with_invalid_record_limit(mut self, limit: Option<u64>) -> Self {
         self.invalid_record_limit = limit;
+        self
+    }
+
+    /// DTLS 1.3 server: how many tickets (NewSessionTicket messages, RFC 8446 section 4.6.1)
+    /// to send after each handshake, for the client to resume with. 0, the default, sends
+    /// none and accepts none. Tickets are sealed under a key the configuration makes at
+    /// random when it is built, and each is accepted once: see [`crate::session`].
+    pub fn with_session_tickets(mut self, count: u8) -> Self {
+        self.session_tickets = count;
+        self
+    }
+
+    /// DTLS 1.3 server: how long a ticket it issues may be used for (`ticket_lifetime`).
+    /// Two hours by default; at most seven days (RFC 8446 section 4.6.1).
+    pub fn with_session_ticket_lifetime(mut self, lifetime: Duration) -> Self {
+        self.session_ticket_lifetime = lifetime;
+        self
+    }
+
+    /// DTLS 1.3 client: where to keep the tickets servers send, and take one from for the
+    /// next handshake with the same server name. Without a store (the default) a client
+    /// offers no PSK and drops the tickets it is sent.
+    pub fn with_session_store(
+        mut self,
+        store: Option<Arc<dyn crate::session::SessionStore>>,
+    ) -> Self {
+        self.session_store = store;
+        self
+    }
+
+    /// DTLS 1.3: external pre-shared keys (RFC 8446 section 2.2). A client offers each of
+    /// them; a server accepts one whose identity it has in place of a certificate exchange.
+    /// The DTLS 1.2 PSK suites are configured with [`Self::with_psk`] instead.
+    pub fn with_external_psks(mut self, psks: Vec<crate::session::ExternalPsk>) -> Self {
+        self.external_psks = psks;
+        self
+    }
+
+    /// DTLS 1.3: whether a PSK may also be used alone, without an (EC)DHE exchange (the
+    /// `psk_ke` mode of RFC 8446 section 4.2.9). Off by default: `psk_dhe_ke` only, which
+    /// keeps forward secrecy (RFC 8446 section E.1).
+    pub fn with_psk_without_key_exchange(mut self, allowed: bool) -> Self {
+        self.psk_without_key_exchange = allowed;
+        self
+    }
+
+    /// DTLS 1.3 client: offer post-handshake authentication (the `post_handshake_auth`
+    /// extension, RFC 8446 section 4.2.6), so that the server may ask for this client's
+    /// certificate at any time after the handshake ([`DTLSConn::request_client_certificate`](crate::conn::DTLSConn::request_client_certificate)).
+    /// It is answered at once, with the configured certificate if the request allows it and
+    /// with an empty Certificate otherwise. Off by default.
+    pub fn with_post_handshake_auth(mut self, offer: bool) -> Self {
+        self.post_handshake_auth = offer;
         self
     }
 
@@ -745,6 +822,14 @@ impl ConfigBuilder {
             }
             max_version = DtlsVersion::Dtls1_2;
         }
+        // The groups of DTLS 1.3: the hybrid with ML-KEM first where the provider has it
+        // (and the configuration does not switch it off), then the curves.
+        let mut local_tls13_groups = vec![];
+        if self.post_quantum_key_share && hybrid_key_share_works(crypto_provider.crypto()) {
+            local_tls13_groups.push(NamedCurve::X25519MlKem768);
+        }
+        local_tls13_groups.extend_from_slice(&local_named_curves);
+
         // A list with TLS 1.3 suites only leaves nothing to negotiate DTLS 1.2 with.
         let min_version = if max_version == DtlsVersion::Dtls1_3
             && !self.cipher_suites.is_empty()
@@ -851,6 +936,26 @@ impl ConfigBuilder {
             None
         };
 
+        // DTLS 1.3 pre-shared keys: a server's tickets, and the external PSKs (RFC 8446
+        // section 4.2.11: an identity of at least one byte).
+        let ticket_issuer = if !is_client && self.session_tickets > 0 {
+            Some(Arc::new(crate::dtls13::psk::TicketIssuer::new(
+                crypto_provider.as_ref(),
+                self.session_tickets,
+                self.session_ticket_lifetime,
+            )?))
+        } else {
+            None
+        };
+        let external_psks = std::mem::take(&mut self.external_psks);
+        if external_psks.iter().any(|psk| {
+            psk.identity.is_empty() || psk.identity.len() > 0xffff || psk.secret.is_empty()
+        }) {
+            return Err(Error::Other(
+                "an external PSK has an identity of 1 to 65535 bytes and a secret".to_owned(),
+            ));
+        }
+
         // Fields not derived from the builder come from `HandshakeConfig::new`, which also
         // supplies `crypto_provider`.
         Ok(HandshakeConfig {
@@ -883,19 +988,25 @@ impl ConfigBuilder {
             min_version,
             max_version,
             local_tls13_cipher_suites,
-            // The extension belongs to both versions, and only DTLS 1.3 has its records
-            // here. Where a hello is for DTLS 1.3 alone it carries the extension even when
-            // no connection id was asked for (RFC 9147 section 5.1: so that the peer can
-            // ask for one), unless that is switched off.
-            // A server answers the offer of a DTLS 1.3 client whatever else it speaks: its
-            // DTLS 1.2 handshake does not know the extension.
-            connection_id: if !is_client || min_version == DtlsVersion::Dtls1_3 {
-                self.connection_id
+            local_tls13_groups,
+            // The extension belongs to both versions (RFC 9146 for DTLS 1.2, RFC 9147
+            // section 9 for 1.3). A hello carries it even when no connection id is asked for
+            // (RFC 9147 section 5.1: so that the peer can ask for one), unless that is
+            // switched off.
+            connection_id: self.connection_id,
+            connection_id_migration: self.connection_id_migration,
+            invalid_record_limit: self.invalid_record_limit,
+            ticket_issuer,
+            session_store: if is_client {
+                self.session_store.take()
             } else {
                 None
             },
-            connection_id_migration: self.connection_id_migration,
-            invalid_record_limit: self.invalid_record_limit,
+            external_psks,
+            psk_without_key_exchange: self.psk_without_key_exchange,
+            post_handshake_auth: is_client && self.post_handshake_auth,
+            #[cfg(test)]
+            psk_modes_for_test: None,
             initial_epoch: 0,
             maximum_transmission_unit,
             maximum_retransmit_number,
@@ -969,11 +1080,26 @@ pub struct HandshakeConfig {
     pub(crate) max_version: DtlsVersion,
     /// The TLS 1.3 cipher suites, for DTLS 1.3. Empty when DTLS 1.3 is not negotiated.
     pub(crate) local_tls13_cipher_suites: Vec<CipherSuiteId>,
+    /// The key exchange groups of DTLS 1.3, most preferred first: `local_named_curves`,
+    /// with X25519MLKEM768 in front where the provider has it.
+    pub(crate) local_tls13_groups: Vec<NamedCurve>,
     /// The length of the connection ids this side asks its peer to send, if it uses the
     /// connection_id extension at all.
     pub(crate) connection_id: Option<usize>,
     pub(crate) connection_id_migration: bool,
     pub(crate) invalid_record_limit: Option<u64>,
+    /// DTLS 1.3 server: the tickets it issues and has accepted, if it issues any.
+    pub(crate) ticket_issuer: Option<Arc<crate::dtls13::psk::TicketIssuer>>,
+    /// DTLS 1.3 client: where it keeps tickets, if it resumes.
+    pub(crate) session_store: Option<Arc<dyn crate::session::SessionStore>>,
+    pub(crate) external_psks: Vec<crate::session::ExternalPsk>,
+    pub(crate) psk_without_key_exchange: bool,
+    /// DTLS 1.3 client: it offers post-handshake authentication.
+    pub(crate) post_handshake_auth: bool,
+    /// The PSK key exchange modes a client offers, in place of the configured ones: for the
+    /// tests of a peer that offers psk_ke alone.
+    #[cfg(test)]
+    pub(crate) psk_modes_for_test: Option<Vec<u8>>,
     pub(crate) initial_epoch: u16,
     pub(crate) maximum_transmission_unit: usize,
     pub(crate) maximum_retransmit_number: usize,
@@ -1043,9 +1169,17 @@ impl HandshakeConfig {
             min_version: DtlsVersion::Dtls1_2,
             max_version: DtlsVersion::Dtls1_2,
             local_tls13_cipher_suites: vec![],
+            local_tls13_groups: vec![],
             connection_id: None,
             connection_id_migration: false,
             invalid_record_limit: None,
+            ticket_issuer: None,
+            session_store: None,
+            external_psks: vec![],
+            psk_without_key_exchange: false,
+            post_handshake_auth: false,
+            #[cfg(test)]
+            psk_modes_for_test: None,
             initial_epoch: 0,
             maximum_transmission_unit: DEFAULT_MTU,
             maximum_retransmit_number: DEFAULT_MAXIMUM_RETRANSMIT_NUMBER,
@@ -1133,4 +1267,27 @@ impl HandshakeConfig {
         // If nothing matches, return the first certificate.
         Ok(self.local_certificates[0].clone())
     }
+}
+
+/// Whether `crypto` can do both ends of the X25519MLKEM768 exchange: it says so, and one
+/// exchange made at once with it (a client share, the server's answer by encapsulation, the
+/// client's decapsulation) gives both sides the same secret. A provider that wraps another
+/// and passes `supports` through while leaving `key_exchange_respond` at its Diffie-Hellman
+/// default says yes and cannot answer a hybrid share; such a provider is not offered the
+/// group, rather than failing every handshake that picks it.
+fn hybrid_key_share_works(crypto: &dyn crypto::RTCCrypto) -> bool {
+    let algorithm = crypto::KeyExchangeAlgorithm::X25519MlKem768;
+    if !crypto.supports(crypto::CryptoAlgorithm::KeyExchange(algorithm)) {
+        return false;
+    }
+    let Ok(client) = crypto.start_key_exchange(algorithm) else {
+        return false;
+    };
+    let Ok((share, server_secret)) = crypto.key_exchange_respond(algorithm, client.public_key())
+    else {
+        return false;
+    };
+    client
+        .complete(&share)
+        .is_ok_and(|client_secret| client_secret.as_ref() == server_secret.as_ref())
 }
