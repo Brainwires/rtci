@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **srtp**: `RTCPeerConnectionBuilder::build` refuses an SRTP or SRTCP replay window of 1 to
+  63 packets (new `Error::ErrSrtpReplayWindowTooSmall`; RFC 3711 3.3.2); it used to fail when
+  the first DTLS handshake completed. DTLS-SRTP keys of the AES-CM profiles live 2^31 packets
+  (RFC 5764 4.1.2; they had RFC 3711's 2^48); at a key's limit the DTLS transport fails with
+  `dtls-failure` (no re-keying: a browser does not take a new DTLS association on a transport
+  that has one).
 - **svc**: `RTCRtpEncodingParameters` has a new public member `scalability_mode`
   (`Option<String>`, W3C webrtc-svc), validated by `add_transceiver_*` (new
   `Error::ErrOperationError`) and `set_parameters` (`InvalidModificationError`). The default
@@ -1136,6 +1142,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+- **srtp**: `OnSrtpKeyLifetimeExpiring` (the SRTP contexts' `KeyLifetimeExpiring`) and
+  `OnCryptexRequiredViolation` reach the application; `SettingEngineBuilder::with_srtp_key_lifetime`;
+  the SRTP profile is mapped from its DTLS-SRTP code point (`ProtectionProfile::from_dtls_srtp_id`),
+  a NULL-cipher profile never taken. rtc-srtp: `keying::validate_key_lifetime`.
 - **encoded transform**: `rtc::sframe` re-exports `rtc-sframe` (RFC 9605); `rtp::codec::opaque`
   is a format-agnostic payloader / depacketizer for bytes the RTP layer does not parse (a
   whole-frame SFrame ciphertext over several packets; start and end flags in a one-byte

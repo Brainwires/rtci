@@ -569,6 +569,26 @@ pub enum RTCPeerConnectionEvent {
     /// tone buffer ran out (an empty tone). See
     /// [`RTCRtpSender::dtmf`](crate::rtp_transceiver::rtp_sender::RTCRtpSender::dtmf).
     OnDtmfToneChange(crate::rtp_transceiver::rtp_sender::dtmf::RTCDTMFToneChangeEvent),
+
+    /// The SRTP master key of this side's outbound (`outbound` true) or the peer's inbound
+    /// stream has used fifteen sixteenths of its lifetime (RFC 3711 section 9.2): `remaining`
+    /// more packets of `rtcp` (SRTCP) or RTP may be protected with it. At the limit the
+    /// connection's DTLS transport fails (a new DTLS association cannot be had from a browser
+    /// peer without an ICE restart with new DTLS parameters), so an application that will
+    /// reach it restarts the session first. Not a W3C event: a fork addition.
+    OnSrtpKeyLifetimeExpiring {
+        /// Whether it is the key this side sends with.
+        outbound: bool,
+        /// Whether it is the SRTCP count.
+        rtcp: bool,
+        /// Packets left.
+        remaining: u64,
+    },
+
+    /// Cryptex is required and the peer sent an authentic packet on `ssrc` whose header
+    /// extensions or CSRCs were not protected with it (RFC 9335 section 5.2); the packet was
+    /// dropped. Not a W3C event: a fork addition.
+    OnCryptexRequiredViolation(u32),
 }
 
 /// Reserved for future use.
@@ -637,6 +657,10 @@ pub(crate) enum RTCEventInternal {
     /// Parameter: whether a new association replaces it (the channels not yet opened wait
     /// for that one) or none does (they are closed too).
     SCTPClosedBySignalling(bool /*replaced*/),
+
+    /// An SRTP master key reached its lifetime (RFC 3711 section 9.2): nothing more is
+    /// protected or accepted with it, and the DTLS transport that keyed it fails.
+    SRTPKeyExhausted,
 
     /// SCTP stream has been closed
     ///

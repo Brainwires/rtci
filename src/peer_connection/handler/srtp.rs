@@ -1,4 +1,6 @@
-use crate::peer_connection::event::{RTCEventInternal, TaggedRTCEventInternal};
+use crate::peer_connection::event::{
+    RTCEventInternal, RTCPeerConnectionEvent, TaggedRTCEventInternal,
+};
 use crate::peer_connection::message::internal::{
     RTCMessageInternal, RTPMessage, TaggedRTCMessageInternal,
 };
@@ -28,6 +30,8 @@ pub(crate) struct SrtpHandlerContext {
     pub(crate) read_outs: VecDeque<TaggedRTCMessageInternal>,
     pub(crate) write_outs: VecDeque<TaggedRTCMessageInternal>,
     pub(crate) event_outs: VecDeque<TaggedRTCEventInternal>,
+    /// The newest instant a read or write carried, for the events the contexts raise.
+    pub(crate) now: Option<Instant>,
 }
 
 impl SrtpHandlerContext {
@@ -56,6 +60,50 @@ impl<'a> SrtpHandler<'a> {
     pub(crate) fn name(&self) -> &'static str {
         "SrtpHandler"
     }
+
+    /// What the SRTP contexts have to say (`srtp::context::Context::poll_event`), as the
+    /// connection's events: a key near the end of its lifetime, a key that reached it (the
+    /// transport fails), a Cryptex violation.
+    fn drain_context_events(&mut self) {
+        use srtp::keying::{ContextEvent, PacketKind};
+        // Contexts raise events only while protecting or unprotecting, which a read or a
+        // write carrying an instant drives.
+        let Some(now) = self.ctx.now else {
+            return;
+        };
+        let mut events = Vec::new();
+        for (outbound, context) in [
+            (true, self.ctx.local_srtp_context.as_mut()),
+            (false, self.ctx.remote_srtp_context.as_mut()),
+        ] {
+            let Some(context) = context else { continue };
+            while let Some(event) = context.poll_event() {
+                events.push(match event {
+                    ContextEvent::KeyLifetimeExpiring {
+                        kind, remaining, ..
+                    } => RTCEventInternal::RTCPeerConnectionEvent(
+                        RTCPeerConnectionEvent::OnSrtpKeyLifetimeExpiring {
+                            outbound,
+                            rtcp: kind == PacketKind::Rtcp,
+                            remaining,
+                        },
+                    ),
+                    ContextEvent::KeyExhausted { .. } => RTCEventInternal::SRTPKeyExhausted,
+                    ContextEvent::CryptexRequiredViolation { ssrc } => {
+                        RTCEventInternal::RTCPeerConnectionEvent(
+                            RTCPeerConnectionEvent::OnCryptexRequiredViolation(ssrc),
+                        )
+                    }
+                    _ => continue,
+                });
+            }
+        }
+        for event in events {
+            self.ctx
+                .event_outs
+                .push_back(TaggedRTCEventInternal { now, event });
+        }
+    }
 }
 
 impl<'a>
@@ -69,6 +117,7 @@ impl<'a>
     type Time = Instant;
 
     fn handle_read(&mut self, msg: TaggedRTCMessageInternal) -> Result<()> {
+        self.ctx.now = Some(self.ctx.now.map_or(msg.now, |now| now.max(msg.now)));
         if let RTCMessageInternal::Rtp(RTPMessage::Raw(message)) = msg.message {
             debug!("srtp read {:?}", msg.transport.peer_addr);
 
@@ -125,6 +174,7 @@ impl<'a>
     }
 
     fn handle_write(&mut self, msg: TaggedRTCMessageInternal) -> Result<()> {
+        self.ctx.now = Some(self.ctx.now.map_or(msg.now, |now| now.max(msg.now)));
         if let RTCMessageInternal::Rtp(message) = msg.message {
             debug!("srtp write {:?}", msg.transport.peer_addr);
 
@@ -222,6 +272,7 @@ impl<'a>
     }
 
     fn poll_event(&mut self) -> Option<Self::Eout> {
+        self.drain_context_events();
         self.ctx.event_outs.pop_front()
     }
 

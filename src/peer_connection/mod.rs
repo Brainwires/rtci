@@ -669,6 +669,17 @@ impl RTCPeerConnectionBuilder {
     /// # }
     /// ```
     pub fn build(self, now: Instant) -> Result<RTCPeerConnection> {
+        // RFC 3711 section 3.3.2: "A replay list ... the window size MUST be at least 64"; 0
+        // turns replay protection off, which the setting engine documents.
+        let replay = &self.setting_engine.replay_protection;
+        for (what, window) in [("SRTP", replay.srtp), ("SRTCP", replay.srtcp)] {
+            if (1..64).contains(&window) {
+                return Err(Error::ErrSrtpReplayWindowTooSmall(what, window));
+            }
+        }
+        if let Some(lifetime) = self.setting_engine.srtp_key_lifetime {
+            ::srtp::keying::validate_key_lifetime(lifetime)?;
+        }
         RTCPeerConnection::new(
             now,
             self.configuration,

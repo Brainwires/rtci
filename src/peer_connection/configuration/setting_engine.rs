@@ -448,6 +448,8 @@ pub struct SettingEngine {
     pub(crate) data_channel_max_buffer_size: Option<u32>,
     /// [`SettingEngineBuilder::with_non_interactive_video`].
     pub(crate) non_interactive_video: bool,
+    /// [`SettingEngineBuilder::with_srtp_key_lifetime`].
+    pub(crate) srtp_key_lifetime: Option<srtp::keying::KeyLifetime>,
     pub(crate) ignore_rid_pause_for_recv: bool,
     /// [`SettingEngineBuilder::with_rid_pause_marks`].
     pub(crate) rid_pause_marks: bool,
@@ -1948,6 +1950,21 @@ impl SettingEngineBuilder {
     /// [`RTCPeerConnection::dscp`]: crate::peer_connection::RTCPeerConnection::dscp
     pub fn with_non_interactive_video(mut self, non_interactive: bool) -> Self {
         self.0.non_interactive_video = non_interactive;
+        self
+    }
+
+    /// Sets how many packets a DTLS-SRTP master key may protect. `None`, the default, is the
+    /// profile's: 2^31 for the RFC 5764 profiles (section 4.1.2), 2^48 SRTP and 2^31 SRTCP
+    /// packets for the AEAD ones (RFC 7714). Shortly before a key runs out the connection
+    /// raises `OnSrtpKeyLifetimeExpiring`; at the limit nothing more is protected with it and
+    /// the DTLS transport fails (`dtls-failure`): browsers do not take a new DTLS association
+    /// on a transport that has one, so the engine does not attempt one (RFC 3711 section 9.2:
+    /// re-key, or end the session).
+    ///
+    /// A lifetime of zero, or above the RFC 3711 limits, makes building the peer connection
+    /// fail.
+    pub fn with_srtp_key_lifetime(mut self, lifetime: Option<srtp::keying::KeyLifetime>) -> Self {
+        self.0.srtp_key_lifetime = lifetime;
         self
     }
 

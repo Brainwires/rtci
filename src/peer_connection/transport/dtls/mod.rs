@@ -95,6 +95,8 @@ pub(crate) struct DtlsTransport {
     /// The error the transport failed with (W3C `RTCDtlsTransport` `error` event), until the
     /// peer connection has announced it.
     pub(crate) failure: Option<crate::peer_connection::rtc_error::RTCError>,
+    /// The SRTP key lifetime the setting engine sets, if any (`DtlsHandler::key_lifetime`).
+    pub(crate) srtp_key_lifetime: Option<srtp::keying::KeyLifetime>,
 
     // The peer's certificate chain in DER form, retained at handshake completion so
     // `get_remote_certificates()` has something to return. Previously the bytes reached
@@ -238,6 +240,7 @@ impl DtlsTransport {
             certificates,
             fingerprint_mismatch: Arc::default(),
             failure: None,
+            srtp_key_lifetime: None,
             remote_certificates: vec![],
             remote_dtls_parameters: None,
             remote_tls_id: None,

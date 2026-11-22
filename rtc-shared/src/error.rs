@@ -1929,6 +1929,10 @@ pub enum Error {
     #[error("label is larger than 65535 bytes")]
     ErrLabelTooLarge,
 
+    /// An SRTP or SRTCP replay window of 1 to 63 packets (RFC 3711 section 3.3.2: at least 64).
+    #[error("the {0} replay window of {1} packets is below the 64 RFC 3711 requires")]
+    ErrSrtpReplayWindowTooSmall(&'static str, usize),
+
     /// W3C `OperationError`, with what failed.
     #[error("OperationError: {0}")]
     ErrOperationError(String),

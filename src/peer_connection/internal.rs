@@ -210,7 +210,7 @@ impl RTCPeerConnection {
         // `set_configuration` compares with them (W3C 4.4.1.5). With none configured the DTLS
         // transport generates its own, which the configuration does not list.
         let certificates = configuration.certificates.clone();
-        let dtls_transport = DtlsTransport::new(RTCDtlsTransportConfig {
+        let mut dtls_transport = DtlsTransport::new(RTCDtlsTransportConfig {
             id: dtls_transport_id,
             ice_transport_id,
             certificates,
@@ -225,6 +225,7 @@ impl RTCPeerConnection {
             replay_protection: setting_engine.replay_protection,
             crypto_provider: crypto_provider.clone(),
         })?;
+        dtls_transport.srtp_key_lifetime = setting_engine.srtp_key_lifetime;
 
         // Create the SCTP transport. The RFC behaviour is the default for each of these: the
         // weighted fair queueing scheduler (RFC 8831 section 6.4), message interleaving

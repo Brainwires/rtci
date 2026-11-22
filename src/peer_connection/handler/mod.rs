@@ -461,6 +461,21 @@ impl RTCPeerConnection {
                     self.announce_transport_states();
                     self.update_connection_state(false);
                 }
+                RTCEventInternal::SRTPKeyExhausted => {
+                    // RFC 3711 section 9.2: re-key or end the session. A new DTLS association
+                    // is not something a browser peer takes on a transport that has one, so
+                    // the session ends: the transport fails with the reason.
+                    use crate::peer_connection::rtc_error::{RTCError, RTCErrorDetailType};
+                    let now = evt_internal.now;
+                    self.get_dtls_handler().fail_with(
+                        now,
+                        RTCError::new(
+                            RTCErrorDetailType::DtlsFailure,
+                            "the SRTP master key reached its lifetime (RFC 3711 section 9.2)",
+                        ),
+                    );
+                    self.announce_transport_states();
+                }
                 RTCEventInternal::RTCPeerConnectionEvent(evt) => {
                     self.pipeline_context.event_outs.push_back(evt);
                 }
