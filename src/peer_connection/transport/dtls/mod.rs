@@ -24,12 +24,6 @@ pub(crate) mod parameters;
 pub(crate) mod role;
 pub(crate) mod state;
 
-/// The DTLS cipher suites a peer connection offers when the application configures none: the
-/// TLS 1.3 suites, with which DTLS 1.3 (RFC 9147) is negotiated and preferred, and for DTLS
-/// 1.2 the `dtls` crate's defaults without the AES-256-CBC-SHA suites. Browsers negotiate GCM, and the
-/// CBC suites' MAC-then-encrypt record handling is the part of DTLS with a history of padding
-/// and length bugs (rtc#96 was one). An application that needs CBC can still list it with
-/// `SettingEngineBuilder::with_dtls_cipher_suites`.
 /// The initial DTLS retransmission timer of a peer connection: what RFC 9147 section 5.8.2
 /// recommends for DTLS-SRTP, where latencies of real-time paths are short.
 pub(crate) const DTLS_SRTP_FLIGHT_INTERVAL: std::time::Duration =
@@ -39,6 +33,12 @@ pub(crate) const DTLS_SRTP_FLIGHT_INTERVAL: std::time::Duration =
 pub(crate) const MINIMUM_FLIGHT_INTERVAL: std::time::Duration =
     std::time::Duration::from_millis(100);
 
+/// The DTLS cipher suites a peer connection offers when the application configures none: the
+/// TLS 1.3 suites, with which DTLS 1.3 (RFC 9147) is negotiated and preferred, and for DTLS
+/// 1.2 the `dtls` crate's defaults without the AES-256-CBC-SHA suites. Browsers negotiate GCM,
+/// and the CBC suites' MAC-then-encrypt record handling is the part of DTLS with a history of padding
+/// and length bugs (rtc#96 was one). An application that needs CBC can still list it with
+/// `SettingEngineBuilder::with_dtls_cipher_suites`.
 pub(crate) fn webrtc_default_cipher_suites() -> Vec<CipherSuiteId> {
     vec![
         CipherSuiteId::Tls_Aes_128_Gcm_Sha256,

@@ -139,12 +139,12 @@ fn a_side_can_ask_for_no_connection_id_and_a_side_can_leave_the_extension_out() 
         assert_eq!(pair.client_sends(b"plain"), vec![b"plain".to_vec()]);
     }
 
-    // A hello that also offers DTLS 1.2 leaves the extension out: the DTLS 1.2 record
-    // format of RFC 9146 is not implemented.
+    // A hello that also offers DTLS 1.2 keeps the extension (RFC 9147 section 5.1; DTLS
+    // 1.2 has it from RFC 9146: `conn/connection_id_test.rs`).
     let both = client_builder()
         .with_connection_id(Some(4))
         .build(true, None)?;
-    assert_eq!(both.connection_id, None);
+    assert_eq!(both.connection_id, Some(4));
     // A server that also speaks DTLS 1.2 answers a DTLS 1.3 client's offer all the same.
     let mut pair = Pair::new(
         dtls13(client_builder(), Some(4)),

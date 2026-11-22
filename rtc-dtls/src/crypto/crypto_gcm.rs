@@ -57,6 +57,17 @@ impl CryptoGcm {
     ///
     /// Fails if the cipher rejects the input.
     pub fn encrypt(&mut self, pkt_rlh: &RecordLayerHeader, raw: &[u8]) -> Result<Vec<u8>> {
+        self.encrypt_with(pkt_rlh, raw, None)
+    }
+
+    /// [`Self::encrypt`], for a `tls12_cid` record when `cid` is given (RFC 9146): the
+    /// additional data then covers the connection id, which is not in `raw`.
+    pub(crate) fn encrypt_with(
+        &mut self,
+        pkt_rlh: &RecordLayerHeader,
+        raw: &[u8],
+        cid: Option<&[u8]>,
+    ) -> Result<Vec<u8>> {
         let payload = &raw[RECORD_LAYER_HEADER_SIZE..];
         let raw = &raw[..RECORD_LAYER_HEADER_SIZE];
 
@@ -66,7 +77,7 @@ impl CryptoGcm {
         nonce[..4].copy_from_slice(&self.local_write_iv[..4]);
         nonce[4..].copy_from_slice(&record_explicit_nonce(pkt_rlh));
 
-        let additional_data = generate_aead_additional_data(pkt_rlh, payload.len());
+        let additional_data = record_additional_data(pkt_rlh, payload.len(), cid);
 
         // Assemble header + explicit nonce + payload once, then encrypt the
         // payload region in place with a detached tag: one allocation and one
@@ -103,6 +114,12 @@ impl CryptoGcm {
     ///
     /// Fails if authentication fails or the record is too short.
     pub fn decrypt(&mut self, r: &[u8]) -> Result<Vec<u8>> {
+        self.decrypt_with(r, None)
+    }
+
+    /// [`Self::decrypt`], for a `tls12_cid` record when `cid` is given (RFC 9146); `r` is
+    /// the record without its connection id.
+    pub(crate) fn decrypt_with(&mut self, r: &[u8], cid: Option<&[u8]>) -> Result<Vec<u8>> {
         let mut reader = Cursor::new(r);
         let h = RecordLayerHeader::unmarshal(&mut reader)?;
         if h.content_type == ContentType::ChangeCipherSpec {
@@ -127,7 +144,7 @@ impl CryptoGcm {
         }
         let tag_start = out.len() - CRYPTO_GCM_TAG_LENGTH;
 
-        let additional_data = generate_aead_additional_data(&h, tag_start);
+        let additional_data = record_additional_data(&h, tag_start, cid);
 
         let mut d = Vec::with_capacity(RECORD_LAYER_HEADER_SIZE + tag_start);
         d.extend_from_slice(&r[..RECORD_LAYER_HEADER_SIZE]);

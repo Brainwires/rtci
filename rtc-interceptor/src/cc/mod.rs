@@ -11,4 +11,5 @@ pub(crate) mod estimator;
 pub(crate) mod feedback;
 pub(crate) mod feedback_cadence;
 pub(crate) mod interceptor;
+pub(crate) mod probe;
 pub(crate) mod tmmbr;
