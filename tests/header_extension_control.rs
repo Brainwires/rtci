@@ -10,7 +10,6 @@ use std::time::Instant;
 
 use jsep_common::{TestResult, exchange, media_sections};
 use rtc::peer_connection::configuration::media_engine::MediaEngine;
-use rtc::peer_connection::sdp::RTCSessionDescription;
 use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
 use rtc::rtp_transceiver::rtp_sender::{
     RTCRtpHeaderExtensionCapability, RTCRtpHeaderExtensionToNegotiate, RtpCodecKind,
@@ -283,7 +282,6 @@ fn a_stopped_extension_is_left_out_and_can_be_offered_again() -> TestResult {
     let lines = extmaps(&offer.sdp);
     assert!(lines.contains(&ORIENTATION.to_owned()), "{}", offer.sdp);
     assert!(lines.contains(&format!("{ABS}/inactive")), "{}", offer.sdp);
-    offerer.set_local_description(Instant::now(), RTCSessionDescription::rollback(None)?)?;
     Ok(())
 }
 
