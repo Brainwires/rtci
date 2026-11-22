@@ -778,10 +778,39 @@ impl Agent {
             let Some(pair_index) = self.find_pair_exact(r.local_index, r.remote_index) else {
                 continue;
             };
-            let state = self.candidate_pairs[pair_index].state;
+            let pair = self.candidate_pairs[pair_index];
+            // A nomination is a check on a valid pair: the pair has received a success
+            // response and stays Succeeded (Section 7.2.5.3.3). When it times out, it is sent
+            // again for as long as the peer is heard from (see `nomination_is_alive`).
+            let nomination = r.is_use_candidate
+                && self.is_controlling
+                && self.selected_pair.is_none()
+                && pair.valid
+                && pair.state == CandidatePairState::Succeeded;
+            if nomination && self.failed_nomination == FailedNomination::FailChecklist {
+                warn!(
+                    "[{}]: no response to the nomination of {}: the pair and the checklist failed",
+                    self.get_name(),
+                    pair
+                );
+                self.fail_pair(pair_index);
+                self.update_connection_state(Some(now), ConnectionState::Failed);
+                return;
+            }
+            if nomination && self.nomination_is_alive(now, pair_index) {
+                debug!(
+                    "[{}]: no response to the nomination of {} after {} requests: nominating it again",
+                    self.get_name(),
+                    pair,
+                    r.transmissions
+                );
+                self.candidate_pairs[pair_index].nominate = true;
+                self.enqueue_triggered(pair_index);
+                continue;
+            }
             // A check that timed out on a pair another transaction has validated since is
             // moot; a nomination that timed out is not.
-            if state == CandidatePairState::InProgress || r.is_use_candidate {
+            if pair.state == CandidatePairState::InProgress || r.is_use_candidate {
                 warn!(
                     "[{}]: no response to {} requests on {}{}: the pair failed",
                     self.get_name(),
@@ -1664,30 +1693,46 @@ impl Agent {
         );
         self.candidate_pairs[pair_index].nominate = true;
         self.nominated_pair = Some(pair_index);
+        self.nomination_started = Some(now);
         self.enqueue_triggered(pair_index);
     }
 
-    /// Controlling agent, when its time to connect runs out with a nomination unanswered:
-    /// fails the nominated pair if another valid pair is there to be nominated instead.
-    /// Returns whether it did.
-    pub(crate) fn give_up_nomination_for_another_valid_pair(&mut self) -> bool {
+    /// Whether the controlling agent's nomination of `pair_index` may still be answered: the
+    /// peer has been heard from on the pair's remote candidate (an authenticated request or
+    /// response) or the nomination started, less than the consent expiry ago (30 seconds,
+    /// the time RFC 7675 Section 5.1 gives a peer to answer before the path is given up).
+    pub(crate) fn nomination_is_alive(&self, now: Instant, pair_index: usize) -> bool {
+        let p = &self.candidate_pairs[pair_index];
+        let heard = self
+            .remote_candidates
+            .get(p.remote_index)
+            .and_then(|r| r.last_authenticated);
+        let started = self
+            .nomination_started
+            .filter(|_| self.nominated_pair == Some(pair_index));
+        heard
+            .into_iter()
+            .chain(started)
+            .max()
+            .is_some_and(|at| now.saturating_duration_since(at) < self.consent_expiry())
+    }
+
+    /// Controlling agent, checking: a nomination the peer has not been heard from on for the
+    /// consent expiry is given up. The pair fails (its transactions with it), and the next
+    /// valid pair, if there is one, is nominated (Section 8.1.1: "If the nomination fails,
+    /// the controlling agent [...] may nominate a different pair").
+    pub(crate) fn expire_unanswered_nomination(&mut self, now: Instant) {
         let Some(nominated) = self.nominated_pair else {
-            return false;
+            return;
         };
-        if !self.is_controlling || self.selected_pair.is_some() {
-            return false;
-        }
-        let another = self.candidate_pairs.iter().enumerate().any(|(index, p)| {
-            index != nominated
-                && p.valid
-                && p.state == CandidatePairState::Succeeded
-                && p.valid_pair != Some(nominated)
-        });
-        if !another {
-            return false;
+        if !self.is_controlling
+            || self.selected_pair.is_some()
+            || self.nomination_is_alive(now, nominated)
+        {
+            return;
         }
         warn!(
-            "[{}]: nomination of {} is unanswered: nominating another valid pair",
+            "[{}]: nomination of {} is unanswered and the peer is not heard from: the pair failed",
             self.get_name(),
             self.candidate_pairs[nominated]
         );
@@ -1695,7 +1740,35 @@ impl Agent {
         self.pending_binding_requests
             .retain(|r| !(r.local_index == p.local_index && r.remote_index == p.remote_index));
         self.fail_pair(nominated);
-        true
+        self.nomination_started = None;
+        self.maybe_nominate(now);
+    }
+
+    /// Whether something may still produce a selected pair: a pair Frozen, Waiting or In
+    /// Progress, a triggered check queued, a valid pair the controlling agent nominates (or
+    /// will), or a pair the peer has been heard from on within the consent expiry (the peer
+    /// is checking it, and the controlled agent waits for its nomination). While this holds,
+    /// the checklist has not failed (RFC 8445 Section 8.1.2) and the agent does not fail by
+    /// its timer.
+    pub(crate) fn checks_in_progress(&self, now: Instant) -> bool {
+        if !self.triggered_queue.is_empty() {
+            return true;
+        }
+        let expiry = self.consent_expiry();
+        self.candidate_pairs.iter().any(|p| match p.state {
+            CandidatePairState::Frozen
+            | CandidatePairState::Waiting
+            | CandidatePairState::InProgress => true,
+            CandidatePairState::Failed | CandidatePairState::Unspecified => false,
+            CandidatePairState::Succeeded => {
+                (self.is_controlling && p.valid)
+                    || self
+                        .remote_candidates
+                        .get(p.remote_index)
+                        .and_then(|r| r.last_authenticated)
+                        .is_some_and(|at| now.saturating_duration_since(at) < expiry)
+            }
+        })
     }
 
     /// Section 8.1.2, once a pair is nominated: the other pairs leave the triggered-check
