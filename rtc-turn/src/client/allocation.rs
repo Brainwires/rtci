@@ -483,7 +483,12 @@ impl Client {
 
         // The relayed address or addresses, the lifetime, and how the server sees us.
         let mut lifetime = Lifetime::default();
-        let decoded = xor_addresses(response, ATTR_XOR_RELAYED_ADDRESS).and_then(|relayed| {
+        let decoded = xor_addresses(response, ATTR_XOR_RELAYED_ADDRESS).and_then(|mut relayed| {
+            // An XOR-RELAYED-ADDRESS of the unspecified address and port 0 names no relayed
+            // transport address (RFC 8656 §7.3 has the attribute carry the one allocated).
+            // coturn 4.6 puts one beside the real address when the session was refused
+            // another family before; it is passed over, not taken for a second address.
+            relayed.retain(|addr| !(addr.ip().is_unspecified() && addr.port() == 0));
             if relayed.is_empty() {
                 return Err(Error::ErrAttributeNotFound);
             }

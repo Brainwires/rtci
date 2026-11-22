@@ -629,6 +629,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ALTERNATE-SERVER. Every received message now goes through `rtc_stun::validated::Validator`
   and the handlers read the validated message only. The same holds for indications: nothing
   after an integrity attribute in a Data or ConnectionAttempt indication is read.
+- **turn**: an XOR-RELAYED-ADDRESS of 0.0.0.0:0 in an Allocate success response is passed
+  over. coturn 4.6 sends one beside the real address when it refused the same client another
+  address family before (an IPv6 request answered 440, then an IPv4 one): the client took the
+  two for a family mismatch, deleted the allocation and refused to allocate again.
+- **test-env**: three expectations of `tests/testenv_turn_client.rs` that coturn 4.6.1 does
+  not meet are corrected: it ignores ADDITIONAL-ADDRESS-FAMILY (comprehension-optional; one
+  IPv4 address comes back), its 441 to a Refresh under another username carries no integrity
+  the client can verify (RFC 8489 section 9.2.5 has the client discard it; the test is now
+  `a_refresh_under_another_username_is_not_accepted`), and its Allocate after a 440 carries
+  the all-zero address above.
 - **turn**: a response of another method than its request's no longer ends the transaction. An
   Allocate success response carrying the transaction id of an outstanding Binding request
   removed the transaction and raised no event, so the caller waited for ever.
