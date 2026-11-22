@@ -927,6 +927,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behaviour changes
 
+- **ecn**: ECN is initiated and watched as RFC 8888 section 7 requires (RFC 6679 sections
+  7.2-7.4). With `SettingEngineBuilder::with_ecn(true)` and `ack ccfb` negotiated, a stream
+  no longer sends every packet ECT(1) from the first: one packet in ten (and one at least every
+  500 ms) is an ECT(1) probe until the RFC 8888 feedback shows two arrived ECT or CE, then every
+  packet is ECT(1). A probe reported Not-ECT, or more than three lost with none received, fails
+  the initiation (retried after 60 s); in use, a path that clears the ECN field stops the
+  marking, and a high loss of ECT packets sends Not-ECT to compare, initiating again when the
+  loss went with the marking (the second time ECN stays off for the stream). New
+  `rtc_interceptor::{EcnValidation, EcnState, EcnInitiation}` and
+  `SettingEngineBuilder::with_ecn_initiation` (`EcnInitiation::LeapOfFaith`, RFC 6679 section
+  7.2.3, marks from the first packet as browsers sending L4S do; failure detection still
+  applies). `packetsWithBleachedEct1Marking` counts only packets that were sent ECT(1).
+- **rfc8888**: an RTX packet is reported under the RTX SSRC and the sequence number it arrived
+  with (sections 3.1 and 6), read from `Attribute::Retransmitted`; it was reported as the
+  original packet it is rewritten into before the chain, which told the sender a lost packet
+  had arrived, at the retransmission's arrival time.
+- **jsep**: offered both `ack ccfb` and `nack ecn`, an answer keeps `ack ccfb` only (RFC 8888
+  section 7). New `RTCP_FB_NACK_ECN`.
 - **rtcp_session**: congestion control feedback (TWCC, RFC 8888) leaves as its generator
   builds it, outside RFC 4585's one Early packet per regular interval and outside the
   regular reports' timing (`RtcpSessionBuilder::with_immediate_congestion_feedback`, default

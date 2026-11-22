@@ -5,7 +5,7 @@ use crate::Interceptor;
 use crate::cc::feedback_cadence::FeedbackCadence;
 use crate::stream_info::StreamInfo;
 use crate::twcc::flow_ssrcs;
-use crate::{AttributedPacket, Packet, TaggedPacket};
+use crate::{Attribute, AttributedPacket, Packet, TaggedPacket};
 use rtcp::transport_feedbacks::cc_feedback_report::Ecn;
 use sansio::Protocol;
 use shared::error::Error;
@@ -230,20 +230,34 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for Rfc8888Interceptor {
 
     fn handle_read(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
         self.cadence.on_packet(&msg);
-        if let Packet::Rtp(rtp_packet) = &msg.message.packet
-            && self.streams.contains(&rtp_packet.header.ssrc)
-        {
-            // ECN lives in the IP header, which a sans-I/O interceptor never sees: the
-            // application's socket layer reads it and hands it over in the transport context.
-            // A datagram without one is reported Not-ECT, which is what an endpoint without ECN
-            // support reports anyway.
-            self.recorder.add_packet(
-                msg.now,
-                rtp_packet.header.ssrc,
-                rtp_packet.header.sequence_number,
-                ecn_of(msg.transport.ecn),
-            );
-            self.arm(msg.now);
+        if let Packet::Rtp(rtp_packet) = &msg.message.packet {
+            // An RTX packet reaches the chain rewritten into the original it carries; what
+            // arrived on the wire was a packet of the retransmission stream, and that is what
+            // the report describes (RFC 8888 section 3.1: a block "for each RTP stream", and
+            // section 6: feedback for every payload type in use, retransmission included). Its
+            // SSRC and sequence number are the ones the sender's history knows the RTX packet
+            // by; reporting it as the original would tell the sender a lost packet arrived.
+            let (ssrc, sequence_number) = msg
+                .message
+                .attributes
+                .iter()
+                .find_map(|attribute| match attribute {
+                    Attribute::Retransmitted {
+                        ssrc,
+                        sequence_number,
+                    } => Some((*ssrc, *sequence_number)),
+                    _ => None,
+                })
+                .unwrap_or((rtp_packet.header.ssrc, rtp_packet.header.sequence_number));
+            if self.streams.contains(&ssrc) {
+                // ECN lives in the IP header, which a sans-I/O interceptor never sees: the
+                // application's socket layer reads it and hands it over in the transport
+                // context. A datagram without one is reported Not-ECT, which is what an
+                // endpoint without ECN support reports anyway.
+                self.recorder
+                    .add_packet(msg.now, ssrc, sequence_number, ecn_of(msg.transport.ecn));
+                self.arm(msg.now);
+            }
         }
         self.read_queue.push_back(msg);
         Ok(())

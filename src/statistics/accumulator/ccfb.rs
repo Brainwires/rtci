@@ -98,6 +98,16 @@ impl CcfbTally {
     /// Counts what one report block says. `sent_with_ect1` is whether the stream's packets
     /// were sent ECT(1), which a Not-ECT report then shows was bleached on the path.
     pub(crate) fn on_report_block(&mut self, block: &CcFeedbackReportBlock, sent_with_ect1: bool) {
+        self.on_report_block_marked(block, |_| sent_with_ect1);
+    }
+
+    /// [`on_report_block`](Self::on_report_block) for a stream that marks some packets ECT(1)
+    /// and not others: `sent_with_ect1` says, by sequence number, which were.
+    pub(crate) fn on_report_block_marked(
+        &mut self,
+        block: &CcFeedbackReportBlock,
+        sent_with_ect1: impl Fn(u16) -> bool,
+    ) {
         for (offset, metric) in block.metric_blocks.iter().enumerate() {
             let sequence_number = block.begin_sequence.wrapping_add(offset as u16);
             if !self.admit(sequence_number) {
@@ -111,7 +121,7 @@ impl CcfbTally {
                 match metric.ecn {
                     Ecn::Ect1 => self.received_with_ect1 += 1,
                     Ecn::Ce => self.received_with_ce += 1,
-                    Ecn::NotEct if sent_with_ect1 => self.bleached_ect1 += 1,
+                    Ecn::NotEct if sent_with_ect1(sequence_number) => self.bleached_ect1 += 1,
                     _ => {}
                 }
                 if self.lost.get(sequence_number) {

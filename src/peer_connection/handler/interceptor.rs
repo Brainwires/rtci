@@ -1453,7 +1453,11 @@ impl<'a>
                 // for the RTP packets of a stream that sends it, Not-ECT for everything else,
                 // whatever context an interceptor copied onto the packet.
                 packet.transport.ecn = match &packet.message.packet {
-                    Packet::Rtp(rtp_packet) => self.stats.ecn_for_rtp_sent(rtp_packet.header.ssrc),
+                    Packet::Rtp(rtp_packet) => self.stats.ecn_for_rtp_sent(
+                        rtp_packet.header.ssrc,
+                        rtp_packet.header.sequence_number,
+                        packet.now,
+                    ),
                     _ => None,
                 };
 
