@@ -332,14 +332,9 @@ impl<'a>
                     // and its statistics show the new name.
                     let mut rtc_candidate =
                         crate::peer_connection::transport::RTCIceCandidate::from(&*candidate);
-                    rtc_candidate.username_fragment = Some(
-                        self.ctx
-                            .ice_transport
-                            .agent
-                            .get_local_credentials()
-                            .ufrag
-                            .clone(),
-                    );
+                    self.ctx
+                        .ice_transport
+                        .describe_local_candidate(&mut rtc_candidate);
                     if let Some(known) = self.stats.local_candidates.get_mut(
                         &crate::statistics::accumulator::local_candidate_stats_id(candidate.id()),
                     ) {
@@ -350,8 +345,8 @@ impl<'a>
                         event: RTCEventInternal::RTCPeerConnectionEvent(
                             RTCPeerConnectionEvent::OnIceCandidateEvent(
                                 crate::peer_connection::event::RTCPeerConnectionIceEvent {
-                                    candidate: rtc_candidate,
-                                    url: String::new(),
+                                    candidate: Some(rtc_candidate),
+                                    url: None,
                                 },
                             ),
                         ),

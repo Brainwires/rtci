@@ -481,7 +481,7 @@ async fn run_peer(
                             info!("[{}] Negotiation needed", role);
                             pending_negotiation = true;
                         }
-                        RTCPeerConnectionEvent::OnIceCandidateEvent(RTCPeerConnectionIceEvent { candidate, ..}) => {
+                        RTCPeerConnectionEvent::OnIceCandidateEvent(RTCPeerConnectionIceEvent { candidate: Some(candidate), ..}) => {
                             info!("[{}] ICE candidate: {}:{}", role, candidate.address, candidate.port);
                             let candidate_init = candidate.to_json()?;
                             let msg = SignalingMessage::Candidate { candidate: candidate_init };

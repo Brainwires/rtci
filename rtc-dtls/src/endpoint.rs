@@ -40,6 +40,10 @@ pub enum EndpointEvent {
     /// matching `close_notify` reply is queued for [`Endpoint::poll_transmit`], and the connection
     /// has been removed.
     PeerClosed,
+    /// DTLS 1.3 server: the client answered a post-handshake CertificateRequest
+    /// ([`Endpoint::request_client_certificate`]) and the answer verified. The chain is in
+    /// [`State::peer_certificates`]; a client that declined left the earlier one there.
+    PeerAuthenticated,
 }
 
 /// The most associations a server endpoint holds for addresses it has not verified: those
@@ -140,6 +144,12 @@ impl Endpoint {
         self.connections
             .get(remote)
             .is_some_and(|conn| conn.is_failed())
+    }
+
+    /// The fatal alerts that ended the association with `remote`, as alert description codes:
+    /// (sent, received). `None` when there is no such association.
+    pub fn connection_fatal_alerts(&self, remote: &SocketAddr) -> Option<(Option<u8>, Option<u8>)> {
+        self.connections.get(remote).map(|conn| conn.fatal_alerts())
     }
 
     /// The connection with `remote`, for the fuzz harness to reach its record state.
@@ -256,6 +266,8 @@ impl Endpoint {
         messages: &mut Vec<EndpointEvent>,
     ) -> Result<()> {
         let is_handshake_completed_before = conn.is_handshake_completed();
+        let authentications_before = conn.post_handshake_authentications;
+        conn.set_clock(now);
         conn.read(data)?;
         if conn.is_dtls13() {
             // DTLS 1.3 has handshake messages after the handshake too (ACKs, key updates),
@@ -289,6 +301,10 @@ impl Endpoint {
         }
         if !is_handshake_completed_before && conn.is_handshake_completed() {
             messages.push(EndpointEvent::HandshakeComplete)
+        }
+        // One event per answer verified.
+        for _ in authentications_before..conn.post_handshake_authentications {
+            messages.push(EndpointEvent::PeerAuthenticated)
         }
         Ok(())
     }
@@ -570,6 +586,7 @@ impl Endpoint {
         // is dropped by it like any other, and leaves it where it was.
         let authenticated = conn.authenticated_records;
         let newest_before = conn.newest_authenticated_record;
+        conn.set_clock(now);
         let _ = conn.read(data);
         let _ = conn.handshake(now);
         let newest = match conn.v13.as_ref() {
@@ -645,6 +662,12 @@ impl Endpoint {
             self.transport_protocol,
         );
         Ok(())
+    }
+
+    /// Asks the client at `remote` for its certificate after the handshake (RFC 8446 section
+    /// 4.6.2): see [`DTLSConn::request_client_certificate`].
+    pub fn request_client_certificate(&mut self, now: Instant, remote: SocketAddr) -> Result<()> {
+        self.with_dtls13(now, remote, DTLSConn::request_client_certificate)
     }
 
     /// Starts a key update on the DTLS 1.3 association with `remote` (RFC 9147 section 8):

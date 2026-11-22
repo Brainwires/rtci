@@ -141,3 +141,144 @@ fn a_stream_is_used_again_after_its_channel_closed() -> Result<()> {
     }
     Ok(())
 }
+
+/// RFC 8832 section 6: the DATA_CHANNEL_OPEN and the DATA_CHANNEL_ACK travel on a reliable
+/// stream, so a channel opens for as long as the association lives, however long the
+/// retransmissions take. Under heavy loss (`tests/lossy_link_rtc2rtc.rs`, 30 % each way) the
+/// ACK can take longer than 30 seconds: the peer's half of the SCTP handshake may still be in
+/// progress (its COOKIE ACK lost, it discards the OPEN until its COOKIE ECHO is answered,
+/// retransmitted at a doubling interval), or the OPEN or the ACK is retransmitted at RTO
+/// 1, 2, 4, 8, 16 seconds. A DCEP handshake timeout of 30 seconds, the default once, closed the
+/// channel there although the path and the association were up, and with no error.
+///
+/// Here every DTLS datagram the answerer writes is lost for 35 seconds from the moment the
+/// offerer's association is up (STUN still passes, so ICE stays connected): the ACK arrives
+/// with the OPEN's retransmission after that. The channel opens, and carries data both ways.
+#[test]
+fn a_channel_whose_ack_takes_longer_than_thirty_seconds_still_opens() -> Result<()> {
+    use rtc::peer_connection::transport::RTCSctpTransportState;
+    use rtc::sansio::Protocol;
+    use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+    use std::time::Duration;
+
+    const BLACKOUT: Duration = Duration::from_secs(35);
+
+    let mut pair = Pair::new(RTCDtlsRole::Client)?;
+    let channel = pair.offerer.pc.create_data_channel("slow", None)?.id();
+    pair.negotiate()?;
+    let mut now = pair.now;
+    let deadline = now + Duration::from_secs(180);
+    let offerer = &mut pair.offerer.pc;
+    let answerer = &mut pair.answerer.pc;
+    let arriving = |datagram: TaggedBytesMut, now| TaggedBytesMut {
+        now,
+        transport: TransportContext {
+            local_addr: datagram.transport.peer_addr,
+            peer_addr: datagram.transport.local_addr,
+            ecn: None,
+            transport_protocol: TransportProtocol::UDP,
+        },
+        message: datagram.message,
+    };
+
+    let mut blackout_until = None;
+    let mut offerer_events = Vec::new();
+    let mut answerer_open = None;
+    let mut received = (Vec::new(), Vec::new());
+    let mut sent = false;
+    loop {
+        anyhow::ensure!(
+            now < deadline,
+            "the channel never opened and carried data: offerer events {offerer_events:?}"
+        );
+        let to_answerer: Vec<_> = std::iter::from_fn(|| offerer.poll_write()).collect();
+        let mut to_offerer: Vec<_> = std::iter::from_fn(|| answerer.poll_write()).collect();
+        let quiet = to_answerer.is_empty() && to_offerer.is_empty();
+        if blackout_until.is_some_and(|until| now < until) {
+            // RFC 7983 section 7: 20..=63 is DTLS; STUN (0..=3) passes.
+            to_offerer.retain(|d| !(20..=63).contains(&d.message.first().copied().unwrap_or(0)));
+        }
+        for datagram in to_answerer {
+            answerer.handle_read(arriving(datagram, now))?;
+        }
+        for datagram in to_offerer {
+            offerer.handle_read(arriving(datagram, now))?;
+        }
+        while let Some(event) = offerer.poll_event() {
+            if let rtc::peer_connection::event::RTCPeerConnectionEvent::OnDataChannel(event) = event
+                && !matches!(event, RTCDataChannelEvent::OnBufferedAmountLow(_))
+            {
+                offerer_events.push(event);
+            }
+        }
+        while let Some(event) = answerer.poll_event() {
+            if let rtc::peer_connection::event::RTCPeerConnectionEvent::OnDataChannel(
+                RTCDataChannelEvent::OnOpen(id),
+            ) = event
+            {
+                answerer_open = Some(id);
+            }
+        }
+        while let Some(read) = offerer.poll_read() {
+            if let rtc::peer_connection::message::RTCMessage::DataChannelMessage(_, m) =
+                read.message
+            {
+                received.0.push(m.data.to_vec());
+            }
+        }
+        while let Some(read) = answerer.poll_read() {
+            if let rtc::peer_connection::message::RTCMessage::DataChannelMessage(_, m) =
+                read.message
+            {
+                received.1.push(m.data.to_vec());
+            }
+        }
+        // The blackout starts once the offerer's association is up: it has sent its OPEN.
+        if blackout_until.is_none()
+            && offerer
+                .sctp()
+                .is_some_and(|sctp| sctp.state() == RTCSctpTransportState::Connected)
+        {
+            blackout_until = Some(now + BLACKOUT);
+        }
+        let open = offerer_events.contains(&RTCDataChannelEvent::OnOpen(channel));
+        if open && !sent {
+            let remote = answerer_open.expect("the answerer has the channel");
+            offerer
+                .data_channel(channel)
+                .expect("open")
+                .send(now, BytesMut::from(&b"from the offerer"[..]))?;
+            answerer
+                .data_channel(remote)
+                .expect("open")
+                .send(now, BytesMut::from(&b"from the answerer"[..]))?;
+            sent = true;
+        }
+        if sent && !received.0.is_empty() && !received.1.is_empty() {
+            break;
+        }
+        if quiet {
+            let next = [offerer.poll_timeout(), answerer.poll_timeout()]
+                .into_iter()
+                .flatten()
+                .min()
+                .unwrap_or(now + Duration::from_secs(1));
+            now = now.max(next);
+            offerer.handle_timeout(now)?;
+            answerer.handle_timeout(now)?;
+        }
+    }
+    let opened_at = now;
+    assert!(
+        opened_at >= blackout_until.expect("the association came up"),
+        "the ACK cannot have arrived during the blackout"
+    );
+    assert_eq!(
+        offerer_events,
+        vec![RTCDataChannelEvent::OnOpen(channel)],
+        "the channel opens, and is neither failed nor closed on the way"
+    );
+    assert_eq!(received.0, vec![b"from the answerer".to_vec()]);
+    assert_eq!(received.1, vec![b"from the offerer".to_vec()]);
+    Ok(())
+}

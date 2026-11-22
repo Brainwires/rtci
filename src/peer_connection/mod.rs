@@ -250,6 +250,8 @@ pub(crate) mod handler;
 mod internal;
 mod object_model;
 mod remote_tracks;
+pub mod rtc_error;
+mod states_events;
 // wpt100:hdrext
 mod always_negotiate;
 pub mod message;
@@ -279,7 +281,6 @@ use crate::peer_connection::configuration::{
     RTCConfiguration, RTCIceTransportPolicy,
     offer_answer_options::{RTCAnswerOptions, RTCOfferOptions},
 };
-use crate::peer_connection::event::RTCPeerConnectionEvent;
 use crate::peer_connection::handler::PipelineContext;
 use crate::peer_connection::handler::dtls::DtlsHandlerContext;
 use crate::peer_connection::handler::ice::IceHandlerContext;
@@ -798,7 +799,10 @@ pub struct RTCPeerConnection {
     last_offer: String,
     last_answer: String,
 
-    ice_restart_requested: Option<RTCOfferOptions>,
+    /// W3C `[[LocalIceCredentialsToReplace]]`: the username fragments of the local
+    /// descriptions `restart_ice` was called with. Offers restart ICE while the current local
+    /// description still has one of them (`ice_restart_pending`).
+    pub(crate) ice_credentials_to_replace: Vec<String>,
     /// The last completed offer/answer rejected every m-section, which closes the transport
     /// (RFC 8843 §7.1.3, RFC 9429 §5.10): the next description that sets one up with new ICE
     /// credentials starts new ICE and DTLS associations.
@@ -812,6 +816,8 @@ pub struct RTCPeerConnection {
     is_negotiation_ongoing: bool,
     // wpt100:hdrext — `alwaysNegotiateDataChannels` (see `always_negotiate`).
     always_negotiate_data_channels: bool,
+    /// What the application has been told of the transports' states (`states_events`).
+    pub(crate) announced: states_events::AnnouncedStates,
 }
 
 impl RTCPeerConnection {
@@ -861,11 +867,12 @@ impl RTCPeerConnection {
         // Staging, not restarting: the offer must advertise fresh ICE credentials, but JSEP
         // requires `createOffer` to be free of side effects, and inbound STUN is still being
         // validated against the current ufrag/pwd. `set_local_description` applies the restart.
-        let is_ice_restart_requested = self
-            .ice_restart_requested
-            .take()
-            .is_some_and(|options| options.ice_restart)
-            || options.take().is_some_and(|options| options.ice_restart);
+        // W3C createOffer: "If connection.[[LocalIceCredentialsToReplace]] is not empty, or if
+        // options.iceRestart is true": every offer restarts ICE until an answer has replaced
+        // the credentials `restart_ice` was called for, even if an earlier restart offer was
+        // discarded or rolled back.
+        let is_ice_restart_requested =
+            self.ice_restart_pending() || options.take().is_some_and(|options| options.ice_restart);
 
         // A new transport after the last one was closed (every m-section rejected) is a new ICE
         // session: the offer carries new credentials and `set_local_description` restarts the
@@ -1430,8 +1437,10 @@ impl RTCPeerConnection {
             self.remove_stopped_rejected_transceivers();
         }
 
-        if local_description.sdp_type != RTCSdpType::Rollback {
-            self.ice_transport_mut().ice_gathering_state = RTCIceGatheringState::Gathering;
+        if local_description.sdp_type != RTCSdpType::Rollback
+            && let Some(parsed) = local_description.parsed.as_ref()
+        {
+            self.begin_local_gathering(parsed);
         }
 
         if matches!(
@@ -2553,10 +2562,16 @@ impl RTCPeerConnection {
     /// # Signalling the end of gathering
     ///
     /// An **empty candidate string** is the end-of-gathering sentinel. It advertises no
-    /// candidate; it moves the ICE gathering state to [`RTCIceGatheringState::Complete`] and
-    /// emits [`RTCPeerConnectionEvent::OnIceGatheringStateChangeEvent`] with that state. No
-    /// other call reaches `Complete`, so a caller that never sends it leaves the connection
-    /// reporting `Gathering` forever. Send it once, after the last real candidate:
+    /// candidate; it ends the current ICE generation's gathering as W3C webrtc-pc section 5.6
+    /// has the user agent do: an `OnIceCandidateEvent` with the generation's end-of-candidates
+    /// candidate ([`RTCIceCandidate::end_of_candidates`] set, its `candidate` attribute the
+    /// empty string), the ICE gathering state [`RTCIceGatheringState::Complete`] with
+    /// `OnIceGathererStateChange` and [`RTCPeerConnectionEvent::OnIceGatheringStateChangeEvent`],
+    /// and last an `OnIceCandidateEvent` with no candidate. The local descriptions then carry
+    /// `a=end-of-candidates`. A second sentinel for the same generation changes nothing; after
+    /// an ICE restart the new generation gathers anew. No other call reaches `Complete`, so a
+    /// caller that never sends it leaves the connection reporting `Gathering` forever. Send it
+    /// once, after the last real candidate:
     ///
     /// ```no_run
     /// # use std::time::Instant;
@@ -2584,6 +2599,7 @@ impl RTCPeerConnection {
     ///
     /// [`RTCIceGatheringState::Complete`]: crate::peer_connection::state::RTCIceGatheringState::Complete
     /// [`RTCPeerConnectionEvent::OnIceGatheringStateChangeEvent`]: crate::peer_connection::event::RTCPeerConnectionEvent::OnIceGatheringStateChangeEvent
+    /// [`RTCIceCandidate::end_of_candidates`]: crate::peer_connection::transport::RTCIceCandidate::end_of_candidates
     pub fn add_local_candidate(&mut self, local_candidate: RTCIceCandidateInit) -> Result<()> {
         let candidate_value = match local_candidate.candidate.strip_prefix("candidate:") {
             Some(s) => s,
@@ -2593,18 +2609,7 @@ impl RTCPeerConnection {
         if !candidate_value.is_empty() {
             self.add_ice_local_candidate(candidate_value, local_candidate.url.as_deref())?;
         } else {
-            self.ice_transport_mut().ice_gathering_state = RTCIceGatheringState::Complete;
-            // RFC 8838 section 13: no candidate follows the end-of-candidates indication of
-            // its generation; the agent refuses one from here on, until an ICE restart.
-            self.ice_transport_mut()
-                .agent
-                .set_local_gathering_complete();
-            // Emit OnIceGatheringStateChangeEvent
-            self.pipeline_context.event_outs.push_back(
-                RTCPeerConnectionEvent::OnIceGatheringStateChangeEvent(
-                    RTCIceGatheringState::Complete,
-                ),
-            );
+            self.finish_local_gathering();
         }
 
         Ok(())
@@ -2643,7 +2648,10 @@ impl RTCPeerConnection {
     ///
     /// See [restartIce](https://www.w3.org/TR/webrtc/#dom-rtcpeerconnection-restartice)
     pub fn restart_ice(&mut self) {
-        self.ice_restart_requested = Some(RTCOfferOptions { ice_restart: true });
+        // W3C restartIce: every ICE credential of the current and pending local descriptions
+        // is to be replaced, and the negotiation-needed flag is updated.
+        self.ice_credentials_to_replace = self.local_ice_ufrags();
+        self.trigger_negotiation_needed();
     }
 
     /// The RTCP canonical name (CNAME) of this connection: the one name every SSRC it sends
@@ -2685,10 +2693,12 @@ impl RTCPeerConnection {
         &self.configuration
     }
 
-    /// Updates the configuration of this peer connection.
+    /// Updates the configuration of this peer connection (W3C "set a configuration").
     ///
-    /// Only the fields the W3C algorithm permits changing after construction are applied;
-    /// attempting to change the peer identity or the certificate set is an error.
+    /// Only the fields the W3C algorithm permits changing after construction are applied, and
+    /// only once every check has passed: a refused configuration changes nothing. ICE servers
+    /// past [`MAX_ICE_SERVERS`](configuration::MAX_ICE_SERVERS) are ignored; an empty list
+    /// clears them.
     ///
     /// # Parameters
     ///
@@ -2699,60 +2709,65 @@ impl RTCPeerConnection {
     /// Returns an error if:
     /// - The peer connection is closed (`ErrConnectionClosed`)
     /// - The peer identity differs from the one already set (`ErrModifyingPeerIdentity`)
-    /// - The number of certificates differs from the one already set (`ErrModifyingCertificates`)
+    /// - The certificates are not those the connection was constructed with, in the same
+    ///   order (`ErrModifyingCertificates`); W3C `InvalidModificationError`
+    /// - The bundle or RTCP multiplexing policy differs (`ErrModifyingBundlePolicy`,
+    ///   `ErrModifyingRTCPMuxPolicy`), or the candidate pool size does once a local
+    ///   description was set (`ErrModifyingICECandidatePoolSize`); W3C
+    ///   `InvalidModificationError`
+    /// - An ICE server fails "validate an ICE server URL" (see `RTCIceServer::urls`): W3C
+    ///   `SyntaxError` or, for TURN credentials, `InvalidAccessError`
     ///
     /// # Specification
     ///
     /// See [setConfiguration](https://www.w3.org/TR/webrtc/#dom-rtcpeerconnection-setconfiguration)
-    pub fn set_configuration(&mut self, configuration: RTCConfiguration) -> Result<()> {
+    pub fn set_configuration(&mut self, mut configuration: RTCConfiguration) -> Result<()> {
         // https://www.w3.org/TR/webrtc/#dom-rtcpeerconnection-setconfiguration (step #2)
         if self.peer_connection_state == RTCPeerConnectionState::Closed {
             return Err(Error::ErrConnectionClosed);
         }
 
-        // https://www.w3.org/TR/webrtc/#set-the-configuration (step #3)
-        if !configuration.peer_identity.is_empty() {
-            if configuration.peer_identity != self.configuration.peer_identity {
-                return Err(Error::ErrModifyingPeerIdentity);
-            }
-            self.configuration.peer_identity = configuration.peer_identity;
+        // https://www.w3.org/TR/webrtc/#set-the-configuration: every check runs before
+        // anything is changed, so that a refused configuration leaves the connection's as it
+        // was (bug B6 of the audit).
+        if !configuration.peer_identity.is_empty()
+            && configuration.peer_identity != self.configuration.peer_identity
+        {
+            return Err(Error::ErrModifyingPeerIdentity);
         }
-
-        // https://www.w3.org/TR/webrtc/#set-the-configuration (step #4)
-        if !configuration.certificates.is_empty() {
-            if configuration.certificates.len() != self.configuration.certificates.len() {
-                return Err(Error::ErrModifyingCertificates);
-            }
-
-            self.configuration.certificates = configuration.certificates;
+        // The certificates are those of the constructor, one for one: the same list, the same
+        // certificates in the same order ("the same ECMAScript object": the same certificate
+        // and expiry).
+        if configuration.certificates.len() != self.configuration.certificates.len()
+            || configuration
+                .certificates
+                .iter()
+                .zip(&self.configuration.certificates)
+                .any(|(new, old)| new != old || new.expires != old.expires)
+        {
+            return Err(Error::ErrModifyingCertificates);
         }
-
-        // https://www.w3.org/TR/webrtc/#set-the-configuration (step #5)
-
         if configuration.bundle_policy != self.configuration.bundle_policy {
             return Err(Error::ErrModifyingBundlePolicy);
         }
-        self.configuration.bundle_policy = configuration.bundle_policy;
-
-        // https://www.w3.org/TR/webrtc/#set-the-configuration (step #6)
         if configuration.rtcp_mux_policy != self.configuration.rtcp_mux_policy {
             return Err(Error::ErrModifyingRTCPMuxPolicy);
         }
-        self.configuration.rtcp_mux_policy = configuration.rtcp_mux_policy;
-
-        // https://www.w3.org/TR/webrtc/#set-the-configuration (step #7)
-        if configuration.ice_candidate_pool_size != 0 {
-            if self.configuration.ice_candidate_pool_size != configuration.ice_candidate_pool_size
-                && self.local_description().is_some()
-            {
-                return Err(Error::ErrModifyingICECandidatePoolSize);
-            }
-            self.configuration.ice_candidate_pool_size = configuration.ice_candidate_pool_size;
+        if configuration.ice_candidate_pool_size != self.configuration.ice_candidate_pool_size
+            && self.local_description().is_some()
+        {
+            return Err(Error::ErrModifyingICECandidatePoolSize);
+        }
+        configuration
+            .ice_servers
+            .truncate(configuration::MAX_ICE_SERVERS);
+        for server in &configuration.ice_servers {
+            server.validate()?;
         }
 
-        // https://www.w3.org/TR/webrtc/#set-the-configuration (step #8): the ICE agent's
-        // transport setting follows; candidates already added stay, and the new setting
-        // applies from the next gathering (RFC 9429, Section 4.1.18).
+        // Every check passed: the configuration is stored, and the ICE agent's transport
+        // setting follows; candidates already added stay, and the new setting applies from
+        // the next gathering (RFC 9429, Section 4.1.18).
         if configuration.ice_transport_policy != self.configuration.ice_transport_policy {
             let candidate_types =
                 if configuration.ice_transport_policy == RTCIceTransportPolicy::Relay {
@@ -2765,15 +2780,8 @@ impl RTCPeerConnection {
                 .set_candidate_types(candidate_types);
         }
         self.configuration.ice_transport_policy = configuration.ice_transport_policy;
-
-        // https://www.w3.org/TR/webrtc/#set-the-configuration (step #11)
-        if !configuration.ice_servers.is_empty() {
-            // https://www.w3.org/TR/webrtc/#set-the-configuration (step #11.3)
-            for server in &configuration.ice_servers {
-                server.validate()?;
-            }
-            self.configuration.ice_servers = configuration.ice_servers
-        }
+        self.configuration.ice_candidate_pool_size = configuration.ice_candidate_pool_size;
+        self.configuration.ice_servers = configuration.ice_servers;
 
         Ok(())
     }

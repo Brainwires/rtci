@@ -47,15 +47,15 @@ fn test_host_candidate_event_emission() {
         );
 
         if let RTCPeerConnectionEvent::OnIceCandidateEvent(ice_event) = event {
+            let Some(candidate) = ice_event.candidate else {
+                continue;
+            };
             println!("✅ Received OnIceCandidateEvent for host candidate");
-            println!(
-                "   Address: {}:{}",
-                ice_event.candidate.address, ice_event.candidate.port
-            );
-            println!("   Type: {:?}", ice_event.candidate.typ);
-            println!("   Foundation: {}", ice_event.candidate.foundation);
+            println!("   Address: {}:{}", candidate.address, candidate.port);
+            println!("   Type: {:?}", candidate.typ);
+            println!("   Foundation: {}", candidate.foundation);
             assert_eq!(
-                ice_event.candidate.typ,
+                candidate.typ,
                 rtc::peer_connection::transport::RTCIceCandidateType::Host
             );
             found_event = true;
@@ -105,19 +105,19 @@ fn test_srflx_candidate_event_emission() {
         );
 
         if let RTCPeerConnectionEvent::OnIceCandidateEvent(ice_event) = event {
+            let Some(candidate) = ice_event.candidate else {
+                continue;
+            };
             println!("✅ Received OnIceCandidateEvent for srflx candidate");
-            println!(
-                "   Address: {}:{}",
-                ice_event.candidate.address, ice_event.candidate.port
-            );
-            println!("   Type: {:?}", ice_event.candidate.typ);
-            println!("   Foundation: {}", ice_event.candidate.foundation);
-            println!("   URL: {}", ice_event.url);
+            println!("   Address: {}:{}", candidate.address, candidate.port);
+            println!("   Type: {:?}", candidate.typ);
+            println!("   Foundation: {}", candidate.foundation);
+            println!("   URL: {:?}", ice_event.url);
             assert_eq!(
-                ice_event.candidate.typ,
+                candidate.typ,
                 rtc::peer_connection::transport::RTCIceCandidateType::Srflx
             );
-            assert_eq!(ice_event.url, "stun:stun.example.com:3478");
+            assert_eq!(ice_event.url.as_deref(), Some("stun:stun.example.com:3478"));
             found_event = true;
         }
     }
@@ -178,16 +178,16 @@ fn test_multiple_candidates_events() {
         );
 
         if let RTCPeerConnectionEvent::OnIceCandidateEvent(ice_event) = event {
+            let Some(candidate) = ice_event.candidate else {
+                continue;
+            };
             ice_events += 1;
             println!(
                 "✅ ICE Event {}: {:?} candidate at {}:{}",
-                ice_events,
-                ice_event.candidate.typ,
-                ice_event.candidate.address,
-                ice_event.candidate.port
+                ice_events, candidate.typ, candidate.address, candidate.port
             );
 
-            match ice_event.candidate.typ {
+            match candidate.typ {
                 rtc::peer_connection::transport::RTCIceCandidateType::Host => host_found = true,
                 rtc::peer_connection::transport::RTCIceCandidateType::Srflx => srflx_found = true,
                 _ => {}

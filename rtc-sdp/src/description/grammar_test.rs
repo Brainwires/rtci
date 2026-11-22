@@ -1362,3 +1362,34 @@ fn encoding_names_are_matched_without_regard_to_case() {
     assert_eq!(sdp.get_codec_for_payload_type(96).unwrap().name, "vp8");
     assert!(sdp.get_codec_for_payload_type(98).is_err());
 }
+
+/// W3C webrtc-pc section 11.1 (`sdpLineNumber`): a parse error says which line it is on,
+/// from 1, blank lines counted; an error about the whole description says none.
+#[test]
+fn a_parse_error_names_the_line_it_is_on() {
+    let located = |sdp: &str| {
+        SessionDescription::parse_located(sdp, &ParseOptions::strict())
+            .err()
+            .map(|err| err.line_number)
+    };
+    // A line the grammar has no type for: line 4.
+    assert_eq!(located(&format!("{V}{O}{S}x\r\n{T}")), Some(Some(4)));
+    // A malformed value: the m= line, line 5.
+    assert_eq!(
+        located(&format!("{V}{O}{S}{T}m=audio nine RTP/AVP 0\r\n")),
+        Some(Some(5))
+    );
+    // A line without `=`, after a blank line the lenient parse skips: line 6.
+    assert_eq!(
+        SessionDescription::parse_located(
+            &format!("{V}{O}{S}{T}\r\nbogus\r\n"),
+            &ParseOptions::lenient()
+        )
+        .err()
+        .map(|err| err.line_number),
+        Some(Some(6))
+    );
+    // The description ends before its t= line: about the whole description.
+    assert_eq!(located(&format!("{V}{O}{S}")), Some(None));
+    assert_eq!(located(&format!("{V}{O}{S}{T}")), None);
+}

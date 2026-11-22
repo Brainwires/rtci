@@ -170,10 +170,14 @@ pub struct DTLSConn {
     /// sent again when the peer keeps sending handshake records (RFC 6347 4.2.7: alerts are
     /// not retransmitted on a timer, but the offending record arriving again draws a new one).
     pub(crate) fatal_alert_sent: Option<(Alert, usize)>,
+    /// The fatal alert the peer ended the association with, if it did.
+    pub(crate) fatal_alert_received: Option<Alert>,
     /// How many records of an epoch after 0 have authenticated. An endpoint that holds two
     /// associations for one address (RFC 6347 4.2.8) reads from it which of them a protected
     /// record belongs to.
     pub(crate) authenticated_records: u64,
+    /// DTLS 1.3 server: the client's post-handshake authentications verified so far.
+    pub(crate) post_handshake_authentications: u64,
     /// DTLS 1.2: the newest (epoch, sequence number) of a record that authenticated. RFC 9146
     /// section 6 lets an association follow its peer to a new address only for a record
     /// newer than every one before.
@@ -293,7 +297,9 @@ impl DTLSConn {
             handshake_started: None,
             handshake_mtu: handshake_config.maximum_transmission_unit,
             fatal_alert_sent: None,
+            fatal_alert_received: None,
             authenticated_records: 0,
+            post_handshake_authentications: 0,
             newest_authenticated_record: None,
 
             current_flight: flight,
@@ -318,11 +324,21 @@ impl DTLSConn {
 
     /// Copies what the DTLS 1.3 association has reached into the state callers read.
     pub(crate) fn sync_dtls13(&mut self) {
-        let Some(v13) = &self.v13 else {
+        let Some(v13) = &mut self.v13 else {
             return;
         };
         self.authenticated_records = v13.authenticated_records;
         self.closed_by_peer = v13.closed_by_peer;
+        self.state.resumed = v13.resumed;
+        self.post_handshake_authentications = v13.post_handshake_authentications;
+        if let Some(chain) = v13.post_handshake_peer_certificates.take() {
+            // RFC 8446 section 4.6.2: the client authenticated after the handshake; an
+            // empty chain (it declined) leaves the earlier one.
+            if !chain.is_empty() {
+                v13.peer_certificates.clone_from(&chain);
+                self.state.peer_certificates = chain;
+            }
+        }
         self.address_verified |= v13.address_verified;
         if v13.established && !self.handshake_completed {
             self.handshake_completed = true;
@@ -353,6 +369,9 @@ impl DTLSConn {
         let Some(v13) = &mut self.v13 else {
             return Ok(());
         };
+        if self.state.clock.is_some() {
+            v13.clock = self.state.clock;
+        }
         let result = v13.read(datagram);
         self.sync_dtls13();
         result
@@ -397,6 +416,30 @@ impl DTLSConn {
             connection_ids.push(connection_id);
         }
         v13.send_new_connection_id(connection_ids, immediate)
+    }
+
+    /// DTLS 1.3 server: asks the client for its certificate now (post-handshake
+    /// authentication, RFC 8446 section 4.6.2). The answer is checked as the handshake checks
+    /// a client certificate; once verified, [`State::peer_certificates`] holds the chain and
+    /// the endpoint reports [`EndpointEvent::PeerAuthenticated`](crate::endpoint::EndpointEvent::PeerAuthenticated).
+    /// One that is refused ends the association with the alert RFC 8446 names.
+    ///
+    /// # Errors
+    ///
+    /// For DTLS 1.2, for a client, before the handshake is complete, when the client did not
+    /// offer post_handshake_auth
+    /// ([`ConfigBuilder::with_post_handshake_auth`](crate::config::ConfigBuilder::with_post_handshake_auth)),
+    /// and with four requests unanswered.
+    pub fn request_client_certificate(&mut self) -> Result<()> {
+        match &mut self.v13 {
+            Some(v13) => v13.request_client_certificate(),
+            None => Err(Error::ErrUnsupportedProtocolVersion),
+        }
+    }
+
+    /// How many post-handshake authentications of the client this server has verified.
+    pub fn post_handshake_authentications(&self) -> u64 {
+        self.post_handshake_authentications
     }
 
     /// Asks the peer for `count` more connection ids (RFC 9147 section 9).
@@ -457,6 +500,14 @@ impl DTLSConn {
         }
     }
 
+    /// Tells the association the time, ahead of a datagram: what a DTLS 1.3 handshake dates
+    /// session tickets by (it reads no clock of its own). [`Endpoint`](crate::endpoint::Endpoint)
+    /// calls it before every datagram it delivers; a caller that drives a `DTLSConn` itself
+    /// calls it, or [`Self::read`] goes by the `now` of the last timer call.
+    pub fn set_clock(&mut self, now: Instant) {
+        self.state.clock = Some(now);
+    }
+
     /// Settles the version from a hello: `message` is one whole ClientHello (to a server)
     /// or ServerHello (to a client), with its handshake header, from `record`.
     fn negotiate_version(
@@ -491,6 +542,7 @@ impl DTLSConn {
                         record_sequence: record.sequence_number,
                         address_verified: self.address_verified,
                         verified_retry: self.verified_retry.take(),
+                        now: self.state.clock,
                     };
                     self.v13 = Some(Box::new(Conn13::server(cfg, body, start)));
                     self.state.negotiated_version = Some(DtlsVersion::Dtls1_3);
@@ -553,6 +605,7 @@ impl DTLSConn {
                         next_sequence.unwrap_or(0),
                     );
                     v13.set_next_receive_seq(message_seq);
+                    v13.clock = self.state.clock;
                     let server_hello = crate::dtls13::record::plaintext_record(
                         crate::dtls13::record::CONTENT_TYPE_HANDSHAKE,
                         record.sequence_number,
@@ -778,6 +831,21 @@ impl DTLSConn {
     /// record that is silently discarded, never fails it.
     pub fn is_failed(&self) -> bool {
         self.failed
+    }
+
+    /// The fatal alerts that ended the association, as their `AlertDescription` codes (RFC
+    /// 5246 section 7.2, RFC 8446 section 6): (sent, received). `None` for a side that sent or
+    /// received none, as when the handshake gave up after its retransmissions.
+    pub fn fatal_alerts(&self) -> (Option<u8>, Option<u8>) {
+        if let Some(v13) = &self.v13 {
+            return v13.fatal_alerts();
+        }
+        (
+            self.fatal_alert_sent
+                .map(|(alert, _)| alert.alert_description as u8),
+            self.fatal_alert_received
+                .map(|alert| alert.alert_description as u8),
+        )
     }
 
     /// Whether the peer's source address is known to be its own: a client's always is; a
@@ -1922,6 +1990,7 @@ impl DTLSConn {
                     // A fatal alert ends the association at once, unanswered [RFC5246 Section
                     // 7.2.2].
                     self.replay_detector[h.epoch as usize].accept();
+                    self.fatal_alert_received = Some(a);
                     self.fail();
                     return (false, None, Some(Error::ErrAlertFatalOrClose));
                 }

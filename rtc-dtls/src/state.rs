@@ -91,6 +91,12 @@ pub struct State {
     pub(crate) tls13: Option<(crate::dtls13::suite::Suite13, SecretVec)>,
     /// The version negotiated, once a ServerHello has settled it.
     pub(crate) negotiated_version: Option<crate::config::DtlsVersion>,
+    /// The DTLS 1.3 handshake resumed a session, or used an external PSK, in place of
+    /// certificates (RFC 8446 section 2.2).
+    pub(crate) resumed: bool,
+    /// The latest `now` the association was given: what a ClientHello dates its ticket's
+    /// age by (the engine reads no clock).
+    pub(crate) clock: Option<std::time::Instant>,
     //pub(crate) replay_detector: Vec<Box<dyn ReplayDetector>>,
 }
 
@@ -181,6 +187,8 @@ impl State {
             tls13_offer: None,
             tls13: None,
             negotiated_version: None,
+            resumed: false,
+            clock: None,
         }
     }
 }
@@ -387,6 +395,12 @@ impl State {
     /// DTLS 1.3).
     pub fn negotiated_version(&self) -> Option<crate::config::DtlsVersion> {
         self.negotiated_version
+    }
+
+    /// Whether the DTLS 1.3 handshake was made with a pre-shared key, a ticket of an earlier
+    /// session or an external PSK, rather than with certificates (RFC 8446 section 2.2).
+    pub fn resumed(&self) -> bool {
+        self.resumed
     }
 
     /// Whether this endpoint took the client role.

@@ -702,15 +702,55 @@ impl SessionDescription {
 
     /// Parses a session description from text, with the leniencies `options` names.
     pub fn parse_with_options(text: &str, options: &ParseOptions) -> Result<Self> {
+        Self::parse_located(text, options).map_err(|err| err.error)
+    }
+
+    /// [`Self::parse_with_options`], saying which line a syntax error is on (W3C webrtc-pc
+    /// section 11.1: an `sdp-syntax-error` carries its `sdpLineNumber`).
+    ///
+    /// # Errors
+    ///
+    /// The error [`Self::parse_with_options`] returns, with the number (from 1, blank lines
+    /// counted) of the line it is about; `None` for an error about the description as a whole
+    /// (its size, or a missing `t=` line at its end).
+    pub fn parse_located(
+        text: &str,
+        options: &ParseOptions,
+    ) -> std::result::Result<Self, SdpParseError> {
+        let unlocated = |error| SdpParseError {
+            line_number: None,
+            error,
+        };
         if text.len() > MAX_SDP_SIZE {
-            return Err(over_limit("bytes", MAX_SDP_SIZE));
+            return Err(unlocated(over_limit("bytes", MAX_SDP_SIZE)));
         }
         let mut parser = Parser::new(*options);
-        for line in lines(text, options.blank_lines, MAX_SDP_LINES)? {
-            parser.line(line)?;
+        let lines = lines_located(text, options.blank_lines, MAX_SDP_LINES).map_err(
+            |(number, error)| SdpParseError {
+                line_number: Some(number),
+                error,
+            },
+        )?;
+        for line in lines {
+            let number = line.number;
+            parser.line(line).map_err(|error| SdpParseError {
+                line_number: Some(number),
+                error,
+            })?;
         }
-        parser.finish()
+        parser.finish().map_err(unlocated)
     }
+}
+
+/// A description that does not parse, and where: what
+/// [`SessionDescription::parse_located`] returns.
+#[derive(Debug, PartialEq)]
+pub struct SdpParseError {
+    /// The line the error is about, from 1 (blank lines counted); `None` when it is about the
+    /// description as a whole.
+    pub line_number: Option<usize>,
+    /// What is wrong.
+    pub error: Error,
 }
 
 impl From<SessionDescription> for String {

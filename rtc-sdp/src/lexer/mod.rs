@@ -15,6 +15,8 @@ pub(crate) struct Line<'a> {
     pub(crate) kind: u8,
     /// Everything after the `=`.
     pub(crate) value: &'a str,
+    /// The line's number in the text, from 1 (blank lines count).
+    pub(crate) number: usize,
 }
 
 /// Splits `text` into lines.
@@ -27,6 +29,15 @@ pub(crate) struct Line<'a> {
 /// `blank_lines` says (a description that went through a text field often ends in one);
 /// empty lines before or between lines are skipped only when `blank_lines` is set.
 pub(crate) fn lines(text: &str, blank_lines: bool, max_lines: usize) -> Result<Vec<Line<'_>>> {
+    lines_located(text, blank_lines, max_lines).map_err(|(_, err)| err)
+}
+
+/// [`lines`], with the number (from 1) of the line an error is about.
+pub(crate) fn lines_located(
+    text: &str,
+    blank_lines: bool,
+    max_lines: usize,
+) -> std::result::Result<Vec<Line<'_>>, (usize, Error)> {
     let mut out = Vec::new();
     let mut pending_blank = false;
     let mut count = 0usize;
@@ -42,9 +53,12 @@ pub(crate) fn lines(text: &str, blank_lines: bool, max_lines: usize) -> Result<V
 
         count += 1;
         if count > max_lines {
-            return Err(Error::SdpInvalidValue(format!(
-                "session description has more than {max_lines} lines"
-            )));
+            return Err((
+                count,
+                Error::SdpInvalidValue(format!(
+                    "session description has more than {max_lines} lines"
+                )),
+            ));
         }
 
         if line.is_empty() {
@@ -52,25 +66,28 @@ pub(crate) fn lines(text: &str, blank_lines: bool, max_lines: usize) -> Result<V
             continue;
         }
         if pending_blank && !blank_lines {
-            return Err(Error::SdpInvalidSyntax(
-                "an empty line inside the description".to_owned(),
+            return Err((
+                count,
+                Error::SdpInvalidSyntax("an empty line inside the description".to_owned()),
             ));
         }
         pending_blank = false;
 
         if line.bytes().any(|b| b == 0 || b == b'\r') {
-            return Err(Error::SdpInvalidSyntax(
-                "a line contains NUL or a bare CR".to_owned(),
+            return Err((
+                count,
+                Error::SdpInvalidSyntax("a line contains NUL or a bare CR".to_owned()),
             ));
         }
 
         let bytes = line.as_bytes();
         if bytes.len() < 2 || bytes[1] != b'=' || !bytes[0].is_ascii() {
-            return Err(Error::SdpInvalidSyntax(quote(line)));
+            return Err((count, Error::SdpInvalidSyntax(quote(line))));
         }
         out.push(Line {
             kind: bytes[0],
             value: &line[2..],
+            number: count,
         });
     }
 

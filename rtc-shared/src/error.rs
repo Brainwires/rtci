@@ -1582,6 +1582,21 @@ pub enum Error {
     /// Outbound packet larger than maximum message size.
     #[error("outbound packet larger than maximum message size")]
     ErrOutboundPacketTooLarge,
+    /// A data channel message over the 16 KB a sender keeps to on an SCTP association without
+    /// user message interleaving (RFC 8831 section 6.6), which is every association with a
+    /// peer that does not announce I-DATA (RFC 8260), current browsers among them.
+    #[error(
+        "a {size} byte message is over the {limit} byte limit of an SCTP association without \
+         message interleaving (RFC 8831 section 6.6: the peer did not announce I-DATA); \
+         SettingEngineBuilder::with_sctp_message_size_limit_without_interleaving(false) lifts it \
+         up to the peer's max-message-size"
+    )]
+    ErrMessageTooLargeWithoutInterleaving {
+        /// The size of the message refused.
+        size: usize,
+        /// The limit, `maxMessageSize` (16384).
+        limit: u32,
+    },
     /// Stream closed.
     #[error("Stream closed")]
     ErrStreamClosed,
@@ -1805,6 +1820,11 @@ pub enum Error {
     /// ErrCertificateExpired indicates that an x509 certificate has expired.
     #[error("x509Cert expired")]
     ErrCertificateExpired,
+
+    /// An ICE server with no url (W3C "set a configuration": "If urls is empty, throw a
+    /// SyntaxError").
+    #[error("an ICE server has no url")]
+    ErrNoIceServerUrls,
 
     /// ErrNoTurnCredentials indicates that a TURN server URL was provided
     /// without required credentials.
@@ -2033,6 +2053,16 @@ pub enum Error {
     /// Type error: an argument is not a value the operation takes (W3C / WebIDL `TypeError`).
     #[error("Type error {0}")]
     TypeError(String),
+
+    /// A session description that does not parse (W3C webrtc-pc section 11.1, an `RTCError`
+    /// with `errorDetail` `sdp-syntax-error`): what the SDP parser found, and on which line.
+    #[error("SDP syntax error{}: {error}", .line_number.map(|n| format!(" on line {n}")).unwrap_or_default())]
+    SdpSyntaxError {
+        /// The line the error is about, from 1; `None` when it is about the whole description.
+        line_number: Option<usize>,
+        /// The parser's error.
+        error: Box<Error>,
+    },
 
     /// ErrSenderWithNoCodecs indicates that a RTPSender was created without any codecs. To send media the MediaEngine needs at
     /// least one configured codec.

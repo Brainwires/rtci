@@ -4,16 +4,17 @@
 
 use crate::peer_connection::transport::ice::candidate::RTCIceCandidate;
 
-/// ICE candidate event.
+/// ICE candidate event (W3C `RTCPeerConnectionIceEvent`).
 ///
-/// This event is fired when a new ICE candidate is discovered during the
-/// gathering process. The candidate should be sent to the remote peer
-/// via the signaling channel.
+/// Fired for each local candidate the connection surfaces, which the application sends to
+/// the remote peer over its signalling channel, and at the end of gathering (W3C webrtc-pc
+/// section 5.6):
 ///
-/// # Fields
-///
-/// - `candidate` - The discovered ICE candidate
-/// - `url` - The STUN/TURN URL used to discover this candidate (if applicable)
+/// - a candidate whose [`end_of_candidates`](RTCIceCandidate::end_of_candidates) is set (its
+///   `candidate` attribute is the empty string) when a generation has finished gathering, with
+///   that generation's `usernameFragment`;
+/// - then, once no transport gathers any more, a `None` candidate: the legacy "gathering is
+///   complete" indication, which follows the gathering state's change to `complete`.
 ///
 /// # Candidate Types
 ///
@@ -24,45 +25,27 @@ use crate::peer_connection::transport::ice::candidate::RTCIceCandidate;
 ///
 /// # Examples
 ///
-/// ## Sending candidates to remote peer
-///
-/// ```
-/// use rtc::peer_connection::event::RTCPeerConnectionEvent;
-///
-/// # fn handle_event(event: RTCPeerConnectionEvent) {
-/// match event {
-///     RTCPeerConnectionEvent::OnIceCandidateEvent(ice_event) => {
-///         // Send candidate to remote peer via signaling channel
-///         println!("Send candidate: {}", ice_event.candidate.address);
-///         
-///         // Also send the URL if needed
-///         if !ice_event.url.is_empty() {
-///             println!("Gathered from URL: {}", ice_event.url);
-///         }
-///         
-///         // Signal candidate to remote peer
-///         // signal_candidate(&ice_event.candidate).await;
-///     }
-///     _ => {}
-/// }
-/// # }
-/// ```
-///
-/// ## Filtering candidates by type
-///
 /// ```
 /// use rtc::peer_connection::event::RTCPeerConnectionEvent;
 /// use rtc::peer_connection::transport::RTCIceCandidateType;
 ///
 /// # fn handle_event(event: RTCPeerConnectionEvent) {
 /// match event {
-///     RTCPeerConnectionEvent::OnIceCandidateEvent(ice_event) => {
-///         // Only send relay candidates (for privacy)
-///         if ice_event.candidate.typ == RTCIceCandidateType::Relay {
-///             println!("Sending relay candidate: {}", ice_event.candidate.address);
-///             // signal_candidate(&ice_event.candidate).await;
+///     RTCPeerConnectionEvent::OnIceCandidateEvent(ice_event) => match ice_event.candidate {
+///         Some(candidate) if candidate.end_of_candidates => {
+///             // Signal the end of this generation's candidates.
 ///         }
-///     }
+///         Some(candidate) => {
+///             // Only send relay candidates (for privacy), say.
+///             if candidate.typ == RTCIceCandidateType::Relay {
+///                 println!("Sending relay candidate: {}", candidate.address);
+///             }
+///             if let Some(url) = &ice_event.url {
+///                 println!("Gathered from URL: {url}");
+///             }
+///         }
+///         None => println!("gathering complete"),
+///     },
 ///     _ => {}
 /// }
 /// # }
@@ -73,15 +56,11 @@ use crate::peer_connection::transport::ice::candidate::RTCIceCandidate;
 /// See [RTCPeerConnectionIceEvent](https://www.w3.org/TR/webrtc/#rtcpeerconnectioniceevent)
 #[derive(Default, Clone, Debug)]
 pub struct RTCPeerConnectionIceEvent {
-    /// The ICE candidate that was gathered.
-    ///
-    /// Contains all information about the candidate including address, port,
-    /// protocol, priority, and type.
-    pub candidate: RTCIceCandidate,
+    /// W3C `candidate`: the candidate surfaced, the end-of-candidates indication, or `None`
+    /// once gathering is complete.
+    pub candidate: Option<RTCIceCandidate>,
 
-    /// The STUN or TURN URL used to gather this candidate.
-    ///
-    /// This is the URL from the ICE server configuration that was used
-    /// to discover this candidate. May be empty for host candidates.
-    pub url: String,
+    /// W3C `url`: the STUN or TURN URL the candidate was gathered from, `None` for a host
+    /// candidate and for the end-of-gathering indications.
+    pub url: Option<String>,
 }

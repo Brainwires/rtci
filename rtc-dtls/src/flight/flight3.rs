@@ -433,21 +433,27 @@ impl Flight for Flight3 {
             state.connection_id_offer.as_deref(),
         );
 
+        let mut client_hello = HandshakeMessageClientHello {
+            version: PROTOCOL_VERSION1_2,
+            random: state.local_random.clone(),
+            cookie: state.cookie.clone(),
+
+            cipher_suites: super::flight1::client_hello_cipher_suites(cfg),
+            compression_methods: default_compression_methods(),
+            extensions,
+        };
+        // The PSK binders cover the cookie too.
+        if let Err(error) =
+            super::flight1::bind_client_hello(cfg, state.tls13_offer.as_ref(), &mut client_hello)
+        {
+            return Err((None, Some(error)));
+        }
+
         Ok(vec![Packet {
             record: RecordLayer::new(
                 PROTOCOL_VERSION1_2,
                 0,
-                Content::Handshake(Handshake::new(HandshakeMessage::ClientHello(
-                    HandshakeMessageClientHello {
-                        version: PROTOCOL_VERSION1_2,
-                        random: state.local_random.clone(),
-                        cookie: state.cookie.clone(),
-
-                        cipher_suites: super::flight1::client_hello_cipher_suites(cfg),
-                        compression_methods: default_compression_methods(),
-                        extensions,
-                    },
-                ))),
+                Content::Handshake(Handshake::new(HandshakeMessage::ClientHello(client_hello))),
             ),
             should_encrypt: false,
             reset_local_sequence_number: false,
