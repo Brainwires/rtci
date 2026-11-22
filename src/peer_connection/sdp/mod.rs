@@ -315,7 +315,8 @@ use crate::peer_connection::transport::ice::candidate::RTCIceCandidate;
 use crate::peer_connection::transport::ice::parameters::RTCIceParameters;
 use crate::rtp_transceiver::direction::RTCRtpTransceiverDirection;
 use crate::rtp_transceiver::rtp_sender::rtp_codec::{
-    RTCRtpCodec, RtpCodecKind, is_fec_mime_type, repair_family,
+    CodecMatch, RTCRtpCodec, RtpCodecKind, codec_parameters_fuzzy_search, is_fec_mime_type,
+    repair_family, rtcp_feedback_intersection,
 };
 use crate::rtp_transceiver::rtp_sender::rtp_codec_parameters::RTCRtpCodecParameters;
 use crate::rtp_transceiver::rtp_sender::rtp_coding_parameters::RTCRtpRidRestrictions;
@@ -1020,7 +1021,20 @@ impl RTCPeerConnection {
                 media_engine.local_fmtp_line(transceiver.kind(), codec, !is_offer),
             );
 
-            for feedback in &codec.rtp_codec.rtcp_feedback {
+            // An answer has only feedback the offer has for the format (RFC 4585 section 4.2).
+            let feedbacks = match &media_section.offered_codecs {
+                Some(offered) => match codec_parameters_fuzzy_search(&codec.rtp_codec, offered) {
+                    (offered, CodecMatch::Exact | CodecMatch::Partial) => {
+                        rtcp_feedback_intersection(
+                            &codec.rtp_codec.rtcp_feedback,
+                            &offered.rtp_codec.rtcp_feedback,
+                        )
+                    }
+                    _ => vec![],
+                },
+                None => codec.rtp_codec.rtcp_feedback.clone(),
+            };
+            for feedback in &feedbacks {
                 // RFC 8888 section 6: "The payload type used with 'ccfb' feedback MUST be the
                 // wildcard type ('*')": written once, below.
                 if negotiates_ccfb([(feedback.typ.as_str(), feedback.parameter.as_str())]) {
@@ -1567,6 +1581,11 @@ pub(crate) struct MediaSection {
     /// `a=rtcp-mux-only` (RFC 9429 section 5.2.2: "The 'a=rtcp-mux-only' line MUST NOT be
     /// added").
     pub(crate) renegotiated: bool,
+    /// In an answer, the codecs of the offered section with their `a=rtcp-fb`: the answer
+    /// keeps only feedback the offer has for the format (RFC 4585 section 4.2: "The answerer
+    /// MUST NOT add feedback parameters"), also when the transceiver's codecs still carry
+    /// what an earlier offer had. `None` in an offer.
+    pub(crate) offered_codecs: Option<Vec<RTCRtpCodecParameters>>,
 }
 
 /// `a=rtcp-mux-only` (RFC 8858 section 3).

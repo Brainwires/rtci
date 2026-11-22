@@ -1830,6 +1830,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+- **jsep**: an answer has only the `a=rtcp-fb` the offer has for each format (RFC 4585 section
+  4.2: "The answerer MUST NOT add feedback parameters"). A renegotiation whose offer dropped a
+  feedback type (or `trr-int`) was answered with what the first offer had, because the
+  transceiver kept the codecs of that first exchange.
+- **rtcp_session**: a `trr-int` that a renegotiation no longer has is undone: the peer
+  connection sends the new `RtcpSessionControl::TrrIntCleared` and the session goes back to the
+  interval it was built with (RFC 4585 section 4.2). The negotiated value used to stay.
+- **association**: a DTMF (`telephone-event`, RFC 4733) or comfort-noise (`CN`, RFC 3389)
+  packet that arrives before any media on an SSRC no longer becomes the receiver track's codec;
+  the stream is established by its first media packet.
 - **ice**: a controlling agent could lose the nomination it had queued: an answer to a second
   check on the same pair (one the peer's request triggered) took the pair off the
   triggered-check queue, so no request with USE-CANDIDATE left and the agent stayed in
