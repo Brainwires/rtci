@@ -663,6 +663,95 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **conformance**: the clause audits of RFC 8831, RFC 8832, RFC 8841 and RFC 8261 under
   `docs/conformance/audit/`, with the rows this change closes.
+`rtc-rtcp` becomes a complete codec for the RTCP packets and blocks of the WebRTC spec set, from the
+clause audit of RFC 3550, 4585, 5104, 5506, 3611, 8888, 7941, 8852, 5761 and the transport-cc draft.
+Each bug below was confirmed by a failing test first (`rtc-rtcp/tests/audit_bugs.rs`).
+
+### Breaking changes
+
+- **rtcp**: `PacketType`, `SdesType` and `extended_report::BlockType` gain an `Other(u8)` variant that
+  keeps a value the crate does not model, so they are no longer `#[repr(u8)]`: convert with
+  `u8::from(x)` / `X::from(octet)` instead of `as u8`. `SdesType::from` no longer maps an unknown
+  type to `SdesEnd`, `PacketType::from` no longer maps one to `Unsupported`, `BlockType::from` no
+  longer maps one to `Unknown` (each of those is now the octet 0 only).
+- **rtcp**: `extended_report::UnknownReportBlock` has two more fields, `block_type` and
+  `type_specific`, and refuses to marshal a body that is not a whole number of 32-bit words.
+- **rtcp**: `VoIPMetricsReportBlock::default()` is "nothing available" (127 for the levels, the R
+  factors and the MOS scores, Gmin 16), not all zeros.
+- **rtcp**: a typed `unmarshal` reads the one packet its header describes: it fails
+  (`PacketTooShort`) when the length field runs past the buffer, and it leaves what follows the
+  packet in the buffer. `SenderReport` / `ReceiverReport` used to take everything left in the buffer
+  as a profile-specific extension.
+- **rtcp**: stricter writers. Refused now: a generic NACK, an SLI or a FIR with no entry; a profile
+  extension, APP data or an unparsed XR block that is not whole words; an RLE block with a null chunk
+  among its chunks, a run of length zero or a range of 65,534 or more; VoIP metrics with an R factor
+  or a MOS score outside its range, or Gmin 0; a compound packet with a padded packet that is not its
+  last. `FullIntraRequest` writes the header's media SSRC as 0 whatever `media_ssrc` holds
+  (RFC 5104 section 4.3.1.2).
+- **rtcp**: stricter readers. Refused now: a PLI or an RRR with FCI; an SLI with no entry; a REMB whose
+  SSRC count does not match its length; a padding count of zero or beyond the packet; transport-cc
+  feedback whose chunks or deltas reach into its padding; an SDES whose chunks do not match its source
+  count. A BYE without a reason is written without a length octet (8 octets for one source, was 12).
+- **rtcp**: the parsed `chunks` of a Loss / Duplicate RLE block no longer include the terminating null
+  chunk; statistics-summary fields whose flag is clear read as zero; the reserved octet of VoIP
+  metrics reads as zero.
+
+### Features
+
+- **rtcp**: new packet types, each with marshal, unmarshal and a fuzz target: `ApplicationDefined`
+  (APP, RFC 3550 section 6.7); `TemporaryMaximumBitrateRequest` / `Notification` (TMMBR, TMMBN,
+  RFC 5104 section 4.2); `TemporalSpatialTradeoffRequest` / `Notification` (TSTR, TSTN, section
+  4.3.2 and 4.3.3); `VideoBackChannelMessage` (VBCM, section 4.3.4);
+  `ReferencePictureSelectionIndication` (RPSI, RFC 4585 section 6.3.3); `LayerRefreshRequest` (LRR,
+  RFC 9627); `ApplicationLayerFeedback` (PSFB FMT 15 that is not REMB). These are wire
+  codecs: nothing negotiates or acts on the new messages yet.
+- **rtcp**: SDES items MID (15), RtpStreamId (12) and RepairedRtpStreamId (13) (RFC 7941, RFC 8852);
+  `SourceDescriptionItem::private` / `as_private` for PRIV items.
+- **rtcp**: `compound_packet::validate_compound` (the header checks of RFC 3550 Appendix A.2 and the
+  rules of section 6.1) and `validate_reduced_size` (what RFC 5506 leaves of them).
+- **rtcp**: `packet::unmarshal_lenient`: a malformed packet of a known type comes back as a
+  `RawPacket` and the packets around it are read. `packet::unmarshal` still fails the datagram.
+- **rtcp**: `TransportLayerCc::reference_time_signed` and `ReferenceTimeUnwrapper`, which follows the
+  24-bit reference time across its wrap (every 12.4 days).
+- **rtcp**: `StatisticsSummaryReportBlock::reported`, `ApplicationDefined::name_str`, the `FORMAT_*`
+  constants of the new feedback messages.
+
+### Bug Fixes
+
+- **rtcp**: an SDES item of a type above 8 (MID, RID, anything registered later) ended the chunk and
+  failed the whole datagram, the SR or RR in it included. Items are read by their length whatever
+  their type (RFC 3550 section 6.5).
+- **rtcp**: a padded XR packet failed to parse and took the datagram with it; one XR block with a
+  length its type does not allow did the same. Padding is cut first, and such a block is kept
+  unparsed with its type (RFC 3611 sections 2 and 4).
+- **rtcp**: an RTCP packet of an unknown type was written back as type 0, and an XR block of an
+  unknown type as block type 0. Both keep what they arrived with.
+- **rtcp**: transport-cc feedback with an even number of chunks and no delta was rejected; the
+  symbols of a status vector beyond the packet status count consumed deltas.
+- **rtcp**: application layer feedback that is not REMB failed the datagram.
+- **rtcp**: RTCP padding was read as content: as a profile extension of an SR / RR, as report blocks
+  of an XR, as the report timestamp of RFC 8888 feedback.
+- **rtcp**: an SDES chunk and a BYE reason were padded with a count octet, as if by the P bit, and
+  the BYE set the P bit. Both are padded with null octets (RFC 3550 sections 6.5 and 6.6).
+- **rtcp**: an RLE block with an odd number of chunks was written misaligned with a truncated block
+  length; it now ends with the terminating null chunk (RFC 3611 section 4.1).
+- **rtcp**: a generic NACK or an SLI could not hold more than 253 entries; the limit is the 16-bit
+  length field.
+- **rtcp**: a REMB with a zero mantissa was read as 2^(exp + 23) bit/s, not zero; printing a REMB
+  above 1000 Eb/s panicked (an index past the unit table, on a value a peer chooses).
+
+### Testing
+
+- **rtcp**: 117 new tests (wire layout, round trip and malformed input for every packet and block
+  type; a fixed set of 60,000 damaged datagrams that must not panic and must keep one wire form) and
+  12 new fuzz targets, among them `packet_roundtrip`, a round-trip oracle over whole datagrams.
+- **shared**: `is_rtcp` / `match_srtp` / `match_srtcp` are tested over every value of the first two
+  octets (RFC 5761 section 4, RFC 7983). The classifier was right and is unchanged.
+- Inherited fixtures corrected: RTCP length fields that counted octets instead of words
+  (`goodbye_test.rs`, `sender_report_test.rs`, `source_description_test.rs`); two transport-cc
+  fixtures whose padding count was larger than their padding; XR fixtures that listed the
+  terminating null chunk as a chunk and used VoIP values outside their range; a REMB expectation of
+  2^70 for a zero mantissa.
 
 ## [0.22.0+brainwires.5] - 2026-11-20
 

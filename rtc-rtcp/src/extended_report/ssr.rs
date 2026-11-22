@@ -110,6 +110,33 @@ impl fmt::Display for TTLorHopLimitType {
 }
 
 impl StatisticsSummaryReportBlock {
+    /// This block with every field its flags do not report set to zero: the loss count
+    /// without `loss_reports`, the duplicate count without `duplicate_reports`, the jitter
+    /// values without `jitter_reports`, the TTL / hop limit values when `ttl_or_hop_limit` is
+    /// `Missing`.
+    pub fn reported(&self) -> Self {
+        let mut block = self.clone();
+        if !block.loss_reports {
+            block.lost_packets = 0;
+        }
+        if !block.duplicate_reports {
+            block.dup_packets = 0;
+        }
+        if !block.jitter_reports {
+            block.min_jitter = 0;
+            block.max_jitter = 0;
+            block.mean_jitter = 0;
+            block.dev_jitter = 0;
+        }
+        if block.ttl_or_hop_limit == TTLorHopLimitType::Missing {
+            block.min_ttl_or_hl = 0;
+            block.max_ttl_or_hl = 0;
+            block.mean_ttl_or_hl = 0;
+            block.dev_ttl_or_hl = 0;
+        }
+        block
+    }
+
     /// The XR block header describing this block's type and length.
     pub fn xr_header(&self) -> XRHeader {
         let mut type_specific = 0x00;
@@ -177,19 +204,23 @@ impl Marshal for StatisticsSummaryReportBlock {
         let n = h.marshal_to(buf)?;
         buf = &mut buf[n..];
 
-        buf.put_u32(self.ssrc);
-        buf.put_u16(self.begin_seq);
-        buf.put_u16(self.end_seq);
-        buf.put_u32(self.lost_packets);
-        buf.put_u32(self.dup_packets);
-        buf.put_u32(self.min_jitter);
-        buf.put_u32(self.max_jitter);
-        buf.put_u32(self.mean_jitter);
-        buf.put_u32(self.dev_jitter);
-        buf.put_u8(self.min_ttl_or_hl);
-        buf.put_u8(self.max_ttl_or_hl);
-        buf.put_u8(self.mean_ttl_or_hl);
-        buf.put_u8(self.dev_ttl_or_hl);
+        // RFC 3611 4.6: "The fields corresponding to unreported parameters MUST be present,
+        // but are set to zero."
+        let reported = self.reported();
+
+        buf.put_u32(reported.ssrc);
+        buf.put_u16(reported.begin_seq);
+        buf.put_u16(reported.end_seq);
+        buf.put_u32(reported.lost_packets);
+        buf.put_u32(reported.dup_packets);
+        buf.put_u32(reported.min_jitter);
+        buf.put_u32(reported.max_jitter);
+        buf.put_u32(reported.mean_jitter);
+        buf.put_u32(reported.dev_jitter);
+        buf.put_u8(reported.min_ttl_or_hl);
+        buf.put_u8(reported.max_ttl_or_hl);
+        buf.put_u8(reported.mean_ttl_or_hl);
+        buf.put_u8(reported.dev_ttl_or_hl);
 
         Ok(self.marshal_size())
     }
@@ -207,6 +238,9 @@ impl Unmarshal for StatisticsSummaryReportBlock {
         }
 
         let xr_header = XRHeader::unmarshal(raw_packet)?;
+        if xr_header.block_type != BlockType::StatisticsSummary {
+            return Err(Error::WrongType);
+        }
         let block_length = match xr_header.block_length.checked_mul(4) {
             Some(length) => length,
             None => return Err(Error::InvalidBlockSize),
@@ -235,6 +269,8 @@ impl Unmarshal for StatisticsSummaryReportBlock {
         let mean_ttl_or_hl = raw_packet.get_u8();
         let dev_ttl_or_hl = raw_packet.get_u8();
 
+        // "The receiver MUST ignore any such field": a field whose flag is clear reads as zero,
+        // whatever the sender put there.
         Ok(StatisticsSummaryReportBlock {
             loss_reports,
             duplicate_reports,
@@ -254,6 +290,7 @@ impl Unmarshal for StatisticsSummaryReportBlock {
             max_ttl_or_hl,
             mean_ttl_or_hl,
             dev_ttl_or_hl,
-        })
+        }
+        .reported())
     }
 }

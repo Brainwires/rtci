@@ -184,7 +184,13 @@ impl MarshalSize for TransportLayerNack {
 impl Marshal for TransportLayerNack {
     /// Marshal encodes the packet in binary.
     fn marshal_to(&self, mut buf: &mut [u8]) -> Result<usize> {
-        if self.nacks.len() + TLN_LENGTH > u8::MAX as usize {
+        // RFC 4585 6.2.1: "The FCI field MUST contain at least one and MAY contain more than
+        // one Generic NACK."
+        if self.nacks.is_empty() {
+            return Err(Error::PacketTooShort);
+        }
+        // The length field counts 32-bit words in 16 bits.
+        if self.nacks.len() + TLN_LENGTH > u16::MAX as usize {
             return Err(Error::TooManyReports);
         }
         if buf.remaining_mut() < self.marshal_size() {
@@ -212,42 +218,31 @@ impl Marshal for TransportLayerNack {
 }
 
 impl Unmarshal for TransportLayerNack {
-    /// Unmarshal decodes the ReceptionReport from binary
+    /// Unmarshal decodes the TransportLayerNack from binary
     fn unmarshal<B>(raw_packet: &mut B) -> Result<Self>
     where
         Self: Sized,
         B: Buf,
     {
-        let raw_packet_len = raw_packet.remaining();
-        if raw_packet_len < (HEADER_LENGTH + NACK_MIN_OCTET_COUNT) {
+        let (sender_ssrc, media_ssrc, mut fci) = read_feedback(
+            raw_packet,
+            PacketType::TransportSpecificFeedback,
+            FORMAT_TLN,
+        )?;
+        // RFC 4585 6.2.1: at least one Generic NACK, the length being 2 + n.
+        if fci.is_empty() {
             return Err(Error::PacketTooShort);
         }
-
-        let h = Header::unmarshal(raw_packet)?;
-
-        if raw_packet_len < (HEADER_LENGTH + 4 * (h.length as usize)) {
-            return Err(Error::PacketTooShort);
+        if !fci.len().is_multiple_of(4) {
+            return Err(Error::WrongPadding);
         }
 
-        if h.packet_type != PacketType::TransportSpecificFeedback || h.count != FORMAT_TLN {
-            return Err(Error::WrongType);
-        }
-
-        let sender_ssrc = raw_packet.get_u32();
-        let media_ssrc = raw_packet.get_u32();
-
-        let mut nacks = vec![];
-        for _i in 0..(h.length as i32 - NACK_OFFSET as i32 / 4) {
+        let mut nacks = Vec::with_capacity(fci.len() / 4);
+        while fci.has_remaining() {
             nacks.push(NackPair {
-                packet_id: raw_packet.get_u16(),
-                lost_packets: raw_packet.get_u16(),
+                packet_id: fci.get_u16(),
+                lost_packets: fci.get_u16(),
             });
-        }
-
-        if
-        /*h.padding &&*/
-        raw_packet.has_remaining() {
-            raw_packet.advance(raw_packet.remaining());
         }
 
         Ok(TransportLayerNack {

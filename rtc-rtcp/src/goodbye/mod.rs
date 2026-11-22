@@ -36,7 +36,8 @@ impl Packet for Goodbye {
     /// Header returns the Header associated with this packet.
     fn header(&self) -> Header {
         Header {
-            padding: get_padding_size(self.raw_size()) != 0,
+            // The null octets after the reason are not the padding of the P bit (RFC 3550 6.6).
+            padding: false,
             count: self.sources.len() as u8,
             packet_type: PacketType::Goodbye,
             length: ((self.marshal_size() / 4) - 1) as u16,
@@ -50,7 +51,12 @@ impl Packet for Goodbye {
 
     fn raw_size(&self) -> usize {
         let srcs_length = self.sources.len() * SSRC_LENGTH;
-        let reason_length = self.reason.len() + 1;
+        // The reason is optional: without one there is no length octet either.
+        let reason_length = if self.reason.is_empty() {
+            0
+        } else {
+            self.reason.len() + 1
+        };
 
         HEADER_LENGTH + srcs_length + reason_length
     }
@@ -113,13 +119,13 @@ impl Marshal for Goodbye {
             buf.put_u32(*source);
         }
 
-        buf.put_u8(self.reason.len() as u8);
         if !self.reason.is_empty() {
+            buf.put_u8(self.reason.len() as u8);
             buf.put(self.reason.clone());
-        }
-
-        if h.padding {
-            put_padding(buf, self.raw_size());
+            // "If the string fills the packet to the next 32-bit boundary, the string is not
+            // null terminated. If not, the BYE packet MUST be padded with null octets to the
+            // next 32-bit boundary. This padding is separate from that indicated by the P bit"
+            buf.put_bytes(0, get_padding_size(self.raw_size()));
         }
 
         Ok(self.marshal_size())
@@ -145,46 +151,31 @@ impl Unmarshal for Goodbye {
          * (opt) |     length    |               reason for leaving            ...
          *       +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
          */
-        let raw_packet_len = raw_packet.remaining();
-
-        let header = Header::unmarshal(raw_packet)?;
+        let (header, mut body) = read_packet(raw_packet)?;
         if header.packet_type != PacketType::Goodbye {
             return Err(Error::WrongType);
         }
 
-        if get_padding_size(raw_packet_len) != 0 {
+        // SC sources, four octets each.
+        if body.len() < header.count as usize * SSRC_LENGTH {
             return Err(Error::PacketTooShort);
         }
-
-        let reason_offset = HEADER_LENGTH + header.count as usize * SSRC_LENGTH;
-
-        if reason_offset > raw_packet_len {
-            return Err(Error::PacketTooShort);
-        }
-
         let mut sources = Vec::with_capacity(header.count as usize);
         for _ in 0..header.count {
-            sources.push(raw_packet.get_u32());
+            sources.push(body.get_u32());
         }
 
-        let reason = if reason_offset < raw_packet_len {
-            let reason_len = raw_packet.get_u8() as usize;
-            let reason_end = reason_offset + 1 + reason_len;
-
-            if reason_end > raw_packet_len {
+        // Then, optionally, a length octet and that many octets of reason. What is left after
+        // them pads the packet to a 32-bit boundary.
+        let reason = if body.has_remaining() {
+            let reason_len = body.get_u8() as usize;
+            if reason_len > body.len() {
                 return Err(Error::PacketTooShort);
             }
-
-            raw_packet.copy_to_bytes(reason_len)
+            body.split_to(reason_len)
         } else {
             Bytes::new()
         };
-
-        if
-        /*header.padding &&*/
-        raw_packet.has_remaining() {
-            raw_packet.advance(raw_packet.remaining());
-        }
 
         Ok(Goodbye { sources, reason })
     }

@@ -6,7 +6,7 @@ fn test_goodbye_unmarshal() {
         (
             "valid",
             Bytes::from_static(&[
-                0x81, 0xcb, 0x00, 0x0c, // v=2, p=0, count=1, BYE, len=12
+                0x81, 0xcb, 0x00, 0x02, // v=2, p=0, count=1, BYE, len=2 (12 octets)
                 0x90, 0x2f, 0x9e, 0x2e, // ssrc=0x902f9e2e
                 0x03, 0x46, 0x4f, 0x4f, // len=3, text=FOO
             ]),
@@ -19,7 +19,7 @@ fn test_goodbye_unmarshal() {
         (
             "invalid octet count",
             Bytes::from_static(&[
-                0x81, 0xcb, 0x00, 0x0c, // v=2, p=0, count=1, BYE, len=12
+                0x81, 0xcb, 0x00, 0x02, // v=2, p=0, count=1, BYE, len=2 (12 octets)
                 0x90, 0x2f, 0x9e, 0x2e, // ssrc=0x902f9e2e
                 0x04, 0x46, 0x4f, 0x4f, // len=4, text=FOO
             ]),
@@ -32,7 +32,7 @@ fn test_goodbye_unmarshal() {
         (
             "wrong type",
             Bytes::from_static(&[
-                0x81, 0xca, 0x00, 0x0c, // v=2, p=0, count=1, SDES, len=12
+                0x81, 0xca, 0x00, 0x02, // v=2, p=0, count=1, SDES, len=2 (12 octets)
                 0x90, 0x2f, 0x9e, 0x2e, // ssrc=0x902f9e2e
                 0x03, 0x46, 0x4f, 0x4f, // len=3, text=FOO
             ]),
@@ -45,7 +45,7 @@ fn test_goodbye_unmarshal() {
         (
             "short reason",
             Bytes::from_static(&[
-                0x81, 0xcb, 0x00, 0x0c, // v=2, p=0, count=1, BYE, len=12
+                0x81, 0xcb, 0x00, 0x02, // v=2, p=0, count=1, BYE, len=2 (12 octets)
                 0x90, 0x2f, 0x9e, 0x2e, // ssrc=0x902f9e2e
                 0x01, 0x46, 0x00, 0x00, // len=3, text=F + padding
             ]),
@@ -58,7 +58,7 @@ fn test_goodbye_unmarshal() {
         (
             "not byte aligned",
             Bytes::from_static(&[
-                0x81, 0xcb, 0x00, 0x0a, // v=2, p=0, count=1, BYE, len=10
+                0x81, 0xcb, 0x00, 0x02, // v=2, p=0, count=1, BYE, len=2, two octets missing
                 0x90, 0x2f, 0x9e, 0x2e, // ssrc=0x902f9e2e
                 0x01, 0x46, // len=1, text=F
             ]),
@@ -71,7 +71,7 @@ fn test_goodbye_unmarshal() {
         (
             "bad count in header",
             Bytes::from_static(&[
-                0x82, 0xcb, 0x00, 0x0c, // v=2, p=0, count=2, BYE, len=8
+                0x82, 0xcb, 0x00, 0x01, // v=2, p=0, count=2, BYE, len=1 (8 octets)
                 0x90, 0x2f, 0x9e, 0x2e, // ssrc=0x902f9e2e
             ]),
             Goodbye {
@@ -83,8 +83,8 @@ fn test_goodbye_unmarshal() {
         (
             "empty packet",
             Bytes::from_static(&[
-                // v=2, p=0, count=0, BYE, len=4
-                0x80, 0xcb, 0x00, 0x04,
+                // v=2, p=0, count=0, BYE, len=0 (4 octets)
+                0x80, 0xcb, 0x00, 0x00,
             ]),
             Goodbye {
                 sources: vec![],
@@ -222,4 +222,92 @@ fn test_goodbye_round_trip() {
             )
         }
     }
+}
+
+// RFC 3550 6.6: the reason is a length octet and text; "if the string fills the packet to the
+// next 32-bit boundary, the string is not null terminated. If not, the BYE packet MUST be
+// padded with null octets", which "is separate from that indicated by the P bit".
+#[test]
+fn a_reason_is_padded_with_null_octets_without_the_padding_bit() {
+    for (reason, size) in [
+        (&b"a"[..], 12),
+        (&b"ab"[..], 12),
+        (&b"abc"[..], 12),
+        (&b"abcd"[..], 16),
+        (&b"abcdefg"[..], 16),
+    ] {
+        let bye = Goodbye {
+            sources: vec![0x01020304],
+            reason: Bytes::copy_from_slice(reason),
+        };
+        let raw = bye.marshal().unwrap();
+
+        assert_eq!(size, raw.len(), "reason {reason:?}");
+        assert_eq!(0x81, raw[0], "P is clear");
+        assert_eq!((size / 4 - 1) as u8, raw[3]);
+        assert_eq!(reason.len() as u8, raw[8]);
+        assert_eq!(reason, &raw[9..9 + reason.len()]);
+        assert!(raw[9 + reason.len()..].iter().all(|b| *b == 0));
+        assert_eq!(bye, Goodbye::unmarshal(&mut raw.freeze()).unwrap());
+    }
+}
+
+// RFC 3550 6.6: the reason is optional. Without one the packet is the header and the sources.
+#[test]
+fn a_goodbye_without_a_reason_has_no_length_octet() {
+    let none = Goodbye::default();
+    assert_eq!(&[0x80, 0xcb, 0x00, 0x00][..], &none.marshal().unwrap()[..]);
+
+    let two = Goodbye {
+        sources: vec![1, 2],
+        reason: Bytes::new(),
+    };
+    let raw = two.marshal().unwrap();
+    assert_eq!(
+        &[0x82, 0xcb, 0x00, 0x02, 0, 0, 0, 1, 0, 0, 0, 2][..],
+        &raw[..]
+    );
+    assert_eq!(two, Goodbye::unmarshal(&mut raw.freeze()).unwrap());
+
+    let most = Goodbye {
+        sources: (0..31).collect(),
+        reason: Bytes::new(),
+    };
+    let raw = most.marshal().unwrap();
+    assert_eq!(4 + 31 * 4, raw.len());
+    assert_eq!(most, Goodbye::unmarshal(&mut raw.freeze()).unwrap());
+}
+
+// What this crate wrote before: a zero length octet and three octets of P-bit padding. The
+// padding is cut, the empty reason read.
+#[test]
+fn a_goodbye_with_an_empty_reason_and_rtcp_padding_still_parses() {
+    let mut raw = Bytes::from_static(&[
+        0xa1, 0xcb, 0x00, 0x02, // v=2, p=1, count=1, BYE, len=2
+        0x01, 0x02, 0x03, 0x04, // ssrc
+        0x00, 0x00, 0x00, 0x03, // empty reason, three padding octets
+    ]);
+    assert_eq!(
+        Goodbye {
+            sources: vec![0x01020304],
+            reason: Bytes::new(),
+        },
+        Goodbye::unmarshal(&mut raw).unwrap()
+    );
+}
+
+#[test]
+fn a_goodbye_that_contradicts_its_own_lengths_is_refused() {
+    // The count says three sources, the length holds two.
+    let mut raw = Bytes::from_static(&[0x83, 0xcb, 0, 2, 0, 0, 0, 1, 0, 0, 0, 2]);
+    assert_eq!(Err(Error::PacketTooShort), Goodbye::unmarshal(&mut raw));
+    // The reason says nine octets, three follow.
+    let mut raw = Bytes::from_static(&[0x81, 0xcb, 0, 2, 0, 0, 0, 1, 9, b'a', b'b', b'c']);
+    assert_eq!(Err(Error::PacketTooShort), Goodbye::unmarshal(&mut raw));
+    // The length runs past the datagram.
+    let mut raw = Bytes::from_static(&[0x81, 0xcb, 0, 3, 0, 0, 0, 1, 0, 0, 0, 0]);
+    assert_eq!(Err(Error::PacketTooShort), Goodbye::unmarshal(&mut raw));
+    // A padding count of zero is not a count.
+    let mut raw = Bytes::from_static(&[0xa1, 0xcb, 0, 2, 0, 0, 0, 1, 0, 0, 0, 0]);
+    assert_eq!(Err(Error::WrongPadding), Goodbye::unmarshal(&mut raw));
 }

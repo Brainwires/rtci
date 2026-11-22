@@ -215,3 +215,87 @@ path = "fuzz_targets/source_description_unmarshal.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "application_defined_unmarshal"
+path = "fuzz_targets/application_defined_unmarshal.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "payload_feedbacks_application_layer_feedback_unmarshal"
+path = "fuzz_targets/payload_feedbacks_application_layer_feedback_unmarshal.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "payload_feedbacks_layer_refresh_request_unmarshal"
+path = "fuzz_targets/payload_feedbacks_layer_refresh_request_unmarshal.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "payload_feedbacks_reference_picture_selection_indication_unmarshal"
+path = "fuzz_targets/payload_feedbacks_reference_picture_selection_indication_unmarshal.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "payload_feedbacks_temporal_spatial_tradeoff_request_unmarshal"
+path = "fuzz_targets/payload_feedbacks_temporal_spatial_tradeoff_request_unmarshal.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "payload_feedbacks_temporal_spatial_tradeoff_notification_unmarshal"
+path = "fuzz_targets/payload_feedbacks_temporal_spatial_tradeoff_notification_unmarshal.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "payload_feedbacks_video_back_channel_message_unmarshal"
+path = "fuzz_targets/payload_feedbacks_video_back_channel_message_unmarshal.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "transport_feedbacks_tmmbr_unmarshal"
+path = "fuzz_targets/transport_feedbacks_tmmbr_unmarshal.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "transport_feedbacks_tmmbn_unmarshal"
+path = "fuzz_targets/transport_feedbacks_tmmbn_unmarshal.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "packet_roundtrip"
+path = "fuzz_targets/packet_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "packet_unmarshal_lenient"
+path = "fuzz_targets/packet_unmarshal_lenient.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "compound_packet_validate"
+path = "fuzz_targets/compound_packet_validate.rs"
+test = false
+doc = false
+bench = false

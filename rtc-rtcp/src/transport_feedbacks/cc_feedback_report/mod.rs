@@ -379,23 +379,18 @@ impl Unmarshal for CcFeedbackReport {
         Self: Sized,
         B: Buf,
     {
-        let raw_packet_len = raw_packet.remaining();
-        if raw_packet_len < REPORT_BLOCK_OFFSET + REPORT_TIMESTAMP_LENGTH {
-            return Err(Error::PacketTooShort);
-        }
-
-        let h = Header::unmarshal(raw_packet)?;
+        // RFC 8888 3.1: V, P, PT and length are as RFC 3550 defines them, so padding the P bit
+        // announces is not part of the report.
+        let (h, mut body) = read_packet(raw_packet)?;
         if h.packet_type != PacketType::TransportSpecificFeedback || h.count != FORMAT_CCFB {
             return Err(Error::WrongType);
         }
 
-        // The header's length field, not the buffer's, delimits this packet: in a compound RTCP
-        // datagram the buffer may hold more than this report.
-        let packet_len = 4 * (h.length as usize + 1);
-        if raw_packet_len < packet_len || packet_len < REPORT_BLOCK_OFFSET + REPORT_TIMESTAMP_LENGTH
-        {
+        let packet_len = HEADER_LENGTH + body.len();
+        if packet_len < REPORT_BLOCK_OFFSET + REPORT_TIMESTAMP_LENGTH {
             return Err(Error::PacketTooShort);
         }
+        let raw_packet = &mut body;
 
         let sender_ssrc = raw_packet.get_u32();
 
