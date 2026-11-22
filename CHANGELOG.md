@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **ice candidate pairs** (webrtc-extensions 7): new `RTCPeerConnectionEvent::
+  OnIceCandidatePairAdd` / `OnIceCandidatePairRemove` (the enum is `#[non_exhaustive]`), new
+  `ice::Event::CandidatePairAdded` / `CandidatePairRemoved` (an exhaustive match on the agent's
+  events needs the arms), `RTCIceTransport::get_candidate_pairs`,
+  `RTCPeerConnection::select_candidate_pair` / `remove_candidate_pair` (InvalidStateError when
+  closed or the ICE state is new / failed / closed, new `Error::NotFoundError` for a pair not
+  listed), `ice::Agent::{get_candidate_pairs, select_candidate_pair, remove_candidate_pair}`.
+  A removed pair is not checked again and not listed; removing the selected pair hands the
+  data to the best other valid pair. The cancelable `icecandidatepairnominate` and the
+  cancelable removal proposals are not implemented.
+
 - **rtp header extension control** (webrtc-extensions 4): `RTCRtpTransceiver::
   set_header_extensions_to_negotiate` takes a `Vec<RTCRtpHeaderExtensionToNegotiate>` (uri and
   direction, "stopped" for not negotiated) and returns a `Result`: an InvalidModificationError

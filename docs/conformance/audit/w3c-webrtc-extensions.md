@@ -8,7 +8,7 @@ The draft's section numbers are generated when it is rendered; this file numbers
 
 Totals:
 
-- MUST: tested 23 / untested 6 / partial 4 / missing 28 / violated 0 / n-a 12
+- MUST: tested 32 / untested 6 / partial 6 / missing 17 / violated 0 / n-a 12
 - SHOULD: tested 1 / untested 0 / partial 0 / missing 0 / violated 0 / n-a 1
 - MAY: tested 0 / untested 0 / partial 0 / missing 1 / violated 0 / n-a 0
 
@@ -46,21 +46,21 @@ Totals:
 | WEBRTC-EXT-6-2 | 6 | MUST | setParameters: encodingOptions is emptied for audio | n/a | - | - | Encoder is the application's |
 | WEBRTC-EXT-6-3 | 6 | MUST | setParameters: encodingOptions of a different length than encodings is an InvalidModificationError | n/a | - | - | Encoder is the application's |
 | WEBRTC-EXT-6-4 | 6 | MUST | setParameters: keyFrame true asks that encoding's encoder for a key frame, without waiting | n/a | - | - | Encoder is the application's |
-| WEBRTC-EXT-7-1 | 7 | MUST | When the ICE agent forms a candidate pair it is appended to [[CandidatePairs]] and icecandidatepairadd fires | missing | `src/peer_connection/transport/ice/mod.rs:1` | - | No event; pairs are visible only through get_stats |
+| WEBRTC-EXT-7-1 | 7 | MUST | When the ICE agent forms a candidate pair it is appended to [[CandidatePairs]] and icecandidatepairadd fires | tested | rtc-ice/src/agent/agent_selector.rs (announce_pair), src/peer_connection/handler/ice.rs | test_every_pair_the_agent_forms_is_announced_and_listed, the_candidate_pairs_are_announced_and_listed | OnIceCandidatePairAdd for every pair put on the list |
 | WEBRTC-EXT-7-2 | 7 | MUST | Before nominating, a cancelable icecandidatepairnominate fires; if cancelled the agent keeps checking | missing | `src/peer_connection/transport/ice/mod.rs:1` | - | Nomination cannot be deferred |
 | WEBRTC-EXT-7-3 | 7 | MUST | [[ProposalPending]] is true while a nominate or remove proposal is being decided | missing | - | - | - |
 | WEBRTC-EXT-7-4 | 7 | MUST | Before removing a pair, icecandidatepairremove fires, cancelable when freeing an unused candidate | missing | `src/peer_connection/transport/ice/mod.rs:1` | - | - |
 | WEBRTC-EXT-7-5 | 7 | MUST | A cancelled removal keeps the pair and its connectivity checks | missing | - | - | - |
-| WEBRTC-EXT-7-6 | 7 | MUST | An accepted removal takes the pair out of [[CandidatePairs]] and the agent drops it | missing | - | - | - |
-| WEBRTC-EXT-7-7 | 7 | MUST | selectCandidatePair: InvalidStateError if closed, a proposal is pending, or the state is new / failed / closed | missing | `src/peer_connection/transport/ice/mod.rs:1` | - | No such method |
-| WEBRTC-EXT-7-8 | 7 | MUST | selectCandidatePair: NotFoundError for a pair not in [[CandidatePairs]] | missing | - | - | - |
-| WEBRTC-EXT-7-9 | 7 | MUST | selectCandidatePair: the agent sends data on the given pair, then selected pair and state are updated with their events | missing | - | - | - |
-| WEBRTC-EXT-7-10 | 7 | MUST | removeCandidatePair: the same three InvalidStateError checks | missing | `src/peer_connection/transport/ice/mod.rs:1` | - | No such method |
-| WEBRTC-EXT-7-11 | 7 | MUST | removeCandidatePair: NotFoundError for an unknown pair | missing | - | - | - |
-| WEBRTC-EXT-7-12 | 7 | MUST | removeCandidatePair: the agent stops checks on the pair, then a non-cancelable icecandidatepairremove fires | missing | - | - | - |
-| WEBRTC-EXT-7.1-1 | 7.1 | MUST | RTCIceCandidatePairEvent carries the candidatePair | missing | `src/peer_connection/event/mod.rs:1` | - | No candidate-pair event in the event enum |
-| WEBRTC-EXT-7.2-1 | 7.2 | MUST | Changing the selected pair picks the [[CandidatePairs]] item whose local and remote candidates match | missing | - | - | There is no [[CandidatePairs]] list to pick from |
-| WEBRTC-EXT-7.2-2 | 7.2 | MUST | Candidate match: identical candidate string, sdpMid, sdpMLineIndex and usernameFragment (null matching only null) | missing | - | - | - |
+| WEBRTC-EXT-7-6 | 7 | MUST | An accepted removal takes the pair out of [[CandidatePairs]] and the agent drops it | tested | rtc-ice/src/agent/mod.rs (remove_candidate_pair) | test_remove_candidate_pair_stops_its_checks_and_announces_the_removal | the pair keeps its slot (pairs are referenced by index), flagged removed: not listed, not checked |
+| WEBRTC-EXT-7-7 | 7 | MUST | selectCandidatePair: InvalidStateError if closed, a proposal is pending, or the state is new / failed / closed | partial | src/peer_connection/mod.rs (select_candidate_pair) | test_select_and_remove_refuse_in_the_new_failed_and_closed_states_and_unknown_pairs, remove_candidate_pair_drops_the_pair_and_both_calls_refuse_what_the_spec_refuses | closed and new / failed / closed refused; there are no proposals (7-2 to 7-5), so none is ever pending |
+| WEBRTC-EXT-7-8 | 7 | MUST | selectCandidatePair: NotFoundError for a pair not in [[CandidatePairs]] | tested | rtc-ice/src/agent/mod.rs (select_candidate_pair) | test_select_and_remove_refuse_in_the_new_failed_and_closed_states_and_unknown_pairs, remove_candidate_pair_drops_the_pair_and_both_calls_refuse_what_the_spec_refuses | Error::NotFoundError |
+| WEBRTC-EXT-7-9 | 7 | MUST | selectCandidatePair: the agent sends data on the given pair, then selected pair and state are updated with their events | tested | rtc-ice/src/agent/mod.rs (select_candidate_pair) | test_select_candidate_pair_makes_the_pair_the_selected_one, select_candidate_pair_moves_the_data_to_the_pair |  |
+| WEBRTC-EXT-7-10 | 7 | MUST | removeCandidatePair: the same three InvalidStateError checks | partial | src/peer_connection/mod.rs (remove_candidate_pair) | remove_candidate_pair_drops_the_pair_and_both_calls_refuse_what_the_spec_refuses | as 7-7 |
+| WEBRTC-EXT-7-11 | 7 | MUST | removeCandidatePair: NotFoundError for an unknown pair | tested | rtc-ice/src/agent/mod.rs (remove_candidate_pair) | remove_candidate_pair_drops_the_pair_and_both_calls_refuse_what_the_spec_refuses |  |
+| WEBRTC-EXT-7-12 | 7 | MUST | removeCandidatePair: the agent stops checks on the pair, then a non-cancelable icecandidatepairremove fires | tested | rtc-ice/src/agent/mod.rs (remove_candidate_pair) | test_remove_candidate_pair_stops_its_checks_and_announces_the_removal, remove_candidate_pair_drops_the_pair_and_both_calls_refuse_what_the_spec_refuses | transactions cancelled, no check sent, queued or taken; then OnIceCandidatePairRemove |
+| WEBRTC-EXT-7.1-1 | 7.1 | MUST | RTCIceCandidatePairEvent carries the candidatePair | tested | src/peer_connection/event/mod.rs (OnIceCandidatePairAdd, OnIceCandidatePairRemove) | the_candidate_pairs_are_announced_and_listed |  |
+| WEBRTC-EXT-7.2-1 | 7.2 | MUST | Changing the selected pair picks the [[CandidatePairs]] item whose local and remote candidates match | tested | rtc-ice/src/agent/mod.rs (listed_pair) | select_candidate_pair_moves_the_data_to_the_pair |  |
+| WEBRTC-EXT-7.2-2 | 7.2 | MUST | Candidate match: identical candidate string, sdpMid, sdpMLineIndex and usernameFragment (null matching only null) | tested | src/peer_connection/transport/ice/mod.rs (find_candidate_pair) | remove_candidate_pair_drops_the_pair_and_both_calls_refuse_what_the_spec_refuses | candidate string, sdpMid, sdpMLineIndex, usernameFragment; the pairs the engine reports carry none of the last three |
 | WEBRTC-EXT-8-1 | 8 | MUST | RTCRtpContributingSource.captureTimestamp: the abs-capture-time of the packet, or interpolated from an earlier one, else undefined | missing | `src/rtp_transceiver/rtp_receiver/rtp_contributing_source.rs:14`, `rtc-rtp/src/extension/mod.rs:1` | - | No abs-capture-time header extension parser |
 | WEBRTC-EXT-8-2 | 8 | MUST | RTCRtpContributingSource.senderCaptureTimeOffset: the extension's estimated capture clock offset, or the most recent one, else undefined | missing | `src/rtp_transceiver/rtp_receiver/rtp_contributing_source.rs:14` | - | - |
 | WEBRTC-EXT-9-1 | 9 | MUST | RTCDataChannel is exposed to and transferable to any Worker | n/a | - | - | Worker transfer is a binding concern |
