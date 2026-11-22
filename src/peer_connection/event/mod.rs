@@ -281,7 +281,9 @@ pub enum RTCPeerConnectionEvent {
     /// match event {
     ///     RTCPeerConnectionEvent::OnIceCandidateEvent(ice_event) => {
     ///         // Send ice_event to remote peer via signaling
-    ///         println!("Send ICE candidate: {}", ice_event.candidate.address);
+    ///         if let Some(candidate) = ice_event.candidate {
+    ///             println!("Send ICE candidate: {}", candidate.address);
+    ///         }
     ///     }
     ///     _ => {}
     /// }
