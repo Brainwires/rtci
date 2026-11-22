@@ -127,6 +127,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **sctp**: a FORWARD TSN fits one packet (RFC 3758 section 3.5, C4): with abandoned messages
   on more streams than fit, it covers the TSNs whose streams do and the next one goes on.
 
+- **sctp**: the Outgoing SSN Reset Request sent in answer to a peer's reset is retransmitted
+  (RFC 6525 section 5.1.1); lost once, the peer's data channel stayed closing for good. No
+  request is given up after five timer expiries any more, and "In progress" answers restart
+  its timer without counting (section 5.2.7).
+- **sctp**: an Outgoing SSN Reset Request without stream numbers resets every stream (RFC
+  6525 section 5.2.2); it reset none and was answered "Success - Performed".
+- **sctp**: the re-configuration requests that are not performed (Incoming SSN Reset, SSN/TSN
+  Reset, Add Streams) are answered "Denied" (RFC 6525 section 5.2.1) instead of not at all.
+
 ### Features
 
 - **sctp**: `Stream::write_sctp_with_ppid` and `Chunks::ppid` for a Payload Protocol

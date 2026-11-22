@@ -33,7 +33,10 @@ pub struct TimerConfig {
     /// RTO.Max that is about five minutes without an answer. `usize::MAX` never gives up and
     /// leaves the failure of the path to whatever runs underneath (ICE consent, for WebRTC).
     pub max_t3_rtx_retrans: usize,
-    /// How many times a RE-CONFIG chunk (stream reset) may be retransmitted.
+    /// How many times a RE-CONFIG request (stream reset) is retransmitted with its timer
+    /// doubling. Past it the request is not given up (RFC 6525 5.1.1: it is retransmitted
+    /// until it is answered): it goes on at the interval reached, at most RTO.Max. An
+    /// association whose peer has gone ends by its other limits.
     pub max_reconfig_retrans: usize,
     /// How many times a delayed SACK may be retransmitted.
     pub max_ack_retrans: usize,

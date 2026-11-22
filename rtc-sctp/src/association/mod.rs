@@ -295,6 +295,9 @@ pub struct Association {
     will_send_forward_tsn: bool,
     will_retransmit_fast: bool,
     will_retransmit_reconfig: bool,
+    /// The peer answered a request "In progress": the reconfiguration timer starts over,
+    /// and the wait is not counted against the request (RFC 6525 5.2.7).
+    restart_reconfig_timer: bool,
     /// True only while the in-flight queue may still hold chunks flagged for
     /// T3-rtx retransmission (set when the timer marks them, cleared once the
     /// scan has re-sent them all). Lets `gather_outbound` skip the O(in-flight)
@@ -473,6 +476,7 @@ impl Default for Association {
             will_send_forward_tsn: false,
             will_retransmit_fast: false,
             will_retransmit_reconfig: false,
+            restart_reconfig_timer: false,
             t3_retransmit_pending: false,
 
             will_send_shutdown_ack: false,
@@ -846,7 +850,7 @@ impl Association {
                 self.on_ack_timeout();
             } else if timer == Timer::Heartbeat {
                 self.on_heartbeat_timeout(now);
-            } else if failure {
+            } else if failure && timer != Timer::Reconfig {
                 self.on_retransmission_failure(timer);
             } else {
                 self.on_retransmission_timeout(timer, n_rtos, now);
@@ -3029,6 +3033,13 @@ impl Association {
         } else if let Some(p) = raw.as_any().downcast_ref::<ParamReconfigResponse>() {
             // RFC 6525 5.1.1: "In progress" is not the outcome. The request stays outstanding
             // (and its timer running), so the final response still finds it.
+            if p.result == ReconfigResult::InProgress
+                && self
+                    .reconfigs
+                    .contains_key(&p.reconfig_response_sequence_number)
+            {
+                self.restart_reconfig_timer = true;
+            }
             if p.result != ReconfigResult::InProgress
                 && let Some(request) = self.reconfigs.remove(&p.reconfig_response_sequence_number)
                 && matches!(
@@ -3043,7 +3054,24 @@ impl Association {
             }
             Ok(())
         } else {
-            // A parameter this side does not handle. It is no reason to end the association.
+            // RFC 6525 5.2.1: every request is answered. The requests this side does not
+            // perform (Incoming SSN Reset, SSN/TSN Reset, Add Outgoing / Incoming Streams)
+            // are denied; each starts with its Re-configuration Request Sequence Number.
+            if let Some(unknown) = raw.as_any().downcast_ref::<ParamUnknown>()
+                && matches!(unknown.typ(), 14 | 15 | 17 | 18)
+                && unknown.value().len() >= 4
+            {
+                let v = unknown.value();
+                let rsn = u32::from_be_bytes([v[0], v[1], v[2], v[3]]);
+                debug!(
+                    "[{}] denying RE-CONFIG request {}",
+                    self.side,
+                    unknown.typ()
+                );
+                reply.push(self.create_reconfig_response(rsn, ReconfigResult::Denied));
+                return Ok(());
+            }
+            // Anything else is no reason to end the association.
             debug!("[{}] ignoring RE-CONFIG parameter {}", self.side, raw);
             Ok(())
         }
@@ -3476,6 +3504,19 @@ impl Association {
         respond: bool,
         reply: &mut Vec<Packet>,
     ) -> Result<()> {
+        // RFC 6525 5.2.2: a request without stream numbers is for every stream.
+        let all_streams;
+        let p = if p.stream_identifiers.is_empty() {
+            let mut stream_identifiers: Vec<u16> = self.streams.keys().copied().collect();
+            stream_identifiers.sort_unstable();
+            all_streams = ParamOutgoingResetRequest {
+                stream_identifiers,
+                ..p.clone()
+            };
+            &all_streams
+        } else {
+            p
+        };
         let mut result = ReconfigResult::SuccessPerformed;
         let mut sis_to_reset = vec![];
 
@@ -3933,6 +3974,16 @@ impl Association {
                 self.timers
                     .start(Timer::Reconfig, now, self.rto_mgr.get_rto());
             }
+        }
+
+        // RFC 6525 5.1.1: a request outstanding is timed, whoever started it. The request
+        // sent in answer to the peer's reset had no timer, so it was never retransmitted.
+        if std::mem::take(&mut self.restart_reconfig_timer) {
+            self.timers.stop(Timer::Reconfig);
+        }
+        if !self.reconfigs.is_empty() {
+            self.timers
+                .start_if_idle(Timer::Reconfig, now, self.rto_mgr.get_rto());
         }
 
         raw_packets
