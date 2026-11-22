@@ -375,16 +375,6 @@ impl World {
                 .unwrap_or(world.now);
             world.run_until(next.max(world.now + Duration::from_millis(1)))?;
         }
-        world.fec_ssrc = world.peers[0]
-            .pc
-            .rtp_sender(sender)
-            .expect("sender")
-            .get_parameters()
-            .encodings[0]
-            .rtp_coding_parameters
-            .fec
-            .as_ref()
-            .map(|fec| fec.ssrc);
         Ok((world, sender))
     }
 

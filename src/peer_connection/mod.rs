@@ -830,6 +830,8 @@ pub struct RTCPeerConnection {
     identity_assertion: Option<String>,
     /// What a rollback restores: set while an offer applied in the stable state is pending.
     last_stable_state: Option<internal::LastStableState>,
+    /// The transport part of the pending remote offer, applied with the local answer.
+    pending_remote_transport: Option<internal::PendingRemoteTransport>,
     negotiation_needed_state: NegotiationNeededState,
     is_negotiation_ongoing: bool,
     // wpt100:hdrext — `alwaysNegotiateDataChannels` (see `always_negotiate`).
@@ -1149,13 +1151,22 @@ impl RTCPeerConnection {
         // negotiated DTLS roles"): the endpoint that was the offerer, and so the DTLS server,
         // when the association was set up stays the server when it answers a later offer,
         // whatever its configured answering role and its ICE role say.
-        match self.dtls_transport().role() {
-            RTCDtlsRole::Client if self.dtls_transport().is_started() => {
-                connection_role = ConnectionRole::Active
-            }
-            RTCDtlsRole::Server if self.dtls_transport().is_started() => {
-                connection_role = ConnectionRole::Passive
-            }
+        // A new association the offer asks for has the role applying the answer gives it
+        // (`defer_remote_transport` worked it out).
+        let transport_role = match self
+            .pending_remote_transport
+            .as_ref()
+            .and_then(|pending| pending.new_dtls_role)
+        {
+            Some(role) => Some(role),
+            None => self
+                .dtls_transport()
+                .is_started()
+                .then(|| self.dtls_transport().role()),
+        };
+        match transport_role {
+            Some(RTCDtlsRole::Client) => connection_role = ConnectionRole::Active,
+            Some(RTCDtlsRole::Server) => connection_role = ConnectionRole::Passive,
             _ => {}
         }
 
@@ -1406,6 +1417,17 @@ impl RTCPeerConnection {
             }
             self.pipeline_context.stats.transport.ice_role = RTCIceRole::Controlling;
             self.ice_transport_mut().role_determined = true;
+        }
+
+        // The transports take the remote offer's parameters now that it is answered
+        // (`defer_remote_transport`).
+        if matches!(
+            local_description.sdp_type,
+            RTCSdpType::Answer | RTCSdpType::Pranswer
+        ) && let Some(pending) = self.pending_remote_transport.take()
+            && let Some(parsed) = self.remote_description().and_then(|r| r.parsed.clone())
+        {
+            self.apply_remote_transport(now, &parsed, false, Some(pending.ice_restart))?;
         }
 
         let we_answer = local_description.sdp_type == RTCSdpType::Answer;
@@ -1748,6 +1770,268 @@ impl RTCPeerConnection {
             self.after_remote_description(sdp_type, prior_state);
         }
         applied
+    }
+
+    /// Gives the ICE and DTLS transports the parameters of a remote description: an answer's
+    /// when it is applied, an offer's when the local answer to it is
+    /// ([`Self::defer_remote_transport`]; `deferred_ice_restart` is whether that offer restarts
+    /// ICE, as worked out then: the restart's local half was applied with the answer).
+    fn apply_remote_transport(
+        &mut self,
+        now: Instant,
+        parsed_remote_description: &::sdp::description::session::SessionDescription,
+        we_offer: bool,
+        deferred_ice_restart: Option<bool>,
+    ) -> Result<()> {
+        // The ICE and DTLS transports start with the first description that sets one up,
+        // not with the first remote description: a description with nothing to negotiate
+        // (no m-section) has no ICE credentials, and a remote offer may be applied again or
+        // rolled back before an answer makes it current.
+        let transports_started = self.ice_transport().state() != RTCIceTransportState::New;
+
+        if let Some(RemoteIceDetails {
+            ufrag: remote_ufrag,
+            pwd: remote_pwd,
+            candidates,
+        }) = extract_ice_details(parsed_remote_description)?
+        {
+            let remote_end_of_candidates = parsed_remote_description
+                .media_descriptions
+                .iter()
+                .any(|m| !is_rejected_media(m) && m.has_attribute(ATTR_KEY_END_OF_CANDIDATES));
+            // A description that sets up a transport consumes the closure of the last one.
+            let new_association = std::mem::take(&mut self.transport_closed);
+            let remote_is_lite = is_lite_set(parsed_remote_description);
+            let local_ice_role = self.local_ice_role(remote_is_lite, we_offer);
+            let remote_dtls_parameters = RTCDtlsParameters {
+                role: RTCDtlsRole::from(parsed_remote_description),
+                fingerprints: extract_fingerprints(parsed_remote_description)?,
+            };
+
+            let remote_tls_id = extract_tls_id(parsed_remote_description)?;
+            // A session with media sections needs SRTP keys from the association: it is
+            // set up with `use_srtp`, and one that was not is replaced (RFC 5764 section
+            // 4.1).
+            self.dtls_transport_mut().srtp_required = has_rtp_media(parsed_remote_description);
+
+            // After the transport was closed, the description that sets one up again starts
+            // a new ICE session even when the peer keeps its ICE credentials: some browsers
+            // hold one ufrag/pwd per session, not per transport (Firefox), so a new m-section
+            // after every one was rejected arrives with the old credentials but new
+            // candidates and a new DTLS association. Keeping the old session left the agent on
+            // the closed transport's selected pair, sending the DTLS handshake there.
+            let ice_restart = deferred_ice_restart.unwrap_or_else(|| {
+                transports_started
+                    && (new_association
+                        || self
+                            .ice_transport()
+                            .have_remote_credentials_change(&remote_ufrag, &remote_pwd))
+            });
+            // The local half of a restart was applied with this side's description (the
+            // offerer's offer, the answerer's answer): the transport takes the peer's new
+            // credentials. So does one whose credentials a restart of this side's cleared.
+            if transports_started
+                && (ice_restart
+                    || self
+                        .ice_transport()
+                        .have_remote_credentials_change(&remote_ufrag, &remote_pwd))
+            {
+                self.ice_transport_mut()
+                    .set_remote_credentials(remote_ufrag.clone(), remote_pwd.clone())?;
+            }
+            if transports_started {
+                // RFC 8445 section 6.1.1: "Once the roles are determined for a session,
+                // they persist throughout the lifetime of the session", an ICE restart
+                // included ("an ICE agent MUST NOT redetermine the role as part of an ICE
+                // restart unless" a full agent became lite, or a role conflict is
+                // repaired, which the agent does by itself). So whoever offers later, the
+                // ICE agent keeps its role, except that with one lite and one full agent
+                // the full one is controlling, and that a transport set up again after it
+                // was closed is a new session: its roles are determined as the first
+                // time, by who offers. (`local_ice_role`, which follows the offerer, is
+                // what the DTLS role is derived from when `a=setup` leaves it open.)
+                let local_is_lite = self.setting_engine.candidates.ice_lite;
+                self.ice_transport_mut()
+                    .agent
+                    .set_remote_lite(remote_is_lite);
+                let role = if remote_is_lite != local_is_lite {
+                    Some(if local_is_lite {
+                        RTCIceRole::Controlled
+                    } else {
+                        RTCIceRole::Controlling
+                    })
+                } else if new_association {
+                    Some(local_ice_role)
+                } else {
+                    None
+                };
+                if let Some(role) = role
+                    && role != self.ice_transport().role()
+                {
+                    self.ice_transport_mut().set_role(role);
+                    self.pipeline_context.stats.transport.ice_role = role;
+                }
+                self.ice_transport_mut().role_determined = true;
+
+                // RFC 8842 section 3.1: the DTLS association goes on, across an ICE restart
+                // too, unless the description changes the roles, the fingerprints or the
+                // `tls-id`, or sets up a transport that was closed; then a new association
+                // replaces it, with or without an ICE restart.
+                let association = self.dtls_transport_mut().update_remote(
+                    local_ice_role,
+                    remote_dtls_parameters.clone(),
+                    remote_tls_id.clone(),
+                    DtlsRemoteUpdate {
+                        we_offer,
+                        ice_restart,
+                        transport_closed: new_association,
+                    },
+                )?;
+                if association == DtlsAssociationUpdate::New {
+                    self.pipeline_context
+                        .stats
+                        .transport
+                        .on_dtls_state_changed(RTCDtlsTransportState::Connecting);
+                    // An ICE restart starts the client's handshake when it selects its
+                    // pair. Without one no pair change is coming: the handshake starts now,
+                    // on the pair ICE has (or with the first pair, if it has none yet).
+                    if !ice_restart && self.ice_transport().agent.media_path().is_some() {
+                        self.pipeline_context.dtls_handler_context.connect_requested = Some(now);
+                    }
+                    self.update_connection_state(false);
+                }
+            }
+
+            // The description's candidate lines: candidates the application supplied, as
+            // much as those it trickles.
+            for candidate in candidates {
+                self.add_signalled_remote_candidate(candidate)?;
+            }
+            // `a=end-of-candidates` (RFC 8838 section 14): the candidates above were the
+            // generation's last. The agent ignores later ones and can fail without
+            // waiting for its timeout when none of them works.
+            if remote_end_of_candidates {
+                self.ice_transport_mut()
+                    .agent
+                    .set_remote_end_of_candidates();
+            }
+
+            if !transports_started {
+                log::trace!(
+                    "start_transports: local_ice_role={local_ice_role}, remote_dtls_role={}",
+                    remote_dtls_parameters.role
+                );
+
+                self.start_transports(
+                    now,
+                    local_ice_role,
+                    RTCIceParameters {
+                        username_fragment: remote_ufrag,
+                        password: remote_pwd,
+                        ice_lite: remote_is_lite,
+                    },
+                    remote_dtls_parameters,
+                )?;
+                self.dtls_transport_mut().remote_tls_id = remote_tls_id;
+                self.ice_transport_mut().role_determined = true;
+            }
+            // RFC 8445 section 14.2: "Both agents MUST use the higher out of the two
+            // proposed values"; the peer's is its `a=ice-pacing` (RFC 8839 section 5.5),
+            // the default when it states none. Every description states it again.
+            self.ice_transport_mut()
+                .agent
+                .set_remote_pacing(remote_ice_pacing(parsed_remote_description));
+        }
+        Ok(())
+    }
+
+    /// The ICE role of this side for a description that sets up a transport. If one of the
+    /// agents is lite and the other one is not, the full agent is the controlling one. If both
+    /// or neither agents are lite the offering agent is controlling (RFC 8445 section 6.1.1).
+    fn local_ice_role(&self, remote_is_lite: bool, we_offer: bool) -> RTCIceRole {
+        let local_is_lite = self.setting_engine.candidates.ice_lite;
+        if (we_offer && remote_is_lite == local_is_lite) || (remote_is_lite && !local_is_lite) {
+            RTCIceRole::Controlling
+        } else {
+            RTCIceRole::Controlled
+        }
+    }
+
+    /// Keeps the transport part of a remote offer for the local answer
+    /// ([`internal::PendingRemoteTransport`]), so that a rollback of the offer leaves the ICE
+    /// and DTLS transports as they were (RFC 9429 section 5.7): nothing is started, restarted
+    /// or replaced, and no candidate of the offer's ICE generation reaches the agent, until the
+    /// answer is applied. What the answer states is staged: the new local ICE credentials of a
+    /// restart, the role and `tls-id` of a new DTLS association.
+    fn defer_remote_transport(
+        &mut self,
+        parsed: &::sdp::description::session::SessionDescription,
+    ) -> Result<()> {
+        // An offer applied over a pending one replaces it.
+        self.drop_pending_remote_transport();
+        let Some(RemoteIceDetails { ufrag, pwd, .. }) = extract_ice_details(parsed)? else {
+            return Ok(());
+        };
+        // W3C 4.4.1.4 ([[IceRole]], RFC 8445 rules): a remote offer sets an undetermined
+        // role now, though the transports start with the answer: controlled, or controlling
+        // when the offerer is lite and this side is not.
+        if !self.ice_transport().role_determined {
+            let role = self.local_ice_role(is_lite_set(parsed), false);
+            if role != self.ice_transport().role() {
+                self.ice_transport_mut().set_role(role);
+            }
+            self.pipeline_context.stats.transport.ice_role = role;
+            self.ice_transport_mut().role_determined = true;
+        }
+        let transports_started = self.ice_transport().state() != RTCIceTransportState::New;
+        let ice_restart = transports_started
+            && (self.transport_closed
+                || self
+                    .ice_transport()
+                    .have_remote_credentials_change(&ufrag, &pwd));
+        // The answer carries the new local credentials: staged now, applied with the answer.
+        // Credentials an offer of this side staged already are the ones it carries.
+        let staged_restart = if ice_restart && !self.ice_transport().has_pending_restart() {
+            let gathering = self.ice_transport().gathering_state();
+            self.stage_ice_restart()?;
+            Some(gathering)
+        } else {
+            None
+        };
+        let new_dtls_role = self.dtls_transport().planned_association(
+            self.local_ice_role(is_lite_set(parsed), false),
+            &RTCDtlsParameters {
+                role: RTCDtlsRole::from(parsed),
+                fingerprints: extract_fingerprints(parsed)?,
+            },
+            extract_tls_id(parsed)?.as_deref(),
+            DtlsRemoteUpdate {
+                we_offer: false,
+                ice_restart,
+                transport_closed: self.transport_closed,
+            },
+            has_rtp_media(parsed),
+        );
+        let staged_tls_id =
+            new_dtls_role.is_some() && self.dtls_transport_mut().stage_answer_tls_id()?;
+        self.pending_remote_transport = Some(internal::PendingRemoteTransport {
+            ufrag,
+            ice_restart,
+            staged_restart,
+            new_dtls_role,
+            staged_tls_id,
+        });
+        Ok(())
+    }
+
+    /// Whether the remote candidates of the pending remote offer's ICE generation wait for the
+    /// local answer: the offer starts the transport or restarts ICE.
+    fn remote_candidates_wait_for_answer(&self) -> bool {
+        self.pending_remote_transport
+            .as_ref()
+            .is_some_and(|pending| {
+                pending.ufrag != self.ice_transport().get_remote_user_credentials().0
+            })
     }
 
     /// The checks `set_remote_description` makes on a parsed description before applying it
@@ -2131,176 +2415,12 @@ impl RTCPeerConnection {
             // What the remote side says about bandwidth, section by section.
             self.apply_remote_bandwidth(parsed_remote_description);
 
-            // The ICE and DTLS transports start with the first description that sets one up,
-            // not with the first remote description: a description with nothing to negotiate
-            // (no m-section) has no ICE credentials, and a remote offer may be applied again or
-            // rolled back before an answer makes it current.
-            let transports_started = self.ice_transport().state() != RTCIceTransportState::New;
-
-            if let Some(RemoteIceDetails {
-                ufrag: remote_ufrag,
-                pwd: remote_pwd,
-                candidates,
-            }) = extract_ice_details(parsed_remote_description)?
-            {
-                let remote_end_of_candidates = parsed_remote_description
-                    .media_descriptions
-                    .iter()
-                    .any(|m| !is_rejected_media(m) && m.has_attribute(ATTR_KEY_END_OF_CANDIDATES));
-                // A description that sets up a transport consumes the closure of the last one.
-                let new_association = std::mem::take(&mut self.transport_closed);
-                // If one of the agents is lite and the other one is not, the full agent is the
-                // controlling one. If both or neither agents are lite the offering agent
-                // is controlling. RFC 8445 S6.1.1
-                let remote_is_lite = is_lite_set(parsed_remote_description);
-                let local_ice_role = if (we_offer
-                    && remote_is_lite == self.setting_engine.candidates.ice_lite)
-                    || (remote_is_lite && !self.setting_engine.candidates.ice_lite)
-                {
-                    RTCIceRole::Controlling
-                } else {
-                    RTCIceRole::Controlled
-                };
-                let remote_dtls_parameters = RTCDtlsParameters {
-                    role: RTCDtlsRole::from(parsed_remote_description),
-                    fingerprints: extract_fingerprints(parsed_remote_description)?,
-                };
-
-                let remote_tls_id = extract_tls_id(parsed_remote_description)?;
-                // A session with media sections needs SRTP keys from the association: it is
-                // set up with `use_srtp`, and one that was not is replaced (RFC 5764 section
-                // 4.1).
-                self.dtls_transport_mut().srtp_required = has_rtp_media(parsed_remote_description);
-
-                // After the transport was closed, the description that sets one up again starts
-                // a new ICE session even when the peer keeps its ICE credentials: some browsers
-                // hold one ufrag/pwd per session, not per transport (Firefox), so a new m-section
-                // after every one was rejected arrives with the old credentials but new
-                // candidates and a new DTLS association. Keeping the old session left the agent on
-                // the closed transport's selected pair, sending the DTLS handshake there.
-                let ice_restart = transports_started
-                    && (new_association
-                        || self
-                            .ice_transport()
-                            .have_remote_credentials_change(&remote_ufrag, &remote_pwd));
-                if ice_restart {
-                    // An ICE Restart only happens implicitly for a set_remote_description of type
-                    // offer; as the offerer, `create_offer` staged one for a closed transport.
-
-                    if !we_offer {
-                        // The answerer restarts in one step: it has `now`, and the answer it
-                        // generates next must already carry the new local credentials.
-                        self.stage_ice_restart()?;
-                        self.apply_ice_restart(now)?;
-                    }
-
-                    self.ice_transport_mut()
-                        .set_remote_credentials(remote_ufrag.clone(), remote_pwd.clone())?;
-                }
-
-                if transports_started {
-                    // RFC 8445 section 6.1.1: "Once the roles are determined for a session,
-                    // they persist throughout the lifetime of the session", an ICE restart
-                    // included ("an ICE agent MUST NOT redetermine the role as part of an ICE
-                    // restart unless" a full agent became lite, or a role conflict is
-                    // repaired, which the agent does by itself). So whoever offers later, the
-                    // ICE agent keeps its role, except that with one lite and one full agent
-                    // the full one is controlling, and that a transport set up again after it
-                    // was closed is a new session: its roles are determined as the first
-                    // time, by who offers. (`local_ice_role`, which follows the offerer, is
-                    // what the DTLS role is derived from when `a=setup` leaves it open.)
-                    let local_is_lite = self.setting_engine.candidates.ice_lite;
-                    self.ice_transport_mut()
-                        .agent
-                        .set_remote_lite(remote_is_lite);
-                    let role = if remote_is_lite != local_is_lite {
-                        Some(if local_is_lite {
-                            RTCIceRole::Controlled
-                        } else {
-                            RTCIceRole::Controlling
-                        })
-                    } else if new_association {
-                        Some(local_ice_role)
-                    } else {
-                        None
-                    };
-                    if let Some(role) = role
-                        && role != self.ice_transport().role()
-                    {
-                        self.ice_transport_mut().set_role(role);
-                        self.pipeline_context.stats.transport.ice_role = role;
-                    }
-                    self.ice_transport_mut().role_determined = true;
-
-                    // RFC 8842 section 3.1: the DTLS association goes on, across an ICE restart
-                    // too, unless the description changes the roles, the fingerprints or the
-                    // `tls-id`, or sets up a transport that was closed; then a new association
-                    // replaces it, with or without an ICE restart.
-                    let association = self.dtls_transport_mut().update_remote(
-                        local_ice_role,
-                        remote_dtls_parameters.clone(),
-                        remote_tls_id.clone(),
-                        DtlsRemoteUpdate {
-                            we_offer,
-                            ice_restart,
-                            transport_closed: new_association,
-                        },
-                    )?;
-                    if association == DtlsAssociationUpdate::New {
-                        self.pipeline_context
-                            .stats
-                            .transport
-                            .on_dtls_state_changed(RTCDtlsTransportState::Connecting);
-                        // An ICE restart starts the client's handshake when it selects its
-                        // pair. Without one no pair change is coming: the handshake starts now,
-                        // on the pair ICE has (or with the first pair, if it has none yet).
-                        if !ice_restart && self.ice_transport().agent.media_path().is_some() {
-                            self.pipeline_context.dtls_handler_context.connect_requested =
-                                Some(now);
-                        }
-                        self.update_connection_state(false);
-                    }
-                }
-
-                // The description's candidate lines: candidates the application supplied, as
-                // much as those it trickles.
-                for candidate in candidates {
-                    self.add_signalled_remote_candidate(candidate)?;
-                }
-                // `a=end-of-candidates` (RFC 8838 section 14): the candidates above were the
-                // generation's last. The agent ignores later ones and can fail without
-                // waiting for its timeout when none of them works.
-                if remote_end_of_candidates {
-                    self.ice_transport_mut()
-                        .agent
-                        .set_remote_end_of_candidates();
-                }
-
-                if !transports_started {
-                    log::trace!(
-                        "start_transports: local_ice_role={local_ice_role}, remote_dtls_role={}",
-                        remote_dtls_parameters.role
-                    );
-
-                    self.start_transports(
-                        now,
-                        local_ice_role,
-                        RTCIceParameters {
-                            username_fragment: remote_ufrag,
-                            password: remote_pwd,
-                            ice_lite: remote_is_lite,
-                        },
-                        remote_dtls_parameters,
-                    )?;
-                    self.dtls_transport_mut().remote_tls_id = remote_tls_id;
-                    self.ice_transport_mut().role_determined = true;
-                }
-                // RFC 8445 section 14.2: "Both agents MUST use the higher out of the two
-                // proposed values"; the peer's is its `a=ice-pacing` (RFC 8839 section 5.5),
-                // the default when it states none. Every description states it again.
-                self.ice_transport_mut()
-                    .agent
-                    .set_remote_pacing(remote_ice_pacing(parsed_remote_description));
+            // The ICE and DTLS transports take an answer's parameters now, an offer's
+            // when the local answer is applied (`defer_remote_transport`).
+            if we_offer {
+                self.apply_remote_transport(now, parsed_remote_description, true, None)?;
+            } else {
+                self.defer_remote_transport(parsed_remote_description)?;
             }
 
             if is_final_answer
@@ -2524,10 +2644,13 @@ impl RTCPeerConnection {
                     None,
                 );
             }
-            // One transport carries every section (BUNDLE): its agent is told.
-            self.ice_transport_mut()
-                .agent
-                .set_remote_end_of_candidates();
+            // One transport carries every section (BUNDLE): its agent is told, with the
+            // answer when the candidates wait for it (it reads the description then).
+            if !self.remote_candidates_wait_for_answer() {
+                self.ice_transport_mut()
+                    .agent
+                    .set_remote_end_of_candidates();
+            }
             return Ok(());
         }
 
@@ -2566,8 +2689,15 @@ impl RTCPeerConnection {
             return Ok(());
         }
 
+        // The candidates of a remote offer that starts the transport or restarts ICE reach
+        // the agent with the local answer (`defer_remote_transport`), from the description.
+        let waits = self.remote_candidates_wait_for_answer();
         let Some(section) = section else {
-            self.add_ice_remote_candidate(candidate_value)?;
+            if waits {
+                unmarshal_candidate(candidate_value)?;
+            } else {
+                self.add_ice_remote_candidate(candidate_value)?;
+            }
             self.trickled_remote_candidates += 1;
             return Ok(());
         };
@@ -2582,9 +2712,10 @@ impl RTCPeerConnection {
                 .map(str::to_owned)
         });
         let (transport_ufrag, _) = self.ice_transport().get_remote_user_credentials();
-        if transport_ufrag.is_empty()
-            || section_ufrag.is_none()
-            || section_ufrag.as_deref() == Some(transport_ufrag)
+        if !waits
+            && (transport_ufrag.is_empty()
+                || section_ufrag.is_none()
+                || section_ufrag.as_deref() == Some(transport_ufrag))
         {
             self.add_ice_remote_candidate(candidate_value)?;
         } else {
@@ -4900,6 +5031,9 @@ a=rtcp-mux\r\n";
             remote(RTCSdpType::Offer, PER_SECTION_UFRAG_OFFER),
         )
         .expect("a BUNDLE group's m-sections may have their own ICE credentials");
+        // The transport takes them with the answer.
+        let answer = pc.create_answer(None).unwrap();
+        pc.set_local_description(Instant::now(), answer).unwrap();
         assert_eq!(pc.ice_transport().get_remote_user_credentials().0, "ETEn");
         assert_eq!(pc.can_trickle_ice_candidates(), Some(true));
 
@@ -5103,9 +5237,13 @@ a=rtcp-mux\r\n";
         assert_eq!(pc.signaling_state, RTCSignalingState::Stable);
         assert_eq!(pc.ice_transport().state(), RTCIceTransportState::New);
 
-        // The next offer that has an m-section starts them.
+        // The next offer that has an m-section starts them, with its answer (a rollback of the
+        // offer has nothing to undo, RFC 9429 section 5.7).
         pc.set_remote_description(Instant::now(), audio_video_offer())
             .unwrap();
+        assert_eq!(pc.ice_transport().state(), RTCIceTransportState::New);
+        let answer = pc.create_answer(None).unwrap();
+        pc.set_local_description(Instant::now(), answer).unwrap();
         assert_ne!(pc.ice_transport().state(), RTCIceTransportState::New);
     }
 
