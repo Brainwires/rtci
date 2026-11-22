@@ -329,6 +329,11 @@ over SRTP and is subject to none of SCTP's flow control.
 - ✅ **SVC signalling in `rtc-rtp`** - the W3C scalability modes and their layer structures, VP8 / VP9 layer descriptors, the AV1 Dependency Descriptor, and forwarder-side layer selectors (`scalabilityMode` on an encoding is not there yet)
 - ✅ **RTX & FEC** - RFC 4588 retransmission; FlexFEC (draft-ietf-payload-flexible-fec-scheme-03, not RFC 8627) through an
   opt-in interceptor; ULPFEC can be registered for an application with its own coder but is not encoded or decoded
+- ✅ **Simulcast** - RID-based simulcast, sending and receiving (no SVC layer packetization for VP9 / AV1)
+- ✅ **RTX & FEC** - RFC 4588 retransmission; FlexFEC through opt-in interceptors, both as browsers send it
+  (draft-ietf-payload-flexible-fec-scheme-03, `video/flexfec-03`) and as published (RFC 8627, `video/flexfec`: masks,
+  row / column / 2-D protection, retransmission); ULPFEC can be registered for an application with its own coder but is
+  not encoded or decoded
 - ✅ **Statistics** - `getStats` per the W3C WebRTC Statistics API, for what a transport measures (members that need an
   encoder, decoder or playout are left out, not reported as 0)
 - ✅ **Interceptors** - Composable RTP/RTCP pipeline: the RTCP session (reports, CNAME, BYE, RFC 3550 / RFC 4585 timing, compound packets), NACK, TWCC feedback and key-frame requests by default;

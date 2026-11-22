@@ -165,4 +165,37 @@ pub struct StreamInfo {
     /// Specifies which RTCP feedback types (NACK, PLI, REMB, etc.) are
     /// supported for this stream.
     pub rtcp_feedback: Vec<RTCPFeedback>,
+
+    /// MIME type of the FEC format `payload_type_fec` names (e.g. "video/flexfec-03",
+    /// "video/flexfec").
+    ///
+    /// It selects the coder: FlexFEC draft-03 (`flexfec-03`) and RFC 8627 (`flexfec`) are
+    /// different wire formats. Empty means the stream does not say, and the draft-03
+    /// interceptors, the only FEC there was before this field, take it as theirs.
+    pub mime_type_fec: String,
+
+    /// Format-specific parameters of the FEC format (its `a=fmtp` line), e.g.
+    /// "repair-window=200000".
+    pub sdp_fmtp_line_fec: String,
+}
+
+impl StreamInfo {
+    /// Whether this stream's FEC flow is FlexFEC draft-03 (`<type>/flexfec-03`), or does not
+    /// name its format.
+    pub fn fec_is_flexfec03(&self) -> bool {
+        self.mime_type_fec.is_empty() || fec_subtype_is(&self.mime_type_fec, "flexfec-03")
+    }
+
+    /// Whether this stream's FEC flow is RFC 8627 FlexFEC (`<type>/flexfec`).
+    pub fn fec_is_flexfec(&self) -> bool {
+        fec_subtype_is(&self.mime_type_fec, "flexfec")
+    }
+}
+
+/// Whether `mime_type` is `<type>/<subtype>`, compared without case and exactly: `flexfec` must
+/// not match `flexfec-03`.
+fn fec_subtype_is(mime_type: &str, subtype: &str) -> bool {
+    mime_type
+        .split_once('/')
+        .is_some_and(|(_, found)| found.eq_ignore_ascii_case(subtype))
 }

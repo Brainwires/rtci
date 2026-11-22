@@ -155,7 +155,10 @@ impl Interceptor for FlexFec03ReceiveInterceptor {
     fn bind_remote_stream(&mut self, info: &StreamInfo) {
         // Both halves, as everywhere else: without the repair SSRC there is nothing to route, and
         // without the payload type the association was never negotiated.
-        if let (Some(ssrc_fec), Some(_)) = (info.ssrc_fec, info.payload_type_fec) {
+        // And only for this format: RFC 8627 `flexfec` has its own interceptor.
+        if let (Some(ssrc_fec), Some(_)) = (info.ssrc_fec, info.payload_type_fec)
+            && info.fec_is_flexfec03()
+        {
             self.decoders
                 .insert(info.ssrc, FlexFec03Decoder::new(ssrc_fec, info.ssrc));
             self.repair_to_media.insert(ssrc_fec, info.ssrc);

@@ -859,7 +859,7 @@ pub(crate) fn create_stream_info(
     ssrc_fec: Option<SSRC>,
     payload_type: PayloadType,
     payload_type_rtx: Option<PayloadType>,
-    payload_type_fec: Option<PayloadType>,
+    fec_format: Option<&crate::rtp_transceiver::rtp_sender::rtp_codec::FecFormat>,
     codec: &RTCRtpCodec,
     header_extensions: &[RTCRtpHeaderExtensionParameters],
 ) -> interceptor::StreamInfo {
@@ -886,13 +886,20 @@ pub(crate) fn create_stream_info(
         ssrc_fec,
         payload_type,
         payload_type_rtx,
-        payload_type_fec,
+        payload_type_fec: fec_format.map(|format| format.payload_type),
         rtp_header_extensions,
         mime_type: codec.mime_type.clone(),
         clock_rate: codec.clock_rate,
         channels: codec.channels,
         sdp_fmtp_line: codec.sdp_fmtp_line.clone(),
         rtcp_feedback: feedbacks,
+        // Which FEC coder the repair flow needs, and its parameters (`repair-window`).
+        mime_type_fec: fec_format
+            .map(|format| format.mime_type.clone())
+            .unwrap_or_default(),
+        sdp_fmtp_line_fec: fec_format
+            .map(|format| format.sdp_fmtp_line.clone())
+            .unwrap_or_default(),
     }
 }
 

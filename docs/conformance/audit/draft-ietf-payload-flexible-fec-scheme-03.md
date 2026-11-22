@@ -3,16 +3,22 @@
 Spec: draft-ietf-payload-flexible-fec-scheme-03, 31 October 2016 (expired; superseded by RFC 8627, whose
 payload format is not backward compatible). This is the format libwebrtc negotiates as
 `video/flexfec-03` and the only FEC the engine implements (`rtc-interceptor/src/flexfec/`). Audited at
-fork master 8916bc3. All sections with implementation requirements are covered: 4, 5.1, 5.2, 6, 8, 9.
+fork master 8916bc3; rows updated on branch `conf/cc-fec-flexfec` (wire-format fixes and tests). All sections with implementation requirements are covered: 4, 5.1, 5.2, 6, 8, 9.
 Sections 1 to 3, 7 (examples), 10 to 13 carry no requirement on an endpoint.
 
 The interceptors are opt-in: nothing registers `FlexFec03SendInterceptor` / `FlexFec03ReceiveInterceptor`
 by default, and `video/flexfec-03` is not in `register_default_codecs`.
 
+Two rows are `violated` on purpose and stay so (libwebrtc compatibility, decision D4 of
+`docs/conformance.md`): FLEXFEC03-4.2-17 (mask bit j is SN base + j) and FLEXFEC03-5.1-5 (the subtype is
+`flexfec-03`). Each is pinned by a test. Bugs 2, 3 and 6 below are fixed on `conf/cc-fec-flexfec`; bugs 1,
+4 and 5 (chain order with transport-wide CC, repair packets and the arrival recorders) are fixed in the
+congestion-control PR.
+
 Totals:
 
-- MUST: tested 19 / untested 8 / partial 1 / missing 3 / violated 6 / n-a 2 (total 39)
-- SHOULD: tested 1 / untested 0 / partial 1 / missing 5 / violated 0 / n-a 3 (total 10)
+- MUST: tested 29 / untested 1 / partial 1 / missing 3 / violated 3 / n-a 2 (total 39)
+- SHOULD: tested 2 / untested 0 / partial 1 / missing 4 / violated 0 / n-a 3 (total 10)
 - MAY: tested 0 / untested 1 / partial 0 / missing 6 / violated 0 / n-a 0 (total 7)
 
 Paths are relative to the repo root; `fec/` abbreviates `rtc-interceptor/src/flexfec/`, `it/` abbreviates
@@ -22,30 +28,30 @@ Paths are relative to the repo root; `fec/` abbreviates `rtc-interceptor/src/fle
 |---|---|---|---|---|---|---|---|
 | FLEXFEC03-4.1-1 | 4.1 | MUST | Source packets are sent unmodified; the FEC covers the packets as they are on the wire | partial | `fec/draft03/sender.rs:136-170` | `it/flexfec_send.rs::media_precedes_the_repair_packets_that_protect_it` | The interceptor does not alter media, but it encodes at `Slot::FecEncoder` (5000), before `TwccSenderInterceptor` (2000) adds or rewrites the transport-cc header extension (`twcc/sender.rs:112-126`). The protected image is then not the wire image. See Bug 1 |
 | FLEXFEC03-4.2-1 | 4.2 | MUST | Repair packet carries a FEC header identifying the source block and the packets protected | tested | `fec/draft03/encoder.rs:222-241` | `encoder.rs::the_header_names_the_stream_and_block_it_protects` | |
-| FLEXFEC03-4.2-2 | 4.2 | MUST | Marker bit of a repair packet SHALL be 0 | untested | `fec/draft03/encoder.rs:249-262` (`..Default::default()`) | none | No test reads `header.marker` of a repair packet |
+| FLEXFEC03-4.2-2 | 4.2 | MUST | Marker bit of a repair packet SHALL be 0 | tested | `fec/draft03/encoder.rs` (`encode_one`, header built with `marker` unset) | `encoder.rs::the_marker_bit_of_a_repair_packet_is_zero`, `it/flexfec03_conformance.rs::a_repair_packet_has_no_marker_bit` |  |
 | FLEXFEC03-4.2-3 | 4.2 | MUST | Repair packets use a dynamic payload type determined out of band | tested | `fec/draft03/sender.rs:193-205`, `src/rtp_transceiver/rtp_sender/rtp_codec.rs:347-352` | `encoder.rs::repair_packets_form_their_own_stream`, `tests/repair_codec_negotiation.rs::flexfec_codec_is_offered_alongside_the_track_codec` | |
 | FLEXFEC03-4.2-4 | 4.2 | MUST | Repair sequence number is one higher than the previous repair packet | tested | `fec/draft03/encoder.rs:243-244` | `encoder.rs::repair_packets_form_their_own_stream`, `it/flexfec_send.rs::the_repair_stream_has_its_own_identity_and_sequence_numbers` | |
-| FLEXFEC03-4.2-5 | 4.2 | SHOULD | Initial repair sequence number is random | missing | `fec/draft03/encoder.rs:63-70` (starts at 0), `fec/draft03/sender.rs:199` | none | `with_base_sequence_number` exists but production never calls it |
-| FLEXFEC03-4.2-6 | 4.2 | MUST | Repair timestamp SHALL correspond to the repair packet's transmission time | violated | `fec/draft03/encoder.rs:256-259` | none | Carries the RTP timestamp of the first covered media packet, so it is the media clock, not the send time; jitter computed on the repair stream is meaningless |
+| FLEXFEC03-4.2-5 | 4.2 | SHOULD | Initial repair sequence number is random | tested | `fec/draft03/sender.rs` (`bind_local_stream`: `rand::random` unless `FlexFec03SendBuilder::with_initial_sequence_number`) | `it/flexfec03_conformance.rs::the_initial_repair_sequence_number_is_random_unless_pinned` | The bare `FlexFec03Encoder` still starts at 0 unless `with_base_sequence_number` is called; the interceptor, the production path, draws a random one per repair stream |
+| FLEXFEC03-4.2-6 | 4.2 | MUST | Repair timestamp SHALL correspond to the repair packet's transmission time | tested | `fec/draft03/encoder.rs` (`encode(.., timestamp)`), `fec/draft03/sender.rs` (`RepairClock::timestamp_at`) | `it/flexfec03_conformance.rs::the_repair_timestamp_follows_the_send_clock`, `it/flexfec03_conformance.rs::the_repair_timestamp_wraps`, `encoder.rs::the_repair_timestamp_is_the_send_clock_not_the_media_clock` | The timestamp is the instant the block is written with (`TaggedPacket::now`), in ticks of the stream clock rate since the first repair packet, from a random offset. Was the media timestamp of the first covered packet (Bug 6, fixed) |
 | FLEXFEC03-4.2-7 | 4.2 | MUST | Repair SSRC SHALL be randomly assigned | untested | `src/peer_connection/internal.rs:1651-1657` (`rand::random` when the track names none) | none (`tests/repair_codec_negotiation.rs::explicit_repair_ssrcs_are_used_verbatim` covers the application-supplied case) | An application-supplied SSRC is used verbatim |
 | FLEXFEC03-4.2-8 | 4.2 | SHOULD | Repair flow uses the RTCP CNAME to associate itself with the source flow | partial | `src/peer_connection/sdp/mod.rs:1256-1263` (same `a=ssrc ... cname` for the FEC SSRC) | `tests/repair_codec_negotiation.rs::flexfec_repair_flow_is_grouped_with_fec_fr` (SDP only) | No SR or SDES is ever sent for the repair SSRC: the FEC SSRC is not bound as a local stream (`rtp_sender/internal.rs:395-430`), so the RTCP half is missing |
 | FLEXFEC03-4.2-9 | 4.2 | MUST | SSRC collisions of the repair flow are resolved as in RFC 3550 | missing | none | none | No SSRC collision handling anywhere in the engine |
 | FLEXFEC03-4.2-10 | 4.2 | MUST | R bit is 0 in repair packets | tested | `fec/draft03/encoder.rs:203` | `encoder.rs::the_version_bits_are_not_recovered` | |
-| FLEXFEC03-4.2-11 | 4.2 | MAY | Retransmission packets (R=1, Figure 15 layout) | missing | `fec/draft03/decoder.rs:333-335` (discarded) | none | Never sent; received ones are dropped, and that drop is untested |
-| FLEXFEC03-4.2-12 | 4.2 | MAY | F=1 repair packets (M columns / N rows offsets, Figures 13 and 14) | missing | `fec/draft03/decoder.rs:336-338` (discarded) | none | Never sent; received ones are dropped silently, so a peer using fixed offsets gets no recovery |
-| FLEXFEC03-4.2-13 | 4.2 | MUST | SSRCCount 0 is invalid: the packet MUST be ignored | untested | `fec/draft03/decoder.rs:339-341` | none | Anything other than 1 is rejected |
+| FLEXFEC03-4.2-11 | 4.2 | MAY | Retransmission packets (R=1, Figure 15 layout) | missing | `fec/draft03/decoder.rs:333-335` (discarded) | `it/flexfec03_conformance.rs::retransmission_and_fixed_offset_repair_packets_are_discarded` (the discard) | Never sent; a received one is discarded, and that is now tested |
+| FLEXFEC03-4.2-12 | 4.2 | MAY | F=1 repair packets (M columns / N rows offsets, Figures 13 and 14) | missing | `fec/draft03/decoder.rs:336-338` (discarded) | `it/flexfec03_conformance.rs::retransmission_and_fixed_offset_repair_packets_are_discarded` (the discard) | Never sent; a received one is discarded (tested), so a peer using fixed offsets gets no recovery. libwebrtc sends none |
+| FLEXFEC03-4.2-13 | 4.2 | MUST | SSRCCount 0 is invalid: the packet MUST be ignored | tested | `fec/draft03/decoder.rs:339-341` | `it/flexfec03_conformance.rs::a_repair_packet_with_ssrc_count_zero_is_ignored` | Anything other than 1 is rejected |
 | FLEXFEC03-4.2-14 | 4.2 | MUST | Reserved 24 bits set to zero by senders | tested | `fec/draft03/encoder.rs:223` | `encoder.rs::the_header_names_the_stream_and_block_it_protects` | |
-| FLEXFEC03-4.2-15 | 4.2 | MUST | Reserved 24 bits ignored by receivers | untested | `fec/draft03/decoder.rs:329-408` (bytes 9..12 never read) | none | |
+| FLEXFEC03-4.2-15 | 4.2 | MUST | Reserved 24 bits ignored by receivers | tested | `fec/draft03/decoder.rs:329-408` (bytes 9..12 never read) | `it/flexfec03_conformance.rs::the_reserved_bits_are_ignored_on_receive` |  |
 | FLEXFEC03-4.2-16 | 4.2 | MAY | One repair packet protects several SSRCs (SSRCCount > 1, one SSRC / SN base / mask block each) | missing | `fec/draft03/decoder.rs:339-341`, `fec/draft03/encoder.rs:222` | none | Sender always writes 1; receiver discards anything else |
-| FLEXFEC03-4.2-17 | 4.2 | MUST | Mask bit j set means the packet SN base + j + 1 is protected (literal draft text) | violated | `fec/draft03/decoder.rs:410-417`, `fec/draft03/encoder.rs:266-306` | `it/flexfec_round_trip.rs::a_single_loss_is_recovered_byte_identically` | Deliberate: the code uses SN base + j, which is what libwebrtc sends and what RFC 8627 4.2.2.1 later wrote down. Do not "fix"; record as a known deviation from the letter of draft-03 |
+| FLEXFEC03-4.2-17 | 4.2 | MUST | Mask bit j set means the packet SN base + j + 1 is protected (literal draft text) | violated | `fec/draft03/decoder.rs:410-417`, `fec/draft03/encoder.rs:266-306` | `encoder.rs::mask_bit_j_names_sn_base_plus_j_as_libwebrtc_sends_it`, `it/flexfec_round_trip.rs::a_single_loss_is_recovered_byte_identically` | Deliberate, kept and pinned by a test: the code uses SN base + j, which is what libwebrtc sends and what RFC 8627 4.2.2.1 later wrote down. Do not "fix"; recorded in `docs/conformance.md` (D4) |
 | FLEXFEC03-4.2-18 | 4.2 | MUST | k bit: marks whether another mask follows; masks are 15, then 31, then 63 bits | tested | `fec/draft03/encoder.rs:228-241`, `fec/draft03/decoder.rs:346-407` | `encoder.rs::a_short_block_carries_one_mask_with_the_k_bit_set`, `a_longer_block_adds_the_second_mask`, `a_block_beyond_46_packets_adds_the_third_mask` | Polarity follows libwebrtc (k=1 is the last mask); the draft's sentence reads the other way round and is self-contradictory |
-| FLEXFEC03-4.2-19 | 4.2 | MUST | A repair packet describes at most 109 source packets (15 + 31 + 63 mask bits) | violated | `fec/coverage.rs:5` (`MAX_MEDIA_PACKETS = 110`), `fec/bit_array.rs:58-70` (`mask3_draft03` shifts bit 109 out) | none (`coverage.rs::the_full_range_reaches_the_last_mask` asserts only the RFC 8627 `mask3`) | A 110-packet block is accepted, packet 109 is XORed into the repair data but not named in the wire mask. See Bug 2 |
+| FLEXFEC03-4.2-19 | 4.2 | MUST | A repair packet describes at most 109 source packets (15 + 31 + 63 mask bits) | tested | `fec/draft03/encoder.rs` (`DRAFT03_MAX_MEDIA_PACKETS = 109`, checked in `encode`) | `it/flexfec03_conformance.rs::a_block_of_110_packets_is_refused_and_109_recover`, `encoder.rs::a_block_longer_than_the_masks_can_describe_is_refused` | Bug 2, fixed. `coverage.rs` still describes 110 positions, which is the RFC 8627 mask width; the draft-03 encoder refuses a block above 109 |
 | FLEXFEC03-4.2-20 | 4.2 | MUST | A truncated FEC header is not parsed past its end | tested | `fec/draft03/decoder.rs:330-332, 363-365, 382-384` | `it/flexfec_round_trip.rs::a_truncated_repair_packet_is_discarded` | Only the 20-byte bound is tested; the 24 and 32 byte bounds are not |
 | FLEXFEC03-5.1-1 | 5.1 | MUST | `rate` SHALL be larger than 1000 Hz | n/a | none | none | The application registers the codec and its rate; the engine validates neither side |
 | FLEXFEC03-5.1-2 | 5.1 | SHOULD | `rate` matches the protected stream's rate | n/a | none | none | Application's codec registration |
 | FLEXFEC03-5.1-3 | 5.1 | MUST | Required parameter `repair-window` (microseconds) is signalled and bounds what is sent and buffered | missing | `fec/draft03/decoder.rs:10-19` (fixed 100 / 100 / 192 packet limits) | none | The engine neither writes nor reads `repair-window`; the fmtp line is whatever the application registered, and the decoder window is a packet count unrelated to it |
 | FLEXFEC03-5.1-4 | 5.1 | MAY | Optional parameters `L`, `D`, `ToP` | missing | none | none | Not parsed, not generated |
-| FLEXFEC03-5.1-5 | 5.1 | MUST | Media subtype name is `flexfec` | violated | `src/peer_connection/configuration/media_engine.rs:180`, `rtp_codec.rs:343-345` | `rtp_codec_flexfec_test.rs` | Deliberate: the coder is bound to `flexfec-03` (libwebrtc's name) and never to `flexfec`, because `flexfec` now means RFC 8627 |
+| FLEXFEC03-5.1-5 | 5.1 | MUST | Media subtype name is `flexfec` | violated | `src/peer_connection/configuration/media_engine.rs` (`MIME_TYPE_FLEX_FEC03`), `rtp_codec.rs` (`is_flexfec03_mime_type`) | `rtp_codec_flexfec_test.rs::the_mime_type_match_is_exact`, `rtp_codec_flexfec_test.rs::rfc_8627_flexfec_is_not_the_draft_03_coder` | Deliberate, kept and pinned by tests: the draft-03 coder is bound to `flexfec-03` (libwebrtc's name) and never to `flexfec`, which now selects the RFC 8627 coder. Recorded in `docs/conformance.md` (D4) |
 | FLEXFEC03-5.2-1 | 5.2 | MUST | Subtype and rate go in `a=rtpmap`, remaining parameters in `a=fmtp` | tested | `src/peer_connection/sdp/mod.rs` (codec lines) | `tests/repair_codec_negotiation.rs::flexfec_codec_is_offered_alongside_the_track_codec` | |
 | FLEXFEC03-5.2.1-1 | 5.2.1 | SHOULD | Receiver offered several L/D combinations chooses one with sufficient interleaving | missing | none | none | L and D are not understood |
 | FLEXFEC03-5.2.1-2 | 5.2.1 | MUST | Receiver takes the offered repair-window into account for its buffering when accepting | missing | `fec/draft03/decoder.rs:10-19` | none | Lower-case "must" in the draft; the buffer is fixed whatever is offered |
@@ -55,9 +61,9 @@ Paths are relative to the repo root; `fec/` abbreviates `rtc-interceptor/src/fle
 | FLEXFEC03-6.2-1 | 6.2 | MUST | FEC bit string: P, X, CC, M, PT recovery are the XOR of the source headers; first two bits skipped | tested | `fec/draft03/encoder.rs:200-203` | `encoder.rs::recovery_fields_are_the_xor_of_the_protected_packets` | |
 | FLEXFEC03-6.2-2 | 6.2 | MUST | Length recovery is the XOR of (packet length - 12): CSRC list, extension, payload and padding included | tested | `fec/draft03/encoder.rs:205-207` | `encoder.rs::recovery_fields_are_the_xor_of_the_protected_packets` | Tested only with packets that have no CSRC, extension or padding |
 | FLEXFEC03-6.2-3 | 6.2 | MUST | TS recovery is the XOR of the source timestamps | tested | `fec/draft03/encoder.rs:212-214` | `encoder.rs::recovery_fields_are_the_xor_of_the_protected_packets` | |
-| FLEXFEC03-6.2-4 | 6.2 (4.2) | MUST | SN base MUST be the lowest sequence number of the source packets this repair packet protects | violated | `fec/draft03/encoder.rs:139, 225` | `encoder.rs::the_declared_mask_matches_the_interleaved_coverage` (asserts masks `[1,3,5]` against the block base, i.e. the violation) | Every repair packet of a block carries the block's first sequence number, also when its own first protected packet is later (interleaved packet 2 of N). See Bug 3 |
+| FLEXFEC03-6.2-4 | 6.2 (4.2) | MUST | SN base MUST be the lowest sequence number of the source packets this repair packet protects | tested | `fec/draft03/encoder.rs` (`encode_one`: base and mask relative to the first packet the repair packet covers) | `it/flexfec03_conformance.rs::each_repair_packet_carries_its_own_lowest_sequence_number_as_sn_base`, `encoder.rs::sn_base_is_the_lowest_sequence_number_each_repair_packet_protects`, `encoder.rs::the_declared_mask_matches_the_interleaved_coverage` | Bug 3, fixed |
 | FLEXFEC03-6.2-5 | 6.2 | MUST | Repair payload is the XOR of everything after the 12-byte header; shorter packets padded with zero octets at the end | tested | `fec/draft03/encoder.rs:181-220` | `encoder.rs::the_repair_payload_is_the_xor_of_the_protected_payloads`, `the_repair_payload_is_as_long_as_the_largest_protected_packet` | |
-| FLEXFEC03-6.2-6 | 6.2 | MUST | CSRC list, header extension and RTP padding of source packets are part of the protected data | untested | `fec/draft03/encoder.rs:193-196` (marshals the whole packet) | none | No FlexFEC test builds a source packet with a CSRC, an extension or padding |
+| FLEXFEC03-6.2-6 | 6.2 | MUST | CSRC list, header extension and RTP padding of source packets are part of the protected data | tested | `fec/draft03/encoder.rs:193-196` (marshals the whole packet) | `it/flexfec03_conformance.rs::a_lost_packet_with_csrcs_an_extension_and_padding_is_recovered_byte_identically` |  |
 | FLEXFEC03-6.2-7 | 6.2 | SHOULD | Repair packet (largest source + 20 to 32 bytes) should not exceed the path MTU | missing | `fec/draft03/encoder.rs:181-186` | none | Advisory text ("may cause problems"). A repair packet for a full-MTU source packet is always over the MTU |
 | FLEXFEC03-6.3-1 | 6.3 | MUST | Whatever algorithm is used, the result is identical to the specified one | tested | `fec/draft03/decoder.rs:259-318` | `it/flexfec_round_trip.rs::a_single_loss_is_recovered_byte_identically`, `one_repair_packet_covering_the_whole_block_recovers_any_single_loss` | |
 | FLEXFEC03-6.3.1-1 | 6.3.1 | MUST | A repair packet with more than one missing source packet recovers nothing | tested | `fec/draft03/decoder.rs:241-246` | `it/flexfec_round_trip.rs::two_losses_under_one_repair_packet_recover_neither` | |
@@ -65,13 +71,13 @@ Paths are relative to the repo root; `fec/` abbreviates `rtc-interceptor/src/fle
 | FLEXFEC03-6.3.1.2-1 | 6.3.1.2 | MUST | Bitmask association over 15, 46 and 109 bit masks | tested | `fec/draft03/decoder.rs:346-407` | `it/flexfec_round_trip.rs::a_block_using_the_second_packet_mask_round_trips`, `a_block_using_the_third_packet_mask_round_trips`, `a_block_that_wraps_the_sequence_space_round_trips` | |
 | FLEXFEC03-6.3.1.3-1 | 6.3.1.3 | MAY | Association by M and N offsets | missing | none | none | See FLEXFEC03-4.2-12 |
 | FLEXFEC03-6.3.2-1 | 6.3.2 | MUST | Recovered header: version 2; M, PT, SN (= SEQNUM), TS from the recovered bit string | tested | `fec/draft03/decoder.rs:262-300` | `it/flexfec_round_trip.rs::a_single_loss_is_recovered_byte_identically` | |
-| FLEXFEC03-6.3.2-2 | 6.3.2 | MUST | Recovered header: P, X and CC from the recovered bit string | untested | `fec/draft03/decoder.rs:283-289` | none | No test loses a packet that has padding, an extension or CSRCs. Recovery of such a packet also depends on `rtp::Packet` re-marshalling received packets byte-identically |
+| FLEXFEC03-6.3.2-2 | 6.3.2 | MUST | Recovered header: P, X and CC from the recovered bit string | tested | `fec/draft03/decoder.rs:283-289` | `it/flexfec03_conformance.rs::a_lost_packet_with_csrcs_an_extension_and_padding_is_recovered_byte_identically` | Depends on `rtp::Packet` re-marshalling a received packet as it arrived, which holds for zero padding octets (`packet/padding_size_test.rs`) |
 | FLEXFEC03-6.3.2-3 | 6.3.2 | MUST | Recovered length Y is taken from the length recovery field | tested | `fec/draft03/decoder.rs:291-295` | `it/flexfec_round_trip.rs::packets_of_different_lengths_are_recovered_at_their_own_length`, `a_repair_packet_with_a_truncated_payload_recovers_nothing` | |
 | FLEXFEC03-6.3.2-4 | 6.3.2 | MUST | SSRC of the recovered packet is the source stream's SSRC | tested | `fec/draft03/decoder.rs:297` | `it/flexfec_round_trip.rs::a_single_loss_is_recovered_byte_identically` | |
 | FLEXFEC03-6.3.3-1 | 6.3.3 | MUST | Payload recovery: XOR Y octets from octet 13 of each received packet, shorter ones zero padded at the end | tested | `fec/draft03/decoder.rs:299-311` | `it/flexfec_round_trip.rs::packets_of_different_lengths_are_recovered_at_their_own_length` | |
-| FLEXFEC03-6.3.4-1 | 6.3.4 | MUST | Iterative decoding: a recovered packet is fed back so other repair packets can complete | untested | `fec/draft03/decoder.rs:232-257` (loop) | none | No test where one recovery enables a second (2-D or staircase pattern) |
+| FLEXFEC03-6.3.4-1 | 6.3.4 | MUST | Iterative decoding: a recovered packet is fed back so other repair packets can complete | tested | `fec/draft03/decoder.rs:232-257` (loop) | `it/flexfec03_conformance.rs::a_recovered_packet_completes_another_repair_packet` |  |
 | FLEXFEC03-8-1 | 8 | SHOULD | Consider the impact of FEC in congested networks before injecting repair flows | n/a | none | none | Application decides to register the interceptor |
-| FLEXFEC03-8-2 | 8 | MUST | MUST NOT arbitrarily increase the amount of FEC | untested | `fec/draft03/sender.rs:12-16, 89-108` (fixed ratio) | none | True by construction: the ratio never changes after build |
+| FLEXFEC03-8-2 | 8 | MUST | MUST NOT arbitrarily increase the amount of FEC | tested | `fec/draft03/sender.rs:12-16, 89-108` (fixed ratio) | `it/flexfec03_conformance.rs::the_amount_of_fec_stays_at_the_configured_ratio` | The ratio never changes after build |
 | FLEXFEC03-8-3 | 8 | SHOULD | Do not send repair flows when they would not help recover anything | missing | none | none | No loss feedback reaches the FEC sender |
 | FLEXFEC03-8-4 | 8 | SHOULD | Adjust the amount of FEC dynamically from the observed loss rate | missing | `fec/draft03/sender.rs:89-108` | none | The ratio is fixed at build time; there is no runtime setter |
 | FLEXFEC03-8-5 | 8 | SHOULD | Multicast: offer several repair flows with different protection | n/a | none | none | No multicast |
@@ -84,9 +90,9 @@ Paths are relative to the repo root; `fec/` abbreviates `rtc-interceptor/src/fle
    the encoder and only rewrite its value in a way the receiver undoes), let repair packets be seen by the
    arrival recorders (TWCC, RFC 8888, receiver report) before the decoder swallows them, and have those
    recorders skip packets tagged `RecoveredByFec`.
-2. **Wire-format corrections (S).** FLEXFEC03-4.2-19 (cap blocks at 109), FLEXFEC03-6.2-4 (per-packet SN
-   base), FLEXFEC03-4.2-6 (timestamp from the send clock), FLEXFEC03-4.2-5 (random initial sequence
-   number), FLEXFEC03-4.2-2 (assert marker = 0).
+2. **Wire-format corrections (S).** Done on `conf/cc-fec-flexfec`: FLEXFEC03-4.2-19 (blocks capped at 109),
+   FLEXFEC03-6.2-4 (per-packet SN base), FLEXFEC03-4.2-6 (timestamp from the send clock), FLEXFEC03-4.2-5
+   (random initial sequence number), FLEXFEC03-4.2-2 (marker = 0 asserted).
 3. **Repair stream as an RTP source (M).** FLEXFEC03-4.2-8, FLEXFEC03-4.2-9: sender reports and SDES CNAME
    for the repair SSRC, reception reports for an inbound repair SSRC, SSRC collision handling.
 4. **`repair-window` (M).** FLEXFEC03-5.1-3, FLEXFEC03-5.2.1-2: generate the parameter, parse the peer's,
@@ -97,8 +103,8 @@ Paths are relative to the repo root; `fec/` abbreviates `rtc-interceptor/src/fle
 6. **Receive-side generality (M).** FLEXFEC03-4.2-16 (several SSRCs per repair packet), FLEXFEC03-4.2-12 /
    6.3.1.3-1 (F=1 offsets), FLEXFEC03-4.2-11 (R=1 retransmission), FLEXFEC03-5.1-4, 5.2.1-1, 6.3.1.1-1
    (L, D, ToP). libwebrtc sends none of these, so this is last.
-7. **Tests for what is implemented but unproven (S).** FLEXFEC03-4.2-13, 4.2-15, 6.2-6, 6.3.2-2, 6.3.4-1,
-   5.2.1-3: parse-error paths, sources with CSRC / extension / padding, cascading recovery.
+7. **Tests for what is implemented but unproven (S).** Done on `conf/cc-fec-flexfec` for FLEXFEC03-4.2-13,
+   4.2-15, 6.2-6, 6.3.2-2, 6.3.4-1, 8-2 and the R=1 / F=1 discard paths. FLEXFEC03-5.2.1-3 stays with gap 8.
 8. **Answer fmtp (shared, M).** FLEXFEC03-5.2.1-3: the answer must be written from the local codec, not
    echo the offer; tracked as gap 1 of the RFC 7587 audit.
 
@@ -114,14 +120,14 @@ Paths are relative to the repo root; `fec/` abbreviates `rtc-interceptor/src/fle
    Reproduction: build a chain with `Slot::FecEncoder` + `Slot::TwccSender` bound to one stream with the
    transport-cc extension, write 5 media packets, feed all outputs but one media packet to a
    `FlexFec03Decoder`, and compare the recovered bytes with the wire bytes of the dropped packet.
-2. **A 110-packet block corrupts recovery.** `fec/coverage.rs:5` allows 110 media packets, but draft-03's
+2. **(Fixed on `conf/cc-fec-flexfec`.) A 110-packet block corrupts recovery.** `fec/coverage.rs:5` allows 110 media packets, but draft-03's
    third mask has 63 bits (indices 46..108). `BitArray::mask3_draft03` (`fec/bit_array.rs:68-70`) shifts
    index 109 out, while `ProtectionCoverage::covered_by` still returns it, so `encode_one` XORs packet 109
    into the repair data without naming it in the mask. Any recovery from that repair packet is the lost
    packet XOR packet 109. Reproduction: `FlexFec03Encoder::encode(&run(110), 1)`, drop media packet 0, decode
    the rest plus the repair packet, compare with the original (expect mismatch); also
    `parse_packet_mask` of the repair payload shows bit 109 unset.
-3. **SN base is not the lowest protected sequence number.** `fec/draft03/encoder.rs:139,225`: with two
+3. **(Fixed on `conf/cc-fec-flexfec`.) SN base is not the lowest protected sequence number.** `fec/draft03/encoder.rs:139,225`: with two
    repair packets over a block starting at 100, the second carries SN base 100 and a mask starting at bit 1.
    Interoperable (a decoder honours any base), but it violates the MUST and wastes mask range: an
    interleaved block reaches the second and third masks earlier than needed. Reproduction: the existing
@@ -141,6 +147,6 @@ Paths are relative to the repo root; `fec/` abbreviates `rtc-interceptor/src/fle
    recovery time. Loss is hidden from the remote's congestion control and from `fraction lost`.
    Reproduction: receiver chain with FEC decoder + `ReceiverReportInterceptor`; drop one media packet that
    FEC recovers; the next RR reports 0 lost.
-6. **Repair timestamp is media time, not send time** (`fec/draft03/encoder.rs:256-259`), FLEXFEC03-4.2-6.
+6. **(Fixed on `conf/cc-fec-flexfec`.) Repair timestamp is media time, not send time** (`fec/draft03/encoder.rs:256-259`), FLEXFEC03-4.2-6.
    Reproduction: encode a block whose media timestamps are constant (one large frame); every repair packet
    of every such block within the frame carries the same timestamp regardless of when it is sent.

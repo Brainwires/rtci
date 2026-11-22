@@ -153,7 +153,7 @@ fn block(first: u16, count: u16) -> Vec<rtp::Packet> {
 }
 
 fn encode(media: &[rtp::Packet], num_fec_packets: u32) -> Vec<rtp::Packet> {
-    FlexFec03Encoder::new(REPAIR_PT, REPAIR_SSRC).encode(media, num_fec_packets)
+    FlexFec03Encoder::new(REPAIR_PT, REPAIR_SSRC).encode(media, num_fec_packets, 0)
 }
 
 fn bytes_of(packet: &rtp::Packet) -> Vec<u8> {

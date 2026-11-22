@@ -6,10 +6,12 @@
 //!
 //! # Two formats, deliberately kept apart
 //!
-//! [`draft03`] implements `video/flexfec-03`, which is what browsers negotiate today. RFC 8627
-//! states that its payload formats are **not** backward compatible with the earlier drafts, so a
-//! draft-03 round trip is evidence about browser interoperability and says nothing about RFC
-//! conformance. The two live in separate modules with separate vectors for that reason.
+//! [`draft03`] implements `video/flexfec-03`, which is what browsers negotiate today; [`rfc8627`]
+//! implements the published RFC, negotiated as `video/flexfec`. RFC 8627 states that its payload
+//! formats are **not** backward compatible with the earlier drafts, so a draft-03 round trip is
+//! evidence about browser interoperability and says nothing about RFC conformance. The two live
+//! in separate modules with separate vectors for that reason, and a stream's FEC format
+//! ([`StreamInfo::mime_type_fec`](crate::StreamInfo::mime_type_fec)) selects one.
 //!
 //! # References
 //!
@@ -18,3 +20,4 @@
 pub(crate) mod bit_array;
 pub(crate) mod coverage;
 pub(crate) mod draft03;
+pub(crate) mod rfc8627;

@@ -334,8 +334,8 @@ pub(crate) fn repair_family(codec: &RTCRtpCodec) -> &'static str {
     }
 }
 
-/// Whether `mime_type` names the FlexFEC this engine implements: draft-ietf-payload-flexible-fec
-/// -scheme-03 (`video/flexfec-03`), matched exactly.
+/// Whether `mime_type` names FlexFEC draft-ietf-payload-flexible-fec-scheme-03
+/// (`video/flexfec-03`), matched exactly.
 ///
 /// RFC 8627's `video/flexfec` is a different wire format (its own header layout and masks), so a
 /// substring match, which also took `video/flexfec`, handed RFC 8627 packets to the draft-03
@@ -344,12 +344,49 @@ pub(crate) fn is_flexfec03_mime_type(mime_type: &str) -> bool {
     mime_type.eq_ignore_ascii_case(MIME_TYPE_FLEX_FEC03)
 }
 
-/// The payload type of the FlexFEC draft-03 format in `haystack`, the only FEC implemented.
-pub(crate) fn find_fec_payload_type(haystack: &[RTCRtpCodecParameters]) -> Option<PayloadType> {
+/// Whether `mime_type` names RFC 8627 FlexFEC (`video/flexfec`), matched exactly: never
+/// `video/flexfec-03`, which is the draft-03 coder's.
+pub(crate) fn is_flexfec_mime_type(mime_type: &str) -> bool {
+    mime_type.eq_ignore_ascii_case(MIME_TYPE_FLEX_FEC)
+}
+
+/// Whether `mime_type` names a FEC format the engine has a coder for: FlexFEC draft-03
+/// (`video/flexfec-03`) or RFC 8627 (`video/flexfec`).
+pub(crate) fn is_fec_mime_type(mime_type: &str) -> bool {
+    is_flexfec03_mime_type(mime_type) || is_flexfec_mime_type(mime_type)
+}
+
+/// The FEC format a stream's repair flow uses: its payload type and what selects and
+/// configures the coder (the interceptors read the MIME type and the `a=fmtp` line).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FecFormat {
+    pub(crate) payload_type: PayloadType,
+    pub(crate) mime_type: String,
+    pub(crate) sdp_fmtp_line: String,
+}
+
+/// The FEC format of `haystack`: FlexFEC draft-03 when it is there (what browsers send), else
+/// RFC 8627 FlexFEC.
+pub(crate) fn find_fec_format(haystack: &[RTCRtpCodecParameters]) -> Option<FecFormat> {
     haystack
         .iter()
         .find(|c| is_flexfec03_mime_type(&c.rtp_codec.mime_type))
-        .map(|c| c.payload_type)
+        .or_else(|| {
+            haystack
+                .iter()
+                .find(|c| is_flexfec_mime_type(&c.rtp_codec.mime_type))
+        })
+        .map(|c| FecFormat {
+            payload_type: c.payload_type,
+            mime_type: c.rtp_codec.mime_type.clone(),
+            sdp_fmtp_line: c.rtp_codec.sdp_fmtp_line.clone(),
+        })
+}
+
+/// The payload type of the FEC format in `haystack` ([`find_fec_format`]).
+#[cfg(test)]
+pub(crate) fn find_fec_payload_type(haystack: &[RTCRtpCodecParameters]) -> Option<PayloadType> {
+    find_fec_format(haystack).map(|format| format.payload_type)
 }
 
 /// Computes the intersection of two RTCP feedback lists.

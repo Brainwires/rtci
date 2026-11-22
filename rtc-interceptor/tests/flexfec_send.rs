@@ -308,8 +308,10 @@ fn the_repair_stream_has_its_own_identity_and_sequence_numbers() {
         assert_eq!(REPAIR_SSRC, packet.ssrc);
         assert_eq!(REPAIR_PT, packet.payload_type);
     }
+    // The first number is random (draft-03 section 4.2); the ones after it follow.
+    let first = repair[0].sequence_number;
     assert_eq!(
-        vec![0, 1, 2],
+        vec![first, first.wrapping_add(1), first.wrapping_add(2)],
         repair
             .iter()
             .map(|packet| packet.sequence_number)

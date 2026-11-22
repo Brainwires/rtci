@@ -259,11 +259,29 @@ pub use cc::interceptor::{
 pub use flexfec::bit_array::BitArray;
 pub use flexfec::coverage::{MAX_FEC_PACKETS, MAX_MEDIA_PACKETS, ProtectionCoverage};
 pub use flexfec::draft03::decoder::{FlexFec03Decoder, ParseError as FlexFecParseError};
+pub use flexfec::draft03::encoder::DRAFT03_MAX_MEDIA_PACKETS as FLEXFEC03_MAX_MEDIA_PACKETS;
 pub use flexfec::draft03::encoder::FlexFec03Encoder;
 pub use flexfec::draft03::receiver::{FlexFec03ReceiveBuilder, FlexFec03ReceiveInterceptor};
 pub use flexfec::draft03::sender::{
     DEFAULT_NUM_FEC_PACKETS, DEFAULT_NUM_MEDIA_PACKETS, FlexFec03SendBuilder,
     FlexFec03SendInterceptor,
+};
+pub use flexfec::rfc8627::decoder::{
+    FLEXFEC_DEFAULT_REPAIR_WINDOW, FlexFecDecoder, FlexFecDecoderConfig, FlexFecDecoderStats,
+};
+pub use flexfec::rfc8627::encoder::{
+    FlexFecEncodeError, FlexFecEncoder, FlexFecLayout, FlexFecProtection,
+};
+pub use flexfec::rfc8627::header::{
+    FLEXFEC_MAX_MASK_BITS, FLEXFEC_MAX_PROTECTED_SSRCS, FLEXFEC_RECOVERY_SIZE, FlexFecBlock,
+    FlexFecHeader, FlexFecHeaderError, FlexFecProtected,
+};
+pub use flexfec::rfc8627::params::FlexFecParameters;
+pub use flexfec::rfc8627::receiver::{
+    FLEXFEC_MAX_REPAIR_WINDOW, FlexFecReceiveBuilder, FlexFecReceiveInterceptor,
+};
+pub use flexfec::rfc8627::sender::{
+    FLEXFEC_DEFAULT_PROTECTION, FlexFecSendBuilder, FlexFecSendInterceptor,
 };
 pub use gcc::arrival_group::{
     ArrivalGroup, ArrivalGroupAccumulator, DEFAULT_BURST_INTERVAL as GCC_DEFAULT_BURST_INTERVAL,
