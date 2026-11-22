@@ -4,7 +4,7 @@
 
 mod rtcp_session_common;
 
-use rtc_interceptor::{Interceptor, RtcpSessionControl};
+use rtc_interceptor::{Interceptor, RtcpBandwidth, RtcpSessionControl};
 use rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 use rtcp::payload_feedbacks::receiver_estimated_maximum_bitrate::ReceiverEstimatedMaximumBitrate;
 use rtcp::receiver_report::ReceiverReport;
@@ -95,7 +95,10 @@ fn feedback_leaves_at_once_in_a_minimal_compound_packet_from_the_endpoints_ssrc(
 /// merged into as few messages as possible.
 #[test]
 fn a_second_feedback_waits_for_the_regular_packet_and_is_merged() {
-    let mut chain = chain(builder());
+    let mut chain = chain(builder().with_bandwidth(RtcpBandwidth {
+        session: Some(64_000),
+        ..Default::default()
+    }));
     let base = Instant::now();
     chain.bind_remote_stream(&video(200));
     control(&mut chain, base, RtcpSessionControl::Start);
