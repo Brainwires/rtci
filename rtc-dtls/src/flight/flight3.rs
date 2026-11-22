@@ -222,6 +222,7 @@ impl Flight for Flight3 {
                 ));
             }
             if !cfg.local_srtp_protection_profiles.is_empty()
+                && !cfg.use_srtp_optional
                 && state.srtp_protection_profile == SrtpProtectionProfile::Unsupported
             {
                 return Err((

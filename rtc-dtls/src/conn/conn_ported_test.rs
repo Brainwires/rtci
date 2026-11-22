@@ -528,12 +528,14 @@ fn test_srtp_configuration() -> Result<()> {
             None,
         ),
         (
+            // RFC 5764 section 4.1.1: a server with no profile ignores the extension; it is
+            // the client, which asked for SRTP and did not allow going without, that aborts.
             "SRTP client only",
             vec![SrtpProtectionProfile::Srtp_Aes128_Cm_Hmac_Sha1_80],
             vec![],
             SrtpProtectionProfile::Unsupported,
+            Some(Error::ErrRequestedButNoSrtpExtension),
             Some(Error::ErrAlertFatalOrClose),
-            Some(Error::ErrServerNoMatchingSrtpProfile),
         ),
         (
             "SRTP server only",

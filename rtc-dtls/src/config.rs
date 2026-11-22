@@ -113,6 +113,7 @@ pub struct ConfigBuilder {
     cipher_suites: Vec<CipherSuiteId>,
     signature_schemes: Vec<SignatureScheme>,
     srtp_protection_profiles: Vec<SrtpProtectionProfile>,
+    use_srtp_optional: bool,
     client_auth: ClientAuthType,
     extended_master_secret: ExtendedMasterSecretType,
     flight_interval: Duration,
@@ -138,6 +139,7 @@ impl Default for ConfigBuilder {
             cipher_suites: vec![],
             signature_schemes: vec![],
             srtp_protection_profiles: vec![],
+            use_srtp_optional: false,
             client_auth: ClientAuthType::default(),
             extended_master_secret: ExtendedMasterSecretType::default(),
             flight_interval: Duration::default(),
@@ -196,6 +198,17 @@ impl ConfigBuilder {
         srtp_protection_profiles: Vec<SrtpProtectionProfile>,
     ) -> Self {
         self.srtp_protection_profiles = srtp_protection_profiles;
+        self
+    }
+
+    /// Lets a client that offers `use_srtp` go on when the server's ServerHello carries no
+    /// `use_srtp` extension (RFC 5764 section 4.1.1: a server that does not take the extension
+    /// leaves it out). The association then has no SRTP profile
+    /// ([`SrtpProtectionProfile::Unsupported`]) and carries DTLS application data only: the
+    /// caller decides whether that is enough. `false` (the default) aborts such a handshake with
+    /// a fatal alert.
+    pub fn with_use_srtp_optional(mut self, use_srtp_optional: bool) -> Self {
+        self.use_srtp_optional = use_srtp_optional;
         self
     }
 
@@ -580,6 +593,7 @@ impl ConfigBuilder {
             local_signature_schemes,
             extended_master_secret: self.extended_master_secret,
             local_srtp_protection_profiles: self.srtp_protection_profiles,
+            use_srtp_optional: self.use_srtp_optional,
             server_name,
             client_auth: self.client_auth,
             local_certificates: self.certificates,
@@ -639,6 +653,7 @@ pub struct HandshakeConfig {
     pub(crate) local_signature_schemes: Vec<SignatureHashAlgorithm>, // Available signature schemes
     pub(crate) extended_master_secret: ExtendedMasterSecretType, // Policy for the Extended Master Support extension
     pub(crate) local_srtp_protection_profiles: Vec<SrtpProtectionProfile>, // Available SRTPProtectionProfiles, if empty no SRTP support
+    pub(crate) use_srtp_optional: bool, // A client goes on when the server leaves use_srtp out
     pub(crate) server_name: String,
     pub(crate) client_auth: ClientAuthType, // If we are a client should we request a client certificate
     pub(crate) local_certificates: Vec<Certificate>,
@@ -696,6 +711,7 @@ impl HandshakeConfig {
             local_signature_schemes: vec![],
             extended_master_secret: ExtendedMasterSecretType::Disable,
             local_srtp_protection_profiles: vec![],
+            use_srtp_optional: false,
             server_name: String::new(),
             client_auth: ClientAuthType::NoClientCert,
             local_certificates: vec![],

@@ -176,6 +176,9 @@ pub(crate) fn negotiate_client_hello(
                     }
                 }
             }
+            // RFC 5764 section 4.1.1: a server with no SRTP profile of its own does not take
+            // part in `use_srtp`; it ignores the extension and leaves it out of ServerHello.
+            Extension::UseSrtp(_) if cfg.local_srtp_protection_profiles.is_empty() => {}
             Extension::UseSrtp(e) => {
                 if let Ok(profile) = find_matching_srtp_profile(
                     &e.protection_profiles,
