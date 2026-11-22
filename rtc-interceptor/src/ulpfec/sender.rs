@@ -108,7 +108,7 @@ impl UlpfecSendBuilder {
 
     /// FEC as a stream of its own (RFC 5109 14.1), on the repair SSRC and payload type of
     /// [`StreamInfo::ssrc_fec`] / [`StreamInfo::payload_type_fec`]. A stream without both is not
-    /// protected. See the [module documentation](super) for why this is not the media SSRC.
+    /// protected. See [`UlpfecStreamPacketizer`] for why this is not the media SSRC.
     pub fn stream() -> Self {
         Self::new(Carriage::Stream)
     }
