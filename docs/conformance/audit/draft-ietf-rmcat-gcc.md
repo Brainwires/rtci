@@ -25,7 +25,7 @@ bugs G1, G2, G3 and G4 are fixed, each first reproduced by a failing test
 
 Totals (MUST includes MUST NOT/SHALL; SHOULD includes SHOULD NOT/RECOMMENDED):
 
-- MUST: tested 26 / untested 3 / partial 4 / missing 2 / violated 0 / n-a 0
+- MUST: tested 27 / untested 3 / partial 3 / missing 2 / violated 0 / n-a 0
 - SHOULD: tested 10 / untested 3 / partial 3 / missing 1 / violated 0 / n-a 0
 - MAY: tested 0 / untested 0 / partial 0 / missing 1 / violated 0 / n-a 0
 
@@ -82,7 +82,7 @@ Totals (MUST includes MUST NOT/SHALL; SHOULD includes SHOULD NOT/RECOMMENDED):
 | GCC-6-3 | 6 | MUST | Loss above 10%: As_hat = As_hat (1 - 0.5 p) | tested | `gcc/loss.rs:57-60` | `the_backoff_is_proportional_to_the_loss`, `heavy_loss_lowers_the_target_on_its_own` | p is an 0.8/0.2 smoothed average, and the smaller of average and sample must exceed 10% |
 | GCC-6-4 | 6 | MUST | Loss below 2%: As_hat = 1.05 As_hat | tested | `gcc/loss.rs:53-56` | `a_clean_path_raises_the_target` | |
 | GCC-6-5 | 6 | MUST | The sending rate is min(As_hat, A_hat) | tested | `gcc/estimator.rs:155` | `the_more_pessimistic_half_wins`, `stats_report_both_halves` | |
-| GCC-6-6 | 6 | MUST | The loss-based controller takes the delay-based estimate (and REMB) as its bound | partial | `gcc/estimator.rs` `on_reports` (minimum of the two), `set_external_bounds` (REMB bounds both) | `gcc_backs_off_on_a_lossy_path_with_no_queueing`, `a_remb_bounds_the_target` | The sending rate is the minimum of As_hat and A_hat, as section 6 states, and a REMB bounds both. As_hat itself still grows 5% per interval whatever A_hat is. Bounding its growth by A_hat was tried and withdrawn: after a lossy narrow phase As_hat then sat below A_hat and held the target down when the path widened (`gcc_climbs_back_after_the_path_widens`) |
+| GCC-6-6 | 6 | MUST | The loss-based controller takes the delay-based estimate (and REMB) as its bound | tested | `gcc/estimator.rs` `on_reports` (`loss_control.cap(delay_target)`, `with_loss_estimate_capped_by_delay_estimate`), `set_external_bounds` (REMB bounds both); `gcc/loss.rs` `cap` | `the_loss_based_estimate_free_and_capped_on_the_recovery_and_lossy_fixtures`, `gcc_backs_off_on_a_lossy_path_with_no_queueing`, `gcc_climbs_back_after_the_path_widens`, `a_remb_bounds_the_target` | As_hat is held at or below A_hat after every update, so a loss cut is taken from the rate being sent. Left free it grows 5% per interval to several times that rate and absorbs the cuts (measured: 4.06 Mbit/s against a 530 kbit/s target after five quiet seconds, and 39% loss over two seconds then moved the target by 9%). The free form stays available as an option |
 | GCC-7-1 | 7 | SHOULD | Against a receiver without TWCC or REMB: use RR fraction-lost and RTT for the loss-based controller, delay-based controller disabled | tested | `cc/interceptor.rs` `ingest` (`per_packet_feedback`), `gcc/estimator.rs` `on_receiver_report`, `gcc/loss.rs` `update_fraction` | `receiver_reports_feed_the_estimator_only_without_per_packet_feedback`, `gcc_backs_off_on_reported_loss_when_there_is_no_per_packet_feedback` | The delay-based controller has no input and does not run; the RTT of the reports is not used (the loss controller of the draft does not take one) |
 
 ## Implementation B (`gcc/twcc_gcc`), differences from the draft
