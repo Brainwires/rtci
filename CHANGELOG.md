@@ -5,6 +5,84 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Security
+
+- **dtls**: the server verifies the client's Finished (RFC 5246 section 7.4.9). `Flight4` only
+  checked that a Finished message had arrived, so nothing confirmed to the server that the client
+  had seen the same handshake: a ClientHello altered on the way (cipher suites, SRTP profiles,
+  extensions) was noticed by the client alone, after the server had completed, exported SRTP keys
+  and started sending. Both sides now compare verify_data in constant time and answer a mismatch
+  with decrypt_error; the client's alert, sent after its ChangeCipherSpec, is protected so that
+  the server can read it.
+- **dtls**: unauthenticated input no longer ends a handshake (RFC 6347 sections 4.1.2.7 and
+  4.2.1). A plaintext application-data record during the handshake was answered with a fatal
+  unexpected_message, and a ClientHello with a wrong cookie with a fatal access_denied; either
+  failed the association, and the wrong-cookie one also took the place of the genuine
+  ClientHello, so one spoofed datagram denied the handshake. Both are now discarded without an
+  alert, the server answers the cookieless one with HelloVerifyRequest again, and the genuine
+  ClientHello is still accepted. Nothing is negotiated (and no alert sent) from a ClientHello
+  that does not echo the cookie.
+- **dtls**: `State::export_keying_material` refuses a session without the extended master secret
+  (RFC 7627 section 5.4), so DTLS-SRTP keys never come from a master secret that is not bound to
+  the handshake, whatever `ExtendedMasterSecretType` a crate user picks. The engine already
+  requires the extension.
+- **dtls**: a non-empty renegotiation_info in an initial handshake is a fatal handshake_failure on
+  both sides (RFC 5746 sections 3.4 and 3.6); it was skipped with a warning. The server recognises
+  `TLS_EMPTY_RENEGOTIATION_INFO_SCSV`.
+
+### Bug Fixes
+
+- **dtls**: a ClientHello with a session id is parsed (RFC 5246 section 7.4.1.2). The length byte
+  was read and the id left in place, so the cookie, cipher suites and extensions of a client
+  offering a cached session were read from the wrong offset and it could not connect.
+- **dtls**: a hello may end before the extensions block (RFC 5246 sections 7.4.1.2, 7.4.1.3); such
+  a ClientHello or ServerHello was dropped. A hello with bytes after the block, or with one
+  extension type twice, is refused. An extension of an unknown type is kept
+  (`Extension::Unknown`) instead of being dropped at parse.
+- **dtls**: the ServerHello carries only the extensions the ClientHello offered (RFC 5246 section
+  7.4.1.4): renegotiation_info was sent always, and supported_groups (which is not a ServerHello
+  extension, RFC 8422 section 5.2) and ec_point_formats for every certificate suite. A client
+  refuses an extension it did not offer with unsupported_extension, and a compression method it
+  did not offer with illegal_parameter.
+- **dtls**: the peer's signature algorithm lists are honoured (RFC 5246 sections 7.4.1.4.1, 7.4.2,
+  7.4.3, 7.4.4, 7.4.8). The server signs its ServerKeyExchange with a pair from the client's
+  signature_algorithms (the SHA-1 defaults when the extension is absent) and offers a certificate
+  only if it is signed with such a pair; with none usable no certificate suite is selected. The
+  client answers a CertificateRequest with a certificate only if its type, its signature and a
+  CertificateVerify pair fit the request, and sends an empty Certificate otherwise. A client also
+  checks that the server's key is of the kind the negotiated key exchange names.
+- **dtls**: with no curve of the client's supported_groups in common, an ECDHE suite is not
+  selected and the handshake fails with handshake_failure (RFC 8422 section 5.1); the server went
+  on with its default curve.
+- **dtls**: the reserved alert no_certificate(41) is no longer sent (RFC 5246 section 7.2.2): a
+  missing required client certificate is a handshake_failure. Alert descriptions follow section
+  7.2.2 elsewhere too: handshake_failure when no parameters are acceptable (it was
+  insufficient_security), decrypt_error for a signature or Finished that does not verify,
+  illegal_parameter for a value that was not offered.
+- **dtls**: a client refuses a ServerHello whose `use_srtp` holds an MKI or not exactly one
+  profile (RFC 5764 sections 4.1.1, 4.1.3) with illegal_parameter. A server configured without
+  SRTP profiles ignores a client's `use_srtp` instead of aborting.
+- **dtls**: a ClientHello offering a later DTLS version than 1.2 is answered with 1.2, under any
+  record-layer version of the family in epoch 0 (RFC 5246 section E.1); it was refused.
+
+### Breaking changes
+
+- **dtls**: a ServerHello no longer carries renegotiation_info, supported_groups or
+  ec_point_formats to a client that did not offer them; a client that sends no
+  signature_algorithms extension is no longer served by a certificate suite unless SHA-1
+  signatures are enabled (`with_insecure_hashes`).
+- **dtls**: `State::export_keying_material` returns `ErrExportWithoutExtendedMasterSecret` for a
+  session without the extended master secret. The serialized `State`
+  (`marshal_binary` / `unmarshal_binary`) carries the flag, so a state serialized by an earlier
+  version does not load.
+- **dtls**: new variants on non-exhaustive enums: `Extension::Unknown`,
+  `CipherSuiteId::Tls_Empty_Renegotiation_Info_Scsv`, and seven `shared::error::Error` variants
+  (`ErrRenegotiationInfoNotEmpty`, `ErrUnsolicitedExtension`, `ErrCompressionMethodNotOffered`,
+  `ErrNoNullCompressionMethod`, `ErrInvalidUseSrtpAnswer`, `ErrExportWithoutExtendedMasterSecret`,
+  `ErrDuplicateExtension`). `Extension::extension_type` is new.
+
 ## [0.22.0+brainwires.5] - 2026-11-20
 
 ### Bug Fixes
