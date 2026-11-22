@@ -1,5 +1,6 @@
 pub(crate) mod generic;
 pub(crate) mod h264;
+pub(crate) mod vp9;
 
 use std::any::Any;
 use std::collections::HashMap;
@@ -7,6 +8,7 @@ use std::fmt;
 
 use generic::GenericFmtp;
 use h264::H264Fmtp;
+use vp9::Vp9Fmtp;
 
 /// Fmtp interface for implementing custom
 /// Fmtp parsers based on mime_type
@@ -49,6 +51,8 @@ pub(crate) fn parse(mime_type: &str, line: &str) -> Box<dyn Fmtp> {
 
     if mime_type.to_uppercase() == "video/h264".to_uppercase() {
         Box::new(H264Fmtp { parameters })
+    } else if mime_type.eq_ignore_ascii_case("video/vp9") {
+        Box::new(Vp9Fmtp { parameters })
     } else {
         Box::new(GenericFmtp {
             mime_type: mime_type.to_owned(),
