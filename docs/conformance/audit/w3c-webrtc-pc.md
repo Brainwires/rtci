@@ -10,7 +10,7 @@ Totals (rows 957):
 
 The section 8 rows (statistics) carry the verdicts of branch `conf/stats-conformance`; the totals include them.
 
-- MUST: tested 613 / untested 101 / partial 81 / missing 67 / violated 6 / n-a 61
+- MUST: tested 611 / untested 102 / partial 82 / missing 67 / violated 6 / n-a 61
 - SHOULD: tested 4 / untested 0 / partial 1 / missing 0 / violated 0 / n-a 5
 - MAY: tested 3 / untested 2 / partial 0 / missing 1 / violated 0 / n-a 12
 
@@ -18,7 +18,7 @@ By pass:
 
 - sections 1 to 4: rows 399; MUST: tested 222 / untested 53 / partial 38 / missing 32 / violated 2 / n-a 35
 - section 5: rows 258; MUST: tested 178 / untested 26 / partial 24 / missing 6 / violated 3 / n-a 13
-- sections 6 to 12: rows 300; MUST: tested 213 / untested 22 / partial 19 / missing 29 / violated 1 / n-a 13
+- sections 6 to 12: rows 300; MUST: tested 211 / untested 23 / partial 20 / missing 29 / violated 1 / n-a 13
 
 | ID | § | Level | Clause (short paraphrase) | Verdict | Code | Test | Note |
 |---|---|---|---|---|---|---|---|
@@ -697,7 +697,7 @@ By pass:
 | WEBRTC-6.1-16 | 6.1 | MUST | createDataChannel: id 65535 throws TypeError | tested | src/peer_connection/mod.rs (create_data_channel) | negotiated_id_65535_is_refused | ErrMaxDataChannelID |
 | WEBRTC-6.1-17 | 6.1 | MUST | createDataChannel: with the DTLS role known, generate the id per RFC 8832 | tested | `src/peer_connection/mod.rs:2387`, `src/data_channel/registry.rs:92` | `stream_id_parity_matches_negotiated_dtls_role_across_all_role_configurations` | - |
 | WEBRTC-6.1-18 | 6.1 | MUST | createDataChannel: no id available, or id already used by another channel, throws OperationError | partial | src/peer_connection/mod.rs (create_data_channel), src/data_channel/registry.rs (assign_stream_ids) | - | a duplicate negotiated id is refused (a_second_negotiated_channel_on_a_stream_in_use_is_refused); ids exhausted at creation still leave the new channel registered (it is then closed with a failure at connect: channels_without_a_usable_id_are_closed_with_a_failure_at_connect) |
-| WEBRTC-6.1-19 | 6.1 | MUST | createDataChannel: id at or above MaxChannels on a connected transport throws OperationError | tested | src/peer_connection/mod.rs (create_data_channel) | a_negotiated_id_at_or_above_max_channels_is_refused | ErrDataChannelIdAboveMaxChannels; the off-by-one that refused id maxChannels - 1 in assign_stream_ids fixed |
+| WEBRTC-6.1-19 | 6.1 | MUST | createDataChannel: id at or above MaxChannels on a connected transport throws OperationError | untested | src/peer_connection/mod.rs (create_data_channel) |  | ErrDataChannelIdAboveMaxChannels once connected; the engine negotiates 65535 streams, so between two engines no id an application can name reaches it. At connect such a channel fails (channels_without_a_usable_id_are_closed_with_a_failure_at_connect); the off-by-one that refused id maxChannels - 1 fixed |
 | WEBRTC-6.1-20 | 6.1 | MUST | createDataChannel: first channel updates the negotiation-needed flag | tested | `src/peer_connection/mod.rs:2412` | `tests/jsep_negotiation_needed.rs` | Triggered for every channel; the check itself decides |
 | WEBRTC-6.1-21 | 6.1 | MUST | createDataChannel: append the channel to the connection's channels | tested | `src/peer_connection/mod.rs:2370`, `src/data_channel/registry.rs:28` | `test_data_channel_statistics_collection` | - |
 | WEBRTC-6.1-22 | 6.1 | MUST | createDataChannel: create the underlying data transport with the channel's properties | tested | `src/peer_connection/mod.rs:2408`, `src/data_channel/internal.rs:98`, `src/peer_connection/handler/datachannel.rs:501` | `negotiated_channel_fires_open_at_handshake_complete`, `sctp_handshake_complete_does_not_redial` | - |
@@ -771,7 +771,7 @@ By pass:
 | WEBRTC-6.2-17 | 6.2 | MUST | close(): set "closing" | tested | `src/data_channel/mod.rs:452` | `local_close_completes_with_close_only` | - |
 | WEBRTC-6.2-18 | 6.2 | MUST | close(): start the closing procedure if not started | tested | `src/data_channel/mod.rs:455` | `local_close_completes_with_close_only`, `test_data_channel_close_interop` | - |
 | WEBRTC-6.2-19 | 6.2 | MUST | send(): clears IsTransferable | n/a | - | - | Worker transfer is a binding concern |
-| WEBRTC-6.2-20 | 6.2 | MUST | send(): not "open" throws InvalidStateError | tested | src/data_channel/mod.rs (ensure_sendable) | a_channel_dialed_on_a_live_association_fails_when_its_ack_never_comes, buffered_amount_follows_the_queue_and_close_is_once | gated on the ready state: connecting (stream or not) and closing are ErrDataChannelNotOpen, closed ErrDataChannelClosed |
+| WEBRTC-6.2-20 | 6.2 | MUST | send(): not "open" throws InvalidStateError | partial | src/data_channel/mod.rs (ensure_sendable) | buffered_amount_follows_the_queue_and_close_is_once, a_channel_dialed_on_a_live_association_fails_when_its_ack_never_comes, data_sent_before_the_ack_arrives_on_an_unordered_channel | closing and closed channels refuse (ErrDataChannelNotOpen / ErrDataChannelClosed); an in-band channel awaiting its DATA_CHANNEL_ACK, "connecting" here, accepts a send as RFC 8832 section 6 lets its opener (a browser's channel is open by then): for the owner |
 | WEBRTC-6.2-21 | 6.2 | MUST | send(): string encoded as UTF-8; binary taken as bytes | tested | `src/data_channel/mod.rs:355`, `src/data_channel/mod.rs:382` | `test_data_channel_statistics_collection` | `send` and `send_text` |
 | WEBRTC-6.2-22 | 6.2 | MUST | send(): Blob data is queued in call order | n/a | - | - | Blob is a binding type |
 | WEBRTC-6.2-23 | 6.2 | MUST | send(): data larger than maxMessageSize throws TypeError | tested | `src/data_channel/mod.rs:329` | `send_larger_than_max_message_size_is_rejected` | - |

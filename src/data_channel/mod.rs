@@ -317,10 +317,15 @@ impl RTCDataChannel<'_> {
             .ok_or(Error::ErrDataChannelClosed)?;
 
         // W3C `send()`: "If channel.[[ReadyState]] is not "open", throw an
-        // InvalidStateError". An in-band channel waiting for its DATA_CHANNEL_ACK is
-        // "connecting" although it has a stream, and a closing one still has its stream too.
+        // InvalidStateError". A closing channel still has its stream, and refuses. An in-band
+        // channel waiting for its DATA_CHANNEL_ACK is "connecting" here, but RFC 8832 section
+        // 6 lets its opener send on the stream at once ("MAY start sending messages
+        // containing user data without waiting for the reception of the corresponding
+        // DATA_CHANNEL_ACK"), which is what a browser's channel, open by then, does: it is
+        // accepted.
         match dc.ready_state {
-            RTCDataChannelState::Open if dc.data_channel.is_some() => {}
+            RTCDataChannelState::Open | RTCDataChannelState::Connecting
+                if dc.data_channel.is_some() => {}
             RTCDataChannelState::Closed => return Err(Error::ErrDataChannelClosed),
             _ => return Err(Error::ErrDataChannelNotOpen),
         }

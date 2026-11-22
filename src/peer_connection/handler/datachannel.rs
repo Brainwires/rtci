@@ -2446,7 +2446,17 @@ mod tests {
             c.event(RTCEventInternal::SCTPStreamClosed(0, *stream_id));
         }
         assert!(c.data_channels.is_empty());
-        assert!(c.stats.data_channels.is_empty());
+        // The closed channels' stats objects stay, for the last few only.
+        assert!(
+            c.stats.data_channels.len()
+                <= crate::statistics::accumulator::MAX_CLOSED_DATA_CHANNEL_STATS
+        );
+        assert!(
+            c.stats
+                .data_channels
+                .values()
+                .all(|s| s.state == RTCDataChannelState::Closed)
+        );
     }
 
     /// RFC 8841 section 10 with RFC 8831 section 6.2: an association closed by signalling
@@ -2477,7 +2487,13 @@ mod tests {
             ]
         );
         assert!(c.data_channels.is_empty());
-        assert!(c.stats.data_channels.is_empty());
+        assert!(
+            c.stats
+                .data_channels
+                .values()
+                .all(|s| s.state == RTCDataChannelState::Closed),
+            "closed channels keep a closed stats object"
+        );
     }
 
     /// RFC 8841 section 9.3: a new `a=sctp-port` closes the association and establishes a

@@ -157,8 +157,13 @@ fn channels_of_different_priority_deliver_in_order_under_either_scheduler() -> R
     use rtc::data_channel::RTCDataChannelInit;
 
     for weighted in [true, false] {
+        // 40 messages of 2000 bytes queued at once on each channel: above the W3C
+        // [[MaxBufferSize]] between two default peers (64 KiB, the larger max-message-size),
+        // so the sender's limit is raised: the test is about scheduling only.
         let (mut pair, _, _) = connected(
-            default().with_sctp_weighted_fair_queueing(weighted),
+            default()
+                .with_sctp_weighted_fair_queueing(weighted)
+                .with_data_channel_max_buffer_size(Some(1 << 24)),
             default(),
         )?;
         let mut channels = vec![];
