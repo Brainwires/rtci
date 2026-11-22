@@ -3,11 +3,16 @@ use bytes::{BufMut, Bytes, BytesMut};
 use crate::codec::av1::leb128::BytesMutExt;
 use crate::codec::av1::obu::{OBU_HAS_SIZE_BIT, obu_has_extension, parse_obus};
 use crate::codec::av1::packetizer::{
-    AGGREGATION_HEADER_SIZE, MAX_NUM_OBUS_TO_OMIT_SIZE, get_aggregation_header, packetize,
+    AGGREGATION_HEADER_SIZE, MAX_NUM_OBUS_TO_OMIT_SIZE, get_aggregation_header, packet_layer,
+    packetize,
 };
 use crate::packetizer::Payloader;
 use shared::error::Result;
 
+#[cfg(test)]
+mod av1_layers_test;
+#[cfg(test)]
+mod av1_receive_test;
 #[cfg(test)]
 mod av1_test;
 mod depacketizer;
@@ -19,12 +24,91 @@ pub use depacketizer::Av1Depacketizer;
 
 #[derive(Default, Clone, Debug)]
 /// Packetizes AV1 temporal units into RTP payloads.
+///
+/// One call takes one temporal unit in low overhead format (or, with spatial layers, one
+/// layer's frame of it) and never mixes layers in a packet (AV1 RTP section 5): a packet ends
+/// where the OBUs' `temporal_id` / `spatial_id` change, and at a sequence header, which starts
+/// its own packet. Temporal delimiter, tile list and padding OBUs are dropped and the OBU size
+/// fields removed.
 pub struct Av1Payloader {}
 
-impl Payloader for Av1Payloader {
+/// The packets of one frame of a temporal unit, from [`Av1Payloader::payload_frames`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Av1FramePayloads {
+    /// `spatial_id` of the frame's OBUs (0 when none has an extension header).
+    pub spatial_id: u8,
+    /// `temporal_id` of the frame's OBUs (0 when none has an extension header).
+    pub temporal_id: u8,
+    /// The frame's RTP payloads, in order.
+    pub payloads: Vec<Bytes>,
+}
+
+impl Av1Payloader {
+    /// Packetizes one temporal unit and returns its packets grouped by frame: one group per
+    /// run of packets of one spatial layer.
+    ///
+    /// This is the unit the Dependency Descriptor describes (AV1 RTP appendix A: "an RTP
+    /// frame"): `start_of_frame` belongs on a group's first payload and `end_of_frame` on its
+    /// last. The RTP marker belongs on the last payload of the last group only (AV1 RTP
+    /// section 4.2). A packet of OBUs without an extension header (a sequence header, metadata)
+    /// is counted with the frame that follows it.
+    ///
+    /// # Errors
+    ///
+    /// The same as [`Payloader::payload`].
+    pub fn payload_frames(
+        &mut self,
+        mtu: usize,
+        temporal_unit: &Bytes,
+    ) -> Result<Vec<Av1FramePayloads>> {
+        let mut frames: Vec<Av1FramePayloads> = vec![];
+        // Packets of no layer, waiting for the frame they lead.
+        let mut pending: Vec<Bytes> = vec![];
+        for (layer, payload) in self.payload_with_layers(mtu, temporal_unit)? {
+            let Some(layer) = layer else {
+                pending.push(payload);
+                continue;
+            };
+            let (temporal_id, spatial_id) = (layer >> 2, layer & 0x03);
+            match frames.last_mut() {
+                Some(frame) if frame.spatial_id == spatial_id => {
+                    frame.payloads.append(&mut pending);
+                    frame.payloads.push(payload);
+                }
+                _ => {
+                    let mut payloads = std::mem::take(&mut pending);
+                    payloads.push(payload);
+                    frames.push(Av1FramePayloads {
+                        spatial_id,
+                        temporal_id,
+                        payloads,
+                    });
+                }
+            }
+        }
+        if !pending.is_empty() {
+            match frames.last_mut() {
+                Some(frame) => frame.payloads.append(&mut pending),
+                None => frames.push(Av1FramePayloads {
+                    spatial_id: 0,
+                    temporal_id: 0,
+                    payloads: pending,
+                }),
+            }
+        }
+        Ok(frames)
+    }
+
     /// Based on <https://chromium.googlesource.com/external/webrtc/+/4e513346ec56c829b3a6010664998469fc237b35/modules/rtp_rtcp/source/rtp_packetizer_av1.cc>
     /// Reference: <https://aomediacodec.github.io/av1-rtp-spec/#45-payload-structure>
-    fn payload(&mut self, mtu: usize, payload: &Bytes) -> Result<Vec<Bytes>> {
+    ///
+    /// Each payload comes with the layer of its OBUs (`temporal_id << 2 | spatial_id`), or
+    /// `None` when none of them has an extension header.
+    fn payload_with_layers(
+        &mut self,
+        mtu: usize,
+        payload: &Bytes,
+    ) -> Result<Vec<(Option<u8>, Bytes)>> {
         // 0                   1                   2                   3
         // 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
         // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
@@ -115,10 +199,20 @@ impl Payloader for Av1Payloader {
                     .as_ref(),
             );
 
-            payloads.push(out.freeze());
+            payloads.push((packet_layer(&obus, packet), out.freeze()));
         }
 
         Ok(payloads)
+    }
+}
+
+impl Payloader for Av1Payloader {
+    fn payload(&mut self, mtu: usize, payload: &Bytes) -> Result<Vec<Bytes>> {
+        Ok(self
+            .payload_with_layers(mtu, payload)?
+            .into_iter()
+            .map(|(_, payload)| payload)
+            .collect())
     }
 
     fn clone_to(&self) -> Box<dyn Payloader> {

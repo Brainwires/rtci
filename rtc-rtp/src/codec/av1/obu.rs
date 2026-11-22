@@ -20,6 +20,7 @@ pub const OBU_TYPE_FRAME_HEADER: u8 = 3;
 pub const OBU_TYPE_TILE_GROUP: u8 = 4;
 pub const OBU_TYPE_METADATA: u8 = 5;
 pub const OBU_TYPE_FRAME: u8 = 6;
+pub const OBU_TYPE_REDUNDANT_FRAME_HEADER: u8 = 7;
 pub const OBU_TYPE_TILE_LIST: u8 = 8;
 pub const OBU_TYPE_PADDING: u8 = 15;
 
@@ -71,7 +72,10 @@ pub fn parse_obus(payload: &Bytes) -> Result<Vec<Obu>> {
             if payload_without_header.is_empty() {
                 return Err(Error::ErrPayloadTooSmallForObuPayloadSize);
             }
-            let (obu_payload_size, leb128_size) = read_leb128(&payload_without_header);
+            // A size that does not end, is longer than 8 bytes or does not fit 32 bits is
+            // not a size (AV1 4.10.5).
+            let (obu_payload_size, leb128_size) = read_leb128(&payload_without_header)
+                .ok_or(Error::ErrPayloadTooSmallForObuPayloadSize)?;
             // The declared size must fit what follows the size field.
             if (obu_payload_size as u64)
                 > payload_without_header.len().saturating_sub(leb128_size) as u64
@@ -84,6 +88,14 @@ pub fn parse_obus(payload: &Bytes) -> Result<Vec<Obu>> {
         };
 
         let obu_size = obu_header_size + obu_payload.len();
+        // A temporal delimiter starts a temporal unit. One after other OBUs starts a second
+        // unit, and "each RTP packet MUST NOT contain OBUs that belong to different temporal
+        // units" (AV1 RTP 5): one call packetizes one unit, with one RTP timestamp.
+        if obu_type == OBU_TYPE_TEMPORAL_DELIMITER && !obus.is_empty() {
+            return Err(Error::Other(
+                "AV1 payloader: more than one temporal unit in one call".to_owned(),
+            ));
+        }
         if !should_ignore_obu_type(obu_type) {
             obus.push(Obu {
                 header,

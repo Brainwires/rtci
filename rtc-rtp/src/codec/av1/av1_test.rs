@@ -9,10 +9,10 @@ use shared::error::Result;
 
 use super::*;
 
-const OBU_EXTENSION_S1T1: u8 = 0b0010_1000;
+pub(super) const OBU_EXTENSION_S1T1: u8 = 0b0010_1000;
 const NEW_CODED_VIDEO_SEQUENCE_BIT: u8 = 0b0000_1000;
 
-struct Av1Obu {
+pub(super) struct Av1Obu {
     header: u8,
     extension: u8,
     payload: Vec<u8>,
@@ -44,7 +44,7 @@ impl Av1Obu {
     }
 }
 
-fn build_av1_frame(obus: &Vec<Av1Obu>) -> Bytes {
+pub(super) fn build_av1_frame(obus: &Vec<Av1Obu>) -> Bytes {
     let mut raw = vec![];
     for obu in obus {
         raw.push(obu.header);
@@ -512,7 +512,7 @@ fn test_split_two_obus_into_two_packets() -> Result<()> {
 #[test]
 fn read_leb128_0() {
     let bytes = vec![0u8];
-    let (payload_size, leb128_size) = read_leb128(&(bytes.into()));
+    let (payload_size, leb128_size) = read_leb128(&bytes).unwrap();
     assert_eq!(payload_size, 0);
     assert_eq!(leb128_size, 1);
 }
@@ -520,7 +520,7 @@ fn read_leb128_0() {
 #[test]
 fn read_leb128_5_byte() {
     let bytes = vec![0xC3, 0x80, 0x81, 0x80, 0x00];
-    let (payload_size, leb128_size) = read_leb128(&(bytes.into()));
+    let (payload_size, leb128_size) = read_leb128(&bytes).unwrap();
     assert_eq!(leb128_size, 5);
     assert_eq!(payload_size, 16451);
 }
@@ -564,8 +564,32 @@ fn put_leb128_matches_size_and_roundtrips() {
         buf.put_leb128(v);
         assert_eq!(buf.len(), leb128_size(v), "encoded length mismatch for {v}");
 
-        let (decoded, size) = read_leb128(&buf.freeze());
+        let (decoded, size) = read_leb128(&buf).unwrap();
         assert_eq!(decoded, v, "round-trip failed for {v}");
         assert_eq!(size, leb128_size(v), "read size mismatch for {v}");
     }
+}
+
+/// AV1 4.10.5: a leb128 value ends within 8 bytes and fits 32 bits.
+#[test]
+fn read_leb128_refuses_what_is_not_a_value() {
+    // No byte without the continuation bit.
+    assert_eq!(read_leb128(&[]), None);
+    assert_eq!(read_leb128(&[0x80]), None);
+    assert_eq!(read_leb128(&[0xFF, 0xFF, 0xFF]), None);
+    // u32::MAX is the largest value; 2^32 is one too many.
+    assert_eq!(
+        read_leb128(&[0xFF, 0xFF, 0xFF, 0xFF, 0x0F]),
+        Some((u32::MAX, 5))
+    );
+    assert_eq!(read_leb128(&[0x80, 0x80, 0x80, 0x80, 0x10]), None);
+    // Eight bytes is the longest form; the ninth byte is never read.
+    assert_eq!(
+        read_leb128(&[0x81, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x00, 0x55]),
+        Some((1, 8))
+    );
+    assert_eq!(
+        read_leb128(&[0x81, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x00]),
+        None
+    );
 }

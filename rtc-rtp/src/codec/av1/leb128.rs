@@ -1,27 +1,25 @@
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{BufMut, BytesMut};
 
-pub fn decode_leb128(mut val: u64) -> u32 {
-    let mut b = 0;
-    loop {
-        b |= val & 0b_0111_1111;
-        val >>= 8;
-        if val == 0 {
-            return b as u32;
-        }
-        b <<= 7;
-    }
-}
+/// The longest leb128 value (AV1 specification 4.10.5).
+pub const MAX_LEB128_SIZE: usize = 8;
 
-pub fn read_leb128(bytes: &Bytes) -> (u32, usize) {
-    let mut encoded = 0;
-    for i in 0..bytes.len() {
-        encoded |= bytes[i] as u64;
-        if bytes[i] & 0b_1000_0000 == 0 {
-            return (decode_leb128(encoded), i + 1);
+/// Reads a leb128 value from the start of `bytes` (AV1 specification 4.10.5) and returns it
+/// with the number of bytes it took.
+///
+/// `None` when there is none to read: the bytes end before a byte without the continuation
+/// bit, the value takes more than 8 bytes, or it does not fit 32 bits ("it is a requirement of
+/// bitstream conformance that the value returned from the leb128 parsing process is less than
+/// or equal to (1 << 32) - 1"). An unterminated value used to read as 0 in 0 bytes, a value of
+/// 2^32 or more wrapped, and a ninth byte pushed the first one out.
+pub fn read_leb128(bytes: &[u8]) -> Option<(u32, usize)> {
+    let mut value: u64 = 0;
+    for (i, byte) in bytes.iter().take(MAX_LEB128_SIZE).enumerate() {
+        value |= u64::from(byte & 0b_0111_1111) << (7 * i);
+        if byte & 0b_1000_0000 == 0 {
+            return u32::try_from(value).ok().map(|value| (value, i + 1));
         }
-        encoded <<= 8;
     }
-    (0, 0)
+    None
 }
 
 pub fn leb128_size(value: u32) -> usize {

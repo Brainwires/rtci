@@ -1,4 +1,6 @@
 #[cfg(test)]
+mod sample_builder_frame_start_test;
+#[cfg(test)]
 mod sample_builder_test;
 #[cfg(test)]
 mod sample_sequence_location_test;
