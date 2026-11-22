@@ -303,7 +303,8 @@ fn peer_with_explicit_rollback_only() -> Result<RTCPeerConnection, Box<dyn std::
         .build(Instant::now())?)
 }
 
-/// W3C webrtc-pc section 4.4.1.6: a remote offer that arrives while a local offer is pending
+/// W3C webrtc-pc section 4.4.2 (`setRemoteDescription`): a remote offer that arrives while a
+/// local offer is pending
 /// rolls the local offer back and is applied, in one call; that is the default. RFC 9429
 /// sections 5.6 and 5.7 leave the rollback to the application, which is
 /// `SettingEngineBuilder::with_implicit_rollback(false)`: the offer is then refused until

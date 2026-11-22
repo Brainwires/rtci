@@ -1361,10 +1361,10 @@ impl SettingEngineBuilder {
     /// Whether a remote offer that arrives while a local offer is pending rolls the local
     /// offer back and is applied, in one `set_remote_description` call. The default is `true`.
     ///
-    /// W3C webrtc-pc section 4.4.1.6 ("set the session description", the
-    /// `setRemoteDescription` steps): "If description.type is "offer" and
-    /// connection.[[SignalingState]] is "have-local-offer" ... set a local session
-    /// description of type rollback, then set the remote description". This engine's
+    /// W3C webrtc-pc section 4.4.2, the `setRemoteDescription` steps: a description of type
+    /// "offer" that "is invalid for the current connection.[[SignalingState]] as described in
+    /// [RFC9429]" has the local description set to `{type: "rollback"}` first, and is then
+    /// set. This engine's
     /// `set_remote_description` is that operation, browsers perform it and "perfect
     /// negotiation" relies on it. RFC 9429 does not forbid it: its state machine (section
     /// 3.2) is kept, because the rollback is applied first (section 5.7) and the offer is

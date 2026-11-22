@@ -1521,8 +1521,8 @@ impl RTCPeerConnection {
         now: Instant,
         remote_description: RTCSessionDescription,
     ) -> Result<()> {
-        // W3C webrtc-pc section 4.4.1.6, the implicit rollback: a remote offer that arrives
-        // while a local offer is pending rolls the local offer back and is then applied, as
+        // W3C webrtc-pc section 4.4.2 (`setRemoteDescription`), the implicit rollback: a remote
+        // offer that arrives while a local offer is pending rolls the local offer back and is then applied, as
         // one operation. RFC 9429's state machine is kept (the rollback of section 5.7, then
         // the offer in `stable`); `SettingEngineBuilder::with_implicit_rollback(false)`
         // leaves the rollback to the application and refuses the offer (section 5.6). An

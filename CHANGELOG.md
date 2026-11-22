@@ -78,7 +78,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SettingEngineBuilder::with_max_bundle_as_must_bundle(false)` has `max-bundle` ignored (the
   SHOULD of RFC 9429 section 4.1.1): the default policy (`balanced`) then stays in effect.
 - **jsep**: a remote offer applied while a local offer is pending rolls the local offer back
-  first, in the one `set_remote_description` call (W3C webrtc-pc section 4.4.1.6); it was
+  first, in the one `set_remote_description` call (W3C webrtc-pc section 4.4.2,
+  `setRemoteDescription`); it was
   refused. `SettingEngineBuilder::with_implicit_rollback(false)` leaves the rollback to the
   application (RFC 9429 sections 5.6 and 5.7).
 - **jsep**: an initial remote offer whose bundled RTP section is not bundle-only and has no

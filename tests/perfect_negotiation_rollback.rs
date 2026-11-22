@@ -159,8 +159,8 @@ fn polite_peer_glare_recovery_with_local_offer_rollback() {
     );
 }
 
-/// Perfect negotiation as W3C webrtc-pc writes it (section 4.4.1.6, and the example of section
-/// 10.7): the polite peer does not roll back itself, it applies the colliding offer, and
+/// Perfect negotiation as W3C webrtc-pc writes it (`setRemoteDescription` in section 4.4.2,
+/// and the "perfect negotiation" example): the polite peer does not roll back itself, it applies the colliding offer, and
 /// `set_remote_description` rolls its own offer back first. The impolite peer's answer to
 /// the polite peer's discarded offer never comes; the polite peer's track resurfaces in its
 /// next offer, which the impolite peer answers.
