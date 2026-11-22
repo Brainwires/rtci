@@ -9,6 +9,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **rtp_transceiver**: the W3C object model (webrtc-pc 5.1 to 5.4). Every transceiver has a
+  sender and a receiver: `get_senders` / `get_receivers` list those of every transceiver that
+  is not stopped, whatever its direction, and `rtp_sender(id)` / `rtp_receiver(id)` exist for
+  every transceiver. API changes:
+  - `RTCRtpSender::track()` returns `Option<&MediaStreamTrack>` (`None` for a sender without
+    a track: one made by `add_transceiver_from_kind`, or after `remove_track` /
+    `replace_track(None)`); new `track_mut()`, `ssrcs()` and `streams()`.
+  - `RTCRtpSender::replace_track(Option<MediaStreamTrack>)`: `None` stops sending (and
+    `write_rtp` is then refused with `ErrRTPSenderTrackRemoved`); a replacement keeps the
+    sender's SSRCs, msid and streams and needs no negotiation; refused when the transceiver is
+    stopping (`InvalidStateError`).
+  - `RTCRtpSender::set_streams` returns `Result<()>` (refused when closed); the streams are
+    exactly the given ids, deduplicated; an empty list is `a=msid:-`.
+  - `RTCRtpTransceiver::set_direction` returns `Result<()>`: `InvalidStateError` when stopping,
+    `ErrInvalidDirection` for `Stopped` / `Unspecified`, refused when closed.
+  - `RTCRtpTransceiverDirection::Stopped` (the enum is `#[non_exhaustive]`):
+    `direction()` reads it once `stop()` was called, `current_direction()` once the
+    transceiver is stopped. `stop()` is stopping first (the next offer rejects the section,
+    an answer made before still answers it) and stopped once an exchange rejects it; it ends
+    the receiver's track (`RTCTrackEvent::OnClose`). New `is_stopped()`.
+  - `add_transceiver_from_kind(kind, None)` is sendrecv (W3C default) with a sender without a
+    track; `RTCRtpTransceiverInit::recvonly()` and `with_direction()` give the old behaviour.
+    `add_transceiver_from_track` takes any direction. `sendEncodings` are validated (rid
+    syntax: new `Error::TypeError(String)`; `RangeError`s) and normalised (audio members
+    removed, at most `MAX_SEND_ENCODINGS` = 16, `scale_resolution_down_by` filled, a lone rid
+    dropped).
+  - `remove_track` keeps the sender (track null, direction loses send) and does nothing on a
+    stopping transceiver or a sender without a track; `add_track` refuses a track a sender
+    already has (`InvalidAccessError`) and reuses a trackless transceiver of its kind that is
+    not stopping and never sent.
+  - `set_codec_preferences` uses the codec dictionary match (clock rate, channels, fmtp),
+    removes duplicates and refuses a list of only RTX / RED / FEC / CN
+    (`InvalidModificationError`).
+  - `get_capabilities(kind)` on senders and receivers lists the media engine's codecs (RTX
+    once, without `apt`) and header extensions, with no negotiation read.
+  - `RTCRtpSender::set_parameters` also refuses a changed encoding count, a codec the sender
+    cannot choose and changed read-only members; `get_parameters` carries `rtcp.cname`.
+  - `RTCRtpReceiver::jitter_buffer_target()` / `set_jitter_buffer_target()` (RangeError above
+    4000 ms).
+  - `RTCRtpContributingSource::audio_level` is `Option<f64>`: `None` when no level was received;
+    contributing sources take their RFC 6465 levels. `get_contributing_sources` /
+    `get_synchronization_sources` list the sources most recent first, and only those heard in
+    the 10 seconds before the connection's newest time.
 - **sender**: `RTCRtpSender::write_rtp` writes the MID header extension (the transceiver's mid)
   and RtpStreamId (the rid of the packet's encoding) into every packet when the extension is
   negotiated (RFC 9143 section 15, RFC 8852 section 3.3); the application had to. A packet

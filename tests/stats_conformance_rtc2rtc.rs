@@ -509,6 +509,20 @@ impl World {
             .rtp_transceiver(transceiver)
             .and_then(|t| t.sender())
             .expect("a sendonly transceiver has a sender");
+        // A transceiver made from a kind has a sender without a track (W3C addTransceiver);
+        // the stream objects name the track and its media source, so give it one. The track
+        // has no codings of its own: the sender keeps the encoding (and SSRC) it has.
+        world.peers[0]
+            .pc
+            .rtp_sender(sender)
+            .expect("sender")
+            .replace_track(Some(rtc::media_stream::MediaStreamTrack::new(
+                "stats-stream".to_owned(),
+                "stats-track".to_owned(),
+                "stats-track".to_owned(),
+                kind,
+                vec![],
+            )))?;
         if setup.data_channel {
             world.peers[0].pc.create_data_channel("first", None)?;
         }

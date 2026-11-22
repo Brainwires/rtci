@@ -73,7 +73,7 @@ pub(crate) struct InterceptorHandlerContext {
     goodbye_ssrcs: HashSet<SSRC>,
     /// The wall clock paired with the engine's clock, taken once, for the timestamps of the
     /// receivers' synchronization and contributing sources.
-    wall_clock: Option<SystemInstant>,
+    pub(crate) wall_clock: Option<SystemInstant>,
 }
 
 fn receiver_declares_ssrc(transceiver: &RTCRtpTransceiverInternal, ssrc: SSRC) -> bool {
@@ -1062,26 +1062,44 @@ impl<'a> InterceptorHandler<'a> {
         else {
             return;
         };
-        // RFC 6464: one octet, the voice activity flag and the level in -dBov.
-        let audio_level = if header.extension {
+        let extension = |uri: &str| {
+            if !header.extension {
+                return None;
+            }
             let (extension_id, audio, _) =
                 self.media_engine
                     .get_header_extension_id(RTCRtpHeaderExtensionCapability {
-                        uri: ::sdp::extmap::AUDIO_LEVEL_URI.to_owned(),
+                        uri: uri.to_owned(),
                     });
             (audio && extension_id != 0)
                 .then(|| header.get_extension(extension_id as u8))
                 .flatten()
-                .and_then(|payload| payload.first().copied())
-        } else {
-            None
         };
+        // RFC 6464: one octet, the voice activity flag and the level in -dBov.
+        let audio_level =
+            extension(::sdp::extmap::AUDIO_LEVEL_URI).and_then(|payload| payload.first().copied());
+        // RFC 6465: one level per CSRC.
+        let csrc_levels =
+            extension(crate::rtp_transceiver::rtp_receiver::internal::CSRC_AUDIO_LEVEL_URI)
+                .and_then(|payload| {
+                    use shared::marshal::Unmarshal;
+                    rtp::extension::csrc_audio_level_extension::CsrcAudioLevelExtension::unmarshal(
+                        &mut payload.as_ref(),
+                    )
+                    .ok()
+                });
         let wall_clock = *self
             .ctx
             .wall_clock
             .get_or_insert_with(|| SystemInstant::now(now));
         if let Some(receiver) = self.rtp_transceivers[id].receiver_mut() {
-            receiver.record_sources(now, wall_clock, header, audio_level);
+            receiver.record_sources(
+                now,
+                wall_clock,
+                header,
+                audio_level,
+                csrc_levels.as_ref().map(|ext| ext.levels.as_slice()),
+            );
         }
     }
 
