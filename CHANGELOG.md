@@ -956,6 +956,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SettingEngineBuilder::with_sctp_message_size_limit_without_interleaving(false)` lifts it.
   A send over the peer's `max-message-size` still gets `ErrOutboundPacketTooLarge`. Test:
   `the_16_kb_limit_applies_only_when_i_data_was_not_negotiated`.
+- **rtcp_session**: congestion control feedback (TWCC, RFC 8888) leaves as its generator
+  builds it, outside RFC 4585's one Early packet per regular interval and outside the
+  regular reports' timing (`RtcpSessionBuilder::with_immediate_congestion_feedback`, default
+  `true`; reduced-size where negotiated, else a minimal compound packet). The generators size
+  it to the media it reports on: 5% of the media received, every 50 to 250 ms
+  (`FeedbackCadence`; the RTCP bandwidth no longer stretches it). The rest of RTCP follows RFC
+  3550 section 6.2 on the media measured both ways, with a start-up value before it is
+  measured (`RTCP_SESSION_NOMINAL_VIDEO_BANDWIDTH` 1 Mbit/s with video,
+  `RTCP_SESSION_NOMINAL_AUDIO_BANDWIDTH` 64 kbit/s with audio). Before, feedback waited for the
+  RTCP bandwidth of the measured rate: a sender that started low (a browser with three
+  simulcast layers) heard 6.3 times a second, with gaps to 387 ms, and did not climb. Measured
+  now (receiver side, one stream / three layers): feedback gaps at most 250 ms from 64 kbit/s
+  up, 50 ms from 300 kbit/s; the receiver's RTCP 5.6% of the media at 64 kbit/s, 5.1% at 300
+  kbit/s, 3.1% at 1 Mbit/s, 2.5% at 2.5 Mbit/s; a `Gcc` sender fed by it reaches 2 Mbit/s from
+  300 kbit/s in 0.49 s. Regular reports at 1 and 2.5 Mbit/s are 50 and 125 a second (RTP/AVPF
+  with `T_rr_interval` zero spends the RTCP share).
 - **interceptor**: bandwidth probing is on in the default interceptor set
   (`DefaultInterceptorOptions::bandwidth_probing` now `true`; `false` is the opt-out). RFC 8836
   section 2 (requirement 4, a SHOULD) asks a congestion controller to adapt as quickly as
