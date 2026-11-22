@@ -2349,6 +2349,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of failing every record (`isolates_crypto_providers_across_simultaneous_peer_connections`
   failed on the train).
 
+### DTLS 1.3 pre-shared keys
+
+- **dtls**: session resumption with tickets for DTLS 1.3 (RFC 8446 sections 2.2, 4.2.9,
+  4.2.11, 4.6.1). A server sends `ConfigBuilder::with_session_tickets(n)` NewSessionTicket
+  messages after each handshake (default 0: none), sealed under a key its configuration makes
+  at random and valid for `with_session_ticket_lifetime` (two hours by default, seven days at
+  most); each ticket is accepted once. A client given a `SessionStore`
+  (`with_session_store`; `session::MemorySessionStore`) keeps them by server name and offers
+  one, with its binder, as the last extension of its next ClientHello to that name (computed
+  again after a HelloRetryRequest). A resumed handshake has no Certificate or
+  CertificateVerify; the association reports the certificates of the handshake the ticket
+  came from (`State::resumed`), and the peer-certificate check runs on them again.
+- **dtls**: external PSKs for DTLS 1.3 (`with_external_psks`, `session::ExternalPsk`, with
+  their hash, which steers the suite a server picks). `psk_dhe_ke` is the only mode by
+  default; `with_psk_without_key_exchange` allows `psk_ke` as well.
+- **dtls**: `DTLSConn::set_clock` gives an association the time ahead of a datagram (the
+  endpoint calls it): what tickets are dated by. The engine reads no clock.
+- **peer connection**: no session tickets, no session store and no PSK in the DTLS
+  configuration: WebRTC authenticates every association by the fingerprints of its SDP and
+  makes a new one per session (`the_peer_connection_neither_sends_nor_accepts_session_tickets`).
+
 ### DTLS 1.2: the RFC by default
 
 - **dtls**: `HelloVerifyRequest.server_version` is DTLS 1.0, as RFC 6347 section 4.2.1 asks

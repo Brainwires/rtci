@@ -323,6 +323,7 @@ impl DTLSConn {
         };
         self.authenticated_records = v13.authenticated_records;
         self.closed_by_peer = v13.closed_by_peer;
+        self.state.resumed = v13.resumed;
         self.address_verified |= v13.address_verified;
         if v13.established && !self.handshake_completed {
             self.handshake_completed = true;
@@ -353,6 +354,9 @@ impl DTLSConn {
         let Some(v13) = &mut self.v13 else {
             return Ok(());
         };
+        if self.state.clock.is_some() {
+            v13.clock = self.state.clock;
+        }
         let result = v13.read(datagram);
         self.sync_dtls13();
         result
@@ -457,6 +461,14 @@ impl DTLSConn {
         }
     }
 
+    /// Tells the association the time, ahead of a datagram: what a DTLS 1.3 handshake dates
+    /// session tickets by (it reads no clock of its own). [`Endpoint`](crate::endpoint::Endpoint)
+    /// calls it before every datagram it delivers; a caller that drives a `DTLSConn` itself
+    /// calls it, or [`Self::read`] goes by the `now` of the last timer call.
+    pub fn set_clock(&mut self, now: Instant) {
+        self.state.clock = Some(now);
+    }
+
     /// Settles the version from a hello: `message` is one whole ClientHello (to a server)
     /// or ServerHello (to a client), with its handshake header, from `record`.
     fn negotiate_version(
@@ -491,6 +503,7 @@ impl DTLSConn {
                         record_sequence: record.sequence_number,
                         address_verified: self.address_verified,
                         verified_retry: self.verified_retry.take(),
+                        now: self.state.clock,
                     };
                     self.v13 = Some(Box::new(Conn13::server(cfg, body, start)));
                     self.state.negotiated_version = Some(DtlsVersion::Dtls1_3);
@@ -553,6 +566,7 @@ impl DTLSConn {
                         next_sequence.unwrap_or(0),
                     );
                     v13.set_next_receive_seq(message_seq);
+                    v13.clock = self.state.clock;
                     let server_hello = crate::dtls13::record::plaintext_record(
                         crate::dtls13::record::CONTENT_TYPE_HANDSHAKE,
                         record.sequence_number,

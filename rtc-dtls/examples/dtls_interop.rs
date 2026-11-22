@@ -16,8 +16,14 @@
 //! * `DTLS_KEY_UPDATE=1`: start a key update, asking the peer for one too, after the
 //!   handshake (DTLS 1.3).
 //! * `DTLS_SECONDS`: how long to run after starting (default 6).
+//! * `DTLS_TICKETS=<n>`: a server that sends `n` session tickets after each handshake
+//!   (DTLS 1.3), and takes them back in later ones.
+//! * `DTLS_RESUME=1`: a client that keeps the tickets it is sent and, 1.5 s after its first
+//!   handshake, closes the association and makes a second one from the same port, which
+//!   offers one of them.
 //!
-//! It prints one line per event: `complete version=.. suite=.. exporter=..` (60 bytes of
+//! It prints one line per event: `complete version=.. suite=.. resumed=.. exporter=..` (60
+//! bytes of
 //! keying material for the label `EXTRACTOR-dtls_srtp`), `data <text>` for application data
 //! received, `closed` for the peer's close_notify, `failed` when the association failed. The
 //! server uses a self-signed certificate; the client accepts any.
@@ -68,6 +74,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Ok(suite) = std::env::var("DTLS_SUITE") {
         builder = builder.with_cipher_suites(vec![CipherSuiteId::from(suite.as_str())]);
     }
+    let resume = is_client && std::env::var("DTLS_RESUME").as_deref() == Ok("1");
+    if resume {
+        builder = builder
+            .with_session_store(Some(Arc::new(rtc_dtls::session::MemorySessionStore::new())));
+    }
+    if let Some(tickets) = std::env::var("DTLS_TICKETS")
+        .ok()
+        .and_then(|count| count.parse().ok())
+    {
+        builder = builder.with_session_tickets(tickets);
+    }
     if !is_client {
         builder = builder.with_certificates(vec![Certificate::generate_self_signed(
             vec!["localhost".to_owned()],
@@ -92,8 +109,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         (!is_client).then(|| config.clone()),
     );
     if let Some(remote) = remote {
-        endpoint.connect(Instant::now(), remote, config, None)?;
+        endpoint.connect(Instant::now(), remote, config.clone(), None)?;
     }
+    let mut reconnected = false;
 
     let seconds = std::env::var("DTLS_SECONDS")
         .ok()
@@ -113,6 +131,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let now = Instant::now();
         if now >= deadline {
             break;
+        }
+        // A resuming client makes its second association once the tickets are in.
+        if let (Some(at), Some(remote)) = (complete_at, remote)
+            && resume
+            && !reconnected
+            && now >= at + Duration::from_millis(1500)
+        {
+            reconnected = true;
+            complete_at = None;
+            let _ = endpoint.stop(now, remote);
+            while let Some(transmit) = endpoint.poll_transmit() {
+                socket.send_to(&transmit.message, transmit.transport.peer_addr)?;
+            }
+            println!("reconnecting");
+            endpoint.connect(now, remote, config.clone(), None)?;
+            continue;
         }
         // After the handshake: say something, and then, if asked, update the keys and say
         // something under the new ones.
@@ -151,7 +185,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         socket.set_read_timeout(Some(wait))?;
         let events = match socket.recv_from(&mut buffer) {
             Ok((length, from)) => {
-                remote.get_or_insert(from);
+                // A server follows its latest client: one after the other.
+                if is_client {
+                    remote.get_or_insert(from);
+                } else {
+                    remote = Some(from);
+                }
                 match endpoint.read(
                     Instant::now(),
                     from,
@@ -188,7 +227,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .negotiated_version()
                         .map(|version| version.protocol_version());
                     println!(
-                        "complete version={} suite={} srtp={:?} exporter={}",
+                        "complete version={} suite={} srtp={:?} resumed={} exporter={}",
                         version.map_or("?".to_owned(), |v| format!(
                             "{:02X}{:02X}",
                             v.major, v.minor
@@ -197,6 +236,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .cipher_suite()
                             .map_or("?".to_owned(), |s| s.to_string()),
                         state.srtp_protection_profile(),
+                        state.resumed(),
                         hex(state
                             .export_keying_material("EXTRACTOR-dtls_srtp", &[], 60)?
                             .as_ref()),

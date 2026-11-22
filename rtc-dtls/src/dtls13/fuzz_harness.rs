@@ -61,11 +61,18 @@ pub(crate) fn handshake_parse(
             let _ = parse_connection_id(extension);
             let _ = parse_server_name(extension);
             let _ = hello::parse_cookie(extension);
+            let _ = super::psk::parse_psk_key_exchange_modes(extension);
+            let _ = super::psk::parse_client_pre_shared_key(extension);
         }
         if let Some(config) = config(provider, Some(server_certificate), false, 0) {
             let _ = hello::negotiate(&config, &client_hello);
         }
-        let _ = hello::second_client_hello(&client_hello, Some((29, &[1; 32])), Some(b"cookie"));
+        let _ = hello::second_client_hello(
+            &client_hello,
+            Some((29, &[1; 32])),
+            Some(b"cookie"),
+            client_hello.extension(EXT_PRE_SHARED_KEY),
+        );
     }
     if let Ok(server_hello) = ServerHello::parse(data) {
         let _ = server_hello.is_hello_retry_request();

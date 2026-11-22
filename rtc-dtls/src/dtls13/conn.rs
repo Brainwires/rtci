@@ -155,6 +155,7 @@ pub(crate) enum FlightKind {
     KeyUpdate,
     NewConnectionId,
     RequestConnectionId,
+    NewSessionTicket,
 }
 
 /// Messages sent together and retransmitted until acknowledged (RFC 9147 section 5.7).
@@ -248,6 +249,21 @@ pub(crate) struct Conn13 {
     pub(crate) server_name: String,
     pub(crate) client_random: Vec<u8>,
     pub(crate) exporter_secret: Option<SecretVec>,
+    /// The PSK the key schedule starts from, when the handshake uses one (RFC 8446 section
+    /// 2.2), and whether it came without an (EC)DHE exchange (psk_ke).
+    pub(crate) psk: Option<SecretVec>,
+    pub(crate) psk_without_key_exchange: bool,
+    /// The handshake was made with a PSK, so neither side sent a certificate.
+    pub(crate) resumed: bool,
+    /// `resumption_master_secret`, kept while tickets are to be made or taken from it.
+    pub(crate) resumption_secret: Option<SecretVec>,
+    /// Server: the PSK key exchange modes the client offered; tickets are sent only to a
+    /// client that offered one this server accepts (RFC 8446 section 4.2.9).
+    pub(crate) client_psk_modes: Vec<u8>,
+    /// How many tickets this association has issued: their nonces.
+    pub(crate) tickets_issued: u8,
+    /// The latest `now` this association was given (it reads no clock).
+    pub(crate) clock: Option<Instant>,
 
     // The record layer.
     plaintext_send_sequence: u64,
@@ -366,6 +382,13 @@ impl Conn13 {
             server_name: String::new(),
             client_random: vec![],
             exporter_secret: None,
+            psk: None,
+            psk_without_key_exchange: false,
+            resumed: false,
+            resumption_secret: None,
+            client_psk_modes: vec![],
+            tickets_issued: 0,
+            clock: None,
             plaintext_send_sequence: 0,
             plaintext_replay: SlidingWindowDetector::new(
                 cfg.replay_protection_window,
@@ -528,6 +551,8 @@ impl Conn13 {
             schedule.forget();
         }
         self.exporter_secret = None;
+        self.psk = None;
+        self.resumption_secret = None;
         self.local_traffic_secret = None;
         self.remote_traffic_secret = None;
         self.cookie_secret = None;
@@ -886,7 +911,9 @@ impl Conn13 {
                     let _ = self.send_key_update(false);
                 }
             }
-            FlightKind::NewConnectionId | FlightKind::RequestConnectionId => {}
+            FlightKind::NewConnectionId
+            | FlightKind::RequestConnectionId
+            | FlightKind::NewSessionTicket => {}
         }
         self.prune_write_epochs();
     }
@@ -955,6 +982,7 @@ impl Conn13 {
         if self.failed {
             return Err(Error::ErrConnClosed);
         }
+        self.clock = Some(now);
         self.handshake_started.get_or_insert(now);
 
         // RFC 9147 section 5.8.2: when a flight got through without being sent again, the
@@ -1902,9 +1930,9 @@ impl Conn13 {
         let unexpected = || refuse(alert::UNEXPECTED_MESSAGE, Error::ErrUnhandledContextType);
         match handshake_type {
             NEW_SESSION_TICKET if self.is_client => {
-                // Tickets are not used: this stack does not resume. Acknowledged, so that
-                // the server stops sending it.
-                parse_new_session_ticket(body)?;
+                // Kept if this client resumes, dropped otherwise; acknowledged either way,
+                // so that the server stops sending it.
+                self.on_new_session_ticket(body)?;
             }
             KEY_UPDATE => {
                 let update_requested = parse_key_update(body)?;

@@ -256,6 +256,7 @@ impl Endpoint {
         messages: &mut Vec<EndpointEvent>,
     ) -> Result<()> {
         let is_handshake_completed_before = conn.is_handshake_completed();
+        conn.set_clock(now);
         conn.read(data)?;
         if conn.is_dtls13() {
             // DTLS 1.3 has handshake messages after the handshake too (ACKs, key updates),
@@ -570,6 +571,7 @@ impl Endpoint {
         // is dropped by it like any other, and leaves it where it was.
         let authenticated = conn.authenticated_records;
         let newest_before = conn.newest_authenticated_record;
+        conn.set_clock(now);
         let _ = conn.read(data);
         let _ = conn.handshake(now);
         let newest = match conn.v13.as_ref() {

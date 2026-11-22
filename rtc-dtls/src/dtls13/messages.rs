@@ -530,21 +530,11 @@ pub(crate) fn parse_request_connection_id(body: &[u8]) -> std::result::Result<u8
     }
 }
 
-/// Checks a NewSessionTicket (RFC 8446 section 4.6.1) for form. Its contents are not kept:
-/// this stack does not resume.
+/// Checks a NewSessionTicket (RFC 8446 section 4.6.1) for form.
 pub(crate) fn parse_new_session_ticket(body: &[u8]) -> std::result::Result<(), Refusal> {
-    let mut reader = Reader::new(body);
-    let parse = |reader: &mut Reader<'_>| -> Result<()> {
-        reader.u32()?;
-        reader.u32()?;
-        reader.vec8()?;
-        if reader.vec16()?.is_empty() {
-            return Err(Error::ErrLengthMismatch);
-        }
-        read_extensions(reader.vec16()?)?;
-        reader.finish()
-    };
-    parse(&mut reader).map_err(decode_error)
+    super::psk::parse_new_session_ticket(body)
+        .map(|_| ())
+        .map_err(decode_error)
 }
 
 /// The 12-byte header of a DTLSHandshake message (RFC 9147 section 5.2).
