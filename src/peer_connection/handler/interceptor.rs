@@ -1132,6 +1132,17 @@ impl<'a> InterceptorHandler<'a> {
             .ctx
             .wall_clock
             .get_or_insert_with(|| SystemInstant::now(now));
+        // RFC 6464 section 4: the V bit is in use unless the extension was negotiated with
+        // `vad=off` (no attribute is `vad=on`).
+        let vad = self
+            .media_engine
+            .negotiated_header_extensions
+            .values()
+            .find(|e| e.is_audio && e.uri == ::sdp::extmap::AUDIO_LEVEL_URI)
+            .is_none_or(|e| {
+                rtp::extension::audio_level_extension::parse_vad_attribute(e.attributes.as_deref())
+                    .unwrap_or(true)
+            });
         let receptive = self.rtp_transceivers[id].receptive();
         if let Some(receiver) = self.rtp_transceivers[id].receiver_mut() {
             receiver.record_sources(
@@ -1140,6 +1151,7 @@ impl<'a> InterceptorHandler<'a> {
                 header,
                 audio_level,
                 csrc_levels.as_ref().map(|ext| ext.levels.as_slice()),
+                vad,
             );
             // W3C webrtc 9.3: data for a muted, not ended track of a receptive transceiver
             // unmutes it.

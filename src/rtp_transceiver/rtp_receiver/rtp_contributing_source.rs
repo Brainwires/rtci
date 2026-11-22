@@ -47,6 +47,17 @@ pub struct RTCRtpContributingSource {
     /// Corresponds to the `rtpTimestamp` attribute in
     /// [RTCRtpContributingSource](https://www.w3.org/TR/webrtc/#dom-rtcrtpcontributingsource-rtptimestamp).
     pub rtp_timestamp: u32,
+
+    /// Whether the last packet from this synchronization source said there is voice in it: the
+    /// V bit of the RFC 6464 client-to-mixer audio level. `None` for a contributing source,
+    /// for a packet without the level, and when the extension was negotiated `vad=off`, where
+    /// the bit "is not in use" and "MUST" be ignored (RFC 6464 sections 3 and 4; no `vad`
+    /// attribute is `vad=on`).
+    ///
+    /// # Specification
+    /// Corresponds to `voiceActivityFlag` of `RTCRtpSynchronizationSource` in
+    /// [WebRTC Extensions](https://www.w3.org/TR/webrtc-extensions/#rtcrtpsynchronizationsource-dictionary).
+    pub voice_activity_flag: Option<bool>,
 }
 
 /// Synchronization source information.

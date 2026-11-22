@@ -2649,6 +2649,24 @@ pub(crate) fn inherit_session_rtcp_xr(desc: &mut SessionDescription) {
 /// per media stream ... or globally for all streams"; RFC 9429 section 5.8.1 stores them, and
 /// section 5.3.1 has session-level attributes count as present in each m= section). A
 /// section's own mapping for an id or a URI wins. Only the parsed description changes.
+/// RFC 8285 section 5: "The definitions MUST be either all session level or all media level;
+/// it is not permitted to mix the two styles." A received description that has `a=extmap`
+/// lines at both levels is refused.
+pub(crate) fn check_extmap_levels(desc: &SessionDescription) -> Result<()> {
+    let at_session = desc.attributes.iter().any(|a| a.key == ATTR_KEY_EXT_MAP);
+    if at_session
+        && desc
+            .media_descriptions
+            .iter()
+            .any(|m| m.attributes.iter().any(|a| a.key == ATTR_KEY_EXT_MAP))
+    {
+        return Err(Error::SdpInvalidValue(
+            "a=extmap at both session and media level (RFC 8285 section 5)".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn inherit_session_extmap(desc: &mut SessionDescription) {
     let session: Vec<(String, String, String)> = desc
         .attributes

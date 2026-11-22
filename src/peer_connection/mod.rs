@@ -290,10 +290,10 @@ use crate::peer_connection::sdp::section_multiplexes_rtcp;
 use crate::peer_connection::sdp::session_description::RTCSessionDescription;
 use crate::peer_connection::sdp::{
     ATTR_KEY_RTCP_MUX_ONLY, RemoteIceDetails, SctpNegotiation, check_answer_against_offer,
-    check_extmap_ids, codecs_from_media_description, discard_stray_bundle_only,
-    effective_direction, extract_fingerprints, extract_ice_details, extract_tls_id, get_mid_value,
-    get_peer_direction, has_ice_trickle_option, has_rtcp_mux, has_rtp_media,
-    inherit_session_extmap, inherit_session_rtcp_xr, insert_media_line, is_lite_set,
+    check_extmap_ids, check_extmap_levels, codecs_from_media_description,
+    discard_stray_bundle_only, effective_direction, extract_fingerprints, extract_ice_details,
+    extract_tls_id, get_mid_value, get_peer_direction, has_ice_trickle_option, has_rtcp_mux,
+    has_rtp_media, inherit_session_extmap, inherit_session_rtcp_xr, insert_media_line, is_lite_set,
     is_live_rtp_section, is_rejected_media, is_sdp_token, is_unknown_application_media,
     media_ice_credentials, negotiated_sctp, remap_answerer_assigned_extmaps, remote_ice_options,
     remote_ice_pacing, sdp_type::RTCSdpType, update_sdp_origin, validate_application_media_section,
@@ -1611,6 +1611,7 @@ impl RTCPeerConnection {
             let mut parsed = remote_description.unmarshal()?;
             self.assign_missing_mids(&mut parsed, answers);
             discard_stray_bundle_only(&mut parsed, answers);
+            check_extmap_levels(&parsed)?;
             inherit_session_extmap(&mut parsed);
             inherit_session_rtcp_xr(&mut parsed);
             check_extmap_ids(&parsed)?;
@@ -1766,6 +1767,11 @@ impl RTCPeerConnection {
                 && RtpCodecKind::from(media.media_name.media.as_str()) != RtpCodecKind::Unspecified
             {
                 codecs_from_media_description(media)?;
+                if let Some(err) = sdp::simulcast::malformed_simulcast_line(media) {
+                    return Err(Error::SdpInvalidValue(format!(
+                        "{err} (RFC 9429 section 5.8, RFC 8853 section 5.2)"
+                    )));
+                }
                 // RFC 9429 section 5.8.3: "All rid-ids referenced in an 'a=simulcast' line
                 // MUST exist as 'a=rid' lines."
                 if let Some(rid) = sdp::simulcast::simulcast_rid_without_line(media) {

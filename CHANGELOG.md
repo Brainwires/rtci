@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **jsep**: small rules.
+  - `RTCRtpSender::write_rtp` takes out the header extension elements whose id is not
+    negotiated for the sender (RFC 8285 section 4.1.2); they were passed through. New
+    `SettingEngineBuilder::with_unnegotiated_header_extensions(true)` passes them through.
+  - A remote description with `a=extmap` lines at both session and media level is refused
+    (`SdpInvalidValue`, RFC 8285 section 5).
+  - A remote `a=simulcast` line that does not parse (a rid-id or a direction twice, RFC 8853
+    section 5.2) refuses the description (RFC 9429 section 5.8); it was ignored.
+  - `RTCRtpContributingSource` has a new public field `voice_activity_flag`: the V bit of the
+    client-to-mixer audio level on a synchronization source, `None` when the extension was
+    negotiated `vad=off` (RFC 6464 sections 3, 4).
 - **jsep**: description rules.
   - Lip synchronization groups (RFC 5888 section 7, RFC 9429 sections 5.2.1, 5.2.2, 5.3.1):
     an offer has `a=group:LS` for each stream more than one transceiver is associated with,
