@@ -268,11 +268,16 @@ fn run(offerer: TcpType, answerer: TcpType, messages: &[Vec<u8>]) -> Result<(Vec
         if !net.in_flight.is_empty() {
             continue;
         }
+        // The next timer, and 50 ms at most: a stream the pipeline's back-pressure parked is
+        // resumed by `poll_read`, with no timer of its own, so each pass of this loop moves a
+        // bounded amount of data and must not cost seconds of virtual time when the only
+        // timer left is the next ICE consent check (4 to 6 seconds away, RFC 7675).
         let next = peers
             .iter_mut()
             .filter_map(|p| p.pc.poll_timeout())
             .min()
-            .unwrap_or(now + Duration::from_millis(50));
+            .unwrap_or(now + Duration::from_millis(50))
+            .min(now + Duration::from_millis(50));
         now = next.max(now + Duration::from_millis(1));
         for peer in peers.iter_mut() {
             let _ = peer.pc.handle_timeout(now);
