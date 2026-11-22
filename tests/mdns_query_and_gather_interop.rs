@@ -76,21 +76,28 @@ const WEBRTC_MDNS_LOCAL_NAME: &str = "3f1c2b7e-9a4d-4e6f-8b21-5c0d7a9e1f34.local
 fn query_and_gather_bind_ip() -> std::net::IpAddr {
     #[cfg(windows)]
     {
-        let egress = std::net::UdpSocket::bind("0.0.0.0:0")
-            .and_then(|socket| {
-                socket.connect((rtc::mdns::MDNS_MULTICAST_IPV4, MDNS_PORT))?;
-                socket.local_addr()
-            })
-            .map(|addr| addr.ip());
-        match egress {
-            Ok(ip) if !ip.is_unspecified() && !ip.is_loopback() => {
+        match mdns_egress_ip() {
+            Some(ip) => {
                 log::info!("rtc peer binds the mDNS egress interface address {ip}");
                 return ip;
             }
-            other => log::warn!("no mDNS egress interface address ({other:?}); binding loopback"),
+            None => log::warn!("no mDNS egress interface address; binding loopback"),
         }
     }
     std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+}
+
+/// The address of the interface multicast to the mDNS group leaves by: the one a UDP socket
+/// connected to the group sends from. `None` if there is none (or it is loopback).
+fn mdns_egress_ip() -> Option<std::net::IpAddr> {
+    std::net::UdpSocket::bind("0.0.0.0:0")
+        .and_then(|socket| {
+            socket.connect((rtc::mdns::MDNS_MULTICAST_IPV4, MDNS_PORT))?;
+            socket.local_addr()
+        })
+        .ok()
+        .map(|addr| addr.ip())
+        .filter(|ip| !ip.is_unspecified() && !ip.is_loopback())
 }
 
 /// Helper function to create a webrtc peer connection with QueryAndGather mDNS mode
@@ -105,6 +112,18 @@ async fn create_webrtc_peer() -> Result<Arc<WebrtcPeerConnection>> {
     let mut setting_engine = WebrtcSettingEngine::default();
     setting_engine.set_ice_multicast_dns_mode(WebrtcMulticastDnsMode::QueryAndGather);
     setting_engine.set_multicast_dns_host_name(WEBRTC_MDNS_LOCAL_NAME.to_string());
+    // The upstream agent publishes every host candidate it gathers under that one name, and
+    // answers for it with one address. On a host with a second interface (GitHub's Linux
+    // runners have docker0) the rtc peer then resolves both candidates to the same address,
+    // one of them wrongly; the two share a foundation, so the right one stays Frozen (RFC 8445
+    // section 6.1.2.6) until the wrong one's check has failed, about 40 s later, past the
+    // test's timeout. The mDNS draft gives each IP address a name of its own (section 3.1.1,
+    // steps 2 to 5); upstream does not, so the upstream peer gathers on the mDNS egress
+    // interface only.
+    if let Some(egress) = mdns_egress_ip() {
+        log::info!("webrtc peer gathers on the mDNS egress interface address {egress} only");
+        setting_engine.set_ip_filter(Box::new(move |ip| ip == egress));
+    }
 
     let api = APIBuilder::new()
         .with_media_engine(media_engine)
