@@ -307,6 +307,37 @@ impl<'a>
                 ::ice::Event::RoleChange(is_controlling) => {
                     self.stats.transport.on_ice_role_changed(is_controlling);
                 }
+                ::ice::Event::LocalCandidateRenamed(candidate) => {
+                    // The candidate's mDNS name was lost to another host and replaced (RFC
+                    // 6762 section 9): it is announced again, for the application to convey,
+                    // and its statistics show the new name.
+                    let mut rtc_candidate =
+                        crate::peer_connection::transport::RTCIceCandidate::from(&*candidate);
+                    rtc_candidate.username_fragment = Some(
+                        self.ctx
+                            .ice_transport
+                            .agent
+                            .get_local_credentials()
+                            .ufrag
+                            .clone(),
+                    );
+                    if let Some(known) = self.stats.local_candidates.get_mut(
+                        &crate::statistics::accumulator::local_candidate_stats_id(candidate.id()),
+                    ) {
+                        known.address = Some(rtc_candidate.address.clone());
+                    }
+                    self.ctx.event_outs.push_back(TaggedRTCEventInternal {
+                        now,
+                        event: RTCEventInternal::RTCPeerConnectionEvent(
+                            RTCPeerConnectionEvent::OnIceCandidateEvent(
+                                crate::peer_connection::event::RTCPeerConnectionIceEvent {
+                                    candidate: rtc_candidate,
+                                    url: String::new(),
+                                },
+                            ),
+                        ),
+                    });
+                }
                 _ => {}
             }
         }

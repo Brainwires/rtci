@@ -149,6 +149,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only stored the flag). The peer connection sets the role again at an ICE restart only when
   one agent is lite and the other is not (RFC 8445 section 6.1.1), and for a transport set up
   again after it was closed.
+- **ice**: a local candidate added after a pair is nominated is not taken, and so not
+  announced (RFC 8838 section 13: "an agent MUST NOT trickle any new candidates within an ICE
+  session after nomination"); `add_local_candidate` returns `Ok(false)`. An ICE restart takes
+  candidates again.
+- **ice**: the first mDNS query for a remote `.local` candidate waits a random 20 to 120 ms
+  (RFC 6762 section 5.2) instead of leaving with the next `handle_timeout`;
+  `multicast_dns_first_query_delay: Some(false)` /
+  `with_multicast_dns_first_query_delay(false)` keeps the old timing. A driver must keep
+  following `poll_timeout`.
+- **ice**: an IPv6 link-local local candidate is no longer paired with a remote candidate that
+  is not link-local (RFC 8445 section 6.1.2.2), and `allow_link_local_remote_candidates` no
+  longer pairs an IPv6 link-local remote candidate with another local one (it still does for
+  IPv4 link-local).
+- **ice**: a lite agent told that its peer is lite too (`Agent::set_remote_lite`; the peer
+  connection passes `a=ice-lite`) sends no checks and selects its pair from the candidate
+  exchange (RFC 8445 section 8.2); as the controlling agent it used to run a full agent's
+  checks.
+- **ice**: what arrives on the mDNS socket (local port 5353) goes to the mDNS connection
+  whatever its source port (it had to be 5353), so that a legacy unicast query is answered
+  (RFC 6762 section 6.7). The peer connection's demultiplexer does the same when its mDNS mode
+  is `QueryAndGather`; in the other modes a datagram on port 5353 from another port is still
+  demultiplexed as STUN / DTLS / SRTP.
+- **api**: `RTCIceCandidate` has a new public field, `username_fragment`; `rtc_ice::Event`
+  has the variants `LocalCandidateRenamed` and `LiteCandidateUpdate`; `AgentConfig` the fields
+  `multicast_dns_first_query_delay`, `multicast_dns_destination_reported`,
+  `multicast_dns_unicast_response`, `multicast_dns_rate_limit`; `setting_engine::MulticastDNS`
+  the fields `first_query_delay`, `destination_reported`, `unicast_response`, `rate_limit`.
 - **api**: `rtc_ice::AgentConfig` has new public fields (`tie_breaker`,
   `nomination_acceptance`, `nominate_on_consent_checks`, `unauthenticated_requests`,
   `data_from_selected_pair_only`, `send_data_before_nomination`): a struct literal without
@@ -1018,6 +1045,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it was closing (`OnError`, `OnClose`) instead of leaving it `closing`; an inactive path
   (RFC 9260 section 8.2) changes neither the transport's state nor a channel's.
 
+- **ice**: `Agent::handle_transport_error` / `RTCPeerConnection::handle_ice_transport_error`:
+  the application reports a hard ICMP error (RFC 8445 section 7.2.5.2.2), a TCP connection
+  that could not be established, or one whose first answer is not STUN (RFC 6544 section 7.1),
+  and the pair fails at once. A pair a check has validated is never failed that way.
+- **ice**: Ta agreed with the peer (RFC 8445 section 14.2): `Agent::proposed_pacing`,
+  `set_remote_pacing`, `pacing`. (Writing and reading `a=ice-pacing` is not wired yet.)
+- **ice**: at most five TCP connection attempts are outstanding to one remote IP address (RFC
+  6544 section 12).
+- **ice**: an mDNS name lost to another host (RFC 6762 section 9) is replaced by a new
+  `<uuid>.local` name and the candidate announced again (`Event::LocalCandidateRenamed`,
+  `OnIceCandidateEvent`).
+- **ice**: mDNS options of `rtc-mdns` reachable from the agent and the peer connection:
+  the datagram's destination reported by the driver, the QU bit, and one `MdnsRateLimit`
+  shared by several peer connections (`with_multicast_dns_destination_reported`,
+  `with_multicast_dns_unicast_response`, `with_multicast_dns_rate_limit`).
+- **ice**: the candidate of `OnIceCandidateEvent` carries the username fragment of its ICE
+  generation, and `to_json` hands it on (RFC 8838 section 9).
 - **ice**: `AgentConfig::tie_breaker` / `SettingEngineBuilder::with_ice_tie_breaker` fix the ICE
   tiebreaker (RFC 8445 section 5.2); `Agent::tie_breaker`, `Agent::is_lite`.
 - **ice**: `AgentConfig::send_data_before_nomination` /
@@ -1756,6 +1800,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **sctp**: an association accepted from the peer's INIT after an earlier one was lost left
   the transport reporting the loss, so every later offer asked for a new `a=sctp-port` and
   replaced the association it had.
+- **stats**: a remote mDNS candidate has its statistics object, with its name as the address,
+  from the moment it is submitted, resolved or not (draft-ietf-mmusic-mdns-ice-candidates
+  section 3.3.1). It appeared only once resolved, and then as a candidate "learned from a
+  check": type `host` with a null address, which is what the browser interop cell "mDNS-hidden
+  browser candidates resolve on the Rust side" read. A signalled candidate that takes the
+  place of a peer-reflexive one (it keeps that one's id and pairs) now shows its own type and
+  its signalled address.
+- **test**: the four mDNS interop tests share the host's mDNS group, port and names; they run
+  one at a time.
 - **jsep**: two retransmission formats that differ only in `rtx-time` are one format (RFC
   4588 section 8.1: each sender's own figure); an offer whose RTX `fmtp` had another
   `rtx-time` than the local one was answered without RTX.

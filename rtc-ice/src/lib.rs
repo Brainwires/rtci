@@ -87,5 +87,6 @@ pub mod url;
 pub use agent::{
     Agent, Credentials, DataPath, Event,
     agent_config::{AgentConfig, NominationAcceptance, UnauthenticatedRequests},
+    agent_selector::TransportError,
     agent_stats::{CandidatePairStats, CandidateStats},
 };
