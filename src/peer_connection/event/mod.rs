@@ -554,6 +554,15 @@ pub enum RTCPeerConnectionEvent {
     /// to send over (the one `RTCIceTransport::get_selected_candidate_pair` now reports).
     OnSelectedCandidatePairChange(RTCIceCandidatePair),
 
+    /// webrtc-extensions 7 `icecandidatepairadd`: the ICE agent formed a candidate pair and
+    /// put it on its list (`RTCIceTransport::get_candidate_pairs`).
+    OnIceCandidatePairAdd(RTCIceCandidatePair),
+
+    /// webrtc-extensions 7 `icecandidatepairremove`: a candidate pair left the ICE agent's
+    /// list: replaced on a full checklist, dropped by an ICE restart, or removed by
+    /// `RTCPeerConnection::remove_candidate_pair`. Not cancelable here.
+    OnIceCandidatePairRemove(RTCIceCandidatePair),
+
     /// W3C `RTCDtlsTransport` `statechange`. Comes before the `OnConnectionStateChangeEvent` it
     /// causes, and after the `OnDtlsTransportError` of a failure. Not fired by `close()`.
     OnDtlsTransportStateChange(RTCDtlsTransportState),

@@ -9,6 +9,8 @@
 //! controlled agent accepts that choice. Which side controls is decided by which offered, and the
 //! two must not agree — see [`Credentials`] and [`Agent::set_role`].
 #[cfg(test)]
+mod agent_candidate_pair_test;
+#[cfg(test)]
 mod agent_checklist_test;
 #[cfg(test)]
 mod agent_consent_test;
@@ -283,6 +285,14 @@ pub enum Event {
     /// "send an updated candidate list to reconcile different agents selecting different
     /// candidate pairs": an updated candidate exchange with these two candidates only.
     LiteCandidateUpdate(Box<Candidate>, Box<Candidate>),
+    /// A candidate pair (local, remote) was put on the agent's list of pairs: formed from a
+    /// local and a remote candidate, from a peer's request, or as the valid pair a response
+    /// produced (webrtc-extensions 7, `icecandidatepairadd`).
+    CandidatePairAdded(Box<Candidate>, Box<Candidate>),
+    /// A candidate pair (local, remote) left the agent's list: another pair took its place
+    /// on a full checklist, an ICE restart dropped the pairs, or the application removed it
+    /// with [`Agent::remove_candidate_pair`] (webrtc-extensions 7, `icecandidatepairremove`).
+    CandidatePairRemoved(Box<Candidate>, Box<Candidate>),
 }
 
 /// An [`Event`] together with the instant its condition was observed at.
@@ -389,6 +399,9 @@ pub struct Agent {
     pub(crate) check_interval: Duration,
     pub(crate) checking_duration: Instant,
     pub(crate) last_checking_time: Instant,
+    /// The latest instant the agent was given (construction, `handle_read`, `handle_timeout`):
+    /// what the candidate-pair events of a call that is not given one are tagged with.
+    pub(crate) clock: Instant,
     // When set, a connectivity check has been requested and must be run on the next
     // `handle_timeout`. Checks are deferred (rather than run inline) so that adding a
     // candidate can never re-enter `contact()` and mutate agent state - e.g. transition
@@ -611,6 +624,7 @@ impl Agent {
             consent_unanswered_since: None,
             checking_duration: now,
             last_checking_time: now,
+            clock: now,
             force_candidate_contact: false,
             last_connection_state: ConnectionState::Unspecified,
 
@@ -1345,6 +1359,140 @@ impl Agent {
             .unwrap_or(&self.ufrag_pwd.local_credentials)
     }
 
+    /// Queues `CandidatePairRemoved` for every listed pair, before the list is cleared.
+    pub(crate) fn announce_all_pairs_removed(&mut self) {
+        for index in 0..self.candidate_pairs.len() {
+            self.announce_pair(index, false);
+        }
+    }
+
+    /// The candidate pairs on the agent's list (webrtc-extensions 7 `[[CandidatePairs]]`):
+    /// (local, remote), in the order they were formed. A pair the application removed is not
+    /// listed.
+    pub fn get_candidate_pairs(&self) -> Vec<(Candidate, Candidate)> {
+        self.candidate_pairs
+            .iter()
+            .filter(|p| !p.removed)
+            .filter_map(|p| {
+                Some((
+                    self.local_candidates.get(p.local_index)?.clone(),
+                    self.remote_candidates.get(p.remote_index)?.clone(),
+                ))
+            })
+            .collect()
+    }
+
+    fn listed_pair(&self, local: &Candidate, remote: &Candidate) -> Option<usize> {
+        self.candidate_pairs.iter().position(|p| {
+            !p.removed
+                && self
+                    .local_candidates
+                    .get(p.local_index)
+                    .is_some_and(|c| c.equal(local))
+                && self
+                    .remote_candidates
+                    .get(p.remote_index)
+                    .is_some_and(|c| c.equal(remote))
+        })
+    }
+
+    /// The InvalidStateError checks of `selectCandidatePair` / `removeCandidatePair`: the
+    /// agent is closed, or its state is new or failed.
+    fn check_pair_call_state(&self) -> Result<()> {
+        if matches!(
+            self.connection_state,
+            ConnectionState::New | ConnectionState::Failed | ConnectionState::Closed
+        ) {
+            return Err(Error::InvalidStateError);
+        }
+        Ok(())
+    }
+
+    /// webrtc-extensions 7 `selectCandidatePair(pair)`: the agent sends data on the pair of
+    /// `local` and `remote` from now on; the selected pair changes, with its
+    /// `SelectedCandidatePairChange` event, and the state with its event when it was not
+    /// connected. Connectivity checks on other pairs stop, as they do once a pair is
+    /// selected; consent keeps being checked on this one.
+    ///
+    /// # Errors
+    ///
+    /// `InvalidStateError` when the agent is closed, or new or failed; `NotFoundError` when
+    /// the pair is not on the list ([`Self::get_candidate_pairs`]).
+    pub fn select_candidate_pair(
+        &mut self,
+        now: Instant,
+        local: &Candidate,
+        remote: &Candidate,
+    ) -> Result<()> {
+        self.check_pair_call_state()?;
+        let index = self
+            .listed_pair(local, remote)
+            .ok_or(Error::NotFoundError)?;
+        self.clock = self.clock.max(now);
+        if self.selected_pair != Some(index) {
+            self.nominated_pair = Some(index);
+            self.set_selected_pair(Some(now), Some(index));
+        }
+        Ok(())
+    }
+
+    /// webrtc-extensions 7 `removeCandidatePair(pair)`: the agent stops the checks on the
+    /// pair of `local` and `remote` (an In-Progress transaction is cancelled, no check is
+    /// sent or answered on it any more, data from it is not accepted through it), then
+    /// queues `CandidatePairRemoved`. When it was the selected pair the best other valid pair
+    /// takes its place, or none: the state then follows consent as for a lost path.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::select_candidate_pair`].
+    pub fn remove_candidate_pair(
+        &mut self,
+        now: Instant,
+        local: &Candidate,
+        remote: &Candidate,
+    ) -> Result<()> {
+        self.check_pair_call_state()?;
+        let index = self
+            .listed_pair(local, remote)
+            .ok_or(Error::NotFoundError)?;
+        self.clock = self.clock.max(now);
+        let pair = self.candidate_pairs[index];
+        self.cancel_pair_checks(pair.local_index, pair.remote_index);
+        {
+            let p = &mut self.candidate_pairs[index];
+            p.state = CandidatePairState::Failed;
+            p.valid = false;
+            p.nominate = false;
+            p.triggered = false;
+            p.nomination_pending = false;
+        }
+        self.announce_pair(index, false);
+        self.candidate_pairs[index].removed = true;
+        if self.nominated_pair == Some(index) {
+            self.nominated_pair = None;
+        }
+        if self.selected_pair == Some(index) {
+            let next = self
+                .candidate_pairs
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| p.valid && !p.removed && p.state == CandidatePairState::Succeeded)
+                .max_by_key(|(_, p)| p.priority())
+                .map(|(i, _)| i);
+            match next {
+                Some(next) => {
+                    self.nominated_pair = Some(next);
+                    self.set_selected_pair(Some(now), Some(next));
+                }
+                None => {
+                    self.selected_pair = None;
+                    self.request_connectivity_check();
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Whether this agent is the controlling one, which decides nomination.
     pub fn role(&self) -> bool {
         self.is_controlling
@@ -1432,7 +1580,8 @@ impl Agent {
             return false;
         }
         self.set_selected_pair(Some(now), None);
-        self.candidate_pairs.clear();
+        self.announce_all_pairs_removed();
+        self.candidate_pairs = Vec::new();
         self.nominated_pair = None;
         self.triggered_queue.clear();
         self.remote_candidates.clear();
@@ -1773,7 +1922,8 @@ impl Agent {
         self.remote_end_of_candidates = false;
         self.local_gathering_complete = false;
 
-        self.candidate_pairs = vec![];
+        self.announce_all_pairs_removed();
+        self.candidate_pairs = Vec::new();
 
         self.set_selected_pair(Some(now), None);
         self.delete_all_candidates(keep_local_candidates);
@@ -2410,7 +2560,8 @@ impl Agent {
         // the pair list - is dangling and must be dropped to avoid out-of-bounds
         // access. `remote_candidates` is always cleared here, so no pair can remain
         // valid even when the local candidates are kept. See issue #88.
-        self.candidate_pairs.clear();
+        self.announce_all_pairs_removed();
+        self.candidate_pairs = Vec::new();
         self.selected_pair = None;
         self.nominated_pair = None;
     }
