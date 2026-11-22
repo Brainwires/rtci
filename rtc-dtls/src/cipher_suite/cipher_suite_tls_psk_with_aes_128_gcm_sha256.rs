@@ -39,6 +39,11 @@ impl CipherSuite for CipherSuiteTlsPskWithAes128GcmSha256 {
         self.gcm.is_some()
     }
 
+    fn record_expansion(&self) -> usize {
+        // The 8-byte explicit nonce and the 16-byte tag (RFC 5288).
+        8 + 16
+    }
+
     fn init(
         &mut self,
         provider: Arc<dyn RTCCryptoProvider>,

@@ -689,6 +689,9 @@ fn initalize_cipher_suite(
         }
     }
 
+    // RFC 5246 8.1: the premaster secret is deleted once the master secret has been computed.
+    state.forget_pre_master_secret();
+
     if cfg.local_psk_callback.is_none() {
         // Verify that the pair of hash algorithm and signiture is listed.
         let mut valid_signature_scheme = false;

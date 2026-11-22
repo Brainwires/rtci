@@ -432,6 +432,10 @@ impl Flight for Flight4 {
                     };
                 }
 
+                // RFC 5246 8.1: the premaster secret is deleted once the master secret has
+                // been computed.
+                drop(crypto::SecretVec::new(pre_master_secret));
+
                 if let Some(cipher_suite) = &mut state.cipher_suite
                     && let Err(err) = cipher_suite.init(
                         cfg.provider().clone(),
@@ -885,6 +889,9 @@ mod tests {
         }
         fn is_initialized(&self) -> bool {
             panic!("is_initialized called with Certificate but not CertificateVerify");
+        }
+        fn record_expansion(&self) -> usize {
+            unimplemented!();
         }
 
         // Generate the internal encryption state

@@ -13,6 +13,8 @@ mod conn_conformance_test;
 mod conn_ported_test;
 #[cfg(test)]
 mod conn_test;
+#[cfg(test)]
+mod conn_transport_test;
 
 use crate::alert::*;
 use crate::application_data::*;
@@ -26,7 +28,7 @@ use crate::flight::flight6::*;
 use crate::flight::*;
 use crate::fragment_buffer::*;
 use crate::handshake::handshake_cache::*;
-use crate::handshake::handshake_header::HandshakeHeader;
+use crate::handshake::handshake_header::{HANDSHAKE_HEADER_LENGTH, HandshakeHeader};
 use crate::handshake::*;
 use crate::handshaker::*;
 use crate::record_layer::record_layer_header::*;
@@ -43,12 +45,34 @@ use std::io::BufWriter;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+/// The retransmission timer's initial value (RFC 6347 4.2.4.1).
 pub(crate) const INITIAL_TICKER_INTERVAL: Duration = Duration::from_secs(1);
+/// What the retransmission timer doubles up to (RFC 6347 4.2.4.1, the RFC 6298 maximum).
+pub(crate) const MAXIMUM_RETRANSMIT_INTERVAL: Duration = Duration::from_secs(60);
+/// How long a handshake may take before it is given up, unless configured otherwise. RFC 6347
+/// sets no limit; with the timer doubling from one second this allows the first transmission
+/// of a flight and four more.
+pub(crate) const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
+/// The most bytes a record carries before protection (RFC 5246 6.2.1).
+pub const MAX_RECORD_PAYLOAD: usize = 1 << 14;
+/// The most bytes a protected record's fragment may hold (RFC 5246 6.2.3).
+pub(crate) const MAX_PROTECTED_RECORD_PAYLOAD: usize = MAX_RECORD_PAYLOAD + 2048;
+/// The smallest MTU a configuration may name: room for a record header, a handshake header,
+/// the largest record expansion and some payload.
+pub(crate) const MINIMUM_MTU: usize = 128;
+/// The smallest datagram size handshake records are cut for when retransmissions go unanswered
+/// and the path MTU may be the reason (RFC 6347 4.1.1.1): 256 bytes less the IPv4 and UDP
+/// headers, the floor OpenSSL uses as well.
+pub(crate) const FALLBACK_HANDSHAKE_MTU: usize = 228;
+/// Retransmissions of one flight after which its records are cut smaller (RFC 6347 4.1.1.1).
+pub(crate) const RETRANSMITS_BEFORE_MTU_BACKOFF: usize = 2;
 pub(crate) const COOKIE_LENGTH: usize = 20;
 pub(crate) const DEFAULT_NAMED_CURVE: NamedCurve = NamedCurve::X25519;
 pub(crate) const INBOUND_BUFFER_SIZE: usize = 8192;
 // Default replay protection window is specified by RFC 6347 Section 4.1.2.6
 pub(crate) const DEFAULT_REPLAY_PROTECTION_WINDOW: usize = 64;
+/// The smallest replay protection window RFC 6347 4.1.2.6 allows.
+pub(crate) const MINIMUM_REPLAY_PROTECTION_WINDOW: usize = 32;
 /// Most not-yet-decryptable records held for later (next epoch / cipher suite not ready).
 /// A flight needs only a few; the rest are unauthenticated until decrypted.
 pub(crate) const MAX_EARLY_ENCRYPTED_PACKETS: usize = 64;
@@ -124,6 +148,21 @@ pub struct DTLSConn {
     pub(crate) current_handshake_state: HandshakeState,
     pub(crate) current_retransmit_timer: Option<Instant>,
     pub(crate) current_retransmit_count: usize,
+    /// The retransmission timer's current value: the configured initial value, doubled at each
+    /// retransmission up to the configured maximum, and kept until a flight is answered without
+    /// any retransmission (RFC 6347 4.2.4.1).
+    pub(crate) current_retransmit_interval: Duration,
+    /// When the handshake began: the first time it was driven. The handshake deadline counts
+    /// from here.
+    pub(crate) handshake_started: Option<Instant>,
+    /// The datagram size handshake records are cut for: the configured MTU, halved (down to
+    /// [`FALLBACK_HANDSHAKE_MTU`]) when a flight's retransmissions go unanswered, since records
+    /// too large for the path are one reason they would (RFC 6347 4.1.1.1).
+    pub(crate) handshake_mtu: usize,
+    /// The fatal alert this side ended the association with, and how many more times it may be
+    /// sent again when the peer keeps sending handshake records (RFC 6347 4.2.7: alerts are
+    /// not retransmitted on a timer, but the offending record arriving again draws a new one).
+    pub(crate) fatal_alert_sent: Option<(Alert, usize)>,
 
     pub(crate) current_flight: Box<dyn Flight>,
     pub(crate) flights: Option<Vec<Packet>>,
@@ -142,6 +181,13 @@ pub struct DTLSConn {
     /// The peer's source address is its own: always for a client (it chose the server's
     /// address), and for a server once the client has echoed its cookie (RFC 6347 4.2.1).
     pub(crate) address_verified: bool,
+}
+
+impl Drop for DTLSConn {
+    /// The master secret does not outlive the association in memory.
+    fn drop(&mut self) {
+        self.state.forget_secrets();
+    }
 }
 
 impl DTLSConn {
@@ -203,6 +249,10 @@ impl DTLSConn {
             current_handshake_state: initial_fsm_state,
             current_retransmit_timer: None,
             current_retransmit_count: 0,
+            current_retransmit_interval: handshake_config.retransmit_interval,
+            handshake_started: None,
+            handshake_mtu: handshake_config.maximum_transmission_unit,
+            fatal_alert_sent: None,
 
             current_flight: flight,
             flights: None,
@@ -240,12 +290,21 @@ impl DTLSConn {
     // Write writes p to the DTLS connection
     /// Queues `p` as application data, encrypting it once the handshake has completed.
     ///
+    /// A write made before the handshake completes is held and sent when it does (RFC 5246
+    /// 7.3: no application data before the first handshake completes).
+    ///
     /// # Errors
     ///
-    /// Fails if the connection is closed or the handshake has not finished.
+    /// Fails if the connection is closed, or if `p` is longer than [`MAX_RECORD_PAYLOAD`].
     pub fn write(&mut self, p: &[u8]) -> Result<()> {
         if self.is_connection_closed() {
             return Err(Error::ErrConnClosed);
+        }
+        // RFC 5246 6.2.1: a record carries at most 2^14 bytes. A longer write is refused rather
+        // than split: an application datagram is one record, and whoever sizes datagrams for
+        // the path (SCTP, for a data channel) relies on that.
+        if p.len() > MAX_RECORD_PAYLOAD {
+            return Err(Error::ErrRecordOverflow);
         }
 
         let pkt = Packet {
@@ -316,6 +375,10 @@ impl DTLSConn {
         self.failed = true;
         self.closed = true;
         self.current_retransmit_timer = None;
+        // RFC 5246 7.2.2: the keys and secrets of a failed connection are forgotten. The
+        // cipher suite stays for the one alert that may still have to be protected; its keys
+        // go with the association.
+        self.state.forget_secrets();
     }
 
     pub(crate) fn notify(&mut self, level: AlertLevel, desc: AlertDescription) {
@@ -334,6 +397,13 @@ impl DTLSConn {
         }]);
         if is_fatal {
             // Sending a fatal alert ends the association (RFC 5246 7.2.2).
+            self.fatal_alert_sent = Some((
+                Alert {
+                    alert_level: level,
+                    alert_description: desc,
+                },
+                self.maximum_retransmit_number,
+            ));
             self.fail();
         }
     }
@@ -362,6 +432,34 @@ impl DTLSConn {
                         || !crypto::constant_time_eq(&self.state.cookie, &client_hello.cookie))
             }
             _ => false,
+        }
+    }
+
+    /// Whether the peer, in its role, sends a handshake message of this type in this epoch
+    /// (RFC 5246 7.3, 7.4): everything in epoch 0 except Finished, which alone follows
+    /// ChangeCipherSpec.
+    fn expects_handshake_type(&self, handshake_type: HandshakeType, epoch: u16) -> bool {
+        if epoch != 0 {
+            return handshake_type == HandshakeType::Finished;
+        }
+        if self.is_client {
+            matches!(
+                handshake_type,
+                HandshakeType::HelloVerifyRequest
+                    | HandshakeType::ServerHello
+                    | HandshakeType::Certificate
+                    | HandshakeType::ServerKeyExchange
+                    | HandshakeType::CertificateRequest
+                    | HandshakeType::ServerHelloDone
+            )
+        } else {
+            matches!(
+                handshake_type,
+                HandshakeType::ClientHello
+                    | HandshakeType::Certificate
+                    | HandshakeType::ClientKeyExchange
+                    | HandshakeType::CertificateVerify
+            )
         }
     }
 
@@ -417,8 +515,7 @@ impl DTLSConn {
         }
 
         if !raw_packets.is_empty() {
-            let compacted_raw_packets =
-                compact_raw_packets(&raw_packets, self.maximum_transmission_unit);
+            let compacted_raw_packets = compact_raw_packets(&raw_packets, self.handshake_mtu);
 
             for compacted_raw_packets in compacted_raw_packets {
                 self.outgoing_compacted_raw_packets
@@ -466,7 +563,18 @@ impl DTLSConn {
     fn process_handshake_packet(&mut self, p: &Packet, h: &Handshake) -> Result<Vec<Vec<u8>>> {
         let mut raw_packets = vec![];
 
-        let handshake_fragments = DTLSConn::fragment_handshake(self.maximum_transmission_unit, h)?;
+        // RFC 6347 4.1.1, 4.2.3: each fragment travels in one record, and the record in one
+        // datagram of at most the MTU, so a fragment has the MTU less the record header, the
+        // handshake header and what protecting the record adds.
+        let record_expansion = match &self.state.cipher_suite {
+            Some(cipher_suite) if p.should_encrypt => cipher_suite.record_expansion(),
+            _ => 0,
+        };
+        let fragment_room = self
+            .handshake_mtu
+            .saturating_sub(RECORD_LAYER_HEADER_SIZE + HANDSHAKE_HEADER_LENGTH + record_expansion)
+            .max(1);
+        let handshake_fragments = DTLSConn::fragment_handshake(fragment_room, h)?;
 
         let epoch = p.record.record_layer_header.epoch as usize;
 
@@ -515,7 +623,9 @@ impl DTLSConn {
         Ok(raw_packets)
     }
 
-    fn fragment_handshake(maximum_transmission_unit: usize, h: &Handshake) -> Result<Vec<Vec<u8>>> {
+    /// Cuts `h` into fragments of at most `fragment_room` body bytes, each with its own
+    /// handshake header: abutting ranges that cover the message (RFC 6347 4.2.3).
+    fn fragment_handshake(fragment_room: usize, h: &Handshake) -> Result<Vec<Vec<u8>>> {
         let mut content = vec![];
         {
             let mut writer = BufWriter::<&mut Vec<u8>>::new(content.as_mut());
@@ -524,7 +634,7 @@ impl DTLSConn {
 
         let mut fragmented_handshakes = vec![];
 
-        let mut content_fragments = split_bytes(&content, maximum_transmission_unit);
+        let mut content_fragments = split_bytes(&content, fragment_room);
         if content_fragments.is_empty() {
             content_fragments = vec![vec![]];
         }
@@ -578,15 +688,29 @@ impl DTLSConn {
     ///
     /// Fails if the record is malformed or fails authentication.
     pub fn read(&mut self, buf: &[u8]) -> Result<()> {
-        // A failed association is finished: nothing more is processed on it.
+        // A failed association is finished: nothing more is processed on it. One thing is
+        // still said: if this side ended it with a fatal alert and the peer goes on sending
+        // handshake records, it has not seen the alert (alerts are not retransmitted on a
+        // timer), so a new one is generated, a bounded number of times (RFC 6347 4.2.7).
         if self.failed {
+            self.repeat_fatal_alert_for(buf);
             return Err(Error::ErrConnClosed);
         }
         // Per RFC 6347: buffer future-epoch packets only until Finished is received
         // (i.e. until handshake completes). After that, discard them.
         let enqueue = !self.is_handshake_completed();
         self.received_handshake_in_last_datagram = false;
-        for pkt in unpack_datagram(buf)? {
+        // An invalid record is discarded alone: what follows the last whole record of the
+        // datagram does not cost the valid records in front of it [RFC6347 Section-4.1.2.7].
+        let (records, well_formed) = split_datagram(buf);
+        if !well_formed {
+            debug!(
+                "{}: discarded the malformed end of a datagram ({} whole records before it)",
+                srv_cli_str(self.is_client),
+                records.len()
+            );
+        }
+        for pkt in records {
             let (hs, alert, err) = self.handle_incoming_packet(pkt, enqueue);
             if let Some(alert) = alert {
                 self.outgoing_packets.push_back(Packet {
@@ -608,6 +732,7 @@ impl DTLSConn {
                 }
                 if alert.alert_level == AlertLevel::Fatal {
                     // A fatal alert ends the association (RFC 5246 7.2.2).
+                    self.fatal_alert_sent = Some((alert, self.maximum_retransmit_number));
                     self.fail();
                 }
                 if alert.alert_level == AlertLevel::Fatal
@@ -628,6 +753,33 @@ impl DTLSConn {
         }
 
         Ok(())
+    }
+
+    /// RFC 6347 4.2.7: after this side's fatal alert, a datagram that still carries a handshake
+    /// record means the peer is retransmitting the flight the alert was about. The alert is
+    /// sent again, at most as many times as a flight would have been retransmitted: it is an
+    /// answer to unauthenticated input, and smaller than any record that provokes it.
+    fn repeat_fatal_alert_for(&mut self, datagram: &[u8]) {
+        let Some((alert, remaining)) = self.fatal_alert_sent else {
+            return;
+        };
+        let (records, _) = split_datagram(datagram);
+        let carries_handshake = records
+            .iter()
+            .any(|record| ContentType::from(record[0]) == ContentType::Handshake);
+        if remaining == 0 || !carries_handshake {
+            return;
+        }
+        self.fatal_alert_sent = Some((alert, remaining - 1));
+        self.write_packets(vec![Packet {
+            record: RecordLayer::new(
+                PROTOCOL_VERSION1_2,
+                self.get_local_epoch(),
+                Content::Alert(alert),
+            ),
+            should_encrypt: self.protects_alerts(),
+            reset_local_sequence_number: false,
+        }]);
     }
 
     pub(crate) fn handle_incoming_queued_packets(&mut self) -> Result<bool> {
@@ -737,6 +889,24 @@ impl DTLSConn {
             }
         };
 
+        // RFC 5246 6.2.1, 6.2.3: a record holds at most 2^14 bytes, 2^14 + 2048 once protected.
+        // A header that announces more is not this protocol's; it is unauthenticated, so the
+        // record is discarded rather than answered [RFC6347 Section-4.1.2.7].
+        let length_limit = if h.epoch == 0 {
+            MAX_RECORD_PAYLOAD
+        } else {
+            MAX_PROTECTED_RECORD_PAYLOAD
+        };
+        if h.content_len as usize > length_limit {
+            debug!(
+                "{}: discarded oversize record ({} bytes, epoch {})",
+                srv_cli_str(self.is_client),
+                h.content_len,
+                h.epoch,
+            );
+            return (false, None, None);
+        }
+
         // Validate epoch
         let epoch = self.state.remote_epoch;
         if h.epoch > epoch {
@@ -829,14 +999,15 @@ impl DTLSConn {
                         debug!("{}: decrypt failed: {}", srv_cli_str(self.is_client), err);
 
                         // During a PSK handshake, a decrypt failure means a key mismatch, so
-                        // alert. Afterwards, anyone can forge such a record, so silently
-                        // discard it [RFC6347 Section-4.1.2.7].
+                        // alert: bad_record_mac, the one alert RFC 6347 4.1.2.1 allows for a
+                        // record that fails authentication. Afterwards, anyone can forge such
+                        // a record, so silently discard it [RFC6347 Section-4.1.2.7].
                         if cipher_suite.is_psk() && !self.handshake_completed {
                             return (
                                 false,
                                 Some(Alert {
                                     alert_level: AlertLevel::Fatal,
-                                    alert_description: AlertDescription::UnknownPskIdentity,
+                                    alert_description: AlertDescription::BadRecordMac,
                                 }),
                                 None,
                             );
@@ -845,6 +1016,19 @@ impl DTLSConn {
                         }
                     }
                 };
+            }
+
+            // RFC 5246 6.2.1, 7.2.2: an authenticated record that opens to more than 2^14
+            // bytes is the peer's error, and fatal: record_overflow.
+            if pkt.len() - RECORD_LAYER_HEADER_SIZE > MAX_RECORD_PAYLOAD {
+                return (
+                    false,
+                    Some(Alert {
+                        alert_level: AlertLevel::Fatal,
+                        alert_description: AlertDescription::RecordOverflow,
+                    }),
+                    Some(Error::ErrRecordOverflow),
+                );
             }
         }
 
@@ -887,6 +1071,31 @@ impl DTLSConn {
             let mut delivered = h.epoch != 0;
             while let Ok((out, epoch)) = self.fragment_buffer.pop() {
                 //log::debug!("Extension Debug: out.len()={}", out.len());
+                // RFC 5246 7.4: a message the peer's role never sends, or sends only in the
+                // other epoch (a Finished in the clear, anything but a Finished protected),
+                // is out of order. Authenticated, it is the peer's error: unexpected_message.
+                // In epoch 0 anyone can have sent it, so it is dropped without taking the
+                // genuine message's place [RFC6347 Section-4.1.2.7].
+                let handshake_type = HandshakeType::from(out[0]);
+                if !self.expects_handshake_type(handshake_type, epoch) {
+                    if epoch != 0 {
+                        return (
+                            true,
+                            Some(Alert {
+                                alert_level: AlertLevel::Fatal,
+                                alert_description: AlertDescription::UnexpectedMessage,
+                            }),
+                            Some(Error::ErrUnhandledContextType),
+                        );
+                    }
+                    debug!(
+                        "{}: discarded out-of-place {} in epoch 0",
+                        srv_cli_str(self.is_client),
+                        handshake_type,
+                    );
+                    self.fragment_buffer.unpop();
+                    continue;
+                }
                 let mut reader = out.as_slice();
                 let raw_handshake = match Handshake::unmarshal(&mut reader) {
                     Ok(rh) => {
@@ -971,11 +1180,19 @@ impl DTLSConn {
                 return (false, None, None);
             }
             Err(err) => {
+                // Authenticated. RFC 5246 6: a record type that is not one of the four is
+                // answered with unexpected_message; one of the four that does not decode,
+                // with decode_error.
+                let alert_description = if h.content_type == ContentType::Invalid {
+                    AlertDescription::UnexpectedMessage
+                } else {
+                    AlertDescription::DecodeError
+                };
                 return (
                     false,
                     Some(Alert {
                         alert_level: AlertLevel::Fatal,
-                        alert_description: AlertDescription::DecodeError,
+                        alert_description,
                     }),
                     Some(err),
                 );
@@ -1123,7 +1340,7 @@ fn compact_raw_packets(raw_packets: &[Vec<u8>], maximum_transmission_unit: usize
 
     for raw_packet in raw_packets {
         if !current_combined_raw_packet.is_empty()
-            && current_combined_raw_packet.len() + raw_packet.len() >= maximum_transmission_unit
+            && current_combined_raw_packet.len() + raw_packet.len() > maximum_transmission_unit
         {
             combined_raw_packets.push(current_combined_raw_packet);
             current_combined_raw_packet = BytesMut::new();

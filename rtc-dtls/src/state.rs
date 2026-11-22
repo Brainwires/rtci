@@ -68,6 +68,8 @@ pub struct State {
     /// Server: the pair chosen for the ServerKeyExchange signature, one the client listed and
     /// the certificate's key can produce (RFC 5246 7.4.3).
     pub(crate) local_signature_scheme: Option<SignatureHashAlgorithm>,
+    /// The association failed and its secrets have been overwritten (RFC 5246 7.2.2).
+    pub(crate) secrets_forgotten: bool,
     //pub(crate) replay_detector: Vec<Box<dyn ReplayDetector>>,
 }
 
@@ -130,6 +132,7 @@ impl State {
             remote_certificate_types: vec![],
             remote_offered_point_formats: false,
             local_signature_scheme: None,
+            secrets_forgotten: false,
         }
     }
 }
@@ -296,6 +299,20 @@ impl State {
         Ok(())
     }
 
+    /// Forgets the session's secrets: the master secret and the premaster secret are
+    /// overwritten and dropped (RFC 5246 7.2.2 for a failed connection, 8.1 for the premaster
+    /// secret once the master secret exists). Nothing can be exported or resumed afterwards.
+    pub(crate) fn forget_secrets(&mut self) {
+        self.secrets_forgotten = true;
+        self.forget_pre_master_secret();
+        drop(SecretVec::new(std::mem::take(&mut self.master_secret)));
+    }
+
+    /// Overwrites and drops the premaster secret.
+    pub(crate) fn forget_pre_master_secret(&mut self) {
+        drop(SecretVec::new(std::mem::take(&mut self.pre_master_secret)));
+    }
+
     /// The SRTP protection profile negotiated through `use_srtp`.
     pub fn srtp_protection_profile(&self) -> SrtpProtectionProfile {
         self.srtp_protection_profile
@@ -341,6 +358,9 @@ impl State {
             return Err(Error::ReservedExportKeyingMaterial);
         } else if !self.extended_master_secret {
             return Err(Error::ErrExportWithoutExtendedMasterSecret);
+        } else if self.secrets_forgotten {
+            // The association failed and its secrets were forgotten (RFC 5246 7.2.2).
+            return Err(Error::ErrConnClosed);
         }
 
         let mut local_random = vec![];

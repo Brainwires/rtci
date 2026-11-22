@@ -91,11 +91,12 @@ impl FragmentBuffer {
                 .get(&handshake_header.message_sequence)
                 .is_some_and(|frags| frags.len() >= MAX_FRAGMENTS_PER_MESSAGE);
 
-            // end index should be the length of handshake header but if the handshake
-            // was fragmented, we should keep them all
-            let mut end = HANDSHAKE_HEADER_LENGTH + handshake_header.length as usize;
+            // The fragment is the `fragment_length` bytes after the header; another message
+            // (or fragment) may follow it in the same record (RFC 6347 4.2.3). One that claims
+            // more bytes than the record holds is malformed.
+            let end = HANDSHAKE_HEADER_LENGTH + handshake_header.fragment_length as usize;
             if end > buf.len() {
-                end = buf.len();
+                return Err(Error::ErrBufferTooSmall);
             }
 
             if !(at_message_cap || at_fragment_cap) {
@@ -205,25 +206,31 @@ impl FragmentBuffer {
     }
 }
 
-/// Reassembles one handshake message from its fragments: start at offset 0 and follow each
-/// fragment's end to the next, until the message length is reached (or a zero-length fragment
-/// ends it). Returns the message body and the index of the fragment it starts with.
+/// What the fragments of one message agree on: its type, its length, and the epoch they came
+/// in. Fragments of different epochs are never joined: an epoch-0 fragment is unauthenticated,
+/// and must not supply bytes of a message (the Finished) that arrives protected.
+type Reading = (HandshakeType, u32, u16);
+
+fn reading_of(f: &Fragment) -> Reading {
+    (
+        f.handshake_header.handshake_type,
+        f.handshake_header.length,
+        f.record_layer_header.epoch,
+    )
+}
+
+/// Reassembles one handshake message from its fragments, whatever their order and however
+/// their ranges overlap or repeat (RFC 6347 4.2.3): a peer that retransmits a flight after its
+/// path MTU estimate changed cuts the same message differently. Returns the message body and
+/// the index of a fragment it was built from.
 ///
 /// The fragments of one message agree on its type and length. One that disagrees (forged, or
-/// corrupt) used to win its offset for good if it arrived first, so the genuine fragments could
-/// never complete the message. Each (type, length) reading is tried instead, newest first, and
-/// within it first the earliest then the latest fragment for each offset, so a later genuine
-/// fragment can replace a conflicting one.
-///
-/// Iterative: the previous recursive version used one stack frame per fragment, so a peer that
-/// sent enough tiny fragments could overflow the stack and abort the process.
+/// corrupt) must not keep the genuine ones from completing the message, so each reading is
+/// tried, newest first.
 fn assemble_message(frags: &[Fragment]) -> Option<(Vec<u8>, usize)> {
-    let mut tried: Vec<(HandshakeType, u32)> = Vec::new();
+    let mut tried: Vec<Reading> = Vec::new();
     for candidate in frags.iter().rev() {
-        let reading = (
-            candidate.handshake_header.handshake_type,
-            candidate.handshake_header.length,
-        );
+        let reading = reading_of(candidate);
         if tried.contains(&reading) {
             continue;
         }
@@ -231,8 +238,8 @@ fn assemble_message(frags: &[Fragment]) -> Option<(Vec<u8>, usize)> {
             break;
         }
         tried.push(reading);
-        for latest_wins in [false, true] {
-            if let Some(assembled) = assemble_reading(frags, reading, latest_wins) {
+        for latest_first in [false, true] {
+            if let Some(assembled) = assemble_reading(frags, reading, latest_first) {
                 return Some(assembled);
             }
         }
@@ -240,44 +247,62 @@ fn assemble_message(frags: &[Fragment]) -> Option<(Vec<u8>, usize)> {
     None
 }
 
-/// Reassembles the message from the fragments that agree with `reading` (type, length), taking
-/// for each offset the earliest fragment, or the latest when `latest_wins`.
+/// Reassembles the message from the fragments that agree with `reading`, laying them over the
+/// message's bytes in arrival order, or newest first when `latest_first`. A fragment that
+/// disagrees with bytes already placed is left out: genuine fragments, however they overlap,
+/// carry the same bytes, so the one that disagrees is forged or corrupt, and trying both orders
+/// lets the genuine ones win whether it came before or after them.
+///
+/// One pass over each fragment's bytes, no recursion: a peer that sends many tiny fragments
+/// costs work in proportion to what it sent.
 fn assemble_reading(
     frags: &[Fragment],
-    reading: (HandshakeType, u32),
-    latest_wins: bool,
+    reading: Reading,
+    latest_first: bool,
 ) -> Option<(Vec<u8>, usize)> {
-    let mut by_offset: HashMap<u32, (usize, &Fragment)> = HashMap::with_capacity(frags.len());
-    for (index, f) in frags.iter().enumerate() {
-        if (f.handshake_header.handshake_type, f.handshake_header.length) != reading {
-            continue;
-        }
-        if latest_wins {
-            by_offset.insert(f.handshake_header.fragment_offset, (index, f));
-        } else {
-            by_offset
-                .entry(f.handshake_header.fragment_offset)
-                .or_insert((index, f));
-        }
+    let length = reading.1 as usize;
+    let fits = |f: &&Fragment| {
+        reading_of(f) == reading
+            && f.data.len() == f.handshake_header.fragment_length as usize
+            && (f.handshake_header.fragment_offset as usize)
+                .checked_add(f.data.len())
+                .is_some_and(|end| end <= length)
+    };
+    // The message cannot be complete with fewer bytes than its length, which also keeps a
+    // length an unauthenticated header merely claims from sizing the allocation below.
+    let available: usize = frags.iter().filter(fits).map(|f| f.data.len()).sum();
+    if available < length {
+        return None;
     }
 
-    let mut raw_message = vec![];
+    let mut order: Vec<usize> = (0..frags.len()).filter(|i| fits(&&frags[*i])).collect();
+    if latest_first {
+        order.reverse();
+    }
+
+    let mut message = vec![0u8; length];
+    let mut covered = vec![false; length];
+    let mut missing = length;
     let mut first = None;
-    let mut target_offset = 0u32;
-    // Each step consumes a distinct offset, so this ends within `by_offset.len()` steps even if
-    // fragment lengths point back at an offset already visited.
-    for _ in 0..by_offset.len() {
-        let (index, f) = by_offset.remove(&target_offset)?;
-        first.get_or_insert(index);
-        raw_message.extend_from_slice(&f.data);
-        let fragment_end = f
-            .handshake_header
-            .fragment_offset
-            .checked_add(f.handshake_header.fragment_length)?;
-        if fragment_end == f.handshake_header.length || f.handshake_header.fragment_length == 0 {
-            return Some((raw_message, first?));
+    for index in order {
+        let f = &frags[index];
+        let start = f.handshake_header.fragment_offset as usize;
+        let end = start + f.data.len();
+        let agrees = (start..end).all(|i| !covered[i] || message[i] == f.data[i - start]);
+        if !agrees {
+            continue;
         }
-        target_offset = fragment_end;
+        first.get_or_insert(index);
+        for i in start..end {
+            if !covered[i] {
+                covered[i] = true;
+                message[i] = f.data[i - start];
+                missing -= 1;
+            }
+        }
+        if missing == 0 {
+            return Some((message, first?));
+        }
     }
     None
 }

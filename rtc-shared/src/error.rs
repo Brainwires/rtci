@@ -1222,6 +1222,12 @@ pub enum Error {
     /// Key material was asked of a session without the extended master secret (RFC 7627 5.4).
     #[error("no keying material is exported without the extended master secret")]
     ErrExportWithoutExtendedMasterSecret,
+    /// The handshake did not complete within the configured time.
+    #[error("handshake did not complete in time")]
+    ErrHandshakeTimeout,
+    /// A record's payload is longer than the 2^14 bytes a record may carry (RFC 5246 6.2.1).
+    #[error("record payload exceeds 2^14 bytes")]
+    ErrRecordOverflow,
     /// A hello carried two extensions of one type (RFC 5246 7.4.1.4).
     #[error("hello carries an extension type twice")]
     ErrDuplicateExtension,

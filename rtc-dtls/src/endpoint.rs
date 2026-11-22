@@ -345,46 +345,45 @@ impl Endpoint {
         }
     }
 
-    /// Advances `remote`'s association to `now`, driving handshake retransmissions.
+    /// Advances `remote`'s association to `now`: retransmits its handshake flight when the
+    /// retransmission timer has expired (RFC 6347 4.2.4), and gives the handshake up at its
+    /// deadline ([`ConfigBuilder::with_handshake_timeout`](crate::config::ConfigBuilder::with_handshake_timeout)).
     ///
     /// # Errors
     ///
-    /// Fails if the handshake has exhausted its retransmissions.
+    /// `ErrHandshakeTimeout` when the handshake did not complete in time; the association has
+    /// then failed.
     pub fn handle_timeout(&mut self, remote: SocketAddr, now: Instant) -> Result<()> {
         if let Some(conn) = self.connections.get_mut(&remote) {
-            if let Some(current_retransmit_timer) = &conn.current_retransmit_timer
-                && now >= *current_retransmit_timer
-            {
-                if conn.current_retransmit_timer.take().is_some() && !conn.is_handshake_completed()
-                {
-                    conn.handshake_timeout(now)?;
-                }
-                while let Some(payload) = conn.outgoing_raw_packet() {
-                    self.transmits.push_back(TransportMessage {
-                        now,
-                        transport: TransportContext {
-                            local_addr: self.local_addr,
-                            peer_addr: remote,
-                            ecn: None,
-                            transport_protocol: self.transport_protocol,
-                        },
-                        message: payload,
-                    });
-                }
+            let result = if conn.next_timeout().is_some_and(|at| now >= at) {
+                conn.handle_timeout(now)
+            } else {
+                Ok(())
+            };
+            while let Some(payload) = conn.outgoing_raw_packet() {
+                self.transmits.push_back(TransportMessage {
+                    now,
+                    transport: TransportContext {
+                        local_addr: self.local_addr,
+                        peer_addr: remote,
+                        ecn: None,
+                        transport_protocol: self.transport_protocol,
+                    },
+                    message: payload,
+                });
             }
-            Ok(())
+            result
         } else {
             Err(Error::InvalidRemoteAddress(remote))
         }
     }
 
-    /// When `remote`'s association next needs [`Self::handle_timeout`].
+    /// When `remote`'s association next needs [`Self::handle_timeout`]: the retransmission
+    /// timer or the handshake deadline, whichever comes first.
     pub fn poll_timeout(&self, remote: &SocketAddr) -> Option<Instant> {
-        if let Some(conn) = self.connections.get(remote) {
-            conn.current_retransmit_timer
-        } else {
-            None
-        }
+        self.connections
+            .get(remote)
+            .and_then(|conn| conn.next_timeout())
     }
 }
 
@@ -1267,6 +1266,9 @@ mod tests {
             .poll_transmit()
             .expect("the server answers with an alert");
         assert_eq!(alert.message.first(), Some(&(ContentType::Alert as u8)));
+        // RFC 6347 4.1.2.1: the alert for a record that fails authentication is
+        // bad_record_mac(20), at fatal level (4.1.2.7).
+        assert_eq!(&alert.message[13..], &[2, 20]);
         Ok(())
     }
 }

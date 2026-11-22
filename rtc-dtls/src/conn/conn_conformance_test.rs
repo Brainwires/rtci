@@ -39,22 +39,22 @@ const ALERT_HANDSHAKE_FAILURE: u8 = 40;
 const ALERT_ILLEGAL_PARAMETER: u8 = 47;
 const ALERT_DECRYPT_ERROR: u8 = 51;
 
-fn provider() -> Arc<dyn crypto::RTCCryptoProvider> {
+pub(super) fn provider() -> Arc<dyn crypto::RTCCryptoProvider> {
     crypto::default_provider().expect("a built-in crypto provider is enabled for tests")
 }
 
-fn self_signed() -> Certificate {
+pub(super) fn self_signed() -> Certificate {
     Certificate::generate_self_signed(vec!["localhost".to_owned()], provider().crypto())
         .expect("a self-signed certificate is generated")
 }
 
-fn builder() -> ConfigBuilder {
+pub(super) fn builder() -> ConfigBuilder {
     ConfigBuilder::default()
         .with_crypto_provider(provider())
         .with_cipher_suites(vec![CipherSuiteId::Tls_Ecdhe_Ecdsa_With_Aes_128_Gcm_Sha256])
 }
 
-fn client(builder: ConfigBuilder) -> DTLSConn {
+pub(super) fn client(builder: ConfigBuilder) -> DTLSConn {
     let config = builder
         .with_insecure_skip_verify(true)
         .build(true, None)
@@ -62,7 +62,7 @@ fn client(builder: ConfigBuilder) -> DTLSConn {
     DTLSConn::new(Arc::new(config), true, None)
 }
 
-fn server(builder: ConfigBuilder) -> DTLSConn {
+pub(super) fn server(builder: ConfigBuilder) -> DTLSConn {
     let config = builder
         .with_certificates(vec![self_signed()])
         .build(false, None)
@@ -71,7 +71,7 @@ fn server(builder: ConfigBuilder) -> DTLSConn {
 }
 
 /// One received datagram, handled as `Endpoint::read` handles it.
-fn feed(conn: &mut DTLSConn, now: Instant, datagram: &[u8]) -> Result<()> {
+pub(super) fn feed(conn: &mut DTLSConn, now: Instant, datagram: &[u8]) -> Result<()> {
     conn.read(datagram)?;
     if !conn.is_handshake_completed() {
         conn.handshake(now)?;
@@ -82,7 +82,7 @@ fn feed(conn: &mut DTLSConn, now: Instant, datagram: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn drain(conn: &mut DTLSConn) -> Vec<Vec<u8>> {
+pub(super) fn drain(conn: &mut DTLSConn) -> Vec<Vec<u8>> {
     let mut datagrams = vec![];
     while let Some(datagram) = conn.outgoing_raw_packet() {
         datagrams.push(datagram.to_vec());
@@ -91,23 +91,23 @@ fn drain(conn: &mut DTLSConn) -> Vec<Vec<u8>> {
 }
 
 /// A client and a server driven against each other, with everything each sent.
-struct Exchange {
-    client: DTLSConn,
-    server: DTLSConn,
-    client_err: Option<Error>,
-    server_err: Option<Error>,
-    from_client: Vec<Vec<u8>>,
-    from_server: Vec<Vec<u8>>,
+pub(super) struct Exchange {
+    pub(super) client: DTLSConn,
+    pub(super) server: DTLSConn,
+    pub(super) client_err: Option<Error>,
+    pub(super) server_err: Option<Error>,
+    pub(super) from_client: Vec<Vec<u8>>,
+    pub(super) from_server: Vec<Vec<u8>>,
 }
 
 impl Exchange {
-    fn run(client: DTLSConn, server: DTLSConn) -> Self {
+    pub(super) fn run(client: DTLSConn, server: DTLSConn) -> Self {
         Self::run_altering(client, server, |_| {}, |_| {})
     }
 
     /// As [`Self::run`], with every datagram passed through `to_server` or `to_client` on its
     /// way: what someone on the path can do to the unprotected part of a handshake.
-    fn run_altering(
+    pub(super) fn run_altering(
         mut client: DTLSConn,
         mut server: DTLSConn,
         mut to_server: impl FnMut(&mut Vec<u8>),
@@ -156,7 +156,7 @@ impl Exchange {
         }
     }
 
-    fn completed(&self) -> bool {
+    pub(super) fn completed(&self) -> bool {
         self.client_err.is_none()
             && self.server_err.is_none()
             && self.client.is_handshake_completed()
@@ -165,7 +165,7 @@ impl Exchange {
 }
 
 /// The (level, description) of every plaintext alert record in `datagrams`.
-fn plaintext_alerts(datagrams: &[Vec<u8>]) -> Vec<(u8, u8)> {
+pub(super) fn plaintext_alerts(datagrams: &[Vec<u8>]) -> Vec<(u8, u8)> {
     let mut alerts = vec![];
     for datagram in datagrams {
         for record in unpack_datagram(datagram).expect("a datagram splits into records") {
@@ -179,7 +179,7 @@ fn plaintext_alerts(datagrams: &[Vec<u8>]) -> Vec<(u8, u8)> {
 }
 
 /// The (type, body) of every unfragmented plaintext handshake message in `datagrams`.
-fn plaintext_handshake_messages(datagrams: &[Vec<u8>]) -> Vec<(u8, Vec<u8>)> {
+pub(super) fn plaintext_handshake_messages(datagrams: &[Vec<u8>]) -> Vec<(u8, Vec<u8>)> {
     let mut messages = vec![];
     for datagram in datagrams {
         for record in unpack_datagram(datagram).expect("a datagram splits into records") {
@@ -203,7 +203,10 @@ fn plaintext_handshake_messages(datagrams: &[Vec<u8>]) -> Vec<(u8, Vec<u8>)> {
 
 /// Where the body of the first unfragmented plaintext handshake message of `handshake_type`
 /// lies in `datagram`.
-fn handshake_body_range(datagram: &[u8], handshake_type: u8) -> Option<std::ops::Range<usize>> {
+pub(super) fn handshake_body_range(
+    datagram: &[u8],
+    handshake_type: u8,
+) -> Option<std::ops::Range<usize>> {
     let mut at = 0;
     while at + RECORD_LAYER_HEADER_SIZE <= datagram.len() {
         let record_len = u16::from_be_bytes([datagram[at + 11], datagram[at + 12]]) as usize;
@@ -217,7 +220,7 @@ fn handshake_body_range(datagram: &[u8], handshake_type: u8) -> Option<std::ops:
     None
 }
 
-fn body_of(messages: &[(u8, Vec<u8>)], handshake_type: u8) -> Option<Vec<u8>> {
+pub(super) fn body_of(messages: &[(u8, Vec<u8>)], handshake_type: u8) -> Option<Vec<u8>> {
     messages
         .iter()
         .find(|(typ, _)| *typ == handshake_type)
@@ -328,7 +331,7 @@ fn server_hello_body(cipher_suite: u16, compression: u8, extensions: Option<&[u8
 }
 
 /// A handshake message with its 12-byte header, unfragmented.
-fn handshake_message(handshake_type: u8, message_sequence: u16, body: &[u8]) -> Vec<u8> {
+pub(super) fn handshake_message(handshake_type: u8, message_sequence: u16, body: &[u8]) -> Vec<u8> {
     let length = (body.len() as u32).to_be_bytes();
     let mut out = vec![handshake_type];
     out.extend_from_slice(&length[1..]);
@@ -340,7 +343,7 @@ fn handshake_message(handshake_type: u8, message_sequence: u16, body: &[u8]) -> 
 }
 
 /// A plaintext (epoch 0) record around `payload`.
-fn plaintext_record(content_type: u8, sequence_number: u64, payload: &[u8]) -> Vec<u8> {
+pub(super) fn plaintext_record(content_type: u8, sequence_number: u64, payload: &[u8]) -> Vec<u8> {
     let mut out = vec![content_type, 0xfe, 0xfd, 0, 0];
     out.extend_from_slice(&sequence_number.to_be_bytes()[2..]);
     out.extend_from_slice(&(payload.len() as u16).to_be_bytes());

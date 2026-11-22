@@ -253,6 +253,10 @@ pub trait CipherSuite: Send {
     fn is_psk(&self) -> bool;
     /// Whether keys have been installed, so records can be protected.
     fn is_initialized(&self) -> bool;
+    /// The most bytes this suite's record protection adds to a record's payload (explicit
+    /// nonce or IV, authentication tag or MAC, padding), on top of the 13-byte record header.
+    /// An application sizing its datagrams for a path MTU subtracts both (RFC 6347 4.1.1.1).
+    fn record_expansion(&self) -> usize;
 
     // Generate the internal encryption state
     /// Installs the keying material derived from the handshake.

@@ -199,16 +199,12 @@ fn assert_error(result: &Result<DTLSConn>, expected: &Error, what: &str) {
     }
 }
 
-/// Fires `conn`'s retransmit timer, as `Endpoint::handle_timeout` does, returning the instant it
-/// fired at, or `None` when no timer is armed.
+/// Fires `conn`'s next timer (retransmission or handshake deadline), as
+/// `Endpoint::handle_timeout` does, returning the instant it fired at, or `None` when no timer
+/// is armed.
 fn fire_timer(conn: &mut DTLSConn) -> Option<(Instant, Result<()>)> {
-    let at = conn.current_retransmit_timer.take()?;
-    let result = if conn.is_handshake_completed() {
-        Ok(())
-    } else {
-        conn.handshake_timeout(at)
-    };
-    Some((at, result))
+    let at = conn.next_timeout()?;
+    Some((at, conn.handle_timeout(at)))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -478,7 +474,7 @@ fn test_psk_hint_fail() -> Result<()> {
     Ok(())
 }
 
-/// No server: the client retransmits on its timer until its retries run out, then fails.
+/// No server: the client retransmits on its timer until the handshake deadline, then fails.
 #[test]
 fn test_client_timeout() -> Result<()> {
     let mut client = test_client(builder(), true)?;
@@ -486,7 +482,7 @@ fn test_client_timeout() -> Result<()> {
     drain(&mut client);
 
     let mut result = Ok(());
-    for _ in 0..=client.maximum_retransmit_number + 1 {
+    for _ in 0..16 {
         let Some((_, fired)) = fire_timer(&mut client) else {
             break;
         };
@@ -496,7 +492,7 @@ fn test_client_timeout() -> Result<()> {
             break;
         }
     }
-    assert!(result.is_err(), "Expected Error but got Ok");
+    assert_eq!(result, Err(Error::ErrHandshakeTimeout));
     assert!(client.is_failed());
     assert!(!client.is_handshake_completed());
     Ok(())

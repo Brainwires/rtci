@@ -7,6 +7,7 @@ use crate::cipher_suite::CipherSuiteId;
 use crate::config::ConfigBuilder;
 use crate::crypto::Certificate;
 use crypto::RTCCryptoProvider;
+use std::time::Duration;
 
 fn client_addr() -> SocketAddr {
     SocketAddr::from(([127, 0, 0, 1], 5444))
@@ -216,39 +217,152 @@ fn an_ordinary_retransmission_does_not_fail_the_association() -> Result<()> {
     Ok(())
 }
 
-/// A handshake whose peer never answers gives up once its retransmissions run out, and only then.
+/// A handshake nobody answers is retransmitted on a doubling timer and given up at the
+/// handshake deadline (30 seconds unless configured): the association fails then, and only
+/// then.
 #[test]
-fn a_handshake_whose_retransmissions_run_out_fails() -> Result<()> {
-    let mut now = Instant::now();
+fn a_handshake_nobody_answers_fails_at_its_deadline() -> Result<()> {
+    let start = Instant::now();
     let mut client = Endpoint::new(client_addr(), TransportProtocol::UDP, None);
-    client.connect(now, server_addr(), client_config()?, None)?;
-    let retries = client.connections[&server_addr()].maximum_retransmit_number;
+    client.connect(start, server_addr(), client_config()?, None)?;
     take_transmits(&mut client);
 
-    for retry in 0..retries {
-        now = client
+    // Retransmissions 1, 3, 7 and 15 seconds in; the next would be at 31.
+    for expected in [1, 3, 7, 15] {
+        let now = client
             .poll_timeout(&server_addr())
-            .expect("the retransmit timer stays armed while retries remain");
+            .expect("the retransmit timer stays armed until the deadline");
+        assert_eq!(now.duration_since(start), Duration::from_secs(expected));
         client.handle_timeout(server_addr(), now)?;
         assert!(
             !take_transmits(&mut client).is_empty(),
-            "retry {retry} retransmits the flight"
+            "the flight is retransmitted {expected} s in"
         );
         assert!(
             !client.is_connection_failed(&server_addr()),
-            "retry {retry} is an ordinary retransmission, not a failure"
+            "an ordinary retransmission is not a failure"
         );
     }
 
-    now = client
+    let now = client
         .poll_timeout(&server_addr())
-        .expect("the last retransmission arms the timer once more");
-    assert!(
-        client.handle_timeout(server_addr(), now).is_err(),
-        "the handshake gives up once its retransmissions run out"
+        .expect("the deadline is the next timeout");
+    assert_eq!(now.duration_since(start), Duration::from_secs(30));
+    assert_eq!(
+        client.handle_timeout(server_addr(), now),
+        Err(Error::ErrHandshakeTimeout)
     );
     assert!(client.is_connection_failed(&server_addr()));
     assert_eq!(client.poll_timeout(&server_addr()), None);
+    // RFC 6347 4.2.7: nothing is retransmitted after the association has failed.
+    client.handle_timeout(server_addr(), now + Duration::from_secs(120))?;
+    assert!(take_transmits(&mut client).is_empty());
+    Ok(())
+}
+
+/// RFC 6347 4.2.4.1: the timer doubles up to 60 seconds and stays there. Without a handshake
+/// deadline the flight is retransmitted for as long as the association exists.
+#[test]
+fn the_retransmission_timer_stops_doubling_at_sixty_seconds() -> Result<()> {
+    let start = Instant::now();
+    let mut client = Endpoint::new(client_addr(), TransportProtocol::UDP, None);
+    let config = Arc::new(
+        client_builder()
+            .with_handshake_timeout(None)
+            .build(true, None)?,
+    );
+    client.connect(start, server_addr(), config, None)?;
+    take_transmits(&mut client);
+
+    let mut intervals = vec![];
+    let mut previous = start;
+    for _ in 0..10 {
+        let at = client.poll_timeout(&server_addr()).expect("armed");
+        client.handle_timeout(server_addr(), at)?;
+        assert!(!take_transmits(&mut client).is_empty());
+        intervals.push(at.duration_since(previous).as_secs());
+        previous = at;
+    }
+    assert_eq!(intervals, vec![1, 2, 4, 8, 16, 32, 60, 60, 60, 60]);
+    assert!(!client.is_connection_failed(&server_addr()));
+    Ok(())
+}
+
+/// The initial value, the maximum and the deadline are configuration.
+#[test]
+fn the_retransmission_timer_follows_its_configuration() -> Result<()> {
+    let start = Instant::now();
+    let mut client = Endpoint::new(client_addr(), TransportProtocol::UDP, None);
+    let config = Arc::new(
+        client_builder()
+            .with_flight_interval(Duration::from_millis(50))
+            .with_maximum_flight_interval(Duration::from_millis(300))
+            .with_handshake_timeout(Some(Duration::from_secs(1)))
+            .build(true, None)?,
+    );
+    client.connect(start, server_addr(), config, None)?;
+    take_transmits(&mut client);
+
+    let mut fired = vec![];
+    let result = loop {
+        let at = client.poll_timeout(&server_addr()).expect("armed");
+        fired.push(at.duration_since(start).as_millis());
+        if let Err(err) = client.handle_timeout(server_addr(), at) {
+            break err;
+        }
+    };
+    // 50, 100, 200, then 300 at a time, until the deadline one second in.
+    assert_eq!(fired, vec![50, 150, 350, 650, 950, 1000]);
+    assert_eq!(result, Error::ErrHandshakeTimeout);
+    Ok(())
+}
+
+/// RFC 6347 4.2.4.1: the backed-off value is kept until a flight is answered without loss. A
+/// flight that needed two retransmissions leaves the timer at four seconds for the next one;
+/// after a flight that needed none, it is one second again.
+#[test]
+fn the_backed_off_timer_is_kept_until_a_flight_gets_through_without_loss() -> Result<()> {
+    let start = Instant::now();
+    let mut client = Endpoint::new(client_addr(), TransportProtocol::UDP, None);
+    let mut server = Endpoint::new(
+        server_addr(),
+        TransportProtocol::UDP,
+        Some(server_config()?),
+    );
+    client.connect(start, server_addr(), client_config()?, None)?;
+
+    // The first ClientHello and its first retransmission are lost.
+    take_transmits(&mut client);
+    let mut now = client.poll_timeout(&server_addr()).expect("armed");
+    client.handle_timeout(server_addr(), now)?;
+    take_transmits(&mut client);
+    now = client.poll_timeout(&server_addr()).expect("armed");
+    assert_eq!(now.duration_since(start), Duration::from_secs(3));
+    client.handle_timeout(server_addr(), now)?;
+
+    // The second retransmission is answered: the next flight starts with the 4 s value.
+    let to_server = take_transmits(&mut client);
+    deliver(&mut server, client_addr(), to_server, now);
+    let to_client = take_transmits(&mut server);
+    deliver(&mut client, server_addr(), to_client, now);
+    let second_client_hello = take_transmits(&mut client);
+    assert_eq!(
+        client.poll_timeout(&server_addr()),
+        Some(now + Duration::from_secs(4))
+    );
+
+    // That flight is answered at once: the one after it starts at 1 s.
+    deliver(&mut server, client_addr(), second_client_hello, now);
+    let to_client = take_transmits(&mut server);
+    deliver(&mut client, server_addr(), to_client, now);
+    assert!(
+        !take_transmits(&mut client).is_empty(),
+        "the client's flight 5"
+    );
+    assert_eq!(
+        client.poll_timeout(&server_addr()),
+        Some(now + Duration::from_secs(1))
+    );
     Ok(())
 }
 
@@ -798,5 +912,372 @@ fn a_client_hello_with_a_wrong_cookie_does_not_block_the_genuine_one() -> Result
         deliver(&mut client, server_addr(), hello_verify_request, now);
         complete_handshake(&mut client, &mut server, now);
     }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------------------------
+// Records, datagrams and the retransmission timer (RFC 6347 4.1.1, 4.2.3, 4.2.4; RFC 5246 6.2).
+// ---------------------------------------------------------------------------------------------
+
+/// Every (message sequence, total length, fragment offset, fragment length) of the plaintext
+/// handshake records in `datagram`.
+fn handshake_fragments(datagram: &[u8]) -> Vec<(u16, usize, usize, usize)> {
+    let mut fragments = vec![];
+    for record in crate::record_layer::unpack_datagram(datagram).expect("records") {
+        if record[0] != HANDSHAKE || record[3..5] != [0, 0] {
+            continue;
+        }
+        let m = &record[13..];
+        let u24 = |b: &[u8]| u32::from_be_bytes([0, b[0], b[1], b[2]]) as usize;
+        fragments.push((
+            u16::from_be_bytes([m[4], m[5]]),
+            u24(&m[1..4]),
+            u24(&m[6..9]),
+            u24(&m[9..12]),
+        ));
+    }
+    fragments
+}
+
+/// RFC 6347 4.1.1, 4.2.3: no handshake datagram is larger than the configured MTU, and the
+/// fragments of each message cover it exactly, without overlap, each in one datagram.
+#[test]
+fn handshake_datagrams_fit_the_configured_mtu() -> Result<()> {
+    for mtu in [200usize, 257, 600] {
+        let now = Instant::now();
+        let provider = provider();
+        let certificate =
+            Certificate::generate_self_signed(vec!["localhost".to_owned()], provider.crypto())?;
+        let builder = || {
+            ConfigBuilder::default()
+                .with_crypto_provider(provider.clone())
+                .with_cipher_suites(vec![SUITE])
+                .with_insecure_skip_verify(true)
+                .with_certificates(vec![certificate.clone()])
+                .with_client_auth(crate::config::ClientAuthType::RequireAnyClientCert)
+                .with_mtu(mtu)
+        };
+        let mut client = Endpoint::new(client_addr(), TransportProtocol::UDP, None);
+        let mut server = Endpoint::new(
+            server_addr(),
+            TransportProtocol::UDP,
+            Some(Arc::new(builder().build(false, None)?)),
+        );
+        client.connect(
+            now,
+            server_addr(),
+            Arc::new(builder().build(true, None)?),
+            None,
+        )?;
+
+        let mut largest = 0;
+        let mut fragmented_messages = 0;
+        // Checks one side's datagrams: each within the MTU, each message's fragments abutting
+        // and covering it.
+        let mut check = |datagrams: &[BytesMut]| {
+            let mut coverage: std::collections::BTreeMap<u16, (usize, Vec<(usize, usize)>)> =
+                Default::default();
+            for datagram in datagrams {
+                assert!(
+                    datagram.len() <= mtu,
+                    "a {}-byte datagram with an MTU of {mtu}",
+                    datagram.len()
+                );
+                largest = largest.max(datagram.len());
+                for (sequence, length, offset, fragment_length) in handshake_fragments(datagram) {
+                    let entry = coverage.entry(sequence).or_insert((length, vec![]));
+                    assert_eq!(entry.0, length);
+                    entry.1.push((offset, fragment_length));
+                }
+            }
+            for (sequence, (length, mut ranges)) in coverage {
+                ranges.sort_unstable();
+                let mut next = 0;
+                for (offset, fragment_length) in &ranges {
+                    assert_eq!(*offset, next, "message {sequence}: fragments abut");
+                    next = offset + fragment_length;
+                }
+                assert_eq!(next, length, "message {sequence}: fragments cover it");
+                if ranges.len() > 1 {
+                    fragmented_messages += 1;
+                }
+            }
+        };
+        let mut complete = (false, false);
+        for _ in 0..32 {
+            let datagrams = take_transmits(&mut client);
+            check(&datagrams);
+            let (events, _) = deliver(&mut server, client_addr(), datagrams, now);
+            complete.1 |= events
+                .iter()
+                .any(|event| matches!(event, EndpointEvent::HandshakeComplete));
+            let datagrams = take_transmits(&mut server);
+            check(&datagrams);
+            let (events, _) = deliver(&mut client, server_addr(), datagrams, now);
+            complete.0 |= events
+                .iter()
+                .any(|event| matches!(event, EndpointEvent::HandshakeComplete));
+            if complete.0 && complete.1 {
+                break;
+            }
+        }
+        assert!(
+            complete.0 && complete.1,
+            "mtu {mtu}: the handshake completes"
+        );
+        assert!(
+            fragmented_messages > 0 || mtu > 400,
+            "mtu {mtu}: a certificate is fragmented"
+        );
+        assert!(
+            largest > mtu / 2,
+            "mtu {mtu}: fragments use the room ({largest})"
+        );
+    }
+    Ok(())
+}
+
+/// A completed client and server.
+fn connected_pair() -> Result<(Endpoint, Endpoint)> {
+    let now = Instant::now();
+    let mut client = Endpoint::new(client_addr(), TransportProtocol::UDP, None);
+    let mut server = Endpoint::new(
+        server_addr(),
+        TransportProtocol::UDP,
+        Some(server_config()?),
+    );
+    client.connect(now, server_addr(), client_config()?, None)?;
+    complete_handshake(&mut client, &mut server, now);
+    Ok((client, server))
+}
+
+/// RFC 5246 6.2.1, RFC 6347 4.1.1.1: a record carries at most 2^14 bytes. A larger write is
+/// refused (splitting it would break the datagram boundary the application relies on), never
+/// sent with a wrapped length; a write of exactly 2^14 bytes, and an empty one, arrive whole.
+#[test]
+fn application_writes_are_limited_to_two_to_the_fourteen_bytes() -> Result<()> {
+    let now = Instant::now();
+    let (mut client, mut server) = connected_pair()?;
+
+    for too_long in [(1 << 14) + 1, 70_000] {
+        assert!(
+            client
+                .write(now, server_addr(), &vec![0x5a; too_long])
+                .is_err(),
+            "a {too_long}-byte write"
+        );
+        assert!(take_transmits(&mut client).is_empty(), "nothing is sent");
+    }
+
+    for len in [1 << 14, 0] {
+        let payload = vec![0xa5; len];
+        client.write(now, server_addr(), &payload)?;
+        let datagrams = take_transmits(&mut client);
+        assert_eq!(datagrams.len(), 1);
+        let (events, errored) = deliver(&mut server, client_addr(), datagrams, now);
+        assert!(!errored);
+        assert!(
+            matches!(&events[..], [EndpointEvent::ApplicationData(data)] if data[..] == payload[..]),
+            "a {len}-byte write arrives as one message"
+        );
+    }
+    Ok(())
+}
+
+/// RFC 6347 4.1.2.7: an invalid record is discarded, and only that record. Junk after the valid
+/// records of a datagram (here the server's whole first flight) does not cost them.
+#[test]
+fn junk_after_the_valid_records_of_a_datagram_is_ignored() -> Result<()> {
+    let now = Instant::now();
+    let mut client = Endpoint::new(client_addr(), TransportProtocol::UDP, None);
+    let mut server = Endpoint::new(
+        server_addr(),
+        TransportProtocol::UDP,
+        Some(server_config()?),
+    );
+    client.connect(now, server_addr(), client_config()?, None)?;
+
+    let mut junk_appended = 0;
+    let mut complete = (false, false);
+    for _ in 0..32 {
+        let to_server = take_transmits(&mut client);
+        let (events, _) = deliver(&mut server, client_addr(), to_server, now);
+        complete.1 |= events
+            .iter()
+            .any(|event| matches!(event, EndpointEvent::HandshakeComplete));
+        for mut datagram in take_transmits(&mut server) {
+            // Five bytes: too short to be a record. Then a header announcing more than follows.
+            datagram.extend_from_slice(if junk_appended % 2 == 0 {
+                &[0x16, 0xfe, 0xfd, 0x00, 0x00][..]
+            } else {
+                &[0x16, 0xfe, 0xfd, 0, 0, 0, 0, 0, 0, 0, 9, 0x01, 0x00, 0xaa][..]
+            });
+            junk_appended += 1;
+            let events = client.read(now, server_addr(), None, datagram)?;
+            complete.0 |= events
+                .iter()
+                .any(|event| matches!(event, EndpointEvent::HandshakeComplete));
+        }
+        if complete.0 && complete.1 {
+            break;
+        }
+    }
+    assert!(junk_appended >= 3);
+    assert!(complete.0 && complete.1, "the handshake completes");
+    Ok(())
+}
+
+/// RFC 6347 4.2.4.1: the retransmission timer starts at one second and doubles with each
+/// retransmission.
+#[test]
+fn the_retransmission_timer_doubles_from_one_second() -> Result<()> {
+    let start = Instant::now();
+    let mut client = Endpoint::new(client_addr(), TransportProtocol::UDP, None);
+    client.connect(start, server_addr(), client_config()?, None)?;
+    take_transmits(&mut client);
+
+    let mut fired = vec![];
+    let mut previous = start;
+    for _ in 0..4 {
+        let at = client
+            .poll_timeout(&server_addr())
+            .expect("the retransmission timer is armed");
+        client.handle_timeout(server_addr(), at)?;
+        assert_eq!(
+            take_transmits(&mut client).len(),
+            1,
+            "the flight is sent again"
+        );
+        fired.push(at.duration_since(previous).as_secs_f64());
+        previous = at;
+    }
+    assert_eq!(fired, vec![1.0, 2.0, 4.0, 8.0]);
+    Ok(())
+}
+
+/// RFC 6347 4.1.1.1: when a flight's retransmissions go unanswered its records may be too
+/// large for the path, so they are cut smaller. The peer reassembles the message from
+/// fragments of both cuts (RFC 6347 4.2.3).
+#[test]
+fn unanswered_retransmissions_are_sent_in_smaller_records() -> Result<()> {
+    let mtu = 600;
+    let start = Instant::now();
+    let provider = provider();
+    let certificate =
+        Certificate::generate_self_signed(vec!["localhost".to_owned()], provider.crypto())?;
+    let builder = || {
+        ConfigBuilder::default()
+            .with_crypto_provider(provider.clone())
+            .with_cipher_suites(vec![SUITE])
+            .with_insecure_skip_verify(true)
+            .with_certificates(vec![certificate.clone()])
+            .with_client_auth(crate::config::ClientAuthType::RequireAnyClientCert)
+            .with_mtu(mtu)
+    };
+    let mut client = Endpoint::new(client_addr(), TransportProtocol::UDP, None);
+    let mut server = Endpoint::new(
+        server_addr(),
+        TransportProtocol::UDP,
+        Some(Arc::new(builder().build(false, None)?)),
+    );
+    client.connect(
+        start,
+        server_addr(),
+        Arc::new(builder().build(true, None)?),
+        None,
+    )?;
+
+    // Up to the client's flight with its certificate, which is lost.
+    for _ in 0..2 {
+        let to_server = take_transmits(&mut client);
+        deliver(&mut server, client_addr(), to_server, start);
+        let to_client = take_transmits(&mut server);
+        deliver(&mut client, server_addr(), to_client, start);
+    }
+    let largest = |datagrams: &[BytesMut]| datagrams.iter().map(|d| d.len()).max().unwrap_or(0);
+    let first = take_transmits(&mut client);
+    assert!(largest(&first) > mtu / 2 && largest(&first) <= mtu);
+
+    // Two retransmissions at the configured size; the first datagram of the second reaches
+    // the server, the rest is lost.
+    let mut partial = vec![];
+    for _ in 0..2 {
+        let now = client.poll_timeout(&server_addr()).expect("armed");
+        client.handle_timeout(server_addr(), now)?;
+        let again = take_transmits(&mut client);
+        assert!(largest(&again) > mtu / 2 && largest(&again) <= mtu);
+        partial = again[..1].to_vec();
+    }
+    deliver(&mut server, client_addr(), partial, start);
+    assert!(take_transmits(&mut server).is_empty());
+
+    // From the third on the records are cut for half the size, then for the 228-byte floor.
+    let now = client.poll_timeout(&server_addr()).expect("armed");
+    client.handle_timeout(server_addr(), now)?;
+    let halved = take_transmits(&mut client);
+    assert!(largest(&halved) <= mtu / 2, "{}", largest(&halved));
+    let now = client.poll_timeout(&server_addr()).expect("armed");
+    client.handle_timeout(server_addr(), now)?;
+    let smallest = take_transmits(&mut client);
+    assert!(largest(&smallest) <= 228, "{}", largest(&smallest));
+
+    // The server completes from the partial flight and the smallest cut.
+    let (events, errored) = deliver(&mut server, client_addr(), smallest, now);
+    assert!(!errored);
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, EndpointEvent::HandshakeComplete))
+    );
+    let to_client = take_transmits(&mut server);
+    let (events, _) = deliver(&mut client, server_addr(), to_client, now);
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, EndpointEvent::HandshakeComplete))
+    );
+    Ok(())
+}
+
+/// RFC 6347 4.2.1: the ClientHello that answers HelloVerifyRequest repeats the first one's
+/// version, random, session id, cipher suites, compression methods (and extensions), with the
+/// cookie added.
+#[test]
+fn the_second_client_hello_repeats_the_first_but_for_the_cookie() -> Result<()> {
+    let now = Instant::now();
+    let mut client = Endpoint::new(client_addr(), TransportProtocol::UDP, None);
+    let mut server = Endpoint::new(
+        server_addr(),
+        TransportProtocol::UDP,
+        Some(server_config()?),
+    );
+    client.connect(now, server_addr(), client_config()?, None)?;
+    let first = take_transmits(&mut client);
+    deliver(&mut server, client_addr(), first.clone(), now);
+    let hello_verify_request = take_transmits(&mut server);
+    deliver(&mut client, server_addr(), hello_verify_request, now);
+    let second = take_transmits(&mut client);
+
+    // Record header (13), handshake header (12), then the body: version (2), random (32),
+    // session id, cookie, and the rest.
+    let split = |datagram: &BytesMut| {
+        let body = datagram[25..].to_vec();
+        let session_id_end = 34 + 1 + body[34] as usize;
+        let cookie_end = session_id_end + 1 + body[session_id_end] as usize;
+        (
+            body[..session_id_end].to_vec(),
+            body[session_id_end + 1..cookie_end].to_vec(),
+            body[cookie_end..].to_vec(),
+        )
+    };
+    let (first_head, first_cookie, first_rest) = split(&first[0]);
+    let (second_head, second_cookie, second_rest) = split(&second[0]);
+    assert!(first_cookie.is_empty());
+    assert!(!second_cookie.is_empty());
+    assert_eq!(first_head, second_head, "version, random and session id");
+    assert_eq!(
+        first_rest, second_rest,
+        "cipher suites, compression methods and extensions"
+    );
     Ok(())
 }

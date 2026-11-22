@@ -67,8 +67,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **dtls**: a ClientHello offering a later DTLS version than 1.2 is answered with 1.2, under any
   record-layer version of the family in epoch 0 (RFC 5246 section E.1); it was refused.
 
+### Record layer and handshake transport
+
+- **dtls**: the handshake retransmission timer follows RFC 6347 section 4.2.4.1: one second,
+  doubled at each retransmission up to 60 seconds, the value kept until a flight is answered
+  without loss. It was a fixed second, and the handshake failed after seven retransmissions
+  (8 seconds), which ends a handshake a browser would still have completed. A handshake is now
+  given up at a deadline: `ConfigBuilder::with_handshake_timeout`, 30 seconds by default, `None`
+  for never. `with_maximum_flight_interval` sets what the timer doubles up to.
+  `Endpoint::poll_timeout` returns the deadline when it comes before the next retransmission, and
+  `handle_timeout` fails the association with `ErrHandshakeTimeout`.
+- **dtls**: handshake messages reassemble from fragments that overlap, repeat or arrive in any
+  order (RFC 6347 section 4.2.3). Only fragments that each started where the previous one ended
+  were joined, so a peer that retransmitted with another fragmentation never completed its
+  message. A fragment that disagrees with bytes already placed is left out, and fragments of
+  different epochs are never joined.
+- **dtls**: no handshake datagram is larger than the configured MTU (RFC 6347 section 4.1.1).
+  The message body was cut at the MTU and the record and handshake headers added on top, so
+  datagrams reached MTU + 25. When a flight's retransmissions go unanswered its records are cut
+  for half the size, down to 228 bytes (section 4.1.1.1).
+- **dtls**: a record carries at most 2^14 bytes (RFC 5246 section 6.2.1). `write` refuses a longer
+  payload with `ErrRecordOverflow`; above 65535 bytes the record length used to wrap. A received
+  record that authenticates and opens to more is answered with a fatal record_overflow; a header
+  that announces more than a protected record may hold is discarded.
+- **dtls**: junk after the valid records of a datagram no longer costs them (RFC 6347 section
+  4.1.2.7): the whole datagram was dropped.
+- **dtls**: alerts. A record that fails authentication during a PSK handshake draws bad_record_mac
+  (RFC 6347 section 4.1.2.1; it was unknown_psk_identity). An authenticated record of an unknown
+  type, or a protected handshake message other than Finished, draws unexpected_message. A
+  plaintext handshake message of a type the peer's role never sends is dropped without taking
+  the genuine message's place. A fatal alert is sent again, at most seven times, when the peer
+  repeats the flight it was about (section 4.2.7).
+- **dtls**: a client waiting for the server's first answer no longer ends the handshake over a
+  handshake record that delivers nothing (a stray fragment, a discarded message): it sent a fatal
+  internal_error, so one spoofed datagram failed the association.
+- **dtls**: a replay window below 32 is raised to 32 (RFC 6347 section 4.1.2.6).
+- **dtls**: the master secret is overwritten when an association fails or is dropped, and the
+  premaster secret once the master secret exists (RFC 5246 sections 7.2.2, 8.1).
+- **dtls**: `CipherSuite::record_expansion` reports what a suite adds to a record's payload, so an
+  application can size its datagrams (RFC 6347 section 4.1.1.1).
+
 ### Breaking changes
 
+- **dtls**: a handshake nobody answers fails after 30 seconds with `ErrHandshakeTimeout`, where
+  it failed after 8 seconds with `ErrInvalidFsmTransition`; its retransmissions are 1, 3, 7 and
+  15 seconds in instead of every second.
+- **dtls**: `CipherSuite` has a new required method, `record_expansion`. `DTLSConn::write` and
+  `Endpoint::write` return `ErrRecordOverflow` above 2^14 bytes. `ConfigBuilder::build` refuses
+  an MTU below 128. New: `ConfigBuilder::{with_maximum_flight_interval, with_handshake_timeout}`,
+  `conn::MAX_RECORD_PAYLOAD`, `Error::{ErrHandshakeTimeout, ErrRecordOverflow}`.
 - **dtls**: a ServerHello no longer carries renegotiation_info, supported_groups or
   ec_point_formats to a client that did not offer them; a client that sends no
   signature_algorithms extension is no longer served by a certificate suite unless SHA-1

@@ -98,13 +98,11 @@ impl Flight for Flight1 {
             state.handshake_recv_sequence = seq;
             Ok(Box::new(Flight3 {}))
         } else {
-            Err((
-                Some(Alert {
-                    alert_level: AlertLevel::Fatal,
-                    alert_description: AlertDescription::InternalError,
-                }),
-                None,
-            ))
+            // Neither a HelloVerifyRequest nor a ServerHello has arrived yet: a handshake
+            // record that delivered nothing (a fragment, or one that was discarded) is no
+            // reason for an alert. This used to answer any such record, which anyone can send
+            // from the server's address, with a fatal internal_error that ended the handshake.
+            Err((None, None))
         }
     }
 
