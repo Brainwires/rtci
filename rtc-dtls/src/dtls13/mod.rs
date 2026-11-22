@@ -21,6 +21,8 @@ pub(crate) mod suite;
 #[cfg(test)]
 mod connection_id_test;
 #[cfg(test)]
+mod early_data_test;
+#[cfg(test)]
 mod fuzz_corpus_test;
 #[cfg(test)]
 pub(crate) mod handshake_test;

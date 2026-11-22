@@ -24,6 +24,8 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+/// The epoch of 0-RTT data (RFC 9147 section 6.1).
+pub(crate) const EPOCH_EARLY: u64 = 1;
 /// The epoch of the handshake traffic keys (RFC 9147 section 6.1).
 pub(crate) const EPOCH_HANDSHAKE: u64 = 2;
 /// The epoch of the first application traffic keys.
@@ -278,6 +280,16 @@ pub(crate) struct Conn13 {
     pub(crate) post_handshake_peer_certificates: Option<Vec<Vec<u8>>>,
     /// Server: how many post-handshake answers have been verified.
     pub(crate) post_handshake_authentications: u64,
+    /// Whether 0-RTT data was accepted (RFC 8446 section 4.2.10); `None` when none was
+    /// offered.
+    pub(crate) early_data_accepted: Option<bool>,
+    /// The PSK the server selected, by its index in the client's list.
+    pub(crate) psk_index: Option<u16>,
+    /// Server: the 0-RTT data received, until the endpoint takes it.
+    pub(crate) early_data: VecDeque<BytesMut>,
+    /// Server: how much 0-RTT data it takes, and has taken.
+    pub(crate) early_data_limit: usize,
+    early_data_received: usize,
 
     // The record layer.
     plaintext_send_sequence: u64,
@@ -415,6 +427,11 @@ impl Conn13 {
             client_authentication: None,
             post_handshake_peer_certificates: None,
             post_handshake_authentications: 0,
+            early_data_accepted: None,
+            psk_index: None,
+            early_data: VecDeque::new(),
+            early_data_limit: 0,
+            early_data_received: 0,
             plaintext_send_sequence: 0,
             plaintext_replay: SlidingWindowDetector::new(
                 cfg.replay_protection_window,
@@ -559,6 +576,12 @@ impl Conn13 {
 
     fn drop_write_epoch(&mut self, epoch: u64) {
         self.write.retain(|write| write.epoch != epoch);
+    }
+
+    /// Whether this side holds keys to read records of `epoch`.
+    #[cfg(test)]
+    pub(crate) fn has_read_epoch(&self, epoch: u64) -> bool {
+        self.read.iter().any(|read| read.epoch == epoch)
     }
 
     fn drop_read_epoch(&mut self, epoch: u64) {
@@ -1238,7 +1261,11 @@ impl Conn13 {
                     // RFC 9147 section 4: a record for another connection id ends the
                     // datagram.
                     let connection_id = &record[header.connection_id.clone()];
-                    if connection_id != &self.local_connection_id[..]
+                    // 0-RTT records come before the client knows this side's connection id.
+                    let early =
+                        header.epoch_bits == 1 && connection_id.is_empty() && !self.established;
+                    if !early
+                        && connection_id != &self.local_connection_id[..]
                         && !self
                             .accepted_connection_ids
                             .iter()
@@ -1407,6 +1434,9 @@ impl Conn13 {
             // A server protects nothing under its application keys before it has taken the
             // client's Finished.
             self.confirm();
+            // RFC 9147 section 5.6: no 0-RTT records once the peer's application data
+            // arrives.
+            self.drop_read_epoch(EPOCH_EARLY);
         }
         if epoch > EPOCH_APPLICATION {
             // RFC 9147 section 8: the keys before an update are kept until a record under
@@ -1446,6 +1476,21 @@ impl Conn13 {
             CONTENT_TYPE_ALERT => self.read_alert(&content),
             CONTENT_TYPE_ACK => self.handle_ack(epoch, &content),
             CONTENT_TYPE_APPLICATION_DATA => {
+                // 0-RTT data (RFC 8446 section 4.2.10), where the server accepted it: given
+                // to the application at once, up to the size the ticket allows (section
+                // 4.6.1: more is an unexpected_message).
+                if epoch == EPOCH_EARLY && !self.is_client && self.early_data_accepted == Some(true)
+                {
+                    self.early_data_received += content.len();
+                    if self.early_data_received > self.early_data_limit {
+                        return Err(refuse(
+                            alert::UNEXPECTED_MESSAGE,
+                            Error::Other("more 0-RTT data than max_early_data_size".to_owned()),
+                        ));
+                    }
+                    self.early_data.push_back(BytesMut::from(&content[..]));
+                    return Ok(());
+                }
                 // RFC 8446 section 5: application data is never protected under the
                 // handshake keys.
                 if epoch < EPOCH_APPLICATION {

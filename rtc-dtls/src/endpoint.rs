@@ -44,6 +44,12 @@ pub enum EndpointEvent {
     /// ([`Endpoint::request_client_certificate`]) and the answer verified. The chain is in
     /// [`State::peer_certificates`]; a client that declined left the earlier one there.
     PeerAuthenticated,
+    /// DTLS 1.3 server: 0-RTT data the client sent with its ClientHello (RFC 8446 section
+    /// 4.2.10), delivered before the handshake is complete. Unlike [`Self::ApplicationData`]
+    /// it may be a replay (RFC 8446 section 8): each ticket is accepted once, and the
+    /// ticket's age is checked, but whoever saw the ClientHello can send it to another
+    /// server, or this one before its ticket record exists.
+    EarlyData(BytesMut),
 }
 
 /// The most associations a server endpoint holds for addresses it has not verified: those
@@ -184,12 +190,29 @@ impl Endpoint {
         client_config: Arc<HandshakeConfig>,
         initial_state: Option<State>,
     ) -> Result<()> {
+        self.connect_with_early_data(now, remote, client_config, initial_state, &[])
+    }
+
+    /// As [`Self::connect`], with `early_data` sent as DTLS 1.3 0-RTT data (RFC 8446 section
+    /// 4.2.10) if the configuration's session store has a ticket for the server that allows
+    /// that much. [`State::early_data_accepted`] says, once the server has answered, whether
+    /// it took it; data it did not take is lost, and the application may send it again.
+    /// 0-RTT data can be replayed (RFC 8446 section 8): send only what is safe to repeat.
+    pub fn connect_with_early_data(
+        &mut self,
+        now: Instant,
+        remote: SocketAddr,
+        client_config: Arc<HandshakeConfig>,
+        initial_state: Option<State>,
+        early_data: &[u8],
+    ) -> Result<()> {
         if remote.port() == 0 {
             return Err(Error::InvalidRemoteAddress(remote));
         }
 
         if let Vacant(e) = self.connections.entry(remote) {
             let mut conn = DTLSConn::new(client_config, true, initial_state);
+            conn.state.early_data = early_data.to_vec();
             conn.handshake(now)?;
             Self::queue_transmits(
                 &mut self.transmits,
@@ -263,6 +286,9 @@ impl Endpoint {
         let authentications_before = conn.post_handshake_authentications;
         conn.set_clock(now);
         conn.read(data)?;
+        while let Some(early) = conn.incoming_early_data() {
+            messages.push(EndpointEvent::EarlyData(early));
+        }
         if conn.is_dtls13() {
             // DTLS 1.3 has handshake messages after the handshake too (ACKs, key updates),
             // so its timers are set after every datagram.
