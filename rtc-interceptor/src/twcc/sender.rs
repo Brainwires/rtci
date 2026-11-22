@@ -1,6 +1,6 @@
 //! Tags outgoing RTP packets with transport-wide sequence numbers.
 
-use super::stream_supports_twcc;
+use super::{flow_ssrcs, stream_supports_twcc};
 use crate::Interceptor;
 use crate::stream_info::StreamInfo;
 use crate::{Packet, TaggedPacket};
@@ -187,16 +187,26 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for TwccSenderInterceptor {
 }
 
 impl Interceptor for TwccSenderInterceptor {
+    /// The media SSRC and the repair flows that go with it: the retransmission (RTX) SSRC and
+    /// the FEC SSRC. The number is attached to every packet sent on the transport
+    /// (draft-holmer-rmcat-transport-wide-cc-extensions-01 section 2.2), and a retransmission or
+    /// a repair packet is as much a packet on the path as the media it protects: left
+    /// unnumbered, its bytes are invisible to the receiver's feedback and to the sender's
+    /// congestion controller.
     fn bind_local_stream(&mut self, info: &StreamInfo) {
         if let Some(hdr_ext_id) = stream_supports_twcc(info)
             && hdr_ext_id != 0
         {
-            self.streams.insert(info.ssrc, LocalStream::new(hdr_ext_id));
+            for ssrc in flow_ssrcs(info) {
+                self.streams.insert(ssrc, LocalStream::new(hdr_ext_id));
+            }
         }
     }
 
     fn unbind_local_stream(&mut self, info: &StreamInfo) {
-        self.streams.remove(&info.ssrc);
+        for ssrc in flow_ssrcs(info) {
+            self.streams.remove(&ssrc);
+        }
     }
 
     fn bind_remote_stream(&mut self, _info: &StreamInfo) {}

@@ -254,9 +254,24 @@ fn a_changed_estimate_rides_out_on_the_feedback_packet() {
     chain.bind_local_stream(&stream());
     send_and_drain(&mut chain, epoch, 3);
 
-    // Unchanged: nothing to announce.
+    // The first inbound packet announces the estimator's starting rate: the pacer has to learn
+    // it too, not only its changes.
     chain
         .handle_read(twcc_feedback(epoch + Duration::from_millis(200), 0, 3))
+        .expect("read");
+    let first = chain.poll_read().expect("the feedback packet carries on");
+    assert!(matches!(
+        first.message.get(&Attribute::TargetBitrateChanged {
+            bits_per_second: 0.0
+        }),
+        Some(Attribute::TargetBitrateChanged { bits_per_second }) if *bits_per_second == BITRATE
+    ));
+    while chain.poll_read().is_some() {}
+
+    // Unchanged: nothing to announce.
+    send_and_drain(&mut chain, epoch + Duration::from_millis(210), 3);
+    chain
+        .handle_read(twcc_feedback(epoch + Duration::from_millis(280), 3, 3))
         .expect("read");
     let unchanged = chain.poll_read().expect("the feedback packet carries on");
     assert!(
@@ -271,7 +286,7 @@ fn a_changed_estimate_rides_out_on_the_feedback_packet() {
     estimator.set_target(BITRATE / 2.0);
     send_and_drain(&mut chain, epoch + Duration::from_millis(300), 3);
     chain
-        .handle_read(twcc_feedback(epoch + Duration::from_millis(500), 3, 3))
+        .handle_read(twcc_feedback(epoch + Duration::from_millis(500), 6, 3))
         .expect("read");
 
     let mut announced = None;
