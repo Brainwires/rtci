@@ -82,7 +82,7 @@ fn test_set_direction_updates_negotiation_needed_flag() -> Result<(), Box<dyn st
     offerer
         .rtp_transceiver(transceiver_id)
         .expect("transceiver should exist")
-        .set_direction(RTCRtpTransceiverDirection::Inactive);
+        .set_direction(RTCRtpTransceiverDirection::Sendrecv);
 
     assert_eq!(
         count_negotiation_needed(&mut offerer),
@@ -95,7 +95,7 @@ fn test_set_direction_updates_negotiation_needed_flag() -> Result<(), Box<dyn st
     offerer
         .rtp_transceiver(transceiver_id)
         .expect("transceiver should exist")
-        .set_direction(RTCRtpTransceiverDirection::Inactive);
+        .set_direction(RTCRtpTransceiverDirection::Sendrecv);
 
     assert_eq!(
         count_negotiation_needed(&mut offerer),

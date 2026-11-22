@@ -224,7 +224,8 @@ fn test_media_engine_remote_description() -> Result<()> {
         );
     }
 
-    // "Falls back to a partial match": with no exact match, the MIME type match is taken.
+    // No fallback to the name for H.264: a profile this endpoint did not register (High,
+    // against Constrained Baseline) is removed (RFC 6184 section 8.2.2), not negotiated.
     {
         let mut m = MediaEngine::default();
         m.register_codec(
@@ -247,8 +248,7 @@ fn test_media_engine_remote_description() -> Result<()> {
         ))?;
 
         assert!(m.negotiated_video);
-        let (h264, _) = m.get_codec_by_payload(96)?;
-        assert_eq!(h264.rtp_codec.mime_type, MIME_TYPE_H264);
+        assert!(m.get_codec_by_payload(96).is_err());
     }
 
     // "Matches RTX": an RTX codec is negotiated with the remote's `apt`, as is its primary.

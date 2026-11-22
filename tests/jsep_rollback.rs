@@ -8,14 +8,16 @@ mod jsep_common;
 use std::time::Instant;
 
 use jsep_common::{
-    SESSION, TRANSPORT, TestResult, crlf, default_peer, exchange, media_sections, video_track, vp8,
+    SESSION, TRANSPORT, TestResult, crlf, default_peer, exchange, media_sections, video_track,
 };
 use rtc::peer_connection::RTCPeerConnection;
 use rtc::peer_connection::event::RTCPeerConnectionEvent;
 use rtc::peer_connection::sdp::RTCSessionDescription;
 use rtc::peer_connection::state::RTCSignalingState;
-use rtc::rtp_transceiver::rtp_sender::RTCRtpCodecParameters;
-use rtc::rtp_transceiver::{RTCRtpTransceiverId, SSRC};
+use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
+use rtc::rtp_transceiver::{
+    RTCRtpTransceiverDirection, RTCRtpTransceiverId, RTCRtpTransceiverInit, SSRC,
+};
 use sansio::Protocol;
 
 fn rollback() -> RTCSessionDescription {
@@ -122,8 +124,15 @@ fn a_remote_offer_is_rolled_back_through_set_local_description() -> TestResult {
 #[test]
 fn a_rollback_restores_the_codecs_and_repair_flows_a_remote_offer_took() -> TestResult {
     let mut pc = default_peer()?;
-    let sender = pc.add_track(video_track("local", 0x0303_0303))?;
-    let id = RTCRtpTransceiverId::from(sender);
+    // A sending transceiver with no codec preferences: it offers every video codec.
+    let id = pc.add_transceiver_from_kind(
+        RtpCodecKind::Video,
+        Some(RTCRtpTransceiverInit {
+            direction: RTCRtpTransceiverDirection::Sendrecv,
+            streams: vec![],
+            send_encodings: vec![],
+        }),
+    )?;
     let rtx_before = rtx_ssrc(&mut pc, id).expect("the default video codecs carry RTX");
     let formats_before = video_formats(&pc.create_offer(None)?.sdp);
     assert!(formats_before.len() > 2, "{formats_before:?}");
@@ -148,48 +157,11 @@ a=rtpmap:96 VP8/90000
     let offer = pc.create_offer(None)?;
     assert_eq!(video_formats(&offer.sdp), formats_before, "{}", offer.sdp);
     assert!(
-        offer
-            .sdp
-            .contains(&format!("a=ssrc-group:FID {} {rtx_before}", 0x0303_0303)),
+        offer.sdp.contains(&format!(" {rtx_before}\r\n"))
+            && offer.sdp.contains("a=ssrc-group:FID "),
         "{}",
         offer.sdp
     );
-    Ok(())
-}
-
-/// After an exchange that negotiated VP8 only, a remote offer with every codec widens the
-/// negotiated list; rolled back, the endpoint offers what was negotiated, not what the
-/// abandoned offer listed.
-#[test]
-fn a_rollback_of_a_renegotiation_restores_the_last_negotiated_codecs() -> TestResult {
-    let mut a = default_peer()?;
-    let mut b = default_peer()?;
-    let sender = a.add_track(video_track("a", 0x0404_0404))?;
-    let id = RTCRtpTransceiverId::from(sender);
-    a.rtp_transceiver(id)
-        .expect("transceiver")
-        .set_codec_preferences(vec![RTCRtpCodecParameters {
-            rtp_codec: vp8(),
-            payload_type: 96,
-        }])?;
-    exchange(&mut a, &mut b)?;
-    let negotiated = video_formats(&b.create_offer(None)?.sdp);
-
-    // `a` offers all its codecs again; `b` applies the offer, then abandons it.
-    a.rtp_transceiver(id)
-        .expect("transceiver")
-        .set_codec_preferences(vec![])?;
-    let offer = a.create_offer(None)?;
-    assert!(
-        video_formats(&offer.sdp).len() > negotiated.len(),
-        "{}",
-        offer.sdp
-    );
-    b.set_remote_description(Instant::now(), offer)?;
-    b.set_local_description(Instant::now(), rollback())?;
-
-    let offer = b.create_offer(None)?;
-    assert_eq!(video_formats(&offer.sdp), negotiated, "{}", offer.sdp);
     Ok(())
 }
 

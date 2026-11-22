@@ -1265,15 +1265,24 @@ impl MediaEngine {
             // parameters or remove the media format (payload type) completely" (RFC 6184
             // section 8.2.2; RFC 9628 section 6; AV1 RTP section 7.2): such a format is not
             // negotiated, nor is its RTX.
-            partial_matches.retain(|codec| {
-                !has_symmetric_configuration(&codec.rtp_codec)
-                    && !parse_rtx_apt(&codec.rtp_codec.sdp_fmtp_line).is_some_and(|apt| {
-                        is_repair_codec(&codec.rtp_codec)
-                            && codecs.iter().any(|primary| {
-                                primary.payload_type == apt
-                                    && has_symmetric_configuration(&primary.rtp_codec)
-                            })
+            // A codec registered with no parameters at all states no configuration, and
+            // keeps matching by name.
+            let removed: Vec<PayloadType> =
+                partial_matches
+                    .iter()
+                    .filter(|codec| {
+                        has_symmetric_configuration(&codec.rtp_codec)
+                            && self.match_remote_codec(codec, typ, &[], &[]).is_ok_and(
+                                |(local, _)| !local.rtp_codec.sdp_fmtp_line.trim().is_empty(),
+                            )
                     })
+                    .map(|codec| codec.payload_type)
+                    .collect();
+            partial_matches.retain(|codec| {
+                !removed.contains(&codec.payload_type)
+                    && !(is_repair_codec(&codec.rtp_codec)
+                        && parse_rtx_apt(&codec.rtp_codec.sdp_fmtp_line)
+                            .is_some_and(|apt| removed.contains(&apt)))
             });
 
             // use exact matches when they exist, otherwise fall back to partial

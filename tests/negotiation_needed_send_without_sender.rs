@@ -74,8 +74,8 @@ fn test_recvonly_answer_without_track_settles() -> Result<(), Box<dyn std::error
         .expect("transceiver should exist");
     assert_eq!(
         transceiver.direction(),
-        RTCRtpTransceiverDirection::Sendonly,
-        "answering a recvonly offer yields a sendonly transceiver",
+        RTCRtpTransceiverDirection::Recvonly,
+        "the transceiver created for a remote m= section is recvonly (W3C)",
     );
     assert!(
         transceiver.sender().is_none(),

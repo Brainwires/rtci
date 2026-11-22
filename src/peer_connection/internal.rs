@@ -469,7 +469,7 @@ impl RTCPeerConnection {
                     // RFC 9429 Section 5.2.2: an offer may reuse a rejected m= section (whose
                     // transceiver, if any, is stopped) for a transceiver that has no m= section
                     // yet; it keeps its own new mid.
-                    if include_unmatched && media.media_name.port.value == 0 {
+                    if include_unmatched && is_rejected_media(media) {
                         let free = match self
                             .rtp_transceivers
                             .iter()
@@ -506,7 +506,7 @@ impl RTCPeerConnection {
 
                     // RFC 8829 §5.3.1: rejected m-lines (port=0) in the offer MUST be
                     // reflected as rejected in the answer to preserve m-line indexing.
-                    if media.media_name.port.value == 0 {
+                    if is_rejected_media(media) {
                         media_sections.push(MediaSection {
                             mid: mid_value.to_owned(),
                             rejected: true,

@@ -4634,15 +4634,10 @@ a=rtcp-mux\r\n";
             .unwrap();
         pc.set_remote_description(Instant::now(), audio_video_offer())
             .expect("a remote offer after a rollback");
-        assert_eq!(
-            pc.set_local_description(Instant::now(), rollback()),
-            Err(Error::ErrSignalingStateProposedTransitionInvalid(format!(
-                "from {} applying {} {}",
-                RTCSignalingState::HaveRemoteOffer,
-                true,
-                RTCSdpType::Rollback
-            )))
-        );
+        // Either method rolls a remote offer back (RFC 9429 section 5.7).
+        pc.set_local_description(Instant::now(), rollback())
+            .expect("a remote offer is rolled back through set_local_description too");
+        assert_eq!(pc.signaling_state, RTCSignalingState::Stable);
     }
 
     #[test]

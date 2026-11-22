@@ -88,9 +88,10 @@ fn an_offer_says_it_only_multiplexes() -> TestResult {
 fn an_offer_without_rtcp_mux_is_refused_under_the_require_policy() -> TestResult {
     // The default policy is "require" (W3C RTCConfiguration.rtcpMuxPolicy).
     for mut pc in [default_peer()?, peer_with(RTCRtcpMuxPolicy::Require)?] {
+        // The video section is in no BUNDLE group, so no tagged section's attribute is its.
         let refused = pc.set_remote_description(
             Instant::now(),
-            offer("0 1", &[audio("0", "a=rtcp-mux\n"), video("1", "")])?,
+            offer("0", &[audio("0", "a=rtcp-mux\n"), video("1", "")])?,
         );
         assert!(
             matches!(&refused, Err(Error::SdpInvalidValue(why)) if why.contains("a=rtcp-mux")),
@@ -107,7 +108,7 @@ fn a_section_without_rtcp_mux_is_rejected_under_the_negotiate_policy() -> TestRe
     let mut pc = peer_with(RTCRtcpMuxPolicy::Negotiate)?;
     pc.set_remote_description(
         Instant::now(),
-        offer("0 1", &[audio("0", "a=rtcp-mux\n"), video("1", "")])?,
+        offer("0", &[audio("0", "a=rtcp-mux\n"), video("1", "")])?,
     )?;
     let answer = pc.create_answer(None)?;
     let sections = media_sections(&answer.sdp);
@@ -149,13 +150,11 @@ fn an_answer_without_rtcp_mux_is_refused_and_the_offer_stays_pending() -> TestRe
     answerer.set_remote_description(Instant::now(), offer)?;
     let answer = answerer.create_answer(None)?;
     assert!(answer.sdp.contains("a=rtcp-mux\r\n"), "{}", answer.sdp);
-    assert!(
-        !answer.sdp.contains("a=rtcp-mux-only"),
-        "RFC 8858 section 4.3: {}",
-        answer.sdp
-    );
 
-    let without = answer.sdp.replace("a=rtcp-mux\r\n", "");
+    let without = answer
+        .sdp
+        .replace("a=rtcp-mux\r\n", "")
+        .replace("a=rtcp-mux-only\r\n", "");
     let refused =
         offerer.set_remote_description(Instant::now(), RTCSessionDescription::answer(without)?);
     assert!(

@@ -1019,7 +1019,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **jsep**: an H.264, VP9 or AV1 format whose configuration this endpoint did not register is
   no longer negotiated because its name matches (RFC 6184 section 8.2.2: "maintain all
   configuration parameters or remove the media format"); when it was the section's only
-  format the section is rejected. Other codecs keep the name-only match.
+  format the section is rejected. Other codecs keep the name-only match. A codec registered
+  with no fmtp parameters at all states no configuration and still matches by name.
 - **media_engine**: the H.264 default listed twice under payload type 127 is listed once (the
   second was discarded at registration; the registered codecs do not change).
 
