@@ -294,6 +294,7 @@ impl<'a> InterceptorHandler<'a> {
         if let Some(receiver) = self.rtp_transceivers[current].receiver_mut() {
             receiver.interceptor_remote_streams_op(self.media_engine, self.interceptor, false);
             receiver.set_coding_parameters(vec![]);
+            receiver.track_mut().set_codings(vec![]);
         }
         self.ctx.ssrc_owners.remove(ssrc);
         self.ctx.placed_ssrcs.remove(&ssrc);
