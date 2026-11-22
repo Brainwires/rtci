@@ -85,6 +85,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   s) aborts a shutdown that never finishes; SHUTDOWN is retransmitted at most 10 times by
   default (`TimerConfig::max_t2_shutdown_retrans`, it was unlimited).
 
+- **sctp**: an established association whose path is idle sends a HEARTBEAT every RTO +
+  HB.interval (30 s, `TransportConfig::with_heartbeat_interval`; RFC 9260 section 8.3). The
+  HEARTBEAT ACK measures the round trip, so an idle association no longer keeps a stale RTO,
+  and a HEARTBEAT without an answer counts against the peer. None was ever sent.
+- **sctp**: the peer is given up after Association.Max.Retrans (10) consecutive T3-rtx
+  expiries or unanswered HEARTBEATs (RFC 9260 section 8.1), with `TimedOut`; past
+  Path.Max.Retrans (5) the path is reported inactive (`Event::PathInactive`, then
+  `Event::PathActive` when it answers again). `TimerConfig::max_t3_rtx_retrans` was unlimited
+  by default, so SCTP itself never declared a peer unreachable.
+
 ### Features
 
 - **sctp**: `Stream::write_sctp_with_ppid` and `Chunks::ppid` for a Payload Protocol
@@ -92,6 +102,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ChunkPayloadData::ppid`; `Association::verification_tag`.
 - **sctp**: `Endpoint::poll_transmit` (the endpoint's answers to out-of-the-blue packets);
   `TransportConfig::with_valid_cookie_life` / `valid_cookie_life`.
+- **sctp**: `TransportConfig::with_heartbeat_interval` / `heartbeat_interval`,
+  `Association::set_heartbeat_interval`, `Event::PathInactive`, `Event::PathActive`.
 - **fuzz**: `rtc-sctp` targets `association_handle_chunks` (an established association fed
   chunks, timers running) and `chunk_chunk_unknown_unmarshal`.
 
@@ -103,6 +115,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **sctp**: `Association::open_stream` fails for a stream id at or past the negotiated
   outbound stream count.
 - **sctp**: `TimerConfig::default().max_t2_shutdown_retrans` is 10, not unlimited.
+- **sctp**: `TimerConfig::default().max_t3_rtx_retrans` is 10, not unlimited: an association
+  whose peer answers nothing for about five minutes ends with `TimedOut`. `usize::MAX` keeps
+  the old behaviour.
+- **sctp**: an established association sends HEARTBEATs when idle and so always has a timer
+  running; `with_heartbeat_interval(None)` turns them off.
 - **sctp**: a SACK for a TSN never sent, and an INIT ACK without a State Cookie, end the
   association with an ABORT (`TransportError`, `HandshakeFailed`).
 
