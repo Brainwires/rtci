@@ -1399,15 +1399,19 @@ fn feedback_counts_are_the_feedback_packets_sent() -> Result<()> {
         (1..=3).contains(&nacks),
         "three losses, at most a NACK each: {nacks}"
     );
-    assert_eq!(u(inbound, "pliCount"), 5);
-    assert_eq!(u(inbound, "firCount"), 2);
+    // The counts are of the feedback packets that left. The RTCP session sends feedback on the
+    // RFC 4585 section 3.5 schedule, so requests written within one interval leave as one: at
+    // least one of each, at most what was written.
+    let (plis, firs) = (u(inbound, "pliCount"), u(inbound, "firCount"));
+    assert!((1..=5).contains(&plis), "five PLIs written: {plis}");
+    assert!((1..=2).contains(&firs), "two FIRs written: {firs}");
     assert_eq!(u(inbound, "retransmittedPacketsReceived"), 3);
 
     let offerer = world.peers[0].stats(now);
     let outbound = stream(&offerer, "outbound-rtp", ssrc);
     assert_eq!(u(outbound, "nackCount"), nacks, "every NACK sent arrived");
-    assert_eq!(u(outbound, "pliCount"), 5);
-    assert_eq!(u(outbound, "firCount"), 2);
+    assert_eq!(u(outbound, "pliCount"), plis, "every PLI sent arrived");
+    assert_eq!(u(outbound, "firCount"), firs, "every FIR sent arrived");
     assert_eq!(u(outbound, "retransmittedPacketsSent"), 3);
     Ok(())
 }
@@ -1496,7 +1500,7 @@ fn a_candidate_pairs_counters_are_the_checks_and_the_payload_on_the_wire() -> Re
         );
 
         // Idle, the only requests are the ones that keep the pair alive, and a consent request
-        // goes out every two seconds (the ICE agent's keepalive interval).
+        // goes out every 4 to 6 seconds (RFC 7675 section 5.1: 5 seconds, times 0.8 to 1.2).
         let earlier = one(&before[i], "candidate-pair");
         let idle_requests = world.wire[wire_before..]
             .iter()
@@ -1507,10 +1511,10 @@ fn a_candidate_pairs_counters_are_the_checks_and_the_payload_on_the_wire() -> Re
             idle_requests,
             "peer {i}"
         );
-        assert_eq!(
-            u(pair, "consentRequestsSent") - u(earlier, "consentRequestsSent"),
-            10,
-            "peer {i}: twenty seconds of consent requests; {pair}"
+        let consent_requests = u(pair, "consentRequestsSent") - u(earlier, "consentRequestsSent");
+        assert!(
+            (3..=5).contains(&consent_requests),
+            "peer {i}: twenty seconds of consent requests: {consent_requests}; {pair}"
         );
         assert!(u(pair, "consentRequestsSent") <= u(pair, "requestsSent"));
 
@@ -2436,7 +2440,6 @@ fn a_candidate_reports_what_it_was_gathered_as() -> Result<()> {
         "a pair for each remote candidate the local one can reach: {pairs:#?}"
     );
     let selected = &one(&answerer, "transport")["selectedCandidatePairId"];
-    let mut failed = 0;
     for pair in &pairs {
         let reachable = by_id(&answerer, &pair["remoteCandidateId"])["port"] == 5000;
         assert_eq!(pair["id"] == *selected, reachable, "{pair}");
@@ -2447,18 +2450,15 @@ fn a_candidate_reports_what_it_was_gathered_as() -> Result<()> {
         assert_eq!(u(pair, "responsesReceived"), 0, "{pair}");
         assert!(!has(pair, "currentRoundTripTime"), "{pair}");
         // A pair that was checked and never answered failed; one the agent never got to
-        // check (the UDP candidate against the TCP one) is still waiting.
+        // check is still waiting: the UDP candidate against the TCP one, and every pair the
+        // checklist had not reached when the nominated pair completed it (RFC 8445 section
+        // 8.1.2 stops the checks then).
         if u(pair, "requestsSent") >= 1 {
             assert_eq!(pair["state"], "failed", "{pair}");
-            failed += 1;
         } else {
             assert_eq!(pair["state"], "waiting", "{pair}");
         }
     }
-    assert!(
-        failed >= 3,
-        "the three UDP candidates nobody answers at: {pairs:#?}"
-    );
     Ok(())
 }
 

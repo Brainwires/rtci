@@ -249,18 +249,30 @@ fn test_role_attribute_after_message_integrity_is_ignored() {
     a.tie_breaker = 100;
     let _ = sent(&mut a);
 
-    let mut m = peer_request(
-        &a,
-        vec![Box::new(AttrControlling(5)), Box::new(PriorityAttr(1000))],
-    );
-    // Appended by the attacker: ICE-CONTROLLED with tiebreaker 0 (we would "win" and switch).
+    // The peer's check, up to MESSAGE-INTEGRITY.
+    let username = a.ufrag_pwd.local_credentials.ufrag.clone() + ":" + REMOTE_UFRAG;
+    let provider = provider();
+    let mut m = Message::new();
+    m.build(&[
+        Box::new(BINDING_REQUEST),
+        Box::new(TransactionId::new()),
+        Box::new(Username::new(ATTR_USERNAME, username)),
+        Box::new(AttrControlling(5)),
+        Box::new(PriorityAttr(1000)),
+        Box::new(MessageIntegrity::new_short_term_integrity_with_provider(
+            a.ufrag_pwd.local_credentials.pwd.clone(),
+            provider.crypto(),
+        )),
+    ])
+    .unwrap();
+    // Added by the attacker after MESSAGE-INTEGRITY: ICE-CONTROLLED with tiebreaker 0 (we would
+    // "win" and switch), and the FINGERPRINT that goes last (RFC 8489 section 14.7), which
+    // anyone can compute.
     m.add(ATTR_ICE_CONTROLLED, &0u64.to_be_bytes());
+    FINGERPRINT.add_to(&mut m).unwrap();
     assert!(m.contains(ATTR_ICE_CONTROLLED));
 
-    // The appended attribute also follows FINGERPRINT, which RFC 8489 section 14.7 has as the
-    // last attribute: the STUN layer may refuse the whole message for that. Refused or taken
-    // without the attribute, the role stands.
-    let _ = deliver(&mut a, now, &m, REMOTE_A);
+    deliver(&mut a, now, &m, REMOTE_A).unwrap();
 
     assert!(
         !a.is_controlling,
