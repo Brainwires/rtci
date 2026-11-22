@@ -91,9 +91,9 @@ history stays intact.
 | One RTCP CNAME in SDP, RTCP and the RTP parameters | `src/peer_connection/sdp/mod.rs` (`with_source_attributes`), `src/peer_connection/configuration/media_engine.rs` (`rtcp_cname`) | RFC 5576 section 6.1, RFC 7022. Upstream writes the stream id as the `cname` source attribute and leaves `RTCRtcpParameters::cname` empty. |
 | Payload types 64 to 95 refused | `src/peer_connection/configuration/media_engine.rs` (`register_codec`, `is_rtcp_conflicting_payload_type`), `src/peer_connection/sdp/mod.rs` (`codecs_from_media_description`) | RFC 5761 section 4. Listed under the defaults the fork narrows: a codec registered with such a number is an error. |
 | SCTP: the endpoint's own answers are sent; a path change restarts congestion control | `src/peer_connection/handler/sctp.rs` (`handle_read`) | RFC 9260 sections 8.4 and 7.2.5. |
-| RTP stream association per RFC 9143 section 9.2; the sender stamps MID / RtpStreamId | `src/peer_connection/handler/interceptor.rs` (`bind_undeclared_ssrc`, `process_sdes_mids`, `get_rtp_header_extension_ids`), `src/rtp_transceiver/rtp_sender/mod.rs` (`write_rtp`), `src/peer_connection/configuration/interceptor_registry.rs` (`configure_default_header_extensions`) | Upstream leaves the extensions to the application and drops an undeclared SSRC without MID unless there is a single transceiver. |
+| RTP stream association per RFC 9143 section 9.2; the sender stamps MID / RtpStreamId and describes its SSRCs with them in RTCP SDES | `src/peer_connection/handler/interceptor.rs` (`bind_undeclared_ssrc`, `process_sdes_mids`, `stream_ids`, `get_rtp_header_extension_ids`), `src/rtp_transceiver/rtp_sender/mod.rs` (`write_rtp`), `src/peer_connection/configuration/interceptor_registry.rs` (`configure_default_header_extensions`), `src/peer_connection/internal.rs` (`apply_negotiated_session`), `rtc-interceptor/src/rtcp_session/mod.rs` (`RtcpSessionControl::StreamIdentifiers`) | Upstream leaves the extensions to the application, sends only CNAME in SDES, reads no SDES MID / RID item, and drops an undeclared SSRC without MID unless there is a single transceiver. |
 | Remote m= sections without `a=mid` (RFC 9429 sections 5.10, 5.11) | `src/peer_connection/mod.rs` | Take the mid of our section at the same position (answer) or their index (offer), instead of failing the description. |
-| `a=rid` takes each simulcast layer's first alternative, once | `src/peer_connection/sdp/mod.rs` (`get_rids`) | W3C webrtc-pc "set the RTCSessionDescription", RFC 8853 section 5.2: alternatives and duplicate rids are not answered as layers. |
+| `a=rid` / `a=simulcast` per RFC 8851 and RFC 8853: restrictions, answer rules, applied answers | `src/peer_connection/sdp/simulcast.rs` (`section_rids`, `answered_rid_is_valid`), `src/peer_connection/sdp/mod.rs` (`add_transceiver_sdp`), `src/peer_connection/internal.rs` (`apply_negotiated_simulcast`), `src/rtp_transceiver/rtp_sender/internal.rs` (`apply_simulcast_answer`), `src/rtp_transceiver/rtp_sender/rtp_coding_parameters.rs` (`RTCRtpRidRestrictions`) | Received lines checked per RFC 8851 section 6.2.2 and RFC 8853 section 5.2 (first usable alternative of a layer, W3C webrtc-pc); restrictions written, echoed and exposed; an answer adds no stream the offer did not ask for; an applied answer prunes the sender's encodings (W3C "set a session description"); no `~` without RFC 7728 unless `with_rid_pause_marks(true)`. Upstream echoes every offered rid reversed, drops restrictions and never applies an answer's rids. |
 | Static audio payload types without `a=rtpmap`; undefined dynamic ones skipped | `src/peer_connection/sdp/mod.rs` (`codecs_from_media_description`) | RFC 3551's static audio types are read; an undefined dynamic payload type is left out instead of failing the description (RFC 9429 sections 5.3.1, 5.8). |
 | Unknown media types | `rtc-sdp/src/description/session.rs`, `src/peer_connection/internal.rs` (`generate_matched_sdp`), `src/peer_connection/sdp/mod.rs` (`MediaSection::rejected_name`, `unknown_media_name`) | `<media>` is any RFC 8866 token; a section of an unknown type is answered, and kept in later offers, rejected with its media type, protocol and formats (RFC 9429 sections 5.3.1, 5.2.2). |
 | ULPFEC (RFC 5109) in RED and as a separate stream | `rtc-interceptor/src/ulpfec/` (`UlpfecEncoder`, `UlpfecDecoder`, `UlpfecSendInterceptor`, `UlpfecReceiveInterceptor`), `configure_ulpfec`, `src/peer_connection/handler/interceptor.rs` | New; upstream has no ULPFEC coder. FEC header and level headers with 16- and 48-bit masks, any number of protection levels, level-aware iterated recovery over a bounded window, RED carriage (FEC as its own RED packet in the media sequence space, as libwebrtc sends it, or as a redundant block as in RFC 5109 10.3) and a separate stream on a repair SSRC. Opt-in; the RED block reader and writer are private to this carriage until `rtc-rtp` has a RED codec. |
@@ -308,6 +308,12 @@ reason. Today there are two:
   bundled section that is not bundle-only (RFC 9143 section 9.3.1.1). Maintainer rule of
   2026-11-22: the RFC behaviour is the default unless a browser cannot connect under it; then
   the RFC form is the setting.
+- Simulcast: no pause mark `~` in `a=simulcast` (RFC 8853 section 5.2: it needs RFC 7728,
+  which the engine does not implement); upstream writes it for an inactive encoding and echoes
+  it from offers, as libwebrtc does: `with_rid_pause_marks(true)`. An answer no longer adds
+  `send` rids the offer did not ask for, and an applied answer prunes the sender's encodings
+  to the ones it accepted (RFC 8853 section 5.3.2 / 5.3.3, W3C "set a session description").
+  A local rid must be 1 to 255 alphanumerics (RFC 8852 section 3.1); no switch.
 - SCTP: a peer connection's association schedules its streams by weighted fair queueing
   (RFC 8831 section 6.4) and announces user message interleaving (RFC 8260), the zero checksum
   (RFC 9653) and a State Cookie with a MAC, each of which upstream leaves off or lacks;
@@ -321,12 +327,6 @@ reason. Today there are two:
   (`SettingEngineBuilder::with_sctp_message_size_limit_without_interleaving(false)`). The SCTP
   packet size is likewise smaller than upstream's over IPv4 (1135 bytes against 1191: RFC 8831
   section 5), unless `with_sctp_mtu` sets it.
-- BUNDLE: answers and subsequent offers carry the BUNDLE attributes in the tagged m= section
-  only (RFC 9143 section 7.1.3), `RTCBundlePolicy::MaxBundle` is ignored (RFC 9429 section
-  4.1.1), and an initial offer needs `a=rtcp-mux` in each bundled section that is not
-  bundle-only (RFC 9143 section 9.3.1.1). Maintainer rule of 2026-11-22: the RFC behaviour is
-  the default, the browsers' a setting (`with_bundle_attributes_repeated`,
-  `with_max_bundle_as_must_bundle`).
 - `rtc-mdns`: an unanswered query ends after 30 seconds by default (upstream: never) and is
   retried at doubling intervals from one second (upstream: every `query_interval`, any
   value). `MdnsConfig::without_query_timeout` keeps a query alive; the interval floor is RFC

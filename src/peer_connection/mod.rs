@@ -1396,6 +1396,11 @@ impl RTCPeerConnection {
                 && let Some(parsed_remote_description) = remote_description.parsed.as_ref()
             {
                 self.apply_negotiated_rtcp(parsed_remote_description, parsed_local_description);
+                self.apply_negotiated_simulcast(
+                    parsed_remote_description,
+                    parsed_local_description,
+                    true,
+                );
 
                 // we_answer: we first call set_remote_description,
                 // then, we create_answer() and set_local_description() here
@@ -1696,6 +1701,13 @@ impl RTCPeerConnection {
                 && RtpCodecKind::from(media.media_name.media.as_str()) != RtpCodecKind::Unspecified
             {
                 codecs_from_media_description(media)?;
+                // RFC 9429 section 5.8.3: "All rid-ids referenced in an 'a=simulcast' line
+                // MUST exist as 'a=rid' lines."
+                if let Some(rid) = sdp::simulcast::simulcast_rid_without_line(media) {
+                    return Err(Error::SdpInvalidValue(format!(
+                        "a=simulcast names rid {rid} without an a=rid line (RFC 9429 section 5.8.3)"
+                    )));
+                }
             }
         }
 
@@ -2167,6 +2179,11 @@ impl RTCPeerConnection {
                     .as_ref()
             {
                 self.apply_negotiated_rtcp(parsed_local_description, parsed_remote_description);
+                self.apply_negotiated_simulcast(
+                    parsed_local_description,
+                    parsed_remote_description,
+                    false,
+                );
 
                 // we_offer: we create_offer() and set_local_description() first
                 // then, after call set_remote_description here,

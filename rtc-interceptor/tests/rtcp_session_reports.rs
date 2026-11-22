@@ -804,3 +804,83 @@ fn under_avp_what_is_written_waits_for_the_regular_report() {
         sent[0].has::<rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication>()
     );
 }
+
+/// The `(source, item type, text)` of every SDES item after the CNAME.
+fn identifiers(sent: &Sent) -> Vec<(u32, SdesType, String)> {
+    sent.get::<SourceDescription>()
+        .iter()
+        .flat_map(|sdes| &sdes.chunks)
+        .flat_map(|chunk| {
+            chunk
+                .items
+                .iter()
+                .filter(|item| item.sdes_type != SdesType::SdesCname)
+                .map(|item| {
+                    (
+                        chunk.source,
+                        item.sdes_type,
+                        String::from_utf8(item.text.to_vec()).unwrap(),
+                    )
+                })
+        })
+        .collect()
+}
+
+/// RFC 9143 section 15: "The RTCP MID SDES item SHOULD be sent in the first few RTCP packets
+/// after joining the session and SHOULD be sent regularly thereafter"; RFC 8852 sections 3.1
+/// and 3.2: a source stream's RtpStreamId and a redundancy stream's RepairedRtpStreamId are
+/// SDES items too. Each compound packet describes each SSRC with what it was given; all `None`
+/// takes the items back.
+#[test]
+fn every_compound_packet_carries_the_mid_and_rids_of_each_stream() {
+    let mut chain = chain(builder().with_bandwidth(busy_session()));
+    let base = Instant::now();
+    chain.bind_local_stream(&video_with_repair(100, 101, 102));
+    let identify =
+        |ssrc, rid: Option<&str>, repaired: Option<&str>| RtcpSessionControl::StreamIdentifiers {
+            ssrc,
+            mid: Some("v0".to_owned()),
+            rid: rid.map(str::to_owned),
+            repaired_rid: repaired.map(str::to_owned),
+        };
+    control(&mut chain, base, identify(100, Some("hi"), None));
+    control(&mut chain, base, identify(101, None, Some("hi")));
+    control(&mut chain, base, RtcpSessionControl::Start);
+    for ssrc in [100, 101, 102] {
+        chain.handle_write(rtp(base, ssrc, 1, 3000)).unwrap();
+    }
+
+    let sent = run(&mut chain, base + secs(10.0));
+    let compound: Vec<&Sent> = sent.iter().filter(|s| s.is_compound()).collect();
+    assert!(compound.len() > 2, "{} compound packets", compound.len());
+    for packet in &compound {
+        let mut items = identifiers(packet);
+        items.sort_by_key(|(ssrc, typ, _)| (*ssrc, u8::from(*typ)));
+        assert_eq!(
+            items,
+            vec![
+                (100, SdesType::SdesRtpStreamId, "hi".to_owned()),
+                (100, SdesType::SdesMid, "v0".to_owned()),
+                (101, SdesType::SdesRepairedRtpStreamId, "hi".to_owned()),
+                (101, SdesType::SdesMid, "v0".to_owned()),
+            ]
+        );
+    }
+
+    let later = base + secs(10.0);
+    for ssrc in [100, 101] {
+        control(
+            &mut chain,
+            later,
+            RtcpSessionControl::StreamIdentifiers {
+                ssrc,
+                mid: None,
+                rid: None,
+                repaired_rid: None,
+            },
+        );
+    }
+    let sent = run(&mut chain, later + secs(10.0));
+    assert!(sent.iter().any(Sent::is_compound));
+    assert!(sent.iter().all(|s| identifiers(s).is_empty()));
+}
