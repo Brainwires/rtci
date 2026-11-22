@@ -97,6 +97,12 @@ pub struct State {
     /// The latest `now` the association was given: what a ClientHello dates its ticket's
     /// age by (the engine reads no clock).
     pub(crate) clock: Option<std::time::Instant>,
+    /// DTLS 1.3 client: the 0-RTT data to send with the ClientHello, until it is offered.
+    pub(crate) early_data: Vec<u8>,
+    /// DTLS 1.3 client: the 0-RTT record, to go out after the ClientHello once.
+    pub(crate) early_datagrams: Vec<bytes::BytesMut>,
+    /// DTLS 1.3: whether 0-RTT data was accepted; `None` when none was offered.
+    pub(crate) early_data_accepted: Option<bool>,
     //pub(crate) replay_detector: Vec<Box<dyn ReplayDetector>>,
 }
 
@@ -189,6 +195,9 @@ impl State {
             negotiated_version: None,
             resumed: false,
             clock: None,
+            early_data: vec![],
+            early_datagrams: vec![],
+            early_data_accepted: None,
         }
     }
 }
@@ -401,6 +410,13 @@ impl State {
     /// session or an external PSK, rather than with certificates (RFC 8446 section 2.2).
     pub fn resumed(&self) -> bool {
         self.resumed
+    }
+
+    /// DTLS 1.3 client and server: whether the 0-RTT data was accepted (RFC 8446 section
+    /// 4.2.10), once the server's EncryptedExtensions has said; `None` when none was offered.
+    /// Data that was not accepted was not delivered: the application may send it again.
+    pub fn early_data_accepted(&self) -> Option<bool> {
+        self.early_data_accepted
     }
 
     /// Whether this endpoint took the client role.

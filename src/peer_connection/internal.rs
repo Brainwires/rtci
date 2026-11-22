@@ -216,7 +216,7 @@ impl RTCPeerConnection {
         // `set_configuration` compares with them (W3C 4.4.1.5). With none configured the DTLS
         // transport generates its own, which the configuration does not list.
         let certificates = configuration.certificates.clone();
-        let dtls_transport = DtlsTransport::new(RTCDtlsTransportConfig {
+        let mut dtls_transport = DtlsTransport::new(RTCDtlsTransportConfig {
             id: dtls_transport_id,
             ice_transport_id,
             certificates,
@@ -231,6 +231,7 @@ impl RTCPeerConnection {
             replay_protection: setting_engine.replay_protection,
             crypto_provider: crypto_provider.clone(),
         })?;
+        dtls_transport.srtp_key_lifetime = setting_engine.srtp_key_lifetime;
 
         // Create the SCTP transport. The RFC behaviour is the default for each of these: the
         // weighted fair queueing scheduler (RFC 8831 section 6.4), message interleaving
@@ -251,7 +252,8 @@ impl RTCPeerConnection {
                 .sctp_message_size_limit_without_interleaving
                 .unwrap_or(true),
         )
-        .with_cookie_provider(crypto_provider);
+        .with_cookie_provider(crypto_provider)
+        .with_max_buffer_size(setting_engine.data_channel_max_buffer_size);
 
         // Create Pipeline Context
         let ice_handler_context = IceHandlerContext::new(ice_transport);
@@ -3076,6 +3078,24 @@ impl RTCPeerConnection {
                     continue;
                 }
                 codec_preferences.push(codec.clone());
+            }
+            // So does telephone-event at a named codec's clock rate (RFC 4733, RFC 7874
+            // section 5): naming the audio codec does not take DTMF away (W3C webrtc-pc 7.3:
+            // DTMF needs telephone-event negotiated for sending).
+            let named_rates: Vec<u32> = codec_preferences
+                .iter()
+                .map(|preference| preference.rtp_codec.clock_rate)
+                .collect();
+            for codec in &media_engine_codecs {
+                if codec.rtp_codec.mime_type.eq_ignore_ascii_case(
+                    crate::rtp_transceiver::rtp_sender::dtmf::MIME_TYPE_TELEPHONE_EVENT,
+                ) && named_rates.contains(&codec.rtp_codec.clock_rate)
+                    && !codec_preferences
+                        .iter()
+                        .any(|preference| preference.payload_type == codec.payload_type)
+                {
+                    codec_preferences.push(codec.clone());
+                }
             }
         }
 

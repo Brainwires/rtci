@@ -8,7 +8,7 @@ Totals:
 
 - MUST: tested 18 / untested 5 / partial 7 / missing 11 / violated 0 / n-a 12
 - SHOULD: tested 0 / untested 0 / partial 0 / missing 0 / violated 0 / n-a 0
-- MAY: tested 0 / untested 0 / partial 1 / missing 0 / violated 0 / n-a 0
+- MAY: tested 1 / untested 0 / partial 0 / missing 0 / violated 0 / n-a 0
 
 | ID | § | Level | Clause (short paraphrase) | Verdict | Code | Test | Note |
 |---|---|---|---|---|---|---|---|
@@ -22,7 +22,7 @@ Totals:
 | ENCTRANS-2.1.1-4 | 2.1.1 | MUST | A transform cannot reorder frames; it may delay or drop them | n/a | - | - | Guard on JS frame objects |
 | ENCTRANS-2.1.1-5 | 2.1.1 | MUST | Sender: frames reach the transform in encoder output order, and packet sequence numbers follow that order | tested | `src/rtp_transceiver/rtp_sender/mod.rs:402` | `test_packetizer` | Sequence numbers are assigned in write order |
 | ENCTRANS-2.1.1-6 | 2.1.1 | MUST | Receiver: frames reach the transform in encoder output order (packets reordered by sequence number first) | tested | `rtc-media/src/io/sample_builder/mod.rs:1`, `rtc-interceptor/src/jitterbuffer/mod.rs:1` | `test_sample_builder` | `SampleBuilder` and the jitter-buffer interceptor reorder |
-| ENCTRANS-2.1.1-7 | 2.1.1 | MAY | The packetizer may expect transformed data to keep the original format | partial | `rtc-rtp/src/codec/mod.rs:1` | - | Codec payloaders parse the payload (AV1 OBUs, H.264 NAL units, VP9 header): an encrypted frame needs a format-agnostic payloader, which does not exist |
+| ENCTRANS-2.1.1-7 | 2.1.1 | MAY | The packetizer may expect transformed data to keep the original format | tested | rtc-rtp/src/codec/opaque/mod.rs | an_sframe_ciphertext_crosses_the_opaque_payloader, a_unit_is_split_and_reassembled_unparsed | `OpaquePayloader` / `OpaqueDepacketizer` carry transformed bytes without parsing them (S / E flags in a one-byte header, the engine's framing, not yet the draft-ietf-avtcore-rtp-sframe format) |
 | ENCTRANS-2.2-1 | 2.2 | MUST | Setting an SFrame transform on a transceiver whose [[useSFrame]] is false, or a non-SFrame one when true, is an InvalidModificationError | missing | - | - | No [[useSFrame]] |
 | ENCTRANS-2.2-2 | 2.2 | MUST | A transform already owned by another sender or receiver is an InvalidStateError | n/a | - | - | JS object ownership |
 | ENCTRANS-2.2-3 | 2.2 | MUST | A transform can be replaced or removed at any time; removal restores passthrough | n/a | - | - | The step is the application's |

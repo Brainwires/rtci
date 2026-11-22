@@ -1944,6 +1944,28 @@ pub enum Error {
     #[error("label is larger than 65535 bytes")]
     ErrLabelTooLarge,
 
+    /// An SRTP or SRTCP replay window of 1 to 63 packets (RFC 3711 section 3.3.2: at least 64).
+    #[error("the {0} replay window of {1} packets is below the 64 RFC 3711 requires")]
+    ErrSrtpReplayWindowTooSmall(&'static str, usize),
+
+    /// W3C `OperationError`, with what failed.
+    #[error("OperationError: {0}")]
+    ErrOperationError(String),
+
+    /// A character `insertDTMF` does not take (W3C: an `InvalidCharacterError`).
+    #[error("{0:?} is not a DTMF tone")]
+    ErrDtmfInvalidCharacter(char),
+
+    /// A send would take a data channel's `bufferedAmount` above the SCTP transport's
+    /// `[[MaxBufferSize]]` (W3C `send()`: an `OperationError`).
+    #[error("the data channel's send buffer is full")]
+    ErrDataChannelBufferFull,
+
+    /// A negotiated data channel id at or above the connected SCTP transport's `maxChannels`
+    /// (W3C createDataChannel: an `OperationError`).
+    #[error("the data channel id is not below the SCTP transport's maxChannels")]
+    ErrDataChannelIdAboveMaxChannels,
+
     /// ErrDataChannelIdInUse indicates that a data channel was created with a negotiated id
     /// whose SCTP stream already carries a data channel (RFC 8831 section 6.5)
     #[error("data channel id is already in use")]

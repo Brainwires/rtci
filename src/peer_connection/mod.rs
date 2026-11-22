@@ -249,6 +249,7 @@ pub mod event;
 pub(crate) mod handler;
 mod internal;
 mod object_model;
+pub mod priority;
 mod remote_tracks;
 pub mod rtc_error;
 mod states_events;
@@ -670,6 +671,17 @@ impl RTCPeerConnectionBuilder {
     /// # }
     /// ```
     pub fn build(self, now: Instant) -> Result<RTCPeerConnection> {
+        // RFC 3711 section 3.3.2: "A replay list ... the window size MUST be at least 64"; 0
+        // turns replay protection off, which the setting engine documents.
+        let replay = &self.setting_engine.replay_protection;
+        for (what, window) in [("SRTP", replay.srtp), ("SRTCP", replay.srtcp)] {
+            if (1..64).contains(&window) {
+                return Err(Error::ErrSrtpReplayWindowTooSmall(what, window));
+            }
+        }
+        if let Some(lifetime) = self.setting_engine.srtp_key_lifetime {
+            ::srtp::keying::validate_key_lifetime(lifetime)?;
+        }
         RTCPeerConnection::new(
             now,
             self.configuration,
@@ -2902,6 +2914,16 @@ impl RTCPeerConnection {
             if self.data_channels.stream_id_in_use(&id) {
                 return Err(Error::ErrDataChannelIdInUse);
             }
+            // W3C createDataChannel: "If [[DataChannelId]] is equal to or greater than the
+            // transport's [[MaxChannels]] ... throw an OperationError": once the association
+            // is connected and the stream count known.
+            if self
+                .sctp_transport()
+                .max_channels()
+                .is_some_and(|max_channels| id >= max_channels)
+            {
+                return Err(Error::ErrDataChannelIdAboveMaxChannels);
+            }
         }
 
         // The registry assigns the handle. Note this happens before any dial: the channel is
@@ -2959,6 +2981,16 @@ impl RTCPeerConnection {
                 && data_channel.data_channel.is_none()
             {
                 data_channel.dial(handle.0)?;
+                // An in-band channel waits for its DATA_CHANNEL_ACK under the same deadline
+                // as one dialed when the association came up: a lost ACK must not leave it
+                // connecting for ever.
+                if !data_channel.negotiated {
+                    data_channel.handshake_deadline = self
+                        .setting_engine
+                        .data_channel
+                        .dcep_handshake_timeout
+                        .map(|timeout| self.pipeline_context.now + timeout);
+                }
             }
         }
 
@@ -3233,6 +3265,18 @@ impl RTCPeerConnection {
         } else {
             let mut send_encodings = std::mem::take(&mut init.send_encodings);
             validate_send_encodings(track.kind(), &mut send_encodings)?;
+            let implemented: Vec<crate::rtp_transceiver::rtp_sender::RTCRtpCodec> = self
+                .media_engine
+                .get_codecs_by_kind(track.kind())
+                .into_iter()
+                .map(|codec| codec.rtp_codec)
+                .collect();
+            crate::rtp_transceiver::rtp_sender::internal::validate_scalability_modes(
+                track.kind(),
+                &mut send_encodings,
+                &implemented,
+                Error::ErrOperationError,
+            )?;
             send_encodings
         };
         let (track, send_encodings, codec_preferences) =
@@ -3311,6 +3355,18 @@ impl RTCPeerConnection {
         let explicit_encodings = !init.send_encodings.is_empty();
         if explicit_encodings {
             validate_send_encodings(kind, &mut init.send_encodings)?;
+            let implemented: Vec<crate::rtp_transceiver::rtp_sender::RTCRtpCodec> = self
+                .media_engine
+                .get_codecs_by_kind(kind)
+                .into_iter()
+                .map(|codec| codec.rtp_codec)
+                .collect();
+            crate::rtp_transceiver::rtp_sender::internal::validate_scalability_modes(
+                kind,
+                &mut init.send_encodings,
+                &implemented,
+                Error::ErrOperationError,
+            )?;
         }
         let mut codec_preferences = vec![];
         // A sender that may send has its encodings (SSRCs) from the start, so that the first

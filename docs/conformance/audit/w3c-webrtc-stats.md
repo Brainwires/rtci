@@ -8,7 +8,7 @@ How members were judged. The Note column of every member row starts with one of:
 
 Totals (all rows):
 
-- MUST: tested 253 / untested 2 / partial 2 / missing 0 / violated 0 / n-a 1
+- MUST: tested 254 / untested 2 / partial 1 / missing 0 / violated 0 / n-a 1
 - SHOULD: tested 4 / untested 0 / partial 0 / missing 0 / violated 0 / n-a 1
 - MAY: tested 0 / untested 0 / partial 0 / missing 0 / violated 0 / n-a 0
 
@@ -43,7 +43,7 @@ Members by source:
 | STATS-7.1-media-source | 7.1 | MUST | "media-source": the media of a track attached to a sender (audio or video dictionary) | tested | `src/statistics/accumulator/mod.rs:1099` | `a_media_source_lives_while_its_track_is_attached_to_a_sender`, `a_stream_names_its_transport_codec_track_mid_and_source` | Exists from the moment a sender has the track; capture members from the app feed |
 | STATS-7.1-media-playout | 7.1 | MUST | "media-playout": audio playout path | tested | `src/statistics/accumulator/mod.rs:950`, `src/statistics/accumulator/media/audio_playout.rs:31` | `supplied_stats_reach_the_report_and_their_references_resolve` | app feed |
 | STATS-7.1-peer-connection | 7.1 | MUST | "peer-connection" object | tested | `src/statistics/accumulator/peer_connection.rs:36` | `test_peer_connection_json_snapshot` | - |
-| STATS-7.1-data-channel | 7.1 | MUST | "data-channel": one per RTCDataChannel | partial | `src/statistics/accumulator/mod.rs:634`, `src/peer_connection/handler/datachannel.rs:109` | `a_data_channel_reports_what_it_is_and_what_crossed_it` | By design (hardening): the object is removed when the channel closes, so a peer that opens and closes channels cannot grow the report without bound; for the owner to decide |
+| STATS-7.1-data-channel | 7.1 | MUST | "data-channel": one per RTCDataChannel | tested | `src/statistics/accumulator/mod.rs` (`on_data_channel_gone`, `MAX_CLOSED_DATA_CHANNEL_STATS`) | `a_closed_channel_keeps_its_stats_object`, `a_data_channel_reports_what_it_is_and_what_crossed_it` | A closed channel's object stays, state "closed", with its last counters (webrtc-stats lifetime); only the 64 channels closed last keep theirs, so a peer that opens and closes channels without end cannot grow the report without bound |
 | STATS-7.1-transport | 7.1 | MUST | "transport" object | tested | `src/statistics/accumulator/transport.rs:137` | `test_transport_statistics_collection` | One transport (max-bundle only) |
 | STATS-7.1-candidate-pair | 7.1 | MUST | "candidate-pair": one per pair; non-current pairs deleted at ICE restart, current pair once replaced | tested | `src/statistics/accumulator/mod.rs:986`, `src/peer_connection/internal.rs:1854` | `every_candidate_pair_is_reported_with_its_state` | Pairs the agent drops go, except the selected one |
 | STATS-7.1-local-candidate | 7.1 | MUST | "local-candidate": deleted at ICE restart once in no non-deleted pair | tested | `src/statistics/accumulator/mod.rs:815` | `an_ice_restart_replaces_the_pairs_the_candidates_and_the_username_fragment`, `a_candidate_goes_when_the_agent_and_every_pair_let_go_of_it` | Deleted once the agent and every reported pair let go of it |
@@ -294,11 +294,10 @@ Every bug below is fixed, each with the test named in its row. Running the tests
 4. **A sender report's NTP time followed the machine's clock, not the caller's**: the sender-report interceptor re-read the wall clock at every frame (`rtc-interceptor/src/report/sender_stream.rs`).
 5. **A data channel created after the association is up has no DCEP handshake deadline** (`RTCPeerConnection::create_data_channel` dials without arming it). Not fixed here: it is outside the statistics; reported to the owner.
 
-Gaps closed: 1, 2, 3 (but see below), 4 (but `STATS-7.1-data-channel`), 5, 7, 8, 9; of gap 6, `totalPacketSendDelay` and `issuerCertificateId`.
+Gaps closed: 1, 2, 3 (but see below), 4, 5, 7, 8, 9; of gap 6, `totalPacketSendDelay` and `issuerCertificateId`.
 
 Still open:
 
-- `STATS-7.1-data-channel` (partial, by design): a closed channel's object is deleted; a test pins that as hardening against a peer that opens and closes channels without end.
 - `STATS-8.5-corruptionMeasurements` (partial): the corruption-detection header extension is not parsed.
 - `STATS-8.21-frozen`, `STATS-8.21-failed` (untested): no rtc-to-rtc call here reaches them (the agent stops checking the other pairs once one is nominated).
 - Gap 6, the rest: `fecPacketsDiscarded` (the FlexFEC-03 decoder does not report unused repair packets), `packetsDiscarded` and the jitter-buffer members (the jitter-buffer interceptors do not feed the report), `framesReceived` and the assembly members, `scalabilityMode`, in-band FEC: all reach the report from the application feed only.
