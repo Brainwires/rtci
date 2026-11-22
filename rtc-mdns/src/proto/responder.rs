@@ -431,9 +431,13 @@ impl Mdns {
                     planned.due = due;
                 }
             }
-            self.break_probe_ties(inbound, now);
-            if !unicast_arrival {
-                self.note_duplicate_questions(inbound, src, now);
+            // What a query tells the names being probed for and the pending queries is taken
+            // only from the link (RFC 6762 section 11), like the answers of a response.
+            if on_link {
+                self.break_probe_ties(inbound, now);
+                if !unicast_arrival {
+                    self.note_duplicate_questions(inbound, src, now);
+                }
             }
         }
 

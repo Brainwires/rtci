@@ -660,6 +660,12 @@ fn test_question_that_does_not_stand_for_ours_changes_nothing() {
     );
     assert_eq!(retry_at(&knowing, other_host, ms(500), config()), on_time);
 
+    // One from off the link.
+    assert_eq!(
+        retry_at(&query_for(UUID_1), "203.0.113.5:5353", ms(500), config()),
+        on_time
+    );
+
     // Half of ours.
     let only_a = message(0, QUERY, &[(UUID_1, TYPE_A, CLASS_IN)], &[], &[], &[]);
     assert_eq!(retry_at(&only_a, other_host, ms(500), config()), on_time);

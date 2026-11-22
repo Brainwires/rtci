@@ -294,7 +294,18 @@ fn test_simultaneous_probe_with_later_data_makes_us_probe_again_a_second_later()
         ),
     );
     assert!(events(&mut conn).is_empty(), "the name is not given up");
-    let out = run(&mut conn, base, seen, ms(20_000));
+    // The same probe from off the link, later, changes nothing (RFC 6762 section 11).
+    deliver(
+        &mut conn,
+        base + seen + ms(10),
+        "203.0.113.5:5353",
+        &probe(
+            "MyPrinter.local",
+            "169.254.200.50",
+            CLASS_IN | CLASS_TOP_BIT,
+        ),
+    );
+    let out = run(&mut conn, base, seen + ms(10), ms(20_000));
     let probes: Vec<Duration> = out
         .iter()
         .filter(|p| !p.is_response())
