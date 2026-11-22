@@ -34,12 +34,15 @@ The subcrates are in scope for this policy, not an afterthought.
 ## Inventory
 
 125 public enums, all with an explicit decision:
+126 public enums, all with an explicit decision:
 
 | Area | `#[non_exhaustive]` | Kept exhaustive |
 |---|---:|---:|
 | `rtc/src` | 34 | 0 |
 | protocol subcrates | 72 | 19 |
 | **total** | **106** | **19** |
+| protocol subcrates | 72 | 20 |
+| **total** | **106** | **20** |
 
 ### `rtc/src` — all 34 marked
 
@@ -47,7 +50,7 @@ Every directly declared enum in the core is `#[non_exhaustive]`: the W3C-facing 
 configuration, transport, statistics, event, and message enums. All of these track external
 specifications (W3C WebRTC, IANA registries, RFC state machines) that add values over time.
 
-### Protocol subcrates — kept exhaustive (19)
+### Protocol subcrates — kept exhaustive (20)
 
 These are the deliberate exceptions. Each is closed by construction, and exhaustive matching
 is worth more to callers than room for a variant we have no way to add.
@@ -70,6 +73,7 @@ is worth more to callers than room for a variant we have no way to add.
 | `rtc-datachannel` | `DataChannelThreshold` | Low / High. |
 | `rtc-rtp` | `CameraDirection` | Front / Back. |
 | `rtc-rtp` | `VideoRotation` | 0° / 90° / 180° / 270°. |
+| `rtc-rtp` | `DecodeTargetIndication` | The four values of the Dependency Descriptor's two-bit DTI field. |
 | `rtc-sdp` | `Direction` | sendrecv / sendonly / recvonly / inactive (RFC 4566). |
 | `rtc-sdp` | `ConnectionRole` | active / passive / actpass / holdconn (RFC 4145). |
 
