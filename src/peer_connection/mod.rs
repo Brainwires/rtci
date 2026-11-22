@@ -254,6 +254,8 @@ pub mod sdp;
 #[cfg(test)]
 mod set_configuration_test;
 #[cfg(test)]
+mod set_description_atomic_test;
+#[cfg(test)]
 mod set_remote_description_test;
 pub mod state;
 pub mod transport;
@@ -282,7 +284,8 @@ use crate::peer_connection::handler::sctp::SctpHandlerContext;
 use crate::peer_connection::sdp::MediaDescriptionExt;
 use crate::peer_connection::sdp::session_description::RTCSessionDescription;
 use crate::peer_connection::sdp::{
-    RemoteIceDetails, extract_fingerprints, extract_ice_details, get_application_media,
+    RemoteIceDetails, check_answer_against_offer, codecs_from_media_description,
+    extract_fingerprints, extract_ice_details, get_application_media,
     get_application_media_section_max_message_size, get_application_media_section_sctp_port,
     get_mid_value, get_peer_direction, has_ice_trickle_option, insert_media_line, is_lite_set,
     is_rejected_media, media_ice_credentials, sdp_type::RTCSdpType, update_sdp_origin,
@@ -781,6 +784,8 @@ pub struct RTCPeerConnection {
     /// (RFC 8843 §7.1.3, RFC 9429 §5.10): the next description that sets one up with new ICE
     /// credentials starts new ICE and DTLS associations.
     transport_closed: bool,
+    /// What a rollback restores: set while an offer applied in the stable state is pending.
+    last_stable_state: Option<internal::LastStableState>,
     negotiation_needed_state: NegotiationNeededState,
     is_negotiation_ongoing: bool,
     // wpt100:hdrext — `alwaysNegotiateDataChannels` (see `always_negotiate`).
@@ -817,6 +822,18 @@ impl RTCPeerConnection {
     ) -> Result<RTCSessionDescription> {
         if self.peer_connection_state == RTCPeerConnectionState::Closed {
             return Err(Error::ErrConnectionClosed);
+        }
+
+        // W3C webrtc-pc createOffer: "If connection.[[SignalingState]] is neither 'stable' nor
+        // 'have-local-offer', return a promise rejected with a newly created
+        // InvalidStateError" (RFC 9429 section 5.2: an offer is made from the stable state, or
+        // again while the previous one is pending). Checked before anything is touched: an
+        // endpoint that has a remote offer to answer keeps its mids and its restart request.
+        if !matches!(
+            self.signaling_state,
+            RTCSignalingState::Stable | RTCSignalingState::HaveLocalOffer
+        ) {
+            return Err(Error::ErrIncorrectSignalingState);
         }
 
         // Staging, not restarting: the offer must advertise fresh ICE credentials, but JSEP
@@ -1203,12 +1220,6 @@ impl RTCPeerConnection {
             return Err(Error::ErrConnectionClosed);
         }
 
-        // Apply an ICE restart staged by `create_offer`. A no-op if none was staged, so an offer
-        // that was created and then discarded leaves the existing session untouched.
-        if self.ice_transport().has_pending_restart() {
-            self.apply_ice_restart(now)?;
-        }
-
         // JSEP 5.4
         if local_description.sdp.is_empty() {
             match local_description.sdp_type {
@@ -1229,7 +1240,70 @@ impl RTCPeerConnection {
         if local_description.sdp_type != RTCSdpType::Rollback {
             local_description.parsed = Some(local_description.unmarshal()?);
         }
-        self.set_description(&local_description, StateChangeOp::SetLocal)?;
+
+        // Everything that can refuse the description is checked before anything is changed
+        // (RFC 9429 section 5.9: "the session state MUST be restored to its state before"):
+        // the signaling state, that it is the description last created, and that each of an
+        // answer's media sections has a mid and a transceiver.
+        let next_state = self.check_description(&local_description, StateChangeOp::SetLocal)?;
+        if local_description.sdp_type == RTCSdpType::Answer
+            && let Some(parsed) = &local_description.parsed
+        {
+            self.check_local_answer(parsed)?;
+        }
+
+        // What is left can only fail inside a transport; should it, the description state is
+        // put back as it was.
+        let snapshot = self.description_snapshot();
+        let applied = self.apply_local_description(now, local_description, next_state);
+        if applied.is_err() {
+            self.restore_description_snapshot(snapshot);
+        }
+        applied
+    }
+
+    /// The checks `set_local_description` makes on an answer's media sections before applying
+    /// it: the ones its loop over them relies on.
+    fn check_local_answer(
+        &self,
+        parsed: &::sdp::description::session::SessionDescription,
+    ) -> Result<()> {
+        let transceiver_by_mid =
+            RTCPeerConnection::transceiver_index_by_mid(&self.rtp_transceivers);
+        for media in &parsed.media_descriptions {
+            let mid_value = match get_mid_value(media) {
+                Some(mid) if !mid.is_empty() => mid,
+                _ => return Err(Error::ErrPeerConnLocalDescriptionWithoutMidValue),
+            };
+            if media.is_webrtc_datachannel()
+                || is_rejected_media(media)
+                || transceiver_by_mid.contains_key(mid_value.as_str())
+            {
+                continue;
+            }
+            return Err(Error::ErrPeerConnTransceiverMidNil);
+        }
+        Ok(())
+    }
+
+    /// Applies a local description `set_local_description` has checked.
+    fn apply_local_description(
+        &mut self,
+        now: Instant,
+        local_description: RTCSessionDescription,
+        next_state: RTCSignalingState,
+    ) -> Result<()> {
+        // Apply an ICE restart staged by `create_offer`, now that the description is known to
+        // be the one created and valid in this state: a description that is refused, and a
+        // rollback, leave the session on its credentials. A no-op if none was staged, so an
+        // offer that was created and then discarded leaves the existing session untouched.
+        if local_description.sdp_type != RTCSdpType::Rollback
+            && self.ice_transport().has_pending_restart()
+        {
+            self.apply_ice_restart(now)?;
+        }
+
+        self.commit_description(&local_description, StateChangeOp::SetLocal, next_state)?;
 
         let we_answer = local_description.sdp_type == RTCSdpType::Answer;
         if we_answer && let Some(parsed_local_description) = &local_description.parsed {
@@ -1276,9 +1350,6 @@ impl RTCPeerConnection {
                 self.rtp_transceivers[i].set_current_direction(direction);
             }
 
-            // An answer applied: the stopped transceivers whose sections it left rejected go.
-            self.remove_stopped_rejected_transceivers();
-
             if let Some(remote_description) = self.remote_description().cloned()
                 && let Some(parsed_remote_description) = remote_description.parsed.as_ref()
             {
@@ -1314,9 +1385,15 @@ impl RTCPeerConnection {
                 }
                 self.start_rtp(remote_description)?;
             }
+
+            // An answer applied: the stopped transceivers whose sections it left rejected go.
+            // Last, so that nothing that can still fail comes after a removal.
+            self.remove_stopped_rejected_transceivers();
         }
 
-        self.ice_transport_mut().ice_gathering_state = RTCIceGatheringState::Gathering;
+        if local_description.sdp_type != RTCSdpType::Rollback {
+            self.ice_transport_mut().ice_gathering_state = RTCIceGatheringState::Gathering;
+        }
 
         if matches!(
             local_description.sdp_type,
@@ -1449,7 +1526,108 @@ impl RTCPeerConnection {
             }
             None => None,
         };
-        self.set_description(&remote_description, StateChangeOp::SetRemote)?;
+
+        // Everything that can refuse the description is checked before anything is changed
+        // (RFC 9429 section 5.10: "the session state MUST be restored to its state before";
+        // W3C webrtc-pc "set a session description": a description that fails the checks of
+        // RFC 9429 section 5.8 leaves the connection as it was): the signaling state, the
+        // media sections, an answer against its offer, and the ICE and DTLS parameters.
+        let next_state = self.check_description(&remote_description, StateChangeOp::SetRemote)?;
+        if let Some(parsed) = &remote_description.parsed {
+            self.check_remote_description(parsed, answers)?;
+        }
+
+        // What is left can only fail inside a transport; should it, the description state is
+        // put back as it was.
+        let snapshot = self.description_snapshot();
+        let applied = self.apply_remote_description(
+            now,
+            remote_description,
+            next_state,
+            negotiated_media_engine,
+        );
+        if applied.is_err() {
+            self.restore_description_snapshot(snapshot);
+        }
+        applied
+    }
+
+    /// The checks `set_remote_description` makes on a parsed description before applying it
+    /// (RFC 9429 section 5.8.3), none of which changes anything:
+    ///
+    /// - every media section has a mid (`assign_missing_mids` has run);
+    /// - an answer or provisional answer answers the pending local offer
+    ///   ([`check_answer_against_offer`]) and names only media sections that have a transceiver;
+    /// - the formats of each audio and video section can be read;
+    /// - the ICE credentials and candidates and the DTLS fingerprints of the transport the
+    ///   description sets up are present, well formed and do not conflict.
+    fn check_remote_description(
+        &self,
+        parsed: &::sdp::description::session::SessionDescription,
+        answers: bool,
+    ) -> Result<()> {
+        for media in &parsed.media_descriptions {
+            if !get_mid_value(media).is_some_and(|mid| !mid.is_empty()) {
+                return Err(Error::ErrPeerConnRemoteDescriptionWithoutMidValue);
+            }
+        }
+
+        if answers {
+            if let Some(offer) = self
+                .pending_local_description
+                .as_ref()
+                .and_then(|offer| offer.parsed.as_ref())
+            {
+                check_answer_against_offer(offer, parsed)?;
+            }
+            let transceiver_by_mid =
+                RTCPeerConnection::transceiver_index_by_mid(&self.rtp_transceivers);
+            for media in &parsed.media_descriptions {
+                if media.is_webrtc_datachannel()
+                    || is_rejected_media(media)
+                    || RtpCodecKind::from(media.media_name.media.as_str())
+                        == RtpCodecKind::Unspecified
+                    || get_peer_direction(media) == RTCRtpTransceiverDirection::Unspecified
+                {
+                    continue;
+                }
+                if !get_mid_value(media)
+                    .is_some_and(|mid| transceiver_by_mid.contains_key(mid.as_str()))
+                {
+                    return Err(Error::ErrPeerConnTransceiverMidNil);
+                }
+            }
+        }
+
+        for media in &parsed.media_descriptions {
+            if !media.is_webrtc_datachannel()
+                && !is_rejected_media(media)
+                && RtpCodecKind::from(media.media_name.media.as_str()) != RtpCodecKind::Unspecified
+            {
+                codecs_from_media_description(media)?;
+            }
+        }
+
+        if extract_ice_details(parsed)?.is_some() {
+            extract_fingerprints(parsed)?;
+        }
+        Ok(())
+    }
+
+    /// Applies a remote description `set_remote_description` has checked.
+    fn apply_remote_description(
+        &mut self,
+        now: Instant,
+        remote_description: RTCSessionDescription,
+        next_state: RTCSignalingState,
+        negotiated_media_engine: Option<MediaEngine>,
+    ) -> Result<()> {
+        let answers = matches!(
+            remote_description.sdp_type,
+            RTCSdpType::Answer | RTCSdpType::Pranswer
+        );
+
+        self.commit_description(&remote_description, StateChangeOp::SetRemote, next_state)?;
         if remote_description.sdp_type != RTCSdpType::Rollback {
             self.trickled_remote_candidates = 0;
         }
@@ -1691,11 +1869,6 @@ impl RTCPeerConnection {
                 }
             }
 
-            // An answer applied: the stopped transceivers whose sections it left rejected go.
-            if is_final_answer {
-                self.remove_stopped_rejected_transceivers();
-            }
-
             // The ICE and DTLS transports start with the first description that sets one up,
             // not with the first remote description: a description with nothing to negotiate
             // (no m-section) has no ICE credentials, and a remote offer may be applied again or
@@ -1828,6 +2001,12 @@ impl RTCPeerConnection {
                     )?;
                 }
                 self.start_rtp(remote_description)?;
+            }
+
+            // An answer applied: the stopped transceivers whose sections it left rejected go.
+            // Last, so that nothing that can still fail comes after a removal.
+            if is_final_answer {
+                self.remove_stopped_rejected_transceivers();
             }
         }
 

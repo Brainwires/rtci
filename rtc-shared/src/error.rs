@@ -2090,6 +2090,10 @@ pub enum Error {
     /// New SDP does not match previous answer.
     #[error("new sdp does not match previous answer")]
     ErrSDPDoesNotMatchAnswer,
+    /// A remote answer does not answer the pending local offer (RFC 3264 section 6, RFC 9429
+    /// section 5.8.3): the text names the media section and what differs.
+    #[error("the answer does not match the offer: {0}")]
+    ErrAnswerDoesNotMatchOffer(String),
     /// Provided value is not a valid enum value of type SDPType.
     #[error("provided value is not a valid enum value of type SDPType")]
     ErrPeerConnSDPTypeInvalidValue,

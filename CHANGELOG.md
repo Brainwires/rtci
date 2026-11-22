@@ -5,6 +5,48 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Bug Fixes
+
+- **jsep**: a description is checked in full before any of it is applied (RFC 9429 sections 5.9
+  and 5.10, W3C webrtc-pc "set a session description"). `set_remote_description` changed the
+  signaling state, stored the description and created transceivers, and only then looked at
+  the ICE credentials, the candidates and the fingerprints: a remote offer without
+  `a=fingerprint` returned an error and left the connection in `have-remote-offer`. The checks
+  now run first; a description that is refused changes nothing, and should a transport fail
+  while one is applied, the signaling state, the descriptions, the transceivers, the negotiated
+  codecs and the queued events are put back.
+- **jsep**: a remote answer is checked against the offer it answers (RFC 3264 section 6, RFC
+  9429 section 5.8.3, RFC 5888 section 9.1, RFC 9143 section 7.4, RFC 4585 section 4.2): the
+  number and order of the m= sections, each one's media type, proto and mid, a direction the
+  offered direction allows, no `a=rtcp-fb` the offer did not have, and BUNDLE groups that
+  bundle only what the offer bundled. An answer with fewer sections, swapped sections or an
+  added feedback line was applied. It is now `Error::ErrAnswerDoesNotMatchOffer`, and the offer
+  stays pending.
+- **jsep**: a rollback is taken through either `set_local_description` or
+  `set_remote_description` (RFC 9429 section 5.7: "the same effect"). A local offer could be
+  rolled back only through the first and a remote offer only through the second.
+- **jsep**: a rollback restores what the last completed exchange negotiated: the negotiated
+  codecs and header extensions, each transceiver's codecs, and the RTX / FEC flows of the
+  senders' encodings. An abandoned remote offer left its codecs negotiated (the next local offer
+  listed only those) and the senders without the repair flows it lacked.
+- **jsep**: a staged ICE restart is applied only by the description that carries it.
+  `set_local_description` applied it before it looked at the description, so a refused
+  description and a rollback restarted ICE.
+- **jsep**: `create_offer` is refused outside the `stable` and `have-local-offer` states
+  (`Error::ErrIncorrectSignalingState`; W3C createOffer, RFC 9429 section 5.2.2). It made an
+  offer in any state, gave transceivers mids and used up a requested ICE restart.
+- **jsep**: `OnSignalingStateChangeEvent` is emitted only when the state changes; an offer
+  applied over a pending one and a repeated provisional answer emitted it again.
+- **jsep**: an applied answer forgets the last created offer and answer (W3C "set a session
+  description"), so the offer of a finished exchange is not accepted for the next
+  (`Error::ErrSDPDoesNotMatchOffer`).
+
+### Features
+
+- **shared**: `Error::ErrAnswerDoesNotMatchOffer(String)`.
+
 ## [0.22.0+brainwires.5] - 2026-11-20
 
 ### Bug Fixes

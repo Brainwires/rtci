@@ -280,8 +280,11 @@ mod rejected_mline_tests {
     }
 }
 
+mod answer_check;
 pub(crate) mod sdp_type;
 pub(crate) mod session_description;
+
+pub(crate) use answer_check::check_answer_against_offer;
 
 pub use sdp_type::RTCSdpType;
 pub use session_description::RTCSessionDescription;

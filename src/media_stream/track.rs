@@ -763,6 +763,15 @@ impl MediaStreamTrack {
         }
     }
 
+    /// Gives back the repair SSRCs `clear_repair_ssrcs` took, from `saved` (a copy of the
+    /// codings made before): a rollback of the offer that lacked the repair format.
+    pub(crate) fn restore_repair_ssrcs(&mut self, saved: &[RTCRtpEncodingParameters]) {
+        crate::rtp_transceiver::rtp_sender::internal::restore_repair_ssrcs(
+            &mut self.codings,
+            saved,
+        );
+    }
+
     /// Returns the RTP encoding parameters (codings) configured for this track.
     pub fn codings(&self) -> &[RTCRtpEncodingParameters] {
         &self.codings

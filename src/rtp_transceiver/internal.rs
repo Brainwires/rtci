@@ -311,6 +311,22 @@ impl RTCRtpTransceiverInternal {
         self.current_direction = RTCRtpTransceiverDirection::Unspecified;
     }
 
+    /// Brings back what the last completed exchange negotiated for this transceiver, from the
+    /// copy `saved` taken when the offer now rolled back was applied (W3C webrtc-pc "set a
+    /// session description", rollback: `[[ReceiveCodecs]]` and the send encodings return to
+    /// their last stable values): the codecs of the transceiver, its sender and its receiver,
+    /// and the repair (RTX / FEC) flows the offer took from the sender's encodings. What the
+    /// application did since (direction, track, stop, the mid, which the caller handles) stays.
+    pub(crate) fn restore_negotiated_state(&mut self, saved: &RTCRtpTransceiverInternal) {
+        self.preferred_codecs.clone_from(&saved.preferred_codecs);
+        if let (Some(sender), Some(saved)) = (self.sender.as_mut(), saved.sender.as_ref()) {
+            sender.restore_negotiated_state(saved);
+        }
+        if let (Some(receiver), Some(saved)) = (self.receiver.as_mut(), saved.receiver.as_ref()) {
+            receiver.restore_negotiated_state(saved);
+        }
+    }
+
     pub(crate) fn set_current_direction(&mut self, d: RTCRtpTransceiverDirection) {
         let previous: RTCRtpTransceiverDirection = self.current_direction;
         self.current_direction = d;

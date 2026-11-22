@@ -38,6 +38,41 @@ use rand::RngExt;
 use std::collections::HashSet;
 use std::collections::VecDeque;
 
+/// What the last completed offer/answer exchange negotiated, remembered when an offer is
+/// applied in the stable state and brought back by a rollback (W3C webrtc-pc "set a session
+/// description": the `[[LastStableState...]]` slots; RFC 9429 section 5.7).
+#[derive(Clone)]
+pub(super) struct LastStableState {
+    /// The negotiated codecs and header extensions (a remote offer replaces them).
+    media_engine: MediaEngine,
+    /// The transceivers as they were: their codecs and their senders' repair flows are what a
+    /// rollback restores.
+    rtp_transceivers: Vec<RTCRtpTransceiverInternal>,
+    can_trickle_ice_candidates: Option<bool>,
+    transport_closed: bool,
+}
+
+/// See [`RTCPeerConnection::description_snapshot`].
+pub(super) struct DescriptionSnapshot {
+    signaling_state: RTCSignalingState,
+    current_local_description: Option<RTCSessionDescription>,
+    pending_local_description: Option<RTCSessionDescription>,
+    current_remote_description: Option<RTCSessionDescription>,
+    pending_remote_description: Option<RTCSessionDescription>,
+    media_engine: MediaEngine,
+    rtp_transceivers: Vec<RTCRtpTransceiverInternal>,
+    removed_transceivers: usize,
+    can_trickle_ice_candidates: Option<bool>,
+    trickled_remote_candidates: usize,
+    last_offer: String,
+    last_answer: String,
+    transport_closed: bool,
+    negotiation_needed_state: NegotiationNeededState,
+    is_negotiation_ongoing: bool,
+    last_stable_state: Option<LastStableState>,
+    events: usize,
+}
+
 impl RTCPeerConnection {
     pub(super) fn new(
         now: Instant,
@@ -225,6 +260,7 @@ impl RTCPeerConnection {
             last_answer: String::new(),
             ice_restart_requested: None,
             transport_closed: false,
+            last_stable_state: None,
             negotiation_needed_state: NegotiationNeededState::Empty,
             is_negotiation_ongoing: false,
             always_negotiate_data_channels: false,
@@ -667,199 +703,233 @@ impl RTCPeerConnection {
         }
     }
 
-    // 4.4.1.6 Set the SessionDescription
-    pub(super) fn set_description(
+    /// The signaling state a description leads to (W3C webrtc-pc "set a session description",
+    /// RFC 9429 sections 5.5 and 5.6), or the error that refuses it. Nothing is changed: both
+    /// `set_local_description` and `set_remote_description` call this before they touch the
+    /// connection, and [`Self::commit_description`] once every other check has passed.
+    pub(super) fn check_description(
+        &self,
+        sd: &RTCSessionDescription,
+        op: StateChangeOp,
+    ) -> Result<RTCSignalingState> {
+        let cur = self.signaling_state;
+        let next = match (op, sd.sdp_type) {
+            (_, RTCSdpType::Unspecified) => return Err(Error::ErrPeerConnSDPTypeInvalidValue),
+            // stable->SetLocal(offer)->have-local-offer
+            (StateChangeOp::SetLocal, RTCSdpType::Offer) => {
+                if sd.sdp != self.last_offer {
+                    return Err(Error::ErrSDPDoesNotMatchOffer);
+                }
+                RTCSignalingState::HaveLocalOffer
+            }
+            // have-remote-offer->SetLocal(answer)->stable
+            // have-local-pranswer->SetLocal(answer)->stable
+            (StateChangeOp::SetLocal, RTCSdpType::Answer) => {
+                if sd.sdp != self.last_answer {
+                    return Err(Error::ErrSDPDoesNotMatchAnswer);
+                }
+                RTCSignalingState::Stable
+            }
+            // have-remote-offer->SetLocal(pranswer)->have-local-pranswer
+            (StateChangeOp::SetLocal, RTCSdpType::Pranswer) => {
+                if sd.sdp != self.last_answer {
+                    return Err(Error::ErrSDPDoesNotMatchAnswer);
+                }
+                RTCSignalingState::HaveLocalPranswer
+            }
+            // stable->SetRemote(offer)->have-remote-offer
+            (StateChangeOp::SetRemote, RTCSdpType::Offer) => RTCSignalingState::HaveRemoteOffer,
+            // have-local-offer->SetRemote(answer)->stable
+            // have-remote-pranswer->SetRemote(answer)->stable
+            (StateChangeOp::SetRemote, RTCSdpType::Answer) => RTCSignalingState::Stable,
+            // have-local-offer->SetRemote(pranswer)->have-remote-pranswer
+            (StateChangeOp::SetRemote, RTCSdpType::Pranswer) => {
+                RTCSignalingState::HaveRemotePranswer
+            }
+            // have-local-offer or have-remote-offer->rollback->stable, through either method
+            (_, RTCSdpType::Rollback) => RTCSignalingState::Stable,
+        };
+        check_next_signaling_state(cur, next, op, sd.sdp_type)
+    }
+
+    /// Records a description [`Self::check_description`] accepted: the pending and current
+    /// descriptions, what a rollback has to restore, and the signaling state `next_state`
+    /// (W3C webrtc-pc "set a session description").
+    pub(super) fn commit_description(
         &mut self,
         sd: &RTCSessionDescription,
         op: StateChangeOp,
+        next_state: RTCSignalingState,
     ) -> Result<()> {
-        if sd.sdp_type == RTCSdpType::Unspecified {
-            return Err(Error::ErrPeerConnSDPTypeInvalidValue);
+        // An offer applied in the stable state: what the last completed exchange negotiated is
+        // remembered, so that a rollback can bring it back (W3C: the [[LastStableState...]]
+        // slots). An offer applied over a pending one keeps what was remembered.
+        if sd.sdp_type == RTCSdpType::Offer && self.signaling_state == RTCSignalingState::Stable {
+            self.last_stable_state = Some(LastStableState {
+                media_engine: self.media_engine.clone(),
+                rtp_transceivers: self.rtp_transceivers.clone(),
+                can_trickle_ice_candidates: self.can_trickle_ice_candidates,
+                transport_closed: self.transport_closed,
+            });
         }
 
-        let next_state = {
-            let cur = self.signaling_state;
-            let new_sdpdoes_not_match_offer = Error::ErrSDPDoesNotMatchOffer;
-            let new_sdpdoes_not_match_answer = Error::ErrSDPDoesNotMatchAnswer;
-
-            match op {
-                StateChangeOp::SetLocal => {
-                    match sd.sdp_type {
-                        // stable->SetLocal(offer)->have-local-offer
-                        RTCSdpType::Offer => {
-                            if sd.sdp != self.last_offer {
-                                Err(new_sdpdoes_not_match_offer)
-                            } else {
-                                let next_state = check_next_signaling_state(
-                                    cur,
-                                    RTCSignalingState::HaveLocalOffer,
-                                    StateChangeOp::SetLocal,
-                                    sd.sdp_type,
-                                );
-                                if next_state.is_ok() {
-                                    self.pending_local_description = Some(sd.clone());
-                                }
-                                next_state
-                            }
-                        }
-                        // have-remote-offer->SetLocal(answer)->stable
-                        // have-local-pranswer->SetLocal(answer)->stable
-                        RTCSdpType::Answer => {
-                            if sd.sdp != self.last_answer {
-                                Err(new_sdpdoes_not_match_answer)
-                            } else {
-                                let next_state = check_next_signaling_state(
-                                    cur,
-                                    RTCSignalingState::Stable,
-                                    StateChangeOp::SetLocal,
-                                    sd.sdp_type,
-                                );
-                                if next_state.is_ok() {
-                                    let pending_remote_description =
-                                        self.pending_remote_description.take();
-                                    let _pending_local_description =
-                                        self.pending_local_description.take();
-
-                                    self.current_local_description = Some(sd.clone());
-                                    self.current_remote_description = pending_remote_description;
-                                    self.transport_closed = rejects_every_media_section(&sd);
-                                }
-                                next_state
-                            }
-                        }
-                        RTCSdpType::Rollback => {
-                            let next_state = check_next_signaling_state(
-                                cur,
-                                RTCSignalingState::Stable,
-                                StateChangeOp::SetLocal,
-                                sd.sdp_type,
-                            );
-                            if next_state.is_ok() {
-                                self.pending_local_description = None;
-                                // Undo the transceiver associations/creations made by the
-                                // now-abandoned offer (RFC 9429, Section 5.7).
-                                self.rollback_transceivers()?;
-                            }
-                            next_state
-                        }
-                        // have-remote-offer->SetLocal(pranswer)->have-local-pranswer
-                        RTCSdpType::Pranswer => {
-                            if sd.sdp != self.last_answer {
-                                Err(new_sdpdoes_not_match_answer)
-                            } else {
-                                let next_state = check_next_signaling_state(
-                                    cur,
-                                    RTCSignalingState::HaveLocalPranswer,
-                                    StateChangeOp::SetLocal,
-                                    sd.sdp_type,
-                                );
-                                if next_state.is_ok() {
-                                    self.pending_local_description = Some(sd.clone());
-                                }
-                                next_state
-                            }
-                        }
-                        _ => Err(Error::ErrPeerConnStateChangeInvalid),
-                    }
-                }
-                StateChangeOp::SetRemote => {
-                    match sd.sdp_type {
-                        // stable->SetRemote(offer)->have-remote-offer
-                        RTCSdpType::Offer => {
-                            let next_state = check_next_signaling_state(
-                                cur,
-                                RTCSignalingState::HaveRemoteOffer,
-                                StateChangeOp::SetRemote,
-                                sd.sdp_type,
-                            );
-                            if next_state.is_ok() {
-                                self.pending_remote_description = Some(sd.clone());
-                            }
-                            next_state
-                        }
-                        // have-local-offer->SetRemote(answer)->stable
-                        // have-remote-pranswer->SetRemote(answer)->stable
-                        RTCSdpType::Answer => {
-                            let next_state = check_next_signaling_state(
-                                cur,
-                                RTCSignalingState::Stable,
-                                StateChangeOp::SetRemote,
-                                sd.sdp_type,
-                            );
-                            if next_state.is_ok() {
-                                let pending_local_description =
-                                    self.pending_local_description.take();
-
-                                let _pending_remote_description =
-                                    self.pending_remote_description.take();
-
-                                self.current_remote_description = Some(sd.clone());
-                                self.current_local_description = pending_local_description;
-                                self.transport_closed = rejects_every_media_section(&sd);
-                            }
-                            next_state
-                        }
-                        RTCSdpType::Rollback => {
-                            let next_state = check_next_signaling_state(
-                                cur,
-                                RTCSignalingState::Stable,
-                                StateChangeOp::SetRemote,
-                                sd.sdp_type,
-                            );
-                            if next_state.is_ok() {
-                                self.pending_remote_description = None;
-                                // Undo the transceiver associations/creations made by the
-                                // now-abandoned offer (RFC 9429, Section 5.7).
-                                self.rollback_transceivers()?;
-                            }
-                            next_state
-                        }
-                        // have-local-offer->SetRemote(pranswer)->have-remote-pranswer
-                        RTCSdpType::Pranswer => {
-                            let next_state = check_next_signaling_state(
-                                cur,
-                                RTCSignalingState::HaveRemotePranswer,
-                                StateChangeOp::SetRemote,
-                                sd.sdp_type,
-                            );
-                            if next_state.is_ok() {
-                                self.pending_remote_description = Some(sd.clone());
-                            }
-                            next_state
-                        }
-                        _ => Err(Error::ErrPeerConnStateChangeInvalid),
-                    }
-                } //_ => Err(Error::ErrPeerConnStateChangeUnhandled.into()),
+        match (op, sd.sdp_type) {
+            (StateChangeOp::SetLocal, RTCSdpType::Offer | RTCSdpType::Pranswer) => {
+                self.pending_local_description = Some(sd.clone());
             }
+            (StateChangeOp::SetRemote, RTCSdpType::Offer | RTCSdpType::Pranswer) => {
+                self.pending_remote_description = Some(sd.clone());
+            }
+            (StateChangeOp::SetLocal, RTCSdpType::Answer) => {
+                self.current_remote_description = self.pending_remote_description.take();
+                self.pending_local_description = None;
+                self.current_local_description = Some(sd.clone());
+                self.transport_closed = rejects_every_media_section(sd);
+            }
+            (StateChangeOp::SetRemote, RTCSdpType::Answer) => {
+                self.current_local_description = self.pending_local_description.take();
+                self.pending_remote_description = None;
+                self.current_remote_description = Some(sd.clone());
+                self.transport_closed = rejects_every_media_section(sd);
+            }
+            (_, RTCSdpType::Rollback) => {
+                self.pending_local_description = None;
+                self.pending_remote_description = None;
+                // Undo what the abandoned offer changed (RFC 9429, Section 5.7).
+                self.rollback_transceivers()?;
+                self.restore_last_stable_state();
+            }
+            (_, RTCSdpType::Unspecified) => return Err(Error::ErrPeerConnSDPTypeInvalidValue),
+        }
+
+        if matches!(sd.sdp_type, RTCSdpType::Answer) {
+            // W3C "set a session description": an answer resets [[LastCreatedOffer]] and
+            // [[LastCreatedAnswer]], so a description created for an exchange that is over
+            // cannot be applied to the next one.
+            self.last_offer.clear();
+            self.last_answer.clear();
+            self.last_stable_state = None;
+        }
+
+        let changed = self.signaling_state != next_state;
+        self.signaling_state = next_state;
+        let reached_stable = next_state == RTCSignalingState::Stable;
+        if reached_stable {
+            self.is_negotiation_ongoing = false;
+            // Negotiation has committed: any transceiver that was created while applying
+            // a remote offer is now part of the stable state, so clear the
+            // created-by-remote flag. This keeps the flag meaning exactly "created by the
+            // current pending (uncommitted) offer", which is what rollback relies on.
+            for t in &mut self.rtp_transceivers {
+                t.set_created_by_remote_description(false);
+            }
+        }
+        // W3C "set a session description": "If connection.[[SignalingState]] changed above,
+        // fire an event named signalingstatechange". An offer applied over a pending offer and
+        // a repeated provisional answer change nothing.
+        if changed {
+            self.do_signaling_state_change(next_state);
+        }
+        if reached_stable {
+            // W3C "update the negotiation-needed flag" is re-run each time the connection
+            // returns to a stable signaling state. A transceiver added while the
+            // connection was mid-negotiation (`negotiation_needed_op` step 2.3 bails out
+            // when not stable) had its negotiation-needed check deferred; re-running it now
+            // fires `OnNegotiationNeededEvent` if anything is still un-negotiated.
+            self.trigger_negotiation_needed();
+        }
+        Ok(())
+    }
+
+    /// Brings back what the last completed exchange negotiated, after a rollback (W3C
+    /// webrtc-pc "set a session description", the rollback steps; RFC 9429 section 5.7: "the
+    /// state of the session is restored to the state it was in before the offer"): the
+    /// negotiated codecs and header extensions, each transceiver's codecs, the repair (RTX /
+    /// FEC) flows of its sender's encodings, and what the remote description said about
+    /// trickling. The transceivers the offer created are already gone
+    /// ([`Self::rollback_transceivers`]); one the offer stopped stays stopped, as the stop
+    /// algorithm is not undone.
+    fn restore_last_stable_state(&mut self) {
+        let Some(saved) = self.last_stable_state.take() else {
+            return;
         };
-
-        match next_state {
-            Ok(next_state) => {
-                self.signaling_state = next_state;
-                let reached_stable = self.signaling_state == RTCSignalingState::Stable;
-                if reached_stable {
-                    self.is_negotiation_ongoing = false;
-                    // Negotiation has committed: any transceiver that was created while applying
-                    // a remote offer is now part of the stable state, so clear the
-                    // created-by-remote flag. This keeps the flag meaning exactly "created by the
-                    // current pending (uncommitted) offer", which is what rollback relies on.
-                    for t in &mut self.rtp_transceivers {
-                        t.set_created_by_remote_description(false);
-                    }
-                }
-                self.do_signaling_state_change(next_state);
-                if reached_stable {
-                    // W3C "update the negotiation-needed flag" is re-run each time the connection
-                    // returns to a stable signaling state. A transceiver added while the
-                    // connection was mid-negotiation (`negotiation_needed_op` step 2.3 bails out
-                    // when not stable) had its negotiation-needed check deferred; re-running it now
-                    // fires `OnNegotiationNeededEvent` if anything is still un-negotiated.
-                    self.trigger_negotiation_needed();
-                }
-                Ok(())
-            }
-            Err(err) => Err(err),
+        self.media_engine = saved.media_engine;
+        self.can_trickle_ice_candidates = saved.can_trickle_ice_candidates;
+        self.transport_closed = saved.transport_closed;
+        // No transceiver is removed while an offer is pending, other than the ones the offer
+        // created, which come after every transceiver that existed when it was applied: the
+        // saved ones are the first of the list, in order.
+        for (transceiver, saved) in self
+            .rtp_transceivers
+            .iter_mut()
+            .zip(&saved.rtp_transceivers)
+        {
+            transceiver.restore_negotiated_state(saved);
         }
+        self.pipeline_context
+            .interceptor_handler_context
+            .ssrc_owners
+            .clear();
+        self.pipeline_context
+            .endpoint_handler_context
+            .ssrc_owners
+            .clear();
+    }
+
+    /// The part of the connection a description changes that is not a transport, copied so
+    /// that a description which fails while it is applied leaves all of it as it was (RFC 9429
+    /// sections 5.9 and 5.10: "the session state MUST be restored to its state before").
+    pub(super) fn description_snapshot(&self) -> DescriptionSnapshot {
+        DescriptionSnapshot {
+            signaling_state: self.signaling_state,
+            current_local_description: self.current_local_description.clone(),
+            pending_local_description: self.pending_local_description.clone(),
+            current_remote_description: self.current_remote_description.clone(),
+            pending_remote_description: self.pending_remote_description.clone(),
+            media_engine: self.media_engine.clone(),
+            rtp_transceivers: self.rtp_transceivers.clone(),
+            removed_transceivers: self.removed_transceivers.len(),
+            can_trickle_ice_candidates: self.can_trickle_ice_candidates,
+            trickled_remote_candidates: self.trickled_remote_candidates,
+            last_offer: self.last_offer.clone(),
+            last_answer: self.last_answer.clone(),
+            transport_closed: self.transport_closed,
+            negotiation_needed_state: self.negotiation_needed_state,
+            is_negotiation_ongoing: self.is_negotiation_ongoing,
+            last_stable_state: self.last_stable_state.clone(),
+            events: self.pipeline_context.event_outs.len(),
+        }
+    }
+
+    /// Puts back what [`Self::description_snapshot`] copied, dropping the events queued since.
+    pub(super) fn restore_description_snapshot(&mut self, snapshot: DescriptionSnapshot) {
+        self.signaling_state = snapshot.signaling_state;
+        self.current_local_description = snapshot.current_local_description;
+        self.pending_local_description = snapshot.pending_local_description;
+        self.current_remote_description = snapshot.current_remote_description;
+        self.pending_remote_description = snapshot.pending_remote_description;
+        self.media_engine = snapshot.media_engine;
+        self.rtp_transceivers = snapshot.rtp_transceivers;
+        self.removed_transceivers
+            .truncate(snapshot.removed_transceivers);
+        self.can_trickle_ice_candidates = snapshot.can_trickle_ice_candidates;
+        self.trickled_remote_candidates = snapshot.trickled_remote_candidates;
+        self.last_offer = snapshot.last_offer;
+        self.last_answer = snapshot.last_answer;
+        self.transport_closed = snapshot.transport_closed;
+        self.negotiation_needed_state = snapshot.negotiation_needed_state;
+        self.is_negotiation_ongoing = snapshot.is_negotiation_ongoing;
+        self.last_stable_state = snapshot.last_stable_state;
+        self.pipeline_context.event_outs.truncate(snapshot.events);
+        self.pipeline_context
+            .interceptor_handler_context
+            .ssrc_owners
+            .clear();
+        self.pipeline_context
+            .endpoint_handler_context
+            .ssrc_owners
+            .clear();
+        self.update_cryptex();
     }
 
     pub(super) fn do_signaling_state_change(&mut self, new_state: RTCSignalingState) {

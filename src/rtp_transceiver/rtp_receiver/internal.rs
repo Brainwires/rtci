@@ -225,6 +225,13 @@ impl RTCRtpReceiverInternal {
         self.last_returned_parameters = None;
     }
 
+    /// The receive codecs of the last stable state, after a rollback (W3C webrtc-pc
+    /// `[[LastStableStateReceiveCodecs]]`).
+    pub(crate) fn restore_negotiated_state(&mut self, saved: &RTCRtpReceiverInternal) {
+        self.receive_codecs.clone_from(&saved.receive_codecs);
+        self.last_returned_parameters = None;
+    }
+
     pub(crate) fn set_track(&mut self, track: MediaStreamTrack) {
         self.track = track;
     }
