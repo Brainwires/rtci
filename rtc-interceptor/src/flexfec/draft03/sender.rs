@@ -246,7 +246,12 @@ impl Interceptor for FlexFec03SendInterceptor {
         // The gate FEC-PRE-01 exists to open. Both halves or neither: an SSRC with no payload
         // type has nothing to mark its packets with, and a payload type with no SSRC has nowhere
         // to send them.
-        if let (Some(ssrc_fec), Some(payload_type_fec)) = (info.ssrc_fec, info.payload_type_fec) {
+        //
+        // And only for this format: RFC 8627 `flexfec` is another wire format with its own
+        // interceptor.
+        if let (Some(ssrc_fec), Some(payload_type_fec)) = (info.ssrc_fec, info.payload_type_fec)
+            && info.fec_is_flexfec03()
+        {
             self.streams.insert(
                 info.ssrc,
                 ProtectedStream {
