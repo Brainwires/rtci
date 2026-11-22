@@ -92,8 +92,10 @@ pub type PeerAddr = SocketAddr;
 #[derive(Debug)]
 /// What the client produces in response to inbound datagrams and elapsed time.
 ///
-/// Every variant carries the [`TransactionId`] of the request it answers, so a caller can
-/// match responses to the requests it issued.
+/// A variant that answers a request the caller made carries the [`TransactionId`] that
+/// request returned, so responses can be matched to requests. A variant about an allocation
+/// as a whole (lost, released, a refresh or a channel bind the client made by itself) names
+/// the allocation by its relayed address instead.
 #[non_exhaustive]
 pub enum Event {
     /// A request exhausted its retransmissions without a response.
