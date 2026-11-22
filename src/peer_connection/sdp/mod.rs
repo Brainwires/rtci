@@ -1122,8 +1122,7 @@ impl RTCPeerConnection {
             }
             let (id, encrypted) = if media_section.match_extensions.is_empty() {
                 (rtp_extension.id, rtp_extension.encrypted)
-            } else if let Some(offered) = media_section.match_extensions.get(&rtp_extension.uri)
-            {
+            } else if let Some(offered) = media_section.match_extensions.get(&rtp_extension.uri) {
                 (offered.id, offered.encrypted)
             } else {
                 continue;
@@ -2373,6 +2372,166 @@ pub(crate) fn inherit_session_extmap(desc: &mut SessionDescription) {
     }
 }
 
+/// Refuses a received description whose header extension mappings contradict each other
+/// (RFC 8285 sections 5 and 7):
+///
+/// - an id in the valid range mapped to two different extensions in one m= section, or in
+///   two m= sections of one BUNDLE group, which share one id space (section 5: "Each local
+///   identifier potentially used in the stream is mapped to an extension"; section 7: "The
+///   local identifiers MUST be unique in an RTP session"; "All the 'm=' lines in a BUNDLE
+///   group are considered to be part of the same local identifier (ID) space");
+/// - one extension (URI, form and attributes) mapped to two ids in a section (section 5:
+///   "MUST NOT" appear more than once per stream) or, within a BUNDLE group, to different
+///   ids (section 7: "it MUST use the same ID in all of these 'm=' lines").
+///
+/// The ids of the extended range (4096 to 4351) are left out: they may be repeated for
+/// alternatives (section 7). Checked after the session-level mappings are inherited.
+pub(crate) fn check_extmap_ids(desc: &SessionDescription) -> Result<()> {
+    type Ext = (String, bool, Option<String>);
+    let sections: Vec<(Option<String>, Vec<(u16, Ext)>)> = desc
+        .media_descriptions
+        .iter()
+        .filter(|m| {
+            !is_rejected_media(m) && matches!(m.media_name.media.as_str(), "audio" | "video")
+        })
+        .map(|m| {
+            let lines = section_extmap_lines(m)?
+                .into_iter()
+                .map(|(uri, e)| (e.id, (uri, e.encrypted, e.attributes)))
+                .collect();
+            Ok((get_mid_value(m).cloned(), lines))
+        })
+        .collect::<Result<_>>()?;
+    let groups = bundle_groups(desc);
+    let group_of = |mid: &Option<String>| {
+        mid.as_deref()
+            .and_then(|mid| groups.iter().position(|g| g.contains(&mid)))
+    };
+    let mut scopes: HashMap<(Option<usize>, usize), Vec<(u16, Ext)>> = HashMap::new();
+    for (n, (mid, lines)) in sections.iter().enumerate() {
+        // A bundled section shares the group's id space; any other has its own.
+        let scope = match group_of(mid) {
+            Some(group) => (Some(group), 0),
+            None => (None, n),
+        };
+        let seen = scopes.entry(scope).or_default();
+        for (id, ext) in lines {
+            for (seen_id, seen_ext) in seen.iter() {
+                if seen_id == id && seen_ext != ext {
+                    return Err(Error::SdpInvalidValue(format!(
+                        "a=extmap id {id} maps both {} and {} (RFC 8285 sections 5 and 7)",
+                        seen_ext.0, ext.0
+                    )));
+                }
+                if seen_ext == ext && seen_id != id {
+                    return Err(Error::SdpInvalidValue(format!(
+                        "a=extmap maps {} to both id {seen_id} and id {id} (RFC 8285 sections 5 \
+                         and 7)",
+                        ext.0
+                    )));
+                }
+            }
+            seen.push((*id, ext.clone()));
+        }
+    }
+    Ok(())
+}
+
+/// Gives the header extensions an offer numbered in the extended range (4096 to 4351) an id
+/// this endpoint can use, or drops them (RFC 8285 section 7: "The answerer SHOULD select, at
+/// most, one of the offered extensions with the same identifier and remap it to a free
+/// identifier in the valid range for that extension to be usable"; likewise for more
+/// extensions than the valid range holds).
+///
+/// Per section and extended id, the first alternative `supported` accepts for the section's
+/// media kind is kept; it takes the id the description already maps that extension to, or
+/// else the first id of [`local_extension_ids`] that no mapping of the description and none
+/// in `taken` uses. The other alternatives, and extensions nothing accepts, are dropped. Only
+/// the parsed description changes, so the media engine negotiates the remapped id and the
+/// answer states it.
+pub(crate) fn remap_answerer_assigned_extmaps(
+    desc: &mut SessionDescription,
+    supported: impl Fn(&str, &str) -> bool,
+    taken: &[u16],
+) {
+    let parse = |value: &str| -> Option<(u32, String, String)> {
+        let mut tokens = value.splitn(2, ' ');
+        let entry = tokens.next()?;
+        let rest = tokens.next()?.to_owned();
+        let id = entry.split('/').next()?.parse::<u32>().ok()?;
+        let uri = rest.split_whitespace().next()?;
+        let effective = if uri == ENCRYPT_URI {
+            rest.split_whitespace().nth(1).unwrap_or("").to_owned()
+        } else {
+            uri.to_owned()
+        };
+        Some((id, effective, rest))
+    };
+    let extended = |id: u32| (4096..=4351).contains(&id);
+    if !desc.media_descriptions.iter().any(|m| {
+        m.attributes
+            .iter()
+            .filter(|a| a.key == ATTR_KEY_EXT_MAP)
+            .filter_map(|a| a.value.as_deref().and_then(parse))
+            .any(|(id, _, _)| extended(id))
+    }) {
+        return;
+    }
+    // Ids the description maps in the valid range, and to what.
+    let mut used: Vec<(u16, String)> = desc
+        .media_descriptions
+        .iter()
+        .flat_map(|m| m.attributes.iter())
+        .chain(desc.attributes.iter())
+        .filter(|a| a.key == ATTR_KEY_EXT_MAP)
+        .filter_map(|a| a.value.as_deref().and_then(parse))
+        .filter(|(id, _, _)| (1..=255).contains(id))
+        .map(|(id, _, rest)| (id as u16, rest))
+        .collect();
+    for media in &mut desc.media_descriptions {
+        let kind = media.media_name.media.clone();
+        let mut chosen: HashSet<u32> = HashSet::new();
+        let mut attributes = Vec::with_capacity(media.attributes.len());
+        for mut attribute in std::mem::take(&mut media.attributes) {
+            let parsed = (attribute.key == ATTR_KEY_EXT_MAP)
+                .then(|| attribute.value.as_deref().and_then(parse))
+                .flatten();
+            let Some((id, effective, rest)) = parsed.filter(|(id, _, _)| extended(*id)) else {
+                attributes.push(attribute);
+                continue;
+            };
+            if chosen.contains(&id) || !supported(&kind, &effective) {
+                continue;
+            }
+            let new_id = used
+                .iter()
+                .find(|(_, r)| *r == rest)
+                .map(|(i, _)| *i)
+                .or_else(|| {
+                    local_extension_ids()
+                        .find(|i| !taken.contains(i) && !used.iter().any(|(u, _)| u == i))
+                });
+            let Some(new_id) = new_id else {
+                continue;
+            };
+            chosen.insert(id);
+            if !used.iter().any(|(u, r)| *u == new_id && *r == rest) {
+                used.push((new_id, rest.clone()));
+            }
+            let direction = attribute
+                .value
+                .as_deref()
+                .and_then(|v| v.split(' ').next())
+                .and_then(|entry| entry.split_once('/'))
+                .map(|(_, d)| format!("/{d}"))
+                .unwrap_or_default();
+            attribute.value = Some(format!("{new_id}{direction} {rest}"));
+            attributes.push(attribute);
+        }
+        media.attributes = attributes;
+    }
+}
+
 /// The direction an answer gives each extension of an offered section that restricts one
 /// (RFC 8285 section 7), by URI: sendonly is answered recvonly, recvonly sendonly, inactive
 /// inactive. An extension offered without a direction (or sendrecv) is not in the map.
@@ -3024,9 +3183,8 @@ pub(crate) fn reoffered_header_extensions(
         if !registered {
             continue;
         }
-        let taken = |id: u16| {
-            written.iter().any(|(i, _)| *i == id) || out.iter().any(|(i, _, _)| *i == id)
-        };
+        let taken =
+            |id: u16| written.iter().any(|(i, _)| *i == id) || out.iter().any(|(i, _, _)| *i == id);
         let negotiated = media_engine
             .negotiated_header_extensions
             .iter()
@@ -3142,7 +3300,9 @@ fn is_srtp_section(m: &MediaDescription) -> bool {
 /// apply: on a section without an SRTP profile (RFC 6904 section 4: "it MUST be specified
 /// only for media that use SRTP-based RTP profiles"), or encrypting the `encrypt` URI itself
 /// ("MUST NOT be recursively applied to itself").
-pub(crate) fn section_extmap_lines(m: &MediaDescription) -> Result<Vec<(String, SectionExtension)>> {
+pub(crate) fn section_extmap_lines(
+    m: &MediaDescription,
+) -> Result<Vec<(String, SectionExtension)>> {
     let srtp = is_srtp_section(m);
     let mut out = vec![];
     for a in &m.attributes {
@@ -3177,11 +3337,7 @@ pub(crate) fn section_extmap_lines(m: &MediaDescription) -> Result<Vec<(String, 
             if !srtp || inner_uri == ENCRYPT_URI {
                 continue;
             }
-            (
-                inner_uri.to_owned(),
-                true,
-                inner.next().map(str::to_owned),
-            )
+            (inner_uri.to_owned(), true, inner.next().map(str::to_owned))
         } else {
             (uri.to_string(), false, e.ext_attr.clone())
         };
@@ -3225,9 +3381,7 @@ pub(crate) fn superseded_clear_extensions(m: &MediaDescription) -> Result<Vec<(u
     let chosen = rtp_extensions_from_media_description(m)?;
     Ok(section_extmap_lines(m)?
         .into_iter()
-        .filter(|(uri, mapping)| {
-            !mapping.encrypted && chosen.get(uri).is_some_and(|c| c.encrypted)
-        })
+        .filter(|(uri, mapping)| !mapping.encrypted && chosen.get(uri).is_some_and(|c| c.encrypted))
         .map(|(uri, mapping)| (mapping.id, uri))
         .collect())
 }
@@ -3248,8 +3402,11 @@ fn rtp_extensions_from_media_description_reads_each_extmap_line() {
     let extensions = rtp_extensions_from_media_description(&m).unwrap();
 
     assert_eq!(extensions.len(), 2);
-    assert_eq!(extensions["urn:ietf:params:rtp-hdrext:sdes:mid"], 1);
-    assert_eq!(extensions["urn:ietf:params:rtp-hdrext:ssrc-audio-level"], 3);
+    assert_eq!(extensions["urn:ietf:params:rtp-hdrext:sdes:mid"].id, 1);
+    assert_eq!(
+        extensions["urn:ietf:params:rtp-hdrext:ssrc-audio-level"].id,
+        3
+    );
 
     let malformed = MediaDescription::default()
         .with_value_attribute(ATTR_KEY_EXT_MAP.to_owned(), "not-a-number urn:x".to_owned());
@@ -3264,7 +3421,7 @@ fn rtp_extensions_from_media_description_reads_each_extmap_line() {
         );
     let extensions = rtp_extensions_from_media_description(&bogus).unwrap();
     assert_eq!(extensions.len(), 1);
-    assert_eq!(extensions["urn:ietf:params:rtp-hdrext:sdes:mid"], 16);
+    assert_eq!(extensions["urn:ietf:params:rtp-hdrext:sdes:mid"].id, 16);
 }
 
 #[test]
@@ -3307,7 +3464,10 @@ fn reoffered_header_extensions_adds_listed_extensions_back() {
         &written,
     );
     // Only the registered video extension that isn't written yet, on a free id.
-    assert_eq!(added, vec![(2u16, "urn:3gpp:video-orientation".to_owned())]);
+    assert_eq!(
+        added,
+        vec![(2u16, "urn:3gpp:video-orientation".to_owned(), false)]
+    );
 }
 
 /// Gives a generated description the session's `o=` line (RFC 9429 sections 5.2.2 and 5.3.2:
@@ -3338,14 +3498,30 @@ pub(crate) fn update_sdp_origin(
     *last_generated = d.marshal();
 }
 
+/// Whether a received description has `a=extmap-allow-mixed`, at session level or in any
+/// media section (RFC 8285 section 6: "This attribute can be used at the session level or the
+/// media level"). An answer to it says so at session level.
 pub(crate) fn is_ext_map_allow_mixed_set(
     remote_description: Option<&RTCSessionDescription>,
 ) -> bool {
     remote_description.is_some_and(|r| {
-        r.parsed
-            .as_ref()
-            .is_some_and(|parsed| parsed.has_attribute(ATTR_KEY_EXTMAP_ALLOW_MIXED))
+        r.parsed.as_ref().is_some_and(|parsed| {
+            parsed.has_attribute(ATTR_KEY_EXTMAP_ALLOW_MIXED)
+                || parsed
+                    .media_descriptions
+                    .iter()
+                    .any(|m| m.has_attribute(ATTR_KEY_EXTMAP_ALLOW_MIXED))
+        })
     })
+}
+
+/// Whether a description allows mixed one- and two-byte header extensions for one of its
+/// sections: at session level, in the section, or, for a bundled section, in its BUNDLE
+/// group's tagged section (RFC 8285 section 6: the attribute is of the IDENTICAL multiplexing
+/// category, RFC 8859).
+pub(crate) fn extmap_allow_mixed_in(desc: &SessionDescription, media: &MediaDescription) -> bool {
+    desc.has_attribute(ATTR_KEY_EXTMAP_ALLOW_MIXED)
+        || has_bundle_attribute(desc, media, ATTR_KEY_EXTMAP_ALLOW_MIXED)
 }
 
 /// Checks if the SDP indicates trickle ICE support.

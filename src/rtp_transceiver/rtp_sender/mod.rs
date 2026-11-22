@@ -510,6 +510,8 @@ impl RTCRtpSender<'_> {
             return Err(Error::ErrSenderWithNoSSRCs);
         }
 
+        let mixed = sender.extmap_allow_mixed();
+        let two_byte_stream = sender.is_two_byte_stream(packet.header.ssrc);
         let parameters = sender.get_parameters(media_engine);
         let (codecs, encodings) = (&parameters.rtp_parameters.codecs, &parameters.encodings);
 
@@ -612,9 +614,32 @@ impl RTCRtpSender<'_> {
                 continue;
             };
             if packet.header.get_extension(id).is_none() {
+                // The element may need the two-byte form (an id above 14, a value over 16
+                // bytes): the packet takes it. It is on every packet of the stream, so the
+                // stream stays in one form without mixing too (RFC 8285 section 4.1.2).
                 packet
                     .header
-                    .set_extension(id, bytes::Bytes::copy_from_slice(value.as_bytes()))?;
+                    .set_extension_upgrading(id, bytes::Bytes::copy_from_slice(value.as_bytes()))?;
+            }
+        }
+
+        // RFC 8285 sections 4.1.2 and 6: without `a=extmap-allow-mixed` on both sides, a
+        // stream is all one-byte or all two-byte. It is two-byte throughout when the session
+        // negotiated an id above 14 for it (section 4.1.2: a transmitter that intends the
+        // two-byte form "SHOULD negotiate the use of IDs above 14"), and from the first packet
+        // that needed the two-byte form on. With mixing, each packet takes the smallest form
+        // its elements fit.
+        if !mixed && packet.header.extension {
+            let two_byte_ids = parameters
+                .rtp_parameters
+                .header_extensions
+                .iter()
+                .any(|negotiated| negotiated.id > 14);
+            if two_byte_ids || two_byte_stream {
+                packet.header.upgrade_to_two_byte()?;
+            }
+            if packet.header.extension_form() == Some(rtp::header::ExtensionForm::TwoByte) {
+                sender.set_two_byte_stream(packet.header.ssrc);
             }
         }
 

@@ -1182,20 +1182,38 @@ impl MediaEngine {
         let extensions = rtp_extensions_from_media_description(media)?;
 
         for (extension, mapping) in extensions {
-            self.update_header_extension(mapping.id, extension.as_str(), typ, &mapping)?;
+            self.update_header_extension_mapping(extension.as_str(), typ, &mapping);
         }
 
         Ok(())
     }
 
-    /// Look up a header extension and enable if it exists
+    /// Look up a header extension and enable if it exists: a clear mapping of `id`.
     pub(crate) fn update_header_extension(
         &mut self,
         id: u16,
         extension: &str,
         typ: RtpCodecKind,
-        mapping: &SectionExtension,
     ) -> Result<()> {
+        self.update_header_extension_mapping(
+            extension,
+            typ,
+            &SectionExtension {
+                id,
+                ..Default::default()
+            },
+        );
+        Ok(())
+    }
+
+    /// Look up a header extension and enable it, as a section of a description maps it.
+    pub(crate) fn update_header_extension_mapping(
+        &mut self,
+        extension: &str,
+        typ: RtpCodecKind,
+        mapping: &SectionExtension,
+    ) {
+        let id = mapping.id;
         for local_extension in &self.header_extensions {
             if local_extension.uri == extension {
                 let mut negotiated = self
@@ -1225,7 +1243,6 @@ impl MediaEngine {
                 self.negotiated_header_extensions.insert(id, negotiated);
             }
         }
-        Ok(())
     }
 
     pub(crate) fn push_codecs(&mut self, codecs: Vec<RTCRtpCodecParameters>, typ: RtpCodecKind) {
@@ -1561,6 +1578,7 @@ impl MediaEngine {
                         id: *id,
                         uri: e.uri.clone(),
                         encrypted: e.encrypted,
+                        attributes: e.attributes.clone(),
                     });
                 }
             }
@@ -1602,6 +1620,7 @@ impl MediaEngine {
                         id,
                         uri: e.uri.clone(),
                         encrypted,
+                        attributes: None,
                     })
                 }
             }
@@ -1631,6 +1650,7 @@ impl MediaEngine {
                     uri: e.uri.clone(),
                     id: *id,
                     encrypted: e.encrypted,
+                    attributes: e.attributes.clone(),
                 });
             }
         }

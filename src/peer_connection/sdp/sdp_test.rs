@@ -1377,8 +1377,8 @@ fn test_rtp_extensions_from_media_description() -> Result<()> {
         ..Default::default()
     })?;
 
-    assert_eq!(extensions[sdp::extmap::ABS_SEND_TIME_URI], 1);
-    assert_eq!(extensions[sdp::extmap::SDES_MID_URI], 3);
+    assert_eq!(extensions[sdp::extmap::ABS_SEND_TIME_URI].id, 1);
+    assert_eq!(extensions[sdp::extmap::SDES_MID_URI].id, 3);
 
     Ok(())
 }

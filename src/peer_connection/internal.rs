@@ -13,10 +13,10 @@ use crate::peer_connection::sdp::section_multiplexes_rtcp;
 use crate::peer_connection::sdp::{
     ATTR_KEY_RTCP_MUX_ONLY, BundleMode, MediaSection, PopulateSdpParams,
     add_candidates_to_media_descriptions, bundle_group_mids, effective_direction,
-    get_application_media, get_application_media_section_sctp_port, get_by_mid, get_peer_direction,
-    get_rids, have_data_channel, is_ext_map_allow_mixed_set, is_rejected_media, is_rtp_profile,
-    is_unknown_application_media, rtp_extensions_from_media_description, superseded_clear_extensions,
-    track_details_from_sdp,
+    extmap_allow_mixed_in, get_application_media, get_application_media_section_sctp_port,
+    get_by_mid, get_peer_direction, get_rids, have_data_channel, is_ext_map_allow_mixed_set,
+    is_rejected_media, is_rtp_profile, is_unknown_application_media,
+    rtp_extensions_from_media_description, superseded_clear_extensions, track_details_from_sdp,
     unknown_media_name,
 };
 use crate::peer_connection::state::signaling_state::check_next_signaling_state;
@@ -1153,6 +1153,7 @@ impl RTCPeerConnection {
             .ssrc_owners
             .clear();
         self.update_cryptex();
+        self.update_encrypted_header_extensions();
     }
 
     pub(super) fn do_signaling_state_change(&mut self, new_state: RTCSignalingState) {
@@ -1388,6 +1389,12 @@ impl RTCPeerConnection {
                 && has_bundle_attribute(offer, offered, ATTR_KEY_RTCPRSIZE)
                 && has_bundle_attribute(answer, answered, ATTR_KEY_RTCPRSIZE);
             self.rtp_transceivers[i].set_rtcp_reduced_size(reduced_size);
+            // RFC 8285 section 6: a stream mixes one- and two-byte header extensions only when
+            // the offer and the answer both have `a=extmap-allow-mixed`.
+            let mixed = !is_rejected_media(answered)
+                && extmap_allow_mixed_in(offer, offered)
+                && extmap_allow_mixed_in(answer, answered);
+            self.rtp_transceivers[i].set_extmap_allow_mixed(mixed);
         }
     }
 
