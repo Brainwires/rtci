@@ -276,6 +276,11 @@ fn families_written_to(peer: &dc_common::Peer) -> (bool, bool) {
 /// IPv4 packet of 1200: RFC 9260 section 7.2 counts congestion control in packets of the
 /// path's PMTU, and RFC 8261 section 5 has the SCTP packet fit the DTLS record the path
 /// carries). Nothing used to tell SCTP of a new pair.
+///
+/// RFC 8841 section 12.2: "the SCTP association MUST NOT be affected by such a change in the
+/// candidate pair. The DTLS and SCTP handshakes MUST NOT be repeated": no DTLS handshake
+/// record leaves either peer after the move, and the channel opened before it is the only one
+/// and stays open.
 #[test]
 fn a_move_to_another_candidate_pair_reaches_sctp() -> Result<()> {
     let settings = || default().with_discard_local_candidates_during_ice_restart(true);
@@ -290,6 +295,8 @@ fn a_move_to_another_candidate_pair_reaches_sctp() -> Result<()> {
     );
     assert_eq!(families_written_to(&pair.offerer), (true, false));
 
+    pair.offerer.written_first_bytes.clear();
+    pair.answerer.written_first_bytes.clear();
     pair.offerer.move_to("[fd00::1]:50010".parse()?);
     pair.answerer.move_to("[fd00::2]:50011".parse()?);
     pair.offerer.pc.restart_ice();
@@ -325,6 +332,14 @@ fn a_move_to_another_candidate_pair_reaches_sctp() -> Result<()> {
             RTCSctpTransportState::Connected
         );
         assert!(peer.connected());
+    }
+    // RFC 7983 section 7: a DTLS handshake record has content type 22.
+    for peer in [&pair.offerer, &pair.answerer] {
+        assert!(
+            !peer.written_first_bytes.contains(&22),
+            "no DTLS handshake after the move"
+        );
+        assert_eq!(peer.opened().len(), 1, "no channel opened again");
     }
     let closed = |peer: &dc_common::Peer| {
         peer.events.iter().any(|event| {
