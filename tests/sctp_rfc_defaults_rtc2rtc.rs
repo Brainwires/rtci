@@ -213,6 +213,8 @@ fn channels_of_different_priority_deliver_in_order_under_either_scheduler() -> R
     use rtc::data_channel::RTCDataChannelInit;
 
     for weighted in [true, false] {
+        // 40 messages of 2000 bytes queued at once on each channel: within the W3C
+        // [[MaxBufferSize]] between two default peers (the 16 MiB send buffer).
         let (mut pair, _, _) = connected(
             default().with_sctp_weighted_fair_queueing(weighted),
             default(),

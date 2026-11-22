@@ -281,6 +281,8 @@ pub struct IceBehaviour {
     pub nomination_acceptance: NominationAcceptance,
     /// See [`SettingEngineBuilder::with_ice_nomination_on_consent_checks`].
     pub nominate_on_consent_checks: bool,
+    /// See [`SettingEngineBuilder::with_ice_pacing`].
+    pub pacing: Option<Duration>,
     /// See [`SettingEngineBuilder::with_ice_unauthenticated_requests`].
     pub unauthenticated_requests: UnauthenticatedRequests,
     /// See [`SettingEngineBuilder::with_ice_data_from_selected_pair_only`].
@@ -443,13 +445,24 @@ pub struct SettingEngine {
     /// A message over 16 KB is refused on an association without message interleaving
     /// (RFC 8831 section 6.6). `None` is the default, on.
     pub(crate) sctp_message_size_limit_without_interleaving: Option<bool>,
+    /// [`SettingEngineBuilder::with_data_channel_max_buffer_size`].
+    pub(crate) data_channel_max_buffer_size: Option<u32>,
+    /// [`SettingEngineBuilder::with_non_interactive_video`].
+    pub(crate) non_interactive_video: bool,
+    /// [`SettingEngineBuilder::with_srtp_key_lifetime`].
+    pub(crate) srtp_key_lifetime: Option<srtp::keying::KeyLifetime>,
     pub(crate) ignore_rid_pause_for_recv: bool,
     /// [`SettingEngineBuilder::with_rid_pause_marks`].
     pub(crate) rid_pause_marks: bool,
+    /// Whether `write_rtp` sends header extension elements whose id is not negotiated; see
+    /// [`SettingEngineBuilder::with_unnegotiated_header_extensions`].
+    pub(crate) unnegotiated_header_extensions: bool,
     pub(crate) write_ssrc_attributes_for_simulcast: bool,
     /// The application's socket layer reports each received datagram's ECN codepoint and
     /// applies the one each sent datagram carries ([`SettingEngineBuilder::with_ecn`]).
     pub(crate) ecn: bool,
+    /// How a stream starts marking ([`SettingEngineBuilder::with_ecn_initiation`]).
+    pub(crate) ecn_initiation: interceptor::EcnInitiation,
 }
 
 impl SettingEngine {
@@ -1339,6 +1352,15 @@ impl SettingEngineBuilder {
         self
     }
 
+    /// Ta, the pacing of connectivity checks (RFC 8445 section 14.2), `None` for the default
+    /// of 50 ms (never under 5 ms). A value other than the default is proposed to the peer as
+    /// `a=ice-pacing` (RFC 8839 section 5.5) in every description, and both agents use the
+    /// higher of the two proposals.
+    pub fn with_ice_pacing(mut self, ta: Option<Duration>) -> Self {
+        self.0.ice.pacing = ta;
+        self
+    }
+
     /// Makes the controlling ICE agent's consent checks carry USE-CANDIDATE, as libwebrtc's
     /// do. Off by default: RFC 8445 section 7.1.2 has the attribute sent "in order to nominate
     /// a candidate pair", once (section 8.1.1), and a consent check is a plain Binding request
@@ -1925,6 +1947,46 @@ impl SettingEngineBuilder {
         self
     }
 
+    /// Replaces the SCTP transport's `[[MaxBufferSize]]` with a fixed limit: `send()` refuses
+    /// data that would take a channel's `bufferedAmount` above `limit` bytes
+    /// (`ErrDataChannelBufferFull`). `None`, the default, is the W3C rule (webrtc-pc 6.1.1.2):
+    /// the larger of the peer's `max-message-size` and this side's send buffer, 16 MiB (the
+    /// spec leaves the send buffer's size to the implementation; 16 MiB is Chromium's).
+    ///
+    /// A smaller limit makes `send()` refuse sooner; an application that keeps
+    /// `bufferedAmount` low by `bufferedAmountLowThreshold` needs none.
+    pub fn with_data_channel_max_buffer_size(mut self, limit: Option<u32>) -> Self {
+        self.0.data_channel_max_buffer_size = limit;
+        self
+    }
+
+    /// Marks video as non-interactive for [`RTCPeerConnection::dscp`]: the AF3x codepoints of
+    /// RFC 8837 Table 1 instead of the AF4x ones. RFC 8837 section 5: "Non-browser
+    /// implementations of WebRTC MAY use the AF3x DSCP values for video that is known not to
+    /// be interactive, e.g., all video in a WebRTC video playback application". The default
+    /// is `false`: all WebRTC video is interactive.
+    ///
+    /// [`RTCPeerConnection::dscp`]: crate::peer_connection::RTCPeerConnection::dscp
+    pub fn with_non_interactive_video(mut self, non_interactive: bool) -> Self {
+        self.0.non_interactive_video = non_interactive;
+        self
+    }
+
+    /// Sets how many packets a DTLS-SRTP master key may protect. `None`, the default, is the
+    /// profile's: 2^31 for the RFC 5764 profiles (section 4.1.2), 2^48 SRTP and 2^31 SRTCP
+    /// packets for the AEAD ones (RFC 7714). Shortly before a key runs out the connection
+    /// raises `OnSrtpKeyLifetimeExpiring`; at the limit nothing more is protected with it and
+    /// the DTLS transport fails (`dtls-failure`): browsers do not take a new DTLS association
+    /// on a transport that has one, so the engine does not attempt one (RFC 3711 section 9.2:
+    /// re-key, or end the session).
+    ///
+    /// A lifetime of zero, or above the RFC 3711 limits, makes building the peer connection
+    /// fail.
+    pub fn with_srtp_key_lifetime(mut self, lifetime: Option<srtp::keying::KeyLifetime>) -> Self {
+        self.0.srtp_key_lifetime = lifetime;
+        self
+    }
+
     /// Writes the pause mark `~` of `a=simulcast` (RFC 8853 section 5.2) although RTP stream
     /// pause and resume (RFC 7728) is not negotiated: for an inactive encoding of a sender,
     /// and for a stream the offer being answered marks. The default is `false`.
@@ -1938,6 +2000,18 @@ impl SettingEngineBuilder {
     /// does for inactive layers.
     pub fn with_rid_pause_marks(mut self, rid_pause_marks: bool) -> Self {
         self.0.rid_pause_marks = rid_pause_marks;
+        self
+    }
+
+    /// Sends the header extension elements an application puts in a packet whose id is not
+    /// negotiated for the sender, as the fork did before. The default is `false`.
+    ///
+    /// RFC 8285 section 4.1.2: "the local identifier ... MUST be one that has been negotiated"
+    /// for an element that appears in a stream, so by default `RTCRtpSender::write_rtp` takes
+    /// such an element out of the packet (with a trace log) and sends the rest. `true` passes
+    /// them through.
+    pub fn with_unnegotiated_header_extensions(mut self, pass_through: bool) -> Self {
+        self.0.unnegotiated_header_extensions = pass_through;
         self
     }
 
@@ -1976,16 +2050,32 @@ impl SettingEngineBuilder {
     ///   [`TransportContext::ecn`](shared::TransportContext::ecn) (`IP_TOS` / `IPV6_TCLASS`;
     ///   `None` for Not-ECT).
     ///
-    /// With it on, every RTP packet (RTX included) of a stream whose codec negotiated RFC 8888
-    /// congestion control feedback (`a=rtcp-fb:<pt> ack ccfb`, see
-    /// `configure_congestion_control_feedback`) is sent ECT(1), the L4S identifier: a sender
-    /// marks only where the receiver reports the CE marks back. STUN, DTLS, SCTP and RTCP are
-    /// never marked. Inbound RTP streams count their ECT(1) and CE receptions
+    /// With it on, the RTP packets of a stream whose codec negotiated RFC 8888 congestion
+    /// control feedback (`a=rtcp-fb:<pt> ack ccfb`, see `configure_congestion_control_feedback`)
+    /// are sent ECT(1), the L4S identifier: a sender marks only where the receiver reports the
+    /// CE marks back. As RFC 8888 section 7 requires, the stream first initiates ECN as RFC 6679
+    /// section 7.2.1 has it (one packet in ten a probe, until the feedback shows the probes
+    /// arrive ECT), then marks every packet (RTX included), and stops when the feedback shows
+    /// the path clears the marking or drops marked packets (section 7.4); see
+    /// [`with_ecn_initiation`](Self::with_ecn_initiation) and
+    /// [`EcnValidation`](interceptor::EcnValidation). STUN, DTLS, SCTP and RTCP are never
+    /// marked. Inbound RTP streams count their ECT(1) and CE receptions
     /// (`packetsReceivedWithEct1`, `packetsReceivedWithCe`) and outbound ones their ECT(1)
     /// packets (`packetsSentWithEct1`); with it off those members are left out of the stats,
     /// since the engine cannot see the IP header itself. Off by default.
     pub fn with_ecn(mut self, enabled: bool) -> Self {
         self.0.ecn = enabled;
+        self
+    }
+
+    /// How a stream with ECN on ([`with_ecn`](Self::with_ecn)) starts marking:
+    /// [`EcnInitiation::RtpAndRtcp`](interceptor::EcnInitiation::RtpAndRtcp), the default,
+    /// probes first (RFC 6679 section 7.2.1, the method RFC 8888 section 7 requires);
+    /// [`EcnInitiation::LeapOfFaith`](interceptor::EcnInitiation::LeapOfFaith) marks every
+    /// packet from the first, as browsers that send L4S do (RFC 6679 section 7.2.3). Failure
+    /// detection applies to both.
+    pub fn with_ecn_initiation(mut self, initiation: interceptor::EcnInitiation) -> Self {
+        self.0.ecn_initiation = initiation;
         self
     }
 

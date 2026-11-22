@@ -88,6 +88,16 @@ pub struct KeyLifetime {
     pub srtcp_packets: u64,
 }
 
+/// Checks a key lifetime as [`Context::set_key_lifetime`](crate::context::Context::set_key_lifetime)
+/// does: at least one packet, at most 2^48 SRTP and 2^31 SRTCP (RFC 3711 section 9.2).
+///
+/// # Errors
+///
+/// For a lifetime outside those bounds.
+pub fn validate_key_lifetime(lifetime: KeyLifetime) -> shared::error::Result<()> {
+    lifetime.validate()
+}
+
 impl KeyLifetime {
     /// The longest lifetime RFC 3711 allows: 2^48 SRTP and 2^31 SRTCP packets.
     pub const MAX: Self = Self {

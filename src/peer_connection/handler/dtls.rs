@@ -395,6 +395,7 @@ impl<'a>
                                 DtlsHandler::update_srtp_contexts(
                                     state,
                                     &self.ctx.dtls_transport.replay_protection,
+                                    self.ctx.dtls_transport.srtp_key_lifetime,
                                     &self.ctx.dtls_transport.crypto_provider,
                                 )
                                 .map(Some)
@@ -643,6 +644,19 @@ impl<'a> DtlsHandler<'a> {
     /// `DTLSClosed` event is what tells the SCTP and data channel handlers, and it is also what
     /// makes the peer connection re-evaluate its state. A no-op once the transport is failed
     /// or closed.
+    /// Fails the transport with `error`, as `fail_transport` does for a DTLS failure: what an
+    /// SRTP key that reached its lifetime does to the transport that keyed it.
+    pub(crate) fn fail_with(
+        &mut self,
+        now: Instant,
+        error: crate::peer_connection::rtc_error::RTCError,
+    ) {
+        self.fail_transport(now);
+        if self.ctx.dtls_transport.state == RTCDtlsTransportState::Failed {
+            self.ctx.dtls_transport.failure = Some(error);
+        }
+    }
+
     fn fail_transport(&mut self, now: Instant) {
         if matches!(
             self.ctx.dtls_transport.state,
@@ -678,22 +692,42 @@ impl<'a> DtlsHandler<'a> {
     /// and the cost is a 128-byte bitmap per SSRC (at most `MAX_SSRC_STATES` of them).
     const DEFAULT_SESSION_SRTP_REPLAY_PROTECTION_WINDOW: usize = 1024;
     const DEFAULT_SESSION_SRTCP_REPLAY_PROTECTION_WINDOW: usize = 64;
+    /// The lifetime of a DTLS-SRTP master key: 2^31 packets for the RFC 5764 profiles
+    /// (section 4.1.2: "maximum_lifetime: 2^31"), what RFC 3711 allows otherwise (the AEAD
+    /// profiles of RFC 7714: 2^48 SRTP, 2^31 SRTCP), unless the setting engine sets a shorter
+    /// one.
+    fn key_lifetime(
+        profile: ProtectionProfile,
+        configured: Option<srtp::keying::KeyLifetime>,
+    ) -> srtp::keying::KeyLifetime {
+        if let Some(lifetime) = configured {
+            return lifetime;
+        }
+        if profile.is_aead() {
+            srtp::keying::KeyLifetime::MAX
+        } else {
+            srtp::keying::KeyLifetime {
+                srtp_packets: 1 << 31,
+                srtcp_packets: 1 << 31,
+            }
+        }
+    }
+
     pub(crate) fn update_srtp_contexts(
         state: &State,
         replay_protection: &ReplayProtection,
+        key_lifetime: Option<srtp::keying::KeyLifetime>,
         crypto_provider: &Arc<dyn RTCCryptoProvider>,
     ) -> Result<(srtp::context::Context, srtp::context::Context)> {
+        // The DTLS-SRTP code point names the profile (RFC 5764 section 4.1.2, RFC 7714
+        // section 14.2). A NULL-cipher profile protects nothing from eavesdroppers and is
+        // never taken (RFC 8827 section 6.5: media is encrypted).
         let profile = match state.srtp_protection_profile() {
-            SrtpProtectionProfile::Srtp_Aead_Aes_128_Gcm => ProtectionProfile::AeadAes128Gcm,
-            SrtpProtectionProfile::Srtp_Aead_Aes_256_Gcm => ProtectionProfile::AeadAes256Gcm,
-            SrtpProtectionProfile::Srtp_Aes128_Cm_Hmac_Sha1_80 => {
-                ProtectionProfile::Aes128CmHmacSha1_80
-            }
-            SrtpProtectionProfile::Srtp_Aes128_Cm_Hmac_Sha1_32 => {
-                ProtectionProfile::Aes128CmHmacSha1_32
-            }
-            _ => return Err(Error::ErrNoSuchSrtpProfile),
-        };
+            SrtpProtectionProfile::Unsupported => None,
+            negotiated => ProtectionProfile::from_dtls_srtp_id(negotiated as u16),
+        }
+        .filter(|profile| !profile.is_null_cipher())
+        .ok_or(Error::ErrNoSuchSrtpProfile)?;
 
         let mut srtp_config = srtp::config::Config {
             profile,
@@ -728,6 +762,9 @@ impl<'a> DtlsHandler<'a> {
             crypto_provider.crypto(),
         )?;
 
+        let mut local_context = local_context;
+        local_context.set_key_lifetime(Self::key_lifetime(profile, key_lifetime))?;
+
         let remote_context = srtp::context::Context::new(
             &srtp_config.keys.remote_master_key,
             &srtp_config.keys.remote_master_salt,
@@ -748,6 +785,8 @@ impl<'a> DtlsHandler<'a> {
             },
             crypto_provider.crypto(),
         )?;
+        let mut remote_context = remote_context;
+        remote_context.set_key_lifetime(Self::key_lifetime(profile, key_lifetime))?;
 
         Ok((local_context, remote_context))
     }
@@ -755,6 +794,43 @@ impl<'a> DtlsHandler<'a> {
 
 #[cfg(test)]
 mod tests {
+    /// RFC 5764 section 4.1.2: a DTLS-SRTP key of the AES-CM profiles lives for 2^31 packets;
+    /// the AEAD profiles (RFC 7714) for what RFC 3711 allows; a configured lifetime wins.
+    #[test]
+    fn dtls_srtp_keys_get_the_profiles_lifetime() {
+        use srtp::keying::KeyLifetime;
+        use srtp::protection_profile::ProtectionProfile;
+        let rfc5764 = KeyLifetime {
+            srtp_packets: 1 << 31,
+            srtcp_packets: 1 << 31,
+        };
+        for profile in [
+            ProtectionProfile::Aes128CmHmacSha1_80,
+            ProtectionProfile::Aes128CmHmacSha1_32,
+        ] {
+            assert_eq!(DtlsHandler::key_lifetime(profile, None), rfc5764);
+        }
+        assert_eq!(
+            DtlsHandler::key_lifetime(ProtectionProfile::AeadAes128Gcm, None),
+            KeyLifetime::MAX
+        );
+        let configured = KeyLifetime {
+            srtp_packets: 9,
+            srtcp_packets: 9,
+        };
+        assert_eq!(
+            DtlsHandler::key_lifetime(ProtectionProfile::AeadAes256Gcm, Some(configured)),
+            configured
+        );
+        // The NULL-cipher profiles are never taken.
+        assert!(ProtectionProfile::from_dtls_srtp_id(0x0005).is_some_and(|p| p.is_null_cipher()));
+        assert!(
+            !crate::peer_connection::transport::dtls::default_srtp_protection_profiles()
+                .iter()
+                .any(|p| matches!(*p as u16, 0x0005 | 0x0006))
+        );
+    }
+
     use super::*;
     use crate::peer_connection::transport::{RTCTransportId, TransportKind};
     use shared::marshal::Marshal;

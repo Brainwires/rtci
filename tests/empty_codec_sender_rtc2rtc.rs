@@ -20,6 +20,7 @@ use rtc::peer_connection::configuration::media_engine::{
 };
 use rtc::peer_connection::event::RTCPeerConnectionEvent;
 use rtc::peer_connection::message::RTCMessage;
+use rtc::peer_connection::sdp::RTCSessionDescription;
 use rtc::peer_connection::state::RTCPeerConnectionState;
 use rtc::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, RTCIceCandidate, RTCIceCandidateInit,
@@ -224,6 +225,14 @@ impl World {
 
     /// `connected`, both peers negotiating receiver reference times with `rrtr`.
     fn connected_with_rrtr(rrtr: bool) -> Result<(Self, RTCRtpSenderId)> {
+        Self::connected_with_offer(rrtr, |sdp| sdp)
+    }
+
+    /// `connected_with_rrtr`, the offer changed by `munge` on its way to the answerer.
+    fn connected_with_offer(
+        rrtr: bool,
+        munge: impl Fn(String) -> String,
+    ) -> Result<(Self, RTCRtpSenderId)> {
         let mut world = World {
             peers: [
                 Peer::with_rrtr("10.0.0.1:5000", rrtr)?,
@@ -255,7 +264,9 @@ impl World {
         world.peers[0]
             .pc
             .set_local_description(now, offer.clone())?;
-        world.peers[1].pc.set_remote_description(now, offer)?;
+        world.peers[1]
+            .pc
+            .set_remote_description(now, RTCSessionDescription::offer(munge(offer.sdp))?)?;
         let answer = world.peers[1].pc.create_answer(None)?;
         world.peers[1]
             .pc
@@ -585,6 +596,75 @@ fn without_rrtr_the_remote_outbound_round_trip_time_is_unmeasured() -> Result<()
     let (ssrc, _, _) = world.sender_stream(sender);
     world.send_media(sender, Duration::from_secs(3))?;
 
+    let (rtt, _, measurements) =
+        remote_outbound_rtt(&mut world, ssrc).expect("remote-outbound stats");
+    assert_eq!(rtt, None);
+    assert_eq!(measurements, 0);
+    Ok(())
+}
+
+/// Sends media until the receiver's remote-outbound stats carry a round trip time, or 1500
+/// packets have gone: whether one was measured.
+fn round_trip_time_measured(world: &mut World, sender: RTCRtpSenderId) -> Result<bool> {
+    let (ssrc, _, pt) = world.sender_stream(sender);
+    world.send_media(sender, Duration::ZERO)?;
+    for n in 0..1500u16 {
+        if remote_outbound_rtt(world, ssrc).is_some_and(|(rtt, _, _)| rtt.is_some()) {
+            return Ok(true);
+        }
+        let now = world.now;
+        world.peers[0]
+            .pc
+            .rtp_sender(sender)
+            .expect("sender")
+            .write_rtp(
+                now,
+                rtc::rtp::Packet {
+                    header: rtc::rtp::header::Header {
+                        version: 2,
+                        payload_type: pt,
+                        sequence_number: FIRST_SEQ.wrapping_add(PACKETS).wrapping_add(n),
+                        timestamp: u32::from(PACKETS + n) * 1800,
+                        ssrc,
+                        marker: true,
+                        ..Default::default()
+                    },
+                    payload: Bytes::from(vec![0x10u8; 200]),
+                },
+            )?;
+        world.pump()?;
+        world.run_until(now + Duration::from_millis(20))?;
+    }
+    Ok(false)
+}
+
+/// RFC 3611 section 5.1: `a=rtcp-xr:rcvr-rtt=<mode>` is how SDP asks for receiver reference
+/// times. An offer that says so only that way (no `a=rtcp-fb ... rrtr`) negotiates them: the
+/// receiver sends reference times and measures the round trip time from the DLRR blocks.
+#[test]
+fn receiver_reference_times_are_negotiated_by_rtcp_xr_alone() -> Result<()> {
+    let (mut world, sender) = World::connected_with_offer(true, |sdp| {
+        assert!(sdp.contains("a=rtcp-xr:rcvr-rtt=all\r\n"), "{sdp}");
+        sdp.split("\r\n")
+            .filter(|l| !(l.starts_with("a=rtcp-fb:") && l.ends_with(" rrtr")))
+            .collect::<Vec<_>>()
+            .join("\r\n")
+    })?;
+    assert!(round_trip_time_measured(&mut world, sender)?);
+    Ok(())
+}
+
+/// RFC 3611 section 5.1: a peer whose `a=rtcp-xr` is present "SHOULD NOT send XR blocks other
+/// than those listed": an offer whose attribute does not list `rcvr-rtt` gets no reference
+/// times, whatever its `a=rtcp-fb` lines say.
+#[test]
+fn a_peer_whose_rtcp_xr_omits_rcvr_rtt_is_sent_no_reference_times() -> Result<()> {
+    let (mut world, sender) = World::connected_with_offer(true, |sdp| {
+        assert!(sdp.contains(" rrtr\r\n"), "{sdp}");
+        sdp.replace("a=rtcp-xr:rcvr-rtt=all", "a=rtcp-xr:pkt-loss-rle")
+    })?;
+    let (ssrc, _, _) = world.sender_stream(sender);
+    world.send_media(sender, Duration::from_secs(3))?;
     let (rtt, _, measurements) =
         remote_outbound_rtt(&mut world, ssrc).expect("remote-outbound stats");
     assert_eq!(rtt, None);

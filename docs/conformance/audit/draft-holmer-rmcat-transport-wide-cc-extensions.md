@@ -23,7 +23,7 @@ T5 are in `rtc-rtcp`; T6 is unchanged (libwebrtc behaviour, a decision).
 
 Totals (MUST includes MUST NOT/SHALL; SHOULD includes SHOULD NOT/RECOMMENDED):
 
-- MUST: tested 31 / untested 1 / partial 2 / missing 1 / violated 1 / n-a 0
+- MUST: tested 32 / untested 1 / partial 2 / missing 0 / violated 1 / n-a 0
 - SHOULD: tested 1 / untested 0 / partial 2 / missing 0 / violated 0 / n-a 0
 - MAY: tested 1 / untested 0 / partial 0 / missing 0 / violated 0 / n-a 0
 
@@ -40,7 +40,7 @@ Totals (MUST includes MUST NOT/SHALL; SHOULD includes SHOULD NOT/RECOMMENDED):
 | TWCC-3-2 | 3 | MUST | The sender keeps a map of in-flight packets and looks up each one's send time on feedback | tested | `rtpfb/history.rs:38-112`, `cc/interceptor.rs:137-146` | `reports_carry_the_transport_wide_sequence_numbers`, `every_departing_packet_is_recorded_at_its_release_instant` | |
 | TWCC-3-3 | 3 | MUST | Lost feedback: the packets it would have reported are ignored, not counted as lost or received | tested | `rtpfb/history.rs` `take_reports` (only packets a feedback described are reported; the rest are released without a verdict, counted by `unreported()`) | `packets_whose_feedback_was_lost_are_not_reported_as_lost`, `packets_of_a_lost_feedback_packet_are_not_reported_as_lost`, `a_stream_the_feedback_does_not_cover_is_not_counted_as_lost` | A packet is a loss only when a feedback reported it not received |
 | TWCC-3-4 | 3 | SHOULD | A feedback message is sent for every frame received | partial | `twcc/receiver.rs:13` (fixed 100 ms), `:187-196` | `test_twcc_receiver_generates_feedback_on_timeout`, `test_twcc_receiver_configurable_interval` | Timer-driven only; not tied to frames |
-| TWCC-3-5 | 3 | MAY | With low uplink bandwidth feedback may be sent less often, e.g. once per RTT | tested | `rtc-interceptor/src/cc/feedback_cadence.rs`, `twcc/receiver.rs` (`with_adaptive_interval`) | `the_default_feedback_rate_is_enough_for_the_congestion_controller`, `the_interval_is_what_the_rtcp_bandwidth_holds_one_report_in` | The interval stretches to what the RTCP bandwidth holds one feedback packet in (100 to 400 ms); not tied to the RTT |
+| TWCC-3-5 | 3 | MAY | With low uplink bandwidth feedback may be sent less often, e.g. once per RTT | tested | `rtc-interceptor/src/cc/feedback_cadence.rs`, `twcc/receiver.rs` (`with_adaptive_interval`) | `the_default_feedback_rate_is_enough_for_the_congestion_controller`, `the_interval_holds_the_feedback_in_five_percent_of_the_media` | The interval holds the feedback in 5% of the media received, between 50 and 250 ms (`FeedbackCadence`): 250 ms at 64 kbit/s, 160 ms at 100 kbit/s, 50 ms from 300 kbit/s up; `b=RR` replaces the 5% when negotiated |
 | TWCC-3.1-1 | 3.1 | MUST | Packet is RTPFB (PT 205) with FMT 15, V=2 | tested | `transport_layer_cc/mod.rs` `header()`, `unmarshal` type check | `test_transport_layer_cc_marshal`, `test_transport_layer_cc_unmarshal` | |
 | TWCC-3.1-2 | 3.1 | MUST | P bit set when padding octets follow; they are counted in `length` and are not control information | tested | `header.rs::read_packet`, `transport_layer_cc/mod.rs` (`unmarshal`: chunks and deltas end before the padding) | `reference_time_test.rs::padding_is_not_read_as_chunks_or_deltas` | Two inherited fixtures stated a padding count larger than their padding; corrected (libwebrtc checks the count the same way) |
 | TWCC-3.1-3 | 3.1 | MUST | "SSRC of packet sender" is the originator's SSRC | partial | `twcc/receiver.rs:150` (`Recorder::new(rand::random())`) | none on the value | A random SSRC unrelated to any stream or to the SSRC in this endpoint's RR/SDES |
@@ -68,7 +68,7 @@ Totals (MUST includes MUST NOT/SHALL; SHOULD includes SHOULD NOT/RECOMMENDED):
 | TWCC-3.1.5-3 | 3.1.5 | MUST | Large or negative delta: 16-bit signed, -8192.0 to 8191.75 ms | tested | same, `twcc/recorder.rs:287-290` | `a_large_delta_run_needs_two_bytes_each`, `a_negative_delta_moves_the_arrival_backwards` | |
 | TWCC-3.1.5-4 | 3.1.5 | MUST | A delta beyond the 16-bit range starts a new feedback message, whose reference time absorbs the gap | untested | `twcc/recorder.rs:271-274` (`add_received` returns false), `:185-187`, `:154-164` | none (no test has an arrival gap above 8.19 s) | |
 | TWCC-3.1.5-5 | 3.1.5 | MUST (implied) | The sender reconstructs each arrival time from the reference time and the running deltas, negative ones included | tested | `rtpfb/convert.rs:36-64`, `gcc/twcc_gcc/mod.rs` `process_status` | `deltas_accumulate_from_the_reference_time`, `a_negative_delta_moves_the_arrival_backwards`, `more_received_packets_than_deltas_does_not_panic` | |
-| TWCC-3.1.5-6 | 3.1.5 | MUST (implied) | A feedback packet stays within the path MTU; a longer window continues in the next packet | missing | `twcc/recorder.rs:238` (`len` is counted, never compared with a limit) | none | A long reporting window yields one arbitrarily large packet |
+| TWCC-3.1.5-6 | 3.1.5 | MUST (implied) | A feedback packet stays within the path MTU; a longer window continues in the next packet | tested | `twcc/recorder.rs` (`MAX_FEEDBACK_OCTETS`, `Feedback::add_received`) | `a_long_window_is_split_within_the_mtu` | A feedback packet is kept within 1100 octets (room for SRTCP and a minimal compound packet within 1200); the rest of the window continues in the next packet, each arrival reported once |
 
 ## Gaps, in order of importance
 

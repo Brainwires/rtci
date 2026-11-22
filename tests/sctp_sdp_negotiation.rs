@@ -667,10 +667,12 @@ fn the_offers_proto_matches_the_default_candidate() -> TestResult {
     add_host_candidate(&mut offerer, "tcp", 5000)?;
     let mut answerer = default_peer()?;
     let (offer, answer) = jsep_common::exchange(&mut offerer, &mut answerer)?;
-    for sdp in [&offer, &answer] {
+    // The offer's port is its default candidate's, the passive TCP one (RFC 8839 section
+    // 4.2.1.2); the answerer has no candidate yet.
+    for (sdp, port) in [(&offer, 5000), (&answer, 9)] {
         assert_eq!(
             data_section(sdp)[0],
-            "m=application 9 TCP/DTLS/SCTP webrtc-datachannel"
+            format!("m=application {port} TCP/DTLS/SCTP webrtc-datachannel")
         );
     }
     assert!(answerer.sctp().is_some());
