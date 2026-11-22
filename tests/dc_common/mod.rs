@@ -45,6 +45,8 @@ pub struct Peer {
     pub drop_outgoing: bool,
     /// The size of every datagram this peer wrote, in order (lost ones included).
     pub written_sizes: Vec<usize>,
+    /// The address every datagram this peer wrote went to, in the order of `written_sizes`.
+    pub written_to: Vec<SocketAddr>,
     /// Whether a datagram the peer connection refuses is passed over instead of failing the
     /// run: while a DTLS association is being replaced, records of the old one still arrive.
     pub tolerate_read_errors: bool,
@@ -83,6 +85,7 @@ impl Peer {
             received: Vec::new(),
             drop_outgoing: false,
             written_sizes: Vec::new(),
+            written_to: Vec::new(),
             tolerate_read_errors: false,
             earlier_addrs: Vec::new(),
         };
@@ -134,6 +137,7 @@ impl Peer {
         let mut written = Vec::new();
         while let Some(datagram) = self.pc.poll_write() {
             self.written_sizes.push(datagram.message.len());
+            self.written_to.push(datagram.transport.peer_addr);
             written.push(datagram);
         }
         if self.drop_outgoing {
