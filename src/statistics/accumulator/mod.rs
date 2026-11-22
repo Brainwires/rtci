@@ -126,6 +126,8 @@ pub(crate) struct RTCStatsAccumulator {
     /// The application's socket layer carries ECN (`SettingEngineBuilder::with_ecn`): RTP
     /// streams report their ECN counts.
     pub(crate) ecn: bool,
+    /// How a stream with ECN on starts marking (`SettingEngineBuilder::with_ecn_initiation`).
+    pub(crate) ecn_initiation: interceptor::EcnInitiation,
 
     /// How many RTP stream objects have been deleted. A stream object created now carries it in
     /// its id, so that id differs from the id of every deleted object with the same SSRC
@@ -180,9 +182,14 @@ impl RTCStatsAccumulator {
 
     /// The accumulator of a peer connection: [`with_ecn`](Self::with_ecn), and report ids
     /// hashed with `id_salt`, which the connection draws at random.
-    pub(crate) fn for_connection(ecn: bool, id_salt: [u64; 2]) -> Self {
+    pub(crate) fn for_connection(
+        ecn: bool,
+        ecn_initiation: interceptor::EcnInitiation,
+        id_salt: [u64; 2],
+    ) -> Self {
         Self {
             ecn,
+            ecn_initiation,
             id_salt: Some(id_salt),
             ..Self::default()
         }
@@ -935,20 +942,37 @@ impl RTCStatsAccumulator {
         }
     }
 
-    /// The ECN codepoint to send an outgoing RTP packet with: ECT(1) for a packet (RTX
-    /// included) of a stream that sends ECT(1) ([`OutboundRtpStreamAccumulator::ect1_marking`]),
-    /// counted on that stream; Not-ECT (`None`) otherwise.
-    pub(crate) fn ecn_for_rtp_sent(&mut self, ssrc: SSRC) -> Option<shared::EcnCodepoint> {
+    /// The ECN codepoint to send an outgoing RTP packet `sequence_number` of `ssrc` with at
+    /// `now`: ECT(1) or Not-ECT (`None`) as the stream's ECN validation decides (RFC 8888
+    /// section 7, RFC 6679 sections 7.2-7.4: probes while initiating, every packet once
+    /// confirmed, none after a failure), for a stream that marks at all
+    /// ([`OutboundRtpStreamAccumulator::ect1_marking`]). An RTX packet is marked only while
+    /// the stream it repairs marks every packet. ECT(1) packets are counted on the stream.
+    pub(crate) fn ecn_for_rtp_sent(
+        &mut self,
+        ssrc: SSRC,
+        sequence_number: u16,
+        now: Instant,
+    ) -> Option<shared::EcnCodepoint> {
         if !self.ecn {
             return None;
         }
-        let primary = if self.outbound_rtp_streams.contains_key(&ssrc) {
-            ssrc
+        let (primary, own) = if self.outbound_rtp_streams.contains_key(&ssrc) {
+            (ssrc, true)
         } else {
-            *self.outbound_rtx_ssrc_to_primary.get(&ssrc)?
+            (*self.outbound_rtx_ssrc_to_primary.get(&ssrc)?, false)
         };
         let stream = self.outbound_rtp_streams.get_mut(&primary)?;
         if !stream.ect1_marking {
+            return None;
+        }
+        let validation = stream.ecn_validation.as_deref_mut()?;
+        let marked = if own {
+            validation.on_send(now, sequence_number)
+        } else {
+            validation.marks_all()
+        };
+        if !marked {
             return None;
         }
         stream.on_ect1_sent();
@@ -975,9 +999,17 @@ impl RTCStatsAccumulator {
     /// ECN on, its packets are then sent ECT(1).
     pub(crate) fn set_outbound_ccfb(&mut self, ssrc: SSRC, negotiated: bool) {
         let ecn = self.ecn;
+        let initiation = self.ecn_initiation;
         if let Some(stream) = self.outbound_rtp_streams.get_mut(&ssrc) {
             stream.ccfb_negotiated = negotiated;
             stream.ect1_marking = ecn && negotiated;
+            // A renegotiation that keeps `ack ccfb` keeps where the stream is in the
+            // procedure; one that drops it ends it.
+            if !stream.ect1_marking {
+                stream.ecn_validation = None;
+            } else if stream.ecn_validation.is_none() {
+                stream.ecn_validation = Some(Box::new(interceptor::EcnValidation::new(initiation)));
+            }
         }
     }
 

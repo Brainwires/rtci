@@ -306,6 +306,7 @@ impl RTCRtpReceiverInternal {
         header: &rtp::Header,
         audio_level: Option<u8>,
         csrc_levels: Option<&[u8]>,
+        vad: bool,
         capture: Option<rtp::extension::abs_capture_time_extension::AbsCaptureTimeExtension>,
         clock_rate: Option<u32>,
     ) {
@@ -320,13 +321,18 @@ impl RTCRtpReceiverInternal {
             rtp_timestamp: header.timestamp,
             capture_timestamp: None,
             sender_capture_time_offset: None,
+            voice_activity_flag: None,
         };
         let (capture_timestamp, sender_capture_time_offset) =
             self.capture_time_of(header, capture, clock_rate);
 
         self.synchronization_sources
             .retain(|source| source.source != header.ssrc && live(source));
-        let mut synchronization = entry(header.ssrc, audio_level.map(linear_audio_level));
+        let mut synchronization = RTCRtpContributingSource {
+            // RFC 6464 section 3: the V bit is the level octet's high bit.
+            voice_activity_flag: audio_level.filter(|_| vad).map(|level| level & 0x80 != 0),
+            ..entry(header.ssrc, audio_level.map(linear_audio_level))
+        };
         synchronization.capture_timestamp = capture_timestamp;
         synchronization.sender_capture_time_offset = sender_capture_time_offset;
         self.synchronization_sources.push(synchronization);

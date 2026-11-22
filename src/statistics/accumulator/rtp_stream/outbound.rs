@@ -127,9 +127,13 @@ pub struct OutboundRtpStreamAccumulator {
     pub ecn: bool,
     /// The stream's codec negotiated RFC 8888 feedback (`a=rtcp-fb:<pt> ack ccfb`).
     pub ccfb_negotiated: bool,
-    /// The stream's RTP packets (and its RTX packets) are sent ECT(1): ECN is on and RFC 8888
-    /// feedback, which reports CE marks back, is negotiated.
+    /// The stream's RTP packets (and its RTX packets) may be sent ECT(1): ECN is on and RFC
+    /// 8888 feedback, which reports CE marks back, is negotiated. Which ones are is
+    /// `ecn_validation`'s decision.
     pub ect1_marking: bool,
+    /// RFC 6679 sections 7.2-7.4 for the stream, fed from the RFC 8888 reports (RFC 8888
+    /// section 7); `Some` while `ect1_marking`.
+    pub ecn_validation: Option<Box<interceptor::EcnValidation>>,
     /// RTP packets sent with ECT(1).
     pub packets_sent_with_ect1: u64,
     /// What the RFC 8888 reports received from the remote say about the stream.
@@ -218,10 +222,24 @@ impl OutboundRtpStreamAccumulator {
     /// stream.
     pub fn on_ccfb_block_received(&mut self, block: &CcFeedbackReportBlock, now: Instant) {
         self.remote_report_received_at = Some(now);
-        let sent_with_ect1 = self.packets_sent_with_ect1 > 0;
+        if let Some(validation) = self.ecn_validation.as_deref_mut() {
+            for (offset, metric) in block.metric_blocks.iter().enumerate() {
+                validation.on_report(
+                    now,
+                    block.begin_sequence.wrapping_add(offset as u16),
+                    metric.received,
+                    metric.ecn,
+                );
+            }
+        }
+        // Bleaching is a Not-ECT report of a packet that was sent ECT(1): which packets were
+        // is known per packet, since a stream initiating ECN marks only some.
+        let validation = self.ecn_validation.as_deref();
         self.ccfb_received
             .get_or_insert_with(|| Box::new(CcfbTally::new()))
-            .on_report_block(block, sent_with_ect1);
+            .on_report_block_marked(block, |sequence_number| {
+                validation.is_some_and(|v| v.was_marked(sequence_number))
+            });
     }
 
     /// The remote-inbound RFC 8888 member `pick` selects, where `ccfb` is negotiated (or

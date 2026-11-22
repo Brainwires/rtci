@@ -541,6 +541,10 @@ impl RTCRtpSender<'_> {
         let mid = self.peer_connection.rtp_transceivers[self.id.0]
             .mid()
             .clone();
+        let pass_unnegotiated_extensions = self
+            .peer_connection
+            .setting_engine
+            .unnegotiated_header_extensions;
         let (sender, media_engine) = (
             self.peer_connection.rtp_transceivers[self.id.0]
                 .sender_mut()
@@ -661,19 +665,36 @@ impl RTCRtpSender<'_> {
             packet.header.payload_type = codec.payload_type;
         }
 
-        // Header extensions whose id is not negotiated on this leg are passed through, as before
-        // upstream's 1f1b0874 made them an error (kept by the Brainwires fork, see FORK.md).
-        if let Some(ext) = packet.header.extensions.iter().find(|ext| {
-            !parameters
-                .rtp_parameters
-                .header_extensions
-                .iter()
-                .any(|negotiated| negotiated.id as u8 == ext.id)
-        }) {
+        // RFC 8285 section 4.1.2: an element in a stream has a negotiated id. One that has
+        // not is taken out (upstream's 1f1b0874 refuses the packet instead), or passed through
+        // with `SettingEngineBuilder::with_unnegotiated_header_extensions`.
+        let unnegotiated: Vec<u8> = packet
+            .header
+            .extensions
+            .iter()
+            .map(|ext| ext.id)
+            .filter(|id| {
+                !parameters
+                    .rtp_parameters
+                    .header_extensions
+                    .iter()
+                    .any(|negotiated| u8::try_from(negotiated.id).ok() == Some(*id))
+            })
+            .collect();
+        for id in unnegotiated {
             trace!(
-                "rtp_sender {:?} RTP ssrc {} carries header extension id {} that is not negotiated on this sender leg; passing it through",
-                self.id, packet.header.ssrc, ext.id,
+                "rtp_sender {:?} RTP ssrc {} carries header extension id {id} that is not negotiated on this sender leg; {}",
+                self.id,
+                packet.header.ssrc,
+                if pass_unnegotiated_extensions {
+                    "passing it through"
+                } else {
+                    "removed"
+                },
             );
+            if !pass_unnegotiated_extensions {
+                packet.header.del_extension(id)?;
+            }
         }
 
         // RFC 9143 sections 9.1 and 15: the offerer and answerer identify the m= section an

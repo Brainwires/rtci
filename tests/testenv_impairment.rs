@@ -399,10 +399,16 @@ fn rtp_received(p: &EnvPeer) -> impl Iterator<Item = &rtc::rtp::Packet> {
 }
 
 /// Sends `count` 1000-byte RTP packets at 200 packets/s and returns the fraction of distinct
-/// sequence numbers the receiver got (after any recovery the chain does).
-/// The share of the first `count` packets that arrive. A short uncounted tail follows them: a
-/// receiver learns a packet is lost from a later one, so the last packet of a stream, if lost,
-/// can never be NACKed, and the tail keeps that out of the measurement.
+/// sequence numbers the receiver got (after any recovery the chain does), counted from the
+/// first packet that arrived.
+///
+/// Both ends of the stream are outside what a receiver can repair. A receiver learns a packet
+/// is lost from a later one, so the last packet of a stream, if lost, can never be NACKed: a
+/// short uncounted tail follows the counted packets. And a receiver knows of no packet sent
+/// before the first it receives: a Generic NACK names packets missing between ones it saw
+/// (RFC 4585 section 6.2.1), and there is no gap before the first. With 5% loss the stream's
+/// first packet is lost in one run of twenty, so those packets are not counted either (as in
+/// the virtual-clock twin, `rtc-interceptor/tests/nack_recovery_under_loss.rs`).
 fn rtp_delivery(chain: Chain, count: u16) -> f64 {
     const TAIL: u16 = 20;
     let total = count + TAIL;
@@ -462,22 +468,22 @@ fn rtp_delivery(chain: Chain, count: u16) -> f64 {
         .map(|p| p.header.sequence_number)
         .filter(|&seq| seq.wrapping_sub(start_seq) < count)
         .collect();
-    if chain.nack {
-        // Which packets stayed lost tells a NACK failure from a start-up one: a receiver
-        // cannot ask for packets sent before the first it receives (RFC 4585 6.2.1 NACKs
-        // name gaps, and there is no gap before the first packet).
-        let first = (0..count).find(|n| seqs.contains(&start_seq.wrapping_add(*n)));
-        let missing: Vec<u16> = (0..count)
-            .filter(|n| !seqs.contains(&start_seq.wrapping_add(*n)))
-            .collect();
-        if !missing.is_empty() {
-            eprintln!(
-                "NACK: first packet received is #{first:?}; never received: {:?}",
-                &missing[..missing.len().min(32)]
-            );
-        }
+    let first = (0..count)
+        .find(|n| seqs.contains(&start_seq.wrapping_add(*n)))
+        .expect("no counted packet arrived");
+    let missing: Vec<u16> = (first..count)
+        .filter(|n| !seqs.contains(&start_seq.wrapping_add(*n)))
+        .collect();
+    if chain.nack && (first > 0 || !missing.is_empty()) {
+        // Names what stayed lost, to tell a NACK failure (a gap after the first packet)
+        // from the start-up packets no receiver can ask for.
+        eprintln!(
+            "NACK: first packet received is #{first} (earlier ones not counted); never received after it: {:?}",
+            &missing[..missing.len().min(32)]
+        );
     }
-    seqs.len() as f64 / count as f64
+    let counted = count - first;
+    f64::from(counted - missing.len() as u16) / f64::from(counted)
 }
 
 #[test]

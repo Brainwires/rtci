@@ -94,6 +94,8 @@ struct World {
     now: Instant,
     /// The headers of the RTP packets the first peer put on the wire.
     wire: Vec<Header>,
+    /// The SSRC `send` writes on.
+    media_ssrc: Option<u32>,
 }
 
 impl World {
@@ -153,6 +155,14 @@ impl World {
         Ok(())
     }
 
+    /// The headers on the wire of the stream `send` writes (not RTX, FEC or probes).
+    fn media_wire(&self) -> Vec<&Header> {
+        self.wire
+            .iter()
+            .filter(|h| Some(h.ssrc) == self.media_ssrc)
+            .collect()
+    }
+
     fn run_until(&mut self, until: Instant) -> Result<()> {
         while self.now < until {
             let mut next = until;
@@ -176,7 +186,17 @@ impl World {
         kind: RtpCodecKind,
         edit: impl Fn(String) -> String,
     ) -> Result<(Self, RTCRtpSenderId)> {
-        Self::connected_prepared(kind, edit, |_| {})
+        Self::connected_edited(kind, |offer| offer, edit)
+    }
+
+    /// `connected`, the offer changed by `edit_offer` on its way to the receiver and the
+    /// answer by `edit` on its way to the sender.
+    fn connected_edited(
+        kind: RtpCodecKind,
+        edit_offer: impl Fn(String) -> String,
+        edit: impl Fn(String) -> String,
+    ) -> Result<(Self, RTCRtpSenderId)> {
+        Self::connected_prepared_edited(kind, edit_offer, edit, |_| {})
     }
 
     /// [`Self::connected`], each peer passed through `prepare` before the offer.
@@ -185,10 +205,20 @@ impl World {
         edit: impl Fn(String) -> String,
         prepare: impl Fn(&mut RTCPeerConnection),
     ) -> Result<(Self, RTCRtpSenderId)> {
+        Self::connected_prepared_edited(kind, |offer| offer, edit, prepare)
+    }
+
+    fn connected_prepared_edited(
+        kind: RtpCodecKind,
+        edit_offer: impl Fn(String) -> String,
+        edit: impl Fn(String) -> String,
+        prepare: impl Fn(&mut RTCPeerConnection),
+    ) -> Result<(Self, RTCRtpSenderId)> {
         let mut world = World {
             peers: [Peer::new("10.0.0.1:5000")?, Peer::new("10.0.0.2:5000")?],
             now: Instant::now(),
             wire: Vec::new(),
+            media_ssrc: None,
         };
         for peer in world.peers.iter_mut() {
             prepare(&mut peer.pc);
@@ -215,7 +245,9 @@ impl World {
         world.peers[0]
             .pc
             .set_local_description(now, offer.clone())?;
-        world.peers[1].pc.set_remote_description(now, offer)?;
+        world.peers[1]
+            .pc
+            .set_remote_description(now, RTCSessionDescription::offer(edit_offer(offer.sdp))?)?;
         let answer = world.peers[1].pc.create_answer(None)?;
         world.peers[1]
             .pc
@@ -257,6 +289,7 @@ impl World {
                 parameters.rtp_parameters.codecs[0].payload_type,
             )
         };
+        self.media_ssrc = Some(ssrc);
         let mut header = Header {
             version: 2,
             payload_type: pt,
@@ -290,14 +323,28 @@ fn forms_after_a_long_element(
     edit: impl Fn(String) -> String,
 ) -> Result<Vec<Option<ExtensionForm>>> {
     let (mut world, sender) = World::connected(RtpCodecKind::Video, edit)?;
+    // A negotiated extension (an element of an id that is not is not sent, RFC 8285 section
+    // 4.1.2), the coordination of video orientation.
+    let id = world.peers[0]
+        .pc
+        .rtp_sender(sender)
+        .expect("sender")
+        .get_parameters()
+        .rtp_parameters
+        .header_extensions
+        .iter()
+        .find(|e| e.uri == "urn:3gpp:video-orientation")
+        .map(|e| u8::try_from(e.id))
+        .expect("video orientation is negotiated")?;
     // An element of 20 bytes fits the two-byte form only (RFC 8285 section 4.2: 1 to 16).
-    world.send(sender, 100, &[(13, &[0xAB; 20])])?;
+    world.send(sender, 100, &[(id, &[0xAB; 20])])?;
     for seq in 101..106 {
         world.send(sender, seq, &[])?;
     }
-    assert_eq!(6, world.wire.len(), "every packet went out");
-    assert_eq!(Some(ExtensionForm::TwoByte), world.wire[0].extension_form());
-    Ok(world.wire[1..].iter().map(|h| h.extension_form()).collect())
+    let wire = world.media_wire();
+    assert_eq!(6, wire.len(), "every packet went out");
+    assert_eq!(Some(ExtensionForm::TwoByte), wire[0].extension_form());
+    Ok(wire[1..].iter().map(|h| h.extension_form()).collect())
 }
 
 /// RFC 8285 section 4.1.2: "A stream MUST contain only one-byte headers or only two-byte
@@ -348,9 +395,9 @@ fn an_extension_negotiated_encrypted_is_encrypted_on_the_wire() -> Result<()> {
     for seq in 0..8u16 {
         world.send(sender, 200 + seq, &[(id, &[0x2A])])?;
     }
-    assert_eq!(8, world.wire.len());
-    let on_wire: Vec<Option<u8>> = world
-        .wire
+    let wire = world.media_wire();
+    assert_eq!(8, wire.len());
+    let on_wire: Vec<Option<u8>> = wire
         .iter()
         .map(|h| h.get_extension(id).and_then(|v| v.first().copied()))
         .collect();
@@ -444,6 +491,100 @@ fn the_absolute_capture_time_reaches_the_receivers_synchronization_source() -> R
         source(&mut world),
         Some((Some(capture_ms + 100.0), Some(500.0)))
     );
+    Ok(())
+}
+
+/// The voice activity flags of the receiver's synchronization sources.
+fn voice_activity(world: &mut World) -> Vec<Option<bool>> {
+    let transceiver = world.peers[1]
+        .pc
+        .get_transceivers()
+        .next()
+        .expect("transceiver");
+    let receiver = world.peers[1]
+        .pc
+        .rtp_transceiver(transceiver)
+        .and_then(|t| t.receiver())
+        .expect("receiver");
+    world.peers[1]
+        .pc
+        .rtp_receiver(receiver)
+        .expect("receiver")
+        .get_synchronization_sources()
+        .map(|source| source.voice_activity_flag)
+        .collect()
+}
+
+/// RFC 6464 sections 3 and 4: the V bit of the client-to-mixer audio level says whether there
+/// is voice; it is in use unless the extension was signalled `vad=off` (no attribute is
+/// `vad=on`), and then a receiver "MUST" ignore it. The receiver's synchronization source
+/// carries it (`voiceActivityFlag`) only then.
+#[test]
+fn the_v_bit_is_reported_unless_the_audio_level_was_signalled_vad_off() -> Result<()> {
+    for (vad_off, expected) in [(false, vec![Some(true)]), (true, vec![None])] {
+        let (mut world, sender) = World::connected_edited(
+            RtpCodecKind::Audio,
+            |offer| {
+                if !vad_off {
+                    return offer;
+                }
+                offer
+                    .split("\r\n")
+                    .map(|l| {
+                        if l.starts_with("a=extmap:") && l.ends_with(AUDIO_LEVEL) {
+                            format!("{l} vad=off")
+                        } else {
+                            l.to_owned()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\r\n")
+            },
+            |answer| answer,
+        )?;
+        let level = world.peers[0]
+            .pc
+            .rtp_sender(sender)
+            .expect("sender")
+            .get_parameters()
+            .rtp_parameters
+            .header_extensions
+            .iter()
+            .find(|e| e.uri == AUDIO_LEVEL)
+            .cloned()
+            .expect("the audio level is negotiated");
+        let id = u8::try_from(level.id)?;
+        // V set, level 42 -dBov.
+        world.send(sender, 300, &[(id, &[0x80 | 0x2A])])?;
+        assert_eq!(expected, voice_activity(&mut world), "vad=off: {vad_off}");
+    }
+    Ok(())
+}
+
+/// RFC 8285 section 4.1.2: an element in a stream has a negotiated id. One the application
+/// puts in a packet under an id that is not negotiated is taken out; the others go.
+#[test]
+fn an_element_with_an_id_that_is_not_negotiated_is_not_sent() -> Result<()> {
+    let (mut world, sender) = World::connected(RtpCodecKind::Audio, |sdp| sdp)?;
+    let negotiated: Vec<u8> = world.peers[0]
+        .pc
+        .rtp_sender(sender)
+        .expect("sender")
+        .get_parameters()
+        .rtp_parameters
+        .header_extensions
+        .iter()
+        .filter_map(|e| u8::try_from(e.id).ok())
+        .collect();
+    let stray = (1..=14u8)
+        .find(|id| !negotiated.contains(id))
+        .expect("a free id");
+    let kept = negotiated[0];
+    world.send(sender, 400, &[(stray, &[0x55]), (kept, &[0x01])])?;
+    let wire = world.media_wire();
+    let last = wire.last().expect("the packet went out");
+    assert_eq!(None, last.get_extension(stray), "{last:?}");
+    assert!(last.get_extension(kept).is_some(), "{last:?}");
     Ok(())
 }
 

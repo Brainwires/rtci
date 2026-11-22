@@ -266,6 +266,7 @@ pub use cc::probe::{
     ProbeRequest, probe_estimate,
 };
 pub use cc::tmmbr::{TMMBR_OWNER_TIMEOUT, TmmbEntry};
+pub use cc::tmmbr_request::{TMMBR_REPEAT_INTERVAL, TmmbrControl};
 pub use circuit_breaker::{
     CircuitBreakerBuilder, CircuitBreakerHandle, CircuitBreakerInterceptor, CircuitBreakerReason,
     CircuitBreakerState,
@@ -322,6 +323,11 @@ pub use gcc::rate_control::{
     DEFAULT_DECREASE_FACTOR as GCC_DECREASE_FACTOR, DEFAULT_INCREASE_FACTOR as GCC_INCREASE_FACTOR,
     DEFAULT_RATE_CONTROL_INTERVAL as GCC_RATE_CONTROL_INTERVAL, RateController,
 };
+pub use gcc::remb::{
+    ABS_SEND_TIME_SLOT, ABS_SEND_TIME_URI, AbsSendTimeInterceptor, GOOG_REMB,
+    REMB_DECREASE_TRIGGER, REMB_GENERATOR_SLOT, REMB_INITIALIZATION_TIME, REMB_MAX_INTERVAL,
+    REMB_UPDATE_INTERVAL, RembGeneratorBuilder, RembGeneratorInterceptor,
+};
 pub use gcc::slope::{DelayTrend, SlopeEstimator};
 pub use gcc::state::RateControlState;
 pub use gcc::threshold::{AdaptiveThreshold, DEFAULT_INITIAL_MS as GCC_THRESHOLD_INITIAL_MS};
@@ -359,6 +365,11 @@ pub use pass_through::PassThroughInterceptor;
 pub use registry::{Registry, Slot};
 pub use report::receiver::{RTCP_FB_RRTR, ReceiverReportBuilder, ReceiverReportInterceptor};
 pub use report::sender::{SenderReportBuilder, SenderReportInterceptor};
+pub use rfc8888::ecn::{
+    CONFIRMATIONS as ECN_CONFIRMATIONS, DEFAULT_RETRY_AFTER as ECN_DEFAULT_RETRY_AFTER,
+    EcnInitiation, EcnState, EcnValidation, PROBE_INTERVAL as ECN_PROBE_INTERVAL,
+    PROBE_SPACING as ECN_PROBE_SPACING,
+};
 pub use rfc8888::recorder::CcFeedbackRecorder;
 pub use rfc8888::sender::{
     DEFAULT_INTERVAL as RFC8888_DEFAULT_INTERVAL,
