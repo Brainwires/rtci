@@ -870,6 +870,54 @@ impl Setter for AlternateServer {
     }
 }
 
+/// An XOR-RELAYED-ADDRESS of 0.0.0.0:0 names no relayed address. coturn 4.6 sends one beside
+/// the real address in the Allocate after it refused the same client an IPv6 one with 440
+/// (seen in the test environment): the allocation is the real address, not a family mismatch.
+/// An answer with nothing but such an address is no allocation.
+#[test]
+fn test_an_all_zero_relayed_address_is_passed_over() -> Result<()> {
+    let now = Instant::now();
+    let server = TestServer::new()?;
+    let unusable: SocketAddr = "0.0.0.0:0".parse().unwrap();
+    let options = AllocateOptions {
+        address_family: Some(REQUESTED_FAMILY_IPV4),
+        ..Default::default()
+    };
+
+    let mut client = new_client(TransportProtocol::UDP)?;
+    let (tid, _) = server.allocate_with(
+        &mut client,
+        now,
+        options.clone(),
+        vec![relayed(relayed_addr()), relayed(unusable), lifetime(600)],
+    )?;
+    assert!(matches!(
+        client.poll_event(),
+        Some(Event::AllocateResponse(id, addr)) if id == tid && addr == relayed_addr()
+    ));
+    assert_eq!(
+        client.relay(relayed_addr())?.relayed_addrs(),
+        vec![relayed_addr()]
+    );
+    assert!(
+        client.allocate_with(now, options.clone()).is_ok(),
+        "nothing was held against the server"
+    );
+
+    let mut client = new_client(TransportProtocol::UDP)?;
+    let (tid, _) = server.allocate_with(
+        &mut client,
+        now,
+        options,
+        vec![relayed(unusable), lifetime(600)],
+    )?;
+    assert!(matches!(
+        client.poll_event(),
+        Some(Event::AllocateError(id, RequestError::Failed(_))) if id == tid
+    ));
+    client.close()
+}
+
 /// RFC 8656 §7.4, RFC 8489 §10: a 300 (Try Alternate) names the server to use instead in
 /// ALTERNATE-SERVER. The client does not go there by itself: which server it talks to is the
 /// application's, which gets the address with the error and tries it first.
