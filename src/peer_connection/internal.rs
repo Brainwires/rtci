@@ -6,9 +6,10 @@ use crate::peer_connection::handler::endpoint::EndpointHandlerContext;
 use crate::peer_connection::handler::interceptor::InterceptorHandlerContext;
 use crate::peer_connection::handler::srtp::SrtpHandlerContext;
 use crate::peer_connection::sdp::{
-    BundleMode, MediaSection, PopulateSdpParams, add_candidates_to_media_descriptions,
-    effective_direction, get_by_mid, get_peer_direction, get_rids, have_data_channel,
-    is_ext_map_allow_mixed_set, is_rtp_profile, rtp_extensions_from_media_description,
+    ATTR_KEY_RTCP_MUX_ONLY, BundleMode, MediaSection, PopulateSdpParams,
+    add_candidates_to_media_descriptions, bundle_group_mids, effective_direction, get_by_mid,
+    get_peer_direction, get_rids, has_rtcp_mux, have_data_channel, is_ext_map_allow_mixed_set,
+    is_rejected_media, is_rtp_profile, rtp_extensions_from_media_description,
     track_details_from_sdp, unknown_media_name,
 };
 use crate::peer_connection::state::signaling_state::check_next_signaling_state;
@@ -373,6 +374,7 @@ impl RTCPeerConnection {
             connection_role: DEFAULT_DTLS_ROLE_OFFER.to_connection_role(),
             ice_gathering_state: self.ice_transport().ice_gathering_state,
             bundle: BundleMode::Offer,
+            offered_tag_rtcp_mux_only: false,
             sctp_max_message_size: self.setting_engine.sctp_max_message_size.as_usize(),
             ignore_rid_pause_for_recv: false,
             write_ssrc_attributes_for_simulcast: self
@@ -530,10 +532,14 @@ impl RTCPeerConnection {
 
                     // An audio or video section offered with a profile that is none of the
                     // RTP profiles of RFC 9429 section 5.1.2 is not RTP this endpoint can
-                    // answer: rejected, its proto and formats kept.
+                    // answer: rejected, its proto and formats kept. So is one offered without
+                    // `a=rtcp-mux`: there is no RTCP component to answer it with (RFC 8858
+                    // section 4.3: an answerer that only multiplexes "MUST reject the 'm='
+                    // section"; RFC 9429 section 5.3.1). Under the mux policy "require" such
+                    // an offer was refused when it was applied.
                     if !include_unmatched
                         && matches!(kind, RtpCodecKind::Audio | RtpCodecKind::Video)
-                        && !is_rtp_profile(media)
+                        && (!is_rtp_profile(media) || !has_rtcp_mux(media))
                     {
                         media_sections.push(MediaSection {
                             mid: mid_value.to_owned(),
@@ -588,6 +594,8 @@ impl RTCPeerConnection {
                             rid_map: get_rids(media),
                             answer_direction,
                             offered_protos: offered_protos(media),
+                            offered_rtcp_rsize: (!include_unmatched)
+                                .then(|| media.has_attribute(ATTR_KEY_RTCPRSIZE)),
                             ..Default::default()
                         });
                     } else {
@@ -676,6 +684,10 @@ impl RTCPeerConnection {
             is_extmap_allow_mixed,
             connection_role,
             ice_gathering_state: self.ice_transport().ice_gathering_state,
+            offered_tag_rtcp_mux_only: !include_unmatched
+                && remote_parsed
+                    .as_ref()
+                    .is_some_and(offerer_tagged_section_is_rtcp_mux_only),
             bundle: match_bundle_group,
             sctp_max_message_size: self.setting_engine.sctp_max_message_size.as_usize(),
             ignore_rid_pause_for_recv,
@@ -1113,6 +1125,36 @@ impl RTCPeerConnection {
         // machine settles back to `stable` (see `set_description`).
 
         Ok(())
+    }
+
+    /// What an applied answer negotiated for RTCP, section by section, given to the
+    /// transceivers: reduced-size RTCP is used when both the offer and the answer carry
+    /// `a=rtcp-rsize` (RFC 5506 section 5; RFC 9429 section 5.11: "If the answer does not
+    /// contain 'a=rtcp-rsize', ... reduced-size RTCP MUST NOT be used"). The senders' and
+    /// receivers' parameters report it (`rtcp.reduced_size`), which is what an RTCP session
+    /// reads to choose between compound and reduced-size packets.
+    pub(super) fn apply_negotiated_rtcp(
+        &mut self,
+        offer: &SessionDescription,
+        answer: &SessionDescription,
+    ) {
+        let transceiver_by_mid =
+            RTCPeerConnection::transceiver_index_by_mid(&self.rtp_transceivers);
+        for (offered, answered) in offer
+            .media_descriptions
+            .iter()
+            .zip(&answer.media_descriptions)
+        {
+            let Some(&i) =
+                get_mid_value(answered).and_then(|mid| transceiver_by_mid.get(mid.as_str()))
+            else {
+                continue;
+            };
+            let reduced_size = !is_rejected_media(answered)
+                && offered.has_attribute(ATTR_KEY_RTCPRSIZE)
+                && answered.has_attribute(ATTR_KEY_RTCPRSIZE);
+            self.rtp_transceivers[i].set_rtcp_reduced_size(reduced_size);
+        }
     }
 
     /// Gives each m= section of a remote description that has no `a=mid` one (RFC 9429,
@@ -2415,6 +2457,19 @@ pub(crate) fn answered_direction(
         offered
     };
     local.intersect(offered.reverse())
+}
+
+/// Whether the offerer-tagged section of `offer` (the first tag of its BUNDLE group that is not
+/// rejected, RFC 9143 section 7.2) carries `a=rtcp-mux-only`.
+fn offerer_tagged_section_is_rtcp_mux_only(offer: &SessionDescription) -> bool {
+    bundle_group_mids(offer)
+        .into_iter()
+        .find_map(|tag| {
+            offer.media_descriptions.iter().find(|media| {
+                get_mid_value(media).is_some_and(|mid| mid == tag) && !is_rejected_media(media)
+            })
+        })
+        .is_some_and(|media| media.has_attribute(ATTR_KEY_RTCP_MUX_ONLY))
 }
 
 /// Whether the description has m-sections and rejects every one (port 0): a completed

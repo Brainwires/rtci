@@ -1,0 +1,270 @@
+//! RTP/RTCP multiplexing and reduced-size RTCP in descriptions (RFC 5761 section 5.1.1,
+//! RFC 8858, RFC 5506 section 5, RFC 9429 sections 5.2.1, 5.3.1, 5.8.3 and 5.11, RFC 9143
+//! section 9.3.1): the attributes are read, not only written. This endpoint has no RTCP
+//! component, so it says `a=rtcp-mux-only`, refuses (or, under the "negotiate" policy,
+//! rejects) what does not multiplex, and uses reduced-size RTCP only when both sides say so.
+
+mod jsep_common;
+
+use std::time::Instant;
+
+use jsep_common::{
+    SESSION, TestResult, crlf, default_peer, exchange, media_sections, port_of, video_track,
+};
+use rtc::peer_connection::configuration::media_engine::MediaEngine;
+use rtc::peer_connection::configuration::{RTCConfigurationBuilder, RTCRtcpMuxPolicy};
+use rtc::peer_connection::sdp::RTCSessionDescription;
+use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtc::rtp_transceiver::RTCRtpTransceiverId;
+use rtc::shared::error::Error;
+
+/// The transport lines of a remote section, without `a=rtcp-mux`.
+const TRANSPORT_NO_MUX: &str = "c=IN IP4 0.0.0.0
+a=ice-ufrag:4ZcD
+a=ice-pwd:2/1muCWoOi3uLifh0NuRHlkwz
+a=fingerprint:sha-256 F2:1C:F2:9E:B4:BE:58:19:C9:48:1A:D9:C4:A7:5D:5A:1F:61:7C:17:6B:07:8E:39:A2:E2:B2:BB:BF:4B:D2:16
+a=setup:actpass
+";
+
+fn section(media: &str, mid: &str, payload: &str, rtcp: &str) -> String {
+    format!(
+        "m={media} 9 UDP/TLS/RTP/SAVPF {}
+{TRANSPORT_NO_MUX}a=mid:{mid}
+a=sendrecv
+{rtcp}a=rtpmap:{payload}
+",
+        payload.split(' ').next().unwrap_or_default()
+    )
+}
+
+fn audio(mid: &str, rtcp: &str) -> String {
+    section("audio", mid, "111 opus/48000/2", rtcp)
+}
+
+fn video(mid: &str, rtcp: &str) -> String {
+    section("video", mid, "96 VP8/90000", rtcp)
+}
+
+fn offer(group: &str, sections: &[String]) -> Result<RTCSessionDescription, Error> {
+    RTCSessionDescription::offer(crlf(&format!(
+        "{SESSION}a=group:BUNDLE {group}\n{}",
+        sections.concat()
+    )))
+}
+
+fn peer_with(policy: RTCRtcpMuxPolicy) -> Result<RTCPeerConnection, Box<dyn std::error::Error>> {
+    let mut media_engine = MediaEngine::default();
+    media_engine.register_default_codecs()?;
+    Ok(RTCPeerConnectionBuilder::new()
+        .with_configuration(
+            RTCConfigurationBuilder::new()
+                .with_rtcp_mux_policy(policy)
+                .build(),
+        )
+        .with_media_engine(media_engine)
+        .build(Instant::now())?)
+}
+
+fn has(section: &[String], line: &str) -> bool {
+    section.iter().any(|l| l == line)
+}
+
+#[test]
+fn an_offer_says_it_only_multiplexes() -> TestResult {
+    let mut pc = default_peer()?;
+    pc.add_track(video_track("local", 0x0101_0101))?;
+    pc.create_data_channel("data", None)?;
+    let offer = pc.create_offer(None)?;
+    let sections = media_sections(&offer.sdp);
+    assert!(sections[0][0].starts_with("m=video"), "{}", offer.sdp);
+    for line in ["a=rtcp-mux", "a=rtcp-mux-only", "a=rtcp-rsize"] {
+        assert!(has(&sections[0], line), "{line}:\n{}", offer.sdp);
+    }
+    assert!(!has(&sections[1], "a=rtcp-mux-only"), "{}", offer.sdp);
+    Ok(())
+}
+
+#[test]
+fn an_offer_without_rtcp_mux_is_refused_under_the_require_policy() -> TestResult {
+    // The default policy is "require" (W3C RTCConfiguration.rtcpMuxPolicy).
+    for mut pc in [default_peer()?, peer_with(RTCRtcpMuxPolicy::Require)?] {
+        let refused = pc.set_remote_description(
+            Instant::now(),
+            offer("0 1", &[audio("0", "a=rtcp-mux\n"), video("1", "")])?,
+        );
+        assert!(
+            matches!(&refused, Err(Error::SdpInvalidValue(why)) if why.contains("a=rtcp-mux")),
+            "{refused:?}"
+        );
+        assert!(pc.remote_description().is_none());
+        assert_eq!(pc.get_transceivers().count(), 0);
+    }
+    Ok(())
+}
+
+#[test]
+fn a_section_without_rtcp_mux_is_rejected_under_the_negotiate_policy() -> TestResult {
+    let mut pc = peer_with(RTCRtcpMuxPolicy::Negotiate)?;
+    pc.set_remote_description(
+        Instant::now(),
+        offer("0 1", &[audio("0", "a=rtcp-mux\n"), video("1", "")])?,
+    )?;
+    let answer = pc.create_answer(None)?;
+    let sections = media_sections(&answer.sdp);
+    assert_ne!(port_of(&sections[0]), 0, "{}", answer.sdp);
+    assert!(has(&sections[0], "a=rtcp-mux"), "{}", answer.sdp);
+    // No RTCP component to answer the video section with: rejected.
+    assert_eq!(port_of(&sections[1]), 0, "{}", answer.sdp);
+    assert!(
+        answer.sdp.contains("a=group:BUNDLE 0\r\n"),
+        "{}",
+        answer.sdp
+    );
+    pc.set_local_description(Instant::now(), answer)?;
+    Ok(())
+}
+
+#[test]
+fn rtcp_mux_only_needs_rtcp_mux() -> TestResult {
+    let mut pc = peer_with(RTCRtcpMuxPolicy::Negotiate)?;
+    let refused = pc.set_remote_description(
+        Instant::now(),
+        offer("0", &[audio("0", "a=rtcp-mux-only\n")])?,
+    );
+    assert!(
+        matches!(&refused, Err(Error::SdpInvalidValue(why)) if why.contains("rtcp-mux-only")),
+        "{refused:?}"
+    );
+    assert!(pc.remote_description().is_none());
+    Ok(())
+}
+
+#[test]
+fn an_answer_without_rtcp_mux_is_refused_and_the_offer_stays_pending() -> TestResult {
+    let mut offerer = default_peer()?;
+    let mut answerer = default_peer()?;
+    offerer.add_track(video_track("local", 0x0202_0202))?;
+    let offer = offerer.create_offer(None)?;
+    offerer.set_local_description(Instant::now(), offer.clone())?;
+    answerer.set_remote_description(Instant::now(), offer)?;
+    let answer = answerer.create_answer(None)?;
+    assert!(answer.sdp.contains("a=rtcp-mux\r\n"), "{}", answer.sdp);
+    assert!(
+        !answer.sdp.contains("a=rtcp-mux-only"),
+        "RFC 8858 section 4.3: {}",
+        answer.sdp
+    );
+
+    let without = answer.sdp.replace("a=rtcp-mux\r\n", "");
+    let refused =
+        offerer.set_remote_description(Instant::now(), RTCSessionDescription::answer(without)?);
+    assert!(
+        matches!(&refused, Err(Error::SdpInvalidValue(why)) if why.contains("a=rtcp-mux")),
+        "{refused:?}"
+    );
+    assert!(offerer.remote_description().is_none());
+
+    offerer.set_remote_description(Instant::now(), answer)?;
+    Ok(())
+}
+
+/// RFC 9143 section 9.3.1.2: when the offerer-tagged section had `a=rtcp-mux-only`, the
+/// answerer-tagged section says so too; no other answered section does (RFC 8858 section 4.3).
+#[test]
+fn the_answerer_tagged_section_repeats_rtcp_mux_only() -> TestResult {
+    let mut pc = default_peer()?;
+    pc.set_remote_description(
+        Instant::now(),
+        offer(
+            "0 1",
+            &[
+                audio("0", "a=rtcp-mux\na=rtcp-mux-only\n"),
+                video("1", "a=rtcp-mux\na=rtcp-mux-only\n"),
+            ],
+        )?,
+    )?;
+    let answer = pc.create_answer(None)?;
+    let sections = media_sections(&answer.sdp);
+    assert!(has(&sections[0], "a=rtcp-mux"), "{}", answer.sdp);
+    assert!(has(&sections[0], "a=rtcp-mux-only"), "{}", answer.sdp);
+    assert!(has(&sections[1], "a=rtcp-mux"), "{}", answer.sdp);
+    assert!(!has(&sections[1], "a=rtcp-mux-only"), "{}", answer.sdp);
+
+    // Not offered: not answered.
+    let mut pc = default_peer()?;
+    pc.set_remote_description(Instant::now(), offer("0", &[audio("0", "a=rtcp-mux\n")])?)?;
+    let answer = pc.create_answer(None)?;
+    assert!(!answer.sdp.contains("a=rtcp-mux-only"), "{}", answer.sdp);
+    Ok(())
+}
+
+fn receiver_reduced_size(pc: &mut RTCPeerConnection) -> bool {
+    let id = pc.get_transceivers().next().expect("transceiver");
+    let receiver = pc
+        .rtp_transceiver(id)
+        .expect("transceiver")
+        .receiver()
+        .expect("receiver");
+    pc.rtp_receiver(receiver)
+        .expect("receiver")
+        .get_parameters()
+        .rtp_parameters
+        .rtcp
+        .reduced_size
+}
+
+/// RFC 5506 section 5, RFC 9429 section 5.11: reduced-size RTCP only when the offer and the
+/// answer both carry `a=rtcp-rsize`.
+#[test]
+fn reduced_size_rtcp_is_used_only_when_both_sides_signal_it() -> TestResult {
+    // Offered without it: the answer does not say it, and it is not used.
+    let mut pc = default_peer()?;
+    pc.set_remote_description(Instant::now(), offer("0", &[video("0", "a=rtcp-mux\n")])?)?;
+    let answer = pc.create_answer(None)?;
+    assert!(!answer.sdp.contains("a=rtcp-rsize"), "{}", answer.sdp);
+    pc.set_local_description(Instant::now(), answer)?;
+    assert!(!receiver_reduced_size(&mut pc));
+
+    // Offered with it: answered with it, and used.
+    let mut pc = default_peer()?;
+    pc.set_remote_description(
+        Instant::now(),
+        offer("0", &[video("0", "a=rtcp-mux\na=rtcp-rsize\n")])?,
+    )?;
+    let answer = pc.create_answer(None)?;
+    assert!(answer.sdp.contains("a=rtcp-rsize"), "{}", answer.sdp);
+    pc.set_local_description(Instant::now(), answer)?;
+    assert!(receiver_reduced_size(&mut pc));
+
+    // The offerer: used after an answer with it, not after one without.
+    let mut offerer = default_peer()?;
+    let mut answerer = default_peer()?;
+    let sender = offerer.add_track(video_track("local", 0x0303_0303))?;
+    let sender_reduced_size = |pc: &mut RTCPeerConnection| {
+        let id = pc
+            .rtp_transceiver(RTCRtpTransceiverId::from(sender))
+            .expect("transceiver")
+            .sender()
+            .expect("sender");
+        pc.rtp_sender(id)
+            .expect("sender")
+            .get_parameters()
+            .rtp_parameters
+            .rtcp
+            .reduced_size
+    };
+    assert!(!sender_reduced_size(&mut offerer), "nothing negotiated yet");
+    exchange(&mut offerer, &mut answerer)?;
+    assert!(sender_reduced_size(&mut offerer));
+
+    let offer = offerer.create_offer(None)?;
+    offerer.set_local_description(Instant::now(), offer.clone())?;
+    answerer.set_remote_description(Instant::now(), offer)?;
+    let answer = answerer.create_answer(None)?;
+    answerer.set_local_description(Instant::now(), answer.clone())?;
+    let without = answer.sdp.replace("a=rtcp-rsize\r\n", "");
+    assert_ne!(without, answer.sdp);
+    offerer.set_remote_description(Instant::now(), RTCSessionDescription::answer(without)?)?;
+    assert!(!sender_reduced_size(&mut offerer));
+    Ok(())
+}

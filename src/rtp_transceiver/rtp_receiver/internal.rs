@@ -43,6 +43,8 @@ pub(crate) struct RTCRtpReceiverInternal {
     /// The ids of the remote MediaStreams the track is in, as the remote description's
     /// `a=msid` lines name them (W3C `[[AssociatedRemoteMediaStreams]]`).
     associated_media_stream_ids: Vec<MediaStreamId>,
+    /// Reduced-size RTCP as negotiated for the media section (`RTCRtcpParameters::reduced_size`).
+    rtcp_reduced_size: bool,
 
     last_returned_parameters: Option<RTCRtpReceiveParameters>,
 }
@@ -59,6 +61,7 @@ impl RTCRtpReceiverInternal {
 
             receive_codecs: vec![],
             associated_media_stream_ids: vec![],
+            rtcp_reduced_size: false,
             last_returned_parameters: None,
         }
     }
@@ -69,6 +72,13 @@ impl RTCRtpReceiverInternal {
 
     pub(crate) fn track(&self) -> &MediaStreamTrack {
         &self.track
+    }
+
+    pub(crate) fn set_rtcp_reduced_size(&mut self, reduced_size: bool) {
+        if self.rtcp_reduced_size != reduced_size {
+            self.rtcp_reduced_size = reduced_size;
+            self.last_returned_parameters = None;
+        }
     }
 
     pub(crate) fn streams(&self) -> &[MediaStreamId] {
@@ -125,6 +135,7 @@ impl RTCRtpReceiverInternal {
 
             rtp_parameters.codecs =
                 RTCRtpReceiverInternal::get_codecs(&self.receive_codecs, self.kind(), media_engine);
+            rtp_parameters.rtcp.reduced_size = self.rtcp_reduced_size;
 
             self.last_returned_parameters = Some(RTCRtpReceiveParameters { rtp_parameters });
         }

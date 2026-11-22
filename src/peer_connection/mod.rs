@@ -284,12 +284,13 @@ use crate::peer_connection::handler::sctp::SctpHandlerContext;
 use crate::peer_connection::sdp::MediaDescriptionExt;
 use crate::peer_connection::sdp::session_description::RTCSessionDescription;
 use crate::peer_connection::sdp::{
-    RemoteIceDetails, check_answer_against_offer, codecs_from_media_description,
-    discard_stray_bundle_only, effective_direction, extract_fingerprints, extract_ice_details,
-    get_application_media, get_application_media_section_max_message_size,
-    get_application_media_section_sctp_port, get_mid_value, get_peer_direction,
-    has_ice_trickle_option, insert_media_line, is_lite_set, is_rejected_media, is_sdp_token,
-    media_ice_credentials, sdp_type::RTCSdpType, update_sdp_origin,
+    ATTR_KEY_BUNDLE_ONLY, ATTR_KEY_RTCP_MUX_ONLY, RemoteIceDetails, check_answer_against_offer,
+    codecs_from_media_description, discard_stray_bundle_only, effective_direction,
+    extract_fingerprints, extract_ice_details, get_application_media,
+    get_application_media_section_max_message_size, get_application_media_section_sctp_port,
+    get_mid_value, get_peer_direction, has_ice_trickle_option, has_rtcp_mux, insert_media_line,
+    is_lite_set, is_live_rtp_section, is_rejected_media, is_sdp_token, media_ice_credentials,
+    sdp_type::RTCSdpType, update_sdp_origin,
 };
 use crate::peer_connection::state::RTCIceGatheringState;
 use crate::peer_connection::state::ice_connection_state::RTCIceConnectionState;
@@ -1357,6 +1358,8 @@ impl RTCPeerConnection {
             if let Some(remote_description) = self.remote_description().cloned()
                 && let Some(parsed_remote_description) = remote_description.parsed.as_ref()
             {
+                self.apply_negotiated_rtcp(parsed_remote_description, parsed_local_description);
+
                 // only start sctp transport if application media has been negotiated
                 if let (Some(local_application_media), Some(remote_application_media)) = (
                     get_application_media(parsed_local_description),
@@ -1623,6 +1626,43 @@ impl RTCPeerConnection {
                 && RtpCodecKind::from(media.media_name.media.as_str()) != RtpCodecKind::Unspecified
             {
                 codecs_from_media_description(media)?;
+            }
+        }
+
+        // RTP/RTCP multiplexing (RFC 9429 section 5.8.3). This endpoint has no RTCP component,
+        // so a section that does not multiplex cannot be used at all.
+        for (index, media) in parsed.media_descriptions.iter().enumerate() {
+            if media.has_attribute(ATTR_KEY_RTCP_MUX_ONLY) && !has_rtcp_mux(media) {
+                return Err(Error::SdpInvalidValue(format!(
+                    "m= section {index}: a=rtcp-mux-only without a=rtcp-mux (RFC 8858 section 4.2)"
+                )));
+            }
+            // A bundle-only section may leave the attribute to the tagged section (RFC 9143
+            // section 9.3.1.1).
+            if !is_live_rtp_section(media)
+                || has_rtcp_mux(media)
+                || media.has_attribute(ATTR_KEY_BUNDLE_ONLY)
+            {
+                continue;
+            }
+            if answers {
+                // RFC 8858 section 4.4, RFC 9429 section 5.11: "if no RTCP component exists
+                // ... this indicates an error".
+                return Err(Error::SdpInvalidValue(format!(
+                    "m= section {index}: the answer has no a=rtcp-mux and there is no RTCP \
+                     component to fall back to (RFC 8858 section 4.4)"
+                )));
+            }
+            // W3C webrtc-pc "set a session description" and RFC 9429 section 5.8.3: under the
+            // mux policy "require" (the default) every m= section has `a=rtcp-mux`. Under
+            // "negotiate" the offer is applied and that section is answered rejected.
+            if self.configuration.rtcp_mux_policy
+                != crate::peer_connection::configuration::RTCRtcpMuxPolicy::Negotiate
+            {
+                return Err(Error::SdpInvalidValue(format!(
+                    "m= section {index}: no a=rtcp-mux under the RTCP mux policy \"require\" \
+                     (RFC 9429 section 5.8.3)"
+                )));
             }
         }
 
@@ -1982,8 +2022,11 @@ impl RTCPeerConnection {
                 && let Some(parsed_local_description) = self
                     .current_local_description
                     .as_ref()
-                    .and_then(|desc| desc.parsed.as_ref())
+                    .and_then(|desc| desc.parsed.clone())
+                    .as_ref()
             {
+                self.apply_negotiated_rtcp(parsed_local_description, parsed_remote_description);
+
                 // only start sctp transport if application media has been negotiated
                 if let (Some(local_application_media), Some(remote_application_media)) = (
                     get_application_media(parsed_local_description),

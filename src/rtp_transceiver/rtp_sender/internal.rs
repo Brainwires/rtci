@@ -51,6 +51,8 @@ pub(crate) struct RTCRtpSenderInternal {
     /// that changes one unbinds exactly these before binding the new ones, and `stop` unbinds
     /// them whatever the parameters are by then.
     bound_streams: Vec<StreamInfo>,
+    /// Reduced-size RTCP as negotiated for the media section (`RTCRtcpParameters::reduced_size`).
+    rtcp_reduced_size: bool,
 }
 
 impl RTCRtpSenderInternal {
@@ -85,6 +87,7 @@ impl RTCRtpSenderInternal {
             negotiated: false,
             sent: false,
             bound_streams: Vec::new(),
+            rtcp_reduced_size: false,
         }
     }
 
@@ -251,6 +254,7 @@ impl RTCRtpSenderInternal {
                 .get_rtp_parameters_by_kind(self.kind(), RTCRtpTransceiverDirection::Sendonly);
 
             rtp_parameters.codecs = self.send_codecs.clone();
+            rtp_parameters.rtcp.reduced_size = self.rtcp_reduced_size;
 
             self.last_returned_parameters = Some(RTCRtpSendParameters {
                 rtp_parameters,
@@ -379,6 +383,13 @@ impl RTCRtpSenderInternal {
         self.sender_track
             .clear_repair_ssrcs(!is_rtx_enabled, !is_fec_enabled);
         self.last_returned_parameters = None;
+    }
+
+    pub(crate) fn set_rtcp_reduced_size(&mut self, reduced_size: bool) {
+        if self.rtcp_reduced_size != reduced_size {
+            self.rtcp_reduced_size = reduced_size;
+            self.last_returned_parameters = None;
+        }
     }
 
     /// The send codecs of the last stable state, and the repair (RTX / FEC) SSRCs a rolled-back

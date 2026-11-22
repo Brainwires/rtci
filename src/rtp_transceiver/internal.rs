@@ -53,6 +53,8 @@ pub(crate) struct RTCRtpTransceiverInternal {
     /// `None`, the default, is every extension the media engine negotiates; see
     /// `RTCRtpTransceiver::set_header_extensions_to_negotiate`.
     header_extensions_to_negotiate: Option<Vec<String>>,
+    /// Reduced-size RTCP (RFC 5506) as the last answer negotiated it for this media section.
+    rtcp_reduced_size: bool,
 }
 
 impl fmt::Debug for RTCRtpTransceiverInternal {
@@ -101,6 +103,7 @@ impl RTCRtpTransceiverInternal {
             created_by_remote_description: false,
             associable_with_remote_offer: true,
             header_extensions_to_negotiate: None,
+            rtcp_reduced_size: false,
         }
     }
 
@@ -324,6 +327,22 @@ impl RTCRtpTransceiverInternal {
         }
         if let (Some(receiver), Some(saved)) = (self.receiver.as_mut(), saved.receiver.as_ref()) {
             receiver.restore_negotiated_state(saved);
+        }
+    }
+
+    /// Whether the last answer negotiated reduced-size RTCP (RFC 5506) for this transceiver's
+    /// media section.
+    pub(crate) fn rtcp_reduced_size(&self) -> bool {
+        self.rtcp_reduced_size
+    }
+
+    pub(crate) fn set_rtcp_reduced_size(&mut self, reduced_size: bool) {
+        self.rtcp_reduced_size = reduced_size;
+        if let Some(sender) = self.sender.as_mut() {
+            sender.set_rtcp_reduced_size(reduced_size);
+        }
+        if let Some(receiver) = self.receiver.as_mut() {
+            receiver.set_rtcp_reduced_size(reduced_size);
         }
     }
 

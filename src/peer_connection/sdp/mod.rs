@@ -159,6 +159,7 @@ mod rejected_mline_tests {
             connection_role: ConnectionRole::Active,
             ice_gathering_state: RTCIceGatheringState::Complete,
             bundle: BundleMode::Offer,
+            offered_tag_rtcp_mux_only: false,
             sctp_max_message_size: 0,
             ignore_rid_pause_for_recv: false,
             write_ssrc_attributes_for_simulcast: false,
@@ -1008,8 +1009,19 @@ impl RTCPeerConnection {
                     ice_params.username_fragment.clone(),
                     ice_params.password.clone(),
                 )
-                .with_property_attribute(ATTR_KEY_RTCPMUX.to_owned())
-                .with_property_attribute(ATTR_KEY_RTCPRSIZE.to_owned());
+                .with_property_attribute(ATTR_KEY_RTCPMUX.to_owned());
+        // This endpoint has no RTCP component: it only ever multiplexes, and an offer says so
+        // (RFC 8858 section 4.2: "the offerer MUST include an SDP 'rtcp-mux-only' attribute";
+        // RFC 9429 section 5.2.1 for the mux policy "require"). An answer does not carry it
+        // (RFC 8858 section 4.3), but for the answerer-tagged section of a BUNDLE group
+        // whose offer had it (RFC 9143 section 9.3.1.2), which `populate_sdp` adds.
+        if is_offer {
+            media = media.with_property_attribute(ATTR_KEY_RTCP_MUX_ONLY.to_owned());
+        }
+        // Reduced-size RTCP (RFC 5506 section 5): offered always, answered when offered.
+        if media_section.offered_rtcp_rsize.unwrap_or(true) {
+            media = media.with_property_attribute(ATTR_KEY_RTCPRSIZE.to_owned());
+        }
 
         let codecs = transceiver.get_codecs(media_engine);
         // Which repair flows the section has a format for: a sender's RTX / FlexFEC SSRCs are
@@ -1471,6 +1483,27 @@ pub(crate) struct MediaSection {
     /// the profile provided in the offer"). `None` in an offer, which states this endpoint's
     /// own profile.
     pub(crate) offered_protos: Option<Vec<String>>,
+    /// In an answer, whether the offered section had `a=rtcp-rsize`: an answer says it only
+    /// then (RFC 5506 section 5: reduced-size RTCP is used when both sides signal it).
+    /// `None` in an offer, which always says it.
+    pub(crate) offered_rtcp_rsize: Option<bool>,
+}
+
+/// `a=rtcp-mux-only` (RFC 8858 section 3).
+pub(crate) const ATTR_KEY_RTCP_MUX_ONLY: &str = "rtcp-mux-only";
+
+/// Whether an audio or video m= section signals RTP/RTCP multiplexing (RFC 5761 section 5.1.1).
+pub(crate) fn has_rtcp_mux(media: &MediaDescription) -> bool {
+    media.has_attribute(ATTR_KEY_RTCPMUX)
+}
+
+/// Whether `media` is an RTP (audio or video) section that is not rejected.
+pub(crate) fn is_live_rtp_section(media: &MediaDescription) -> bool {
+    !is_rejected_media(media)
+        && matches!(
+            RtpCodecKind::from(media.media_name.media.as_str()),
+            RtpCodecKind::Audio | RtpCodecKind::Video
+        )
 }
 
 /// The profiles of a media (RTP) m= line RFC 9429 section 5.1.2 has accepted in an offer:
@@ -1500,6 +1533,10 @@ pub(crate) struct PopulateSdpParams {
     pub(crate) connection_role: ConnectionRole,
     pub(crate) ice_gathering_state: RTCIceGatheringState,
     pub(crate) bundle: BundleMode,
+    /// Answering: the mid of the offer's offerer-tagged section when it carried
+    /// `a=rtcp-mux-only`. The answer then says so in its answerer-tagged section (RFC 9143
+    /// section 9.3.1.2).
+    pub(crate) offered_tag_rtcp_mux_only: bool,
     pub(crate) sctp_max_message_size: usize,
     pub(crate) ignore_rid_pause_for_recv: bool,
     pub(crate) write_ssrc_attributes_for_simulcast: bool,
@@ -1742,6 +1779,24 @@ impl RTCPeerConnection {
         if let BundleMode::Answer(Some(group)) = &params.bundle {
             // The offer's order: its first accepted tag is the answerer-tagged section.
             bundled.sort_by_key(|mid| group.iter().position(|tag| tag == mid));
+        }
+        if params.offered_tag_rtcp_mux_only
+            && let Some(tag) = bundled.first()
+            && let Some(tagged) = d.media_descriptions.iter_mut().find(|media| {
+                get_mid_value(media) == Some(tag)
+                    && media.has_attribute(ATTR_KEY_RTCPMUX)
+                    && !media.has_attribute(ATTR_KEY_RTCP_MUX_ONLY)
+            })
+        {
+            let at = tagged
+                .attributes
+                .iter()
+                .position(|a| a.key == ATTR_KEY_RTCPMUX)
+                .map_or(tagged.attributes.len(), |i| i + 1);
+            tagged.attributes.insert(
+                at,
+                sdp::description::common::Attribute::new(ATTR_KEY_RTCP_MUX_ONLY.to_owned(), None),
+            );
         }
         if !bundled.is_empty() {
             d = d.with_value_attribute(
