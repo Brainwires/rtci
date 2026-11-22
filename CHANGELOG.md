@@ -9,6 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **sctp, datachannel**: a peer connection's SCTP association follows the RFCs by default
+  where it left them to settings or did without. Each is a change in what goes on the wire
+  or in what `send` accepts, and each has a setting:
+  - **weighted fair queueing** is the stream scheduler (RFC 8831 section 6.4: the priorities
+    of data channels "MUST be interpreted as weighted-fair-queuing scheduling priorities");
+    it was first come, first served unless asked for.
+    `SettingEngineBuilder::with_sctp_weighted_fair_queueing(false)` is the old order.
+  - **user message interleaving** (RFC 8260) is announced (RFC 8831 sections 6.1 and 6.6: it
+    "SHOULD be used") and used when the peer announces it too; the association sends DATA
+    chunks otherwise. `with_sctp_message_interleaving(false)` does not announce it.
+  - **a message over 16 KB is refused on an association without interleaving** (RFC 8831
+    section 6.6: "the sender SHOULD limit the maximum message size to 16 KB"), and
+    `RTCSctpTransport::max_message_size` reports at most 16384 there. Two engines interleave,
+    so nothing changes between them; browsers do not announce interleaving, and an
+    application that sends more than 16 KB at a time to one sets
+    `with_sctp_message_size_limit_without_interleaving(false)`, which is what browsers do.
+  - **the zero checksum** (RFC 9653) is announced, the association running over DTLS, and
+    used towards a peer that announces it; `with_sctp_zero_checksum(false)` turns it off.
+  - **the size of an SCTP packet follows the path** (RFC 8831 section 5: an initial path MTU
+    of at most 1200 bytes at the IP layer over IPv4 and 1280 over IPv6): 1135 bytes over
+    IPv4 and UDP with AES-GCM where it was 1191 on every path, 1195 over IPv6, less on a
+    relayed or a TCP candidate. `with_sctp_mtu` still sets it outright.
+  - **State Cookies carry a MAC** from the connection's crypto provider and the accepting
+    side keeps nothing for an INIT (RFC 9260 sections 5.1 and 5.1.3); the association is made
+    when the COOKIE ECHO arrives. No setting: nothing a peer can tell changes.
+- **sdp**: the data section of an offer says `TCP/DTLS/SCTP` when every candidate the offer
+  carries is a TCP candidate, and when the selected candidate pair is a TCP pair (RFC 8841
+  section 12.2); it always said `UDP/DTLS/SCTP`.
+- **sctp**: an association that signalling closed by rejecting the data section takes a new
+  `a=sctp-port` when a data section is negotiated again (RFC 8841 section 10.5).
+
 - **dtls**: `use_srtp` follows RFC 5764 section 4.1 by default: the DTLS client offers it only
   when the session has an audio or video section. A data-channel-only session is set up
   without it, and when it gains a media section a new DTLS association with `use_srtp`
@@ -789,6 +820,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+- **sctp**: `RTCPeerConnection::reject_data_section` asks for the data section to be rejected
+  (m= port zero) in the next offer, or in the answer to the peer's next offer: RFC 8841
+  section 10.5, closing the SCTP association and the DTLS association under it. A data
+  channel created afterwards brings a new section, with a new `a=tls-id` and `a=sctp-port`.
+- **sctp**: when ICE selects another candidate pair the association is told (RFC 8831
+  section 5): its congestion control and RTO start over and its packet size is set for the
+  new path.
+- **sctp**: a stream reset the peer answers with "denied" or an error fails the data channel
+  it was closing (`OnError`, `OnClose`) instead of leaving it `closing`; an inactive path
+  (RFC 9260 section 8.2) changes neither the transport's state nor a channel's.
+
 - **congestion control is on by default** (RFC 8834 section 7). `register_default_interceptors`
   now installs `Gcc` over the receiver's TWCC or RFC 8888 feedback, the pacer that releases
   media at its target, the TWCC sender, and the RTP circuit breaker.
@@ -1485,6 +1527,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+- **sctp**: an association accepted from the peer's INIT after an earlier one was lost left
+  the transport reporting the loss, so every later offer asked for a new `a=sctp-port` and
+  replaced the association it had.
 - **jsep**: two retransmission formats that differ only in `rtx-time` are one format (RFC
   4588 section 8.1: each sender's own figure); an offer whose RTX `fmtp` had another
   `rtx-time` than the local one was answered without RTX.
@@ -2049,6 +2094,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Testing
 
+- **sctp**: the SCTP association across DTLS changes, between two engines
+  (`tests/sctp_across_dtls_associations_rtc2rtc.rs`): a new DTLS association (a changed
+  `tls-id`, swapped roles) leaves the association and its channels as they are, and a DTLS
+  transport the peer closed closes them, after which the next exchange brings a new
+  association on a new port. `tests/sctp_rfc_defaults_rtc2rtc.rs` runs the defaults above
+  against a peer with each turned off.
+- **ice**: `test_ice_tcp_bidirectional_data_channel` no longer depends on which side's
+  messages arrive first: both sides stopped sending once four messages had arrived in total,
+  and when three of them had gone one way the test waited for its 30 second timeout.
+- **sctp**: two handler tests expected DATA that overtakes the COOKIE ACK to be kept; it is
+  discarded (RFC 9260 section 6) and delivered when the peer sends it again.
 - **dtls**: known-answer tests against handshakes recorded from OpenSSL 3.5.4 (`openssl s_client`
   against `openssl s_server -dtls1_2 -listen`, five cipher suites): the Finished values, the
   extended master secret, the `EXTRACTOR-dtls_srtp` exporter output and the protected records
