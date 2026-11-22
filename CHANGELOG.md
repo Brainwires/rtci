@@ -72,6 +72,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ChannelBindError`; `RequestError` and `ErrorResponse` with the typed STUN error code.
 - **turn**: an allocation a server gave without a credential is used without one, and takes the
   long-term credential when the server asks with a 401.
+- **turn**: `Client::allocate_with(now, AllocateOptions)` for what RFC 8656 section 7.1 lets an
+  Allocate ask: `address_family` (REQUESTED-ADDRESS-FAMILY, an IPv6 relayed address),
+  `additional_ipv6` (ADDITIONAL-ADDRESS-FAMILY, an IPv4 and an IPv6 address on one allocation),
+  `lifetime`, `dont_fragment`, `even_port` (with the R bit) and `reservation_token`. The
+  combinations the RFC forbids are refused before anything is sent.
+- **turn**: `Relay::relayed_addrs`, `mapped_addr` (the XOR-MAPPED-ADDRESS of the Allocate
+  response, the client's server-reflexive address), `lifetime`, `reservation_token`,
+  `dont_fragment` and `address_error` (ADDRESS-ERROR-CODE). A dual allocation is found by either
+  of its addresses and takes peers of both families; `Relay::release_family` deletes one
+  family's address with a Refresh of LIFETIME 0 naming it (section 8.1).
+- **turn**: `Relay::send_to_dont_fragment` sends a Send indication with DONT-FRAGMENT, on an
+  allocation made with it. A 420 naming DONT-FRAGMENT to the Allocate is answered with the
+  request again without it (section 7.4).
+- **turn**: `Event::IcmpError(peer, Icmp)` for a Data indication carrying the ICMP attribute
+  (sections 11.6, 18.13).
+- **turn**: a 300 (Try Alternate) carries its ALTERNATE-SERVER in
+  `ErrorResponse::alternate_server`; a 420 its UNKNOWN-ATTRIBUTES.
+- **turn**: a 438 (Stale Nonce) to the authenticated Allocate is retried once with the new
+  nonce, as it already was for the other requests.
+- **turn**: SOFTWARE (`ClientConfig::software`) goes in every TURN request (section 5), not
+  only in Binding requests.
+- **turn**: the client keeps to the families the server refused: after a 440 to an Allocate,
+  or ADDRESS-ERROR-CODE 440, `allocate_with` refuses that family; after ADDRESS-ERROR-CODE 508,
+  for a minute; after a relayed address of a family that was not asked for, the allocation is
+  deleted and `allocate` fails (sections 7.3, 7.4) until
+  `Client::clear_allocate_restrictions`.
+- **turn**: peers of a family the allocation has no relayed address of are refused by
+  `create_permission` and `send_to` (sections 10.1, 12.1), before the server's 443 could fail
+  the refresh of every other permission.
+- **turn**: `proto::addfamily` (ADDITIONAL-ADDRESS-FAMILY, 0x8000), `proto::addrerror`
+  (ADDRESS-ERROR-CODE, 0x8001), `proto::icmp` (ICMP, 0x8004); `EvenPort::reserve_port` is
+  public; `Lifetime` sends a duration past 32 bits of seconds as the largest value instead of
+  its low bits.
+- **test-env**: a third coturn (port 3480, an IPv4 and an IPv6 relay address, two users) and
+  `tests/testenv_turn_client.rs`: the TURN client's Allocate options, IPv6 and dual
+  allocations, 440 and 441 against a real server.
 
 ## [0.22.0+brainwires.5] - 2026-11-20
 
