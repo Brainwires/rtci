@@ -30,7 +30,7 @@ The rest of the evidence that the claims hold:
 | Area | Fragment |
 |---|---|
 | Data channels, SCTP | [conformance/w1.md](conformance/w1.md) |
-| JSEP negotiation, codecs, transceivers, API state rules | [conformance/w2.md](conformance/w2.md) |
+| JSEP negotiation, codecs, transceivers, API state rules; SDP syntax and typed attributes (rtc-sdp) | [conformance/w2.md](conformance/w2.md) |
 | ICE, TURN, STUN, DTLS, mDNS, SRTP | [conformance/w3.md](conformance/w3.md) |
 | RTP, RTCP, interceptors, payloaders, FEC | [conformance/w4.md](conformance/w4.md) |
 | Statistics | [conformance/w5.md](conformance/w5.md) |

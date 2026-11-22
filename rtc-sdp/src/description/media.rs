@@ -12,9 +12,11 @@ use std::fmt;
 
 use url::Url;
 
+use crate::attribute::{RtcpFb, RtcpFbPayloadType, TypedAttribute};
 use crate::description::common::*;
+use crate::description::session::{ATTR_KEY_FMTP, ATTR_KEY_RTCP_FB, ATTR_KEY_RTPMAP};
 use crate::extmap::*;
-use crate::util::{Codec, merge_codecs, parse_fmtp, parse_rtcp_fb, parse_rtpmap};
+use crate::util::{Codec, merge_codecs, parse_fmtp, parse_rtpmap};
 
 /// Constants for extmap key
 pub const EXT_MAP_VALUE_TRANSPORT_CC_KEY: u16 = 3;
@@ -60,11 +62,9 @@ pub struct MediaDescription {
     /// <https://tools.ietf.org/html/rfc4566#section-5.8>
     pub bandwidth: Vec<Bandwidth>,
 
-    /// `k=<method>`
-    ///
-    /// `k=<method>:<encryption key>`
-    ///
-    /// <https://tools.ietf.org/html/rfc4566#section-5.12>
+    /// Obsolete. RFC 8866 section 5.12: a `k=` line "MUST NOT be included in an SDP
+    /// description and MUST be discarded if received". The parser never sets this field
+    /// and nothing writes it; it is kept so that code naming it still builds.
     pub encryption_key: Option<EncryptionKey>,
 
     /// Attributes are the primary means for extending SDP.  Attributes may
@@ -93,30 +93,82 @@ impl MediaDescription {
 
     /// The codecs this media section offers, keyed by payload type.
     ///
-    /// Assembled from the `m=` format list plus the `a=rtpmap`, `a=fmtp` and `a=rtcp-fb`
-    /// attributes that describe them.
+    /// Assembled from the `a=rtpmap`, `a=fmtp` and `a=rtcp-fb` attributes. An
+    /// `a=rtcp-fb:*` line (RFC 4585 section 4.2: "applies to all formats") adds its
+    /// feedback type to every codec of the section, in the place the line has among the
+    /// other `a=rtcp-fb` lines.
+    ///
+    /// A line that does not parse is left out, so that one bad codec line does not take
+    /// the others with it; [`MediaDescription::rtpmaps`], [`MediaDescription::fmtps`] and
+    /// [`MediaDescription::rtcp_fbs`] report such a line as an error instead.
     pub fn codecs(&self) -> HashMap<u8, Codec> {
         let mut codecs: HashMap<u8, Codec> = HashMap::new();
+        let mut feedback: Vec<RtcpFb> = Vec::new();
 
         for a in &self.attributes {
-            let attr = a.to_string();
-            if attr.starts_with("rtpmap:") {
-                if let Ok(codec) = parse_rtpmap(&attr) {
-                    merge_codecs(codec, &mut codecs);
+            let (name, Some(value)) = a.parts() else {
+                continue;
+            };
+            match name {
+                ATTR_KEY_RTPMAP => {
+                    if let Ok(codec) = parse_rtpmap(value) {
+                        merge_codecs(codec, &mut codecs);
+                    }
                 }
-            } else if attr.starts_with("fmtp:") {
-                if let Ok(codec) = parse_fmtp(&attr) {
-                    merge_codecs(codec, &mut codecs);
+                ATTR_KEY_FMTP => {
+                    if let Ok(codec) = parse_fmtp(value) {
+                        merge_codecs(codec, &mut codecs);
+                    }
                 }
-            } else if attr.starts_with("rtcp-fb:")
-                && let Ok(codec) = parse_rtcp_fb(&attr)
-            {
-                merge_codecs(codec, &mut codecs);
+                ATTR_KEY_RTCP_FB => {
+                    if let Ok(fb) = RtcpFb::parse(value) {
+                        feedback.push(fb);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Feedback is applied once every codec is known: a wildcard line reaches the
+        // codecs whose rtpmap follows it too.
+        for fb in &feedback {
+            let targets: Vec<u8> = match fb.payload_type {
+                RtcpFbPayloadType::PayloadType(pt) => vec![pt],
+                RtcpFbPayloadType::All => {
+                    let mut all: Vec<u8> = codecs.keys().copied().collect();
+                    for format in &self.media_name.formats {
+                        if let Ok(pt) = format.parse::<u8>()
+                            && pt <= 127
+                            && !all.contains(&pt)
+                        {
+                            all.push(pt);
+                        }
+                    }
+                    all
+                }
+            };
+            for payload_type in targets {
+                merge_codecs(
+                    Codec {
+                        payload_type,
+                        rtcp_feedback: vec![fb.feedback()],
+                        ..Default::default()
+                    },
+                    &mut codecs,
+                );
             }
         }
 
         codecs
     }
+
+    /// The value of the first `b=` line of `kind`, in the unit of that modifier.
+    pub fn bandwidth_of(&self, kind: BandwidthKind) -> Option<u64> {
+        find_bandwidth(&self.bandwidth, kind)
+    }
+
+    crate::attribute::common_accessors!();
+    crate::attribute::media_accessors!();
 
     /// new_jsep_media_description creates a new MediaName with
     /// some settings that are required by the JSEP spec.
@@ -199,7 +251,13 @@ impl MediaDescription {
         }
     }
 
-    /// with_media_source adds media source information to the media description
+    /// with_media_source adds the source attributes of one SSRC to the media description:
+    /// `a=ssrc:<ssrc> cname:<cname>` (RFC 5576 section 6.1) and
+    /// `a=ssrc:<ssrc> msid:<stream id> <track id>`.
+    ///
+    /// These are the two registered source attributes WebRTC endpoints read. The Plan B
+    /// leftovers `mslabel` and `label`, which this used to write as well, were never
+    /// registered (RFC 5576 section 4.1: source attributes are registered ones).
     pub fn with_media_source(
         self,
         ssrc: u32,
@@ -207,12 +265,11 @@ impl MediaDescription {
         stream_id: String,
         track_id: String,
     ) -> Self {
-        self.
-            with_value_attribute("ssrc".to_string(), format!("{ssrc} cname:{cname}")). // Deprecated but not phased out?
-            with_value_attribute("ssrc".to_string(), format!("{ssrc} msid:{stream_id} {track_id}")).
-            with_value_attribute("ssrc".to_string(), format!("{ssrc} mslabel:{stream_id}")). // Deprecated but not phased out?
-            with_value_attribute("ssrc".to_string(), format!("{ssrc} label:{track_id}"))
-        // Deprecated but not phased out?
+        self.with_value_attribute("ssrc".to_string(), format!("{ssrc} cname:{cname}"))
+            .with_value_attribute(
+                "ssrc".to_string(),
+                format!("{ssrc} msid:{stream_id} {track_id}"),
+            )
     }
 
     /// with_candidate adds an ICE candidate to the media description

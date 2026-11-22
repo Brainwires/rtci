@@ -890,6 +890,101 @@ Each bug below was confirmed by a failing test first (`rtc-rtcp/tests/audit_bugs
 - **receiver**: `RTCRtpReceiver::get_synchronization_sources` and `get_contributing_sources` list
   the sources of the packets delivered in the last ten seconds (W3C webrtc 5.3). They were always
   empty.
+### Breaking changes
+
+- **sdp**: `SessionDescription::unmarshal` is the RFC 8866 section 9 grammar and nothing else
+  (RFC 9429 section 5.8: a description that is not well formed is rejected). It now refuses what
+  it used to let through: empty lines between lines, `i=` / `c=` / `b=` / `k=` after `a=` lines in
+  a media section, fields separated by more than one space or with white space around them, a
+  `c=` line without an address or with an address that does not fit its address type, a unicast
+  address with a `/`, a `t=` time that is neither 0 nor ten digits or more, a negative `r=` value,
+  extra fields after the stop time, an empty `s=` or `i=`, `e=` / `p=` text that is not an email
+  address or a phone number, an attribute name or a format that is not a token, a NUL or a bare CR
+  in a line. An application that reads SDP from software that writes such things asks for it:
+  `SessionDescription::unmarshal_with_options` with `ParseOptions { blank_lines,
+  unordered_media_lines, loose_fields }`, or `ParseOptions::lenient()` for all three. What every
+  mode still accepts beyond the grammar (a bare LF line ending, a last line without one, `z=`
+  where RFC 4566 put it, `a=name:` with an empty value) is listed in the `ParseOptions`
+  documentation.
+- **sdp**: values are no longer trimmed. `s= ` is a session name of one space, and an attribute
+  value keeps its leading and trailing white space (`a=msid-semantic: WMS` has the value
+  `" WMS"`). Structured lines never had any to trim.
+- **sdp**: `SessionDescription::email_address` and `phone_number` (`Option<String>`) are
+  `email_addresses` and `phone_numbers` (`Vec<String>`): RFC 8866 allows any number of `e=` and
+  `p=` lines, and a second one was a parse error.
+- **sdp**: `SessionDescription::time_zones` is `TimeDescription::time_zones`: a `z=` line belongs
+  to the time description it follows (RFC 8866 section 9) and is written there. A `z=` may now be
+  followed by another `t=`.
+- **sdp**: `k=` lines are parsed, checked and dropped, and never written (RFC 8866 section 5.12).
+  The `encryption_key` fields of `SessionDescription` and `MediaDescription` remain so that code
+  naming them builds; the parser never sets them and `marshal` ignores them.
+- **sdp**: `MediaDescription::with_media_source` writes the `cname` and `msid` source attributes
+  only. `a=ssrc:<n> mslabel:...` and `a=ssrc:<n> label:...` (Plan B, never registered; RFC 5576
+  section 4.1) are no longer in the engine's offers and answers.
+- **sdp**: `SessionDescription::new_jsep_session_description(true)` no longer adds a bare
+  `a=identity` line, which was not valid SDP (RFC 8827 section 5: the attribute is an assertion).
+  The parameter is ignored.
+- **sdp**: an `a=rtpmap` without a clock rate (`a=rtpmap:96 VP8`) is malformed and gives no codec
+  (it gave one with clock rate 0); a payload type above 127 in `a=rtpmap`, `a=fmtp` or `a=rtcp-fb`
+  gives none either. Any network and address type token is accepted in `o=` and `c=` (only `IN`,
+  `IP4` and `IP6` were).
+- **sdp**: `ExtMap::unmarshal` accepts only `extmap:` / `a=extmap:` in front of the value (it took
+  any text before the first colon), and an `a=extmap` with nothing or only a space after the URI
+  is refused.
+
+### Bug Fixes
+
+- **sdp**: `a=fmtp` parameters that contain a space were dropped
+  (`a=fmtp:96 level-asymmetry-allowed=1; packetization-mode=1; profile-level-id=42e01f` left the
+  codec without parameters, so H.264 profiles did not match). The parameters are everything
+  after the first space (RFC 8866 section 6.15).
+- **sdp**: `a=rtcp-fb:* <type>` was dropped. It applies to every format of the media section
+  (RFC 4585 section 4.2), in its place among the other `a=rtcp-fb` lines.
+- **sdp**: the extension attributes of `a=extmap` are everything after the URI (RFC 8285 section
+  5); they were cut at their first space.
+
+### Features
+
+- **sdp**: typed, validated attributes (`rtc_sdp::attribute`, re-exported as
+  `rtc::sdp::attribute`). Each type parses the value of one attribute against the ABNF of the RFC
+  that defines it and prints it back: `Group`, `Mid`, `Msid`, `MsidSemantic`, `Ssrc` (with
+  `cname`, `previous-ssrc`, `fmtp`, `msid`), `SsrcGroup`, `Rid` (with `pt=` and every
+  restriction), `Simulcast` (alternatives and `~`), `ExtMap`, `Rtcp`, `RtcpFb` (wildcard, and
+  every feedback type through `RtcpFb::kind`), `RtcpXr`, `RtpMap`, `Fmtp` (`parameter_list` keeps
+  order and text), `Ptime`, `MaxPtime`, `FrameRate`, `ImageAttr`, `Content`, `Candidate`,
+  `RemoteCandidates`, `IceUfrag`, `IcePwd`, `IceOptions`, `IcePacing`, `Fingerprint`, `Setup`,
+  `TlsId`, `Identity`, `SctpPort`, `MaxMessageSize`, `SctpMap`. `SessionDescription` and
+  `MediaDescription` have an accessor for each (`mid()`, `msids()`, `rids()`, `simulcast()`,
+  `rtcp_fbs()`, `candidates()`, `fingerprints()`, `direction()`, `rtcp_mux()`, `bundle_only()`,
+  ...), the generic `typed::<T>()` / `typed_all::<T>()` / `flag(name)`, and `with_typed(&T)` to
+  write one. An accessor returns `Err` when the attribute is present and malformed.
+- **sdp**: `SessionDescription::validate` checks a whole description: a `c=` line for every media
+  section, the value of every attribute with a type, the level each attribute is defined for,
+  attributes a level holds once (one direction, one `mid`, ...), unique `a=mid`, `a=rid` /
+  `a=simulcast` consistency, payload types as the formats of an RTP section.
+- **sdp**: the RFC 8859 multiplexing category and level of every attribute as data
+  (`rtc_sdp::attribute::mux`): the attribute table of RFC 8859 section 15.2.2 plus the attributes
+  registered since (`msid`, `rid`, `simulcast`, `extmap-allow-mixed`, `rtcp-mux-only`,
+  `ice-pacing`, `end-of-candidates`, `tls-id`, `sctp-port`, `max-message-size`, `identity`,
+  `cryptex`, `bundle-only`), and the tables for `b=` modifiers, `rtcp-fb` values, grouping
+  semantics and source attributes.
+- **sdp**: `ParseOptions`, `SessionDescription::unmarshal_with_options`, `parse_with_options` and
+  `impl FromStr for SessionDescription`.
+- **sdp**: `a=extmap` ids 256 (the appbits) and 4096 to 4351 (extensions the offerer leaves the
+  answerer to number, RFC 8285 section 6) parse through `ExtMap::parse` and `extmaps()`, with
+  `ExtMap::is_element_id`, `is_answerer_assigned` and `fits_one_byte_header` to tell them apart.
+  `ExtMap::unmarshal`, whose id callers put into RTP headers, still returns only 1 to 255.
+- **sdp**: `ConnectionInformation::parse`, `Address::parse`, `Bandwidth::parse`,
+  `Bandwidth::kind` (`BandwidthKind`), `Bandwidth::bits_per_second`, `bandwidth_of` on both
+  description levels, `Attribute::parts`, and `ATTR_KEY_*` constants for the attributes above.
+
+### Testing
+
+- **sdp**: the RFC 8866 grammar line type by line type, every typed attribute against its ABNF
+  with the examples of its RFC, the Safari and Firefox captures and a Chrome-format offer parsed
+  strictly and written back byte for byte, and a deterministic mutation test of the parse and
+  marshal fixed point. Fuzzing: `description_roundtrip` checks that fixed point (strict and
+  lenient) and reads every typed accessor; new target `attribute_parse`.
 
 ## [0.22.0+brainwires.5] - 2026-11-20
 

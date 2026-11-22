@@ -38,3 +38,10 @@ path = "fuzz_targets/description_roundtrip.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "attribute_parse"
+path = "fuzz_targets/attribute_parse.rs"
+test = false
+doc = false
+bench = false
