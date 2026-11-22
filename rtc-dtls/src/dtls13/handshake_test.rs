@@ -393,6 +393,110 @@ fn the_flights_of_a_handshake_with_the_cookie_exchange() -> Result<()> {
     Ok(())
 }
 
+/// The ClientHello in `datagram` (one plaintext record, the whole message): its message_seq,
+/// random and whether it carries a cookie extension.
+fn client_hello_of(datagram: &[u8]) -> (u16, Vec<u8>, bool) {
+    assert_eq!(datagram[13], 1, "a ClientHello");
+    let length = usize::from(datagram[14]) << 16
+        | usize::from(datagram[15]) << 8
+        | usize::from(datagram[16]);
+    let hello = super::messages::ClientHello::parse(&datagram[25..25 + length])
+        .expect("the ClientHello parses");
+    (
+        u16::from_be_bytes([datagram[17], datagram[18]]),
+        hello.random.to_vec(),
+        hello.extension(super::messages::EXT_COOKIE).is_some(),
+    )
+}
+
+/// The cookie exchange of `pair` up to the second ClientHello, which reaches the server
+/// `late` after its first: the server's answer to it.
+fn second_client_hello_arrives_late(pair: &mut Pair, late: Duration) -> Vec<BytesMut> {
+    let (client_hello, hello_retry_request) = pair.round();
+    assert_eq!(client_hello.len(), 1);
+    assert_eq!(hello_retry_request.len(), 1);
+    let second = take(&mut pair.client);
+    assert!(
+        client_hello_of(&second[0]).2,
+        "the second ClientHello has the cookie"
+    );
+    pair.now += late;
+    pair.deliver_to_server(second);
+    take(&mut pair.server)
+}
+
+/// RFC 9147 section 5.1: "If the server receives a ClientHello with an invalid cookie [...]
+/// it SHOULD terminate the handshake with an "illegal_parameter" alert. This allows the
+/// client to restart the connection from scratch without a cookie." A server endpoint's
+/// cookie is good for one to two lifetimes of its secret (60 to 120 s): a second ClientHello
+/// that reaches it later is refused. The client starts over with a new ClientHello (message
+/// 0, a new random, no cookie), and the handshake completes.
+#[test]
+fn a_client_whose_cookie_expired_starts_over_with_a_new_client_hello() -> Result<()> {
+    use crate::cookie::COOKIE_SECRET_LIFETIME;
+
+    let mut pair = Pair::new(client_builder(), server_builder())?;
+    let first = take(&mut pair.client);
+    let (_, first_random, _) = client_hello_of(&first[0]);
+    pair.deliver_to_server(first);
+    let hello_retry_request = take(&mut pair.server);
+    pair.deliver_to_client(hello_retry_request);
+    let second = take(&mut pair.client);
+    pair.now += 2 * COOKIE_SECRET_LIFETIME + Duration::from_secs(1);
+    pair.deliver_to_server(second);
+    let refusal = take(&mut pair.server);
+    assert_eq!(
+        plaintext_alerts(&refusal),
+        vec![(2, alert::ILLEGAL_PARAMETER)],
+        "the expired cookie is refused"
+    );
+
+    pair.deliver_to_client(refusal);
+    assert!(pair.client_error.is_none(), "{:?}", pair.client_error);
+    let fresh = take(&mut pair.client);
+    assert_eq!(fresh.len(), 1, "a new ClientHello");
+    let (message_seq, random, cookie) = client_hello_of(&fresh[0]);
+    assert_eq!(message_seq, 0, "from scratch");
+    assert!(!cookie, "without a cookie");
+    assert_ne!(random, first_random, "a new random");
+
+    pair.deliver_to_server(fresh);
+    let mut pair = pair.complete();
+    assert_eq!(pair.versions().0, Some(DtlsVersion::Dtls1_3));
+    assert_eq!(pair.client_sends(b"fresh"), vec![b"fresh".to_vec()]);
+    Ok(())
+}
+
+/// The illegal_parameter that makes a client start over comes in the clear, so it is taken
+/// a bounded number of times (`MAX_FRESH_CLIENT_HELLOS`); one more and the handshake fails as
+/// before.
+#[test]
+fn a_client_starts_over_a_bounded_number_of_times() -> Result<()> {
+    use crate::conn::MAX_FRESH_CLIENT_HELLOS;
+    use crate::cookie::COOKIE_SECRET_LIFETIME;
+
+    let late = 2 * COOKIE_SECRET_LIFETIME + Duration::from_secs(1);
+    let mut pair = Pair::new(client_builder(), server_builder())?;
+    for attempt in 0..=MAX_FRESH_CLIENT_HELLOS {
+        let refusal = second_client_hello_arrives_late(&mut pair, late);
+        assert_eq!(
+            plaintext_alerts(&refusal),
+            vec![(2, alert::ILLEGAL_PARAMETER)]
+        );
+        pair.deliver_to_client(refusal);
+        if attempt < MAX_FRESH_CLIENT_HELLOS {
+            assert!(pair.client_error.is_none(), "attempt {attempt}");
+        }
+    }
+    assert!(
+        pair.client_error.is_some(),
+        "the last refusal ends the handshake"
+    );
+    assert!(take(&mut pair.client).is_empty(), "no further ClientHello");
+    assert!(!pair.client_complete);
+    Ok(())
+}
+
 /// RFC 9147 section 5.1: where the application says the client's address is verified (ICE
 /// does that), the cookie exchange can be switched off, and the handshake is one round trip.
 #[test]
