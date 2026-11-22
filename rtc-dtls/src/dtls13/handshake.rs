@@ -77,6 +77,8 @@ struct SelectedPsk {
     secret: SecretVec,
     without_key_exchange: bool,
     peer_certificates: Vec<Vec<u8>>,
+    /// The 0-RTT data the server takes with it, if it takes any.
+    early_data_limit: Option<u32>,
 }
 
 impl Conn13 {
@@ -99,6 +101,9 @@ impl Conn13 {
             .map(|hello| hello.extensions.iter().map(|(t, _)| *t).collect())
             .unwrap_or_default();
         conn.client_hello = client_hello;
+        if offer.early_data.is_some() {
+            conn.early_data_accepted = Some(false);
+        }
         conn.offer = Some(offer);
         conn.next_send_seq = client_hello_message_seq.wrapping_add(1);
         conn.set_plaintext_send_sequence(next_plaintext_sequence);
@@ -461,6 +466,7 @@ impl Conn13 {
                 ));
             }
         };
+        self.psk_index = selected_psk;
         if let Some(psk) = psk {
             // The server is the one that made the ticket (or holds the external PSK): its
             // certificates are those of the handshake the ticket came from.
@@ -554,6 +560,10 @@ impl Conn13 {
             .map_err(internal)?;
         self.transcript.add(SERVER_HELLO, body);
         self.offered_extensions.push(EXT_COOKIE);
+        // RFC 8446 section 4.2.10: no early_data in the ClientHello after a
+        // HelloRetryRequest; the 0-RTT data sent is not accepted.
+        self.offered_extensions
+            .retain(|extension| *extension != EXT_EARLY_DATA);
         if psks.is_empty() {
             self.offered_extensions
                 .retain(|extension| *extension != EXT_PRE_SHARED_KEY);
@@ -586,6 +596,18 @@ impl Conn13 {
             }
             match *extension_type {
                 EXT_SERVER_NAME | EXT_SUPPORTED_GROUPS => {}
+                // RFC 8446 sections 4.2.10 and 4.2.11: the server took the 0-RTT data, which
+                // went with the first PSK; a selected_identity other than 0 is an
+                // illegal_parameter.
+                EXT_EARLY_DATA => {
+                    if !data.is_empty() {
+                        return Err(decode_error(Error::ErrLengthMismatch));
+                    }
+                    if self.psk_index != Some(0) {
+                        return Err(illegal(Error::ErrInvalidExtensionType));
+                    }
+                    self.early_data_accepted = Some(true);
+                }
                 EXT_USE_SRTP => {
                     // RFC 5764 section 4.1.1: exactly one profile, one of those offered.
                     let (profiles, _mki) = parse_use_srtp(data).map_err(decode_error)?;
@@ -896,6 +918,31 @@ impl Conn13 {
                 .to_vec();
         }
         let selected_index = selected.as_ref().map(|selected| selected.index);
+        // RFC 8446 section 4.2.10: 0-RTT data taken where the PSK allows it, keyed from
+        // client_early_traffic_secret over the ClientHello.
+        let mut early_secret = None;
+        if let Some(limit) = selected
+            .as_ref()
+            .and_then(|selected| selected.early_data_limit)
+        {
+            let hash = self.transcript_hash()?;
+            let secret = selected
+                .as_ref()
+                .map(|selected| selected.secret.clone())
+                .ok_or_else(|| internal(Error::ErrCipherSuiteUnset))?;
+            let schedule =
+                KeySchedule::with_psk(self.crypto(), suite, DTLS13_LABEL_PREFIX, secret.as_ref())
+                    .map_err(internal)?;
+            early_secret = Some(
+                schedule
+                    .client_early_traffic_secret(self.crypto(), &hash)
+                    .map_err(internal)?,
+            );
+            self.early_data_limit = limit as usize;
+        }
+        if hello.extension(EXT_EARLY_DATA).is_some() {
+            self.early_data_accepted = Some(early_secret.is_some());
+        }
         if let Some(selected) = selected {
             self.psk = Some(selected.secret);
             self.psk_without_key_exchange = selected.without_key_exchange;
@@ -956,6 +1003,10 @@ impl Conn13 {
         let mut flight = Flight::new(FlightKind::Handshake);
         self.add_to_flight(&mut flight, 0, SERVER_HELLO, server_hello);
         self.enter_handshake_keys(shared_secret.as_ref())?;
+        if let Some(secret) = &early_secret {
+            self.install_read_epoch(EPOCH_EARLY, secret.as_ref())
+                .map_err(internal)?;
+        }
         // The client's records carry this server's connection id once they are protected.
         if let Some(connection_id) = connection_id {
             self.local_connection_id = connection_id;
@@ -973,6 +1024,9 @@ impl Conn13 {
             if !negotiated.server_name.is_empty() {
                 // RFC 6066 section 3: an empty server_name says the name was used.
                 put_extension(extensions, EXT_SERVER_NAME, |_| {});
+            }
+            if early_secret.is_some() {
+                put_extension(extensions, EXT_EARLY_DATA, |_| {});
             }
         });
         self.add_to_flight(
@@ -1092,7 +1146,11 @@ impl Conn13 {
             cfg.client_auth,
             ClientAuthType::RequireAnyClientCert | ClientAuthType::RequireAndVerifyClientCert
         );
-        for (index, (identity, _obfuscated_age)) in offered.identities.iter().enumerate() {
+        let offers_early_data = hello.extension(EXT_EARLY_DATA).is_some();
+        // No HelloRetryRequest came before this ClientHello (its transcript starts with it).
+        let first_client_hello = self.transcript.is_empty();
+        for (index, (identity, obfuscated_age)) in offered.identities.iter().enumerate() {
+            let mut early_data_limit = None;
             // An external PSK of this identity, or a ticket of this server (RFC 8446 section
             // 4.6.1: of the same hash, within its lifetime; the name it was made for).
             let mut claim = None;
@@ -1116,6 +1174,21 @@ impl Conn13 {
                         && ticket.server_name == negotiated.server_name
                         && (!requires_certificate || !ticket.peer_certificates.is_empty());
                     claim = Some((ticket.id, now_ms, expires));
+                    // RFC 8446 sections 4.2.10 and 8.3: 0-RTT with the first PSK, a ticket
+                    // that allows it, of the same suite, in a first ClientHello, whose age as
+                    // the client counts it agrees with this server's within the window.
+                    let client_age = u64::from(obfuscated_age.wrapping_sub(ticket.age_add));
+                    let server_age = now_ms.saturating_sub(ticket.issued_ms);
+                    if offers_early_data
+                        && index == 0
+                        && first_client_hello
+                        && ticket.max_early_data > 0
+                        && cfg.max_early_data > 0
+                        && ticket.suite == suite.id
+                        && client_age.abs_diff(server_age) <= super::psk::EARLY_DATA_AGE_WINDOW_MS
+                    {
+                        early_data_limit = Some(ticket.max_early_data.min(cfg.max_early_data));
+                    }
                     usable.then_some((ticket.secret, false, ticket.peer_certificates))
                 })
             } else {
@@ -1152,6 +1225,7 @@ impl Conn13 {
                 secret,
                 without_key_exchange,
                 peer_certificates,
+                early_data_limit,
             };
             // The client is the peer of the handshake the ticket came from: the
             // application's check of it runs again.
@@ -1210,7 +1284,7 @@ impl Conn13 {
                     psk.as_ref(),
                     &self.server_name,
                     &self.peer_certificates,
-                    0,
+                    cfg.max_early_data,
                 )
                 .map_err(internal)?;
             let body = new_session_ticket(
@@ -1218,7 +1292,7 @@ impl Conn13 {
                 age_add,
                 &nonce,
                 &ticket,
-                None,
+                (cfg.max_early_data > 0).then_some(cfg.max_early_data),
             );
             self.send_post_handshake(FlightKind::NewSessionTicket, NEW_SESSION_TICKET, body)
                 .map_err(internal)?;

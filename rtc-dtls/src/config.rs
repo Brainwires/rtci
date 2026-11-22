@@ -142,6 +142,7 @@ pub struct ConfigBuilder {
     external_psks: Vec<crate::session::ExternalPsk>,
     psk_without_key_exchange: bool,
     post_handshake_auth: bool,
+    max_early_data: u32,
     insecure_skip_verify: bool,
     insecure_hashes: bool,
     insecure_verification: bool,
@@ -186,6 +187,7 @@ impl Default for ConfigBuilder {
             external_psks: vec![],
             psk_without_key_exchange: false,
             post_handshake_auth: false,
+            max_early_data: 0,
             insecure_skip_verify: false,
             insecure_hashes: false,
             insecure_verification: false,
@@ -464,6 +466,19 @@ impl ConfigBuilder {
     /// with an empty Certificate otherwise. Off by default.
     pub fn with_post_handshake_auth(mut self, offer: bool) -> Self {
         self.post_handshake_auth = offer;
+        self
+    }
+
+    /// DTLS 1.3 server: take up to `size` bytes of 0-RTT data (RFC 8446 section 4.2.10)
+    /// with the tickets it issues ([`Self::with_session_tickets`]). 0, the default, takes
+    /// none. 0-RTT data can be replayed by anyone who saw it: each ticket is accepted once
+    /// (RFC 8446 section 8.1), and the ticket's age has to agree with the server's within ten
+    /// seconds (section 8.3), but the application decides what is safe to do before the
+    /// handshake is complete ([`EndpointEvent::EarlyData`](crate::endpoint::EndpointEvent::EarlyData)).
+    /// A ClientHello answered with a HelloRetryRequest has no 0-RTT, so this takes effect
+    /// only with the cookie exchange off ([`Self::with_cookie_exchange`]).
+    pub fn with_max_early_data(mut self, size: u32) -> Self {
+        self.max_early_data = size;
         self
     }
 
@@ -1005,6 +1020,7 @@ impl ConfigBuilder {
             external_psks,
             psk_without_key_exchange: self.psk_without_key_exchange,
             post_handshake_auth: is_client && self.post_handshake_auth,
+            max_early_data: if is_client { 0 } else { self.max_early_data },
             #[cfg(test)]
             psk_modes_for_test: None,
             initial_epoch: 0,
@@ -1096,6 +1112,8 @@ pub struct HandshakeConfig {
     pub(crate) psk_without_key_exchange: bool,
     /// DTLS 1.3 client: it offers post-handshake authentication.
     pub(crate) post_handshake_auth: bool,
+    /// DTLS 1.3 server: the most 0-RTT data it takes with a ticket.
+    pub(crate) max_early_data: u32,
     /// The PSK key exchange modes a client offers, in place of the configured ones: for the
     /// tests of a peer that offers psk_ke alone.
     #[cfg(test)]
@@ -1178,6 +1196,7 @@ impl HandshakeConfig {
             external_psks: vec![],
             psk_without_key_exchange: false,
             post_handshake_auth: false,
+            max_early_data: 0,
             #[cfg(test)]
             psk_modes_for_test: None,
             initial_epoch: 0,

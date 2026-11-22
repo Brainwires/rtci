@@ -58,6 +58,8 @@ pub(crate) struct OfferedPsk {
     pub(crate) external: bool,
     /// The certificates of the handshake that issued the ticket.
     pub(crate) peer_certificates: Vec<Vec<u8>>,
+    /// The most early data the ticket allows; 0 for an external PSK.
+    pub(crate) max_early_data: u32,
 }
 
 impl OfferedPsk {
@@ -69,6 +71,7 @@ impl OfferedPsk {
             secret: session.secret,
             external: false,
             peer_certificates: session.peer_certificates,
+            max_early_data: session.max_early_data,
         })
     }
 
@@ -85,6 +88,7 @@ impl OfferedPsk {
             suite,
             external: true,
             peer_certificates: vec![],
+            max_early_data: 0,
         })
     }
 }
@@ -269,6 +273,41 @@ pub(crate) fn bind(
         .ok_or(Error::ErrLengthMismatch)?;
     client_hello[at..].copy_from_slice(&list);
     Ok(())
+}
+
+/// How far apart the client's and the server's views of a ticket's age may be for its 0-RTT
+/// data to be taken (RFC 8446 section 8.3): ten seconds.
+pub(crate) const EARLY_DATA_AGE_WINDOW_MS: u64 = 10_000;
+
+/// The 0-RTT record of `data` (RFC 9147 section 6.1: epoch 1, under keys from
+/// `client_early_traffic_secret` of `psk`), for a ClientHello of body `client_hello` that
+/// offers early_data with `psk` first.
+pub(crate) fn early_data_record(
+    crypto: &dyn RTCCrypto,
+    psk: &OfferedPsk,
+    client_hello: &[u8],
+    data: &[u8],
+) -> Result<Vec<u8>> {
+    let mut message = vec![CLIENT_HELLO];
+    put_u24(&mut message, client_hello.len());
+    message.extend_from_slice(client_hello);
+    let hash = Transcript::default().hash_with(crypto, psk.suite, &message)?;
+    let schedule =
+        KeySchedule::with_psk(crypto, psk.suite, DTLS13_LABEL_PREFIX, psk.secret.as_ref())?;
+    let secret = schedule.client_early_traffic_secret(crypto, &hash)?;
+    let keys = schedule.traffic_keys(crypto, secret.as_ref())?;
+    let mut keys = super::record::RecordKeys::new(crypto, psk.suite, &keys)?;
+    keys.seal(
+        super::record::RecordNumber {
+            epoch: super::conn::EPOCH_EARLY,
+            sequence: 0,
+        },
+        &[],
+        super::record::HeaderForm::FULL,
+        super::record::CONTENT_TYPE_APPLICATION_DATA,
+        data,
+        0,
+    )
 }
 
 /// What a server's ticket holds, once opened.
