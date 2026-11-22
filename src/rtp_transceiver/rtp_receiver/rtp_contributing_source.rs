@@ -48,6 +48,17 @@ pub struct RTCRtpContributingSource {
     /// [RTCRtpContributingSource](https://www.w3.org/TR/webrtc/#dom-rtcrtpcontributingsource-rtptimestamp).
     pub rtp_timestamp: u32,
 
+    /// webrtc-extensions 8 `captureTimestamp`: when the most recent frame from this source
+    /// was captured, in milliseconds on the capture system's NTP clock (since 1900): the
+    /// packet's absolute capture time (`abs-capture-time` header extension), or one
+    /// interpolated from an earlier packet's by the RTP timestamps; `None` without either.
+    pub capture_timestamp: Option<f64>,
+
+    /// webrtc-extensions 8 `senderCaptureTimeOffset`: the sender's estimate of its NTP
+    /// clock's offset from the capture system's, in milliseconds, from the packet's
+    /// extension or else the most recent one that carried it; `None` without either.
+    pub sender_capture_time_offset: Option<f64>,
+
     /// Whether the last packet from this synchronization source said there is voice in it: the
     /// V bit of the RFC 6464 client-to-mixer audio level. `None` for a contributing source,
     /// for a packet without the level, and when the extension was negotiated `vad=off`, where

@@ -43,6 +43,13 @@ impl Peer {
         let mut media_engine = MediaEngine::default();
         media_engine.register_default_codecs()?;
         let registry = register_default_interceptors(Registry::new(), &mut media_engine)?;
+        media_engine.register_header_extension(
+            rtc::rtp_transceiver::rtp_sender::RTCRtpHeaderExtensionCapability {
+                uri: rtc::rtp::extension::ABS_CAPTURE_TIME_URI.to_owned(),
+            },
+            RtpCodecKind::Video,
+            None,
+        )?;
         let pc = RTCPeerConnectionBuilder::new()
             .with_configuration(RTCConfigurationBuilder::new().build())
             .with_media_engine(media_engine)
@@ -189,12 +196,33 @@ impl World {
         edit_offer: impl Fn(String) -> String,
         edit: impl Fn(String) -> String,
     ) -> Result<(Self, RTCRtpSenderId)> {
+        Self::connected_prepared_edited(kind, edit_offer, edit, |_| {})
+    }
+
+    /// [`Self::connected`], each peer passed through `prepare` before the offer.
+    fn connected_prepared(
+        kind: RtpCodecKind,
+        edit: impl Fn(String) -> String,
+        prepare: impl Fn(&mut RTCPeerConnection),
+    ) -> Result<(Self, RTCRtpSenderId)> {
+        Self::connected_prepared_edited(kind, |offer| offer, edit, prepare)
+    }
+
+    fn connected_prepared_edited(
+        kind: RtpCodecKind,
+        edit_offer: impl Fn(String) -> String,
+        edit: impl Fn(String) -> String,
+        prepare: impl Fn(&mut RTCPeerConnection),
+    ) -> Result<(Self, RTCRtpSenderId)> {
         let mut world = World {
             peers: [Peer::new("10.0.0.1:5000")?, Peer::new("10.0.0.2:5000")?],
             now: Instant::now(),
             wire: Vec::new(),
             media_ssrc: None,
         };
+        for peer in world.peers.iter_mut() {
+            prepare(&mut peer.pc);
+        }
         let transceiver = world.peers[0].pc.add_transceiver_from_kind(
             kind,
             Some(RTCRtpTransceiverInit {
@@ -390,6 +418,82 @@ fn an_extension_negotiated_encrypted_is_encrypted_on_the_wire() -> Result<()> {
     Ok(())
 }
 
+/// webrtc-extensions 8: a sender stamps a packet's absolute capture time
+/// (`write_rtp_with_capture_time`, the `abs-capture-time` extension); the receiver's
+/// synchronization source reports it as `captureTimestamp` with the offset as
+/// `senderCaptureTimeOffset`, and a later packet without the extension reports a capture time
+/// interpolated by its RTP timestamp, with the last offset.
+#[test]
+fn the_absolute_capture_time_reaches_the_receivers_synchronization_source() -> Result<()> {
+    let (mut world, sender) = World::connected(RtpCodecKind::Video, |sdp| sdp)?;
+    let (ssrc, pt) = {
+        let mut sender = world.peers[0].pc.rtp_sender(sender).expect("sender");
+        let parameters = sender.get_parameters();
+        (
+            parameters.encodings[0]
+                .rtp_coding_parameters
+                .ssrc
+                .expect("an SSRC"),
+            parameters.rtp_parameters.codecs[0].payload_type,
+        )
+    };
+    let packet = |seq: u16, timestamp: u32| rtc::rtp::Packet {
+        header: Header {
+            version: 2,
+            payload_type: pt,
+            sequence_number: seq,
+            timestamp,
+            ssrc,
+            marker: true,
+            ..Default::default()
+        },
+        payload: Bytes::from(vec![0x10u8; 100]),
+    };
+    // 1000 s and a quarter on the capturer's NTP clock; the sender's clock half a second
+    // ahead of it.
+    let capture_ntp: u64 = (1000u64 << 32) | (1u64 << 30);
+    let offset: i64 = 1 << 31;
+    let capture_ms = 1_000_250.0;
+    let source = |world: &mut World| {
+        let receiver = world.peers[1]
+            .pc
+            .get_receivers()
+            .next()
+            .expect("a receiver");
+        let receiver = world.peers[1].pc.rtp_receiver(receiver).expect("receiver");
+        receiver
+            .get_synchronization_sources()
+            .find(|s| s.source == ssrc)
+            .map(|s| (s.capture_timestamp, s.sender_capture_time_offset))
+    };
+
+    let now = world.now;
+    world.peers[0]
+        .pc
+        .rtp_sender(sender)
+        .expect("sender")
+        .write_rtp_with_capture_time(now, packet(1, 90_000), capture_ntp, Some(offset))?;
+    world.pump()?;
+    world.run_until(now + Duration::from_millis(20))?;
+    assert_eq!(source(&mut world), Some((Some(capture_ms), Some(500.0))));
+
+    // 100 ms later at 90 kHz, without the extension.
+    let now = world.now;
+    world.peers[0]
+        .pc
+        .rtp_sender(sender)
+        .expect("sender")
+        .write_rtp(now, packet(2, 99_000))?;
+    world.pump()?;
+    // (The pacer releases it by its RTP timestamp, 100 ms after the first.)
+    world.run_until(now + Duration::from_millis(200))?;
+    assert_eq!(
+        source(&mut world),
+        Some((Some(capture_ms + 100.0), Some(500.0)))
+    );
+    Ok(())
+}
+
 /// The voice activity flags of the receiver's synchronization sources.
 fn voice_activity(world: &mut World) -> Vec<Option<bool>> {
     let transceiver = world.peers[1]
@@ -481,5 +585,142 @@ fn an_element_with_an_id_that_is_not_negotiated_is_not_sent() -> Result<()> {
     let last = wire.last().expect("the packet went out");
     assert_eq!(None, last.get_extension(stray), "{last:?}");
     assert!(last.get_extension(kept).is_some(), "{last:?}");
+    Ok(())
+}
+
+/// RFC 9335 (Cryptex) end to end: with header encryption negotiated by both peers the header
+/// extension block travels encrypted under the Cryptex profile (0xC0DE for the one-byte
+/// form), and the receiver reads the elements as they were sent: here the absolute capture
+/// time, which its synchronization source reports.
+#[test]
+fn with_cryptex_the_extensions_are_encrypted_on_the_wire_and_read_in_the_clear() -> Result<()> {
+    use rtc::peer_connection::cryptex::RTCRtpHeaderEncryptionPolicy;
+    let (mut world, sender) = World::connected_prepared(
+        RtpCodecKind::Video,
+        |sdp| sdp,
+        |pc| pc.set_rtp_header_encryption_policy(RTCRtpHeaderEncryptionPolicy::Negotiate),
+    )?;
+    assert!(world.peers[0].pc.cryptex_negotiated());
+    assert!(world.peers[1].pc.cryptex_negotiated());
+    let (ssrc, pt) = {
+        let mut sender = world.peers[0].pc.rtp_sender(sender).expect("sender");
+        let parameters = sender.get_parameters();
+        (
+            parameters.encodings[0]
+                .rtp_coding_parameters
+                .ssrc
+                .expect("an SSRC"),
+            parameters.rtp_parameters.codecs[0].payload_type,
+        )
+    };
+    let capture_ntp: u64 = 0x1122_3344_5566_7788;
+    let now = world.now;
+    let before = world.wire.len();
+    world.peers[0]
+        .pc
+        .rtp_sender(sender)
+        .expect("sender")
+        .write_rtp_with_capture_time(
+            now,
+            rtc::rtp::Packet {
+                header: Header {
+                    version: 2,
+                    payload_type: pt,
+                    sequence_number: 7,
+                    timestamp: 90_000,
+                    ssrc,
+                    marker: true,
+                    ..Default::default()
+                },
+                payload: Bytes::from(vec![0x10u8; 100]),
+            },
+            capture_ntp,
+            None,
+        )?;
+    world.pump()?;
+    world.run_until(now + Duration::from_millis(20))?;
+    let on_wire: Vec<&Header> = world.wire[before..]
+        .iter()
+        .filter(|h| h.ssrc == ssrc)
+        .collect();
+    assert_eq!(on_wire.len(), 1);
+    assert!(
+        matches!(on_wire[0].extension_profile, 0xC0DE | 0xC2DE),
+        "the Cryptex profile: {:#x}",
+        on_wire[0].extension_profile
+    );
+    let clear = capture_ntp.to_be_bytes();
+    assert!(
+        on_wire[0]
+            .extensions
+            .iter()
+            .all(|e| !e.payload.windows(8).any(|w| w == clear)),
+        "no element is in the clear on the wire"
+    );
+    let receiver = world.peers[1]
+        .pc
+        .get_receivers()
+        .next()
+        .expect("a receiver");
+    let capture = world.peers[1]
+        .pc
+        .rtp_receiver(receiver)
+        .expect("receiver")
+        .get_synchronization_sources()
+        .find(|s| s.source == ssrc)
+        .and_then(|s| s.capture_timestamp);
+    let expected = capture_ntp as f64 / 4_294_967_296.0 * 1000.0;
+    assert_eq!(capture, Some(expected));
+
+    // RFC 9335 section 4: without the peer's support (one side does not offer it), Cryptex is
+    // not used: the RFC 8285 profile, the element in the clear.
+    let (mut world, sender) = World::connected_prepared(RtpCodecKind::Video, |sdp| sdp, |_| {})?;
+    assert!(!world.peers[0].pc.cryptex_negotiated());
+    let plain_ssrc = world.peers[0]
+        .pc
+        .rtp_sender(sender)
+        .expect("sender")
+        .get_parameters()
+        .encodings[0]
+        .rtp_coding_parameters
+        .ssrc
+        .expect("an SSRC");
+    let now = world.now;
+    let before = world.wire.len();
+    world.peers[0]
+        .pc
+        .rtp_sender(sender)
+        .expect("sender")
+        .write_rtp_with_capture_time(
+            now,
+            rtc::rtp::Packet {
+                header: Header {
+                    version: 2,
+                    payload_type: pt,
+                    sequence_number: 7,
+                    timestamp: 90_000,
+                    ssrc: plain_ssrc,
+                    marker: true,
+                    ..Default::default()
+                },
+                payload: Bytes::from(vec![0x10u8; 100]),
+            },
+            capture_ntp,
+            None,
+        )?;
+    world.pump()?;
+    world.run_until(now + Duration::from_millis(20))?;
+    let header = world.wire[before..]
+        .iter()
+        .find(|h| h.payload_type == pt)
+        .expect("the packet");
+    assert_eq!(header.extension_profile, 0xBEDE);
+    assert!(
+        header
+            .extensions
+            .iter()
+            .any(|e| e.payload.windows(8).any(|w| w == clear)),
+        "in the clear without Cryptex"
+    );
     Ok(())
 }

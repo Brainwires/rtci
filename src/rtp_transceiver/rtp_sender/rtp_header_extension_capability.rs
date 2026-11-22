@@ -11,6 +11,21 @@ pub struct RTCRtpHeaderExtensionCapability {
     pub uri: String,
 }
 
+/// An RTP header extension with the direction this transceiver negotiates it in
+/// (webrtc-extensions 4.1: `RTCRtpHeaderExtensionCapability` with its `direction` member; the
+/// items of `[[HeaderExtensionsToNegotiate]]` and `[[NegotiatedHeaderExtensions]]`).
+///
+/// `direction` is from this side's point of view; `Stopped` means not negotiated.
+/// `Inactive` is offered as `a=extmap:<id>/inactive`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RTCRtpHeaderExtensionToNegotiate {
+    /// The URI of the extension.
+    pub uri: String,
+    /// The direction: `Sendrecv` (the default), `Sendonly`, `Recvonly`, `Inactive` or
+    /// `Stopped`.
+    pub direction: crate::rtp_transceiver::RTCRtpTransceiverDirection,
+}
+
 /// How offers signal a header extension with respect to header extension encryption (RFC
 /// 6904); see [`MediaEngine::set_header_extension_encryption`].
 ///
