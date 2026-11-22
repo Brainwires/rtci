@@ -135,6 +135,38 @@ impl IceTransport {
         RTCIceComponent::Rtp
     }
 
+    /// webrtc-extensions 7 `[[CandidatePairs]]`: the agent's candidate pairs.
+    pub(crate) fn get_candidate_pairs(&self) -> Vec<RTCIceCandidatePair> {
+        self.agent
+            .get_candidate_pairs()
+            .iter()
+            .map(|(local, remote)| RTCIceCandidatePair::new(local.into(), remote.into()))
+            .collect()
+    }
+
+    /// The agent's candidates of the listed pair that matches `pair` (webrtc-extensions 7.2:
+    /// local and remote each with the same candidate string, sdpMid, sdpMLineIndex and
+    /// usernameFragment, a null one matching only null).
+    pub(crate) fn find_candidate_pair(
+        &self,
+        pair: &RTCIceCandidatePair,
+    ) -> Option<(ice::candidate::Candidate, ice::candidate::Candidate)> {
+        fn matches(ours: &RTCIceCandidate, theirs: &RTCIceCandidate) -> bool {
+            ours.candidate().ok() == theirs.candidate().ok()
+                && ours.sdp_mid == theirs.sdp_mid
+                && ours.sdp_mline_index == theirs.sdp_mline_index
+                && ours.username_fragment == theirs.username_fragment
+        }
+        self.agent
+            .get_candidate_pairs()
+            .into_iter()
+            .find(|(local, remote)| {
+                let candidate = RTCIceCandidatePair::new(local.into(), remote.into());
+                matches(candidate.local(), pair.local())
+                    && matches(candidate.remote(), pair.remote())
+            })
+    }
+
     /// W3C `IceTransport.getSelectedCandidatePair()`.
     ///
     /// `None` until ICE has nominated a pair.

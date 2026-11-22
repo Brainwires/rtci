@@ -305,6 +305,12 @@ impl RTCIceTransport<'_> {
         self.peer_connection.ice_transport().get_remote_candidates()
     }
 
+    /// webrtc-extensions 7 `getCandidatePairs()`: the ICE agent's candidate pairs, in the
+    /// order they were formed (`OnIceCandidatePairAdd` announced each).
+    pub fn get_candidate_pairs(&self) -> Vec<RTCIceCandidatePair> {
+        self.peer_connection.ice_transport().get_candidate_pairs()
+    }
+
     /// The nominated candidate pair, or `None` until ICE selects one.
     pub fn get_selected_candidate_pair(&self) -> Option<RTCIceCandidatePair> {
         self.peer_connection

@@ -2656,6 +2656,68 @@ impl RTCPeerConnection {
         self.trigger_negotiation_needed();
     }
 
+    /// webrtc-extensions 7 `RTCIceTransport.selectCandidatePair(pair)`: the ICE agent sends
+    /// data on `pair` (one of `RTCIceTransport::get_candidate_pairs`) from now on; the
+    /// selected pair changes with its `OnSelectedCandidatePairChange`, and the ICE state with
+    /// its events when it was not connected.
+    ///
+    /// # Errors
+    ///
+    /// `InvalidStateError` when the connection is closed or the ICE transport's state is
+    /// new, failed or closed; `NotFoundError` when `pair` is not a listed pair (its candidates
+    /// match by candidate string, sdpMid, sdpMLineIndex and usernameFragment).
+    pub fn select_candidate_pair(
+        &mut self,
+        now: Instant,
+        pair: &crate::peer_connection::transport::RTCIceCandidatePair,
+    ) -> Result<()> {
+        if self.is_closed() {
+            return Err(Error::InvalidStateError);
+        }
+        let (local, remote) = self.listed_candidate_pair(pair)?;
+        self.ice_transport_mut()
+            .agent
+            .select_candidate_pair(now, &local, &remote)
+    }
+
+    /// webrtc-extensions 7 `RTCIceTransport.removeCandidatePair(pair)`: the ICE agent stops
+    /// the checks on `pair` and drops it from its list, announced by
+    /// `OnIceCandidatePairRemove`. When it carried the data the best other valid pair takes
+    /// over, with `OnSelectedCandidatePairChange`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::select_candidate_pair`].
+    pub fn remove_candidate_pair(
+        &mut self,
+        now: Instant,
+        pair: &crate::peer_connection::transport::RTCIceCandidatePair,
+    ) -> Result<()> {
+        if self.is_closed() {
+            return Err(Error::InvalidStateError);
+        }
+        let (local, remote) = self.listed_candidate_pair(pair)?;
+        self.ice_transport_mut()
+            .agent
+            .remove_candidate_pair(now, &local, &remote)
+    }
+
+    fn listed_candidate_pair(
+        &self,
+        pair: &crate::peer_connection::transport::RTCIceCandidatePair,
+    ) -> Result<(ice::candidate::Candidate, ice::candidate::Candidate)> {
+        let state = self.ice_transport().state();
+        if matches!(
+            state,
+            RTCIceTransportState::New | RTCIceTransportState::Failed | RTCIceTransportState::Closed
+        ) {
+            return Err(Error::InvalidStateError);
+        }
+        self.ice_transport()
+            .find_candidate_pair(pair)
+            .ok_or(Error::NotFoundError)
+    }
+
     /// The RTCP canonical name (CNAME) of this connection: the one name every SSRC it sends
     /// from is described with in RTCP (RFC 3550 6.5.1), so that a receiver can tell which
     /// streams come from one endpoint and synchronise them.

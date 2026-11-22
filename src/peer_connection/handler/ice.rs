@@ -323,6 +323,30 @@ impl<'a>
                         event: RTCEventInternal::ICESelectedCandidatePairChange,
                     });
                 }
+                ::ice::Event::CandidatePairAdded(local, remote) => {
+                    let pair = crate::peer_connection::transport::RTCIceCandidatePair::new(
+                        (&*local).into(),
+                        (&*remote).into(),
+                    );
+                    self.ctx.event_outs.push_back(TaggedRTCEventInternal {
+                        now,
+                        event: RTCEventInternal::RTCPeerConnectionEvent(
+                            RTCPeerConnectionEvent::OnIceCandidatePairAdd(pair),
+                        ),
+                    });
+                }
+                ::ice::Event::CandidatePairRemoved(local, remote) => {
+                    let pair = crate::peer_connection::transport::RTCIceCandidatePair::new(
+                        (&*local).into(),
+                        (&*remote).into(),
+                    );
+                    self.ctx.event_outs.push_back(TaggedRTCEventInternal {
+                        now,
+                        event: RTCEventInternal::RTCPeerConnectionEvent(
+                            RTCPeerConnectionEvent::OnIceCandidatePairRemove(pair),
+                        ),
+                    });
+                }
                 ::ice::Event::RoleChange(is_controlling) => {
                     self.stats.transport.on_ice_role_changed(is_controlling);
                 }

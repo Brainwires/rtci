@@ -104,6 +104,10 @@ pub struct CandidatePair {
     /// The peer nominated this pair before its check succeeded here; the nomination takes
     /// effect when the triggered check does (RFC 8445 Section 7.3.1.5).
     pub(crate) nomination_pending: bool,
+    /// The application removed the pair (`Agent::remove_candidate_pair`): it is Failed, no
+    /// check is sent or answered on it, and it is not listed. It keeps its slot: pairs are
+    /// referenced by index.
+    pub(crate) removed: bool,
 
     // STUN transaction stats
     /// Total number of STUN connectivity check requests sent (not including retransmissions).
@@ -185,6 +189,7 @@ impl CandidatePair {
             nominate: false,
             remote_nomination: 0,
             nomination_pending: false,
+            removed: false,
             // STUN transaction stats
             requests_sent: 0,
             requests_received: 0,
