@@ -40,7 +40,8 @@ struct Peer {
     pc: RTCPeerConnection,
     addrs: Vec<SocketAddr>,
     events: Vec<RTCPeerConnectionEvent>,
-    /// The local address of every datagram this peer wrote.
+    /// The local address of every DTLS datagram (the data, not the STUN checks) this peer
+    /// wrote.
     sent_from: Vec<SocketAddr>,
 }
 
@@ -97,7 +98,13 @@ impl World {
             }
             while peer.pc.poll_read().is_some() {}
             while let Some(datagram) = peer.pc.poll_write() {
-                peer.sent_from.push(datagram.transport.local_addr);
+                if datagram
+                    .message
+                    .first()
+                    .is_some_and(|b| (20..=63).contains(b))
+                {
+                    peer.sent_from.push(datagram.transport.local_addr);
+                }
                 in_flight.push((i, datagram));
             }
         }
@@ -205,8 +212,8 @@ fn the_candidate_pairs_are_announced_and_listed() -> Result<()> {
     Ok(())
 }
 
-/// webrtc-extensions 7 selectCandidatePair: the data moves to the pair the application
-/// selected, with a `selectedcandidatepairchange`.
+/// webrtc-extensions 7 selectCandidatePair: the data (DTLS records here) moves to the pair
+/// the application selected, with a `selectedcandidatepairchange`.
 #[test]
 fn select_candidate_pair_moves_the_data_to_the_pair() -> Result<()> {
     let mut world = World::connected(&OFFERER, &ANSWERER)?;
@@ -219,6 +226,8 @@ fn select_candidate_pair_moves_the_data_to_the_pair() -> Result<()> {
     let before = world.peers[0].events.len();
     world.peers[0].pc.select_candidate_pair(now, &other)?;
     world.peers[0].sent_from.clear();
+    // Data to carry: a new channel's DATA_CHANNEL_OPEN.
+    world.peers[0].pc.create_data_channel("after", None)?;
     let until = world.now + Duration::from_millis(500);
     world.run_until(|w| w.now >= until)?;
     let offerer = &world.peers[0];
