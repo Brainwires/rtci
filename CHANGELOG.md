@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **remote tracks**: by description, not by media (W3C webrtc-pc 4.4.1.6, 5.1.1, 5.3, 9.3).
+  New `RTCTrackEvent` variants: `OnRemoteTrack(RTCRemoteTrackEventInit)` (the W3C `track`
+  event, queued when a description makes a transceiver receive or adds streams, with the
+  receiver, transceiver, track and every msid stream), `OnMute` / `OnUnmute`,
+  `OnStreamsChanged(RTCRemoteStreamsChange)`. `OnOpen` still fires per RTP stream. A
+  receiver's track has an id the engine generates (not the msid appdata) and keeps it across
+  descriptions; it starts muted and its first RTP packet unmutes it. An RTCP BYE mutes the
+  track instead of ending it (`OnClose` no longer follows a BYE); a remote track ends only
+  by negotiation: `stop()`, a rejected section, or a rollback that removes its transceiver.
+  A section without `a=msid` puts the track in one random "default" stream per session
+  (RFC 9429 5.8). `MediaStream` keys its tracks by track id (tracks of one stream no longer
+  overwrite each other), does not add a track twice, and computes `active`.
 - **rtp_transceiver**: the W3C object model (webrtc-pc 5.1 to 5.4). Every transceiver has a
   sender and a receiver: `get_senders` / `get_receivers` list those of every transceiver that
   is not stopped, whatever its direction, and `rtp_sender(id)` / `rtp_receiver(id)` exist for
