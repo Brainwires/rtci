@@ -805,7 +805,16 @@ impl<'a>
                 // one of `dataChannelsClosed`.
                 self.stats.on_data_channel_gone(id);
 
+                // The channel failed to open: an error, then the close (W3C webrtc 6.2,
+                // "announce the data channel as closed" after a failure), not a close alone.
+                dc.failed = true;
                 dc.close_emitted = true;
+                self.ctx.event_outs.push_back(TaggedRTCEventInternal {
+                    now,
+                    event: RTCEventInternal::RTCPeerConnectionEvent(
+                        RTCPeerConnectionEvent::OnDataChannel(RTCDataChannelEvent::OnError(id)),
+                    ),
+                });
                 self.ctx.event_outs.push_back(TaggedRTCEventInternal {
                     now,
                     event: RTCEventInternal::RTCPeerConnectionEvent(
@@ -1382,8 +1391,9 @@ mod tests {
         );
     }
 
-    /// An in-band channel whose ACK never arrives must time out: it transitions
-    /// to Closed and fires OnClose once. It never opened, so it is not counted as closed.
+    /// With a DCEP handshake timeout configured (none is by default), an in-band channel
+    /// whose ACK never arrives times out: it transitions to Closed and fires OnError, then
+    /// OnClose once. It never opened, so it is not counted as closed.
     #[test]
     fn in_band_channel_times_out_without_ack() {
         let now = Instant::now();
@@ -1471,6 +1481,27 @@ mod tests {
             })
             .count();
         assert_eq!(closes, 1, "exactly one OnClose for the timed-out channel");
+        // It failed to open: an error first, then the close, not a close alone.
+        let lifecycle: Vec<_> = ctx
+            .event_outs
+            .iter()
+            .filter_map(|e| match &e.event {
+                RTCEventInternal::RTCPeerConnectionEvent(
+                    RTCPeerConnectionEvent::OnDataChannel(
+                        event @ (RTCDataChannelEvent::OnError(id)
+                        | RTCDataChannelEvent::OnClose(id)),
+                    ),
+                ) if *id == handle => Some(event.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            lifecycle,
+            vec![
+                RTCDataChannelEvent::OnError(handle),
+                RTCDataChannelEvent::OnClose(handle)
+            ]
+        );
 
         // webrtc-stats `dataChannelsClosed` counts the channels that left the `open` state:
         // this one never was in it, and opened minus closed (the channels open now) stays 0.

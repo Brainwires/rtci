@@ -169,19 +169,18 @@ pub struct Timeout {
 }
 
 /// Data-channel configuration for in-band channels.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct DataChannel {
     /// Maximum time to wait for a peer's `DATA_CHANNEL_ACK` before failing an
-    /// in-band data channel. `None` disables the timeout.
+    /// in-band data channel, counted from the moment the association came up on this side.
+    /// `None` (the default) disables the timeout.
+    ///
+    /// RFC 8832 has none: the `DATA_CHANNEL_OPEN` and the `DATA_CHANNEL_ACK` are sent on a
+    /// reliable, ordered stream, so they arrive while the association lives, and a channel
+    /// whose association fails gets an error with it. A fixed timeout instead closed channels
+    /// on a lossy path that was still up, where SCTP's retransmissions (which back off) or
+    /// the peer's half of the SCTP handshake (a lost COOKIE ACK) took longer than it.
     pub dcep_handshake_timeout: Option<Duration>,
-}
-
-impl Default for DataChannel {
-    fn default() -> Self {
-        Self {
-            dcep_handshake_timeout: Some(Duration::from_secs(30)),
-        }
-    }
 }
 
 /// MulticastDNS configuration for mDNS.
@@ -670,6 +669,9 @@ impl SettingEngineBuilder {
     }
 
     /// Configures the DCEP handshake timeout for in-band data channels.
+    ///
+    /// Off by default (RFC 8832 has no such timeout; see [`DataChannel::dcep_handshake_timeout`]).
+    /// A channel whose `DATA_CHANNEL_ACK` has not arrived in time gets an error and is closed.
     ///
     /// # Parameters
     ///

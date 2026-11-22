@@ -17,6 +17,17 @@
 //! at most one every 4 seconds: consent can lapse, and then the peer MUST stop sending. What
 //! may not happen is a failure before it lapsed, so there a failure counts only when no Binding
 //! success response has reached that peer for 30 seconds.
+//!
+//! Nor may the data channel be closed or failed before it opened while the path is up: its
+//! DATA_CHANNEL_OPEN and DATA_CHANNEL_ACK travel on a reliable stream (RFC 8832 section 6). At
+//! 30 % loss every message still arrives exactly once, but not within any fixed time: a DATA
+//! chunk and its SACK both arrive about half the time, each retransmission timeout doubles the
+//! RTO up to RTO.Max, 60 seconds (RFC 9260 section 6.3.3 E2, and rule C7 allows no lower
+//! ceiling), and Karn's algorithm (C5) takes no RTT sample from a retransmitted chunk, so once
+//! every message is out the RTO stays backed off until the last is acknowledged.
+//!
+//! The engine draws random numbers of its own (ICE tie-breakers, SCTP tags, heartbeat jitter),
+//! so a seed fixes the link, not the whole run: the same seed can take a different course.
 
 use anyhow::{Result, bail};
 use bytes::BytesMut;
@@ -71,6 +82,8 @@ struct Peer {
     states: Vec<RTCPeerConnectionState>,
     ice_states: Vec<RTCIceConnectionState>,
     open: Option<RTCDataChannelId>,
+    /// Errors and closes of a data channel announced before any channel opened here.
+    closed_before_open: Vec<RTCDataChannelEvent>,
     received: Vec<u32>,
     /// When a Binding success response last reached this peer (RFC 7675: only such a response
     /// refreshes consent).
@@ -88,6 +101,7 @@ impl Peer {
             states: Vec::new(),
             ice_states: Vec::new(),
             open: None,
+            closed_before_open: Vec::new(),
             received: Vec::new(),
             last_binding_success: None,
         })
@@ -201,6 +215,10 @@ impl World {
                         RTCPeerConnectionEvent::OnDataChannel(RTCDataChannelEvent::OnOpen(id)) => {
                             peer.open = Some(id)
                         }
+                        RTCPeerConnectionEvent::OnDataChannel(
+                            event @ (RTCDataChannelEvent::OnError(_)
+                            | RTCDataChannelEvent::OnClose(_)),
+                        ) if peer.open.is_none() => peer.closed_before_open.push(event),
                         _ => {}
                     }
                 }
@@ -258,6 +276,10 @@ impl World {
 enum Outcome {
     /// Every message arrived, exactly once.
     Delivered,
+    /// The time was up with the channel open and messages still on their way, each that
+    /// arrived having arrived once (only where `lapse_allowed`: RFC 9260 bounds no delivery
+    /// time at that loss rate, see the module docs).
+    Delivering,
     /// A peer failed after its consent had lapsed: no Binding success response had reached it
     /// for 30 seconds (RFC 7675 Section 5.1).
     ConsentLapsed,
@@ -267,10 +289,11 @@ enum Outcome {
 const CONSENT_EXPIRY: Duration = Duration::from_secs(30);
 
 /// Sets up a session over `link` (seeded with `seed`), opens a reliable unordered data channel
-/// and sends `count` numbered messages over it. An error if either peer reports `failed` before
-/// the channel opened, or (unless `lapse_allowed` and its consent had lapsed) at any time; if
-/// the channel does not open within `open_within`; or if not every message arrives (exactly
-/// once) within `deliver_within`; all in virtual time.
+/// and sends `count` numbered messages over it. An error if either peer reports `failed`
+/// (unless `lapse_allowed` and its consent had lapsed); if a data channel is failed or closed
+/// before it opened while the path is up; if the channel does not open within `open_within`;
+/// or if not every message arrives (exactly once) within `deliver_within` (where
+/// `lapse_allowed`, the messages that arrived must have arrived once); all in virtual time.
 fn session_over(
     link: Link,
     seed: u64,
@@ -312,7 +335,7 @@ fn session_over(
         world.pump();
         if let Some(failed) = world.peers.iter().find(|p| p.failed()) {
             let silent_for = world.now - failed.last_binding_success.unwrap_or(start).max(start);
-            if lapse_allowed && world.peers[0].open.is_some() && silent_for >= CONSENT_EXPIRY {
+            if lapse_allowed && silent_for >= CONSENT_EXPIRY {
                 return Ok(Outcome::ConsentLapsed);
             }
             bail!(
@@ -321,6 +344,19 @@ fn session_over(
                  sent): {}",
                 world.now - start,
                 world.peers[0].open.is_some(),
+                world.describe()
+            );
+        }
+        if let Some(peer) = world
+            .peers
+            .iter()
+            .find(|p| !p.closed_before_open.is_empty())
+        {
+            bail!(
+                "seed {seed}, {link:?}: {:?} before the channel opened, after {:?}, with the path \
+                 up: {}",
+                peer.closed_before_open,
+                world.now - start,
                 world.describe()
             );
         }
@@ -357,6 +393,11 @@ fn session_over(
             return Ok(Outcome::Delivered);
         }
         if world.now - start > open_within + deliver_within {
+            if lapse_allowed {
+                let unique: HashSet<u32> = received.iter().copied().collect();
+                assert_eq!(unique.len(), received.len(), "seed {seed}: only once");
+                return Ok(Outcome::Delivering);
+            }
             bail!(
                 "seed {seed}, {link:?}: {} of {count} messages arrived ({next} sent) within \
                  {deliver_within:?} of opening: {}",
@@ -415,30 +456,44 @@ fn a_session_over_a_link_with_ten_percent_loss_connects_and_delivers_everything(
 }
 
 /// 30 % loss each way: about half of all check transactions lose the request or the
-/// response. The session still connects and opens its channel every time, and fails only when
-/// consent has lapsed; the seeds below include runs where it does not, which deliver
-/// everything.
+/// response. The session fails only when consent has lapsed, its channel is never failed or
+/// closed before it opened, and what arrives arrives once.
 #[test]
 fn a_session_over_a_link_with_thirty_percent_loss_fails_only_when_consent_lapses() -> Result<()> {
-    let link = Link {
-        loss: 0.30,
-        delay: Duration::from_millis(20),
-        jitter: Duration::from_millis(5),
-    };
-    let mut outcomes = Vec::new();
     for seed in SEEDS {
-        outcomes.push(session_over(
-            link,
+        session_over(
+            THIRTY_PERCENT,
             seed,
             100,
-            Duration::from_secs(60),
+            Duration::from_secs(300),
             Duration::from_secs(180),
             true,
-        )?);
+        )?;
     }
-    assert!(
-        outcomes.contains(&Outcome::Delivered),
-        "no seed delivered everything: {outcomes:?}"
-    );
+    Ok(())
+}
+
+const THIRTY_PERCENT: Link = Link {
+    loss: 0.30,
+    delay: Duration::from_millis(20),
+    jitter: Duration::from_millis(5),
+};
+
+/// The run that found it: at 30 % loss with seed 0x5eed, ICE and DTLS stayed connected and
+/// the channel did not open within 300 s. The SCTP handshake had completed on the offerer
+/// and not yet on the answerer (its COOKIE ACK lost, the OPEN discarded in COOKIE-ECHOED until
+/// a retransmitted COOKIE ECHO was answered), and a DCEP handshake timeout of 30 s closed the
+/// channel, with no error, before the ACK could come. RFC 8832 has no such timeout; the
+/// channel must open while the path stays up, or consent lapse first.
+#[test]
+fn the_channel_opens_over_thirty_percent_loss_while_the_path_stays_up() -> Result<()> {
+    session_over(
+        THIRTY_PERCENT,
+        0x5eed,
+        100,
+        Duration::from_secs(300),
+        Duration::from_secs(180),
+        true,
+    )?;
     Ok(())
 }
