@@ -15,7 +15,8 @@ use crate::peer_connection::sdp::{
     add_candidates_to_media_descriptions, bundle_group_mids, effective_direction,
     get_application_media, get_application_media_section_sctp_port, get_by_mid, get_peer_direction,
     get_rids, have_data_channel, is_ext_map_allow_mixed_set, is_rejected_media, is_rtp_profile,
-    is_unknown_application_media, rtp_extensions_from_media_description, track_details_from_sdp,
+    is_unknown_application_media, rtp_extensions_from_media_description, superseded_clear_extensions,
+    track_details_from_sdp,
     unknown_media_name,
 };
 use crate::peer_connection::state::signaling_state::check_next_signaling_state;
@@ -709,6 +710,11 @@ impl RTCPeerConnection {
                                 Default::default()
                             } else {
                                 answered_extension_directions(media)
+                            },
+                            superseded_extensions: if include_unmatched {
+                                vec![]
+                            } else {
+                                superseded_clear_extensions(media)?
                             },
                             rid_map: get_rids(media),
                             answer_direction,

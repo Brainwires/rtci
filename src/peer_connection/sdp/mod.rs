@@ -304,7 +304,7 @@ use crate::media_stream::track::{MediaStreamTrack, MediaStreamTrackId};
 use crate::peer_connection::RTCPeerConnection;
 use crate::peer_connection::configuration::RTCBundlePolicy;
 use crate::peer_connection::configuration::media_engine::{
-    MediaEngine, is_rtcp_conflicting_payload_type,
+    MediaEngine, is_rtcp_conflicting_payload_type, local_extension_ids,
 };
 use crate::peer_connection::state::ice_gathering_state::RTCIceGatheringState;
 use crate::peer_connection::transport::dtls::fingerprint::{
@@ -2381,20 +2381,14 @@ pub(crate) fn answered_extension_directions(
 ) -> HashMap<String, sdp::direction::Direction> {
     use sdp::direction::Direction;
     let mut out = HashMap::new();
-    for a in m.attributes.iter().filter(|a| a.key == ATTR_KEY_EXT_MAP) {
-        let a_str = a.to_string();
-        let Ok(e) = ExtMap::unmarshal(&mut a_str.as_bytes()) else {
-            continue;
-        };
-        let answered = match e.direction {
+    for (uri, mapping) in rtp_extensions_from_media_description(m).unwrap_or_default() {
+        let answered = match mapping.direction {
             Direction::SendOnly => Direction::RecvOnly,
             Direction::RecvOnly => Direction::SendOnly,
             Direction::Inactive => Direction::Inactive,
             _ => continue,
         };
-        if let Some(uri) = e.uri {
-            out.insert(uri.to_string(), answered);
-        }
+        out.insert(uri, answered);
     }
     out
 }
@@ -3126,6 +3120,9 @@ pub(crate) struct SectionExtension {
     pub(crate) encrypted: bool,
     /// The extension attributes after the URI, if any (`vad=off`, RFC 6464 section 4).
     pub(crate) attributes: Option<String>,
+    /// The direction the line gives the extension (RFC 8285 section 7), `Unspecified` for
+    /// none.
+    pub(crate) direction: sdp::direction::Direction,
 }
 
 /// Whether a section's transport protocol is an SRTP-based RTP profile (`RTP/SAVP`,
@@ -3194,6 +3191,7 @@ pub(crate) fn section_extmap_lines(m: &MediaDescription) -> Result<Vec<(String, 
                 id: e.value,
                 encrypted,
                 attributes,
+                direction: e.direction,
             },
         ));
     }
