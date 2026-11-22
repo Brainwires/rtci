@@ -48,23 +48,17 @@ use std::time::{Duration, Instant};
 /// The session bandwidth assumed while none is configured and no media has been measured:
 /// one audio stream.
 pub const RTCP_SESSION_MIN_BANDWIDTH: u64 = 64_000;
-/// The session bandwidth assumed for video while none was signalled: 1 Mbit/s, a camera
-/// stream at standard definition.
+/// The session bandwidth assumed for video at the start, while no `b=` line gave one and the
+/// media has not yet had its two seconds to be measured: 1 Mbit/s, a camera stream at
+/// standard definition.
 ///
-/// RFC 3550 section 6.2 takes the RTCP bandwidth as a share of the *session* bandwidth, "the
-/// nominal" bandwidth the session is set up for, not of what happens to be sent at the
-/// moment. A sender that starts low (a congestion controller starts at a few hundred kbit/s
-/// and climbs on the feedback it gets) measured as the session bandwidth would get little
-/// feedback, and so climb slowly: the loop runs on the wrong quantity. Without `b=` lines
-/// the nominal bandwidth of a session with video is this, with audio
-/// [`RTCP_SESSION_NOMINAL_AUDIO_BANDWIDTH`], and never less than what is measured.
-///
-/// Why this figure: RTP/AVPF with `T_rr_interval` zero spends the whole RTCP bandwidth on
-/// regular reports, so the nominal value is also what a low-rate stream pays for. At 1 Mbit/s
-/// the receiver has 50 kbit/s of RTCP, which holds a congestion feedback packet every 100 ms
-/// with room for three simulcast layers' report blocks (`congestion_feedback_rate.rs`); the
-/// 2.5 Mbit/s a high-definition stream may reach doubled the RTCP of a 300 kbit/s stream for
-/// no gain in feedback.
+/// RFC 3550 section 6.2 takes the RTCP bandwidth as a share of the session bandwidth, which
+/// it lets "a session management application" supply; without one the session measures the
+/// media, both ways, over the last two seconds (64 kbit/s at least). Before there is anything
+/// to measure, this start-up value (with [`RTCP_SESSION_NOMINAL_AUDIO_BANDWIDTH`] for audio)
+/// stands in, so the first reports are not held to an idle session's share. Congestion
+/// control feedback does not depend on it: it follows the media it reports on
+/// ([`RtcpSessionBuilder::with_immediate_congestion_feedback`]).
 pub const RTCP_SESSION_NOMINAL_VIDEO_BANDWIDTH: u64 = 1_000_000;
 /// The session bandwidth assumed for audio while none was signalled: 64 kbit/s, an Opus
 /// stream at its high end for speech and the floor the session has always had.
@@ -128,9 +122,8 @@ pub enum RtcpProfile {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RtcpBandwidth {
     /// The session bandwidth (`b=TIAS`, or `b=AS` times 1000). RTCP gets 5% of it unless
-    /// `rs` and `rr` say otherwise. `None`: the nominal bandwidth of the media bound
-    /// ([`RTCP_SESSION_NOMINAL_VIDEO_BANDWIDTH`], [`RTCP_SESSION_NOMINAL_AUDIO_BANDWIDTH`]),
-    /// or the media bitrate measured when that is more.
+    /// `rs` and `rr` say otherwise. `None`: the media bitrate measured over the last two
+    /// seconds, with a start-up value before that ([`RTCP_SESSION_NOMINAL_VIDEO_BANDWIDTH`]).
     pub session: Option<u64>,
     /// `b=RS` (RFC 3556): the RTCP bandwidth of the senders.
     pub rs: Option<u64>,
@@ -246,6 +239,7 @@ pub struct RtcpSessionBuilder {
     cname: Option<String>,
     point_to_point: Option<bool>,
     report_from_every_ssrc: bool,
+    immediate_congestion_feedback: bool,
     random: Box<dyn RtcpRandom>,
 }
 
@@ -262,6 +256,7 @@ impl Default for RtcpSessionBuilder {
             cname: None,
             point_to_point: None,
             report_from_every_ssrc: false,
+            immediate_congestion_feedback: true,
             random: Box::new(ThreadRandom),
         }
     }
@@ -269,8 +264,8 @@ impl Default for RtcpSessionBuilder {
 
 impl RtcpSessionBuilder {
     /// A builder with the defaults: RTP/AVPF timing, a `T_rr_interval` of one second, RTCP at
-    /// 5% of the nominal session bandwidth of the media bound (or of the measured media
-    /// bitrate when that is more), compound packets only.
+    /// 5% of the measured media bitrate (a start-up value before it is measured), compound
+    /// packets only, congestion control feedback sent as it is built.
     pub fn new() -> Self {
         Self::default()
     }
@@ -350,6 +345,23 @@ impl RtcpSessionBuilder {
         self
     }
 
+    /// Whether congestion control feedback (transport-wide feedback, RFC 8888 reports) leaves
+    /// as soon as its generator writes it (the default), or waits its turn under RFC 4585
+    /// section 3.5.2 like other feedback: at most one Early packet per regular interval.
+    ///
+    /// The generators size their own cadence to 5% of the media they report on, between 50
+    /// and 250 ms (`TwccReceiverBuilder::with_adaptive_interval`): congestion control feedback
+    /// is the sender's congestion signal and is not held to the RTCP bandwidth the regular
+    /// reports share, as libwebrtc and the browsers send it. It goes as a reduced-size packet
+    /// where `a=rtcp-rsize` was negotiated, else in a minimal compound packet, and does not
+    /// move the regular reports' timing. `false` is RFC 4585 as written: at low media rates
+    /// the session then sends feedback a few times a second, with gaps a sender's estimator
+    /// does not climb through.
+    pub fn with_immediate_congestion_feedback(mut self, immediate: bool) -> Self {
+        self.immediate_congestion_feedback = immediate;
+        self
+    }
+
     /// The source of the session's random numbers; a test supplies one that repeats.
     pub fn with_random(mut self, random: impl RtcpRandom + 'static) -> Self {
         self.random = Box::new(random);
@@ -386,6 +398,8 @@ impl RtcpSessionBuilder {
             pmembers: 0,
             avg_rtcp_size: 0.0,
             rate: RateWindow::default(),
+            immediate_congestion_feedback: self.immediate_congestion_feedback,
+            outside_budget: false,
             pending: Vec::new(),
             early_at: None,
             compound_sent: false,
@@ -621,6 +635,11 @@ pub struct RtcpSessionInterceptor {
     pmembers: usize,
     avg_rtcp_size: f64,
     rate: RateWindow,
+    /// Whether congestion control feedback leaves as soon as it is written.
+    immediate_congestion_feedback: bool,
+    /// Set while a packet is sent outside the RTCP bandwidth's timing (immediate congestion
+    /// feedback): it does not move the average packet size the regular interval rests on.
+    outside_budget: bool,
     /// Feedback and other packets waiting for a compound packet.
     pending: Vec<Box<dyn rtcp::Packet>>,
     /// RFC 4585 3.5.2: when the scheduled Early packet goes.
@@ -769,8 +788,10 @@ impl RtcpSessionInterceptor {
             return;
         }
         // RFC 3550 6.3.6 with RFC 8108 5.3.1: the average takes the size per reporting SSRC.
-        let size = wire_size(&packets) as f64 / reporting_ssrcs(&packets) as f64;
-        self.avg_rtcp_size = update_avg_rtcp_size(self.avg_rtcp_size, size);
+        if !self.outside_budget {
+            let size = wire_size(&packets) as f64 / reporting_ssrcs(&packets) as f64;
+            self.avg_rtcp_size = update_avg_rtcp_size(self.avg_rtcp_size, size);
+        }
         self.write_queue.push_back(TaggedPacket {
             now,
             transport: TransportContext::default(),
@@ -863,7 +884,25 @@ impl RtcpSessionInterceptor {
     fn session_bandwidth(&self, now: Instant) -> f64 {
         match self.bandwidth.session {
             Some(session) => session as f64,
-            None => self.rate.bits_per_second(now).max(self.nominal_bandwidth()),
+            None => {
+                // RFC 3550 6.2 lets the session bandwidth be "supplied by a session
+                // management application"; without one it is the media measured both ways
+                // over the last seconds. (A congestion controller's target is not used: an
+                // application-limited sender's target is many times what it sends.)
+                let measured = self.rate.bits_per_second(now);
+                // The nominal figure stands only until the media has had its window to be
+                // measured: a start-up value, not the session bandwidth.
+                let starting = self
+                    .rate
+                    .first
+                    .is_none_or(|first| now.saturating_duration_since(first) < RATE_WINDOW);
+                let measured = if starting {
+                    measured.max(self.nominal_bandwidth())
+                } else {
+                    measured
+                };
+                measured.max(RTCP_SESSION_MIN_BANDWIDTH as f64)
+            }
         }
     }
 
@@ -1696,6 +1735,43 @@ impl RtcpSessionInterceptor {
         included
     }
 
+    /// Congestion control feedback leaves now, outside RFC 4585's Early allowance and the
+    /// regular timing (see [`RtcpSessionBuilder::with_immediate_congestion_feedback`]):
+    /// reduced-size where negotiated, else in a minimal compound packet; whatever other
+    /// feedback is waiting goes with it.
+    fn send_congestion_feedback(&mut self, now: Instant) {
+        let media = self
+            .pending
+            .iter()
+            .find_map(|packet| sender_and_media(packet.as_ref()).1);
+        let Some(index) = self.feedback_source(media) else {
+            return;
+        };
+        if self.locals[index].timing.is_none() {
+            return;
+        }
+        let reduced = self.reduced_size
+            && self.compound_sent
+            && !self.reduced_size_failed
+            && self
+                .pending
+                .iter()
+                .all(|packet| delivery_shows(packet.as_ref()))
+            && self.pending.iter().map(|p| p.marshal_size()).sum::<usize>() <= REDUCED_SIZE_MAX;
+        self.outside_budget = true;
+        if reduced {
+            self.note_reduced_nack();
+            let packets = std::mem::take(&mut self.pending);
+            self.send(now, packets);
+        } else {
+            self.send_compound(now, index, Shape::Minimal);
+        }
+        self.outside_budget = false;
+        if self.pending.is_empty() {
+            self.early_at = None;
+        }
+    }
+
     /// RFC 4585 3.5.2 step 6: the Early packet goes, from the local SSRC `index`.
     fn send_early(&mut self, now: Instant, index: usize) {
         let reduced = self.reduced_size
@@ -2117,10 +2193,18 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for RtcpSessionInterceptor {
                 self.write_queue.push_back(msg);
             }
             Packet::Rtcp(packets) => {
+                let congestion_feedback = !packets.is_empty()
+                    && packets.iter().all(|packet| {
+                        let any = packet.as_any();
+                        any.is::<TransportLayerCc>() || any.is::<CcFeedbackReport>()
+                    });
                 for packet in packets {
                     self.adopt(packet);
                 }
                 self.run_timers(now);
+                if congestion_feedback && self.immediate_congestion_feedback {
+                    self.send_congestion_feedback(now);
+                }
                 self.schedule_feedback(now);
             }
         }

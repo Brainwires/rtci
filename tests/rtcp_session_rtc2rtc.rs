@@ -421,12 +421,9 @@ fn a_pli_arrives_from_the_receivers_own_ssrc() -> Result<()> {
     Ok(())
 }
 
-/// RFC 3550 6.2: RTCP stays inside its share of the session: 5% of the session bandwidth,
-/// which without `b=` lines is the nominal 1 Mbit/s of a video session
-/// (`RTCP_SESSION_NOMINAL_VIDEO_BANDWIDTH`). RTP/AVPF with `T_rr_interval` zero (no
-/// `trr-int`, RFC 4585 section 4.2) spends that share, so a side sends a few tens of compound
-/// packets a second: at most the 50 kbit/s over five seconds in packets of 60 octets, and at
-/// least a few. Feedback rides those packets rather than adding its own per interceptor.
+/// RFC 3550 6.2: RTCP stays a small share of the session: a few compound packets a second
+/// from each side, with congestion control feedback at most every 50 ms from the receiver,
+/// not one per stream per interceptor.
 #[test]
 fn rtcp_is_a_few_packets_a_second() -> Result<()> {
     let (mut world, sender) = World::connected()?;
@@ -442,7 +439,7 @@ fn rtcp_is_a_few_packets_a_second() -> Result<()> {
             peer.rtcp_datagrams
         );
         assert!(
-            (3..=520).contains(&peer.rtcp_datagrams),
+            (3..=150).contains(&peer.rtcp_datagrams),
             "the {name} sent {} RTCP datagrams in five seconds",
             peer.rtcp_datagrams
         );
