@@ -14,11 +14,16 @@
 //!   `marshal` one back, get and set header extensions by id.
 //! * [`packetizer`] — [`Packetizer`](packetizer::Packetizer), which fragments a frame into
 //!   MTU-sized payloads, and the per-codec [`Payloader`](packetizer::Payloader)
-//!   implementations in [`codec`] (VP8, VP9, H.264, H.265, AV1, Opus, G.711).
+//!   implementations in [`codec`] (VP8, VP9, H.264, H.265, AV1, Opus, G.711), with the
+//!   payload formats an application drives itself: telephone-event ([RFC 4733]), comfort noise
+//!   ([RFC 3389]) and RED ([RFC 2198]).
 //! * [`sequence`] — [`Sequencer`](sequence::Sequencer), for sequence numbers that start at a
 //!   random offset as the RFC requires.
 //! * [`extension`] — the typed header extensions: audio level ([RFC 6464]), video
 //!   orientation, transport-wide CC, and the SDES stream ids used for simulcast.
+//! * [`header::validity`] and [`sequence::SourceSequence`] — the validity checks of RFC 3550
+//!   Appendix A.1.
+//! * [`clock_rate`] — the rules for a stream that changes clock rate ([RFC 7160]).
 //!
 //! # Example
 //!
@@ -55,8 +60,17 @@
 //! [RFC 3550]: https://datatracker.ietf.org/doc/html/rfc3550
 //! [RFC 8285]: https://datatracker.ietf.org/doc/html/rfc8285
 //! [RFC 6464]: https://datatracker.ietf.org/doc/html/rfc6464
+//! [RFC 4733]: https://datatracker.ietf.org/doc/html/rfc4733
+//! [RFC 3389]: https://datatracker.ietf.org/doc/html/rfc3389
+//! [RFC 2198]: https://datatracker.ietf.org/doc/html/rfc2198
+//! [RFC 7160]: https://datatracker.ietf.org/doc/html/rfc7160
 
-/// Per-codec payloaders and depacketizers (VP8, VP9, AV1, H.264, H.265, Opus, G.711).
+/// Several clock rates in one RTP session ([RFC 7160]): the SSRC, timestamp and jitter rules.
+///
+/// [RFC 7160]: https://datatracker.ietf.org/doc/html/rfc7160
+pub mod clock_rate;
+/// Per-codec payloaders and depacketizers (VP8, VP9, AV1, H.264, H.265, Opus, G.711), and
+/// telephone-event, comfort noise and RED.
 pub mod codec;
 /// The typed RTP header extensions ([RFC 8285]).
 ///

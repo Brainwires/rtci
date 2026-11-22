@@ -6,16 +6,58 @@ use shared::{
     marshal::{Marshal, MarshalSize},
 };
 
+/// Absolute capture time: when a frame was captured, on the capturer's NTP clock.
+pub mod abs_capture_time_extension;
 /// Absolute send time, for one-way-delay based bandwidth estimation.
 pub mod abs_send_time_extension;
 /// Per-packet audio loudness and voice activity ([RFC 6464]).
 pub mod audio_level_extension;
+/// The audio level of each contributing source of a mixed packet ([RFC 6465]).
+///
+/// [RFC 6465]: https://datatracker.ietf.org/doc/html/rfc6465
+pub mod csrc_audio_level_extension;
 /// A requested playout-delay range, for latency/smoothness trade-offs.
 pub mod playout_delay_extension;
+/// SDES items in header extensions: MID, RtpStreamId, RepairedRtpStreamId ([RFC 7941],
+/// [RFC 8852]).
+///
+/// [RFC 7941]: https://datatracker.ietf.org/doc/html/rfc7941
+/// [RFC 8852]: https://datatracker.ietf.org/doc/html/rfc8852
+pub mod sdes_extension;
+/// Transmission time offset ([RFC 5450]).
+///
+/// [RFC 5450]: https://datatracker.ietf.org/doc/html/rfc5450
+pub mod transmission_offset_extension;
 /// The transport-wide sequence number that TWCC feedback refers to.
 pub mod transport_cc_extension;
 /// Camera direction and rotation (CVO), so a receiver can display video upright.
 pub mod video_orientation_extension;
+
+/// The URI of the absolute-send-time extension.
+pub const ABS_SEND_TIME_URI: &str = "http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time";
+/// The URI of the absolute-capture-time extension.
+pub const ABS_CAPTURE_TIME_URI: &str =
+    "http://www.webrtc.org/experiments/rtp-hdrext/abs-capture-time";
+/// The URI of the client-to-mixer audio level extension (RFC 6464).
+pub const AUDIO_LEVEL_URI: &str = "urn:ietf:params:rtp-hdrext:ssrc-audio-level";
+/// The URI of the mixer-to-client audio level extension (RFC 6465).
+pub const CSRC_AUDIO_LEVEL_URI: &str = "urn:ietf:params:rtp-hdrext:csrc-audio-level";
+/// The URI of the playout-delay extension.
+pub const PLAYOUT_DELAY_URI: &str = "http://www.webrtc.org/experiments/rtp-hdrext/playout-delay";
+/// The URI of the transport-wide sequence number extension.
+pub const TRANSPORT_CC_URI: &str =
+    "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01";
+/// The URI of the video orientation extension (3GPP TS 26.114).
+pub const VIDEO_ORIENTATION_URI: &str = "urn:3gpp:video-orientation";
+/// The URI of the MID extension (RFC 8843).
+pub const SDES_MID_URI: &str = "urn:ietf:params:rtp-hdrext:sdes:mid";
+/// The URI of the RtpStreamId extension (RFC 8852).
+pub const SDES_RTP_STREAM_ID_URI: &str = "urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id";
+/// The URI of the RepairedRtpStreamId extension (RFC 8852).
+pub const SDES_REPAIRED_RTP_STREAM_ID_URI: &str =
+    "urn:ietf:params:rtp-hdrext:sdes:repaired-rtp-stream-id";
+/// The URI of the transmission time offset extension (RFC 5450).
+pub const TRANSMISSION_OFFSET_URI: &str = "urn:ietf:params:rtp-hdrext:toffset";
 
 /// A generic RTP header extension.
 #[non_exhaustive]
@@ -30,6 +72,18 @@ pub enum HeaderExtension {
     TransportCc(transport_cc_extension::TransportCcExtension),
     /// The video-orientation extension.
     VideoOrientation(video_orientation_extension::VideoOrientationExtension),
+    /// The absolute-capture-time extension.
+    AbsCaptureTime(abs_capture_time_extension::AbsCaptureTimeExtension),
+    /// The mixer-to-client audio level extension.
+    CsrcAudioLevel(csrc_audio_level_extension::CsrcAudioLevelExtension),
+    /// The MID extension.
+    Mid(sdes_extension::Mid),
+    /// The RtpStreamId extension.
+    RtpStreamId(sdes_extension::RtpStreamId),
+    /// The RepairedRtpStreamId extension.
+    RepairedRtpStreamId(sdes_extension::RepairedRtpStreamId),
+    /// The transmission time offset extension.
+    TransmissionOffset(transmission_offset_extension::TransmissionOffsetExtension),
 
     /// A custom extension
     Custom {
@@ -46,28 +100,25 @@ impl HeaderExtension {
         use HeaderExtension::*;
 
         match self {
-            AbsSendTime(_) => "http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time".into(),
-            AudioLevel(_) => "urn:ietf:params:rtp-hdrext:ssrc-audio-level".into(),
-            PlayoutDelay(_) => "http://www.webrtc.org/experiments/rtp-hdrext/playout-delay".into(),
-            TransportCc(_) => {
-                "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01".into()
-            }
-            VideoOrientation(_) => "urn:3gpp:video-orientation".into(),
+            AbsSendTime(_) => ABS_SEND_TIME_URI.into(),
+            AudioLevel(_) => AUDIO_LEVEL_URI.into(),
+            PlayoutDelay(_) => PLAYOUT_DELAY_URI.into(),
+            TransportCc(_) => TRANSPORT_CC_URI.into(),
+            VideoOrientation(_) => VIDEO_ORIENTATION_URI.into(),
+            AbsCaptureTime(_) => ABS_CAPTURE_TIME_URI.into(),
+            CsrcAudioLevel(_) => CSRC_AUDIO_LEVEL_URI.into(),
+            Mid(_) => SDES_MID_URI.into(),
+            RtpStreamId(_) => SDES_RTP_STREAM_ID_URI.into(),
+            RepairedRtpStreamId(_) => SDES_REPAIRED_RTP_STREAM_ID_URI.into(),
+            TransmissionOffset(_) => TRANSMISSION_OFFSET_URI.into(),
             Custom { uri, .. } => uri.clone(),
         }
     }
 
     /// Whether both refer to the same extension, comparing URIs rather than values.
     pub fn is_same(&self, other: &Self) -> bool {
-        use HeaderExtension::*;
-        match (self, other) {
-            (AbsSendTime(_), AbsSendTime(_)) => true,
-            (AudioLevel(_), AudioLevel(_)) => true,
-            (TransportCc(_), TransportCc(_)) => true,
-            (VideoOrientation(_), VideoOrientation(_)) => true,
-            (Custom { uri, .. }, Custom { uri: other_uri, .. }) => uri == other_uri,
-            _ => false,
-        }
+        // One URI is one extension, whatever its value.
+        self.uri() == other.uri()
     }
 }
 
@@ -80,6 +131,12 @@ impl MarshalSize for HeaderExtension {
             PlayoutDelay(ext) => ext.marshal_size(),
             TransportCc(ext) => ext.marshal_size(),
             VideoOrientation(ext) => ext.marshal_size(),
+            AbsCaptureTime(ext) => ext.marshal_size(),
+            CsrcAudioLevel(ext) => ext.marshal_size(),
+            Mid(ext) => ext.marshal_size(),
+            RtpStreamId(ext) => ext.marshal_size(),
+            RepairedRtpStreamId(ext) => ext.marshal_size(),
+            TransmissionOffset(ext) => ext.marshal_size(),
             Custom { extension: ext, .. } => ext.marshal_size(),
         }
     }
@@ -94,6 +151,12 @@ impl Marshal for HeaderExtension {
             PlayoutDelay(ext) => ext.marshal_to(buf),
             TransportCc(ext) => ext.marshal_to(buf),
             VideoOrientation(ext) => ext.marshal_to(buf),
+            AbsCaptureTime(ext) => ext.marshal_to(buf),
+            CsrcAudioLevel(ext) => ext.marshal_to(buf),
+            Mid(ext) => ext.marshal_to(buf),
+            RtpStreamId(ext) => ext.marshal_to(buf),
+            RepairedRtpStreamId(ext) => ext.marshal_to(buf),
+            TransmissionOffset(ext) => ext.marshal_to(buf),
             Custom { extension: ext, .. } => ext.marshal_to(buf),
         }
     }
@@ -109,7 +172,16 @@ impl fmt::Debug for HeaderExtension {
             PlayoutDelay(ext) => f.debug_tuple("PlayoutDelay").field(ext).finish(),
             TransportCc(ext) => f.debug_tuple("TransportCc").field(ext).finish(),
             VideoOrientation(ext) => f.debug_tuple("VideoOrientation").field(ext).finish(),
+            AbsCaptureTime(ext) => f.debug_tuple("AbsCaptureTime").field(ext).finish(),
+            CsrcAudioLevel(ext) => f.debug_tuple("CsrcAudioLevel").field(ext).finish(),
+            Mid(ext) => f.debug_tuple("Mid").field(ext).finish(),
+            RtpStreamId(ext) => f.debug_tuple("RtpStreamId").field(ext).finish(),
+            RepairedRtpStreamId(ext) => f.debug_tuple("RepairedRtpStreamId").field(ext).finish(),
+            TransmissionOffset(ext) => f.debug_tuple("TransmissionOffset").field(ext).finish(),
             Custom { uri, extension: _ } => f.debug_struct("Custom").field("uri", uri).finish(),
         }
     }
 }
+
+#[cfg(test)]
+mod extension_test;

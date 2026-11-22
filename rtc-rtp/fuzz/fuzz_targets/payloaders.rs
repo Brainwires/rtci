@@ -59,7 +59,7 @@ fuzz_target!(|data: &[u8]| {
             &frame,
         ),
         1 => run(
-            &mut HevcPayloader,
+            &mut HevcPayloader::default(),
             Some(&mut H265Packet::default()),
             mtu,
             &frame,

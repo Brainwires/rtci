@@ -5,34 +5,21 @@ mod h26x_writer_test;
 
 use std::io::Write;
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use rtp::codec::h264::H264Packet;
-use rtp::codec::h265::{H265Packet, H265Payload};
+use rtp::codec::h265::H265Packet;
 use rtp::packetizer::Depacketizer;
 
 use crate::io::Writer;
-use shared::error::{Error, Result};
+use shared::error::Result;
 
 const NALU_TTYPE_STAP_A: u32 = 24;
 const NALU_TTYPE_SPS: u32 = 7;
 const NALU_TYPE_BITMASK: u32 = 0x1F;
 const ANNEXB_NALUSTART_CODE: &[u8] = &[0x00, 0x00, 0x00, 0x01];
 /// Largest H.265 NAL unit reassembled from fragmentation units, as for H.264 FU-A
-/// (`rtp::codec::h264::MAX_FUA_NALU_SIZE`).
-pub const MAX_H265_FU_NALU_SIZE: usize = 4 * 1024 * 1024;
-
-fn rebuild_h265_nalu_header(
-    payload_header: rtp::codec::h265::H265NALUHeader,
-    fu_type: u8,
-) -> [u8; 2] {
-    let mut raw = (fu_type as u16) << 9;
-    raw |= (payload_header.layer_id() as u16) << 3;
-    raw |= payload_header.tid() as u16;
-    if payload_header.f() {
-        raw |= 1 << 15;
-    }
-    raw.to_be_bytes()
-}
+/// (`rtp::codec::h264::MAX_FUA_NALU_SIZE`). The depacketizer enforces it.
+pub const MAX_H265_FU_NALU_SIZE: usize = rtp::codec::h265::MAX_H265_FU_NALU_SIZE;
 
 fn is_key_frame(data: &[u8]) -> bool {
     if data.len() < 4 {
@@ -68,8 +55,6 @@ pub struct H26xWriter<W: Write> {
     is_hevc: bool,
     // H264-specific fields
     has_key_frame: bool,
-    // H265-specific fields
-    buffer: BytesMut,
 }
 
 impl<W: Write> H26xWriter<W> {
@@ -85,7 +70,6 @@ impl<W: Write> H26xWriter<W> {
             },
             is_hevc,
             has_key_frame: false,
-            buffer: BytesMut::new(),
         }
     }
 }
@@ -106,11 +90,8 @@ impl<W: Write> Writer for H26xWriter<W> {
 
     /// close closes the underlying writer
     fn close(&mut self) -> Result<()> {
-        // Flush any remaining buffered data (for H265 fragmentation units)
-        if !self.buffer.is_empty() {
-            self.writer.write_all(&self.buffer)?;
-            self.buffer.clear();
-        }
+        // A NAL unit whose last fragment never came stays in the depacketizer: an incomplete
+        // NAL unit is not written.
         self.writer.flush()?;
         Ok(())
     }
@@ -135,72 +116,14 @@ impl<W: Write> H26xWriter<W> {
     }
 
     fn write_h265(&mut self, packet: &rtp::Packet) -> Result<()> {
-        // Depacketize the H265 RTP packet
-        let _data = self
+        // The depacketizer returns the NAL units the packet completes, as Annex B: a single
+        // NAL unit, the units of an aggregation packet, a NAL unit reassembled from its
+        // fragmentation units (bounded), or what a PACI packet carries. Nothing of type 48 to
+        // 63 is among them (RFC 7798 section 6).
+        let data = self
             .packet
             .depacketize(&Bytes::copy_from_slice(&packet.payload))?;
-
-        if let H26xPacket::H265(h265_packet) = &self.packet {
-            match h265_packet.payload() {
-                H265Payload::H265PACIPacket(_p) => {
-                    // PACI packets are not commonly used, skip for now
-                }
-                H265Payload::H265SingleNALUnitPacket(p) => {
-                    // Write start code + NAL unit
-                    self.writer.write_all(ANNEXB_NALUSTART_CODE)?;
-                    self.writer.write_all(&p.payload_header().0.to_be_bytes())?;
-                    self.writer.write_all(&p.payload())?;
-                }
-                H265Payload::H265AggregationPacket(p) => {
-                    // Write first unit
-                    if let Some(uf) = p.first_unit() {
-                        self.writer.write_all(ANNEXB_NALUSTART_CODE)?;
-                        self.writer.write_all(&uf.nal_unit())?;
-                    }
-                    // Write other units
-                    for ou in p.other_units() {
-                        self.writer.write_all(ANNEXB_NALUSTART_CODE)?;
-                        self.writer.write_all(&ou.nal_unit())?;
-                    }
-                }
-                H265Payload::H265FragmentationUnitPacket(p) => {
-                    // Handle fragmentation units
-                    if p.fu_header().s() {
-                        // Clear buffer for new NAL unit
-                        self.buffer.clear();
-
-                        // Write start code
-                        self.buffer.extend_from_slice(ANNEXB_NALUSTART_CODE);
-                        self.buffer.extend_from_slice(&rebuild_h265_nalu_header(
-                            p.payload_header(),
-                            p.fu_header().fu_type(),
-                        ));
-                    }
-
-                    // A fragment with no start fragment before it has nothing to join.
-                    if self.buffer.is_empty() {
-                        return Ok(());
-                    }
-                    // Bounded: a peer that never sends the end fragment must not grow this
-                    // without limit. Drop the partial NAL unit.
-                    if self.buffer.len() + p.payload().len() > MAX_H265_FU_NALU_SIZE {
-                        self.buffer.clear();
-                        return Err(Error::ErrPacketTooBig);
-                    }
-
-                    // Accumulate payload
-                    self.buffer.extend_from_slice(&p.payload());
-
-                    if p.fu_header().e() {
-                        // End of fragmented NAL unit - flush to writer
-                        self.writer.write_all(&self.buffer)?;
-                        self.buffer.clear();
-                    }
-                }
-                // Unknown payload kind: skip it rather than corrupt the Annex-B stream.
-                _ => {}
-            }
-        }
+        self.writer.write_all(&data)?;
 
         Ok(())
     }

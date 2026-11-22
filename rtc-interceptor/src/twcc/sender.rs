@@ -164,9 +164,12 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for TwccSenderInterceptor {
                 transport_sequence: seq,
             };
             if let Ok(ext_data) = tcc_ext.marshal() {
+                // The number goes on every packet of the stream, so when its negotiated ID
+                // needs the two-byte form (an ID above 14, RFC 8285 section 4.2) every packet
+                // is converted and the stream stays in one form (section 4.1.2).
                 let _ = rtp_packet
                     .header
-                    .set_extension(stream.hdr_ext_id, ext_data.freeze());
+                    .set_extension_upgrading(stream.hdr_ext_id, ext_data.freeze());
             }
         }
         self.write_queue.push_back(msg);

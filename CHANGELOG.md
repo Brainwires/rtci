@@ -1275,6 +1275,113 @@ Each bug below was confirmed by a failing test first (`rtc-rtcp/tests/audit_bugs
   unless built with `with_use_srtp_optional`.
 - **sdp**: errors `ErrSessionDescriptionInvalidSetup`, `ErrSessionDescriptionInvalidTlsId`,
   `ErrSessionDescriptionMediaWithoutSrtp`, `ErrInvalidIdentityAssertion`.
+- **rtp**: a two-byte header-extension block is parsed whatever its appbits (RFC 8285 section
+  4.3). Only the exact profile `0x1000` selected the two-byte parser; `0x1001` to `0x100F` came
+  back as one opaque element with ID 0, so MID, RID and the transport-wide number in it were not
+  found.
+- **rtp**: ID 0 with a non-zero length ends a one-byte extension block and the elements before
+  it are kept (RFC 8285 section 4.1.2). It was parsed as an element with ID 0, and the header
+  could then not be marshalled again.
+- **rtp**: `Header::set_extension` on a header without extensions takes the two-byte form for an
+  ID above 14 or an empty element (RFC 8285 section 4.2). It chose the form from the length
+  alone, so `set_extension(20, ..)` returned `Ok` and the header could not be marshalled. The
+  TWCC sender stamped packets that way when the peer mapped transport-cc above 14 and discarded
+  the error; it now converts a one-byte header, so every packet of such a stream is two-byte.
+- **rtp**: `Header::default()` is version 2, and `Header` marshals and unmarshals version 2 only
+  (RFC 3550 section 5.1). A header built from `Default` went out as version 0, which a peer reads
+  as STUN or DTLS.
+- **rtp**: a marshalled extension block is as long as `marshal_size()` says when a parsed block
+  had more than three bytes after its elements (an ignored tail after ID 15).
+- **rtp**: the packetizer sets the marker bit as the payload format has it. Every Opus, G.711
+  and G.722 packet carried it (the video rule); audio now carries it only on the first packet
+  after a silence skipped with `skip_samples` (RFC 3551 section 4.1, RFC 7587 section 4.1).
+- **rtp**: a G.711 / G.722 buffer split over several packets gets a timestamp per packet (RFC
+  3551 section 4.3); the fragments shared one.
+- **rtp**: `packetize` returns an error for an MTU that leaves no room after the RTP header; an
+  MTU below 12 underflowed (a panic in debug builds, a huge MTU in release builds).
+- **rtp**: the H.264 payloader sends NAL units in the order given and loses none (RFC 6184
+  sections 5.5 and 6.3). `SPS, SEI, PPS, IDR` went out as `SEI, STAP-A, IDR`; a second SPS or PPS
+  of an access unit replaced the first; an SPS without a PPS was never sent. The STAP-A header
+  has the highest NRI and the OR of the F bits of what it aggregates (it was the constant
+  `0x78`), an FU-A keeps the F bit, and NAL units of reserved or packet types (0, 24 to 31) are
+  not sent.
+- **rtp**: the H.264 depacketizer takes a NAL unit that is its header octet alone (end of
+  sequence, end of stream) and an FU-A with an empty payload (RFC 6184 section 5.8); both were
+  `ErrShortPacket`. Reserved packet types are ignored instead of an error that made
+  `SampleBuilder` drop the sample (section 5.4).
+- **rtp**: `H265Packet::depacketize` returns NAL units (RFC 7798 section 6). It returned the RTP
+  payload unchanged, so a `SampleBuilder<H265Packet>` sample held AP and FU headers. Single NAL
+  units, the units of an aggregation packet, a NAL unit reassembled from its fragmentation
+  units (bounded at 4 MiB) and what a PACI packet carries come out as Annex B; nothing of type
+  48 to 63 does. A NAL unit that is its two-byte header alone is accepted.
+- **rtp**: `H265PACIPacket::tsci()` reads TL0PICIDX, IrapPicID, S, E and RES from the first
+  three octets of the PHES (RFC 7798 section 4.5); it read the first octet twice and never the
+  third.
+- **rtp**: the H.265 payloader splits an Annex B stream at start codes of either length; a
+  four-byte code followed by three-byte ones made one "NAL unit" of the whole access unit.
+- **media**: `H26xWriter` writes what the H.265 depacketizer returns, so the media in a PACI
+  packet is written and reserved packet types are not.
+
+### Features
+
+- **rtp**: `Header::set_extension_upgrading` and `Header::upgrade_to_two_byte` convert a
+  one-byte extension block to the two-byte form, for a stream that negotiated
+  `a=extmap-allow-mixed` or is two-byte throughout; `Header::extension_form`, `ExtensionForm`.
+  `Header::del_extension` clears the X bit with the last element (RFC 8285 section 4.1.1).
+- **rtp**: `header::validity::check_rtp_validity`, the header validity checks of RFC 3550
+  Appendix A.1 on raw bytes, and `sequence::SourceSequence`, its per-source sequence number state
+  (probation, restart after a jump, loss by Appendix A.3).
+- **rtp**: `Payloader::marker_rule` (`MarkerRule`) and `Payloader::payload_duration`, provided
+  methods a payload format overrides to say which packets carry the marker and how long a
+  sample-based payload is.
+- **rtp**: typed header extensions: `CsrcAudioLevelExtension` (RFC 6465), `Mid`, `RtpStreamId`,
+  `RepairedRtpStreamId` (RFC 7941, RFC 8852: UTF-8 checked, stream ids alphanumeric),
+  `AbsCaptureTimeExtension`, `TransmissionOffsetExtension` (RFC 5450);
+  `AudioLevelExtension::voice_activity` and `parse_vad_attribute` (RFC 6464 `vad`); URI
+  constants and `HeaderExtension` variants for each.
+- **rtp**: H.264 interleaved mode (RFC 6184 section 6.4). `H264Payloader::with_packetization_mode(2)`
+  sends STAP-B and FU-B / FU-A with consecutive decoding order numbers
+  (`with_initial_don`); `H264Packet` receives STAP-B, MTAP16, MTAP24 and FU-B
+  (`H264Packet::nal_units` gives each NAL unit's DON and timestamp offset);
+  `H264DeinterleavingBuffer` puts NAL units back in decoding order (section 7.2.2); `stap_a`,
+  `stap_b`, `mtap` and `don_diff` are public. `try_with_packetization_mode` refuses a mode
+  above 2.
+- **rtp**: H.265 decoding order numbers (RFC 7798 sections 4.4.1 to 4.4.3, 4.6, 6):
+  `HevcPayloader::with_donl` writes DONL and DOND, `H265Packet::nal_units` derives each NAL
+  unit's DON, `H265DepacketizationBuffer` passes NAL units on by AbsDon.
+  `H265Packet::with_length_prefix` for length-prefixed output.
+- **rtp**: `H264Packet::depacketize_with_sequence_number` and
+  `H265Packet::depacketize_with_sequence_number` drop a NAL unit when one of its fragments was
+  lost, instead of splicing over the gap (RFC 6184 section 5.8, RFC 7798 section 4.4.3).
+- **rtp**: `codec::telephone_event` (RFC 4733): the event payload, the DTMF codes, the `events`
+  list, and sender and receiver state machines for an application or a DTMF sender to drive
+  (marker on the first packet, cumulative duration, segments of 0xFFFF for long events, the end
+  packet three times).
+- **rtp**: `codec::comfort_noise` (RFC 3389): the CN payload, its reflection coefficients, one
+  payload per channel.
+- **rtp**: `codec::red` (RFC 2198): block headers, `RedEncoder` (the last N primaries as
+  redundancy), `RedDecoder` (recovers a lost primary once), the fmtp list.
+- **rtp**: `clock_rate` (RFC 7160): `ClockRateHistory`, `MultiRateTimestamp`,
+  `interarrival_difference`, `JitterEstimator`.
+- **rtp**: `codec::opus::opus_packet_samples`, the duration of an Opus packet from its TOC;
+  static payload type and clock constants for PCMU, PCMA, G722 and Opus.
+
+### Breaking Changes
+
+- **rtp**: `Header::unmarshal` and `Header::marshal_to` refuse a version other than 2
+  (`Error::BadVersion`), and `marshal_to` a payload type above 127. `Header::default().version`
+  is 2.
+- **rtp**: `Header::set_extension` on a header without extensions returns an error for ID 0 and
+  for an element over 255 bytes (it made a header that could not be marshalled).
+  `del_extension` of the last element clears `extension`.
+- **rtp**: `HevcPayloader` is no longer a unit struct: write `HevcPayloader::default()`.
+- **rtp**: `H265Packet::depacketize` returns NAL units behind Annex B start codes, not the RTP
+  payload.
+- **rtp**: `H264Packet::depacketize` returns an empty result, not an error, for reserved packet
+  types; `H264Payloader` drops NAL units of types 0 and 24 to 31; parameter sets given alone are
+  all held, and sent with the next call that has another NAL unit.
+- **rtp**: a `Packetizer` built on an audio payloader no longer sets the marker bit on every
+  packet.
 
 ## [0.22.0+brainwires.5] - 2026-11-20
 

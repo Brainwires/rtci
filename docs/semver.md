@@ -36,6 +36,7 @@ The subcrates are in scope for this policy, not an afterthought.
 125 public enums, all with an explicit decision:
 126 public enums, all with an explicit decision:
 128 public enums, all with an explicit decision:
+127 public enums, all with an explicit decision:
 
 | Area | `#[non_exhaustive]` | Kept exhaustive |
 |---|---:|---:|
@@ -46,6 +47,8 @@ The subcrates are in scope for this policy, not an afterthought.
 | **total** | **106** | **20** |
 | protocol subcrates | 73 | 21 |
 | **total** | **107** | **21** |
+| protocol subcrates | 71 | 22 |
+| **total** | **105** | **22** |
 
 ### `rtc/src` — all 34 marked
 
@@ -55,6 +58,7 @@ specifications (W3C WebRTC, IANA registries, RFC state machines) that add values
 
 ### Protocol subcrates — kept exhaustive (20)
 ### Protocol subcrates — kept exhaustive (21)
+### Protocol subcrates — kept exhaustive (22)
 
 These are the deliberate exceptions. Each is closed by construction, and exhaustive matching
 is worth more to callers than room for a variant we have no way to add.
@@ -78,11 +82,15 @@ is worth more to callers than room for a variant we have no way to add.
 | `rtc-rtp` | `CameraDirection` | Front / Back. |
 | `rtc-rtp` | `VideoRotation` | 0° / 90° / 180° / 270°. |
 | `rtc-rtp` | `DecodeTargetIndication` | The four values of the Dependency Descriptor's two-bit DTI field. |
+| `rtc-rtp` | `ExtensionForm` | One-byte / two-byte / anything else: a partition of the 16-bit "defined by profile" field (RFC 8285). |
+| `rtc-rtp` | `MtapKind` | MTAP16 / MTAP24: the two NAL types RFC 6184 defines. |
+| `rtc-rtp` | `SsrcForClockRate` | Keep / new / new after BYE: the three outcomes of RFC 7160 section 4.1. |
 | `rtc-sdp` | `Direction` | sendrecv / sendonly / recvonly / inactive (RFC 4566). |
 | `rtc-sdp` | `ConnectionRole` | active / passive / actpass / holdconn (RFC 4145). |
 | `rtc-interceptor` | `FlexFecProtected`, `FlexFecLayout` | Flexible mask or fixed L/D: the one F bit of the RFC 8627 FEC header. |
 
 ### Protocol subcrates — marked (73)
+### Protocol subcrates — marked (71)
 
 Everything else, falling into four families:
 
@@ -99,12 +107,15 @@ Everything else, falling into four families:
   `StunEvent`, `ClientAgent`, `MdnsEvent`, `StreamEvent`, …
 - **Error taxonomies**: `Error` (shared, media), `AssociationError`, `ConnectError`,
   `FlexFecHeaderError`, `FlexFecEncodeError`.
+  `StunEvent`, `ClientAgent`, `MdnsEvent`, `StreamEvent`, `TelephoneEventReport`, …
+- **Error taxonomies**: `Error` (shared, media), `AssociationError`, `ConnectError`.
 
 Also marked: wire sum types that gain arms when the protocol does — `Content`,
 `HandshakeMessage`, `Extension`, `Message`, `Payload`, `H265Payload`, `HeaderExtension`,
 `H26xNAL`, `Packet`, `CryptoPrivateKeyKind`, `NextHop`, `Kind`, `TransportProtocol`,
 `IvfCodec`, `OggHeaderType`, `MulticastDnsMode`, `ClientAuthType`, `CipherSuiteHash`,
 `FlexFecHeader` (R=1 F=1 is reserved for a future variant), `FlexFecProtection`, and the
+`MarkerRule` (payload formats define their own marker rules), and the
 Windows interface-info enums in `rtc-shared::ifaces`.
 
 ## When adding a new public item
