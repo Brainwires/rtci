@@ -340,12 +340,27 @@ fn the_rtcp_session_is_told_the_trr_int_this_endpoint_announced() -> TestResult 
     assert_eq!(trr_int(&take(&seen_a)), vec![Duration::from_millis(250)]);
     assert_eq!(trr_int(&take(&seen_b)), vec![Duration::from_millis(1500)]);
 
-    // Without the parameter nothing is said: the session keeps its configured interval.
-    let (mut a, seen_a) = peer("apt=96", None)?;
-    let (mut b, _) = peer("apt=96", None)?;
-    add_media(&mut a)?;
-    negotiate(&mut a, &mut b, str::to_owned)?;
-    assert!(trr_int(&take(&seen_a)).is_empty());
+    // A renegotiation without the parameter undoes the earlier one: the answerer, offered no
+    // `trr-int`, answers without one, and its session goes back to the configured interval.
+    let now = Instant::now();
+    let offer = a.create_offer(None)?;
+    a.set_local_description(now, offer.clone())?;
+    let stripped: String = offer
+        .sdp
+        .split_inclusive("\r\n")
+        .filter(|line| !line.contains(" trr-int "))
+        .collect();
+    b.set_remote_description(now, RTCSessionDescription::offer(stripped)?)?;
+    let answer = b.create_answer(None)?;
+    assert!(!answer.sdp.contains(" trr-int "), "{}", answer.sdp);
+    b.set_local_description(now, answer.clone())?;
+    a.set_remote_description(now, answer)?;
+    let controls = take(&seen_b);
+    assert!(trr_int(&controls).is_empty(), "{controls:?}");
+    assert!(
+        controls.contains(&Control::Session(RtcpSessionControl::TrrIntCleared)),
+        "{controls:?}"
+    );
     Ok(())
 }
 

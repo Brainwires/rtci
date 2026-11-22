@@ -5,7 +5,8 @@ use crate::peer_connection::event::RTCPeerConnectionEvent;
 use crate::peer_connection::event::track_event::{RTCTrackEvent, RTCTrackEventInit};
 use crate::peer_connection::event::{RTCEventInternal, TaggedRTCEventInternal};
 use crate::peer_connection::handler::endpoint::{
-    SsrcOwners, deencapsulate_rtx, is_repair_mime_type, repair_flow_codec, resolve_rtx_primary,
+    SsrcOwners, deencapsulate_rtx, is_auxiliary_mime_type, is_repair_mime_type, repair_flow_codec,
+    resolve_rtx_primary,
 };
 use crate::peer_connection::message::internal::{
     RTCMessageInternal, RTPMessage, TaggedRTCMessageInternal,
@@ -520,13 +521,14 @@ impl<'a> InterceptorHandler<'a> {
             .is_some_and(|codec| codec.mime_type.is_empty());
 
         // `payload_type` is the *primary* codec's: an RTX packet was resolved back to the stream it
-        // repairs before we got here. FEC de-encapsulation is still TODO (see #12).
+        // repairs before we got here. FEC de-encapsulation is still TODO (see #12). A DTMF or
+        // comfort-noise packet that comes first leaves the stream unestablished: the next media
+        // packet says what the track's codec is.
         let track_codec = if is_track_codec_empty
-            && let Some(codec) = receiver
-                .get_codec_preferences()
-                .iter()
-                .find(|codec| codec.payload_type == payload_type)
-        {
+            && let Some(codec) = receiver.get_codec_preferences().iter().find(|codec| {
+                codec.payload_type == payload_type
+                    && !is_auxiliary_mime_type(&codec.rtp_codec.mime_type)
+            }) {
             Some((codec.rtp_codec.clone(), codec.payload_type))
         } else {
             None
@@ -712,10 +714,15 @@ impl<'a> InterceptorHandler<'a> {
         let Some(receiver) = transceiver.receiver_mut() else {
             return false;
         };
+        // A DTMF or comfort-noise packet does not say what the stream is sent with: the stream
+        // is placed by its first media packet.
         let Some(codec) = receiver
             .get_codec_preferences()
             .iter()
-            .find(|codec| codec.payload_type == payload_type)
+            .find(|codec| {
+                codec.payload_type == payload_type
+                    && !is_auxiliary_mime_type(&codec.rtp_codec.mime_type)
+            })
             .cloned()
         else {
             return false;
@@ -912,6 +919,7 @@ impl<'a> InterceptorHandler<'a> {
             .find(|codec| {
                 codec.payload_type == payload_type
                     && !is_repair_mime_type(&codec.rtp_codec.mime_type)
+                    && !is_auxiliary_mime_type(&codec.rtp_codec.mime_type)
             })
             .cloned()
         else {

@@ -337,3 +337,29 @@ fn the_transceiver_created_for_a_remote_section_is_recvonly() -> TestResult {
     );
     Ok(())
 }
+
+/// RFC 4585 section 4.2: "The answerer MUST NOT add feedback parameters to the media
+/// description": a renegotiation whose offer no longer has a feedback type is answered
+/// without it, though the first exchange negotiated it.
+#[test]
+fn a_feedback_type_a_later_offer_drops_is_not_answered() -> TestResult {
+    let mut offerer = default_peer()?;
+    let mut answerer = default_peer()?;
+    offerer.add_track(jsep_common::video_track("camera", 0x0b0b_0b0b))?;
+    let (_, answer) = jsep_common::exchange(&mut offerer, &mut answerer)?;
+    assert!(answer.contains(" nack pli\r\n"), "{answer}");
+
+    let now = Instant::now();
+    let offer = offerer.create_offer(None)?;
+    offerer.set_local_description(now, offer.clone())?;
+    let without_pli: String = offer
+        .sdp
+        .split_inclusive("\r\n")
+        .filter(|line| !line.ends_with(" nack pli\r\n"))
+        .collect();
+    answerer.set_remote_description(now, RTCSessionDescription::offer(without_pli)?)?;
+    let answer = answerer.create_answer(None)?;
+    assert!(!answer.sdp.contains(" nack pli\r\n"), "{}", answer.sdp);
+    assert!(answer.sdp.contains(" nack\r\n"), "the rest stays: {}", answer.sdp);
+    Ok(())
+}
