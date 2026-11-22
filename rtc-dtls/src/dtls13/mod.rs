@@ -31,6 +31,8 @@ mod openssl_kat_test;
 #[cfg(test)]
 mod openssl_recordings;
 #[cfg(test)]
+mod post_handshake_auth_test;
+#[cfg(test)]
 mod psk_test;
 #[cfg(test)]
 mod record_test;

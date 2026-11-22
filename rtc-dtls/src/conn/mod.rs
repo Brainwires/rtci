@@ -174,6 +174,8 @@ pub struct DTLSConn {
     /// associations for one address (RFC 6347 4.2.8) reads from it which of them a protected
     /// record belongs to.
     pub(crate) authenticated_records: u64,
+    /// DTLS 1.3 server: the client's post-handshake authentications verified so far.
+    pub(crate) post_handshake_authentications: u64,
     /// DTLS 1.2: the newest (epoch, sequence number) of a record that authenticated. RFC 9146
     /// section 6 lets an association follow its peer to a new address only for a record
     /// newer than every one before.
@@ -294,6 +296,7 @@ impl DTLSConn {
             handshake_mtu: handshake_config.maximum_transmission_unit,
             fatal_alert_sent: None,
             authenticated_records: 0,
+            post_handshake_authentications: 0,
             newest_authenticated_record: None,
 
             current_flight: flight,
@@ -318,12 +321,21 @@ impl DTLSConn {
 
     /// Copies what the DTLS 1.3 association has reached into the state callers read.
     pub(crate) fn sync_dtls13(&mut self) {
-        let Some(v13) = &self.v13 else {
+        let Some(v13) = &mut self.v13 else {
             return;
         };
         self.authenticated_records = v13.authenticated_records;
         self.closed_by_peer = v13.closed_by_peer;
         self.state.resumed = v13.resumed;
+        self.post_handshake_authentications = v13.post_handshake_authentications;
+        if let Some(chain) = v13.post_handshake_peer_certificates.take() {
+            // RFC 8446 section 4.6.2: the client authenticated after the handshake; an
+            // empty chain (it declined) leaves the earlier one.
+            if !chain.is_empty() {
+                v13.peer_certificates.clone_from(&chain);
+                self.state.peer_certificates = chain;
+            }
+        }
         self.address_verified |= v13.address_verified;
         if v13.established && !self.handshake_completed {
             self.handshake_completed = true;
@@ -401,6 +413,30 @@ impl DTLSConn {
             connection_ids.push(connection_id);
         }
         v13.send_new_connection_id(connection_ids, immediate)
+    }
+
+    /// DTLS 1.3 server: asks the client for its certificate now (post-handshake
+    /// authentication, RFC 8446 section 4.6.2). The answer is checked as the handshake checks
+    /// a client certificate; once verified, [`State::peer_certificates`] holds the chain and
+    /// the endpoint reports [`EndpointEvent::PeerAuthenticated`](crate::endpoint::EndpointEvent::PeerAuthenticated).
+    /// One that is refused ends the association with the alert RFC 8446 names.
+    ///
+    /// # Errors
+    ///
+    /// For DTLS 1.2, for a client, before the handshake is complete, when the client did not
+    /// offer post_handshake_auth
+    /// ([`ConfigBuilder::with_post_handshake_auth`](crate::config::ConfigBuilder::with_post_handshake_auth)),
+    /// and with four requests unanswered.
+    pub fn request_client_certificate(&mut self) -> Result<()> {
+        match &mut self.v13 {
+            Some(v13) => v13.request_client_certificate(),
+            None => Err(Error::ErrUnsupportedProtocolVersion),
+        }
+    }
+
+    /// How many post-handshake authentications of the client this server has verified.
+    pub fn post_handshake_authentications(&self) -> u64 {
+        self.post_handshake_authentications
     }
 
     /// Asks the peer for `count` more connection ids (RFC 9147 section 9).

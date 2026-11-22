@@ -21,6 +21,10 @@
 //! * `DTLS_RESUME=1`: a client that keeps the tickets it is sent and, 1.5 s after its first
 //!   handshake, closes the association and makes a second one from the same port, which
 //!   offers one of them.
+//! * `DTLS_PHA=1`: a client that offers post-handshake authentication, with a self-signed
+//!   certificate to answer with (DTLS 1.3).
+//! * `DTLS_REQUEST_CERT=1`: a server that asks for the client's certificate 300 ms after the
+//!   handshake (post-handshake authentication, DTLS 1.3).
 //!
 //! It prints one line per event: `complete version=.. suite=.. resumed=.. exporter=..` (60
 //! bytes of
@@ -85,12 +89,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         builder = builder.with_session_tickets(tickets);
     }
-    if !is_client {
+    if !is_client || std::env::var("DTLS_PHA").as_deref() == Ok("1") {
         builder = builder.with_certificates(vec![Certificate::generate_self_signed(
-            vec!["localhost".to_owned()],
+            vec![if is_client { "client" } else { "localhost" }.to_owned()],
             provider.crypto(),
         )?]);
     }
+    if is_client && std::env::var("DTLS_PHA").as_deref() == Ok("1") {
+        builder = builder.with_post_handshake_auth(true);
+    }
+    let request_certificate =
+        !is_client && std::env::var("DTLS_REQUEST_CERT").as_deref() == Ok("1");
+    let mut certificate_requested = false;
     let config = Arc::new(builder.build(is_client, None)?);
 
     let (socket, mut remote): (UdpSocket, Option<SocketAddr>) = if is_client {
@@ -131,6 +141,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let now = Instant::now();
         if now >= deadline {
             break;
+        }
+        // A server that authenticates its client after the handshake.
+        if let (Some(at), Some(remote)) = (complete_at, remote)
+            && request_certificate
+            && !certificate_requested
+            && now >= at + Duration::from_millis(300)
+        {
+            certificate_requested = true;
+            match endpoint.request_client_certificate(now, remote) {
+                Ok(()) => println!("certificate requested"),
+                Err(err) => println!("certificate request failed: {err}"),
+            }
+            continue;
         }
         // A resuming client makes its second association once the tickets are in.
         if let (Some(at), Some(remote)) = (complete_at, remote)
@@ -253,6 +276,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("data {}", String::from_utf8_lossy(&data).trim_end());
                 }
                 EndpointEvent::PeerClosed => println!("closed"),
+                EndpointEvent::PeerAuthenticated => {
+                    let chain = endpoint
+                        .get_connection_state(remote)
+                        .map_or(0, |state| state.peer_certificates.len());
+                    println!("peer authenticated certificates={chain}");
+                }
                 _ => {}
             }
         }

@@ -135,6 +135,14 @@ impl ClientOffer {
                 data,
             });
         }
+        // RFC 8446 section 4.2.6: this client answers a CertificateRequest after the
+        // handshake.
+        if cfg.post_handshake_auth {
+            extensions.push(Extension::Unknown {
+                extension_type: EXT_POST_HANDSHAKE_AUTH,
+                data: vec![],
+            });
+        }
         if cfg.uses_psks() {
             extensions.push(Extension::Unknown {
                 extension_type: EXT_PSK_KEY_EXCHANGE_MODES,

@@ -2370,6 +2370,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   configuration: WebRTC authenticates every association by the fingerprints of its SDP and
   makes a new one per session (`the_peer_connection_neither_sends_nor_accepts_session_tickets`).
 
+### DTLS 1.3 post-handshake authentication
+
+- **dtls**: post-handshake authentication for DTLS 1.3 (RFC 8446 sections 4.2.6 and 4.6.2).
+  A client configured with `ConfigBuilder::with_post_handshake_auth` offers it; a server asks
+  with `Endpoint::request_client_certificate` (`DTLSConn::request_client_certificate`), and
+  the client answers at once with its certificate (or an empty Certificate where it has none
+  the request allows). The server checks the answer as it checks a client certificate in the
+  handshake and reports `EndpointEvent::PeerAuthenticated`; `State::peer_certificates` then
+  holds the new chain.
+
 ### DTLS 1.2: the RFC by default
 
 - **dtls**: `HelloVerifyRequest.server_version` is DTLS 1.0, as RFC 6347 section 4.2.1 asks

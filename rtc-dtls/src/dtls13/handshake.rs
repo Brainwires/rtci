@@ -337,36 +337,14 @@ impl Conn13 {
         signature: &[u8],
         from_server: bool,
     ) -> std::result::Result<(), Refusal> {
-        let bad_certificate = |error| refuse(alert::BAD_CERTIFICATE, error);
-        let end_entity = self
-            .peer_certificates
-            .first()
-            .ok_or_else(|| bad_certificate(Error::ErrLengthMismatch))?;
-        let (_, certificate) = x509_parser::parse_x509_certificate(end_entity)
-            .map_err(|err| bad_certificate(Error::Other(err.to_string())))?;
-        let encoding = match scheme.signature {
-            SignatureAlgorithm::Ed25519 => PublicKeyEncoding::Ed25519Raw,
-            SignatureAlgorithm::Ecdsa => PublicKeyEncoding::EcUncompressedPoint,
-            _ => PublicKeyEncoding::RsaPkcs1Der,
-        };
-        let crypto_scheme = scheme.crypto_scheme().map_err(illegal)?;
-        let input = certificate_verify_input(from_server, &self.transcript_hash()?);
-        // RFC 8446 section 6.2: a signature that does not verify is a decrypt_error.
-        self.crypto()
-            .verify_signature(
-                crypto_scheme,
-                PublicKey {
-                    encoding,
-                    bytes: &certificate
-                        .tbs_certificate
-                        .subject_pki
-                        .subject_public_key
-                        .data,
-                },
-                &input,
-                signature,
-            )
-            .map_err(|_| refuse(alert::DECRYPT_ERROR, Error::ErrKeySignatureMismatch))
+        let transcript_hash = self.transcript_hash()?;
+        self.verify_signature_over(
+            &self.peer_certificates,
+            scheme,
+            signature,
+            from_server,
+            &transcript_hash,
+        )
     }
 
     // ------------------------------------------------------------------------------------
@@ -776,23 +754,7 @@ impl Conn13 {
         let mut flight = Flight::new(FlightKind::ClientFinal);
         let authenticates = self.certificate_requested.is_some();
         if let Some(schemes) = self.certificate_requested.take() {
-            let credentials = self
-                .cfg
-                .get_certificate(&self.cfg.server_name)
-                .ok()
-                .and_then(|certificate| {
-                    self.cfg
-                        .local_signature_schemes
-                        .iter()
-                        .find(|scheme| {
-                            scheme.is_tls13_signature()
-                                && schemes.contains(&scheme.scheme_code())
-                                && scheme.is_compatible(&certificate.private_key)
-                        })
-                        .copied()
-                        .map(|scheme| (certificate, scheme))
-                });
-            match credentials {
+            match self.client_credentials(&schemes) {
                 Some((certificate, scheme)) => {
                     let chain: Vec<&[u8]> = certificate
                         .certificate
@@ -1359,6 +1321,304 @@ impl Conn13 {
         self.send_session_tickets()
     }
 }
+
+impl Conn13 {
+    // ------------------------------------------------------------------------------------
+    // Post-handshake authentication (RFC 8446 sections 4.2.6 and 4.6.2).
+    // ------------------------------------------------------------------------------------
+
+    /// The certificate a client answers a CertificateRequest listing `schemes` with, and the
+    /// scheme it signs with: one TLS 1.3 signs with, that the request lists and its key can
+    /// make (RFC 8446 section 4.4.2.3). `None` when it has none.
+    fn client_credentials(
+        &self,
+        schemes: &[u16],
+    ) -> Option<(crate::crypto::Certificate, SignatureHashAlgorithm)> {
+        let certificate = self.cfg.get_certificate(&self.cfg.server_name).ok()?;
+        self.cfg
+            .local_signature_schemes
+            .iter()
+            .find(|scheme| {
+                scheme.is_tls13_signature()
+                    && schemes.contains(&scheme.scheme_code())
+                    && scheme.is_compatible(&certificate.private_key)
+            })
+            .copied()
+            .map(|scheme| (certificate, scheme))
+    }
+
+    /// Whether the client sent post_handshake_auth (RFC 8446 section 4.2.6).
+    pub(crate) fn post_handshake_auth_offered(&self) -> bool {
+        self.offered_extensions.contains(&EXT_POST_HANDSHAKE_AUTH)
+    }
+
+    /// Server: asks the client to authenticate, after the handshake (RFC 8446 section 4.6.2):
+    /// a CertificateRequest with a fresh, non-empty certificate_request_context, under the
+    /// application keys, acknowledged like any post-handshake message. The client's answer
+    /// is checked as its Certificate and CertificateVerify would be in the handshake, and its
+    /// Finished with the key of its current application traffic secret.
+    ///
+    /// # Errors
+    ///
+    /// For a client, before the handshake is complete, when the client did not send
+    /// post_handshake_auth (RFC 8446 section 4.2.6 forbids the request then), and with
+    /// [`MAX_PENDING_CERTIFICATE_REQUESTS`] unanswered.
+    pub(crate) fn request_client_certificate(&mut self) -> Result<()> {
+        if !self.established || self.closed {
+            return Err(Error::ErrConnClosed);
+        }
+        if self.is_client || !self.post_handshake_auth_offered() {
+            return Err(Error::Other(
+                "the client did not offer post-handshake authentication".to_owned(),
+            ));
+        }
+        if self.pending_certificate_requests.len() >= MAX_PENDING_CERTIFICATE_REQUESTS {
+            return Err(Error::Other(
+                "too many unanswered CertificateRequests".to_owned(),
+            ));
+        }
+        let mut context = vec![0u8; 16];
+        self.provider
+            .random()
+            .fill(&mut context)
+            .map_err(|err| Error::Crypto(err.to_string()))?;
+        let body = certificate_request(&context, &self.local_scheme_codes());
+        // RFC 8446 section 4.4: the context of the answer is the handshake through the
+        // client's Finished, and this CertificateRequest.
+        let mut transcript = self.transcript.clone();
+        transcript.add(CERTIFICATE_REQUEST, &body);
+        self.pending_certificate_requests
+            .push((context, transcript));
+        self.send_post_handshake(FlightKind::CertificateRequest, CERTIFICATE_REQUEST, body)
+    }
+
+    /// Client: answers a post-handshake CertificateRequest at once (RFC 8446 section 4.6.2):
+    /// Certificate, CertificateVerify and Finished, one flight, or an empty Certificate and
+    /// Finished when this client has no certificate the request allows.
+    pub(crate) fn on_post_handshake_certificate_request(
+        &mut self,
+        body: &[u8],
+    ) -> std::result::Result<(), Refusal> {
+        let (context, schemes) = parse_certificate_request(body)?;
+        // RFC 8446 section 4.3.2: after the handshake the context is not empty.
+        if context.is_empty() {
+            return Err(illegal(Error::ErrLengthMismatch));
+        }
+        let suite = self.suite().map_err(internal)?;
+        let crypto = self.provider.clone();
+        let crypto = crypto.crypto();
+        let mut transcript = self.transcript.clone();
+        transcript.add(CERTIFICATE_REQUEST, body);
+        let mut messages = vec![];
+        match self.client_credentials(&schemes) {
+            Some((certificate, scheme)) => {
+                let chain: Vec<&[u8]> = certificate
+                    .certificate
+                    .iter()
+                    .map(|der| der.as_ref())
+                    .collect();
+                let certificate_message = super::messages::certificate(context, &chain);
+                transcript.add(CERTIFICATE, &certificate_message);
+                messages.push((CERTIFICATE, certificate_message));
+                let input = certificate_verify_input(
+                    false,
+                    &transcript.hash(crypto, suite).map_err(internal)?,
+                );
+                let signature = certificate
+                    .private_key
+                    .signing_key
+                    .sign(scheme.crypto_scheme().map_err(internal)?, &input)
+                    .map_err(|err| internal(Error::Crypto(err.to_string())))?;
+                let verify = certificate_verify(scheme.scheme_code(), &signature);
+                transcript.add(CERTIFICATE_VERIFY, &verify);
+                messages.push((CERTIFICATE_VERIFY, verify));
+            }
+            None => {
+                // RFC 8446 section 4.6.2: one that declines sends a Certificate with no
+                // certificates, and its Finished.
+                let certificate_message = super::messages::certificate(context, &[]);
+                transcript.add(CERTIFICATE, &certificate_message);
+                messages.push((CERTIFICATE, certificate_message));
+            }
+        }
+        // RFC 8446 section 4.4: the Finished of a post-handshake answer is keyed from
+        // client_application_traffic_secret_N.
+        let base_key = self
+            .local_application_secret()
+            .ok_or_else(|| internal(Error::ErrCipherSuiteUnset))?;
+        let schedule = self
+            .schedule
+            .as_ref()
+            .ok_or_else(|| internal(Error::ErrCipherSuiteUnset))?;
+        let finished = schedule
+            .finished_verify_data(
+                crypto,
+                base_key.as_ref(),
+                &transcript.hash(crypto, suite).map_err(internal)?,
+            )
+            .map_err(internal)?;
+        messages.push((FINISHED, finished));
+        self.send_post_handshake_messages(FlightKind::Authentication, messages)
+            .map_err(internal)
+    }
+
+    /// Server: one message of a client's answer to a post-handshake CertificateRequest (RFC
+    /// 8446 section 4.6.2). They come in order and together: a Certificate with the context of
+    /// a request outstanding, its CertificateVerify when it holds a certificate, and the
+    /// Finished. Anything else in between is an unexpected_message.
+    pub(crate) fn on_post_handshake_authentication(
+        &mut self,
+        handshake_type: u8,
+        body: &[u8],
+    ) -> std::result::Result<(), Refusal> {
+        let suite = self.suite().map_err(internal)?;
+        let provider = self.provider.clone();
+        let crypto = provider.crypto();
+        let bad_certificate = |error| refuse(alert::BAD_CERTIFICATE, error);
+        match (handshake_type, self.client_authentication.take()) {
+            (CERTIFICATE, None) => {
+                let (context, chain) = parse_certificate(body)?;
+                let Some(index) = self
+                    .pending_certificate_requests
+                    .iter()
+                    .position(|(pending, _)| pending.as_slice() == context)
+                else {
+                    // A context of no request this server made.
+                    return Err(illegal(Error::ErrLengthMismatch));
+                };
+                let (_, mut transcript) = self.pending_certificate_requests.remove(index);
+                transcript.add(CERTIFICATE, body);
+                if chain.is_empty()
+                    && matches!(
+                        self.cfg.client_auth,
+                        ClientAuthType::RequireAnyClientCert
+                            | ClientAuthType::RequireAndVerifyClientCert
+                    )
+                {
+                    return Err(refuse(
+                        alert::CERTIFICATE_REQUIRED,
+                        Error::ErrClientCertificateRequired,
+                    ));
+                }
+                self.client_authentication = Some(ClientAuthentication {
+                    verified: chain.is_empty(),
+                    chain,
+                    transcript,
+                });
+                Ok(())
+            }
+            (CERTIFICATE_VERIFY, Some(mut answer)) if !answer.verified => {
+                let (code, signature) = parse_certificate_verify(body).map_err(decode_error)?;
+                let scheme = SignatureHashAlgorithm::from_scheme_code(code);
+                if !scheme.is_tls13_signature()
+                    || !self.cfg.local_signature_schemes.contains(&scheme)
+                {
+                    return Err(illegal(Error::ErrNoAvailableSignatureSchemes));
+                }
+                let hash = answer.transcript.hash(crypto, suite).map_err(internal)?;
+                self.verify_signature_over(&answer.chain, scheme, signature, false, &hash)?;
+                // As in the handshake: the CA chain if the configuration verifies one, and
+                // the application's check.
+                let mut chains = vec![];
+                if self.cfg.client_auth as u8 >= ClientAuthType::VerifyClientCertIfGiven as u8 {
+                    let verifier = self
+                        .cfg
+                        .client_cert_verifier
+                        .as_ref()
+                        .ok_or_else(|| bad_certificate(Error::ErrInvalidCertificate))?;
+                    chains =
+                        verify_client_cert(&answer.chain, verifier).map_err(bad_certificate)?;
+                }
+                if let Some(verify_peer_certificate) = &self.cfg.verify_peer_certificate {
+                    verify_peer_certificate(&answer.chain, &chains).map_err(bad_certificate)?;
+                }
+                answer.transcript.add(CERTIFICATE_VERIFY, body);
+                answer.verified = true;
+                self.client_authentication = Some(answer);
+                Ok(())
+            }
+            (FINISHED, Some(answer)) if answer.verified => {
+                let base_key = self
+                    .remote_application_secret()
+                    .ok_or_else(|| internal(Error::ErrCipherSuiteUnset))?;
+                let schedule = self
+                    .schedule
+                    .as_ref()
+                    .ok_or_else(|| internal(Error::ErrCipherSuiteUnset))?;
+                let expected = schedule
+                    .finished_verify_data(
+                        crypto,
+                        base_key.as_ref(),
+                        &answer.transcript.hash(crypto, suite).map_err(internal)?,
+                    )
+                    .map_err(internal)?;
+                if !crypto::constant_time_eq(&expected, body) {
+                    return Err(refuse(alert::DECRYPT_ERROR, Error::ErrVerifyDataMismatch));
+                }
+                debug!(
+                    "server: post-handshake authentication with {} certificates",
+                    answer.chain.len()
+                );
+                self.post_handshake_peer_certificates = Some(answer.chain);
+                self.post_handshake_authentications += 1;
+                Ok(())
+            }
+            _ => Err(unexpected()),
+        }
+    }
+
+    /// Checks a CertificateVerify signature by the end-entity certificate of `chain` over
+    /// the transcript hash given (RFC 8446 section 4.4.3).
+    fn verify_signature_over(
+        &self,
+        chain: &[Vec<u8>],
+        scheme: SignatureHashAlgorithm,
+        signature: &[u8],
+        from_server: bool,
+        transcript_hash: &[u8],
+    ) -> std::result::Result<(), Refusal> {
+        let bad_certificate = |error| refuse(alert::BAD_CERTIFICATE, error);
+        let end_entity = chain
+            .first()
+            .ok_or_else(|| bad_certificate(Error::ErrLengthMismatch))?;
+        let (_, certificate) = x509_parser::parse_x509_certificate(end_entity)
+            .map_err(|err| bad_certificate(Error::Other(err.to_string())))?;
+        let encoding = match scheme.signature {
+            SignatureAlgorithm::Ed25519 => PublicKeyEncoding::Ed25519Raw,
+            SignatureAlgorithm::Ecdsa => PublicKeyEncoding::EcUncompressedPoint,
+            _ => PublicKeyEncoding::RsaPkcs1Der,
+        };
+        let crypto_scheme = scheme.crypto_scheme().map_err(illegal)?;
+        let input = certificate_verify_input(from_server, transcript_hash);
+        self.crypto()
+            .verify_signature(
+                crypto_scheme,
+                PublicKey {
+                    encoding,
+                    bytes: &certificate
+                        .tbs_certificate
+                        .subject_pki
+                        .subject_public_key
+                        .data,
+                },
+                &input,
+                signature,
+            )
+            .map_err(|_| refuse(alert::DECRYPT_ERROR, Error::ErrKeySignatureMismatch))
+    }
+}
+
+/// A client's answer to a post-handshake CertificateRequest, while it comes in.
+pub(crate) struct ClientAuthentication {
+    chain: Vec<Vec<u8>>,
+    /// The transcript of the answer so far: the handshake, the request, and what came.
+    transcript: super::key_schedule::Transcript,
+    /// Its CertificateVerify has been checked, or it has no certificate to check one for.
+    verified: bool,
+}
+
+/// How many post-handshake CertificateRequests a server leaves unanswered at once.
+pub(crate) const MAX_PENDING_CERTIFICATE_REQUESTS: usize = 4;
 
 /// The HelloRetryRequest that answers `client_hello` (its body), and the cookie in it:
 /// stateless, in that the second ClientHello and the cookie are all a server needs to go on

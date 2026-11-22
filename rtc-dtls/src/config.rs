@@ -141,6 +141,7 @@ pub struct ConfigBuilder {
     session_store: Option<Arc<dyn crate::session::SessionStore>>,
     external_psks: Vec<crate::session::ExternalPsk>,
     psk_without_key_exchange: bool,
+    post_handshake_auth: bool,
     insecure_skip_verify: bool,
     insecure_hashes: bool,
     insecure_verification: bool,
@@ -184,6 +185,7 @@ impl Default for ConfigBuilder {
             session_store: None,
             external_psks: vec![],
             psk_without_key_exchange: false,
+            post_handshake_auth: false,
             insecure_skip_verify: false,
             insecure_hashes: false,
             insecure_verification: false,
@@ -452,6 +454,16 @@ impl ConfigBuilder {
     /// keeps forward secrecy (RFC 8446 section E.1).
     pub fn with_psk_without_key_exchange(mut self, allowed: bool) -> Self {
         self.psk_without_key_exchange = allowed;
+        self
+    }
+
+    /// DTLS 1.3 client: offer post-handshake authentication (the `post_handshake_auth`
+    /// extension, RFC 8446 section 4.2.6), so that the server may ask for this client's
+    /// certificate at any time after the handshake ([`DTLSConn::request_client_certificate`](crate::conn::DTLSConn::request_client_certificate)).
+    /// It is answered at once, with the configured certificate if the request allows it and
+    /// with an empty Certificate otherwise. Off by default.
+    pub fn with_post_handshake_auth(mut self, offer: bool) -> Self {
+        self.post_handshake_auth = offer;
         self
     }
 
@@ -992,6 +1004,7 @@ impl ConfigBuilder {
             },
             external_psks,
             psk_without_key_exchange: self.psk_without_key_exchange,
+            post_handshake_auth: is_client && self.post_handshake_auth,
             #[cfg(test)]
             psk_modes_for_test: None,
             initial_epoch: 0,
@@ -1081,6 +1094,8 @@ pub struct HandshakeConfig {
     pub(crate) session_store: Option<Arc<dyn crate::session::SessionStore>>,
     pub(crate) external_psks: Vec<crate::session::ExternalPsk>,
     pub(crate) psk_without_key_exchange: bool,
+    /// DTLS 1.3 client: it offers post-handshake authentication.
+    pub(crate) post_handshake_auth: bool,
     /// The PSK key exchange modes a client offers, in place of the configured ones: for the
     /// tests of a peer that offers psk_ke alone.
     #[cfg(test)]
@@ -1162,6 +1177,7 @@ impl HandshakeConfig {
             session_store: None,
             external_psks: vec![],
             psk_without_key_exchange: false,
+            post_handshake_auth: false,
             #[cfg(test)]
             psk_modes_for_test: None,
             initial_epoch: 0,

@@ -156,6 +156,10 @@ pub(crate) enum FlightKind {
     NewConnectionId,
     RequestConnectionId,
     NewSessionTicket,
+    /// A server's post-handshake CertificateRequest.
+    CertificateRequest,
+    /// A client's answer to one: Certificate, CertificateVerify, Finished.
+    Authentication,
 }
 
 /// Messages sent together and retransmitted until acknowledged (RFC 9147 section 5.7).
@@ -264,6 +268,16 @@ pub(crate) struct Conn13 {
     pub(crate) tickets_issued: u8,
     /// The latest `now` this association was given (it reads no clock).
     pub(crate) clock: Option<Instant>,
+    /// Server: the post-handshake CertificateRequests not yet answered, by context, each with
+    /// the transcript its answer continues (RFC 8446 section 4.6.2).
+    pub(crate) pending_certificate_requests: Vec<(Vec<u8>, Transcript)>,
+    /// Server: the answer to one of them, while it comes in.
+    pub(crate) client_authentication: Option<super::handshake::ClientAuthentication>,
+    /// Server: the client's certificates from its latest post-handshake answer, until the
+    /// association's state has taken them.
+    pub(crate) post_handshake_peer_certificates: Option<Vec<Vec<u8>>>,
+    /// Server: how many post-handshake answers have been verified.
+    pub(crate) post_handshake_authentications: u64,
 
     // The record layer.
     plaintext_send_sequence: u64,
@@ -301,7 +315,7 @@ pub(crate) struct Conn13 {
     // Sending the handshake.
     pub(crate) next_send_seq: u16,
     pub(crate) flight: Option<Flight>,
-    post_handshake: Vec<Flight>,
+    pub(crate) post_handshake: Vec<Flight>,
     retransmit_interval: Duration,
     handshake_mtu: usize,
     handshake_started: Option<Instant>,
@@ -389,6 +403,10 @@ impl Conn13 {
             client_psk_modes: vec![],
             tickets_issued: 0,
             clock: None,
+            pending_certificate_requests: vec![],
+            client_authentication: None,
+            post_handshake_peer_certificates: None,
+            post_handshake_authentications: 0,
             plaintext_send_sequence: 0,
             plaintext_replay: SlidingWindowDetector::new(
                 cfg.replay_protection_window,
@@ -504,6 +522,16 @@ impl Conn13 {
             failures: 0,
         });
         Ok(())
+    }
+
+    /// This side's current application traffic secret (`..._application_traffic_secret_N`).
+    pub(crate) fn local_application_secret(&self) -> Option<&SecretVec> {
+        self.local_traffic_secret.as_ref()
+    }
+
+    /// The peer's current application traffic secret.
+    pub(crate) fn remote_application_secret(&self) -> Option<&SecretVec> {
+        self.remote_traffic_secret.as_ref()
     }
 
     pub(crate) fn set_application_secrets(&mut self, local: SecretVec, remote: SecretVec) {
@@ -913,7 +941,9 @@ impl Conn13 {
             }
             FlightKind::NewConnectionId
             | FlightKind::RequestConnectionId
-            | FlightKind::NewSessionTicket => {}
+            | FlightKind::NewSessionTicket
+            | FlightKind::CertificateRequest
+            | FlightKind::Authentication => {}
         }
         self.prune_write_epochs();
     }
@@ -1755,6 +1785,23 @@ impl Conn13 {
         Ok(())
     }
 
+    /// Sends `messages` as one post-handshake flight: in order, and acknowledged together.
+    pub(crate) fn send_post_handshake_messages(
+        &mut self,
+        kind: FlightKind,
+        messages: Vec<(u8, Vec<u8>)>,
+    ) -> Result<()> {
+        let mut flight = Flight::new(kind);
+        let epoch = self.send_epoch();
+        for (handshake_type, body) in messages {
+            flight.push(self.next_send_seq, epoch, handshake_type, body);
+            self.next_send_seq = self.next_send_seq.wrapping_add(1);
+        }
+        self.transmit(&mut flight)?;
+        self.post_handshake.push(flight);
+        Ok(())
+    }
+
     /// Sends a KeyUpdate: this side moves to new sending keys once the peer acknowledges
     /// it. `request_update` asks the peer to update its own as well.
     ///
@@ -1928,7 +1975,22 @@ impl Conn13 {
         body: &[u8],
     ) -> std::result::Result<(), Refusal> {
         let unexpected = || refuse(alert::UNEXPECTED_MESSAGE, Error::ErrUnhandledContextType);
+        // RFC 8446 section 4.6.2: the messages of a client's answer to a CertificateRequest
+        // come together, with nothing of another type in between.
+        if self.client_authentication.is_some()
+            && !matches!(handshake_type, CERTIFICATE_VERIFY | FINISHED)
+        {
+            return Err(unexpected());
+        }
         match handshake_type {
+            // RFC 8446 section 4.6.2: only to a client that sent post_handshake_auth; to any
+            // other it is an unexpected_message (the arm below).
+            CERTIFICATE_REQUEST if self.is_client && self.cfg.post_handshake_auth => {
+                self.on_post_handshake_certificate_request(body)?;
+            }
+            CERTIFICATE | CERTIFICATE_VERIFY | FINISHED if !self.is_client => {
+                self.on_post_handshake_authentication(handshake_type, body)?;
+            }
             NEW_SESSION_TICKET if self.is_client => {
                 // Kept if this client resumes, dropped otherwise; acknowledged either way,
                 // so that the server stops sending it.

@@ -40,6 +40,10 @@ pub enum EndpointEvent {
     /// matching `close_notify` reply is queued for [`Endpoint::poll_transmit`], and the connection
     /// has been removed.
     PeerClosed,
+    /// DTLS 1.3 server: the client answered a post-handshake CertificateRequest
+    /// ([`Endpoint::request_client_certificate`]) and the answer verified. The chain is in
+    /// [`State::peer_certificates`]; a client that declined left the earlier one there.
+    PeerAuthenticated,
 }
 
 /// The most associations a server endpoint holds for addresses it has not verified: those
@@ -256,6 +260,7 @@ impl Endpoint {
         messages: &mut Vec<EndpointEvent>,
     ) -> Result<()> {
         let is_handshake_completed_before = conn.is_handshake_completed();
+        let authentications_before = conn.post_handshake_authentications;
         conn.set_clock(now);
         conn.read(data)?;
         if conn.is_dtls13() {
@@ -290,6 +295,10 @@ impl Endpoint {
         }
         if !is_handshake_completed_before && conn.is_handshake_completed() {
             messages.push(EndpointEvent::HandshakeComplete)
+        }
+        // One event per answer verified.
+        for _ in authentications_before..conn.post_handshake_authentications {
+            messages.push(EndpointEvent::PeerAuthenticated)
         }
         Ok(())
     }
@@ -647,6 +656,12 @@ impl Endpoint {
             self.transport_protocol,
         );
         Ok(())
+    }
+
+    /// Asks the client at `remote` for its certificate after the handshake (RFC 8446 section
+    /// 4.6.2): see [`DTLSConn::request_client_certificate`].
+    pub fn request_client_certificate(&mut self, now: Instant, remote: SocketAddr) -> Result<()> {
+        self.with_dtls13(now, remote, DTLSConn::request_client_certificate)
     }
 
     /// Starts a key update on the DTLS 1.3 association with `remote` (RFC 9147 section 8):
