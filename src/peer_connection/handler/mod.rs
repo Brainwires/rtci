@@ -458,11 +458,6 @@ impl RTCPeerConnection {
                     );
                     self.update_connection_state(false);
                 }
-                RTCEventInternal::ICESelectedCandidatePairChange => {
-                    if !self.is_closed() {
-                        self.announce_selected_candidate_pair();
-                    }
-                }
                 RTCEventInternal::DTLSHandshakeComplete(_, _) | RTCEventInternal::DTLSClosed => {
                     self.announce_transport_states();
                     self.update_connection_state(false);
@@ -473,8 +468,12 @@ impl RTCPeerConnection {
                 _ => {}
             }
         }
-        // The SCTP transport's state follows its association, which any event may have moved.
+        // The SCTP transport's state follows its association, which any event may have moved;
+        // the selected pair is the agent's, whose change event the DTLS handler consumes.
         self.announce_transport_states();
+        if !self.is_closed() {
+            self.announce_selected_candidate_pair();
+        }
 
         raised
     }

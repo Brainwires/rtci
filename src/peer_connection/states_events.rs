@@ -315,19 +315,22 @@ impl RTCPeerConnection {
         ufrags
     }
 
-    /// Whether an ICE restart `restart_ice` asked for is still to be done: the current local
-    /// description still has credentials it was called for (W3C: `[[LocalIceCredentialsToReplace]]`
-    /// loses them when an answer replaces them).
+    /// Whether an ICE restart `restart_ice` asked for is still to be done: it recorded
+    /// credentials, and no answer has yet made a current local description without them (W3C:
+    /// `[[LocalIceCredentialsToReplace]]` is emptied when an answer does).
     pub(crate) fn ice_restart_pending(&self) -> bool {
         if self.ice_credentials_to_replace.is_empty() {
             return false;
         }
-        let current = self
+        // The set is emptied when an answer leaves the current local description with none of
+        // its credentials; until a first answer there is no current description to look at.
+        let Some(current) = self
             .current_local_description()
             .and_then(|description| description.parsed)
-            .map(|parsed| description_ufrags(&parsed))
-            .unwrap_or_default();
-        current
+        else {
+            return true;
+        };
+        description_ufrags(&current)
             .iter()
             .any(|ufrag| self.ice_credentials_to_replace.contains(ufrag))
     }

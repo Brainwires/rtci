@@ -7,6 +7,7 @@
 
 use anyhow::Result;
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
+use rtc::peer_connection::configuration::media_engine::MediaEngine;
 use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtc::peer_connection::event::{
     ICE_SERVER_UNREACHABLE, RTCDataChannelEvent, RTCPeerConnectionEvent,
@@ -65,8 +66,11 @@ struct Peer {
 
 impl Peer {
     fn new(addr: SocketAddr, role: RTCDtlsRole, now: Instant) -> Result<Self> {
+        let mut media_engine = MediaEngine::default();
+        media_engine.register_default_codecs()?;
         let pc = RTCPeerConnectionBuilder::new()
             .with_configuration(RTCConfigurationBuilder::new().build())
+            .with_media_engine(media_engine)
             .with_setting_engine(
                 SettingEngineBuilder::new()
                     .with_answering_dtls_role(role)
@@ -497,11 +501,13 @@ fn gathering_is_announced_once_per_ice_generation() -> Result<()> {
     let labels: Vec<String> = events.iter().filter_map(label).collect();
     assert_eq!(labels, ["gatherer:gathering", "gathering:gathering"]);
     let ufrag = pc
-        .sctp()
-        .map(|s| s.transport().ice_transport())
-        .and_then(|t| t.get_local_parameters())
-        .map(|p| p.username_fragment)
-        .expect("local parameters");
+        .local_description()
+        .expect("local description")
+        .sdp
+        .lines()
+        .find_map(|l| l.strip_prefix("a=ice-ufrag:"))
+        .map(str::to_owned)
+        .expect("ufrag");
 
     pc.add_local_candidate(host("10.0.0.1:5000".parse()?)?)?;
     drain(&mut pc, &mut events);

@@ -55,7 +55,8 @@ impl IceTransport {
             agent,
             id,
             ice_gathering_state: RTCIceGatheringState::New,
-            ice_connection_state: RTCIceConnectionState::default(),
+            // W3C 4.4.1.1: [[IceConnectionState]] starts "new".
+            ice_connection_state: RTCIceConnectionState::New,
             local_media_section: None,
         })
     }
