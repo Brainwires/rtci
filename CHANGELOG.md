@@ -2715,6 +2715,16 @@ Found by the seeded lossy-link test (`tests/lossy_link_rtc2rtc.rs`).
   KeyUpdate was unacknowledged keys it from its old secret (its new keys take effect on the
   acknowledgement, RFC 9147 section 8), and the server used its newest one and refused the
   answer with decrypt_error.
+- **sctp**: an endpoint that announces the zero checksum over DTLS (RFC 9653, as a peer
+  connection's does) answers an out-of-the-blue packet with a zero checksum as RFC 9260
+  section 8.4 says, with an ABORT (RFC 9653 section 5.3 allows it: "faster SCTP association
+  failure detection"); it used to drop it. A data channel neither opened nor failed for
+  minutes over a lossy path: the INITs crossed, one side (its COOKIE ACKs lost) was
+  established and sent DATA_CHANNEL_OPEN, the other discarded it in COOKIE-ECHOED until its
+  handshake ran out and its association ended, and the established side's DATA and
+  HEARTBEATs then reached no association and were dropped unanswered. It is now aborted by
+  its next packet, and the channel fails with an error. INIT and COOKIE ECHO still need their
+  CRC32c (`a_peer_whose_association_ended_here_is_aborted_by_its_next_packet`).
 - **sctp**: `EndpointConfig::random_source(provider)` draws every random value of an
   endpoint and its associations (verification tags, initial TSNs, unauthenticated State
   Cookies, the Initiate Tag of an INIT ACK for an existing association, HEARTBEAT nonces and
