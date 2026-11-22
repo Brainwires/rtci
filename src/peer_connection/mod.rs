@@ -291,12 +291,13 @@ use crate::peer_connection::sdp::section_multiplexes_rtcp;
 use crate::peer_connection::sdp::session_description::RTCSessionDescription;
 use crate::peer_connection::sdp::{
     ATTR_KEY_RTCP_MUX_ONLY, RemoteIceDetails, SctpNegotiation, check_answer_against_offer,
-    codecs_from_media_description, discard_stray_bundle_only, effective_direction,
-    extract_fingerprints, extract_ice_details, extract_tls_id, get_mid_value, get_peer_direction,
-    has_ice_trickle_option, has_rtcp_mux, has_rtp_media, inherit_session_extmap, insert_media_line,
-    is_lite_set, is_live_rtp_section, is_rejected_media, is_sdp_token,
-    is_unknown_application_media, media_ice_credentials, negotiated_sctp, sdp_type::RTCSdpType,
-    update_sdp_origin, validate_application_media_section, validate_dtls_attributes,
+    check_extmap_ids, codecs_from_media_description, discard_stray_bundle_only,
+    effective_direction, extract_fingerprints, extract_ice_details, extract_tls_id, get_mid_value,
+    get_peer_direction, has_ice_trickle_option, has_rtcp_mux, has_rtp_media,
+    inherit_session_extmap, insert_media_line, is_lite_set, is_live_rtp_section, is_rejected_media,
+    is_sdp_token, is_unknown_application_media, media_ice_credentials, negotiated_sctp,
+    remap_answerer_assigned_extmaps, sdp_type::RTCSdpType, update_sdp_origin,
+    validate_application_media_section, validate_dtls_attributes,
 };
 use crate::peer_connection::state::RTCIceGatheringState;
 use crate::peer_connection::state::ice_connection_state::RTCIceConnectionState;
@@ -1463,6 +1464,7 @@ impl RTCPeerConnection {
 
         // wpt100:hdrext — Cryptex once both sides signalled it (RFC 9335).
         self.update_cryptex();
+        self.update_encrypted_header_extensions();
 
         Ok(())
     }
@@ -1599,6 +1601,26 @@ impl RTCPeerConnection {
             self.assign_missing_mids(&mut parsed, answers);
             discard_stray_bundle_only(&mut parsed, answers);
             inherit_session_extmap(&mut parsed);
+            check_extmap_ids(&parsed)?;
+            if !answers {
+                let taken: Vec<u16> = self
+                    .media_engine
+                    .negotiated_header_extensions
+                    .keys()
+                    .copied()
+                    .collect();
+                let registered = &self.media_engine.header_extensions;
+                remap_answerer_assigned_extmaps(
+                    &mut parsed,
+                    |kind, uri| {
+                        registered.iter().any(|e| {
+                            e.uri == uri
+                                && (kind == "audio" && e.is_audio || kind == "video" && e.is_video)
+                        })
+                    },
+                    &taken,
+                );
+            }
             // `RTCRtpHeaderEncryptionPolicy::Require`: refused before any of it is applied.
             self.check_required_cryptex(&parsed)?;
             // RFC 8841 section 5.1: a data section without a valid `a=sctp-port` is invalid.
@@ -2247,6 +2269,7 @@ impl RTCPeerConnection {
 
         // wpt100:hdrext — Cryptex once both sides signalled it (RFC 9335).
         self.update_cryptex();
+        self.update_encrypted_header_extensions();
 
         Ok(())
     }

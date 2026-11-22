@@ -454,6 +454,15 @@ impl DtlsTransport {
                 // for DTLS-SRTP. A client that knows the round trip time of the selected
                 // pair from ICE starts from 1.5 times that instead (`DtlsHandler`).
                 .with_flight_interval(DTLS_SRTP_FLIGHT_INTERVAL)
+                // No session resumption (RFC 8446 section 2.2): WebRTC authenticates each
+                // association by the certificate fingerprints of its SDP (RFC 8827 section
+                // 6.5) and makes a new one per session, so a ticket would have no caller and
+                // a resumed handshake would carry no certificate to check. As a server this
+                // side issues no tickets (and accepts none: it has no key to open one with);
+                // as a client it keeps none and offers no PSK.
+                .with_session_tickets(0)
+                .with_session_store(None)
+                .with_external_psks(vec![])
                 .build(self.dtls_role == RTCDtlsRole::Client, None)?,
         ))
     }

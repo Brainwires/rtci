@@ -13,6 +13,7 @@ use shared::marshal::{Marshal, Unmarshal};
 use shared::util::is_rtcp;
 use srtp::context::Context;
 use srtp::cryptex::Cryptex;
+use srtp::header_extension::EncryptedHeaderExtensions;
 use std::collections::VecDeque;
 use std::time::Instant;
 
@@ -26,6 +27,9 @@ pub(crate) struct SrtpHandlerContext {
     /// What the negotiated session says about Cryptex (RFC 9335), applied to the contexts
     /// now and to ones a DTLS handshake hands over later.
     pub(crate) cryptex: Cryptex,
+    /// The header extension ids negotiated encrypted (RFC 6904), applied to the contexts now
+    /// and to ones a DTLS handshake hands over later.
+    pub(crate) encrypted_header_extensions: EncryptedHeaderExtensions,
 
     pub(crate) read_outs: VecDeque<TaggedRTCMessageInternal>,
     pub(crate) write_outs: VecDeque<TaggedRTCMessageInternal>,
@@ -43,6 +47,23 @@ impl SrtpHandlerContext {
         }
         if let Some(context) = self.remote_srtp_context.as_mut() {
             context.set_cryptex(cryptex);
+        }
+    }
+}
+
+impl SrtpHandlerContext {
+    /// Records the header extensions the session encrypts (RFC 6904) and applies them to the
+    /// contexts in place, in both directions.
+    pub(crate) fn set_encrypted_header_extensions(&mut self, ids: EncryptedHeaderExtensions) {
+        self.encrypted_header_extensions = ids;
+        for context in [
+            self.local_srtp_context.as_mut(),
+            self.remote_srtp_context.as_mut(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            context.set_encrypted_header_extensions(ids);
         }
     }
 }
@@ -264,6 +285,8 @@ impl<'a>
             self.ctx.remote_srtp_context = remote_srtp_context.take();
             let cryptex = self.ctx.cryptex;
             self.ctx.set_cryptex(cryptex);
+            let encrypted = self.ctx.encrypted_header_extensions;
+            self.ctx.set_encrypted_header_extensions(encrypted);
         }
 
         self.ctx.event_outs.push_back(evt);

@@ -29,6 +29,41 @@
 //! # }
 //! ```
 //!
+//! # Message size
+//!
+//! **Toward a browser, a message is at most 16 KB by default.** RFC 8831 section 6.6: "As
+//! long as message interleaving is not supported, the sender SHOULD limit the maximum message
+//! size to 16 KB to avoid monopolization." Interleaving is RFC 8260 (I-DATA); this engine
+//! offers it, and no current browser does. So once the association with such a peer is
+//! established, [`RTCSctpTransport::max_message_size`] (W3C `maxMessageSize`) is 16384, and
+//! [`RTCDataChannel::send`] / [`RTCDataChannel::send_text`] refuse a larger message with
+//! [`Error::ErrMessageTooLargeWithoutInterleaving`], whose text names the limit and the setting.
+//! Between two peers that both interleave (two instances of this engine, by default) the limit
+//! is the peer's `a=max-message-size` (RFC 8841 section 6.1).
+//!
+//! An application that needs larger messages toward browsers, as the browsers themselves
+//! send them, lifts the limit up to the peer's `a=max-message-size`:
+//!
+//! ```no_run
+//! # use std::time::Instant;
+//! use rtc::peer_connection::RTCPeerConnectionBuilder;
+//! use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+//!
+//! # fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! let setting_engine = SettingEngineBuilder::new()
+//!     .with_sctp_message_size_limit_without_interleaving(false)
+//!     .build();
+//! let pc = RTCPeerConnectionBuilder::new()
+//!     .with_setting_engine(setting_engine)
+//!     .build(Instant::now())?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! A large message then holds up every other channel of the association until it is sent.
+//!
+//! [`RTCSctpTransport::max_message_size`]: crate::peer_connection::transport::RTCSctpTransport::max_message_size
+//!
 //! # Specification
 //!
 //! * [W3C WebRTC - RTCDataChannel](https://www.w3.org/TR/webrtc/#rtcdatachannel)
@@ -337,11 +372,9 @@ impl RTCDataChannel<'_> {
         }
 
         // W3C `send()`: data larger than `maxMessageSize` throws (a TypeError).
-        if let Some(max_message_size) = self.peer_connection.sctp_transport().max_message_size()
-            && data_len > max_message_size as usize
-        {
-            return Err(Error::ErrOutboundPacketTooLarge);
-        }
+        self.peer_connection
+            .sctp_transport()
+            .check_message_size(data_len)?;
 
         // W3C `send()`: "If the value of [[BufferedAmount]] increased by the byte size of data
         // is above [[MaxBufferSize]], throw an OperationError."
@@ -368,6 +401,8 @@ impl RTCDataChannel<'_> {
     /// - [`Error::ErrDataChannelClosed`] once the channel is gone.
     /// - [`Error::ErrOutboundPacketTooLarge`] if `data` is larger than the negotiated
     ///   [`max_message_size`](crate::peer_connection::transport::RTCSctpTransport::max_message_size).
+    /// - [`Error::ErrMessageTooLargeWithoutInterleaving`] if `data` is larger than 16384 bytes
+    ///   and the peer does not interleave messages (see [the module docs](self#message-size)).
     ///
     /// The check is made here, synchronously, rather than deeper in the pipeline where an error
     /// could only be logged. A rejected send never charges [`Self::outstanding_bytes`].
