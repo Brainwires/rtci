@@ -6,7 +6,7 @@ const PATH_MAX_RETRANS: usize = 5;
 /// Association.Max.Retrans (RFC 9260 16).
 const ASSOCIATION_MAX_RETRANS: usize = 10;
 const NO_MAX_RETRANS: usize = usize::MAX;
-const TIMER_COUNT: usize = 8;
+const TIMER_COUNT: usize = 9;
 
 #[derive(Debug, Copy, Clone)]
 /// Retransmission limits for the association's timers.
@@ -27,8 +27,11 @@ pub struct TimerConfig {
     /// tolerated before the peer is declared unreachable and the association closes with
     /// [`AssociationError::TimedOut`](crate::AssociationError::TimedOut) (RFC 9260 8.1).
     ///
-    /// Defaults to unlimited, leaving reliability to the per-stream partial-reliability settings
-    /// and path failure to ICE.
+    /// An unanswered HEARTBEAT counts as one more.
+    ///
+    /// Defaults to Association.Max.Retrans, 10 (RFC 9260 16): with the RTO doubling up to
+    /// RTO.Max that is about five minutes without an answer. `usize::MAX` never gives up and
+    /// leaves the failure of the path to whatever runs underneath (ICE consent, for WebRTC).
     pub max_t3_rtx_retrans: usize,
     /// How many times a RE-CONFIG chunk (stream reset) may be retransmitted.
     pub max_reconfig_retrans: usize,
@@ -42,7 +45,7 @@ impl Default for TimerConfig {
             max_t1_init_retrans: MAX_INIT_RETRANS,
             max_t1_cookie_retrans: MAX_INIT_RETRANS,
             max_t2_shutdown_retrans: ASSOCIATION_MAX_RETRANS,
-            max_t3_rtx_retrans: NO_MAX_RETRANS,
+            max_t3_rtx_retrans: ASSOCIATION_MAX_RETRANS,
             max_reconfig_retrans: PATH_MAX_RETRANS,
             max_ack_retrans: PATH_MAX_RETRANS,
         }
@@ -63,6 +66,9 @@ pub(crate) enum Timer {
     /// T5-shutdown-guard (RFC 9260 9.2): bounds a graceful shutdown. Its first expiry aborts
     /// the association.
     T5ShutdownGuard = 7,
+    /// The heartbeat timer (RFC 9260 8.3): the wait before a HEARTBEAT on an idle path, then
+    /// the wait for its HEARTBEAT ACK.
+    Heartbeat = 8,
 }
 
 impl Timer {
@@ -75,6 +81,7 @@ impl Timer {
         Timer::Ack,
         Timer::HalfOpen,
         Timer::T5ShutdownGuard,
+        Timer::Heartbeat,
     ];
 }
 
@@ -100,6 +107,7 @@ impl TimerTable {
                 time_config.max_ack_retrans,         //Ack
                 0,                                   //HalfOpen
                 0,                                   //T5ShutdownGuard
+                NO_MAX_RETRANS,                      //Heartbeat
             ],
             ..Default::default()
         }
@@ -163,6 +171,14 @@ impl TimerTable {
         if let Some(interval) = self.control_interval(timer) {
             *interval = None;
         }
+    }
+
+    /// Counts a failure that is not this timer's own expiry against its limit (an
+    /// unanswered HEARTBEAT counts with the T3-rtx expiries, RFC 9260 8.1). Returns whether
+    /// the limit is passed.
+    pub fn count_error(&mut self, timer: Timer) -> bool {
+        self.retrans[timer as usize] = self.retrans[timer as usize].saturating_add(1);
+        self.retrans[timer as usize] > self.max_retrans[timer as usize]
     }
 
     /// How many times `timer` may expire before it fails.

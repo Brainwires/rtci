@@ -112,6 +112,10 @@ const PARAM_HOST_NAME_ADDRESS: u16 = 11;
 /// The State Cookie parameter, for the "Missing Mandatory Parameter" cause.
 const PARAM_STATE_COOKIE: u16 = 7;
 
+/// Path.Max.Retrans (RFC 9260 16): the consecutive failures (T3-rtx expiries, HEARTBEATs
+/// without an answer) after which the path to the peer is reported inactive.
+pub(crate) const PATH_MAX_RETRANS: usize = 5;
+
 /// T5-shutdown-guard (RFC 9260 9.2, 16): five times RTO.Max, in milliseconds.
 pub(crate) const T5_SHUTDOWN_GUARD: u64 = 5 * 60_000;
 
@@ -211,6 +215,12 @@ pub enum Event {
         /// Reason that the association was closed
         reason: AssociationError,
     },
+    /// The path to the peer is inactive: Path.Max.Retrans consecutive retransmissions or
+    /// HEARTBEATs went unanswered (RFC 9260 sections 8.2, 8.3). The association goes on
+    /// trying, up to [`TimerConfig::max_t3_rtx_retrans`](crate::TimerConfig).
+    PathInactive,
+    /// The path to the peer answers again after [`Event::PathInactive`].
+    PathActive,
     /// Stream events
     Stream(StreamEvent),
     /// One or more application datagrams have been received
@@ -307,6 +317,19 @@ pub struct Association {
     sack_packet_immediately: bool,
     /// Set by a chunk handler: the chunks after it in the packet are discarded.
     discard_rest_of_packet: bool,
+
+    /// HB.interval (RFC 9260 8.3, 16); `None` sends no HEARTBEAT.
+    heartbeat_interval: Option<Duration>,
+    /// The HEARTBEAT sent and not yet acknowledged: its nonce and when it left.
+    heartbeat_outstanding: Option<(u64, Instant)>,
+    /// When a chunk that can measure the round trip last left: a DATA chunk sent for the
+    /// first time, or a HEARTBEAT. The path is idle from then on.
+    last_rtt_probe: Option<Instant>,
+    /// Consecutive failures on the path to the peer, for `Event::PathInactive`.
+    path_error_count: usize,
+    path_inactive: bool,
+    /// When the association was made: the zero of the time a HEARTBEAT carries.
+    created_at: Option<Instant>,
 
     pub(crate) payload_queue: PayloadQueue,
     pub(crate) inflight_queue: PayloadQueue,
@@ -438,6 +461,12 @@ impl Default for Association {
             first_data_received: false,
             sack_packet_immediately: false,
             discard_rest_of_packet: false,
+            heartbeat_interval: None,
+            heartbeat_outstanding: None,
+            last_rtt_probe: None,
+            path_error_count: 0,
+            path_inactive: false,
+            created_at: None,
 
             payload_queue: PayloadQueue::default(),
             inflight_queue: PayloadQueue::default(),
@@ -547,6 +576,8 @@ impl Association {
             configured_outbound_streams: config.max_num_outbound_streams(),
             configured_inbound_streams: config.max_num_inbound_streams(),
             valid_cookie_life: config.valid_cookie_life(),
+            heartbeat_interval: config.heartbeat_interval(),
+            created_at: Some(now),
             max_payload_size,
             // RFC 8841 5: each side's `a=sctp-port`. An accepting side takes the INIT's ports
             // instead (`handle_init`).
@@ -704,6 +735,8 @@ impl Association {
 
             if timer == Timer::Ack {
                 self.on_ack_timeout();
+            } else if timer == Timer::Heartbeat {
+                self.on_heartbeat_timeout(now);
             } else if failure {
                 self.on_retransmission_failure(timer);
             } else {
@@ -1440,14 +1473,13 @@ impl Association {
             vec![]
         } else if let Some(c) = chunk_any.downcast_ref::<ChunkHeartbeat>() {
             self.handle_heartbeat(c)?
-        } else if chunk_any.downcast_ref::<ChunkHeartbeatAck>().is_some() {
-            // The engine sends no HEARTBEAT yet, so there is none to match this against.
-            trace!("[{}] HEARTBEAT ACK", self.side);
+        } else if let Some(c) = chunk_any.downcast_ref::<ChunkHeartbeatAck>() {
+            self.handle_heartbeat_ack(c, now);
             vec![]
         } else if let Some(c) = chunk_any.downcast_ref::<ChunkCookieEcho>() {
             self.handle_cookie_echo(p, c, now)?
         } else if chunk_any.downcast_ref::<ChunkCookieAck>().is_some() {
-            self.handle_cookie_ack()?
+            self.handle_cookie_ack(now)?
         } else if let Some(c) = chunk_any.downcast_ref::<ChunkPayloadData>() {
             self.handle_data(c)?
         } else if let Some(c) = chunk_any.downcast_ref::<ChunkSelectiveAck>() {
@@ -2069,6 +2101,7 @@ impl Association {
                 self.events.push_back(Event::Connected);
                 self.set_state(AssociationState::Established);
                 self.handshake_completed = true;
+                self.start_heartbeat_timer(now);
                 // RFC 9260 5.1.5 7): DATA that came with the COOKIE ECHO is acknowledged
                 // at once.
                 self.sack_packet_immediately = true;
@@ -2088,7 +2121,7 @@ impl Association {
         }])
     }
 
-    fn handle_cookie_ack(&mut self) -> Result<Vec<Packet>> {
+    fn handle_cookie_ack(&mut self, now: Instant) -> Result<Vec<Packet>> {
         let state = self.state();
         debug!("[{}] COOKIE-ACK received in state '{}'", self.side, state);
         if state != AssociationState::CookieEchoed {
@@ -2105,8 +2138,167 @@ impl Association {
         self.events.push_back(Event::Connected);
         self.set_state(AssociationState::Established);
         self.handshake_completed = true;
+        self.start_heartbeat_timer(now);
 
         Ok(vec![])
+    }
+
+    /// The time a HEARTBEAT is sent after the path went idle: RTO + HB.interval, with a
+    /// jitter of up to half an RTO either way (RFC 9260 8.3).
+    fn heartbeat_period(&self) -> Option<Duration> {
+        let interval = self.heartbeat_interval?;
+        let rto = self.rto_mgr.get_rto();
+        let jitter = u64::from(random::<u32>()) % (rto + 1);
+        Some(interval + Duration::from_millis(rto / 2 + jitter))
+    }
+
+    /// RFC 9260 8.3: HEARTBEATs start when the association is established.
+    fn start_heartbeat_timer(&mut self, now: Instant) {
+        self.heartbeat_outstanding = None;
+        match self.heartbeat_period() {
+            Some(period) => self.timers.set(Timer::Heartbeat, Some(now + period)),
+            None => self.timers.stop(Timer::Heartbeat),
+        }
+    }
+
+    /// The heartbeat timer expired: either the wait for the path to be idle is over and a
+    /// HEARTBEAT goes out, or the HEARTBEAT that went out has not been answered within an
+    /// RTO.
+    fn on_heartbeat_timeout(&mut self, now: Instant) {
+        if !matches!(
+            self.state(),
+            AssociationState::Established
+                | AssociationState::ShutdownPending
+                | AssociationState::ShutdownReceived
+        ) {
+            return;
+        }
+        let Some(interval) = self.heartbeat_interval else {
+            return;
+        };
+
+        if self.heartbeat_outstanding.take().is_some() {
+            // RFC 9260 8.3: a HEARTBEAT not acknowledged within an RTO counts against the
+            // path and the association, and the RTO backs off. The next one follows after
+            // HB.interval.
+            debug!("[{}] HEARTBEAT not acknowledged", self.side);
+            self.rto_mgr.backoff();
+            if self.on_path_failure() {
+                return;
+            }
+            self.timers.set(Timer::Heartbeat, Some(now + interval));
+            return;
+        }
+
+        // The path is idle when nothing that measures the round trip has left for a
+        // heartbeat period: not while DATA is being sent for the first time.
+        let Some(period) = self.heartbeat_period() else {
+            return;
+        };
+        if let Some(last) = self.last_rtt_probe
+            && now.saturating_duration_since(last) < interval
+        {
+            self.timers.set(Timer::Heartbeat, Some(last + period));
+            return;
+        }
+
+        // RFC 9260 8.3: the HEARTBEAT carries the time it is sent, and a nonce, so that the
+        // HEARTBEAT ACK can be told from any other.
+        let nonce = random::<u64>();
+        let sent_ms = self.created_at.map_or(0, |start| {
+            now.saturating_duration_since(start).as_millis() as u64
+        });
+        let mut info = BytesMut::with_capacity(16);
+        info.extend_from_slice(&sent_ms.to_be_bytes());
+        info.extend_from_slice(&nonce.to_be_bytes());
+        let packet = self.create_packet(vec![Box::new(ChunkHeartbeat {
+            params: vec![Box::new(ParamHeartbeatInfo {
+                heartbeat_information: info.freeze(),
+            })],
+        })]);
+        self.control_queue.push_back(packet);
+        self.awake_write_loop();
+        self.heartbeat_outstanding = Some((nonce, now));
+        self.last_rtt_probe = Some(now);
+        self.timers.set(
+            Timer::Heartbeat,
+            Some(now + Duration::from_millis(self.rto_mgr.get_rto())),
+        );
+    }
+
+    /// RFC 9260 8.3: a HEARTBEAT ACK for the HEARTBEAT outstanding measures the round trip,
+    /// clears the error counters and shows the path active. Any other is ignored.
+    fn handle_heartbeat_ack(&mut self, c: &ChunkHeartbeatAck, now: Instant) {
+        let Some((nonce, sent_at)) = self.heartbeat_outstanding else {
+            trace!("[{}] HEARTBEAT ACK for no HEARTBEAT", self.side);
+            return;
+        };
+        let echoed = c.params.first().and_then(|p| {
+            p.as_any()
+                .downcast_ref::<ParamHeartbeatInfo>()
+                .map(|info| info.heartbeat_information.clone())
+        });
+        let matches = echoed.is_some_and(|info| {
+            info.len() == 16 && constant_time_eq(&info[8..], &nonce.to_be_bytes())
+        });
+        if !matches {
+            debug!(
+                "[{}] HEARTBEAT ACK does not match the HEARTBEAT sent",
+                self.side
+            );
+            return;
+        }
+        self.heartbeat_outstanding = None;
+        let rtt = now.saturating_duration_since(sent_at);
+        self.rto_mgr.set_new_rtt(rtt.as_millis() as u64);
+        self.timers.reset_retrans(Timer::T3RTX);
+        self.on_path_success();
+        if let Some(period) = self.heartbeat_period() {
+            self.timers.set(Timer::Heartbeat, Some(now + period));
+        }
+    }
+
+    /// One more consecutive failure on the path (RFC 9260 8.1, 8.2): a HEARTBEAT without an
+    /// answer. Returns whether the association ended over it.
+    fn on_path_failure(&mut self) -> bool {
+        self.note_path_error();
+        if self.timers.count_error(Timer::T3RTX) {
+            // RFC 9260 8.1: past Association.Max.Retrans the peer is unreachable.
+            error!("[{}] the peer does not answer: giving up", self.side);
+            if let Err(err) = self.close(AssociationError::TimedOut) {
+                error!("[{}] failed to close association: {err}", self.side);
+            }
+            return true;
+        }
+        false
+    }
+
+    /// Counts a failure against the path and reports the path inactive past
+    /// Path.Max.Retrans.
+    fn note_path_error(&mut self) {
+        self.path_error_count += 1;
+        if self.path_error_count > PATH_MAX_RETRANS && !self.path_inactive {
+            self.path_inactive = true;
+            self.events.push_back(Event::PathInactive);
+        }
+    }
+
+    /// The peer answered: new DATA was acknowledged, or a HEARTBEAT.
+    fn on_path_success(&mut self) {
+        self.path_error_count = 0;
+        if self.path_inactive {
+            self.path_inactive = false;
+            self.events.push_back(Event::PathActive);
+        }
+    }
+
+    /// Sets HB.interval for this association (RFC 9260 11.1.9, "Change Heartbeat"). `None`
+    /// stops the HEARTBEATs.
+    pub fn set_heartbeat_interval(&mut self, interval: Option<Duration>, now: Instant) {
+        self.heartbeat_interval = interval;
+        if self.state() == AssociationState::Established {
+            self.start_heartbeat_timer(now);
+        }
     }
 
     fn handle_data(&mut self, d: &ChunkPayloadData) -> Result<Vec<Packet>> {
@@ -2867,6 +3059,7 @@ impl Association {
         // assigned only for FORWARD TSN do not count as newly acknowledged DATA.
         if newly_acked_data {
             self.timers.reset_retrans(Timer::T3RTX);
+            self.on_path_success();
         }
         if earliest_outstanding.is_some_and(|tsn| {
             sna32lte(tsn, d.cumulative_tsn_ack)
@@ -4412,6 +4605,7 @@ impl Association {
 
             // RTT baseline only; maxPacketLifeTime measures from `created_at`.
             c.since = Some(now);
+            self.last_rtt_probe = Some(now);
             c.nsent = 1; // being sent for the first time
 
             trace!(
@@ -4551,6 +4745,7 @@ impl Association {
             Timer::T3RTX => {
                 self.stats.inc_t3timeouts();
                 self.rto_mgr.backoff();
+                self.note_path_error();
                 // Refresh before C2 or mark_all_to_retrasmit reads abandoned().
                 if let Err(err) =
                     self.abandon_unretransmittable_messages(now, ChunkPayloadData::is_outstanding)
@@ -4681,7 +4876,8 @@ impl Association {
     pub(crate) fn is_idle(&self) -> bool {
         Timer::VALUES
             .iter()
-            //.filter(|&&t| t != Timer::KeepAlive && t != Timer::PushNewCid)
+            // The heartbeat timer always runs on an established association.
+            .filter(|&&t| t != Timer::Heartbeat)
             .filter_map(|&t| Some((t, self.timers.get(t)?)))
             .min_by_key(|&(_, time)| time)
             //.map_or(true, |(timer, _)| timer == Timer::Idle)

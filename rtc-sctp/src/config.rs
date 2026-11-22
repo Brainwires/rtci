@@ -78,6 +78,7 @@ pub struct TransportConfig {
     timer_config: TimerConfig,
     stream_scheduler: StreamScheduler,
     valid_cookie_life: Duration,
+    heartbeat_interval: Option<Duration>,
 }
 
 impl Default for TransportConfig {
@@ -93,11 +94,27 @@ impl Default for TransportConfig {
             timer_config: TimerConfig::default(),
             stream_scheduler: StreamScheduler::default(),
             valid_cookie_life: Duration::from_secs(60),
+            heartbeat_interval: Some(Duration::from_secs(30)),
         }
     }
 }
 
 impl TransportConfig {
+    /// Sets HB.interval (RFC 9260 8.3, 16): an association whose path has been idle for an RTO
+    /// plus this long sends a HEARTBEAT, which measures the round trip and shows that the peer
+    /// is still there. One left unanswered counts toward
+    /// [`TimerConfig::max_t3_rtx_retrans`](crate::TimerConfig). Defaults to 30 seconds; `None`
+    /// sends no HEARTBEAT.
+    pub fn with_heartbeat_interval(mut self, value: Option<Duration>) -> Self {
+        self.heartbeat_interval = value;
+        self
+    }
+
+    /// HB.interval, see [`with_heartbeat_interval`](Self::with_heartbeat_interval).
+    pub fn heartbeat_interval(&self) -> Option<Duration> {
+        self.heartbeat_interval
+    }
+
     /// Sets Valid.Cookie.Life: how long after an INIT ACK its State Cookie is accepted in a
     /// COOKIE ECHO (RFC 9260 5.1.3, 16). Later it is refused with a "Stale Cookie" error and
     /// the peer starts again. Defaults to 60 seconds.

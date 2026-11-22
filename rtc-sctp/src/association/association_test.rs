@@ -2164,3 +2164,6 @@ mod robustness_test;
 
 #[path = "handshake_teardown_test.rs"]
 mod handshake_teardown_test;
+
+#[path = "heartbeat_test.rs"]
+mod heartbeat_test;
