@@ -988,7 +988,10 @@ fn a_crossing_init_is_answered_without_touching_the_tcb() {
             "the tag that came with the cookie"
         );
         assert_eq!(699, a.peer_last_tsn);
-        assert!(a.poll_timeout().is_none(), "the T1 timers are stopped");
+        assert!(
+            a.timers.get(Timer::T1Init).is_none() && a.timers.get(Timer::T1Cookie).is_none(),
+            "the T1 timers are stopped"
+        );
         let sent = sent_datagrams(&mut a, now);
         assert_eq!(1, chunks_of_type(&sent, CT_COOKIE_ACK.0).len());
         assert_eq!(0x0808, tag_of(&sent[0]));
