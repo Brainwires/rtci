@@ -97,6 +97,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **ice**: a consent request waits for its response four times the pair's round-trip time
   (500 ms to 4 s; RFC 7675 section 5.1) instead of a fixed 4 s.
 - **stats**: a candidate pair's state can be `frozen`.
+- **ice**: a remote candidate of a component other than RTP is ignored (the engine is rtcp-mux
+  only). pion and webrtc-rs signal every candidate for both components on one address; held,
+  the RTCP one could not be paired and kept the RTP one out when its mDNS name resolved first.
+- **ice**: the controlling agent's consent checks carry USE-CANDIDATE (as libwebrtc's do), so a
+  peer that takes over an address and its credentials without an ICE restart learns the pair in
+  use; and an agent leaves `Disconnected` with the consent response, not at its next check.
 - **ice**: the agent receives STUN through `rtc_stun::validated::Validator`: FINGERPRINT is
   verified when present (it never was), a request with an unknown comprehension-required
   attribute is answered 420 with UNKNOWN-ATTRIBUTES and a response with one is discarded (RFC

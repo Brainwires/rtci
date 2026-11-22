@@ -542,16 +542,49 @@ fn test_redundant_local_candidates_are_not_kept() {
     assert_eq!(a.local_candidates.len(), 2);
 }
 
-/// Section 6.1.2.2: candidates are paired only within a component.
+/// Section 6.1.2.2: candidates are paired only within a component. The agent has the RTP
+/// component alone, so a candidate the peer signals for RTCP (pion and webrtc-rs signal every
+/// candidate for both components, on the same address) is not held, and does not keep the RTP
+/// candidate with that address out, whichever of the two arrives or resolves first.
 #[test]
-fn test_candidates_of_different_components_are_not_paired() {
+fn test_candidates_of_another_component_are_ignored() {
     let mut a = bare_agent(Instant::now(), config(true));
     let mut rtcp = remote(1, 500, "f1");
     rtcp.set_component(2);
-    a.add_remote_candidate(rtcp).unwrap();
+    assert!(!a.add_remote_candidate(rtcp).unwrap());
+    assert!(a.remote_candidates.is_empty());
     assert!(a.candidate_pairs.is_empty());
-    a.add_remote_candidate(remote(2, 500, "f2")).unwrap();
+    // The RTP candidate on the same address is taken and paired.
+    assert!(a.add_remote_candidate(remote(1, 500, "f1")).unwrap());
     assert_eq!(a.candidate_pairs.len(), 1);
+
+    // The same for names: of an RTCP and an RTP candidate behind one mDNS name, only the RTP
+    // one is resolved.
+    let named = |component: u16| {
+        let mut c = CandidateHostConfig {
+            base_config: CandidateConfig {
+                network: "udp".to_owned(),
+                address: "9b36eaac-bb2e-49bb-bb78-21c41c499900.local".to_owned(),
+                port: 5000,
+                component: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+        .new_candidate_host()
+        .unwrap();
+        c.set_component(component);
+        c
+    };
+    let cfg = AgentConfig {
+        multicast_dns_mode: crate::mdns::MulticastDnsMode::QueryOnly,
+        ..config(true)
+    };
+    let mut a = bare_agent(Instant::now(), cfg);
+    a.add_remote_candidate(named(2)).unwrap();
+    assert!(a.mdns_queries.is_empty());
+    a.add_remote_candidate(named(1)).unwrap();
+    assert_eq!(a.mdns_queries.len(), 1);
 }
 
 /// Section 6.1.2.5: the checklist holds 100 pairs by default, the limit is configurable, and

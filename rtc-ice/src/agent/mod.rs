@@ -894,6 +894,21 @@ impl Agent {
             return Ok(false);
         }
 
+        // The agent has one component (RTP; the engine is rtcp-mux only), and candidates are
+        // paired within a component (RFC 8445 Section 6.1.2.2). A peer that also signals each
+        // candidate for the RTCP component (pion and webrtc-rs do, with the same address)
+        // gets those ignored: held, they could never be paired, and they would stand in the
+        // way of the RTP candidate with the same transport address.
+        if c.component() != COMPONENT_RTP {
+            debug!(
+                "[{}]: ignoring remote candidate {} of component {}",
+                self.get_name(),
+                c.address(),
+                c.component()
+            );
+            return Ok(false);
+        }
+
         // Filter by network type if network_types is configured
         if !self.network_types.is_empty() {
             let candidate_network_type = c.network_type();
