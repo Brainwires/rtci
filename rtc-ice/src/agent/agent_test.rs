@@ -1364,6 +1364,9 @@ fn test_query_only_agent_queries_mdns_remote_candidate() -> Result<()> {
         base,
         Arc::new(AgentConfig {
             multicast_dns_mode: crate::mdns::MulticastDnsMode::QueryOnly,
+            // The RFC 6762 section 5.2 first-query delay has its own test
+            // (`agent_open_rows_test.rs`); this one asks at once.
+            multicast_dns_first_query_delay: Some(false),
             ..Default::default()
         }),
         test_crypto_provider(),
@@ -2214,6 +2217,9 @@ fn agent_with_answered_mdns_query(base: Instant) -> Result<(Agent, TaggedBytesMu
         base,
         Arc::new(AgentConfig {
             multicast_dns_mode: crate::mdns::MulticastDnsMode::QueryOnly,
+            // The RFC 6762 section 5.2 first-query delay has its own test
+            // (`agent_open_rows_test.rs`); this one asks at once.
+            multicast_dns_first_query_delay: Some(false),
             ..Default::default()
         }),
         test_crypto_provider(),
@@ -2478,6 +2484,9 @@ fn mdns_agent(mode: crate::mdns::MulticastDnsMode, local_ip: Option<IpAddr>) -> 
         Arc::new(AgentConfig {
             multicast_dns_mode: mode,
             multicast_dns_local_ip: local_ip,
+            // The RFC 6762 section 5.2 first-query delay has its own test
+            // (`agent_open_rows_test.rs`); these ask at once.
+            multicast_dns_first_query_delay: Some(false),
             ..Default::default()
         }),
         test_crypto_provider(),

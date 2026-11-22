@@ -120,6 +120,23 @@ pub enum RtcpSessionControl {
     TrrInt(Duration),
     /// The endpoint leaves the session: every local SSRC says BYE.
     Leave,
+    /// What identifies the local stream `ssrc` beyond the CNAME: the identification-tag of
+    /// its m= section (RFC 9143 section 15.1, SDES `MID`), its RtpStreamId (RFC 8852 section
+    /// 3.1) and, for a redundancy stream (RTX, FEC), the RepairedRtpStreamId of the stream it
+    /// repairs (section 3.2). Each given value is an item of the SSRC's SDES chunk in every
+    /// compound packet: RFC 9143 section 15 wants the MID "in the first few RTCP packets after
+    /// joining the session and ... regularly thereafter". All `None` forgets the SSRC's items;
+    /// the items of an SSRC that is no longer bound go when the next ones are given.
+    StreamIdentifiers {
+        /// The local SSRC.
+        ssrc: u32,
+        /// The m= section's `a=mid`.
+        mid: Option<String>,
+        /// The RtpStreamId (the encoding's rid).
+        rid: Option<String>,
+        /// The RepairedRtpStreamId (the rid of the stream a redundancy stream repairs).
+        repaired_rid: Option<String>,
+    },
 }
 
 impl RtcpSessionControl {
@@ -341,6 +358,7 @@ impl RtcpSessionBuilder {
             awaited: None,
             collided: HashSet::new(),
             said_bye: HashMap::new(),
+            identifiers: HashMap::new(),
             bye: None,
             read_queue: VecDeque::new(),
             write_queue: VecDeque::new(),
@@ -553,6 +571,8 @@ pub struct RtcpSessionInterceptor {
     locals: Vec<Local>,
     /// Local SSRCs unbound since the chain was last driven: each says BYE unless bound again.
     departing: Vec<Local>,
+    /// The SDES items of a local SSRC after its CNAME ([`RtcpSessionControl::StreamIdentifiers`]).
+    identifiers: HashMap<u32, Vec<SourceDescriptionItem>>,
     remotes: HashMap<u32, Remote>,
     /// The bound remote SSRCs in the order they were bound, for the round robin of report
     /// blocks.
@@ -1368,12 +1388,16 @@ impl RtcpSessionInterceptor {
     // ---- building packets ------------------------------------------------------------
 
     fn sdes_chunk(&self, ssrc: u32) -> SourceDescriptionChunk {
+        let mut items = vec![SourceDescriptionItem {
+            sdes_type: SdesType::SdesCname,
+            text: self.cname.clone().into(),
+        }];
+        if let Some(identifiers) = self.identifiers.get(&ssrc) {
+            items.extend(identifiers.iter().cloned());
+        }
         SourceDescriptionChunk {
             source: ssrc,
-            items: vec![SourceDescriptionItem {
-                sdes_type: SdesType::SdesCname,
-                text: self.cname.clone().into(),
-            }],
+            items,
         }
     }
 
@@ -1503,8 +1527,14 @@ impl RtcpSessionInterceptor {
         let mut included = vec![first];
         let mut reports: Vec<Box<dyn rtcp::Packet>> = vec![];
 
-        // The SDES chunk of an SSRC is 12 octets and its CNAME, padded.
-        let chunk = self.sdes_chunk(0).marshal_size();
+        // The SDES chunk of an SSRC is 12 octets and its CNAME, padded, and its stream
+        // identifiers: the largest one is counted for each.
+        let chunk = self
+            .locals
+            .iter()
+            .map(|local| self.sdes_chunk(local.ssrc).marshal_size())
+            .max()
+            .unwrap_or_else(|| self.sdes_chunk(0).marshal_size());
         let block = 24;
 
         let reporter = self.reporter();
@@ -1911,6 +1941,43 @@ impl RtcpSessionInterceptor {
             RtcpSessionControl::ReducedSize(reduced_size) => self.reduced_size = *reduced_size,
             RtcpSessionControl::TrrInt(t_rr_interval) => {
                 self.t_rr_interval = t_rr_interval.as_secs_f64();
+            }
+            RtcpSessionControl::StreamIdentifiers {
+                ssrc,
+                mid,
+                rid,
+                repaired_rid,
+            } => {
+                let items: Vec<SourceDescriptionItem> = [
+                    (SdesType::SdesMid, mid),
+                    (SdesType::SdesRtpStreamId, rid),
+                    (SdesType::SdesRepairedRtpStreamId, repaired_rid),
+                ]
+                .into_iter()
+                // An SDES item holds at most 255 octets (RFC 3550 section 6.5).
+                .filter_map(|(sdes_type, value)| {
+                    value
+                        .as_ref()
+                        .filter(|value| !value.is_empty() && value.len() <= 255)
+                        .map(|value| SourceDescriptionItem {
+                            sdes_type,
+                            text: value.clone().into(),
+                        })
+                })
+                .collect();
+                // Only the streams the session still has keep theirs.
+                let (locals, departing) = (&self.locals, &self.departing);
+                self.identifiers.retain(|kept, _| {
+                    locals
+                        .iter()
+                        .chain(departing)
+                        .any(|local| local.ssrc == *kept)
+                });
+                if items.is_empty() {
+                    self.identifiers.remove(ssrc);
+                } else {
+                    self.identifiers.insert(*ssrc, items);
+                }
             }
             RtcpSessionControl::Leave => {
                 // RFC 3550 6.6: every SSRC of an endpoint that leaves says BYE.

@@ -119,6 +119,12 @@ pub struct RTCIceCandidate {
     pub relay_protocol: RTCIceServerTransportProtocol,
     /// The URL of the STUN/TURN server used to gather this candidate, if any.
     pub url: Option<String>,
+    /// The username fragment of the ICE generation the candidate belongs to (W3C
+    /// `RTCIceCandidate.usernameFragment`; RFC 8838 section 9: a trickled candidate is tied to
+    /// its ICE session, so that one that arrives after an ICE restart is recognised and
+    /// ignored). Set on the local candidates the peer connection announces.
+    #[serde(default)]
+    pub username_fragment: Option<String>,
 }
 
 /// Conversion for ice_candidates
@@ -153,6 +159,7 @@ impl From<&Candidate> for RTCIceCandidate {
             related_port,
             relay_protocol: Default::default(),
             url: c.url().map(|u| u.to_string()),
+            username_fragment: None,
         }
     }
 }
@@ -237,7 +244,7 @@ impl RTCIceCandidate {
             candidate: format!("candidate:{}", candidate.marshal()),
             sdp_mid: None,
             sdp_mline_index: Some(0u16),
-            username_fragment: None,
+            username_fragment: self.username_fragment.clone(),
             url: None,
         })
     }

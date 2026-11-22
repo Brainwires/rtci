@@ -17,6 +17,8 @@ mod agent_nat_1to1_test;
 #[cfg(test)]
 mod agent_nomination_test;
 #[cfg(test)]
+mod agent_open_rows_test;
+#[cfg(test)]
 mod agent_ported_test;
 #[cfg(test)]
 mod agent_rfc6544_mdns_test;
@@ -61,8 +63,8 @@ use crate::candidate::candidate_server_reflexive::CandidateServerReflexiveConfig
 use crate::candidate::{candidate_pair::*, *};
 use crate::external_ip_mapper::ExternalIpMapper;
 use crate::mdns::{
-    MulticastDnsMode, create_multicast_dns, generate_multicast_dns_name, is_ice_mdns_name,
-    is_valid_local_mdns_name,
+    MdnsOptions, MulticastDnsMode, create_multicast_dns, generate_multicast_dns_name,
+    is_ice_mdns_name, is_valid_local_mdns_name,
 };
 use crate::network_type::NetworkType;
 use crate::rand::*;
@@ -272,6 +274,15 @@ pub enum Event {
     /// Emitted when the ICE role switches due to a role conflict (RFC 8445 §7.3.1.1).
     /// The bool is `true` if the agent is now controlling, `false` if now controlled.
     RoleChange(bool),
+    /// A local candidate is signalled differently from now on and has to be conveyed to the
+    /// peer again: its mDNS name was lost to another host (RFC 6762 Section 9) and it has a
+    /// new one. The candidate keeps its id.
+    LocalCandidateRenamed(Box<Candidate>),
+    /// Two lite agents, this one controlling, and more than one candidate pair: the agent
+    /// chose this pair (local, remote), and RFC 8445 Section 8.2 has the controlling agent
+    /// "send an updated candidate list to reconcile different agents selecting different
+    /// candidate pairs": an updated candidate exchange with these two candidates only.
+    LiteCandidateUpdate(Box<Candidate>, Box<Candidate>),
 }
 
 /// An [`Event`] together with the instant its condition was observed at.
@@ -402,6 +413,12 @@ pub struct Agent {
     /// Which remote addresses checks may be sent to. See [`remote_policy`].
     pub(crate) remote_policy: RemotePolicy,
 
+    /// The peer is a lite implementation (RFC 8445 Section 6.1.1; set by the using protocol).
+    pub(crate) remote_lite: bool,
+    /// The `LiteCandidateUpdate` event of this generation was raised.
+    pub(crate) lite_update_raised: bool,
+    /// Ta as configured, before the peer's proposal (Section 14.2).
+    pub(crate) configured_ta: Option<Duration>,
     /// Which of several nominations the controlled agent uses.
     pub(crate) nomination_acceptance: NominationAcceptance,
     /// The controlling agent's consent checks carry USE-CANDIDATE (libwebrtc).
@@ -469,6 +486,12 @@ impl Agent {
             &mdns_local_name,
             &config.multicast_dns_local_ip,
             &config.multicast_dns_query_timeout,
+            MdnsOptions {
+                first_query_delay: config.multicast_dns_first_query_delay.unwrap_or(true),
+                destination_reported: config.multicast_dns_destination_reported,
+                unicast_response: config.multicast_dns_unicast_response,
+                rate_limit: config.multicast_dns_rate_limit.clone(),
+            },
         )
         .unwrap_or_else(|err| {
             // Opportunistic mDNS: If we can't open the connection, that's ok: we
@@ -628,6 +651,9 @@ impl Agent {
             },
             ext_ip_mapper,
 
+            remote_lite: false,
+            lite_update_raised: false,
+            configured_ta: config.ta,
             nomination_acceptance: config.nomination_acceptance,
             nominate_on_consent_checks: config.nominate_on_consent_checks,
             unauthenticated_requests: config.unauthenticated_requests,
@@ -709,6 +735,17 @@ impl Agent {
         if self.local_gathering_complete {
             warn!(
                 "[{}]: ignoring local candidate {}: gathering was declared complete",
+                self.get_name(),
+                c
+            );
+            return Ok(false);
+        }
+        // RFC 8838 Section 13: "In all cases, an agent MUST NOT trickle any new candidates
+        // within an ICE session after nomination of a candidate pair". A candidate gathered
+        // after it is not taken (so not announced either); an ICE restart takes it.
+        if self.selected_pair.is_some() {
+            debug!(
+                "[{}]: ignoring local candidate {}: a pair has been nominated",
                 self.get_name(),
                 c
             );
@@ -1123,6 +1160,103 @@ impl Agent {
         self.request_connectivity_check();
     }
 
+    /// Takes what the mDNS connection has to report: the remote candidates whose names
+    /// resolved (returned), the queries that ended without an address, and the local names
+    /// lost to another host, which are replaced.
+    pub(crate) fn drain_mdns_events(&mut self, now: Instant) -> Vec<Candidate> {
+        use mdns::MdnsEvent;
+
+        let mut resolved = vec![];
+        let mut lost = vec![];
+        if let Some(mdns_conn) = &mut self.mdns {
+            while let Some(event) = mdns_conn.poll_event() {
+                match event {
+                    MdnsEvent::QueryAnswered(id, addr) => {
+                        if let Some(mut c) = self.mdns_queries.remove(&id)
+                            && c.set_ip(&addr).is_ok()
+                        {
+                            debug!(
+                                "mDNS query id {} answered Candidate {} with resolved_addr {} is added into remote candidates",
+                                id,
+                                c,
+                                c.addr()
+                            );
+                            resolved.push(c);
+                        }
+                    }
+                    MdnsEvent::QueryTimeout(id) => {
+                        if let Some(c) = self.mdns_queries.remove(&id) {
+                            error!("mDNS Query {} timed out for {}", id, c.address());
+                        }
+                    }
+                    MdnsEvent::LocalNameConflict(name) => lost.push(name),
+                    _ => {}
+                }
+            }
+        }
+        for name in lost {
+            self.replace_local_mdns_name(now, &name);
+        }
+        resolved
+    }
+
+    /// RFC 6762 Section 9: a host that loses a name to another "MUST [...] choose a new
+    /// name". The local candidates published under `lost` get a new `<uuid>.local` name,
+    /// registered with the responder, and are reported with
+    /// [`Event::LocalCandidateRenamed`] so that they are conveyed to the peer again: the
+    /// name it holds resolves to the other host, or to nothing.
+    fn replace_local_mdns_name(&mut self, now: Instant, lost: &str) {
+        let ip = if self.mdns_local_name == lost {
+            self.mdns_local_ip
+        } else {
+            self.mdns_local_names
+                .iter()
+                .find(|(_, name)| name == lost)
+                .map(|(ip, _)| *ip)
+        };
+        let (Some(ip), Some(mdns_conn)) = (ip, &mut self.mdns) else {
+            return;
+        };
+        let name = generate_multicast_dns_name();
+        if !mdns_conn.add_local_name(&name, ip) {
+            warn!(
+                "[{}]: the mDNS name {} was lost to another host and no new one could be registered",
+                self.get_name(),
+                lost
+            );
+            return;
+        }
+        warn!(
+            "[{}]: the mDNS name {} was lost to another host: its candidates are now {}",
+            self.get_name(),
+            lost,
+            name
+        );
+        if self.mdns_local_name == lost {
+            self.mdns_local_name = name.clone();
+        }
+        for (_, published) in &mut self.mdns_local_names {
+            if published == lost {
+                *published = name.clone();
+            }
+        }
+        for c in &mut self.local_candidates {
+            if c.address == lost {
+                c.address = name.clone();
+                self.event_outs.push_back(TaggedEvent {
+                    now,
+                    event: Event::LocalCandidateRenamed(Box::new(c.clone())),
+                });
+            }
+        }
+    }
+
+    /// The remote mDNS candidates whose names have not resolved yet. They are held by no
+    /// pair, but they were submitted: statistics list them (mDNS draft Section 3.3.1).
+    pub fn pending_mdns_candidates(&self) -> impl Iterator<Item = &Candidate> {
+        self.mdns_queries.values()
+    }
+
     /// The peer has no more candidates for this generation (an end-of-candidates indication,
     /// RFC 8838 Section 14). Remote candidates signalled after it are ignored, and a checking
     /// agent whose pairs have all failed fails without waiting for its timeout, once local
@@ -1247,6 +1381,65 @@ impl Agent {
     /// Whether this agent is a lite implementation.
     pub fn is_lite(&self) -> bool {
         self.lite
+    }
+
+    /// Tells the agent whether the peer is a lite implementation (in SDP, `a=ice-lite`).
+    ///
+    /// It matters to a lite agent: with a full peer it answers checks and waits for the
+    /// nomination; with a lite peer "no connectivity checks are ever sent. Rather, once the
+    /// candidates are exchanged, each agent performs the processing described in Section 8
+    /// without connectivity checks" (RFC 8445 Section 6.1.1). See
+    /// [`Event::LiteCandidateUpdate`] and [`Agent::replace_remote_candidates`].
+    pub fn set_remote_lite(&mut self, lite: bool) {
+        self.remote_lite = lite;
+        self.request_connectivity_check();
+    }
+
+    /// Ta, the pacing of connectivity checks in use (RFC 8445 Section 14.2).
+    pub fn pacing(&self) -> Duration {
+        self.ta
+    }
+
+    /// The Ta this agent proposes to its peer, when it is not the default of 50 ms: "If an
+    /// agent wants to use a Ta value other than the default value, the agent MUST indicate the
+    /// proposed value to its peer during the establishment of the ICE session" (RFC 8445
+    /// Section 14.2; in SDP, `a=ice-pacing`, RFC 8839 Section 5.5, in milliseconds).
+    pub fn proposed_pacing(&self) -> Option<Duration> {
+        self.configured_ta
+            .map(|ta| ta.max(MIN_TA))
+            .filter(|ta| *ta != DEFAULT_TA)
+    }
+
+    /// The peer's proposal for Ta (`None`: it proposed nothing, which is the default, 50 ms).
+    /// "Both agents MUST use the higher out of the two proposed values" (RFC 8445 Section
+    /// 14.2): from now on Ta is the larger of this agent's own and the peer's.
+    ///
+    /// Until this is called the agent paces by its own configuration alone: it cannot know
+    /// that the peer was told. An application that configures a Ta under 50 ms and never
+    /// calls this is pacing faster than the peer agreed to.
+    pub fn set_remote_pacing(&mut self, proposed: Option<Duration>) {
+        let own = self.configured_ta.unwrap_or(DEFAULT_TA);
+        self.ta = own.max(proposed.unwrap_or(DEFAULT_TA)).max(MIN_TA);
+    }
+
+    /// Two lite agents: replaces the remote candidates with those of an updated candidate
+    /// exchange (RFC 8445 Section 8.2: "the controlling agent MUST send an updated candidate
+    /// list to reconcile different agents selecting different candidate pairs. ICE processing
+    /// is complete after and only after the updated candidate exchange is complete"), and
+    /// selects again. Returns `false`, and changes nothing, unless both agents are lite.
+    pub fn replace_remote_candidates(&mut self, now: Instant, candidates: Vec<Candidate>) -> bool {
+        if !(self.lite && self.remote_lite) {
+            return false;
+        }
+        self.set_selected_pair(Some(now), None);
+        self.candidate_pairs.clear();
+        self.nominated_pair = None;
+        self.triggered_queue.clear();
+        self.remote_candidates.clear();
+        self.remote_end_of_candidates = false;
+        self.trigger_request_connectivity_check(candidates);
+        self.request_connectivity_check();
+        true
     }
 
     /// Replaces the candidate types the agent accepts as local candidates from now on
@@ -1576,6 +1769,7 @@ impl Agent {
         self.early_requests = vec![];
         self.triggered_queue.clear();
         // A new generation: its candidates and its end-of-candidates are still to come.
+        self.lite_update_raised = false;
         self.remote_end_of_candidates = false;
         self.local_gathering_complete = false;
 
@@ -1669,8 +1863,13 @@ impl Agent {
 
         self.run_transactions(now);
 
+        // Two lite agents: no checks, the pair comes from the candidate exchange (Section 8.2).
+        if self.lite && self.remote_lite {
+            self.conclude_lite_to_lite(now);
+        }
+
         if self.selected_pair.is_some() && self.validate_selected_pair(now) {
-            if self.lite && !self.is_controlling {
+            if self.lite && (!self.is_controlling || self.remote_lite) {
                 self.lite_keepalive(now);
             } else {
                 self.check_keepalive(now);
@@ -1865,6 +2064,13 @@ impl Agent {
         };
         let remote_index = self.candidate_pairs[pair_index].remote_index;
         let remote = &self.remote_candidates[remote_index];
+
+        if self.lite && self.remote_lite {
+            // Two lite agents exchange no Binding requests at all (Section 6.1.1: "no
+            // connectivity checks are ever sent"): ICE has no sign of life to judge by.
+            self.update_connection_state(Some(now), self.healthy_state());
+            return true;
+        }
 
         if self.lite {
             // A lite agent sends no checks (RFC 8445 §2.5), so for it an authenticated request

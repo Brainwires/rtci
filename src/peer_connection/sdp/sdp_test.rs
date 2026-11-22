@@ -102,6 +102,7 @@ fn params(
         sctp_over_tcp: false,
         ignore_rid_pause_for_recv: false,
         write_ssrc_attributes_for_simulcast: false,
+        rid_pause_marks: false,
     }
 }
 
@@ -942,66 +943,66 @@ fn test_media_description_fingerprints() -> Result<()> {
 
 #[test]
 fn test_populate_sdp() -> Result<()> {
-    //"Rid"
-    {
+    //"Rid": the remote side's `send` rids are answered `recv` (RFC 8851 section 6.3), and the
+    // `~` of a paused stream is written only with `rid_pause_marks` (RFC 8853 section 5.2:
+    // the mark needs RFC 7728, which the engine does not implement).
+    for rid_pause_marks in [false, true] {
         let me = default_media_engine();
         let mut transceivers = vec![recvonly_transceiver(RtpCodecKind::Video)];
 
-        let rid_map = vec![
-            SimulcastRid {
-                id: "ridkey".to_owned(),
-                direction: SimulcastDirection::Recv,
-                params: "some".to_owned(),
-                paused: false,
-            },
-            SimulcastRid {
-                id: "ridpaused".to_owned(),
-                direction: SimulcastDirection::Recv,
-                params: "some2".to_owned(),
-                paused: true,
-            },
-        ];
+        let remote_rid = |id: &str, paused: bool| SimulcastRid {
+            id: id.to_owned(),
+            direction: SimulcastDirection::Send,
+            simulcast: true,
+            paused,
+            formats: vec![],
+            restrictions: vec![("max-width".to_owned(), Some("1280".to_owned()))],
+        };
         let media_sections = vec![MediaSection {
-            rid_map,
+            rid_map: vec![remote_rid("ridkey", false), remote_rid("ridpaused", true)],
             ..media_section("video", 0)
         }];
 
-        let offer_sdp = populate(
+        let sdp = populate(
             &me,
             &mut transceivers,
             &media_sections,
-            params(false, None),
+            PopulateSdpParams {
+                rid_pause_marks,
+                ..params(false, None)
+            },
             &[],
         )?;
 
-        // Test contains rid map keys
-        let mut found = 0;
-        for desc in &offer_sdp.media_descriptions {
-            if desc.media_name.media != "video" {
-                continue;
-            }
-
-            let rid_map = get_rids(desc);
-            if let Some(rid) = rid_map.iter().find(|rid| rid.id == "ridkey") {
-                assert!(!rid.paused, "Rid should be active");
-                assert_eq!(
-                    rid.direction,
-                    SimulcastDirection::Send,
-                    "Rid should be send"
-                );
-                found += 1;
-            }
-            if let Some(rid) = rid_map.iter().find(|rid| rid.id == "ridpaused") {
-                assert!(rid.paused, "Rid should be paused");
-                assert_eq!(
-                    rid.direction,
-                    SimulcastDirection::Send,
-                    "Rid should be send"
-                );
-                found += 1;
-            }
+        let video = sdp
+            .media_descriptions
+            .iter()
+            .find(|desc| desc.media_name.media == "video")
+            .expect("a video section");
+        let rids = get_rids(video);
+        for id in ["ridkey", "ridpaused"] {
+            let rid = rids
+                .iter()
+                .find(|rid| rid.id == id)
+                .unwrap_or_else(|| panic!("rid {id} is written"));
+            assert_eq!(rid.direction, SimulcastDirection::Recv, "rid {id}");
+            assert!(rid.simulcast, "rid {id} is a simulcast stream");
+            assert_eq!(
+                rid.restrictions,
+                vec![("max-width".to_owned(), Some("1280".to_owned()))],
+                "rid {id} keeps its restrictions"
+            );
         }
-        assert_eq!(found, 2, "All Rid key should be present");
+        let simulcast = video
+            .attribute(SDP_ATTRIBUTE_SIMULCAST)
+            .flatten()
+            .expect("an a=simulcast line");
+        let expected = if rid_pause_marks {
+            "recv ridkey;~ridpaused"
+        } else {
+            "recv ridkey;ridpaused"
+        };
+        assert_eq!(simulcast, expected);
     }
 
     //"SetCodecPreferences"
@@ -1251,23 +1252,35 @@ fn test_populate_sdp_reject() -> Result<()> {
 
 #[test]
 fn test_get_rids() {
-    let m = [media(
+    // RFC 8851 section 6.2.2 step 3: a `pt=` keeps the formats of the m= line only.
+    let mut m = media(
         "video",
         vec![
             attr("sendonly", None),
             attr(
                 SDP_ATTRIBUTE_RID,
-                Some("f send pt=97;max-width=1280;max-height=720"),
+                Some("f send pt=97,98;max-width=1280;max-height=720"),
             ),
         ],
-    )];
+    );
+    m.media_name.formats = vec!["97".to_owned()];
 
-    let rids = get_rids(&m[0]);
+    let rids = get_rids(&m);
 
-    assert!(!rids.is_empty(), "Rid mapping should be present");
+    let f = rids
+        .iter()
+        .find(|rid| rid.id == "f")
+        .expect("rid values should contain 'f'");
+    assert_eq!(f.direction, SimulcastDirection::Send);
+    assert_eq!(f.formats, vec![97]);
+    let restrictions = f.to_restrictions();
+    assert_eq!(restrictions.payload_types, vec![97]);
+    assert_eq!(restrictions.max_width, Some(1280));
+    assert_eq!(restrictions.max_height, Some(720));
 
-    let f = rids.iter().find(|rid| rid.id == "f");
-    assert!(f.is_some(), "rid values should contain 'f'");
+    // Without the format on the m= line, the line keeps no format and is discarded.
+    m.media_name.formats = vec!["96".to_owned()];
+    assert!(get_rids(&m).is_empty());
 }
 
 #[test]

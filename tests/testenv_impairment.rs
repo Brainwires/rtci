@@ -99,6 +99,19 @@ fn dc_open_id(p: &EnvPeer) -> Option<rtc::data_channel::RTCDataChannelId> {
     })
 }
 
+/// A peer's ICE and peer connection state changes, in order: a peer connection that fails while
+/// its ICE state stays connected failed in DTLS, not in ICE (checks, consent).
+fn state_changes(p: &EnvPeer) -> Vec<String> {
+    p.events
+        .iter()
+        .filter_map(|e| match e {
+            RTCPeerConnectionEvent::OnIceConnectionStateChangeEvent(s) => Some(format!("ice {s}")),
+            RTCPeerConnectionEvent::OnConnectionStateChangeEvent(s) => Some(format!("pc {s}")),
+            _ => None,
+        })
+        .collect()
+}
+
 fn dc_messages(p: &EnvPeer) -> Vec<u32> {
     p.reads
         .iter()
@@ -178,8 +191,10 @@ fn send_numbered(
     assert_eq!(
         next,
         count,
-        "a could not send everything (state {:?})",
-        a.connection_state()
+        "a could not send everything (state {:?}); state changes: a {:?}, b {:?}",
+        a.connection_state(),
+        state_changes(&a),
+        state_changes(&b)
     );
     let dc_stats = |p: &mut EnvPeer| {
         let r = p.pc.get_stats(Instant::now(), StatsSelector::None);

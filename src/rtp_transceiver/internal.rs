@@ -429,7 +429,9 @@ impl RTCRtpTransceiverInternal {
     }
 
     /// Whether the transceiver is stopping or stopped: an offer rejects its m= section, and
-    /// it neither sends nor receives. What RFC 9429 calls a stopped RtpTransceiver.
+    /// it neither sends nor receives. What RFC 9429 calls a stopped RtpTransceiver. Stopping
+    /// implies it (`stop()` sets both), so this reads `[[Stopping]]`, not `[[Stopped]]`.
+    #[allow(clippy::misnamed_getters)]
     pub(crate) fn stopped(&self) -> bool {
         self.stopping || self.stopped
     }
