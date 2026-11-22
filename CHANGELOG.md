@@ -981,7 +981,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `max-compat` all of them. **The default offer changes**: a second audio or video section of
   an initial offer now has port 0 and `a=bundle-only`.
 
+- **jsep**: session-level `a=extmap` lines of a remote description are read (RFC 8285 section
+  5, RFC 9429 section 5.8.1); an offer that maps its header extensions once for the session
+  negotiated none. An extension offered `sendonly` is answered `recvonly`, `recvonly` as
+  `sendonly` and `inactive` as `inactive` (RFC 8285 section 7); the answer wrote no direction,
+  which claims both.
+
+- **jsep**: a remote answer or subsequent offer that carries the BUNDLE attributes in the
+  tagged m= section only (RFC 9143 section 7.1.3) is accepted, and `a=rtcp-mux` and
+  `a=rtcp-rsize` of the tagged section apply to every bundled section.
+
 - **shared**: `Error::ErrAnswerDoesNotMatchOffer(String)`.
+- **setting_engine**: `SettingEngineBuilder::with_bundle_attributes_in_tagged_section_only`:
+  answers and subsequent offers carry the BUNDLE attributes in the tagged m= section only, as
+  RFC 9143 section 7.1.3 says. The default repeats them in every bundled section, as browsers
+  do.
 - **transceiver**: `RTCRtpTransceiver::remote_bandwidth()` (`RTCRemoteBandwidth`: `b=TIAS` /
   `b=AS`, `b=RS`, `b=RR` of the remote media section, RFC 9429 section 5.10),
   `RTCRtpTransceiver::remote_rtcp_xr()` (the remote `a=rtcp-xr` formats, RFC 3611 section 5.1)

@@ -368,6 +368,10 @@ pub struct SettingEngine {
     pub(crate) sdp_media_level_fingerprints: bool,
     pub(crate) disable_sdp_tls_id: bool,
     pub(crate) disable_dtls_use_srtp: bool,
+    /// Answers and subsequent offers carry the BUNDLE attributes in the tagged m= section
+    /// only (RFC 9143 section 7.1.3); see
+    /// [`SettingEngineBuilder::with_bundle_attributes_in_tagged_section_only`].
+    pub(crate) bundle_attributes_in_tagged_section_only: bool,
     pub(crate) answering_dtls_role: RTCDtlsRole,
     pub(crate) disable_certificate_fingerprint_verification: bool,
     pub(crate) allow_insecure_verification_algorithm: bool,
@@ -1300,6 +1304,22 @@ impl SettingEngineBuilder {
     /// ```
     pub fn with_disable_dtls_use_srtp(mut self, is_disabled: bool) -> Self {
         self.0.disable_dtls_use_srtp = is_disabled;
+        self
+    }
+
+    /// Where answers and subsequent offers put the BUNDLE attributes (the IDENTICAL and
+    /// TRANSPORT categories of RFC 8859: `a=ice-ufrag`, `a=ice-pwd`, `a=setup`, media-level
+    /// `a=fingerprint`, `a=rtcp-mux`, `a=rtcp-mux-only`, `a=rtcp-rsize`).
+    ///
+    /// RFC 9143 section 7.1.3: "In a subsequent offer or in an answer ... the offerer and
+    /// answerer MUST include [them] only in the tagged 'm=' section". `true` writes that
+    /// form. `false`, the default, repeats them in every bundled m= section, as browsers do:
+    /// libwebrtc refuses an RTP m= section without `a=rtcp-mux` under its `require` policy.
+    ///
+    /// Either form is accepted from the remote side whatever this is set to: the tagged
+    /// section's attributes apply to every bundled section.
+    pub fn with_bundle_attributes_in_tagged_section_only(mut self, tagged_only: bool) -> Self {
+        self.0.bundle_attributes_in_tagged_section_only = tagged_only;
         self
     }
 

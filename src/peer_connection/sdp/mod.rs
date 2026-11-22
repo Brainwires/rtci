@@ -163,6 +163,7 @@ mod rejected_mline_tests {
             rtcp_mux_only: true,
             bundle_policy: RTCBundlePolicy::MaxCompat,
             initial_offer: false,
+            bundle_attributes_in_tagged_section_only: false,
             sctp_max_message_size: 0,
             sctp_port: 5000,
             sctp_over_tcp: false,
@@ -1184,6 +1185,11 @@ impl RTCPeerConnection {
             media = media.with_extmap(sdp::extmap::ExtMap {
                 value: *id,
                 uri: Some(ext_url),
+                direction: media_section
+                    .match_extension_directions
+                    .get(uri)
+                    .cloned()
+                    .unwrap_or_default(),
                 ..Default::default()
             });
         }
@@ -1470,17 +1476,6 @@ impl TryFrom<&String> for SimulcastRid {
 /// categories of RFC 8859), which "the offerer MUST NOT include ... in bundle-only 'm='
 /// sections" (RFC 9143 section 7.1.3): they are the offerer-tagged section's.
 fn make_bundle_only(media: &mut MediaDescription) {
-    const BUNDLE_ATTRIBUTES: [&str; 9] = [
-        "ice-ufrag",
-        "ice-pwd",
-        "ice-options",
-        "fingerprint",
-        "setup",
-        "candidate",
-        ATTR_KEY_RTCPMUX,
-        ATTR_KEY_RTCP_MUX_ONLY,
-        ATTR_KEY_RTCPRSIZE,
-    ];
     media.media_name.port = RangedPort {
         value: 0,
         range: None,
@@ -1496,16 +1491,25 @@ fn make_bundle_only(media: &mut MediaDescription) {
         ));
 }
 
-/// The section whose BUNDLE attributes (`a=rtcp-mux`, `a=rtcp-rsize`, RFC 8859 category
-/// IDENTICAL) are `media`'s: `media` itself, or, when it is a bundle-only section of an
-/// offer, the offerer-tagged section of its BUNDLE group (RFC 9143 section 7.1.3).
-pub(crate) fn bundle_attribute_section<'a>(
+/// Whether a BUNDLE attribute (`a=rtcp-mux`, `a=rtcp-rsize`: RFC 8859 category IDENTICAL)
+/// applies to `media`: the section has it, or the tagged section of its BUNDLE group has it.
+/// RFC 9143 section 7.1.3: in an initial offer a bundle-only section leaves the BUNDLE
+/// attributes to the offerer-tagged section, and in a subsequent offer or an answer they are
+/// "only in the tagged 'm=' section" and "will apply to each bundled 'm=' section".
+pub(crate) fn has_bundle_attribute(
+    desc: &SessionDescription,
+    media: &MediaDescription,
+    key: &str,
+) -> bool {
+    media.has_attribute(key) || tagged_section(desc, media).is_some_and(|m| m.has_attribute(key))
+}
+
+/// The tagged section of the BUNDLE group `media` is in: the first tag of the group that is
+/// neither rejected nor bundle-only (RFC 9143 sections 7.2 and 7.3.1).
+fn tagged_section<'a>(
     desc: &'a SessionDescription,
-    media: &'a MediaDescription,
-) -> &'a MediaDescription {
-    if !media.has_attribute(ATTR_KEY_BUNDLE_ONLY) {
-        return media;
-    }
+    media: &MediaDescription,
+) -> Option<&'a MediaDescription> {
     let mid = get_mid_value(media);
     bundle_groups(desc)
         .into_iter()
@@ -1519,8 +1523,20 @@ pub(crate) fn bundle_attribute_section<'a>(
                 })
             })
         })
-        .unwrap_or(media)
 }
+
+/// The BUNDLE attributes this endpoint writes (RFC 8859 categories IDENTICAL and TRANSPORT).
+const BUNDLE_ATTRIBUTES: [&str; 9] = [
+    "ice-ufrag",
+    "ice-pwd",
+    "ice-options",
+    "fingerprint",
+    "setup",
+    "candidate",
+    ATTR_KEY_RTCPMUX,
+    ATTR_KEY_RTCP_MUX_ONLY,
+    ATTR_KEY_RTCPRSIZE,
+];
 
 /// What a generated description does about BUNDLE (RFC 9143).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1572,6 +1588,11 @@ pub(crate) struct MediaSection {
     /// in an offer, which states [[Direction]].
     pub(crate) answer_direction: Option<RTCRtpTransceiverDirection>,
     pub(crate) match_extensions: HashMap<String, u16>,
+    /// In an answer, the direction each extension (by URI) is answered with when the offer
+    /// restricted it: the reverse of the offered one (RFC 8285 section 7: "if an extension
+    /// map is offered as 'sendonly', and the answerer wishes to use it, it MUST be marked as
+    /// 'recvonly' in the SDP answer", and the other way round; `inactive` stays).
+    pub(crate) match_extension_directions: HashMap<String, sdp::direction::Direction>,
     pub(crate) rid_map: Vec<SimulcastRid>,
     /// In an answer, the `<proto>` of the offered m= line, which the answer repeats (RFC 9429
     /// section 5.1.2: "The profile in any 'm=' line in any generated answer MUST exactly match
@@ -1650,6 +1671,8 @@ pub(crate) struct PopulateSdpParams {
     /// (RFC 9429 section 5.2.2: in a subsequent offer "an 'a=bundle-only' line ... MUST NOT
     /// be added").
     pub(crate) initial_offer: bool,
+    /// `SettingEngineBuilder::with_bundle_attributes_in_tagged_section_only`.
+    pub(crate) bundle_attributes_in_tagged_section_only: bool,
     pub(crate) sctp_max_message_size: usize,
     /// The data section's `a=sctp-port`.
     pub(crate) sctp_port: u16,
@@ -1971,6 +1994,21 @@ impl RTCPeerConnection {
                 sdp::description::common::Attribute::new(ATTR_KEY_RTCP_MUX_ONLY.to_owned(), None),
             );
         }
+        // RFC 9143 section 7.1.3, when asked for: in an answer or a subsequent offer only the
+        // tagged section (the first of the group) carries the BUNDLE attributes.
+        if params.bundle_attributes_in_tagged_section_only && !params.initial_offer {
+            for mid in bundled.iter().skip(1) {
+                if let Some(media) = d
+                    .media_descriptions
+                    .iter_mut()
+                    .find(|media| get_mid_value(media) == Some(mid))
+                {
+                    media.attributes.retain(|a| {
+                        !BUNDLE_ATTRIBUTES.contains(&a.key.as_str()) && a.key != "end-of-candidates"
+                    });
+                }
+            }
+        }
         if !bundled.is_empty() {
             d = d.with_value_attribute(
                 ATTR_KEY_GROUP.to_owned(),
@@ -2211,6 +2249,84 @@ pub(crate) fn is_sdp_token(s: &str) -> bool {
                 0x21 | 0x23..=0x27 | 0x2A..=0x2B | 0x2D..=0x2E | 0x30..=0x39 | 0x41..=0x5A
                 | 0x5E..=0x7E)
         })
+}
+
+/// Gives each audio and video section of a received description the session-level
+/// `a=extmap` lines it does not override (RFC 8285 section 5: the mappings may be "provided
+/// per media stream ... or globally for all streams"; RFC 9429 section 5.8.1 stores them, and
+/// section 5.3.1 has session-level attributes count as present in each m= section). A
+/// section's own mapping for an id or a URI wins. Only the parsed description changes.
+pub(crate) fn inherit_session_extmap(desc: &mut SessionDescription) {
+    let session: Vec<(String, String, String)> = desc
+        .attributes
+        .iter()
+        .filter(|a| a.key == ATTR_KEY_EXT_MAP)
+        .filter_map(|a| a.value.clone())
+        .filter_map(|value| {
+            let mut tokens = value.split_whitespace();
+            let id = tokens.next()?.split('/').next()?.to_owned();
+            let uri = tokens.next()?.to_owned();
+            Some((id, uri, value))
+        })
+        .collect();
+    if session.is_empty() {
+        return;
+    }
+    for media in &mut desc.media_descriptions {
+        if !matches!(media.media_name.media.as_str(), "audio" | "video") {
+            continue;
+        }
+        let own: Vec<(String, String)> = media
+            .attributes
+            .iter()
+            .filter(|a| a.key == ATTR_KEY_EXT_MAP)
+            .filter_map(|a| a.value.as_deref())
+            .filter_map(|value| {
+                let mut tokens = value.split_whitespace();
+                let id = tokens.next()?.split('/').next()?.to_owned();
+                Some((id, tokens.next()?.to_owned()))
+            })
+            .collect();
+        for (id, uri, value) in &session {
+            if !own
+                .iter()
+                .any(|(own_id, own_uri)| own_id == id || own_uri == uri)
+            {
+                media
+                    .attributes
+                    .push(sdp::description::common::Attribute::new(
+                        ATTR_KEY_EXT_MAP.to_owned(),
+                        Some(value.clone()),
+                    ));
+            }
+        }
+    }
+}
+
+/// The direction an answer gives each extension of an offered section that restricts one
+/// (RFC 8285 section 7), by URI: sendonly is answered recvonly, recvonly sendonly, inactive
+/// inactive. An extension offered without a direction (or sendrecv) is not in the map.
+pub(crate) fn answered_extension_directions(
+    m: &MediaDescription,
+) -> HashMap<String, sdp::direction::Direction> {
+    use sdp::direction::Direction;
+    let mut out = HashMap::new();
+    for a in m.attributes.iter().filter(|a| a.key == ATTR_KEY_EXT_MAP) {
+        let a_str = a.to_string();
+        let Ok(e) = ExtMap::unmarshal(&mut a_str.as_bytes()) else {
+            continue;
+        };
+        let answered = match e.direction {
+            Direction::SendOnly => Direction::RecvOnly,
+            Direction::RecvOnly => Direction::SendOnly,
+            Direction::Inactive => Direction::Inactive,
+            _ => continue,
+        };
+        if let Some(uri) = e.uri {
+            out.insert(uri.to_string(), answered);
+        }
+    }
+    out
 }
 
 /// Drops the `a=bundle-only` attributes of a received description that do not mean

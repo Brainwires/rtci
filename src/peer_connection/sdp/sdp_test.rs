@@ -96,6 +96,7 @@ fn params(
         rtcp_mux_only: true,
         bundle_policy: RTCBundlePolicy::MaxCompat,
         initial_offer: false,
+        bundle_attributes_in_tagged_section_only: false,
         sctp_max_message_size: 0,
         sctp_port: 5000,
         sctp_over_tcp: false,
