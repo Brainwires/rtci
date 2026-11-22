@@ -4,7 +4,7 @@ use crate::peer_connection::sdp::codecs_from_media_description;
 use crate::rtp_transceiver::rtp_receiver::internal::RTCRtpReceiverInternal;
 use crate::rtp_transceiver::rtp_sender::internal::RTCRtpSenderInternal;
 use crate::rtp_transceiver::rtp_sender::rtp_codec::{
-    CodecMatch, codec_parameters_fuzzy_search, find_rtx_payload_type,
+    CodecMatch, codec_parameters_fuzzy_search, find_rtx_payload_type, rtcp_feedback_intersection,
 };
 use crate::rtp_transceiver::rtp_sender::{RTCRtpCodecParameters, RtpCodecKind};
 use crate::rtp_transceiver::{
@@ -441,6 +441,13 @@ impl RTCRtpTransceiverInternal {
                     pass_mapping.insert(0, (remote_codec.payload_type, match_codec.payload_type));
 
                     remote_codec.payload_type = match_codec.payload_type;
+                    // Only the feedback both sides have is negotiated (RFC 4585 section 4.2):
+                    // what a remote description lists beyond this endpoint's own, or an
+                    // answer beyond the offer, is never enabled.
+                    remote_codec.rtp_codec.rtcp_feedback = rtcp_feedback_intersection(
+                        &match_codec.rtp_codec.rtcp_feedback,
+                        &remote_codec.rtp_codec.rtcp_feedback,
+                    );
                     // The scan runs backwards so that matched entries can be removed by index,
                     // so prepend to undo it: an answer must keep the offer's codec order (the
                     // offerer reads it back as our preference). Appending here would make the

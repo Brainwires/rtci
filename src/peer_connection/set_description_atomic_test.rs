@@ -210,12 +210,6 @@ fn a_remote_answer_that_does_not_answer_the_offer_changes_nothing() -> Result<()
         offerer.media_engine.negotiated_video,
     );
 
-    let video_payload_type = answer
-        .lines()
-        .find(|l| l.starts_with("m=video"))
-        .and_then(|l| l.split_whitespace().nth(3))
-        .expect("the answer accepts a video format")
-        .to_owned();
     let cases: Vec<(&str, String)> = vec![
         (
             "one m= section fewer than the offer (RFC 3264 section 6)",
@@ -247,12 +241,6 @@ fn a_remote_answer_that_does_not_answer_the_offer_changes_nothing() -> Result<()
             edit_section(&answer, 0, |lines| {
                 lines.retain(|l| !is_direction(l));
                 lines.push("a=recvonly".to_owned());
-            }),
-        ),
-        (
-            "feedback the offer did not have (RFC 4585 section 4.2)",
-            edit_section(&answer, 1, |lines| {
-                lines.push(format!("a=rtcp-fb:{video_payload_type} made-up"));
             }),
         ),
         (
@@ -548,5 +536,70 @@ fn an_answer_resets_the_last_created_offer_and_answer() -> Result<()> {
         "{refused:?}"
     );
     assert_eq!(offerer.signaling_state, RTCSignalingState::Stable);
+    Ok(())
+}
+
+/// RFC 4585 section 4.2 has an answerer add no feedback; real ones answer with their own list.
+/// Such an answer is applied, and the feedback the offer did not have is not enabled: what is
+/// negotiated is the intersection with this endpoint's own feedback for the format.
+#[test]
+fn feedback_an_answer_adds_is_not_enabled() -> Result<()> {
+    let (mut offerer, answer) = pending_offer()?;
+    let video_payload_type = answer
+        .lines()
+        .find(|l| l.starts_with("m=video"))
+        .and_then(|l| l.split_whitespace().nth(3))
+        .expect("the answer accepts a video format")
+        .to_owned();
+    let offered: Vec<String> = offerer
+        .pending_local_description
+        .as_ref()
+        .expect("the offer is pending")
+        .sdp
+        .lines()
+        .filter_map(|l| l.strip_prefix(&format!("a=rtcp-fb:{video_payload_type} ")))
+        .map(str::to_owned)
+        .collect();
+    assert!(!offered.is_empty() && !offered.iter().any(|f| f == "made-up"));
+
+    let with_extra = edit_section(&answer, 1, |lines| {
+        lines.push(format!("a=rtcp-fb:{video_payload_type} made-up"));
+        lines.push("a=rtcp-fb:* also-made-up 7".to_owned());
+    });
+    offerer.set_remote_description(Instant::now(), description(RTCSdpType::Answer, &with_extra))?;
+    assert_eq!(offerer.signaling_state, RTCSignalingState::Stable);
+
+    let negotiated = &offerer.media_engine.negotiated_video_codecs;
+    assert!(!negotiated.is_empty());
+    for codec in negotiated {
+        for feedback in &codec.rtp_codec.rtcp_feedback {
+            assert!(
+                !feedback.typ.contains("made-up"),
+                "{} enabled {feedback:?}",
+                codec.rtp_codec.mime_type
+            );
+            let value = if feedback.parameter.is_empty() {
+                feedback.typ.clone()
+            } else {
+                format!("{} {}", feedback.typ, feedback.parameter)
+            };
+            if codec.payload_type.to_string() == video_payload_type {
+                assert!(offered.contains(&value), "{value} was not offered");
+            }
+        }
+    }
+    // Nor do the transceivers' codecs carry it.
+    for transceiver in &offerer.rtp_transceivers {
+        for codec in transceiver.get_codec_preferences() {
+            assert!(
+                codec
+                    .rtp_codec
+                    .rtcp_feedback
+                    .iter()
+                    .all(|f| !f.typ.contains("made-up")),
+                "{codec:?}"
+            );
+        }
+    }
     Ok(())
 }

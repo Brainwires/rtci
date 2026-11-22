@@ -116,20 +116,30 @@ fn rtpmap_names(media: &MediaDescription) -> Vec<(String, String)> {
         .collect()
 }
 
+/// The `a=rtcp-fb` lines of an answered section that the offered section did not have, as
+/// `<payload type> <value>`.
+///
 /// RFC 4585 section 4.2: "The answerer MUST NOT add feedback parameters to a media section or
-/// alter values of such parameters"; RFC 9429 section 5.11: "If the answer contains any
-/// 'a=rtcp-fb' attributes ... that were not present in the offer, this indicates an error."
+/// alter values of such parameters"; RFC 9429 section 5.11 calls such a line an error. Real
+/// answerers do add them (they answer with their own configured list), so the answer is not
+/// refused for it: the extra feedback is never enabled, because what is negotiated is the
+/// intersection with this endpoint's own feedback for the format
+/// (`MediaEngine::update_from_remote_description`), as libwebrtc does. The caller logs what
+/// this returns.
 ///
 /// A feedback line of the answer is one the offer had when the offer carries the same value
 /// for the wildcard, for the same payload type, or for a payload type the offer maps to the
 /// same encoding (an answerer may number a format differently, RFC 3264 section 6.1). An
 /// answered wildcard is one the offer had as a wildcard or for every format the answer lists.
-/// `trr-int` is each side's own minimum interval (RFC 4585 section 4.2: declarative), so its
-/// number is not compared.
-fn check_feedback(index: usize, offer: &MediaDescription, answer: &MediaDescription) -> Result<()> {
+/// `trr-int` is each side's own minimum interval, so its number is not compared.
+pub(crate) fn feedback_not_offered(
+    offer: &MediaDescription,
+    answer: &MediaDescription,
+) -> Vec<String> {
     let answered = feedback_lines(answer);
+    let mut extra = vec![];
     if answered.is_empty() {
-        return Ok(());
+        return extra;
     }
     let offered = feedback_lines(offer);
     let kind = |value: &str| -> String {
@@ -188,17 +198,14 @@ fn check_feedback(index: usize, offer: &MediaDescription, answer: &MediaDescript
             }
         };
         if !allowed {
-            return Err(mismatch(
-                index,
-                format!(
-                    "a=rtcp-fb:{} {} was not in the offer",
-                    feedback.payload_type.as_deref().unwrap_or("*"),
-                    feedback.value
-                ),
+            extra.push(format!(
+                "{} {}",
+                feedback.payload_type.as_deref().unwrap_or("*"),
+                feedback.value
             ));
         }
     }
-    Ok(())
+    extra
 }
 
 /// Checks a remote answer (or provisional answer) against the local offer it answers.
@@ -213,9 +220,10 @@ fn check_feedback(index: usize, offer: &MediaDescription, answer: &MediaDescript
 ///   was indicated as bundled in the corresponding offer"; section 7.3: a group only if the
 ///   offer had one, no section moved between groups, no rejected section in a group
 ///   (section 7.3.3).
-/// - RFC 4585 section 4.2 and RFC 9429 section 5.11: no `a=rtcp-fb` the offer did not have.
 ///
-/// The first difference is returned as [`Error::ErrAnswerDoesNotMatchOffer`].
+/// The first difference is returned as [`Error::ErrAnswerDoesNotMatchOffer`]. An `a=rtcp-fb`
+/// line the offer did not have is not one of them: it is logged and never enabled (see
+/// [`feedback_not_offered`]).
 pub(crate) fn check_answer_against_offer(
     offer: &SessionDescription,
     answer: &SessionDescription,
@@ -280,7 +288,12 @@ pub(crate) fn check_answer_against_offer(
             ));
         }
 
-        check_feedback(index, offered, answered)?;
+        for feedback in feedback_not_offered(offered, answered) {
+            log::warn!(
+                "m= section {index}: the answer has a=rtcp-fb:{feedback}, which the offer did \
+                 not have; it is not enabled (RFC 4585 section 4.2)"
+            );
+        }
     }
 
     // BUNDLE groups: each of the answer's is a subset of one of the offer's, and holds no
@@ -338,8 +351,14 @@ a=rtpmap:96 VP8/90000\r\na=rtpmap:97 H264/90000\r\n{extra}"
         check_answer_against_offer(&parse(offer), &parse(answer))
     }
 
+    /// The feedback of `answer`'s first section that `offer`'s first section did not have.
+    fn extra(offer: &str, answer: &str) -> Vec<String> {
+        let (offer, answer) = (parse(offer), parse(answer));
+        feedback_not_offered(&offer.media_descriptions[0], &answer.media_descriptions[0])
+    }
+
     #[test]
-    fn feedback_of_the_answer_is_a_subset_of_the_offers() {
+    fn feedback_the_offer_did_not_have_is_found_and_does_not_refuse_the_answer() {
         let offer = format!(
             "{HEAD}{}",
             video(
@@ -355,22 +374,23 @@ a=rtpmap:96 VP8/90000\r\na=rtpmap:97 H264/90000\r\n{extra}"
                 "a=rtcp-fb:96 NACK  PLI\r\na=rtcp-fb:97 transport-cc\r\n"
             )
         );
-        assert!(check(&offer, &subset).is_ok());
+        assert!(extra(&offer, &subset).is_empty());
 
         // The offer had `nack` for 96 only.
         let other_format = format!("{HEAD}{}", video("0", "a=rtcp-fb:97 nack\r\n"));
-        assert!(matches!(
-            check(&offer, &other_format),
-            Err(Error::ErrAnswerDoesNotMatchOffer(_))
-        ));
+        assert_eq!(extra(&offer, &other_format), vec!["97 nack"]);
         // A wildcard in the answer needs the value for every answered format.
         let wildcard = format!("{HEAD}{}", video("0", "a=rtcp-fb:* nack\r\n"));
-        assert!(check(&offer, &wildcard).is_err());
+        assert_eq!(extra(&offer, &wildcard), vec!["* nack"]);
         let offered_wildcard = format!("{HEAD}{}", video("0", "a=rtcp-fb:* transport-cc\r\n"));
-        assert!(check(&offer, &offered_wildcard).is_ok());
+        assert!(extra(&offer, &offered_wildcard).is_empty());
         // A value the offer never had.
         let added = format!("{HEAD}{}", video("0", "a=rtcp-fb:96 ccm fir\r\n"));
-        assert!(check(&offer, &added).is_err());
+        assert_eq!(extra(&offer, &added), vec!["96 ccm fir"]);
+        // None of them refuses the answer.
+        for answer in [&other_format, &wildcard, &added] {
+            assert!(check(&offer, answer).is_ok());
+        }
     }
 
     #[test]
@@ -381,21 +401,21 @@ a=rtpmap:96 VP8/90000\r\na=rtpmap:97 H264/90000\r\n{extra}"
             "{HEAD}m=video 9 UDP/TLS/RTP/SAVPF 100\r\nc=IN IP4 0.0.0.0\r\na=mid:0\r\n\
 a=rtpmap:100 VP8/90000\r\na=rtcp-fb:100 nack\r\n"
         );
-        assert!(check(&offer, &answer).is_ok());
+        assert!(extra(&offer, &answer).is_empty());
         let h264 = format!(
             "{HEAD}m=video 9 UDP/TLS/RTP/SAVPF 100\r\nc=IN IP4 0.0.0.0\r\na=mid:0\r\n\
 a=rtpmap:100 H264/90000\r\na=rtcp-fb:100 nack\r\n"
         );
-        assert!(check(&offer, &h264).is_err());
+        assert_eq!(extra(&offer, &h264), vec!["100 nack"]);
     }
 
     #[test]
     fn a_trr_int_of_the_answer_needs_one_in_the_offer_not_the_same_number() {
         let offer = format!("{HEAD}{}", video("0", "a=rtcp-fb:* trr-int 100\r\n"));
         let answer = format!("{HEAD}{}", video("0", "a=rtcp-fb:* trr-int 500\r\n"));
-        assert!(check(&offer, &answer).is_ok());
+        assert!(extra(&offer, &answer).is_empty());
         let bare = format!("{HEAD}{}", video("0", ""));
-        assert!(check(&bare, &answer).is_err());
+        assert_eq!(extra(&bare, &answer), vec!["* trr-int 500"]);
     }
 
     #[test]

@@ -20,10 +20,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **jsep**: a remote answer is checked against the offer it answers (RFC 3264 section 6, RFC
   9429 section 5.8.3, RFC 5888 section 9.1, RFC 9143 section 7.4, RFC 4585 section 4.2): the
   number and order of the m= sections, each one's media type, proto and mid, a direction the
-  offered direction allows, no `a=rtcp-fb` the offer did not have, and BUNDLE groups that
-  bundle only what the offer bundled. An answer with fewer sections, swapped sections or an
-  added feedback line was applied. It is now `Error::ErrAnswerDoesNotMatchOffer`, and the offer
-  stays pending.
+  offered direction allows, and BUNDLE groups that bundle only what the offer bundled. An
+  answer with fewer or swapped sections was applied. It is now
+  `Error::ErrAnswerDoesNotMatchOffer`, and the offer stays pending. An `a=rtcp-fb` line the
+  offer did not have does not refuse the answer (real peers answer with their own list): it is
+  logged and never enabled, the negotiated feedback of a format being what both sides have.
+  The transceiver's codecs used to take the remote description's feedback as it came.
 - **jsep**: a rollback is taken through either `set_local_description` or
   `set_remote_description` (RFC 9429 section 5.7: "the same effect"). A local offer could be
   rolled back only through the first and a remote offer only through the second.
