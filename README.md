@@ -325,7 +325,8 @@ over SRTP and is subject to none of SCTP's flow control.
 - ✅ **Media Tracks** - Audio/video RTP transport (encoding, decoding, capture and playout are the application's)
 - ✅ **Trickle ICE** - Progressive candidate gathering, and ICE restart
 - ✅ **ICE over TCP** - Active and passive
-- ✅ **Simulcast** - RID-based simulcast, sending and receiving (no SVC layer packetization for VP9 / AV1)
+- ✅ **Simulcast** - RID-based simulcast, sending and receiving
+- ✅ **SVC signalling in `rtc-rtp`** - the W3C scalability modes and their layer structures, VP8 / VP9 layer descriptors, the AV1 Dependency Descriptor, and forwarder-side layer selectors (`scalabilityMode` on an encoding is not there yet)
 - ✅ **RTX & FEC** - RFC 4588 retransmission; FlexFEC (draft-ietf-payload-flexible-fec-scheme-03, not RFC 8627) through an
   opt-in interceptor; ULPFEC can be registered for an application with its own coder but is not encoded or decoded
 - ✅ **Statistics** - `getStats` per the W3C WebRTC Statistics API, for what a transport measures (members that need an

@@ -5,6 +5,65 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Bug Fixes
+
+- **rtp (VP8, RFC 7741)**: `Vp8Packet` refused every packet shorter than four octets, among them
+  the two and three octet packets `Vp8Payloader` emits for a frame's tail (section 4.2). It kept
+  `I`/`L`/`T`/`K`, PictureID, TL0PICIDX, TID, Y and KEYIDX from the previous packet, so an `X=0`
+  packet after an `X=1` one lost its first data octets. TID / Y are read only with `T`, KEYIDX
+  only with `K`. A frame starts at `S=1` with `PID=0` (section 4.5.1), not at `S=1` alone:
+  `SampleBuilder` emitted a frame whose first partition was lost.
+- **rtp (VP9, RFC 9628)**: `F` is ignored without `I` (reference indices were read out of the
+  frame data); `SID` 5 to 7 are accepted; layer indices and the scalability structure of an
+  earlier packet no longer stay in `Vp9Packet`. `Vp9Payloader` changed `F` in the middle of a
+  stream when a frame's header did not parse: the mode is now fixed at a key picture. Flexible
+  mode sent every frame with `P=0`: `P` follows the frame's header in both modes (an intra-only
+  frame is `P=0`, it was `P=1`), and flexible mode carries the reference indices of the slots
+  the frame reads. A key frame larger than 65535 pixels a side is announced without
+  resolutions instead of switching the stream to flexible mode.
+- **rtp (AV1)**: a leb128 value is at most 8 bytes and 32 bits and must end (AV1 4.10.5): an
+  unterminated `obu_size` read as 0, 2^32 wrapped to 0, a ninth byte pushed the first out. `W`
+  is checked against the number of OBU elements. A packet whose first OBU is a tile group or a
+  redundant frame header does not start a temporal unit (`Z=0` alone counted). A packet no
+  longer mixes OBUs of different `temporal_id` / `spatial_id` (AV1 RTP section 5); a sequence
+  header starts its packet. An OBU that exactly fills a packet is not split. A malformed packet
+  drops the OBU being reassembled.
+- **VP9 fmtp**: a format without `profile-id` is profile 0 (RFC 9628 section 6); it matched
+  every profile. `max-fr` and `max-fs` no longer count in the match.
+
+### Features
+
+- **rtp: SVC**. `rtc_rtp::codec::svc`: `ScalabilityMode`, the 36 modes of the W3C webrtc-svc
+  table (case sensitive, `supported_by(mime_type)` per codec), and `ScalabilityPattern`, each
+  mode's dependency structure as a generator of `LayerFrame`s that feed the payloaders.
+- **rtp: Dependency Descriptor** (AV1 RTP appendix A). `rtc_rtp::codec::dependency_descriptor`:
+  `DependencyDescriptor` (marshal / unmarshal), `FrameDependencyStructure`,
+  `DependencyDescriptorWriter`, `DependencyDescriptorReader`, `DecodeTargetSelector`,
+  `DEPENDENCY_DESCRIPTOR_URI`.
+- **rtp (VP8)**: `Vp8Payloader::payload_frame` with `Vp8FrameInfo` (N, TID, Y, KEYIDX; the
+  payloader counts TL0PICIDX), `set_initial_picture_id`, `set_initial_tl0_pic_idx`;
+  `Vp8TemporalLayerFilter`.
+- **rtp (VP9)**: `Vp9Payloader::payload_layer_frame` with `Vp9FrameInfo` (TID, U, SID, D, Z,
+  end of picture, reference indices), `set_scalability_structure` with
+  `Vp9ScalabilityStructure`, `initial_tl0_pic_idx`; `Vp9Packet::scalability_structure`,
+  `referenced_picture_id`; `Vp9LayerFilter`.
+- **rtp (AV1)**: `Av1Payloader::payload_frames` (a temporal unit's packets by frame),
+  `Av1Payloader::sequence_header_per_spatial_layer`.
+
+### Behaviour changes
+
+- `Vp8Packet` and `Vp9Packet` have a new public field `picture_id_15_bits`, and every field
+  describes the packet last parsed (a field the packet did not carry reads 0 / empty; they kept
+  the previous packet's values). `Vp9Packet::f` is false when `I` is 0.
+- `Av1Payloader` has a public field (`sequence_header_per_spatial_layer`): `Av1Payloader {}`
+  no longer compiles, `Av1Payloader::default()` does. It refuses a buffer with two temporal
+  units.
+- `Vp9Payloader` sends a frame that is not VP9 with `P=1` and a reference index, unless it is
+  the stream's first frame (it was `P=0`).
+- `ErrTooManySpatialLayers` is no longer returned by `Vp9Packet`.
+
 ## [0.22.0+brainwires.5] - 2026-11-20
 
 ### Bug Fixes

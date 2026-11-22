@@ -58,7 +58,7 @@ README.
 | TURN | TCP allocations (RFC 6062), a TURN server | Never claimed. The TURN client is implemented. |
 | SRTP | AEAD double (RFC 8723), MKI, EKT | Never claimed. |
 | FEC | FlexFEC as RFC 8627 | Only draft-ietf-payload-flexible-fec-scheme-03 is implemented, and the codec name is matched exactly so RFC 8627 `flexfec` is never fed to it. |
-| RTP | H.264 STAP-B / MTAP / FU-B (interleaved mode, never offered); SVC layer packetization for VP9 and AV1 | Simulcast is implemented; SVC is not claimed. |
+| RTP | H.264 STAP-B / MTAP / FU-B (interleaved mode, never offered); `scalabilityMode` on an encoding | Simulcast is implemented. The SVC modes, their layer structures and their signalling (VP8 / VP9 payload descriptors, AV1 with the Dependency Descriptor) are in `rtc-rtp` for an application to use ([conformance/w4.md](conformance/w4.md)); the encoding parameter, its validation and offering the Dependency Descriptor by default are not. |
 | Identity | `peer_identity`, identity providers | Applications (Deno, for one) implement webrtc-identity above the engine. |
 | W3C API | `RTCDTMFSender` | Applications implement DTMF above the engine; the engine sends the telephone-event packets it is given. |
 | Test platforms | The real-network environment and browser interop run on Linux only | They need network namespaces. Unit and integration tests run on Linux, macOS and Windows. |
