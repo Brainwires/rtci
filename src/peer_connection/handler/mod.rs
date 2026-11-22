@@ -234,7 +234,7 @@ impl RTCPeerConnection {
 
     /// What lies under the SCTP association: the selected candidate pair (its address
     /// family, its transport, whether this side's candidate is relayed) and what the DTLS
-    /// cipher suite adds to a record. `None` while no pair is selected.
+    /// version and cipher suite add to a record. `None` while no pair is selected.
     fn sctp_path(&self) -> Option<SctpPath> {
         let (local, remote) = self
             .pipeline_context
@@ -242,24 +242,23 @@ impl RTCPeerConnection {
             .ice_transport
             .agent
             .get_selected_candidate_pair()?;
-        let dtls_record_expansion = self
+        // The record overhead of the version and suite negotiated (a DTLS 1.3 record is
+        // smaller than a DTLS 1.2 one).
+        let dtls_record_overhead = self
             .pipeline_context
             .dtls_handler_context
             .dtls_transport
             .dtls_endpoint
             .as_ref()
             .and_then(|endpoint| {
-                endpoint.get_connection_state(shared::TransportContext::default().peer_addr)
+                endpoint.record_overhead(shared::TransportContext::default().peer_addr)
             })
-            .and_then(|state| state.cipher_suite())
-            .map_or(SctpPath::DEFAULT_DTLS_RECORD_EXPANSION, |suite| {
-                suite.record_expansion()
-            });
+            .unwrap_or(SctpPath::DEFAULT_DTLS_RECORD_OVERHEAD);
         Some(SctpPath {
             ipv6: remote.addr().is_ipv6(),
             tcp: local.network_type().is_tcp(),
             relayed: local.candidate_type() == ::ice::candidate::CandidateType::Relay,
-            dtls_record_expansion,
+            dtls_record_overhead,
         })
     }
 

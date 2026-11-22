@@ -18,6 +18,7 @@ pub fn assert_provider(provider: &dyn RTCCryptoProvider) {
     assert_cbc(provider.crypto());
     assert_aead(provider.crypto());
     assert_key_exchange(provider.crypto());
+    assert_key_exchange_respond(provider.crypto());
     assert_signatures(provider.crypto());
     assert_tls13_key_schedule(provider.crypto());
     assert_header_masks(provider.crypto());
@@ -485,6 +486,83 @@ pub fn assert_key_exchange(crypto: &dyn RTCCrypto) {
             Err(CryptoError::InvalidPublicKey)
         ));
     }
+}
+
+/// Checks the responder's side of a key exchange, and X25519MLKEM768
+/// (draft-ietf-tls-ecdhe-mlkem) where the provider has it: the lengths of its shares and
+/// secret, agreement, and that malformed shares are refused. A provider without it says so.
+pub fn assert_key_exchange_respond(crypto: &dyn RTCCrypto) {
+    for algorithm in [
+        KeyExchangeAlgorithm::P256,
+        KeyExchangeAlgorithm::P384,
+        KeyExchangeAlgorithm::X25519,
+    ] {
+        let initiator = crypto.start_key_exchange(algorithm).unwrap();
+        let (share, responder_secret) = crypto
+            .key_exchange_respond(algorithm, initiator.public_key())
+            .unwrap();
+        let initiator_secret = initiator.complete(&share).unwrap();
+        assert_eq!(initiator_secret.as_ref(), responder_secret.as_ref());
+        assert!(crypto.key_exchange_respond(algorithm, &[0; 1]).is_err());
+    }
+
+    let hybrid = KeyExchangeAlgorithm::X25519MlKem768;
+    if !crypto.supports(CryptoAlgorithm::KeyExchange(hybrid)) {
+        assert!(matches!(
+            crypto.start_key_exchange(hybrid).map(|_| ()),
+            Err(CryptoError::UnsupportedAlgorithm(_))
+        ));
+        assert!(crypto.key_exchange_respond(hybrid, &[0; 1216]).is_err());
+        return;
+    }
+    let initiator = crypto.start_key_exchange(hybrid).unwrap();
+    assert_eq!(initiator.algorithm(), hybrid);
+    // An ML-KEM-768 encapsulation key (1184 bytes) and an X25519 key (32).
+    assert_eq!(initiator.public_key().len(), 1216);
+    let initiator_share = initiator.public_key().to_vec();
+    let (share, responder_secret) = crypto
+        .key_exchange_respond(hybrid, &initiator_share)
+        .unwrap();
+    // An ML-KEM-768 ciphertext (1088 bytes) and an X25519 key (32).
+    assert_eq!(share.len(), 1120);
+    let initiator_secret = initiator.complete(&share).unwrap();
+    // The ML-KEM shared secret (32 bytes) followed by the X25519 one (32).
+    assert_eq!(initiator_secret.len(), 64);
+    assert_eq!(initiator_secret.as_ref(), responder_secret.as_ref());
+    assert_ne!(
+        initiator_secret.as_ref()[..32],
+        initiator_secret.as_ref()[32..]
+    );
+
+    // Encapsulation is randomised: a second answer to the same share is another secret.
+    let (_, other_secret) = crypto
+        .key_exchange_respond(hybrid, &initiator_share)
+        .unwrap();
+    assert_ne!(other_secret.as_ref(), responder_secret.as_ref());
+
+    // Shares of the wrong length, either way.
+    for length in [0, 32, 1120, 1215, 1217] {
+        assert!(matches!(
+            crypto.key_exchange_respond(hybrid, &vec![1; length]),
+            Err(CryptoError::InvalidPublicKey)
+        ));
+    }
+    for length in [0, 32, 1119, 1121, 1216] {
+        let initiator = crypto.start_key_exchange(hybrid).unwrap();
+        assert!(matches!(
+            initiator.complete(&vec![1; length]),
+            Err(CryptoError::InvalidPublicKey)
+        ));
+    }
+    // A ciphertext that was altered decapsulates to another secret (ML-KEM rejects
+    // implicitly), so the two ends do not agree.
+    let initiator = crypto.start_key_exchange(hybrid).unwrap();
+    let (mut share, responder_secret) = crypto
+        .key_exchange_respond(hybrid, initiator.public_key())
+        .unwrap();
+    share[0] ^= 1;
+    let initiator_secret = initiator.complete(&share).unwrap();
+    assert_ne!(initiator_secret.as_ref(), responder_secret.as_ref());
 }
 
 /// Checks signing, verification, key import/export, and invalid signatures and encodings.

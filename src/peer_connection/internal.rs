@@ -216,7 +216,7 @@ impl RTCPeerConnection {
             certificates,
             answering_dtls_role: setting_engine.answering_dtls_role,
             srtp_protection_profiles: setting_engine.srtp_protection_profiles.clone(),
-            use_srtp_always: setting_engine.dtls_use_srtp_on_every_association,
+            use_srtp_always: !setting_engine.dtls_use_srtp_only_with_media,
             dtls_cipher_suites: setting_engine.dtls_cipher_suites.clone(),
             allow_insecure_verification_algorithm: setting_engine
                 .allow_insecure_verification_algorithm,
@@ -726,6 +726,8 @@ impl RTCPeerConnection {
                                 })
                             }),
                             renegotiated: include_unmatched,
+                            offered_codecs: (!include_unmatched)
+                                .then(|| codecs_from_media_description(media).unwrap_or_default()),
                             ..Default::default()
                         });
                     } else {
@@ -1470,7 +1472,8 @@ impl RTCPeerConnection {
     ///   [`RtcpSessionControl::Bandwidth`](interceptor::RtcpSessionControl).
     /// - `trr-int` of the local description (RFC 4585 section 4.2: this endpoint's minimum
     ///   interval between regular RTCP packets), the longest when sections differ:
-    ///   [`RtcpSessionControl::TrrInt`](interceptor::RtcpSessionControl).
+    ///   [`RtcpSessionControl::TrrInt`](interceptor::RtcpSessionControl); without one,
+    ///   `TrrIntCleared`, so that a value an earlier negotiation set does not stay.
     /// - The most the remote side accepts (`b=TIAS`, else `b=AS`; RFC 9429 section 5.10),
     ///   summed over the sections this endpoint sends in when each has a limit, as the upper
     ///   bound of the congestion controller's estimate ([`RemoteBitrateLimit`]).
@@ -1567,10 +1570,14 @@ impl RTCPeerConnection {
             RtcpSessionControl::ReducedSize(reduced_size).into_packet(now),
             RtcpSessionControl::Bandwidth(bandwidth).into_packet(now),
         ];
-        if let Some(trr_int) = trr_int {
-            controls
-                .push(RtcpSessionControl::TrrInt(Duration::from_millis(trr_int)).into_packet(now));
-        }
+        // A `trr-int` an earlier negotiation set and this one does not have is undone.
+        controls.push(
+            match trr_int {
+                Some(trr_int) => RtcpSessionControl::TrrInt(Duration::from_millis(trr_int)),
+                None => RtcpSessionControl::TrrIntCleared,
+            }
+            .into_packet(now),
+        );
         controls.push(RemoteBitrateLimit(send_limit.map(|limit| limit as f64)).into_packet(now));
         for (payload_type_rtx, rtx_time) in rtx_times(&local_sections) {
             controls.push(

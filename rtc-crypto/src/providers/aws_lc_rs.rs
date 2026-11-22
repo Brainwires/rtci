@@ -98,7 +98,8 @@ impl RTCCrypto for AwsLcRsCrypto {
                 | CryptoAlgorithm::KeyExchange(
                     KeyExchangeAlgorithm::P256
                         | KeyExchangeAlgorithm::P384
-                        | KeyExchangeAlgorithm::X25519,
+                        | KeyExchangeAlgorithm::X25519
+                        | KeyExchangeAlgorithm::X25519MlKem768,
                 )
                 | CryptoAlgorithm::Signature(
                     SignatureScheme::Ed25519
@@ -202,7 +203,24 @@ impl RTCCrypto for AwsLcRsCrypto {
         &self,
         algorithm: KeyExchangeAlgorithm,
     ) -> Result<Box<dyn ActiveKeyExchange>, CryptoError> {
+        if algorithm == KeyExchangeAlgorithm::X25519MlKem768 {
+            return HybridKeyExchange::start();
+        }
         AwsLcRsKeyExchange::start(algorithm)
+    }
+
+    fn key_exchange_respond(
+        &self,
+        algorithm: KeyExchangeAlgorithm,
+        peer_share: &[u8],
+    ) -> Result<(Vec<u8>, SecretVec), CryptoError> {
+        if algorithm == KeyExchangeAlgorithm::X25519MlKem768 {
+            return HybridKeyExchange::respond(peer_share);
+        }
+        let exchange = self.start_key_exchange(algorithm)?;
+        let share = exchange.public_key().to_vec();
+        let secret = exchange.complete(peer_share)?;
+        Ok((share, secret))
     }
 
     fn generate_signing_key(
@@ -361,6 +379,114 @@ impl AeadCipher for AwsLcRsAead {
             .open_in_place_separate_tag(nonce, aead::Aad::from(aad), tag, ciphertext_and_plaintext)
             .map(|_| ())
             .map_err(|_| CryptoError::AuthenticationFailed)
+    }
+}
+
+/// The lengths of X25519MLKEM768 (draft-ietf-tls-ecdhe-mlkem section 4.2).
+const ML_KEM_768_ENCAPSULATION_KEY_LEN: usize = 1184;
+const ML_KEM_768_CIPHERTEXT_LEN: usize = 1088;
+const X25519_LEN: usize = 32;
+
+/// The initiator's half of X25519MLKEM768: an ML-KEM-768 decapsulation key and an X25519
+/// private key. Its share is the encapsulation key followed by the X25519 public key.
+struct HybridKeyExchange {
+    decapsulation_key: aws_lc_rs::kem::DecapsulationKey,
+    x25519: agreement::PrivateKey,
+    share: Vec<u8>,
+}
+
+impl HybridKeyExchange {
+    fn failure(what: &'static str) -> CryptoError {
+        CryptoError::Provider(what.into())
+    }
+
+    fn start() -> Result<Box<dyn ActiveKeyExchange>, CryptoError> {
+        let decapsulation_key =
+            aws_lc_rs::kem::DecapsulationKey::generate(&aws_lc_rs::kem::ML_KEM_768)
+                .map_err(|_| CryptoError::RandomnessFailed)?;
+        let encapsulation_key = decapsulation_key
+            .encapsulation_key()
+            .and_then(|key| key.key_bytes())
+            .map_err(|_| Self::failure("ML-KEM key generation failed"))?;
+        let x25519 = agreement::PrivateKey::generate(&agreement::X25519)
+            .map_err(|_| CryptoError::RandomnessFailed)?;
+        let x25519_public = x25519
+            .compute_public_key()
+            .map_err(|_| Self::failure("key exchange public-key generation failed"))?;
+        let mut share = encapsulation_key.as_ref().to_vec();
+        share.extend_from_slice(x25519_public.as_ref());
+        Ok(Box::new(Self {
+            decapsulation_key,
+            x25519,
+            share,
+        }))
+    }
+
+    /// The responder's half: encapsulates to the initiator's ML-KEM key and agrees with its
+    /// X25519 key. The share is the ciphertext followed by an X25519 public key, the secret
+    /// the ML-KEM shared secret followed by the X25519 one.
+    fn respond(peer_share: &[u8]) -> Result<(Vec<u8>, SecretVec), CryptoError> {
+        if peer_share.len() != ML_KEM_768_ENCAPSULATION_KEY_LEN + X25519_LEN {
+            return Err(CryptoError::InvalidPublicKey);
+        }
+        let (encapsulation_key, peer_x25519) =
+            peer_share.split_at(ML_KEM_768_ENCAPSULATION_KEY_LEN);
+        let encapsulation_key =
+            aws_lc_rs::kem::EncapsulationKey::new(&aws_lc_rs::kem::ML_KEM_768, encapsulation_key)
+                .map_err(|_| CryptoError::InvalidPublicKey)?;
+        let (ciphertext, kem_secret) = encapsulation_key
+            .encapsulate()
+            .map_err(|_| CryptoError::InvalidPublicKey)?;
+        let x25519 = agreement::PrivateKey::generate(&agreement::X25519)
+            .map_err(|_| CryptoError::RandomnessFailed)?;
+        let x25519_public = x25519
+            .compute_public_key()
+            .map_err(|_| Self::failure("key exchange public-key generation failed"))?;
+        let mut secret = kem_secret.as_ref().to_vec();
+        agreement::agree(
+            &x25519,
+            agreement::UnparsedPublicKey::new(&agreement::X25519, peer_x25519),
+            CryptoError::InvalidPublicKey,
+            |x25519_secret| {
+                secret.extend_from_slice(x25519_secret);
+                Ok(())
+            },
+        )?;
+        let mut share = ciphertext.as_ref().to_vec();
+        share.extend_from_slice(x25519_public.as_ref());
+        Ok((share, SecretVec::new(secret)))
+    }
+}
+
+impl ActiveKeyExchange for HybridKeyExchange {
+    fn algorithm(&self) -> KeyExchangeAlgorithm {
+        KeyExchangeAlgorithm::X25519MlKem768
+    }
+
+    fn public_key(&self) -> &[u8] {
+        &self.share
+    }
+
+    fn complete(self: Box<Self>, peer_share: &[u8]) -> Result<SecretVec, CryptoError> {
+        if peer_share.len() != ML_KEM_768_CIPHERTEXT_LEN + X25519_LEN {
+            return Err(CryptoError::InvalidPublicKey);
+        }
+        let (ciphertext, peer_x25519) = peer_share.split_at(ML_KEM_768_CIPHERTEXT_LEN);
+        let kem_secret = self
+            .decapsulation_key
+            .decapsulate(ciphertext.into())
+            .map_err(|_| CryptoError::InvalidPublicKey)?;
+        let mut secret = kem_secret.as_ref().to_vec();
+        agreement::agree(
+            &self.x25519,
+            agreement::UnparsedPublicKey::new(&agreement::X25519, peer_x25519),
+            CryptoError::InvalidPublicKey,
+            |x25519_secret| {
+                secret.extend_from_slice(x25519_secret);
+                Ok(())
+            },
+        )?;
+        Ok(SecretVec::new(secret))
     }
 }
 
@@ -554,7 +680,9 @@ fn agreement_algorithm(algorithm: KeyExchangeAlgorithm) -> &'static agreement::A
     match algorithm {
         KeyExchangeAlgorithm::P256 => &agreement::ECDH_P256,
         KeyExchangeAlgorithm::P384 => &agreement::ECDH_P384,
-        KeyExchangeAlgorithm::X25519 => &agreement::X25519,
+        // The hybrid has its own type (`HybridKeyExchange`); its Diffie-Hellman half is
+        // X25519.
+        KeyExchangeAlgorithm::X25519 | KeyExchangeAlgorithm::X25519MlKem768 => &agreement::X25519,
     }
 }
 

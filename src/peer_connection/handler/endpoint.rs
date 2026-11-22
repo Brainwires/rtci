@@ -36,6 +36,15 @@ pub(crate) fn is_repair_mime_type(mime_type: &str) -> bool {
         || mt.ends_with("/flexfec-03")
 }
 
+/// Returns `true` for a format that travels on a media stream's SSRC beside its codec without
+/// being that codec: DTMF events (`telephone-event`, RFC 4733 section 2.1: they share the
+/// audio stream's SSRC and timestamp space) and comfort noise (`CN`, RFC 3389). A packet of
+/// such a format does not establish what the stream is sent with.
+pub(crate) fn is_auxiliary_mime_type(mime_type: &str) -> bool {
+    let mt = mime_type.to_ascii_lowercase();
+    mt.ends_with("/telephone-event") || mt.ends_with("/cn")
+}
+
 /// The codec a repair flow (an RTX or FEC SSRC) is bound to the interceptors with: its
 /// primary's, less the feedback that is addressed to a media stream. RFC 4588 6.3: "the
 /// receiver MUST NOT send NACKs for the retransmission stream"; a picture loss indication or

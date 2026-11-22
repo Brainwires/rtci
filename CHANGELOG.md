@@ -160,7 +160,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **the size of an SCTP packet follows the path** (RFC 8831 section 5: an initial path MTU
     of at most 1200 bytes at the IP layer over IPv4 and 1280 over IPv6): 1135 bytes over
     IPv4 and UDP with AES-GCM where it was 1191 on every path, 1195 over IPv6, less on a
-    relayed or a TCP candidate. `with_sctp_mtu` still sets it outright.
+    relayed or a TCP candidate. What a DTLS record adds is the DTLS association's own figure
+    for the negotiated version, suite and connection id (`Endpoint::record_overhead`): over
+    DTLS 1.3 with AES-GCM and no connection id (a 5-byte unified header, the inner content
+    type and the tag) 1150 and 1210. `with_sctp_mtu` still sets it outright.
   - **State Cookies carry a MAC** from the connection's crypto provider and the accepting
     side keeps nothing for an INIT (RFC 9260 sections 5.1 and 5.1.3); the association is made
     when the COOKIE ECHO arrives. No setting: nothing a peer can tell changes.
@@ -268,15 +271,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **media engine**: a remote description that carries both RFC 8627 `flexfec` and `rtx`
   negotiates no `rtx` (RFC 8627 section 1.1.7); `MediaEngine::set_flexfec_with_retransmission`
   is the setting that keeps it. `flexfec-03` is not affected.
-- **dtls**: `use_srtp` follows RFC 5764 section 4.1 by default: the DTLS client offers it only
-  when the session has an audio or video section. A data-channel-only session is set up
-  without it, and when it gains a media section a new DTLS association with `use_srtp`
-  replaces it (the offer carries a new `a=tls-id`, RFC 8842 section 5.5; the DTLS roles are
-  kept). Offering it on every association, as browsers and the engine until now did, is
-  `SettingEngineBuilder::with_dtls_use_srtp_on_every_association(true)`: set it for a peer that
-  fails an association without an SRTP profile (pion-lineage stacks) or that does not act on
-  `tls-id` when media is added later (browsers). The earlier, never released, setting to turn
-  `use_srtp` off and the error for media on an association without SRTP keys are gone.
+- **dtls**: `SettingEngineBuilder::with_dtls_use_srtp_on_every_association(false)` follows RFC
+  5764 section 4.1: the DTLS client offers `use_srtp` only when the session has an audio or
+  video section, a data-channel-only session is set up without it, and when it gains a media
+  section a new DTLS association with `use_srtp` replaces it (the offer carries a new
+  `a=tls-id`, RFC 8842 section 5.5; the DTLS roles are kept). The default offers it on every
+  association, as browsers and the engine always did: the RFC form was the default for a
+  while, and Chromium, Firefox and WebKit do not act on the new `tls-id`, so media added to a
+  data-channel-only session never flowed and the data channels stopped too (browser matrix,
+  train round 8: "Rust offers media, the browser answers and decodes it", "rollback",
+  "glare"). The earlier, never released, setting to turn `use_srtp` off and the error for
+  media on an association without SRTP keys are gone.
 - **sdp**: a remote `a=fingerprint` with lower-case hex digits is refused (RFC 8122 section 5:
   `UHEX`); `SettingEngineBuilder::with_lowercase_fingerprints_accepted(true)` reads it, as
   browsers do.
@@ -879,6 +884,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behaviour changes
 
+- **interceptor**: bandwidth probing is on in the default interceptor set
+  (`DefaultInterceptorOptions::bandwidth_probing` now `true`; `false` is the opt-out). RFC 8836
+  section 2 (requirement 4, a SHOULD) asks a congestion controller to adapt as quickly as
+  possible to the initial conditions: 90% of a 2.5 Mbit/s path from a 300 kbit/s start in 0.2 s,
+  against 26 s without. `CongestionControlBuilder::with_bandwidth_probing` stays off for a chain
+  built by hand.
+- **nack**: a probe cluster the application's media does not fill is filled with padding-only
+  packets on the RTX stream (no original sequence number, `PROBE_PADDING_OCTETS` = 255 octets of
+  RFC 3550 padding), which receivers drop; they were retransmissions of recent packets, which a
+  receiver hands to its application again (this crate's endpoint does, after de-encapsulating
+  RTX). An application sending a fifth of the path spends 3.7% of its octets on probes (3.8% with
+  the retransmissions).
+- **cc**: after a large drop of the target (below two thirds of its high of the last two
+  seconds) the rate before the drop is probed for, once a second from a second after it, for
+  five seconds (`ProbeController::with_probe_after_drop`, default `true`; libwebrtc's
+  `RequestProbe` in outline). A 2 s burst of cross traffic at half the capacity costs 2 s of
+  share instead of 23 s (RFC 8836 section 2, requirement 1f).
+- **gcc**: a packet lost out of a queue at its limit is over-use for the delay-based controller
+  (`Gcc::with_loss_at_queue_limit_as_overuse`, default `true`; `QueueLimitDetector`): a feedback
+  batch with a loss whose arrived packets all waited at least 75% of the highest queueing delay
+  of the last five seconds, and at least 10 ms. At a full tail-drop queue the delay gradient is
+  zero and the loss-based controller holds between 2% and 10% loss (draft-ietf-rmcat-gcc-02
+  section 6), so `Gcc` held the queue full: on a shared bottleneck it took 0.97 of the path from
+  a TCP-like transfer and held a late-joining flow at the floor (RFC 8836 section 2, 3 and 2a).
+  Now 0.21 / 0.79 against the transfer and 0.49 / 0.45 with the late flow. The adaptive
+  threshold (section 5.4) was checked for the late-joiner case and is not the cause: it is the
+  draft's, bounded to 6..600 ms and quick to fall back.
+- **gcc**: over-use that lasts cuts the target once per round trip (10 to 200 ms), at once
+  when the received rate has fallen below half the target
+  (`Gcc::with_one_decrease_per_round_trip`, `RateController::with_one_decrease_per_round_trip`,
+  default `true`; libwebrtc's `TimeToReduceFurther`). draft-ietf-rmcat-gcc-02 section 5.5 cuts on
+  every update while over-use lasts; `false` is that.
+- **cc**: `ProbeController::poll_timeout` no longer names an instant `poll` has already been
+  called at: a deadline that passed with nothing to send (the application caught up with its
+  target, or stopped sending) asked to be woken again at once, over and over.
 - **rtcp_session**: the SDES chunk of each local SSRC carries, after the CNAME, the MID of
   its m= section (RFC 9143 section 15.1: "SHOULD be sent in the first few RTCP packets ... and
   regularly thereafter"), the encoding's rid as RtpStreamId and, on RTX and FEC SSRCs, as
@@ -1093,6 +1133,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   365, random name and serial). rtc-sdp: `SessionDescription::parse_located` and
   `SdpParseError` give the line of a parse error. rtc-dtls: `Endpoint::connection_fatal_alerts`.
   rtc-sctp: `Association::abort_cause_code`.
+- **dtls**: `DTLSConn::record_overhead` and `Endpoint::record_overhead`: what each protected
+  record adds to its content (the record header, the connection id it carries under DTLS 1.3
+  or a DTLS 1.2 `tls12_cid` record, and the suite's expansion), for a layer above that sizes
+  its datagrams for a path MTU
+  (RFC 6347 section 4.1.1.1, RFC 9147 section 4.4). The peer connection sizes SCTP packets by
+  it.
+- **interceptor**: bandwidth probing, as an option that is off by default
+  (`CongestionControlBuilder::with_bandwidth_probing`, `bandwidth_probing` in
+  `DefaultInterceptorOptions`). The congestion controller asks for clusters of packets at a
+  multiple of the target (three and six times the starting rate at the start, twice the result
+  while the path carries what is asked, one every five seconds while the application sends less
+  than the target), the pacer releases a cluster at its rate and marks its packets, the NACK
+  responder fills it with retransmissions of recent packets on the RTX stream, and the estimator
+  takes the rate the cluster arrived at (`BandwidthEstimator::on_probe_result`, `ProbeController`,
+  `ProbeRequest`, `ProbePacket`, `probe_estimate`). On a virtual clock `Gcc` goes from 300 kbit/s
+  to 2.5 Mbit/s in 0.4 s with it and in 26.1 s without
+  (`rtc-interceptor/tests/bandwidth_probing.rs`). No RFC requires probing (RFC 8836 section 2
+  names it as one way to start faster; draft-ietf-rmcat-gcc-02 has none), and it sends packets
+  the application did not write, so it is not a default.
+  With probing, an application that sends less than the target keeps the estimate near
+  the path's capacity: over-use after a probe backs off from what the probe measured, and a
+  probe that arrives at about the estimate renews the measurement
+  (`gcc::estimator::PROBE_CONFIRMS_ESTIMATE`); before, the estimate fell back to one and a half
+  times what the application sent, and with it what the application was told to send, to the
+  floor (0.04 of the capacity after 30 s; now 0.95).
+- **test**: `rtc-interceptor/tests/rfc8836_multi_flow.rs`, a deterministic multi-flow
+  bottleneck (FIFO with tail drop or random early drop, capacity changes, `Gcc` flows probed as
+  in the default set, a TCP-like transfer, cross traffic) for the RFC 8836 section 2
+  properties. Two flows share evenly, a late flow gets its share, `Gcc` and TCP neither starve
+  the other, bursts leave no queue, a pause and an AQM leave the flow stable. The TCP-like model
+  is checked on its own (it fills a path alone and takes what a constant-rate flow leaves).
+- **test**: `rtc-interceptor/tests/nack_recovery_under_loss.rs`: NACK recovers every packet
+  over 5% loss each way with jitter on the virtual clock, with and without the RTCP session.
+  `tests/testenv_impairment.rs` prints the packets NACK left lost, and the first one received.
+- **gcc**: a packet the receiver reports as arrived with ECN-CE counts as a lost one in the
+  loss-based controller (RFC 8888 section 7, RFC 6679 section 7.3.3); the mark was only counted
+  in statistics.
+- **cc**: several TMMBRs in one compound RTCP packet are answered with one TMMBN (RFC 5104
+  section 4.2.2.2).
+- **interceptor**: the congestion controller notices a path change by itself: when inbound
+  packets keep arriving between other addresses than before (another candidate pair), the
+  estimator is told (`BandwidthEstimator::on_path_change`) and `Gcc` starts its delay side over
+  (RFC 8836 section 2, requirement 1).
+- **test**: the `interceptor_inbound` fuzz target's logic runs as a unit test over a fixed
+  corpus (`tests/interceptor_inbound_fuzz_corpus.rs`).
+
 - **sctp**: `RTCPeerConnection::reject_data_section` asks for the data section to be rejected
   (m= port zero) in the next offer, or in the answer to the peer's next offer: RFC 8841
   section 10.5, closing the SCTP association and the DTLS association under it. A data
@@ -1134,6 +1220,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `set_remote_pacing`, `pacing`. (Writing and reading `a=ice-pacing` is not wired yet.)
 - **ice**: at most five TCP connection attempts are outstanding to one remote IP address (RFC
   6544 section 12).
+- **ice**: the peer connection fails the pairs of a remote TCP candidate whose first answer, on
+  a connection its active candidate opened, is not STUN (RFC 6544 section 7.1);
+  `Agent::handle_non_stun_before_validation` for other drivers.
 - **ice**: an mDNS name lost to another host (RFC 6762 section 9) is replaced by a new
   `<uuid>.local` name and the candidate announced again (`Event::LocalCandidateRenamed`,
   `OnIceCandidateEvent`).
@@ -1878,6 +1967,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+- **jsep**: an answer has only the `a=rtcp-fb` the offer has for each format (RFC 4585 section
+  4.2: "The answerer MUST NOT add feedback parameters"). A renegotiation whose offer dropped a
+  feedback type (or `trr-int`) was answered with what the first offer had, because the
+  transceiver kept the codecs of that first exchange.
+- **rtcp_session**: a `trr-int` that a renegotiation no longer has is undone: the peer
+  connection sends the new `RtcpSessionControl::TrrIntCleared` and the session goes back to the
+  interval it was built with (RFC 4585 section 4.2). The negotiated value used to stay.
+- **association**: a DTMF (`telephone-event`, RFC 4733) or comfort-noise (`CN`, RFC 3389)
+  packet that arrives before any media on an SSRC no longer becomes the receiver track's codec;
+  the stream is established by its first media packet.
 - **ice**: a controlling agent could lose the nomination it had queued: an answer to a second
   check on the same pair (one the peer's request triggered) took the pair off the
   triggered-check queue, so no request with USE-CANDIDATE left and the agent stayed in
@@ -1894,7 +1993,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   place of a peer-reflexive one (it keeps that one's id and pairs) now shows its own type and
   its signalled address.
 - **test**: the four mDNS interop tests share the host's mDNS group, port and names; they run
-  one at a time.
+  one at a time. On a timeout they report the rtc peer's candidates and pairs, and they log
+  the mDNS traffic.
+- **test**: sessions over a simulated lossy, reordering link in virtual time
+  (`tests/lossy_link_rtc2rtc.rs`): nothing fails at 5 % (with reordering) or 10 % loss, and at
+  30 % a peer fails only after 30 s without a Binding success response (RFC 7675 section 5.1).
+  The netem impairment test prints both peers' state changes when it fails.
+- **test**: relayed TCP candidates (RFC 6544 sections 4.1, 4.5 over RFC 6062 allocations) pair
+  by `tcptype` and are checked on the relayed path; server-reflexive TCP direction preferences.
+- **test**: the mDNS interop tests' upstream peer gathers on the mDNS egress interface only: it
+  publishes every host candidate under one name, and on a host with a second interface the
+  wrong one froze the right one past the timeout (hosted Linux runners). The browser cell's
+  WebKit `na-env` rule asks whether the `.local` candidate got a pair, now that every submitted
+  mDNS candidate is in the report. `stats_conformance_rtc2rtc` adds its late candidates before
+  the nomination (RFC 8838 section 13).
 - **jsep**: two retransmission formats that differ only in `rtx-time` are one format (RFC
   4588 section 8.1: each sender's own figure); an offer whose RTX `fmtp` had another
   `rtx-time` than the local one was answered without RTX.
@@ -2370,8 +2482,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `HeaderMaskAlgorithm` (record number encryption); `SignatureScheme::RsaPssSha256/384/512`,
   which an imported RSA key signs with.
 - Not in it: pre-shared keys in DTLS 1.3 (resumption, external PSKs, 0-RTT), post-handshake
-  authentication, the DTLS 1.2 record format of RFC 9146. A configuration with a pre-shared key
-  negotiates DTLS 1.2.
+  authentication. A configuration with a pre-shared key negotiates DTLS 1.2.
 
 - **dtls**: DTLS 1.3 (RFC 9147, on the TLS 1.3 handshake of RFC 8446), next to DTLS 1.2. A
   client offers both in one ClientHello and a server takes 1.3 from a client that offers it;
@@ -2403,8 +2514,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `HeaderMaskAlgorithm` (record number encryption); `SignatureScheme::RsaPssSha256/384/512`,
   which an imported RSA key signs with.
 - Not in it: pre-shared keys in DTLS 1.3 (resumption, external PSKs, 0-RTT), post-handshake
-  authentication, the DTLS 1.2 record format of RFC 9146. A configuration with a pre-shared key
-  negotiates DTLS 1.2.
+  authentication. A configuration with a pre-shared key negotiates DTLS 1.2.
+
+### DTLS 1.3 in the peer connection, connection ids for DTLS 1.2
+
+- **peer connection**: the TLS 1.3 suites come first in the default cipher suite list, so two
+  engines negotiate DTLS 1.3 and a peer without it (webrtc 0.17, which ignores the extensions)
+  gets DTLS 1.2 from the same ClientHello. `tlsVersion` is `FEFC` for DTLS 1.3. The client's
+  retransmission timer starts at 400 ms (RFC 9147 section 5.8.2, DTLS-SRTP), or at 1.5 times
+  the selected pair's ICE round trip time, at least 100 ms
+  (`HandshakeConfig::with_flight_interval`).
+- **peer connection**: an SCTP packet is sized by the record overhead of the DTLS version and
+  suite negotiated (`Endpoint::record_overhead`, `DTLSConn::record_overhead`): a DTLS 1.3 record
+  adds 22 bytes where a DTLS 1.2 AES-GCM record adds 37, and packets were 15 bytes short of the
+  path MTU under DTLS 1.3.
+- **dtls**: RFC 9146 for DTLS 1.2: the `connection_id` extension in the DTLS 1.2 hellos (a
+  ClientHello for both versions carries one, for whichever is negotiated; by default it asks
+  for no id), `tls12_cid` records with the additional data and MAC input of section 5 for
+  every cipher family, records without the negotiated id discarded, and the peer address
+  update of section 6 behind `with_connection_id_migration` (off by default).
+- **dtls**: a DTLS 1.3 client that authenticates completes only on the server's ACK or first
+  application-epoch record; a DTLS 1.3 server picks a certificate chain signed with algorithms
+  the client lists (RFC 8446 section 4.4.2.2); the retransmission timer returns to its start
+  after ten intervals of quiet (RFC 9147 section 5.8.2); too_many_cids_requested ends an
+  association after 32 RequestConnectionId messages; `ConfigBuilder::with_invalid_record_limit`
+  gives up on a peer that keeps sending records that fail (opt-in: they are unauthenticated).
+- **dtls**, **crypto**: the hybrid post-quantum key share X25519MLKEM768 (0x11EC,
+  draft-ietf-tls-ecdhe-mlkem) in DTLS 1.3, offered first where the provider has ML-KEM
+  (aws-lc-rs; ring has none and does not offer it): `ConfigBuilder::with_post_quantum_key_share`
+  (default on), `KeyExchangeAlgorithm::X25519MlKem768`, `RTCCrypto::key_exchange_respond` (the
+  server's side of a KEM; the default is the Diffie-Hellman key pair and agreement). Its
+  1216-byte share makes the ClientHello two fragments; the stateless cookie exchange reassembles
+  them. Checked against OpenSSL 4.1 in both roles. The group is offered only where one exchange
+  through the provider gives both ends the same secret.
+- **dtls**: a DTLS 1.3 suite is offered only if the provider can make its record-number mask,
+  so a provider that wraps another and leaves `new_header_mask` at its default gets DTLS 1.2
+  instead of failing every record (`isolates_crypto_providers_across_simultaneous_peer_connections`
+  failed on the train).
 
 ### DTLS 1.2: the RFC by default
 

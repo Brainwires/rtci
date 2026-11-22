@@ -80,6 +80,12 @@ pub trait BandwidthEstimator: Send + Sync {
     /// learnt about the old path says nothing about this one (RFC 8836 section 2, 1d).
     fn on_path_change(&mut self, _now: Instant) {}
 
+    /// A probe cluster showed the path carries `bits_per_second`
+    /// ([`probe_estimate`](crate::probe_estimate)). Called only when bandwidth probing is on
+    /// ([`CongestionControlBuilder::with_bandwidth_probing`](crate::CongestionControlBuilder::with_bandwidth_probing)).
+    /// An estimator that ignores it loses nothing but the faster start.
+    fn on_probe_result(&mut self, _now: Instant, _bits_per_second: f64) {}
+
     /// Whatever the algorithm wants to expose. Never load-bearing.
     fn stats(&self) -> EstimatorStats {
         EstimatorStats::default()

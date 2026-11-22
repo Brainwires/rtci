@@ -132,7 +132,20 @@ impl Flight for Flight1 {
                 Err(error) => return Err((None, Some(error))),
             }
         }
-        let extensions = client_hello_extensions(cfg, state.tls13_offer.as_ref());
+        // RFC 9146 section 3: the connection id this client wants in the records it
+        // receives. A ClientHello that also offers DTLS 1.3 carries one extension for both
+        // versions (RFC 9147 section 5.1), the one of that offer.
+        state.connection_id_offer = match &state.tls13_offer {
+            Some(offer) => offer.connection_id.clone(),
+            None => cfg.connection_id_offer(),
+        };
+        state.local_connection_id = None;
+        state.remote_connection_id = None;
+        let extensions = client_hello_extensions(
+            cfg,
+            state.tls13_offer.as_ref(),
+            state.connection_id_offer.as_deref(),
+        );
 
         Ok(vec![Packet {
             record: RecordLayer::new(
@@ -162,6 +175,7 @@ impl Flight for Flight1 {
 pub(crate) fn client_hello_extensions(
     cfg: &HandshakeConfig,
     tls13_offer: Option<&crate::dtls13::hello::ClientOffer>,
+    connection_id: Option<&[u8]>,
 ) -> Vec<Extension> {
     let mut extensions = vec![
         Extension::SupportedSignatureAlgorithms(ExtensionSupportedSignatureAlgorithms {
@@ -175,7 +189,13 @@ pub(crate) fn client_hello_extensions(
     if cfg.local_psk_callback.is_none() {
         extensions.extend_from_slice(&[
             Extension::SupportedEllipticCurves(ExtensionSupportedEllipticCurves {
-                elliptic_curves: cfg.local_named_curves.clone(),
+                // With DTLS 1.3 offered the list has its groups too (the hybrid one); a
+                // DTLS 1.2 server takes the first curve of it that it knows.
+                elliptic_curves: if tls13_offer.is_some() {
+                    cfg.local_tls13_groups.clone()
+                } else {
+                    cfg.local_named_curves.clone()
+                },
             }),
             Extension::SupportedPointFormats(ExtensionSupportedPointFormats {
                 point_formats: vec![ELLIPTIC_CURVE_POINT_FORMAT_UNCOMPRESSED],
@@ -205,7 +225,10 @@ pub(crate) fn client_hello_extensions(
     }
 
     if let Some(offer) = tls13_offer {
+        // Its connection_id, when it has one, is `connection_id`.
         extensions.extend(offer.extensions(cfg));
+    } else if let Some(connection_id) = connection_id {
+        extensions.push(Extension::connection_id(connection_id));
     }
 
     extensions

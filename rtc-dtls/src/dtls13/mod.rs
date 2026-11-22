@@ -22,7 +22,7 @@ mod connection_id_test;
 #[cfg(test)]
 mod fuzz_corpus_test;
 #[cfg(test)]
-mod handshake_test;
+pub(crate) mod handshake_test;
 #[cfg(test)]
 mod key_schedule_test;
 #[cfg(test)]

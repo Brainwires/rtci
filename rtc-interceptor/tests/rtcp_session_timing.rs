@@ -195,6 +195,33 @@ fn a_negotiated_trr_int_spaces_the_regular_reports() {
     }
 }
 
+/// A `trr-int` a later negotiation no longer has stops spacing the reports: the interval the
+/// session was built with applies again (RFC 4585 4.2).
+#[test]
+fn a_cleared_trr_int_gives_back_the_configured_interval() {
+    let mut chain = chain(builder());
+    let base = Instant::now();
+    control(&mut chain, base, RtcpSessionControl::Start);
+    control(
+        &mut chain,
+        base,
+        RtcpSessionControl::TrrInt(Duration::from_secs(5)),
+    );
+    let sent = run(&mut chain, base + secs(11.0));
+    assert!(
+        offsets(&sent, base).len() <= 3,
+        "{:?}",
+        offsets(&sent, base)
+    );
+
+    let later = base + secs(11.0);
+    control(&mut chain, later, RtcpSessionControl::TrrIntCleared);
+    let sent = run(&mut chain, later + secs(10.0));
+    // The builder's one-second interval: about ten reports in ten seconds.
+    let at = offsets(&sent, later);
+    assert!((8..=11).contains(&at.len()), "{at:?}");
+}
+
 /// RFC 4585 3.5.3 with `T_rr_interval` zero (its default when `trr-int` is not signalled):
 /// every regular packet is sent, at the interval the RTCP bandwidth gives. RFC 3556: `b=RS`
 /// and `b=RR` are that bandwidth. 8000 + 24000 bit/s, a lone receiver with 64-octet packets:

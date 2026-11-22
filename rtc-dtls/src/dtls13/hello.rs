@@ -34,7 +34,7 @@ impl ClientOffer {
     /// Makes the key shares of a ClientHello.
     pub(crate) fn new(cfg: &HandshakeConfig) -> Result<Self> {
         let mut key_shares = vec![];
-        for curve in cfg.local_named_curves.iter().take(KEY_SHARES_OFFERED) {
+        for curve in cfg.local_tls13_groups.iter().take(KEY_SHARES_OFFERED) {
             key_shares.push(curve.generate_keypair_with_crypto(cfg.provider().crypto())?);
         }
         if key_shares.is_empty() {
@@ -232,7 +232,7 @@ pub(crate) fn negotiate(
     }
     // The group: the first of the client's that this server has and the client sent a share
     // for; failing that, the first this server has, which costs a HelloRetryRequest.
-    let supported = |group: &u16| cfg.local_named_curves.contains(&NamedCurve::from(*group));
+    let supported = |group: &u16| cfg.local_tls13_groups.contains(&NamedCurve::from(*group));
     let with_share = groups
         .iter()
         .filter(|group| supported(group))

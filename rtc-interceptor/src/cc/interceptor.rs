@@ -2,9 +2,11 @@
 
 use super::estimator::{BandwidthEstimator, EstimatorStats};
 use super::feedback::{CongestionFeedbackFormat, negotiated_congestion_feedback};
+use super::probe::{ProbeController, ProbePacket, probe_estimate};
 use super::tmmbr::{self, TmmbrState};
 use crate::Interceptor;
 use crate::circuit_breaker::CircuitBreakerHandle;
+use crate::rtpfb::acknowledgement::PacketReport;
 use crate::rtpfb::convert::FeedbackTimeline;
 use crate::rtpfb::history::History;
 use crate::stream_info::StreamInfo;
@@ -34,6 +36,48 @@ pub const DEFAULT_PRUNE_HORIZON: Duration = Duration::from_secs(2);
 /// (draft-ietf-rmcat-gcc-02 section 3). Three of those intervals without one and the bound is
 /// taken to be gone, as a receiver that stopped estimating has no other way to lift it.
 pub const REMB_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// The addresses and protocol a packet arrived between.
+type PathKey = (
+    std::net::SocketAddr,
+    std::net::SocketAddr,
+    shared::TransportProtocol,
+);
+
+/// How many packets in a row arrive between new addresses before the path counts as changed:
+/// one straggler on the old pair, or one early packet on a new one, is not a change.
+const PATH_CHANGE_PACKETS: u8 = 3;
+
+/// How long after its last packet left a probe cluster counts as sent in full: the pacer
+/// spaces a cluster's packets by less than this.
+const PROBE_CLOSED_AFTER: Duration = Duration::from_millis(50);
+
+/// How long a probe cluster's packets are remembered without their reports.
+const PROBE_FORGET: Duration = Duration::from_secs(2);
+
+/// A probe cluster on the path.
+struct ProbeCluster {
+    /// How many of its packets left.
+    sent: usize,
+    last_sent: Instant,
+    /// The reports on them so far.
+    reports: Vec<PacketReport>,
+}
+
+impl ProbeCluster {
+    fn new(now: Instant) -> Self {
+        Self {
+            sent: 0,
+            last_sent: now,
+            reports: Vec::new(),
+        }
+    }
+
+    /// Whether the pacer has finished sending it.
+    fn closed(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.last_sent) >= PROBE_CLOSED_AFTER
+    }
+}
 
 /// Per-stream state: the header-extension id the transport-wide sequence number is written under.
 struct LocalStream {
@@ -69,6 +113,7 @@ pub struct CongestionControlBuilder<E: BandwidthEstimator> {
     prune_horizon: Duration,
     circuit_breaker: Option<CircuitBreakerHandle>,
     unnegotiated_tmmbr: bool,
+    bandwidth_probing: bool,
 }
 
 impl<E: BandwidthEstimator> CongestionControlBuilder<E> {
@@ -79,6 +124,7 @@ impl<E: BandwidthEstimator> CongestionControlBuilder<E> {
             prune_horizon: DEFAULT_PRUNE_HORIZON,
             circuit_breaker: None,
             unnegotiated_tmmbr: false,
+            bandwidth_probing: false,
         }
     }
 
@@ -108,6 +154,38 @@ impl<E: BandwidthEstimator> CongestionControlBuilder<E> {
         self
     }
 
+    /// Whether the path is probed for capacity above the target: short clusters of packets
+    /// at a multiple of the target, whose arrival shows at once whether the path carries
+    /// that rate. Off for a builder (it needs the pacer and the NACK responder of the same
+    /// chain); on in the peer connection's default interceptor set
+    /// (`DefaultInterceptorOptions::bandwidth_probing`).
+    ///
+    /// Without it the estimate climbs as fast as the delay-based controller raises it, 8% a
+    /// second in [`Gcc`](crate::Gcc): from 300 kbit/s to 2.5 Mbit/s takes most of half a
+    /// minute. With it, two clusters at the start (three and six times the starting rate),
+    /// further ones at twice the result while the path keeps carrying what is asked, and one
+    /// every five seconds while the application sends less than the target allows; a path
+    /// with 2.5 Mbit/s is found in well under a second.
+    ///
+    /// RFC 8836 section 2 (requirement 4, a SHOULD) asks for quick adaptation to the initial
+    /// conditions and names "probing during setup" as one way; draft-ietf-rmcat-gcc-02 has
+    /// none. It is libwebrtc's behaviour, in outline, and adds traffic the application did
+    /// not write: padding-only packets on the RTX stream fill a cluster the application's own
+    /// media does not (they carry no media, and receivers drop them), so it needs RTX
+    /// negotiated to probe a sender with little to send. After a large drop of the target
+    /// (a third or more), the rate before it is probed for a few seconds
+    /// ([`ProbeController::with_probe_after_drop`](crate::ProbeController::with_probe_after_drop)).
+    /// What it costs: an application sending a fifth of what the path carries spends about
+    /// 4% of its octets on probes, one cluster every five seconds. The pacer
+    /// ([`PacerInterceptor`](crate::PacerInterceptor)) and the NACK responder
+    /// ([`NackResponderInterceptor`](crate::NackResponderInterceptor)) of the same chain do
+    /// the sending; the estimator hears the result through
+    /// [`BandwidthEstimator::on_probe_result`].
+    pub fn with_bandwidth_probing(mut self, bandwidth_probing: bool) -> Self {
+        self.bandwidth_probing = bandwidth_probing;
+        self
+    }
+
     /// Build the interceptor.
     pub fn build(self) -> CongestionControlInterceptor<E> {
         self.build_with_handle().0
@@ -121,8 +199,18 @@ impl<E: BandwidthEstimator> CongestionControlBuilder<E> {
             stats: self.estimator.stats(),
             ..Shared::default()
         }));
+        let probing = self
+            .bandwidth_probing
+            .then(|| ProbeController::new(self.estimator.target_bitrate(), f64::INFINITY));
         (
             CongestionControlInterceptor {
+                tmmbn_owed: false,
+                path: None,
+                path_candidate: None,
+                probing,
+                probe_packets: HashMap::new(),
+                probe_clusters: HashMap::new(),
+                sent: VecDeque::new(),
                 last_target: None,
                 estimator: self.estimator,
                 prune_horizon: self.prune_horizon,
@@ -278,6 +366,22 @@ pub struct CongestionControlInterceptor<E: BandwidthEstimator> {
     applied_max: Option<Option<f64>>,
     /// Whether a TMMBR limits a stream that did not negotiate `ccm tmmbr`.
     unnegotiated_tmmbr: bool,
+    /// Whether the compound packet being read asks for a TMMBN.
+    tmmbn_owed: bool,
+    /// The addresses inbound packets arrive between: the path, as far as this interceptor
+    /// can see it.
+    path: Option<PathKey>,
+    /// A different pair of addresses, and how many packets in a row arrived on it.
+    path_candidate: Option<(PathKey, u8)>,
+    /// Bandwidth probing, when it is on.
+    probing: Option<ProbeController>,
+    /// The packets that left as part of a probe cluster and await their report: SSRC and RTP
+    /// sequence number to cluster.
+    probe_packets: HashMap<(u32, u16), u32>,
+    /// What is known of each cluster in flight.
+    probe_clusters: HashMap<u32, ProbeCluster>,
+    /// Departures of the last second with their sizes, for the rate being sent.
+    sent: VecDeque<(Instant, usize)>,
     circuit_breaker: Option<CircuitBreakerHandle>,
     shared: Arc<Mutex<Shared>>,
     prune_horizon: Duration,
@@ -478,11 +582,10 @@ impl<E: BandwidthEstimator> CongestionControlInterceptor<E> {
                     );
                 }
             }
-            if owed {
-                // One TMMBN for the packet, however many entries it had, and whether or not
-                // the bounding set changed.
-                self.send_tmmbn(now);
-            }
+            // One TMMBN for the compound packet, however many TMMBRs and entries it had, and
+            // whether or not the bounding set changed (RFC 5104 section 4.2.2.2: "only a
+            // single TMMBN SHALL be sent, even if more than one TMMBR is received").
+            self.tmmbn_owed |= owed;
             return false;
         }
 
@@ -495,9 +598,7 @@ impl<E: BandwidthEstimator> CongestionControlInterceptor<E> {
                     .tmmbr
                     .on_owner_left(now, *source, packet_rate, round_trip_time);
             }
-            if owed {
-                self.send_tmmbn(now);
-            }
+            self.tmmbn_owed |= owed;
             return false;
         }
 
@@ -566,6 +667,111 @@ impl<E: BandwidthEstimator> CongestionControlInterceptor<E> {
         }
     }
 
+    /// Follows the addresses inbound packets arrive between, and tells the estimator when
+    /// they change (RFC 8836 section 2, requirement 1: a congestion controller reacts to a
+    /// change of the path, and "the application may be able to notify it").
+    ///
+    /// The peer connection moves to another candidate pair without this interceptor being
+    /// told, but every inbound packet carries the pair it arrived on. A new local or remote
+    /// address is a new path in at least one direction, and what was measured on the old one
+    /// (its delay gradient, where its capacity was) describes nothing any more.
+    fn observe_path(&mut self, now: Instant, transport: &shared::TransportContext) {
+        let key = (
+            transport.local_addr,
+            transport.peer_addr,
+            transport.transport_protocol,
+        );
+        let Some(current) = self.path else {
+            self.path = Some(key);
+            return;
+        };
+        if key == current {
+            self.path_candidate = None;
+            return;
+        }
+        let seen = match self.path_candidate {
+            Some((candidate, seen)) if candidate == key => seen + 1,
+            _ => 1,
+        };
+        if seen >= PATH_CHANGE_PACKETS {
+            self.path = Some(key);
+            self.path_candidate = None;
+            self.estimator.on_path_change(now);
+        } else {
+            self.path_candidate = Some((key, seen));
+        }
+    }
+
+    /// Bits per second sent over the last second.
+    fn sending_rate(&mut self, now: Instant) -> f64 {
+        while let Some((at, _)) = self.sent.front() {
+            if now.saturating_duration_since(*at) <= Duration::from_secs(1) {
+                break;
+            }
+            self.sent.pop_front();
+        }
+        self.sent.iter().map(|(_, size)| *size as f64 * 8.0).sum()
+    }
+
+    /// Sorts the reports of probe packets into their clusters, and gives the estimator the
+    /// result of every cluster that has been reported in full.
+    fn collect_probe_reports(&mut self, now: Instant, reports: &[PacketReport]) {
+        if self.probing.is_none() {
+            return;
+        }
+        for report in reports {
+            if let Some(cluster) = self
+                .probe_packets
+                .remove(&(report.ssrc, report.rtp_sequence_number))
+                && let Some(state) = self.probe_clusters.get_mut(&cluster)
+            {
+                state.reports.push(report.clone());
+            }
+        }
+        let complete: Vec<u32> = self
+            .probe_clusters
+            .iter()
+            .filter(|(_, state)| state.closed(now) && state.reports.len() >= state.sent)
+            .map(|(cluster, _)| *cluster)
+            .collect();
+        for cluster in complete {
+            let Some(state) = self.probe_clusters.remove(&cluster) else {
+                continue;
+            };
+            if let Some(estimate) = probe_estimate(&state.reports)
+                && let Some(probing) = self.probing.as_mut()
+                && let Some(estimate) = probing.on_result(cluster, estimate)
+            {
+                self.estimator.on_probe_result(now, estimate);
+            }
+        }
+        // A cluster whose packets were never all reported is forgotten with its packets.
+        self.probe_clusters
+            .retain(|_, state| now.saturating_duration_since(state.last_sent) < PROBE_FORGET);
+        if self.probe_clusters.is_empty() {
+            self.probe_packets.clear();
+        }
+    }
+
+    /// Asks for the next probe cluster when one is due: the request leaves on the read leg,
+    /// towards the pacer and the NACK responder.
+    fn poll_probe(&mut self, now: Instant) {
+        if self.probing.is_none() {
+            return;
+        }
+        let target = self.estimator.target_bitrate();
+        let sending = self.sending_rate(now);
+        let media_flowing = !self.sent.is_empty();
+        let max = self.applied_max.flatten().unwrap_or(f64::INFINITY);
+        let Some(probing) = self.probing.as_mut() else {
+            return;
+        };
+        probing.set_max_bitrate(max);
+        if let Some(request) = probing.poll(now, target, sending, media_flowing) {
+            self.read_queue.push_back(request.into_packet(now));
+        }
+    }
+
     /// Publish the estimate, and return the attribute to announce when it moved.
     fn publish(&mut self) -> Option<Attribute> {
         let target = self.estimator.target_bitrate();
@@ -594,6 +800,11 @@ impl<E: BandwidthEstimator> Protocol<TaggedPacket, TaggedPacket, ()>
     type Time = Instant;
 
     fn handle_read(&mut self, mut msg: TaggedPacket) -> Result<(), Self::Error> {
+        // A packet from the wire, not one of the chain's attribute carriers (an empty RTCP
+        // packet, which never had an address).
+        if !matches!(&msg.message.packet, Packet::Rtcp(packets) if packets.is_empty()) {
+            self.observe_path(msg.now, &msg.transport);
+        }
         let mut reported = false;
         if let Packet::Rtcp(ref rtcp_packets) = msg.message.packet {
             // `for` over a borrow of `msg` while `self` is borrowed mutably: collect first.
@@ -602,11 +813,15 @@ impl<E: BandwidthEstimator> Protocol<TaggedPacket, TaggedPacket, ()>
                 reported |= self.ingest(msg.now, rtcp_packet);
             }
         }
+        if std::mem::take(&mut self.tmmbn_owed) {
+            self.send_tmmbn(msg.now);
+        }
 
         if reported {
             self.per_packet_feedback = true;
             let reports = self.history.take_reports();
             self.estimator.on_reports(msg.now, &reports);
+            self.collect_probe_reports(msg.now, &reports);
         }
         self.apply_bounds(msg.now);
 
@@ -651,7 +866,30 @@ impl<E: BandwidthEstimator> Protocol<TaggedPacket, TaggedPacket, ()>
                     self.departures.pop_front();
                 }
                 self.estimator.on_packet_sent(msg.now, size);
+
+                if self.probing.is_some() {
+                    self.sent.push_back((msg.now, size));
+                    if self.sent.len() > 4096 {
+                        self.sent.pop_front();
+                    }
+                    // The pacer marked it as part of a cluster: its report is the cluster's.
+                    if let Some(probe) = msg.message.custom::<ProbePacket>() {
+                        self.probe_packets.insert(
+                            (rtp_packet.header.ssrc, rtp_packet.header.sequence_number),
+                            probe.cluster,
+                        );
+                        let state = self
+                            .probe_clusters
+                            .entry(probe.cluster)
+                            .or_insert_with(|| ProbeCluster::new(msg.now));
+                        state.sent += 1;
+                        state.last_sent = msg.now;
+                    }
+                }
             }
+        }
+        if matches!(msg.message.packet, Packet::Rtp(_)) {
+            self.poll_probe(msg.now);
         }
 
         self.write_queue.push_back(msg);
@@ -675,6 +913,7 @@ impl<E: BandwidthEstimator> Protocol<TaggedPacket, TaggedPacket, ()>
 
         self.estimator.handle_timeout(now);
         self.apply_bounds(now);
+        self.poll_probe(now);
 
         // No packet to ride on: the estimate leaves on the chain's attribute carrier.
         if let Some(attribute) = self.publish() {
@@ -696,6 +935,9 @@ impl<E: BandwidthEstimator> Protocol<TaggedPacket, TaggedPacket, ()>
             self.estimator.poll_timeout(),
             self.tmmbr.poll_timeout(),
             self.remb.map(|(_, at)| at + REMB_TIMEOUT),
+            self.probing
+                .as_ref()
+                .and_then(ProbeController::poll_timeout),
         ]
         .into_iter()
         .flatten()

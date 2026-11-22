@@ -12,9 +12,12 @@ mod dc_common;
 
 use anyhow::Result;
 use dc_common::Pair;
+use dtls::cipher_suite::{CipherSuite, CipherSuiteId, cipher_suite_for_id};
+use dtls::record_layer::record_layer_header::RECORD_LAYER_HEADER_SIZE;
 use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtc::peer_connection::transport::RTCSctpTransportState;
 use rtc::shared::error::Error;
+use rtc::statistics::StatsSelector;
 
 const OFFERER: &str = "127.0.0.1:50010";
 const ANSWERER: &str = "127.0.0.1:50011";
@@ -204,33 +207,80 @@ fn channels_of_different_priority_deliver_in_order_under_either_scheduler() -> R
     Ok(())
 }
 
-/// The largest datagram either peer of a new pair at these addresses writes while a 64 KiB
-/// message crosses in each direction.
-fn largest_data_datagram(offerer_addr: &str, answerer_addr: &str) -> Result<usize> {
-    let (mut pair, local, remote) =
-        connected_at(offerer_addr, default(), answerer_addr, default())?;
-    largest_datagram_of_a_large_message(&mut pair, local, remote)
+/// A setting engine to build a peer from.
+type Settings = fn() -> SettingEngineBuilder;
+
+/// The DTLS versions the tests run under: the default, with which two engines negotiate
+/// DTLS 1.3, and a cipher suite list without the TLS 1.3 suites, which gives DTLS 1.2.
+fn dtls_versions() -> [(&'static str, Settings); 2] {
+    [
+        ("DTLS 1.3", default),
+        ("DTLS 1.2", || {
+            default().with_dtls_cipher_suites(vec![
+                CipherSuiteId::Tls_Ecdhe_Ecdsa_With_Aes_128_Gcm_Sha256,
+            ])
+        }),
+    ]
+}
+
+/// What each DTLS record the offerer sends adds to its content, from the version and cipher
+/// suite the connection reports in its statistics (`tlsVersion`, `dtlsCipher`): the record
+/// header of that version and what `rtc-dtls` says the suite adds to a record
+/// (`CipherSuite::record_expansion`). Neither side asks for a connection id.
+fn negotiated_record_overhead(pair: &mut Pair) -> usize {
+    let now = pair.now;
+    let stats = pair.offerer.pc.get_stats(now, StatsSelector::None);
+    let transport = stats.transport().expect("a transport");
+    let header = match transport.tls_version.as_str() {
+        // RFC 9147 section 4: the unified header with a 16-bit sequence number and the
+        // length, and no connection id: 1 + 2 + 2 bytes.
+        "FEFC" => 5,
+        // RFC 6347 section 4.1.
+        "FEFD" => RECORD_LAYER_HEADER_SIZE,
+        other => panic!("tlsVersion {other}"),
+    };
+    let suite = (0..=u16::MAX)
+        .map(CipherSuiteId::from)
+        .find(|id| id.to_string() == transport.dtls_cipher)
+        .unwrap_or_else(|| panic!("dtlsCipher {}", transport.dtls_cipher));
+    let suite: Box<dyn CipherSuite> = cipher_suite_for_id(suite).expect("a suite rtc-dtls has");
+    header + suite.record_expansion()
+}
+
+/// The largest datagram that carries a full SCTP packet on a path whose UDP payload is at
+/// most `limit` bytes, under DTLS records that add `overhead` bytes: the largest SCTP packet
+/// (a multiple of four bytes long) that fits, in its record.
+fn full_datagram(limit: usize, overhead: usize) -> usize {
+    let packet = limit - overhead;
+    packet - packet % 4 + overhead
 }
 
 /// RFC 8831 section 5: "The initial Path MTU at the IP layer SHOULD NOT exceed 1200 bytes for
 /// IPv4 and 1280 bytes for IPv6." The association takes its packet size from the selected
-/// candidate pair and the DTLS cipher suite, so a full packet of a large message, in its DTLS
-/// record, is a UDP payload that fills what 1200 - 20 - 8 bytes leave over IPv4, and
-/// 1280 - 40 - 8 over IPv6, to within the three bytes an SCTP packet (a multiple of four
-/// bytes long) may fall short. It used to be 1191 + 37 = 1228 bytes on either, which is an
-/// IPv4 packet of 1256.
+/// candidate pair and the DTLS association's record overhead (RFC 8261 section 5), so a full
+/// packet of a large message, in its DTLS record, is a UDP payload that fills what
+/// 1200 - 20 - 8 bytes leave over IPv4, and 1280 - 40 - 8 over IPv6, to within the three
+/// bytes an SCTP packet (a multiple of four bytes long) may fall short, under DTLS 1.3 and
+/// DTLS 1.2 alike. It used to be 1191 + 37 = 1228 bytes on either, which is an IPv4 packet of
+/// 1256; with the DTLS 1.2 record header counted for DTLS 1.3 records it was 8 bytes short.
 #[test]
 fn full_packets_fill_the_initial_path_mtu_of_the_address_family_and_no_more() -> Result<()> {
-    for (family, offerer, answerer, path_mtu, ip_header) in [
-        ("IPv4", "127.0.0.1:50010", "127.0.0.1:50011", 1200, 20),
-        ("IPv6", "[fd00::1]:50010", "[fd00::2]:50011", 1280, 40),
-    ] {
-        let largest = largest_data_datagram(offerer, answerer)?;
-        let limit = path_mtu - ip_header - 8;
-        assert!(
-            (limit - 3..=limit).contains(&largest),
-            "{family}: the largest datagram is {largest} bytes, for a limit of {limit}"
-        );
+    for (dtls, settings) in dtls_versions() {
+        for (family, offerer, answerer, path_mtu, ip_header) in [
+            ("IPv4", "127.0.0.1:50010", "127.0.0.1:50011", 1200, 20),
+            ("IPv6", "[fd00::1]:50010", "[fd00::2]:50011", 1280, 40),
+        ] {
+            let (mut pair, local, remote) =
+                connected_at(offerer, settings(), answerer, settings())?;
+            let overhead = negotiated_record_overhead(&mut pair);
+            let largest = largest_datagram_of_a_large_message(&mut pair, local, remote)?;
+            let limit = path_mtu - ip_header - 8;
+            assert_eq!(
+                largest,
+                full_datagram(limit, overhead),
+                "{dtls}, {family}: records of {overhead} bytes of overhead, a limit of {limit}"
+            );
+        }
     }
     Ok(())
 }
@@ -288,10 +338,12 @@ fn a_move_to_another_candidate_pair_reaches_sctp() -> Result<()> {
         connected_at("127.0.0.1:50010", settings(), "127.0.0.1:50011", settings())?;
     pair.offerer.written_to.clear();
     pair.answerer.written_to.clear();
+    let overhead = negotiated_record_overhead(&mut pair);
     let over_ipv4 = largest_datagram_of_a_large_message(&mut pair, local, remote)?;
-    assert!(
-        (1169..=1172).contains(&over_ipv4),
-        "over IPv4 the largest datagram is {over_ipv4} bytes"
+    assert_eq!(
+        over_ipv4,
+        full_datagram(1200 - 20 - 8, overhead),
+        "over IPv4"
     );
     assert_eq!(families_written_to(&pair.offerer), (true, false));
 
@@ -322,9 +374,10 @@ fn a_move_to_another_candidate_pair_reaches_sctp() -> Result<()> {
             "the restart moved the session to the IPv6 pair"
         );
     }
-    assert!(
-        (1229..=1232).contains(&over_ipv6),
-        "over IPv6 the largest datagram is {over_ipv6} bytes"
+    assert_eq!(
+        over_ipv6,
+        full_datagram(1280 - 40 - 8, overhead),
+        "over IPv6"
     );
     for peer in [&pair.offerer, &pair.answerer] {
         assert_eq!(
@@ -359,13 +412,20 @@ fn a_move_to_another_candidate_pair_reaches_sctp() -> Result<()> {
     Ok(())
 }
 
-/// An SCTP packet budget the application sets is used as it is, on any path.
+/// An SCTP packet budget the application sets is used as it is, on any path and under either
+/// DTLS version: 900 bytes of SCTP and the record around them.
 #[test]
 fn a_configured_sctp_mtu_takes_the_place_of_the_paths() -> Result<()> {
-    let (mut pair, local, _) = connected(default().with_sctp_mtu(900), default())?;
-    pair.offerer.written_sizes.clear();
-    assert!(pair.deliver(false, local, &vec![1u8; 65536])?);
-    // 900 bytes of SCTP in a DTLS record: 13 bytes of header, 8 of explicit nonce, 16 of tag.
-    assert_eq!(pair.offerer.written_sizes.iter().copied().max(), Some(937));
+    for (dtls, settings) in dtls_versions() {
+        let (mut pair, local, _) = connected(settings().with_sctp_mtu(900), settings())?;
+        let overhead = negotiated_record_overhead(&mut pair);
+        pair.offerer.written_sizes.clear();
+        assert!(pair.deliver(false, local, &vec![1u8; 65536])?);
+        assert_eq!(
+            pair.offerer.written_sizes.iter().copied().max(),
+            Some(900 + overhead),
+            "{dtls}"
+        );
+    }
     Ok(())
 }

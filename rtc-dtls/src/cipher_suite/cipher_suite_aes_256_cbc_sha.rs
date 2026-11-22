@@ -117,4 +117,27 @@ impl CipherSuite for CipherSuiteAes256CbcSha {
         ))?;
         cg.decrypt(input)
     }
+
+    fn encrypt_with_connection_id(
+        &mut self,
+        pkt_rlh: &RecordLayerHeader,
+        raw: &[u8],
+        connection_id: &[u8],
+    ) -> Result<Vec<u8>> {
+        let cg = self.cbc.as_mut().ok_or(Error::Other(
+            "CipherSuite has not been initialized, unable to encrypt".to_owned(),
+        ))?;
+        cg.encrypt_with(pkt_rlh, raw, Some(connection_id))
+    }
+
+    fn decrypt_with_connection_id(
+        &mut self,
+        input: &[u8],
+        connection_id: &[u8],
+    ) -> Result<Vec<u8>> {
+        let cg = self.cbc.as_mut().ok_or(Error::Other(
+            "CipherSuite has not been initialized, unable to decrypt".to_owned(),
+        ))?;
+        cg.decrypt_with(input, Some(connection_id))
+    }
 }

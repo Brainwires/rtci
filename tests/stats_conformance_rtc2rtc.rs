@@ -473,6 +473,16 @@ impl World {
     /// Two peers set up with `setup`, connected over host candidates. The offerer (peer 0)
     /// sends one media stream; the answerer (peer 1) receives it.
     fn connected(setup: Setup) -> Result<(Self, RTCRtpSenderId)> {
+        Self::connected_with(setup, |_| Ok(()))
+    }
+
+    /// As [`World::connected`], with `before` run once the host candidates are exchanged and
+    /// before the first check: what a peer gathers after a pair is nominated is not taken in
+    /// that ICE session (RFC 8838 section 13).
+    fn connected_with(
+        setup: Setup,
+        before: impl FnOnce(&mut World) -> Result<()>,
+    ) -> Result<(Self, RTCRtpSenderId)> {
         let mut world = World {
             peers: [
                 Peer::new("10.0.0.1:5000", setup, true)?,
@@ -529,6 +539,7 @@ impl World {
 
         world.negotiate()?;
         world.trickle(setup.signal_offerer_candidate)?;
+        before(&mut world)?;
 
         let start = world.now;
         loop {
@@ -2275,17 +2286,6 @@ fn every_supplied_member_reaches_the_report_of_the_kind_it_applies_to() -> Resul
 /// reached), and a remote candidate never does.
 #[test]
 fn a_candidate_reports_what_it_was_gathered_as() -> Result<()> {
-    let (mut world, _) = World::connected(VIDEO)?;
-    let ufrag = [
-        sdp_attribute(
-            &world.peers[0].pc.local_description().expect("offer").sdp,
-            "ice-ufrag",
-        ),
-        sdp_attribute(
-            &world.peers[1].pc.local_description().expect("answer").sdp,
-            "ice-ufrag",
-        ),
-    ];
     // (candidate, the server it was gathered from)
     let gathered = [
         (
@@ -2305,17 +2305,32 @@ fn a_candidate_reports_what_it_was_gathered_as() -> Result<()> {
             None,
         ),
     ];
-    for (candidate, url) in gathered {
-        let init = RTCIceCandidateInit {
-            candidate: candidate.to_owned(),
-            url: url.map(str::to_owned),
-            ..Default::default()
-        };
-        world.peers[0].pc.add_local_candidate(init.clone())?;
-        world.peers[1]
-            .pc
-            .add_remote_candidate(RTCIceCandidateInit { url: None, ..init })?;
-    }
+    // Gathered before a pair is nominated: the agent takes no local candidate after that in
+    // one ICE session (RFC 8838 section 13).
+    let (mut world, _) = World::connected_with(VIDEO, |world| {
+        for (candidate, url) in gathered {
+            let init = RTCIceCandidateInit {
+                candidate: candidate.to_owned(),
+                url: url.map(str::to_owned),
+                ..Default::default()
+            };
+            world.peers[0].pc.add_local_candidate(init.clone())?;
+            world.peers[1]
+                .pc
+                .add_remote_candidate(RTCIceCandidateInit { url: None, ..init })?;
+        }
+        Ok(())
+    })?;
+    let ufrag = [
+        sdp_attribute(
+            &world.peers[0].pc.local_description().expect("offer").sdp,
+            "ice-ufrag",
+        ),
+        sdp_attribute(
+            &world.peers[1].pc.local_description().expect("answer").sdp,
+            "ice-ufrag",
+        ),
+    ];
     world.run_for(Duration::from_secs(1))?;
     let now = world.now;
     let offerer = world.peers[0].stats(now);

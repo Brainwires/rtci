@@ -114,6 +114,21 @@ pub trait RTCCrypto: Send + Sync {
         ))
     }
 
+    /// Answers a key exchange the peer started: makes this side's share for `peer_share`
+    /// and the shared secret. For the Diffie-Hellman groups that is a key pair and an
+    /// agreement, which is what the default does; a KEM-based group (X25519MLKEM768)
+    /// encapsulates to the peer's key instead, and its provider overrides this.
+    fn key_exchange_respond(
+        &self,
+        algorithm: KeyExchangeAlgorithm,
+        peer_share: &[u8],
+    ) -> Result<(Vec<u8>, SecretVec), CryptoError> {
+        let exchange = self.start_key_exchange(algorithm)?;
+        let share = exchange.public_key().to_vec();
+        let secret = exchange.complete(peer_share)?;
+        Ok((share, secret))
+    }
+
     /// Generates an exportable signing key.
     fn generate_signing_key(
         &self,
