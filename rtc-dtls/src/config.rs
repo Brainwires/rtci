@@ -916,11 +916,7 @@ impl ConfigBuilder {
             // ask for one), unless that is switched off.
             // A server answers the offer of a DTLS 1.3 client whatever else it speaks: its
             // DTLS 1.2 handshake does not know the extension.
-            connection_id: if !is_client || min_version == DtlsVersion::Dtls1_3 {
-                self.connection_id
-            } else {
-                None
-            },
+            connection_id: self.connection_id,
             connection_id_migration: self.connection_id_migration,
             invalid_record_limit: self.invalid_record_limit,
             initial_epoch: 0,

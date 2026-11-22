@@ -65,6 +65,15 @@ pub struct State {
     pub(crate) remote_certificate_types: Vec<ClientCertificateType>,
     /// Server: the ClientHello carried ec_point_formats, so the ServerHello may (RFC 8422 5.2).
     pub(crate) remote_offered_point_formats: bool,
+    /// RFC 9146, DTLS 1.2. The connection id this client put in its ClientHello, kept so
+    /// that a repeated ClientHello carries the same one.
+    pub(crate) connection_id_offer: Option<Vec<u8>>,
+    /// The connection id the peer puts in the records it sends here, once the extension
+    /// is negotiated (both hellos carried it). Empty: its records come without one.
+    pub(crate) local_connection_id: Option<Vec<u8>>,
+    /// The connection id this side puts in the records it sends, once negotiated. Empty:
+    /// they go without one.
+    pub(crate) remote_connection_id: Option<Vec<u8>>,
     /// Server: the pair chosen for the ServerKeyExchange signature, one the client listed and
     /// the certificate's key can produce (RFC 5246 7.4.3).
     pub(crate) local_signature_scheme: Option<SignatureHashAlgorithm>,
@@ -102,6 +111,23 @@ struct SerializedState {
 }
 
 impl State {
+    /// The connection id a protected record sent to the peer carries (RFC 9146): `None`
+    /// unless the extension was negotiated and the peer asked for a non-empty one.
+    pub(crate) fn send_connection_id(&self) -> Option<&[u8]> {
+        self.local_connection_id.as_ref()?;
+        self.remote_connection_id
+            .as_deref()
+            .filter(|connection_id| !connection_id.is_empty())
+    }
+
+    /// The connection id a protected record from the peer carries, likewise.
+    pub(crate) fn receive_connection_id(&self) -> Option<&[u8]> {
+        self.remote_connection_id.as_ref()?;
+        self.local_connection_id
+            .as_deref()
+            .filter(|connection_id| !connection_id.is_empty())
+    }
+
     /// Creates the initial handshake state for a connection.
     ///
     /// The crypto provider comes from the caller — `rtc-dtls` never resolves a default. This
@@ -143,6 +169,9 @@ impl State {
             remote_signature_schemes: vec![],
             remote_certificate_types: vec![],
             remote_offered_point_formats: false,
+            connection_id_offer: None,
+            local_connection_id: None,
+            remote_connection_id: None,
             local_signature_scheme: None,
             secrets_forgotten: false,
             cookie_verified_by_endpoint: false,

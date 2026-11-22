@@ -187,6 +187,20 @@ pub(crate) fn negotiate_client_hello(
             Extension::ServerName(e) => {
                 state.server_name.clone_from(&e.server_name); // remote server name
             }
+            // RFC 9146 section 3: the connection id the client wants in the records it
+            // receives. A server configured for connection ids answers with its own
+            // (flight 4); one that is not ignores the extension.
+            extension if extension.as_connection_id().is_some() => {
+                match extension.as_connection_id() {
+                    Some(Ok(connection_id)) if cfg.connection_id.is_some() => {
+                        state.remote_connection_id = Some(connection_id.to_vec());
+                    }
+                    Some(Err(error)) => {
+                        return Err(fatal(AlertDescription::DecodeError, error));
+                    }
+                    _ => {}
+                }
+            }
             Extension::RenegotiationInfo(e) => {
                 // RFC 5746 3.6: this is an initial handshake, so the field is empty.
                 if !e.renegotiated_connection.is_empty() {

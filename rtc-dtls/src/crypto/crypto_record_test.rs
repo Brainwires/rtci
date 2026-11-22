@@ -237,6 +237,7 @@ fn hand_built_cbc_record(payload: &[u8], corrupt_mac: bool, padding: &[u8]) -> V
         header.sequence_number,
         header.content_type,
         header.protocol_version,
+        None,
         payload,
     )
     .expect("the MAC is computed");
