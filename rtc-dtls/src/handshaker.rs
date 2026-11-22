@@ -170,6 +170,7 @@ impl DTLSConn {
 
         // Prepare flights
         self.current_retransmit_count = 0;
+        self.early_data_retransmit_done = false;
         self.retransmit = self.current_flight.has_retransmit();
 
         let result =

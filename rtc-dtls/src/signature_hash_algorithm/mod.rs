@@ -27,7 +27,8 @@ pub enum HashAlgorithm {
     Sha384 = 5,
     /// `SHA512` (`6`).
     Sha512 = 6,
-    /// `ED25519` (`8`).
+    /// `Intrinsic` (`8`): the hash is part of the signature algorithm. The value of Ed25519
+    /// (`0x0807`) and of the RSASSA-PSS schemes (`0x0804` to `0x0806`), whose first byte this is.
     Ed25519 = 8,
     /// An algorithm this crate does not implement.
     Unsupported,
@@ -89,8 +90,25 @@ pub enum SignatureAlgorithm {
     Ecdsa = 3,
     /// `ED25519` (`7`).
     Ed25519 = 7,
+    /// `rsa_pss_rsae_sha256` (`0x0804`, RFC 8446 section 4.2.3): RSASSA-PSS with SHA-256
+    /// over a key with the rsaEncryption OID. Paired with the hash value `8` (intrinsic).
+    RsaPssRsaeSha256 = 4,
+    /// `rsa_pss_rsae_sha384` (`0x0805`).
+    RsaPssRsaeSha384 = 5,
+    /// `rsa_pss_rsae_sha512` (`0x0806`).
+    RsaPssRsaeSha512 = 6,
     /// An algorithm this crate does not implement.
-    Unsupported,
+    Unsupported = 0xff,
+}
+
+impl SignatureAlgorithm {
+    /// Whether the signature is made with an RSA key: PKCS#1 v1.5 or RSASSA-PSS.
+    pub fn is_rsa(self) -> bool {
+        matches!(
+            self,
+            Self::Rsa | Self::RsaPssRsaeSha256 | Self::RsaPssRsaeSha384 | Self::RsaPssRsaeSha512
+        )
+    }
 }
 
 impl From<u8> for SignatureAlgorithm {
@@ -99,6 +117,9 @@ impl From<u8> for SignatureAlgorithm {
             1 => SignatureAlgorithm::Rsa,
             3 => SignatureAlgorithm::Ecdsa,
             7 => SignatureAlgorithm::Ed25519,
+            4 => SignatureAlgorithm::RsaPssRsaeSha256,
+            5 => SignatureAlgorithm::RsaPssRsaeSha384,
+            6 => SignatureAlgorithm::RsaPssRsaeSha512,
             _ => SignatureAlgorithm::Unsupported,
         }
     }
@@ -114,9 +135,52 @@ pub struct SignatureHashAlgorithm {
 }
 
 impl SignatureHashAlgorithm {
+    /// The pair as the 16-bit SignatureScheme of RFC 8446 section 4.2.3: the hash byte, then
+    /// the signature byte.
+    pub fn scheme_code(&self) -> u16 {
+        u16::from_be_bytes([self.hash as u8, self.signature as u8])
+    }
+
+    /// The pair for a 16-bit SignatureScheme.
+    pub fn from_scheme_code(code: u16) -> Self {
+        let [hash, signature] = code.to_be_bytes();
+        Self {
+            hash: hash.into(),
+            signature: signature.into(),
+        }
+    }
+
+    /// Whether the pair may sign a TLS 1.3 CertificateVerify (RFC 8446 section 4.4.3): ECDSA
+    /// with the curve its hash names, Ed25519, or RSASSA-PSS. RSA PKCS#1 v1.5 and SHA-1 may
+    /// not.
+    pub(crate) fn is_tls13_signature(&self) -> bool {
+        matches!(
+            (self.signature, self.hash),
+            (
+                SignatureAlgorithm::Ecdsa,
+                HashAlgorithm::Sha256 | HashAlgorithm::Sha384
+            ) | (
+                SignatureAlgorithm::Ed25519
+                    | SignatureAlgorithm::RsaPssRsaeSha256
+                    | SignatureAlgorithm::RsaPssRsaeSha384
+                    | SignatureAlgorithm::RsaPssRsaeSha512,
+                HashAlgorithm::Ed25519
+            )
+        )
+    }
+
     pub(crate) fn crypto_scheme(&self) -> Result<crypto::SignatureScheme> {
         match (self.signature, self.hash) {
             (SignatureAlgorithm::Ed25519, _) => Ok(crypto::SignatureScheme::Ed25519),
+            (SignatureAlgorithm::RsaPssRsaeSha256, HashAlgorithm::Ed25519) => {
+                Ok(crypto::SignatureScheme::RsaPssSha256)
+            }
+            (SignatureAlgorithm::RsaPssRsaeSha384, HashAlgorithm::Ed25519) => {
+                Ok(crypto::SignatureScheme::RsaPssSha384)
+            }
+            (SignatureAlgorithm::RsaPssRsaeSha512, HashAlgorithm::Ed25519) => {
+                Ok(crypto::SignatureScheme::RsaPssSha512)
+            }
             (SignatureAlgorithm::Ecdsa, HashAlgorithm::Sha256) => {
                 Ok(crypto::SignatureScheme::EcdsaP256Sha256)
             }
@@ -175,6 +239,21 @@ pub(crate) fn default_signature_schemes() -> Vec<SignatureHashAlgorithm> {
         SignatureHashAlgorithm {
             hash: HashAlgorithm::Ed25519,
             signature: SignatureAlgorithm::Ed25519,
+        },
+        // RSASSA-PSS (RFC 8446 section 4.2.3), which TLS 1.3 requires of an RSA key and
+        // TLS 1.2 may use. After PKCS#1 v1.5, so that a DTLS 1.2 handshake signs as before
+        // with a peer that lists both.
+        SignatureHashAlgorithm {
+            hash: HashAlgorithm::Ed25519,
+            signature: SignatureAlgorithm::RsaPssRsaeSha256,
+        },
+        SignatureHashAlgorithm {
+            hash: HashAlgorithm::Ed25519,
+            signature: SignatureAlgorithm::RsaPssRsaeSha384,
+        },
+        SignatureHashAlgorithm {
+            hash: HashAlgorithm::Ed25519,
+            signature: SignatureAlgorithm::RsaPssRsaeSha512,
         },
     ]
 }

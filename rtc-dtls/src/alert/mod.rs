@@ -63,6 +63,16 @@ pub(crate) enum AlertDescription {
     NoRenegotiation = 100,
     UnsupportedExtension = 110,
     UnknownPskIdentity = 115,
+    /// too_many_cids_requested (RFC 9147 section 9).
+    TooManyCidsRequested = 52,
+    /// missing_extension (RFC 8446 section 6.2).
+    MissingExtension = 109,
+    /// unrecognized_name (RFC 6066).
+    UnrecognizedName = 112,
+    /// certificate_required (RFC 8446 section 6.2).
+    CertificateRequired = 116,
+    /// no_application_protocol (RFC 7301).
+    NoApplicationProtocol = 120,
     Invalid,
 }
 
@@ -95,6 +105,11 @@ impl fmt::Display for AlertDescription {
             AlertDescription::NoRenegotiation => write!(f, "NoRenegotiation"),
             AlertDescription::UnsupportedExtension => write!(f, "UnsupportedExtension"),
             AlertDescription::UnknownPskIdentity => write!(f, "UnknownPskIdentity"),
+            AlertDescription::TooManyCidsRequested => write!(f, "TooManyCidsRequested"),
+            AlertDescription::MissingExtension => write!(f, "MissingExtension"),
+            AlertDescription::UnrecognizedName => write!(f, "UnrecognizedName"),
+            AlertDescription::CertificateRequired => write!(f, "CertificateRequired"),
+            AlertDescription::NoApplicationProtocol => write!(f, "NoApplicationProtocol"),
             _ => write!(f, "Invalid alert description"),
         }
     }
@@ -129,6 +144,11 @@ impl From<u8> for AlertDescription {
             100 => AlertDescription::NoRenegotiation,
             110 => AlertDescription::UnsupportedExtension,
             115 => AlertDescription::UnknownPskIdentity,
+            52 => AlertDescription::TooManyCidsRequested,
+            109 => AlertDescription::MissingExtension,
+            112 => AlertDescription::UnrecognizedName,
+            116 => AlertDescription::CertificateRequired,
+            120 => AlertDescription::NoApplicationProtocol,
             _ => AlertDescription::Invalid,
         }
     }

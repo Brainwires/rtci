@@ -338,10 +338,13 @@ fn verify_signature(
     let encoding = match hash_algorithm.signature {
         SignatureAlgorithm::Ed25519 => PublicKeyEncoding::Ed25519Raw,
         SignatureAlgorithm::Ecdsa => PublicKeyEncoding::EcUncompressedPoint,
-        SignatureAlgorithm::Rsa => PublicKeyEncoding::RsaPkcs1Der,
+        SignatureAlgorithm::Rsa
+        | SignatureAlgorithm::RsaPssRsaeSha256
+        | SignatureAlgorithm::RsaPssRsaeSha384
+        | SignatureAlgorithm::RsaPssRsaeSha512 => PublicKeyEncoding::RsaPkcs1Der,
         SignatureAlgorithm::Unsupported => return Err(Error::ErrKeySignatureVerifyUnimplemented),
     };
-    if hash_algorithm.signature == SignatureAlgorithm::Rsa
+    if hash_algorithm.signature.is_rsa()
         && remote_key_signature.len() < 256
         && !insecure_verification
     {
