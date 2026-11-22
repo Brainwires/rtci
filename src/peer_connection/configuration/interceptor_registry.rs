@@ -878,6 +878,61 @@ pub(crate) fn create_stream_info(
     }
 }
 
+/// Adds ULPFEC (RFC 5109) carried in RED (RFC 2198), the form browsers negotiate for video
+/// (`a=rtpmap:<red> red/90000`, `a=rtpmap:<ulpfec> ulpfec/90000`), in both directions.
+///
+/// Every video stream bound to the chain is then sent as RED packets with a FEC packet after
+/// each frame or five packets, whichever comes first, and received RED is taken apart, lost
+/// packets rebuilt, and the media delivered under its own payload type. FEC replaces FlexFEC at
+/// [`Slot::FecEncoder`] / [`Slot::FecDecoder`]: a chain runs one FEC scheme.
+///
+/// `red_payload_type` and `ulpfec_payload_type` are the payload types **in use on the
+/// connection**. Register `video/red` and [`MIME_TYPE_ULP_FEC`] on the [`MediaEngine`] with the
+/// same numbers; the engine offers and answers them like any codec. When the remote side makes
+/// the offer and numbers them differently, the negotiated numbers are the ones to pass here.
+///
+/// For other shapes (FEC as a redundant block, uneven protection levels, `onelevelonly`, a
+/// separate FEC stream) build the interceptors with
+/// [`UlpfecSendBuilder`](interceptor::UlpfecSendBuilder) and
+/// [`UlpfecReceiveBuilder`](interceptor::UlpfecReceiveBuilder).
+///
+/// [`MIME_TYPE_ULP_FEC`]: crate::peer_connection::configuration::media_engine::MIME_TYPE_ULP_FEC
+pub fn configure_ulpfec(
+    registry: Registry,
+    red_payload_type: PayloadType,
+    ulpfec_payload_type: PayloadType,
+) -> Registry {
+    registry
+        .with(
+            Slot::FecEncoder,
+            interceptor::UlpfecSendBuilder::red(red_payload_type, ulpfec_payload_type)
+                .with_flush_on_marker(true)
+                .build(),
+        )
+        .with(
+            Slot::FecDecoder,
+            interceptor::UlpfecReceiveBuilder::red(red_payload_type, ulpfec_payload_type).build(),
+        )
+}
+
+#[cfg(test)]
+mod ulpfec_tests {
+    use super::*;
+
+    #[test]
+    fn configure_ulpfec_fills_both_fec_slots() {
+        let registry = configure_ulpfec(Registry::new(), 116, 117);
+        let names: Vec<String> = registry.slots().into_iter().map(|(_, name)| name).collect();
+        assert_eq!(
+            vec![
+                "UlpfecSendInterceptor".to_owned(),
+                "UlpfecReceiveInterceptor".to_owned()
+            ],
+            names
+        );
+    }
+}
+
 #[cfg(test)]
 mod slot_order_tests {
     use super::*;

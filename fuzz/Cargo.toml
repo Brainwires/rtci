@@ -45,3 +45,17 @@ path = "fuzz_targets/peer_connection_handle_read.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "ulpfec_packet"
+path = "fuzz_targets/ulpfec_packet.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ulpfec_receive"
+path = "fuzz_targets/ulpfec_receive.rs"
+test = false
+doc = false
+bench = false
