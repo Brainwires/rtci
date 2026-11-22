@@ -72,6 +72,21 @@ pub enum Attribute {
     /// an original tells a bandwidth estimator the path is carrying less than it is.
     Retransmission,
 
+    /// An inbound packet that arrived as an RTX retransmission (RFC 4588) and was rewritten
+    /// into the original before the chain: `ssrc` and `sequence_number` are the RTX
+    /// stream's, the ones it had on the wire.
+    ///
+    /// The chain sees the original packet, so a NACK generator stops asking for it and a
+    /// jitter buffer slots it in. What the *network* delivered is another matter: reception
+    /// statistics count this arrival on the RTX stream, not on the stream it repairs, which
+    /// keeps a receiver report's loss figures those of the path (RFC 4588 section 3).
+    Retransmitted {
+        /// The SSRC of the retransmission stream the packet arrived on.
+        ssrc: u32,
+        /// Its sequence number in that stream.
+        sequence_number: u16,
+    },
+
     /// Inbound RTCP an interceptor has decided the application should see.
     ///
     /// [`NoopInterceptor`](crate::NoopInterceptor) ends the inbound RTCP path unless the packet
@@ -109,6 +124,14 @@ impl std::fmt::Debug for Attribute {
         match self {
             Self::RecoveredByFec => f.write_str("RecoveredByFec"),
             Self::Retransmission => f.write_str("Retransmission"),
+            Self::Retransmitted {
+                ssrc,
+                sequence_number,
+            } => f
+                .debug_struct("Retransmitted")
+                .field("ssrc", ssrc)
+                .field("sequence_number", sequence_number)
+                .finish(),
             Self::DeliverToApplication => f.write_str("DeliverToApplication"),
             Self::TargetBitrateChanged { bits_per_second } => f
                 .debug_struct("TargetBitrateChanged")

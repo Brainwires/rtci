@@ -36,7 +36,20 @@ pub struct NackGeneratorBuilder {
     skip_last_n: u16,
     /// Maximum number of NACKs to send per missing packet (0 = unlimited).
     max_nacks_per_packet: u16,
+    /// How long a packet is asked for, counted from when it was found missing.
+    max_packet_age: Option<Duration>,
+    /// How long a packet has to be missing before it is first asked for.
+    reorder_delay: Duration,
+    /// The round-trip time assumed until one is measured.
+    round_trip_time: Option<Duration>,
 }
+
+/// The default of [`NackGeneratorBuilder::with_max_nacks_per_packet`]: a packet that ten
+/// requests did not bring is not coming.
+pub const DEFAULT_MAX_NACKS_PER_PACKET: u16 = 10;
+/// The default of [`NackGeneratorBuilder::with_max_packet_age`]: past two seconds a
+/// retransmission is of no use to an interactive stream.
+pub const DEFAULT_MAX_PACKET_AGE: Duration = Duration::from_secs(2);
 
 impl Default for NackGeneratorBuilder {
     fn default() -> Self {
@@ -44,7 +57,10 @@ impl Default for NackGeneratorBuilder {
             size: 512,
             interval: Duration::from_millis(100),
             skip_last_n: 0,
-            max_nacks_per_packet: 0,
+            max_nacks_per_packet: DEFAULT_MAX_NACKS_PER_PACKET,
+            max_packet_age: Some(DEFAULT_MAX_PACKET_AGE),
+            reorder_delay: Duration::ZERO,
+            round_trip_time: None,
         }
     }
 }
@@ -78,22 +94,55 @@ impl NackGeneratorBuilder {
         self
     }
 
-    /// Set the maximum number of NACKs to send per missing packet.
+    /// Set the maximum number of NACKs to send per missing packet (RFC 4588 Appendix A: a
+    /// receiver limits how often it asks again).
     ///
-    /// Set to 0 (default) for unlimited NACKs.
+    /// Default: [`DEFAULT_MAX_NACKS_PER_PACKET`]. 0 is unlimited.
     pub fn with_max_nacks_per_packet(mut self, max: u16) -> Self {
         self.max_nacks_per_packet = max;
         self
     }
 
+    /// Set how long a missing packet is asked for (RFC 4588 6.3: a retransmission is only
+    /// requested while it can still be of use). Give the sender's `rtx-time` (RFC 4588 8.1)
+    /// when it signals one: past it the sender no longer has the packet.
+    ///
+    /// Default: [`DEFAULT_MAX_PACKET_AGE`]. `None` is unlimited.
+    pub fn with_max_packet_age(mut self, max_packet_age: Option<Duration>) -> Self {
+        self.max_packet_age = max_packet_age;
+        self
+    }
+
+    /// Set how long a packet has to be missing before the first NACK for it (RFC 4588 6.3:
+    /// the request is delayed to allow for reordering). Default: zero, the gap is asked for
+    /// at the next cycle.
+    pub fn with_reorder_delay(mut self, reorder_delay: Duration) -> Self {
+        self.reorder_delay = reorder_delay;
+        self
+    }
+
+    /// Set the round-trip time assumed until the RTCP session measures one
+    /// ([`RtcpSessionEvent::RoundTripTime`](crate::RtcpSessionEvent::RoundTripTime)). A
+    /// packet is not asked for again before a round trip has passed since the last request
+    /// (RFC 4588 6.3: "the timer value shall be based on the observed round-trip time"): the
+    /// retransmission could not have arrived sooner.
+    pub fn with_round_trip_time(mut self, round_trip_time: Duration) -> Self {
+        self.round_trip_time = Some(round_trip_time);
+        self
+    }
+
     /// Build the interceptor.
     pub fn build(self) -> NackGeneratorInterceptor {
-        NackGeneratorInterceptor::new(
+        let mut interceptor = NackGeneratorInterceptor::new(
             self.size,
             self.interval,
             self.skip_last_n,
             self.max_nacks_per_packet,
-        )
+        );
+        interceptor.max_packet_age = self.max_packet_age;
+        interceptor.reorder_delay = self.reorder_delay;
+        interceptor.round_trip_time = self.round_trip_time;
+        interceptor
     }
 }
 
@@ -118,8 +167,13 @@ pub struct NackGeneratorInterceptor {
     /// Receive logs per remote stream SSRC
     receive_logs: HashMap<u32, ReceiveLog>,
 
-    /// NACK count per (SSRC, sequence number) for max_nacks_per_packet limiting
-    nack_counts: HashMap<u32, HashMap<u16, u16>>,
+    max_packet_age: Option<Duration>,
+    reorder_delay: Duration,
+    /// The round-trip time to the senders, measured by the RTCP session when there is one.
+    round_trip_time: Option<Duration>,
+
+    /// What has been asked for, per SSRC and missing sequence number.
+    requests: HashMap<u32, HashMap<u16, Request>>,
 
     /// Queue for outgoing NACK packets
     write_queue: VecDeque<TaggedPacket>,
@@ -138,7 +192,10 @@ impl NackGeneratorInterceptor {
             next_timeout: None,
             sender_ssrc: rand::random(),
             receive_logs: HashMap::new(),
-            nack_counts: HashMap::new(),
+            max_packet_age: Some(DEFAULT_MAX_PACKET_AGE),
+            reorder_delay: Duration::ZERO,
+            round_trip_time: None,
+            requests: HashMap::new(),
             write_queue: VecDeque::new(),
         }
     }
@@ -148,46 +205,57 @@ impl NackGeneratorInterceptor {
         for (&ssrc, receive_log) in &self.receive_logs {
             let missing = receive_log.missing_seq_numbers(self.skip_last_n);
             if missing.is_empty() {
-                // Clear nack counts for this SSRC if no missing packets
-                self.nack_counts.remove(&ssrc);
+                self.requests.remove(&ssrc);
                 continue;
             }
 
-            // Initialize nack counts for this SSRC if needed
-            let nack_count = self.nack_counts.entry(ssrc).or_default();
+            let requests = self.requests.entry(ssrc).or_default();
+            // A packet that arrived, or that the log no longer covers, is forgotten.
+            requests.retain(|sequence_number, _| missing.contains(sequence_number));
 
-            // Filter by max_nacks_per_packet if configured
-            let filtered: Vec<u16> = if self.max_nacks_per_packet > 0 {
-                missing
-                    .iter()
-                    .filter(|&&seq| {
-                        let count = nack_count.entry(seq).or_insert(0);
-                        if *count < self.max_nacks_per_packet {
-                            *count += 1;
-                            true
-                        } else {
-                            false
-                        }
-                    })
-                    .copied()
-                    .collect()
-            } else {
-                missing.clone()
-            };
+            let due: Vec<u16> = missing
+                .iter()
+                .copied()
+                .filter(|sequence_number| {
+                    let request = requests.entry(*sequence_number).or_insert(Request {
+                        missing_since: now,
+                        last_asked: None,
+                        asked: 0,
+                    });
+                    // Give up: asked often enough, or too old to be of use.
+                    if self.max_nacks_per_packet > 0 && request.asked >= self.max_nacks_per_packet {
+                        return false;
+                    }
+                    let missing_for = now.saturating_duration_since(request.missing_since);
+                    if self.max_packet_age.is_some_and(|max| missing_for > max) {
+                        return false;
+                    }
+                    let due = match request.last_asked {
+                        // The first request waits out the reordering allowance.
+                        None => missing_for >= self.reorder_delay,
+                        // The next waits for the retransmission to have had a round trip.
+                        Some(last_asked) => self
+                            .round_trip_time
+                            .is_none_or(|rtt| now.saturating_duration_since(last_asked) >= rtt),
+                    };
+                    if due {
+                        request.last_asked = Some(now);
+                        request.asked = request.asked.saturating_add(1);
+                    }
+                    due
+                })
+                .collect();
 
-            if filtered.is_empty() {
+            if due.is_empty() {
                 continue;
             }
-
-            // Clean up nack counts for packets no longer missing
-            nack_count.retain(|seq, _| missing.contains(seq));
 
             // Create NACK packet
             let nack = rtcp::transport_feedbacks::transport_layer_nack::TransportLayerNack {
                 sender_ssrc: self.sender_ssrc,
                 media_ssrc: ssrc,
                 nacks: rtcp::transport_feedbacks::transport_layer_nack::nack_pairs_from_sequence_numbers(
-                    &filtered,
+                    &due,
                 ),
             };
 
@@ -198,6 +266,16 @@ impl NackGeneratorInterceptor {
             });
         }
     }
+}
+
+/// A missing packet and what has been done about it.
+struct Request {
+    /// When the generator first found it missing.
+    missing_since: Instant,
+    /// When it was last asked for.
+    last_asked: Option<Instant>,
+    /// How often it has been asked for.
+    asked: u16,
 }
 
 impl Protocol<TaggedPacket, TaggedPacket, ()> for NackGeneratorInterceptor {
@@ -219,10 +297,17 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for NackGeneratorInterceptor {
                 {
                     for source in &goodbye.sources {
                         self.receive_logs.remove(source);
-                        self.nack_counts.remove(source);
+                        self.requests.remove(source);
                     }
                 }
             }
+        }
+
+        // The round-trip time the RTCP session measured, for the pace of repeated requests.
+        if let Some(crate::RtcpSessionEvent::RoundTripTime { rtt, .. }) =
+            msg.message.custom::<crate::RtcpSessionEvent>()
+        {
+            self.round_trip_time = Some(*rtt);
         }
 
         // Track incoming RTP packets
@@ -286,7 +371,7 @@ impl Interceptor for NackGeneratorInterceptor {
 
     fn unbind_remote_stream(&mut self, info: &StreamInfo) {
         self.receive_logs.remove(&info.ssrc);
-        self.nack_counts.remove(&info.ssrc);
+        self.requests.remove(&info.ssrc);
     }
 
     fn bind_local_stream(&mut self, _info: &StreamInfo) {}

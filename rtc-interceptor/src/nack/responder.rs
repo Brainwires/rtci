@@ -9,7 +9,7 @@ use sansio::Protocol;
 use shared::TransportContext;
 use shared::error::Error;
 use std::collections::{HashMap, VecDeque};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Builder for the NackResponderInterceptor.
 ///
@@ -27,11 +27,16 @@ use std::time::Instant;
 pub struct NackResponderBuilder {
     /// Size of the send buffer (must be power of 2: 1, 2, 4, ..., 32768).
     size: u16,
+    /// How long a sent packet stays available for retransmission.
+    max_packet_age: Option<Duration>,
 }
 
 impl Default for NackResponderBuilder {
     fn default() -> Self {
-        Self { size: 1024 }
+        Self {
+            size: 1024,
+            max_packet_age: None,
+        }
     }
 }
 
@@ -50,9 +55,20 @@ impl NackResponderBuilder {
         self
     }
 
+    /// Set how long a sent packet is kept for retransmission: the `rtx-time` of RFC 4588
+    /// 8.1, when one is signalled. A NACK for a packet sent longer ago is not answered.
+    ///
+    /// Default: `None`, a packet is available for as long as the buffer holds it.
+    pub fn with_max_packet_age(mut self, max_packet_age: Option<Duration>) -> Self {
+        self.max_packet_age = max_packet_age;
+        self
+    }
+
     /// Build the interceptor.
     pub fn build(self) -> NackResponderInterceptor {
-        NackResponderInterceptor::new(self.size)
+        let mut interceptor = NackResponderInterceptor::new(self.size);
+        interceptor.max_packet_age = self.max_packet_age;
+        interceptor
     }
 }
 
@@ -93,6 +109,9 @@ struct LocalStream {
     retransmit_budget: usize,
     /// The budget's ceiling: the send buffer's size.
     retransmit_budget_max: usize,
+    /// When each buffered packet was sent, by its place in the send buffer (the sequence
+    /// number modulo the buffer size), with the sequence number the entry is for.
+    sent_at: Vec<Option<(u16, Instant)>>,
 }
 
 /// A sequence number is retransmitted at most once per this interval, however often it is
@@ -115,6 +134,9 @@ const MAX_REMEMBERED_RTX_SSRCS: usize = 1024;
 pub struct NackResponderInterceptor {
     /// Configuration
     size: u16,
+
+    /// How long a sent packet stays available for retransmission (`rtx-time`).
+    max_packet_age: Option<Duration>,
 
     /// Send buffers per local stream SSRC
     streams: HashMap<u32, LocalStream>,
@@ -139,6 +161,7 @@ impl NackResponderInterceptor {
         Self {
             read_queue: VecDeque::new(),
             size,
+            max_packet_age: None,
             streams: HashMap::new(),
             rtx_sequence_numbers: HashMap::new(),
             write_queue: VecDeque::new(),
@@ -194,6 +217,14 @@ impl NackResponderInterceptor {
             let Some(original_packet) = stream.send_buffer.get(seq) else {
                 continue;
             };
+            // RFC 4588 8.1 (`rtx-time`): a packet is kept for retransmission that long.
+            if let Some(max_packet_age) = self.max_packet_age
+                && let Some((_, sent)) = stream.sent_at[usize::from(seq) % stream.sent_at.len()]
+                    .filter(|(sequence_number, _)| *sequence_number == seq)
+                && now.saturating_duration_since(sent) > max_packet_age
+            {
+                continue;
+            }
             stream.last_retransmit.insert(seq, now);
             stream.retransmit_budget -= 1;
             self.retransmissions_queued += 1;
@@ -294,6 +325,8 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for NackResponderInterceptor {
             && let Some(stream) = self.streams.get_mut(&rtp_packet.header.ssrc)
         {
             stream.send_buffer.add(rtp_packet.clone());
+            let slot = usize::from(rtp_packet.header.sequence_number) % stream.sent_at.len();
+            stream.sent_at[slot] = Some((rtp_packet.header.sequence_number, msg.now));
             stream.retransmit_budget =
                 (stream.retransmit_budget + 1).min(stream.retransmit_budget_max);
         }
@@ -345,6 +378,7 @@ impl Interceptor for NackResponderInterceptor {
                     repaired_rid_extension_id: extension_id(info, REPAIRED_RTP_STREAM_ID_URI),
                     retransmit_budget: usize::from(self.size),
                     retransmit_budget_max: usize::from(self.size),
+                    sent_at: vec![None; usize::from(self.size).max(1)],
                 },
             );
         }

@@ -18,6 +18,10 @@ use std::collections::BTreeMap;
 #[non_exhaustive]
 #[repr(usize)]
 pub enum Slot {
+    /// The RTCP session ([`RtcpSessionInterceptor`](crate::RtcpSessionInterceptor)): the
+    /// last thing every outbound RTCP packet passes and the first to see what arrives, so it
+    /// counts what really left and arrived and no RTCP leaves except in its compound packets.
+    RtcpSession = 500,
     /// `CongestionControlInterceptor` — the send history, and the ingest of returning feedback.
     ///
     /// **Both legs.** *Read:* ingests inbound TWCC or CCFB and hands the reports to the estimator.
@@ -198,6 +202,7 @@ impl Slot {
     /// The named slots are the thousands; a custom one is whatever it was built from.
     pub const fn slot(self) -> usize {
         match self {
+            Self::RtcpSession => 500,
             Self::CongestionControl => 1_000,
             Self::TwccSender => 2_000,
             Self::Pacer => 3_000,
