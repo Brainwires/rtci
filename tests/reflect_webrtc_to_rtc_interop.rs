@@ -363,7 +363,6 @@ async fn test_reflect_webrtc_to_rtc() -> Result<()> {
                             .ok_or(Error::ErrRTPTransceiverCodecUnsupported)?
                     };
                     rtp_packet.header.ssrc = rtp_sender
-                        .track()
                         .ssrcs()
                         .last()
                         .ok_or(Error::ErrSenderWithNoSSRCs)?;

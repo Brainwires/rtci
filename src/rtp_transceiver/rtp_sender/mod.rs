@@ -216,6 +216,11 @@ pub use rtp_receiver_parameters::RTCRtpReceiveParameters;
 pub use rtp_send_parameters::RTCRtpSendParameters;
 pub use set_parameter_options::RTCSetParameterOptions;
 
+/// The most encodings a sender has (W3C webrtc 5.1 `addTransceiver`: "the maximum number of
+/// total simultaneous encodings the user agent may support"): `sendEncodings` past this many
+/// are dropped from the end.
+pub const MAX_SEND_ENCODINGS: usize = 16;
+
 /// RTCRtpSender controls the encoding and transmission of media tracks to remote peers.
 ///
 /// This struct provides a handle to the RTP sender within a peer connection,
@@ -268,44 +273,91 @@ impl RTCRtpSender<'_> {
             peer_connection: self.peer_connection,
         })
     }
-    /// Returns the media track being sent by this sender.
-    pub fn track(&self) -> &MediaStreamTrack {
-        // peer_connection is mutable borrow, its rtp_transceivers won't be resized and
-        // the direction won't be changed too, so, unwrap() here is safe.
+    fn sender(&self) -> &internal::RTCRtpSenderInternal {
+        // Every transceiver has a sender from its creation, and the handle borrows the peer
+        // connection mutably, so the transceivers cannot change under it.
         self.peer_connection.rtp_transceivers[self.id.0]
             .sender()
             .as_ref()
-            .unwrap()
-            .track()
+            .expect("every transceiver has a sender")
     }
 
-    /// Returns the RTP capabilities for the specified codec kind.
+    fn sender_mut(&mut self) -> &mut internal::RTCRtpSenderInternal {
+        self.peer_connection.rtp_transceivers[self.id.0]
+            .sender_mut()
+            .as_mut()
+            .expect("every transceiver has a sender")
+    }
+
+    /// The track this sender sends (W3C `[[SenderTrack]]`), with the sender's encodings as
+    /// its codings: `None` when the sender has no track, as after
+    /// [`add_transceiver_from_kind`], [`remove_track`] or [`replace_track`]`(None)`.
+    ///
+    /// [`add_transceiver_from_kind`]: crate::peer_connection::RTCPeerConnection::add_transceiver_from_kind
+    /// [`remove_track`]: crate::peer_connection::RTCPeerConnection::remove_track
+    /// [`replace_track`]: Self::replace_track
+    ///
+    /// ## Specifications
+    ///
+    /// * [W3C](https://www.w3.org/TR/webrtc/#dom-rtcrtpsender-track)
+    pub fn track(&self) -> Option<&MediaStreamTrack> {
+        self.sender().attached_track()
+    }
+
+    /// The sender's track, to change the state the application owns (`enabled`, constraints).
+    pub fn track_mut(&mut self) -> Option<&mut MediaStreamTrack> {
+        self.sender_mut().attached_track_mut()
+    }
+
+    /// The SSRCs of the sender's encodings, whether or not it has a track. Empty for a
+    /// sender that has not needed encodings yet (see
+    /// [`ensure_transceiver_sender`](crate::peer_connection::RTCPeerConnection::ensure_transceiver_sender)).
+    pub fn ssrcs(&self) -> impl Iterator<Item = crate::rtp_transceiver::SSRC> + '_ {
+        self.sender()
+            .send_encodings()
+            .iter()
+            .filter_map(|encoding| encoding.rtp_coding_parameters.ssrc)
+    }
+
+    /// The ids of the MediaStreams this sender's track is signalled in (W3C
+    /// `[[AssociatedMediaStreamIds]]`), as [`set_streams`](Self::set_streams) or the track's
+    /// own stream id set them; empty for none (the description then says `a=msid:-`).
+    pub fn streams(&self) -> &[MediaStreamId] {
+        self.sender().associated_streams()
+    }
+
+    /// The RTP capabilities of the engine for sending `kind`: every codec the media engine
+    /// has registered for it (the retransmission format once, without an `sdpFmtpLine`) and
+    /// the header extensions registered for sending. Nothing negotiated is read: the answer
+    /// is the same before and after negotiation and for every sender (W3C
+    /// `RTCRtpSender.getCapabilities`, a static method). `None` for a kind that is neither
+    /// audio nor video.
     ///
     /// # Parameters
     ///
     /// * `kind` - The codec type (audio or video) to query capabilities for
     pub fn get_capabilities(&self, kind: RtpCodecKind) -> Option<RTCRtpCapabilities> {
-        // peer_connection is mutable borrow, its rtp_transceivers won't be resized and
-        // the direction won't be changed too, so, unwrap() here is safe.
-        self.peer_connection.rtp_transceivers[self.id.0]
-            .sender()
-            .as_ref()
-            .unwrap()
-            .get_capabilities(kind, &self.peer_connection.media_engine)
+        internal::RTCRtpSenderInternal::get_capabilities(kind, &self.peer_connection.media_engine)
     }
+
     /// Updates the RTP send parameters for this sender.
     ///
-    /// This method modifies encoding parameters such as bitrates, frame rates,
-    /// and active state for each encoding.
-    ///
-    /// # Parameters
-    ///
-    /// * `parameters` - The new send parameters to apply
-    /// * `set_parameter_options` - Optional additional configuration options
+    /// `parameters` is what [`get_parameters`](Self::get_parameters) last returned, with the
+    /// changes wanted in its encodings: `active`, `max_bitrate`, `max_framerate`,
+    /// `scale_resolution_down_by` and `codec`.
     ///
     /// # Errors
     ///
-    /// Returns an error if the parameters are invalid.
+    /// The W3C `setParameters` steps:
+    /// - [`Error::InvalidStateError`] when the transceiver is stopping or stopped, or
+    ///   `get_parameters` has not been called since the last `set_parameters`
+    /// - [`Error::InvalidModificationError`] when the transaction id is not the one
+    ///   `get_parameters` returned; when the number of encodings, their order, a rid or an
+    ///   SSRC differs; when a read-only member (`header_extensions`, `rtcp`, `codecs`) was
+    ///   changed; or when an encoding's `codec` was set to one that is not among the
+    ///   negotiated send codecs (before negotiation: the codecs the engine can send)
+    /// - [`Error::RangeError`] for a `scale_resolution_down_by` below 1.0 or a negative
+    ///   `max_framerate`
     pub fn set_parameters(
         &mut self,
         parameters: RTCRtpSendParameters,
@@ -316,72 +368,77 @@ impl RTCRtpSender<'_> {
         if self.peer_connection.rtp_transceivers[self.id.0].stopped() {
             return Err(Error::InvalidStateError);
         }
-        // peer_connection is mutable borrow, its rtp_transceivers won't be resized and
-        // the direction won't be changed too, so, unwrap() here is safe.
         self.peer_connection.rtp_transceivers[self.id.0]
             .sender_mut()
             .as_mut()
-            .unwrap()
-            .set_parameters(parameters, set_parameter_options)
+            .expect("every transceiver has a sender")
+            .set_parameters(
+                parameters,
+                set_parameter_options,
+                &self.peer_connection.media_engine,
+            )
     }
 
     /// Returns the sender's current RTP send parameters.
     ///
     /// The returned parameters describe how the track is encoded and transmitted,
-    /// including codecs, encodings, and header extensions.
+    /// including codecs, encodings, and header extensions. Calls until the next
+    /// [`set_parameters`](Self::set_parameters) return the same parameters, with the same
+    /// transaction id.
     pub fn get_parameters(&mut self) -> &RTCRtpSendParameters {
-        // peer_connection is mutable borrow, its rtp_transceivers won't be resized and
-        // the direction won't be changed too, so, unwrap() here is safe.
         self.peer_connection.rtp_transceivers[self.id.0]
             .sender_mut()
             .as_mut()
-            .unwrap()
+            .expect("every transceiver has a sender")
             .get_parameters(&self.peer_connection.media_engine)
     }
 
-    /// Replaces the currently sent track with a new media track.
+    /// Replaces the track this sender sends, without negotiation (W3C `replaceTrack`).
     ///
-    /// The new track must be of the same media kind (audio, video, etc) as the original.
-    /// Track replacement can be performed without renegotiation.
+    /// `Some(track)`: the sender sends `track` from now on. Its encodings and their SSRCs,
+    /// the `a=msid` it is signalled with and its associated streams are not changed, so no
+    /// negotiation is needed; [`track`](Self::track) returns the new track with the sender's
+    /// encodings as its codings. A sender that no description carries yet, or that has no
+    /// encodings, takes the new track's own codings (the SSRCs the application chose) instead.
     ///
-    /// # Parameters
-    ///
-    /// * `track` - The new track to send
+    /// `None`: the sender stops sending (an RTCP BYE goes out for each of its streams) and
+    /// its track becomes null; [`write_rtp`](Self::write_rtp) is refused until it has a track
+    /// again.
     ///
     /// # Errors
     ///
-    /// Returns an error if the track kinds do not match.
+    /// - [`Error::ErrRTPSenderNewTrackHasIncorrectKind`] when the track is not of the
+    ///   sender's kind (W3C `TypeError`)
+    /// - [`Error::InvalidStateError`] when the transceiver is stopping or stopped
     ///
     /// ## Specifications
     ///
     /// * [W3C](https://www.w3.org/TR/webrtc/#dom-rtcrtpsender-replacetrack)
-    pub fn replace_track(&mut self, track: MediaStreamTrack) -> Result<()> {
-        // peer_connection is mutable borrow, its rtp_transceivers won't be resized and
-        // the direction won't be changed too, so, unwrap() here is safe.
-        self.peer_connection.rtp_transceivers[self.id.0]
-            .sender_mut()
-            .as_mut()
-            .unwrap()
-            .replace_track(track)
+    pub fn replace_track(&mut self, track: Option<MediaStreamTrack>) -> Result<()> {
+        self.peer_connection.replace_sender_track(self.id.0, track)
     }
 
-    /// Sets the media stream IDs associated with this sender's track.
+    /// Sets the ids of the MediaStreams this sender's track is signalled in, to exactly
+    /// `streams` without duplicates; an empty list is no stream (`a=msid:-`). The
+    /// negotiation-needed flag is updated: a description has to carry the change.
     ///
-    /// # Parameters
+    /// # Errors
     ///
-    /// * `streams` - Vector of stream IDs to associate with the track
-    pub fn set_streams(&mut self, streams: Vec<MediaStreamId>) {
-        // peer_connection is mutable borrow, its rtp_transceivers won't be resized and
-        // the direction won't be changed too, so, unwrap() here is safe.
-        self.peer_connection.rtp_transceivers[self.id.0]
-            .sender_mut()
-            .as_mut()
-            .unwrap()
-            .set_streams(streams);
+    /// [`Error::ErrConnectionClosed`] when the connection is closed (W3C `InvalidStateError`).
+    ///
+    /// ## Specifications
+    ///
+    /// * [W3C](https://www.w3.org/TR/webrtc/#dom-rtcrtpsender-setstreams)
+    pub fn set_streams(&mut self, streams: Vec<MediaStreamId>) -> Result<()> {
+        if self.peer_connection.is_closed() {
+            return Err(Error::ErrConnectionClosed);
+        }
+        self.sender_mut().set_streams(streams);
         // https://www.w3.org/TR/webrtc/#dom-rtcrtpsender-setstreams: update the
         // negotiation-needed flag.
         self.peer_connection
             .on_transceiver_stopped_or_streams_changed();
+        Ok(())
     }
 
     /// Writes an RTP packet to the network.
@@ -389,13 +446,25 @@ impl RTCRtpSender<'_> {
     /// This method allows direct writing of RTP packets, automatically setting
     /// the correct payload type and SSRC based on the sender's configuration.
     ///
+    /// When the MID header extension (`urn:ietf:params:rtp-hdrext:sdes:mid`) is negotiated,
+    /// the packet is given the transceiver's mid, and when RtpStreamId
+    /// (`urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id`) is, the rid of its encoding (RFC 9143
+    /// section 15, RFC 8852): the application does not stamp them. A packet that already
+    /// carries the extension keeps its value.
+    ///
     /// # Parameters
     ///
     /// * `packet` - The RTP packet to send
     ///
     /// # Errors
     ///
-    /// Returns an error if no matching encoding is found, the codec is unsupported (neither the
+    /// [`Error::ErrRTPSenderTrackRemoved`] after the sender's track was removed
+    /// ([`remove_track`](crate::peer_connection::RTCPeerConnection::remove_track),
+    /// [`replace_track`](Self::replace_track)`(None)`), until it has a track again. A sender
+    /// made without a track for a sending transceiver is not refused: the engine makes no
+    /// media of its own, and forwards what the application writes with the sender's SSRCs
+    /// ([`ssrcs`](Self::ssrcs)). Otherwise
+    /// returns an error if no matching encoding is found, the codec is unsupported (neither the
     /// packet's payload type nor its encoding's codec is negotiated on this sender leg), or
     /// internal handle_write returns error. A packet whose payload type is not negotiated is
     /// rewritten to its encoding's negotiated payload type.
@@ -403,13 +472,20 @@ impl RTCRtpSender<'_> {
         // peer_connection is mutable borrow, its rtp_transceivers won't be resized and
         // the direction won't be changed too, so, unwrap() here is safe.
 
+        let mid = self.peer_connection.rtp_transceivers[self.id.0]
+            .mid()
+            .clone();
         let (sender, media_engine) = (
             self.peer_connection.rtp_transceivers[self.id.0]
                 .sender_mut()
                 .as_mut()
-                .unwrap(),
+                .expect("every transceiver has a sender"),
             &mut self.peer_connection.media_engine,
         );
+
+        if sender.track_removed() {
+            return Err(Error::ErrRTPSenderTrackRemoved);
+        }
 
         if !sender
             .track()
@@ -491,6 +567,42 @@ impl RTCRtpSender<'_> {
             );
         }
 
+        // RFC 9143 sections 9.1 and 15: the offerer and answerer identify the m= section an
+        // RTP stream belongs to with the MID header extension, and RFC 8852 section 3.3 / RFC
+        // 8853 section 5.5 the encoding of a simulcast stream with RtpStreamId. Both go into
+        // every packet the sender writes when the extension is negotiated: a receiver that
+        // was not told the SSRC (the engine's descriptions name none for simulcast, and RFC
+        // 9143 makes `a=ssrc` optional) needs one to associate the stream, at any time it
+        // starts to listen or the SSRC changes. A value the application put there itself is
+        // left alone. The NACK responder turns the RtpStreamId of a packet it retransmits
+        // into RepairedRtpStreamId.
+        let stamps = [
+            (::sdp::extmap::SDES_MID_URI, mid.as_deref().unwrap_or("")),
+            (
+                ::sdp::extmap::SDES_RTP_STREAM_ID_URI,
+                encoding.rtp_coding_parameters.rid.as_str(),
+            ),
+        ];
+        for (uri, value) in stamps {
+            if value.is_empty() {
+                continue;
+            }
+            let Some(id) = parameters
+                .rtp_parameters
+                .header_extensions
+                .iter()
+                .find(|negotiated| negotiated.uri == uri)
+                .and_then(|negotiated| u8::try_from(negotiated.id).ok())
+            else {
+                continue;
+            };
+            if packet.header.get_extension(id).is_none() {
+                packet
+                    .header
+                    .set_extension(id, bytes::Bytes::copy_from_slice(value.as_bytes()))?;
+            }
+        }
+
         let track_id = sender.track().track_id().to_string();
         self.peer_connection.handle_write(TaggedRTCMessage {
             now,
@@ -514,12 +626,7 @@ impl RTCRtpSender<'_> {
         // peer_connection is mutable borrow, its rtp_transceivers won't be resized and
         // the direction won't be changed too, so, unwrap() here is safe.
 
-        let sender = self.peer_connection.rtp_transceivers[self.id.0]
-            .sender_mut()
-            .as_mut()
-            .unwrap();
-
-        let track_id = sender.track().track_id().to_string();
+        let track_id = self.sender().track().track_id().to_string();
         self.peer_connection.handle_write(TaggedRTCMessage {
             now,
             message: RTCMessage::RtcpPacket(track_id, packets),

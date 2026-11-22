@@ -716,7 +716,7 @@ fn initalize_cipher_suite(
         let suite_signs_with_rsa = state.cipher_suite.as_ref().is_some_and(|cipher_suite| {
             cipher_suite.certificate_type() == ClientCertificateType::RsaSign
         });
-        if suite_signs_with_rsa != (h.algorithm.signature == SignatureAlgorithm::Rsa) {
+        if suite_signs_with_rsa != h.algorithm.signature.is_rsa() {
             return Err((
                 Some(Alert {
                     alert_level: AlertLevel::Fatal,

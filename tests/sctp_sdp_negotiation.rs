@@ -482,3 +482,197 @@ fn the_application_asks_for_a_new_association_or_none() -> TestResult {
     assert!(answerer.sctp().is_none());
     Ok(())
 }
+
+/// The data channel sections of `sdp`, in order.
+fn data_sections(sdp: &str) -> Vec<Vec<String>> {
+    media_sections(sdp)
+        .into_iter()
+        .filter(|section| section[0].starts_with("m=application"))
+        .collect()
+}
+
+/// RFC 8841 section 10.5: "If the offerer wants to close an existing SCTP association and the
+/// underlying DTLS association ..., it MUST assign a zero port value to the 'm=' line
+/// associated with the SCTP and DTLS associations", and section 10.3 for an answerer that
+/// does not accept the "m=" line. `reject_data_section` asks for that: the data section of the
+/// next offer, or of the answer to the peer's next offer, has port zero, no association is
+/// kept on either side and the channels are closed. A data channel created later brings a new
+/// data section, with a port other than the one of the association that was closed (section
+/// 10.5: "a new attribute value (different than the value associated with the previous SCTP
+/// association)"). There used to be no way to reject the section in an offer.
+#[test]
+fn the_application_rejects_the_data_section() -> TestResult {
+    const REJECTED: &str = "m=application 0 UDP/DTLS/SCTP webrtc-datachannel";
+    let port = |section: &[String]| attribute(section, "sctp-port").map(str::to_owned);
+
+    let mut offerer = default_peer()?;
+    let mut answerer = default_peer()?;
+    let first = offerer.create_data_channel("first", None)?.id();
+    let (offer, _) = jsep_common::exchange(&mut offerer, &mut answerer)?;
+    assert_eq!(port(&data_section(&offer)).as_deref(), Some("5000"));
+    assert!(offerer.sctp().is_some());
+    channel_events(&mut offerer);
+
+    // In an offer.
+    offerer.reject_data_section();
+    let (offer, answer) = jsep_common::exchange(&mut offerer, &mut answerer)?;
+    for sdp in [&offer, &answer] {
+        let section = data_section(sdp);
+        assert_eq!(section[0], REJECTED, "{sdp}");
+        assert_eq!(port(&section), None, "a rejected section says nothing more");
+    }
+    assert!(offerer.sctp().is_none());
+    assert!(answerer.sctp().is_none());
+    assert!(
+        channel_events(&mut offerer).contains(&RTCDataChannelEvent::OnClose(first)),
+        "the channel is closed with its association"
+    );
+
+    // An offer that asks for nothing keeps the section rejected.
+    let (offer, _) = jsep_common::exchange(&mut offerer, &mut answerer)?;
+    assert_eq!(data_sections(&offer).len(), 1);
+    assert_eq!(data_section(&offer)[0], REJECTED);
+
+    // A data channel brings a new data section and a new association, on another port.
+    offerer.create_data_channel("second", None)?;
+    let (offer, answer) = jsep_common::exchange(&mut offerer, &mut answerer)?;
+    for sdp in [&offer, &answer] {
+        let live: Vec<_> = data_sections(sdp)
+            .into_iter()
+            .filter(|section| port_of(section) != 0)
+            .collect();
+        assert_eq!(live.len(), 1, "{sdp}");
+        assert_eq!(port(&live[0]).as_deref(), Some("5001"), "{sdp}");
+    }
+    assert!(offerer.sctp().is_some());
+    assert!(answerer.sctp().is_some());
+
+    // In an answer: the answerer does not accept the data section of the next offer.
+    answerer.reject_data_section();
+    let (offer, answer) = jsep_common::exchange(&mut offerer, &mut answerer)?;
+    assert!(
+        data_sections(&offer)
+            .iter()
+            .any(|section| port_of(section) != 0),
+        "the offer still has its data section:\n{offer}"
+    );
+    assert!(
+        data_sections(&answer)
+            .iter()
+            .all(|section| port_of(section) == 0),
+        "the answer rejects it:\n{answer}"
+    );
+    assert!(offerer.sctp().is_none());
+    assert!(answerer.sctp().is_none());
+    Ok(())
+}
+
+/// RFC 8841 section 10.1: "Each endpoint MUST associate an SDP 'tls-id' attribute with the
+/// 'm=' line, following the procedures in [RFC8842]." The data section of an offer carries
+/// one, the answer's carries another, and a later exchange that keeps the DTLS association
+/// repeats both.
+#[test]
+fn the_data_section_carries_a_tls_id() -> TestResult {
+    let mut offerer = default_peer()?;
+    let mut answerer = default_peer()?;
+    offerer.create_data_channel("data", None)?;
+    let (offer, answer) = jsep_common::exchange(&mut offerer, &mut answerer)?;
+    let tls_id = |sdp: &str| {
+        let value = attribute(&data_section(sdp), "tls-id")
+            .unwrap_or_else(|| panic!("a=tls-id in the data section of\n{sdp}"))
+            .to_owned();
+        assert!(
+            (20..=255).contains(&value.len())
+                && value
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"+/-_".contains(&b)),
+            "RFC 8842 section 4: 20 to 255 tls-id characters, not {value}"
+        );
+        value
+    };
+    let ids = (tls_id(&offer), tls_id(&answer));
+    assert_ne!(ids.0, ids.1, "each endpoint has its own");
+    let (offer, answer) = jsep_common::exchange(&mut offerer, &mut answerer)?;
+    assert_eq!((tls_id(&offer), tls_id(&answer)), ids);
+    Ok(())
+}
+
+/// A host candidate of `pc` over `network` (`udp` or `tcp`), added to it.
+fn add_host_candidate(pc: &mut RTCPeerConnection, network: &str, port: u16) -> TestResult {
+    use rtc::ice::tcp_type::TcpType;
+    use rtc::peer_connection::transport::{CandidateConfig, CandidateHostConfig, RTCIceCandidate};
+
+    let candidate = CandidateHostConfig {
+        base_config: CandidateConfig {
+            network: network.to_owned(),
+            address: "192.0.2.1".to_owned(),
+            port,
+            component: 1,
+            ..Default::default()
+        },
+        tcp_type: if network == "tcp" {
+            TcpType::Passive
+        } else {
+            TcpType::Unspecified
+        },
+    }
+    .new_candidate_host()?;
+    pc.add_local_candidate(RTCIceCandidate::from(&candidate).to_json()?)?;
+    Ok(())
+}
+
+/// RFC 8841 section 12.2: "The proto value MUST match the transport protocol associated with
+/// the default candidate. If UDP transport is used for the default candidate, then the
+/// 'UDP/DTLS/SCTP' proto value MUST be used. If TCP transport is used for the default
+/// candidate, then the 'TCP/DTLS/SCTP' proto value MUST be used", the default candidate being
+/// "chosen from one of those UDP candidates" when there are any. So an offer made before any
+/// candidate is gathered says UDP (the dummy values of a trickled offer), one made when only
+/// TCP candidates have been gathered says TCP, and one made with candidates of both says UDP.
+/// The offer used to say `UDP/DTLS/SCTP` whatever its candidates.
+#[test]
+fn the_offers_proto_matches_the_default_candidate() -> TestResult {
+    use rtc::ice::network_type::NetworkType;
+
+    let proto = |pc: &mut RTCPeerConnection| -> Result<String, Box<dyn std::error::Error>> {
+        let offer = pc.create_offer(None)?.sdp;
+        Ok(data_section(&offer)[0]
+            .split_whitespace()
+            .nth(2)
+            .expect("a proto")
+            .to_owned())
+    };
+    let mut pc = RTCPeerConnectionBuilder::new()
+        .with_setting_engine(
+            SettingEngineBuilder::new()
+                .with_network_types(vec![NetworkType::Udp4, NetworkType::Tcp4])
+                .build(),
+        )
+        .build(Instant::now())?;
+    pc.create_data_channel("data", None)?;
+    assert_eq!(proto(&mut pc)?, "UDP/DTLS/SCTP", "no candidate yet");
+    add_host_candidate(&mut pc, "tcp", 5000)?;
+    assert_eq!(proto(&mut pc)?, "TCP/DTLS/SCTP", "a TCP candidate alone");
+    add_host_candidate(&mut pc, "udp", 5001)?;
+    assert_eq!(proto(&mut pc)?, "UDP/DTLS/SCTP", "a UDP candidate as well");
+
+    // An answerer repeats the proto of a TCP offer (section 10.3), which it accepts.
+    let mut offerer = RTCPeerConnectionBuilder::new()
+        .with_setting_engine(
+            SettingEngineBuilder::new()
+                .with_network_types(vec![NetworkType::Tcp4])
+                .build(),
+        )
+        .build(Instant::now())?;
+    offerer.create_data_channel("data", None)?;
+    add_host_candidate(&mut offerer, "tcp", 5000)?;
+    let mut answerer = default_peer()?;
+    let (offer, answer) = jsep_common::exchange(&mut offerer, &mut answerer)?;
+    for sdp in [&offer, &answer] {
+        assert_eq!(
+            data_section(sdp)[0],
+            "m=application 9 TCP/DTLS/SCTP webrtc-datachannel"
+        );
+    }
+    assert!(answerer.sctp().is_some());
+    Ok(())
+}

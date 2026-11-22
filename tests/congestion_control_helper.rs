@@ -31,6 +31,8 @@ fn an_application_can_supply_its_own_estimator() {
                 "CongestionControlInterceptor<ConstantBitrate>".to_owned()
             ),
             (Slot::TwccSender, "TwccSenderInterceptor".to_owned()),
+            // The remote description's send limit (`b=TIAS` / `b=AS`), applied to whatever
+            // the estimator says.
             (
                 Slot::Custom(REMOTE_BITRATE_LIMIT_SLOT),
                 "RemoteBitrateLimitInterceptor".to_owned()

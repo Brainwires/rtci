@@ -18,7 +18,7 @@ use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
 use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
 
 fn peer(policy: Option<RTCBundlePolicy>) -> Result<RTCPeerConnection, Box<dyn std::error::Error>> {
-    peer_with(policy, false)
+    peer_with(policy, true)
 }
 
 /// `max_bundle_alias`: `SettingEngineBuilder::with_max_bundle_as_must_bundle`.
@@ -49,7 +49,7 @@ fn peer_with(
 fn offerer(
     policy: Option<RTCBundlePolicy>,
 ) -> Result<RTCPeerConnection, Box<dyn std::error::Error>> {
-    offerer_with(policy, false)
+    offerer_with(policy, true)
 }
 
 fn offerer_with(
@@ -57,7 +57,10 @@ fn offerer_with(
     max_bundle_alias: bool,
 ) -> Result<RTCPeerConnection, Box<dyn std::error::Error>> {
     let mut pc = peer_with(policy, max_bundle_alias)?;
-    pc.add_transceiver_from_kind(RtpCodecKind::Audio, None)?;
+    pc.add_transceiver_from_kind(
+        RtpCodecKind::Audio,
+        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+    )?;
     pc.add_track(video_track("first", 0x0101_0101))?;
     pc.add_track(video_track("second", 0x0202_0202))?;
     pc.create_data_channel("data", None)?;
@@ -141,25 +144,28 @@ fn must_bundle_gives_only_the_first_section_a_transport() -> TestResult {
     Ok(())
 }
 
-/// RFC 9429 section 4.1.1: "'max-bundle' is considered deprecated, and implementations
-/// compliant with this specification SHOULD ignore attempts by the application to select this
-/// bundle policy": the default, balanced, stays in effect. The setting engine can make it the
-/// alias of must-bundle it was defined as.
+/// W3C webrtc-pc section 4.2.5 defines `max-bundle`, and RFC 9429 section 4.1.1 `must-bundle`
+/// as "identically defined": by default both select the one policy. RFC 9429 section 4.1.1:
+/// "'max-bundle' is considered deprecated, and implementations compliant with this
+/// specification SHOULD ignore attempts by the application to select this bundle policy":
+/// with the setting, the default policy, balanced, stays in effect.
 #[test]
-fn max_bundle_is_ignored_unless_made_an_alias_of_must_bundle() -> TestResult {
-    let mut pc = offerer(Some(RTCBundlePolicy::MaxBundle))?;
-    let offer = pc.create_offer(None)?;
-    assert_eq!(
-        shape(&offer.sdp)
-            .into_iter()
-            .map(|(_, bundle_only)| bundle_only)
-            .collect::<Vec<_>>(),
-        vec![false, false, true, false],
-        "balanced:\n{}",
-        offer.sdp
-    );
-
-    let mut pc = offerer_with(Some(RTCBundlePolicy::MaxBundle), true)?;
+fn max_bundle_is_must_bundle_unless_it_is_set_to_be_ignored() -> TestResult {
+    // No setting engine at all: the default.
+    let mut media_engine = MediaEngine::default();
+    media_engine.register_default_codecs()?;
+    let mut pc = RTCPeerConnectionBuilder::new()
+        .with_media_engine(media_engine)
+        .with_configuration(
+            RTCConfigurationBuilder::new()
+                .with_bundle_policy(RTCBundlePolicy::MaxBundle)
+                .build(),
+        )
+        .build(Instant::now())?;
+    pc.add_transceiver_from_kind(RtpCodecKind::Audio, None)?;
+    pc.add_track(video_track("first", 0x0101_0101))?;
+    pc.add_track(video_track("second", 0x0202_0202))?;
+    pc.create_data_channel("data", None)?;
     let offer = pc.create_offer(None)?;
     assert_eq!(
         shape(&offer.sdp)
@@ -168,6 +174,18 @@ fn max_bundle_is_ignored_unless_made_an_alias_of_must_bundle() -> TestResult {
             .collect::<Vec<_>>(),
         vec![false, true, true, true],
         "must-bundle:\n{}",
+        offer.sdp
+    );
+
+    let mut pc = offerer_with(Some(RTCBundlePolicy::MaxBundle), false)?;
+    let offer = pc.create_offer(None)?;
+    assert_eq!(
+        shape(&offer.sdp)
+            .into_iter()
+            .map(|(_, bundle_only)| bundle_only)
+            .collect::<Vec<_>>(),
+        vec![false, false, true, false],
+        "balanced:\n{}",
         offer.sdp
     );
     Ok(())

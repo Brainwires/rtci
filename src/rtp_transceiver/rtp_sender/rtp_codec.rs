@@ -169,9 +169,17 @@ pub(crate) fn codec_parameters_fuzzy_search(
     haystack: &[RTCRtpCodecParameters],
 ) -> (RTCRtpCodecParameters, CodecMatch) {
     let needle_fmtp = fmtp::parse(&needle_rtp_codec.mime_type, &needle_rtp_codec.sdp_fmtp_line);
+    // A format is its encoding name and its clock rate (RFC 8866 section 6.6, `a=rtpmap`):
+    // `telephone-event/8000` and `telephone-event/48000` are two formats. A needle that
+    // states no clock rate (an encoding that leaves its codec to negotiation) matches any.
+    let same_clock_rate = |c: &RTCRtpCodecParameters| {
+        needle_rtp_codec.clock_rate == 0
+            || c.rtp_codec.clock_rate == 0
+            || c.rtp_codec.clock_rate == needle_rtp_codec.clock_rate
+    };
 
     // First attempt to match on mime_type + sdpfmtp_line
-    for c in haystack {
+    for c in haystack.iter().filter(|c| same_clock_rate(c)) {
         let cfmpt = fmtp::parse(&c.rtp_codec.mime_type, &c.rtp_codec.sdp_fmtp_line);
         if needle_fmtp.match_fmtp(&*cfmpt) {
             return (c.clone(), CodecMatch::Exact);
@@ -179,7 +187,7 @@ pub(crate) fn codec_parameters_fuzzy_search(
     }
 
     // Fallback to just mime_type
-    for c in haystack {
+    for c in haystack.iter().filter(|c| same_clock_rate(c)) {
         // MIME types are ASCII-only; eq_ignore_ascii_case is sufficient and allocation-free.
         if c.rtp_codec
             .mime_type
@@ -190,6 +198,33 @@ pub(crate) fn codec_parameters_fuzzy_search(
     }
 
     (RTCRtpCodecParameters::default(), CodecMatch::None)
+}
+
+/// W3C webrtc 5.4 "codec dictionary match": whether two codec dictionaries name the same
+/// codec. The MIME types are equal without regard to case, the clock rates equal, the
+/// channels both absent (0) or equal, and the `sdpFmtpLine`s both absent (empty) or
+/// matching: compared by the format's own rules where it has key-value parameters
+/// (`fmtp::match_fmtp`: H.264 profile and packetization mode, and so on) and as strings
+/// otherwise.
+pub(crate) fn codec_dictionary_match(first: &RTCRtpCodec, second: &RTCRtpCodec) -> bool {
+    if !first.mime_type.eq_ignore_ascii_case(&second.mime_type)
+        || first.clock_rate != second.clock_rate
+        || first.channels != second.channels
+    {
+        return false;
+    }
+    let (first_fmtp, second_fmtp) = (first.sdp_fmtp_line.trim(), second.sdp_fmtp_line.trim());
+    if first_fmtp.is_empty() != second_fmtp.is_empty() {
+        return false;
+    }
+    if first_fmtp.is_empty() {
+        return true;
+    }
+    if !first_fmtp.contains('=') || !second_fmtp.contains('=') {
+        return first_fmtp == second_fmtp;
+    }
+    fmtp::parse(&first.mime_type, first_fmtp)
+        .match_fmtp(&*fmtp::parse(&second.mime_type, second_fmtp))
 }
 
 /// The negotiated codec an encoding is sent with.

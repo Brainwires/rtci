@@ -54,8 +54,14 @@ fn test_opus_and_video_case() -> Result<()> {
     let mut pc = RTCPeerConnectionBuilder::new()
         .with_media_engine(media_engine)
         .build(Instant::now())?;
-    pc.add_transceiver_from_kind(RtpCodecKind::Audio, None)?;
-    pc.add_transceiver_from_kind(RtpCodecKind::Video, None)?;
+    pc.add_transceiver_from_kind(
+        RtpCodecKind::Audio,
+        Some(crate::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+    )?;
+    pc.add_transceiver_from_kind(
+        RtpCodecKind::Video,
+        Some(crate::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+    )?;
 
     let offer = pc.create_offer(None)?;
     assert!(

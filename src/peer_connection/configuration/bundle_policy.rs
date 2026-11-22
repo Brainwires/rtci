@@ -16,13 +16,14 @@ use serde::{Deserialize, Serialize};
 /// an offer without a BUNDLE group an answer accepts (RFC 9429 section 4.1.1). It may not be
 /// changed by `set_configuration` (W3C webrtc-pc "set the configuration").
 ///
-/// # `max-bundle` is deprecated
+/// # `max-bundle` and `must-bundle`
 ///
-/// RFC 9429 section 4.1.1 replaces `max-bundle` with the identically defined `must-bundle` and
-/// has implementations "ignore attempts by the application to select" `max-bundle`. So
-/// [`RTCBundlePolicy::MaxBundle`] behaves as the default (`balanced`) unless
-/// `SettingEngineBuilder::with_max_bundle_as_must_bundle(true)` is set; use
-/// [`RTCBundlePolicy::MustBundle`].
+/// W3C webrtc-pc section 4.2.5 defines `max-bundle`; RFC 9429 section 4.1.1 deprecates that
+/// name and introduces "an identically defined 'must-bundle' policy". Both select the same
+/// policy here. RFC 9429 also has implementations "ignore attempts by the application to
+/// select" `max-bundle` (a SHOULD):
+/// `SettingEngineBuilder::with_max_bundle_as_must_bundle(false)` does that, and
+/// [`RTCBundlePolicy::MaxBundle`] then behaves as the default (`balanced`).
 ///
 /// # Examples
 ///
@@ -79,9 +80,10 @@ pub enum RTCBundlePolicy {
     /// is not bundle-aware, only negotiate one media track. This provides
     /// the best performance by minimizing overhead.
     ///
-    /// **In this engine:** deprecated by RFC 9429 section 4.1.1 and ignored (the default
-    /// policy applies) unless `SettingEngineBuilder::with_max_bundle_as_must_bundle(true)`
-    /// makes it an alias of [`RTCBundlePolicy::MustBundle`].
+    /// **In this engine:** the W3C webrtc-pc name of [`RTCBundlePolicy::MustBundle`]. RFC
+    /// 9429 section 4.1.1 deprecates the name;
+    /// `SettingEngineBuilder::with_max_bundle_as_must_bundle(false)` has it ignored (the
+    /// default policy then applies).
     #[serde(rename = "max-bundle")]
     MaxBundle = 3,
 

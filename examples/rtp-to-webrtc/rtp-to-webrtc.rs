@@ -317,7 +317,6 @@ async fn run_peer_connection(offer: RTCSessionDescription, rtp_listener: UdpSock
                             // Write the RTP packet to the sender
                             if let Some(mut sender) = peer_connection.rtp_sender(sender_id) {
                                 rtp_packet.header.ssrc = sender
-                                    .track()
                                     .ssrcs()
                                     .last()
                                     .ok_or(Error::ErrSenderWithNoSSRCs)?;

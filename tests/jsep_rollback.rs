@@ -273,3 +273,107 @@ fn a_rollback_leaves_the_remote_track_of_the_last_stable_state() -> TestResult {
     );
     Ok(())
 }
+
+/// The signaling state, as the pending descriptions show it.
+fn pending(pc: &RTCPeerConnection) -> RTCSignalingState {
+    match (
+        pc.pending_local_description().is_some(),
+        pc.pending_remote_description().is_some(),
+    ) {
+        (false, false) => RTCSignalingState::Stable,
+        (true, false) => RTCSignalingState::HaveLocalOffer,
+        (false, true) => RTCSignalingState::HaveRemoteOffer,
+        (true, true) => panic!("two pending descriptions"),
+    }
+}
+
+fn peer_with_explicit_rollback_only() -> Result<RTCPeerConnection, Box<dyn std::error::Error>> {
+    use rtc::peer_connection::RTCPeerConnectionBuilder;
+    use rtc::peer_connection::configuration::media_engine::MediaEngine;
+    use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    let mut media_engine = MediaEngine::default();
+    media_engine.register_default_codecs()?;
+    Ok(RTCPeerConnectionBuilder::new()
+        .with_media_engine(media_engine)
+        .with_setting_engine(
+            SettingEngineBuilder::new()
+                .with_implicit_rollback(false)
+                .build(),
+        )
+        .build(Instant::now())?)
+}
+
+/// W3C webrtc-pc section 4.4.2 (`setRemoteDescription`): a remote offer that arrives while a
+/// local offer is pending
+/// rolls the local offer back and is applied, in one call; that is the default. RFC 9429
+/// sections 5.6 and 5.7 leave the rollback to the application, which is
+/// `SettingEngineBuilder::with_implicit_rollback(false)`: the offer is then refused until
+/// the application has rolled its own back.
+#[test]
+fn a_remote_offer_over_a_local_offer_rolls_it_back_unless_rollback_is_left_to_the_application()
+-> TestResult {
+    let glare =
+        |pc: &mut RTCPeerConnection| -> Result<RTCSessionDescription, Box<dyn std::error::Error>> {
+            let mut other = default_peer()?;
+            other.add_track(video_track("theirs", 0x0909_0909))?;
+            let theirs = other.create_offer(None)?;
+            pc.add_track(video_track("ours", 0x0808_0808))?;
+            let ours = pc.create_offer(None)?;
+            pc.set_local_description(Instant::now(), ours)?;
+            signaling_states(pc);
+            Ok(theirs)
+        };
+
+    // Rollback left to the application: RFC 9429's state machine with nothing added.
+    let mut pc = peer_with_explicit_rollback_only()?;
+    let theirs = glare(&mut pc)?;
+    assert!(
+        pc.set_remote_description(Instant::now(), theirs.clone())
+            .is_err()
+    );
+    assert_eq!(pending(&pc), RTCSignalingState::HaveLocalOffer);
+    assert!(pc.pending_local_description().is_some());
+    // Rolled back by the application, the offer is taken.
+    pc.set_local_description(Instant::now(), rollback())?;
+    pc.set_remote_description(Instant::now(), theirs)?;
+    assert_eq!(pending(&pc), RTCSignalingState::HaveRemoteOffer);
+
+    // The implicit rollback, the default.
+    let mut pc = default_peer()?;
+    let theirs = glare(&mut pc)?;
+    pc.set_remote_description(Instant::now(), theirs)?;
+    assert_eq!(pending(&pc), RTCSignalingState::HaveRemoteOffer);
+    assert!(pc.pending_local_description().is_none());
+    assert!(pc.pending_remote_description().is_some());
+    assert_eq!(
+        signaling_states(&mut pc),
+        vec![
+            RTCSignalingState::Stable,
+            RTCSignalingState::HaveRemoteOffer
+        ]
+    );
+    let answer = pc.create_answer(None)?;
+    pc.set_local_description(Instant::now(), answer)?;
+    assert_eq!(pending(&pc), RTCSignalingState::Stable);
+
+    // A remote offer that is refused rolls nothing back.
+    let mut pc = default_peer()?;
+    let theirs = glare(&mut pc)?;
+    let without_fingerprint: String = theirs
+        .sdp
+        .split_inclusive("\r\n")
+        .filter(|line| !line.starts_with("a=fingerprint:"))
+        .collect();
+    assert_ne!(without_fingerprint, theirs.sdp);
+    assert!(
+        pc.set_remote_description(
+            Instant::now(),
+            RTCSessionDescription::offer(without_fingerprint)?
+        )
+        .is_err()
+    );
+    assert_eq!(pending(&pc), RTCSignalingState::HaveLocalOffer);
+    assert!(pc.pending_local_description().is_some());
+    assert!(signaling_states(&mut pc).is_empty());
+    Ok(())
+}

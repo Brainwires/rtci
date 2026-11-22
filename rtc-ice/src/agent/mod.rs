@@ -299,6 +299,15 @@ pub struct MediaPath {
     pub transport_protocol: TransportProtocol,
 }
 
+/// The pair data arrived on. See [`Agent::data_path`].
+#[derive(Debug, Clone, Copy)]
+pub enum DataPath<'a> {
+    /// The path data is sent on: the selected pair's ([`Agent::media_path`]).
+    InUse,
+    /// Another valid pair: its local and remote candidates.
+    Valid(&'a Candidate, &'a Candidate),
+}
+
 /// Represents the ICE agent.
 pub struct Agent {
     pub(crate) crypto_provider: Arc<dyn RTCCryptoProvider>,
@@ -393,6 +402,20 @@ pub struct Agent {
     /// Which remote addresses checks may be sent to. See [`remote_policy`].
     pub(crate) remote_policy: RemotePolicy,
 
+    /// Which of several nominations the controlled agent uses.
+    pub(crate) nomination_acceptance: NominationAcceptance,
+    /// The controlling agent's consent checks carry USE-CANDIDATE (libwebrtc).
+    pub(crate) nominate_on_consent_checks: bool,
+    /// Error responses to unauthenticated requests, or nothing.
+    pub(crate) unauthenticated_requests: UnauthenticatedRequests,
+    /// The token bucket of those error responses: tokens left, and when it was last filled.
+    pub(crate) unauthenticated_response_tokens: u32,
+    pub(crate) unauthenticated_response_refill: Instant,
+    /// Data only from the selected pair's remote address (not RFC 8445 Section 12.2).
+    pub(crate) data_from_selected_pair_only: bool,
+    /// Data on the best valid pair before a pair is selected (RFC 8445 Section 12.1).
+    pub(crate) send_data_before_nomination: bool,
+
     /// The 1:1 NAT mapping applied to the host candidates the application adds.
     pub(crate) ext_ip_mapper: Option<ExternalIpMapper>,
 
@@ -425,7 +448,10 @@ impl Agent {
         config: Arc<AgentConfig>,
         crypto_provider: Arc<dyn RTCCryptoProvider>,
     ) -> Result<Self> {
-        let tie_breaker = generate_tie_breaker(crypto_provider.random())?;
+        let tie_breaker = match config.tie_breaker {
+            Some(tie_breaker) => tie_breaker,
+            None => generate_tie_breaker(crypto_provider.random())?,
+        };
 
         let mut mdns_local_name = config.multicast_dns_local_name.clone();
         if mdns_local_name.is_empty() {
@@ -601,6 +627,14 @@ impl Agent {
                 filter: config.remote_address_filter.clone(),
             },
             ext_ip_mapper,
+
+            nomination_acceptance: config.nomination_acceptance,
+            nominate_on_consent_checks: config.nominate_on_consent_checks,
+            unauthenticated_requests: config.unauthenticated_requests,
+            unauthenticated_response_tokens: MAX_UNAUTHENTICATED_RESPONSE_BURST,
+            unauthenticated_response_refill: now,
+            data_from_selected_pair_only: config.data_from_selected_pair_only,
+            send_data_before_nomination: config.send_data_before_nomination,
 
             write_outs: VecDeque::new(),
             event_outs: VecDeque::new(),
@@ -1060,6 +1094,11 @@ impl Agent {
         c.last_received = learned.last_received;
         c.last_authenticated = learned.last_authenticated;
         c.last_consent = learned.last_consent;
+        // The candidate keeps the identity its pairs are known by: the statistics of a pair
+        // (and its packet counters) are keyed by the two candidates' ids, and a pair that is
+        // carrying data must not become another pair because its remote candidate was
+        // signalled after all.
+        c.id = learned.id.clone();
         if c.tcp_type() == TcpType::Unspecified {
             c.tcp_type = learned.tcp_type();
         }
@@ -1177,11 +1216,37 @@ impl Agent {
         self.is_controlling
     }
 
-    /// Sets the controlling role.
+    /// Sets the role, when the roles are determined (RFC 8445 Section 6.1.1): the agent that
+    /// started the ICE processing is controlling, unless exactly one of the two is lite (the
+    /// full one is controlling then).
     ///
-    /// Determined by which side offered; the two agents must not agree, or nomination stalls.
+    /// "Once the roles are determined for a session, they persist throughout the lifetime of
+    /// the session": an ICE restart keeps them (the agent does, by itself), and they are
+    /// determined again at a restart only when an agent changed between full and lite. A role
+    /// conflict is repaired by the agent (Section 7.3.1.1).
+    ///
+    /// The pairs the agent holds get the priority of the new role (Section 6.1.2.3), and a
+    /// nomination that was being made is dropped: only the controlling agent nominates.
     pub fn set_role(&mut self, is_controlling: bool) {
+        if self.is_controlling == is_controlling {
+            return;
+        }
         self.is_controlling = is_controlling;
+        for pair in &mut self.candidate_pairs {
+            pair.ice_role_controlling = is_controlling;
+            pair.nominate = false;
+        }
+        self.nominated_pair = None;
+    }
+
+    /// The tiebreaker the agent's checks carry (RFC 8445 Section 5.2).
+    pub fn tie_breaker(&self) -> u64 {
+        self.tie_breaker
+    }
+
+    /// Whether this agent is a lite implementation.
+    pub fn is_lite(&self) -> bool {
+        self.lite
     }
 
     /// Replaces the candidate types the agent accepts as local candidates from now on
@@ -1253,8 +1318,95 @@ impl Agent {
     /// pair until a new pair is selected by the restart". Without it every packet between
     /// `apply_restart` and the first nomination of the new generation was dropped, on both
     /// sides, for as long as the offer/answer exchange took.
+    ///
+    /// With [`AgentConfig::send_data_before_nomination`], and before the first pair is
+    /// selected, it is the best valid pair's (Section 12.1: "An ICE agent MAY send data on any
+    /// valid pair before selected pairs have been produced for the data stream").
     pub fn media_path(&self) -> Option<MediaPath> {
-        self.selected_media_path().or(self.previous_media_path)
+        self.selected_media_path()
+            .or(self.previous_media_path)
+            .or_else(|| self.valid_media_path())
+    }
+
+    /// The best valid pair's path, when data may be sent before a pair is selected. A lite
+    /// agent has no valid pair before a nomination (Section 12.1.1).
+    fn valid_media_path(&self) -> Option<MediaPath> {
+        if !self.send_data_before_nomination {
+            return None;
+        }
+        let pair = &self.candidate_pairs[self.get_best_valid_candidate_pair()?];
+        Some(self.path_of(pair.local_index, pair.remote_index))
+    }
+
+    fn path_of(&self, local_index: usize, remote_index: usize) -> MediaPath {
+        let local = &self.local_candidates[local_index];
+        MediaPath {
+            local_addr: local.base_addr(),
+            peer_addr: self.remote_candidates[remote_index].addr(),
+            transport_protocol: local.network_type().to_protocol(),
+        }
+    }
+
+    /// Whether data (anything that is not STUN: DTLS, SRTP) that arrived on `transport` is
+    /// accepted.
+    ///
+    /// RFC 8445 Section 12.2: "ICE implementations SHOULD by default be prepared to receive
+    /// data on any of the candidates provided in the most recent candidate exchange with the
+    /// peer", and "an agent will be able to determine that a data stream is from the same peer
+    /// as a consequence of the STUN exchange that proceeds media data transmission". So, once
+    /// there is a path to send on ([`Agent::media_path`]), data is accepted on any local
+    /// candidate, from that path's remote address and from the remote candidate of any valid
+    /// pair: an address one of the agent's own checks was answered from, by someone who holds
+    /// the peer's password. A source that only sent requests, or that no check reached, is
+    /// not accepted.
+    ///
+    /// With [`AgentConfig::data_from_selected_pair_only`] only the remote address of the path
+    /// data is sent on is accepted.
+    pub fn accepts_data(&self, transport: TransportContext) -> bool {
+        self.data_path(transport).is_some()
+    }
+
+    /// As [`Agent::accepts_data`], saying which pair the data arrived on: the one in use, or
+    /// another valid pair (its local and remote candidates).
+    pub fn data_path(&self, transport: TransportContext) -> Option<DataPath<'_>> {
+        let path = self.media_path()?;
+        if self.data_from_selected_pair_only {
+            // (The hardening compares the source only, as it always did.)
+            return (transport.peer_addr == path.peer_addr).then_some(DataPath::InUse);
+        }
+        if transport.peer_addr == path.peer_addr
+            && transport.local_addr == path.local_addr
+            && transport.transport_protocol == path.transport_protocol
+        {
+            return Some(DataPath::InUse);
+        }
+        // "On any of the candidates provided": the datagram arrived on one of them.
+        self.find_local_candidate(transport.local_addr, transport.transport_protocol)?;
+        let valid = |p: &&CandidatePair| {
+            p.valid
+                && p.state == CandidatePairState::Succeeded
+                && self.remote_candidates[p.remote_index].addr() == transport.peer_addr
+                && self.local_candidates[p.local_index]
+                    .network_type()
+                    .to_protocol()
+                    == transport.transport_protocol
+        };
+        // The valid pair it arrived on, when there is one for this local candidate too.
+        let exact = self
+            .candidate_pairs
+            .iter()
+            .filter(valid)
+            .find(|p| self.local_candidates[p.local_index].base_addr() == transport.local_addr);
+        if let Some(p) = exact.or_else(|| self.candidate_pairs.iter().find(valid)) {
+            return Some(DataPath::Valid(
+                &self.local_candidates[p.local_index],
+                &self.remote_candidates[p.remote_index],
+            ));
+        }
+        // From the remote address of the path in use, on another local candidate.
+        (transport.peer_addr == path.peer_addr
+            && transport.transport_protocol == path.transport_protocol)
+            .then_some(DataPath::InUse)
     }
 
     fn selected_media_path(&self) -> Option<MediaPath> {
@@ -1762,7 +1914,11 @@ impl Agent {
         } else if self.disconnected_timeout != ZERO_DURATION
             && unanswered >= self.disconnected_timeout
         {
+            let was = self.connection_state;
             self.update_connection_state(Some(now), ConnectionState::Disconnected);
+            if was != ConnectionState::Disconnected {
+                self.fall_back_to_another_nominated_pair(now);
+            }
         } else {
             self.update_connection_state(Some(now), self.healthy_state());
         }
@@ -1785,13 +1941,12 @@ impl Agent {
                 self.next_consent_at = Some(now + self.next_consent_interval());
                 self.consent_unanswered_since.get_or_insert(now);
                 self.candidate_pairs[pair_index].on_consent_request_sent();
-                // The controlling agent's consent checks repeat the nomination of the pair
-                // they are sent on (USE-CANDIDATE), as libwebrtc's do. It nominates no other
-                // pair (RFC 8445 Section 8.1.1), and a peer that lost its state without an
-                // ICE restart (a new peer connection that takes over the address and the
-                // credentials) learns from them which pair is in use: as the controlled
-                // agent it would otherwise wait for a nomination that was made long ago.
-                self.send_check(now, pair_index, self.is_controlling, true);
+                // A consent check is a plain Binding request (RFC 7675 Section 5.1); RFC 8445
+                // Section 7.1.2 asks for USE-CANDIDATE "in order to nominate a candidate
+                // pair", which was done. libwebrtc's controlling agent repeats it on every
+                // check of its selected pair: `nominate_on_consent_checks`.
+                let use_candidate = self.is_controlling && self.nominate_on_consent_checks;
+                self.send_check(now, pair_index, use_candidate, true);
             }
             Some(_) => {}
         }
@@ -2450,6 +2605,23 @@ impl Agent {
                     remote_addr,
                     rejection
                 );
+                // RFC 8489 Section 9.1.3, in its order: no MESSAGE-INTEGRITY or no USERNAME
+                // is 400; a username that is not valid here is 401; a MESSAGE-INTEGRITY that
+                // does not match is 401. (A FINGERPRINT that does not match is not answered:
+                // the datagram is not STUN for this agent, Section 7.3.)
+                use stun::error_code::{CODE_BAD_REQUEST, CODE_UNAUTHENTICATED};
+                use stun::validated::Rejection;
+                let code = match rejection {
+                    Rejection::IntegrityMissing => Some(CODE_BAD_REQUEST),
+                    Rejection::IntegrityMismatch if !m.contains(ATTR_USERNAME) => {
+                        Some(CODE_BAD_REQUEST)
+                    }
+                    Rejection::IntegrityMismatch => Some(CODE_UNAUTHENTICATED),
+                    _ => None,
+                };
+                if let Some(code) = code {
+                    self.reject_unauthenticated_request(now, m, code, local_index, remote_addr);
+                }
                 return Err(rejection_error(&rejection));
             }
         }
@@ -2460,6 +2632,14 @@ impl Agent {
                 remote_addr,
                 err
             );
+            // The integrity matched, so the sender holds the password: the username is
+            // absent (400) or not this agent's (401).
+            let code = if m.contains(ATTR_USERNAME) {
+                stun::error_code::CODE_UNAUTHENTICATED
+            } else {
+                stun::error_code::CODE_BAD_REQUEST
+            };
+            self.reject_unauthenticated_request(now, m, code, local_index, remote_addr);
             return Err(err);
         }
 
@@ -2478,6 +2658,80 @@ impl Agent {
         }
 
         self.process_binding_request(now, m, local_index, remote_addr, true)
+    }
+
+    /// Answers a Binding request that failed the short-term credential check with `code` (400
+    /// or 401, RFC 8489 Section 9.1.3), unless the agent is set to drop such requests.
+    ///
+    /// The source of such a request is unverified, so the answer must be of no use to someone
+    /// who forged it: the response carries the error code and FINGERPRINT only (no reason
+    /// phrase, and no MESSAGE-INTEGRITY: there is no key the two share), it is sent only when
+    /// it is no longer than the request, and at most [`MAX_UNAUTHENTICATED_RESPONSE_BURST`]
+    /// of them go out in a burst, one more per [`UNAUTHENTICATED_RESPONSE_INTERVAL`]. Past
+    /// that the request is dropped.
+    fn reject_unauthenticated_request(
+        &mut self,
+        now: Instant,
+        m: &Message,
+        code: stun::error_code::ErrorCode,
+        local_index: usize,
+        remote_addr: SocketAddr,
+    ) {
+        if self.unauthenticated_requests == UnauthenticatedRequests::Drop
+            || !self.remote_policy.allows_candidate(remote_addr)
+            || !self
+                .remote_policy
+                .allows_pair(self.local_candidates[local_index].base_addr(), remote_addr)
+        {
+            return;
+        }
+        // The token bucket: one token per interval since the last refill, up to the burst.
+        let elapsed = now.saturating_duration_since(self.unauthenticated_response_refill);
+        let earned = elapsed.as_nanos() / UNAUTHENTICATED_RESPONSE_INTERVAL.as_nanos();
+        if earned > 0 {
+            let earned = u32::try_from(earned).unwrap_or(u32::MAX);
+            self.unauthenticated_response_tokens = self
+                .unauthenticated_response_tokens
+                .saturating_add(earned)
+                .min(MAX_UNAUTHENTICATED_RESPONSE_BURST);
+            self.unauthenticated_response_refill = if self.unauthenticated_response_tokens
+                == MAX_UNAUTHENTICATED_RESPONSE_BURST
+            {
+                now
+            } else {
+                self.unauthenticated_response_refill + UNAUTHENTICATED_RESPONSE_INTERVAL * earned
+            };
+        }
+        if self.unauthenticated_response_tokens == 0 {
+            return;
+        }
+
+        let mut out = Message::new();
+        let built = out.build(&[
+            Box::new(MessageType::new(METHOD_BINDING, CLASS_ERROR_RESPONSE)),
+            Box::new(m.transaction_id),
+            Box::new(stun::error_code::ErrorCodeAttribute {
+                code,
+                reason: vec![],
+            }),
+            Box::new(FINGERPRINT),
+        ]);
+        if let Err(err) = built {
+            warn!(
+                "[{}]: cannot build the {} response for {}: {}",
+                self.get_name(),
+                code.0,
+                remote_addr,
+                err
+            );
+            return;
+        }
+        if out.raw.len() > m.raw.len() {
+            // Never more bytes out than came in.
+            return;
+        }
+        self.unauthenticated_response_tokens -= 1;
+        self.send_stun_to(now, &out, local_index, remote_addr);
     }
 
     fn remember_early_request(&mut self, m: &Message, local_index: usize, remote_addr: SocketAddr) {
@@ -2545,6 +2799,15 @@ impl Agent {
         // 487 gets nothing else: no success response, no candidate, no triggered check.
         if respond && self.detect_role_conflict(now, m)? {
             self.send_role_conflict_error(now, m, local_index, remote_addr);
+            // A peer that claimed the controlling role holds no nomination of ours: it was
+            // not the controlled agent. If this agent, which keeps the controlling role, has
+            // concluded, its nomination is lost on the peer (a peer that lost its state
+            // without an ICE restart), and nothing else would bring it back: the pair is
+            // nominated again, the same one (RFC 8445 Section 8.1.1: "the agent MUST NOT
+            // nominate another pair").
+            if self.is_controlling {
+                self.repeat_nomination();
+            }
             return Ok(());
         }
 

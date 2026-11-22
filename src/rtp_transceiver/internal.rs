@@ -6,7 +6,8 @@ use crate::peer_connection::sdp::codecs_from_media_description;
 use crate::rtp_transceiver::rtp_receiver::internal::RTCRtpReceiverInternal;
 use crate::rtp_transceiver::rtp_sender::internal::RTCRtpSenderInternal;
 use crate::rtp_transceiver::rtp_sender::rtp_codec::{
-    CodecMatch, codec_parameters_fuzzy_search, find_rtx_payload_type, rtcp_feedback_intersection,
+    CodecMatch, codec_dictionary_match, codec_parameters_fuzzy_search, find_rtx_payload_type,
+    is_repair_codec, repair_family, rtcp_feedback_intersection,
 };
 use crate::rtp_transceiver::rtp_sender::{RTCRtpCodecParameters, RtpCodecKind};
 use crate::rtp_transceiver::{
@@ -36,7 +37,21 @@ pub(crate) struct RTCRtpTransceiverInternal {
     direction: RTCRtpTransceiverDirection,
     current_direction: RTCRtpTransceiverDirection,
     preferred_codecs: Vec<RTCRtpCodecParameters>,
+    /// W3C `[[Stopping]]`: `stop()` was called, or the transceiver is stopped. Its direction
+    /// reads "stopped" and offers reject its m= section.
+    stopping: bool,
+    /// W3C `[[Stopped]]`: a description rejected the m= section (or a rollback removed the
+    /// transceiver). Its current direction reads "stopped".
     stopped: bool,
+    /// W3C `[[Receptive]]`: whether the last description applied has this transceiver
+    /// receive (a local offer or any answer with a receiving direction).
+    receptive: bool,
+    /// W3C `[[FiredDirection]]`: the direction of the last remote description processed for
+    /// remote tracks, `None` before the first.
+    fired_direction: Option<RTCRtpTransceiverDirection>,
+    /// Whether `[[CurrentDirection]]` ever was sendrecv or sendonly: such a transceiver's
+    /// sender "has been used to send" and `addTrack` does not take it (W3C webrtc 5.1).
+    used_to_send: bool,
     /// Whether this transceiver was implicitly created while applying a remote offer
     /// (as opposed to being created by the application via `add_track`/`add_transceiver_*`).
     /// Used by rollback (RFC 9429, Section 5.7): transceivers created by a remote offer that
@@ -74,12 +89,16 @@ impl fmt::Debug for RTCRtpTransceiverInternal {
             .field("direction", &self.direction)
             .field("current_direction", &self.current_direction)
             .field("preferred_codecs", &self.preferred_codecs)
+            .field("stopping", &self.stopping)
             .field("stopped", &self.stopped)
             .finish()
     }
 }
 
 impl RTCRtpTransceiverInternal {
+    /// A transceiver with its sender and its receiver, which it has from the start and
+    /// keeps (W3C webrtc 5.4 "create an RTCRtpTransceiver"): with `track`, a sender sending
+    /// it; without, a sender whose track is null.
     pub(crate) fn new(
         kind: RtpCodecKind,
         track: Option<MediaStreamTrack>,
@@ -88,25 +107,23 @@ impl RTCRtpTransceiverInternal {
         Self {
             mid: None,
             kind,
-            sender: if let Some(track) = track {
-                Some(RTCRtpSenderInternal::new(
-                    kind,
-                    track,
-                    init.streams,
-                    init.send_encodings,
-                ))
-            } else {
-                None
-            },
-            receiver: if init.direction.has_recv() {
-                Some(RTCRtpReceiverInternal::new(kind, vec![]))
-            } else {
-                None
-            },
+            sender: Some(match track {
+                Some(track) => {
+                    RTCRtpSenderInternal::new(kind, track, init.streams, init.send_encodings)
+                }
+                None => {
+                    RTCRtpSenderInternal::without_track(kind, init.streams, init.send_encodings)
+                }
+            }),
+            receiver: Some(RTCRtpReceiverInternal::new(kind, vec![])),
             direction: init.direction,
             current_direction: RTCRtpTransceiverDirection::Unspecified,
             preferred_codecs: vec![],
+            stopping: false,
             stopped: false,
+            receptive: false,
+            fired_direction: None,
+            used_to_send: false,
             created_by_remote_description: false,
             associable_with_remote_offer: true,
             header_extensions_to_negotiate: None,
@@ -114,6 +131,37 @@ impl RTCRtpTransceiverInternal {
             remote_bandwidth: RTCRemoteBandwidth::default(),
             remote_rtcp_xr: None,
         }
+    }
+
+    /// Whether the sender is described in this transceiver's m= section (its `a=msid` and
+    /// SSRC lines) and counts as sending there: it has a track, or the transceiver's direction
+    /// sends (RFC 9429 section 5.2.1), and it has encodings to describe.
+    pub(crate) fn describes_sender(&self) -> bool {
+        self.sender.as_ref().is_some_and(|sender| {
+            sender.has_send_encodings() && (sender.has_track() || self.direction.has_send())
+        })
+    }
+
+    pub(crate) fn receptive(&self) -> bool {
+        self.receptive
+    }
+
+    pub(crate) fn set_receptive(&mut self, receptive: bool) {
+        self.receptive = receptive;
+    }
+
+    pub(crate) fn fired_direction(&self) -> Option<RTCRtpTransceiverDirection> {
+        self.fired_direction
+    }
+
+    pub(crate) fn set_fired_direction(&mut self, direction: Option<RTCRtpTransceiverDirection>) {
+        self.fired_direction = direction;
+    }
+
+    /// Whether the sender "has been used to send": `[[CurrentDirection]]` was once sendrecv
+    /// or sendonly.
+    pub(crate) fn used_to_send(&self) -> bool {
+        self.used_to_send
     }
 
     pub(crate) fn associable_with_remote_offer(&self) -> bool {
@@ -211,35 +259,55 @@ impl RTCRtpTransceiverInternal {
         self.current_direction
     }
 
-    /// Irreversibly stops the transceiver.
+    /// W3C webrtc 5.4 "stop sending and receiving": the sender stops and says BYE for each
+    /// stream it sent, the receiver stops and its track ends, `[[Direction]]` becomes
+    /// inactive and `[[Stopping]]` true. What `RTCRtpTransceiver.stop()` does; the
+    /// transceiver is stopped once a description rejects its m= section.
     ///
-    /// After calling this method, the transceiver will no longer send or receive media.
-    /// This operation cannot be undone.
+    /// # Returns
     ///
-    /// # Specification
-    ///
-    /// See [RTCRtpTransceiver.stop()](https://www.w3.org/TR/webrtc/#dom-rtcrtptransceiver-stop).
-    pub(crate) fn stop(
+    /// Whether the receiver's track ended now (it was live), for the caller to announce.
+    pub(crate) fn stop_sending_and_receiving(
         &mut self,
         media_engine: &MediaEngine,
         interceptor: &mut dyn Interceptor,
-    ) -> Result<()> {
-        if self.stopped {
-            return Ok(());
+    ) -> Result<bool> {
+        if self.stopping {
+            return Ok(false);
         }
-        self.stopped = true;
+        self.stopping = true;
 
         if let Some(sender) = self.sender_mut() {
             sender.stop(media_engine, interceptor)?;
         }
+        let mut ended = false;
         if let Some(receiver) = self.receiver_mut() {
             receiver.stop(media_engine, interceptor)?;
+            ended = receiver.end_track();
         }
 
         self.direction = RTCRtpTransceiverDirection::Inactive;
-        self.current_direction = RTCRtpTransceiverDirection::Inactive;
 
-        Ok(())
+        Ok(ended)
+    }
+
+    /// W3C webrtc 5.4 "stop the RTCRtpTransceiver": what a rejected m= section and a rollback
+    /// do. Stops sending and receiving unless `stop()` already did, then `[[Stopped]]` is
+    /// true, `[[Receptive]]` false and `[[CurrentDirection]]` null.
+    ///
+    /// # Returns
+    ///
+    /// Whether the receiver's track ended now, for the caller to announce.
+    pub(crate) fn stop(
+        &mut self,
+        media_engine: &MediaEngine,
+        interceptor: &mut dyn Interceptor,
+    ) -> Result<bool> {
+        let ended = self.stop_sending_and_receiving(media_engine, interceptor)?;
+        self.stopped = true;
+        self.receptive = false;
+        self.current_direction = RTCRtpTransceiverDirection::Unspecified;
+        Ok(ended)
     }
 
     /// Sets the preferred codec list for this transceiver.
@@ -281,6 +349,66 @@ impl RTCRtpTransceiverInternal {
         Ok(())
     }
 
+    /// W3C webrtc 5.4 `setCodecPreferences`, the steps before the codecs are stored:
+    /// duplicates are removed, keeping the first; each codec has to match one the engine can
+    /// send or receive for this kind (the codec dictionary match; the retransmission format
+    /// matches by name, as `getCapabilities` lists it once, without an `apt`); and a list of
+    /// nothing but RTX, RED, FEC and comfort noise formats is refused.
+    pub(crate) fn validate_codec_preferences(
+        &self,
+        codecs: Vec<RTCRtpCodecParameters>,
+        media_engine: &MediaEngine,
+    ) -> Result<Vec<RTCRtpCodecParameters>> {
+        if codecs.is_empty() {
+            return Ok(codecs);
+        }
+        let mut unique: Vec<RTCRtpCodecParameters> = Vec::with_capacity(codecs.len());
+        for codec in codecs {
+            // The same codec twice: the same name, clock rate, channels and parameters.
+            if !unique.iter().any(|kept| {
+                let (kept, codec) = (&kept.rtp_codec, &codec.rtp_codec);
+                kept.mime_type.eq_ignore_ascii_case(&codec.mime_type)
+                    && kept.clock_rate == codec.clock_rate
+                    && kept.channels == codec.channels
+                    && kept.sdp_fmtp_line.trim() == codec.sdp_fmtp_line.trim()
+            }) {
+                unique.push(codec);
+            }
+        }
+        let capabilities = media_engine.get_codecs_by_kind(self.kind());
+        for codec in &unique {
+            let is_rtx =
+                is_repair_codec(&codec.rtp_codec) && repair_family(&codec.rtp_codec) == "rtx";
+            let supported = capabilities.iter().any(|capability| {
+                if is_rtx {
+                    capability
+                        .rtp_codec
+                        .mime_type
+                        .eq_ignore_ascii_case(&codec.rtp_codec.mime_type)
+                        && capability.rtp_codec.clock_rate == codec.rtp_codec.clock_rate
+                } else {
+                    codec_dictionary_match(&codec.rtp_codec, &capability.rtp_codec)
+                }
+            });
+            if !supported {
+                return Err(Error::InvalidModificationError);
+            }
+        }
+        let is_auxiliary = |codec: &RTCRtpCodecParameters| {
+            is_repair_codec(&codec.rtp_codec)
+                || codec
+                    .rtp_codec
+                    .mime_type
+                    .rsplit('/')
+                    .next()
+                    .is_some_and(|subtype| subtype.eq_ignore_ascii_case("CN"))
+        };
+        if unique.iter().all(is_auxiliary) {
+            return Err(Error::InvalidModificationError);
+        }
+        Ok(unique)
+    }
+
     pub(crate) fn get_codec_preferences(&self) -> &[RTCRtpCodecParameters] {
         &self.preferred_codecs
     }
@@ -300,7 +428,14 @@ impl RTCRtpTransceiverInternal {
         Ok(())
     }
 
+    /// Whether the transceiver is stopping or stopped: an offer rejects its m= section, and
+    /// it neither sends nor receives. What RFC 9429 calls a stopped RtpTransceiver.
     pub(crate) fn stopped(&self) -> bool {
+        self.stopping || self.stopped
+    }
+
+    /// W3C `[[Stopped]]`.
+    pub(crate) fn is_stopped(&self) -> bool {
         self.stopped
     }
 
@@ -376,6 +511,7 @@ impl RTCRtpTransceiverInternal {
     pub(crate) fn set_current_direction(&mut self, d: RTCRtpTransceiverDirection) {
         let previous: RTCRtpTransceiverDirection = self.current_direction;
         self.current_direction = d;
+        self.used_to_send |= d.has_send();
 
         if d != previous {
             trace!("Changing current direction of transceiver from {previous} to {d}",);

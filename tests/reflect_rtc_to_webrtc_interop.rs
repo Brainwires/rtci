@@ -383,7 +383,6 @@ async fn test_reflect_rtc_to_webrtc() -> Result<()> {
                 .unwrap_or(96);
 
             let ssrc = rtp_sender
-                .track()
                 .ssrcs()
                 .last()
                 .ok_or(Error::ErrSenderWithNoSSRCs)?;

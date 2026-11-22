@@ -161,6 +161,14 @@ impl RTCCrypto for DeterministicCrypto {
         self.inner.crypto().new_cbc(algorithm, key)
     }
 
+    fn new_header_mask(
+        &self,
+        algorithm: crate::HeaderMaskAlgorithm,
+        key: &[u8],
+    ) -> Result<Box<dyn crate::HeaderMask>, CryptoError> {
+        self.inner.crypto().new_header_mask(algorithm, key)
+    }
+
     fn start_key_exchange(
         &self,
         algorithm: KeyExchangeAlgorithm,

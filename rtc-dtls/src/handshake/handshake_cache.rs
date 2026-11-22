@@ -266,11 +266,9 @@ impl HandshakeCache {
 
         merged.extend_from_slice(additional);
 
-        match hf {
-            CipherSuiteHash::Sha256 => crypto
-                .hash(crypto::HashAlgorithm::Sha256, &merged)
-                .map_err(|error| Error::Crypto(error.to_string())),
-        }
+        crypto
+            .hash(hf.hash_algorithm(), &merged)
+            .map_err(|error| Error::Crypto(error.to_string()))
     }
 
     /// Whether `data`, one complete handshake message with its header, is byte for byte the

@@ -7,6 +7,7 @@ use sctp::{Association, AssociationHandle};
 use shared::error::Result;
 use shared::{TransportContext, TransportProtocol};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 pub(crate) mod capabilities;
 pub(crate) mod state;
@@ -22,9 +23,64 @@ pub(crate) const SCTP_MAX_CHANNELS: u16 = u16::MAX;
 /// one is refused.
 pub(crate) const MAX_SCTP_ASSOCIATIONS_PER_DTLS_TRANSPORT: u32 = 1;
 
+/// RFC 8831 section 6.6: the largest message sent on an association that does not interleave
+/// user messages, "16 KB".
+pub(crate) const MAX_MESSAGE_SIZE_WITHOUT_INTERLEAVING: u32 = 16 * 1024;
+
 /// The SCTP port this side advertises (`a=sctp-port`) for its first association: the value
 /// every browser uses.
 pub(crate) const DEFAULT_SCTP_PORT: u16 = 5000;
+
+/// What lies under the SCTP association, as far as the size of its packets goes: the selected
+/// ICE candidate pair and the DTLS record protection.
+///
+/// RFC 8831 section 5: "The initial Path MTU at the IP layer SHOULD NOT exceed 1200 bytes for
+/// IPv4 and 1280 bytes for IPv6." The association does not probe the path (no RFC 4821
+/// discovery), so that initial value is the one it keeps, and an SCTP packet is what is left
+/// of it under the headers below.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub(crate) struct SctpPath {
+    /// The selected pair's addresses are IPv6.
+    pub(crate) ipv6: bool,
+    /// The selected pair runs over TCP (RFC 6544), with the framing of RFC 4571.
+    pub(crate) tcp: bool,
+    /// The local candidate is a relayed one: the data travels in TURN ChannelData.
+    pub(crate) relayed: bool,
+    /// What the negotiated DTLS cipher suite adds to a record's payload (explicit nonce, tag,
+    /// padding), without the record header.
+    pub(crate) dtls_record_expansion: usize,
+}
+
+impl SctpPath {
+    /// RFC 8831 section 5: the IP-layer path MTU an association starts from.
+    const IPV4_PATH_MTU: u32 = 1200;
+    const IPV6_PATH_MTU: u32 = 1280;
+    /// The DTLS record header (RFC 6347 section 4.1): type, version, epoch, sequence number,
+    /// length.
+    const DTLS_RECORD_HEADER: u32 = 13;
+    /// The record expansion assumed while no cipher suite is negotiated: an AEAD suite with
+    /// an 8-byte explicit nonce and a 16-byte tag (AES-GCM), the largest of the AEAD suites.
+    pub(crate) const DEFAULT_DTLS_RECORD_EXPANSION: usize = 24;
+
+    /// The largest SCTP packet (common header and chunks) that fits the path: the IP-layer
+    /// MTU less the IP header, the UDP header (or the TCP header and the two-byte frame
+    /// length of RFC 4571), the four-byte TURN ChannelData header on a relayed candidate, and
+    /// the DTLS record header and expansion.
+    pub(crate) fn packet_budget(&self) -> u32 {
+        let (path_mtu, ip_header) = if self.ipv6 {
+            (Self::IPV6_PATH_MTU, 40)
+        } else {
+            (Self::IPV4_PATH_MTU, 20)
+        };
+        let transport_header = if self.tcp { 20 + 2 } else { 8 };
+        let turn_header = if self.relayed { 4 } else { 0 };
+        let dtls = Self::DTLS_RECORD_HEADER + self.dtls_record_expansion as u32;
+        path_mtu
+            .saturating_sub(ip_header + transport_header + turn_header)
+            .saturating_sub(dtls)
+            .max(::sctp::MIN_DATA_PACKET_MTU)
+    }
+}
 
 /// What the application asked the next offer to do with the SCTP association (RFC 8841
 /// section 10.5).
@@ -34,6 +90,9 @@ pub(crate) enum SctpRenegotiation {
     Replace,
     /// Close it and establish none: the offer carries `a=sctp-port:0`.
     Close,
+    /// Close it together with the DTLS association under it: the data section of the offer
+    /// (or of the answer to the peer's next offer) is rejected, its m= line port zero.
+    Reject,
 }
 
 /// What a completed offer/answer exchange did to the SCTP transport.
@@ -84,8 +143,35 @@ pub(crate) struct SctpTransport {
     // `EndpointConfig` in `start()`. None uses the sctp crate default (INITIAL_MTU, 1191).
     pub(crate) mtu: Option<u32>,
 
-    // Streams share the bytes sent by weight (RFC 8260 section 3.6), off by default.
+    // Streams share the bytes sent by weight (RFC 8260 section 3.6), each data channel's
+    // priority being its stream's weight (RFC 8831 section 6.4). On unless the application
+    // turned it off, which gives first-come-first-served.
     pub(crate) weighted_fair_queueing: bool,
+
+    // User message interleaving (RFC 8260) is announced to the peer and used when the peer
+    // announces it too (RFC 8831 sections 6.1 and 6.6: it "SHOULD be used"). On by default.
+    pub(crate) message_interleaving: bool,
+
+    // The zero checksum of RFC 9653 is announced as acceptable and used when the peer accepts
+    // it too: the association runs over DTLS, which is the alternate error detection method
+    // the RFC defines (section 6). On by default.
+    pub(crate) zero_checksum: bool,
+
+    // RFC 8831 section 6.6: "As long as message interleaving is not supported, the sender
+    // SHOULD limit the maximum message size to 16 KB to avoid monopolization." On by default:
+    // on an association that did not negotiate interleaving, a message over
+    // `MAX_MESSAGE_SIZE_WITHOUT_INTERLEAVING` is refused.
+    pub(crate) limit_message_size_without_interleaving: bool,
+
+    // The crypto provider State Cookies are authenticated with (RFC 9260 section 5.1.3). With
+    // one the accepting side of the handshake keeps no state before the COOKIE ECHO. `None`
+    // only in unit tests that build a transport by hand.
+    pub(crate) cookie_provider: Option<Arc<dyn crypto::RTCCryptoProvider>>,
+
+    /// The largest SCTP packet the path below carries, as worked out from the selected
+    /// candidate pair and the DTLS cipher suite ([`SctpPath::packet_budget`]). `None` until a
+    /// pair is selected. `mtu` above, when the application set it, takes its place.
+    pub(crate) path_mtu: Option<u32>,
 
     // The largest message accepted from the peer: the `max-message-size` this side advertised
     // (RFC 8841 6.1), which is not the negotiated send limit above. 0 before `start()`.
@@ -138,7 +224,12 @@ impl SctpTransport {
             negotiated_max_message_size: None,
             max_receive_buffer_size,
             mtu,
-            weighted_fair_queueing: false,
+            weighted_fair_queueing: true,
+            message_interleaving: true,
+            zero_checksum: true,
+            limit_message_size_without_interleaving: true,
+            cookie_provider: None,
+            path_mtu: None,
             receive_message_limit: 0,
             local_port: DEFAULT_SCTP_PORT,
             negotiated_ports: None,
@@ -180,6 +271,8 @@ impl SctpTransport {
         match self.staged {
             Some(SctpRenegotiation::Close) => 0,
             Some(SctpRenegotiation::Replace) => self.next_port(),
+            // A rejected section carries no `a=sctp-port`.
+            Some(SctpRenegotiation::Reject) => self.local_port,
             None if self.port_zero => 0,
             None if self.association_lost() => self.next_port(),
             None => self.local_port,
@@ -229,6 +322,13 @@ impl SctpTransport {
                     return Ok(SctpNegotiationOutcome::Unchanged);
                 }
                 self.stop();
+                if negotiated == SctpNegotiation::Rejected {
+                    // RFC 8841 section 10.5: "If the offerer wants to establish an SCTP
+                    // association, and another SCTP association was previously closed, the
+                    // offerer MUST associate an SDP 'sctp-port' attribute with a new attribute
+                    // value"; only one closed with `a=sctp-port:0` may have its port again.
+                    self.local_port = self.next_port();
+                }
                 return Ok(SctpNegotiationOutcome::Closed);
             }
             SctpNegotiation::Association {
@@ -288,10 +388,49 @@ impl SctpTransport {
         self.lost = false;
     }
 
-    /// Schedules the association `start()` builds by weighted fair queueing.
+    /// Schedules the association `start()` builds by weighted fair queueing (the default),
+    /// or first come, first served.
     pub(crate) fn with_weighted_fair_queueing(mut self, enabled: bool) -> Self {
         self.weighted_fair_queueing = enabled;
         self
+    }
+
+    /// Whether the association `start()` builds announces user message interleaving
+    /// (RFC 8260).
+    pub(crate) fn with_message_interleaving(mut self, enabled: bool) -> Self {
+        self.message_interleaving = enabled;
+        self
+    }
+
+    /// Whether the association `start()` builds announces that it accepts a zero checksum
+    /// (RFC 9653).
+    pub(crate) fn with_zero_checksum(mut self, enabled: bool) -> Self {
+        self.zero_checksum = enabled;
+        self
+    }
+
+    /// Whether a message over 16 KB is refused on an association without message
+    /// interleaving (RFC 8831 section 6.6).
+    pub(crate) fn with_message_size_limit_without_interleaving(mut self, enabled: bool) -> Self {
+        self.limit_message_size_without_interleaving = enabled;
+        self
+    }
+
+    /// Authenticates the State Cookies of the endpoint `start()` builds with an HMAC from
+    /// `provider` (RFC 9260 section 5.1.3).
+    pub(crate) fn with_cookie_provider(
+        mut self,
+        provider: Arc<dyn crypto::RTCCryptoProvider>,
+    ) -> Self {
+        self.cookie_provider = Some(provider);
+        self
+    }
+
+    /// The largest SCTP packet an association of this transport sends: what the application
+    /// configured, else what the path is known to carry, else `None` (the `rtc-sctp` default,
+    /// 1191 bytes).
+    pub(crate) fn packet_budget(&self) -> Option<u32> {
+        self.mtu.or(self.path_mtu)
     }
 
     pub(crate) fn calc_message_size(remote_max_message_size: u32, can_send_size: u32) -> u32 {
@@ -354,8 +493,25 @@ impl SctpTransport {
     /// because the value also sizes a real allocation — see `start()`.
     ///
     /// [RFC 8841 §6]: https://datatracker.ietf.org/doc/html/rfc8841#section-6
+    ///
+    /// RFC 8831 section 6.6: once the association is established without user message
+    /// interleaving, a large message would hold up every other channel until it is sent, and
+    /// "the sender SHOULD limit the maximum message size to 16 KB". The value reported, and
+    /// enforced, is then at most that, unless the application lifted the limit
+    /// (`SettingEngineBuilder::with_sctp_message_size_limit_without_interleaving`).
     pub(crate) fn max_message_size(&self) -> Option<u32> {
-        self.negotiated_max_message_size
+        let negotiated = self.negotiated_max_message_size?;
+        let without_interleaving = self.limit_message_size_without_interleaving
+            && self.association().is_some_and(|association| {
+                !Self::ended(association)
+                    && !association.is_handshaking()
+                    && !association.message_interleaving()
+            });
+        Some(if without_interleaving {
+            negotiated.min(MAX_MESSAGE_SIZE_WITHOUT_INTERLEAVING)
+        } else {
+            negotiated
+        })
     }
 
     /// W3C `SctpTransport.maxChannels`: the minimum of the negotiated inbound and outbound
@@ -421,7 +577,7 @@ impl SctpTransport {
         self.receive_message_limit = can_send_size as usize;
 
         let mut sctp_endpoint_config = ::sctp::EndpointConfig::default();
-        if let Some(mtu) = self.mtu {
+        if let Some(mtu) = self.packet_budget() {
             sctp_endpoint_config.max_payload_size(::sctp::max_payload_size_for_mtu(mtu));
         }
         let scheduler = if self.weighted_fair_queueing {
@@ -434,7 +590,14 @@ impl SctpTransport {
             .with_max_receive_message_size(can_send_size)
             .with_sctp_port(local_port)
             .with_remote_sctp_port(remote_port)
-            .with_stream_scheduler(scheduler);
+            .with_stream_scheduler(scheduler)
+            // RFC 8831 sections 6.1 and 6.6: message interleaving "SHOULD be used". It is
+            // announced, and used when the peer announces it too; otherwise the association
+            // sends DATA chunks, as before.
+            .with_message_interleaving(self.message_interleaving)
+            // RFC 9653 section 6: SCTP over DTLS is an alternate error detection method, so
+            // the CRC32c may be left out. Announced, and used when the peer announces it too.
+            .with_zero_checksum(self.zero_checksum);
         if let Some(recv_buf) = self.max_receive_buffer_size {
             sctp_transport_config = sctp_transport_config.with_max_receive_buffer_size(recv_buf);
         }
@@ -443,6 +606,12 @@ impl SctpTransport {
         // taken the peer's INIT, the endpoint starts no other.
         let mut server_config = ::sctp::ServerConfig::new(sctp_transport_config.clone());
         server_config.concurrent_associations(MAX_SCTP_ASSOCIATIONS_PER_DTLS_TRANSPORT);
+        // RFC 9260 sections 5.1 and 5.1.3: the State Cookie carries a MAC, and the endpoint
+        // keeps nothing for an INIT it has answered. The association then appears with the
+        // COOKIE ECHO, already established.
+        if let Some(provider) = &self.cookie_provider {
+            server_config.cookie_authentication(provider.clone());
+        }
         self.sctp_endpoint = Some(::sctp::Endpoint::new(
             TransportContext::default().local_addr, // placeholder; rewritten per-transmit by the ICE handler
             TransportProtocol::UDP, // placeholder; rewritten per-transmit by the ICE handler
@@ -766,35 +935,131 @@ mod tests {
             .stream_scheduler()
     }
 
+    /// RFC 8831 section 6.4: the priorities of data channels "MUST be interpreted as
+    /// weighted-fair-queuing scheduling priorities per the definition of the corresponding
+    /// stream scheduler supporting interleaving in [RFC8260]": that scheduler is the one an
+    /// association gets unless the application says otherwise. It used to be opt-in.
     #[test]
-    fn start_applies_weighted_fair_queueing_when_asked() {
-        let transport = SctpTransport::new(
-            SctpMaxMessageSize::default(),
-            None,
-            None,
-            test_transport_id(TransportKind::Sctp),
-            test_transport_id(TransportKind::Dtls),
-        )
-        .with_weighted_fair_queueing(true);
+    fn start_schedules_by_weighted_fair_queueing_by_default() {
         assert_eq!(
             ::sctp::StreamScheduler::WeightedFairQueueing,
-            scheduler_after_start(transport)
+            scheduler_after_start(new_transport())
         );
     }
 
     #[test]
-    fn start_keeps_first_come_first_served_by_default() {
-        let transport = SctpTransport::new(
+    fn start_applies_weighted_fair_queueing_when_asked() {
+        assert_eq!(
+            ::sctp::StreamScheduler::WeightedFairQueueing,
+            scheduler_after_start(new_transport().with_weighted_fair_queueing(true))
+        );
+    }
+
+    #[test]
+    fn start_schedules_first_come_first_served_when_asked() {
+        assert_eq!(
+            ::sctp::StreamScheduler::FirstComeFirstServed,
+            scheduler_after_start(new_transport().with_weighted_fair_queueing(false))
+        );
+    }
+
+    /// RFC 8831 sections 6.1 and 6.6 (message interleaving "SHOULD be used") and RFC 9653
+    /// section 5.2 (over DTLS an endpoint "SHOULD use zero as the checksum"): both are
+    /// announced by default, and each can be turned off.
+    #[test]
+    fn start_announces_interleaving_and_the_zero_checksum_by_default() {
+        let mut transport = new_transport();
+        transport
+            .start(
+                SCTPTransportCapabilities {
+                    max_message_size: 0,
+                },
+                5000,
+                5000,
+            )
+            .expect("start");
+        let config = transport.sctp_transport_config.expect("config");
+        assert!(config.message_interleaving());
+        assert!(config.zero_checksum());
+
+        let mut transport = new_transport()
+            .with_message_interleaving(false)
+            .with_zero_checksum(false);
+        transport
+            .start(
+                SCTPTransportCapabilities {
+                    max_message_size: 0,
+                },
+                5000,
+                5000,
+            )
+            .expect("start");
+        let config = transport.sctp_transport_config.expect("config");
+        assert!(!config.message_interleaving());
+        assert!(!config.zero_checksum());
+    }
+
+    /// RFC 8831 section 5: "The initial Path MTU at the IP layer SHOULD NOT exceed 1200 bytes
+    /// for IPv4 and 1280 bytes for IPv6." An SCTP packet of the budget, in its DTLS record,
+    /// under the headers of the path, is exactly that large at the IP layer, whatever the
+    /// path and the cipher suite; the fixed 1191 gave 1256 bytes over IPv4.
+    #[test]
+    fn the_packet_budget_keeps_the_ip_packet_within_the_initial_path_mtu() {
+        const DTLS_RECORD_HEADER: u32 = 13;
+        // AES-GCM, ChaCha20-Poly1305, AES-CCM-8, AES-256-CBC-SHA.
+        for dtls_record_expansion in [24usize, 16, 16, 52] {
+            for ipv6 in [false, true] {
+                for tcp in [false, true] {
+                    for relayed in [false, true] {
+                        let path = SctpPath {
+                            ipv6,
+                            tcp,
+                            relayed,
+                            dtls_record_expansion,
+                        };
+                        let budget = path.packet_budget();
+                        let ip_header = if ipv6 { 40 } else { 20 };
+                        let transport = if tcp { 20 + 2 } else { 8 };
+                        let turn = if relayed { 4 } else { 0 };
+                        let on_the_wire = budget
+                            + DTLS_RECORD_HEADER
+                            + dtls_record_expansion as u32
+                            + turn
+                            + transport
+                            + ip_header;
+                        assert_eq!(on_the_wire, if ipv6 { 1280 } else { 1200 }, "{path:?}");
+                    }
+                }
+            }
+        }
+        let udp_gcm = |ipv6| SctpPath {
+            ipv6,
+            tcp: false,
+            relayed: false,
+            dtls_record_expansion: SctpPath::DEFAULT_DTLS_RECORD_EXPANSION,
+        };
+        assert_eq!(udp_gcm(false).packet_budget(), 1135);
+        assert_eq!(udp_gcm(true).packet_budget(), 1195);
+    }
+
+    /// A budget the application configured (`SettingEngineBuilder::with_sctp_mtu`) is used as
+    /// it is; without one the path's is, once a pair is selected.
+    #[test]
+    fn a_configured_mtu_takes_the_place_of_the_paths() {
+        let mut transport = new_transport();
+        assert_eq!(transport.packet_budget(), None);
+        transport.path_mtu = Some(1135);
+        assert_eq!(transport.packet_budget(), Some(1135));
+
+        let mut transport = SctpTransport::new(
             SctpMaxMessageSize::default(),
             None,
-            None,
+            Some(1400),
             test_transport_id(TransportKind::Sctp),
             test_transport_id(TransportKind::Dtls),
         );
-        assert_eq!(
-            ::sctp::StreamScheduler::FirstComeFirstServed,
-            scheduler_after_start(transport)
-        );
+        transport.path_mtu = Some(1135);
+        assert_eq!(transport.packet_budget(), Some(1400));
     }
 
     /// One DTLS transport carries one SCTP association: INITs that would start more on the
@@ -854,6 +1119,71 @@ mod tests {
 
         assert_eq!(new_associations, 1);
         assert_eq!(transport.sctp_associations.len(), 1);
+    }
+
+    /// RFC 9260 section 5.1: after its INIT ACK the endpoint "MUST NOT allocate any resources
+    /// or keep any states for the new association", so that INITs cost it nothing. With the
+    /// crypto provider the peer connection gives it, the endpoint answers a thousand INITs
+    /// and holds no association for any of them.
+    #[test]
+    fn the_accepting_side_keeps_nothing_for_an_init() {
+        let mut transport = SctpTransport::new(
+            SctpMaxMessageSize::Bounded(65536),
+            None,
+            None,
+            test_transport_id(TransportKind::Sctp),
+            test_transport_id(TransportKind::Dtls),
+        )
+        .with_cookie_provider(crypto::default_provider().expect("test crypto provider"));
+        transport
+            .start(
+                SCTPTransportCapabilities {
+                    max_message_size: 65536,
+                },
+                5000,
+                5000,
+            )
+            .expect("start");
+
+        let now = std::time::Instant::now();
+        let peer: std::net::SocketAddr = "127.0.0.1:4444".parse().unwrap();
+        let mut client_ep = ::sctp::Endpoint::new(
+            peer,
+            TransportProtocol::UDP,
+            ::sctp::EndpointConfig::default().into(),
+            None,
+        );
+        let mut init_acks = 0;
+        for _ in 0..1000 {
+            let (_ch, mut conn) = client_ep
+                .connect(
+                    now,
+                    ::sctp::ClientConfig::new(::sctp::TransportConfig::default()),
+                    "127.0.0.1:5000".parse().unwrap(),
+                )
+                .expect("connect");
+            while let Some(t) = conn.poll_transmit(now) {
+                let ::sctp::Payload::RawEncode(contents) = t.message else {
+                    continue;
+                };
+                for dgram in contents {
+                    let server_ep = transport.sctp_endpoint.as_mut().expect("endpoint");
+                    assert!(
+                        server_ep.handle(now, peer, None, dgram).is_none(),
+                        "an INIT makes no association"
+                    );
+                    while let Some(answer) = server_ep.poll_transmit() {
+                        let ::sctp::Payload::RawEncode(packets) = answer.message else {
+                            continue;
+                        };
+                        // The first chunk of the answer is an INIT ACK (type 2).
+                        init_acks += packets.iter().filter(|p| p[12] == 2).count();
+                    }
+                }
+            }
+        }
+        assert_eq!(init_acks, 1000, "every INIT is answered");
+        assert!(transport.sctp_associations.is_empty());
     }
 
     fn new_transport() -> SctpTransport {
