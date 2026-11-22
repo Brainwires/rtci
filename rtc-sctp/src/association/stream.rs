@@ -546,21 +546,15 @@ impl StreamState {
         self.reassembly_queue.push(pd.clone())
     }
 
+    /// RFC 3758 3.6: what the peer's FORWARD TSN says is applied whatever this side's own
+    /// setting for the stream: `unordered` is how this side sends, not how the peer does.
     pub(crate) fn handle_forward_tsn_for_ordered(&mut self, ssn: u16) {
-        if self.unordered {
-            return; // unordered chunks are handled by handleForwardUnordered method
-        }
-
         // Remove all chunks older than or equal to the new TSN from
         // the reassembly_queue.
         self.reassembly_queue.forward_tsn_for_ordered(ssn);
     }
 
     pub(crate) fn handle_forward_tsn_for_unordered(&mut self, new_cumulative_tsn: u32) {
-        if !self.unordered {
-            return; // ordered chunks are handled by handleForwardTSNOrdered method
-        }
-
         // Remove all chunks older than or equal to the new TSN from
         // the reassembly_queue.
         self.reassembly_queue

@@ -2172,3 +2172,6 @@ mod heartbeat_test;
 
 #[path = "congestion_control_test.rs"]
 mod congestion_control_test;
+
+#[path = "partial_reliability_test.rs"]
+mod partial_reliability_test;

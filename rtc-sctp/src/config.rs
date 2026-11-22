@@ -82,6 +82,7 @@ pub struct TransportConfig {
     slow_start_growth_limit: u32,
     max_burst: Option<u32>,
     sack_delay: Duration,
+    partial_reliability: bool,
 }
 
 impl Default for TransportConfig {
@@ -101,6 +102,7 @@ impl Default for TransportConfig {
             slow_start_growth_limit: 1,
             max_burst: None,
             sack_delay: Duration::from_millis(200),
+            partial_reliability: true,
         }
     }
 }
@@ -121,6 +123,20 @@ impl TransportConfig {
     /// L, see [`with_slow_start_growth_limit`](Self::with_slow_start_growth_limit).
     pub fn slow_start_growth_limit(&self) -> u32 {
         self.slow_start_growth_limit
+    }
+
+    /// Whether PR-SCTP (RFC 3758) is announced to the peer and used. On by default, as WebRTC
+    /// data channels need it (RFC 8831 section 6.1). Off, neither chunk 192 nor the
+    /// Forward-TSN-Supported parameter is announced, no message is ever abandoned, and a
+    /// FORWARD TSN from the peer is answered as an unrecognized chunk.
+    pub fn with_partial_reliability(mut self, value: bool) -> Self {
+        self.partial_reliability = value;
+        self
+    }
+
+    /// See [`with_partial_reliability`](Self::with_partial_reliability).
+    pub fn partial_reliability(&self) -> bool {
+        self.partial_reliability
     }
 
     /// Sets SACK.Delay (RFC 9260 sections 6.2 and 16): how long the acknowledgement of a DATA

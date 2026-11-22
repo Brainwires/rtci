@@ -4,10 +4,9 @@ use crate::association::{
 };
 use crate::chunk::chunk_header::CHUNK_HEADER_SIZE;
 use crate::chunk::{
-    Chunk, ErrorCause, ErrorCauseUnrecognizedChunkType, INVALID_MANDATORY_PARAMETER,
-    INVALID_STREAM_IDENTIFIER, MISSING_MANDATORY_PARAMETER, NO_USER_DATA, PROTOCOL_VIOLATION,
-    STALE_COOKIE_ERROR, UNRECOGNIZED_CHUNK_TYPE, UNRECOGNIZED_PARAMETERS, UNRESOLVABLE_ADDRESS,
-    USER_INITIATED_ABORT,
+    Chunk, ErrorCause, INVALID_MANDATORY_PARAMETER, INVALID_STREAM_IDENTIFIER,
+    MISSING_MANDATORY_PARAMETER, NO_USER_DATA, PROTOCOL_VIOLATION, STALE_COOKIE_ERROR,
+    UNRECOGNIZED_CHUNK_TYPE, UNRECOGNIZED_PARAMETERS, UNRESOLVABLE_ADDRESS, USER_INITIATED_ABORT,
     chunk_abort::ChunkAbort,
     chunk_cookie_ack::ChunkCookieAck,
     chunk_cookie_echo::ChunkCookieEcho,
@@ -146,6 +145,28 @@ struct HandshakeParams {
     /// A Host Name Address parameter, as it arrived.
     host_name: Option<Bytes>,
     forward_tsn: bool,
+    /// The peer reported this side's Forward-TSN-Supported parameter as unrecognized.
+    forward_tsn_rejected: bool,
+}
+
+/// The Forward-TSN-Supported parameter (RFC 3758 3.1).
+const PARAM_FORWARD_TSN_SUPPORTED: u16 = 49152;
+
+/// Whether `raw`, the value of an Unrecognized Parameter parameter or of an "Unrecognized
+/// Parameters" error cause, names the Forward-TSN-Supported parameter.
+fn names_forward_tsn_supported(mut raw: &[u8]) -> bool {
+    while raw.len() >= 4 {
+        if u16::from_be_bytes([raw[0], raw[1]]) == PARAM_FORWARD_TSN_SUPPORTED {
+            return true;
+        }
+        let length = usize::from(u16::from_be_bytes([raw[2], raw[3]])).max(4);
+        let padded = length.next_multiple_of(4);
+        if padded > raw.len() {
+            break;
+        }
+        raw = &raw[padded..];
+    }
+    false
 }
 
 /// Error causes reported for one received packet, at most.
@@ -343,6 +364,8 @@ pub struct Association {
     cumulative_tsn_ack_point: u32,
     advanced_peer_tsn_ack_point: u32,
     use_forward_tsn: bool,
+    /// PR-SCTP is announced and used at all (`TransportConfig::with_partial_reliability`).
+    partial_reliability_enabled: bool,
     /// Max stream-sequence-number per *ordered* stream among abandoned chunks
     /// currently in the forward-TSN window `(cumulative_tsn_ack_point,
     /// advanced_peer_tsn_ack_point]`. Maintained incrementally as chunks are
@@ -498,6 +521,7 @@ impl Default for Association {
             cumulative_tsn_ack_point: 0,
             advanced_peer_tsn_ack_point: 0,
             use_forward_tsn: false,
+            partial_reliability_enabled: true,
             fwd_tsn_stream_map: FxHashMap::default(),
 
             rto_mgr: RtoManager::default(),
@@ -596,6 +620,7 @@ impl Association {
             configured_outbound_streams: config.max_num_outbound_streams(),
             configured_inbound_streams: config.max_num_inbound_streams(),
             valid_cookie_life: config.valid_cookie_life(),
+            partial_reliability_enabled: config.partial_reliability(),
             heartbeat_interval: config.heartbeat_interval(),
             created_at: Some(now),
             max_payload_size,
@@ -646,7 +671,7 @@ impl Association {
                 advertised_receiver_window_credit: this.max_receive_buffer_size,
                 ..Default::default()
             };
-            init.set_supported_extensions();
+            init.announce_extensions(this.partial_reliability_enabled);
 
             this.set_state(AssociationState::CookieWait);
             this.stored_init = Some(init);
@@ -872,6 +897,13 @@ impl Association {
                 }
             } //TODO:
         }
+    }
+
+    /// Whether PR-SCTP (RFC 3758) is in use: both sides announced it. `false` while the
+    /// association is being set up, and for good when the peer does not support it, in which
+    /// case every message is sent reliably whatever its stream's reliability parameters say.
+    pub fn partial_reliability(&self) -> bool {
+        self.use_forward_tsn
     }
 
     /// Returns Association statistics
@@ -1682,6 +1714,16 @@ impl Association {
     /// Error" in COOKIE-ECHOED (5.2.6), where the cookie this side echoed had outlived its
     /// lifetime. The setup is tried again with a new INIT, a bounded number of times.
     fn handle_error(&mut self, c: &ChunkError, now: Instant) {
+        // RFC 3758 3.3.3: a peer that reports the Forward-TSN-Supported parameter as
+        // unrecognized does not do PR-SCTP: no FORWARD TSN for the life of the association.
+        if c.error_causes
+            .iter()
+            .any(|e| e.code == UNRECOGNIZED_PARAMETERS && names_forward_tsn_supported(&e.raw))
+            && self.use_forward_tsn
+        {
+            warn!("[{}] the peer does not support PR-SCTP", self.side);
+            self.use_forward_tsn = false;
+        }
         if self.state() != AssociationState::CookieEchoed
             || !c.error_causes.iter().any(|e| e.code == STALE_COOKIE_ERROR)
         {
@@ -1708,7 +1750,7 @@ impl Association {
             advertised_receiver_window_credit: self.max_receive_buffer_size,
             ..Default::default()
         };
-        init.set_supported_extensions();
+        init.announce_extensions(self.partial_reliability_enabled);
         self.stored_init = Some(init);
         self.set_state(AssociationState::CookieWait);
         let _ = self.send_init();
@@ -1738,6 +1780,9 @@ impl Association {
                 if v.typ() == PARAM_HOST_NAME_ADDRESS {
                     out.host_name = param.marshal().ok();
                     continue;
+                }
+                if v.typ() == UNRECOGNIZED_PARAMETER && names_forward_tsn_supported(v.value()) {
+                    out.forward_tsn_rejected = true;
                 }
                 if IGNORED_HANDSHAKE_PARAMS.contains(&v.typ()) {
                     continue;
@@ -1831,7 +1876,7 @@ impl Association {
             peer_rwnd: i.advertised_receiver_window_credit,
             inbound_streams,
             outbound_streams,
-            use_forward_tsn: params.forward_tsn,
+            use_forward_tsn: params.forward_tsn && self.partial_reliability_enabled,
             source_port,
             destination_port,
         };
@@ -1870,7 +1915,7 @@ impl Association {
                 .push(Box::new(ParamUnknown::new(UNRECOGNIZED_PARAMETER, raw)));
         }
 
-        init_ack.set_supported_extensions();
+        init_ack.announce_extensions(self.partial_reliability_enabled);
 
         if state == AssociationState::Closed {
             // The accepting side holds this association from the INIT on. If no COOKIE ECHO
@@ -1935,7 +1980,7 @@ impl Association {
             advertised_receiver_window_credit: self.max_receive_buffer_size,
             params: vec![Box::new(ParamStateCookie::new())],
         };
-        init_ack.set_supported_extensions();
+        init_ack.announce_extensions(self.partial_reliability_enabled);
         Packet {
             common_header: CommonHeader {
                 verification_tag: i.initiate_tag,
@@ -2001,7 +2046,10 @@ impl Association {
         self.stored_init = None;
 
         let params = self.process_handshake_params(&i.params);
-        self.use_forward_tsn |= params.forward_tsn;
+        // RFC 3758 3.3.2, 3.3.3: PR-SCTP is used when the peer announced it too, and not when
+        // the peer reported this side's Forward-TSN-Supported parameter as unrecognized.
+        self.use_forward_tsn =
+            params.forward_tsn && self.partial_reliability_enabled && !params.forward_tsn_rejected;
         if !self.use_forward_tsn {
             warn!("[{}] not using ForwardTSN (on initAck)", self.side);
         }
@@ -2711,20 +2759,13 @@ impl Association {
 
         if !self.use_forward_tsn {
             warn!("[{}] received FwdTSN but not enabled", self.side);
-            // Return an error chunk
-            let cerr = ChunkError {
-                error_causes: vec![ErrorCauseUnrecognizedChunkType::default()],
-            };
-
-            let outbound = Packet {
-                common_header: CommonHeader {
-                    verification_tag: self.peer_verification_tag,
-                    source_port: self.source_port,
-                    destination_port: self.destination_port,
-                },
-                chunks: vec![Box::new(cerr)],
-            };
-            return Ok(vec![outbound]);
+            // RFC 3758 3.3.1: answered as a chunk this side does not recognize, with the
+            // chunk in the cause.
+            self.report_error(ErrorCause {
+                code: UNRECOGNIZED_CHUNK_TYPE,
+                raw: c.marshal()?,
+            });
+            return Ok(vec![]);
         }
 
         // From RFC 3758 Sec 3.6:
@@ -4488,10 +4529,13 @@ impl Association {
     /// An unsent unordered message can be dropped without assigning TSNs.
     /// A selected fragment tail instead needs the whole-message abandonment path.
     /// Timed(0) permits first transmissions until an actual retry is considered.
+    ///
+    /// RFC 3758 4.1 (TR3, TR4): the lifetime is checked before every transmission, the first
+    /// included, of ordered messages too. An ordered message has its stream sequence number
+    /// from the moment it was written, so abandoning it takes a TSN and a FORWARD TSN, which
+    /// `abandon_message` sees to.
     fn pending_message_expired(&self, c: &ChunkPayloadData, now: Instant) -> bool {
-        (!c.beginning_fragment || c.unordered)
-            && c.reliability.deadline() != c.created_at
-            && self.timed_data_expired(c, now)
+        c.reliability.deadline() != c.created_at && self.timed_data_expired(c, now)
     }
 
     fn pending_message_to_abandon(&self) -> Result<MessageToAbandon> {
@@ -4559,6 +4603,14 @@ impl Association {
                 // allocated, means there is no gap for the peer to reconcile and
                 // no ForwardTSN to send.
                 if self.pending_message_expired(c, now) {
+                    // Abandoning an ordered message takes TSNs: not past what may be
+                    // outstanding (see `MAX_OUTSTANDING_TSNS`).
+                    if !unordered
+                        && self.my_next_tsn.wrapping_sub(self.cumulative_tsn_ack_point)
+                            > MAX_OUTSTANDING_TSNS
+                    {
+                        break;
+                    }
                     match self
                         .pending_message_to_abandon()
                         .and_then(|message| self.abandon_message(message))
@@ -4817,15 +4869,56 @@ impl Association {
         // rescan `(cumulative_tsn_ack_point, advanced_peer_tsn_ack_point]` with
         // a per-TSN hashmap probe on every FORWARD-TSN — that scan was O(rwnd)
         // (~1000 probes/call for a 1 MB window) and dominated the send profile.
+        // RFC 3758 3.5 C4: the chunk fits one packet. When more streams have abandoned data
+        // than fit, it covers the TSNs up to the last one whose streams do, and the next
+        // FORWARD TSN goes on from there once the peer has acknowledged this one. Only then
+        // is the window walked.
+        let room = (self.mtu as usize)
+            .saturating_sub(COMMON_HEADER_SIZE as usize + CHUNK_HEADER_SIZE + 4)
+            / 4;
         let mut fwd_tsn = ChunkForwardTsn {
             new_cumulative_tsn: self.advanced_peer_tsn_ack_point,
-            streams: Vec::with_capacity(self.fwd_tsn_stream_map.len()),
+            streams: Vec::with_capacity(self.fwd_tsn_stream_map.len().min(room)),
         };
-        for (si, ssn) in &self.fwd_tsn_stream_map {
-            fwd_tsn.streams.push(ChunkForwardTsnStream {
-                identifier: *si,
-                sequence: *ssn,
-            });
+        if self.fwd_tsn_stream_map.len() <= room {
+            for (si, ssn) in &self.fwd_tsn_stream_map {
+                fwd_tsn.streams.push(ChunkForwardTsnStream {
+                    identifier: *si,
+                    sequence: *ssn,
+                });
+            }
+        } else {
+            let mut streams: FxHashMap<u16, u16> = FxHashMap::default();
+            let mut covered = self.cumulative_tsn_ack_point;
+            let mut tsn = self.cumulative_tsn_ack_point.wrapping_add(1);
+            while sna32lte(tsn, self.advanced_peer_tsn_ack_point) {
+                let Some(c) = self.inflight_queue.get(tsn) else {
+                    break;
+                };
+                if !c.unordered {
+                    if !streams.contains_key(&c.stream_identifier) && streams.len() == room {
+                        break;
+                    }
+                    let ssn = c.stream_sequence_number;
+                    streams
+                        .entry(c.stream_identifier)
+                        .and_modify(|cur| {
+                            if sna16lt(*cur, ssn) {
+                                *cur = ssn;
+                            }
+                        })
+                        .or_insert(ssn);
+                }
+                covered = tsn;
+                tsn = tsn.wrapping_add(1);
+            }
+            fwd_tsn.new_cumulative_tsn = covered;
+            for (si, ssn) in streams {
+                fwd_tsn.streams.push(ChunkForwardTsnStream {
+                    identifier: si,
+                    sequence: ssn,
+                });
+            }
         }
         // `trace!` evaluates its arguments lazily, so the stream list is only
         // formatted when trace logging is enabled -- no per-FORWARD-TSN string
