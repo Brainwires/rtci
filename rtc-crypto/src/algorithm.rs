@@ -53,6 +53,8 @@ pub enum StreamCipherAlgorithm {
     Aes128Ctr,
     /// AES-256 in counter mode.
     Aes256Ctr,
+    /// AES-192 in counter mode (RFC 6188 `AES_192_CM`).
+    Aes192Ctr,
 }
 
 /// Single-block encryption algorithms.
@@ -63,6 +65,8 @@ pub enum BlockCipherAlgorithm {
     Aes128,
     /// AES-256.
     Aes256,
+    /// AES-192 (RFC 6188 `AES_192_CM_PRF`).
+    Aes192,
 }
 
 /// CBC algorithms.

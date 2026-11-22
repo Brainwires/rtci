@@ -12,7 +12,7 @@
 use libfuzzer_sys::fuzz_target;
 use rtc_srtp::context::Context;
 use rtc_srtp::cryptex::Cryptex;
-use rtc_srtp::option::srtp_replay_protection;
+use rtc_srtp::option::{srtp_no_replay_protection, srtp_replay_protection};
 use rtc_srtp::protection_profile::ProtectionProfile;
 
 const PROFILES: [ProtectionProfile; 4] = [
@@ -88,11 +88,16 @@ fuzz_target!(|data: &[u8]| {
     let master_key: Vec<u8> = (0..profile.key_len() as u8).collect();
     let master_salt: Vec<u8> = (0..profile.salt_len() as u8).map(|b| 0xa0 ^ b).collect();
     let new_context = |replay: bool| {
+        let srtp = if replay {
+            srtp_replay_protection(64)?
+        } else {
+            srtp_no_replay_protection()
+        };
         Context::new(
             &master_key,
             &master_salt,
             profile,
-            replay.then(|| srtp_replay_protection(64)),
+            Some(srtp),
             None,
             provider.crypto(),
         )

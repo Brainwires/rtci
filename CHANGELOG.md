@@ -521,6 +521,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`ErrRenegotiationInfoNotEmpty`, `ErrUnsolicitedExtension`, `ErrCompressionMethodNotOffered`,
   `ErrNoNullCompressionMethod`, `ErrInvalidUseSrtpAnswer`, `ErrExportWithoutExtendedMasterSecret`,
   `ErrDuplicateExtension`). `Extension::extension_type` is new.
+### Breaking changes
+
+- **srtp**: `srtp_replay_protection` and `srtcp_replay_protection` return `Result<ContextOption>`
+  and refuse a window below 64 packets (RFC 3711 section 3.3.2). With
+  `SettingEngineBuilder::with_srtp_replay_protection_window` / `with_srtcp_replay_protection_window`
+  set to 1..=63, the SRTP contexts now fail to build when the DTLS handshake completes.
+- **srtp**: `Context::new` with `None` for a replay option gives replay protection with a
+  64-packet window, as its documentation said; it gave none. Pass `srtp_no_replay_protection()` /
+  `srtcp_no_replay_protection()` to go without. Peer connections are not affected (they pass
+  their windows).
+- **srtp**: the first SRTCP packet of an SSRC carries index 0 (RFC 3711 section 3.4), not 1.
+  Receivers accept any first index.
+- **srtp**: a master key stops at its lifetime: `encrypt_rtp`, `encrypt_rtcp`, `decrypt_rtp` and
+  `decrypt_rtcp` fail with `ErrExceededMaxPackets` after 2^48 SRTP or 2^31 SRTCP packets under
+  one key (2^31 of each for the AES-256 counter-mode profiles, RFC 6188 section 4), counted over
+  all the SSRCs that share it.
+- **srtp**: with `Cryptex { require: true, .. }`, `encrypt_rtp` fails for a packet that has
+  CSRCs or a header extension and cannot be protected with Cryptex. A received clear packet under
+  the same setting is authenticated before it is refused.
+- **srtp**: `SessionKeys` no longer prints its keys (`Debug` shows lengths) and has a `Drop`
+  that zeroizes them, so its fields can no longer be moved out of it.
+- **srtp**: the AES-GCM profiles require the provider's AES-CTR as well (for RFC 6904), and
+  `ProtectionProfile::Aes256CmHmacSha1_*` are documented as having no DTLS-SRTP code point (their
+  discriminants 0x0003 / 0x0004 are not wire values; see `ProtectionProfile::dtls_srtp_id`).
+- **srtp**: an AES-CM packet whose encrypted portion is over 2^16 AES blocks (1 MiB) is refused
+  (RFC 3711 section 4.1.1).
+
+### Bug Fixes
+
+- **srtp** (security): the SRTCP index wrapped to 0 after 2^31 − 1 and sending went on under the
+  same master key, reusing the AES-CM keystream, or the AES-GCM nonce, of the first packets
+  (RFC 3711 section 9.2, RFC 7714 section 9.4). The context now counts packets per master key and
+  refuses the one past the limit.
+- **srtp** (security): the receiver followed a rollover counter past 2^32 − 1: after ROC
+  0xFFFFFFFF a packet with a low sequence number was tried, and accepted, with ROC 0
+  (RFC 3711 section 3.3.1, RFC 7714 section 13.1).
+- **srtp** (security): with Cryptex required, a packet whose extension profile is not RFC 8285's
+  (or has two-byte "appbits") left with its header extension and CSRCs in the clear
+  (RFC 9335 section 5.2).
+- **srtp**: a valid unencrypted (E = 0) SRTCP packet under AEAD_AES_128_GCM / AEAD_AES_256_GCM
+  failed authentication: the receiver always treated the body as ciphertext (RFC 7714 section
+  9.3). It is now authenticated as the RFC has it, and still refused with a wrong tag or a
+  flipped E flag.
+
+### Features
+
+- **srtp**: key exhaustion is reported. `Context::poll_event` yields
+  `ContextEvent::KeyLifetimeExpiring` when a sixteenth of a master key's lifetime is left and
+  `KeyExhausted` at the first refused packet, so the application can re-key;
+  `Context::set_key_lifetime`, `key_lifetime`, `key_usage` (`keying::{KeyLifetime, KeyUsage,
+  PacketKind}`).
+- **srtp**: encrypted header extensions (RFC 6904, and RFC 7714 section 8.3 for AES-GCM),
+  selectable per extension id: `Context::set_encrypted_header_extensions`,
+  `header_extension::EncryptedHeaderExtensions`. Not signalled by a peer connection.
+- **srtp**: Master Key Identifier, sending and receiving, with a master-key table:
+  `Context::with_keying`, `add_master_key`, `set_sending_mki`, `remove_master_key`,
+  `sending_mki`, `mkis`, `key_usage_of` (`keying::Keying`).
+- **srtp**: key derivation rate (RFC 3711 section 4.3.1): `keying::KeyDerivationRate`.
+- **srtp**: AES-192 counter mode (RFC 6188): `ProtectionProfile::Aes192CmHmacSha1_80` / `_32`;
+  **crypto**: `BlockCipherAlgorithm::Aes192`, `StreamCipherAlgorithm::Aes192Ctr`.
+- **srtp**: the NULL cipher with HMAC-SHA1, which RFC 3711 section 5.1 makes mandatory to
+  implement: `ProtectionProfile::NullHmacSha1_80` / `_32`. Never offered by a peer connection
+  (RFC 8827 section 6.5).
+- **srtp**: unencrypted SRTCP can be sent: `Context::set_srtcp_encryption`.
+- **srtp**: `ProtectionProfile::dtls_srtp_id`, `from_dtls_srtp_id` (the IANA code points),
+  `ALL`, `is_aead`, `is_null_cipher`, `default_key_lifetime`; it is `PartialEq`, `Eq`, `Hash`.
+  `ContextEvent::CryptexRequiredViolation`; `Context::profile`.
+- **srtp**: known-answer tests from RFC 3711 Appendix B, RFC 6188 section 7, RFC 6904 Appendix
+  A, RFC 7714 sections 16 and 17, and libsrtp's RFC 6904 vectors.
 
 ## [0.22.0+brainwires.5] - 2026-11-20
 

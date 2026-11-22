@@ -41,7 +41,7 @@ fn build_rtcp_context() -> Result<Context> {
         &RTCP_TEST_MASTER_SALT,
         ProtectionProfile::Aes128CmHmacSha1_80,
         None,
-        Some(srtcp_replay_protection(10)),
+        Some(srtcp_replay_protection(64)?),
         provider().crypto(),
     )
 }

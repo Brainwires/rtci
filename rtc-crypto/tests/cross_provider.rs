@@ -44,6 +44,7 @@ fn cross_symmetric(sealer: &dyn RTCCrypto, opener: &dyn RTCCrypto) {
     for (algorithm, key_len) in [
         (StreamCipherAlgorithm::Aes128Ctr, 16),
         (StreamCipherAlgorithm::Aes256Ctr, 32),
+        (StreamCipherAlgorithm::Aes192Ctr, 24),
     ] {
         let key = vec![0x34; key_len];
         let plaintext = b"cross-provider stream cipher".to_vec();

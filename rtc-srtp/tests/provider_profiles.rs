@@ -9,19 +9,15 @@ use crypto::{
 };
 use crypto::{CryptoAlgorithm, CryptoError, RTCCrypto, RTCCryptoProvider, RTCRandom};
 use rtc_srtp::context::Context;
-use rtc_srtp::option::{srtcp_replay_protection, srtp_replay_protection};
+use rtc_srtp::option::{
+    srtcp_no_replay_protection, srtcp_replay_protection, srtp_no_replay_protection,
+    srtp_replay_protection,
+};
 use rtc_srtp::protection_profile::ProtectionProfile;
 use shared::error::Result;
 use shared::marshal::Marshal;
 
-const PROFILES: [ProtectionProfile; 6] = [
-    ProtectionProfile::Aes128CmHmacSha1_80,
-    ProtectionProfile::Aes128CmHmacSha1_32,
-    ProtectionProfile::Aes256CmHmacSha1_80,
-    ProtectionProfile::Aes256CmHmacSha1_32,
-    ProtectionProfile::AeadAes128Gcm,
-    ProtectionProfile::AeadAes256Gcm,
-];
+const PROFILES: [ProtectionProfile; 10] = ProtectionProfile::ALL;
 
 fn providers() -> Vec<Arc<dyn RTCCryptoProvider>> {
     #[cfg(all(feature = "crypto-ring", feature = "crypto-aws-lc-rs"))]
@@ -107,8 +103,16 @@ fn context(
         &key,
         &salt,
         profile,
-        replay.then(|| srtp_replay_protection(64)),
-        replay.then(|| srtcp_replay_protection(64)),
+        Some(if replay {
+            srtp_replay_protection(64)?
+        } else {
+            srtp_no_replay_protection()
+        }),
+        Some(if replay {
+            srtcp_replay_protection(64)?
+        } else {
+            srtcp_no_replay_protection()
+        }),
         provider.crypto(),
     )
 }
@@ -351,8 +355,9 @@ impl RTCCryptoProvider for CountingProvider {
 #[test]
 fn keyed_ciphers_are_constructed_once_per_context_not_per_packet() -> Result<()> {
     // With the `openssl` feature the AES-CM keystream comes from OpenSSL, not the provider
-    // (`CipherAesCmHmacSha1::new`), so the provider builds no stream cipher at all.
-    let expected_stream_constructions = if cfg!(feature = "openssl") { 0 } else { 2 };
+    // (`cipher::new_aes_cm`), so the provider builds no stream cipher at all. Otherwise three:
+    // SRTP, SRTCP, and the RFC 6904 header extension keystream.
+    let expected_stream_constructions = if cfg!(feature = "openssl") { 0 } else { 3 };
     let stream_provider = Arc::new(CountingProvider::new());
     let mut stream_context = context(
         ProtectionProfile::Aes128CmHmacSha1_80,

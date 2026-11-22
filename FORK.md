@@ -103,6 +103,10 @@ history stays intact.
 | DTLS 1.2 handshake rules (RFC 5246, RFC 5746, RFC 5764, RFC 7627, RFC 8422) | `rtc-dtls/src/flight/` (`negotiate_client_hello`, `verify_client_finished`, `client_hello_extensions`), `rtc-dtls/src/extension/mod.rs` (`unmarshal_hello_extensions`, `Extension::Unknown`), `rtc-dtls/src/state.rs` | The server verifies the client's Finished (it only checked that one had arrived); both sides compare in constant time. Hellos parse with a session id, without an extensions block and with unknown extensions; a ServerHello carries only what the ClientHello offered and a client refuses anything else. The peer's signature_algorithms and CertificateRequest lists, supported_groups and renegotiation_info are honoured and checked; `use_srtp` answers with an MKI or several profiles are refused; no key export without the extended master secret; no_certificate(41) is not sent. `rtc-dtls/src/conn/conn_conformance_test.rs`, `docs/conformance/audit/rfc5246.md`. |
 | DTLS 1.2 record layer and handshake transport (RFC 6347 sections 4.1, 4.2) | `rtc-dtls/src/handshaker.rs` (`handle_timeout`, `next_timeout`), `rtc-dtls/src/fragment_buffer/mod.rs` (`assemble_reading`), `rtc-dtls/src/conn/mod.rs`, `rtc-dtls/src/record_layer/mod.rs` (`split_datagram`), `ConfigBuilder::{with_handshake_timeout, with_maximum_flight_interval}`, `CipherSuite::record_expansion` | The retransmission timer doubles from 1 s to 60 s and a handshake ends at a deadline (30 s by default) instead of after seven one-second retransmissions. Fragments reassemble whatever their order and overlap. Handshake datagrams fit the MTU exactly and are cut smaller when retransmissions go unanswered. Records are limited to 2^14 bytes both ways. Junk after a datagram's valid records is discarded alone. Alert descriptions follow RFC 5246 7.2 and a fatal alert is repeated when the peer repeats its flight. Secrets are overwritten when an association ends. `rtc-dtls/src/conn/conn_transport_test.rs`, `docs/conformance/audit/rfc6347.md`. |
 | Stateless DTLS cookie exchange and a new association on a live address (RFC 6347 sections 4.2.1, 4.2.8) | `rtc-dtls/src/cookie.rs`, `rtc-dtls/src/endpoint.rs` (`admit`, `read_pending`), `DTLSConn::accept`, `ConfigBuilder::with_cookie_exchange` | A server endpoint keeps nothing for a ClientHello until it echoes a cookie made from its address and parameters; the 256-association table for unverified addresses is gone. A ClientHello with a valid cookie on an address that has an association starts a handshake beside it and replaces it when it completes. |
+| SRTP key lifetime and key-exhaustion events (RFC 3711 sections 3.3.1, 3.4, 9.2; RFC 7714 sections 9.4, 13.1) | `rtc-srtp/src/context/{mod,srtp,srtcp}.rs` (`check_key_lifetime`, `count_packet`, `poll_event`), `rtc-srtp/src/keying.rs` (`KeyLifetime`, `KeyUsage`, `ContextEvent`) | Packets are counted per master key; the one past 2^48 SRTP / 2^31 SRTCP (or the lifetime set) is refused in both directions, and `KeyLifetimeExpiring` / `KeyExhausted` tell the application to re-key. Upstream wraps the SRTCP index under the same key. `key_lifetime_test.rs`. |
+| Encrypted header extensions (RFC 6904; RFC 7714 section 8.3) | `rtc-srtp/src/header_extension.rs`, `Context::set_encrypted_header_extensions` | The transform, per extension id, for every profile; not signalled by a peer connection. `header_extension_test.rs` (RFC 6904 Appendix A and libsrtp's vectors). |
+| MKI with a master-key table, key derivation rate (RFC 3711 sections 3.1, 4.3.1, 8.1) | `rtc-srtp/src/keying.rs` (`Keying`, `KeyDerivationRate`), `Context::{with_keying, add_master_key, set_sending_mki, remove_master_key}`, `rtc-srtp/src/cipher/mod.rs` (`KeySource`, `Epochs`) | Crate level; DTLS-SRTP uses neither. `keying_test.rs`. |
+| AES-192 counter mode (RFC 6188), the NULL cipher (RFC 3711 section 5.1), unencrypted SRTCP on send | `rtc-crypto` (`Aes192`, `Aes192Ctr`), `rtc-srtp/src/protection_profile.rs` (`Aes192CmHmacSha1_*`, `NullHmacSha1_*`, `dtls_srtp_id`), `Context::set_srtcp_encryption` | Crate level. The NULL profiles are never offered by a peer connection; the RFC 6188 suites have no DTLS-SRTP code point. `profiles_test.rs`, `rfc_vectors_test.rs`, `rfc7714_test.rs`. |
 | CI: benchmarks, fuzzing, OSS-Fuzz, git-cliff release notes | `.github/workflows/{bench,fuzz,release}.yml`, `oss-fuzz/`, `cliff.toml` | |
 
 ### Hardening (fork only)
@@ -117,6 +121,9 @@ whatever the timeouts, also on the path an ICE restart leaves in use), candidate
 handshake's one epoch transition; plaintext application data and a ClientHello without the cookie
 discarded instead of failing a handshake, nothing negotiated and no state kept before the cookie; SRTP state only after authentication, and SRTCP authenticated
 whatever its E flag; ICE source filtering, authenticated role conflicts and consent, candidate
+whatever its E flag (AES-GCM included), no SRTP / SRTCP packet past a master key's lifetime and no
+ROC wrap on reception, replay protection on by default with a window of at least 64, nothing
+sent in the clear when Cryptex is required, master keys zeroized and never printed; ICE source filtering, authenticated role conflicts and consent, candidate
 caps (mDNS-resolved ones included), mDNS answers only from the mDNS socket, at most 64 published
 mDNS names (a host candidate past them is dropped, not sent with its address), a bounded mDNS
 cache (256 addresses), bounded reading of an mDNS message (256 questions, 512 records, 9000
@@ -176,6 +183,13 @@ reason. Today there are two:
   announcing and goodbyes are what RFC 6762 requires and cannot be turned off.
 
 ### Defaults the fork narrows on purpose
+
+- SRTP (`rtc-srtp`), each following RFC 3711 where upstream does not: a `Context` created without
+  replay options has a 64-packet replay window (upstream: none; pass
+  `srtp_no_replay_protection()`); `srtp_replay_protection(n)` / `srtcp_replay_protection(n)`
+  refuse n below 64 (section 3.3.2); the first SRTCP index is 0, not 1 (section 3.4); a master key
+  is refused after its lifetime (section 9.2), which is 2^31 packets for the AES-192 / AES-256
+  counter-mode suites (RFC 6188 section 4; `Context::set_key_lifetime` changes it).
 
 - DTLS: the default WebRTC cipher suites are AEAD only (AES-128-GCM, ChaCha20-Poly1305); the
   AES-256-CBC-SHA suites are opt-in. This is the one deliberate exception to rule 1, decided by

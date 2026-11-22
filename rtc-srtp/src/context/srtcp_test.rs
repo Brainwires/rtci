@@ -125,7 +125,8 @@ fn test_rtcp_lifecycle() -> Result<()> {
             "RTCP failed to decrypt"
         );
 
-        encrypt_context.set_index(test_case.ssrc, test_case.index);
+        // The known answers were made with SRTCP index 1.
+        encrypt_context.set_index(test_case.ssrc, test_case.index + 1);
         let encrypt_result = encrypt_context.encrypt_rtcp(&test_case.decrypted)?;
         assert_eq!(
             encrypt_result, test_case.encrypted,
@@ -177,7 +178,7 @@ fn test_rtcp_replay_detector_separation() -> Result<()> {
         &RTCP_TEST_MASTER_SALT,
         ProtectionProfile::Aes128CmHmacSha1_80,
         None,
-        Some(srtcp_replay_protection(10)),
+        Some(srtcp_replay_protection(64)?),
         test_crypto_provider().crypto(),
     )?;
 
@@ -235,7 +236,7 @@ fn test_encrypt_rtcp_separation() -> Result<()> {
         &RTCP_TEST_MASTER_SALT,
         ProtectionProfile::Aes128CmHmacSha1_80,
         None,
-        Some(srtcp_replay_protection(10)),
+        Some(srtcp_replay_protection(64)?),
         test_crypto_provider().crypto(),
     )?;
 
@@ -252,7 +253,9 @@ fn test_encrypt_rtcp_separation() -> Result<()> {
         encrypted_rctps.push(encrypted);
     }
 
-    for (i, expected_index) in [1, 1, 2, 2].iter().enumerate() {
+    // RFC 3711 section 3.4: the index is zero before the first packet of an SSRC, and one more
+    // after each packet.
+    for (i, expected_index) in [0, 0, 1, 1].iter().enumerate() {
         assert_eq!(
             *expected_index,
             get_rtcp_index(&encrypted_rctps[i].clone().freeze(), auth_tag_len),
@@ -352,7 +355,7 @@ fn test_unencrypted_srtcp_with_a_forged_tag_is_rejected() -> Result<()> {
         &RTCP_TEST_MASTER_SALT,
         ProtectionProfile::Aes128CmHmacSha1_80,
         None,
-        Some(srtcp_replay_protection(64)),
+        Some(srtcp_replay_protection(64)?),
         test_crypto_provider().crypto(),
     )?;
     // BYE for SSRC 0x11111111, E=0, index 0x7ffffff0 (far ahead), bogus tag.
@@ -374,7 +377,7 @@ fn test_srtcp_ssrc_states_are_capped() -> Result<()> {
             &RTCP_TEST_MASTER_SALT,
             ProtectionProfile::Aes128CmHmacSha1_80,
             None,
-            Some(srtcp_replay_protection(64)),
+            Some(srtcp_replay_protection(64)?),
             test_crypto_provider().crypto(),
         )
     };

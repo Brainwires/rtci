@@ -557,14 +557,15 @@ impl<'a> DtlsHandler<'a> {
             ..Default::default()
         };
         if replay_protection.srtp != 0 {
-            srtp_config.remote_rtp_options =
-                Some(srtp::option::srtp_replay_protection(replay_protection.srtp));
+            srtp_config.remote_rtp_options = Some(srtp::option::srtp_replay_protection(
+                replay_protection.srtp,
+            )?);
         }
 
         if replay_protection.srtcp != 0 {
             srtp_config.remote_rtcp_options = Some(srtp::option::srtcp_replay_protection(
                 replay_protection.srtcp,
-            ));
+            )?);
         }
 
         let keying_material = state.export_keying_material(
@@ -591,14 +592,14 @@ impl<'a> DtlsHandler<'a> {
             if srtp_config.remote_rtp_options.is_none() {
                 Some(srtp_replay_protection(
                     Self::DEFAULT_SESSION_SRTP_REPLAY_PROTECTION_WINDOW,
-                ))
+                )?)
             } else {
                 srtp_config.remote_rtp_options
             },
             if srtp_config.remote_rtcp_options.is_none() {
                 Some(srtcp_replay_protection(
                     Self::DEFAULT_SESSION_SRTCP_REPLAY_PROTECTION_WINDOW,
-                ))
+                )?)
             } else {
                 srtp_config.remote_rtcp_options
             },
@@ -646,7 +647,7 @@ mod tests {
             ProtectionProfile::Aes128CmHmacSha1_80,
             Some(srtp_replay_protection(
                 DtlsHandler::<'static>::DEFAULT_SESSION_SRTP_REPLAY_PROTECTION_WINDOW,
-            )),
+            )?),
             None,
             provider.crypto(),
         )?;

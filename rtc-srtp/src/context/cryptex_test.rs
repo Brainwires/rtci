@@ -329,3 +329,177 @@ fn cryptex_adds_an_empty_extension_for_csrcs() {
     assert_eq!(&decrypted[16..20], &[0xbe, 0xde, 0x00, 0x00]);
     assert_eq!(&decrypted[20..], &plain[16..]);
 }
+
+/// An RTP packet with `csrcs` CSRCs and, with `profile`, a 4-octet header extension of it.
+fn shaped(csrcs: u8, profile: Option<u16>, seq: u16) -> Vec<u8> {
+    let mut packet = vec![0x80 | csrcs | if profile.is_some() { 0x10 } else { 0 }, 96];
+    packet.extend_from_slice(&seq.to_be_bytes());
+    packet.extend_from_slice(&[0, 0, 0, 1, 0, 0, 0, 7]);
+    for csrc in 0..csrcs {
+        packet.extend_from_slice(&[0xC0, 0, 0, csrc]);
+    }
+    if let Some(profile) = profile {
+        packet.extend_from_slice(&profile.to_be_bytes());
+        packet.extend_from_slice(&[0, 1]);
+        // Element 1 with one octet, in the two-byte or the one-byte form.
+        packet.extend_from_slice(if profile & 0xFFF0 == 0x1000 {
+            &[0x01, 0x01, 0xAA, 0]
+        } else {
+            &[0x10, 0xAA, 0, 0]
+        });
+    }
+    packet.extend_from_slice(b"payload");
+    packet
+}
+
+/// RFC 9335 sections 5 and 5.1: Cryptex applies to RFC 8285 extensions only, and not to
+/// two-byte headers with non-zero "appbits". When Cryptex is mandatory such a packet must not
+/// leave with its CSRCs or extension in the clear (the receiving side of the same policy
+/// discards it, section 5.2): protecting it is an error. It used to go out unprotected.
+#[test]
+fn cryptex_required_never_sends_csrcs_or_extensions_in_the_clear() {
+    let required = Cryptex {
+        send: true,
+        require: true,
+    };
+    for profile in [
+        ProtectionProfile::Aes128CmHmacSha1_80,
+        ProtectionProfile::AeadAes128Gcm,
+    ] {
+        for (name, packet) in [
+            ("two-byte with appbits", shaped(0, Some(0x1001), 1)),
+            ("profile-specific extension", shaped(0, Some(0xABCD), 2)),
+            ("the same with CSRCs", shaped(2, Some(0xABCD), 3)),
+            ("already marked 0xC0DE", shaped(0, Some(0xC0DE), 4)),
+            (
+                "extension cut short",
+                shaped(1, Some(0xBEDE), 5)[..17].to_vec(),
+            ),
+        ] {
+            let mut sender = context(profile, required);
+            assert!(sender.encrypt_rtp(&packet).is_err(), "{profile:?}: {name}");
+            // Nothing was consumed: the index is still free for a packet that can be sent.
+            assert!(sender.get_roc(7).is_none_or(|roc| roc == 0));
+        }
+
+        // What Cryptex can protect is sent, protected; a bare packet has nothing to protect.
+        let mut sender = context(profile, required);
+        for (packet, marker) in [
+            (shaped(0, Some(0xBEDE), 10), Some([0xC0, 0xDE])),
+            (shaped(0, Some(0x1000), 11), Some([0xC2, 0xDE])),
+            (shaped(3, None, 12), Some([0xC0, 0xDE])),
+            (shaped(0, None, 13), None),
+        ] {
+            let protected = sender.encrypt_rtp(&packet).unwrap();
+            let csrc_end = 12 + 4 * (packet[0] & 0x0F) as usize;
+            if let Some(marker) = marker {
+                assert_eq!(&protected[csrc_end..csrc_end + 2], &marker);
+            }
+            let mut receiver = context(profile, required);
+            let received = receiver.decrypt_rtp(&protected).unwrap();
+            assert_eq!(&received[received.len() - 7..], b"payload");
+        }
+
+        // Mandatory without the peer's support (`send` unset) sends nothing that would need it.
+        let mut sender = context(
+            profile,
+            Cryptex {
+                send: false,
+                require: true,
+            },
+        );
+        assert!(sender.encrypt_rtp(&shaped(0, Some(0xBEDE), 20)).is_err());
+        assert!(sender.encrypt_rtp(&shaped(1, None, 21)).is_err());
+        sender.encrypt_rtp(&shaped(0, None, 22)).unwrap();
+
+        // Without the requirement those packets go out as RFC 3711 has them (RFC 9335 section
+        // 5.1: "MUST NOT be applied" to other extensions).
+        let mut sender = context(profile, SEND);
+        let packet = shaped(0, Some(0xABCD), 30);
+        let protected = sender.encrypt_rtp(&packet).unwrap();
+        assert_eq!(&protected[..20], &packet[..20]);
+        assert_eq!(
+            &context(profile, Cryptex::default())
+                .decrypt_rtp(&protected)
+                .unwrap()[..],
+            &packet[..]
+        );
+    }
+}
+
+/// RFC 9335 section 5.2: when Cryptex is mandatory and a packet arrives without it, the
+/// receiver stops processing it and reports an error for the stream. The report comes only for
+/// a packet that authenticates, so the peer really sent it, and once until the settings change.
+#[test]
+fn cryptex_required_reports_an_authentic_violation_once() {
+    let required = Cryptex {
+        send: true,
+        require: true,
+    };
+    for profile in [
+        ProtectionProfile::Aes128CmHmacSha1_80,
+        ProtectionProfile::AeadAes128Gcm,
+    ] {
+        let mut sender = context(profile, Cryptex::default());
+        let mut receiver = context(profile, required);
+
+        // A forged packet in the clear is refused as a forgery, and reported to nobody.
+        let mut forged = sender
+            .encrypt_rtp(&shaped(1, Some(0xBEDE), 1))
+            .unwrap()
+            .to_vec();
+        let last = forged.len() - 1;
+        forged[last] ^= 1;
+        assert!(receiver.decrypt_rtp(&forged).is_err());
+        assert_eq!(receiver.poll_event(), None);
+
+        for seq in 2..5 {
+            let clear = sender.encrypt_rtp(&shaped(0, Some(0xBEDE), seq)).unwrap();
+            assert!(receiver.decrypt_rtp(&clear).is_err());
+        }
+        assert_eq!(
+            receiver.poll_event(),
+            Some(ContextEvent::CryptexRequiredViolation { ssrc: 7 })
+        );
+        assert_eq!(receiver.poll_event(), None);
+        // The discarded packets left no state: nothing was accepted for the stream.
+        assert_eq!(receiver.get_roc(7), None);
+        assert_eq!(receiver.key_usage().srtp_packets, 0);
+
+        receiver.set_cryptex(required);
+        let clear = sender.encrypt_rtp(&shaped(0, Some(0xBEDE), 9)).unwrap();
+        assert!(receiver.decrypt_rtp(&clear).is_err());
+        assert!(
+            receiver.poll_event().is_some(),
+            "reported again after a change"
+        );
+    }
+}
+
+/// RFC 9335 section 6.2: the plaintext runs on through the RTP padding and the padding count.
+#[test]
+fn cryptex_round_trips_a_padded_packet_with_csrcs() {
+    for profile in [
+        ProtectionProfile::Aes128CmHmacSha1_80,
+        ProtectionProfile::AeadAes128Gcm,
+    ] {
+        let mut packet = shaped(2, Some(0xBEDE), 40);
+        packet[0] |= 0x20;
+        packet.extend_from_slice(&[0, 0, 0, 0, 5]);
+        let protected = context(profile, SEND).encrypt_rtp(&packet).unwrap();
+        // Everything after the fixed header but the 4-octet extension header is encrypted.
+        assert_ne!(&protected[12..20], &packet[12..20], "CSRCs");
+        assert_eq!(&protected[20..24], &[0xC0, 0xDE, 0, 1]);
+        assert_ne!(
+            &protected[24..packet.len()],
+            &packet[24..],
+            "extension data to padding"
+        );
+        assert_eq!(
+            &context(profile, Cryptex::default())
+                .decrypt_rtp(&protected)
+                .unwrap()[..],
+            &packet[..]
+        );
+    }
+}
