@@ -621,6 +621,7 @@ impl RTCPeerConnection {
             rid_pause_marks: self.setting_engine.rid_pause_marks,
             video_receive_limits: self.setting_engine.video_receive_limits,
             codec_video_receive_limits: self.setting_engine.codec_video_receive_limits.clone(),
+            w3c_simulcast_answer: self.setting_engine.w3c_simulcast_answer,
             write_ssrc_attributes_for_simulcast: self
                 .setting_engine
                 .write_ssrc_attributes_for_simulcast,
@@ -1023,6 +1024,7 @@ impl RTCPeerConnection {
             rid_pause_marks: self.setting_engine.rid_pause_marks,
             video_receive_limits: self.setting_engine.video_receive_limits,
             codec_video_receive_limits: self.setting_engine.codec_video_receive_limits.clone(),
+            w3c_simulcast_answer: self.setting_engine.w3c_simulcast_answer,
             write_ssrc_attributes_for_simulcast: self
                 .setting_engine
                 .write_ssrc_attributes_for_simulcast,
@@ -2553,7 +2555,7 @@ impl RTCPeerConnection {
                 sender.rebind_local_streams(&self.media_engine, self.interceptor.as_mut());
             }
             if primary == old {
-                self.stats_mut().remove_outbound_rtp_stream(old);
+                self.stats_mut().replace_outbound_rtp_stream(old, new);
             }
             self.pipeline_context
                 .interceptor_handler_context

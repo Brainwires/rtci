@@ -176,6 +176,7 @@ mod rejected_mline_tests {
             rid_pause_marks: false,
             video_receive_limits: None,
             codec_video_receive_limits: vec![],
+            w3c_simulcast_answer: false,
         }
     }
 
@@ -1181,6 +1182,9 @@ pub(crate) struct AddTransceiverSdpParams {
     /// and by MIME type.
     video_receive_limits: Option<RTCVideoResolutionRange>,
     codec_video_receive_limits: Vec<(String, RTCVideoResolutionRange)>,
+    /// `SettingEngineBuilder::with_w3c_simulcast_answer`: an answer's `a=rid` lines have no
+    /// restrictions.
+    w3c_simulcast_answer: bool,
     write_ssrc_attributes_for_simulcast: bool,
     /// An offer (initial or subsequent) rather than an answer.
     is_offer: bool,
@@ -1570,10 +1574,12 @@ impl RTCPeerConnection {
                 let Some(pts) = kept_formats(rid) else {
                     continue;
                 };
-                media = media.with_value_attribute(
-                    SDP_ATTRIBUTE_RID.to_owned(),
-                    rid.line(SimulcastDirection::Recv, pts),
-                );
+                let line = if !is_offer && params.w3c_simulcast_answer {
+                    rid.bare_line(SimulcastDirection::Recv)
+                } else {
+                    rid.line(SimulcastDirection::Recv, pts)
+                };
+                media = media.with_value_attribute(SDP_ATTRIBUTE_RID.to_owned(), line);
                 if rid.simulcast {
                     recv_sc_list.push(sc_id(&rid.id, rid.paused));
                 }
@@ -1616,10 +1622,12 @@ impl RTCPeerConnection {
                     let Some(pts) = kept_formats(&rid) else {
                         continue;
                     };
-                    media = media.with_value_attribute(
-                        SDP_ATTRIBUTE_RID.to_owned(),
-                        rid.line(SimulcastDirection::Send, pts),
-                    );
+                    let line = if !is_offer && params.w3c_simulcast_answer {
+                        rid.bare_line(SimulcastDirection::Send)
+                    } else {
+                        rid.line(SimulcastDirection::Send, pts)
+                    };
+                    media = media.with_value_attribute(SDP_ATTRIBUTE_RID.to_owned(), line);
                     lines += 1;
                     if listed {
                         let paused = !encoding.active
@@ -2052,6 +2060,8 @@ pub(crate) struct PopulateSdpParams {
     /// The video receive limits (`a=imageattr`, RFC 9429 section 3.6.1).
     pub(crate) video_receive_limits: Option<RTCVideoResolutionRange>,
     pub(crate) codec_video_receive_limits: Vec<(String, RTCVideoResolutionRange)>,
+    /// `SettingEngineBuilder::with_w3c_simulcast_answer`.
+    pub(crate) w3c_simulcast_answer: bool,
     pub(crate) write_ssrc_attributes_for_simulcast: bool,
     /// The Ta this endpoint proposes (`ice::Agent::proposed_pacing`): `a=ice-pacing` when it is
     /// not the default.
@@ -2242,6 +2252,7 @@ impl RTCPeerConnection {
                     rid_pause_marks: params.rid_pause_marks,
                     video_receive_limits: params.video_receive_limits,
                     codec_video_receive_limits: params.codec_video_receive_limits.clone(),
+                    w3c_simulcast_answer: params.w3c_simulcast_answer,
                     write_ssrc_attributes_for_simulcast: params.write_ssrc_attributes_for_simulcast,
                     is_offer: params.bundle == BundleMode::Offer,
                     rtcp_mux_only: params.rtcp_mux_only,

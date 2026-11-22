@@ -454,6 +454,8 @@ pub struct SettingEngine {
     pub(crate) ignore_rid_pause_for_recv: bool,
     /// [`SettingEngineBuilder::with_rid_pause_marks`].
     pub(crate) rid_pause_marks: bool,
+    /// [`SettingEngineBuilder::with_w3c_simulcast_answer`].
+    pub(crate) w3c_simulcast_answer: bool,
     /// [`SettingEngineBuilder::with_video_receive_limits`].
     pub(crate) video_receive_limits: Option<crate::peer_connection::sdp::RTCVideoResolutionRange>,
     /// [`SettingEngineBuilder::with_codec_video_receive_limits`], by MIME type.
@@ -2005,6 +2007,20 @@ impl SettingEngineBuilder {
     /// does for inactive layers.
     pub fn with_rid_pause_marks(mut self, rid_pause_marks: bool) -> Self {
         self.0.rid_pause_marks = rid_pause_marks;
+        self
+    }
+
+    /// Answers simulcast as W3C webrtc-pc `createAnswer` (section 4.4.2) does, instead of
+    /// RFC 8853 / RFC 8851. The default is `false`.
+    ///
+    /// - A remote `a=simulcast` line that names a rid-id more than once is taken with each
+    ///   rid-id at its first occurrence (W3C: "identically named rids are reduced to the
+    ///   first"); by default it refuses the description (RFC 8853 section 5.2: "a single rid-id
+    ///   MUST NOT occur more than once per 'a=simulcast' line"; RFC 9429 section 5.8).
+    /// - The `a=rid` lines of an answer carry no restrictions (W3C sets none); by default they
+    ///   keep the offered ones (RFC 8851 section 6.3).
+    pub fn with_w3c_simulcast_answer(mut self, w3c: bool) -> Self {
+        self.0.w3c_simulcast_answer = w3c;
         self
     }
 

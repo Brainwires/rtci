@@ -1646,6 +1646,22 @@ impl RTCPeerConnection {
             let mut parsed = remote_description.unmarshal()?;
             self.assign_missing_mids(&mut parsed, answers);
             discard_stray_bundle_only(&mut parsed, answers);
+            // W3C webrtc-pc createAnswer: identically named rids reduced to the first
+            // (`with_w3c_simulcast_answer`); by default such a line refuses the description.
+            if self.setting_engine.w3c_simulcast_answer {
+                for media in &mut parsed.media_descriptions {
+                    for attr in &mut media.attributes {
+                        if attr.key == sdp::SDP_ATTRIBUTE_SIMULCAST
+                            && let Some(value) = attr
+                                .value
+                                .as_deref()
+                                .and_then(sdp::simulcast::without_repeated_rids)
+                        {
+                            attr.value = Some(value);
+                        }
+                    }
+                }
+            }
             check_extmap_levels(&parsed)?;
             inherit_session_extmap(&mut parsed);
             inherit_session_rtcp_xr(&mut parsed);

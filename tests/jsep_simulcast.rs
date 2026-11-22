@@ -475,3 +475,65 @@ fn a_pt_restriction_keeps_the_formats_of_the_section_and_an_answered_pause_mark_
     assert!(encodings.iter().all(|e| e.active), "no encoding is paused");
     Ok(())
 }
+
+fn w3c_peer() -> Result<RTCPeerConnection, Box<dyn std::error::Error>> {
+    let mut media_engine = MediaEngine::default();
+    media_engine.register_default_codecs()?;
+    Ok(RTCPeerConnectionBuilder::new()
+        .with_media_engine(media_engine)
+        .with_setting_engine(
+            SettingEngineBuilder::new()
+                .with_w3c_simulcast_answer(true)
+                .build(),
+        )
+        .build(Instant::now())?)
+}
+
+/// W3C webrtc-pc row 4.4.2-39, the W3C form as a setting: with `with_w3c_simulcast_answer` a
+/// remote `a=simulcast` line that names a rid twice is taken with the rid at its first place
+/// (by default it refuses the description: RFC 8853 section 5.2), and the answer's `a=rid`
+/// lines carry no restrictions (by default they keep the offered ones: RFC 8851 section 6.3).
+#[test]
+fn the_w3c_answer_form_reduces_a_repeated_rid_and_sets_no_restrictions() -> TestResult {
+    let mut pc = w3c_peer()?;
+    pc.set_remote_description(
+        Instant::now(),
+        remote_offer(
+            "sendonly",
+            "a=rid:f send max-width=1280\na=rid:h send max-width=640\na=simulcast:send f;h;f\n",
+        )?,
+    )?;
+    let answer = pc.create_answer(None)?;
+    assert_eq!(
+        lines_with(&answer.sdp, "a=rid:"),
+        vec!["a=rid:f recv", "a=rid:h recv"],
+        "{}",
+        answer.sdp
+    );
+    assert_eq!(
+        lines_with(&answer.sdp, "a=simulcast:"),
+        vec!["a=simulcast:recv f;h"]
+    );
+
+    // The default, for contrast: the same offer is refused, and restrictions are echoed.
+    let mut pc = default_peer()?;
+    assert!(
+        pc.set_remote_description(
+            Instant::now(),
+            remote_offer(
+                "sendonly",
+                "a=rid:f send\na=rid:h send\na=simulcast:send f;h;f\n"
+            )?,
+        )
+        .is_err()
+    );
+    let (mut offerer, _) = simulcast_sender(&[("f", Some(1280)), ("h", Some(640))])?;
+    let mut answerer = w3c_peer()?;
+    let (_, answer) = exchange(&mut offerer, &mut answerer)?;
+    assert_eq!(
+        lines_with(&answer, "a=rid:"),
+        vec!["a=rid:f recv", "a=rid:h recv"],
+        "{answer}"
+    );
+    Ok(())
+}
