@@ -66,7 +66,7 @@ fn answer_formats() -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         .with_media_engine(video_engine(&codec_set(100, 101, 98, 99, 35)))
         .build(Instant::now())?;
     let mut answerer = RTCPeerConnectionBuilder::new()
-        .with_media_engine(video_engine(&codec_set(96, 97, 94, 95, 45)))
+        .with_media_engine(video_engine(&codec_set(96, 97, 108, 109, 45)))
         .build(Instant::now())?;
     offerer.add_transceiver_from_kind(RtpCodecKind::Video, None)?;
 

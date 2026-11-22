@@ -374,6 +374,8 @@ pub struct SettingEngine {
     pub(crate) bundle_attributes_repeated: bool,
     /// [`SettingEngineBuilder::with_max_bundle_as_must_bundle`].
     pub(crate) max_bundle_as_must_bundle: bool,
+    /// [`SettingEngineBuilder::with_implicit_rollback`].
+    pub(crate) implicit_rollback: bool,
     pub(crate) answering_dtls_role: RTCDtlsRole,
     pub(crate) disable_certificate_fingerprint_verification: bool,
     pub(crate) allow_insecure_verification_algorithm: bool,
@@ -1324,6 +1326,21 @@ impl SettingEngineBuilder {
     /// section's attributes apply to every bundled section.
     pub fn with_bundle_attributes_repeated(mut self, repeated: bool) -> Self {
         self.0.bundle_attributes_repeated = repeated;
+        self
+    }
+
+    /// Lets a remote offer that arrives while a local offer is pending roll the local offer
+    /// back and be applied, in one `set_remote_description` call: the implicit rollback of
+    /// W3C webrtc-pc ("set a session description"), which browsers perform and "perfect
+    /// negotiation" relies on.
+    ///
+    /// RFC 9429 has no implicit rollback: a remote offer in the `have-local-offer` state is
+    /// an error (section 5.6), and the application rolls its offer back first (section 5.7).
+    /// That is the default (`false`). With `true`, an offer that is refused after the
+    /// rollback leaves the local offer pending, as if nothing had been called; one that is
+    /// applied emits the `stable` and then the `have-remote-offer` signaling state.
+    pub fn with_implicit_rollback(mut self, implicit_rollback: bool) -> Self {
+        self.0.implicit_rollback = implicit_rollback;
         self
     }
 

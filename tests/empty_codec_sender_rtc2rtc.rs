@@ -519,12 +519,20 @@ fn the_receiver_measures_a_round_trip_time_over_rtcp_xr() -> Result<()> {
         measurements > 0,
         "the DLRR blocks gave round trip times: {rtt:?} {total} {measurements}"
     );
-    let rtt = rtt.expect("a round trip time");
+    // `roundTripTime` exists only while the latest sender report came with a DLRR block
+    // (webrtc-stats). With the RTCP session's default timing (RFC 4585 section 4.2: no minimum
+    // interval between regular reports unless `trr-int` says so) the sender reports more
+    // often than the receiver sends reference times, so the latest report may have none: the
+    // measurements are then in the total.
+    let mean = total / measurements as f64;
     assert!(
-        (0.0..1.0).contains(&rtt),
-        "a plausible round trip time on a virtual network: {rtt}"
+        (0.0..1.0).contains(&mean),
+        "a plausible round trip time on a virtual network: {mean}"
     );
-    assert!(total >= rtt);
+    if let Some(rtt) = rtt {
+        assert!((0.0..1.0).contains(&rtt), "{rtt}");
+        assert!(total >= rtt);
+    }
     Ok(())
 }
 

@@ -79,3 +79,43 @@ a=fmtp:96 profile-id=0
     pc.set_local_description(Instant::now(), answer)?;
     Ok(())
 }
+
+/// RFC 7874 section 3 and RFC 4733 section 2.4.1: the default codecs offer
+/// `telephone-event` for each audio clock rate, with the DTMF events 0 to 15, and it is
+/// answered.
+#[test]
+fn telephone_event_is_offered_with_the_dtmf_events_and_answered() -> TestResult {
+    let mut a = default_peer()?;
+    let mut b = default_peer()?;
+    a.add_transceiver_from_kind(rtc::rtp_transceiver::rtp_sender::RtpCodecKind::Audio, None)?;
+    let (offer, answer) = jsep_common::exchange(&mut a, &mut b)?;
+    for sdp in [&offer, &answer] {
+        let audio = &media_sections(sdp)[0];
+        for rate in [48000, 8000] {
+            let rtpmap = audio
+                .iter()
+                .find(|l| l.ends_with(&format!(" telephone-event/{rate}")))
+                .unwrap_or_else(|| panic!("telephone-event/{rate} in:\n{sdp}"));
+            let payload_type = rtpmap
+                .strip_prefix("a=rtpmap:")
+                .and_then(|l| l.split(' ').next())
+                .expect("a payload type");
+            assert!(
+                audio.contains(&format!("a=fmtp:{payload_type} 0-15")),
+                "{sdp}"
+            );
+            assert!(
+                audio[0]
+                    .split(' ')
+                    .skip(3)
+                    .any(|format| format == payload_type),
+                "{sdp}"
+            );
+        }
+        // After the audio codecs: it is not the format media is sent with.
+        assert!(audio[0].contains(" 111 "), "{sdp}");
+        let formats: Vec<&str> = audio[0].split(' ').skip(3).collect();
+        assert_eq!(formats[0], "111", "{sdp}");
+    }
+    Ok(())
+}

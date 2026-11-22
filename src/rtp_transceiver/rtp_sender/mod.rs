@@ -389,6 +389,12 @@ impl RTCRtpSender<'_> {
     /// This method allows direct writing of RTP packets, automatically setting
     /// the correct payload type and SSRC based on the sender's configuration.
     ///
+    /// When the MID header extension (`urn:ietf:params:rtp-hdrext:sdes:mid`) is negotiated,
+    /// the packet is given the transceiver's mid, and when RtpStreamId
+    /// (`urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id`) is, the rid of its encoding (RFC 9143
+    /// section 15, RFC 8852): the application does not stamp them. A packet that already
+    /// carries the extension keeps its value.
+    ///
     /// # Parameters
     ///
     /// * `packet` - The RTP packet to send
@@ -403,6 +409,9 @@ impl RTCRtpSender<'_> {
         // peer_connection is mutable borrow, its rtp_transceivers won't be resized and
         // the direction won't be changed too, so, unwrap() here is safe.
 
+        let mid = self.peer_connection.rtp_transceivers[self.id.0]
+            .mid()
+            .clone();
         let (sender, media_engine) = (
             self.peer_connection.rtp_transceivers[self.id.0]
                 .sender_mut()
@@ -489,6 +498,42 @@ impl RTCRtpSender<'_> {
                 "rtp_sender {:?} RTP ssrc {} carries header extension id {} that is not negotiated on this sender leg; passing it through",
                 self.id, packet.header.ssrc, ext.id,
             );
+        }
+
+        // RFC 9143 sections 9.1 and 15: the offerer and answerer identify the m= section an
+        // RTP stream belongs to with the MID header extension, and RFC 8852 section 3.3 / RFC
+        // 8853 section 5.5 the encoding of a simulcast stream with RtpStreamId. Both go into
+        // every packet the sender writes when the extension is negotiated: a receiver that
+        // was not told the SSRC (the engine's descriptions name none for simulcast, and RFC
+        // 9143 makes `a=ssrc` optional) needs one to associate the stream, at any time it
+        // starts to listen or the SSRC changes. A value the application put there itself is
+        // left alone. The NACK responder turns the RtpStreamId of a packet it retransmits
+        // into RepairedRtpStreamId.
+        let stamps = [
+            (::sdp::extmap::SDES_MID_URI, mid.as_deref().unwrap_or("")),
+            (
+                ::sdp::extmap::SDES_RTP_STREAM_ID_URI,
+                encoding.rtp_coding_parameters.rid.as_str(),
+            ),
+        ];
+        for (uri, value) in stamps {
+            if value.is_empty() {
+                continue;
+            }
+            let Some(id) = parameters
+                .rtp_parameters
+                .header_extensions
+                .iter()
+                .find(|negotiated| negotiated.uri == uri)
+                .and_then(|negotiated| u8::try_from(negotiated.id).ok())
+            else {
+                continue;
+            };
+            if packet.header.get_extension(id).is_none() {
+                packet
+                    .header
+                    .set_extension(id, bytes::Bytes::copy_from_slice(value.as_bytes()))?;
+            }
         }
 
         let track_id = sender.track().track_id().to_string();

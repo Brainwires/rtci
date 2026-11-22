@@ -216,7 +216,47 @@ pub fn register_default_interceptors(
 
     let registry = configure_key_frame_requests(registry);
 
+    // Last, so the ids of the extensions registered above stay what they were.
+    configure_default_header_extensions(media_engine)?;
+
     Ok(registry)
+}
+
+/// Registers the header extensions every WebRTC endpoint is expected to offer, beside the
+/// ones the interceptors above need:
+///
+/// - **MID** (`urn:ietf:params:rtp-hdrext:sdes:mid`) for audio as well as video: RFC 9143
+///   section 15 has an endpoint that offers a BUNDLE group offer it in every bundled RTP
+///   section, and RFC 9429 section 5.2.1 lists it among the extensions of any m= section.
+///   The sender stamps it (`RTCRtpSender::write_rtp`), and a receiver finds the m= section of
+///   an SSRC no description declared by it.
+/// - **Client-to-mixer audio level** (`urn:ietf:params:rtp-hdrext:ssrc-audio-level`, RFC
+///   6464) for audio: RFC 8834 section 5.2.2 ("RECOMMENDED"). The application writes the
+///   level into the packets it sends; a receiver reports the level it reads as the audio
+///   level of its synchronization sources.
+/// - **Coordination of video orientation** (`urn:3gpp:video-orientation`) for video: the
+///   application writes and reads it.
+///
+/// Part of [`register_default_interceptors`].
+///
+/// # Errors
+///
+/// Returns an error if a header extension cannot be registered (no free id).
+pub fn configure_default_header_extensions(media_engine: &mut MediaEngine) -> Result<()> {
+    for (uri, kind) in [
+        (::sdp::extmap::SDES_MID_URI, RtpCodecKind::Audio),
+        (::sdp::extmap::AUDIO_LEVEL_URI, RtpCodecKind::Audio),
+        (::sdp::extmap::VIDEO_ORIENTATION_URI, RtpCodecKind::Video),
+    ] {
+        media_engine.register_header_extension(
+            RTCRtpHeaderExtensionCapability {
+                uri: uri.to_owned(),
+            },
+            kind,
+            None,
+        )?;
+    }
+    Ok(())
 }
 
 /// Delivers inbound key-frame requests (RTCP PLI and FIR) to the application.
@@ -1084,6 +1124,8 @@ mod slot_order_tests {
             vec![
                 Slot::CongestionControl,
                 Slot::TwccSender,
+                // The remote description's send limit, between the estimate and the pacer.
+                Slot::Custom(REMOTE_BITRATE_LIMIT_SLOT),
                 Slot::Pacer,
                 Slot::NackResponder,
                 Slot::TwccReceiver,
@@ -1110,7 +1152,12 @@ mod slot_order_tests {
         .expect("congestion control");
 
         assert_eq!(
-            vec![Slot::CongestionControl, Slot::Pacer, Slot::Rfc8888],
+            vec![
+                Slot::CongestionControl,
+                Slot::Custom(REMOTE_BITRATE_LIMIT_SLOT),
+                Slot::Pacer,
+                Slot::Rfc8888
+            ],
             slots(&registry),
             "RFC 8888 needs no transport-wide sequence numbers"
         );
