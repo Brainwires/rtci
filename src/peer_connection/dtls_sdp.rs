@@ -133,7 +133,19 @@ impl RTCPeerConnection {
             if offered.is_none() {
                 return Ok(d);
             }
-            self.dtls_transport().local_tls_id.clone()
+            // The new association the offer asks for has the `tls-id` staged for it
+            // (`defer_remote_transport`).
+            match &self.dtls_transport().staged_local_tls_id {
+                Some(staged)
+                    if self
+                        .pending_remote_transport
+                        .as_ref()
+                        .is_some_and(|pending| pending.new_dtls_role.is_some()) =>
+                {
+                    staged.clone()
+                }
+                _ => self.dtls_transport().local_tls_id.clone(),
+            }
         };
         if let Some(tagged) = d
             .media_descriptions

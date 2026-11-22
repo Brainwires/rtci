@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **jsep**: a rolled-back remote offer leaves the transports as they were (RFC 9429 section
+  5.7). The answerer's ICE and DTLS transports take a remote offer's parameters when the local
+  answer (or provisional answer) is applied, not when the offer is: the first offer starts
+  ICE and DTLS then, an offer with new ICE credentials restarts ICE then, an offer that asks
+  for a new DTLS association (another `tls-id`, fingerprint or role) replaces it then, and the
+  candidates of the offer's ICE generation, in the description or trickled, reach the agent
+  then. What the answer states is staged when the offer is applied (the restart's new local
+  credentials, the new association's `a=setup` role and `tls-id`) and dropped by a rollback.
+  Observable: after `set_remote_description(offer)` the answerer's ICE transport is still
+  `new` until `set_local_description(answer)`. New `ice::Agent::discard_restart_credentials`.
 - **jsep**: small rules.
   - `RTCRtpSender::write_rtp` takes out the header extension elements whose id is not
     negotiated for the sender (RFC 8285 section 4.1.2); they were passed through. New
