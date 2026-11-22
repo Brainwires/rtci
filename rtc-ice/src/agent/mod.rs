@@ -1717,6 +1717,13 @@ impl Agent {
         self.ufrag_pwd.pending_local_credentials.is_some()
     }
 
+    /// Forgets the credentials [`Agent::generate_restart_credentials`] staged, so that no
+    /// restart is pending: the description they were staged for was abandoned (a rolled-back
+    /// remote offer, RFC 9429 section 5.7). The live session is untouched.
+    pub fn discard_restart_credentials(&mut self) {
+        self.ufrag_pwd.pending_local_credentials = None;
+    }
+
     /// Applies a staged ICE restart, tearing down the old session and starting a new one at `now`.
     ///
     /// Installs the credentials staged by [`Agent::generate_restart_credentials`], if any, then
