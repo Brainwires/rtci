@@ -22,7 +22,6 @@ use rtc::peer_connection::event::RTCDataChannelEvent;
 use rtc::peer_connection::event::RTCPeerConnectionEvent;
 use rtc::peer_connection::state::RTCPeerConnectionState;
 use rtc::peer_connection::transport::RTCDtlsRole;
-use rtc::peer_connection::transport::RTCIceServer;
 use rtc::peer_connection::transport::{CandidateConfig, CandidateHostConfig};
 
 use webrtc::api::APIBuilder;
@@ -155,11 +154,8 @@ async fn test_ice_restart_by_rtc_interop() -> Result<()> {
             .with_answering_dtls_role(RTCDtlsRole::Server)
             .build();
 
-        let config = RTCConfigurationBuilder::default()
-            .with_ice_servers(vec![RTCIceServer {
-                ..Default::default()
-            }])
-            .build();
+        // No ICE server: an empty `urls` is a SyntaxError (W3C "set a configuration").
+        let config = RTCConfigurationBuilder::default().build();
 
         let mut rtc_pc = RTCPeerConnectionBuilder::new()
             .with_configuration(config)
