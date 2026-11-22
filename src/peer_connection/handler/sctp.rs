@@ -1089,14 +1089,28 @@ impl<'a>
             // message interleaving (RFC 8831 section 6.6, `SctpTransport::max_message_size`);
             // a DCEP message is not the application's, and its label and protocol may take
             // more than that (RFC 8832 section 5.1).
-            let send_limit = if message.ppi == PayloadProtocolIdentifier::Dcep {
-                self.ctx.sctp_transport.negotiated_max_message_size
+            if message.ppi == PayloadProtocolIdentifier::Dcep {
+                let send_limit = self
+                    .ctx
+                    .sctp_transport
+                    .negotiated_max_message_size
+                    .unwrap_or(0) as usize;
+                if message.payload.len() > send_limit {
+                    return Err(Error::ErrOutboundPacketTooLarge);
+                }
+            } else if self
+                .ctx
+                .sctp_transport
+                .negotiated_max_message_size
+                .is_none()
+            {
+                if !message.payload.is_empty() {
+                    return Err(Error::ErrOutboundPacketTooLarge);
+                }
             } else {
-                self.ctx.sctp_transport.max_message_size()
-            }
-            .unwrap_or(0) as usize;
-            if message.payload.len() > send_limit {
-                return Err(Error::ErrOutboundPacketTooLarge);
+                self.ctx
+                    .sctp_transport
+                    .check_message_size(message.payload.len())?;
             }
 
             if let Some(conn) = self
@@ -5096,9 +5110,19 @@ mod tests {
         .expect("DCEP OPEN");
         try_client_write(&mut a, now, ch, 4, PayloadProtocolIdentifier::Dcep, &open)
             .expect("a DATA_CHANNEL_OPEN over 16 KB is sent");
+        let refused = try_client_write(&mut a, now, ch, 4, binary, &big);
         assert_eq!(
-            try_client_write(&mut a, now, ch, 4, binary, &big),
-            Err(Error::ErrOutboundPacketTooLarge)
+            refused,
+            Err(Error::ErrMessageTooLargeWithoutInterleaving {
+                size: 16 * 1024 + 1,
+                limit: 16 * 1024,
+            })
+        );
+        let text = refused.unwrap_err().to_string();
+        assert!(
+            text.contains("16384")
+                && text.contains("with_sctp_message_size_limit_without_interleaving(false)"),
+            "the error names the limit and the setting that lifts it: {text}"
         );
         try_client_write(&mut a, now, ch, 4, binary, &fits).expect("16 KB is within the limit");
 

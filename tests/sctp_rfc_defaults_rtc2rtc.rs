@@ -107,12 +107,65 @@ fn without_interleaving_the_association_falls_back_and_messages_are_held_to_16_k
                 .data_channel(channel)
                 .expect("the channel")
                 .send(now, bytes::BytesMut::from(&vec![3u8; 16385][..]));
-            assert_eq!(refused, Err(Error::ErrOutboundPacketTooLarge));
+            assert_eq!(
+                refused,
+                Err(Error::ErrMessageTooLargeWithoutInterleaving {
+                    size: 16385,
+                    limit: 16384
+                })
+            );
         }
         assert!(
             pair.deliver(false, local, b"after the refusal")?,
             "a refused message leaves the channel usable"
         );
+    }
+    Ok(())
+}
+
+/// The 16 KB limit is the one of an association without interleaving, and only of that: with
+/// I-DATA negotiated (both peers announce it) `maxMessageSize` is the peer's
+/// `max-message-size` and a message over 16 KB is sent, whichever peer sends it; when either
+/// peer does not announce it, `maxMessageSize` is 16384 on both sides and `send` refuses a
+/// larger message with an error that names the limit and the setting that lifts it.
+#[test]
+fn the_16_kb_limit_applies_only_when_i_data_was_not_negotiated() -> Result<()> {
+    let off = || default().with_sctp_message_interleaving(false);
+    let cases = [
+        (default(), default(), true),
+        (default(), off(), false),
+        (off(), default(), false),
+        (off(), off(), false),
+    ];
+    for (offerer, answerer, interleaved) in cases {
+        let (mut pair, local, remote) = connected(offerer, answerer)?;
+        let expected = if interleaved { 65536 } else { 16384 };
+        assert_eq!(
+            max_message_sizes(&pair),
+            (Some(expected), Some(expected)),
+            "interleaved: {interleaved}"
+        );
+        let over = vec![4u8; 16385];
+        if interleaved {
+            assert!(pair.deliver(false, local, &over)?);
+            assert!(pair.deliver(true, remote, &over)?);
+            continue;
+        }
+        let now = pair.now;
+        for (peer, channel) in [(&mut pair.offerer, local), (&mut pair.answerer, remote)] {
+            let refused = peer
+                .pc
+                .data_channel(channel)
+                .expect("the channel")
+                .send(now, bytes::BytesMut::from(&over[..]))
+                .expect_err("over 16 KB without interleaving");
+            let text = refused.to_string();
+            assert!(
+                text.contains("16384")
+                    && text.contains("with_sctp_message_size_limit_without_interleaving(false)"),
+                "the error names the limit and the setting: {text}"
+            );
+        }
     }
     Ok(())
 }
