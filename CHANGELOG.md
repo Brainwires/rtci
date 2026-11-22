@@ -981,6 +981,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behaviour changes
 
+- **sctp / dscp** (RFC 8837 section 5): when the data channels' codepoint changes (a channel
+  of another priority comes or goes) the association's congestion control and RTO start over,
+  at the next `handle_timeout`, as on a path change. New diagnostic
+  `RTCSctpTransport::congestion_window`
+  (`a_new_codepoint_restarts_the_associations_congestion_control`).
+- **tests**: SFrame-encrypted frames sent by the application through the opaque payloader
+  survive loss with NACK / RTX between two engines
+  (`sframe_encrypted_frames_survive_loss_through_nack_and_rtx`); Cryptex end to end
+  (`with_cryptex_the_extensions_are_encrypted_on_the_wire_and_read_in_the_clear`); the
+  webrtc-svc `setParameters` checks and the data channel priority on the wire.
+
 - **rtp receiver** (W3C webrtc-pc 4.4.1.4): `RTCRtpReceiver::get_parameters` lists no codecs
   once a description negotiated a direction that does not receive (sendonly, inactive): W3C
   `[[ReceiveCodecs]]` is then empty. It listed every engine codec
