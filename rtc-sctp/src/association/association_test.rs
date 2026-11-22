@@ -2178,3 +2178,6 @@ mod partial_reliability_test;
 
 #[path = "stream_reconfig_test.rs"]
 mod stream_reconfig_test;
+
+#[path = "untested_rows_test.rs"]
+mod untested_rows_test;
