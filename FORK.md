@@ -26,6 +26,18 @@ history stays intact.
    for that reason, say so here.
 3. Security fixes are always taken.
 
+## Read this first: data channels to browsers carry at most 16 KB per message by default
+
+RFC 8831 section 6.6: without user message interleaving (RFC 8260, I-DATA) "the sender SHOULD
+limit the maximum message size to 16 KB". No current browser announces I-DATA, so toward a
+browser `RTCSctpTransport::max_message_size` (W3C `maxMessageSize`) is 16384 and
+`RTCDataChannel::send` refuses a larger message with
+`Error::ErrMessageTooLargeWithoutInterleaving`, whose text names the limit and the setting.
+Between two instances of this engine (both interleave) the limit is the peer's
+`a=max-message-size`. To send larger messages to browsers, as browsers themselves do:
+`SettingEngineBuilder::new().with_sctp_message_size_limit_without_interleaving(false)`. Details
+under "Defaults the fork narrows on purpose" and in the `rtc::data_channel` module docs.
+
 ## What the fork carries over upstream
 
 ### Fork features
@@ -131,6 +143,7 @@ history stays intact.
 | AES-192 counter mode (RFC 6188), the NULL cipher (RFC 3711 section 5.1), unencrypted SRTCP on send | `rtc-crypto` (`Aes192`, `Aes192Ctr`), `rtc-srtp/src/protection_profile.rs` (`Aes192CmHmacSha1_*`, `NullHmacSha1_*`, `dtls_srtp_id`), `Context::set_srtcp_encryption` | Crate level. The NULL profiles are never offered by a peer connection; the RFC 6188 suites have no DTLS-SRTP code point. `profiles_test.rs`, `rfc_vectors_test.rs`, `rfc7714_test.rs`. |
 | SCTP association lifecycle by `a=sctp-port` (RFC 8841) | `src/peer_connection/transport/sctp/mod.rs` (`negotiate`, `offer_port`, `answer_port`), `src/peer_connection/handler/sctp.rs` (`connect`, `close_for_renegotiation`, `init_for_existing_association`), `src/peer_connection/mod.rs` (`apply_sctp_negotiation`, `replace_sctp_association`, `close_sctp_association`), `src/peer_connection/sdp/mod.rs` (`negotiated_sctp`) | Both endpoints initiate, crossing INITs make one association, a rejected data section or `a=sctp-port:0` closes it, a new `a=sctp-port` replaces it over the same DTLS transport. Upstream starts the transport once with the DTLS client initiating, and never looks at a later description. `init_for_existing_association` is a workaround to remove when `rtc-sctp`'s `Endpoint::handle` routes a peer's INIT to the association this side initiated. |
 | DCEP error handling (RFC 8832 section 6, RFC 8831 section 6.6) | `src/peer_connection/handler/datachannel.rs` (`fail_channel`, `reset_stream`), `src/peer_connection/handler/sctp.rs` (`ordered_until_reply`), `rtc-datachannel/src/data_channel/mod.rs` | An OPEN on a stream in use, a malformed OPEN, data on a stream never opened and an unsupported PPID close the channel; data before the ACK is sent ordered; the channel priority weighs the stream. |
+| No DCEP handshake timeout by default; back-pressure resumes by itself | `src/peer_connection/configuration/setting_engine.rs` (`DataChannel::dcep_handshake_timeout`), `src/peer_connection/handler/datachannel.rs` (`handle_timeout`), `src/peer_connection/handler/sctp.rs` (`window_update_due`, `resumable`, `poll_timeout`) | An in-band channel opens whenever its DATA_CHANNEL_ACK arrives while the association lives (RFC 8832 section 6); the fork's 30 s timeout closed channels on a lossy path that was up, and is now opt-in (`with_dcep_handshake_timeout`), failing the channel with an error. A receiver that reads again after back-pressure sends the window-update SACK at once (`poll_timeout` is due) and a parked stream resumes from a deadline of its own (RFC 9260 section 6.2). |
 | SCTP survives what a peer may send (RFC 9260 conformance, first part) | `rtc-sctp/src/{packet,endpoint/mod,association/mod}.rs`, `rtc-sctp/src/chunk/chunk_unknown.rs`, `rtc-sctp/src/queue/payload_queue.rs` | Unknown chunks and parameters are handled by their action bits; a late INIT or an invalid INIT / INIT ACK no longer closes an association; an ended association takes no packets and frees its endpoint slot; a half-open one ends after 120 s; DATA on an invalid stream is acknowledged and reported; Gap Ack Blocks are right across the TSN wrap; stream counts are paired OS with MIS; at most 32767 TSNs are outstanding; a failed shutdown ends the association; any PPID is carried (`write_sctp_with_ppid`, `Chunks::ppid`). Rows in `docs/conformance/audit/rfc9260.md`. |
 | SCTP handshake and teardown as RFC 9260 sections 5, 8.4, 8.5 and 9 have them | `rtc-sctp/src/association/mod.rs` (`accepts_verification_tag`, `refuse_invalid_init`, `handle_cookie_echo`, `handle_error`, `Timer::T5ShutdownGuard`), `rtc-sctp/src/endpoint/mod.rs` (`handle_out_of_the_blue`, `poll_transmit`) | Verification Tag and T bit rules; answers to out-of-the-blue packets (`Endpoint::poll_transmit`); ABORT for a refused or invalid INIT / INIT ACK and for a SACK of unsent data; State Cookie lifetime and Stale Cookie; crossing INITs leave the TCB alone; immediate SACK for the first DATA; the shutdown rules (DATA in SHUTDOWN-SENT, T5 guard, 10 retransmissions). The State Cookie has no MAC: the association is kept from the INIT on and the cookie is compared with the copy kept. |
 | SCTP HEARTBEAT and failure detection (RFC 9260 sections 8.1 to 8.3) | `rtc-sctp/src/association/mod.rs` (`on_heartbeat_timeout`, `handle_heartbeat_ack`, `on_path_failure`), `TransportConfig::with_heartbeat_interval`, `TimerConfig::max_t3_rtx_retrans` | An idle association sends a HEARTBEAT every RTO + 30 s; its acknowledgement measures the round trip and clears the error count. Ten consecutive unanswered retransmissions or HEARTBEATs end the association (it never gave up by default); five report the path inactive (`Event::PathInactive` / `PathActive`). |
@@ -325,7 +338,8 @@ reason. Today there are two:
   `with_sctp_weighted_fair_queueing(false)`, `with_sctp_message_interleaving(false)` and
   `with_sctp_zero_checksum(false)` are upstream's behaviour.
 - Data channels: on an SCTP association that does not interleave user messages (RFC 8260),
-  which is every association with a current browser, `send` refuses a message over 16 KB and
+  which is every association with a current browser, `send` refuses a message over 16 KB
+  (`Error::ErrMessageTooLargeWithoutInterleaving`, which names the limit and the setting) and
   `maxMessageSize` says 16384 (RFC 8831 section 6.6, SHOULD). Upstream, like the browsers,
   sends up to the peer's `max-message-size`. Maintainer rule of 2026-11-22: the RFC behaviour is
   the default, the browsers' a setting

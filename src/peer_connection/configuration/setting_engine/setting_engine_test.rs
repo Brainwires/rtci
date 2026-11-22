@@ -49,10 +49,8 @@ fn test_setting_engine_defaults() {
     assert!(!s.disable_certificate_fingerprint_verification);
     assert!(!s.allow_insecure_verification_algorithm);
     assert_eq!(s.answering_dtls_role, RTCDtlsRole::Unspecified);
-    assert_eq!(
-        s.data_channel.dcep_handshake_timeout,
-        Some(Duration::from_secs(30))
-    );
+    // RFC 8832 has no DCEP handshake timeout.
+    assert_eq!(s.data_channel.dcep_handshake_timeout, None);
     assert_eq!(s.multicast_dns.timeout, Some(Duration::from_secs(10)));
     assert_eq!(s.multicast_dns.mode, MulticastDnsMode::QueryOnly);
     assert_eq!(s.replay_protection.dtls, 0);

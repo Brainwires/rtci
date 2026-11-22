@@ -1582,6 +1582,21 @@ pub enum Error {
     /// Outbound packet larger than maximum message size.
     #[error("outbound packet larger than maximum message size")]
     ErrOutboundPacketTooLarge,
+    /// A data channel message over the 16 KB a sender keeps to on an SCTP association without
+    /// user message interleaving (RFC 8831 section 6.6), which is every association with a
+    /// peer that does not announce I-DATA (RFC 8260), current browsers among them.
+    #[error(
+        "a {size} byte message is over the {limit} byte limit of an SCTP association without \
+         message interleaving (RFC 8831 section 6.6: the peer did not announce I-DATA); \
+         SettingEngineBuilder::with_sctp_message_size_limit_without_interleaving(false) lifts it \
+         up to the peer's max-message-size"
+    )]
+    ErrMessageTooLargeWithoutInterleaving {
+        /// The size of the message refused.
+        size: usize,
+        /// The limit, `maxMessageSize` (16384).
+        limit: u32,
+    },
     /// Stream closed.
     #[error("Stream closed")]
     ErrStreamClosed,
