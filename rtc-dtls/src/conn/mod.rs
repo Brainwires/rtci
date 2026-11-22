@@ -1098,8 +1098,38 @@ impl DTLSConn {
                 );
             if repeats_finished {
                 self.replay_detector[h.epoch as usize].accept();
+                return (true, None, None);
             }
-            return (repeats_finished, None, None);
+            // An authenticated handshake record after the handshake that is not the peer's
+            // Finished again is a request to renegotiate: a HelloRequest from a server, a
+            // ClientHello from a client. This stack does not renegotiate (WebRTC forbids it,
+            // RFC 8827 6.5; a new association is made instead), and says so with the
+            // no_renegotiation warning (RFC 5246 7.2.2, RFC 5746 4.2, 4.4); the association
+            // goes on. A plaintext one is not the peer's (or is a new client's, which the
+            // endpoint handles: RFC 6347 4.2.8) and is ignored here.
+            let requests_renegotiation = h.epoch != 0
+                && pkt
+                    .get(RECORD_LAYER_HEADER_SIZE)
+                    .is_some_and(|handshake_type| {
+                        let handshake_type = HandshakeType::from(*handshake_type);
+                        if self.is_client {
+                            handshake_type == HandshakeType::HelloRequest
+                        } else {
+                            handshake_type == HandshakeType::ClientHello
+                        }
+                    });
+            if requests_renegotiation {
+                self.replay_detector[h.epoch as usize].accept();
+                return (
+                    false,
+                    Some(Alert {
+                        alert_level: AlertLevel::Warning,
+                        alert_description: AlertDescription::NoRenegotiation,
+                    }),
+                    None,
+                );
+            }
+            return (false, None, None);
         }
 
         let is_handshake = match self.fragment_buffer.push(&pkt) {

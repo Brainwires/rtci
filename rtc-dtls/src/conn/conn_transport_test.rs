@@ -664,3 +664,117 @@ fn the_first_protected_record_of_each_side_has_sequence_number_zero() {
         assert_eq!(&first_protected[5..11], &[0; 6]);
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Renegotiation is refused (RFC 5246 7.2.2, 7.4.1.1; RFC 5746 4.2, 4.4)
+// ---------------------------------------------------------------------------------------------
+
+/// The (level, description) of the protected alert records `from` sent, as `to` opens them.
+fn protected_alerts(datagrams: &[Vec<u8>], to: &mut DTLSConn) -> Vec<(u8, u8)> {
+    let mut alerts = vec![];
+    for datagram in datagrams {
+        for record in unpack_datagram(datagram).unwrap() {
+            if record[0] == 21 && record[3..5] == [0, 1] {
+                let opened = to
+                    .state
+                    .cipher_suite
+                    .as_mut()
+                    .unwrap()
+                    .decrypt(&record)
+                    .expect("the alert is protected with the session keys");
+                alerts.push((opened[13], opened[14]));
+            }
+        }
+    }
+    alerts
+}
+
+/// RFC 5746 4.2, 4.4 and RFC 5246 7.2.2: a request to renegotiate (a HelloRequest to a client,
+/// a ClientHello to a server, in the established epoch) is refused with a no_renegotiation
+/// warning, and the association goes on as before.
+#[test]
+fn a_renegotiation_request_is_refused_with_a_no_renegotiation_warning() {
+    const ALERT_WARNING: u8 = 1;
+    const ALERT_NO_RENEGOTIATION: u8 = 100;
+    let Exchange {
+        mut client,
+        mut server,
+        ..
+    } = completed_pair(builder(), builder());
+
+    // The server asks the client to renegotiate: HelloRequest, an empty message of type 0.
+    let hello_request = protected_record(
+        &mut server,
+        ContentType::Handshake,
+        &[0, 0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 0],
+    );
+    client.read(&hello_request).unwrap();
+    let answer = drain(&mut client);
+    assert_eq!(
+        protected_alerts(&answer, &mut server),
+        vec![(ALERT_WARNING, ALERT_NO_RENEGOTIATION)]
+    );
+    assert!(!client.is_failed());
+    // The same record again is a replay and draws nothing.
+    client.read(&hello_request).unwrap();
+    assert!(drain(&mut client).is_empty());
+
+    // The client starts a renegotiation: a ClientHello in the established epoch.
+    let mut client_hello = vec![1, 0, 0, 42, 0, 9, 0, 0, 0, 0, 0, 42, 0xfe, 0xfd];
+    client_hello.extend_from_slice(&[0x77; 32]);
+    client_hello.extend_from_slice(&[0, 0, 0, 2, 0xc0, 0x2b, 1, 0]);
+    let renegotiation = protected_record(&mut client, ContentType::Handshake, &client_hello);
+    server.read(&renegotiation).unwrap();
+    let answer = drain(&mut server);
+    assert_eq!(
+        protected_alerts(&answer, &mut client),
+        vec![(ALERT_WARNING, ALERT_NO_RENEGOTIATION)]
+    );
+    assert!(!server.is_failed());
+
+    // Both directions still carry data, and the warning itself changes nothing at the peer.
+    for datagram in &answer {
+        client.read(datagram).unwrap();
+    }
+    assert!(!client.is_failed());
+    let record = application_record(&mut client, 500, b"still here");
+    server.read(&record).unwrap();
+    assert_eq!(
+        server.incoming_application_data().as_deref(),
+        Some(&b"still here"[..])
+    );
+}
+
+/// RFC 5246 7.4: a HelloRequest that arrives while a handshake is in progress is ignored. RFC
+/// 5246 7.4.1.1: it is not part of the handshake hashes, so the handshake still completes.
+#[test]
+fn a_hello_request_during_the_handshake_is_ignored() {
+    let now = Instant::now();
+    let mut client = client(builder());
+    let mut server = server(builder());
+    client.handshake(now).unwrap();
+
+    let mut injected = 0;
+    for _ in 0..16 {
+        for datagram in drain(&mut client) {
+            feed(&mut server, now, &datagram).unwrap();
+        }
+        for datagram in drain(&mut server) {
+            // A HelloRequest under the message sequence number the client expects next.
+            let expected = client.state.handshake_recv_sequence as u16;
+            let mut hello_request = vec![22, 0xfe, 0xfd, 0, 0, 0, 0, 0, 0, 1, injected, 0, 12];
+            hello_request.extend_from_slice(&[0, 0, 0, 0]);
+            hello_request.extend_from_slice(&expected.to_be_bytes());
+            hello_request.extend_from_slice(&[0; 6]);
+            feed(&mut client, now, &hello_request).unwrap();
+            injected += 1;
+            assert!(!client.is_failed());
+            feed(&mut client, now, &datagram).unwrap();
+        }
+        if client.is_handshake_completed() && server.is_handshake_completed() {
+            break;
+        }
+    }
+    assert!(injected >= 2);
+    assert!(client.is_handshake_completed() && server.is_handshake_completed());
+}

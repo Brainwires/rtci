@@ -101,6 +101,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **dtls**: a client waiting for the server's first answer no longer ends the handshake over a
   handshake record that delivers nothing (a stray fragment, a discarded message): it sent a fatal
   internal_error, so one spoofed datagram failed the association.
+- **dtls**: renegotiation is refused as RFC 5746 section 4.2 and RFC 5246 section 7.2.2 say: a
+  HelloRequest (to a client) or a ClientHello in the established epoch (to a server) is answered
+  with a protected no_renegotiation warning, and the association goes on. Both were ignored
+  silently.
 - **dtls**: a replay window below 32 is raised to 32 (RFC 6347 section 4.1.2.6).
 - **dtls**: the master secret is overwritten when an association fails or is dropped, and the
   premaster secret once the master secret exists (RFC 5246 sections 7.2.2, 8.1).
