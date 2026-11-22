@@ -33,13 +33,13 @@ The subcrates are in scope for this policy, not an afterthought.
 
 ## Inventory
 
-122 public enums, all with an explicit decision:
+128 public enums, all with an explicit decision:
 
 | Area | `#[non_exhaustive]` | Kept exhaustive |
 |---|---:|---:|
 | `rtc/src` | 34 | 0 |
-| protocol subcrates | 69 | 19 |
-| **total** | **103** | **19** |
+| protocol subcrates | 73 | 21 |
+| **total** | **107** | **21** |
 
 ### `rtc/src` — all 34 marked
 
@@ -47,7 +47,7 @@ Every directly declared enum in the core is `#[non_exhaustive]`: the W3C-facing 
 configuration, transport, statistics, event, and message enums. All of these track external
 specifications (W3C WebRTC, IANA registries, RFC state machines) that add values over time.
 
-### Protocol subcrates — kept exhaustive (19)
+### Protocol subcrates — kept exhaustive (21)
 
 These are the deliberate exceptions. Each is closed by construction, and exhaustive matching
 is worth more to callers than room for a variant we have no way to add.
@@ -72,8 +72,9 @@ is worth more to callers than room for a variant we have no way to add.
 | `rtc-rtp` | `VideoRotation` | 0° / 90° / 180° / 270°. |
 | `rtc-sdp` | `Direction` | sendrecv / sendonly / recvonly / inactive (RFC 4566). |
 | `rtc-sdp` | `ConnectionRole` | active / passive / actpass / holdconn (RFC 4145). |
+| `rtc-interceptor` | `FlexFecProtected`, `FlexFecLayout` | Flexible mask or fixed L/D: the one F bit of the RFC 8627 FEC header. |
 
-### Protocol subcrates — marked (69)
+### Protocol subcrates — marked (73)
 
 Everything else, falling into four families:
 
@@ -88,12 +89,14 @@ Everything else, falling into four families:
   `RecvSendState`, `ReliabilityType`, …
 - **Event streams**: `Event` (ice, turn, sctp), `EndpointEvent`, `DatagramEvent`,
   `StunEvent`, `ClientAgent`, `MdnsEvent`, `StreamEvent`, …
-- **Error taxonomies**: `Error` (shared, media), `AssociationError`, `ConnectError`.
+- **Error taxonomies**: `Error` (shared, media), `AssociationError`, `ConnectError`,
+  `FlexFecHeaderError`, `FlexFecEncodeError`.
 
 Also marked: wire sum types that gain arms when the protocol does — `Content`,
 `HandshakeMessage`, `Extension`, `Message`, `Payload`, `H265Payload`, `HeaderExtension`,
 `H26xNAL`, `Packet`, `CryptoPrivateKeyKind`, `NextHop`, `Kind`, `TransportProtocol`,
-`IvfCodec`, `OggHeaderType`, `MulticastDnsMode`, `ClientAuthType`, `CipherSuiteHash`, and the
+`IvfCodec`, `OggHeaderType`, `MulticastDnsMode`, `ClientAuthType`, `CipherSuiteHash`,
+`FlexFecHeader` (R=1 F=1 is reserved for a future variant), `FlexFecProtection`, and the
 Windows interface-info enums in `rtc-shared::ifaces`.
 
 ## When adding a new public item

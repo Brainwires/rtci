@@ -44,6 +44,7 @@ The rest of the evidence that the claims hold:
 | D1 | ULPFEC (RFC 5109) | Not offered by default: nothing encodes or decodes it. `MIME_TYPE_ULP_FEC` stays, and an application with its own coder registers it explicitly. RED is not implemented. |
 | D2 | `bundle_policy` | The engine has one transport, so `balanced` and `max-compat` behave as `max-bundle`. A remote offer without BUNDLE gets a defined error, never a half-working session. |
 | D3 | `SettingEngine` options with no effect in a sans-I/O engine (`receive_mtu`, `include_loopback_candidate`, `disable_media_engine_copy`) | `#[deprecated]` with the reason; no option is silently a no-op. `nat_1to1_ips` and `disable_media_engine_multiple_codecs` are implemented. |
+| D4 | FlexFEC draft-03 (`video/flexfec-03`) where libwebrtc departs from the draft's letter | The engine follows libwebrtc, the only draft-03 peer: mask bit j names the packet SN base + j (the draft's text says SN base + j + 1; RFC 8627 4.2.2.1 later wrote down what libwebrtc does), and the coder answers to the subtype `flexfec-03` only (the draft registers `flexfec`, which now means RFC 8627 and selects that coder). Both are pinned by tests (`mask_bit_j_names_sn_base_plus_j_as_libwebrtc_sends_it`, `the_mime_type_match_is_exact`). |
 
 ## Not implemented, on purpose
 
@@ -57,7 +58,7 @@ README.
 | SCTP | I-DATA (RFC 8260), Add Streams (RFC 6525 4.5), path MTU discovery, zero checksum (RFC 9653), RACK-TLP | Never claimed; none is needed for a browser data channel. |
 | TURN | TCP allocations (RFC 6062), a TURN server | Never claimed. The TURN client is implemented. |
 | SRTP | AEAD double (RFC 8723), MKI, EKT | Never claimed. |
-| FEC | FlexFEC as RFC 8627 | Only draft-ietf-payload-flexible-fec-scheme-03 is implemented, and the codec name is matched exactly so RFC 8627 `flexfec` is never fed to it. |
+| FEC | For RFC 8627 FlexFEC: answering FlexFEC only when offered with RTX (1.1.7), refusing an offer over its `repair-window` (5.2.1), adapting the amount of FEC to loss (8) | The RFC 8627 coder itself is implemented (opt-in, `video/flexfec`; [conformance/w4.md](conformance/w4.md)). libwebrtc answers both FlexFEC and RTX, and the engine does the same. |
 | RTP | H.264 STAP-B / MTAP / FU-B (interleaved mode, never offered); SVC layer packetization for VP9 and AV1 | Simulcast is implemented; SVC is not claimed. |
 | Identity | `peer_identity`, identity providers | Applications (Deno, for one) implement webrtc-identity above the engine. |
 | W3C API | `RTCDTMFSender` | Applications implement DTMF above the engine; the engine sends the telephone-event packets it is given. |

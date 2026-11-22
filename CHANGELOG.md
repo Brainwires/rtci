@@ -5,6 +5,54 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Features
+
+- **flexfec**: RFC 8627 FlexFEC as its own coder, negotiated as `video/flexfec` (the draft-03
+  coder keeps `video/flexfec-03`; the two wire formats are not compatible and each name selects
+  its coder exactly). `FlexFecEncoder` builds flexible-mask repair packets (15, 46 or 110 bits),
+  fixed L columns / D rows packets (row, column and 2-D protection, `FlexFecProtection`) and
+  retransmission packets (R=1), with the protected SSRCs in the CSRC list. `FlexFecDecoder`
+  recovers under all of them, iteratively for 2-D, for several source streams per repair packet,
+  and takes retransmissions; its buffers follow the negotiated `repair-window`
+  (`FlexFecParameters`, `FlexFecDecoderConfig`) and are bounded against the peer (RFC 8627
+  section 9). `FlexFecSendBuilder` / `FlexFecReceiveBuilder` install the interceptors at
+  `Slot::FecEncoder` / `Slot::FecDecoder`; both are opt-in, like the draft-03 pair. A sender
+  protects no block that outlasts the repair window; FlexFEC retransmission in answer to NACK
+  is `with_retransmissions(true)`; in-band SSRC mapping (section 7.1.1) is
+  `with_in_band_ssrc_mapping`.
+- **interceptor**: `StreamInfo::mime_type_fec` and `StreamInfo::sdp_fmtp_line_fec` name a
+  stream's FEC format and its parameters, with `fec_is_flexfec03()` / `fec_is_flexfec()`.
+- **flexfec-03**: `FlexFec03SendBuilder::with_initial_sequence_number` and
+  `with_initial_timestamp`; `FLEXFEC03_MAX_MEDIA_PACKETS` (109).
+- **fuzz**: targets `flexfec_header_parse`, `flexfec_decoders` and `flexfec_receive`.
+
+### Bug Fixes
+
+- **flexfec-03**: a block of 110 media packets is refused. Draft-03's masks hold 109 bits
+  (15 + 31 + 63); the 110th packet was XORed into the repair data without being named in the
+  mask, so anything recovered from that repair packet was corrupt.
+- **flexfec-03**: SN base is the lowest sequence number each repair packet protects (draft-03
+  section 4.2). Every repair packet of a block carried the block's first sequence number.
+- **flexfec-03**: the repair packet's timestamp is its transmission time on the repair stream's
+  clock, from the instant the block is written with (section 4.2). It was the media timestamp
+  of the first protected packet.
+- **flexfec-03**: the initial sequence number of a repair stream is random (section 4.2). It
+  was 0.
+
+### Breaking Changes
+
+- **flexfec-03**: `FlexFec03Encoder::encode` takes the repair stream's RTP timestamp as a third
+  argument.
+- **interceptor**: `StreamInfo` has two more public fields (`mime_type_fec`,
+  `sdp_fmtp_line_fec`); a struct literal without `..Default::default()` needs them. The draft-03
+  FlexFEC interceptors bind a stream whose `mime_type_fec` is empty or `<type>/flexfec-03`, and
+  no longer one that names another FEC format.
+- **codecs**: with `video/flexfec` registered and negotiated, a sender's FEC SSRC is now
+  described (`a=ssrc-group:FEC-FR`) and its streams are bound with the repair flow, as for
+  `video/flexfec-03`. Before, `video/flexfec` was written to SDP with nothing behind it.
+
 ## [0.22.0+brainwires.5] - 2026-11-20
 
 ### Bug Fixes
