@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **simulcast**: `a=rid` and `a=simulcast` follow RFC 8851 and RFC 8853 (`src/peer_connection/sdp/simulcast.rs`).
+  `RTCRtpCodingParameters` has a new public field `rid_restrictions: RTCRtpRidRestrictions`
+  (`pt=`, `max-width`, `max-height`, `max-fps`, `max-fs`, `max-br`, `max-pps`, `max-bpp`,
+  `depend`; RFC 8851 section 5): struct literals need `..Default::default()`. An offer writes
+  a sender encoding's restrictions on its `a=rid ... send` line (a `pt=` keeps the formats the
+  section has), an answer echoes the offered restrictions with the direction reversed, and a
+  receiver's coding parameters carry what the remote `a=rid ... send` line says.
+  - An answer adds a `send` rid only for a `recv` rid the offer listed and the sender has an
+    encoding for (RFC 8853 section 5.3.2: "MUST NOT add any simulcast streams"); it used to
+    echo every offered `recv` rid as `send`, and to add the sender's own rids to an offer that
+    listed none.
+  - An applied answer (local or remote) leaves the sender the encodings it accepted, or its
+    first encoding when it accepted none or has no simulcast (W3C webrtc-pc "set a session
+    description", RFC 8853 section 5.3.3). The removed encodings leave `getParameters` and
+    later offers, their streams are not bound, and `write_rtp` drops their packets. A remote
+    answer's `a=rid` line that loosens a restriction or adds a `pt=` is discarded with its
+    stream (RFC 8851 section 6.4); one that tightens a restriction sets it on the encoding.
+  - The pause mark `~` is no longer written, neither for an inactive encoding nor echoed from
+    an offer: RFC 8853 section 5.2 has it go with RFC 7728 pause / resume, which the engine
+    does not implement. `SettingEngineBuilder::with_rid_pause_marks(true)` writes it as
+    before (and as libwebrtc does).
+  - Received lines are checked per RFC 8851 section 6.2.2: a rid-id on two lines discards
+    both, a `pt=` keeps the m= line's formats only, a `recv` line with an unknown restriction
+    and a line whose `depend` does not resolve are discarded; per RFC 8853 section 5.2 a
+    rid-id is used only with its own direction, the first usable alternative of a stream is
+    taken, and a section with more than one `a=simulcast` line (or one that repeats a rid-id)
+    has no simulcast stream. A remote description whose `a=simulcast` names a rid-id without
+    an `a=rid` line is refused with `SdpInvalidValue` (RFC 9429 section 5.8.3).
+  - A local encoding's rid must be 1 to 255 alphanumeric characters (RFC 8852 section 3.1,
+    W3C webrtc-pc addTransceiver): anything else is the new `Error::ErrRTPSenderRidInvalid`.
 - **sender**: `RTCRtpSender::write_rtp` writes the MID header extension (the transceiver's mid)
   and RtpStreamId (the rid of the packet's encoding) into every packet when the extension is
   negotiated (RFC 9143 section 15, RFC 8852 section 3.3); the application had to. A packet

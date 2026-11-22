@@ -2,12 +2,14 @@ use crate::media_stream::MediaStreamId;
 use crate::media_stream::track::MediaStreamTrack;
 use crate::peer_connection::configuration::interceptor_registry::create_stream_info;
 use crate::peer_connection::configuration::media_engine::MediaEngine;
+use crate::rtp_transceiver::SSRC;
 use crate::rtp_transceiver::direction::RTCRtpTransceiverDirection;
 use crate::rtp_transceiver::rtp_sender::rtp_capabilities::RTCRtpCapabilities;
 use crate::rtp_transceiver::rtp_sender::rtp_codec::{
     RtpCodecKind, encoding_send_codec, find_fec_format, find_rtx_payload_type,
 };
 use crate::rtp_transceiver::rtp_sender::rtp_codec_parameters::RTCRtpCodecParameters;
+use crate::rtp_transceiver::rtp_sender::rtp_coding_parameters::RTCRtpRidRestrictions;
 use crate::rtp_transceiver::rtp_sender::rtp_encoding_parameters::RTCRtpEncodingParameters;
 use crate::rtp_transceiver::rtp_sender::rtp_header_extension_capability::RTCRtpHeaderExtensionCapability;
 use crate::rtp_transceiver::rtp_sender::rtp_send_parameters::RTCRtpSendParameters;
@@ -53,6 +55,9 @@ pub(crate) struct RTCRtpSenderInternal {
     bound_streams: Vec<StreamInfo>,
     /// Reduced-size RTCP as negotiated for the media section (`RTCRtcpParameters::reduced_size`).
     rtcp_reduced_size: bool,
+    /// The SSRCs of the simulcast encodings an answer removed (`apply_simulcast_answer`): the
+    /// track still has them, but they are neither bound nor sent.
+    removed_ssrcs: Vec<SSRC>,
 }
 
 impl RTCRtpSenderInternal {
@@ -88,6 +93,7 @@ impl RTCRtpSenderInternal {
             sent: false,
             bound_streams: Vec::new(),
             rtcp_reduced_size: false,
+            removed_ssrcs: Vec::new(),
         }
     }
 
@@ -404,6 +410,52 @@ impl RTCRtpSenderInternal {
         self.last_returned_parameters = None;
     }
 
+    /// Keeps the simulcast encodings an applied answer accepted, `accepted` being their rids
+    /// with the restrictions the answer gave them (see
+    /// `RTCPeerConnection::apply_negotiated_simulcast`). Without any of them, the first
+    /// encoding stays. A sender with one encoding is left as it is.
+    pub(crate) fn apply_simulcast_answer(&mut self, accepted: &[(String, RTCRtpRidRestrictions)]) {
+        if self.send_encodings.len() < 2 {
+            return;
+        }
+        let restrictions_of = |rid: &str| {
+            accepted
+                .iter()
+                .find(|(id, _)| id == rid)
+                .map(|(_, restrictions)| restrictions)
+        };
+        let keeps_any = self
+            .send_encodings
+            .iter()
+            .any(|encoding| restrictions_of(&encoding.rtp_coding_parameters.rid).is_some());
+        let mut kept = Vec::with_capacity(self.send_encodings.len());
+        for (index, mut encoding) in std::mem::take(&mut self.send_encodings)
+            .into_iter()
+            .enumerate()
+        {
+            let coding = &mut encoding.rtp_coding_parameters;
+            match restrictions_of(&coding.rid) {
+                Some(restrictions) => {
+                    coding.rid_restrictions = restrictions.clone();
+                    kept.push(encoding);
+                }
+                None if !keeps_any && index == 0 => kept.push(encoding),
+                None => {
+                    if let Some(ssrc) = coding.ssrc {
+                        self.removed_ssrcs.push(ssrc);
+                    }
+                }
+            }
+        }
+        self.send_encodings = kept;
+        self.last_returned_parameters = None;
+    }
+
+    /// Whether `ssrc` is the SSRC of an encoding an answer removed (`apply_simulcast_answer`).
+    pub(crate) fn is_removed_ssrc(&self, ssrc: SSRC) -> bool {
+        self.removed_ssrcs.contains(&ssrc)
+    }
+
     /// The streams this sender sends, as the interceptors are to see them now: each coding's
     /// SSRCs with the codec it is sent with ([`encoding_send_codec`]), that codec's RTX
     /// payload type, the FEC payload type and the negotiated header extensions.
@@ -422,6 +474,7 @@ impl RTCRtpSenderInternal {
             // and its stream is bound like any other: without it the interceptors never see the
             // stream (no sender reports, no NACK responder, no TWCC).
             if let Some(&ssrc) = coding.rtp_coding_parameters.ssrc.as_ref()
+                && !self.is_removed_ssrc(ssrc)
                 && let Some(codec) = encoding_send_codec(&coding.codec, codecs)
             {
                 let payload_type_rtx = find_rtx_payload_type(codec.payload_type, codecs);

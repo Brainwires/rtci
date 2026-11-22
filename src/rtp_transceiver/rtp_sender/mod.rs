@@ -430,6 +430,17 @@ impl RTCRtpSender<'_> {
             return Err(Error::ErrSenderWithNoSSRCs);
         }
 
+        // RFC 8853 section 5.3.3: no RTP for a simulcast stream the answer removed. Dropped
+        // like an inactive encoding's packet, so an encoder that has not re-read the
+        // parameters yet does not fail.
+        if sender.is_removed_ssrc(packet.header.ssrc) {
+            trace!(
+                "rtp_sender {:?} drops RTP ssrc {}: the answer removed its simulcast stream",
+                self.id, packet.header.ssrc
+            );
+            return Ok(());
+        }
+
         let parameters = sender.get_parameters(media_engine);
         let (codecs, encodings) = (&parameters.rtp_parameters.codecs, &parameters.encodings);
 

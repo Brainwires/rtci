@@ -385,6 +385,36 @@ pub(crate) fn simulcast_rid_without_line(media: &MediaDescription) -> Option<Str
         .find(|id| !section.declared.contains(id))
 }
 
+/// The format a payload type of `media` stands for: its `a=rtpmap` value (case-insensitive,
+/// RFC 4855 section 3) and its `a=fmtp` value. A payload type without `a=rtpmap` is a static
+/// one (RFC 3551 section 6), the format of its number.
+fn format_of(media: &MediaDescription, pt: u8) -> (String, Option<String>) {
+    let value = |key: &str| -> Option<String> {
+        media.attributes.iter().find_map(|attr| {
+            let value = attr.value.as_deref()?;
+            let (number, rest) = value.split_once(' ')?;
+            (attr.key == key && number.parse::<u8>().ok() == Some(pt)).then(|| rest.to_owned())
+        })
+    };
+    let rtpmap = value("rtpmap").map_or_else(|| pt.to_string(), |v| v.to_ascii_lowercase());
+    (rtpmap, value("fmtp"))
+}
+
+/// The `same_format` of [`answered_rid_is_valid`] for an answer section `answer` to the
+/// offer section `offer`: whether the answer's payload type `pt` has the format of one of the
+/// offered payload types `offered`.
+pub(crate) fn same_format<'a>(
+    offer: &'a MediaDescription,
+    answer: &'a MediaDescription,
+) -> impl Fn(u8, &[u8]) -> bool + 'a {
+    move |pt, offered| {
+        let answered = format_of(answer, pt);
+        offered
+            .iter()
+            .any(|&offered_pt| format_of(offer, offered_pt) == answered)
+    }
+}
+
 /// RFC 8851 section 6.4: whether the offerer keeps the `a=rid` line `answered`, given the
 /// line `offered` it wrote with that rid-id.
 ///

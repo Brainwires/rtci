@@ -169,6 +169,7 @@ mod rejected_mline_tests {
             sctp_over_tcp: false,
             ignore_rid_pause_for_recv: false,
             write_ssrc_attributes_for_simulcast: false,
+            rid_pause_marks: false,
         }
     }
 
@@ -752,7 +753,7 @@ fn get_rids_orders_and_pauses_by_lookup() {
     for i in 0..RIDS {
         media = media.with_value_attribute(SDP_ATTRIBUTE_RID.to_owned(), format!("r{i} send"));
     }
-    // Reverse order, every third one paused, one id listed twice and one unknown id.
+    // Reverse order, every third one paused, and one unknown id.
     let mut list: Vec<String> = (0..RIDS)
         .rev()
         .map(|i| {
@@ -763,14 +764,13 @@ fn get_rids_orders_and_pauses_by_lookup() {
             }
         })
         .collect();
-    list.push("r1".to_owned());
     list.push("unknown".to_owned());
-    media = media.with_value_attribute(
+    let simulcast = media.clone().with_value_attribute(
         SDP_ATTRIBUTE_SIMULCAST.to_owned(),
         format!("send {}", list.join(";")),
     );
 
-    let rids = get_rids(&media);
+    let rids = get_rids(&simulcast);
 
     assert_eq!(rids.len(), RIDS);
     for (position, rid) in rids.iter().enumerate() {
@@ -779,6 +779,21 @@ fn get_rids_orders_and_pauses_by_lookup() {
         assert_eq!(rid.paused, i % 3 == 0, "rid r{i}");
         assert!(rid.simulcast);
     }
+
+    // RFC 8853 section 5.2: a rid-id "MUST NOT" occur twice on the line. One that does is
+    // malformed and not used: the rids stay, in a=rid order, as no simulcast streams.
+    list.push("r1".to_owned());
+    let repeated = media.with_value_attribute(
+        SDP_ATTRIBUTE_SIMULCAST.to_owned(),
+        format!("send {}", list.join(";")),
+    );
+    let rids = get_rids(&repeated);
+    assert_eq!(rids.len(), RIDS);
+    assert!(
+        rids.iter()
+            .enumerate()
+            .all(|(i, rid)| rid.id == format!("r{i}") && !rid.simulcast)
+    );
 }
 
 pub(crate) fn add_candidates_to_media_descriptions(
@@ -2900,12 +2915,23 @@ fn get_rids_uses_each_layers_first_alternative_once() {
     for rid in ["foo", "bar", "1", "2"] {
         m = m.with_value_attribute(SDP_ATTRIBUTE_RID.to_owned(), format!("{rid} recv"));
     }
-    m = m.with_value_attribute(
+    let simulcast = m.clone().with_value_attribute(
+        SDP_ATTRIBUTE_SIMULCAST.to_owned(),
+        "recv foo,bar;1,2".to_owned(),
+    );
+    let ids: Vec<(String, bool)> = get_rids(&simulcast)
+        .into_iter()
+        .map(|r| (r.id, r.simulcast))
+        .collect();
+    // The first alternative of each stream is the stream; the others are dropped.
+    assert_eq!(ids, [("foo".to_owned(), true), ("1".to_owned(), true)]);
+
+    // A rid-id listed twice makes the line malformed (RFC 8853 section 5.2): it is not used.
+    let repeated = m.with_value_attribute(
         SDP_ATTRIBUTE_SIMULCAST.to_owned(),
         "recv foo,bar;1,2;foo".to_owned(),
     );
-    let ids: Vec<String> = get_rids(&m).into_iter().map(|r| r.id).collect();
-    assert_eq!(ids, ["foo", "1"]);
+    assert!(get_rids(&repeated).iter().all(|r| !r.simulcast));
 }
 
 /// The extensions an offer adds back for a transceiver with an explicit list of header

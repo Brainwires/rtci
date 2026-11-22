@@ -1315,6 +1315,72 @@ impl RTCPeerConnection {
         }
     }
 
+    /// What an applied answer leaves of the simulcast encodings this endpoint offered or was
+    /// asked for (RFC 8853 section 5.3.3, W3C webrtc-pc "set a session description": "If
+    /// description is missing any of the previously negotiated layers, then remove the
+    /// dictionaries that correspond to the missing layers from [[SendEncodings]]"; without
+    /// simulcast, or without any of them, the first encoding stays).
+    ///
+    /// The encodings that stay take the restrictions of the answer's `a=rid` line. In a
+    /// remote answer, a line that does not keep to what the offer said (RFC 8851 section 6.4)
+    /// is discarded, so its stream goes.
+    pub(super) fn apply_negotiated_simulcast(
+        &mut self,
+        offer: &SessionDescription,
+        answer: &SessionDescription,
+        answer_is_local: bool,
+    ) {
+        use super::sdp::SimulcastDirection;
+        use super::sdp::simulcast::{answered_rid_is_valid, same_format};
+        use crate::rtp_transceiver::rtp_sender::RTCRtpRidRestrictions;
+        // The direction this endpoint's streams have in the answer.
+        let ours = if answer_is_local {
+            SimulcastDirection::Send
+        } else {
+            SimulcastDirection::Recv
+        };
+        let transceiver_by_mid =
+            RTCPeerConnection::transceiver_index_by_mid(&self.rtp_transceivers);
+        for (offered, answered) in offer
+            .media_descriptions
+            .iter()
+            .zip(&answer.media_descriptions)
+        {
+            if is_rejected_media(answered) {
+                continue;
+            }
+            let Some(&i) =
+                get_mid_value(answered).and_then(|mid| transceiver_by_mid.get(mid.as_str()))
+            else {
+                continue;
+            };
+            let Some(sender) = self.rtp_transceivers[i].sender_mut() else {
+                continue;
+            };
+            let offered_rids = get_rids(offered);
+            let formats = same_format(offered, answered);
+            let accepted: Vec<(String, RTCRtpRidRestrictions)> = get_rids(answered)
+                .into_iter()
+                .filter(|rid| rid.direction == ours && rid.simulcast)
+                .filter(|rid| {
+                    answer_is_local
+                        || offered_rids
+                            .iter()
+                            .find(|offered| {
+                                offered.id == rid.id
+                                    && offered.direction == SimulcastDirection::Send
+                            })
+                            .is_some_and(|offered| answered_rid_is_valid(offered, rid, &formats))
+                })
+                .map(|rid| {
+                    let restrictions = rid.to_restrictions();
+                    (rid.id, restrictions)
+                })
+                .collect();
+            sender.apply_simulcast_answer(&accepted);
+        }
+    }
+
     /// Hands what an applied answer negotiated to the parts of the interceptor chain that
     /// act on it. Each goes as a control message written into the chain; a chain without
     /// the interceptor a message is for drops it.
@@ -1587,7 +1653,9 @@ impl RTCPeerConnection {
             {
                 // Collect SSRCs for stats accumulator creation
                 for (encoding_index, coding) in sender.track().codings().iter().enumerate() {
-                    if let Some(ssrc) = coding.rtp_coding_parameters.ssrc {
+                    if let Some(ssrc) = coding.rtp_coding_parameters.ssrc
+                        && !sender.is_removed_ssrc(ssrc)
+                    {
                         let rid = coding.rtp_coding_parameters.rid.clone();
                         let rtx_ssrc = coding
                             .rtp_coding_parameters
@@ -1698,13 +1766,17 @@ impl RTCPeerConnection {
                     // The reason is to provide stream_id and track_id information for later usage
                     // when received the first RTP packet. So, it is placeholder here.
                     let mut codings = vec![];
-                    for rid in incoming_track.rids {
+                    let mut rid_restrictions = std::mem::take(&mut incoming_track.rid_restrictions);
+                    for rid in std::mem::take(&mut incoming_track.rids) {
+                        // RFC 8851 section 5: the restrictions the sender's `a=rid` line put on
+                        // the stream, as the application reads them from the receiver.
+                        let restrictions = rid_restrictions.remove(&rid).unwrap_or_default();
                         let rtp_coding_parameters = RTCRtpCodingParameters {
                             rid,
                             ssrc: None, // Defer receiver's track's ssrc until received the first RTP packet with mid/rid header extension in endpoint handler
                             rtx: None,
                             fec: None,
-                            ..Default::default()
+                            rid_restrictions: restrictions,
                         };
                         receive_codings.push(rtp_coding_parameters.clone());
                         codings.push(RTCRtpEncodingParameters {
@@ -2752,6 +2824,16 @@ impl RTCPeerConnection {
             .all(|encoding| !encoding.rtp_coding_parameters.rid.is_empty());
         if send_encodings.len() > 1 && has_rid && !all_have_rid {
             return Err(Error::ErrRTPSenderRidNil);
+        }
+        // W3C webrtc-pc addTransceiver: a rid that "does not conform to the grammar
+        // requirements specified in Section 10 of [RFC8851]" is a TypeError. The rid is sent as
+        // the RtpStreamId of RFC 8852, whose section 3.1 narrows it to 1 to 255 alphanumeric
+        // characters; a rid outside that could be signalled but never sent.
+        if send_encodings.iter().any(|encoding| {
+            let rid = &encoding.rtp_coding_parameters.rid;
+            !rid.is_empty() && (rid.len() > 255 || !rid.bytes().all(|b| b.is_ascii_alphanumeric()))
+        }) {
+            return Err(Error::ErrRTPSenderRidInvalid);
         }
 
         let is_simulcast = send_encodings.len() > 1 && all_have_rid;

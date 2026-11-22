@@ -2256,6 +2256,10 @@ pub enum Error {
     /// Sender cannot encoding due to RID collision.
     #[error("Sender cannot encoding due to RID collision")]
     ErrRTPSenderRIDCollision,
+    /// An encoding's rid is not 1 to 255 alphanumeric characters (RFC 8852 section 3.1, the
+    /// RtpStreamId the rid is sent as; RFC 8851 section 10).
+    #[error("Sender cannot add encoding as its rid is not 1 to 255 alphanumeric characters")]
+    ErrRTPSenderRidInvalid,
     /// Sender does not have track for RID.
     #[error("Sender does not have track for RID")]
     ErrRTPSenderNoTrackForRID,
