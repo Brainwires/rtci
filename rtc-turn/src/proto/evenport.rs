@@ -14,13 +14,13 @@ use stun::message::*;
 /// relayed transport address be even, and (optionally) that the server
 /// reserve the next-higher port number.
 ///
-/// [RFC 5766 Section 14.6](https://www.rfc-editor.org/rfc/rfc5766#section-14.6).
-#[derive(Default, Debug, PartialEq, Eq)]
+/// [RFC 8656 Section 18.7](https://www.rfc-editor.org/rfc/rfc8656#section-18.7).
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EvenPort {
     /// `reserve_port` means that the server is requested to reserve
     /// the next-higher port number (on the same IP address)
     /// for a subsequent allocation.
-    reserve_port: bool,
+    pub reserve_port: bool,
 }
 
 impl fmt::Display for EvenPort {
@@ -34,7 +34,7 @@ impl fmt::Display for EvenPort {
 }
 
 const EVEN_PORT_SIZE: usize = 1;
-// RFC 5766 §14.6: only the most-significant bit (R flag) is meaningful;
+// RFC 8656 §18.7: only the most-significant bit (R flag) is meaningful;
 // remaining bits are reserved and must be zero.  0b10000000 = 1 << 7 is correct.
 const FIRST_BIT_SET: u8 = 0b10000000;
 

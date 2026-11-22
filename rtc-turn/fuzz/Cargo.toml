@@ -33,3 +33,10 @@ path = "fuzz_targets/proto_attributes.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "data_connection_handle_read"
+path = "fuzz_targets/data_connection_handle_read.rs"
+test = false
+doc = false
+bench = false

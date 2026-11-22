@@ -3,7 +3,16 @@ mod binding_test;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+/// How long a channel binding lasts on the server from the ChannelBind that made or refreshed
+/// it (RFC 8656 §12).
+pub(crate) const BINDING_LIFETIME: Duration = Duration::from_secs(600);
+/// How long after a binding expires its channel number may not be bound to another peer
+/// address, nor its peer address to another number (RFC 8656 §12).
+pub(crate) const BINDING_REUSE_DELAY: Duration = Duration::from_secs(300);
+/// The age at which a send on a binding rebinds it.
+pub(crate) const BINDING_REFRESH_AGE: Duration = Duration::from_secs(300);
 
 //  Channel number:
 //    0x4000 through 0x4FFF: These values are the allowed channel
@@ -17,6 +26,7 @@ pub(crate) enum BindingState {
     Request,
     Ready,
     Refresh,
+    /// The server refused the ChannelBind; it is not asked again before `retry_at`.
     Failed,
 }
 
@@ -25,10 +35,36 @@ pub(crate) struct Binding {
     pub(crate) number: u16,
     pub(crate) st: BindingState,
     pub(crate) addr: SocketAddr,
+    /// When the server last confirmed the binding; meaningful once `bound`.
     pub(crate) refreshed_at: Instant,
+    /// Whether a ChannelBind for this pair ever succeeded.
+    pub(crate) bound: bool,
+    /// Whether data went over the channel, either way, since it was last bound.
+    pub(crate) used: bool,
+    /// When a ChannelBind for this pair was last sent. The server may hold the binding for
+    /// [`BINDING_LIFETIME`] from then, whatever became of the response.
+    pub(crate) last_request_at: Option<Instant>,
+    /// With [`BindingState::Failed`]: when the ChannelBind may be tried again.
+    pub(crate) retry_at: Option<Instant>,
 }
 
 impl Binding {
+    /// Whether the server still holds this binding at `now`, by the last ChannelBind it
+    /// confirmed.
+    pub(crate) fn is_live(&self, now: Instant) -> bool {
+        self.bound && now.saturating_duration_since(self.refreshed_at) < BINDING_LIFETIME
+    }
+
+    /// Whether the number and the address are free for another binding at `now`: no ChannelBind
+    /// is in flight, and the last one was sent long enough ago that the binding it may have made
+    /// expired and the wait after that is over.
+    fn is_reusable(&self, now: Instant) -> bool {
+        !matches!(self.st, BindingState::Request | BindingState::Refresh)
+            && self.last_request_at.is_some_and(|at| {
+                now.saturating_duration_since(at) >= BINDING_LIFETIME + BINDING_REUSE_DELAY
+            })
+    }
+
     pub(crate) fn set_state(&mut self, state: BindingState) {
         self.st = state;
     }
@@ -82,12 +118,27 @@ impl BindingManager {
                 break;
             }
         }
+        // Every number is taken: take one whose binding expired at least five minutes ago.
+        if available.is_none()
+            && let Some(old) = self
+                .addr_map
+                .values()
+                .find(|b| b.is_reusable(now))
+                .map(|b| b.number)
+        {
+            self.delete_by_number(old);
+            available = Some(old);
+        }
         let number = available?;
         let b = Binding {
             number,
             st: BindingState::Idle,
             addr,
             refreshed_at: now,
+            bound: false,
+            used: false,
+            last_request_at: None,
+            retry_at: None,
         };
 
         self.chan_map.insert(b.number, b.addr.to_string());
@@ -133,5 +184,13 @@ impl BindingManager {
 
     pub(crate) fn size(&self) -> usize {
         self.addr_map.len()
+    }
+
+    pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = &mut Binding> {
+        self.addr_map.values_mut()
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &Binding> {
+        self.addr_map.values()
     }
 }

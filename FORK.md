@@ -96,6 +96,9 @@ history stays intact.
 | ECN / L4S on RTP media and the ECN / RFC 8888 statistics | `rtc-shared/src/transport.rs` (`TransportContext::ecn`), `SettingEngineBuilder::with_ecn`, `src/peer_connection/handler/{ice,interceptor}.rs`, `rtc-interceptor/src/rfc8888/sender.rs`, `src/statistics/accumulator/{ccfb,rtcp_reports}.rs`, `configure_congestion_control_feedback` | The sans-I/O engine takes each received datagram's ECN codepoint in `TransportContext::ecn` and names the one to set on each datagram it sends. With `with_ecn(true)`, RTP media (RTX included) of a stream that negotiated `a=rtcp-fb:<pt> ack ccfb` (RFC 8888) is sent ECT(1), the L4S identifier; nothing else is marked. RFC 8888 reports carry each packet's codepoint. Stats: inbound `packetsReceivedWithEct1` / `packetsReceivedWithCe` / `packetsReportedAsLost` / `packetsReportedAsLostButRecovered`, outbound `packetsSentWithEct1`, remote-inbound `packetsReceivedWithEct1` / `packetsReceivedWithCe` / `packetsReportedAsLost` / `packetsReportedAsLostButRecovered` / `packetsWithBleachedEct1Marking`. Opt-in: off by default, TWCC stays the default feedback and the default SDP is unchanged. `tests/ecn_l4s_rtc2rtc.rs`. |
 | A NACK retransmission without RTX keeps its transport-wide number | `rtc-interceptor/src/twcc/sender.rs` (`LocalStream::numbers`, `REMEMBERED`) | A packet whose RTP sequence number is among the last 1024 its stream numbered is that packet again (the NACK responder's no-RTX path) and keeps its transport-wide sequence number, so it is the same bytes and SRTP protects it again; upstream renumbers it and SRTP refuses it as an index reuse. An RTX retransmission is numbered as a new packet. |
 | STUN as RFC 8489 has it, and a receive path that shows only authenticated attributes | `rtc-stun/src/{validated,long_term,nonce_cookie,password_algorithm,userhash,opaque,alternate,integrity,client}.rs` | `rtc_stun::validated` (`Validator`, `ValidatedMessage`): FINGERPRINT, MESSAGE-INTEGRITY(-SHA256) and unknown comprehension-required attributes checked in one place, and only the attributes ahead of the integrity attribute readable afterwards. MESSAGE-INTEGRITY-SHA256, USERHASH, PASSWORD-ALGORITHM(S), ALTERNATE-DOMAIN, OpaqueString (`precis-profiles`), the nonce cookie and bid-down protection (`LongTermCredentials`), 300 (Try Alternate) data with the loop rule, and the retransmission timer of section 6.2 in `Client` (doubling RTO, Rc, Rm, Ti, RFC 6298 estimate, ten outstanding transactions, path MTU). Upstream follows RFC 5389, reads attributes wherever they sit, and its client truncates responses over 120 bytes and backs off linearly. |
+| The TURN client's copy of an allocation follows the server's (RFC 8656 sections 5, 8, 9, 12) | `rtc-turn/src/client/{mod,relay,binding,permission,error}.rs` (`RequestError`, `Event::{AllocationLost, AllocationReleased, RefreshError, PermissionLost, ChannelBindError}`) | A 437 ends the allocation; a release is never undone by a refresh; permissions (300 s) and channel bindings (10 minutes, per allocation) end and are refreshed by the RFC's timers; error responses reach the application with their code. Upstream keeps bindings per client, has no expiry, and reports errors as text. |
+| The TURN client's RFC 8656 Allocate options, dual allocation and ICMP | `rtc-turn/src/client/allocation.rs` (`AllocateOptions`, `Client::allocate_with`), `rtc-turn/src/client/relay.rs` (`Relay::{relayed_addrs, mapped_addr, release_family, send_to_dont_fragment}`), `rtc-turn/src/proto/{addfamily,addrerror,icmp}.rs` | REQUESTED-ADDRESS-FAMILY, ADDITIONAL-ADDRESS-FAMILY (two relayed addresses on one allocation), ADDRESS-ERROR-CODE, LIFETIME, DONT-FRAGMENT (with the 420 fallback), EVEN-PORT / RESERVATION-TOKEN, SOFTWARE on every request, the ICMP attribute as `Event::IcmpError`. A 300 is reported with its ALTERNATE-SERVER, not followed: the application owns the socket and chooses the server. Upstream's client sends REQUESTED-TRANSPORT only. |
+| TCP allocations in the TURN client (RFC 6062) | `rtc-turn/src/client/data_connection.rs` (`DataConnection`), `rtc-turn/src/client/relay.rs` (`Relay::{connect, data_connection}`), `rtc-turn/src/client/allocation.rs` (`RelayTransport`), `rtc-turn/src/proto/connid.rs` | Client side, sans-I/O: the application opens the TCP connections, the client drives Allocate (REQUESTED-TRANSPORT TCP), Connect and ConnectionAttempt on the control connection, and a `DataConnection` per peer sends ConnectionBind and then passes the bytes as they are. ICE gathers no relayed TCP candidate from it. Upstream has the code points only. |
 | CI: benchmarks, fuzzing, OSS-Fuzz, git-cliff release notes | `.github/workflows/{bench,fuzz,release}.yml`, `oss-fuzz/`, `cliff.toml` | |
 
 ### Hardening (fork only)
@@ -111,8 +114,8 @@ caps (mDNS-resolved ones included), mDNS answers only from the mDNS socket, at m
 mDNS names (a host candidate past them is dropped, not sent with its address); bounded RFC 4571
 frame decoding; bounded SCTP
 FORWARD-TSN/SACK/receive window and stream-id checks; DCEP stream-id parity and internal message
-types refused from the wire; TURN client server-address filtering and response MESSAGE-INTEGRITY
-checks; errors instead of panics on malformed DTLS/SCTP/DCEP/ICE/SDP/RTCP input; NACK
+types refused from the wire; TURN client server-address filtering, response MESSAGE-INTEGRITY
+checks and relayed data only from peers with a permission; errors instead of panics on malformed DTLS/SCTP/DCEP/ICE/SDP/RTCP input; NACK
 retransmission de-duplication and rate limit; bounded H.264 FU-A and AV1 reassembly, AV1 OBU
 checks, VP9 per-picture state; RTP extension blocks consumed whole; SLI on PT 206; bounded IVF and
 H.265 writer buffers; sha-256 fingerprint selection; fuzzing CI fixes and stateful SCTP targets.
@@ -123,7 +126,15 @@ responses without MESSAGE-INTEGRITY (RFC 8489 §9.2.4; a server cannot sign a re
 credential or nonce it would sign with). So a forged 438 can still end the request it answers
 with a stale-nonce error and replace the allocation's nonce; the server's own 438 on the next
 request restores it. Only a sender that passes the server-address filter can do this, and it
-cannot release the allocation or forge any other response.
+cannot release the allocation or forge any other response. An unsigned 401 or 438 to a
+permission refresh ends that refresh only: the permissions keep the time the server last
+granted and are asked for again.
+
+Also as the RFC has it: a success response to the first, unauthenticated Allocate is an
+allocation (RFC 8656 section 7.2 step 1 lets a server ask for no credential). Nothing can sign
+that response, so a sender that passes the server-address filter and knows the request's
+transaction id can make the client believe in an allocation; requests for such an allocation
+carry no credential until the server asks for one with a 401.
 
 ### Dependency audit (fork only)
 

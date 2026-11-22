@@ -15,7 +15,7 @@ use stun::xoraddr::*;
 /// seen from the TURN server. (For example, the peer's server-reflexive
 /// transport address if the peer is behind a NAT.)
 ///
-/// [RFC 5766 Section 14.3](https://www.rfc-editor.org/rfc/rfc5766#section-14.3).
+/// [RFC 8656 Section 18.3](https://www.rfc-editor.org/rfc/rfc8656#section-18.3).
 #[derive(PartialEq, Eq, Debug)]
 pub struct PeerAddress {
     /// The peer IP address.
@@ -70,5 +70,5 @@ impl Getter for PeerAddress {
 /// seen from the TURN server. (For example, the peer's server-reflexive
 /// transport address if the peer is behind a NAT.)
 ///
-/// [RFC 5766 Section 14.3](https://www.rfc-editor.org/rfc/rfc5766#section-14.3).
+/// [RFC 8656 Section 18.3](https://www.rfc-editor.org/rfc/rfc8656#section-18.3).
 pub type XorPeerAddress = PeerAddress;

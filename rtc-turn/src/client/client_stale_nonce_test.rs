@@ -104,7 +104,7 @@ fn test_create_permission_stale_nonce_is_retried_once() -> Result<()> {
                 id, tid,
                 "the failure names the id create_permission() returned"
             );
-            assert_eq!(err, Error::ErrTryAgain);
+            assert_eq!(err, RequestError::Failed(Error::ErrTryAgain));
         }
         other => panic!("expected CreatePermissionError, got {other:?}"),
     }
@@ -211,8 +211,8 @@ fn test_channel_bind_stale_nonce_is_retried() -> Result<()> {
     assert_eq!(first.typ.method, METHOD_CHANNEL_BIND);
     server.stale_nonce(&mut client, now, &first, "renewed", REALM)?;
 
-    let binding_state = |client: &Client| client.binding_mgr.find_by_addr(&peer).map(|b| b.state());
-    assert_eq!(binding_state(&client), Some(BindingState::Request));
+    let binding_state = |client: &Client| binding_state(client, relayed, peer);
+    assert_eq!(binding_state(&client), Some(binding::BindingState::Request));
 
     let mut retry = server.next_request(&mut client);
     assert_eq!(retry.typ.method, METHOD_CHANNEL_BIND);
@@ -223,7 +223,7 @@ fn test_channel_bind_stale_nonce_is_retried() -> Result<()> {
     MessageIntegrity::check(&mut retry, &server.key, test_crypto_provider().crypto())?;
 
     server.succeed(&mut client, now, &retry)?;
-    assert_eq!(binding_state(&client), Some(BindingState::Ready));
+    assert_eq!(binding_state(&client), Some(binding::BindingState::Ready));
 
     client.close()
 }

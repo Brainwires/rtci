@@ -26,7 +26,7 @@ fn benchmark_chan_data(c: &mut Criterion) {
         };
         c.bench_function("BenchmarkChannelData_Encode", |b| {
             b.iter(|| {
-                d.encode();
+                d.encode().unwrap();
                 d.reset();
             })
         });
@@ -38,7 +38,7 @@ fn benchmark_chan_data(c: &mut Criterion) {
             number: ChannelNumber(MIN_CHANNEL_NUMBER + 1),
             raw: vec![],
         };
-        d.encode();
+        d.encode().unwrap();
         let mut buf = vec![0u8; d.raw.len()];
         buf.copy_from_slice(&d.raw);
         c.bench_function("BenchmarkChannelData_Decode", |b| {

@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 #[command(name = "TURN Client TCP")]
 #[command(author = "Brainwires <brainwires@github.com>")]
 #[command(version = "0.1.0")]
-#[command(about = "An example of TURN Client over TCP (RFC 6062)", long_about = None)]
+#[command(about = "An example of TURN Client over TCP (RFC 8656 section 3.1)", long_about = None)]
 struct Cli {
     #[arg(long, default_value_t = format!("127.0.0.1"))]
     host: String,
@@ -160,14 +160,14 @@ fn main() -> Result<()> {
                         );
                     }
                 }
-                Event::AllocateError(_, err) => return Err(err),
+                Event::AllocateError(_, err) => return Err(err.into()),
                 Event::CreatePermissionResponse(tid, peer_addr) => {
                     println!(
                         "CreatePermission for peer addr {} is granted (tid={:?})",
                         peer_addr, tid
                     );
                 }
-                Event::CreatePermissionError(_, err) => return Err(err),
+                Event::CreatePermissionError(_, err) => return Err(err.into()),
                 Event::DataIndicationOrChannelData(_, from, data) => {
                     println!("relay read: {:?} from {}", &data[..], from);
                     // Echo back

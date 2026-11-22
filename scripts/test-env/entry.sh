@@ -36,6 +36,8 @@ export RTC_TESTENV_TURN_USER=test RTC_TESTENV_TURN_PASS=test RTC_TESTENV_TURN_RE
 export RTC_TESTENV_TURN_CA=/run/rtc-env/ca.crt
 export RTC_TESTENV_TURN_STALE_UDP=203.0.113.10:3479
 export RTC_TESTENV_TURN_STALE_LOG=/run/rtc-env/turnserver-stale.log
+export RTC_TESTENV_TURN_CLIENT=203.0.113.10:3480
+export RTC_TESTENV_TURN_CLIENT_LOG=/run/rtc-env/turnserver-client.log
 export RTC_TESTENV_MEDIA=/run/rtc-env/media
 
 log "media fixtures (GStreamer)"
@@ -90,14 +92,16 @@ stage_unit() {
 stage_env() {
   log "stage env: real networks (NAT matrix, TURN, mDNS) and netem impairment"
   cargo test --test testenv_ice --test testenv_mdns --test testenv_impairment \
-    --test testenv_turn --test testenv_dtls --test testenv_ice_tcp --test testenv_media_fixtures \
+    --test testenv_turn --test testenv_turn_client --test testenv_dtls --test testenv_ice_tcp \
+    --test testenv_media_fixtures \
     --no-fail-fast -- --ignored --nocapture > "$A/env.log" 2>&1
   local rc=$?
   echo "## env: $(summarise "$A/env.log") (exit $rc)" >> "$REPORT"
   grep -E '^test .* FAILED' "$A/env.log" | sed 's/^/    /' >> "$REPORT"
   { echo; echo '### NAT matrix'; grep -E '^NAT-MATRIX' "$A/env.log" | sort; } >> "$REPORT"
   { echo; echo '### impairment'; grep -E '^(NETEM|RTP over|unreliable:|VP8:|GCC target)' "$A/env.log"; } >> "$REPORT"
-  { echo; echo '### TURN, DTLS, ICE-TCP, fixtures'; grep -E '^(TURN stale nonce|wrong fingerprint|ICE-TCP|Ogg:|H.264:)' "$A/env.log"; } >> "$REPORT"
+  { echo; echo '### TURN, DTLS, ICE-TCP, fixtures'; grep -E '^(TURN stale nonce|TURN client|wrong fingerprint|ICE-TCP|Ogg:|H.264:)' "$A/env.log"; } >> "$REPORT"
+  cp /run/rtc-env/turnserver-client.log "$A/" 2>/dev/null || true
   local n438
   n438=$(grep -c '438' /run/rtc-env/turnserver-stale.log 2>/dev/null) || true
   echo "short-nonce coturn log lines with 438: ${n438:-0}" >> "$REPORT"

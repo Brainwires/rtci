@@ -186,6 +186,121 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   seconds after it), and `Failed` 30 seconds after the last response at the latest:
   `disconnected_timeout + failed_timeout` above 30 seconds, or a zero `failed_timeout`, no
   longer keeps it alive longer. A shorter sum still fails it sooner.
+### Breaking changes
+
+- **turn**: `Event::AllocateError` and `Event::CreatePermissionError` carry a
+  `rtc_turn::client::RequestError` instead of a `shared::error::Error`: `Rejected(ErrorResponse)`
+  with the server's error code, reason, ALTERNATE-SERVER and UNKNOWN-ATTRIBUTES, or
+  `Failed(Error)`. It implements `Display` and converts into `Error` (`err.into()`).
+- **turn**: `ChannelData::encode` and `ChannelData::write_header` return `Result<()>`: data longer
+  than 65 535 bytes is refused (see below).
+- **turn**: the client delivers a Data indication or ChannelData only from a peer address it
+  holds a permission for (asked for or installed), as RFC 8656 sections 11.4 and 12.6 recommend.
+- **turn**: `Relay::send_to` fails with `ErrNoPermission` once a permission's 300 s have run out
+  without a refresh, and with `ErrConnClosed` after `Relay::close`.
+
+### Bug Fixes
+
+- **turn**: a 437 (Allocation Mismatch) to a Refresh, CreatePermission or ChannelBind ends the
+  allocation (RFC 8656 sections 5 and 8.3). The error was returned from `handle_read` or logged,
+  the relay stayed in the client and a Refresh went out every half lifetime for ever. The client
+  now drops the allocation, with its permissions, channel bindings and outstanding requests, and
+  raises `Event::AllocationLost`.
+- **turn**: an allocation released with `Relay::close` stays released. If the Refresh with
+  LIFETIME 0 and its retry went unanswered, or the server answered 437, the next periodic
+  refresh asked for the old lifetime again and kept the allocation alive. `close` now stops
+  every refresh at once; `Event::AllocationReleased` reports the end (success, 437, or no
+  answer).
+- **turn**: channel bindings belong to their allocation (RFC 8656 section 12). They were kept per
+  client, so a new allocation sent ChannelData on channel numbers only the previous one had
+  bound, which the server drops.
+- **turn**: permissions and channel bindings follow the RFC's timers. A permission lasts 300 s
+  from its last accepted CreatePermission or ChannelBind: one whose refresh the server refuses
+  is dropped (`Event::PermissionLost`), and a refused refresh of several addresses is repeated
+  address by address so only the refused ones end. A channel binding lasts 10 minutes: one that
+  carried data is rebound from a timer, one left idle is bound again (with the data in Send
+  indications) before ChannelData is used on it, and a channel number is reused for another
+  peer address only 15 minutes after the last ChannelBind sent for it.
+- **turn**: the first Allocate response is read for what it is. A success (a server that asks
+  for no credential, RFC 8656 section 7.2) is an allocation; an error other than 401 keeps its
+  code. Both were reported as `AllocateError(attribute not found)`, the first while the server
+  held the allocation.
+- **turn**: an Allocate success response without XOR-RELAYED-ADDRESS or LIFETIME is reported as
+  `AllocateError` under the caller's id and the allocation is deleted with a Refresh of
+  LIFETIME 0. It ended `handle_read` with an error and no event, and left the allocation on the
+  server.
+- **turn**: with all 4096 channel numbers taken, data to one more peer address goes as Send
+  indications; the send failed.
+- **turn**: ChannelData cannot carry more than 65 535 bytes; `Relay::send_to` and
+  `ChannelData::encode` refuse a longer payload instead of writing a wrapped length, which over
+  TCP or TLS broke the framing of every later message.
+- **turn**: an allocation whose Refresh requests all fail is refreshed again at half the time
+  it has left, and is dropped (`Event::AllocationLost`) when its lifetime has run out.
+- **turn**: a ChannelBind the server refuses is reported (`Event::ChannelBindError`) and tried
+  again after a minute; it was sent again with every packet. A 400 (the channels of client and
+  server are out of step) deletes the allocation, as RFC 8656 section 12.3 recommends.
+- **turn**: a ChannelBind success refreshes the peer's permission (RFC 8656 section 12.3).
+- **turn**: `Client::update_credentials` documents that a live allocation takes a new password,
+  not a new username (the server answers 441, RFC 8656 section 5).
+- **turn**: the `turn_client_tcp` example no longer names RFC 6062; it is a UDP allocation
+  reached over TCP (RFC 8656 section 3.1).
+
+### Features
+
+- **turn**: `Event::AllocationLost`, `AllocationReleased`, `RefreshError`, `PermissionLost` and
+  `ChannelBindError`; `RequestError` and `ErrorResponse` with the typed STUN error code.
+- **turn**: an allocation a server gave without a credential is used without one, and takes the
+  long-term credential when the server asks with a 401.
+- **turn**: `Client::allocate_with(now, AllocateOptions)` for what RFC 8656 section 7.1 lets an
+  Allocate ask: `address_family` (REQUESTED-ADDRESS-FAMILY, an IPv6 relayed address),
+  `additional_ipv6` (ADDITIONAL-ADDRESS-FAMILY, an IPv4 and an IPv6 address on one allocation),
+  `lifetime`, `dont_fragment`, `even_port` (with the R bit) and `reservation_token`. The
+  combinations the RFC forbids are refused before anything is sent.
+- **turn**: `Relay::relayed_addrs`, `mapped_addr` (the XOR-MAPPED-ADDRESS of the Allocate
+  response, the client's server-reflexive address), `lifetime`, `reservation_token`,
+  `dont_fragment` and `address_error` (ADDRESS-ERROR-CODE). A dual allocation is found by either
+  of its addresses and takes peers of both families; `Relay::release_family` deletes one
+  family's address with a Refresh of LIFETIME 0 naming it (section 8.1).
+- **turn**: `Relay::send_to_dont_fragment` sends a Send indication with DONT-FRAGMENT, on an
+  allocation made with it. A 420 naming DONT-FRAGMENT to the Allocate is answered with the
+  request again without it (section 7.4).
+- **turn**: `Event::IcmpError(peer, Icmp)` for a Data indication carrying the ICMP attribute
+  (sections 11.6, 18.13).
+- **turn**: a 300 (Try Alternate) carries its ALTERNATE-SERVER in
+  `ErrorResponse::alternate_server`; a 420 its UNKNOWN-ATTRIBUTES.
+- **turn**: a 438 (Stale Nonce) to the authenticated Allocate is retried once with the new
+  nonce, as it already was for the other requests.
+- **turn**: SOFTWARE (`ClientConfig::software`) goes in every TURN request (section 5), not
+  only in Binding requests.
+- **turn**: the client keeps to the families the server refused: after a 440 to an Allocate,
+  or ADDRESS-ERROR-CODE 440, `allocate_with` refuses that family; after ADDRESS-ERROR-CODE 508,
+  for a minute; after a relayed address of a family that was not asked for, the allocation is
+  deleted and `allocate` fails (sections 7.3, 7.4) until
+  `Client::clear_allocate_restrictions`.
+- **turn**: peers of a family the allocation has no relayed address of are refused by
+  `create_permission` and `send_to` (sections 10.1, 12.1), before the server's 443 could fail
+  the refresh of every other permission.
+- **turn**: `proto::addfamily` (ADDITIONAL-ADDRESS-FAMILY, 0x8000), `proto::addrerror`
+  (ADDRESS-ERROR-CODE, 0x8001), `proto::icmp` (ICMP, 0x8004); `EvenPort::reserve_port` is
+  public; `Lifetime` sends a duration past 32 bits of seconds as the largest value instead of
+  its low bits.
+- **turn**: TCP allocations, client side (RFC 6062). On a client that reaches the server over
+  TCP or TLS, `allocate_with` with `AllocateOptions::transport = RelayTransport::Tcp` asks for
+  a TCP relayed address (REQUESTED-TRANSPORT 6; refused over UDP and with DONT-FRAGMENT,
+  EVEN-PORT or RESERVATION-TOKEN). `Relay::connect` sends Connect for a peer (one outstanding
+  per peer address, ten seconds after a 447) and `Event::ConnectResponse` carries the
+  CONNECTION-ID; `Event::ConnectionAttempt` reports a permitted peer's connection.
+  `Relay::data_connection` gives a sans-I/O `DataConnection` for a new TCP connection the
+  application opens to the same server address from another local address: it sends
+  ConnectionBind with the CONNECTION-ID and the control connection's credential (30 s to be
+  answered; a 401 or 438 with a nonce is answered once), reports
+  `DataConnectionEvent::Bound`, and from then on passes the peer's bytes as they are, both
+  ways. `Event::ConnectError`; `proto::connid` (CONNECTION-ID, 0x002a); a
+  `data_connection_handle_read` fuzz target.
+- **test-env**: a third coturn (port 3480, an IPv4 and an IPv6 relay address, two users) and
+  `tests/testenv_turn_client.rs`: the TURN client's Allocate options, IPv6 and dual
+  allocations, 440 and 441, and a TCP allocation with a connection out and one in, against a
+  real server.
 
 ## [0.22.0+brainwires.5] - 2026-11-20
 

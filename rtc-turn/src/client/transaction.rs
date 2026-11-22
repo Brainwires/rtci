@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 use stun::message::*;
 
 use crate::client::RelayedAddr;
+use crate::client::allocation::AllocateState;
 use shared::{TransportContext, TransportMessage, TransportProtocol};
-use stun::textattrs::TextAttribute;
 
 const MAX_RTX_INTERVAL_IN_MS: u64 = 1600;
 const MAX_RTX_COUNT: u16 = 7; // total 7 requests (Rc)
@@ -61,11 +61,12 @@ impl Retry {
 
 pub(crate) enum TransactionType {
     BindingRequest,
-    /// The anonymous Allocate. It carries the id the authenticated retry will go out under,
-    /// which [`Client::allocate`](crate::client::Client::allocate) hands to its caller and
+    /// The Allocate without a credential. Its state carries the id
+    /// [`Client::allocate`](crate::client::Client::allocate) handed to its caller, which
     /// everything the caller is told about that allocation names.
-    AllocateAttempt(TransactionId),
-    AllocateRequest(TextAttribute),
+    AllocateAttempt(Box<AllocateState>),
+    /// The Allocate with the credential the server asked for.
+    AllocateRequest(Box<AllocateState>),
     /// The relay, the peer a caller asked for (`None` for a permission refresh), every peer
     /// the request names, and its retry state.
     CreatePermissionRequest(RelayedAddr, Option<SocketAddr>, Vec<SocketAddr>, Retry),
@@ -73,18 +74,44 @@ pub(crate) enum TransactionType {
     RefreshRequest(RelayedAddr, Duration, Retry),
     /// The relay, the peer being bound, and the retry state.
     ChannelBindRequest(RelayedAddr, SocketAddr, Retry),
+    /// A Connect to a peer through a TCP allocation (RFC 6062 §4.3): the relay, the peer, and
+    /// the retry state.
+    ConnectRequest(RelayedAddr, SocketAddr, Retry),
+    /// The Refresh with LIFETIME 0 that deletes one address family (its
+    /// REQUESTED-ADDRESS-FAMILY value) of an allocation that has two, and its retry state.
+    FamilyRelease(RelayedAddr, u8, Retry),
+    /// A Refresh with LIFETIME 0 for an allocation the client does not keep: the server made
+    /// it, but its success response was unusable. Nothing is reported about it.
+    OrphanRelease,
 }
 
 impl TransactionType {
+    /// The allocation the request is about, if it is about one.
+    pub(crate) fn relay(&self) -> Option<RelayedAddr> {
+        match self {
+            Self::CreatePermissionRequest(relayed, ..)
+            | Self::RefreshRequest(relayed, ..)
+            | Self::FamilyRelease(relayed, ..)
+            | Self::ConnectRequest(relayed, ..)
+            | Self::ChannelBindRequest(relayed, ..) => Some(*relayed),
+            Self::BindingRequest
+            | Self::AllocateAttempt(_)
+            | Self::AllocateRequest(_)
+            | Self::OrphanRelease => None,
+        }
+    }
+
     /// The id events about the request sent as `wire` are reported under: the id its caller
     /// was handed, which a retry or the Allocate exchange does not put on the wire.
     pub(crate) fn report_id(&self, wire: TransactionId) -> TransactionId {
         match self {
-            Self::AllocateAttempt(allocation_id) => *allocation_id,
+            Self::AllocateAttempt(state) | Self::AllocateRequest(state) => state.report_id,
             Self::CreatePermissionRequest(_, _, _, retry)
             | Self::RefreshRequest(_, _, retry)
+            | Self::FamilyRelease(_, _, retry)
+            | Self::ConnectRequest(_, _, retry)
             | Self::ChannelBindRequest(_, _, retry) => retry.report_id(wire),
-            Self::BindingRequest | Self::AllocateRequest(_) => wire,
+            Self::BindingRequest | Self::OrphanRelease => wire,
         }
     }
 }
@@ -281,6 +308,12 @@ impl TransactionMap {
     // Delete deletes a transaction by its key
     pub(crate) fn delete(&mut self, tid: &TransactionId) -> Option<Transaction> {
         self.tr_map.remove(tid)
+    }
+
+    /// Drops every transaction `gone` says belongs to something that no longer exists, so
+    /// nothing is retransmitted or reported for it.
+    pub(crate) fn delete_where(&mut self, gone: impl Fn(&TransactionType) -> bool) {
+        self.tr_map.retain(|_, tr| !gone(&tr.transaction_type));
     }
 
     // close_and_delete_all closes and deletes all transactions

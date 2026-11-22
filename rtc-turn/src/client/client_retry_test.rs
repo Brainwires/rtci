@@ -73,8 +73,8 @@ fn test_channel_bind_that_times_out_is_sent_again() -> Result<()> {
         "the binding times out once, under the id of its first request"
     );
     assert_eq!(
-        client.binding_mgr.find_by_addr(&peer).map(|b| b.state()),
-        Some(BindingState::Idle),
+        binding_state(&client, relayed, peer),
+        Some(binding::BindingState::Idle),
         "a binding that failed is attempted again, not left waiting"
     );
 

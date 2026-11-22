@@ -400,7 +400,8 @@ fn test_allocation_refresh_interval_cap_is_applied() -> Result<()> {
     client.handle_allocate_response(
         base,
         response,
-        TransactionType::AllocateRequest(Nonce::new(ATTR_NONCE, "nonce".to_owned())),
+        allocation::AllocateState::authenticated(),
+        true,
     )?;
 
     for expected_secs in [30, 60, 90, 120, 150, 180] {
@@ -764,11 +765,7 @@ fn test_zero_lifetime_allocate_response_is_an_error() -> Result<()> {
         Box::new(crate::proto::lifetime::Lifetime(Duration::from_secs(0))),
     ])?;
 
-    client.handle_allocate_response(
-        base,
-        res,
-        TransactionType::AllocateRequest(Nonce::new(ATTR_NONCE, "nonce".to_owned())),
-    )?;
+    client.handle_allocate_response(base, res, allocation::AllocateState::authenticated(), true)?;
 
     assert!(
         client.relays.is_empty(),
@@ -1022,6 +1019,7 @@ fn test_data_from_a_non_server_address_is_ignored() -> Result<()> {
     let server_addr = client.turn_server_addr().expect("configured");
     let stray: SocketAddr = "127.0.0.1:9".parse().unwrap();
     assert_ne!(stray, server_addr);
+    test_server::hold_permission(&mut client, Instant::now(), "10.0.0.1".parse().unwrap());
 
     let indication = |from: SocketAddr| -> Result<TransportMessage<BytesMut>> {
         let mut msg = Message::new();
@@ -1278,8 +1276,9 @@ fn test_responses_without_valid_integrity_are_dropped() -> Result<()> {
     while client.poll_write().is_some() {}
     let binding_state = |client: &Client| {
         client
-            .binding_mgr
-            .find_by_addr(&peer_addr)
+            .relays
+            .get(&relayed_addr)
+            .and_then(|relay| relay.binding_mgr.find_by_addr(&peer_addr))
             .map(|b| b.state())
     };
     for forged in forgeries {
@@ -1292,7 +1291,7 @@ fn test_responses_without_valid_integrity_are_dropped() -> Result<()> {
         )?;
         assert_eq!(
             binding_state(&client),
-            Some(BindingState::Request),
+            Some(binding::BindingState::Request),
             "a forged ChannelBind success response was accepted"
         );
         server.answer(
@@ -1307,7 +1306,7 @@ fn test_responses_without_valid_integrity_are_dropped() -> Result<()> {
         )?;
         assert_eq!(
             binding_state(&client),
-            Some(BindingState::Request),
+            Some(binding::BindingState::Request),
             "a forged ChannelBind error response was accepted"
         );
     }
@@ -1318,7 +1317,7 @@ fn test_responses_without_valid_integrity_are_dropped() -> Result<()> {
         vec![],
         Some(&server.key),
     )?;
-    assert_eq!(binding_state(&client), Some(BindingState::Ready));
+    assert_eq!(binding_state(&client), Some(binding::BindingState::Ready));
 
     // Refresh: a forged LIFETIME=0 would make the client drop a live allocation.
     client.refresh_allocations(Instant::now())?;
