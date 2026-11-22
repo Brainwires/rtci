@@ -294,8 +294,8 @@ use crate::peer_connection::sdp::{
     get_peer_direction, has_ice_trickle_option, has_rtcp_mux, has_rtp_media,
     inherit_session_extmap, insert_media_line, is_lite_set, is_live_rtp_section, is_rejected_media,
     is_sdp_token, is_unknown_application_media, media_ice_credentials, negotiated_sctp,
-    remap_answerer_assigned_extmaps, sdp_type::RTCSdpType, update_sdp_origin,
-    validate_application_media_section, validate_dtls_attributes,
+    remap_answerer_assigned_extmaps, remote_ice_options, remote_ice_pacing, sdp_type::RTCSdpType,
+    update_sdp_origin, validate_application_media_section, validate_dtls_attributes,
 };
 use crate::peer_connection::state::RTCIceGatheringState;
 use crate::peer_connection::state::ice_connection_state::RTCIceConnectionState;
@@ -1512,6 +1512,17 @@ impl RTCPeerConnection {
         self.can_trickle_ice_candidates
     }
 
+    /// The ICE options of the current remote description (`a=ice-options`, RFC 8839 section
+    /// 5.6), each once: `trickle` (RFC 8840), `ice2` (RFC 8445 section 10: the peer implements
+    /// RFC 8445 rather than RFC 5245), and any other the peer states. Empty without a remote
+    /// description.
+    pub fn remote_ice_options(&self) -> Vec<String> {
+        self.remote_description()
+            .and_then(|r| r.parsed.as_ref())
+            .map(remote_ice_options)
+            .unwrap_or_default()
+    }
+
     /// Sets the remote description as part of the offer/answer negotiation.
     ///
     /// This changes the remote description associated with the connection. This description
@@ -2204,6 +2215,12 @@ impl RTCPeerConnection {
                     )?;
                     self.dtls_transport_mut().remote_tls_id = remote_tls_id;
                 }
+                // RFC 8445 section 14.2: "Both agents MUST use the higher out of the two
+                // proposed values"; the peer's is its `a=ice-pacing` (RFC 8839 section 5.5),
+                // the default when it states none. Every description states it again.
+                self.ice_transport_mut()
+                    .agent
+                    .set_remote_pacing(remote_ice_pacing(parsed_remote_description));
             }
 
             if is_final_answer
@@ -4860,7 +4877,7 @@ a=rtcp-mux\r\n";
         )
         .unwrap();
         let offer = pc.create_offer(None).unwrap();
-        assert!(offer.sdp.contains("a=ice-options:trickle\r\n"));
+        assert!(offer.sdp.contains("a=ice-options:trickle ice2\r\n"));
         assert_eq!(offer.sdp.matches("a=fingerprint:sha-256 ").count(), 2);
 
         // The other side takes both and trickles back.
@@ -4869,7 +4886,66 @@ a=rtcp-mux\r\n";
             .set_remote_description(Instant::now(), offer)
             .unwrap();
         let answer = answerer.create_answer(None).unwrap();
-        assert!(answer.sdp.contains("a=ice-options:trickle\r\n"));
+        assert!(answer.sdp.contains("a=ice-options:trickle ice2\r\n"));
+    }
+
+    /// RFC 8445 section 14.2: an agent that wants a Ta other than the default proposes it
+    /// (`a=ice-pacing`, RFC 8839 section 5.5), and "Both agents MUST use the higher out of the
+    /// two proposed values"; RFC 8445 section 10: both say `ice2`.
+    #[test]
+    fn a_proposed_ice_pacing_is_signalled_and_both_agents_use_the_higher_value() {
+        use std::time::Duration;
+        let peer = |ta: Option<Duration>| {
+            let mut me = MediaEngine::default();
+            me.register_default_codecs().unwrap();
+            RTCPeerConnectionBuilder::new()
+                .with_media_engine(me)
+                .with_setting_engine(SettingEngineBuilder::new().with_ice_pacing(ta).build())
+                .build(Instant::now())
+                .unwrap()
+        };
+        let mut offerer = peer(Some(Duration::from_millis(80)));
+        let mut answerer = peer(Some(Duration::from_millis(20)));
+        offerer
+            .add_transceiver_from_kind(RtpCodecKind::Audio, None)
+            .unwrap();
+        let now = Instant::now();
+        let offer = offerer.create_offer(None).unwrap();
+        assert!(offer.sdp.contains("a=ice-pacing:80\r\n"), "{}", offer.sdp);
+        offerer.set_local_description(now, offer.clone()).unwrap();
+        answerer.set_remote_description(now, offer).unwrap();
+        let answer = answerer.create_answer(None).unwrap();
+        assert!(answer.sdp.contains("a=ice-pacing:20\r\n"), "{}", answer.sdp);
+        answerer.set_local_description(now, answer.clone()).unwrap();
+        offerer.set_remote_description(now, answer).unwrap();
+
+        assert_eq!(
+            Duration::from_millis(80),
+            offerer.ice_transport().agent.pacing()
+        );
+        assert_eq!(
+            Duration::from_millis(80),
+            answerer.ice_transport().agent.pacing()
+        );
+        assert!(offerer.remote_ice_options().contains(&"ice2".to_owned()));
+        assert!(
+            answerer
+                .remote_ice_options()
+                .contains(&"trickle".to_owned())
+        );
+
+        // The default Ta is not proposed.
+        let mut plain = peer(None);
+        plain
+            .add_transceiver_from_kind(RtpCodecKind::Audio, None)
+            .unwrap();
+        assert!(
+            !plain
+                .create_offer(None)
+                .unwrap()
+                .sdp
+                .contains("a=ice-pacing")
+        );
     }
 
     /// `SettingEngineBuilder::with_mid_generator` was stored and never read.

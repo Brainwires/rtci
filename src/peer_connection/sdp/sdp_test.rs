@@ -102,6 +102,7 @@ fn params(
         sctp_over_tcp: false,
         ignore_rid_pause_for_recv: false,
         write_ssrc_attributes_for_simulcast: false,
+        ice_pacing: None,
         rid_pause_marks: false,
     }
 }

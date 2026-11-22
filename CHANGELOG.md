@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **jsep**: ICE options. Every description says `a=ice-options:trickle ice2` (a lite agent
+  `ice2`; RFC 8445 section 10), so the line differs from before. A Ta configured with the new
+  `SettingEngineBuilder::with_ice_pacing` (it was not reachable before) is proposed as
+  `a=ice-pacing` (RFC 8839 section 5.5) when it is not the default, and the peer's
+  `a=ice-pacing` reaches the ICE agent, which uses the higher value (RFC 8445 section 14.2).
+  New `RTCPeerConnection::remote_ice_options`.
 - **jsep**: codec parameters.
   - The default audio formats include comfort noise, `CN/8000` on payload type 13 (RFC 7874
     section 3, RFC 3389): default audio offers have one more format. New `MIME_TYPE_CN`,

@@ -177,6 +177,7 @@ impl RTCPeerConnection {
             tie_breaker: setting_engine.ice.tie_breaker,
             nomination_acceptance: setting_engine.ice.nomination_acceptance,
             nominate_on_consent_checks: setting_engine.ice.nominate_on_consent_checks,
+            ta: setting_engine.ice.pacing,
             unauthenticated_requests: setting_engine.ice.unauthenticated_requests,
             data_from_selected_pair_only: setting_engine.ice.data_from_selected_pair_only,
             send_data_before_nomination: setting_engine.ice.send_data_before_nomination,
@@ -476,6 +477,7 @@ impl RTCPeerConnection {
             write_ssrc_attributes_for_simulcast: self
                 .setting_engine
                 .write_ssrc_attributes_for_simulcast,
+            ice_pacing: self.ice_transport().agent.proposed_pacing(),
         };
         RTCPeerConnection::populate_sdp(
             d,
@@ -865,6 +867,7 @@ impl RTCPeerConnection {
             write_ssrc_attributes_for_simulcast: self
                 .setting_engine
                 .write_ssrc_attributes_for_simulcast,
+            ice_pacing: self.ice_transport().agent.proposed_pacing(),
         };
         RTCPeerConnection::populate_sdp(
             d,
