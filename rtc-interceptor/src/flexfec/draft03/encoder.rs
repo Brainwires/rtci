@@ -17,6 +17,13 @@ const MASK2_SIZE: usize = 4;
 /// Bytes added when the third packet mask is present.
 const MASK3_SIZE: usize = 8;
 
+/// The most media packets one draft-03 repair packet can describe: 15 + 31 + 63 mask bits
+/// (draft-ietf-payload-flexible-fec-scheme-03, section 4.2).
+///
+/// One fewer than RFC 8627's 110: draft-03 spends the first bit of the third mask word on a
+/// k-bit, the RFC does not.
+pub const DRAFT03_MAX_MEDIA_PACKETS: u32 = 109;
+
 /// Builds FlexFEC **draft-03** repair packets.
 ///
 /// Draft-03 rather than [RFC 8627] because draft-03 is what browsers negotiate as
@@ -80,18 +87,32 @@ impl FlexFec03Encoder {
         self.next_sequence_number
     }
 
-    /// Build up to `num_fec_packets` repair packets protecting `media_packets`.
+    /// Build up to `num_fec_packets` repair packets protecting `media_packets`, stamped with
+    /// `timestamp`.
+    ///
+    /// `timestamp` is the repair stream's RTP timestamp for the instant these packets are sent
+    /// (draft-03 section 4.2: "the timestamp SHALL be set to a time corresponding to the repair
+    /// packet's transmission time"). It is the caller's send clock, not the media's: the repair
+    /// stream is an RTP stream of its own, and a receiver computes its jitter from this field.
     ///
     /// Returns nothing when the media packets are not a **consecutive** run: a packet mask
     /// describes positions relative to one base sequence number, so a gap would silently shift
     /// every position after it and protect the wrong packets. A caller that has lost a packet
-    /// should start a new block rather than encode across the hole.
+    /// should start a new block rather than encode across the hole. Returns nothing, too, for a
+    /// block of more than [`DRAFT03_MAX_MEDIA_PACKETS`] packets: the caller must split it.
     pub fn encode(
         &mut self,
         media_packets: &[rtp::Packet],
         num_fec_packets: u32,
+        timestamp: u32,
     ) -> Vec<rtp::Packet> {
         if media_packets.is_empty() || num_fec_packets == 0 {
+            return Vec::new();
+        }
+        // The coverage can describe 110 positions (RFC 8627's masks); draft-03's wire masks
+        // hold 109. A 110th packet would be XORed into the repair data without being named in
+        // the mask, and every recovery from that repair packet would be corrupt.
+        if media_packets.len() as u32 > DRAFT03_MAX_MEDIA_PACKETS {
             return Vec::new();
         }
 
@@ -122,7 +143,9 @@ impl FlexFec03Encoder {
         let base_sequence_number = media_packets[0].header.sequence_number;
         let mut repair_packets = Vec::with_capacity(num_fec_packets as usize);
         for fec_index in 0..num_fec_packets {
-            if let Some(packet) = self.encode_one(fec_index, base_sequence_number, media_packets) {
+            if let Some(packet) =
+                self.encode_one(fec_index, base_sequence_number, media_packets, timestamp)
+            {
                 repair_packets.push(packet);
             }
         }
@@ -134,14 +157,21 @@ impl FlexFec03Encoder {
         fec_index: u32,
         base_sequence_number: u16,
         media_packets: &[rtp::Packet],
+        timestamp: u32,
     ) -> Option<rtp::Packet> {
         let coverage = self.coverage.as_ref()?;
         let covered = coverage.covered_by(fec_index);
-        if covered.is_empty() {
-            // A repair packet protecting nothing carries no information.
-            return None;
+        // A repair packet protecting nothing carries no information.
+        let first_covered = *covered.first()?;
+
+        // SN base is the lowest sequence number *this* repair packet protects (section 4.2), not
+        // the block's: the mask is written relative to it, so the second repair packet of an
+        // interleaved block starts its mask at bit 0 too and stays in the short mask longer.
+        let base_sequence_number = base_sequence_number.wrapping_add(first_covered as u16);
+        let mut mask = BitArray::new();
+        for &index in &covered {
+            mask.set_bit(index - first_covered);
         }
-        let mask = *coverage.mask(fec_index)?;
 
         let mask2 = mask.mask2();
         let mask3 = mask.mask3_draft03();
@@ -223,10 +253,9 @@ impl FlexFec03Encoder {
                 version: 2,
                 payload_type: self.payload_type,
                 sequence_number,
-                // Upstream hardcodes a constant here. The repair stream is a stream in its own
-                // right, so it carries the media timestamp it was built from — which is at least
-                // monotonic with the media, rather than frozen for the life of the process.
-                timestamp: media_packets[covered[0] as usize].header.timestamp,
+                // The repair stream's own send clock (section 4.2), handed in by the caller.
+                // Upstream hardcodes a constant here.
+                timestamp,
                 ssrc: self.ssrc,
                 csrc: Vec::new(),
                 ..Default::default()
@@ -321,7 +350,7 @@ mod tests {
     #[test]
     fn repair_packets_form_their_own_stream() {
         let mut encoder = encoder().with_base_sequence_number(1000);
-        let repair = encoder.encode(&run(4), 2);
+        let repair = encoder.encode(&run(4), 2, 0);
 
         assert_eq!(2, repair.len());
         for (offset, packet) in repair.iter().enumerate() {
@@ -341,7 +370,7 @@ mod tests {
         let mut packets = run(3);
         packets[2].header.sequence_number = 105; // 100, 101, 105
 
-        assert!(encoder().encode(&packets, 1).is_empty());
+        assert!(encoder().encode(&packets, 1, 0).is_empty());
     }
 
     #[test]
@@ -349,7 +378,7 @@ mod tests {
         let mut packets = run(2);
         packets.swap(0, 1);
 
-        assert!(encoder().encode(&packets, 1).is_empty());
+        assert!(encoder().encode(&packets, 1, 0).is_empty());
     }
 
     #[test]
@@ -361,22 +390,22 @@ mod tests {
         ];
         assert_eq!(
             1,
-            encoder().encode(&packets, 1).len(),
+            encoder().encode(&packets, 1, 0).len(),
             "0 follows 65535: consecutive, not a gap"
         );
     }
 
     #[test]
     fn nothing_to_protect_produces_nothing() {
-        assert!(encoder().encode(&[], 1).is_empty());
-        assert!(encoder().encode(&run(3), 0).is_empty());
+        assert!(encoder().encode(&[], 1, 0).is_empty());
+        assert!(encoder().encode(&run(3), 0, 0).is_empty());
     }
 
     /// A repair packet covering no media packet carries no information, so the surplus is dropped
     /// rather than emitted as an empty packet.
     #[test]
     fn surplus_repair_packets_are_not_emitted() {
-        let repair = encoder().encode(&run(2), 4);
+        let repair = encoder().encode(&run(2), 4, 0);
         assert_eq!(
             2,
             repair.len(),
@@ -384,12 +413,24 @@ mod tests {
         );
     }
 
+    /// Draft-03's three masks hold 15 + 31 + 63 = 109 bits (section 4.2). The coverage type can
+    /// describe 110, which is RFC 8627's width: a 110-packet block XORed the last packet into the
+    /// repair data without naming it in the mask.
     #[test]
     fn a_block_longer_than_the_masks_can_describe_is_refused() {
-        let packets = run(crate::flexfec::coverage::MAX_MEDIA_PACKETS as u16 + 1);
         assert!(
-            encoder().encode(&packets, 1).is_empty(),
-            "the caller must split the block"
+            encoder()
+                .encode(&run(DRAFT03_MAX_MEDIA_PACKETS as u16 + 1), 1, 0)
+                .is_empty(),
+            "110 packets: the caller must split the block"
+        );
+
+        let repair = encoder().encode(&run(DRAFT03_MAX_MEDIA_PACKETS as u16), 1, 0);
+        assert_eq!(1, repair.len(), "109 packets fit");
+        let (mask, _) = parse_packet_mask(&repair[0].payload).expect("parses");
+        assert!(
+            (0..DRAFT03_MAX_MEDIA_PACKETS).all(|bit| mask.bit(bit)),
+            "and every one of them is named in the mask"
         );
     }
 
@@ -399,7 +440,7 @@ mod tests {
 
     #[test]
     fn the_header_names_the_stream_and_block_it_protects() {
-        let repair = encoder().encode(&run(4), 1);
+        let repair = encoder().encode(&run(4), 1, 0);
         let payload = &repair[0].payload;
 
         assert_eq!(1, payload[8], "SSRCCount: draft-03 protects one stream");
@@ -412,14 +453,14 @@ mod tests {
         assert_eq!(
             100u16.to_be_bytes(),
             payload[16..18],
-            "the block's base sequence number"
+            "the lowest sequence number it protects"
         );
     }
 
     /// The k-bit marks the last mask present, which is why mask1 is 15 bits and not 16.
     #[test]
     fn a_short_block_carries_one_mask_with_the_k_bit_set() {
-        let repair = encoder().encode(&run(4), 1);
+        let repair = encoder().encode(&run(4), 1, 0);
         let payload = &repair[0].payload;
 
         assert_eq!(
@@ -440,7 +481,7 @@ mod tests {
 
     #[test]
     fn a_longer_block_adds_the_second_mask() {
-        let repair = encoder().encode(&run(20), 1);
+        let repair = encoder().encode(&run(20), 1, 0);
         let payload = &repair[0].payload;
 
         assert_eq!(
@@ -460,7 +501,7 @@ mod tests {
 
     #[test]
     fn a_block_beyond_46_packets_adds_the_third_mask() {
-        let repair = encoder().encode(&run(60), 1);
+        let repair = encoder().encode(&run(60), 1, 0);
         let payload = &repair[0].payload;
 
         assert_eq!(0, payload[18] & 0b1000_0000);
@@ -478,20 +519,98 @@ mod tests {
     /// XORs the wrong set back out and "recovers" corruption.
     #[test]
     fn the_declared_mask_matches_the_interleaved_coverage() {
-        let repair = encoder().encode(&run(6), 2);
+        let repair = encoder().encode(&run(6), 2, 0);
         assert_eq!(2, repair.len());
 
-        let (first, _) = parse_packet_mask(&repair[0].payload).expect("parses");
-        let (second, _) = parse_packet_mask(&repair[1].payload).expect("parses");
+        // Each mask is relative to its own packet's SN base, so both start at bit 0.
+        let protected = |packet: &rtp::Packet| {
+            let base = u16::from_be_bytes([packet.payload[16], packet.payload[17]]);
+            let (mask, _) = parse_packet_mask(&packet.payload).expect("parses");
+            (0..6u16)
+                .filter(|&bit| mask.bit(u32::from(bit)))
+                .map(|bit| base + bit)
+                .collect::<Vec<_>>()
+        };
 
+        assert_eq!(vec![100, 102, 104], protected(&repair[0]));
+        assert_eq!(vec![101, 103, 105], protected(&repair[1]));
+    }
+
+    /// Section 4.2: SN base is "the lowest sequence number, taking wrap around into account, of
+    /// those source packets protected by this repair packet". The second repair packet of an
+    /// interleaved block starts one packet later than the block.
+    #[test]
+    fn sn_base_is_the_lowest_sequence_number_each_repair_packet_protects() {
+        let repair = encoder().encode(&run(6), 2, 0);
+        let base =
+            |packet: &rtp::Packet| u16::from_be_bytes([packet.payload[16], packet.payload[17]]);
+
+        assert_eq!(100, base(&repair[0]));
         assert_eq!(
-            vec![0, 2, 4],
-            (0..6).filter(|&bit| first.bit(bit)).collect::<Vec<_>>()
+            101,
+            base(&repair[1]),
+            "its first protected packet, not the block's"
         );
-        assert_eq!(
-            vec![1, 3, 5],
-            (0..6).filter(|&bit| second.bit(bit)).collect::<Vec<_>>()
+        for packet in &repair {
+            let (mask, _) = parse_packet_mask(&packet.payload).expect("parses");
+            assert!(mask.bit(0), "so bit 0 of every mask is set");
+        }
+
+        // Across the sequence wrap the base is still the first packet in sending order.
+        let wrapping = vec![
+            media_packet(65_534, &[1]),
+            media_packet(65_535, &[2]),
+            media_packet(0, &[3]),
+            media_packet(1, &[4]),
+        ];
+        let repair = encoder().encode(&wrapping, 2, 0);
+        assert_eq!(65_534, base(&repair[0]));
+        assert_eq!(65_535, base(&repair[1]));
+    }
+
+    /// Section 4.2: the timestamp is the repair packet's transmission time, so it is whatever the
+    /// caller's send clock says, and does not follow the media timestamps.
+    #[test]
+    fn the_repair_timestamp_is_the_send_clock_not_the_media_clock() {
+        let mut encoder = encoder();
+        // Every media packet of `run` carries the same timestamp (one large frame).
+        let first = encoder.encode(&run(4), 2, 90_000);
+        let second = encoder.encode(&run(4), 2, 93_000);
+
+        assert!(first.iter().all(|packet| packet.header.timestamp == 90_000));
+        assert!(
+            second
+                .iter()
+                .all(|packet| packet.header.timestamp == 93_000)
         );
+    }
+
+    /// Section 4.2: the marker bit of a repair packet SHALL be 0, whatever the media's is.
+    #[test]
+    fn the_marker_bit_of_a_repair_packet_is_zero() {
+        let media = run(4);
+        assert!(media.iter().all(|packet| packet.header.marker));
+
+        for packet in encoder().encode(&media, 2, 0) {
+            assert!(!packet.header.marker);
+            let mut wire = vec![0u8; packet.marshal_size()];
+            packet.marshal_to(&mut wire).expect("marshal");
+            assert_eq!(0, wire[1] & 0x80, "and it is 0 on the wire");
+        }
+    }
+
+    /// FLEXFEC03-4.2-17, a deliberate deviation from the letter of draft-03. The draft's text
+    /// says mask bit j names packet "SN base + j + 1"; libwebrtc, the only draft-03 peer there
+    /// is, sends bit j for SN base + j, and RFC 8627 section 4.2.2.1 later wrote that down. The
+    /// engine follows libwebrtc: bit 0 is SN base itself.
+    #[test]
+    fn mask_bit_j_names_sn_base_plus_j_as_libwebrtc_sends_it() {
+        let repair = encoder().encode(&run(3), 1, 0);
+        let payload = &repair[0].payload;
+
+        assert_eq!(100u16.to_be_bytes(), payload[16..18], "SN base");
+        // k = 1 (only mask), then bits 0, 1, 2 set: packets 100, 101, 102.
+        assert_eq!([0b1111_0000, 0], payload[18..20]);
     }
 
     // ---------------------------------------------------------------------------------------
@@ -504,7 +623,7 @@ mod tests {
     #[test]
     fn recovery_fields_are_the_xor_of_the_protected_packets() {
         let media = run(4);
-        let repair = encoder().encode(&media, 1);
+        let repair = encoder().encode(&media, 1, 0);
         let payload = &repair[0].payload;
 
         let mut expected = [0u8; 8];
@@ -534,7 +653,7 @@ mod tests {
     #[test]
     fn the_repair_payload_is_the_xor_of_the_protected_payloads() {
         let media = run(4);
-        let repair = encoder().encode(&media, 1);
+        let repair = encoder().encode(&media, 1, 0);
         let header_size = parse_packet_mask(&repair[0].payload).expect("parses").1;
         let repair_payload = &repair[0].payload[header_size..];
 
@@ -557,7 +676,7 @@ mod tests {
             media_packet(2, &[1, 2, 3, 4, 5, 6, 7, 8]),
             media_packet(3, &[9]),
         ];
-        let repair = encoder().encode(&media, 1);
+        let repair = encoder().encode(&media, 1, 0);
         let header_size = parse_packet_mask(&repair[0].payload).expect("parses").1;
 
         assert_eq!(8, repair[0].payload.len() - header_size);
@@ -567,7 +686,7 @@ mod tests {
     /// recovery byte are cleared rather than carrying XORed version bits.
     #[test]
     fn the_version_bits_are_not_recovered() {
-        let repair = encoder().encode(&run(3), 1);
+        let repair = encoder().encode(&run(3), 1, 0);
         assert_eq!(
             0,
             repair[0].payload[0] & 0b1100_0000,

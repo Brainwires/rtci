@@ -29,6 +29,8 @@ pub const DEFAULT_NUM_FEC_PACKETS: u32 = 2;
 pub struct FlexFec03SendBuilder {
     num_media_packets: u32,
     num_fec_packets: u32,
+    initial_sequence_number: Option<u16>,
+    initial_timestamp: Option<u32>,
 }
 
 impl Default for FlexFec03SendBuilder {
@@ -36,6 +38,8 @@ impl Default for FlexFec03SendBuilder {
         Self {
             num_media_packets: DEFAULT_NUM_MEDIA_PACKETS,
             num_fec_packets: DEFAULT_NUM_FEC_PACKETS,
+            initial_sequence_number: None,
+            initial_timestamp: None,
         }
     }
 }
@@ -64,9 +68,31 @@ impl FlexFec03SendBuilder {
         self
     }
 
+    /// The sequence number each repair stream starts at.
+    ///
+    /// Unset, every repair stream starts at a random one (draft-03 section 4.2, RFC 3550 section
+    /// 5.1). A test pins it to assert on the numbers.
+    pub fn with_initial_sequence_number(mut self, sequence_number: u16) -> Self {
+        self.initial_sequence_number = Some(sequence_number);
+        self
+    }
+
+    /// The RTP timestamp each repair stream carries at the instant of its first packet.
+    ///
+    /// Unset, it is random (RFC 3550 section 5.1). From there the timestamp follows the send
+    /// clock: the `now` each media packet is written with, at the stream's clock rate.
+    pub fn with_initial_timestamp(mut self, timestamp: u32) -> Self {
+        self.initial_timestamp = Some(timestamp);
+        self
+    }
+
     /// Build the interceptor.
     pub fn build(self) -> FlexFec03SendInterceptor {
-        FlexFec03SendInterceptor::new(self.num_media_packets, self.num_fec_packets)
+        let mut interceptor =
+            FlexFec03SendInterceptor::new(self.num_media_packets, self.num_fec_packets);
+        interceptor.initial_sequence_number = self.initial_sequence_number;
+        interceptor.initial_timestamp = self.initial_timestamp;
+        interceptor
     }
 }
 
@@ -75,6 +101,30 @@ struct ProtectedStream {
     encoder: FlexFec03Encoder,
     /// Media packets awaiting a full block.
     block: Vec<rtp::Packet>,
+    /// The repair stream's send clock: its rate, and the timestamp it carries at `epoch`.
+    clock: RepairClock,
+}
+
+/// The repair stream's RTP clock, driven by the instants packets are written with.
+///
+/// A repair packet's timestamp is its transmission time (draft-03 section 4.2), so it comes from
+/// the send clock and not from the media it protects. The engine is sans-I/O: the only clock is
+/// the `now` each packet carries.
+struct RepairClock {
+    clock_rate: u32,
+    initial_timestamp: u32,
+    /// The instant of the first repair packet, which carries `initial_timestamp`.
+    epoch: Option<Instant>,
+}
+
+impl RepairClock {
+    fn timestamp_at(&mut self, now: Instant) -> u32 {
+        let epoch = *self.epoch.get_or_insert(now);
+        let elapsed = now.saturating_duration_since(epoch);
+        let ticks = elapsed.as_nanos() * u128::from(self.clock_rate) / 1_000_000_000;
+        // The RTP timestamp is modulo 2^32.
+        self.initial_timestamp.wrapping_add(ticks as u32)
+    }
 }
 
 /// Produces FlexFEC draft-03 repair packets for outgoing media.
@@ -87,6 +137,9 @@ pub struct FlexFec03SendInterceptor {
     num_fec_packets: u32,
     /// Keyed by the **media** SSRC being protected.
     streams: HashMap<u32, ProtectedStream>,
+    /// Pinned by the builder; random per repair stream when unset.
+    initial_sequence_number: Option<u16>,
+    initial_timestamp: Option<u32>,
     /// Repair packets the encoder produced, waiting to join the belt.
     /// Inbound packets ready for the next interceptor.
     read_queue: VecDeque<TaggedPacket>,
@@ -103,6 +156,8 @@ impl FlexFec03SendInterceptor {
             num_media_packets: num_media_packets.max(1),
             num_fec_packets,
             streams: HashMap::new(),
+            initial_sequence_number: None,
+            initial_timestamp: None,
         }
     }
 
@@ -145,7 +200,10 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for FlexFec03SendInterceptor {
 
         stream.block.push(rtp_packet.clone());
         let repair_packets = if stream.block.len() as u32 >= self.num_media_packets {
-            let repair = stream.encoder.encode(&stream.block, self.num_fec_packets);
+            let timestamp = stream.clock.timestamp_at(now);
+            let repair = stream
+                .encoder
+                .encode(&stream.block, self.num_fec_packets, timestamp);
             // Cleared either way: a block the encoder refused — a gap, or one longer than the
             // masks describe — must not be retried packet by packet as more arrive.
             stream.block.clear();
@@ -192,8 +250,22 @@ impl Interceptor for FlexFec03SendInterceptor {
             self.streams.insert(
                 info.ssrc,
                 ProtectedStream {
-                    encoder: FlexFec03Encoder::new(payload_type_fec, ssrc_fec),
+                    encoder: FlexFec03Encoder::new(payload_type_fec, ssrc_fec)
+                        .with_base_sequence_number(
+                            self.initial_sequence_number.unwrap_or_else(rand::random),
+                        ),
                     block: Vec::new(),
+                    clock: RepairClock {
+                        // The FlexFEC rate is negotiated equal to the media's (section 5.1);
+                        // 90 kHz is the video clock when a stream names none.
+                        clock_rate: if info.clock_rate == 0 {
+                            90_000
+                        } else {
+                            info.clock_rate
+                        },
+                        initial_timestamp: self.initial_timestamp.unwrap_or_else(rand::random),
+                        epoch: None,
+                    },
                 },
             );
         }
