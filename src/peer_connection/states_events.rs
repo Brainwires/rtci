@@ -271,6 +271,15 @@ impl RTCPeerConnection {
         if self.announced.gathering == RTCIceGatheringState::Complete {
             return;
         }
+        // The generation has gathered: a local description of it set later (the application
+        // may finish gathering before it sets one) does not start it again.
+        let ufrag = self
+            .ice_transport()
+            .agent
+            .get_local_credentials()
+            .ufrag
+            .clone();
+        self.announced.gathering_ufrag = Some(ufrag);
         let mut end = RTCIceCandidate::end_of_candidates_for(None, None, None);
         self.ice_transport().describe_local_candidate(&mut end);
         self.pipeline_context

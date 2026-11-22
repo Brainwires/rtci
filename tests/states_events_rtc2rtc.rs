@@ -714,3 +714,19 @@ fn ice_candidate_errors_follow_the_spec_rules() -> Result<()> {
     ));
     Ok(())
 }
+
+/// The application may finish gathering before it sets a local description: the description
+/// of that generation set afterwards does not start gathering again.
+#[test]
+fn gathering_finished_before_the_local_description_stays_complete() -> Result<()> {
+    let now = Instant::now();
+    let mut pc = RTCPeerConnectionBuilder::new().build(now)?;
+    pc.create_data_channel("d", None)?;
+    pc.add_local_candidate(host("10.0.0.1:5000".parse()?)?)?;
+    pc.add_local_candidate(RTCIceCandidateInit::default())?;
+    assert_eq!(pc.ice_gathering_state(), RTCIceGatheringState::Complete);
+    let offer = pc.create_offer(None)?;
+    pc.set_local_description(now, offer)?;
+    assert_eq!(pc.ice_gathering_state(), RTCIceGatheringState::Complete);
+    Ok(())
+}
