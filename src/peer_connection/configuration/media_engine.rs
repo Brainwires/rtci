@@ -397,6 +397,7 @@ impl MediaEngine {
     /// - G.722 (8kHz wideband)
     /// - PCMU/G.711 μ-law (8kHz)
     /// - PCMA/G.711 A-law (8kHz)
+    /// - telephone-event at 48 kHz and 8 kHz, events 0-15 (DTMF, RFC 4733)
     ///
     /// **Video Codecs:**
     /// - VP8 with RTCP feedback
@@ -468,6 +469,32 @@ impl MediaEngine {
                     rtcp_feedback: vec![],
                 },
                 payload_type: 8,
+            },
+            // DTMF as named telephone events (RFC 4733), which RFC 7874 section 3 has every
+            // WebRTC endpoint implement, with events 0 to 15, the DTMF digits. One format per
+            // clock rate of the audio codecs above (the event stream runs on the clock of the
+            // audio it goes with), each stating the events it takes (RFC 4733 section 2.4.1:
+            // `a=fmtp:<pt> 0-15`). The application sends and reads the event packets
+            // (`rtp::codec::telephone_event`).
+            RTCRtpCodecParameters {
+                rtp_codec: RTCRtpCodec {
+                    mime_type: MIME_TYPE_TELEPHONE_EVENT.to_owned(),
+                    clock_rate: 48000,
+                    channels: 0,
+                    sdp_fmtp_line: "0-15".to_owned(),
+                    rtcp_feedback: vec![],
+                },
+                payload_type: 112,
+            },
+            RTCRtpCodecParameters {
+                rtp_codec: RTCRtpCodec {
+                    mime_type: MIME_TYPE_TELEPHONE_EVENT.to_owned(),
+                    clock_rate: 8000,
+                    channels: 0,
+                    sdp_fmtp_line: "0-15".to_owned(),
+                    rtcp_feedback: vec![],
+                },
+                payload_type: 115,
             },
         ] {
             self.register_codec(codec, RtpCodecKind::Audio)?;
@@ -1551,11 +1578,53 @@ fn fmtp_parameter_set(line: &str) -> Vec<(String, String)> {
 /// Whether `a` and `b` describe one format (RFC 8866 section 6.6, `a=rtpmap` and `a=fmtp`):
 /// the same encoding name, clock rate, channels and fmtp parameters. The payload type that
 /// numbers it is not part of the format.
+///
+/// A VP9 format without `profile-id` is profile 0 (RFC 9628 section 6: "If no profile-id is
+/// present, Profile 0 MUST be inferred"), so it is the format that says `profile-id=0`.
 fn same_format(a: &RTCRtpCodec, b: &RTCRtpCodec) -> bool {
+    let parameters = |codec: &RTCRtpCodec| {
+        let mut set = fmtp_parameter_set(&codec.sdp_fmtp_line);
+        if codec.mime_type.eq_ignore_ascii_case(MIME_TYPE_VP9)
+            && !set.iter().any(|(key, _)| key == "profile-id")
+        {
+            set.push(("profile-id".to_owned(), "0".to_owned()));
+            set.sort();
+        }
+        set
+    };
     a.mime_type.eq_ignore_ascii_case(&b.mime_type)
         && a.clock_rate == b.clock_rate
         && a.channels == b.channels
-        && fmtp_parameter_set(&a.sdp_fmtp_line) == fmtp_parameter_set(&b.sdp_fmtp_line)
+        && parameters(a) == parameters(b)
+}
+
+#[cfg(test)]
+mod same_format_test {
+    use super::*;
+
+    fn vp9(fmtp: &str) -> RTCRtpCodec {
+        RTCRtpCodec {
+            mime_type: MIME_TYPE_VP9.to_owned(),
+            clock_rate: 90000,
+            channels: 0,
+            sdp_fmtp_line: fmtp.to_owned(),
+            rtcp_feedback: vec![],
+        }
+    }
+
+    #[test]
+    fn a_vp9_format_without_a_profile_id_is_profile_0() {
+        assert!(same_format(&vp9(""), &vp9("profile-id=0")));
+        assert!(same_format(&vp9("profile-id=0"), &vp9("")));
+        assert!(!same_format(&vp9(""), &vp9("profile-id=2")));
+        assert!(!same_format(&vp9("profile-id=0"), &vp9("profile-id=2")));
+        // Only VP9 has that default.
+        let other = |fmtp: &str| RTCRtpCodec {
+            mime_type: MIME_TYPE_VP8.to_owned(),
+            ..vp9(fmtp)
+        };
+        assert!(!same_format(&other(""), &other("profile-id=0")));
+    }
 }
 
 #[cfg(test)]

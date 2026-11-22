@@ -62,6 +62,10 @@ pub(crate) struct InterceptorHandlerContext {
     /// The CNAME each remote SSRC named in its SDES (RFC 3550 6.5.1), which is what binds the
     /// streams of one remote endpoint together for synchronisation.
     pub(crate) remote_cnames: HashMap<SSRC, String>,
+    /// The MID each remote SSRC named in an RTCP SDES MID item (RFC 9143 sections 9.2 and
+    /// 15.1): the m= section of a stream whose packets carry no MID header extension and whose
+    /// SSRC no description declares.
+    pub(crate) sdes_mids: HashMap<SSRC, String>,
     /// Local SSRCs another source was heard using (RFC 3550 8.2), until their stream is
     /// replaced.
     pub(crate) ssrc_collisions: HashSet<SSRC>,
@@ -92,6 +96,7 @@ impl Default for InterceptorHandlerContext {
             event_outs: Default::default(),
             cname: interceptor::generate_rtcp_cname(),
             remote_cnames: Default::default(),
+            sdes_mids: Default::default(),
             ssrc_collisions: Default::default(),
             goodbye_ssrcs: Default::default(),
             wall_clock: None,
@@ -222,6 +227,38 @@ impl<'a> InterceptorHandler<'a> {
             return;
         }
         self.bind_by_rid(now, ssrc, payload_type, rtp_header);
+    }
+
+    /// RFC 9143 section 9.2: "If the RTCP packet is an SDES packet containing a MID item,
+    /// update the ... SSRC mapping table" with the SSRC of the chunk and the m= section the
+    /// MID names. The mapping is used when a stream of that SSRC arrives that nothing else
+    /// places ([`Self::bind_undeclared_ssrc`]); a MID that names no m= section is not kept.
+    fn process_sdes_mids(&mut self, rtcp_packets: &[Box<dyn rtcp::Packet>]) {
+        for packet in rtcp_packets {
+            let Some(sdes) = packet.as_any().downcast_ref::<SourceDescription>() else {
+                continue;
+            };
+            for chunk in &sdes.chunks {
+                for item in &chunk.items {
+                    if item.sdes_type != SdesType::SdesMid {
+                        continue;
+                    }
+                    let Ok(mid) = std::str::from_utf8(&item.text) else {
+                        continue;
+                    };
+                    let known = self
+                        .rtp_transceivers
+                        .iter()
+                        .any(|t| t.mid().as_deref() == Some(mid));
+                    if known
+                        && (self.ctx.sdes_mids.len() < MAX_REMOTE_CNAMES
+                            || self.ctx.sdes_mids.contains_key(&chunk.source))
+                    {
+                        self.ctx.sdes_mids.insert(chunk.source, mid.to_owned());
+                    }
+                }
+            }
+        }
     }
 
     /// RFC 3550 6.6: a BYE says a source has left. Once every SSRC of a remote track has said
@@ -554,8 +591,9 @@ impl<'a> InterceptorHandler<'a> {
     /// only one place it could belong to.
     /// An SSRC the remote description doesn't declare, for a receiver that expects one: the
     /// only transceiver's, or — with several media sections — the one the packet's MID header
-    /// extension names without a RID (RFC 8843 §9.2: a=ssrc lines are optional, the MID
-    /// identifies the m-section).
+    /// extension names without a RID (RFC 9143 section 9.2: a=ssrc lines are optional, the MID
+    /// identifies the m-section), or, for a packet with no MID, the one transceiver that
+    /// receives the packet's payload type.
     fn bind_undeclared_ssrc(
         &mut self,
         now: Instant,
@@ -566,21 +604,51 @@ impl<'a> InterceptorHandler<'a> {
         let index = if self.rtp_transceivers.len() == 1 {
             0
         } else {
+            let (mut mid, rid, rrid) = self
+                .get_rtp_header_extension_ids(rtp_header)
+                .unwrap_or_default();
+            // No MID in the packet: the one an RTCP SDES MID item gave this SSRC.
+            if mid.is_empty()
+                && let Some(learned) = self.ctx.sdes_mids.get(&ssrc)
+            {
+                mid.clone_from(learned);
+            }
             // A RID (or RRID) means simulcast: that is the rid path's.
-            let Some((mid, rid, rrid)) = self.get_rtp_header_extension_ids(rtp_header) else {
-                return false;
-            };
-            if mid.is_empty() || !rid.is_empty() || !rrid.is_empty() {
+            if !rid.is_empty() || !rrid.is_empty() {
                 return false;
             }
-            let Some(index) = self
-                .rtp_transceivers
-                .iter()
-                .position(|t| t.mid().as_deref() == Some(mid.as_str()))
-            else {
-                return false;
-            };
-            index
+            if mid.is_empty() {
+                // RFC 9143 section 9.2, the last step of associating an RTP stream with an m=
+                // section: "If the packet's payload type is in the payload type table, update
+                // the outgoing SSRC mapping table to include an entry that maps the packet's
+                // SSRC to the 'm=' section for that payload type", the table holding the
+                // payload types that "uniquely identify an 'm=' section". So: the one
+                // transceiver that is not stopped and receives this payload type. None, or
+                // more than one, and the packet belongs nowhere ("Otherwise, drop the
+                // packet").
+                let mut receiving = self.rtp_transceivers.iter().enumerate().filter(|(_, t)| {
+                    !t.stopped()
+                        && t.receiver().as_ref().is_some_and(|receiver| {
+                            receiver
+                                .get_codec_preferences()
+                                .iter()
+                                .any(|codec| codec.payload_type == payload_type)
+                        })
+                });
+                match (receiving.next(), receiving.next()) {
+                    (Some((index, _)), None) => index,
+                    _ => return false,
+                }
+            } else {
+                let Some(index) = self
+                    .rtp_transceivers
+                    .iter()
+                    .position(|t| t.mid().as_deref() == Some(mid.as_str()))
+                else {
+                    return false;
+                };
+                index
+            }
         };
 
         if let Some(transceiver) = self.rtp_transceivers.get(index)
@@ -1025,46 +1093,46 @@ impl<'a> InterceptorHandler<'a> {
             return None;
         }
 
-        // Get MID extension ID
-        let (mid_extension_id, audio_supported, video_supported) = self
-            .media_engine
-            .get_header_extension_id(RTCRtpHeaderExtensionCapability {
-                uri: ::sdp::extmap::SDES_MID_URI.to_owned(),
-            });
-        if !audio_supported && !video_supported {
+        // Each of the three extensions is read when it is negotiated, on its own: a session
+        // that negotiated MID without RtpStreamId (no simulcast) still associates by MID.
+        let negotiated_id = |uri: &str| -> u16 {
+            let (id, audio_supported, video_supported) =
+                self.media_engine
+                    .get_header_extension_id(RTCRtpHeaderExtensionCapability {
+                        uri: uri.to_owned(),
+                    });
+            if audio_supported || video_supported {
+                id
+            } else {
+                0
+            }
+        };
+        let mid_extension_id = negotiated_id(::sdp::extmap::SDES_MID_URI);
+        let rid_extension_id = negotiated_id(::sdp::extmap::SDES_RTP_STREAM_ID_URI);
+        let rrid_extension_id = negotiated_id(::sdp::extmap::SDES_REPAIR_RTP_STREAM_ID_URI);
+        if mid_extension_id == 0 && rid_extension_id == 0 && rrid_extension_id == 0 {
             return None;
         }
 
-        // Get RID extension ID
-        let (rid_extension_id, audio_supported, video_supported) = self
-            .media_engine
-            .get_header_extension_id(RTCRtpHeaderExtensionCapability {
-                uri: ::sdp::extmap::SDES_RTP_STREAM_ID_URI.to_owned(),
-            });
-        if !audio_supported && !video_supported {
-            return None;
-        }
-
-        // Get RRID extension ID
-        let (rrid_extension_id, _, _) =
-            self.media_engine
-                .get_header_extension_id(RTCRtpHeaderExtensionCapability {
-                    uri: ::sdp::extmap::SDES_REPAIR_RTP_STREAM_ID_URI.to_owned(),
-                });
-
-        let mid = if let Some(payload) = rtp_header.get_extension(mid_extension_id as u8) {
+        let mid = if mid_extension_id != 0
+            && let Some(payload) = rtp_header.get_extension(mid_extension_id as u8)
+        {
             String::from_utf8(payload.to_vec()).unwrap_or_default()
         } else {
             String::new()
         };
 
-        let rid = if let Some(payload) = rtp_header.get_extension(rid_extension_id as u8) {
+        let rid = if rid_extension_id != 0
+            && let Some(payload) = rtp_header.get_extension(rid_extension_id as u8)
+        {
             String::from_utf8(payload.to_vec()).unwrap_or_default()
         } else {
             String::new()
         };
 
-        let rrid = if let Some(payload) = rtp_header.get_extension(rrid_extension_id as u8) {
+        let rrid = if rrid_extension_id != 0
+            && let Some(payload) = rtp_header.get_extension(rrid_extension_id as u8)
+        {
             String::from_utf8(payload.to_vec()).unwrap_or_default()
         } else {
             String::new()
@@ -1156,6 +1224,7 @@ impl<'a>
                     // `poll_read` never sees most incoming SR/RR/NACK/PLI/FIR/CCFB. This is the
                     // read-side counterpart of `process_write_rtcp_for_stats` in `poll_write`.
                     self.process_read_rtcp_for_stats(rtcp_packets, msg.now);
+                    self.process_sdes_mids(rtcp_packets);
                     self.process_goodbyes(msg.now, rtcp_packets);
                 }
                 _ => {}
@@ -1397,6 +1466,10 @@ mod interceptor_repair_feedback_test;
 #[cfg(test)]
 #[path = "interceptor_sources_test.rs"]
 mod interceptor_sources_test;
+
+#[cfg(test)]
+#[path = "interceptor_association_test.rs"]
+mod interceptor_association_test;
 
 #[cfg(test)]
 #[path = "interceptor_session_test.rs"]

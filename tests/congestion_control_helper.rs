@@ -9,6 +9,7 @@ use rtc::peer_connection::configuration::interceptor_registry::{
     CongestionFeedback, configure_congestion_control,
 };
 use rtc::peer_connection::configuration::media_engine::MediaEngine;
+use rtc::peer_connection::configuration::remote_bitrate_limit::REMOTE_BITRATE_LIMIT_SLOT;
 
 /// The estimator seam is what #840's second requirement asks for: an application supplies its own,
 /// and it drives the same machinery `Gcc` does.
@@ -30,6 +31,12 @@ fn an_application_can_supply_its_own_estimator() {
                 "CongestionControlInterceptor<ConstantBitrate>".to_owned()
             ),
             (Slot::TwccSender, "TwccSenderInterceptor".to_owned()),
+            // The remote description's send limit (`b=TIAS` / `b=AS`), applied to whatever
+            // the estimator says.
+            (
+                Slot::Custom(REMOTE_BITRATE_LIMIT_SLOT),
+                "RemoteBitrateLimitInterceptor".to_owned()
+            ),
             (Slot::Pacer, "PacerInterceptor".to_owned()),
             (Slot::TwccReceiver, "TwccReceiverInterceptor".to_owned()),
         ],
@@ -59,6 +66,10 @@ fn rfc8888_is_selectable() {
             (
                 Slot::CongestionControl,
                 "CongestionControlInterceptor<Gcc>".to_owned()
+            ),
+            (
+                Slot::Custom(REMOTE_BITRATE_LIMIT_SLOT),
+                "RemoteBitrateLimitInterceptor".to_owned()
             ),
             (Slot::Pacer, "PacerInterceptor".to_owned()),
             (Slot::Rfc8888, "Rfc8888Interceptor".to_owned()),

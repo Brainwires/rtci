@@ -905,8 +905,8 @@ fn the_servers_answers_take_their_sequence_numbers_from_the_client_hello() -> Re
     let hello_verify_request = take_transmits(&mut server);
     assert_eq!(sequence_of(&hello_verify_request[0]), 0x1234);
     assert_eq!(message_sequence_of(&hello_verify_request[0]), 0);
-    // The version the ServerHello will carry.
-    assert_eq!(&hello_verify_request[0][25..27], &[0xfe, 0xfd]);
+    // DTLS 1.0, whatever the ServerHello will carry (RFC 6347 4.2.1).
+    assert_eq!(&hello_verify_request[0][25..27], &[0xfe, 0xff]);
     let cookie = cookie_of(&hello_verify_request[0]);
 
     // A second exchange (message_seq 1) is answered with message_seq 1.
@@ -1823,5 +1823,272 @@ fn the_second_client_hello_repeats_the_first_but_for_the_cookie() -> Result<()> 
         first_rest, second_rest,
         "cipher suites, compression methods and extensions"
     );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------------------------
+// DTLS 1.2 rules that follow the RFC by default and keep the other behaviour as a setting:
+// HelloVerifyRequest.server_version (RFC 6347 4.2.1), server_name without IP addresses
+// (RFC 6066 3), EdDSA certificates under ECDHE_ECDSA (RFC 8422 5.1.1), and the final flight
+// sent again on early application data (RFC 6347 4.2.4).
+// ---------------------------------------------------------------------------------------------
+
+fn server_config_from(builder: ConfigBuilder) -> Result<Arc<HandshakeConfig>> {
+    let provider = provider();
+    Ok(Arc::new(
+        builder
+            .with_crypto_provider(provider.clone())
+            .with_cipher_suites(vec![SUITE])
+            .with_insecure_skip_verify(true)
+            .with_certificates(vec![Certificate::generate_self_signed(
+                vec!["localhost".to_owned()],
+                provider.crypto(),
+            )?])
+            .build(false, None)?,
+    ))
+}
+
+/// The server_version field of the HelloVerifyRequest in `datagram`: the two bytes after the
+/// record header and the handshake header.
+fn hello_verify_request_version(datagram: &[u8]) -> [u8; 2] {
+    assert_eq!(datagram[0], HANDSHAKE);
+    assert_eq!(datagram[13], 3, "the message is a HelloVerifyRequest");
+    [datagram[25], datagram[26]]
+}
+
+#[test]
+fn hello_verify_request_says_dtls_1_0_unless_configured_to_say_1_2() -> Result<()> {
+    use crate::record_layer::record_layer_header::{PROTOCOL_VERSION1_0, PROTOCOL_VERSION1_2};
+
+    let now = Instant::now();
+    for (builder, expected) in [
+        (ConfigBuilder::default(), [254, 255]),
+        (
+            ConfigBuilder::default().with_hello_verify_request_version(PROTOCOL_VERSION1_0),
+            [254, 255],
+        ),
+        (
+            ConfigBuilder::default().with_hello_verify_request_version(PROTOCOL_VERSION1_2),
+            [254, 253],
+        ),
+    ] {
+        let mut client = Endpoint::new(client_addr(), TransportProtocol::UDP, None);
+        let mut server = Endpoint::new(
+            server_addr(),
+            TransportProtocol::UDP,
+            Some(server_config_from(builder)?),
+        );
+        client.connect(now, server_addr(), client_config()?, None)?;
+        let (_, errored) = deliver(&mut server, client_addr(), take_transmits(&mut client), now);
+        assert!(!errored);
+        let answer = take_transmits(&mut server);
+        assert_eq!(
+            answer.len(),
+            1,
+            "one HelloVerifyRequest answers the ClientHello"
+        );
+        assert_eq!(hello_verify_request_version(&answer[0]), expected);
+        // The record that carries it says DTLS 1.2 either way.
+        assert_eq!(&answer[0][1..3], &[254, 253]);
+
+        // A client takes either and completes.
+        let (_, errored) = deliver(&mut client, server_addr(), answer, now);
+        assert!(!errored);
+        complete_handshake(&mut client, &mut server, now);
+    }
+    Ok(())
+}
+
+#[test]
+fn a_hello_verify_request_version_other_than_dtls_1_0_or_1_2_is_refused_by_the_builder() {
+    use crate::record_layer::record_layer_header::ProtocolVersion;
+
+    let result = server_config_from(
+        ConfigBuilder::default()
+            .with_hello_verify_request_version(ProtocolVersion { major: 3, minor: 3 }),
+    );
+    assert!(matches!(result, Err(Error::ErrUnsupportedProtocolVersion)));
+}
+
+/// The host_name of the server_name extension of the ClientHello in `datagram`, if it has one.
+fn client_hello_server_name(datagram: &[u8]) -> Option<String> {
+    use crate::extension::Extension;
+    use crate::handshake::handshake_message_client_hello::HandshakeMessageClientHello;
+
+    assert_eq!(datagram[13], 1, "the message is a ClientHello");
+    let mut body = &datagram[25..];
+    let hello = HandshakeMessageClientHello::unmarshal(&mut body).expect("a ClientHello parses");
+    hello
+        .extensions
+        .iter()
+        .find_map(|extension| match extension {
+            Extension::ServerName(name) => Some(name.server_name.clone()),
+            other if other.extension_type() == 0 => panic!("server_name did not parse: {other:?}"),
+            _ => None,
+        })
+}
+
+#[test]
+fn the_server_name_extension_never_carries_an_ip_address() -> Result<()> {
+    let now = Instant::now();
+    let first_client_hello = |builder: ConfigBuilder, remote: Option<SocketAddr>| -> Result<_> {
+        let config = Arc::new(builder.build(true, remote)?);
+        let mut client = Endpoint::new(client_addr(), TransportProtocol::UDP, None);
+        client.connect(now, server_addr(), config, None)?;
+        Ok(take_transmits(&mut client).remove(0))
+    };
+
+    // The name defaults to the remote address, which RFC 6066 section 3 keeps out of the
+    // extension; so is an address given as the name, in either family.
+    let hello = first_client_hello(client_builder(), Some(server_addr()))?;
+    assert_eq!(client_hello_server_name(&hello), None);
+    for literal in ["192.0.2.7", "2001:db8::7", "[2001:db8::7]"] {
+        let hello =
+            first_client_hello(client_builder().with_server_name(literal.to_owned()), None)?;
+        assert_eq!(client_hello_server_name(&hello), None, "{literal}");
+    }
+
+    // A DNS name is sent, without a trailing dot.
+    let hello = first_client_hello(
+        client_builder().with_server_name("example.org".to_owned()),
+        None,
+    )?;
+    assert_eq!(
+        client_hello_server_name(&hello).as_deref(),
+        Some("example.org")
+    );
+    let hello = first_client_hello(
+        client_builder().with_server_name("example.org.".to_owned()),
+        None,
+    )?;
+    assert_eq!(
+        client_hello_server_name(&hello).as_deref(),
+        Some("example.org")
+    );
+    Ok(())
+}
+
+#[test]
+fn an_ed25519_certificate_serves_an_ecdhe_ecdsa_suite() -> Result<()> {
+    let now = Instant::now();
+    let provider = provider();
+    let certificate = Certificate::generate_self_signed_with_alg(
+        vec!["localhost".to_owned()],
+        &rcgen::PKCS_ED25519,
+        provider.crypto(),
+    )?;
+    let expected = certificate.certificate[0].as_ref().to_vec();
+    let server_config = Arc::new(
+        ConfigBuilder::default()
+            .with_crypto_provider(provider)
+            .with_cipher_suites(vec![SUITE])
+            .with_certificates(vec![certificate])
+            .build(false, None)?,
+    );
+    let mut client = Endpoint::new(client_addr(), TransportProtocol::UDP, None);
+    let mut server = Endpoint::new(server_addr(), TransportProtocol::UDP, Some(server_config));
+    client.connect(now, server_addr(), client_config()?, None)?;
+    complete_handshake(&mut client, &mut server, now);
+
+    let state = client
+        .get_connection_state(server_addr())
+        .expect("the client holds the association");
+    assert_eq!(state.peer_certificates, vec![expected]);
+    assert_eq!(state.cipher_suite().map(|suite| suite.id()), Some(SUITE));
+    Ok(())
+}
+
+/// Drives a handshake until the server has completed and returns its unsent final flight
+/// (ChangeCipherSpec and Finished), which the caller loses.
+fn handshake_until_the_server_completes(
+    client: &mut Endpoint,
+    server: &mut Endpoint,
+    now: Instant,
+) -> Vec<BytesMut> {
+    for _ in 0..32 {
+        let (events, _) = deliver(server, client_addr(), take_transmits(client), now);
+        if events
+            .iter()
+            .any(|event| matches!(event, EndpointEvent::HandshakeComplete))
+        {
+            return take_transmits(server);
+        }
+        deliver(client, server_addr(), take_transmits(server), now);
+    }
+    panic!("the server did not complete");
+}
+
+#[test]
+fn application_data_ahead_of_the_servers_finished_makes_the_client_repeat_its_final_flight()
+-> Result<()> {
+    let now = Instant::now();
+    for enabled in [true, false] {
+        let mut client = Endpoint::new(client_addr(), TransportProtocol::UDP, None);
+        let mut server = Endpoint::new(
+            server_addr(),
+            TransportProtocol::UDP,
+            Some(server_config()?),
+        );
+        let config = Arc::new(
+            client_builder()
+                .with_early_data_retransmit(enabled)
+                .build(true, None)?,
+        );
+        client.connect(now, server_addr(), config, None)?;
+        let lost = handshake_until_the_server_completes(&mut client, &mut server, now);
+        assert!(!lost.is_empty());
+        assert!(take_transmits(&mut client).is_empty());
+
+        // A record that only claims the next epoch is anyone's: nothing is sent for it.
+        let mut forged = vec![23, 254, 253, 0, 1, 0, 0, 0, 0, 0, 9, 0, 32];
+        forged.extend_from_slice(&[0x5a; 32]);
+        let (_, errored) = deliver(&mut client, server_addr(), vec![forged[..].into()], now);
+        assert!(!errored);
+        assert!(
+            take_transmits(&mut client).is_empty(),
+            "a forged record was answered"
+        );
+
+        // The server's application data authenticates: its Finished was lost.
+        server.write(now, client_addr(), b"early")?;
+        let data = take_transmits(&mut server);
+        let (events, errored) = deliver(&mut client, server_addr(), data, now);
+        assert!(
+            !errored && events.is_empty(),
+            "nothing is delivered before the Finished"
+        );
+        let repeated = take_transmits(&mut client);
+        if !enabled {
+            assert!(repeated.is_empty(), "the setting is off");
+            continue;
+        }
+        let types: Vec<u8> = repeated
+            .iter()
+            .flat_map(|datagram| record_content_types(datagram))
+            .collect();
+        assert!(
+            types.contains(&20) && types.iter().filter(|t| **t == HANDSHAKE).count() >= 2,
+            "the client's final flight goes out again at once: {types:?}"
+        );
+
+        // Once per flight: more early data does not send it a third time.
+        server.write(now, client_addr(), b"more")?;
+        deliver(&mut client, server_addr(), take_transmits(&mut server), now);
+        assert!(take_transmits(&mut client).is_empty());
+
+        // The server answers the repeated flight with its own, and the client completes and
+        // delivers what it held.
+        let (_, errored) = deliver(&mut server, client_addr(), repeated, now);
+        assert!(!errored);
+        let (events, _) = deliver(&mut client, server_addr(), take_transmits(&mut server), now);
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, EndpointEvent::HandshakeComplete))
+        );
+        assert!(events.iter().any(
+            |event| matches!(event, EndpointEvent::ApplicationData(data) if data.as_ref() == b"early")
+        ));
+    }
     Ok(())
 }

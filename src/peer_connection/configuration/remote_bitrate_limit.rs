@@ -12,8 +12,9 @@ use std::time::Instant;
 /// Where [`RemoteBitrateLimitInterceptor`] goes in a chain: between the congestion controller
 /// ([`Slot::CongestionControl`](interceptor::Slot::CongestionControl), which announces the
 /// estimate on the read leg) and the pacer ([`Slot::Pacer`](interceptor::Slot::Pacer), which
-/// reads it), so that everything that reads the estimate reads the bounded one.
-pub const REMOTE_BITRATE_LIMIT_SLOT: usize = 2_500;
+/// reads it), so that everything that reads the estimate reads the bounded one. It is past the
+/// circuit breaker's slot (2 500).
+pub const REMOTE_BITRATE_LIMIT_SLOT: usize = 2_750;
 
 /// The most this endpoint may send, in bits per second, as the remote description says
 /// (`None`: it sets no limit). The peer connection writes it into the chain when an answer is

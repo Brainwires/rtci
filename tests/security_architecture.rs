@@ -121,7 +121,10 @@ fn dtls_srtp_is_offered_for_every_media_section() -> Result<()> {
     )?;
     world.peers[0].pc.create_data_channel("data", None)?;
     let (offer, answer) = world.exchange(0)?;
-    for sdp in [offer, answer] {
+    // The initial offer states the role in each section; the answer in the tagged section of
+    // the BUNDLE group only, where it is in force for every bundled section (RFC 9143 section
+    // 7.1.3).
+    for (sdp, setups) in [(offer, 3), (answer, 1)] {
         let media_lines: Vec<&str> = sdp.lines().filter(|line| line.starts_with("m=")).collect();
         assert_eq!(media_lines.len(), 3, "{sdp}");
         for line in media_lines {
@@ -134,7 +137,8 @@ fn dtls_srtp_is_offered_for_every_media_section() -> Result<()> {
         }
         assert!(!sdp.contains("a=crypto"), "{sdp}");
         assert_eq!(attribute_values(&sdp, "fingerprint").len(), 1, "{sdp}");
-        assert_eq!(attribute_values(&sdp, "setup").len(), 3, "{sdp}");
+        assert_eq!(attribute_values(&sdp, "setup").len(), setups, "{sdp}");
+        assert!(sdp.contains("a=group:BUNDLE "), "{sdp}");
     }
     Ok(())
 }

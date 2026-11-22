@@ -339,7 +339,11 @@ impl Endpoint {
                     ecn,
                     transport_protocol: self.transport_protocol,
                 },
-                message: BytesMut::from(hello.hello_verify_request(&cookie).as_slice()),
+                message: BytesMut::from(
+                    hello
+                        .hello_verify_request(&cookie, config.hello_verify_request_version)
+                        .as_slice(),
+                ),
             });
             return Ok(Admission::Done);
         }

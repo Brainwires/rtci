@@ -157,7 +157,7 @@ fn test_answer_to_renumbering_peer_is_well_formed() -> Result<(), Box<dyn std::e
     // First exchange establishes one numbering...
     let first = codec_set(100, 101, 98, 99, 35);
     // ...the answerer's own registration differs, so echoing local preference is visible.
-    let local = codec_set(96, 97, 94, 95, 45);
+    let local = codec_set(96, 97, 108, 109, 45);
     // ...and a later peer numbers the very same codecs differently.
     let second = codec_set(102, 104, 103, 105, 115);
 
