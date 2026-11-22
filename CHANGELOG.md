@@ -46,6 +46,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `Agent::resolve_nomination_proposal` (additive; an `AgentConfig` literal needs the field).
   - Header extension control (section 4.1): an extension the section's negotiated direction
     leaves no use for is "stopped" after the answer.
+- **jsep**: what descriptions say of the selected ICE pair (RFC 8839 sections 4.2.1.2, 4.3.4,
+  4.4.1.2.2, 4.4.1.3, 4.4.2, 5.1, 5.2; RFC 8445 section 8.2). Descriptions differ on the wire:
+  - Once ICE has selected a pair (and no restart is staged), the `m=` / `c=` destination of
+    later offers and answers is the pair's local candidate; an offer of the controlling agent
+    carries `a=remote-candidates:1 <address> <port>` of its remote candidate, and an answer to
+    such an offer takes the local candidate it names as its destination.
+  - Every candidate line a description carries ends with the `ufrag` extension (the section's
+    `ice-ufrag`). A trickled candidate without `usernameFragment` whose line's `ufrag` names
+    another ICE generation is ignored (RFC 8838 section 9).
+  - A remote `a=remote-candidates` line that does not parse refuses the description (RFC 9429
+    section 5.8.2).
+  - Two lite agents: the controlling one's `Event::LiteCandidateUpdate` raises
+    negotiation-needed; its next offer lists the chosen local candidate alone with
+    `a=remote-candidates`, and the controlled peer connection applies it with
+    `ice::Agent::replace_remote_candidates`, its answer listing the named candidate alone.
+- **jsep**: a rolled-back remote offer leaves the transports as they were (RFC 9429 section
+  5.7). The answerer's ICE and DTLS transports take a remote offer's parameters when the local
+  answer (or provisional answer) is applied, not when the offer is: the first offer starts
+  ICE and DTLS then, an offer with new ICE credentials restarts ICE then, an offer that asks
+  for a new DTLS association (another `tls-id`, fingerprint or role) replaces it then, and the
+  candidates of the offer's ICE generation, in the description or trickled, reach the agent
+  then. What the answer states is staged when the offer is applied (the restart's new local
+  credentials, the new association's `a=setup` role and `tls-id`) and dropped by a rollback.
+  Observable: after `set_remote_description(offer)` the answerer's ICE transport is still
+  `new` until `set_local_description(answer)`. New `ice::Agent::discard_restart_credentials`.
 - **media_stream**: remote tracks and the mediacapture-main model (pc-16).
   - `MediaStreamTrack::apply_constraints` returns `Result<()>`: on a remote track (a
     receiver's; new `is_remote()`) constraints naming `width`, `height`, `frameRate` or
@@ -436,6 +461,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   extension for video (`configure_default_header_extensions`): descriptions carry three more
   `a=extmap` lines.
 
+- **ice**: a checking agent no longer fails at its timeout (`disconnected_timeout +
+  failed_timeout`, 30 s by default) while a pair is still being checked: it fails by the timer
+  only once no pair is Frozen, Waiting or In-Progress, no triggered check is queued, no valid
+  pair is being nominated and the peer has not been heard from on any pair for 30 s (RFC 8445
+  sections 6.1.4.2 and 8.1.2: the checklist fails when every pair has failed; section 14.3: a
+  check is a transaction of Rc requests, 39.5 s at the defaults). A short `failed_timeout` no
+  longer cuts a check's transaction short. A controlling agent whose nomination's transaction
+  times out sends the nomination again while the peer is heard from on the pair, and gives the
+  pair up after 30 s of silence (`FailedNomination::Retry`); before, the pair failed, or the
+  agent with it at the 30 s timer. `AgentConfig` has a new field, `failed_nomination`: a struct
+  literal without `..Default::default()` no longer compiles.
+- **turn**: the client's Binding request (`send_binding_request`, `send_binding_request_to`)
+  ends with FINGERPRINT, as every other message it sends does (RFC 8489 section 7).
 - **ice**: where the fork followed libwebrtc or its own hardening instead of the RFC, the RFC is
   now the default and the other behaviour a setting (`AgentConfig`, and
   `SettingEngineBuilder::with_ice_*`):
@@ -1647,6 +1685,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it was closing (`OnError`, `OnClose`) instead of leaving it `closing`; an inactive path
   (RFC 9260 section 8.2) changes neither the transport's state nor a channel's.
 
+- **ice**: `AgentConfig::failed_nomination` / `SettingEngineBuilder::with_ice_failed_nomination`
+  (`FailedNomination::{Retry, FailChecklist}`): what a controlling agent does when its
+  nomination times out. `Retry`, the default, nominates the pair again while the peer is heard
+  from; `FailChecklist` is RFC 8445 section 7.2.5.3.4 to the letter (the pair and the checklist
+  fail). The one ICE default that is not the RFC's; see `docs/conformance/audit/rfc8445.md`
+  ("Decisions").
+- **ice**: `rank_local_candidates` and `Agent::add_local_candidates` rank candidates gathered
+  together as RFC 8421 section 4 recommends for a dual-stack host: the IPv6 candidates of a type
+  get a head start of (N4 + N6) / N4 places, then the families alternate. Candidates added one
+  at a time are ranked in their order, as before.
+- **ice**: a Binding request authenticated by MESSAGE-INTEGRITY-SHA256 is answered (success,
+  487, 420) with MESSAGE-INTEGRITY-SHA256 alone (RFC 8489 section 9.1.3); it was answered with
+  MESSAGE-INTEGRITY.
+- **dtls**: a DTLS 1.3 client whose second ClientHello is refused with illegal_parameter (its
+  HelloRetryRequest cookie had expired: a server endpoint's is good for 60 to 120 s) starts the
+  handshake over with a new ClientHello, without a cookie (RFC 9147 section 5.1), at most twice;
+  it failed.
 - **ice**: `Agent::handle_transport_error` / `RTCPeerConnection::handle_ice_transport_error`:
   the application reports a hard ICMP error (RFC 8445 section 7.2.5.2.2), a TCP connection
   that could not be established, or one whose first answer is not STUN (RFC 6544 section 7.1),
@@ -2402,6 +2457,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+- **ice**: at 30 % loss (seeds 0x4a, 0xff and 0x127 of `tests/lossy_link_rtc2rtc.rs` with
+  aws-lc-rs) and 40 % loss (0x1c and 0x21, both backends) the controlling peer went `failed`
+  about 30 s in, still checking, 29.5 s after the Binding success response that validated its
+  pair: every response to its nomination had been lost, the nomination's transaction (seven
+  requests over 39.5 s) was still open and the other peer had accepted it and was connected.
+  The checking timer inherited from the pion agent (`disconnected_timeout + failed_timeout`
+  from entering checking) failed the agent with a pair in progress. Tests:
+  `agent_checklist_test.rs::test_an_unanswered_nomination_is_sent_again_while_the_peer_is_heard_from`
+  and `tests/lossy_link_rtc2rtc.rs::ice_does_not_fail_while_a_nomination_is_in_progress_over_heavy_loss`.
 - **test**: `tests/lossy_link_rtc2rtc.rs` seeds the engine's provider randomness: each peer's
   `RTCCryptoProvider::random()` (ICE credentials, the tie-breaker, the consent intervals, DTLS
   randoms and cookies) is a generator seeded from the test's seed, so ICE takes the same course

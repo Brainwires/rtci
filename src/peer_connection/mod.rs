@@ -292,13 +292,14 @@ use crate::peer_connection::sdp::MediaDescriptionExt;
 use crate::peer_connection::sdp::section_multiplexes_rtcp;
 use crate::peer_connection::sdp::session_description::RTCSessionDescription;
 use crate::peer_connection::sdp::{
-    ATTR_KEY_RTCP_MUX_ONLY, RemoteIceDetails, SctpNegotiation, check_answer_against_offer,
-    check_extmap_ids, check_extmap_levels, codecs_from_media_description,
-    discard_stray_bundle_only, effective_direction, extract_fingerprints, extract_ice_details,
-    extract_tls_id, get_mid_value, get_peer_direction, has_ice_trickle_option, has_rtcp_mux,
-    has_rtp_media, inherit_session_extmap, inherit_session_rtcp_xr, insert_media_line, is_lite_set,
-    is_live_rtp_section, is_rejected_media, is_sdp_token, is_unknown_application_media,
-    media_ice_credentials, negotiated_sctp, remap_answerer_assigned_extmaps, remote_ice_options,
+    ATTR_KEY_RTCP_MUX_ONLY, RemoteIceDetails, SctpNegotiation, candidate_line_ufrag,
+    check_answer_against_offer, check_extmap_ids, check_extmap_levels,
+    codecs_from_media_description, discard_stray_bundle_only, effective_direction,
+    extract_fingerprints, extract_ice_details, extract_tls_id, get_mid_value, get_peer_direction,
+    has_ice_trickle_option, has_rtcp_mux, has_rtp_media, inherit_session_extmap,
+    inherit_session_rtcp_xr, insert_media_line, is_lite_set, is_live_rtp_section,
+    is_rejected_media, is_sdp_token, is_unknown_application_media, media_ice_credentials,
+    negotiated_sctp, remap_answerer_assigned_extmaps, remote_candidates, remote_ice_options,
     remote_ice_pacing, sdp_type::RTCSdpType, update_sdp_origin, validate_application_media_section,
     validate_dtls_attributes,
 };
@@ -1408,17 +1409,6 @@ impl RTCPeerConnection {
 
         self.commit_description(&local_description, StateChangeOp::SetLocal, next_state)?;
 
-        // W3C 4.4.1.4 (the transport's [[IceRole]], RFC 8445 rules): a local offer makes an
-        // undetermined role controlling; once determined it is not modified here.
-        if local_description.sdp_type == RTCSdpType::Offer && !self.ice_transport().role_determined
-        {
-            if self.ice_transport().role() != RTCIceRole::Controlling {
-                self.ice_transport_mut().set_role(RTCIceRole::Controlling);
-            }
-            self.pipeline_context.stats.transport.ice_role = RTCIceRole::Controlling;
-            self.ice_transport_mut().role_determined = true;
-        }
-
         // The transports take the remote offer's parameters now that it is answered
         // (`defer_remote_transport`).
         if matches!(
@@ -1428,6 +1418,17 @@ impl RTCPeerConnection {
             && let Some(parsed) = self.remote_description().and_then(|r| r.parsed.clone())
         {
             self.apply_remote_transport(now, &parsed, false, Some(pending.ice_restart))?;
+        }
+
+        // W3C 4.4.1.4 (the transport's [[IceRole]], RFC 8445 rules): a local offer makes an
+        // undetermined role controlling; once determined it is not modified here.
+        if local_description.sdp_type == RTCSdpType::Offer && !self.ice_transport().role_determined
+        {
+            if self.ice_transport().role() != RTCIceRole::Controlling {
+                self.ice_transport_mut().set_role(RTCIceRole::Controlling);
+            }
+            self.pipeline_context.stats.transport.ice_role = RTCIceRole::Controlling;
+            self.ice_transport_mut().role_determined = true;
         }
 
         let we_answer = local_description.sdp_type == RTCSdpType::Answer;
@@ -1906,10 +1907,25 @@ impl RTCPeerConnection {
                 }
             }
 
-            // The description's candidate lines: candidates the application supplied, as
-            // much as those it trickles.
-            for candidate in candidates {
-                self.add_signalled_remote_candidate(candidate)?;
+            // Two lite agents, this one controlled: an offer with `a=remote-candidates` is the
+            // controlling agent's updated candidate exchange (RFC 8445 section 8.2, RFC 8839
+            // section 4.4.2.2): its candidates replace the remote ones, and the agent selects
+            // again among them.
+            let lite_update = !we_offer
+                && remote_is_lite
+                && self.setting_engine.candidates.ice_lite
+                && transports_started
+                && !remote_candidates(parsed_remote_description)?.is_empty();
+            if lite_update {
+                self.ice_transport_mut()
+                    .agent
+                    .replace_remote_candidates(now, candidates);
+            } else {
+                // The description's candidate lines: candidates the application supplied, as
+                // much as those it trickles.
+                for candidate in candidates {
+                    self.add_signalled_remote_candidate(candidate)?;
+                }
             }
             // `a=end-of-candidates` (RFC 8838 section 14): the candidates above were the
             // generation's last. The agent ignores later ones and can fail without
@@ -2160,6 +2176,8 @@ impl RTCPeerConnection {
         if extract_ice_details(parsed)?.is_some() {
             extract_fingerprints(parsed)?;
         }
+        // RFC 9429 section 5.8.2: "Any 'a=remote-candidates' attributes MUST be parsed".
+        remote_candidates(parsed)?;
         Ok(())
     }
 
@@ -2444,6 +2462,21 @@ impl RTCPeerConnection {
                     parsed_remote_description,
                     false,
                 );
+                // The updated candidate exchange of two lite agents is complete (RFC 8445
+                // section 8.2) once an offer that carried it is answered.
+                if self
+                    .pipeline_context
+                    .ice_handler_context
+                    .lite_candidate_update
+                    .is_some()
+                    && !remote_candidates(parsed_local_description)
+                        .unwrap_or_default()
+                        .is_empty()
+                {
+                    self.pipeline_context
+                        .ice_handler_context
+                        .lite_candidate_update = None;
+                }
 
                 // we_offer: we create_offer() and set_local_description() first
                 // then, after call set_remote_description here,
@@ -2610,6 +2643,31 @@ impl RTCPeerConnection {
         } else {
             None
         };
+
+        // Without a usernameFragment, the line's own `ufrag` extension names its generation
+        // (RFC 8838 section 9: a candidate is tied to an ICE session): one of another
+        // generation is stale and is ignored.
+        if remote_candidate.username_fragment.is_none()
+            && let Some(line_ufrag) = candidate_line_ufrag(candidate_value)
+        {
+            let known = match section {
+                Some(i) => {
+                    media_ice_credentials(parsed, &parsed.media_descriptions[i]).0
+                        == Some(line_ufrag)
+                }
+                None => parsed
+                    .media_descriptions
+                    .iter()
+                    .any(|m| media_ice_credentials(parsed, m).0 == Some(line_ufrag)),
+            };
+            if !known {
+                unmarshal_candidate(candidate_value)?;
+                log::warn!(
+                    "ignoring remote candidate: its ufrag {line_ufrag} names another ICE generation"
+                );
+                return Ok(());
+            }
+        }
 
         // A usernameFragment must be one of the corresponding media description's (any media
         // description's when there is none): a candidate of another ICE generation is refused.
@@ -5029,6 +5087,54 @@ a=rtcp-mux\r\n";
             username_fragment: ufrag.map(str::to_owned),
             ..Default::default()
         }
+    }
+
+    /// RFC 9429 section 5.8.2: "Any 'a=remote-candidates' attributes MUST be parsed as
+    /// specified in [RFC8839], Section 5.2, but their values are ignored".
+    #[test]
+    fn a_malformed_remote_candidates_line_refuses_the_description() {
+        let offer = audio_video_offer();
+        for (line, accepted) in [
+            (
+                "a=remote-candidates:1 192.0.2.3 45664 2 192.0.2.3 45665",
+                true,
+            ),
+            ("a=remote-candidates:1 192.0.2.3", false),
+            ("a=remote-candidates:1 192.0.2.3 port", false),
+        ] {
+            let sdp = offer
+                .sdp
+                .replacen("a=mid:", &format!("{line}\r\na=mid:"), 1);
+            let result = media_pc()
+                .set_remote_description(Instant::now(), RTCSessionDescription::offer(sdp).unwrap());
+            assert_eq!(result.is_ok(), accepted, "{line}: {result:?}");
+        }
+    }
+
+    /// RFC 8838 section 9: a trickled candidate without a usernameFragment whose line has a
+    /// `ufrag` extension naming another ICE generation is stale: ignored, not refused.
+    #[test]
+    fn a_candidate_line_whose_ufrag_names_another_generation_is_ignored() {
+        let mut pc = media_pc();
+        pc.set_remote_description(
+            Instant::now(),
+            remote(RTCSdpType::Offer, PER_SECTION_UFRAG_OFFER),
+        )
+        .unwrap();
+        let answer = pc.create_answer(None).unwrap();
+        pc.set_local_description(Instant::now(), answer).unwrap();
+
+        let line = "candidate:1 1 udp 2113929471 203.0.113.100 10100 typ host";
+        pc.add_remote_candidate(candidate(&format!("{line} ufrag OLDG"), Some("a1"), None))
+            .expect("a stale candidate is ignored, not refused");
+        assert!(pc.ice_transport().get_remote_candidates().is_empty());
+        assert!(
+            !pc.remote_description().unwrap().sdp.contains("OLDG"),
+            "nor recorded"
+        );
+        pc.add_remote_candidate(candidate(&format!("{line} ufrag ETEn"), Some("a1"), None))
+            .unwrap();
+        assert_eq!(pc.ice_transport().get_remote_candidates().len(), 1);
     }
 
     #[test]
