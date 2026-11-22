@@ -86,7 +86,14 @@ fn params(
         // DEFAULT_DTLS_ROLE_OFFER in the old crate: an offer is `actpass`.
         connection_role: ConnectionRole::Actpass,
         ice_gathering_state: RTCIceGatheringState::Complete,
-        match_bundle_group,
+        bundle: match match_bundle_group {
+            None => BundleMode::Offer,
+            Some(group) => {
+                BundleMode::Answer(Some(group.split_whitespace().map(str::to_owned).collect()))
+            }
+        },
+        offered_tag_rtcp_mux_only: false,
+        rtcp_mux_only: true,
         sctp_max_message_size: 0,
         sctp_port: 5000,
         sctp_over_tcp: false,

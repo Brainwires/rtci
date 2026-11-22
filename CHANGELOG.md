@@ -1460,6 +1460,107 @@ Each bug below was confirmed by a failing test first (`rtc-rtcp/tests/audit_bugs
   carriage in both directions. The default codecs still do not offer `ulpfec` or `red`; register
   them and pass the negotiated payload types.
 - **fuzz**: targets `ulpfec_packet` and `ulpfec_receive` (crate `rtc`).
+- **jsep**: a description is checked in full before any of it is applied (RFC 9429 sections 5.9
+  and 5.10, W3C webrtc-pc "set a session description"). `set_remote_description` changed the
+  signaling state, stored the description and created transceivers, and only then looked at
+  the ICE credentials, the candidates and the fingerprints: a remote offer without
+  `a=fingerprint` returned an error and left the connection in `have-remote-offer`. The checks
+  now run first; a description that is refused changes nothing, and should a transport fail
+  while one is applied, the signaling state, the descriptions, the transceivers, the negotiated
+  codecs and the queued events are put back.
+- **jsep**: a remote answer is checked against the offer it answers (RFC 3264 section 6, RFC
+  9429 section 5.8.3, RFC 5888 section 9.1, RFC 9143 section 7.4, RFC 4585 section 4.2): the
+  number and order of the m= sections, each one's media type, proto and mid, a direction the
+  offered direction allows, and BUNDLE groups that bundle only what the offer bundled. An
+  answer with fewer or swapped sections was applied. It is now
+  `Error::ErrAnswerDoesNotMatchOffer`, and the offer stays pending. An `a=rtcp-fb` line the
+  offer did not have does not refuse the answer (real peers answer with their own list): it is
+  logged and never enabled, the negotiated feedback of a format being what both sides have.
+  The transceiver's codecs used to take the remote description's feedback as it came.
+- **jsep**: a rollback is taken through either `set_local_description` or
+  `set_remote_description` (RFC 9429 section 5.7: "the same effect"). A local offer could be
+  rolled back only through the first and a remote offer only through the second.
+- **jsep**: a rollback restores what the last completed exchange negotiated: the negotiated
+  codecs and header extensions, each transceiver's codecs, and the RTX / FEC flows of the
+  senders' encodings. An abandoned remote offer left its codecs negotiated (the next local offer
+  listed only those) and the senders without the repair flows it lacked.
+- **jsep**: a staged ICE restart is applied only by the description that carries it.
+  `set_local_description` applied it before it looked at the description, so a refused
+  description and a rollback restarted ICE.
+- **jsep**: `create_offer` is refused outside the `stable` and `have-local-offer` states
+  (`Error::ErrIncorrectSignalingState`; W3C createOffer, RFC 9429 section 5.2.2). It made an
+  offer in any state, gave transceivers mids and used up a requested ICE restart.
+- **jsep**: `OnSignalingStateChangeEvent` is emitted only when the state changes; an offer
+  applied over a pending one and a repeated provisional answer emitted it again.
+- **jsep**: an applied answer forgets the last created offer and answer (W3C "set a session
+  description"), so the offer of a finished exchange is not accepted for the next
+  (`Error::ErrSDPDoesNotMatchOffer`).
+
+- **jsep**: the `o=` session version goes up by one with each generated description that
+  differs from the one before (RFC 9429 sections 5.2.2 and 5.3.2, RFC 3264 section 8). It was
+  the clock's sub-second nanoseconds plus one on every call, so versions were unrelated and
+  could go down.
+- **jsep**: the answer's BUNDLE group is the offered BUNDLE group, in its tag order (RFC 9429
+  section 5.3.1, RFC 9143 sections 7.3 and 7.3.1). It was read from the first `a=group` line
+  of any semantics, so an offer listing `a=group:LS` first had sections rejected; and an offer
+  with no group at all had every section answered with port 0. It is now answered without a
+  group, accepted.
+- **jsep**: an answer repeats the `<proto>` of each offered m= line (RFC 9429 section 5.1.2),
+  rejected and data sections included; it said `UDP/TLS/RTP/SAVPF` / `UDP/DTLS/SCTP` whatever
+  was offered. An audio or video section whose profile is none of the eight RTP profiles of
+  that section is rejected.
+- **jsep**: a media section with no direction attribute is sendrecv, and a session-level
+  direction is the section's when it has none (RFC 8866 section 6.7, RFC 3264 section 6.1).
+  Such a section was skipped when the offer was applied, and `create_answer` then failed with
+  `ErrPeerConnTransceiverMidNil`.
+- **jsep**: the transceiver created for a remote m= section has direction `recvonly` whatever
+  was offered (W3C "set a session description"); for a section offered recvonly it was
+  `sendonly`, with no sender. Such a section is answered `inactive` until `add_track`.
+- **jsep**: a remote description that repeats a mid, or whose mid is not a token, is refused
+  (RFC 5888 section 4, RFC 9429 section 5.8.2); both sections used to share one transceiver.
+- **jsep**: `a=bundle-only` in a section outside every BUNDLE group, or in an answer, is
+  discarded (RFC 9143 section 6): a port-zero section is then rejected, as port zero says.
+- **jsep**: local descriptions list each candidate once, for the RTP component (RFC 8858
+  section 5.3, RFC 5761 section 5.1.3); every candidate was repeated as component 2.
+- **jsep**: the unregistered `mslabel` and `label` source attributes are no longer written
+  (RFC 5576 section 4.1); `a=ssrc` carries `cname` and `msid`.
+
+- **jsep**: `a=msid:<stream>` without appdata, the form RFC 9429 section 5.2.1 has senders
+  write, is read (RFC 8830 section 3): it was dropped, leaving the remote track without a
+  stream or, with no `a=ssrc` lines, no track at all. The recipient names the track and keeps
+  the name across descriptions. Every `a=msid` line of a section counts (a track in several
+  streams, RFC 8830 section 2); only the last did. The `a=msid` lines win over a legacy
+  `a=ssrc:<n> msid:` attribute.
+
+- **jsep**: `a=rtcp-mux` of a remote description is read (RFC 9429 sections 5.8.3 and 5.11, RFC
+  8858, RFC 5761 section 5.1.1). The engine has no RTCP component, and it multiplexed whatever
+  the peer said. A remote offer whose RTP section lacks the attribute is now refused under the
+  RTCP mux policy `require` (the default; `RTCRtcpMuxPolicy` had no effect) and has that
+  section answered rejected under `negotiate`; a remote answer without it is refused, the offer
+  staying pending. `a=rtcp-mux-only` without `a=rtcp-mux` is refused.
+- **jsep**: new m= sections of an offer say `a=rtcp-mux-only` under the `require` policy (RFC
+  9429 sections 4.1.1 and 5.2.1); the answerer-tagged section repeats it when the
+  offerer-tagged one had it (RFC 9143 section 9.3.1.2).
+- **jsep**: `a=rtcp-rsize` is answered only when offered, kept in a subsequent offer only when
+  the most recent answer had it, and reduced-size RTCP counts as negotiated only when both
+  descriptions carry it (RFC 5506 section 5, RFC 9429 sections 5.2.2, 5.3.1 and 5.11). It was
+  written in every description and never read.
+- **jsep**: `a=rtcp-fb:*` (the wildcard payload type, RFC 4585 section 4.2) is read and applies
+  to every format of the section; such lines were dropped. RFC 8888 feedback is written as
+  `a=rtcp-fb:* ack ccfb`, as its section 6 requires, not once per payload type, so a peer that
+  follows the RFC now negotiates it. A feedback value keeps everything after its type as its
+  parameter.
+
+### Features
+
+- **shared**: `Error::ErrAnswerDoesNotMatchOffer(String)`.
+- **transceiver**: `RTCRtpTransceiver::remote_bandwidth()` (`RTCRemoteBandwidth`: `b=TIAS` /
+  `b=AS`, `b=RS`, `b=RR` of the remote media section, RFC 9429 section 5.10),
+  `RTCRtpTransceiver::remote_rtcp_xr()` (the remote `a=rtcp-xr` formats, RFC 3611 section 5.1)
+  and `RTCRtpTransceiver::rtcp_reduced_size()`; `RTCRtcpParameters::reduced_size` of the
+  sender's and receiver's parameters is the negotiated value.
+- **receiver**: `RTCRtpReceiver::streams()`, the ids of the remote MediaStreams the track is
+  in (W3C `[[AssociatedRemoteMediaStreams]]`).
 
 ## [0.22.0+brainwires.5] - 2026-11-20
 

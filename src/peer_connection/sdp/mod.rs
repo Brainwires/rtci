@@ -158,7 +158,9 @@ mod rejected_mline_tests {
             is_extmap_allow_mixed: false,
             connection_role: ConnectionRole::Active,
             ice_gathering_state: RTCIceGatheringState::Complete,
-            match_bundle_group: None,
+            bundle: BundleMode::Offer,
+            offered_tag_rtcp_mux_only: false,
+            rtcp_mux_only: true,
             sctp_max_message_size: 0,
             sctp_port: 5000,
             sctp_over_tcp: false,
@@ -282,14 +284,17 @@ mod rejected_mline_tests {
     }
 }
 
+mod answer_check;
 pub(crate) mod sdp_type;
 pub(crate) mod session_description;
+
+pub(crate) use answer_check::{bundle_groups, check_answer_against_offer, effective_direction};
 
 pub use sdp_type::RTCSdpType;
 pub use session_description::RTCSessionDescription;
 
 use crate::media_stream::MediaStreamId;
-use crate::media_stream::track::MediaStreamTrackId;
+use crate::media_stream::track::{MediaStreamTrack, MediaStreamTrackId};
 use crate::peer_connection::RTCPeerConnection;
 use crate::peer_connection::configuration::media_engine::MediaEngine;
 use crate::peer_connection::state::ice_gathering_state::RTCIceGatheringState;
@@ -305,8 +310,11 @@ use crate::rtp_transceiver::rtp_sender::rtp_codec::{
 };
 use crate::rtp_transceiver::rtp_sender::rtp_codec_parameters::RTCRtpCodecParameters;
 use crate::rtp_transceiver::{
-    PayloadType, RtpStreamId, SSRC, internal::RTCRtpTransceiverInternal,
-    rtp_sender::rtcp_parameters::RTCPFeedback,
+    PayloadType, RtpStreamId, SSRC,
+    internal::RTCRtpTransceiverInternal,
+    rtp_sender::rtcp_parameters::{
+        RTCP_FB_ACK_CCFB, RTCPFeedback, TYPE_RTCP_FB_ACK, negotiates_ccfb,
+    },
 };
 use ice::candidate::{Candidate, unmarshal_candidate};
 use sdp::description::common::{Address, ConnectionInformation};
@@ -334,7 +342,16 @@ pub(crate) const MEDIA_SECTION_APPLICATION: &str = "application";
 pub(crate) struct TrackDetails {
     pub(crate) mid: String,
     pub(crate) kind: RtpCodecKind,
+    /// The first MediaStream the track is in (`-` when it is in none), the id its
+    /// `MediaStreamTrack` carries.
     pub(crate) stream_id: MediaStreamId,
+    /// Every MediaStream the track is in, one per `a=msid` line, without `-` (RFC 8830
+    /// section 2: "Multiple media descriptions with the same value for msid-id ... If
+    /// multiple media descriptions ... one track in several streams").
+    pub(crate) stream_ids: Vec<MediaStreamId>,
+    /// The msid-appdata, the sender's track id. Empty when the `a=msid` lines carry none
+    /// (the form RFC 9429 section 5.2.1 has senders write): the recipient names the track
+    /// itself (RFC 8830 section 3).
     pub(crate) track_id: MediaStreamTrackId,
     pub(crate) ssrc: Option<SSRC>,
     pub(crate) rtx_ssrc: Option<SSRC>,
@@ -372,8 +389,17 @@ pub(crate) fn track_details_from_sdp(s: &SessionDescription) -> Vec<TrackDetails
         let mut rtx_repair_flows = HashMap::new();
         let mut fec_repair_flows = HashMap::new();
 
-        let mut stream_id = "";
-        let mut track_id = "";
+        // The section's `a=msid` lines (RFC 8830 section 2), read before anything else: they
+        // name the track's streams whatever a legacy `a=ssrc:<n> msid:` attribute says.
+        let msid = media_msid(media);
+        let has_media_msid = msid.is_some();
+        let (stream_ids, msid_track_id) = msid.unwrap_or_default();
+        let mut stream_id = if has_media_msid {
+            stream_ids.first().map_or("-", String::as_str)
+        } else {
+            ""
+        };
+        let mut track_id = msid_track_id.as_str();
 
         // If media section is recvonly or inactive skip
         if media.attribute(ATTR_KEY_RECV_ONLY).is_some()
@@ -472,18 +498,8 @@ pub(crate) fn track_details_from_sdp(s: &SessionDescription) -> Vec<TrackDetails
                 // Handle `a=msid:<stream_id> <track_label>` The first value is the same as MediaStream.id
                 // in the browser and can be used to figure out which tracks belong to the same stream. The browser should
                 // figure this out automatically when an ontrack event is emitted on RTCPeerConnection.
-                ATTR_KEY_MSID => {
-                    if let Some(value) = &attr.value {
-                        let mut split = value.split(' ');
-
-                        if let (Some(sid), Some(tid), None) =
-                            (split.next(), split.next(), split.next())
-                        {
-                            stream_id = sid;
-                            track_id = tid;
-                        }
-                    }
-                }
+                // `a=msid` lines were read by `media_msid` above.
+                ATTR_KEY_MSID => {}
 
                 ATTR_KEY_SSRC => {
                     if let Some(value) = &attr.value {
@@ -503,7 +519,9 @@ pub(crate) fn track_details_from_sdp(s: &SessionDescription) -> Vec<TrackDetails
                             continue; // This ssrc is a FEC repair flow, ignore
                         }
 
-                        if split.len() == 3 && split[1].starts_with("msid:") {
+                        // The source-level msid of a description without `a=msid` lines
+                        // (the form that predates them).
+                        if !has_media_msid && split.len() == 3 && split[1].starts_with("msid:") {
                             stream_id = &split[1]["msid:".len()..];
                             track_id = split[2];
                         }
@@ -555,18 +573,38 @@ pub(crate) fn track_details_from_sdp(s: &SessionDescription) -> Vec<TrackDetails
 
         let mut tracks_in_media_section: Vec<TrackDetails> =
             track_slots.into_iter().flatten().collect();
+        // Every track of the section is in the streams its `a=msid` lines name; without such
+        // lines, in the one its source-level msid names.
+        let stream_ids_of = |stream_id: &str| -> Vec<MediaStreamId> {
+            if has_media_msid {
+                stream_ids.clone()
+            } else if stream_id.is_empty() || stream_id == "-" {
+                vec![]
+            } else {
+                vec![stream_id.to_owned()]
+            }
+        };
+        for track in &mut tracks_in_media_section {
+            if has_media_msid {
+                // One track, whichever `a=ssrc` line it was read from.
+                stream_id.clone_into(&mut track.stream_id);
+                track_id.clone_into(&mut track.track_id);
+            }
+            track.stream_ids = stream_ids_of(&track.stream_id);
+        }
 
         // If media line is using RTP Stream Identifier Source Description per RFC8851
         // we will need to override tracks, and remove ssrcs.
         // This is in particular important for Firefox, as it uses both 'rid', 'simulcast'
         // and 'a=ssrc' lines.
-        if !track_id.is_empty() && !stream_id.is_empty() {
+        if has_media_msid || (!track_id.is_empty() && !stream_id.is_empty()) {
             let rids = get_rids(media);
             if !rids.is_empty() {
                 let simulcast_track = TrackDetails {
                     mid: mid_value.to_string(),
                     kind: codec_type,
                     stream_id: stream_id.to_owned(),
+                    stream_ids: stream_ids_of(stream_id),
                     track_id: track_id.to_owned(),
                     rids: rids.iter().map(|r| r.id.clone()).collect(),
                     ..Default::default()
@@ -579,6 +617,7 @@ pub(crate) fn track_details_from_sdp(s: &SessionDescription) -> Vec<TrackDetails
                     mid: mid_value.to_string(),
                     kind: codec_type,
                     stream_id: stream_id.to_owned(),
+                    stream_ids: stream_ids_of(stream_id),
                     track_id: track_id.to_owned(),
                     ..Default::default()
                 };
@@ -591,6 +630,42 @@ pub(crate) fn track_details_from_sdp(s: &SessionDescription) -> Vec<TrackDetails
     }
 
     incoming_tracks
+}
+
+/// The `a=msid` lines of a media section (RFC 8830 section 2, `msid-id [SP msid-appdata]`):
+/// the MediaStream ids they name, in order and once each, without the `-` that stands for
+/// "no MediaStream" (RFC 8830 section 3), and the msid-appdata of the first line that has
+/// one. `None` when the section has no well-formed `a=msid` line; a line that is not
+/// `msid-id [SP msid-appdata]` is ignored (section 3: "SHOULD be ignored").
+///
+/// RFC 9429 section 5.8.2 reads the lines "ignoring appdata"; the appdata is still returned,
+/// because a sender that writes it means its track id (RFC 8830 section 3).
+pub(crate) fn media_msid(media: &MediaDescription) -> Option<(Vec<MediaStreamId>, String)> {
+    let mut found = false;
+    let mut stream_ids: Vec<MediaStreamId> = vec![];
+    let mut track_id = String::new();
+    for value in media
+        .attributes
+        .iter()
+        .filter(|a| a.key == ATTR_KEY_MSID)
+        .filter_map(|a| a.value.as_deref())
+    {
+        let mut tokens = value.split(' ');
+        let (Some(id), appdata, None) = (tokens.next(), tokens.next(), tokens.next()) else {
+            continue;
+        };
+        if !is_sdp_token(id) || appdata.is_some_and(|appdata| !is_sdp_token(appdata)) {
+            continue;
+        }
+        found = true;
+        if id != "-" && !stream_ids.iter().any(|known| known == id) {
+            stream_ids.push(id.to_owned());
+        }
+        if let (true, Some(appdata)) = (track_id.is_empty(), appdata) {
+            appdata.clone_into(&mut track_id);
+        }
+    }
+    found.then_some((stream_ids, track_id))
 }
 
 pub(crate) fn get_rids(media: &MediaDescription) -> Vec<SimulcastRid> {
@@ -793,13 +868,13 @@ pub(crate) fn add_candidates_to_media_descriptions(
         m.with_value_attribute("candidate".to_owned(), marshaled)
     };
 
+    // RTP candidates only (component 1). RTP and RTCP are multiplexed on one port, so there
+    // is no RTCP component to describe: RFC 8858 section 5.3 (updating RFC 8839), "the offerer
+    // MUST NOT include RTCP candidates" when it cannot use a separate RTCP port, and RFC 5761
+    // section 5.1.3 for the answer.
     for c in candidates {
         let mut candidate = c.to_ice()?;
-
         candidate.set_component(1);
-        m = append_candidate_if_new(&candidate, m);
-
-        candidate.set_component(2);
         m = append_candidate_if_new(&candidate, m);
     }
 
@@ -910,6 +985,8 @@ pub(crate) struct AddTransceiverSdpParams {
     write_ssrc_attributes_for_simulcast: bool,
     /// An offer (initial or subsequent) rather than an answer.
     is_offer: bool,
+    /// The RTCP mux policy is "require".
+    rtcp_mux_only: bool,
 }
 
 impl RTCPeerConnection {
@@ -951,8 +1028,20 @@ impl RTCPeerConnection {
                     ice_params.username_fragment.clone(),
                     ice_params.password.clone(),
                 )
-                .with_property_attribute(ATTR_KEY_RTCPMUX.to_owned())
-                .with_property_attribute(ATTR_KEY_RTCPRSIZE.to_owned());
+                .with_property_attribute(ATTR_KEY_RTCPMUX.to_owned());
+        // Under the mux policy "require" a new m= section of an offer says this endpoint only
+        // multiplexes (RFC 9429 sections 4.1.1 and 5.2.1, RFC 8858 section 4.2); a section
+        // negotiated before does not get the line (RFC 9429 section 5.2.2). An answer does
+        // not carry it (RFC 8858 section 4.3), but for the answerer-tagged section of a
+        // BUNDLE group whose offer had it (RFC 9143 section 9.3.1.2), which `populate_sdp`
+        // adds.
+        if is_offer && params.rtcp_mux_only && !media_section.renegotiated {
+            media = media.with_property_attribute(ATTR_KEY_RTCP_MUX_ONLY.to_owned());
+        }
+        // Reduced-size RTCP (RFC 5506 section 5).
+        if media_section.offered_rtcp_rsize.unwrap_or(true) {
+            media = media.with_property_attribute(ATTR_KEY_RTCPRSIZE.to_owned());
+        }
 
         let codecs = transceiver.get_codecs(media_engine);
         // Which repair flows the section has a format for: a sender's RTX / FlexFEC SSRCs are
@@ -965,6 +1054,7 @@ impl RTCPeerConnection {
                 .iter()
                 .any(|c| is_fec_mime_type(&c.rtp_codec.mime_type)),
         };
+        let mut ccfb = false;
         for codec in &codecs {
             let name = codec
                 .rtp_codec
@@ -982,6 +1072,12 @@ impl RTCPeerConnection {
             );
 
             for feedback in &codec.rtp_codec.rtcp_feedback {
+                // RFC 8888 section 6: "The payload type used with 'ccfb' feedback MUST be the
+                // wildcard type ('*')": written once, below.
+                if negotiates_ccfb([(feedback.typ.as_str(), feedback.parameter.as_str())]) {
+                    ccfb = true;
+                    continue;
+                }
                 media = media.with_value_attribute(
                     "rtcp-fb".to_owned(),
                     if feedback.parameter.is_empty() {
@@ -994,6 +1090,12 @@ impl RTCPeerConnection {
                     },
                 );
             }
+        }
+        if ccfb {
+            media = media.with_value_attribute(
+                ATTR_KEY_RTCP_FB.to_owned(),
+                format!("* {TYPE_RTCP_FB_ACK} {RTCP_FB_ACK_CCFB}"),
+            );
         }
         if codecs.is_empty() {
             // If we are sender and have no codecs throw an error early
@@ -1250,29 +1352,12 @@ impl RTCPeerConnection {
                             );
                         }
 
-                        media = media.with_media_source(
-                            ssrc,
-                            track.stream_id().clone(),    /* cname */
-                            track.stream_id().to_owned(), /* stream_id */
-                            track.track_id().to_owned(),
-                        );
-
+                        media = with_source_attributes(media, ssrc, track);
                         if let Some(rtx) = rtx_flow {
-                            media = media.with_media_source(
-                                rtx.ssrc,
-                                track.stream_id().clone(),    /* cname */
-                                track.stream_id().to_owned(), /* stream_id */
-                                track.track_id().to_owned(),
-                            );
+                            media = with_source_attributes(media, rtx.ssrc, track);
                         }
-
                         if let Some(fec) = fec_flow {
-                            media = media.with_media_source(
-                                fec.ssrc,
-                                track.stream_id().clone(),    /* cname */
-                                track.stream_id().to_owned(), /* stream_id */
-                                track.track_id().to_owned(),
-                            );
+                            media = with_source_attributes(media, fec.ssrc, track);
                         }
                     }
                 }
@@ -1296,6 +1381,26 @@ impl RTCPeerConnection {
 
         (media, send_rids)
     }
+}
+
+/// The source attributes of one of a sender's SSRCs (RFC 5576 section 4.1): `cname` (section
+/// 6.1) and `msid` (RFC 8830 appendix A, registered as a source attribute). The Plan B
+/// `mslabel` and `label` attributes are not written: RFC 5576 section 4.1 has source
+/// attributes registered with IANA, and neither is.
+fn with_source_attributes(
+    media: MediaDescription,
+    ssrc: SSRC,
+    track: &MediaStreamTrack,
+) -> MediaDescription {
+    media
+        .with_value_attribute(
+            ATTR_KEY_SSRC.to_owned(),
+            format!("{ssrc} cname:{}", track.stream_id()),
+        )
+        .with_value_attribute(
+            ATTR_KEY_SSRC.to_owned(),
+            format!("{ssrc} msid:{} {}", track.stream_id(), track.track_id()),
+        )
 }
 
 /// Whether an m-section has a format for a sender's RTX (RFC 4588) and FlexFEC
@@ -1356,10 +1461,31 @@ impl TryFrom<&String> for SimulcastRid {
     }
 }
 
-fn bundle_match(bundle: Option<&String>, id: &str) -> bool {
-    match bundle {
-        None => true,
-        Some(b) => b.split_whitespace().any(|s| s == id),
+/// What a generated description does about BUNDLE (RFC 9143).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum BundleMode {
+    /// An offer: every media section that is not rejected is in the one BUNDLE group.
+    Offer,
+    /// An answer to an offer with this BUNDLE group (its identification-tags, in the offer's
+    /// order), or with none. With a group, the answer's group holds the accepted sections of
+    /// it, in its order (RFC 9143 section 7.3.1: the answerer-tagged section is the first the
+    /// offer suggested that is accepted), and a section outside it, which would need a
+    /// transport of its own, is rejected. With none, no group is written and no section is
+    /// rejected for it (RFC 9143 section 7.3: "The answerer MUST NOT include a BUNDLE group in
+    /// the answer unless the offer contained one"; RFC 9429 section 5.3.1).
+    Answer(Option<Vec<String>>),
+}
+
+impl BundleMode {
+    /// The mode of the answer to `offer`: its first non-empty `a=group:BUNDLE` (an
+    /// `a=group` line of other semantics, such as LS, is not one).
+    pub(crate) fn answering(offer: &SessionDescription) -> Self {
+        BundleMode::Answer(
+            bundle_groups(offer)
+                .into_iter()
+                .find(|group| !group.is_empty())
+                .map(|group| group.into_iter().map(str::to_owned).collect()),
+        )
     }
 }
 
@@ -1386,6 +1512,59 @@ pub(crate) struct MediaSection {
     pub(crate) answer_direction: Option<RTCRtpTransceiverDirection>,
     pub(crate) match_extensions: HashMap<String, u16>,
     pub(crate) rid_map: Vec<SimulcastRid>,
+    /// In an answer, the `<proto>` of the offered m= line, which the answer repeats (RFC 9429
+    /// section 5.1.2: "The profile in any 'm=' line in any generated answer MUST exactly match
+    /// the profile provided in the offer"). `None` in an offer, which states this endpoint's
+    /// own profile.
+    pub(crate) offered_protos: Option<Vec<String>>,
+    /// Whether the section says `a=rtcp-rsize`, when that is not this endpoint's choice: in
+    /// an answer, whether the offered section had it (RFC 9429 section 5.3.1: "If present in
+    /// the offer"); in a subsequent offer, for a section the last exchange negotiated,
+    /// whether the most recent answer had it (section 5.2.2: "MUST NOT be added unless
+    /// present in the most recent answer"). `None` for a new section of an offer, which
+    /// says it.
+    pub(crate) offered_rtcp_rsize: Option<bool>,
+    /// An offer's section that the last completed exchange already negotiated: it gets no
+    /// `a=rtcp-mux-only` (RFC 9429 section 5.2.2: "The 'a=rtcp-mux-only' line MUST NOT be
+    /// added").
+    pub(crate) renegotiated: bool,
+}
+
+/// `a=rtcp-mux-only` (RFC 8858 section 3).
+pub(crate) const ATTR_KEY_RTCP_MUX_ONLY: &str = "rtcp-mux-only";
+
+/// Whether an audio or video m= section signals RTP/RTCP multiplexing (RFC 5761 section 5.1.1).
+pub(crate) fn has_rtcp_mux(media: &MediaDescription) -> bool {
+    media.has_attribute(ATTR_KEY_RTCPMUX)
+}
+
+/// Whether `media` is an RTP (audio or video) section that is not rejected.
+pub(crate) fn is_live_rtp_section(media: &MediaDescription) -> bool {
+    !is_rejected_media(media)
+        && matches!(
+            RtpCodecKind::from(media.media_name.media.as_str()),
+            RtpCodecKind::Audio | RtpCodecKind::Video
+        )
+}
+
+/// The profiles of a media (RTP) m= line RFC 9429 section 5.1.2 has accepted in an offer:
+/// whatever the string, the section is DTLS-SRTP with feedback when it carries
+/// `a=fingerprint`.
+const RTP_PROFILES: [&str; 8] = [
+    "RTP/AVP",
+    "RTP/AVPF",
+    "RTP/SAVP",
+    "RTP/SAVPF",
+    "TCP/DTLS/RTP/SAVP",
+    "TCP/DTLS/RTP/SAVPF",
+    "UDP/TLS/RTP/SAVP",
+    "UDP/TLS/RTP/SAVPF",
+];
+
+/// Whether an audio or video m= line's `<proto>` is one of the RTP profiles RFC 9429 section
+/// 5.1.2 lists. Another one (`udptl`, say) is not RTP this endpoint can answer.
+pub(crate) fn is_rtp_profile(media: &MediaDescription) -> bool {
+    RTP_PROFILES.contains(&media.media_name.protos.join("/").as_str())
 }
 
 pub(crate) struct PopulateSdpParams {
@@ -1394,7 +1573,14 @@ pub(crate) struct PopulateSdpParams {
     pub(crate) is_extmap_allow_mixed: bool,
     pub(crate) connection_role: ConnectionRole,
     pub(crate) ice_gathering_state: RTCIceGatheringState,
-    pub(crate) match_bundle_group: Option<String>,
+    pub(crate) bundle: BundleMode,
+    /// Answering: the mid of the offer's offerer-tagged section when it carried
+    /// `a=rtcp-mux-only`. The answer then says so in its answerer-tagged section (RFC 9143
+    /// section 9.3.1.2).
+    pub(crate) offered_tag_rtcp_mux_only: bool,
+    /// The RTCP mux policy is "require" (the default): new m= sections of an offer say
+    /// `a=rtcp-mux-only`.
+    pub(crate) rtcp_mux_only: bool,
     pub(crate) sctp_max_message_size: usize,
     /// The data section's `a=sctp-port`.
     pub(crate) sctp_port: u16,
@@ -1476,13 +1662,8 @@ impl RTCPeerConnection {
             vec![]
         };
 
-        let mut bundle_value = "BUNDLE".to_owned();
-        let mut bundle_count = 0;
-        let append_bundle = |mid_value: &str, value: &mut String, count: &mut i32| {
-            value.push(' ');
-            value.push_str(mid_value);
-            *count += 1;
-        };
+        // The mids of the BUNDLE group, in media section order.
+        let mut bundled: Vec<String> = vec![];
 
         let mut candidates_added = false;
         for m in media_sections.iter() {
@@ -1535,6 +1716,11 @@ impl RTCPeerConnection {
                     }
                     .with_value_attribute(ATTR_KEY_MID.to_owned(), m.mid.clone()),
                 );
+                if let (Some(protos), Some(desc)) =
+                    (&m.offered_protos, d.media_descriptions.last_mut())
+                {
+                    desc.media_name.protos.clone_from(protos);
+                }
                 if m.stopped
                     && let Some(desc) = d.media_descriptions.last_mut()
                 {
@@ -1573,8 +1759,8 @@ impl RTCPeerConnection {
                     ice_gathering_state: params.ice_gathering_state,
                     ignore_rid_pause_for_recv: params.ignore_rid_pause_for_recv,
                     write_ssrc_attributes_for_simulcast: params.write_ssrc_attributes_for_simulcast,
-                    // An answer matches the remote offer's bundle group; an offer has none.
-                    is_offer: params.match_bundle_group.is_none(),
+                    is_offer: params.bundle == BundleMode::Offer,
+                    rtcp_mux_only: params.rtcp_mux_only,
                 };
                 let (d1, should_add_id) = RTCPeerConnection::add_transceiver_sdp(
                     d,
@@ -1592,14 +1778,27 @@ impl RTCPeerConnection {
 
             candidates_added = true;
 
+            if let (Some(protos), Some(desc)) = (&m.offered_protos, d.media_descriptions.last_mut())
+            {
+                desc.media_name.protos.clone_from(protos);
+            }
+
             if should_add_id {
-                if bundle_match(params.match_bundle_group.as_ref(), &m.mid) {
-                    append_bundle(&m.mid, &mut bundle_value, &mut bundle_count);
-                } else if let Some(desc) = d.media_descriptions.last_mut() {
-                    desc.media_name.port = RangedPort {
-                        value: 0,
-                        range: None,
+                match &params.bundle {
+                    BundleMode::Offer => bundled.push(m.mid.clone()),
+                    BundleMode::Answer(Some(group)) if group.contains(&m.mid) => {
+                        bundled.push(m.mid.clone())
                     }
+                    BundleMode::Answer(Some(_)) => {
+                        // Outside the offered group: it would need a transport of its own.
+                        if let Some(desc) = d.media_descriptions.last_mut() {
+                            desc.media_name.port = RangedPort {
+                                value: 0,
+                                range: None,
+                            }
+                        }
+                    }
+                    BundleMode::Answer(None) => {}
                 }
             }
         }
@@ -1628,8 +1827,33 @@ impl RTCPeerConnection {
             d = d.with_property_attribute(ATTR_KEY_EXTMAP_ALLOW_MIXED.to_owned());
         }
 
-        if bundle_count > 0 {
-            d = d.with_value_attribute(ATTR_KEY_GROUP.to_owned(), bundle_value);
+        if let BundleMode::Answer(Some(group)) = &params.bundle {
+            // The offer's order: its first accepted tag is the answerer-tagged section.
+            bundled.sort_by_key(|mid| group.iter().position(|tag| tag == mid));
+        }
+        if params.offered_tag_rtcp_mux_only
+            && let Some(tag) = bundled.first()
+            && let Some(tagged) = d.media_descriptions.iter_mut().find(|media| {
+                get_mid_value(media) == Some(tag)
+                    && media.has_attribute(ATTR_KEY_RTCPMUX)
+                    && !media.has_attribute(ATTR_KEY_RTCP_MUX_ONLY)
+            })
+        {
+            let at = tagged
+                .attributes
+                .iter()
+                .position(|a| a.key == ATTR_KEY_RTCPMUX)
+                .map_or(tagged.attributes.len(), |i| i + 1);
+            tagged.attributes.insert(
+                at,
+                sdp::description::common::Attribute::new(ATTR_KEY_RTCP_MUX_ONLY.to_owned(), None),
+            );
+        }
+        if !bundled.is_empty() {
+            d = d.with_value_attribute(
+                ATTR_KEY_GROUP.to_owned(),
+                format!("BUNDLE {}", bundled.join(" ")),
+            );
         }
 
         Ok(d)
@@ -1854,6 +2078,41 @@ pub(crate) struct RemoteIceDetails {
 /// m-section that is only reachable through its BUNDLE group also has port zero).
 pub(crate) fn is_rejected_media(m: &MediaDescription) -> bool {
     m.media_name.port.value == 0 && !m.has_attribute(ATTR_KEY_BUNDLE_ONLY)
+}
+
+/// Whether `s` is a `token` of RFC 8866 section 9: one or more of the characters
+/// `!#$%&'*+-.0-9A-Z^_`a-z{|}~`.
+pub(crate) fn is_sdp_token(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes().all(|b| {
+            matches!(b,
+                0x21 | 0x23..=0x27 | 0x2A..=0x2B | 0x2D..=0x2E | 0x30..=0x39 | 0x41..=0x5A
+                | 0x5E..=0x7E)
+        })
+}
+
+/// Drops the `a=bundle-only` attributes of a received description that do not mean
+/// "this section has port zero because it is only reachable through its BUNDLE group":
+///
+/// - RFC 9143 section 6: "If an offerer or answerer receives a 'bundle-only' attribute in a
+///   non-bundled 'm=' section, the offerer or answerer MUST discard the attribute." Without
+///   it a port-zero section is what port zero says: rejected (RFC 3264 section 6).
+/// - RFC 9143 sections 7.3.2 and 7.3.3 and RFC 9429 section 5.3.1: no m= section of an
+///   answer has the attribute, so one in an answer is discarded too.
+///
+/// Only the parsed description changes: the SDP text stays as given.
+pub(crate) fn discard_stray_bundle_only(desc: &mut SessionDescription, answers: bool) {
+    let bundled: HashSet<String> = bundle_groups(desc)
+        .into_iter()
+        .flatten()
+        .map(str::to_owned)
+        .collect();
+    for media in &mut desc.media_descriptions {
+        let in_group = get_mid_value(media).is_some_and(|mid| bundled.contains(mid.as_str()));
+        if answers || !in_group {
+            media.attributes.retain(|a| a.key != ATTR_KEY_BUNDLE_ONLY);
+        }
+    }
 }
 
 /// The mids of the description's first `a=group:BUNDLE` (RFC 8843 §7.1), in order.
@@ -2232,10 +2491,35 @@ pub(crate) fn have_data_channel(
     get_application_media(desc.parsed.as_ref()?)
 }
 
+const ATTR_KEY_RTCP_FB: &str = "rtcp-fb";
+
+/// One feedback value of an `a=rtcp-fb` line, the payload type removed: the type (`nack`,
+/// `ccm`, `ack`, `goog-remb`, ...) and everything after it as the parameter (`pli`, `fir`,
+/// `ccfb`, `100` of `trr-int 100`). `None` for an empty value.
+fn parse_rtcp_feedback(value: &str) -> Option<RTCPFeedback> {
+    let mut tokens = value.split_whitespace();
+    let typ = tokens.next()?.to_owned();
+    Some(RTCPFeedback {
+        typ,
+        parameter: tokens.collect::<Vec<_>>().join(" "),
+    })
+}
+
 pub(crate) fn codecs_from_media_description(
     m: &MediaDescription,
 ) -> Result<Vec<RTCRtpCodecParameters>> {
     let codecs = m.codecs();
+    // Feedback for the wildcard payload type applies to every format of the section (RFC 4585
+    // section 4.2: "'*' ... indicates that the RTCP feedback attribute applies to all payload
+    // types"); RFC 8888 section 6 has `ack ccfb` signalled only that way.
+    let wildcard_feedback: Vec<RTCPFeedback> = m
+        .attributes
+        .iter()
+        .filter(|a| a.key == ATTR_KEY_RTCP_FB)
+        .filter_map(|a| a.value.as_deref())
+        .filter_map(|value| value.strip_prefix("* "))
+        .filter_map(parse_rtcp_feedback)
+        .collect();
 
     let mut out = vec![];
     // A payload type listed more than once on the m= line describes one codec: keep its first
@@ -2275,23 +2559,15 @@ pub(crate) fn codecs_from_media_description(
 
         let channels = codec.encoding_parameters.parse::<u16>().unwrap_or(0);
 
-        let mut feedback = vec![];
-        for raw in &codec.rtcp_feedback {
-            let split: Vec<&str> = raw.split(' ').collect();
-
-            let entry = if split.len() == 2 {
-                RTCPFeedback {
-                    typ: split[0].to_string(),
-                    parameter: split[1].to_string(),
-                }
-            } else {
-                RTCPFeedback {
-                    typ: split[0].to_string(),
-                    parameter: String::new(),
-                }
-            };
-
-            feedback.push(entry);
+        let mut feedback: Vec<RTCPFeedback> = codec
+            .rtcp_feedback
+            .iter()
+            .filter_map(|raw| parse_rtcp_feedback(raw))
+            .collect();
+        for entry in &wildcard_feedback {
+            if !feedback.contains(entry) {
+                feedback.push(entry.clone());
+            }
         }
 
         out.push(RTCRtpCodecParameters {
@@ -2575,30 +2851,32 @@ fn reoffered_header_extensions_adds_listed_extensions_back() {
     assert_eq!(added, vec![(2u16, "urn:3gpp:video-orientation".to_owned())]);
 }
 
-/// update_sdp_origin saves sdp.Origin in PeerConnection when creating 1st local SDP;
-/// for subsequent calling, it updates Origin for SessionDescription from saved one
-/// and increments session version by one.
-/// <https://datatracker.ietf.org/doc/html/rfc9429#section-5.2.2>
-pub(crate) fn update_sdp_origin(origin: &mut Origin, d: &mut SessionDescription) {
-    if origin.session_version == 0 {
-        // store
-        origin.session_version = d.origin.session_version;
-        //atomic.StoreUint64(&origin.SessionID, d.Origin.SessionID)
-        origin.session_id = d.origin.session_id;
+/// Gives a generated description the session's `o=` line (RFC 9429 sections 5.2.2 and 5.3.2:
+/// "The 'o=' line MUST stay the same except for the <session-version> field, which MUST
+/// increment by one on each call ... if the offer might differ from the output of the
+/// previous call"; RFC 3264 section 8: "the version in the origin field MUST increment by one
+/// from the previous SDP").
+///
+/// The first description generated sets the session's origin (`origin`). Each later one gets
+/// that origin, with the version one higher than the previous description's when it differs
+/// from it (`last_generated`, the text of the previous one) and the same version when it is
+/// the same text. Offers and answers are one sequence: they describe one session.
+pub(crate) fn update_sdp_origin(
+    origin: &mut Origin,
+    last_generated: &mut String,
+    d: &mut SessionDescription,
+) {
+    if last_generated.is_empty() {
+        *origin = d.origin.clone();
     } else {
-        // load
-        /*for { // awaiting for saving session id
-            d.Origin.SessionID = atomic.LoadUint64(&origin.SessionID)
-            if d.Origin.SessionID != 0 {
-                break
-            }
-        }*/
-        d.origin.session_id = origin.session_id;
-
-        //d.Origin.SessionVersion = atomic.AddUint64(&origin.SessionVersion, 1)
-        origin.session_version += 1;
-        d.origin.session_version += 1;
+        d.origin = origin.clone();
+        if d.marshal() == *last_generated {
+            return;
+        }
+        origin.session_version = origin.session_version.wrapping_add(1);
+        d.origin.session_version = origin.session_version;
     }
+    *last_generated = d.marshal();
 }
 
 pub(crate) fn is_ext_map_allow_mixed_set(

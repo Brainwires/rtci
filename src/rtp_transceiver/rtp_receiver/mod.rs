@@ -223,6 +223,17 @@ impl RTCRtpReceiver<'_> {
             peer_connection: self.peer_connection,
         })
     }
+    /// The ids of the remote MediaStreams this receiver's track is in: one per `a=msid` line
+    /// of the remote media section, in order, without the `-` that stands for no stream
+    /// (RFC 8830 sections 2 and 3; W3C `[[AssociatedRemoteMediaStreams]]`, the `streams` of
+    /// the track event). Empty until an answer is applied, and for a track in no stream.
+    pub fn streams(&self) -> &[crate::media_stream::MediaStreamId] {
+        self.peer_connection.rtp_transceivers[self.id.0]
+            .receiver()
+            .as_ref()
+            .map_or(&[], |receiver| receiver.streams())
+    }
+
     /// Returns the track associated with this receiver.
     ///
     /// The [`track`](RTCRtpReceiver::track) method returns the [`MediaStreamTrack`] that is

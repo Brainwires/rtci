@@ -7,12 +7,11 @@
 //!    back that offer, then call createOffer and have an "m=" section for the added track appear
 //!    in the generated offer."
 //!
-//! There are two variants, one per rollback entry point. Note these are NOT interchangeable at
-//! the same signaling state: the state machine only permits `SetLocal(rollback)` from
-//! `have-local-offer` and `SetRemote(rollback)` from `have-remote-offer`. So the polite peer in
-//! the classic glare position (it sent an offer and a remote offer collides) rolls back its own
-//! offer via `set_local_description`, whereas rolling back an already-applied remote offer uses
-//! `set_remote_description`.
+//! There are two variants, one per rollback entry point. Either method rolls back the pending
+//! offer, local or remote (RFC 9429 section 5.7; `tests/jsep_rollback.rs` crosses them): here
+//! the polite peer in the classic glare position (it sent an offer and a remote offer collides)
+//! rolls back its own offer via `set_local_description`, and an already-applied remote offer is
+//! rolled back via `set_remote_description`.
 
 use rtc::media_stream::MediaStreamTrack;
 use rtc::peer_connection::RTCPeerConnection;

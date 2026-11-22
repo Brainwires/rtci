@@ -223,7 +223,43 @@ pub struct RTCRtpTransceiver<'a> {
     pub(crate) peer_connection: &'a mut RTCPeerConnection,
 }
 
+/// What the `b=` lines of a remote media section say (RFC 9429 section 5.10), in bits per
+/// second. `None`: the section has no such line.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct RTCRemoteBandwidth {
+    /// The most the remote side accepts from this endpoint in the section: `b=TIAS` (RFC
+    /// 3890, the bit rate without transport overhead), else `b=AS` (RFC 8866 section 5.8,
+    /// kilobits per second, here times 1000). The input a congestion controller or an
+    /// encoder caps its target with.
+    pub max_bitrate: Option<u64>,
+    /// `b=RS` (RFC 3556): the RTCP bandwidth allocated to active data senders.
+    pub rtcp_senders_bitrate: Option<u64>,
+    /// `b=RR` (RFC 3556): the RTCP bandwidth allocated to receivers; 0 turns their RTCP off.
+    pub rtcp_receivers_bitrate: Option<u64>,
+}
+
 impl RTCRtpTransceiver<'_> {
+    /// The bandwidth limits the remote description states for this transceiver's media
+    /// section (`b=TIAS` / `b=AS`, `b=RS`, `b=RR`); all `None` before a remote description
+    /// with such lines is applied.
+    pub fn remote_bandwidth(&self) -> RTCRemoteBandwidth {
+        self.peer_connection.rtp_transceivers[self.id].remote_bandwidth()
+    }
+
+    /// The `xr-format`s the remote description lists in `a=rtcp-xr` for this transceiver's
+    /// media section (RFC 3611 section 5.1; the media-level attribute, else the session's),
+    /// such as `rcvr-rtt=all`. `None`: no such attribute. `Some` of an empty list: the remote
+    /// side wants no XR blocks (RFC 3611 section 5.2).
+    pub fn remote_rtcp_xr(&self) -> Option<&[String]> {
+        self.peer_connection.rtp_transceivers[self.id].remote_rtcp_xr()
+    }
+
+    /// Whether the last answer negotiated reduced-size RTCP for this transceiver's media
+    /// section (`a=rtcp-rsize` in the offer and in the answer, RFC 5506 section 5).
+    pub fn rtcp_reduced_size(&self) -> bool {
+        self.peer_connection.rtp_transceivers[self.id].rtcp_reduced_size()
+    }
+
     /// Returns the media stream identification tag (mid) for this transceiver.
     ///
     /// The mid uniquely identifies the media description in the SDP. When not already set,

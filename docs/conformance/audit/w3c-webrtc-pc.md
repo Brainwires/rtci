@@ -8,13 +8,13 @@ How rows were judged. The engine is sans-I/O Rust under a JS API layer: promises
 
 Totals (rows 957):
 
-- MUST: tested 364 / untested 165 / partial 151 / missing 158 / violated 29 / n-a 62
+- MUST: tested 384 / untested 157 / partial 152 / missing 148 / violated 26 / n-a 62
 - SHOULD: tested 2 / untested 0 / partial 2 / missing 1 / violated 0 / n-a 5
 - MAY: tested 2 / untested 2 / partial 1 / missing 1 / violated 0 / n-a 12
 
 By pass:
 
-- sections 1 to 4: rows 399; MUST: tested 133 / untested 75 / partial 71 / missing 59 / violated 9 / n-a 35
+- sections 1 to 4: rows 399; MUST: tested 153 / untested 67 / partial 72 / missing 49 / violated 6 / n-a 35
 - section 5: rows 258; MUST: tested 81 / untested 50 / partial 46 / missing 43 / violated 16 / n-a 14
 - sections 6 to 12: rows 300; MUST: tested 150 / untested 40 / partial 34 / missing 56 / violated 4 / n-a 13
 
@@ -110,7 +110,7 @@ By pass:
 | WEBRTC-4.4.1.3-2 | 4.4.1.3 | MUST | No update once the connection is closed | tested | src/peer_connection/internal.rs:1332 | close_is_idempotent | |
 | WEBRTC-4.4.1.3-3 | 4.4.1.3 | MUST | No event when the derived state equals the current one | untested | src/peer_connection/internal.rs:1366 | | |
 | WEBRTC-4.4.1.3-4 | 4.4.1.3 | MUST | Otherwise set [[ConnectionState]] and fire connectionstatechange | tested | src/peer_connection/internal.rs:1371 | a_fingerprint_mismatch_fails_the_dtls_transport_and_the_connection | |
-| WEBRTC-4.4.1.4-1 | 4.4.1.4 | MUST | rollback in stable, have-local-pranswer or have-remote-pranswer rejects with InvalidStateError | untested | src/peer_connection/state/signaling_state.rs:315 | | implemented for all three states; no test applies a rollback there |
+| WEBRTC-4.4.1.4-1 | 4.4.1.4 | MUST | rollback in stable, have-local-pranswer or have-remote-pranswer rejects with InvalidStateError | tested | src/peer_connection/state/signaling_state.rs:315 | `pc/set_description_atomic_test.rs::a_rollback_is_refused_outside_the_offer_states` | `ErrSignalingStateCannotRollback` in stable, `ErrSignalingStateProposedTransitionInvalid` in the pranswer states, through either method |
 | WEBRTC-4.4.1.4-2 | 4.4.1.4 | MUST | Apply against a snapshot of the transceiver set, using [[JsepMid]] as the mid | n/a | | | no in-parallel section |
 | WEBRTC-4.4.1.4-3 | 4.4.1.4 | MUST | Local description: never gather from administratively prohibited sources | n/a | | | application gathers candidates |
 | WEBRTC-4.4.1.4-4 | 4.4.1.4 | MUST | Remote description: never check connectivity to administratively prohibited candidates | partial | src/peer_connection/internal.rs:118 | | loopback / link-local / `remote_address_filter` options exist; no bad-port list (see 4.4.2-64) |
@@ -118,29 +118,29 @@ By pass:
 | WEBRTC-4.4.1.4-6 | 4.4.1.4 | MUST | On failure, nothing is reported if the connection closed meanwhile | n/a | | | synchronous API |
 | WEBRTC-4.4.1.4-7 | 4.4.1.4 | MUST | A type invalid for the signaling state rejects with InvalidStateError | tested | src/peer_connection/state/signaling_state.rs:308 | test_signaling_state_transitions | |
 | WEBRTC-4.4.1.4-8 | 4.4.1.4 | MUST | An SDP parse failure rejects with RTCError sdp-syntax-error carrying sdpLineNumber | partial | src/peer_connection/mod.rs:1433 | | the parse error is returned; no line number is available to the API layer |
-| WEBRTC-4.4.1.4-9 | 4.4.1.4 | MUST | Remote description without rtcp-mux under policy "require" rejects with InvalidAccessError | missing | src/peer_connection/mod.rs:1417 | | a=rtcp-mux is never checked |
+| WEBRTC-4.4.1.4-9 | 4.4.1.4 | MUST | Remote description without rtcp-mux under policy "require" rejects with InvalidAccessError | tested | pc/mod.rs `check_remote_description` | `tests/jsep_rtcp_mux.rs::an_offer_without_rtcp_mux_is_refused_under_the_require_policy` | `SdpInvalidValue`; the default policy is require |
 | WEBRTC-4.4.1.4-10 | 4.4.1.4 | MUST | A description that renegotiates RIDs rejects with InvalidAccessError | missing | src/peer_connection/mod.rs:1417 | | no comparison with previously negotiated rids |
-| WEBRTC-4.4.1.4-11 | 4.4.1.4 | MUST | A description failing RFC 9429 5.8.3 semantic validation rejects with InvalidAccessError | partial | src/peer_connection/mod.rs:1709 | extract_ice_details_checks_the_credentials_syntax | ICE credentials, fingerprints and mids are checked, but after the signaling state and descriptions were already changed (bug B1) |
+| WEBRTC-4.4.1.4-11 | 4.4.1.4 | MUST | A description failing RFC 9429 5.8.3 semantic validation rejects with InvalidAccessError | partial | src/peer_connection/mod.rs:1709 | extract_ice_details_checks_the_credentials_syntax | ICE credentials, candidates, fingerprints, mids and the answer-against-offer checks run before anything changes (`check_remote_description`); the rtcp-mux, rid and tls-id checks of RFC 9429 5.8.3 do not exist yet |
 | WEBRTC-4.4.1.4-12 | 4.4.1.4 | MUST | Any other failure rejects with OperationError | n/a | | | error-class mapping is the binding's |
-| WEBRTC-4.4.1.4-13 | 4.4.1.4 | MUST | A failed application leaves the connection as it was | partial | src/peer_connection/mod.rs:1452 | a_description_the_media_engine_refuses_changes_nothing | true for media-engine and state errors; later failures (ICE details, unknown mid in an answer, transports) leave the new state in place; a staged ICE restart is applied before a local description is validated (bug B2) |
+| WEBRTC-4.4.1.4-13 | 4.4.1.4 | MUST | A failed application leaves the connection as it was | tested | pc/mod.rs `check_remote_description`, `check_local_answer`; pc/internal.rs `description_snapshot` | `pc/set_description_atomic_test.rs`, `pc/set_remote_description_test.rs` | every check precedes the first change; a staged ICE restart is applied after validation; transport failures restore the description state |
 | WEBRTC-4.4.1.4-14 | 4.4.1.4 | MUST | On success, nothing happens if the connection closed meanwhile | n/a | | | synchronous API |
 | WEBRTC-4.4.1.4-15 | 4.4.1.4 | MUST | Remote offer: restart the process if addTrack succeeded while it was being applied | n/a | | | no interleaving possible |
 | WEBRTC-4.4.1.4-16 | 4.4.1.4 | MUST | Restart the process while setParameters promises are unsettled | n/a | | | no interleaving possible |
-| WEBRTC-4.4.1.4-17 | 4.4.1.4 | MUST | Offer applied in stable: remember [[SctpTransport]] as the last stable one | missing | | | nothing saved for rollback |
+| WEBRTC-4.4.1.4-17 | 4.4.1.4 | MUST | Offer applied in stable: remember [[SctpTransport]] as the last stable one | tested |  | `tests/jsep_rollback.rs::a_rollback_leaves_the_sctp_transport_of_the_last_stable_state` | an offer never creates or changes the SCTP transport here (an answer does), so the last stable one is the one in place |
 | WEBRTC-4.4.1.4-18 | 4.4.1.4 | MUST | Offer in stable: remember each sender's and receiver's transport | untested | src/peer_connection/internal.rs:1005 | | transport presence follows the mid; disassociation on rollback undoes it, untested for the transport accessor |
 | WEBRTC-4.4.1.4-19 | 4.4.1.4 | MUST | Offer in stable: remember a lone rid-less encoding as [[LastStableRidlessSendEncodings]] | missing | | | |
-| WEBRTC-4.4.1.4-20 | 4.4.1.4 | MUST | Offer in stable: remember each receiver's associated remote streams | missing | | | |
-| WEBRTC-4.4.1.4-21 | 4.4.1.4 | MUST | Offer in stable: remember each receiver's [[ReceiveCodecs]] | missing | src/peer_connection/mod.rs:1457 | | a remote offer replaces the negotiated media engine and codec preferences; a rollback restores neither (bug B5) |
+| WEBRTC-4.4.1.4-20 | 4.4.1.4 | MUST | Offer in stable: remember each receiver's associated remote streams | partial |  | `tests/jsep_rollback.rs::a_rollback_leaves_the_remote_track_of_the_last_stable_state` | not remembered separately: remote tracks are set up when an answer is applied (see 4.4.1.4-61), so an offer changes none |
+| WEBRTC-4.4.1.4-21 | 4.4.1.4 | MUST | Offer in stable: remember each receiver's [[ReceiveCodecs]] | tested | pc/internal.rs `commit_description` (`LastStableState`) | `tests/jsep_rollback.rs::a_rollback_restores_the_codecs_and_repair_flows_a_remote_offer_took` | the negotiated media engine and every transceiver are copied when an offer is applied in stable |
 | WEBRTC-4.4.1.4-22 | 4.4.1.4 | MUST | Local offer: set [[PendingLocalDescription]], state have-local-offer | tested | src/peer_connection/internal.rs:700 | polite_peer_glare_recovery_with_local_offer_rollback | |
 | WEBRTC-4.4.1.4-23 | 4.4.1.4 | MUST | Local offer, answer or pranswer: release early candidates | n/a | | | application gathers; no early-candidate queue |
 | WEBRTC-4.4.1.4-24 | 4.4.1.4 | MUST | Local answer: current local = description, current remote = pending remote, both pending null | tested | src/peer_connection/internal.rs:718 | sections_without_ssrc_lines_are_answered | |
-| WEBRTC-4.4.1.4-25 | 4.4.1.4 | MUST | Local answer: reset [[LastCreatedOffer]] and [[LastCreatedAnswer]] to "" | missing | src/peer_connection/internal.rs:723 | | `last_offer` / `last_answer` are never cleared |
+| WEBRTC-4.4.1.4-25 | 4.4.1.4 | MUST | Local answer: reset [[LastCreatedOffer]] and [[LastCreatedAnswer]] to "" | tested | pc/internal.rs `commit_description` | `pc/set_description_atomic_test.rs::an_answer_resets_the_last_created_offer_and_answer` |  |
 | WEBRTC-4.4.1.4-26 | 4.4.1.4 | MUST | Local answer: signaling state becomes stable | tested | src/peer_connection/state/signaling_state.rs:381 | sections_without_ssrc_lines_are_answered | |
 | WEBRTC-4.4.1.4-27 | 4.4.1.4 | MUST | Local answer: empty [[LocalIceCredentialsToReplace]] when none of them is in the description | partial | src/peer_connection/mod.rs:825 | | the restart request is consumed by create_offer, not when an answer replaces the credentials; a discarded restart offer loses the request |
 | WEBRTC-4.4.1.4-28 | 4.4.1.4 | MUST | Local pranswer: set [[PendingLocalDescription]], state have-local-pranswer | tested | src/peer_connection/internal.rs:757 | provisional_answers_repeat_and_keep_the_offerer_controlling | |
 | WEBRTC-4.4.1.4-29 | 4.4.1.4 | MUST | Remote offer: set [[PendingRemoteDescription]], state have-remote-offer | tested | src/peer_connection/internal.rs:776 | glare_recovery_with_remote_offer_rollback | |
 | WEBRTC-4.4.1.4-30 | 4.4.1.4 | MUST | Remote answer: current remote = description, current local = pending local, both pending null, state stable | tested | src/peer_connection/internal.rs:790 | provisional_answers_repeat_and_keep_the_offerer_controlling | |
-| WEBRTC-4.4.1.4-31 | 4.4.1.4 | MUST | Remote answer: reset [[LastCreatedOffer]] and [[LastCreatedAnswer]] to "" | missing | src/peer_connection/internal.rs:796 | | |
+| WEBRTC-4.4.1.4-31 | 4.4.1.4 | MUST | Remote answer: reset [[LastCreatedOffer]] and [[LastCreatedAnswer]] to "" | tested | pc/internal.rs `commit_description` | `pc/set_description_atomic_test.rs::an_answer_resets_the_last_created_offer_and_answer` |  |
 | WEBRTC-4.4.1.4-32 | 4.4.1.4 | MUST | Remote answer: empty [[LocalIceCredentialsToReplace]] when none is in the new current local description | partial | src/peer_connection/mod.rs:825 | | as 4.4.1.4-27 |
 | WEBRTC-4.4.1.4-33 | 4.4.1.4 | MUST | Remote pranswer: set [[PendingRemoteDescription]], state have-remote-pranswer | tested | src/peer_connection/internal.rs:826 | provisional_answers_repeat_and_keep_the_offerer_controlling | |
 | WEBRTC-4.4.1.4-34 | 4.4.1.4 | MUST | Offer describing an SCTP association with no [[SctpTransport]]: create one in "connecting" | partial | src/peer_connection/mod.rs:2875 | sctp_is_none_until_sctp_is_negotiated | the transport is exposed once negotiated, not when the offer is applied |
@@ -165,7 +165,7 @@ By pass:
 | WEBRTC-4.4.1.4-53 | 4.4.1.4 | MUST | Remote description: find an existing transceiver for the m= section as RFC 9429 says | tested | src/peer_connection/mod.rs:1576 | add_track_then_rollback_remote_offer_then_create_offer_includes_track | |
 | WEBRTC-4.4.1.4-54 | 4.4.1.4 | MUST | Found transceiver with one rid-less encoding takes proposedSendEncodings | missing | | | |
 | WEBRTC-4.4.1.4-55 | 4.4.1.4 | MUST | No transceiver found: create sender, receiver and transceiver and add it to the set | tested | src/peer_connection/mod.rs:1606 | set_remote_rollback_removes_transceivers_created_by_remote_offer | |
-| WEBRTC-4.4.1.4-56 | 4.4.1.4 | MUST | The transceiver created for a remote m= section has direction "recvonly" | violated | src/peer_connection/mod.rs:1599 | | created `Sendonly` when the offered section is recvonly |
+| WEBRTC-4.4.1.4-56 | 4.4.1.4 | MUST | The transceiver created for a remote m= section has direction "recvonly" | tested | pc/mod.rs `apply_remote_description` | `tests/jsep_answer_sections.rs::the_transceiver_created_for_a_remote_section_is_recvonly` |  |
 | WEBRTC-4.4.1.4-57 | 4.4.1.4 | MUST | Remote answer rejecting simulcast or missing all layers: keep only the first send encoding | missing | src/peer_connection/mod.rs:1639 | | |
 | WEBRTC-4.4.1.4-58 | 4.4.1.4 | MUST | Remote answer missing some layers: remove those encodings | missing | src/peer_connection/mod.rs:1639 | | |
 | WEBRTC-4.4.1.4-59 | 4.4.1.4 | MUST | Remote description: set [[Mid]] to [[JsepMid]] | tested | src/peer_connection/mod.rs:1594 | an_offer_without_mids_numbers_its_sections_by_index | |
@@ -181,20 +181,20 @@ By pass:
 | WEBRTC-4.4.1.4-69 | 4.4.1.4 | MUST | A remote offer with a=ice-lite sets [[IceRole]] to controlling | untested | src/peer_connection/mod.rs:1719 | | |
 | WEBRTC-4.4.1.4-70 | 4.4.1.4 | MUST | A remote offer without a=ice-lite sets [[IceRole]] to controlled | untested | src/peer_connection/mod.rs:1723 | | no test asserts Controlled |
 | WEBRTC-4.4.1.4-71 | 4.4.1.4 | MUST | A rejected remote m= section stops its transceiver if not already stopped | tested | src/peer_connection/mod.rs:1532 | a_rejected_section_in_a_remote_offer_stops_its_transceiver | |
-| WEBRTC-4.4.1.4-72 | 4.4.1.4 | MUST | Rollback: [[SctpTransport]] returns to the last stable one | missing | src/peer_connection/internal.rs:977 | | |
+| WEBRTC-4.4.1.4-72 | 4.4.1.4 | MUST | Rollback: [[SctpTransport]] returns to the last stable one | tested | src/peer_connection/internal.rs:977 | `tests/jsep_rollback.rs::a_rollback_leaves_the_sctp_transport_of_the_last_stable_state` | as 4.4.1.4-17 |
 | WEBRTC-4.4.1.4-73 | 4.4.1.4 | MUST | Rollback: a transceiver the pending description associated is disassociated, mid null | tested | src/peer_connection/internal.rs:999 | set_local_rollback_disassociates_but_keeps_app_created_transceivers | |
 | WEBRTC-4.4.1.4-74 | 4.4.1.4 | MUST | Rollback: sender and receiver transports return to the last stable ones | untested | src/peer_connection/internal.rs:1005 | | |
 | WEBRTC-4.4.1.4-75 | 4.4.1.4 | MUST | Rollback: restore the rid-less send encodings a remote offer replaced | missing | | | nothing replaces them either (4.4.1.4-54) |
-| WEBRTC-4.4.1.4-76 | 4.4.1.4 | MUST | Rollback: [[ReceiveCodecs]] return to the last stable ones | missing | src/peer_connection/internal.rs:977 | | bug B5 |
-| WEBRTC-4.4.1.4-77 | 4.4.1.4 | MUST | Rollback of a remote offer: process remote tracks with the last stable streams and direction | missing | src/peer_connection/internal.rs:977 | | |
+| WEBRTC-4.4.1.4-76 | 4.4.1.4 | MUST | Rollback: [[ReceiveCodecs]] return to the last stable ones | tested | pc/internal.rs `restore_last_stable_state`, src/rtp_transceiver/internal.rs `restore_negotiated_state` | `tests/jsep_rollback.rs::a_rollback_restores_the_codecs_and_repair_flows_a_remote_offer_took`, `tests/jsep_rollback.rs::a_rollback_of_a_renegotiation_restores_the_last_negotiated_codecs` | negotiated codecs and header extensions, each transceiver's codecs, the senders' RTX / FEC flows |
+| WEBRTC-4.4.1.4-77 | 4.4.1.4 | MUST | Rollback of a remote offer: process remote tracks with the last stable streams and direction | partial | src/peer_connection/internal.rs:977 | `tests/jsep_rollback.rs::a_rollback_leaves_the_remote_track_of_the_last_stable_state` | nothing to undo: an offer does not process remote tracks here (4.4.1.4-61); the track of the last answer stays |
 | WEBRTC-4.4.1.4-78 | 4.4.1.4 | MUST | Rollback: a transceiver the pending description created, never given a track by addTrack, is stopped and removed | tested | src/peer_connection/internal.rs:989 | rollback_keeps_transceiver_with_track_attached_via_add_track | also set_remote_rollback_removes_transceivers_created_by_remote_offer |
 | WEBRTC-4.4.1.4-79 | 4.4.1.4 | MUST | Rollback: both pending descriptions null, state stable | tested | src/peer_connection/internal.rs:738 | polite_peer_glare_recovery_with_local_offer_rollback | |
-| WEBRTC-4.4.1.4-80 | 4.4.1.4 | MUST | A rollback is valid in have-local-offer and have-remote-offer whichever method carries it | violated | src/peer_connection/state/signaling_state.rs:350 | a_remote_offer_can_be_applied_again_and_rolled_back | set_local(rollback) in have-remote-offer and set_remote(rollback) in have-local-offer are refused; the test asserts the refusal |
+| WEBRTC-4.4.1.4-80 | 4.4.1.4 | MUST | A rollback is valid in have-local-offer and have-remote-offer whichever method carries it | tested | pc/state/signaling_state.rs `check_next_signaling_state` | `tests/jsep_rollback.rs`, `signaling_state.rs::test_signaling_state_transitions` |  |
 | WEBRTC-4.4.1.4-81 | 4.4.1.4 | MUST | Answer: remove stopped transceivers whose m= section is rejected in a current description | tested | src/peer_connection/internal.rs:947 | stopped_transceivers_are_removed_once_their_sections_are_rejected | |
 | WEBRTC-4.4.1.4-82 | 4.4.1.4 | MUST | Stable: close DTLS and ICE transports no non-stopped transceiver references any more | partial | src/peer_connection/internal.rs:725 | rejects_every_media_section_only_when_all_are_rejected | the single transport is marked closed when every section is rejected; no transport state event |
 | WEBRTC-4.4.1.4-83 | 4.4.1.4 | MUST | Stable: remove encoding.codec values that match no entry of [[SendCodecs]] | missing | | | not found in the set-description path |
 | WEBRTC-4.4.1.4-84 | 4.4.1.4 | MUST | Stable: clear the negotiation-needed flag and update it | tested | src/peer_connection/internal.rs:841 | stop_raises_negotiation_needed_and_settles_once_rejected | |
-| WEBRTC-4.4.1.4-85 | 4.4.1.4 | MUST | signalingstatechange fires only if the signaling state changed | violated | src/peer_connection/internal.rs:850 | | the event is pushed on every successful call, including re-applied offers and repeated pranswers |
+| WEBRTC-4.4.1.4-85 | 4.4.1.4 | MUST | signalingstatechange fires only if the signaling state changed | tested | pc/internal.rs `commit_description` | `pc/set_description_atomic_test.rs::signalingstatechange_fires_only_when_the_state_changes` |  |
 | WEBRTC-4.4.1.4-86 | 4.4.1.4 | MUST | Fire an error event (data-channel-failure) at each channel in errorList | missing | src/peer_connection/mod.rs:2157 | | |
 | WEBRTC-4.4.1.4-87 | 4.4.1.4 | MUST | Mute every track in muteTracks | missing | | | no muted state or event from set-description |
 | WEBRTC-4.4.1.4-88 | 4.4.1.4 | MUST | Remove each (stream, track) pair of removeList from its stream | missing | | | no stream membership change is reported |
@@ -244,8 +244,8 @@ By pass:
 | WEBRTC-4.4.2-18 | 4.4.2 | MUST | connectionstatechange event is delivered | tested | src/peer_connection/internal.rs:1374 | a_fingerprint_mismatch_fails_the_dtls_transport_and_the_connection | |
 | WEBRTC-4.4.2-19 | 4.4.2 | MUST | createOffer: an offer stays applicable by setLocalDescription until the caller has seen it | tested | src/peer_connection/mod.rs:913 | test_offer_answer_rtc_to_rtc | |
 | WEBRTC-4.4.2-20 | 4.4.2 | MUST | createOffer follows RFC 9429 offer generation, treating a stopping transceiver as stopped | tested | src/peer_connection/internal.rs:276 | tests/jsep_stopped_transceivers.rs | clause-level JSEP verdicts are in the RFC 9429 audit |
-| WEBRTC-4.4.2-21 | 4.4.2 | MUST | createOffer on a closed connection fails with InvalidStateError | untested | src/peer_connection/mod.rs:818 | | |
-| WEBRTC-4.4.2-22 | 4.4.2 | MUST | createOffer in a state other than stable or have-local-offer fails with InvalidStateError | missing | src/peer_connection/mod.rs:814 | | no signaling-state check; an offer is generated in have-remote-offer |
+| WEBRTC-4.4.2-21 | 4.4.2 | MUST | createOffer on a closed connection fails with InvalidStateError | tested | src/peer_connection/mod.rs:818 | `tests/jsep_description_state.rs::a_closed_connection_refuses_offers_answers_and_descriptions` |  |
+| WEBRTC-4.4.2-22 | 4.4.2 | MUST | createOffer in a state other than stable or have-local-offer fails with InvalidStateError | tested | pc/mod.rs `create_offer` | `pc/set_description_atomic_test.rs::create_offer_needs_the_stable_or_have_local_offer_state` | `ErrIncorrectSignalingState` |
 | WEBRTC-4.4.2-23 | 4.4.2 | MUST | createOffer waits for the default certificate to be generated | n/a | | | certificate exists from build() |
 | WEBRTC-4.4.2-24 | 4.4.2 | MUST | createOffer: a failed inspection of system resources rejects with OperationError | n/a | | | no media resources in the engine |
 | WEBRTC-4.4.2-25 | 4.4.2 | MUST | createOffer re-inspects when the connection was modified meanwhile | n/a | | | synchronous |
@@ -258,8 +258,8 @@ By pass:
 | WEBRTC-4.4.2-32 | 4.4.2 | MUST | createOffer has no side effects on the session (RFC 9429 5.2) | partial | src/peer_connection/mod.rs:880 | set_local_rollback_disassociates_but_keeps_app_created_transceivers | it assigns mids, marks senders negotiated, stages an ICE restart and consumes the restart request |
 | WEBRTC-4.4.2-33 | 4.4.2 | SHOULD | createAnswer reflects the current system state | n/a | | | no media resources in the engine |
 | WEBRTC-4.4.2-34 | 4.4.2 | MUST | createAnswer follows RFC 9429 answer generation | tested | src/peer_connection/internal.rs:357 | test_offer_answer_rtc_to_rtc | clause-level verdicts in the RFC 9429 audit |
-| WEBRTC-4.4.2-35 | 4.4.2 | MUST | createAnswer on a closed connection fails with InvalidStateError | untested | src/peer_connection/mod.rs:1026 | | |
-| WEBRTC-4.4.2-36 | 4.4.2 | MUST | createAnswer outside have-remote-offer / have-local-pranswer fails with InvalidStateError | untested | src/peer_connection/mod.rs:1030 | | ErrIncorrectSignalingState is asserted by no test |
+| WEBRTC-4.4.2-35 | 4.4.2 | MUST | createAnswer on a closed connection fails with InvalidStateError | tested | src/peer_connection/mod.rs:1026 | `tests/jsep_description_state.rs::a_closed_connection_refuses_offers_answers_and_descriptions` |  |
+| WEBRTC-4.4.2-36 | 4.4.2 | MUST | createAnswer outside have-remote-offer / have-local-pranswer fails with InvalidStateError | tested | src/peer_connection/mod.rs:1030 | `tests/jsep_description_state.rs::create_answer_needs_a_remote_offer` |  |
 | WEBRTC-4.4.2-37 | 4.4.2 | MUST | createAnswer filters [[PreferredCodecs]] by direction without reordering | partial | src/peer_connection/internal.rs:2108 | tests/answer_preserves_offer_codec_order.rs | as 4.4.2-28 |
 | WEBRTC-4.4.2-38 | 4.4.2 | MUST | createAnswer to a simulcast offer: only the first of comma-separated rid alternatives is kept | untested | src/peer_connection/sdp/mod.rs:592 | | implemented in get_rids; no test with alternatives found |
 | WEBRTC-4.4.2-39 | 4.4.2 | MUST | createAnswer: identically named rids are reduced to the first; no restrictions set | untested | src/peer_connection/sdp/mod.rs:630 | | |
@@ -268,11 +268,11 @@ By pass:
 | WEBRTC-4.4.2-42 | 4.4.2 | MUST | A provisional answer is made by setting the type of a created answer to "pranswer" | tested | src/peer_connection/internal.rs:746 | provisional_answers_repeat_and_keep_the_offerer_controlling | |
 | WEBRTC-4.4.2-43 | 4.4.2 | MUST | setLocalDescription: current and pending local descriptions stay usable together until the answer or a rollback | partial | src/peer_connection/mod.rs:1457 | | one negotiated media engine; no test of media under a pending incompatible offer |
 | WEBRTC-4.4.2-44 | 4.4.2 | MUST | setLocalDescription without a type uses "offer" in stable, have-local-offer, have-remote-pranswer; else "answer" | missing | src/peer_connection/internal.rs:676 | | the type is required; `Unspecified` is an error |
-| WEBRTC-4.4.2-45 | 4.4.2 | MUST | setLocalDescription(offer) with SDP different from [[LastCreatedOffer]] fails with InvalidModificationError | untested | src/peer_connection/internal.rs:690 | | ErrSDPDoesNotMatchOffer is asserted by no test |
-| WEBRTC-4.4.2-46 | 4.4.2 | MUST | setLocalDescription(answer or pranswer) with SDP different from [[LastCreatedAnswer]] fails | untested | src/peer_connection/internal.rs:708 | | |
-| WEBRTC-4.4.2-47 | 4.4.2 | MUST | setLocalDescription(offer, empty sdp) uses [[LastCreatedOffer]] | untested | src/peer_connection/mod.rs:1219 | | |
+| WEBRTC-4.4.2-45 | 4.4.2 | MUST | setLocalDescription(offer) with SDP different from [[LastCreatedOffer]] fails with InvalidModificationError | tested | src/peer_connection/internal.rs:690 | `tests/jsep_description_state.rs::a_local_description_is_the_last_one_created` |  |
+| WEBRTC-4.4.2-46 | 4.4.2 | MUST | setLocalDescription(answer or pranswer) with SDP different from [[LastCreatedAnswer]] fails | tested | src/peer_connection/internal.rs:708 | `tests/jsep_description_state.rs::a_local_description_is_the_last_one_created` |  |
+| WEBRTC-4.4.2-47 | 4.4.2 | MUST | setLocalDescription(offer, empty sdp) uses [[LastCreatedOffer]] | tested | src/peer_connection/mod.rs:1219 | `tests/jsep_description_state.rs::a_local_description_is_the_last_one_created` |  |
 | WEBRTC-4.4.2-48 | 4.4.2 | MUST | ...and creates a new offer when there is none or it no longer matches the system state | missing | src/peer_connection/mod.rs:1219 | | an empty or stale last offer is parsed as it is; the parse fails or a stale offer is applied |
-| WEBRTC-4.4.2-49 | 4.4.2 | MUST | setLocalDescription(answer/pranswer, empty sdp) uses [[LastCreatedAnswer]] | untested | src/peer_connection/mod.rs:1216 | | |
+| WEBRTC-4.4.2-49 | 4.4.2 | MUST | setLocalDescription(answer/pranswer, empty sdp) uses [[LastCreatedAnswer]] | tested | src/peer_connection/mod.rs:1216 | `tests/jsep_description_state.rs::a_local_description_is_the_last_one_created` |  |
 | WEBRTC-4.4.2-50 | 4.4.2 | MUST | ...and creates a new answer when there is none or it no longer matches | missing | src/peer_connection/mod.rs:1216 | | |
 | WEBRTC-4.4.2-51 | 4.4.2 | MUST | setLocalDescription then sets the local description {type, sdp} | tested | src/peer_connection/mod.rs:1232 | test_offer_answer_rtc_to_rtc | |
 | WEBRTC-4.4.2-52 | 4.4.2 | MUST | setRemoteDescription(offer) in a state where an offer is invalid first rolls back the local offer | missing | src/peer_connection/state/signaling_state.rs:337 | glare_recovery_with_remote_offer_rollback | a remote offer in have-local-offer is refused; the application has to roll back itself |

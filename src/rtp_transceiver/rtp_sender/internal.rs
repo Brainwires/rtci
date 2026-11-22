@@ -51,6 +51,8 @@ pub(crate) struct RTCRtpSenderInternal {
     /// that changes one unbinds exactly these before binding the new ones, and `stop` unbinds
     /// them whatever the parameters are by then.
     bound_streams: Vec<StreamInfo>,
+    /// Reduced-size RTCP as negotiated for the media section (`RTCRtcpParameters::reduced_size`).
+    rtcp_reduced_size: bool,
 }
 
 impl RTCRtpSenderInternal {
@@ -85,6 +87,7 @@ impl RTCRtpSenderInternal {
             negotiated: false,
             sent: false,
             bound_streams: Vec::new(),
+            rtcp_reduced_size: false,
         }
     }
 
@@ -251,6 +254,7 @@ impl RTCRtpSenderInternal {
                 .get_rtp_parameters_by_kind(self.kind(), RTCRtpTransceiverDirection::Sendonly);
 
             rtp_parameters.codecs = self.send_codecs.clone();
+            rtp_parameters.rtcp.reduced_size = self.rtcp_reduced_size;
 
             self.last_returned_parameters = Some(RTCRtpSendParameters {
                 rtp_parameters,
@@ -381,6 +385,25 @@ impl RTCRtpSenderInternal {
         self.last_returned_parameters = None;
     }
 
+    pub(crate) fn set_rtcp_reduced_size(&mut self, reduced_size: bool) {
+        if self.rtcp_reduced_size != reduced_size {
+            self.rtcp_reduced_size = reduced_size;
+            self.last_returned_parameters = None;
+        }
+    }
+
+    /// The send codecs of the last stable state, and the repair (RTX / FEC) SSRCs a rolled-back
+    /// offer took from the encodings (`configure_rtx_and_fec` drops them when the offer lacks
+    /// the repair format), after a rollback. An encoding is found by its SSRC and rid, so one
+    /// the application changed since is left alone.
+    pub(crate) fn restore_negotiated_state(&mut self, saved: &RTCRtpSenderInternal) {
+        self.send_codecs.clone_from(&saved.send_codecs);
+        restore_repair_ssrcs(&mut self.send_encodings, &saved.send_encodings);
+        self.sender_track
+            .restore_repair_ssrcs(saved.sender_track.codings());
+        self.last_returned_parameters = None;
+    }
+
     /// The streams this sender sends, as the interceptors are to see them now: each coding's
     /// SSRCs with the codec it is sent with ([`encoding_send_codec`]), that codec's RTX
     /// payload type, the FEC payload type and the negotiated header extensions.
@@ -485,6 +508,30 @@ impl RTCRtpSenderInternal {
     pub(crate) fn unbind_local_streams(&mut self, interceptor: &mut dyn Interceptor) {
         for info in std::mem::take(&mut self.bound_streams) {
             interceptor.unbind_local_stream(&info);
+        }
+    }
+}
+
+/// Gives each encoding of `encodings` that lost its RTX or FEC SSRC the one the encoding with
+/// the same SSRC and rid has in `saved`.
+pub(crate) fn restore_repair_ssrcs(
+    encodings: &mut [RTCRtpEncodingParameters],
+    saved: &[RTCRtpEncodingParameters],
+) {
+    for encoding in encodings {
+        let parameters = &mut encoding.rtp_coding_parameters;
+        let Some(saved) = saved
+            .iter()
+            .map(|e| &e.rtp_coding_parameters)
+            .find(|saved| saved.ssrc == parameters.ssrc && saved.rid == parameters.rid)
+        else {
+            continue;
+        };
+        if parameters.rtx.is_none() {
+            parameters.rtx.clone_from(&saved.rtx);
+        }
+        if parameters.fec.is_none() {
+            parameters.fec.clone_from(&saved.fec);
         }
     }
 }

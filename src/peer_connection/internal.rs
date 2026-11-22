@@ -1,4 +1,5 @@
 use super::*;
+use crate::peer_connection::configuration::RTCRtcpMuxPolicy;
 use crate::peer_connection::event::{RTCPeerConnectionEvent, RTCPeerConnectionIceEvent};
 use crate::peer_connection::handler::datachannel::DataChannelHandlerContext;
 use crate::peer_connection::handler::demuxer::DemuxerHandlerContext;
@@ -6,10 +7,12 @@ use crate::peer_connection::handler::endpoint::EndpointHandlerContext;
 use crate::peer_connection::handler::interceptor::InterceptorHandlerContext;
 use crate::peer_connection::handler::srtp::SrtpHandlerContext;
 use crate::peer_connection::sdp::{
-    MediaSection, PopulateSdpParams, add_candidates_to_media_descriptions, get_application_media,
-    get_application_media_section_sctp_port, get_by_mid, get_peer_direction, get_rids,
-    have_data_channel, is_ext_map_allow_mixed_set, is_unknown_application_media,
-    rtp_extensions_from_media_description, track_details_from_sdp, unknown_media_name,
+    ATTR_KEY_RTCP_MUX_ONLY, BundleMode, MediaSection, PopulateSdpParams,
+    add_candidates_to_media_descriptions, bundle_group_mids, effective_direction,
+    get_application_media, get_application_media_section_sctp_port, get_by_mid, get_peer_direction,
+    get_rids, has_rtcp_mux, have_data_channel, is_ext_map_allow_mixed_set, is_rejected_media,
+    is_rtp_profile, is_unknown_application_media, rtp_extensions_from_media_description,
+    track_details_from_sdp, unknown_media_name,
 };
 use crate::peer_connection::state::signaling_state::check_next_signaling_state;
 use crate::peer_connection::transport::dtls::state::RTCDtlsTransportState;
@@ -28,16 +31,54 @@ use crate::rtp_transceiver::rtp_sender::rtp_coding_parameters::{
     RTCRtpCodingParameters, RTCRtpFecParameters, RTCRtpRtxParameters,
 };
 use crate::rtp_transceiver::rtp_sender::rtp_encoding_parameters::RTCRtpEncodingParameters;
-use crate::rtp_transceiver::{PayloadType, RTCRtpTransceiverDirection, RTCRtpTransceiverId};
+use crate::rtp_transceiver::{
+    PayloadType, RTCRemoteBandwidth, RTCRtpTransceiverDirection, RTCRtpTransceiverId,
+};
 use crate::statistics::accumulator::{
     IceCandidateAccumulator, local_candidate_stats_id, remote_candidate_stats_id,
 };
 use ::sdp::description::common::Attribute;
+use ::sdp::description::media::MediaDescription;
 use ::sdp::description::session::*;
 use ::sdp::util::ConnectionRole;
 use rand::RngExt;
 use std::collections::HashSet;
 use std::collections::VecDeque;
+
+/// What the last completed offer/answer exchange negotiated, remembered when an offer is
+/// applied in the stable state and brought back by a rollback (W3C webrtc-pc "set a session
+/// description": the `[[LastStableState...]]` slots; RFC 9429 section 5.7).
+#[derive(Clone)]
+pub(super) struct LastStableState {
+    /// The negotiated codecs and header extensions (a remote offer replaces them).
+    media_engine: MediaEngine,
+    /// The transceivers as they were: their codecs and their senders' repair flows are what a
+    /// rollback restores.
+    rtp_transceivers: Vec<RTCRtpTransceiverInternal>,
+    can_trickle_ice_candidates: Option<bool>,
+    transport_closed: bool,
+}
+
+/// See [`RTCPeerConnection::description_snapshot`].
+pub(super) struct DescriptionSnapshot {
+    signaling_state: RTCSignalingState,
+    current_local_description: Option<RTCSessionDescription>,
+    pending_local_description: Option<RTCSessionDescription>,
+    current_remote_description: Option<RTCSessionDescription>,
+    pending_remote_description: Option<RTCSessionDescription>,
+    media_engine: MediaEngine,
+    rtp_transceivers: Vec<RTCRtpTransceiverInternal>,
+    removed_transceivers: usize,
+    can_trickle_ice_candidates: Option<bool>,
+    trickled_remote_candidates: usize,
+    last_offer: String,
+    last_answer: String,
+    transport_closed: bool,
+    negotiation_needed_state: NegotiationNeededState,
+    is_negotiation_ongoing: bool,
+    last_stable_state: Option<LastStableState>,
+    events: usize,
+}
 
 impl RTCPeerConnection {
     pub(super) fn new(
@@ -223,11 +264,13 @@ impl RTCPeerConnection {
             removed_transceivers: Vec::new(),
             greater_mid: -1,
             sdp_origin: Origin::default(),
+            last_generated_sdp: String::new(),
             last_offer: String::new(),
             last_answer: String::new(),
             ice_restart_requested: None,
             transport_closed: false,
             identity_assertion: None,
+            last_stable_state: None,
             negotiation_needed_state: NegotiationNeededState::Empty,
             is_negotiation_ongoing: false,
             always_negotiate_data_channels: false,
@@ -336,7 +379,9 @@ impl RTCPeerConnection {
             is_extmap_allow_mixed: true,
             connection_role: DEFAULT_DTLS_ROLE_OFFER.to_connection_role(),
             ice_gathering_state: self.ice_transport().ice_gathering_state,
-            match_bundle_group: None,
+            bundle: BundleMode::Offer,
+            offered_tag_rtcp_mux_only: false,
+            rtcp_mux_only: self.configuration.rtcp_mux_policy != RTCRtcpMuxPolicy::Negotiate,
             sctp_max_message_size: self.setting_engine.sctp_max_message_size.as_usize(),
             sctp_port: self.sctp_transport().offer_port(),
             sctp_over_tcp: false,
@@ -376,12 +421,19 @@ impl RTCPeerConnection {
         let is_extmap_allow_mixed = is_ext_map_allow_mixed_set(self.remote_description());
         let local_mids = self.local_description_mids();
 
-        // Extract media descriptions to avoid borrowing conflicts
-        let media_descriptions = self
+        // Extract the description to avoid borrowing conflicts
+        let remote_parsed = self
             .remote_description()
-            .as_ref()
             .and_then(|r| r.parsed.as_ref())
+            .cloned();
+        let media_descriptions = remote_parsed
+            .as_ref()
             .map(|parsed| parsed.media_descriptions.clone());
+        // An answer repeats each offered m= line's proto (RFC 9429 section 5.1.2); an offer
+        // states this endpoint's own.
+        let offered_protos = |media: &MediaDescription| {
+            (!include_unmatched).then(|| media.media_name.protos.clone())
+        };
 
         // The mids the remote description has: a transceiver whose mid isn't among them is new
         // to this negotiation, and may take a rejected m-line's place in an offer.
@@ -451,6 +503,7 @@ impl RTCPeerConnection {
                             rejected_kind: media.media_name.media.clone(),
                             transceiver_index: usize::MAX,
                             rejected_name: unknown_media_name(media),
+                            offered_protos: offered_protos(media),
                             ..Default::default()
                         });
                         continue;
@@ -461,6 +514,7 @@ impl RTCPeerConnection {
                             mid: mid_value.to_owned(),
                             transceiver_index: usize::MAX,
                             data: true,
+                            offered_protos: offered_protos(media),
                             ..Default::default()
                         });
                         already_have_application_media_section = true;
@@ -480,6 +534,28 @@ impl RTCPeerConnection {
                             rejected_kind: media.media_name.media.clone(),
                             transceiver_index: usize::MAX,
                             rejected_name: unknown_media_name(media),
+                            ..Default::default()
+                        });
+                        continue;
+                    }
+
+                    // An audio or video section offered with a profile that is none of the
+                    // RTP profiles of RFC 9429 section 5.1.2 is not RTP this endpoint can
+                    // answer: rejected, its proto and formats kept. So is one offered without
+                    // `a=rtcp-mux`: there is no RTCP component to answer it with (RFC 8858
+                    // section 4.3: an answerer that only multiplexes "MUST reject the 'm='
+                    // section"; RFC 9429 section 5.3.1). Under the mux policy "require" such
+                    // an offer was refused when it was applied.
+                    if !include_unmatched
+                        && matches!(kind, RtpCodecKind::Audio | RtpCodecKind::Video)
+                        && (!is_rtp_profile(media) || !has_rtcp_mux(media))
+                    {
+                        media_sections.push(MediaSection {
+                            mid: mid_value.to_owned(),
+                            rejected: true,
+                            rejected_kind: media.media_name.media.clone(),
+                            transceiver_index: usize::MAX,
+                            rejected_name: Some(media.media_name.clone()),
                             ..Default::default()
                         });
                         continue;
@@ -514,7 +590,10 @@ impl RTCPeerConnection {
                         let answer_direction = (!include_unmatched).then(|| {
                             answered_direction(
                                 self.rtp_transceivers[i].direction(),
-                                get_peer_direction(media),
+                                remote_parsed.as_ref().map_or_else(
+                                    || get_peer_direction(media),
+                                    |parsed| effective_direction(parsed, media),
+                                ),
                             )
                         });
                         media_sections.push(MediaSection {
@@ -523,6 +602,13 @@ impl RTCPeerConnection {
                             match_extensions: extensions,
                             rid_map: get_rids(media),
                             answer_direction,
+                            offered_protos: offered_protos(media),
+                            offered_rtcp_rsize: Some(if include_unmatched {
+                                self.rtp_transceivers[i].rtcp_reduced_size()
+                            } else {
+                                media.has_attribute(ATTR_KEY_RTCPRSIZE)
+                            }),
+                            renegotiated: include_unmatched,
                             ..Default::default()
                         });
                     } else {
@@ -594,14 +680,13 @@ impl RTCPeerConnection {
                     ..Default::default()
                 });
             }
-            None
+            BundleMode::Offer
         } else {
-            self.remote_description()
+            // The offered BUNDLE group, whatever other `a=group` lines the offer has
+            // (RFC 9429 section 5.3.1); none when the offer has none.
+            remote_parsed
                 .as_ref()
-                .and_then(|d| d.parsed.as_ref())
-                .and_then(|d| d.attribute(ATTR_KEY_GROUP))
-                .map(ToOwned::to_owned)
-                .or(Some(String::new()))
+                .map_or(BundleMode::Answer(None), BundleMode::answering)
         };
 
         let dtls_fingerprints = self.local_dtls_fingerprints()?;
@@ -637,7 +722,12 @@ impl RTCPeerConnection {
             is_extmap_allow_mixed,
             connection_role,
             ice_gathering_state: self.ice_transport().ice_gathering_state,
-            match_bundle_group,
+            rtcp_mux_only: self.configuration.rtcp_mux_policy != RTCRtcpMuxPolicy::Negotiate,
+            offered_tag_rtcp_mux_only: !include_unmatched
+                && remote_parsed
+                    .as_ref()
+                    .is_some_and(offerer_tagged_section_is_rtcp_mux_only),
+            bundle: match_bundle_group,
             sctp_max_message_size: self.setting_engine.sctp_max_message_size.as_usize(),
             sctp_port,
             sctp_over_tcp,
@@ -699,199 +789,239 @@ impl RTCPeerConnection {
         }
     }
 
-    // 4.4.1.6 Set the SessionDescription
-    pub(super) fn set_description(
+    /// The signaling state a description leads to (W3C webrtc-pc "set a session description",
+    /// RFC 9429 sections 5.5 and 5.6), or the error that refuses it. Nothing is changed: both
+    /// `set_local_description` and `set_remote_description` call this before they touch the
+    /// connection, and [`Self::commit_description`] once every other check has passed.
+    pub(super) fn check_description(
+        &self,
+        sd: &RTCSessionDescription,
+        op: StateChangeOp,
+    ) -> Result<RTCSignalingState> {
+        let cur = self.signaling_state;
+        let next = match (op, sd.sdp_type) {
+            (_, RTCSdpType::Unspecified) => return Err(Error::ErrPeerConnSDPTypeInvalidValue),
+            // stable->SetLocal(offer)->have-local-offer
+            (StateChangeOp::SetLocal, RTCSdpType::Offer) => {
+                if sd.sdp != self.last_offer {
+                    return Err(Error::ErrSDPDoesNotMatchOffer);
+                }
+                RTCSignalingState::HaveLocalOffer
+            }
+            // have-remote-offer->SetLocal(answer)->stable
+            // have-local-pranswer->SetLocal(answer)->stable
+            (StateChangeOp::SetLocal, RTCSdpType::Answer) => {
+                if sd.sdp != self.last_answer {
+                    return Err(Error::ErrSDPDoesNotMatchAnswer);
+                }
+                RTCSignalingState::Stable
+            }
+            // have-remote-offer->SetLocal(pranswer)->have-local-pranswer
+            (StateChangeOp::SetLocal, RTCSdpType::Pranswer) => {
+                if sd.sdp != self.last_answer {
+                    return Err(Error::ErrSDPDoesNotMatchAnswer);
+                }
+                RTCSignalingState::HaveLocalPranswer
+            }
+            // stable->SetRemote(offer)->have-remote-offer
+            (StateChangeOp::SetRemote, RTCSdpType::Offer) => RTCSignalingState::HaveRemoteOffer,
+            // have-local-offer->SetRemote(answer)->stable
+            // have-remote-pranswer->SetRemote(answer)->stable
+            (StateChangeOp::SetRemote, RTCSdpType::Answer) => RTCSignalingState::Stable,
+            // have-local-offer->SetRemote(pranswer)->have-remote-pranswer
+            (StateChangeOp::SetRemote, RTCSdpType::Pranswer) => {
+                RTCSignalingState::HaveRemotePranswer
+            }
+            // have-local-offer or have-remote-offer->rollback->stable, through either method
+            (_, RTCSdpType::Rollback) => RTCSignalingState::Stable,
+        };
+        check_next_signaling_state(cur, next, op, sd.sdp_type)
+    }
+
+    /// Records a description [`Self::check_description`] accepted: the pending and current
+    /// descriptions, what a rollback has to restore, and the signaling state `next_state`
+    /// (W3C webrtc-pc "set a session description").
+    pub(super) fn commit_description(
         &mut self,
         sd: &RTCSessionDescription,
         op: StateChangeOp,
+        next_state: RTCSignalingState,
     ) -> Result<()> {
-        if sd.sdp_type == RTCSdpType::Unspecified {
-            return Err(Error::ErrPeerConnSDPTypeInvalidValue);
+        // A remote offer applied in the stable state: what the last completed exchange
+        // negotiated is remembered, so that a rollback can bring it back (W3C: the
+        // [[LastStableState...]] slots). An offer applied over a pending one keeps what was
+        // remembered. A local offer changes none of it, so there is nothing to remember, and
+        // what the application sets while its own offer is pending (codec preferences, say)
+        // survives the rollback.
+        if sd.sdp_type == RTCSdpType::Offer
+            && op == StateChangeOp::SetRemote
+            && self.signaling_state == RTCSignalingState::Stable
+        {
+            self.last_stable_state = Some(LastStableState {
+                media_engine: self.media_engine.clone(),
+                rtp_transceivers: self.rtp_transceivers.clone(),
+                can_trickle_ice_candidates: self.can_trickle_ice_candidates,
+                transport_closed: self.transport_closed,
+            });
         }
 
-        let next_state = {
-            let cur = self.signaling_state;
-            let new_sdpdoes_not_match_offer = Error::ErrSDPDoesNotMatchOffer;
-            let new_sdpdoes_not_match_answer = Error::ErrSDPDoesNotMatchAnswer;
-
-            match op {
-                StateChangeOp::SetLocal => {
-                    match sd.sdp_type {
-                        // stable->SetLocal(offer)->have-local-offer
-                        RTCSdpType::Offer => {
-                            if sd.sdp != self.last_offer {
-                                Err(new_sdpdoes_not_match_offer)
-                            } else {
-                                let next_state = check_next_signaling_state(
-                                    cur,
-                                    RTCSignalingState::HaveLocalOffer,
-                                    StateChangeOp::SetLocal,
-                                    sd.sdp_type,
-                                );
-                                if next_state.is_ok() {
-                                    self.pending_local_description = Some(sd.clone());
-                                }
-                                next_state
-                            }
-                        }
-                        // have-remote-offer->SetLocal(answer)->stable
-                        // have-local-pranswer->SetLocal(answer)->stable
-                        RTCSdpType::Answer => {
-                            if sd.sdp != self.last_answer {
-                                Err(new_sdpdoes_not_match_answer)
-                            } else {
-                                let next_state = check_next_signaling_state(
-                                    cur,
-                                    RTCSignalingState::Stable,
-                                    StateChangeOp::SetLocal,
-                                    sd.sdp_type,
-                                );
-                                if next_state.is_ok() {
-                                    let pending_remote_description =
-                                        self.pending_remote_description.take();
-                                    let _pending_local_description =
-                                        self.pending_local_description.take();
-
-                                    self.current_local_description = Some(sd.clone());
-                                    self.current_remote_description = pending_remote_description;
-                                    self.transport_closed = rejects_every_media_section(&sd);
-                                }
-                                next_state
-                            }
-                        }
-                        RTCSdpType::Rollback => {
-                            let next_state = check_next_signaling_state(
-                                cur,
-                                RTCSignalingState::Stable,
-                                StateChangeOp::SetLocal,
-                                sd.sdp_type,
-                            );
-                            if next_state.is_ok() {
-                                self.pending_local_description = None;
-                                // Undo the transceiver associations/creations made by the
-                                // now-abandoned offer (RFC 9429, Section 5.7).
-                                self.rollback_transceivers()?;
-                            }
-                            next_state
-                        }
-                        // have-remote-offer->SetLocal(pranswer)->have-local-pranswer
-                        RTCSdpType::Pranswer => {
-                            if sd.sdp != self.last_answer {
-                                Err(new_sdpdoes_not_match_answer)
-                            } else {
-                                let next_state = check_next_signaling_state(
-                                    cur,
-                                    RTCSignalingState::HaveLocalPranswer,
-                                    StateChangeOp::SetLocal,
-                                    sd.sdp_type,
-                                );
-                                if next_state.is_ok() {
-                                    self.pending_local_description = Some(sd.clone());
-                                }
-                                next_state
-                            }
-                        }
-                        _ => Err(Error::ErrPeerConnStateChangeInvalid),
-                    }
-                }
-                StateChangeOp::SetRemote => {
-                    match sd.sdp_type {
-                        // stable->SetRemote(offer)->have-remote-offer
-                        RTCSdpType::Offer => {
-                            let next_state = check_next_signaling_state(
-                                cur,
-                                RTCSignalingState::HaveRemoteOffer,
-                                StateChangeOp::SetRemote,
-                                sd.sdp_type,
-                            );
-                            if next_state.is_ok() {
-                                self.pending_remote_description = Some(sd.clone());
-                            }
-                            next_state
-                        }
-                        // have-local-offer->SetRemote(answer)->stable
-                        // have-remote-pranswer->SetRemote(answer)->stable
-                        RTCSdpType::Answer => {
-                            let next_state = check_next_signaling_state(
-                                cur,
-                                RTCSignalingState::Stable,
-                                StateChangeOp::SetRemote,
-                                sd.sdp_type,
-                            );
-                            if next_state.is_ok() {
-                                let pending_local_description =
-                                    self.pending_local_description.take();
-
-                                let _pending_remote_description =
-                                    self.pending_remote_description.take();
-
-                                self.current_remote_description = Some(sd.clone());
-                                self.current_local_description = pending_local_description;
-                                self.transport_closed = rejects_every_media_section(&sd);
-                            }
-                            next_state
-                        }
-                        RTCSdpType::Rollback => {
-                            let next_state = check_next_signaling_state(
-                                cur,
-                                RTCSignalingState::Stable,
-                                StateChangeOp::SetRemote,
-                                sd.sdp_type,
-                            );
-                            if next_state.is_ok() {
-                                self.pending_remote_description = None;
-                                // Undo the transceiver associations/creations made by the
-                                // now-abandoned offer (RFC 9429, Section 5.7).
-                                self.rollback_transceivers()?;
-                            }
-                            next_state
-                        }
-                        // have-local-offer->SetRemote(pranswer)->have-remote-pranswer
-                        RTCSdpType::Pranswer => {
-                            let next_state = check_next_signaling_state(
-                                cur,
-                                RTCSignalingState::HaveRemotePranswer,
-                                StateChangeOp::SetRemote,
-                                sd.sdp_type,
-                            );
-                            if next_state.is_ok() {
-                                self.pending_remote_description = Some(sd.clone());
-                            }
-                            next_state
-                        }
-                        _ => Err(Error::ErrPeerConnStateChangeInvalid),
-                    }
-                } //_ => Err(Error::ErrPeerConnStateChangeUnhandled.into()),
+        match (op, sd.sdp_type) {
+            (StateChangeOp::SetLocal, RTCSdpType::Offer | RTCSdpType::Pranswer) => {
+                self.pending_local_description = Some(sd.clone());
             }
+            (StateChangeOp::SetRemote, RTCSdpType::Offer | RTCSdpType::Pranswer) => {
+                self.pending_remote_description = Some(sd.clone());
+            }
+            (StateChangeOp::SetLocal, RTCSdpType::Answer) => {
+                self.current_remote_description = self.pending_remote_description.take();
+                self.pending_local_description = None;
+                self.current_local_description = Some(sd.clone());
+                self.transport_closed = rejects_every_media_section(sd);
+            }
+            (StateChangeOp::SetRemote, RTCSdpType::Answer) => {
+                self.current_local_description = self.pending_local_description.take();
+                self.pending_remote_description = None;
+                self.current_remote_description = Some(sd.clone());
+                self.transport_closed = rejects_every_media_section(sd);
+            }
+            (_, RTCSdpType::Rollback) => {
+                self.pending_local_description = None;
+                self.pending_remote_description = None;
+                // Undo what the abandoned offer changed (RFC 9429, Section 5.7).
+                self.rollback_transceivers()?;
+                self.restore_last_stable_state();
+            }
+            (_, RTCSdpType::Unspecified) => return Err(Error::ErrPeerConnSDPTypeInvalidValue),
+        }
+
+        if matches!(sd.sdp_type, RTCSdpType::Answer) {
+            // W3C "set a session description": an answer resets [[LastCreatedOffer]] and
+            // [[LastCreatedAnswer]], so a description created for an exchange that is over
+            // cannot be applied to the next one.
+            self.last_offer.clear();
+            self.last_answer.clear();
+            self.last_stable_state = None;
+        }
+
+        let changed = self.signaling_state != next_state;
+        self.signaling_state = next_state;
+        let reached_stable = next_state == RTCSignalingState::Stable;
+        if reached_stable {
+            self.is_negotiation_ongoing = false;
+            // Negotiation has committed: any transceiver that was created while applying
+            // a remote offer is now part of the stable state, so clear the
+            // created-by-remote flag. This keeps the flag meaning exactly "created by the
+            // current pending (uncommitted) offer", which is what rollback relies on.
+            for t in &mut self.rtp_transceivers {
+                t.set_created_by_remote_description(false);
+            }
+        }
+        // W3C "set a session description": "If connection.[[SignalingState]] changed above,
+        // fire an event named signalingstatechange". An offer applied over a pending offer and
+        // a repeated provisional answer change nothing.
+        if changed {
+            self.do_signaling_state_change(next_state);
+        }
+        if reached_stable {
+            // W3C "update the negotiation-needed flag" is re-run each time the connection
+            // returns to a stable signaling state. A transceiver added while the
+            // connection was mid-negotiation (`negotiation_needed_op` step 2.3 bails out
+            // when not stable) had its negotiation-needed check deferred; re-running it now
+            // fires `OnNegotiationNeededEvent` if anything is still un-negotiated.
+            self.trigger_negotiation_needed();
+        }
+        Ok(())
+    }
+
+    /// Brings back what the last completed exchange negotiated, after a rollback (W3C
+    /// webrtc-pc "set a session description", the rollback steps; RFC 9429 section 5.7: "the
+    /// state of the session is restored to the state it was in before the offer"): the
+    /// negotiated codecs and header extensions, each transceiver's codecs, the repair (RTX /
+    /// FEC) flows of its sender's encodings, and what the remote description said about
+    /// trickling. The transceivers the offer created are already gone
+    /// ([`Self::rollback_transceivers`]); one the offer stopped stays stopped, as the stop
+    /// algorithm is not undone.
+    fn restore_last_stable_state(&mut self) {
+        let Some(saved) = self.last_stable_state.take() else {
+            return;
         };
-
-        match next_state {
-            Ok(next_state) => {
-                self.signaling_state = next_state;
-                let reached_stable = self.signaling_state == RTCSignalingState::Stable;
-                if reached_stable {
-                    self.is_negotiation_ongoing = false;
-                    // Negotiation has committed: any transceiver that was created while applying
-                    // a remote offer is now part of the stable state, so clear the
-                    // created-by-remote flag. This keeps the flag meaning exactly "created by the
-                    // current pending (uncommitted) offer", which is what rollback relies on.
-                    for t in &mut self.rtp_transceivers {
-                        t.set_created_by_remote_description(false);
-                    }
-                }
-                self.do_signaling_state_change(next_state);
-                if reached_stable {
-                    // W3C "update the negotiation-needed flag" is re-run each time the connection
-                    // returns to a stable signaling state. A transceiver added while the
-                    // connection was mid-negotiation (`negotiation_needed_op` step 2.3 bails out
-                    // when not stable) had its negotiation-needed check deferred; re-running it now
-                    // fires `OnNegotiationNeededEvent` if anything is still un-negotiated.
-                    self.trigger_negotiation_needed();
-                }
-                Ok(())
-            }
-            Err(err) => Err(err),
+        self.media_engine = saved.media_engine;
+        self.can_trickle_ice_candidates = saved.can_trickle_ice_candidates;
+        self.transport_closed = saved.transport_closed;
+        // No transceiver is removed while an offer is pending, other than the ones the offer
+        // created, which come after every transceiver that existed when it was applied: the
+        // saved ones are the first of the list, in order.
+        for (transceiver, saved) in self
+            .rtp_transceivers
+            .iter_mut()
+            .zip(&saved.rtp_transceivers)
+        {
+            transceiver.restore_negotiated_state(saved);
         }
+        self.pipeline_context
+            .interceptor_handler_context
+            .ssrc_owners
+            .clear();
+        self.pipeline_context
+            .endpoint_handler_context
+            .ssrc_owners
+            .clear();
+    }
+
+    /// The part of the connection a description changes that is not a transport, copied so
+    /// that a description which fails while it is applied leaves all of it as it was (RFC 9429
+    /// sections 5.9 and 5.10: "the session state MUST be restored to its state before").
+    pub(super) fn description_snapshot(&self) -> DescriptionSnapshot {
+        DescriptionSnapshot {
+            signaling_state: self.signaling_state,
+            current_local_description: self.current_local_description.clone(),
+            pending_local_description: self.pending_local_description.clone(),
+            current_remote_description: self.current_remote_description.clone(),
+            pending_remote_description: self.pending_remote_description.clone(),
+            media_engine: self.media_engine.clone(),
+            rtp_transceivers: self.rtp_transceivers.clone(),
+            removed_transceivers: self.removed_transceivers.len(),
+            can_trickle_ice_candidates: self.can_trickle_ice_candidates,
+            trickled_remote_candidates: self.trickled_remote_candidates,
+            last_offer: self.last_offer.clone(),
+            last_answer: self.last_answer.clone(),
+            transport_closed: self.transport_closed,
+            negotiation_needed_state: self.negotiation_needed_state,
+            is_negotiation_ongoing: self.is_negotiation_ongoing,
+            last_stable_state: self.last_stable_state.clone(),
+            events: self.pipeline_context.event_outs.len(),
+        }
+    }
+
+    /// Puts back what [`Self::description_snapshot`] copied, dropping the events queued since.
+    pub(super) fn restore_description_snapshot(&mut self, snapshot: DescriptionSnapshot) {
+        self.signaling_state = snapshot.signaling_state;
+        self.current_local_description = snapshot.current_local_description;
+        self.pending_local_description = snapshot.pending_local_description;
+        self.current_remote_description = snapshot.current_remote_description;
+        self.pending_remote_description = snapshot.pending_remote_description;
+        self.media_engine = snapshot.media_engine;
+        self.rtp_transceivers = snapshot.rtp_transceivers;
+        self.removed_transceivers
+            .truncate(snapshot.removed_transceivers);
+        self.can_trickle_ice_candidates = snapshot.can_trickle_ice_candidates;
+        self.trickled_remote_candidates = snapshot.trickled_remote_candidates;
+        self.last_offer = snapshot.last_offer;
+        self.last_answer = snapshot.last_answer;
+        self.transport_closed = snapshot.transport_closed;
+        self.negotiation_needed_state = snapshot.negotiation_needed_state;
+        self.is_negotiation_ongoing = snapshot.is_negotiation_ongoing;
+        self.last_stable_state = snapshot.last_stable_state;
+        self.pipeline_context.event_outs.truncate(snapshot.events);
+        self.pipeline_context
+            .interceptor_handler_context
+            .ssrc_owners
+            .clear();
+        self.pipeline_context
+            .endpoint_handler_context
+            .ssrc_owners
+            .clear();
+        self.update_cryptex();
     }
 
     pub(super) fn do_signaling_state_change(&mut self, new_state: RTCSignalingState) {
@@ -1042,6 +1172,85 @@ impl RTCPeerConnection {
         // machine settles back to `stable` (see `set_description`).
 
         Ok(())
+    }
+
+    /// Gives each transceiver the `a=rtcp-xr` attribute (RFC 3611 section 5.1) and the `b=`
+    /// lines of its section of a remote description (RFC 9429 section 5.10): `b=TIAS` (bits per second, RFC 3890), else `b=AS` (kilobits per second,
+    /// RFC 8866 section 5.8), is the most this endpoint may send there; `b=RS` and `b=RR`
+    /// (RFC 3556) are the RTCP bandwidth of senders and receivers. A session-level `b=` line
+    /// and `b=CT` are ignored, as RFC 9429 section 5.10 says. A section without the lines
+    /// clears what an earlier description set.
+    pub(super) fn apply_remote_bandwidth(&mut self, remote: &SessionDescription) {
+        let transceiver_by_mid =
+            RTCPeerConnection::transceiver_index_by_mid(&self.rtp_transceivers);
+        for media in &remote.media_descriptions {
+            let Some(&i) =
+                get_mid_value(media).and_then(|mid| transceiver_by_mid.get(mid.as_str()))
+            else {
+                continue;
+            };
+            let of = |bandwidth_type: &str| {
+                media
+                    .bandwidth
+                    .iter()
+                    .find(|b| !b.experimental && b.bandwidth_type == bandwidth_type)
+                    .map(|b| b.bandwidth)
+            };
+            // RFC 3611 section 5.1: "a=rtcp-xr" at media level replaces the session's.
+            let rtcp_xr = media
+                .attribute(ATTR_KEY_RTCP_XR)
+                .map(|value| value.map(str::to_owned))
+                .or_else(|| {
+                    remote
+                        .attributes
+                        .iter()
+                        .find(|a| a.key == ATTR_KEY_RTCP_XR)
+                        .map(|a| a.value.clone())
+                })
+                .map(|value| {
+                    value
+                        .unwrap_or_default()
+                        .split_whitespace()
+                        .map(str::to_owned)
+                        .collect()
+                });
+            self.rtp_transceivers[i].set_remote_rtcp_xr(rtcp_xr);
+            self.rtp_transceivers[i].set_remote_bandwidth(RTCRemoteBandwidth {
+                max_bitrate: of("TIAS").or_else(|| of("AS").map(|kbps| kbps.saturating_mul(1000))),
+                rtcp_senders_bitrate: of("RS"),
+                rtcp_receivers_bitrate: of("RR"),
+            });
+        }
+    }
+
+    /// What an applied answer negotiated for RTCP, section by section, given to the
+    /// transceivers: reduced-size RTCP is used when both the offer and the answer carry
+    /// `a=rtcp-rsize` (RFC 5506 section 5; RFC 9429 section 5.11: "If the answer does not
+    /// contain 'a=rtcp-rsize', ... reduced-size RTCP MUST NOT be used"). The senders' and
+    /// receivers' parameters report it (`rtcp.reduced_size`), which is what an RTCP session
+    /// reads to choose between compound and reduced-size packets.
+    pub(super) fn apply_negotiated_rtcp(
+        &mut self,
+        offer: &SessionDescription,
+        answer: &SessionDescription,
+    ) {
+        let transceiver_by_mid =
+            RTCPeerConnection::transceiver_index_by_mid(&self.rtp_transceivers);
+        for (offered, answered) in offer
+            .media_descriptions
+            .iter()
+            .zip(&answer.media_descriptions)
+        {
+            let Some(&i) =
+                get_mid_value(answered).and_then(|mid| transceiver_by_mid.get(mid.as_str()))
+            else {
+                continue;
+            };
+            let reduced_size = !is_rejected_media(answered)
+                && offered.has_attribute(ATTR_KEY_RTCPRSIZE)
+                && answered.has_attribute(ATTR_KEY_RTCPRSIZE);
+            self.rtp_transceivers[i].set_rtcp_reduced_size(reduced_size);
+        }
     }
 
     /// Gives each m= section of a remote description that has no `a=mid` one (RFC 9429,
@@ -1260,10 +1469,25 @@ impl RTCPeerConnection {
                     && transceiver.direction().has_recv()
             }) && let Some(receiver) = transceiver.receiver_mut()
             {
+                // The MediaStreams the track is in, one per `a=msid` line (RFC 8830 section 2).
+                receiver.set_streams(incoming_track.stream_ids.clone());
+
                 if is_same_remote_track(receiver, &incoming_track) {
                     // Keep SSRCs and codecs learned from RTP; the sender may no longer attach
                     // the MID/RID header extension needed to learn them again.
                     continue;
+                }
+
+                // An `a=msid` without appdata names no track: "the recipient can assign the
+                // track ID itself" (RFC 8830 section 3; RFC 9429 section 5.2.1 has senders
+                // write that form). The receiver's track keeps the id it was given before.
+                let mut incoming_track = incoming_track;
+                if incoming_track.track_id.is_empty() {
+                    incoming_track.track_id = if receiver.track().track_id().is_empty() {
+                        math_rand_alpha(16)
+                    } else {
+                        receiver.track().track_id().clone()
+                    };
                 }
 
                 let mut receive_codings = vec![];
@@ -2267,7 +2491,10 @@ fn is_same_remote_track(
     incoming_track: &sdp::TrackDetails,
 ) -> bool {
     let track = receiver.track();
-    if track.track_id() != &incoming_track.track_id
+    // A description without msid-appdata leaves the track id to this side: any id it gave
+    // the track is the same track.
+    if (!incoming_track.track_id.is_empty() && track.track_id() != &incoming_track.track_id)
+        || track.track_id().is_empty()
         || track.stream_id() != &incoming_track.stream_id
     {
         return false;
@@ -2326,6 +2553,22 @@ pub(crate) fn answered_direction(
         offered
     };
     local.intersect(offered.reverse())
+}
+
+/// `a=rtcp-xr` (RFC 3611 section 5.1).
+const ATTR_KEY_RTCP_XR: &str = "rtcp-xr";
+
+/// Whether the offerer-tagged section of `offer` (the first tag of its BUNDLE group that is not
+/// rejected, RFC 9143 section 7.2) carries `a=rtcp-mux-only`.
+fn offerer_tagged_section_is_rtcp_mux_only(offer: &SessionDescription) -> bool {
+    bundle_group_mids(offer)
+        .into_iter()
+        .find_map(|tag| {
+            offer.media_descriptions.iter().find(|media| {
+                get_mid_value(media).is_some_and(|mid| mid == tag) && !is_rejected_media(media)
+            })
+        })
+        .is_some_and(|media| media.has_attribute(ATTR_KEY_RTCP_MUX_ONLY))
 }
 
 /// Whether the description has m-sections and rejects every one (port 0): a completed
