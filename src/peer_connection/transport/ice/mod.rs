@@ -274,6 +274,11 @@ impl IceTransport {
         self.agent.has_pending_restart()
     }
 
+    /// Forgets a staged ICE restart; see [`ice::Agent::discard_restart_credentials`].
+    pub(crate) fn discard_restart_credentials(&mut self) {
+        self.agent.discard_restart_credentials();
+    }
+
     /// Applies a staged ICE restart, restarting the agent's timers at `now`.
     pub(crate) fn apply_restart(
         &mut self,
