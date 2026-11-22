@@ -403,6 +403,22 @@ impl RTCPeerConnection {
 
     fn offered_local_candidates(&self) -> Result<Vec<RTCIceCandidate>> {
         if self.ice_transport().has_pending_restart() {
+            // An answer to a restart offer (only an answer has a remote offer pending): the
+            // restart is applied with the answer (`defer_remote_transport`), and keeps the
+            // local candidates unless they are to be discarded; they are the new
+            // generation's, so the answer lists them.
+            let answers_restart = self
+                .pending_remote_transport
+                .as_ref()
+                .is_some_and(|pending| pending.ice_restart);
+            if answers_restart
+                && !self
+                    .setting_engine
+                    .candidates
+                    .discard_local_candidates_during_ice_restart
+            {
+                return self.ice_transport().get_local_candidates();
+            }
             return Ok(Vec::new());
         }
         self.ice_transport().get_local_candidates()
