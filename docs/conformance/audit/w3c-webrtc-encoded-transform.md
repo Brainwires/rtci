@@ -6,7 +6,7 @@ Scope. The API puts a transform between encoder and packetizer on the sender and
 
 Totals:
 
-- MUST: tested 18 / untested 5 / partial 7 / missing 11 / violated 0 / n-a 12
+- MUST: tested 18 / untested 5 / partial 10 / missing 8 / violated 0 / n-a 12
 - SHOULD: tested 0 / untested 0 / partial 0 / missing 0 / violated 0 / n-a 0
 - MAY: tested 1 / untested 0 / partial 0 / missing 0 / violated 0 / n-a 0
 
@@ -16,7 +16,7 @@ Totals:
 | ENCTRANS-2-2 | 2 | MUST | Every frame the depacketizer outputs goes through the transform before the decoder | tested | `src/peer_connection/message/mod.rs:420`, `rtc-media/src/io/sample_builder/mod.rs:1` | `test_sample_builder` | The application depacketizes (`Depacketizer`, `SampleBuilder`) and owns the step before its decoder |
 | ENCTRANS-2.1-1 | 2.1 | MUST | A transceiver's [[useSFrame]] is taken from its media description; if true SFrame RTP packetization is enabled | missing | `src/peer_connection/sdp/mod.rs:1` | - | No SFrame payload format in SDP (draft-ietf-avtcore-rtp-sframe), no per-transceiver flag |
 | ENCTRANS-2.1-2 | 2.1 | MUST | [[useSFrame]] is fixed before the transceiver is associated with an m= section, so SDP and transceiver agree | missing | - | - | - |
-| ENCTRANS-2.1.1-1 | 2.1.1 | MUST | A received frame carries captureTime and senderCaptureTimeOffset from the abs-capture-time extension, or interpolated from an earlier packet | missing | `rtc-rtp/src/extension/mod.rs:1` | - | No abs-capture-time header extension |
+| ENCTRANS-2.1.1-1 | 2.1.1 | MUST | A received frame carries captureTime and senderCaptureTimeOffset from the abs-capture-time extension, or interpolated from an earlier packet | partial | src/rtp_transceiver/rtp_receiver/internal.rs (capture_time_of) | the_absolute_capture_time_reaches_the_receivers_synchronization_source | the capture time and offset, from abs-capture-time or interpolated, are on the receiver's synchronization source; there is no per-frame metadata object (the application depacketizes) |
 | ENCTRANS-2.1.1-2 | 2.1.1 | MUST | A sent frame's captureTime is its capture timestamp | n/a | - | - | Capture is the application's |
 | ENCTRANS-2.1.1-3 | 2.1.1 | MUST | A transform cannot create frames or move them between streams | n/a | - | - | Guard on JS frame objects |
 | ENCTRANS-2.1.1-4 | 2.1.1 | MUST | A transform cannot reorder frames; it may delay or drop them | n/a | - | - | Guard on JS frame objects |
@@ -41,8 +41,8 @@ Totals:
 | ENCTRANS-4.1-3 | 4.1 | MUST | Metadata contributingSources: the CSRC list | untested | `src/peer_connection/message/mod.rs:420`, `src/rtp_transceiver/rtp_receiver/mod.rs:299` | - | Header field; no test sends CSRCs end to end |
 | ENCTRANS-4.1-4 | 4.1 | MUST | Metadata rtpTimestamp | tested | `src/peer_connection/message/mod.rs:420` | `tests/save_to_disk_vpx_interop.rs` | Header field |
 | ENCTRANS-4.1-5 | 4.1 | MUST | Metadata receiveTime: when the last packet of the frame was received | partial | `src/peer_connection/message/mod.rs:420` | - | `RTCMessage::RtpPacket` carries no arrival time; the application knows only when it called `handle_read`, and a jitter buffer delays packets |
-| ENCTRANS-4.1-6 | 4.1 | MUST | Metadata captureTime, relative to the time origin | missing | `rtc-rtp/src/extension/mod.rs:1` | - | No abs-capture-time |
-| ENCTRANS-4.1-7 | 4.1 | MUST | Metadata senderCaptureTimeOffset | missing | `rtc-rtp/src/extension/mod.rs:1` | - | No abs-capture-time |
+| ENCTRANS-4.1-6 | 4.1 | MUST | Metadata captureTime, relative to the time origin | partial | src/rtp_transceiver/rtp_receiver/internal.rs (capture_time_of) | the_absolute_capture_time_reaches_the_receivers_synchronization_source | as 2.1.1-1; on the capture system's NTP clock, not translated to the time origin |
+| ENCTRANS-4.1-7 | 4.1 | MUST | Metadata senderCaptureTimeOffset | partial | src/rtp_transceiver/rtp_receiver/internal.rs (capture_time_of) | the_absolute_capture_time_reaches_the_receivers_synchronization_source | as 2.1.1-1 |
 | ENCTRANS-4.1-8 | 4.1 | MUST | Metadata mimeType: the codec of the frame | tested | `src/rtp_transceiver/rtp_receiver/mod.rs:1` | `tests/codec_negotiation.rs` | The receiver's negotiated codecs map payload type to MIME type |
 | ENCTRANS-4.2-1 | 4.2 | MUST | Video metadata frameId: lower 16 bits match the dependency descriptor's frame_number when present | missing | `rtc-rtp/src/extension/mod.rs:1` | - | No AV1 dependency descriptor extension |
 | ENCTRANS-4.2-2 | 4.2 | MUST | Video metadata dependencies: frame ids referenced, from the dependency descriptor | missing | `rtc-rtp/src/extension/mod.rs:1` | - | - |
