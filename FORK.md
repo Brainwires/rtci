@@ -327,8 +327,8 @@ reason. Today there are two:
   sends up to the peer's `max-message-size`. Maintainer rule of 2026-11-22: the RFC behaviour is
   the default, the browsers' a setting
   (`SettingEngineBuilder::with_sctp_message_size_limit_without_interleaving(false)`). The SCTP
-  packet size is likewise smaller than upstream's over IPv4 (1135 bytes against 1191: RFC 8831
-  section 5), unless `with_sctp_mtu` sets it.
+  packet size is likewise smaller than upstream's over IPv4 (1135 bytes against 1191 under
+  DTLS 1.2, 1150 under DTLS 1.3: RFC 8831 section 5), unless `with_sctp_mtu` sets it.
 - `rtc-mdns`: an unanswered query ends after 30 seconds by default (upstream: never) and is
   retried at doubling intervals from one second (upstream: every `query_interval`, any
   value). `MdnsConfig::without_query_timeout` keeps a query alive; the interval floor is RFC
