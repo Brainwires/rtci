@@ -1,7 +1,6 @@
 use super::*;
 use bytes::Bytes;
 use rtp::Packet;
-use rtp::codec::h265::H265NALUHeader;
 use rtp::codec::h265::HevcPayloader;
 use rtp::packetizer::Payloader;
 
@@ -77,10 +76,21 @@ fn test_h26x_writer_h265_flushes_exact_full_tail_fragment() {
 
 #[test]
 fn test_h26x_writer_h265_fragmentation_preserves_layer_and_tid_bits() {
-    let payload_header = H265NALUHeader::new(0x28, 0x09);
-    let header = rebuild_h265_nalu_header(payload_header, 20);
-
-    assert_eq!(header, [0x28, 0x09]);
+    // LayerId 5, TID 3 in the payload header; FuType 20 (IDR_N_LP).
+    let mut writer = H26xWriter::new(Vec::<u8>::new(), true);
+    for payload in [
+        &[0x62u8, 0x2B, 0x80 | 20, 0xAA][..],
+        &[0x62, 0x2B, 0x40 | 20, 0xBB],
+    ] {
+        writer
+            .write_rtp(&Packet {
+                payload: Bytes::copy_from_slice(payload),
+                ..Default::default()
+            })
+            .unwrap();
+    }
+    // (20 << 9) | (5 << 3) | 3 = 0x282B.
+    assert_eq!(vec![0, 0, 0, 1, 0x28, 0x2B, 0xAA, 0xBB], writer.writer);
 }
 
 /// An H.265 FU NAL unit is bounded at `MAX_H265_FU_NALU_SIZE`: one whose end fragment never

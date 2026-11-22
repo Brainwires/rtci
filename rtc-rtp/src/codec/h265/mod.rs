@@ -12,7 +12,7 @@
 
 use bytes::{BufMut, Bytes, BytesMut};
 
-use super::h264::ANNEXB_NALUSTART_CODE;
+use super::h264::{ANNEXB_NALUSTART_CODE, annex_b_nal_units, don_diff};
 use crate::packetizer::{Depacketizer, Payloader};
 use shared::error::{Error, Result};
 
@@ -20,6 +20,8 @@ use shared::error::{Error, Result};
 mod h265_test;
 #[cfg(test)]
 mod partition_head_test;
+#[cfg(test)]
+mod rfc7798_test;
 #[cfg(test)]
 mod short_nal_test;
 
@@ -106,11 +108,159 @@ impl UnitType {
     }
 }
 
+/// Largest NAL unit reassembled from fragmentation units. Far above any real slice; a
+/// reassembly that would grow past it is dropped.
+pub const MAX_H265_FU_NALU_SIZE: usize = 4 * 1024 * 1024;
+/// The de-packetization buffer never holds more NAL units than this, whatever
+/// `sprop-depack-buf-nalus` and `sprop-max-don-diff` ask for.
+pub const MAX_DEPACKETIZATION_NAL_UNITS: usize = 4096;
+/// Nor more bytes than this.
+pub const MAX_DEPACKETIZATION_BYTES: usize = 32 * 1024 * 1024;
+
 #[derive(Default, Debug, Clone)]
 /// Packetizes H.265/HEVC NAL units into RTP payloads, fragmenting when needed.
-pub struct HevcPayloader;
+///
+/// By default the stream is one with `sprop-max-don-diff` equal to 0: no decoding order
+/// numbers, NAL units in decoding order. [`HevcPayloader::with_donl`] makes one for a stream
+/// whose `sprop-max-don-diff` is greater than 0, where every packet carries them (RFC 7798
+/// sections 4.4.1 to 4.4.3).
+pub struct HevcPayloader {
+    /// `sprop-max-don-diff` > 0: DONL and DOND fields are written.
+    donl: bool,
+    /// The decoding order number of the next NAL unit.
+    next_don: u16,
+}
 
 impl HevcPayloader {
+    /// A payloader for a stream whose `sprop-max-don-diff` is greater than 0: single NAL unit
+    /// packets and the first fragment of a NAL unit carry a DONL, and aggregation packets a
+    /// DONL for their first unit and a DOND for each other one (RFC 7798 sections 4.4.1 to
+    /// 4.4.3). NAL units are sent in the order given, which is decoding order, numbered from
+    /// `initial_don` upwards by one, so every DOND is 0.
+    pub fn with_donl(initial_don: u16) -> Self {
+        HevcPayloader {
+            donl: true,
+            next_don: initial_don,
+        }
+    }
+
+    /// The NAL units of an access unit that are sent: those with a whole two-byte header whose
+    /// type is a NAL unit type (below 48; 48 to 50 are this format's packet types, and they
+    /// are neither aggregated, fragmented nor nested: RFC 7798 sections 4.4.2 to 4.4.4).
+    fn sendable_nal_units(payload: &Bytes) -> Vec<Bytes> {
+        annex_b_nal_units(payload)
+            .into_iter()
+            .filter(|nalu| {
+                nalu.len() >= NAL_HEADER_SIZE
+                    && H265NALUHeader::new(nalu[0], nalu[1]).nalu_type()
+                        < H265NALU_AGGREGATION_PACKET_TYPE
+            })
+            .collect()
+    }
+
+    /// The packets of a stream with decoding order numbers.
+    fn payload_with_don(&mut self, mtu: usize, payload: &Bytes) -> Vec<Bytes> {
+        const DONL_SIZE: usize = 2;
+        const DOND_SIZE: usize = 1;
+
+        fn flush(pending: &mut Vec<(u16, Bytes)>, payloads: &mut Vec<Bytes>) {
+            let nalus: Vec<Bytes> = pending.iter().map(|(_, nalu)| nalu.clone()).collect();
+            match pending.len() {
+                0 => {}
+                1 => {
+                    // A single NAL unit packet: the NAL unit header, DONL, the rest.
+                    let (don, nalu) = &pending[0];
+                    let mut out = BytesMut::with_capacity(nalu.len() + DONL_SIZE);
+                    out.extend_from_slice(&nalu[..NAL_HEADER_SIZE]);
+                    out.put_u16(*don);
+                    out.extend_from_slice(&nalu[NAL_HEADER_SIZE..]);
+                    payloads.push(out.freeze());
+                }
+                _ => {
+                    let mut out = BytesMut::new();
+                    out.extend_from_slice(&HevcPayloader::aggregation_payload_header(&nalus));
+                    let mut previous = pending[0].0;
+                    for (i, (don, nalu)) in pending.iter().enumerate() {
+                        if i == 0 {
+                            out.put_u16(*don);
+                        } else {
+                            // DON = previous DON + DOND + 1.
+                            out.put_u8(don.wrapping_sub(previous).wrapping_sub(1) as u8);
+                        }
+                        previous = *don;
+                        out.put_u16(nalu.len() as u16);
+                        out.extend_from_slice(nalu);
+                    }
+                    payloads.push(out.freeze());
+                }
+            }
+            pending.clear();
+        }
+
+        let mut payloads = vec![];
+        let mut pending: Vec<(u16, Bytes)> = vec![];
+        let mut pending_size = 0;
+        for nalu in Self::sendable_nal_units(payload) {
+            let don = self.next_don;
+            self.next_don = self.next_don.wrapping_add(1);
+
+            if nalu.len() + DONL_SIZE > mtu || nalu.len() > u16::MAX as usize {
+                flush(&mut pending, &mut payloads);
+                // Fragmentation units: the first carries the DONL.
+                let header = H265NALUHeader::new(nalu[0], nalu[1]);
+                let data = &nalu[NAL_HEADER_SIZE..];
+                let fu_header_size = NAL_HEADER_SIZE + H265FRAGMENTATION_UNIT_HEADER_SIZE;
+                let (Some(first_size), Some(next_size)) = (
+                    mtu.checked_sub(fu_header_size + DONL_SIZE)
+                        .filter(|&size| size > 0),
+                    mtu.checked_sub(fu_header_size).filter(|&size| size > 0),
+                ) else {
+                    continue;
+                };
+                // Never one FU, and no FU with an empty payload: a NAL unit that would fit
+                // the first fragment is cut in two.
+                let first_len = if data.len() <= first_size {
+                    data.len().div_ceil(2)
+                } else {
+                    first_size
+                };
+                let (first, rest) = data.split_at(first_len);
+                if first.is_empty() || rest.is_empty() {
+                    continue;
+                }
+                let mut out = BytesMut::with_capacity(fu_header_size + DONL_SIZE + first.len());
+                out.extend_from_slice(&Self::fragmentation_payload_header(header));
+                out.put_u8(Self::fu_header(header.nalu_type(), true, false));
+                out.put_u16(don);
+                out.extend_from_slice(first);
+                payloads.push(out.freeze());
+                let last = rest.len().div_ceil(next_size) - 1;
+                for (i, fragment) in rest.chunks(next_size).enumerate() {
+                    let mut out = BytesMut::with_capacity(fu_header_size + fragment.len());
+                    out.extend_from_slice(&Self::fragmentation_payload_header(header));
+                    out.put_u8(Self::fu_header(header.nalu_type(), false, i == last));
+                    out.extend_from_slice(fragment);
+                    payloads.push(out.freeze());
+                }
+                continue;
+            }
+
+            let first_unit_size = DONL_SIZE + 2 + nalu.len();
+            let next_unit_size = DOND_SIZE + 2 + nalu.len();
+            if pending.is_empty() {
+                pending_size = NAL_HEADER_SIZE + first_unit_size;
+            } else if pending_size + next_unit_size > mtu {
+                flush(&mut pending, &mut payloads);
+                pending_size = NAL_HEADER_SIZE + first_unit_size;
+            } else {
+                pending_size += next_unit_size;
+            }
+            pending.push((don, nalu));
+        }
+        flush(&mut pending, &mut payloads);
+        payloads
+    }
+
     fn aggregation_payload_header(nalus: &[Bytes]) -> [u8; 2] {
         let mut f = false;
         let mut layer_id = u8::MAX;
@@ -156,7 +306,9 @@ impl HevcPayloader {
 
     /// Locates the NAL unit boundaries in an Annex B buffer.
     ///
-    /// Returns the offset of each start code and the length of the code that was matched.
+    /// Returns the offset of each start code and the length of the code that was matched:
+    /// four-byte codes, or three-byte codes when there is no four-byte one. A stream that
+    /// mixes the two is not split right by this; the payloader does not use it.
     pub fn parse(nalu: &Bytes) -> (Vec<usize>, usize) {
         let finder = memchr::memmem::Finder::new(&ANNEXB_NALUSTART_CODE);
         let nals = finder.find_iter(nalu).collect::<Vec<usize>>();
@@ -286,34 +438,16 @@ impl Payloader for HevcPayloader {
             return Ok(vec![]);
         }
 
+        if self.donl {
+            return Ok(self.payload_with_don(mtu, payload));
+        }
+
         let mut payloads = vec![];
         let mut aggregation_buffer = vec![];
 
-        let (nal_idxs, offset) = HevcPayloader::parse(payload);
-        if nal_idxs.is_empty() {
-            Self::emit(payload, mtu, &mut payloads);
-            return Ok(payloads);
-        }
-        let nal_len = nal_idxs.len();
-        for (i, start) in nal_idxs.iter().enumerate() {
-            let end = if (i + 1) < nal_len {
-                nal_idxs[i + 1]
-            } else {
-                payload.len()
-            };
-            let nalu = payload.slice((start + offset)..end);
-            if nalu.len() < NAL_HEADER_SIZE {
-                continue;
-            }
-
-            let payload_header = H265NALUHeader::new(nalu[0], nalu[1]);
-            if payload_header.is_aggregation_packet()
-                || payload_header.is_fragmentation_unit()
-                || payload_header.is_paci_packet()
-            {
-                continue;
-            }
-
+        // The NAL units of the access unit, split at their Annex B start codes of either
+        // length. A buffer without a start code is one NAL unit.
+        for nalu in Self::sendable_nal_units(payload) {
             if nalu.len() > mtu {
                 Self::flush_aggregation_buffer(&mut aggregation_buffer, mtu, &mut payloads);
                 Self::emit(&nalu, mtu, &mut payloads);
@@ -468,7 +602,9 @@ impl H265SingleNALUnitPacket {
 
     /// depacketize parses the passed byte slice and stores the result in the H265SingleNALUnitPacket this method is called upon.
     fn depacketize(&mut self, payload: &Bytes) -> Result<()> {
-        if payload.len() <= H265NALU_HEADER_SIZE {
+        // A NAL unit may be its two-byte header alone: end of sequence (36), end of
+        // bitstream (37).
+        if payload.len() < H265NALU_HEADER_SIZE {
             return Err(Error::ErrShortPacket);
         }
 
@@ -487,7 +623,7 @@ impl H265SingleNALUnitPacket {
 
         if self.might_need_donl {
             // sizeof(uint16)
-            if payload.len() <= 2 {
+            if payload.len() < 2 {
                 return Err(Error::ErrShortPacket);
             }
 
@@ -966,12 +1102,16 @@ impl H265PACIPacket {
 
     /// tsci returns the Temporal Scalability Control Information extension, if present.
     pub fn tsci(&self) -> Option<H265TSCI> {
-        if !self.f0() || self.phs_size() < 3 {
+        if !self.f0() || self.phs_size() < 3 || self.phes.len() < 3 {
             return None;
         }
 
+        // TL0PICIDX, IrapPicID, then S, E and RES: the first three octets of the PHES, in the
+        // high 24 bits of the value, which is where the accessors read them.
         Some(H265TSCI(
-            ((self.phes[0] as u32) << 16) | ((self.phes[1] as u32) << 8) | self.phes[0] as u32,
+            ((self.phes[0] as u32) << 24)
+                | ((self.phes[1] as u32) << 16)
+                | ((self.phes[2] as u32) << 8),
         ))
     }
 
@@ -1086,14 +1226,138 @@ impl Default for H265Payload {
     }
 }
 
+/// One NAL unit taken out of an RTP payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct H265NalUnit {
+    /// The NAL unit, its two-byte header included, without a start code or a length prefix.
+    pub data: Bytes,
+    /// Its decoding order number, on a stream that carries them (`sprop-max-don-diff` greater
+    /// than 0): the DONL of its packet, or the previous unit's DON plus DOND plus one inside an
+    /// aggregation packet (RFC 7798 sections 4.4.1 to 4.4.3).
+    pub don: Option<u16>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BufferedH265NalUnit {
+    unit: H265NalUnit,
+    /// AbsDon of RFC 7798 section 4.6: the DON unwrapped along the reception order.
+    abs_don: i64,
+}
+
+/// The de-packetization buffer of RFC 7798 section 6, for a stream whose `sprop-max-don-diff`
+/// is greater than 0: NAL units go in in reception order and come out in decoding order, by
+/// AbsDon (section 4.6).
+///
+/// A NAL unit leaves, the smallest AbsDon first, whenever the AbsDon values in the buffer span
+/// `sprop-max-don-diff` or more (condition A) or the buffer holds more than
+/// `sprop-depack-buf-nalus` NAL units (condition B).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct H265DepacketizationBuffer {
+    max_don_diff: i64,
+    depack_buf_nalus: usize,
+    units: Vec<BufferedH265NalUnit>,
+    /// The DON and AbsDon of the NAL unit received last.
+    last_received: Option<(u16, i64)>,
+    bytes: usize,
+}
+
+impl H265DepacketizationBuffer {
+    /// A buffer for a stream with these `sprop-max-don-diff` and `sprop-depack-buf-nalus`
+    /// media type parameters (RFC 7798 section 7.1; both are 0 to 32767).
+    pub fn new(sprop_max_don_diff: u16, sprop_depack_buf_nalus: u16) -> Self {
+        H265DepacketizationBuffer {
+            max_don_diff: i64::from(sprop_max_don_diff),
+            depack_buf_nalus: usize::from(sprop_depack_buf_nalus),
+            units: Vec::new(),
+            last_received: None,
+            bytes: 0,
+        }
+    }
+
+    /// NAL units in the buffer.
+    pub fn len(&self) -> usize {
+        self.units.len()
+    }
+
+    /// Whether the buffer holds no NAL unit.
+    pub fn is_empty(&self) -> bool {
+        self.units.is_empty()
+    }
+
+    fn due(&self) -> bool {
+        let mut abs_dons = self.units.iter().map(|buffered| buffered.abs_don);
+        let Some(first) = abs_dons.next() else {
+            return false;
+        };
+        let (smallest, greatest) = abs_dons
+            .fold((first, first), |(smallest, greatest), abs_don| {
+                (smallest.min(abs_don), greatest.max(abs_don))
+            });
+        // Condition A, condition B, and the bound.
+        greatest - smallest >= self.max_don_diff
+            || self.units.len() > self.depack_buf_nalus
+            || self.units.len() > MAX_DEPACKETIZATION_NAL_UNITS
+            || self.bytes > MAX_DEPACKETIZATION_BYTES
+    }
+
+    /// Stores a NAL unit and returns the NAL units that are now due, in decoding order. A NAL
+    /// unit without a DON is returned as it is.
+    pub fn push(&mut self, unit: H265NalUnit) -> Vec<H265NalUnit> {
+        let Some(don) = unit.don else {
+            return vec![unit];
+        };
+        let abs_don = match self.last_received {
+            Some((last_don, last_abs)) => last_abs + i64::from(don_diff(last_don, don)),
+            None => i64::from(don),
+        };
+        self.last_received = Some((don, abs_don));
+        self.bytes += unit.data.len();
+        self.units.push(BufferedH265NalUnit { unit, abs_don });
+
+        let mut out = vec![];
+        while self.due() {
+            // The NAL unit with the smallest AbsDon; the earliest received among equals.
+            let index = (0..self.units.len())
+                .min_by_key(|&i| self.units[i].abs_don)
+                .unwrap_or(0);
+            let buffered = self.units.remove(index);
+            self.bytes -= buffered.unit.data.len();
+            out.push(buffered.unit);
+        }
+        out
+    }
+
+    /// Empties the buffer, in order of increasing AbsDon: no more NAL units are coming.
+    pub fn flush(&mut self) -> Vec<H265NalUnit> {
+        let mut buffered = std::mem::take(&mut self.units);
+        self.bytes = 0;
+        buffered.sort_by_key(|buffered| buffered.abs_don);
+        buffered.into_iter().map(|buffered| buffered.unit).collect()
+    }
+}
+
 ///
 /// Packet implementation
 ///
 /// H265Packet represents a H265 packet, stored in the payload of an RTP packet.
+///
+/// As a [`Depacketizer`] it turns RTP payloads into NAL units, in an Annex B byte stream (or
+/// length-prefixed, see [`with_length_prefix`](H265Packet::with_length_prefix)): a single NAL
+/// unit packet's NAL unit, each NAL unit of an aggregation packet, a NAL unit reassembled from
+/// its fragmentation units, and whichever of those a PACI packet carries. Nothing of type 48
+/// to 63 is ever passed on (RFC 7798 section 6).
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct H265Packet {
     payload: H265Payload,
     might_need_donl: bool,
+    length_prefixed: bool,
+    /// The NAL unit being reassembled from fragmentation units: its header, then the data.
+    fu_buffer: Option<BytesMut>,
+    /// Its decoding order number, from the first fragment's DONL.
+    fu_don: Option<u16>,
+    /// The sequence number of the last packet given with one.
+    last_sequence_number: Option<u16>,
+    depacketization: Option<H265DepacketizationBuffer>,
 }
 
 impl H265Packet {
@@ -1101,6 +1365,31 @@ impl H265Packet {
     /// DONL may need to be parsed if `sprop-max-don-diff` is greater than 0 on the RTP stream.
     pub fn with_donl(&mut self, value: bool) {
         self.might_need_donl = value;
+    }
+
+    /// Emits each NAL unit with a four-byte big-endian length before it (the `hvcC` sample
+    /// format) in place of an Annex B start code.
+    pub fn with_length_prefix(&mut self, value: bool) {
+        self.length_prefixed = value;
+    }
+
+    /// Receives a stream whose `sprop-max-don-diff` is greater than 0 in decoding order: DONL
+    /// and DOND are parsed, and NAL units go through `buffer` before
+    /// [`depacketize`](Depacketizer::depacketize) returns them (RFC 7798 section 6).
+    pub fn with_depacketization_buffer(&mut self, buffer: H265DepacketizationBuffer) {
+        self.might_need_donl = true;
+        self.depacketization = Some(buffer);
+    }
+
+    /// The NAL units still in the de-packetization buffer, in decoding order and in the output
+    /// format of [`depacketize`](Depacketizer::depacketize): for the end of the stream.
+    pub fn flush_depacketization_buffer(&mut self) -> Bytes {
+        let units = self
+            .depacketization
+            .as_mut()
+            .map(H265DepacketizationBuffer::flush)
+            .unwrap_or_default();
+        self.format(&units)
     }
 
     /// payload returns the populated payload.
@@ -1112,12 +1401,48 @@ impl H265Packet {
     pub fn payload(&self) -> &H265Payload {
         &self.payload
     }
-}
 
-impl Depacketizer for H265Packet {
-    /// depacketize parses the passed byte slice and stores the result in the H265Packet this method is called upon
-    fn depacketize(&mut self, payload: &Bytes) -> Result<Bytes> {
-        if payload.len() <= H265NALU_HEADER_SIZE {
+    /// As [`depacketize`](Depacketizer::depacketize), given the packet's RTP sequence number:
+    /// when a packet is missing before this one, the fragments collected so far are discarded
+    /// with the rest of their NAL unit, in place of a NAL unit with a hole in it (RFC 7798
+    /// section 4.4.3). Give the packets in sequence number order.
+    ///
+    /// # Errors
+    ///
+    /// As [`depacketize`](Depacketizer::depacketize).
+    pub fn depacketize_with_sequence_number(
+        &mut self,
+        sequence_number: u16,
+        payload: &Bytes,
+    ) -> Result<Bytes> {
+        if let Some(last) = self.last_sequence_number
+            && sequence_number != last.wrapping_add(1)
+        {
+            self.fu_buffer = None;
+            self.fu_don = None;
+        }
+        self.last_sequence_number = Some(sequence_number);
+        self.depacketize(payload)
+    }
+
+    /// Whether a NAL unit may be passed to a decoder: a whole header and a type below 48.
+    fn is_nal_unit(data: &[u8]) -> bool {
+        data.len() >= H265NALU_HEADER_SIZE
+            && H265NALUHeader::new(data[0], data[1]).nalu_type() < H265NALU_AGGREGATION_PACKET_TYPE
+    }
+
+    /// The NAL units a payload completes, with their decoding order numbers when the stream
+    /// carries them: one for a single NAL unit packet, two or more for an aggregation packet,
+    /// none or one for a fragmentation unit, and those of the packet a PACI carries. The
+    /// de-packetization buffer is not involved. [`payload`](H265Packet::payload) is the
+    /// parsed packet afterwards.
+    ///
+    /// # Errors
+    ///
+    /// Fails for a payload cut short, a packet with the F bit set, and a reassembly over
+    /// [`MAX_H265_FU_NALU_SIZE`].
+    pub fn nal_units(&mut self, payload: &Bytes) -> Result<Vec<H265NalUnit>> {
+        if payload.len() < H265NALU_HEADER_SIZE {
             return Err(Error::ErrShortPacket);
         }
 
@@ -1129,32 +1454,158 @@ impl Depacketizer for H265Packet {
         if payload_header.is_paci_packet() {
             let mut decoded = H265PACIPacket::default();
             decoded.depacketize(payload)?;
-
+            if decoded.ctype() == H265NALU_PACI_PACKET_TYPE {
+                // A PACI carries a single NAL unit, an FU or an AP, not a PACI: there is
+                // nothing in it to pass on.
+                self.payload = H265Payload::H265PACIPacket(decoded);
+                return Ok(vec![]);
+            }
+            // The packet a PACI carries: its payload header is the PACI's with F and Type
+            // replaced by the A and cType fields, and its body is the PACI payload (RFC 7798
+            // section 4.4.4).
+            let mut header = (decoded.ctype() as u16) << 9;
+            header |= (payload_header.layer_id() as u16) << 3;
+            header |= payload_header.tid() as u16;
+            if decoded.a() {
+                header |= 1 << 15;
+            }
+            let mut carried = BytesMut::with_capacity(2 + decoded.payload.len());
+            carried.put_u16(header);
+            carried.extend_from_slice(&decoded.payload);
+            let units = self.nal_units(&carried.freeze());
             self.payload = H265Payload::H265PACIPacket(decoded);
+            units
         } else if payload_header.is_fragmentation_unit() {
             let mut decoded = H265FragmentationUnitPacket::default();
             decoded.with_donl(self.might_need_donl);
 
-            decoded.depacketize(payload)?;
+            if let Err(err) = decoded.depacketize(payload) {
+                self.fu_buffer = None;
+                self.fu_don = None;
+                return Err(err);
+            }
 
+            let fu_header = decoded.fu_header();
+            if fu_header.s() {
+                if fu_header.fu_type() < H265NALU_AGGREGATION_PACKET_TYPE {
+                    // The NAL unit header: the payload header with the FU's type.
+                    let mut header = (fu_header.fu_type() as u16) << 9;
+                    header |= (payload_header.layer_id() as u16) << 3;
+                    header |= payload_header.tid() as u16;
+                    let mut buffer = BytesMut::new();
+                    buffer.put_u16(header);
+                    self.fu_buffer = Some(buffer);
+                    self.fu_don = decoded.donl();
+                } else {
+                    // A fragmented aggregation packet, fragment or PACI: not a NAL unit.
+                    self.fu_buffer = None;
+                    self.fu_don = None;
+                }
+            }
+            let mut units = vec![];
+            if let Some(buffer) = &mut self.fu_buffer {
+                if buffer.len() + decoded.payload.len() > MAX_H265_FU_NALU_SIZE {
+                    // Bounded: a peer that never sends the end fragment must not grow this
+                    // without limit. Drop the partial NAL unit.
+                    self.fu_buffer = None;
+                    self.fu_don = None;
+                    self.payload = H265Payload::H265FragmentationUnitPacket(decoded);
+                    return Err(Error::ErrPacketTooBig);
+                }
+                buffer.extend_from_slice(&decoded.payload);
+                if fu_header.e()
+                    && let Some(buffer) = self.fu_buffer.take()
+                {
+                    units.push(H265NalUnit {
+                        data: buffer.freeze(),
+                        don: self.fu_don.take(),
+                    });
+                }
+            }
+            // A fragment whose start was lost has nothing to join: it is dropped.
             self.payload = H265Payload::H265FragmentationUnitPacket(decoded);
+            Ok(units)
         } else if payload_header.is_aggregation_packet() {
             let mut decoded = H265AggregationPacket::default();
             decoded.with_donl(self.might_need_donl);
 
             decoded.depacketize(payload)?;
 
+            let mut units = vec![];
+            let mut don = None;
+            if let Some(first) = decoded.first_unit() {
+                don = first.donl();
+                if Self::is_nal_unit(&first.nal_unit) {
+                    units.push(H265NalUnit {
+                        data: first.nal_unit(),
+                        don,
+                    });
+                }
+            }
+            for unit in decoded.other_units() {
+                // DON = the previous unit's DON + DOND + 1, modulo 65536.
+                don = don
+                    .zip(unit.dond())
+                    .map(|(don, dond)| don.wrapping_add(u16::from(dond)).wrapping_add(1));
+                // An aggregated aggregation packet, fragment or PACI is not a NAL unit.
+                if Self::is_nal_unit(&unit.nal_unit) {
+                    units.push(H265NalUnit {
+                        data: unit.nal_unit(),
+                        don,
+                    });
+                }
+            }
             self.payload = H265Payload::H265AggregationPacket(decoded);
+            Ok(units)
         } else {
             let mut decoded = H265SingleNALUnitPacket::default();
             decoded.with_donl(self.might_need_donl);
 
             decoded.depacketize(payload)?;
 
+            let mut units = vec![];
+            // Types 51 to 63 are reserved: not passed on.
+            if payload_header.nalu_type() < H265NALU_AGGREGATION_PACKET_TYPE {
+                let mut data = BytesMut::with_capacity(2 + decoded.payload.len());
+                data.put_u16(payload_header.0);
+                data.extend_from_slice(&decoded.payload);
+                units.push(H265NalUnit {
+                    data: data.freeze(),
+                    don: decoded.donl(),
+                });
+            }
             self.payload = H265Payload::H265SingleNALUnitPacket(decoded);
+            Ok(units)
         }
+    }
 
-        Ok(payload.clone())
+    /// NAL units as an Annex B byte stream, or length-prefixed.
+    fn format(&self, units: &[H265NalUnit]) -> Bytes {
+        let mut out = BytesMut::with_capacity(units.iter().map(|unit| 4 + unit.data.len()).sum());
+        for unit in units {
+            if self.length_prefixed {
+                out.put_u32(unit.data.len() as u32);
+            } else {
+                out.put(&*ANNEXB_NALUSTART_CODE);
+            }
+            out.put(&*unit.data);
+        }
+        out.freeze()
+    }
+}
+
+impl Depacketizer for H265Packet {
+    /// Parses one RTP payload and returns the NAL units it completes, each behind an Annex B
+    /// start code (or a length prefix): empty for a fragment that does not end its NAL unit.
+    fn depacketize(&mut self, payload: &Bytes) -> Result<Bytes> {
+        let mut units = self.nal_units(payload)?;
+        if let Some(buffer) = &mut self.depacketization {
+            units = units
+                .into_iter()
+                .flat_map(|unit| buffer.push(unit))
+                .collect();
+        }
+        Ok(self.format(&units))
     }
 
     /// is_partition_head checks if this is the head of a packetized nalu stream.

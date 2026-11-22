@@ -7,8 +7,8 @@
 use bytes::Bytes;
 
 use crate::codec::av1::Av1Depacketizer;
-use crate::codec::h264::H264Packet;
-use crate::codec::h265::H265Packet;
+use crate::codec::h264::{H264DeinterleavingBuffer, H264Packet};
+use crate::codec::h265::{H265DepacketizationBuffer, H265Packet};
 use crate::codec::opus::OpusPacket;
 use crate::codec::vp8::Vp8Packet;
 use crate::codec::vp9::Vp9Packet;
@@ -16,7 +16,7 @@ use crate::packetizer::Depacketizer;
 
 /// The depacketizer the first input byte selects.
 fn depacketizer(selector: u8) -> Box<dyn Depacketizer> {
-    match selector % 8 {
+    match selector % 10 {
         0 => Box::new(H264Packet::default()),
         1 => {
             let mut packet = H264Packet::default();
@@ -30,6 +30,14 @@ fn depacketizer(selector: u8) -> Box<dyn Depacketizer> {
             Box::new(packet)
         }
         4 => Box::new(Vp8Packet::default()),
+        8 => Box::new(
+            H264Packet::default().with_deinterleaving(H264DeinterleavingBuffer::new(3, Some(8))),
+        ),
+        9 => {
+            let mut packet = H265Packet::default();
+            packet.with_depacketization_buffer(H265DepacketizationBuffer::new(8, 3));
+            Box::new(packet)
+        }
         5 => Box::new(Vp9Packet::default()),
         6 => Box::new(Av1Depacketizer::new()),
         _ => Box::new(OpusPacket),
@@ -38,8 +46,9 @@ fn depacketizer(selector: u8) -> Box<dyn Depacketizer> {
 
 /// Stateful target: one depacketizer fed fuzzed payloads in sequence.
 ///
-/// The first byte picks the codec: H.264 (Annex B or AVC output), H.265 (with or without DONL),
-/// VP8, VP9, AV1 or Opus. Each payload after it is a flags byte (bit 0 is the RTP marker), a
+/// The first byte picks the codec: H.264 (Annex B or AVC output, or with the de-interleaving
+/// buffer of interleaved mode), H.265 (with or without DONL, or with the de-packetization
+/// buffer), VP8, VP9, AV1 or Opus. Each payload after it is a flags byte (bit 0 is the RTP marker), a
 /// two-byte length and the payload. Every payload goes through `is_partition_head`,
 /// `depacketize` and `is_partition_tail` on the same depacketizer.
 pub fn depacketize_sequence(mut data: &[u8]) {
