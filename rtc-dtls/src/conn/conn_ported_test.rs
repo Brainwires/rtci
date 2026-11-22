@@ -480,10 +480,14 @@ fn test_psk_hint_fail() -> Result<()> {
     Ok(())
 }
 
-/// No server: the client retransmits on its timer until the handshake deadline, then fails.
+/// No server: the client retransmits on its timer until the configured handshake deadline,
+/// then fails.
 #[test]
 fn test_client_timeout() -> Result<()> {
-    let mut client = test_client(builder(), true)?;
+    let mut client = test_client(
+        builder().with_handshake_timeout(Some(Duration::from_secs(30))),
+        true,
+    )?;
     client.handshake(Instant::now())?;
     drain(&mut client);
 

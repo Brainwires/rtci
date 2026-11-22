@@ -67,6 +67,8 @@ pub(crate) struct ServerStart {
     pub(crate) address_verified: bool,
     /// The cookie of this ClientHello, already verified by the endpoint, with what it holds.
     pub(crate) verified_retry: Option<(Vec<u8>, RetryCookie)>,
+    /// The endpoint's cookie secrets, when it left the cookie exchange to the association.
+    pub(crate) retry_keys: Option<RetryKeys>,
     /// The time the ClientHello arrived at, which a ticket it offers is checked against.
     pub(crate) now: Option<Instant>,
 }
@@ -128,6 +130,7 @@ impl Conn13 {
             conn.next_send_seq = 1;
         }
         conn.verified_retry = start.verified_retry;
+        conn.retry_keys = start.retry_keys;
         if let Err(refusal) = conn.on_client_hello(client_hello) {
             conn.refuse(refusal);
         }
@@ -152,6 +155,7 @@ impl Conn13 {
                 if epoch < EPOCH_APPLICATION {
                     return Err(unexpected());
                 }
+                self.message_epoch = epoch;
                 return self.on_post_handshake_message(handshake_type, body);
             }
             (_, CLIENT_HELLO | SERVER_HELLO) => 0,
@@ -854,15 +858,28 @@ impl Conn13 {
                 let opened = match self.verified_retry.take() {
                     Some((verified, opened)) if verified == cookie => Some(opened),
                     Some(_) => None,
-                    None => match &self.cookie_secret {
-                        Some(secret) => RetryCookie::open(
+                    None => match (&self.retry_keys, &self.cookie_secret) {
+                        // The endpoint's cookie, made by this association, another or the
+                        // endpoint itself.
+                        (Some(keys), _) => {
+                            let secrets: Vec<&[u8]> =
+                                keys.secrets.iter().map(|secret| secret.as_ref()).collect();
+                            RetryCookie::open(
+                                self.provider.as_ref(),
+                                &secrets,
+                                Some(keys.remote),
+                                cookie,
+                            )
+                            .map_err(internal)?
+                        }
+                        (None, Some(secret)) => RetryCookie::open(
                             self.provider.as_ref(),
                             &[secret.as_ref()],
                             None,
                             cookie,
                         )
                         .map_err(internal)?,
-                        None => None,
+                        (None, None) => None,
                     },
                 };
                 let opened = opened.ok_or_else(|| illegal(Error::ErrCookieMismatch))?;
@@ -1347,34 +1364,57 @@ impl Conn13 {
     /// Answers a first ClientHello with a HelloRetryRequest, from an association that runs
     /// the cookie exchange itself. Until the cookie comes back nothing is computed for the
     /// client: no key pair, no signature.
+    ///
+    /// The cookie is made with the endpoint's secret and bound to the client's address when
+    /// the endpoint handed them over (`retry_keys`), else with a secret of this association.
+    /// The HelloRetryRequest is kept, and sent again each time the ClientHello is repeated
+    /// (RFC 9147 sections 5.1 and 5.8.1): if it was lost, the client's retransmission is all
+    /// that can bring it. It is never sent on a timer.
     fn send_hello_retry_request(
         &mut self,
         client_hello: &[u8],
         negotiated: &Negotiated,
     ) -> std::result::Result<(), Refusal> {
-        let mut secret = vec![0u8; 32];
-        self.provider
-            .random()
-            .fill(&mut secret)
-            .map_err(|err| internal(Error::Crypto(err.to_string())))?;
-        let secret = SecretVec::new(secret);
-        let (hello_retry_request, _) = hello_retry_request(
-            self.provider.as_ref(),
-            secret.as_ref(),
-            None,
-            client_hello,
-            negotiated,
-        )
-        .map_err(internal)?;
-        self.cookie_secret = Some(secret);
-        let mut flight = Flight::new(FlightKind::Handshake);
+        let hello_retry_request = match &self.retry_keys {
+            Some(keys) => {
+                let secret = keys
+                    .secrets
+                    .first()
+                    .ok_or_else(|| internal(Error::Crypto("no cookie secret".to_owned())))?;
+                hello_retry_request(
+                    self.provider.as_ref(),
+                    secret.as_ref(),
+                    Some(keys.remote),
+                    client_hello,
+                    negotiated,
+                )
+                .map_err(internal)?
+                .0
+            }
+            None => {
+                let mut secret = vec![0u8; 32];
+                self.provider
+                    .random()
+                    .fill(&mut secret)
+                    .map_err(|err| internal(Error::Crypto(err.to_string())))?;
+                let secret = SecretVec::new(secret);
+                let (hello_retry_request, _) = hello_retry_request(
+                    self.provider.as_ref(),
+                    secret.as_ref(),
+                    None,
+                    client_hello,
+                    negotiated,
+                )
+                .map_err(internal)?;
+                self.cookie_secret = Some(secret);
+                hello_retry_request
+            }
+        };
+        let mut flight = Flight::new(FlightKind::HelloRetryRequest);
         flight.push(self.next_send_seq, 0, SERVER_HELLO, hello_retry_request);
         self.next_send_seq = self.next_send_seq.wrapping_add(1);
         self.state = HandshakeState::ServerWaitClientHello;
-        // A HelloRetryRequest is not retransmitted: the client's ClientHello is, and draws
-        // a new one. The server keeps nothing to time.
         self.send_flight(flight).map_err(internal)?;
-        self.flight = None;
         Ok(())
     }
 
@@ -1516,7 +1556,9 @@ impl Conn13 {
             }
         }
         // RFC 8446 section 4.4: the Finished of a post-handshake answer is keyed from
-        // client_application_traffic_secret_N.
+        // client_application_traffic_secret_N: the secret this side sends under, which is
+        // the one the answer is protected with (a KeyUpdate of this side's takes effect only
+        // when it is acknowledged, RFC 9147 section 8), and which the server reads it with.
         let base_key = self
             .local_application_secret()
             .ok_or_else(|| internal(Error::ErrCipherSuiteUnset))?;
@@ -1612,8 +1654,16 @@ impl Conn13 {
                 Ok(())
             }
             (FINISHED, Some(answer)) if answer.verified => {
+                // RFC 8446 section 4.4: keyed from client_application_traffic_secret_N, the
+                // client's current one, which is the one its Finished is protected under. In
+                // DTLS the two directions move to new keys apart (RFC 9147 section 8): a
+                // client that sent a KeyUpdate keeps its old keys until it is acknowledged,
+                // while this side reads its next ones from the KeyUpdate on. So the base
+                // key is the secret of the epoch the Finished arrived in, which is the one
+                // the client keyed it from, not this side's newest secret of the client's.
                 let base_key = self
-                    .remote_application_secret()
+                    .read_epoch_secret(self.message_epoch)
+                    .or(self.remote_application_secret())
                     .ok_or_else(|| internal(Error::ErrCipherSuiteUnset))?;
                 let schedule = self
                     .schedule

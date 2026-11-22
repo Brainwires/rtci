@@ -3,7 +3,7 @@
 //! (section 8), connection id updates (section 9) and alerts. The handshake messages
 //! themselves are in [`handshake`](super::handshake).
 
-use super::hello::{ClientOffer, RetryCookie};
+use super::hello::{ClientOffer, RetryCookie, RetryKeys};
 use super::key_schedule::{KeySchedule, Transcript};
 use super::messages::*;
 use super::record::*;
@@ -162,6 +162,12 @@ pub(crate) enum FlightKind {
     CertificateRequest,
     /// A client's answer to one: Certificate, CertificateVerify, Finished.
     Authentication,
+    /// A server's HelloRetryRequest. It has no timer (the client's ClientHello is what is
+    /// retransmitted, RFC 9147 section 5.8.1) and nothing acknowledges it; it is sent again
+    /// each time the ClientHello it answered is repeated, as often as it is (section 5.1: a
+    /// ClientHello without a valid cookie is answered with a HelloRetryRequest every time),
+    /// until the second ClientHello answers it.
+    HelloRetryRequest,
 }
 
 /// Messages sent together and retransmitted until acknowledged (RFC 9147 section 5.7).
@@ -227,6 +233,9 @@ struct ReadEpoch {
     next_expected: u64,
     /// How many records failed authentication under these keys (section 4.5.3).
     failures: u64,
+    /// The traffic secret the keys were made from: the base key of the Finished of a
+    /// post-handshake authentication that arrives in this epoch (RFC 8446 section 4.4).
+    secret: SecretVec,
 }
 
 /// What became of a record handed to the handshake layer.
@@ -382,12 +391,17 @@ pub(crate) struct Conn13 {
     /// The server's: the secret of the cookies of a cookie exchange it runs itself, and the
     /// cookie a caller has already verified for it.
     pub(crate) cookie_secret: Option<SecretVec>,
+    /// Server: the endpoint's cookie secrets and the client's address, when the endpoint
+    /// left the cookie exchange to this association (see [`RetryKeys`]).
+    pub(crate) retry_keys: Option<RetryKeys>,
     pub(crate) verified_retry: Option<(Vec<u8>, RetryCookie)>,
     pub(crate) address_verified: bool,
     pub(crate) client_certificate_expected: bool,
     /// Limits of the AEAD, which a test lowers to reach them.
     pub(crate) confidentiality_limit: Option<u64>,
     pub(crate) integrity_limit: Option<u64>,
+    /// The epoch of the record that completed the handshake message being processed.
+    pub(crate) message_epoch: u64,
 }
 
 impl Drop for Conn13 {
@@ -494,11 +508,13 @@ impl Conn13 {
             certificate_requested: None,
             peer_signature_scheme: None,
             cookie_secret: None,
+            retry_keys: None,
             verified_retry: None,
             address_verified: false,
             client_certificate_expected: false,
             confidentiality_limit: None,
             integrity_limit: None,
+            message_epoch: 0,
             cfg,
         }
     }
@@ -548,8 +564,17 @@ impl Conn13 {
             ),
             next_expected: 0,
             failures: 0,
+            secret: SecretVec::new(secret.to_vec()),
         });
         Ok(())
+    }
+
+    /// The peer's traffic secret of read epoch `epoch`, while this side still reads it.
+    pub(crate) fn read_epoch_secret(&self, epoch: u64) -> Option<&SecretVec> {
+        self.read
+            .iter()
+            .find(|read| read.epoch == epoch)
+            .map(|read| &read.secret)
     }
 
     /// This side's current application traffic secret (`..._application_traffic_secret_N`).
@@ -618,6 +643,7 @@ impl Conn13 {
         self.local_traffic_secret = None;
         self.remote_traffic_secret = None;
         self.cookie_secret = None;
+        self.retry_keys = None;
         self.offer = None;
     }
 
@@ -857,7 +883,10 @@ impl Conn13 {
     /// acknowledges all of it (RFC 9147 section 7.2).
     pub(crate) fn flight_answered(&mut self) {
         if let Some(flight) = &self.flight
-            && flight.kind == FlightKind::Handshake
+            && matches!(
+                flight.kind,
+                FlightKind::Handshake | FlightKind::HelloRetryRequest
+            )
         {
             self.answered = Some(flight.first_sent);
             self.flight = None;
@@ -895,7 +924,10 @@ impl Conn13 {
             .filter(|number| number.epoch <= ack_epoch || ack_epoch >= EPOCH_APPLICATION)
             .collect();
 
-        if let Some(mut flight) = self.flight.take() {
+        if let Some(mut flight) = self
+            .flight
+            .take_if(|flight| flight.kind != FlightKind::HelloRetryRequest)
+        {
             let progressed = Self::acknowledge(&mut flight, &numbers);
             if flight.acknowledged() {
                 self.answered = Some(flight.first_sent);
@@ -979,7 +1011,8 @@ impl Conn13 {
             | FlightKind::RequestConnectionId
             | FlightKind::NewSessionTicket
             | FlightKind::CertificateRequest
-            | FlightKind::Authentication => {}
+            | FlightKind::Authentication
+            | FlightKind::HelloRetryRequest => {}
         }
         self.prune_write_epochs();
     }
@@ -1062,10 +1095,10 @@ impl Conn13 {
         }
 
         if std::mem::take(&mut self.peer_retransmitted)
-            && self
-                .flight
-                .as_ref()
-                .is_some_and(|flight| flight.retransmissions < self.cfg.maximum_retransmit_number)
+            && self.flight.as_ref().is_some_and(|flight| {
+                flight.kind == FlightKind::HelloRetryRequest
+                    || flight.retransmissions < self.cfg.maximum_retransmit_number
+            })
         {
             // RFC 9147 section 5.8.1: the peer sent its flight again, so ours was lost.
             self.retransmit_handshake_flight()?;
@@ -1106,7 +1139,7 @@ impl Conn13 {
 
         let interval = self.retransmit_interval;
         for flight in self.flight.iter_mut().chain(self.post_handshake.iter_mut()) {
-            if std::mem::take(&mut flight.arm) {
+            if std::mem::take(&mut flight.arm) && flight.kind != FlightKind::HelloRetryRequest {
                 flight.timer = Some(now + interval);
                 if flight.retransmissions == 0 && flight.first_sent.is_none() {
                     flight.first_sent = Some(now);
@@ -1129,6 +1162,14 @@ impl Conn13 {
             return None;
         }
         Some(self.handshake_started? + self.cfg.handshake_timeout?)
+    }
+
+    /// How often the handshake flight under way has been sent again (by its timer or for a
+    /// repeat of the peer's flight).
+    pub(crate) fn handshake_retransmissions(&self) -> usize {
+        self.flight
+            .as_ref()
+            .map_or(0, |flight| flight.retransmissions)
     }
 
     pub(crate) fn next_timeout(&self) -> Option<Instant> {

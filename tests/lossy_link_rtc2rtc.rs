@@ -36,10 +36,16 @@
 //! A seed fixes the link, and as much of the engine as a test can reach: each peer draws its
 //! randomness from a generator seeded from the test's seed (its crypto provider's `random()`:
 //! ICE credentials, the tie-breaker and the 4 to 6 second consent intervals, DTLS randoms and
-//! cookies), and both are built at the virtual start time, so ICE takes the same course under
-//! every crypto provider. Not everything is seeded: the provider's own key generation and
-//! signatures, STUN transaction IDs and SCTP's tags and heartbeat jitter draw from the OS
-//! (`rand`), so the same seed can still take a different course where SCTP's heartbeats fall.
+//! cookies, SCTP's verification tags, initial TSNs, cookie key, HEARTBEAT nonces and jitter),
+//! and both are built at the virtual start time, so ICE takes the same course under every
+//! crypto provider and a failing seed fails the same way every time. Not everything is
+//! seeded: the provider's own key generation and signatures and STUN transaction IDs draw
+//! from the OS; they change bytes, not the course of a run (the link's losses and delays are
+//! drawn per datagram, whatever it holds).
+//!
+//! Nor may DTLS give a handshake up on its own clock while the path is alive: RFC 6347
+//! section 4.2.4 and RFC 9147 section 5.8 set no total limit on a handshake, and a peer
+//! connection's handshake ends on ICE failure (consent expiry), a fatal alert or a close.
 //!
 //! At every loss rate the consent rule is judged on every datagram, whatever the number of
 //! datagrams a run takes: a peer sends no application data (anything but STUN, RFC 7983)
@@ -369,10 +375,6 @@ enum Outcome {
     /// The SCTP association gave up by its retransmission limits before the channel opened,
     /// and the channel failed with an error (only where `lapse_allowed`, see the module docs).
     AssociationFailed,
-    /// The peer connection went `failed` while ICE stayed up: the DTLS handshake was given up
-    /// at its deadline (30 s, `rtc-dtls` `DEFAULT_HANDSHAKE_TIMEOUT`) before the channel
-    /// opened. Not ICE's doing; only where `dtls_give_up_allowed`.
-    DtlsGaveUp,
 }
 
 /// RFC 7675 Section 5.1: "Consent expires after 30 seconds."
@@ -396,7 +398,6 @@ fn session_over(
     open_within: Duration,
     deliver_within: Duration,
     lapse_allowed: bool,
-    dtls_give_up_allowed: bool,
 ) -> Result<Outcome> {
     let mut world = World::new(link, seed)?;
     world.peers[0].pc.create_data_channel(
@@ -451,12 +452,6 @@ fn session_over(
             let silent_for = world.now - failed.last_binding_success.unwrap_or(start).max(start);
             if lapse_allowed && silent_for >= CONSENT_EXPIRY {
                 return Ok(Outcome::ConsentLapsed);
-            }
-            if dtls_give_up_allowed
-                && !failed.ice_states.contains(&RTCIceConnectionState::Failed)
-                && world.peers.iter().all(|p| p.open.is_none())
-            {
-                return Ok(Outcome::DtlsGaveUp);
             }
             bail!(
                 "seed {seed}, {link:?}: a peer failed after {:?}, {silent_for:?} after the last \
@@ -556,7 +551,6 @@ fn a_session_over_a_link_with_loss_and_reordering_connects_and_delivers_everythi
             Duration::from_secs(30),
             Duration::from_secs(60),
             false,
-            false,
         )?;
     }
     Ok(())
@@ -578,7 +572,6 @@ fn a_session_over_a_link_with_ten_percent_loss_connects_and_delivers_everything(
             Duration::from_secs(30),
             Duration::from_secs(90),
             false,
-            false,
         )?;
     }
     Ok(())
@@ -599,7 +592,6 @@ fn a_session_over_a_link_with_thirty_percent_loss_fails_only_when_consent_lapses
             // delivery is slow; the bound is about the session not ending, not about speed.
             Duration::from_secs(900),
             true,
-            false,
         )?;
     }
     Ok(())
@@ -627,17 +619,17 @@ fn the_channel_opens_over_thirty_percent_loss_while_the_path_stays_up() -> Resul
         Duration::from_secs(400),
         Duration::from_secs(900),
         true,
-        false,
     )?;
     Ok(())
 }
 
 /// Seeds of a 41-seed sweep at 30 % loss where the session went `failed` at about 30 seconds
-/// while a Binding success response had reached the peer less than 30 seconds before. ICE is
-/// not what fails there: it stays connected (a connected pair fails only when its consent
+/// while a Binding success response had reached the peer less than 30 seconds before. ICE was
+/// not what failed there: it stayed connected (a connected pair fails only when its consent
 /// expires, RFC 7675 Section 5.1, and the consent rule is judged on every datagram); the peer
-/// connection fails because the DTLS handshake is given up at its 30 second deadline. This
-/// test holds ICE to the rule on those seeds and lets the DTLS deadline end the run.
+/// connection failed because the DTLS handshake was given up at a 30 second deadline of its
+/// own. RFC 6347 section 4.2.4 and RFC 9147 section 5.8 set no such limit, and the engine no
+/// longer has one by default: on these seeds the session fails only when consent lapses.
 #[test]
 fn ice_does_not_fail_while_consent_is_fresh_over_thirty_percent_loss() -> Result<()> {
     let mut outcomes = Vec::new();
@@ -651,10 +643,33 @@ fn ice_does_not_fail_while_consent_is_fresh_over_thirty_percent_loss() -> Result
                 Duration::from_secs(400),
                 Duration::from_secs(900),
                 true,
-                true,
             )?,
         ));
     }
     println!("30 % loss, outcome by seed: {outcomes:?}");
+    Ok(())
+}
+
+/// Seeds of a 400-seed sweep at 30 % loss on which, with the aws-lc-rs provider, the DTLS
+/// handshake did not complete in 400 seconds with ICE up and nothing failing. The hybrid
+/// X25519MLKEM768 key share makes the ClientHello two datagrams, and after unanswered
+/// retransmissions the client cuts it into up to eight (RFC 9147 section 4.4); the server
+/// endpoint dropped the association putting it together 60 seconds after it was made, which at
+/// a backed-off timer of 60 seconds is about when the next transmission comes, so fragments of
+/// different transmissions never added up, and the ones that came before the first fragment
+/// of a transmission were dropped. The association now lives on for two minutes after each
+/// datagram. Under ring the ClientHello is one datagram and these seeds take other courses.
+#[test]
+fn a_fragmented_client_hello_is_put_together_over_thirty_percent_loss() -> Result<()> {
+    for seed in [0x49, 0x5b, 0x81] {
+        session_over(
+            THIRTY_PERCENT,
+            seed,
+            50,
+            Duration::from_secs(400),
+            Duration::from_secs(900),
+            true,
+        )?;
+    }
     Ok(())
 }

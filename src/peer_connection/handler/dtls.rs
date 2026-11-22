@@ -575,8 +575,13 @@ impl<'a>
             return Ok(());
         };
 
-        // A handshake whose retransmissions run out fails here. That failure is reported as the
-        // transport's state, not as an error, so the other handlers still get their timeout.
+        // The DTLS handshake sets no deadline of its own (RFC 6347 section 4.2.4 and RFC 9147
+        // section 5.8 define the retransmission timer and no total limit): while ICE says the
+        // path is alive its flights are retransmitted, at most once a minute, and what ends a
+        // handshake is ICE (consent expiry or failure, which fails the peer connection), a
+        // fatal alert or a close. Only a deadline configured on the association fails it here.
+        // That failure is reported as the transport's state, not as an error, so the other
+        // handlers still get their timeout.
         let remotes: Vec<SocketAddr> = dtls_endpoint.get_connections_keys().copied().collect();
         let mut failed = false;
         let mut timeout_error = None;

@@ -217,14 +217,18 @@ fn an_ordinary_retransmission_does_not_fail_the_association() -> Result<()> {
     Ok(())
 }
 
-/// A handshake nobody answers is retransmitted on a doubling timer and given up at the
-/// handshake deadline (30 seconds unless configured): the association fails then, and only
-/// then.
+/// A handshake nobody answers is retransmitted on a doubling timer and, where a handshake
+/// deadline is configured, given up there: the association fails then, and only then.
 #[test]
-fn a_handshake_nobody_answers_fails_at_its_deadline() -> Result<()> {
+fn a_handshake_nobody_answers_fails_at_its_configured_deadline() -> Result<()> {
     let start = Instant::now();
     let mut client = Endpoint::new(client_addr(), TransportProtocol::UDP, None);
-    client.connect(start, server_addr(), client_config()?, None)?;
+    let config = Arc::new(
+        client_builder()
+            .with_handshake_timeout(Some(Duration::from_secs(30)))
+            .build(true, None)?,
+    );
+    client.connect(start, server_addr(), config, None)?;
     take_transmits(&mut client);
 
     // Retransmissions 1, 3, 7 and 15 seconds in; the next would be at 31.
@@ -257,6 +261,31 @@ fn a_handshake_nobody_answers_fails_at_its_deadline() -> Result<()> {
     // RFC 6347 4.2.7: nothing is retransmitted after the association has failed.
     client.handle_timeout(server_addr(), now + Duration::from_secs(120))?;
     assert!(take_transmits(&mut client).is_empty());
+    Ok(())
+}
+
+/// RFC 6347 4.2.4 sets no total limit on a handshake, and by default neither does this crate:
+/// what ends a handshake nobody answers is the transport under it (ICE consent, in a peer
+/// connection), a fatal alert or the application. The flight goes out at most once a
+/// minute, the same flight each time, for as long as the association exists.
+#[test]
+fn by_default_a_handshake_nobody_answers_is_never_given_up() -> Result<()> {
+    let start = Instant::now();
+    let mut client = Endpoint::new(client_addr(), TransportProtocol::UDP, None);
+    client.connect(start, server_addr(), client_config()?, None)?;
+    let first = take_transmits(&mut client);
+    let mut at = start;
+    for _ in 0..120 {
+        at = client
+            .poll_timeout(&server_addr())
+            .expect("the retransmission timer stays armed");
+        client.handle_timeout(server_addr(), at)?;
+        let again = take_transmits(&mut client);
+        assert_eq!(again.len(), first.len(), "the same flight, no more");
+        assert!(!client.is_connection_failed(&server_addr()));
+    }
+    // 1 + 2 + ... + 32 seconds, then 114 minutes at 60 seconds.
+    assert_eq!(at.duration_since(start), Duration::from_secs(63 + 114 * 60));
     Ok(())
 }
 
@@ -1196,11 +1225,15 @@ fn a_new_handshake_from_the_same_address_replaces_the_association_once_it_comple
 }
 
 /// RFC 6347 4.2.8: the existing association survives a new handshake that does not complete.
-/// The association in the making goes at its deadline and the established one is as it was.
+/// The association in the making goes at its deadline (configured here: by default there is
+/// none) and the established one is as it was.
 #[test]
 fn a_new_handshake_that_does_not_complete_leaves_the_association_in_place() -> Result<()> {
     let start = Instant::now();
     let (mut old_client, mut server) = connected_pair()?;
+    server.set_server_config(Some(server_config_from(
+        ConfigBuilder::default().with_handshake_timeout(Some(Duration::from_secs(30))),
+    )?));
 
     let mut new_client = Endpoint::new(client_addr(), TransportProtocol::UDP, None);
     new_client.connect(start, server_addr(), client_config()?, None)?;
