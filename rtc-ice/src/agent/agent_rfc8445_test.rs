@@ -249,27 +249,38 @@ fn test_role_attribute_after_message_integrity_is_ignored() {
     a.tie_breaker = 100;
     let _ = sent(&mut a);
 
-    // The peer's check, up to MESSAGE-INTEGRITY.
-    let username = a.ufrag_pwd.local_credentials.ufrag.clone() + ":" + REMOTE_UFRAG;
-    let provider = provider();
+    // The genuine check carries FINGERPRINT: with anything appended it no longer verifies
+    // (and is no longer last), so the replay is discarded whole.
+    let mut m = peer_request(
+        &a,
+        vec![Box::new(AttrControlling(5)), Box::new(PriorityAttr(1000))],
+    );
+    // Appended by the attacker: ICE-CONTROLLED with tiebreaker 0 (we would "win" and switch).
+    m.add(ATTR_ICE_CONTROLLED, &0u64.to_be_bytes());
+    assert!(m.contains(ATTR_ICE_CONTROLLED));
+    assert!(deliver(&mut a, now, &m, REMOTE_A).is_err());
+    assert!(!a.is_controlling);
+    assert!(sent(&mut a).is_empty());
+
+    // A check without FINGERPRINT: the integrity still verifies with the attribute appended,
+    // and the attribute is not read.
     let mut m = Message::new();
     m.build(&[
         Box::new(BINDING_REQUEST),
         Box::new(TransactionId::new()),
-        Box::new(Username::new(ATTR_USERNAME, username)),
+        Box::new(Username::new(
+            ATTR_USERNAME,
+            a.ufrag_pwd.local_credentials.ufrag.clone() + ":" + REMOTE_UFRAG,
+        )),
         Box::new(AttrControlling(5)),
         Box::new(PriorityAttr(1000)),
         Box::new(MessageIntegrity::new_short_term_integrity_with_provider(
             a.ufrag_pwd.local_credentials.pwd.clone(),
-            provider.crypto(),
+            provider().crypto(),
         )),
     ])
     .unwrap();
-    // Added by the attacker after MESSAGE-INTEGRITY: ICE-CONTROLLED with tiebreaker 0 (we would
-    // "win" and switch), and the FINGERPRINT that goes last (RFC 8489 section 14.7), which
-    // anyone can compute.
     m.add(ATTR_ICE_CONTROLLED, &0u64.to_be_bytes());
-    FINGERPRINT.add_to(&mut m).unwrap();
     assert!(m.contains(ATTR_ICE_CONTROLLED));
 
     deliver(&mut a, now, &m, REMOTE_A).unwrap();

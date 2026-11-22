@@ -1085,16 +1085,18 @@ impl Agent {
         self.request_connectivity_check();
     }
 
-    /// Whether the peer signalled a candidate with this IP address, as an address (not behind
-    /// an mDNS name). A peer-reflexive remote candidate's address may be shown in statistics
-    /// only then (draft-ietf-mmusic-mdns-ice-candidates Section 3.3.1: it could be the address
-    /// an mDNS name hides).
+    /// Whether this IP address is one the peer's signalling led to: the address of a candidate
+    /// it signalled, or the address a `.local` name it signalled has been resolved to. A
+    /// peer-reflexive remote candidate's address may be shown in statistics only then
+    /// (draft-ietf-mmusic-mdns-ice-candidates Section 3.3.1: "a peer-reflexive remote
+    /// candidate could be constructed from a remote host IP address as a result of an ICE
+    /// connectivity check"; before the peer's name resolves, such a candidate would reveal
+    /// what the name hides). Once the agent has resolved the name itself, the address is no
+    /// news; the mDNS candidate's own entry still shows the name, never the address.
     pub fn is_signalled_remote_ip(&self, ip: IpAddr) -> bool {
-        self.remote_candidates.iter().any(|c| {
-            c.candidate_type() != CandidateType::PeerReflexive
-                && !c.address().ends_with(".local")
-                && c.addr().ip() == ip
-        })
+        self.remote_candidates
+            .iter()
+            .any(|c| c.candidate_type() != CandidateType::PeerReflexive && c.addr().ip() == ip)
     }
 
     /// The local candidates to signal to the peer: the ones the application added (with their
