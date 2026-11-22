@@ -8,9 +8,9 @@ Appendix A (Dependency Descriptor header extension, A.3 to A.9). Sections 1 to 3
 and A.10 carry no normative keyword. MUST NOT / SHALL / REQUIRED count as MUST, RECOMMENDED / SHOULD NOT
 as SHOULD, OPTIONAL as MAY.
 
-- MUST: tested 51 / untested 2 / partial 2 / missing 4 / violated 0 / n-a 12
+- MUST: tested 55 / untested 1 / partial 2 / missing 1 / violated 0 / n-a 12
 - SHOULD: tested 13 / untested 0 / partial 1 / missing 0 / violated 0 / n-a 1
-- MAY: tested 6 / untested 0 / partial 0 / missing 1 / violated 0 / n-a 3
+- MAY: tested 7 / untested 0 / partial 0 / missing 0 / violated 0 / n-a 3
 
 96 clauses (71 MUST, 15 SHOULD, 10 MAY), counted from the table.
 
@@ -80,17 +80,17 @@ produces, or what a decoder does, are `n-a` and say so.
 | AV1RTP-6.2-2 | 6.2 | MUST | `obu_extension_flag` is 1 in frame, frame header, redundant frame header and tile group OBUs of a scalable stream | n-a | | | Encoder sets OBU headers |
 | AV1RTP-6.2-3 | 6.2 | MUST | `obu_extension_flag` is 0 in a scalability metadata OBU | n-a | | | Encoder sets OBU headers |
 | AV1RTP-6.2-4 | 6.2 | MAY | `obu_extension_flag` may be 1 in a padding OBU | n-a | | | Encoder sets OBU headers. The payloader drops padding OBUs (`obu.rs:118`) |
-| AV1RTP-7.2-1 | 7.2 | MUST | An absent `profile` is inferred to be 0 | missing | `src/rtp_transceiver/fmtp/generic/mod.rs:9-25` | | No code names the parameter. An absent key matches any value, so a local `profile=1` codec is an exact match for a remote AV1 with no `profile`. With the default `profile=0` the outcome happens to be right |
-| AV1RTP-7.2-2 | 7.2 | MUST | An absent `level-idx` is inferred to be 5 | missing | | | Not interpreted anywhere; the raw fmtp string is handed to the application |
-| AV1RTP-7.2-3 | 7.2 | MUST | An absent `tier` is inferred to be 0 | missing | | | As above |
+| AV1RTP-7.2-1 | 7.2 | MUST | An absent `profile` is inferred to be 0 | tested | `src/rtp_transceiver/fmtp/av1/mod.rs` (`Av1Fmtp::profile`, `match_fmtp`) | `fmtp/av1/av1_test.rs::an_av1_format_is_its_profile_with_the_absent_parameters_inferred`, `tests/jsep_codec_parameters.rs::av1_formats_match_by_profile_and_the_answer_declares_its_own_parameters` | The profile is the format: an absent one is 0, another profile does not match |
+| AV1RTP-7.2-2 | 7.2 | MUST | An absent `level-idx` is inferred to be 5 | tested | `src/rtp_transceiver/fmtp/av1/mod.rs` (`Av1Fmtp::level_idx`) | `fmtp/av1/av1_test.rs::an_av1_format_is_its_profile_with_the_absent_parameters_inferred` | Read as 5 when absent; not part of the format (section 7.2.3) |
+| AV1RTP-7.2-3 | 7.2 | MUST | An absent `tier` is inferred to be 0 | tested | `src/rtp_transceiver/fmtp/av1/mod.rs` (`Av1Fmtp::tier`) | `fmtp/av1/av1_test.rs::an_av1_format_is_its_profile_with_the_absent_parameters_inferred` | Read as 0 when absent; not part of the format |
 | AV1RTP-7.2.1-1 | 7.2.1 | MUST | The media name in the `m=` line is `video` | untested | `media_engine.rs:146`, `:632` | | `tests/jsep_av1_fmtp.rs` finds the AV1 rtpmap but never looks at the `m=` line |
 | AV1RTP-7.2.1-2 | 7.2.1 | MUST | The rtpmap encoding name is `AV1` | tested | `media_engine.rs:146`, `:606` | `tests/jsep_av1_fmtp.rs::the_default_av1_codec_offers_profile_not_profile_id` | Fails ("the default codecs offer AV1") if no `AV1/` rtpmap is offered |
-| AV1RTP-7.2.1-3 | 7.2.1 | MUST | The rtpmap clock rate is 90000 | untested | `media_engine.rs:607` | | No test contains `AV1/90000`; the test above stops at `AV1/` |
+| AV1RTP-7.2.1-3 | 7.2.1 | MUST | The rtpmap clock rate is 90000 | tested | `media_engine.rs:607` | `tests/jsep_codec_parameters.rs::av1_formats_match_by_profile_and_the_answer_declares_its_own_parameters` | The answered rtpmap is `AV1/90000` |
 | AV1RTP-7.2.1-4 | 7.2.1 | MAY | `profile`, `level-idx`, `tier` appear in `a=fmtp` as semicolon-separated pairs | tested | `media_engine.rs:611` | `tests/jsep_av1_fmtp.rs::the_default_av1_codec_offers_profile_not_profile_id` | Default offers `profile=0` only; an application may register a codec with the others |
 | AV1RTP-7.2.1-5 | 7.2.1 | MUST | Receiver ignores fmtp parameters this spec does not define | tested | `fmtp/mod.rs:37-57`, `fmtp/generic/mod.rs:9-25` | `fmtp/generic/generic_test.rs::test_generic_fmtp_compare` ("OneHasExtraParam") | Generic rule: a key only one side has never fails the match. An unknown key both sides carry with different values does fail the exact match, then falls back to a MIME-only match (`rtp_codec.rs:179-188`) |
 | AV1RTP-7.2.2-1 | 7.2.2 | MUST | RID restrictions (`max-width`, `max-height`, `max-fps`, `max-fs`, `max-br`, `max-pps`, `max-bpp`) take the AV1 meanings | n-a | `src/peer_connection/sdp/mod.rs:1314-1319` | | Encoder applies restrictions. The engine keeps the restriction text as an opaque string (`SimulcastRid.params`) and interprets none |
 | AV1RTP-7.2.2-2 | 7.2.2 | MUST | With negotiated restrictions the stream has an operating point within them | n-a | | | Encoder's bitstream |
-| AV1RTP-7.2.3-1 | 7.2.3 | MAY | The answerer declares its own profile / level / tier (parameters are asymmetric) | missing | `src/rtp_transceiver/internal.rs:377-387`, `:421-422` | | By reading: the answer's codec entry is the remote codec cloned with the local payload type, so the answer repeats the offerer's fmtp instead of the local one. See Bugs 8 |
+| AV1RTP-7.2.3-1 | 7.2.3 | MAY | The answerer declares its own profile / level / tier (parameters are asymmetric) | tested | `media_engine.rs` `local_fmtp_line` (an exact AV1 match answers with the local fmtp) | `tests/jsep_codec_parameters.rs::av1_formats_match_by_profile_and_the_answer_declares_its_own_parameters` | The answer states this endpoint's own fmtp, not the offer's `level-idx` / `tier` |
 | AV1RTP-7.2.3-2 | 7.2.3 | MUST | The stream sent stays within the profile, level and tier the receiving agent declared | n-a | | | Encoder's job; application reads the fmtp |
 | AV1RTP-7.2.4-1 | 7.2.4 | MUST | Declarative SDP (RTSP, SAP): a receiver that cannot support the declared values rejects or stays out | n-a | | | RTSP and SAP, not WebRTC |
 | AV1RTP-8.1-1 | 8.1 | MUST | On FIR the sender starts a new coded video sequence for each SSRC named, as soon as possible | partial | `rtc-interceptor/src/keyframe.rs:58-64` | `keyframe.rs::pli_and_fir_reach_the_application` | The engine's part, handing the FIR to the application that owns the encoder, is done and tested. It does not filter by the FCI's SSRC or drop repeats (see `rfc5104.md`, RFC5104-4.3.1.2-3). `ccm fir` is offered for AV1 (`media_engine.rs:407`) |

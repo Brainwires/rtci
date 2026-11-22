@@ -100,7 +100,18 @@ impl KeySchedule {
         prefix: &'static str,
     ) -> Result<Self> {
         let zeros = vec![0u8; suite.hash_len()];
-        let early = hkdf_extract(crypto, suite.hmac(), &[], &zeros).map_err(crypto_error)?;
+        Self::with_psk(crypto, suite, prefix, &zeros)
+    }
+
+    /// Starts the schedule from a PSK: the Early Secret is `HKDF-Extract(0, PSK)` (RFC 8446
+    /// section 7.1).
+    pub(crate) fn with_psk(
+        crypto: &dyn RTCCrypto,
+        suite: Suite13,
+        prefix: &'static str,
+        psk: &[u8],
+    ) -> Result<Self> {
+        let early = hkdf_extract(crypto, suite.hmac(), &[], psk).map_err(crypto_error)?;
         Ok(Self {
             suite,
             prefix,
@@ -152,6 +163,14 @@ impl KeySchedule {
             transcript_hash,
             self.suite.hash_len(),
         )
+    }
+
+    /// `binder_key = Derive-Secret(Early Secret, "ext binder" | "res binder", "")` (RFC 8446
+    /// section 7.1): for a PSK provisioned out of band, or one from a ticket.
+    pub(crate) fn binder_key(&self, crypto: &dyn RTCCrypto, external: bool) -> Result<SecretVec> {
+        let empty_hash = crypto.hash(self.suite.hash(), &[]).map_err(crypto_error)?;
+        let label = if external { "ext binder" } else { "res binder" };
+        self.derive_secret(crypto, self.current.as_ref(), label, &empty_hash)
     }
 
     /// Moves from the current secret to the next one in the chain:
@@ -215,9 +234,43 @@ impl KeySchedule {
             "exp master",
             transcript_hash,
         )?);
-        // Nothing else is derived from the Main Secret here (no resumption), so it goes.
-        self.current = SecretVec::new(vec![]);
+        // The Main Secret stays for the resumption master secret, which comes from the
+        // transcript through the client's Finished.
         Ok(())
+    }
+
+    /// `resumption_master_secret = Derive-Secret(Main Secret, "res master", ClientHello ...
+    /// client Finished)` (RFC 8446 section 7.1). The Main Secret has no other use left, so it
+    /// is dropped.
+    pub(crate) fn take_resumption_master_secret(
+        &mut self,
+        crypto: &dyn RTCCrypto,
+        transcript_hash: &[u8],
+    ) -> Result<SecretVec> {
+        if self.current.is_empty() || self.exporter.is_none() {
+            return Err(Error::ErrCipherSuiteUnset);
+        }
+        let secret =
+            self.derive_secret(crypto, self.current.as_ref(), "res master", transcript_hash);
+        self.current = SecretVec::new(vec![]);
+        secret
+    }
+
+    /// The PSK of one ticket: `HKDF-Expand-Label(resumption_master_secret, "resumption",
+    /// ticket_nonce, Hash.length)` (RFC 8446 section 4.6.1).
+    pub(crate) fn resumption_psk(
+        &self,
+        crypto: &dyn RTCCrypto,
+        resumption_master_secret: &[u8],
+        ticket_nonce: &[u8],
+    ) -> Result<SecretVec> {
+        self.expand_label(
+            crypto,
+            resumption_master_secret,
+            "resumption",
+            ticket_nonce,
+            self.suite.hash_len(),
+        )
     }
 
     /// The verify_data of a Finished: `HMAC(finished_key, Transcript-Hash)`, the key expanded

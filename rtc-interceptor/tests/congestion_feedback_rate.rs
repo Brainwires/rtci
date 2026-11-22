@@ -46,7 +46,8 @@ impl RtcpRandom for Lcg {
     }
 }
 
-fn stream(format: CongestionFeedbackFormat) -> StreamInfo {
+/// Simulcast layer `index` of the video stream (layer 0 is the only one of a single stream).
+fn layer(format: CongestionFeedbackFormat, index: u32) -> StreamInfo {
     let mut rtcp_feedback = vec![RTCPFeedback {
         typ: "transport-cc".to_owned(),
         parameter: String::new(),
@@ -58,7 +59,7 @@ fn stream(format: CongestionFeedbackFormat) -> StreamInfo {
         });
     }
     StreamInfo {
-        ssrc: MEDIA_SSRC,
+        ssrc: MEDIA_SSRC + index,
         clock_rate: 90_000,
         mime_type: "video/VP8".to_owned(),
         payload_type: 96,
@@ -122,6 +123,11 @@ struct Measured {
     mean_feedback_octets: f64,
     /// The longest time between two datagrams with feedback.
     longest_gap: Duration,
+    /// The median time between two datagrams with feedback.
+    median_gap: Duration,
+    /// All of the receiver's RTCP as a share of the nominal session bandwidth (the RTCP
+    /// session's: 1 Mbit/s with video and no `b=` line), against the 5% of RFC 3550.
+    rtcp_share_of_session: f64,
     /// The share of the media packets sent that some feedback reported as received.
     coverage: f64,
     /// The longest a media packet waited from its arrival to the departure of the feedback
@@ -139,6 +145,18 @@ fn measure(
     generators: Generators,
     reduced_size: bool,
 ) -> Measured {
+    measure_layers(media_bitrate, 1, format, generators, reduced_size)
+}
+
+/// `measure` with the media split over `layers` simulcast streams of fifty packets a second
+/// each.
+fn measure_layers(
+    media_bitrate: f64,
+    layers: u32,
+    format: CongestionFeedbackFormat,
+    generators: Generators,
+    reduced_size: bool,
+) -> Measured {
     let epoch = Instant::now();
     let mut sender = endpoint(1, generators, reduced_size);
     let mut receiver = endpoint(2, generators, reduced_size);
@@ -150,14 +168,19 @@ fn measure(
             .handle_write(RtcpSessionControl::Start.into_packet(epoch))
             .unwrap();
     }
-    let info = stream(format);
-    sender.bind_local_stream(&info);
-    receiver.bind_remote_stream(&info);
+    for index in 0..layers {
+        let info = layer(format, index);
+        sender.bind_local_stream(&info);
+        receiver.bind_remote_stream(&info);
+    }
 
     // Fifty packets a second up to 1200 octets each, more packets above that: an audio
-    // stream at the low end, video at the high end.
-    let packet_octets = ((media_bitrate / 8.0 / 50.0) as usize).clamp(100, 1200);
+    // stream at the low end, video at the high end. With layers, each layer is such a
+    // stream at its share of the rate, and they take turns.
+    let packet_octets =
+        ((media_bitrate / f64::from(layers) / 8.0 / 50.0) as usize).clamp(100, 1200);
     let spacing = Duration::from_secs_f64(packet_octets as f64 * 8.0 / media_bitrate);
+    let mut gaps: Vec<Duration> = Vec::new();
 
     let mut to_receiver: VecDeque<(Instant, TaggedPacket)> = VecDeque::new();
     let mut to_sender: VecDeque<(Instant, TaggedPacket)> = VecDeque::new();
@@ -194,7 +217,7 @@ fn measure(
                     payload_type: 96,
                     sequence_number,
                     timestamp: (next_media.as_secs_f64() * 90_000.0) as u32,
-                    ssrc: MEDIA_SSRC,
+                    ssrc: MEDIA_SSRC + u32::from(sequence_number) % layers,
                     ..Default::default()
                 },
                 payload: vec![0u8; packet_octets - 20].into(),
@@ -304,6 +327,7 @@ fn measure(
                     datagram_octets += octets as u64;
                     if let Some(last) = last_feedback {
                         longest_gap = longest_gap.max(now.saturating_duration_since(last));
+                        gaps.push(now.saturating_duration_since(last));
                     }
                     last_feedback = Some(now);
                 }
@@ -319,7 +343,12 @@ fn measure(
         .iter()
         .filter(|sequence| reported.contains(sequence))
         .count();
+    gaps.sort();
     Measured {
+        median_gap: gaps.get(gaps.len() / 2).copied().unwrap_or_default(),
+        rtcp_share_of_session: receiver_rtcp_octets as f64 * 8.0
+            / window
+            / (1_000_000.0f64).max(media_bitrate),
         feedback_datagrams_per_second: feedback_datagrams as f64 / window,
         feedback_packets_per_second: feedback_packets as f64 / window,
         mean_datagram_octets: datagram_octets as f64 / feedback_datagrams.max(1) as f64,
@@ -410,14 +439,16 @@ fn feedback_rate_with_a_fixed_generation_interval() {
         Generators::Fixed,
         true,
     );
+    // With the nominal session bandwidth of a video session (1 Mbit/s without `b=` lines)
+    // the RTCP bandwidth holds a report every 100 ms at every rate: the fixed interval is
+    // what the adaptive one comes to.
     for (rate, measured) in compound {
-        if rate <= 64_000.0 {
-            assert!(
-                measured.longest_gap > Duration::from_secs(1),
-                "{rate} bit/s: {:?}",
-                measured.longest_gap
-            );
-        }
+        assert!(measured.coverage >= 0.999, "{rate} bit/s");
+        assert!(
+            measured.longest_gap <= Duration::from_millis(250),
+            "{rate} bit/s: {:?}",
+            measured.longest_gap
+        );
     }
 }
 
@@ -479,4 +510,198 @@ fn the_default_feedback_rate_is_enough_for_the_congestion_controller() {
         datagram_octets_at_the_lowest_rate[1] < datagram_octets_at_the_lowest_rate[0] - 10.0,
         "{datagram_octets_at_the_lowest_rate:?}"
     );
+}
+
+/// The receiver's side with a sender that starts low (RFC 3550 section 6.2: the RTCP bandwidth
+/// is a share of the nominal session bandwidth, not of what is being received): one video
+/// stream at 64, 100 and 300 kbit/s and 1 Mbit/s, and three simulcast layers of fifty packets
+/// a second each at 300 kbit/s and 1 Mbit/s, no `b=` line. From 300 kbit/s on the sender
+/// hears from the receiver at least every 100 ms on average and never waits 250 ms, and the
+/// receiver's RTCP stays inside the 5% of the session bandwidth.
+#[test]
+fn a_low_starting_sender_gets_feedback_every_100_ms() {
+    println!(
+        "\n{:>9} {:>6} {:>8} | {:>9} {:>9} {:>9} {:>9} {:>10}",
+        "media", "layers", "format", "dgrams/s", "median ms", "gap ms", "rtcp %", "% session"
+    );
+    for format in [
+        CongestionFeedbackFormat::TransportCc,
+        CongestionFeedbackFormat::Rfc8888,
+    ] {
+        for (rate, layers) in [
+            (64_000.0, 1),
+            (100_000.0, 1),
+            (300_000.0, 1),
+            (1_000_000.0, 1),
+            (300_000.0, 3),
+            (1_000_000.0, 3),
+        ] {
+            let measured = measure_layers(rate, layers, format, Generators::Default, false);
+            println!(
+                "{:>9.0} {:>6} {:>8} | {:>9.2} {:>9} {:>9} {:>9.2} {:>10.2}",
+                rate,
+                layers,
+                match format {
+                    CongestionFeedbackFormat::TransportCc => "twcc",
+                    CongestionFeedbackFormat::Rfc8888 => "rfc8888",
+                },
+                measured.feedback_datagrams_per_second,
+                measured.median_gap.as_millis(),
+                measured.longest_gap.as_millis(),
+                measured.rtcp_share * 100.0,
+                measured.rtcp_share_of_session * 100.0,
+            );
+            assert!(
+                measured.rtcp_share_of_session <= 0.05,
+                "{rate} bit/s, {layers} layers: RTCP {:.2}% of the session bandwidth",
+                measured.rtcp_share_of_session * 100.0
+            );
+            assert!(measured.coverage >= 0.999, "{rate} bit/s, {layers} layers");
+            if rate >= 300_000.0 {
+                assert!(
+                    measured.feedback_datagrams_per_second >= 9.5,
+                    "{rate} bit/s, {layers} layers: {:.2} feedback datagrams a second",
+                    measured.feedback_datagrams_per_second
+                );
+                assert!(
+                    measured.longest_gap < Duration::from_millis(250),
+                    "{rate} bit/s, {layers} layers: {:?} without feedback",
+                    measured.longest_gap
+                );
+            }
+        }
+    }
+}
+
+/// The engine's own congestion controller standing in for a browser's: a `Gcc` sender with
+/// bandwidth probing and RTX, three simulcast layers sharing its target (a seventh, two
+/// sevenths and four sevenths), fed only by what the engine's receiver (RTCP session and
+/// transport-wide feedback, the defaults, no `b=` line) sends back over a clean link with 20 ms
+/// each way. It reaches 2 Mbit/s from 300 kbit/s within a few seconds.
+#[test]
+fn a_gcc_sender_fed_by_the_receiver_ramps_to_2_mbits() {
+    use rtc_interceptor::{CongestionControlBuilder, Gcc, NackResponderBuilder, PacerBuilder};
+    let epoch = Instant::now();
+    let (controller, handle) = CongestionControlBuilder::new(Gcc::default())
+        .with_bandwidth_probing(true)
+        .build_with_handle();
+    let mut sender: Box<dyn Interceptor> = Box::new(
+        Registry::new()
+            .with(
+                Slot::RtcpSession,
+                RtcpSessionBuilder::new()
+                    .with_random(Lcg(1))
+                    .with_t_rr_interval(Duration::ZERO)
+                    .build(),
+            )
+            .with(Slot::CongestionControl, controller)
+            .with(Slot::TwccSender, TwccSenderBuilder::new().build())
+            .with(
+                Slot::Pacer,
+                PacerBuilder::new().with_target_bitrate(300_000.0).build(),
+            )
+            .with(Slot::NackResponder, NackResponderBuilder::new().build())
+            .build(),
+    );
+    let mut receiver = endpoint(2, Generators::Default, false);
+    for (chain, cname) in [(&mut sender, "sender"), (&mut receiver, "receiver")] {
+        chain
+            .handle_write(RtcpSessionControl::Cname(cname.to_owned()).into_packet(epoch))
+            .unwrap();
+        chain
+            .handle_write(RtcpSessionControl::Start.into_packet(epoch))
+            .unwrap();
+    }
+    let shares = [1.0 / 7.0, 2.0 / 7.0, 4.0 / 7.0];
+    for index in 0..3u32 {
+        let mut info = layer(CongestionFeedbackFormat::TransportCc, index);
+        info.rtcp_feedback.push(RTCPFeedback {
+            typ: "nack".to_owned(),
+            parameter: String::new(),
+        });
+        let mut local = info.clone();
+        local.ssrc_rtx = Some(MEDIA_SSRC + 100 + index);
+        local.payload_type_rtx = Some(97);
+        sender.bind_local_stream(&local);
+        receiver.bind_remote_stream(&info);
+    }
+
+    let mut to_receiver: VecDeque<(Instant, TaggedPacket)> = VecDeque::new();
+    let mut to_sender: VecDeque<(Instant, TaggedPacket)> = VecDeque::new();
+    let mut next_media = [Duration::ZERO; 3];
+    let mut sequence_numbers = [0u16; 3];
+    let mut reached = None;
+    let step = Duration::from_millis(1);
+    let mut elapsed = Duration::ZERO;
+    while elapsed < Duration::from_secs(30) && reached.is_none() {
+        let now = epoch + elapsed;
+        let target = handle.target_bitrate();
+        if target >= 2_000_000.0 {
+            reached = Some(elapsed);
+        }
+        for index in 0..3 {
+            while next_media[index] <= elapsed {
+                let layer_rate = (target * shares[index]).max(10_000.0);
+                let octets = ((layer_rate / 8.0 / 50.0) as usize).clamp(100, 1200);
+                let packet = rtp::Packet {
+                    header: rtp::header::Header {
+                        version: 2,
+                        payload_type: 96,
+                        sequence_number: sequence_numbers[index],
+                        timestamp: (next_media[index].as_secs_f64() * 90_000.0) as u32,
+                        ssrc: MEDIA_SSRC + index as u32,
+                        ..Default::default()
+                    },
+                    payload: vec![0u8; octets - 20].into(),
+                };
+                sequence_numbers[index] = sequence_numbers[index].wrapping_add(1);
+                sender
+                    .handle_write(TaggedPacket {
+                        now,
+                        transport: TransportContext::default(),
+                        message: AttributedPacket::new(Packet::Rtp(packet)),
+                    })
+                    .unwrap();
+                next_media[index] += Duration::from_secs_f64(octets as f64 * 8.0 / layer_rate);
+            }
+        }
+        while to_receiver.front().is_some_and(|(at, _)| *at <= now) {
+            let (_, mut packet) = to_receiver.pop_front().unwrap();
+            packet.now = now;
+            receiver.handle_read(packet).unwrap();
+        }
+        while to_sender.front().is_some_and(|(at, _)| *at <= now) {
+            let (_, mut packet) = to_sender.pop_front().unwrap();
+            packet.now = now;
+            sender.handle_read(packet).unwrap();
+        }
+        while sender.poll_read().is_some() {}
+        while receiver.poll_read().is_some() {}
+        for chain in [&mut sender, &mut receiver] {
+            for _ in 0..64 {
+                match chain.poll_timeout() {
+                    Some(at) if at <= now => chain.handle_timeout(now).unwrap(),
+                    _ => break,
+                }
+            }
+        }
+        while let Some(packet) = sender.poll_write() {
+            if matches!(&packet.message.packet, Packet::Rtcp(packets) if packets.is_empty()) {
+                continue;
+            }
+            to_receiver.push_back((now + ONE_WAY_DELAY, packet));
+        }
+        while let Some(packet) = receiver.poll_write() {
+            if matches!(&packet.message.packet, Packet::Rtcp(packets) if packets.is_empty()) {
+                continue;
+            }
+            to_sender.push_back((now + ONE_WAY_DELAY, packet));
+        }
+        elapsed += step;
+    }
+    println!("Gcc with three layers, fed by the receiver: 2 Mbit/s after {reached:?}");
+    let reached = reached.expect("the sender reaches 2 Mbit/s");
+    // Measured: 0.24 s; with the session bandwidth taken from the measured media rate
+    // (before), 0.58 s.
+    assert!(reached <= Duration::from_millis(400), "{reached:?}");
 }
