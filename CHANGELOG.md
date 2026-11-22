@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **abs-capture-time** (webrtc-extensions 8): `RTCRtpContributingSource` gains
+  `capture_timestamp` and `sender_capture_time_offset` (milliseconds; struct literals need
+  them). The receiver takes them from the `abs-capture-time` extension when it was negotiated,
+  or interpolates the capture time by RTP timestamp from the source's last one;
+  `RTCRtpSender::write_rtp_with_capture_time` stamps a packet.
+
 - **ice candidate pairs** (webrtc-extensions 7): new `RTCPeerConnectionEvent::
   OnIceCandidatePairAdd` / `OnIceCandidatePairRemove` (the enum is `#[non_exhaustive]`), new
   `ice::Event::CandidatePairAdded` / `CandidatePairRemoved` (an exhaustive match on the agent's

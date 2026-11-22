@@ -8,7 +8,7 @@ The draft's section numbers are generated when it is rendered; this file numbers
 
 Totals:
 
-- MUST: tested 32 / untested 6 / partial 6 / missing 17 / violated 0 / n-a 12
+- MUST: tested 34 / untested 6 / partial 6 / missing 15 / violated 0 / n-a 12
 - SHOULD: tested 1 / untested 0 / partial 0 / missing 0 / violated 0 / n-a 1
 - MAY: tested 0 / untested 0 / partial 0 / missing 1 / violated 0 / n-a 0
 
@@ -61,8 +61,8 @@ Totals:
 | WEBRTC-EXT-7.1-1 | 7.1 | MUST | RTCIceCandidatePairEvent carries the candidatePair | tested | src/peer_connection/event/mod.rs (OnIceCandidatePairAdd, OnIceCandidatePairRemove) | the_candidate_pairs_are_announced_and_listed |  |
 | WEBRTC-EXT-7.2-1 | 7.2 | MUST | Changing the selected pair picks the [[CandidatePairs]] item whose local and remote candidates match | tested | rtc-ice/src/agent/mod.rs (listed_pair) | select_candidate_pair_moves_the_data_to_the_pair |  |
 | WEBRTC-EXT-7.2-2 | 7.2 | MUST | Candidate match: identical candidate string, sdpMid, sdpMLineIndex and usernameFragment (null matching only null) | tested | src/peer_connection/transport/ice/mod.rs (find_candidate_pair) | remove_candidate_pair_drops_the_pair_and_both_calls_refuse_what_the_spec_refuses | candidate string, sdpMid, sdpMLineIndex, usernameFragment; the pairs the engine reports carry none of the last three |
-| WEBRTC-EXT-8-1 | 8 | MUST | RTCRtpContributingSource.captureTimestamp: the abs-capture-time of the packet, or interpolated from an earlier one, else undefined | missing | `src/rtp_transceiver/rtp_receiver/rtp_contributing_source.rs:14`, `rtc-rtp/src/extension/mod.rs:1` | - | No abs-capture-time header extension parser |
-| WEBRTC-EXT-8-2 | 8 | MUST | RTCRtpContributingSource.senderCaptureTimeOffset: the extension's estimated capture clock offset, or the most recent one, else undefined | missing | `src/rtp_transceiver/rtp_receiver/rtp_contributing_source.rs:14` | - | - |
+| WEBRTC-EXT-8-1 | 8 | MUST | RTCRtpContributingSource.captureTimestamp: the abs-capture-time of the packet, or interpolated from an earlier one, else undefined | tested | src/rtp_transceiver/rtp_receiver/internal.rs (capture_time_of), src/rtp_transceiver/rtp_sender/mod.rs (write_rtp_with_capture_time) | the_absolute_capture_time_reaches_the_receivers_synchronization_source | on synchronization sources; milliseconds on the capture system's NTP clock; interpolated by RTP timestamp at the payload type's clock rate |
+| WEBRTC-EXT-8-2 | 8 | MUST | RTCRtpContributingSource.senderCaptureTimeOffset: the extension's estimated capture clock offset, or the most recent one, else undefined | tested | src/rtp_transceiver/rtp_receiver/internal.rs (capture_time_of) | the_absolute_capture_time_reaches_the_receivers_synchronization_source | the last offset carried |
 | WEBRTC-EXT-9-1 | 9 | MUST | RTCDataChannel is exposed to and transferable to any Worker | n/a | - | - | Worker transfer is a binding concern |
 | WEBRTC-EXT-10-1 | 10 | SHOULD | Once both endpoints signalled a=cryptex, header extensions and CSRCs are encrypted with RFC 9335 | tested | `src/peer_connection/cryptex.rs:121`, `src/peer_connection/handler/srtp.rs:35` | `cryptex_aes_cm_test_vectors`, `require_accepts_cryptex_both_ways` | - |
 | WEBRTC-EXT-10.1-1 | 10.1 | MUST | "disable": no a=cryptex in offers or answers, a remote a=cryptex is not acted on | untested | `src/peer_connection/cryptex.rs:93` | - | - |
