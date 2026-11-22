@@ -1,9 +1,9 @@
 //! Where the BUNDLE attributes go (RFC 9143 section 7.1.3; RFC 8859 categories IDENTICAL and
 //! TRANSPORT). From the remote side both forms are taken: repeated in every bundled section,
 //! or in the tagged section only, whose attributes then apply to every bundled section. What
-//! this endpoint writes in answers and subsequent offers is the repeated form by default (as
-//! browsers do) and the tagged-only form with
-//! `SettingEngineBuilder::with_bundle_attributes_in_tagged_section_only`.
+//! this endpoint writes in answers and subsequent offers is the tagged-only form the RFC
+//! requires, and the repeated form (as browsers write) with
+//! `SettingEngineBuilder::with_bundle_attributes_repeated`.
 
 mod jsep_common;
 
@@ -24,14 +24,14 @@ const BUNDLE_ATTRIBUTES: [&str; 5] = [
     "a=rtcp-rsize",
 ];
 
-fn strict_peer() -> Result<RTCPeerConnection, Box<dyn std::error::Error>> {
+fn repeating_peer() -> Result<RTCPeerConnection, Box<dyn std::error::Error>> {
     let mut media_engine = MediaEngine::default();
     media_engine.register_default_codecs()?;
     Ok(RTCPeerConnectionBuilder::new()
         .with_media_engine(media_engine)
         .with_setting_engine(
             SettingEngineBuilder::new()
-                .with_bundle_attributes_in_tagged_section_only(true)
+                .with_bundle_attributes_repeated(true)
                 .build(),
         )
         .build(Instant::now())?)
@@ -70,9 +70,9 @@ fn every_transceiver_uses_reduced_size_rtcp(pc: &mut RTCPeerConnection) -> bool 
 }
 
 #[test]
-fn by_default_answers_and_later_offers_repeat_the_bundle_attributes() -> TestResult {
-    let mut a = default_peer()?;
-    let mut b = default_peer()?;
+fn when_asked_answers_and_later_offers_repeat_the_bundle_attributes() -> TestResult {
+    let mut a = repeating_peer()?;
+    let mut b = repeating_peer()?;
     add_media(&mut a)?;
     let (_, answer) = jsep_common::exchange(&mut a, &mut b)?;
     for section in carried(&answer) {
@@ -85,13 +85,36 @@ fn by_default_answers_and_later_offers_repeat_the_bundle_attributes() -> TestRes
     Ok(())
 }
 
+/// The initial offer is the one description whose bundled sections each carry the BUNDLE
+/// attributes (RFC 9143 section 7.1.3, first exception), bundle-only sections excepted.
 #[test]
-fn the_strict_form_has_them_in_the_tagged_section_only_and_is_applied_to_all() -> TestResult {
+fn an_initial_offer_has_them_in_every_section_that_is_not_bundle_only() -> TestResult {
     let mut a = default_peer()?;
-    let mut b = strict_peer()?;
+    add_media(&mut a)?;
+    let offer = a.create_offer(None)?;
+    let sections = media_sections(&offer.sdp);
+    assert_eq!(sections.len(), 3);
+    for section in &sections {
+        let bundle_only = section.iter().any(|l| l == "a=bundle-only");
+        for attribute in BUNDLE_ATTRIBUTES {
+            assert_eq!(
+                section.iter().any(|l| l.starts_with(attribute)),
+                !bundle_only,
+                "{attribute}\n{}",
+                offer.sdp
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn by_default_they_are_in_the_tagged_section_only_and_apply_to_all() -> TestResult {
+    let mut a = default_peer()?;
+    let mut b = default_peer()?;
     add_media(&mut a)?;
 
-    // The answer of the strict peer.
+    // The answer.
     let offer = a.create_offer(None)?;
     a.set_local_description(Instant::now(), offer.clone())?;
     b.set_remote_description(Instant::now(), offer)?;
@@ -111,20 +134,28 @@ fn the_strict_form_has_them_in_the_tagged_section_only_and_is_applied_to_all() -
     assert!(every_transceiver_uses_reduced_size_rtcp(&mut a));
     assert!(every_transceiver_uses_reduced_size_rtcp(&mut b));
 
-    // A subsequent offer of the strict peer has the same form, and is answered.
-    let offer = b.create_offer(None)?;
-    let shape = carried(&offer.sdp);
-    assert_eq!(shape[0], BUNDLE_ATTRIBUTES.to_vec(), "{}", offer.sdp);
-    assert!(shape[1].is_empty() && shape[2].is_empty(), "{}", offer.sdp);
-    b.set_local_description(Instant::now(), offer.clone())?;
-    a.set_remote_description(Instant::now(), offer)?;
-    let answer = a.create_answer(None)?;
-    for section in media_sections(&answer.sdp) {
-        assert_ne!(port_of(&section), 0, "{}", answer.sdp);
+    // A subsequent offer, from either side, has the same form, and is answered.
+    for answerer_offers in [true, false] {
+        let (x, y) = if answerer_offers {
+            (&mut b, &mut a)
+        } else {
+            (&mut a, &mut b)
+        };
+        let offer = x.create_offer(None)?;
+        let shape = carried(&offer.sdp);
+        assert_eq!(shape[0], BUNDLE_ATTRIBUTES.to_vec(), "{}", offer.sdp);
+        assert!(shape[1].is_empty() && shape[2].is_empty(), "{}", offer.sdp);
+        x.set_local_description(Instant::now(), offer.clone())?;
+        y.set_remote_description(Instant::now(), offer)?;
+        let answer = y.create_answer(None)?;
+        let shape = carried(&answer.sdp);
+        assert_eq!(shape[0], BUNDLE_ATTRIBUTES.to_vec(), "{}", answer.sdp);
+        assert!(shape[1].is_empty() && shape[2].is_empty(), "{}", answer.sdp);
+        y.set_local_description(Instant::now(), answer.clone())?;
+        x.set_remote_description(Instant::now(), answer)?;
+        assert!(every_transceiver_uses_reduced_size_rtcp(x));
+        assert!(every_transceiver_uses_reduced_size_rtcp(y));
     }
-    a.set_local_description(Instant::now(), answer.clone())?;
-    b.set_remote_description(Instant::now(), answer)?;
-    assert!(every_transceiver_uses_reduced_size_rtcp(&mut a));
     Ok(())
 }
 

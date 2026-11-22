@@ -1504,6 +1504,27 @@ pub(crate) fn has_bundle_attribute(
     media.has_attribute(key) || tagged_section(desc, media).is_some_and(|m| m.has_attribute(key))
 }
 
+/// Whether an RTP section of a remote description multiplexes RTP and RTCP. A section says so
+/// itself with `a=rtcp-mux`. In an initial offer every bundled RTP section does, the
+/// bundle-only ones excepted (RFC 9143 section 9.3.1.1: "the offerer MUST include an SDP
+/// 'rtcp-mux' attribute in each bundled 'm=' section (excluding any bundle-only 'm='
+/// sections)"), so only a bundle-only section takes the attribute from the offerer-tagged
+/// one there. In a subsequent offer or an answer the attribute is in the tagged section only
+/// (section 7.1.3) and applies to every bundled section.
+pub(crate) fn section_multiplexes_rtcp(
+    desc: &SessionDescription,
+    media: &MediaDescription,
+    initial_offer: bool,
+) -> bool {
+    if has_rtcp_mux(media) {
+        return true;
+    }
+    if initial_offer && !media.has_attribute(ATTR_KEY_BUNDLE_ONLY) {
+        return false;
+    }
+    has_bundle_attribute(desc, media, ATTR_KEY_RTCPMUX)
+}
+
 /// The tagged section of the BUNDLE group `media` is in: the first tag of the group that is
 /// neither rejected nor bundle-only (RFC 9143 sections 7.2 and 7.3.1).
 fn tagged_section<'a>(
@@ -1671,7 +1692,8 @@ pub(crate) struct PopulateSdpParams {
     /// (RFC 9429 section 5.2.2: in a subsequent offer "an 'a=bundle-only' line ... MUST NOT
     /// be added").
     pub(crate) initial_offer: bool,
-    /// `SettingEngineBuilder::with_bundle_attributes_in_tagged_section_only`.
+    /// Not `SettingEngineBuilder::with_bundle_attributes_repeated`: the form of RFC 9143
+    /// section 7.1.3.
     pub(crate) bundle_attributes_in_tagged_section_only: bool,
     pub(crate) sctp_max_message_size: usize,
     /// The data section's `a=sctp-port`.
@@ -1901,7 +1923,7 @@ impl RTCPeerConnection {
                 let without_transport = has_carrier
                     && match params.bundle_policy {
                         RTCBundlePolicy::MaxCompat => false,
-                        RTCBundlePolicy::MaxBundle => true,
+                        RTCBundlePolicy::MustBundle => true,
                         _ => with_transport.contains(&media_type),
                     };
                 match &params.bundle {
@@ -1994,8 +2016,9 @@ impl RTCPeerConnection {
                 sdp::description::common::Attribute::new(ATTR_KEY_RTCP_MUX_ONLY.to_owned(), None),
             );
         }
-        // RFC 9143 section 7.1.3, when asked for: in an answer or a subsequent offer only the
-        // tagged section (the first of the group) carries the BUNDLE attributes.
+        // RFC 9143 section 7.1.3: in an answer or a subsequent offer only the tagged section
+        // (the first of the group) carries the BUNDLE attributes, unless the application
+        // asked for the browsers' repeated form.
         if params.bundle_attributes_in_tagged_section_only && !params.initial_offer {
             for mid in bundled.iter().skip(1) {
                 if let Some(media) = d

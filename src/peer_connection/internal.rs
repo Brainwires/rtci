@@ -1,5 +1,5 @@
 use super::*;
-use crate::peer_connection::configuration::RTCRtcpMuxPolicy;
+use crate::peer_connection::configuration::{RTCBundlePolicy, RTCRtcpMuxPolicy};
 use crate::peer_connection::event::{RTCPeerConnectionEvent, RTCPeerConnectionIceEvent};
 use crate::peer_connection::handler::datachannel::DataChannelHandlerContext;
 use crate::peer_connection::handler::demuxer::DemuxerHandlerContext;
@@ -8,6 +8,7 @@ use crate::peer_connection::handler::interceptor::InterceptorHandlerContext;
 use crate::peer_connection::handler::srtp::SrtpHandlerContext;
 use crate::peer_connection::sdp::answered_extension_directions;
 use crate::peer_connection::sdp::has_bundle_attribute;
+use crate::peer_connection::sdp::section_multiplexes_rtcp;
 use crate::peer_connection::sdp::{
     ATTR_KEY_RTCP_MUX_ONLY, BundleMode, MediaSection, PopulateSdpParams,
     add_candidates_to_media_descriptions, bundle_group_mids, effective_direction,
@@ -286,6 +287,25 @@ impl RTCPeerConnection {
     /// because the description advertises the new credentials and the candidates gathered
     /// so far belong to the old ones (RFC 8839 section 5.4, JSEP section 5.2.3.1: a restart
     /// starts a new gathering phase, whose candidates are signalled as they come).
+    /// The bundle policy in effect (RFC 9429 section 4.1.1): the deprecated `max-bundle` is
+    /// ignored, which leaves the default, unless the application made it an alias of
+    /// `must-bundle`.
+    fn effective_bundle_policy(&self) -> RTCBundlePolicy {
+        match self.configuration.bundle_policy {
+            RTCBundlePolicy::MaxBundle if self.setting_engine.max_bundle_as_must_bundle => {
+                RTCBundlePolicy::MustBundle
+            }
+            RTCBundlePolicy::MaxBundle => RTCBundlePolicy::Unspecified,
+            policy => policy,
+        }
+    }
+
+    /// No offer/answer exchange has completed yet: an offer applied now is an initial offer
+    /// (RFC 9143 section 2, "initial BUNDLE offer").
+    pub(super) fn is_initial_exchange(&self) -> bool {
+        self.current_local_description.is_none() && self.current_remote_description.is_none()
+    }
+
     fn offered_local_candidates(&self) -> Result<Vec<RTCIceCandidate>> {
         if self.ice_transport().has_pending_restart() {
             return Ok(Vec::new());
@@ -387,11 +407,11 @@ impl RTCPeerConnection {
             bundle: BundleMode::Offer,
             offered_tag_rtcp_mux_only: false,
             rtcp_mux_only: self.configuration.rtcp_mux_policy != RTCRtcpMuxPolicy::Negotiate,
-            bundle_policy: self.configuration.bundle_policy,
+            bundle_policy: self.effective_bundle_policy(),
             initial_offer: true,
-            bundle_attributes_in_tagged_section_only: self
+            bundle_attributes_in_tagged_section_only: !self
                 .setting_engine
-                .bundle_attributes_in_tagged_section_only,
+                .bundle_attributes_repeated,
             sctp_max_message_size: self.setting_engine.sctp_max_message_size.as_usize(),
             sctp_port: self.sctp_transport().offer_port(),
             sctp_over_tcp: false,
@@ -430,6 +450,7 @@ impl RTCPeerConnection {
         let mut already_have_application_media_section = false;
         let is_extmap_allow_mixed = is_ext_map_allow_mixed_set(self.remote_description());
         let local_mids = self.local_description_mids();
+        let initial_remote_offer = !include_unmatched && self.is_initial_exchange();
 
         // Extract the description to avoid borrowing conflicts
         let remote_parsed = self
@@ -560,7 +581,7 @@ impl RTCPeerConnection {
                         && matches!(kind, RtpCodecKind::Audio | RtpCodecKind::Video)
                         && (!is_rtp_profile(media)
                             || !remote_parsed.as_ref().is_some_and(|parsed| {
-                                has_bundle_attribute(parsed, media, ATTR_KEY_RTCPMUX)
+                                section_multiplexes_rtcp(parsed, media, initial_remote_offer)
                             }))
                     {
                         media_sections.push(MediaSection {
@@ -742,11 +763,11 @@ impl RTCPeerConnection {
             is_extmap_allow_mixed,
             connection_role,
             ice_gathering_state: self.ice_transport().ice_gathering_state,
-            bundle_policy: self.configuration.bundle_policy,
+            bundle_policy: self.effective_bundle_policy(),
             initial_offer: false,
-            bundle_attributes_in_tagged_section_only: self
+            bundle_attributes_in_tagged_section_only: !self
                 .setting_engine
-                .bundle_attributes_in_tagged_section_only,
+                .bundle_attributes_repeated,
             rtcp_mux_only: self.configuration.rtcp_mux_policy != RTCRtcpMuxPolicy::Negotiate,
             offered_tag_rtcp_mux_only: !include_unmatched
                 && remote_parsed

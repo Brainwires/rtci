@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **jsep**: answers and subsequent offers carry the BUNDLE attributes (`a=ice-ufrag`,
+  `a=ice-pwd`, `a=setup`, a media-level `a=fingerprint`, `a=rtcp-mux`, `a=rtcp-mux-only`,
+  `a=rtcp-rsize`, candidates) in the tagged m= section only, as RFC 9143 section 7.1.3
+  requires; they were repeated in every bundled section. The repeated form, which browsers
+  write, is `SettingEngineBuilder::with_bundle_attributes_repeated(true)`.
+  `with_bundle_attributes_in_tagged_section_only` is gone (it selected what is now the
+  default). An initial offer is unchanged. A remote endpoint that needs `a=rtcp-mux` or ICE
+  credentials in each section of an answer needs the setting.
+- **jsep**: `RTCBundlePolicy::MaxBundle` is ignored, as RFC 9429 section 4.1.1 says of the
+  deprecated `max-bundle`: the default policy (`balanced`) stays in effect. The policy it was
+  an alias of is the new `RTCBundlePolicy::MustBundle` (`must-bundle`);
+  `SettingEngineBuilder::with_max_bundle_as_must_bundle(true)` restores the alias.
+- **jsep**: an initial remote offer whose bundled RTP section is not bundle-only and has no
+  `a=rtcp-mux` of its own is refused under the RTCP mux policy `require` and has that section
+  rejected under `negotiate` (RFC 9143 section 9.3.1.1). The offerer-tagged section's
+  attribute was taken for it. A subsequent offer, where RFC 9143 section 7.1.3 puts the
+  attribute in the tagged section only, is unchanged.
+
 - **ice**: candidate constructors and `unmarshal_candidate` return an error for a priority above
   2^31 - 1 or a component above 256.
 - **ice**: a local candidate added without a priority after another of its type no longer has
@@ -1182,10 +1200,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `a=rtcp-rsize` of the tagged section apply to every bundled section.
 
 - **shared**: `Error::ErrAnswerDoesNotMatchOffer(String)`.
-- **setting_engine**: `SettingEngineBuilder::with_bundle_attributes_in_tagged_section_only`:
-  answers and subsequent offers carry the BUNDLE attributes in the tagged m= section only, as
-  RFC 9143 section 7.1.3 says. The default repeats them in every bundled section, as browsers
-  do.
+- **setting_engine**: `SettingEngineBuilder::with_bundle_attributes_repeated`: answers and
+  subsequent offers repeat the BUNDLE attributes in every bundled section, as browsers do. The
+  default carries them in the tagged m= section only, as RFC 9143 section 7.1.3 says.
+- **configuration**: `RTCBundlePolicy::MustBundle` (RFC 9429 section 4.1.1) and
+  `SettingEngineBuilder::with_max_bundle_as_must_bundle`.
 - **transceiver**: `RTCRtpTransceiver::remote_bandwidth()` (`RTCRemoteBandwidth`: `b=TIAS` /
   `b=AS`, `b=RS`, `b=RR` of the remote media section, RFC 9429 section 5.10),
   `RTCRtpTransceiver::remote_rtcp_xr()` (the remote `a=rtcp-xr` formats, RFC 3611 section 5.1)

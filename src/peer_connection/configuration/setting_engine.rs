@@ -368,10 +368,12 @@ pub struct SettingEngine {
     pub(crate) sdp_media_level_fingerprints: bool,
     pub(crate) disable_sdp_tls_id: bool,
     pub(crate) disable_dtls_use_srtp: bool,
-    /// Answers and subsequent offers carry the BUNDLE attributes in the tagged m= section
-    /// only (RFC 9143 section 7.1.3); see
-    /// [`SettingEngineBuilder::with_bundle_attributes_in_tagged_section_only`].
-    pub(crate) bundle_attributes_in_tagged_section_only: bool,
+    /// Answers and subsequent offers repeat the BUNDLE attributes in every bundled m=
+    /// section instead of carrying them in the tagged one only (RFC 9143 section 7.1.3); see
+    /// [`SettingEngineBuilder::with_bundle_attributes_repeated`].
+    pub(crate) bundle_attributes_repeated: bool,
+    /// [`SettingEngineBuilder::with_max_bundle_as_must_bundle`].
+    pub(crate) max_bundle_as_must_bundle: bool,
     pub(crate) answering_dtls_role: RTCDtlsRole,
     pub(crate) disable_certificate_fingerprint_verification: bool,
     pub(crate) allow_insecure_verification_algorithm: bool,
@@ -1307,19 +1309,34 @@ impl SettingEngineBuilder {
         self
     }
 
-    /// Where answers and subsequent offers put the BUNDLE attributes (the IDENTICAL and
-    /// TRANSPORT categories of RFC 8859: `a=ice-ufrag`, `a=ice-pwd`, `a=setup`, media-level
-    /// `a=fingerprint`, `a=rtcp-mux`, `a=rtcp-mux-only`, `a=rtcp-rsize`).
+    /// Repeats the BUNDLE attributes (the IDENTICAL and TRANSPORT categories of RFC 8859:
+    /// `a=ice-ufrag`, `a=ice-pwd`, `a=setup`, media-level `a=fingerprint`, `a=rtcp-mux`,
+    /// `a=rtcp-mux-only`, `a=rtcp-rsize`, candidates) in every bundled m= section of answers
+    /// and subsequent offers, as browsers do.
     ///
     /// RFC 9143 section 7.1.3: "In a subsequent offer or in an answer ... the offerer and
-    /// answerer MUST include [them] only in the tagged 'm=' section". `true` writes that
-    /// form. `false`, the default, repeats them in every bundled m= section, as browsers do:
-    /// libwebrtc refuses an RTP m= section without `a=rtcp-mux` under its `require` policy.
+    /// answerer MUST include [them] only in the tagged 'm=' section" and "MUST NOT include
+    /// such attributes in any other bundled 'm=' section". That is the default (`false`).
+    /// `true` writes the browsers' form, for a remote endpoint that needs each section to
+    /// say `a=rtcp-mux` or to carry ICE credentials of its own.
     ///
     /// Either form is accepted from the remote side whatever this is set to: the tagged
     /// section's attributes apply to every bundled section.
-    pub fn with_bundle_attributes_in_tagged_section_only(mut self, tagged_only: bool) -> Self {
-        self.0.bundle_attributes_in_tagged_section_only = tagged_only;
+    pub fn with_bundle_attributes_repeated(mut self, repeated: bool) -> Self {
+        self.0.bundle_attributes_repeated = repeated;
+        self
+    }
+
+    /// Honours the deprecated bundle policy `max-bundle` as an alias of `must-bundle`.
+    ///
+    /// RFC 9429 section 4.1.1: "'max-bundle' is considered deprecated, and implementations
+    /// compliant with this specification SHOULD ignore attempts by the application to
+    /// select this bundle policy". That is the default (`false`): a configuration with
+    /// `RTCBundlePolicy::MaxBundle` behaves as the default policy, `balanced`. `true` gives
+    /// `MaxBundle` the definition RFC 8829 gave it, which is `must-bundle`'s: every m=
+    /// section of an initial offer but the first is bundle-only.
+    pub fn with_max_bundle_as_must_bundle(mut self, honoured: bool) -> Self {
+        self.0.max_bundle_as_must_bundle = honoured;
         self
     }
 
