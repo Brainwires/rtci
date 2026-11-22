@@ -419,17 +419,33 @@ fn event_packets_share_the_audio_streams_sequence_numbers() -> Result<()> {
     })?;
     call.write_audio(1001, 96_000 + 48_000)?;
     call.run_until(Duration::from_millis(100), |_| false)?;
-    let sequence: Vec<(u8, u16)> = call
+    // The first audio packet of the stream may be held by the receiver's source validation
+    // (RFC 3550 appendix A.1); what matters is what was sent after it.
+    let events: Vec<u16> = call
         .callee
         .rtp
         .iter()
-        .map(|(_, p)| (p.header.payload_type, p.header.sequence_number))
+        .filter(|(_, p)| p.header.payload_type != 111)
+        .map(|(_, p)| p.header.sequence_number)
         .collect();
-    let numbers: Vec<u16> = sequence.iter().map(|(_, s)| *s).collect();
-    let expected: Vec<u16> = (1000..1000 + numbers.len() as u16).collect();
-    assert_eq!(numbers, expected, "one number space, no gap: {sequence:?}");
-    assert_eq!(sequence.first().map(|(pt, _)| *pt), Some(111));
-    assert_eq!(sequence.last().map(|(pt, _)| *pt), Some(111));
+    assert!(!events.is_empty());
+    let expected: Vec<u16> = (1001..1001 + events.len() as u16).collect();
+    assert_eq!(
+        events, expected,
+        "the event packets follow the audio packet 1000"
+    );
+    let last_audio = call
+        .callee
+        .rtp
+        .iter()
+        .rev()
+        .find(|(_, p)| p.header.payload_type == 111)
+        .map(|(_, p)| p.header.sequence_number);
+    assert_eq!(
+        last_audio,
+        Some(1001 + events.len() as u16),
+        "the application's packet 1001 comes after the event packets"
+    );
     let events = call.events_received();
     assert!(
         events.iter().all(|(_, p, _)| p.header.ssrc == AUDIO_SSRC),
