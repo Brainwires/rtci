@@ -156,7 +156,9 @@ impl<E: BandwidthEstimator> CongestionControlBuilder<E> {
 
     /// Whether the path is probed for capacity above the target: short clusters of packets
     /// at a multiple of the target, whose arrival shows at once whether the path carries
-    /// that rate. Off by default.
+    /// that rate. Off for a builder (it needs the pacer and the NACK responder of the same
+    /// chain); on in the peer connection's default interceptor set
+    /// (`DefaultInterceptorOptions::bandwidth_probing`).
     ///
     /// Without it the estimate climbs as fast as the delay-based controller raises it, 8% a
     /// second in [`Gcc`](crate::Gcc): from 300 kbit/s to 2.5 Mbit/s takes most of half a
@@ -165,12 +167,16 @@ impl<E: BandwidthEstimator> CongestionControlBuilder<E> {
     /// every five seconds while the application sends less than the target allows; a path
     /// with 2.5 Mbit/s is found in well under a second.
     ///
-    /// No RFC requires it: RFC 8836 section 2 (requirement 4) asks for quick adaptation to
-    /// the initial conditions and names "probing during setup" as one way, and
-    /// draft-ietf-rmcat-gcc-02 has none. It is libwebrtc's behaviour, in outline, and adds
-    /// traffic the application did not write: retransmissions of recent packets on the RTX
-    /// stream fill a cluster the application's own media does not, so it needs RTX
-    /// negotiated to probe a sender with little to send. The pacer
+    /// RFC 8836 section 2 (requirement 4, a SHOULD) asks for quick adaptation to the initial
+    /// conditions and names "probing during setup" as one way; draft-ietf-rmcat-gcc-02 has
+    /// none. It is libwebrtc's behaviour, in outline, and adds traffic the application did
+    /// not write: padding-only packets on the RTX stream fill a cluster the application's own
+    /// media does not (they carry no media, and receivers drop them), so it needs RTX
+    /// negotiated to probe a sender with little to send. After a large drop of the target
+    /// (a third or more), the rate before it is probed for a few seconds
+    /// ([`ProbeController::with_probe_after_drop`](crate::ProbeController::with_probe_after_drop)).
+    /// What it costs: an application sending a fifth of what the path carries spends about
+    /// 4% of its octets on probes, one cluster every five seconds. The pacer
     /// ([`PacerInterceptor`](crate::PacerInterceptor)) and the NACK responder
     /// ([`NackResponderInterceptor`](crate::NackResponderInterceptor)) of the same chain do
     /// the sending; the estimator hears the result through

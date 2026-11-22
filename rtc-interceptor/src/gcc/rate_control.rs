@@ -117,6 +117,11 @@ pub struct RateController {
     measured_rate: Option<f64>,
     convergence: Convergence,
     last_change: Option<Instant>,
+    /// Whether a decrease is taken at most once per round trip (see
+    /// [`with_one_decrease_per_round_trip`](Self::with_one_decrease_per_round_trip)).
+    one_decrease_per_round_trip: bool,
+    /// When the target was last decreased.
+    last_decrease: Option<Instant>,
 }
 
 impl RateController {
@@ -136,7 +141,26 @@ impl RateController {
             measured_rate: None,
             convergence: Convergence::new(),
             last_change: None,
+            one_decrease_per_round_trip: true,
+            last_decrease: None,
         }
+    }
+
+    /// Whether over-use lowers the target at most once per round trip (the default), or on
+    /// every update while it lasts.
+    ///
+    /// draft-ietf-rmcat-gcc-02 section 5.5 stays in Decrease while over-use lasts and sets
+    /// `A_hat = beta * R_hat` on each update. The received rate lags a cut by its measurement
+    /// window, and the detector by its filter (more so for a flow that sends few packets), so
+    /// over-use that the last cut has already answered goes on being read for some updates,
+    /// and each one cuts again: a newcomer to a shared bottleneck, which sends little and
+    /// filters slowly, cuts itself several times for one episode that the established flow
+    /// answers once. As libwebrtc's `AimdRateControl::TimeToReduceFurther` does, a further
+    /// cut waits one round trip (held within 10 to 200 ms) unless the received rate has
+    /// fallen below half the target. `false` is the draft as written.
+    pub fn with_one_decrease_per_round_trip(mut self, enabled: bool) -> Self {
+        self.one_decrease_per_round_trip = enabled;
+        self
     }
 
     /// How hard to back off, as a fraction of the received rate.
@@ -220,6 +244,17 @@ impl RateController {
                 let Some(received) = received else {
                     return self.target;
                 };
+                if self.one_decrease_per_round_trip
+                    && let Some(last) = self.last_decrease
+                    && now.saturating_duration_since(last)
+                        < self
+                            .round_trip_time
+                            .clamp(Duration::from_millis(10), Duration::from_millis(200))
+                    && received >= 0.5 * self.target
+                {
+                    return self.target;
+                }
+                self.last_decrease = Some(now);
                 // A rate far below the average means the path lost capacity: the old average
                 // describes a path that is gone.
                 if let Some((low, _)) = self.convergence.band()
@@ -596,5 +631,68 @@ mod tests {
         at += DEFAULT_RATE_CONTROL_INTERVAL;
         let again = controller.update(at, Usage::Over, received);
         assert!((again - 0.85 * backed_off).abs() < 1.0, "{again}");
+    }
+
+    /// Over-use that lasts through several updates, answered by the first cut: with the
+    /// default, a second cut waits a round trip (here 100 ms, so the update 50 ms later holds
+    /// and the one 100 ms later cuts again), as libwebrtc's `TimeToReduceFurther` does; with
+    /// the draft as written every update cuts.
+    #[test]
+    fn lasting_over_use_cuts_once_per_round_trip() {
+        let epoch = Instant::now();
+        let run = |once: bool| {
+            let mut controller =
+                RateController::new(1_000_000.0, MIN, MAX).with_one_decrease_per_round_trip(once);
+            controller.set_round_trip_time(Duration::from_millis(100));
+            [0u64, 50, 100].map(|ms| {
+                controller.update(
+                    epoch + Duration::from_millis(ms),
+                    Usage::Over,
+                    Some(900_000.0),
+                )
+            })
+        };
+        assert_eq!([765_000.0, 765_000.0, 765_000.0], run(true).map(f64::round));
+        assert_eq!(
+            [765_000.0, 765_000.0, 765_000.0],
+            run(false).map(f64::round)
+        );
+        // The cut is from the received rate: repeated, it compounds only as the received
+        // rate follows. With the received rate falling with the target, the draft cuts again
+        // on every update.
+        let follow = |once: bool| {
+            let mut controller =
+                RateController::new(1_000_000.0, MIN, MAX).with_one_decrease_per_round_trip(once);
+            controller.set_round_trip_time(Duration::from_millis(100));
+            let mut received = 900_000.0;
+            let mut targets = Vec::new();
+            for ms in [0u64, 50, 100] {
+                let target = controller.update(
+                    epoch + Duration::from_millis(ms),
+                    Usage::Over,
+                    Some(received),
+                );
+                targets.push(target.round());
+                received = target;
+            }
+            targets
+        };
+        assert_eq!(vec![765_000.0, 765_000.0, 650_250.0], follow(true));
+        assert_eq!(vec![765_000.0, 650_250.0, 552_713.0], follow(false));
+    }
+
+    /// The received rate falling below half the target is news: the cut is not held back.
+    #[test]
+    fn a_collapse_of_the_received_rate_cuts_at_once() {
+        let epoch = Instant::now();
+        let mut controller = RateController::new(1_000_000.0, MIN, MAX);
+        controller.set_round_trip_time(Duration::from_millis(200));
+        controller.update(epoch, Usage::Over, Some(900_000.0));
+        let target = controller.update(
+            epoch + Duration::from_millis(20),
+            Usage::Over,
+            Some(300_000.0),
+        );
+        assert_eq!(255_000.0, target.round());
     }
 }

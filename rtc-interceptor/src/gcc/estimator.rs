@@ -1,7 +1,8 @@
 //! `Gcc`: the delay half and the loss half, combined.
 
 use super::loss::LossController;
-use super::overuse::OveruseDetector;
+use super::overuse::{OveruseDetector, Usage};
+use super::queue_limit::QueueLimitDetector;
 use super::rate_calc::RateCalculator;
 use super::rate_control::RateController;
 use super::slope::SlopeEstimator;
@@ -117,6 +118,10 @@ pub struct Gcc {
     round_trip_time: Option<Duration>,
     /// When the last probe result was taken.
     probed_at: Option<Instant>,
+    /// Whether a loss out of a queue at its limit is over-use (see
+    /// [`with_loss_at_queue_limit_as_overuse`](Self::with_loss_at_queue_limit_as_overuse)).
+    loss_at_queue_limit_is_overuse: bool,
+    queue_limit: QueueLimitDetector,
 }
 
 impl Default for Gcc {
@@ -154,7 +159,39 @@ impl Gcc {
             feedback_interval: None,
             round_trip_time: None,
             probed_at: None,
+            loss_at_queue_limit_is_overuse: true,
+            queue_limit: QueueLimitDetector::new(),
         }
+    }
+
+    /// Whether a packet lost out of a queue at its limit counts as over-use for the
+    /// delay-based controller (the default), or only for the loss-based one as
+    /// draft-ietf-rmcat-gcc-02 has it.
+    ///
+    /// The draft's over-use signal is the delay *gradient*: a queue that is growing. A
+    /// tail-drop queue that has filled to its limit no longer grows, whatever is sent into
+    /// it: the gradient is zero, the detector reads normal and the delay-based estimate keeps
+    /// climbing, while the loss-based controller holds anywhere between 2% and 10% loss
+    /// (section 6). A flow in that state never yields. Measured on a shared FIFO bottleneck
+    /// (`rtc-interceptor/tests/rfc8836_multi_flow.rs`): a second flow joining an established
+    /// one fell to the floor, and against a Reno-like transfer `Gcc` took 97% of the path,
+    /// both against RFC 8836 section 2 (requirements 2a, a MUST, and 3). With the default, a
+    /// feedback batch that lost a packet while every packet of it that arrived waited near the
+    /// highest queueing delay seen of late ([`QueueLimitDetector`]) is over-use: the
+    /// estimate backs off as from a growing queue, and the queue drains. Loss with little or
+    /// no queue (a radio link, a policer) is left to the loss-based controller, as before.
+    /// `false` is the draft as written.
+    pub fn with_loss_at_queue_limit_as_overuse(mut self, enabled: bool) -> Self {
+        self.loss_at_queue_limit_is_overuse = enabled;
+        self
+    }
+
+    /// Whether over-use lowers the estimate at most once per round trip (the default) or on
+    /// every update while it lasts, as draft-ietf-rmcat-gcc-02 section 5.5 has it. See
+    /// [`RateController::with_one_decrease_per_round_trip`].
+    pub fn with_one_decrease_per_round_trip(mut self, enabled: bool) -> Self {
+        self.delay_control = self.delay_control.with_one_decrease_per_round_trip(enabled);
+        self
     }
 
     /// How long feedback may be missing, while packets are being sent, before the target is
@@ -265,6 +302,10 @@ impl BandwidthEstimator for Gcc {
         let received = self
             .newest_arrival
             .and_then(|newest| self.rate.rate_bits_per_second(newest));
+        // A loss out of a queue at its limit: the queue would be growing, had it room.
+        if self.queue_limit.on_reports(now, reports) && self.loss_at_queue_limit_is_overuse {
+            usage = Usage::Over;
+        }
         let delay_target = self.delay_control.update(now, usage, received);
 
         // Loss: a fraction over this batch. A packet that arrived marked ECN-CE counts as one
@@ -369,6 +410,7 @@ impl BandwidthEstimator for Gcc {
         self.deltas = 0;
         self.arrival_anchor = None;
         self.newest_arrival = None;
+        self.queue_limit = QueueLimitDetector::new();
         self.delay_control.reset_convergence();
         self.feedback_deadline = None;
     }

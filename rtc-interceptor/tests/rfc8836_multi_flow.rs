@@ -7,7 +7,10 @@
 //! - **`Gcc`**: sends 1200-octet packets at its target, the receiver reports every packet
 //!   every 100 ms (what transport-wide feedback carries), and the report reaches the sender
 //!   one propagation delay later. The estimator is the production `Gcc`, driven through the
-//!   `BandwidthEstimator` trait as the congestion control interceptor drives it.
+//!   `BandwidthEstimator` trait as the congestion control interceptor drives it, and probed
+//!   by the production `ProbeController` as the default interceptor set does (bandwidth
+//!   probing is on there): a cluster is extra packets at its rate, padding the receiver
+//!   discards, so they count as sent and not as goodput.
 //! - **TCP-like**: a long bulk transfer with a Reno window in packets (slow start, one packet
 //!   per round trip after it, halved once per loss episode, losses noticed a round trip
 //!   after the drop). Simple on purpose: what matters is that it fills the queue until it
@@ -18,7 +21,7 @@
 //! Shares are goodput: the bits of a flow that arrived, over a window, as a fraction of the
 //! capacity. Run with `--nocapture` to read the numbers.
 
-use rtc_interceptor::{BandwidthEstimator, Gcc, PacketReport};
+use rtc_interceptor::{BandwidthEstimator, Gcc, PacketReport, ProbeController, probe_estimate};
 use rtcp::transport_feedbacks::cc_feedback_report::Ecn;
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -186,6 +189,18 @@ struct GccFlow {
     goodput: Goodput,
     /// The target every 100 ms, from the start of the run.
     targets: Vec<f64>,
+    probing: Option<ProbeController>,
+    /// The cluster being sent: its number, its rate, packets still to send, and when the
+    /// next one leaves.
+    probe_sending: Option<(u32, f64, usize, Duration)>,
+    /// Which cluster each probe packet in flight belongs to.
+    probe_packets: BTreeMap<u64, u32>,
+    /// The reports on each cluster so far, and how many packets it had.
+    probe_reports: BTreeMap<u32, (usize, Vec<PacketReport>)>,
+    /// Media packets sent in the last second, for the probe controller's sending rate.
+    recently_sent: Vec<Duration>,
+    /// Probe bits sent.
+    probe_bits: f64,
 }
 
 impl GccFlow {
@@ -201,6 +216,92 @@ impl GccFlow {
             returning: Vec::new(),
             goodput: Goodput::default(),
             targets: Vec::new(),
+            probing: Some(ProbeController::new(initial, 20_000_000.0)),
+            probe_sending: None,
+            probe_packets: BTreeMap::new(),
+            probe_reports: BTreeMap::new(),
+            recently_sent: Vec::new(),
+            probe_bits: 0.0,
+        }
+    }
+
+    /// Without bandwidth probing (`DefaultInterceptorOptions::bandwidth_probing` false).
+    fn without_probing(mut self) -> Self {
+        self.probing = None;
+        self
+    }
+
+    /// Puts one packet on the path at `at`; returns its sequence number.
+    fn offer(&mut self, epoch: Instant, at: Duration, path: &mut Bottleneck) -> u64 {
+        let sequence = self.sequence;
+        self.sequence += 1;
+        self.gcc.on_packet_sent(epoch + at, PACKET_BYTES);
+        let (due, arrived) = match path.offer(at, PACKET_BITS) {
+            Some(arrival) => (arrival, true),
+            // A loss shows as a gap once later packets arrive: about when it would have.
+            None => (at + path.propagation, false),
+        };
+        self.in_flight.insert(
+            sequence,
+            InFlight {
+                sent: at,
+                due,
+                arrived,
+            },
+        );
+        sequence
+    }
+
+    /// The probe controller's turn, as the congestion control interceptor takes it: a cluster
+    /// when one is due, sent at its rate.
+    fn probe(&mut self, epoch: Instant, now: Duration, path: &mut Bottleneck) {
+        self.recently_sent
+            .retain(|at| now.saturating_sub(*at) <= Duration::from_secs(1));
+        let sending = self.recently_sent.len() as f64 * PACKET_BITS;
+        let target = self.gcc.target_bitrate();
+        let media_flowing = !self.recently_sent.is_empty();
+        if self.probe_sending.is_none()
+            && let Some(probing) = self.probing.as_mut()
+            && let Some(request) = probing.poll(epoch + now, target, sending, media_flowing)
+        {
+            let packets = request.octets.div_ceil(PACKET_BYTES).max(5);
+            self.probe_reports
+                .insert(request.cluster, (packets, Vec::new()));
+            self.probe_sending = Some((request.cluster, request.bits_per_second, packets, now));
+        }
+        while let Some((cluster, rate, left, at)) = self.probe_sending
+            && at <= now
+        {
+            let sequence = self.offer(epoch, at, path);
+            self.probe_bits += PACKET_BITS;
+            self.probe_packets.insert(sequence, cluster);
+            self.probe_sending = (left > 1).then(|| {
+                (
+                    cluster,
+                    rate,
+                    left - 1,
+                    at + Duration::from_secs_f64(PACKET_BITS / rate),
+                )
+            });
+        }
+    }
+
+    /// Gives the estimator the result of every cluster reported in full.
+    fn probe_results(&mut self, epoch: Instant, now: Duration) {
+        let complete: Vec<u32> = self
+            .probe_reports
+            .iter()
+            .filter(|(_, (packets, reports))| reports.len() >= *packets)
+            .map(|(cluster, _)| *cluster)
+            .collect();
+        for cluster in complete {
+            let (_, reports) = self.probe_reports.remove(&cluster).expect("complete");
+            if let Some(estimate) = probe_estimate(&reports)
+                && let Some(probing) = self.probing.as_mut()
+                && let Some(estimate) = probing.on_result(cluster, estimate)
+            {
+                self.gcc.on_probe_result(epoch + now, estimate);
+            }
         }
     }
 
@@ -229,24 +330,11 @@ impl GccFlow {
                 break;
             }
             let at = self.next_send;
-            let sequence = self.sequence;
-            self.sequence += 1;
-            self.gcc.on_packet_sent(epoch + at, PACKET_BYTES);
-            let (due, arrived) = match path.offer(at, PACKET_BITS) {
-                Some(arrival) => (arrival, true),
-                // A loss shows as a gap once later packets arrive: about when it would have.
-                None => (at + path.propagation, false),
-            };
-            self.in_flight.insert(
-                sequence,
-                InFlight {
-                    sent: at,
-                    due,
-                    arrived,
-                },
-            );
+            self.offer(epoch, at, path);
+            self.recently_sent.push(at);
             self.next_send += Duration::from_secs_f64(PACKET_BITS / self.gcc.target_bitrate());
         }
+        self.probe(epoch, now, path);
 
         // The receiver reports what it has seen.
         if now >= self.next_feedback {
@@ -260,10 +348,11 @@ impl GccFlow {
             let mut reports = Vec::with_capacity(seen.len());
             for sequence in seen {
                 let packet = self.in_flight.remove(&sequence).expect("seen");
-                if packet.arrived {
+                let cluster = self.probe_packets.remove(&sequence);
+                if packet.arrived && cluster.is_none() {
                     self.goodput.add(packet.due, PACKET_BITS);
                 }
-                reports.push(PacketReport {
+                let report = PacketReport {
                     ssrc: 1,
                     id: sequence,
                     rtp_sequence_number: sequence as u16,
@@ -274,7 +363,13 @@ impl GccFlow {
                     departure: epoch + packet.sent,
                     arrival: packet.arrived.then_some(packet.due),
                     ecn: Ecn::default(),
-                });
+                };
+                if let Some(cluster) = cluster
+                    && let Some((_, cluster_reports)) = self.probe_reports.get_mut(&cluster)
+                {
+                    cluster_reports.push(report.clone());
+                }
+                reports.push(report);
             }
             if !reports.is_empty() {
                 self.returning.push((now + path.propagation, reports));
@@ -287,6 +382,7 @@ impl GccFlow {
             if self.returning[index].0 <= now {
                 let (_, reports) = self.returning.remove(index);
                 self.gcc.on_reports(epoch + now, &reports);
+                self.probe_results(epoch, now);
             } else {
                 index += 1;
             }
@@ -483,23 +579,14 @@ fn two_gcc_flows_share_a_bottleneck() {
     assert!(a + b >= 0.6, "the two use the path: {:.2}", a + b);
 }
 
-/// RFC 8836 section 2 (2a): a flow that joins a bottleneck another flow already fills reaches
-/// a useful share quickly: the existing flow makes room.
-///
-/// Not met (measured: the newcomer starts at 300 kbit/s and is down to the 30 kbit/s floor
-/// 40 s later, while the established flow climbs to 2.1 Mbit/s). Two flows started together
-/// share the path evenly (`two_gcc_flows_share_a_bottleneck`): the established flow's
-/// over-use threshold has adapted upward over its long run near the capacity
-/// (draft-ietf-rmcat-gcc-02 section 5.4), so the queue the newcomer adds is over-use only for
-/// the newcomer, which backs off alone.
-#[test]
-#[ignore = "RFC 8836 2 (2a) not met by draft-ietf-rmcat-gcc-02 as implemented: see docs/conformance/audit/rfc8836.md"]
-fn a_flow_that_joins_late_gets_a_useful_share() {
+/// The run of `a_flow_that_joins_late_gets_a_useful_share`: when the newcomer first had a fifth
+/// of the path over a second (seconds after it joined), and the two shares over the last 20 s.
+fn a_late_flow(flow: impl Fn(Duration) -> GccFlow) -> (Option<u64>, f64, f64) {
     const CAPACITY: f64 = 2_000_000.0;
     let join = Duration::from_secs(40);
     let mut world = World::new(Bottleneck::new(CAPACITY, Queue::TailDrop(0.3), PROPAGATION));
-    world.gcc.push(GccFlow::new(300_000.0, Duration::ZERO));
-    world.gcc.push(GccFlow::new(300_000.0, join));
+    world.gcc.push(flow(Duration::ZERO));
+    world.gcc.push(flow(join));
     world.run(Duration::from_secs(100));
 
     let before = share(
@@ -532,24 +619,109 @@ fn a_flow_that_joins_late_gets_a_useful_share() {
     let (from, until) = (Duration::from_secs(80), Duration::from_secs(100));
     let old = share(world.gcc[0].goodput.rate(from, until), CAPACITY);
     let new = share(world.gcc[1].goodput.rate(from, until), CAPACITY);
+    let (mean_delay, p95_delay) = world.path.queueing_delay(from, until);
     println!(
-        "a late flow: the first had {before:.2} alone; the newcomer reached 0.2 after {reached:?} s; later {old:.2} / {new:.2}"
+        "a late flow: the first had {before:.2} alone; the newcomer reached 0.2 after {reached:?} s; later {old:.2} / {new:.2}; queueing delay mean {mean_delay:?}, p95 {p95_delay:?}"
     );
     assert!(
         before >= 0.6,
         "the first flow used the path alone: {before:.2}"
     );
+    (reached, old, new)
+}
+
+/// RFC 8836 section 2 (2a), MUST: a flow that joins a bottleneck another flow already fills
+/// reaches a useful share quickly: the existing flow makes room.
+///
+/// Measured before the queue-limit signal (`Gcc::with_loss_at_queue_limit_as_overuse`): the
+/// newcomer fell to the 30 kbit/s floor while the established flow kept 98% of the path. The
+/// draft's adaptive threshold (section 5.4) was not the cause: it is the draft's, bounded to
+/// 6..600 ms, and falls back to 6 ms within seconds of a calm path. The tail-drop queue had
+/// filled to its limit, where the delay gradient is zero and the loss-based controller holds
+/// (2% to 10% loss): the established flow read normal and kept climbing, the newcomer lost
+/// packets and could not grow. With the signal, and the newcomer's start-up probes, it has a
+/// fair share within a second.
+#[test]
+fn a_flow_that_joins_late_gets_a_useful_share() {
+    let (reached, _, new) = a_late_flow(|start| GccFlow::new(300_000.0, start));
     let reached = reached.expect("the newcomer reaches a fifth of the path");
-    assert!(reached <= 30, "{reached} s");
+    assert!(reached <= 5, "{reached} s");
     assert!(new >= 0.2, "{new:.2}");
 }
 
-/// `Gcc` from the start, a long TCP-like transfer from 20 s on: the shares of each over the
-/// last minute of two.
-fn gcc_against_a_tcp_like_transfer() -> (f64, f64) {
+/// The same without bandwidth probing (`DefaultInterceptorOptions::bandwidth_probing` off): the
+/// newcomer climbs from its starting rate at the controller's own pace, and the queue-limit
+/// signal is what makes the established flow yield.
+#[test]
+fn a_flow_that_joins_late_gets_a_share_without_probing_too() {
+    let (reached, _, new) = a_late_flow(|start| GccFlow::new(300_000.0, start).without_probing());
+    let reached = reached.expect("the newcomer reaches a fifth of the path");
+    assert!(reached <= 45, "{reached} s");
+    assert!(new >= 0.15, "{new:.2}");
+}
+
+/// RFC 8836 section 2 (3) is about how a flow meets TCP, so the TCP-like model has to behave
+/// like TCP first: alone on the path it fills it, whatever the buffer.
+#[test]
+fn the_tcp_like_model_fills_a_path_alone() {
     const CAPACITY: f64 = 2_000_000.0;
-    let mut world = World::new(Bottleneck::new(CAPACITY, Queue::TailDrop(0.2), PROPAGATION));
-    world.gcc.push(GccFlow::new(300_000.0, Duration::ZERO));
+    for queue in [0.2, 0.05] {
+        let mut world = World::new(Bottleneck::new(
+            CAPACITY,
+            Queue::TailDrop(queue),
+            PROPAGATION,
+        ));
+        world.tcp.push(TcpFlow::new(Duration::ZERO, ROUND_TRIP));
+        world.run(Duration::from_secs(60));
+        let tcp = share(
+            world.tcp[0]
+                .goodput
+                .rate(Duration::from_secs(20), Duration::from_secs(60)),
+            CAPACITY,
+        );
+        println!("TCP-like alone, queue {queue} s: {tcp:.2}");
+        assert!(tcp >= 0.9, "queue {queue} s: {tcp:.2}");
+    }
+}
+
+/// And beside a constant-rate flow (which does not react to anything) it takes what that flow
+/// leaves: a loss-based flow is not starved by an unresponsive one that leaves room.
+#[test]
+fn the_tcp_like_model_takes_what_a_constant_rate_flow_leaves() {
+    const CAPACITY: f64 = 2_000_000.0;
+    for (constant, left) in [(0.5, 0.5), (0.75, 0.25)] {
+        let mut world = World::new(Bottleneck::new(CAPACITY, Queue::TailDrop(0.2), PROPAGATION));
+        world.tcp.push(TcpFlow::new(Duration::ZERO, ROUND_TRIP));
+        world.cross.push(CrossTraffic {
+            rate: constant * CAPACITY,
+            on: vec![(Duration::ZERO, Duration::from_secs(60))],
+            next: Duration::ZERO,
+            goodput: Goodput::default(),
+        });
+        world.run(Duration::from_secs(60));
+        let (from, until) = (Duration::from_secs(20), Duration::from_secs(60));
+        let tcp = share(world.tcp[0].goodput.rate(from, until), CAPACITY);
+        let cross = share(world.cross[0].goodput.rate(from, until), CAPACITY);
+        println!("TCP-like beside {constant} constant: {tcp:.2} / {cross:.2}");
+        assert!(tcp >= 0.8 * left, "{tcp:.2} of the {left} left");
+        assert!(
+            tcp + cross >= 0.9,
+            "together they fill it: {:.2}",
+            tcp + cross
+        );
+    }
+}
+
+/// `Gcc` from the start, a long TCP-like transfer from 20 s on: the shares of each over the
+/// last minute of two, on a 200 ms and a 50 ms tail-drop buffer.
+fn gcc_against_a_tcp_like_transfer(gcc: impl Fn() -> GccFlow, queue: f64) -> (f64, f64) {
+    const CAPACITY: f64 = 2_000_000.0;
+    let mut world = World::new(Bottleneck::new(
+        CAPACITY,
+        Queue::TailDrop(queue),
+        PROPAGATION,
+    ));
+    world.gcc.push(gcc());
     world
         .tcp
         .push(TcpFlow::new(Duration::from_secs(20), ROUND_TRIP));
@@ -560,7 +732,7 @@ fn gcc_against_a_tcp_like_transfer() -> (f64, f64) {
     let tcp = share(world.tcp[0].goodput.rate(from, until), CAPACITY);
     let (mean_delay, p95_delay) = world.path.queueing_delay(from, until);
     println!(
-        "Gcc against TCP-like: shares {gcc:.2} / {tcp:.2}; queueing delay mean {mean_delay:?}, p95 {p95_delay:?}; Gcc target at the end {:.0}",
+        "Gcc against TCP-like, queue {queue} s: shares {gcc:.2} / {tcp:.2}; queueing delay mean {mean_delay:?}, p95 {p95_delay:?}; Gcc target at the end {:.0}",
         world.gcc[0].target_at(until - Duration::from_millis(100))
     );
     (gcc, tcp)
@@ -570,20 +742,51 @@ fn gcc_against_a_tcp_like_transfer() -> (f64, f64) {
 /// fills the queue, the flow is not starved.
 #[test]
 fn gcc_is_not_starved_by_a_tcp_like_transfer() {
-    let (gcc, _) = gcc_against_a_tcp_like_transfer();
-    assert!(gcc >= 0.05, "Gcc keeps a useful share: {gcc:.2}");
+    for queue in [0.2, 0.05] {
+        let (gcc, _) =
+            gcc_against_a_tcp_like_transfer(|| GccFlow::new(300_000.0, Duration::ZERO), queue);
+        assert!(
+            gcc >= 0.05,
+            "queue {queue} s: Gcc keeps a useful share: {gcc:.2}"
+        );
+    }
 }
 
 /// RFC 8836 section 2 (3), SHOULD NOT: the flow does not starve a competing TCP transfer.
-/// Not met (measured: `Gcc` 0.97, the transfer 0.03 of the path). Once the queue is full
-/// its delay no longer grows, the delay gradient is zero and `Gcc` keeps increasing, while the
-/// drops stay under the 10% the loss-based controller of draft-ietf-rmcat-gcc-02 section 6
-/// reacts to: the transfer halves on every loss episode and `Gcc` does not.
+///
+/// Measured before the queue-limit signal (`Gcc::with_loss_at_queue_limit_as_overuse`): `Gcc`
+/// 0.97, the transfer 0.03 (`the_draft_as_written_starves_a_tcp_like_transfer`). Once the queue
+/// is full its delay no longer grows, the delay gradient is zero and `Gcc` keeps increasing,
+/// while the drops stay under the 10% the loss-based controller of draft-ietf-rmcat-gcc-02
+/// section 6 reacts to: the transfer halves on every loss episode and `Gcc` does not. With the
+/// signal, a loss out of the full queue is over-use and `Gcc` backs off as the transfer does.
 #[test]
-#[ignore = "RFC 8836 2 (3) not met by draft-ietf-rmcat-gcc-02 as implemented: see docs/conformance/audit/rfc8836.md"]
 fn gcc_does_not_starve_a_tcp_like_transfer() {
-    let (_, tcp) = gcc_against_a_tcp_like_transfer();
-    assert!(tcp >= 0.2, "the transfer is not starved: {tcp:.2}");
+    for queue in [0.2, 0.05] {
+        let (_, tcp) =
+            gcc_against_a_tcp_like_transfer(|| GccFlow::new(300_000.0, Duration::ZERO), queue);
+        assert!(
+            tcp >= 0.2,
+            "queue {queue} s: the transfer is not starved: {tcp:.2}"
+        );
+    }
+}
+
+/// The draft as written (`with_loss_at_queue_limit_as_overuse(false)`), on the 200 ms buffer:
+/// `Gcc` holds the queue full and the transfer gets almost nothing.
+#[test]
+fn the_draft_as_written_starves_a_tcp_like_transfer() {
+    let (gcc, tcp) = gcc_against_a_tcp_like_transfer(
+        || {
+            let mut flow = GccFlow::new(300_000.0, Duration::ZERO);
+            flow.gcc = Gcc::new(300_000.0, 30_000.0, 20_000_000.0)
+                .with_loss_at_queue_limit_as_overuse(false);
+            flow
+        },
+        0.2,
+    );
+    assert!(gcc >= 0.8, "{gcc:.2}");
+    assert!(tcp < 0.1, "{tcp:.2}");
 }
 
 /// RFC 8836 section 2 (1f): a short burst of competing traffic does not make the flow build
@@ -626,11 +829,13 @@ fn gcc_regains_its_share_after_a_short_burst_of_cross_traffic() {
     println!(
         "short burst: share before {before:.2}, regained 80% of it {regained:?} s after; p95 queueing delay during {p95_during:?}, after {p95_after:?}"
     );
-    // Measured: 23 s. The back-off is prompt; the climb back is the additive increase of
-    // draft-ietf-rmcat-gcc-02 section 5.5 near the convergence band, about half a packet per
-    // response time, until the received rate leaves the band.
+    // Measured: 2 s. Without the probe after a large drop
+    // (`ProbeController::with_probe_after_drop`) it was 23 s: the back-off is prompt, and the
+    // climb back was the additive increase of draft-ietf-rmcat-gcc-02 section 5.5 near the
+    // convergence band, about half a packet per response time, until the received rate left
+    // the band.
     let regained = regained.expect("the share comes back");
-    assert!(regained <= 30, "{regained} s");
+    assert!(regained <= 5, "{regained} s");
     assert!(p95_after < Duration::from_millis(100), "{p95_after:?}");
 }
 
