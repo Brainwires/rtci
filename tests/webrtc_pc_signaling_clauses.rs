@@ -669,3 +669,20 @@ fn capabilities_list_header_extensions_by_uri() -> TestResult {
     );
     Ok(())
 }
+
+/// W3C 9.3.1: a remote track's getCapabilities is the empty set.
+#[test]
+fn a_remote_track_has_no_capabilities() -> TestResult {
+    use rtc::media_stream::MediaTrackCapabilities;
+    let mut offerer = default_peer()?;
+    let mut answerer = default_peer()?;
+    offerer.add_track(video_track("v", 0x0707_0707))?;
+    exchange(&mut offerer, &mut answerer)?;
+    let receiver = answerer.get_receivers().next().expect("a receiver");
+    let receiver = answerer.rtp_receiver(receiver).expect("receiver");
+    assert_eq!(
+        format!("{:?}", receiver.track().get_capabilities()),
+        format!("{:?}", MediaTrackCapabilities::default())
+    );
+    Ok(())
+}

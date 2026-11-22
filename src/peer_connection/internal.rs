@@ -328,6 +328,7 @@ impl RTCPeerConnection {
             is_negotiation_ongoing: false,
             always_negotiate_data_channels: false,
             announced: super::states_events::AnnouncedStates::new(),
+            last_data_dscp: None,
         })
     }
 
@@ -1232,8 +1233,9 @@ impl RTCPeerConnection {
     /// caller of this method should hold `self.mu` lock
     pub(super) fn add_rtp_transceiver(
         &mut self,
-        t: RTCRtpTransceiverInternal,
+        mut t: RTCRtpTransceiverInternal,
     ) -> RTCRtpTransceiverId {
+        self.inherit_header_extensions_to_negotiate(&mut t);
         self.rtp_transceivers.push(t);
         self.trigger_negotiation_needed();
         self.rtp_transceivers.len() - 1
@@ -3168,6 +3170,11 @@ impl RTCPeerConnection {
         let is_rtx_enabled = self
             .media_engine
             .is_rtx_enabled(track.kind(), RTCRtpTransceiverDirection::Sendonly);
+        // Likewise a FEC repair flow (RFC 5956 `FEC-FR`, flexfec-03 / RFC 8627) when a FEC
+        // format is registered: the application names no FEC SSRC either.
+        let is_fec_enabled = self
+            .media_engine
+            .is_fec_enabled(track.kind(), RTCRtpTransceiverDirection::Sendonly);
         let mut minted: Vec<SSRC> = send_encodings
             .iter()
             .flat_map(|encoding| {
@@ -3186,6 +3193,11 @@ impl RTCPeerConnection {
             }
             if is_rtx_enabled && encoding.rtp_coding_parameters.rtx.is_none() {
                 encoding.rtp_coding_parameters.rtx = Some(RTCRtpRtxParameters {
+                    ssrc: self.unused_ssrc(&mut minted),
+                });
+            }
+            if is_fec_enabled && encoding.rtp_coding_parameters.fec.is_none() {
+                encoding.rtp_coding_parameters.fec = Some(RTCRtpFecParameters {
                     ssrc: self.unused_ssrc(&mut minted),
                 });
             }

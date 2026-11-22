@@ -435,4 +435,35 @@ impl RTCRtpReceiver<'_> {
             message: RTCMessage::RtcpPacket(track_id, packets),
         })
     }
+
+    /// Asks the remote sender of this receiver's streams to keep its media under `bitrate`
+    /// bits per second (total media bit rate at the IP layer), or lifts that limit with
+    /// `None`: RFC 5104 TMMBR, sent by the congestion control interceptor
+    /// (`interceptor::TmmbrControl::{Limit, Clear}`), repeated until the sender acknowledges
+    /// it with a TMMBN.
+    ///
+    /// Only effective for a stream that negotiated `a=rtcp-fb:<pt> ccm tmmbr` (RFC 5104
+    /// section 7.2: no CCM message is sent that was not negotiated) and with the default
+    /// interceptors (their congestion control interceptor holds the request state); otherwise
+    /// nothing is sent. The limit applies to every SSRC the receiver's track receives.
+    pub fn set_remote_bitrate_limit(&mut self, now: Instant, bitrate: Option<u64>) -> Result<()> {
+        let ssrcs: Vec<u32> = self.peer_connection.rtp_transceivers[self.id.0]
+            .receiver()
+            .as_ref()
+            .map(|receiver| receiver.track().ssrcs().collect())
+            .unwrap_or_default();
+        for media_ssrc in ssrcs {
+            let control = match bitrate {
+                Some(bitrate) => interceptor::TmmbrControl::Limit {
+                    media_ssrc,
+                    bitrate,
+                },
+                None => interceptor::TmmbrControl::Clear { media_ssrc },
+            };
+            self.peer_connection
+                .interceptor
+                .handle_write(control.into_packet(now))?;
+        }
+        Ok(())
+    }
 }
