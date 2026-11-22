@@ -168,9 +168,10 @@ fn sctp_port_zero_closes_the_association_and_a_later_offer_brings_one_back() -> 
 fn a_data_channel_added_to_a_connected_session_gets_its_association() -> Result<()> {
     for answerer_role in [RTCDtlsRole::Client, RTCDtlsRole::Server] {
         let mut pair = Pair::new(answerer_role)?;
-        pair.offerer
-            .pc
-            .add_transceiver_from_kind(RtpCodecKind::Video, None)?;
+        pair.offerer.pc.add_transceiver_from_kind(
+            RtpCodecKind::Video,
+            Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+        )?;
         pair.negotiate()?;
         assert!(
             pair.run_until(|p| p.offerer.connected() && p.answerer.connected())?,
@@ -186,6 +187,98 @@ fn a_data_channel_added_to_a_connected_session_gets_its_association() -> Result<
             )?,
             "{answerer_role}: the channel added later never opened"
         );
+    }
+    Ok(())
+}
+
+/// The value of the first `a=<key>:` line of `sdp`, if it has one.
+fn attribute(sdp: &str, key: &str) -> Option<String> {
+    let prefix = format!("a={key}:");
+    sdp.lines()
+        .find_map(|line| line.trim_end().strip_prefix(prefix.as_str()))
+        .map(str::to_owned)
+}
+
+/// RFC 8841 section 10.5: "If the offerer wants to close an existing SCTP association and the
+/// underlying DTLS association ..., it MUST assign a zero port value to the 'm=' line". The
+/// data section, the only one of this session, is rejected in the offer and in the answer:
+/// the association and its channels close on both sides, and so does the transport. A data
+/// channel created later brings a new data section, and with it a new DTLS association (a
+/// new `a=tls-id`, RFC 8842 section 5.5) and a new SCTP association on a new `a=sctp-port`,
+/// which both sides initiate when the new DTLS handshake completes.
+#[test]
+fn rejecting_the_data_section_closes_sctp_and_dtls_and_a_later_channel_brings_new_ones()
+-> Result<()> {
+    for answerer_role in [RTCDtlsRole::Client, RTCDtlsRole::Server] {
+        let (mut pair, first) = Pair::connected(answerer_role, "first")?;
+        let first_remote = pair.answerer.opened()[0];
+        // Records of the association that is closed may still arrive at the new one.
+        pair.offerer.tolerate_read_errors = true;
+        pair.answerer.tolerate_read_errors = true;
+        let first_tls_id = attribute(
+            &pair.offerer.pc.local_description().expect("offer").sdp,
+            "tls-id",
+        )
+        .expect("a=tls-id");
+
+        pair.offerer.pc.reject_data_section();
+        let (offer, answer) = pair.negotiate()?;
+        for sdp in [&offer.sdp, &answer.sdp] {
+            assert!(
+                sdp.contains("m=application 0 UDP/DTLS/SCTP webrtc-datachannel"),
+                "{answerer_role}:\n{sdp}"
+            );
+            assert_eq!(attribute(sdp, "sctp-port"), None, "{answerer_role}");
+            assert_eq!(
+                attribute(sdp, "tls-id"),
+                None,
+                "{answerer_role}: a closed transport has no tls-id"
+            );
+        }
+        assert!(
+            pair.run_until(|p| p.offerer.closed(first) && p.answerer.closed(first_remote))?,
+            "{answerer_role}: the channel outlived its association"
+        );
+        for peer in [&pair.offerer, &pair.answerer] {
+            assert!(peer.pc.sctp().is_none(), "{answerer_role}");
+        }
+
+        let again = pair.offerer.pc.create_data_channel("again", None)?.id();
+        let (offer, answer) = pair.negotiate()?;
+        for sdp in [&offer.sdp, &answer.sdp] {
+            assert_eq!(
+                attribute(sdp, "sctp-port").as_deref(),
+                Some("5001"),
+                "{answerer_role}: a new association, on a new port"
+            );
+        }
+        assert_ne!(
+            attribute(&offer.sdp, "tls-id").expect("a=tls-id"),
+            first_tls_id,
+            "{answerer_role}: a new DTLS association"
+        );
+        // The offer that sets the transport up again restarts ICE.
+        pair.trickle()?;
+        assert!(
+            pair.run_until(
+                |p| p.offerer.opened().contains(&again) && p.answerer.opened().len() == 2
+            )?,
+            "{answerer_role}: no association came back: {:?} / {:?}, {:?} / {:?}",
+            pair.offerer.events,
+            pair.answerer.events,
+            pair.offerer.connection_states,
+            pair.answerer.connection_states
+        );
+        let again_remote = pair.answerer.opened()[1];
+        assert!(pair.deliver(false, again, b"on the new association")?);
+        assert!(pair.deliver(true, again_remote, b"and back")?);
+        for peer in [&pair.offerer, &pair.answerer] {
+            assert_eq!(
+                peer.pc.sctp().expect("SCTP").state(),
+                RTCSctpTransportState::Connected,
+                "{answerer_role}"
+            );
+        }
     }
     Ok(())
 }

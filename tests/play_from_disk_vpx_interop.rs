@@ -427,7 +427,6 @@ async fn test_play_from_disk_vpx_rtc_to_webrtc() -> Result<()> {
                 .ok_or_else(|| anyhow::anyhow!("RTP sender not found"))?;
 
             packet.header.ssrc = rtp_sender
-                .track()
                 .ssrcs()
                 .last()
                 .ok_or(Error::ErrSenderWithNoSSRCs)?;

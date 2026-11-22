@@ -4,9 +4,11 @@ use crate::peer_connection::configuration::interceptor_registry::create_stream_i
 use crate::peer_connection::configuration::media_engine::MediaEngine;
 use crate::rtp_transceiver::SSRC;
 use crate::rtp_transceiver::direction::RTCRtpTransceiverDirection;
+use crate::rtp_transceiver::rtp_sender::MAX_SEND_ENCODINGS;
 use crate::rtp_transceiver::rtp_sender::rtp_capabilities::RTCRtpCapabilities;
 use crate::rtp_transceiver::rtp_sender::rtp_codec::{
-    RtpCodecKind, encoding_send_codec, find_fec_format, find_rtx_payload_type,
+    RTCRtpCodec, RtpCodecKind, codec_dictionary_match, encoding_send_codec, find_fec_format,
+    find_rtx_payload_type, is_repair_codec, repair_family,
 };
 use crate::rtp_transceiver::rtp_sender::rtp_codec_parameters::RTCRtpCodecParameters;
 use crate::rtp_transceiver::rtp_sender::rtp_coding_parameters::RTCRtpRidRestrictions;
@@ -34,10 +36,26 @@ use shared::util::math_rand_alpha;
 pub(crate) struct RTCRtpSenderInternal {
     /// The codec kind (audio or video) for this sender
     kind: RtpCodecKind,
-    /// The media track being sent
+    /// What the sender is signalled and sent as: the ids of its `a=msid` lines, which
+    /// `replaceTrack` leaves alone (W3C webrtc 5.2), and the codings (SSRCs) it sends now.
+    /// It has the codings of `send_encodings`, and none once the track was removed
+    /// (`track_removed`), so "has codings" is "sends": nothing is bound, routed or counted
+    /// for a sender whose track was taken away.
     sender_track: MediaStreamTrack,
-    /// Media stream IDs associated with this sender's track
+    /// The application set `[[SenderTrack]]` to null (`removeTrack`, `replaceTrack(null)`):
+    /// the sender stopped sending and refuses RTP until it has a track again. A sender made
+    /// without a track is not in this state: the engine makes no media of its own, so one
+    /// created to send forwards what the application writes.
+    track_removed: bool,
+    /// W3C `[[SenderTrack]]`: the application's track, with the sender's codings; `None` is
+    /// null (a transceiver made without a track, `removeTrack`, `replaceTrack(null)`).
+    attached_track: Option<MediaStreamTrack>,
+    /// W3C `[[AssociatedMediaStreamIds]]`: exactly what the application gave, without
+    /// duplicates, possibly empty.
     associated_media_stream_ids: Vec<MediaStreamId>,
+    /// The stream ids the `a=msid` lines carry: the associated ids, or `-` when there are
+    /// none (RFC 9429 section 5.2.1).
+    msid_stream_ids: Vec<MediaStreamId>,
     /// Encoding parameters for each simulcast/layered encoding
     send_encodings: Vec<RTCRtpEncodingParameters>,
     /// Negotiated codec parameters
@@ -67,7 +85,9 @@ impl RTCRtpSenderInternal {
     ///
     /// * `kind` - The codec kind (audio or video)
     /// * `track` - The media track to send
-    /// * `streams` - Media stream IDs to associate with the track (uses track's stream if empty)
+    /// * `streams` - Media stream IDs to associate with the track. This crate's `add_track`
+    ///   has no streams argument: a track names the one stream it is in, so an empty list
+    ///   stands for that stream.
     /// * `send_encodings` - Initial encoding parameters for the sender
     pub(crate) fn new(
         kind: RtpCodecKind,
@@ -75,31 +95,154 @@ impl RTCRtpSenderInternal {
         streams: Vec<MediaStreamId>,
         send_encodings: Vec<RTCRtpEncodingParameters>,
     ) -> Self {
-        let associated_media_stream_ids = if streams.is_empty() {
+        let streams = if streams.is_empty() {
             vec![track.stream_id().to_string()]
         } else {
             streams
         };
-
-        Self {
+        // Encodings left out are the track's own codings.
+        let send_encodings = if send_encodings.is_empty() {
+            track.codings().to_vec()
+        } else {
+            send_encodings
+        };
+        let mut sender = Self {
             kind,
-            sender_track: track,
-            associated_media_stream_ids,
+            sender_track: track.clone(),
+            attached_track: Some(track),
             send_encodings,
-            send_codecs: Vec::new(),
-
-            last_returned_parameters: None,
-            negotiated: false,
-            sent: false,
-            bound_streams: Vec::new(),
-            rtcp_reduced_size: false,
-            removed_ssrcs: Vec::new(),
-        }
+            ..Default::default()
+        };
+        sender.set_streams(streams);
+        sender.sync_tracks();
+        sender
     }
 
-    /// Returns the media track being sent.
+    /// A sender whose `[[SenderTrack]]` is null (W3C webrtc 5.2 "create an RTCRtpSender" with
+    /// a kind): every transceiver has one, whether or not it ever sends.
+    ///
+    /// `send_encodings` may be empty: SSRCs are then allocated when the sender first needs
+    /// them (a sending direction, a track).
+    pub(crate) fn without_track(
+        kind: RtpCodecKind,
+        streams: Vec<MediaStreamId>,
+        send_encodings: Vec<RTCRtpEncodingParameters>,
+    ) -> Self {
+        let mut sender = Self {
+            kind,
+            // Signalled as `a=msid:<stream or -> <id>`: an id of its own, as a browser gives a
+            // sender without a track.
+            sender_track: MediaStreamTrack::new(
+                "-".to_owned(),
+                math_rand_alpha(16),
+                String::new(),
+                kind,
+                vec![],
+            ),
+            attached_track: None,
+            send_encodings,
+            ..Default::default()
+        };
+        sender.set_streams(streams);
+        sender.sync_tracks();
+        sender
+    }
+
+    /// What the sender is signalled and sent as: the msid ids, and the codings it sends now
+    /// (none while `[[SenderTrack]]` is null).
     pub(crate) fn track(&self) -> &MediaStreamTrack {
         &self.sender_track
+    }
+
+    /// W3C `[[SenderTrack]]`: the track the application attached, `None` for null.
+    pub(crate) fn attached_track(&self) -> Option<&MediaStreamTrack> {
+        self.attached_track.as_ref()
+    }
+
+    pub(crate) fn attached_track_mut(&mut self) -> Option<&mut MediaStreamTrack> {
+        self.attached_track.as_mut()
+    }
+
+    pub(crate) fn has_track(&self) -> bool {
+        self.attached_track.is_some()
+    }
+
+    /// Whether the application removed the sender's track: it sends nothing until it gets one.
+    pub(crate) fn track_removed(&self) -> bool {
+        self.track_removed
+    }
+
+    /// Gives the signalled track and the attached one the sender's codings: all of
+    /// `send_encodings`, and none for the signalled one once the track was removed.
+    fn sync_tracks(&mut self) {
+        if let Some(track) = self.attached_track.as_mut() {
+            track.set_codings(self.send_encodings.clone());
+        }
+        self.sender_track.set_codings(if self.track_removed {
+            vec![]
+        } else {
+            self.send_encodings.clone()
+        });
+    }
+
+    /// Whether the sender has encodings with SSRCs to describe and send with.
+    pub(crate) fn has_send_encodings(&self) -> bool {
+        !self.send_encodings.is_empty()
+    }
+
+    /// Gives a sender that has none its encodings (SSRCs allocated by the caller).
+    pub(crate) fn set_send_encodings(&mut self, send_encodings: Vec<RTCRtpEncodingParameters>) {
+        self.send_encodings = send_encodings;
+        self.last_returned_parameters = None;
+        self.sync_tracks();
+    }
+
+    /// Gives each encoding the codec the coding of a new track names for it (the coding with
+    /// the same rid, or at the same place when there are no rids), when that codec is within
+    /// what was negotiated: one of the send codecs, or any before negotiation. A coding that
+    /// names no codec, or one that was not negotiated, leaves the encoding's codec alone (the
+    /// envelope `replaceTrack` stays in). The SSRCs and rids are the sender's and stay.
+    pub(crate) fn adopt_coding_codecs(&mut self, codings: &[RTCRtpEncodingParameters]) {
+        for (i, encoding) in self.send_encodings.iter_mut().enumerate() {
+            let rid = &encoding.rtp_coding_parameters.rid;
+            let coding = if rid.is_empty() {
+                codings.get(i)
+            } else {
+                codings
+                    .iter()
+                    .find(|coding| &coding.rtp_coding_parameters.rid == rid)
+            };
+            if let Some(coding) = coding
+                && !coding.codec.mime_type.is_empty()
+                && (self.send_codecs.is_empty()
+                    || encoding_send_codec(&coding.codec, &self.send_codecs).is_some())
+            {
+                encoding.codec = coding.codec.clone();
+            }
+        }
+        self.last_returned_parameters = None;
+        self.sync_tracks();
+    }
+
+    /// W3C `addTrack` reusing this sender: the track becomes `[[SenderTrack]]` and what the
+    /// sender is signalled as (its `a=msid`), `streams` its associated streams.
+    pub(crate) fn attach_track(&mut self, track: MediaStreamTrack, streams: Vec<MediaStreamId>) {
+        self.sender_track = track.clone();
+        self.attached_track = Some(track);
+        self.track_removed = false;
+        self.set_streams(streams);
+        self.sync_tracks();
+    }
+
+    /// W3C `removeTrack` / `replaceTrack(null)`: `[[SenderTrack]]` becomes null and the sender
+    /// stops sending (an RTCP BYE goes out for each stream it sent, as the streams are
+    /// unbound). The encodings, their SSRCs, the msid and the associated streams stay.
+    pub(crate) fn detach_track(&mut self, interceptor: &mut dyn Interceptor) {
+        self.attached_track = None;
+        self.track_removed = true;
+        self.unbind_local_streams(interceptor);
+        self.sent = false;
+        self.sync_tracks();
     }
 
     /// Returns the codec kind (audio or video) for this sender.
@@ -115,50 +258,19 @@ impl RTCRtpSenderInternal {
         &self.send_codecs
     }
 
-    /// Returns the RTP capabilities for the specified codec kind.
-    ///
-    /// Filters codecs by the requested kind and returns available codecs
-    /// and header extensions supported by the media engine.
-    ///
-    /// # Parameters
-    ///
-    /// * `kind` - The codec kind to query capabilities for
-    /// * `media_engine` - The media engine containing codec information
+    /// The RTP capabilities of the engine for sending `kind` (W3C webrtc 5.2
+    /// `RTCRtpSender.getCapabilities`, a static method: no negotiation state is read).
     ///
     /// # Returns
     ///
-    /// `None` if the kind is unspecified, otherwise returns the capabilities.
+    /// `None` for a kind that is neither audio nor video.
     pub(crate) fn get_capabilities(
-        &self,
         kind: RtpCodecKind,
         media_engine: &MediaEngine,
     ) -> Option<RTCRtpCapabilities> {
-        if kind == RtpCodecKind::Unspecified {
-            return None;
-        }
-
-        let rtp_parameters = media_engine
-            .get_rtp_parameters_by_kind(self.kind(), RTCRtpTransceiverDirection::Sendonly);
-
-        Some(RTCRtpCapabilities {
-            codecs: self
-                .send_codecs
-                .iter()
-                .filter(|codec| {
-                    codec
-                        .rtp_codec
-                        .mime_type
-                        .contains(kind.to_string().as_str())
-                })
-                .map(|codec| codec.rtp_codec.clone())
-                .collect(),
-            header_extensions: rtp_parameters
-                .header_extensions
-                .into_iter()
-                .map(|h| RTCRtpHeaderExtensionCapability { uri: h.uri })
-                .collect(),
-        })
+        rtp_capabilities(kind, RTCRtpTransceiverDirection::Sendonly, media_engine)
     }
+
     /// Updates the sender's RTP send parameters.
     ///
     /// Validates and applies new encoding parameters including bitrate limits,
@@ -177,17 +289,21 @@ impl RTCRtpSenderInternal {
     /// - `InvalidModificationError` when the transaction id is not the one `get_parameters`
     ///   returned, the number of encodings or an encoding's rid differs, or a read-only member
     ///   (`header_extensions`, `rtcp`, `codecs`) was changed
+    /// - `InvalidModificationError` when an encoding's SSRCs were changed, or its `codec` was
+    ///   set to one that is not choosable
     /// - `RangeError` for a `scale_resolution_down_by` below 1.0 or a negative `max_framerate`
     pub(crate) fn set_parameters(
         &mut self,
         mut parameters: RTCRtpSendParameters,
         _set_parameter_options: Option<RTCSetParameterOptions>,
+        media_engine: &MediaEngine,
     ) -> Result<()> {
         // Validate parameters by running the following setParameters validation steps:
         {
             let Some(last) = self.last_returned_parameters.as_ref() else {
                 return Err(Error::InvalidStateError);
             };
+            // Read-only members: the transaction id, the header extensions, RTCP and codecs.
             if parameters.transaction_id != last.transaction_id {
                 return Err(Error::InvalidModificationError);
             }
@@ -197,11 +313,45 @@ impl RTCRtpSenderInternal {
             {
                 return Err(Error::InvalidModificationError);
             }
+            // The number of encodings and their order: an encoding is its rid and, in this
+            // crate, the SSRCs it was given, none of which `setParameters` may change.
             if parameters.encodings.len() != self.send_encodings.len() {
                 return Err(Error::InvalidModificationError);
             }
             for (p, s) in parameters.encodings.iter().zip(self.send_encodings.iter()) {
-                if p.rtp_coding_parameters.rid != s.rtp_coding_parameters.rid {
+                let (p, s) = (&p.rtp_coding_parameters, &s.rtp_coding_parameters);
+                if p.rid != s.rid
+                    || p.ssrc != s.ssrc
+                    || p.rtx.as_ref().map(|rtx| rtx.ssrc) != s.rtx.as_ref().map(|rtx| rtx.ssrc)
+                    || p.fec.as_ref().map(|fec| fec.ssrc) != s.fec.as_ref().map(|fec| fec.ssrc)
+                {
+                    return Err(Error::InvalidModificationError);
+                }
+            }
+            // An encoding's codec is one of the choosable codecs: the negotiated send codecs,
+            // or before negotiation the codecs the engine can send. An encoding whose codec
+            // was not touched passes, whatever it names (`addTransceiver` checked it).
+            let choosable: Vec<RTCRtpCodec> = if self.send_codecs.is_empty() {
+                media_engine
+                    .get_codecs_by_kind(self.kind())
+                    .into_iter()
+                    .map(|codec| codec.rtp_codec)
+                    .collect()
+            } else {
+                self.send_codecs
+                    .iter()
+                    .map(|codec| codec.rtp_codec.clone())
+                    .collect()
+            };
+            for (p, s) in parameters.encodings.iter().zip(self.send_encodings.iter()) {
+                if p.codec.mime_type.is_empty() || p.codec == s.codec {
+                    continue;
+                }
+                if is_repair_codec(&p.codec)
+                    || !choosable
+                        .iter()
+                        .any(|codec| codec_dictionary_match(&p.codec, codec))
+                {
                     return Err(Error::InvalidModificationError);
                 }
             }
@@ -211,36 +361,36 @@ impl RTCRtpSenderInternal {
                     encoding.scale_resolution_down_by.get_or_insert(1.0);
                 });
 
-                if parameters
-                    .encodings
-                    .iter()
-                    .any(|e| e.scale_resolution_down_by.is_some_and(|v| v < 1.0))
-                {
+                if parameters.encodings.iter().any(|e| {
+                    e.scale_resolution_down_by
+                        .is_some_and(|v| v.is_nan() || v < 1.0)
+                }) {
                     return Err(Error::RangeError(
                         "scaleResolutionDownBy must be >= 1.0".to_string(),
                     ));
                 }
-                if parameters
-                    .encodings
-                    .iter()
-                    .any(|e| e.max_framerate.is_some_and(|v| v < 0.0))
-                {
-                    return Err(Error::RangeError(
-                        "maxFramerate must not be negative".to_string(),
-                    ));
-                }
             } else {
-                // Audio and Application have no resolution or frame rate: those members are
-                // ignored, not the encodings that carry them (whose count is read-only).
+                // Audio has no resolution or frame rate: those members are removed, not the
+                // encodings that carry them (whose count is read-only).
                 for encoding in &mut parameters.encodings {
                     encoding.scale_resolution_down_by = None;
                     encoding.max_framerate = None;
                 }
             }
+            if parameters
+                .encodings
+                .iter()
+                .any(|e| e.max_framerate.is_some_and(|v| v.is_nan() || v < 0.0))
+            {
+                return Err(Error::RangeError(
+                    "maxFramerate must not be negative".to_string(),
+                ));
+            }
         }
 
         self.send_encodings = parameters.encodings;
         self.last_returned_parameters = None;
+        self.sync_tracks();
 
         Ok(())
     }
@@ -261,6 +411,8 @@ impl RTCRtpSenderInternal {
 
             rtp_parameters.codecs = self.send_codecs.clone();
             rtp_parameters.rtcp.reduced_size = self.rtcp_reduced_size;
+            // RFC 7022 / RFC 8834 section 4.9: one CNAME for every stream of the connection.
+            rtp_parameters.rtcp.cname = media_engine.rtcp_cname.clone();
 
             self.last_returned_parameters = Some(RTCRtpSendParameters {
                 rtp_parameters,
@@ -272,13 +424,12 @@ impl RTCRtpSenderInternal {
         self.last_returned_parameters.as_ref().unwrap()
     }
 
-    /// Replaces the current track with a new media track.
+    /// Replaces the track the sender sends with another of the same kind, without
+    /// negotiation: the encodings and their SSRCs, the `a=msid` the sender is signalled with
+    /// and its associated streams all stay (W3C webrtc 5.2 `replaceTrack`).
     ///
-    /// The new track must be of the same media kind (audio or video) as the existing track.
-    ///
-    /// # Parameters
-    ///
-    /// * `track` - The new media track to send
+    /// The caller checks the transceiver (stopping) and binds the streams when the sender
+    /// had no track.
     ///
     /// # Errors
     ///
@@ -292,37 +443,39 @@ impl RTCRtpSenderInternal {
         if self.kind() != track.kind() {
             return Err(Error::ErrRTPSenderNewTrackHasIncorrectKind);
         }
-
-        //if transceiver.stopping  {
-        //  return Err(Error::InvalidStateError);
-        //}
-
-        self.associated_media_stream_ids = vec![track.stream_id().to_string()];
-
-        self.sender_track = track;
-
+        self.attached_track = Some(track);
+        self.track_removed = false;
+        self.sync_tracks();
         Ok(())
     }
 
-    /// Returns the media stream IDs associated with this sender's track.
+    /// The stream ids of the sender's `a=msid` lines: its associated streams, or `-` when it
+    /// has none (RFC 9429 section 5.2.1). What a description is compared with to tell whether
+    /// `setStreams` needs negotiating.
     pub(crate) fn streams(&self) -> &[MediaStreamId] {
+        &self.msid_stream_ids
+    }
+
+    /// W3C `[[AssociatedMediaStreamIds]]`.
+    pub(crate) fn associated_streams(&self) -> &[MediaStreamId] {
         &self.associated_media_stream_ids
     }
 
-    /// Sets the media stream IDs for this sender's track.
-    ///
-    /// If the streams vector is empty, uses the track's own stream ID.
-    ///
-    /// # Parameters
-    ///
-    /// * `streams` - Vector of stream IDs to associate with the track
+    /// Sets the sender's associated stream ids to exactly `streams`, without duplicates; the
+    /// list may be empty (W3C webrtc 5.2 `setStreams`).
     pub(crate) fn set_streams(&mut self, streams: Vec<MediaStreamId>) {
-        let associated_media_stream_ids = if streams.is_empty() {
-            vec![self.sender_track.stream_id().to_string()]
+        let mut associated: Vec<MediaStreamId> = Vec::with_capacity(streams.len());
+        for stream in streams {
+            if !associated.contains(&stream) {
+                associated.push(stream);
+            }
+        }
+        self.msid_stream_ids = if associated.is_empty() {
+            vec!["-".to_owned()]
         } else {
-            streams
+            associated.clone()
         };
-        self.associated_media_stream_ids = associated_media_stream_ids;
+        self.associated_media_stream_ids = associated;
         // The negotiation-needed flag is updated by `RTCRtpSender::set_streams`, which has the
         // peer connection.
     }
@@ -344,7 +497,8 @@ impl RTCRtpSenderInternal {
         self.sent = true;
     }
 
-    /// Stops the sender (placeholder for future implementation).
+    /// Stops the sender: its streams are unbound, which has the sender report interceptor
+    /// say BYE for each (W3C webrtc 5.4 "stop sending and receiving").
     pub(crate) fn stop(
         &mut self,
         _media_engine: &MediaEngine,
@@ -386,8 +540,7 @@ impl RTCRtpSenderInternal {
         // The streams are bound from the track's codings (`local_stream_infos`), which carry
         // the same repair SSRCs: dropped there too, or a stream would bind an RTX / FEC SSRC
         // with no payload type to send it with.
-        self.sender_track
-            .clear_repair_ssrcs(!is_rtx_enabled, !is_fec_enabled);
+        self.sync_tracks();
         self.last_returned_parameters = None;
     }
 
@@ -405,8 +558,7 @@ impl RTCRtpSenderInternal {
     pub(crate) fn restore_negotiated_state(&mut self, saved: &RTCRtpSenderInternal) {
         self.send_codecs.clone_from(&saved.send_codecs);
         restore_repair_ssrcs(&mut self.send_encodings, &saved.send_encodings);
-        self.sender_track
-            .restore_repair_ssrcs(saved.sender_track.codings());
+        self.sync_tracks();
         self.last_returned_parameters = None;
     }
 
@@ -449,6 +601,7 @@ impl RTCRtpSenderInternal {
         }
         self.send_encodings = kept;
         self.last_returned_parameters = None;
+        self.sync_tracks();
     }
 
     /// Whether `ssrc` is the SSRC of an encoding an answer removed (`apply_simulcast_answer`).
@@ -569,6 +722,134 @@ impl RTCRtpSenderInternal {
             interceptor.unbind_local_stream(&info);
         }
     }
+}
+
+/// W3C webrtc 5.1 `addTransceiver`, the steps that take `sendEncodings`:
+///
+/// - a rid that is not `1*(alpha-numeric / "-" / "_")` (RFC 8851 section 10) is a `TypeError`,
+///   as are a rid on some encodings only and a repeated rid;
+/// - for audio `scaleResolutionDownBy` and `maxFramerate` are removed;
+/// - a `scaleResolutionDownBy` below 1.0 and a negative `maxFramerate` are `RangeError`s;
+/// - encodings past [`MAX_SEND_ENCODINGS`] are dropped from the end;
+/// - video encodings without `scaleResolutionDownBy` get 1.0 when another has one, and
+///   otherwise `2^(count - index - 1)`: each layer half the next;
+/// - a single encoding loses its rid.
+///
+/// The codec of an encoding is checked where the encodings are given their SSRCs
+/// (`codec_preferences_from_encodings`: one the engine cannot send is refused).
+pub(crate) fn validate_send_encodings(
+    kind: RtpCodecKind,
+    encodings: &mut Vec<RTCRtpEncodingParameters>,
+) -> Result<()> {
+    let is_rid = |rid: &str| {
+        rid.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    };
+    if let Some(encoding) = encodings
+        .iter()
+        .find(|encoding| !is_rid(&encoding.rtp_coding_parameters.rid))
+    {
+        return Err(Error::TypeError(format!(
+            "rid {:?} is not RFC 8851 syntax",
+            encoding.rtp_coding_parameters.rid
+        )));
+    }
+    let with_rid = encodings
+        .iter()
+        .filter(|encoding| !encoding.rtp_coding_parameters.rid.is_empty())
+        .count();
+    if with_rid != 0 && with_rid != encodings.len() {
+        return Err(Error::ErrRTPSenderRidNil);
+    }
+    if encodings.iter().enumerate().any(|(i, encoding)| {
+        !encoding.rtp_coding_parameters.rid.is_empty()
+            && encodings[..i].iter().any(|earlier| {
+                earlier.rtp_coding_parameters.rid == encoding.rtp_coding_parameters.rid
+            })
+    }) {
+        return Err(Error::ErrRTPSenderRIDCollision);
+    }
+
+    if kind != RtpCodecKind::Video {
+        for encoding in encodings.iter_mut() {
+            encoding.scale_resolution_down_by = None;
+            encoding.max_framerate = None;
+        }
+    }
+    if encodings.iter().any(|e| {
+        e.scale_resolution_down_by
+            .is_some_and(|v| v.is_nan() || v < 1.0)
+    }) {
+        return Err(Error::RangeError(
+            "scaleResolutionDownBy must be >= 1.0".to_string(),
+        ));
+    }
+    if encodings
+        .iter()
+        .any(|e| e.max_framerate.is_some_and(|v| v.is_nan() || v < 0.0))
+    {
+        return Err(Error::RangeError(
+            "maxFramerate must not be negative".to_string(),
+        ));
+    }
+
+    encodings.truncate(MAX_SEND_ENCODINGS);
+
+    if kind == RtpCodecKind::Video {
+        if encodings
+            .iter()
+            .any(|encoding| encoding.scale_resolution_down_by.is_some())
+        {
+            for encoding in encodings.iter_mut() {
+                encoding.scale_resolution_down_by.get_or_insert(1.0);
+            }
+        } else {
+            let count = encodings.len();
+            for (i, encoding) in encodings.iter_mut().enumerate() {
+                encoding.scale_resolution_down_by =
+                    Some(f64::from(1u32 << (count - i - 1).min(31)));
+            }
+        }
+    }
+
+    if let [encoding] = encodings.as_mut_slice() {
+        encoding.rtp_coding_parameters.rid = String::new();
+    }
+    Ok(())
+}
+
+/// The codecs and header extensions the engine implements for `kind` in `direction` (W3C
+/// webrtc 5.2.10 `RTCRtpCapabilities`): every registered codec once, the retransmission
+/// format as a single entry without an `sdpFmtpLine` (it stands for every primary), and the
+/// header extensions registered for the kind and direction.
+pub(crate) fn rtp_capabilities(
+    kind: RtpCodecKind,
+    direction: RTCRtpTransceiverDirection,
+    media_engine: &MediaEngine,
+) -> Option<RTCRtpCapabilities> {
+    if !matches!(kind, RtpCodecKind::Audio | RtpCodecKind::Video) {
+        return None;
+    }
+    let mut codecs: Vec<RTCRtpCodec> = vec![];
+    for codec in media_engine.get_codecs_by_kind(kind) {
+        let mut codec = codec.rtp_codec;
+        if is_repair_codec(&codec) && repair_family(&codec) == "rtx" {
+            codec.sdp_fmtp_line = String::new();
+            codec.rtcp_feedback = vec![];
+        }
+        if !codecs.contains(&codec) {
+            codecs.push(codec);
+        }
+    }
+    Some(RTCRtpCapabilities {
+        codecs,
+        header_extensions: media_engine
+            .get_rtp_parameters_by_kind(kind, direction)
+            .header_extensions
+            .into_iter()
+            .map(|h| RTCRtpHeaderExtensionCapability { uri: h.uri })
+            .collect(),
+    })
 }
 
 /// Gives each encoding of `encodings` that lost its RTX or FEC SSRC the one the encoding with

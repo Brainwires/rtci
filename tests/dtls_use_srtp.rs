@@ -72,9 +72,10 @@ fn a_data_channel_session_is_set_up_without_use_srtp() -> Result<()> {
 fn a_media_session_negotiates_use_srtp() -> Result<()> {
     for answering_role in [None, Some(RTCDtlsRole::Server)] {
         let mut world = world([false, false], answering_role)?;
-        world.peers[0]
-            .pc
-            .add_transceiver_from_kind(RtpCodecKind::Audio, None)?;
+        world.peers[0].pc.add_transceiver_from_kind(
+            RtpCodecKind::Audio,
+            Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+        )?;
         world.connect()?;
         world.ping_pong("a media session")?;
         let now = world.now;
@@ -135,9 +136,10 @@ fn media_added_to_a_data_channel_session_gets_an_association_with_use_srtp() -> 
             ];
             let written = [world.peers[0].written.len(), world.peers[1].written.len()];
 
-            world.peers[offering]
-                .pc
-                .add_transceiver_from_kind(RtpCodecKind::Audio, None)?;
+            world.peers[offering].pc.add_transceiver_from_kind(
+                RtpCodecKind::Audio,
+                Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+            )?;
             let (offer, answer) = world.exchange(offering)?;
             assert!(offer.contains("m=audio 9 "), "{what}: {offer}");
             assert_ne!(
@@ -181,9 +183,10 @@ fn media_added_keeps_an_association_that_has_use_srtp() -> Result<()> {
     let mut world = world([true, true], None)?;
     let (first_offer, _) = world.connect()?;
     let written = world.peers[1].written.len();
-    world.peers[0]
-        .pc
-        .add_transceiver_from_kind(RtpCodecKind::Audio, None)?;
+    world.peers[0].pc.add_transceiver_from_kind(
+        RtpCodecKind::Audio,
+        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+    )?;
     let (offer, _) = world.exchange(0)?;
     assert_eq!(
         attribute_values(&offer, "tls-id"),

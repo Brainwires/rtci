@@ -752,26 +752,10 @@ impl MediaStreamTrack {
             .map(|coding| &coding.codec)
     }
 
-    /// Drops the RTX and / or FEC repair SSRCs of every coding, when negotiation left the
-    /// repair format out.
-    pub(crate) fn clear_repair_ssrcs(&mut self, rtx: bool, fec: bool) {
-        for coding in &mut self.codings {
-            if rtx {
-                coding.rtp_coding_parameters.rtx = None;
-            }
-            if fec {
-                coding.rtp_coding_parameters.fec = None;
-            }
-        }
-    }
-
-    /// Gives back the repair SSRCs `clear_repair_ssrcs` took, from `saved` (a copy of the
-    /// codings made before): a rollback of the offer that lacked the repair format.
-    pub(crate) fn restore_repair_ssrcs(&mut self, saved: &[RTCRtpEncodingParameters]) {
-        crate::rtp_transceiver::rtp_sender::internal::restore_repair_ssrcs(
-            &mut self.codings,
-            saved,
-        );
+    /// Replaces the codings: a sender's track carries the sender's encodings, which
+    /// negotiation and `setParameters` change.
+    pub(crate) fn set_codings(&mut self, codings: Vec<RTCRtpEncodingParameters>) {
+        self.codings = codings;
     }
 
     /// Returns the RTP encoding parameters (codings) configured for this track.

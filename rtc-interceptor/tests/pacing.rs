@@ -253,9 +253,11 @@ fn a_burst_is_released_at_the_configured_rate() {
     for sequence_number in 0..5 {
         harness.send(ms(0), sequence_number);
     }
-    assert!(
-        harness.released().is_empty(),
-        "enqueueing releases nothing; only the clock does"
+    harness.drain();
+    assert_eq!(
+        vec![(0, ms(0))],
+        harness.schedule(),
+        "the packet the budget covers leaves as it is written; the rest wait for the clock"
     );
 
     harness.advance_to(ms(100));
@@ -398,18 +400,23 @@ fn poll_timeout_is_none_when_the_queue_is_empty() {
     assert_eq!(None, harness.next_timeout(), "nothing queued");
 
     harness.send(ms(0), 0);
+    assert_eq!(
+        None,
+        harness.next_timeout(),
+        "a packet inside the budget left as it was written: nothing to wake for"
+    );
     harness.send(ms(0), 1);
     assert_eq!(
-        Some(ms(0)),
+        Some(ms(10)),
         harness.next_timeout(),
-        "the head can go immediately"
+        "the next is due a packet-time later"
     );
 
     harness.tick(ms(0));
     assert_eq!(
         Some(ms(10)),
         harness.next_timeout(),
-        "and the next is due a packet-time later"
+        "and a timeout before then changes nothing"
     );
 
     harness.advance_to(ms(100));
@@ -632,9 +639,80 @@ fn the_queue_is_bounded_and_refuses_new_arrivals_when_full() {
     }
 
     assert_eq!(
-        3, released,
-        "capped at the queue limit; the other seven arrivals were refused"
+        4, released,
+        "the first left inside the budget, three filled the queue, the other six were refused"
     );
+}
+
+/// RFC 8836 section 2, requirement 1 (self-induced delay as low as possible) with
+/// draft-ietf-rmcat-gcc-02 section 4 (no more than the target rate times the burst time at
+/// once): a packet the budget covers leaves when it is written, at the instant it was written,
+/// and the budget it used still spaces what follows.
+#[test]
+fn a_packet_inside_the_budget_leaves_when_it_is_written() {
+    let mut harness = Harness::new();
+
+    harness.send(ms(3), 0);
+    harness.drain();
+    assert_eq!(vec![(0, ms(3))], harness.schedule(), "no timer was needed");
+
+    // The budget is spent: the next packet waits its 10 ms, wherever the clock is asked.
+    harness.send(ms(4), 1);
+    harness.drain();
+    assert_eq!(1, harness.schedule().len(), "the second is over budget");
+    harness.advance_to(ms(50));
+    let schedule = harness.schedule();
+    assert_eq!((0, ms(3)), schedule[0]);
+    assert_eq!(1, schedule[1].0);
+    assert!(
+        schedule[1].1.abs_diff(ms(13)) < Duration::from_micros(1),
+        "one packet-time after the first, not after the write: {:?}",
+        schedule[1].1
+    );
+
+    // And one written behind a queued packet does not overtake it.
+    harness.send(ms(60), 2);
+    harness.send(ms(60), 3);
+    harness.send(ms(70), 4);
+    harness.advance_to(ms(100));
+    let order: Vec<u16> = harness.schedule().iter().map(|(seq, _)| *seq).collect();
+    assert_eq!(vec![0, 1, 2, 3, 4], order);
+}
+
+/// The setting for a driver that wants every departure on its own clock: nothing leaves from
+/// a write, only from a timeout.
+#[test]
+fn without_immediate_release_only_the_clock_releases() {
+    let epoch = Instant::now();
+    let mut chain = Registry::new()
+        .with(
+            Slot::Pacer,
+            PacerBuilder::new()
+                .with_target_bitrate(BITRATE)
+                .with_immediate_release(false)
+                .build(),
+        )
+        .build();
+
+    chain
+        .handle_write(TaggedPacket {
+            now: epoch,
+            transport: TransportContext::default(),
+            message: AttributedPacket::new(Packet::Rtp(rtp::Packet {
+                header: rtp::header::Header {
+                    version: 2,
+                    ssrc: 1,
+                    ..Default::default()
+                },
+                payload: vec![0u8; PAYLOAD_BYTES].into(),
+            })),
+        })
+        .expect("handle_write");
+    assert!(chain.poll_write().is_none(), "held for the clock");
+    assert_eq!(Some(epoch), chain.poll_timeout());
+
+    chain.handle_timeout(epoch).expect("handle_timeout");
+    assert!(chain.poll_write().is_some(), "released by the timeout");
 }
 
 /// A packet's size is its size on the wire, since that is what occupies the path.

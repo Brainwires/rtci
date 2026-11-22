@@ -2,7 +2,7 @@ use crate::peer_connection::event::{RTCEventInternal, TaggedRTCEventInternal};
 use crate::peer_connection::message::internal::{
     DTLSMessage, RTCMessageInternal, TaggedRTCMessageInternal,
 };
-use crate::peer_connection::transport::sctp::SctpTransport;
+use crate::peer_connection::transport::sctp::{SctpPath, SctpTransport};
 use bytes::BytesMut;
 use datachannel::data_channel::DataChannelMessage;
 use datachannel::message::Message;
@@ -10,8 +10,8 @@ use datachannel::message::message_channel_threshold::DataChannelThreshold;
 use log::{debug, warn};
 use sctp::{
     Association, AssociationError, AssociationEvent, AssociationHandle, ClientConfig,
-    DatagramEvent, EndpointEvent, Event, Payload, PayloadProtocolIdentifier, ReliabilityType,
-    Stream, StreamEvent, StreamId,
+    DatagramEvent, EndpointEvent, Event, Payload, PayloadProtocolIdentifier, ReconfigEvent,
+    ReliabilityType, Stream, StreamEvent, StreamId,
 };
 use shared::error::{Error, Result};
 use shared::marshal::Unmarshal;
@@ -102,6 +102,20 @@ pub(crate) struct SctpHandlerContext {
     /// parked data either.
     association_transport: HashMap<AssociationHandle, TransportContext>,
 
+    /// What lies under the associations may have changed (ICE selected a candidate pair, or a
+    /// DTLS handshake completed and with it a cipher suite): the peer connection, which sees
+    /// both, works the path out again before the handler is used next
+    /// ([`SctpHandlerContext::take_path_refresh`], [`SctpHandler::apply_path`]).
+    path_dirty: bool,
+
+    /// ICE selected a candidate pair since the path was last applied: the associations are
+    /// told that their packets take another path (RFC 8831 section 5).
+    path_changed: bool,
+
+    /// The ICE handler's count of selected-pair changes when the path was last asked for
+    /// (`IceHandlerContext::selected_pair_changes`).
+    selected_pair_changes: u64,
+
     /// The newest instant a caller has supplied, seeded at construction.
     ///
     /// This is the one place in the core that genuinely needs a retained instant: the flush is
@@ -127,8 +141,27 @@ impl SctpHandlerContext {
             ordered_until_reply: HashMap::new(),
             unannounced: HashSet::new(),
             association_transport: HashMap::new(),
+            path_dirty: false,
+            path_changed: false,
+            selected_pair_changes: 0,
             now,
         }
+    }
+
+    /// Whether the path under the associations has to be worked out again, asked once per
+    /// change: the caller then hands the answer to [`SctpHandler::apply_path`].
+    ///
+    /// `selected_pair_changes` is how many times ICE has selected another candidate pair so
+    /// far. RFC 8831 section 5: "SCTP SHOULD be notified when an address change has
+    /// happened." The association runs on a placeholder address and the selected-pair event
+    /// ends at the DTLS handler, so a count that moved is how this handler learns of it.
+    pub(crate) fn take_path_refresh(&mut self, selected_pair_changes: u64) -> bool {
+        if selected_pair_changes != self.selected_pair_changes {
+            self.selected_pair_changes = selected_pair_changes;
+            self.path_dirty = true;
+            self.path_changed = true;
+        }
+        std::mem::take(&mut self.path_dirty)
     }
 
     /// Records the newest instant a caller has supplied.
@@ -364,6 +397,27 @@ impl<'a> SctpHandler<'a> {
                         });
                     }
                 }
+                // RFC 9260 sections 8.2 and 8.3: Path.Max.Retrans retransmissions or HEARTBEATs
+                // in a row went unanswered. The association has one path and goes on trying
+                // on it, so it is still `connected` (W3C webrtc 6.1: the transport is `closed`
+                // when the association is) and its channels are still open; if the peer never
+                // answers, Association.Max.Retrans closes it and `AssociationClosed` reports
+                // the failure.
+                Event::PathInactive => {
+                    debug!("association_handle {} path is inactive", ch.0);
+                }
+                Event::PathActive => {
+                    debug!("association_handle {} path is active again", ch.0);
+                }
+                Event::Reconfig(reconfig) => {
+                    Self::process_reconfig_event(
+                        ch,
+                        reconfig,
+                        now,
+                        event_outs,
+                        ordered_until_reply,
+                    );
+                }
                 Event::Stream(StreamEvent::Opened { id }) => {
                     // The peer's DATA created this stream. Its first message
                     // may be the OPEN this side's sends must follow.
@@ -418,6 +472,47 @@ impl<'a> SctpHandler<'a> {
             }
         }
         Ok(())
+    }
+
+    /// What the outcome of a stream re-configuration (RFC 6525) means for the data channels.
+    ///
+    /// The only request this handler makes is the reset of an outgoing stream, which closes a
+    /// data channel (RFC 8831 section 6.7). Performed, the close goes on: the channel is
+    /// closed when the peer has reset its own direction, which `AssociationLost` reports.
+    /// Not performed (the peer denied it, or reported an error), the closing procedure cannot
+    /// complete: the channel fails, and is closed with an error instead of staying `closing`
+    /// for good. The other outcomes change nothing a data channel shows: a reset of the
+    /// association's TSNs and SSNs is invisible above SCTP, and streams the peer adds raise
+    /// `maxChannels`, which is read from the association.
+    fn process_reconfig_event(
+        ch: AssociationHandle,
+        reconfig: ReconfigEvent,
+        now: Instant,
+        event_outs: &mut VecDeque<TaggedRTCEventInternal>,
+        ordered_until_reply: &mut HashMap<(AssociationHandle, StreamId), (ReliabilityType, u32)>,
+    ) {
+        match reconfig {
+            ReconfigEvent::OutgoingStreamsResetFailed { streams, denied } => {
+                warn!(
+                    "association_handle {} the peer did not reset streams {:?} (denied: {})",
+                    ch.0, streams, denied
+                );
+                for id in streams {
+                    ordered_until_reply.remove(&(ch, id));
+                    event_outs.push_back(TaggedRTCEventInternal {
+                        now,
+                        event: RTCEventInternal::SCTPStreamFailed(ch.0, id),
+                    });
+                    event_outs.push_back(TaggedRTCEventInternal {
+                        now,
+                        event: RTCEventInternal::SCTPStreamClosed(ch.0, id),
+                    });
+                }
+            }
+            other => {
+                debug!("association_handle {} reconfiguration: {:?}", ch.0, other);
+            }
+        }
     }
 
     /// Configures this side's outgoing direction of a peer-opened stream from the peer's
@@ -559,19 +654,23 @@ impl<'a> SctpHandler<'a> {
         {
             return Ok(());
         }
+        let packet_budget = transport.packet_budget();
         let sctp_endpoint = transport
             .sctp_endpoint
             .as_mut()
             .ok_or(Error::ErrSCTPNotEstablished)?;
 
         debug!("sctp endpoint initiates the association");
-        let (ch, conn) = sctp_endpoint
+        let (ch, mut conn) = sctp_endpoint
             .connect(
                 now,
                 ClientConfig::new(sctp_transport_config),
                 TransportContext::default().peer_addr,
             )
             .map_err(|e| Error::Other(e.to_string()))?;
+        if let Some(mtu) = packet_budget {
+            conn.set_path_mtu(mtu);
+        }
         transport.sctp_associations.insert(ch, conn);
         transport.lost = false;
 
@@ -581,6 +680,39 @@ impl<'a> SctpHandler<'a> {
         self.ctx.observe(now);
         self.ctx.flush_dirty = true;
         Ok(())
+    }
+
+    /// Takes what the peer connection worked out about the path under the associations, after
+    /// [`SctpHandlerContext::take_path_refresh`] asked for it. `None`: no candidate pair is
+    /// selected.
+    ///
+    /// RFC 8831 section 5: "SCTP SHOULD be notified when an address change has happened. In
+    /// this case, SCTP SHOULD retest the Path MTU and reset the congestion state to the
+    /// initial state." The association does not probe, so its path MTU is set again from
+    /// what is known of the new path (the address family, the transport and whether it is
+    /// relayed, and the DTLS record overhead), first, since the initial congestion window is
+    /// counted in packets of that size; then, when ICE selected another pair, the congestion
+    /// control and the RTO start over ([`Association::on_path_change`]).
+    pub(crate) fn apply_path(&mut self, path: Option<SctpPath>) {
+        let now = self.ctx.now;
+        let transport = &mut self.ctx.sctp_transport;
+        if let Some(path) = path {
+            transport.path_mtu = Some(path.packet_budget());
+        }
+        let packet_budget = transport.packet_budget();
+        let path_changed = std::mem::take(&mut self.ctx.path_changed) && path.is_some();
+        for association in transport.sctp_associations.values_mut() {
+            if association.is_ended() {
+                continue;
+            }
+            if let Some(mtu) = packet_budget {
+                association.set_path_mtu(mtu);
+            }
+            if path_changed {
+                association.on_path_change(now);
+                self.ctx.flush_dirty = true;
+            }
+        }
     }
 
     /// Closes the associations because signalling said so (RFC 8841 section 10: a rejected
@@ -692,6 +824,7 @@ impl<'a>
             // Both are read before `sctp_transport` is split up below, which would otherwise
             // conflict with the borrow of `sctp_associations`.
             let max_len = self.ctx.sctp_transport.receive_message_limit;
+            let packet_budget = self.ctx.sctp_transport.packet_budget();
             let mut budget = self.read_budget();
             let mut inbound_transport = None;
 
@@ -720,33 +853,24 @@ impl<'a>
             }
 
             let datagram = dtls_message.freeze(); //TODO: switch API Bytes to BytesMut
-            let mut routed = sctp_endpoint.handle(
+            // The peer's INIT while this side's own is out is the ordinary case, since both
+            // endpoints initiate (RFC 8841 section 9.3): the endpoint routes it to the
+            // association this side initiated, which answers it from COOKIE-WAIT or
+            // COOKIE-ECHOED (RFC 9260 section 5.2.1) so that one association results. An INIT
+            // that finds no association is answered without one being made (section 5.1):
+            // `handle` returns `None` and the INIT ACK is collected below; the association
+            // comes with the COOKIE ECHO, as `NewAssociation`, already established.
+            let routed = sctp_endpoint.handle(
                 msg.now,
                 msg.transport.peer_addr,
                 msg.transport.ecn,
-                datagram.clone(),
+                datagram,
             );
-            // The peer's INIT while this side's own is out: both endpoints initiate (RFC 8841
-            // section 9.3), so this is the ordinary case, and RFC 9260 section 5.2.1 has the
-            // association that is in COOKIE-WAIT or COOKIE-ECHOED answer it (with an INIT
-            // ACK carrying its own Initiate Tag) so that one association results.
-            if routed.is_none()
-                && is_init(&datagram)
-                && let Some(ch) = handshaking_association(sctp_associations)
-                && let Some(event) = init_for_existing_association(
-                    msg.now,
-                    msg.transport.peer_addr,
-                    msg.transport.ecn,
-                    datagram,
-                )
-            {
-                routed = Some((ch, DatagramEvent::AssociationEvent(event)));
-            }
-
-            // What the endpoint itself answers a packet that belongs to none of its
-            // associations with (RFC 9260 section 8.4: an ABORT, or a SHUTDOWN COMPLETE to a
-            // SHUTDOWN ACK, reflecting the packet's Verification Tag). It goes back the way
-            // the packet came.
+            // What the endpoint itself answers: the INIT ACK with the State Cookie for an
+            // INIT that found no association (RFC 9260 section 5.1), and what a packet that
+            // belongs to none of its associations is answered with (section 8.4: an ABORT,
+            // or a SHUTDOWN COMPLETE to a SHUTDOWN ACK, reflecting the packet's Verification
+            // Tag). It goes back the way the packet came.
             let mut endpoint_answers = vec![];
             while let Some(transmit) = sctp_endpoint.poll_transmit() {
                 if let Payload::RawEncode(raw_data) = transmit.message {
@@ -761,8 +885,14 @@ impl<'a>
                 // remembering its 5-tuple.
                 inbound_transport = Some((ch, msg.transport));
                 match event {
-                    DatagramEvent::NewAssociation(conn) => {
+                    DatagramEvent::NewAssociation(mut conn) => {
+                        if let Some(mtu) = packet_budget {
+                            conn.set_path_mtu(mtu);
+                        }
                         sctp_associations.insert(ch, conn);
+                        // An association is there again: the one before it, if it was lost
+                        // (see `SctpTransport::association_lost`), no longer counts.
+                        self.ctx.sctp_transport.lost = false;
                     }
                     DatagramEvent::AssociationEvent(event) => {
                         sctp_events.entry(ch).or_default().push_back(event);
@@ -955,11 +1085,16 @@ impl<'a>
 
             // The send limit is the negotiated one: the peer's `max-message-size` (RFC 8841
             // 6.1), bounded by what this side can send. Nothing is sent before negotiation.
-            let send_limit = self
-                .ctx
-                .sctp_transport
-                .negotiated_max_message_size
-                .unwrap_or(0) as usize;
+            // An application message is further held to 16 KB on an association without
+            // message interleaving (RFC 8831 section 6.6, `SctpTransport::max_message_size`);
+            // a DCEP message is not the application's, and its label and protocol may take
+            // more than that (RFC 8832 section 5.1).
+            let send_limit = if message.ppi == PayloadProtocolIdentifier::Dcep {
+                self.ctx.sctp_transport.negotiated_max_message_size
+            } else {
+                self.ctx.sctp_transport.max_message_size()
+            }
+            .unwrap_or(0) as usize;
             if message.payload.len() > send_limit {
                 return Err(Error::ErrOutboundPacketTooLarge);
             }
@@ -1144,6 +1279,8 @@ impl<'a>
         if matches!(&evt.event, RTCEventInternal::DTLSHandshakeComplete(_, _)) {
             debug!("sctp recv dtls handshake complete");
             self.ctx.sctp_transport.dtls_connected = true;
+            // The cipher suite, and so the record overhead, is known from now on.
+            self.ctx.path_dirty = true;
             self.connect(now)?;
         }
 
@@ -1308,54 +1445,6 @@ fn packet_is_between(packet: &[u8], (local, remote): (u16, u16)) -> bool {
     packet.len() >= 4
         && u16::from_be_bytes([packet[0], packet[1]]) == remote
         && u16::from_be_bytes([packet[2], packet[3]]) == local
-}
-
-/// Whether an SCTP packet is an INIT: Verification Tag 0 and a first chunk of type 1
-/// (RFC 9260 sections 3.3.2 and 8.5.1).
-fn is_init(packet: &[u8]) -> bool {
-    const CT_INIT: u8 = 1;
-    packet.len() > 12 && packet[4..8] == [0, 0, 0, 0] && packet[12] == CT_INIT
-}
-
-/// The one association of this transport, if it is still in its handshake.
-fn handshaking_association(
-    associations: &HashMap<AssociationHandle, Association>,
-) -> Option<AssociationHandle> {
-    let mut live = associations
-        .iter()
-        .filter(|(_, association)| !association.is_ended());
-    let (ch, association) = live.next()?;
-    (live.next().is_none() && association.is_handshaking()).then_some(*ch)
-}
-
-/// Wraps the peer's INIT as an event for the association this side initiated.
-///
-/// `Endpoint::handle` finds the association of an INIT by the Initiate Tag of an INIT it has
-/// accepted before, so it knows no association for the INIT of a peer that initiates while
-/// this side does, and refuses it as a second association. The association itself handles
-/// that INIT as RFC 9260 section 5.2.1 says; what is missing is only the way to it, and
-/// `AssociationEvent` can be built by an `Endpoint` alone. So a throwaway endpoint takes the
-/// INIT twice: the first time it starts an association there (dropped with it), which makes
-/// the second a datagram for a known association, and that is the event.
-///
-/// To be replaced by the endpoint's own routing once `rtc-sctp` has it.
-fn init_for_existing_association(
-    now: Instant,
-    remote: std::net::SocketAddr,
-    ecn: Option<shared::EcnCodepoint>,
-    init: bytes::Bytes,
-) -> Option<AssociationEvent> {
-    let mut router = ::sctp::Endpoint::new(
-        TransportContext::default().local_addr,
-        shared::TransportProtocol::UDP,
-        ::sctp::EndpointConfig::default().into(),
-        Some(::sctp::ServerConfig::new(::sctp::TransportConfig::default()).into()),
-    );
-    router.handle(now, remote, ecn, init.clone())?;
-    match router.handle(now, remote, ecn, init)? {
-        (_, DatagramEvent::AssociationEvent(event)) => Some(event),
-        _ => None,
-    }
 }
 
 fn split_transmit(transmit: TransportMessage<Payload>) -> Vec<TransportMessage<Payload>> {
@@ -1796,6 +1885,10 @@ mod tests {
         );
         transport.receive_message_limit = SctpMaxMessageSize::DEFAULT_MESSAGE_SIZE as usize;
         transport.negotiated_max_message_size = Some(SctpMaxMessageSize::DEFAULT_MESSAGE_SIZE);
+        // An association made by hand from `TransportConfig::default()` does not interleave;
+        // this test is not about the 16 KB limit that follows from that (see
+        // `a_message_over_16_kb_is_refused_without_interleaving`).
+        transport.limit_message_size_without_interleaving = false;
         transport.sctp_endpoint = Some(client_ep);
         transport.sctp_associations.insert(ch, conn);
         SctpHandlerContext::new(now, transport)
@@ -1907,9 +2000,13 @@ mod tests {
         }
     }
 
-    /// An SCTP DATA message received before COOKIE-ACK must stay in the association's receive
-    /// queue.  Once COOKIE-ACK establishes the association, the same message is delivered exactly
-    /// once, allowing the DataChannel handler to announce `OnOpen` only after SCTP is ready.
+    /// An SCTP DATA message that overtakes the COOKIE-ACK finds the association in
+    /// COOKIE-ECHOED, where RFC 9260 section 6 has it discarded ("DATA chunks MUST only be
+    /// received ... in the ESTABLISHED, SHUTDOWN-PENDING, and SHUTDOWN-SENT states. ... A
+    /// DATA chunk received in any other state SHOULD be discarded"): nothing reaches the
+    /// DataChannel handler and nothing is parked. Once COOKIE-ACK has established the
+    /// association the peer's retransmission of the message is delivered, once, so the
+    /// DataChannel handler announces `OnOpen` only after SCTP is ready.
     #[test]
     fn inbound_data_waits_for_sctp_handshake() {
         let now = Instant::now();
@@ -1917,7 +2014,7 @@ mod tests {
 
         {
             let mut handler = SctpHandler::new(&mut ctx, 0);
-            for dgram in early_data {
+            for dgram in early_data.clone() {
                 handler
                     .handle_read(raw_read(now, dgram))
                     .expect("early DATA");
@@ -1928,10 +2025,9 @@ mod tests {
             ctx.read_outs.is_empty(),
             "handshaking SCTP data must not reach the DataChannel handler"
         );
-        assert_eq!(
-            ctx.pending_readable.len(),
-            1,
-            "the readable stream must be retried after SCTP connects"
+        assert!(
+            ctx.pending_readable.is_empty(),
+            "DATA in COOKIE-ECHOED is discarded, not kept"
         );
 
         let inbound = {
@@ -1941,17 +2037,18 @@ mod tests {
                     .handle_read(raw_read(now, dgram))
                     .expect("COOKIE-ACK");
             }
-            // Established now, but the event that says so has not gone on yet: the data
-            // waits for it (the DataChannel handler opens negotiated channels on that event).
-            assert!(
-                handler.poll_read().is_none(),
-                "data must not overtake SCTPHandshakeComplete"
-            );
+            assert!(handler.poll_read().is_none(), "nothing was kept");
             let mut announced = false;
             while let Some(evt) = handler.poll_event() {
                 announced |= matches!(evt.event, RTCEventInternal::SCTPHandshakeComplete(_));
             }
             assert!(announced, "the association must say it is up");
+            // The peer sends the message again (it was never acknowledged).
+            for dgram in early_data {
+                handler
+                    .handle_read(raw_read(now, dgram))
+                    .expect("retransmitted DATA");
+            }
             handler.poll_read().expect("delivered DCEP")
         };
 
@@ -2413,6 +2510,10 @@ mod tests {
         );
         transport.receive_message_limit = SctpMaxMessageSize::DEFAULT_MESSAGE_SIZE as usize;
         transport.negotiated_max_message_size = Some(SctpMaxMessageSize::DEFAULT_MESSAGE_SIZE);
+        // An association made by hand from `TransportConfig::default()` does not interleave;
+        // this test is not about the 16 KB limit that follows from that (see
+        // `a_message_over_16_kb_is_refused_without_interleaving`).
+        transport.limit_message_size_without_interleaving = false;
         transport.sctp_endpoint = Some(client_ep);
         transport.sctp_associations.insert(ch_a, conn_a);
         transport.sctp_associations.insert(ch_b, conn_b);
@@ -2477,6 +2578,10 @@ mod tests {
         );
         transport.receive_message_limit = SctpMaxMessageSize::DEFAULT_MESSAGE_SIZE as usize;
         transport.negotiated_max_message_size = Some(SctpMaxMessageSize::DEFAULT_MESSAGE_SIZE);
+        // An association made by hand from `TransportConfig::default()` does not interleave;
+        // this test is not about the 16 KB limit that follows from that (see
+        // `a_message_over_16_kb_is_refused_without_interleaving`).
+        transport.limit_message_size_without_interleaving = false;
         transport.sctp_endpoint = Some(Endpoint::new(
             client_addr(),
             TransportProtocol::UDP,
@@ -3326,10 +3431,10 @@ mod tests {
         assert_recovery(&after, probe, now, Recovery::AbandonAtFirstRetry);
     }
 
-    /// The OPEN arrives in the same flight as the end of the handshake, before COOKIE-ACK. It is
-    /// held in the reassembly queue and drained by the resume once the association has
-    /// connected and its `SCTPHandshakeComplete` has gone on, not by the `Readable` that
-    /// announced it, and must still configure the stream.
+    /// The OPEN arrives in the same flight as the end of the handshake, before COOKIE-ACK,
+    /// and is discarded there (RFC 9260 section 6: no DATA in COOKIE-ECHOED). The copy the
+    /// peer sends again once the association is up is the first message of its stream, and
+    /// must still configure the stream.
     #[test]
     fn an_open_received_before_cookie_ack_still_configures_the_stream() {
         let now = Instant::now();
@@ -3337,22 +3442,24 @@ mod tests {
             client_with_open_before_cookie_ack(ChannelType::PartialReliableRexmitUnordered, 0);
         let ch = only_association(&ctx);
 
-        client_read(&mut ctx, 0, early_data, now);
+        client_read(&mut ctx, 0, early_data.clone(), now);
         assert!(
             ctx.read_outs.is_empty(),
-            "precondition: held until COOKIE-ACK"
+            "precondition: not delivered before COOKIE-ACK"
         );
         assert!(
-            ctx.peer_opened_streams.contains(&(ch, PEER_STREAM)),
-            "the stream the peer created is recorded although its OPEN is not drained yet"
+            ctx.peer_opened_streams.is_empty() && ctx.pending_readable.is_empty(),
+            "the discarded OPEN created no stream"
         );
 
         client_read(&mut ctx, 0, cookie_ack, now);
-        let delivered = {
+        {
             let mut handler = SctpHandler::new(&mut ctx, 0);
             while handler.poll_event().is_some() {}
-            handler.poll_read()
-        };
+        }
+        // The peer's retransmission.
+        client_read(&mut ctx, 0, early_data, now);
+        let delivered = SctpHandler::new(&mut ctx, 0).poll_read();
         assert!(
             matches!(
                 delivered.as_ref().map(|m| &m.message),
@@ -4232,14 +4339,29 @@ mod tests {
     const CT_INIT: u8 = 1;
 
     /// A handler context whose transport was negotiated for the SCTP ports `local` and
-    /// `remote` (`a=sctp-port` of this side and of the peer), DTLS not connected yet.
+    /// `remote` (`a=sctp-port` of this side and of the peer), DTLS not connected yet. The
+    /// transport is the one a peer connection builds: weighted fair queueing, message
+    /// interleaving and the zero checksum announced, State Cookies with a MAC.
     fn negotiated_ctx(now: Instant, local: u16, remote: u16) -> SctpHandlerContext {
-        let mut transport = SctpTransport::new(
-            SctpMaxMessageSize::default(),
-            None,
-            None,
-            test_transport_id(TransportKind::Sctp),
-            test_transport_id(TransportKind::Dtls),
+        negotiated_ctx_with(now, local, remote, |transport| transport)
+    }
+
+    /// [`negotiated_ctx`] with the transport changed by `configure` before it starts.
+    fn negotiated_ctx_with(
+        now: Instant,
+        local: u16,
+        remote: u16,
+        configure: impl FnOnce(SctpTransport) -> SctpTransport,
+    ) -> SctpHandlerContext {
+        let mut transport = configure(
+            SctpTransport::new(
+                SctpMaxMessageSize::default(),
+                None,
+                None,
+                test_transport_id(TransportKind::Sctp),
+                test_transport_id(TransportKind::Dtls),
+            )
+            .with_cookie_provider(crypto::default_provider().expect("test crypto provider")),
         );
         transport
             .start(
@@ -4423,8 +4545,12 @@ mod tests {
     }
 
     /// An endpoint that has not initiated yet (its DTLS handshake completes a moment after
-    /// the peer's) takes the peer's INIT, and does not initiate a second association when its
-    /// own DTLS handshake completes.
+    /// the peer's) answers the peer's INIT, keeping nothing (RFC 9260 section 5.1), and
+    /// initiates when its own DTLS handshake completes (RFC 8841 section 9.3: both do). The
+    /// peer's COOKIE ECHO for the first answer then finds the association this side
+    /// initiated, which is not the one the cookie stands for, and is discarded; the peer
+    /// answers this side's INIT from COOKIE-ECHOED (RFC 9260 section 5.2.1) and the two ends
+    /// meet in one association, with no retransmission.
     #[test]
     fn an_init_that_comes_first_is_accepted_and_no_second_association_started() {
         let now = Instant::now();
@@ -4487,12 +4613,17 @@ mod tests {
             let init = flush(&mut peer);
             assert_eq!(packet_header(&init[0]).3, CT_INIT);
             client_read(&mut ctx, 0, init, now);
+            assert!(
+                ctx.sctp_transport.sctp_associations.is_empty(),
+                "RFC 9260 section 5.1: an INIT makes no association"
+            );
+            let answers = flush(&mut ctx);
             assert_eq!(
-                ctx.sctp_transport.sctp_associations.len(),
+                answers.len(),
                 usize::from(accepted),
                 "INIT from port {peer_local} to port {peer_remote}"
             );
-            assert_eq!(flush(&mut ctx).len(), usize::from(accepted), "INIT ACK");
+            assert!(answers.iter().all(|p| packet_header(p).3 == CT_INIT_ACK));
         }
     }
 
@@ -4639,5 +4770,742 @@ mod tests {
             .collect();
         assert_eq!(tsns[1], tsns[0].wrapping_add(1));
         assert_eq!(tsns[2], tsns[1].wrapping_add(1));
+    }
+    const CT_INIT_ACK: u8 = 2;
+    const CT_COOKIE_ECHO: u8 = 10;
+    const CT_I_DATA: u8 = 64;
+
+    /// The fields of an I-DATA chunk (RFC 8260 section 2.1) these tests assert on.
+    #[derive(Debug, Clone, Copy)]
+    struct WireIData {
+        tsn: u32,
+        stream_id: StreamId,
+        /// The E bit: the last fragment of its message.
+        ending: bool,
+        len: usize,
+    }
+
+    fn wire_i_data(packet: &[u8]) -> Vec<WireIData> {
+        wire_chunks(packet)
+            .into_iter()
+            .filter(|c| c.kind == CT_I_DATA && c.value.len() >= 16)
+            .map(|c| WireIData {
+                tsn: u32::from_be_bytes([c.value[0], c.value[1], c.value[2], c.value[3]]),
+                stream_id: u16::from_be_bytes([c.value[4], c.value[5]]),
+                ending: c.flags & DATA_FLAG_ENDING != 0,
+                len: c.value.len() - 16,
+            })
+            .collect()
+    }
+
+    /// Two endpoints as a peer connection builds them, their transports changed by
+    /// `configure_a` and `configure_b`, with their association established.
+    fn established_pair(
+        now: Instant,
+        configure_a: impl FnOnce(SctpTransport) -> SctpTransport,
+        configure_b: impl FnOnce(SctpTransport) -> SctpTransport,
+    ) -> (SctpHandlerContext, SctpHandlerContext) {
+        let mut a = negotiated_ctx_with(now, 5000, 5001, configure_a);
+        let mut b = negotiated_ctx_with(now, 5001, 5000, configure_b);
+        dtls_connects(&mut a, now);
+        dtls_connects(&mut b, now);
+        assert_eq!(exchange(&mut a, &mut b, now, |_, _| false), (true, true));
+        (a, b)
+    }
+
+    fn live_association(ctx: &SctpHandlerContext) -> &Association {
+        let ch = established_association(ctx);
+        &ctx.sctp_transport.sctp_associations[&ch]
+    }
+
+    fn try_client_write(
+        ctx: &mut SctpHandlerContext,
+        now: Instant,
+        ch: AssociationHandle,
+        stream_id: StreamId,
+        ppi: PayloadProtocolIdentifier,
+        payload: &[u8],
+    ) -> Result<()> {
+        SctpHandler::new(ctx, 0).handle_write(TaggedRTCMessageInternal {
+            now,
+            transport: TransportContext::default(),
+            message: RTCMessageInternal::Dtls(DTLSMessage::Sctp(DataChannelMessage {
+                association_handle: ch.0,
+                stream_id,
+                ppi,
+                payload: BytesMut::from(payload),
+                negotiated: false,
+            })),
+        })
+    }
+
+    /// The binary messages `ctx` has handed up, as (stream, length), in order; they are taken.
+    fn take_received(ctx: &mut SctpHandlerContext) -> Vec<(StreamId, usize)> {
+        ctx.read_outs
+            .drain(..)
+            .filter_map(|m| match m.message {
+                RTCMessageInternal::Dtls(DTLSMessage::Sctp(msg))
+                    if msg.ppi == PayloadProtocolIdentifier::Binary =>
+                {
+                    Some((msg.stream_id, msg.payload.len()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Carries what `from` sends to `to` and `to`'s acknowledgements back, moving the clock
+    /// past the delayed-acknowledgement timer each round, until `from` has nothing more to
+    /// send or `rounds` have passed. Returns everything `from` sent, and the time reached.
+    fn pump(
+        from: &mut SctpHandlerContext,
+        to: &mut SctpHandlerContext,
+        mut at: Instant,
+        rounds: usize,
+    ) -> (Vec<Bytes>, Instant) {
+        let mut all = vec![];
+        for _ in 0..rounds {
+            let sent = flush(from);
+            if sent.is_empty() {
+                break;
+            }
+            all.extend(sent.iter().cloned());
+            client_read(to, 0, sent, at);
+            // Past the peer's delayed-acknowledgement timer, short of this side's T3-rtx.
+            at += Duration::from_millis(250);
+            SctpHandler::new(to, 0).handle_timeout(at).expect("timeout");
+            let sacks = flush(to);
+            client_read(from, 0, sacks, at);
+        }
+        (all, at)
+    }
+
+    /// RFC 9260 section 5.1: the endpoint that receives an INIT answers with an INIT ACK and
+    /// "MUST NOT allocate any resources or keep any states for the new association";
+    /// section 5.1.3: the State Cookie carries a MAC, made with a key only this endpoint
+    /// has; section 5.1.5: the association is made when a COOKIE ECHO brings back a cookie
+    /// whose MAC verifies. The peer connection gives the endpoint its crypto provider for
+    /// that. Here the INIT leaves no association behind, another endpoint (another key)
+    /// refuses the cookie without a word, and the endpoint that made it builds the
+    /// association from it, established at once. The association used to be made, and
+    /// held, from the INIT on, with a cookie of random bytes compared against a copy.
+    #[test]
+    fn the_association_is_made_at_the_cookie_echo_from_an_authenticated_cookie() {
+        let now = Instant::now();
+        let mut a = negotiated_ctx(now, 5000, 5001);
+        let mut b = negotiated_ctx(now, 5001, 5000);
+        dtls_connects(&mut a, now);
+
+        let init = flush(&mut a);
+        assert_eq!(packet_header(&init[0]).3, CT_INIT);
+        client_read(&mut b, 0, init, now);
+        assert!(
+            b.sctp_transport.sctp_associations.is_empty(),
+            "nothing is kept for an INIT"
+        );
+        let init_ack = flush(&mut b);
+        assert_eq!(init_ack.len(), 1);
+        assert_eq!(packet_header(&init_ack[0]).3, CT_INIT_ACK);
+
+        client_read(&mut a, 0, init_ack, now);
+        let cookie_echo = flush(&mut a);
+        assert_eq!(cookie_echo.len(), 1);
+        assert_eq!(packet_header(&cookie_echo[0]).3, CT_COOKIE_ECHO);
+
+        // An endpoint negotiated for the same ports that did not make this cookie.
+        let mut other = negotiated_ctx(now, 5001, 5000);
+        client_read(&mut other, 0, cookie_echo.clone(), now);
+        assert!(
+            other.sctp_transport.sctp_associations.is_empty(),
+            "a cookie whose MAC does not verify makes no association"
+        );
+        assert!(flush(&mut other).is_empty(), "and is discarded silently");
+
+        client_read(&mut b, 0, cookie_echo, now);
+        established_association(&b);
+        assert!(announced_connected(&mut b));
+        assert!(!b.sctp_transport.association_lost());
+
+        // The endpoint's own DTLS handshake completes now: it has its association already
+        // and initiates no second one.
+        dtls_connects(&mut b, now);
+        let from_b = flush(&mut b);
+        assert!(
+            from_b.iter().all(|p| packet_header(p).3 != CT_INIT),
+            "no INIT from an endpoint that has its association"
+        );
+        client_read(&mut a, 0, from_b, now);
+        assert!(announced_connected(&mut a), "the COOKIE ACK");
+        assert_data_flows(&mut a, &mut b, now);
+        assert_data_flows(&mut b, &mut a, now);
+    }
+
+    /// RFC 8831 section 6.1: "The support for message interleaving as defined in [RFC8260]
+    /// SHOULD be used." It is announced by default, and used (user data travels in I-DATA
+    /// chunks) when the peer announces it too; a peer that does not gets DATA chunks, and
+    /// the message arrives either way.
+    #[test]
+    fn user_data_is_interleaved_when_the_peer_announces_it_and_not_otherwise() {
+        for (peer_interleaves, chunk) in [(true, CT_I_DATA), (false, CT_PAYLOAD_DATA)] {
+            let now = Instant::now();
+            let (mut a, mut b) = established_pair(
+                now,
+                |t| t,
+                |t| t.with_message_interleaving(peer_interleaves),
+            );
+            for ctx in [&a, &b] {
+                assert_eq!(
+                    live_association(ctx).message_interleaving(),
+                    peer_interleaves
+                );
+            }
+            for a_sends in [true, false] {
+                let (from, to) = if a_sends {
+                    (&mut a, &mut b)
+                } else {
+                    (&mut b, &mut a)
+                };
+                let ch = established_association(from);
+                client_write_negotiated_open(
+                    from,
+                    now,
+                    ch,
+                    4,
+                    &dcep_open(ChannelType::Reliable, 0),
+                );
+                client_write(
+                    from,
+                    now,
+                    ch,
+                    4,
+                    PayloadProtocolIdentifier::Binary,
+                    &[7u8; 3000],
+                );
+                let sent = flush(from);
+                let kinds: HashSet<u8> = sent
+                    .iter()
+                    .flat_map(|p| wire_chunks(p))
+                    .map(|c| c.kind)
+                    .filter(|kind| [CT_I_DATA, CT_PAYLOAD_DATA].contains(kind))
+                    .collect();
+                assert_eq!(
+                    kinds,
+                    HashSet::from([chunk]),
+                    "the peer interleaves: {peer_interleaves}"
+                );
+                client_read(to, 0, sent, now);
+                assert_eq!(take_received(to), vec![(4, 3000)]);
+            }
+        }
+    }
+
+    /// RFC 9653 section 5.2: over DTLS, which is an alternate error detection method
+    /// (section 6), an endpoint "SHOULD use zero as the checksum" towards a peer that
+    /// announced it accepts one. It is announced by default; the INIT always carries its
+    /// CRC32c (section 5.2), and so does every packet for a peer that did not announce the
+    /// same.
+    #[test]
+    fn the_checksum_is_zero_when_the_peer_accepts_it_and_a_crc32c_otherwise() {
+        for peer_accepts in [true, false] {
+            let now = Instant::now();
+            let mut a = negotiated_ctx(now, 5000, 5001);
+            let mut b =
+                negotiated_ctx_with(now, 5001, 5000, |t| t.with_zero_checksum(peer_accepts));
+            dtls_connects(&mut a, now);
+            dtls_connects(&mut b, now);
+            let init = flush(&mut a);
+            assert_eq!(packet_header(&init[0]).3, CT_INIT);
+            assert_ne!(&init[0][8..12], &[0u8; 4], "an INIT has its CRC32c");
+            client_read(&mut b, 0, init, now);
+            assert_eq!(exchange(&mut a, &mut b, now, |_, _| false), (true, true));
+
+            for ctx in [&a, &b] {
+                assert_eq!(live_association(ctx).zero_checksum(), peer_accepts);
+            }
+            for a_sends in [true, false] {
+                let (from, to) = if a_sends {
+                    (&mut a, &mut b)
+                } else {
+                    (&mut b, &mut a)
+                };
+                let ch = established_association(from);
+                client_write_negotiated_open(
+                    from,
+                    now,
+                    ch,
+                    4,
+                    &dcep_open(ChannelType::Reliable, 0),
+                );
+                client_write(
+                    from,
+                    now,
+                    ch,
+                    4,
+                    PayloadProtocolIdentifier::Binary,
+                    b"checked",
+                );
+                let sent = flush(from);
+                assert!(!sent.is_empty());
+                for packet in &sent {
+                    assert_eq!(
+                        packet[8..12] == [0u8; 4],
+                        peer_accepts,
+                        "the peer accepts a zero checksum: {peer_accepts}"
+                    );
+                }
+                client_read(to, 0, sent, now);
+                assert_eq!(take_received(to), vec![(4, 7)]);
+            }
+        }
+    }
+
+    /// RFC 8831 section 6.6: "As long as message interleaving is not supported, the sender
+    /// SHOULD limit the maximum message size to 16 KB to avoid monopolization." On an
+    /// association that does not interleave, `maxMessageSize` is 16384 and a larger message
+    /// is refused; with interleaving, or with the limit lifted (what browsers do), the peer's
+    /// `max-message-size` is the only limit. A DATA_CHANNEL_OPEN is not an application
+    /// message and may be larger (its label alone may take 65535 bytes).
+    #[test]
+    fn a_message_over_16_kb_is_refused_without_interleaving() {
+        let now = Instant::now();
+        let negotiated = SctpMaxMessageSize::DEFAULT_MESSAGE_SIZE;
+        let big = vec![3u8; 16 * 1024 + 1];
+        let fits = vec![3u8; 16 * 1024];
+        let binary = PayloadProtocolIdentifier::Binary;
+
+        // Interleaving: the negotiated limit.
+        let (mut a, _b) = established_pair(now, |t| t, |t| t);
+        let ch = established_association(&a);
+        assert_eq!(a.sctp_transport.max_message_size(), Some(negotiated));
+        client_write_negotiated_open(&mut a, now, ch, 4, &dcep_open(ChannelType::Reliable, 0));
+        try_client_write(&mut a, now, ch, 4, binary, &big)
+            .expect("with interleaving a message over 16 KB is sent");
+
+        // No interleaving: 16 KB.
+        let (mut a, _b) = established_pair(now, |t| t, |t| t.with_message_interleaving(false));
+        let ch = established_association(&a);
+        assert_eq!(a.sctp_transport.max_message_size(), Some(16 * 1024));
+        let open = Message::DataChannelOpen(DataChannelOpen {
+            channel_type: ChannelType::Reliable,
+            priority: CHANNEL_PRIORITY_NORMAL,
+            reliability_parameter: 0,
+            label: vec![b'l'; 20_000],
+            protocol: Vec::new(),
+        })
+        .marshal()
+        .expect("DCEP OPEN");
+        try_client_write(&mut a, now, ch, 4, PayloadProtocolIdentifier::Dcep, &open)
+            .expect("a DATA_CHANNEL_OPEN over 16 KB is sent");
+        assert_eq!(
+            try_client_write(&mut a, now, ch, 4, binary, &big),
+            Err(Error::ErrOutboundPacketTooLarge)
+        );
+        try_client_write(&mut a, now, ch, 4, binary, &fits).expect("16 KB is within the limit");
+
+        // No interleaving, and the limit lifted.
+        let (mut a, _b) = established_pair(
+            now,
+            |t| t.with_message_size_limit_without_interleaving(false),
+            |t| t.with_message_interleaving(false),
+        );
+        let ch = established_association(&a);
+        assert_eq!(a.sctp_transport.max_message_size(), Some(negotiated));
+        client_write_negotiated_open(&mut a, now, ch, 4, &dcep_open(ChannelType::Reliable, 0));
+        try_client_write(&mut a, now, ch, 4, binary, &big).expect("the limit is lifted");
+    }
+
+    /// RFC 8831 section 6.4 with the defaults of a peer connection (the weighted fair
+    /// queueing scheduler, and interleaving, so that it chooses for every chunk): of two
+    /// channels with the same backlog, the one of priority 1024 gets eight times the line of
+    /// the one of priority 128, whichever was written to first. With the scheduler turned off
+    /// the two are served in the order their messages were written, which is half each.
+    #[test]
+    fn by_default_two_channels_share_the_line_by_their_priorities() {
+        for (weighted, light_stream_first) in
+            [(true, true), (true, false), (false, true), (false, false)]
+        {
+            let now = Instant::now();
+            let (mut a, mut b) =
+                established_pair(now, |t| t.with_weighted_fair_queueing(weighted), |t| t);
+            let ch = established_association(&a);
+            let (light, heavy): (StreamId, StreamId) =
+                if light_stream_first { (0, 2) } else { (2, 0) };
+            for (stream_id, priority) in [(light, 128), (heavy, 1024)] {
+                client_write_negotiated_open(
+                    &mut a,
+                    now,
+                    ch,
+                    stream_id,
+                    &dcep_open_with_priority(ChannelType::Reliable, priority),
+                );
+            }
+            for _ in 0..64 {
+                for stream_id in [light, heavy] {
+                    client_write(
+                        &mut a,
+                        now,
+                        ch,
+                        stream_id,
+                        PayloadProtocolIdentifier::Binary,
+                        &[stream_id as u8; 1024],
+                    );
+                }
+            }
+            let (sent, _) = pump(&mut a, &mut b, now, 64);
+            let mut seen = HashSet::new();
+            let order: Vec<StreamId> = sent
+                .iter()
+                .flat_map(|p| wire_i_data(p))
+                .filter(|chunk| seen.insert(chunk.tsn))
+                .map(|chunk| chunk.stream_id)
+                .collect();
+            assert_eq!(order.len(), 128, "every message left, in one chunk each");
+            let first = &order[..36];
+            let shares = (
+                first.iter().filter(|s| **s == heavy).count(),
+                first.iter().filter(|s| **s == light).count(),
+            );
+            if weighted {
+                assert_eight_to_one(shares);
+            } else {
+                assert_eq!(shares, (18, 18), "first come, first served");
+            }
+        }
+    }
+
+    /// RFC 8831 section 6.6: without interleaving "sending a large user message can
+    /// monopolize the SCTP association. To overcome this limitation, [RFC8260] defines an
+    /// extension to support message interleaving, which SHOULD be used." A small message
+    /// written on one channel while a large one is on its way on another leaves in the next
+    /// flight, between the fragments of the large one, and reaches the application first.
+    /// Against a peer that does not interleave it waits until the large message is through.
+    #[test]
+    fn a_large_message_does_not_hold_up_another_channel_when_interleaving() {
+        const LARGE: usize = 60_000;
+        for peer_interleaves in [true, false] {
+            let now = Instant::now();
+            let (mut a, mut b) = established_pair(
+                now,
+                |t| t.with_message_size_limit_without_interleaving(false),
+                |t| t.with_message_interleaving(peer_interleaves),
+            );
+            let ch = established_association(&a);
+            for stream_id in [0, 2] {
+                client_write_negotiated_open(
+                    &mut a,
+                    now,
+                    ch,
+                    stream_id,
+                    &dcep_open(ChannelType::Reliable, 0),
+                );
+            }
+            client_write(
+                &mut a,
+                now,
+                ch,
+                0,
+                PayloadProtocolIdentifier::Binary,
+                &vec![1u8; LARGE],
+            );
+            // The first congestion window of the large message is on its way.
+            let first_flight = flush(&mut a);
+            assert!(!first_flight.is_empty());
+            client_write(
+                &mut a,
+                now,
+                ch,
+                2,
+                PayloadProtocolIdentifier::Binary,
+                &[2u8; 100],
+            );
+
+            client_read(&mut b, 0, first_flight, now);
+            let at = now + Duration::from_millis(250);
+            SctpHandler::new(&mut b, 0)
+                .handle_timeout(at)
+                .expect("timeout");
+            let sacks = flush(&mut b);
+            client_read(&mut a, 0, sacks, at);
+
+            let second_flight = flush(&mut a);
+            let small_in_second_flight = if peer_interleaves {
+                second_flight
+                    .iter()
+                    .flat_map(|p| wire_i_data(p))
+                    .any(|c| c.stream_id == 2 && c.ending)
+            } else {
+                second_flight
+                    .iter()
+                    .flat_map(|p| wire_data(p))
+                    .any(|c| c.stream_id == 2)
+            };
+            assert_eq!(
+                small_in_second_flight, peer_interleaves,
+                "the peer interleaves: {peer_interleaves}"
+            );
+
+            client_read(&mut b, 0, second_flight, at);
+            let mut received = take_received(&mut b);
+            let at = at + Duration::from_millis(250);
+            SctpHandler::new(&mut b, 0)
+                .handle_timeout(at)
+                .expect("timeout");
+            let sacks = flush(&mut b);
+            client_read(&mut a, 0, sacks, at);
+            for _ in 0..40 {
+                let (sent, _) = pump(&mut a, &mut b, at, 200);
+                received.extend(take_received(&mut b));
+                if sent.is_empty() {
+                    break;
+                }
+            }
+            assert_eq!(
+                received,
+                if peer_interleaves {
+                    vec![(2, 100), (0, LARGE)]
+                } else {
+                    vec![(0, LARGE), (2, 100)]
+                },
+                "the peer interleaves: {peer_interleaves}"
+            );
+        }
+    }
+
+    /// RFC 8831 section 5: "SCTP SHOULD be notified when an address change has happened. In
+    /// this case, SCTP SHOULD retest the Path MTU and reset the congestion state to the
+    /// initial state ... setting the congestion window and slow-start threshold to its
+    /// initial values." When the ICE handler's count of selected pairs moves the handler asks
+    /// for the path, takes the packet size that fits it (here from IPv4 to IPv6: 1135 to 1195
+    /// bytes) and has the association start its congestion control over. A DTLS handshake
+    /// that completes changes what is known of the path (the cipher suite) and nothing else.
+    #[test]
+    fn a_selected_pair_change_sets_the_path_mtu_and_restarts_congestion_control() {
+        let now = Instant::now();
+        let ipv4 = SctpPath {
+            ipv6: false,
+            tcp: false,
+            relayed: false,
+            dtls_record_expansion: SctpPath::DEFAULT_DTLS_RECORD_EXPANSION,
+        };
+        let ipv6 = SctpPath { ipv6: true, ..ipv4 };
+
+        let mut a = negotiated_ctx(now, 5000, 5001);
+        let mut b = negotiated_ctx(now, 5001, 5000);
+        // ICE selects its first pair, then DTLS connects: the order of a real connection.
+        for ctx in [&mut a, &mut b] {
+            assert!(!ctx.take_path_refresh(0), "nothing has changed yet");
+            assert!(
+                ctx.take_path_refresh(1),
+                "ICE selected a pair: the path is asked for"
+            );
+            assert!(!ctx.take_path_refresh(1), "once");
+            SctpHandler::new(ctx, 0).apply_path(Some(ipv4));
+            dtls_connects(ctx, now);
+            assert!(ctx.take_path_refresh(1), "the cipher suite is known now");
+            SctpHandler::new(ctx, 0).apply_path(Some(ipv4));
+        }
+        assert_eq!(exchange(&mut a, &mut b, now, |_, _| false), (true, true));
+        for ctx in [&a, &b] {
+            assert_eq!(
+                live_association(ctx).path_mtu(),
+                1135,
+                "1200 - 20 (IPv4) - 8 (UDP) - 13 - 24 (DTLS)"
+            );
+        }
+        let initial = live_association(&a).congestion_window();
+
+        // Slow start opens the window.
+        let ch = established_association(&a);
+        client_write_negotiated_open(&mut a, now, ch, 4, &dcep_open(ChannelType::Reliable, 0));
+        for _ in 0..48 {
+            client_write(
+                &mut a,
+                now,
+                ch,
+                4,
+                PayloadProtocolIdentifier::Binary,
+                &[9u8; 1000],
+            );
+        }
+        let (sent, at) = pump(&mut a, &mut b, now, 64);
+        assert!(
+            sent.iter().all(|p| p.len() <= 1135),
+            "no packet over the path MTU"
+        );
+        assert_eq!(take_received(&mut b).len(), 48);
+        let grown = live_association(&a).congestion_window();
+        assert!(
+            grown > initial,
+            "cwnd {grown} after slow start, {initial} before"
+        );
+
+        // A DTLS handshake that completes again: the path is looked at, nothing restarts.
+        dtls_connects(&mut a, at);
+        assert!(a.take_path_refresh(1));
+        SctpHandler::new(&mut a, 0).apply_path(Some(ipv4));
+        assert_eq!(live_association(&a).congestion_window(), grown);
+
+        // ICE selects another pair.
+        SctpHandler::new(&mut a, 0)
+            .handle_timeout(at)
+            .expect("timeout");
+        assert!(a.take_path_refresh(2));
+        SctpHandler::new(&mut a, 0).apply_path(Some(ipv6));
+        let association = live_association(&a);
+        assert_eq!(
+            association.path_mtu(),
+            1195,
+            "1280 - 40 (IPv6) - 8 (UDP) - 13 - 24 (DTLS)"
+        );
+        assert!(
+            association.congestion_window() < grown,
+            "the congestion window started over: {} after {grown}",
+            association.congestion_window()
+        );
+        assert!(
+            association.congestion_window() <= 4 * 1195,
+            "at its initial value, at most four packets (RFC 9260 section 7.2.1)"
+        );
+        assert!(
+            association.slow_start_threshold() >= grown,
+            "and the slow start threshold is high again"
+        );
+
+        // The association goes on over the new path.
+        client_write(
+            &mut a,
+            at,
+            ch,
+            4,
+            PayloadProtocolIdentifier::Binary,
+            b"after the move",
+        );
+        pump(&mut a, &mut b, at, 8);
+        assert_eq!(take_received(&mut b), vec![(4, 14)]);
+    }
+
+    /// RFC 9260 sections 8.2 and 8.3: past Path.Max.Retrans unanswered retransmissions the
+    /// path is inactive, and the association, which has no other, goes on trying. That is
+    /// no state of an `RTCSctpTransport` (W3C webrtc 6.1: `connecting`, `connected`,
+    /// `closed`) and no data channel event: the transport stays `connected` with its
+    /// channels open, and when the peer answers again the data arrives.
+    #[test]
+    fn an_inactive_path_leaves_the_transport_connected_and_its_channels_open() {
+        use crate::peer_connection::transport::sctp::state::RTCSctpTransportState;
+
+        let now = Instant::now();
+        let (mut a, mut b) = established_pair(now, |t| t, |t| t);
+        let ch = established_association(&a);
+        client_write_negotiated_open(&mut a, now, ch, 4, &dcep_open(ChannelType::Reliable, 0));
+        client_write(
+            &mut a,
+            now,
+            ch,
+            4,
+            PayloadProtocolIdentifier::Binary,
+            b"late",
+        );
+        let lost = flush(&mut a);
+        assert!(!lost.is_empty());
+
+        // Seven retransmissions go unanswered: more than Path.Max.Retrans (5), fewer than
+        // Association.Max.Retrans (10).
+        let mut at = now;
+        let mut retransmissions = 0;
+        let mut last = vec![];
+        for _ in 0..64 {
+            if retransmissions == 7 {
+                break;
+            }
+            let Some(next) = SctpHandler::new(&mut a, 0).poll_timeout() else {
+                break;
+            };
+            at = at.max(next);
+            SctpHandler::new(&mut a, 0)
+                .handle_timeout(at)
+                .expect("timeout");
+            let sent = flush(&mut a);
+            if sent.iter().any(|p| !wire_i_data(p).is_empty()) {
+                retransmissions += 1;
+                last = sent;
+            }
+        }
+        assert_eq!(retransmissions, 7);
+        let mut events = vec![];
+        {
+            let mut handler = SctpHandler::new(&mut a, 0);
+            while let Some(evt) = handler.poll_event() {
+                events.push(evt.event);
+            }
+        }
+        assert!(
+            events.is_empty(),
+            "no failure and no closed stream is reported for an inactive path"
+        );
+        assert_eq!(a.sctp_transport.state(), RTCSctpTransportState::Connected);
+
+        // The path answers again.
+        client_read(&mut b, 0, last, at);
+        assert_eq!(take_received(&mut b), vec![(4, 4)]);
+        let sacks = flush(&mut b);
+        client_read(&mut a, 0, sacks, at);
+        assert_data_flows(&mut a, &mut b, at);
+        assert_eq!(a.sctp_transport.state(), RTCSctpTransportState::Connected);
+    }
+
+    /// RFC 8831 section 6.7: a data channel is closed by resetting its outgoing stream, and
+    /// is closed when the peer has reset its own. A peer that answers the reset request with
+    /// "denied" or an error (RFC 6525 section 4.4) will never do that: the channel fails and
+    /// is closed with an error instead of staying `closing`. The other outcomes of a
+    /// re-configuration report nothing to the data channels.
+    #[test]
+    fn a_stream_reset_the_peer_does_not_perform_fails_the_channel() {
+        let now = Instant::now();
+        let ch = AssociationHandle(3);
+        let mut event_outs = VecDeque::new();
+        let mut ordered_until_reply = HashMap::new();
+        ordered_until_reply.insert((ch, 4), (ReliabilityType::Reliable, 0));
+
+        SctpHandler::process_reconfig_event(
+            ch,
+            ReconfigEvent::OutgoingStreamsReset { streams: vec![6] },
+            now,
+            &mut event_outs,
+            &mut ordered_until_reply,
+        );
+        SctpHandler::process_reconfig_event(
+            ch,
+            ReconfigEvent::AssociationReset {
+                local_next_tsn: 1,
+                remote_next_tsn: 2,
+            },
+            now,
+            &mut event_outs,
+            &mut ordered_until_reply,
+        );
+        assert!(event_outs.is_empty());
+
+        SctpHandler::process_reconfig_event(
+            ch,
+            ReconfigEvent::OutgoingStreamsResetFailed {
+                streams: vec![4],
+                denied: true,
+            },
+            now,
+            &mut event_outs,
+            &mut ordered_until_reply,
+        );
+        let events: Vec<RTCEventInternal> = event_outs.into_iter().map(|e| e.event).collect();
+        assert!(
+            matches!(
+                events.as_slice(),
+                [
+                    RTCEventInternal::SCTPStreamFailed(3, 4),
+                    RTCEventInternal::SCTPStreamClosed(3, 4)
+                ]
+            ),
+            "the channel on stream 4 fails, then closes"
+        );
+        assert!(ordered_until_reply.is_empty());
     }
 }

@@ -51,7 +51,96 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for audio, the client-to-mixer audio level (RFC 6464) for audio and the video orientation
   extension for video (`configure_default_header_extensions`): descriptions carry three more
   `a=extmap` lines.
+- **sctp, datachannel**: a peer connection's SCTP association follows the RFCs by default
+  where it left them to settings or did without. Each is a change in what goes on the wire
+  or in what `send` accepts, and each has a setting:
+  - **weighted fair queueing** is the stream scheduler (RFC 8831 section 6.4: the priorities
+    of data channels "MUST be interpreted as weighted-fair-queuing scheduling priorities");
+    it was first come, first served unless asked for.
+    `SettingEngineBuilder::with_sctp_weighted_fair_queueing(false)` is the old order.
+  - **user message interleaving** (RFC 8260) is announced (RFC 8831 sections 6.1 and 6.6: it
+    "SHOULD be used") and used when the peer announces it too; the association sends DATA
+    chunks otherwise. `with_sctp_message_interleaving(false)` does not announce it.
+  - **a message over 16 KB is refused on an association without interleaving** (RFC 8831
+    section 6.6: "the sender SHOULD limit the maximum message size to 16 KB"), and
+    `RTCSctpTransport::max_message_size` reports at most 16384 there. Two engines interleave,
+    so nothing changes between them; browsers do not announce interleaving, and an
+    application that sends more than 16 KB at a time to one sets
+    `with_sctp_message_size_limit_without_interleaving(false)`, which is what browsers do.
+  - **the zero checksum** (RFC 9653) is announced, the association running over DTLS, and
+    used towards a peer that announces it; `with_sctp_zero_checksum(false)` turns it off.
+  - **the size of an SCTP packet follows the path** (RFC 8831 section 5: an initial path MTU
+    of at most 1200 bytes at the IP layer over IPv4 and 1280 over IPv6): 1135 bytes over
+    IPv4 and UDP with AES-GCM where it was 1191 on every path, 1195 over IPv6, less on a
+    relayed or a TCP candidate. `with_sctp_mtu` still sets it outright.
+  - **State Cookies carry a MAC** from the connection's crypto provider and the accepting
+    side keeps nothing for an INIT (RFC 9260 sections 5.1 and 5.1.3); the association is made
+    when the COOKIE ECHO arrives. No setting: nothing a peer can tell changes.
+- **sdp**: the data section of an offer says `TCP/DTLS/SCTP` when every candidate the offer
+  carries is a TCP candidate, and when the selected candidate pair is a TCP pair (RFC 8841
+  section 12.2); it always said `UDP/DTLS/SCTP`.
+- **sctp**: an association that signalling closed by rejecting the data section takes a new
+  `a=sctp-port` when a data section is negotiated again (RFC 8841 section 10.5).
 
+- **ice**: where the fork followed libwebrtc or its own hardening instead of the RFC, the RFC is
+  now the default and the other behaviour a setting (`AgentConfig`, and
+  `SettingEngineBuilder::with_ice_*`):
+  - a controlled agent uses the nominated pair with the highest priority (RFC 8445 section
+    8.1.1) and moves to a nominated pair of lower priority only when consent is lost on the
+    selected one. Following the latest nomination and libwebrtc's `NOMINATION` value, as
+    before, is `NominationAcceptance::Latest` (`with_ice_nomination_acceptance`);
+  - data (DTLS, SRTP) is accepted on any local candidate from the remote candidate of every
+    valid pair (section 12.2), no longer from the selected pair's address only;
+    `data_from_selected_pair_only` (`with_ice_data_from_selected_pair_only`) restores that.
+    `Agent::data_path` / `accepts_data` are the test the engine applies;
+  - consent checks are plain Binding requests: the controlling agent's no longer carry
+    USE-CANDIDATE (`nominate_on_consent_checks`, `with_ice_nomination_on_consent_checks`, turns
+    it back on). A controlling agent that wins a role conflict (section 7.3.1.1) after it
+    nominated sends its nomination again by itself, which is what the attribute on consent
+    checks was there for;
+  - a Binding request that fails the short-term credential check is answered 400 or 401 (RFC
+    8489 section 9.1.3) instead of being dropped: unsigned, never longer than the request, at
+    most five in a burst and one more per 200 ms. `UnauthenticatedRequests::Drop`
+    (`with_ice_unauthenticated_requests`) keeps the drop.
+- **ice**: `Agent::set_role` re-prioritises the pairs and drops a nomination in the making (it
+  only stored the flag). The peer connection sets the role again at an ICE restart only when
+  one agent is lite and the other is not (RFC 8445 section 6.1.1), and for a transport set up
+  again after it was closed.
+- **api**: `rtc_ice::AgentConfig` has new public fields (`tie_breaker`,
+  `nomination_acceptance`, `nominate_on_consent_checks`, `unauthenticated_requests`,
+  `data_from_selected_pair_only`, `send_data_before_nomination`): a struct literal without
+  `..Default::default()` no longer compiles.
+- **interceptor**: the default interceptor set offers RFC 8888 congestion control feedback
+  (`a=rtcp-fb:* ack ccfb`) beside `transport-cc`, and `a=rtcp-fb:<pt> ccm tmmbr`, on audio and
+  video; its chain has the RFC 8888 recorder at `Slot::Rfc8888` beside the TWCC receiver
+  (`register_default_interceptors_without_congestion_control` too). An answer to an offer with
+  both feedback mechanisms keeps `ack ccfb` and drops `transport-cc` (RFC 8888 section 6), and
+  two engines now run on RFC 8888; a browser answers `transport-cc` alone and nothing changes
+  towards it. `CongestionFeedback::Twcc` in `DefaultInterceptorOptions` restores the old offer.
+- **interceptor**: `REMOTE_BITRATE_LIMIT_SLOT` moves from 2_500 to 2_250: at 2_500 the remote
+  bit rate limit and the circuit breaker (`Slot::CircuitBreaker`) displaced each other in a
+  chain that had both. The default interceptor set now carries the limit too, so the remote
+  description's `b=TIAS` / `b=AS` bounds its estimate.
+- **interceptor**: `CongestionFeedback` has a new default variant, `Negotiated`; `Twcc` and
+  `Rfc8888` now mean that mechanism only.
+- **interceptor**: a TMMBR is honoured, and answered with a TMMBN, only for a stream that
+  negotiated `ccm tmmbr` (RFC 5104 sections 7.1 and 7.2). It was honoured for every stream.
+  `CongestionControlBuilder::with_unnegotiated_tmmbr(true)` (`unnegotiated_tmmbr` in
+  `DefaultInterceptorOptions`) is the lenient setting.
+- **interceptor**: `TwccReceiverBuilder` and `Rfc8888Builder` stretch their interval to what the
+  RTCP bandwidth holds one report in, up to 400 ms (`with_adaptive_interval`, on by default);
+  `with_interval` is now the shortest interval, not the only one. `with_adaptive_interval(false)`
+  keeps it fixed.
+- **interceptor**: the pacer releases a packet that is inside its budget, with nothing queued
+  ahead, from `handle_write` instead of from the next `handle_timeout`
+  (`PacerBuilder::with_immediate_release(false)` restores the wait).
+- **interceptor**: `RedPlacement::WithNextMedia` is the default of `UlpfecSendBuilder::red` and
+  of `configure_ulpfec` (RFC 5109 section 14.2: FEC is not sent by itself). libwebrtc reads only
+  the other form: towards a browser use `configure_ulpfec_with_placement(..,
+  RedPlacement::OwnPacket)`.
+- **media engine**: a remote description that carries both RFC 8627 `flexfec` and `rtx`
+  negotiates no `rtx` (RFC 8627 section 1.1.7); `MediaEngine::set_flexfec_with_retransmission`
+  is the setting that keeps it. `flexfec-03` is not affected.
 - **dtls**: `use_srtp` follows RFC 5764 section 4.1 by default: the DTLS client offers it only
   when the session has an audio or video section. A data-channel-only session is set up
   without it, and when it gains a media section a new DTLS association with `use_srtp`
@@ -865,6 +954,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   9.2); with several transceivers it was dropped. An RTCP SDES MID item maps its SSRC to the m=
   section it names, for such a stream. The MID header extension is read when RtpStreamId is
   not negotiated; it was ignored then.
+- **sctp**: `RTCPeerConnection::reject_data_section` asks for the data section to be rejected
+  (m= port zero) in the next offer, or in the answer to the peer's next offer: RFC 8841
+  section 10.5, closing the SCTP association and the DTLS association under it. A data
+  channel created afterwards brings a new section, with a new `a=tls-id` and `a=sctp-port`.
+- **sctp**: when ICE selects another candidate pair the association is told (RFC 8831
+  section 5): its congestion control and RTO start over and its packet size is set for the
+  new path.
+- **sctp**: a stream reset the peer answers with "denied" or an error fails the data channel
+  it was closing (`OnError`, `OnClose`) instead of leaving it `closing`; an inactive path
+  (RFC 9260 section 8.2) changes neither the transport's state nor a channel's.
+
+- **ice**: `AgentConfig::tie_breaker` / `SettingEngineBuilder::with_ice_tie_breaker` fix the ICE
+  tiebreaker (RFC 8445 section 5.2); `Agent::tie_breaker`, `Agent::is_lite`.
+- **ice**: `AgentConfig::send_data_before_nomination` /
+  `SettingEngineBuilder::with_ice_data_before_nomination`: data on the best valid pair before
+  a pair is selected (RFC 8445 section 12.1).
+- **interceptor**: `negotiated_congestion_feedback` / `CongestionFeedbackFormat`: the one
+  feedback format a stream runs on, from its negotiated feedback (RFC 8888 when `ack ccfb` is
+  there, transport-wide congestion control otherwise). The TWCC sender does not number a stream
+  that runs on RFC 8888, the TWCC receiver does not report it, and the congestion controller
+  reads each stream's packets from one format only.
+- **interceptor**: `DefaultInterceptorOptions` and `register_default_interceptors_with_options`:
+  the settings of the default set in one place (`congestion_feedback`, `unnegotiated_tmmbr`,
+  `pacer_immediate_release`). `configure_tmmbr`, `configure_ulpfec_with_placement`.
+- **interceptor**: congestion control feedback follows the RTCP bandwidth. The generators read
+  the session's `b=` lines and `a=rtcp-rsize` (`RtcpSessionControl`) and measure the media rate
+  as the RTCP session does, and build one report per RTCP packet the session may send. Measured
+  on a virtual clock, two engines, RFC defaults (5% RTCP bandwidth, `T_rr_interval` 0, compound
+  RTCP): at 64 kbit/s of media 2.5 feedback datagrams a second with at most 0.66 s (TWCC) or
+  0.79 s (RFC 8888) between two, where a fixed 100 ms interval gave 2.07 and 1.87 a second with
+  gaps of 1.15 s and 1.35 s; at 100 kbit/s 3.1 and 2.5 a second (gaps 0.5 s; fixed: 4.0 and 3.5
+  with gaps of 0.6 s and 0.7 s); from 300 kbit/s up 10 a second either way
+  (`rtc-interceptor/tests/congestion_feedback_rate.rs`).
+- **interceptor**: with reduced-size RTCP negotiated, TWCC and RFC 8888 feedback leave as early
+  RTCP without a compound packet around them (RFC 8888 section 3.1, RFC 5506).
 
 - **congestion control is on by default** (RFC 8834 section 7). `register_default_interceptors`
   now installs `Gcc` over the receiver's TWCC or RFC 8888 feedback, the pacer that releases
@@ -1576,6 +1700,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+- **sctp**: an association accepted from the peer's INIT after an earlier one was lost left
+  the transport reporting the loss, so every later offer asked for a new `a=sctp-port` and
+  replaced the association it had.
 - **jsep**: two retransmission formats that differ only in `rtx-time` are one format (RFC
   4588 section 8.1: each sender's own figure); an offer whose RTX `fmtp` had another
   `rtx-time` than the local one was answered without RTX.
@@ -2019,6 +2146,120 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **test-env**: `tests/testenv_turn_client.rs` checks against coturn that a wrong password's
   401 is not answered again, and that requests keep the 500 ms initial RTO.
 
+### DTLS 1.3
+
+- **dtls**: DTLS 1.3 (RFC 9147, on the TLS 1.3 handshake of RFC 8446), next to DTLS 1.2. A
+  client offers both in one ClientHello and a server takes 1.3 from a client that offers it;
+  the downgrade sentinel of RFC 8446 section 4.1.3 is set and checked.
+  `ConfigBuilder::with_protocol_versions` sets the range (default 1.2 to 1.3), and
+  `State::negotiated_version` says which was negotiated (`DtlsVersion::protocol_version` gives
+  the bytes of webrtc-stats' `tlsVersion`: `FEFC` for 1.3).
+- **dtls**: the record layer of RFC 9147 section 4: the unified header, record number
+  encryption, epochs with their own keys and replay windows, ACK records.
+- **dtls**: the handshake with certificates (ECDSA P-256, Ed25519, RSASSA-PSS), a stateless
+  cookie exchange by HelloRetryRequest (on by default), client certificates, `use_srtp` in
+  EncryptedExtensions and the exporter of RFC 8446 section 7.5 behind the same
+  `State::export_keying_material` (which takes a context for a DTLS 1.3 association).
+  Suites: `TLS_AES_128_GCM_SHA256`, `TLS_CHACHA20_POLY1305_SHA256`, `TLS_AES_256_GCM_SHA384`
+  by default, `TLS_AES_128_CCM_SHA256` and `TLS_AES_128_CCM_8_SHA256` when named. Groups:
+  P-256, X25519, P-384.
+- **dtls**: flights, retransmission and ACKs as RFC 9147 sections 5.8 and 7 define them; the
+  timer follows the measured round trip once a flight gets through without loss.
+- **dtls**: key update (`Endpoint::update_keys`, `DTLSConn::update_keys`), started by
+  itself before a key reaches the number of records its AEAD allows; an association is closed
+  when too many records fail authentication under one key (RFC 9147 section 4.5.3).
+- **dtls**: connection ids for DTLS 1.3 (RFC 9147 section 9): `ConfigBuilder::with_connection_id`,
+  `Endpoint::{new_connection_ids, request_connection_ids}`, `DTLSConn::use_next_connection_id`,
+  and `with_connection_id_migration` for an endpoint that may follow a peer to a new address.
+- **dtls**: RSASSA-PSS (`rsa_pss_rsae_sha256/384/512`) in DTLS 1.2 as well: listed by default
+  after PKCS#1 v1.5, verified and signed.
+- **crypto**: `hkdf_extract`, `hkdf_expand`, `hkdf_expand_label`; `HashAlgorithm::Sha384`,
+  `HmacAlgorithm::Sha384`; `RTCCrypto::new_header_mask` with `HeaderMask` and
+  `HeaderMaskAlgorithm` (record number encryption); `SignatureScheme::RsaPssSha256/384/512`,
+  which an imported RSA key signs with.
+- Not in it: pre-shared keys in DTLS 1.3 (resumption, external PSKs, 0-RTT), post-handshake
+  authentication, the DTLS 1.2 record format of RFC 9146. A configuration with a pre-shared key
+  negotiates DTLS 1.2.
+
+- **dtls**: DTLS 1.3 (RFC 9147, on the TLS 1.3 handshake of RFC 8446), next to DTLS 1.2. A
+  client offers both in one ClientHello and a server takes 1.3 from a client that offers it;
+  the downgrade sentinel of RFC 8446 section 4.1.3 is set and checked.
+  `ConfigBuilder::with_protocol_versions` sets the range (default 1.2 to 1.3), and
+  `State::negotiated_version` says which was negotiated (`DtlsVersion::protocol_version` gives
+  the bytes of webrtc-stats' `tlsVersion`: `FEFC` for 1.3).
+- **dtls**: the record layer of RFC 9147 section 4: the unified header, record number
+  encryption, epochs with their own keys and replay windows, ACK records.
+- **dtls**: the handshake with certificates (ECDSA P-256, Ed25519, RSASSA-PSS), a stateless
+  cookie exchange by HelloRetryRequest (on by default), client certificates, `use_srtp` in
+  EncryptedExtensions and the exporter of RFC 8446 section 7.5 behind the same
+  `State::export_keying_material` (which takes a context for a DTLS 1.3 association).
+  Suites: `TLS_AES_128_GCM_SHA256`, `TLS_CHACHA20_POLY1305_SHA256`, `TLS_AES_256_GCM_SHA384`
+  by default, `TLS_AES_128_CCM_SHA256` and `TLS_AES_128_CCM_8_SHA256` when named. Groups:
+  P-256, X25519, P-384.
+- **dtls**: flights, retransmission and ACKs as RFC 9147 sections 5.8 and 7 define them; the
+  timer follows the measured round trip once a flight gets through without loss.
+- **dtls**: key update (`Endpoint::update_keys`, `DTLSConn::update_keys`), started by
+  itself before a key reaches the number of records its AEAD allows; an association is closed
+  when too many records fail authentication under one key (RFC 9147 section 4.5.3).
+- **dtls**: connection ids for DTLS 1.3 (RFC 9147 section 9): `ConfigBuilder::with_connection_id`,
+  `Endpoint::{new_connection_ids, request_connection_ids}`, `DTLSConn::use_next_connection_id`,
+  and `with_connection_id_migration` for an endpoint that may follow a peer to a new address.
+- **dtls**: RSASSA-PSS (`rsa_pss_rsae_sha256/384/512`) in DTLS 1.2 as well: listed by default
+  after PKCS#1 v1.5, verified and signed.
+- **crypto**: `hkdf_extract`, `hkdf_expand`, `hkdf_expand_label`; `HashAlgorithm::Sha384`,
+  `HmacAlgorithm::Sha384`; `RTCCrypto::new_header_mask` with `HeaderMask` and
+  `HeaderMaskAlgorithm` (record number encryption); `SignatureScheme::RsaPssSha256/384/512`,
+  which an imported RSA key signs with.
+- Not in it: pre-shared keys in DTLS 1.3 (resumption, external PSKs, 0-RTT), post-handshake
+  authentication, the DTLS 1.2 record format of RFC 9146. A configuration with a pre-shared key
+  negotiates DTLS 1.2.
+
+### DTLS 1.2: the RFC by default
+
+- **dtls**: `HelloVerifyRequest.server_version` is DTLS 1.0, as RFC 6347 section 4.2.1 asks
+  whatever version follows; `ConfigBuilder::with_hello_verify_request_version` restores DTLS 1.2.
+- **dtls**: the `server_name` extension is not sent for an IP address (RFC 6066 section 3),
+  and is sent without a trailing dot.
+- **dtls**: a server with an Ed25519 certificate offers the ECDHE_ECDSA suites (RFC 8422
+  section 5.1.1); its configuration used to fail to build.
+- **dtls**: a client that receives authentic application data before the server's Finished
+  sends its last flight again at once (RFC 6347 section 4.2.4;
+  `ConfigBuilder::with_early_data_retransmit`), and that data is delivered when the handshake
+  completes: it used to be dropped when the early-record queue was drained.
+
+- **dtls**: `HelloVerifyRequest.server_version` is DTLS 1.0, as RFC 6347 section 4.2.1 asks
+  whatever version follows; `ConfigBuilder::with_hello_verify_request_version` restores DTLS 1.2.
+- **dtls**: the `server_name` extension is not sent for an IP address (RFC 6066 section 3),
+  and is sent without a trailing dot.
+- **dtls**: a server with an Ed25519 certificate offers the ECDHE_ECDSA suites (RFC 8422
+  section 5.1.1); its configuration used to fail to build.
+- **dtls**: a client that receives authentic application data before the server's Finished
+  sends its last flight again at once (RFC 6347 section 4.2.4;
+  `ConfigBuilder::with_early_data_retransmit`), and that data is delivered when the handshake
+  completes: it used to be dropped when the early-record queue was drained.
+
+### Breaking changes (DTLS 1.3)
+
+- **dtls**: a `ConfigBuilder` without a cipher suite list negotiates DTLS 1.3 with a peer that
+  has it. A list is exact: one without a TLS 1.3 suite negotiates DTLS 1.2 only, as before.
+- **dtls**: `CipherSuiteId` has the five TLS 1.3 suites, `CipherSuiteHash` has `Sha384`,
+  `SignatureAlgorithm` has the three RSASSA-PSS values (and `Unsupported` is `0xff`), and the
+  default signature schemes list them.
+- **dtls**: a HelloVerifyRequest says DTLS 1.0 (see above).
+- **dtls**: `State::marshal_binary` fails for a DTLS 1.3 association.
+- **crypto**: `HashAlgorithm`, `HmacAlgorithm`, `SignatureScheme` and `CryptoAlgorithm` have
+  new variants (all `non_exhaustive`).
+
+- **dtls**: a `ConfigBuilder` without a cipher suite list negotiates DTLS 1.3 with a peer that
+  has it. A list is exact: one without a TLS 1.3 suite negotiates DTLS 1.2 only, as before.
+- **dtls**: `CipherSuiteId` has the five TLS 1.3 suites, `CipherSuiteHash` has `Sha384`,
+  `SignatureAlgorithm` has the three RSASSA-PSS values (and `Unsupported` is `0xff`), and the
+  default signature schemes list them.
+- **dtls**: a HelloVerifyRequest says DTLS 1.0 (see above).
+- **dtls**: `State::marshal_binary` fails for a DTLS 1.3 association.
+- **crypto**: `HashAlgorithm`, `HmacAlgorithm`, `SignatureScheme` and `CryptoAlgorithm` have
+  new variants (all `non_exhaustive`).
+
 ### Dependencies
 
 - **stun**: `precis-profiles` 0.2 (MIT / Apache-2.0, pure Rust) for the OpaqueString profile.
@@ -2140,6 +2381,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Testing
 
+- **sctp**: the SCTP association across DTLS changes, between two engines
+  (`tests/sctp_across_dtls_associations_rtc2rtc.rs`): a new DTLS association (a changed
+  `tls-id`, swapped roles) leaves the association and its channels as they are, and a DTLS
+  transport the peer closed closes them, after which the next exchange brings a new
+  association on a new port. `tests/sctp_rfc_defaults_rtc2rtc.rs` runs the defaults above
+  against a peer with each turned off.
+- **ice**: `test_ice_tcp_bidirectional_data_channel` no longer depends on which side's
+  messages arrive first: both sides stopped sending once four messages had arrived in total,
+  and when three of them had gone one way the test waited for its 30 second timeout.
+- **sctp**: two handler tests expected DATA that overtakes the COOKIE ACK to be kept; it is
+  discarded (RFC 9260 section 6) and delivered when the peer sends it again.
 - **dtls**: known-answer tests against handshakes recorded from OpenSSL 3.5.4 (`openssl s_client`
   against `openssl s_server -dtls1_2 -listen`, five cipher suites): the Finished values, the
   extended master secret, the `EXTRACTOR-dtls_srtp` exporter output and the protected records

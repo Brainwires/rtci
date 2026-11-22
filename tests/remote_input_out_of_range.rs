@@ -65,7 +65,10 @@ fn negotiated_with_remote_mid(remote_mid: &str) -> rtc::peer_connection::RTCPeer
     let mut offer_pc = build_pc(RTCDtlsRole::Server);
     let mut answer_pc = build_pc(RTCDtlsRole::Client);
     offer_pc
-        .add_transceiver_from_kind(RtpCodecKind::Audio, None)
+        .add_transceiver_from_kind(
+            RtpCodecKind::Audio,
+            Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+        )
         .unwrap();
     let offer = offer_pc.create_offer(None).unwrap();
     assert!(offer.sdp.contains("a=mid:0\r\n") && offer.sdp.contains("a=group:BUNDLE 0\r\n"));
@@ -90,8 +93,11 @@ fn negotiated_with_remote_mid(remote_mid: &str) -> rtc::peer_connection::RTCPeer
 fn test_remote_mid_at_isize_max_does_not_panic_a_later_offer() {
     let mut pc = negotiated_with_remote_mid(&isize::MAX.to_string());
     // A new transceiver has no mid yet, so the offer must pick one above every mid in use.
-    pc.add_transceiver_from_kind(RtpCodecKind::Audio, None)
-        .unwrap();
+    pc.add_transceiver_from_kind(
+        RtpCodecKind::Audio,
+        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+    )
+    .unwrap();
     let err = pc
         .create_offer(None)
         .expect_err("no numeric mid is left above isize::MAX");
