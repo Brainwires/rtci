@@ -1,9 +1,10 @@
 //! Where the BUNDLE attributes go (RFC 9143 section 7.1.3; RFC 8859 categories IDENTICAL and
 //! TRANSPORT). From the remote side both forms are taken: repeated in every bundled section,
 //! or in the tagged section only, whose attributes then apply to every bundled section. What
-//! this endpoint writes in answers and subsequent offers is the tagged-only form the RFC
-//! requires, and the repeated form (as browsers write) with
-//! `SettingEngineBuilder::with_bundle_attributes_repeated`.
+//! this endpoint writes in answers and subsequent offers is the repeated form, the only one
+//! browsers take (Chromium and WebKit: "rtcp-mux must be enabled when BUNDLE is enabled";
+//! Firefox: "m-section at level 1 is missing a=rtcp-mux"), and the tagged-only form the RFC
+//! requires with `SettingEngineBuilder::with_bundle_attributes_repeated(false)`.
 
 mod jsep_common;
 
@@ -24,14 +25,14 @@ const BUNDLE_ATTRIBUTES: [&str; 5] = [
     "a=rtcp-rsize",
 ];
 
-fn repeating_peer() -> Result<RTCPeerConnection, Box<dyn std::error::Error>> {
+fn tagged_only_peer() -> Result<RTCPeerConnection, Box<dyn std::error::Error>> {
     let mut media_engine = MediaEngine::default();
     media_engine.register_default_codecs()?;
     Ok(RTCPeerConnectionBuilder::new()
         .with_media_engine(media_engine)
         .with_setting_engine(
             SettingEngineBuilder::new()
-                .with_bundle_attributes_repeated(true)
+                .with_bundle_attributes_repeated(false)
                 .build(),
         )
         .build(Instant::now())?)
@@ -70,9 +71,9 @@ fn every_transceiver_uses_reduced_size_rtcp(pc: &mut RTCPeerConnection) -> bool 
 }
 
 #[test]
-fn when_asked_answers_and_later_offers_repeat_the_bundle_attributes() -> TestResult {
-    let mut a = repeating_peer()?;
-    let mut b = repeating_peer()?;
+fn by_default_answers_and_later_offers_repeat_the_bundle_attributes() -> TestResult {
+    let mut a = default_peer()?;
+    let mut b = default_peer()?;
     add_media(&mut a)?;
     let (_, answer) = jsep_common::exchange(&mut a, &mut b)?;
     for section in carried(&answer) {
@@ -108,10 +109,11 @@ fn an_initial_offer_has_them_in_every_section_that_is_not_bundle_only() -> TestR
     Ok(())
 }
 
+/// RFC 9143 section 7.1.3, with `with_bundle_attributes_repeated(false)`.
 #[test]
-fn by_default_they_are_in_the_tagged_section_only_and_apply_to_all() -> TestResult {
-    let mut a = default_peer()?;
-    let mut b = default_peer()?;
+fn when_asked_they_are_in_the_tagged_section_only_and_apply_to_all() -> TestResult {
+    let mut a = tagged_only_peer()?;
+    let mut b = tagged_only_peer()?;
     add_media(&mut a)?;
 
     // The answer.
@@ -205,11 +207,12 @@ fn an_answer_with_the_bundle_attributes_in_the_tagged_section_only_is_applied() 
 /// `a=rtcp-mux` for the group "even if the tagged 'm=' section does not describe RTP-based
 /// media". A connection that began with a data channel has the data section tagged; the
 /// subsequent offer that adds video, and its answer, say `a=rtcp-mux` (and `a=rtcp-rsize`)
-/// there, and both sides take it for the video section.
+/// there, and both sides take it for the video section. This is the tagged-only form
+/// (`with_bundle_attributes_repeated(false)`).
 #[test]
 fn a_tagged_data_section_carries_rtcp_mux_for_the_rtp_sections() -> TestResult {
-    let mut a = default_peer()?;
-    let mut b = default_peer()?;
+    let mut a = tagged_only_peer()?;
+    let mut b = tagged_only_peer()?;
     a.create_data_channel("data", None)?;
     jsep_common::exchange(&mut a, &mut b)?;
 

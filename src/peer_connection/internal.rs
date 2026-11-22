@@ -414,9 +414,9 @@ impl RTCPeerConnection {
             rtcp_mux_only: self.configuration.rtcp_mux_policy != RTCRtcpMuxPolicy::Negotiate,
             bundle_policy: self.effective_bundle_policy(),
             initial_offer: true,
-            bundle_attributes_in_tagged_section_only: !self
+            bundle_attributes_in_tagged_section_only: self
                 .setting_engine
-                .bundle_attributes_repeated,
+                .bundle_attributes_tagged_only,
             sctp_max_message_size: self.setting_engine.sctp_max_message_size.as_usize(),
             sctp_port: self.sctp_transport().offer_port(),
             sctp_over_tcp: false,
@@ -770,9 +770,9 @@ impl RTCPeerConnection {
             ice_gathering_state: self.ice_transport().ice_gathering_state,
             bundle_policy: self.effective_bundle_policy(),
             initial_offer: false,
-            bundle_attributes_in_tagged_section_only: !self
+            bundle_attributes_in_tagged_section_only: self
                 .setting_engine
-                .bundle_attributes_repeated,
+                .bundle_attributes_tagged_only,
             rtcp_mux_only: self.configuration.rtcp_mux_policy != RTCRtcpMuxPolicy::Negotiate,
             offered_tag_rtcp_mux_only: !include_unmatched
                 && remote_parsed

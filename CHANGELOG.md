@@ -61,16 +61,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   left the feedback out unless the two numbers were equal (RFC 4585 section 4.2: the value is
   each side's own minimum interval).
 
-- **jsep**: answers and subsequent offers carry the BUNDLE attributes (`a=ice-ufrag`,
-  `a=ice-pwd`, `a=setup`, a media-level `a=fingerprint`, `a=rtcp-mux`, `a=rtcp-mux-only`,
-  `a=rtcp-rsize`, candidates) in the tagged m= section only, as RFC 9143 section 7.1.3
-  requires; they were repeated in every bundled section. The repeated form, which browsers
-  write, is `SettingEngineBuilder::with_bundle_attributes_repeated(true)`.
-  `with_bundle_attributes_in_tagged_section_only` is gone (it selected what is now the
-  default). An initial offer is unchanged. A remote endpoint that needs `a=rtcp-mux` or ICE
-  credentials in each section of an answer needs the setting. A tagged section that is the
-  data section carries `a=rtcp-mux` (and `a=rtcp-rsize`) for the RTP sections of its group
-  (the note of RFC 9143 section 7.1.3).
+- **setting_engine**: `with_bundle_attributes_in_tagged_section_only` is replaced by
+  `SettingEngineBuilder::with_bundle_attributes_repeated(bool)`. Answers and subsequent offers
+  repeat the BUNDLE attributes (`a=ice-ufrag`, `a=ice-pwd`, `a=setup`, a media-level
+  `a=fingerprint`, `a=rtcp-mux`, `a=rtcp-mux-only`, `a=rtcp-rsize`, candidates) in every
+  bundled section by default, as before; `false` carries them in the tagged m= section only,
+  as RFC 9143 section 7.1.3 requires. That form was the default for a short while and is not
+  any more: no browser takes it (Chromium and WebKit: "rtcp-mux must be enabled when BUNDLE is
+  enabled"; Firefox: "m-section at level 1 is missing a=rtcp-mux, which is required by
+  rtcpMuxPolicy"). A tagged section that is the data section carries `a=rtcp-mux` (and
+  `a=rtcp-rsize`) for the RTP sections of its group in the tagged-only form (the note of RFC
+  9143 section 7.1.3).
 - **jsep**: `RTCBundlePolicy::MustBundle` (`must-bundle`, RFC 9429 section 4.1.1) is new, and
   `RTCBundlePolicy::MaxBundle` selects it: W3C webrtc-pc section 4.2.5 defines `max-bundle`,
   and RFC 9429 `must-bundle` as "identically defined". Every m= section of an initial offer
@@ -1418,9 +1419,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `a=rtcp-rsize` of the tagged section apply to every bundled section.
 
 - **shared**: `Error::ErrAnswerDoesNotMatchOffer(String)`.
-- **setting_engine**: `SettingEngineBuilder::with_bundle_attributes_repeated`: answers and
-  subsequent offers repeat the BUNDLE attributes in every bundled section, as browsers do. The
-  default carries them in the tagged m= section only, as RFC 9143 section 7.1.3 says.
+- **setting_engine**: `SettingEngineBuilder::with_bundle_attributes_repeated(false)`: answers
+  and subsequent offers carry the BUNDLE attributes in the tagged m= section only, as RFC 9143
+  section 7.1.3 says. The default repeats them in every bundled section, as browsers do and
+  need.
 - **configuration**: `RTCBundlePolicy::MustBundle` (RFC 9429 section 4.1.1) and
   `SettingEngineBuilder::with_max_bundle_as_must_bundle`.
 - **transceiver**: `RTCRtpTransceiver::remote_bandwidth()` (`RTCRemoteBandwidth`: `b=TIAS` /

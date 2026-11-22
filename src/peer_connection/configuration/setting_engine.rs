@@ -372,7 +372,8 @@ pub struct SettingEngine {
     /// Answers and subsequent offers repeat the BUNDLE attributes in every bundled m=
     /// section instead of carrying them in the tagged one only (RFC 9143 section 7.1.3); see
     /// [`SettingEngineBuilder::with_bundle_attributes_repeated`].
-    pub(crate) bundle_attributes_repeated: bool,
+    /// Inverted so that the derived default is "repeated".
+    pub(crate) bundle_attributes_tagged_only: bool,
     /// [`SettingEngineBuilder::with_max_bundle_as_must_bundle`].
     /// Inverted so that the derived default is "honoured".
     pub(crate) max_bundle_ignored: bool,
@@ -1340,21 +1341,28 @@ impl SettingEngineBuilder {
         self
     }
 
-    /// Repeats the BUNDLE attributes (the IDENTICAL and TRANSPORT categories of RFC 8859:
-    /// `a=ice-ufrag`, `a=ice-pwd`, `a=setup`, media-level `a=fingerprint`, `a=rtcp-mux`,
-    /// `a=rtcp-mux-only`, `a=rtcp-rsize`, candidates) in every bundled m= section of answers
-    /// and subsequent offers, as browsers do.
+    /// Whether answers and subsequent offers repeat the BUNDLE attributes (the IDENTICAL and
+    /// TRANSPORT categories of RFC 8859: `a=ice-ufrag`, `a=ice-pwd`, `a=setup`, media-level
+    /// `a=fingerprint`, `a=rtcp-mux`, `a=rtcp-mux-only`, `a=rtcp-rsize`, candidates) in every
+    /// bundled m= section. The default is `true`.
     ///
-    /// RFC 9143 section 7.1.3: "In a subsequent offer or in an answer ... the offerer and
-    /// answerer MUST include [them] only in the tagged 'm=' section" and "MUST NOT include
-    /// such attributes in any other bundled 'm=' section". That is the default (`false`).
-    /// `true` writes the browsers' form, for a remote endpoint that needs each section to
-    /// say `a=rtcp-mux` or to carry ICE credentials of its own.
+    /// RFC 9143 section 7.1.3 (and RFC 9429 sections 5.2.2 and 5.3.1): "In a subsequent offer
+    /// or in an answer ... the offerer and answerer MUST include IDENTICAL and TRANSPORT
+    /// multiplexing category SDP attributes (BUNDLE attributes) only in the tagged 'm='
+    /// section" and "MUST NOT include such attributes in any other bundled 'm=' section".
+    /// `false` writes that form.
+    ///
+    /// It is not the default because no browser takes it: given an answer or a subsequent
+    /// offer whose second bundled section has no `a=rtcp-mux` of its own, Chromium and WebKit
+    /// refuse the description with "rtcp-mux must be enabled when BUNDLE is enabled" and
+    /// Firefox with "m-section at level 1 is missing a=rtcp-mux, which is required by
+    /// rtcpMuxPolicy" (browser matrix, 2026-11-22). Browsers themselves repeat the
+    /// attributes.
     ///
     /// Either form is accepted from the remote side whatever this is set to: the tagged
     /// section's attributes apply to every bundled section.
     pub fn with_bundle_attributes_repeated(mut self, repeated: bool) -> Self {
-        self.0.bundle_attributes_repeated = repeated;
+        self.0.bundle_attributes_tagged_only = !repeated;
         self
     }
 
