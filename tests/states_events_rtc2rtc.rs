@@ -393,7 +393,7 @@ fn close_sets_every_state_to_closed_without_an_event() -> Result<()> {
     let start = Instant::now();
     let mut offerer = Peer::new("127.0.0.1:51040".parse()?, RTCDtlsRole::Client, start)?;
     let mut answerer = Peer::new("127.0.0.1:51041".parse()?, RTCDtlsRole::Server, start)?;
-    offerer.pc.create_data_channel("probe", None)?;
+    let channel = offerer.pc.create_data_channel("probe", None)?.id();
     let transceiver = offerer
         .pc
         .add_transceiver_from_kind(RtpCodecKind::Audio, Some(RTCRtpTransceiverInit::recvonly()))?;
@@ -403,6 +403,16 @@ fn close_sets_every_state_to_closed_without_an_event() -> Result<()> {
         connected(a) && connected(b)
     })?;
     offerer.drain_events();
+    assert!(
+        offerer
+            .pc
+            .sctp()
+            .expect("sctp")
+            .transport()
+            .ice_transport()
+            .get_selected_candidate_pair()
+            .is_some()
+    );
 
     let before = offerer.events.len();
     offerer.pc.close()?;
@@ -426,6 +436,23 @@ fn close_sets_every_state_to_closed_without_an_event() -> Result<()> {
     assert_eq!(
         sctp.transport().ice_transport().state(),
         RTCIceTransportState::Closed
+    );
+    assert_eq!(
+        sctp.transport()
+            .ice_transport()
+            .get_selected_candidate_pair(),
+        None,
+        "no selected pair in the closed state"
+    );
+    assert_eq!(sctp.state(), RTCSctpTransportState::Closed);
+    assert_eq!(
+        offerer
+            .pc
+            .data_channel(channel)
+            .expect("the channel")
+            .ready_state(),
+        rtc::data_channel::RTCDataChannelState::Closed,
+        "close() closes every data channel"
     );
     assert!(
         offerer
@@ -966,5 +993,218 @@ fn the_sctp_transport_closes_with_its_dtls_transport() -> Result<()> {
     let sctp = answerer.pc.sctp().expect("sctp");
     assert_eq!(sctp.transport().state(), RTCDtlsTransportState::Closed);
     assert_eq!(sctp.state(), RTCSctpTransportState::Closed);
+    Ok(())
+}
+
+/// W3C 5.6 `getRemoteCandidates()` and `getLocalParameters()`: the remote candidates are those
+/// of the remote description, never a peer-reflexive one the agent learned from a check; the
+/// local parameters are the local description's, and null while there is none. The answerer
+/// is never told the offerer's candidate: it learns it as peer-reflexive from the offerer's
+/// connectivity checks, and the pair still connects.
+#[test]
+fn remote_candidates_leave_out_the_peer_reflexive_ones_the_checks_found() -> Result<()> {
+    let start = Instant::now();
+    let mut offerer = Peer::new("127.0.0.1:51090".parse()?, RTCDtlsRole::Client, start)?;
+    let mut answerer = Peer::new("127.0.0.1:51091".parse()?, RTCDtlsRole::Server, start)?;
+    offerer.pc.create_data_channel("probe", None)?;
+
+    let offer = offerer.pc.create_offer(None)?;
+    offerer.pc.set_local_description(start, offer.clone())?;
+    answerer.pc.set_remote_description(start, offer)?;
+    let answer = answerer.pc.create_answer(None)?;
+    answerer.pc.set_local_description(start, answer.clone())?;
+    offerer.pc.set_remote_description(start, answer.clone())?;
+    let (offerer_addr, answerer_addr) = (offerer.addr, answerer.addr);
+    offerer.pc.add_local_candidate(host(offerer_addr)?)?;
+    answerer.pc.add_local_candidate(host(answerer_addr)?)?;
+    offerer.pc.add_remote_candidate(host(answerer_addr)?)?;
+
+    let sctp_connected = |p: &Peer| {
+        p.pc.sctp()
+            .is_some_and(|s| s.state() == RTCSctpTransportState::Connected)
+    };
+    run(&mut offerer, &mut answerer, start, start, |a, b| {
+        sctp_connected(a) && sctp_connected(b)
+    })?;
+
+    let now = start + Duration::from_secs(1);
+    let learned: Vec<_> = answerer
+        .pc
+        .get_stats(now, rtc::statistics::StatsSelector::None)
+        .iter()
+        .filter_map(|entry| match entry {
+            rtc::statistics::report::RTCStatsReportEntry::RemoteCandidate(c) => {
+                Some(c.candidate_type)
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(
+        learned.contains(&rtc::peer_connection::transport::RTCIceCandidateType::Prflx),
+        "the answerer's agent learned the offerer as peer-reflexive: {learned:?}"
+    );
+    let answerer_ice = answerer
+        .pc
+        .sctp()
+        .expect("sctp")
+        .transport()
+        .ice_transport();
+    assert_eq!(
+        answerer_ice.get_remote_candidates(),
+        vec![],
+        "the remote description holds no candidate"
+    );
+
+    let offerer_ice = offerer.pc.sctp().expect("sctp").transport().ice_transport();
+    let remote = offerer_ice.get_remote_candidates();
+    assert_eq!(remote.len(), 1, "{remote:?}");
+    assert_eq!(remote[0].port, answerer_addr.port());
+    assert_eq!(remote[0].sdp_mline_index, Some(0));
+    assert_eq!(remote[0].sdp_mid.as_deref(), Some("0"));
+
+    let local = offerer_ice
+        .get_local_parameters()
+        .expect("a local description");
+    let offer_ufrag = offerer
+        .pc
+        .local_description()
+        .expect("offer")
+        .sdp
+        .lines()
+        .find_map(|l| l.strip_prefix("a=ice-ufrag:").map(str::to_owned))
+        .expect("an ice-ufrag");
+    assert_eq!(local.username_fragment, offer_ufrag);
+    let remote_parameters = answerer_ice.get_remote_parameters().expect("an offer");
+    assert_eq!(remote_parameters.username_fragment, offer_ufrag);
+    Ok(())
+}
+
+/// W3C 5.6 `getLocalParameters()`: null while the local description is null. `createOffer`
+/// alone associates the transceiver (its sender names the transport) but sets no description:
+/// the parameters appear with `setLocalDescription`, as the offer states them.
+#[test]
+fn local_parameters_are_null_until_a_local_description_is_set() -> Result<()> {
+    let now = Instant::now();
+    let mut pc = Peer::new("127.0.0.1:51092".parse()?, RTCDtlsRole::Client, now)?.pc;
+    let transceiver =
+        pc.add_transceiver_from_kind(RtpCodecKind::Audio, Some(RTCRtpTransceiverInit::recvonly()))?;
+    let offer = pc.create_offer(None)?;
+    let sender = pc.rtp_sender(transceiver.into()).expect("sender");
+    let ice = sender
+        .transport()
+        .expect("createOffer associated the transceiver")
+        .ice_transport();
+    assert_eq!(ice.get_local_parameters(), None);
+    assert_eq!(ice.get_remote_parameters(), None);
+    assert_eq!(ice.get_remote_candidates(), vec![]);
+
+    pc.set_local_description(now, offer.clone())?;
+    let sender = pc.rtp_sender(transceiver.into()).expect("sender");
+    let local = sender
+        .transport()
+        .expect("transport")
+        .ice_transport()
+        .get_local_parameters()
+        .expect("the offer's parameters");
+    assert!(
+        offer
+            .sdp
+            .contains(&format!("a=ice-ufrag:{}", local.username_fragment)),
+        "{}",
+        offer.sdp
+    );
+    assert!(
+        offer.sdp.contains(&format!("a=ice-pwd:{}", local.password)),
+        "{}",
+        offer.sdp
+    );
+    Ok(())
+}
+
+/// The datagrams `pc` sends in `span` of virtual time, as their destination addresses.
+fn destinations(
+    pc: &mut RTCPeerConnection,
+    start: Instant,
+    span: Duration,
+) -> Result<Vec<SocketAddr>> {
+    let mut now = start;
+    let mut sent = vec![];
+    while now < start + span {
+        while let Some(datagram) = pc.poll_write() {
+            sent.push(datagram.transport.peer_addr);
+        }
+        let Some(next) = pc.poll_timeout() else { break };
+        now = next.max(now + Duration::from_millis(1));
+        pc.handle_timeout(now)?;
+    }
+    Ok(sent)
+}
+
+/// W3C 4.4.2 "administratively prohibited": the ICE agent never connects to a remote
+/// candidate on a port of the Fetch bad-port list, nor, under the "relay" policy, to one that
+/// needs name resolution; `addIceCandidate` still succeeds and the candidate is in the remote
+/// description and `getRemoteCandidates()`, as if added. A candidate on another port is
+/// checked.
+#[test]
+fn prohibited_remote_candidates_are_added_but_never_checked() -> Result<()> {
+    let start = Instant::now();
+    for (port, prohibited) in [(6000u16, true), (6001, false)] {
+        let mut offerer = Peer::new("127.0.0.1:51093".parse()?, RTCDtlsRole::Client, start)?;
+        let mut answerer = Peer::new("127.0.0.1:51094".parse()?, RTCDtlsRole::Server, start)?;
+        offerer.pc.create_data_channel("probe", None)?;
+        let offer = offerer.pc.create_offer(None)?;
+        offerer.pc.set_local_description(start, offer.clone())?;
+        answerer.pc.set_remote_description(start, offer)?;
+        let answer = answerer.pc.create_answer(None)?;
+        answerer.pc.set_local_description(start, answer)?;
+        answerer.pc.add_local_candidate(host(answerer.addr)?)?;
+        let remote: SocketAddr = format!("127.0.0.1:{port}").parse()?;
+        answerer.pc.add_remote_candidate(host(remote)?)?;
+        assert!(
+            answerer
+                .pc
+                .remote_description()
+                .expect("offer")
+                .sdp
+                .contains(&format!("127.0.0.1 {port} typ host")),
+            "the candidate is in the remote description"
+        );
+
+        let sent = destinations(&mut answerer.pc, start, Duration::from_secs(5))?;
+        let to_candidate = sent.iter().filter(|a| **a == remote).count();
+        if prohibited {
+            assert_eq!(to_candidate, 0, "nothing is sent to a bad port: {sent:?}");
+        } else {
+            assert!(to_candidate > 0, "the candidate is checked: {sent:?}");
+        }
+    }
+
+    // Under the "relay" policy a name to resolve is prohibited the same way.
+    let mut pc = RTCPeerConnectionBuilder::new()
+        .with_configuration(
+            RTCConfigurationBuilder::new()
+                .with_ice_transport_policy(
+                    rtc::peer_connection::configuration::RTCIceTransportPolicy::Relay,
+                )
+                .build(),
+        )
+        .build(start)?;
+    let mut offerer = Peer::new("127.0.0.1:51095".parse()?, RTCDtlsRole::Client, start)?;
+    offerer.pc.create_data_channel("probe", None)?;
+    let offer = offerer.pc.create_offer(None)?;
+    pc.set_remote_description(start, offer)?;
+    pc.add_remote_candidate(RTCIceCandidateInit {
+        candidate:
+            "candidate:1 1 udp 2130706431 0f0e0d0c-0b0a-0908-0706-050403020100.local 51096 typ host"
+                .to_owned(),
+        sdp_mline_index: Some(0),
+        ..Default::default()
+    })?;
+    assert!(
+        pc.remote_description()
+            .expect("offer")
+            .sdp
+            .contains(".local 51096 typ host")
+    );
     Ok(())
 }

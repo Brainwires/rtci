@@ -59,8 +59,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Default, Debug, PartialEq, Eq, Copy, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum RTCIceTransportPolicy {
-    /// Unspecified - not a valid policy, used as default value
-    #[default]
+    /// Unspecified - not a W3C value. Behaves as the default, "all", which is what
+    /// [`Default`] gives (W3C webrtc-pc 4.2.1).
     Unspecified = 0,
 
     /// Use all types of ICE candidates (recommended for best connectivity).
@@ -74,6 +74,7 @@ pub enum RTCIceTransportPolicy {
     /// local and public IP addresses.
     ///
     /// **Use when:** Normal operation, prioritizing connectivity over privacy
+    #[default]
     #[serde(rename = "all")]
     All = 1,
 

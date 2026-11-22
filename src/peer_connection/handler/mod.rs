@@ -671,6 +671,11 @@ impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCP
                 close_errs.push(err);
             }
         }
+        // Step 7: every data channel's [[ReadyState]] becomes "closed", without the closing
+        // procedure and without an event.
+        for channel in self.data_channels.values_mut() {
+            channel.ready_state = crate::data_channel::RTCDataChannelState::Closed;
+        }
         self.ice_transport_mut().ice_connection_state =
             crate::peer_connection::state::ice_connection_state::RTCIceConnectionState::Closed;
         self.peer_connection_state = RTCPeerConnectionState::Closed;

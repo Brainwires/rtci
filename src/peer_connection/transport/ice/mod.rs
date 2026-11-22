@@ -39,6 +39,12 @@ pub(crate) struct IceTransport {
     /// first section of the BUNDLE group. The `sdpMid` / `sdpMLineIndex` of the candidates the
     /// connection surfaces (W3C webrtc-pc section 5.6, "surface the candidate").
     pub(crate) local_media_section: Option<(String, u16)>,
+
+    /// Whether W3C `[[IceRole]]` has left "unknown": set by the first offer processed, local
+    /// (controlling) or remote (by RFC 8445's rules), and kept for the life of the transport.
+    /// The role itself is the agent's, which an ICE role conflict may change (RFC 8445
+    /// section 7.3.1.1).
+    pub(crate) role_determined: bool,
 }
 
 impl IceTransport {
@@ -58,6 +64,7 @@ impl IceTransport {
             // W3C 4.4.1.1: [[IceConnectionState]] starts "new".
             ice_connection_state: RTCIceConnectionState::New,
             local_media_section: None,
+            role_determined: false,
         })
     }
 
@@ -246,6 +253,16 @@ impl IceTransport {
             RTCIceRole::Controlling
         } else {
             RTCIceRole::Controlled
+        }
+    }
+
+    /// W3C `RTCIceTransport.role` (`[[IceRole]]`): "unknown" until the first offer is
+    /// processed, then the agent's role.
+    pub(crate) fn w3c_role(&self) -> RTCIceRole {
+        if self.role_determined {
+            self.role()
+        } else {
+            RTCIceRole::Unspecified
         }
     }
 

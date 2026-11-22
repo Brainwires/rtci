@@ -491,21 +491,24 @@ impl RTCRtpTransceiver<'_> {
 
     /// Returns the negotiated direction of the transceiver.
     ///
-    /// The direction the last completed offer/answer exchange negotiated;
-    /// [`RTCRtpTransceiverDirection::Unspecified`] (W3C null) before the first, and
-    /// [`RTCRtpTransceiverDirection::Stopped`] once the transceiver is stopped.
+    /// The direction the last completed offer/answer exchange negotiated; `None` (W3C null)
+    /// before the first, and [`RTCRtpTransceiverDirection::Stopped`] once the transceiver is
+    /// stopped.
     ///
     /// # Specification
     ///
     /// See [RTCRtpTransceiver.currentDirection](https://www.w3.org/TR/webrtc/#dom-rtcrtptransceiver-currentdirection).
-    pub fn current_direction(&self) -> RTCRtpTransceiverDirection {
+    pub fn current_direction(&self) -> Option<RTCRtpTransceiverDirection> {
         // peer_connection is mutable borrow, its rtp_transceivers won't be resized,
         // so, [self.id] here is safe.
         let transceiver = &self.peer_connection.rtp_transceivers[self.id];
         if transceiver.is_stopped() {
-            RTCRtpTransceiverDirection::Stopped
+            Some(RTCRtpTransceiverDirection::Stopped)
         } else {
-            transceiver.current_direction()
+            match transceiver.current_direction() {
+                RTCRtpTransceiverDirection::Unspecified => None,
+                direction => Some(direction),
+            }
         }
     }
 
