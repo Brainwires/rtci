@@ -511,26 +511,49 @@ fn remote_outbound_rtt(world: &mut World, ssrc: u32) -> Option<(Option<f64>, f64
 fn the_receiver_measures_a_round_trip_time_over_rtcp_xr() -> Result<()> {
     let (mut world, sender) = World::connected_with_rrtr(true)?;
     let (ssrc, _, _) = world.sender_stream(sender);
-    world.send_media(sender, Duration::from_secs(3))?;
+    world.send_media(sender, Duration::ZERO)?;
 
     // webrtc-stats: `roundTripTime` exists while the latest sender report came with a DLRR
-    // block that measures one. When reports go out is the RTCP schedule's business, so the
-    // clock is driven until the latest report is such a one, not for a fixed time.
+    // block that measures one. Which report carries a block is the RTCP schedule's business
+    // (a block answers a reference time, and the two ends report on their own timers), and a
+    // sender that has stopped sends no sender reports at all. So the media keeps flowing and
+    // the report is read after every packet, until the latest sender report is such a one.
+    let (_, _, pt) = world.sender_stream(sender);
     let started = world.now;
-    let give_up = started + Duration::from_secs(30);
     // What the report said each time it changed: (ms, roundTripTime, measurements).
     let mut seen: Vec<(u128, Option<f64>, u64)> = Vec::new();
-    loop {
-        let (rtt, _, measurements) =
-            remote_outbound_rtt(&mut world, ssrc).expect("remote-outbound stats");
-        if seen.last().map(|(_, rtt, n)| (*rtt, *n)) != Some((rtt, measurements)) {
-            seen.push(((world.now - started).as_millis(), rtt, measurements));
+    for n in 0..1500u16 {
+        if let Some((rtt, _, measurements)) = remote_outbound_rtt(&mut world, ssrc) {
+            if seen.last().map(|(_, rtt, n)| (*rtt, *n)) != Some((rtt, measurements)) {
+                seen.push(((world.now - started).as_millis(), rtt, measurements));
+            }
+            if rtt.is_some() {
+                break;
+            }
         }
-        if rtt.is_some() || world.now >= give_up {
-            break;
-        }
-        let until = world.now + Duration::from_millis(5);
-        world.run_until(until)?;
+        let now = world.now;
+        let sequence_number = FIRST_SEQ.wrapping_add(PACKETS).wrapping_add(n);
+        world.peers[0]
+            .pc
+            .rtp_sender(sender)
+            .expect("sender")
+            .write_rtp(
+                now,
+                rtc::rtp::Packet {
+                    header: rtc::rtp::header::Header {
+                        version: 2,
+                        payload_type: pt,
+                        sequence_number,
+                        timestamp: u32::from(PACKETS + n) * 1800,
+                        ssrc,
+                        marker: true,
+                        ..Default::default()
+                    },
+                    payload: Bytes::from(vec![0x10u8; 200]),
+                },
+            )?;
+        world.pump()?;
+        world.run_until(now + Duration::from_millis(20))?;
     }
     let (rtt, total, measurements) =
         remote_outbound_rtt(&mut world, ssrc).expect("remote-outbound stats");
