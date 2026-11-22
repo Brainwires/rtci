@@ -17,7 +17,7 @@
 //! other pair can still be nominated.
 
 use crate::agent::agent_config::*;
-use crate::agent::{Agent, BindingRequest};
+use crate::agent::{Agent, BindingRequest, Event, TaggedEvent};
 use bytes::BytesMut;
 use crc::{CRC_32_ISCSI, Crc};
 use log::{debug, error, trace, warn};
@@ -198,7 +198,9 @@ impl Agent {
                 && !e.nomination_pending;
             if unchecked && pair.priority() > e.priority() {
                 pair.state = self.initial_pair_state(&pair, Some(existing));
+                self.announce_pair(existing, false);
                 self.candidate_pairs[existing] = pair;
+                self.announce_pair(existing, true);
             }
             return;
         }
@@ -221,10 +223,42 @@ impl Agent {
             }
         };
         pair.state = self.initial_pair_state(&pair, slot);
-        match slot {
-            Some(slot) => self.candidate_pairs[slot] = pair,
-            None => self.candidate_pairs.push(pair),
+        let index = match slot {
+            Some(slot) => {
+                self.announce_pair(slot, false);
+                self.candidate_pairs[slot] = pair;
+                slot
+            }
+            None => {
+                self.candidate_pairs.push(pair);
+                self.candidate_pairs.len() - 1
+            }
+        };
+        self.announce_pair(index, true);
+    }
+
+    /// Queues `CandidatePairAdded` (`added`) or `CandidatePairRemoved` for the pair at
+    /// `index`. A pair the application removed was announced removed already.
+    pub(crate) fn announce_pair(&mut self, index: usize, added: bool) {
+        let p = self.candidate_pairs[index];
+        if p.removed {
+            return;
         }
+        let (Some(local), Some(remote)) = (
+            self.local_candidates.get(p.local_index),
+            self.remote_candidates.get(p.remote_index),
+        ) else {
+            return;
+        };
+        let (local, remote) = (Box::new(local.clone()), Box::new(remote.clone()));
+        self.event_outs.push_back(TaggedEvent {
+            now: self.clock,
+            event: if added {
+                Event::CandidatePairAdded(local, remote)
+            } else {
+                Event::CandidatePairRemoved(local, remote)
+            },
+        });
     }
 
     /// Section 7.3.1.4: the pair of a request the peer sent is put on the checklist even when
@@ -253,7 +287,9 @@ impl Agent {
             self.is_controlling,
         );
         pair.foundation = self.pair_foundation(local_index, remote_index);
+        self.announce_pair(slot, false);
         self.candidate_pairs[slot] = pair;
+        self.announce_pair(slot, true);
     }
 
     /// The pairs that count against the limit: the checklist, not the valid pairs a response
@@ -385,6 +421,9 @@ impl Agent {
     /// Puts the pair on the triggered-check queue (FIFO, once).
     pub(crate) fn enqueue_triggered(&mut self, pair_index: usize) {
         let p = &mut self.candidate_pairs[pair_index];
+        if p.removed {
+            return;
+        }
         if !p.triggered {
             p.triggered = true;
             self.triggered_queue
@@ -409,6 +448,9 @@ impl Agent {
     /// queue.
     pub(crate) fn trigger_check(&mut self, pair_index: usize) {
         let p = self.candidate_pairs[pair_index];
+        if p.removed {
+            return;
+        }
         if p.state == CandidatePairState::InProgress {
             self.cancel_transactions(p.local_index, p.remote_index);
         }
@@ -714,6 +756,11 @@ impl Agent {
     /// retransmit the Binding requests associated with the connectivity-check transaction,
     /// will not treat the lack of response to be a failure, but will wait the duration of the
     /// transaction timeout for a response."
+    /// Cancels the transactions on a pair the application removed.
+    pub(crate) fn cancel_pair_checks(&mut self, local_index: usize, remote_index: usize) {
+        self.cancel_transactions(local_index, remote_index);
+    }
+
     fn cancel_transactions(&mut self, local_index: usize, remote_index: usize) {
         // How long a transaction lasts without a response (RFC 8489 Section 6.2.1): the `Rc`
         // requests are RTO, 2 RTO, 4 RTO, ... apart and the last one is given `Rm` times the
@@ -910,6 +957,10 @@ impl Agent {
         let Some(checked) = checked else {
             return;
         };
+        // The application removed the pair: its checks stopped (webrtc-extensions 7).
+        if self.candidate_pairs[checked].removed {
+            return;
+        }
 
         // Consent (RFC 7675 Section 5.1): a matching, authenticated success response from the
         // address the request went to.
@@ -1158,7 +1209,9 @@ impl Agent {
         pair.foundation = self.pair_foundation(local_index, remote_index);
         pair.state = CandidatePairState::Succeeded;
         self.candidate_pairs.push(pair);
-        self.candidate_pairs.len() - 1
+        let index = self.candidate_pairs.len() - 1;
+        self.announce_pair(index, true);
+        index
     }
 
     /// An error response to one of our Binding requests, already authenticated.

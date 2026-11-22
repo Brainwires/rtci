@@ -1214,6 +1214,32 @@ impl<'a> InterceptorHandler<'a> {
                     )
                     .ok()
                 });
+        // webrtc-extensions 8: the absolute capture time, audio or video.
+        let capture = header
+            .extension
+            .then(|| {
+                let (extension_id, audio, video) =
+                    self.media_engine
+                        .get_header_extension_id(RTCRtpHeaderExtensionCapability {
+                            uri: rtp::extension::ABS_CAPTURE_TIME_URI.to_owned(),
+                        });
+                ((audio || video) && extension_id != 0)
+                    .then(|| header.get_extension(extension_id as u8))
+                    .flatten()
+            })
+            .flatten()
+            .and_then(|payload| {
+                use shared::marshal::Unmarshal;
+                rtp::extension::abs_capture_time_extension::AbsCaptureTimeExtension::unmarshal(
+                    &mut payload.as_ref(),
+                )
+                .ok()
+            });
+        let clock_rate = self
+            .media_engine
+            .get_codec_by_payload(header.payload_type)
+            .ok()
+            .map(|(codec, _)| codec.rtp_codec.clock_rate);
         let wall_clock = *self
             .ctx
             .wall_clock
@@ -1238,6 +1264,8 @@ impl<'a> InterceptorHandler<'a> {
                 audio_level,
                 csrc_levels.as_ref().map(|ext| ext.levels.as_slice()),
                 vad,
+                capture,
+                clock_rate,
             );
             // W3C webrtc 9.3: data for a muted, not ended track of a receptive transceiver
             // unmutes it.

@@ -9,6 +9,7 @@ impl sansio::Protocol<TaggedBytesMut, (), ()> for Agent {
     type Time = Instant;
 
     fn handle_read(&mut self, msg: TaggedBytesMut) -> Result<()> {
+        self.clock = self.clock.max(msg.now);
         // mDNS arrives on the host's mDNS socket, the one bound to MDNS_PORT that this
         // agent's queries leave from. A source port says nothing: anyone can send from 5353 to
         // an ICE socket, and an answer taken from there could point a `.local` candidate at an
@@ -78,6 +79,7 @@ impl sansio::Protocol<TaggedBytesMut, (), ()> for Agent {
     }
 
     fn handle_timeout(&mut self, now: Self::Time) -> std::result::Result<(), Self::Error> {
+        self.clock = self.clock.max(now);
         if let Some(mdns_conn) = &mut self.mdns {
             let _ = mdns_conn.handle_timeout(now);
         }

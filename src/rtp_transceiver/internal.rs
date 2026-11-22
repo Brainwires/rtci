@@ -9,7 +9,9 @@ use crate::rtp_transceiver::rtp_sender::rtp_codec::{
     CodecMatch, codec_dictionary_match, codec_parameters_fuzzy_search, find_rtx_payload_type,
     is_repair_codec, repair_family, rtcp_feedback_intersection,
 };
-use crate::rtp_transceiver::rtp_sender::{RTCRtpCodecParameters, RtpCodecKind};
+use crate::rtp_transceiver::rtp_sender::{
+    RTCRtpCodecParameters, RTCRtpHeaderExtensionToNegotiate, RtpCodecKind,
+};
 use crate::rtp_transceiver::{
     PayloadType, RTCRemoteBandwidth, RTCRtpTransceiverDirection, RTCRtpTransceiverInit, fmtp,
 };
@@ -65,11 +67,12 @@ pub(crate) struct RTCRtpTransceiverInternal {
     /// that tells the two kinds apart clears it with
     /// `RTCRtpTransceiver::set_associable_with_remote_offer`.
     associable_with_remote_offer: bool,
-    /// The RTP header extensions (by URI) this transceiver's media section may carry
-    /// (webrtc-extensions, `[[HeaderExtensionsToNegotiate]]` without the "stopped" ones).
-    /// `None`, the default, is every extension the media engine negotiates; see
-    /// `RTCRtpTransceiver::set_header_extensions_to_negotiate`.
-    header_extensions_to_negotiate: Option<Vec<String>>,
+    /// webrtc-extensions `[[HeaderExtensionsToNegotiate]]`. `None` until the application or
+    /// an answer sets it: the media engine's extensions for the kind, each in the direction
+    /// it was registered for (`header_extension_control::default_to_negotiate`).
+    header_extensions_to_negotiate: Option<Vec<RTCRtpHeaderExtensionToNegotiate>>,
+    /// webrtc-extensions `[[NegotiatedHeaderExtensions]]`: empty until an answer is applied.
+    negotiated_header_extensions: Vec<RTCRtpHeaderExtensionToNegotiate>,
     /// Reduced-size RTCP (RFC 5506) as the last answer negotiated it for this media section.
     rtcp_reduced_size: bool,
     /// The rids of the simulcast streams this transceiver's offers ask to receive
@@ -132,6 +135,7 @@ impl RTCRtpTransceiverInternal {
             created_by_remote_description: false,
             associable_with_remote_offer: true,
             header_extensions_to_negotiate: None,
+            negotiated_header_extensions: vec![],
             rtcp_reduced_size: false,
             receive_simulcast: vec![],
             remote_bandwidth: RTCRemoteBandwidth::default(),
@@ -179,12 +183,67 @@ impl RTCRtpTransceiverInternal {
         self.associable_with_remote_offer = associable;
     }
 
-    pub(crate) fn header_extensions_to_negotiate(&self) -> Option<&[String]> {
-        self.header_extensions_to_negotiate.as_deref()
+    /// The URIs of `[[HeaderExtensionsToNegotiate]]` that are not "stopped", what the media
+    /// section may carry; `None` while the slot holds the media engine's defaults.
+    pub(crate) fn header_extensions_to_negotiate(&self) -> Option<Vec<String>> {
+        self.header_extensions_to_negotiate.as_ref().map(|list| {
+            list.iter()
+                .filter(|e| e.direction != RTCRtpTransceiverDirection::Stopped)
+                .map(|e| e.uri.clone())
+                .collect()
+        })
     }
 
-    pub(crate) fn set_header_extensions_to_negotiate(&mut self, uris: Option<Vec<String>>) {
-        self.header_extensions_to_negotiate = uris;
+    /// The direction `[[HeaderExtensionsToNegotiate]]` gives `uri`, when the slot was set.
+    pub(crate) fn header_extension_direction(
+        &self,
+        uri: &str,
+    ) -> Option<RTCRtpTransceiverDirection> {
+        self.header_extensions_to_negotiate
+            .as_ref()?
+            .iter()
+            .find(|e| e.uri == uri)
+            .map(|e| e.direction)
+    }
+
+    /// `[[HeaderExtensionsToNegotiate]]`, the media engine's defaults while it is unset.
+    pub(crate) fn header_extensions_to_negotiate_list(
+        &self,
+        media_engine: &MediaEngine,
+    ) -> Vec<RTCRtpHeaderExtensionToNegotiate> {
+        self.header_extensions_to_negotiate
+            .clone()
+            .unwrap_or_else(|| {
+                crate::rtp_transceiver::header_extension_control::default_to_negotiate(
+                    media_engine,
+                    self.kind(),
+                )
+            })
+    }
+
+    pub(crate) fn has_header_extensions_to_negotiate(&self) -> bool {
+        self.header_extensions_to_negotiate.is_some()
+    }
+
+    pub(crate) fn set_header_extensions_to_negotiate(
+        &mut self,
+        list: Vec<RTCRtpHeaderExtensionToNegotiate>,
+    ) {
+        self.header_extensions_to_negotiate = Some(list);
+    }
+
+    pub(crate) fn negotiated_header_extensions(&self) -> &[RTCRtpHeaderExtensionToNegotiate] {
+        &self.negotiated_header_extensions
+    }
+
+    /// An answer was applied: `negotiated` is `[[NegotiatedHeaderExtensions]]` and the new
+    /// `[[HeaderExtensionsToNegotiate]]` (webrtc-extensions 4.1).
+    pub(crate) fn set_negotiated_header_extensions(
+        &mut self,
+        negotiated: Vec<RTCRtpHeaderExtensionToNegotiate>,
+    ) {
+        self.header_extensions_to_negotiate = Some(negotiated.clone());
+        self.negotiated_header_extensions = negotiated;
     }
 
     /// Returns the media stream identification tag (mid) for this transceiver.
