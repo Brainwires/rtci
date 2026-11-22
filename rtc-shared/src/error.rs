@@ -1966,6 +1966,12 @@ pub enum Error {
     #[error("Invalid modification error")]
     InvalidModificationError,
 
+    /// Invalid access error: an argument names something that is not the object's (W3C
+    /// `InvalidAccessError`), such as a statistics selector that is not a sender or receiver
+    /// of the peer connection.
+    #[error("Invalid access error")]
+    InvalidAccessError,
+
     /// Range error.
     #[error("Range error {0}")]
     RangeError(String),
