@@ -14,8 +14,8 @@
 //! The certificates of a peer connection are fixed, so the peer that changes them is played by
 //! a second peer connection that takes the first one's place: same address, same ICE
 //! credentials (so that the exchange is not an ICE restart), and its own certificate, `tls-id`
-//! or `a=setup`, as the test needs. It answers an offer of the peer that stays, so the ICE
-//! roles stay as they were too.
+//! or `a=setup`, as the test needs. B offers first and its successor offers again, so the ICE
+//! roles stay as they were too (B's side controlling): the peer that stays restarts nothing.
 
 mod dtls_sdp_common;
 
@@ -42,18 +42,15 @@ const B_UFRAG: &str = "bufragbufrag";
 const B_PWD: &str = "bpasswordbpasswordbpassw";
 
 /// A peer at `B` with the given certificate and B's ICE credentials.
-fn peer_b(certificate: &RTCCertificate, answering_role: Option<RTCDtlsRole>) -> Result<Peer> {
-    let mut setting_engine =
-        SettingEngineBuilder::new().with_ice_credentials(B_UFRAG.to_owned(), B_PWD.to_owned());
-    if let Some(role) = answering_role {
-        setting_engine = setting_engine.with_answering_dtls_role(role);
-    }
+fn peer_b(certificate: &RTCCertificate) -> Result<Peer> {
     Peer::with_configuration(
         B,
         RTCConfigurationBuilder::new()
             .with_certificates(vec![certificate.clone()])
             .build(),
-        setting_engine.build(),
+        SettingEngineBuilder::new()
+            .with_ice_credentials(B_UFRAG.to_owned(), B_PWD.to_owned())
+            .build(),
     )
 }
 
@@ -61,12 +58,11 @@ fn without_tls_id(sdp: &str) -> String {
     replace_lines(sdp, "a=tls-id:", None)
 }
 
-/// A (peer 0) and B (peer 1) connected, A having offered: A is the DTLS server and B the
-/// client, unless B is configured to answer as the server. `legacy` removes `a=tls-id` from
-/// everything B sends, as a peer that predates RFC 8842 does.
+/// A (peer 0) and B (peer 1) connected, B having offered: A answered, as the DTLS client
+/// unless it is configured to answer as the server. `legacy` removes `a=tls-id` from what B
+/// sends, as a peer that predates RFC 8842 does. Returns A's answer too.
 fn connected(
     a_answering_role: Option<RTCDtlsRole>,
-    b_answering_role: Option<RTCDtlsRole>,
     legacy: bool,
 ) -> Result<(World, RTCCertificate, String)> {
     let mut setting_engine = SettingEngineBuilder::new();
@@ -76,13 +72,13 @@ fn connected(
     let b_certificate = certificate()?;
     let mut world = World::new(
         Peer::new(A, setting_engine.build())?,
-        peer_b(&b_certificate, b_answering_role)?,
+        peer_b(&b_certificate)?,
     );
-    world.peers[0].pc.create_data_channel("data", None)?;
-    let (a_offer, _) = if legacy {
-        world.exchange_with(0, keep, without_tls_id)?
+    world.peers[1].pc.create_data_channel("data", None)?;
+    let (_, a_answer) = if legacy {
+        world.exchange_with(1, without_tls_id, keep)?
     } else {
-        world.exchange(0)?
+        world.exchange(1)?
     };
     world.trickle()?;
     world.run("the first connection", |peers| {
@@ -92,32 +88,29 @@ fn connected(
     let now = world.now;
     assert_eq!(
         world.peers[0].dtls_role(now),
-        if b_answering_role == Some(RTCDtlsRole::Server) {
-            RTCDtlsRole::Client
-        } else {
-            RTCDtlsRole::Server
-        }
+        a_answering_role.unwrap_or(RTCDtlsRole::Client)
     );
     assert_eq!(
         world.peers[0].remote_certificate().as_deref(),
         Some(b_certificate.dtls_certificate.certificate[0].as_ref())
     );
-    Ok((world, b_certificate, a_offer))
+    Ok((world, b_certificate, a_answer))
 }
 
-/// Replaces B by `successor` (a new peer connection at B's address) and has it answer a new
-/// offer of A. Returns the successor's answer as it wrote it.
-fn successor_answers(
+/// Replaces B by `successor` (a new peer connection at B's address) and has it offer to A.
+/// Returns A's answer.
+fn successor_offers(
     world: &mut World,
     successor: Peer,
-    munge_answer: impl Fn(&str) -> String,
+    munge_offer: impl Fn(&str) -> String,
 ) -> Result<String> {
     world.peers[1] = successor;
-    let (_, answer) = world.exchange_with(0, keep, munge_answer)?;
+    world.peers[1].pc.create_data_channel("data", None)?;
+    let (offer, answer) = world.exchange_with(1, munge_offer, keep)?;
     assert_eq!(
-        attribute_values(&answer, "ice-ufrag"),
+        attribute_values(&offer, "ice-ufrag"),
         [B_UFRAG],
-        "the successor keeps B's ICE credentials: the exchange is no ICE restart"
+        "the successor's offer keeps B's ICE credentials: it is no ICE restart"
     );
     let candidate = world.peers[0].candidate()?;
     world.peers[1].pc.add_remote_candidate(candidate)?;
@@ -175,71 +168,89 @@ fn assert_new_association(
 }
 
 /// A changed fingerprint set (another certificate) on the same ICE session: A establishes a
-/// new association and checks the new certificate against the new fingerprint. The successor
-/// answers `active` as B did, so the roles stay: A, the DTLS server, accepts its ClientHello;
-/// and with the roles the other way round (B and its successor answer `passive`) it is A,
-/// whose ICE transport selects no new pair, that starts the handshake.
+/// new association and checks the new certificate against the new fingerprint. The offer is
+/// `actpass`, so A keeps its role: as the DTLS client it is A, whose ICE transport selects no
+/// new pair, that starts the handshake; as the server it accepts the successor's ClientHello.
 #[test]
 fn a_changed_fingerprint_without_an_ice_restart_establishes_a_new_association() -> Result<()> {
-    for (b_answering_role, a_role) in [
-        (None, RTCDtlsRole::Server),
-        (Some(RTCDtlsRole::Server), RTCDtlsRole::Client),
-    ] {
+    for a_answering_role in [None, Some(RTCDtlsRole::Server)] {
+        let a_role = a_answering_role.unwrap_or(RTCDtlsRole::Client);
         let what = format!("A is the DTLS {a_role}");
-        let (mut world, b_certificate, _) = connected(None, b_answering_role, false)?;
+        let (mut world, b_certificate, first_answer) = connected(a_answering_role, false)?;
         let new_certificate = certificate()?;
         assert_ne!(new_certificate, b_certificate);
-        let successor = peer_b(&new_certificate, b_answering_role)?;
-        successor_answers(&mut world, successor, keep)?;
+        let successor = peer_b(&new_certificate)?;
+        let answer = successor_offers(&mut world, successor, keep)?;
         assert_new_association(&mut world, &what, a_role, &new_certificate)?;
+        // RFC 8842 section 5.3: the answerer that establishes a new association gives it a new
+        // `tls-id`, and its answer does not change the roles.
+        let (first, second) = (
+            attribute_values(&first_answer, "tls-id"),
+            attribute_values(&answer, "tls-id"),
+        );
+        assert_eq!((first.len(), second.len()), (1, 1), "{what}");
+        assert_ne!(first, second, "{what}");
+        assert_eq!(
+            attribute_values(&answer, "setup"),
+            attribute_values(&first_answer, "setup"),
+            "{what}"
+        );
     }
     Ok(())
 }
 
-/// A changed `tls-id` alone (same certificate, same roles, same ICE session) asks for a new
-/// association (RFC 8842 section 3.1, third case).
+/// A changed `tls-id` alone (same certificate, same `actpass`, same ICE session) asks for a
+/// new association (RFC 8842 section 3.1, third case).
 #[test]
 fn a_changed_tls_id_establishes_a_new_association() -> Result<()> {
-    let (mut world, b_certificate, _) = connected(None, None, false)?;
-    let successor = peer_b(&b_certificate, None)?;
-    let answer = successor_answers(&mut world, successor, keep)?;
-    assert_eq!(attribute_values(&answer, "tls-id").len(), 1);
+    let (mut world, b_certificate, _) = connected(None, false)?;
+    let successor = peer_b(&b_certificate)?;
+    successor_offers(&mut world, successor, keep)?;
     assert_new_association(
         &mut world,
         "a new tls-id",
-        RTCDtlsRole::Server,
-        &b_certificate,
-    )?;
-    Ok(())
-}
-
-/// Without `tls-id` (a peer that predates RFC 8842), a change of the setup roles asks for a
-/// new association (RFC 8842 section 4): B was the DTLS client; its successor answers
-/// `passive`, which takes the role A had. A becomes the client of a new association.
-#[test]
-fn a_changed_setup_role_without_tls_id_establishes_a_new_association() -> Result<()> {
-    let (mut world, b_certificate, _) = connected(None, None, true)?;
-    let successor = peer_b(&b_certificate, Some(RTCDtlsRole::Server))?;
-    let answer = successor_answers(&mut world, successor, without_tls_id)?;
-    assert_eq!(attribute_values(&answer, "setup"), ["passive"]);
-    assert_new_association(
-        &mut world,
-        "a changed role",
         RTCDtlsRole::Client,
         &b_certificate,
     )?;
     Ok(())
 }
 
+/// Without `tls-id` (a peer that predates RFC 8842), a change of the setup roles asks for a
+/// new association (RFC 8842 section 4): B was the DTLS server; its successor's offer says
+/// `active`, which takes the role A had. A becomes the server of a new association.
+#[test]
+fn a_changed_setup_role_without_tls_id_establishes_a_new_association() -> Result<()> {
+    let (mut world, b_certificate, _) = connected(None, true)?;
+    let successor = peer_b(&b_certificate)?;
+    let answer = successor_offers(&mut world, successor, |sdp| {
+        without_tls_id(&replace_lines(sdp, "a=setup:", Some("a=setup:active")))
+    })?;
+    // The successor wrote `actpass` and is told `passive` by A's answer: it is the client, as
+    // the offer A saw said.
+    assert_eq!(attribute_values(&answer, "setup"), ["passive"]);
+    assert_new_association(
+        &mut world,
+        "a changed role",
+        RTCDtlsRole::Server,
+        &b_certificate,
+    )?;
+    Ok(())
+}
+
 /// The counterpart: a later description that changes none of the three (same fingerprints, no
-/// `tls-id`, the same role) keeps the association (RFC 8842 section 5.4). A, the DTLS client
-/// here, neither resets its DTLS transport nor starts a handshake.
+/// `tls-id`, `actpass`) keeps the association (RFC 8842 section 5.4). A, the DTLS client,
+/// neither resets its DTLS transport nor starts a handshake, and its answer repeats its role.
 #[test]
 fn an_unchanged_description_keeps_the_association() -> Result<()> {
-    let (mut world, b_certificate, _) = connected(None, Some(RTCDtlsRole::Server), true)?;
-    let successor = peer_b(&b_certificate, Some(RTCDtlsRole::Server))?;
+    let (mut world, b_certificate, _) = connected(None, true)?;
+    let successor = peer_b(&b_certificate)?;
     let written = world.peers[0].written.len();
-    successor_answers(&mut world, successor, without_tls_id)?;
+    let answer = successor_offers(&mut world, successor, without_tls_id)?;
+    assert_eq!(
+        attribute_values(&answer, "setup"),
+        ["active"],
+        "A, the DTLS client, keeps its role"
+    );
     let now = world.now;
     assert_eq!(
         world.peers[0].dtls_state(now),
@@ -260,7 +271,6 @@ fn an_unchanged_description_keeps_the_association() -> Result<()> {
         world.peers[0].dtls_state(now),
         RTCDtlsTransportState::Connected
     );
-    assert_eq!(world.peers[0].dtls_role(now), RTCDtlsRole::Client);
     assert_eq!(
         world.peers[0].remote_certificate().as_deref(),
         Some(b_certificate.dtls_certificate.certificate[0].as_ref())
