@@ -31,6 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     the receiver's track (`RTCTrackEvent::OnClose`). New `is_stopped()`.
   - `add_transceiver_from_kind(kind, None)` is sendrecv (W3C default) with a sender without a
     track; `RTCRtpTransceiverInit::recvonly()` and `with_direction()` give the old behaviour.
+    Only the `Unspecified` kind is refused: `Application` (the fork's RTP in `m=application`,
+    SMPTE ST 336) stays accepted, an extension beyond the W3C kinds.
     `add_transceiver_from_track` takes any direction. `sendEncodings` are validated (rid
     syntax: new `Error::TypeError(String)`; `RangeError`s) and normalised (audio members
     removed, at most `MAX_SEND_ENCODINGS` = 16, `scale_resolution_down_by` filled, a lone rid

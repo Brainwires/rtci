@@ -3162,8 +3162,9 @@ impl RTCPeerConnection {
     /// # Errors
     ///
     /// - [`Error::ErrConnectionClosed`] when the peer connection is closed
-    /// - [`Error::ErrPeerConnAddTransceiverFromKindSupport`] when the kind is neither audio
-    ///   nor video, or the direction is `Unspecified` or `Stopped` (W3C `TypeError`)
+    /// - [`Error::ErrPeerConnAddTransceiverFromKindSupport`] when the kind is `Unspecified`,
+    ///   or the direction is `Unspecified` or `Stopped` (W3C `TypeError`; `Application` is
+    ///   the fork's RTP-in-`m=application` extension and is accepted)
     /// - [`Error::TypeError`] for a rid that is not RFC 8851 section 10 syntax,
     ///   [`Error::ErrRTPSenderRidNil`] when some but not all encodings have a rid and
     ///   [`Error::ErrRTPSenderRIDCollision`] for a repeated rid (all W3C `TypeError`)
@@ -3190,7 +3191,10 @@ impl RTCPeerConnection {
         if self.is_closed() {
             return Err(Error::ErrConnectionClosed);
         }
-        if !matches!(kind, RtpCodecKind::Audio | RtpCodecKind::Video) {
+        // W3C: a kind other than audio or video is a TypeError. The fork also carries RTP in
+        // `m=application` sections (SMPTE ST 336 / KLV, `RtpCodecKind::Application`), an
+        // engine extension the W3C API has no kind for; only `Unspecified` is refused.
+        if kind == RtpCodecKind::Unspecified {
             return Err(Error::ErrPeerConnAddTransceiverFromKindSupport);
         }
 
