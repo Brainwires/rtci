@@ -133,6 +133,7 @@ pub struct ConfigBuilder {
     connection_id: Option<usize>,
     connection_id_migration: bool,
     invalid_record_limit: Option<u64>,
+    post_quantum_key_share: bool,
     psk: Option<PskCallback>,
     psk_identity_hint: Option<Vec<u8>>,
     insecure_skip_verify: bool,
@@ -170,6 +171,7 @@ impl Default for ConfigBuilder {
             connection_id: Some(0),
             connection_id_migration: false,
             invalid_record_limit: None,
+            post_quantum_key_share: true,
             psk: None,
             psk_identity_hint: None,
             insecure_skip_verify: false,
@@ -376,6 +378,16 @@ impl ConfigBuilder {
     /// selected pair anyway.
     pub fn with_connection_id_migration(mut self, migration: bool) -> Self {
         self.connection_id_migration = migration;
+        self
+    }
+
+    /// Whether DTLS 1.3 offers and accepts the hybrid post-quantum group X25519MLKEM768
+    /// (draft-ietf-tls-ecdhe-mlkem, code point 0x11EC), preferred over the curves. On by
+    /// default; it takes effect only with a crypto provider that has ML-KEM (the built-in
+    /// aws-lc-rs one; ring has none). Its key share is 1216 bytes, so a ClientHello that
+    /// carries it does not fit one datagram and is sent as two fragments.
+    pub fn with_post_quantum_key_share(mut self, post_quantum_key_share: bool) -> Self {
+        self.post_quantum_key_share = post_quantum_key_share;
         self
     }
 
@@ -745,6 +757,20 @@ impl ConfigBuilder {
             }
             max_version = DtlsVersion::Dtls1_2;
         }
+        // The groups of DTLS 1.3: the hybrid with ML-KEM first where the provider has it
+        // (and the configuration does not switch it off), then the curves.
+        let mut local_tls13_groups = vec![];
+        if self.post_quantum_key_share
+            && crypto_provider
+                .crypto()
+                .supports(crypto::CryptoAlgorithm::KeyExchange(
+                    crypto::KeyExchangeAlgorithm::X25519MlKem768,
+                ))
+        {
+            local_tls13_groups.push(NamedCurve::X25519MlKem768);
+        }
+        local_tls13_groups.extend_from_slice(&local_named_curves);
+
         // A list with TLS 1.3 suites only leaves nothing to negotiate DTLS 1.2 with.
         let min_version = if max_version == DtlsVersion::Dtls1_3
             && !self.cipher_suites.is_empty()
@@ -883,6 +909,7 @@ impl ConfigBuilder {
             min_version,
             max_version,
             local_tls13_cipher_suites,
+            local_tls13_groups,
             // The extension belongs to both versions, and only DTLS 1.3 has its records
             // here. Where a hello is for DTLS 1.3 alone it carries the extension even when
             // no connection id was asked for (RFC 9147 section 5.1: so that the peer can
@@ -969,6 +996,9 @@ pub struct HandshakeConfig {
     pub(crate) max_version: DtlsVersion,
     /// The TLS 1.3 cipher suites, for DTLS 1.3. Empty when DTLS 1.3 is not negotiated.
     pub(crate) local_tls13_cipher_suites: Vec<CipherSuiteId>,
+    /// The key exchange groups of DTLS 1.3, most preferred first: `local_named_curves`,
+    /// with X25519MLKEM768 in front where the provider has it.
+    pub(crate) local_tls13_groups: Vec<NamedCurve>,
     /// The length of the connection ids this side asks its peer to send, if it uses the
     /// connection_id extension at all.
     pub(crate) connection_id: Option<usize>,
@@ -1043,6 +1073,7 @@ impl HandshakeConfig {
             min_version: DtlsVersion::Dtls1_2,
             max_version: DtlsVersion::Dtls1_2,
             local_tls13_cipher_suites: vec![],
+            local_tls13_groups: vec![],
             connection_id: None,
             connection_id_migration: false,
             invalid_record_limit: None,

@@ -34,6 +34,10 @@ pub(crate) fn client_builder() -> ConfigBuilder {
     ConfigBuilder::default()
         .with_crypto_provider(provider())
         .with_insecure_skip_verify(true)
+        // The hybrid key share makes a ClientHello two datagrams long, with the provider
+        // that has it; the tests that look at flights are written for one. It has its own
+        // tests below.
+        .with_post_quantum_key_share(false)
 }
 
 pub(crate) fn server_builder() -> ConfigBuilder {
@@ -567,8 +571,8 @@ fn a_hello_retry_request_asks_for_another_key_share() -> Result<()> {
             .with_cookie_exchange(cookie_exchange)
             .build(false, None)?;
         // The client sends shares for its first two groups; the server has the third only.
-        assert_eq!(client.local_named_curves.len(), 3);
-        server.local_named_curves = vec![NamedCurve::P384];
+        assert_eq!(client.local_tls13_groups.len(), 3);
+        server.local_tls13_groups = vec![NamedCurve::P384];
         let mut pair = Pair::with(client, Arc::new(server))?;
         let (_, hello_retry_request) = pair.round();
         assert_eq!(
@@ -974,5 +978,123 @@ fn the_server_sends_a_chain_signed_with_algorithms_the_client_lists() -> Result<
     // With nothing better to offer the server sends what it has, and the client decides.
     let pair = Pair::new(ecdsa_only(), server(vec![issued]))?.complete();
     assert_eq!(sent(&pair), vec![issued_der]);
+    Ok(())
+}
+
+/// X25519MLKEM768 (draft-ietf-tls-ecdhe-mlkem, 0x11EC) with a provider that has ML-KEM: it is
+/// offered first and negotiated, its 1216-byte share makes the ClientHello two fragments,
+/// and a peer without it still gets a handshake.
+#[cfg(feature = "crypto-aws-lc-rs")]
+#[test]
+fn the_hybrid_post_quantum_group_is_negotiated_where_the_provider_has_it() -> Result<()> {
+    use crate::curve::named_curve::NamedCurve;
+
+    let aws: Arc<dyn RTCCryptoProvider> = Arc::new(crypto::providers::AwsLcRsProvider::new());
+    let client = |provider: &Arc<dyn RTCCryptoProvider>| {
+        ConfigBuilder::default()
+            .with_crypto_provider(provider.clone())
+            .with_insecure_skip_verify(true)
+    };
+    let server = |provider: &Arc<dyn RTCCryptoProvider>| {
+        ConfigBuilder::default()
+            .with_crypto_provider(provider.clone())
+            .with_insecure_skip_verify(true)
+            .with_certificates(vec![
+                Certificate::generate_self_signed(vec!["localhost".to_owned()], provider.crypto())
+                    .expect("a certificate"),
+            ])
+    };
+    let config = client(&aws).build(true, None)?;
+    assert_eq!(config.local_tls13_groups[0], NamedCurve::X25519MlKem768);
+    assert_eq!(config.local_tls13_groups.len(), 4);
+    // Not a curve of DTLS 1.2.
+    assert!(
+        !config
+            .local_named_curves
+            .contains(&NamedCurve::X25519MlKem768)
+    );
+    let off = client(&aws)
+        .with_post_quantum_key_share(false)
+        .build(true, None)?;
+    assert!(!off.local_tls13_groups.contains(&NamedCurve::X25519MlKem768));
+
+    for cookie_exchange in [true, false] {
+        let mut pair = Pair::new(
+            client(&aws),
+            server(&aws).with_cookie_exchange(cookie_exchange),
+        )?;
+        let client_hello = take(&mut pair.client);
+        // Two fragments of one ClientHello (message_seq 0), each within the MTU.
+        assert_eq!(client_hello.len(), 2, "cookies: {cookie_exchange}");
+        for datagram in &client_hello {
+            assert!(datagram.len() <= 1200);
+            assert_eq!((datagram[13], &datagram[17..19]), (1, &[0u8, 0][..]));
+        }
+        assert!(client_hello[0].len() + client_hello[1].len() > 1216 + 65);
+        pair.deliver_to_server(client_hello);
+        let mut pair = pair.complete();
+        assert_eq!(pair.versions().0, Some(DtlsVersion::Dtls1_3));
+        // The ServerHello's key share was the hybrid's: an ML-KEM ciphertext and an X25519
+        // key. The secret both ends derived from it carries data.
+        assert_eq!(pair.client_sends(b"hybrid"), vec![b"hybrid".to_vec()]);
+        assert_eq!(pair.server_sends(b"back"), vec![b"back".to_vec()]);
+    }
+
+    // A server that does not have the group takes the client's other share (P-256), with
+    // no HelloRetryRequest for it.
+    let mut pair = Pair::new(
+        client(&aws),
+        server(&aws)
+            .with_cookie_exchange(false)
+            .with_post_quantum_key_share(false),
+    )?;
+    let client_hello = take(&mut pair.client);
+    pair.deliver_to_server(client_hello);
+    let flight = take(&mut pair.server);
+    assert_ne!(
+        &flight[0][27..59],
+        &super::messages::HELLO_RETRY_REQUEST_RANDOM
+    );
+    pair.deliver_to_client(flight);
+    let mut pair = pair.complete();
+    assert_eq!(pair.client_sends(b"p256"), vec![b"p256".to_vec()]);
+
+    // A client that has only curves and a server that prefers the hybrid.
+    let mut pair = Pair::new(
+        client(&aws).with_post_quantum_key_share(false),
+        server(&aws),
+    )?
+    .complete();
+    assert_eq!(pair.client_sends(b"curve"), vec![b"curve".to_vec()]);
+
+    // DTLS 1.2 with the same ClientHello: the group is not one of its curves.
+    let mut pair = Pair::new(
+        client(&aws),
+        server(&aws).with_protocol_versions(DtlsVersion::Dtls1_2, DtlsVersion::Dtls1_2),
+    )?
+    .complete();
+    assert_eq!(pair.versions().0, Some(DtlsVersion::Dtls1_2));
+    assert_eq!(pair.client_sends(b"1.2"), vec![b"1.2".to_vec()]);
+    Ok(())
+}
+
+/// The provider without ML-KEM does not offer the group, whatever the setting.
+#[cfg(feature = "crypto-ring")]
+#[test]
+fn the_hybrid_group_is_not_offered_without_a_provider_for_it() -> Result<()> {
+    use crate::curve::named_curve::NamedCurve;
+
+    let ring: Arc<dyn RTCCryptoProvider> = Arc::new(crypto::providers::RingProvider::new());
+    let config = ConfigBuilder::default()
+        .with_crypto_provider(ring)
+        .with_insecure_skip_verify(true)
+        .with_post_quantum_key_share(true)
+        .build(true, None)?;
+    assert!(
+        !config
+            .local_tls13_groups
+            .contains(&NamedCurve::X25519MlKem768)
+    );
+    assert_eq!(config.local_tls13_groups, config.local_named_curves);
     Ok(())
 }

@@ -175,7 +175,13 @@ pub(crate) fn client_hello_extensions(
     if cfg.local_psk_callback.is_none() {
         extensions.extend_from_slice(&[
             Extension::SupportedEllipticCurves(ExtensionSupportedEllipticCurves {
-                elliptic_curves: cfg.local_named_curves.clone(),
+                // With DTLS 1.3 offered the list has its groups too (the hybrid one); a
+                // DTLS 1.2 server takes the first curve of it that it knows.
+                elliptic_curves: if tls13_offer.is_some() {
+                    cfg.local_tls13_groups.clone()
+                } else {
+                    cfg.local_named_curves.clone()
+                },
             }),
             Extension::SupportedPointFormats(ExtensionSupportedPointFormats {
                 point_formats: vec![ELLIPTIC_CURVE_POINT_FORMAT_UNCOMPRESSED],

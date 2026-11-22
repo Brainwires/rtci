@@ -396,7 +396,7 @@ struct RingKeyExchange {
 
 impl RingKeyExchange {
     fn start(algorithm: KeyExchangeAlgorithm) -> Result<Box<dyn ActiveKeyExchange>, CryptoError> {
-        let backend_algorithm = agreement_algorithm(algorithm);
+        let backend_algorithm = agreement_algorithm(algorithm)?;
         let private_key =
             agreement::EphemeralPrivateKey::generate(backend_algorithm, &SystemRandom::new())
                 .map_err(|_| CryptoError::RandomnessFailed)?;
@@ -574,11 +574,17 @@ impl SigningKey for RingSigningKey {
     }
 }
 
-fn agreement_algorithm(algorithm: KeyExchangeAlgorithm) -> &'static agreement::Algorithm {
+fn agreement_algorithm(
+    algorithm: KeyExchangeAlgorithm,
+) -> Result<&'static agreement::Algorithm, CryptoError> {
     match algorithm {
-        KeyExchangeAlgorithm::P256 => &agreement::ECDH_P256,
-        KeyExchangeAlgorithm::P384 => &agreement::ECDH_P384,
-        KeyExchangeAlgorithm::X25519 => &agreement::X25519,
+        KeyExchangeAlgorithm::P256 => Ok(&agreement::ECDH_P256),
+        KeyExchangeAlgorithm::P384 => Ok(&agreement::ECDH_P384),
+        KeyExchangeAlgorithm::X25519 => Ok(&agreement::X25519),
+        // ring has no ML-KEM.
+        KeyExchangeAlgorithm::X25519MlKem768 => Err(CryptoError::UnsupportedAlgorithm(
+            CryptoAlgorithm::KeyExchange(algorithm),
+        )),
     }
 }
 
