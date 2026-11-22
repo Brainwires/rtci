@@ -1015,6 +1015,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **dtls**: DTLS 1.3 certificates (RFC 8446 sections 4.2.5, 4.4.2.2 to 4.4.2.4). A server no
+  longer sends a certificate whose KeyUsage forbids signing (handshake_failure when it has no
+  other); a client answers a CertificateRequest's `oid_filters` (KeyUsage, ExtendedKeyUsage;
+  they were ignored) and sends no certificate whose chain is signed with an algorithm the
+  request lacks, a self-signed one excepted; a certificate signed with MD5 is a bad_certificate
+  in the handshake and in post-handshake authentication, also under fingerprint authentication.
+- **dtls**: a DTLS 1.3 client refuses a use_srtp answer that carries an MKI (illegal_parameter,
+  RFC 5764 section 4.1.3, RFC 8827 section 6.5), as the DTLS 1.2 client already did.
+- **dtls**: a DTLS 1.3 association at the last epoch, 2^48-1, is closed with close_notify when
+  its keys reach their limit, where the epoch would otherwise have to wrap (RFC 9147 sections
+  4.2.1 and 6.1); writes used to fail at the limit with the association left open.
 - **dtls**: the server verifies the client's Finished (RFC 5246 section 7.4.9). `Flight4` only
   checked that a Finished message had arrived, so nothing confirmed to the server that the client
   had seen the same handshake: a ClientHello altered on the way (cipher suites, SRTP profiles,

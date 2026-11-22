@@ -386,7 +386,7 @@ pub(crate) struct Conn13 {
     pub(crate) client_hello: Vec<u8>,
     pub(crate) hello_retry_seen: bool,
     pub(crate) offered_extensions: Vec<u16>,
-    pub(crate) certificate_requested: Option<Vec<u16>>,
+    pub(crate) certificate_requested: Option<(Vec<u16>, Vec<super::certificate_checks::OidFilter>)>,
     pub(crate) peer_signature_scheme: Option<SignatureHashAlgorithm>,
     /// The server's: the secret of the cookies of a cookie exchange it runs itself, and the
     /// cookie a caller has already verified for it.
@@ -732,6 +732,54 @@ impl Conn13 {
         self.pending_records.pop()
     }
 
+    /// A protected record whose content is longer than RFC 8446 section 5.1 allows, under
+    /// this side's current keys and not queued.
+    #[cfg(test)]
+    pub(crate) fn seal_oversized_for_test(&mut self, content_type: u8, content: &[u8]) -> Vec<u8> {
+        let epoch = self.send_epoch();
+        let connection_id_len = self.remote_connection_id.len();
+        assert_eq!(
+            connection_id_len, 0,
+            "written for associations without connection ids"
+        );
+        let write = self
+            .write
+            .iter_mut()
+            .find(|write| write.epoch == epoch)
+            .expect("keys to write with");
+        let number = RecordNumber {
+            epoch,
+            sequence: write.next_sequence,
+        };
+        write.next_sequence += 1;
+        write
+            .keys
+            .seal_oversized(number, content_type, content)
+            .expect("the record is sealed")
+    }
+
+    /// The message_seq of the next handshake message this side expects.
+    #[cfg(test)]
+    pub(crate) fn next_receive_seq_for_test(&self) -> u16 {
+        self.next_receive_seq
+    }
+
+    /// The records an ACK of this side's would list now (RFC 9147 section 7).
+    #[cfg(test)]
+    pub(crate) fn acknowledgeable_records(&self) -> &[RecordNumber] {
+        &self.received_records
+    }
+
+    /// Moves this side's current sending epoch to `epoch` (same keys): for the tests of
+    /// what happens at the last epoch, 2^48-1, which no test can reach by key updates.
+    #[cfg(test)]
+    pub(crate) fn set_send_epoch_for_test(&mut self, epoch: u64) {
+        let current = self.send_epoch();
+        if let Some(write) = self.write.iter_mut().find(|write| write.epoch == current) {
+            write.epoch = epoch;
+        }
+    }
+
     /// Packs the queued records into datagrams no larger than the MTU, in order.
     fn flush(&mut self) {
         let mtu = self.cfg.maximum_transmission_unit;
@@ -797,6 +845,13 @@ impl Conn13 {
             .find(|write| write.epoch == epoch)
             .map_or(0, |write| write.next_sequence);
         if used >= limit - limit / 8 && !self.key_update_outstanding() {
+            if epoch >= MAX_SEND_EPOCH {
+                // RFC 9147 sections 4.2.1 and 6.1: the epoch would have to wrap. The
+                // association ends; a new one is the way on.
+                warn!("dtls 1.3: the last epoch is used up; closing the association");
+                self.close();
+                return;
+            }
             let _ = self.send_key_update(false);
         }
     }
@@ -1874,7 +1929,7 @@ impl Conn13 {
         self.post_handshake.len()
     }
 
-    fn key_update_outstanding(&self) -> bool {
+    pub(crate) fn key_update_outstanding(&self) -> bool {
         self.post_handshake
             .iter()
             .any(|flight| flight.kind == FlightKind::KeyUpdate)
