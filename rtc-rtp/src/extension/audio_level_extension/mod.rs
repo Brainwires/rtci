@@ -46,6 +46,35 @@ pub struct AudioLevelExtension {
     pub voice: bool,
 }
 
+/// The level of digital silence, which a muted source sends (RFC 6464 section 3).
+pub const AUDIO_LEVEL_SILENCE: u8 = 127;
+
+/// Reads the `vad` extension attribute of an `a=extmap` line for this extension (RFC 6464
+/// section 4): `vad=on` or `vad=off`, and `vad=on` when there is none. The answer says whether
+/// the V bit is in use.
+///
+/// # Errors
+///
+/// Fails for an attribute that is neither.
+pub fn parse_vad_attribute(extension_attributes: Option<&str>) -> Result<bool> {
+    match extension_attributes.map(str::trim) {
+        None | Some("") | Some("vad=on") => Ok(true),
+        Some("vad=off") => Ok(false),
+        Some(other) => Err(Error::Other(format!(
+            "ssrc-audio-level: unknown extension attribute {other:?}"
+        ))),
+    }
+}
+
+impl AudioLevelExtension {
+    /// The voice activity flag, for a stream negotiated with this `vad` (see
+    /// [`parse_vad_attribute`]): `None` with `vad=off`, where the V bit means nothing and a
+    /// receiver ignores it (RFC 6464 sections 3 and 4).
+    pub fn voice_activity(&self, vad: bool) -> Option<bool> {
+        vad.then_some(self.voice)
+    }
+}
+
 impl Unmarshal for AudioLevelExtension {
     /// Unmarshal parses the passed byte slice and stores the result in the members
     fn unmarshal<B>(raw_packet: &mut B) -> Result<Self>

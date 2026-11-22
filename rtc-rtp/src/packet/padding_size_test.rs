@@ -44,3 +44,22 @@ fn without_a_padding_size_marshal_pads_to_32_bits() -> Result<()> {
     assert_eq!(padded(&[0, 0, 3]), packet.marshal()?.freeze());
     Ok(())
 }
+
+#[test]
+fn a_padding_count_larger_than_what_follows_the_header_is_refused() {
+    // RFC 3550 5.1: the count covers padding octets at the end of the payload, itself
+    // included, so it cannot exceed what follows the header.
+    for padding in [&[3u8][..], &[0, 0, 0, 9], &[0xFF]] {
+        assert!(
+            Packet::unmarshal(&mut padded(padding)).is_err(),
+            "{padding:?}"
+        );
+    }
+    // The payload byte and the padding: 2 is the whole of it.
+    let packet = Packet::unmarshal(&mut padded(&[2])).unwrap();
+    assert!(packet.payload.is_empty());
+
+    // P set and nothing after the header.
+    let bare = Bytes::from_static(&[0xA0, 0x60, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3]);
+    assert!(Packet::unmarshal(&mut bare.clone()).is_err());
+}
