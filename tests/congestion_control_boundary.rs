@@ -77,21 +77,29 @@ fn an_estimate_reaches_the_end_of_the_chain_as_a_carrier() {
 }
 
 /// A report nobody annotated still stops at the terminus, so turning this on has not quietly turned
-/// inbound RTCP into something the application receives.
+/// inbound RTCP into something the application receives. The first inbound packet is the one the
+/// congestion controller announces its starting target on: it leaves as a carrier, its payload
+/// stripped. Every report after it leaves nothing.
 #[test]
 fn an_unannotated_report_still_stops_at_the_terminus() {
     let mut chain = chain_with_congestion_control();
+    let report = || TaggedPacket {
+        now: Instant::now(),
+        transport: TransportContext::default(),
+        message: AttributedPacket::new(Packet::Rtcp(vec![Box::new(
+            rtcp::receiver_report::ReceiverReport::default(),
+        )])),
+    };
 
-    chain
-        .handle_read(TaggedPacket {
-            now: Instant::now(),
-            transport: TransportContext::default(),
-            message: AttributedPacket::new(Packet::Rtcp(vec![Box::new(
-                rtcp::receiver_report::ReceiverReport::default(),
-            )])),
-        })
-        .expect("read");
+    chain.handle_read(report()).expect("read");
+    while let Some(packet) = chain.poll_read() {
+        assert!(
+            matches!(&packet.message.packet, Packet::Rtcp(packets) if packets.is_empty()),
+            "the starting target leaves on a carrier, not with the report"
+        );
+    }
 
+    chain.handle_read(report()).expect("read");
     assert!(
         chain.poll_read().is_none(),
         "inbound RTCP is for the interceptors unless something asked for it"

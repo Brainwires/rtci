@@ -79,11 +79,11 @@ const MEDIA_PACKETS_TO_SEND: u16 = 200;
 
 /// The drop filter stands in for the network: below every built-in slot, so the packet is gone only
 /// after everything on the sending side has already accounted for it.
-const DROP_FILTER_SLOT: usize = 500;
+const DROP_FILTER_SLOT: usize = 400;
 
-/// The recorder sits immediately application-ward of `Slot::FecDecoder` (6_000) — the earliest
+/// The recorder sits immediately application-ward of `Slot::FecDecoder` (10_300) — the earliest
 /// point at which [`Attribute::RecoveredByFec`] exists to be read.
-const RECOVERY_RECORDER_SLOT: usize = 6_500;
+const RECOVERY_RECORDER_SLOT: usize = 10_400;
 
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 

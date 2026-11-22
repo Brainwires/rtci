@@ -202,6 +202,13 @@ fn an_answer_that_rejects_the_data_section_starts_no_sctp_and_closes_the_channel
         "m=application",
         "m=application 0 UDP/DTLS/SCTP webrtc-datachannel",
     );
+    // A rejected section is in no BUNDLE group (RFC 9143 section 7.3.3): an answer that
+    // kept it there is refused as a whole.
+    let rejected = rejected
+        .split("\r\n")
+        .filter(|line| !line.starts_with("a=group:BUNDLE"))
+        .collect::<Vec<_>>()
+        .join("\r\n");
     offerer.set_remote_description(Instant::now(), RTCSessionDescription::answer(rejected)?)?;
     assert!(offerer.sctp().is_none());
     assert_eq!(

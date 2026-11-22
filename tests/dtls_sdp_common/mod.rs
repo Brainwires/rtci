@@ -25,9 +25,10 @@ use rtc::statistics::StatsSelector;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
-/// Virtual time a step gets: enough for an ICE check, a DTLS handshake with a retransmission
-/// and an SCTP handshake; far below the ICE disconnected and failed timeouts.
-pub const STEP: Duration = Duration::from_secs(5);
+/// Virtual time a step gets: enough for an ICE check, a DTLS handshake whose flight is
+/// retransmitted three times (RFC 6347 section 4.2.4.1: 1 s, doubling, so 1, 3 and 7 seconds
+/// in) and an SCTP handshake. ICE consent is answered throughout, so its timeouts do not run.
+pub const STEP: Duration = Duration::from_secs(20);
 
 pub struct Peer {
     pub pc: RTCPeerConnection,

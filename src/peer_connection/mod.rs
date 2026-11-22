@@ -1667,6 +1667,7 @@ impl RTCPeerConnection {
 
         for media in &parsed.media_descriptions {
             if !media.is_webrtc_datachannel()
+                && !is_unknown_application_media(media)
                 && !is_rejected_media(media)
                 && RtpCodecKind::from(media.media_name.media.as_str()) != RtpCodecKind::Unspecified
             {

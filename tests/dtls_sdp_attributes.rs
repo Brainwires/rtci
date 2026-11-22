@@ -272,8 +272,9 @@ fn fingerprints_are_read_at_session_and_at_media_level() -> Result<()> {
 
 /// RFC 8842 section 5.2 / RFC 8122 section 6.2: what arrives before the answer, and so before
 /// the answerer's fingerprint, is not taken as coming from a verified peer. The engine goes
-/// further and takes nothing: while the offerer has no answer, the answerer's connectivity
-/// checks and ClientHello get no reply, no handshake runs and no channel opens. Once the answer
+/// further and takes nothing: while the offerer has no answer, the answerer's ClientHello
+/// gets no reply (its connectivity checks do, RFC 8445 section 7.3), no handshake runs and
+/// no channel opens. Once the answer
 /// is applied the association is established (the answerer retransmits its ClientHello) and
 /// the certificate it was established with is the one the answer's fingerprint names.
 #[test]
@@ -307,9 +308,15 @@ fn nothing_is_accepted_before_the_fingerprint_arrives() -> Result<()> {
         !world.peers[1].written.is_empty(),
         "the answerer sent its checks"
     );
+    // The ICE agent answers a Binding request that arrives before the remote description
+    // (RFC 8445 section 7.3); what must not leave is anything else (RFC 7983: a first byte
+    // of 0 to 3 is STUN): no DTLS record, no SRTP.
     assert!(
-        world.peers[0].written.is_empty(),
-        "the offerer replied to a peer it has no fingerprint for"
+        world.peers[0]
+            .written
+            .iter()
+            .all(|datagram| datagram.first().is_some_and(|first| *first <= 3)),
+        "the offerer replied with more than STUN to a peer it has no fingerprint for"
     );
     let now = world.now;
     assert!(matches!(
