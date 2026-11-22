@@ -907,12 +907,6 @@ impl<'a>
                 self.ctx.event_outs.push_back(TaggedRTCEventInternal {
                     now,
                     event: RTCEventInternal::RTCPeerConnectionEvent(
-                        RTCPeerConnectionEvent::OnDataChannel(RTCDataChannelEvent::OnError(id)),
-                    ),
-                });
-                self.ctx.event_outs.push_back(TaggedRTCEventInternal {
-                    now,
-                    event: RTCEventInternal::RTCPeerConnectionEvent(
                         RTCPeerConnectionEvent::OnDataChannel(RTCDataChannelEvent::OnClose(id)),
                     ),
                 });
