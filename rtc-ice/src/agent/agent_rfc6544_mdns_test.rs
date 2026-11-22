@@ -365,6 +365,11 @@ fn test_reopened_tcp_connection_becomes_the_media_path() {
     );
 
     // A connection from another host is another candidate, not a reconnection.
-    connect(&mut a, later, "192.168.0.99:40003", false);
+    connect(
+        &mut a,
+        later + Duration::from_secs(1),
+        "192.168.0.99:40003",
+        false,
+    );
     assert_eq!(a.media_path().unwrap().peer_addr, addr("192.168.0.3:40002"));
 }
