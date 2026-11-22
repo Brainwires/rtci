@@ -6,7 +6,7 @@
 //! from PRE-01, since a report that cannot be encoded and decoded is worth nothing.
 
 use rtc_interceptor::{
-    AttributedPacket, Interceptor, Packet, RTCPFeedback, Registry, Rfc8888Builder, Slot,
+    Attribute, AttributedPacket, Interceptor, Packet, RTCPFeedback, Registry, Rfc8888Builder, Slot,
     StreamInfo, TaggedPacket,
 };
 use rtcp::transport_feedbacks::cc_feedback_report::CcFeedbackReport;
@@ -667,5 +667,67 @@ fn the_repair_flows_of_a_negotiated_stream_are_reported_under_their_own_ssrc() {
             .iter()
             .map(|block| (block.media_ssrc, block.begin_sequence))
             .collect::<Vec<_>>()
+    );
+}
+
+/// RFC 8888 sections 3.1 and 6: a retransmission is reported as what arrived on the wire, a
+/// packet of the RTX stream under its own SSRC and sequence number, although the chain sees it
+/// rewritten into the original (RFC 4588 de-encapsulation happens before the chain). Reporting
+/// it as the original would tell the sender that a packet the path lost arrived, at the time
+/// the retransmission did.
+#[test]
+fn a_retransmission_is_reported_under_the_rtx_ssrc_and_sequence_number() {
+    let mut harness = Harness::new();
+    harness.chain.bind_remote_stream(&StreamInfo {
+        ssrc_rtx: Some(4000),
+        payload_type_rtx: Some(97),
+        ..negotiated(SSRC)
+    });
+
+    harness.arrive(ms(0), SSRC, 10);
+    harness.arrive(ms(1), SSRC, 12);
+    // Sequence number 11 was lost; the RTX packet 900 carries it, rewritten before the chain.
+    harness
+        .chain
+        .handle_read(TaggedPacket {
+            now: harness.epoch + ms(30),
+            transport: TransportContext::default(),
+            message: AttributedPacket::new(Packet::Rtp(rtp::Packet {
+                header: rtp::header::Header {
+                    version: 2,
+                    payload_type: 96,
+                    sequence_number: 11,
+                    ssrc: SSRC,
+                    ..Default::default()
+                },
+                payload: vec![1, 2, 3].into(),
+            }))
+            .with(Attribute::Retransmitted {
+                ssrc: 4000,
+                sequence_number: 900,
+            }),
+        })
+        .expect("handle_read");
+    harness.tick(INTERVAL);
+
+    let reports = harness.drain_reports();
+    let blocks: Vec<(u32, u16, Vec<bool>)> = reports
+        .iter()
+        .flat_map(|report| &report.report_blocks)
+        .map(|block| {
+            (
+                block.media_ssrc,
+                block.begin_sequence,
+                block.metric_blocks.iter().map(|m| m.received).collect(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        vec![
+            (SSRC, 10u16, vec![true, false, true]),
+            (4000, 900, vec![true])
+        ],
+        blocks,
+        "11 stays lost on the media stream; the RTX stream's 900 arrived"
     );
 }

@@ -282,7 +282,11 @@ impl RTCPeerConnection {
             event_outs: VecDeque::new(),
             // The salt of the report ids, drawn per connection so an application cannot
             // predict them (webrtc 8.4).
-            stats: RTCStatsAccumulator::for_connection(setting_engine.ecn, rand::rng().random()),
+            stats: RTCStatsAccumulator::for_connection(
+                setting_engine.ecn,
+                setting_engine.ecn_initiation,
+                rand::rng().random(),
+            ),
             now,
         };
 

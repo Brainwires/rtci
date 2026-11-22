@@ -1,7 +1,8 @@
 use crate::peer_connection::configuration::UNSPECIFIED_STR;
 use crate::peer_connection::configuration::media_engine::*;
 use crate::rtp_transceiver::rtp_sender::rtcp_parameters::{
-    RTCP_FB_ACK_CCFB, RTCPFeedback, TYPE_RTCP_FB_ACK, TYPE_RTCP_FB_CCM, TYPE_RTCP_FB_TRANSPORT_CC,
+    RTCP_FB_ACK_CCFB, RTCP_FB_NACK_ECN, RTCPFeedback, TYPE_RTCP_FB_ACK, TYPE_RTCP_FB_CCM,
+    TYPE_RTCP_FB_NACK, TYPE_RTCP_FB_TRANSPORT_CC,
 };
 use crate::rtp_transceiver::rtp_sender::rtp_codec_parameters::RTCRtpCodecParameters;
 use crate::rtp_transceiver::rtp_sender::rtp_encoding_parameters::RTCRtpEncodingParameters;
@@ -634,9 +635,17 @@ pub(crate) fn rtcp_feedback_intersection(
     // in a later answer to the same offer. RFC 8888 is kept and transport-wide congestion
     // control dropped, which is also what the interceptors run a stream on when a peer
     // answered both (`interceptor::negotiated_congestion_feedback`).
+    //
+    // RFC 8888 section 7: "If an SDP offer signals support for both RTP Congestion Control
+    // Feedback Packets and the RTCP ECN Feedback Packet, the answering party SHOULD signal
+    // support for one, but not both": the RFC 6679 ECN feedback (`nack ecn`) duplicates what
+    // the RFC 8888 report carries per packet, and goes as well.
     let is_ccfb = |f: &RTCPFeedback| f.typ == TYPE_RTCP_FB_ACK && f.parameter == RTCP_FB_ACK_CCFB;
     if out.iter().any(is_ccfb) {
-        out.retain(|f| f.typ != TYPE_RTCP_FB_TRANSPORT_CC);
+        out.retain(|f| {
+            f.typ != TYPE_RTCP_FB_TRANSPORT_CC
+                && !(f.typ == TYPE_RTCP_FB_NACK && f.parameter == RTCP_FB_NACK_ECN)
+        });
     }
 
     out
@@ -673,6 +682,32 @@ mod congestion_feedback_answer_test {
             expected,
             rtcp_feedback_intersection(&ours, &offered_both),
             "a later answer to the same offer chooses the same mechanism"
+        );
+    }
+
+    /// RFC 8888 section 7: offered RFC 8888 feedback and the RFC 6679 ECN feedback packet
+    /// (`nack ecn`) together, the answer signals one, RFC 8888, even where the answerer
+    /// registered both; plain `nack` is another matter and stays.
+    #[test]
+    fn an_offer_of_ccfb_and_nack_ecn_is_answered_with_ccfb_only() {
+        let ours = [
+            feedback("nack", ""),
+            feedback("nack", "ecn"),
+            feedback("ack", "ccfb"),
+        ];
+        let offered = [
+            feedback("nack", "ecn"),
+            feedback("ack", "ccfb"),
+            feedback("nack", ""),
+        ];
+        assert_eq!(
+            vec![feedback("nack", ""), feedback("ack", "ccfb")],
+            rtcp_feedback_intersection(&ours, &offered)
+        );
+        // Without RFC 8888 in the answer, `nack ecn` is the ECN feedback and is kept.
+        assert_eq!(
+            vec![feedback("nack", "ecn")],
+            rtcp_feedback_intersection(&ours[1..2], &offered)
         );
     }
 

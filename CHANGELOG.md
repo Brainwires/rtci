@@ -1025,6 +1025,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with `T_rr_interval` zero spends its RTCP share). The TWCC and RFC 8888 generators' cadence
   reads the same nominal figure. A `Gcc` sender fed by the engine's receiver reaches 2 Mbit/s
   from 300 kbit/s in 0.24 s (0.58 s before).
+- **ecn**: ECN is initiated and watched as RFC 8888 section 7 requires (RFC 6679 sections
+  7.2-7.4). With `SettingEngineBuilder::with_ecn(true)` and `ack ccfb` negotiated, a stream
+  no longer sends every packet ECT(1) from the first: one packet in ten (and one at least every
+  500 ms) is an ECT(1) probe until the RFC 8888 feedback shows two arrived ECT or CE, then every
+  packet is ECT(1). A probe reported Not-ECT, or more than three lost with none received, fails
+  the initiation (retried after 60 s); in use, a path that clears the ECN field stops the
+  marking, and a high loss of ECT packets sends Not-ECT to compare, initiating again when the
+  loss went with the marking (the second time ECN stays off for the stream). New
+  `rtc_interceptor::{EcnValidation, EcnState, EcnInitiation}` and
+  `SettingEngineBuilder::with_ecn_initiation` (`EcnInitiation::LeapOfFaith`, RFC 6679 section
+  7.2.3, marks from the first packet as browsers sending L4S do; failure detection still
+  applies). `packetsWithBleachedEct1Marking` counts only packets that were sent ECT(1).
+- **rfc8888**: an RTX packet is reported under the RTX SSRC and the sequence number it arrived
+  with (sections 3.1 and 6), read from `Attribute::Retransmitted`; it was reported as the
+  original packet it is rewritten into before the chain, which told the sender a lost packet
+  had arrived, at the retransmission's arrival time.
+- **jsep**: offered both `ack ccfb` and `nack ecn`, an answer keeps `ack ccfb` only (RFC 8888
+  section 7). New `RTCP_FB_NACK_ECN`.
 - **rtcp_session**: congestion control feedback (TWCC, RFC 8888) leaves as its generator
   builds it, outside RFC 4585's one Early packet per regular interval and outside the
   regular reports' timing (`RtcpSessionBuilder::with_immediate_congestion_feedback`, default
@@ -1309,6 +1327,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+- **cc**: the media receiver's side of TMMBR (RFC 5104 section 4.2.1.2). An application asks a
+  remote sender to stay under a bit rate with `TmmbrControl::Limit` (and lifts it with
+  `TmmbrControl::Clear`) written into the chain; the congestion control interceptor sends the
+  TMMBR at once for a remote stream that negotiated `ccm tmmbr` (and never for one that did
+  not), with the overhead measured on the stream as section 4.2.1.2's running average, capped
+  at `TmmbrControl::NegotiatedMaximum`. It keeps the latest TMMBN of each sender, asks again
+  as owner when its tuple changed or as non-owner when its tuple would enter the bounding set,
+  and repeats an unacknowledged request every `TMMBR_REPEAT_INTERVAL` (1 s). Inbound TMMBN,
+  typed or raw, is read (it was dropped).
 - **gcc**: the receive-side variant of draft-ietf-rmcat-gcc-02 (section 3) in the default
   set (`configure_remb`): `RembGeneratorInterceptor` sends a REMB for every remote stream that
   negotiated `goog-remb` and neither transport-wide feedback nor RFC 8888, from the delay-based

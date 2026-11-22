@@ -461,6 +461,8 @@ pub struct SettingEngine {
     /// The application's socket layer reports each received datagram's ECN codepoint and
     /// applies the one each sent datagram carries ([`SettingEngineBuilder::with_ecn`]).
     pub(crate) ecn: bool,
+    /// How a stream starts marking ([`SettingEngineBuilder::with_ecn_initiation`]).
+    pub(crate) ecn_initiation: interceptor::EcnInitiation,
 }
 
 impl SettingEngine {
@@ -2048,16 +2050,32 @@ impl SettingEngineBuilder {
     ///   [`TransportContext::ecn`](shared::TransportContext::ecn) (`IP_TOS` / `IPV6_TCLASS`;
     ///   `None` for Not-ECT).
     ///
-    /// With it on, every RTP packet (RTX included) of a stream whose codec negotiated RFC 8888
-    /// congestion control feedback (`a=rtcp-fb:<pt> ack ccfb`, see
-    /// `configure_congestion_control_feedback`) is sent ECT(1), the L4S identifier: a sender
-    /// marks only where the receiver reports the CE marks back. STUN, DTLS, SCTP and RTCP are
-    /// never marked. Inbound RTP streams count their ECT(1) and CE receptions
+    /// With it on, the RTP packets of a stream whose codec negotiated RFC 8888 congestion
+    /// control feedback (`a=rtcp-fb:<pt> ack ccfb`, see `configure_congestion_control_feedback`)
+    /// are sent ECT(1), the L4S identifier: a sender marks only where the receiver reports the
+    /// CE marks back. As RFC 8888 section 7 requires, the stream first initiates ECN as RFC 6679
+    /// section 7.2.1 has it (one packet in ten a probe, until the feedback shows the probes
+    /// arrive ECT), then marks every packet (RTX included), and stops when the feedback shows
+    /// the path clears the marking or drops marked packets (section 7.4); see
+    /// [`with_ecn_initiation`](Self::with_ecn_initiation) and
+    /// [`EcnValidation`](interceptor::EcnValidation). STUN, DTLS, SCTP and RTCP are never
+    /// marked. Inbound RTP streams count their ECT(1) and CE receptions
     /// (`packetsReceivedWithEct1`, `packetsReceivedWithCe`) and outbound ones their ECT(1)
     /// packets (`packetsSentWithEct1`); with it off those members are left out of the stats,
     /// since the engine cannot see the IP header itself. Off by default.
     pub fn with_ecn(mut self, enabled: bool) -> Self {
         self.0.ecn = enabled;
+        self
+    }
+
+    /// How a stream with ECN on ([`with_ecn`](Self::with_ecn)) starts marking:
+    /// [`EcnInitiation::RtpAndRtcp`](interceptor::EcnInitiation::RtpAndRtcp), the default,
+    /// probes first (RFC 6679 section 7.2.1, the method RFC 8888 section 7 requires);
+    /// [`EcnInitiation::LeapOfFaith`](interceptor::EcnInitiation::LeapOfFaith) marks every
+    /// packet from the first, as browsers that send L4S do (RFC 6679 section 7.2.3). Failure
+    /// detection applies to both.
+    pub fn with_ecn_initiation(mut self, initiation: interceptor::EcnInitiation) -> Self {
+        self.0.ecn_initiation = initiation;
         self
     }
 
