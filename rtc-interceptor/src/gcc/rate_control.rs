@@ -112,6 +112,9 @@ pub struct RateController {
     decrease_factor: f64,
     increase_factor: f64,
     round_trip_time: Duration,
+    /// What a probe measured the path to deliver, while that is news the received rate has
+    /// not caught up with.
+    measured_rate: Option<f64>,
     convergence: Convergence,
     last_change: Option<Instant>,
 }
@@ -130,6 +133,7 @@ impl RateController {
             decrease_factor: DEFAULT_DECREASE_FACTOR,
             increase_factor: DEFAULT_INCREASE_FACTOR,
             round_trip_time: DEFAULT_ROUND_TRIP_TIME,
+            measured_rate: None,
             convergence: Convergence::new(),
             last_change: None,
         }
@@ -166,6 +170,16 @@ impl RateController {
     /// Replace the target, as when the path changed and the old estimate describes nothing.
     pub fn set_target(&mut self, target: f64) {
         self.target = target.clamp(self.min, self.max);
+    }
+
+    /// A rate the path was measured to deliver apart from the running received rate (a probe
+    /// cluster), or `None` to forget it. While set, the estimate may be as high as this
+    /// measurement even where one and a half times the received rate (the bound of section
+    /// 5.5) is less: the received rate lags a sender that has only just been told it may
+    /// send more, and would pull the estimate straight back to where it was. Over-use lowers
+    /// it to where the estimate backs off to.
+    pub fn set_measured_rate(&mut self, measured: Option<f64>) {
+        self.measured_rate = measured;
     }
 
     /// Forget where the path's capacity was thought to be: the next climb is multiplicative.
@@ -214,7 +228,22 @@ impl RateController {
                     self.convergence.reset();
                 }
                 self.convergence.on_decrease(received);
-                self.target = (received * self.decrease_factor).clamp(self.min, self.max);
+                // What the path delivers is the received rate, or what a probe measured when
+                // the sender has less to send than that: backing off from the received rate
+                // of an application-limited sender would cut the estimate to a fraction of
+                // what it sends, and the bound below would then cut it again on every update
+                // (1.5 times a fifth of the target is less than the target). The measurement
+                // backs off with the estimate: over-use says the path carries less than the
+                // probe saw, so the estimate never climbs back above where it backed off to
+                // until a new probe measures the path, and over-use that lasts brings both
+                // down by the decrease factor each time.
+                let delivered = self
+                    .measured_rate
+                    .map_or(received, |measured| measured.max(received).min(self.target));
+                self.target = (delivered * self.decrease_factor).clamp(self.min, self.max);
+                if self.measured_rate.is_some() {
+                    self.measured_rate = Some(self.target);
+                }
                 self.last_change = Some(now);
             }
 
@@ -245,10 +274,12 @@ impl RateController {
 
         // A_hat(i) < 1.5 * R_hat(i): the estimate does not run away from what is sent.
         if let Some(received) = received {
-            self.target = self
-                .target
-                .min(MAX_ESTIMATE_TO_RECEIVED_RATIO * received)
-                .clamp(self.min, self.max);
+            // One and a half times what is received, or what a probe measured the path to
+            // deliver when that is more: a measurement is a bound in itself, with no margin
+            // on top, so an estimate that rests on a probe never passes what the probe saw.
+            let bound =
+                (MAX_ESTIMATE_TO_RECEIVED_RATIO * received).max(self.measured_rate.unwrap_or(0.0));
+            self.target = self.target.min(bound).clamp(self.min, self.max);
         }
 
         self.target
@@ -532,5 +563,38 @@ mod tests {
             low < 300_000.0 && high > 300_000.0 && high < 400_000.0,
             "the band is around 300 kbit/s, not an average with 1 Mbit/s: {low}..{high}"
         );
+    }
+
+    /// An application-limited sender (a fifth of the target) over-uses the path with a probe
+    /// cluster: the estimate backs off from the probe's measurement, not from what the
+    /// application sends, and the updates that follow keep it there instead of cutting it to
+    /// one and a half times the received rate again and again (which spiralled the target
+    /// down to the minimum).
+    #[test]
+    fn over_use_after_a_probe_backs_off_from_the_measurement_and_stays() {
+        let epoch = Instant::now();
+        let mut controller = RateController::new(2_000_000.0, MIN, MAX);
+        controller.set_measured_rate(Some(2_000_000.0));
+        let received = Some(400_000.0);
+
+        let mut at = epoch;
+        let backed_off = controller.update(at, Usage::Over, received);
+        assert!(
+            (backed_off - 1_700_000.0).abs() < 1.0,
+            "0.85 × the measured 2 Mbit/s, got {backed_off}"
+        );
+        for usage in [Usage::Normal, Usage::Normal, Usage::Normal, Usage::Under] {
+            at += DEFAULT_RATE_CONTROL_INTERVAL;
+            let target = controller.update(at, usage, received);
+            assert!(
+                (target - backed_off).abs() < 1.0,
+                "the estimate rests where it backed off to: {target} after {usage:?}"
+            );
+        }
+
+        // Over-use that lasts brings it down by the decrease factor each time.
+        at += DEFAULT_RATE_CONTROL_INTERVAL;
+        let again = controller.update(at, Usage::Over, received);
+        assert!((again - 0.85 * backed_off).abs() < 1.0, "{again}");
     }
 }

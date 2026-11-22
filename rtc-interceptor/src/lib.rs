@@ -260,6 +260,10 @@ pub use cc::interceptor::{
     CongestionControlBuilder, CongestionControlHandle, CongestionControlInterceptor,
     DEFAULT_PRUNE_HORIZON as CONGESTION_CONTROL_DEFAULT_PRUNE_HORIZON, REMB_TIMEOUT,
 };
+pub use cc::probe::{
+    PROBE_APPLICATION_LIMITED_INTERVAL, PROBE_MAX_OCTETS, PROBE_MIN_DURATION, PROBE_MIN_PACKETS,
+    PROBE_RESULT_TIMEOUT, ProbeController, ProbePacket, ProbeRequest, probe_estimate,
+};
 pub use cc::tmmbr::{TMMBR_OWNER_TIMEOUT, TmmbEntry};
 pub use circuit_breaker::{
     CircuitBreakerBuilder, CircuitBreakerHandle, CircuitBreakerInterceptor, CircuitBreakerReason,

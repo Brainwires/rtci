@@ -3,12 +3,14 @@
 use super::pacer::Pacer as LeakyBucket;
 use crate::Interceptor;
 use crate::StreamInfo;
+use crate::cc::probe::{ProbePacket, ProbeRequest};
 use crate::{Attribute, Packet, TaggedPacket};
 use sansio::Protocol;
 use shared::error::Error;
 use shared::marshal::MarshalSize;
 use std::collections::VecDeque;
-use std::time::Instant;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// Rate used when none is configured: 1 Mb/s.
 pub const DEFAULT_BITRATE: f64 = 1_000_000.0;
@@ -129,6 +131,8 @@ pub struct PacerInterceptor {
     queue_limit: usize,
     /// Whether a packet inside the budget leaves at once when nothing is queued ahead of it.
     immediate_release: bool,
+    /// The probe cluster being sent, if one is (see [`ProbeRequest`]).
+    probe: Option<ActiveProbe>,
     /// Packets refused because the queue was full.
     dropped: u64,
     /// Packets the budget has released, waiting to join the belt.
@@ -150,6 +154,7 @@ impl PacerInterceptor {
             queue: VecDeque::new(),
             queue_limit: queue_limit.max(1),
             immediate_release: true,
+            probe: None,
             dropped: 0,
         }
     }
@@ -182,11 +187,77 @@ impl PacerInterceptor {
         }
     }
 
+    /// The bucket releases are metered through now: the probe cluster's while one is being
+    /// sent, the target rate's otherwise.
+    fn bucket(&self) -> &LeakyBucket {
+        self.probe
+            .as_ref()
+            .map_or(&self.pacer, |probe| &probe.bucket)
+    }
+
     /// The instant the head of the queue can next be released.
     fn next_release(&self) -> Option<Instant> {
         let head = self.queue.front()?;
-        self.pacer.releasable_at(Self::bits_of(head))
+        self.bucket().releasable_at(Self::bits_of(head))
     }
+
+    /// Whether `bits` may leave now, and if so, spends them.
+    fn try_spend(&mut self, bits: f64) -> bool {
+        match self.probe.as_mut() {
+            Some(probe) => {
+                if !probe.bucket.can_release(bits) {
+                    return false;
+                }
+                probe.bucket.consume(bits);
+                true
+            }
+            None => {
+                if !self.pacer.can_release(bits) {
+                    return false;
+                }
+                self.pacer.consume(bits);
+                true
+            }
+        }
+    }
+
+    /// Brings the budgets up to `now`, and ends a probe cluster that could not be filled.
+    fn refill(&mut self, now: Instant) {
+        self.pacer.refill(now);
+        if let Some(probe) = self.probe.as_mut() {
+            probe.bucket.refill(now);
+            if now.saturating_duration_since(probe.started) > PROBE_CLUSTER_TIMEOUT {
+                self.probe = None;
+            }
+        }
+    }
+
+    /// A packet leaves at `now`: marked as part of the probe cluster while one is being sent.
+    fn release(&mut self, mut packet: TaggedPacket, bits: f64) {
+        if let Some(probe) = self.probe.as_mut() {
+            packet.message.add(Attribute::Custom(Arc::new(ProbePacket {
+                cluster: probe.cluster,
+            })));
+            probe.remaining_bits -= bits;
+            if probe.remaining_bits <= 0.0 {
+                self.probe = None;
+            }
+        }
+        self.released.push_back(packet);
+    }
+}
+
+/// How long a probe cluster is held open for packets to fill it. A cluster that takes longer
+/// than this to leave is not a burst any more and measures nothing.
+const PROBE_CLUSTER_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// A probe cluster on its way out.
+struct ActiveProbe {
+    cluster: u32,
+    /// Meters the cluster's packets at the probe rate, one packet at a time.
+    bucket: LeakyBucket,
+    remaining_bits: f64,
+    started: Instant,
 }
 
 impl Protocol<TaggedPacket, TaggedPacket, ()> for PacerInterceptor {
@@ -215,6 +286,21 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for PacerInterceptor {
             self.pacer.set_target_bitrate(*bits_per_second);
         }
 
+        // A probe cluster the congestion controller asks for: the next packets leave at its
+        // rate, on top of the target's budget, and carry its mark. Observed, not consumed:
+        // the NACK responder above reads the same request and fills the cluster.
+        if let Some(request) = msg.message.custom::<ProbeRequest>() {
+            let mut bucket = LeakyBucket::new(request.bits_per_second)
+                .with_burst_bits(crate::pacing::pacer::MIN_BURST_BITS);
+            bucket.refill(msg.now);
+            self.probe = Some(ActiveProbe {
+                cluster: request.cluster,
+                bucket,
+                remaining_bits: request.octets as f64 * 8.0,
+                started: msg.now,
+            });
+        }
+
         self.read_queue.push_back(msg);
         Ok(())
     }
@@ -238,15 +324,14 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for PacerInterceptor {
 
         // Keeping the budget current at enqueue time is what lets `poll_timeout` compute a
         // deadline that is never in the past, even before the first `handle_timeout`.
-        self.pacer.refill(msg.now);
+        self.refill(msg.now);
 
         // Inside the budget and first in line: it leaves now. The budget is the bound on what
         // may enter the path at once, so nothing is gained by holding the packet for a timer.
         if self.immediate_release && self.queue.is_empty() {
             let bits = Self::bits_of(&msg);
-            if self.pacer.can_release(bits) {
-                self.pacer.consume(bits);
-                self.released.push_back(msg);
+            if self.try_spend(bits) {
+                self.release(msg, bits);
                 return Ok(());
             }
         }
@@ -274,23 +359,22 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for PacerInterceptor {
     }
 
     fn handle_timeout(&mut self, now: Instant) -> Result<(), Error> {
-        self.pacer.refill(now);
+        self.refill(now);
 
         while let Some(head) = self.queue.front() {
             let bits = Self::bits_of(head);
-            if !self.pacer.can_release(bits) {
+            if !self.try_spend(bits) {
                 break;
             }
 
             let mut packet = self.queue.pop_front().expect("front just checked");
-            self.pacer.consume(bits);
             // Rule 3: the packet departs now. Anything below recording departure — the send
             // history congestion control reads — must see the release instant, not the enqueue
             // instant, or this queueing delay is charged to the network.
             packet.now = now;
             // Queued for `poll_write`, which puts it back on the belt so it traverses every
             // interceptor ahead — numbering, and the send history reading the release instant just set.
-            self.released.push_back(packet);
+            self.release(packet, bits);
         }
         Ok(())
     }

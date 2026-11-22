@@ -282,6 +282,13 @@ pub struct DefaultInterceptorOptions {
     /// default) or holds every packet for its next timeout. See
     /// [`PacerBuilder::with_immediate_release`](interceptor::PacerBuilder::with_immediate_release).
     pub pacer_immediate_release: bool,
+    /// Whether the path is probed for capacity above the target with short clusters of
+    /// packets, as libwebrtc does. `false` by default: no RFC requires it (RFC 8836 section 2
+    /// names probing as one way to start faster), and it sends traffic the application did
+    /// not write. With it a path of 2.5 Mbit/s is found in under a second from a 300 kbit/s
+    /// start; without, in about 27 seconds. See
+    /// [`CongestionControlBuilder::with_bandwidth_probing`](interceptor::CongestionControlBuilder::with_bandwidth_probing).
+    pub bandwidth_probing: bool,
 }
 
 impl Default for DefaultInterceptorOptions {
@@ -290,6 +297,7 @@ impl Default for DefaultInterceptorOptions {
             congestion_feedback: CongestionFeedback::default(),
             unnegotiated_tmmbr: false,
             pacer_immediate_release: true,
+            bandwidth_probing: false,
         }
     }
 }
@@ -346,6 +354,7 @@ pub fn register_default_interceptors_with_options(
     let (congestion_control, handle) = CongestionControlBuilder::new(estimator)
         .with_circuit_breaker(circuit_breaker.clone())
         .with_unnegotiated_tmmbr(options.unnegotiated_tmmbr)
+        .with_bandwidth_probing(options.bandwidth_probing)
         .build_with_handle();
     let registry = registry
         .with(Slot::CongestionControl, congestion_control)
