@@ -834,6 +834,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behaviour changes
 
+- **rtcp_session**: without `b=` lines the session bandwidth is the nominal one of the media
+  bound (`RTCP_SESSION_NOMINAL_VIDEO_BANDWIDTH` 1 Mbit/s with video,
+  `RTCP_SESSION_NOMINAL_AUDIO_BANDWIDTH` 64 kbit/s with audio), or the measured media rate when
+  that is more (RFC 3550 section 6.2: a share of the *session* bandwidth). It was the measured
+  rate alone, so a sender that started low got little RTCP from its receiver, hence little
+  congestion feedback, and climbed slowly: a browser sending three simulcast layers to the
+  engine was held near 300 kbit/s (6.3 feedback datagrams a second, gaps to 387 ms). Now 10 a
+  second at every rate from 64 kbit/s, no gap over 110 ms, the receiver's RTCP 2.4% of the
+  session bandwidth (37% of a 64 kbit/s stream, 8% of 300 kbit/s, 2.4% of 1 Mbit/s: RTP/AVPF
+  with `T_rr_interval` zero spends its RTCP share). The TWCC and RFC 8888 generators' cadence
+  reads the same nominal figure. A `Gcc` sender fed by the engine's receiver reaches 2 Mbit/s
+  from 300 kbit/s in 0.24 s (0.58 s before).
 - **interceptor**: bandwidth probing is on in the default interceptor set
   (`DefaultInterceptorOptions::bandwidth_probing` now `true`; `false` is the opt-out). RFC 8836
   section 2 (requirement 4, a SHOULD) asks a congestion controller to adapt as quickly as

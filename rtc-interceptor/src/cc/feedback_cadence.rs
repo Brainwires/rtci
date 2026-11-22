@@ -1,6 +1,7 @@
 //! How often congestion control feedback is generated, given the RTCP bandwidth it has to fit.
 
-use crate::rtcp_session::{RTCP_SESSION_MIN_BANDWIDTH, RtcpBandwidth, RtcpSessionControl};
+use crate::rtcp_session::{RtcpBandwidth, RtcpSessionControl, nominal_session_bandwidth};
+use crate::stream_info::StreamInfo;
 use crate::{Packet, TaggedPacket};
 use shared::marshal::MarshalSize;
 use std::collections::VecDeque;
@@ -51,6 +52,8 @@ pub(crate) struct FeedbackCadence {
     first_media: Option<Instant>,
     /// A running mean of the size of the feedback built, RTCP octets.
     feedback_octets: f64,
+    /// The media of the streams bound, by SSRC: whether each is video (else audio).
+    streams: std::collections::HashMap<u32, bool>,
 }
 
 impl FeedbackCadence {
@@ -63,7 +66,24 @@ impl FeedbackCadence {
             buckets: VecDeque::new(),
             first_media: None,
             feedback_octets: INITIAL_FEEDBACK_OCTETS,
+            streams: std::collections::HashMap::new(),
         }
+    }
+
+    /// A stream of the session was bound (either direction): its media counts towards the
+    /// nominal session bandwidth, as it does in the RTCP session.
+    pub(crate) fn on_bind(&mut self, info: &StreamInfo) {
+        let mime = info.mime_type.to_ascii_lowercase();
+        if mime.starts_with("video/") {
+            self.streams.insert(info.ssrc, true);
+        } else if mime.starts_with("audio/") {
+            self.streams.insert(info.ssrc, false);
+        }
+    }
+
+    /// A stream was unbound.
+    pub(crate) fn on_unbind(&mut self, info: &StreamInfo) {
+        self.streams.remove(&info.ssrc);
     }
 
     /// Whether no interval was configured at all: the generator is off.
@@ -135,7 +155,10 @@ impl FeedbackCadence {
             Some(session) => session as f64,
             None => self
                 .media_bits_per_second(now)
-                .max(RTCP_SESSION_MIN_BANDWIDTH as f64),
+                .max(nominal_session_bandwidth(
+                    self.streams.values().any(|video| *video),
+                    self.streams.values().any(|video| !*video),
+                )),
         };
         match (self.negotiated.rs, self.negotiated.rr) {
             (None, None) => session * RTCP_FRACTION,

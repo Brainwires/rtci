@@ -48,6 +48,41 @@ use std::time::{Duration, Instant};
 /// The session bandwidth assumed while none is configured and no media has been measured:
 /// one audio stream.
 pub const RTCP_SESSION_MIN_BANDWIDTH: u64 = 64_000;
+/// The session bandwidth assumed for video while none was signalled: 1 Mbit/s, a camera
+/// stream at standard definition.
+///
+/// RFC 3550 section 6.2 takes the RTCP bandwidth as a share of the *session* bandwidth, "the
+/// nominal" bandwidth the session is set up for, not of what happens to be sent at the
+/// moment. A sender that starts low (a congestion controller starts at a few hundred kbit/s
+/// and climbs on the feedback it gets) measured as the session bandwidth would get little
+/// feedback, and so climb slowly: the loop runs on the wrong quantity. Without `b=` lines
+/// the nominal bandwidth of a session with video is this, with audio
+/// [`RTCP_SESSION_NOMINAL_AUDIO_BANDWIDTH`], and never less than what is measured.
+///
+/// Why this figure: RTP/AVPF with `T_rr_interval` zero spends the whole RTCP bandwidth on
+/// regular reports, so the nominal value is also what a low-rate stream pays for. At 1 Mbit/s
+/// the receiver has 50 kbit/s of RTCP, which holds a congestion feedback packet every 100 ms
+/// with room for three simulcast layers' report blocks (`congestion_feedback_rate.rs`); the
+/// 2.5 Mbit/s a high-definition stream may reach doubled the RTCP of a 300 kbit/s stream for
+/// no gain in feedback.
+pub const RTCP_SESSION_NOMINAL_VIDEO_BANDWIDTH: u64 = 1_000_000;
+/// The session bandwidth assumed for audio while none was signalled: 64 kbit/s, an Opus
+/// stream at its high end for speech and the floor the session has always had.
+pub const RTCP_SESSION_NOMINAL_AUDIO_BANDWIDTH: u64 = RTCP_SESSION_MIN_BANDWIDTH;
+
+/// The nominal session bandwidth of a session that carries video and / or audio, bits per
+/// second (see [`RTCP_SESSION_NOMINAL_VIDEO_BANDWIDTH`]).
+pub(crate) fn nominal_session_bandwidth(video: bool, audio: bool) -> f64 {
+    let mut nominal = 0;
+    if video {
+        nominal += RTCP_SESSION_NOMINAL_VIDEO_BANDWIDTH;
+    }
+    if audio {
+        nominal += RTCP_SESSION_NOMINAL_AUDIO_BANDWIDTH;
+    }
+    nominal.max(RTCP_SESSION_MIN_BANDWIDTH) as f64
+}
+
 /// The default of [`RtcpSessionBuilder::with_t_rr_interval`].
 pub const RTCP_SESSION_DEFAULT_T_RR_INTERVAL: Duration = Duration::from_secs(1);
 /// The default of [`RtcpSessionBuilder::with_mtu`]: the size a compound RTCP packet is kept
@@ -93,7 +128,9 @@ pub enum RtcpProfile {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RtcpBandwidth {
     /// The session bandwidth (`b=TIAS`, or `b=AS` times 1000). RTCP gets 5% of it unless
-    /// `rs` and `rr` say otherwise. `None`: the media bitrate is measured instead.
+    /// `rs` and `rr` say otherwise. `None`: the nominal bandwidth of the media bound
+    /// ([`RTCP_SESSION_NOMINAL_VIDEO_BANDWIDTH`], [`RTCP_SESSION_NOMINAL_AUDIO_BANDWIDTH`]),
+    /// or the media bitrate measured when that is more.
     pub session: Option<u64>,
     /// `b=RS` (RFC 3556): the RTCP bandwidth of the senders.
     pub rs: Option<u64>,
@@ -232,7 +269,8 @@ impl Default for RtcpSessionBuilder {
 
 impl RtcpSessionBuilder {
     /// A builder with the defaults: RTP/AVPF timing, a `T_rr_interval` of one second, RTCP at
-    /// 5% of the measured media bitrate, compound packets only.
+    /// 5% of the nominal session bandwidth of the media bound (or of the measured media
+    /// bitrate when that is more), compound packets only.
     pub fn new() -> Self {
         Self::default()
     }
@@ -825,11 +863,27 @@ impl RtcpSessionInterceptor {
     fn session_bandwidth(&self, now: Instant) -> f64 {
         match self.bandwidth.session {
             Some(session) => session as f64,
-            None => self
-                .rate
-                .bits_per_second(now)
-                .max(RTCP_SESSION_MIN_BANDWIDTH as f64),
+            None => self.rate.bits_per_second(now).max(self.nominal_bandwidth()),
         }
+    }
+
+    /// The nominal session bandwidth of the media bound, when no `b=` line gave one.
+    fn nominal_bandwidth(&self) -> f64 {
+        let kinds = self
+            .locals
+            .iter()
+            .filter(|local| local.role == Role::Media)
+            .map(|local| local.kind)
+            .chain(self.remotes.values().map(|remote| remote.kind));
+        let (mut video, mut audio) = (false, false);
+        for kind in kinds {
+            match kind {
+                Kind::Video => video = true,
+                Kind::Audio => audio = true,
+                Kind::Other => {}
+            }
+        }
+        nominal_session_bandwidth(video, audio)
     }
 
     /// The RTCP bandwidth in octets per second and the senders' share of it.
