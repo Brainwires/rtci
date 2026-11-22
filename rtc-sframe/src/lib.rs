@@ -94,7 +94,7 @@ pub use cipher_suite::{CipherSuite, NONCE_LEN, UnknownCipherSuite};
 pub use context::{KeyUsage, SFrameConfig, SFrameContext, SFrameStats};
 pub use error::{Error, ErrorKind, Result};
 pub use header::{Header, MAX_HEADER_LEN};
-pub use kdf::ratchet_base_key;
+pub use kdf::{derive_ssrc_key, ratchet_base_key};
 pub use key_id::{MlsKeyId, MlsKeyIdLayout, SenderKeyId, SenderKeyIdLayout};
 pub use mls::{DEFAULT_MAX_MLS_KEYS, MLS_EXPORTER_LABEL, MlsContext};
 pub use pending::{PendingCiphertext, PendingCiphertexts};

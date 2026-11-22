@@ -1457,7 +1457,11 @@ impl RTCPeerConnection {
             if let Some(remote_description) = self.remote_description().cloned()
                 && let Some(parsed_remote_description) = remote_description.parsed.as_ref()
             {
-                self.apply_negotiated_rtcp(parsed_remote_description, parsed_local_description);
+                self.apply_negotiated_rtcp(
+                    parsed_remote_description,
+                    parsed_local_description,
+                    false,
+                );
                 self.apply_negotiated_simulcast(
                     parsed_remote_description,
                     parsed_local_description,
@@ -2310,7 +2314,11 @@ impl RTCPeerConnection {
                     .and_then(|desc| desc.parsed.clone())
                     .as_ref()
             {
-                self.apply_negotiated_rtcp(parsed_local_description, parsed_remote_description);
+                self.apply_negotiated_rtcp(
+                    parsed_local_description,
+                    parsed_remote_description,
+                    true,
+                );
                 self.apply_negotiated_simulcast(
                     parsed_local_description,
                     parsed_remote_description,

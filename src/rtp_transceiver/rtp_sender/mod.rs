@@ -544,6 +544,12 @@ impl RTCRtpSender<'_> {
         // peer_connection is mutable borrow, its rtp_transceivers won't be resized and
         // the direction won't be changed too, so, unwrap() here is safe.
 
+        // draft-ietf-avtcore-rtp-sframe-03 section 6: SFrame offered and not answered, the
+        // offerer "MUST NOT send media for that m-section and MUST NOT fall back to sending
+        // unencrypted RTP".
+        if self.peer_connection.rtp_transceivers[self.id.0].sframe_refused() {
+            return Err(Error::ErrSFrameRefused);
+        }
         let mid = self.peer_connection.rtp_transceivers[self.id.0]
             .mid()
             .clone();

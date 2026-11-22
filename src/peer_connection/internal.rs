@@ -1369,6 +1369,7 @@ impl RTCPeerConnection {
             else {
                 continue;
             };
+            self.rtp_transceivers[i].note_remote_sframe(media.has_attribute("sframe"));
             let of = |bandwidth_type: &str| {
                 media
                     .bandwidth
@@ -1417,6 +1418,7 @@ impl RTCPeerConnection {
         &mut self,
         offer: &SessionDescription,
         answer: &SessionDescription,
+        we_offered: bool,
     ) {
         let transceiver_by_mid =
             RTCPeerConnection::transceiver_index_by_mid(&self.rtp_transceivers);
@@ -1441,6 +1443,11 @@ impl RTCPeerConnection {
                 && extmap_allow_mixed_in(offer, offered)
                 && extmap_allow_mixed_in(answer, answered);
             self.rtp_transceivers[i].set_extmap_allow_mixed(mixed);
+            self.rtp_transceivers[i].apply_sframe_answer(
+                we_offered,
+                offered.has_attribute("sframe"),
+                answered.has_attribute("sframe"),
+            );
         }
     }
 

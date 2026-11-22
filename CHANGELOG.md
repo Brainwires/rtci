@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **sframe**: the SFrame RTP payload format and `[[useSFrame]]` (pc-18), pinned to
+  draft-ietf-avtcore-rtp-sframe-03 (21 October 2026).
+  - `rtc::rtp::codec::sframe`: `SFramePayloader` (the S / E / T payload descriptor, origin
+    raw or packetized), `SFrameDepacketizer`, and `SFrameReassembler`, the receive algorithm
+    of section 5.2 over packets in any order with a bounded buffer.
+  - `rtc::sframe::derive_ssrc_key`: the per-SSRC key of section 7.
+  - `RTCRtpTransceiver::use_sframe` / `set_transform_use_sframe` (webrtc-encoded-transform
+    2.1, 2.2): an SFrame transform puts `a=sframe` in the media section; a remote
+    description's `a=sframe` sets it; the other kind of transform is then an
+    InvalidModificationError. An answer that leaves out the offered `a=sframe` stops the
+    offerer's media (`write_rtp` refused with the new `Error::ErrSFrameRefused`, received RTP
+    discarded), `RTCRtpTransceiver::sframe_refused`.
 - **webrtc-extensions** (pc-17).
   - `RTCRtpEncodingParameters` has `scale_resolution_down_to: Option<RTCResolutionRestriction>`,
     `ptime: Option<u32>` and `adaptive_ptime: bool` (section 5): validated in addTransceiver
