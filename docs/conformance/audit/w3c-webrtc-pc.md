@@ -8,7 +8,9 @@ How rows were judged. The engine is sans-I/O Rust under a JS API layer: promises
 
 Totals (rows 957):
 
-- MUST: tested 364 / untested 165 / partial 151 / missing 158 / violated 29 / n-a 62
+The section 8 rows (statistics) carry the verdicts of branch `conf/stats-conformance`; the totals include them.
+
+- MUST: tested 387 / untested 151 / partial 144 / missing 157 / violated 28 / n-a 62
 - SHOULD: tested 2 / untested 0 / partial 2 / missing 1 / violated 0 / n-a 5
 - MAY: tested 2 / untested 2 / partial 1 / missing 1 / violated 0 / n-a 12
 
@@ -16,7 +18,7 @@ By pass:
 
 - sections 1 to 4: rows 399; MUST: tested 133 / untested 75 / partial 71 / missing 59 / violated 9 / n-a 35
 - section 5: rows 258; MUST: tested 81 / untested 50 / partial 46 / missing 43 / violated 16 / n-a 14
-- sections 6 to 12: rows 300; MUST: tested 150 / untested 40 / partial 34 / missing 56 / violated 4 / n-a 13
+- sections 6 to 12: rows 300; MUST: tested 173 / untested 26 / partial 27 / missing 55 / violated 3 / n-a 13
 
 | ID | § | Level | Clause (short paraphrase) | Verdict | Code | Test | Note |
 |---|---|---|---|---|---|---|---|
@@ -815,17 +817,17 @@ By pass:
 | WEBRTC-7.3-6 | 7.3 | MUST | canInsertDTMF: false if audio/telephone-event is not negotiated for sending | missing | `src/rtp_transceiver/rtp_sender/rtp_codec.rs:117` | - | telephone-event is recognised as a non-media codec but is not in the default codecs |
 | WEBRTC-7.4-1 | 7.4 | MUST | RTCDTMFToneChangeEvent.tone: the tone begun, or "" at the end | missing | - | - | - |
 | WEBRTC-8.1-1 | 8.1 | MUST | A track selector must be sent or received by this connection | tested | `src/statistics/mod.rs:81`, `src/statistics/accumulator/mod.rs:303` | `test_stats_selector_no_matching_streams` | Selector is a sender or receiver id of this connection |
-| WEBRTC-8.1-2 | 8.1 | MUST | Monitored objects stay available after close() unless their lifetime says otherwise | untested | `src/peer_connection/mod.rs:2992` | - | See STATS-4.3-1 |
+| WEBRTC-8.1-2 | 8.1 | MUST | Monitored objects stay available after close() unless their lifetime says otherwise | tested | `src/peer_connection/mod.rs:2992` | `losing_the_selected_pair_is_a_change_and_stats_outlive_close` | See STATS-4.3-1 |
 | WEBRTC-8.2-1 | 8.2 | MUST | getStats: null selector selects the whole connection | tested | `src/statistics/accumulator/mod.rs:290` | `test_stats_selector_none_returns_all`, `test_get_stats_selector_none_complete` | - |
 | WEBRTC-8.2-2 | 8.2 | MUST | getStats: a track selects the sender or receiver whose track it is | n/a | - | - | Track lookup is the binding's |
-| WEBRTC-8.2-3 | 8.2 | MUST | getStats: no match, or more than one, rejects with InvalidAccessError | partial | `src/statistics/accumulator/mod.rs:303` | `test_stats_selector_no_matching_streams` | An unknown id returns an empty selection instead of an error |
+| WEBRTC-8.2-3 | 8.2 | MUST | getStats: no match, or more than one, rejects with InvalidAccessError | tested | `src/peer_connection/mod.rs:3021` | `a_selector_that_is_not_the_connections_is_an_invalid_access_error` | `try_get_stats` returns `InvalidAccessError`; `get_stats` keeps answering with an empty report |
 | WEBRTC-8.2-4 | 8.2 | MUST | getStats: gather per the selection algorithm and deliver the report | tested | `src/peer_connection/mod.rs:2992` | `test_get_stats_selector_subset_property` | Synchronous |
 | WEBRTC-8.3-1 | 8.3 | MUST | RTCStatsReport maps each stats id to its dictionary | tested | `src/statistics/report.rs:183` | `test_stats_report_iteration` | - |
 | WEBRTC-8.4-1 | 8.4 | MUST | All values in one stats object are synchronized | tested | `src/statistics/accumulator/mod.rs:167` | `test_master_accumulator_snapshot` | One snapshot under one `now` |
-| WEBRTC-8.4-2 | 8.4 | MUST | timestamp: collection time; arrival time for remote-sourced stats | partial | `src/statistics/accumulator/mod.rs:167` | `test_master_accumulator_snapshot` | Remote-inbound / remote-outbound objects carry the snapshot time, not the RTCP arrival time |
+| WEBRTC-8.4-2 | 8.4 | MUST | timestamp: collection time; arrival time for remote-sourced stats | tested | `src/statistics/accumulator/seal.rs:102` | `remote_outbound_times_are_the_sender_reports_ntp_time_and_its_arrival`, `a_receiver_report_with_no_delay_since_last_sr_measures_no_round_trip` | Remote objects carry their report's arrival time |
 | WEBRTC-8.4-3 | 8.4 | MUST | type is the most specific type name | tested | `src/statistics/stats/mod.rs:63` | `test_json_format_compliance` | - |
 | WEBRTC-8.4-4 | 8.4 | MUST | id: the same for the same object across reports | tested | `src/statistics/accumulator/mod.rs:167` | `every_reference_resolves_and_nothing_unmeasured_is_reported` | - |
-| WEBRTC-8.4-5 | 8.4 | MUST | id must not be predictable by an application | violated | `src/statistics/accumulator/rtp_stream/inbound.rs:23`, `src/statistics/accumulator/peer_connection.rs:36` | - | Ids are fixed strings built from kind, SSRC, payload type ("RTCPeerConnection", "RTCTransport", ...); no per-connection salt |
+| WEBRTC-8.4-5 | 8.4 | MUST | id must not be predictable by an application | tested | `src/statistics/accumulator/seal.rs:46` | `ids_are_stable_on_a_connection_and_not_the_same_on_another` | Hashed with a salt drawn per connection |
 | WEBRTC-8.5-1 | 8.5 | MUST | Selection: null selector returns everything | tested | `src/statistics/accumulator/mod.rs:290` | `test_stats_selector_none_returns_all` | - |
 | WEBRTC-8.5-2 | 8.5 | MUST | Selection: sender gives its outbound-rtp objects | tested | `src/statistics/accumulator/mod.rs:303` | `test_stats_selector_sender_filters_outbound`, `test_stats_selector_simulcast_sender` | - |
 | WEBRTC-8.5-3 | 8.5 | MUST | Selection: plus everything they reference, directly or indirectly | tested | `src/statistics/accumulator/mod.rs:303` | `test_stats_selector_includes_referenced_codecs`, `test_stats_selector_sender_includes_remote_inbound`, `test_stats_selector_includes_ice_candidates` | - |
@@ -855,22 +857,22 @@ By pass:
 | WEBRTC-8.6-22 | 8.6 | MUST | Mandatory stats: "inbound-rtp" has packetsReceived | tested | `src/statistics/accumulator/mod.rs:167` | `every_reference_resolves_and_nothing_unmeasured_is_reported`, `cumulative_loss_is_signed` | present |
 | WEBRTC-8.6-23 | 8.6 | MUST | Mandatory stats: "inbound-rtp" has packetsLost | tested | `src/statistics/accumulator/mod.rs:167` | `every_reference_resolves_and_nothing_unmeasured_is_reported`, `cumulative_loss_is_signed` | present |
 | WEBRTC-8.6-24 | 8.6 | MUST | Mandatory stats: "inbound-rtp" has jitter | tested | `src/statistics/accumulator/mod.rs:167` | `every_reference_resolves_and_nothing_unmeasured_is_reported`, `cumulative_loss_is_signed` | present |
-| WEBRTC-8.6-25 | 8.6 | MUST | Mandatory stats: "inbound-rtp" has trackIdentifier | untested | `src/statistics/accumulator/mod.rs:167` | - | present; value unasserted |
-| WEBRTC-8.6-26 | 8.6 | MUST | Mandatory stats: "inbound-rtp" has bytesReceived | untested | `src/statistics/accumulator/mod.rs:167` | - | present; value unasserted |
-| WEBRTC-8.6-27 | 8.6 | MUST | Mandatory stats: "inbound-rtp" has nackCount | untested | `src/statistics/accumulator/mod.rs:167` | - | present; value unasserted |
+| WEBRTC-8.6-25 | 8.6 | MUST | Mandatory stats: "inbound-rtp" has trackIdentifier | tested | `src/statistics/accumulator/mod.rs:167` | `a_stream_names_its_transport_codec_track_mid_and_source` | present |
+| WEBRTC-8.6-26 | 8.6 | MUST | Mandatory stats: "inbound-rtp" has bytesReceived | tested | `src/statistics/accumulator/mod.rs:167` | `retransmissions_over_rtx_are_counted_as_what_the_wire_carried` | present |
+| WEBRTC-8.6-27 | 8.6 | MUST | Mandatory stats: "inbound-rtp" has nackCount | tested | `src/statistics/accumulator/mod.rs:167` | `feedback_counts_are_the_feedback_packets_sent` | present |
 | WEBRTC-8.6-28 | 8.6 | MUST | Mandatory stats: "inbound-rtp" has remoteId | tested | `src/statistics/accumulator/mod.rs:167` | `test_snapshot_remote` | present once an SR arrived |
-| WEBRTC-8.6-29 | 8.6 | MUST | Mandatory stats: "inbound-rtp" has framesDecoded | partial | `src/statistics/accumulator/mod.rs:167` | `an_update_merges_into_what_was_supplied_before` | present only when the application feeds it |
-| WEBRTC-8.6-30 | 8.6 | MUST | Mandatory stats: "inbound-rtp" has framesReceived | partial | `src/statistics/accumulator/mod.rs:167` | `an_update_merges_into_what_was_supplied_before` | present only when the application feeds it |
-| WEBRTC-8.6-31 | 8.6 | MUST | Mandatory stats: "inbound-rtp" has framesDropped | partial | `src/statistics/accumulator/mod.rs:167` | - | present only when the application feeds it; feed value untested |
-| WEBRTC-8.6-32 | 8.6 | MUST | Mandatory stats: "inbound-rtp" has totalAudioEnergy | partial | `src/statistics/accumulator/mod.rs:167` | - | present only when the application feeds it; feed value untested |
-| WEBRTC-8.6-33 | 8.6 | MUST | Mandatory stats: "inbound-rtp" has totalSamplesDuration | partial | `src/statistics/accumulator/mod.rs:167` | - | present only when the application feeds it; feed value untested |
-| WEBRTC-8.6-34 | 8.6 | MUST | Mandatory stats: "inbound-rtp" has packetsDiscarded | partial | `src/statistics/accumulator/mod.rs:167` | - | present only when the application feeds it; feed value untested |
-| WEBRTC-8.6-35 | 8.6 | MUST | Mandatory stats: "outbound-rtp" has packetsSent | tested | `src/statistics/accumulator/mod.rs:167` | `test_on_rtp_sent` | present (RTX-SSRC retransmissions not included, see STATS-8.7) |
-| WEBRTC-8.6-36 | 8.6 | MUST | Mandatory stats: "outbound-rtp" has bytesSent | tested | `src/statistics/accumulator/mod.rs:167` | `test_on_rtp_sent` | present (RTX-SSRC retransmissions not included, see STATS-8.7) |
+| WEBRTC-8.6-29 | 8.6 | MUST | Mandatory stats: "inbound-rtp" has framesDecoded | partial | `src/statistics/accumulator/mod.rs:167` | `every_supplied_member_reaches_the_report_of_the_kind_it_applies_to` | present only when the application feeds it (by design: the engine has no decoder, encoder or capture); the fed value is tested |
+| WEBRTC-8.6-30 | 8.6 | MUST | Mandatory stats: "inbound-rtp" has framesReceived | partial | `src/statistics/accumulator/mod.rs:167` | `every_supplied_member_reaches_the_report_of_the_kind_it_applies_to` | present only when the application feeds it (by design: the engine has no decoder, encoder or capture); the fed value is tested |
+| WEBRTC-8.6-31 | 8.6 | MUST | Mandatory stats: "inbound-rtp" has framesDropped | partial | `src/statistics/accumulator/mod.rs:167` | `every_supplied_member_reaches_the_report_of_the_kind_it_applies_to` | present only when the application feeds it (by design: the engine has no decoder, encoder or capture); the fed value is tested |
+| WEBRTC-8.6-32 | 8.6 | MUST | Mandatory stats: "inbound-rtp" has totalAudioEnergy | partial | `src/statistics/accumulator/mod.rs:167` | `every_supplied_member_reaches_the_report_of_the_kind_it_applies_to` | present only when the application feeds it (by design: the engine has no decoder, encoder or capture); the fed value is tested |
+| WEBRTC-8.6-33 | 8.6 | MUST | Mandatory stats: "inbound-rtp" has totalSamplesDuration | partial | `src/statistics/accumulator/mod.rs:167` | `every_supplied_member_reaches_the_report_of_the_kind_it_applies_to` | present only when the application feeds it (by design: the engine has no decoder, encoder or capture); the fed value is tested |
+| WEBRTC-8.6-34 | 8.6 | MUST | Mandatory stats: "inbound-rtp" has packetsDiscarded | partial | `src/statistics/accumulator/mod.rs:167` | `every_supplied_member_reaches_the_report_of_the_kind_it_applies_to` | present only when the application feeds it (by design: the engine has no decoder, encoder or capture); the fed value is tested |
+| WEBRTC-8.6-35 | 8.6 | MUST | Mandatory stats: "outbound-rtp" has packetsSent | tested | `src/statistics/accumulator/mod.rs:167` | `retransmissions_over_rtx_are_counted_as_what_the_wire_carried` | present, RTX-SSRC retransmissions included |
+| WEBRTC-8.6-36 | 8.6 | MUST | Mandatory stats: "outbound-rtp" has bytesSent | tested | `src/statistics/accumulator/mod.rs:167` | `retransmissions_over_rtx_are_counted_as_what_the_wire_carried` | present, RTX-SSRC retransmissions included |
 | WEBRTC-8.6-37 | 8.6 | MUST | Mandatory stats: "outbound-rtp" has remoteId | tested | `src/statistics/accumulator/mod.rs:167` | `test_snapshot_remote` | present once a report arrived |
-| WEBRTC-8.6-38 | 8.6 | MUST | Mandatory stats: "outbound-rtp" has nackCount | untested | `src/statistics/accumulator/mod.rs:167` | - | present; value unasserted |
-| WEBRTC-8.6-39 | 8.6 | MUST | Mandatory stats: "outbound-rtp" has framesEncoded | partial | `src/statistics/accumulator/mod.rs:167` | `supplied_stats_reach_the_report_and_their_references_resolve` | present only when the application feeds it |
-| WEBRTC-8.6-40 | 8.6 | MUST | Mandatory stats: "outbound-rtp" has framesSent | partial | `src/statistics/accumulator/mod.rs:167` | - | present only when the application feeds it |
+| WEBRTC-8.6-38 | 8.6 | MUST | Mandatory stats: "outbound-rtp" has nackCount | tested | `src/statistics/accumulator/mod.rs:167` | `feedback_counts_are_the_feedback_packets_sent` | present |
+| WEBRTC-8.6-39 | 8.6 | MUST | Mandatory stats: "outbound-rtp" has framesEncoded | partial | `src/statistics/accumulator/mod.rs:167` | `every_supplied_member_reaches_the_report_of_the_kind_it_applies_to` | present only when the application feeds it (by design: the engine has no decoder, encoder or capture); the fed value is tested |
+| WEBRTC-8.6-40 | 8.6 | MUST | Mandatory stats: "outbound-rtp" has framesSent | partial | `src/statistics/accumulator/mod.rs:167` | `every_supplied_member_reaches_the_report_of_the_kind_it_applies_to` | present only when the application feeds it (by design: the engine has no decoder, encoder or capture); the fed value is tested |
 | WEBRTC-8.6-41 | 8.6 | MUST | Mandatory stats: "remote-inbound-rtp" has packetsReceived | tested | `src/statistics/accumulator/mod.rs:167` | `test_on_receiver_report`, `cumulative_loss_is_signed` | present |
 | WEBRTC-8.6-42 | 8.6 | MUST | Mandatory stats: "remote-inbound-rtp" has packetsLost | tested | `src/statistics/accumulator/mod.rs:167` | `test_on_receiver_report`, `cumulative_loss_is_signed` | present |
 | WEBRTC-8.6-43 | 8.6 | MUST | Mandatory stats: "remote-inbound-rtp" has jitter | tested | `src/statistics/accumulator/mod.rs:167` | `test_on_receiver_report`, `cumulative_loss_is_signed` | present |
@@ -879,26 +881,26 @@ By pass:
 | WEBRTC-8.6-46 | 8.6 | MUST | Mandatory stats: "remote-outbound-rtp" has packetsSent | tested | `src/statistics/accumulator/mod.rs:167` | `test_on_rtcp_sr_received`, `test_snapshot_remote` | present |
 | WEBRTC-8.6-47 | 8.6 | MUST | Mandatory stats: "remote-outbound-rtp" has bytesSent | tested | `src/statistics/accumulator/mod.rs:167` | `test_on_rtcp_sr_received`, `test_snapshot_remote` | present |
 | WEBRTC-8.6-48 | 8.6 | MUST | Mandatory stats: "remote-outbound-rtp" has localId | tested | `src/statistics/accumulator/mod.rs:167` | `test_on_rtcp_sr_received`, `test_snapshot_remote` | present |
-| WEBRTC-8.6-49 | 8.6 | MUST | Mandatory stats: "remote-outbound-rtp" has remoteTimestamp | partial | `src/statistics/accumulator/mod.rs:167` | - | present, but it is the local arrival time (STATS-8.10-remoteTimestamp) |
-| WEBRTC-8.6-50 | 8.6 | MUST | Mandatory stats: "media-source" has trackIdentifier | partial | `src/statistics/accumulator/mod.rs:167` | `a_media_source_names_its_track_as_track_identifier` | object exists only once the application feeds source stats |
-| WEBRTC-8.6-51 | 8.6 | MUST | Mandatory stats: "media-source" has kind | partial | `src/statistics/accumulator/mod.rs:167` | `a_media_source_names_its_track_as_track_identifier` | object exists only once the application feeds source stats |
-| WEBRTC-8.6-52 | 8.6 | MUST | Mandatory stats: "media-source" has totalAudioEnergy | partial | `src/statistics/accumulator/mod.rs:167` | - | present only when the application feeds it; untested |
-| WEBRTC-8.6-53 | 8.6 | MUST | Mandatory stats: "media-source" has totalSamplesDuration | partial | `src/statistics/accumulator/mod.rs:167` | - | present only when the application feeds it; untested |
-| WEBRTC-8.6-54 | 8.6 | MUST | Mandatory stats: "media-source" has framesPerSecond | partial | `src/statistics/accumulator/mod.rs:167` | - | present only when the application feeds it; untested |
-| WEBRTC-8.6-55 | 8.6 | MUST | Mandatory stats: "media-source" has height | partial | `src/statistics/accumulator/mod.rs:167` | - | present only when the application feeds it; untested |
-| WEBRTC-8.6-56 | 8.6 | MUST | Mandatory stats: "media-source" has width | partial | `src/statistics/accumulator/mod.rs:167` | `supplied_stats_reach_the_report_and_their_references_resolve` | present only when the application feeds it |
+| WEBRTC-8.6-49 | 8.6 | MUST | Mandatory stats: "remote-outbound-rtp" has remoteTimestamp | tested | `src/statistics/accumulator/mod.rs:167` | `remote_outbound_times_are_the_sender_reports_ntp_time_and_its_arrival` | present: the sender report's NTP time |
+| WEBRTC-8.6-50 | 8.6 | MUST | Mandatory stats: "media-source" has trackIdentifier | tested | `src/statistics/accumulator/mod.rs:167` | `a_stream_names_its_transport_codec_track_mid_and_source` | present from the moment a sender has the track |
+| WEBRTC-8.6-51 | 8.6 | MUST | Mandatory stats: "media-source" has kind | tested | `src/statistics/accumulator/mod.rs:167` | `a_stream_names_its_transport_codec_track_mid_and_source` | present from the moment a sender has the track |
+| WEBRTC-8.6-52 | 8.6 | MUST | Mandatory stats: "media-source" has totalAudioEnergy | partial | `src/statistics/accumulator/mod.rs:167` | `every_supplied_member_reaches_the_report_of_the_kind_it_applies_to` | present only when the application feeds it (by design: the engine has no decoder, encoder or capture); the fed value is tested |
+| WEBRTC-8.6-53 | 8.6 | MUST | Mandatory stats: "media-source" has totalSamplesDuration | partial | `src/statistics/accumulator/mod.rs:167` | `every_supplied_member_reaches_the_report_of_the_kind_it_applies_to` | present only when the application feeds it (by design: the engine has no decoder, encoder or capture); the fed value is tested |
+| WEBRTC-8.6-54 | 8.6 | MUST | Mandatory stats: "media-source" has framesPerSecond | partial | `src/statistics/accumulator/mod.rs:167` | `every_supplied_member_reaches_the_report_of_the_kind_it_applies_to` | present only when the application feeds it (by design: the engine has no decoder, encoder or capture); the fed value is tested |
+| WEBRTC-8.6-55 | 8.6 | MUST | Mandatory stats: "media-source" has height | partial | `src/statistics/accumulator/mod.rs:167` | `every_supplied_member_reaches_the_report_of_the_kind_it_applies_to` | present only when the application feeds it (by design: the engine has no decoder, encoder or capture); the fed value is tested |
+| WEBRTC-8.6-56 | 8.6 | MUST | Mandatory stats: "media-source" has width | partial | `src/statistics/accumulator/mod.rs:167` | `every_supplied_member_reaches_the_report_of_the_kind_it_applies_to` | present only when the application feeds it (by design: the engine has no decoder, encoder or capture); the fed value is tested |
 | WEBRTC-8.6-57 | 8.6 | MUST | Mandatory stats: "peer-connection" has dataChannelsOpened | tested | `src/statistics/accumulator/mod.rs:167` | `test_data_channel_statistics_collection` | present |
-| WEBRTC-8.6-58 | 8.6 | MUST | Mandatory stats: "peer-connection" has dataChannelsClosed | partial | `src/statistics/accumulator/mod.rs:167` | - | present; counts never-opened channels (STATS-8.15) |
+| WEBRTC-8.6-58 | 8.6 | MUST | Mandatory stats: "peer-connection" has dataChannelsClosed | tested | `src/statistics/accumulator/mod.rs:167` | `a_channel_that_never_opened_is_not_counted_as_closed` | present |
 | WEBRTC-8.6-59 | 8.6 | MUST | Mandatory stats: "data-channel" has label | tested | `src/statistics/accumulator/mod.rs:167` | `test_data_channel_statistics_collection` | present |
 | WEBRTC-8.6-60 | 8.6 | MUST | Mandatory stats: "data-channel" has state | tested | `src/statistics/accumulator/mod.rs:167` | `test_data_channel_statistics_collection` | present |
 | WEBRTC-8.6-61 | 8.6 | MUST | Mandatory stats: "data-channel" has messagesSent | tested | `src/statistics/accumulator/mod.rs:167` | `test_data_channel_statistics_collection` | present |
 | WEBRTC-8.6-62 | 8.6 | MUST | Mandatory stats: "data-channel" has bytesSent | tested | `src/statistics/accumulator/mod.rs:167` | `test_data_channel_statistics_collection` | present |
 | WEBRTC-8.6-63 | 8.6 | MUST | Mandatory stats: "data-channel" has messagesReceived | tested | `src/statistics/accumulator/mod.rs:167` | `test_data_channel_statistics_collection` | present |
 | WEBRTC-8.6-64 | 8.6 | MUST | Mandatory stats: "data-channel" has bytesReceived | tested | `src/statistics/accumulator/mod.rs:167` | `test_data_channel_statistics_collection` | present |
-| WEBRTC-8.6-65 | 8.6 | MUST | Mandatory stats: "data-channel" has protocol | untested | `src/statistics/accumulator/mod.rs:167` | - | present |
-| WEBRTC-8.6-66 | 8.6 | MUST | Mandatory stats: "data-channel" has dataChannelIdentifier | partial | `src/statistics/accumulator/mod.rs:167` | `tests/data_channel_stream_id_parity.rs` | present; 0 while unassigned |
-| WEBRTC-8.6-67 | 8.6 | MUST | Mandatory stats: "transport" has bytesSent | tested | `src/statistics/accumulator/mod.rs:167` | `test_transport_statistics_collection` | present (STUN included, see STATS-8.17) |
-| WEBRTC-8.6-68 | 8.6 | MUST | Mandatory stats: "transport" has bytesReceived | tested | `src/statistics/accumulator/mod.rs:167` | `test_transport_statistics_collection` | present (STUN included, see STATS-8.17) |
+| WEBRTC-8.6-65 | 8.6 | MUST | Mandatory stats: "data-channel" has protocol | tested | `src/statistics/accumulator/mod.rs:167` | `a_data_channel_reports_what_it_is_and_what_crossed_it` | present |
+| WEBRTC-8.6-66 | 8.6 | MUST | Mandatory stats: "data-channel" has dataChannelIdentifier | tested | `src/statistics/accumulator/mod.rs:167` | `a_data_channel_reports_what_it_is_and_what_crossed_it` | present once assigned |
+| WEBRTC-8.6-67 | 8.6 | MUST | Mandatory stats: "transport" has bytesSent | tested | `src/statistics/accumulator/mod.rs:167` | `transport_bytes_leave_out_ice_checks` | present, STUN left out |
+| WEBRTC-8.6-68 | 8.6 | MUST | Mandatory stats: "transport" has bytesReceived | tested | `src/statistics/accumulator/mod.rs:167` | `transport_bytes_leave_out_ice_checks` | present, STUN left out |
 | WEBRTC-8.6-69 | 8.6 | MUST | Mandatory stats: "transport" has selectedCandidatePairId | tested | `src/statistics/accumulator/mod.rs:167` | `a_connection_reports_dtls_state_channel_state_and_every_pair` | present |
 | WEBRTC-8.6-70 | 8.6 | MUST | Mandatory stats: "transport" has localCertificateId | tested | `src/statistics/accumulator/mod.rs:167` | `a_connection_reports_dtls_state_channel_state_and_every_pair` | present |
 | WEBRTC-8.6-71 | 8.6 | MUST | Mandatory stats: "transport" has remoteCertificateId | tested | `src/statistics/accumulator/mod.rs:167` | `a_connection_reports_dtls_state_channel_state_and_every_pair` | present |
@@ -907,25 +909,25 @@ By pass:
 | WEBRTC-8.6-74 | 8.6 | MUST | Mandatory stats: "candidate-pair" has remoteCandidateId | tested | `src/statistics/accumulator/mod.rs:167` | `every_candidate_pair_is_reported_with_its_state` | present |
 | WEBRTC-8.6-75 | 8.6 | MUST | Mandatory stats: "candidate-pair" has state | tested | `src/statistics/accumulator/mod.rs:167` | `every_candidate_pair_is_reported_with_its_state` | present |
 | WEBRTC-8.6-76 | 8.6 | MUST | Mandatory stats: "candidate-pair" has nominated | tested | `src/statistics/accumulator/mod.rs:167` | `every_candidate_pair_is_reported_with_its_state` | present |
-| WEBRTC-8.6-77 | 8.6 | MUST | Mandatory stats: "candidate-pair" has bytesSent | untested | `src/statistics/accumulator/mod.rs:167` | - | present; value unasserted |
-| WEBRTC-8.6-78 | 8.6 | MUST | Mandatory stats: "candidate-pair" has bytesReceived | untested | `src/statistics/accumulator/mod.rs:167` | - | present; value unasserted |
-| WEBRTC-8.6-79 | 8.6 | MUST | Mandatory stats: "candidate-pair" has totalRoundTripTime | untested | `src/statistics/accumulator/mod.rs:167` | - | present; value unasserted |
-| WEBRTC-8.6-80 | 8.6 | MUST | Mandatory stats: "candidate-pair" has responsesReceived | untested | `src/statistics/accumulator/mod.rs:167` | - | present; value unasserted |
-| WEBRTC-8.6-81 | 8.6 | MUST | Mandatory stats: "candidate-pair" has currentRoundTripTime | untested | `src/statistics/accumulator/mod.rs:167` | - | present; value unasserted |
+| WEBRTC-8.6-77 | 8.6 | MUST | Mandatory stats: "candidate-pair" has bytesSent | tested | `src/statistics/accumulator/mod.rs:167` | `a_candidate_pairs_counters_are_the_checks_and_the_payload_on_the_wire` | present |
+| WEBRTC-8.6-78 | 8.6 | MUST | Mandatory stats: "candidate-pair" has bytesReceived | tested | `src/statistics/accumulator/mod.rs:167` | `a_candidate_pairs_counters_are_the_checks_and_the_payload_on_the_wire` | present |
+| WEBRTC-8.6-79 | 8.6 | MUST | Mandatory stats: "candidate-pair" has totalRoundTripTime | tested | `src/statistics/accumulator/mod.rs:167` | `a_candidate_pairs_counters_are_the_checks_and_the_payload_on_the_wire` | present |
+| WEBRTC-8.6-80 | 8.6 | MUST | Mandatory stats: "candidate-pair" has responsesReceived | tested | `src/statistics/accumulator/mod.rs:167` | `a_candidate_pairs_counters_are_the_checks_and_the_payload_on_the_wire` | present |
+| WEBRTC-8.6-81 | 8.6 | MUST | Mandatory stats: "candidate-pair" has currentRoundTripTime | tested | `src/statistics/accumulator/mod.rs:167` | `a_candidate_pairs_counters_are_the_checks_and_the_payload_on_the_wire` | present |
 | WEBRTC-8.6-82 | 8.6 | MUST | Mandatory stats: "local-candidate" has address | tested | `src/statistics/accumulator/mod.rs:167` | `a_candidate_reports_its_whole_priority_and_only_the_members_it_has` | present |
 | WEBRTC-8.6-83 | 8.6 | MUST | Mandatory stats: "local-candidate" has port | tested | `src/statistics/accumulator/mod.rs:167` | `a_candidate_reports_its_whole_priority_and_only_the_members_it_has` | present |
 | WEBRTC-8.6-84 | 8.6 | MUST | Mandatory stats: "local-candidate" has candidateType | tested | `src/statistics/accumulator/mod.rs:167` | `a_candidate_reports_its_whole_priority_and_only_the_members_it_has` | present |
-| WEBRTC-8.6-85 | 8.6 | MUST | Mandatory stats: "local-candidate" has protocol | untested | `src/statistics/accumulator/mod.rs:167` | - | present |
+| WEBRTC-8.6-85 | 8.6 | MUST | Mandatory stats: "local-candidate" has protocol | tested | `src/statistics/accumulator/mod.rs:167` | `a_candidate_reports_what_it_was_gathered_as` | present |
 | WEBRTC-8.6-86 | 8.6 | MUST | Mandatory stats: "remote-candidate" has address | tested | `src/statistics/accumulator/mod.rs:167` | `a_candidate_reports_its_whole_priority_and_only_the_members_it_has` | present |
 | WEBRTC-8.6-87 | 8.6 | MUST | Mandatory stats: "remote-candidate" has port | tested | `src/statistics/accumulator/mod.rs:167` | `a_candidate_reports_its_whole_priority_and_only_the_members_it_has` | present |
 | WEBRTC-8.6-88 | 8.6 | MUST | Mandatory stats: "remote-candidate" has candidateType | tested | `src/statistics/accumulator/mod.rs:167` | `a_candidate_reports_its_whole_priority_and_only_the_members_it_has` | present |
-| WEBRTC-8.6-89 | 8.6 | MUST | Mandatory stats: "remote-candidate" has protocol | untested | `src/statistics/accumulator/mod.rs:167` | - | present |
-| WEBRTC-8.6-90 | 8.6 | MUST | Mandatory stats: "local-candidate" has url | untested | `src/statistics/accumulator/mod.rs:167` | - | present for srflx and relay |
+| WEBRTC-8.6-89 | 8.6 | MUST | Mandatory stats: "remote-candidate" has protocol | tested | `src/statistics/accumulator/mod.rs:167` | `a_candidate_reports_what_it_was_gathered_as` | present |
+| WEBRTC-8.6-90 | 8.6 | MUST | Mandatory stats: "local-candidate" has url | tested | `src/statistics/accumulator/mod.rs:167` | `a_candidate_reports_what_it_was_gathered_as` | present for srflx and relay |
 | WEBRTC-8.6-91 | 8.6 | MUST | Mandatory stats: "remote-candidate" has url | tested | `src/statistics/accumulator/mod.rs:167` | `a_candidate_reports_its_whole_priority_and_only_the_members_it_has` | correctly never present for a remote candidate |
 | WEBRTC-8.6-92 | 8.6 | MUST | Mandatory stats: "certificate" has fingerprint | tested | `src/statistics/accumulator/mod.rs:167` | `a_connection_reports_dtls_state_channel_state_and_every_pair`, `base64_matches_rfc_4648` | present |
 | WEBRTC-8.6-93 | 8.6 | MUST | Mandatory stats: "certificate" has fingerprintAlgorithm | tested | `src/statistics/accumulator/mod.rs:167` | `a_connection_reports_dtls_state_channel_state_and_every_pair`, `base64_matches_rfc_4648` | present |
 | WEBRTC-8.6-94 | 8.6 | MUST | Mandatory stats: "certificate" has base64Certificate | tested | `src/statistics/accumulator/mod.rs:167` | `a_connection_reports_dtls_state_channel_state_and_every_pair`, `base64_matches_rfc_4648` | present |
-| WEBRTC-8.6-95 | 8.6 | MUST | Mandatory stats: "certificate" has issuerCertificateId | missing | `src/statistics/accumulator/mod.rs:167` | - | never present: only the leaf certificate is reported |
+| WEBRTC-8.6-95 | 8.6 | MUST | Mandatory stats: "certificate" has issuerCertificateId | tested | `src/statistics/accumulator/mod.rs:167` | `handshake_completion_retains_the_peer_certificate_chain` | present when the certificate has an issuer in the chain |
 | WEBRTC-8.6-96 | 8.6 | MAY | Any other statistic of webrtc-stats may be generated | tested | `src/statistics/accumulator/mod.rs:167` | `every_reference_resolves_and_nothing_unmeasured_is_reported` | See w3c-webrtc-stats.md |
 | WEBRTC-9.1-1 | 9.1 | MUST | A sent track appears as exactly one track to the recipient | tested | `src/peer_connection/handler/interceptor.rs:470`, `src/peer_connection/event/track_event.rs:171` | `tests/one_media_section_rtc_to_rtc_unicast.rs` | One `OnTrack(OnOpen)` per receiver track |
 | WEBRTC-9.1-2 | 9.1 | MUST | The sender's stream membership (msid) creates and populates the receiver-side streams | untested | `src/media_stream/track.rs:193`, `src/peer_connection/event/track_event.rs:1` | - | The track carries a stream id from the remote msid; several streams per track are not modelled on the track |
