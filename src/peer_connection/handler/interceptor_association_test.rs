@@ -3,8 +3,11 @@
 //! one, by the payload type when exactly one m= section receives it.
 
 use super::*;
+use crate::media_stream::MediaStreamTrack;
 use crate::peer_connection::event::RTCTrackEvent;
-use crate::rtp_transceiver::rtp_sender::{RTCRtpCodec, RTCRtpCodecParameters, RtpCodecKind};
+use crate::rtp_transceiver::rtp_sender::{
+    RTCRtpCodec, RTCRtpCodecParameters, RTCRtpEncodingParameters, RtpCodecKind,
+};
 use crate::rtp_transceiver::{RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
 use bytes::Bytes;
 use interceptor::Registry;
@@ -106,8 +109,22 @@ fn opened(
 
 /// [`opened`], after an RTCP SDES packet with a MID item for each of `sdes_mids` arrived.
 fn opened_after_sdes(
-    mut transceivers: Vec<RTCRtpTransceiverInternal>,
+    transceivers: Vec<RTCRtpTransceiverInternal>,
     sdes_mids: &[(u32, &str)],
+    arrivals: &[Arrival],
+) -> (Vec<(usize, u32)>, Vec<RTCRtpTransceiverInternal>) {
+    let items: Vec<(u32, Vec<(SdesType, &str)>)> = sdes_mids
+        .iter()
+        .map(|(source, mid)| (*source, vec![(SdesType::SdesMid, *mid)]))
+        .collect();
+    opened_after_sdes_items(transceivers, &items, arrivals)
+}
+
+/// [`opened`], after an RTCP SDES packet with a chunk of `items` (after a CNAME) for each
+/// source arrived.
+fn opened_after_sdes_items(
+    mut transceivers: Vec<RTCRtpTransceiverInternal>,
+    sdes_items: &[(u32, Vec<(SdesType, &str)>)],
     arrivals: &[Arrival],
 ) -> (Vec<(usize, u32)>, Vec<RTCRtpTransceiverInternal>) {
     let media_engine = media_engine();
@@ -125,21 +142,20 @@ fn opened_after_sdes(
         &mut stats,
     );
     let now = Instant::now();
-    if !sdes_mids.is_empty() {
-        let chunks = sdes_mids
+    if !sdes_items.is_empty() {
+        let chunks = sdes_items
             .iter()
-            .map(|(source, mid)| SourceDescriptionChunk {
+            .map(|(source, items)| SourceDescriptionChunk {
                 source: *source,
-                items: vec![
-                    SourceDescriptionItem {
-                        sdes_type: SdesType::SdesCname,
-                        text: Bytes::from_static(b"cname"),
-                    },
-                    SourceDescriptionItem {
-                        sdes_type: SdesType::SdesMid,
-                        text: Bytes::copy_from_slice(mid.as_bytes()),
-                    },
-                ],
+                items: std::iter::once(SourceDescriptionItem {
+                    sdes_type: SdesType::SdesCname,
+                    text: Bytes::from_static(b"cname"),
+                })
+                .chain(items.iter().map(|(sdes_type, text)| SourceDescriptionItem {
+                    sdes_type: *sdes_type,
+                    text: Bytes::copy_from_slice(text.as_bytes()),
+                }))
+                .collect(),
             })
             .collect();
         handler
@@ -352,5 +368,59 @@ fn an_sdes_mid_item_places_a_stream_whose_packets_carry_no_mid() {
 
     // Another SSRC's MID, or a MID no section has, places nothing.
     let (opened, _) = opened_after_sdes(two_vp8(), &[(0xbbbb, "1"), (0xaaaa, "9")], &arrival);
+    assert!(opened.is_empty(), "{opened:?}");
+}
+
+/// A receive-only video transceiver with `mid` that expects the simulcast layer `rid`, whose
+/// SSRC the first packet of the layer gives.
+fn simulcast_layer(mid: &str, rid: &str) -> RTCRtpTransceiverInternal {
+    let mut transceiver = transceiver(RtpCodecKind::Video, mid, vec![codec("video/VP8", VP8)]);
+    let receiver = transceiver.receiver_mut().as_mut().unwrap();
+    let coding = RTCRtpCodingParameters {
+        rid: rid.to_owned(),
+        ..Default::default()
+    };
+    receiver.set_coding_parameters(vec![coding.clone()]);
+    receiver.set_track(MediaStreamTrack::new(
+        "stream".to_owned(),
+        "track".to_owned(),
+        "remote video".to_owned(),
+        RtpCodecKind::Video,
+        vec![RTCRtpEncodingParameters {
+            rtp_coding_parameters: coding,
+            ..Default::default()
+        }],
+    ));
+    transceiver
+}
+
+/// RFC 8852 section 3.1: the RtpStreamId SDES item names a stream's rid as the header
+/// extension does. A layer whose packets carry the MID but no RID opens once an SDES chunk of
+/// its SSRC names the rid, and not without it.
+#[test]
+fn an_sdes_rtp_stream_id_item_places_a_layer_whose_packets_carry_no_rid() {
+    let transceivers = || vec![simulcast_layer("0", "h"), simulcast_layer("1", "h")];
+    let arrival = || Arrival {
+        ssrc: 7000,
+        payload_type: VP8,
+        mid: Some("1"),
+    };
+
+    let (opened, _) = opened(transceivers(), &[arrival()]);
+    assert!(opened.is_empty(), "no rid, no layer: {opened:?}");
+
+    let (opened, _) = opened_after_sdes_items(
+        transceivers(),
+        &[(7000, vec![(SdesType::SdesRtpStreamId, "h")])],
+        &[arrival()],
+    );
+    assert_eq!(opened, vec![(1, 7000)]);
+
+    // A value that is not an RtpStreamId (RFC 8852 section 3: alphanumerics) is not taken.
+    let (opened, _) = opened_after_sdes_items(
+        transceivers(),
+        &[(7000, vec![(SdesType::SdesRtpStreamId, "h-1")])],
+        &[arrival()],
+    );
     assert!(opened.is_empty(), "{opened:?}");
 }
