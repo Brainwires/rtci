@@ -518,6 +518,8 @@ impl RTCRtpSender<'_> {
         if sender.track_removed() {
             return Err(Error::ErrRTPSenderTrackRemoved);
         }
+        // An SSRC a collision replaced (RFC 3550 section 8.2) goes out as its replacement.
+        packet.header.ssrc = sender.current_ssrc(packet.header.ssrc);
 
         // RFC 8853 section 5.3.3: no RTP for a simulcast stream the answer removed. Dropped
         // like an inactive encoding's packet, so an encoder that has not re-read the

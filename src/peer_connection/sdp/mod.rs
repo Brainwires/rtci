@@ -1709,12 +1709,22 @@ impl RTCPeerConnection {
                             );
                         }
 
-                        media = with_source_attributes(media, ssrc, track, cname);
-                        if let Some(rtx) = rtx_flow {
-                            media = with_source_attributes(media, rtx.ssrc, track, cname);
-                        }
-                        if let Some(fec) = fec_flow {
-                            media = with_source_attributes(media, fec.ssrc, track, cname);
+                        let mut sources = vec![ssrc];
+                        sources.extend(rtx_flow.map(|rtx| rtx.ssrc));
+                        sources.extend(fec_flow.map(|fec| fec.ssrc));
+                        for source in sources {
+                            media = with_source_attributes(media, source, track, cname);
+                            // RFC 5576 sections 5 and 6.2: a source that moved after a
+                            // collision names the SSRCs it had, once.
+                            let previous = sender.previous_ssrcs(source);
+                            if !previous.is_empty() {
+                                let previous: Vec<String> =
+                                    previous.iter().map(|ssrc| ssrc.to_string()).collect();
+                                media = media.with_value_attribute(
+                                    ATTR_KEY_SSRC.to_owned(),
+                                    format!("{source} previous-ssrc:{}", previous.join(" ")),
+                                );
+                            }
                         }
                     }
                 }

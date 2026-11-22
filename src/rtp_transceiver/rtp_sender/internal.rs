@@ -85,6 +85,11 @@ pub(crate) struct RTCRtpSenderInternal {
     /// the two-byte form from then on (RFC 8285 section 4.1.2: "A stream MUST contain only
     /// one-byte headers or only two-byte headers").
     two_byte_ssrcs: Vec<SSRC>,
+    /// The SSRCs moved after a collision (RFC 3550 section 8.2, RFC 5576 section 5): each new
+    /// SSRC with the ones it replaced, oldest first. Descriptions say `a=ssrc:<new>
+    /// previous-ssrc:<old> ...` (RFC 5576 section 6.2), and what the application still writes
+    /// with an old SSRC goes out with the new one.
+    previous_ssrcs: Vec<(SSRC, Vec<SSRC>)>,
 }
 
 impl RTCRtpSenderInternal {
@@ -650,6 +655,62 @@ impl RTCRtpSenderInternal {
         self.send_encodings = kept;
         self.last_returned_parameters = None;
         self.sync_tracks();
+    }
+
+    /// Moves the encoding (media, RTX or FEC flow) that sends from `old` to `new`, after a
+    /// collision (RFC 3550 section 8.2): `Some` with the encoding's media SSRC as it was before,
+    /// `None` when no encoding has `old`. The streams are re-bound by the caller.
+    pub(crate) fn replace_ssrc(&mut self, old: SSRC, new: SSRC) -> Option<SSRC> {
+        let mut primary = None;
+        for encoding in &mut self.send_encodings {
+            let coding = &mut encoding.rtp_coding_parameters;
+            let before = coding.ssrc;
+            let slots = [
+                coding.ssrc.as_mut(),
+                coding.rtx.as_mut().map(|rtx| &mut rtx.ssrc),
+                coding.fec.as_mut().map(|fec| &mut fec.ssrc),
+            ];
+            for slot in slots.into_iter().flatten() {
+                if *slot == old {
+                    *slot = new;
+                    primary = before;
+                }
+            }
+        }
+        primary?;
+        let mut replaced = self
+            .previous_ssrcs
+            .iter()
+            .position(|(ssrc, _)| *ssrc == old)
+            .map(|i| self.previous_ssrcs.remove(i).1)
+            .unwrap_or_default();
+        replaced.push(old);
+        self.previous_ssrcs.push((new, replaced));
+        self.last_returned_parameters = None;
+        self.sync_tracks();
+        primary
+    }
+
+    /// The SSRCs `ssrc` replaced after collisions (`replace_ssrc`), oldest first.
+    pub(crate) fn previous_ssrcs(&self, ssrc: SSRC) -> &[SSRC] {
+        self.previous_ssrcs
+            .iter()
+            .find(|(new, _)| *new == ssrc)
+            .map_or(&[], |(_, replaced)| replaced.as_slice())
+    }
+
+    /// The SSRCs collisions moved the sender to (`replace_ssrc`).
+    pub(crate) fn replacement_ssrcs(&self) -> impl Iterator<Item = SSRC> + '_ {
+        self.previous_ssrcs.iter().map(|(new, _)| *new)
+    }
+
+    /// The SSRC a packet the application wrote with `ssrc` is sent with: the one a collision
+    /// moved it to, else `ssrc`.
+    pub(crate) fn current_ssrc(&self, ssrc: SSRC) -> SSRC {
+        self.previous_ssrcs
+            .iter()
+            .find(|(_, replaced)| replaced.contains(&ssrc))
+            .map_or(ssrc, |(new, _)| *new)
     }
 
     /// Whether `ssrc` is the SSRC of an encoding an answer removed (`apply_simulcast_answer`).

@@ -2379,6 +2379,9 @@ impl RTCPeerConnection {
                 }
             }
 
+            // A remote description that describes one of this side's SSRCs (RFC 5576 5).
+            self.resolve_signalled_ssrc_collisions(parsed_remote_description);
+
             // What the remote side says about bandwidth, section by section.
             self.apply_remote_bandwidth(parsed_remote_description);
 
