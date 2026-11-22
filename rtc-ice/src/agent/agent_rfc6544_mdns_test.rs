@@ -198,8 +198,8 @@ fn test_peer_reflexive_address_is_not_in_statistics_unless_signalled() {
     assert_eq!(stats[0].ip, "", "the address is withheld");
     assert!(!a.is_signalled_remote_ip(addr(REMOTE_A).ip()));
 
-    // The name resolving to that address does not make it "signalled": the candidate that
-    // replaces the learned one shows its name.
+    // The name resolves to that very address: the candidate takes the learned one's place and
+    // shows its name, never the address.
     a.trigger_request_connectivity_check(vec![{
         let mut c = resolved_mdns_candidate("192.168.0.3");
         c.port = addr(REMOTE_A).port();
@@ -209,6 +209,16 @@ fn test_peer_reflexive_address_is_not_in_statistics_unless_signalled() {
     let stats = a.get_remote_candidates_stats(now);
     assert_eq!(stats.len(), 1);
     assert_eq!(stats[0].ip, MDNS_NAME);
+    // A check from another port of that address now teaches nothing the agent did not
+    // resolve itself: that learned candidate's address is shown.
+    let request = peer_request(
+        &a,
+        vec![Box::new(AttrControlling(1)), Box::new(PriorityAttr(1000))],
+    );
+    deliver(&mut a, now, &request, "192.168.0.3:2999").unwrap();
+    let stats = a.get_remote_candidates_stats(now);
+    assert_eq!(stats[1].candidate_type, CandidateType::PeerReflexive);
+    assert_eq!(stats[1].ip, "192.168.0.3");
 
     // An address the peer signals is shown, on a learned candidate too.
     let mut b = started_agent(now, config(false), &["192.168.0.3:9999"]);
