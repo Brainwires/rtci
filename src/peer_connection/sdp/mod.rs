@@ -2387,8 +2387,11 @@ pub(crate) fn inherit_session_extmap(desc: &mut SessionDescription) {
 /// The ids of the extended range (4096 to 4351) are left out: they may be repeated for
 /// alternatives (section 7). Checked after the session-level mappings are inherited.
 pub(crate) fn check_extmap_ids(desc: &SessionDescription) -> Result<()> {
-    type Ext = (String, bool, Option<String>);
-    let sections: Vec<(Option<String>, Vec<(u16, Ext)>)> = desc
+    // (URI, encrypted form, attributes) under an id.
+    type Mapping = (u16, (String, bool, Option<String>));
+    // A section's mid and its mappings.
+    type Section = (Option<String>, Vec<Mapping>);
+    let sections: Vec<Section> = desc
         .media_descriptions
         .iter()
         .filter(|m| {
@@ -2407,7 +2410,7 @@ pub(crate) fn check_extmap_ids(desc: &SessionDescription) -> Result<()> {
         mid.as_deref()
             .and_then(|mid| groups.iter().position(|g| g.contains(&mid)))
     };
-    let mut scopes: HashMap<(Option<usize>, usize), Vec<(u16, Ext)>> = HashMap::new();
+    let mut scopes: HashMap<(Option<usize>, usize), Vec<Mapping>> = HashMap::new();
     for (n, (mid, lines)) in sections.iter().enumerate() {
         // A bundled section shares the group's id space; any other has its own.
         let scope = match group_of(mid) {
@@ -3422,6 +3425,52 @@ fn rtp_extensions_from_media_description_reads_each_extmap_line() {
     let extensions = rtp_extensions_from_media_description(&bogus).unwrap();
     assert_eq!(extensions.len(), 1);
     assert_eq!(extensions["urn:ietf:params:rtp-hdrext:sdes:mid"].id, 16);
+}
+
+/// RFC 6904 section 4: an encrypted mapping applies only to media with an SRTP-based profile
+/// ("it MUST be specified only for media that use SRTP-based RTP profiles"; a session-level
+/// one "MUST be ignored for all other (non-SRTP or non-RTP) media"), never to the `encrypt`
+/// URI itself ("MUST NOT be recursively applied to itself"), and is preferred to the clear
+/// form of the same extension (section 4.1), which an answer marks inactive.
+#[test]
+fn encrypted_mappings_apply_to_srtp_media_only_and_are_preferred() {
+    let section = |protos: &[&str], lines: &[&str]| {
+        let mut m = MediaDescription::default();
+        m.media_name.media = "audio".to_owned();
+        m.media_name.protos = protos.iter().map(|p| (*p).to_owned()).collect();
+        for line in lines {
+            m = m.with_value_attribute(ATTR_KEY_EXT_MAP.to_owned(), (*line).to_owned());
+        }
+        m
+    };
+    let level = "urn:ietf:params:rtp-hdrext:ssrc-audio-level";
+    let both = [
+        "3 urn:ietf:params:rtp-hdrext:ssrc-audio-level",
+        "4 urn:ietf:params:rtp-hdrext:encrypt urn:ietf:params:rtp-hdrext:ssrc-audio-level vad=off",
+        "5 urn:ietf:params:rtp-hdrext:encrypt urn:ietf:params:rtp-hdrext:encrypt",
+    ];
+
+    let srtp = section(&["UDP", "TLS", "RTP", "SAVPF"], &both);
+    let chosen = rtp_extensions_from_media_description(&srtp).unwrap();
+    assert_eq!(
+        chosen[level],
+        SectionExtension {
+            id: 4,
+            encrypted: true,
+            attributes: Some("vad=off".to_owned()),
+            direction: sdp::direction::Direction::Unspecified,
+        }
+    );
+    assert!(!chosen.contains_key(ENCRYPT_URI), "{chosen:?}");
+    assert_eq!(
+        superseded_clear_extensions(&srtp).unwrap(),
+        vec![(3, level.to_owned())]
+    );
+
+    let plain = section(&["RTP", "AVPF"], &both);
+    let chosen = rtp_extensions_from_media_description(&plain).unwrap();
+    assert_eq!((chosen[level].id, chosen[level].encrypted), (3, false));
+    assert!(superseded_clear_extensions(&plain).unwrap().is_empty());
 }
 
 #[test]
