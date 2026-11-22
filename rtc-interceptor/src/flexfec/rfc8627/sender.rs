@@ -6,6 +6,7 @@ use super::encoder::{FlexFecEncoder, FlexFecProtection};
 use super::params::FlexFecParameters;
 use crate::Interceptor;
 use crate::stream_info::StreamInfo;
+use crate::wire_image::{WireImageTap, WireImages, wire_image_tap};
 use crate::{Attribute, AttributedPacket, Packet, TaggedPacket};
 use sansio::Protocol;
 use shared::TransportContext;
@@ -121,6 +122,7 @@ impl FlexFecSendBuilder {
             initial_timestamp: self.initial_timestamp,
             streams: HashMap::new(),
             repair_streams: HashMap::new(),
+            wire: None,
             read_queue: VecDeque::new(),
             write_queue: VecDeque::new(),
         }
@@ -181,6 +183,9 @@ pub struct FlexFecSendInterceptor {
     streams: HashMap<u32, ProtectedStream>,
     /// Keyed by the repair SSRC.
     repair_streams: HashMap<u32, RepairStream>,
+    /// Where the source packets are read from once [`wire_tap`](Self::wire_tap) was called: as
+    /// they left, below everything that edits them.
+    wire: Option<WireImages>,
     read_queue: VecDeque<TaggedPacket>,
     write_queue: VecDeque<TaggedPacket>,
 }
@@ -234,57 +239,32 @@ impl FlexFecSendInterceptor {
     }
 }
 
-impl Protocol<TaggedPacket, TaggedPacket, ()> for FlexFecSendInterceptor {
-    type Rout = TaggedPacket;
-    type Wout = TaggedPacket;
-    type Eout = ();
-    type Error = Error;
-    type Time = Instant;
-
-    fn handle_read(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
-        if self.retransmissions
-            && let Packet::Rtcp(rtcp_packets) = &msg.message.packet
-        {
-            let mut requests = Vec::new();
-            for rtcp_packet in rtcp_packets {
-                if let Some(nack) = rtcp_packet
-                    .as_any()
-                    .downcast_ref::<rtcp::transport_feedbacks::transport_layer_nack::TransportLayerNack>()
-                    && self.streams.contains_key(&nack.media_ssrc)
-                {
-                    let mut sequence_numbers: Vec<u16> = nack
-                        .nacks
-                        .iter()
-                        .flat_map(|pair| pair.packet_list())
-                        .collect();
-                    sequence_numbers.sort_unstable();
-                    sequence_numbers.dedup();
-                    requests.push((nack.media_ssrc, sequence_numbers));
-                }
-            }
-            for (media_ssrc, sequence_numbers) in requests {
-                self.retransmit(msg.now, media_ssrc, sequence_numbers);
-            }
+impl FlexFecSendInterceptor {
+    /// The tap this encoder reads the source packets from, to register at
+    /// [`Slot::FecWireImage`](crate::Slot::FecWireImage).
+    ///
+    /// FEC covers the source packets as they are on the wire (RFC 8627 section 4.1). This
+    /// interceptor generates packets, so it sits above the pacer, where a source packet is not
+    /// final: the TWCC sender below writes the transport-wide sequence number into it, adding
+    /// the header extension when the packet has none. With the tap registered the encoder
+    /// protects the packet that left (and keeps that image for retransmission), and the repair
+    /// packets still enter the chain here, so they are paced, numbered and recorded. Without a
+    /// tap the encoder reads the packets as they pass this slot, which is the wire image only
+    /// when nothing below edits them.
+    pub fn wire_tap(&mut self) -> WireImageTap {
+        let (tap, images) = wire_image_tap();
+        for ssrc in self.streams.keys() {
+            images.watch(*ssrc);
         }
-        self.read_queue.push_back(msg);
-        Ok(())
+        self.wire = Some(images);
+        tap
     }
 
-    fn poll_read(&mut self) -> Option<Self::Rout> {
-        self.read_queue.pop_front()
-    }
-
-    fn handle_write(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
-        let Packet::Rtp(rtp_packet) = &msg.message.packet else {
-            self.write_queue.push_back(msg);
-            return Ok(());
-        };
-        let now = msg.now;
-        let transport = msg.transport;
-
+    /// Add one source packet to its stream's block and queue the repair packets a full block
+    /// yields.
+    fn protect(&mut self, now: Instant, transport: TransportContext, rtp_packet: &rtp::Packet) {
         let Some(stream) = self.streams.get_mut(&rtp_packet.header.ssrc) else {
-            self.write_queue.push_back(msg);
-            return Ok(());
+            return;
         };
 
         if self.retransmissions {
@@ -328,9 +308,6 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for FlexFecSendInterceptor {
             }
         }
 
-        // The source packet goes out first, as it was handed over; the repair packets protect
-        // what has already left.
-        self.write_queue.push_back(msg);
         for packet in repair_packets {
             self.write_queue.push_back(TaggedPacket {
                 now,
@@ -338,10 +315,87 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for FlexFecSendInterceptor {
                 message: AttributedPacket::new(Packet::Rtp(packet)),
             });
         }
+    }
+
+    /// Protect the source packets that left since the last call.
+    fn protect_wire_images(&mut self) {
+        let Some(images) = self.wire.as_ref().map(WireImages::take) else {
+            return;
+        };
+        for image in images {
+            if let Packet::Rtp(rtp_packet) = &image.message.packet {
+                // `image.now` is the instant the pacer released the packet.
+                self.protect(image.now, image.transport, rtp_packet);
+            }
+        }
+    }
+}
+
+impl Protocol<TaggedPacket, TaggedPacket, ()> for FlexFecSendInterceptor {
+    type Rout = TaggedPacket;
+    type Wout = TaggedPacket;
+    type Eout = ();
+    type Error = Error;
+    type Time = Instant;
+
+    fn handle_read(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
+        if self.retransmissions
+            && let Packet::Rtcp(rtcp_packets) = &msg.message.packet
+        {
+            let mut requests = Vec::new();
+            for rtcp_packet in rtcp_packets {
+                if let Some(nack) = rtcp_packet
+                    .as_any()
+                    .downcast_ref::<rtcp::transport_feedbacks::transport_layer_nack::TransportLayerNack>()
+                    && self.streams.contains_key(&nack.media_ssrc)
+                {
+                    let mut sequence_numbers: Vec<u16> = nack
+                        .nacks
+                        .iter()
+                        .flat_map(|pair| pair.packet_list())
+                        .collect();
+                    sequence_numbers.sort_unstable();
+                    sequence_numbers.dedup();
+                    requests.push((nack.media_ssrc, sequence_numbers));
+                }
+            }
+            for (media_ssrc, sequence_numbers) in requests {
+                self.retransmit(msg.now, media_ssrc, sequence_numbers);
+            }
+        }
+        self.read_queue.push_back(msg);
+        Ok(())
+    }
+
+    fn poll_read(&mut self) -> Option<Self::Rout> {
+        self.read_queue.pop_front()
+    }
+
+    fn handle_write(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
+        if self.wire.is_some() {
+            // The packets are protected as they leave, from the tap: here they only pass.
+            self.protect_wire_images();
+            self.write_queue.push_back(msg);
+            return Ok(());
+        }
+
+        let Packet::Rtp(rtp_packet) = &msg.message.packet else {
+            self.write_queue.push_back(msg);
+            return Ok(());
+        };
+        let rtp_packet = rtp_packet.clone();
+        let now = msg.now;
+        let transport = msg.transport;
+
+        // The source packet goes out first, as it was handed over; the repair packets protect
+        // what has already left.
+        self.write_queue.push_back(msg);
+        self.protect(now, transport, &rtp_packet);
         Ok(())
     }
 
     fn poll_write(&mut self) -> Option<TaggedPacket> {
+        self.protect_wire_images();
         self.write_queue.pop_front()
     }
 
@@ -403,9 +457,15 @@ impl Interceptor for FlexFecSendInterceptor {
                 last_retransmit: HashMap::new(),
             },
         );
+        if let Some(images) = &self.wire {
+            images.watch(info.ssrc);
+        }
     }
 
     fn unbind_local_stream(&mut self, info: &StreamInfo) {
+        if let Some(images) = &self.wire {
+            images.unwatch(info.ssrc);
+        }
         let Some(stream) = self.streams.remove(&info.ssrc) else {
             return;
         };
