@@ -1768,8 +1768,10 @@ impl RTCPeerConnection {
                     }
                 }
 
+                // The description's candidate lines: candidates the application supplied, as
+                // much as those it trickles.
                 for candidate in candidates {
-                    self.ice_transport_mut().add_remote_candidate(candidate)?;
+                    self.add_signalled_remote_candidate(candidate)?;
                 }
 
                 if !transports_started {
@@ -2999,9 +3001,32 @@ impl RTCPeerConnection {
         self.retire_rtp_stream_stats();
         // Update codec stats from transceivers before taking snapshot
         self.update_codec_stats();
+        // The media source of each track a sender has attached
+        self.update_media_source_stats();
         self.pipeline_context
             .stats
             .snapshot_with_selector(now, selector)
+    }
+
+    /// [`get_stats`](Self::get_stats), refusing a selector that is not this connection's.
+    ///
+    /// W3C `getStats(selector)` rejects with `InvalidAccessError` when the selector matches no
+    /// sender or receiver of the connection; `get_stats` answers such a selector with an empty
+    /// report, which cannot be told from a sender that has no stream yet.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidAccessError`] when `selector` names a sender or receiver this peer
+    /// connection does not have.
+    pub fn try_get_stats(
+        &mut self,
+        now: Instant,
+        selector: StatsSelector,
+    ) -> Result<RTCStatsReport> {
+        if !self.stats_selector_is_ours(&selector) {
+            return Err(Error::InvalidAccessError);
+        }
+        Ok(self.get_stats(now, selector))
     }
 }
 

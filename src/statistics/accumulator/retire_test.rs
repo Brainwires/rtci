@@ -3,6 +3,7 @@
 use super::RTCStatsAccumulator;
 use crate::rtp_transceiver::rtp_sender::RtpCodecKind;
 use std::collections::HashSet;
+use std::time::Instant;
 
 fn inbound(stats: &mut RTCStatsAccumulator, ssrc: u32, rtx: Option<u32>, fec: Option<u32>) {
     stats.get_or_create_inbound_rtp_streams(ssrc, RtpCodecKind::Video, "t", "0", rtx, fec, 0);
@@ -19,9 +20,10 @@ fn a_changing_rtx_ssrc_leaves_one_reverse_entry() {
         stats.update_inbound_rtx_ssrc(1, rtx);
     }
     assert_eq!(stats.inbound_rtx_ssrc_to_primary.len(), 1);
-    assert!(stats.on_rtx_packet_received_if_rtx(1_999, 10));
-    assert!(!stats.on_rtx_packet_received_if_rtx(2, 10));
-    assert!(!stats.on_rtx_packet_received_if_rtx(1_000, 10));
+    let now = Instant::now();
+    assert!(stats.on_rtp_received(1_999, 22, 0, now));
+    assert!(!stats.on_rtp_received(2, 22, 0, now));
+    assert!(!stats.on_rtp_received(1_000, 22, 0, now));
     assert_eq!(stats.inbound_rtp_streams[&1].rtx_ssrc, Some(1_999));
 }
 
@@ -38,7 +40,7 @@ fn removing_a_stream_removes_its_reverse_entries() {
     assert!(!stats.inbound_rtx_ssrc_to_primary.contains_key(&2));
     assert!(!stats.fec_ssrc_to_primary.contains_key(&3));
     assert!(
-        stats.on_rtx_packet_received_if_rtx(5, 10),
+        stats.on_rtp_received(5, 22, 0, Instant::now()),
         "another stream's entry stays"
     );
 
@@ -92,14 +94,23 @@ fn inbound_and_outbound_rtx_ssrcs_do_not_collide() {
     stats.get_or_create_outbound_rtp_streams(10, RtpCodecKind::Video, "0", "", 0, Some(99), 0);
     inbound(&mut stats, 20, Some(99), None);
 
-    assert!(stats.on_rtx_packet_sent_if_rtx(99, 100));
-    assert!(stats.on_rtx_packet_received_if_rtx(99, 50));
+    // A retransmission going out on our RTX SSRC 99: 2 bytes of original sequence number and
+    // 100 of the packet it repeats. A padding-only packet coming in on the remote's RTX SSRC,
+    // also 99.
+    let now = Instant::now();
+    stats.on_rtp_sent(99, 1, 12, 102, false, now);
+    assert!(stats.on_rtp_received(99, 62, 0, now));
+    let outbound = &stats.outbound_rtp_streams[&10];
+    assert_eq!(outbound.retransmitted_packets_sent, 1);
+    assert_eq!(outbound.retransmitted_bytes_sent, 100);
     assert_eq!(
-        stats.outbound_rtp_streams[&10].retransmitted_bytes_sent,
-        100
+        (outbound.packets_sent, outbound.bytes_sent),
+        (1, 100),
+        "the RTX packet is a packet of the stream, and its retransmission a subset of it"
     );
-    assert_eq!(
-        stats.inbound_rtp_streams[&20].retransmitted_bytes_received,
-        50
-    );
+    assert_eq!(outbound.header_bytes_sent, 14);
+    let inbound = &stats.inbound_rtp_streams[&20];
+    assert_eq!(inbound.packets_received, 1);
+    assert_eq!(inbound.header_bytes_received, 62);
+    assert_eq!(inbound.retransmitted_packets_received, 0);
 }

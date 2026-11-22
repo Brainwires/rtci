@@ -104,9 +104,9 @@ impl<'a> DataChannelHandler<'a> {
             return;
         }
         let channel_id = dc.id;
-        self.stats.peer_connection.on_data_channel_closed();
-        // The channel is gone from the registry: drop its statistics with it.
-        self.stats.data_channels.remove(&channel_id);
+        // The channel is gone from the registry: drop its statistics with it, and count it as
+        // closed if it had been open.
+        self.stats.on_data_channel_gone(channel_id);
         self.ctx.event_outs.push_back(TaggedRTCEventInternal {
             now,
             event: RTCEventInternal::RTCPeerConnectionEvent(RTCPeerConnectionEvent::OnDataChannel(
@@ -201,7 +201,7 @@ impl<'a> DataChannelHandler<'a> {
         self.stats.peer_connection.on_data_channel_opened();
         self.stats
             .get_or_create_data_channel(id, dc.label(), dc.protocol())
-            .on_state_changed(RTCDataChannelState::Open);
+            .on_opened();
         if let Some(stream_id) = stream_id {
             self.stats.set_data_channel_stream_id(id, stream_id);
         }
@@ -693,9 +693,9 @@ impl<'a>
                     data_channel.close()?;
                 }
 
-                self.stats.peer_connection.on_data_channel_closed();
-                // Closed for good: its statistics go with it.
-                self.stats.data_channels.remove(&id);
+                // Closed for good: its statistics go with it. It never opened, so it is not
+                // one of `dataChannelsClosed`.
+                self.stats.on_data_channel_gone(id);
 
                 dc.close_emitted = true;
                 self.ctx.event_outs.push_back(TaggedRTCEventInternal {
@@ -1275,7 +1275,7 @@ mod tests {
     }
 
     /// An in-band channel whose ACK never arrives must time out: it transitions
-    /// to Closed, fires OnClose and is counted exactly once (closed without opened).
+    /// to Closed and fires OnClose once. It never opened, so it is not counted as closed.
     #[test]
     fn in_band_channel_times_out_without_ack() {
         let now = Instant::now();
@@ -1364,8 +1364,14 @@ mod tests {
             .count();
         assert_eq!(closes, 1, "exactly one OnClose for the timed-out channel");
 
+        // webrtc-stats `dataChannelsClosed` counts the channels that left the `open` state:
+        // this one never was in it, and opened minus closed (the channels open now) stays 0.
         assert_eq!(stats.peer_connection.data_channels_opened, 0);
-        assert_eq!(stats.peer_connection.data_channels_closed, 1);
+        assert_eq!(stats.peer_connection.data_channels_closed, 0);
+        assert!(
+            stats.data_channels.is_empty(),
+            "its statistics went with it"
+        );
 
         // No further deadlines remain.
         {

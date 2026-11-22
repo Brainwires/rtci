@@ -24,12 +24,13 @@ pub struct RTCDataChannelStats {
     #[serde(flatten)]
     pub stats: RTCStats,
 
-    /// The data channel identifier.
+    /// The data channel identifier: the SCTP stream ID used for this data channel.
     ///
-    /// This is the SCTP stream ID used for this data channel. It is 0 while the channel has
-    /// not been assigned one, which per RFC 8832 section 6 cannot happen before the DTLS role
-    /// is resolved.
-    pub data_channel_identifier: StreamId,
+    /// `None`, and left out of the JSON, while the channel has not been assigned one (its
+    /// `RTCDataChannel.id` is null then), which per RFC 8832 section 6 cannot happen before
+    /// the DTLS role is resolved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_channel_identifier: Option<StreamId>,
 
     /// The label assigned to the data channel.
     ///

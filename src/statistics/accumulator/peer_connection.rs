@@ -11,9 +11,10 @@ use std::time::Instant;
 /// the number of data channels opened and closed.
 #[derive(Debug, Default)]
 pub struct PeerConnectionStatsAccumulator {
-    /// Total number of data channels opened.
+    /// Number of data channels that entered the `open` state.
     pub data_channels_opened: u32,
-    /// Total number of data channels closed.
+    /// Number of data channels that left the `open` state; one that closed without ever
+    /// opening is not counted, so opened minus closed is the number open now.
     pub data_channels_closed: u32,
 }
 
@@ -23,7 +24,7 @@ impl PeerConnectionStatsAccumulator {
         self.data_channels_opened += 1;
     }
 
-    /// Called when a data channel is closed.
+    /// Called when a data channel that was open is closed.
     pub fn on_data_channel_closed(&mut self) {
         self.data_channels_closed += 1;
     }

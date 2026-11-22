@@ -430,6 +430,12 @@ impl RTCRtpSenderInternal {
         infos
     }
 
+    /// The sender's encodings as `set_parameters` last left them (their `active` flags are what
+    /// the outbound streams' statistics report).
+    pub(crate) fn send_encodings(&self) -> &[RTCRtpEncodingParameters] {
+        &self.send_encodings
+    }
+
     /// The streams this sender bound to the interceptors, as they were bound.
     pub(crate) fn bound_streams(&self) -> &[StreamInfo] {
         &self.bound_streams

@@ -206,6 +206,14 @@ impl<'a>
                     // Update transport stats for ICE state change
                     // Use the original ice state which converts to RTCIceTransportState
                     self.stats.transport.on_ice_state_changed(state.into());
+                    // A transport that failed or closed has no selected pair any more.
+                    if matches!(
+                        state,
+                        ::ice::state::ConnectionState::Failed
+                            | ::ice::state::ConnectionState::Closed
+                    ) {
+                        self.stats.on_selected_candidate_pair(None);
+                    }
 
                     self.ctx.event_outs.push_back(TaggedRTCEventInternal {
                         now,
@@ -236,7 +244,7 @@ impl<'a>
                     let key = format!("RTCIceCandidatePair_{}_{}", local.id(), remote.id());
                     self.ctx.selected_pair_key = Some(key.clone());
                     // Update transport stats for selected candidate pair change
-                    self.stats.transport.on_selected_candidate_pair_changed(key);
+                    self.stats.on_selected_candidate_pair(Some(key));
 
                     self.ctx.event_outs.push_back(TaggedRTCEventInternal {
                         now,

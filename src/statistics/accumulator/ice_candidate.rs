@@ -41,6 +41,10 @@ pub struct IceCandidateAccumulator {
     pub username_fragment: String,
     /// The TCP type (active, passive, so) for TCP candidates.
     pub tcp_type: RTCIceTcpCandidateType,
+    /// A remote candidate the application supplied (`addIceCandidate`, or a candidate line of
+    /// a remote description), as opposed to one the agent learned from a connectivity check:
+    /// only an address the application supplied is shown on a remote candidate.
+    pub signalled: bool,
 }
 
 impl IceCandidateAccumulator {

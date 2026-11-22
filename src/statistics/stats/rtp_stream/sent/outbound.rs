@@ -13,11 +13,6 @@ use super::RTCSentRtpStreamStats;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// `skip_serializing_if` for the congestion controller's estimate: 0 is "no estimate yet".
-fn no_estimate(bits_per_second: &f64) -> bool {
-    *bits_per_second == 0.0
-}
-
 /// Statistics for a locally sent outbound RTP stream.
 ///
 /// This struct corresponds to the `RTCOutboundRtpStreamStats` dictionary in the
@@ -59,28 +54,29 @@ pub struct RTCOutboundRtpStreamStats {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encoding_index: Option<u32>,
 
-    /// Total bytes sent in RTP headers.
+    /// Total RTP header and padding bytes sent, those of retransmissions (on this SSRC or the
+    /// RTX SSRC) included.
     pub header_bytes_sent: u64,
 
-    /// Number of retransmitted packets sent.
+    /// Number of retransmitted packets sent, on this SSRC or on the RTX SSRC; a subset of
+    /// `packets_sent`.
     pub retransmitted_packets_sent: u64,
 
-    /// Bytes sent via retransmission.
+    /// Payload bytes of the retransmitted packets sent, without the RTX original sequence
+    /// number; a subset of `bytes_sent`.
     pub retransmitted_bytes_sent: u64,
 
     /// SSRC of the RTX stream; left out of the JSON when there is none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rtx_ssrc: Option<u32>,
 
-    /// The congestion controller's target bitrate in bits per second.
+    /// The encoder's current target for this stream, in bits per second: what the application
+    /// supplied, or else the congestion controller's estimate while the connection sends a
+    /// single stream.
     ///
-    /// 0, and left out of the JSON, until a congestion controller has produced an estimate.
-    #[serde(default, skip_serializing_if = "no_estimate")]
-    pub target_bitrate: f64,
-
-    /// Cumulative target encoded bytes (application-provided).
+    /// `None`, and left out of the JSON, while there is neither.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub total_encoded_bytes_target: Option<u64>,
+    pub target_bitrate: Option<f64>,
 
     /// Width of the last encoded frame in pixels (application-provided).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -114,11 +110,12 @@ pub struct RTCOutboundRtpStreamStats {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub qp_sum: Option<u64>,
 
-    /// PSNR sums by component; needs an encoder, left out of the JSON.
+    /// Cumulative PSNR of the encoded frames, under the keys "y", "u" and "v"
+    /// (application-provided).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub psnr_sum: Option<HashMap<String, f64>>,
 
-    /// Number of PSNR measurements; needs an encoder, left out of the JSON.
+    /// Number of frames `psnr_sum` covers (application-provided).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub psnr_measurements: Option<u64>,
 
@@ -126,16 +123,17 @@ pub struct RTCOutboundRtpStreamStats {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_encode_time: Option<f64>,
 
-    /// Total time packets spent buffered before being sent, in seconds; the engine sends what
-    /// it is given at once and has no pacer, so this is left out of the JSON.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub total_packet_send_delay: Option<f64>,
+    /// Total time the stream's packets spent in the engine before they were handed out for
+    /// sending, in seconds: from `write_rtp` to `poll_write`, which is the time an interceptor
+    /// (a pacer) held them. Added when `packets_sent` counts the packet.
+    pub total_packet_send_delay: f64,
 
     /// The current quality limitation reason (application-provided).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quality_limitation_reason: Option<RTCQualityLimitationReason>,
 
-    /// Time spent in each quality limitation state; needs an encoder, left out of the JSON.
+    /// Seconds spent in each quality limitation state, under the keys "none", "cpu",
+    /// "bandwidth" and "other" (application-provided).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quality_limitation_durations: Option<HashMap<String, f64>>,
 
@@ -146,11 +144,15 @@ pub struct RTCOutboundRtpStreamStats {
     /// Number of NACK packets received.
     pub nack_count: u32,
 
-    /// Number of FIR packets received.
-    pub fir_count: u32,
+    /// Number of FIR packets received; video only, `None` (and left out of the JSON) for
+    /// audio.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fir_count: Option<u32>,
 
-    /// Number of PLI packets received.
-    pub pli_count: u32,
+    /// Number of PLI packets received; video only, `None` (and left out of the JSON) for
+    /// audio.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pli_count: Option<u32>,
 
     /// Name of the encoder implementation (application-provided).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -160,7 +162,8 @@ pub struct RTCOutboundRtpStreamStats {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub power_efficient_encoder: Option<bool>,
 
-    /// Whether this stream is currently being sent.
+    /// Whether this stream is configured to be sent: its encoding's
+    /// `RTCRtpEncodingParameters.active`.
     pub active: bool,
 
     /// The scalability mode, e.g. "L1T3" (application-provided).

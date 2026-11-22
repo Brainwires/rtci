@@ -136,21 +136,29 @@ impl<'a> DtlsHandler<'a> {
             self.stats.transport.dtls_cipher = cipher;
         }
 
-        // Register local certificate and set local_certificate_id
+        // Register the local certificate and the certificates it was issued through, and set
+        // local_certificate_id
         if let Some(local_cert) = self.ctx.dtls_transport.certificates.first() {
             let fingerprints =
                 local_cert.get_fingerprints(self.ctx.dtls_transport.crypto_provider.crypto())?;
             if let Some(fp) = fingerprints.first() {
+                let chain: Vec<Vec<u8>> = local_cert
+                    .dtls_certificate
+                    .certificate
+                    .iter()
+                    .map(|der| der.as_ref().to_vec())
+                    .collect();
+                let issuer_certificate_id = self.register_issuers(&chain, "local")?;
                 // Register certificate in accumulator, the DER base64-encoded (webrtc-stats
                 // `base64Certificate`)
-                if let Some(der) = local_cert.dtls_certificate.certificate.first() {
+                if let Some(der) = chain.first() {
                     self.stats.register_certificate(
                         fp.value.clone(),
                         CertificateStatsAccumulator {
                             fingerprint: fp.value.clone(),
                             fingerprint_algorithm: fp.algorithm.clone(),
-                            base64_certificate: base64_encode(der.as_ref()),
-                            issuer_certificate_id: String::new(),
+                            base64_certificate: base64_encode(der),
+                            issuer_certificate_id,
                         },
                     );
                 }
@@ -160,23 +168,11 @@ impl<'a> DtlsHandler<'a> {
             }
         }
 
-        // Register remote certificate and set remote_certificate_id
+        // Register the remote certificate chain and set remote_certificate_id
         if let Some(peer_cert_der) = peer_certificates.first() {
-            // Compute fingerprint from peer certificate
-            let hash = self
-                .ctx
-                .dtls_transport
-                .crypto_provider
-                .crypto()
-                .hash(crypto::HashAlgorithm::Sha256, peer_cert_der)
-                .map_err(|error| Error::Crypto(error.to_string()))?;
-            let fingerprint: String = hash
-                .iter()
-                .map(|b| format!("{:02x}", b))
-                .collect::<Vec<_>>()
-                .join(":");
-
+            let fingerprint = self.sha256_fingerprint(peer_cert_der)?;
             let cert_id = format!("remote-certificate-{}", &fingerprint[..8]);
+            let issuer_certificate_id = self.register_issuers(peer_certificates, "remote")?;
 
             // Register remote certificate in accumulator
             self.stats.register_certificate(
@@ -185,7 +181,7 @@ impl<'a> DtlsHandler<'a> {
                     fingerprint,
                     fingerprint_algorithm: "sha-256".to_string(),
                     base64_certificate: base64_encode(peer_cert_der),
-                    issuer_certificate_id: String::new(),
+                    issuer_certificate_id,
                 },
             );
 
@@ -193,6 +189,47 @@ impl<'a> DtlsHandler<'a> {
             self.stats.transport.remote_certificate_id = cert_id;
         }
         Ok(())
+    }
+
+    /// The SHA-256 fingerprint of a DER certificate, as RFC 8122 writes one (lower case here).
+    fn sha256_fingerprint(&self, der: &[u8]) -> Result<String> {
+        let hash = self
+            .ctx
+            .dtls_transport
+            .crypto_provider
+            .crypto()
+            .hash(crypto::HashAlgorithm::Sha256, der)
+            .map_err(|error| Error::Crypto(error.to_string()))?;
+        Ok(hash
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<Vec<_>>()
+            .join(":"))
+    }
+
+    /// Registers the certificates after the first of `chain` (the ones the end-entity
+    /// certificate was issued through, in the order the handshake carried them), each naming
+    /// the next as its issuer, and returns the id of the first of them: the end-entity
+    /// certificate's `issuerCertificateId` (webrtc-stats 8.22: "the stats object that contains
+    /// the next certificate in the certificate chain"). Empty when the chain is one
+    /// certificate, as a WebRTC certificate usually is.
+    fn register_issuers(&mut self, chain: &[Vec<u8>], side: &str) -> Result<String> {
+        let mut issuer_certificate_id = String::new();
+        for der in chain.iter().skip(1).rev() {
+            let fingerprint = self.sha256_fingerprint(der)?;
+            let id = format!("{side}-issuer-certificate-{fingerprint}");
+            self.stats.register_certificate(
+                id.clone(),
+                CertificateStatsAccumulator {
+                    fingerprint,
+                    fingerprint_algorithm: "sha-256".to_string(),
+                    base64_certificate: base64_encode(der),
+                    issuer_certificate_id,
+                },
+            );
+            issuer_certificate_id = id;
+        }
+        Ok(issuer_certificate_id)
     }
 }
 
@@ -759,7 +796,11 @@ mod tests {
         assert!(context.dtls_transport.get_remote_certificates().is_empty());
 
         // The fingerprint is hashed from these bytes, so any content works.
-        let peer_chain = vec![vec![0x30u8, 0x82, 0x01, 0x0a], vec![0x30, 0x82, 0x02, 0x0b]];
+        let peer_chain = vec![
+            vec![0x30u8, 0x82, 0x01, 0x0a],
+            vec![0x30, 0x82, 0x02, 0x0b],
+            vec![0x30, 0x82, 0x03, 0x0c],
+        ];
 
         DtlsHandler::new(&mut context, &mut stats).update_dtls_stats_from_profile(
             SrtpProtectionProfile::Srtp_Aead_Aes_128_Gcm,
@@ -772,6 +813,25 @@ mod tests {
             context.dtls_transport.get_remote_certificates(),
             "the whole chain is retained, not just the first entry the stats path consumes"
         );
+
+        // webrtc-stats 8.22 `issuerCertificateId`: every certificate of the chain has a stats
+        // object, and each names the next one as its issuer; the last names none.
+        assert_eq!(
+            stats.certificates.len(),
+            4,
+            "the peer's three and the transport's own"
+        );
+        let mut id = stats.transport.remote_certificate_id.clone();
+        for der in &peer_chain {
+            let certificate = stats
+                .certificates
+                .get(&id)
+                .unwrap_or_else(|| panic!("no certificate object {id}"));
+            assert_eq!(certificate.base64_certificate, base64_encode(der));
+            assert_eq!(certificate.fingerprint_algorithm, "sha-256");
+            id = certificate.issuer_certificate_id.clone();
+        }
+        assert_eq!(id, "", "the last certificate of the chain names no issuer");
         Ok(())
     }
 }

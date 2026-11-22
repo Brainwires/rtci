@@ -57,7 +57,7 @@ impl RTCStatsAccumulator {
             if let Some(ccfb) = packet.as_any().downcast_ref::<CcFeedbackReport>() {
                 for block in &ccfb.report_blocks {
                     if let Some(stream) = self.outbound_rtp_streams.get_mut(&block.media_ssrc) {
-                        stream.on_ccfb_block_received(block);
+                        stream.on_ccfb_block_received(block, now);
                     }
                 }
             }
@@ -68,6 +68,7 @@ impl RTCStatsAccumulator {
                 stream.on_rtcp_sr_received(
                     u64::from(sr.packet_count),
                     u64::from(sr.octet_count),
+                    sr.ntp_time,
                     now,
                 );
             }

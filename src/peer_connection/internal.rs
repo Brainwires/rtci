@@ -12,6 +12,7 @@ use crate::peer_connection::sdp::{
 };
 use crate::peer_connection::state::signaling_state::check_next_signaling_state;
 use crate::peer_connection::transport::dtls::state::RTCDtlsTransportState;
+use crate::peer_connection::transport::ice::candidate::RTCIceServerTransportProtocol;
 use crate::peer_connection::transport::ice::candidate::{
     RTCIceCandidate, rtc_ice_candidates_from_ice_candidates,
 };
@@ -196,7 +197,9 @@ impl RTCPeerConnection {
             data_read_outs: VecDeque::new(),
             write_outs: VecDeque::new(),
             event_outs: VecDeque::new(),
-            stats: RTCStatsAccumulator::with_ecn(setting_engine.ecn),
+            // The salt of the report ids, drawn per connection so an application cannot
+            // predict them (webrtc 8.4).
+            stats: RTCStatsAccumulator::for_connection(setting_engine.ecn, rand::rng().random()),
             now,
         };
 
@@ -1688,14 +1691,6 @@ impl RTCPeerConnection {
             .generate_restart_credentials(local_ufrag, local_pwd)?;
         self.ice_transport_mut().ice_gathering_state = RTCIceGatheringState::Gathering;
 
-        // Update stats with the credentials the offer will carry.
-        if let Ok(params) = self.ice_transport().get_local_parameters() {
-            self.pipeline_context
-                .stats
-                .transport
-                .ice_local_username_fragment = params.username_fragment;
-        }
-
         Ok(())
     }
 
@@ -1768,26 +1763,45 @@ impl RTCPeerConnection {
             protocol: candidate.protocol.to_string(),
             candidate_type: candidate.typ,
             priority: candidate.priority,
+            // webrtc-stats `relayProtocol`: how the endpoint reaches the TURN server of a local
+            // relay candidate. The application does that, so the candidate does not say; the
+            // TURN URL it was gathered from does (RFC 7065).
+            relay_protocol: match candidate.relay_protocol {
+                RTCIceServerTransportProtocol::Unspecified
+                    if candidate.typ == RTCIceCandidateType::Relay =>
+                {
+                    relay_protocol_of_turn_url(&url_for_stats)
+                }
+                protocol => protocol,
+            },
             url: url_for_stats,
-            relay_protocol: candidate.relay_protocol,
             foundation: candidate.foundation.clone(),
             related_address: candidate.related_address.clone(),
             related_port: candidate.related_port,
             username_fragment: username_fragment.to_string(),
             tcp_type: candidate.tcp_type,
+            signalled: false,
         }
     }
 
     pub(super) fn add_ice_remote_candidate(&mut self, candidate_value: &str) -> Result<()> {
         let candidate: Candidate = unmarshal_candidate(candidate_value)?;
+        self.add_signalled_remote_candidate(candidate)
+    }
 
+    /// Gives the ICE agent a remote candidate the application supplied, through
+    /// `add_remote_candidate` or in a candidate line of a remote description, and registers
+    /// its statistics.
+    pub(super) fn add_signalled_remote_candidate(&mut self, candidate: Candidate) -> Result<()> {
         // Register remote candidate with stats accumulator, only once the agent keeps it (one
         // past its cap is dropped there and here).
         // Per W3C spec, URL must NOT be present for remote candidates
         let rtc_candidate: RTCIceCandidate = (&candidate).into();
         let candidate_id = remote_candidate_stats_id(&rtc_candidate.id);
         let (ufrag, _) = self.ice_transport().get_remote_user_credentials();
-        let accumulator = self.candidate_to_accumulator(&rtc_candidate, ufrag, None);
+        let mut accumulator = self.candidate_to_accumulator(&rtc_candidate, ufrag, None);
+        // The application supplied this candidate, so its address may be shown in the stats.
+        accumulator.signalled = true;
 
         if self.ice_transport_mut().add_remote_candidate(candidate)? {
             self.stats_mut()
@@ -1902,13 +1916,11 @@ impl RTCPeerConnection {
             }
         }
         if !unregistered_remote.is_empty() {
-            let ufrag = self
-                .ice_transport()
-                .get_remote_user_credentials()
-                .0
-                .to_owned();
             for candidate in unregistered_remote {
-                let accumulator = self.candidate_to_accumulator(&candidate, &ufrag, None);
+                // Learned from a check, never signalled: no username fragment was given for
+                // it (webrtc-stats `usernameFragment`), and its address is not shown
+                // (`RTCStatsAccumulator::remote_candidate_entries`).
+                let accumulator = self.candidate_to_accumulator(&candidate, "", None);
                 self.stats_mut().register_remote_candidate(
                     remote_candidate_stats_id(&candidate.id),
                     accumulator,
@@ -1919,6 +1931,64 @@ impl RTCPeerConnection {
         // Sync each pair's STUN stats, state and nomination from the agent, and drop the pairs
         // it no longer holds.
         self.pipeline_context.stats.sync_ice_candidate_pairs(&pairs);
+
+        // And the candidates it no longer holds (an ICE restart lets go of them), unless a
+        // pair that is still reported names them.
+        let agent = &self
+            .pipeline_context
+            .ice_handler_context
+            .ice_transport
+            .agent;
+        let local_held: HashSet<String> = agent
+            .get_local_candidates()
+            .iter()
+            .map(|c| local_candidate_stats_id(c.id()))
+            .collect();
+        let remote_held: HashSet<String> = agent
+            .get_remote_candidates()
+            .iter()
+            .map(|c| remote_candidate_stats_id(c.id()))
+            .collect();
+        self.pipeline_context
+            .stats
+            .retain_candidates(&local_held, &remote_held);
+    }
+
+    /// Update the media source stats from the senders: the track each sender has attached has
+    /// a `media-source` object, from the moment it is attached until no sender has it
+    /// (webrtc-stats 8.11).
+    ///
+    /// This is called automatically by `get_stats()`.
+    pub(super) fn update_media_source_stats(&mut self) {
+        let attached: Vec<(usize, String, RtpCodecKind)> = self
+            .rtp_transceivers
+            .iter()
+            .enumerate()
+            .filter_map(|(transceiver_id, transceiver)| {
+                let sender = transceiver.sender().as_ref()?;
+                Some((
+                    transceiver_id,
+                    sender.track().track_id().clone(),
+                    sender.kind(),
+                ))
+            })
+            .collect();
+        self.pipeline_context.stats.sync_media_sources(&attached);
+    }
+
+    /// Whether `selector` names a sender or a receiver of this peer connection (or nothing).
+    pub(super) fn stats_selector_is_ours(&self, selector: &StatsSelector) -> bool {
+        match selector {
+            StatsSelector::Sender(id) => self
+                .rtp_transceivers
+                .get(id.0)
+                .is_some_and(|transceiver| transceiver.sender().is_some()),
+            StatsSelector::Receiver(id) => self
+                .rtp_transceivers
+                .get(id.0)
+                .is_some_and(|transceiver| transceiver.receiver().is_some()),
+            _ => true,
+        }
     }
 
     /// Update the transport stats from the DTLS transport itself: webrtc-stats
@@ -1929,10 +1999,17 @@ impl RTCPeerConnection {
     /// This is called automatically by `get_stats()`.
     pub(super) fn update_transport_stats(&mut self) {
         let dtls_state = self.dtls_transport().state();
-        self.pipeline_context
-            .stats
-            .transport
-            .on_dtls_state_changed(dtls_state);
+        // webrtc-stats `iceLocalUsernameFragment`: the local username fragment in use for
+        // message validation, which is the ICE agent's current one: the first description's,
+        // then each applied restart's.
+        let ufrag = self
+            .ice_transport()
+            .get_local_user_credentials()
+            .0
+            .to_owned();
+        let transport = &mut self.pipeline_context.stats.transport;
+        transport.on_dtls_state_changed(dtls_state);
+        transport.ice_local_username_fragment = ufrag;
     }
 
     /// Update the data channel stats from the data channels themselves: every channel the peer
@@ -1970,12 +2047,15 @@ impl RTCPeerConnection {
 
     /// Drops the stats of the RTP streams whose SSRC no longer belongs to a receiver's or a
     /// sender's track (a stopped transceiver, a removed track, a rebound simulcast layer), and
-    /// with them their RTX / FEC reverse lookups.
+    /// with them their RTX / FEC reverse lookups. The outbound streams that stay take their
+    /// encoding's `active` (webrtc-stats `RTCOutboundRtpStreamStats.active`: whether the stream
+    /// is configured to be sent, which `set_parameters` changes).
     ///
     /// This is called automatically by `get_stats()`.
     pub(super) fn retire_rtp_stream_stats(&mut self) {
         let mut inbound_live = HashSet::new();
         let mut outbound_live = HashSet::new();
+        let mut outbound_active = Vec::new();
         for transceiver in &self.rtp_transceivers {
             if let Some(receiver) = transceiver.receiver() {
                 inbound_live.extend(
@@ -1994,11 +2074,18 @@ impl RTCPeerConnection {
                         .iter()
                         .filter_map(|coding| coding.rtp_coding_parameters.ssrc),
                 );
+                outbound_active.extend(sender.send_encodings().iter().filter_map(|encoding| {
+                    Some((encoding.rtp_coding_parameters.ssrc?, encoding.active))
+                }));
             }
         }
-        self.pipeline_context
-            .stats
-            .retire_rtp_streams(&inbound_live, &outbound_live);
+        let stats = &mut self.pipeline_context.stats;
+        stats.retire_rtp_streams(&inbound_live, &outbound_live);
+        for (ssrc, active) in outbound_active {
+            if let Some(stream) = stats.outbound_rtp_streams.get_mut(&ssrc) {
+                stream.active = active;
+            }
+        }
     }
 
     /// The transceiver, id and kind of the track `sender` sends: what the stats of its media
@@ -2303,6 +2390,26 @@ fn rejects_every_media_section(desc: &RTCSessionDescription) -> bool {
         !parsed.media_descriptions.is_empty()
             && parsed.media_descriptions.iter().all(is_rejected_media)
     })
+}
+
+/// The transport a TURN URL (RFC 7065) says its server is reached over: TLS for `turns:`, else
+/// the `transport` parameter, UDP when there is none. `Unspecified` for anything that is not a
+/// TURN URL.
+fn relay_protocol_of_turn_url(url: &str) -> RTCIceServerTransportProtocol {
+    let lower = url.to_ascii_lowercase();
+    if lower.starts_with("turns:") {
+        return RTCIceServerTransportProtocol::Tls;
+    }
+    if !lower.starts_with("turn:") {
+        return RTCIceServerTransportProtocol::Unspecified;
+    }
+    match lower
+        .split_once("?transport=")
+        .map(|(_, transport)| transport)
+    {
+        Some("tcp") => RTCIceServerTransportProtocol::Tcp,
+        _ => RTCIceServerTransportProtocol::Udp,
+    }
 }
 
 #[cfg(test)]

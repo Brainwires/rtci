@@ -287,7 +287,9 @@ impl<'a> InterceptorHandler<'a> {
     }
 
     /// Rewrite an RTX packet into the original packet it carries (RFC 4588 4), when it is one.
-    fn deencapsulate_if_rtx(&mut self, rtp_packet: &mut rtp::Packet) {
+    ///
+    /// Returns whether the packet was a retransmission and is now the packet it repeats.
+    fn deencapsulate_if_rtx(&mut self, rtp_packet: &mut rtp::Packet) -> bool {
         let is_primary = self
             .ctx
             .ssrc_owners
@@ -298,12 +300,13 @@ impl<'a> InterceptorHandler<'a> {
             )
             .is_some();
         if is_primary {
-            return;
+            return false;
         }
-        if let Some((primary_ssrc, primary_payload_type)) =
-            self.rtx_primary_for(rtp_packet.header.ssrc, rtp_packet.header.payload_type)
-        {
-            deencapsulate_rtx(rtp_packet, primary_ssrc, primary_payload_type);
+        match self.rtx_primary_for(rtp_packet.header.ssrc, rtp_packet.header.payload_type) {
+            Some((primary_ssrc, primary_payload_type)) => {
+                deencapsulate_rtx(rtp_packet, primary_ssrc, primary_payload_type)
+            }
+            None => false,
         }
     }
 
@@ -989,14 +992,16 @@ impl<'a>
                     // See "Stream establishment" below.
                     self.ensure_remote_stream_bound(msg.now, &rtp_packet.header);
 
+                    // What arrived, before anything rewrites it: the SSRC it came on, its
+                    // payload, and the rest of it (header and padding, RFC 3550 section 5.1).
                     let ssrc = rtp_packet.header.ssrc;
                     let payload_bytes = rtp_packet.payload.len();
-                    // Reached only now that the accumulator exists: `ensure_remote_stream_bound` creates it, and until
-                    // this ran here these two silently dropped the first packet of every stream.
-                    self.stats
-                        .on_rtx_packet_received_if_rtx(ssrc, payload_bytes);
-                    self.stats
-                        .on_fec_packet_received_if_fec(ssrc, payload_bytes);
+                    let overhead_bytes = rtp_packet.header.marshal_size()
+                        + if rtp_packet.header.padding {
+                            usize::from(rtp_packet.header.padding_size)
+                        } else {
+                            0
+                        };
 
                     // RFC 4588 5: a retransmission is the original packet again, and the
                     // receiver's own machinery has to see it as that. De-encapsulated here, before
@@ -1008,7 +1013,24 @@ impl<'a>
                     // A padding-only RTX packet (a bandwidth probe, no OSN) carries nothing to
                     // recover and goes on unchanged: its transport-wide sequence number still has
                     // to reach the TWCC recorder, or the probe reads as lost.
-                    self.deencapsulate_if_rtx(rtp_packet);
+                    let repaired = self.deencapsulate_if_rtx(rtp_packet);
+
+                    // The arrival is counted here, before the chain and on what the wire
+                    // carried: webrtc-stats counts the packets received for the SSRC (RFC 3550
+                    // section 6.4.1), which is every arrival, whatever an interceptor later
+                    // does with it, and no packet a FEC decoder rebuilds. Reached only now that
+                    // the accumulator exists: `ensure_remote_stream_bound` creates it.
+                    if repaired {
+                        self.stats.on_retransmission_received(
+                            rtp_packet.header.ssrc,
+                            overhead_bytes,
+                            payload_bytes,
+                            msg.now,
+                        );
+                    } else {
+                        self.stats
+                            .on_rtp_received(ssrc, overhead_bytes, payload_bytes, msg.now);
+                    }
 
                     // The ECN codepoint the datagram arrived with (from the application's socket
                     // layer), counted on the stream the packet belongs to, a repaired one
@@ -1080,6 +1102,15 @@ impl<'a>
         if self.ctx.is_dtls_handshake_complete
             && let RTCMessageInternal::Rtp(RTPMessage::Packet(packet)) = msg.message
         {
+            // When the application wrote the packet: what the time an interceptor holds it
+            // (a pacer) is measured from (`totalPacketSendDelay`).
+            if let Packet::Rtp(rtp_packet) = &packet {
+                self.stats.on_rtp_written(
+                    rtp_packet.header.ssrc,
+                    rtp_packet.header.sequence_number,
+                    msg.now,
+                );
+            }
             self.interceptor.handle_write(TaggedPacket {
                 now: msg.now,
                 transport: msg.transport,
@@ -1102,19 +1133,24 @@ impl<'a>
                         self.process_write_rtcp_for_stats(rtcp_packets, packet.now);
                     }
                     Packet::Rtp(rtp_packet) => {
-                        // Track outbound RTP stats if the stream accumulator exists
-                        let ssrc = rtp_packet.header.ssrc;
+                        // Counted on the stream the packet belongs to: its own SSRC or its
+                        // RTX SSRC. The NACK responder tags what it sends again, which is how
+                        // a retransmission on the stream's own SSRC (no RTX negotiated) is
+                        // told from a first transmission.
                         let payload_bytes = rtp_packet.payload.len();
-                        self.stats.on_rtx_packet_sent_if_rtx(ssrc, payload_bytes);
-
-                        if let Some(stream) = self.stats.outbound_rtp_streams.get_mut(&ssrc) {
-                            stream.on_rtp_sent(
-                                rtp_packet.header.marshal_size(),
-                                payload_bytes,
-                                packet.now,
-                            );
-                            stream.on_sequence_number_sent(rtp_packet.header.sequence_number);
-                        }
+                        let retransmission = packet
+                            .message
+                            .attributes
+                            .iter()
+                            .any(|attribute| matches!(attribute, Attribute::Retransmission));
+                        self.stats.on_rtp_sent(
+                            rtp_packet.header.ssrc,
+                            rtp_packet.header.sequence_number,
+                            rtp_packet.marshal_size() - payload_bytes,
+                            payload_bytes,
+                            retransmission,
+                            packet.now,
+                        );
                     }
                     _ => {}
                 }
@@ -1530,7 +1566,7 @@ mod boundary_tests {
         let stream = &stats.inbound_rtp_streams[&9];
         assert_eq!(10, stream.remote_packets_sent);
         assert_eq!(1000, stream.remote_bytes_sent);
-        assert_eq!(Some(now), stream.remote_timestamp);
+        assert_eq!(Some(now), stream.remote_report_received_at);
         assert_eq!(1, stream.reports_received);
     }
 }

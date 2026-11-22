@@ -70,6 +70,13 @@ pub struct DecoderStatsUpdate {
     pub decoder_implementation: Option<String>,
     /// Whether the decoder is power efficient (`powerEfficientDecoder`).
     pub power_efficient_decoder: Option<bool>,
+    /// Sum of the corruption probability measurements, each in 0.0..=1.0
+    /// (`totalCorruptionProbability`).
+    pub total_corruption_probability: Option<f64>,
+    /// Sum of the squares of those measurements (`totalSquaredCorruptionProbability`).
+    pub total_squared_corruption_probability: Option<f64>,
+    /// Number of corruption probability measurements (`corruptionMeasurements`).
+    pub corruption_measurements: Option<u64>,
 }
 
 impl DecoderStatsUpdate {
@@ -96,6 +103,9 @@ impl DecoderStatsUpdate {
             freeze_count,
             total_freezes_duration,
             packets_discarded,
+            total_corruption_probability,
+            total_squared_corruption_probability,
+            corruption_measurements,
         );
         if update.decoder_implementation.is_some() {
             self.decoder_implementation = update.decoder_implementation;
@@ -104,6 +114,33 @@ impl DecoderStatsUpdate {
             self.power_efficient_decoder = update.power_efficient_decoder;
         }
     }
+}
+
+/// The cumulative PSNR of the frames an encoder produced, per colour component (webrtc-stats
+/// `RTCOutboundRtpStreamStats.psnrSum`).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PsnrSum {
+    /// Sum of the luma PSNR values, in dB.
+    pub y: f64,
+    /// Sum of the first chroma component's PSNR values, in dB.
+    pub u: f64,
+    /// Sum of the second chroma component's PSNR values, in dB.
+    pub v: f64,
+}
+
+/// The time a stream has spent in each quality limitation state, in seconds (webrtc-stats
+/// `RTCOutboundRtpStreamStats.qualityLimitationDurations`: a record with an entry for every
+/// `RTCQualityLimitationReason`, "none" included).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct QualityLimitationDurations {
+    /// Seconds not limited.
+    pub none: f64,
+    /// Seconds limited by CPU.
+    pub cpu: f64,
+    /// Seconds limited by bandwidth.
+    pub bandwidth: f64,
+    /// Seconds limited for another reason.
+    pub other: f64,
 }
 
 /// Send-side statistics provided by the application: the encoder (webrtc-stats
@@ -128,10 +165,19 @@ pub struct EncoderStatsUpdate {
     pub qp_sum: Option<u64>,
     /// Total time spent encoding, in seconds (`totalEncodeTime`).
     pub total_encode_time: Option<f64>,
-    /// Cumulative target encoded bytes (`totalEncodedBytesTarget`).
-    pub total_encoded_bytes_target: Option<u64>,
+    /// The cumulative PSNR of the encoded frames (`psnrSum`).
+    pub psnr_sum: Option<PsnrSum>,
+    /// Number of frames `psnr_sum` covers (`psnrMeasurements`).
+    pub psnr_measurements: Option<u64>,
+    /// The encoder's current target for this stream, in bits per second (`targetBitrate`).
+    /// Without it the report gives the congestion controller's estimate, and only while the
+    /// connection sends a single stream: how an estimate is shared between several is the
+    /// encoder's decision.
+    pub target_bitrate: Option<f64>,
     /// The current quality limitation reason (`qualityLimitationReason`).
     pub quality_limitation_reason: Option<crate::statistics::stats::RTCQualityLimitationReason>,
+    /// Time spent in each quality limitation state (`qualityLimitationDurations`).
+    pub quality_limitation_durations: Option<QualityLimitationDurations>,
     /// Resolution changes made for quality limitation (`qualityLimitationResolutionChanges`).
     pub quality_limitation_resolution_changes: Option<u32>,
     /// Name of the encoder implementation (`encoderImplementation`).
@@ -155,8 +201,11 @@ impl EncoderStatsUpdate {
             key_frames_encoded,
             qp_sum,
             total_encode_time,
-            total_encoded_bytes_target,
+            psnr_sum,
+            psnr_measurements,
+            target_bitrate,
             quality_limitation_reason,
+            quality_limitation_durations,
             quality_limitation_resolution_changes,
             power_efficient_encoder,
         );
@@ -170,8 +219,8 @@ impl EncoderStatsUpdate {
 }
 
 /// Audio receive-side statistics provided by the application: the jitter buffer, the decoder
-/// and concealment (webrtc-stats `RTCInboundRtpStreamStats`, audio members; the jitter buffer
-/// members apply to video too).
+/// and concealment (webrtc-stats `RTCInboundRtpStreamStats`, audio members; the jitter buffer,
+/// playout position and FEC members apply to video too).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct AudioReceiverStatsUpdate {
     /// Total audio samples received (`totalSamplesReceived`).
@@ -200,6 +249,19 @@ pub struct AudioReceiverStatsUpdate {
     pub jitter_buffer_minimum_delay: Option<f64>,
     /// Samples or frames emitted from the jitter buffer (`jitterBufferEmittedCount`).
     pub jitter_buffer_emitted_count: Option<u64>,
+    /// The track's playout position on the sender's clock, as time since the Unix epoch: the
+    /// NTP time of the last playable sample or frame, extrapolated with the time since it was
+    /// ready to play (`estimatedPlayoutTimestamp`).
+    pub estimated_playout_timestamp: Option<std::time::Duration>,
+    /// FEC packets whose correction was not used: everything they protect had arrived or was
+    /// already recovered, or they came too late (`fecPacketsDiscarded`).
+    pub fec_packets_discarded: Option<u64>,
+    /// FEC packets found inside the stream's own packets (in-band FEC, as Opus carries it),
+    /// which only the decoder sees; added to the `fecPacketsReceived` the engine counts on a
+    /// FEC SSRC.
+    pub in_band_fec_packets_received: Option<u64>,
+    /// The bytes of that in-band FEC, added to `fecBytesReceived`.
+    pub in_band_fec_bytes_received: Option<u64>,
 }
 
 impl AudioReceiverStatsUpdate {
@@ -219,6 +281,10 @@ impl AudioReceiverStatsUpdate {
             jitter_buffer_target_delay,
             jitter_buffer_minimum_delay,
             jitter_buffer_emitted_count,
+            estimated_playout_timestamp,
+            fec_packets_discarded,
+            in_band_fec_packets_received,
+            in_band_fec_bytes_received,
         );
     }
 }
