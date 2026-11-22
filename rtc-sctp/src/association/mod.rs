@@ -4924,9 +4924,13 @@ impl Association {
         // than fit, it covers the TSNs up to the last one whose streams do, and the next
         // FORWARD TSN goes on from there once the peer has acknowledged this one. Only then
         // is the window walked.
-        let room = (self.mtu as usize)
-            .saturating_sub(COMMON_HEADER_SIZE as usize + CHUNK_HEADER_SIZE + 4)
-            / 4;
+        let room = if self.mtu == 0 {
+            // No packet size is known (an association that was never set up): no bound.
+            usize::MAX
+        } else {
+            (self.mtu as usize).saturating_sub(COMMON_HEADER_SIZE as usize + CHUNK_HEADER_SIZE + 4)
+                / 4
+        };
         let mut fwd_tsn = ChunkForwardTsn {
             new_cumulative_tsn: self.advanced_peer_tsn_ack_point,
             streams: Vec::with_capacity(self.fwd_tsn_stream_map.len().min(room)),
