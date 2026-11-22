@@ -160,6 +160,10 @@ impl RTCPeerConnection {
             multicast_dns_local_name: setting_engine.multicast_dns.local_name.clone(),
             multicast_dns_local_ip: setting_engine.multicast_dns.local_ip,
             multicast_dns_query_timeout: setting_engine.multicast_dns.timeout,
+            multicast_dns_first_query_delay: setting_engine.multicast_dns.first_query_delay,
+            multicast_dns_destination_reported: setting_engine.multicast_dns.destination_reported,
+            multicast_dns_unicast_response: setting_engine.multicast_dns.unicast_response,
+            multicast_dns_rate_limit: setting_engine.multicast_dns.rate_limit.clone(),
             local_ufrag: setting_engine.candidates.username_fragment.clone(),
             local_pwd: setting_engine.candidates.password.clone(),
             allow_loopback_remote_candidates: setting_engine
@@ -2259,7 +2263,16 @@ impl RTCPeerConnection {
         // The application supplied this candidate, so its address may be shown in the stats.
         accumulator.signalled = true;
 
-        if self.ice_transport_mut().add_remote_candidate(candidate)? {
+        // An mDNS candidate is held by the agent only once its name resolves, and not at all
+        // when it is ignored. Its statistics object exists from the moment it is submitted
+        // all the same, so that the report does not say whether the name resolved
+        // (draft-ietf-mmusic-mdns-ice-candidates section 3.3.1).
+        let is_mdns = candidate.address().ends_with(".local");
+        let kept = self.ice_transport_mut().add_remote_candidate(candidate)?;
+        if kept
+            || (is_mdns
+                && self.stats().remote_candidates.len() < MAX_UNRESOLVED_MDNS_CANDIDATE_STATS)
+        {
             self.stats_mut()
                 .register_remote_candidate(candidate_id, accumulator);
         }
@@ -2293,10 +2306,13 @@ impl RTCPeerConnection {
             ));
         }
 
-        for rtc_candidate in added {
+        for mut rtc_candidate in added {
             // Register local candidate with stats accumulator
             let candidate_id = local_candidate_stats_id(&rtc_candidate.id);
             let (ufrag, _) = self.ice_transport().get_local_user_credentials();
+            // The candidate is of this ICE generation: `to_json` carries the fragment, and
+            // the peer ignores it if it arrives after an ICE restart (RFC 8838 section 9).
+            rtc_candidate.username_fragment = Some(ufrag.to_owned());
             let accumulator = self.candidate_to_accumulator(&rtc_candidate, ufrag, url);
             self.stats_mut()
                 .register_local_candidate(candidate_id, accumulator);
@@ -2345,16 +2361,24 @@ impl RTCPeerConnection {
             })
             .map(RTCIceCandidate::from)
             .collect();
+        // A remote candidate also needs (new) statistics when it is no longer what its object
+        // says: a peer-reflexive candidate that the signalled candidate with its address
+        // replaced keeps its id, and so its pairs (RFC 8838 section 11), but is a signalled
+        // host or server-reflexive candidate now, with the address that was signalled (the
+        // name, for an mDNS candidate that resolved to it).
         let unregistered_remote: Vec<RTCIceCandidate> = agent
             .get_remote_candidates()
             .iter()
             .filter(|c| {
                 pairs.iter().any(|p| p.remote_candidate_id == c.id())
-                    && !self
+                    && self
                         .pipeline_context
                         .stats
                         .remote_candidates
-                        .contains_key(&remote_candidate_stats_id(c.id()))
+                        .get(&remote_candidate_stats_id(c.id()))
+                        .is_none_or(|known| {
+                            known.candidate_type != RTCIceCandidateType::from(c.candidate_type())
+                        })
             })
             .map(|c| {
                 let mut candidate = RTCIceCandidate::from(c);
@@ -2383,15 +2407,41 @@ impl RTCPeerConnection {
             }
         }
         if !unregistered_remote.is_empty() {
+            let remote_ufrag = self
+                .ice_transport()
+                .get_remote_user_credentials()
+                .0
+                .to_owned();
             for candidate in unregistered_remote {
-                // Learned from a check, never signalled: no username fragment was given for
-                // it (webrtc-stats `usernameFragment`), and its address is not shown
-                // (`RTCStatsAccumulator::remote_candidate_entries`).
-                let accumulator = self.candidate_to_accumulator(&candidate, "", None);
-                self.stats_mut().register_remote_candidate(
-                    remote_candidate_stats_id(&candidate.id),
-                    accumulator,
-                );
+                let id = remote_candidate_stats_id(&candidate.id);
+                let accumulator = if candidate.typ == RTCIceCandidateType::Prflx {
+                    // Learned from a check, never signalled: no username fragment was given
+                    // for it (webrtc-stats `usernameFragment`), and its address is not shown
+                    // (`RTCStatsAccumulator::remote_candidate_entries`).
+                    self.candidate_to_accumulator(&candidate, "", None)
+                } else {
+                    // Every other remote candidate the agent holds was signalled: one whose
+                    // mDNS name resolved after it was submitted, or one that took the place
+                    // of a learned candidate. The object made when it was submitted, under the
+                    // id it had then, gives way to this one.
+                    let mut accumulator =
+                        self.candidate_to_accumulator(&candidate, &remote_ufrag, None);
+                    accumulator.signalled = true;
+                    let (address, port, protocol) = (
+                        accumulator.address.clone(),
+                        accumulator.port,
+                        accumulator.protocol.clone(),
+                    );
+                    self.stats_mut().remote_candidates.retain(|other, known| {
+                        *other == id
+                            || !(known.signalled
+                                && known.address == address
+                                && known.port == port
+                                && known.protocol == protocol)
+                    });
+                    accumulator
+                };
+                self.stats_mut().register_remote_candidate(id, accumulator);
             }
         }
 
@@ -2411,11 +2461,33 @@ impl RTCPeerConnection {
             .iter()
             .map(|c| local_candidate_stats_id(c.id()))
             .collect();
-        let remote_held: HashSet<String> = agent
+        let mut remote_held: HashSet<String> = agent
             .get_remote_candidates()
             .iter()
             .map(|c| remote_candidate_stats_id(c.id()))
             .collect();
+        // The mDNS candidates that were submitted for this ICE generation stay in the report
+        // whether their name has resolved, has not yet, or never will (mDNS draft section
+        // 3.3.1: the report does not leak whether resolution succeeded).
+        let remote_ufrag = agent
+            .get_remote_credentials()
+            .map(|credentials| credentials.ufrag.as_str())
+            .unwrap_or_default();
+        remote_held.extend(
+            self.pipeline_context
+                .stats
+                .remote_candidates
+                .iter()
+                .filter(|(_, known)| {
+                    known.signalled
+                        && known.username_fragment == remote_ufrag
+                        && known
+                            .address
+                            .as_deref()
+                            .is_some_and(|address| address.ends_with(".local"))
+                })
+                .map(|(id, _)| id.clone()),
+        );
         self.pipeline_context
             .stats
             .retain_candidates(&local_held, &remote_held);
@@ -3225,3 +3297,8 @@ a=mid:2\r\n";
         );
     }
 }
+
+/// The most remote-candidate statistics objects held while an mDNS candidate that the agent
+/// does not hold (unresolved, or ignored) is still given one: what a remote description can
+/// make the report grow to.
+const MAX_UNRESOLVED_MDNS_CANDIDATE_STATS: usize = 320;

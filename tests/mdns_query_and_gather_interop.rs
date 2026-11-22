@@ -50,6 +50,12 @@ use webrtc::peer_connection::sdp::session_description::RTCSessionDescription as 
 mod common;
 
 const DEFAULT_TIMEOUT_DURATION: Duration = Duration::from_secs(30);
+
+/// The tests of this file share the host's mDNS group and port, and the same names: each
+/// peer of one test hears the queries, probes and answers of every other test's peers (two
+/// responders for one name, a query suppressed because another test asked the same). They run
+/// one at a time, so that what a test resolves is what its own peers published.
+static MDNS_GROUP_IN_USE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 const MDNS_LOCAL_NAME: &str = "webrtc-rs-test-mdns.local";
 // The receiving agent resolves only `<uuid>.local` names (draft-ietf-mmusic-mdns-ice-candidates),
 // the form browsers publish.
@@ -331,6 +337,7 @@ async fn run_rtc_event_loop(
 /// advertise its own IP via mDNS.
 #[tokio::test]
 async fn test_mdns_query_only_webrtc_offerer_rtc_answerer() -> Result<()> {
+    let _one_test_on_the_group = MDNS_GROUP_IN_USE.lock().await;
     common::install_crypto_provider();
     env_logger::builder()
         .filter_level(log::LevelFilter::Info)
@@ -497,6 +504,7 @@ async fn test_mdns_query_only_webrtc_offerer_rtc_answerer() -> Result<()> {
 /// advertises its own IP via an mDNS name.
 #[tokio::test]
 async fn test_mdns_query_and_gather_webrtc_offerer_rtc_answerer() -> Result<()> {
+    let _one_test_on_the_group = MDNS_GROUP_IN_USE.lock().await;
     common::install_crypto_provider();
     env_logger::builder()
         .filter_level(log::LevelFilter::Info)
@@ -651,6 +659,7 @@ async fn test_mdns_query_and_gather_webrtc_offerer_rtc_answerer() -> Result<()> 
 /// Test mDNS QueryOnly mode: sansio RTC as offerer, webrtc as answerer
 #[tokio::test]
 async fn test_mdns_query_only_rtc_offerer_webrtc_answerer() -> Result<()> {
+    let _one_test_on_the_group = MDNS_GROUP_IN_USE.lock().await;
     common::install_crypto_provider();
     env_logger::builder()
         .filter_level(log::LevelFilter::Info)
@@ -826,6 +835,7 @@ async fn test_mdns_query_only_rtc_offerer_webrtc_answerer() -> Result<()> {
 /// Test mDNS QueryAndGather mode: sansio RTC as offerer, webrtc as answerer
 #[tokio::test]
 async fn test_mdns_query_and_gather_rtc_offerer_webrtc_answerer() -> Result<()> {
+    let _one_test_on_the_group = MDNS_GROUP_IN_USE.lock().await;
     common::install_crypto_provider();
     env_logger::builder()
         .filter_level(log::LevelFilter::Info)

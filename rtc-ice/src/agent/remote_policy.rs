@@ -103,6 +103,15 @@ impl RemotePolicy {
 
     /// Whether checks may be sent from the local candidate based at `local` to `remote`.
     pub(crate) fn allows_pair(&self, local: SocketAddr, remote: SocketAddr) -> bool {
+        // RFC 8445 Section 6.1.2.2: "IPv6 link-local addresses MUST NOT be paired with other
+        // than link-local addresses", in either direction, whatever the settings say.
+        let v6_link_local =
+            |ip: IpAddr| matches!(ip.to_canonical(), IpAddr::V6(v6) if v6.is_unicast_link_local());
+        if v6_link_local(local.ip()) != v6_link_local(remote.ip())
+            && address_scope(remote) != AddressScope::Invalid
+        {
+            return false;
+        }
         match address_scope(remote) {
             AddressScope::Invalid => false,
             AddressScope::Loopback => {

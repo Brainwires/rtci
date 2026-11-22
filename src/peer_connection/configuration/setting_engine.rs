@@ -196,6 +196,14 @@ pub struct MulticastDNS {
     pub local_name: String,
     /// Control mDNS local IP address
     pub local_ip: Option<IpAddr>,
+    /// See [`SettingEngineBuilder::with_multicast_dns_first_query_delay`]. `None`: on.
+    pub first_query_delay: Option<bool>,
+    /// See [`SettingEngineBuilder::with_multicast_dns_destination_reported`].
+    pub destination_reported: bool,
+    /// See [`SettingEngineBuilder::with_multicast_dns_unicast_response`].
+    pub unicast_response: bool,
+    /// See [`SettingEngineBuilder::with_multicast_dns_rate_limit`].
+    pub rate_limit: Option<ice::mdns::MdnsRateLimit>,
 }
 
 impl Default for MulticastDNS {
@@ -211,6 +219,10 @@ impl Default for MulticastDNS {
             mode: MulticastDnsMode::QueryOnly,
             local_name: "".to_string(),
             local_ip: None,
+            first_query_delay: None,
+            destination_reported: false,
+            unicast_response: false,
+            rate_limit: None,
         }
     }
 }
@@ -1232,6 +1244,45 @@ impl SettingEngineBuilder {
     pub fn with_remote_candidate_scopes(mut self, loopback: bool, link_local: bool) -> Self {
         self.0.candidates.allow_loopback_remote_candidates = loopback;
         self.0.candidates.allow_link_local_remote_candidates = link_local;
+        self
+    }
+
+    /// Whether the first mDNS query for a remote `.local` candidate waits a random 20 to 120
+    /// ms (RFC 6762 section 5.2). On by default; `false` sends it at once.
+    pub fn with_multicast_dns_first_query_delay(mut self, delay: bool) -> Self {
+        self.0.multicast_dns.first_query_delay = Some(delay);
+        self
+    }
+
+    /// Declares that the application hands every datagram of its mDNS socket to `handle_read`
+    /// with the datagram's destination address in `local_addr` (`IP_PKTINFO` /
+    /// `IPV6_PKTINFO`): the mDNS group's (`224.0.0.251:5353`, `[ff02::fb]:5353`) for one that
+    /// arrived by multicast, the host's own for one sent to it by unicast. A unicast arrival
+    /// is then held to RFC 6762's rules for it (a query is answered by unicast and only to an
+    /// on-link sender, section 5.5; a response is taken only when a recent question asked for
+    /// a unicast response, section 6). Off by default.
+    pub fn with_multicast_dns_destination_reported(mut self, reported: bool) -> Self {
+        self.0.multicast_dns.destination_reported = reported;
+        self
+    }
+
+    /// Makes the first mDNS query for a name ask for a unicast response (the QU bit, RFC 6762
+    /// section 5.4; draft-ietf-mmusic-mdns-ice-candidates section 3.2.1). Off by default: a
+    /// unicast response reaches only one of the sockets bound to port 5353 on a host (RFC 6762
+    /// section 15.1). Use it with
+    /// [`with_multicast_dns_destination_reported`](Self::with_multicast_dns_destination_reported)
+    /// when the application's socket is the only one.
+    pub fn with_multicast_dns_unicast_response(mut self, unicast: bool) -> Self {
+        self.0.multicast_dns.unicast_response = unicast;
+        self
+    }
+
+    /// Shares one limit on mDNS messages between peer connections
+    /// (draft-ietf-mmusic-mdns-ice-candidates section 7.1: the limit is the implementation's).
+    /// Give every peer connection of the process a clone of one `MdnsRateLimit`. Without it
+    /// each peer connection has a limit of its own.
+    pub fn with_multicast_dns_rate_limit(mut self, limit: ice::mdns::MdnsRateLimit) -> Self {
+        self.0.multicast_dns.rate_limit = Some(limit);
         self
     }
 
