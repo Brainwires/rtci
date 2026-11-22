@@ -1100,6 +1100,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `set_remote_pacing`, `pacing`. (Writing and reading `a=ice-pacing` is not wired yet.)
 - **ice**: at most five TCP connection attempts are outstanding to one remote IP address (RFC
   6544 section 12).
+- **ice**: the peer connection fails the pairs of a remote TCP candidate whose first answer, on
+  a connection its active candidate opened, is not STUN (RFC 6544 section 7.1);
+  `Agent::handle_non_stun_before_validation` for other drivers.
 - **ice**: an mDNS name lost to another host (RFC 6762 section 9) is replaced by a new
   `<uuid>.local` name and the candidate announced again (`Event::LocalCandidateRenamed`,
   `OnIceCandidateEvent`).
@@ -1870,7 +1873,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   place of a peer-reflexive one (it keeps that one's id and pairs) now shows its own type and
   its signalled address.
 - **test**: the four mDNS interop tests share the host's mDNS group, port and names; they run
-  one at a time.
+  one at a time. On a timeout they report the rtc peer's candidates and pairs, and they log
+  the mDNS traffic.
+- **test**: sessions over a simulated lossy, reordering link in virtual time
+  (`tests/lossy_link_rtc2rtc.rs`): nothing fails at 5 % (with reordering) or 10 % loss, and at
+  30 % a peer fails only after 30 s without a Binding success response (RFC 7675 section 5.1).
+  The netem impairment test prints both peers' state changes when it fails.
+- **test**: relayed TCP candidates (RFC 6544 sections 4.1, 4.5 over RFC 6062 allocations) pair
+  by `tcptype` and are checked on the relayed path; server-reflexive TCP direction preferences.
 - **jsep**: two retransmission formats that differ only in `rtx-time` are one format (RFC
   4588 section 8.1: each sender's own figure); an offer whose RTX `fmtp` had another
   `rtx-time` than the local one was answered without RTX.
