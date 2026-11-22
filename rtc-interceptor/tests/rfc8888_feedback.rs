@@ -45,6 +45,10 @@ impl Harness {
                 Slot::Rfc8888,
                 Rfc8888Builder::new()
                     .with_interval(INTERVAL)
+                    // These tests are about what a report says, at a fixed rhythm. (By
+                    // default the interval stretches to the RTCP bandwidth, which for a few
+                    // test packets is that of one audio stream.)
+                    .with_adaptive_interval(false)
                     .with_sender_ssrc(SENDER_SSRC)
                     .build(),
             )
@@ -454,7 +458,10 @@ fn unconfigured_chain() -> Box<dyn Interceptor> {
         Registry::new()
             .with(
                 Slot::Rfc8888,
-                Rfc8888Builder::new().with_interval(INTERVAL).build(),
+                Rfc8888Builder::new()
+                    .with_interval(INTERVAL)
+                    .with_adaptive_interval(false)
+                    .build(),
             )
             .build(),
     )
@@ -602,6 +609,7 @@ fn feedback_too_large_for_the_report_size_is_split_into_several_packets() {
             Slot::Rfc8888,
             Rfc8888Builder::new()
                 .with_interval(INTERVAL)
+                .with_adaptive_interval(false)
                 .with_sender_ssrc(SENDER_SSRC)
                 // 12 + 8 bytes of overhead and 100 two-byte metric blocks.
                 .with_max_report_size(220)

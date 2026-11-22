@@ -18,6 +18,13 @@ const MEDIA_PT: u8 = 11;
 const RED_PT: u8 = 100;
 const FEC_PT: u8 = 127;
 
+/// The RED carriage with FEC in RED packets of its own (libwebrtc's form), which most of these
+/// tests are about. The builder's default is the form of RFC 5109 14.2 (FEC with the next media
+/// packet); tests of that say so with `with_red_placement`.
+fn red_builder() -> UlpfecSendBuilder {
+    UlpfecSendBuilder::red(RED_PT, FEC_PT).with_red_placement(RedPlacement::OwnPacket)
+}
+
 fn stream_info(mime_type: &str, separate_fec: bool) -> StreamInfo {
     StreamInfo {
         ssrc: MEDIA_SSRC,
@@ -144,7 +151,7 @@ fn assert_same_packet(expected: &rtp::Packet, actual: &rtp::Packet) {
 #[test]
 fn rfc_5109_10_3_fec_rides_as_a_redundant_block_with_the_next_media_packet() {
     let mut chain = red_sender(
-        UlpfecSendBuilder::red(RED_PT, FEC_PT)
+        red_builder()
             .with_num_media_packets(4)
             .with_num_fec_packets(1)
             .with_red_placement(RedPlacement::WithNextMedia),
@@ -184,10 +191,52 @@ fn rfc_5109_10_3_fec_rides_as_a_redundant_block_with_the_next_media_packet() {
     assert_eq!(&packets[4].payload[..], &fifth[5 + 354..]);
 }
 
+/// RFC 5109 14.2: "the FEC MUST NOT be sent by itself for this stream", and "the FEC data ...
+/// is sent in the same packets as the protected payload". That is the builder's default: with
+/// no placement chosen, every RED packet on the wire has a media primary block, and the FEC
+/// rides ahead of one as a redundant block.
+#[test]
+fn by_default_fec_is_never_sent_by_itself() {
+    let mut chain = red_sender(
+        UlpfecSendBuilder::red(RED_PT, FEC_PT)
+            .with_num_media_packets(4)
+            .with_num_fec_packets(1),
+    );
+    let packets = rfc_packets();
+    let wire = send(&mut chain, Instant::now(), &packets);
+
+    assert_eq!(
+        packets.len(),
+        wire.len(),
+        "no packet beside the media packets"
+    );
+    let mut with_fec = 0;
+    for (red, original) in wire.iter().zip(&packets) {
+        assert_eq!(original.header.sequence_number, red.header.sequence_number);
+        let first = red.payload[0];
+        if first & 0x80 != 0 {
+            // A redundant block header (F = 1) with the FEC payload type, then the primary's.
+            assert_eq!(FEC_PT, first & 0x7F);
+            assert_eq!(
+                MEDIA_PT,
+                red.payload[4] & 0x7F,
+                "media is the primary block"
+            );
+            with_fec += 1;
+        } else {
+            assert_eq!(MEDIA_PT, first & 0x7F, "media is the only block");
+        }
+    }
+    assert_eq!(
+        1, with_fec,
+        "the block's FEC rides with the next media packet"
+    );
+}
+
 #[test]
 fn a_fec_packet_of_its_own_takes_the_next_sequence_number_of_the_media_stream() {
     let mut chain = red_sender(
-        UlpfecSendBuilder::red(RED_PT, FEC_PT)
+        red_builder()
             .with_num_media_packets(2)
             .with_num_fec_packets(1),
     );
@@ -220,7 +269,7 @@ fn a_fec_packet_of_its_own_takes_the_next_sequence_number_of_the_media_stream() 
 
 #[test]
 fn the_marker_bit_of_a_media_packet_stays_on_its_red_packet() {
-    let mut chain = red_sender(UlpfecSendBuilder::red(RED_PT, FEC_PT));
+    let mut chain = red_sender(red_builder());
     let wire = send(
         &mut chain,
         Instant::now(),
@@ -233,7 +282,7 @@ fn the_marker_bit_of_a_media_packet_stays_on_its_red_packet() {
 #[test]
 fn a_block_closes_at_the_end_of_a_frame_when_asked_to() {
     let mut chain = red_sender(
-        UlpfecSendBuilder::red(RED_PT, FEC_PT)
+        red_builder()
             .with_num_media_packets(10)
             .with_flush_on_marker(true),
     );
@@ -257,9 +306,7 @@ fn only_video_streams_are_protected_unless_the_filter_says_otherwise() {
     let mut chain = Registry::new()
         .with(
             Slot::FecEncoder,
-            UlpfecSendBuilder::red(RED_PT, FEC_PT)
-                .with_num_media_packets(1)
-                .build(),
+            red_builder().with_num_media_packets(1).build(),
         )
         .build();
     chain.bind_local_stream(&stream_info("audio/opus", false));
@@ -270,7 +317,7 @@ fn only_video_streams_are_protected_unless_the_filter_says_otherwise() {
     let mut chain = Registry::new()
         .with(
             Slot::FecEncoder,
-            UlpfecSendBuilder::red(RED_PT, FEC_PT)
+            red_builder()
                 .with_num_media_packets(1)
                 .with_stream_filter(|info| info.mime_type == "audio/opus")
                 .build(),
@@ -285,7 +332,7 @@ fn only_video_streams_are_protected_unless_the_filter_says_otherwise() {
 #[test]
 fn a_rebound_stream_continues_its_wire_sequence_numbers() {
     let mut chain = red_sender(
-        UlpfecSendBuilder::red(RED_PT, FEC_PT)
+        red_builder()
             .with_num_media_packets(1)
             .with_num_fec_packets(1),
     );
@@ -313,7 +360,7 @@ fn level_lengths_give_each_fec_packet_those_levels_and_onelevelonly_keeps_the_fi
     let packets: Vec<_> = (1..5).map(|seq| media(seq, 0, false, 100)).collect();
 
     let mut chain = red_sender(
-        UlpfecSendBuilder::red(RED_PT, FEC_PT)
+        red_builder()
             .with_num_media_packets(4)
             .with_level_lengths([20u16, 30]),
     );
@@ -329,7 +376,7 @@ fn level_lengths_give_each_fec_packet_those_levels_and_onelevelonly_keeps_the_fi
     assert_eq!(0b1111, fec.levels[1].mask);
 
     let mut chain = red_sender(
-        UlpfecSendBuilder::red(RED_PT, FEC_PT)
+        red_builder()
             .with_num_media_packets(4)
             .with_level_lengths([20u16, 30])
             .with_one_level_only(true),
@@ -370,11 +417,7 @@ fn red_round_trip(
 #[test]
 fn red_packets_are_delivered_as_the_media_packets_they_carry() {
     let packets = rfc_packets();
-    let (_, delivered) = red_round_trip(
-        UlpfecSendBuilder::red(RED_PT, FEC_PT).with_num_media_packets(48),
-        &packets,
-        &[],
-    );
+    let (_, delivered) = red_round_trip(red_builder().with_num_media_packets(48), &packets, &[]);
     assert_eq!(5, delivered.len());
     for (original, message) in packets.iter().zip(&delivered) {
         assert_same_packet(original, rtp_of(message));
@@ -387,7 +430,7 @@ fn a_lost_media_packet_is_rebuilt_and_marked_recovered() {
     let packets = rfc_packets();
     for lost in 0..4 {
         let (wire, delivered) = red_round_trip(
-            UlpfecSendBuilder::red(RED_PT, FEC_PT).with_num_media_packets(4),
+            red_builder().with_num_media_packets(4),
             &packets[..4],
             &[lost],
         );
@@ -411,11 +454,8 @@ fn a_lost_media_packet_is_rebuilt_and_marked_recovered() {
 #[test]
 fn a_fec_only_packet_goes_on_emptied_and_marked_so_its_sequence_number_is_seen() {
     let packets = rfc_packets();
-    let (wire, delivered) = red_round_trip(
-        UlpfecSendBuilder::red(RED_PT, FEC_PT).with_num_media_packets(4),
-        &packets[..4],
-        &[],
-    );
+    let (wire, delivered) =
+        red_round_trip(red_builder().with_num_media_packets(4), &packets[..4], &[]);
     let repair: Vec<_> = delivered
         .iter()
         .filter(|message| message.custom::<UlpfecRepair>().is_some())
@@ -436,7 +476,7 @@ fn a_fec_only_packet_goes_on_emptied_and_marked_so_its_sequence_number_is_seen()
 #[test]
 fn a_fec_only_packet_can_be_swallowed_instead() {
     let now = Instant::now();
-    let mut sender = red_sender(UlpfecSendBuilder::red(RED_PT, FEC_PT).with_num_media_packets(2));
+    let mut sender = red_sender(red_builder().with_num_media_packets(2));
     let wire = send(
         &mut sender,
         now,
@@ -461,7 +501,7 @@ fn a_burst_is_rebuilt_when_there_are_as_many_fec_packets_as_losses() {
     // Six media packets and three FEC packets, each over every third: wire indices 0..6 are
     // media, 6..9 FEC. A burst of three consecutive media packets is one loss per FEC packet.
     let (_, delivered) = red_round_trip(
-        UlpfecSendBuilder::red(RED_PT, FEC_PT)
+        red_builder()
             .with_num_media_packets(6)
             .with_num_fec_packets(3),
         &packets,
@@ -482,7 +522,7 @@ fn a_burst_is_rebuilt_when_there_are_as_many_fec_packets_as_losses() {
 fn losses_beyond_the_fec_are_left_lost() {
     let packets: Vec<_> = (500..504).map(|seq| media(seq, 0, false, 60)).collect();
     let (_, delivered) = red_round_trip(
-        UlpfecSendBuilder::red(RED_PT, FEC_PT)
+        red_builder()
             .with_num_media_packets(4)
             .with_num_fec_packets(1),
         &packets,
@@ -496,11 +536,8 @@ fn losses_beyond_the_fec_are_left_lost() {
 #[test]
 fn losing_the_fec_packet_loses_nothing_else() {
     let packets = rfc_packets();
-    let (_, delivered) = red_round_trip(
-        UlpfecSendBuilder::red(RED_PT, FEC_PT).with_num_media_packets(4),
-        &packets[..4],
-        &[4],
-    );
+    let (_, delivered) =
+        red_round_trip(red_builder().with_num_media_packets(4), &packets[..4], &[4]);
     assert_eq!(4, delivered.len());
     for (original, message) in packets.iter().zip(&delivered) {
         assert_same_packet(original, rtp_of(message));
@@ -514,11 +551,8 @@ fn recovery_works_where_the_sequence_numbers_wrap() {
         .map(|seq| media(seq, 100, false, 40))
         .collect();
     for lost in 0..4 {
-        let (wire, delivered) = red_round_trip(
-            UlpfecSendBuilder::red(RED_PT, FEC_PT).with_num_media_packets(4),
-            &packets,
-            &[lost],
-        );
+        let (wire, delivered) =
+            red_round_trip(red_builder().with_num_media_packets(4), &packets, &[lost]);
         assert_eq!(
             1, wire[4].header.sequence_number,
             "the FEC packet follows 0"
@@ -546,11 +580,7 @@ fn a_lost_packet_with_csrc_extension_and_padding_is_rebuilt_whole() {
         rich.clone(),
         media(3, 60, false, 20),
     ];
-    let (_, delivered) = red_round_trip(
-        UlpfecSendBuilder::red(RED_PT, FEC_PT).with_num_media_packets(3),
-        &packets,
-        &[1],
-    );
+    let (_, delivered) = red_round_trip(red_builder().with_num_media_packets(3), &packets, &[1]);
     let recovered: Vec<_> = delivered
         .iter()
         .filter(|m| m.has(&Attribute::RecoveredByFec))
@@ -570,7 +600,7 @@ fn a_lost_packet_with_csrc_extension_and_padding_is_rebuilt_whole() {
 fn uneven_protection_rebuilds_short_packets_and_withholds_a_long_one_cut_short() {
     // Level 0 covers 30 octets, level 1 the next 40: packets up to 70 octets are fully covered.
     let builder = || {
-        UlpfecSendBuilder::red(RED_PT, FEC_PT)
+        red_builder()
             .with_num_media_packets(3)
             .with_level_lengths([30u16, 40])
     };
@@ -605,7 +635,7 @@ fn uneven_protection_rebuilds_short_packets_and_withholds_a_long_one_cut_short()
 fn fec_as_a_redundant_block_is_used_and_the_media_behind_it_delivered() {
     let now = Instant::now();
     let mut sender = red_sender(
-        UlpfecSendBuilder::red(RED_PT, FEC_PT)
+        red_builder()
             .with_num_media_packets(4)
             .with_red_placement(RedPlacement::WithNextMedia),
     );
@@ -638,7 +668,7 @@ fn fec_as_a_redundant_block_is_used_and_the_media_behind_it_delivered() {
 #[test]
 fn fec_too_long_for_a_redundant_block_gets_a_packet_of_its_own() {
     let mut chain = red_sender(
-        UlpfecSendBuilder::red(RED_PT, FEC_PT)
+        red_builder()
             .with_num_media_packets(2)
             .with_red_placement(RedPlacement::WithNextMedia),
     );
@@ -679,7 +709,7 @@ fn bare_fec_and_malformed_red_on_the_media_stream_are_dropped() {
 fn a_bare_media_packet_on_a_red_stream_is_accepted_and_protected() {
     // RFC 2198 5: a receiver that lists RED takes the encodings bare as well.
     let now = Instant::now();
-    let mut sender = red_sender(UlpfecSendBuilder::red(RED_PT, FEC_PT).with_num_media_packets(3));
+    let mut sender = red_sender(red_builder().with_num_media_packets(3));
     let packets = vec![
         media(1, 0, false, 30),
         media(2, 0, false, 30),
@@ -703,7 +733,7 @@ fn a_bare_media_packet_on_a_red_stream_is_accepted_and_protected() {
 fn a_receiver_that_signalled_onelevelonly_refuses_two_levels() {
     let now = Instant::now();
     let mut sender = red_sender(
-        UlpfecSendBuilder::red(RED_PT, FEC_PT)
+        red_builder()
             .with_num_media_packets(2)
             .with_level_lengths([10u16, 30]),
     );
@@ -762,7 +792,7 @@ fn the_nack_generator_asks_for_neither_the_fec_packet_nor_what_it_rebuilt() {
     const NACK_INTERVAL: Duration = Duration::from_millis(100);
     let now = Instant::now();
 
-    let mut sender = red_sender(UlpfecSendBuilder::red(RED_PT, FEC_PT).with_num_media_packets(4));
+    let mut sender = red_sender(red_builder().with_num_media_packets(4));
     let first: Vec<_> = (200..204).map(|seq| media(seq, 0, false, 40)).collect();
     let second: Vec<_> = (204..208).map(|seq| media(seq, 0, false, 40)).collect();
     let mut wire = send(&mut sender, now, &first);
