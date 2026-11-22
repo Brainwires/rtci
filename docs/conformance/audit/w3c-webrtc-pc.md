@@ -8,13 +8,13 @@ How rows were judged. The engine is sans-I/O Rust under a JS API layer: promises
 
 Totals (rows 957):
 
-- MUST: tested 382 / untested 157 / partial 152 / missing 149 / violated 27 / n-a 62
+- MUST: tested 383 / untested 157 / partial 152 / missing 149 / violated 26 / n-a 62
 - SHOULD: tested 2 / untested 0 / partial 2 / missing 1 / violated 0 / n-a 5
 - MAY: tested 2 / untested 2 / partial 1 / missing 1 / violated 0 / n-a 12
 
 By pass:
 
-- sections 1 to 4: rows 399; MUST: tested 151 / untested 67 / partial 72 / missing 50 / violated 7 / n-a 35
+- sections 1 to 4: rows 399; MUST: tested 152 / untested 67 / partial 72 / missing 50 / violated 6 / n-a 35
 - section 5: rows 258; MUST: tested 81 / untested 50 / partial 46 / missing 43 / violated 16 / n-a 14
 - sections 6 to 12: rows 300; MUST: tested 150 / untested 40 / partial 34 / missing 56 / violated 4 / n-a 13
 
@@ -165,7 +165,7 @@ By pass:
 | WEBRTC-4.4.1.4-53 | 4.4.1.4 | MUST | Remote description: find an existing transceiver for the m= section as RFC 9429 says | tested | src/peer_connection/mod.rs:1576 | add_track_then_rollback_remote_offer_then_create_offer_includes_track | |
 | WEBRTC-4.4.1.4-54 | 4.4.1.4 | MUST | Found transceiver with one rid-less encoding takes proposedSendEncodings | missing | | | |
 | WEBRTC-4.4.1.4-55 | 4.4.1.4 | MUST | No transceiver found: create sender, receiver and transceiver and add it to the set | tested | src/peer_connection/mod.rs:1606 | set_remote_rollback_removes_transceivers_created_by_remote_offer | |
-| WEBRTC-4.4.1.4-56 | 4.4.1.4 | MUST | The transceiver created for a remote m= section has direction "recvonly" | violated | src/peer_connection/mod.rs:1599 | | created `Sendonly` when the offered section is recvonly |
+| WEBRTC-4.4.1.4-56 | 4.4.1.4 | MUST | The transceiver created for a remote m= section has direction "recvonly" | tested | pc/mod.rs `apply_remote_description` | `tests/jsep_answer_sections.rs::the_transceiver_created_for_a_remote_section_is_recvonly` |  |
 | WEBRTC-4.4.1.4-57 | 4.4.1.4 | MUST | Remote answer rejecting simulcast or missing all layers: keep only the first send encoding | missing | src/peer_connection/mod.rs:1639 | | |
 | WEBRTC-4.4.1.4-58 | 4.4.1.4 | MUST | Remote answer missing some layers: remove those encodings | missing | src/peer_connection/mod.rs:1639 | | |
 | WEBRTC-4.4.1.4-59 | 4.4.1.4 | MUST | Remote description: set [[Mid]] to [[JsepMid]] | tested | src/peer_connection/mod.rs:1594 | an_offer_without_mids_numbers_its_sections_by_index | |

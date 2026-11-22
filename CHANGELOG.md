@@ -43,6 +43,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   description"), so the offer of a finished exchange is not accepted for the next
   (`Error::ErrSDPDoesNotMatchOffer`).
 
+- **jsep**: the `o=` session version goes up by one with each generated description that
+  differs from the one before (RFC 9429 sections 5.2.2 and 5.3.2, RFC 3264 section 8). It was
+  the clock's sub-second nanoseconds plus one on every call, so versions were unrelated and
+  could go down.
+- **jsep**: the answer's BUNDLE group is the offered BUNDLE group, in its tag order (RFC 9429
+  section 5.3.1, RFC 9143 sections 7.3 and 7.3.1). It was read from the first `a=group` line
+  of any semantics, so an offer listing `a=group:LS` first had sections rejected; and an offer
+  with no group at all had every section answered with port 0. It is now answered without a
+  group, accepted.
+- **jsep**: an answer repeats the `<proto>` of each offered m= line (RFC 9429 section 5.1.2),
+  rejected and data sections included; it said `UDP/TLS/RTP/SAVPF` / `UDP/DTLS/SCTP` whatever
+  was offered. An audio or video section whose profile is none of the eight RTP profiles of
+  that section is rejected.
+- **jsep**: a media section with no direction attribute is sendrecv, and a session-level
+  direction is the section's when it has none (RFC 8866 section 6.7, RFC 3264 section 6.1).
+  Such a section was skipped when the offer was applied, and `create_answer` then failed with
+  `ErrPeerConnTransceiverMidNil`.
+- **jsep**: the transceiver created for a remote m= section has direction `recvonly` whatever
+  was offered (W3C "set a session description"); for a section offered recvonly it was
+  `sendonly`, with no sender. Such a section is answered `inactive` until `add_track`.
+- **jsep**: a remote description that repeats a mid, or whose mid is not a token, is refused
+  (RFC 5888 section 4, RFC 9429 section 5.8.2); both sections used to share one transceiver.
+- **jsep**: `a=bundle-only` in a section outside every BUNDLE group, or in an answer, is
+  discarded (RFC 9143 section 6): a port-zero section is then rejected, as port zero says.
+- **jsep**: local descriptions list each candidate once, for the RTP component (RFC 8858
+  section 5.3, RFC 5761 section 5.1.3); every candidate was repeated as component 2.
+- **jsep**: the unregistered `mslabel` and `label` source attributes are no longer written
+  (RFC 5576 section 4.1); `a=ssrc` carries `cname` and `msid`.
+
 ### Features
 
 - **shared**: `Error::ErrAnswerDoesNotMatchOffer(String)`.
