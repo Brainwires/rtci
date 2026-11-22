@@ -2066,6 +2066,13 @@ impl RTCPeerConnection {
                 && RtpCodecKind::from(media.media_name.media.as_str()) != RtpCodecKind::Unspecified
             {
                 codecs_from_media_description(media)?;
+                // RFC 9429 section 5.8.2: "Any 'a=imageattr' attributes MUST be parsed as
+                // specified in [RFC6236], Section 3, and their values stored."
+                if let Err(err) = media.imageattrs() {
+                    return Err(Error::SdpInvalidValue(format!(
+                        "{err} (RFC 9429 section 5.8.2, RFC 6236 section 3.1)"
+                    )));
+                }
                 if let Some(err) = sdp::simulcast::malformed_simulcast_line(media) {
                     return Err(Error::SdpInvalidValue(format!(
                         "{err} (RFC 9429 section 5.8, RFC 8853 section 5.2)"

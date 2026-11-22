@@ -619,6 +619,8 @@ impl RTCPeerConnection {
             sctp_over_tcp: self.offers_sctp_over_tcp(&candidates),
             ignore_rid_pause_for_recv: false,
             rid_pause_marks: self.setting_engine.rid_pause_marks,
+            video_receive_limits: self.setting_engine.video_receive_limits,
+            codec_video_receive_limits: self.setting_engine.codec_video_receive_limits.clone(),
             write_ssrc_attributes_for_simulcast: self
                 .setting_engine
                 .write_ssrc_attributes_for_simulcast,
@@ -1019,6 +1021,8 @@ impl RTCPeerConnection {
             sctp_over_tcp,
             ignore_rid_pause_for_recv,
             rid_pause_marks: self.setting_engine.rid_pause_marks,
+            video_receive_limits: self.setting_engine.video_receive_limits,
+            codec_video_receive_limits: self.setting_engine.codec_video_receive_limits.clone(),
             write_ssrc_attributes_for_simulcast: self
                 .setting_engine
                 .write_ssrc_attributes_for_simulcast,

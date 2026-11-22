@@ -107,6 +107,8 @@ fn params(
         selected_destination: None,
         remote_candidates: vec![],
         rid_pause_marks: false,
+        video_receive_limits: None,
+        codec_video_receive_limits: vec![],
     }
 }
 

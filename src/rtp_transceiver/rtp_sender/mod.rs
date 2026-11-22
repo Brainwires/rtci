@@ -399,6 +399,49 @@ impl RTCRtpSender<'_> {
             .get_parameters(&self.peer_connection.media_engine)
     }
 
+    /// The resolution an encoder that produces `width` x `height` for this sender is to send
+    /// (RFC 9429 section 3.6.2): the frame sizes the remote description's `a=imageattr recv`
+    /// lines permit for the sender's codec, for as long as they are in it. The input when no
+    /// line limits it; a downscaled resolution with the same picture aspect ratio when the
+    /// input exceeds the maximum; `Err(ErrImageAttrUnsatisfiable)` when no line can be
+    /// satisfied (below a minimum, non-square pixels only): the encoding "MUST NOT be
+    /// transmitted". The engine has no encoder; the application's encoder applies this.
+    ///
+    /// Not a W3C method: a fork addition.
+    pub fn send_resolution(&mut self, width: u32, height: u32) -> Result<(u32, u32)> {
+        let payload_type = self
+            .get_parameters()
+            .rtp_parameters
+            .codecs
+            .first()
+            .map(|codec| codec.payload_type);
+        let mid = self.peer_connection.rtp_transceivers[self.id.0]
+            .mid()
+            .clone();
+        let attributes = mid
+            .and_then(|mid| {
+                let parsed = self.peer_connection.remote_description()?.parsed.as_ref()?;
+                parsed
+                    .media_descriptions
+                    .iter()
+                    .find(|m| crate::peer_connection::sdp::get_mid_value(m) == Some(&mid))
+                    .map(|m| m.imageattrs().unwrap_or_default())
+            })
+            .unwrap_or_default();
+        match payload_type {
+            None => Ok((width, height)),
+            Some(payload_type) => {
+                crate::peer_connection::sdp::imageattr::imageattr_send_resolution(
+                    &attributes,
+                    payload_type,
+                    width,
+                    height,
+                )
+                .ok_or(Error::ErrImageAttrUnsatisfiable)
+            }
+        }
+    }
+
     /// Replaces the track this sender sends, without negotiation (W3C `replaceTrack`).
     ///
     /// `Some(track)`: the sender sends `track` from now on. Its encodings and their SSRCs,

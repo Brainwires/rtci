@@ -454,6 +454,11 @@ pub struct SettingEngine {
     pub(crate) ignore_rid_pause_for_recv: bool,
     /// [`SettingEngineBuilder::with_rid_pause_marks`].
     pub(crate) rid_pause_marks: bool,
+    /// [`SettingEngineBuilder::with_video_receive_limits`].
+    pub(crate) video_receive_limits: Option<crate::peer_connection::sdp::RTCVideoResolutionRange>,
+    /// [`SettingEngineBuilder::with_codec_video_receive_limits`], by MIME type.
+    pub(crate) codec_video_receive_limits:
+        Vec<(String, crate::peer_connection::sdp::RTCVideoResolutionRange)>,
     /// Whether `write_rtp` sends header extension elements whose id is not negotiated; see
     /// [`SettingEngineBuilder::with_unnegotiated_header_extensions`].
     pub(crate) unnegotiated_header_extensions: bool,
@@ -2000,6 +2005,36 @@ impl SettingEngineBuilder {
     /// does for inactive layers.
     pub fn with_rid_pause_marks(mut self, rid_pause_marks: bool) -> Self {
         self.0.rid_pause_marks = rid_pause_marks;
+        self
+    }
+
+    /// The video frame sizes this endpoint can receive, with every video codec (its decoder's
+    /// limits, or a policy): descriptions state them in `a=imageattr:* recv [x=...,y=...,q=1.0]`
+    /// lines of their receiving video sections (RFC 9429 section 3.6.1, RFC 6236). A range
+    /// that permits no size leaves the attribute out and makes those sections not receive
+    /// (`sendonly` / `inactive`). The default is none: no `a=imageattr`.
+    pub fn with_video_receive_limits(
+        mut self,
+        limits: crate::peer_connection::sdp::RTCVideoResolutionRange,
+    ) -> Self {
+        self.0.video_receive_limits = Some(limits);
+        self
+    }
+
+    /// The video frame sizes this endpoint can receive with one codec (`mime_type`, such as
+    /// `video/VP9`), instead of those of [`Self::with_video_receive_limits`]: codecs with
+    /// different limits get one `a=imageattr` line per payload type (RFC 9429 section 3.6.1).
+    pub fn with_codec_video_receive_limits(
+        mut self,
+        mime_type: &str,
+        limits: crate::peer_connection::sdp::RTCVideoResolutionRange,
+    ) -> Self {
+        self.0
+            .codec_video_receive_limits
+            .retain(|(codec, _)| !codec.eq_ignore_ascii_case(mime_type));
+        self.0
+            .codec_video_receive_limits
+            .push((mime_type.to_owned(), limits));
         self
     }
 

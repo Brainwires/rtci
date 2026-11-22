@@ -174,6 +174,8 @@ mod rejected_mline_tests {
             selected_destination: None,
             remote_candidates: vec![],
             rid_pause_marks: false,
+            video_receive_limits: None,
+            codec_video_receive_limits: vec![],
         }
     }
 
@@ -293,6 +295,7 @@ mod rejected_mline_tests {
 }
 
 mod answer_check;
+pub(crate) mod imageattr;
 pub(crate) mod sdp_type;
 pub(crate) mod session_description;
 pub(crate) mod simulcast;
@@ -300,6 +303,7 @@ pub(crate) mod simulcast;
 pub(crate) use answer_check::{bundle_groups, check_answer_against_offer, effective_direction};
 pub(crate) use simulcast::{SimulcastDirection, SimulcastRid, get_rids};
 
+pub use imageattr::RTCVideoResolutionRange;
 pub use sdp_type::RTCSdpType;
 pub use session_description::RTCSessionDescription;
 
@@ -349,6 +353,8 @@ pub(crate) const ATTR_KEY_ICE_OPTIONS: &str = "ice-options";
 pub(crate) const ATTR_KEY_ICE_PACING: &str = "ice-pacing";
 /// RFC 8839 section 5.2.
 pub(crate) const ATTR_KEY_REMOTE_CANDIDATES: &str = "remote-candidates";
+/// RFC 6236 section 3.1.
+pub(crate) const ATTR_KEY_IMAGEATTR: &str = "imageattr";
 
 /// The remote candidates an offer's `a=remote-candidates` lines name, as (address, port), of
 /// the sections that carry candidates (RFC 8839 section 5.2). RFC 9429 section 5.8.2: they
@@ -1171,6 +1177,10 @@ pub(crate) struct AddTransceiverSdpParams {
     ignore_rid_pause_for_recv: bool,
     /// `SettingEngineBuilder::with_rid_pause_marks`: `~` is written without RFC 7728.
     rid_pause_marks: bool,
+    /// The video receive limits (`a=imageattr`, RFC 9429 section 3.6.1): for every codec,
+    /// and by MIME type.
+    video_receive_limits: Option<RTCVideoResolutionRange>,
+    codec_video_receive_limits: Vec<(String, RTCVideoResolutionRange)>,
     write_ssrc_attributes_for_simulcast: bool,
     /// An offer (initial or subsequent) rather than an answer.
     is_offer: bool,
@@ -1488,9 +1498,41 @@ impl RTCPeerConnection {
         // The section's direction: an answer's is the transceiver's [[Direction]] intersected
         // with the reverse of the offered one (RFC 9429 section 5.3.1, RFC 3264 section 6.1);
         // an offer states [[Direction]] itself.
-        let direction = media_section
+        let mut direction = media_section
             .answer_direction
             .unwrap_or_else(|| transceiver.direction());
+
+        // RFC 9429 section 3.6.1 (and 5.2.1, 5.3.1): a receiving video section states the
+        // frame sizes this endpoint can receive; when its limits permit none, the attribute
+        // is left out and the section does not receive.
+        let mut imageattrs = vec![];
+        if transceiver.kind() == RtpCodecKind::Video && direction.has_recv() {
+            let formats: Vec<(u8, String)> = codecs
+                .iter()
+                .filter(|codec| {
+                    repair_family(&codec.rtp_codec).is_empty()
+                        && !is_fec_mime_type(&codec.rtp_codec.mime_type)
+                })
+                .map(|codec| (codec.payload_type, codec.rtp_codec.mime_type.clone()))
+                .collect();
+            match imageattr::imageattr_lines(
+                &formats,
+                params.video_receive_limits,
+                &params.codec_video_receive_limits,
+            ) {
+                Some(lines) => imageattrs = lines,
+                None => {
+                    direction = if direction.has_send() {
+                        RTCRtpTransceiverDirection::Sendonly
+                    } else {
+                        RTCRtpTransceiverDirection::Inactive
+                    }
+                }
+            }
+        }
+        for line in imageattrs {
+            media = media.with_value_attribute(ATTR_KEY_IMAGEATTR.to_owned(), line);
+        }
 
         // `a=rid` and `a=simulcast` (RFC 8851, RFC 8853).
         let formats: HashSet<u8> = codecs.iter().map(|codec| codec.payload_type).collect();
@@ -2007,6 +2049,9 @@ pub(crate) struct PopulateSdpParams {
     pub(crate) sctp_over_tcp: bool,
     pub(crate) ignore_rid_pause_for_recv: bool,
     pub(crate) rid_pause_marks: bool,
+    /// The video receive limits (`a=imageattr`, RFC 9429 section 3.6.1).
+    pub(crate) video_receive_limits: Option<RTCVideoResolutionRange>,
+    pub(crate) codec_video_receive_limits: Vec<(String, RTCVideoResolutionRange)>,
     pub(crate) write_ssrc_attributes_for_simulcast: bool,
     /// The Ta this endpoint proposes (`ice::Agent::proposed_pacing`): `a=ice-pacing` when it is
     /// not the default.
@@ -2195,6 +2240,8 @@ impl RTCPeerConnection {
                     ice_gathering_state: params.ice_gathering_state,
                     ignore_rid_pause_for_recv: params.ignore_rid_pause_for_recv,
                     rid_pause_marks: params.rid_pause_marks,
+                    video_receive_limits: params.video_receive_limits,
+                    codec_video_receive_limits: params.codec_video_receive_limits.clone(),
                     write_ssrc_attributes_for_simulcast: params.write_ssrc_attributes_for_simulcast,
                     is_offer: params.bundle == BundleMode::Offer,
                     rtcp_mux_only: params.rtcp_mux_only,

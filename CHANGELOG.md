@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **jsep**: video size negotiation with `a=imageattr` (RFC 9429 sections 3.6, 5.2.1, 5.3.1,
+  5.8.2, 5.10; RFC 6236). New `SettingEngineBuilder::with_video_receive_limits` and
+  `with_codec_video_receive_limits` (new public `RTCVideoResolutionRange`): receiving video
+  sections of offers and answers state them (`a=imageattr:* recv [x=[..],y=[..],q=1.0]`, or one
+  line per payload type when codecs differ); limits that permit no size leave the attribute
+  out and make the section `sendonly` / `inactive`. A remote `a=imageattr` that does not parse
+  refuses the description. New `RTCRtpSender::send_resolution(width, height)`: the resolution
+  the application's encoder is to send under the remote description's `recv` sets
+  (downscaled at the same aspect ratio, never upscaled), or the new
+  `Error::ErrImageAttrUnsatisfiable` when none can be satisfied.
 - **jsep**: SSRC collisions are resolved by the engine (RFC 3550 section 8.2, RFC 5576
   sections 5 and 6.2, RFC 8834 sections 4.1 and 4.8). A sender whose SSRC (media, RTX or FEC
   flow) the RTCP session hears from another source, or a remote description describes, moves
