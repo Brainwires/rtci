@@ -155,6 +155,36 @@ impl<'a> DataChannelHandler<'a> {
         Ok(())
     }
 
+    /// Closes channel `id` for an error the peer made on its stream: `OnError` now, the
+    /// stream reset as a local `close()` resets it, and `OnClose` when that reset completes.
+    /// What the peer still sends on the stream until then is ignored, as for any closed
+    /// channel.
+    fn fail_channel(&mut self, now: Instant, id: RTCDataChannelId) -> Result<()> {
+        let Some(dc) = self.data_channels.get_mut(&id) else {
+            return Ok(());
+        };
+        if !dc.close_emitted && !dc.failed {
+            dc.failed = true;
+            self.ctx.event_outs.push_back(TaggedRTCEventInternal {
+                now,
+                event: RTCEventInternal::RTCPeerConnectionEvent(
+                    RTCPeerConnectionEvent::OnDataChannel(RTCDataChannelEvent::OnError(id)),
+                ),
+            });
+        }
+        dc.close()?;
+        if let Some(data_channel) = dc.data_channel.as_mut() {
+            while let Some(data_channel_message) = sansio::Protocol::poll_write(data_channel) {
+                self.ctx.write_outs.push_back(TaggedRTCMessageInternal {
+                    now,
+                    transport: TransportContext::default(),
+                    message: RTCMessageInternal::Dtls(DTLSMessage::Sctp(data_channel_message)),
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Creates the statistics entry of channel `id` if it has none, copying its label and
     /// protocol once rather than for every message. A closed channel's entry is not recreated.
     fn ensure_data_channel_stats(&mut self, id: RTCDataChannelId) {
@@ -250,7 +280,16 @@ impl<'a>
                     .data_channel
                     .as_mut()
                     .ok_or(Error::ErrDataChannelNotExisted)?;
-                data_channel.handle_read(message)?;
+                if let Err(err) = data_channel.handle_read(message) {
+                    // RFC 8832 section 6 (a DATA_CHANNEL_OPEN on a stream in use, a DCEP
+                    // message that is not well formed) and RFC 8831 section 6.6 (an
+                    // unsupported PPID): the channel is closed. Returning the error left it
+                    // open, and before that an OPEN was acknowledged a second time and a
+                    // message of unknown interpretation delivered as binary data.
+                    warn!("closing the data channel on stream {stream_id}: the peer sent {err}");
+                    let channel_id = data_channel_internal.id;
+                    return self.fail_channel(now, channel_id);
+                }
                 if data_channel.is_handshake_complete()
                     && data_channel_internal.ready_state == RTCDataChannelState::Connecting
                 {
@@ -272,12 +311,24 @@ impl<'a>
                     self.reset_stream(now, message.association_handle, stream_id)?;
                     return Ok(());
                 }
-                let data_channel_internal = RTCDataChannelInternal::accept(
+                let data_channel_internal = match RTCDataChannelInternal::accept(
                     message.association_handle,
                     message.stream_id,
                     message.ppi,
                     &message.payload,
-                )?;
+                ) {
+                    Ok(data_channel_internal) => data_channel_internal,
+                    Err(err) => {
+                        // RFC 8832 section 6: a DATA_CHANNEL_OPEN that is not well formed or
+                        // has invalid parameters, and any other message on an unused stream
+                        // (user data, a stray ACK), close the channel the peer meant, which
+                        // here is only its stream. Returning the error instead left that
+                        // stream open for good, each later message failing the same way.
+                        warn!("resetting stream {stream_id}, which the peer did not open: {err}");
+                        self.reset_stream(now, message.association_handle, stream_id)?;
+                        return Ok(());
+                    }
+                };
 
                 self.data_channels.insert(data_channel_internal);
                 true
@@ -582,7 +633,26 @@ impl<'a>
             }
 
             RTCEventInternal::SCTPStreamClosed(_association_handle, stream_id) => {
-                if let Some(dc) = self.data_channels.remove_by_stream(&stream_id) {
+                if let Some(mut dc) = self.data_channels.remove_by_stream(&stream_id) {
+                    // RFC 8832 section 6: "receiving an SCTP stream-reset request for a
+                    // stream on which no DATA_CHANNEL_ACK message has been received indicates
+                    // to the sender of the corresponding DATA_CHANNEL_OPEN message the
+                    // failure of the data channel setup procedure". That is an error, not
+                    // the closing procedure of a channel that was open.
+                    let awaits_ack = !dc.negotiated
+                        && dc.ready_state == RTCDataChannelState::Connecting
+                        && dc.data_channel.is_some();
+                    if awaits_ack && !dc.close_emitted && !dc.failed {
+                        dc.failed = true;
+                        self.ctx.event_outs.push_back(TaggedRTCEventInternal {
+                            now,
+                            event: RTCEventInternal::RTCPeerConnectionEvent(
+                                RTCPeerConnectionEvent::OnDataChannel(
+                                    RTCDataChannelEvent::OnError(dc.id),
+                                ),
+                            ),
+                        });
+                    }
                     // W3C closing procedure: a close the remote started (its stream reset, or
                     // its DCEP close) takes an open or connecting channel to `closing` first.
                     // A channel this side is closing is already there, and one whose
@@ -599,6 +669,44 @@ impl<'a>
                             event: RTCEventInternal::RTCPeerConnectionEvent(
                                 RTCPeerConnectionEvent::OnDataChannel(
                                     RTCDataChannelEvent::OnClosing(dc.id),
+                                ),
+                            ),
+                        });
+                    }
+                    self.announce_closed(now, dc);
+                }
+            }
+
+            // RFC 8841 section 10: signalling closed the association (a rejected data
+            // section, `a=sctp-port:0`, a new `a=sctp-port`), and RFC 8831 section 6.2: its
+            // data channels are closed with it. A channel that never opened did not get
+            // what it was created for, which is an error; one not dialed yet belongs to no
+            // association, and waits for the new one if there is to be one.
+            RTCEventInternal::SCTPClosedBySignalling(replaced) => {
+                let mut handles: Vec<RTCDataChannelId> =
+                    self.data_channels.values().map(|dc| dc.id).collect();
+                handles.sort_unstable();
+                for handle in handles {
+                    let waits_for_the_new_association = replaced
+                        && self.data_channels.get(&handle).is_some_and(|dc| {
+                            dc.data_channel.is_none()
+                                && dc.ready_state == RTCDataChannelState::Connecting
+                        });
+                    if waits_for_the_new_association {
+                        continue;
+                    }
+                    let Some(dc) = self.data_channels.remove(&handle) else {
+                        continue;
+                    };
+                    if dc.ready_state == RTCDataChannelState::Connecting
+                        && !dc.close_emitted
+                        && !dc.failed
+                    {
+                        self.ctx.event_outs.push_back(TaggedRTCEventInternal {
+                            now,
+                            event: RTCEventInternal::RTCPeerConnectionEvent(
+                                RTCPeerConnectionEvent::OnDataChannel(
+                                    RTCDataChannelEvent::OnError(dc.id),
                                 ),
                             ),
                         });
@@ -1797,5 +1905,427 @@ mod tests {
             5, dc_stats.bytes_received,
             "the two empty messages add nothing"
         );
+    }
+
+    /// A handler whose association is up: the channels it was given are dialed, and nothing
+    /// is left queued.
+    struct Connected {
+        now: Instant,
+        ctx: DataChannelHandlerContext,
+        data_channels: DataChannelRegistry,
+        stats: RTCStatsAccumulator,
+        role: RTCDtlsRole,
+        handles: Vec<RTCDataChannelId>,
+    }
+
+    impl Connected {
+        fn new(role: RTCDtlsRole, channels: Vec<RTCDataChannelInternal>) -> Self {
+            let now = Instant::now();
+            let (data_channels, handles) = registry(channels);
+            let mut connected = Connected {
+                now,
+                ctx: DataChannelHandlerContext::new(now),
+                data_channels,
+                stats: RTCStatsAccumulator::new(),
+                role,
+                handles,
+            };
+            connected.event(RTCEventInternal::SCTPHandshakeComplete(0));
+            connected.written();
+            connected.delivered();
+            connected
+        }
+
+        fn handler(&mut self) -> DataChannelHandler<'_> {
+            DataChannelHandler::new(
+                &mut self.ctx,
+                &mut self.data_channels,
+                &mut self.stats,
+                None,
+                self.role,
+                None,
+            )
+        }
+
+        fn event(&mut self, event: RTCEventInternal) {
+            let now = self.now;
+            self.handler()
+                .handle_event(TaggedRTCEventInternal { now, event })
+                .unwrap();
+        }
+
+        /// What the SCTP handler delivers for one message from the peer.
+        fn read(&mut self, message: DataChannelMessage) -> Result<()> {
+            let now = self.now;
+            self.handler().handle_read(TaggedRTCMessageInternal {
+                now,
+                transport: TransportContext::default(),
+                message: RTCMessageInternal::Dtls(DTLSMessage::Sctp(message)),
+            })
+        }
+
+        /// Everything queued towards SCTP since the last call.
+        fn written(&mut self) -> Vec<DataChannelMessage> {
+            let mut handler = self.handler();
+            let mut out = vec![];
+            while let Some(msg) = handler.poll_write() {
+                if let RTCMessageInternal::Dtls(DTLSMessage::Sctp(message)) = msg.message {
+                    out.push(message);
+                }
+            }
+            out
+        }
+
+        /// Everything handed towards the application since the last call.
+        fn delivered(&mut self) -> Vec<(RTCDataChannelId, DataChannelEvent)> {
+            let mut handler = self.handler();
+            let mut out = vec![];
+            while let Some(msg) = handler.poll_read() {
+                if let RTCMessageInternal::Dtls(DTLSMessage::DataChannel(app)) = msg.message {
+                    out.push((app.data_channel_id, app.data_channel_event));
+                }
+            }
+            out
+        }
+
+        /// The data channel events raised since the last call.
+        fn events(&mut self) -> Vec<RTCDataChannelEvent> {
+            let events = channel_events(&self.ctx);
+            self.ctx.event_outs.clear();
+            events
+        }
+    }
+
+    fn dcep(stream_id: u16, payload: &[u8]) -> DataChannelMessage {
+        peer_message(stream_id, PayloadProtocolIdentifier::Dcep, payload)
+    }
+
+    fn peer_message(
+        stream_id: u16,
+        ppi: PayloadProtocolIdentifier,
+        payload: &[u8],
+    ) -> DataChannelMessage {
+        DataChannelMessage {
+            association_handle: 0,
+            stream_id,
+            ppi,
+            payload: BytesMut::from(payload),
+            negotiated: false,
+        }
+    }
+
+    /// The DCEP message types among `written`, per stream: what the handler asks SCTP to do.
+    fn dcep_types(written: &[DataChannelMessage]) -> Vec<(u16, u8)> {
+        written
+            .iter()
+            .filter(|m| m.ppi == PayloadProtocolIdentifier::Dcep)
+            .map(|m| (m.stream_id, m.payload[0]))
+            .collect()
+    }
+
+    /// The internal message that makes the SCTP handler reset a stream (never on the wire).
+    const RESET: u8 = 0x01;
+    /// RFC 8832 5.2.
+    const ACK: u8 = 0x02;
+
+    /// RFC 8832 section 6: a DATA_CHANNEL_OPEN "received on an already used stream" closes the
+    /// data channel, and no DATA_CHANNEL_ACK is sent in response. The stream is one the peer
+    /// opened in band, or one both sides negotiated.
+    #[test]
+    fn an_open_on_a_stream_in_use_closes_the_channel_without_an_ack() {
+        // The peer (DTLS server) opens stream 1, and both sides negotiated stream 4.
+        let mut c = Connected::new(RTCDtlsRole::Client, vec![negotiated_channel(4)]);
+        c.read(open_message(0, 1)).unwrap();
+        assert_eq!(dcep_types(&c.written()), vec![(1, ACK)], "the first OPEN");
+        let peer_opened = c.data_channels.handle_of_stream(&1).unwrap();
+        c.delivered();
+        c.events();
+
+        for (stream_id, handle) in [(1, peer_opened), (4, c.handles[0])] {
+            c.read(open_message(0, stream_id))
+                .expect("a second OPEN is the peer's error, not a read failure");
+            assert_eq!(
+                dcep_types(&c.written()),
+                vec![(stream_id, RESET)],
+                "stream {stream_id}: its stream is reset and the OPEN is not acknowledged"
+            );
+            assert_eq!(
+                c.data_channels.get(&handle).unwrap().ready_state,
+                RTCDataChannelState::Closed
+            );
+            assert_eq!(c.events(), vec![RTCDataChannelEvent::OnError(handle)]);
+            assert!(c.delivered().is_empty(), "no second open event");
+
+            // The reset completes: the channel is announced closed, as one that failed.
+            c.event(RTCEventInternal::SCTPStreamClosed(0, stream_id));
+            assert_eq!(c.events(), vec![RTCDataChannelEvent::OnClose(handle)]);
+            assert!(c.data_channels.get(&handle).is_none());
+        }
+    }
+
+    /// RFC 8832 section 6: an OPEN with "invalid parameters" or "inconsistencies of lengths"
+    /// closes the channel: the stream the peer used is reset, where it used to stay half open
+    /// with the error dropped on the floor. Nothing is acknowledged and no channel exists.
+    #[test]
+    fn a_malformed_open_resets_its_stream() {
+        let mut well_formed = open_message(0, 1).payload.to_vec();
+        let truncated = well_formed[..well_formed.len() - 2].to_vec();
+        // Label "peer" replaced by bytes that are not UTF-8.
+        let label_at = well_formed.len() - 4;
+        well_formed[label_at..].copy_from_slice(&[0xff, 0xfe, 0xfd, 0xfc]);
+        let bad_utf8 = well_formed;
+
+        let cases: [(&str, Vec<u8>); 7] = [
+            (
+                "reserved channel type",
+                vec![0x03, 0x7f, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            ),
+            ("lengths past the end of the message", truncated),
+            ("a label that is not UTF-8", bad_utf8),
+            ("a header cut short", vec![0x03, 0x00, 0x01]),
+            ("an ACK where the OPEN belongs", vec![ACK]),
+            ("an unassigned message type", vec![0x7e]),
+            ("no message at all", vec![]),
+        ];
+        for (what, payload) in cases {
+            let mut c = Connected::new(RTCDtlsRole::Client, vec![]);
+            c.read(dcep(1, &payload))
+                .unwrap_or_else(|err| panic!("{what}: returned {err} and reset nothing"));
+            assert_eq!(dcep_types(&c.written()), vec![(1, RESET)], "{what}");
+            assert!(c.data_channels.is_empty(), "{what}: no channel is created");
+            assert!(c.delivered().is_empty(), "{what}: nothing is announced");
+        }
+    }
+
+    /// RFC 8832 section 6: "If a message other than a DATA_CHANNEL_OPEN is received on an
+    /// unused stream, the receiver MUST close the corresponding data channel": user data on a
+    /// stream of the peer's parity that no OPEN opened resets it.
+    #[test]
+    fn user_data_on_a_stream_that_was_never_opened_resets_it() {
+        for ppi in [
+            PayloadProtocolIdentifier::String,
+            PayloadProtocolIdentifier::Binary,
+            PayloadProtocolIdentifier::StringEmpty,
+            PayloadProtocolIdentifier::BinaryEmpty,
+            PayloadProtocolIdentifier::Unknown,
+        ] {
+            let mut c = Connected::new(RTCDtlsRole::Client, vec![]);
+            c.read(peer_message(1, ppi, b"x"))
+                .unwrap_or_else(|err| panic!("{ppi}: returned {err} and reset nothing"));
+            assert_eq!(dcep_types(&c.written()), vec![(1, RESET)], "{ppi}");
+            assert!(c.data_channels.is_empty(), "{ppi}");
+            assert!(c.delivered().is_empty(), "{ppi}");
+        }
+    }
+
+    /// RFC 8831 section 6.6: "The SCTP Payload Protocol Identifiers (PPIDs) are used to signal
+    /// the interpretation of the 'payload data'", and a message with an unsupported one closes
+    /// the channel. It used to reach the application as a binary message, so each fragment a
+    /// peer sent under the deprecated partial PPIDs (52, 54) became a message of its own.
+    #[test]
+    fn a_message_with_an_unsupported_ppid_closes_the_channel() {
+        let mut c = Connected::new(RTCDtlsRole::Client, vec![negotiated_channel(4)]);
+        let handle = c.handles[0];
+        c.events();
+
+        // 52, 54 and every unassigned value decode to `Unknown`.
+        c.read(peer_message(4, PayloadProtocolIdentifier::Unknown, b"??"))
+            .expect("the peer's error is not a read failure");
+        assert!(
+            c.delivered().is_empty(),
+            "a message of unknown interpretation is not delivered as binary"
+        );
+        assert_eq!(dcep_types(&c.written()), vec![(4, RESET)]);
+        assert_eq!(c.events(), vec![RTCDataChannelEvent::OnError(handle)]);
+        assert_eq!(
+            c.data_channels.get(&handle).unwrap().ready_state,
+            RTCDataChannelState::Closed
+        );
+
+        // What still arrives before the reset completes is not delivered either.
+        c.read(data_message(0, 4, b"late")).unwrap();
+        assert!(c.delivered().is_empty());
+        assert!(c.written().is_empty(), "the stream is reset once");
+        assert!(c.events().is_empty(), "the error is reported once");
+    }
+
+    /// RFC 8831 section 6.6 (closing on a receive error) for DCEP itself: a control message
+    /// that cannot be parsed, or one only this crate uses internally, closes an open channel.
+    #[test]
+    fn a_malformed_dcep_message_on_an_open_channel_closes_it() {
+        for payload in [&[0x7e][..], &[][..], &[0x00, 0, 0, 0, 1][..], &[0x01][..]] {
+            let mut c = Connected::new(RTCDtlsRole::Client, vec![negotiated_channel(4)]);
+            let handle = c.handles[0];
+            c.events();
+            c.read(dcep(4, payload))
+                .unwrap_or_else(|err| panic!("{payload:?}: returned {err}"));
+            assert_eq!(dcep_types(&c.written()), vec![(4, RESET)], "{payload:?}");
+            assert_eq!(
+                c.events(),
+                vec![RTCDataChannelEvent::OnError(handle)],
+                "{payload:?}"
+            );
+        }
+    }
+
+    /// A DATA_CHANNEL_ACK on a channel whose handshake is already complete carries nothing
+    /// new: it is ignored, the channel stays open (a retransmitted or duplicated ACK must not
+    /// cost the channel).
+    #[test]
+    fn a_repeated_ack_leaves_the_channel_open() {
+        let mut c = Connected::new(RTCDtlsRole::Client, vec![in_band_channel(0)]);
+        let handle = c.handles[0];
+        c.read(ack(0, 0)).unwrap();
+        c.read(ack(0, 0)).unwrap();
+        assert!(c.written().is_empty());
+        assert_eq!(
+            c.data_channels.get(&handle).unwrap().ready_state,
+            RTCDataChannelState::Open
+        );
+        assert_eq!(c.delivered().len(), 1, "one open event");
+        assert!(c.events().is_empty());
+    }
+
+    /// RFC 8831 section 6.6: "When receiving an SCTP user message with one of these PPIDs
+    /// [String Empty, Binary Empty], the receiver MUST ignore the SCTP user message and
+    /// process it as an empty message": the application gets no byte of it, as a string or as
+    /// binary data by its PPID.
+    #[test]
+    fn an_empty_message_reaches_the_application_empty() {
+        let mut c = Connected::new(RTCDtlsRole::Client, vec![negotiated_channel(4)]);
+        c.read(peer_message(
+            4,
+            PayloadProtocolIdentifier::StringEmpty,
+            &[0],
+        ))
+        .unwrap();
+        c.read(peer_message(
+            4,
+            PayloadProtocolIdentifier::BinaryEmpty,
+            &[0x55],
+        ))
+        .unwrap();
+        let got: Vec<(bool, Vec<u8>)> = c
+            .delivered()
+            .into_iter()
+            .filter_map(|(_, event)| match event {
+                DataChannelEvent::Message(m) => Some((m.is_string, m.data.to_vec())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(got, vec![(true, vec![]), (false, vec![])]);
+    }
+
+    /// RFC 8832 section 6: a stream reset that arrives where the DATA_CHANNEL_ACK was expected
+    /// means the peer refused the channel. Its setup failed: `error`, then `close`, and no
+    /// `closing`, which is the closing procedure of a channel that was open.
+    #[test]
+    fn a_reset_before_the_ack_fails_the_channel_setup() {
+        let mut c = Connected::new(RTCDtlsRole::Client, vec![in_band_channel(0)]);
+        let handle = c.handles[0];
+        assert_eq!(
+            c.data_channels.get(&handle).unwrap().ready_state,
+            RTCDataChannelState::Connecting
+        );
+        c.event(RTCEventInternal::SCTPStreamClosed(0, 0));
+        assert_eq!(
+            c.events(),
+            vec![
+                RTCDataChannelEvent::OnError(handle),
+                RTCDataChannelEvent::OnClose(handle),
+            ]
+        );
+        assert!(c.data_channels.is_empty());
+    }
+
+    /// RFC 8832 section 7: the peer may open as many channels as the association has streams,
+    /// and every one of them is accepted; each costs one registry entry, which goes when the
+    /// channel closes.
+    #[test]
+    fn the_peer_may_open_every_stream_of_its_parity() {
+        let mut c = Connected::new(RTCDtlsRole::Client, vec![]);
+        let streams: Vec<u16> = (1..u16::MAX).step_by(2).collect();
+        for stream_id in &streams {
+            c.read(open_message(0, *stream_id)).unwrap();
+        }
+        assert_eq!(c.data_channels.len(), streams.len());
+        // Counted where `handle_read` queues them: `poll_write` walks every channel.
+        assert_eq!(c.ctx.write_outs.len(), streams.len(), "one ACK each");
+        c.ctx.write_outs.clear();
+        for stream_id in &streams {
+            c.event(RTCEventInternal::SCTPStreamClosed(0, *stream_id));
+        }
+        assert!(c.data_channels.is_empty());
+        assert!(c.stats.data_channels.is_empty());
+    }
+
+    /// RFC 8841 section 10 with RFC 8831 section 6.2: an association closed by signalling
+    /// (a rejected data section, `a=sctp-port:0`) takes its data channels with it. An open
+    /// channel is closed; one that never opened failed, and says so first.
+    #[test]
+    fn an_association_closed_by_signalling_closes_its_channels() {
+        let mut waiting = in_band_channel(2);
+        waiting.stream_id = None;
+        let mut c = Connected::new(
+            RTCDtlsRole::Client,
+            vec![negotiated_channel(4), in_band_channel(0)],
+        );
+        let (open, connecting) = (c.handles[0], c.handles[1]);
+        // Created after the association came up, and never dialed.
+        let undialed = c.data_channels.insert(waiting);
+        c.events();
+
+        c.event(RTCEventInternal::SCTPClosedBySignalling(false));
+        assert_eq!(
+            c.events(),
+            vec![
+                RTCDataChannelEvent::OnClose(open),
+                RTCDataChannelEvent::OnError(connecting),
+                RTCDataChannelEvent::OnClose(connecting),
+                RTCDataChannelEvent::OnError(undialed),
+                RTCDataChannelEvent::OnClose(undialed),
+            ]
+        );
+        assert!(c.data_channels.is_empty());
+        assert!(c.stats.data_channels.is_empty());
+    }
+
+    /// RFC 8841 section 9.3: a new `a=sctp-port` closes the association and establishes a
+    /// new one. The channels that ran over the old one are closed; a channel that was not
+    /// dialed yet belongs to neither, keeps its handle, and is opened on the new one.
+    #[test]
+    fn a_replaced_association_keeps_the_channels_not_yet_dialed() {
+        let mut c = Connected::new(
+            RTCDtlsRole::Client,
+            vec![negotiated_channel(4), in_band_channel(0)],
+        );
+        let (open, connecting) = (c.handles[0], c.handles[1]);
+        let mut waiting = in_band_channel(2);
+        waiting.stream_id = None;
+        let undialed = c.data_channels.insert(waiting);
+        c.events();
+        c.written();
+
+        c.event(RTCEventInternal::SCTPClosedBySignalling(true));
+        assert_eq!(
+            c.events(),
+            vec![
+                RTCDataChannelEvent::OnClose(open),
+                RTCDataChannelEvent::OnError(connecting),
+                RTCDataChannelEvent::OnClose(connecting),
+            ]
+        );
+        assert_eq!(c.data_channels.len(), 1);
+        assert!(c.data_channels.get(&undialed).is_some());
+
+        // The new association comes up: the waiting channel takes the first free stream of
+        // this side's parity, which the closed channel no longer holds, and is dialed.
+        c.event(RTCEventInternal::SCTPHandshakeComplete(1));
+        let dc = c.data_channels.get(&undialed).expect("the waiting channel");
+        assert_eq!(dc.stream_id, Some(0));
+        assert!(dc.data_channel.is_some());
+        let written = c.written();
+        assert_eq!(dcep_types(&written)[0], (0, 0x03), "its OPEN");
+        assert_eq!(written[0].association_handle, 1, "on the new association");
     }
 }

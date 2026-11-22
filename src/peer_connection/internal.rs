@@ -6,8 +6,9 @@ use crate::peer_connection::handler::endpoint::EndpointHandlerContext;
 use crate::peer_connection::handler::interceptor::InterceptorHandlerContext;
 use crate::peer_connection::handler::srtp::SrtpHandlerContext;
 use crate::peer_connection::sdp::{
-    MediaSection, PopulateSdpParams, add_candidates_to_media_descriptions, get_by_mid,
-    get_peer_direction, get_rids, have_data_channel, is_ext_map_allow_mixed_set,
+    MediaSection, PopulateSdpParams, add_candidates_to_media_descriptions, get_application_media,
+    get_application_media_section_sctp_port, get_by_mid, get_peer_direction, get_rids,
+    have_data_channel, is_ext_map_allow_mixed_set, is_unknown_application_media,
     rtp_extensions_from_media_description, track_details_from_sdp, unknown_media_name,
 };
 use crate::peer_connection::state::signaling_state::check_next_signaling_state;
@@ -335,6 +336,8 @@ impl RTCPeerConnection {
             ice_gathering_state: self.ice_transport().ice_gathering_state,
             match_bundle_group: None,
             sctp_max_message_size: self.setting_engine.sctp_max_message_size.as_usize(),
+            sctp_port: self.sctp_transport().offer_port(),
+            sctp_over_tcp: false,
             ignore_rid_pause_for_recv: false,
             write_ssrc_attributes_for_simulcast: self
                 .setting_engine
@@ -463,7 +466,7 @@ impl RTCPeerConnection {
                     }
 
                     let kind = RtpCodecKind::from(media.media_name.media.as_str());
-                    if kind == RtpCodecKind::Unspecified {
+                    if kind == RtpCodecKind::Unspecified || is_unknown_application_media(media) {
                         // A media type this endpoint doesn't know (RFC 8866
                         // lets <media> be any token): rejected with port 0,
                         // its media type, protocol and formats kept, so the
@@ -601,6 +604,31 @@ impl RTCPeerConnection {
 
         let dtls_fingerprints = self.local_dtls_fingerprints()?;
 
+        // RFC 8841 section 10: an offer says which SCTP port this side wants next (section
+        // 10.5); an answer follows the offer's data section, in its port (section 10.3: a new
+        // port for a new port, zero for zero) and in its proto, which the answer repeats.
+        let (sctp_port, sctp_over_tcp) = if include_unmatched {
+            (self.sctp_transport().offer_port(), false)
+        } else {
+            let offered = self
+                .remote_description()
+                .and_then(|d| d.parsed.as_ref())
+                .and_then(get_application_media);
+            let offered_port = offered
+                .and_then(|media| {
+                    get_application_media_section_sctp_port(media)
+                        .ok()
+                        .flatten()
+                })
+                .unwrap_or(0);
+            (
+                self.sctp_transport().answer_port(offered_port),
+                offered.is_some_and(|media| {
+                    media.media_name.protos.first().is_some_and(|p| p == "TCP")
+                }),
+            )
+        };
+
         let params = PopulateSdpParams {
             media_description_fingerprint: self.setting_engine.sdp_media_level_fingerprints,
             is_ice_lite: self.setting_engine.candidates.ice_lite,
@@ -609,6 +637,8 @@ impl RTCPeerConnection {
             ice_gathering_state: self.ice_transport().ice_gathering_state,
             match_bundle_group,
             sctp_max_message_size: self.setting_engine.sctp_max_message_size.as_usize(),
+            sctp_port,
+            sctp_over_tcp,
             ignore_rid_pause_for_recv,
             write_ssrc_attributes_for_simulcast: self
                 .setting_engine

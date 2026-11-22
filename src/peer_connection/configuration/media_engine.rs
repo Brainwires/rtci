@@ -85,7 +85,8 @@ mod media_engine_test;
 mod multi_codec_test;
 
 use crate::peer_connection::sdp::{
-    MediaDescriptionExt, codecs_from_media_description, rtp_extensions_from_media_description,
+    MediaDescriptionExt, codecs_from_media_description, is_unknown_application_media,
+    rtp_extensions_from_media_description,
 };
 use crate::rtp_transceiver::direction::RTCRtpTransceiverDirection;
 use crate::rtp_transceiver::fmtp;
@@ -1125,7 +1126,9 @@ impl MediaEngine {
         desc: &SessionDescription,
     ) -> Result<()> {
         for media in &desc.media_descriptions {
-            if media.is_webrtc_datachannel() {
+            // A data channel section, or an `m=application` line that is not RTP (the pre-RFC
+            // 8841 `DTLS/SCTP` data section): no codecs to read.
+            if media.is_webrtc_datachannel() || is_unknown_application_media(media) {
                 continue;
             }
 

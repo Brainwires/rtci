@@ -110,6 +110,17 @@ impl DataChannelRegistry {
         self.channels.remove(&handle)
     }
 
+    /// Removes channel `handle`, freeing its stream id if it has one.
+    pub(crate) fn remove(&mut self, handle: &RTCDataChannelId) -> Option<RTCDataChannelInternal> {
+        let channel = self.channels.remove(handle)?;
+        if let Some(stream_id) = channel.stream_id
+            && self.by_stream.get(&stream_id) == Some(handle)
+        {
+            self.by_stream.remove(&stream_id);
+        }
+        Some(channel)
+    }
+
     /// Whether `stream_id` is already claimed, by a channel of any origin.
     pub(crate) fn stream_id_in_use(&self, stream_id: &StreamId) -> bool {
         self.by_stream.contains_key(stream_id)

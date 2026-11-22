@@ -10,8 +10,8 @@ use datachannel::message::message_channel_threshold::DataChannelThreshold;
 use log::{debug, warn};
 use sctp::{
     Association, AssociationError, AssociationEvent, AssociationHandle, ClientConfig,
-    DatagramEvent, EndpointEvent, Event, Payload, PayloadProtocolIdentifier, Stream, StreamEvent,
-    StreamId,
+    DatagramEvent, EndpointEvent, Event, Payload, PayloadProtocolIdentifier, ReliabilityType,
+    Stream, StreamEvent, StreamId,
 };
 use shared::error::{Error, Result};
 use shared::marshal::Unmarshal;
@@ -60,6 +60,19 @@ pub(crate) struct SctpHandlerContext {
     /// leaves it when its first message is drained, so only that message can configure it,
     /// and a stream this side opened itself is never reconfigured by the peer.
     peer_opened_streams: HashSet<(AssociationHandle, StreamId)>,
+
+    /// Unordered channels this side opened in band that have not heard from the peer yet,
+    /// with the reliability they were opened with.
+    ///
+    /// RFC 8832 section 6: "before the DATA_CHANNEL_ACK message or any other message has been
+    /// received on a data channel, all other messages containing user data and belonging to
+    /// this data channel MUST be sent ordered, no matter whether the data channel is ordered
+    /// or not". Until then the peer may not have seen the DATA_CHANNEL_OPEN, and an unordered
+    /// message could reach it before the OPEN does: data on a stream it has no channel for,
+    /// which it must answer by resetting the stream. So the stream starts out ordered and is
+    /// switched to unordered when its first message from the peer is drained; a stream enters
+    /// here when its OPEN is written and leaves then, or when it closes.
+    ordered_until_reply: HashMap<(AssociationHandle, StreamId), (ReliabilityType, u32)>,
 
     /// Associations that came up here and whose `SCTPHandshakeComplete` still waits in
     /// `event_outs`.
@@ -111,6 +124,7 @@ impl SctpHandlerContext {
             abort_requested: false,
             pending_readable: HashSet::new(),
             peer_opened_streams: HashSet::new(),
+            ordered_until_reply: HashMap::new(),
             unannounced: HashSet::new(),
             association_transport: HashMap::new(),
             now,
@@ -183,6 +197,7 @@ impl<'a> SctpHandler<'a> {
     fn drain_stream(
         ctx_pending: &mut HashSet<(AssociationHandle, StreamId)>,
         peer_opened: &mut HashSet<(AssociationHandle, StreamId)>,
+        ordered_until_reply: &mut HashMap<(AssociationHandle, StreamId), (ReliabilityType, u32)>,
         unannounced: &HashSet<AssociationHandle>,
         conn: &mut Association,
         ch: AssociationHandle,
@@ -227,6 +242,15 @@ impl<'a> SctpHandler<'a> {
                 ctx_pending.remove(&(ch, id));
                 return Ok(());
             };
+            // The peer has answered on this stream (its DATA_CHANNEL_ACK, or anything else):
+            // it knows the channel, and an unordered channel sends unordered from here on
+            // (RFC 8832 section 6). The stream may be gone already, its reset completed by
+            // this read, and then there is nothing left to configure.
+            if let Some((reliability_type, reliability_value)) =
+                ordered_until_reply.remove(&(ch, id))
+            {
+                let _ = stream.set_reliability_params(true, reliability_type, reliability_value);
+            }
             // Reassemble straight into the delivered buffer: one copy instead of the
             // scratch-buffer round-trip (`max_len` preserves the max-message-size bound
             // `read()` enforced via `ErrShortBuffer`).
@@ -277,6 +301,7 @@ impl<'a> SctpHandler<'a> {
         event_outs: &mut VecDeque<TaggedRTCEventInternal>,
         pending_readable: &mut HashSet<(AssociationHandle, StreamId)>,
         peer_opened: &mut HashSet<(AssociationHandle, StreamId)>,
+        ordered_until_reply: &mut HashMap<(AssociationHandle, StreamId), (ReliabilityType, u32)>,
         unannounced: &mut HashSet<AssociationHandle>,
         max_len: usize,
         budget: &mut usize,
@@ -303,6 +328,8 @@ impl<'a> SctpHandler<'a> {
                 }
                 Event::AssociationLost { reason, id } => {
                     debug!("association_handle {} is closed due to {}", ch.0, reason);
+                    // The stream is gone, and with it what was remembered about it.
+                    ordered_until_reply.remove(&(ch, id));
                     // A stream reset (either side's close) is the channel's own
                     // closing procedure; the association going away under it is
                     // a failure the channel reports first.
@@ -348,6 +375,7 @@ impl<'a> SctpHandler<'a> {
                     Self::drain_stream(
                         pending_readable,
                         peer_opened,
+                        ordered_until_reply,
                         unannounced,
                         conn,
                         ch,
@@ -421,6 +449,9 @@ impl<'a> SctpHandler<'a> {
                 reliability_type,
                 data_channel_open.reliability_parameter,
             )?;
+            // RFC 8831 section 6.4: the channel's priority is its stream's weight (see the
+            // OPEN this side writes, in `handle_write`).
+            stream.set_priority(data_channel_open.priority)?;
         }
         Ok(())
     }
@@ -466,6 +497,7 @@ impl<'a> SctpHandler<'a> {
             Self::drain_stream(
                 &mut self.ctx.pending_readable,
                 &mut self.ctx.peer_opened_streams,
+                &mut self.ctx.ordered_until_reply,
                 &self.ctx.unannounced,
                 conn,
                 ch,
@@ -499,6 +531,85 @@ impl<'a> SctpHandler<'a> {
         "SctpHandler"
     }
 
+    /// Initiates the association the last offer/answer exchange negotiated, if there is one
+    /// to initiate and none is under way.
+    ///
+    /// RFC 8841 section 9.3: "both SCTP endpoints MUST initiate the SCTP association", so
+    /// this runs in either DTLS role, and RFC 8261 section 6.1: only once the DTLS connection
+    /// is established. It is called when DTLS connects and when an association is negotiated
+    /// over a DTLS transport that is connected already (a new `a=sctp-port`).
+    ///
+    /// An association that is alive is left alone: a DTLS handshake that completes again
+    /// (after an ICE restart, RFC 8842) does not touch it. RFC 8841 section 10.5: "if a DTLS
+    /// association is closed and replaced with a new DTLS association ..., the state of the
+    /// SCTP association is not affected."
+    pub(crate) fn connect(&mut self, now: Instant) -> Result<()> {
+        let transport = &mut self.ctx.sctp_transport;
+        if !transport.dtls_connected {
+            return Ok(());
+        }
+        let Some(sctp_transport_config) = transport.sctp_transport_config.clone() else {
+            // No association is negotiated (no data section, a rejected one, sctp-port 0).
+            return Ok(());
+        };
+        if transport
+            .sctp_associations
+            .values()
+            .any(|association| !association.is_ended())
+        {
+            return Ok(());
+        }
+        let sctp_endpoint = transport
+            .sctp_endpoint
+            .as_mut()
+            .ok_or(Error::ErrSCTPNotEstablished)?;
+
+        debug!("sctp endpoint initiates the association");
+        let (ch, conn) = sctp_endpoint
+            .connect(
+                now,
+                ClientConfig::new(sctp_transport_config),
+                TransportContext::default().peer_addr,
+            )
+            .map_err(|e| Error::Other(e.to_string()))?;
+        transport.sctp_associations.insert(ch, conn);
+        transport.lost = false;
+
+        // `connect` queued the INIT. Mark dirty so poll_write emits it at the next flush
+        // instead of waiting for a later handle_* (the deferred flush is the only transmit
+        // path).
+        self.ctx.observe(now);
+        self.ctx.flush_dirty = true;
+        Ok(())
+    }
+
+    /// Closes the associations because signalling said so (RFC 8841 section 10: a rejected
+    /// data section, an `a=sctp-port` of zero, or a new `a=sctp-port`), ahead of
+    /// [`SctpTransport::negotiate`] replacing or dropping the transport's configuration.
+    ///
+    /// Each is aborted, the ABORT queued for the wire, and forgotten. `replaced` says whether
+    /// a new association follows; the data channel handler, which gets the event queued here,
+    /// closes the channels that ran over the old one either way.
+    pub(crate) fn close_for_renegotiation(&mut self, now: Instant, replaced: bool) {
+        self.ctx.observe(now);
+        self.abort_associations();
+        self.ctx.sctp_transport.sctp_associations.clear();
+        self.ctx.association_transport.clear();
+        self.ctx.event_outs.push_back(TaggedRTCEventInternal {
+            now,
+            event: RTCEventInternal::SCTPClosedBySignalling(replaced),
+        });
+    }
+
+    /// Records, after the endpoint let go of `removed` associations, whether the last one is
+    /// gone without signalling having closed it.
+    fn note_associations_removed(&mut self, removed: usize) {
+        let transport = &mut self.ctx.sctp_transport;
+        if removed > 0 && transport.is_started && transport.sctp_associations.is_empty() {
+            transport.lost = true;
+        }
+    }
+
     /// Asks for every association to be aborted (W3C `close()`: "tear down the underlying SCTP
     /// association by sending an SCTP ABORT chunk").
     ///
@@ -520,6 +631,7 @@ impl<'a> SctpHandler<'a> {
         }
         self.ctx.pending_readable.clear();
         self.ctx.peer_opened_streams.clear();
+        self.ctx.ordered_until_reply.clear();
         self.ctx.unannounced.clear();
         self.flush_transmits(self.ctx.now);
     }
@@ -592,14 +704,48 @@ impl<'a>
                 &mut self.ctx.sctp_transport.sctp_associations,
             );
 
-            let mut sctp_events: HashMap<AssociationHandle, VecDeque<AssociationEvent>> =
-                HashMap::new();
-            if let Some((ch, event)) = sctp_endpoint.handle(
+            // RFC 8841 section 9.3: "both endpoints MUST use the same SCTP port as client
+            // port and server port, in order to prevent two separate SCTP associations from
+            // being established". The two ports are the `a=sctp-port` values; a packet
+            // between any others belongs to no association negotiated here. (Without this
+            // an accepted INIT set the association's ports to whatever it carried.)
+            if let Some(ports) = self.ctx.sctp_transport.negotiated_ports
+                && !packet_is_between(&dtls_message, ports)
+            {
+                warn!(
+                    "drop sctp RAW {:?}: not between the negotiated SCTP ports {:?}",
+                    msg.transport.peer_addr, ports
+                );
+                return Ok(());
+            }
+
+            let datagram = dtls_message.freeze(); //TODO: switch API Bytes to BytesMut
+            let mut routed = sctp_endpoint.handle(
                 msg.now,
                 msg.transport.peer_addr,
                 msg.transport.ecn,
-                dtls_message.freeze(), //TODO: switch API Bytes to BytesMut
-            ) {
+                datagram.clone(),
+            );
+            // The peer's INIT while this side's own is out: both endpoints initiate (RFC 8841
+            // section 9.3), so this is the ordinary case, and RFC 9260 section 5.2.1 has the
+            // association that is in COOKIE-WAIT or COOKIE-ECHOED answer it (with an INIT
+            // ACK carrying its own Initiate Tag) so that one association results.
+            if routed.is_none()
+                && is_init(&datagram)
+                && let Some(ch) = handshaking_association(sctp_associations)
+                && let Some(event) = init_for_existing_association(
+                    msg.now,
+                    msg.transport.peer_addr,
+                    msg.transport.ecn,
+                    datagram,
+                )
+            {
+                routed = Some((ch, DatagramEvent::AssociationEvent(event)));
+            }
+
+            let mut sctp_events: HashMap<AssociationHandle, VecDeque<AssociationEvent>> =
+                HashMap::new();
+            if let Some((ch, event)) = routed {
                 // `ch` is the association this datagram belongs to — the only safe key for
                 // remembering its 5-tuple.
                 inbound_transport = Some((ch, msg.transport));
@@ -615,6 +761,7 @@ impl<'a>
             }
 
             let mut messages = vec![];
+            let removed;
             {
                 let mut endpoint_events: Vec<(AssociationHandle, EndpointEvent)> = vec![];
 
@@ -638,6 +785,7 @@ impl<'a>
                         &mut self.ctx.event_outs,
                         &mut self.ctx.pending_readable,
                         &mut self.ctx.peer_opened_streams,
+                        &mut self.ctx.ordered_until_reply,
                         &mut self.ctx.unannounced,
                         max_len,
                         &mut budget,
@@ -667,6 +815,7 @@ impl<'a>
                     }
                 }
 
+                removed = endpoint_events.len();
                 for (ch, event) in endpoint_events {
                     sctp_endpoint.handle_event(ch, event); // handle drain event
                     sctp_associations.remove(&ch);
@@ -675,9 +824,13 @@ impl<'a>
                     self.ctx.association_transport.remove(&ch);
                     self.ctx.pending_readable.retain(|(pch, _)| *pch != ch);
                     self.ctx.peer_opened_streams.retain(|(pch, _)| *pch != ch);
+                    self.ctx
+                        .ordered_until_reply
+                        .retain(|(pch, _), _| *pch != ch);
                     self.ctx.unannounced.remove(&ch);
                 }
             }
+            self.note_associations_removed(removed);
 
             for message in messages {
                 match message {
@@ -800,18 +953,37 @@ impl<'a>
                                 }
                                 Err(e) => return Err(e),
                             };
+                            // RFC 8832 section 6: until the peer has answered on the
+                            // stream, user data on a channel opened in band is sent ordered
+                            // even if the channel is unordered (see `ordered_until_reply`).
+                            // A negotiated channel has no OPEN the data could overtake.
+                            let stream_key = (
+                                AssociationHandle(message.association_handle),
+                                message.stream_id,
+                            );
+                            let ordered_until_reply = unordered && !message.negotiated;
                             stream.set_reliability_params(
-                                unordered,
+                                unordered && !ordered_until_reply,
                                 reliability_type,
                                 data_channel_open.reliability_parameter,
                             )?;
+                            // RFC 8831 section 6.4: the priority of the channel is the weight
+                            // of its stream in the RFC 8260 weighted fair queueing scheduler.
+                            // This is the one place a locally opened stream gets it; with
+                            // another scheduler configured the weight is recorded and unused.
+                            stream.set_priority(data_channel_open.priority)?;
+                            if ordered_until_reply {
+                                self.ctx.ordered_until_reply.insert(
+                                    stream_key,
+                                    (reliability_type, data_channel_open.reliability_parameter),
+                                );
+                            } else {
+                                self.ctx.ordered_until_reply.remove(&stream_key);
+                            }
                             // This side owns the stream's parameters now. A record left by an
                             // earlier, peer-created use of the same stream id must not let a
                             // later OPEN from the peer override them.
-                            self.ctx.peer_opened_streams.remove(&(
-                                AssociationHandle(message.association_handle),
-                                message.stream_id,
-                            ));
+                            self.ctx.peer_opened_streams.remove(&stream_key);
 
                             // Out-of-band negotiated channels (W3C WebRTC
                             // `RTCDataChannelInit.negotiated`) only open the SCTP
@@ -828,7 +1000,17 @@ impl<'a>
                                 "sctp data channel close for stream id {}",
                                 message.stream_id
                             );
-                            let mut stream = conn.stream(message.stream_id)?;
+                            self.ctx.ordered_until_reply.remove(&(
+                                AssociationHandle(message.association_handle),
+                                message.stream_id,
+                            ));
+                            // A stream that is gone already (its reset completed while this
+                            // close was on its way down) has nothing left to reset.
+                            let Ok(mut stream) = conn.stream(message.stream_id) else {
+                                self.ctx.flush_dirty = true;
+                                self.ctx.observe(now);
+                                return Ok(());
+                            };
                             // Closing resets the outgoing stream; RFC 8831 section 6.7: the
                             // channel is closed, and its stream id free, once the peer has
                             // reset the incoming one in turn, which `AssociationLost` reports
@@ -915,38 +1097,10 @@ impl<'a>
         self.ctx.observe(now);
 
         // DTLSHandshakeComplete is not terminated here since SRTP handler needs it
-        let dtls_complete = matches!(&evt.event, RTCEventInternal::DTLSHandshakeComplete(_, _));
-        if dtls_complete {
+        if matches!(&evt.event, RTCEventInternal::DTLSHandshakeComplete(_, _)) {
             debug!("sctp recv dtls handshake complete");
-
-            if let Some(sctp_transport_config) =
-                self.ctx.sctp_transport.sctp_transport_config.clone()
-            {
-                let (sctp_endpoint, sctp_associations) = (
-                    self.ctx
-                        .sctp_transport
-                        .sctp_endpoint
-                        .as_mut()
-                        .ok_or(Error::ErrSCTPNotEstablished)?,
-                    &mut self.ctx.sctp_transport.sctp_associations,
-                );
-
-                debug!("sctp endpoint initiates connection for dtls client role");
-                let (ch, conn) = sctp_endpoint
-                    .connect(
-                        now,
-                        ClientConfig::new(sctp_transport_config),
-                        TransportContext::default().peer_addr,
-                    )
-                    .map_err(|e| Error::Other(e.to_string()))?;
-
-                sctp_associations.insert(ch, conn);
-
-                // `connect` queued the client INIT. Mark dirty so poll_write emits
-                // it at the next flush instead of waiting for a later handle_* (the
-                // deferred flush is now the only transmit path).
-                self.ctx.flush_dirty = true;
-            }
+            self.ctx.sctp_transport.dtls_connected = true;
+            self.connect(now)?;
         }
 
         // The peer closed the DTLS transport the associations run over, so they are over too.
@@ -954,6 +1108,7 @@ impl<'a>
         // next in line for this event, closes the channels themselves.
         if matches!(&evt.event, RTCEventInternal::DTLSClosed) {
             debug!("sctp closing associations: dtls closed by peer");
+            self.ctx.sctp_transport.dtls_connected = false;
             for association in self.ctx.sctp_transport.sctp_associations.values_mut() {
                 if let Err(err) = association.close(AssociationError::ApplicationClosed) {
                     warn!("failed to close sctp association: {}", err);
@@ -961,6 +1116,7 @@ impl<'a>
             }
             self.ctx.pending_readable.clear();
             self.ctx.peer_opened_streams.clear();
+            self.ctx.ordered_until_reply.clear();
             self.ctx.unannounced.clear();
         }
 
@@ -1009,6 +1165,7 @@ impl<'a>
                 &mut self.ctx.event_outs,
                 &mut self.ctx.pending_readable,
                 &mut self.ctx.peer_opened_streams,
+                &mut self.ctx.ordered_until_reply,
                 &mut self.ctx.unannounced,
                 max_len,
                 &mut budget,
@@ -1049,14 +1206,19 @@ impl<'a>
             }
         }
 
+        let removed = endpoint_events.len();
         for (ch, event) in endpoint_events {
             sctp_endpoint.handle_event(ch, event); // handle drain event
             sctp_associations.remove(&ch);
             self.ctx.association_transport.remove(&ch);
             self.ctx.pending_readable.retain(|(pch, _)| *pch != ch);
             self.ctx.peer_opened_streams.retain(|(pch, _)| *pch != ch);
+            self.ctx
+                .ordered_until_reply
+                .retain(|(pch, _), _| *pch != ch);
             self.ctx.unannounced.remove(&ch);
         }
+        self.note_associations_removed(removed);
 
         for transmit in transmits {
             if let Payload::RawEncode(raw_data) = transmit.message {
@@ -1093,6 +1255,62 @@ impl<'a>
 
     fn close(&mut self) -> Result<()> {
         Ok(())
+    }
+}
+
+/// Whether an SCTP packet's common header (RFC 9260 section 3.1: source port, destination
+/// port) names `(local, remote)` as its destination and source.
+fn packet_is_between(packet: &[u8], (local, remote): (u16, u16)) -> bool {
+    packet.len() >= 4
+        && u16::from_be_bytes([packet[0], packet[1]]) == remote
+        && u16::from_be_bytes([packet[2], packet[3]]) == local
+}
+
+/// Whether an SCTP packet is an INIT: Verification Tag 0 and a first chunk of type 1
+/// (RFC 9260 sections 3.3.2 and 8.5.1).
+fn is_init(packet: &[u8]) -> bool {
+    const CT_INIT: u8 = 1;
+    packet.len() > 12 && packet[4..8] == [0, 0, 0, 0] && packet[12] == CT_INIT
+}
+
+/// The one association of this transport, if it is still in its handshake.
+fn handshaking_association(
+    associations: &HashMap<AssociationHandle, Association>,
+) -> Option<AssociationHandle> {
+    let mut live = associations
+        .iter()
+        .filter(|(_, association)| !association.is_ended());
+    let (ch, association) = live.next()?;
+    (live.next().is_none() && association.is_handshaking()).then_some(*ch)
+}
+
+/// Wraps the peer's INIT as an event for the association this side initiated.
+///
+/// `Endpoint::handle` finds the association of an INIT by the Initiate Tag of an INIT it has
+/// accepted before, so it knows no association for the INIT of a peer that initiates while
+/// this side does, and refuses it as a second association. The association itself handles
+/// that INIT as RFC 9260 section 5.2.1 says; what is missing is only the way to it, and
+/// `AssociationEvent` can be built by an `Endpoint` alone. So a throwaway endpoint takes the
+/// INIT twice: the first time it starts an association there (dropped with it), which makes
+/// the second a datagram for a known association, and that is the event.
+///
+/// To be replaced by the endpoint's own routing once `rtc-sctp` has it.
+fn init_for_existing_association(
+    now: Instant,
+    remote: std::net::SocketAddr,
+    ecn: Option<shared::EcnCodepoint>,
+    init: bytes::Bytes,
+) -> Option<AssociationEvent> {
+    let mut router = ::sctp::Endpoint::new(
+        TransportContext::default().local_addr,
+        shared::TransportProtocol::UDP,
+        ::sctp::EndpointConfig::default().into(),
+        Some(::sctp::ServerConfig::new(::sctp::TransportConfig::default()).into()),
+    );
+    router.handle(now, remote, ecn, init.clone())?;
+    match router.handle(now, remote, ecn, init)? {
+        (_, DatagramEvent::AssociationEvent(event)) => Some(event),
+        _ => None,
     }
 }
 
@@ -1187,6 +1405,11 @@ mod tests {
     /// shuttle plays the role the ICE handler plays in production: it rewrites each
     /// datagram's source address for the receiving endpoint.
     fn establish() -> Established {
+        establish_with(TransportConfig::default())
+    }
+
+    /// [`establish`] with the client's association configured by `client_config`.
+    fn establish_with(client_config: TransportConfig) -> Established {
         let now = Instant::now();
 
         let mut client_ep = Endpoint::new(
@@ -1203,11 +1426,7 @@ mod tests {
         );
 
         let (client_ch, mut client_conn) = client_ep
-            .connect(
-                now,
-                ClientConfig::new(TransportConfig::default()),
-                server_addr(),
-            )
+            .connect(now, ClientConfig::new(client_config), server_addr())
             .expect("client connect");
 
         let mut server_conns: HashMap<AssociationHandle, Association> = HashMap::new();
@@ -3426,5 +3645,815 @@ mod tests {
             after, empty_window,
             "the abandoned fragments must be dropped and their window given back"
         );
+    }
+
+    fn dcep_open_with_priority(channel_type: ChannelType, priority: u16) -> Bytes {
+        Bytes::from(
+            Message::DataChannelOpen(DataChannelOpen {
+                channel_type,
+                priority,
+                reliability_parameter: 0,
+                label: b"weighted".to_vec(),
+                protocol: Vec::new(),
+            })
+            .marshal()
+            .expect("DCEP OPEN"),
+        )
+    }
+
+    /// What the data channel handler writes for a channel negotiated out of band: the OPEN
+    /// that configures the stream and is never sent.
+    fn client_write_negotiated_open(
+        ctx: &mut SctpHandlerContext,
+        now: Instant,
+        ch: AssociationHandle,
+        stream_id: StreamId,
+        open: &[u8],
+    ) {
+        SctpHandler::new(ctx, 0)
+            .handle_write(TaggedRTCMessageInternal {
+                now,
+                transport: TransportContext::default(),
+                message: RTCMessageInternal::Dtls(DTLSMessage::Sctp(DataChannelMessage {
+                    association_handle: ch.0,
+                    stream_id,
+                    ppi: PayloadProtocolIdentifier::Dcep,
+                    payload: BytesMut::from(open),
+                    negotiated: true,
+                })),
+            })
+            .expect("negotiated open");
+    }
+
+    /// The DATA chunks the client sends for `stream_id`, in order.
+    fn flushed_data(ctx: &mut SctpHandlerContext, stream_id: StreamId) -> Vec<WireData> {
+        flush(ctx)
+            .iter()
+            .flat_map(|p| wire_data(p))
+            .filter(|d| d.stream_id == stream_id)
+            .collect()
+    }
+
+    /// A client that opened an unordered channel in band on stream 0 and sent one message
+    /// on it at once, as RFC 8832 section 6 allows. Returns what it put on the wire.
+    fn open_unordered_and_send_early(channel_type: ChannelType) -> (Accepted, Vec<Bytes>) {
+        let now = Instant::now();
+        let e = establish();
+        let ch = e.client_ch;
+        let mut ctx = client_ctx(now, e.client_ep, ch, e.client_conn);
+        client_write(
+            &mut ctx,
+            now,
+            ch,
+            0,
+            PayloadProtocolIdentifier::Dcep,
+            &dcep_open(channel_type, 0),
+        );
+        client_write(
+            &mut ctx,
+            now,
+            ch,
+            0,
+            PayloadProtocolIdentifier::Binary,
+            b"early",
+        );
+        let sent = flush(&mut ctx);
+        (
+            Accepted {
+                now,
+                ctx,
+                ch,
+                server_ep: e.server_ep,
+                server_conn: e.server_conn,
+            },
+            sent,
+        )
+    }
+
+    /// RFC 8832 section 6: "before the DATA_CHANNEL_ACK message or any other message has been
+    /// received on a data channel, all other messages containing user data and belonging to
+    /// this data channel MUST be sent ordered, no matter whether the data channel is ordered
+    /// or not. After the DATA_CHANNEL_ACK or any other message has been received on the data
+    /// channel, messages containing user data ... MUST be sent unordered on unordered data
+    /// channels." The stream used to be unordered from the moment the OPEN was written, so
+    /// early data could reach the peer before the OPEN it depends on.
+    #[test]
+    fn data_sent_before_the_ack_is_ordered_on_an_unordered_channel() {
+        for channel_type in [
+            ChannelType::ReliableUnordered,
+            ChannelType::PartialReliableRexmitUnordered,
+            ChannelType::PartialReliableTimedUnordered,
+        ] {
+            // What ends the ordered phase: the peer's ACK, or any other message from it.
+            for reply in [
+                (PayloadProtocolIdentifier::Dcep, dcep_ack()),
+                (PayloadProtocolIdentifier::Binary, Bytes::from_static(b"hi")),
+            ] {
+                let (mut a, sent) = open_unordered_and_send_early(channel_type);
+                let data: Vec<WireData> = sent
+                    .iter()
+                    .flat_map(|p| wire_data(p))
+                    .filter(|d| d.stream_id == 0)
+                    .collect();
+                assert_eq!(data.len(), 2, "{channel_type:?}: the OPEN and the message");
+                assert_eq!(data[0].ppid, PPID_DCEP);
+                assert!(
+                    !data[0].unordered(),
+                    "{channel_type:?}: the OPEN is ordered"
+                );
+                assert_eq!(data[1].ppid, PPID_BINARY);
+                assert!(
+                    !data[1].unordered(),
+                    "{channel_type:?}: user data before any reply must be sent ordered"
+                );
+
+                // Still nothing from the peer: still ordered.
+                let probe = send_probe(&mut a.ctx, a.ch, 0, a.now);
+                assert!(!probe.unordered(), "{channel_type:?}: no reply yet");
+
+                deliver_to_server(&mut a.server_ep, &mut a.server_conn, sent, a.now);
+                let reply_ppi = reply.0;
+                let reply = server_send(&mut a.server_conn, 0, &[reply], a.now);
+                client_read(&mut a.ctx, 0, reply, a.now);
+
+                let probe = send_probe(&mut a.ctx, a.ch, 0, a.now);
+                assert!(
+                    probe.unordered(),
+                    "{channel_type:?}: after the peer's {reply_ppi} the channel sends unordered"
+                );
+                assert!(a.ctx.ordered_until_reply.is_empty());
+            }
+        }
+    }
+
+    /// The reliability of the channel is in force from its first message: only the ordering
+    /// waits for the peer's reply. A message lost before the ACK on a `maxRetransmits: 0`
+    /// channel is abandoned, not retransmitted.
+    #[test]
+    fn data_sent_before_the_ack_already_has_the_channels_reliability() {
+        let (mut a, sent) =
+            open_unordered_and_send_early(ChannelType::PartialReliableRexmitUnordered);
+        let early = sent
+            .iter()
+            .flat_map(|p| wire_data(p))
+            .find(|d| d.ppid == PPID_BINARY)
+            .expect("the early message");
+        // Nothing reaches the peer: the OPEN comes back, the early message does not.
+        let after = lose_probe(&mut a.ctx, early, a.now);
+        assert!(
+            after.retransmits.is_empty(),
+            "maxRetransmits 0 holds before the ACK too: resent at {:?}",
+            after.retransmits
+        );
+    }
+
+    /// A channel negotiated out of band has no DATA_CHANNEL_OPEN its data could overtake, so
+    /// an unordered one sends unordered from its first message. An ordered channel opened in
+    /// band stays ordered after the ACK.
+    #[test]
+    fn only_an_in_band_unordered_channel_waits_for_the_peers_reply() {
+        let now = Instant::now();
+        let e = establish();
+        let ch = e.client_ch;
+        let (mut server_ep, mut server_conn) = (e.server_ep, e.server_conn);
+        let mut ctx = client_ctx(now, e.client_ep, ch, e.client_conn);
+
+        client_write_negotiated_open(
+            &mut ctx,
+            now,
+            ch,
+            4,
+            &dcep_open(ChannelType::ReliableUnordered, 0),
+        );
+        assert!(send_probe(&mut ctx, ch, 4, now).unordered());
+        assert!(ctx.ordered_until_reply.is_empty());
+
+        client_write(
+            &mut ctx,
+            now,
+            ch,
+            0,
+            PayloadProtocolIdentifier::Dcep,
+            &dcep_open(ChannelType::Reliable, 0),
+        );
+        let open = flush(&mut ctx);
+        assert!(ctx.ordered_until_reply.is_empty());
+        deliver_to_server(&mut server_ep, &mut server_conn, open, now);
+        let ack = server_send(
+            &mut server_conn,
+            0,
+            &[(PayloadProtocolIdentifier::Dcep, dcep_ack())],
+            now,
+        );
+        client_read(&mut ctx, 0, ack, now);
+        assert!(!send_probe(&mut ctx, ch, 0, now).unordered());
+    }
+
+    /// A channel closed before the peer answered is forgotten with its stream.
+    #[test]
+    fn closing_a_channel_forgets_that_it_waited_for_a_reply() {
+        let (mut a, _sent) = open_unordered_and_send_early(ChannelType::ReliableUnordered);
+        assert_eq!(a.ctx.ordered_until_reply.len(), 1);
+        client_write(
+            &mut a.ctx,
+            a.now,
+            a.ch,
+            0,
+            PayloadProtocolIdentifier::Dcep,
+            &[0x01],
+        );
+        assert!(a.ctx.ordered_until_reply.is_empty());
+    }
+
+    /// RFC 8832 section 6: "All DCEP messages MUST be sent using ordered delivery and reliable
+    /// transmission", whatever the channel they open: the DATA_CHANNEL_OPEN of an unordered
+    /// `maxRetransmits: 0` channel that is lost is retransmitted, never abandoned.
+    #[test]
+    fn a_lost_open_is_retransmitted_on_a_partially_reliable_channel() {
+        let now = Instant::now();
+        let e = establish();
+        let ch = e.client_ch;
+        let mut ctx = client_ctx(now, e.client_ep, ch, e.client_conn);
+        client_write(
+            &mut ctx,
+            now,
+            ch,
+            0,
+            PayloadProtocolIdentifier::Dcep,
+            &dcep_open(ChannelType::PartialReliableRexmitUnordered, 0),
+        );
+        let open = flushed_data(&mut ctx, 0);
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].ppid, PPID_DCEP);
+        assert!(!open[0].unordered());
+        let after = lose_probe(&mut ctx, open[0], now);
+        assert_recovery(&after, open[0], now, Recovery::Retransmit);
+    }
+
+    /// RFC 8832 section 6: "Other messages MUST NOT be sent using this PPID." What the data
+    /// channel layer hands down under PPID 50 besides OPEN and ACK (the OPEN of a negotiated
+    /// channel, buffered-amount thresholds, the close) is this stack's own signalling and
+    /// stays off the wire.
+    #[test]
+    fn internal_dcep_messages_put_no_data_on_the_wire() {
+        use datachannel::message::message_channel_close::DataChannelClose;
+        let now = Instant::now();
+        let e = establish();
+        let ch = e.client_ch;
+        let mut ctx = client_ctx(now, e.client_ep, ch, e.client_conn);
+        client_write_negotiated_open(&mut ctx, now, ch, 4, &dcep_open(ChannelType::Reliable, 0));
+        for message in [
+            Message::DataChannelThreshold(DataChannelThreshold::Low(1024)),
+            Message::DataChannelThreshold(DataChannelThreshold::High(1 << 20)),
+            Message::DataChannelClose(DataChannelClose),
+        ] {
+            client_write(
+                &mut ctx,
+                now,
+                ch,
+                4,
+                PayloadProtocolIdentifier::Dcep,
+                &message.marshal().expect("marshal"),
+            );
+        }
+        let sent = flush(&mut ctx);
+        assert!(
+            sent.iter().flat_map(|p| wire_data(p)).next().is_none(),
+            "no DATA chunk at all, under PPID 50 or any other"
+        );
+        const CT_RECONFIG: u8 = 130;
+        assert!(
+            sent.iter()
+                .flat_map(|p| wire_chunks(p))
+                .any(|c| c.kind == CT_RECONFIG),
+            "the close is the stream reset of RFC 8831 section 6.7"
+        );
+    }
+
+    /// A client whose association schedules by weighted fair queueing, and its peer.
+    fn weighted_pair() -> Accepted {
+        let now = Instant::now();
+        let e = establish_with(
+            TransportConfig::default()
+                .with_stream_scheduler(sctp::StreamScheduler::WeightedFairQueueing),
+        );
+        let ch = e.client_ch;
+        Accepted {
+            now,
+            ctx: client_ctx(now, e.client_ep, ch, e.client_conn),
+            ch,
+            server_ep: e.server_ep,
+            server_conn: e.server_conn,
+        }
+    }
+
+    /// Queues the same backlog on both streams, then returns how many of the first 36
+    /// messages to leave belong to `heavy` and how many to `light`.
+    fn shares_of_two_backlogged_streams(
+        a: &mut Accepted,
+        heavy: StreamId,
+        light: StreamId,
+    ) -> (usize, usize) {
+        for _ in 0..64 {
+            for stream_id in [light, heavy] {
+                client_write(
+                    &mut a.ctx,
+                    a.now,
+                    a.ch,
+                    stream_id,
+                    PayloadProtocolIdentifier::Binary,
+                    &[stream_id as u8; 1024],
+                );
+            }
+        }
+        let mut order: Vec<StreamId> = vec![];
+        let mut seen = HashSet::new();
+        let mut at = a.now;
+        for _ in 0..64 {
+            let sent = flush(&mut a.ctx);
+            for data in sent.iter().flat_map(|p| wire_data(p)) {
+                if data.ppid == PPID_BINARY && seen.insert(data.tsn) {
+                    order.push(data.stream_id);
+                }
+            }
+            if order.len() >= 36 {
+                break;
+            }
+            deliver_to_server(&mut a.server_ep, &mut a.server_conn, sent, at);
+            // Past the peer's delayed-acknowledgement timer, short of this side's T3-rtx.
+            at += Duration::from_millis(250);
+            a.server_conn.handle_timeout(at);
+            let sacks = drain_transmits(&mut a.server_conn, at);
+            client_read(&mut a.ctx, 0, sacks, at);
+        }
+        assert!(order.len() >= 36, "only {} messages left", order.len());
+        let first = &order[..36];
+        (
+            first.iter().filter(|s| **s == heavy).count(),
+            first.iter().filter(|s| **s == light).count(),
+        )
+    }
+
+    fn assert_eight_to_one((heavy, light): (usize, usize)) {
+        assert!(
+            heavy.abs_diff(8 * light) <= 8 && heavy > 4 * light,
+            "priority 1024 against 128: {heavy} and {light} of the first 36 messages"
+        );
+    }
+
+    /// RFC 8831 section 6.4: "These priorities MUST be interpreted as weighted-fair-queuing
+    /// scheduling priorities". The priority a channel is created with is carried in its OPEN
+    /// and weighs its stream: with equal backlogs, a channel of priority 1024 ("extra high")
+    /// gets eight times the share of one of priority 128 ("below normal"). The priority used
+    /// to be reported and never applied, so the two shared the line evenly.
+    #[test]
+    fn the_priority_of_a_local_channel_weighs_its_stream() {
+        let mut a = weighted_pair();
+        // Negotiated channels, so that no OPEN shares the line with the backlog.
+        for (stream_id, priority) in [(0, 128), (2, 1024)] {
+            client_write_negotiated_open(
+                &mut a.ctx,
+                a.now,
+                a.ch,
+                stream_id,
+                &dcep_open_with_priority(ChannelType::Reliable, priority),
+            );
+        }
+        assert_eight_to_one(shares_of_two_backlogged_streams(&mut a, 2, 0));
+    }
+
+    /// The same for a channel the peer opened: the priority in the peer's OPEN weighs this
+    /// side's sends on that channel.
+    #[test]
+    fn the_priority_in_the_peers_open_weighs_the_stream() {
+        let mut a = weighted_pair();
+        for (stream_id, priority) in [(1, 1024), (3, 128)] {
+            let open = server_send(
+                &mut a.server_conn,
+                stream_id,
+                &[(
+                    PayloadProtocolIdentifier::Dcep,
+                    dcep_open_with_priority(ChannelType::Reliable, priority),
+                )],
+                a.now,
+            );
+            client_read(&mut a.ctx, 0, open, a.now);
+        }
+        // The acknowledgements of the two OPENs go out before the backlog is queued.
+        let sacks = flush(&mut a.ctx);
+        deliver_to_server(&mut a.server_ep, &mut a.server_conn, sacks, a.now);
+        assert_eight_to_one(shares_of_two_backlogged_streams(&mut a, 1, 3));
+    }
+
+    const CT_INIT: u8 = 1;
+
+    /// A handler context whose transport was negotiated for the SCTP ports `local` and
+    /// `remote` (`a=sctp-port` of this side and of the peer), DTLS not connected yet.
+    fn negotiated_ctx(now: Instant, local: u16, remote: u16) -> SctpHandlerContext {
+        let mut transport = SctpTransport::new(
+            SctpMaxMessageSize::default(),
+            None,
+            None,
+            test_transport_id(TransportKind::Sctp),
+            test_transport_id(TransportKind::Dtls),
+        );
+        transport
+            .start(
+                crate::peer_connection::transport::sctp::capabilities::SCTPTransportCapabilities {
+                    max_message_size: 0,
+                },
+                local,
+                remote,
+            )
+            .expect("start");
+        SctpHandlerContext::new(now, transport)
+    }
+
+    fn dtls_connects(ctx: &mut SctpHandlerContext, now: Instant) {
+        SctpHandler::new(ctx, 0)
+            .handle_event(TaggedRTCEventInternal {
+                now,
+                event: RTCEventInternal::DTLSHandshakeComplete(None, None),
+            })
+            .expect("handle_event");
+    }
+
+    /// Whether `ctx` has announced its association established since the last call.
+    fn announced_connected(ctx: &mut SctpHandlerContext) -> bool {
+        let mut handler = SctpHandler::new(ctx, 0);
+        let mut connected = false;
+        while let Some(evt) = handler.poll_event() {
+            connected |= matches!(evt.event, RTCEventInternal::SCTPHandshakeComplete(_));
+        }
+        connected
+    }
+
+    /// (source port, destination port, verification tag, first chunk type) of an SCTP packet.
+    fn packet_header(packet: &[u8]) -> (u16, u16, u32, u8) {
+        (
+            u16::from_be_bytes([packet[0], packet[1]]),
+            u16::from_be_bytes([packet[2], packet[3]]),
+            u32::from_be_bytes([packet[4], packet[5], packet[6], packet[7]]),
+            packet[12],
+        )
+    }
+
+    /// Two negotiated endpoints, `a` on SCTP port 5000 and `b` on 5001, whose DTLS transport
+    /// has just connected: each has its INIT ready to go.
+    fn two_initiating_endpoints(now: Instant) -> (SctpHandlerContext, SctpHandlerContext) {
+        let mut a = negotiated_ctx(now, 5000, 5001);
+        let mut b = negotiated_ctx(now, 5001, 5000);
+        dtls_connects(&mut a, now);
+        dtls_connects(&mut b, now);
+        (a, b)
+    }
+
+    /// Exchanges what the two endpoints send until neither sends anything more, without
+    /// moving the clock: no retransmission timer takes part. `lost` says which packets
+    /// never arrive, by sender (`true` for `a`) and by how many packets that sender has sent
+    /// before. Returns whether each announced its association established.
+    fn exchange(
+        a: &mut SctpHandlerContext,
+        b: &mut SctpHandlerContext,
+        now: Instant,
+        lost: impl Fn(bool, usize) -> bool,
+    ) -> (bool, bool) {
+        let (mut a_up, mut b_up) = (false, false);
+        let (mut a_sent, mut b_sent) = (0, 0);
+        for _ in 0..32 {
+            let from_a = flush(a);
+            let from_b = flush(b);
+            if from_a.is_empty() && from_b.is_empty() {
+                break;
+            }
+            for dgram in from_a {
+                if !lost(true, a_sent) {
+                    client_read(b, 0, vec![dgram], now);
+                }
+                a_sent += 1;
+            }
+            for dgram in from_b {
+                if !lost(false, b_sent) {
+                    client_read(a, 0, vec![dgram], now);
+                }
+                b_sent += 1;
+            }
+            a_up |= announced_connected(a);
+            b_up |= announced_connected(b);
+        }
+        (a_up, b_up)
+    }
+
+    /// The one live association of `ctx` must be established; returns its handle.
+    fn established_association(ctx: &SctpHandlerContext) -> AssociationHandle {
+        let live: Vec<_> = ctx
+            .sctp_transport
+            .sctp_associations
+            .iter()
+            .filter(|(_, association)| !association.is_ended())
+            .collect();
+        assert_eq!(live.len(), 1, "one association, not two");
+        assert!(!live[0].1.is_handshaking(), "established");
+        *live[0].0
+    }
+
+    /// A message written on `from` arrives on `to`: the two ends are one association.
+    fn assert_data_flows(from: &mut SctpHandlerContext, to: &mut SctpHandlerContext, now: Instant) {
+        let ch = established_association(from);
+        established_association(to);
+        client_write_negotiated_open(from, now, ch, 4, &dcep_open(ChannelType::Reliable, 0));
+        client_write(
+            from,
+            now,
+            ch,
+            4,
+            PayloadProtocolIdentifier::Binary,
+            b"across",
+        );
+        let sent = flush(from);
+        client_read(to, 0, sent, now);
+        assert!(
+            to.read_outs.iter().any(|m| matches!(
+                &m.message,
+                RTCMessageInternal::Dtls(DTLSMessage::Sctp(msg))
+                    if msg.stream_id == 4 && &msg.payload[..] == b"across"
+            )),
+            "the message did not arrive"
+        );
+        to.read_outs.clear();
+    }
+
+    /// RFC 8841 section 9.3: "both SCTP endpoints MUST initiate the SCTP association (i.e.,
+    /// both SCTP endpoints take the 'active' role). In addition, both endpoints MUST use the
+    /// same SCTP port as client port and server port". Whatever the DTLS role (the transport
+    /// is not told it), an INIT leaves when DTLS connects, from this side's `a=sctp-port` to
+    /// the peer's. Only the DTLS client used to initiate.
+    #[test]
+    fn the_association_is_initiated_when_dtls_connects() {
+        let now = Instant::now();
+        let mut ctx = negotiated_ctx(now, 5002, 6001);
+        assert!(
+            flush(&mut ctx).is_empty(),
+            "RFC 8261 section 6.1: nothing before DTLS is established"
+        );
+        dtls_connects(&mut ctx, now);
+        let sent = flush(&mut ctx);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(packet_header(&sent[0]), (5002, 6001, 0, CT_INIT));
+    }
+
+    /// The simultaneous open that results: the two INITs cross, each side answers the
+    /// other's from the association it initiated (RFC 9260 section 5.2.1), and there is one
+    /// association at each end, the same one. The peer's INIT used to be refused by the
+    /// endpoint that had initiated, as the start of a second association.
+    #[test]
+    fn inits_that_cross_make_one_association() {
+        let now = Instant::now();
+        let (mut a, mut b) = two_initiating_endpoints(now);
+        assert_eq!(
+            exchange(&mut a, &mut b, now, |_, _| false),
+            (true, true),
+            "both associations come up, with no retransmission"
+        );
+        assert_data_flows(&mut a, &mut b, now);
+        assert_data_flows(&mut b, &mut a, now);
+    }
+
+    /// One side's INIT is lost and the other's arrives: the association is established from
+    /// the INIT that got through, at once, where it used to wait for T1-init to send the lost
+    /// one again (or for good, against a peer that leaves initiating to this side).
+    #[test]
+    fn the_peers_init_is_answered_when_this_sides_is_lost() {
+        for a_loses_its_init in [true, false] {
+            let now = Instant::now();
+            let (mut a, mut b) = two_initiating_endpoints(now);
+            assert_eq!(
+                exchange(&mut a, &mut b, now, |from_a, sent| sent == 0
+                    && from_a == a_loses_its_init),
+                (true, true),
+                "a's INIT lost: {a_loses_its_init}"
+            );
+            assert_data_flows(&mut a, &mut b, now);
+            assert_data_flows(&mut b, &mut a, now);
+        }
+    }
+
+    /// An endpoint that has not initiated yet (its DTLS handshake completes a moment after
+    /// the peer's) takes the peer's INIT, and does not initiate a second association when its
+    /// own DTLS handshake completes.
+    #[test]
+    fn an_init_that_comes_first_is_accepted_and_no_second_association_started() {
+        let now = Instant::now();
+        let mut a = negotiated_ctx(now, 5000, 5001);
+        let mut b = negotiated_ctx(now, 5001, 5000);
+        dtls_connects(&mut a, now);
+        // A timer that fires before anything has arrived finds no association to lose.
+        SctpHandler::new(&mut b, 0)
+            .handle_timeout(now)
+            .expect("timeout");
+        let init = flush(&mut a);
+        client_read(&mut b, 0, init, now);
+        dtls_connects(&mut b, now);
+        assert_eq!(exchange(&mut a, &mut b, now, |_, _| false), (true, true));
+        assert_data_flows(&mut a, &mut b, now);
+        for ctx in [&a, &b] {
+            assert!(
+                !ctx.sctp_transport.association_lost(),
+                "an association that is up is not one that was lost"
+            );
+            assert_eq!(
+                ctx.sctp_transport.offer_port(),
+                ctx.sctp_transport.local_port,
+                "so the next offer keeps the port"
+            );
+        }
+    }
+
+    /// RFC 8841 section 10.5: "if a DTLS association is closed and replaced with a new DTLS
+    /// association ..., the state of the SCTP association is not affected." A DTLS handshake
+    /// that completes again starts no second association.
+    #[test]
+    fn a_later_dtls_handshake_leaves_the_association_alone() {
+        let now = Instant::now();
+        let (mut a, mut b) = two_initiating_endpoints(now);
+        exchange(&mut a, &mut b, now, |_, _| false);
+        let ch = established_association(&a);
+        dtls_connects(&mut a, now);
+        assert_eq!(established_association(&a), ch);
+        assert!(
+            flush(&mut a).iter().all(|p| packet_header(p).3 != CT_INIT),
+            "no new INIT"
+        );
+        assert_data_flows(&mut a, &mut b, now);
+    }
+
+    /// RFC 8841 section 9.3: the ports of the association are the two `a=sctp-port` values,
+    /// "in order to prevent two separate SCTP associations from being established". An INIT
+    /// from another port, or to another port, is not for this transport; the accepting side
+    /// used to adopt whatever ports the INIT carried.
+    #[test]
+    fn a_packet_between_other_sctp_ports_is_dropped() {
+        let now = Instant::now();
+        for (peer_local, peer_remote, accepted) in
+            [(6000, 5000, true), (6001, 5000, false), (6000, 5001, false)]
+        {
+            let mut ctx = negotiated_ctx(now, 5000, 6000);
+            let mut peer = negotiated_ctx(now, peer_local, peer_remote);
+            dtls_connects(&mut peer, now);
+            let init = flush(&mut peer);
+            assert_eq!(packet_header(&init[0]).3, CT_INIT);
+            client_read(&mut ctx, 0, init, now);
+            assert_eq!(
+                ctx.sctp_transport.sctp_associations.len(),
+                usize::from(accepted),
+                "INIT from port {peer_local} to port {peer_remote}"
+            );
+            assert_eq!(flush(&mut ctx).len(), usize::from(accepted), "INIT ACK");
+        }
+    }
+
+    /// RFC 8841 sections 10.3 and 10.4: an association that signalling closes is closed on
+    /// the wire (here with an ABORT, so the peer learns it even if it applies the description
+    /// later), forgotten, and reported so its data channels are closed.
+    #[test]
+    fn closing_for_renegotiation_aborts_and_forgets_the_association() {
+        for replaced in [false, true] {
+            let now = Instant::now();
+            let (mut a, mut b) = two_initiating_endpoints(now);
+            exchange(&mut a, &mut b, now, |_, _| false);
+            established_association(&a);
+
+            SctpHandler::new(&mut a, 0).close_for_renegotiation(now, replaced);
+            assert!(a.sctp_transport.sctp_associations.is_empty());
+            let sent = flush(&mut a);
+            assert!(
+                sent.iter().any(|p| packet_header(p).3 == CT_ABORT),
+                "an ABORT closes it"
+            );
+            let mut events = vec![];
+            {
+                let mut handler = SctpHandler::new(&mut a, 0);
+                while let Some(evt) = handler.poll_event() {
+                    events.push(evt.event);
+                }
+            }
+            assert!(
+                matches!(
+                    events.as_slice(),
+                    [RTCEventInternal::SCTPClosedBySignalling(r)] if *r == replaced
+                ),
+                "one event, and none of the aborted association's own"
+            );
+
+            // The peer's association ends with the ABORT, and it reports the loss: with no
+            // signalling of its own it needs a new exchange, with a new port (section 9.3).
+            client_read(&mut b, 0, sent, now);
+            let mut at = now;
+            for _ in 0..8 {
+                let Some(next) = SctpHandler::new(&mut b, 0).poll_timeout() else {
+                    break;
+                };
+                at = at.max(next);
+                SctpHandler::new(&mut b, 0)
+                    .handle_timeout(at)
+                    .expect("timeout");
+                if b.sctp_transport.sctp_associations.is_empty() {
+                    break;
+                }
+            }
+            assert!(
+                b.sctp_transport
+                    .sctp_associations
+                    .values()
+                    .all(|association| association.is_ended())
+            );
+            assert_eq!(
+                b.sctp_transport.state(),
+                crate::peer_connection::transport::sctp::state::RTCSctpTransportState::Closed
+            );
+        }
+    }
+
+    /// RFC 8841 section 9.3: "SCTP associations might be closed without SDP signaling -- for
+    /// example, in case of a failure. ... New (different than the ones currently used) SCTP
+    /// ports MUST be used by both endpoints." The transport is `closed`, and the next offer
+    /// or answer carries a new port.
+    #[test]
+    fn an_association_lost_without_signalling_asks_for_a_new_port() {
+        let now = Instant::now();
+        let (mut a, mut b) = two_initiating_endpoints(now);
+        exchange(&mut a, &mut b, now, |_, _| false);
+        assert_eq!(a.sctp_transport.offer_port(), 5000);
+
+        // A stream this side has open, to see what becomes of it.
+        let a_ch = established_association(&a);
+        client_write_negotiated_open(&mut a, now, a_ch, 4, &dcep_open(ChannelType::Reliable, 0));
+
+        // The peer shuts the association down and this side follows.
+        let ch = established_association(&b);
+        b.sctp_transport
+            .sctp_associations
+            .get_mut(&ch)
+            .expect("association")
+            .shutdown()
+            .expect("shutdown");
+        b.flush_dirty = true;
+        let mut at = now;
+        let mut stream_closed = false;
+        for _ in 0..32 {
+            let from_b = flush(&mut b);
+            let from_a = flush(&mut a);
+            let idle = from_a.is_empty() && from_b.is_empty();
+            client_read(&mut a, 0, from_b, at);
+            client_read(&mut b, 0, from_a, at);
+            {
+                let mut handler = SctpHandler::new(&mut a, 0);
+                while let Some(evt) = handler.poll_event() {
+                    stream_closed |= matches!(evt.event, RTCEventInternal::SCTPStreamClosed(_, 4));
+                }
+            }
+            if a.sctp_transport.association_lost() {
+                break;
+            }
+            if idle {
+                let Some(next) = SctpHandler::new(&mut a, 0).poll_timeout() else {
+                    break;
+                };
+                at = at.max(next);
+                SctpHandler::new(&mut a, 0)
+                    .handle_timeout(at)
+                    .expect("timeout");
+            }
+        }
+        assert!(
+            stream_closed,
+            "RFC 8831 section 6.2: an association closed gracefully closes its data channels, \
+             each of which hears of its stream"
+        );
+        assert!(a.sctp_transport.association_lost());
+        assert_eq!(
+            a.sctp_transport.state(),
+            crate::peer_connection::transport::sctp::state::RTCSctpTransportState::Closed
+        );
+        assert_eq!(a.sctp_transport.offer_port(), 5001);
+        assert_eq!(a.sctp_transport.answer_port(5001), 5001);
+    }
+
+    /// RFC 8831 section 6.6: "The sender SHOULD disable the Nagle algorithm (see [RFC1122])
+    /// to minimize the latency": a small message is not held back for data in flight to be
+    /// acknowledged. Three messages well under a packet each leave at the flush that follows
+    /// their write, though nothing sent before has been acknowledged.
+    #[test]
+    fn a_small_message_is_sent_at_once_while_data_is_outstanding() {
+        let now = Instant::now();
+        let e = establish();
+        let ch = e.client_ch;
+        let mut ctx = client_ctx(now, e.client_ep, ch, e.client_conn);
+        client_write_negotiated_open(&mut ctx, now, ch, 4, &dcep_open(ChannelType::Reliable, 0));
+        let tsns: Vec<u32> = (0..3)
+            .map(|_| send_probe(&mut ctx, ch, 4, now).tsn)
+            .collect();
+        assert_eq!(tsns[1], tsns[0].wrapping_add(1));
+        assert_eq!(tsns[2], tsns[1].wrapping_add(1));
     }
 }

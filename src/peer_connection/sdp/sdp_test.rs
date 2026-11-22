@@ -88,6 +88,8 @@ fn params(
         ice_gathering_state: RTCIceGatheringState::Complete,
         match_bundle_group,
         sctp_max_message_size: 0,
+        sctp_port: 5000,
+        sctp_over_tcp: false,
         ignore_rid_pause_for_recv: false,
         write_ssrc_attributes_for_simulcast: false,
     }
@@ -521,6 +523,7 @@ fn test_have_application_media_section() -> Result<()> {
             media_descriptions: vec![MediaDescription {
                 media_name: MediaName {
                     media: MEDIA_SECTION_APPLICATION.to_owned(),
+                    protos: vec!["UDP".to_owned(), "DTLS".to_owned(), "SCTP".to_owned()],
                     formats: vec!["webrtc-datachannel".to_owned()],
                     ..Default::default()
                 },
@@ -533,11 +536,303 @@ fn test_have_application_media_section() -> Result<()> {
         let application = get_application_media(&s).expect("the data channel section");
         assert_eq!(
             get_application_media_section_sctp_port(application),
-            Some(5000)
+            Ok(Some(5000))
         );
     }
 
     Ok(())
+}
+
+/// A data channel section as a peer writes it: `m=application <port> <proto>
+/// webrtc-datachannel` with the given attributes.
+fn data_section(port: isize, proto: &str, attributes: Vec<Attribute>) -> MediaDescription {
+    MediaDescription {
+        media_name: MediaName {
+            media: MEDIA_SECTION_APPLICATION.to_owned(),
+            port: RangedPort {
+                value: port,
+                range: None,
+            },
+            protos: proto.split('/').map(ToOwned::to_owned).collect(),
+            formats: vec!["webrtc-datachannel".to_owned()],
+        },
+        attributes,
+        ..Default::default()
+    }
+}
+
+fn description(media_descriptions: Vec<MediaDescription>) -> SessionDescription {
+    SessionDescription {
+        media_descriptions,
+        ..Default::default()
+    }
+}
+
+/// RFC 8841 section 4.4.2: a data channel section is `m=application` with proto
+/// `UDP/DTLS/SCTP` or `TCP/DTLS/SCTP` and the fmt `webrtc-datachannel`. The proto used not to
+/// be looked at, so any `m=application ... webrtc-datachannel` line started SCTP over DTLS
+/// over UDP.
+#[test]
+fn a_data_channel_section_is_told_by_its_proto_and_fmt() {
+    for (proto, is_data) in [
+        ("UDP/DTLS/SCTP", true),
+        ("TCP/DTLS/SCTP", true),
+        ("DTLS/SCTP", false),
+        ("UDP/TLS/RTP/SAVPF", false),
+        ("SCTP", false),
+        ("UDP/DTLS/SCTP/X", false),
+    ] {
+        let section = data_section(9, proto, vec![attr("sctp-port", Some("5000"))]);
+        assert_eq!(section.is_webrtc_datachannel(), is_data, "{proto}");
+        assert_eq!(
+            get_application_media(&description(vec![section])).is_some(),
+            is_data,
+            "{proto}"
+        );
+    }
+
+    // Exactly one fmt, and that one (section 4.3).
+    let mut two_formats = data_section(9, "UDP/DTLS/SCTP", vec![]);
+    two_formats.media_name.formats.push("other".to_owned());
+    assert!(!two_formats.is_webrtc_datachannel());
+    let mut other_format = data_section(9, "UDP/DTLS/SCTP", vec![]);
+    other_format.media_name.formats = vec!["5000".to_owned()];
+    assert!(!other_format.is_webrtc_datachannel());
+}
+
+/// An `m=application` line that is neither a data channel section nor RTP is media this
+/// endpoint does not know: the `DTLS/SCTP 5000` section of the drafts before RFC 8841 is
+/// one. Application media over RTP (SMPTE ST 336) is not.
+#[test]
+fn an_application_section_that_is_neither_data_channel_nor_rtp_is_unknown() {
+    let section = |proto: &str, fmt: &str| {
+        let mut section = data_section(9, proto, vec![]);
+        section.media_name.formats = vec![fmt.to_owned()];
+        section
+    };
+    for (proto, fmt, unknown) in [
+        ("DTLS/SCTP", "5000", true),
+        ("UDP/DTLS/SCTP", "5000", true),
+        ("UDP/DTLS/SCTP", "webrtc-datachannel", false),
+        ("TCP/DTLS/SCTP", "webrtc-datachannel", false),
+        ("UDP/TLS/RTP/SAVPF", "96", false),
+        ("UDP/BFCP", "*", true),
+    ] {
+        assert_eq!(
+            is_unknown_application_media(&section(proto, fmt)),
+            unknown,
+            "m=application 9 {proto} {fmt}"
+        );
+    }
+    assert!(!is_unknown_application_media(&media("audio", vec![])));
+    assert_eq!(
+        unknown_media_name(&section("DTLS/SCTP", "5000")).map(|name| name.to_string()),
+        Some("application 9 DTLS/SCTP 5000".to_owned())
+    );
+}
+
+/// RFC 8841 section 5.2: `sctp-port-value = 1*5(DIGIT)`, in 0..=65535. Anything else is not
+/// a port; it used to be read as "no port", which the caller turned into 5000.
+#[test]
+fn sctp_port_is_one_to_five_digits_up_to_65535() {
+    let port_of = |value: Option<&str>| {
+        get_application_media_section_sctp_port(&data_section(
+            9,
+            "UDP/DTLS/SCTP",
+            vec![attr("sctp-port", value)],
+        ))
+    };
+    for (value, port) in [
+        ("5000", 5000),
+        ("0", 0),
+        ("1", 1),
+        ("65535", 65535),
+        ("05000", 5000),
+    ] {
+        assert_eq!(port_of(Some(value)), Ok(Some(port)), "{value:?}");
+    }
+    for value in [
+        "65536", "70000", "123456", "+5000", "-1", "5000 ", " 5000", "5e3", "0x50", "port", "",
+    ] {
+        assert_eq!(
+            port_of(Some(value)),
+            Err(Error::ErrSDPSctpPortInvalid),
+            "{value:?}"
+        );
+    }
+    assert_eq!(port_of(None), Err(Error::ErrSDPSctpPortInvalid), "no value");
+
+    // No attribute at all. The `a=sctpmap` of the drafts before RFC 8841 is not a source of
+    // the port: it belongs to the `DTLS/SCTP` m= line, which is not a data channel section.
+    assert_eq!(
+        get_application_media_section_sctp_port(&data_section(9, "UDP/DTLS/SCTP", vec![])),
+        Ok(None)
+    );
+    assert_eq!(
+        get_application_media_section_sctp_port(&data_section(
+            9,
+            "UDP/DTLS/SCTP",
+            vec![attr("sctpmap", Some("5000 webrtc-datachannel 1024"))]
+        )),
+        Ok(None)
+    );
+}
+
+/// RFC 8841 section 5.1: "if the attribute is not present, the associated 'm=' line MUST be
+/// considered invalid". A rejected section (port zero) carries no attributes and is fine.
+#[test]
+fn a_data_section_without_a_valid_sctp_port_is_invalid() {
+    let valid = |section| validate_application_media_section(&description(vec![section]));
+    assert_eq!(
+        valid(data_section(
+            9,
+            "UDP/DTLS/SCTP",
+            vec![attr("sctp-port", Some("5000"))]
+        )),
+        Ok(())
+    );
+    assert_eq!(
+        valid(data_section(
+            9,
+            "UDP/DTLS/SCTP",
+            vec![attr("sctp-port", Some("0"))]
+        )),
+        Ok(()),
+        "zero is a port value: it closes the association"
+    );
+    assert_eq!(
+        valid(data_section(9, "UDP/DTLS/SCTP", vec![])),
+        Err(Error::ErrSDPSctpPortInvalid)
+    );
+    assert_eq!(
+        valid(data_section(
+            9,
+            "TCP/DTLS/SCTP",
+            vec![attr("sctp-port", Some("70000"))]
+        )),
+        Err(Error::ErrSDPSctpPortInvalid)
+    );
+    assert_eq!(valid(data_section(0, "UDP/DTLS/SCTP", vec![])), Ok(()));
+    assert_eq!(
+        validate_application_media_section(&description(vec![media("audio", vec![])])),
+        Ok(())
+    );
+}
+
+/// RFC 8841 section 6.1: the value is the largest message the sender of the description
+/// takes, "a maximum message size value of zero ... indicates that the SCTP endpoint will
+/// handle messages of any size", and without the attribute "the default value is 64K".
+#[test]
+fn max_message_size_zero_is_any_size_and_absent_is_the_default() {
+    let size_of = |attributes| {
+        get_application_media_section_max_message_size(&data_section(
+            9,
+            "UDP/DTLS/SCTP",
+            attributes,
+        ))
+    };
+    assert_eq!(
+        size_of(vec![attr("max-message-size", Some("262144"))]),
+        Some(262144)
+    );
+    assert_eq!(size_of(vec![attr("max-message-size", Some("0"))]), Some(0));
+    assert_eq!(size_of(vec![]), None);
+    assert_eq!(size_of(vec![attr("max-message-size", Some("big"))]), None);
+    assert_eq!(
+        size_of(vec![attr("max-message-size", Some("99999999999999999999"))]),
+        Some(0),
+        "more than 32 bits hold is no limit this endpoint could reach"
+    );
+
+    let with = |attributes: Vec<Attribute>| {
+        let mut attributes = attributes;
+        attributes.push(attr("sctp-port", Some("5000")));
+        description(vec![data_section(9, "UDP/DTLS/SCTP", attributes)])
+    };
+    let local = with(vec![]);
+    let limit = |remote: &SessionDescription| match negotiated_sctp(&local, remote) {
+        SctpNegotiation::Association {
+            remote_max_message_size,
+            ..
+        } => remote_max_message_size,
+        other => panic!("no association: {other:?}"),
+    };
+    assert_eq!(limit(&with(vec![])), 65536, "absent: 64K");
+    assert_eq!(limit(&with(vec![attr("max-message-size", Some("0"))])), 0);
+    assert_eq!(
+        limit(&with(vec![attr("max-message-size", Some("1200"))])),
+        1200
+    );
+}
+
+/// RFC 8841 sections 10.3 and 10.4: what the two data sections of an exchange negotiate. A
+/// rejected section (m= port zero) on either side and an `a=sctp-port` of zero on either side
+/// establish no association; the section used to be matched by media and fmt alone, so a
+/// rejected one started the SCTP transport all the same.
+#[test]
+fn what_two_data_sections_negotiate() {
+    let section = |port, sctp_port: &str| {
+        description(vec![data_section(
+            port,
+            "UDP/DTLS/SCTP",
+            vec![attr("sctp-port", Some(sctp_port))],
+        )])
+    };
+    let rejected = || description(vec![data_section(0, "UDP/DTLS/SCTP", vec![])]);
+    let none = || description(vec![media("audio", vec![])]);
+
+    assert_eq!(
+        negotiated_sctp(&section(9, "5000"), &section(9, "5001")),
+        SctpNegotiation::Association {
+            local_port: 5000,
+            remote_port: 5001,
+            remote_max_message_size: 65536,
+        }
+    );
+    assert_eq!(
+        negotiated_sctp(&section(9, "5000"), &rejected()),
+        SctpNegotiation::Rejected
+    );
+    assert_eq!(
+        negotiated_sctp(&rejected(), &section(9, "5000")),
+        SctpNegotiation::Rejected
+    );
+    assert_eq!(
+        negotiated_sctp(&rejected(), &rejected()),
+        SctpNegotiation::Rejected
+    );
+    assert_eq!(
+        negotiated_sctp(&section(9, "5000"), &section(9, "0")),
+        SctpNegotiation::PortZero
+    );
+    assert_eq!(
+        negotiated_sctp(&section(9, "0"), &section(9, "5000")),
+        SctpNegotiation::PortZero
+    );
+    assert_eq!(
+        negotiated_sctp(&section(9, "5000"), &none()),
+        SctpNegotiation::NoSection
+    );
+    assert_eq!(
+        negotiated_sctp(&none(), &section(9, "5000")),
+        SctpNegotiation::NoSection
+    );
+
+    // A section rejected earlier, and the one offered after it: the live one counts.
+    let mut both = rejected();
+    both.media_descriptions.push(data_section(
+        9,
+        "UDP/DTLS/SCTP",
+        vec![attr("sctp-port", Some("5002"))],
+    ));
+    assert_eq!(
+        negotiated_sctp(&both, &both),
+        SctpNegotiation::Association {
+            local_port: 5002,
+            remote_port: 5002,
+            remote_max_message_size: 65536,
+        }
+    );
 }
 
 fn fingerprint_test(

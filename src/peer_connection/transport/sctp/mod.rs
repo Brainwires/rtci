@@ -1,6 +1,6 @@
 use crate::peer_connection::configuration::setting_engine::SctpMaxMessageSize;
+use crate::peer_connection::sdp::SctpNegotiation;
 use crate::peer_connection::transport::RTCTransportId;
-use crate::peer_connection::transport::dtls::role::RTCDtlsRole;
 use crate::peer_connection::transport::sctp::capabilities::SCTPTransportCapabilities;
 use crate::peer_connection::transport::sctp::state::RTCSctpTransportState;
 use sctp::{Association, AssociationHandle};
@@ -21,6 +21,34 @@ pub(crate) const SCTP_MAX_CHANNELS: u16 = u16::MAX;
 /// each DTLS transport (RFC 8261 section 4, RFC 8831 section 6.1), so an INIT for a second
 /// one is refused.
 pub(crate) const MAX_SCTP_ASSOCIATIONS_PER_DTLS_TRANSPORT: u32 = 1;
+
+/// The SCTP port this side advertises (`a=sctp-port`) for its first association: the value
+/// every browser uses.
+pub(crate) const DEFAULT_SCTP_PORT: u16 = 5000;
+
+/// What the application asked the next offer to do with the SCTP association (RFC 8841
+/// section 10.5).
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub(crate) enum SctpRenegotiation {
+    /// Close it and establish a new one: the offer carries a new `a=sctp-port`.
+    Replace,
+    /// Close it and establish none: the offer carries `a=sctp-port:0`.
+    Close,
+}
+
+/// What a completed offer/answer exchange did to the SCTP transport.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub(crate) enum SctpNegotiationOutcome {
+    /// Nothing to do: no association was negotiated and none exists, or the one that exists
+    /// is the one negotiated.
+    Unchanged,
+    /// The first association of this transport was negotiated.
+    Started,
+    /// The association was closed by signalling and none replaces it.
+    Closed,
+    /// The association was closed by signalling and a new one replaces it.
+    Replaced,
+}
 
 /// SCTPTransport provides details about the SCTP transport.
 ///
@@ -62,6 +90,32 @@ pub(crate) struct SctpTransport {
     // The largest message accepted from the peer: the `max-message-size` this side advertised
     // (RFC 8841 6.1), which is not the negotiated send limit above. 0 before `start()`.
     pub(crate) receive_message_limit: usize,
+
+    /// The SCTP port this side advertises in `a=sctp-port` and uses as source port: the one
+    /// of the current association, or of the next one before any was negotiated.
+    pub(crate) local_port: u16,
+
+    /// The `(local, remote)` SCTP ports the last completed offer/answer exchange negotiated,
+    /// which are the ports of the association in use (RFC 8841 section 9.3: each endpoint
+    /// uses one port as client and server port). `None` while no association is negotiated.
+    pub(crate) negotiated_ports: Option<(u16, u16)>,
+
+    /// What the application staged for the next offer.
+    pub(crate) staged: Option<SctpRenegotiation>,
+
+    /// Whether the DTLS transport under this one is connected: the association is initiated
+    /// when it becomes so (RFC 8261 section 6.1), or at once when an association is
+    /// negotiated over a DTLS transport that already is.
+    pub(crate) dtls_connected: bool,
+
+    /// The last exchange closed the association with `a=sctp-port:0` (RFC 8841 section 9.3)
+    /// and none has been negotiated since: offers go on saying 0 until the application asks
+    /// for an association again.
+    pub(crate) port_zero: bool,
+
+    /// The last association ended without signalling and the endpoint has let go of it; see
+    /// [`Self::association_lost`], which also covers one that ended and is still held.
+    pub(crate) lost: bool,
 }
 
 impl SctpTransport {
@@ -86,7 +140,152 @@ impl SctpTransport {
             mtu,
             weighted_fair_queueing: false,
             receive_message_limit: 0,
+            local_port: DEFAULT_SCTP_PORT,
+            negotiated_ports: None,
+            staged: None,
+            dtls_connected: false,
+            port_zero: false,
+            lost: false,
         }
+    }
+
+    /// Whether the association ended without signalling (an ABORT, a timeout, a SHUTDOWN)
+    /// and has not been replaced. RFC 8841 section 9.3: "SCTP associations might be closed
+    /// without SDP signaling -- for example, in case of a failure. ... This requires a new SDP
+    /// offer/answer exchange. New (different than the ones currently used) SCTP ports MUST be
+    /// used by both endpoints", so the next offer or answer carries a new port.
+    pub(crate) fn association_lost(&self) -> bool {
+        self.is_started
+            && (self.lost
+                || (!self.sctp_associations.is_empty()
+                    && self.sctp_associations.values().all(Self::ended)))
+    }
+
+    /// A port for a new association: never 0 (which closes, RFC 8841 section 9.3) and never
+    /// the port in use ("a new (different than the ones currently used) SCTP port").
+    fn next_port(&self) -> u16 {
+        match self.local_port.checked_add(1) {
+            Some(port) => port,
+            None => DEFAULT_SCTP_PORT,
+        }
+    }
+
+    /// The `a=sctp-port` of the next offer (RFC 8841 sections 10.2 and 10.5).
+    ///
+    /// The port in use, unless the association is to be replaced (asked for by the
+    /// application, or needed because the last one ended without signalling), which takes a
+    /// new port, or closed, which takes 0. The same answer every time until a negotiation
+    /// completes, so an offer created twice says the same thing.
+    pub(crate) fn offer_port(&self) -> u16 {
+        match self.staged {
+            Some(SctpRenegotiation::Close) => 0,
+            Some(SctpRenegotiation::Replace) => self.next_port(),
+            None if self.port_zero => 0,
+            None if self.association_lost() => self.next_port(),
+            None => self.local_port,
+        }
+    }
+
+    /// The `a=sctp-port` of the answer to an offer whose data section says
+    /// `a=sctp-port:<offered>` (RFC 8841 section 10.3).
+    ///
+    /// "If the offer contained a new (different than the one currently used) SCTP port
+    /// value, the answerer MUST also associate a new SCTP port value. If the offer contained a
+    /// zero SCTP port value, or if the answerer does not accept the SCTP association, the
+    /// answerer MUST also associate a zero SCTP port value".
+    pub(crate) fn answer_port(&self, offered: u16) -> u16 {
+        if offered == 0 || self.staged == Some(SctpRenegotiation::Close) {
+            return 0;
+        }
+        let offer_has_a_new_port = self
+            .negotiated_ports
+            .is_some_and(|(_, remote)| remote != offered);
+        if offer_has_a_new_port
+            || self.association_lost()
+            || self.staged == Some(SctpRenegotiation::Replace)
+        {
+            self.next_port()
+        } else {
+            self.local_port
+        }
+    }
+
+    /// Applies what a completed offer/answer exchange negotiated for the data section
+    /// (RFC 8841 sections 10.3 and 10.4).
+    ///
+    /// When this closes or replaces a running transport, the caller has had its associations
+    /// aborted first (`SctpHandler::close_for_renegotiation`): this only drops or replaces
+    /// the configuration they ran with.
+    pub(crate) fn negotiate(
+        &mut self,
+        negotiated: SctpNegotiation,
+    ) -> Result<SctpNegotiationOutcome> {
+        let (local_port, remote_port, remote_max_message_size) = match negotiated {
+            SctpNegotiation::NoSection => return Ok(SctpNegotiationOutcome::Unchanged),
+            SctpNegotiation::Rejected | SctpNegotiation::PortZero => {
+                self.staged = None;
+                self.port_zero = negotiated == SctpNegotiation::PortZero;
+                if !self.is_started {
+                    return Ok(SctpNegotiationOutcome::Unchanged);
+                }
+                self.stop();
+                return Ok(SctpNegotiationOutcome::Closed);
+            }
+            SctpNegotiation::Association {
+                local_port,
+                remote_port,
+                remote_max_message_size,
+            } => (local_port, remote_port, remote_max_message_size),
+        };
+        self.staged = None;
+        self.port_zero = false;
+
+        let outcome = if !self.is_started {
+            SctpNegotiationOutcome::Started
+        } else if self.negotiated_ports == Some((local_port, remote_port)) {
+            return Ok(SctpNegotiationOutcome::Unchanged);
+        } else {
+            // RFC 8841 section 9.3: "The existing SCTP association is closed, and the new
+            // SCTP association is established, if one or both endpoints signal a new SCTP
+            // port."
+            self.stop();
+            SctpNegotiationOutcome::Replaced
+        };
+        self.start(
+            SCTPTransportCapabilities {
+                max_message_size: remote_max_message_size,
+            },
+            local_port,
+            remote_port,
+        )?;
+        Ok(outcome)
+    }
+
+    /// Whether applying `negotiated` ends the association this transport runs.
+    pub(crate) fn closes_on(&self, negotiated: SctpNegotiation) -> bool {
+        self.is_started
+            && match negotiated {
+                SctpNegotiation::NoSection => false,
+                SctpNegotiation::Rejected | SctpNegotiation::PortZero => true,
+                SctpNegotiation::Association {
+                    local_port,
+                    remote_port,
+                    ..
+                } => self.negotiated_ports != Some((local_port, remote_port)),
+            }
+    }
+
+    /// Forgets the association this transport was negotiated for, back to the state before
+    /// `start()`. The port this side advertised is remembered, so the next one differs.
+    fn stop(&mut self) {
+        self.sctp_endpoint = None;
+        self.sctp_transport_config = None;
+        self.sctp_associations.clear();
+        self.is_started = false;
+        self.negotiated_max_message_size = None;
+        self.receive_message_limit = 0;
+        self.negotiated_ports = None;
+        self.lost = false;
     }
 
     /// Schedules the association `start()` builds by weighted fair queueing.
@@ -135,6 +334,8 @@ impl SctpTransport {
         // An association that ended during its handshake is `closed` (W3C webrtc 6.1.1: the
         // transport is closed when the association is), not `connecting` for good.
         match self.association() {
+            // The association ended and the endpoint has let go of it.
+            None if self.lost => RTCSctpTransportState::Closed,
             None => RTCSctpTransportState::Connecting,
             Some(association) if Self::ended(association) => RTCSctpTransportState::Closed,
             Some(association) if association.is_handshaking() => RTCSctpTransportState::Connecting,
@@ -169,9 +370,13 @@ impl SctpTransport {
     /// Start the SCTPTransport. Since both local and remote parties must mutually
     /// create an SCTPTransport, SCTP SO (Simultaneous Open) is used to establish
     /// a connection over SCTP.
+    ///
+    /// RFC 8841 section 9.3: "both SCTP endpoints MUST initiate the SCTP association (i.e.,
+    /// both SCTP endpoints take the 'active' role)", whatever their DTLS roles, so the
+    /// endpoint built here is the same in both: the SCTP handler initiates from it when DTLS
+    /// is connected, and it takes the peer's INIT, should that come first.
     pub(crate) fn start(
         &mut self,
-        dtls_role: RTCDtlsRole,
         remote_caps: SCTPTransportCapabilities,
         local_port: u16,
         remote_port: u16,
@@ -180,6 +385,9 @@ impl SctpTransport {
             return Ok(());
         }
         self.is_started = true;
+        self.local_port = local_port;
+        self.negotiated_ports = Some((local_port, remote_port));
+        self.lost = false;
 
         // W3C §6.1.1.2 defines `canSendSize` as what this endpoint can actually send, and allows
         // 0 only when the implementation "can handle messages of any size". This one cannot: the
@@ -231,24 +439,17 @@ impl SctpTransport {
             sctp_transport_config = sctp_transport_config.with_max_receive_buffer_size(recv_buf);
         }
 
-        if dtls_role == RTCDtlsRole::Client {
-            self.sctp_endpoint = Some(sctp::Endpoint::new(
-                TransportContext::default().local_addr, // placeholder; rewritten per-transmit by the ICE handler
-                TransportProtocol::UDP, // placeholder; rewritten per-transmit by the ICE handler
-                sctp_endpoint_config.into(),
-                None,
-            ));
-            self.sctp_transport_config = Some(sctp_transport_config);
-        } else {
-            let mut server_config = ::sctp::ServerConfig::new(sctp_transport_config);
-            server_config.concurrent_associations(MAX_SCTP_ASSOCIATIONS_PER_DTLS_TRANSPORT);
-            self.sctp_endpoint = Some(::sctp::Endpoint::new(
-                TransportContext::default().local_addr, // placeholder; rewritten per-transmit by the ICE handler
-                TransportProtocol::UDP, // placeholder; rewritten per-transmit by the ICE handler
-                sctp_endpoint_config.into(),
-                Some(server_config.into()),
-            ));
-        }
+        // One association per DTLS transport: once this side has initiated its own, or has
+        // taken the peer's INIT, the endpoint starts no other.
+        let mut server_config = ::sctp::ServerConfig::new(sctp_transport_config.clone());
+        server_config.concurrent_associations(MAX_SCTP_ASSOCIATIONS_PER_DTLS_TRANSPORT);
+        self.sctp_endpoint = Some(::sctp::Endpoint::new(
+            TransportContext::default().local_addr, // placeholder; rewritten per-transmit by the ICE handler
+            TransportProtocol::UDP, // placeholder; rewritten per-transmit by the ICE handler
+            sctp_endpoint_config.into(),
+            Some(server_config.into()),
+        ));
+        self.sctp_transport_config = Some(sctp_transport_config);
 
         Ok(())
     }
@@ -313,7 +514,6 @@ mod tests {
         );
         transport
             .start(
-                RTCDtlsRole::Client,
                 SCTPTransportCapabilities {
                     max_message_size: remote_max_message_size,
                 },
@@ -394,7 +594,6 @@ mod tests {
         );
         transport
             .start(
-                RTCDtlsRole::Client,
                 SCTPTransportCapabilities {
                     max_message_size: 0,
                 },
@@ -475,7 +674,6 @@ mod tests {
         );
         transport
             .start(
-                RTCDtlsRole::Client,
                 SCTPTransportCapabilities {
                     max_message_size: 0,
                 },
@@ -503,7 +701,6 @@ mod tests {
         );
         transport
             .start(
-                RTCDtlsRole::Client,
                 SCTPTransportCapabilities {
                     max_message_size: 0,
                 },
@@ -535,7 +732,6 @@ mod tests {
         );
         transport
             .start(
-                RTCDtlsRole::Client,
                 SCTPTransportCapabilities {
                     max_message_size: 0,
                 },
@@ -557,7 +753,6 @@ mod tests {
         let mut transport = transport;
         transport
             .start(
-                RTCDtlsRole::Client,
                 SCTPTransportCapabilities {
                     max_message_size: 0,
                 },
@@ -615,7 +810,6 @@ mod tests {
         );
         transport
             .start(
-                RTCDtlsRole::Server,
                 SCTPTransportCapabilities {
                     max_message_size: 65536,
                 },
@@ -660,5 +854,243 @@ mod tests {
 
         assert_eq!(new_associations, 1);
         assert_eq!(transport.sctp_associations.len(), 1);
+    }
+
+    fn new_transport() -> SctpTransport {
+        SctpTransport::new(
+            SctpMaxMessageSize::default(),
+            None,
+            None,
+            test_transport_id(TransportKind::Sctp),
+            test_transport_id(TransportKind::Dtls),
+        )
+    }
+
+    fn association(local_port: u16, remote_port: u16) -> SctpNegotiation {
+        SctpNegotiation::Association {
+            local_port,
+            remote_port,
+            remote_max_message_size: 65536,
+        }
+    }
+
+    /// RFC 8841 sections 10.3 and 10.4: the first exchange that negotiates an association
+    /// starts the transport between the two `a=sctp-port` values; the same ports again
+    /// change nothing; no data section changes nothing.
+    #[test]
+    fn negotiating_an_association_starts_the_transport_once() {
+        let mut transport = new_transport();
+        assert_eq!(
+            transport.negotiate(SctpNegotiation::NoSection).unwrap(),
+            SctpNegotiationOutcome::Unchanged
+        );
+        assert!(!transport.is_started);
+
+        assert!(!transport.closes_on(association(5000, 6000)));
+        assert_eq!(
+            transport.negotiate(association(5000, 6000)).unwrap(),
+            SctpNegotiationOutcome::Started
+        );
+        assert!(transport.is_started);
+        assert_eq!(transport.negotiated_ports, Some((5000, 6000)));
+        let config = transport.sctp_transport_config.as_ref().expect("config");
+        assert_eq!(
+            (config.sctp_port(), config.remote_sctp_port()),
+            (5000, 6000)
+        );
+        assert_eq!(transport.max_message_size(), Some(65536));
+
+        for same in [association(5000, 6000), SctpNegotiation::NoSection] {
+            assert!(!transport.closes_on(same));
+            assert_eq!(
+                transport.negotiate(same).unwrap(),
+                SctpNegotiationOutcome::Unchanged
+            );
+            assert!(transport.is_started);
+        }
+    }
+
+    /// RFC 8841 section 9.3: "The existing SCTP association is closed, and the new SCTP
+    /// association is established, if one or both endpoints signal a new SCTP port."
+    #[test]
+    fn a_new_port_on_either_side_replaces_the_association() {
+        for (local, remote) in [(5001, 6000), (5000, 6001), (5001, 6001)] {
+            let mut transport = new_transport();
+            transport.negotiate(association(5000, 6000)).unwrap();
+            assert!(transport.closes_on(association(local, remote)));
+            assert_eq!(
+                transport
+                    .negotiate(SctpNegotiation::Association {
+                        local_port: local,
+                        remote_port: remote,
+                        remote_max_message_size: 1200,
+                    })
+                    .unwrap(),
+                SctpNegotiationOutcome::Replaced
+            );
+            assert!(transport.is_started);
+            assert_eq!(transport.negotiated_ports, Some((local, remote)));
+            let config = transport.sctp_transport_config.as_ref().expect("config");
+            assert_eq!(
+                (config.sctp_port(), config.remote_sctp_port()),
+                (local, remote)
+            );
+            assert_eq!(
+                transport.max_message_size(),
+                Some(1200),
+                "the new association is negotiated afresh"
+            );
+            assert_eq!(transport.local_port, local);
+        }
+    }
+
+    /// RFC 8841 sections 10.3 and 10.4: "If the SDP 'sctp-port' attribute in the answer
+    /// contains an attribute value of zero, the offerer MUST NOT establish an SCTP
+    /// association. If, in addition, an SCTP association exists, the offerer MUST close it",
+    /// and the same for an m= line with port zero. Port 0 used to be handed to the
+    /// association as its peer's port.
+    #[test]
+    fn port_zero_and_a_rejected_section_establish_nothing_and_close_what_exists() {
+        for refusal in [SctpNegotiation::PortZero, SctpNegotiation::Rejected] {
+            let mut transport = new_transport();
+            assert!(!transport.closes_on(refusal));
+            assert_eq!(
+                transport.negotiate(refusal).unwrap(),
+                SctpNegotiationOutcome::Unchanged
+            );
+            assert!(!transport.is_started, "{refusal:?}");
+            assert!(transport.sctp_endpoint.is_none());
+
+            transport.negotiate(association(5000, 6000)).unwrap();
+            assert!(transport.closes_on(refusal));
+            assert_eq!(
+                transport.negotiate(refusal).unwrap(),
+                SctpNegotiationOutcome::Closed
+            );
+            assert!(!transport.is_started, "{refusal:?}");
+            assert!(transport.sctp_endpoint.is_none());
+            assert!(transport.sctp_transport_config.is_none());
+            assert_eq!(transport.negotiated_ports, None);
+            assert_eq!(transport.max_message_size(), None);
+        }
+    }
+
+    /// RFC 8841 section 10.2 and 10.5: the port an offer carries. The port in use; a new
+    /// one to replace the association; zero to close it, and zero from then on until an
+    /// association is asked for again, which takes a port again.
+    #[test]
+    fn the_offer_carries_the_port_in_use_a_new_one_or_zero() {
+        let mut transport = new_transport();
+        assert_eq!(transport.offer_port(), DEFAULT_SCTP_PORT);
+        transport.negotiate(association(5000, 6000)).unwrap();
+        assert_eq!(transport.offer_port(), 5000);
+
+        transport.staged = Some(SctpRenegotiation::Replace);
+        let new_port = transport.offer_port();
+        assert_ne!(new_port, 5000, "different than the one currently used");
+        assert_ne!(new_port, 0);
+        assert_eq!(transport.offer_port(), new_port, "the same offer twice");
+        transport.negotiate(association(new_port, 6001)).unwrap();
+        assert_eq!(transport.staged, None, "consumed by the exchange");
+        assert_eq!(transport.offer_port(), new_port);
+
+        transport.staged = Some(SctpRenegotiation::Close);
+        assert_eq!(transport.offer_port(), 0);
+        transport.negotiate(SctpNegotiation::PortZero).unwrap();
+        assert_eq!(transport.offer_port(), 0, "closed until asked for again");
+
+        transport.staged = Some(SctpRenegotiation::Replace);
+        let reopened = transport.offer_port();
+        assert_ne!(reopened, 0);
+        assert_ne!(
+            reopened, new_port,
+            "different than the value associated with the previous SCTP association"
+        );
+        transport.negotiate(association(reopened, 6002)).unwrap();
+        assert!(transport.is_started);
+        assert_eq!(transport.offer_port(), reopened);
+    }
+
+    /// RFC 8841 section 10.3: "If the offer contained a new (different than the one
+    /// currently used) SCTP port value, the answerer MUST also associate a new SCTP port
+    /// value. If the offer contained a zero SCTP port value, or if the answerer does not
+    /// accept the SCTP association, the answerer MUST also associate a zero SCTP port value".
+    /// The answer used to say 5000 whatever the offer said.
+    #[test]
+    fn the_answer_follows_the_port_of_the_offer() {
+        let mut transport = new_transport();
+        assert_eq!(
+            transport.answer_port(6000),
+            DEFAULT_SCTP_PORT,
+            "first offer"
+        );
+        assert_eq!(transport.answer_port(0), 0);
+
+        transport.negotiate(association(5000, 6000)).unwrap();
+        assert_eq!(
+            transport.answer_port(6000),
+            5000,
+            "the same port: no change"
+        );
+        assert_eq!(transport.answer_port(0), 0);
+        let new_port = transport.answer_port(6001);
+        assert_ne!(new_port, 5000, "a new port for a new port");
+        assert_ne!(new_port, 0);
+
+        transport.staged = Some(SctpRenegotiation::Close);
+        assert_eq!(
+            transport.answer_port(6000),
+            0,
+            "the application does not accept the association"
+        );
+
+        // Section 10.5: after a close by port zero, the port of the association that was
+        // closed may be used for the next one.
+        transport.negotiate(SctpNegotiation::PortZero).unwrap();
+        assert_eq!(transport.answer_port(6000), 5000);
+    }
+
+    /// The port after 65535 is not 0, which would close the association.
+    #[test]
+    fn a_new_port_is_never_zero() {
+        let mut transport = new_transport();
+        transport.negotiate(association(65535, 6000)).unwrap();
+        transport.staged = Some(SctpRenegotiation::Replace);
+        assert_eq!(transport.offer_port(), DEFAULT_SCTP_PORT);
+    }
+
+    /// RFC 8841 section 9.3: both endpoints initiate, so the endpoint `start` builds is the
+    /// same whatever the DTLS role: it has the configuration to initiate with, and it takes
+    /// the peer's INIT when that arrives first. A DTLS client's endpoint used to refuse it.
+    #[test]
+    fn the_started_endpoint_initiates_and_accepts() {
+        let mut transport = new_transport();
+        transport.negotiate(association(5000, 5000)).unwrap();
+        assert!(transport.sctp_transport_config.is_some());
+
+        let now = std::time::Instant::now();
+        let peer: std::net::SocketAddr = "127.0.0.1:4444".parse().unwrap();
+        let mut peer_ep = ::sctp::Endpoint::new(
+            peer,
+            TransportProtocol::UDP,
+            ::sctp::EndpointConfig::default().into(),
+            None,
+        );
+        let (_ch, mut conn) = peer_ep
+            .connect(
+                now,
+                ::sctp::ClientConfig::new(::sctp::TransportConfig::default()),
+                "127.0.0.1:5000".parse().unwrap(),
+            )
+            .expect("connect");
+        let init = match conn.poll_transmit(now).expect("INIT").message {
+            ::sctp::Payload::RawEncode(mut contents) => contents.remove(0),
+            _ => panic!("an encoded INIT"),
+        };
+        let endpoint = transport.sctp_endpoint.as_mut().expect("endpoint");
+        assert!(matches!(
+            endpoint.handle(now, peer, None, init),
+            Some((_, ::sctp::DatagramEvent::NewAssociation(_)))
+        ));
     }
 }

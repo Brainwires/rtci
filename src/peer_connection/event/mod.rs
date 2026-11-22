@@ -577,6 +577,14 @@ pub(crate) enum RTCEventInternal {
     /// Parameter: Association handle
     SCTPHandshakeComplete(usize /*AssociationHandle*/),
 
+    /// The SCTP association was closed by signalling (RFC 8841 section 10): its data section
+    /// was rejected, an `a=sctp-port` of zero closed it, or a new `a=sctp-port` replaces it.
+    /// The data channels that ran over it are closed.
+    ///
+    /// Parameter: whether a new association replaces it (the channels not yet opened wait
+    /// for that one) or none does (they are closed too).
+    SCTPClosedBySignalling(bool /*replaced*/),
+
     /// SCTP stream has been closed
     ///
     /// Parameters:
