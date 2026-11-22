@@ -7,13 +7,14 @@
 //! that are not on it (Section 7.2.5.3.2); the order of the checklist is the pairs' priority,
 //! read when a pair is picked (Section 6.1.2.3).
 //!
-//! Two of the RFC's rules are not followed, on purpose:
+//! Section 8.1.1 uses the nominated pair with the highest priority, and so does the controlled
+//! agent here. libwebrtc moves a session to another pair after it connects, whatever that
+//! pair's priority: following the controlling agent's *latest* nomination (or the highest
+//! libwebrtc `NOMINATION` value) is `AgentConfig::nomination_acceptance`.
 //!
-//! - Section 8.1.1 uses the nominated pair with the highest priority. The controlled agent
-//!   here follows the controlling agent's *latest* nomination (or the highest libwebrtc
-//!   `NOMINATION` value), because libwebrtc moves a session to another pair after it connects.
-//! - Sections 7.2.5.3.4 and 7.3.1.5 fail the checklist when a nomination fails. Here the pair
-//!   fails, and the checklist only when no other pair can still be nominated.
+//! One of the RFC's rules is not followed, on purpose: Sections 7.2.5.3.4 and 7.3.1.5 fail the
+//! checklist when a nomination fails. Here the pair fails, and the checklist only when no
+//! other pair can still be nominated.
 
 use crate::agent::agent_config::*;
 use crate::agent::{Agent, BindingRequest};
@@ -930,6 +931,7 @@ impl Agent {
             // attribute set, and if the ICE agent receives a successful response to the
             // request, the agent sets the nominated flag of the pair to true."
             self.candidate_pairs[valid].nominate = false;
+            self.candidate_pairs[checked].nominate = false;
             if self.selected_pair.is_none() {
                 self.set_selected_pair(Some(now), Some(valid));
                 self.conclude();
@@ -1229,10 +1231,8 @@ impl Agent {
         if p.state == CandidatePairState::Succeeded {
             // Section 7.3.1.4: "If the state of that pair is Succeeded, nothing further is
             // done." Section 7.3.1.5: with USE-CANDIDATE, "the agent sets the nominated flag
-            // value of the valid pair to true". The controlled agent follows the controlling
-            // agent's nomination, a later one included: libwebrtc moves the session to
-            // another pair after it connects (regular nomination on the new pair, or a higher
-            // NOMINATION value), and the pair it leaves stops carrying media.
+            // value of the valid pair to true". Which nominated pair is then used is
+            // `accept_nomination`'s business.
             if nomination > 0 {
                 self.accept_nomination(now, p.valid_pair.unwrap_or(pair_index));
             } else {
@@ -1255,39 +1255,62 @@ impl Agent {
     // Nomination and conclusion (Section 8)
     // ---------------------------------------------------------------------------------------
 
-    /// Controlled agent: makes `pair_index`, a valid pair the controlling agent nominated, the
-    /// selected pair, unless the selected pair carries a higher nomination (libwebrtc's
-    /// renomination: the highest `NOMINATION` value wins, so a delayed earlier one does not
-    /// move the session back). Between regular nominations, all value 1, the latest one wins.
+    /// Controlled agent: `pair_index`, a valid pair, was nominated by the controlling agent.
+    /// It becomes the selected pair when there is none. When there is one:
+    ///
+    /// - [`NominationAcceptance::HighestPriority`] (RFC 8445 Section 8.1.1: "the agents MUST
+    ///   produce the selected pairs and use the pairs with the highest priority"): it takes
+    ///   over when its priority is higher. A nominated pair of lower priority takes over only
+    ///   when the selected pair has lost the peer's consent (the agent is `Disconnected`): that
+    ///   pair is on its way out of the valid list, and the highest-priority nominated pair is
+    ///   then this one.
+    /// - [`NominationAcceptance::Latest`] (libwebrtc): it takes over unless the selected pair
+    ///   carries a higher nomination (libwebrtc's renomination: the highest `NOMINATION` value
+    ///   wins, so a delayed earlier one does not move the session back). Between regular
+    ///   nominations, all value 1, the latest one wins.
     ///
     /// Switching emits `SelectedCandidatePairChange`, and `media_path` follows at once: DTLS,
-    /// SRTP and SCTP go out on, and are accepted from, the new pair from the next datagram.
+    /// SRTP and SCTP go out on the new pair from the next datagram.
     pub(crate) fn accept_nomination(&mut self, now: Instant, pair_index: usize) {
+        self.candidate_pairs[pair_index].nominated = true;
         match self.get_selected_pair() {
             Some(selected) if selected == pair_index => {}
             Some(selected) => {
-                let current = self.candidate_pairs[selected].remote_nomination;
-                let offered = self.candidate_pairs[pair_index].remote_nomination;
-                if offered >= current {
+                let (current, offered) = (
+                    self.candidate_pairs[selected],
+                    self.candidate_pairs[pair_index],
+                );
+                let takes_over = match self.nomination_acceptance {
+                    NominationAcceptance::HighestPriority => {
+                        offered.priority() > current.priority()
+                            || self.connection_state == ConnectionState::Disconnected
+                    }
+                    NominationAcceptance::Latest => {
+                        offered.remote_nomination >= current.remote_nomination
+                    }
+                };
+                if takes_over {
                     debug!(
-                        "[{}]: peer renominated: switching selected pair from {} to {} (nomination {} -> {})",
+                        "[{}]: peer nominated another pair: switching selected pair from {} to {} (nomination {} -> {})",
                         self.get_name(),
-                        self.candidate_pairs[selected],
-                        self.candidate_pairs[pair_index],
                         current,
-                        offered
+                        offered,
+                        current.remote_nomination,
+                        offered.remote_nomination
                     );
-                    self.candidate_pairs[selected].nominated = false;
+                    if self.nomination_acceptance == NominationAcceptance::Latest {
+                        self.candidate_pairs[selected].nominated = false;
+                    }
                     self.set_selected_pair(Some(now), Some(pair_index));
                     self.conclude();
                 } else {
                     debug!(
-                        "[{}]: ignoring nomination {} of {}: selected pair {} carries nomination {}",
+                        "[{}]: nomination of {} accepted, selected pair {} kept (nomination {} / {})",
                         self.get_name(),
                         offered,
-                        self.candidate_pairs[pair_index],
-                        self.candidate_pairs[selected],
-                        current
+                        current,
+                        offered.remote_nomination,
+                        current.remote_nomination
                     );
                 }
             }
@@ -1296,6 +1319,65 @@ impl Agent {
                 self.conclude();
             }
         }
+    }
+
+    /// Controlled agent, [`NominationAcceptance::HighestPriority`], when consent is lost on
+    /// the selected pair: the session moves to the nominated valid pair with the highest
+    /// priority the peer has been heard on since it last consented on the selected one, if
+    /// there is one. (RFC 8445 Section 8.1.1 uses the nominated pairs "with the highest
+    /// priority"; a pair without consent may not be sent on, RFC 7675 Section 5.1.)
+    pub(crate) fn fall_back_to_another_nominated_pair(&mut self, now: Instant) {
+        if self.is_controlling
+            || self.nomination_acceptance != NominationAcceptance::HighestPriority
+        {
+            return;
+        }
+        let Some(selected) = self.selected_pair else {
+            return;
+        };
+        let last_consent = self.remote_candidates[self.candidate_pairs[selected].remote_index]
+            .last_consent()
+            .unwrap_or(self.start_time);
+        let best = self
+            .candidate_pairs
+            .iter()
+            .enumerate()
+            .filter(|(index, p)| {
+                *index != selected
+                    && p.nominated
+                    && p.valid
+                    && p.state == CandidatePairState::Succeeded
+                    && p.remote_index != self.candidate_pairs[selected].remote_index
+                    && self.remote_candidates[p.remote_index]
+                        .last_authenticated()
+                        .is_some_and(|heard| heard > last_consent)
+            })
+            .max_by_key(|(_, p)| p.priority())
+            .map(|(index, _)| index);
+        if let Some(pair_index) = best {
+            debug!(
+                "[{}]: consent lost on {}: moving to the nominated pair {}",
+                self.get_name(),
+                self.candidate_pairs[selected],
+                self.candidate_pairs[pair_index]
+            );
+            self.set_selected_pair(Some(now), Some(pair_index));
+            self.conclude();
+        }
+    }
+
+    /// Controlling agent that has concluded: sends the nomination of its selected pair again
+    /// (a check with USE-CANDIDATE, retransmitted like any check). Used when the peer has
+    /// shown that it does not hold the nomination; no other pair is ever nominated.
+    pub(crate) fn repeat_nomination(&mut self) {
+        let Some(selected) = self.selected_pair else {
+            return;
+        };
+        if !self.is_controlling || (self.lite && self.is_controlling) {
+            return;
+        }
+        self.candidate_pairs[selected].nominate = true;
+        self.enqueue_triggered(selected);
     }
 
     /// Controlling agent, regular nomination (Section 8.1.1): once its best valid pair has

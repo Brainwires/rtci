@@ -199,7 +199,10 @@ async fn run_broadcaster(
         .build(Instant::now())?;
 
     // Add transceiver to receive video
-    peer_connection.add_transceiver_from_kind(RtpCodecKind::Video, None)?;
+    peer_connection.add_transceiver_from_kind(
+        RtpCodecKind::Video,
+        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+    )?;
 
     peer_connection.set_remote_description(Instant::now(), offer)?;
 
@@ -713,7 +716,6 @@ async fn run_viewer(
                                         .ok_or(Error::ErrRTPTransceiverCodecUnsupported)?
                                 };
                                 packet.header.ssrc = sender
-                                    .track()
                                     .ssrcs()
                                     .last()
                                     .ok_or(Error::ErrSenderWithNoSSRCs)?;

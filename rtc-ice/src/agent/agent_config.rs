@@ -123,6 +123,49 @@ impl AgentConfig {
     }
 }
 
+/// Which nomination a controlled agent uses when the controlling agent makes more than one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum NominationAcceptance {
+    /// RFC 8445 Section 8.1.1: "If more than one candidate pair is nominated by the
+    /// controlling agent, and if the controlled agent accepts multiple nominations requests,
+    /// the agents MUST produce the selected pairs and use the pairs with the highest
+    /// priority." Every nomination is accepted; the selected pair is the nominated valid pair
+    /// with the highest priority. A nominated pair of lower priority takes over only when
+    /// consent is lost on the selected one (RFC 7675: that pair may no longer be sent on).
+    #[default]
+    HighestPriority,
+    /// libwebrtc's behaviour: the latest nomination wins, and with the `NOMINATION` attribute
+    /// (libwebrtc's renomination) the highest value does. libwebrtc moves a session to another
+    /// pair after it connected by nominating that pair, whatever its priority.
+    Latest,
+}
+
+/// What the agent does with a Binding request that fails the short-term credential check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum UnauthenticatedRequests {
+    /// RFC 8489 Section 9.1.3 (which RFC 8445 Section 7.3 makes the ICE procedure): a request
+    /// without MESSAGE-INTEGRITY or USERNAME is answered 400 (Bad Request), one with an
+    /// unknown username or a wrong MESSAGE-INTEGRITY 401 (Unauthenticated). The error
+    /// responses are rate limited (a token bucket of
+    /// [`MAX_UNAUTHENTICATED_RESPONSE_BURST`] responses, one more every
+    /// [`UNAUTHENTICATED_RESPONSE_INTERVAL`]), each is smaller than the request it answers,
+    /// and past the limit the request is dropped: the agent cannot be made to reflect traffic
+    /// at a spoofed source.
+    #[default]
+    Reject,
+    /// Such a request is dropped without an answer (what this crate did before, and what
+    /// libwebrtc does for a request whose username is not for it).
+    Drop,
+}
+
+/// The error responses to unauthenticated requests the agent may send in a burst.
+pub const MAX_UNAUTHENTICATED_RESPONSE_BURST: u32 = 5;
+
+/// How often the agent may send one more error response to an unauthenticated request.
+pub const UNAUTHENTICATED_RESPONSE_INTERVAL: Duration = Duration::from_millis(200);
+
 pub(crate) fn default_candidate_types() -> Vec<CandidateType> {
     vec![
         CandidateType::Host,
@@ -253,4 +296,38 @@ pub struct AgentConfig {
     /// the agent holds it; `false` drops the candidate. Addresses that are never a valid unicast
     /// destination (unspecified, multicast, broadcast, port 0) are dropped before it is asked.
     pub remote_address_filter: Option<RemoteAddressFilter>,
+
+    /// The tiebreaker of RFC 8445 Section 5.2 ("a random number between 0 and 2**64 - 1",
+    /// drawn when nil). A fixed one makes the outcome of a role conflict reproducible; the
+    /// agent still draws a new one when a 487 (Role Conflict) tells it to (Section 7.2.5.1).
+    pub tie_breaker: Option<u64>,
+
+    /// Which of several nominations a controlled agent uses. The default is RFC 8445's rule
+    /// (the nominated pair with the highest priority); [`NominationAcceptance::Latest`] is
+    /// libwebrtc's.
+    pub nomination_acceptance: NominationAcceptance,
+
+    /// The controlling agent's consent checks on the selected pair carry USE-CANDIDATE, as
+    /// libwebrtc's do. Off by default: RFC 8445 Section 7.1.2 asks for the attribute "in order
+    /// to nominate a candidate pair", which is done once (Section 8.1.1), and RFC 7675 asks
+    /// for nothing more than a Binding request. The agent repeats its nomination by itself
+    /// where the peer has shown that it lost it (a role conflict the agent wins after it
+    /// nominated).
+    pub nominate_on_consent_checks: bool,
+
+    /// What a Binding request that fails authentication gets: an error response (RFC 8489
+    /// Section 9.1.3, rate limited; the default) or nothing.
+    pub unauthenticated_requests: UnauthenticatedRequests,
+
+    /// Accept data (DTLS, SRTP) only from the selected pair's remote address. Off by default:
+    /// RFC 8445 Section 12.2 says an agent "SHOULD by default be prepared to receive data on
+    /// any of the candidates provided in the most recent candidate exchange", and the agent
+    /// accepts it from the remote candidate of any valid pair (a pair one of its own checks
+    /// succeeded on). See [`Agent::accepts_data`].
+    pub data_from_selected_pair_only: bool,
+
+    /// Send data on the best valid pair before a pair is selected (RFC 8445 Section 12.1: "An
+    /// ICE agent MAY send data on any valid pair before selected pairs have been produced").
+    /// Off by default: data is sent once a pair is selected.
+    pub send_data_before_nomination: bool,
 }

@@ -169,6 +169,12 @@ impl RTCPeerConnection {
                 .candidates
                 .allow_link_local_remote_candidates,
             remote_address_filter: setting_engine.candidates.remote_address_filter.clone(),
+            tie_breaker: setting_engine.ice.tie_breaker,
+            nomination_acceptance: setting_engine.ice.nomination_acceptance,
+            nominate_on_consent_checks: setting_engine.ice.nominate_on_consent_checks,
+            unauthenticated_requests: setting_engine.ice.unauthenticated_requests,
+            data_from_selected_pair_only: setting_engine.ice.data_from_selected_pair_only,
+            send_data_before_nomination: setting_engine.ice.send_data_before_nomination,
             nat_1to1_ips: setting_engine.candidates.nat_1to1_ips.clone(),
             nat_1to1_ip_candidate_type: match setting_engine.candidates.nat_1to1_ip_candidate_type {
                 RTCIceCandidateType::Srflx => ice::candidate::CandidateType::ServerReflexive,
@@ -303,12 +309,12 @@ impl RTCPeerConnection {
     /// because the description advertises the new credentials and the candidates gathered
     /// so far belong to the old ones (RFC 8839 section 5.4, JSEP section 5.2.3.1: a restart
     /// starts a new gathering phase, whose candidates are signalled as they come).
-    /// The bundle policy in effect (RFC 9429 section 4.1.1): the deprecated `max-bundle` is
-    /// ignored, which leaves the default, unless the application made it an alias of
-    /// `must-bundle`.
+    /// The bundle policy in effect: `max-bundle` (W3C webrtc-pc section 4.2.5) is the policy
+    /// RFC 9429 section 4.1.1 names `must-bundle`, unless the application has it ignored as
+    /// that section's SHOULD says, which leaves the default.
     fn effective_bundle_policy(&self) -> RTCBundlePolicy {
         match self.configuration.bundle_policy {
-            RTCBundlePolicy::MaxBundle if self.setting_engine.max_bundle_as_must_bundle => {
+            RTCBundlePolicy::MaxBundle if !self.setting_engine.max_bundle_ignored => {
                 RTCBundlePolicy::MustBundle
             }
             RTCBundlePolicy::MaxBundle => RTCBundlePolicy::Unspecified,
@@ -449,9 +455,9 @@ impl RTCPeerConnection {
             rtcp_mux_only: self.configuration.rtcp_mux_policy != RTCRtcpMuxPolicy::Negotiate,
             bundle_policy: self.effective_bundle_policy(),
             initial_offer: true,
-            bundle_attributes_in_tagged_section_only: !self
+            bundle_attributes_in_tagged_section_only: self
                 .setting_engine
-                .bundle_attributes_repeated,
+                .bundle_attributes_tagged_only,
             sctp_max_message_size: self.setting_engine.sctp_max_message_size.as_usize(),
             sctp_port: self.sctp_transport().offer_port(),
             sctp_over_tcp: self.offers_sctp_over_tcp(&candidates),
@@ -824,9 +830,9 @@ impl RTCPeerConnection {
             ice_gathering_state: self.ice_transport().ice_gathering_state,
             bundle_policy: self.effective_bundle_policy(),
             initial_offer: false,
-            bundle_attributes_in_tagged_section_only: !self
+            bundle_attributes_in_tagged_section_only: self
                 .setting_engine
-                .bundle_attributes_repeated,
+                .bundle_attributes_tagged_only,
             rtcp_mux_only: self.configuration.rtcp_mux_policy != RTCRtcpMuxPolicy::Negotiate,
             offered_tag_rtcp_mux_only: !include_unmatched
                 && remote_parsed
@@ -1431,7 +1437,7 @@ impl RTCPeerConnection {
             .rtp_transceivers
             .iter()
             .filter(live)
-            .filter(|t| t.sender().is_some() && t.current_direction().has_send())
+            .filter(|t| t.describes_sender() && t.current_direction().has_send())
             .map(|t| t.remote_bandwidth().max_bitrate)
             .collect());
 
@@ -1600,7 +1606,7 @@ impl RTCPeerConnection {
         mids
     }
 
-    fn start_rtp_senders(&mut self) -> Result<()> {
+    pub(super) fn start_rtp_senders(&mut self) -> Result<()> {
         // Collect SSRCs, kinds, mids, rids, encoding indices, rtx_ssrc, and transceiver_id for outbound stream accumulators
         // We do this in two phases to avoid borrow conflicts
         #[allow(clippy::type_complexity)]
@@ -2024,6 +2030,7 @@ impl RTCPeerConnection {
                     // nothing a renegotiation could settle - claiming otherwise re-offers on
                     // every return to a stable signaling state, forever.
                     if transceiver.direction().has_send()
+                        && transceiver.describes_sender()
                         && let Some(sender) = transceiver.sender()
                     {
                         // The stream ids of the section's a=msid lines (one per stream,
@@ -2483,7 +2490,7 @@ impl RTCPeerConnection {
                 let sender = transceiver.sender().as_ref()?;
                 Some((
                     transceiver_id,
-                    sender.track().track_id().clone(),
+                    sender.attached_track()?.track_id().clone(),
                     sender.kind(),
                 ))
             })
@@ -2617,7 +2624,7 @@ impl RTCPeerConnection {
             .as_ref()?;
         Some((
             transceiver_id,
-            sender.track().track_id().clone(),
+            sender.attached_track()?.track_id().clone(),
             sender.kind(),
         ))
     }

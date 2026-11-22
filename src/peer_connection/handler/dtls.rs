@@ -112,6 +112,18 @@ impl<'a> DtlsHandler<'a> {
         else {
             return Ok(());
         };
+        // RFC 9147 section 5.8.2: where ICE has measured the round trip time of the path,
+        // the retransmission timer starts from 1.5 times it.
+        let dtls_handshake_config = match self.selected_pair_round_trip_time() {
+            Some(round_trip_time) => Arc::new(
+                dtls_handshake_config.with_flight_interval(
+                    (round_trip_time + round_trip_time / 2)
+                        .max(crate::peer_connection::transport::dtls::MINIMUM_FLIGHT_INTERVAL),
+                ),
+            ),
+            None => dtls_handshake_config,
+        };
+        self.ctx.dtls_transport.flight_interval = Some(dtls_handshake_config.flight_interval());
         let dtls_endpoint = self
             .ctx
             .dtls_transport
@@ -143,12 +155,24 @@ impl<'a> DtlsHandler<'a> {
         "DtlsHandler"
     }
 
+    /// The round trip time ICE has measured on the selected candidate pair, if it has.
+    fn selected_pair_round_trip_time(&self) -> Option<std::time::Duration> {
+        let pair = self
+            .stats
+            .ice_candidate_pairs
+            .get(&self.stats.transport.selected_candidate_pair_id)?;
+        (pair.current_round_trip_time > 0.0)
+            .then(|| std::time::Duration::try_from_secs_f64(pair.current_round_trip_time).ok())
+            .flatten()
+    }
+
     /// Update stats when DTLS handshake completes
     fn update_dtls_stats_from_profile(
         &mut self,
         srtp_profile: SrtpProtectionProfile,
         peer_certificates: &[Vec<u8>],
         dtls_cipher: Option<String>,
+        version: Option<dtls::config::DtlsVersion>,
     ) -> Result<()> {
         // Update transport DTLS state
         self.stats
@@ -175,9 +199,12 @@ impl<'a> DtlsHandler<'a> {
         self.stats.transport.srtp_cipher = srtp_cipher.to_string();
 
         // webrtc-stats `tlsVersion`: the negotiated version as the uppercase hex of its two
-        // ServerHello bytes; the DTLS stack speaks DTLS 1.2 only (RFC 6347 section 4.1,
-        // `{254, 253}`).
-        self.stats.transport.tls_version = "FEFD".to_string();
+        // bytes: "FEFD" for DTLS 1.2 (RFC 6347 section 4.1, `{254, 253}`), "FEFC" for DTLS
+        // 1.3 (RFC 9147 section 5.3, the value of `supported_versions`).
+        let version = version
+            .unwrap_or(dtls::config::DtlsVersion::Dtls1_2)
+            .protocol_version();
+        self.stats.transport.tls_version = format!("{:02X}{:02X}", version.major, version.minor);
 
         // Update DTLS cipher from the negotiated cipher suite
         if let Some(cipher) = dtls_cipher {
@@ -319,6 +346,7 @@ impl<'a>
             let mut srtp_profile_for_stats: Option<SrtpProtectionProfile> = None;
             let mut peer_certificates_for_stats: Vec<Vec<u8>> = vec![];
             let mut dtls_cipher_for_stats: Option<String> = None;
+            let mut dtls_version_for_stats = None;
 
             let srtp_required = self.ctx.dtls_transport.srtp_required;
             let dtls_endpoint = self
@@ -382,6 +410,7 @@ impl<'a>
                                     // Save DTLS cipher suite for stats
                                     dtls_cipher_for_stats =
                                         state.cipher_suite().map(|cs| cs.to_string());
+                                    dtls_version_for_stats = state.negotiated_version();
 
                                     handshake_complete = Some(srtp_contexts);
                                 }
@@ -443,6 +472,7 @@ impl<'a>
                     srtp_profile,
                     &peer_certificates_for_stats,
                     dtls_cipher_for_stats,
+                    dtls_version_for_stats,
                 )?;
             }
 
@@ -878,6 +908,7 @@ mod tests {
         DtlsHandler::new(&mut context, &mut stats).update_dtls_stats_from_profile(
             SrtpProtectionProfile::Srtp_Aead_Aes_128_Gcm,
             &peer_chain,
+            None,
             None,
         )?;
 

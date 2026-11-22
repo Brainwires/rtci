@@ -374,7 +374,8 @@ fn test_old_generation_consent_requests_are_answered_during_a_restart() {
             "no candidate of the new generation"
         );
 
-        // From another address the old credentials open nothing.
+        // From another address the old credentials open nothing (the restart dropped the
+        // local candidates: the datagram is for no candidate of the agent, and is not answered).
         assert!(deliver(&mut a, now, &old_generation_request(&old_local), REMOTE_B).is_err());
         assert!(sent(&mut a).is_empty());
     }

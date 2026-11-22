@@ -61,7 +61,10 @@ fn test_recvonly_answer_without_track_settles() -> Result<(), Box<dyn std::error
         .build(Instant::now())?;
 
     // The offerer wants to receive only; the answerer never adds a track of its own.
-    offerer.add_transceiver_from_kind(RtpCodecKind::Video, None)?;
+    offerer.add_transceiver_from_kind(
+        RtpCodecKind::Video,
+        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+    )?;
     negotiate(&mut offerer, &mut answerer)?;
 
     // The answerer's transceiver is the shape under test: send-capable, no sender.
@@ -77,9 +80,16 @@ fn test_recvonly_answer_without_track_settles() -> Result<(), Box<dyn std::error
         RTCRtpTransceiverDirection::Recvonly,
         "the transceiver created for a remote m= section is recvonly (W3C)",
     );
+    let sender_id = transceiver
+        .sender()
+        .expect("every transceiver has a sender");
     assert!(
-        transceiver.sender().is_none(),
-        "no local track was added, so the transceiver has no sender",
+        answerer
+            .rtp_sender(sender_id)
+            .expect("sender")
+            .track()
+            .is_none(),
+        "no local track was added, so the sender has no track",
     );
 
     // Drain whatever the initial exchange produced so the count starts clean.

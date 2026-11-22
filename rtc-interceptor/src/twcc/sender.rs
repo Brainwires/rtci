@@ -2,6 +2,7 @@
 
 use super::{flow_ssrcs, stream_supports_twcc};
 use crate::Interceptor;
+use crate::cc::feedback::{CongestionFeedbackFormat, negotiated_congestion_feedback};
 use crate::stream_info::StreamInfo;
 use crate::{Packet, TaggedPacket};
 use sansio::Protocol;
@@ -197,6 +198,15 @@ impl Interceptor for TwccSenderInterceptor {
     /// unnumbered, its bytes are invisible to the receiver's feedback and to the sender's
     /// congestion controller.
     fn bind_local_stream(&mut self, info: &StreamInfo) {
+        // A stream whose feedback is RFC 8888 is reported against its RTP sequence numbers:
+        // numbering it as well would invite a second report of every packet
+        // (RFC 8888 section 6: one congestion control feedback mechanism).
+        if negotiated_congestion_feedback(info) != Some(CongestionFeedbackFormat::TransportCc) {
+            for ssrc in flow_ssrcs(info) {
+                self.streams.remove(&ssrc);
+            }
+            return;
+        }
         if let Some(hdr_ext_id) = stream_supports_twcc(info)
             && hdr_ext_id != 0
         {

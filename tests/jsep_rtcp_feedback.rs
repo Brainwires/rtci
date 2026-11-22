@@ -62,7 +62,10 @@ a=rtpmap:96 VP8/90000
 #[test]
 fn rfc_8888_feedback_is_offered_with_the_wildcard_payload_type() -> TestResult {
     let mut pc = peer(vec![feedback("nack", ""), feedback("ack", "ccfb")])?;
-    pc.add_transceiver_from_kind(RtpCodecKind::Video, None)?;
+    pc.add_transceiver_from_kind(
+        RtpCodecKind::Video,
+        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+    )?;
     let offer = pc.create_offer(None)?;
     assert_eq!(
         feedback_lines(&offer.sdp),

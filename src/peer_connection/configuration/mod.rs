@@ -193,8 +193,8 @@
 //! - **Balanced** - Bundle audio/video separately if peer doesn't support bundling
 //! - **MaxCompat** - Separate transports for each track (maximum compatibility)
 //! - **MustBundle** - Only the first m= section of an initial offer carries a transport
-//! - **MaxBundle** - Deprecated (RFC 9429 section 4.1.1) and ignored unless the setting engine
-//!   makes it an alias of `MustBundle`
+//! - **MaxBundle** - The W3C name of `MustBundle` (RFC 9429 section 4.1.1 deprecates the name;
+//!   the setting engine can have it ignored)
 //!
 //! ## ICE Transport Policy
 //!
@@ -597,8 +597,8 @@ impl RTCConfigurationBuilder {
     ///   each media type is bundle-only
     /// - `MaxCompat`: no m= section is bundle-only
     /// - `MustBundle`: every m= section but the first is bundle-only
-    /// - `MaxBundle`: deprecated and ignored, unless
-    ///   `SettingEngineBuilder::with_max_bundle_as_must_bundle(true)`
+    /// - `MaxBundle`: the W3C name of `MustBundle`; ignored with
+    ///   `SettingEngineBuilder::with_max_bundle_as_must_bundle(false)`
     ///
     /// This engine has a single transport: all m= sections are bundled on one ICE/DTLS
     /// transport whatever the policy. See [`RTCBundlePolicy`].

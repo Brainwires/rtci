@@ -319,3 +319,30 @@ pub(crate) fn certificate_verify_input(from_server: bool, transcript_hash: &[u8]
     input.extend_from_slice(transcript_hash);
     input
 }
+
+/// `TLS-Exporter` for a completed DTLS 1.3 handshake, from its exporter secret.
+pub(crate) fn export_keying_material(
+    crypto: &dyn RTCCrypto,
+    suite: Suite13,
+    exporter_secret: &[u8],
+    label: &str,
+    context: &[u8],
+    length: usize,
+) -> Result<SecretVec> {
+    let empty_hash = crypto.hash(suite.hash(), &[]).map_err(crypto_error)?;
+    let expand = |secret: &[u8], label: &str, context: &[u8], length: usize| {
+        hkdf_expand_label(
+            crypto,
+            suite.hmac(),
+            secret,
+            DTLS13_LABEL_PREFIX,
+            label,
+            context,
+            length,
+        )
+        .map_err(crypto_error)
+    };
+    let secret = expand(exporter_secret, label, &empty_hash, suite.hash_len())?;
+    let context_hash = crypto.hash(suite.hash(), context).map_err(crypto_error)?;
+    expand(secret.as_ref(), "exporter", &context_hash, length)
+}

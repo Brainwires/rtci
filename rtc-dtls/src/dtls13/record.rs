@@ -395,7 +395,7 @@ pub(crate) fn decode_ack(content: &[u8]) -> Result<Vec<RecordNumber>> {
     let mut reader = Reader::new(content);
     let mut numbers = Reader::new(reader.vec16()?);
     reader.finish()?;
-    if numbers.remaining() % 16 != 0 {
+    if !numbers.remaining().is_multiple_of(16) {
         return Err(Error::ErrLengthMismatch);
     }
     let mut record_numbers = Vec::with_capacity(numbers.remaining() / 16);

@@ -79,6 +79,9 @@ impl DTLSConn {
     /// has been queued for the peer where one applies), or the retransmissions ran out. The
     /// association is then failed and stays failed (W3C webrtc 5.5.1 RTCDtlsTransport "failed").
     pub(crate) fn handshake(&mut self, now: Instant) -> Result<()> {
+        if self.v13.is_some() {
+            return self.drive_dtls13(now, false);
+        }
         if self.failed {
             return Err(Error::ErrConnClosed);
         }
@@ -97,6 +100,21 @@ impl DTLSConn {
         if result.is_err() {
             self.fail();
         }
+        result
+    }
+
+    /// Advances the DTLS 1.3 association to `now`: sets the timers that what has happened
+    /// since armed, and with `timeout` acts on those that are due.
+    pub(crate) fn drive_dtls13(&mut self, now: Instant, timeout: bool) -> Result<()> {
+        let Some(v13) = &mut self.v13 else {
+            return Ok(());
+        };
+        let result = if timeout {
+            v13.handle_timeout(now)
+        } else {
+            v13.drive(now)
+        };
+        self.sync_dtls13();
         result
     }
 
@@ -246,6 +264,9 @@ impl DTLSConn {
     /// When this association next needs [`Self::handle_timeout`]: its retransmission timer or,
     /// if sooner, the handshake deadline.
     pub(crate) fn next_timeout(&self) -> Option<Instant> {
+        if let Some(v13) = &self.v13 {
+            return v13.next_timeout();
+        }
         match (self.current_retransmit_timer, self.handshake_deadline()) {
             (Some(timer), Some(deadline)) => Some(timer.min(deadline)),
             (timer, deadline) => timer.or(deadline),
@@ -260,6 +281,9 @@ impl DTLSConn {
     /// `ErrHandshakeTimeout` when the handshake did not complete in the configured time. The
     /// association has then failed.
     pub(crate) fn handle_timeout(&mut self, now: Instant) -> Result<()> {
+        if self.v13.is_some() {
+            return self.drive_dtls13(now, true);
+        }
         if self
             .handshake_deadline()
             .is_some_and(|deadline| now >= deadline)

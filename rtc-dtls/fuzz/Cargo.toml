@@ -227,3 +227,24 @@ path = "fuzz_targets/conn_handle_records.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "dtls13_record_parse"
+path = "fuzz_targets/dtls13_record_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dtls13_handshake_parse"
+path = "fuzz_targets/dtls13_handshake_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dtls13_conn_handle_datagrams"
+path = "fuzz_targets/dtls13_conn_handle_datagrams.rs"
+test = false
+doc = false
+bench = false

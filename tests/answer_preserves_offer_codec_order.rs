@@ -68,7 +68,10 @@ fn test_answer_preserves_offer_codec_order() -> Result<(), Box<dyn std::error::E
         .with_media_engine(video_engine(&answer_codecs))
         .build(Instant::now())?;
 
-    offerer.add_transceiver_from_kind(RtpCodecKind::Video, None)?;
+    offerer.add_transceiver_from_kind(
+        RtpCodecKind::Video,
+        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+    )?;
 
     let offer = offerer.create_offer(None)?;
     let offered = video_format_list(&offer.sdp)

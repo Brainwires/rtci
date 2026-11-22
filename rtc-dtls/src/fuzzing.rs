@@ -480,3 +480,51 @@ mod tests {
         }
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// DTLS 1.3. The harnesses are in `dtls13::fuzz_harness`, where unit tests run them over a
+// fixed corpus too; here they get the deterministic providers and the fixed certificate.
+// ---------------------------------------------------------------------------------------------
+
+/// Parses `data` as the records of a DTLS 1.3 datagram (the first byte chooses the length of
+/// the connection id the receiver expects), and as an ACK.
+pub fn dtls13_record_parse(data: &[u8]) {
+    crate::dtls13::fuzz_harness::record_parse(data);
+}
+
+/// Parses `data` as each DTLS 1.3 handshake message in turn, and negotiates from it as a
+/// ClientHello.
+pub fn dtls13_handshake_parse(data: &[u8]) {
+    let Ok(provider) = crypto::fuzzing::deterministic_provider(3, true) else {
+        return;
+    };
+    let Some(certificate) = deterministic_certificate(&provider) else {
+        return;
+    };
+    crate::dtls13::fuzz_harness::handshake_parse(data, provider, certificate);
+}
+
+/// Runs a DTLS 1.3 handshake between two in-memory endpoints and lets the fuzzer inject
+/// datagrams into either at a point it chooses; see
+/// [`conn_handle_datagrams`](crate::dtls13::fuzz_harness::conn_handle_datagrams) for the
+/// input format.
+pub fn dtls13_conn_handle_datagrams(data: &[u8], start: Instant) {
+    let (Ok(client_provider), Ok(server_provider)) = (
+        crypto::fuzzing::deterministic_provider(1, true),
+        crypto::fuzzing::deterministic_provider(2, true),
+    ) else {
+        return;
+    };
+    let (Some(client_certificate), Some(server_certificate)) = (
+        deterministic_certificate(&client_provider),
+        deterministic_certificate(&server_provider),
+    ) else {
+        return;
+    };
+    crate::dtls13::fuzz_harness::conn_handle_datagrams(
+        data,
+        start,
+        (client_provider, client_certificate),
+        (server_provider, server_certificate),
+    );
+}

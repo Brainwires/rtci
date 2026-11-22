@@ -277,3 +277,65 @@ fn an_unchanged_description_keeps_the_association() -> Result<()> {
     );
     Ok(())
 }
+
+/// The ICE side of the same takeover, when the roles do conflict. ICE roles "persist
+/// throughout the lifetime of the session" (RFC 8445 section 6.1.1): A offered first, so A is
+/// the controlling agent and stays it when the other side offers later. The successor, whose
+/// own ICE session starts with its offer, takes the controlling role as well. Section 7.3.1.1
+/// repairs that with the tiebreakers, and the session comes up whichever of the two is the
+/// larger:
+///
+/// - the successor's: A switches to the controlled role, keeps its selected pair and takes
+///   the successor's nomination of it;
+/// - A's: the successor is told 487 and becomes the controlled agent. A nominated its pair
+///   long before the successor existed, so A nominates that pair again (the successor, as the
+///   DTLS client, starts its handshake when its ICE agent selects a pair: without the repeated
+///   nomination it waited for ever).
+#[test]
+fn a_successor_is_connected_whichever_agent_wins_the_ice_role_conflict() -> Result<()> {
+    for (a_tie_breaker, successor_tie_breaker) in [(2u64, 1u64), (1, 2)] {
+        let what = format!("tiebreakers {a_tie_breaker} (A) and {successor_tie_breaker}");
+        let b_certificate = certificate()?;
+        let mut world = World::new(
+            Peer::new(
+                A,
+                SettingEngineBuilder::new()
+                    .with_ice_tie_breaker(a_tie_breaker)
+                    .build(),
+            )?,
+            peer_b(&b_certificate)?,
+        );
+        // A offers: A is the controlling agent.
+        world.connect()?;
+        world.ping_pong(&what)?;
+
+        let new_certificate = certificate()?;
+        let successor = Peer::with_configuration(
+            B,
+            RTCConfigurationBuilder::new()
+                .with_certificates(vec![new_certificate.clone()])
+                .build(),
+            SettingEngineBuilder::new()
+                .with_ice_credentials(B_UFRAG.to_owned(), B_PWD.to_owned())
+                .with_ice_tie_breaker(successor_tie_breaker)
+                .build(),
+        )?;
+        successor_offers(&mut world, successor, keep)?;
+        world.run(&format!("{what}: the new association"), |peers| {
+            peers.iter().all(|p| p.connected())
+                && peers[1].remote_certificate().is_some()
+                && peers[0].remote_certificate().as_deref()
+                    == Some(new_certificate.dtls_certificate.certificate[0].as_ref())
+        })?;
+        let now = world.now;
+        for i in 0..2 {
+            assert_eq!(
+                world.peers[i].dtls_state(now),
+                RTCDtlsTransportState::Connected,
+                "{what}: peer {i}"
+            );
+            assert!(!world.peers[i].failed(), "{what}: peer {i}");
+        }
+    }
+    Ok(())
+}
