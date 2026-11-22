@@ -471,6 +471,173 @@ fn test_first_answer_that_is_not_stun_fails_the_pairs_of_that_remote_candidate()
     assert!(a.pending_binding_requests.is_empty());
 }
 
+// --- RFC 6544 Sections 4.1, 4.2, 4.5: relayed TCP candidates (RFC 6062 allocations) ---
+
+const RELAYED: &str = "203.0.113.5";
+
+/// A relayed TCP candidate of a TURN TCP allocation (RFC 6062) at `RELAYED:port`.
+fn relayed_tcp(port: u16, tcp_type: TcpType) -> Candidate {
+    let mut c = crate::candidate::candidate_relay::CandidateRelayConfig {
+        base_config: CandidateConfig {
+            network: "tcp".to_owned(),
+            address: RELAYED.to_owned(),
+            port,
+            component: 1,
+            ..Default::default()
+        },
+        rel_addr: "192.168.0.2".to_owned(),
+        rel_port: 40000,
+        url: None,
+    }
+    .new_candidate_relay()
+    .unwrap();
+    c.set_tcp_type(tcp_type);
+    c
+}
+
+/// RFC 6544 Section 4.1: "the agent SHOULD obtain [...] passive relayed candidates [...] it
+/// SHOULD also include an active candidate" (of the relayed address, port 9: Section 4.5); the
+/// application holds the TURN TCP allocation (`rtc_turn` `Relay::connect`, `DataConnection`)
+/// and hands the agent the relayed candidates. Section 6.2: they pair by `tcptype` like host
+/// ones. The active relayed candidate's check goes to the peer's passive candidate on the
+/// relayed path (the application opens it with a Connect and a data connection); a check from
+/// the peer's active side that arrives on the passive relayed candidate (an accepted
+/// ConnectionAttempt's data connection) is answered on that path.
+#[test]
+fn test_relayed_tcp_candidates_pair_by_tcptype_and_check_on_the_relayed_path() {
+    let now = Instant::now();
+    let cfg = AgentConfig {
+        failed_timeout: Some(Duration::ZERO),
+        ..config(true)
+    };
+    let mut a = Agent::new(now, Arc::new(cfg), provider()).unwrap();
+    let passive = relayed_tcp(5000, TcpType::Passive);
+    let active = relayed_tcp(9, TcpType::Active);
+    // Section 4.2: direction-pref 6 (active) and 4 (passive) for relayed candidates, as for
+    // host ones.
+    assert!(active.priority() > passive.priority());
+    a.add_local_candidate(passive).unwrap();
+    a.add_local_candidate(active).unwrap();
+    a.add_remote_candidate(candidate("tcp", "192.168.0.3", 6000, 0, TcpType::Passive))
+        .unwrap();
+    // A signalled active candidate (port 9) is reached as the peer-reflexive candidate its
+    // checks make, as for host candidates.
+    assert!(
+        !a.add_remote_candidate(candidate("tcp", "192.168.0.3", 9, 0, TcpType::Active))
+            .unwrap()
+    );
+    a.start_connectivity_checks(now, true, REMOTE_UFRAG.to_owned(), REMOTE_PWD.to_owned())
+        .unwrap();
+
+    let local = |port: u16| {
+        a.find_local_candidate(addr(&format!("{RELAYED}:{port}")), TransportProtocol::TCP)
+    };
+    let remote =
+        |a: &Agent, port: u16| a.find_remote_candidate(addr(&format!("192.168.0.3:{port}")));
+    let (lp, la) = (local(5000).unwrap(), local(9).unwrap());
+    let rp = remote(&a, 6000).unwrap();
+    assert!(
+        a.find_pair(la, rp).is_some(),
+        "active relayed with remote passive"
+    );
+    assert!(a.find_pair(lp, rp).is_none(), "passive with passive");
+
+    // The active relayed candidate's check: to the peer's passive address, from the relayed
+    // address, over TCP.
+    a.handle_timeout(now + 10 * MS).unwrap();
+    let out: Vec<TaggedBytesMut> = std::iter::from_fn(|| a.poll_write()).collect();
+    let check = out
+        .iter()
+        .find(|t| t.transport.peer_addr == addr("192.168.0.3:6000"))
+        .expect("a check to the passive remote candidate");
+    assert_eq!(check.transport.transport_protocol, TransportProtocol::TCP);
+    assert_eq!(
+        check.transport.local_addr.ip(),
+        addr(&format!("{RELAYED}:9")).ip()
+    );
+    assert!(
+        out.iter()
+            .all(|t| t.transport.peer_addr != addr("192.168.0.3:9")),
+        "nothing goes to an active candidate's port 9"
+    );
+
+    // The peer's check over a data connection the TURN server accepted for the passive
+    // relayed candidate: from the peer's ephemeral port, answered on the same path.
+    let request = peer_request(
+        &a,
+        vec![
+            Box::new(crate::attributes::control::AttrControlled(1)),
+            Box::new(crate::attributes::priority::PriorityAttr(1)),
+        ],
+    );
+    a.handle_read(TaggedBytesMut {
+        now: now + 20 * MS,
+        transport: TransportContext {
+            local_addr: addr(&format!("{RELAYED}:5000")),
+            peer_addr: addr("192.168.0.3:51000"),
+            ecn: None,
+            transport_protocol: TransportProtocol::TCP,
+        },
+        message: BytesMut::from(&request.raw[..]),
+    })
+    .unwrap();
+    let answers: Vec<TaggedBytesMut> = std::iter::from_fn(|| a.poll_write()).collect();
+    let answer = answers
+        .iter()
+        .find(|t| t.transport.peer_addr == addr("192.168.0.3:51000"))
+        .expect("the check is answered");
+    assert_eq!(
+        answer.transport.local_addr,
+        addr(&format!("{RELAYED}:5000"))
+    );
+    assert_eq!(answer.transport.transport_protocol, TransportProtocol::TCP);
+    let mut m = Message {
+        raw: answer.message.to_vec(),
+        ..Message::default()
+    };
+    m.decode().unwrap();
+    assert_eq!(m.typ, BINDING_SUCCESS);
+    // The peer's active side is now a peer-reflexive candidate, paired with the passive
+    // relayed one.
+    let learned = remote(&a, 51000).expect("a peer-reflexive candidate for the peer's connection");
+    assert_eq!(a.remote_candidates[learned].tcp_type(), TcpType::Active);
+    assert!(
+        a.find_pair(lp, learned).is_some(),
+        "passive relayed with the peer's active side"
+    );
+}
+
+/// RFC 6544 Section 4.2: for server-reflexive candidates the direction-pref order is
+/// simultaneous-open (6), then active (4), then passive (2): an active or S-O srflx candidate
+/// can work through a NAT that a passive one cannot.
+#[test]
+fn test_server_reflexive_tcp_direction_preferences() {
+    let srflx = |tcp_type: TcpType| {
+        let mut c = crate::candidate::candidate_server_reflexive::CandidateServerReflexiveConfig {
+            base_config: CandidateConfig {
+                network: "tcp".to_owned(),
+                address: "198.51.100.7".to_owned(),
+                port: 7000,
+                component: 1,
+                ..Default::default()
+            },
+            rel_addr: "192.168.0.2".to_owned(),
+            rel_port: 40000,
+            url: None,
+        }
+        .new_candidate_server_reflexive()
+        .unwrap();
+        c.set_tcp_type(tcp_type);
+        c.priority()
+    };
+    let (so, active, passive) = (
+        srflx(TcpType::SimultaneousOpen),
+        srflx(TcpType::Active),
+        srflx(TcpType::Passive),
+    );
+    assert!(so > active && active > passive, "{so} {active} {passive}");
+}
+
 // --- RFC 8838 Section 13: no candidate after the nomination ---
 
 /// "In all cases, an agent MUST NOT trickle any new candidates within an ICE session after

@@ -10,6 +10,10 @@ Verdicts: `tested` (implemented, and a test that would fail if it broke), `untes
 
 ## Totals per spec
 
+The table is recounted from the files' tables as they stand after the conformance work. The
+sections after it ("What the numbers say", "Top gaps", "Bugs found") describe the audit as
+first made at 8916bc3; each file's rows and notes say what has been done since.
+
 Rows, not sentences: a few rows group several clauses that bind only a server or a spec
 writer, and say so. Behaviour the RFCs state without a BCP 14 keyword ("the agent sets ...")
 is listed too. Where a file counts those separately the "proc" row below carries them;
@@ -17,46 +21,46 @@ is listed too. Where a file counts those separately the "proc" row below carries
 
 | Spec | File | Level | tested | untested | partial | missing | violated | n/a |
 |---|---|---|---|---|---|---|---|---|
-| RFC 8445 ICE | `rfc8445.md` | MUST | 34 | 20 | 33 | 34 | 12 | 23 |
-| | | SHOULD | 6 | 0 | 1 | 11 | 1 | 30 |
-| | | MAY | 4 | 1 | 0 | 5 | 0 | 6 |
-| RFC 8838 trickle ICE | `rfc8838.md` | MUST | 11 | 4 | 5 | 10 | 1 | 3 |
-| | | SHOULD | 0 | 5 | 0 | 5 | 0 | 3 |
+| RFC 8445 ICE | `rfc8445.md` | MUST | 118 | 6 | 9 | 1 | 0 | 22 |
+| | | SHOULD | 16 | 0 | 3 | 2 | 0 | 28 |
+| | | MAY | 6 | 1 | 0 | 3 | 0 | 6 |
+| RFC 8838 trickle ICE | `rfc8838.md` | MUST | 26 | 1 | 4 | 0 | 0 | 3 |
+| | | SHOULD | 5 | 5 | 0 | 0 | 0 | 3 |
 | | | MAY | 5 | 1 | 1 | 0 | 0 | 1 |
 | RFC 8839 SDP for ICE | `rfc8839.md` | MUST | 28 | 17 | 14 | 21 | 3 | 14 |
 | | | SHOULD | 1 | 0 | 1 | 4 | 0 | 2 |
 | | | MAY | 6 | 1 | 0 | 2 | 0 | 3 |
-| RFC 6544 ICE-TCP | `rfc6544.md` | MUST | 16 | 2 | 7 | 2 | 1 | 11 |
-| | | SHOULD | 4 | 1 | 3 | 4 | 0 | 21 |
-| | | MAY | 2 | 1 | 0 | 5 | 0 | 1 |
-| RFC 7675 consent | `rfc7675.md` | MUST | 4 | 3 | 3 | 2 | 1 | 0 |
-| | | SHOULD | 0 | 0 | 1 | 0 | 1 | 2 |
+| RFC 6544 ICE-TCP | `rfc6544.md` | MUST | 22 | 4 | 2 | 1 | 0 | 10 |
+| | | SHOULD | 7 | 1 | 4 | 0 | 0 | 21 |
+| | | MAY | 3 | 1 | 0 | 4 | 0 | 1 |
+| RFC 7675 consent | `rfc7675.md` | MUST | 12 | 1 | 0 | 0 | 0 | 0 |
+| | | SHOULD | 2 | 0 | 0 | 0 | 0 | 2 |
 | | | MAY | 0 | 0 | 0 | 1 | 0 | 1 |
-| RFC 8421 dual stack | `rfc8421.md` | MUST | 0 | 0 | 0 | 1 | 0 | 0 |
-| | | SHOULD | 1 | 0 | 0 | 4 | 0 | 2 |
+| RFC 8421 dual stack | `rfc8421.md` | MUST | 1 | 0 | 0 | 0 | 0 | 0 |
+| | | SHOULD | 4 | 0 | 1 | 0 | 0 | 2 |
 | | | MAY | 0 | 0 | 0 | 0 | 0 | 0 |
-| RFC 8489 STUN | `rfc8489.md` | MUST | 34 | 17 | 22 | 29 | 2 | 15 |
-| | | SHOULD | 5 | 8 | 4 | 3 | 2 | 2 |
-| | | MAY | 3 | 2 | 0 | 3 | 0 | 0 |
-| RFC 5780 NAT discovery | `rfc5780.md` | MUST | 0 | 1 | 1 | 1 | 0 | 1 |
+| RFC 8489 STUN | `rfc8489.md` | MUST | 83 | 7 | 14 | 1 | 0 | 14 |
+| | | SHOULD | 17 | 4 | 1 | 1 | 0 | 1 |
+| | | MAY | 5 | 0 | 0 | 3 | 0 | 0 |
+| RFC 5780 NAT discovery | `rfc5780.md` | MUST | 1 | 0 | 1 | 1 | 0 | 1 |
 | | | SHOULD | 0 | 0 | 0 | 0 | 0 | 0 |
-| | | MAY | 0 | 1 | 0 | 2 | 0 | 0 |
-| RFC 8656 TURN client | `rfc8656.md` | MUST | 13 | 3 | 2 | 9 | 0 | 25 |
-| | | SHOULD | 1 | 3 | 0 | 8 | 0 | 11 |
-| | | MAY | 3 | 2 | 0 | 5 | 0 | 14 |
-| | | proc | 19 | 4 | 7 | 10 | 0 | 0 |
-| RFC 6062 TURN TCP allocations | `rfc6062.md` | MUST | 0 | 0 | 0 | 19 | 0 | 5 |
+| | | MAY | 1 | 0 | 0 | 2 | 0 | 0 |
+| RFC 8656 TURN client | `rfc8656.md` | MUST | 32 | 0 | 0 | 0 | 0 | 20 |
+| | | SHOULD | 12 | 0 | 0 | 1 | 0 | 10 |
+| | | MAY | 12 | 0 | 0 | 0 | 0 | 12 |
+| | | proc | 36 | 1 | 1 | 2 | 0 | 0 |
+| RFC 6062 TURN TCP allocations | `rfc6062.md` | MUST | 19 | 0 | 0 | 0 | 0 | 5 |
 | | | SHOULD | 0 | 0 | 0 | 0 | 0 | 0 |
-| | | MAY | 0 | 0 | 0 | 3 | 0 | 1 |
-| | | proc | 0 | 0 | 0 | 10 | 0 | 0 |
-| mDNS ICE candidates draft -03 | `draft-ietf-mmusic-mdns-ice-candidates.md` | MUST | 4 | 4 | 1 | 0 | 3 | 0 |
-| | | SHOULD | 2 | 2 | 1 | 4 | 1 | 5 |
+| | | MAY | 3 | 0 | 0 | 0 | 0 | 1 |
+| | | proc | 10 | 0 | 0 | 0 | 0 | 0 |
+| mDNS ICE candidates draft -03 | `draft-ietf-mmusic-mdns-ice-candidates.md` | MUST | 9 | 2 | 1 | 0 | 0 | 0 |
+| | | SHOULD | 8 | 0 | 2 | 0 | 0 | 5 |
 | | | MAY | 1 | 1 | 0 | 2 | 0 | 1 |
-| | | proc | 5 | 1 | 2 | 2 | 0 | 0 |
-| RFC 6762 mDNS (parts used) | `rfc6762.md` | MUST | 7 | 14 | 5 | 23 | 5 | 16 |
-| | | SHOULD | 7 | 6 | 0 | 15 | 0 | 10 |
-| | | MAY | 0 | 0 | 0 | 4 | 0 | 2 |
-| | | proc | 1 | 0 | 0 | 0 | 1 | 0 |
+| | | proc | 7 | 1 | 2 | 0 | 0 | 0 |
+| RFC 6762 mDNS (parts used) | `rfc6762.md` | MUST | 58 | 0 | 3 | 0 | 0 | 9 |
+| | | SHOULD | 27 | 0 | 3 | 0 | 0 | 8 |
+| | | MAY | 4 | 0 | 0 | 1 | 0 | 1 |
+| | | proc | 2 | 0 | 0 | 0 | 0 | 0 |
 | RFC 8828 IP handling | `rfc8828.md` | MUST | 0 | 0 | 0 | 0 | 0 | 7 |
 | | | SHOULD | 0 | 0 | 0 | 0 | 0 | 3 |
 | | | MAY | 0 | 0 | 0 | 0 | 0 | 1 |

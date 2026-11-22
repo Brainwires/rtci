@@ -1722,7 +1722,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   place of a peer-reflexive one (it keeps that one's id and pairs) now shows its own type and
   its signalled address.
 - **test**: the four mDNS interop tests share the host's mDNS group, port and names; they run
-  one at a time.
+  one at a time. On a timeout they report the rtc peer's candidates and pairs, and they log
+  the mDNS traffic.
+- **test**: sessions over a simulated lossy, reordering link in virtual time
+  (`tests/lossy_link_rtc2rtc.rs`): nothing fails at 5 % (with reordering) or 10 % loss, and at
+  30 % a peer fails only after 30 s without a Binding success response (RFC 7675 section 5.1).
+  The netem impairment test prints both peers' state changes when it fails.
+- **test**: relayed TCP candidates (RFC 6544 sections 4.1, 4.5 over RFC 6062 allocations) pair
+  by `tcptype` and are checked on the relayed path; server-reflexive TCP direction preferences.
 - **sctp**: an association accepted from the peer's INIT after an earlier one was lost left
   the transport reporting the loss, so every later offer asked for a new `a=sctp-port` and
   replaced the association it had.
