@@ -55,3 +55,17 @@ path = "fuzz_targets/smpte336m_depacketize.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "dependency_descriptor"
+path = "fuzz_targets/dependency_descriptor.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "layer_filters"
+path = "fuzz_targets/layer_filters.rs"
+test = false
+doc = false
+bench = false
