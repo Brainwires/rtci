@@ -2175,3 +2175,6 @@ mod congestion_control_test;
 
 #[path = "partial_reliability_test.rs"]
 mod partial_reliability_test;
+
+#[path = "stream_reconfig_test.rs"]
+mod stream_reconfig_test;
