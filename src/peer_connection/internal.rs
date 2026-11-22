@@ -69,6 +69,28 @@ pub(super) struct LastStableState {
     transport_closed: bool,
 }
 
+/// The transport part of a remote offer, waiting for the local answer: the ICE and DTLS
+/// transports take the offer's parameters (start, restart ICE, set up a new DTLS association,
+/// take its candidates) when the answer is applied, so that a rollback of the offer has nothing
+/// to undo (RFC 9429 section 5.7: "any media that is received is processed according to the
+/// previous local and remote descriptions"). What the answer must already state is staged: the
+/// local ICE credentials of a restart, and the role and `tls-id` of a new DTLS association.
+#[derive(Clone, Debug)]
+pub(super) struct PendingRemoteTransport {
+    /// The offer's ICE username fragment: candidates of that generation reach the agent with
+    /// the answer (they are kept in the remote description meanwhile).
+    pub(super) ufrag: String,
+    /// The offer restarts ICE (or sets a closed transport up again).
+    pub(super) ice_restart: bool,
+    /// The ICE gathering state before this offer staged the restart credentials its answer
+    /// carries; `None` when it staged none.
+    pub(super) staged_restart: Option<RTCIceGatheringState>,
+    /// The DTLS role of the new association the offer asks for, which the answer states.
+    pub(super) new_dtls_role: Option<RTCDtlsRole>,
+    /// This offer staged the answer's new `tls-id`.
+    pub(super) staged_tls_id: bool,
+}
+
 /// See [`RTCPeerConnection::description_snapshot`].
 pub(super) struct DescriptionSnapshot {
     signaling_state: RTCSignalingState,
@@ -87,6 +109,7 @@ pub(super) struct DescriptionSnapshot {
     negotiation_needed_state: NegotiationNeededState,
     is_negotiation_ongoing: bool,
     last_stable_state: Option<LastStableState>,
+    pending_remote_transport: Option<PendingRemoteTransport>,
     events: usize,
 }
 
@@ -323,6 +346,7 @@ impl RTCPeerConnection {
             transport_closed: false,
             identity_assertion: None,
             last_stable_state: None,
+            pending_remote_transport: None,
             negotiation_needed_state: NegotiationNeededState::Empty,
             is_negotiation_ongoing: false,
             always_negotiate_data_channels: false,
@@ -380,6 +404,22 @@ impl RTCPeerConnection {
 
     fn offered_local_candidates(&self) -> Result<Vec<RTCIceCandidate>> {
         if self.ice_transport().has_pending_restart() {
+            // An answer to a restart offer (only an answer has a remote offer pending): the
+            // restart is applied with the answer (`defer_remote_transport`), and keeps the
+            // local candidates unless they are to be discarded; they are the new
+            // generation's, so the answer lists them.
+            let answers_restart = self
+                .pending_remote_transport
+                .as_ref()
+                .is_some_and(|pending| pending.ice_restart);
+            if answers_restart
+                && !self
+                    .setting_engine
+                    .candidates
+                    .discard_local_candidates_during_ice_restart
+            {
+                return self.ice_transport().get_local_candidates();
+            }
             return Ok(Vec::new());
         }
         self.ice_transport().get_local_candidates()
@@ -1058,7 +1098,9 @@ impl RTCPeerConnection {
             (_, RTCSdpType::Rollback) => {
                 self.pending_local_description = None;
                 self.pending_remote_description = None;
-                // Undo what the abandoned offer changed (RFC 9429, Section 5.7).
+                // Undo what the abandoned offer changed (RFC 9429, Section 5.7). Its transport
+                // part was never applied: what it staged for the answer is dropped.
+                self.drop_pending_remote_transport();
                 self.rollback_transceivers()?;
                 self.restore_last_stable_state();
             }
@@ -1160,6 +1202,7 @@ impl RTCPeerConnection {
             negotiation_needed_state: self.negotiation_needed_state,
             is_negotiation_ongoing: self.is_negotiation_ongoing,
             last_stable_state: self.last_stable_state.clone(),
+            pending_remote_transport: self.pending_remote_transport.clone(),
             events: self.pipeline_context.event_outs.len(),
         }
     }
@@ -1183,6 +1226,20 @@ impl RTCPeerConnection {
         self.negotiation_needed_state = snapshot.negotiation_needed_state;
         self.is_negotiation_ongoing = snapshot.is_negotiation_ongoing;
         self.last_stable_state = snapshot.last_stable_state;
+        // What a refused description staged for its answer goes; what was pending before
+        // stays pending.
+        if self
+            .pending_remote_transport
+            .as_ref()
+            .map(|p| (p.staged_restart.is_some(), p.staged_tls_id, &p.ufrag))
+            != snapshot
+                .pending_remote_transport
+                .as_ref()
+                .map(|p| (p.staged_restart.is_some(), p.staged_tls_id, &p.ufrag))
+        {
+            self.drop_pending_remote_transport();
+        }
+        self.pending_remote_transport = snapshot.pending_remote_transport;
         self.pipeline_context.event_outs.truncate(snapshot.events);
         self.pipeline_context
             .interceptor_handler_context
@@ -2430,6 +2487,22 @@ impl RTCPeerConnection {
         self.ice_transport_mut().ice_gathering_state = RTCIceGatheringState::Gathering;
 
         Ok(())
+    }
+
+    /// Drops the transport part of the pending remote offer
+    /// ([`PendingRemoteTransport`]) and what it staged for its answer: the offer was rolled
+    /// back, refused or replaced by another one.
+    pub(super) fn drop_pending_remote_transport(&mut self) {
+        let Some(pending) = self.pending_remote_transport.take() else {
+            return;
+        };
+        if let Some(gathering) = pending.staged_restart {
+            self.ice_transport_mut().discard_restart_credentials();
+            self.ice_transport_mut().ice_gathering_state = gathering;
+        }
+        if pending.staged_tls_id {
+            self.dtls_transport_mut().staged_local_tls_id = None;
+        }
     }
 
     /// Applies a staged ICE restart, restarting the agent's timers at `now`.
