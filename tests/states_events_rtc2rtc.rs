@@ -579,6 +579,86 @@ fn gathering_is_announced_once_per_ice_generation() -> Result<()> {
     Ok(())
 }
 
+/// W3C 5.6 and restartIce: every ICE generation gathers anew and ends anew. Two restarts in a
+/// row (each completed by an answer) give three generations, and each announces "gathering",
+/// its own candidates with its own ufrag, then the empty candidate, "complete" and the null
+/// candidate: what a peer that waits for the end of gathering on a restart (the webrtc 0.17
+/// interop peer) relies on.
+#[test]
+fn each_ice_restart_gathers_and_ends_its_own_generation() -> Result<()> {
+    let now = Instant::now();
+    let mut offerer = RTCPeerConnectionBuilder::new().build(now)?;
+    let mut answerer = RTCPeerConnectionBuilder::new().build(now)?;
+    offerer.create_data_channel("d", None)?;
+    let drain = |pc: &mut RTCPeerConnection| {
+        let mut sequence = Vec::new();
+        while let Some(event) = pc.poll_event() {
+            match &event {
+                RTCPeerConnectionEvent::OnIceCandidateEvent(e) => {
+                    sequence.push(match &e.candidate {
+                        Some(c) if c.end_of_candidates => {
+                            format!("end:{}", c.username_fragment.clone().unwrap_or_default())
+                        }
+                        Some(c) => format!(
+                            "candidate:{}",
+                            c.username_fragment.clone().unwrap_or_default()
+                        ),
+                        None => "null".to_owned(),
+                    })
+                }
+                other => {
+                    if let Some(l) = label(other).filter(|l| l.starts_with("gathering:")) {
+                        sequence.push(l);
+                    }
+                }
+            }
+        }
+        sequence
+    };
+    let mut ufrags = Vec::new();
+    for generation in 0..3 {
+        if generation > 0 {
+            offerer.restart_ice();
+        }
+        let offer = offerer.create_offer(None)?;
+        offerer.set_local_description(now, offer.clone())?;
+        let ufrag = offer
+            .sdp
+            .lines()
+            .find_map(|l| l.strip_prefix("a=ice-ufrag:"))
+            .map(str::to_owned)
+            .expect("ufrag");
+        assert!(
+            !ufrags.contains(&ufrag),
+            "generation {generation} reuses {ufrag}"
+        );
+        ufrags.push(ufrag.clone());
+        assert_eq!(
+            drain(&mut offerer),
+            ["gathering:gathering"],
+            "generation {generation}"
+        );
+        offerer.add_local_candidate(host("10.0.0.1:5000".parse()?)?)?;
+        offerer.add_local_candidate(RTCIceCandidateInit::default())?;
+        assert_eq!(
+            drain(&mut offerer),
+            [
+                format!("candidate:{ufrag}"),
+                format!("end:{ufrag}"),
+                "gathering:complete".to_owned(),
+                "null".to_owned()
+            ],
+            "generation {generation}"
+        );
+        answerer.set_remote_description(now, offer)?;
+        let answer = answerer.create_answer(None)?;
+        answerer.set_local_description(now, answer.clone())?;
+        offerer.set_remote_description(now, answer)?;
+        drain(&mut offerer);
+    }
+    Ok(())
+}
+
 /// W3C restartIce (4.4.2-69 to -71) and the negotiation-needed check's credentials step: the
 /// call raises negotiation-needed, and every offer restarts ICE until an answer has replaced
 /// the credentials, even after an offer was discarded. The new generation gathers anew.
