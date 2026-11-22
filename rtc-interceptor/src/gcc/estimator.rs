@@ -25,6 +25,19 @@ pub const DEFAULT_MIN_BITRATE: f64 = 100_000.0;
 /// Ceiling.
 pub const DEFAULT_MAX_BITRATE: f64 = 100_000_000.0;
 
+/// How long feedback may be missing, while packets are being sent, before the target is cut.
+///
+/// RFC 8888 section 5 has the congestion control algorithm specify its response to lost
+/// feedback, and asks that several consecutive lost feedback packets rapidly reduce the sending
+/// rate; RFC 8836 requirement 10 treats an unexpected lack of backchannel information as
+/// possible over-use. Feedback is sent every 100 ms at most (draft-ietf-rmcat-gcc-02
+/// section 3), so half a second is five reports in a row.
+pub const DEFAULT_FEEDBACK_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// What the target is multiplied by each time [`DEFAULT_FEEDBACK_TIMEOUT`] passes without
+/// feedback.
+pub const FEEDBACK_TIMEOUT_DECREASE: f64 = 0.5;
+
 /// Google Congestion Control.
 ///
 /// # The two halves
@@ -70,6 +83,18 @@ pub struct Gcc {
     arrival_anchor: Option<(Duration, Instant)>,
     /// The newest arrival placed so far.
     newest_arrival: Option<Instant>,
+    /// The range the application configured; `min` and `max` are this, narrowed by the limits
+    /// from outside.
+    configured: (f64, f64),
+    /// When feedback was last read, once any has been.
+    last_feedback: Option<Instant>,
+    /// When a packet was last sent.
+    last_sent: Option<Instant>,
+    /// When the missing-feedback cut next applies: set while packets sent after the last
+    /// feedback are waiting for theirs.
+    feedback_deadline: Option<Instant>,
+    feedback_timeout: Duration,
+    round_trip_time: Option<Duration>,
 }
 
 impl Default for Gcc {
@@ -98,7 +123,27 @@ impl Gcc {
             deltas: 0,
             arrival_anchor: None,
             newest_arrival: None,
+            configured: (min, max),
+            last_feedback: None,
+            last_sent: None,
+            feedback_deadline: None,
+            feedback_timeout: DEFAULT_FEEDBACK_TIMEOUT,
+            round_trip_time: None,
         }
+    }
+
+    /// How long feedback may be missing, while packets are being sent, before the target is
+    /// halved (and halved again each time the same period passes).
+    pub fn with_feedback_timeout(mut self, feedback_timeout: Duration) -> Self {
+        self.feedback_timeout = feedback_timeout;
+        self
+    }
+
+    /// Bring both controllers and the target into the current range.
+    fn apply_range(&mut self) {
+        self.delay_control.set_bounds(self.min, self.max);
+        self.loss_control.set_bounds(self.min, self.max);
+        self.target = self.target.clamp(self.min, self.max);
     }
 
     /// Place an arrival on the receiver's clock onto this endpoint's timeline.
@@ -167,6 +212,75 @@ impl BandwidthEstimator for Gcc {
 
         // Whichever half is more pessimistic wins, clamped once (D3).
         self.target = delay_target.min(loss_target).clamp(self.min, self.max);
+
+        // Feedback arrived: the missing-feedback clock starts again when the next packet
+        // leaves.
+        self.last_feedback = Some(now);
+        self.feedback_deadline = None;
+    }
+
+    fn on_packet_sent(&mut self, now: Instant, _size: usize) {
+        self.last_sent = Some(now);
+        // Only once feedback has been seen is its absence unexpected: a receiver that never
+        // sends any is handled by the receiver-report fallback, not by cutting the rate.
+        if self.last_feedback.is_some() && self.feedback_deadline.is_none() {
+            self.feedback_deadline = Some(now + self.feedback_timeout);
+        }
+    }
+
+    fn on_round_trip_time(&mut self, _now: Instant, round_trip_time: Duration) {
+        self.round_trip_time = Some(round_trip_time);
+        self.delay_control.set_round_trip_time(round_trip_time);
+    }
+
+    fn set_external_bounds(&mut self, min: Option<f64>, max: Option<f64>) {
+        let (configured_min, configured_max) = self.configured;
+        self.max = max.map_or(configured_max, |max| max.min(configured_max));
+        // A limit below the floor wins: the floor is a preference, the limit is not.
+        self.min = min.unwrap_or(configured_min).min(self.max);
+        self.apply_range();
+    }
+
+    fn on_receiver_report(&mut self, now: Instant, fraction_lost: f64) {
+        // No per-packet feedback: the delay-based controller has nothing to run on, and the
+        // loss-based one runs on the fraction lost the receiver reports (section 7).
+        self.loss_control.update_fraction(now, fraction_lost);
+        self.target = self.loss_control.target().clamp(self.min, self.max);
+        self.delay_control.set_target(self.target);
+    }
+
+    fn on_path_change(&mut self, _now: Instant) {
+        // Delay measurements across two paths mean nothing, and neither does where the old
+        // path converged: start the delay side over, at the current target.
+        self.slope = SlopeEstimator::new();
+        self.detector = OveruseDetector::new();
+        self.rate = RateCalculator::default();
+        self.deltas = 0;
+        self.arrival_anchor = None;
+        self.newest_arrival = None;
+        self.delay_control.reset_convergence();
+        self.feedback_deadline = None;
+    }
+
+    fn handle_timeout(&mut self, now: Instant) {
+        // Packets were sent and nothing has been heard about them for a whole timeout: treat
+        // it as over-use. Halve, and again for each further timeout without feedback.
+        while let Some(deadline) = self.feedback_deadline
+            && now >= deadline
+        {
+            self.target = (self.target * FEEDBACK_TIMEOUT_DECREASE).clamp(self.min, self.max);
+            self.delay_control.set_target(self.target);
+            self.loss_control.cap(self.target);
+            // Keep counting only while packets are still going out.
+            self.feedback_deadline = self
+                .last_sent
+                .is_some_and(|sent| sent + self.feedback_timeout > deadline)
+                .then(|| deadline + self.feedback_timeout);
+        }
+    }
+
+    fn poll_timeout(&self) -> Option<Instant> {
+        self.feedback_deadline
     }
 
     fn target_bitrate(&self) -> f64 {
@@ -178,7 +292,7 @@ impl BandwidthEstimator for Gcc {
             delay_based_bitrate: Some(self.delay_control.target()),
             loss_based_bitrate: Some(self.loss_control.target()),
             packet_loss: self.loss_control.average_loss(),
-            round_trip_time: None,
+            round_trip_time: self.round_trip_time,
         }
     }
 }

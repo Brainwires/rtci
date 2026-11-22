@@ -225,7 +225,8 @@ impl<P: Interceptor> GccInterceptor<P> {
 
     /// Intercept incoming TWCC feedback RTCP and update the bandwidth estimate.
     #[overrides]
-    fn handle_read(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
+    fn handle_read(&mut self, mut msg: TaggedPacket) -> Result<(), Self::Error> {
+        let mut processed = false;
         if let Packet::Rtcp(ref rtcp_pkts) = msg.message.packet {
             let now = msg.now;
             for fb in rtcp_pkts
@@ -233,7 +234,21 @@ impl<P: Interceptor> GccInterceptor<P> {
                 .filter_map(|pkt| pkt.as_any().downcast_ref::<TransportLayerCc>())
             {
                 self.process_feedback(fb, now);
+                processed = true;
             }
+        }
+        // The estimate rides out on the feedback that produced it, so a pacer in the chain
+        // (the standard interceptor set installs one) releases at this estimator's rate.
+        if processed
+            && let Some(bits_per_second) = self
+                .shared
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .target_bitrate_bps
+        {
+            msg.message.add(crate::Attribute::TargetBitrateChanged {
+                bits_per_second: f64::from(bits_per_second),
+            });
         }
         self.inner.handle_read(msg)
     }
@@ -517,6 +532,20 @@ mod tests {
             handle.target_bitrate_bps().is_some(),
             "should have an estimate after feedback"
         );
+
+        // The estimate rides out on the feedback packet, so a pacer in the chain follows it.
+        let feedback = chain.poll_read().expect("the feedback carries on");
+        let announced = match feedback
+            .message
+            .get(&crate::Attribute::TargetBitrateChanged {
+                bits_per_second: 0.0,
+            }) {
+            Some(crate::Attribute::TargetBitrateChanged { bits_per_second }) => {
+                Some(*bits_per_second as u32)
+            }
+            _ => None,
+        };
+        assert_eq!(handle.target_bitrate_bps(), announced);
     }
 
     #[test]

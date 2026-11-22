@@ -228,6 +228,7 @@ pub(crate) mod registry;
 
 pub(crate) mod adaptive_jitter_buffer;
 pub(crate) mod cc;
+pub(crate) mod circuit_breaker;
 pub(crate) mod flexfec;
 pub(crate) mod gcc;
 pub(crate) mod intervalpli;
@@ -251,8 +252,15 @@ pub use adaptive_jitter_buffer::{
 };
 pub use cc::estimator::{BandwidthEstimator, ConstantBitrate, EstimatorStats};
 pub use cc::interceptor::{
-    CongestionControlBuilder, CongestionControlInterceptor,
-    DEFAULT_PRUNE_HORIZON as CONGESTION_CONTROL_DEFAULT_PRUNE_HORIZON,
+    CongestionControlBuilder, CongestionControlHandle, CongestionControlInterceptor,
+    DEFAULT_PRUNE_HORIZON as CONGESTION_CONTROL_DEFAULT_PRUNE_HORIZON, REMB_TIMEOUT,
+};
+pub use cc::tmmbr::{TMMBR_OWNER_TIMEOUT, TmmbEntry};
+pub use circuit_breaker::{
+    CircuitBreakerBuilder, CircuitBreakerHandle, CircuitBreakerInterceptor, CircuitBreakerReason,
+    CircuitBreakerState,
+    DEFAULT_NON_REPORTING_THRESHOLD as CIRCUIT_BREAKER_NON_REPORTING_THRESHOLD,
+    DEFAULT_RTCP_INTERVAL as CIRCUIT_BREAKER_RTCP_INTERVAL, MediaUsability,
 };
 pub use flexfec::bit_array::BitArray;
 pub use flexfec::coverage::{MAX_FEC_PACKETS, MAX_MEDIA_PACKETS, ProtectionCoverage};
@@ -302,7 +310,9 @@ pub use keyframe::KeyFrameRequestInterceptor;
 pub use nack::generator::{NackGeneratorBuilder, NackGeneratorInterceptor};
 pub use nack::responder::{NackResponderBuilder, NackResponderInterceptor};
 pub use noop::NoopInterceptor;
-pub use pacing::pacer::{MIN_BURST_BITS as PACER_MIN_BURST_BITS, Pacer};
+pub use pacing::pacer::{
+    BURST_TIME as PACER_BURST_TIME, MIN_BURST_BITS as PACER_MIN_BURST_BITS, Pacer,
+};
 pub use pacing::sender::{
     DEFAULT_BITRATE as PACER_DEFAULT_BITRATE, DEFAULT_QUEUE_LIMIT as PACER_DEFAULT_QUEUE_LIMIT,
     PacerBuilder, PacerInterceptor,
