@@ -115,6 +115,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and a window smaller than a packet is advertised as closed (RFC 9260 section 6.2, silly
   window syndrome avoidance).
 
+- **sctp**: PR-SCTP is announced with the Forward-TSN-Supported parameter (RFC 3758 section
+  3.3) in INIT and INIT ACK, beside chunk 192 in Supported Extensions; a peer that reports
+  the parameter as unrecognized gets no FORWARD TSN.
+- **sctp**: a received FORWARD TSN is applied whatever this side's own setting for the stream
+  (RFC 3758 section 3.6). On a stream this side sends ordered, abandoned unordered fragments
+  stayed in the receive buffer for the life of the stream; on a stream this side sends
+  unordered, the stream sequence numbers were ignored and ordered data stayed held back.
+- **sctp**: an ordered message whose lifetime ran out while it waited for the window is not
+  sent (RFC 3758 section 4.1); only unordered ones were dropped.
+- **sctp**: a FORWARD TSN fits one packet (RFC 3758 section 3.5, C4): with abandoned messages
+  on more streams than fit, it covers the TSNs whose streams do and the next one goes on.
+
 ### Features
 
 - **sctp**: `Stream::write_sctp_with_ppid` and `Chunks::ppid` for a Payload Protocol
@@ -131,6 +143,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **sctp**: `TransportConfig::with_slow_start_growth_limit` (L of RFC 9260 section 7.2.1,
   default 1), `with_max_burst` (Max.Burst, off by default), `with_sack_delay` (200 ms by
   default, at most 500 ms).
+- **sctp**: `Association::partial_reliability` (whether PR-SCTP is in use),
+  `TransportConfig::with_partial_reliability`.
 - **fuzz**: `rtc-sctp` targets `association_handle_chunks` (an established association fed
   chunks, timers running) and `chunk_chunk_unknown_unmarshal`.
 
