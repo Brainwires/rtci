@@ -55,34 +55,6 @@ impl<'a> IceHandler<'a> {
     pub(crate) fn name(&self) -> &'static str {
         "IceHandler"
     }
-
-    /// Makes the cached stats key name the pair the agent has selected *now*.
-    ///
-    /// The key is otherwise set when `SelectedCandidatePairChange` is polled, which is after
-    /// the agent selected the pair: a datagram written or read in between (the first of the
-    /// DTLS handshake, typically) was counted on no pair, or on the pair just left. Comparing
-    /// the two ids costs no allocation; the key is formatted only when the pair changed.
-    /// Without a selected pair (an ICE restart in progress) the last key stays.
-    fn sync_selected_pair_key(&mut self) {
-        let Some((local, remote)) = self.ctx.ice_transport.agent.get_selected_candidate_pair()
-        else {
-            return;
-        };
-        let current = self.ctx.selected_pair_key.as_deref().is_some_and(|key| {
-            key.strip_prefix("RTCIceCandidatePair_")
-                .and_then(|rest| rest.strip_prefix(local.id()))
-                .and_then(|rest| rest.strip_prefix('_'))
-                == Some(remote.id())
-        });
-        if current {
-            return;
-        }
-        let key = format!("RTCIceCandidatePair_{}_{}", local.id(), remote.id());
-        let (local_id, remote_id) = (local.id().to_owned(), remote.id().to_owned());
-        self.stats
-            .get_or_create_candidate_pair(&local_id, &remote_id);
-        self.ctx.selected_pair_key = Some(key);
-    }
 }
 
 impl<'a>
@@ -124,7 +96,6 @@ impl<'a>
             // the accumulator up via the cached key (set on the last
             // SelectedCandidatePairChange) to avoid allocating the key per packet.
             let bytes = msg.message.len();
-            self.sync_selected_pair_key();
             if let Some(key) = &self.ctx.selected_pair_key
                 && let Some(pair) = self.stats.ice_candidate_pairs.get_mut(key)
             {
@@ -187,7 +158,6 @@ impl<'a>
             // Track packets/bytes sent on the selected candidate pair. Look the
             // accumulator up via the cached key to avoid allocating it per packet.
             let bytes = msg.message.len();
-            self.sync_selected_pair_key();
             if let Some(key) = &self.ctx.selected_pair_key
                 && let Some(pair) = self.stats.ice_candidate_pairs.get_mut(key)
             {
