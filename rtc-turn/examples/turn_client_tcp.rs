@@ -98,6 +98,7 @@ fn main() -> Result<()> {
         software: String::new(),
         rto_in_ms: 0,
         allocation_refresh_interval_cap: None,
+        ..Default::default()
     };
 
     let crypto_provider = crypto::default_provider()

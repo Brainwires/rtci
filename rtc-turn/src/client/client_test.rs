@@ -18,6 +18,7 @@ fn create_test_client_with_turn_server() -> Result<(UdpSocket, Client)> {
             software: "TEST SOFTWARE".to_owned(),
             rto_in_ms: 0,
             allocation_refresh_interval_cap: None,
+            ..Default::default()
         },
         test_crypto_provider(),
     )?;
@@ -45,6 +46,7 @@ fn create_listening_test_client(rto_in_ms: u64) -> Result<(UdpSocket, Client)> {
             software: "TEST SOFTWARE".to_owned(),
             rto_in_ms,
             allocation_refresh_interval_cap: None,
+            ..Default::default()
         },
         test_crypto_provider(),
     )?;
@@ -67,6 +69,7 @@ fn create_listening_test_client_with_stun_serv() -> Result<(UdpSocket, Client)> 
             software: "TEST SOFTWARE".to_owned(),
             rto_in_ms: 0,
             allocation_refresh_interval_cap: None,
+            ..Default::default()
         },
         test_crypto_provider(),
     )?;
@@ -301,6 +304,7 @@ fn test_relay_refresh_timers_run_on_injected_time() -> Result<()> {
             software: "TEST SOFTWARE".to_owned(),
             rto_in_ms: 0,
             allocation_refresh_interval_cap: None,
+            ..Default::default()
         },
         test_crypto_provider(),
     )?;
@@ -313,8 +317,7 @@ fn test_relay_refresh_timers_run_on_injected_time() -> Result<()> {
         RelayState::new(
             t(0),
             relayed_addr,
-            vec![0u8; 16],
-            Nonce::new(ATTR_NONCE, "nonce".to_owned()),
+            credential::Credential::established(),
             lifetime,
             None,
         ),
@@ -382,6 +385,7 @@ fn test_allocation_refresh_interval_cap_is_applied() -> Result<()> {
             software: "TEST SOFTWARE".to_owned(),
             rto_in_ms: 0,
             allocation_refresh_interval_cap: Some(Duration::from_secs(30)),
+            ..Default::default()
         },
         test_crypto_provider(),
     )?;
@@ -399,9 +403,8 @@ fn test_allocation_refresh_interval_cap_is_applied() -> Result<()> {
     ])?;
     client.handle_allocate_response(
         base,
-        response,
+        Response::unchecked(&response),
         allocation::AllocateState::authenticated(),
-        true,
     )?;
 
     for expected_secs in [30, 60, 90, 120, 150, 180] {
@@ -446,6 +449,7 @@ fn test_overdue_relay_refreshes_are_rescheduled_from_now() -> Result<()> {
             software: "TEST SOFTWARE".to_owned(),
             rto_in_ms: 0,
             allocation_refresh_interval_cap: None,
+            ..Default::default()
         },
         test_crypto_provider(),
     )?;
@@ -456,8 +460,7 @@ fn test_overdue_relay_refreshes_are_rescheduled_from_now() -> Result<()> {
         RelayState::new(
             t(0),
             relayed_addr,
-            vec![0u8; 16],
-            Nonce::new(ATTR_NONCE, "nonce".to_owned()),
+            credential::Credential::established(),
             Duration::from_secs(600),
             None,
         ),
@@ -513,6 +516,7 @@ fn test_zero_lifetime_relay_does_not_freeze_its_deadline() -> Result<()> {
             software: "TEST SOFTWARE".to_owned(),
             rto_in_ms: 0,
             allocation_refresh_interval_cap: None,
+            ..Default::default()
         },
         test_crypto_provider(),
     )?;
@@ -523,8 +527,7 @@ fn test_zero_lifetime_relay_does_not_freeze_its_deadline() -> Result<()> {
         RelayState::new(
             t(0),
             relayed_addr,
-            vec![0u8; 16],
-            Nonce::new(ATTR_NONCE, "nonce".to_owned()),
+            credential::Credential::established(),
             Duration::from_secs(600),
             None,
         ),
@@ -572,6 +575,7 @@ fn test_refresh_response_reschedules_shorter_lifetime_from_response_time() -> Re
             software: "TEST SOFTWARE".to_owned(),
             rto_in_ms: 0,
             allocation_refresh_interval_cap: None,
+            ..Default::default()
         },
         test_crypto_provider(),
     )?;
@@ -581,8 +585,7 @@ fn test_refresh_response_reschedules_shorter_lifetime_from_response_time() -> Re
         RelayState::new(
             t(0),
             relayed_addr,
-            vec![0u8; 16],
-            Nonce::new(ATTR_NONCE, "nonce".to_owned()),
+            credential::Credential::established(),
             Duration::from_secs(600),
             None,
         ),
@@ -624,6 +627,7 @@ fn test_refresh_response_reschedule_applies_interval_cap() -> Result<()> {
             software: "TEST SOFTWARE".to_owned(),
             rto_in_ms: 0,
             allocation_refresh_interval_cap: Some(Duration::from_secs(20)),
+            ..Default::default()
         },
         test_crypto_provider(),
     )?;
@@ -633,8 +637,7 @@ fn test_refresh_response_reschedule_applies_interval_cap() -> Result<()> {
         RelayState::new(
             t(0),
             relayed_addr,
-            vec![0u8; 16],
-            Nonce::new(ATTR_NONCE, "nonce".to_owned()),
+            credential::Credential::established(),
             Duration::from_secs(600),
             Some(Duration::from_secs(20)),
         ),
@@ -682,6 +685,7 @@ fn test_zero_lifetime_response_drops_the_relay() -> Result<()> {
             software: "TEST SOFTWARE".to_owned(),
             rto_in_ms: 0,
             allocation_refresh_interval_cap: None,
+            ..Default::default()
         },
         test_crypto_provider(),
     )?;
@@ -692,8 +696,7 @@ fn test_zero_lifetime_response_drops_the_relay() -> Result<()> {
         RelayState::new(
             t(0),
             relayed_addr,
-            vec![0u8; 16],
-            Nonce::new(ATTR_NONCE, "nonce".to_owned()),
+            credential::Credential::established(),
             Duration::from_secs(600),
             None,
         ),
@@ -750,6 +753,7 @@ fn test_zero_lifetime_allocate_response_is_an_error() -> Result<()> {
             software: "TEST SOFTWARE".to_owned(),
             rto_in_ms: 0,
             allocation_refresh_interval_cap: None,
+            ..Default::default()
         },
         test_crypto_provider(),
     )?;
@@ -765,7 +769,11 @@ fn test_zero_lifetime_allocate_response_is_an_error() -> Result<()> {
         Box::new(crate::proto::lifetime::Lifetime(Duration::from_secs(0))),
     ])?;
 
-    client.handle_allocate_response(base, res, allocation::AllocateState::authenticated(), true)?;
+    client.handle_allocate_response(
+        base,
+        Response::unchecked(&res),
+        allocation::AllocateState::authenticated(),
+    )?;
 
     assert!(
         client.relays.is_empty(),
@@ -1357,7 +1365,7 @@ fn test_responses_without_valid_integrity_are_dropped() -> Result<()> {
         client
             .relays
             .get(&relayed_addr)
-            .map(|r| r.nonce.text.clone()),
+            .and_then(|r| r.credential.nonce().map(str::to_owned)),
         Some("fresh".to_owned())
     );
 

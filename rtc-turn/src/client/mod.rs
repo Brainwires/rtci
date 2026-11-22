@@ -26,6 +26,10 @@ mod client_retry_test;
 #[cfg(test)]
 mod client_stale_nonce_test;
 #[cfg(test)]
+mod client_stun8489_config_test;
+#[cfg(test)]
+mod client_stun8489_test;
+#[cfg(test)]
 mod client_tcp_allocation_test;
 #[cfg(test)]
 mod client_test;
@@ -35,6 +39,7 @@ mod test_server;
 mod allocation;
 /// Channel bindings, which replace the 36-byte Data indication header with a 4-byte one.
 pub mod binding;
+pub(crate) mod credential;
 /// The data connections of a TCP allocation (RFC 6062).
 pub mod data_connection;
 mod error;
@@ -54,14 +59,22 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use stun::alternate::RedirectGuard;
+/// The redirection of an authenticated 300 (Try Alternate): see
+/// [`ErrorResponse::try_alternate`] and [`Client::follow_alternate`].
+pub use stun::alternate::TryAlternate;
 use stun::attributes::*;
+#[cfg(test)]
 use stun::integrity::*;
 use stun::message::*;
 use stun::textattrs::*;
+use stun::timer::Schedule;
+use stun::validated::{Rejection, ValidatedMessage, Validator};
 use stun::xoraddr::*;
 
 use allocation::FamilyBlock;
 pub use allocation::{AllocateOptions, RelayTransport};
+use credential::{Credential, Login};
 pub use error::{ErrorResponse, RequestError};
 use transaction::*;
 
@@ -81,7 +94,150 @@ use shared::{TransportContext, TransportMessage, TransportProtocol};
 use stun::error_code::ErrorCodeAttribute;
 use stun::fingerprint::FINGERPRINT;
 
-const DEFAULT_RTO_IN_MS: u64 = 200;
+/// The comprehension-required attributes the TURN client understands in what it receives:
+/// those of STUN, of TURN (RFC 8656 §18) and of TCP allocations (RFC 6062 §6.2), and the three
+/// of RFC 3489 that old STUN servers still put in a Binding response. A message with any other
+/// is not processed (RFC 8489 §6.3.2 to §6.3.4).
+pub(crate) const KNOWN_ATTRIBUTES: &[AttrType] = &[
+    ATTR_MAPPED_ADDRESS,
+    ATTR_USERNAME,
+    ATTR_MESSAGE_INTEGRITY,
+    ATTR_ERROR_CODE,
+    ATTR_UNKNOWN_ATTRIBUTES,
+    ATTR_REALM,
+    ATTR_NONCE,
+    ATTR_MESSAGE_INTEGRITY_SHA256,
+    ATTR_PASSWORD_ALGORITHM,
+    ATTR_USER_HASH,
+    ATTR_XORMAPPED_ADDRESS,
+    ATTR_CHANNEL_NUMBER,
+    ATTR_LIFETIME,
+    ATTR_XOR_PEER_ADDRESS,
+    ATTR_DATA,
+    ATTR_XOR_RELAYED_ADDRESS,
+    ATTR_REQUESTED_ADDRESS_FAMILY,
+    ATTR_EVEN_PORT,
+    ATTR_REQUESTED_TRANSPORT,
+    ATTR_DONT_FRAGMENT,
+    ATTR_RESERVATION_TOKEN,
+    ATTR_CONNECTION_ID,
+    ATTR_SOURCE_ADDRESS,
+    ATTR_CHANGED_ADDRESS,
+    AttrType(0x000b),
+];
+
+/// The validator every received STUN message goes through.
+pub(crate) fn validator() -> Validator<'static> {
+    Validator::new().known_attributes(KNOWN_ATTRIBUTES)
+}
+
+/// A response that passed the checks, and the request it answers.
+pub(crate) struct Response {
+    /// The response, reduced to the attributes ahead of its integrity attribute: nothing
+    /// that follows it is read (RFC 8489 §9).
+    pub(crate) msg: ValidatedMessage,
+    /// The request as it was sent.
+    pub(crate) request: BytesMut,
+}
+
+impl Response {
+    /// The request the response answers, decoded.
+    pub(crate) fn request(&self) -> Message {
+        let mut request = Message::new();
+        request.raw = self.request.to_vec();
+        // What the client built decodes; if it does not, the request counts as unsigned.
+        let _ = request.decode();
+        request
+    }
+
+    /// The error of an error response.
+    pub(crate) fn error(&self) -> RequestError {
+        RequestError::of(&self.msg)
+    }
+
+    /// A response nothing checked, to a request without a credential: for tests that hand a
+    /// handler its response directly.
+    #[cfg(test)]
+    pub(crate) fn unchecked(msg: &Message) -> Self {
+        Self {
+            msg: Validator::new()
+                .unauthenticated(msg)
+                .expect("the response has no wrong FINGERPRINT"),
+            request: BytesMut::new(),
+        }
+    }
+}
+
+impl std::ops::Deref for Response {
+    type Target = Message;
+
+    fn deref(&self) -> &Message {
+        &self.msg
+    }
+}
+
+/// Why a transaction ended without a response the client could act on.
+pub(crate) enum Failure {
+    /// Nothing arrived in time.
+    Timeout,
+    /// Every response that arrived failed the integrity check, or, over a reliable
+    /// transport, one did (RFC 8489 §9.2.5).
+    IntegrityViolation,
+    /// The response carried comprehension-required attributes the client does not know
+    /// (RFC 8489 §6.3.3, §6.3.4).
+    UnknownAttributes(Vec<AttrType>),
+}
+
+impl Failure {
+    fn error(&self) -> Error {
+        match self {
+            Self::Timeout => Error::ErrTimeout,
+            Self::IntegrityViolation => Error::ErrIntegrityMismatch,
+            Self::UnknownAttributes(unknown) => {
+                Error::Other(Rejection::UnknownAttributes(unknown.clone()).to_string())
+            }
+        }
+    }
+}
+
+/// The retransmission timer of the client's requests (RFC 8489 §6.2), the one `rtc-stun` has
+/// ([`stun::timer`]). The default is the RFC's.
+///
+/// Over UDP a request is sent again after RTO, then after twice that, and so on, `rc` times in
+/// all, and its transaction fails `rm` x RTO after the last: with the defaults and an RTO of
+/// 500 ms, at 0, 0.5, 1.5, 3.5, 7.5, 15.5 and 31.5 s, failing at 39.5 s. Over TCP or TLS it is
+/// sent once and fails after `ti`. The initial RTO is [`ClientConfig::rto_in_ms`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetransmissionConfig {
+    /// Rc: how many times a request is sent over UDP (RFC 8489 §6.2.1; 7). Values below 1
+    /// are 1.
+    pub rc: u32,
+    /// Rm: the transaction fails Rm x RTO after the last request (RFC 8489 §6.2.1; 16).
+    pub rm: u32,
+    /// Ti: how long a request waits over a reliable transport (RFC 8489 §6.2.2; 39.5 s).
+    pub ti: Duration,
+    /// Whether the RTO follows the server's round-trip times as RFC 6298 computes it, never
+    /// below the initial RTO, kept per server and dropped after ten minutes without a
+    /// transaction (RFC 8489 §6.2.1; on). Off: every transaction starts at the initial RTO.
+    pub rto_estimation: bool,
+    /// Most transactions outstanding to one server (RFC 8489 §6.2; 10). A request past the
+    /// limit is sent when one of them ends. `0` lifts the limit, for an application that
+    /// limits its rate some other way.
+    pub max_outstanding_transactions: usize,
+}
+
+impl Default for RetransmissionConfig {
+    fn default() -> Self {
+        let schedule = Schedule::default();
+        Self {
+            rc: schedule.rc,
+            rm: schedule.rm,
+            ti: schedule.ti,
+            rto_estimation: true,
+            max_outstanding_transactions: stun::timer::DEFAULT_MAX_OUTSTANDING,
+        }
+    }
+}
 const MAX_DATA_BUFFER_SIZE: usize = u16::MAX as usize; // message size limit for Chromium
 const MAX_READ_QUEUE_SIZE: usize = 1024;
 
@@ -104,6 +260,13 @@ pub type PeerAddr = SocketAddr;
 #[non_exhaustive]
 pub enum Event {
     /// A request exhausted its retransmissions without a response.
+    ///
+    /// A request whose every response was discarded for its integrity, or whose response
+    /// carried attributes the client must but does not understand, does not end here: it is
+    /// reported by the error event of its kind ([`Event::AllocateError`],
+    /// [`Event::RefreshError`], ...) with [`RequestError::Failed`], an
+    /// `ErrIntegrityMismatch` in the first case (RFC 8489 §9.2.5: an integrity violation is
+    /// not a timeout).
     TransactionTimeout(TransactionId),
 
     /// A STUN Binding succeeded, reporting this client's server-reflexive address.
@@ -165,21 +328,6 @@ pub enum Event {
     DataIndicationOrChannelData(Option<ChannelNumber>, PeerAddr, BytesMut),
 }
 
-enum AllocateState {
-    Attempting,
-    Requesting(TextAttribute),
-}
-
-//              interval [msec]
-// 0: 0 ms      +500
-// 1: 500 ms	+1000
-// 2: 1500 ms   +2000
-// 3: 3500 ms   +4000
-// 4: 7500 ms   +8000
-// 5: 15500 ms  +16000
-// 6: 31500 ms  +32000
-// -: 63500 ms  failed
-
 /// ClientConfig is a bag of config parameters for Client.
 pub struct ClientConfig {
     /// The STUN server to use for Binding requests, as `host:port`. May be empty.
@@ -190,16 +338,27 @@ pub struct ClientConfig {
     pub local_addr: SocketAddr,
     /// Whether to reach the server over UDP or TCP.
     pub transport_protocol: TransportProtocol,
-    /// The long-term credential username for the TURN server.
+    /// The long-term credential username for the TURN server. It is sent as USERNAME, or
+    /// hashed as USERHASH when the server's nonce says it supports that (RFC 8489 §9.2.5).
     pub username: String,
     /// The long-term credential password.
     pub password: String,
-    /// The authentication realm, used in the `MESSAGE-INTEGRITY` computation.
+    /// Not used: the realm is the one the server names in its 401 (RFC 8489 §9.2.5).
     pub realm: String,
     /// An optional `SOFTWARE` attribute value, sent for diagnostics.
     pub software: String,
-    /// The initial retransmission timeout in milliseconds; each retry doubles it.
+    /// The initial retransmission timeout in milliseconds; each retransmission doubles the
+    /// wait. `0` selects the default, the 500 ms RFC 8489 §6.2.1 asks for at least.
     pub rto_in_ms: u64,
+    /// The rest of the retransmission timer: Rc, Rm, Ti, the RTO estimate and the number of
+    /// outstanding transactions.
+    pub retransmission: RetransmissionConfig,
+    /// The password algorithms accepted from the server's PASSWORD-ALGORITHMS
+    /// (`stun::password_algorithm`), the first of the server's list that is in here being
+    /// used. Empty for all the client implements, SHA-256 and MD5. Without MD5, a server
+    /// that offers no list (RFC 5389) or MD5 alone is not authenticated to: RFC 8489
+    /// §18.5.1.1 keeps MD5 for such servers only.
+    pub password_algorithms: Vec<u16>,
     /// Optional upper bound for the interval between allocation Refresh requests.
     ///
     /// By default, allocations are refreshed at half the lifetime advertised by the server.
@@ -220,6 +379,8 @@ impl Default for ClientConfig {
             realm: "".to_string(),
             software: "".to_string(),
             rto_in_ms: 0,
+            retransmission: RetransmissionConfig::default(),
+            password_algorithms: vec![],
             allocation_refresh_interval_cap: None,
         }
     }
@@ -232,12 +393,12 @@ pub struct Client {
     turn_serv_addr: Option<SocketAddr>,
     local_addr: SocketAddr,
     transport_protocol: TransportProtocol,
-    username: Username,
-    password: String,
-    realm: Realm,
+    /// What the application authenticates with; each allocation has its own state of it.
+    login: Arc<Login>,
     software: Software,
     tr_map: TransactionMap,
-    rto_in_ms: u64,
+    /// The TURN servers an Allocate was sent to, against redirection loops (RFC 8489 §10).
+    redirects: RedirectGuard,
     allocation_refresh_interval_cap: Option<Duration>,
 
     /// Allocations, each under the first relayed address it was given.
@@ -279,16 +440,27 @@ impl Client {
             turn_serv_addr,
             local_addr: config.local_addr,
             transport_protocol: config.transport_protocol,
-            username: Username::new(ATTR_USERNAME, config.username),
-            password: config.password,
-            realm: Realm::new(ATTR_REALM, config.realm),
+            login: Arc::new(Login {
+                username: config.username,
+                password: config.password,
+                password_algorithms: config.password_algorithms,
+            }),
             software: Software::new(ATTR_SOFTWARE, config.software),
-            tr_map: TransactionMap::new(),
-            rto_in_ms: if config.rto_in_ms != 0 {
-                config.rto_in_ms
-            } else {
-                DEFAULT_RTO_IN_MS
-            },
+            tr_map: TransactionMap::new(TimerSettings {
+                initial_rto: if config.rto_in_ms != 0 {
+                    Duration::from_millis(config.rto_in_ms)
+                } else {
+                    stun::timer::DEFAULT_RTO
+                },
+                schedule: Schedule {
+                    rc: config.retransmission.rc.max(1),
+                    rm: config.retransmission.rm,
+                    ti: config.retransmission.ti,
+                },
+                estimate_rto: config.retransmission.rto_estimation,
+                max_outstanding: config.retransmission.max_outstanding_transactions,
+            }),
+            redirects: RedirectGuard::new(),
             allocation_refresh_interval_cap: config.allocation_refresh_interval_cap,
             relays: HashMap::new(),
             family_blocks: [None, None],
@@ -386,7 +558,177 @@ impl Client {
             )));
         }
 
-        if msg.typ.class == CLASS_INDICATION && msg.typ.method == METHOD_CONNECTION_ATTEMPT {
+        if msg.typ.class == CLASS_INDICATION {
+            return self.handle_indication(now, &msg, from_turn_server);
+        }
+
+        // This is a STUN response message (transactional)
+        // The type is either:
+        // - stun.ClassSuccessResponse
+        // - stun.ClassErrorResponse
+
+        let Some(tr) = self.tr_map.find(&msg.transaction_id) else {
+            // silently discard
+            debug!("no transaction for {}", msg);
+            return Ok(());
+        };
+
+        // Only a response of the request's method answers it (RFC 8489 §6.3). Anything else
+        // with its transaction id is not its response, and the transaction goes on.
+        if tr.method != msg.typ.method {
+            debug!(
+                "discarding {}: its transaction is a {} request",
+                msg, tr.method
+            );
+            return Ok(());
+        }
+
+        // One place for the checks of RFC 8489 §6.3, §9 and §9.2.5: FINGERPRINT, the
+        // integrity attribute the request's credential asks for, and no attribute the client
+        // has to but does not understand. What comes out holds the attributes ahead of the
+        // integrity attribute and nothing else.
+        let crypto = self.crypto_provider.crypto();
+        let checked = match &tr.credential {
+            Some(credential) => credential.check_response(&msg, &validator(), crypto),
+            None => validator().unauthenticated(&msg),
+        };
+        let valid = match checked {
+            Ok(valid) => valid,
+            Err(Rejection::IntegrityMissing | Rejection::IntegrityMismatch) => {
+                // A response to a signed request is believed only if it is signed with the
+                // same key (RFC 8489 §9.2.5). Over UDP it is dropped as if never received,
+                // so the transaction stays open and its retransmissions continue; over a
+                // reliable transport the transaction ends at once. Either way its failure
+                // is an integrity violation, not a timeout.
+                debug!("discarding {}: integrity attribute missing or wrong", msg);
+                if tr.is_reliable() {
+                    if let Some(tr) = self.tr_map.delete(&msg.transaction_id) {
+                        self.handle_transaction_failure(now, tr, Failure::IntegrityViolation);
+                    }
+                } else if let Some(tr) = self.tr_map.get(&msg.transaction_id) {
+                    tr.discarded = true;
+                }
+                return Ok(());
+            }
+            Err(Rejection::UnknownAttributes(unknown)) => {
+                // RFC 8489 §6.3.3, §6.3.4: the response is discarded and the transaction
+                // has failed.
+                debug!("discarding {}: unknown attributes {:?}", msg, unknown);
+                if let Some(tr) = self.tr_map.answered(&msg.transaction_id, now) {
+                    self.handle_transaction_failure(now, tr, Failure::UnknownAttributes(unknown));
+                }
+                return Ok(());
+            }
+            Err(rejection) => {
+                debug!("discarding {}: {}", msg, rejection);
+                return Ok(());
+            }
+        };
+
+        let Some(tr) = self.tr_map.answered(&msg.transaction_id, now) else {
+            return Ok(());
+        };
+        let id = tr.transaction_id;
+        let res = Response {
+            msg: valid,
+            request: tr.raw,
+        };
+        match tr.transaction_type {
+            TransactionType::BindingRequest => {
+                if res.typ.class == CLASS_ERROR_RESPONSE {
+                    let mut code = ErrorCodeAttribute::default();
+                    let err = if code.get_from(&res).is_err() {
+                        Error::Other(format!("{}", res.typ))
+                    } else {
+                        Error::Other(format!("{} (error {})", res.typ, code))
+                    };
+                    self.events.push_back(Event::BindingError(id, err));
+                } else {
+                    let mut refl_addr = XorMappedAddress::default();
+                    match refl_addr.get_from(&res) {
+                        Ok(_) => {
+                            self.events.push_back(Event::BindingResponse(
+                                id,
+                                ReflexiveAddr::new(refl_addr.ip, refl_addr.port),
+                            ));
+                        }
+                        Err(err) => {
+                            self.events.push_back(Event::BindingError(id, err));
+                        }
+                    }
+                }
+            }
+            TransactionType::AllocateAttempt(state) | TransactionType::AllocateRequest(state) => {
+                self.handle_allocate_response(now, res, *state)?;
+            }
+            // A release of an allocation the client did not keep: nothing to do.
+            TransactionType::OrphanRelease => {}
+            TransactionType::FamilyRelease(relayed_addr, family, retry) => {
+                let mut relay = Relay {
+                    relayed_addr,
+                    client: self,
+                };
+                relay.handle_family_release_response(now, res, family, retry)?;
+            }
+            TransactionType::CreatePermissionRequest(
+                relayed_addr,
+                peer_addr,
+                peer_addrs,
+                retry,
+            ) => {
+                let mut relay = Relay {
+                    relayed_addr,
+                    client: self,
+                };
+                relay.handle_create_permission_response(now, res, peer_addr, peer_addrs, retry)?;
+            }
+            TransactionType::RefreshRequest(relayed_addr, lifetime, retry) => {
+                let mut relay = Relay {
+                    relayed_addr,
+                    client: self,
+                };
+                relay.handle_refresh_response(now, res, lifetime, retry)?;
+            }
+            TransactionType::ConnectRequest(relayed_addr, peer_addr, retry) => {
+                let mut relay = Relay {
+                    relayed_addr,
+                    client: self,
+                };
+                relay.handle_connect_response(now, res, peer_addr, retry)?;
+            }
+            TransactionType::ChannelBindRequest(relayed_addr, bind_addr, retry) => {
+                let mut relay = Relay {
+                    relayed_addr,
+                    client: self,
+                };
+                relay.handle_channel_bind_response(now, res, bind_addr, retry)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Handles an indication from a server: the peer's data, the ICMP error a datagram to a
+    /// peer met, or a peer's connection to a TCP allocation.
+    fn handle_indication(
+        &mut self,
+        now: Instant,
+        msg: &Message,
+        from_turn_server: bool,
+    ) -> Result<()> {
+        // RFC 8489 §6.3.2: an indication with a wrong FINGERPRINT, or with an attribute the
+        // client has to but does not understand, is discarded. TURN indications are not
+        // signed (RFC 8656 §11); if one carries an integrity attribute all the same, what
+        // follows it is not read (RFC 8489 §9).
+        let msg = match validator().unauthenticated(msg) {
+            Ok(msg) => msg,
+            Err(rejection) => {
+                debug!("discarding {}: {}", msg, rejection);
+                return Ok(());
+            }
+        };
+
+        if msg.typ.method == METHOD_CONNECTION_ATTEMPT {
             // Like relayed data, a peer's connection is announced by the server holding the
             // allocation and by nobody else.
             if !from_turn_server {
@@ -417,200 +759,80 @@ impl Client {
             return Ok(());
         }
 
-        if msg.typ.class == CLASS_INDICATION {
-            // Only the TURN server holding the allocation relays peer data. The STUN server,
-            // when it is a different address, has no allocation and is not believed for it.
-            if msg.typ.method == METHOD_DATA && !from_turn_server {
-                debug!("discarding Data indication: not from the TURN server");
+        // Only the TURN server holding the allocation relays peer data. The STUN server,
+        // when it is a different address, has no allocation and is not believed for it.
+        if msg.typ.method == METHOD_DATA && !from_turn_server {
+            debug!("discarding Data indication: not from the TURN server");
+            return Ok(());
+        }
+        if msg.typ.method == METHOD_DATA {
+            let mut peer_addr = PeerAddress::default();
+            peer_addr.get_from(&msg)?;
+            let from = SocketAddr::new(peer_addr.ip, peer_addr.port);
+
+            // A Data indication carries the peer's data, or the ICMP error a datagram
+            // relayed to that peer met (RFC 8656 §11.4, §11.6). One with neither is
+            // discarded.
+            let mut data = Data::default();
+            let mut icmp = Icmp::default();
+            let has_data = msg.contains(ATTR_DATA);
+            if has_data {
+                data.get_from(&msg)?;
+            } else {
+                icmp.get_from(&msg)?;
+            }
+
+            // The server relays only from addresses the client installed a permission
+            // for, so anything else is not what it claims to be (RFC 8656 §11.4, §11.6).
+            if !self
+                .relays
+                .values()
+                .any(|relay| relay.expects_data_from(&from.ip(), now))
+            {
+                debug!("discarding Data indication from {from}: no permission");
                 return Ok(());
             }
-            if msg.typ.method == METHOD_DATA {
-                let mut peer_addr = PeerAddress::default();
-                peer_addr.get_from(&msg)?;
-                let from = SocketAddr::new(peer_addr.ip, peer_addr.port);
 
-                // A Data indication carries the peer's data, or the ICMP error a datagram
-                // relayed to that peer met (RFC 8656 §11.4, §11.6). One with neither is
-                // discarded.
-                let mut data = Data::default();
-                let mut icmp = Icmp::default();
-                let has_data = msg.contains(ATTR_DATA);
-                if has_data {
-                    data.get_from(&msg)?;
-                } else {
-                    icmp.get_from(&msg)?;
-                }
-
-                // The server relays only from addresses the client installed a permission
-                // for, so anything else is not what it claims to be (RFC 8656 §11.4, §11.6).
-                if !self
-                    .relays
-                    .values()
-                    .any(|relay| relay.expects_data_from(&from.ip(), now))
-                {
-                    debug!("discarding Data indication from {from}: no permission");
-                    return Ok(());
-                }
-
-                if has_data {
-                    debug!("data indication received from {}", from);
-                    self.events.push_back(Event::DataIndicationOrChannelData(
-                        None,
-                        from,
-                        BytesMut::from(&data.0[..]),
-                    ))
-                } else {
-                    debug!("{icmp} reported for {from}");
-                    self.events.push_back(Event::IcmpError(from, icmp))
-                }
-            }
-
-            return Ok(());
-        }
-
-        // This is a STUN response message (transactional)
-        // The type is either:
-        // - stun.ClassSuccessResponse
-        // - stun.ClassErrorResponse
-
-        let Some(tr) = self.tr_map.find(&msg.transaction_id) else {
-            // silently discard
-            debug!("no transaction for {}", msg);
-            return Ok(());
-        };
-
-        // A response to a signed request is believed only if it is signed with the same key
-        // (RFC 8489 §9.2.5); anything else is dropped as if never received, so the
-        // transaction stays open and its retransmissions continue.
-        if let Some(key) = &tr.integrity_key
-            && !response_is_authentic(&mut msg, key, self.crypto_provider.crypto())
-        {
-            debug!("discarding {}: MESSAGE-INTEGRITY missing or wrong", msg);
-            return Ok(());
-        }
-
-        if let Some(tr) = self.tr_map.delete(&msg.transaction_id) {
-            match msg.typ.method {
-                METHOD_BINDING => {
-                    if msg.typ.class == CLASS_ERROR_RESPONSE {
-                        let mut code = ErrorCodeAttribute::default();
-                        let err = if code.get_from(&msg).is_err() {
-                            Error::Other(format!("{}", msg.typ))
-                        } else {
-                            Error::Other(format!("{} (error {})", msg.typ, code))
-                        };
-                        self.events
-                            .push_back(Event::BindingError(tr.transaction_id, err));
-                    } else {
-                        let mut refl_addr = XorMappedAddress::default();
-                        match refl_addr.get_from(&msg) {
-                            Ok(_) => {
-                                self.events.push_back(Event::BindingResponse(
-                                    tr.transaction_id,
-                                    ReflexiveAddr::new(refl_addr.ip, refl_addr.port),
-                                ));
-                            }
-                            Err(err) => {
-                                self.events
-                                    .push_back(Event::BindingError(tr.transaction_id, err));
-                            }
-                        }
-                    }
-                }
-                METHOD_ALLOCATE => match tr.transaction_type {
-                    TransactionType::AllocateAttempt(state) => {
-                        self.handle_allocate_response(now, msg, *state, false)?;
-                    }
-                    TransactionType::AllocateRequest(state) => {
-                        self.handle_allocate_response(now, msg, *state, true)?;
-                    }
-                    _ => {}
-                },
-                // A release of an allocation the client did not keep: nothing to do.
-                METHOD_REFRESH if matches!(tr.transaction_type, TransactionType::OrphanRelease) => {
-                }
-                METHOD_REFRESH
-                    if matches!(tr.transaction_type, TransactionType::FamilyRelease(..)) =>
-                {
-                    if let TransactionType::FamilyRelease(relayed_addr, family, retry) =
-                        tr.transaction_type
-                    {
-                        let mut relay = Relay {
-                            relayed_addr,
-                            client: self,
-                        };
-                        relay.handle_family_release_response(now, msg, family, retry)?;
-                    }
-                }
-                METHOD_CREATE_PERMISSION => {
-                    if let TransactionType::CreatePermissionRequest(
-                        relayed_addr,
-                        peer_addr,
-                        peer_addrs,
-                        retry,
-                    ) = tr.transaction_type
-                    {
-                        let mut relay = Relay {
-                            relayed_addr,
-                            client: self,
-                        };
-                        relay.handle_create_permission_response(
-                            now, msg, peer_addr, peer_addrs, retry,
-                        )?;
-                    }
-                }
-                METHOD_REFRESH => {
-                    if let TransactionType::RefreshRequest(relayed_addr, lifetime, retry) =
-                        tr.transaction_type
-                    {
-                        let mut relay = Relay {
-                            relayed_addr,
-                            client: self,
-                        };
-                        relay.handle_refresh_response(now, msg, lifetime, retry)?;
-                    }
-                }
-                METHOD_CONNECT => {
-                    if let TransactionType::ConnectRequest(relayed_addr, peer_addr, retry) =
-                        tr.transaction_type
-                    {
-                        let mut relay = Relay {
-                            relayed_addr,
-                            client: self,
-                        };
-                        relay.handle_connect_response(now, msg, peer_addr, retry)?;
-                    }
-                }
-                METHOD_CHANNEL_BIND => {
-                    if let TransactionType::ChannelBindRequest(relayed_addr, bind_addr, retry) =
-                        tr.transaction_type
-                    {
-                        let mut relay = Relay {
-                            relayed_addr,
-                            client: self,
-                        };
-                        relay.handle_channel_bind_response(now, msg, bind_addr, retry)?;
-                    }
-                }
-                _ => {}
+            if has_data {
+                debug!("data indication received from {}", from);
+                self.events.push_back(Event::DataIndicationOrChannelData(
+                    None,
+                    from,
+                    BytesMut::from(&data.0[..]),
+                ))
+            } else {
+                debug!("{icmp} reported for {from}");
+                self.events.push_back(Event::IcmpError(from, icmp))
             }
         }
 
         Ok(())
     }
 
-    /// Deals with a transaction that exhausted its retransmissions.
+    /// Deals with a transaction that ended without a response the client could act on.
     ///
-    /// A Refresh or ChannelBind is started once more as a new transaction, so one lost burst
-    /// does not let the allocation lapse or leave a channel unbound for good. A ChannelBind that
-    /// fails again returns its binding to idle, so the next send binds it again. Anything not
-    /// started again is reported as [`Event::TransactionTimeout`], under the id its caller
-    /// knows.
-    fn handle_transaction_timeout(&mut self, now: Instant, tr: Transaction) {
+    /// One that exhausted its retransmissions: a Refresh or ChannelBind is started once more
+    /// as a new transaction, so one lost burst does not let the allocation lapse or leave a
+    /// channel unbound for good. A ChannelBind that fails again returns its binding to idle,
+    /// so the next send binds it again. Anything not started again is reported as
+    /// [`Event::TransactionTimeout`], under the id its caller knows.
+    ///
+    /// One that failed for another reason (its responses were not authentic, or carried
+    /// attributes the client does not understand) is not started again, and is reported by
+    /// the error event of its kind.
+    fn handle_transaction_failure(&mut self, now: Instant, tr: Transaction, failure: Failure) {
+        // RFC 8489 §9.2.5: when every response that arrived was discarded, the failure is an
+        // integrity violation, not a timeout.
+        let failure = match failure {
+            Failure::Timeout if tr.discarded => Failure::IntegrityViolation,
+            other => other,
+        };
+        let timed_out = matches!(failure, Failure::Timeout);
         let id = tr.transaction_type.report_id(tr.transaction_id);
         match tr.transaction_type {
             TransactionType::RefreshRequest(relayed_addr, lifetime, retry) => {
-                if !retry.timeout
+                if timed_out
+                    && !retry.timeout
                     && let Some(mut relay) = self.relay_by_key(relayed_addr)
                     && relay
                         .refresh_allocation_with(
@@ -627,14 +849,16 @@ impl Client {
                     return;
                 };
                 let releasing = lifetime.is_zero();
-                relay.refresh_failed(now, lifetime, RequestError::Failed(Error::ErrTimeout));
-                if releasing {
-                    // The release is over, and reported as that.
+                relay.refresh_failed(now, lifetime, RequestError::Failed(failure.error()));
+                if releasing || !timed_out {
+                    // The release is over, and reported as that; a failure that is not a
+                    // timeout was reported as the refresh error it is.
                     return;
                 }
             }
             TransactionType::ChannelBindRequest(relayed_addr, bind_addr, retry) => {
-                if !retry.timeout
+                if timed_out
+                    && !retry.timeout
                     && let Some(mut relay) = self.relay_by_key(relayed_addr)
                     && relay
                         .rebind_channel(now, bind_addr, retry.after_timeout(tr.transaction_id))
@@ -644,11 +868,21 @@ impl Client {
                     return;
                 }
                 if let Some(mut relay) = self.relay_by_key(relayed_addr) {
-                    relay.channel_bind_timed_out(bind_addr);
+                    if timed_out {
+                        relay.channel_bind_timed_out(bind_addr);
+                    } else {
+                        relay.channel_bind_failed(
+                            now,
+                            bind_addr,
+                            RequestError::Failed(failure.error()),
+                        );
+                        return;
+                    }
                 }
             }
             TransactionType::FamilyRelease(relayed_addr, family, retry) => {
-                if !retry.timeout
+                if timed_out
+                    && !retry.timeout
                     && let Some(mut relay) = self.relay_by_key(relayed_addr)
                     && relay
                         .release_family_with(
@@ -665,7 +899,7 @@ impl Client {
                 if let Some(relay) = self.relays.get(&relayed_addr) {
                     self.events.push_back(Event::RefreshError(
                         relay.name(),
-                        RequestError::Failed(Error::ErrTimeout),
+                        RequestError::Failed(failure.error()),
                     ));
                 }
                 return;
@@ -675,9 +909,49 @@ impl Client {
                 if let Some(relay) = self.relays.get_mut(&relayed_addr) {
                     relay.connecting.remove(&peer_addr);
                 }
+                if !timed_out {
+                    self.events.push_back(Event::ConnectError(
+                        id,
+                        peer_addr,
+                        RequestError::Failed(failure.error()),
+                    ));
+                    return;
+                }
+            }
+            TransactionType::CreatePermissionRequest(relayed_addr, peer_addr, _, _) => {
+                if !timed_out {
+                    // A permission the application asked for is not there; a refresh that
+                    // failed this way leaves the permissions the time the server last
+                    // granted, and they are asked for again.
+                    if let Some(peer_addr) = peer_addr {
+                        if let Some(relay) = self.relays.get_mut(&relayed_addr) {
+                            relay.perm_map.remove(&peer_addr.ip());
+                        }
+                        self.events.push_back(Event::CreatePermissionError(
+                            id,
+                            RequestError::Failed(failure.error()),
+                        ));
+                    }
+                    return;
+                }
+            }
+            TransactionType::AllocateAttempt(_) | TransactionType::AllocateRequest(_) => {
+                if !timed_out {
+                    self.events.push_back(Event::AllocateError(
+                        id,
+                        RequestError::Failed(failure.error()),
+                    ));
+                    return;
+                }
+            }
+            TransactionType::BindingRequest => {
+                if !timed_out {
+                    self.events
+                        .push_back(Event::BindingError(id, failure.error()));
+                    return;
+                }
             }
             TransactionType::OrphanRelease => return,
-            _ => {}
         }
         self.events.push_back(Event::TransactionTimeout(id));
     }
@@ -885,26 +1159,32 @@ impl Client {
     ///
     /// [RFC 8656 §5]: https://datatracker.ietf.org/doc/html/rfc8656#section-5
     pub fn update_credentials(&mut self, username: String, password: String) -> Result<()> {
-        let username = Username::new(ATTR_USERNAME, username);
-        let long_term_integrity_key = MessageIntegrity::long_term_integrity_key(
-            username.text.clone(),
-            self.realm.text.clone(),
-            password.clone(),
-            self.crypto_provider.crypto(),
-        )?;
-        self.username = username;
-        self.password = password;
+        let login = Arc::new(Login {
+            username,
+            password,
+            password_algorithms: self.login.password_algorithms.clone(),
+        });
 
-        // Each allocation carries the integrity it will sign its own Refresh /
-        // CreatePermission / ChannelBind with, so they have to be re-signed too — otherwise
-        // the next refresh would still present the retired credential.
-        for relay in self.relays.values_mut() {
-            // An allocation the server gave without a credential stays unsigned until the
-            // server asks for one.
-            if relay.key().is_some() {
-                relay.long_term_integrity_key = long_term_integrity_key.clone();
+        // Each allocation carries the credential it will sign its own Refresh /
+        // CreatePermission / ChannelBind with, so they have to be re-keyed too — otherwise
+        // the next refresh would still present the retired credential. The realm, the nonce
+        // and the password algorithm stay what the server last asked for. An allocation the
+        // server gave without a credential stays unsigned until the server asks for one.
+        let mut rekeyed = Vec::with_capacity(self.relays.len());
+        for (key, relay) in &self.relays {
+            rekeyed.push((
+                *key,
+                relay
+                    .credential
+                    .with_login(login.clone(), self.crypto_provider.crypto())?,
+            ));
+        }
+        for (key, credential) in rekeyed {
+            if let Some(relay) = self.relays.get_mut(&key) {
+                relay.credential = Arc::new(credential);
             }
         }
+        self.login = login;
 
         Ok(())
     }
@@ -938,47 +1218,42 @@ impl Client {
         attrs: Vec<Box<dyn Setter>>,
         relay: &RelayState,
     ) -> Result<Message> {
-        self.build_request_with(method, attrs, &relay.long_term_integrity_key, &relay.nonce)
+        self.build_request_with(method, attrs, &relay.credential)
     }
 
-    /// Builds a request signed with `key` and `nonce`; unsigned when `key` is empty.
+    /// Builds a request made with `credential`; without one until the server asked for it.
     pub(crate) fn build_request_with(
         &self,
         method: Method,
         attrs: Vec<Box<dyn Setter>>,
-        key: &[u8],
-        nonce: &Nonce,
+        credential: &Credential,
     ) -> Result<Message> {
-        self.build_request_as(TransactionId::new(), method, attrs, key, nonce)
+        self.build_request_as(TransactionId::new(), method, attrs, credential)
     }
 
     /// Builds the request `id`: `attrs`, SOFTWARE when the client has one (RFC 8656 §5: in
-    /// every Allocate and Refresh, and allowed in any other request), the credential when
-    /// `key` is not empty, and FINGERPRINT.
+    /// every Allocate and Refresh, and allowed in any other request), what the long-term
+    /// credential mechanism adds once the server asked for the credential (RFC 8489 §9.2.3,
+    /// §9.2.5: USERNAME or USERHASH, REALM, NONCE, PASSWORD-ALGORITHMS and
+    /// PASSWORD-ALGORITHM when the server offered algorithms, and MESSAGE-INTEGRITY-SHA256
+    /// then, MESSAGE-INTEGRITY otherwise), and FINGERPRINT.
     pub(crate) fn build_request_as(
         &self,
         id: TransactionId,
         method: Method,
         attrs: Vec<Box<dyn Setter>>,
-        key: &[u8],
-        nonce: &Nonce,
+        credential: &Credential,
     ) -> Result<Message> {
         let mut setters: Vec<Box<dyn Setter + '_>> = vec![
             Box::new(id),
             Box::new(MessageType::new(method, CLASS_REQUEST)),
         ];
-        setters.extend(attrs);
+        setters.extend(attrs.into_iter().map(|a| a as Box<dyn Setter + '_>));
         if !self.software.text.is_empty() {
             setters.push(Box::new(self.software.clone()));
         }
-        if !key.is_empty() {
-            setters.push(Box::new(self.username.clone()));
-            setters.push(Box::new(self.realm.clone()));
-            setters.push(Box::new(nonce.clone()));
-            setters.push(Box::new(MessageIntegrity::new_raw_integrity_with_provider(
-                key.to_vec(),
-                self.crypto_provider.crypto(),
-            )));
+        if let Some(authentication) = credential.setter(self.crypto_provider.crypto()) {
+            setters.push(authentication);
         }
         setters.push(Box::new(FINGERPRINT));
 
@@ -989,12 +1264,15 @@ impl Client {
 
     /// Deletes the allocation the server holds for this client's 5-tuple, with a Refresh of
     /// LIFETIME 0 (RFC 8656 §8), when the client keeps no copy of it. Nothing is reported.
-    pub(crate) fn release_orphan(&mut self, now: Instant, key: &[u8], nonce: &Nonce) -> Result<()> {
+    pub(crate) fn release_orphan(
+        &mut self,
+        now: Instant,
+        credential: &Arc<Credential>,
+    ) -> Result<()> {
         let msg = self.build_request_with(
             METHOD_REFRESH,
             vec![Box::new(Lifetime(Duration::ZERO))],
-            key,
-            nonce,
+            credential,
         )?;
         let to = self.turn_server_addr_or_err()?;
         self.perform_transaction(
@@ -1002,9 +1280,58 @@ impl Client {
             &msg,
             to,
             TransactionType::OrphanRelease,
-            (!key.is_empty()).then(|| key.to_vec()),
+            Some(credential.clone()),
         );
         Ok(())
+    }
+
+    /// Points the client at the alternate server of a 300 (Try Alternate), for an
+    /// application that chooses to follow the redirection (RFC 8489 §10, RFC 8656 §7.4). The
+    /// client never follows one by itself: the application owns the socket and the choice of
+    /// server.
+    ///
+    /// `redirect` comes from [`ErrorResponse::try_alternate`], which is there only for a 300
+    /// that was authenticated with the allocation's credential; RFC 8489 §14.8 has a client
+    /// validate the response before it redirects itself. (An application that trusts the
+    /// address of an unauthenticated 300, [`ErrorResponse::alternate_server`], makes the
+    /// `TryAlternate` itself.) The server of the address family the client reached the old
+    /// one over is taken, and becomes [`Client::turn_server_addr`]. The application then
+    /// calls [`Client::allocate`] again: the request goes to the alternate server over the
+    /// same transport protocol and with the same credentials. Over TLS or DTLS the
+    /// application checks the new server's certificate against
+    /// [`TryAlternate::domain`] when it is there, and against the name it used for the old
+    /// server when it is not.
+    ///
+    /// # Errors
+    ///
+    /// Fails, and leaves the server as it is, when an Allocate was already sent to the
+    /// alternate server within the last five minutes: the redirection is a loop and RFC 8489
+    /// §10 has the client ignore it and take the transaction as failed. Fails as well while
+    /// the client holds an allocation (its server cannot change), or when no TURN server is
+    /// configured.
+    pub fn follow_alternate(
+        &mut self,
+        now: Instant,
+        redirect: &TryAlternate,
+    ) -> Result<SocketAddr> {
+        let current = self.turn_server_addr_or_err()?;
+        if !self.relays.is_empty() {
+            return Err(Error::Other(
+                "the TURN server cannot change while the client holds an allocation".to_owned(),
+            ));
+        }
+        let server = redirect
+            .server_for(current.ip())
+            .ok_or(Error::ErrAttributeNotFound)?;
+        if !self.redirects.follow(server, now) {
+            return Err(Error::Other(format!(
+                "redirection loop: an Allocate was sent to {server} within the last five \
+                 minutes (RFC 8489 section 10)"
+            )));
+        }
+        debug!("TURN server {current} redirects to {server}");
+        self.turn_serv_addr = Some(server);
+        Ok(server)
     }
 
     /// Returns the TURN server address, if configured.
@@ -1020,16 +1347,6 @@ impl Client {
     /// Returns the local address this client is bound to.
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
-    }
-
-    /// username returns username
-    fn username(&self) -> Username {
-        self.username.clone()
-    }
-
-    /// realm return realm
-    fn realm(&self) -> Realm {
-        self.realm.clone()
     }
 
     /// WriteTo sends data to the specified destination using the base socket.
@@ -1053,52 +1370,30 @@ impl Client {
         msg: &Message,
         to: SocketAddr,
         transaction_type: TransactionType,
-        integrity_key: Option<Vec<u8>>,
+        credential: Option<Arc<Credential>>,
     ) -> TransactionId {
-        let tr = Transaction::new(TransactionConfig {
-            now,
-            transaction_id: msg.transaction_id,
-            transaction_type,
-            raw: BytesMut::from(&msg.raw[..]),
-            local_addr: self.local_addr,
-            peer_addr: to,
-            transport_protocol: self.transport_protocol,
-            interval: self.rto_in_ms,
-            integrity_key,
-        });
-
         trace!(
             "start {} transaction {:?} to {}",
-            msg.typ, msg.transaction_id, tr.peer_addr
+            msg.typ, msg.transaction_id, to
         );
-        self.tr_map.insert(msg.transaction_id, tr);
-
-        self.write_to(now, &msg.raw, to);
+        self.tr_map.start(
+            now,
+            TransactionConfig {
+                transaction_id: msg.transaction_id,
+                method: msg.typ.method,
+                transaction_type,
+                raw: BytesMut::from(&msg.raw[..]),
+                local_addr: self.local_addr,
+                peer_addr: to,
+                transport_protocol: self.transport_protocol,
+                credential,
+            },
+        );
+        // In the order it was asked for, with whatever else the client sends.
+        while let Some(transmit) = self.tr_map.poll_transmit() {
+            self.transmits.push_back(transmit);
+        }
 
         msg.transaction_id
     }
-}
-
-/// Whether a response to a request signed with `key` may be acted on.
-///
-/// It must carry a MESSAGE-INTEGRITY computed with that key. The one exception is a 401
-/// (Unauthorized) or 438 (Stale Nonce) error without one: the server cannot or must not sign
-/// those, since they report that the credential or nonce it would sign with is not accepted
-/// (RFC 8489 §9.2.4 and §10.2.3 put their handling before the integrity check). A 401 or 438
-/// that does carry a MESSAGE-INTEGRITY must still verify.
-pub(crate) fn response_is_authentic(
-    msg: &mut Message,
-    key: &[u8],
-    crypto: &dyn crypto::RTCCrypto,
-) -> bool {
-    if !msg.contains(ATTR_MESSAGE_INTEGRITY) {
-        if msg.typ.class != CLASS_ERROR_RESPONSE {
-            return false;
-        }
-        let mut code = ErrorCodeAttribute::default();
-        return code.get_from(msg).is_ok()
-            && (code.code == stun::error_code::CODE_UNAUTHORIZED
-                || code.code == stun::error_code::CODE_STALE_NONCE);
-    }
-    MessageIntegrity::check(msg, key, crypto).is_ok()
 }

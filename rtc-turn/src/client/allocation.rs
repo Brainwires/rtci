@@ -7,14 +7,14 @@ use std::time::{Duration, Instant};
 use log::debug;
 use stun::attributes::*;
 use stun::error_code::*;
-use stun::integrity::MessageIntegrity;
+use stun::long_term::ChallengeError;
 use stun::message::*;
-use stun::textattrs::*;
 use stun::xoraddr::XorMappedAddress;
 
+use super::credential::Credential;
 use super::relay::RelayState;
 use super::transaction::TransactionType;
-use super::{Client, Event, RelayedAddr, RequestError};
+use super::{Client, Event, RelayedAddr, RequestError, Response};
 use crate::proto::addfamily::AdditionalAddressFamily;
 use crate::proto::addrerror::AddressErrorCode;
 use crate::proto::dontfrag::DontFragmentAttr;
@@ -28,6 +28,7 @@ use crate::proto::rsrvtoken::ReservationToken;
 use crate::proto::{PROTO_TCP, PROTO_UDP};
 use shared::TransportProtocol;
 use shared::error::{Error, Result};
+use std::sync::Arc;
 
 /// What an allocation relays to and from peers: the REQUESTED-TRANSPORT of its Allocate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -153,12 +154,19 @@ pub(crate) struct AllocateState {
     /// allocation names.
     pub(crate) report_id: TransactionId,
     pub(crate) options: AllocateOptions,
-    /// The long-term key, once the server asked for the credential with a 401.
-    pub(crate) key: Vec<u8>,
-    pub(crate) nonce: Nonce,
+    /// The credential the request is made with: none until the server asked for it with a
+    /// 401 (RFC 8489 §9.2.3.1).
+    pub(crate) credential: Arc<Credential>,
+    /// How many times the request was sent again after a 401 (Unauthenticated).
+    unauthenticated_retries: u8,
     /// Whether the request was already sent again after a 438 (Stale Nonce).
     stale_nonce_retried: bool,
 }
+
+/// Most 401 responses one Allocate is sent again after: the one that asks for the
+/// credential, and one that names another realm for it. RFC 8489 §9.2.5 forbids the retry
+/// that changes nothing; this bounds the ones that do.
+const MAX_UNAUTHENTICATED_RETRIES: u8 = 2;
 
 #[cfg(test)]
 impl AllocateState {
@@ -168,8 +176,8 @@ impl AllocateState {
         Self {
             report_id: TransactionId::new(),
             options: AllocateOptions::default(),
-            key: vec![0u8; 16],
-            nonce: Nonce::new(ATTR_NONCE, "nonce".to_owned()),
+            credential: Credential::established(),
+            unauthenticated_retries: 1,
             stale_nonce_retried: false,
         }
     }
@@ -274,10 +282,15 @@ impl Client {
         let state = AllocateState {
             report_id: allocation_id,
             options,
-            key: vec![],
-            nonce: Nonce::new(ATTR_NONCE, String::new()),
+            credential: Arc::new(Credential::new(self.login.clone())),
+            unauthenticated_retries: 0,
             stale_nonce_retried: false,
         };
+        // The servers this request went to, against a redirection back to one of them
+        // (RFC 8489 §10).
+        if let Some(server) = self.turn_serv_addr {
+            self.redirects.sent_to(server, now);
+        }
         debug!("client.Allocate call PerformTransaction 1");
         self.send_allocate(now, TransactionId::new(), state)?;
         Ok(allocation_id)
@@ -327,27 +340,25 @@ impl Client {
         if let Some(token) = &options.reservation_token {
             attrs.push(Box::new(token.clone()));
         }
-        let msg = self.build_request_as(id, METHOD_ALLOCATE, attrs, &state.key, &state.nonce)?;
+        let msg = self.build_request_as(id, METHOD_ALLOCATE, attrs, &state.credential)?;
 
         let to = self.turn_server_addr_or_err()?;
-        let key = (!state.key.is_empty()).then(|| state.key.clone());
-        let transaction_type = if key.is_some() {
+        let credential = state.credential.clone();
+        let transaction_type = if credential.is_established() {
             TransactionType::AllocateRequest(Box::new(state))
         } else {
             TransactionType::AllocateAttempt(Box::new(state))
         };
-        self.perform_transaction(now, &msg, to, transaction_type, key);
+        self.perform_transaction(now, &msg, to, transaction_type, Some(credential));
         Ok(())
     }
 
-    /// Handles the response to an Allocate; `authenticated` says whether that request
-    /// carried the credential.
+    /// Handles the response to an Allocate.
     pub(super) fn handle_allocate_response(
         &mut self,
         now: Instant,
-        response: Message,
+        response: Response,
         mut state: AllocateState,
-        authenticated: bool,
     ) -> Result<()> {
         // A server that wants no credential answers the first request with the allocation
         // (RFC 8656 §7.2 step 1).
@@ -355,7 +366,8 @@ impl Client {
             return self.handle_allocate_success(now, &response, state);
         }
         let id = state.report_id;
-        let err = RequestError::of(&response);
+        let err = response.error();
+        let authenticated = state.credential.is_established();
 
         // 420 naming DONT-FRAGMENT: the server does not support it. The request is made
         // again without it (RFC 8656 §7.4), and the allocation will not have it.
@@ -369,67 +381,76 @@ impl Client {
             return self.send_allocate(now, TransactionId::new(), state);
         }
 
-        if !authenticated {
-            // Only a 401 (Unauthorized) asks for the credential (RFC 8489 §9.2.5). Any other
-            // error is the answer to the Allocate, reported with its code under the id
-            // allocate() handed out.
-            if !err.is(CODE_UNAUTHORIZED) {
+        // The long-term credential mechanism (RFC 8489 §9.2.5). A 401 (Unauthenticated) asks
+        // for the credential, or refuses the one the request carried; a 438 (Stale Nonce)
+        // gives an authenticated request a new nonce. To the first request only a 401 is a
+        // challenge; any other error is the answer to the Allocate, reported with its code
+        // under the id allocate() handed out.
+        let unauthenticated = err.is(CODE_UNAUTHORIZED);
+        let stale = err.is(CODE_STALE_NONCE) && authenticated;
+        if !unauthenticated && !stale {
+            self.allocate_failed(now, &state.options, id, err);
+            return Ok(());
+        }
+        // What the client may send again after, and how: the realm and nonce of the
+        // response, USERHASH when the nonce cookie says so, the first password algorithm of
+        // the server's list the client supports. Not after a bid-down (the cookie announces
+        // PASSWORD-ALGORITHMS and the response has none), not without a supported algorithm,
+        // and not after a 401 to the very credentials the request carried.
+        let challenged = state.credential.challenged(
+            &response.request(),
+            &response.msg,
+            self.crypto_provider.crypto(),
+        );
+        let credential = match challenged {
+            Ok(credential) => credential,
+            // The server refused the credential, or its response gives nothing to answer
+            // with (no realm, no nonce): the error is the answer.
+            Err(
+                ChallengeError::CredentialsRejected
+                | ChallengeError::Incomplete
+                | ChallengeError::NotAChallenge,
+            ) => {
                 self.allocate_failed(now, &state.options, id, err);
                 return Ok(());
             }
-            let nonce = match Nonce::get_from_as(&response, ATTR_NONCE) {
-                Ok(nonce) => nonce,
-                Err(err) => {
-                    self.events.push_back(Event::AllocateError(id, err.into()));
-                    return Ok(());
-                }
-            };
-            self.realm = match Realm::get_from_as(&response, ATTR_REALM) {
-                Ok(realm) => realm,
-                Err(err) => {
-                    self.events.push_back(Event::AllocateError(id, err.into()));
-                    return Ok(());
-                }
-            };
-            state.key = MessageIntegrity::long_term_integrity_key(
-                self.username.text.clone(),
-                self.realm.text.clone(),
-                self.password.clone(),
-                self.crypto_provider.crypto(),
-            )?;
-            state.nonce = nonce;
-
-            // Trying to authorize, under the id allocate() returned, so the caller can
-            // match Event::AllocateResponse with it.
-            debug!("client.Allocate call PerformTransaction 2");
-            return self.send_allocate(now, id, state);
-        }
-
-        // 438 (Stale Nonce): the same request once more with the new nonce, and the new
-        // realm if there is one, under a new transaction id (RFC 8489 §9.2.5).
-        if err.is(CODE_STALE_NONCE)
-            && !state.stale_nonce_retried
-            && let Ok(nonce) = Nonce::get_from_as(&response, ATTR_NONCE)
-        {
-            if let Ok(realm) = Realm::get_from_as(&response, ATTR_REALM)
-                && !realm.text.is_empty()
-                && realm.text != self.realm.text
-            {
-                state.key = MessageIntegrity::long_term_integrity_key(
-                    self.username.text.clone(),
-                    realm.text.clone(),
-                    self.password.clone(),
-                    self.crypto_provider.crypto(),
-                )?;
-                self.realm = realm;
+            // The client will not authenticate this way: a bid-down, no password algorithm
+            // it supports, or a user name or password it cannot use.
+            Err(refused) => {
+                debug!("Allocate: {err} is not answered: {refused}");
+                self.events.push_back(Event::AllocateError(
+                    id,
+                    RequestError::Failed(Error::Other(format!("{err}; not retried: {refused}"))),
+                ));
+                return Ok(());
             }
-            state.nonce = nonce;
-            state.stale_nonce_retried = true;
-            return self.send_allocate(now, TransactionId::new(), state);
+        };
+        let again = if unauthenticated {
+            state.unauthenticated_retries < MAX_UNAUTHENTICATED_RETRIES
+        } else {
+            !state.stale_nonce_retried
+        };
+        if !again {
+            self.allocate_failed(now, &state.options, id, err);
+            return Ok(());
         }
+        if unauthenticated {
+            state.unauthenticated_retries += 1;
+        } else {
+            state.stale_nonce_retried = true;
+        }
+        state.credential = Arc::new(credential);
 
-        self.allocate_failed(now, &state.options, id, err);
-        Ok(())
+        // The request that carries the credential the server first asked for goes out under
+        // the id allocate() returned, so the caller can match Event::AllocateResponse with
+        // it; every later one takes a new transaction id (RFC 8489 §9.2.5).
+        debug!("client.Allocate call PerformTransaction 2");
+        let next_id = if authenticated {
+            TransactionId::new()
+        } else {
+            id
+        };
+        self.send_allocate(now, next_id, state)
     }
 
     /// Reports an Allocate the server refused, and remembers what RFC 8656 §7.4 has the
@@ -450,9 +471,8 @@ impl Client {
         self.events.push_back(Event::AllocateError(id, err));
     }
 
-    /// Takes the allocation of an Allocate success response. `state.key` and `state.nonce`
-    /// are the credential the request was made with; the key is empty when the server asked
-    /// for none.
+    /// Takes the allocation of an Allocate success response. `state.credential` is the
+    /// credential the request was made with: none when the server asked for none.
     fn handle_allocate_success(
         &mut self,
         now: Instant,
@@ -483,7 +503,7 @@ impl Client {
                 // The server made an allocation this client cannot use: it is deleted, not
                 // left to hold the 5-tuple until it expires (RFC 8656 §7.3), and the caller
                 // is told.
-                let _ = self.release_orphan(now, &state.key, &state.nonce);
+                let _ = self.release_orphan(now, &state.credential);
                 self.events
                     .push_back(Event::AllocateError(id, RequestError::Failed(err)));
                 return Ok(());
@@ -501,7 +521,7 @@ impl Client {
             || !one_per_family
             || !relayed.iter().all(|addr| state.options.expects(addr))
         {
-            let _ = self.release_orphan(now, &state.key, &state.nonce);
+            let _ = self.release_orphan(now, &state.credential);
             self.family_mismatch = true;
             self.events.push_back(Event::AllocateError(
                 id,
@@ -564,8 +584,7 @@ impl Client {
         let mut relay = RelayState::new(
             now,
             relayed_addr,
-            state.key,
-            state.nonce,
+            state.credential,
             lifetime.0,
             self.allocation_refresh_interval_cap,
         );

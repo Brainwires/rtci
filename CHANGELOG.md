@@ -94,6 +94,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   holds a permission for (asked for or installed), as RFC 8656 sections 11.4 and 12.6 recommend.
 - **turn**: `Relay::send_to` fails with `ErrNoPermission` once a permission's 300 s have run out
   without a refresh, and with `ErrConnClosed` after `Relay::close`.
+- **stun**: `Message::decode` (and `unmarshal_binary`, `write`, `read_from`, `clone_to`) refuses
+  what RFC 8489 section 6.3 has a receiver check: a first byte with either of its top two bits
+  set, a length that is not a multiple of four, and bytes after the message the header
+  describes. `is_stun_message` is false for the first of these.
+- **stun**: `addr::AlternateServer`, `ResponseOrigin` and `OtherAddress` are types of their own
+  that encode and decode under their own attribute types (0x8023, 0x802b, 0x802c). They were
+  aliases of `MappedAddress`, so `add_to` wrote a MAPPED-ADDRESS.
+- **stun**: what is sent keeps RFC 8489's limits: a USERNAME is at most 508 bytes (was 513); a
+  REALM, NONCE or SOFTWARE is fewer than 128 characters and at most 509 bytes (was 763 bytes);
+  an ERROR-CODE has a code from 300 to 699 and a UTF-8 reason phrase of fewer than 128
+  characters. A received ERROR-CODE whose class is not 3 to 6 or whose number is over 99 is an
+  error. The default reason phrase of 401 is "Unauthenticated" (new constant
+  `CODE_UNAUTHENTICATED`).
+- **stun**: `FingerprintAttr::check` fails when FINGERPRINT is not the last attribute (RFC 8489
+  section 14.7).
+- **stun**: `MessageIntegrity::new_long_term_integrity_with_provider` and
+  `long_term_integrity_key` apply the OpaqueString profile (RFC 8265) to the user name, realm
+  and password, as RFC 8489 section 9.2.2 has it: a string the profile does not allow (a
+  control character, say) is an error, and one it normalises gives the normalised key.
+- **stun**: `Client` follows RFC 8489 section 6.2. The initial RTO is 500 ms (was 300 ms); the
+  interval doubles (it grew linearly); a request is sent 7 times (was 8) and its transaction
+  fails 16 x RTO after the last, 39.5 s by default (was 10.8 s); over
+  `TransportProtocol::TCP` a request is sent once and fails after Ti = 39.5 s;
+  `handle_timeout(t)` acts on a deadline equal to `t` (it needed a later instant, so a driver
+  that slept until `poll_timeout` made no progress) and queues the retransmission itself (it
+  was queued by `poll_event`); at most ten transactions are outstanding and a UDP message fits
+  the path MTU (548 / 1232 bytes of STUN when it is unknown), `handle_write` failing otherwise;
+  an indication starts no transaction. `with_no_retransmit` is Rc = 1.
+  `ClientBuilder::with_timeout_rate` and `with_buffer_size`, which had no effect, are
+  deprecated.
+
+- **turn**: the client's requests follow the retransmission timer of RFC 8489 section 6.2, the
+  one `rtc-stun` has (`rtc_stun::timer`). The default initial RTO is 500 ms (was 200 ms) and
+  doubles without the 1600 ms cap; a request is sent 7 times, at 0, 0.5, 1.5, 3.5, 7.5, 15.5
+  and 31.5 s, and its transaction fails 16 x RTO after the last, at 39.5 s (was 7.8 s). So an
+  `Event::TransactionTimeout`, and the second attempt of a Refresh or ChannelBind, come that
+  much later. `ClientConfig::rto_in_ms` sets the initial RTO as before; with the new
+  `ClientConfig::retransmission` (`RetransmissionConfig`: `rc`, `rm`, `ti`, `rto_estimation`,
+  `max_outstanding_transactions`) an application can have the old pace back.
+- **turn**: at most ten transactions are outstanding to a server (RFC 8489 section 6.2). A
+  request past that is kept and sent when one of the ten ends; `Client::has_transaction` is
+  true for it meanwhile. `RetransmissionConfig::max_outstanding_transactions` changes the
+  limit, 0 lifts it.
+- **turn**: `ClientConfig` has two new fields, `retransmission` and `password_algorithms`; a
+  literal that names every field needs them, or `..Default::default()`. `ClientConfig::realm`
+  is no longer read: the realm is the one the server's 401 names, as it always was after the
+  first Allocate.
+- **turn**: a request whose responses were all discarded because their integrity did not hold
+  no longer ends as `Event::TransactionTimeout`. It ends with the error event of its kind
+  (`AllocateError`, `CreatePermissionError`, `RefreshError`, `ChannelBindError`,
+  `ConnectError`, `BindingError`) carrying `RequestError::Failed(Error::ErrIntegrityMismatch)`,
+  and over TCP or TLS the first such response ends it at once (RFC 8489 section 9.2.5). On a
+  data connection a ConnectionBind response that is unsigned or wrongly signed is a
+  `DataConnectionEvent::BindError` at once; it was passed over.
+- **turn**: a 401 (Unauthenticated) to a ConnectionBind that carried the credential is not
+  answered with the same credential again unless it names another realm (RFC 8489 section
+  9.2.5 forbids the retry that changes nothing); it was, once. A 438 (Stale Nonce), which is
+  what a server with nonces per connection sends, is answered as before.
+- **turn**: a received message with a FINGERPRINT that does not match, an indication or a
+  response with a comprehension-required attribute the client does not know, and a response
+  of another method than its request's are no longer processed (RFC 8489 sections 6.3 and
+  14.7). A 401 without NONCE or REALM to the first Allocate is reported as
+  `RequestError::Rejected` with its code; it was `Failed(attribute not found)`.
 
 - **mdns**: `MdnsConfig` has private fields: build it with `MdnsConfig::default()` and the
   `with_*` methods, not as a struct literal. `MdnsConfig::query_timeout` defaults to 30
@@ -499,6 +562,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   four-byte code followed by three-byte ones made one "NAL unit" of the whole access unit.
 - **media**: `H26xWriter` writes what the H.265 depacketizer returns, so the media in a PACI
   packet is written and reserved packet types are not.
+- **turn**: a 437 (Allocation Mismatch) to a Refresh, CreatePermission or ChannelBind ends the
+  allocation (RFC 8656 sections 5 and 8.3). The error was returned from `handle_read` or logged,
+  the relay stayed in the client and a Refresh went out every half lifetime for ever. The client
+  now drops the allocation, with its permissions, channel bindings and outstanding requests, and
+  raises `Event::AllocationLost`.
+- **turn**: an allocation released with `Relay::close` stays released. If the Refresh with
+  LIFETIME 0 and its retry went unanswered, or the server answered 437, the next periodic
+  refresh asked for the old lifetime again and kept the allocation alive. `close` now stops
+  every refresh at once; `Event::AllocationReleased` reports the end (success, 437, or no
+  answer).
+- **turn**: channel bindings belong to their allocation (RFC 8656 section 12). They were kept per
+  client, so a new allocation sent ChannelData on channel numbers only the previous one had
+  bound, which the server drops.
+- **turn**: permissions and channel bindings follow the RFC's timers. A permission lasts 300 s
+  from its last accepted CreatePermission or ChannelBind: one whose refresh the server refuses
+  is dropped (`Event::PermissionLost`), and a refused refresh of several addresses is repeated
+  address by address so only the refused ones end. A channel binding lasts 10 minutes: one that
+  carried data is rebound from a timer, one left idle is bound again (with the data in Send
+  indications) before ChannelData is used on it, and a channel number is reused for another
+  peer address only 15 minutes after the last ChannelBind sent for it.
+- **turn**: the first Allocate response is read for what it is. A success (a server that asks
+  for no credential, RFC 8656 section 7.2) is an allocation; an error other than 401 keeps its
+  code. Both were reported as `AllocateError(attribute not found)`, the first while the server
+  held the allocation.
+- **turn**: an Allocate success response without XOR-RELAYED-ADDRESS or LIFETIME is reported as
+  `AllocateError` under the caller's id and the allocation is deleted with a Refresh of
+  LIFETIME 0. It ended `handle_read` with an error and no event, and left the allocation on the
+  server.
+- **turn**: with all 4096 channel numbers taken, data to one more peer address goes as Send
+  indications; the send failed.
+- **turn**: ChannelData cannot carry more than 65 535 bytes; `Relay::send_to` and
+  `ChannelData::encode` refuse a longer payload instead of writing a wrapped length, which over
+  TCP or TLS broke the framing of every later message.
+- **turn**: an allocation whose Refresh requests all fail is refreshed again at half the time
+  it has left, and is dropped (`Event::AllocationLost`) when its lifetime has run out.
+- **turn**: a ChannelBind the server refuses is reported (`Event::ChannelBindError`) and tried
+  again after a minute; it was sent again with every packet. A 400 (the channels of client and
+  server are out of step) deletes the allocation, as RFC 8656 section 12.3 recommends.
+- **turn**: a ChannelBind success refreshes the peer's permission (RFC 8656 section 12.3).
+- **turn**: `Client::update_credentials` documents that a live allocation takes a new password,
+  not a new username (the server answers 441, RFC 8656 section 5).
+- **turn**: the `turn_client_tcp` example no longer names RFC 6062; it is a UDP allocation
+  reached over TCP (RFC 8656 section 3.1).
+- **stun**: `Client` delivers a response of any length. It read into a 120-byte buffer, so a
+  132-byte Binding response (what coturn sends over IPv6) failed to decode and the transaction
+  timed out. `Message::read_from` reads its reader to the end.
+- **stun**: `Client` takes as the response only a success or error response of the request's
+  method that comes from the server (RFC 8489 section 6.3). Any message with a known
+  transaction id, a request or an indication from any address included, ended the transaction.
+- **stun**: a truncated MAPPED-ADDRESS or XOR-MAPPED-ADDRESS is an error; it decoded to an
+  address filled up with zeros. The first byte of the value is ignored (RFC 8489 section 14.1);
+  a non-zero one failed the attribute.
+- **stun**: the reserved bits of ERROR-CODE are ignored (RFC 8489 section 14.8). With one set
+  next to the class, a 438 decoded as 1238 and a stale nonce went unrecognised.
+- **stun**: `Uri`'s `Display` writes every IPv6 host in brackets; one without `::` came out as
+  `stun:2001:db8:1:2:3:4:5:6:3478`, which does not parse back.
+- **stun**: `MessageIntegrity::check` no longer rewrites the message's length field while it
+  runs, and checks by the attribute's position, whatever follows it.
+
+- **turn**: an attribute after the MESSAGE-INTEGRITY of a response is not read (RFC 8489
+  section 9). The client checked the HMAC and then read attributes wherever they sat, so
+  anyone on the path could append one to a genuine response: an XOR-MAPPED-ADDRESS appended to
+  an Allocate success response was handed out as the client's server-reflexive address
+  (`Relay::mapped_addr`), and so for a RESERVATION-TOKEN, an ADDRESS-ERROR-CODE or an
+  ALTERNATE-SERVER. Every received message now goes through `rtc_stun::validated::Validator`
+  and the handlers read the validated message only. The same holds for indications: nothing
+  after an integrity attribute in a Data or ConnectionAttempt indication is read.
+- **turn**: a response of another method than its request's no longer ends the transaction. An
+  Allocate success response carrying the transaction id of an outstanding Binding request
+  removed the transaction and raised no event, so the caller waited for ever.
+- **turn**: a 401 to an authenticated request that names another realm is answered with the
+  credential for that realm (RFC 8489 section 9.2.5); it was reported as a failure. A 438 with
+  a new realm re-keys the allocation it is about, not every allocation of the client.
 
 ### Features
 
@@ -1434,6 +1570,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   counts the loss of the selected pair; a pair that stops being selected gives up its bitrate
   estimates; candidates no agent and no reported pair holds are deleted (ICE restart);
   `targetBitrate` is no longer the connection's estimate copied to every stream.
+- **stun**: `rtc_stun::validated`, the receive path for every usage. `Validator` runs the
+  FINGERPRINT check (required with `require_fingerprint`; always right and last), the integrity
+  check (`authenticate`: MESSAGE-INTEGRITY-SHA256 when present, else MESSAGE-INTEGRITY;
+  `authenticate_with` for the algorithm the request used; `unauthenticated` for messages
+  without credentials) and the unknown comprehension-required attribute check
+  (`known_attributes`, `STUN_ATTRIBUTES`), and returns a `ValidatedMessage` that holds only the
+  attributes ahead of the first integrity attribute. RFC 8489 section 9 has agents ignore
+  everything after it; reading attributes off the raw `Message` after
+  `MessageIntegrity::check` does not, and an attribute appended to a genuine message was
+  obeyed. `unknown_attributes_response` builds the 420 with UNKNOWN-ATTRIBUTES. `rtc-ice` and
+  `rtc-turn` are to receive through it.
+- **stun**: MESSAGE-INTEGRITY-SHA256 (`MessageIntegritySha256`, truncation only where the usage
+  allows it), USERHASH (`userhash::Userhash`), PASSWORD-ALGORITHM and PASSWORD-ALGORITHMS
+  (`password_algorithm`), ALTERNATE-DOMAIN (`textattrs::AlternateDomain`), the SHA-256
+  long-term key (`integrity::long_term_key`), the OpaqueString profile (`opaque::opaque_string`,
+  `MessageIntegrity::short_term`) and the nonce cookie's security features
+  (`nonce_cookie::SecurityFeatures`). Checked against RFC 5769 and RFC 8489 appendix B.1.
+- **stun**: `long_term::LongTermCredentials`, the client rules of the long-term credential
+  mechanism (RFC 8489 section 9.2) without I/O: the first request carries no credentials; a
+  401 / 438 is turned into the retry's attributes (USERNAME or USERHASH, REALM, NONCE,
+  PASSWORD-ALGORITHMS, PASSWORD-ALGORITHM, the integrity attribute), or refused when the nonce
+  cookie shows PASSWORD-ALGORITHMS was stripped (bid-down), when no offered algorithm is
+  supported, or when the same credentials were just rejected; `check_response` says whether a
+  response is authenticated, a challenge, or to be discarded.
+- **stun**: `alternate::TryAlternate` reads the alternate servers and domain out of an
+  authenticated 300 (Try Alternate); `RedirectGuard` refuses a redirection to a server tried
+  within five minutes (RFC 8489 section 10).
+- **stun**: `Client` computes its RTO as RFC 6298 does (kept per server for ten minutes,
+  `with_rto_estimation`), has `with_rc`, `with_rm`, `with_ti`,
+  `with_max_outstanding_transactions`, `with_path_mtu` and `with_known_attributes`, drops a
+  response with a wrong FINGERPRINT, fails a transaction whose response has unknown
+  comprehension-required attributes or no ERROR-CODE (`StunEvent::TransactionFailed`), and with
+  `with_response_integrity` discards unauthentic responses and reports an integrity violation
+  instead of a timeout (at once over TCP), as RFC 8489 section 9.1.4 requires.
+- **stun**: `Uri::port_or_default`, `Uri::srv_query_name`, `Uri::is_secure`, `Uri::host_is_ip`,
+  and `Uri::parse_uri_strict`, which refuses a `stuns` URI with an IP address (RFC 8489 section
+  8.1; `parse_uri` keeps accepting it, as browsers do). `Message::unknown_required_attributes`.
+
+- **turn**: the long-term credential mechanism of RFC 8489 section 9.2, through
+  `rtc_stun::long_term::LongTermCredentials`. When the server's 401 offers PASSWORD-ALGORITHMS
+  the client echoes it, sends PASSWORD-ALGORITHM, derives the key with it and authenticates
+  with MESSAGE-INTEGRITY-SHA256 alone, in that request and every later one, expecting the same
+  attribute in responses; with SHA-256 on offer it takes SHA-256 wherever the server listed it
+  (RFC 8656 section 6). It sends USERHASH in place of USERNAME when the nonce cookie has the
+  "username anonymity" bit. It does not retry after a 401 or 438 whose nonce cookie announces
+  PASSWORD-ALGORITHMS when the response has none (a bid-down), nor when no offered algorithm
+  is supported, and it ignores any other response with such a nonce. The user name is sent as
+  an OpaqueString (RFC 8265). `ClientConfig::password_algorithms` restricts the algorithms
+  accepted, for example to SHA-256 alone (RFC 8489 section 18.5.1.1 keeps MD5 for servers that
+  have nothing else). `Client::update_credentials` keeps the negotiated realm, nonce and
+  algorithm. A data connection's ConnectionBind carries the same credential.
+- **turn**: the RTO follows each server's round-trip time as RFC 6298 computes it (never below
+  the initial RTO, no sample from a retransmitted request, dropped after ten minutes without a
+  transaction); `RetransmissionConfig::rto_estimation` turns it off.
+- **turn**: `ErrorResponse::try_alternate` is the redirection (`rtc_stun::alternate::TryAlternate`:
+  every ALTERNATE-SERVER and the ALTERNATE-DOMAIN) of a 300 that was authenticated with the
+  request's credential; `alternate_server` still reports the address of any 300. The client
+  follows none by itself. `Client::follow_alternate(now, &redirect)` is for the application
+  that does: it moves the client to the alternate server of the address family in use, so
+  that the next `allocate` goes there over the same transport with the same credentials, and
+  refuses a server an Allocate was sent to within the last five minutes (RFC 8489 section 10).
+- **stun**: `rtc_stun::timer` (`Schedule`, `RtoEstimator`, the RFC's defaults): the
+  retransmission arithmetic of section 6.2, moved out of `Client` so that the TURN client runs
+  on the same code.
+- **test-env**: `tests/testenv_turn_client.rs` checks against coturn that a wrong password's
+  401 is not answered again, and that requests keep the 500 ms initial RTO.
 
 ### Dependencies
 

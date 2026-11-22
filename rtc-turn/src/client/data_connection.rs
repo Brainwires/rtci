@@ -8,14 +8,14 @@ use std::time::{Duration, Instant};
 use bytes::BytesMut;
 use crypto::RTCCryptoProvider;
 use log::debug;
-use stun::attributes::*;
 use stun::error_code::*;
 use stun::fingerprint::FINGERPRINT;
-use stun::integrity::MessageIntegrity;
 use stun::message::*;
 use stun::textattrs::*;
+use stun::validated::Rejection;
 
-use super::{RequestError, response_is_authentic};
+use super::credential::Credential;
+use super::{RequestError, validator};
 use crate::proto::connid::ConnectionId;
 use shared::error::{Error, Result};
 use shared::{TaggedBytesMut, TransportContext, TransportMessage, TransportProtocol};
@@ -78,14 +78,12 @@ pub struct DataConnection {
     server_addr: SocketAddr,
     local_addr: SocketAddr,
     connection_id: ConnectionId,
-    username: Username,
-    realm: Realm,
-    password: String,
     software: Software,
-    /// The long-term key of the control connection; empty when the server asked for no
-    /// credential there.
-    key: Vec<u8>,
-    nonce: Nonce,
+    /// The long-term credential of the control connection, as the server's last challenge
+    /// on either connection left it; none when the server asked for no credential there.
+    credential: Arc<Credential>,
+    /// The ConnectionBind that is out, as it was sent.
+    request: Message,
     state: State,
     /// The stream so far, until the ConnectionBind response is whole.
     inbound: BytesMut,
@@ -99,12 +97,8 @@ pub(crate) struct DataConnectionConfig {
     pub(crate) server_addr: SocketAddr,
     pub(crate) local_addr: SocketAddr,
     pub(crate) connection_id: ConnectionId,
-    pub(crate) username: Username,
-    pub(crate) realm: Realm,
-    pub(crate) password: String,
     pub(crate) software: Software,
-    pub(crate) key: Vec<u8>,
-    pub(crate) nonce: Nonce,
+    pub(crate) credential: Arc<Credential>,
 }
 
 impl DataConnection {
@@ -115,12 +109,9 @@ impl DataConnection {
             server_addr: config.server_addr,
             local_addr: config.local_addr,
             connection_id: config.connection_id,
-            username: config.username,
-            realm: config.realm,
-            password: config.password,
             software: config.software,
-            key: config.key,
-            nonce: config.nonce,
+            credential: config.credential,
+            request: Message::new(),
             state: State::Closed,
             inbound: BytesMut::new(),
             transmits: VecDeque::new(),
@@ -201,20 +192,15 @@ impl DataConnection {
         if !self.software.text.is_empty() {
             setters.push(Box::new(self.software.clone()));
         }
-        if !self.key.is_empty() {
-            setters.push(Box::new(self.username.clone()));
-            setters.push(Box::new(self.realm.clone()));
-            setters.push(Box::new(self.nonce.clone()));
-            setters.push(Box::new(MessageIntegrity::new_raw_integrity_with_provider(
-                self.key.clone(),
-                self.crypto_provider.crypto(),
-            )));
+        if let Some(authentication) = self.credential.setter(self.crypto_provider.crypto()) {
+            setters.push(authentication);
         }
         setters.push(Box::new(FINGERPRINT));
         let mut msg = Message::new();
         msg.build(&setters)?;
         drop(setters);
         self.transmit(now, &msg.raw);
+        self.request = msg;
         Ok(id)
     }
 
@@ -267,17 +253,30 @@ impl DataConnection {
                 debug!("data connection {}: ignoring {msg}", self.connection_id);
                 continue;
             }
-            // As on the control connection: a response to a signed request is believed only
-            // if it is signed with the same key (RFC 8489 §9.2.5).
-            if !self.key.is_empty()
-                && !response_is_authentic(&mut msg, &self.key, self.crypto_provider.crypto())
-            {
-                debug!(
-                    "data connection {}: discarding {msg}: MESSAGE-INTEGRITY missing or wrong",
-                    self.connection_id
-                );
-                continue;
-            }
+            // As on the control connection (RFC 8489 §6.3, §9, §9.2.5): the response to a
+            // signed request is signed with the same key, and nothing after its integrity
+            // attribute is read. This is a reliable transport, so a response that is not
+            // authentic ends the transaction at once, as an integrity violation; so does one
+            // with an attribute the client has to but does not understand.
+            let msg = match self.credential.check_response(
+                &msg,
+                &validator(),
+                self.crypto_provider.crypto(),
+            ) {
+                Ok(valid) => valid,
+                Err(Rejection::IntegrityMissing | Rejection::IntegrityMismatch) => {
+                    debug!(
+                        "data connection {}: {msg}: integrity attribute missing or wrong",
+                        self.connection_id
+                    );
+                    self.fail(RequestError::Failed(Error::ErrIntegrityMismatch));
+                    return Ok(());
+                }
+                Err(rejection) => {
+                    self.fail(RequestError::Failed(Error::Other(rejection.to_string())));
+                    return Ok(());
+                }
+            };
 
             if msg.typ.class == CLASS_SUCCESS_RESPONSE {
                 self.state = State::Bound;
@@ -291,9 +290,9 @@ impl DataConnection {
             }
 
             let err = RequestError::of(&msg);
-            // The server's nonces may be the connection's own: a 401 or 438 with a nonce is
-            // answered once each with the same request, the control connection's credential
-            // and that nonce (RFC 8489 §9.2.5).
+            // The server's nonces may be the connection's own: a 401 or 438 is answered once
+            // each with the same request and what the response asks for, by the rules of the
+            // control connection (RFC 8489 §9.2.5).
             let again = if err.is(CODE_UNAUTHORIZED) && !challenged {
                 Some((true, stale))
             } else if err.is(CODE_STALE_NONCE) && !stale {
@@ -301,31 +300,28 @@ impl DataConnection {
             } else {
                 None
             };
-            if let Some((challenged, stale)) = again
-                && let Ok(nonce) = Nonce::get_from_as(&msg, ATTR_NONCE)
-            {
-                if let Ok(realm) = Realm::get_from_as(&msg, ATTR_REALM)
-                    && !realm.text.is_empty()
-                    && (self.key.is_empty() || realm.text != self.realm.text)
+            if let Some((challenged, stale)) = again {
+                match self
+                    .credential
+                    .challenged(&self.request, &msg, self.crypto_provider.crypto())
                 {
-                    self.key = MessageIntegrity::long_term_integrity_key(
-                        self.username.text.clone(),
-                        realm.text.clone(),
-                        self.password.clone(),
-                        self.crypto_provider.crypto(),
-                    )?;
-                    self.realm = realm;
-                }
-                if !self.key.is_empty() {
-                    self.nonce = nonce;
-                    let id = self.send_bind(now)?;
-                    self.state = State::Binding {
-                        id,
-                        deadline,
-                        challenged,
-                        stale,
-                    };
-                    continue;
+                    Ok(credential) => {
+                        self.credential = Arc::new(credential);
+                        let id = self.send_bind(now)?;
+                        self.state = State::Binding {
+                            id,
+                            deadline,
+                            challenged,
+                            stale,
+                        };
+                        continue;
+                    }
+                    Err(refused) => {
+                        debug!(
+                            "data connection {}: {err} is not answered: {refused}",
+                            self.connection_id
+                        );
+                    }
                 }
             }
             self.fail(err);
