@@ -1193,6 +1193,17 @@ impl<'a>
                     continue;
                 }
 
+                // A RED packet that held only ULPFEC travels the read leg emptied, so the
+                // interceptors that count sequence numbers see its number. It is not media, and
+                // an application has no use for a packet with nothing in it.
+                if packet
+                    .message
+                    .custom::<interceptor::UlpfecRepair>()
+                    .is_some()
+                {
+                    continue;
+                }
+
                 match &packet.message.packet {
                     Packet::Rtcp(rtcp_packet) => {
                         trace!("Interceptor forwarded a RTCP packet {:?}", rtcp_packet);
@@ -1489,6 +1500,60 @@ mod boundary_tests {
             750_000.0, stats.outbound_rtp_streams[&7].target_bitrate,
             "the estimate must reach the stats, or nothing outside the chain ever learns it"
         );
+    }
+
+    /// A FEC-only RED packet reaches the end of the chain as an emptied RTP packet marked
+    /// `UlpfecRepair`; media, marked or not, is delivered.
+    #[test]
+    fn a_fec_only_packet_does_not_reach_the_application() {
+        let mut ctx = connected();
+        let mut chain = FakeChain::default();
+        let mut stats = RTCStatsAccumulator::default();
+        let rtp_message = |sequence_number: u16| {
+            AttributedPacket::new(Packet::Rtp(rtp::Packet {
+                header: rtp::header::Header {
+                    version: 2,
+                    sequence_number,
+                    ssrc: 7,
+                    ..Default::default()
+                },
+                ..Default::default()
+            }))
+        };
+        for message in [
+            rtp_message(1),
+            rtp_message(2).with(Attribute::Custom(std::sync::Arc::new(
+                interceptor::UlpfecRepair,
+            ))),
+            rtp_message(3).with(Attribute::RecoveredByFec),
+        ] {
+            chain
+                .handle_read(TaggedPacket {
+                    now: Instant::now(),
+                    transport: TransportContext::default(),
+                    message,
+                })
+                .expect("seed");
+        }
+
+        let mut transceivers = vec![];
+        let media_engine = MediaEngine::default();
+        let mut handler = InterceptorHandler::new(
+            &mut ctx,
+            &mut transceivers,
+            &media_engine,
+            &mut chain,
+            &mut stats,
+        );
+        let mut delivered = Vec::new();
+        while let Some(message) = handler.poll_read() {
+            if let RTCMessageInternal::Rtp(RTPMessage::Packet(Packet::Rtp(packet))) =
+                message.message
+            {
+                delivered.push(packet.header.sequence_number);
+            }
+        }
+        assert_eq!(vec![1, 3], delivered);
     }
 
     /// A per-packet attribute is chain business. `RecoveredByFec` tells the NACK generator not to

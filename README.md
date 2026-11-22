@@ -338,6 +338,12 @@ over SRTP and is subject to none of SCTP's flow control.
   encoder, decoder or playout are left out, not reported as 0)
 - ✅ **Interceptors** - Composable RTP/RTCP pipeline: the RTCP session (reports, CNAME, BYE, RFC 3550 / RFC 4585 timing, compound packets), NACK, TWCC feedback and key-frame requests by default;
   bandwidth estimation (GCC), pacing, the jitter buffer and FlexFEC are opt-in
+  opt-in interceptor; ULPFEC (RFC 5109) in RED, as browsers send it for video, through `configure_ulpfec` (opt-in, not
+  in the default codecs)
+- ✅ **Statistics** - `getStats` per the W3C WebRTC Statistics API, for what a transport measures (members that need an
+  encoder, decoder or playout are left out, not reported as 0)
+- ✅ **Interceptors** - Composable RTP/RTCP pipeline: NACK, TWCC feedback, RTCP reports and key-frame requests by default;
+  bandwidth estimation (GCC), pacing, the jitter buffer, FlexFEC and ULPFEC are opt-in
 - ✅ **Pluggable crypto** - `ring` or `aws-lc-rs` built in, or bring your own provider
 
 Each claim above, with its specification section, where it is implemented and the test that proves it, is in

@@ -244,6 +244,7 @@ pub(crate) mod rtcp_session;
 pub(crate) mod rtpfb;
 pub(crate) mod stream_info;
 pub(crate) mod twcc;
+pub(crate) mod ulpfec;
 pub(crate) mod wire_image;
 
 // Fork additions kept over upstream (see FORK.md): the TWCC-driven GCC interceptor with its
@@ -354,6 +355,18 @@ pub use rtpfb::history::History;
 pub use stream_info::{RTCPFeedback, RTPHeaderExtension, StreamInfo};
 pub use twcc::receiver::{TwccReceiverBuilder, TwccReceiverInterceptor};
 pub use twcc::sender::{TwccSenderBuilder, TwccSenderInterceptor};
+pub use ulpfec::decoder::{ULPFEC_MAX_HELD_FEC, ULPFEC_MEDIA_WINDOW};
+pub use ulpfec::sender::{ULPFEC_DEFAULT_NUM_FEC_PACKETS, ULPFEC_DEFAULT_NUM_MEDIA_PACKETS};
+pub use ulpfec::{
+    FEC_HEADER_LENGTH as ULPFEC_HEADER_LENGTH, LONG_MASK_BITS as ULPFEC_LONG_MASK_BITS,
+    MAX_LEVELS as ULPFEC_MAX_LEVELS, ProtectionLevel as UlpfecProtectionLevel, RedFecPayload,
+    RedPlacement, SHORT_MASK_BITS as ULPFEC_SHORT_MASK_BITS, UlpfecDecoder, UlpfecDecoderStats,
+    UlpfecEncoder, UlpfecError, UlpfecLevel, UlpfecPacket, UlpfecReceiveBuilder,
+    UlpfecReceiveInterceptor, UlpfecRepair, UlpfecSendBuilder, UlpfecSendInterceptor,
+    UlpfecStreamPacketizer, depacketize_red as depacketize_red_for_ulpfec,
+    one_level_only_from_fmtp as ulpfec_one_level_only_from_fmtp,
+    validate_scheme as validate_ulpfec_scheme,
+};
 pub use wire_image::{MAX_HELD_WIRE_IMAGES, WireImageTap, WireImages, wire_image_tap};
 
 /// One interceptor of packet processing.

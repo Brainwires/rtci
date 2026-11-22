@@ -89,6 +89,7 @@ history stays intact.
 | `a=rid` takes each simulcast layer's first alternative, once | `src/peer_connection/sdp/mod.rs` (`get_rids`) | W3C webrtc-pc "set the RTCSessionDescription", RFC 8853 section 5.2: alternatives and duplicate rids are not answered as layers. |
 | Static audio payload types without `a=rtpmap`; undefined dynamic ones skipped | `src/peer_connection/sdp/mod.rs` (`codecs_from_media_description`) | RFC 3551's static audio types are read; an undefined dynamic payload type is left out instead of failing the description (RFC 9429 sections 5.3.1, 5.8). |
 | Unknown media types | `rtc-sdp/src/description/session.rs`, `src/peer_connection/internal.rs` (`generate_matched_sdp`), `src/peer_connection/sdp/mod.rs` (`MediaSection::rejected_name`, `unknown_media_name`) | `<media>` is any RFC 8866 token; a section of an unknown type is answered, and kept in later offers, rejected with its media type, protocol and formats (RFC 9429 sections 5.3.1, 5.2.2). |
+| ULPFEC (RFC 5109) in RED and as a separate stream | `rtc-interceptor/src/ulpfec/` (`UlpfecEncoder`, `UlpfecDecoder`, `UlpfecSendInterceptor`, `UlpfecReceiveInterceptor`), `configure_ulpfec`, `src/peer_connection/handler/interceptor.rs` | New; upstream has no ULPFEC coder. FEC header and level headers with 16- and 48-bit masks, any number of protection levels, level-aware iterated recovery over a bounded window, RED carriage (FEC as its own RED packet in the media sequence space, as libwebrtc sends it, or as a redundant block as in RFC 5109 10.3) and a separate stream on a repair SSRC. Opt-in; the RED block reader and writer are private to this carriage until `rtc-rtp` has a RED codec. |
 | Codec preferences keep only the repair formats they list | `src/rtp_transceiver/rtp_receiver/internal.rs` (`get_codecs`), `src/rtp_transceiver/rtp_sender/rtp_codec.rs` (`repair_family`), `src/peer_connection/sdp/mod.rs` (`add_sender_sdp`) | W3C `setCodecPreferences` can remove RTX, ULPFEC and FlexFEC; RTX / FEC SSRC groups are written only when the section has the format. |
 | The default AV1 codec's fmtp is `profile=0` | `src/peer_connection/configuration/media_engine.rs` | The AV1 RTP payload format's parameter is `profile`; it said VP9's `profile-id`. |
 | Per-transceiver header extensions to negotiate (webrtc-extensions RTP header extension control) | `src/rtp_transceiver/{mod,internal}.rs` (`set_header_extensions_to_negotiate`), `src/peer_connection/sdp/mod.rs` | Limits a section's `a=extmap` lines to the listed URIs; `None` (the default) is every extension the media engine negotiates. |
@@ -255,6 +256,8 @@ reason. Today there are two:
   value). `MdnsConfig::without_query_timeout` keeps a query alive; the interval floor is RFC
   6762 section 5.2 and has no switch. A name with more than one address does not resolve
   (`MdnsConfig::with_multiple_addresses(true)` takes the first, as upstream does).
+  `MIME_TYPE_ULP_FEC` itself. RED + ULPFEC is now implemented as opt-in interceptors
+  (`configure_ulpfec`, `rtc-interceptor/src/ulpfec/`); it is still not a default codec.
 
 ### Upstream API replacements taken
 

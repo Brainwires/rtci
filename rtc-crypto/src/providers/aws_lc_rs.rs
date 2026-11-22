@@ -72,25 +72,21 @@ impl RTCCrypto for AwsLcRsCrypto {
                     | HashAlgorithm::Sha512
             ) | CryptoAlgorithm::Hmac(
                 HmacAlgorithm::Sha1 | HmacAlgorithm::Sha256 | HmacAlgorithm::Sha512
-            )
-                | CryptoAlgorithm::Aead(
-                    AeadAlgorithm::Aes128Gcm
-                        | AeadAlgorithm::Aes256Gcm
-                        | AeadAlgorithm::Aes128Ccm
-                        | AeadAlgorithm::Aes128Ccm8
-                        | AeadAlgorithm::ChaCha20Poly1305,
-                )
-                | CryptoAlgorithm::StreamCipher(
-                    StreamCipherAlgorithm::Aes128Ctr
-                        | StreamCipherAlgorithm::Aes256Ctr
-                        | StreamCipherAlgorithm::Aes192Ctr,
-                )
-                | CryptoAlgorithm::BlockCipher(
-                    BlockCipherAlgorithm::Aes128
-                        | BlockCipherAlgorithm::Aes256
-                        | BlockCipherAlgorithm::Aes192,
-                )
-                | CryptoAlgorithm::Cbc(CbcAlgorithm::Aes256Cbc)
+            ) | CryptoAlgorithm::Aead(
+                AeadAlgorithm::Aes128Gcm
+                    | AeadAlgorithm::Aes256Gcm
+                    | AeadAlgorithm::Aes128Ccm
+                    | AeadAlgorithm::Aes128Ccm8
+                    | AeadAlgorithm::ChaCha20Poly1305,
+            ) | CryptoAlgorithm::StreamCipher(
+                StreamCipherAlgorithm::Aes128Ctr
+                    | StreamCipherAlgorithm::Aes256Ctr
+                    | StreamCipherAlgorithm::Aes192Ctr,
+            ) | CryptoAlgorithm::BlockCipher(
+                BlockCipherAlgorithm::Aes128
+                    | BlockCipherAlgorithm::Aes256
+                    | BlockCipherAlgorithm::Aes192,
+            ) | CryptoAlgorithm::Cbc(CbcAlgorithm::Aes256Cbc)
                 | CryptoAlgorithm::KeyExchange(
                     KeyExchangeAlgorithm::P256
                         | KeyExchangeAlgorithm::P384
