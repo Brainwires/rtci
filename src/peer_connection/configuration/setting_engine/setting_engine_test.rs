@@ -260,7 +260,7 @@ fn test_set_sctp_parameters() {
     assert_eq!(s.sctp_max_message_size.as_usize(), 1024);
     assert_eq!(s.sctp_max_receive_buffer_size, Some(4096));
     assert_eq!(s.sctp_mtu, Some(1100));
-    assert!(s.sctp_weighted_fair_queueing);
+    assert_eq!(s.sctp_weighted_fair_queueing, Some(true));
     assert_eq!(s.data_channel.dcep_handshake_timeout, None);
 
     // A bound past the implementation ceiling, and no bound at all, both resolve to the ceiling.

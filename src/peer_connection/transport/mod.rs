@@ -408,7 +408,13 @@ impl<'a> RTCSctpTransport<'a> {
 
     /// The maximum size, in bytes, of a message that can be sent on a data channel.
     ///
-    /// `None` until the association reaches the connected state
+    /// `None` until the association has been negotiated; then the smaller of this side's limit
+    /// and the peer's `a=max-message-size` (RFC 8841 section 6.1). Once the association is
+    /// established without user message interleaving (the peer did not announce RFC 8260, as
+    /// current browsers do not) it is at most 16384: RFC 8831 section 6.6 has the sender limit
+    /// its messages to 16 KB then, and `send` refuses a larger one.
+    /// [`SettingEngineBuilder::with_sctp_message_size_limit_without_interleaving`](crate::peer_connection::configuration::setting_engine::SettingEngineBuilder::with_sctp_message_size_limit_without_interleaving)
+    /// lifts that limit.
     pub fn max_message_size(&self) -> Option<u32> {
         self.peer_connection.sctp_transport().max_message_size()
     }
