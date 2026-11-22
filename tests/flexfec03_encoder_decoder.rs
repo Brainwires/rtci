@@ -23,14 +23,15 @@
 use anyhow::Result;
 use bytes::BytesMut;
 use rtc::interceptor::{
-    Attribute, FlexFec03ReceiveBuilder, FlexFec03SendBuilder, Interceptor, Packet, Registry, Slot,
-    StreamInfo, TaggedPacket,
+    Attribute, FlexFec03ReceiveBuilder, FlexFec03SendBuilder, FlexFecProtection,
+    FlexFecReceiveBuilder, FlexFecSendBuilder, Interceptor, Packet, Registry, Slot, StreamInfo,
+    TaggedPacket,
 };
 use rtc::media_stream::MediaStreamTrack;
 use rtc::peer_connection::RTCPeerConnectionBuilder;
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 use rtc::peer_connection::configuration::media_engine::{
-    MIME_TYPE_FLEX_FEC03, MIME_TYPE_VP8, MediaEngine,
+    MIME_TYPE_FLEX_FEC, MIME_TYPE_FLEX_FEC03, MIME_TYPE_VP8, MediaEngine,
 };
 use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtc::peer_connection::event::RTCPeerConnectionEvent;
@@ -265,10 +266,64 @@ fn video_codec() -> RTCRtpCodecParameters {
     }
 }
 
-fn fec_codec() -> RTCRtpCodecParameters {
+/// Which FlexFEC the two peers negotiate and run.
+#[derive(Clone, Copy, PartialEq)]
+enum Fec {
+    /// draft-ietf-payload-flexible-fec-scheme-03, `video/flexfec-03`.
+    Draft03,
+    /// RFC 8627, `video/flexfec`.
+    Rfc8627,
+}
+
+impl Fec {
+    fn mime_type(self) -> &'static str {
+        match self {
+            Fec::Draft03 => MIME_TYPE_FLEX_FEC03,
+            Fec::Rfc8627 => MIME_TYPE_FLEX_FEC,
+        }
+    }
+
+    /// The `a=rtpmap` line the negotiation must carry.
+    fn rtpmap(self) -> String {
+        match self {
+            Fec::Draft03 => format!("a=rtpmap:{FLEX_FEC_PT} flexfec-03/90000"),
+            Fec::Rfc8627 => format!("a=rtpmap:{FLEX_FEC_PT} flexfec/90000"),
+        }
+    }
+
+    fn encoder(self, registry: Registry) -> Registry {
+        match self {
+            Fec::Draft03 => registry.with(
+                Slot::FecEncoder,
+                FlexFec03SendBuilder::new()
+                    .with_num_media_packets(NUM_MEDIA_PACKETS)
+                    .with_num_fec_packets(NUM_FEC_PACKETS)
+                    .build(),
+            ),
+            // One row packet per ten: the same overhead and the same one loss per block.
+            Fec::Rfc8627 => registry.with(
+                Slot::FecEncoder,
+                FlexFecSendBuilder::new()
+                    .with_protection(FlexFecProtection::Row {
+                        l: NUM_MEDIA_PACKETS as u8,
+                    })
+                    .build(),
+            ),
+        }
+    }
+
+    fn decoder(self, registry: Registry) -> Registry {
+        match self {
+            Fec::Draft03 => registry.with(Slot::FecDecoder, FlexFec03ReceiveBuilder::new().build()),
+            Fec::Rfc8627 => registry.with(Slot::FecDecoder, FlexFecReceiveBuilder::new().build()),
+        }
+    }
+}
+
+fn fec_codec(fec: Fec) -> RTCRtpCodecParameters {
     RTCRtpCodecParameters {
         rtp_codec: RTCRtpCodec {
-            mime_type: MIME_TYPE_FLEX_FEC03.to_owned(),
+            mime_type: fec.mime_type().to_owned(),
             clock_rate: 90000,
             channels: 0,
             sdp_fmtp_line: "repair-window=10000000".to_owned(),
@@ -278,15 +333,26 @@ fn fec_codec() -> RTCRtpCodecParameters {
     }
 }
 
-fn media_engine() -> Result<MediaEngine> {
+fn media_engine(fec: Fec) -> Result<MediaEngine> {
     let mut media_engine = MediaEngine::default();
     media_engine.register_codec(video_codec(), RtpCodecKind::Video)?;
-    media_engine.register_codec(fec_codec(), RtpCodecKind::Video)?;
+    media_engine.register_codec(fec_codec(fec), RtpCodecKind::Video)?;
     Ok(media_engine)
 }
 
 #[tokio::test]
 async fn flexfec03_recovers_every_dropped_packet() -> Result<()> {
+    recovers_every_dropped_packet(Fec::Draft03).await
+}
+
+/// The same path with `video/flexfec` negotiated: the RFC 8627 coder binds on both sides (the
+/// draft-03 one would recover nothing from its packets), and every dropped packet comes back.
+#[tokio::test]
+async fn rfc_8627_flexfec_recovers_every_dropped_packet() -> Result<()> {
+    recovers_every_dropped_packet(Fec::Rfc8627).await
+}
+
+async fn recovers_every_dropped_packet(fec: Fec) -> Result<()> {
     common::install_crypto_provider();
     env_logger::builder()
         .filter_level(log::LevelFilter::Info)
@@ -301,13 +367,11 @@ async fn flexfec03_recovers_every_dropped_packet() -> Result<()> {
     let answerer_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await?);
     let answerer_local_addr = answerer_socket.local_addr()?;
 
-    let mut answerer_media_engine = media_engine()?;
-    let answerer_registry = Registry::new()
-        .with(Slot::FecDecoder, FlexFec03ReceiveBuilder::new().build())
-        .with(
-            Slot::from(RECOVERY_RECORDER_SLOT),
-            RecoveryRecorder::new(arrivals_tx),
-        );
+    let mut answerer_media_engine = media_engine(fec)?;
+    let answerer_registry = fec.decoder(Registry::new()).with(
+        Slot::from(RECOVERY_RECORDER_SLOT),
+        RecoveryRecorder::new(arrivals_tx),
+    );
 
     let mut answerer_pc = RTCPeerConnectionBuilder::new()
         .with_configuration(RTCConfigurationBuilder::new().build())
@@ -335,15 +399,9 @@ async fn flexfec03_recovers_every_dropped_packet() -> Result<()> {
     let offerer_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await?);
     let offerer_local_addr = offerer_socket.local_addr()?;
 
-    let mut offerer_media_engine = media_engine()?;
-    let offerer_registry = Registry::new()
-        .with(
-            Slot::FecEncoder,
-            FlexFec03SendBuilder::new()
-                .with_num_media_packets(NUM_MEDIA_PACKETS)
-                .with_num_fec_packets(NUM_FEC_PACKETS)
-                .build(),
-        )
+    let mut offerer_media_engine = media_engine(fec)?;
+    let offerer_registry = fec
+        .encoder(Registry::new())
         .with(Slot::from(DROP_FILTER_SLOT), DropFilter::new(dropped_tx));
 
     let mut offerer_pc = RTCPeerConnectionBuilder::new()
@@ -379,10 +437,15 @@ async fn flexfec03_recovers_every_dropped_packet() -> Result<()> {
     // ---- negotiate ----
     let offer = offerer_pc.create_offer(None)?;
     assert!(
+        offer.sdp.contains(&fec.rtpmap()),
+        "the offer must carry the repair codec, or nothing below tests FEC:\n{}",
+        offer.sdp
+    );
+    assert!(
         offer
             .sdp
-            .contains(&format!("a=rtpmap:{FLEX_FEC_PT} flexfec-03/90000")),
-        "the offer must carry the repair codec, or nothing below tests FEC:\n{}",
+            .contains(&format!("a=fmtp:{FLEX_FEC_PT} repair-window=10000000")),
+        "the required repair-window parameter goes in a=fmtp:\n{}",
         offer.sdp
     );
     assert!(
@@ -397,9 +460,7 @@ async fn flexfec03_recovers_every_dropped_packet() -> Result<()> {
     answerer_pc.set_remote_description(Instant::now(), offer)?;
     let answer = answerer_pc.create_answer(None)?;
     assert!(
-        answer
-            .sdp
-            .contains(&format!("a=rtpmap:{FLEX_FEC_PT} flexfec-03/90000")),
+        answer.sdp.contains(&fec.rtpmap()),
         "the answerer must select the repair codec, or its decoder never binds:\n{}",
         answer.sdp
     );

@@ -169,12 +169,19 @@ pub const MIME_TYPE_PCMA: &str = "audio/PCMA";
 /// Note: MIME type matching is case-insensitive.
 pub const MIME_TYPE_RTX: &str = "video/rtx";
 
-/// FlexFEC forward error correction MIME type.
+/// FlexFEC forward error correction MIME type, as published: RFC 8627.
+///
+/// Its coder is `interceptor::FlexFecSendBuilder` / `interceptor::FlexFecReceiveBuilder`
+/// (opt-in). The payload format is not compatible with [`MIME_TYPE_FLEX_FEC03`], and each name
+/// selects its own coder. Register it with its required `repair-window` parameter
+/// (`interceptor::FlexFecParameters::to_fmtp`).
 ///
 /// Note: MIME type matching is case-insensitive.
 pub const MIME_TYPE_FLEX_FEC: &str = "video/flexfec";
 
-/// FlexFEC-03 forward error correction MIME type.
+/// FlexFEC-03 forward error correction MIME type: draft-ietf-payload-flexible-fec-scheme-03,
+/// the FlexFEC browsers send. Its coder is `interceptor::FlexFec03SendBuilder` /
+/// `interceptor::FlexFec03ReceiveBuilder` (opt-in).
 ///
 /// Note: MIME type matching is case-insensitive.
 pub const MIME_TYPE_FLEX_FEC03: &str = "video/flexfec-03";
@@ -1364,13 +1371,13 @@ impl MediaEngine {
         kind: RtpCodecKind,
         direction: RTCRtpTransceiverDirection,
     ) -> bool {
-        // Only the FlexFEC this engine implements (draft-03), matched exactly: RFC 8627's
-        // `video/flexfec` is another wire format.
+        // The FEC formats the engine has a coder for, each matched exactly: FlexFEC draft-03
+        // (`video/flexfec-03`) and RFC 8627 (`video/flexfec`).
         self.get_rtp_parameters_by_kind(kind, direction)
             .codecs
             .iter()
             .any(|codec| {
-                crate::rtp_transceiver::rtp_sender::rtp_codec::is_flexfec03_mime_type(
+                crate::rtp_transceiver::rtp_sender::rtp_codec::is_fec_mime_type(
                     &codec.rtp_codec.mime_type,
                 )
             })

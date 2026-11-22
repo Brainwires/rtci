@@ -5,7 +5,7 @@ use crate::peer_connection::configuration::media_engine::MediaEngine;
 use crate::rtp_transceiver::direction::RTCRtpTransceiverDirection;
 use crate::rtp_transceiver::rtp_sender::rtp_capabilities::RTCRtpCapabilities;
 use crate::rtp_transceiver::rtp_sender::rtp_codec::{
-    RtpCodecKind, encoding_send_codec, find_fec_payload_type, find_rtx_payload_type,
+    RtpCodecKind, encoding_send_codec, find_fec_format, find_rtx_payload_type,
 };
 use crate::rtp_transceiver::rtp_sender::rtp_codec_parameters::RTCRtpCodecParameters;
 use crate::rtp_transceiver::rtp_sender::rtp_encoding_parameters::RTCRtpEncodingParameters;
@@ -402,7 +402,7 @@ impl RTCRtpSenderInternal {
                 && let Some(codec) = encoding_send_codec(&coding.codec, codecs)
             {
                 let payload_type_rtx = find_rtx_payload_type(codec.payload_type, codecs);
-                let payload_type_fec = find_fec_payload_type(codecs);
+                let fec_format = find_fec_format(codecs);
                 infos.push(create_stream_info(
                     ssrc,
                     // A repair SSRC goes with a repair payload type: without one negotiated it
@@ -417,11 +417,11 @@ impl RTCRtpSenderInternal {
                         .rtp_coding_parameters
                         .fec
                         .as_ref()
-                        .filter(|_| payload_type_fec.is_some())
+                        .filter(|_| fec_format.is_some())
                         .map(|fec| fec.ssrc),
                     codec.payload_type,
                     payload_type_rtx,
-                    payload_type_fec,
+                    fec_format.as_ref(),
                     &codec.rtp_codec,
                     &header_extensions,
                 ));

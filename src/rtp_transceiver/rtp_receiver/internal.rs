@@ -7,7 +7,7 @@ use crate::rtp_transceiver::rtp_receiver::rtp_contributing_source::{
 };
 use crate::rtp_transceiver::rtp_sender::rtp_capabilities::RTCRtpCapabilities;
 use crate::rtp_transceiver::rtp_sender::rtp_codec::{
-    CodecMatch, RtpCodecKind, codec_parameters_fuzzy_search, find_fec_payload_type,
+    CodecMatch, FecFormat, RtpCodecKind, codec_parameters_fuzzy_search, find_fec_format,
     find_rtx_payload_type, is_repair_codec, parse_rtx_apt, repair_family,
 };
 use crate::rtp_transceiver::rtp_sender::rtp_codec_parameters::RTCRtpCodecParameters;
@@ -257,7 +257,7 @@ impl RTCRtpReceiverInternal {
         ssrc_fec: Option<SSRC>,
         payload_type: PayloadType,
         payload_type_rtx: Option<PayloadType>,
-        payload_type_fec: Option<PayloadType>,
+        fec_format: Option<&FecFormat>,
         rtp_codec: &RTCRtpCodec,
         header_extensions: &[RTCRtpHeaderExtensionParameters],
     ) {
@@ -267,7 +267,7 @@ impl RTCRtpReceiverInternal {
             ssrc_fec,
             payload_type,
             payload_type_rtx,
-            payload_type_fec,
+            fec_format,
             rtp_codec,
             header_extensions,
         );
@@ -301,8 +301,8 @@ impl RTCRtpReceiverInternal {
                         .map(|payload_type| (rtx.ssrc, payload_type))
                 });
                 let fec = coding.rtp_coding_parameters.fec.as_ref().and_then(|fec| {
-                    find_fec_payload_type(&parameters.rtp_parameters.codecs)
-                        .map(|payload_type| (fec.ssrc, payload_type))
+                    find_fec_format(&parameters.rtp_parameters.codecs)
+                        .map(|fec_format| (fec.ssrc, fec_format))
                 });
 
                 RTCRtpReceiverInternal::interceptor_remote_stream_op(
@@ -310,10 +310,10 @@ impl RTCRtpReceiverInternal {
                     is_binding,
                     ssrc,
                     rtx.map(|(ssrc_rtx, _)| ssrc_rtx),
-                    fec.map(|(ssrc_fec, _)| ssrc_fec),
+                    fec.as_ref().map(|(ssrc_fec, _)| *ssrc_fec),
                     codec.payload_type,
                     rtx.map(|(_, payload_type_rtx)| payload_type_rtx),
-                    fec.map(|(_, payload_type_fec)| payload_type_fec),
+                    fec.as_ref().map(|(_, fec_format)| fec_format),
                     &codec.rtp_codec,
                     &parameters.rtp_parameters.header_extensions,
                 );
@@ -337,14 +337,14 @@ impl RTCRtpReceiverInternal {
                     );
                 }
 
-                if let Some((ssrc_fec, payload_type_fec)) = fec {
+                if let Some((ssrc_fec, fec_format)) = fec {
                     RTCRtpReceiverInternal::interceptor_remote_stream_op(
                         interceptor,
                         is_binding,
                         ssrc_fec,
                         None,
                         None,
-                        payload_type_fec,
+                        fec_format.payload_type,
                         None,
                         None,
                         &codec.rtp_codec,
@@ -374,7 +374,7 @@ mod repair_association_test {
     use super::{RTCRtpReceiverInternal, RtpCodecKind};
     use crate::media_stream::track::MediaStreamTrack;
     use crate::peer_connection::configuration::media_engine::{
-        MIME_TYPE_FLEX_FEC03, MIME_TYPE_RTX, MIME_TYPE_VP8, MediaEngine,
+        MIME_TYPE_FLEX_FEC, MIME_TYPE_FLEX_FEC03, MIME_TYPE_RTX, MIME_TYPE_VP8, MediaEngine,
     };
     use crate::rtp_transceiver::rtp_sender::rtp_codec_parameters::RTCRtpCodecParameters;
     use crate::rtp_transceiver::rtp_sender::rtp_coding_parameters::RTCRtpCodingParameters;
@@ -565,6 +565,53 @@ mod repair_association_test {
             Some(98),
             media.payload_type_fec,
             "and the FlexFEC payload type, which is the other half of the interceptor's gate"
+        );
+    }
+
+    /// The stream says which FEC format its repair flow is, so the right coder binds: draft-03
+    /// here, as negotiated.
+    #[test]
+    fn the_media_stream_names_its_fec_format() {
+        let streams = run(
+            &media_engine(),
+            vec![encoding("", 1000, None, Some(3000))],
+            true,
+        );
+
+        let media = primary(&streams, 1000);
+        assert_eq!(MIME_TYPE_FLEX_FEC03, media.mime_type_fec);
+        assert!(media.fec_is_flexfec03() && !media.fec_is_flexfec());
+    }
+
+    /// RFC 8627 section 7: with `video/flexfec` negotiated, the `FEC-FR` repair flow is bound as
+    /// RFC 8627 FlexFEC, and its `repair-window` (section 5.1) goes with it.
+    #[test]
+    fn an_rfc_8627_repair_flow_is_bound_as_flexfec_with_its_repair_window() {
+        let mut media_engine = media_engine_without_fec();
+        media_engine
+            .register_codec(
+                codec(110, MIME_TYPE_FLEX_FEC, "repair-window=200000"),
+                RtpCodecKind::Video,
+            )
+            .expect("flexfec");
+
+        let streams = run(
+            &media_engine,
+            vec![encoding("", 1000, None, Some(3000))],
+            true,
+        );
+
+        let media = primary(&streams, 1000);
+        assert_eq!(
+            (Some(3000), Some(110)),
+            (media.ssrc_fec, media.payload_type_fec)
+        );
+        assert_eq!(MIME_TYPE_FLEX_FEC, media.mime_type_fec);
+        assert_eq!("repair-window=200000", media.sdp_fmtp_line_fec);
+        assert!(media.fec_is_flexfec() && !media.fec_is_flexfec03());
+        assert!(
+            streams.iter().any(|info| info.ssrc == 3000),
+            "the repair flow is bound in its own right: {streams:?}"
         );
     }
 

@@ -12,7 +12,7 @@ use crate::peer_connection::message::internal::{
 };
 use crate::rtp_transceiver::rtp_receiver::internal::RTCRtpReceiverInternal;
 use crate::rtp_transceiver::rtp_sender::negotiates_ccfb;
-use crate::rtp_transceiver::rtp_sender::rtp_codec::{find_fec_payload_type, find_rtx_payload_type};
+use crate::rtp_transceiver::rtp_sender::rtp_codec::{find_fec_format, find_rtx_payload_type};
 use crate::rtp_transceiver::rtp_sender::rtp_coding_parameters::{
     RTCRtpCodingParameters, RTCRtpRtxParameters,
 };
@@ -402,17 +402,17 @@ impl<'a> InterceptorHandler<'a> {
             payload_type,
             &parameters.rtp_parameters.codecs,
         ));
-        let fec = fec_ssrc.zip(find_fec_payload_type(&parameters.rtp_parameters.codecs));
+        let fec = fec_ssrc.zip(find_fec_format(&parameters.rtp_parameters.codecs));
 
         RTCRtpReceiverInternal::interceptor_remote_stream_op(
             self.interceptor,
             true,
             ssrc,
             rtx.map(|(ssrc_rtx, _)| ssrc_rtx),
-            fec.map(|(ssrc_fec, _)| ssrc_fec),
+            fec.as_ref().map(|(ssrc_fec, _)| *ssrc_fec),
             payload_type,
             rtx.map(|(_, payload_type_rtx)| payload_type_rtx),
-            fec.map(|(_, payload_type_fec)| payload_type_fec),
+            fec.as_ref().map(|(_, fec_format)| fec_format),
             &codec,
             &parameters.rtp_parameters.header_extensions,
         );
@@ -437,14 +437,14 @@ impl<'a> InterceptorHandler<'a> {
             );
         }
 
-        if let Some((ssrc_fec, payload_type_fec)) = fec {
+        if let Some((ssrc_fec, fec_format)) = fec {
             RTCRtpReceiverInternal::interceptor_remote_stream_op(
                 self.interceptor,
                 true,
                 ssrc_fec,
                 None,
                 None,
-                payload_type_fec,
+                fec_format.payload_type,
                 None,
                 None,
                 &codec,
@@ -806,17 +806,17 @@ impl<'a> InterceptorHandler<'a> {
             codec.payload_type,
             &parameters.rtp_parameters.codecs,
         ));
-        let fec = fec_ssrc.zip(find_fec_payload_type(&parameters.rtp_parameters.codecs));
+        let fec = fec_ssrc.zip(find_fec_format(&parameters.rtp_parameters.codecs));
 
         RTCRtpReceiverInternal::interceptor_remote_stream_op(
             self.interceptor,
             true,
             ssrc,
             rtx.map(|(ssrc_rtx, _)| ssrc_rtx),
-            fec.map(|(ssrc_fec, _)| ssrc_fec),
+            fec.as_ref().map(|(ssrc_fec, _)| *ssrc_fec),
             codec.payload_type,
             rtx.map(|(_, payload_type_rtx)| payload_type_rtx),
-            fec.map(|(_, payload_type_fec)| payload_type_fec),
+            fec.as_ref().map(|(_, fec_format)| fec_format),
             &codec.rtp_codec,
             &parameters.rtp_parameters.header_extensions,
         );
@@ -841,14 +841,14 @@ impl<'a> InterceptorHandler<'a> {
             );
         }
 
-        if let Some((ssrc_fec, payload_type_fec)) = fec {
+        if let Some((ssrc_fec, fec_format)) = fec {
             RTCRtpReceiverInternal::interceptor_remote_stream_op(
                 self.interceptor,
                 true,
                 ssrc_fec,
                 None,
                 None,
-                payload_type_fec,
+                fec_format.payload_type,
                 None,
                 None,
                 &codec.rtp_codec,
