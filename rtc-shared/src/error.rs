@@ -1929,6 +1929,10 @@ pub enum Error {
     #[error("label is larger than 65535 bytes")]
     ErrLabelTooLarge,
 
+    /// A character `insertDTMF` does not take (W3C: an `InvalidCharacterError`).
+    #[error("{0:?} is not a DTMF tone")]
+    ErrDtmfInvalidCharacter(char),
+
     /// A send would take a data channel's `bufferedAmount` above the SCTP transport's
     /// `[[MaxBufferSize]]` (W3C `send()`: an `OperationError`).
     #[error("the data channel's send buffer is full")]

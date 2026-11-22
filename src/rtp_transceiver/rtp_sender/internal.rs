@@ -76,6 +76,8 @@ pub(crate) struct RTCRtpSenderInternal {
     /// The SSRCs of the simulcast encodings an answer removed (`apply_simulcast_answer`): the
     /// track still has them, but they are neither bound nor sent.
     removed_ssrcs: Vec<SSRC>,
+    /// The `RTCDTMFSender` of an audio sender: its slots and playout.
+    pub(crate) dtmf: super::dtmf::DtmfState,
 }
 
 impl RTCRtpSenderInternal {

@@ -1128,6 +1128,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+- **dtmf**: `RTCDTMFSender` (W3C webrtc-pc section 7) as `RTCRtpSender::dtmf()` for an audio
+  sender: `insert_dtmf(now, tones, duration, inter_tone_gap)`, `tone_buffer()`,
+  `can_insert_dtmf()`; `RTCPeerConnectionEvent::OnDtmfToneChange`. The tones play out on the
+  connection's timers as RFC 4733 telephone-event packets in the sender's first stream: the
+  engine numbers them in the stream's sequence and moves the application's later audio
+  packets past them (`write_rtp` adds the count of event packets sent), timestamps follow the
+  last audio packet, the final packet goes three times 50 ms apart.
+- **rtp**: `TelephoneEventSender` sends the final report of each segment of a long event three
+  times, as the final report of the event (RFC 4733 section 2.5.1.4 SHOULD).
 - **data channels**: `RTCDataChannel::buffered_amount()` (W3C `bufferedAmount`). At the
   SCTP connected procedure a channel without a usable id fails alone (`OnError` with
   `data-channel-failure`, then `OnClose`) instead of the whole event failing; the DCEP

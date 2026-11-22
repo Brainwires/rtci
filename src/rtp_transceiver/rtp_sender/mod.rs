@@ -173,6 +173,7 @@
 #[cfg(test)]
 mod rtp_sender_test;
 
+pub mod dtmf;
 pub(crate) mod internal;
 pub(crate) mod rtcp_parameters;
 pub(crate) mod rtp_capabilities;
@@ -471,7 +472,29 @@ impl RTCRtpSender<'_> {
     /// packet's payload type nor its encoding's codec is negotiated on this sender leg), or
     /// internal handle_write returns error. A packet whose payload type is not negotiated is
     /// rewritten to its encoding's negotiated payload type.
-    pub fn write_rtp(&mut self, now: Instant, mut packet: rtp::Packet) -> Result<()> {
+    pub fn write_rtp(&mut self, now: Instant, packet: rtp::Packet) -> Result<()> {
+        self.write_rtp_inner(now, packet, true)
+    }
+
+    /// W3C `RTCRtpSender.dtmf`: the DTMF sender of an audio sender, `None` for a video one.
+    pub fn dtmf(&mut self) -> Option<dtmf::RTCDTMFSender<'_>> {
+        if self.sender().kind() != RtpCodecKind::Audio {
+            return None;
+        }
+        Some(dtmf::RTCDTMFSender {
+            id: self.id,
+            peer_connection: &mut *self.peer_connection,
+        })
+    }
+
+    /// `write_rtp`; `from_application` is false for the engine's own telephone-event packets,
+    /// whose sequence numbers are already the stream's.
+    pub(crate) fn write_rtp_inner(
+        &mut self,
+        now: Instant,
+        mut packet: rtp::Packet,
+        from_application: bool,
+    ) -> Result<()> {
         // peer_connection is mutable borrow, its rtp_transceivers won't be resized and
         // the direction won't be changed too, so, unwrap() here is safe.
 
@@ -615,6 +638,17 @@ impl RTCRtpSender<'_> {
                     .header
                     .set_extension(id, bytes::Bytes::copy_from_slice(value.as_bytes()))?;
             }
+        }
+
+        // RFC 4733 section 2.5.1.2: DTMF events share the stream's sequence numbers. The
+        // first encoding's stream carries them; the application's packets there move past
+        // the event packets sent before them.
+        if from_application
+            && encodings
+                .first()
+                .is_some_and(|first| first.rtp_coding_parameters.ssrc == Some(packet.header.ssrc))
+        {
+            sender.dtmf.on_media_packet(now, &mut packet);
         }
 
         let track_id = sender.track().track_id().to_string();

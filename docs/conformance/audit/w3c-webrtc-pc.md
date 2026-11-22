@@ -10,15 +10,15 @@ Totals (rows 957):
 
 The section 8 rows (statistics) carry the verdicts of branch `conf/stats-conformance`; the totals include them.
 
-- MUST: tested 611 / untested 102 / partial 82 / missing 67 / violated 6 / n-a 61
+- MUST: tested 630 / untested 108 / partial 82 / missing 42 / violated 6 / n-a 61
 - SHOULD: tested 4 / untested 0 / partial 1 / missing 0 / violated 0 / n-a 5
-- MAY: tested 3 / untested 2 / partial 0 / missing 1 / violated 0 / n-a 12
+- MAY: tested 3 / untested 2 / partial 0 / missing 0 / violated 0 / n-a 13
 
 By pass:
 
 - sections 1 to 4: rows 399; MUST: tested 222 / untested 53 / partial 38 / missing 32 / violated 2 / n-a 35
 - section 5: rows 258; MUST: tested 178 / untested 26 / partial 24 / missing 6 / violated 3 / n-a 13
-- sections 6 to 12: rows 300; MUST: tested 211 / untested 23 / partial 20 / missing 29 / violated 1 / n-a 13
+- sections 6 to 12: rows 300; MUST: tested 230 / untested 29 / partial 20 / missing 4 / violated 1 / n-a 13
 
 | ID | § | Level | Clause (short paraphrase) | Verdict | Code | Test | Note |
 |---|---|---|---|---|---|---|---|
@@ -791,31 +791,31 @@ By pass:
 | WEBRTC-6.3-1 | 6.3 | MUST | RTCDataChannelEvent.channel names the announced channel | tested | `src/peer_connection/event/data_channel_event.rs:1` | `tests/data_channels_create_interop.rs` | The event carries the channel handle |
 | WEBRTC-6.3-2 | 6.3 | MUST | RTCDataChannelEvent constructor and init dictionary | n/a | - | - | JS event construction |
 | WEBRTC-6.4-1 | 6.4 | MUST | A channel with listeners or queued data is not garbage collected | n/a | - | - | Engine owns channels; no GC |
-| WEBRTC-7.1-1 | 7.1 | MUST | RTCRtpSender.dtmf: a DTMF sender for an audio sender, else null | missing | `src/rtp_transceiver/rtp_sender/mod.rs:1` | - | No RTCDTMFSender (listed as not implemented on purpose) |
-| WEBRTC-7.2-1 | 7.2 | MUST | RTCDTMFSender has Duration, InterToneGap and ToneBuffer slots | missing | - | - | - |
-| WEBRTC-7.2-2 | 7.2 | MUST | canInsertDTMF attribute returns the algorithm's result | missing | - | - | - |
-| WEBRTC-7.2-3 | 7.2 | MUST | toneBuffer returns the tones remaining to be played | missing | - | - | - |
-| WEBRTC-7.2-4 | 7.2 | MUST | insertDTMF: characters 0-9, A-D, #, * generate tones; a-d normalized to upper case | missing | - | - | - |
-| WEBRTC-7.2-5 | 7.2 | MUST | insertDTMF: "," is a 2 second delay | missing | - | - | - |
-| WEBRTC-7.2-6 | 7.2 | MAY | insertDTMF: duration and gap may be stretched to RTP packet boundaries, by at most one packet | missing | - | - | - |
-| WEBRTC-7.2-7 | 7.2 | MUST | insertDTMF: InvalidStateError when DTMF cannot be sent | missing | - | - | - |
-| WEBRTC-7.2-8 | 7.2 | MUST | insertDTMF: unrecognized characters throw InvalidCharacterError | missing | - | - | - |
-| WEBRTC-7.2-9 | 7.2 | MUST | insertDTMF: replace ToneBuffer, set Duration and InterToneGap | missing | - | - | - |
-| WEBRTC-7.2-10 | 7.2 | MUST | insertDTMF: duration clamped to 40..6000 ms | missing | - | - | - |
-| WEBRTC-7.2-11 | 7.2 | MUST | insertDTMF: interToneGap clamped to 30..6000 ms | missing | - | - | - |
-| WEBRTC-7.2-12 | 7.2 | MUST | insertDTMF: an empty buffer aborts; a playout task already scheduled is kept | missing | - | - | - |
-| WEBRTC-7.2-13 | 7.2 | MUST | Playout task: abort when DTMF cannot be sent | missing | - | - | - |
-| WEBRTC-7.2-14 | 7.2 | MUST | Playout task: empty buffer fires tonechange with "" and stops | missing | - | - | - |
-| WEBRTC-7.2-15 | 7.2 | MUST | Playout task: "," delays 2000 ms then continues | missing | - | - | - |
-| WEBRTC-7.2-16 | 7.2 | MUST | Playout task: play the tone for Duration with the telephone-event codec, continue after Duration plus InterToneGap | missing | `src/peer_connection/configuration/media_engine.rs:191` | - | Only the MIME constant exists: no RFC 4733 payload builder, no timer; an application writes the event packets itself |
-| WEBRTC-7.2-17 | 7.2 | MUST | Playout task: fire tonechange with the tone | missing | - | - | - |
-| WEBRTC-7.3-1 | 7.3 | MUST | canInsertDTMF: false unless the connection is "connected" | missing | - | - | - |
-| WEBRTC-7.3-2 | 7.3 | MUST | canInsertDTMF: false if the transceiver is stopping | missing | - | - | - |
-| WEBRTC-7.3-3 | 7.3 | MUST | canInsertDTMF: false if the sender has no track | missing | - | - | - |
-| WEBRTC-7.3-4 | 7.3 | MUST | canInsertDTMF: false unless currentDirection is sendrecv or sendonly | missing | - | - | - |
-| WEBRTC-7.3-5 | 7.3 | MUST | canInsertDTMF: false if the first encoding is inactive | missing | - | - | - |
-| WEBRTC-7.3-6 | 7.3 | MUST | canInsertDTMF: false if audio/telephone-event is not negotiated for sending | missing | `src/rtp_transceiver/rtp_sender/rtp_codec.rs:117` | - | telephone-event is recognised as a non-media codec but is not in the default codecs |
-| WEBRTC-7.4-1 | 7.4 | MUST | RTCDTMFToneChangeEvent.tone: the tone begun, or "" at the end | missing | - | - | - |
+| WEBRTC-7.1-1 | 7.1 | MUST | RTCRtpSender.dtmf: a DTMF sender for an audio sender, else null | tested | src/rtp_transceiver/rtp_sender/mod.rs (dtmf) | insert_dtmf_refuses_unknown_characters_and_an_empty_string_cancels | `RTCRtpSender::dtmf()`: `Some` for an audio sender, `None` for a video one |
+| WEBRTC-7.2-1 | 7.2 | MUST | RTCDTMFSender has Duration, InterToneGap and ToneBuffer slots | tested | src/rtp_transceiver/rtp_sender/dtmf.rs (DtmfState) | tones_play_out_as_telephone_events_with_tone_changes |  |
+| WEBRTC-7.2-2 | 7.2 | MUST | canInsertDTMF attribute returns the algorithm's result | tested | src/rtp_transceiver/rtp_sender/dtmf.rs (can_insert_dtmf) | tones_play_out_as_telephone_events_with_tone_changes |  |
+| WEBRTC-7.2-3 | 7.2 | MUST | toneBuffer returns the tones remaining to be played | tested | src/rtp_transceiver/rtp_sender/dtmf.rs (tone_buffer) | tones_play_out_as_telephone_events_with_tone_changes, insert_dtmf_refuses_unknown_characters_and_an_empty_string_cancels |  |
+| WEBRTC-7.2-4 | 7.2 | MUST | insertDTMF: characters 0-9, A-D, #, * generate tones; a-d normalized to upper case | tested | src/rtp_transceiver/rtp_sender/dtmf.rs (insert) | tones_play_out_as_telephone_events_with_tone_changes | "1a" plays 1 then A |
+| WEBRTC-7.2-5 | 7.2 | MUST | insertDTMF: "," is a 2 second delay | tested | src/rtp_transceiver/rtp_sender/dtmf.rs (playout_task) | a_comma_pauses_two_seconds |  |
+| WEBRTC-7.2-6 | 7.2 | MAY | insertDTMF: duration and gap may be stretched to RTP packet boundaries, by at most one packet | n/a | src/rtp_transceiver/rtp_sender/dtmf.rs | - | MAY: the tones are not stretched to packet boundaries; the playout runs on the connection's timers, in virtual time |
+| WEBRTC-7.2-7 | 7.2 | MUST | insertDTMF: InvalidStateError when DTMF cannot be sent | tested | src/rtp_transceiver/rtp_sender/dtmf.rs (insert_dtmf) | tones_play_out_as_telephone_events_with_tone_changes | InvalidStateError before the connection is connected |
+| WEBRTC-7.2-8 | 7.2 | MUST | insertDTMF: unrecognized characters throw InvalidCharacterError | tested | src/rtp_transceiver/rtp_sender/dtmf.rs (insert) | insert_dtmf_refuses_unknown_characters_and_an_empty_string_cancels | `Error::ErrDtmfInvalidCharacter` |
+| WEBRTC-7.2-9 | 7.2 | MUST | insertDTMF: replace ToneBuffer, set Duration and InterToneGap | tested | src/rtp_transceiver/rtp_sender/dtmf.rs (insert) | insert_dtmf_refuses_unknown_characters_and_an_empty_string_cancels |  |
+| WEBRTC-7.2-10 | 7.2 | MUST | insertDTMF: duration clamped to 40..6000 ms | tested | src/rtp_transceiver/rtp_sender/dtmf.rs (insert) | tones_play_out_as_telephone_events_with_tone_changes | 10 ms is played for 40 ms (the final duration is 40 ms worth of units) |
+| WEBRTC-7.2-11 | 7.2 | MUST | insertDTMF: interToneGap clamped to 30..6000 ms | tested | src/rtp_transceiver/rtp_sender/dtmf.rs (insert) | tones_play_out_as_telephone_events_with_tone_changes | 10 ms gap becomes 30 ms: tones 70 ms apart |
+| WEBRTC-7.2-12 | 7.2 | MUST | insertDTMF: an empty buffer aborts; a playout task already scheduled is kept | tested | src/rtp_transceiver/rtp_sender/dtmf.rs (insert) | insert_dtmf_refuses_unknown_characters_and_an_empty_string_cancels |  |
+| WEBRTC-7.2-13 | 7.2 | MUST | Playout task: abort when DTMF cannot be sent | untested | src/rtp_transceiver/rtp_sender/dtmf.rs (playout_task) | - | the task stops when "determine if DTMF can be sent" says no (a tone in progress is still ended); not provoked by a test |
+| WEBRTC-7.2-14 | 7.2 | MUST | Playout task: empty buffer fires tonechange with "" and stops | tested | src/rtp_transceiver/rtp_sender/dtmf.rs (playout_task) | tones_play_out_as_telephone_events_with_tone_changes |  |
+| WEBRTC-7.2-15 | 7.2 | MUST | Playout task: "," delays 2000 ms then continues | tested | src/rtp_transceiver/rtp_sender/dtmf.rs (playout_task) | a_comma_pauses_two_seconds |  |
+| WEBRTC-7.2-16 | 7.2 | MUST | Playout task: play the tone for Duration with the telephone-event codec, continue after Duration plus InterToneGap | tested | src/rtp_transceiver/rtp_sender/dtmf.rs (playout_task, advance_tone) | tones_play_out_as_telephone_events_with_tone_changes | telephone-event packets through the sender (rtc-rtp `TelephoneEventSender`), updates every 50 ms |
+| WEBRTC-7.2-17 | 7.2 | MUST | Playout task: fire tonechange with the tone | tested | src/rtp_transceiver/rtp_sender/dtmf.rs (playout_task) | tones_play_out_as_telephone_events_with_tone_changes | `RTCPeerConnectionEvent::OnDtmfToneChange` |
+| WEBRTC-7.3-1 | 7.3 | MUST | canInsertDTMF: false unless the connection is "connected" | tested | src/rtp_transceiver/rtp_sender/dtmf.rs (dtmf_stream) | tones_play_out_as_telephone_events_with_tone_changes |  |
+| WEBRTC-7.3-2 | 7.3 | MUST | canInsertDTMF: false if the transceiver is stopping | untested | src/rtp_transceiver/rtp_sender/dtmf.rs (dtmf_stream) | - | checked: stopping transceiver; not asserted by a test |
+| WEBRTC-7.3-3 | 7.3 | MUST | canInsertDTMF: false if the sender has no track | untested | src/rtp_transceiver/rtp_sender/dtmf.rs (dtmf_stream) | - | checked: sender without a track; not asserted by a test |
+| WEBRTC-7.3-4 | 7.3 | MUST | canInsertDTMF: false unless currentDirection is sendrecv or sendonly | untested | src/rtp_transceiver/rtp_sender/dtmf.rs (dtmf_stream) | - | checked: current direction not sending; not asserted by a test |
+| WEBRTC-7.3-5 | 7.3 | MUST | canInsertDTMF: false if the first encoding is inactive | untested | src/rtp_transceiver/rtp_sender/dtmf.rs (dtmf_stream) | - | checked: first encoding inactive; not asserted by a test |
+| WEBRTC-7.3-6 | 7.3 | MUST | canInsertDTMF: false if audio/telephone-event is not negotiated for sending | untested | src/rtp_transceiver/rtp_sender/dtmf.rs (dtmf_stream) | - | checked: telephone-event not negotiated (it is in the default codecs); not asserted by a test |
+| WEBRTC-7.4-1 | 7.4 | MUST | RTCDTMFToneChangeEvent.tone: the tone begun, or "" at the end | tested | src/rtp_transceiver/rtp_sender/dtmf.rs (RTCDTMFToneChangeEvent) | tones_play_out_as_telephone_events_with_tone_changes |  |
 | WEBRTC-8.1-1 | 8.1 | MUST | A track selector must be sent or received by this connection | tested | `src/statistics/mod.rs:81`, `src/statistics/accumulator/mod.rs:303` | `test_stats_selector_no_matching_streams` | Selector is a sender or receiver id of this connection |
 | WEBRTC-8.1-2 | 8.1 | MUST | Monitored objects stay available after close() unless their lifetime says otherwise | tested | `src/peer_connection/mod.rs:2992` | `losing_the_selected_pair_is_a_change_and_stats_outlive_close` | See STATS-4.3-1 |
 | WEBRTC-8.2-1 | 8.2 | MUST | getStats: null selector selects the whole connection | tested | `src/statistics/accumulator/mod.rs:290` | `test_stats_selector_none_returns_all`, `test_get_stats_selector_none_complete` | - |
@@ -972,7 +972,7 @@ By pass:
 | WEBRTC-12-13 | 12 | MUST | RTCPeerConnection connectionstatechange | tested | `src/peer_connection/event/mod.rs:458` | `tests/data_channels_negotiated_rtc2rtc.rs` | - |
 | WEBRTC-12-14 | 12 | MUST | RTCPeerConnection icecandidateerror | tested | src/peer_connection/event/mod.rs (OnIceCandidateErrorEvent) | ice_candidate_errors_follow_the_spec_rules |  |
 | WEBRTC-12-15 | 12 | MUST | RTCPeerConnection datachannel | partial | `src/peer_connection/handler/datachannel.rs:186` | `tests/data_channels_create_interop.rs` | Folded into the channel's `OnOpen` |
-| WEBRTC-12-16 | 12 | MUST | RTCDTMFSender tonechange | missing | - | - | No DTMF sender |
+| WEBRTC-12-16 | 12 | MUST | RTCDTMFSender tonechange | tested | src/peer_connection/event/mod.rs (OnDtmfToneChange) | tones_play_out_as_telephone_events_with_tone_changes |  |
 | WEBRTC-12-17 | 12 | MUST | RTCIceTransport statechange | tested | src/peer_connection/event/mod.rs (OnIceTransportStateChange) | transport_state_events_come_before_the_connection_events_they_cause |  |
 | WEBRTC-12-18 | 12 | MUST | RTCIceTransport gatheringstatechange | tested | src/peer_connection/event/mod.rs (OnIceGathererStateChange) | gathering_is_announced_once_per_ice_generation |  |
 | WEBRTC-12-19 | 12 | MUST | RTCIceTransport selectedcandidatepairchange | tested | src/peer_connection/event/mod.rs (OnSelectedCandidatePairChange) | transport_state_events_come_before_the_connection_events_they_cause |  |

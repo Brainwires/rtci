@@ -564,6 +564,11 @@ pub enum RTCPeerConnectionEvent {
     /// W3C `RTCSctpTransport` `statechange`: the SCTP transport (the one
     /// `RTCPeerConnection::sctp` returns) changed state. Not fired by `close()`.
     OnSctpTransportStateChange(RTCSctpTransportState),
+
+    /// W3C `RTCDTMFSender` `tonechange`: a tone began playing out (`,` for a pause), or the
+    /// tone buffer ran out (an empty tone). See
+    /// [`RTCRtpSender::dtmf`](crate::rtp_transceiver::rtp_sender::RTCRtpSender::dtmf).
+    OnDtmfToneChange(crate::rtp_transceiver::rtp_sender::dtmf::RTCDTMFToneChangeEvent),
 }
 
 /// Reserved for future use.

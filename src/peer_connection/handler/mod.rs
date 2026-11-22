@@ -582,6 +582,8 @@ impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCP
         for_each_handler!(forward: process_handler!(self, handler, {
             handler.handle_timeout(now)?;
         }));
+        // The DTMF senders' playout (W3C webrtc-pc section 7).
+        self.run_dtmf(now)?;
         Ok(())
     }
 
@@ -592,6 +594,9 @@ impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCP
                 eto = Some(eto.map_or(next, |curr| std::cmp::min(curr, next)));
             }
         }));
+        if let Some(dtmf) = self.dtmf_timeout() {
+            eto = Some(eto.map_or(dtmf, |curr| curr.min(dtmf)));
+        }
         eto
     }
 
