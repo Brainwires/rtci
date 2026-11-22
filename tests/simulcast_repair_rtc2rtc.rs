@@ -364,7 +364,10 @@ fn every_simulcast_layer_is_repaired_over_its_rtx_stream() -> Result<()> {
     let (layers, _) = world.layers(sender);
     assert_eq!(
         RIDS.to_vec(),
-        layers.iter().map(|(rid, _, _)| rid.as_str()).collect::<Vec<_>>(),
+        layers
+            .iter()
+            .map(|(rid, _, _)| rid.as_str())
+            .collect::<Vec<_>>(),
         "the answer keeps the three layers"
     );
     for (rid, _, rtx) in &layers {
