@@ -6,6 +6,7 @@ use crate::peer_connection::handler::demuxer::DemuxerHandlerContext;
 use crate::peer_connection::handler::endpoint::EndpointHandlerContext;
 use crate::peer_connection::handler::interceptor::InterceptorHandlerContext;
 use crate::peer_connection::handler::srtp::SrtpHandlerContext;
+use crate::peer_connection::sdp::bundle_attribute_section;
 use crate::peer_connection::sdp::{
     ATTR_KEY_RTCP_MUX_ONLY, BundleMode, MediaSection, PopulateSdpParams,
     add_candidates_to_media_descriptions, bundle_group_mids, effective_direction, get_by_mid,
@@ -379,6 +380,8 @@ impl RTCPeerConnection {
             bundle: BundleMode::Offer,
             offered_tag_rtcp_mux_only: false,
             rtcp_mux_only: self.configuration.rtcp_mux_policy != RTCRtcpMuxPolicy::Negotiate,
+            bundle_policy: self.configuration.bundle_policy,
+            initial_offer: true,
             sctp_max_message_size: self.setting_engine.sctp_max_message_size.as_usize(),
             ignore_rid_pause_for_recv: false,
             write_ssrc_attributes_for_simulcast: self
@@ -543,7 +546,10 @@ impl RTCPeerConnection {
                     // an offer was refused when it was applied.
                     if !include_unmatched
                         && matches!(kind, RtpCodecKind::Audio | RtpCodecKind::Video)
-                        && (!is_rtp_profile(media) || !has_rtcp_mux(media))
+                        && (!is_rtp_profile(media)
+                            || !remote_parsed.as_ref().is_some_and(|parsed| {
+                                has_rtcp_mux(bundle_attribute_section(parsed, media))
+                            }))
                     {
                         media_sections.push(MediaSection {
                             mid: mid_value.to_owned(),
@@ -601,7 +607,10 @@ impl RTCPeerConnection {
                             offered_rtcp_rsize: Some(if include_unmatched {
                                 self.rtp_transceivers[i].rtcp_reduced_size()
                             } else {
-                                media.has_attribute(ATTR_KEY_RTCPRSIZE)
+                                remote_parsed.as_ref().is_some_and(|parsed| {
+                                    bundle_attribute_section(parsed, media)
+                                        .has_attribute(ATTR_KEY_RTCPRSIZE)
+                                })
                             }),
                             renegotiated: include_unmatched,
                             ..Default::default()
@@ -692,6 +701,8 @@ impl RTCPeerConnection {
             is_extmap_allow_mixed,
             connection_role,
             ice_gathering_state: self.ice_transport().ice_gathering_state,
+            bundle_policy: self.configuration.bundle_policy,
+            initial_offer: false,
             rtcp_mux_only: self.configuration.rtcp_mux_policy != RTCRtcpMuxPolicy::Negotiate,
             offered_tag_rtcp_mux_only: !include_unmatched
                 && remote_parsed
@@ -1214,8 +1225,9 @@ impl RTCPeerConnection {
             else {
                 continue;
             };
+            // A bundle-only section of the offer takes the offerer-tagged section's.
             let reduced_size = !is_rejected_media(answered)
-                && offered.has_attribute(ATTR_KEY_RTCPRSIZE)
+                && bundle_attribute_section(offer, offered).has_attribute(ATTR_KEY_RTCPRSIZE)
                 && answered.has_attribute(ATTR_KEY_RTCPRSIZE);
             self.rtp_transceivers[i].set_rtcp_reduced_size(reduced_size);
         }

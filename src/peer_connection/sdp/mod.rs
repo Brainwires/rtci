@@ -161,6 +161,8 @@ mod rejected_mline_tests {
             bundle: BundleMode::Offer,
             offered_tag_rtcp_mux_only: false,
             rtcp_mux_only: true,
+            bundle_policy: RTCBundlePolicy::MaxCompat,
+            initial_offer: false,
             sctp_max_message_size: 0,
             ignore_rid_pause_for_recv: false,
             write_ssrc_attributes_for_simulcast: false,
@@ -294,6 +296,7 @@ pub use session_description::RTCSessionDescription;
 use crate::media_stream::MediaStreamId;
 use crate::media_stream::track::{MediaStreamTrack, MediaStreamTrackId};
 use crate::peer_connection::RTCPeerConnection;
+use crate::peer_connection::configuration::RTCBundlePolicy;
 use crate::peer_connection::configuration::media_engine::MediaEngine;
 use crate::peer_connection::state::ice_gathering_state::RTCIceGatheringState;
 use crate::peer_connection::transport::dtls::fingerprint::RTCDtlsFingerprint;
@@ -1448,6 +1451,63 @@ impl TryFrom<&String> for SimulcastRid {
     }
 }
 
+/// Makes a section of an initial offer bundle-only (RFC 9143 sections 6 and 7.2.1): port
+/// zero, `a=bundle-only`, and none of the BUNDLE attributes (the IDENTICAL and TRANSPORT
+/// categories of RFC 8859), which "the offerer MUST NOT include ... in bundle-only 'm='
+/// sections" (RFC 9143 section 7.1.3): they are the offerer-tagged section's.
+fn make_bundle_only(media: &mut MediaDescription) {
+    const BUNDLE_ATTRIBUTES: [&str; 9] = [
+        "ice-ufrag",
+        "ice-pwd",
+        "ice-options",
+        "fingerprint",
+        "setup",
+        "candidate",
+        ATTR_KEY_RTCPMUX,
+        ATTR_KEY_RTCP_MUX_ONLY,
+        ATTR_KEY_RTCPRSIZE,
+    ];
+    media.media_name.port = RangedPort {
+        value: 0,
+        range: None,
+    };
+    media
+        .attributes
+        .retain(|a| !BUNDLE_ATTRIBUTES.contains(&a.key.as_str()) && a.key != "end-of-candidates");
+    media
+        .attributes
+        .push(sdp::description::common::Attribute::new(
+            ATTR_KEY_BUNDLE_ONLY.to_owned(),
+            None,
+        ));
+}
+
+/// The section whose BUNDLE attributes (`a=rtcp-mux`, `a=rtcp-rsize`, RFC 8859 category
+/// IDENTICAL) are `media`'s: `media` itself, or, when it is a bundle-only section of an
+/// offer, the offerer-tagged section of its BUNDLE group (RFC 9143 section 7.1.3).
+pub(crate) fn bundle_attribute_section<'a>(
+    desc: &'a SessionDescription,
+    media: &'a MediaDescription,
+) -> &'a MediaDescription {
+    if !media.has_attribute(ATTR_KEY_BUNDLE_ONLY) {
+        return media;
+    }
+    let mid = get_mid_value(media);
+    bundle_groups(desc)
+        .into_iter()
+        .find(|group| mid.is_some_and(|mid| group.contains(&mid.as_str())))
+        .and_then(|group| {
+            group.into_iter().find_map(|tag| {
+                desc.media_descriptions.iter().find(|candidate| {
+                    get_mid_value(candidate).is_some_and(|mid| mid == tag)
+                        && !candidate.has_attribute(ATTR_KEY_BUNDLE_ONLY)
+                        && !is_rejected_media(candidate)
+                })
+            })
+        })
+        .unwrap_or(media)
+}
+
 /// What a generated description does about BUNDLE (RFC 9143).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum BundleMode {
@@ -1568,6 +1628,14 @@ pub(crate) struct PopulateSdpParams {
     /// The RTCP mux policy is "require" (the default): new m= sections of an offer say
     /// `a=rtcp-mux-only`.
     pub(crate) rtcp_mux_only: bool,
+    /// The bundle policy (RFC 9429 section 4.1.1), `Unspecified` being the default,
+    /// `balanced`. It decides which m= sections of an initial offer are bundle-only, and which
+    /// sections of an offer without a BUNDLE group an answer accepts.
+    pub(crate) bundle_policy: RTCBundlePolicy,
+    /// The description is an initial offer: the only one that marks sections bundle-only
+    /// (RFC 9429 section 5.2.2: in a subsequent offer "an 'a=bundle-only' line ... MUST NOT
+    /// be added").
+    pub(crate) initial_offer: bool,
     pub(crate) sctp_max_message_size: usize,
     pub(crate) ignore_rid_pause_for_recv: bool,
     pub(crate) write_ssrc_attributes_for_simulcast: bool,
@@ -1647,6 +1715,9 @@ impl RTCPeerConnection {
 
         // The mids of the BUNDLE group, in media section order.
         let mut bundled: Vec<String> = vec![];
+        // The media types (`audio`, `video`, `application`) of the sections so far that carry
+        // their own transport parameters, for the bundle policy.
+        let mut with_transport: Vec<String> = vec![];
 
         let mut candidates_added = false;
         for m in media_sections.iter() {
@@ -1765,8 +1836,43 @@ impl RTCPeerConnection {
             }
 
             if should_add_id {
+                let media_type = d
+                    .media_descriptions
+                    .last()
+                    .map(|desc| desc.media_name.media.clone())
+                    .unwrap_or_default();
+                // Whether the bundle policy leaves this section without a transport of its
+                // own, given the sections before it (RFC 9429 section 4.1.1): `balanced`
+                // (the default), "the second and any subsequent 'm=' sections of each type";
+                // `must-bundle` (`max-bundle`), "all streams other than the first";
+                // `max-compat`, none. An RTP section needs an RTP section before it to take
+                // its BUNDLE attributes from (RFC 9143 section 9.3.1.1).
+                let rtp = media_type != MEDIA_SECTION_APPLICATION;
+                let has_carrier = if rtp {
+                    with_transport
+                        .iter()
+                        .any(|t| t != MEDIA_SECTION_APPLICATION)
+                } else {
+                    !with_transport.is_empty()
+                };
+                let without_transport = has_carrier
+                    && match params.bundle_policy {
+                        RTCBundlePolicy::MaxCompat => false,
+                        RTCBundlePolicy::MaxBundle => true,
+                        _ => with_transport.contains(&media_type),
+                    };
                 match &params.bundle {
-                    BundleMode::Offer => bundled.push(m.mid.clone()),
+                    BundleMode::Offer => {
+                        if params.initial_offer
+                            && without_transport
+                            && let Some(desc) = d.media_descriptions.last_mut()
+                        {
+                            make_bundle_only(desc);
+                        } else {
+                            with_transport.push(media_type);
+                        }
+                        bundled.push(m.mid.clone())
+                    }
                     BundleMode::Answer(Some(group)) if group.contains(&m.mid) => {
                         bundled.push(m.mid.clone())
                     }
@@ -1779,7 +1885,22 @@ impl RTCPeerConnection {
                             }
                         }
                     }
-                    BundleMode::Answer(None) => {}
+                    // No BUNDLE group offered: every accepted section is a transport of its
+                    // own, and the policy says how many this endpoint takes (RFC 9429 section
+                    // 4.1.1: balanced "will reject all but the first 'm=' section of each
+                    // type", must-bundle "any 'm=' sections other than the first").
+                    BundleMode::Answer(None) => {
+                        if without_transport {
+                            if let Some(desc) = d.media_descriptions.last_mut() {
+                                desc.media_name.port = RangedPort {
+                                    value: 0,
+                                    range: None,
+                                }
+                            }
+                        } else {
+                            with_transport.push(media_type);
+                        }
+                    }
                 }
             }
         }

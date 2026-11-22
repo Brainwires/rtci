@@ -42,7 +42,7 @@ The rest of the evidence that the claims hold:
 | # | Claim | What the engine does |
 |---|---|---|
 | D1 | ULPFEC (RFC 5109) | Not offered by default: nothing encodes or decodes it. `MIME_TYPE_ULP_FEC` stays, and an application with its own coder registers it explicitly. RED is not implemented. |
-| D2 | `bundle_policy` | The engine has one transport, so `balanced` and `max-compat` behave as `max-bundle`. A remote offer without BUNDLE gets a defined error, never a half-working session. |
+| D2 | `bundle_policy` | The engine has one transport. The policy decides what an initial offer marks `a=bundle-only` and which sections of an offer without a BUNDLE group are answered (RFC 9429 4.1.1; `balanced` is the default, `max-bundle` is must-bundle), but every section shares the one set of ICE credentials, also under `max-compat`. A remote description whose sections need separate transports (different ICE credentials outside a BUNDLE group) gets a defined error, never a half-working session. |
 | D3 | `SettingEngine` options with no effect in a sans-I/O engine (`receive_mtu`, `include_loopback_candidate`, `disable_media_engine_copy`) | `#[deprecated]` with the reason; no option is silently a no-op. `nat_1to1_ips` and `disable_media_engine_multiple_codecs` are implemented. |
 
 ## Not implemented, on purpose
