@@ -727,12 +727,12 @@ fn a_sender_moves_to_a_new_ssrc_after_a_collision() -> Result<()> {
         world.run_until(step)?;
     }
     assert_eq!(world.peers[0].collisions, vec![SHARED], "reported once");
-    // (Each may hear the other's sender report on the shared SSRC before any media.)
-    let log = &world.peers[0].log;
-    let collided = log.iter().position(|e| *e == "collision");
-    assert!(
-        collided.is_some_and(|at| log[at..].contains(&"negotiation-needed")),
-        "the new SSRC is to be signalled: {log:?}"
+    // Negotiation is asked for the first exchange, and again for the new SSRC (each peer
+    // may hear the other's sender report on the shared SSRC before any media).
+    assert_eq!(
+        world.peers[0].negotiation_needed, 2,
+        "the new SSRC is to be signalled: {:?}",
+        world.peers[0].log
     );
 
     let (moved, rtx_after) = encoding_ssrcs(&mut world, 0, senders[0]);
