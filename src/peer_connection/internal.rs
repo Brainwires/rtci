@@ -421,6 +421,7 @@ impl RTCPeerConnection {
             sctp_port: self.sctp_transport().offer_port(),
             sctp_over_tcp: false,
             ignore_rid_pause_for_recv: false,
+            rid_pause_marks: self.setting_engine.rid_pause_marks,
             write_ssrc_attributes_for_simulcast: self
                 .setting_engine
                 .write_ssrc_attributes_for_simulcast,
@@ -783,6 +784,7 @@ impl RTCPeerConnection {
             sctp_port,
             sctp_over_tcp,
             ignore_rid_pause_for_recv,
+            rid_pause_marks: self.setting_engine.rid_pause_marks,
             write_ssrc_attributes_for_simulcast: self
                 .setting_engine
                 .write_ssrc_attributes_for_simulcast,
@@ -1702,6 +1704,7 @@ impl RTCPeerConnection {
                             ssrc: None, // Defer receiver's track's ssrc until received the first RTP packet with mid/rid header extension in endpoint handler
                             rtx: None,
                             fec: None,
+                            ..Default::default()
                         };
                         receive_codings.push(rtp_coding_parameters.clone());
                         codings.push(RTCRtpEncodingParameters {
@@ -1729,6 +1732,7 @@ impl RTCPeerConnection {
                         fec: incoming_track
                             .fec_ssrc
                             .map(|fec_ssrc| RTCRtpFecParameters { ssrc: fec_ssrc }),
+                        ..Default::default()
                     };
 
                     receive_codings.push(rtp_coding_parameters.clone());
@@ -2108,6 +2112,7 @@ impl RTCPeerConnection {
                             }
                         })
                     }),
+                    ..Default::default()
                 },
                 codec: coding.codec.clone(),
                 ..Default::default()

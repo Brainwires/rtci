@@ -599,6 +599,7 @@ mod repair_association_test {
                 ssrc: Some(ssrc),
                 rtx: rtx_ssrc.map(|ssrc| RTCRtpRtxParameters { ssrc }),
                 fec: fec_ssrc.map(|ssrc| RTCRtpFecParameters { ssrc }),
+                ..Default::default()
             },
             codec: RTCRtpCodec {
                 mime_type: MIME_TYPE_VP8.to_owned(),

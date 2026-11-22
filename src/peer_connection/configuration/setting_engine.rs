@@ -401,6 +401,8 @@ pub struct SettingEngine {
     /// SCTP streams share the bytes sent by weight (RFC 8260 section 3.6), off by default.
     pub(crate) sctp_weighted_fair_queueing: bool,
     pub(crate) ignore_rid_pause_for_recv: bool,
+    /// [`SettingEngineBuilder::with_rid_pause_marks`].
+    pub(crate) rid_pause_marks: bool,
     pub(crate) write_ssrc_attributes_for_simulcast: bool,
     /// The application's socket layer reports each received datagram's ECN codepoint and
     /// applies the one each sent datagram carries ([`SettingEngineBuilder::with_ecn`]).
@@ -1710,14 +1712,28 @@ impl SettingEngineBuilder {
         self
     }
 
-    /// Controls whether to ignore RID pause signals for receiving transceivers.
+    /// Writes the pause mark `~` of `a=simulcast` (RFC 8853 section 5.2) although RTP stream
+    /// pause and resume (RFC 7728) is not negotiated: for an inactive encoding of a sender,
+    /// and for a stream the offer being answered marks. The default is `false`.
     ///
-    /// RID (RTP Stream Identifier) can signal pause/resume for individual streams
-    /// in simulcast scenarios. This setting controls whether to honor those signals.
+    /// RFC 8853 section 5.2: "The use of [the pause mark] MUST be accompanied by support
+    /// for RTP stream pause/resume [RFC7728] ... signaled under the same 'm=' line", and
+    /// section 5.3.2: an answerer "MUST NOT" mark a stream paused when the offer shows no
+    /// such support. The engine does not implement RFC 7728 and never signals it, so by
+    /// default it writes no `~`: an inactive encoding is listed and not sent, and an offered
+    /// `~` is answered without the mark. `true` writes the mark all the same, as libwebrtc
+    /// does for inactive layers.
+    pub fn with_rid_pause_marks(mut self, rid_pause_marks: bool) -> Self {
+        self.0.rid_pause_marks = rid_pause_marks;
+        self
+    }
+
+    /// With [`Self::with_rid_pause_marks`], controls whether the `~` an offer puts on a
+    /// stream it asks to receive is left out of the answer's `send` list.
     ///
     /// # Parameters
     ///
-    /// * `ignore_rid_pause_for_recv` - `true` to ignore pause signals, `false` to honor them
+    /// * `ignore_rid_pause_for_recv` - `true` to leave the mark out, `false` to repeat it
     pub fn with_ignore_rid_pause_for_recv(mut self, ignore_rid_pause_for_recv: bool) -> Self {
         self.0.ignore_rid_pause_for_recv = ignore_rid_pause_for_recv;
         self

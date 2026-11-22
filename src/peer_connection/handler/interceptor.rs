@@ -683,6 +683,7 @@ impl<'a> InterceptorHandler<'a> {
             ssrc: Some(ssrc),
             rtx: None,
             fec: None,
+            ..Default::default()
         }];
         receiver.set_coding_parameters(receive_codings);
 
@@ -1905,6 +1906,7 @@ mod stream_binding_tests {
             ssrc: Some(primary_ssrc),
             rtx: rtx_ssrc.map(|ssrc| RTCRtpRtxParameters { ssrc }),
             fec: None,
+            ..Default::default()
         }
     }
 
@@ -2242,6 +2244,7 @@ mod stream_binding_tests {
                 ssrc: None,
                 rtx: Some(RTCRtpRtxParameters { ssrc: rtx_ssrc }),
                 fec: None,
+                ..Default::default()
             }]);
             receiver.set_codec_preferences(vec![
                 codec(payload_type, "video/VP8", ""),
@@ -2262,6 +2265,7 @@ mod stream_binding_tests {
                         ssrc: None,
                         rtx: Some(RTCRtpRtxParameters { ssrc: rtx_ssrc }),
                         fec: None,
+                        ..Default::default()
                     },
                     active: true,
                     codec: RTCRtpCodec::default(),
@@ -2372,6 +2376,7 @@ mod stream_binding_tests {
             ssrc: None,
             rtx: Some(RTCRtpRtxParameters { ssrc: rtx_ssrc }),
             fec: None,
+            ..Default::default()
         };
         let mut transceiver = RTCRtpTransceiverInternal::new(
             RtpCodecKind::Video,
