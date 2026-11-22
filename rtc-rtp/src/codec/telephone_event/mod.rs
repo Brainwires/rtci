@@ -400,8 +400,9 @@ struct ActiveEvent {
 ///   E, then a new segment whose timestamp is the previous one plus 0xFFFF, without M
 ///   (section 2.5.1.3);
 /// * produces the final report three times, identical, with E set on all three
-///   (section 2.5.1.4). Segment boundaries (the 0xFFFF report) are reported once, since the
-///   next segment's reports follow immediately;
+///   (section 2.5.1.4), and the final report of each segment (the 0xFFFF report) three
+///   times too: "The final packet for each event and for each segment SHOULD be sent a
+///   total of three times";
 /// * refuses events outside the receiver's [`EventSet`] (section 2.5.1.1).
 #[derive(Debug, Clone)]
 pub struct TelephoneEventSender {
@@ -467,8 +468,9 @@ impl TelephoneEventSender {
 
     /// Reports the event as still going, `total_duration` units after it started.
     ///
-    /// Returns one packet, or two when the duration crosses a segment boundary (the 0xFFFF
-    /// report closing the old segment, then the first report of the new one).
+    /// Returns one packet; when the duration reaches or crosses a segment boundary, the 0xFFFF
+    /// report closing the old segment three times (section 2.5.1.4), then the first report of
+    /// the new one if the duration went past it.
     ///
     /// # Errors
     ///
@@ -476,11 +478,25 @@ impl TelephoneEventSender {
     /// that grew by more than 0xFFFF since the last report (it would skip a whole segment).
     pub fn update(&mut self, total_duration: u32) -> Result<Vec<EventPacket>> {
         let mut active = self.take_checked(total_duration)?;
-        let mut packets = Vec::with_capacity(2);
-        Self::advance(&mut active, total_duration.max(1), &mut packets);
-        let last = Self::report(&mut active, total_duration.max(1), false);
-        packets.push(last);
-        active.reported = total_duration.max(1);
+        let total = total_duration.max(1);
+        let mut packets = Vec::with_capacity(1 + TELEPHONE_EVENT_END_REPEATS);
+        Self::advance(&mut active, total, &mut packets);
+        if total != active.reported {
+            let last = Self::report(&mut active, total, false);
+            // A report landing exactly on a segment's end is that segment's final packet.
+            let repeats = if total.is_multiple_of(u32::from(TELEPHONE_EVENT_MAX_SEGMENT_DURATION)) {
+                TELEPHONE_EVENT_END_REPEATS
+            } else {
+                1
+            };
+            for i in 0..repeats {
+                packets.push(EventPacket {
+                    marker: last.marker && i == 0,
+                    ..last
+                });
+            }
+        }
+        active.reported = total;
         self.active = Some(active);
         Ok(packets)
     }
@@ -551,8 +567,14 @@ impl TelephoneEventSender {
         if Self::segment_of(total) > from {
             let boundary = (from + 1) * u32::from(TELEPHONE_EVENT_MAX_SEGMENT_DURATION);
             if active.reported != boundary {
+                // The segment's final packet, three times (section 2.5.1.4).
                 let packet = Self::report(active, boundary, false);
-                packets.push(packet);
+                for i in 0..TELEPHONE_EVENT_END_REPEATS {
+                    packets.push(EventPacket {
+                        marker: packet.marker && i == 0,
+                        ..packet
+                    });
+                }
                 active.reported = boundary;
             }
         }

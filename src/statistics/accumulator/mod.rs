@@ -65,6 +65,9 @@ use std::time::Instant;
 ///
 /// This struct is not thread-safe. It is designed to be owned by the
 /// pipeline context and accessed only from the handler thread.
+/// How many closed data channels keep their stats object (webrtc-stats lifetime, bounded).
+pub(crate) const MAX_CLOSED_DATA_CHANNEL_STATS: usize = 64;
+
 #[derive(Debug, Default)]
 pub(crate) struct RTCStatsAccumulator {
     /// Peer connection level stats.
@@ -90,6 +93,10 @@ pub(crate) struct RTCStatsAccumulator {
 
     /// Data channel stats keyed by channel ID.
     pub(crate) data_channels: HashMap<RTCDataChannelId, DataChannelStatsAccumulator>,
+
+    /// The closed channels whose stats objects are kept, oldest first (at most
+    /// [`MAX_CLOSED_DATA_CHANNEL_STATS`]).
+    pub(crate) closed_data_channels: std::collections::VecDeque<RTCDataChannelId>,
 
     /// Inbound RTP stream accumulators keyed by SSRC.
     pub(crate) inbound_rtp_streams: HashMap<SSRC, InboundRtpStreamAccumulator>,
@@ -749,17 +756,30 @@ impl RTCStatsAccumulator {
             })
     }
 
-    /// A data channel is gone for good: its stats object goes with it, and if the channel had
-    /// been open it is counted in `dataChannelsClosed` (webrtc-stats: the channels that "left
-    /// the open state"; one that never opened, closed while connecting or by the handshake
-    /// timeout, is not one of them).
+    /// A data channel is gone for good. Its stats object stays, in the "closed" state
+    /// (webrtc-stats section 3.3: a stats object outlives its closed object, its last values
+    /// kept), for the [`MAX_CLOSED_DATA_CHANNEL_STATS`] channels closed last; an older one goes.
+    /// If the channel had been open it is counted in `dataChannelsClosed` (webrtc-stats: the
+    /// channels that "left the open state"; one that never opened, closed while connecting or
+    /// by the handshake timeout, is not one of them).
     pub(crate) fn on_data_channel_gone(&mut self, id: RTCDataChannelId) {
-        if self
-            .data_channels
-            .remove(&id)
-            .is_some_and(|channel| channel.opened)
+        let Some(channel) = self.data_channels.get_mut(&id) else {
+            return;
+        };
+        if channel.state == crate::data_channel::RTCDataChannelState::Closed
+            && self.closed_data_channels.contains(&id)
         {
+            return;
+        }
+        channel.state = crate::data_channel::RTCDataChannelState::Closed;
+        if channel.opened {
             self.peer_connection.on_data_channel_closed();
+        }
+        self.closed_data_channels.push_back(id);
+        while self.closed_data_channels.len() > MAX_CLOSED_DATA_CHANNEL_STATS {
+            if let Some(oldest) = self.closed_data_channels.pop_front() {
+                self.data_channels.remove(&oldest);
+            }
         }
     }
 

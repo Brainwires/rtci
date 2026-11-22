@@ -249,6 +249,7 @@ pub mod event;
 pub(crate) mod handler;
 mod internal;
 mod object_model;
+pub mod priority;
 mod remote_tracks;
 pub mod rtc_error;
 mod states_events;
@@ -293,10 +294,11 @@ use crate::peer_connection::sdp::{
     check_extmap_ids, codecs_from_media_description, discard_stray_bundle_only,
     effective_direction, extract_fingerprints, extract_ice_details, extract_tls_id, get_mid_value,
     get_peer_direction, has_ice_trickle_option, has_rtcp_mux, has_rtp_media,
-    inherit_session_extmap, insert_media_line, is_lite_set, is_live_rtp_section, is_rejected_media,
-    is_sdp_token, is_unknown_application_media, media_ice_credentials, negotiated_sctp,
-    remap_answerer_assigned_extmaps, sdp_type::RTCSdpType, update_sdp_origin,
-    validate_application_media_section, validate_dtls_attributes,
+    inherit_session_extmap, inherit_session_rtcp_xr, insert_media_line, is_lite_set,
+    is_live_rtp_section, is_rejected_media, is_sdp_token, is_unknown_application_media,
+    media_ice_credentials, negotiated_sctp, remap_answerer_assigned_extmaps, remote_ice_options,
+    remote_ice_pacing, sdp_type::RTCSdpType, update_sdp_origin, validate_application_media_section,
+    validate_dtls_attributes,
 };
 use crate::peer_connection::state::RTCIceGatheringState;
 use crate::peer_connection::state::ice_connection_state::RTCIceConnectionState;
@@ -669,6 +671,17 @@ impl RTCPeerConnectionBuilder {
     /// # }
     /// ```
     pub fn build(self, now: Instant) -> Result<RTCPeerConnection> {
+        // RFC 3711 section 3.3.2: "A replay list ... the window size MUST be at least 64"; 0
+        // turns replay protection off, which the setting engine documents.
+        let replay = &self.setting_engine.replay_protection;
+        for (what, window) in [("SRTP", replay.srtp), ("SRTCP", replay.srtcp)] {
+            if (1..64).contains(&window) {
+                return Err(Error::ErrSrtpReplayWindowTooSmall(what, window));
+            }
+        }
+        if let Some(lifetime) = self.setting_engine.srtp_key_lifetime {
+            ::srtp::keying::validate_key_lifetime(lifetime)?;
+        }
         RTCPeerConnection::new(
             now,
             self.configuration,
@@ -1521,6 +1534,17 @@ impl RTCPeerConnection {
         self.can_trickle_ice_candidates
     }
 
+    /// The ICE options of the current remote description (`a=ice-options`, RFC 8839 section
+    /// 5.6), each once: `trickle` (RFC 8840), `ice2` (RFC 8445 section 10: the peer implements
+    /// RFC 8445 rather than RFC 5245), and any other the peer states. Empty without a remote
+    /// description.
+    pub fn remote_ice_options(&self) -> Vec<String> {
+        self.remote_description()
+            .and_then(|r| r.parsed.as_ref())
+            .map(remote_ice_options)
+            .unwrap_or_default()
+    }
+
     /// Sets the remote description as part of the offer/answer negotiation.
     ///
     /// This changes the remote description associated with the connection. This description
@@ -1589,6 +1613,7 @@ impl RTCPeerConnection {
             self.assign_missing_mids(&mut parsed, answers);
             discard_stray_bundle_only(&mut parsed, answers);
             inherit_session_extmap(&mut parsed);
+            inherit_session_rtcp_xr(&mut parsed);
             check_extmap_ids(&parsed)?;
             if !answers {
                 let taken: Vec<u16> = self
@@ -2213,6 +2238,12 @@ impl RTCPeerConnection {
                     )?;
                     self.dtls_transport_mut().remote_tls_id = remote_tls_id;
                 }
+                // RFC 8445 section 14.2: "Both agents MUST use the higher out of the two
+                // proposed values"; the peer's is its `a=ice-pacing` (RFC 8839 section 5.5),
+                // the default when it states none. Every description states it again.
+                self.ice_transport_mut()
+                    .agent
+                    .set_remote_pacing(remote_ice_pacing(parsed_remote_description));
             }
 
             if is_final_answer
@@ -2872,6 +2903,16 @@ impl RTCPeerConnection {
             if self.data_channels.stream_id_in_use(&id) {
                 return Err(Error::ErrDataChannelIdInUse);
             }
+            // W3C createDataChannel: "If [[DataChannelId]] is equal to or greater than the
+            // transport's [[MaxChannels]] ... throw an OperationError": once the association
+            // is connected and the stream count known.
+            if self
+                .sctp_transport()
+                .max_channels()
+                .is_some_and(|max_channels| id >= max_channels)
+            {
+                return Err(Error::ErrDataChannelIdAboveMaxChannels);
+            }
         }
 
         // The registry assigns the handle. Note this happens before any dial: the channel is
@@ -2929,6 +2970,16 @@ impl RTCPeerConnection {
                 && data_channel.data_channel.is_none()
             {
                 data_channel.dial(handle.0)?;
+                // An in-band channel waits for its DATA_CHANNEL_ACK under the same deadline
+                // as one dialed when the association came up: a lost ACK must not leave it
+                // connecting for ever.
+                if !data_channel.negotiated {
+                    data_channel.handshake_deadline = self
+                        .setting_engine
+                        .data_channel
+                        .dcep_handshake_timeout
+                        .map(|timeout| self.pipeline_context.now + timeout);
+                }
             }
         }
 
@@ -3203,6 +3254,18 @@ impl RTCPeerConnection {
         } else {
             let mut send_encodings = std::mem::take(&mut init.send_encodings);
             validate_send_encodings(track.kind(), &mut send_encodings)?;
+            let implemented: Vec<crate::rtp_transceiver::rtp_sender::RTCRtpCodec> = self
+                .media_engine
+                .get_codecs_by_kind(track.kind())
+                .into_iter()
+                .map(|codec| codec.rtp_codec)
+                .collect();
+            crate::rtp_transceiver::rtp_sender::internal::validate_scalability_modes(
+                track.kind(),
+                &mut send_encodings,
+                &implemented,
+                Error::ErrOperationError,
+            )?;
             send_encodings
         };
         let (track, send_encodings, codec_preferences) =
@@ -3281,6 +3344,18 @@ impl RTCPeerConnection {
         let explicit_encodings = !init.send_encodings.is_empty();
         if explicit_encodings {
             validate_send_encodings(kind, &mut init.send_encodings)?;
+            let implemented: Vec<crate::rtp_transceiver::rtp_sender::RTCRtpCodec> = self
+                .media_engine
+                .get_codecs_by_kind(kind)
+                .into_iter()
+                .map(|codec| codec.rtp_codec)
+                .collect();
+            crate::rtp_transceiver::rtp_sender::internal::validate_scalability_modes(
+                kind,
+                &mut init.send_encodings,
+                &implemented,
+                Error::ErrOperationError,
+            )?;
         }
         let mut codec_preferences = vec![];
         // A sender that may send has its encodings (SSRCs) from the start, so that the first
@@ -4868,7 +4943,7 @@ a=rtcp-mux\r\n";
         )
         .unwrap();
         let offer = pc.create_offer(None).unwrap();
-        assert!(offer.sdp.contains("a=ice-options:trickle\r\n"));
+        assert!(offer.sdp.contains("a=ice-options:trickle ice2\r\n"));
         assert_eq!(offer.sdp.matches("a=fingerprint:sha-256 ").count(), 2);
 
         // The other side takes both and trickles back.
@@ -4877,7 +4952,66 @@ a=rtcp-mux\r\n";
             .set_remote_description(Instant::now(), offer)
             .unwrap();
         let answer = answerer.create_answer(None).unwrap();
-        assert!(answer.sdp.contains("a=ice-options:trickle\r\n"));
+        assert!(answer.sdp.contains("a=ice-options:trickle ice2\r\n"));
+    }
+
+    /// RFC 8445 section 14.2: an agent that wants a Ta other than the default proposes it
+    /// (`a=ice-pacing`, RFC 8839 section 5.5), and "Both agents MUST use the higher out of the
+    /// two proposed values"; RFC 8445 section 10: both say `ice2`.
+    #[test]
+    fn a_proposed_ice_pacing_is_signalled_and_both_agents_use_the_higher_value() {
+        use std::time::Duration;
+        let peer = |ta: Option<Duration>| {
+            let mut me = MediaEngine::default();
+            me.register_default_codecs().unwrap();
+            RTCPeerConnectionBuilder::new()
+                .with_media_engine(me)
+                .with_setting_engine(SettingEngineBuilder::new().with_ice_pacing(ta).build())
+                .build(Instant::now())
+                .unwrap()
+        };
+        let mut offerer = peer(Some(Duration::from_millis(80)));
+        let mut answerer = peer(Some(Duration::from_millis(20)));
+        offerer
+            .add_transceiver_from_kind(RtpCodecKind::Audio, None)
+            .unwrap();
+        let now = Instant::now();
+        let offer = offerer.create_offer(None).unwrap();
+        assert!(offer.sdp.contains("a=ice-pacing:80\r\n"), "{}", offer.sdp);
+        offerer.set_local_description(now, offer.clone()).unwrap();
+        answerer.set_remote_description(now, offer).unwrap();
+        let answer = answerer.create_answer(None).unwrap();
+        assert!(answer.sdp.contains("a=ice-pacing:20\r\n"), "{}", answer.sdp);
+        answerer.set_local_description(now, answer.clone()).unwrap();
+        offerer.set_remote_description(now, answer).unwrap();
+
+        assert_eq!(
+            Duration::from_millis(80),
+            offerer.ice_transport().agent.pacing()
+        );
+        assert_eq!(
+            Duration::from_millis(80),
+            answerer.ice_transport().agent.pacing()
+        );
+        assert!(offerer.remote_ice_options().contains(&"ice2".to_owned()));
+        assert!(
+            answerer
+                .remote_ice_options()
+                .contains(&"trickle".to_owned())
+        );
+
+        // The default Ta is not proposed.
+        let mut plain = peer(None);
+        plain
+            .add_transceiver_from_kind(RtpCodecKind::Audio, None)
+            .unwrap();
+        assert!(
+            !plain
+                .create_offer(None)
+                .unwrap()
+                .sdp
+                .contains("a=ice-pacing")
+        );
     }
 
     /// `SettingEngineBuilder::with_mid_generator` was stored and never read.

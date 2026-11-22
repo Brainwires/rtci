@@ -756,6 +756,9 @@ mod rtx_test {
                 max_bitrate: 0,
                 max_framerate: None,
                 scale_resolution_down_by: None,
+                priority: Default::default(),
+                network_priority: None,
+                scalability_mode: None,
             }],
         ));
         transceiver

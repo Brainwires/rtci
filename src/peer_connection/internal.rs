@@ -19,6 +19,7 @@ use crate::peer_connection::sdp::{
     rtp_extensions_from_media_description, superseded_clear_extensions, track_details_from_sdp,
     unknown_media_name,
 };
+use crate::peer_connection::sdp::{media_packet_time, media_rtcp_xr};
 use crate::peer_connection::state::signaling_state::check_next_signaling_state;
 use crate::peer_connection::transport::dtls::state::RTCDtlsTransportState;
 use crate::peer_connection::transport::ice::candidate::RTCIceServerTransportProtocol;
@@ -177,6 +178,7 @@ impl RTCPeerConnection {
             tie_breaker: setting_engine.ice.tie_breaker,
             nomination_acceptance: setting_engine.ice.nomination_acceptance,
             nominate_on_consent_checks: setting_engine.ice.nominate_on_consent_checks,
+            ta: setting_engine.ice.pacing,
             unauthenticated_requests: setting_engine.ice.unauthenticated_requests,
             data_from_selected_pair_only: setting_engine.ice.data_from_selected_pair_only,
             send_data_before_nomination: setting_engine.ice.send_data_before_nomination,
@@ -211,7 +213,7 @@ impl RTCPeerConnection {
         // `set_configuration` compares with them (W3C 4.4.1.5). With none configured the DTLS
         // transport generates its own, which the configuration does not list.
         let certificates = configuration.certificates.clone();
-        let dtls_transport = DtlsTransport::new(RTCDtlsTransportConfig {
+        let mut dtls_transport = DtlsTransport::new(RTCDtlsTransportConfig {
             id: dtls_transport_id,
             ice_transport_id,
             certificates,
@@ -226,6 +228,7 @@ impl RTCPeerConnection {
             replay_protection: setting_engine.replay_protection,
             crypto_provider: crypto_provider.clone(),
         })?;
+        dtls_transport.srtp_key_lifetime = setting_engine.srtp_key_lifetime;
 
         // Create the SCTP transport. The RFC behaviour is the default for each of these: the
         // weighted fair queueing scheduler (RFC 8831 section 6.4), message interleaving
@@ -246,7 +249,8 @@ impl RTCPeerConnection {
                 .sctp_message_size_limit_without_interleaving
                 .unwrap_or(true),
         )
-        .with_cookie_provider(crypto_provider);
+        .with_cookie_provider(crypto_provider)
+        .with_max_buffer_size(setting_engine.data_channel_max_buffer_size);
 
         // Create Pipeline Context
         let ice_handler_context = IceHandlerContext::new(ice_transport);
@@ -484,6 +488,7 @@ impl RTCPeerConnection {
             write_ssrc_attributes_for_simulcast: self
                 .setting_engine
                 .write_ssrc_attributes_for_simulcast,
+            ice_pacing: self.ice_transport().agent.proposed_pacing(),
         };
         RTCPeerConnection::populate_sdp(
             d,
@@ -738,6 +743,11 @@ impl RTCPeerConnection {
                             renegotiated: include_unmatched,
                             offered_codecs: (!include_unmatched)
                                 .then(|| codecs_from_media_description(media).unwrap_or_default()),
+                            offered_rtcp_xr: if include_unmatched {
+                                None
+                            } else {
+                                media_rtcp_xr(media)
+                            },
                             ..Default::default()
                         });
                     } else {
@@ -873,6 +883,7 @@ impl RTCPeerConnection {
             write_ssrc_attributes_for_simulcast: self
                 .setting_engine
                 .write_ssrc_attributes_for_simulcast,
+            ice_pacing: self.ice_transport().agent.proposed_pacing(),
         };
         RTCPeerConnection::populate_sdp(
             d,
@@ -1339,24 +1350,22 @@ impl RTCPeerConnection {
                     .map(|b| b.bandwidth)
             };
             // RFC 3611 section 5.1: "a=rtcp-xr" at media level replaces the session's.
-            let rtcp_xr = media
-                .attribute(ATTR_KEY_RTCP_XR)
-                .map(|value| value.map(str::to_owned))
-                .or_else(|| {
-                    remote
-                        .attributes
-                        .iter()
-                        .find(|a| a.key == ATTR_KEY_RTCP_XR)
-                        .map(|a| a.value.clone())
-                })
-                .map(|value| {
-                    value
-                        .unwrap_or_default()
-                        .split_whitespace()
-                        .map(str::to_owned)
-                        .collect()
-                });
+            let rtcp_xr = media_rtcp_xr(media).or_else(|| {
+                remote
+                    .attributes
+                    .iter()
+                    .find(|a| a.key == ATTR_KEY_RTCP_XR)
+                    .map(|a| {
+                        a.value
+                            .as_deref()
+                            .unwrap_or_default()
+                            .split_whitespace()
+                            .map(str::to_owned)
+                            .collect()
+                    })
+            });
             self.rtp_transceivers[i].set_remote_rtcp_xr(rtcp_xr);
+            self.rtp_transceivers[i].set_remote_packet_time(media_packet_time(media));
             let application_specific = of("AS").map(|kbps| kbps.saturating_mul(1000));
             self.rtp_transceivers[i].set_remote_bandwidth(RTCRemoteBandwidth {
                 // RFC 9429 section 5.10: "TIAS = AS * 1000 * 0.95 - (50 * 40 * 8)".
@@ -3022,6 +3031,24 @@ impl RTCPeerConnection {
                     continue;
                 }
                 codec_preferences.push(codec.clone());
+            }
+            // So does telephone-event at a named codec's clock rate (RFC 4733, RFC 7874
+            // section 5): naming the audio codec does not take DTMF away (W3C webrtc-pc 7.3:
+            // DTMF needs telephone-event negotiated for sending).
+            let named_rates: Vec<u32> = codec_preferences
+                .iter()
+                .map(|preference| preference.rtp_codec.clock_rate)
+                .collect();
+            for codec in &media_engine_codecs {
+                if codec.rtp_codec.mime_type.eq_ignore_ascii_case(
+                    crate::rtp_transceiver::rtp_sender::dtmf::MIME_TYPE_TELEPHONE_EVENT,
+                ) && named_rates.contains(&codec.rtp_codec.clock_rate)
+                    && !codec_preferences
+                        .iter()
+                        .any(|preference| preference.payload_type == codec.payload_type)
+                {
+                    codec_preferences.push(codec.clone());
+                }
             }
         }
 

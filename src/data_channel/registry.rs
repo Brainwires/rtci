@@ -221,10 +221,12 @@ impl DataChannelRegistry {
             // Skip ids already claimed — by an out-of-band channel the application pinned, or
             // by one the peer opened first. Carrying the cursor across iterations rather than
             // restarting the scan keeps this a single pass.
-            while next < max.saturating_sub(1) && self.stream_id_in_use(&next) {
+            // Ids run from 0 to `max - 1` (W3C 6.1.1.3: an id "equal to or greater than"
+            // [[MaxChannels]] is unusable); 65535 is never one (`SCTP_MAX_CHANNELS`).
+            while next < max && self.stream_id_in_use(&next) {
                 next += 2;
             }
-            if next >= max.saturating_sub(1) {
+            if next >= max {
                 return Err(Error::ErrMaxDataChannelID);
             }
             self.assign_stream_id(handle, next);

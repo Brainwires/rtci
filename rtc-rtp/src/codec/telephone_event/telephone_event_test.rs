@@ -321,23 +321,26 @@ fn a_long_event_is_split_into_segments_of_0xffff() {
     assert!(p[0].marker);
     // Crossing 0xFFFF: the old segment closes at 0xFFFF without E, then the new segment
     // starts at 1000 + 0xFFFF without M, counting from the segment start.
+    // The segment's final packet goes three times (section 2.5.1.4).
     let p = s.update(70_000).unwrap();
-    assert_eq!(p.len(), 2);
+    assert_eq!(p.len(), 4);
+    for boundary in &p[..3] {
+        assert_eq!(
+            (
+                boundary.marker,
+                boundary.timestamp,
+                boundary.event.duration,
+                boundary.event.end
+            ),
+            (false, 1000, 0xFFFF, false)
+        );
+    }
     assert_eq!(
         (
-            p[0].marker,
-            p[0].timestamp,
-            p[0].event.duration,
-            p[0].event.end
-        ),
-        (false, 1000, 0xFFFF, false)
-    );
-    assert_eq!(
-        (
-            p[1].marker,
-            p[1].timestamp,
-            p[1].event.duration,
-            p[1].event.end
+            p[3].marker,
+            p[3].timestamp,
+            p[3].event.duration,
+            p[3].event.end
         ),
         (false, 1000 + 0xFFFF, (70_000 - 0xFFFF) as u16, false)
     );
@@ -366,7 +369,7 @@ fn only_the_very_last_packet_of_a_long_event_has_e_set() {
         .filter(|p| p.event.duration == 0xFFFF)
         .map(|p| p.timestamp)
         .collect();
-    assert_eq!(boundaries, vec![0, 0xFFFF]);
+    assert_eq!(boundaries, vec![0, 0, 0, 0xFFFF, 0xFFFF, 0xFFFF]);
     assert!(
         ends.iter()
             .all(|p| p.timestamp == 0xFFFF * 2 && p.event.duration == 5000)
@@ -383,11 +386,13 @@ fn only_the_very_last_packet_of_a_long_event_has_e_set() {
 }
 
 #[test]
-fn a_report_landing_exactly_on_0xffff_is_not_repeated_as_a_boundary() {
+fn a_report_landing_exactly_on_0xffff_is_the_segments_final_packet_sent_three_times() {
     let mut s = sender();
     s.start(DTMF_1, 0, 0).unwrap();
     let p = s.update(0xFFFF).unwrap();
-    assert_eq!((p.len(), p[0].event.duration), (1, 0xFFFF));
+    assert_eq!(p.len(), 3, "the segment's final packet, three times");
+    assert!(p.iter().all(|p| p.event.duration == 0xFFFF && !p.event.end));
+    assert_eq!(p.iter().filter(|p| p.marker).count(), 1);
     let p = s.update(0xFFFF + 400).unwrap();
     assert_eq!(p.len(), 1);
     assert_eq!((p[0].timestamp, p[0].event.duration), (0xFFFF, 400));
@@ -400,7 +405,7 @@ fn segment_timestamps_wrap_around_u32() {
     s.start(DTMF_1, 0, start).unwrap();
     s.update(0xFFF0).unwrap();
     let p = s.update(0xFFFF + 1).unwrap();
-    assert_eq!(p[1].timestamp, start.wrapping_add(0xFFFF));
+    assert_eq!(p[3].timestamp, start.wrapping_add(0xFFFF));
 }
 
 #[test]
