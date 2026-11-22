@@ -26,6 +26,8 @@ mod client_retry_test;
 #[cfg(test)]
 mod client_stale_nonce_test;
 #[cfg(test)]
+mod client_tcp_allocation_test;
+#[cfg(test)]
 mod client_test;
 #[cfg(test)]
 mod test_server;
@@ -33,6 +35,8 @@ mod test_server;
 mod allocation;
 /// Channel bindings, which replace the 36-byte Data indication header with a 4-byte one.
 pub mod binding;
+/// The data connections of a TCP allocation (RFC 6062).
+pub mod data_connection;
 mod error;
 /// Per-peer send permissions, which a relay requires before it will forward to an address.
 pub mod permission;
@@ -56,14 +60,15 @@ use stun::message::*;
 use stun::textattrs::*;
 use stun::xoraddr::*;
 
-pub use allocation::AllocateOptions;
 use allocation::FamilyBlock;
+pub use allocation::{AllocateOptions, RelayTransport};
 pub use error::{ErrorResponse, RequestError};
 use transaction::*;
 
 use crate::client::relay::{Relay, RelayState};
 use crate::proto::chandata::*;
 use crate::proto::channum::ChannelNumber;
+use crate::proto::connid::ConnectionId;
 use crate::proto::data::*;
 use crate::proto::icmp::Icmp;
 use crate::proto::lifetime::Lifetime;
@@ -129,6 +134,18 @@ pub enum Event {
     /// The server refused to refresh the permission for a peer's IP address. The client has
     /// dropped it: nothing is sent to that address until a new permission is created.
     PermissionLost(RelayedAddr, IpAddr, RequestError),
+    /// A Connect succeeded: the server has a TCP connection to the peer, named by the
+    /// CONNECTION-ID (RFC 6062 §4.3). The application now opens a new TCP connection to the
+    /// server and binds it with [`Relay::data_connection`]; the server gives it 30 seconds.
+    ConnectResponse(TransactionId, PeerAddr, ConnectionId),
+    /// A Connect failed. After a 447 (Connection Timeout or Failure) the same peer can be
+    /// tried again, ten seconds later at the earliest.
+    ConnectError(TransactionId, PeerAddr, RequestError),
+    /// A peer with a permission connected to the relayed address of a TCP allocation
+    /// (RFC 6062 §4.4). To accept, the application opens a new TCP connection to the server
+    /// and binds it with [`Relay::data_connection`] within 30 seconds; to refuse, it does
+    /// nothing.
+    ConnectionAttempt(RelayedAddr, PeerAddr, ConnectionId),
     /// A datagram the server relayed to this peer was answered with an ICMP error, for
     /// example "fragmentation needed" with the path MTU after a send with DONT-FRAGMENT
     /// (RFC 8656 §11.6). The peer address tells whether the type and code are ICMPv4 or
@@ -367,6 +384,37 @@ impl Client {
             )));
         }
 
+        if msg.typ.class == CLASS_INDICATION && msg.typ.method == METHOD_CONNECTION_ATTEMPT {
+            // Like relayed data, a peer's connection is announced by the server holding the
+            // allocation and by nobody else.
+            if !from_turn_server {
+                debug!("discarding ConnectionAttempt indication: not from the TURN server");
+                return Ok(());
+            }
+            let mut connection_id = ConnectionId::default();
+            connection_id.get_from(&msg)?;
+            let mut peer_addr = PeerAddress::default();
+            peer_addr.get_from(&msg)?;
+            let from = SocketAddr::new(peer_addr.ip, peer_addr.port);
+            // The server accepts connections only from peers the client installed a
+            // permission for (RFC 6062 §5.3), on a TCP allocation.
+            let Some(relayed) = self
+                .relays
+                .values()
+                .find(|relay| {
+                    relay.transport == RelayTransport::Tcp
+                        && relay.expects_data_from(&from.ip(), now)
+                })
+                .map(RelayState::name)
+            else {
+                debug!("discarding ConnectionAttempt from {from}: no permission");
+                return Ok(());
+            };
+            self.events
+                .push_back(Event::ConnectionAttempt(relayed, from, connection_id));
+            return Ok(());
+        }
+
         if msg.typ.class == CLASS_INDICATION {
             // Only the TURN server holding the allocation relays peer data. The STUN server,
             // when it is a different address, has no allocation and is not believed for it.
@@ -520,6 +568,17 @@ impl Client {
                         relay.handle_refresh_response(now, msg, lifetime, retry)?;
                     }
                 }
+                METHOD_CONNECT => {
+                    if let TransactionType::ConnectRequest(relayed_addr, peer_addr, retry) =
+                        tr.transaction_type
+                    {
+                        let mut relay = Relay {
+                            relayed_addr,
+                            client: self,
+                        };
+                        relay.handle_connect_response(now, msg, peer_addr, retry)?;
+                    }
+                }
                 METHOD_CHANNEL_BIND => {
                     if let TransactionType::ChannelBindRequest(relayed_addr, bind_addr, retry) =
                         tr.transaction_type
@@ -608,6 +667,12 @@ impl Client {
                     ));
                 }
                 return;
+            }
+            TransactionType::ConnectRequest(relayed_addr, peer_addr, _) => {
+                // Nothing is outstanding for the peer any more.
+                if let Some(relay) = self.relays.get_mut(&relayed_addr) {
+                    relay.connecting.remove(&peer_addr);
+                }
             }
             TransactionType::OrphanRelease => return,
             _ => {}
@@ -1019,7 +1084,11 @@ impl Client {
 /// those, since they report that the credential or nonce it would sign with is not accepted
 /// (RFC 8489 §9.2.4 and §10.2.3 put their handling before the integrity check). A 401 or 438
 /// that does carry a MESSAGE-INTEGRITY must still verify.
-fn response_is_authentic(msg: &mut Message, key: &[u8], crypto: &dyn crypto::RTCCrypto) -> bool {
+pub(crate) fn response_is_authentic(
+    msg: &mut Message,
+    key: &[u8],
+    crypto: &dyn crypto::RTCCrypto,
+) -> bool {
     if !msg.contains(ATTR_MESSAGE_INTEGRITY) {
         if msg.typ.class != CLASS_ERROR_RESPONSE {
             return false;

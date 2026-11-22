@@ -1,5 +1,5 @@
 use log::{debug, warn};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::ops::Add;
 use std::time::{Duration, Instant};
@@ -15,8 +15,10 @@ use super::transaction::*;
 use crate::proto;
 
 use crate::client::binding::{BINDING_REFRESH_AGE, BindingManager, BindingState};
+use crate::client::data_connection::{DataConnection, DataConnectionConfig};
 use crate::client::error::RequestError;
-use crate::client::{Client, Event, RelayedAddr};
+use crate::client::{Client, Event, RelayTransport, RelayedAddr};
+use crate::proto::connid::ConnectionId;
 use shared::error::{Error, Result};
 
 const PERM_REFRESH_INTERVAL: Duration = Duration::from_secs(120);
@@ -68,6 +70,13 @@ pub(crate) struct RelayState {
     pub(crate) address_error: Option<proto::addrerror::AddressErrorCode>,
     /// Whether the server took an Allocate with DONT-FRAGMENT, so supports it.
     pub(crate) dont_fragment: bool,
+    /// What the allocation relays: UDP datagrams, or TCP connections (RFC 6062).
+    pub(crate) transport: RelayTransport,
+    /// Peers a Connect request is outstanding for: never two for one peer address
+    /// (RFC 6062 §4.3).
+    pub(crate) connecting: HashSet<SocketAddr>,
+    /// Peers the server could not connect to (447), and when each may be tried again.
+    connect_hold: HashMap<SocketAddr, Instant>,
     pub(crate) long_term_integrity_key: Vec<u8>,
     pub(crate) nonce: Nonce,
     pub(crate) lifetime: Duration,
@@ -108,6 +117,9 @@ impl RelayState {
             reservation_token: None,
             address_error: None,
             dont_fragment: false,
+            transport: RelayTransport::Udp,
+            connecting: HashSet::new(),
+            connect_hold: HashMap::new(),
             long_term_integrity_key,
             nonce,
             lifetime,
@@ -307,6 +319,9 @@ impl Relay<'_> {
         if relay.releasing {
             return Err(Error::ErrConnClosed);
         }
+        if relay.transport == RelayTransport::Tcp {
+            return Err(not_a_udp_allocation());
+        }
         // check if we have a permission for the destination IP addr
         if !relay
             .perm_map
@@ -344,6 +359,9 @@ impl Relay<'_> {
         };
         if relay.releasing {
             return Err(Error::ErrConnClosed);
+        }
+        if relay.transport == RelayTransport::Tcp {
+            return Err(not_a_udp_allocation());
         }
         if !relay.dont_fragment {
             return Err(Error::Other(
@@ -404,6 +422,217 @@ impl Relay<'_> {
     #[must_use]
     pub fn address_error(&self) -> Option<proto::addrerror::AddressErrorCode> {
         self.state()?.address_error.clone()
+    }
+
+    /// What the allocation relays: UDP datagrams, or TCP connections (RFC 6062).
+    #[must_use]
+    pub fn transport(&self) -> RelayTransport {
+        self.state()
+            .map_or(RelayTransport::Udp, |relay| relay.transport)
+    }
+
+    /// Asks the server to open a TCP connection from the relayed address to `peer_addr`
+    /// (RFC 6062 §4.3), with a Connect request on the control connection. Returns the id that
+    /// [`Event::ConnectResponse`], [`Event::ConnectError`] or [`Event::TransactionTimeout`]
+    /// will name. The server answers when the peer accepted, or after it gave up (about 30
+    /// seconds).
+    ///
+    /// Connect requests to different peers can be outstanding together.
+    ///
+    /// # Errors
+    ///
+    /// Fails, with nothing sent, if the allocation is gone, was released, or relays UDP; if
+    /// `peer_addr` is not of the family of its relayed address; if a Connect to `peer_addr`
+    /// is still outstanding (RFC 6062 §4.3: never two for one peer address); or if the server
+    /// answered 447 for `peer_addr` less than ten seconds ago.
+    pub fn connect(&mut self, now: Instant, peer_addr: SocketAddr) -> Result<TransactionId> {
+        let Some(relay) = self.client.relays.get_mut(&self.relayed_addr) else {
+            return Err(Error::ErrConnClosed);
+        };
+        if relay.releasing {
+            return Err(Error::ErrConnClosed);
+        }
+        if relay.transport != RelayTransport::Tcp {
+            return Err(Error::Other(
+                "Connect is for a TCP allocation (RFC 6062); this one relays UDP".to_owned(),
+            ));
+        }
+        if !relay.relays_family_of(&peer_addr.ip()) {
+            return Err(peer_family_mismatch(peer_addr));
+        }
+        if relay.connecting.contains(&peer_addr) {
+            return Err(Error::Other(format!(
+                "a Connect to {peer_addr} is already outstanding"
+            )));
+        }
+        if let Some(until) = relay.connect_hold.get(&peer_addr) {
+            if now < *until {
+                return Err(Error::Other(format!(
+                    "the server could not connect to {peer_addr}; not again within {}s",
+                    CONNECT_RETRY_WAIT.as_secs()
+                )));
+            }
+            relay.connect_hold.remove(&peer_addr);
+        }
+        relay.connecting.insert(peer_addr);
+        match self.connect_with(now, peer_addr, Retry::default()) {
+            Ok(id) => Ok(id),
+            Err(err) => {
+                if let Some(relay) = self.client.relays.get_mut(&self.relayed_addr) {
+                    relay.connecting.remove(&peer_addr);
+                }
+                Err(err)
+            }
+        }
+    }
+
+    fn connect_with(
+        &mut self,
+        now: Instant,
+        peer_addr: SocketAddr,
+        retry: Retry,
+    ) -> Result<TransactionId> {
+        let Some(relay) = self.client.relays.get(&self.relayed_addr) else {
+            return Err(Error::ErrConnClosed);
+        };
+        let msg = self.client.build_request(
+            METHOD_CONNECT,
+            vec![Box::new(proto::peeraddr::PeerAddress {
+                ip: peer_addr.ip(),
+                port: peer_addr.port(),
+            })],
+            relay,
+        )?;
+        let integrity_key = relay.key();
+        Ok(self.client.perform_transaction(
+            now,
+            &msg,
+            self.client.turn_server_addr_or_err()?,
+            TransactionType::ConnectRequest(self.relayed_addr, peer_addr, retry),
+            integrity_key,
+        ))
+    }
+
+    pub(super) fn handle_connect_response(
+        &mut self,
+        now: Instant,
+        res: Message,
+        peer_addr: SocketAddr,
+        retry: Retry,
+    ) -> Result<()> {
+        if !self.client.relays.contains_key(&self.relayed_addr) {
+            return Ok(());
+        }
+        let id = retry.report_id(res.transaction_id);
+
+        let err = if res.typ.class == CLASS_ERROR_RESPONSE {
+            let mut err = RequestError::of(&res);
+            if self.take_challenge(&res) {
+                if !retry.stale_nonce
+                    && self
+                        .connect_with(now, peer_addr, retry.after_stale_nonce(res.transaction_id))
+                        .is_ok()
+                {
+                    // The same peer again, with the new nonce and a new transaction id.
+                    return Ok(());
+                }
+                err = RequestError::Failed(Error::ErrTryAgain);
+            }
+            err
+        } else {
+            let mut connection_id = ConnectionId::default();
+            match connection_id.get_from(&res) {
+                Ok(()) => {
+                    if let Some(relay) = self.client.relays.get_mut(&self.relayed_addr) {
+                        relay.connecting.remove(&peer_addr);
+                    }
+                    self.client.events.push_back(Event::ConnectResponse(
+                        id,
+                        peer_addr,
+                        connection_id,
+                    ));
+                    return Ok(());
+                }
+                Err(err) => RequestError::Failed(err),
+            }
+        };
+
+        if let Some(relay) = self.client.relays.get_mut(&self.relayed_addr) {
+            relay.connecting.remove(&peer_addr);
+            // 447 (Connection Timeout or Failure): the peer may be tried again, but not
+            // within ten seconds (RFC 6062 §4.3).
+            if err.is(CODE_CONN_TIMEOUT_OR_FAILURE) {
+                relay
+                    .connect_hold
+                    .insert(peer_addr, now.add(CONNECT_RETRY_WAIT));
+            }
+        }
+        // 437: the allocation no longer exists (RFC 8656 §5).
+        let allocation_gone = err.is(CODE_ALLOC_MISMATCH);
+        self.client
+            .events
+            .push_back(Event::ConnectError(id, peer_addr, err));
+        if allocation_gone {
+            self.lose(RequestError::of(&res));
+        }
+        Ok(())
+    }
+
+    /// The protocol side of a new TCP connection to the server that is to carry the peer
+    /// connection `connection_id`: from [`Event::ConnectResponse`] for a connection this
+    /// client asked for, from [`Event::ConnectionAttempt`] for one a peer made (RFC 6062
+    /// §4.3, §4.4).
+    ///
+    /// The application opens the connection itself, to the server address the control
+    /// connection goes to ([`DataConnection::server_addr`]) and from `local_addr`, which must
+    /// not be the control connection's local address. The returned [`DataConnection`] has the
+    /// ConnectionBind request queued, with the CONNECTION-ID and the credential of the
+    /// control connection; the server waits 30 seconds for it.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the allocation is gone, was released, or relays UDP, or if `local_addr` is
+    /// the control connection's.
+    pub fn data_connection(
+        &mut self,
+        now: Instant,
+        connection_id: ConnectionId,
+        local_addr: SocketAddr,
+    ) -> Result<DataConnection> {
+        let Some(relay) = self.client.relays.get(&self.relayed_addr) else {
+            return Err(Error::ErrConnClosed);
+        };
+        if relay.releasing {
+            return Err(Error::ErrConnClosed);
+        }
+        if relay.transport != RelayTransport::Tcp {
+            return Err(Error::Other(
+                "a data connection is for a TCP allocation (RFC 6062); this one relays UDP"
+                    .to_owned(),
+            ));
+        }
+        if local_addr == self.client.local_addr {
+            return Err(Error::Other(
+                "a data connection is made from another local address than the control \
+                 connection's (RFC 6062 section 4.3)"
+                    .to_owned(),
+            ));
+        }
+        DataConnection::new(
+            now,
+            DataConnectionConfig {
+                crypto_provider: self.client.crypto_provider.clone(),
+                server_addr: self.client.turn_server_addr_or_err()?,
+                local_addr,
+                connection_id,
+                username: self.client.username.clone(),
+                realm: self.client.realm.clone(),
+                password: self.client.password.clone(),
+                software: self.client.software.clone(),
+                key: relay.long_term_integrity_key.clone(),
+                nonce: relay.nonce.clone(),
+            },
+        )
     }
 
     fn state(&self) -> Option<&RelayState> {
@@ -1299,6 +1528,17 @@ impl Relay<'_> {
 
         Ok(())
     }
+}
+
+/// How long after a 447 the same peer is not connected to again (RFC 6062 §4.3: "at least 10
+/// seconds").
+const CONNECT_RETRY_WAIT: Duration = Duration::from_secs(10);
+
+/// The error for datagram sends on a TCP allocation, whose data goes over data connections.
+fn not_a_udp_allocation() -> Error {
+    Error::Other(
+        "this is a TCP allocation (RFC 6062): data goes over a data connection per peer".to_owned(),
+    )
 }
 
 /// The error for a peer no relayed address of the allocation can reach.

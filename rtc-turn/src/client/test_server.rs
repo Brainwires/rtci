@@ -88,16 +88,14 @@ impl TestServer {
             .expect("the client sent a request")
     }
 
-    /// Answers `request` at `now` with `class` and `attrs`, signed with `key` when given.
-    pub(super) fn answer(
+    /// The response to `request` with `class` and `attrs`, signed with `key` when given.
+    pub(super) fn reply(
         &self,
-        client: &mut Client,
-        now: Instant,
         request: &Message,
         class: MessageClass,
         attrs: Vec<Box<dyn Setter>>,
         key: Option<&[u8]>,
-    ) -> Result<()> {
+    ) -> Result<Vec<u8>> {
         let provider = test_crypto_provider();
         let mut setters: Vec<Box<dyn Setter + '_>> = vec![
             Box::new(request.transaction_id),
@@ -113,6 +111,20 @@ impl TestServer {
         setters.push(Box::new(FINGERPRINT));
         let mut reply = Message::new();
         reply.build(&setters)?;
+        Ok(reply.raw)
+    }
+
+    /// Answers `request` at `now` with `class` and `attrs`, signed with `key` when given.
+    pub(super) fn answer(
+        &self,
+        client: &mut Client,
+        now: Instant,
+        request: &Message,
+        class: MessageClass,
+        attrs: Vec<Box<dyn Setter>>,
+        key: Option<&[u8]>,
+    ) -> Result<()> {
+        let reply = self.reply(request, class, attrs, key)?;
         client.handle_read(TransportMessage {
             now,
             transport: TransportContext {
@@ -121,7 +133,7 @@ impl TestServer {
                 transport_protocol: TransportProtocol::UDP,
                 ecn: None,
             },
-            message: BytesMut::from(&reply.raw[..]),
+            message: BytesMut::from(&reply[..]),
         })
     }
 

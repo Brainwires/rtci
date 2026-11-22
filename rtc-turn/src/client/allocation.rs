@@ -15,7 +15,6 @@ use stun::xoraddr::XorMappedAddress;
 use super::relay::RelayState;
 use super::transaction::TransactionType;
 use super::{Client, Event, RelayedAddr, RequestError};
-use crate::proto::PROTO_UDP;
 use crate::proto::addfamily::AdditionalAddressFamily;
 use crate::proto::addrerror::AddressErrorCode;
 use crate::proto::dontfrag::DontFragmentAttr;
@@ -26,7 +25,24 @@ use crate::proto::reqfamily::{
 };
 use crate::proto::reqtrans::RequestedTransport;
 use crate::proto::rsrvtoken::ReservationToken;
+use crate::proto::{PROTO_TCP, PROTO_UDP};
+use shared::TransportProtocol;
 use shared::error::{Error, Result};
+
+/// What an allocation relays to and from peers: the REQUESTED-TRANSPORT of its Allocate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum RelayTransport {
+    /// UDP datagrams (RFC 8656): permissions, Send and Data indications, channels.
+    #[default]
+    Udp,
+    /// TCP connections (RFC 6062): the client connects to peers with
+    /// [`Relay::connect`](super::relay::Relay::connect) and accepts their connections from
+    /// [`Event::ConnectionAttempt`], each over a
+    /// [`DataConnection`](super::data_connection::DataConnection) of its own. The client must
+    /// reach the server over TCP or TLS.
+    Tcp,
+}
 
 /// How long an address family the server had no capacity for is not asked for again
 /// (RFC 8656 §7.3: "at least 1 minute").
@@ -41,8 +57,13 @@ const INSUFFICIENT_CAPACITY_WAIT: Duration = Duration::from_secs(60);
 /// anything is sent: `address_family` with `additional_ipv6` or `reservation_token`;
 /// `additional_ipv6` with `reservation_token` or with an `even_port` that reserves the next
 /// port; `reservation_token` with `even_port`.
+///
+/// A TCP allocation ([`RelayTransport::Tcp`], RFC 6062 §4.1) takes none of `dont_fragment`,
+/// `even_port` and `reservation_token`, and cannot be asked for over UDP.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AllocateOptions {
+    /// REQUESTED-TRANSPORT: what the allocation relays, UDP datagrams by default.
+    pub transport: RelayTransport,
     /// REQUESTED-ADDRESS-FAMILY: the family of the one relayed address, for example
     /// [`REQUESTED_FAMILY_IPV6`] for an IPv6 relayed address.
     pub address_family: Option<RequestedAddressFamily>,
@@ -91,6 +112,14 @@ impl AllocateOptions {
         }
         if self.reservation_token.is_some() && self.even_port.is_some() {
             return refuse("EVEN-PORT is left out with RESERVATION-TOKEN");
+        }
+        // RFC 6062 §4.1: these are UDP's and never go into the Allocate of a TCP allocation.
+        if self.transport == RelayTransport::Tcp
+            && (self.dont_fragment || self.even_port.is_some() || self.reservation_token.is_some())
+        {
+            return refuse(
+                "a TCP allocation takes no DONT-FRAGMENT, EVEN-PORT or RESERVATION-TOKEN",
+            );
         }
         Ok(())
     }
@@ -199,6 +228,16 @@ impl Client {
         options: AllocateOptions,
     ) -> Result<TransactionId> {
         options.check()?;
+        // RFC 6062 §4.1: a TCP allocation cannot be had over a UDP association with the
+        // server.
+        if options.transport == RelayTransport::Tcp
+            && self.transport_protocol == TransportProtocol::UDP
+        {
+            return Err(Error::Other(
+                "a TCP allocation is asked for over TCP or TLS to the server, never over UDP"
+                    .to_owned(),
+            ));
+        }
         if self.family_mismatch {
             return Err(Error::Other(
                 "the server answered an Allocate with an address family that was not asked for"
@@ -264,8 +303,11 @@ impl Client {
         let options = &state.options;
         let mut attrs: Vec<Box<dyn Setter>> = vec![Box::new(RequestedTransport {
             // REQUESTED-TRANSPORT names what the allocation relays, not the client-to-server
-            // transport (RFC 8656 §7.1).
-            protocol: PROTO_UDP,
+            // transport (RFC 8656 §7.1): UDP, or TCP for a TCP allocation (RFC 6062 §4.1).
+            protocol: match options.transport {
+                RelayTransport::Udp => PROTO_UDP,
+                RelayTransport::Tcp => PROTO_TCP,
+            },
         })];
         if let Some(lifetime) = options.lifetime {
             attrs.push(Box::new(Lifetime(lifetime)));
@@ -533,6 +575,7 @@ impl Client {
         relay.address_error = address_error;
         // The server took the request with DONT-FRAGMENT in it, so it supports it.
         relay.dont_fragment = state.options.dont_fragment;
+        relay.transport = state.options.transport;
         self.relays.insert(relayed_addr, relay);
         self.events
             .push_back(Event::AllocateResponse(id, relayed_addr));

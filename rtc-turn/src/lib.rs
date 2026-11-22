@@ -11,7 +11,8 @@
 //! The client covers the client role of RFC 8656: UDP relayed addresses of either family or
 //! both (`REQUESTED-ADDRESS-FAMILY`, `ADDITIONAL-ADDRESS-FAMILY`), permissions, channels,
 //! `DONT-FRAGMENT`, even and reserved ports, ICMP errors, and the long-term credential of
-//! RFC 5389. There is no TURN server here.
+//! RFC 5389; and TCP allocations ([RFC 6062]): `Connect`, `ConnectionAttempt`, and a data
+//! connection per peer. There is no TURN server here.
 //!
 //! # Structure
 //!
@@ -51,6 +52,7 @@
 //! re-exported as `rtc::turn`.
 //!
 //! [RFC 8656]: https://datatracker.ietf.org/doc/html/rfc8656
+//! [RFC 6062]: https://datatracker.ietf.org/doc/html/rfc6062
 //! [`rtc-stun`]: https://docs.rs/rtc-stun
 
 /// The Sans-I/O TURN client: allocate a relayed address and send through it.

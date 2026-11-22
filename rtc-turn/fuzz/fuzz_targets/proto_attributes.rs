@@ -3,7 +3,7 @@
 //! (section 12.4), and STUN messages decoded with every TURN attribute getter: CHANNEL-NUMBER,
 //! LIFETIME, XOR-PEER-ADDRESS, XOR-RELAYED-ADDRESS, DATA, EVEN-PORT, REQUESTED-TRANSPORT,
 //! REQUESTED-ADDRESS-FAMILY, DONT-FRAGMENT, RESERVATION-TOKEN, ADDITIONAL-ADDRESS-FAMILY,
-//! ADDRESS-ERROR-CODE and ICMP.
+//! ADDRESS-ERROR-CODE, ICMP and CONNECTION-ID (RFC 6062).
 
 use libfuzzer_sys::fuzz_target;
 use rtc_stun::message::{Getter, Message};
@@ -11,6 +11,7 @@ use rtc_turn::proto::addfamily::AdditionalAddressFamily;
 use rtc_turn::proto::addrerror::AddressErrorCode;
 use rtc_turn::proto::chandata::ChannelData;
 use rtc_turn::proto::channum::ChannelNumber;
+use rtc_turn::proto::connid::ConnectionId;
 use rtc_turn::proto::data::Data;
 use rtc_turn::proto::dontfrag::DontFragmentAttr;
 use rtc_turn::proto::evenport::EvenPort;
@@ -50,4 +51,5 @@ fuzz_target!(|data: &[u8]| {
     let _ = AdditionalAddressFamily::default().get_from(&m);
     let _ = AddressErrorCode::default().get_from(&m);
     let _ = Icmp::default().get_from(&m);
+    let _ = ConnectionId::default().get_from(&m);
 });

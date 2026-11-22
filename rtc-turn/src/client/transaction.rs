@@ -74,6 +74,9 @@ pub(crate) enum TransactionType {
     RefreshRequest(RelayedAddr, Duration, Retry),
     /// The relay, the peer being bound, and the retry state.
     ChannelBindRequest(RelayedAddr, SocketAddr, Retry),
+    /// A Connect to a peer through a TCP allocation (RFC 6062 §4.3): the relay, the peer, and
+    /// the retry state.
+    ConnectRequest(RelayedAddr, SocketAddr, Retry),
     /// The Refresh with LIFETIME 0 that deletes one address family (its
     /// REQUESTED-ADDRESS-FAMILY value) of an allocation that has two, and its retry state.
     FamilyRelease(RelayedAddr, u8, Retry),
@@ -89,6 +92,7 @@ impl TransactionType {
             Self::CreatePermissionRequest(relayed, ..)
             | Self::RefreshRequest(relayed, ..)
             | Self::FamilyRelease(relayed, ..)
+            | Self::ConnectRequest(relayed, ..)
             | Self::ChannelBindRequest(relayed, ..) => Some(*relayed),
             Self::BindingRequest
             | Self::AllocateAttempt(_)
@@ -105,6 +109,7 @@ impl TransactionType {
             Self::CreatePermissionRequest(_, _, _, retry)
             | Self::RefreshRequest(_, _, retry)
             | Self::FamilyRelease(_, _, retry)
+            | Self::ConnectRequest(_, _, retry)
             | Self::ChannelBindRequest(_, _, retry) => retry.report_id(wire),
             Self::BindingRequest | Self::OrphanRelease => wire,
         }
