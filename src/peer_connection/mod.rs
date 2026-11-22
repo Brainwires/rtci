@@ -1444,6 +1444,10 @@ impl RTCPeerConnection {
                 )?;
             }
 
+            // webrtc-extensions 4.1: the answer sets each transceiver's negotiated header
+            // extensions.
+            self.apply_answer_header_extensions(&parsed_local_description.clone(), false);
+
             // An answer applied: the stopped transceivers whose sections it left rejected go.
             // Last, so that nothing that can still fail comes after a removal.
             self.remove_stopped_rejected_transceivers();
@@ -2259,6 +2263,9 @@ impl RTCPeerConnection {
             // An answer applied: the stopped transceivers whose sections it left rejected go.
             // Last, so that nothing that can still fail comes after a removal.
             if is_final_answer {
+                // webrtc-extensions 4.1: the answer sets each transceiver's negotiated header
+                // extensions, reversed to this side's point of view.
+                self.apply_answer_header_extensions(&parsed_remote_description.clone(), true);
                 self.remove_stopped_rejected_transceivers();
             }
         }

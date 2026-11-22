@@ -102,14 +102,15 @@
 
 use crate::media_stream::MediaStreamId;
 use crate::peer_connection::RTCPeerConnection;
-use crate::rtp_transceiver::rtp_sender::RTCRtpCodecParameters;
 use crate::rtp_transceiver::rtp_sender::rtp_encoding_parameters::RTCRtpEncodingParameters;
+use crate::rtp_transceiver::rtp_sender::{RTCRtpCodecParameters, RTCRtpHeaderExtensionToNegotiate};
 pub use direction::RTCRtpTransceiverDirection;
 use log::trace;
 use shared::error::{Error, Result};
 
 pub(crate) mod direction;
 pub(crate) mod fmtp;
+pub(crate) mod header_extension_control;
 pub(crate) mod internal;
 pub mod rtp_receiver;
 pub mod rtp_sender;
@@ -386,16 +387,48 @@ impl RTCRtpTransceiver<'_> {
         self.peer_connection.rtp_transceivers[self.id].set_created_by_remote_description(false);
     }
 
-    /// Sets the RTP header extensions this transceiver's next offers and answers carry
-    /// (webrtc-extensions, RTP header extension control).
+    /// webrtc-extensions 4.2 `getHeaderExtensionsToNegotiate()`: the header extensions this
+    /// transceiver's next offers and answers negotiate, each with its direction ("stopped":
+    /// not negotiated). Initially the media engine's extensions for the kind, in the
+    /// direction each was registered for, or the list of the first transceiver of the same
+    /// kind that is not stopping, when it has one set; after an answer, what it negotiated.
+    pub fn get_header_extensions_to_negotiate(&self) -> Vec<RTCRtpHeaderExtensionToNegotiate> {
+        self.peer_connection.rtp_transceivers[self.id]
+            .header_extensions_to_negotiate_list(&self.peer_connection.media_engine)
+    }
+
+    /// webrtc-extensions 4.2 `setHeaderExtensionsToNegotiate(extensions)`: sets the
+    /// directions the next offers and answers negotiate the header extensions in. An offer
+    /// carries an `a=extmap` for each extension that is not "stopped", with its direction (a
+    /// re-offer included: an extension stopped by an earlier answer comes back with the id it
+    /// had, or a free one); an answer carries an offered extension only when it is not
+    /// "stopped" here, in a direction within the offer's.
     ///
-    /// `Some(uris)` limits the media section's `a=extmap` lines to these URIs: an answer
-    /// carries an offered extension only when it is listed, and an offer carries each listed
-    /// extension the media engine has registered for this kind, a re-offer included (one
-    /// left out of an earlier answer gets the id it had, or a free one). `None` (the default)
-    /// is every extension the media engine negotiates (RFC 9429, sections 5.2 and 5.3).
-    pub fn set_header_extensions_to_negotiate(&mut self, uris: Option<Vec<String>>) {
-        self.peer_connection.rtp_transceivers[self.id].set_header_extensions_to_negotiate(uris);
+    /// # Errors
+    ///
+    /// `InvalidModificationError` when `extensions` has another size than
+    /// [`Self::get_header_extensions_to_negotiate`], names another URI at an index, makes the
+    /// mandatory-to-use `urn:ietf:params:rtp-hdrext:sdes:mid` anything but "sendrecv", or
+    /// stops a mandatory-to-implement extension (the mid, and the RFC 6464 audio level; RFC
+    /// 8834 section 5.2); a `TypeError` for an `Unspecified` direction.
+    pub fn set_header_extensions_to_negotiate(
+        &mut self,
+        extensions: Vec<RTCRtpHeaderExtensionToNegotiate>,
+    ) -> Result<()> {
+        let current = self.get_header_extensions_to_negotiate();
+        crate::rtp_transceiver::header_extension_control::validate(&current, &extensions)?;
+        self.peer_connection.rtp_transceivers[self.id]
+            .set_header_extensions_to_negotiate(extensions);
+        Ok(())
+    }
+
+    /// webrtc-extensions 4.2 `getNegotiatedHeaderExtensions()`: the extensions the last
+    /// applied answer negotiated for this transceiver, each with its direction from this
+    /// side's point of view ("stopped" for one the answer left out). Empty until an answer.
+    pub fn get_negotiated_header_extensions(&self) -> Vec<RTCRtpHeaderExtensionToNegotiate> {
+        self.peer_connection.rtp_transceivers[self.id]
+            .negotiated_header_extensions()
+            .to_vec()
     }
 
     /// Sets the preferred direction of this transceiver.

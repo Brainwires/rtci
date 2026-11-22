@@ -1199,8 +1199,9 @@ impl RTCPeerConnection {
     /// caller of this method should hold `self.mu` lock
     pub(super) fn add_rtp_transceiver(
         &mut self,
-        t: RTCRtpTransceiverInternal,
+        mut t: RTCRtpTransceiverInternal,
     ) -> RTCRtpTransceiverId {
+        self.inherit_header_extensions_to_negotiate(&mut t);
         self.rtp_transceivers.push(t);
         self.trigger_negotiation_needed();
         self.rtp_transceivers.len() - 1
