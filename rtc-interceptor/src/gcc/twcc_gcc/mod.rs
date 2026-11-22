@@ -63,7 +63,7 @@ use crate::{Interceptor, Packet, TaggedPacket, interceptor};
 use log::trace;
 use rate_controller::AimdRateController;
 use rtcp::transport_feedbacks::transport_layer_cc::{
-    PacketStatusChunk, SymbolTypeTcc, TransportLayerCc,
+    PacketStatusChunk, ReferenceTimeUnwrapper, SymbolTypeTcc, TransportLayerCc,
 };
 use rtp::extension::transport_cc_extension::TransportCcExtension;
 use shared::error::Error;
@@ -153,6 +153,7 @@ impl<P> GccInterceptorBuilder<P> {
             local_streams: HashMap::new(),
             send_times: HashMap::new(),
             start_time: None,
+            reference_time: ReferenceTimeUnwrapper::new(),
             trendline: TrendlineFilter::new(),
             rate_controller: AimdRateController::new(
                 self.min_bitrate_bps as f64,
@@ -187,6 +188,9 @@ pub struct GccInterceptor<P> {
     /// Time origin for send timestamps: the first TWCC-stamped packet's `now` (sans-I/O:
     /// the interceptor never reads the clock itself).
     start_time: Option<Instant>,
+
+    /// The receiver's 24-bit reference time, followed across feedback packets.
+    reference_time: ReferenceTimeUnwrapper,
 
     trendline: TrendlineFilter,
     rate_controller: AimdRateController,
@@ -225,7 +229,8 @@ impl<P: Interceptor> GccInterceptor<P> {
 
     /// Intercept incoming TWCC feedback RTCP and update the bandwidth estimate.
     #[overrides]
-    fn handle_read(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
+    fn handle_read(&mut self, mut msg: TaggedPacket) -> Result<(), Self::Error> {
+        let mut processed = false;
         if let Packet::Rtcp(ref rtcp_pkts) = msg.message.packet {
             let now = msg.now;
             for fb in rtcp_pkts
@@ -233,7 +238,21 @@ impl<P: Interceptor> GccInterceptor<P> {
                 .filter_map(|pkt| pkt.as_any().downcast_ref::<TransportLayerCc>())
             {
                 self.process_feedback(fb, now);
+                processed = true;
             }
+        }
+        // The estimate rides out on the feedback that produced it, so a pacer in the chain
+        // (the standard interceptor set installs one) releases at this estimator's rate.
+        if processed
+            && let Some(bits_per_second) = self
+                .shared
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .target_bitrate_bps
+        {
+            msg.message.add(crate::Attribute::TargetBitrateChanged {
+                bits_per_second: f64::from(bits_per_second),
+            });
         }
         self.inner.handle_read(msg)
     }
@@ -296,9 +315,11 @@ impl<P: Interceptor> GccInterceptor<P> {
     ///
     /// Only packets that are in the local `send_times` log AND were marked as
     /// received in the feedback are included.
-    fn extract_send_recv_pairs(&self, fb: &TransportLayerCc) -> Vec<(f64, f64)> {
-        // Base receive time: reference_time is 24-bit in 64 ms units → microseconds.
-        let base_recv_us = (fb.reference_time as i64) * 64_000;
+    fn extract_send_recv_pairs(&mut self, fb: &TransportLayerCc) -> Vec<(f64, f64)> {
+        // Base receive time: the 24-bit reference time in 64 ms units, followed through its
+        // wrap (every 12.4 days) so the feedback after 0xFFFFFF is 64 ms later and not 12.4
+        // days earlier → microseconds.
+        let base_recv_us = self.reference_time.unwrap_millis(fb.reference_time) * 1_000;
         let mut recv_us = base_recv_us;
         let mut delta_idx = 0usize;
         let mut seq = fb.base_sequence_number;
@@ -517,6 +538,20 @@ mod tests {
             handle.target_bitrate_bps().is_some(),
             "should have an estimate after feedback"
         );
+
+        // The estimate rides out on the feedback packet, so a pacer in the chain follows it.
+        let feedback = chain.poll_read().expect("the feedback carries on");
+        let announced = match feedback
+            .message
+            .get(&crate::Attribute::TargetBitrateChanged {
+                bits_per_second: 0.0,
+            }) {
+            Some(crate::Attribute::TargetBitrateChanged { bits_per_second }) => {
+                Some(*bits_per_second as u32)
+            }
+            _ => None,
+        };
+        assert_eq!(handle.target_bitrate_bps(), announced);
     }
 
     #[test]
