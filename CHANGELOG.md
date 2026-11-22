@@ -2803,6 +2803,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Testing
 
+- **interceptor (nack)**: the test environment's `nack_recovers_lost_rtp` counts from the
+  first packet that arrives, as its virtual-clock twin `nack_recovery_under_loss.rs` does: a
+  receiver knows of no packet sent before the first it receives, and a Generic NACK names
+  packets missing between ones it saw (RFC 4585 section 6.2.1), so with 5% loss one run in
+  twenty lost the stream's first packet and failed although NACK repaired every gap. It still
+  prints what stayed lost and fails on any gap after the first packet.
+- **rtp**: `a_stream_mixes_header_forms_only_when_extmap_allow_mixed_was_negotiated` takes the
+  media stream's SSRC from the sender, not from the first packet on the wire, which with
+  bandwidth probing on by default is an RTX padding probe.
 - **sctp**: the SCTP association across DTLS changes, between two engines
   (`tests/sctp_across_dtls_associations_rtc2rtc.rs`): a new DTLS association (a changed
   `tls-id`, swapped roles) leaves the association and its channels as they are, and a DTLS

@@ -277,8 +277,17 @@ fn forms_after_a_long_element(
         world.send(sender, seq, &[])?;
     }
     // The media stream's packets: bandwidth probes (padding on the RTX stream, which the
-    // default interceptor set sends at the start) are another stream.
-    let media_ssrc = world.wire[0].ssrc;
+    // default interceptor set sends at the start) are another stream, and may be the first
+    // on the wire, so the stream is the sender's SSRC rather than the first packet's.
+    let media_ssrc = world.peers[0]
+        .pc
+        .rtp_sender(sender)
+        .expect("sender")
+        .get_parameters()
+        .encodings[0]
+        .rtp_coding_parameters
+        .ssrc
+        .expect("an SSRC");
     let media: Vec<&Header> = world.wire.iter().filter(|h| h.ssrc == media_ssrc).collect();
     assert_eq!(6, media.len(), "every packet went out");
     assert_eq!(Some(ExtensionForm::TwoByte), media[0].extension_form());
