@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **svc**: `RTCRtpEncodingParameters` has a new public member `scalability_mode`
+  (`Option<String>`, W3C webrtc-svc), validated by `add_transceiver_*` (new
+  `Error::ErrOperationError`) and `set_parameters` (`InvalidModificationError`). The default
+  header extensions (`register_default_interceptors`) offer the Dependency Descriptor for
+  video.
 - **priority**: `RTCRtpEncodingParameters` has two new public members, `priority`
   (`RTCPriorityType`, `low` by default) and `network_priority` (`Option<RTCPriorityType>`): a
   struct literal without `..Default::default()` needs them.
@@ -1131,6 +1136,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+- **encoded transform**: `rtc::sframe` re-exports `rtc-sframe` (RFC 9605); `rtp::codec::opaque`
+  is a format-agnostic payloader / depacketizer for bytes the RTP layer does not parse (a
+  whole-frame SFrame ciphertext over several packets; start and end flags in a one-byte
+  header; a unit missing a fragment is dropped whole).
 - **priority** (W3C webrtc-priority, RFC 8837): `RTCPriorityType` with its DCEP values,
   encodings' `priority` / `network_priority` (set with `setParameters`),
   `RTCDataChannel::priority_type()`, and `RTCPeerConnection::dscp(&datagram)`: the DSCP of

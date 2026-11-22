@@ -77,6 +77,7 @@ fn track(id: &str, coding: RTCRtpCodingParameters, codec: RTCRtpCodec) -> MediaS
             scale_resolution_down_by: None,
             priority: Default::default(),
             network_priority: None,
+            scalability_mode: None,
         }],
     )
 }

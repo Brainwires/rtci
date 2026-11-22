@@ -390,6 +390,24 @@ impl RTCRtpSenderInternal {
             }
         }
 
+        // webrtc-svc 3.2.2: against the negotiated send codecs, or the implemented ones while
+        // there are none yet.
+        let send_codecs: Vec<RTCRtpCodec> = if self.send_codecs.is_empty() {
+            media_engine
+                .get_codecs_by_kind(self.kind())
+                .into_iter()
+                .map(|codec| codec.rtp_codec)
+                .collect()
+        } else {
+            self.send_codecs
+                .iter()
+                .map(|codec| codec.rtp_codec.clone())
+                .collect()
+        };
+        validate_scalability_modes(self.kind(), &mut parameters.encodings, &send_codecs, |_| {
+            Error::InvalidModificationError
+        })?;
+
         self.send_encodings = parameters.encodings;
         self.last_returned_parameters = None;
         self.sync_tracks();
@@ -724,6 +742,59 @@ impl RTCRtpSenderInternal {
             interceptor.unbind_local_stream(&info);
         }
     }
+}
+
+/// W3C webrtc-svc 3.2: the `scalabilityMode` checks of `addTransceiver` (refused with
+/// `OperationError`) and `setParameters` (`InvalidModificationError`): `error` is the one to
+/// refuse with. A mode outside the webrtc-svc table, one the encoding's own codec cannot carry,
+/// one no codec of `codecs` (the implemented, or the negotiated, send codecs) can carry, and an
+/// active "S" mode with another active encoding are refused. An audio sender has no mode: it is
+/// removed.
+pub(crate) fn validate_scalability_modes(
+    kind: RtpCodecKind,
+    encodings: &mut [RTCRtpEncodingParameters],
+    codecs: &[RTCRtpCodec],
+    error: fn(String) -> Error,
+) -> Result<()> {
+    use rtp::codec::svc::ScalabilityMode;
+    use std::str::FromStr;
+    if kind != RtpCodecKind::Video {
+        for encoding in encodings.iter_mut() {
+            encoding.scalability_mode = None;
+        }
+        return Ok(());
+    }
+    let mut simulcast_mode_active = false;
+    for encoding in encodings.iter() {
+        let Some(name) = encoding.scalability_mode.as_deref() else {
+            continue;
+        };
+        let mode = ScalabilityMode::from_str(name)
+            .map_err(|_| error(format!("{name:?} is not a scalability mode")))?;
+        if !encoding.codec.mime_type.is_empty() && !mode.supported_by(&encoding.codec.mime_type) {
+            return Err(error(format!(
+                "{} cannot carry scalability mode {name}",
+                encoding.codec.mime_type
+            )));
+        }
+        if !codecs
+            .iter()
+            .any(|codec| mode.supported_by(&codec.mime_type))
+        {
+            return Err(error(format!(
+                "no send codec can carry scalability mode {name}"
+            )));
+        }
+        if encoding.active && mode.is_simulcast() {
+            simulcast_mode_active = true;
+        }
+    }
+    if simulcast_mode_active && encodings.iter().filter(|e| e.active).count() > 1 {
+        return Err(error(
+            "an active \"S\" scalability mode with another active encoding".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 /// W3C webrtc 5.1 `addTransceiver`, the steps that take `sendEncodings`:

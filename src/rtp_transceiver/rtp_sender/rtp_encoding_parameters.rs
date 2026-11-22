@@ -32,6 +32,11 @@ pub struct RTCRtpEncodingParameters {
     /// W3C webrtc-priority `networkPriority`: the priority its packets are marked with (the
     /// DSCP, RFC 8837), when it is to differ from [`priority`](Self::priority).
     pub network_priority: Option<crate::peer_connection::priority::RTCPriorityType>,
+    /// W3C webrtc-svc `scalabilityMode`: the scalability mode of the stream (a mode of the
+    /// webrtc-svc table, case sensitive, such as `"L1T3"`), video only. `None` leaves it to
+    /// the encoder; `"L1T1"` is no scalability. Validated by `addTransceiver` and
+    /// `setParameters` against the codecs (`rtp::codec::svc::ScalabilityMode::supported_by`).
+    pub scalability_mode: Option<String>,
 }
 
 impl Default for RTCRtpEncodingParameters {
@@ -45,6 +50,7 @@ impl Default for RTCRtpEncodingParameters {
             scale_resolution_down_by: None,
             priority: Default::default(),
             network_priority: None,
+            scalability_mode: None,
         }
     }
 }

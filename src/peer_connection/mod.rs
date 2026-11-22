@@ -3201,6 +3201,18 @@ impl RTCPeerConnection {
         } else {
             let mut send_encodings = std::mem::take(&mut init.send_encodings);
             validate_send_encodings(track.kind(), &mut send_encodings)?;
+            let implemented: Vec<crate::rtp_transceiver::rtp_sender::RTCRtpCodec> = self
+                .media_engine
+                .get_codecs_by_kind(track.kind())
+                .into_iter()
+                .map(|codec| codec.rtp_codec)
+                .collect();
+            crate::rtp_transceiver::rtp_sender::internal::validate_scalability_modes(
+                track.kind(),
+                &mut send_encodings,
+                &implemented,
+                |why| Error::ErrOperationError(why),
+            )?;
             send_encodings
         };
         let (track, send_encodings, codec_preferences) =
@@ -3279,6 +3291,18 @@ impl RTCPeerConnection {
         let explicit_encodings = !init.send_encodings.is_empty();
         if explicit_encodings {
             validate_send_encodings(kind, &mut init.send_encodings)?;
+            let implemented: Vec<crate::rtp_transceiver::rtp_sender::RTCRtpCodec> = self
+                .media_engine
+                .get_codecs_by_kind(kind)
+                .into_iter()
+                .map(|codec| codec.rtp_codec)
+                .collect();
+            crate::rtp_transceiver::rtp_sender::internal::validate_scalability_modes(
+                kind,
+                &mut init.send_encodings,
+                &implemented,
+                |why| Error::ErrOperationError(why),
+            )?;
         }
         let mut codec_preferences = vec![];
         // A sender that may send has its encodings (SSRCs) from the start, so that the first

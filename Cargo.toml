@@ -138,12 +138,12 @@ readme = "README.md"
 
 [features]
 default = ["crypto-ring"]
-crypto-ring = ["crypto/crypto-ring", "dtls/crypto-ring", "rustls/ring", "rcgen/ring", "ice/crypto-ring", "stun/crypto-ring", "srtp/crypto-ring", "turn/crypto-ring"]
+crypto-ring = ["crypto/crypto-ring", "dtls/crypto-ring", "rustls/ring", "rcgen/ring", "ice/crypto-ring", "stun/crypto-ring", "srtp/crypto-ring", "turn/crypto-ring", "sframe/crypto-ring"]
 # Kept by the Brainwires fork (upstream removed them): see FORK.md.
 openssl = ["srtp/openssl"]
 vendored-openssl = ["srtp/vendored-openssl"]
 pem = ["dtls/pem"]
-crypto-aws-lc-rs = ["crypto/crypto-aws-lc-rs", "dtls/crypto-aws-lc-rs", "rustls/aws-lc-rs", "rcgen/aws_lc_rs", "ice/crypto-aws-lc-rs", "stun/crypto-aws-lc-rs", "srtp/crypto-aws-lc-rs", "turn/crypto-aws-lc-rs"]
+crypto-aws-lc-rs = ["crypto/crypto-aws-lc-rs", "dtls/crypto-aws-lc-rs", "rustls/aws-lc-rs", "rcgen/aws_lc_rs", "ice/crypto-aws-lc-rs", "stun/crypto-aws-lc-rs", "srtp/crypto-aws-lc-rs", "turn/crypto-aws-lc-rs", "sframe/crypto-aws-lc-rs"]
 
 [dependencies]
 shared = { workspace = true, default-features = false, features = ["marshal", "replay"] }
@@ -160,6 +160,7 @@ rtp.workspace = true
 sctp.workspace = true
 sdp.workspace = true
 srtp.workspace = true
+sframe.workspace = true
 stun.workspace = true
 turn.workspace = true
 

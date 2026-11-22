@@ -443,6 +443,9 @@ pub fn register_default_interceptors_without_congestion_control(
 ///   level of its synchronization sources.
 /// - **Coordination of video orientation** (`urn:3gpp:video-orientation`) for video: the
 ///   application writes and reads it.
+/// - **Dependency Descriptor** (the AV1 RTP specification, appendix A) for video: the layer
+///   structure a forwarder that cannot parse the payload routes by (W3C webrtc-svc section 4,
+///   SFrame). The application writes it (`rtp::codec::dependency_descriptor`).
 ///
 /// Part of [`register_default_interceptors`].
 ///
@@ -454,6 +457,12 @@ pub fn configure_default_header_extensions(media_engine: &mut MediaEngine) -> Re
         (::sdp::extmap::SDES_MID_URI, RtpCodecKind::Audio),
         (::sdp::extmap::AUDIO_LEVEL_URI, RtpCodecKind::Audio),
         (::sdp::extmap::VIDEO_ORIENTATION_URI, RtpCodecKind::Video),
+        // The AV1 RTP specification's Dependency Descriptor (appendix A): what a forwarder
+        // that cannot read the payload (SFrame, W3C webrtc-svc section 4) routes layers by.
+        (
+            ::rtp::codec::dependency_descriptor::DEPENDENCY_DESCRIPTOR_URI,
+            RtpCodecKind::Video,
+        ),
     ] {
         media_engine.register_header_extension(
             RTCRtpHeaderExtensionCapability {

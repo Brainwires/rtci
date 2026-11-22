@@ -1929,6 +1929,10 @@ pub enum Error {
     #[error("label is larger than 65535 bytes")]
     ErrLabelTooLarge,
 
+    /// W3C `OperationError`, with what failed.
+    #[error("OperationError: {0}")]
+    ErrOperationError(String),
+
     /// A character `insertDTMF` does not take (W3C: an `InvalidCharacterError`).
     #[error("{0:?} is not a DTMF tone")]
     ErrDtmfInvalidCharacter(char),
