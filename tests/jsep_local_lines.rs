@@ -58,7 +58,65 @@ fn source_attributes_are_cname_and_msid() -> TestResult {
     }
     // Each SSRC (media and RTX) has both.
     let ssrc = 0x0202_0202u32;
-    assert!(sources.contains(&format!("a=ssrc:{ssrc} cname:local-stream").as_str()));
+    let cname = pc.rtcp_cname().to_owned();
+    assert!(sources.contains(&format!("a=ssrc:{ssrc} cname:{cname}").as_str()));
     assert!(sources.contains(&format!("a=ssrc:{ssrc} msid:local-stream local").as_str()));
+    Ok(())
+}
+
+/// RFC 5576 section 6.1: the `cname` source attribute is "the same as the CNAME that the
+/// source uses in RTCP"; RFC 8834 section 4.9 and RFC 7022: one CNAME for the connection. So
+/// every `a=ssrc ... cname:` line, of whatever track and stream, and the RTCP parameters of
+/// every sender and receiver, carry `RTCPeerConnection::rtcp_cname()`.
+#[test]
+fn one_cname_is_in_every_source_attribute_and_in_the_rtcp_parameters() -> TestResult {
+    let mut pc = default_peer()?;
+    pc.add_track(video_track("first", 0x0303_0303))?;
+    pc.add_track(video_track("second", 0x0404_0404))?;
+    let cname = pc.rtcp_cname().to_owned();
+    // RFC 7022 section 4.2: 96 random bits, Base64: 16 characters.
+    assert_eq!(cname.len(), 16, "{cname}");
+
+    let offer = pc.create_offer(None)?;
+    let cnames: Vec<&str> = offer
+        .sdp
+        .lines()
+        .filter(|l| l.starts_with("a=ssrc:"))
+        .filter_map(|l| l.split_once(" cname:").map(|(_, cname)| cname))
+        .collect();
+    // Two tracks, each with a media and an RTX SSRC.
+    assert_eq!(cnames.len(), 4, "{}", offer.sdp);
+    assert!(cnames.iter().all(|c| *c == cname), "{}", offer.sdp);
+
+    let ids: Vec<_> = pc.get_transceivers().collect();
+    for id in ids {
+        let (sender, receiver) = {
+            let transceiver = pc.rtp_transceiver(id).expect("transceiver");
+            (transceiver.sender(), transceiver.receiver())
+        };
+        let sender = sender.expect("a sender");
+        assert_eq!(
+            pc.rtp_sender(sender)
+                .expect("sender")
+                .get_parameters()
+                .rtp_parameters
+                .rtcp
+                .cname,
+            cname
+        );
+        let receiver = receiver.expect("a receiver");
+        assert_eq!(
+            pc.rtp_receiver(receiver)
+                .expect("receiver")
+                .get_parameters()
+                .rtp_parameters
+                .rtcp
+                .cname,
+            cname
+        );
+    }
+
+    // Another connection has another.
+    assert_ne!(default_peer()?.rtcp_cname(), cname);
     Ok(())
 }

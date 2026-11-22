@@ -3,7 +3,9 @@
 //! (RFC 8827 section 5).
 
 use crate::peer_connection::RTCPeerConnection;
-use crate::peer_connection::sdp::{ATTR_KEY_TLS_ID, extract_tls_id, is_rejected_media};
+use crate::peer_connection::sdp::{
+    ATTR_KEY_TLS_ID, extract_tls_id, has_rtp_media, is_rejected_media,
+};
 use sdp::description::common::Attribute;
 use sdp::description::session::{ATTR_KEY_IDENTITY, SessionDescription};
 use shared::error::{Error, Result};
@@ -115,7 +117,13 @@ impl RTCPeerConnection {
             return Ok(d);
         }
         let tls_id = if is_offer {
-            let new_association = self.transport_closed;
+            // The offer asks for a new association when it sets a closed transport up again,
+            // and when it has a media section on an association that cannot key SRTP (one
+            // set up for data channels only, RFC 5764 section 4.1).
+            let new_association = self.transport_closed
+                || (has_rtp_media(&d)
+                    && self.dtls_transport().is_started()
+                    && !self.dtls_transport().can_key_srtp());
             self.dtls_transport_mut().offer_tls_id(new_association)?
         } else {
             let offered = self

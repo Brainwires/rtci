@@ -367,11 +367,14 @@ pub struct SettingEngine {
     pub(crate) replay_protection: ReplayProtection,
     pub(crate) sdp_media_level_fingerprints: bool,
     pub(crate) disable_sdp_tls_id: bool,
-    pub(crate) disable_dtls_use_srtp: bool,
-    /// Answers and subsequent offers carry the BUNDLE attributes in the tagged m= section
-    /// only (RFC 9143 section 7.1.3); see
-    /// [`SettingEngineBuilder::with_bundle_attributes_in_tagged_section_only`].
-    pub(crate) bundle_attributes_in_tagged_section_only: bool,
+    pub(crate) dtls_use_srtp_on_every_association: bool,
+    pub(crate) accept_lowercase_fingerprints: bool,
+    /// Answers and subsequent offers repeat the BUNDLE attributes in every bundled m=
+    /// section instead of carrying them in the tagged one only (RFC 9143 section 7.1.3); see
+    /// [`SettingEngineBuilder::with_bundle_attributes_repeated`].
+    pub(crate) bundle_attributes_repeated: bool,
+    /// [`SettingEngineBuilder::with_max_bundle_as_must_bundle`].
+    pub(crate) max_bundle_as_must_bundle: bool,
     pub(crate) answering_dtls_role: RTCDtlsRole,
     pub(crate) disable_certificate_fingerprint_verification: bool,
     pub(crate) allow_insecure_verification_algorithm: bool,
@@ -1283,15 +1286,21 @@ impl SettingEngineBuilder {
         self
     }
 
-    /// Makes the DTLS transport one for data channels only: `use_srtp` (RFC 5764 section 4.1)
-    /// is neither offered nor accepted, so the association has no SRTP keys.
+    /// Offers the DTLS `use_srtp` extension on every association, as browsers do, instead of
+    /// only on one that carries SRTP media.
     ///
-    /// RFC 5764 section 4.1 reserves `use_srtp` for associations that carry RTP or RTCP. By
-    /// default the engine offers it on every association, as browsers do, because media can be
-    /// added later; a peer that leaves it out is accepted either way as long as the session has
-    /// no audio or video section. With this set, a remote description that has one is refused
-    /// ([`Error::ErrSessionDescriptionMediaWithoutSrtp`](shared::error::Error::ErrSessionDescriptionMediaWithoutSrtp)):
-    /// no RTP is ever sent unprotected.
+    /// RFC 5764 section 4.1: "The use_srtp extension MUST only be used when the data being
+    /// transported is RTP or RTCP". By default the engine follows it: as the DTLS client it
+    /// offers `use_srtp` when the session has an audio or video section, and a
+    /// data-channel-only session is set up without it. When such a session gains a media
+    /// section later, a new DTLS association is established for it (the offer carries a new
+    /// `a=tls-id`, RFC 8842): a peer that does not act on `tls-id`, a browser for one, will
+    /// not follow, and the media cannot flow. (As the DTLS server the engine takes a profile
+    /// whenever the client offers one.)
+    ///
+    /// Set `true` to talk to such peers when media may be added to a data-channel-only
+    /// session, or to peers that refuse an association without `use_srtp` (pion-lineage
+    /// stacks fail their DTLS transport when no SRTP profile was negotiated).
     ///
     /// # Examples
     ///
@@ -1299,27 +1308,62 @@ impl SettingEngineBuilder {
     /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
     ///
     /// let setting_engine = SettingEngineBuilder::new()
-    ///     .with_disable_dtls_use_srtp(true)
+    ///     .with_dtls_use_srtp_on_every_association(true)
     ///     .build();
     /// ```
-    pub fn with_disable_dtls_use_srtp(mut self, is_disabled: bool) -> Self {
-        self.0.disable_dtls_use_srtp = is_disabled;
+    pub fn with_dtls_use_srtp_on_every_association(mut self, on_every_association: bool) -> Self {
+        self.0.dtls_use_srtp_on_every_association = on_every_association;
         self
     }
 
-    /// Where answers and subsequent offers put the BUNDLE attributes (the IDENTICAL and
-    /// TRANSPORT categories of RFC 8859: `a=ice-ufrag`, `a=ice-pwd`, `a=setup`, media-level
-    /// `a=fingerprint`, `a=rtcp-mux`, `a=rtcp-mux-only`, `a=rtcp-rsize`).
+    /// Reads lower-case hex digits in a remote `a=fingerprint`, as browsers do.
+    ///
+    /// RFC 8122 section 5 defines the fingerprint as upper-case hex (`2UHEX *(":" 2UHEX)`), and
+    /// by default a description with anything else is refused as malformed. Set `true` for a
+    /// peer that writes lower-case digits.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    ///
+    /// let setting_engine = SettingEngineBuilder::new()
+    ///     .with_lowercase_fingerprints_accepted(true)
+    ///     .build();
+    /// ```
+    pub fn with_lowercase_fingerprints_accepted(mut self, is_accepted: bool) -> Self {
+        self.0.accept_lowercase_fingerprints = is_accepted;
+        self
+    }
+
+    /// Repeats the BUNDLE attributes (the IDENTICAL and TRANSPORT categories of RFC 8859:
+    /// `a=ice-ufrag`, `a=ice-pwd`, `a=setup`, media-level `a=fingerprint`, `a=rtcp-mux`,
+    /// `a=rtcp-mux-only`, `a=rtcp-rsize`, candidates) in every bundled m= section of answers
+    /// and subsequent offers, as browsers do.
     ///
     /// RFC 9143 section 7.1.3: "In a subsequent offer or in an answer ... the offerer and
-    /// answerer MUST include [them] only in the tagged 'm=' section". `true` writes that
-    /// form. `false`, the default, repeats them in every bundled m= section, as browsers do:
-    /// libwebrtc refuses an RTP m= section without `a=rtcp-mux` under its `require` policy.
+    /// answerer MUST include [them] only in the tagged 'm=' section" and "MUST NOT include
+    /// such attributes in any other bundled 'm=' section". That is the default (`false`).
+    /// `true` writes the browsers' form, for a remote endpoint that needs each section to
+    /// say `a=rtcp-mux` or to carry ICE credentials of its own.
     ///
     /// Either form is accepted from the remote side whatever this is set to: the tagged
     /// section's attributes apply to every bundled section.
-    pub fn with_bundle_attributes_in_tagged_section_only(mut self, tagged_only: bool) -> Self {
-        self.0.bundle_attributes_in_tagged_section_only = tagged_only;
+    pub fn with_bundle_attributes_repeated(mut self, repeated: bool) -> Self {
+        self.0.bundle_attributes_repeated = repeated;
+        self
+    }
+
+    /// Honours the deprecated bundle policy `max-bundle` as an alias of `must-bundle`.
+    ///
+    /// RFC 9429 section 4.1.1: "'max-bundle' is considered deprecated, and implementations
+    /// compliant with this specification SHOULD ignore attempts by the application to
+    /// select this bundle policy". That is the default (`false`): a configuration with
+    /// `RTCBundlePolicy::MaxBundle` behaves as the default policy, `balanced`. `true` gives
+    /// `MaxBundle` the definition RFC 8829 gave it, which is `must-bundle`'s: every m=
+    /// section of an initial offer but the first is bundle-only.
+    pub fn with_max_bundle_as_must_bundle(mut self, honoured: bool) -> Self {
+        self.0.max_bundle_as_must_bundle = honoured;
         self
     }
 

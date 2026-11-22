@@ -1,5 +1,5 @@
 //! Two `rtc` peers on an in-memory network and a virtual clock, for the DTLS / SDP tests
-//! (`dtls_association_*.rs`, `dtls_fingerprint_*.rs`, `dtls_tls_id.rs`, `dtls_without_use_srtp.rs`,
+//! (`dtls_association_*.rs`, `dtls_fingerprint_*.rs`, `dtls_tls_id.rs`, `dtls_use_srtp.rs`,
 //! `security_architecture.rs`). No sockets and no wall clock: a run is deterministic.
 
 #![allow(dead_code)]

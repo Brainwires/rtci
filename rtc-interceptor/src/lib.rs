@@ -330,6 +330,7 @@ pub use jitterbuffer::receiver::{
     DEFAULT_DEPTH as JITTER_BUFFER_DEFAULT_DEPTH, JitterBufferBuilder, JitterBufferInterceptor,
 };
 pub use keyframe::{FirCommands, KeyFrameRequestInterceptor};
+pub use nack::NackControl;
 pub use nack::generator::{
     DEFAULT_MAX_NACKS_PER_PACKET as NACK_DEFAULT_MAX_NACKS_PER_PACKET,
     DEFAULT_MAX_PACKET_AGE as NACK_DEFAULT_MAX_PACKET_AGE, NackGeneratorBuilder,

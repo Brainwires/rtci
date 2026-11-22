@@ -217,6 +217,8 @@ impl TimerTable {
 const RTO_INITIAL: u64 = 1000; // msec
 const RTO_MIN: u64 = 1000; // msec
 const RTO_MAX: u64 = 60000; // msec
+/// G of RFC 9260 6.3.1: the granularity of the clock, in milliseconds.
+const CLOCK_GRANULARITY: f64 = 1.0;
 const RTO_ALPHA: u64 = 1;
 const RTO_BETA: u64 = 2;
 const RTO_BASE: u64 = 8;
@@ -256,6 +258,12 @@ impl RtoManager {
                 + RTO_BETA as f64 * (self.srtt as i64 - rtt as i64).abs() as f64)
                 / RTO_BASE as f64;
             self.srtt = ((RTO_BASE - RTO_ALPHA) * self.srtt + RTO_ALPHA * rtt) / RTO_BASE;
+        }
+
+        // RFC 9260 6.3.1 G1: "Whenever RTTVAR is computed, if RTTVAR == 0, then adjust
+        // RTTVAR <- G", the clock granularity: a millisecond here.
+        if self.rttvar == 0.0 {
+            self.rttvar = CLOCK_GRANULARITY;
         }
 
         self.rto = (self.srtt + (4.0 * self.rttvar) as u64).clamp(RTO_MIN, RTO_MAX);

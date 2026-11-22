@@ -168,6 +168,12 @@ a=rtpmap:96 VP8/90000
 /// W3C `[[LastStableStateSctpTransport]]`: an offer does not create or change the SCTP
 /// transport here (an answer does), so a rollback leaves `sctp()` as the last completed
 /// exchange had it: absent before the first, present after one that negotiated data.
+///
+/// The transport part holds by construction, not by a restore step: nothing an offer does
+/// touches the transport. Before the rollback work this test failed for the method alone (a
+/// remote offer could not be rolled back through `set_local_description`); what it keeps
+/// true since is that applying an offer (one with a data section, or one that renumbers it)
+/// never starts or replaces the transport without the rollback undoing it.
 #[test]
 fn a_rollback_leaves_the_sctp_transport_of_the_last_stable_state() -> TestResult {
     let mut a = default_peer()?;
@@ -185,6 +191,7 @@ fn a_rollback_leaves_the_sctp_transport_of_the_last_stable_state() -> TestResult
 
     exchange(&mut a, &mut b)?;
     let transport = b.sctp().expect("the exchange negotiated data").id();
+    let a_transport = a.sctp().expect("the exchange negotiated data").id();
 
     // A renegotiation, abandoned: the transport of the completed exchange stays.
     a.add_track(video_track("later", 0x0505_0505))?;
@@ -193,6 +200,39 @@ fn a_rollback_leaves_the_sctp_transport_of_the_last_stable_state() -> TestResult
     b.set_local_description(Instant::now(), rollback())?;
     assert_eq!(b.sctp().expect("still negotiated").id(), transport);
     assert_eq!(b.get_transceivers().count(), 0);
+
+    // An abandoned re-offer with another `a=sctp-port`, which an answer would replace the
+    // association for (RFC 8841 section 10.5): rolled back, it replaces nothing.
+    let offer = a.create_offer(None)?;
+    let port: u16 = offer
+        .sdp
+        .lines()
+        .find_map(|l| l.strip_prefix("a=sctp-port:"))
+        .expect("an sctp-port")
+        .parse()?;
+    let replacing = offer.sdp.replace(
+        &format!("a=sctp-port:{port}\r\n"),
+        &format!("a=sctp-port:{}\r\n", port + 1),
+    );
+    assert_ne!(replacing, offer.sdp);
+    b.set_remote_description(Instant::now(), RTCSessionDescription::offer(replacing)?)?;
+    assert_eq!(b.sctp().expect("an offer replaces nothing").id(), transport);
+    b.set_remote_description(Instant::now(), rollback())?;
+    assert_eq!(b.sctp().expect("still negotiated").id(), transport);
+
+    // And the exchange that follows keeps the transport of the last stable state.
+    exchange(&mut a, &mut b)?;
+    assert_eq!(b.sctp().expect("renegotiated").id(), transport);
+    assert_eq!(a.sctp().expect("negotiated").id(), a_transport);
+
+    // The offerer's side: its own offer, applied and rolled back, creates no transport.
+    let mut c = default_peer()?;
+    c.create_data_channel("data", None)?;
+    let offer = c.create_offer(None)?;
+    c.set_local_description(Instant::now(), offer)?;
+    assert!(c.sctp().is_none());
+    c.set_local_description(Instant::now(), rollback())?;
+    assert!(c.sctp().is_none());
     Ok(())
 }
 

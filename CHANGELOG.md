@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   both feedback mechanisms keeps `ack ccfb` and drops `transport-cc` (RFC 8888 section 6), and
   two engines now run on RFC 8888; a browser answers `transport-cc` alone and nothing changes
   towards it. `CongestionFeedback::Twcc` in `DefaultInterceptorOptions` restores the old offer.
+- **interceptor**: `REMOTE_BITRATE_LIMIT_SLOT` moves from 2_500 to 2_250: at 2_500 the remote
+  bit rate limit and the circuit breaker (`Slot::CircuitBreaker`) displaced each other in a
+  chain that had both. The default interceptor set now carries the limit too, so the remote
+  description's `b=TIAS` / `b=AS` bounds its estimate.
 - **interceptor**: `CongestionFeedback` has a new default variant, `Negotiated`; `Twcc` and
   `Rfc8888` now mean that mechanism only.
 - **interceptor**: a TMMBR is honoured, and answered with a TMMBN, only for a stream that
@@ -36,6 +40,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **media engine**: a remote description that carries both RFC 8627 `flexfec` and `rtx`
   negotiates no `rtx` (RFC 8627 section 1.1.7); `MediaEngine::set_flexfec_with_retransmission`
   is the setting that keeps it. `flexfec-03` is not affected.
+- **dtls**: `use_srtp` follows RFC 5764 section 4.1 by default: the DTLS client offers it only
+  when the session has an audio or video section. A data-channel-only session is set up
+  without it, and when it gains a media section a new DTLS association with `use_srtp`
+  replaces it (the offer carries a new `a=tls-id`, RFC 8842 section 5.5; the DTLS roles are
+  kept). Offering it on every association, as browsers and the engine until now did, is
+  `SettingEngineBuilder::with_dtls_use_srtp_on_every_association(true)`: set it for a peer that
+  fails an association without an SRTP profile (pion-lineage stacks) or that does not act on
+  `tls-id` when media is added later (browsers). The earlier, never released, setting to turn
+  `use_srtp` off and the error for media on an association without SRTP keys are gone.
+- **sdp**: a remote `a=fingerprint` with lower-case hex digits is refused (RFC 8122 section 5:
+  `UHEX`); `SettingEngineBuilder::with_lowercase_fingerprints_accepted(true)` reads it, as
+  browsers do.
+- **dtls**: an `rtc-dtls` server that shares no SRTP profile with the client leaves `use_srtp`
+  out and the association falls back to DTLS without SRTP (RFC 5764 section 4.1.1, SHOULD); it
+  aborted with `ErrServerNoMatchingSrtpProfile`. `ConfigBuilder::with_use_srtp_required(true)`
+  keeps the alert; the peer connection sets it for a session with a media section.
+- **dtls**: a new association asked for by an `actpass` description keeps the DTLS roles (it
+  chose them anew from the configuration and the ICE role); only a transport that was closed
+  chooses again.
+- **rtcp**: `configure_rtcp_reports` (and so `register_default_interceptors`) builds the RTCP
+  session with a `T_rr_interval` of zero, the RFC 4585 section 4.2 default when no `trr-int`
+  is signalled: regular reports are spaced by the RTCP bandwidth (5% of the session's, RFC
+  3550 section 6.2), no longer at least a second apart. The browsers' one second is
+  `configure_rtcp_reports_with(registry, RtcpSessionBuilder::new())`.
+- **media_engine**: `MediaEngine::register_codec` refuses a payload type of 64 to 95
+  (`Error::SdpInvalidValue`), and a format a remote description numbers so is not used: RFC 5761
+  section 4, "RTP payload types in the range 64-95 MUST NOT be used" where RTP and RTCP share a
+  port. With the marker bit set such a packet was demultiplexed as RTCP.
+- **jsep**: `a=ssrc:<ssrc> cname:` carries the connection's RTCP CNAME
+  (`RTCPeerConnection::rtcp_cname()`, RFC 7022), the one its RTCP SDES packets carry (RFC 5576
+  section 6.1); it carried the track's stream id. `RTCRtcpParameters::cname` of senders and
+  receivers reports it; it was empty.
+- **transceiver**: `RTCRemoteBandwidth` has a new field, `session_bitrate` (`b=TIAS`, else
+  `b=AS` times 1000: what `max_bitrate` was), and `max_bitrate` derived from `b=AS` follows RFC
+  9429 section 5.10: `AS * 1000 * 0.95 - 16000`. A struct literal needs the new field.
+- **jsep**: an answer states this endpoint's own `trr-int` for a format offered with one; it
+  left the feedback out unless the two numbers were equal (RFC 4585 section 4.2: the value is
+  each side's own minimum interval).
+
+- **jsep**: answers and subsequent offers carry the BUNDLE attributes (`a=ice-ufrag`,
+  `a=ice-pwd`, `a=setup`, a media-level `a=fingerprint`, `a=rtcp-mux`, `a=rtcp-mux-only`,
+  `a=rtcp-rsize`, candidates) in the tagged m= section only, as RFC 9143 section 7.1.3
+  requires; they were repeated in every bundled section. The repeated form, which browsers
+  write, is `SettingEngineBuilder::with_bundle_attributes_repeated(true)`.
+  `with_bundle_attributes_in_tagged_section_only` is gone (it selected what is now the
+  default). An initial offer is unchanged. A remote endpoint that needs `a=rtcp-mux` or ICE
+  credentials in each section of an answer needs the setting. A tagged section that is the
+  data section carries `a=rtcp-mux` (and `a=rtcp-rsize`) for the RTP sections of its group
+  (the note of RFC 9143 section 7.1.3).
+- **jsep**: `RTCBundlePolicy::MaxBundle` is ignored, as RFC 9429 section 4.1.1 says of the
+  deprecated `max-bundle`: the default policy (`balanced`) stays in effect. The policy it was
+  an alias of is the new `RTCBundlePolicy::MustBundle` (`must-bundle`);
+  `SettingEngineBuilder::with_max_bundle_as_must_bundle(true)` restores the alias.
+- **jsep**: an initial remote offer whose bundled RTP section is not bundle-only and has no
+  `a=rtcp-mux` of its own is refused under the RTCP mux policy `require` and has that section
+  rejected under `negotiate` (RFC 9143 section 9.3.1.1). The offerer-tagged section's
+  attribute was taken for it. A subsequent offer, where RFC 9143 section 7.1.3 puts the
+  attribute in the tagged section only, is unchanged.
 
 - **ice**: candidate constructors and `unmarshal_candidate` return an error for a priority above
   2^31 - 1 or a component above 256.
@@ -355,7 +417,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   video section (RFC 5764 section 4.1). As the DTLS server the engine left its transport in
   `connecting`; as the client it aborted the handshake. A session with a media section still
   needs it: the transport fails, and a description that adds media to an association without
-  SRTP keys is refused (`ErrSessionDescriptionMediaWithoutSrtp`).
+  SRTP keys gets a new association with them.
 - **dtls**: a certificate is verified with any fingerprint hash function of RFC 8122 section 5
   (sha-256, sha-512, sha-384, sha-224, sha-1; never md5 or md2), using the most preferred one
   the peer offers. Only sha-256 was compared, so a peer that gave another one could not connect.
@@ -467,62 +529,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on the first inbound packet, not only when it changes; the pacer ran at 1 Mbit/s against
   GCC's 300 kbit/s until the first change.
 
-### Features
-
-- **interceptor**: `negotiated_congestion_feedback` / `CongestionFeedbackFormat`: the one
-  feedback format a stream runs on, from its negotiated feedback (RFC 8888 when `ack ccfb` is
-  there, transport-wide congestion control otherwise). The TWCC sender does not number a stream
-  that runs on RFC 8888, the TWCC receiver does not report it, and the congestion controller
-  reads each stream's packets from one format only.
-- **interceptor**: `DefaultInterceptorOptions` and `register_default_interceptors_with_options`:
-  the settings of the default set in one place (`congestion_feedback`, `unnegotiated_tmmbr`,
-  `pacer_immediate_release`). `configure_tmmbr`, `configure_ulpfec_with_placement`.
-- **interceptor**: congestion control feedback follows the RTCP bandwidth. The generators read
-  the session's `b=` lines and `a=rtcp-rsize` (`RtcpSessionControl`) and measure the media rate
-  as the RTCP session does, and build one report per RTCP packet the session may send. Measured
-  on a virtual clock, two engines, RFC defaults (5% RTCP bandwidth, `T_rr_interval` 0, compound
-  RTCP): at 64 kbit/s of media 2.5 feedback datagrams a second with at most 0.66 s (TWCC) or
-  0.79 s (RFC 8888) between two, where a fixed 100 ms interval gave 2.07 and 1.87 a second with
-  gaps of 1.15 s and 1.35 s; at 100 kbit/s 3.1 and 2.5 a second (gaps 0.5 s; fixed: 4.0 and 3.5
-  with gaps of 0.6 s and 0.7 s); from 300 kbit/s up 10 a second either way
-  (`rtc-interceptor/tests/congestion_feedback_rate.rs`).
-- **interceptor**: with reduced-size RTCP negotiated, TWCC and RFC 8888 feedback leave as early
-  RTCP without a compound packet around them (RFC 8888 section 3.1, RFC 5506).
-
-- **congestion control is on by default** (RFC 8834 section 7). `register_default_interceptors`
-  now installs `Gcc` over the receiver's TWCC or RFC 8888 feedback, the pacer that releases
-  media at its target, the TWCC sender, and the RTP circuit breaker.
-  `register_default_interceptors_with_handles` also returns the handles
-  (`DefaultInterceptorHandles`); `register_default_interceptors_without_congestion_control` is
-  the explicit opt-out and is the set the default used to be. The fork's pull-style `GccHandle`
-  / `GccInterceptor` stays: placed in `Slot::CongestionControl` it replaces the default
-  estimator, and it now announces its estimate so the default pacer follows it.
-- **RTP circuit breaker** (RFC 8083; RFC 8834 section 7.1): `CircuitBreakerInterceptor` at the
-  new `Slot::CircuitBreaker`, with all four breakers (RTCP timeout, media timeout, congestion
-  against ten times the TCP throughput, media usability), ceasing transmission per flow or per
-  group, the optional reduction by ten before ceasing, and restart only on request and not
-  before the triggering interval (`CircuitBreakerHandle`). `configure_circuit_breaker` installs
-  it on its own.
-- **external limits on the estimate**: `CongestionControlInterceptor` holds the target under
-  the tightest of the negotiated session bit rate
-  (`CongestionControlHandle::set_session_bitrate_limit`, for `b=AS` / `b=TIAS`), the receiver's
-  REMB (advertised as `goog-remb` and ignored until now; it lapses after 3 s without a repeat),
-  the TMMBR bounding set (RFC 5104 sections 3.5.4 and 4.2: bounding set, owners, overhead at
-  the packet rate in use, the `2 * RTT` hold-off before a looser limit, and a TMMBN for every
-  TMMBR, on owner BYE and on owner timeout), and the circuit breaker's reduced rate.
-  `BandwidthEstimator` gains `on_packet_sent`, `on_round_trip_time`, `set_external_bounds`,
-  `on_receiver_report` and `on_path_change`, all with defaults.
-- **gcc**: missing feedback is treated as over-use (RFC 8888 section 5, RFC 8836 requirement
-  10): 500 ms without feedback while packets are being sent halves the target, and again for
-  each further 500 ms; the change reaches the pacer on an empty RTCP carrier. The round trip
-  time measured from feedback scales the additive increase and is in `EstimatorStats`. The
-  loss-based controller runs on the fraction lost of receiver reports when the receiver sends
-  no per-packet feedback (draft section 7). `CongestionControlHandle::notify_path_change` restarts the delay side.
-- **pacer**: the burst is one 5 ms group at the target rate (draft-ietf-rmcat-gcc-02 section
-  4), floored at one 1500-byte packet; it was 100 ms of the target.
-
-### Breaking Changes
-
 - **interceptor**: `Slot::FecDecoder` moves from 6_000 to 10_300 and `Slot::NackGenerator` from
   7_000 to 10_600, after the arrival recorders; an interceptor placed with `Slot::from(n)`
   relative to either has to move with them. `Slot::FecWireImage` (1_500) is new.
@@ -553,6 +559,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **stats**: the id an application passes to `update_audio_playout_stats` is no longer the
   `media-playout` object's id in the report; an inbound stream's `playoutId` names it.
 
+- **sctp**: `PayloadProtocolIdentifier::Unknown` is sent as 0 ("not specified", RFC 9260
+  section 3.3.1), not 58. `Chunks` has a new public field, `ppid`.
+- **sctp**: `Stream::write*` with an empty message returns an error.
+- **sctp**: `Association::open_stream` fails for a stream id at or past the negotiated
+  outbound stream count.
+- **sctp**: `TimerConfig::default().max_t2_shutdown_retrans` is 10, not unlimited.
+- **sctp**: `TimerConfig::default().max_t3_rtx_retrans` is 10, not unlimited: an association
+  whose peer answers nothing for about five minutes ends with `TimedOut`. `usize::MAX` keeps
+  the old behaviour.
+- **sctp**: an established association sends HEARTBEATs when idle and so always has a timer
+  running; `with_heartbeat_interval(None)` turns them off.
+- **sctp**: slow start grows the congestion window by one packet per SACK, as the RFC has
+  it, not by everything the SACK acknowledges. A receiver that acknowledges many packets with
+  one SACK slows the sender's ramp; `with_slow_start_growth_limit` sets a larger L.
+- **sctp**: the retransmissions after a timeout are paced by the congestion window (one
+  packet, then slow start) instead of leaving at once.
+- **sctp**: a SACK for a TSN never sent, and an INIT ACK without a State Cookie, end the
+  association with an ABORT (`TransportError`, `HandshakeFailed`).
+
+- **sctp**: Max.Burst is 4 by default (RFC 9260 sections 6.1 D and 16);
+  `TransportConfig::with_max_burst(None)` restores the unlimited burst.
+- **sctp**: `rtc-sctp` depends on `rtc-crypto` (the traits only, no backend).
+  `ServerConfig` no longer derives `Debug` (it implements it).
+- **sctp**: `Stream::stop` and `close` return an error when the peer did not announce
+  RE-CONFIG; `TimerConfig::max_reconfig_retrans` is no longer a limit of its own.
 - **sctp**: `PayloadProtocolIdentifier::Unknown` is sent as 0 ("not specified", RFC 9260
   section 3.3.1), not 58. `Chunks` has a new public field, `ppid`.
 - **sctp**: `Stream::write*` with an empty message returns an error.
@@ -656,7 +687,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   client, which asked for SRTP, is the one that aborts (`ErrRequestedButNoSrtpExtension`)
   unless built with `with_use_srtp_optional`.
 - **sdp**: errors `ErrSessionDescriptionInvalidSetup`, `ErrSessionDescriptionInvalidTlsId`,
-  `ErrSessionDescriptionMediaWithoutSrtp`, `ErrInvalidIdentityAssertion`.
+  `ErrInvalidIdentityAssertion`.
 - **rtp**: a two-byte header-extension block is parsed whatever its appbits (RFC 8285 section
   4.3). Only the exact profile `0x1000` selected the two-byte parser; `0x1001` to `0x100F` came
   back as one opaque element with ID 0, so MID, RID and the transport-wide number in it were not
@@ -788,6 +819,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a new realm re-keys the allocation it is about, not every allocation of the client.
 
 ### Features
+
+- **interceptor**: `negotiated_congestion_feedback` / `CongestionFeedbackFormat`: the one
+  feedback format a stream runs on, from its negotiated feedback (RFC 8888 when `ack ccfb` is
+  there, transport-wide congestion control otherwise). The TWCC sender does not number a stream
+  that runs on RFC 8888, the TWCC receiver does not report it, and the congestion controller
+  reads each stream's packets from one format only.
+- **interceptor**: `DefaultInterceptorOptions` and `register_default_interceptors_with_options`:
+  the settings of the default set in one place (`congestion_feedback`, `unnegotiated_tmmbr`,
+  `pacer_immediate_release`). `configure_tmmbr`, `configure_ulpfec_with_placement`.
+- **interceptor**: congestion control feedback follows the RTCP bandwidth. The generators read
+  the session's `b=` lines and `a=rtcp-rsize` (`RtcpSessionControl`) and measure the media rate
+  as the RTCP session does, and build one report per RTCP packet the session may send. Measured
+  on a virtual clock, two engines, RFC defaults (5% RTCP bandwidth, `T_rr_interval` 0, compound
+  RTCP): at 64 kbit/s of media 2.5 feedback datagrams a second with at most 0.66 s (TWCC) or
+  0.79 s (RFC 8888) between two, where a fixed 100 ms interval gave 2.07 and 1.87 a second with
+  gaps of 1.15 s and 1.35 s; at 100 kbit/s 3.1 and 2.5 a second (gaps 0.5 s; fixed: 4.0 and 3.5
+  with gaps of 0.6 s and 0.7 s); from 300 kbit/s up 10 a second either way
+  (`rtc-interceptor/tests/congestion_feedback_rate.rs`).
+- **interceptor**: with reduced-size RTCP negotiated, TWCC and RFC 8888 feedback leave as early
+  RTCP without a compound packet around them (RFC 8888 section 3.1, RFC 5506).
+
+- **congestion control is on by default** (RFC 8834 section 7). `register_default_interceptors`
+  now installs `Gcc` over the receiver's TWCC or RFC 8888 feedback, the pacer that releases
+  media at its target, the TWCC sender, and the RTP circuit breaker.
+  `register_default_interceptors_with_handles` also returns the handles
+  (`DefaultInterceptorHandles`); `register_default_interceptors_without_congestion_control` is
+  the explicit opt-out and is the set the default used to be. The fork's pull-style `GccHandle`
+  / `GccInterceptor` stays: placed in `Slot::CongestionControl` it replaces the default
+  estimator, and it now announces its estimate so the default pacer follows it.
+- **RTP circuit breaker** (RFC 8083; RFC 8834 section 7.1): `CircuitBreakerInterceptor` at the
+  new `Slot::CircuitBreaker`, with all four breakers (RTCP timeout, media timeout, congestion
+  against ten times the TCP throughput, media usability), ceasing transmission per flow or per
+  group, the optional reduction by ten before ceasing, and restart only on request and not
+  before the triggering interval (`CircuitBreakerHandle`). `configure_circuit_breaker` installs
+  it on its own.
+- **external limits on the estimate**: `CongestionControlInterceptor` holds the target under
+  the tightest of the negotiated session bit rate
+  (`CongestionControlHandle::set_session_bitrate_limit`, for `b=AS` / `b=TIAS`), the receiver's
+  REMB (advertised as `goog-remb` and ignored until now; it lapses after 3 s without a repeat),
+  the TMMBR bounding set (RFC 5104 sections 3.5.4 and 4.2: bounding set, owners, overhead at
+  the packet rate in use, the `2 * RTT` hold-off before a looser limit, and a TMMBN for every
+  TMMBR, on owner BYE and on owner timeout), and the circuit breaker's reduced rate.
+  `BandwidthEstimator` gains `on_packet_sent`, `on_round_trip_time`, `set_external_bounds`,
+  `on_receiver_report` and `on_path_change`, all with defaults.
+- **gcc**: missing feedback is treated as over-use (RFC 8888 section 5, RFC 8836 requirement
+  10): 500 ms without feedback while packets are being sent halves the target, and again for
+  each further 500 ms; the change reaches the pacer on an empty RTCP carrier. The round trip
+  time measured from feedback scales the additive increase and is in `EstimatorStats`. The
+  loss-based controller runs on the fraction lost of receiver reports when the receiver sends
+  no per-packet feedback (draft section 7). `CongestionControlHandle::notify_path_change` restarts the delay side.
+- **pacer**: the burst is one 5 ms group at the target rate (draft-ietf-rmcat-gcc-02 section
+  4), floored at one 1500-byte packet; it was 100 ms of the target.
+- **jsep**: what an applied answer negotiates reaches the interceptors that act on it, as
+  control messages written into the chain (`RTCPeerConnection` did not feed them):
+  `a=rtcp-rsize` in the offer and the answer as `RtcpSessionControl::ReducedSize`; the remote
+  `b=TIAS` / `b=AS`, `b=RS` and `b=RR`, summed over the media sections (RFC 8859 section 6), as
+  `RtcpSessionControl::Bandwidth`; the local `trr-int` as `RtcpSessionControl::TrrInt`; and
+  `rtx-time` of the RTX formats as the new `NackControl`.
+- **interceptor**: `NackControl::{LocalRtxTime, RemoteRtxTime}` (RFC 4588 section 8.1), by
+  retransmission payload type: the NACK responder keeps a sent packet for the `rtx-time` this
+  endpoint announced, and the NACK generator stops asking for a packet the remote sender no
+  longer keeps (the shorter of its `rtx-time` and `with_max_packet_age`).
+- **congestion control**: the remote description's send limit (`b=TIAS`, else the value derived
+  from `b=AS`; the sum over the sections this endpoint sends in) bounds the congestion
+  controller's estimate on its way to the pacer and the statistics:
+  `configuration::remote_bitrate_limit::{RemoteBitrateLimitInterceptor, RemoteBitrateLimit,
+  REMOTE_BITRATE_LIMIT_SLOT}`, part of `configure_congestion_control`.
+- **sctp**: the peer connection sends what the SCTP endpoint answers a packet for none of its
+  associations with (RFC 9260 section 8.4: an ABORT, or a SHUTDOWN COMPLETE to a SHUTDOWN ACK);
+  `Endpoint::poll_transmit` was never polled. And an association whose packets start to arrive
+  over another 5-tuple (ICE selected another candidate pair) starts its congestion control and
+  RTO over (`Association::on_path_change`, RFC 9260 section 7.2.5).
 
 - **ice**: `Agent::checklist_state` (`ChecklistState`: Running, Completed, Failed), the state of
   the checklist in RFC 8445's terms. The transport state reaches `Completed` (it never did):
@@ -1137,9 +1240,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **sdp**: `a=identity` (RFC 8827 section 5) is carried: `RTCPeerConnection::
   set_identity_assertion` and `remote_identity_assertion`. Making and verifying an assertion
   stays the application's.
-- **dtls**: `SettingEngineBuilder::with_disable_dtls_use_srtp` for a data-channel-only
-  endpoint (no `use_srtp`, media sections refused); `RTCCertificate::fingerprint` for one hash
-  function; `rtc_dtls::config::ConfigBuilder::with_use_srtp_optional`.
+- **dtls**: `SettingEngineBuilder::with_dtls_use_srtp_on_every_association`;
+  `RTCCertificate::fingerprint` for one hash function;
+  `rtc_dtls::config::ConfigBuilder::with_use_srtp_optional`.
 - **crypto**: `HashAlgorithm::{Sha1, Sha224, Sha384, Sha512}` in the built-in providers, for
   certificate fingerprints.
 
@@ -1333,10 +1436,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `a=rtcp-rsize` of the tagged section apply to every bundled section.
 
 - **shared**: `Error::ErrAnswerDoesNotMatchOffer(String)`.
-- **setting_engine**: `SettingEngineBuilder::with_bundle_attributes_in_tagged_section_only`:
-  answers and subsequent offers carry the BUNDLE attributes in the tagged m= section only, as
-  RFC 9143 section 7.1.3 says. The default repeats them in every bundled section, as browsers
-  do.
+- **setting_engine**: `SettingEngineBuilder::with_bundle_attributes_repeated`: answers and
+  subsequent offers repeat the BUNDLE attributes in every bundled section, as browsers do. The
+  default carries them in the tagged m= section only, as RFC 9143 section 7.1.3 says.
+- **configuration**: `RTCBundlePolicy::MustBundle` (RFC 9429 section 4.1.1) and
+  `SettingEngineBuilder::with_max_bundle_as_must_bundle`.
 - **transceiver**: `RTCRtpTransceiver::remote_bandwidth()` (`RTCRemoteBandwidth`: `b=TIAS` /
   `b=AS`, `b=RS`, `b=RR` of the remote media section, RFC 9429 section 5.10),
   `RTCRtpTransceiver::remote_rtcp_xr()` (the remote `a=rtcp-xr` formats, RFC 3611 section 5.1)
@@ -1382,7 +1486,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **fuzz**: `rtc-sctp` targets `association_handle_chunks` (an established association fed
   chunks, timers running) and `chunk_chunk_unknown_unmarshal`.
 
+- **sctp**: State Cookie with a MAC (RFC 9260 section 5.1.3).
+  `ServerConfig::cookie_authentication` takes a crypto provider (`rtc-crypto`); the cookie
+  then holds the association's parameters, its creation time and an HMAC-SHA-256 under a
+  random key replaced hourly, and the accepting endpoint keeps nothing between INIT and
+  COOKIE ECHO: the INIT ACK leaves by `Endpoint::poll_transmit` and the association is
+  returned when the cookie verifies. Without a provider the handshake is unchanged.
+- **sctp**: zero checksum for SCTP over DTLS (RFC 9653): `TransportConfig::with_zero_checksum`,
+  `Association::zero_checksum`.
+- **sctp**: `Association::set_path_mtu` / `path_mtu`, the entry point for a transport that
+  learns the path MTU.
+- **sctp**: user message interleaving (RFC 8260 section 2). With
+  `TransportConfig::with_message_interleaving(true)` on both sides, user data travels in
+  I-DATA chunks and abandoned messages are reported with I-FORWARD-TSN: the fragments of
+  messages on different streams interleave, so a large message no longer holds up the other
+  streams. Off by default. `Association::message_interleaving` says whether it is in use.
+- **sctp**: the stream schedulers of RFC 8260 section 3: `StreamScheduler::RoundRobin`,
+  `RoundRobinPerPacket`, `Priority` and `FairCapacity` beside `FirstComeFirstServed` and
+  `WeightedFairQueueing`. They choose between messages, and between chunks when
+  interleaving. `Stream::set_priority` is the rank under `Priority` and the weight under
+  `WeightedFairQueueing`, and applies to what the stream has queued.
+- **fuzz**: `rtc-sctp` targets `chunk_chunk_i_data_unmarshal`,
+  `chunk_chunk_i_forward_tsn_unmarshal`, `association_handle_chunks_interleaved` and the three
+  RE-CONFIG request parameters.
+- **sctp**: the other re-configuration requests of RFC 6525, in both directions: Incoming SSN
+  Reset (`Association::request_incoming_stream_reset`), SSN/TSN Reset
+  (`request_ssn_tsn_reset`) and Add Outgoing / Incoming Streams (`add_outgoing_streams`,
+  `add_incoming_streams`, with `set_stream_limits` for what a peer may add). They were
+  answered "Denied". `Event::Reconfig` reports the outcome of a request and what the peer
+  changed.
+- **sctp**: `Stream::write_sctp_with_ppid` and `Chunks::ppid` for a Payload Protocol
+  Identifier `PayloadProtocolIdentifier` has no name for; `PayloadProtocolIdentifier::number`;
+  `ChunkPayloadData::ppid`; `Association::verification_tag`.
+- **sctp**: `Endpoint::poll_transmit` (the endpoint's answers to out-of-the-blue packets);
+  `TransportConfig::with_valid_cookie_life` / `valid_cookie_life`.
+- **sctp**: `TransportConfig::with_heartbeat_interval` / `heartbeat_interval`,
+  `Association::set_heartbeat_interval`, `Event::PathInactive`, `Event::PathActive`.
+- **sctp**: `Association::on_path_change` restarts congestion control and the RTO when the
+  transport underneath moves to another path (RFC 9260 section 7.2.5; for the peer
+  connection to call when ICE selects another candidate pair).
+  `Association::congestion_window`, `slow_start_threshold`, `rto`.
+- **sctp**: `TransportConfig::with_slow_start_growth_limit` (L of RFC 9260 section 7.2.1,
+  default 1), `with_max_burst` (Max.Burst, off by default), `with_sack_delay` (200 ms by
+  default, at most 500 ms).
+- **sctp**: `Association::partial_reliability` (whether PR-SCTP is in use),
+  `TransportConfig::with_partial_reliability`.
+- **fuzz**: `rtc-sctp` targets `association_handle_chunks` (an established association fed
+  chunks, timers running) and `chunk_chunk_unknown_unmarshal`.
+
 ### Bug Fixes
+
+- **jsep**: two retransmission formats that differ only in `rtx-time` are one format (RFC
+  4588 section 8.1: each sender's own figure); an offer whose RTX `fmtp` had another
+  `rtx-time` than the local one was answered without RTX.
+- **jsep**: a remote description with `a=extmap:256 ...` (the `appbits` mapping) or an id of
+  4096 to 4351 (an extension left for the answerer to number, RFC 8285 section 6) is applied;
+  `set_remote_description` failed on it. This endpoint uses neither and leaves them out of its
+  answer.
 
 - **ice**: attributes after MESSAGE-INTEGRITY are ignored (RFC 8489 section 14.5). The HMAC does
   not cover them, so someone who saw one valid check could replay it with ICE-CONTROLLED or
@@ -1472,6 +1632,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **ice**: a consent request waits for its response four times the pair's round-trip time
   (500 ms to 4 s; RFC 7675 section 5.1) instead of a fixed 4 s.
 - **stats**: a candidate pair's state can be `frozen`.
+- **ice**: a remote candidate of a component other than RTP is ignored (the engine is rtcp-mux
+  only). pion and webrtc-rs signal every candidate for both components on one address; held,
+  the RTCP one could not be paired and kept the RTP one out when its mDNS name resolved first.
+- **ice**: the controlling agent's consent checks carry USE-CANDIDATE (as libwebrtc's do), so a
+  peer that takes over an address and its credentials without an ICE restart learns the pair in
+  use; and an agent leaves `Disconnected` with the consent response, not at its next check.
 - **ice**: the agent receives STUN through `rtc_stun::validated::Validator`: FINGERPRINT is
   verified when present (it never was), a request with an unknown comprehension-required
   attribute is answered 420 with UNKNOWN-ATTRIBUTES and a response with one is discarded (RFC
@@ -1986,6 +2152,23 @@ Each bug below was confirmed by a failing test first (`rtc-rtcp/tests/audit_bugs
   strictly and written back byte for byte, and a deterministic mutation test of the parse and
   marshal fixed point. Fuzzing: `description_roundtrip` checks that fixed point (strict and
   lenient) and reads every typed accessor; new target `attribute_parse`.
+- **sctp**: one received packet is answered with one packet of control chunks (RFC 9260
+  section 12.4); a packet of HEARTBEATs got a packet per HEARTBEAT ACK. A SACK that is due
+  and a FORWARD TSN travel with outbound DATA when the packet has room (sections 6.1, 6.10;
+  RFC 3758 section 3.5).
+- **sctp**: DATA is received only in ESTABLISHED, SHUTDOWN-PENDING and SHUTDOWN-SENT, and a
+  SACK or DATA for an association that has seen no COOKIE ECHO is answered as out of the
+  blue (RFC 9260 section 6). DATA was taken in every state.
+- **sctp**: RTT measurement follows RFC 9260 section 6.3.1: one per round trip for
+  gap-acknowledged chunks too (C4), none with a chunk sent before a retransmission (C5), and
+  an RTTVAR of zero becomes the clock granularity (G1).
+- **sctp**: the default stream scheduler sends messages in the order they were written (RFC
+  8260 section 3.1). Unordered messages used to go ahead of every ordered one, so a steady
+  flow of them kept ordered messages, DCEP and stream resets included, from ever leaving. A
+  stream reset now waits for the messages of its own stream only.
+- **sctp**: an I-DATA or I-FORWARD-TSN chunk on an association that did not negotiate user
+  message interleaving is answered with an ABORT, "Protocol Violation" (RFC 8260 sections
+  2.2.3, 2.3.1). The packet was dropped whole and unanswered.
 - **sctp**: stream resets follow the rest of RFC 6525. One re-configuration request is in
   flight at a time and the others wait (section 5.1.1); closing several data channels put
   several in flight. A request names the peer's last request sequence number (5.1.2), and the

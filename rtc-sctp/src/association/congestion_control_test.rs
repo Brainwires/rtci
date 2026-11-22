@@ -476,18 +476,30 @@ fn an_idle_congestion_window_decays() {
 }
 
 /// RFC 9260 6.1 D, 16: with Max.Burst, cwnd is brought down to what is outstanding plus
-/// Max.Burst packets before DATA is sent. Off by default.
+/// Max.Burst packets before DATA is sent. Four packets by default.
 #[test]
 fn max_burst_limits_what_is_released_at_once() {
+    assert_eq!(Some(4), TransportConfig::default().max_burst());
+    let unlimited = Association::new(
+        None,
+        Arc::new(TransportConfig::default().with_max_burst(None)),
+        1400,
+        0,
+        SocketAddr::from_str("0.0.0.0:0").unwrap(),
+        SocketAddr::from_str("0.0.0.0:0").unwrap(),
+        TransportProtocol::UDP,
+        Instant::now(),
+    );
+    assert_eq!(None, unlimited.max_burst);
     let now = Instant::now();
-    for (max_burst, packets) in [(Some(4), 5), (None, 40)] {
+    for (max_burst, packets) in [(Some(3), 4), (None, 40)] {
         let mut a = sender(config().with_max_burst(max_burst), 40, now);
         let pmdcs = a.pmdcs;
         a.cwnd = 40 * CHUNK as u32;
         let sent = send(&mut a, now);
         assert_eq!(packets, sent.len(), "Max.Burst {max_burst:?}");
         if max_burst.is_some() {
-            assert_eq!(4 * pmdcs, a.cwnd, "nothing outstanding plus four packets");
+            assert_eq!(3 * pmdcs, a.cwnd, "nothing outstanding plus three packets");
         }
     }
 }
