@@ -5,6 +5,7 @@
 
 mod algorithm;
 mod error;
+mod hkdf;
 #[cfg(feature = "openssl")]
 mod openssl_ctr;
 mod provider;
@@ -28,6 +29,7 @@ pub mod fuzzing;
 
 pub use algorithm::*;
 pub use error::CryptoError;
+pub use hkdf::{hkdf_expand, hkdf_expand_label, hkdf_extract};
 #[cfg(feature = "openssl")]
 pub use openssl_ctr::openssl_aes_ctr;
 pub use provider::default_provider;
@@ -53,6 +55,7 @@ const _: () = {
         _stream: &dyn StreamCipher,
         _aead: &dyn AeadCipher,
         _cbc: &dyn CbcCipher,
+        _mask: &dyn HeaderMask,
         _exchange: &dyn ActiveKeyExchange,
         _signing_key: &dyn SigningKey,
     ) {

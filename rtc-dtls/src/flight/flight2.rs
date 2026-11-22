@@ -115,7 +115,7 @@ impl Flight for Flight2 {
         &self,
         state: &mut State,
         _cache: &HandshakeCache,
-        _cfg: &HandshakeConfig,
+        cfg: &HandshakeConfig,
     ) -> Result<Vec<Packet>, (Option<Alert>, Option<Error>)> {
         state.handshake_send_sequence = 0;
         Ok(vec![Packet {
@@ -124,7 +124,9 @@ impl Flight for Flight2 {
                 0,
                 Content::Handshake(Handshake::new(HandshakeMessage::HelloVerifyRequest(
                     HandshakeMessageHelloVerifyRequest {
-                        version: PROTOCOL_VERSION1_2,
+                        // RFC 6347 4.2.1: DTLS 1.0 whatever is negotiated afterwards, unless
+                        // the configuration asks for the ServerHello's version.
+                        version: cfg.hello_verify_request_version,
                         cookie: state.cookie.clone(),
                     },
                 ))),
