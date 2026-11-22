@@ -169,6 +169,7 @@ mod rejected_mline_tests {
             sctp_over_tcp: false,
             ignore_rid_pause_for_recv: false,
             write_ssrc_attributes_for_simulcast: false,
+            ice_pacing: None,
             rid_pause_marks: false,
         }
     }
@@ -341,6 +342,41 @@ use url::Url;
 pub(crate) const ATTR_KEY_BUNDLE_ONLY: &str = "bundle-only";
 /// `a=ice-options` (RFC 8839 §5.6).
 pub(crate) const ATTR_KEY_ICE_OPTIONS: &str = "ice-options";
+/// `a=ice-pacing` (RFC 8839 §5.5).
+pub(crate) const ATTR_KEY_ICE_PACING: &str = "ice-pacing";
+
+/// The Ta a description proposes (`a=ice-pacing`, RFC 8839 section 5.5: session level, a
+/// value in milliseconds of 1 to 10 digits); `None` when it proposes none or the value is not
+/// one (section 5.5: an agent that does not understand it uses the default).
+pub(crate) fn remote_ice_pacing(desc: &SessionDescription) -> Option<std::time::Duration> {
+    desc.attribute(ATTR_KEY_ICE_PACING)
+        .map(|v| v.trim())
+        .filter(|v| (1..=10).contains(&v.len()) && v.bytes().all(|b| b.is_ascii_digit()))
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(std::time::Duration::from_millis)
+}
+
+/// The ICE options a description states (`a=ice-options`, RFC 8839 section 5.6), at session
+/// level and in its media sections, each once, in order.
+pub(crate) fn remote_ice_options(desc: &SessionDescription) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    let values = desc
+        .attributes
+        .iter()
+        .chain(
+            desc.media_descriptions
+                .iter()
+                .flat_map(|m| m.attributes.iter()),
+        )
+        .filter(|a| a.key == ATTR_KEY_ICE_OPTIONS)
+        .filter_map(|a| a.value.as_deref());
+    for option in values.flat_map(str::split_whitespace) {
+        if !out.iter().any(|o| o == option) {
+            out.push(option.to_owned());
+        }
+    }
+    out
+}
 
 pub(crate) const SDP_ATTRIBUTE_RID: &str = "rid";
 pub(crate) const SDP_ATTRIBUTE_SIMULCAST: &str = "simulcast";
@@ -1702,6 +1738,9 @@ pub(crate) struct PopulateSdpParams {
     pub(crate) ignore_rid_pause_for_recv: bool,
     pub(crate) rid_pause_marks: bool,
     pub(crate) write_ssrc_attributes_for_simulcast: bool,
+    /// The Ta this endpoint proposes (`ice::Agent::proposed_pacing`): `a=ice-pacing` when it is
+    /// not the default.
+    pub(crate) ice_pacing: Option<std::time::Duration>,
 }
 
 impl RTCPeerConnection {
@@ -1980,14 +2019,24 @@ impl RTCPeerConnection {
             }
         }
 
+        // RFC 8445 section 10: "an agent compliant to this specification MUST inform the
+        // peer about the compliance using the 'ice2' option" (RFC 8839 section 5.6:
+        // `a=ice-options`), lite agents included.
         if params.is_ice_lite {
             // RFC 8839 §5.3
             d = d.with_property_attribute(ATTR_KEY_ICELITE.to_owned());
+            d = d.with_value_attribute(ATTR_KEY_ICE_OPTIONS.to_owned(), "ice2".to_owned());
         } else {
             // JSEP RFC 8829 §5.2.1 / §5.3.1: this side accepts trickled candidates
             // (`add_remote_candidate` at any time after the remote description), so it says so
             // (RFC 8840 §4.1.1). A lite agent has no checks to trickle into.
-            d = d.with_value_attribute(ATTR_KEY_ICE_OPTIONS.to_owned(), "trickle".to_owned());
+            d = d.with_value_attribute(ATTR_KEY_ICE_OPTIONS.to_owned(), "trickle ice2".to_owned());
+        }
+        // RFC 8445 section 14.2: an agent that wants a Ta other than the default "MUST
+        // indicate the proposed value to its peer"; RFC 8839 section 5.5: `a=ice-pacing`, in
+        // milliseconds, at session level.
+        if let Some(ta) = params.ice_pacing {
+            d = d.with_value_attribute(ATTR_KEY_ICE_PACING.to_owned(), ta.as_millis().to_string());
         }
 
         if params.is_extmap_allow_mixed {

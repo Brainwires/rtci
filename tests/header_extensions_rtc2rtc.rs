@@ -87,6 +87,8 @@ struct World {
     now: Instant,
     /// The headers of the RTP packets the first peer put on the wire.
     wire: Vec<Header>,
+    /// The SSRC `send` writes on.
+    media_ssrc: Option<u32>,
 }
 
 impl World {
@@ -146,6 +148,14 @@ impl World {
         Ok(())
     }
 
+    /// The headers on the wire of the stream `send` writes (not RTX, FEC or probes).
+    fn media_wire(&self) -> Vec<&Header> {
+        self.wire
+            .iter()
+            .filter(|h| Some(h.ssrc) == self.media_ssrc)
+            .collect()
+    }
+
     fn run_until(&mut self, until: Instant) -> Result<()> {
         while self.now < until {
             let mut next = until;
@@ -173,6 +183,7 @@ impl World {
             peers: [Peer::new("10.0.0.1:5000")?, Peer::new("10.0.0.2:5000")?],
             now: Instant::now(),
             wire: Vec::new(),
+            media_ssrc: None,
         };
         let transceiver = world.peers[0].pc.add_transceiver_from_kind(
             kind,
@@ -238,6 +249,7 @@ impl World {
                 parameters.rtp_parameters.codecs[0].payload_type,
             )
         };
+        self.media_ssrc = Some(ssrc);
         let mut header = Header {
             version: 2,
             payload_type: pt,
@@ -276,9 +288,10 @@ fn forms_after_a_long_element(
     for seq in 101..106 {
         world.send(sender, seq, &[])?;
     }
-    assert_eq!(6, world.wire.len(), "every packet went out");
-    assert_eq!(Some(ExtensionForm::TwoByte), world.wire[0].extension_form());
-    Ok(world.wire[1..].iter().map(|h| h.extension_form()).collect())
+    let wire = world.media_wire();
+    assert_eq!(6, wire.len(), "every packet went out");
+    assert_eq!(Some(ExtensionForm::TwoByte), wire[0].extension_form());
+    Ok(wire[1..].iter().map(|h| h.extension_form()).collect())
 }
 
 /// RFC 8285 section 4.1.2: "A stream MUST contain only one-byte headers or only two-byte
@@ -329,9 +342,9 @@ fn an_extension_negotiated_encrypted_is_encrypted_on_the_wire() -> Result<()> {
     for seq in 0..8u16 {
         world.send(sender, 200 + seq, &[(id, &[0x2A])])?;
     }
-    assert_eq!(8, world.wire.len());
-    let on_wire: Vec<Option<u8>> = world
-        .wire
+    let wire = world.media_wire();
+    assert_eq!(8, wire.len());
+    let on_wire: Vec<Option<u8>> = wire
         .iter()
         .map(|h| h.get_extension(id).and_then(|v| v.first().copied()))
         .collect();

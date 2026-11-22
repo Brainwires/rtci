@@ -281,6 +281,8 @@ pub struct IceBehaviour {
     pub nomination_acceptance: NominationAcceptance,
     /// See [`SettingEngineBuilder::with_ice_nomination_on_consent_checks`].
     pub nominate_on_consent_checks: bool,
+    /// See [`SettingEngineBuilder::with_ice_pacing`].
+    pub pacing: Option<Duration>,
     /// See [`SettingEngineBuilder::with_ice_unauthenticated_requests`].
     pub unauthenticated_requests: UnauthenticatedRequests,
     /// See [`SettingEngineBuilder::with_ice_data_from_selected_pair_only`].
@@ -1336,6 +1338,15 @@ impl SettingEngineBuilder {
     /// ```
     pub fn with_ice_nomination_acceptance(mut self, acceptance: NominationAcceptance) -> Self {
         self.0.ice.nomination_acceptance = acceptance;
+        self
+    }
+
+    /// Ta, the pacing of connectivity checks (RFC 8445 section 14.2), `None` for the default
+    /// of 50 ms (never under 5 ms). A value other than the default is proposed to the peer as
+    /// `a=ice-pacing` (RFC 8839 section 5.5) in every description, and both agents use the
+    /// higher of the two proposals.
+    pub fn with_ice_pacing(mut self, ta: Option<Duration>) -> Self {
+        self.0.ice.pacing = ta;
         self
     }
 
