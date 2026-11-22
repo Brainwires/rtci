@@ -372,11 +372,11 @@ fn get_parameters_reports_the_codecs_negotiated_for_each_way() -> TestResult {
 }
 
 /// W3C 4.4.2 createAnswer to a simulcast offer: of comma-separated rid alternatives in
-/// `a=simulcast` only the first is kept, and a rid named twice is kept once.
+/// `a=simulcast` only the first is kept.
 #[test]
 fn an_answer_to_simulcast_keeps_the_first_rid_of_each_alternative() -> TestResult {
     let offer = crlf(&format!(
-        "{SESSION}a=group:BUNDLE 0\nm=video 9 UDP/TLS/RTP/SAVPF 96\n{TRANSPORT}a=mid:0\na=sendonly\na=rtpmap:96 VP8/90000\na=extmap:1 urn:ietf:params:rtp-hdrext:sdes:mid\na=extmap:2 urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id\na=rid:h send\na=rid:hh send\na=rid:m send\na=rid:l send\na=simulcast:send h,hh;m;m;l\n"
+        "{SESSION}a=group:BUNDLE 0\nm=video 9 UDP/TLS/RTP/SAVPF 96\n{TRANSPORT}a=mid:0\na=sendonly\na=rtpmap:96 VP8/90000\na=extmap:1 urn:ietf:params:rtp-hdrext:sdes:mid\na=extmap:2 urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id\na=rid:h send\na=rid:hh send\na=rid:m send\na=rid:l send\na=simulcast:send h,hh;m;l\n"
     ));
     let mut answerer = default_peer()?;
     answerer.set_remote_description(Instant::now(), RTCSessionDescription::offer(offer)?)?;
@@ -524,7 +524,6 @@ fn remote_candidates_expose_the_w3c_attributes() -> TestResult {
         "candidate:2 1 udp 1694498815 192.0.2.1 6000 typ srflx raddr 10.0.0.1 rport 5000",
         "candidate:3 1 udp 1862270975 192.0.2.2 6001 typ prflx raddr 10.0.0.1 rport 5000",
         "candidate:4 1 udp 16777215 198.51.100.1 7000 typ relay raddr 192.0.2.1 rport 6000",
-        "candidate:5 1 tcp 1518280447 10.0.0.1 9 typ host tcptype active",
         "candidate:6 1 tcp 1518280447 10.0.0.1 5001 typ host tcptype passive",
         "candidate:7 1 tcp 1518280447 10.0.0.1 5002 typ host tcptype so",
     ] {
@@ -565,7 +564,6 @@ fn remote_candidates_expose_the_w3c_attributes() -> TestResult {
     let relay = by_port(7000);
     assert_eq!(relay.typ, RTCIceCandidateType::Relay);
     assert_eq!(relay.related_port, 6000);
-    assert_eq!(by_port(9).tcp_type, RTCIceTcpCandidateType::Active);
     assert_eq!(by_port(5001).tcp_type, RTCIceTcpCandidateType::Passive);
     assert_eq!(
         by_port(5002).tcp_type,

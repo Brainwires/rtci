@@ -954,6 +954,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behaviour changes
 
+- **rtp receiver** (W3C webrtc-pc 4.4.1.4): `RTCRtpReceiver::get_parameters` lists no codecs
+  once a description negotiated a direction that does not receive (sendonly, inactive): W3C
+  `[[ReceiveCodecs]]` is then empty. It listed every engine codec
+  (`get_parameters_reports_the_codecs_negotiated_for_each_way`).
+
 - **ice restart**: a local candidate the agent kept across an ICE restart (the default,
   `discard_local_candidates_during_ice_restart` off) and the application gathers again for the
   new generation is announced in an `OnIceCandidateEvent` with the new username fragment, once
