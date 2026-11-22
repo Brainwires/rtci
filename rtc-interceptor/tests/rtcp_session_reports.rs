@@ -689,7 +689,10 @@ fn reference_times_are_sent_and_answered_in_the_regular_report() {
     );
 
     // The other side: a sender that is sent a reference time.
-    let mut chain = self::chain(builder());
+    let mut chain = self::chain(builder().with_bandwidth(RtcpBandwidth {
+        session: Some(64_000),
+        ..Default::default()
+    }));
     chain.bind_local_stream(&video(100));
     control(&mut chain, base, RtcpSessionControl::Start);
     chain.handle_write(rtp(base, 100, 1, 0)).unwrap();

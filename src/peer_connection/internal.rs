@@ -13,9 +13,10 @@ use crate::peer_connection::sdp::section_multiplexes_rtcp;
 use crate::peer_connection::sdp::{
     ATTR_KEY_RTCP_MUX_ONLY, BundleMode, MediaSection, PopulateSdpParams,
     add_candidates_to_media_descriptions, bundle_group_mids, effective_direction,
-    get_application_media, get_application_media_section_sctp_port, get_by_mid, get_peer_direction,
-    get_rids, have_data_channel, is_ext_map_allow_mixed_set, is_rejected_media, is_rtp_profile,
-    is_unknown_application_media, rtp_extensions_from_media_description, track_details_from_sdp,
+    extmap_allow_mixed_in, get_application_media, get_application_media_section_sctp_port,
+    get_by_mid, get_peer_direction, get_rids, have_data_channel, is_ext_map_allow_mixed_set,
+    is_rejected_media, is_rtp_profile, is_unknown_application_media,
+    rtp_extensions_from_media_description, superseded_clear_extensions, track_details_from_sdp,
     unknown_media_name,
 };
 use crate::peer_connection::state::signaling_state::check_next_signaling_state;
@@ -716,6 +717,11 @@ impl RTCPeerConnection {
                             } else {
                                 answered_extension_directions(media)
                             },
+                            superseded_extensions: if include_unmatched {
+                                vec![]
+                            } else {
+                                superseded_clear_extensions(media)?
+                            },
                             rid_map: get_rids(media),
                             answer_direction,
                             offered_protos: offered_protos(media),
@@ -1153,6 +1159,7 @@ impl RTCPeerConnection {
             .ssrc_owners
             .clear();
         self.update_cryptex();
+        self.update_encrypted_header_extensions();
     }
 
     pub(super) fn do_signaling_state_change(&mut self, new_state: RTCSignalingState) {
@@ -1389,6 +1396,12 @@ impl RTCPeerConnection {
                 && has_bundle_attribute(offer, offered, ATTR_KEY_RTCPRSIZE)
                 && has_bundle_attribute(answer, answered, ATTR_KEY_RTCPRSIZE);
             self.rtp_transceivers[i].set_rtcp_reduced_size(reduced_size);
+            // RFC 8285 section 6: a stream mixes one- and two-byte header extensions only when
+            // the offer and the answer both have `a=extmap-allow-mixed`.
+            let mixed = !is_rejected_media(answered)
+                && extmap_allow_mixed_in(offer, offered)
+                && extmap_allow_mixed_in(answer, answered);
+            self.rtp_transceivers[i].set_extmap_allow_mixed(mixed);
         }
     }
 
@@ -2964,9 +2977,33 @@ impl RTCPeerConnection {
 
         // The encodings name media codecs; the repair formats that accompany them (RTX for a
         // named primary, FEC, RED) stay offered, so they are listed too (a preference list
-        // keeps only the repair kinds it lists, RTCRtpReceiverInternal::get_codecs).
+        // keeps only the repair kinds it lists, RTCRtpReceiverInternal::get_codecs). So do
+        // the formats that run in the stream of an audio codec on its clock: telephone events
+        // (RFC 4733 section 2.1, which RFC 7874 section 3 has every WebRTC endpoint support)
+        // and comfort noise (RFC 3389 section 5, required with G.711 by RFC 7874 section 3).
+        let named_clock_rates: Vec<u32> = codec_preferences
+            .iter()
+            .map(|c| c.rtp_codec.clock_rate)
+            .collect();
+        let rides_the_stream = |codec: &RTCRtpCodecParameters| {
+            let mime_type = &codec.rtp_codec.mime_type;
+            use crate::peer_connection::configuration::media_engine::{
+                MIME_TYPE_CN, MIME_TYPE_TELEPHONE_EVENT,
+            };
+            (mime_type.eq_ignore_ascii_case(MIME_TYPE_TELEPHONE_EVENT)
+                || mime_type.eq_ignore_ascii_case(MIME_TYPE_CN))
+                && named_clock_rates.contains(&codec.rtp_codec.clock_rate)
+        };
         if !codec_preferences.is_empty() {
             for codec in &media_engine_codecs {
+                if rides_the_stream(codec)
+                    && !codec_preferences
+                        .iter()
+                        .any(|preference| preference.payload_type == codec.payload_type)
+                {
+                    codec_preferences.push(codec.clone());
+                    continue;
+                }
                 if !is_repair_codec(&codec.rtp_codec)
                     || codec_preferences
                         .iter()

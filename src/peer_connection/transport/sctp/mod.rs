@@ -4,7 +4,7 @@ use crate::peer_connection::transport::RTCTransportId;
 use crate::peer_connection::transport::sctp::capabilities::SCTPTransportCapabilities;
 use crate::peer_connection::transport::sctp::state::RTCSctpTransportState;
 use sctp::{Association, AssociationHandle};
-use shared::error::Result;
+use shared::error::{Error, Result};
 use shared::{TransportContext, TransportProtocol};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -515,13 +515,7 @@ impl SctpTransport {
     /// (`SettingEngineBuilder::with_sctp_message_size_limit_without_interleaving`).
     pub(crate) fn max_message_size(&self) -> Option<u32> {
         let negotiated = self.negotiated_max_message_size?;
-        let without_interleaving = self.limit_message_size_without_interleaving
-            && self.association().is_some_and(|association| {
-                !Self::ended(association)
-                    && !association.is_handshaking()
-                    && !association.message_interleaving()
-            });
-        Some(if without_interleaving {
+        Some(if self.limits_message_size_without_interleaving() {
             negotiated.min(MAX_MESSAGE_SIZE_WITHOUT_INTERLEAVING)
         } else {
             negotiated
@@ -534,6 +528,40 @@ impl SctpTransport {
     pub(crate) fn max_buffer_size(&self) -> Option<u32> {
         self.max_buffer_size_override
             .or(self.negotiated_max_buffer_size)
+    }
+
+    /// Whether the 16 KB limit of RFC 8831 section 6.6 applies: it is on, and the association
+    /// is established without user message interleaving.
+    fn limits_message_size_without_interleaving(&self) -> bool {
+        self.limit_message_size_without_interleaving
+            && self.association().is_some_and(|association| {
+                !Self::ended(association)
+                    && !association.is_handshaking()
+                    && !association.message_interleaving()
+            })
+    }
+
+    /// Refuses an application message of `size` bytes over [`Self::max_message_size`], with
+    /// an error that says which limit it is over: the negotiated one
+    /// (`ErrOutboundPacketTooLarge`), or the 16 KB of an association without message
+    /// interleaving (`ErrMessageTooLargeWithoutInterleaving`, which names the limit and the
+    /// setting that lifts it). Before negotiation nothing is refused here.
+    pub(crate) fn check_message_size(&self, size: usize) -> Result<()> {
+        let Some(negotiated) = self.negotiated_max_message_size else {
+            return Ok(());
+        };
+        if size > negotiated as usize {
+            return Err(Error::ErrOutboundPacketTooLarge);
+        }
+        if size > MAX_MESSAGE_SIZE_WITHOUT_INTERLEAVING as usize
+            && self.limits_message_size_without_interleaving()
+        {
+            return Err(Error::ErrMessageTooLargeWithoutInterleaving {
+                size,
+                limit: MAX_MESSAGE_SIZE_WITHOUT_INTERLEAVING,
+            });
+        }
+        Ok(())
     }
 
     /// W3C `SctpTransport.maxChannels`: the minimum of the negotiated inbound and outbound

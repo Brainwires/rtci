@@ -119,6 +119,8 @@ impl RTCRtpCodec {
             || mime_type == MIME_TYPE_TELEPHONE_EVENT.to_lowercase()
         {
             Ok(Box::<rtp::codec::g7xx::G7xxPayloader>::default())
+        } else if mime_type == MIME_TYPE_CN.to_lowercase() {
+            Ok(Box::<rtp::codec::comfort_noise::ComfortNoisePayloader>::default())
         } else if mime_type == MIME_TYPE_AV1.to_lowercase() {
             Ok(Box::<rtp::codec::av1::Av1Payloader>::default())
         } else if mime_type == MIME_TYPE_SMPTE336M.to_lowercase() {
@@ -172,10 +174,16 @@ pub(crate) fn codec_parameters_fuzzy_search(
     // A format is its encoding name and its clock rate (RFC 8866 section 6.6, `a=rtpmap`):
     // `telephone-event/8000` and `telephone-event/48000` are two formats. A needle that
     // states no clock rate (an encoding that leaves its codec to negotiation) matches any.
+    // So are its encoding parameters, the channel count of an audio format (`opus/48000/2`;
+    // RFC 7587 section 7: Opus "MUST" be `opus/48000/2`): two formats that state different
+    // counts are different formats. One that states none matches any.
     let same_clock_rate = |c: &RTCRtpCodecParameters| {
-        needle_rtp_codec.clock_rate == 0
+        (needle_rtp_codec.clock_rate == 0
             || c.rtp_codec.clock_rate == 0
-            || c.rtp_codec.clock_rate == needle_rtp_codec.clock_rate
+            || c.rtp_codec.clock_rate == needle_rtp_codec.clock_rate)
+            && (needle_rtp_codec.channels == 0
+                || c.rtp_codec.channels == 0
+                || c.rtp_codec.channels == needle_rtp_codec.channels)
     };
 
     // First attempt to match on mime_type + sdpfmtp_line

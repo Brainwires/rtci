@@ -127,7 +127,7 @@ impl Flight for Flight1 {
         // extensions. The key shares are kept until the server has answered.
         state.tls13_offer = None;
         if cfg.supports_dtls13() {
-            match crate::dtls13::hello::ClientOffer::new(cfg) {
+            match crate::dtls13::hello::ClientOffer::new(cfg, state.clock) {
                 Ok(offer) => state.tls13_offer = Some(offer),
                 Err(error) => return Err((None, Some(error))),
             }
@@ -147,21 +147,24 @@ impl Flight for Flight1 {
             state.connection_id_offer.as_deref(),
         );
 
+        let mut client_hello = HandshakeMessageClientHello {
+            version: PROTOCOL_VERSION1_2,
+            random: state.local_random.clone(),
+            cookie: state.cookie.clone(),
+
+            cipher_suites: client_hello_cipher_suites(cfg),
+            compression_methods: default_compression_methods(),
+            extensions,
+        };
+        if let Err(error) = bind_client_hello(cfg, state.tls13_offer.as_ref(), &mut client_hello) {
+            return Err((None, Some(error)));
+        }
+
         Ok(vec![Packet {
             record: RecordLayer::new(
                 PROTOCOL_VERSION1_2,
                 0,
-                Content::Handshake(Handshake::new(HandshakeMessage::ClientHello(
-                    HandshakeMessageClientHello {
-                        version: PROTOCOL_VERSION1_2,
-                        random: state.local_random.clone(),
-                        cookie: state.cookie.clone(),
-
-                        cipher_suites: client_hello_cipher_suites(cfg),
-                        compression_methods: default_compression_methods(),
-                        extensions,
-                    },
-                ))),
+                Content::Handshake(Handshake::new(HandshakeMessage::ClientHello(client_hello))),
             ),
             should_encrypt: false,
             reset_local_sequence_number: false,
@@ -232,6 +235,35 @@ pub(crate) fn client_hello_extensions(
     }
 
     extensions
+}
+
+/// Writes the binders of the DTLS 1.3 PSKs `offer` carries into `client_hello`, whose last
+/// extension is their pre_shared_key (RFC 8446 section 4.2.11.2): the binders cover the
+/// ClientHello as it is written, up to the binders themselves.
+pub(crate) fn bind_client_hello(
+    cfg: &HandshakeConfig,
+    offer: Option<&crate::dtls13::hello::ClientOffer>,
+    client_hello: &mut HandshakeMessageClientHello,
+) -> shared::error::Result<()> {
+    let Some(offer) = offer.filter(|offer| !offer.psks.is_empty()) else {
+        return Ok(());
+    };
+    let mut body = vec![];
+    client_hello.marshal(&mut body)?;
+    offer.bind(cfg, &mut body)?;
+    let length = crate::dtls13::psk::binders_len(&offer.psks);
+    let binders = &body[body.len() - length..];
+    match client_hello.extensions.last_mut() {
+        Some(Extension::Unknown {
+            extension_type: crate::dtls13::messages::EXT_PRE_SHARED_KEY,
+            data,
+        }) if data.len() >= length => {
+            let at = data.len() - length;
+            data[at..].copy_from_slice(binders);
+            Ok(())
+        }
+        _ => Err(Error::ErrInvalidExtensionType),
+    }
 }
 
 /// The cipher suites of this client's ClientHello: the TLS 1.3 ones when DTLS 1.3 is offered,

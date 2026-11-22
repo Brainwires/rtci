@@ -122,10 +122,12 @@ fn an_extension_offered_for_one_direction_is_answered_for_the_other() -> TestRes
     Ok(())
 }
 
-/// RFC 8285 sections 5 and 6: an `a=extmap` id of 256 maps the `appbits`, and 4096 to 4351
+/// RFC 8285 sections 5 to 7: an `a=extmap` id of 256 maps the `appbits`, and 4096 to 4351
 /// number extensions the offerer leaves for the answerer to place. Neither is an id a packet
-/// carries. A description with them is valid: it is applied, and this endpoint, which uses
-/// neither, leaves them out of its answer.
+/// carries. A description with them is valid: it is applied; the `appbits` mapping is left out
+/// of the answer, and an extension of the extended range this endpoint registered is remapped
+/// to a free id (section 7: the answerer "SHOULD ... remap it to a free identifier in the
+/// valid range"), with the reverse of its offered direction.
 #[test]
 fn extmap_ids_outside_the_element_range_do_not_fail_the_description() -> TestResult {
     let answered = answered_extmaps(
@@ -139,7 +141,14 @@ fn extmap_ids_outside_the_element_range_do_not_fail_the_description() -> TestRes
     )?;
     assert_eq!(
         answered,
-        vec![vec![format!("3 {MID}")], vec![format!("3 {MID}")]]
+        vec![
+            vec![format!("3 {MID}")],
+            vec![
+                format!("1 {RID}"),
+                format!("2/recvonly {RRID}"),
+                format!("3 {MID}"),
+            ]
+        ]
     );
     Ok(())
 }

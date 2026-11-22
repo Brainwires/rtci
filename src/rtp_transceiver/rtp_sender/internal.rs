@@ -78,6 +78,13 @@ pub(crate) struct RTCRtpSenderInternal {
     removed_ssrcs: Vec<SSRC>,
     /// The `RTCDTMFSender` of an audio sender: its slots and playout.
     pub(crate) dtmf: super::dtmf::DtmfState,
+    /// Whether the last answer negotiated `a=extmap-allow-mixed` for the media section (RFC
+    /// 8285 section 6): only then may a stream mix one- and two-byte header extensions.
+    extmap_allow_mixed: bool,
+    /// Without mixing, the SSRCs that have sent a two-byte header extension block: each keeps
+    /// the two-byte form from then on (RFC 8285 section 4.1.2: "A stream MUST contain only
+    /// one-byte headers or only two-byte headers").
+    two_byte_ssrcs: Vec<SSRC>,
 }
 
 impl RTCRtpSenderInternal {
@@ -562,6 +569,27 @@ impl RTCRtpSenderInternal {
         // with no payload type to send it with.
         self.sync_tracks();
         self.last_returned_parameters = None;
+    }
+
+    pub(crate) fn set_extmap_allow_mixed(&mut self, mixed: bool) {
+        self.extmap_allow_mixed = mixed;
+    }
+
+    /// Whether a stream may mix one- and two-byte header extensions (RFC 8285 section 6).
+    pub(crate) fn extmap_allow_mixed(&self) -> bool {
+        self.extmap_allow_mixed
+    }
+
+    /// Whether the stream `ssrc` has sent the two-byte form (see `two_byte_ssrcs`).
+    pub(crate) fn is_two_byte_stream(&self, ssrc: SSRC) -> bool {
+        self.two_byte_ssrcs.contains(&ssrc)
+    }
+
+    /// Records that the stream `ssrc` sent the two-byte form.
+    pub(crate) fn set_two_byte_stream(&mut self, ssrc: SSRC) {
+        if !self.two_byte_ssrcs.contains(&ssrc) {
+            self.two_byte_ssrcs.push(ssrc);
+        }
     }
 
     pub(crate) fn set_rtcp_reduced_size(&mut self, reduced_size: bool) {

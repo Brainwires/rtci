@@ -131,6 +131,26 @@ impl RTCPeerConnection {
     }
 }
 
+impl RTCPeerConnection {
+    /// Hands the SRTP contexts the ids of the header extensions negotiated in their encrypted
+    /// form (RFC 6904 section 4): their payload is encrypted when sending and decrypted when
+    /// receiving. A packet protected with Cryptex is not processed this way (RFC 9335 section
+    /// 5, in the SRTP context).
+    pub(crate) fn update_encrypted_header_extensions(&mut self) {
+        let ids: Vec<u8> = self
+            .media_engine
+            .negotiated_header_extensions
+            .iter()
+            .filter(|(_, e)| e.encrypted)
+            .filter_map(|(id, _)| u8::try_from(*id).ok())
+            .collect();
+        let set = srtp::header_extension::EncryptedHeaderExtensions::new(&ids).unwrap_or_default();
+        self.pipeline_context
+            .srtp_handler_context
+            .set_encrypted_header_extensions(set);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

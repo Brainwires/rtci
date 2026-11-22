@@ -79,6 +79,7 @@ impl DTLSConn {
     /// has been queued for the peer where one applies), or the retransmissions ran out. The
     /// association is then failed and stays failed (W3C webrtc 5.5.1 RTCDtlsTransport "failed").
     pub(crate) fn handshake(&mut self, now: Instant) -> Result<()> {
+        self.state.clock = Some(now);
         if self.v13.is_some() {
             return self.drive_dtls13(now, false);
         }
@@ -420,6 +421,7 @@ impl DTLSConn {
     }
 
     pub(crate) fn handshake_timeout(&mut self, now: Instant) -> Result<()> {
+        self.state.clock = Some(now);
         let next_handshake_state = if self.current_handshake_state == HandshakeState::Waiting {
             debug!(
                 "[handshake:{}] {} retransmit_timer",
