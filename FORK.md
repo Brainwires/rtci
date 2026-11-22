@@ -96,6 +96,7 @@ history stays intact.
 | ECN / L4S on RTP media and the ECN / RFC 8888 statistics | `rtc-shared/src/transport.rs` (`TransportContext::ecn`), `SettingEngineBuilder::with_ecn`, `src/peer_connection/handler/{ice,interceptor}.rs`, `rtc-interceptor/src/rfc8888/sender.rs`, `src/statistics/accumulator/{ccfb,rtcp_reports}.rs`, `configure_congestion_control_feedback` | The sans-I/O engine takes each received datagram's ECN codepoint in `TransportContext::ecn` and names the one to set on each datagram it sends. With `with_ecn(true)`, RTP media (RTX included) of a stream that negotiated `a=rtcp-fb:<pt> ack ccfb` (RFC 8888) is sent ECT(1), the L4S identifier; nothing else is marked. RFC 8888 reports carry each packet's codepoint. Stats: inbound `packetsReceivedWithEct1` / `packetsReceivedWithCe` / `packetsReportedAsLost` / `packetsReportedAsLostButRecovered`, outbound `packetsSentWithEct1`, remote-inbound `packetsReceivedWithEct1` / `packetsReceivedWithCe` / `packetsReportedAsLost` / `packetsReportedAsLostButRecovered` / `packetsWithBleachedEct1Marking`. Opt-in: off by default, TWCC stays the default feedback and the default SDP is unchanged. `tests/ecn_l4s_rtc2rtc.rs`. |
 | CI: benchmarks, fuzzing, OSS-Fuzz, git-cliff release notes | `.github/workflows/{bench,fuzz,release}.yml`, `oss-fuzz/`, `cliff.toml` | |
 | RTCP and RTX conformance fixes | `rtc-interceptor/src/report/{receiver_stream,sender_stream,sender}.rs`, `rtc-interceptor/src/nack/{generator,responder}.rs`, `src/peer_connection/handler/{endpoint,interceptor}.rs`, `src/rtp_transceiver/rtp_receiver/internal.rs` | Reception reports per RFC 3550 Appendix A.1 / A.3 (signed cumulative loss, source restart); no sender report from a stream silent for two intervals; no NACK for RTX / FEC SSRCs or after a BYE; RTX sequence numbers random and kept over a re-bind; every packet of an inbound compound RTCP packet delivered with its own track; `get_synchronization_sources` / `get_contributing_sources` filled. Rows in `docs/conformance/w4.md`. |
+| RTCP session: one identity, RFC 3550 / RFC 4585 timing, compound packets | `rtc-interceptor/src/rtcp_session/` (`RtcpSessionInterceptor`, `RtcpSessionBuilder`, `RtcpSessionControl`, `RtcpSessionEvent`, `RtcpRandom`, `Slot::RtcpSession`), `src/peer_connection/handler/interceptor.rs`, `configure_rtcp_reports` | Upstream reports from each interceptor on a fixed timer and sends feedback bare. Here one interceptor at the wire end owns RTCP: one RFC 7022 CNAME per connection, SR / RR / SDES / BYE (RTX and FEC SSRCs included), the RFC 3550 6.3 interval with reconsideration, RFC 4585 3.5 early feedback and `T_rr_interval`, RFC 8108 aggregation, RFC 5506 only when told it was negotiated, member timeouts, SSRC collisions (`OnSsrcCollision`). `SenderReportInterceptor` / `ReceiverReportInterceptor` remain for hand-built chains. NACK request policy (`NackGeneratorBuilder::with_max_packet_age`, `with_reorder_delay`, `with_round_trip_time`), `rtx-time` (`NackResponderBuilder::with_max_packet_age`), `FirCommands`, `Attribute::Retransmitted`, `RTCPeerConnection::rtcp_cname` / `remote_rtcp_cname`. Rows in `docs/conformance/w4.md`. |
 
 ### Hardening (fork only)
 
@@ -136,6 +137,12 @@ reason. Today there are two:
 
 ### Defaults the fork widens
 
+- `configure_rtcp_reports` (and so `register_default_interceptors`) registers the RTCP session:
+  all RTCP leaves in compound packets from the connection's SSRC, timed by RFC 3550 6.3 and
+  RFC 4585 3.5, with a BYE on close. Register `SenderReportBuilder` / `ReceiverReportBuilder`
+  at their slots instead to keep upstream's fixed-timer reports and bare feedback.
+- `NackGeneratorBuilder` gives a lost packet up after ten requests or two seconds (upstream
+  asks for ever); `with_max_nacks_per_packet(0).with_max_packet_age(None)` keeps upstream's.
 - `register_default_interceptors` includes `KeyFrameRequestInterceptor`: an application on the
   defaults now receives the RTCP packets of a compound packet that carries a PLI or FIR as
   `RTCMessage::RtcpPacket`, each with the track it is about (upstream delivers no RTCP by

@@ -330,7 +330,7 @@ over SRTP and is subject to none of SCTP's flow control.
   opt-in interceptor; ULPFEC can be registered for an application with its own coder but is not encoded or decoded
 - ✅ **Statistics** - `getStats` per the W3C WebRTC Statistics API, for what a transport measures (members that need an
   encoder, decoder or playout are left out, not reported as 0)
-- ✅ **Interceptors** - Composable RTP/RTCP pipeline: NACK, TWCC feedback, RTCP reports and key-frame requests by default;
+- ✅ **Interceptors** - Composable RTP/RTCP pipeline: the RTCP session (reports, CNAME, BYE, RFC 3550 / RFC 4585 timing, compound packets), NACK, TWCC feedback and key-frame requests by default;
   bandwidth estimation (GCC), pacing, the jitter buffer and FlexFEC are opt-in
 - ✅ **Pluggable crypto** - `ring` or `aws-lc-rs` built in, or bring your own provider
 
