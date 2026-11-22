@@ -1,3 +1,4 @@
+use crate::media_stream::MediaStreamId;
 use crate::media_stream::track::MediaStreamTrack;
 use crate::peer_connection::configuration::interceptor_registry::create_stream_info;
 use crate::peer_connection::configuration::media_engine::MediaEngine;
@@ -39,6 +40,9 @@ pub(crate) struct RTCRtpReceiverInternal {
 
     receive_codings: Vec<RTCRtpCodingParameters>,
     receive_codecs: Vec<RTCRtpCodecParameters>,
+    /// The ids of the remote MediaStreams the track is in, as the remote description's
+    /// `a=msid` lines name them (W3C `[[AssociatedRemoteMediaStreams]]`).
+    associated_media_stream_ids: Vec<MediaStreamId>,
 
     last_returned_parameters: Option<RTCRtpReceiveParameters>,
 }
@@ -54,6 +58,7 @@ impl RTCRtpReceiverInternal {
             receive_codings,
 
             receive_codecs: vec![],
+            associated_media_stream_ids: vec![],
             last_returned_parameters: None,
         }
     }
@@ -64,6 +69,14 @@ impl RTCRtpReceiverInternal {
 
     pub(crate) fn track(&self) -> &MediaStreamTrack {
         &self.track
+    }
+
+    pub(crate) fn streams(&self) -> &[MediaStreamId] {
+        &self.associated_media_stream_ids
+    }
+
+    pub(crate) fn set_streams(&mut self, streams: Vec<MediaStreamId>) {
+        self.associated_media_stream_ids = streams;
     }
 
     pub(crate) fn track_mut(&mut self) -> &mut MediaStreamTrack {

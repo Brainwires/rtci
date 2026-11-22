@@ -333,7 +333,16 @@ pub(crate) const MEDIA_SECTION_APPLICATION: &str = "application";
 pub(crate) struct TrackDetails {
     pub(crate) mid: String,
     pub(crate) kind: RtpCodecKind,
+    /// The first MediaStream the track is in (`-` when it is in none), the id its
+    /// `MediaStreamTrack` carries.
     pub(crate) stream_id: MediaStreamId,
+    /// Every MediaStream the track is in, one per `a=msid` line, without `-` (RFC 8830
+    /// section 2: "Multiple media descriptions with the same value for msid-id ... If
+    /// multiple media descriptions ... one track in several streams").
+    pub(crate) stream_ids: Vec<MediaStreamId>,
+    /// The msid-appdata, the sender's track id. Empty when the `a=msid` lines carry none
+    /// (the form RFC 9429 section 5.2.1 has senders write): the recipient names the track
+    /// itself (RFC 8830 section 3).
     pub(crate) track_id: MediaStreamTrackId,
     pub(crate) ssrc: Option<SSRC>,
     pub(crate) rtx_ssrc: Option<SSRC>,
@@ -371,8 +380,17 @@ pub(crate) fn track_details_from_sdp(s: &SessionDescription) -> Vec<TrackDetails
         let mut rtx_repair_flows = HashMap::new();
         let mut fec_repair_flows = HashMap::new();
 
-        let mut stream_id = "";
-        let mut track_id = "";
+        // The section's `a=msid` lines (RFC 8830 section 2), read before anything else: they
+        // name the track's streams whatever a legacy `a=ssrc:<n> msid:` attribute says.
+        let msid = media_msid(media);
+        let has_media_msid = msid.is_some();
+        let (stream_ids, msid_track_id) = msid.unwrap_or_default();
+        let mut stream_id = if has_media_msid {
+            stream_ids.first().map_or("-", String::as_str)
+        } else {
+            ""
+        };
+        let mut track_id = msid_track_id.as_str();
 
         // If media section is recvonly or inactive skip
         if media.attribute(ATTR_KEY_RECV_ONLY).is_some()
@@ -471,18 +489,8 @@ pub(crate) fn track_details_from_sdp(s: &SessionDescription) -> Vec<TrackDetails
                 // Handle `a=msid:<stream_id> <track_label>` The first value is the same as MediaStream.id
                 // in the browser and can be used to figure out which tracks belong to the same stream. The browser should
                 // figure this out automatically when an ontrack event is emitted on RTCPeerConnection.
-                ATTR_KEY_MSID => {
-                    if let Some(value) = &attr.value {
-                        let mut split = value.split(' ');
-
-                        if let (Some(sid), Some(tid), None) =
-                            (split.next(), split.next(), split.next())
-                        {
-                            stream_id = sid;
-                            track_id = tid;
-                        }
-                    }
-                }
+                // `a=msid` lines were read by `media_msid` above.
+                ATTR_KEY_MSID => {}
 
                 ATTR_KEY_SSRC => {
                     if let Some(value) = &attr.value {
@@ -502,7 +510,9 @@ pub(crate) fn track_details_from_sdp(s: &SessionDescription) -> Vec<TrackDetails
                             continue; // This ssrc is a FEC repair flow, ignore
                         }
 
-                        if split.len() == 3 && split[1].starts_with("msid:") {
+                        // The source-level msid of a description without `a=msid` lines
+                        // (the form that predates them).
+                        if !has_media_msid && split.len() == 3 && split[1].starts_with("msid:") {
                             stream_id = &split[1]["msid:".len()..];
                             track_id = split[2];
                         }
@@ -554,18 +564,38 @@ pub(crate) fn track_details_from_sdp(s: &SessionDescription) -> Vec<TrackDetails
 
         let mut tracks_in_media_section: Vec<TrackDetails> =
             track_slots.into_iter().flatten().collect();
+        // Every track of the section is in the streams its `a=msid` lines name; without such
+        // lines, in the one its source-level msid names.
+        let stream_ids_of = |stream_id: &str| -> Vec<MediaStreamId> {
+            if has_media_msid {
+                stream_ids.clone()
+            } else if stream_id.is_empty() || stream_id == "-" {
+                vec![]
+            } else {
+                vec![stream_id.to_owned()]
+            }
+        };
+        for track in &mut tracks_in_media_section {
+            if has_media_msid {
+                // One track, whichever `a=ssrc` line it was read from.
+                stream_id.clone_into(&mut track.stream_id);
+                track_id.clone_into(&mut track.track_id);
+            }
+            track.stream_ids = stream_ids_of(&track.stream_id);
+        }
 
         // If media line is using RTP Stream Identifier Source Description per RFC8851
         // we will need to override tracks, and remove ssrcs.
         // This is in particular important for Firefox, as it uses both 'rid', 'simulcast'
         // and 'a=ssrc' lines.
-        if !track_id.is_empty() && !stream_id.is_empty() {
+        if has_media_msid || (!track_id.is_empty() && !stream_id.is_empty()) {
             let rids = get_rids(media);
             if !rids.is_empty() {
                 let simulcast_track = TrackDetails {
                     mid: mid_value.to_string(),
                     kind: codec_type,
                     stream_id: stream_id.to_owned(),
+                    stream_ids: stream_ids_of(stream_id),
                     track_id: track_id.to_owned(),
                     rids: rids.iter().map(|r| r.id.clone()).collect(),
                     ..Default::default()
@@ -578,6 +608,7 @@ pub(crate) fn track_details_from_sdp(s: &SessionDescription) -> Vec<TrackDetails
                     mid: mid_value.to_string(),
                     kind: codec_type,
                     stream_id: stream_id.to_owned(),
+                    stream_ids: stream_ids_of(stream_id),
                     track_id: track_id.to_owned(),
                     ..Default::default()
                 };
@@ -590,6 +621,42 @@ pub(crate) fn track_details_from_sdp(s: &SessionDescription) -> Vec<TrackDetails
     }
 
     incoming_tracks
+}
+
+/// The `a=msid` lines of a media section (RFC 8830 section 2, `msid-id [SP msid-appdata]`):
+/// the MediaStream ids they name, in order and once each, without the `-` that stands for
+/// "no MediaStream" (RFC 8830 section 3), and the msid-appdata of the first line that has
+/// one. `None` when the section has no well-formed `a=msid` line; a line that is not
+/// `msid-id [SP msid-appdata]` is ignored (section 3: "SHOULD be ignored").
+///
+/// RFC 9429 section 5.8.2 reads the lines "ignoring appdata"; the appdata is still returned,
+/// because a sender that writes it means its track id (RFC 8830 section 3).
+pub(crate) fn media_msid(media: &MediaDescription) -> Option<(Vec<MediaStreamId>, String)> {
+    let mut found = false;
+    let mut stream_ids: Vec<MediaStreamId> = vec![];
+    let mut track_id = String::new();
+    for value in media
+        .attributes
+        .iter()
+        .filter(|a| a.key == ATTR_KEY_MSID)
+        .filter_map(|a| a.value.as_deref())
+    {
+        let mut tokens = value.split(' ');
+        let (Some(id), appdata, None) = (tokens.next(), tokens.next(), tokens.next()) else {
+            continue;
+        };
+        if !is_sdp_token(id) || appdata.is_some_and(|appdata| !is_sdp_token(appdata)) {
+            continue;
+        }
+        found = true;
+        if id != "-" && !stream_ids.iter().any(|known| known == id) {
+            stream_ids.push(id.to_owned());
+        }
+        if let (true, Some(appdata)) = (track_id.is_empty(), appdata) {
+            appdata.clone_into(&mut track_id);
+        }
+    }
+    found.then_some((stream_ids, track_id))
 }
 
 pub(crate) fn get_rids(media: &MediaDescription) -> Vec<SimulcastRid> {

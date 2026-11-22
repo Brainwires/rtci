@@ -1331,10 +1331,25 @@ impl RTCPeerConnection {
                     && transceiver.direction().has_recv()
             }) && let Some(receiver) = transceiver.receiver_mut()
             {
+                // The MediaStreams the track is in, one per `a=msid` line (RFC 8830 section 2).
+                receiver.set_streams(incoming_track.stream_ids.clone());
+
                 if is_same_remote_track(receiver, &incoming_track) {
                     // Keep SSRCs and codecs learned from RTP; the sender may no longer attach
                     // the MID/RID header extension needed to learn them again.
                     continue;
+                }
+
+                // An `a=msid` without appdata names no track: "the recipient can assign the
+                // track ID itself" (RFC 8830 section 3; RFC 9429 section 5.2.1 has senders
+                // write that form). The receiver's track keeps the id it was given before.
+                let mut incoming_track = incoming_track;
+                if incoming_track.track_id.is_empty() {
+                    incoming_track.track_id = if receiver.track().track_id().is_empty() {
+                        math_rand_alpha(16)
+                    } else {
+                        receiver.track().track_id().clone()
+                    };
                 }
 
                 let mut receive_codings = vec![];
@@ -2338,7 +2353,10 @@ fn is_same_remote_track(
     incoming_track: &sdp::TrackDetails,
 ) -> bool {
     let track = receiver.track();
-    if track.track_id() != &incoming_track.track_id
+    // A description without msid-appdata leaves the track id to this side: any id it gave
+    // the track is the same track.
+    if (!incoming_track.track_id.is_empty() && track.track_id() != &incoming_track.track_id)
+        || track.track_id().is_empty()
         || track.stream_id() != &incoming_track.stream_id
     {
         return false;
