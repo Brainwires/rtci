@@ -1921,6 +1921,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The netem impairment test prints both peers' state changes when it fails.
 - **test**: relayed TCP candidates (RFC 6544 sections 4.1, 4.5 over RFC 6062 allocations) pair
   by `tcptype` and are checked on the relayed path; server-reflexive TCP direction preferences.
+- **test**: the mDNS interop tests' upstream peer gathers on the mDNS egress interface only: it
+  publishes every host candidate under one name, and on a host with a second interface the
+  wrong one froze the right one past the timeout (hosted Linux runners). The browser cell's
+  WebKit `na-env` rule asks whether the `.local` candidate got a pair, now that every submitted
+  mDNS candidate is in the report. `stats_conformance_rtc2rtc` adds its late candidates before
+  the nomination (RFC 8838 section 13).
 - **jsep**: two retransmission formats that differ only in `rtx-time` are one format (RFC
   4588 section 8.1: each sender's own figure); an offer whose RTX `fmtp` had another
   `rtx-time` than the local one was answered without RTX.
