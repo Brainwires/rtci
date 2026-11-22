@@ -1,0 +1,81 @@
+# W3C WebRTC Encoded Transform (webrtc-encoded-transform): feature-level audit
+
+Spec: WebRTC Encoded Transform, W3C Editor's Draft of 25 June 2026 (https://w3c.github.io/webrtc-encoded-transform/; sections as numbered there). Engine: fork master 8916bc3.
+
+Scope. The API puts a transform between encoder and packetizer on the sender and between depacketizer and decoder on the receiver. In this engine both boundaries are the application's: it packetizes with the `rtc-rtp` payloaders (or its own) and calls `RTCRtpSender::write_rtp`, and it receives `RTCMessage::RtpPacket` and depacketizes. So each row asks whether the engine gives an application what it needs to build that step, not whether the JS object exists. Streams, workers, structured cloning and promises are `n/a`.
+
+Totals:
+
+- MUST: tested 10 / untested 5 / partial 6 / missing 20 / violated 0 / n-a 12
+- SHOULD: tested 0 / untested 0 / partial 0 / missing 0 / violated 0 / n-a 0
+- MAY: tested 0 / untested 0 / partial 1 / missing 0 / violated 0 / n-a 0
+
+| ID | § | Level | Clause (short paraphrase) | Verdict | Code | Test | Note |
+|---|---|---|---|---|---|---|---|
+| ENCTRANS-2-1 | 2 | MUST | Every frame the encoder outputs goes through the transform before the packetizer | tested | `src/rtp_transceiver/rtp_sender/mod.rs:402`, `rtc-rtp/src/packetizer/mod.rs:1` | `test_packetizer` | The application owns the step between its encoder and the payloader; nothing in the engine bypasses it |
+| ENCTRANS-2-2 | 2 | MUST | Every frame the depacketizer outputs goes through the transform before the decoder | tested | `src/peer_connection/message/mod.rs:420`, `rtc-media/src/io/sample_builder/mod.rs:1` | `test_sample_builder` | The application depacketizes (`Depacketizer`, `SampleBuilder`) and owns the step before its decoder |
+| ENCTRANS-2.1-1 | 2.1 | MUST | A transceiver's [[useSFrame]] is taken from its media description; if true SFrame RTP packetization is enabled | missing | `src/peer_connection/sdp/mod.rs:1` | - | No SFrame payload format in SDP (draft-ietf-avtcore-rtp-sframe), no per-transceiver flag |
+| ENCTRANS-2.1-2 | 2.1 | MUST | [[useSFrame]] is fixed before the transceiver is associated with an m= section, so SDP and transceiver agree | missing | - | - | - |
+| ENCTRANS-2.1.1-1 | 2.1.1 | MUST | A received frame carries captureTime and senderCaptureTimeOffset from the abs-capture-time extension, or interpolated from an earlier packet | missing | `rtc-rtp/src/extension/mod.rs:1` | - | No abs-capture-time header extension |
+| ENCTRANS-2.1.1-2 | 2.1.1 | MUST | A sent frame's captureTime is its capture timestamp | n/a | - | - | Capture is the application's |
+| ENCTRANS-2.1.1-3 | 2.1.1 | MUST | A transform cannot create frames or move them between streams | n/a | - | - | Guard on JS frame objects |
+| ENCTRANS-2.1.1-4 | 2.1.1 | MUST | A transform cannot reorder frames; it may delay or drop them | n/a | - | - | Guard on JS frame objects |
+| ENCTRANS-2.1.1-5 | 2.1.1 | MUST | Sender: frames reach the transform in encoder output order, and packet sequence numbers follow that order | tested | `src/rtp_transceiver/rtp_sender/mod.rs:402` | `test_packetizer` | Sequence numbers are assigned in write order |
+| ENCTRANS-2.1.1-6 | 2.1.1 | MUST | Receiver: frames reach the transform in encoder output order (packets reordered by sequence number first) | tested | `rtc-media/src/io/sample_builder/mod.rs:1`, `rtc-interceptor/src/jitterbuffer/mod.rs:1` | `test_sample_builder` | `SampleBuilder` and the jitter-buffer interceptor reorder |
+| ENCTRANS-2.1.1-7 | 2.1.1 | MAY | The packetizer may expect transformed data to keep the original format | partial | `rtc-rtp/src/codec/mod.rs:1` | - | Codec payloaders parse the payload (AV1 OBUs, H.264 NAL units, VP9 header): an encrypted frame needs a format-agnostic payloader, which does not exist |
+| ENCTRANS-2.2-1 | 2.2 | MUST | Setting an SFrame transform on a transceiver whose [[useSFrame]] is false, or a non-SFrame one when true, is an InvalidModificationError | missing | - | - | No [[useSFrame]] |
+| ENCTRANS-2.2-2 | 2.2 | MUST | A transform already owned by another sender or receiver is an InvalidStateError | n/a | - | - | JS object ownership |
+| ENCTRANS-2.2-3 | 2.2 | MUST | A transform can be replaced or removed at any time; removal restores passthrough | n/a | - | - | The step is the application's |
+| ENCTRANS-3-1 | 3 | MUST | SFrameCipherSuite: the five RFC 9605 suites and the three AES-256-CTR-HMAC suites | missing | - | - | No SFrame implementation in any crate (`grep -ri sframe` finds nothing) |
+| ENCTRANS-3-2 | 3 | MUST | RTCRtpSFrameEncryptor / RTCRtpSFrameDecryptor / SFrameEncryptorStream / SFrameDecryptorStream with a cipher suite option | missing | - | - | - |
+| ENCTRANS-3-3 | 3 | MUST | SFrameType "per-frame" (default) and "per-packet" sending | missing | - | - | - |
+| ENCTRANS-3.1-1 | 3.1 | MUST | SFrame transform: encrypt on a sender, decrypt on a receiver, replacing the frame data with the RFC 9605 result | missing | - | - | - |
+| ENCTRANS-3.1-2 | 3.1 | MUST | Decryption failure by format raises an error event of type "syntax" with the frame | missing | - | - | - |
+| ENCTRANS-3.1-3 | 3.1 | MUST | Unknown key id raises an error event of type "keyID" with the parsed KID | missing | - | - | - |
+| ENCTRANS-3.1-4 | 3.1 | MUST | Authentication tag failure raises an error event of type "authentication" | missing | - | - | - |
+| ENCTRANS-3.2-1 | 3.2 | MUST | setEncryptionKey(key, keyId): key ids up to 2^64-1; failure is an InvalidModificationError | missing | - | - | - |
+| ENCTRANS-3.2-2 | 3.2 | MUST | addDecryptionKey(key, keyId) adds to the key store | missing | - | - | - |
+| ENCTRANS-3.2-3 | 3.2 | MUST | removeDecryptionKey(keyId) removes from the key store | missing | - | - | - |
+| ENCTRANS-4.1-1 | 4.1 | MUST | Metadata synchronizationSource: the SSRC of the frame's packets | tested | `src/peer_connection/message/mod.rs:420` | `every_reference_resolves_and_nothing_unmeasured_is_reported` | Received packets keep their RTP header |
+| ENCTRANS-4.1-2 | 4.1 | MUST | Metadata payloadType | tested | `src/peer_connection/message/mod.rs:420` | `tests/codec_negotiation.rs` | Header field |
+| ENCTRANS-4.1-3 | 4.1 | MUST | Metadata contributingSources: the CSRC list | untested | `src/peer_connection/message/mod.rs:420`, `src/rtp_transceiver/rtp_receiver/mod.rs:299` | - | Header field; no test sends CSRCs end to end |
+| ENCTRANS-4.1-4 | 4.1 | MUST | Metadata rtpTimestamp | tested | `src/peer_connection/message/mod.rs:420` | `tests/save_to_disk_vpx_interop.rs` | Header field |
+| ENCTRANS-4.1-5 | 4.1 | MUST | Metadata receiveTime: when the last packet of the frame was received | partial | `src/peer_connection/message/mod.rs:420` | - | `RTCMessage::RtpPacket` carries no arrival time; the application knows only when it called `handle_read`, and a jitter buffer delays packets |
+| ENCTRANS-4.1-6 | 4.1 | MUST | Metadata captureTime, relative to the time origin | missing | `rtc-rtp/src/extension/mod.rs:1` | - | No abs-capture-time |
+| ENCTRANS-4.1-7 | 4.1 | MUST | Metadata senderCaptureTimeOffset | missing | `rtc-rtp/src/extension/mod.rs:1` | - | No abs-capture-time |
+| ENCTRANS-4.1-8 | 4.1 | MUST | Metadata mimeType: the codec of the frame | tested | `src/rtp_transceiver/rtp_receiver/mod.rs:1` | `tests/codec_negotiation.rs` | The receiver's negotiated codecs map payload type to MIME type |
+| ENCTRANS-4.2-1 | 4.2 | MUST | Video metadata frameId: lower 16 bits match the dependency descriptor's frame_number when present | missing | `rtc-rtp/src/extension/mod.rs:1` | - | No AV1 dependency descriptor extension |
+| ENCTRANS-4.2-2 | 4.2 | MUST | Video metadata dependencies: frame ids referenced, from the dependency descriptor | missing | `rtc-rtp/src/extension/mod.rs:1` | - | - |
+| ENCTRANS-4.2-3 | 4.2 | MUST | Video metadata width and height | partial | `rtc-rtp/src/codec/vp9/mod.rs:365`, `rtc-rtp/src/codec/h264/mod.rs:1` | - | VP9 scalability structure gives them; other codecs need the application to parse the bitstream |
+| ENCTRANS-4.2-4 | 4.2 | MUST | Video metadata spatialIndex and temporalIndex | partial | `rtc-rtp/src/codec/vp9/mod.rs:341`, `rtc-rtp/src/codec/vp9/mod.rs:345`, `rtc-rtp/src/codec/vp8/mod.rs:144` | `rtc-rtp/src/codec/vp9/vp9_depacketizer_fields_test.rs` | Depacketizers expose VP8 TID and VP9 TID / SID; AV1 and H.264 layers are not exposed |
+| ENCTRANS-4.2-5 | 4.2 | MUST | Video metadata timestamp: presentation timestamp of the raw frame | n/a | - | - | Raw frames are the application's |
+| ENCTRANS-4.3-1 | 4.3 | MUST | Frame type: key or delta | partial | `rtc-rtp/src/codec/vp8/mod.rs:1`, `rtc-rtp/src/codec/av1/packetizer.rs:220` | - | No common "is key frame" helper across codecs; AV1 packetizer has one internally |
+| ENCTRANS-4.3-2 | 4.3 | MUST | Frame data format per codec: VP8 frame, VP9 frame, H.264 Annex B, AV1 low-overhead OBUs, payload descriptors not included | tested | `rtc-rtp/src/codec/mod.rs:1` | `rtc-rtp/src/codec/vp9/vp9_test.rs`, `rtc-rtp/src/codec/av1/av1_test.rs` | Depacketizers return these formats |
+| ENCTRANS-4.3-3 | 4.3 | MUST | With SVC each spatial layer is transformed separately | missing | `rtc-rtp/src/codec/vp9/mod.rs:31` | - | No per-spatial-layer packetization (see w3c-webrtc-svc.md) |
+| ENCTRANS-4.3-4 | 4.3 | MUST | Frame constructor, getMetadata, data getter and setter, serialization | n/a | - | - | JS object plumbing |
+| ENCTRANS-4.4-1 | 4.4 | MUST | Audio metadata sequenceNumber for incoming frames | tested | `src/peer_connection/message/mod.rs:420` | `tests/save_to_disk_vpx_interop.rs` | Header field |
+| ENCTRANS-4.4-2 | 4.4 | MUST | Audio metadata audioLevel of a received frame comes from the RFC 6464 extension; absent without it | untested | `rtc-rtp/src/extension/audio_level_extension/mod.rs:1` | - | The extension parser is unit tested; no test reads it off a received packet through the peer connection |
+| ENCTRANS-4.4-3 | 4.4 | MUST | A locally sourced frame's level is used to generate the RFC 6464 extension when negotiated | untested | `rtc-rtp/src/extension/audio_level_extension/mod.rs:1` | - | The application sets the extension on the packet it writes |
+| ENCTRANS-4.5-1 | 4.5 | MUST | Audio frame data formats (Opus packet, PCMU, PCMA, G.722, RED, CN) | partial | `rtc-rtp/src/codec/opus/mod.rs:1`, `rtc-rtp/src/codec/g7xx/mod.rs:1` | - | Opus and G.7xx payloaders exist; RED is not implemented (conformance.md D1) |
+| ENCTRANS-5-1 | 5 | MUST | RTCRtpScriptTransform: worker, options, the rtctransform event, association and disassociation | n/a | - | - | Worker and stream plumbing |
+| ENCTRANS-5-2 | 5 | MUST | RTCRtpScriptTransformType "sframe" marks a script transform as producing SFrame, enabling SFrame packetization | missing | - | - | No SFrame packetization |
+| ENCTRANS-6-1 | 6 | MUST | RTCRtpScriptTransformer readable / writable / options, no backpressure | n/a | - | - | Stream plumbing |
+| ENCTRANS-6.4-1 | 6.4 | MUST | keyframerequest fires at the sender's transform when a PLI or FIR arrives, with the RID of the layer | partial | `rtc-interceptor/src/keyframe.rs:1` | `rtc-interceptor/src/keyframe.rs` | PLI / FIR are delivered to the application as `RTCMessage::RtcpPacket`; the SSRC is there, mapping it to a RID is left to the application |
+| ENCTRANS-6.4-2 | 6.4 | MUST | Unless cancelled, the request makes the encoder generate a key frame | n/a | - | - | Encoder is the application's |
+| ENCTRANS-6.5-1 | 6.5 | MUST | generateKeyFrame(rid): InvalidStateError unless on a video sender; TypeError for a malformed rid; NotFoundError if no active layer matches | n/a | - | - | Encoder is the application's |
+| ENCTRANS-6.5-2 | 6.5 | MUST | generateKeyFrame: key frames for all active layers, or the one with the given rid | n/a | - | - | Encoder is the application's |
+| ENCTRANS-6.5-3 | 6.5 | MUST | sendKeyFrameRequest: InvalidStateError unless on a video receiver; nothing sent while not receiving | untested | `src/rtp_transceiver/rtp_receiver/mod.rs:377` | - | `write_rtcp` on the receiver; state checks not traced |
+| ENCTRANS-6.5-4 | 6.5 | MUST | sendKeyFrameRequest sends a PLI or FIR for the receiver's stream | untested | `src/rtp_transceiver/rtp_receiver/mod.rs:377`, `rtc-interceptor/src/intervalpli/mod.rs:1` | - | The application writes the PLI / FIR; no rtc-to-rtc test asserts it reaches the sender's application |
+
+## Gaps, in order of importance
+
+1. **SFrame in the engine (L).** `ENCTRANS-3-1` to `ENCTRANS-3-3`, `ENCTRANS-3.1-1` to `ENCTRANS-3.1-4`, `ENCTRANS-3.2-1` to `ENCTRANS-3.2-3`: an `rtc-sframe` crate (see rfc9605.md) with the encryptor / decryptor, key store and the three error kinds.
+2. **SFrame RTP packetization and its negotiation (M).** `ENCTRANS-2.1-1`, `ENCTRANS-2.1-2`, `ENCTRANS-2.2-1`, `ENCTRANS-5-2`, `ENCTRANS-2.1.1-7`: the SFrame RTP payload format (per-frame and per-packet), its SDP signalling, a per-transceiver flag, and a format-agnostic payloader for encrypted frames.
+3. **Absolute capture time and dependency descriptor (M each).** `ENCTRANS-2.1.1-1`, `ENCTRANS-4.1-6`, `ENCTRANS-4.1-7`, `ENCTRANS-4.2-1`, `ENCTRANS-4.2-2`: the two header extensions, parse and write.
+4. **Per-frame metadata for a receiver (S to M).** `ENCTRANS-4.1-5` (arrival time on `RTCMessage::RtpPacket`), `ENCTRANS-4.2-3`, `ENCTRANS-4.2-4`, `ENCTRANS-4.3-1` (width, height, layer indices, key-frame flag from every depacketizer), `ENCTRANS-4.3-3` (one frame per spatial layer).
+5. **Key frame request path (S).** `ENCTRANS-6.4-1` (SSRC to RID helper), `ENCTRANS-6.5-3`, `ENCTRANS-6.5-4` (an rtc-to-rtc test: receiver writes PLI, sender's application reads it).
+6. **Tests (S).** `ENCTRANS-4.1-3`, `ENCTRANS-4.4-2`, `ENCTRANS-4.4-3`.
+
+## Bugs found
+
+None. The test names in rows `ENCTRANS-2-1`, `2-2`, `2.1.1-5`, `2.1.1-6` are the crates' unit tests of the payloader and sample builder; they were located by file, not read line by line.
