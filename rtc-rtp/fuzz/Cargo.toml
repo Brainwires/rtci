@@ -55,3 +55,24 @@ path = "fuzz_targets/smpte336m_depacketize.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "telephone_event"
+path = "fuzz_targets/telephone_event.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "comfort_noise"
+path = "fuzz_targets/comfort_noise.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "red"
+path = "fuzz_targets/red.rs"
+test = false
+doc = false
+bench = false
