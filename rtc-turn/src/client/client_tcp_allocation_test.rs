@@ -472,12 +472,17 @@ fn test_a_data_connection_binds_with_the_connection_id_and_then_carries_bytes_as
 
 /// RFC 6062 §4.3: the data connection authenticates with the control connection's method and
 /// credential. A server whose nonces are per connection answers the first ConnectionBind with
-/// a 401 or a 438 and a nonce; the request is made again with it.
+/// a 438 (Stale Nonce) and a nonce, or with a 401 that names its realm when that is another
+/// one; the request is made again with it (RFC 8489 §9.2.5).
 #[test]
 fn test_a_connection_bind_is_made_again_with_the_servers_nonce() -> Result<()> {
     let now = Instant::now();
     let server = TestServer::new()?;
-    for code in [CODE_UNAUTHORIZED, CODE_STALE_NONCE] {
+    for (code, realm) in [
+        (CODE_UNAUTHORIZED, "another realm"),
+        (CODE_STALE_NONCE, REALM),
+    ] {
+        let key = key_for(realm)?;
         let mut client = tcp_allocation(&server, now)?;
         let mut connection =
             client
@@ -494,7 +499,7 @@ fn test_a_connection_bind_is_made_again_with_the_servers_nonce() -> Result<()> {
                     reason: b"nonce".to_vec(),
                 }),
                 Box::new(Nonce::new(ATTR_NONCE, "of this connection".to_owned())),
-                Box::new(Realm::new(ATTR_REALM, REALM.to_owned())),
+                Box::new(Realm::new(ATTR_REALM, realm.to_owned())),
             ],
             None,
         )?;
@@ -510,7 +515,7 @@ fn test_a_connection_bind_is_made_again_with_the_servers_nonce() -> Result<()> {
         assert_eq!(again.typ.method, METHOD_CONNECTION_BIND);
         assert_eq!(connection_id_of(&again)?, 9);
         assert_eq!(nonce_of(&again), "of this connection");
-        MessageIntegrity::check(&mut again, &server.key, test_crypto_provider().crypto())?;
+        MessageIntegrity::check(&mut again, &key, test_crypto_provider().crypto())?;
 
         // A second refusal of the same kind ends it.
         let refused = server.reply(
@@ -522,7 +527,7 @@ fn test_a_connection_bind_is_made_again_with_the_servers_nonce() -> Result<()> {
                     reason: b"no".to_vec(),
                 }),
                 Box::new(Nonce::new(ATTR_NONCE, "another".to_owned())),
-                Box::new(Realm::new(ATTR_REALM, REALM.to_owned())),
+                Box::new(Realm::new(ATTR_REALM, realm.to_owned())),
             ],
             None,
         )?;
@@ -567,22 +572,25 @@ fn test_a_connection_bind_that_fails_is_reported() -> Result<()> {
         other => panic!("expected BindError, got {other:?}"),
     }
 
-    // A success nobody signed, or signed with another key, binds nothing.
-    let mut connection =
-        client
-            .relay(relayed_addr())?
-            .data_connection(now, ConnectionId(2), data_local())?;
-    let (bind, _) = next_bind(&mut connection);
+    // A success nobody signed, or signed with another key, binds nothing. The transport is
+    // reliable, so the transaction ends at once, as an integrity violation (RFC 8489 §9.2.5).
     for forged in [None, Some(&b"another key!"[..])] {
+        let mut connection =
+            client
+                .relay(relayed_addr())?
+                .data_connection(now, ConnectionId(2), data_local())?;
+        let (bind, _) = next_bind(&mut connection);
         let reply = server.reply(&bind, CLASS_SUCCESS_RESPONSE, vec![], forged)?;
         connection.handle_read(chunk(now, &reply))?;
-        assert!(connection.poll_event().is_none());
+        assert_eq!(
+            connection.poll_event(),
+            Some(DataConnectionEvent::BindError(RequestError::Failed(
+                Error::ErrIntegrityMismatch
+            )))
+        );
         assert!(!connection.is_bound());
+        assert!(connection.poll_timeout().is_none(), "nothing is waited for");
     }
-    // The real one still does.
-    let reply = server.reply(&bind, CLASS_SUCCESS_RESPONSE, vec![], Some(&server.key))?;
-    connection.handle_read(chunk(now, &reply))?;
-    assert_eq!(connection.poll_event(), Some(DataConnectionEvent::Bound));
 
     // Bytes that are not STUN before the bind is answered.
     let mut connection =

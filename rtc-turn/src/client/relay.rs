@@ -3,23 +3,22 @@ use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::ops::Add;
 use std::time::{Duration, Instant};
-use stun::attributes::*;
 use stun::error_code::*;
 use stun::fingerprint::*;
-use stun::integrity::*;
 use stun::message::*;
-use stun::textattrs::*;
 
 use super::permission::*;
 use super::transaction::*;
 use crate::proto;
 
 use crate::client::binding::{BINDING_REFRESH_AGE, BindingManager, BindingState};
+use crate::client::credential::Credential;
 use crate::client::data_connection::{DataConnection, DataConnectionConfig};
 use crate::client::error::RequestError;
-use crate::client::{Client, Event, RelayTransport, RelayedAddr};
+use crate::client::{Client, Event, RelayTransport, RelayedAddr, Response};
 use crate::proto::connid::ConnectionId;
 use shared::error::{Error, Result};
+use std::sync::Arc;
 
 const PERM_REFRESH_INTERVAL: Duration = Duration::from_secs(120);
 // https://datatracker.ietf.org/doc/html/rfc8656#name-permissions-2
@@ -77,8 +76,9 @@ pub(crate) struct RelayState {
     pub(crate) connecting: HashSet<SocketAddr>,
     /// Peers the server could not connect to (447), and when each may be tried again.
     connect_hold: HashMap<SocketAddr, Instant>,
-    pub(crate) long_term_integrity_key: Vec<u8>,
-    pub(crate) nonce: Nonce,
+    /// The long-term credential requests for the allocation are made with, as the server's
+    /// last challenge left it: none for an allocation a server gave without asking for one.
+    pub(crate) credential: Arc<Credential>,
     pub(crate) lifetime: Duration,
     /// When the server deletes the allocation unless a Refresh reaches it first: the lifetime
     /// it last returned, counted from that response.
@@ -103,8 +103,7 @@ impl RelayState {
     pub(super) fn new(
         now: Instant,
         relayed_addr: RelayedAddr,
-        long_term_integrity_key: Vec<u8>,
-        nonce: Nonce,
+        credential: Arc<Credential>,
         lifetime: Duration,
         allocation_refresh_interval_cap: Option<Duration>,
     ) -> Self {
@@ -120,8 +119,7 @@ impl RelayState {
             transport: RelayTransport::Udp,
             connecting: HashSet::new(),
             connect_hold: HashMap::new(),
-            long_term_integrity_key,
-            nonce,
+            credential,
             lifetime,
             expires_at: now.add(lifetime),
             releasing: false,
@@ -138,9 +136,9 @@ impl RelayState {
     }
 
     /// Whether requests for this allocation are signed. An allocation a server gave without
-    /// asking for a credential (RFC 8656 §7.2 step 1) has no key.
-    pub(crate) fn key(&self) -> Option<Vec<u8>> {
-        (!self.long_term_integrity_key.is_empty()).then(|| self.long_term_integrity_key.clone())
+    /// asking for a credential (RFC 8656 §7.2 step 1) has none.
+    pub(crate) fn is_signed(&self) -> bool {
+        self.credential.is_established()
     }
 
     /// Whether the allocation has a relayed address of `peer`'s family. A peer of another
@@ -503,20 +501,20 @@ impl Relay<'_> {
             })],
             relay,
         )?;
-        let integrity_key = relay.key();
+        let credential = Some(relay.credential.clone());
         Ok(self.client.perform_transaction(
             now,
             &msg,
             self.client.turn_server_addr_or_err()?,
             TransactionType::ConnectRequest(self.relayed_addr, peer_addr, retry),
-            integrity_key,
+            credential,
         ))
     }
 
     pub(super) fn handle_connect_response(
         &mut self,
         now: Instant,
-        res: Message,
+        res: Response,
         peer_addr: SocketAddr,
         retry: Retry,
     ) -> Result<()> {
@@ -526,7 +524,7 @@ impl Relay<'_> {
         let id = retry.report_id(res.transaction_id);
 
         let err = if res.typ.class == CLASS_ERROR_RESPONSE {
-            let mut err = RequestError::of(&res);
+            let mut err = res.error();
             if self.take_challenge(&res) {
                 if !retry.stale_nonce
                     && self
@@ -573,7 +571,7 @@ impl Relay<'_> {
             .events
             .push_back(Event::ConnectError(id, peer_addr, err));
         if allocation_gone {
-            self.lose(RequestError::of(&res));
+            self.lose(res.error());
         }
         Ok(())
     }
@@ -625,12 +623,8 @@ impl Relay<'_> {
                 server_addr: self.client.turn_server_addr_or_err()?,
                 local_addr,
                 connection_id,
-                username: self.client.username.clone(),
-                realm: self.client.realm.clone(),
-                password: self.client.password.clone(),
                 software: self.client.software.clone(),
-                key: relay.long_term_integrity_key.clone(),
-                nonce: relay.nonce.clone(),
+                credential: relay.credential.clone(),
             },
         )
     }
@@ -696,13 +690,13 @@ impl Relay<'_> {
             ],
             relay,
         )?;
-        let integrity_key = relay.key();
+        let credential = Some(relay.credential.clone());
         let _ = self.client.perform_transaction(
             now,
             &msg,
             self.client.turn_server_addr_or_err()?,
             TransactionType::FamilyRelease(self.relayed_addr, family.0, retry),
-            integrity_key,
+            credential,
         );
         Ok(())
     }
@@ -711,14 +705,14 @@ impl Relay<'_> {
     pub(super) fn handle_family_release_response(
         &mut self,
         now: Instant,
-        res: Message,
+        res: Response,
         family: u8,
         retry: Retry,
     ) -> Result<()> {
         let family = proto::reqfamily::RequestedAddressFamily(family);
         let ipv6 = family == proto::reqfamily::REQUESTED_FAMILY_IPV6;
         if res.typ.class == CLASS_ERROR_RESPONSE {
-            let mut err = RequestError::of(&res);
+            let mut err = res.error();
             if self.take_challenge(&res) {
                 if !retry.stale_nonce {
                     return self.release_family_with(
@@ -838,14 +832,13 @@ impl Relay<'_> {
         }
 
         if let Some(bind_number) = bind {
-            let (nonce, key) = (relay.nonce.clone(), relay.long_term_integrity_key.clone());
+            let credential = relay.credential.clone();
             self.channel_bind(
                 now,
                 self.relayed_addr,
                 peer_addr,
                 bind_number,
-                nonce,
-                key,
+                credential,
                 Retry::default(),
             )?;
         }
@@ -973,7 +966,7 @@ impl Relay<'_> {
         let msg = self
             .client
             .build_request(METHOD_CREATE_PERMISSION, attrs, relay)?;
-        let integrity_key = relay.key();
+        let credential = Some(relay.credential.clone());
         Ok(self.client.perform_transaction(
             now,
             &msg,
@@ -984,104 +977,50 @@ impl Relay<'_> {
                 peer_addrs.to_vec(),
                 retry,
             ),
-            integrity_key,
+            credential,
         ))
     }
 
-    /// Takes the NONCE, and the REALM when there is one, from a 438 (Stale Nonce) response so
-    /// the requests that follow are made with them (RFC 8489 §9.2.5, RFC 8656 §4.4).
-    ///
-    /// Returns whether the response carried a nonce, which is what makes sending the request
-    /// again worthwhile.
-    fn take_stale_nonce(&mut self, res: &Message) -> bool {
-        let Ok(nonce) = Nonce::get_from_as(res, ATTR_NONCE) else {
-            warn!("438 (Stale Nonce) without a NONCE");
-            return false;
-        };
-
-        // The realm is the client's and goes into the long-term key, so a new one re-keys
-        // every allocation, as `Client::update_credentials` does for a new password.
-        if let Ok(realm) = Realm::get_from_as(res, ATTR_REALM)
-            && !realm.text.is_empty()
-            && realm.text != self.client.realm.text
-        {
-            match MessageIntegrity::long_term_integrity_key(
-                self.client.username.text.clone(),
-                realm.text.clone(),
-                self.client.password.clone(),
-                self.client.crypto_provider.crypto(),
-            ) {
-                Ok(key) => {
-                    self.client.realm = realm;
-                    for relay in self.client.relays.values_mut() {
-                        relay.long_term_integrity_key = key.clone();
-                    }
-                }
-                Err(err) => {
-                    warn!("438 (Stale Nonce): cannot key the new realm: {err}");
-                    return false;
-                }
-            }
-        }
-
-        if let Some(relay) = self.client.relays.get_mut(&self.relayed_addr) {
-            relay.nonce = nonce;
-            debug!("438 (Stale Nonce): took the new nonce");
-            true
-        } else {
-            false
-        }
-    }
-
     /// Whether the error response `res` is one the request can be sent again after, and takes
-    /// what that needs from it: the nonce of a 438 (Stale Nonce), or the realm and nonce of a
-    /// 401 (Unauthorized) to a request that carried no credential because the server had not
-    /// asked for one when it made the allocation.
-    fn take_challenge(&mut self, res: &Message) -> bool {
+    /// what that needs from it (RFC 8489 §9.2.5, RFC 8656 §4.4): the nonce of a 438 (Stale
+    /// Nonce), with its realm, password algorithms and user name form, or the same of a 401
+    /// (Unauthenticated) to a request that carried no credential because the server had not
+    /// asked for one when it made the allocation, or that names another realm.
+    ///
+    /// Not after a response whose nonce cookie announces PASSWORD-ALGORITHMS when it has none
+    /// (a bid-down), not when none of the offered algorithms is supported, and not after a
+    /// 401 to the very credentials the request carried.
+    fn take_challenge(&mut self, res: &Response) -> bool {
         let mut code = ErrorCodeAttribute::default();
-        if code.get_from(res).is_err() {
-            return false;
-        }
-        if code.code == CODE_STALE_NONCE {
-            return self.take_stale_nonce(res);
-        }
-        if code.code != CODE_UNAUTHORIZED
-            || self
-                .client
-                .relays
-                .get(&self.relayed_addr)
-                .is_none_or(|relay| relay.key().is_some())
+        if code.get_from(res).is_err()
+            || (code.code != CODE_STALE_NONCE && code.code != CODE_UNAUTHORIZED)
         {
             return false;
         }
-        let (Ok(nonce), Ok(realm)) = (
-            Nonce::get_from_as(res, ATTR_NONCE),
-            Realm::get_from_as(res, ATTR_REALM),
-        ) else {
+        let Some(relay) = self.client.relays.get_mut(&self.relayed_addr) else {
             return false;
         };
-        let Ok(key) = MessageIntegrity::long_term_integrity_key(
-            self.client.username.text.clone(),
-            realm.text.clone(),
-            self.client.password.clone(),
+        match relay.credential.challenged(
+            &res.request(),
+            &res.msg,
             self.client.crypto_provider.crypto(),
-        ) else {
-            return false;
-        };
-        self.client.realm = realm;
-        if let Some(relay) = self.client.relays.get_mut(&self.relayed_addr) {
-            relay.long_term_integrity_key = key;
-            relay.nonce = nonce;
-            true
-        } else {
-            false
+        ) {
+            Ok(credential) => {
+                relay.credential = Arc::new(credential);
+                debug!("{}: took the server's realm and nonce", code.code.0);
+                true
+            }
+            Err(refused) => {
+                warn!("{} is not answered: {refused}", code.code.0);
+                false
+            }
         }
     }
 
     pub(super) fn handle_create_permission_response(
         &mut self,
         now: Instant,
-        res: Message,
+        res: Response,
         peer_addr_opt: Option<SocketAddr>,
         peer_addrs: Vec<SocketAddr>,
         retry: Retry,
@@ -1117,7 +1056,7 @@ impl Relay<'_> {
             return Ok(());
         }
 
-        let mut err = RequestError::of(&res);
+        let mut err = res.error();
         if self.take_challenge(&res) {
             if !retry.stale_nonce {
                 // The same peers again, with the new nonce and a new transaction id.
@@ -1143,16 +1082,16 @@ impl Relay<'_> {
                 .events
                 .push_back(Event::CreatePermissionError(id, err));
             if allocation_gone {
-                self.lose(RequestError::of(&res));
+                self.lose(res.error());
             }
         } else if allocation_gone {
             self.lose(err);
-        } else if !res.contains(ATTR_MESSAGE_INTEGRITY)
+        } else if !res.msg.is_authenticated()
             && self
                 .client
                 .relays
                 .get(&self.relayed_addr)
-                .is_some_and(|relay| relay.key().is_some())
+                .is_some_and(RelayState::is_signed)
         {
             // An unsigned 401 or 438 is all a server can say about a credential or nonce it
             // does not accept, and all anyone else can forge. It ends this refresh, not the
@@ -1199,13 +1138,13 @@ impl Relay<'_> {
             vec![Box::new(proto::lifetime::Lifetime(lifetime))],
             relay,
         )?;
-        let integrity_key = relay.key();
+        let credential = Some(relay.credential.clone());
         let _ = self.client.perform_transaction(
             now,
             &msg,
             self.client.turn_server_addr_or_err()?,
             TransactionType::RefreshRequest(self.relayed_addr, lifetime, retry),
-            integrity_key,
+            credential,
         );
         Ok(())
     }
@@ -1222,14 +1161,14 @@ impl Relay<'_> {
             .relays
             .get(&self.relayed_addr)
             .map_or(Duration::ZERO, |relay| relay.lifetime);
-        self.handle_refresh_response(now, res, lifetime, Retry::default())
+        self.handle_refresh_response(now, Response::unchecked(&res), lifetime, Retry::default())
     }
 
     /// Handles the response to a Refresh that asked for `lifetime`.
     pub(super) fn handle_refresh_response(
         &mut self,
         now: Instant,
-        res: Message,
+        res: Response,
         lifetime: Duration,
         retry: Retry,
     ) -> Result<()> {
@@ -1238,7 +1177,7 @@ impl Relay<'_> {
         }
 
         if res.typ.class == CLASS_ERROR_RESPONSE {
-            let mut err = RequestError::of(&res);
+            let mut err = res.error();
             if self.take_challenge(&res) {
                 if !retry.stale_nonce {
                     // The same LIFETIME again (zero for a release), with the new nonce and a
@@ -1354,8 +1293,7 @@ impl Relay<'_> {
         relayed_addr: RelayedAddr,
         bind_addr: SocketAddr,
         bind_number: u16,
-        nonce: Nonce,
-        long_term_integrity_key: Vec<u8>,
+        credential: Arc<Credential>,
         retry: Retry,
     ) -> Result<()> {
         let msg = self.client.build_request_with(
@@ -1367,8 +1305,7 @@ impl Relay<'_> {
                 }),
                 Box::new(proto::channum::ChannelNumber(bind_number)),
             ],
-            &long_term_integrity_key,
-            &nonce,
+            &credential,
         )?;
         let turn_server_addr = self.client.turn_server_addr_or_err()?;
 
@@ -1385,7 +1322,7 @@ impl Relay<'_> {
             &msg,
             turn_server_addr,
             TransactionType::ChannelBindRequest(relayed_addr, bind_addr, retry),
-            (!long_term_integrity_key.is_empty()).then_some(long_term_integrity_key),
+            Some(credential),
         );
 
         Ok(())
@@ -1409,15 +1346,13 @@ impl Relay<'_> {
             .find_by_addr(&bind_addr)
             .map(|b| b.number)
             .ok_or(Error::ErrChannelBindNotFound)?;
-        let (nonce, long_term_integrity_key) =
-            (relay.nonce.clone(), relay.long_term_integrity_key.clone());
+        let credential = relay.credential.clone();
         self.channel_bind(
             now,
             self.relayed_addr,
             bind_addr,
             bind_number,
-            nonce,
-            long_term_integrity_key,
+            credential,
             retry,
         )
     }
@@ -1425,7 +1360,7 @@ impl Relay<'_> {
     pub(super) fn handle_channel_bind_response(
         &mut self,
         now: Instant,
-        res: Message,
+        res: Response,
         bind_addr: SocketAddr,
         retry: Retry,
     ) -> Result<()> {
@@ -1456,7 +1391,7 @@ impl Relay<'_> {
             return Ok(());
         }
 
-        let mut err = RequestError::of(&res);
+        let mut err = res.error();
         if self.take_challenge(&res) {
             if !retry.stale_nonce
                 && self
@@ -1468,6 +1403,18 @@ impl Relay<'_> {
             }
             err = RequestError::Failed(Error::ErrTryAgain);
         }
+        self.channel_bind_failed(now, bind_addr, err);
+        Ok(())
+    }
+
+    /// A ChannelBind for `bind_addr` failed with `err`: an error response, or responses the
+    /// client could not accept.
+    pub(super) fn channel_bind_failed(
+        &mut self,
+        now: Instant,
+        bind_addr: SocketAddr,
+        err: RequestError,
+    ) {
         warn!("ChannelBind for {bind_addr} failed: {err}");
 
         // The data keeps going as Send indications, and the ChannelBind is not sent again
@@ -1484,25 +1431,28 @@ impl Relay<'_> {
         // and starting afresh.
         let allocation_gone = err.is(CODE_ALLOC_MISMATCH);
         let out_of_step = err.is(CODE_BAD_REQUEST);
+        let again = match &err {
+            RequestError::Rejected(response) => RequestError::Rejected(response.clone()),
+            RequestError::Failed(_) => RequestError::Failed(Error::ErrTryAgain),
+        };
         let name = self.name();
         self.client
             .events
             .push_back(Event::ChannelBindError(name, bind_addr, err));
         if allocation_gone {
-            self.lose(RequestError::of(&res));
+            self.lose(again);
         } else if out_of_step {
             // Released on the server and dropped here at once: its state cannot be trusted.
             let credential = self
                 .client
                 .relays
                 .get(&self.relayed_addr)
-                .map(|relay| (relay.long_term_integrity_key.clone(), relay.nonce.clone()));
-            if let Some((key, nonce)) = credential {
-                let _ = self.client.release_orphan(now, &key, &nonce);
+                .map(|relay| relay.credential.clone());
+            if let Some(credential) = credential {
+                let _ = self.client.release_orphan(now, &credential);
             }
-            self.lose(RequestError::of(&res));
+            self.lose(again);
         }
-        Ok(())
     }
 
     /// A ChannelBind for `bind_addr` and the one sent after it both went unanswered: the next

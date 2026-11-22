@@ -308,8 +308,7 @@ pub(super) fn hold_permission(client: &mut Client, now: Instant, peer: IpAddr) {
     let mut relay = relay::RelayState::new(
         now,
         relayed_addr(),
-        vec![0u8; 16],
-        Nonce::new(ATTR_NONCE, "nonce".to_owned()),
+        credential::Credential::established(),
         Duration::from_secs(600),
         None,
     );

@@ -1,5 +1,5 @@
 use crate::client::relay::Relay;
-use crate::client::{Client, Event};
+use crate::client::{Client, Event, Failure};
 use shared::TaggedBytesMut;
 use shared::error::Error;
 use std::net::SocketAddr;
@@ -37,7 +37,7 @@ impl sansio::Protocol<TaggedBytesMut, TaggedBytesMut, ()> for Client {
 
     fn handle_timeout(&mut self, now: Instant) -> Result<(), Self::Error> {
         for exhausted in self.tr_map.handle_timeout(now) {
-            self.handle_transaction_timeout(now, exhausted);
+            self.handle_transaction_failure(now, exhausted, Failure::Timeout);
         }
 
         #[allow(clippy::map_clone)]
@@ -55,7 +55,7 @@ impl sansio::Protocol<TaggedBytesMut, TaggedBytesMut, ()> for Client {
 
     fn poll_timeout(&mut self) -> Option<Instant> {
         let mut eto = None;
-        if let Some(to) = self.tr_map.poll_timout()
+        if let Some(to) = self.tr_map.poll_timeout()
             && (eto.is_none() || to < *eto.as_ref().unwrap())
         {
             eto = Some(to);

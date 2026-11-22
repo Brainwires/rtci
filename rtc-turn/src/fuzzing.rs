@@ -32,6 +32,7 @@ use stun::message::{
 use stun::textattrs::TextAttribute;
 use stun::xoraddr::XorMappedAddress;
 
+use crate::client::credential::{Credential, Login};
 use crate::client::data_connection::{DataConnection, DataConnectionConfig};
 use crate::client::{AllocateOptions, Client, ClientConfig, Event, RelayTransport};
 use crate::proto::addfamily::ATTR_ADDITIONAL_ADDRESS_FAMILY;
@@ -398,6 +399,7 @@ pub fn client_handle_inbound(mut data: &[u8], start: Instant) {
             rto_in_ms: 100,
             allocation_refresh_interval_cap: (config & 0x04 != 0)
                 .then(|| Duration::from_millis(u64::from(config) * 40)),
+            ..Default::default()
         },
         provider,
     ) else {
@@ -562,6 +564,37 @@ pub fn data_connection_handle_read(mut data: &[u8], start: Instant) {
         vec![]
     };
     let local = SocketAddr::from(([10, 0, 0, 1], 5001));
+    // The credential of the control connection: none, or the one a 401 with this realm and
+    // nonce asked for.
+    let mut credential = Credential::new(std::sync::Arc::new(Login {
+        username: USERNAME.to_owned(),
+        password: PASSWORD.to_owned(),
+        password_algorithms: vec![],
+    }));
+    if !key.is_empty() {
+        let mut challenge = Message::new();
+        let built = challenge.build(&[
+            Box::new(TransactionId::new()),
+            Box::new(MessageType::new(
+                METHOD_CONNECTION_BIND,
+                CLASS_ERROR_RESPONSE,
+            )),
+            Box::new(ErrorCodeAttribute {
+                code: stun::error_code::CODE_UNAUTHORIZED,
+                reason: vec![],
+            }),
+            Box::new(TextAttribute::new(ATTR_NONCE, "fuzz-nonce".to_owned())),
+            Box::new(TextAttribute::new(ATTR_REALM, realm.clone())),
+        ]);
+        let Ok(challenged) = built.map_err(|_| ()).and_then(|()| {
+            credential
+                .challenged(&Message::new(), &challenge, provider.crypto())
+                .map_err(|_| ())
+        }) else {
+            return;
+        };
+        credential = challenged;
+    }
     let Ok(mut connection) = DataConnection::new(
         start,
         DataConnectionConfig {
@@ -569,12 +602,8 @@ pub fn data_connection_handle_read(mut data: &[u8], start: Instant) {
             server_addr: turn_server(),
             local_addr: local,
             connection_id: ConnectionId(u32::from(config)),
-            username: TextAttribute::new(stun::attributes::ATTR_USERNAME, USERNAME.to_owned()),
-            realm: TextAttribute::new(ATTR_REALM, realm.clone()),
-            password: PASSWORD.to_owned(),
             software: TextAttribute::new(stun::attributes::ATTR_SOFTWARE, String::new()),
-            key: key.clone(),
-            nonce: TextAttribute::new(ATTR_NONCE, "fuzz-nonce".to_owned()),
+            credential: std::sync::Arc::new(credential),
         },
     ) else {
         return;
@@ -732,6 +761,7 @@ mod tests {
                 software: String::new(),
                 rto_in_ms: 100,
                 allocation_refresh_interval_cap: None,
+                ..Default::default()
             },
             provider,
         )
