@@ -176,8 +176,8 @@ impl RateController {
     /// cluster), or `None` to forget it. While set, the estimate may be as high as this
     /// measurement even where one and a half times the received rate (the bound of section
     /// 5.5) is less: the received rate lags a sender that has only just been told it may
-    /// send more, and would pull the estimate straight back to where it was. Over-use
-    /// forgets it.
+    /// send more, and would pull the estimate straight back to where it was. Over-use lowers
+    /// it to where the estimate backs off to.
     pub fn set_measured_rate(&mut self, measured: Option<f64>) {
         self.measured_rate = measured;
     }
@@ -228,16 +228,22 @@ impl RateController {
                     self.convergence.reset();
                 }
                 self.convergence.on_decrease(received);
-                // What the path delivers is the received rate, or what a probe just measured
-                // when the sender has less to send than that: backing off from the received
-                // rate of an application-limited sender would cut the estimate to a fraction
-                // of what it sends, and again with every probe. The measurement is used once:
-                // over-use that lasts is answered from the received rate.
+                // What the path delivers is the received rate, or what a probe measured when
+                // the sender has less to send than that: backing off from the received rate
+                // of an application-limited sender would cut the estimate to a fraction of
+                // what it sends, and the bound below would then cut it again on every update
+                // (1.5 times a fifth of the target is less than the target). The measurement
+                // backs off with the estimate: over-use says the path carries less than the
+                // probe saw, so the estimate never climbs back above where it backed off to
+                // until a new probe measures the path, and over-use that lasts brings both
+                // down by the decrease factor each time.
                 let delivered = self
                     .measured_rate
-                    .take()
                     .map_or(received, |measured| measured.max(received).min(self.target));
                 self.target = (delivered * self.decrease_factor).clamp(self.min, self.max);
+                if self.measured_rate.is_some() {
+                    self.measured_rate = Some(self.target);
+                }
                 self.last_change = Some(now);
             }
 
@@ -557,5 +563,38 @@ mod tests {
             low < 300_000.0 && high > 300_000.0 && high < 400_000.0,
             "the band is around 300 kbit/s, not an average with 1 Mbit/s: {low}..{high}"
         );
+    }
+
+    /// An application-limited sender (a fifth of the target) over-uses the path with a probe
+    /// cluster: the estimate backs off from the probe's measurement, not from what the
+    /// application sends, and the updates that follow keep it there instead of cutting it to
+    /// one and a half times the received rate again and again (which spiralled the target
+    /// down to the minimum).
+    #[test]
+    fn over_use_after_a_probe_backs_off_from_the_measurement_and_stays() {
+        let epoch = Instant::now();
+        let mut controller = RateController::new(2_000_000.0, MIN, MAX);
+        controller.set_measured_rate(Some(2_000_000.0));
+        let received = Some(400_000.0);
+
+        let mut at = epoch;
+        let backed_off = controller.update(at, Usage::Over, received);
+        assert!(
+            (backed_off - 1_700_000.0).abs() < 1.0,
+            "0.85 × the measured 2 Mbit/s, got {backed_off}"
+        );
+        for usage in [Usage::Normal, Usage::Normal, Usage::Normal, Usage::Under] {
+            at += DEFAULT_RATE_CONTROL_INTERVAL;
+            let target = controller.update(at, usage, received);
+            assert!(
+                (target - backed_off).abs() < 1.0,
+                "the estimate rests where it backed off to: {target} after {usage:?}"
+            );
+        }
+
+        // Over-use that lasts brings it down by the decrease factor each time.
+        at += DEFAULT_RATE_CONTROL_INTERVAL;
+        let again = controller.update(at, Usage::Over, received);
+        assert!((again - 0.85 * backed_off).abs() < 1.0, "{again}");
     }
 }

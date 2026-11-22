@@ -46,7 +46,7 @@ pub const FEEDBACK_TIMEOUT_DECREASE: f64 = 0.5;
 /// five seconds: the result stands until the next one is due and has had its second to
 /// arrive, so the estimate rests on a measurement no older than that instead of falling back
 /// to one and a half times what the application happens to send and jumping up again with
-/// every probe. Over-use ends it at once.
+/// every probe. Over-use lowers it with the estimate.
 pub const PROBE_RESULT_HOLD: Duration = Duration::from_secs(6);
 
 /// Google Congestion Control.
