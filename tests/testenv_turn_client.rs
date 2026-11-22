@@ -4,22 +4,26 @@
 //! The unit tests in `rtc-turn` script the server's answers. These prove the claims that need
 //! a server to agree: that coturn takes the Allocate options the client sends (RFC 8656 7.1),
 //! gives the relayed addresses asked for, relays a Send indication carrying DONT-FRAGMENT, and
-//! refuses what the RFC says a server refuses. The environment's third coturn
-//! (`scripts/test-env/coturn/turnserver-client.conf`, port 3480) relays on an IPv4 and an IPv6
-//! address and knows two users.
+//! refuses what the RFC says a server refuses; and that a TCP allocation (RFC 6062) connects
+//! to a peer and accepts one, each over a data connection that carries the bytes as they are.
+//! The environment's third coturn (`scripts/test-env/coturn/turnserver-client.conf`, port 3480)
+//! relays on an IPv4 and an IPv6 address and knows two users.
 
 mod common;
 mod testenv;
 
 use bytes::BytesMut;
 use rtc::sansio::Protocol;
+use rtc::shared::turn_framing::TurnStreamDecoder;
 use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use rtc::stun::error_code::{CODE_ADDR_FAMILY_NOT_SUPPORTED, CODE_WRONG_CREDENTIALS};
-use rtc::turn::client::{AllocateOptions, Client, ClientConfig, Event};
+use rtc::turn::client::data_connection::{DataConnection, DataConnectionEvent};
+use rtc::turn::client::{AllocateOptions, Client, ClientConfig, Event, RelayTransport};
+use rtc::turn::proto::connid::ConnectionId;
 use rtc::turn::proto::evenport::EvenPort;
 use rtc::turn::proto::reqfamily::{REQUESTED_FAMILY_IPV4, REQUESTED_FAMILY_IPV6};
-use std::io::{self, ErrorKind};
-use std::net::{SocketAddr, UdpSocket};
+use std::io::{self, ErrorKind, Read, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::time::{Duration, Instant};
 use testenv::{Env, in_netns, source_ip};
 
@@ -44,10 +48,41 @@ fn socket_in(ns: &'static str, server: SocketAddr) -> io::Result<UdpSocket> {
     Ok(sock)
 }
 
-/// A sans-I/O TURN client on a real UDP socket.
+/// A TCP connection from namespace `ns` to `to`, non-blocking.
+fn connect_in(ns: &'static str, to: SocketAddr) -> io::Result<TcpStream> {
+    let stream = in_netns(ns, move || {
+        TcpStream::connect_timeout(&to, Duration::from_secs(5))
+    })?;
+    stream.set_nodelay(true)?;
+    stream.set_nonblocking(true)?;
+    Ok(stream)
+}
+
+fn write_all(stream: &mut TcpStream, mut data: &[u8]) -> io::Result<()> {
+    while !data.is_empty() {
+        match stream.write(data) {
+            Ok(n) => data = &data[n..],
+            Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(1))
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+/// How the client reaches the server: a UDP socket, or a TCP connection whose stream is cut
+/// into TURN messages (RFC 8656 3.1).
+enum Link {
+    Udp(UdpSocket),
+    Tcp(TcpStream, TurnStreamDecoder),
+}
+
+/// A sans-I/O TURN client on a real socket.
 struct TurnPeer {
     client: Client,
-    sock: UdpSocket,
+    link: Link,
+    server: SocketAddr,
     local: SocketAddr,
     events: Vec<Event>,
 }
@@ -56,11 +91,38 @@ impl TurnPeer {
     fn new(ns: &'static str, server: SocketAddr, user: &str, pass: &str) -> io::Result<Self> {
         let sock = socket_in(ns, server)?;
         let local = sock.local_addr()?;
+        Self::on(Link::Udp(sock), server, local, user, pass)
+    }
+
+    /// A client over TCP: the control connection a TCP allocation needs (RFC 6062 4.1).
+    fn over_tcp(ns: &'static str, server: SocketAddr, user: &str, pass: &str) -> io::Result<Self> {
+        let stream = connect_in(ns, server)?;
+        let local = stream.local_addr()?;
+        Self::on(
+            Link::Tcp(stream, TurnStreamDecoder::new()),
+            server,
+            local,
+            user,
+            pass,
+        )
+    }
+
+    fn on(
+        link: Link,
+        server: SocketAddr,
+        local: SocketAddr,
+        user: &str,
+        pass: &str,
+    ) -> io::Result<Self> {
+        let transport_protocol = match link {
+            Link::Udp(_) => TransportProtocol::UDP,
+            Link::Tcp(..) => TransportProtocol::TCP,
+        };
         let client = Client::new(
             ClientConfig {
                 turn_serv_addr: server.to_string(),
                 local_addr: local,
-                transport_protocol: TransportProtocol::UDP,
+                transport_protocol,
                 username: user.to_owned(),
                 password: pass.to_owned(),
                 software: "rtc test-env".to_owned(),
@@ -71,7 +133,8 @@ impl TurnPeer {
         .map_err(io::Error::other)?;
         Ok(TurnPeer {
             client,
-            sock,
+            link,
+            server,
             local,
             events: vec![],
         })
@@ -81,30 +144,59 @@ impl TurnPeer {
     /// a due timer runs, events are collected.
     fn step(&mut self) -> io::Result<()> {
         while let Some(out) = self.client.poll_write() {
-            match self.sock.send_to(&out.message, out.transport.peer_addr) {
-                Ok(_) => {}
-                Err(e) if e.kind() == ErrorKind::WouldBlock => {}
-                Err(e) => return Err(e),
+            match &mut self.link {
+                Link::Udp(sock) => match sock.send_to(&out.message, out.transport.peer_addr) {
+                    Ok(_) => {}
+                    Err(e) if e.kind() == ErrorKind::WouldBlock => {}
+                    Err(e) => return Err(e),
+                },
+                Link::Tcp(stream, _) => write_all(stream, &out.message)?,
             }
         }
-        let mut buf = [0u8; 2048];
-        loop {
-            match self.sock.recv_from(&mut buf) {
-                Ok((n, from)) => {
-                    let _ = self.client.handle_read(TaggedBytesMut {
-                        now: Instant::now(),
-                        transport: TransportContext {
-                            local_addr: self.local,
-                            peer_addr: from,
-                            transport_protocol: TransportProtocol::UDP,
-                            ecn: None,
-                        },
-                        message: BytesMut::from(&buf[..n]),
-                    });
+        let mut buf = [0u8; 4096];
+        let mut inbound = vec![];
+        match &mut self.link {
+            Link::Udp(sock) => loop {
+                match sock.recv_from(&mut buf) {
+                    Ok((n, from)) => inbound.push((buf[..n].to_vec(), from)),
+                    Err(e) if e.kind() == ErrorKind::WouldBlock => break,
+                    Err(e) => return Err(e),
                 }
-                Err(e) if e.kind() == ErrorKind::WouldBlock => break,
-                Err(e) => return Err(e),
+            },
+            Link::Tcp(stream, decoder) => {
+                loop {
+                    match stream.read(&mut buf) {
+                        Ok(0) => {
+                            return Err(io::Error::new(
+                                ErrorKind::ConnectionReset,
+                                "the server closed the control connection",
+                            ));
+                        }
+                        Ok(n) => decoder.extend_from_slice(&buf[..n]),
+                        Err(e) if e.kind() == ErrorKind::WouldBlock => break,
+                        Err(e) => return Err(e),
+                    }
+                }
+                while let Some(message) = decoder.next_message().map_err(io::Error::other)? {
+                    inbound.push((message, self.server));
+                }
             }
+        }
+        let transport_protocol = match self.link {
+            Link::Udp(_) => TransportProtocol::UDP,
+            Link::Tcp(..) => TransportProtocol::TCP,
+        };
+        for (message, from) in inbound {
+            let _ = self.client.handle_read(TaggedBytesMut {
+                now: Instant::now(),
+                transport: TransportContext {
+                    local_addr: self.local,
+                    peer_addr: from,
+                    transport_protocol,
+                    ecn: None,
+                },
+                message: BytesMut::from(&message[..]),
+            });
         }
         let now = Instant::now();
         if self.client.poll_timeout().is_some_and(|at| at <= now) {
@@ -455,5 +547,269 @@ fn a_refresh_under_another_username_is_refused_with_441() {
         events.is_empty(),
         "the owner's Refresh is accepted: {events:?}"
     );
+    a.release(relayed);
+}
+
+/// One client data connection of a TCP allocation on a real TCP connection.
+struct DataLink {
+    connection: DataConnection,
+    stream: TcpStream,
+    local: SocketAddr,
+    /// What the peer sent, as the data connection delivered it.
+    received: Vec<u8>,
+    events: Vec<DataConnectionEvent>,
+}
+
+impl DataLink {
+    /// Opens a new TCP connection to the server from `ns` and starts binding it to
+    /// `connection_id` (RFC 6062 4.3, 4.4).
+    fn open(
+        ns: &'static str,
+        control: &mut TurnPeer,
+        relayed: SocketAddr,
+        connection_id: ConnectionId,
+    ) -> io::Result<Self> {
+        let stream = connect_in(ns, control.server)?;
+        let local = stream.local_addr()?;
+        assert_ne!(local, control.local, "another local transport address");
+        let connection = control
+            .client
+            .relay(relayed)
+            .map_err(io::Error::other)?
+            .data_connection(Instant::now(), connection_id, local)
+            .map_err(io::Error::other)?;
+        assert_eq!(connection.server_addr(), control.server);
+        Ok(DataLink {
+            connection,
+            stream,
+            local,
+            received: vec![],
+            events: vec![],
+        })
+    }
+
+    fn step(&mut self) -> io::Result<()> {
+        while let Some(out) = self.connection.poll_write() {
+            write_all(&mut self.stream, &out.message)?;
+        }
+        let mut buf = [0u8; 4096];
+        loop {
+            match self.stream.read(&mut buf) {
+                Ok(0) => {
+                    return Err(io::Error::new(
+                        ErrorKind::ConnectionReset,
+                        "the server closed the data connection",
+                    ));
+                }
+                Ok(n) => {
+                    let _ = self.connection.handle_read(TaggedBytesMut {
+                        now: Instant::now(),
+                        transport: TransportContext {
+                            local_addr: self.local,
+                            peer_addr: self.connection.server_addr(),
+                            transport_protocol: TransportProtocol::TCP,
+                            ecn: None,
+                        },
+                        message: BytesMut::from(&buf[..n]),
+                    });
+                }
+                Err(e) if e.kind() == ErrorKind::WouldBlock => break,
+                Err(e) => return Err(e),
+            }
+        }
+        let now = Instant::now();
+        if self.connection.poll_timeout().is_some_and(|at| at <= now) {
+            self.connection
+                .handle_timeout(now)
+                .map_err(io::Error::other)?;
+        }
+        while let Some(event) = self.connection.poll_event() {
+            self.events.push(event);
+        }
+        while let Some(data) = self.connection.poll_read() {
+            self.received.extend_from_slice(&data);
+        }
+        Ok(())
+    }
+
+    /// Runs until the server accepted the ConnectionBind.
+    fn wait_bound(&mut self) {
+        let deadline = Instant::now() + ANSWER;
+        while !self.connection.is_bound() {
+            self.step().expect("data connection I/O");
+            assert!(
+                !self
+                    .events
+                    .iter()
+                    .any(|e| matches!(e, DataConnectionEvent::BindError(_))),
+                "the ConnectionBind failed: {:?}",
+                self.events
+            );
+            assert!(
+                Instant::now() < deadline,
+                "the ConnectionBind was not answered in {ANSWER:?}"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Runs until the peer's bytes so far are `expected`.
+    fn wait_received(&mut self, expected: &[u8]) {
+        let deadline = Instant::now() + ANSWER;
+        while self.received.len() < expected.len() {
+            self.step().expect("data connection I/O");
+            assert!(
+                Instant::now() < deadline,
+                "only {:?} of {expected:?} arrived",
+                self.received
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(self.received, expected, "relayed as it is");
+    }
+
+    fn send(&mut self, data: &[u8]) {
+        self.connection
+            .send(Instant::now(), data)
+            .expect("the data connection is bound");
+        self.step().expect("data connection I/O");
+    }
+}
+
+/// Reads exactly `n` bytes from a plain peer socket.
+fn read_exact(stream: &mut TcpStream, n: usize) -> Vec<u8> {
+    stream.set_nonblocking(false).unwrap();
+    stream.set_read_timeout(Some(ANSWER)).unwrap();
+    let mut buf = vec![0u8; n];
+    stream
+        .read_exact(&mut buf)
+        .expect("the bytes arrive in time");
+    buf
+}
+
+/// RFC 6062 4.1 to 4.6: over TCP to the server, an Allocate with REQUESTED-TRANSPORT TCP gets a
+/// TCP relayed address. A Connect makes the server connect to a peer, and a peer connecting to
+/// the relayed address is announced with a ConnectionAttempt; each becomes a data connection
+/// with a ConnectionBind on a new TCP connection, and then carries the bytes as they are, both
+/// ways. The allocation is refreshed on the control connection meanwhile, and closing a data
+/// connection closes the peer's.
+#[test]
+#[ignore = "needs the real-network test environment (the TURN client's coturn, namespaces): scripts/test-env/run.sh"]
+fn a_tcp_allocation_connects_and_accepts_through_coturn() {
+    common::install_crypto_provider();
+    let env = Env::get();
+    let server = client_server();
+
+    // Over UDP there is no TCP allocation, and nothing is sent to find out.
+    let mut over_udp = TurnPeer::new("open-a", server, &env.user, &env.pass).expect("client");
+    let tcp = AllocateOptions {
+        transport: RelayTransport::Tcp,
+        ..Default::default()
+    };
+    assert!(
+        over_udp
+            .client
+            .allocate_with(Instant::now(), tcp.clone())
+            .is_err()
+    );
+
+    let mut a = TurnPeer::over_tcp("open-a", server, &env.user, &env.pass).expect("client a");
+    let relayed = a.allocate(tcp);
+    eprintln!("TURN client: TCP relayed address {relayed}");
+    assert_eq!(
+        a.client.relay(relayed).unwrap().transport(),
+        RelayTransport::Tcp
+    );
+
+    // The client connects out: the server dials a listener in open-b from the relayed address.
+    let b_ip = source_ip("open-b", server).unwrap();
+    let listener = in_netns("open-b", move || TcpListener::bind((b_ip, 0))).expect("listener");
+    let listening = listener.local_addr().unwrap();
+    a.permit(relayed, listening);
+    let tid = a
+        .client
+        .relay(relayed)
+        .unwrap()
+        .connect(Instant::now(), listening)
+        .expect("the Connect is sent");
+    assert!(
+        a.client
+            .relay(relayed)
+            .unwrap()
+            .connect(Instant::now(), listening)
+            .is_err(),
+        "never two Connect requests for one peer address"
+    );
+    let connection_id = a.wait_for("ConnectResponse", |e| match e {
+        Event::ConnectResponse(id, peer, connection_id) if *id == tid => {
+            assert_eq!(*peer, listening);
+            Some(*connection_id)
+        }
+        Event::ConnectError(id, _, err) if *id == tid => panic!("the Connect failed: {err}"),
+        _ => None,
+    });
+    listener.set_nonblocking(false).unwrap();
+    let (mut dialled, from) = listener.accept().expect("the server's connection");
+    eprintln!("TURN client: Connect made connection {connection_id}; the peer sees {from}");
+    assert_eq!(from.ip(), relayed.ip(), "the peer sees the relayed address");
+
+    let mut out = DataLink::open("open-a", &mut a, relayed, connection_id).expect("data link");
+    out.wait_bound();
+    out.send(b"through the relay, as it is");
+    assert_eq!(read_exact(&mut dialled, 27), b"through the relay, as it is");
+    dialled.write_all(b"and back").unwrap();
+    out.wait_received(b"and back");
+
+    // A peer connects in: the server announces it, and the client accepts it.
+    let mut knocking = in_netns("open-b", move || {
+        TcpStream::connect_timeout(&relayed, Duration::from_secs(5))
+    })
+    .expect("the peer reaches the relayed address");
+    let knocking_from = knocking.local_addr().unwrap();
+    let attempt = a.wait_for("ConnectionAttempt", |e| match e {
+        Event::ConnectionAttempt(to, peer, connection_id) => {
+            assert_eq!(*to, relayed);
+            Some((*peer, *connection_id))
+        }
+        _ => None,
+    });
+    eprintln!(
+        "TURN client: ConnectionAttempt {} from {} (the peer's socket is {knocking_from})",
+        attempt.1, attempt.0
+    );
+    assert_eq!(attempt.0, knocking_from);
+    assert_ne!(attempt.1, connection_id);
+    let mut accepted = DataLink::open("open-a", &mut a, relayed, attempt.1).expect("data link");
+    accepted.wait_bound();
+    knocking.write_all(b"knock").unwrap();
+    accepted.wait_received(b"knock");
+    accepted.send(b"come in");
+    assert_eq!(read_exact(&mut knocking, 7), b"come in");
+
+    // The allocation is refreshed on the control connection while the data connections live.
+    a.client.refresh_allocations(Instant::now()).unwrap();
+    let events = a.run_for(Duration::from_secs(1));
+    assert!(events.is_empty(), "the Refresh is accepted: {events:?}");
+    out.send(b"still open");
+    assert_eq!(read_exact(&mut dialled, 10), b"still open");
+
+    // Closing the data connection ends the peer's connection.
+    drop(out);
+    dialled.set_read_timeout(Some(ANSWER)).unwrap();
+    let mut rest = [0u8; 16];
+    let closed = dialled.read(&mut rest);
+    let ended = match &closed {
+        Ok(0) => true,
+        Err(e) => matches!(
+            e.kind(),
+            ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted | ErrorKind::BrokenPipe
+        ),
+        Ok(_) => false,
+    };
+    assert!(
+        ended,
+        "the peer's connection stays open after its data connection closed: {closed:?}"
+    );
+
     a.release(relayed);
 }

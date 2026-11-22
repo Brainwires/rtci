@@ -76,7 +76,9 @@ variables the tests read.
     LIFETIME, DONT-FRAGMENT and EVEN-PORT, the reserved port taken with its RESERVATION-TOKEN, a
     Send indication with DONT-FRAGMENT relayed to a peer, an IPv6 and a dual (IPv4 + IPv6)
     allocation with one family released, 440 from the IPv4-only server, and 441 for a Refresh
-    under another username.
+    under another username; and a TCP allocation (RFC 6062) over a TCP control connection: a
+    Connect to a listener in `open-b`, a connection from `open-b` to the relayed address
+    accepted from its ConnectionAttempt, bytes both ways over each data connection.
   - `testenv_dtls`: a wrong `a=fingerprint` in the offer or the answer must end the checking
     side's connection as `failed`.
   - `testenv_ice_tcp`: ICE over TCP from an active candidate behind a symmetric NAT to a passive
