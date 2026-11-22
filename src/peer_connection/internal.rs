@@ -1888,7 +1888,18 @@ impl RTCPeerConnection {
                         .remote_candidates
                         .contains_key(&remote_candidate_stats_id(c.id()))
             })
-            .map(RTCIceCandidate::from)
+            .map(|c| {
+                let mut candidate = RTCIceCandidate::from(c);
+                // draft-ietf-mmusic-mdns-ice-candidates section 3.3.1: a peer-reflexive
+                // candidate's address is shown only when the peer signalled that address
+                // itself; it may be the one an mDNS name hides.
+                if c.candidate_type() == ::ice::candidate::CandidateType::PeerReflexive
+                    && !agent.is_signalled_remote_ip(c.addr().ip())
+                {
+                    candidate.address.clear();
+                }
+                candidate
+            })
             .collect();
 
         if !unregistered_local.is_empty() {

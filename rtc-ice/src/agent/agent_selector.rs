@@ -142,6 +142,19 @@ impl Agent {
             return;
         }
 
+        // draft-ietf-mmusic-mdns-ice-candidates Section 3.3.2: "an ICE agent MUST NOT form
+        // candidate pairs between its own relay candidates and remote mDNS candidates": the
+        // TURN server would learn the address the name hides.
+        if local.candidate_type() == CandidateType::Relay && remote.address().ends_with(".local") {
+            debug!(
+                "[{}]: not pairing relay candidate {} with mDNS candidate {}",
+                self.get_name(),
+                local,
+                remote.address()
+            );
+            return;
+        }
+
         let mut pair = CandidatePair::new(
             local_index,
             remote_index,
@@ -914,6 +927,8 @@ impl Agent {
                 self.set_selected_pair(Some(now), Some(valid));
                 self.conclude();
             }
+        } else if self.adopt_tcp_reconnection(now, valid) {
+            // The selected pair's connection was opened again: see `adopt_tcp_reconnection`.
         } else if std::mem::take(&mut self.candidate_pairs[checked].nomination_pending) {
             // "If the controlled agent receives a successful response to a Binding request
             // sent by the agent, and that Binding request was triggered by a received Binding
@@ -923,6 +938,49 @@ impl Agent {
         } else {
             self.maybe_nominate(now);
         }
+    }
+
+    /// RFC 6544 Section 11.1: when the selected pair's TCP connection is lost, the active side
+    /// opens it again and the passive side waits for it. The new connection has another source
+    /// port, so on the passive side it is a new peer-reflexive candidate and a new pair. Once
+    /// that pair is valid it *is* the selected pair's connection, re-established: the session
+    /// moves to it without a nomination (the active side still sees the pair it nominated).
+    /// Returns whether `valid` was adopted.
+    fn adopt_tcp_reconnection(&mut self, now: Instant, valid: usize) -> bool {
+        let Some(selected) = self.selected_pair else {
+            return false;
+        };
+        if selected == valid {
+            return false;
+        }
+        let (old, new) = (self.candidate_pairs[selected], self.candidate_pairs[valid]);
+        let local = &self.local_candidates[new.local_index];
+        let (old_remote, new_remote) = (
+            &self.remote_candidates[old.remote_index],
+            &self.remote_candidates[new.remote_index],
+        );
+        let reconnection = local.network_type().is_tcp()
+            && local.tcp_type() == crate::tcp_type::TcpType::Passive
+            && self.same_base(old.local_index, new.local_index)
+            && new_remote.candidate_type() == CandidateType::PeerReflexive
+            && new_remote.tcp_type() == crate::tcp_type::TcpType::Active
+            && old_remote.tcp_type() == crate::tcp_type::TcpType::Active
+            && old_remote.addr().ip() == new_remote.addr().ip();
+        if !reconnection {
+            return false;
+        }
+        debug!(
+            "[{}]: the selected TCP pair was reconnected: {} replaces {}",
+            self.get_name(),
+            new,
+            old
+        );
+        self.candidate_pairs[valid].remote_nomination = old.remote_nomination;
+        self.candidate_pairs[valid].nomination_pending = false;
+        self.candidate_pairs[selected].nominated = false;
+        self.set_selected_pair(Some(now), Some(valid));
+        self.conclude();
+        true
     }
 
     /// Section 7.2.5.3.1: "The ICE agent MUST check the mapped address from the STUN response.

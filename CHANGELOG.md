@@ -97,6 +97,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **ice**: a consent request waits for its response four times the pair's round-trip time
   (500 ms to 4 s; RFC 7675 section 5.1) instead of a fixed 4 s.
 - **stats**: a candidate pair's state can be `frozen`.
+- **ice**: mDNS privacy (draft-ietf-mmusic-mdns-ice-candidates). A local relay candidate is not
+  paired with a remote mDNS candidate (section 3.3.2: the TURN server learned the hidden
+  address); a relay-only agent ignores remote mDNS candidates instead of resolving them
+  (section 3.2.1); with `QueryAndGather` a reflexive or relayed candidate is signalled with
+  raddr 0.0.0.0 rport 9 (section 3.1.2.2: it gave the hidden host address away); the address
+  of a peer-reflexive remote candidate is left out of the statistics unless the peer signalled
+  it (section 3.3.1).
+- **ice**: `tcptype` is written after raddr / rport and read wherever it stands among the
+  extension attributes, for every candidate type (RFC 6544 section 4.5); a TCP
+  server-reflexive or relayed candidate lost it on the way to SDP and back.
+- **ice**: when the selected TCP pair's connection is opened again (another source port), the
+  passive side moves to the new connection once its check succeeds (RFC 6544 section 11.1);
+  it kept writing to the dead one.
 
 ### Features
 

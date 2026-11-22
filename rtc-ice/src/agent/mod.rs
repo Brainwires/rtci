@@ -19,6 +19,8 @@ mod agent_nomination_test;
 #[cfg(test)]
 mod agent_ported_test;
 #[cfg(test)]
+mod agent_rfc6544_mdns_test;
+#[cfg(test)]
 mod agent_rfc7675_test;
 #[cfg(test)]
 mod agent_rfc8445_test;
@@ -712,6 +714,15 @@ impl Agent {
 
         self.rank_local_candidate(&mut c);
 
+        // With host addresses hidden behind mDNS names, a reflexive or relayed candidate does
+        // not give its base away in raddr / rport (mDNS draft Section 3.1.2.2).
+        if self.mdns_mode == MulticastDnsMode::QueryAndGather
+            && c.candidate_type() != CandidateType::Host
+            && c.related_address().is_some()
+        {
+            c.hide_related_address = true;
+        }
+
         self.local_candidates.push(c);
         let local_index = self.local_candidates.len() - 1;
 
@@ -920,6 +931,19 @@ impl Agent {
                 return Ok(false);
             }
 
+            // draft-ietf-mmusic-mdns-ice-candidates Section 3.2.1, step 2: "If the ICE
+            // candidate policy is 'relay', as defined in [RFC8829], ignore the candidate":
+            // it could only be paired with a relayed candidate, which Section 3.3.2 forbids,
+            // and resolving it would tell the local network who is being called.
+            if self.candidate_types == [CandidateType::Relay] {
+                debug!(
+                    "[{}]: ignoring mDNS candidate {}: relay-only policy",
+                    self.get_name(),
+                    c.address()
+                );
+                return Ok(false);
+            }
+
             if c.candidate_type() != CandidateType::Host {
                 return Err(Error::ErrAddressParseFailed);
             }
@@ -1062,6 +1086,18 @@ impl Agent {
     pub fn set_local_gathering_complete(&mut self) {
         self.local_gathering_complete = true;
         self.request_connectivity_check();
+    }
+
+    /// Whether the peer signalled a candidate with this IP address, as an address (not behind
+    /// an mDNS name). A peer-reflexive remote candidate's address may be shown in statistics
+    /// only then (draft-ietf-mmusic-mdns-ice-candidates Section 3.3.1: it could be the address
+    /// an mDNS name hides).
+    pub fn is_signalled_remote_ip(&self, ip: IpAddr) -> bool {
+        self.remote_candidates.iter().any(|c| {
+            c.candidate_type() != CandidateType::PeerReflexive
+                && !c.address().ends_with(".local")
+                && c.addr().ip() == ip
+        })
     }
 
     /// The local candidates to signal to the peer: the ones the application added (with their
