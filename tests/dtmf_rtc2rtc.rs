@@ -420,32 +420,25 @@ fn event_packets_share_the_audio_streams_sequence_numbers() -> Result<()> {
     call.write_audio(1001, 96_000 + 48_000)?;
     call.run_until(Duration::from_millis(100), |_| false)?;
     // The first audio packet of the stream may be held by the receiver's source validation
-    // (RFC 3550 appendix A.1); what matters is what was sent after it.
-    let events: Vec<u16> = call
+    // (RFC 3550 appendix A.1); what matters is what was sent after it: one number space, no
+    // gap, the application's packet 1001 among the event packets (it was written between
+    // the repeats of the final report) and numbered after those sent before it.
+    let after: Vec<(u8, u16)> = call
         .callee
         .rtp
         .iter()
-        .filter(|(_, p)| p.header.payload_type != 111)
-        .map(|(_, p)| p.header.sequence_number)
+        .map(|(_, p)| (p.header.payload_type, p.header.sequence_number))
+        .filter(|(_, seq)| *seq > 1000)
         .collect();
-    assert!(!events.is_empty());
-    let expected: Vec<u16> = (1001..1001 + events.len() as u16).collect();
+    let numbers: Vec<u16> = after.iter().map(|(_, seq)| *seq).collect();
+    let expected: Vec<u16> = (1001..1001 + numbers.len() as u16).collect();
+    assert_eq!(numbers, expected, "{after:?}");
     assert_eq!(
-        events, expected,
-        "the event packets follow the audio packet 1000"
+        after.iter().filter(|(pt, _)| *pt == 111).count(),
+        1,
+        "the application's packet 1001, renumbered: {after:?}"
     );
-    let last_audio = call
-        .callee
-        .rtp
-        .iter()
-        .rev()
-        .find(|(_, p)| p.header.payload_type == 111)
-        .map(|(_, p)| p.header.sequence_number);
-    assert_eq!(
-        last_audio,
-        Some(1001 + events.len() as u16),
-        "the application's packet 1001 comes after the event packets"
-    );
+    assert!(after.first().is_some_and(|(pt, _)| *pt != 111), "{after:?}");
     let events = call.events_received();
     assert!(
         events.iter().all(|(_, p, _)| p.header.ssrc == AUDIO_SSRC),
