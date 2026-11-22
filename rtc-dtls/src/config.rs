@@ -26,7 +26,7 @@ use crate::crypto::*;
 use crate::curve::named_curve::NamedCurve;
 use crate::extension::extension_use_srtp::SrtpProtectionProfile;
 use crate::record_layer::record_layer_header::{
-    PROTOCOL_VERSION1_0, PROTOCOL_VERSION1_2, ProtocolVersion,
+    PROTOCOL_VERSION1_0, PROTOCOL_VERSION1_2, ProtocolVersion, RECORD_LAYER_HEADER_SIZE,
 };
 use crate::signature_hash_algorithm::{
     SignatureHashAlgorithm, SignatureScheme, parse_signature_schemes,
@@ -521,6 +521,26 @@ impl DtlsVersion {
                 minor: 252,
             },
         }
+    }
+
+    /// How many bytes a protected record of this version adds to its content under `suite`,
+    /// as this crate writes it: the record header and the suite's
+    /// [`record_expansion`](CipherSuite::record_expansion). For DTLS 1.2 the header is the
+    /// 13 bytes of RFC 6347 section 4.1 (RFC 9146 connection ids are not implemented). For
+    /// DTLS 1.3 it is the unified header of RFC 9147 section 4 with a 16-bit sequence number
+    /// and the length, `connection_id_len` bytes of the peer's connection id in it, and the
+    /// expansion is the inner content type and the tag. A layer above that sizes its
+    /// datagrams for a path MTU takes this off (RFC 6347 section 4.1.1.1, RFC 9147 section
+    /// 4.4). `None` for a suite this crate does not have.
+    pub fn record_overhead(self, suite: CipherSuiteId, connection_id_len: usize) -> Option<usize> {
+        let expansion = cipher_suite_for_id(suite).ok()?.record_expansion();
+        let header = match self {
+            DtlsVersion::Dtls1_2 => RECORD_LAYER_HEADER_SIZE,
+            DtlsVersion::Dtls1_3 => {
+                crate::dtls13::record::HeaderForm::FULL.header_len(connection_id_len)
+            }
+        };
+        Some(header + expansion)
     }
 }
 

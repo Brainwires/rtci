@@ -46,26 +46,26 @@ pub(crate) struct SctpPath {
     pub(crate) tcp: bool,
     /// The local candidate is a relayed one: the data travels in TURN ChannelData.
     pub(crate) relayed: bool,
-    /// What the negotiated DTLS cipher suite adds to a record's payload (explicit nonce, tag,
-    /// padding), without the record header.
-    pub(crate) dtls_record_expansion: usize,
+    /// What a DTLS record adds to its content: the record header and the cipher suite's
+    /// expansion, for the negotiated version and suite and, under DTLS 1.3, the connection id
+    /// (`dtls::endpoint::Endpoint::record_overhead`).
+    pub(crate) dtls_record_overhead: usize,
 }
 
 impl SctpPath {
     /// RFC 8831 section 5: the IP-layer path MTU an association starts from.
     const IPV4_PATH_MTU: u32 = 1200;
     const IPV6_PATH_MTU: u32 = 1280;
-    /// The DTLS record header (RFC 6347 section 4.1): type, version, epoch, sequence number,
-    /// length.
-    const DTLS_RECORD_HEADER: u32 = 13;
-    /// The record expansion assumed while no cipher suite is negotiated: an AEAD suite with
-    /// an 8-byte explicit nonce and a 16-byte tag (AES-GCM), the largest of the AEAD suites.
-    pub(crate) const DEFAULT_DTLS_RECORD_EXPANSION: usize = 24;
+    /// The record overhead assumed while no cipher suite is negotiated: a DTLS 1.2 record
+    /// header (13 bytes, RFC 6347 section 4.1) and an AEAD suite with an 8-byte explicit
+    /// nonce and a 16-byte tag (AES-GCM), more than any DTLS 1.3 AEAD record without a
+    /// connection id.
+    pub(crate) const DEFAULT_DTLS_RECORD_OVERHEAD: usize = 13 + 24;
 
     /// The largest SCTP packet (common header and chunks) that fits the path: the IP-layer
     /// MTU less the IP header, the UDP header (or the TCP header and the two-byte frame
     /// length of RFC 4571), the four-byte TURN ChannelData header on a relayed candidate, and
-    /// the DTLS record header and expansion.
+    /// the DTLS record overhead.
     pub(crate) fn packet_budget(&self) -> u32 {
         let (path_mtu, ip_header) = if self.ipv6 {
             (Self::IPV6_PATH_MTU, 40)
@@ -74,10 +74,9 @@ impl SctpPath {
         };
         let transport_header = if self.tcp { 20 + 2 } else { 8 };
         let turn_header = if self.relayed { 4 } else { 0 };
-        let dtls = Self::DTLS_RECORD_HEADER + self.dtls_record_expansion as u32;
         path_mtu
             .saturating_sub(ip_header + transport_header + turn_header)
-            .saturating_sub(dtls)
+            .saturating_sub(u32::try_from(self.dtls_record_overhead).unwrap_or(u32::MAX))
             .max(::sctp::MIN_DATA_PACKET_MTU)
     }
 }
@@ -1002,12 +1001,47 @@ mod tests {
     /// RFC 8831 section 5: "The initial Path MTU at the IP layer SHOULD NOT exceed 1200 bytes
     /// for IPv4 and 1280 bytes for IPv6." An SCTP packet of the budget, in its DTLS record,
     /// under the headers of the path, is exactly that large at the IP layer, whatever the
-    /// path and the cipher suite; the fixed 1191 gave 1256 bytes over IPv4.
+    /// path, the DTLS version and the cipher suite; the fixed 1191 gave 1256 bytes over IPv4.
     #[test]
     fn the_packet_budget_keeps_the_ip_packet_within_the_initial_path_mtu() {
-        const DTLS_RECORD_HEADER: u32 = 13;
-        // AES-GCM, ChaCha20-Poly1305, AES-CCM-8, AES-256-CBC-SHA.
-        for dtls_record_expansion in [24usize, 16, 16, 52] {
+        use ::dtls::cipher_suite::CipherSuiteId;
+        use ::dtls::config::DtlsVersion;
+        // What `rtc-dtls` says each record adds, for the suites of both versions, with and
+        // without a DTLS 1.3 connection id.
+        let overheads = [
+            (
+                DtlsVersion::Dtls1_2,
+                CipherSuiteId::Tls_Ecdhe_Ecdsa_With_Aes_128_Gcm_Sha256,
+                0,
+            ),
+            (
+                DtlsVersion::Dtls1_2,
+                CipherSuiteId::Tls_Ecdhe_Ecdsa_With_ChaCha20_Poly1305_Sha256,
+                0,
+            ),
+            (
+                DtlsVersion::Dtls1_2,
+                CipherSuiteId::Tls_Ecdhe_Ecdsa_With_Aes_128_Ccm_8,
+                0,
+            ),
+            (
+                DtlsVersion::Dtls1_2,
+                CipherSuiteId::Tls_Ecdhe_Ecdsa_With_Aes_256_Cbc_Sha,
+                0,
+            ),
+            (
+                DtlsVersion::Dtls1_3,
+                CipherSuiteId::Tls_Aes_128_Gcm_Sha256,
+                0,
+            ),
+            (
+                DtlsVersion::Dtls1_3,
+                CipherSuiteId::Tls_ChaCha20_Poly1305_Sha256,
+                8,
+            ),
+        ]
+        .map(|(version, suite, cid)| version.record_overhead(suite, cid).expect("a suite"));
+        for dtls_record_overhead in overheads {
             for ipv6 in [false, true] {
                 for tcp in [false, true] {
                     for relayed in [false, true] {
@@ -1015,18 +1049,14 @@ mod tests {
                             ipv6,
                             tcp,
                             relayed,
-                            dtls_record_expansion,
+                            dtls_record_overhead,
                         };
                         let budget = path.packet_budget();
                         let ip_header = if ipv6 { 40 } else { 20 };
                         let transport = if tcp { 20 + 2 } else { 8 };
                         let turn = if relayed { 4 } else { 0 };
-                        let on_the_wire = budget
-                            + DTLS_RECORD_HEADER
-                            + dtls_record_expansion as u32
-                            + turn
-                            + transport
-                            + ip_header;
+                        let on_the_wire =
+                            budget + dtls_record_overhead as u32 + turn + transport + ip_header;
                         assert_eq!(on_the_wire, if ipv6 { 1280 } else { 1200 }, "{path:?}");
                     }
                 }
@@ -1036,7 +1066,7 @@ mod tests {
             ipv6,
             tcp: false,
             relayed: false,
-            dtls_record_expansion: SctpPath::DEFAULT_DTLS_RECORD_EXPANSION,
+            dtls_record_overhead: SctpPath::DEFAULT_DTLS_RECORD_OVERHEAD,
         };
         assert_eq!(udp_gcm(false).packet_budget(), 1135);
         assert_eq!(udp_gcm(true).packet_budget(), 1195);

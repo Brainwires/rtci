@@ -242,24 +242,23 @@ impl RTCPeerConnection {
             .ice_transport
             .agent
             .get_selected_candidate_pair()?;
-        let dtls_record_expansion = self
+        // What each record adds for the negotiated version and suite (and connection id),
+        // as the DTLS association writes them.
+        let dtls_record_overhead = self
             .pipeline_context
             .dtls_handler_context
             .dtls_transport
             .dtls_endpoint
             .as_ref()
             .and_then(|endpoint| {
-                endpoint.get_connection_state(shared::TransportContext::default().peer_addr)
+                endpoint.record_overhead(shared::TransportContext::default().peer_addr)
             })
-            .and_then(|state| state.cipher_suite())
-            .map_or(SctpPath::DEFAULT_DTLS_RECORD_EXPANSION, |suite| {
-                suite.record_expansion()
-            });
+            .unwrap_or(SctpPath::DEFAULT_DTLS_RECORD_OVERHEAD);
         Some(SctpPath {
             ipv6: remote.addr().is_ipv6(),
             tcp: local.network_type().is_tcp(),
             relayed: local.candidate_type() == ::ice::candidate::CandidateType::Relay,
-            dtls_record_expansion,
+            dtls_record_overhead,
         })
     }
 

@@ -309,6 +309,26 @@ impl DTLSConn {
         self.v13.is_some()
     }
 
+    /// How many bytes each application-data record this side sends adds to its content: the
+    /// record header and the cipher suite's expansion for the negotiated version and suite,
+    /// with the peer's connection id under DTLS 1.3 ([`DtlsVersion::record_overhead`]).
+    /// `None` until the handshake has settled the suite.
+    ///
+    /// [`DtlsVersion::record_overhead`]: crate::config::DtlsVersion::record_overhead
+    pub fn record_overhead(&self) -> Option<usize> {
+        let suite = self.state.cipher_suite()?.id();
+        let version = if self.is_dtls13() {
+            crate::config::DtlsVersion::Dtls1_3
+        } else {
+            crate::config::DtlsVersion::Dtls1_2
+        };
+        let connection_id_len = self
+            .v13
+            .as_ref()
+            .map_or(0, |v13| v13.remote_connection_id.len());
+        version.record_overhead(suite, connection_id_len)
+    }
+
     /// Copies what the DTLS 1.3 association has reached into the state callers read.
     pub(crate) fn sync_dtls13(&mut self) {
         let Some(v13) = &self.v13 else {

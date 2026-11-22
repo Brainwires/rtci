@@ -319,8 +319,8 @@ reason. Today there are two:
   sends up to the peer's `max-message-size`. Maintainer rule of 2026-11-22: the RFC behaviour is
   the default, the browsers' a setting
   (`SettingEngineBuilder::with_sctp_message_size_limit_without_interleaving(false)`). The SCTP
-  packet size is likewise smaller than upstream's over IPv4 (1135 bytes against 1191: RFC 8831
-  section 5), unless `with_sctp_mtu` sets it.
+  packet size is likewise smaller than upstream's over IPv4 (1135 bytes against 1191 under
+  DTLS 1.2, 1150 under DTLS 1.3: RFC 8831 section 5), unless `with_sctp_mtu` sets it.
 - BUNDLE: answers and subsequent offers carry the BUNDLE attributes in the tagged m= section
   only (RFC 9143 section 7.1.3), `RTCBundlePolicy::MaxBundle` is ignored (RFC 9429 section
   4.1.1), and an initial offer needs `a=rtcp-mux` in each bundled section that is not

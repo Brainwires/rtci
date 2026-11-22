@@ -42,7 +42,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **the size of an SCTP packet follows the path** (RFC 8831 section 5: an initial path MTU
     of at most 1200 bytes at the IP layer over IPv4 and 1280 over IPv6): 1135 bytes over
     IPv4 and UDP with AES-GCM where it was 1191 on every path, 1195 over IPv6, less on a
-    relayed or a TCP candidate. `with_sctp_mtu` still sets it outright.
+    relayed or a TCP candidate. What a DTLS record adds is the DTLS association's own figure
+    for the negotiated version, suite and connection id (`Endpoint::record_overhead`): over
+    DTLS 1.3 with AES-GCM and no connection id (a 5-byte unified header, the inner content
+    type and the tag) 1150 and 1210. `with_sctp_mtu` still sets it outright.
   - **State Cookies carry a MAC** from the connection's crypto provider and the accepting
     side keeps nothing for an INIT (RFC 9260 sections 5.1 and 5.1.3); the association is made
     when the COOKIE ECHO arrives. No setting: nothing a peer can tell changes.
@@ -912,6 +915,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+- **dtls**: `DtlsVersion::record_overhead(suite, connection_id_len)`,
+  `DTLSConn::record_overhead` and `Endpoint::record_overhead`: what each protected record adds
+  to its content (the record header, the DTLS 1.3 unified header with the peer's connection
+  id, and the suite's expansion), for a layer above that sizes its datagrams for a path MTU
+  (RFC 6347 section 4.1.1.1, RFC 9147 section 4.4). The peer connection sizes SCTP packets by
+  it.
 - **setting_engine**: `SettingEngineBuilder::with_implicit_rollback`: a remote offer applied
   while a local offer is pending rolls the local offer back first (W3C webrtc-pc "set a session
   description"), in one call; an offer that is then refused leaves the local offer pending.

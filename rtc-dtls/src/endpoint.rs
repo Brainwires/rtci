@@ -126,6 +126,13 @@ impl Endpoint {
         }
     }
 
+    /// How many bytes each application-data record sent to `remote` adds to its content
+    /// ([`DTLSConn::record_overhead`](crate::conn::DTLSConn::record_overhead)). `None` when
+    /// there is no such association or its handshake has not settled the version and suite.
+    pub fn record_overhead(&self, remote: SocketAddr) -> Option<usize> {
+        self.connections.get(&remote)?.record_overhead()
+    }
+
     /// Whether the association with `remote` has failed: a fatal alert was sent or received, or
     /// its handshake gave up (a handshake error, or its deadline passed). An ordinary
     /// retransmission or a discarded record never fails it. `false` when there is no such
