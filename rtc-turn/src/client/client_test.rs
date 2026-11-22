@@ -1022,7 +1022,7 @@ fn test_data_from_a_non_server_address_is_ignored() -> Result<()> {
     let server_addr = client.turn_server_addr().expect("configured");
     let stray: SocketAddr = "127.0.0.1:9".parse().unwrap();
     assert_ne!(stray, server_addr);
-    test_server::hold_permission(&mut client, "10.0.0.1".parse().unwrap());
+    test_server::hold_permission(&mut client, Instant::now(), "10.0.0.1".parse().unwrap());
 
     let indication = |from: SocketAddr| -> Result<TransportMessage<BytesMut>> {
         let mut msg = Message::new();

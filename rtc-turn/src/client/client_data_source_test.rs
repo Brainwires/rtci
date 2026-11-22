@@ -20,7 +20,7 @@ fn test_data_indication_from_the_stun_server_is_ignored() -> Result<()> {
         },
         test_crypto_provider(),
     )?;
-    hold_permission(&mut client, "10.0.0.1".parse().unwrap());
+    hold_permission(&mut client, Instant::now(), "10.0.0.1".parse().unwrap());
 
     let indication = |from: SocketAddr| -> Result<TransportMessage<BytesMut>> {
         let mut msg = Message::new();
@@ -77,7 +77,7 @@ fn test_data_indication_from_a_shared_server_address_is_delivered() -> Result<()
         },
         test_crypto_provider(),
     )?;
-    hold_permission(&mut client, "10.0.0.1".parse().unwrap());
+    hold_permission(&mut client, Instant::now(), "10.0.0.1".parse().unwrap());
 
     let mut msg = Message::new();
     msg.build(&[

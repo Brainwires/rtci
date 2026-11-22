@@ -292,8 +292,7 @@ pub(super) fn binding_state(
 
 /// Gives `client` an allocation holding a permission for `peer`, without the exchanges: for
 /// tests about what the client does with data the server relays.
-pub(super) fn hold_permission(client: &mut Client, peer: IpAddr) {
-    let now = Instant::now();
+pub(super) fn hold_permission(client: &mut Client, now: Instant, peer: IpAddr) {
     let mut relay = relay::RelayState::new(
         now,
         relayed_addr(),
