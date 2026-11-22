@@ -157,8 +157,8 @@ struct Peer {
     /// The first application datagram (not STUN) this peer sent without consent: when, and
     /// how long it had been since the last Binding success response reached it.
     sent_without_consent: Option<(Instant, Option<Duration>)>,
-    /// The nomination (a Binding request with USE-CANDIDATE) this peer started last: when, and
-    /// its transaction id.
+    /// The nomination (a Binding request with USE-CANDIDATE) this peer started or, controlled,
+    /// received last: when, and its transaction id.
     nomination: Option<(Instant, [u8; 12])>,
 }
 
@@ -217,7 +217,8 @@ impl Peer {
     }
 
     /// Whether this peer's ICE failed while it was still checking, at the end of the
-    /// transaction of its last nomination or later: RFC 8445 section 7.2.5.3.4.
+    /// transaction of its last nomination (the controlled peer's: of the check the last one it
+    /// received triggered) or later: RFC 8445 section 7.2.5.3.4.
     fn nomination_failed(&self, now: Instant) -> bool {
         self.ice_states.contains(&RTCIceConnectionState::Failed)
             && !self.ice_states.contains(&RTCIceConnectionState::Connected)
@@ -327,6 +328,11 @@ impl World {
                 }
                 let (dest, from, data) = entry.remove();
                 let peer = &mut self.peers[dest];
+                if let Some(id) = nomination_id(&data)
+                    && peer.nomination.is_none_or(|(_, last)| last != id)
+                {
+                    peer.nomination = Some((self.now, id));
+                }
                 // STUN message type 0x0101: Binding success response.
                 if data.len() >= 20 && data[0] == 0x01 && data[1] == 0x01 {
                     peer.last_binding_success = Some(self.now);
@@ -426,9 +432,9 @@ enum Outcome {
     /// The SCTP association gave up by its retransmission limits before the channel opened,
     /// and the channel failed with an error (only where `lapse_allowed`, see the module docs).
     AssociationFailed,
-    /// The controlling peer's ICE failed while checking, at the end of its nomination's
-    /// transaction, every response to it lost (RFC 8445 section 7.2.5.3.4; only where
-    /// `lapse_allowed`, see the module docs).
+    /// A peer's ICE failed while checking, at the end of its nomination's transaction (the
+    /// controlled peer's: of the check the nomination triggered), every response to it lost
+    /// (RFC 8445 section 7.2.5.3.4; only where `lapse_allowed`, see the module docs).
     NominationFailed,
 }
 

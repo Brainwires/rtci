@@ -362,6 +362,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pair up after 30 s of silence (`FailedNomination::Retry`); before, the pair failed, or the
   agent with it at the 30 s timer. `AgentConfig` has a new field, `failed_nomination`: a struct
   literal without `..Default::default()` no longer compiles.
+- **ice**: a controlled agent whose check triggered by a received USE-CANDIDATE fails (timeout,
+  error response, non-symmetric response) fails the pair and the checklist by default, while no
+  pair is selected (RFC 8445 sections 7.2.5.3.4 and 7.3.1.5: "If the triggered request fails,
+  the agent MUST [...] set the checklist state to Failed"). `FailedNomination::Retry` keeps
+  the earlier behaviour, the pair alone failing, on both sides.
 - **ice**: a controlling agent's failed nomination fails the pair and the checklist by default
   (RFC 8445 section 7.2.5.3.4: "the agent MUST remove the candidate pair from the valid list,
   set the candidate pair state to Failed, and set the checklist state to Failed"):

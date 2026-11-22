@@ -1247,14 +1247,15 @@ fn test_signalled_candidate_replaces_the_peer_reflexive_one_it_duplicates() {
     assert!(requests_of(&silent(&mut a, start, 100 * MS, 3000 * MS)).is_empty());
 }
 
-/// Section 7.3.1.5: the controlled agent's check that a nomination triggered fails: the pair
-/// is Failed and the nomination with it. (By design the checklist keeps running while the
-/// controlling agent can still nominate another pair.)
+/// With `FailedNomination::Retry`, Section 7.3.1.5: the controlled agent's check that a
+/// nomination triggered fails: the pair is Failed and the nomination with it, and the checklist
+/// keeps running while the controlling agent can still nominate another pair.
 #[test]
 fn test_controlled_nomination_dies_with_its_triggered_check() {
     let start = Instant::now();
     let cfg = AgentConfig {
         max_binding_requests: Some(2),
+        failed_nomination: FailedNomination::Retry,
         ..config(false)
     };
     let mut a = agent_with(start, cfg, &[(1, 500), (2, 400)]);
@@ -1309,6 +1310,74 @@ fn test_controlled_nomination_dies_with_its_triggered_check() {
         a.get_selected_candidate_pair().unwrap().1.addr(),
         remote_addr(2)
     );
+}
+
+/// A controlled agent nominated on the pair to remote 1, whose triggered check is answered by
+/// `answer`; the agent with the states it went through. Remote 2 answers every check.
+fn controlled_nomination(
+    start: Instant,
+    answer: impl FnMut(&Sent) -> Answer,
+) -> (Agent, Vec<ConnectionState>) {
+    let cfg = AgentConfig {
+        max_binding_requests: Some(2),
+        ..config(false)
+    };
+    let mut a = agent_with(start, cfg, &[(1, 500), (2, 400)]);
+    let nominate = peer_request(
+        &a,
+        vec![
+            Box::new(AttrControlling(1)),
+            Box::new(PriorityAttr(1000)),
+            Box::new(UseCandidateAttr::new()),
+        ],
+    );
+    deliver(&mut a, start, &nominate, "10.0.0.1:5000").unwrap();
+    assert!(a.candidate_pairs[a.find_pair(0, 0).unwrap()].nomination_pending);
+    run_with(
+        &mut a,
+        start,
+        Duration::ZERO,
+        Duration::from_secs(20),
+        answer,
+    );
+    let seen = states(&mut a);
+    (a, seen)
+}
+
+/// RFC 8445 Sections 7.2.5.3.4 and 7.3.1.5, the default: "If the triggered request fails, the
+/// agent MUST remove the candidate pair from the valid list, set the candidate pair state to
+/// Failed, and set the checklist state to Failed." The controlled agent's check that a
+/// received USE-CANDIDATE triggered times out (Section 7.2.5.2.3) and the checklist fails,
+/// though another pair works.
+#[test]
+fn test_a_controlled_nomination_whose_triggered_check_times_out_fails_the_checklist() {
+    let start = Instant::now();
+    let (a, seen) = controlled_nomination(start, |s| {
+        if s.to == remote_addr(2) {
+            Answer::Success(addr(LOCAL))
+        } else {
+            Answer::Silence
+        }
+    });
+    assert!(seen.contains(&ConnectionState::Failed), "{seen:?}");
+    assert_eq!(a.checklist_state(), ChecklistState::Failed);
+    assert!(a.get_selected_candidate_pair().is_none());
+}
+
+/// The same when the triggered check is answered with an unrecoverable error (Section
+/// 7.2.5.2.4).
+#[test]
+fn test_a_controlled_nomination_whose_triggered_check_gets_an_error_fails_the_checklist() {
+    let start = Instant::now();
+    let (a, seen) = controlled_nomination(start, |s| {
+        if s.to == remote_addr(2) {
+            Answer::Success(addr(LOCAL))
+        } else {
+            Answer::Error(CODE_BAD_REQUEST)
+        }
+    });
+    assert!(seen.contains(&ConnectionState::Failed), "{seen:?}");
+    assert_eq!(a.checklist_state(), ChecklistState::Failed);
 }
 
 /// RFC 7675 Section 5.1: a consent request waits for its response for a time based on the

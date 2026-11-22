@@ -832,7 +832,9 @@ impl Agent {
             // it is sent again for as long as the peer is heard from (see
             // `nomination_is_alive`).
             let nomination = self.is_open_nomination(&r, pair_index);
-            if nomination && self.failed_nomination == FailedNomination::FailChecklist {
+            if self.failed_nomination == FailedNomination::FailChecklist
+                && (nomination || self.is_followed_nomination(&r, pair_index))
+            {
                 self.fail_nomination(now, pair_index, "no response");
                 return;
             }
@@ -909,6 +911,20 @@ impl Agent {
             && self.selected_pair.is_none()
             && pair.valid
             && pair.state == CandidatePairState::Succeeded
+    }
+
+    /// Whether `request` is the controlled agent's check of `pair_index` that a received
+    /// USE-CANDIDATE triggered (Section 7.3.1.5: the nomination waits for it), with no pair
+    /// selected yet: Section 7.2.5.3.4, "If the triggered request fails, the agent MUST remove
+    /// the candidate pair from the valid list, set the candidate pair state to Failed, and set
+    /// the checklist state to Failed." (Once a pair is selected the checklist is Completed and
+    /// a later nomination's check failing only fails its pair.)
+    fn is_followed_nomination(&self, request: &BindingRequest, pair_index: usize) -> bool {
+        !request.sent_as_controlling
+            && !self.is_controlling
+            && !request.consent
+            && self.selected_pair.is_none()
+            && self.candidate_pairs[pair_index].nomination_pending
     }
 
     /// Section 7.2.5.3.4: "If the request fails (Section 7.2.5.2), the agent MUST remove the
@@ -998,7 +1014,8 @@ impl Agent {
                 && !request.consent
             {
                 if self.failed_nomination == FailedNomination::FailChecklist
-                    && self.is_open_nomination(&request, pair_index)
+                    && (self.is_open_nomination(&request, pair_index)
+                        || self.is_followed_nomination(&request, pair_index))
                 {
                     self.fail_nomination(now, pair_index, "a response from another address");
                     return;
@@ -1338,7 +1355,8 @@ impl Agent {
             // (An error answer to a consent check on the selected pair grants no consent, RFC
             // 7675 Section 5.1, and takes nothing away either.)
             if self.failed_nomination == FailedNomination::FailChecklist
-                && self.is_open_nomination(&pending, pair_index)
+                && (self.is_open_nomination(&pending, pair_index)
+                    || self.is_followed_nomination(&pending, pair_index))
             {
                 self.fail_nomination(now, pair_index, "an error response");
                 return;

@@ -141,19 +141,21 @@ pub enum NominationAcceptance {
     Latest,
 }
 
-/// What the controlling agent does when its nomination (a check with USE-CANDIDATE on a valid
-/// pair) fails (RFC 8445 Section 7.2.5.2): its transaction times out (`Rc` requests, the
+/// What an agent does when a nomination fails (RFC 8445 Section 7.2.5.2): the controlling
+/// agent's check with USE-CANDIDATE on a valid pair, or the controlled agent's check that a
+/// received USE-CANDIDATE triggered (Section 7.3.1.5). The check fails when its transaction times out (`Rc` requests, the
 /// last given `Rm` times the RTO, Section 14.3 and RFC 8489 Section 6.2.1: 39.5 seconds at an
 /// RTO of 500 ms), it is answered with an unrecoverable error response, or the response is
 /// not symmetric.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum FailedNomination {
-    /// RFC 8445 Section 7.2.5.3.4 (the default): "If the request fails (Section 7.2.5.2), the
-    /// agent MUST remove the candidate pair from the valid list, set the candidate pair state
-    /// to Failed, and set the checklist state to Failed." The agent fails; the peer, which
-    /// may have accepted the nomination with every response lost, may stay connected until
-    /// its consent expires (RFC 7675).
+    /// RFC 8445 Section 7.2.5.3.4 (the default), for both roles: "If the request fails
+    /// (Section 7.2.5.2), the agent MUST remove the candidate pair from the valid list, set
+    /// the candidate pair state to Failed, and set the checklist state to Failed", and for
+    /// the controlled agent "If the triggered request fails, [...] set the checklist state to
+    /// Failed". The agent fails; the peer may stay connected until its consent expires (RFC
+    /// 7675).
     #[default]
     FailChecklist,
     /// The pair stays valid (it has received a success response, RFC 8445 Section
@@ -163,7 +165,9 @@ pub enum FailedNomination {
     /// nomination is answered with an error or from the wrong address, the pair fails and
     /// the next valid pair is nominated; with none left the checklist fails. Under heavy
     /// loss every request of a transaction, or every response, can be lost while the peer is
-    /// there and has accepted the nomination: this keeps both sides connected then.
+    /// there and has accepted the nomination: this keeps both sides connected then. A
+    /// controlled agent whose triggered check fails fails that pair only: the checklist keeps
+    /// running, and the controlling agent may nominate another pair.
     Retry,
 }
 
