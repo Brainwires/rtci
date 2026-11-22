@@ -15,6 +15,8 @@ fn data(tsn: u32) -> ChunkPayloadData {
 fn receiver() -> Association {
     let mut a = timed_test_association();
     a.peer_last_tsn = 99;
+    // Not the first DATA of the association, which is acknowledged at once (RFC 9260 5.1).
+    a.first_data_received = true;
     a
 }
 
