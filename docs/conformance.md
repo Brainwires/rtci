@@ -31,7 +31,7 @@ The rest of the evidence that the claims hold:
 |---|---|
 | Data channels, SCTP | [conformance/w1.md](conformance/w1.md) |
 | JSEP negotiation, codecs, transceivers, API state rules | [conformance/w2.md](conformance/w2.md) |
-| ICE, TURN, STUN, DTLS, mDNS, SRTP | [conformance/w3.md](conformance/w3.md) |
+| ICE, TURN, STUN, DTLS, mDNS, SRTP, SFrame | [conformance/w3.md](conformance/w3.md) |
 | RTP, RTCP, interceptors, payloaders, FEC | [conformance/w4.md](conformance/w4.md) |
 | Statistics | [conformance/w5.md](conformance/w5.md) |
 | The real-network environment and the browser matrix | [conformance/w6.md](conformance/w6.md) |
@@ -57,6 +57,7 @@ README.
 | SCTP | I-DATA (RFC 8260), Add Streams (RFC 6525 4.5), path MTU discovery, zero checksum (RFC 9653), RACK-TLP | Never claimed; none is needed for a browser data channel. |
 | TURN | TCP allocations (RFC 6062), a TURN server | Never claimed. The TURN client is implemented. |
 | SRTP | AEAD double (RFC 8723), MKI, EKT | Never claimed. |
+| SFrame | An SFrame RTP payload format (draft-ietf-avtcore-rtp-sframe), its SDP signalling, a transceiver switch | `rtc-sframe` encrypts and decrypts; the application packetizes the ciphertext and signals its use. |
 | FEC | FlexFEC as RFC 8627 | Only draft-ietf-payload-flexible-fec-scheme-03 is implemented, and the codec name is matched exactly so RFC 8627 `flexfec` is never fed to it. |
 | RTP | H.264 STAP-B / MTAP / FU-B (interleaved mode, never offered); SVC layer packetization for VP9 and AV1 | Simulcast is implemented; SVC is not claimed. |
 | Identity | `peer_identity`, identity providers | Applications (Deno, for one) implement webrtc-identity above the engine. |
