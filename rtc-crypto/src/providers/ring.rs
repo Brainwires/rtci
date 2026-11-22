@@ -68,7 +68,9 @@ impl RTCCrypto for RingCrypto {
         matches!(
             algorithm,
             CryptoAlgorithm::Hash(HashAlgorithm::Md5 | HashAlgorithm::Sha256)
-                | CryptoAlgorithm::Hmac(HmacAlgorithm::Sha1 | HmacAlgorithm::Sha256)
+                | CryptoAlgorithm::Hmac(
+                    HmacAlgorithm::Sha1 | HmacAlgorithm::Sha256 | HmacAlgorithm::Sha512
+                )
                 | CryptoAlgorithm::Aead(
                     AeadAlgorithm::Aes128Gcm
                         | AeadAlgorithm::Aes256Gcm
@@ -122,7 +124,7 @@ impl RTCCrypto for RingCrypto {
             // RustCrypto's; see common::RustCryptoHmacSha1. SHA-256 stays on ring, which uses
             // the hardware instructions.
             HmacAlgorithm::Sha1 => Ok(Box::new(RustCryptoHmacSha1::new(key))),
-            HmacAlgorithm::Sha256 => Ok(Box::new(RingHmac {
+            HmacAlgorithm::Sha256 | HmacAlgorithm::Sha512 => Ok(Box::new(RingHmac {
                 key: hmac::Key::new(hmac_algorithm(algorithm), key),
                 output_len: algorithm.output_len(),
             })),
@@ -243,6 +245,7 @@ fn hmac_algorithm(algorithm: HmacAlgorithm) -> hmac::Algorithm {
     match algorithm {
         HmacAlgorithm::Sha1 => hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY,
         HmacAlgorithm::Sha256 => hmac::HMAC_SHA256,
+        HmacAlgorithm::Sha512 => hmac::HMAC_SHA512,
     }
 }
 
