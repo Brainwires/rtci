@@ -112,7 +112,7 @@ fn the_recorded_handshakes_have_the_shape_of_rfc_9147() -> Result<()> {
         let cookie = parse_cookie(retry.extension(EXT_COOKIE).expect("a cookie"))?;
         assert!(retry.extension(EXT_KEY_SHARE).is_none());
         assert_eq!(
-            second_client_hello(&first, None, Some(cookie)),
+            second_client_hello(&first, None, Some(cookie), None),
             body(&recording.handshake[2]).1,
             "{}",
             recording.suite

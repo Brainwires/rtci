@@ -138,10 +138,10 @@ use crate::rtp_transceiver::rtp_sender::rtcp_parameters::{
     TYPE_RTCP_FB_TRANSPORT_CC,
 };
 use crate::rtp_transceiver::rtp_sender::{
-    RTCPFeedback, RTCRtpCodec, RTCRtpHeaderExtensionCapability, RTCRtpHeaderExtensionParameters,
-    RtpCodecKind,
+    RTCPFeedback, RTCRtpCodec, RTCRtpHeaderExtensionCapability, RTCRtpHeaderExtensionEncryption,
+    RTCRtpHeaderExtensionParameters, RtpCodecKind,
 };
-use crate::rtp_transceiver::{PayloadType, SSRC};
+use crate::rtp_transceiver::{PayloadType, RTCRtpTransceiverDirection, SSRC};
 use interceptor::{
     BandwidthEstimator, CircuitBreakerBuilder, CircuitBreakerHandle, CongestionControlBuilder,
     CongestionControlHandle, Gcc, KeyFrameRequestInterceptor, NackGeneratorBuilder,
@@ -441,8 +441,19 @@ pub fn register_default_interceptors_without_congestion_control(
 ///   6464) for audio: RFC 8834 section 5.2.2 ("RECOMMENDED"). The application writes the
 ///   level into the packets it sends; a receiver reports the level it reads as the audio
 ///   level of its synchronization sources.
+/// - **Mixer-to-client audio level** (`urn:ietf:params:rtp-hdrext:csrc-audio-level`, RFC
+///   6465) for audio, receive only: RFC 8834 section 5.2.3 makes it optional; an endpoint
+///   that implements it and does not mix states `recvonly` (RFC 6465 section 5). A receiver
+///   reports the levels as the audio level of its contributing sources.
 /// - **Coordination of video orientation** (`urn:3gpp:video-orientation`) for video: the
 ///   application writes and reads it.
+///
+/// The two audio level extensions are offered encrypted as well as in the clear (RFC 6904
+/// section 4.1 best-effort encryption): RFC 8834 sections 5.2.2 and 5.2.3 require that an
+/// implementation can encrypt them and RECOMMEND that it does. A peer that implements RFC
+/// 6904 takes the encrypted form, one that does not (browsers) the clear one.
+/// [`MediaEngine::set_header_extension_encryption`] with
+/// [`RTCRtpHeaderExtensionEncryption::Clear`] offers them in the clear only.
 ///
 /// Part of [`register_default_interceptors`].
 ///
@@ -450,18 +461,34 @@ pub fn register_default_interceptors_without_congestion_control(
 ///
 /// Returns an error if a header extension cannot be registered (no free id).
 pub fn configure_default_header_extensions(media_engine: &mut MediaEngine) -> Result<()> {
-    for (uri, kind) in [
-        (::sdp::extmap::SDES_MID_URI, RtpCodecKind::Audio),
-        (::sdp::extmap::AUDIO_LEVEL_URI, RtpCodecKind::Audio),
-        (::sdp::extmap::VIDEO_ORIENTATION_URI, RtpCodecKind::Video),
+    for (uri, kind, direction) in [
+        (::sdp::extmap::SDES_MID_URI, RtpCodecKind::Audio, None),
+        (::sdp::extmap::AUDIO_LEVEL_URI, RtpCodecKind::Audio, None),
+        (
+            rtp::extension::CSRC_AUDIO_LEVEL_URI,
+            RtpCodecKind::Audio,
+            Some(RTCRtpTransceiverDirection::Recvonly),
+        ),
+        (
+            ::sdp::extmap::VIDEO_ORIENTATION_URI,
+            RtpCodecKind::Video,
+            None,
+        ),
     ] {
         media_engine.register_header_extension(
             RTCRtpHeaderExtensionCapability {
                 uri: uri.to_owned(),
             },
             kind,
-            None,
+            direction,
         )?;
+    }
+    for uri in [
+        ::sdp::extmap::AUDIO_LEVEL_URI,
+        rtp::extension::CSRC_AUDIO_LEVEL_URI,
+    ] {
+        media_engine
+            .set_header_extension_encryption(uri, RTCRtpHeaderExtensionEncryption::BestEffort)?;
     }
     Ok(())
 }
