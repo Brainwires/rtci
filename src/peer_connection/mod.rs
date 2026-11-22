@@ -282,6 +282,7 @@ use crate::peer_connection::handler::dtls::DtlsHandlerContext;
 use crate::peer_connection::handler::ice::IceHandlerContext;
 use crate::peer_connection::handler::sctp::SctpHandlerContext;
 use crate::peer_connection::sdp::MediaDescriptionExt;
+use crate::peer_connection::sdp::has_bundle_attribute;
 use crate::peer_connection::sdp::session_description::RTCSessionDescription;
 use crate::peer_connection::sdp::{
     ATTR_KEY_BUNDLE_ONLY, ATTR_KEY_RTCP_MUX_ONLY, RemoteIceDetails, check_answer_against_offer,
@@ -1638,10 +1639,14 @@ impl RTCPeerConnection {
                     "m= section {index}: a=rtcp-mux-only without a=rtcp-mux (RFC 8858 section 4.2)"
                 )));
             }
-            // A bundle-only section may leave the attribute to the tagged section (RFC 9143
-            // section 9.3.1.1).
+            // A bundled section may leave the attribute to the tagged section of its group
+            // (RFC 9143 section 7.1.3), and a bundle-only one does (section 9.3.1.1).
             if !is_live_rtp_section(media)
-                || has_rtcp_mux(media)
+                || has_bundle_attribute(
+                    parsed,
+                    media,
+                    ::sdp::description::session::ATTR_KEY_RTCPMUX,
+                )
                 || media.has_attribute(ATTR_KEY_BUNDLE_ONLY)
             {
                 continue;

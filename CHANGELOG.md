@@ -130,9 +130,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `sendonly` and `inactive` as `inactive` (RFC 8285 section 7); the answer wrote no direction,
   which claims both.
 
+- **jsep**: a remote answer or subsequent offer that carries the BUNDLE attributes in the
+  tagged m= section only (RFC 9143 section 7.1.3) is accepted, and `a=rtcp-mux` and
+  `a=rtcp-rsize` of the tagged section apply to every bundled section.
+
 ### Features
 
 - **shared**: `Error::ErrAnswerDoesNotMatchOffer(String)`.
+- **setting_engine**: `SettingEngineBuilder::with_bundle_attributes_in_tagged_section_only`:
+  answers and subsequent offers carry the BUNDLE attributes in the tagged m= section only, as
+  RFC 9143 section 7.1.3 says. The default repeats them in every bundled section, as browsers
+  do.
 - **transceiver**: `RTCRtpTransceiver::remote_bandwidth()` (`RTCRemoteBandwidth`: `b=TIAS` /
   `b=AS`, `b=RS`, `b=RR` of the remote media section, RFC 9429 section 5.10),
   `RTCRtpTransceiver::remote_rtcp_xr()` (the remote `a=rtcp-xr` formats, RFC 3611 section 5.1)

@@ -163,6 +163,7 @@ mod rejected_mline_tests {
             rtcp_mux_only: true,
             bundle_policy: RTCBundlePolicy::MaxCompat,
             initial_offer: false,
+            bundle_attributes_in_tagged_section_only: false,
             sctp_max_message_size: 0,
             ignore_rid_pause_for_recv: false,
             write_ssrc_attributes_for_simulcast: false,
@@ -1461,17 +1462,6 @@ impl TryFrom<&String> for SimulcastRid {
 /// categories of RFC 8859), which "the offerer MUST NOT include ... in bundle-only 'm='
 /// sections" (RFC 9143 section 7.1.3): they are the offerer-tagged section's.
 fn make_bundle_only(media: &mut MediaDescription) {
-    const BUNDLE_ATTRIBUTES: [&str; 9] = [
-        "ice-ufrag",
-        "ice-pwd",
-        "ice-options",
-        "fingerprint",
-        "setup",
-        "candidate",
-        ATTR_KEY_RTCPMUX,
-        ATTR_KEY_RTCP_MUX_ONLY,
-        ATTR_KEY_RTCPRSIZE,
-    ];
     media.media_name.port = RangedPort {
         value: 0,
         range: None,
@@ -1487,16 +1477,25 @@ fn make_bundle_only(media: &mut MediaDescription) {
         ));
 }
 
-/// The section whose BUNDLE attributes (`a=rtcp-mux`, `a=rtcp-rsize`, RFC 8859 category
-/// IDENTICAL) are `media`'s: `media` itself, or, when it is a bundle-only section of an
-/// offer, the offerer-tagged section of its BUNDLE group (RFC 9143 section 7.1.3).
-pub(crate) fn bundle_attribute_section<'a>(
+/// Whether a BUNDLE attribute (`a=rtcp-mux`, `a=rtcp-rsize`: RFC 8859 category IDENTICAL)
+/// applies to `media`: the section has it, or the tagged section of its BUNDLE group has it.
+/// RFC 9143 section 7.1.3: in an initial offer a bundle-only section leaves the BUNDLE
+/// attributes to the offerer-tagged section, and in a subsequent offer or an answer they are
+/// "only in the tagged 'm=' section" and "will apply to each bundled 'm=' section".
+pub(crate) fn has_bundle_attribute(
+    desc: &SessionDescription,
+    media: &MediaDescription,
+    key: &str,
+) -> bool {
+    media.has_attribute(key) || tagged_section(desc, media).is_some_and(|m| m.has_attribute(key))
+}
+
+/// The tagged section of the BUNDLE group `media` is in: the first tag of the group that is
+/// neither rejected nor bundle-only (RFC 9143 sections 7.2 and 7.3.1).
+fn tagged_section<'a>(
     desc: &'a SessionDescription,
-    media: &'a MediaDescription,
-) -> &'a MediaDescription {
-    if !media.has_attribute(ATTR_KEY_BUNDLE_ONLY) {
-        return media;
-    }
+    media: &MediaDescription,
+) -> Option<&'a MediaDescription> {
     let mid = get_mid_value(media);
     bundle_groups(desc)
         .into_iter()
@@ -1510,8 +1509,20 @@ pub(crate) fn bundle_attribute_section<'a>(
                 })
             })
         })
-        .unwrap_or(media)
 }
+
+/// The BUNDLE attributes this endpoint writes (RFC 8859 categories IDENTICAL and TRANSPORT).
+const BUNDLE_ATTRIBUTES: [&str; 9] = [
+    "ice-ufrag",
+    "ice-pwd",
+    "ice-options",
+    "fingerprint",
+    "setup",
+    "candidate",
+    ATTR_KEY_RTCPMUX,
+    ATTR_KEY_RTCP_MUX_ONLY,
+    ATTR_KEY_RTCPRSIZE,
+];
 
 /// What a generated description does about BUNDLE (RFC 9143).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1646,6 +1657,8 @@ pub(crate) struct PopulateSdpParams {
     /// (RFC 9429 section 5.2.2: in a subsequent offer "an 'a=bundle-only' line ... MUST NOT
     /// be added").
     pub(crate) initial_offer: bool,
+    /// `SettingEngineBuilder::with_bundle_attributes_in_tagged_section_only`.
+    pub(crate) bundle_attributes_in_tagged_section_only: bool,
     pub(crate) sctp_max_message_size: usize,
     pub(crate) ignore_rid_pause_for_recv: bool,
     pub(crate) write_ssrc_attributes_for_simulcast: bool,
@@ -1960,6 +1973,21 @@ impl RTCPeerConnection {
                 at,
                 sdp::description::common::Attribute::new(ATTR_KEY_RTCP_MUX_ONLY.to_owned(), None),
             );
+        }
+        // RFC 9143 section 7.1.3, when asked for: in an answer or a subsequent offer only the
+        // tagged section (the first of the group) carries the BUNDLE attributes.
+        if params.bundle_attributes_in_tagged_section_only && !params.initial_offer {
+            for mid in bundled.iter().skip(1) {
+                if let Some(media) = d
+                    .media_descriptions
+                    .iter_mut()
+                    .find(|media| get_mid_value(media) == Some(mid))
+                {
+                    media.attributes.retain(|a| {
+                        !BUNDLE_ATTRIBUTES.contains(&a.key.as_str()) && a.key != "end-of-candidates"
+                    });
+                }
+            }
         }
         if !bundled.is_empty() {
             d = d.with_value_attribute(
