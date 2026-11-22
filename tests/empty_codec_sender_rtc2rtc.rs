@@ -513,6 +513,16 @@ fn the_receiver_measures_a_round_trip_time_over_rtcp_xr() -> Result<()> {
     let (ssrc, _, _) = world.sender_stream(sender);
     world.send_media(sender, Duration::from_secs(3))?;
 
+    // webrtc-stats: `roundTripTime` exists while the latest sender report came with a DLRR
+    // block that measures one. When reports go out is the RTCP schedule's business, so the
+    // clock is driven until the latest report is such a one, not for a fixed time.
+    let give_up = world.now + Duration::from_secs(30);
+    while world.now < give_up
+        && !matches!(remote_outbound_rtt(&mut world, ssrc), Some((Some(_), _, _)))
+    {
+        let until = world.now + Duration::from_millis(50);
+        world.run_until(until)?;
+    }
     let (rtt, total, measurements) =
         remote_outbound_rtt(&mut world, ssrc).expect("remote-outbound stats");
     assert!(
