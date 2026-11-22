@@ -46,6 +46,10 @@ pub(crate) struct AnnouncedStates {
     gathering: RTCIceGatheringState,
     /// The username fragment of the ICE generation whose gathering was started last.
     gathering_ufrag: Option<String>,
+    /// The local candidates announced in an `icecandidate` event, with the username fragment
+    /// of the generation they were announced for (W3C 5.6: candidates are surfaced per
+    /// generation; RFC 8838 section 9 ties a trickled candidate to its generation).
+    pub(crate) announced_candidates: Vec<(String, String)>,
 }
 
 impl AnnouncedStates {

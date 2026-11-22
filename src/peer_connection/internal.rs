@@ -2500,27 +2500,70 @@ impl RTCPeerConnection {
     ) -> Result<()> {
         let candidate: Candidate = unmarshal_candidate(candidate_value)?;
         let known = self.ice_transport().agent.get_local_candidates().len();
-        if !self.ice_transport_mut().add_local_candidate(candidate)? {
-            return Ok(());
-        }
-
-        // Usually one candidate is added; with a server-reflexive 1:1 NAT mapping
-        // (`nat_1to1_ips`) the agent adds a second, on the external address. Each is announced.
-        let added: Vec<RTCIceCandidate> = self
+        let ufrag = self
             .ice_transport()
             .agent
-            .get_local_candidates()
-            .iter()
-            .skip(known)
-            .map(RTCIceCandidate::from)
-            .collect();
-        if added.is_empty() {
-            return Err(Error::Other(
-                "local candidate missing after registration".to_owned(),
-            ));
-        }
+            .get_local_credentials()
+            .ufrag
+            .clone();
+        let added: Vec<RTCIceCandidate> = if self
+            .ice_transport_mut()
+            .add_local_candidate(candidate.clone())?
+        {
+            // Usually one candidate is added; with a server-reflexive 1:1 NAT mapping
+            // (`nat_1to1_ips`) the agent adds a second, on the external address. Each is
+            // announced.
+            let added: Vec<RTCIceCandidate> = self
+                .ice_transport()
+                .agent
+                .get_local_candidates()
+                .iter()
+                .skip(known)
+                .map(RTCIceCandidate::from)
+                .collect();
+            if added.is_empty() {
+                return Err(Error::Other(
+                    "local candidate missing after registration".to_owned(),
+                ));
+            }
+            added
+        } else {
+            // An ICE restart keeps the local candidates by default
+            // (`discard_local_candidates_during_ice_restart`), so the application's
+            // gathering of the new generation re-adds candidates the agent already holds.
+            // They belong to the new generation too (W3C 5.6, RFC 8838 section 9: the peer
+            // discards the candidates of the old one), so one not yet announced for it is
+            // announced now, once. Anything else the agent refused stays silent.
+            let gathering = self.ice_gathering_state();
+            let kept = self
+                .ice_transport()
+                .agent
+                .get_local_candidates()
+                .iter()
+                .find(|kept| kept.equal(&candidate))
+                .map(RTCIceCandidate::from);
+            match kept {
+                Some(kept)
+                    if gathering == RTCIceGatheringState::Gathering
+                        && !self.announced.announced_candidates.iter().any(
+                            |(generation, announced)| {
+                                *generation == ufrag && *announced == kept.to_string()
+                            },
+                        ) =>
+                {
+                    vec![kept]
+                }
+                _ => return Ok(()),
+            }
+        };
 
         for mut rtc_candidate in added {
+            self.announced
+                .announced_candidates
+                .retain(|(generation, _)| *generation == ufrag);
+            self.announced
+                .announced_candidates
+                .push((ufrag.clone(), rtc_candidate.to_string()));
             // Register local candidate with stats accumulator
             let candidate_id = local_candidate_stats_id(&rtc_candidate.id);
             // The candidate is of this ICE generation: `to_json` carries the fragment, and

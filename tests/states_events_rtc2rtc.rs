@@ -582,8 +582,9 @@ fn gathering_is_announced_once_per_ice_generation() -> Result<()> {
 /// W3C 5.6 and restartIce: every ICE generation gathers anew and ends anew. Two restarts in a
 /// row (each completed by an answer) give three generations, and each announces "gathering",
 /// its own candidates with its own ufrag, then the empty candidate, "complete" and the null
-/// candidate: what a peer that waits for the end of gathering on a restart (the webrtc 0.17
-/// interop peer) relies on.
+/// candidate. A candidate the agent kept across the restart and the application gathers
+/// again is announced for the new generation (it was dropped silently as a duplicate, so the
+/// peer, which discards the old generation's candidates, never learned it).
 #[test]
 fn each_ice_restart_gathers_and_ends_its_own_generation() -> Result<()> {
     let now = Instant::now();
@@ -638,6 +639,9 @@ fn each_ice_restart_gathers_and_ends_its_own_generation() -> Result<()> {
             ["gathering:gathering"],
             "generation {generation}"
         );
+        // The same host candidate every generation (the agent keeps it across a restart): it
+        // is announced once per generation, a second add in the same one is silent.
+        offerer.add_local_candidate(host("10.0.0.1:5000".parse()?)?)?;
         offerer.add_local_candidate(host("10.0.0.1:5000".parse()?)?)?;
         offerer.add_local_candidate(RTCIceCandidateInit::default())?;
         assert_eq!(
