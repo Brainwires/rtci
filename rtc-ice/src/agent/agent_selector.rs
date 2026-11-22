@@ -945,7 +945,10 @@ impl Agent {
             let c = &mut self.candidate_pairs[checked];
             c.state = CandidatePairState::Succeeded;
             c.valid_pair = Some(valid);
-            c.triggered = false;
+            // A triggered check still queued for the pair is not needed any more, but a
+            // nomination queued for it is (Section 8.1.1): an answer to an earlier check
+            // must not take it off the queue.
+            c.triggered = c.triggered && c.nominate;
         }
         {
             let v = &mut self.candidate_pairs[valid];

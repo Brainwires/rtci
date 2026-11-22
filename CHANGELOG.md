@@ -124,6 +124,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   section 12.2); it always said `UDP/DTLS/SCTP`.
 - **sctp**: an association that signalling closed by rejecting the data section takes a new
   `a=sctp-port` when a data section is negotiated again (RFC 8841 section 10.5).
+- **sender**: `RTCRtpSender::write_rtp` writes the MID header extension (the transceiver's mid)
+  and RtpStreamId (the rid of the packet's encoding) into every packet when the extension is
+  negotiated (RFC 9143 section 15, RFC 8852 section 3.3); the application had to. A packet
+  that already carries the extension keeps its value.
+- **media_engine**: `register_default_codecs` offers `audio/telephone-event` at 48000 Hz
+  (payload type 112) and 8000 Hz (115) with the DTMF events `0-15` (RFC 7874 section 3, RFC
+  4733 section 2.4.1). An application that registered telephone-event itself under one of
+  these numbers keeps its own registration only if it comes first.
+- **interceptors**: `register_default_interceptors` also registers the MID header extension
+  for audio, the client-to-mixer audio level (RFC 6464) for audio and the video orientation
+  extension for video (`configure_default_header_extensions`): descriptions carry three more
+  `a=extmap` lines.
 
 - **ice**: where the fork followed libwebrtc or its own hardening instead of the RFC, the RFC is
   now the default and the other behaviour a setting (`AgentConfig`, and
@@ -1022,6 +1034,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+- **sctp**: `RTCPeerConnection::reject_data_section` asks for the data section to be rejected
+  (m= port zero) in the next offer, or in the answer to the peer's next offer: RFC 8841
+  section 10.5, closing the SCTP association and the DTLS association under it. A data
+  channel created afterwards brings a new section, with a new `a=tls-id` and `a=sctp-port`.
+- **sctp**: when ICE selects another candidate pair the association is told (RFC 8831
+  section 5): its congestion control and RTO start over and its packet size is set for the
+  new path.
+- **sctp**: a stream reset the peer answers with "denied" or an error fails the data channel
+  it was closing (`OnError`, `OnClose`) instead of leaving it `closing`; an inactive path
+  (RFC 9260 section 8.2) changes neither the transport's state nor a channel's.
 - **setting_engine**: `SettingEngineBuilder::with_implicit_rollback`: a remote offer applied
   while a local offer is pending rolls the local offer back first (W3C webrtc-pc "set a session
   description"), in one call; an offer that is then refused leaves the local offer pending.
@@ -1797,6 +1819,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+- **ice**: a controlling agent could lose the nomination it had queued: an answer to a second
+  check on the same pair (one the peer's request triggered) took the pair off the
+  triggered-check queue, so no request with USE-CANDIDATE left and the agent stayed in
+  checking until its failed timeout. It made `test_data_channel_create_rtc_to_webrtc` time
+  out about once in 200 runs.
 - **sctp**: an association accepted from the peer's INIT after an earlier one was lost left
   the transport reporting the loss, so every later offer asked for a new `a=sctp-port` and
   replaced the association it had.
