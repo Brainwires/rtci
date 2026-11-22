@@ -1171,6 +1171,11 @@ impl RTCPeerConnection {
             media = media.with_extmap(sdp::extmap::ExtMap {
                 value: *id,
                 uri: Some(ext_url),
+                direction: media_section
+                    .match_extension_directions
+                    .get(uri)
+                    .cloned()
+                    .unwrap_or_default(),
                 ..Default::default()
             });
         }
@@ -1558,6 +1563,11 @@ pub(crate) struct MediaSection {
     /// in an offer, which states [[Direction]].
     pub(crate) answer_direction: Option<RTCRtpTransceiverDirection>,
     pub(crate) match_extensions: HashMap<String, u16>,
+    /// In an answer, the direction each extension (by URI) is answered with when the offer
+    /// restricted it: the reverse of the offered one (RFC 8285 section 7: "if an extension
+    /// map is offered as 'sendonly', and the answerer wishes to use it, it MUST be marked as
+    /// 'recvonly' in the SDP answer", and the other way round; `inactive` stays).
+    pub(crate) match_extension_directions: HashMap<String, sdp::direction::Direction>,
     pub(crate) rid_map: Vec<SimulcastRid>,
     /// In an answer, the `<proto>` of the offered m= line, which the answer repeats (RFC 9429
     /// section 5.1.2: "The profile in any 'm=' line in any generated answer MUST exactly match
@@ -2098,6 +2108,84 @@ pub(crate) fn is_sdp_token(s: &str) -> bool {
                 0x21 | 0x23..=0x27 | 0x2A..=0x2B | 0x2D..=0x2E | 0x30..=0x39 | 0x41..=0x5A
                 | 0x5E..=0x7E)
         })
+}
+
+/// Gives each audio and video section of a received description the session-level
+/// `a=extmap` lines it does not override (RFC 8285 section 5: the mappings may be "provided
+/// per media stream ... or globally for all streams"; RFC 9429 section 5.8.1 stores them, and
+/// section 5.3.1 has session-level attributes count as present in each m= section). A
+/// section's own mapping for an id or a URI wins. Only the parsed description changes.
+pub(crate) fn inherit_session_extmap(desc: &mut SessionDescription) {
+    let session: Vec<(String, String, String)> = desc
+        .attributes
+        .iter()
+        .filter(|a| a.key == ATTR_KEY_EXT_MAP)
+        .filter_map(|a| a.value.clone())
+        .filter_map(|value| {
+            let mut tokens = value.split_whitespace();
+            let id = tokens.next()?.split('/').next()?.to_owned();
+            let uri = tokens.next()?.to_owned();
+            Some((id, uri, value))
+        })
+        .collect();
+    if session.is_empty() {
+        return;
+    }
+    for media in &mut desc.media_descriptions {
+        if !matches!(media.media_name.media.as_str(), "audio" | "video") {
+            continue;
+        }
+        let own: Vec<(String, String)> = media
+            .attributes
+            .iter()
+            .filter(|a| a.key == ATTR_KEY_EXT_MAP)
+            .filter_map(|a| a.value.as_deref())
+            .filter_map(|value| {
+                let mut tokens = value.split_whitespace();
+                let id = tokens.next()?.split('/').next()?.to_owned();
+                Some((id, tokens.next()?.to_owned()))
+            })
+            .collect();
+        for (id, uri, value) in &session {
+            if !own
+                .iter()
+                .any(|(own_id, own_uri)| own_id == id || own_uri == uri)
+            {
+                media
+                    .attributes
+                    .push(sdp::description::common::Attribute::new(
+                        ATTR_KEY_EXT_MAP.to_owned(),
+                        Some(value.clone()),
+                    ));
+            }
+        }
+    }
+}
+
+/// The direction an answer gives each extension of an offered section that restricts one
+/// (RFC 8285 section 7), by URI: sendonly is answered recvonly, recvonly sendonly, inactive
+/// inactive. An extension offered without a direction (or sendrecv) is not in the map.
+pub(crate) fn answered_extension_directions(
+    m: &MediaDescription,
+) -> HashMap<String, sdp::direction::Direction> {
+    use sdp::direction::Direction;
+    let mut out = HashMap::new();
+    for a in m.attributes.iter().filter(|a| a.key == ATTR_KEY_EXT_MAP) {
+        let a_str = a.to_string();
+        let Ok(e) = ExtMap::unmarshal(&mut a_str.as_bytes()) else {
+            continue;
+        };
+        let answered = match e.direction {
+            Direction::SendOnly => Direction::RecvOnly,
+            Direction::RecvOnly => Direction::SendOnly,
+            Direction::Inactive => Direction::Inactive,
+            _ => continue,
+        };
+        if let Some(uri) = e.uri {
+            out.insert(uri.to_string(), answered);
+        }
+    }
+    out
 }
 
 /// Drops the `a=bundle-only` attributes of a received description that do not mean

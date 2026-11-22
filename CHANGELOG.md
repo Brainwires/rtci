@@ -124,6 +124,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `max-compat` all of them. **The default offer changes**: a second audio or video section of
   an initial offer now has port 0 and `a=bundle-only`.
 
+- **jsep**: session-level `a=extmap` lines of a remote description are read (RFC 8285 section
+  5, RFC 9429 section 5.8.1); an offer that maps its header extensions once for the session
+  negotiated none. An extension offered `sendonly` is answered `recvonly`, `recvonly` as
+  `sendonly` and `inactive` as `inactive` (RFC 8285 section 7); the answer wrote no direction,
+  which claims both.
+
 ### Features
 
 - **shared**: `Error::ErrAnswerDoesNotMatchOffer(String)`.

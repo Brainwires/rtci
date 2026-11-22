@@ -6,6 +6,7 @@ use crate::peer_connection::handler::demuxer::DemuxerHandlerContext;
 use crate::peer_connection::handler::endpoint::EndpointHandlerContext;
 use crate::peer_connection::handler::interceptor::InterceptorHandlerContext;
 use crate::peer_connection::handler::srtp::SrtpHandlerContext;
+use crate::peer_connection::sdp::answered_extension_directions;
 use crate::peer_connection::sdp::bundle_attribute_section;
 use crate::peer_connection::sdp::{
     ATTR_KEY_RTCP_MUX_ONLY, BundleMode, MediaSection, PopulateSdpParams,
@@ -601,6 +602,11 @@ impl RTCPeerConnection {
                             mid: mid_value.to_owned(),
                             transceiver_index: i,
                             match_extensions: extensions,
+                            match_extension_directions: if include_unmatched {
+                                Default::default()
+                            } else {
+                                answered_extension_directions(media)
+                            },
                             rid_map: get_rids(media),
                             answer_direction,
                             offered_protos: offered_protos(media),

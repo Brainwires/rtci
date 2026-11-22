@@ -288,9 +288,9 @@ use crate::peer_connection::sdp::{
     codecs_from_media_description, discard_stray_bundle_only, effective_direction,
     extract_fingerprints, extract_ice_details, get_application_media,
     get_application_media_section_max_message_size, get_application_media_section_sctp_port,
-    get_mid_value, get_peer_direction, has_ice_trickle_option, has_rtcp_mux, insert_media_line,
-    is_lite_set, is_live_rtp_section, is_rejected_media, is_sdp_token, media_ice_credentials,
-    sdp_type::RTCSdpType, update_sdp_origin,
+    get_mid_value, get_peer_direction, has_ice_trickle_option, has_rtcp_mux,
+    inherit_session_extmap, insert_media_line, is_lite_set, is_live_rtp_section, is_rejected_media,
+    is_sdp_token, media_ice_credentials, sdp_type::RTCSdpType, update_sdp_origin,
 };
 use crate::peer_connection::state::RTCIceGatheringState;
 use crate::peer_connection::state::ice_connection_state::RTCIceConnectionState;
@@ -1517,6 +1517,7 @@ impl RTCPeerConnection {
             let mut parsed = remote_description.unmarshal()?;
             self.assign_missing_mids(&mut parsed, answers);
             discard_stray_bundle_only(&mut parsed, answers);
+            inherit_session_extmap(&mut parsed);
             // `RTCRtpHeaderEncryptionPolicy::Require`: refused before any of it is applied.
             self.check_required_cryptex(&parsed)?;
             remote_description.parsed = Some(parsed);
