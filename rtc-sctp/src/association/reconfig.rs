@@ -1154,7 +1154,7 @@ impl Association {
             if let Some(s) = self.streams.get_mut(id) {
                 let bytes_before = s.get_num_bytes_in_reassembly_queue();
                 s.reassembly_queue.reset_sequence_numbers();
-                s.sequence_number = 0;
+                s.reset_outgoing_numbers();
                 if s.reassembly_queue.is_readable() {
                     self.events
                         .push_back(Event::Stream(StreamEvent::Readable { id: *id }));
@@ -1162,16 +1162,27 @@ impl Association {
                 self.reindex_stream(*id, bytes_before);
             }
         }
-        let mut next: FxHashMap<u16, u16> = FxHashMap::default();
-        self.pending_queue.renumber_ordered(|stream| {
-            let ssn = next.entry(stream).or_insert(0);
-            let assigned = *ssn;
-            *ssn = ssn.wrapping_add(1);
-            assigned
+        // The messages still queued take the first numbers of their streams, and the streams
+        // go on from there.
+        let mut next: FxHashMap<u16, (u16, u32, u32)> = FxHashMap::default();
+        self.pending_queue.renumber(|stream, unordered| {
+            let (ssn, ordered_mid, unordered_mid) = next.entry(stream).or_insert((0, 0, 0));
+            if unordered {
+                let mid = *unordered_mid;
+                *unordered_mid = unordered_mid.wrapping_add(1);
+                (*ssn, mid)
+            } else {
+                let assigned = (*ssn, *ordered_mid);
+                *ssn = ssn.wrapping_add(1);
+                *ordered_mid = ordered_mid.wrapping_add(1);
+                assigned
+            }
         });
-        for (id, ssn) in next {
+        for (id, (ssn, ordered_mid, unordered_mid)) in next {
             if let Some(s) = self.streams.get_mut(&id) {
                 s.sequence_number = ssn;
+                s.ordered_mid = ordered_mid;
+                s.unordered_mid = unordered_mid;
             }
         }
     }
@@ -1327,7 +1338,7 @@ impl Association {
                 continue;
             }
             if success {
-                s.sequence_number = 0;
+                s.reset_outgoing_numbers();
             }
             s.outgoing_reset_pending = false;
             let held = std::mem::take(&mut s.held_writes);
@@ -1377,6 +1388,7 @@ impl Association {
         self.advanced_peer_tsn_ack_point = self.cumulative_tsn_ack_point;
         self.min_tsn2measure_rtt = receiver_next_tsn;
         self.fwd_tsn_stream_map.clear();
+        self.i_fwd_tsn_stream_map.clear();
         self.will_send_forward_tsn = false;
         self.timers.stop(Timer::T3RTX);
         // "All incoming streams MUST be reset to 0 as the next expected SSN. The peer will

@@ -10,6 +10,10 @@ pub(crate) const PAYLOAD_DATA_BEGINING_FRAGMENT_BITMASK: u8 = 2;
 pub(crate) const PAYLOAD_DATA_UNORDERED_BITMASK: u8 = 4;
 pub(crate) const PAYLOAD_DATA_IMMEDIATE_SACK: u8 = 8;
 pub(crate) const PAYLOAD_DATA_HEADER_SIZE: usize = 12;
+/// What follows the chunk header of an I-DATA chunk before the user data (RFC 8260 2.1): TSN,
+/// Stream Identifier, Reserved, Message Identifier, and the PPID or the Fragment Sequence
+/// Number.
+pub(crate) const I_DATA_HEADER_SIZE: usize = 16;
 
 /// PayloadProtocolIdentifier is an enum for DataChannel payload types
 /// PayloadProtocolIdentifier enums
@@ -160,6 +164,16 @@ pub struct ChunkPayloadData {
     pub(crate) payload_protocol_id: u32,
     pub(crate) user_data: Bytes,
 
+    /// This is an I-DATA chunk (RFC 8260 2.1), used when user message interleaving was
+    /// negotiated: it carries `mid` and `fsn` in place of the Stream Sequence Number.
+    pub(crate) i_data: bool,
+    /// The Message Identifier of an I-DATA chunk: counted per stream, separately for ordered
+    /// and unordered messages.
+    pub(crate) mid: u32,
+    /// The Fragment Sequence Number of an I-DATA chunk: the place of this fragment in its
+    /// message, from 0. On the wire only when the B bit is not set.
+    pub(crate) fsn: u32,
+
     /// Acknowledged by a peer SACK, independently of local payload release.
     pub(crate) acknowledged: bool,
     pub(crate) miss_indicator: u32,
@@ -210,6 +224,9 @@ impl Default for ChunkPayloadData {
             payload_type: PayloadProtocolIdentifier::default(),
             payload_protocol_id: 0,
             user_data: Bytes::new(),
+            i_data: false,
+            mid: 0,
+            fsn: 0,
             acknowledged: false,
             miss_indicator: 0,
             since: None,
@@ -249,7 +266,12 @@ impl Chunk for ChunkPayloadData {
         }
 
         ChunkHeader {
-            typ: CT_PAYLOAD_DATA,
+            // RFC 8260 2.1: the four Res bits of an I-DATA chunk are sent as 0.
+            typ: if self.i_data {
+                CT_I_DATA
+            } else {
+                CT_PAYLOAD_DATA
+            },
             flags,
             value_length: self.value_length() as u16,
         }
@@ -258,20 +280,26 @@ impl Chunk for ChunkPayloadData {
     fn unmarshal(raw: &Bytes) -> Result<Self> {
         let header = ChunkHeader::unmarshal(raw)?;
 
-        if header.typ != CT_PAYLOAD_DATA {
+        let i_data = header.typ == CT_I_DATA;
+        if header.typ != CT_PAYLOAD_DATA && !i_data {
             return Err(Error::ErrChunkTypeNotPayloadData);
         }
+        let fixed = if i_data {
+            I_DATA_HEADER_SIZE
+        } else {
+            PAYLOAD_DATA_HEADER_SIZE
+        };
 
         let immediate_sack = (header.flags & PAYLOAD_DATA_IMMEDIATE_SACK) != 0;
         let unordered = (header.flags & PAYLOAD_DATA_UNORDERED_BITMASK) != 0;
         let beginning_fragment = (header.flags & PAYLOAD_DATA_BEGINING_FRAGMENT_BITMASK) != 0;
         let ending_fragment = (header.flags & PAYLOAD_DATA_ENDING_FRAGMENT_BITMASK) != 0;
 
-        if raw.len() < CHUNK_HEADER_SIZE + PAYLOAD_DATA_HEADER_SIZE {
+        if raw.len() < CHUNK_HEADER_SIZE + fixed {
             return Err(Error::ErrChunkPayloadSmall);
         }
 
-        if header.value_length() < PAYLOAD_DATA_HEADER_SIZE {
+        if header.value_length() < fixed {
             return Err(Error::ErrChunkUnmarshalPayloadData);
         }
 
@@ -279,12 +307,25 @@ impl Chunk for ChunkPayloadData {
 
         let tsn = reader.get_u32();
         let stream_identifier = reader.get_u16();
-        let stream_sequence_number = reader.get_u16();
-        let payload_protocol_id = reader.get_u32();
+        // RFC 8260 2.1: an I-DATA chunk has a Reserved field here, ignored on receipt.
+        let stream_sequence_number = if i_data {
+            reader.advance(2);
+            0
+        } else {
+            reader.get_u16()
+        };
+        let mid = if i_data { reader.get_u32() } else { 0 };
+        // The last field of an I-DATA chunk is the PPID in the first fragment (whose FSN is
+        // 0) and the FSN in the others.
+        let ppid_or_fsn = reader.get_u32();
+        let (payload_protocol_id, fsn) = if i_data && !beginning_fragment {
+            (0, ppid_or_fsn)
+        } else {
+            (ppid_or_fsn, 0)
+        };
         let payload_type: PayloadProtocolIdentifier = payload_protocol_id.into();
-        let user_data = raw.slice(
-            CHUNK_HEADER_SIZE + PAYLOAD_DATA_HEADER_SIZE..CHUNK_HEADER_SIZE + header.value_length(),
-        );
+        let user_data =
+            raw.slice(CHUNK_HEADER_SIZE + fixed..CHUNK_HEADER_SIZE + header.value_length());
 
         Ok(ChunkPayloadData {
             unordered,
@@ -297,6 +338,9 @@ impl Chunk for ChunkPayloadData {
             payload_type,
             payload_protocol_id,
             user_data,
+            i_data,
+            mid,
+            fsn,
 
             acknowledged: false,
             miss_indicator: 0,
@@ -317,8 +361,19 @@ impl Chunk for ChunkPayloadData {
 
         writer.put_u32(self.tsn);
         writer.put_u16(self.stream_identifier);
-        writer.put_u16(self.stream_sequence_number);
-        writer.put_u32(self.ppid());
+        if self.i_data {
+            // Reserved: 0 on send.
+            writer.put_u16(0);
+            writer.put_u32(self.mid);
+            writer.put_u32(if self.beginning_fragment {
+                self.ppid()
+            } else {
+                self.fsn
+            });
+        } else {
+            writer.put_u16(self.stream_sequence_number);
+            writer.put_u32(self.ppid());
+        }
         // NB: `extend(Bytes)` iterates the payload one byte at a time (Bytes is
         // `IntoIterator<Item = u8>`); `extend_from_slice` does a single bulk copy.
         writer.extend_from_slice(&self.user_data);
@@ -331,7 +386,7 @@ impl Chunk for ChunkPayloadData {
     }
 
     fn value_length(&self) -> usize {
-        PAYLOAD_DATA_HEADER_SIZE + self.user_data.len()
+        self.header_size() - CHUNK_HEADER_SIZE + self.user_data.len()
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -347,6 +402,21 @@ impl ChunkPayloadData {
             PayloadProtocolIdentifier::Unknown => self.payload_protocol_id,
             named => named.number(),
         }
+    }
+
+    /// The size of the chunk without its user data: 16 bytes for DATA, 20 for I-DATA.
+    pub(crate) fn header_size(&self) -> usize {
+        CHUNK_HEADER_SIZE
+            + if self.i_data {
+                I_DATA_HEADER_SIZE
+            } else {
+                PAYLOAD_DATA_HEADER_SIZE
+            }
+    }
+
+    /// The size of the chunk on the wire, padding included.
+    pub(crate) fn wire_size(&self) -> usize {
+        (self.header_size() + self.user_data.len()).next_multiple_of(4)
     }
 
     pub(crate) fn abandoned(&self) -> bool {

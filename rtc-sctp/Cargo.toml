@@ -19,6 +19,9 @@ bench = []
 
 [dependencies]
 shared = { workspace = true, default-features = false, features = [] }
+# The traits only: the hash of a State Cookie's MAC (RFC 9260 5.1.3) comes from the provider
+# the application hands over. No cryptographic implementation is named here.
+crypto.workspace = true
 
 bytes.workspace = true
 rand.workspace = true
@@ -29,6 +32,8 @@ crc32c.workspace = true
 rustc-hash.workspace = true
 
 [dev-dependencies]
+# A provider for the State Cookie tests.
+crypto = { workspace = true, features = ["crypto-ring"] }
 assert_matches.workspace = true
 lazy_static.workspace = true
 

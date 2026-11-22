@@ -5,8 +5,12 @@ use crate::param::param_forward_tsn_supported::ParamForwardTsnSupported;
 
 const ACCEPT_CH_SIZE: usize = 16;
 
+/// An association driven by hand. Max.Burst is off unless the test's configuration sets one
+/// of its own: these tests send what a window allows in one call and say so by setting the
+/// window, which Max.Burst (4 packets by default, RFC 9260 6.1 D) would cut back first.
 fn create_association(config: TransportConfig) -> Association {
-    Association::new(
+    let default_burst = config.max_burst() == TransportConfig::default().max_burst();
+    let mut a = Association::new(
         None,
         Arc::new(config),
         1400,
@@ -15,7 +19,11 @@ fn create_association(config: TransportConfig) -> Association {
         SocketAddr::from_str("0.0.0.0:0").unwrap(),
         TransportProtocol::UDP,
         Instant::now(),
-    )
+    );
+    if default_burst {
+        a.max_burst = None;
+    }
+    a
 }
 
 // `create_forward_tsn` no longer rescans the in-flight window; it emits the
@@ -619,7 +627,7 @@ use crate::config::{INITIAL_MTU, max_payload_size_for_mtu};
 fn create_association_with_mtu(mtu: u32) -> Association {
     Association::new(
         None,
-        Arc::new(TransportConfig::default()),
+        Arc::new(TransportConfig::default().with_max_burst(None)),
         mtu - (COMMON_HEADER_SIZE + DATA_CHUNK_HEADER_SIZE),
         0,
         SocketAddr::from_str("0.0.0.0:0").unwrap(),
@@ -1696,6 +1704,7 @@ fn full_buffer_association() -> Association {
             .with_max_receive_buffer_size(FULL_BUFFER_RECV_BUFFER)
             .with_max_message_size(FULL_BUFFER_MAX_MESSAGE),
     );
+    a.set_state(AssociationState::Established);
     assert!(
         a.create_stream(0, true, PayloadProtocolIdentifier::Binary)
             .is_some()
@@ -1852,6 +1861,7 @@ fn test_handle_sack_beyond_sent_tsns_is_refused() -> Result<()> {
 #[test]
 fn test_handle_data_beyond_stream_limit_is_acknowledged_and_discarded() -> Result<()> {
     let mut a = create_association(TransportConfig::default());
+    a.set_state(AssociationState::Established);
     a.my_max_num_inbound_streams = 16;
     let tsn = a.peer_last_tsn.wrapping_add(1);
     let d = ChunkPayloadData {
@@ -1878,6 +1888,7 @@ fn test_handle_data_beyond_stream_limit_is_acknowledged_and_discarded() -> Resul
 #[test]
 fn test_handle_data_across_the_tsn_wrap() -> Result<()> {
     let mut a = create_association(TransportConfig::default());
+    a.set_state(AssociationState::Established);
     a.peer_last_tsn = u32::MAX - 1;
     for tsn in [u32::MAX, 0, 1] {
         let d = ChunkPayloadData {
@@ -2197,3 +2208,15 @@ mod untested_rows_test;
 
 #[path = "reconfig_test.rs"]
 mod reconfig_test;
+
+#[path = "interleaving_test.rs"]
+mod interleaving_test;
+
+#[path = "bundling_test.rs"]
+mod bundling_test;
+
+#[path = "cookie_test.rs"]
+mod cookie_test;
+
+#[path = "zero_checksum_test.rs"]
+mod zero_checksum_test;
