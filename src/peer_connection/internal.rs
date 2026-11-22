@@ -2245,7 +2245,7 @@ impl RTCPeerConnection {
                             }
                         })
                     }),
-                    ..Default::default()
+                    rid_restrictions: coding.rtp_coding_parameters.rid_restrictions.clone(),
                 },
                 codec: coding.codec.clone(),
                 ..Default::default()
