@@ -279,6 +279,7 @@ impl Cipher for CipherAesCmHmacSha1 {
         // computed, which covers them as they go out.
         keys.header.apply(
             &mut writer,
+            header_len,
             header.sequence_number,
             roc,
             header.ssrc,
@@ -342,6 +343,7 @@ impl Cipher for CipherAesCmHmacSha1 {
         // RFC 6904 section 3: header extensions are decrypted only once the tag is validated.
         keys.header.apply(
             &mut writer,
+            header_len,
             header.sequence_number,
             roc,
             header.ssrc,

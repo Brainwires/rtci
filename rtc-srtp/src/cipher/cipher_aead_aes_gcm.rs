@@ -247,6 +247,7 @@ impl Cipher for CipherAeadAesGcm {
         // which takes the header, encrypted elements included, as associated data.
         keys.header.apply(
             &mut writer,
+            header_len,
             header.sequence_number,
             roc,
             header.ssrc,
@@ -296,6 +297,7 @@ impl Cipher for CipherAeadAesGcm {
         // authenticated.
         keys.header.apply(
             &mut writer,
+            payload_offset,
             header.sequence_number,
             roc,
             header.ssrc,

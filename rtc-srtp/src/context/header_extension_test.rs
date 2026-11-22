@@ -297,3 +297,30 @@ fn packets_without_selected_elements_are_protected_as_usual() {
         }
     }
 }
+
+/// The header keystream never reaches octets the payload transform covers: when the header the
+/// caller parsed is not the packet's (it has no extension, the bytes have one), the "extension"
+/// lies in what is encrypted as payload, and RFC 6904 leaves it alone.
+#[test]
+fn a_header_that_is_not_the_packets_gets_no_header_extension_encryption() {
+    use shared::marshal::Unmarshal;
+    for profile in [
+        ProtectionProfile::Aes128CmHmacSha1_80,
+        ProtectionProfile::AeadAes128Gcm,
+    ] {
+        let (packet, _) = packet_with_extensions(false, 3);
+        let mut without_extension = packet.clone();
+        without_extension[0] = 0x80;
+        let header = rtp::Header::unmarshal(&mut &without_extension[..]).unwrap();
+
+        let mut sender = context(profile);
+        sender.set_encrypted_header_extensions(ids(&[1, 2, 3, 4, 5]));
+        assert_eq!(
+            sender.encrypt_rtp_with_header(&packet, &header).unwrap(),
+            context(profile)
+                .encrypt_rtp_with_header(&packet, &header)
+                .unwrap(),
+            "{profile:?}"
+        );
+    }
+}

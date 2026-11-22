@@ -222,9 +222,14 @@ impl HeaderExtensionKeys {
     /// Encrypts, or decrypts, the payload of the extension elements of `packet` whose ids are
     /// in `ids`, in place. The keystream uses the IV of the packet's payload (RFC 3711 section
     /// 4.1.1) with k_hs in place of k_s, and starts at the first octet of the extension data.
+    ///
+    /// `header_len` is where the payload starts for the caller. An extension block that does
+    /// not end there is left alone: the header the caller parsed is then not this packet's, and
+    /// the keystream must never reach octets the payload transform also covers.
     pub(crate) fn apply(
         &mut self,
         packet: &mut [u8],
+        header_len: usize,
         sequence_number: u16,
         roc: u32,
         ssrc: u32,
@@ -239,6 +244,9 @@ impl HeaderExtensionKeys {
         let Some((profile, range)) = extension_data(packet) else {
             return Ok(());
         };
+        if range.end != header_len {
+            return Ok(());
+        }
         let data = &mut packet[range];
         let mask = encryption_mask(profile, data, ids);
         let Some(end) = mask.last().map(|range| range.end) else {
