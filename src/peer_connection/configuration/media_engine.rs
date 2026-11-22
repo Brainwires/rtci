@@ -143,8 +143,8 @@ use crate::peer_connection::sdp::{
 use crate::rtp_transceiver::direction::RTCRtpTransceiverDirection;
 use crate::rtp_transceiver::fmtp;
 use crate::rtp_transceiver::rtp_sender::rtp_codec::{
-    CodecMatch, RTCRtpCodec, RtpCodecKind, codec_parameters_fuzzy_search, is_repair_codec,
-    parse_rtx_apt, repair_family, rtcp_feedback_intersection,
+    CodecMatch, RTCRtpCodec, RtpCodecKind, codec_parameters_fuzzy_search, is_flexfec_mime_type,
+    is_repair_codec, parse_rtx_apt, repair_family, rtcp_feedback_intersection,
 };
 use crate::rtp_transceiver::rtp_sender::rtp_codec_parameters::RTCRtpCodecParameters;
 use crate::rtp_transceiver::rtp_sender::rtp_header_extension_capability::RTCRtpHeaderExtensionCapability;
@@ -374,6 +374,10 @@ pub struct MediaEngine {
     pub(crate) header_extensions: Vec<MediaEngineHeaderExtension>,
     pub(crate) negotiated_header_extensions: HashMap<u16, MediaEngineHeaderExtension>,
 
+    /// Whether RTP retransmission (RFC 4588) is negotiated beside RFC 8627 FlexFEC.
+    /// See [`MediaEngine::set_flexfec_with_retransmission`].
+    pub(crate) flexfec_with_retransmission: bool,
+
     /// The RTCP CNAME of the connection this media engine belongs to (RFC 7022), set when the
     /// connection is built: what `a=ssrc:<ssrc> cname:` lines and `RTCRtcpParameters::cname`
     /// say. Empty in a media engine no connection has taken yet.
@@ -397,6 +401,7 @@ impl MediaEngine {
     /// - G.722 (8kHz wideband)
     /// - PCMU/G.711 μ-law (8kHz)
     /// - PCMA/G.711 A-law (8kHz)
+    /// - telephone-event at 48 kHz and 8 kHz, events 0-15 (DTMF, RFC 4733)
     ///
     /// **Video Codecs:**
     /// - VP8 with RTCP feedback
@@ -468,6 +473,32 @@ impl MediaEngine {
                     rtcp_feedback: vec![],
                 },
                 payload_type: 8,
+            },
+            // DTMF as named telephone events (RFC 4733), which RFC 7874 section 3 has every
+            // WebRTC endpoint implement, with events 0 to 15, the DTMF digits. One format per
+            // clock rate of the audio codecs above (the event stream runs on the clock of the
+            // audio it goes with), each stating the events it takes (RFC 4733 section 2.4.1:
+            // `a=fmtp:<pt> 0-15`). The application sends and reads the event packets
+            // (`rtp::codec::telephone_event`).
+            RTCRtpCodecParameters {
+                rtp_codec: RTCRtpCodec {
+                    mime_type: MIME_TYPE_TELEPHONE_EVENT.to_owned(),
+                    clock_rate: 48000,
+                    channels: 0,
+                    sdp_fmtp_line: "0-15".to_owned(),
+                    rtcp_feedback: vec![],
+                },
+                payload_type: 112,
+            },
+            RTCRtpCodecParameters {
+                rtp_codec: RTCRtpCodec {
+                    mime_type: MIME_TYPE_TELEPHONE_EVENT.to_owned(),
+                    clock_rate: 8000,
+                    channels: 0,
+                    sdp_fmtp_line: "0-15".to_owned(),
+                    rtcp_feedback: vec![],
+                },
+                payload_type: 115,
             },
         ] {
             self.register_codec(codec, RtpCodecKind::Audio)?;
@@ -892,8 +923,27 @@ impl MediaEngine {
             audio_codecs: self.audio_codecs.clone(),
             application_codecs: self.application_codecs.clone(),
             header_extensions: self.header_extensions.clone(),
+            flexfec_with_retransmission: self.flexfec_with_retransmission,
             ..Default::default()
         }
+    }
+
+    /// Whether RTP retransmission (`rtx`, RFC 4588) stays negotiated in a video section that
+    /// also negotiates RFC 8627 FlexFEC ([`MIME_TYPE_FLEX_FEC`]). `false` by default.
+    ///
+    /// RFC 8627 section 1.1.7: "If a peer supporting both FLEX FEC and other RTP
+    /// retransmission methods (see RFC 4588) receives an Offer including both FLEX FEC and
+    /// another RTP retransmission method, it MUST respond with an Answer containing only FLEX
+    /// FEC." So when a remote description carries both and this engine has both registered,
+    /// the retransmission formats are not negotiated and the answer has none; FlexFEC's own
+    /// retransmission form (section 4.2.2.1, a repair packet with `R` set) replaces them.
+    ///
+    /// The rule is for the `flexfec` format of the RFC. [`MIME_TYPE_FLEX_FEC03`], the format
+    /// browsers negotiate, comes from a draft that has no such rule and is always answered
+    /// together with `rtx`, as libwebrtc does. `true` gives the RFC format the same lenient
+    /// treatment.
+    pub fn set_flexfec_with_retransmission(&mut self, allowed: bool) {
+        self.flexfec_with_retransmission = allowed;
     }
 
     /// set_multi_codec_negotiation enables or disables the negotiation of multiple codecs.
@@ -1311,6 +1361,19 @@ impl MediaEngine {
                             .is_some_and(|apt| removed.contains(&apt)))
             });
 
+            // RFC 8627 section 1.1.7: offered FlexFEC and another RTP retransmission method,
+            // the answer contains only FlexFEC.
+            if !self.flexfec_with_retransmission {
+                for matches in [&mut exact_matches, &mut partial_matches] {
+                    if matches
+                        .iter()
+                        .any(|codec| is_flexfec_mime_type(&codec.rtp_codec.mime_type))
+                    {
+                        matches.retain(|codec| repair_family(&codec.rtp_codec) != "rtx");
+                    }
+                }
+            }
+
             // use exact matches when they exist, otherwise fall back to partial
             if !exact_matches.is_empty() {
                 self.push_codecs(exact_matches, typ);
@@ -1551,11 +1614,53 @@ fn fmtp_parameter_set(line: &str) -> Vec<(String, String)> {
 /// Whether `a` and `b` describe one format (RFC 8866 section 6.6, `a=rtpmap` and `a=fmtp`):
 /// the same encoding name, clock rate, channels and fmtp parameters. The payload type that
 /// numbers it is not part of the format.
+///
+/// A VP9 format without `profile-id` is profile 0 (RFC 9628 section 6: "If no profile-id is
+/// present, Profile 0 MUST be inferred"), so it is the format that says `profile-id=0`.
 fn same_format(a: &RTCRtpCodec, b: &RTCRtpCodec) -> bool {
+    let parameters = |codec: &RTCRtpCodec| {
+        let mut set = fmtp_parameter_set(&codec.sdp_fmtp_line);
+        if codec.mime_type.eq_ignore_ascii_case(MIME_TYPE_VP9)
+            && !set.iter().any(|(key, _)| key == "profile-id")
+        {
+            set.push(("profile-id".to_owned(), "0".to_owned()));
+            set.sort();
+        }
+        set
+    };
     a.mime_type.eq_ignore_ascii_case(&b.mime_type)
         && a.clock_rate == b.clock_rate
         && a.channels == b.channels
-        && fmtp_parameter_set(&a.sdp_fmtp_line) == fmtp_parameter_set(&b.sdp_fmtp_line)
+        && parameters(a) == parameters(b)
+}
+
+#[cfg(test)]
+mod same_format_test {
+    use super::*;
+
+    fn vp9(fmtp: &str) -> RTCRtpCodec {
+        RTCRtpCodec {
+            mime_type: MIME_TYPE_VP9.to_owned(),
+            clock_rate: 90000,
+            channels: 0,
+            sdp_fmtp_line: fmtp.to_owned(),
+            rtcp_feedback: vec![],
+        }
+    }
+
+    #[test]
+    fn a_vp9_format_without_a_profile_id_is_profile_0() {
+        assert!(same_format(&vp9(""), &vp9("profile-id=0")));
+        assert!(same_format(&vp9("profile-id=0"), &vp9("")));
+        assert!(!same_format(&vp9(""), &vp9("profile-id=2")));
+        assert!(!same_format(&vp9("profile-id=0"), &vp9("profile-id=2")));
+        // Only VP9 has that default.
+        let other = |fmtp: &str| RTCRtpCodec {
+            mime_type: MIME_TYPE_VP8.to_owned(),
+            ..vp9(fmtp)
+        };
+        assert!(!same_format(&other(""), &other("profile-id=0")));
+    }
 }
 
 #[cfg(test)]

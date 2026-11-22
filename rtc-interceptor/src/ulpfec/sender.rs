@@ -26,13 +26,18 @@ pub const ULPFEC_DEFAULT_NUM_FEC_PACKETS: usize = 1;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RedPlacement {
     /// A RED packet of its own, whose only block has the FEC payload type. It takes the next
-    /// sequence number of the media stream. What libwebrtc sends and expects.
-    #[default]
+    /// sequence number of the media stream. What libwebrtc sends and the only form it reads
+    /// (its receiver drops a RED packet with more than one block): the setting for a browser
+    /// peer. RFC 5109 14.2 does not allow it: "the FEC MUST NOT be sent by itself for this
+    /// stream".
     OwnPacket,
-    /// A redundant block in the next media packet, ahead of its primary block, as in RFC 5109
-    /// 10.3: FEC is never sent by itself. The media stream's sequence numbers are untouched. A
-    /// redundant block holds at most 1023 octets, so FEC data longer than that (protection of
-    /// full-size video packets) still goes in a packet of its own.
+    /// A redundant block in the next media packet, ahead of its primary block: the carriage of
+    /// RFC 5109 14.2 ("the FEC data ... is sent in the same packets as the protected payload")
+    /// and 10.3, and the default. FEC is never sent by itself and the media stream's sequence
+    /// numbers are untouched. A redundant block holds at most 1023 octets (RFC 2198 section 3),
+    /// so FEC data longer than that (protection of full-size video packets) cannot be carried
+    /// this way and still goes in a packet of its own.
+    #[default]
     WithNextMedia,
 }
 

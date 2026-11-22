@@ -134,7 +134,8 @@ use crate::peer_connection::configuration::remote_bitrate_limit::{
     REMOTE_BITRATE_LIMIT_SLOT, RemoteBitrateLimitInterceptor,
 };
 use crate::rtp_transceiver::rtp_sender::rtcp_parameters::{
-    RTCP_FB_ACK_CCFB, TYPE_RTCP_FB_ACK, TYPE_RTCP_FB_NACK, TYPE_RTCP_FB_TRANSPORT_CC,
+    RTCP_FB_ACK_CCFB, TYPE_RTCP_FB_ACK, TYPE_RTCP_FB_CCM, TYPE_RTCP_FB_NACK,
+    TYPE_RTCP_FB_TRANSPORT_CC,
 };
 use crate::rtp_transceiver::rtp_sender::{
     RTCPFeedback, RTCRtpCodec, RTCRtpHeaderExtensionCapability, RTCRtpHeaderExtensionParameters,
@@ -163,9 +164,13 @@ use shared::error::Result;
 /// - **NACK**: Detects packet loss and requests retransmissions (video only)
 /// - **RTCP Reports**: Generates Sender Reports (SR) and Receiver Reports (RR)
 /// - **Simulcast Headers**: Enables RTP extensions for multi-resolution streaming
-/// - **TWCC**: numbers outgoing packets and generates transport-wide congestion control feedback
-/// - **Congestion control**: Google Congestion Control ([`Gcc`]) over the receiver's TWCC or
-///   RFC 8888 feedback, with a pacer that releases media at its target (RFC 8834 section 7)
+/// - **Congestion control feedback**: RFC 8888 (`ack ccfb`) and transport-wide congestion
+///   control (`transport-cc`) are both offered, and each stream runs on one of them: RFC 8888
+///   when the peer accepted it, TWCC otherwise (RFC 8888 section 6)
+/// - **Congestion control**: Google Congestion Control ([`Gcc`]) over that feedback, with a
+///   pacer that releases media at its target (RFC 8834 section 7)
+/// - **TMMBR**: offered (`ccm tmmbr`), and honoured for the streams that negotiated it
+///   (RFC 8834 section 5.1.6, RFC 5104)
 /// - **RTP circuit breaker**: stops a flow whose receiver has gone or that persistently
 ///   overloads the path (RFC 8083; RFC 8834 section 7.1)
 /// - **Key-frame requests**: Delivers inbound PLI and FIR to the application, the encoder that
@@ -240,6 +245,55 @@ pub struct DefaultInterceptorHandles {
     pub circuit_breaker: CircuitBreakerHandle,
 }
 
+/// The settings of the standard interceptor set. The default of each is what the RFCs say;
+/// the other value is the behaviour of a browser or of an earlier version of this crate.
+///
+/// ```
+/// use rtc::interceptor::Registry;
+/// use rtc::peer_connection::configuration::interceptor_registry::{
+///     CongestionFeedback, DefaultInterceptorOptions, register_default_interceptors_with_options,
+/// };
+/// use rtc::peer_connection::configuration::media_engine::MediaEngine;
+///
+/// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let mut media_engine = MediaEngine::default();
+/// let mut options = DefaultInterceptorOptions::default();
+/// // Offer transport-wide congestion control only, as browsers do.
+/// options.congestion_feedback = CongestionFeedback::Twcc;
+/// let (registry, handles) =
+///     register_default_interceptors_with_options(Registry::new(), &mut media_engine, &options)?;
+/// # let _ = (registry, handles);
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct DefaultInterceptorOptions {
+    /// Which congestion control feedback is offered and accepted. The default,
+    /// [`CongestionFeedback::Negotiated`], offers RFC 8888 and transport-wide congestion
+    /// control together and runs each stream on the one the peer accepted.
+    pub congestion_feedback: CongestionFeedback,
+    /// Whether a TMMBR limits a stream that did not negotiate `a=rtcp-fb:<pt> ccm tmmbr`
+    /// (RFC 5104 sections 7.1 and 7.2). `false` by default: only a negotiated TMMBR is
+    /// honoured. See
+    /// [`CongestionControlBuilder::with_unnegotiated_tmmbr`](interceptor::CongestionControlBuilder::with_unnegotiated_tmmbr).
+    pub unnegotiated_tmmbr: bool,
+    /// Whether the pacer lets a packet inside its budget leave as it is written (`true`, the
+    /// default) or holds every packet for its next timeout. See
+    /// [`PacerBuilder::with_immediate_release`](interceptor::PacerBuilder::with_immediate_release).
+    pub pacer_immediate_release: bool,
+}
+
+impl Default for DefaultInterceptorOptions {
+    fn default() -> Self {
+        Self {
+            congestion_feedback: CongestionFeedback::default(),
+            unnegotiated_tmmbr: false,
+            pacer_immediate_release: true,
+        }
+    }
+}
+
 /// [`register_default_interceptors`], returning the handles of the congestion controller and
 /// the circuit breaker it installs.
 ///
@@ -250,31 +304,63 @@ pub fn register_default_interceptors_with_handles(
     registry: Registry,
     media_engine: &mut MediaEngine,
 ) -> Result<(Registry, DefaultInterceptorHandles)> {
+    register_default_interceptors_with_options(
+        registry,
+        media_engine,
+        &DefaultInterceptorOptions::default(),
+    )
+}
+
+/// [`register_default_interceptors_with_handles`] with settings other than the defaults.
+///
+/// # Errors
+///
+/// As [`register_default_interceptors`].
+pub fn register_default_interceptors_with_options(
+    registry: Registry,
+    media_engine: &mut MediaEngine,
+    options: &DefaultInterceptorOptions,
+) -> Result<(Registry, DefaultInterceptorHandles)> {
     // Order is not decided here — `Registry::build` decides it. These may be called in
     // any sequence.
     let registry = configure_nack(registry, media_engine);
 
     configure_simulcast_extension_headers(media_engine)?;
 
-    // Both halves of transport-wide congestion control: the numbers this endpoint's packets
-    // carry, and the feedback about the remote's.
-    let registry = configure_twcc(registry, media_engine)?;
+    // The per-packet feedback of both directions: what this endpoint's packets are numbered
+    // with and reported in, and the reports about the remote's.
+    register_congestion_feedback(media_engine, options.congestion_feedback)?;
+    let registry = with_congestion_feedback_senders(registry, options.congestion_feedback);
+    let registry = with_congestion_feedback_recorders(registry, options.congestion_feedback);
+
+    // A media sender implements TMMBR (RFC 8834 section 5.1.6), and it is in use where the
+    // session names it (RFC 5104 section 7.1).
+    configure_tmmbr(media_engine);
 
     let (registry, circuit_breaker) = configure_circuit_breaker(registry);
 
-    // The estimator runs on whichever per-packet feedback the remote sends: TWCC, or RFC 8888
-    // when `ack ccfb` was negotiated (`configure_congestion_control_feedback`).
+    // The estimator runs on whichever per-packet feedback each stream negotiated: RFC 8888
+    // when the peer accepted `ack ccfb`, transport-wide congestion control otherwise.
     let estimator = Gcc::default();
     let initial_target = estimator.target_bitrate();
     let (congestion_control, handle) = CongestionControlBuilder::new(estimator)
         .with_circuit_breaker(circuit_breaker.clone())
+        .with_unnegotiated_tmmbr(options.unnegotiated_tmmbr)
         .build_with_handle();
     let registry = registry
         .with(Slot::CongestionControl, congestion_control)
+        // The remote description's `b=TIAS` / `b=AS` bounds the estimate on its way to the
+        // pacer (RFC 9429 section 5.10); the peer connection feeds it when an answer is
+        // applied.
+        .with(
+            Slot::Custom(REMOTE_BITRATE_LIMIT_SLOT),
+            RemoteBitrateLimitInterceptor::new(initial_target),
+        )
         .with(
             Slot::Pacer,
             PacerBuilder::new()
                 .with_target_bitrate(initial_target)
+                .with_immediate_release(options.pacer_immediate_release)
                 .build(),
         );
 
@@ -282,6 +368,9 @@ pub fn register_default_interceptors_with_handles(
     configure_receiver_reference_time(media_engine);
 
     let registry = configure_key_frame_requests(registry);
+
+    // Last, so the ids of the extensions registered above stay what they were.
+    configure_default_header_extensions(media_engine)?;
 
     Ok((
         registry,
@@ -293,8 +382,9 @@ pub fn register_default_interceptors_with_handles(
 }
 
 /// The standard set without congestion control: no estimator, no pacer, no transport-wide
-/// sequence numbers on outgoing packets, no circuit breaker. NACK, RTCP reports, TWCC feedback
-/// for the remote, and key-frame requests are as in [`register_default_interceptors`].
+/// sequence numbers on outgoing packets, no circuit breaker. NACK, RTCP reports, congestion
+/// control feedback for the remote (RFC 8888 or transport-wide, as negotiated), and key-frame
+/// requests are as in [`register_default_interceptors`].
 ///
 /// This is the explicit opt-out. RFC 8834 section 7 requires congestion control and the RTP
 /// circuit breaker of a WebRTC endpoint: use this only when the application provides them
@@ -312,14 +402,135 @@ pub fn register_default_interceptors_without_congestion_control(
 
     configure_simulcast_extension_headers(media_engine)?;
 
-    let registry = configure_twcc_receiver_only(registry, media_engine)?;
+    let feedback = CongestionFeedback::default();
+    register_congestion_feedback(media_engine, feedback)?;
+    let registry = with_congestion_feedback_recorders(registry, feedback);
 
     let registry = configure_rtcp_reports(registry);
     configure_receiver_reference_time(media_engine);
 
     let registry = configure_key_frame_requests(registry);
 
+    // Last, so the ids of the extensions registered above stay what they were.
+    configure_default_header_extensions(media_engine)?;
+
     Ok(registry)
+}
+
+/// Registers the header extensions every WebRTC endpoint is expected to offer, beside the
+/// ones the interceptors above need:
+///
+/// - **MID** (`urn:ietf:params:rtp-hdrext:sdes:mid`) for audio as well as video: RFC 9143
+///   section 15 has an endpoint that offers a BUNDLE group offer it in every bundled RTP
+///   section, and RFC 9429 section 5.2.1 lists it among the extensions of any m= section.
+///   The sender stamps it (`RTCRtpSender::write_rtp`), and a receiver finds the m= section of
+///   an SSRC no description declared by it.
+/// - **Client-to-mixer audio level** (`urn:ietf:params:rtp-hdrext:ssrc-audio-level`, RFC
+///   6464) for audio: RFC 8834 section 5.2.2 ("RECOMMENDED"). The application writes the
+///   level into the packets it sends; a receiver reports the level it reads as the audio
+///   level of its synchronization sources.
+/// - **Coordination of video orientation** (`urn:3gpp:video-orientation`) for video: the
+///   application writes and reads it.
+///
+/// Part of [`register_default_interceptors`].
+///
+/// # Errors
+///
+/// Returns an error if a header extension cannot be registered (no free id).
+pub fn configure_default_header_extensions(media_engine: &mut MediaEngine) -> Result<()> {
+    for (uri, kind) in [
+        (::sdp::extmap::SDES_MID_URI, RtpCodecKind::Audio),
+        (::sdp::extmap::AUDIO_LEVEL_URI, RtpCodecKind::Audio),
+        (::sdp::extmap::VIDEO_ORIENTATION_URI, RtpCodecKind::Video),
+    ] {
+        media_engine.register_header_extension(
+            RTCRtpHeaderExtensionCapability {
+                uri: uri.to_owned(),
+            },
+            kind,
+            None,
+        )?;
+    }
+    Ok(())
+}
+
+/// Offers TMMBR for audio and video: `a=rtcp-fb:<pt> ccm tmmbr` (RFC 5104 section 7.1).
+///
+/// A WebRTC endpoint that sends media implements TMMBR (RFC 8834 section 5.1.6): the
+/// congestion controller keeps its target under the limit a TMMBR sets and answers with a
+/// TMMBN. It does so for the streams that negotiated the message, which is what this
+/// registers; a peer that does not answer `ccm tmmbr` (browsers do not) negotiates without it.
+/// Part of [`register_default_interceptors`].
+pub fn configure_tmmbr(media_engine: &mut MediaEngine) {
+    for kind in [RtpCodecKind::Video, RtpCodecKind::Audio] {
+        media_engine.register_feedback(
+            RTCPFeedback {
+                typ: TYPE_RTCP_FB_CCM.to_owned(),
+                parameter: "tmmbr".to_owned(),
+            },
+            kind,
+        );
+    }
+}
+
+/// Registers what `feedback` needs negotiated, on audio and video codecs.
+fn register_congestion_feedback(
+    media_engine: &mut MediaEngine,
+    feedback: CongestionFeedback,
+) -> Result<()> {
+    for kind in [RtpCodecKind::Video, RtpCodecKind::Audio] {
+        if feedback.offers_twcc() {
+            media_engine.register_feedback(
+                RTCPFeedback {
+                    typ: TYPE_RTCP_FB_TRANSPORT_CC.to_owned(),
+                    parameter: "".to_owned(),
+                },
+                kind,
+            );
+            media_engine.register_header_extension(
+                RTCRtpHeaderExtensionCapability {
+                    uri: sdp::extmap::TRANSPORT_CC_URI.to_owned(),
+                },
+                kind,
+                None,
+            )?;
+        }
+        if feedback.offers_rfc8888() {
+            // `a=rtcp-fb:<pt> ack ccfb` (RFC 8888 section 6). No header extension: RFC 8888
+            // reports against the RTP sequence number, which is in every packet already.
+            register_ccfb_feedback(media_engine, kind);
+        }
+    }
+    Ok(())
+}
+
+/// What numbers this endpoint's packets for the feedback about them. Only transport-wide
+/// congestion control needs anything: RFC 8888 reports against the RTP sequence number.
+fn with_congestion_feedback_senders(registry: Registry, feedback: CongestionFeedback) -> Registry {
+    if feedback.offers_twcc() {
+        registry.with(Slot::TwccSender, TwccSenderBuilder::new().build())
+    } else {
+        registry
+    }
+}
+
+/// What records the remote's packets and reports them. With both formats on offer both
+/// recorders are in the chain, and each stream is reported by exactly one of them: the one
+/// [`negotiated_congestion_feedback`](interceptor::negotiated_congestion_feedback) names.
+fn with_congestion_feedback_recorders(
+    registry: Registry,
+    feedback: CongestionFeedback,
+) -> Registry {
+    let registry = if feedback.offers_twcc() {
+        registry.with(Slot::TwccReceiver, TwccReceiverBuilder::new().build())
+    } else {
+        registry
+    };
+    if feedback.offers_rfc8888() {
+        registry.with(Slot::Rfc8888, Rfc8888Builder::new().build())
+    } else {
+        registry
+    }
 }
 
 /// Installs the RTP circuit breaker (RFC 8083) at [`Slot::CircuitBreaker`] with the RFC's
@@ -848,11 +1059,11 @@ fn register_ccfb_feedback(media_engine: &mut MediaEngine, kind: RtpCodecKind) {
 /// ([`SettingEngineBuilder::with_ecn`](crate::peer_connection::configuration::setting_engine::SettingEngineBuilder::with_ecn)),
 /// a stream that negotiated it is sent ECT(1) (L4S).
 ///
-/// Opt-in, and not part of [`register_default_interceptors`]: TWCC stays the default feedback,
-/// as browsers negotiate it. A peer that does not offer or accept `ack ccfb` negotiates
-/// without it, and nothing changes for that stream. Use [`configure_congestion_control`] with
-/// [`CongestionFeedback::Rfc8888`] instead to also run a congestion controller on the reports;
-/// never both, or every packet is reported twice.
+/// [`register_default_interceptors`] does this already, beside transport-wide congestion
+/// control; this helper is for a chain built piece by piece. A peer that does not offer or
+/// accept `ack ccfb` negotiates without it, and nothing changes for that stream. A stream that
+/// did negotiate it is reported here and not by the TWCC receiver. Use
+/// [`configure_congestion_control`] to also run a congestion controller on the reports.
 ///
 /// # Examples
 ///
@@ -874,19 +1085,42 @@ pub fn configure_congestion_control_feedback(
     registry.with(Slot::Rfc8888, Rfc8888Builder::new().build())
 }
 
-/// Which feedback format the remote should report arrivals with.
+/// Which congestion control feedback is offered, and so which the remote may report arrivals
+/// with.
 ///
-/// **One or the other, never both** (D7). Both resolve into the same `PacketReport`s and the
-/// estimator cannot tell them apart, so a chain carrying both senders counts every packet twice and
-/// the estimate is wrong by a factor of two in the direction that causes congestion.
+/// **A stream runs on one format, never both.** Both resolve into the same `PacketReport`s and
+/// the estimator cannot tell them apart, so a stream reported in both would have every packet
+/// counted twice and the estimate wrong by a factor of two in the direction that causes
+/// congestion. Offering both is a different thing, and is what RFC 8888 section 6 expects:
+/// "an SDP offer might indicate support for both the congestion control feedback mechanism
+/// specified in this memo and one or more alternative congestion control feedback mechanisms
+/// that offer substantially the same semantics. In this case, the answering party SHOULD
+/// include only one of the offered congestion control feedback mechanisms in its answer."
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum CongestionFeedback {
-    /// Transport-wide congestion control. The default: browsers support it.
+    /// Both on offer, one in use per stream: RFC 8888 when the peer accepted `ack ccfb`,
+    /// transport-wide congestion control otherwise (a browser answers `transport-cc` only).
+    /// As an answerer this endpoint keeps `ack ccfb` and drops `transport-cc` when it was
+    /// offered both. The default.
     #[default]
+    Negotiated,
+    /// Transport-wide congestion control only: `ack ccfb` is neither offered nor accepted.
+    /// What browsers offer.
     Twcc,
-    /// RFC 8888 congestion control feedback. Carries ECN, which TWCC cannot.
+    /// RFC 8888 congestion control feedback only. Carries ECN, which TWCC cannot. A peer
+    /// that does not accept `ack ccfb` then sends no per-packet feedback at all.
     Rfc8888,
+}
+
+impl CongestionFeedback {
+    fn offers_twcc(self) -> bool {
+        matches!(self, Self::Negotiated | Self::Twcc)
+    }
+
+    fn offers_rfc8888(self) -> bool {
+        matches!(self, Self::Negotiated | Self::Rfc8888)
+    }
 }
 
 /// Configure send-side congestion control around `estimator`.
@@ -896,10 +1130,10 @@ pub enum CongestionFeedback {
 /// | Slot | Interceptor | Why there |
 /// |---|---|---|
 /// | [`Slot::CongestionControl`] | send history and feedback ingest | the only position that sees every byte that leaves |
-/// | [`Slot::TwccSender`] | transport-wide sequence numbers | so the history keys on a number that already exists |
+/// | [`Slot::TwccSender`] | transport-wide sequence numbers (not with [`CongestionFeedback::Rfc8888`]) | so the history keys on a number that already exists |
 /// | [`REMOTE_BITRATE_LIMIT_SLOT`] | bounds the estimate by the remote description's `b=TIAS` / `b=AS` | between the controller, which announces the estimate, and the pacer, which reads it |
 /// | [`Slot::Pacer`] | paces departures | above the two, so `packet.now` is the release instant |
-/// | [`Slot::TwccReceiver`] or [`Slot::Rfc8888`] | records arrivals, reports them to the remote | an arrival recorder, so it precedes the jitter buffer |
+/// | [`Slot::TwccReceiver`] and / or [`Slot::Rfc8888`] | records arrivals, reports them to the remote | an arrival recorder, so it precedes the jitter buffer |
 ///
 /// The first three are this endpoint's own control loop: number what leaves, ingest the feedback
 /// that comes back, pace to the result. The recorder is the other half — it serves the *remote's*
@@ -909,10 +1143,9 @@ pub enum CongestionFeedback {
 /// The order is declared, not implied by the order these are added, so this composes with
 /// [`configure_nack`] and the rest in any sequence.
 ///
-/// # Not a default (D6)
-///
-/// Congestion control implies pacing, pacing implies queueing delay, and that is not something an
-/// application should acquire without asking. [`register_default_interceptors`] does not call this.
+/// [`register_default_interceptors`] installs the same thing around [`Gcc`], with the circuit
+/// breaker; this is for another estimator, or a chain built piece by piece. A slot holds one
+/// interceptor, so calling this after the default set replaces its estimator and pacer.
 ///
 /// # Examples
 ///
@@ -945,36 +1178,10 @@ pub fn configure_congestion_control<E: BandwidthEstimator + 'static>(
     media_engine: &mut MediaEngine,
 ) -> Result<Registry> {
     // The remote needs to know how to report. RFC 8888 needs no header extension — it reports
-    // against the RTP sequence number — so only TWCC registers one.
-    for kind in [RtpCodecKind::Video, RtpCodecKind::Audio] {
-        match feedback {
-            CongestionFeedback::Twcc => {
-                media_engine.register_feedback(
-                    RTCPFeedback {
-                        typ: TYPE_RTCP_FB_TRANSPORT_CC.to_owned(),
-                        parameter: "".to_owned(),
-                    },
-                    kind,
-                );
-                media_engine.register_header_extension(
-                    RTCRtpHeaderExtensionCapability {
-                        uri: sdp::extmap::TRANSPORT_CC_URI.to_owned(),
-                    },
-                    kind,
-                    None,
-                )?;
-            }
-            CongestionFeedback::Rfc8888 => {
-                // `a=rtcp-fb:<pt> ack ccfb` (RFC 8888 §5). Without it the remote has no reason to
-                // send CCFB, and an estimator that never receives feedback holds its initial rate
-                // for the life of the connection without reporting anything wrong.
-                //
-                // No header extension: RFC 8888 reports against the RTP sequence number, which is
-                // in every packet already.
-                register_ccfb_feedback(media_engine, kind);
-            }
-        }
-    }
+    // against the RTP sequence number — so only TWCC registers one. Without `ack ccfb` in the
+    // description the remote has no reason to send RFC 8888 reports, and an estimator that
+    // never receives feedback holds its initial rate for the life of the connection.
+    register_congestion_feedback(media_engine, feedback)?;
 
     // The pacer starts at the estimator's own starting rate. Left at its default it would
     // release at 1 Mbit/s until the first feedback moved the estimate, whatever the estimator
@@ -998,18 +1205,11 @@ pub fn configure_congestion_control<E: BandwidthEstimator + 'static>(
                 .build(),
         );
 
-    // The other half of the loop: what this endpoint reports about what it *receives*, so the
-    // remote's estimator has something to work with. One recorder or the other, never both —
-    // they do the same job in different formats, and a remote hearing both counts every packet
-    // twice.
-    Ok(match feedback {
-        CongestionFeedback::Twcc => registry
-            // The sequence numbers the send history keys on. Only TWCC needs them; RFC 8888
-            // reports against the RTP sequence number.
-            .with(Slot::TwccSender, TwccSenderBuilder::new().build())
-            .with(Slot::TwccReceiver, TwccReceiverBuilder::new().build()),
-        CongestionFeedback::Rfc8888 => registry.with(Slot::Rfc8888, Rfc8888Builder::new().build()),
-    })
+    // The sequence numbers the send history keys on (TWCC only), and the other half of the
+    // loop: what this endpoint reports about what it *receives*, so the remote's estimator has
+    // something to work with. A stream is reported by one recorder, never both.
+    let registry = with_congestion_feedback_senders(registry, feedback);
+    Ok(with_congestion_feedback_recorders(registry, feedback))
 }
 
 /// Creates a [`StreamInfo`](interceptor::StreamInfo) from RTC types for interceptor binding.
@@ -1067,22 +1267,29 @@ pub(crate) fn create_stream_info(
     }
 }
 
-/// Adds ULPFEC (RFC 5109) carried in RED (RFC 2198), the form browsers negotiate for video
-/// (`a=rtpmap:<red> red/90000`, `a=rtpmap:<ulpfec> ulpfec/90000`), in both directions.
+/// Adds ULPFEC (RFC 5109) carried in RED (RFC 2198) for video (`a=rtpmap:<red> red/90000`,
+/// `a=rtpmap:<ulpfec> ulpfec/90000`), in both directions, with the FEC placed as RFC 5109
+/// section 14.2 has it: in the same packets as the media it protects.
 ///
-/// Every video stream bound to the chain is then sent as RED packets with a FEC packet after
-/// each frame or five packets, whichever comes first, and received RED is taken apart, lost
-/// packets rebuilt, and the media delivered under its own payload type. FEC replaces FlexFEC at
-/// [`Slot::FecEncoder`] / [`Slot::FecDecoder`]: a chain runs one FEC scheme.
+/// Every video stream bound to the chain is then sent as RED packets, FEC data is produced
+/// after each frame or five packets, whichever comes first, and travels as a redundant block
+/// of the next media packet. Received RED is taken apart, lost packets rebuilt, and the media
+/// delivered under its own payload type, whichever of the two placements the sender used. FEC
+/// replaces FlexFEC at [`Slot::FecEncoder`] / [`Slot::FecDecoder`]: a chain runs one FEC scheme.
+///
+/// **Browsers need the other placement.** libwebrtc sends FEC in RED packets of its own and
+/// drops a RED packet with more than one block, so towards Chrome, and for video with
+/// full-size packets (a redundant block holds at most 1023 octets), use
+/// [`configure_ulpfec_with_placement`] with
+/// [`RedPlacement::OwnPacket`](interceptor::RedPlacement::OwnPacket).
 ///
 /// `red_payload_type` and `ulpfec_payload_type` are the payload types **in use on the
 /// connection**. Register `video/red` and [`MIME_TYPE_ULP_FEC`] on the [`MediaEngine`] with the
 /// same numbers; the engine offers and answers them like any codec. When the remote side makes
 /// the offer and numbers them differently, the negotiated numbers are the ones to pass here.
 ///
-/// For other shapes (FEC as a redundant block, uneven protection levels, `onelevelonly`, a
-/// separate FEC stream) build the interceptors with
-/// [`UlpfecSendBuilder`](interceptor::UlpfecSendBuilder) and
+/// For other shapes (uneven protection levels, `onelevelonly`, a separate FEC stream) build
+/// the interceptors with [`UlpfecSendBuilder`](interceptor::UlpfecSendBuilder) and
 /// [`UlpfecReceiveBuilder`](interceptor::UlpfecReceiveBuilder).
 ///
 /// [`MIME_TYPE_ULP_FEC`]: crate::peer_connection::configuration::media_engine::MIME_TYPE_ULP_FEC
@@ -1091,10 +1298,30 @@ pub fn configure_ulpfec(
     red_payload_type: PayloadType,
     ulpfec_payload_type: PayloadType,
 ) -> Registry {
+    configure_ulpfec_with_placement(
+        registry,
+        red_payload_type,
+        ulpfec_payload_type,
+        interceptor::RedPlacement::default(),
+    )
+}
+
+/// [`configure_ulpfec`] with the placement of FEC data in the RED stream chosen:
+/// [`RedPlacement::WithNextMedia`](interceptor::RedPlacement::WithNextMedia), the form of
+/// RFC 5109 section 14.2 and the default, or
+/// [`RedPlacement::OwnPacket`](interceptor::RedPlacement::OwnPacket), the form libwebrtc
+/// sends and the only one it reads.
+pub fn configure_ulpfec_with_placement(
+    registry: Registry,
+    red_payload_type: PayloadType,
+    ulpfec_payload_type: PayloadType,
+    placement: interceptor::RedPlacement,
+) -> Registry {
     registry
         .with(
             Slot::FecEncoder,
             interceptor::UlpfecSendBuilder::red(red_payload_type, ulpfec_payload_type)
+                .with_red_placement(placement)
                 .with_flush_on_marker(true)
                 .build(),
         )
@@ -1169,10 +1396,12 @@ mod slot_order_tests {
                 Slot::RtcpSession,
                 Slot::CongestionControl,
                 Slot::TwccSender,
+                Slot::Custom(REMOTE_BITRATE_LIMIT_SLOT),
                 Slot::CircuitBreaker,
                 Slot::Pacer,
                 Slot::NackResponder,
                 Slot::TwccReceiver,
+                Slot::Rfc8888,
                 Slot::NackGenerator,
                 Slot::KeyFrameRequests,
             ],
@@ -1202,6 +1431,8 @@ mod slot_order_tests {
             vec![
                 Slot::CongestionControl,
                 Slot::TwccSender,
+                // The remote description's send limit, between the estimate and the pacer.
+                Slot::Custom(REMOTE_BITRATE_LIMIT_SLOT),
                 Slot::Pacer,
                 Slot::NackResponder,
                 Slot::TwccReceiver,
@@ -1228,7 +1459,12 @@ mod slot_order_tests {
         .expect("congestion control");
 
         assert_eq!(
-            vec![Slot::CongestionControl, Slot::Pacer, Slot::Rfc8888],
+            vec![
+                Slot::CongestionControl,
+                Slot::Custom(REMOTE_BITRATE_LIMIT_SLOT),
+                Slot::Pacer,
+                Slot::Rfc8888
+            ],
             slots(&registry),
             "RFC 8888 needs no transport-wide sequence numbers"
         );
@@ -1272,6 +1508,7 @@ mod slot_order_tests {
                 Slot::RtcpSession,
                 Slot::NackResponder,
                 Slot::TwccReceiver,
+                Slot::Rfc8888,
                 Slot::NackGenerator,
                 Slot::KeyFrameRequests,
             ],
@@ -1321,10 +1558,15 @@ mod slot_order_tests {
                     "CongestionControlInterceptor<Gcc>".to_owned()
                 ),
                 (Slot::TwccSender, "TwccSenderInterceptor".to_owned()),
+                (
+                    Slot::Custom(REMOTE_BITRATE_LIMIT_SLOT),
+                    "RemoteBitrateLimitInterceptor".to_owned()
+                ),
                 (Slot::CircuitBreaker, "CircuitBreakerInterceptor".to_owned()),
                 (Slot::Pacer, "PacerInterceptor".to_owned()),
                 (Slot::NackResponder, "NackResponderInterceptor".to_owned()),
                 (Slot::TwccReceiver, "TwccReceiverInterceptor".to_owned()),
+                (Slot::Rfc8888, "Rfc8888Interceptor".to_owned()),
                 (Slot::NackGenerator, "NackGeneratorInterceptor".to_owned()),
                 (
                     Slot::KeyFrameRequests,
@@ -1365,11 +1607,69 @@ mod slot_order_tests {
         );
     }
 
-    /// RFC 8888 alongside the defaults is the case slots do **not** de-duplicate: the two recorders
-    /// sit at different positions, so both survive and the remote is told about every packet twice.
-    ///
-    /// Asserted as it behaves today rather than as it should behave, so the hazard is visible and
-    /// this test fails the moment someone fixes it.
+    /// RFC 8888 section 6: an offer may name RFC 8888 beside another congestion control
+    /// feedback mechanism, so the standard set offers `ack ccfb` and `transport-cc` on every
+    /// codec and carries a recorder for each. Which one reports a stream is decided per stream
+    /// (`a_stream_is_reported_in_one_feedback_format` in `rtc-interceptor`).
+    #[test]
+    fn the_default_set_offers_rfc8888_beside_transport_cc() {
+        let mut media_engine = MediaEngine::default();
+        let registry = register_default_interceptors(Registry::new(), &mut media_engine)
+            .expect("default interceptors");
+
+        let recorders: Vec<Slot> = slots(&registry)
+            .into_iter()
+            .filter(|slot| *slot == Slot::TwccReceiver || *slot == Slot::Rfc8888)
+            .collect();
+        assert_eq!(vec![Slot::TwccReceiver, Slot::Rfc8888], recorders);
+
+        for kind in [RtpCodecKind::Video, RtpCodecKind::Audio] {
+            for codec in media_engine.get_codecs_by_kind(kind) {
+                let has = |typ: &str, parameter: &str| {
+                    codec
+                        .rtp_codec
+                        .rtcp_feedback
+                        .iter()
+                        .any(|f| f.typ == typ && f.parameter == parameter)
+                };
+                assert!(has("ack", "ccfb"), "{}", codec.rtp_codec.mime_type);
+                assert!(has("transport-cc", ""), "{}", codec.rtp_codec.mime_type);
+                assert!(has("ccm", "tmmbr"), "{}", codec.rtp_codec.mime_type);
+            }
+        }
+    }
+
+    /// The browser setting: transport-wide congestion control only, with no trace of RFC 8888.
+    #[test]
+    fn the_twcc_only_setting_neither_offers_nor_records_rfc8888() {
+        let mut media_engine = MediaEngine::default();
+        let mut options = DefaultInterceptorOptions::default();
+        options.congestion_feedback = CongestionFeedback::Twcc;
+        let (registry, _handles) = register_default_interceptors_with_options(
+            Registry::new(),
+            &mut media_engine,
+            &options,
+        )
+        .expect("default interceptors");
+
+        assert!(!slots(&registry).contains(&Slot::Rfc8888));
+        assert!(slots(&registry).contains(&Slot::TwccReceiver));
+        for codec in media_engine.get_codecs_by_kind(RtpCodecKind::Video) {
+            assert!(
+                !codec
+                    .rtp_codec
+                    .rtcp_feedback
+                    .iter()
+                    .any(|f| f.typ == "ack" && f.parameter == "ccfb")
+            );
+        }
+    }
+
+    /// RFC 8888 asked for over the default set: the default already carries both recorders, a
+    /// slot holds one interceptor, and so there are two recorders, one per format, and none
+    /// twice. Upstream asserted the same two slots as a hazard (every packet reported twice);
+    /// here each stream is reported by one of them
+    /// (`a_stream_is_reported_in_one_feedback_format`).
     #[test]
     fn rfc8888_alongside_the_defaults_leaves_two_recorders() {
         use interceptor::Gcc;
@@ -1385,19 +1685,10 @@ mod slot_order_tests {
         )
         .expect("congestion control");
 
-        let recorders: Vec<Slot> = registry
-            .slots()
+        let recorders: Vec<Slot> = slots(&registry)
             .into_iter()
-            .map(|(slot, _)| slot)
             .filter(|slot| *slot == Slot::TwccReceiver || *slot == Slot::Rfc8888)
             .collect();
-
-        assert_eq!(
-            vec![Slot::TwccReceiver, Slot::Rfc8888],
-            recorders,
-            "known gap: different slots, so nothing de-duplicates them — an RFC 8888 chain has to \
-             be built without `register_default_interceptors`, or `Registry` needs a way to drop a \
-             slot"
-        );
+        assert_eq!(vec![Slot::TwccReceiver, Slot::Rfc8888], recorders);
     }
 }

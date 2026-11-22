@@ -188,7 +188,7 @@ impl Flight for Flight3 {
 
             // RFC 5246 7.4.1.4: an extension type the ClientHello did not carry is answered
             // with unsupported_extension.
-            let offered: Vec<u16> = client_hello_extensions(cfg)
+            let offered: Vec<u16> = client_hello_extensions(cfg, state.tls13_offer.as_ref())
                 .iter()
                 .map(|extension| extension.extension_type())
                 .collect();
@@ -397,7 +397,7 @@ impl Flight for Flight3 {
         cfg: &HandshakeConfig,
     ) -> Result<Vec<Packet>, (Option<Alert>, Option<Error>)> {
         // RFC 6347 4.2.1: the same parameters as the first ClientHello, plus the cookie.
-        let extensions = client_hello_extensions(cfg);
+        let extensions = client_hello_extensions(cfg, state.tls13_offer.as_ref());
 
         Ok(vec![Packet {
             record: RecordLayer::new(
@@ -409,7 +409,7 @@ impl Flight for Flight3 {
                         random: state.local_random.clone(),
                         cookie: state.cookie.clone(),
 
-                        cipher_suites: cfg.local_cipher_suites.clone(),
+                        cipher_suites: super::flight1::client_hello_cipher_suites(cfg),
                         compression_methods: default_compression_methods(),
                         extensions,
                     },

@@ -81,10 +81,16 @@ fn a_stopped_transceivers_sender_takes_no_parameters() -> TestResult {
     pc.rtp_transceiver(RTCRtpTransceiverId::from(sender))
         .expect("transceiver")
         .stop()?;
-    // Stopping makes the transceiver inactive, and `rtp_sender` hands out a sender only while
-    // its transceiver sends, so no handle reaches set_parameters (which would also refuse a
-    // stopped transceiver with InvalidStateError, W3C webrtc 5.2 setParameters step 4).
-    assert!(pc.rtp_sender(sender).is_none());
+    // The sender outlives the stop, and takes no parameters any more (W3C webrtc 5.2
+    // setParameters: InvalidStateError when the transceiver is stopping).
+    let mut s = pc
+        .rtp_sender(sender)
+        .expect("a stopping transceiver keeps its sender");
+    let params = s.get_parameters().clone();
+    assert_eq!(
+        s.set_parameters(params, None),
+        Err(Error::InvalidStateError)
+    );
     Ok(())
 }
 

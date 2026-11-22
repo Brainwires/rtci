@@ -220,10 +220,13 @@ impl RTCPeerConnection {
             disable_certificate_fingerprint_verification: setting_engine
                 .disable_certificate_fingerprint_verification,
             replay_protection: setting_engine.replay_protection,
-            crypto_provider,
+            crypto_provider: crypto_provider.clone(),
         })?;
 
-        // Create the SCTP transport
+        // Create the SCTP transport. The RFC behaviour is the default for each of these: the
+        // weighted fair queueing scheduler (RFC 8831 section 6.4), message interleaving
+        // (sections 6.1 and 6.6), the zero checksum over DTLS (RFC 9653) and State Cookies
+        // with a MAC (RFC 9260 section 5.1.3).
         let sctp_transport = SctpTransport::new(
             setting_engine.sctp_max_message_size,
             setting_engine.sctp_max_receive_buffer_size,
@@ -231,7 +234,15 @@ impl RTCPeerConnection {
             sctp_transport_id,
             dtls_transport_id,
         )
-        .with_weighted_fair_queueing(setting_engine.sctp_weighted_fair_queueing);
+        .with_weighted_fair_queueing(setting_engine.sctp_weighted_fair_queueing.unwrap_or(true))
+        .with_message_interleaving(setting_engine.sctp_message_interleaving.unwrap_or(true))
+        .with_zero_checksum(setting_engine.sctp_zero_checksum.unwrap_or(true))
+        .with_message_size_limit_without_interleaving(
+            setting_engine
+                .sctp_message_size_limit_without_interleaving
+                .unwrap_or(true),
+        )
+        .with_cookie_provider(crypto_provider);
 
         // Create Pipeline Context
         let ice_handler_context = IceHandlerContext::new(ice_transport);
@@ -306,12 +317,12 @@ impl RTCPeerConnection {
     /// because the description advertises the new credentials and the candidates gathered
     /// so far belong to the old ones (RFC 8839 section 5.4, JSEP section 5.2.3.1: a restart
     /// starts a new gathering phase, whose candidates are signalled as they come).
-    /// The bundle policy in effect (RFC 9429 section 4.1.1): the deprecated `max-bundle` is
-    /// ignored, which leaves the default, unless the application made it an alias of
-    /// `must-bundle`.
+    /// The bundle policy in effect: `max-bundle` (W3C webrtc-pc section 4.2.5) is the policy
+    /// RFC 9429 section 4.1.1 names `must-bundle`, unless the application has it ignored as
+    /// that section's SHOULD says, which leaves the default.
     fn effective_bundle_policy(&self) -> RTCBundlePolicy {
         match self.configuration.bundle_policy {
-            RTCBundlePolicy::MaxBundle if self.setting_engine.max_bundle_as_must_bundle => {
+            RTCBundlePolicy::MaxBundle if !self.setting_engine.max_bundle_ignored => {
                 RTCBundlePolicy::MustBundle
             }
             RTCBundlePolicy::MaxBundle => RTCBundlePolicy::Unspecified,
@@ -323,6 +334,30 @@ impl RTCPeerConnection {
     /// (RFC 9143 section 2, "initial BUNDLE offer").
     pub(super) fn is_initial_exchange(&self) -> bool {
         self.current_local_description.is_none() && self.current_remote_description.is_none()
+    }
+
+    /// Whether the data section of an offer says `TCP/DTLS/SCTP` rather than `UDP/DTLS/SCTP`
+    /// (RFC 8841 section 12.2), given the candidates the offer carries.
+    ///
+    /// "When a subsequent SDP offer or answer is sent after ICE nomination is complete, and it
+    /// does not initiate ICE restart, ... the proto value MUST match the transport protocol
+    /// associated with the nominated ICE candidate pair": the selected pair's, when there is
+    /// one and no restart is staged. Otherwise "The proto value MUST match the transport
+    /// protocol associated with the default candidate", which "SHOULD be chosen from one of
+    /// those UDP candidates" when there are any: TCP only when every candidate gathered so
+    /// far is a TCP one, and UDP while none is gathered (the dummy values of RFC 9429 section
+    /// 5.2.1). An answer repeats the offer's proto instead (section 10.3).
+    fn offers_sctp_over_tcp(&self, candidates: &[RTCIceCandidate]) -> bool {
+        let ice_transport = self.ice_transport();
+        if !ice_transport.has_pending_restart()
+            && let Some((local, _)) = ice_transport.agent.get_selected_candidate_pair()
+        {
+            return local.network_type().is_tcp();
+        }
+        !candidates.is_empty()
+            && candidates.iter().all(|candidate| {
+                candidate.protocol == crate::peer_connection::transport::RTCIceProtocol::Tcp
+            })
     }
 
     fn offered_local_candidates(&self) -> Result<Vec<RTCIceCandidate>> {
@@ -428,12 +463,12 @@ impl RTCPeerConnection {
             rtcp_mux_only: self.configuration.rtcp_mux_policy != RTCRtcpMuxPolicy::Negotiate,
             bundle_policy: self.effective_bundle_policy(),
             initial_offer: true,
-            bundle_attributes_in_tagged_section_only: !self
+            bundle_attributes_in_tagged_section_only: self
                 .setting_engine
-                .bundle_attributes_repeated,
+                .bundle_attributes_tagged_only,
             sctp_max_message_size: self.setting_engine.sctp_max_message_size.as_usize(),
             sctp_port: self.sctp_transport().offer_port(),
-            sctp_over_tcp: false,
+            sctp_over_tcp: self.offers_sctp_over_tcp(&candidates),
             ignore_rid_pause_for_recv: false,
             write_ssrc_attributes_for_simulcast: self
                 .setting_engine
@@ -560,6 +595,22 @@ impl RTCPeerConnection {
                     }
 
                     if media.is_webrtc_datachannel() {
+                        // RFC 8841 section 10.5: the application asked for the SCTP
+                        // association and the DTLS association under it to be closed, which
+                        // is said by a zero port on the data section's m= line, in an offer
+                        // as in an answer (`RTCPeerConnection::reject_data_section`).
+                        if self.sctp_transport().staged == Some(SctpRenegotiation::Reject) {
+                            media_sections.push(MediaSection {
+                                mid: mid_value.to_owned(),
+                                rejected: true,
+                                rejected_kind: media.media_name.media.clone(),
+                                transceiver_index: usize::MAX,
+                                offered_protos: offered_protos(media),
+                                ..Default::default()
+                            });
+                            already_have_application_media_section = true;
+                            continue;
+                        }
                         media_sections.push(MediaSection {
                             mid: mid_value.to_owned(),
                             transceiver_index: usize::MAX,
@@ -755,7 +806,10 @@ impl RTCPeerConnection {
         // 10.5); an answer follows the offer's data section, in its port (section 10.3: a new
         // port for a new port, zero for zero) and in its proto, which the answer repeats.
         let (sctp_port, sctp_over_tcp) = if include_unmatched {
-            (self.sctp_transport().offer_port(), false)
+            (
+                self.sctp_transport().offer_port(),
+                self.offers_sctp_over_tcp(&candidates),
+            )
         } else {
             let offered = self
                 .remote_description()
@@ -784,9 +838,9 @@ impl RTCPeerConnection {
             ice_gathering_state: self.ice_transport().ice_gathering_state,
             bundle_policy: self.effective_bundle_policy(),
             initial_offer: false,
-            bundle_attributes_in_tagged_section_only: !self
+            bundle_attributes_in_tagged_section_only: self
                 .setting_engine
-                .bundle_attributes_repeated,
+                .bundle_attributes_tagged_only,
             rtcp_mux_only: self.configuration.rtcp_mux_policy != RTCRtcpMuxPolicy::Negotiate,
             offered_tag_rtcp_mux_only: !include_unmatched
                 && remote_parsed
@@ -1391,7 +1445,7 @@ impl RTCPeerConnection {
             .rtp_transceivers
             .iter()
             .filter(live)
-            .filter(|t| t.sender().is_some() && t.current_direction().has_send())
+            .filter(|t| t.describes_sender() && t.current_direction().has_send())
             .map(|t| t.remote_bandwidth().max_bitrate)
             .collect());
 
@@ -1560,7 +1614,7 @@ impl RTCPeerConnection {
         mids
     }
 
-    fn start_rtp_senders(&mut self) -> Result<()> {
+    pub(super) fn start_rtp_senders(&mut self) -> Result<()> {
         // Collect SSRCs, kinds, mids, rids, encoding indices, rtx_ssrc, and transceiver_id for outbound stream accumulators
         // We do this in two phases to avoid borrow conflicts
         #[allow(clippy::type_complexity)]
@@ -1984,6 +2038,7 @@ impl RTCPeerConnection {
                     // nothing a renegotiation could settle - claiming otherwise re-offers on
                     // every return to a stable signaling state, forever.
                     if transceiver.direction().has_send()
+                        && transceiver.describes_sender()
                         && let Some(sender) = transceiver.sender()
                     {
                         // The stream ids of the section's a=msid lines (one per stream,
@@ -2511,7 +2566,7 @@ impl RTCPeerConnection {
                 let sender = transceiver.sender().as_ref()?;
                 Some((
                     transceiver_id,
-                    sender.track().track_id().clone(),
+                    sender.attached_track()?.track_id().clone(),
                     sender.kind(),
                 ))
             })
@@ -2645,7 +2700,7 @@ impl RTCPeerConnection {
             .as_ref()?;
         Some((
             transceiver_id,
-            sender.track().track_id().clone(),
+            sender.attached_track()?.track_id().clone(),
             sender.kind(),
         ))
     }

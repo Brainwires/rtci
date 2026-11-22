@@ -37,7 +37,10 @@ fn the_session_version_goes_up_by_one_with_each_changed_description() -> TestRes
     assert_eq!(again.sdp, first.sdp);
 
     // A changed offer: one more, same session.
-    a.add_transceiver_from_kind(RtpCodecKind::Audio, None)?;
+    a.add_transceiver_from_kind(
+        RtpCodecKind::Audio,
+        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+    )?;
     let second = a.create_offer(None)?;
     assert_eq!(origin(&second.sdp), (session.clone(), version + 1));
 

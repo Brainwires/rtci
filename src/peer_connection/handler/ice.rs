@@ -27,6 +27,12 @@ pub(crate) struct IceHandlerContext {
     /// accumulator up with this key instead of re-`format!`ing it on every packet
     /// — that formatting was a heap allocation on the hot path in both directions.
     pub(crate) selected_pair_key: Option<String>,
+
+    /// How many times the agent has reported another selected candidate pair. The SCTP
+    /// transport, which runs on a placeholder address and so cannot see the path change under
+    /// it, is told through this (RFC 8831 section 5: "SCTP SHOULD be notified when an address
+    /// change has happened"): the event itself ends at the DTLS handler.
+    pub(crate) selected_pair_changes: u64,
 }
 
 impl IceHandlerContext {
@@ -39,6 +45,7 @@ impl IceHandlerContext {
             event_outs: VecDeque::new(),
 
             selected_pair_key: None,
+            selected_pair_changes: 0,
         }
     }
 }
@@ -288,6 +295,7 @@ impl<'a>
                     // allocating) the key on every read/write.
                     let key = candidate_pair_stats_id(local.id(), remote.id());
                     self.ctx.selected_pair_key = Some(key.clone());
+                    self.ctx.selected_pair_changes += 1;
                     // Update transport stats for selected candidate pair change
                     self.stats.on_selected_candidate_pair(Some(key));
 

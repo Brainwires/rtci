@@ -25,12 +25,25 @@ pub(crate) mod role;
 pub(crate) mod state;
 
 /// The DTLS cipher suites a peer connection offers when the application configures none: the
-/// `dtls` crate's defaults without the AES-256-CBC-SHA suites. Browsers negotiate GCM, and the
+/// TLS 1.3 suites, with which DTLS 1.3 (RFC 9147) is negotiated and preferred, and for DTLS
+/// 1.2 the `dtls` crate's defaults without the AES-256-CBC-SHA suites. Browsers negotiate GCM, and the
 /// CBC suites' MAC-then-encrypt record handling is the part of DTLS with a history of padding
 /// and length bugs (rtc#96 was one). An application that needs CBC can still list it with
 /// `SettingEngineBuilder::with_dtls_cipher_suites`.
+/// The initial DTLS retransmission timer of a peer connection: what RFC 9147 section 5.8.2
+/// recommends for DTLS-SRTP, where latencies of real-time paths are short.
+pub(crate) const DTLS_SRTP_FLIGHT_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(400);
+/// The least the timer is set to from ICE's round trip time: on a local path 1.5 times the
+/// round trip is less than the time the peer needs to answer a flight.
+pub(crate) const MINIMUM_FLIGHT_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(100);
+
 pub(crate) fn webrtc_default_cipher_suites() -> Vec<CipherSuiteId> {
     vec![
+        CipherSuiteId::Tls_Aes_128_Gcm_Sha256,
+        CipherSuiteId::Tls_ChaCha20_Poly1305_Sha256,
+        CipherSuiteId::Tls_Aes_256_Gcm_Sha384,
         CipherSuiteId::Tls_Ecdhe_Ecdsa_With_Aes_128_Gcm_Sha256,
         CipherSuiteId::Tls_Ecdhe_Rsa_With_Aes_128_Gcm_Sha256,
         CipherSuiteId::Tls_Ecdhe_Ecdsa_With_ChaCha20_Poly1305_Sha256,
@@ -102,6 +115,9 @@ pub(crate) struct DtlsTransport {
     /// Whether the current association negotiated `use_srtp`; `None` until its handshake
     /// completes.
     pub(crate) srtp_negotiated: Option<bool>,
+    /// The retransmission timer the client's handshake was started with: 400 ms, or 1.5
+    /// times the round trip time ICE measured (RFC 9147 section 5.8.2).
+    pub(crate) flight_interval: Option<std::time::Duration>,
 
     // From SettingEngine
     pub(crate) answering_dtls_role: RTCDtlsRole,
@@ -216,6 +232,7 @@ impl DtlsTransport {
             staged_local_tls_id: None,
             srtp_required: false,
             srtp_negotiated: None,
+            flight_interval: None,
 
             answering_dtls_role,
             srtp_protection_profiles,
@@ -372,6 +389,10 @@ impl DtlsTransport {
                 .with_verify_peer_certificate(verify_peer_certificate)
                 .with_extended_master_secret(::dtls::config::ExtendedMasterSecretType::Require)
                 .with_replay_protection_window(self.replay_protection.dtls)
+                // RFC 9147 section 5.8.2: 400 ms is the retransmission timer recommended
+                // for DTLS-SRTP. A client that knows the round trip time of the selected
+                // pair from ICE starts from 1.5 times that instead (`DtlsHandler`).
+                .with_flight_interval(DTLS_SRTP_FLIGHT_INTERVAL)
                 .build(self.dtls_role == RTCDtlsRole::Client, None)?,
         ))
     }

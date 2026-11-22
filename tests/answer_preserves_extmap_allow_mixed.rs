@@ -43,7 +43,10 @@ fn test_answer_preserves_extmap_allow_mixed() -> Result<(), Box<dyn std::error::
         .with_media_engine(media_engine)
         .build(Instant::now())?;
 
-    offerer.add_transceiver_from_kind(RtpCodecKind::Video, None)?;
+    offerer.add_transceiver_from_kind(
+        RtpCodecKind::Video,
+        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+    )?;
 
     let offer = offerer.create_offer(None)?;
     answerer.set_remote_description(Instant::now(), offer)?;
@@ -68,7 +71,10 @@ fn test_answer_omits_extmap_allow_mixed() -> Result<(), Box<dyn std::error::Erro
         .with_media_engine(media_engine)
         .build(Instant::now())?;
 
-    offerer.add_transceiver_from_kind(RtpCodecKind::Video, None)?;
+    offerer.add_transceiver_from_kind(
+        RtpCodecKind::Video,
+        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+    )?;
 
     let offer = offerer.create_offer(None)?;
     let offer = RTCSessionDescription::offer(without_extmap_allow_mixed(&offer.sdp))?;

@@ -479,7 +479,6 @@ async fn run(
                             .ok_or(Error::ErrRTPReceiverNotExisted)?;
 
                         packet.header.ssrc = rtp_sender
-                            .track()
                             .ssrcs()
                             .next()
                             .ok_or(Error::ErrSenderWithNoSSRCs)?;

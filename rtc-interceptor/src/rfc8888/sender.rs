@@ -2,12 +2,14 @@
 
 use super::recorder::CcFeedbackRecorder;
 use crate::Interceptor;
+use crate::cc::feedback_cadence::FeedbackCadence;
 use crate::stream_info::StreamInfo;
 use crate::twcc::flow_ssrcs;
 use crate::{AttributedPacket, Packet, TaggedPacket};
 use rtcp::transport_feedbacks::cc_feedback_report::Ecn;
 use sansio::Protocol;
 use shared::error::Error;
+use shared::marshal::MarshalSize;
 use shared::time::SystemInstant;
 use shared::{EcnCodepoint, TransportContext};
 use std::collections::HashSet;
@@ -44,6 +46,7 @@ fn ecn_of(codepoint: Option<EcnCodepoint>) -> Ecn {
 /// ```
 pub struct Rfc8888Builder {
     interval: Duration,
+    adaptive_interval: bool,
     max_report_size: usize,
     sender_ssrc: Option<u32>,
 }
@@ -52,6 +55,7 @@ impl Default for Rfc8888Builder {
     fn default() -> Self {
         Self {
             interval: DEFAULT_INTERVAL,
+            adaptive_interval: true,
             max_report_size: DEFAULT_MAX_REPORT_SIZE,
             sender_ssrc: None,
         }
@@ -91,6 +95,22 @@ impl Rfc8888Builder {
         self
     }
 
+    /// Whether the interval stretches to what the RTCP bandwidth holds one report in. On by
+    /// default.
+    ///
+    /// "RTCP bandwidth and transmission rules put some upper limits on how frequently the
+    /// RTCP feedback messages can be sent" (RFC 8888 section 4), and the RTCP session applies
+    /// them: 5% of the session bandwidth unless `b=RS` / `b=RR` say otherwise (RFC 3550
+    /// section 6.2). Reports built more often than that queue in the session and reach the
+    /// sender late or not at all. With this on, the interval is the configured one where the
+    /// bandwidth allows it and longer where it does not, up to half a second: one report for
+    /// every RTCP packet the session may send, each covering everything since the last.
+    /// `false` keeps the interval fixed.
+    pub fn with_adaptive_interval(mut self, adaptive_interval: bool) -> Self {
+        self.adaptive_interval = adaptive_interval;
+        self
+    }
+
     /// Byte budget for one report.
     ///
     /// A report larger than the path MTU is fragmented or dropped, and feedback that does not
@@ -114,7 +134,12 @@ impl Rfc8888Builder {
 
     /// Build the interceptor.
     pub fn build(self) -> Rfc8888Interceptor {
-        Rfc8888Interceptor::new(self.interval, self.max_report_size, self.sender_ssrc)
+        Rfc8888Interceptor::new(
+            self.interval,
+            self.adaptive_interval,
+            self.max_report_size,
+            self.sender_ssrc,
+        )
     }
 }
 
@@ -131,7 +156,8 @@ impl Rfc8888Builder {
 ///
 /// [RFC 8888]: https://www.rfc-editor.org/rfc/rfc8888
 pub struct Rfc8888Interceptor {
-    interval: Duration,
+    /// When a report is built: the configured interval, stretched to the RTCP bandwidth.
+    cadence: FeedbackCadence,
     max_report_size: usize,
     /// The SSRC set on the builder, if one was.
     configured_ssrc: Option<u32>,
@@ -152,10 +178,15 @@ pub struct Rfc8888Interceptor {
 }
 
 impl Rfc8888Interceptor {
-    fn new(interval: Duration, max_report_size: usize, sender_ssrc: Option<u32>) -> Self {
+    fn new(
+        interval: Duration,
+        adaptive_interval: bool,
+        max_report_size: usize,
+        sender_ssrc: Option<u32>,
+    ) -> Self {
         Self {
             read_queue: VecDeque::new(),
-            interval,
+            cadence: FeedbackCadence::new(interval, adaptive_interval),
             max_report_size,
             configured_ssrc: sender_ssrc,
             receiver_ssrc: random_ssrc(),
@@ -184,8 +215,8 @@ impl Rfc8888Interceptor {
 
     /// Arm the interval from the first instant this interceptor is given.
     fn arm(&mut self, now: Instant) {
-        if self.next_timeout.is_none() && !self.streams.is_empty() && !self.interval.is_zero() {
-            self.next_timeout = Some(now + self.interval);
+        if self.next_timeout.is_none() && !self.streams.is_empty() && !self.cadence.is_off() {
+            self.next_timeout = Some(now + self.cadence.interval(now));
         }
     }
 }
@@ -198,6 +229,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for Rfc8888Interceptor {
     type Time = Instant;
 
     fn handle_read(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
+        self.cadence.on_packet(&msg);
         if let Packet::Rtp(rtp_packet) = &msg.message.packet
             && self.streams.contains(&rtp_packet.header.ssrc)
         {
@@ -222,6 +254,9 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for Rfc8888Interceptor {
     }
 
     fn handle_write(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
+        // The media this endpoint sends is part of the session bandwidth, and what the RTCP
+        // session is told about its bandwidth passes here on its way to it.
+        self.cadence.on_write(&msg);
         self.write_queue.push_back(msg);
         Ok(())
     }
@@ -238,7 +273,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for Rfc8888Interceptor {
         if let Some(next_timeout) = self.next_timeout
             && now >= next_timeout
         {
-            self.next_timeout = Some(now + self.interval);
+            self.next_timeout = Some(now + self.cadence.interval(now));
 
             if !self.recorder.is_empty() {
                 let report_timestamp = self.report_timestamp(now);
@@ -252,6 +287,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for Rfc8888Interceptor {
                     if report.report_blocks.is_empty() {
                         continue;
                     }
+                    self.cadence.on_feedback(report.marshal_size());
                     self.write_queue.push_back(TaggedPacket {
                         now,
                         transport: TransportContext::default(),

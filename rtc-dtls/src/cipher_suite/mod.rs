@@ -76,6 +76,21 @@ pub enum CipherSuiteId {
     /// `TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256` (`0xcca9`).
     Tls_Ecdhe_Ecdsa_With_ChaCha20_Poly1305_Sha256 = 0xcca9,
 
+    // TLS 1.3 suites (RFC 8446 appendix B.4), negotiated with DTLS 1.3 only.
+    /// `TLS_AES_128_GCM_SHA256` (`0x1301`), DTLS 1.3.
+    Tls_Aes_128_Gcm_Sha256 = 0x1301,
+    /// `TLS_AES_256_GCM_SHA384` (`0x1302`), DTLS 1.3.
+    Tls_Aes_256_Gcm_Sha384 = 0x1302,
+    /// `TLS_CHACHA20_POLY1305_SHA256` (`0x1303`), DTLS 1.3.
+    Tls_ChaCha20_Poly1305_Sha256 = 0x1303,
+    /// `TLS_AES_128_CCM_SHA256` (`0x1304`), DTLS 1.3. Not in the default list.
+    Tls_Aes_128_Ccm_Sha256 = 0x1304,
+    /// `TLS_AES_128_CCM_8_SHA256` (`0x1305`), DTLS 1.3. Never in the default list: RFC 9147
+    /// section 4.5.3 forbids it in DTLS without further protection against forgery, so it is
+    /// negotiated only when a configuration names it, and then under a small limit of
+    /// records that may fail authentication.
+    Tls_Aes_128_Ccm_8_Sha256 = 0x1305,
+
     /// `TLS_EMPTY_RENEGOTIATION_INFO_SCSV` (`0x00ff`): not a cipher suite. A client lists it
     /// to signal secure renegotiation without the renegotiation_info extension (RFC 5746 3.3).
     /// It is recognised in a ClientHello and never negotiated or offered.
@@ -118,6 +133,14 @@ impl fmt::Display for CipherSuiteId {
                 write!(f, "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256")
             }
 
+            CipherSuiteId::Tls_Aes_128_Gcm_Sha256 => write!(f, "TLS_AES_128_GCM_SHA256"),
+            CipherSuiteId::Tls_Aes_256_Gcm_Sha384 => write!(f, "TLS_AES_256_GCM_SHA384"),
+            CipherSuiteId::Tls_ChaCha20_Poly1305_Sha256 => {
+                write!(f, "TLS_CHACHA20_POLY1305_SHA256")
+            }
+            CipherSuiteId::Tls_Aes_128_Ccm_Sha256 => write!(f, "TLS_AES_128_CCM_SHA256"),
+            CipherSuiteId::Tls_Aes_128_Ccm_8_Sha256 => write!(f, "TLS_AES_128_CCM_8_SHA256"),
+
             CipherSuiteId::Tls_Empty_Renegotiation_Info_Scsv => {
                 write!(f, "TLS_EMPTY_RENEGOTIATION_INFO_SCSV")
             }
@@ -149,6 +172,12 @@ impl From<u16> for CipherSuiteId {
             // CHACHA20_POLY1305_SHA256
             0xcca8 => CipherSuiteId::Tls_Ecdhe_Rsa_With_ChaCha20_Poly1305_Sha256,
             0xcca9 => CipherSuiteId::Tls_Ecdhe_Ecdsa_With_ChaCha20_Poly1305_Sha256,
+
+            0x1301 => CipherSuiteId::Tls_Aes_128_Gcm_Sha256,
+            0x1302 => CipherSuiteId::Tls_Aes_256_Gcm_Sha384,
+            0x1303 => CipherSuiteId::Tls_ChaCha20_Poly1305_Sha256,
+            0x1304 => CipherSuiteId::Tls_Aes_128_Ccm_Sha256,
+            0x1305 => CipherSuiteId::Tls_Aes_128_Ccm_8_Sha256,
 
             0x00ff => CipherSuiteId::Tls_Empty_Renegotiation_Info_Scsv,
 
@@ -185,13 +214,26 @@ impl From<&str> for CipherSuiteId {
             "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256" => {
                 CipherSuiteId::Tls_Ecdhe_Ecdsa_With_ChaCha20_Poly1305_Sha256
             }
+            "TLS_AES_128_GCM_SHA256" => CipherSuiteId::Tls_Aes_128_Gcm_Sha256,
+            "TLS_AES_256_GCM_SHA384" => CipherSuiteId::Tls_Aes_256_Gcm_Sha384,
+            "TLS_CHACHA20_POLY1305_SHA256" => CipherSuiteId::Tls_ChaCha20_Poly1305_Sha256,
+            "TLS_AES_128_CCM_SHA256" => CipherSuiteId::Tls_Aes_128_Ccm_Sha256,
+            "TLS_AES_128_CCM_8_SHA256" => CipherSuiteId::Tls_Aes_128_Ccm_8_Sha256,
             _ => CipherSuiteId::Unsupported,
         }
     }
 }
 
 impl CipherSuiteId {
+    /// Whether this is a TLS 1.3 suite, which DTLS 1.3 negotiates and DTLS 1.2 cannot.
+    pub fn is_tls13(self) -> bool {
+        crate::dtls13::suite::Suite13::for_id(self).is_some()
+    }
+
     pub(crate) fn supported_by(self, crypto: &dyn RTCCrypto) -> bool {
+        if let Some(suite) = crate::dtls13::suite::Suite13::for_id(self) {
+            return suite.supported_by(crypto);
+        }
         let record_algorithm = match self {
             Self::Tls_Ecdhe_Ecdsa_With_Aes_128_Ccm | Self::Tls_Psk_With_Aes_128_Ccm => {
                 CryptoAlgorithm::Aead(AeadAlgorithm::Aes128Ccm)
@@ -212,7 +254,13 @@ impl CipherSuiteId {
             | Self::Tls_Ecdhe_Rsa_With_ChaCha20_Poly1305_Sha256 => {
                 CryptoAlgorithm::Aead(AeadAlgorithm::ChaCha20Poly1305)
             }
-            Self::Tls_Empty_Renegotiation_Info_Scsv | Self::Unsupported => return false,
+            Self::Tls_Aes_128_Gcm_Sha256
+            | Self::Tls_Aes_256_Gcm_Sha384
+            | Self::Tls_ChaCha20_Poly1305_Sha256
+            | Self::Tls_Aes_128_Ccm_Sha256
+            | Self::Tls_Aes_128_Ccm_8_Sha256
+            | Self::Tls_Empty_Renegotiation_Info_Scsv
+            | Self::Unsupported => return false,
         };
         crypto.supports(CryptoAlgorithm::Hash(HashAlgorithm::Sha256))
             && crypto.supports(CryptoAlgorithm::Hmac(HmacAlgorithm::Sha256))
@@ -228,12 +276,29 @@ impl CipherSuiteId {
 pub enum CipherSuiteHash {
     /// SHA-256.
     Sha256,
+    /// SHA-384 (TLS 1.3 `_SHA384` suites).
+    Sha384,
 }
 
 impl CipherSuiteHash {
     pub(crate) fn size(&self) -> usize {
         match *self {
             CipherSuiteHash::Sha256 => 32,
+            CipherSuiteHash::Sha384 => 48,
+        }
+    }
+
+    pub(crate) fn hmac_algorithm(&self) -> HmacAlgorithm {
+        match *self {
+            CipherSuiteHash::Sha256 => HmacAlgorithm::Sha256,
+            CipherSuiteHash::Sha384 => HmacAlgorithm::Sha384,
+        }
+    }
+
+    pub(crate) fn hash_algorithm(&self) -> HashAlgorithm {
+        match *self {
+            CipherSuiteHash::Sha256 => HashAlgorithm::Sha256,
+            CipherSuiteHash::Sha384 => HashAlgorithm::Sha384,
         }
     }
 }
@@ -331,7 +396,9 @@ pub fn cipher_suite_for_id(id: CipherSuiteId) -> Result<Box<dyn CipherSuite>> {
             Ok(Box::new(CipherSuiteChaCha20Poly1305Sha256::new(false)))
         }
 
-        _ => Err(Error::ErrInvalidCipherSuite),
+        id => crate::dtls13::suite::Suite13::for_id(id)
+            .map(|suite| Box::new(suite) as Box<dyn CipherSuite>)
+            .ok_or(Error::ErrInvalidCipherSuite),
     }
 }
 
