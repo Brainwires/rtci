@@ -1,0 +1,710 @@
+//! W3C webrtc-pc states and events an API layer needs (sections 4.3, 4.4.1.3, 4.4.2, 4.8,
+//! 5.5, 5.6, 11, 12): the state getters, the transports' `statechange`, `gatheringstatechange`,
+//! `selectedcandidatepairchange` and `error` events in the spec's order, the end-of-candidates
+//! indications, `close()` without events, and the `RTCError` details.
+//!
+//! The peers exchange datagrams in memory, on a virtual clock.
+
+use anyhow::Result;
+use rtc::peer_connection::configuration::RTCConfigurationBuilder;
+use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtc::peer_connection::event::{
+    ICE_SERVER_UNREACHABLE, RTCDataChannelEvent, RTCPeerConnectionEvent,
+    RTCPeerConnectionIceErrorEvent,
+};
+use rtc::peer_connection::rtc_error::{RTCError, RTCErrorDetailType};
+use rtc::peer_connection::sdp::RTCSessionDescription;
+use rtc::peer_connection::state::{
+    RTCIceConnectionState, RTCIceGatheringState, RTCPeerConnectionState, RTCSignalingState,
+};
+use rtc::peer_connection::transport::{
+    CandidateConfig, CandidateHostConfig, RTCDtlsRole, RTCDtlsTransportState, RTCIceCandidate,
+    RTCIceCandidateInit, RTCIceTransportState, RTCSctpTransportState,
+};
+use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtc::rtp_transceiver::RTCRtpTransceiverInit;
+use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
+use rtc::sansio::Protocol;
+use rtc::shared::error::Error;
+use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use std::net::SocketAddr;
+use std::time::{Duration, Instant};
+
+const DEADLINE: Duration = Duration::from_secs(120);
+const MAX_TURNS: usize = 50_000;
+
+/// A fingerprint that matches no certificate.
+const WRONG_FINGERPRINT: &str = "a=fingerprint:sha-256 \
+FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:\
+FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF";
+
+fn host(addr: SocketAddr) -> Result<RTCIceCandidateInit> {
+    let candidate = CandidateHostConfig {
+        base_config: CandidateConfig {
+            network: "udp".to_owned(),
+            address: addr.ip().to_string(),
+            port: addr.port(),
+            component: 1,
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+    .new_candidate_host()?;
+    Ok(RTCIceCandidate::from(&candidate).to_json()?)
+}
+
+struct Peer {
+    pc: RTCPeerConnection,
+    addr: SocketAddr,
+    inbox: Vec<TaggedBytesMut>,
+    /// Every event, in order.
+    events: Vec<RTCPeerConnectionEvent>,
+    /// Whether the link to this peer is cut: what is sent to it is lost.
+    cut: bool,
+}
+
+impl Peer {
+    fn new(addr: SocketAddr, role: RTCDtlsRole, now: Instant) -> Result<Self> {
+        let pc = RTCPeerConnectionBuilder::new()
+            .with_configuration(RTCConfigurationBuilder::new().build())
+            .with_setting_engine(
+                SettingEngineBuilder::new()
+                    .with_answering_dtls_role(role)
+                    .build(),
+            )
+            .build(now)?;
+        Ok(Self {
+            pc,
+            addr,
+            inbox: Vec::new(),
+            events: Vec::new(),
+            cut: false,
+        })
+    }
+
+    fn drain_events(&mut self) {
+        while let Some(event) = self.pc.poll_event() {
+            self.events.push(event);
+        }
+    }
+
+    fn turn(&mut self) -> Result<Vec<TaggedBytesMut>> {
+        for datagram in self.inbox.drain(..) {
+            self.pc.handle_read(datagram)?;
+        }
+        self.drain_events();
+        while self.pc.poll_read().is_some() {}
+        let mut written = Vec::new();
+        while let Some(datagram) = self.pc.poll_write() {
+            written.push(datagram);
+        }
+        Ok(written)
+    }
+
+    fn deliver(&mut self, from: SocketAddr, datagrams: Vec<TaggedBytesMut>, now: Instant) {
+        if self.cut {
+            return;
+        }
+        for datagram in datagrams {
+            self.inbox.push(TaggedBytesMut {
+                now,
+                transport: TransportContext {
+                    local_addr: self.addr,
+                    peer_addr: from,
+                    ecn: None,
+                    transport_protocol: TransportProtocol::UDP,
+                },
+                message: datagram.message,
+            });
+        }
+    }
+
+    /// The state events, as labels, in order.
+    fn state_labels(&self) -> Vec<String> {
+        self.events.iter().filter_map(label).collect()
+    }
+}
+
+fn label(event: &RTCPeerConnectionEvent) -> Option<String> {
+    Some(match event {
+        RTCPeerConnectionEvent::OnIceTransportStateChange(s) => format!("ice-transport:{s}"),
+        RTCPeerConnectionEvent::OnIceConnectionStateChangeEvent(s) => format!("ice:{s}"),
+        RTCPeerConnectionEvent::OnConnectionStateChangeEvent(s) => format!("connection:{s}"),
+        RTCPeerConnectionEvent::OnDtlsTransportStateChange(s) => format!("dtls:{s}"),
+        RTCPeerConnectionEvent::OnDtlsTransportError(e) => format!("dtls-error:{}", e.error_detail),
+        RTCPeerConnectionEvent::OnSctpTransportStateChange(s) => format!("sctp:{s}"),
+        RTCPeerConnectionEvent::OnSelectedCandidatePairChange(_) => "pair".to_owned(),
+        RTCPeerConnectionEvent::OnIceGathererStateChange(s) => format!("gatherer:{s}"),
+        RTCPeerConnectionEvent::OnIceGatheringStateChangeEvent(s) => format!("gathering:{s}"),
+        _ => return None,
+    })
+}
+
+fn position(labels: &[String], wanted: &str) -> usize {
+    labels
+        .iter()
+        .position(|l| l == wanted)
+        .unwrap_or_else(|| panic!("no {wanted} in {labels:?}"))
+}
+
+/// Offer, answer and both candidates; `tamper` may change the offer the answerer sees.
+fn negotiate(
+    offerer: &mut Peer,
+    answerer: &mut Peer,
+    now: Instant,
+    tamper: impl Fn(String) -> String,
+) -> Result<()> {
+    let offer = offerer.pc.create_offer(None)?;
+    offerer.pc.set_local_description(now, offer.clone())?;
+    answerer
+        .pc
+        .set_remote_description(now, RTCSessionDescription::offer(tamper(offer.sdp))?)?;
+    let answer = answerer.pc.create_answer(None)?;
+    answerer.pc.set_local_description(now, answer.clone())?;
+    offerer.pc.set_remote_description(now, answer)?;
+    let (offerer_addr, answerer_addr) = (offerer.addr, answerer.addr);
+    offerer.pc.add_local_candidate(host(offerer_addr)?)?;
+    answerer.pc.add_local_candidate(host(answerer_addr)?)?;
+    offerer.pc.add_remote_candidate(host(answerer_addr)?)?;
+    answerer.pc.add_remote_candidate(host(offerer_addr)?)?;
+    Ok(())
+}
+
+/// Runs both peers until `done` holds or the deadline passes. Returns the virtual time.
+fn run(
+    offerer: &mut Peer,
+    answerer: &mut Peer,
+    mut now: Instant,
+    start: Instant,
+    done: impl Fn(&Peer, &Peer) -> bool,
+) -> Result<Instant> {
+    let mut turns = 0;
+    while !done(offerer, answerer) && now.duration_since(start) < DEADLINE && turns < MAX_TURNS {
+        turns += 1;
+        let written = offerer.turn()?;
+        answerer.deliver(offerer.addr, written, now);
+        let written = answerer.turn()?;
+        offerer.deliver(answerer.addr, written, now);
+        if offerer.inbox.is_empty() && answerer.inbox.is_empty() {
+            let next = [offerer.pc.poll_timeout(), answerer.pc.poll_timeout()]
+                .into_iter()
+                .flatten()
+                .min();
+            let Some(next) = next else { break };
+            now = now.max(next);
+            offerer.pc.handle_timeout(now)?;
+            answerer.pc.handle_timeout(now)?;
+        }
+    }
+    Ok(now)
+}
+
+fn with_wrong_fingerprint(sdp: String) -> String {
+    sdp.lines()
+        .map(|line| {
+            if line.starts_with("a=fingerprint:") {
+                WRONG_FINGERPRINT
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\r\n")
+        + "\r\n"
+}
+
+/// W3C 4.3, 4.4.2-7 to -10: the getters start at their initial values and follow the
+/// connection.
+#[test]
+fn the_state_getters_report_the_initial_states_and_follow_negotiation() -> Result<()> {
+    let now = Instant::now();
+    let mut pc = RTCPeerConnectionBuilder::new().build(now)?;
+    assert_eq!(pc.signaling_state(), RTCSignalingState::Stable);
+    assert_eq!(pc.ice_gathering_state(), RTCIceGatheringState::New);
+    assert_eq!(pc.ice_connection_state(), RTCIceConnectionState::New);
+    assert_eq!(pc.connection_state(), RTCPeerConnectionState::New);
+
+    pc.create_data_channel("d", None)?;
+    let offer = pc.create_offer(None)?;
+    pc.set_local_description(now, offer)?;
+    assert_eq!(pc.signaling_state(), RTCSignalingState::HaveLocalOffer);
+    assert_eq!(pc.ice_gathering_state(), RTCIceGatheringState::Gathering);
+    Ok(())
+}
+
+/// W3C 4.4.1.3, 5.5, 5.6 and 6.1.4: as two peers connect, each transport announces its own
+/// state change before the connection-level event it causes, the selected pair is announced,
+/// and the SCTP transport reports "connected". Then the link is cut: "disconnected" and
+/// "failed" come in the same order.
+#[test]
+fn transport_state_events_come_before_the_connection_events_they_cause() -> Result<()> {
+    let start = Instant::now();
+    let mut offerer = Peer::new("127.0.0.1:51020".parse()?, RTCDtlsRole::Client, start)?;
+    let mut answerer = Peer::new("127.0.0.1:51021".parse()?, RTCDtlsRole::Server, start)?;
+    offerer.pc.create_data_channel("probe", None)?;
+    negotiate(&mut offerer, &mut answerer, start, |sdp| sdp)?;
+
+    let sctp_connected = |p: &Peer| {
+        p.pc.sctp()
+            .is_some_and(|s| s.state() == RTCSctpTransportState::Connected)
+    };
+    let now = run(&mut offerer, &mut answerer, start, start, |a, b| {
+        sctp_connected(a) && sctp_connected(b)
+    })?;
+    offerer.drain_events();
+    answerer.drain_events();
+
+    for peer in [&offerer, &answerer] {
+        let labels = peer.state_labels();
+        assert!(
+            position(&labels, "ice-transport:checking") < position(&labels, "ice:checking"),
+            "{labels:?}"
+        );
+        assert!(
+            position(&labels, "ice-transport:connected") < position(&labels, "ice:connected"),
+            "{labels:?}"
+        );
+        assert!(
+            position(&labels, "dtls:connecting") < position(&labels, "dtls:connected"),
+            "{labels:?}"
+        );
+        assert!(
+            position(&labels, "dtls:connected") < position(&labels, "connection:connected"),
+            "{labels:?}"
+        );
+        assert!(labels.contains(&"sctp:connected".to_owned()), "{labels:?}");
+        assert!(
+            !labels.iter().any(|l| l.starts_with("sctp:connecting")),
+            "the SCTP transport is created connecting, without an event: {labels:?}"
+        );
+        let announced: Vec<_> = peer
+            .events
+            .iter()
+            .filter_map(|e| match e {
+                RTCPeerConnectionEvent::OnSelectedCandidatePairChange(pair) => Some(pair.clone()),
+                _ => None,
+            })
+            .collect();
+        let selected = peer
+            .pc
+            .sctp()
+            .expect("sctp")
+            .transport()
+            .ice_transport()
+            .get_selected_candidate_pair();
+        assert_eq!(
+            announced.last().cloned(),
+            selected,
+            "the selected pair is announced"
+        );
+        assert_eq!(
+            peer.pc.ice_connection_state(),
+            RTCIceConnectionState::Connected
+        );
+        assert_eq!(
+            peer.pc.connection_state(),
+            RTCPeerConnectionState::Connected
+        );
+    }
+
+    // The link goes: consent lapses (RFC 7675), the transport is disconnected, then failed.
+    let before = offerer.events.len();
+    offerer.cut = true;
+    answerer.cut = true;
+    run(&mut offerer, &mut answerer, now, now, |a, _| {
+        a.pc.ice_connection_state() == RTCIceConnectionState::Failed
+    })?;
+    offerer.drain_events();
+    let labels: Vec<String> = offerer.events[before..].iter().filter_map(label).collect();
+    assert!(
+        position(&labels, "ice-transport:disconnected") < position(&labels, "ice:disconnected")
+            && position(&labels, "ice:disconnected") < position(&labels, "connection:disconnected"),
+        "{labels:?}"
+    );
+    assert!(
+        position(&labels, "ice-transport:failed") < position(&labels, "ice:failed")
+            && position(&labels, "ice:failed") < position(&labels, "connection:failed"),
+        "{labels:?}"
+    );
+    Ok(())
+}
+
+/// W3C 5.5 and 11.2: a certificate that matches no fingerprint fails the DTLS transport with
+/// `fingerprint-failure` on the side that checked it, and with `dtls-failure` and the alert it
+/// received on the other; the `error` event comes before the `statechange` to "failed", which
+/// comes before the connection's.
+#[test]
+fn a_dtls_failure_is_announced_with_its_error_detail_before_the_state_change() -> Result<()> {
+    let start = Instant::now();
+    let mut offerer = Peer::new("127.0.0.1:51030".parse()?, RTCDtlsRole::Client, start)?;
+    let mut answerer = Peer::new("127.0.0.1:51031".parse()?, RTCDtlsRole::Server, start)?;
+    offerer.pc.create_data_channel("probe", None)?;
+    negotiate(&mut offerer, &mut answerer, start, with_wrong_fingerprint)?;
+    let failed = |p: &Peer| p.pc.connection_state() == RTCPeerConnectionState::Failed;
+    run(&mut offerer, &mut answerer, start, start, |a, b| {
+        failed(a) && failed(b)
+    })?;
+    offerer.drain_events();
+    answerer.drain_events();
+
+    let error_of = |peer: &Peer| -> RTCError {
+        peer.events
+            .iter()
+            .find_map(|e| match e {
+                RTCPeerConnectionEvent::OnDtlsTransportError(error) => Some(error.clone()),
+                _ => None,
+            })
+            .expect("an error event")
+    };
+    let answerer_error = error_of(&answerer);
+    assert_eq!(
+        answerer_error.error_detail,
+        RTCErrorDetailType::FingerprintFailure
+    );
+    let offerer_error = error_of(&offerer);
+    assert_eq!(offerer_error.error_detail, RTCErrorDetailType::DtlsFailure);
+    assert!(
+        offerer_error.received_alert.is_some(),
+        "the offerer received the answerer's fatal alert: {offerer_error:?}"
+    );
+    for peer in [&offerer, &answerer] {
+        let labels = peer.state_labels();
+        let error = labels
+            .iter()
+            .position(|l| l.starts_with("dtls-error:"))
+            .expect("error");
+        assert!(error < position(&labels, "dtls:failed"), "{labels:?}");
+        assert!(
+            position(&labels, "dtls:failed") < position(&labels, "connection:failed"),
+            "{labels:?}"
+        );
+    }
+    Ok(())
+}
+
+/// W3C close(): the transceivers are stopped and every state becomes "closed" without an
+/// event (4.4.2-78 to -85); the getters say so.
+#[test]
+fn close_sets_every_state_to_closed_without_an_event() -> Result<()> {
+    let start = Instant::now();
+    let mut offerer = Peer::new("127.0.0.1:51040".parse()?, RTCDtlsRole::Client, start)?;
+    let mut answerer = Peer::new("127.0.0.1:51041".parse()?, RTCDtlsRole::Server, start)?;
+    offerer.pc.create_data_channel("probe", None)?;
+    let transceiver = offerer
+        .pc
+        .add_transceiver_from_kind(RtpCodecKind::Audio, Some(RTCRtpTransceiverInit::recvonly()))?;
+    negotiate(&mut offerer, &mut answerer, start, |sdp| sdp)?;
+    let connected = |p: &Peer| p.pc.connection_state() == RTCPeerConnectionState::Connected;
+    run(&mut offerer, &mut answerer, start, start, |a, b| {
+        connected(a) && connected(b)
+    })?;
+    offerer.drain_events();
+
+    let before = offerer.events.len();
+    offerer.pc.close()?;
+    offerer.drain_events();
+    let labels: Vec<String> = offerer.events[before..].iter().filter_map(label).collect();
+    assert!(
+        labels.is_empty(),
+        "close() fires no state event: {labels:?}"
+    );
+    assert_eq!(
+        offerer.pc.connection_state(),
+        RTCPeerConnectionState::Closed
+    );
+    assert_eq!(
+        offerer.pc.ice_connection_state(),
+        RTCIceConnectionState::Closed
+    );
+    assert_eq!(offerer.pc.signaling_state(), RTCSignalingState::Closed);
+    let sctp = offerer.pc.sctp().expect("sctp");
+    assert_eq!(sctp.transport().state(), RTCDtlsTransportState::Closed);
+    assert_eq!(
+        sctp.transport().ice_transport().state(),
+        RTCIceTransportState::Closed
+    );
+    assert!(
+        offerer
+            .pc
+            .rtp_transceiver(transceiver)
+            .expect("transceiver")
+            .is_stopped(),
+        "close() stops every transceiver"
+    );
+    Ok(())
+}
+
+/// W3C 11.2 `sctp-failure`: the peer's close() aborts the association with a User-Initiated
+/// Abort (RFC 9260 cause 12); the channels here fail with that cause code.
+#[test]
+fn a_data_channel_failed_by_an_abort_reports_the_sctp_cause_code() -> Result<()> {
+    let start = Instant::now();
+    let mut offerer = Peer::new("127.0.0.1:51050".parse()?, RTCDtlsRole::Client, start)?;
+    let mut answerer = Peer::new("127.0.0.1:51051".parse()?, RTCDtlsRole::Server, start)?;
+    let channel = offerer.pc.create_data_channel("probe", None)?.id();
+    negotiate(&mut offerer, &mut answerer, start, |sdp| sdp)?;
+    let open = |p: &Peer| {
+        p.events.iter().any(|e| {
+            matches!(
+                e,
+                RTCPeerConnectionEvent::OnDataChannel(RTCDataChannelEvent::OnOpen(_))
+            )
+        })
+    };
+    let now = run(&mut offerer, &mut answerer, start, start, |a, b| {
+        open(a) && open(b)
+    })?;
+
+    answerer.pc.close()?;
+    let failed = |p: &Peer| {
+        p.events.iter().any(|e| {
+            matches!(
+                e,
+                RTCPeerConnectionEvent::OnDataChannel(RTCDataChannelEvent::OnError(_))
+            )
+        })
+    };
+    run(&mut offerer, &mut answerer, now, now, |a, _| failed(a))?;
+    let error = offerer
+        .pc
+        .data_channel_error(channel)
+        .expect("the channel's error is kept");
+    assert_eq!(error.error_detail, RTCErrorDetailType::SctpFailure);
+    assert_eq!(error.sctp_cause_code, Some(12), "User-Initiated Abort");
+    Ok(())
+}
+
+/// W3C 5.6: gathering begins at the first local description, with the transport's and the
+/// connection's events; each candidate names its section and generation; the end of gathering
+/// is an empty candidate, the state "complete" and then a null candidate, once only. A later
+/// description of the same generation does not gather again (the audit's bug: it reset the
+/// state, and the end was announced again on every empty candidate); an ICE restart does.
+#[test]
+fn gathering_is_announced_once_per_ice_generation() -> Result<()> {
+    let now = Instant::now();
+    let mut pc = RTCPeerConnectionBuilder::new().build(now)?;
+    let mut events = Vec::new();
+    let drain = |pc: &mut RTCPeerConnection, events: &mut Vec<RTCPeerConnectionEvent>| {
+        events.clear();
+        while let Some(event) = pc.poll_event() {
+            events.push(event);
+        }
+    };
+    pc.create_data_channel("d", None)?;
+    let offer = pc.create_offer(None)?;
+    pc.set_local_description(now, offer)?;
+    drain(&mut pc, &mut events);
+    let labels: Vec<String> = events.iter().filter_map(label).collect();
+    assert_eq!(labels, ["gatherer:gathering", "gathering:gathering"]);
+    let ufrag = pc
+        .sctp()
+        .map(|s| s.transport().ice_transport())
+        .and_then(|t| t.get_local_parameters())
+        .map(|p| p.username_fragment)
+        .expect("local parameters");
+
+    pc.add_local_candidate(host("10.0.0.1:5000".parse()?)?)?;
+    drain(&mut pc, &mut events);
+    let candidate = events
+        .iter()
+        .find_map(|e| match e {
+            RTCPeerConnectionEvent::OnIceCandidateEvent(e) => e.candidate.clone(),
+            _ => None,
+        })
+        .expect("a candidate event");
+    assert_eq!(candidate.sdp_mid.as_deref(), Some("0"));
+    assert_eq!(candidate.sdp_mline_index, Some(0));
+    assert_eq!(candidate.username_fragment.as_deref(), Some(ufrag.as_str()));
+    let init = candidate.to_json()?;
+    assert_eq!(init.sdp_mid.as_deref(), Some("0"));
+    assert!(init.candidate.starts_with("candidate:"));
+
+    pc.add_local_candidate(RTCIceCandidateInit::default())?;
+    drain(&mut pc, &mut events);
+    let sequence: Vec<String> = events
+        .iter()
+        .filter_map(|e| match e {
+            RTCPeerConnectionEvent::OnIceCandidateEvent(e) => Some(match &e.candidate {
+                Some(c) if c.end_of_candidates => format!(
+                    "end:{}:{}",
+                    c.to_json().expect("json").candidate.is_empty(),
+                    c.username_fragment.as_deref() == Some(ufrag.as_str())
+                ),
+                Some(_) => "candidate".to_owned(),
+                None => "null".to_owned(),
+            }),
+            other => label(other),
+        })
+        .collect();
+    assert_eq!(
+        sequence,
+        [
+            "end:true:true",
+            "gatherer:complete",
+            "gathering:complete",
+            "null"
+        ]
+    );
+    assert_eq!(pc.ice_gathering_state(), RTCIceGatheringState::Complete);
+    let local = pc.local_description().expect("local description").sdp;
+    assert!(local.contains("a=end-of-candidates"), "{local}");
+    assert!(local.contains("a=candidate:"), "{local}");
+
+    pc.add_local_candidate(RTCIceCandidateInit::default())?;
+    drain(&mut pc, &mut events);
+    assert!(
+        events
+            .iter()
+            .all(|e| label(e).is_none()
+                && !matches!(e, RTCPeerConnectionEvent::OnIceCandidateEvent(_))),
+        "the end is announced once: {events:?}"
+    );
+
+    // Back to stable and a new offer of the same generation: still complete, no event.
+    pc.set_local_description(now, RTCSessionDescription::rollback(None)?)?;
+    let offer = pc.create_offer(None)?;
+    pc.set_local_description(now, offer)?;
+    drain(&mut pc, &mut events);
+    assert!(
+        events.iter().filter_map(label).next().is_none(),
+        "{events:?}"
+    );
+    assert_eq!(pc.ice_gathering_state(), RTCIceGatheringState::Complete);
+    Ok(())
+}
+
+/// W3C restartIce (4.4.2-69 to -71) and the negotiation-needed check's credentials step: the
+/// call raises negotiation-needed, and every offer restarts ICE until an answer has replaced
+/// the credentials, even after an offer was discarded. The new generation gathers anew.
+#[test]
+fn restart_ice_restarts_every_offer_until_an_answer_replaces_the_credentials() -> Result<()> {
+    let start = Instant::now();
+    let mut offerer = Peer::new("127.0.0.1:51060".parse()?, RTCDtlsRole::Client, start)?;
+    let mut answerer = Peer::new("127.0.0.1:51061".parse()?, RTCDtlsRole::Server, start)?;
+    offerer.pc.create_data_channel("probe", None)?;
+    negotiate(&mut offerer, &mut answerer, start, |sdp| sdp)?;
+    let connected = |p: &Peer| p.pc.connection_state() == RTCPeerConnectionState::Connected;
+    let now = run(&mut offerer, &mut answerer, start, start, |a, b| {
+        connected(a) && connected(b)
+    })?;
+    offerer
+        .pc
+        .add_local_candidate(RTCIceCandidateInit::default())?;
+    offerer.drain_events();
+    let ufrag = |sdp: &str| {
+        sdp.lines()
+            .find_map(|l| l.strip_prefix("a=ice-ufrag:"))
+            .map(str::to_owned)
+            .expect("ufrag")
+    };
+    let current = ufrag(&offerer.pc.current_local_description().expect("current").sdp);
+
+    let before = offerer.events.len();
+    offerer.pc.restart_ice();
+    offerer.drain_events();
+    assert!(
+        offerer.events[before..]
+            .iter()
+            .any(|e| matches!(e, RTCPeerConnectionEvent::OnNegotiationNeededEvent)),
+        "restartIce updates the negotiation-needed flag"
+    );
+
+    let discarded = offerer.pc.create_offer(None)?;
+    assert_ne!(
+        ufrag(&discarded.sdp),
+        current,
+        "the first offer restarts ICE"
+    );
+    let offer = offerer.pc.create_offer(None)?;
+    assert_ne!(
+        ufrag(&offer.sdp),
+        current,
+        "an offer after a discarded one still restarts ICE"
+    );
+
+    let before = offerer.events.len();
+    offerer.pc.set_local_description(now, offer.clone())?;
+    answerer
+        .pc
+        .set_remote_description(now, RTCSessionDescription::offer(offer.sdp)?)?;
+    let answer = answerer.pc.create_answer(None)?;
+    answerer.pc.set_local_description(now, answer.clone())?;
+    offerer.pc.set_remote_description(now, answer)?;
+    offerer.drain_events();
+    let labels: Vec<String> = offerer.events[before..].iter().filter_map(label).collect();
+    assert!(
+        labels.contains(&"gathering:gathering".to_owned()),
+        "the new generation gathers: {labels:?}"
+    );
+    let replaced = ufrag(&offerer.pc.create_offer(None)?.sdp);
+    assert_eq!(
+        replaced,
+        ufrag(&offerer.pc.current_local_description().expect("current").sdp),
+        "once the answer replaced the credentials, offers keep them"
+    );
+    Ok(())
+}
+
+/// W3C 11.1 / 11.2 `sdp-syntax-error`: a description that does not parse is refused with the
+/// number of the offending line.
+#[test]
+fn an_sdp_syntax_error_carries_its_line_number() {
+    let sdp = "v=0\r\no=- 1 1 IN IP4 0.0.0.0\r\ns=-\r\nbogus line\r\nt=0 0\r\n";
+    let err = RTCSessionDescription::offer(sdp.to_owned()).expect_err("does not parse");
+    assert!(matches!(err, Error::SdpSyntaxError { .. }), "{err:?}");
+    let detail = RTCError::from_error(&err).expect("an RTCError");
+    assert_eq!(detail.error_detail, RTCErrorDetailType::SdpSyntaxError);
+    assert_eq!(detail.sdp_line_number, Some(4));
+}
+
+/// W3C 4.8.3 `icecandidateerror`: reported by the application that gathers; 701 once per
+/// server URL while gathering; the address is withheld unless a local candidate exposed it;
+/// a code that is neither STUN's nor 701 is refused.
+#[test]
+fn ice_candidate_errors_follow_the_spec_rules() -> Result<()> {
+    let now = Instant::now();
+    let mut pc = RTCPeerConnectionBuilder::new().build(now)?;
+    pc.create_data_channel("d", None)?;
+    let offer = pc.create_offer(None)?;
+    pc.set_local_description(now, offer)?;
+    pc.add_local_candidate(host("10.0.0.1:5000".parse()?)?)?;
+    while pc.poll_event().is_some() {}
+
+    let unreachable = |address: &str| RTCPeerConnectionIceErrorEvent {
+        address: address.to_owned(),
+        port: 5000,
+        url: "stun:stun.example.org".to_owned(),
+        error_code: ICE_SERVER_UNREACHABLE,
+        error_text: "unreachable".to_owned(),
+    };
+    pc.report_ice_candidate_error(unreachable("10.0.0.1"))?;
+    pc.report_ice_candidate_error(unreachable("10.0.0.1"))?;
+    pc.report_ice_candidate_error(RTCPeerConnectionIceErrorEvent {
+        address: "192.0.2.9".to_owned(),
+        port: 6000,
+        url: "turn:turn.example.org".to_owned(),
+        error_code: 401,
+        error_text: "Unauthorized".to_owned(),
+    })?;
+    let errors: Vec<RTCPeerConnectionIceErrorEvent> = std::iter::from_fn(|| pc.poll_event())
+        .filter_map(|e| match e {
+            RTCPeerConnectionEvent::OnIceCandidateErrorEvent(e) => Some(e),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(errors.len(), 2, "701 once per URL: {errors:?}");
+    assert_eq!(errors[0].address, "10.0.0.1", "an exposed address is given");
+    assert_eq!(
+        (errors[1].address.as_str(), errors[1].port),
+        ("", 0),
+        "an address no candidate exposed is withheld"
+    );
+    assert!(matches!(
+        pc.report_ice_candidate_error(RTCPeerConnectionIceErrorEvent {
+            error_code: 200,
+            ..unreachable("")
+        }),
+        Err(Error::RangeError(_))
+    ));
+    Ok(())
+}

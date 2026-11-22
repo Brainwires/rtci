@@ -144,10 +144,15 @@
 //! - [W3C WebRTC Events](https://www.w3.org/TR/webrtc/#rtcpeerconnection-interface)
 //! - [`RTCPeerConnection`](crate::peer_connection::RTCPeerConnection)
 
+use crate::peer_connection::rtc_error::RTCError;
 use crate::peer_connection::state::ice_connection_state::RTCIceConnectionState;
 use crate::peer_connection::state::ice_gathering_state::RTCIceGatheringState;
 use crate::peer_connection::state::peer_connection_state::RTCPeerConnectionState;
 use crate::peer_connection::state::signaling_state::RTCSignalingState;
+use crate::peer_connection::transport::dtls::state::RTCDtlsTransportState;
+use crate::peer_connection::transport::ice::candidate_pair::RTCIceCandidatePair;
+use crate::peer_connection::transport::ice::state::RTCIceTransportState;
+use crate::peer_connection::transport::sctp::state::RTCSctpTransportState;
 use srtp::context::Context;
 use std::time::Instant;
 
@@ -156,6 +161,7 @@ pub(crate) mod ice_error_event;
 pub(crate) mod ice_event;
 pub(crate) mod track_event;
 
+pub use crate::peer_connection::states_events::ICE_SERVER_UNREACHABLE;
 pub use data_channel_event::RTCDataChannelEvent;
 pub use ice_error_event::RTCPeerConnectionIceErrorEvent;
 pub use ice_event::RTCPeerConnectionIceEvent;
@@ -530,6 +536,34 @@ pub enum RTCPeerConnectionEvent {
     ///
     /// Not a W3C event: a fork addition.
     OnSsrcCollision(crate::rtp_transceiver::SSRC),
+
+    /// W3C `RTCIceTransport` `statechange`: the connection's ICE transport changed state.
+    ///
+    /// Comes before the `OnIceConnectionStateChangeEvent` and the
+    /// `OnConnectionStateChangeEvent` the same change causes (webrtc-pc section 5.6, "update
+    /// the ICE transport state"). Not fired by `close()`.
+    OnIceTransportStateChange(RTCIceTransportState),
+
+    /// W3C `RTCIceTransport` `gatheringstatechange`: the ICE transport's gatherer changed
+    /// state. Comes before the `OnIceGatheringStateChangeEvent` of the same change.
+    OnIceGathererStateChange(RTCIceGatheringState),
+
+    /// W3C `RTCIceTransport` `selectedcandidatepairchange`: ICE selected a new candidate pair
+    /// to send over (the one `RTCIceTransport::get_selected_candidate_pair` now reports).
+    OnSelectedCandidatePairChange(RTCIceCandidatePair),
+
+    /// W3C `RTCDtlsTransport` `statechange`. Comes before the `OnConnectionStateChangeEvent` it
+    /// causes, and after the `OnDtlsTransportError` of a failure. Not fired by `close()`.
+    OnDtlsTransportStateChange(RTCDtlsTransportState),
+
+    /// W3C `RTCDtlsTransport` `error`: the DTLS transport failed, with `dtls-failure` (and the
+    /// fatal alert sent or received) or `fingerprint-failure`. Comes right before the
+    /// `OnDtlsTransportStateChange` to `Failed`.
+    OnDtlsTransportError(RTCError),
+
+    /// W3C `RTCSctpTransport` `statechange`: the SCTP transport (the one
+    /// `RTCPeerConnection::sctp` returns) changed state. Not fired by `close()`.
+    OnSctpTransportStateChange(RTCSctpTransportState),
 }
 
 /// Reserved for future use.
@@ -615,6 +649,10 @@ pub(crate) enum RTCEventInternal {
     /// - Association handle
     /// - Stream ID
     SCTPStreamFailed(usize /*AssociationHandle*/, u16 /*StreamID*/),
+
+    /// The SCTP cause code of the failure the next `SCTPStreamFailed` / `SCTPAssociationFailed`
+    /// report (W3C `RTCError.sctpCauseCode`), when the association was aborted with one.
+    SCTPFailureCause(u16),
 
     /// The SCTP association was lost to an error (see `SCTPStreamFailed`): every data channel
     /// over it fails, including one that never carried data and so has no SCTP stream.

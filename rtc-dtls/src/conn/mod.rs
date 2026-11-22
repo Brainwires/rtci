@@ -168,6 +168,8 @@ pub struct DTLSConn {
     /// sent again when the peer keeps sending handshake records (RFC 6347 4.2.7: alerts are
     /// not retransmitted on a timer, but the offending record arriving again draws a new one).
     pub(crate) fatal_alert_sent: Option<(Alert, usize)>,
+    /// The fatal alert the peer ended the association with, if it did.
+    pub(crate) fatal_alert_received: Option<Alert>,
     /// How many records of an epoch after 0 have authenticated. An endpoint that holds two
     /// associations for one address (RFC 6347 4.2.8) reads from it which of them a protected
     /// record belongs to.
@@ -287,6 +289,7 @@ impl DTLSConn {
             handshake_started: None,
             handshake_mtu: handshake_config.maximum_transmission_unit,
             fatal_alert_sent: None,
+            fatal_alert_received: None,
             authenticated_records: 0,
 
             current_flight: flight,
@@ -737,6 +740,21 @@ impl DTLSConn {
     /// record that is silently discarded, never fails it.
     pub fn is_failed(&self) -> bool {
         self.failed
+    }
+
+    /// The fatal alerts that ended the association, as their `AlertDescription` codes (RFC
+    /// 5246 section 7.2, RFC 8446 section 6): (sent, received). `None` for a side that sent or
+    /// received none, as when the handshake gave up after its retransmissions.
+    pub fn fatal_alerts(&self) -> (Option<u8>, Option<u8>) {
+        if let Some(v13) = &self.v13 {
+            return v13.fatal_alerts();
+        }
+        (
+            self.fatal_alert_sent
+                .map(|(alert, _)| alert.alert_description as u8),
+            self.fatal_alert_received
+                .map(|alert| alert.alert_description as u8),
+        )
     }
 
     /// Whether the peer's source address is known to be its own: a client's always is; a
@@ -1714,6 +1732,7 @@ impl DTLSConn {
                     // A fatal alert ends the association at once, unanswered [RFC5246 Section
                     // 7.2.2].
                     self.replay_detector[h.epoch as usize].accept();
+                    self.fatal_alert_received = Some(a);
                     self.fail();
                     return (false, None, Some(Error::ErrAlertFatalOrClose));
                 }

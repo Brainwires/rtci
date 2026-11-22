@@ -206,7 +206,10 @@ impl RTCPeerConnection {
             IceTransport::new(now, agent_config, crypto_provider.clone(), ice_transport_id)?;
 
         // Create the DTLS transport
-        let certificates = std::mem::take(&mut configuration.certificates);
+        // The configuration keeps its certificates: `get_configuration` reports them and
+        // `set_configuration` compares with them (W3C 4.4.1.5). With none configured the DTLS
+        // transport generates its own, which the configuration does not list.
+        let certificates = configuration.certificates.clone();
         let dtls_transport = DtlsTransport::new(RTCDtlsTransportConfig {
             id: dtls_transport_id,
             ice_transport_id,
@@ -304,13 +307,14 @@ impl RTCPeerConnection {
             last_generated_sdp: String::new(),
             last_offer: String::new(),
             last_answer: String::new(),
-            ice_restart_requested: None,
+            ice_credentials_to_replace: Vec::new(),
             transport_closed: false,
             identity_assertion: None,
             last_stable_state: None,
             negotiation_needed_state: NegotiationNeededState::Empty,
             is_negotiation_ongoing: false,
             always_negotiate_data_channels: false,
+            announced: super::states_events::AnnouncedStates::new(),
         })
     }
 
@@ -2004,7 +2008,8 @@ impl RTCPeerConnection {
                 // state and all RTCDtlsTransports are in the "connected" or "closed" state.
                 RTCPeerConnectionState::Connected
             } else {
-                RTCPeerConnectionState::New
+                // "connecting": none of the previous states apply.
+                RTCPeerConnectionState::Connecting
             };
 
         if self.peer_connection_state == connection_state {
@@ -2114,6 +2119,10 @@ impl RTCPeerConnection {
     fn check_negotiation_needed(&self) -> bool {
         // To check if negotiation is needed for connection, perform the following checks:
         // Skip 1, 2 steps
+        // Step 4: "If connection.[[LocalIceCredentialsToReplace]] is not empty, return true."
+        if self.ice_restart_pending() {
+            return true;
+        }
         // Step 3
 
         if let Some(local_desc) = &self.current_local_description {
@@ -2492,10 +2501,12 @@ impl RTCPeerConnection {
         for mut rtc_candidate in added {
             // Register local candidate with stats accumulator
             let candidate_id = local_candidate_stats_id(&rtc_candidate.id);
-            let (ufrag, _) = self.ice_transport().get_local_user_credentials();
             // The candidate is of this ICE generation: `to_json` carries the fragment, and
-            // the peer ignores it if it arrives after an ICE restart (RFC 8838 section 9).
-            rtc_candidate.username_fragment = Some(ufrag.to_owned());
+            // the peer ignores it if it arrives after an ICE restart (RFC 8838 section 9). It
+            // also names the media section of the transport (W3C "surface the candidate").
+            self.ice_transport()
+                .describe_local_candidate(&mut rtc_candidate);
+            let (ufrag, _) = self.ice_transport().get_local_user_credentials();
             let accumulator = self.candidate_to_accumulator(&rtc_candidate, ufrag, url);
             self.stats_mut()
                 .register_local_candidate(candidate_id, accumulator);
@@ -2503,8 +2514,8 @@ impl RTCPeerConnection {
             // Emit OnIceCandidateEvent
             self.pipeline_context.event_outs.push_back(
                 RTCPeerConnectionEvent::OnIceCandidateEvent(RTCPeerConnectionIceEvent {
-                    candidate: rtc_candidate,
-                    url: url.unwrap_or_default().to_string(),
+                    candidate: Some(rtc_candidate),
+                    url: url.map(str::to_owned),
                 }),
             );
         }

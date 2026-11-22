@@ -29,7 +29,7 @@ fn announced(candidate_type: RTCIceCandidateType) -> Vec<RTCIceCandidate> {
     let mut out = vec![];
     while let Some(event) = pc.poll_event() {
         if let RTCPeerConnectionEvent::OnIceCandidateEvent(e) = event {
-            out.push(e.candidate);
+            out.extend(e.candidate);
         }
     }
     out

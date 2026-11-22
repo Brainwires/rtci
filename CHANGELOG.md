@@ -9,6 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **states and events** (W3C webrtc-pc 4.3, 4.4.1.3, 4.4.1.5, 4.8, 4.9, 5.5, 5.6, 11, 12):
+  - `RTCPeerConnectionIceEvent::candidate` is `Option<RTCIceCandidate>` (`None` is the
+    "gathering complete" indication) and `url` is `Option<String>`. `RTCIceCandidate` has new
+    public members `sdp_mid`, `sdp_mline_index` and `end_of_candidates`; `to_json` gives the
+    candidate's own mid and index, and an empty `candidate` for an end-of-candidates
+    candidate. New `RTCIceCandidate::candidate()` and `end_of_candidates_for()`.
+  - The end of gathering (an empty local candidate) is an `OnIceCandidateEvent` with the
+    generation's end-of-candidates candidate, the gathering state "complete" with
+    `OnIceGathererStateChange` and `OnIceGatheringStateChangeEvent`, then an
+    `OnIceCandidateEvent` with no candidate; once per ICE generation (a second empty candidate
+    changes nothing). Gathering begins, with its events, at the first local description and
+    after an ICE restart only: a later local description no longer resets the state to
+    "gathering".
+  - `close()` fires no `OnConnectionStateChangeEvent(Closed)` (W3C: the states are set
+    "without firing any event"); it stops every transceiver and sets the ICE connection state
+    to closed. What the ICE agent reports after `close()` is not delivered.
+  - `RTCPeerConnectionEvent::OnIceConnectionStateChangeEvent` now comes before the
+    `OnConnectionStateChangeEvent` it causes (it came after).
+  - `set_configuration` is atomic and compares the certificates with the constructor's (a
+    different or missing list is `ErrModifyingCertificates`); the configuration keeps its
+    certificates (`get_configuration` reports them). ICE server urls are validated as W3C
+    "validate an ICE server URL" says, in the constructor too: a STUN url with a query, a
+    fragment, userinfo, a path, an unknown query and an empty `urls` (new
+    `Error::ErrNoIceServerUrls`) are refused; a TURN username of 509 bytes or more is
+    `InvalidAccessError`. At most 32 servers are kept (`MAX_ICE_SERVERS`).
+  - `restart_ice` raises negotiation-needed, and every offer restarts ICE until an answer has
+    replaced the credentials (an offer that was discarded no longer consumes the request).
+  - A description that does not parse is `Error::SdpSyntaxError { line_number, error }`
+    (the parser's error inside); `RTCError::from_error` maps it to `sdp-syntax-error`.
+  - The connection's default certificate expires 30 days after the connection is created.
+  - Internal `RTCEventInternal::SCTPFailureCause` added.
 - **remote tracks**: by description, not by media (W3C webrtc-pc 4.4.1.6, 5.1.1, 5.3, 9.3).
   New `RTCTrackEvent` variants: `OnRemoteTrack(RTCRemoteTrackEventInit)` (the W3C `track`
   event, queued when a description makes a transceiver receive or adds streams, with the
@@ -1048,6 +1079,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+- **states and events** (W3C webrtc-pc): the getters `signaling_state()`,
+  `ice_gathering_state()`, `ice_connection_state()`, `connection_state()`; the transport
+  events `OnIceTransportStateChange`, `OnIceGathererStateChange`,
+  `OnSelectedCandidatePairChange`, `OnDtlsTransportStateChange`, `OnDtlsTransportError` and
+  `OnSctpTransportStateChange`, each before the connection-level event it causes; `RTCError`
+  and `RTCErrorDetailType` (`rtc::peer_connection::rtc_error`), on the DTLS error event (with
+  the fatal alert sent or received, or `fingerprint-failure`) and for data channels through
+  `RTCPeerConnection::data_channel_error(id)` (`sctp-failure` with the SCTP cause code,
+  `data-channel-failure`); `report_ice_candidate_error` for the application that gathers
+  (`icecandidateerror`: 701 once per URL, the address withheld unless exposed);
+  `RTCCertificate::generate_certificate` (W3C generateCertificate: 30 days by default, at most
+  365, random name and serial). rtc-sdp: `SessionDescription::parse_located` and
+  `SdpParseError` give the line of a parse error. rtc-dtls: `Endpoint::connection_fatal_alerts`.
+  rtc-sctp: `Association::abort_cause_code`.
 - **sctp**: `RTCPeerConnection::reject_data_section` asks for the data section to be rejected
   (m= port zero) in the next offer, or in the answer to the peer's next offer: RFC 8841
   section 10.5, closing the SCTP association and the DTLS association under it. A data

@@ -646,6 +646,7 @@ impl<'a> DtlsHandler<'a> {
             return;
         }
         warn!("dtls transport failed");
+        self.ctx.dtls_transport.failure = Some(self.ctx.dtls_transport.failure_error());
         self.ctx
             .dtls_transport
             .state_change(RTCDtlsTransportState::Failed);

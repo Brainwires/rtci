@@ -10,6 +10,7 @@ use crate::peer_connection::event::{
 use crate::peer_connection::message::internal::{
     ApplicationMessage, DTLSMessage, DataChannelEvent, RTCMessageInternal, TaggedRTCMessageInternal,
 };
+use crate::peer_connection::rtc_error::{RTCError, RTCErrorDetailType};
 use crate::peer_connection::transport::dtls::role::RTCDtlsRole;
 use crate::statistics::accumulator::RTCStatsAccumulator;
 use bytes::BytesMut;
@@ -155,6 +156,36 @@ impl<'a> DataChannelHandler<'a> {
         Ok(())
     }
 
+    /// `OnError` for channel `id`, with the `RTCError` it reports recorded for
+    /// `RTCPeerConnection::data_channel_error` (W3C `RTCErrorEvent.error`).
+    fn push_channel_error(
+        ctx_events: &mut std::collections::VecDeque<TaggedRTCEventInternal>,
+        data_channels: &mut DataChannelRegistry,
+        now: Instant,
+        id: RTCDataChannelId,
+        error: RTCError,
+    ) {
+        data_channels.record_error(id, error);
+        ctx_events.push_back(TaggedRTCEventInternal {
+            now,
+            event: RTCEventInternal::RTCPeerConnectionEvent(RTCPeerConnectionEvent::OnDataChannel(
+                RTCDataChannelEvent::OnError(id),
+            )),
+        });
+    }
+
+    /// The `RTCError` of a channel the SCTP association's failure fails: `sctp-failure`, with
+    /// the cause code when the association was aborted with one.
+    fn sctp_failure(&self) -> RTCError {
+        RTCError {
+            sctp_cause_code: self.data_channels.sctp_failure_cause,
+            ..RTCError::new(
+                RTCErrorDetailType::SctpFailure,
+                "the SCTP association failed",
+            )
+        }
+    }
+
     /// Closes channel `id` for an error the peer made on its stream: `OnError` now, the
     /// stream reset as a local `close()` resets it, and `OnClose` when that reset completes.
     /// What the peer still sends on the stream until then is ignored, as for any closed
@@ -163,16 +194,26 @@ impl<'a> DataChannelHandler<'a> {
         let Some(dc) = self.data_channels.get_mut(&id) else {
             return Ok(());
         };
-        if !dc.close_emitted && !dc.failed {
+        let report = !dc.close_emitted && !dc.failed;
+        if report {
             dc.failed = true;
-            self.ctx.event_outs.push_back(TaggedRTCEventInternal {
-                now,
-                event: RTCEventInternal::RTCPeerConnectionEvent(
-                    RTCPeerConnectionEvent::OnDataChannel(RTCDataChannelEvent::OnError(id)),
-                ),
-            });
         }
         dc.close()?;
+        if report {
+            Self::push_channel_error(
+                &mut self.ctx.event_outs,
+                self.data_channels,
+                now,
+                id,
+                RTCError::new(
+                    RTCErrorDetailType::DataChannelFailure,
+                    "the peer broke the data channel protocol on the channel's stream",
+                ),
+            );
+        }
+        let Some(dc) = self.data_channels.get_mut(&id) else {
+            return Ok(());
+        };
         if let Some(data_channel) = dc.data_channel.as_mut() {
             while let Some(data_channel_message) = sansio::Protocol::poll_write(data_channel) {
                 self.ctx.write_outs.push_back(TaggedRTCMessageInternal {
@@ -591,6 +632,10 @@ impl<'a>
                 }
             }
 
+            RTCEventInternal::SCTPFailureCause(cause) => {
+                self.data_channels.sctp_failure_cause = Some(cause);
+            }
+
             RTCEventInternal::SCTPAssociationFailed(_association_handle) => {
                 // One association per connection: every channel over it fails with it and is
                 // closed, its underlying data transport being gone (W3C webrtc 6.2, "announce
@@ -599,36 +644,36 @@ impl<'a>
                 // pre-negotiated channel that never carried data, and every channel of an
                 // association that failed in its handshake, which never opened a stream and
                 // so stayed `connecting` for good.
+                let error = self.sctp_failure();
                 for dc in self.data_channels.drain() {
                     if !dc.close_emitted && !dc.failed {
-                        self.ctx.event_outs.push_back(TaggedRTCEventInternal {
+                        Self::push_channel_error(
+                            &mut self.ctx.event_outs,
+                            self.data_channels,
                             now,
-                            event: RTCEventInternal::RTCPeerConnectionEvent(
-                                RTCPeerConnectionEvent::OnDataChannel(
-                                    RTCDataChannelEvent::OnError(dc.id),
-                                ),
-                            ),
-                        });
+                            dc.id,
+                            error.clone(),
+                        );
                     }
                     self.announce_closed(now, dc);
                 }
             }
 
             RTCEventInternal::SCTPStreamFailed(_association_handle, stream_id) => {
+                let error = self.sctp_failure();
                 if let Some(dc) = self.data_channels.get_by_stream_mut(&stream_id)
                     && !dc.close_emitted
                     && !dc.failed
                 {
                     dc.failed = true;
                     let channel_id = dc.id;
-                    self.ctx.event_outs.push_back(TaggedRTCEventInternal {
+                    Self::push_channel_error(
+                        &mut self.ctx.event_outs,
+                        self.data_channels,
                         now,
-                        event: RTCEventInternal::RTCPeerConnectionEvent(
-                            RTCPeerConnectionEvent::OnDataChannel(RTCDataChannelEvent::OnError(
-                                channel_id,
-                            )),
-                        ),
-                    });
+                        channel_id,
+                        error,
+                    );
                 }
             }
 
@@ -644,14 +689,16 @@ impl<'a>
                         && dc.data_channel.is_some();
                     if awaits_ack && !dc.close_emitted && !dc.failed {
                         dc.failed = true;
-                        self.ctx.event_outs.push_back(TaggedRTCEventInternal {
+                        Self::push_channel_error(
+                            &mut self.ctx.event_outs,
+                            self.data_channels,
                             now,
-                            event: RTCEventInternal::RTCPeerConnectionEvent(
-                                RTCPeerConnectionEvent::OnDataChannel(
-                                    RTCDataChannelEvent::OnError(dc.id),
-                                ),
+                            dc.id,
+                            RTCError::new(
+                                RTCErrorDetailType::DataChannelFailure,
+                                "the peer reset the stream before acknowledging the channel",
                             ),
-                        });
+                        );
                     }
                     // W3C closing procedure: a close the remote started (its stream reset, or
                     // its DCEP close) takes an open or connecting channel to `closing` first.
@@ -702,14 +749,16 @@ impl<'a>
                         && !dc.close_emitted
                         && !dc.failed
                     {
-                        self.ctx.event_outs.push_back(TaggedRTCEventInternal {
+                        Self::push_channel_error(
+                            &mut self.ctx.event_outs,
+                            self.data_channels,
                             now,
-                            event: RTCEventInternal::RTCPeerConnectionEvent(
-                                RTCPeerConnectionEvent::OnDataChannel(
-                                    RTCDataChannelEvent::OnError(dc.id),
-                                ),
+                            dc.id,
+                            RTCError::new(
+                                RTCErrorDetailType::DataChannelFailure,
+                                "signalling closed the SCTP association before the channel opened",
                             ),
-                        });
+                        );
                     }
                     self.announce_closed(now, dc);
                 }

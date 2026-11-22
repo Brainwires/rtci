@@ -1,5 +1,6 @@
 use crate::peer_connection::certificate::RTCCertificate;
 use crate::peer_connection::configuration::setting_engine::ReplayProtection;
+use crate::peer_connection::rtc_error::{RTCError, RTCErrorDetailType};
 use crate::peer_connection::transport::RTCTransportId;
 use crate::peer_connection::transport::dtls::fingerprint::{
     RTCDtlsFingerprint, format_fingerprint, preferred_fingerprints,
@@ -12,7 +13,6 @@ use crypto::RTCCryptoProvider;
 use dtls::cipher_suite::CipherSuiteId;
 use dtls::config::{ClientAuthType, VerifyPeerCertificateFn};
 use dtls::extension::extension_use_srtp::SrtpProtectionProfile;
-use rcgen::CertificateParams;
 use rustls::pki_types::CertificateDer;
 use shared::error::{Error, Result};
 use shared::{TransportContext, TransportProtocol};
@@ -87,6 +87,14 @@ pub(crate) struct DtlsTransport {
 
     pub(crate) state: RTCDtlsTransportState,
     pub(crate) certificates: Vec<RTCCertificate>,
+
+    /// Set by the certificate check when the peer's certificate matched none of the remote
+    /// description's fingerprints: the transport's failure is then `fingerprint-failure`
+    /// rather than `dtls-failure` (W3C webrtc-pc section 5.5).
+    pub(crate) fingerprint_mismatch: Arc<std::sync::atomic::AtomicBool>,
+    /// The error the transport failed with (W3C `RTCDtlsTransport` `error` event), until the
+    /// peer connection has announced it.
+    pub(crate) failure: Option<crate::peer_connection::rtc_error::RTCError>,
 
     // The peer's certificate chain in DER form, retained at handshake completion so
     // `get_remote_certificates()` has something to return. Previously the bytes reached
@@ -199,20 +207,23 @@ impl DtlsTransport {
             replay_protection,
             crypto_provider,
         } = config;
+        // Wall-clock time for X.509 validity: the expiry of configured certificates, the
+        // validity period of a generated one.
+        let now = SystemTime::now(); // Exemption: wall-clock is correct here to check X.509 certificate expiry
         if !certificates.is_empty() {
-            let now = SystemTime::now(); // Exemption: wall-clock is correct here to check X.509 certificate expiry
             for cert in &certificates {
                 cert.expires
                     .duration_since(now)
                     .map_err(|_| Error::ErrCertificateExpired)?;
             }
         } else {
-            let params = CertificateParams::new(vec![shared::util::math_rand_alpha(16)])
-                .map_err(|error| Error::Other(error.to_string()))?;
-            let cert = RTCCertificate::generate(
+            // W3C constructor: "generate one or more new RTCCertificate instances", as
+            // generateCertificate does (random names and serial, 30 days).
+            let cert = RTCCertificate::generate_certificate(
                 crypto_provider.crypto(),
                 crypto::SignatureScheme::EcdsaP256Sha256,
-                params,
+                None,
+                now,
             )?;
             certificates = vec![cert];
         };
@@ -225,6 +236,8 @@ impl DtlsTransport {
             dtls_endpoint: None,
             state: RTCDtlsTransportState::New,
             certificates,
+            fingerprint_mismatch: Arc::default(),
+            failure: None,
             remote_certificates: vec![],
             remote_dtls_parameters: None,
             remote_tls_id: None,
@@ -246,7 +259,50 @@ impl DtlsTransport {
         })
     }
 
+    /// The `RTCError` of the association's failure (W3C webrtc-pc section 11.2):
+    /// `fingerprint-failure` when the peer's certificate matched no fingerprint, else
+    /// `dtls-failure` with the fatal alert this side sent or received, if one was.
+    pub(crate) fn failure_error(&self) -> RTCError {
+        if self
+            .fingerprint_mismatch
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return RTCError::new(
+                RTCErrorDetailType::FingerprintFailure,
+                "the remote certificate matches no fingerprint of the remote description",
+            );
+        }
+        let (sent_alert, received_alert) = self
+            .dtls_endpoint
+            .as_ref()
+            .and_then(|endpoint| {
+                endpoint
+                    .get_connections_keys()
+                    .next()
+                    .and_then(|remote| endpoint.connection_fatal_alerts(remote))
+            })
+            .unwrap_or_default();
+        RTCError {
+            sent_alert,
+            received_alert,
+            ..RTCError::new(
+                RTCErrorDetailType::DtlsFailure,
+                match (sent_alert, received_alert) {
+                    (_, Some(alert)) => format!("fatal alert {alert} received"),
+                    (Some(alert), None) => format!("fatal alert {alert} sent"),
+                    (None, None) => "the DTLS handshake failed".to_owned(),
+                },
+            )
+        }
+    }
+
     pub(crate) fn state_change(&mut self, state: RTCDtlsTransportState) {
+        if state == RTCDtlsTransportState::Connecting {
+            // A new association: what the last one failed with is not this one's.
+            self.fingerprint_mismatch
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            self.failure = None;
+        }
         self.state = state;
     }
 
@@ -318,6 +374,7 @@ impl DtlsTransport {
             .disable_certificate_fingerprint_verification
         {
             let fingerprint_crypto = self.crypto_provider.clone();
+            let fingerprint_mismatch = self.fingerprint_mismatch.clone();
             Some(Arc::new(
                 move |certs: &[Vec<u8>], _chains: &[CertificateDer<'static>]| -> Result<()> {
                     if certs.is_empty() {
@@ -344,6 +401,7 @@ impl DtlsTransport {
                         return Ok(());
                     }
 
+                    fingerprint_mismatch.store(true, std::sync::atomic::Ordering::Relaxed);
                     Err(Error::ErrNoMatchingCertificateFingerprint)
                 },
             ))
@@ -846,7 +904,7 @@ mod tests {
         let certificate = RTCCertificate::generate(
             default_provider.crypto(),
             crypto::SignatureScheme::EcdsaP256Sha256,
-            CertificateParams::new(vec!["webrtc.rs".to_owned()])
+            rcgen::CertificateParams::new(vec!["webrtc.rs".to_owned()])
                 .map_err(|e| Error::Other(e.to_string()))?,
         )?;
         let provider: Arc<dyn RTCCryptoProvider> = Arc::new(ProfileFilteringProvider {

@@ -317,6 +317,8 @@ pub(crate) struct Conn13 {
     pub(crate) closed: bool,
     pub(crate) closed_by_peer: bool,
     fatal_alert_sent: Option<(u8, usize)>,
+    /// The error alert the peer ended the association with, if it did.
+    fatal_alert_received: Option<u8>,
     /// A KeyUpdate of this side is waiting for its ACK, and whether another was asked for
     /// meanwhile.
     key_update_requested_by_peer: bool,
@@ -412,6 +414,7 @@ impl Conn13 {
             closed: false,
             closed_by_peer: false,
             fatal_alert_sent: None,
+            fatal_alert_received: None,
             key_update_requested_by_peer: false,
             connection_id_request_outstanding: false,
             connection_id_requests_received: 0,
@@ -1234,6 +1237,7 @@ impl Conn13 {
                 {
                     self.plaintext_replay.accept();
                     debug!("<- plaintext alert {description}");
+                    self.fatal_alert_received = Some(*description);
                     self.fail();
                 }
                 Ok(())
@@ -1457,6 +1461,7 @@ impl Conn13 {
             alert::USER_CANCELED => Ok(()),
             // Section 6.2: every other alert is an error alert, whatever its level says.
             _ => {
+                self.fatal_alert_received = Some(*description);
                 self.fail();
                 Ok(())
             }
@@ -1633,6 +1638,14 @@ impl Conn13 {
 
     /// The association is over: nothing more is read, written or retransmitted, and its
     /// secrets are forgotten (RFC 8446 section 6.2).
+    /// The fatal (error) alerts that ended the association: (sent, received).
+    pub(crate) fn fatal_alerts(&self) -> (Option<u8>, Option<u8>) {
+        (
+            self.fatal_alert_sent.map(|(description, _)| description),
+            self.fatal_alert_received,
+        )
+    }
+
     pub(crate) fn fail(&mut self) {
         self.failed = true;
         self.closed = true;

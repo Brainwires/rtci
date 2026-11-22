@@ -366,12 +366,14 @@ impl RTCConfiguration {
     }
 
     pub(crate) fn validate(&mut self) -> Result<()> {
-        let sanitized_ice_servers = self.get_ice_servers();
-        if !sanitized_ice_servers.is_empty() {
-            for server in &sanitized_ice_servers {
-                server.validate()?;
-            }
+        // W3C constructor: "set the configuration", whose server checks are those of
+        // `set_configuration` (webrtc-pc 4.4.1.5). A STUN url with a query is refused there
+        // too ("parsedURL's scheme is stun or stuns, and parsedURL's query is non-null").
+        self.ice_servers.truncate(MAX_ICE_SERVERS);
+        for server in &self.ice_servers {
+            server.validate()?;
         }
+        let sanitized_ice_servers = self.get_ice_servers();
 
         if self.ice_transport_policy == RTCIceTransportPolicy::Relay {
             let mut has_turn = false;
@@ -413,6 +415,11 @@ impl RTCConfiguration {
         Ok(())
     }
 }
+
+/// The most ICE servers a configuration keeps; later ones are ignored (W3C webrtc-pc 4.2.1:
+/// "Truncate iceServers to the maximum number of supported elements", which "MUST be at least
+/// 32").
+pub const MAX_ICE_SERVERS: usize = 32;
 
 /// Builder for creating RTCConfiguration instances.
 ///
