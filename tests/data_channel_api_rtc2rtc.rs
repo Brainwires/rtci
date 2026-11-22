@@ -232,3 +232,103 @@ fn a_closed_channel_keeps_its_stats_object() -> Result<()> {
     assert_eq!(channel.messages_sent, 1);
     Ok(())
 }
+
+/// The browser interop scenario "data channel 64 KiB binary messages" between two engines:
+/// twenty 64 KiB messages sent at once and echoed as they arrive. Every echo is accepted (the
+/// echoing side has far more than one message queued at a time: with `[[MaxBufferSize]]` at
+/// the 64 KiB max-message-size all but the first were refused), and all twenty come back in
+/// order.
+#[test]
+fn twenty_64_kib_messages_are_echoed() -> Result<()> {
+    const SIZE: usize = 64 * 1024;
+    let (mut pair, first) = Pair::connected(RTCDtlsRole::Client, "echo")?;
+    let theirs = *pair
+        .answerer
+        .opened()
+        .last()
+        .expect("the answerer's channel");
+    let now = pair.now;
+    let mut channel = pair.offerer.pc.data_channel(first).expect("open");
+    for i in 0..20u8 {
+        channel.send(now, BytesMut::from(&vec![i; SIZE][..]))?;
+    }
+    let mut echoed = 0;
+    let deadline = pair.now + Duration::from_secs(30);
+    while pair.offerer.received.len() < 20 && pair.now < deadline {
+        pair.run_for(Duration::from_millis(5))?;
+        let now = pair.now;
+        while echoed < pair.answerer.received.len() {
+            let data = pair.answerer.received[echoed].2.clone();
+            let mut channel = pair.answerer.pc.data_channel(theirs).expect("open");
+            channel.send(now, BytesMut::from(&data[..]))?;
+            echoed += 1;
+        }
+    }
+    let back: Vec<(usize, u8)> = pair
+        .offerer
+        .received
+        .iter()
+        .map(|(_, _, d)| (d.len(), d[0]))
+        .collect();
+    let want: Vec<(usize, u8)> = (0..20u8).map(|i| (SIZE, i)).collect();
+    assert_eq!(back, want);
+    Ok(())
+}
+
+/// A bulk sender that paces itself by `bufferedAmount`: 16 MiB queued in one burst is
+/// accepted (the send buffer, W3C [[MaxBufferSize]]), one byte more is refused, and a sender
+/// that then waits for `bufferedamountlow` before queueing more delivers another 16 MiB, all
+/// of it, in order.
+#[test]
+fn a_16_mib_burst_and_back_pressure_deliver_everything() -> Result<()> {
+    const CHUNK: usize = 64 * 1024;
+    const BUFFER: usize = 16 * 1024 * 1024;
+    let (mut pair, first) = Pair::connected(RTCDtlsRole::Client, "bulk")?;
+    let now = pair.now;
+    let mut channel = pair.offerer.pc.data_channel(first).expect("open");
+    let mut sent: u32 = 0;
+    for _ in 0..BUFFER / CHUNK {
+        let mut chunk = vec![0u8; CHUNK];
+        chunk[..4].copy_from_slice(&sent.to_be_bytes());
+        channel.send(now, BytesMut::from(&chunk[..]))?;
+        sent += 1;
+    }
+    assert_eq!(channel.buffered_amount() as usize, BUFFER);
+    assert!(matches!(
+        channel.send(now, BytesMut::from(&[0u8; 1][..])),
+        Err(Error::ErrDataChannelBufferFull)
+    ));
+
+    // Back-pressure: keep at most 1 MiB queued, refill at bufferedamountlow (256 KiB).
+    channel.set_buffered_amount_low_threshold(256 * 1024);
+    let lows = |p: &Pair| {
+        p.offerer
+            .events
+            .iter()
+            .filter(|e| matches!(e, RTCDataChannelEvent::OnBufferedAmountLow(id) if *id == first))
+            .count()
+    };
+    let target = 2 * (BUFFER / CHUNK) as u32;
+    let deadline = pair.now + Duration::from_secs(600);
+    while sent < target && pair.now < deadline {
+        let seen = lows(&pair);
+        assert!(pair.run_until(|p| lows(p) > seen)?, "bufferedamountlow");
+        let now = pair.now;
+        let mut channel = pair.offerer.pc.data_channel(first).expect("open");
+        while sent < target && channel.buffered_amount() < 1 << 20 {
+            let mut chunk = vec![0u8; CHUNK];
+            chunk[..4].copy_from_slice(&sent.to_be_bytes());
+            channel.send(now, BytesMut::from(&chunk[..]))?;
+            sent += 1;
+        }
+    }
+    assert!(pair.run_until(|p| p.answerer.received.len() as u32 >= target)?);
+    let order: Vec<u32> = pair
+        .answerer
+        .received
+        .iter()
+        .map(|(_, _, d)| u32::from_be_bytes([d[0], d[1], d[2], d[3]]))
+        .collect();
+    assert_eq!(order, (0..target).collect::<Vec<_>>());
+    Ok(())
+}
