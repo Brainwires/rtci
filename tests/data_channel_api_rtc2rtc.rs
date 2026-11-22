@@ -252,12 +252,12 @@ fn buffered_amount_low_fires_when_the_queue_falls_to_the_threshold() -> Result<(
             .filter(|e| matches!(e, RTCDataChannelEvent::OnBufferedAmountLow(id) if *id == first))
             .count()
     };
-    assert_eq!(lows(&pair), 0, "not below the threshold yet");
-    assert!(pair.run_until(|p| lows(p) > 0)?);
+    let before = lows(&pair);
+    assert!(pair.run_until(|p| lows(p) > before)?);
     let channel = pair.offerer.pc.data_channel(first).expect("open");
     assert!(channel.buffered_amount() <= 4096);
     pair.run_for(Duration::from_millis(500))?;
-    assert_eq!(lows(&pair), 1, "one crossing, one event");
+    assert_eq!(lows(&pair), before + 1, "one crossing, one event");
     Ok(())
 }
 

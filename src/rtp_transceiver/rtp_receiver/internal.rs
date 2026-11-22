@@ -74,6 +74,9 @@ pub(crate) struct RTCRtpReceiverInternal {
     rtcp_reduced_size: bool,
 
     last_returned_parameters: Option<RTCRtpReceiveParameters>,
+    /// What the public `getParameters` returns while the negotiated direction does not
+    /// receive: the parameters without codecs (W3C [[ReceiveCodecs]] is empty then).
+    not_receiving_parameters: Option<RTCRtpReceiveParameters>,
 
     /// The track id the remote description's `a=msid` gives the track (its appdata), which
     /// identifies the remote sender's track across descriptions. Not the id of this
@@ -102,6 +105,7 @@ impl RTCRtpReceiverInternal {
             associated_media_stream_ids: vec![],
             rtcp_reduced_size: false,
             last_returned_parameters: None,
+            not_receiving_parameters: None,
             remote_track_id: String::new(),
             remote_streams: vec![],
             last_stable_remote_streams: vec![],
@@ -265,6 +269,21 @@ impl RTCRtpReceiverInternal {
         }
 
         self.last_returned_parameters.as_ref().unwrap()
+    }
+
+    /// W3C `getParameters`: [`Self::get_parameters`], without codecs when the negotiated
+    /// direction does not receive (`receiving` false).
+    pub(crate) fn get_public_parameters(
+        &mut self,
+        media_engine: &MediaEngine,
+        receiving: bool,
+    ) -> &RTCRtpReceiveParameters {
+        if receiving {
+            return self.get_parameters(media_engine);
+        }
+        let mut parameters = self.get_parameters(media_engine).clone();
+        parameters.rtp_parameters.codecs.clear();
+        self.not_receiving_parameters.insert(parameters)
     }
 
     /// Records the sources of an RTP packet delivered to this receiver's track: its SSRC as a
