@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **jsep**: description rules.
+  - Lip synchronization groups (RFC 5888 section 7, RFC 9429 sections 5.2.1, 5.2.2, 5.3.1):
+    an offer has `a=group:LS` for each stream more than one transceiver is associated with,
+    and keeps the groups of the most recent answer; an answer keeps an offered group's
+    transceivers that share a stream or have none, when there are two. New
+    `RTCPeerConnection::remote_lip_sync_groups`.
+  - Default destination (RFC 8839 section 4.2.1.2, RFC 9429 sections 5.2.1 to 5.3.2): once
+    there are local candidates the `m=` port and `c=` address are the default candidate's
+    (relayed, else server-reflexive, else host; never an mDNS name), shared by every bundled
+    section that is not bundle-only (RFC 9143 section 7.2); a new section of an offer says
+    `a=rtcp:9 IN IP4 0.0.0.0` (or the default candidate's), and no other description has
+    `a=rtcp`. Descriptions with candidates differ from before.
+  - A minted local SSRC is drawn again while a remote description mentions it or another
+    local stream has it (RFC 5576 sections 5, 8).
 - **jsep**: codec parameters, the rest.
   - H.265 formats match by their configuration (RFC 7798 section 7.2.2: `profile-space`,
     `profile-id`, `tier-flag`, `interop-constraints`, `profile-compatibility-indicator` and

@@ -1533,6 +1533,17 @@ impl RTCPeerConnection {
             .unwrap_or_default()
     }
 
+    /// The lip synchronization groups of the current remote description (`a=group:LS`, RFC
+    /// 5888 section 7), each the mids of media sections whose playout the remote side wants
+    /// synchronized: the receivers of those transceivers are played out in sync by an
+    /// application that renders them. Empty without a remote description or groups.
+    pub fn remote_lip_sync_groups(&self) -> Vec<Vec<String>> {
+        self.remote_description()
+            .and_then(|r| r.parsed.as_ref())
+            .map(crate::peer_connection::sdp::ls_groups)
+            .unwrap_or_default()
+    }
+
     /// Sets the remote description as part of the offer/answer negotiation.
     ///
     /// This changes the remote description associated with the connection. This description
