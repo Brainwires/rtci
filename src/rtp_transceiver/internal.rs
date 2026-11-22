@@ -8,7 +8,7 @@ use crate::rtp_transceiver::rtp_sender::rtp_codec::{
 };
 use crate::rtp_transceiver::rtp_sender::{RTCRtpCodecParameters, RtpCodecKind};
 use crate::rtp_transceiver::{
-    PayloadType, RTCRtpTransceiverDirection, RTCRtpTransceiverInit, fmtp,
+    PayloadType, RTCRemoteBandwidth, RTCRtpTransceiverDirection, RTCRtpTransceiverInit, fmtp,
 };
 use interceptor::Interceptor;
 use log::trace;
@@ -55,6 +55,11 @@ pub(crate) struct RTCRtpTransceiverInternal {
     header_extensions_to_negotiate: Option<Vec<String>>,
     /// Reduced-size RTCP (RFC 5506) as the last answer negotiated it for this media section.
     rtcp_reduced_size: bool,
+    /// The `b=` lines of this transceiver's section of the remote description.
+    remote_bandwidth: RTCRemoteBandwidth,
+    /// The `xr-format`s of the remote description's `a=rtcp-xr` for this section (RFC 3611
+    /// section 5.1); `None` when it has no such attribute.
+    remote_rtcp_xr: Option<Vec<String>>,
 }
 
 impl fmt::Debug for RTCRtpTransceiverInternal {
@@ -104,6 +109,8 @@ impl RTCRtpTransceiverInternal {
             associable_with_remote_offer: true,
             header_extensions_to_negotiate: None,
             rtcp_reduced_size: false,
+            remote_bandwidth: RTCRemoteBandwidth::default(),
+            remote_rtcp_xr: None,
         }
     }
 
@@ -322,12 +329,30 @@ impl RTCRtpTransceiverInternal {
     /// application did since (direction, track, stop, the mid, which the caller handles) stays.
     pub(crate) fn restore_negotiated_state(&mut self, saved: &RTCRtpTransceiverInternal) {
         self.preferred_codecs.clone_from(&saved.preferred_codecs);
+        self.remote_bandwidth = saved.remote_bandwidth;
+        self.remote_rtcp_xr.clone_from(&saved.remote_rtcp_xr);
         if let (Some(sender), Some(saved)) = (self.sender.as_mut(), saved.sender.as_ref()) {
             sender.restore_negotiated_state(saved);
         }
         if let (Some(receiver), Some(saved)) = (self.receiver.as_mut(), saved.receiver.as_ref()) {
             receiver.restore_negotiated_state(saved);
         }
+    }
+
+    pub(crate) fn remote_rtcp_xr(&self) -> Option<&[String]> {
+        self.remote_rtcp_xr.as_deref()
+    }
+
+    pub(crate) fn set_remote_rtcp_xr(&mut self, formats: Option<Vec<String>>) {
+        self.remote_rtcp_xr = formats;
+    }
+
+    pub(crate) fn remote_bandwidth(&self) -> RTCRemoteBandwidth {
+        self.remote_bandwidth
+    }
+
+    pub(crate) fn set_remote_bandwidth(&mut self, bandwidth: RTCRemoteBandwidth) {
+        self.remote_bandwidth = bandwidth;
     }
 
     /// Whether the last answer negotiated reduced-size RTCP (RFC 5506) for this transceiver's

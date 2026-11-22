@@ -1,4 +1,5 @@
 use super::*;
+use crate::peer_connection::configuration::RTCRtcpMuxPolicy;
 use crate::peer_connection::event::{RTCPeerConnectionEvent, RTCPeerConnectionIceEvent};
 use crate::peer_connection::handler::datachannel::DataChannelHandlerContext;
 use crate::peer_connection::handler::demuxer::DemuxerHandlerContext;
@@ -29,7 +30,9 @@ use crate::rtp_transceiver::rtp_sender::rtp_coding_parameters::{
     RTCRtpCodingParameters, RTCRtpFecParameters, RTCRtpRtxParameters,
 };
 use crate::rtp_transceiver::rtp_sender::rtp_encoding_parameters::RTCRtpEncodingParameters;
-use crate::rtp_transceiver::{PayloadType, RTCRtpTransceiverDirection, RTCRtpTransceiverId};
+use crate::rtp_transceiver::{
+    PayloadType, RTCRemoteBandwidth, RTCRtpTransceiverDirection, RTCRtpTransceiverId,
+};
 use crate::statistics::accumulator::{
     IceCandidateAccumulator, local_candidate_stats_id, remote_candidate_stats_id,
 };
@@ -375,6 +378,7 @@ impl RTCPeerConnection {
             ice_gathering_state: self.ice_transport().ice_gathering_state,
             bundle: BundleMode::Offer,
             offered_tag_rtcp_mux_only: false,
+            rtcp_mux_only: self.configuration.rtcp_mux_policy != RTCRtcpMuxPolicy::Negotiate,
             sctp_max_message_size: self.setting_engine.sctp_max_message_size.as_usize(),
             ignore_rid_pause_for_recv: false,
             write_ssrc_attributes_for_simulcast: self
@@ -594,8 +598,12 @@ impl RTCPeerConnection {
                             rid_map: get_rids(media),
                             answer_direction,
                             offered_protos: offered_protos(media),
-                            offered_rtcp_rsize: (!include_unmatched)
-                                .then(|| media.has_attribute(ATTR_KEY_RTCPRSIZE)),
+                            offered_rtcp_rsize: Some(if include_unmatched {
+                                self.rtp_transceivers[i].rtcp_reduced_size()
+                            } else {
+                                media.has_attribute(ATTR_KEY_RTCPRSIZE)
+                            }),
+                            renegotiated: include_unmatched,
                             ..Default::default()
                         });
                     } else {
@@ -684,6 +692,7 @@ impl RTCPeerConnection {
             is_extmap_allow_mixed,
             connection_role,
             ice_gathering_state: self.ice_transport().ice_gathering_state,
+            rtcp_mux_only: self.configuration.rtcp_mux_policy != RTCRtcpMuxPolicy::Negotiate,
             offered_tag_rtcp_mux_only: !include_unmatched
                 && remote_parsed
                     .as_ref()
@@ -1125,6 +1134,55 @@ impl RTCPeerConnection {
         // machine settles back to `stable` (see `set_description`).
 
         Ok(())
+    }
+
+    /// Gives each transceiver the `a=rtcp-xr` attribute (RFC 3611 section 5.1) and the `b=`
+    /// lines of its section of a remote description (RFC 9429 section 5.10): `b=TIAS` (bits per second, RFC 3890), else `b=AS` (kilobits per second,
+    /// RFC 8866 section 5.8), is the most this endpoint may send there; `b=RS` and `b=RR`
+    /// (RFC 3556) are the RTCP bandwidth of senders and receivers. A session-level `b=` line
+    /// and `b=CT` are ignored, as RFC 9429 section 5.10 says. A section without the lines
+    /// clears what an earlier description set.
+    pub(super) fn apply_remote_bandwidth(&mut self, remote: &SessionDescription) {
+        let transceiver_by_mid =
+            RTCPeerConnection::transceiver_index_by_mid(&self.rtp_transceivers);
+        for media in &remote.media_descriptions {
+            let Some(&i) =
+                get_mid_value(media).and_then(|mid| transceiver_by_mid.get(mid.as_str()))
+            else {
+                continue;
+            };
+            let of = |bandwidth_type: &str| {
+                media
+                    .bandwidth
+                    .iter()
+                    .find(|b| !b.experimental && b.bandwidth_type == bandwidth_type)
+                    .map(|b| b.bandwidth)
+            };
+            // RFC 3611 section 5.1: "a=rtcp-xr" at media level replaces the session's.
+            let rtcp_xr = media
+                .attribute(ATTR_KEY_RTCP_XR)
+                .map(|value| value.map(str::to_owned))
+                .or_else(|| {
+                    remote
+                        .attributes
+                        .iter()
+                        .find(|a| a.key == ATTR_KEY_RTCP_XR)
+                        .map(|a| a.value.clone())
+                })
+                .map(|value| {
+                    value
+                        .unwrap_or_default()
+                        .split_whitespace()
+                        .map(str::to_owned)
+                        .collect()
+                });
+            self.rtp_transceivers[i].set_remote_rtcp_xr(rtcp_xr);
+            self.rtp_transceivers[i].set_remote_bandwidth(RTCRemoteBandwidth {
+                max_bitrate: of("TIAS").or_else(|| of("AS").map(|kbps| kbps.saturating_mul(1000))),
+                rtcp_senders_bitrate: of("RS"),
+                rtcp_receivers_bitrate: of("RR"),
+            });
+        }
     }
 
     /// What an applied answer negotiated for RTCP, section by section, given to the
@@ -2458,6 +2516,9 @@ pub(crate) fn answered_direction(
     };
     local.intersect(offered.reverse())
 }
+
+/// `a=rtcp-xr` (RFC 3611 section 5.1).
+const ATTR_KEY_RTCP_XR: &str = "rtcp-xr";
 
 /// Whether the offerer-tagged section of `offer` (the first tag of its BUNDLE group that is not
 /// rejected, RFC 9143 section 7.2) carries `a=rtcp-mux-only`.

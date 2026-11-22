@@ -160,6 +160,7 @@ mod rejected_mline_tests {
             ice_gathering_state: RTCIceGatheringState::Complete,
             bundle: BundleMode::Offer,
             offered_tag_rtcp_mux_only: false,
+            rtcp_mux_only: true,
             sctp_max_message_size: 0,
             ignore_rid_pause_for_recv: false,
             write_ssrc_attributes_for_simulcast: false,
@@ -971,6 +972,8 @@ pub(crate) struct AddTransceiverSdpParams {
     write_ssrc_attributes_for_simulcast: bool,
     /// An offer (initial or subsequent) rather than an answer.
     is_offer: bool,
+    /// The RTCP mux policy is "require".
+    rtcp_mux_only: bool,
 }
 
 impl RTCPeerConnection {
@@ -1013,15 +1016,16 @@ impl RTCPeerConnection {
                     ice_params.password.clone(),
                 )
                 .with_property_attribute(ATTR_KEY_RTCPMUX.to_owned());
-        // This endpoint has no RTCP component: it only ever multiplexes, and an offer says so
-        // (RFC 8858 section 4.2: "the offerer MUST include an SDP 'rtcp-mux-only' attribute";
-        // RFC 9429 section 5.2.1 for the mux policy "require"). An answer does not carry it
-        // (RFC 8858 section 4.3), but for the answerer-tagged section of a BUNDLE group
-        // whose offer had it (RFC 9143 section 9.3.1.2), which `populate_sdp` adds.
-        if is_offer {
+        // Under the mux policy "require" a new m= section of an offer says this endpoint only
+        // multiplexes (RFC 9429 sections 4.1.1 and 5.2.1, RFC 8858 section 4.2); a section
+        // negotiated before does not get the line (RFC 9429 section 5.2.2). An answer does
+        // not carry it (RFC 8858 section 4.3), but for the answerer-tagged section of a
+        // BUNDLE group whose offer had it (RFC 9143 section 9.3.1.2), which `populate_sdp`
+        // adds.
+        if is_offer && params.rtcp_mux_only && !media_section.renegotiated {
             media = media.with_property_attribute(ATTR_KEY_RTCP_MUX_ONLY.to_owned());
         }
-        // Reduced-size RTCP (RFC 5506 section 5): offered always, answered when offered.
+        // Reduced-size RTCP (RFC 5506 section 5).
         if media_section.offered_rtcp_rsize.unwrap_or(true) {
             media = media.with_property_attribute(ATTR_KEY_RTCPRSIZE.to_owned());
         }
@@ -1499,10 +1503,17 @@ pub(crate) struct MediaSection {
     /// the profile provided in the offer"). `None` in an offer, which states this endpoint's
     /// own profile.
     pub(crate) offered_protos: Option<Vec<String>>,
-    /// In an answer, whether the offered section had `a=rtcp-rsize`: an answer says it only
-    /// then (RFC 5506 section 5: reduced-size RTCP is used when both sides signal it).
-    /// `None` in an offer, which always says it.
+    /// Whether the section says `a=rtcp-rsize`, when that is not this endpoint's choice: in
+    /// an answer, whether the offered section had it (RFC 9429 section 5.3.1: "If present in
+    /// the offer"); in a subsequent offer, for a section the last exchange negotiated,
+    /// whether the most recent answer had it (section 5.2.2: "MUST NOT be added unless
+    /// present in the most recent answer"). `None` for a new section of an offer, which
+    /// says it.
     pub(crate) offered_rtcp_rsize: Option<bool>,
+    /// An offer's section that the last completed exchange already negotiated: it gets no
+    /// `a=rtcp-mux-only` (RFC 9429 section 5.2.2: "The 'a=rtcp-mux-only' line MUST NOT be
+    /// added").
+    pub(crate) renegotiated: bool,
 }
 
 /// `a=rtcp-mux-only` (RFC 8858 section 3).
@@ -1553,6 +1564,9 @@ pub(crate) struct PopulateSdpParams {
     /// `a=rtcp-mux-only`. The answer then says so in its answerer-tagged section (RFC 9143
     /// section 9.3.1.2).
     pub(crate) offered_tag_rtcp_mux_only: bool,
+    /// The RTCP mux policy is "require" (the default): new m= sections of an offer say
+    /// `a=rtcp-mux-only`.
+    pub(crate) rtcp_mux_only: bool,
     pub(crate) sctp_max_message_size: usize,
     pub(crate) ignore_rid_pause_for_recv: bool,
     pub(crate) write_ssrc_attributes_for_simulcast: bool,
@@ -1726,6 +1740,7 @@ impl RTCPeerConnection {
                     ignore_rid_pause_for_recv: params.ignore_rid_pause_for_recv,
                     write_ssrc_attributes_for_simulcast: params.write_ssrc_attributes_for_simulcast,
                     is_offer: params.bundle == BundleMode::Offer,
+                    rtcp_mux_only: params.rtcp_mux_only,
                 };
                 let (d1, should_add_id) = RTCPeerConnection::add_transceiver_sdp(
                     d,

@@ -1923,6 +1923,9 @@ impl RTCPeerConnection {
                 }
             }
 
+            // What the remote side says about bandwidth, section by section.
+            self.apply_remote_bandwidth(parsed_remote_description);
+
             // The ICE and DTLS transports start with the first description that sets one up,
             // not with the first remote description: a description with nothing to negotiate
             // (no m-section) has no ICE credentials, and a remote offer may be applied again or

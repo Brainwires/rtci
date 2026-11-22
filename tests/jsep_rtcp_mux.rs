@@ -268,3 +268,121 @@ fn reduced_size_rtcp_is_used_only_when_both_sides_signal_it() -> TestResult {
     assert!(!sender_reduced_size(&mut offerer));
     Ok(())
 }
+
+/// RFC 9429 section 5.10: a media-level `b=TIAS` (else `b=AS`) is the most this endpoint may
+/// send; a session-level `b=` line and `b=CT` are ignored. `b=RS` / `b=RR` are RFC 3556's
+/// RTCP bandwidths. RFC 3611 section 5.1: `a=rtcp-xr` at media level replaces the session's.
+#[test]
+fn bandwidth_lines_and_rtcp_xr_of_a_remote_section_are_read() -> TestResult {
+    let section = |mid: &str, lines: &str, attributes: &str| {
+        format!(
+            "m=video 9 UDP/TLS/RTP/SAVPF 96
+c=IN IP4 0.0.0.0
+{lines}a=ice-ufrag:4ZcD
+a=ice-pwd:2/1muCWoOi3uLifh0NuRHlkwz
+a=fingerprint:sha-256 F2:1C:F2:9E:B4:BE:58:19:C9:48:1A:D9:C4:A7:5D:5A:1F:61:7C:17:6B:07:8E:39:A2:E2:B2:BB:BF:4B:D2:16
+a=setup:actpass
+a=mid:{mid}
+a=sendrecv
+a=rtcp-mux
+{attributes}a=rtpmap:96 VP8/90000
+"
+        )
+    };
+    let offer = crlf(&format!(
+        "v=0
+o=- 4215775240449105457 2 IN IP4 127.0.0.1
+s=-
+b=AS:9999
+t=0 0
+a=group:BUNDLE 0 1 2
+a=rtcp-xr:rcvr-rtt=all
+{}{}{}",
+        section("0", "b=AS:500\nb=TIAS:400000\nb=RS:2000\nb=RR:0\n", ""),
+        section(
+            "1",
+            "b=CT:7000\nb=AS:300\n",
+            "a=rtcp-xr:pkt-loss-rle stat-summary=loss,dup\n"
+        ),
+        section("2", "", "a=rtcp-xr\n"),
+    ));
+    let mut pc = default_peer()?;
+    pc.set_remote_description(Instant::now(), RTCSessionDescription::offer(offer)?)?;
+    let ids: Vec<usize> = pc.get_transceivers().collect();
+    assert_eq!(ids.len(), 3);
+
+    let first = pc.rtp_transceiver(ids[0]).expect("transceiver");
+    let bandwidth = first.remote_bandwidth();
+    assert_eq!(bandwidth.max_bitrate, Some(400_000), "TIAS wins over AS");
+    assert_eq!(bandwidth.rtcp_senders_bitrate, Some(2000));
+    assert_eq!(bandwidth.rtcp_receivers_bitrate, Some(0));
+    assert_eq!(
+        first.remote_rtcp_xr().map(<[String]>::to_vec),
+        Some(vec!["rcvr-rtt=all".to_owned()]),
+        "the session's attribute"
+    );
+
+    let second = pc.rtp_transceiver(ids[1]).expect("transceiver");
+    let bandwidth = second.remote_bandwidth();
+    assert_eq!(bandwidth.max_bitrate, Some(300_000), "AS is in kilobits");
+    assert_eq!(bandwidth.rtcp_senders_bitrate, None);
+    assert_eq!(
+        second.remote_rtcp_xr().map(<[String]>::to_vec),
+        Some(vec![
+            "pkt-loss-rle".to_owned(),
+            "stat-summary=loss,dup".to_owned()
+        ])
+    );
+
+    let third = pc.rtp_transceiver(ids[2]).expect("transceiver");
+    assert_eq!(
+        third.remote_bandwidth().max_bitrate,
+        None,
+        "the session-level b=AS is not a section's"
+    );
+    assert_eq!(
+        third.remote_rtcp_xr().map(<[String]>::to_vec),
+        Some(vec![]),
+        "an empty media-level attribute replaces the session's"
+    );
+    Ok(())
+}
+
+/// RFC 9429 section 4.1.1: `a=rtcp-mux-only` goes into new m= sections under the "require"
+/// policy; section 5.2.2: a section negotiated before does not get it again, and keeps
+/// `a=rtcp-rsize` only if the most recent answer had it.
+#[test]
+fn a_subsequent_offer_follows_the_most_recent_answer() -> TestResult {
+    let mut offerer = default_peer()?;
+    let mut answerer = default_peer()?;
+    offerer.add_track(video_track("first", 0x0404_0404))?;
+    let offer = offerer.create_offer(None)?;
+    offerer.set_local_description(Instant::now(), offer.clone())?;
+    answerer.set_remote_description(Instant::now(), offer)?;
+    let answer = answerer.create_answer(None)?;
+    answerer.set_local_description(Instant::now(), answer.clone())?;
+    // The answer the offerer sees has no a=rtcp-rsize.
+    let without = answer.sdp.replace("a=rtcp-rsize\r\n", "");
+    offerer.set_remote_description(Instant::now(), RTCSessionDescription::answer(without)?)?;
+
+    offerer.add_track(video_track("second", 0x0505_0505))?;
+    let offer = offerer.create_offer(None)?;
+    let sections = media_sections(&offer.sdp);
+    assert_eq!(sections.len(), 2, "{}", offer.sdp);
+    // The negotiated section.
+    assert!(has(&sections[0], "a=rtcp-mux"), "{}", offer.sdp);
+    assert!(!has(&sections[0], "a=rtcp-mux-only"), "{}", offer.sdp);
+    assert!(!has(&sections[0], "a=rtcp-rsize"), "{}", offer.sdp);
+    // The new one.
+    for line in ["a=rtcp-mux", "a=rtcp-mux-only", "a=rtcp-rsize"] {
+        assert!(has(&sections[1], line), "{line}:\n{}", offer.sdp);
+    }
+
+    // Under "negotiate" no section says it only multiplexes.
+    let mut pc = peer_with(RTCRtcpMuxPolicy::Negotiate)?;
+    pc.add_track(video_track("local", 0x0606_0606))?;
+    let offer = pc.create_offer(None)?;
+    assert!(offer.sdp.contains("a=rtcp-mux\r\n"), "{}", offer.sdp);
+    assert!(!offer.sdp.contains("a=rtcp-mux-only"), "{}", offer.sdp);
+    Ok(())
+}

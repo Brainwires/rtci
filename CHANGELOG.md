@@ -79,9 +79,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   streams, RFC 8830 section 2); only the last did. The `a=msid` lines win over a legacy
   `a=ssrc:<n> msid:` attribute.
 
+- **jsep**: `a=rtcp-mux` of a remote description is read (RFC 9429 sections 5.8.3 and 5.11, RFC
+  8858, RFC 5761 section 5.1.1). The engine has no RTCP component, and it multiplexed whatever
+  the peer said. A remote offer whose RTP section lacks the attribute is now refused under the
+  RTCP mux policy `require` (the default; `RTCRtcpMuxPolicy` had no effect) and has that
+  section answered rejected under `negotiate`; a remote answer without it is refused, the offer
+  staying pending. `a=rtcp-mux-only` without `a=rtcp-mux` is refused.
+- **jsep**: new m= sections of an offer say `a=rtcp-mux-only` under the `require` policy (RFC
+  9429 sections 4.1.1 and 5.2.1); the answerer-tagged section repeats it when the
+  offerer-tagged one had it (RFC 9143 section 9.3.1.2).
+- **jsep**: `a=rtcp-rsize` is answered only when offered, kept in a subsequent offer only when
+  the most recent answer had it, and reduced-size RTCP counts as negotiated only when both
+  descriptions carry it (RFC 5506 section 5, RFC 9429 sections 5.2.2, 5.3.1 and 5.11). It was
+  written in every description and never read.
+- **jsep**: `a=rtcp-fb:*` (the wildcard payload type, RFC 4585 section 4.2) is read and applies
+  to every format of the section; such lines were dropped. RFC 8888 feedback is written as
+  `a=rtcp-fb:* ack ccfb`, as its section 6 requires, not once per payload type, so a peer that
+  follows the RFC now negotiates it. A feedback value keeps everything after its type as its
+  parameter.
+
 ### Features
 
 - **shared**: `Error::ErrAnswerDoesNotMatchOffer(String)`.
+- **transceiver**: `RTCRtpTransceiver::remote_bandwidth()` (`RTCRemoteBandwidth`: `b=TIAS` /
+  `b=AS`, `b=RS`, `b=RR` of the remote media section, RFC 9429 section 5.10),
+  `RTCRtpTransceiver::remote_rtcp_xr()` (the remote `a=rtcp-xr` formats, RFC 3611 section 5.1)
+  and `RTCRtpTransceiver::rtcp_reduced_size()`; `RTCRtcpParameters::reduced_size` of the
+  sender's and receiver's parameters is the negotiated value.
 - **receiver**: `RTCRtpReceiver::streams()`, the ids of the remote MediaStreams the track is
   in (W3C `[[AssociatedRemoteMediaStreams]]`).
 

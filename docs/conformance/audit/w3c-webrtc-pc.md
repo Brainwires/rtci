@@ -8,13 +8,13 @@ How rows were judged. The engine is sans-I/O Rust under a JS API layer: promises
 
 Totals (rows 957):
 
-- MUST: tested 383 / untested 157 / partial 152 / missing 149 / violated 26 / n-a 62
+- MUST: tested 384 / untested 157 / partial 152 / missing 148 / violated 26 / n-a 62
 - SHOULD: tested 2 / untested 0 / partial 2 / missing 1 / violated 0 / n-a 5
 - MAY: tested 2 / untested 2 / partial 1 / missing 1 / violated 0 / n-a 12
 
 By pass:
 
-- sections 1 to 4: rows 399; MUST: tested 152 / untested 67 / partial 72 / missing 50 / violated 6 / n-a 35
+- sections 1 to 4: rows 399; MUST: tested 153 / untested 67 / partial 72 / missing 49 / violated 6 / n-a 35
 - section 5: rows 258; MUST: tested 81 / untested 50 / partial 46 / missing 43 / violated 16 / n-a 14
 - sections 6 to 12: rows 300; MUST: tested 150 / untested 40 / partial 34 / missing 56 / violated 4 / n-a 13
 
@@ -118,7 +118,7 @@ By pass:
 | WEBRTC-4.4.1.4-6 | 4.4.1.4 | MUST | On failure, nothing is reported if the connection closed meanwhile | n/a | | | synchronous API |
 | WEBRTC-4.4.1.4-7 | 4.4.1.4 | MUST | A type invalid for the signaling state rejects with InvalidStateError | tested | src/peer_connection/state/signaling_state.rs:308 | test_signaling_state_transitions | |
 | WEBRTC-4.4.1.4-8 | 4.4.1.4 | MUST | An SDP parse failure rejects with RTCError sdp-syntax-error carrying sdpLineNumber | partial | src/peer_connection/mod.rs:1433 | | the parse error is returned; no line number is available to the API layer |
-| WEBRTC-4.4.1.4-9 | 4.4.1.4 | MUST | Remote description without rtcp-mux under policy "require" rejects with InvalidAccessError | missing | src/peer_connection/mod.rs:1417 | | a=rtcp-mux is never checked |
+| WEBRTC-4.4.1.4-9 | 4.4.1.4 | MUST | Remote description without rtcp-mux under policy "require" rejects with InvalidAccessError | tested | pc/mod.rs `check_remote_description` | `tests/jsep_rtcp_mux.rs::an_offer_without_rtcp_mux_is_refused_under_the_require_policy` | `SdpInvalidValue`; the default policy is require |
 | WEBRTC-4.4.1.4-10 | 4.4.1.4 | MUST | A description that renegotiates RIDs rejects with InvalidAccessError | missing | src/peer_connection/mod.rs:1417 | | no comparison with previously negotiated rids |
 | WEBRTC-4.4.1.4-11 | 4.4.1.4 | MUST | A description failing RFC 9429 5.8.3 semantic validation rejects with InvalidAccessError | partial | src/peer_connection/mod.rs:1709 | extract_ice_details_checks_the_credentials_syntax | ICE credentials, candidates, fingerprints, mids and the answer-against-offer checks run before anything changes (`check_remote_description`); the rtcp-mux, rid and tls-id checks of RFC 9429 5.8.3 do not exist yet |
 | WEBRTC-4.4.1.4-12 | 4.4.1.4 | MUST | Any other failure rejects with OperationError | n/a | | | error-class mapping is the binding's |

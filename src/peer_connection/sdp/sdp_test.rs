@@ -93,6 +93,7 @@ fn params(
             }
         },
         offered_tag_rtcp_mux_only: false,
+        rtcp_mux_only: true,
         sctp_max_message_size: 0,
         ignore_rid_pause_for_recv: false,
         write_ssrc_attributes_for_simulcast: false,
