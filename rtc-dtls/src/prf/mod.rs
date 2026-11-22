@@ -3,7 +3,7 @@ mod prf_test;
 
 use std::fmt;
 
-use crypto::{HashAlgorithm as CryptoHashAlgorithm, HmacAlgorithm, Mac, RTCCrypto};
+use crypto::{Mac, RTCCrypto};
 
 use crate::cipher_suite::CipherSuiteHash;
 use crate::content::ContentType;
@@ -102,9 +102,7 @@ fn hmac_sha(
     key: &[u8],
     input: &[&[u8]],
 ) -> Result<Vec<u8>> {
-    let algorithm = match h {
-        CipherSuiteHash::Sha256 => HmacAlgorithm::Sha256,
-    };
+    let algorithm = h.hmac_algorithm();
     let mut output = vec![0; algorithm.output_len()];
     crypto
         .new_hmac(algorithm, key)
@@ -220,11 +218,9 @@ pub(crate) fn prf_verify_data(
     label: &str,
     h: CipherSuiteHash,
 ) -> Result<Vec<u8>> {
-    let result = match h {
-        CipherSuiteHash::Sha256 => crypto
-            .hash(CryptoHashAlgorithm::Sha256, handshake_bodies)
-            .map_err(|error| Error::Crypto(error.to_string()))?,
-    };
+    let result = crypto
+        .hash(h.hash_algorithm(), handshake_bodies)
+        .map_err(|error| Error::Crypto(error.to_string()))?;
     let mut seed = label.as_bytes().to_vec();
     seed.extend_from_slice(&result);
 

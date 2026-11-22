@@ -126,6 +126,9 @@ pub struct ConfigBuilder {
     cookie_exchange: bool,
     hello_verify_request_version: ProtocolVersion,
     early_data_retransmit: bool,
+    min_version: DtlsVersion,
+    max_version: DtlsVersion,
+    connection_id: Option<usize>,
     psk: Option<PskCallback>,
     psk_identity_hint: Option<Vec<u8>>,
     insecure_skip_verify: bool,
@@ -156,6 +159,9 @@ impl Default for ConfigBuilder {
             cookie_exchange: true,
             hello_verify_request_version: PROTOCOL_VERSION1_0,
             early_data_retransmit: true,
+            min_version: DtlsVersion::Dtls1_2,
+            max_version: DtlsVersion::Dtls1_3,
+            connection_id: None,
             psk: None,
             psk_identity_hint: None,
             insecure_skip_verify: false,
@@ -295,6 +301,21 @@ impl ConfigBuilder {
         self
     }
 
+    /// The DTLS versions to negotiate: the lowest and the highest, both included. The default
+    /// is DTLS 1.2 to DTLS 1.3, with 1.3 preferred: a client offers both in
+    /// `supported_versions`, a server takes 1.3 from a client that offers it and 1.2 from one
+    /// that does not (RFC 9147 section 5.3, RFC 8446 section 4.2.1), and each end checks the
+    /// downgrade sentinel of RFC 8446 section 4.1.3.
+    ///
+    /// DTLS 1.3 authenticates with certificates here; a configuration with a pre-shared key
+    /// negotiates DTLS 1.2 (its PSK cipher suites), and [`Self::build`] refuses one that asks
+    /// for DTLS 1.3 as the minimum. It also refuses a minimum above the maximum.
+    pub fn with_protocol_versions(mut self, min: DtlsVersion, max: DtlsVersion) -> Self {
+        self.min_version = min;
+        self.max_version = max;
+        self
+    }
+
     /// psk sets the pre-shared key used by this DTLS connection
     /// A client with a psk offers only psk cipher_suites; a server that also holds certificates
     /// offers both families and lets the negotiated suite decide which credential it uses
@@ -405,6 +426,30 @@ impl ConfigBuilder {
 
 pub(crate) const DEFAULT_MTU: usize = 1200; // bytes
 
+/// A version of DTLS this crate negotiates.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[non_exhaustive]
+pub enum DtlsVersion {
+    /// DTLS 1.2 (RFC 6347), `{254, 253}` on the wire.
+    Dtls1_2,
+    /// DTLS 1.3 (RFC 9147), `{254, 252}` on the wire.
+    Dtls1_3,
+}
+
+impl DtlsVersion {
+    /// The version as a [`ProtocolVersion`]: what `supported_versions` carries, and the two
+    /// bytes webrtc-stats' `tlsVersion` is the hex of (`FEFD`, `FEFC`).
+    pub fn protocol_version(self) -> ProtocolVersion {
+        match self {
+            DtlsVersion::Dtls1_2 => PROTOCOL_VERSION1_2,
+            DtlsVersion::Dtls1_3 => ProtocolVersion {
+                major: 254,
+                minor: 252,
+            },
+        }
+    }
+}
+
 /// PSKCallback is called once we have the remote's psk_identity_hint.
 /// If the remote provided none it will be nil
 pub(crate) type PskCallback = Arc<dyn (Fn(&[u8]) -> Result<Vec<u8>>) + Send + Sync>;
@@ -443,6 +488,7 @@ pub enum ExtendedMasterSecretType {
 
 impl ConfigBuilder {
     fn offered_cipher_suites(&self, is_client: bool) -> Result<Vec<Box<dyn CipherSuite>>> {
+        let legacy_suites = self.configured_suites(false);
         // a client offers one family or the other, while a server can only offer them if
         // it actually holds a certificate.
         let exclude_certificate = if is_client {
@@ -451,10 +497,30 @@ impl ConfigBuilder {
             self.certificates.is_empty()
         };
 
-        parse_cipher_suites(&self.cipher_suites, self.psk.is_none(), exclude_certificate)
+        parse_cipher_suites(&legacy_suites, self.psk.is_none(), exclude_certificate)
+    }
+
+    /// The cipher suites of the configured list that belong to one family: the TLS 1.3
+    /// suites, or the others.
+    fn configured_suites(&self, tls13: bool) -> Vec<CipherSuiteId> {
+        self.cipher_suites
+            .iter()
+            .copied()
+            .filter(|suite| suite.is_tls13() == tls13)
+            .collect()
     }
 
     fn validate(&self, is_client: bool) -> Result<()> {
+        if self.min_version > self.max_version {
+            return Err(Error::ErrUnsupportedProtocolVersion);
+        }
+        // A pre-shared key means the DTLS 1.2 PSK suites: a client with one offers nothing
+        // else, and a server with nothing else has no certificate for DTLS 1.3.
+        let psk_only = self.psk.is_some() && (is_client || self.certificates.is_empty());
+        if psk_only && self.min_version == DtlsVersion::Dtls1_3 {
+            return Err(Error::ErrUnsupportedProtocolVersion);
+        }
+
         if is_client && self.psk.is_some() && self.psk_identity_hint.is_none() {
             return Err(Error::ErrPskAndIdentityMustBeSetForClient);
         }
@@ -545,8 +611,7 @@ impl ConfigBuilder {
                             CipherSuiteId::Tls_Ecdhe_Rsa_With_Aes_128_Gcm_Sha256
                             | CipherSuiteId::Tls_Ecdhe_Rsa_With_Aes_256_Cbc_Sha
                             | CipherSuiteId::Tls_Ecdhe_Rsa_With_ChaCha20_Poly1305_Sha256 => {
-                                algorithm.signature
-                                    == crate::signature_hash_algorithm::SignatureAlgorithm::Rsa
+                                algorithm.signature.is_rsa()
                             }
                             // RFC 8422 5.1.1, 5.2: an ECDHE_ECDSA suite takes a
                             // certificate with an ECDSA- or EdDSA-capable key.
@@ -572,6 +637,39 @@ impl ConfigBuilder {
 
         let local_cipher_suites: Vec<CipherSuiteId> =
             local_cipher_suites.into_iter().map(|(id, _)| id).collect();
+
+        // DTLS 1.3: its own suites (the configured ones of that family, or the defaults),
+        // certificates only. Without a usable suite, group or signature scheme the highest
+        // version is DTLS 1.2.
+        let psk_only = self.psk.is_some() && (is_client || self.certificates.is_empty());
+        let mut max_version = self.max_version;
+        let mut local_tls13_cipher_suites = vec![];
+        if max_version == DtlsVersion::Dtls1_3 && !psk_only {
+            let configured = self.configured_suites(true);
+            local_tls13_cipher_suites = if configured.is_empty() {
+                crate::dtls13::suite::DEFAULT_SUITES.to_vec()
+            } else {
+                configured
+            };
+            local_tls13_cipher_suites.retain(|suite| suite.supported_by(crypto_provider.crypto()));
+            let signs = local_signature_schemes.iter().any(|scheme| {
+                scheme.is_tls13_signature()
+                    && (is_client
+                        || self
+                            .certificates
+                            .first()
+                            .is_some_and(|c| scheme.is_compatible(&c.private_key)))
+            });
+            if local_tls13_cipher_suites.is_empty() || local_named_curves.is_empty() || !signs {
+                local_tls13_cipher_suites.clear();
+            }
+        }
+        if local_tls13_cipher_suites.is_empty() {
+            if self.min_version == DtlsVersion::Dtls1_3 {
+                return Err(Error::ErrNoAvailableCipherSuites);
+            }
+            max_version = DtlsVersion::Dtls1_2;
+        }
 
         let retransmit_interval = if self.flight_interval != Duration::from_secs(0) {
             self.flight_interval
@@ -691,6 +789,10 @@ impl ConfigBuilder {
             cookie_exchange: self.cookie_exchange,
             hello_verify_request_version: self.hello_verify_request_version,
             early_data_retransmit: self.early_data_retransmit,
+            min_version: self.min_version,
+            max_version,
+            local_tls13_cipher_suites,
+            connection_id: self.connection_id,
             initial_epoch: 0,
             maximum_transmission_unit,
             maximum_retransmit_number,
@@ -755,6 +857,16 @@ pub struct HandshakeConfig {
     pub(crate) cookie_exchange: bool,
     pub(crate) hello_verify_request_version: ProtocolVersion,
     pub(crate) early_data_retransmit: bool,
+    /// The lowest version negotiated.
+    pub(crate) min_version: DtlsVersion,
+    /// The highest version negotiated: DTLS 1.3 only when there is something to negotiate it
+    /// with (`local_tls13_cipher_suites`).
+    pub(crate) max_version: DtlsVersion,
+    /// The TLS 1.3 cipher suites, for DTLS 1.3. Empty when DTLS 1.3 is not negotiated.
+    pub(crate) local_tls13_cipher_suites: Vec<CipherSuiteId>,
+    /// The length of the connection ids this side asks its peer to send, if it uses the
+    /// connection_id extension at all.
+    pub(crate) connection_id: Option<usize>,
     pub(crate) initial_epoch: u16,
     pub(crate) maximum_transmission_unit: usize,
     pub(crate) maximum_retransmit_number: usize,
@@ -819,6 +931,10 @@ impl HandshakeConfig {
             cookie_exchange: true,
             hello_verify_request_version: PROTOCOL_VERSION1_0,
             early_data_retransmit: true,
+            min_version: DtlsVersion::Dtls1_2,
+            max_version: DtlsVersion::Dtls1_2,
+            local_tls13_cipher_suites: vec![],
+            connection_id: None,
             initial_epoch: 0,
             maximum_transmission_unit: DEFAULT_MTU,
             maximum_retransmit_number: DEFAULT_MAXIMUM_RETRANSMIT_NUMBER,
@@ -828,6 +944,28 @@ impl HandshakeConfig {
 
     pub(crate) fn provider(&self) -> &Arc<dyn RTCCryptoProvider> {
         &self.crypto_provider
+    }
+
+    /// Whether DTLS 1.3 is negotiated at all.
+    pub(crate) fn supports_dtls13(&self) -> bool {
+        self.max_version == DtlsVersion::Dtls1_3
+    }
+
+    /// Whether DTLS 1.2 is negotiated at all.
+    pub(crate) fn supports_dtls12(&self) -> bool {
+        self.min_version == DtlsVersion::Dtls1_2
+    }
+
+    /// The connection id a hello of this side carries, if it uses the extension: random
+    /// bytes of the configured length, none for a length of zero.
+    pub(crate) fn connection_id_offer(&self) -> Option<Vec<u8>> {
+        let length = self.connection_id?;
+        let mut connection_id = vec![0u8; length];
+        self.crypto_provider
+            .random()
+            .fill(&mut connection_id)
+            .ok()?;
+        Some(connection_id)
     }
 
     pub(crate) fn get_certificate(&self, server_name: &str) -> Result<Certificate> {
