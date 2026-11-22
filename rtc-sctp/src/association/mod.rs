@@ -29,6 +29,7 @@ use crate::chunk::{
     chunk_unknown::ChunkUnknown,
 };
 use crate::config::{COMMON_HEADER_SIZE, DATA_CHUNK_HEADER_SIZE, ServerConfig, TransportConfig};
+use crate::cookie::{CookieFields, CookieSigner};
 use crate::packet::{CommonHeader, Packet};
 use crate::param::{
     Param, UNRECOGNIZED_PARAMETER,
@@ -69,6 +70,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use thiserror::Error;
 
+pub(crate) mod bundling;
 pub(crate) mod interleaving;
 pub(crate) mod reconfig;
 pub(crate) mod state;
@@ -386,6 +388,10 @@ pub struct Association {
     my_cookie: Option<ParamStateCookie>,
     /// What the INIT answered with `my_cookie` said, applied when the cookie is echoed.
     cookie_tcb: Option<CookieTcb>,
+    /// Makes this association's State Cookies with a MAC (RFC 9260 5.1.3), when the endpoint
+    /// was given a crypto provider for it. Without one a cookie is random bytes, good only
+    /// because this association remembers them.
+    cookie_signer: Option<Arc<CookieSigner>>,
     /// Valid.Cookie.Life (RFC 9260 16): how long a State Cookie is accepted after it was made.
     valid_cookie_life: Duration,
     /// How many times a Stale Cookie error sent this side back to a new INIT.
@@ -397,6 +403,11 @@ pub struct Association {
     sack_packet_immediately: bool,
     /// Set by a chunk handler: the chunks after it in the packet are discarded.
     discard_rest_of_packet: bool,
+    /// The SACK that is due and found no control packet to travel with: it goes with
+    /// outbound DATA, or alone.
+    unbundled_sack: Option<ChunkSelectiveAck>,
+    /// Where the packets of DATA begin among the packets being gathered.
+    first_data_packet: usize,
 
     /// HB.interval (RFC 9260 8.3, 16); `None` sends no HEARTBEAT.
     heartbeat_interval: Option<Duration>,
@@ -577,11 +588,14 @@ impl Default for Association {
             configured_outbound_streams: 0,
             my_cookie: None,
             cookie_tcb: None,
+            cookie_signer: None,
             valid_cookie_life: Duration::from_secs(60),
             stale_cookie_restarts: 0,
             first_data_received: false,
             sack_packet_immediately: false,
             discard_rest_of_packet: false,
+            unbundled_sack: None,
+            first_data_packet: 0,
             heartbeat_interval: None,
             heartbeat_outstanding: None,
             last_rtt_probe: None,
@@ -1473,6 +1487,7 @@ impl Association {
         }
 
         self.handle_chunk_start();
+        let replies_before = self.control_queue.len();
 
         // RFC 9260 9.1: a packet that carries an ABORT is not answered. The ABORT is taken
         // first, so nothing queued for the chunks bundled before it goes out.
@@ -1502,6 +1517,8 @@ impl Association {
         }
 
         self.handle_chunk_end(now);
+        // RFC 9260 12.4: one packet of control chunks answers one received packet.
+        self.bundle_replies(replies_before);
 
         Ok(())
     }
@@ -1933,9 +1950,6 @@ impl Association {
                 tcb.peer_verification_tag == i.initiate_tag
                     && now.saturating_duration_since(tcb.created_at) < self.valid_cookie_life
             });
-        if !reuse {
-            self.my_cookie = Some(ParamStateCookie::new());
-        }
         let created_at = match (&self.cookie_tcb, reuse) {
             (Some(tcb), true) => tcb.created_at,
             _ => now,
@@ -1963,6 +1977,19 @@ impl Association {
             if !self.use_forward_tsn {
                 warn!("[{}] not using ForwardTSN (on init)", self.side);
             }
+        }
+        if !reuse {
+            // RFC 9260 5.1.3: the cookie holds what the association is made from, the time
+            // it was made, and a MAC over both. Without a crypto provider to make the MAC
+            // with, it is random bytes this association remembers.
+            let sealed = self
+                .cookie_signer
+                .as_ref()
+                .and_then(|signer| signer.seal(&self.cookie_fields(&tcb, signer.timestamp(now))));
+            self.my_cookie = Some(match sealed {
+                Some(cookie) => ParamStateCookie { cookie },
+                None => ParamStateCookie::new(),
+            });
         }
         self.cookie_tcb = Some(tcb);
 
@@ -2005,6 +2032,70 @@ impl Association {
             },
             chunks: vec![Box::new(init_ack)],
         }])
+    }
+
+    /// What a State Cookie made at `created_ms` says for `tcb` (RFC 9260 5.1.3).
+    fn cookie_fields(&self, tcb: &CookieTcb, created_ms: u64) -> CookieFields {
+        CookieFields {
+            key_id: 0,
+            created_ms,
+            my_tag: self.my_verification_tag,
+            my_initial_tsn: self.my_next_tsn,
+            peer_tag: tcb.peer_verification_tag,
+            peer_initial_tsn: tcb.peer_initial_tsn,
+            peer_rwnd: tcb.peer_rwnd,
+            inbound_streams: tcb.inbound_streams,
+            outbound_streams: tcb.outbound_streams,
+            use_forward_tsn: tcb.use_forward_tsn,
+            use_interleaving: tcb.use_interleaving,
+            reconfig: tcb.reconfig,
+            source_port: tcb.source_port,
+            destination_port: tcb.destination_port,
+            local_tie_tag: 0,
+            peer_tie_tag: 0,
+        }
+    }
+
+    /// Has this association make its State Cookies with a MAC.
+    pub(crate) fn set_cookie_signer(&mut self, signer: Arc<CookieSigner>) {
+        self.cookie_signer = Some(signer);
+    }
+
+    /// Makes this association what it was when it answered an INIT with the State Cookie
+    /// `cookie`, whose MAC the endpoint has verified: nothing was kept since, and the
+    /// cookie says it all (RFC 9260 5.1.3, 5.1.5). The COOKIE ECHO is then handled as if the
+    /// association had been there all along.
+    pub(crate) fn restore_from_cookie(
+        &mut self,
+        fields: &CookieFields,
+        cookie: Bytes,
+        signer: Arc<CookieSigner>,
+        now: Instant,
+    ) {
+        let tsn = fields.my_initial_tsn;
+        self.my_next_tsn = tsn;
+        self.my_next_rsn = tsn;
+        self.min_tsn2measure_rtt = tsn;
+        self.cumulative_tsn_ack_point = tsn.wrapping_sub(1);
+        self.advanced_peer_tsn_ack_point = tsn.wrapping_sub(1);
+        let age = signer.age(fields, now);
+        let tcb = CookieTcb {
+            created_at: now.checked_sub(age).unwrap_or(now),
+            peer_verification_tag: fields.peer_tag,
+            peer_initial_tsn: fields.peer_initial_tsn,
+            peer_rwnd: fields.peer_rwnd,
+            inbound_streams: fields.inbound_streams,
+            outbound_streams: fields.outbound_streams,
+            use_forward_tsn: fields.use_forward_tsn,
+            use_interleaving: fields.use_interleaving,
+            reconfig: fields.reconfig,
+            source_port: fields.source_port,
+            destination_port: fields.destination_port,
+        };
+        self.apply_cookie_tcb(&tcb);
+        self.cookie_tcb = Some(tcb);
+        self.my_cookie = Some(ParamStateCookie { cookie });
+        self.cookie_signer = Some(signer);
     }
 
     /// Takes into the TCB what the peer's INIT said (RFC 9260 5.1 B, 5.2.4 B).
@@ -2236,12 +2327,16 @@ impl Association {
 
     /// RFC 9260 5.1.5 and 5.2.4: a COOKIE ECHO.
     ///
-    /// The State Cookie of this implementation is not a self-contained, MAC-protected TCB:
-    /// the association exists from the INIT on (see `HALF_OPEN_LIFETIME`), so the cookie is
-    /// 32 random bytes and what it stands for is kept beside it (`CookieTcb`). It is
-    /// authenticated by comparing it, in constant time, with the one this association sent,
-    /// which no one who has not seen the INIT ACK can produce; that is what the MAC is for.
-    /// Its creation time and the peer's tag and ports are checked from the kept copy.
+    /// An association handles the COOKIE ECHO for a cookie it sent itself and remembers
+    /// (`my_cookie`, with what it stands for in `cookie_tcb`): the cookie echoed is compared
+    /// with it in constant time, and its creation time and the peer's tag and ports are
+    /// checked from the kept copy. That is so in two cases. Without a crypto provider
+    /// (`ServerConfig::cookie_authentication`) the accepting association exists from the
+    /// INIT on (see `HALF_OPEN_LIFETIME`) and the cookie is 32 random bytes. With one, the
+    /// endpoint keeps nothing after the INIT ACK: the cookie is a MAC-protected TCB
+    /// (`crate::cookie`), the endpoint verifies it and makes this association from it
+    /// (`restore_from_cookie`) just before handing it the COOKIE ECHO, and the MAC is
+    /// verified here once more.
     ///
     /// With one cookie per association there is no cookie whose tags differ from the TCB's,
     /// so of Table 12 only the actions for matching tags arise: B and D (enter or stay in
@@ -2263,6 +2358,15 @@ impl Association {
             self.discard_rest_of_packet = true;
             return Ok(vec![]);
         };
+        // 5.1.5 1), 2): the MAC is computed over the cookie and compared with the one it
+        // carries; a cookie that fails is discarded silently.
+        if let Some(signer) = &self.cookie_signer
+            && signer.open(&c.cookie).is_none()
+        {
+            debug!("[{}] COOKIE-ECHO: the MAC does not verify", self.side);
+            self.discard_rest_of_packet = true;
+            return Ok(vec![]);
+        }
         if !constant_time_eq(&my_cookie.cookie, &c.cookie)
             || p.common_header.source_port != tcb.destination_port
             || p.common_header.destination_port != tcb.source_port
@@ -2544,6 +2648,35 @@ impl Association {
             return Ok(vec![]);
         }
 
+        // RFC 9260 section 6: DATA is received by the normal rules in ESTABLISHED,
+        // SHUTDOWN-PENDING and SHUTDOWN-SENT. COOKIE-ECHOED is kept with them on purpose:
+        // the peer is established once it has sent its COOKIE ACK, and DATA that overtakes
+        // the COOKIE ACK would otherwise wait for a retransmission timeout.
+        match self.state() {
+            AssociationState::Established
+            | AssociationState::ShutdownPending
+            | AssociationState::ShutdownSent
+            | AssociationState::CookieEchoed => {}
+            AssociationState::Closed if self.side == Side::Server => {
+                // An accepting association that has seen no COOKIE ECHO has no association
+                // to receive on: the DATA is out of the blue (8.4), answered with an ABORT
+                // that reflects the packet's tag.
+                debug!("[{}] DATA before the COOKIE ECHO: ABORT", self.side);
+                self.discard_rest_of_packet = true;
+                return Ok(vec![self.abort_packet(
+                    self.my_verification_tag,
+                    true,
+                    vec![],
+                )]);
+            }
+            state => {
+                // COOKIE-WAIT; SHUTDOWN-RECEIVED and SHUTDOWN-ACK-SENT, where the peer has
+                // said it sends nothing more: discarded.
+                debug!("[{}] discarding DATA in state '{}'", self.side, state);
+                return Ok(vec![]);
+            }
+        }
+
         // RFC 9260 section 6.2: a DATA chunk with no user data is answered with an ABORT
         // carrying the "No User Data" cause. Accepting one would cost receive state without
         // counting against the byte-based receive window.
@@ -2745,6 +2878,16 @@ impl Association {
             d.advertised_receiver_window_credit
         );
         let state = self.state();
+        if state == AssociationState::Closed && self.side == Side::Server && !self.ended {
+            // RFC 9260 section 6: a SACK for an association that is not there yet is out of
+            // the blue (8.4).
+            self.discard_rest_of_packet = true;
+            return Ok(vec![self.abort_packet(
+                self.my_verification_tag,
+                true,
+                vec![],
+            )]);
+        }
         if state != AssociationState::Established
             && state != AssociationState::ShutdownPending
             && state != AssociationState::ShutdownReceived
@@ -3199,7 +3342,12 @@ impl Association {
 
                         trace!("[{}] tsn={} has been sacked", self.side, c.tsn);
 
-                        if !c.abandoned() && c.nsent == 1 {
+                        // RFC 9260 6.3.1 C4, C5: as for the cumulative TSN above, one
+                        // measurement per round trip and none across a retransmission.
+                        if !c.abandoned()
+                            && c.nsent == 1
+                            && sna32gte(c.tsn, self.min_tsn2measure_rtt)
+                        {
                             self.min_tsn2measure_rtt = self.my_next_tsn;
                             if let Some(since) = &c.since {
                                 let rtt = now.duration_since(*since);
@@ -3625,9 +3773,28 @@ impl Association {
     /// false means the association should be closed down after the final send.
     fn gather_outbound(&mut self, now: Instant) -> (Vec<Bytes>, bool) {
         let mut raw_packets = vec![];
+        let state = self.state();
 
+        // RFC 9260 6.10, 12.4: control chunks share packets. The SACK that is due goes
+        // with them; if there are none it goes with outbound DATA (6.1), or alone.
+        let mut sack = None;
+        if self.ack_state == AckState::Immediate
+            && matches!(
+                state,
+                AssociationState::Established
+                    | AssociationState::ShutdownPending
+                    | AssociationState::ShutdownSent
+                    | AssociationState::ShutdownReceived
+            )
+        {
+            self.ack_state = AckState::Idle;
+            let chunk = self.create_selective_ack_chunk();
+            debug!("[{}] sending SACK: {}", self.side, chunk);
+            sack = Some(chunk);
+        }
         if !self.control_queue.is_empty() {
-            for p in self.control_queue.drain(..) {
+            let packets: Vec<Packet> = self.control_queue.drain(..).collect();
+            for p in self.bundle_control_packets(packets, &mut sack) {
                 if let Ok(raw) = p.marshal() {
                     raw_packets.push(raw);
                 } else {
@@ -3636,8 +3803,9 @@ impl Association {
                 }
             }
         }
+        self.unbundled_sack = sack;
+        self.first_data_packet = raw_packets.len();
 
-        let state = self.state();
         match state {
             AssociationState::Established => {
                 raw_packets = self.gather_data_packets_to_retransmit(raw_packets, now);
@@ -3910,6 +4078,10 @@ impl Association {
                 );
             }
 
+            if !to_fast_retrans.is_empty() {
+                // RFC 9260 6.3.1 C5, as after a T3-rtx retransmission.
+                self.min_tsn2measure_rtt = self.my_next_tsn;
+            }
             for chunk in &mut to_fast_retrans {
                 if let Some(c) = self.inflight_queue.get_mut(chunk.tsn) {
                     c.nsent += 1;
@@ -3928,10 +4100,11 @@ impl Association {
     }
 
     fn gather_outbound_sack_packets(&mut self, mut raw_packets: Vec<Bytes>) -> Vec<Bytes> {
-        if self.ack_state == AckState::Immediate {
-            self.ack_state = AckState::Idle;
-            let sack = self.create_selective_ack_chunk();
-            debug!("[{}] sending SACK: {}", self.side, sack);
+        if let Some(sack) = self.unbundled_sack.take() {
+            // RFC 9260 6.1: "the endpoint SHOULD bundle the SACK with the outbound DATA".
+            if self.bundle_with_data(&sack, &mut raw_packets, self.first_data_packet) {
+                return raw_packets;
+            }
             if let Ok(raw) = self.marshal_control_chunk(&sack) {
                 raw_packets.push(raw);
             } else {
@@ -3955,11 +4128,19 @@ impl Association {
                 self.cumulative_tsn_ack_point,
             ) {
                 // RFC 8260 2.3.1: with I-DATA the chunk is I-FORWARD-TSN.
+                // RFC 3758 3.5 F2: it goes with outbound DATA when a packet has room.
+                let first_data_packet = self.first_data_packet;
                 let raw = if self.use_interleaving {
                     let fwd_tsn = self.create_i_forward_tsn();
+                    if self.bundle_with_data(&fwd_tsn, &mut raw_packets, first_data_packet) {
+                        return raw_packets;
+                    }
                     self.marshal_control_chunk(&fwd_tsn)
                 } else {
                     let fwd_tsn = self.create_forward_tsn();
+                    if self.bundle_with_data(&fwd_tsn, &mut raw_packets, first_data_packet) {
+                        return raw_packets;
+                    }
                     self.marshal_control_chunk(&fwd_tsn)
                 };
                 if let Ok(raw) = raw {
@@ -4123,6 +4304,13 @@ impl Association {
         // Cleared once the whole in-flight window has been rescanned with nothing
         // left flagged; kept set while awnd/zero-window left chunks behind.
         self.t3_retransmit_pending = chunks_remaining;
+
+        // RFC 9260 6.3.1 C5: no round trip is measured with a TSN sent before this
+        // retransmission; an acknowledgement of it may be for either transmission of what
+        // was sent again.
+        if !chunks.is_empty() {
+            self.min_tsn2measure_rtt = self.my_next_tsn;
+        }
 
         // A later candidate can abandon an earlier fragment already selected
         // into this batch. Commit attempts only after whole-message retirement.

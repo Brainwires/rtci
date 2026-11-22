@@ -429,13 +429,26 @@ impl fmt::Debug for EndpointConfig {
 /// Parameters governing incoming associations
 ///
 /// Default values should be suitable for most internet applications.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ServerConfig {
     /// Transport configuration to use for incoming associations
     pub transport: Arc<TransportConfig>,
 
     /// Maximum number of concurrent associations
     pub(crate) concurrent_associations: u32,
+
+    /// The crypto provider State Cookies are authenticated with, when one was given.
+    pub(crate) cookie_provider: Option<Arc<dyn crypto::RTCCryptoProvider>>,
+}
+
+impl fmt::Debug for ServerConfig {
+    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt.debug_struct("ServerConfig")
+            .field("transport", &self.transport)
+            .field("concurrent_associations", &self.concurrent_associations)
+            .field("cookie_authentication", &self.cookie_provider.is_some())
+            .finish()
+    }
 }
 
 impl Default for ServerConfig {
@@ -443,6 +456,7 @@ impl Default for ServerConfig {
         ServerConfig {
             transport: Arc::new(TransportConfig::default()),
             concurrent_associations: 100_000,
+            cookie_provider: None,
         }
     }
 }
@@ -453,7 +467,34 @@ impl ServerConfig {
         ServerConfig {
             transport: Arc::new(transport),
             concurrent_associations: 100_000,
+            cookie_provider: None,
         }
+    }
+
+    /// Gives the endpoint a crypto provider to authenticate State Cookies with, and makes
+    /// the handshake stateless on the accepting side, as RFC 9260 sections 5.1 and 5.1.3
+    /// have it.
+    ///
+    /// With a provider, the State Cookie of an INIT ACK holds everything the association is
+    /// made from, the time it was made, and an HMAC-SHA-256 over them under a random key of
+    /// the endpoint's (replaced every hour). The endpoint answers an INIT and keeps nothing:
+    /// [`Endpoint::handle`](crate::Endpoint::handle) returns `None` for it and the INIT ACK
+    /// leaves by [`Endpoint::poll_transmit`](crate::Endpoint::poll_transmit). The
+    /// association is made, and returned as
+    /// [`DatagramEvent::NewAssociation`](crate::DatagramEvent::NewAssociation), when a
+    /// COOKIE ECHO brings back a cookie whose MAC verifies and which is no older than
+    /// [`TransportConfig::with_valid_cookie_life`]; it is established at once.
+    ///
+    /// Without a provider (the default) the cookie is 32 random bytes and the endpoint makes
+    /// the association when the INIT arrives, remembering the cookie to compare it with the
+    /// one echoed. `rtc-sctp` names no cryptographic implementation of its own, so the MAC
+    /// is there only when the application supplies the provider.
+    pub fn cookie_authentication(
+        &mut self,
+        provider: Arc<dyn crypto::RTCCryptoProvider>,
+    ) -> &mut Self {
+        self.cookie_provider = Some(provider);
+        self
     }
 
     /// Maximum number of associations the endpoint holds at once. An INIT that would start

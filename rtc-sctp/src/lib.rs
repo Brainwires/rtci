@@ -64,6 +64,7 @@ pub use crate::association::{
 };
 
 pub(crate) mod chunk;
+pub(crate) mod cookie;
 pub use crate::chunk::{
     ErrorCauseCode,
     chunk_payload_data::{ChunkPayloadData, PayloadProtocolIdentifier},

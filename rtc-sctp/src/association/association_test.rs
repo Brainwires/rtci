@@ -1696,6 +1696,7 @@ fn full_buffer_association() -> Association {
             .with_max_receive_buffer_size(FULL_BUFFER_RECV_BUFFER)
             .with_max_message_size(FULL_BUFFER_MAX_MESSAGE),
     );
+    a.set_state(AssociationState::Established);
     assert!(
         a.create_stream(0, true, PayloadProtocolIdentifier::Binary)
             .is_some()
@@ -1852,6 +1853,7 @@ fn test_handle_sack_beyond_sent_tsns_is_refused() -> Result<()> {
 #[test]
 fn test_handle_data_beyond_stream_limit_is_acknowledged_and_discarded() -> Result<()> {
     let mut a = create_association(TransportConfig::default());
+    a.set_state(AssociationState::Established);
     a.my_max_num_inbound_streams = 16;
     let tsn = a.peer_last_tsn.wrapping_add(1);
     let d = ChunkPayloadData {
@@ -1878,6 +1880,7 @@ fn test_handle_data_beyond_stream_limit_is_acknowledged_and_discarded() -> Resul
 #[test]
 fn test_handle_data_across_the_tsn_wrap() -> Result<()> {
     let mut a = create_association(TransportConfig::default());
+    a.set_state(AssociationState::Established);
     a.peer_last_tsn = u32::MAX - 1;
     for tsn in [u32::MAX, 0, 1] {
         let d = ChunkPayloadData {
@@ -2200,3 +2203,9 @@ mod reconfig_test;
 
 #[path = "interleaving_test.rs"]
 mod interleaving_test;
+
+#[path = "bundling_test.rs"]
+mod bundling_test;
+
+#[path = "cookie_test.rs"]
+mod cookie_test;
