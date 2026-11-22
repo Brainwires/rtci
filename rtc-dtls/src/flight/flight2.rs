@@ -69,7 +69,9 @@ impl Flight for Flight2 {
                 }
             };
 
-            if client_hello.version != PROTOCOL_VERSION1_2 {
+            // RFC 5246 E.1: a client offering a later version than 1.2 is answered with 1.2
+            // (the ServerHello's version); one offering only an earlier version is refused.
+            if !client_hello.version.is_dtls1_2_or_later() {
                 return Err((
                     Some(Alert {
                         alert_level: AlertLevel::Fatal,
@@ -79,18 +81,14 @@ impl Flight for Flight2 {
                 ));
             }
 
-            if client_hello.cookie.is_empty() {
+            // RFC 6347 4.2.1: a ClientHello without the cookie, or with a wrong one, proves
+            // nothing about its sender and is no error of the association either: keep
+            // waiting for the one that echoes the cookie. (`DTLSConn` discards such a
+            // ClientHello on arrival, so that it does not take the genuine one's place.)
+            if client_hello.cookie.is_empty()
+                || !crypto::constant_time_eq(&state.cookie, &client_hello.cookie)
+            {
                 return Err((None, None));
-            }
-
-            if state.cookie != client_hello.cookie {
-                return Err((
-                    Some(Alert {
-                        alert_level: AlertLevel::Fatal,
-                        alert_description: AlertDescription::AccessDenied,
-                    }),
-                    Some(Error::ErrCookieMismatch),
-                ));
             }
 
             // Negotiate from the cookie-verified ClientHello, which the handshake transcript
@@ -142,9 +140,11 @@ mod tests {
     use crate::curve::named_curve::NamedCurve;
     use crate::extension::Extension;
     use crate::extension::extension_supported_elliptic_curves::ExtensionSupportedEllipticCurves;
+    use crate::extension::extension_supported_signature_algorithms::ExtensionSupportedSignatureAlgorithms;
     use crate::extension::extension_use_srtp::{ExtensionUseSrtp, SrtpProtectionProfile};
     use crate::handshake::handshake_message_client_hello::HandshakeMessageClientHello;
     use crate::handshake::handshake_random::HandshakeRandom;
+    use crate::signature_hash_algorithm::default_signature_schemes;
     use std::sync::Arc;
 
     fn push_client_hello(
@@ -165,11 +165,17 @@ mod tests {
                 cipher_suites: vec![CipherSuiteId::Tls_Ecdhe_Ecdsa_With_Aes_128_Gcm_Sha256],
                 compression_methods: default_compression_methods(),
                 extensions: vec![
+                    Extension::SupportedSignatureAlgorithms(
+                        ExtensionSupportedSignatureAlgorithms {
+                            signature_hash_algorithms: default_signature_schemes(),
+                        },
+                    ),
                     Extension::SupportedEllipticCurves(ExtensionSupportedEllipticCurves {
                         elliptic_curves: curves,
                     }),
                     Extension::UseSrtp(ExtensionUseSrtp {
                         protection_profiles: profiles,
+                        mki: vec![],
                     }),
                 ],
             }));
@@ -187,6 +193,14 @@ mod tests {
         let mut cfg = HandshakeConfig::new(provider.clone());
         cfg.local_cipher_suites = vec![CipherSuiteId::Tls_Ecdhe_Ecdsa_With_Aes_128_Gcm_Sha256];
         cfg.local_named_curves = vec![NamedCurve::X25519, NamedCurve::P256];
+        cfg.local_signature_schemes = default_signature_schemes();
+        cfg.local_certificates = vec![
+            crate::crypto::Certificate::generate_self_signed(
+                vec!["localhost".to_owned()],
+                provider.crypto(),
+            )
+            .unwrap(),
+        ];
         cfg.local_srtp_protection_profiles = vec![
             SrtpProtectionProfile::Srtp_Aead_Aes_128_Gcm,
             SrtpProtectionProfile::Srtp_Aes128_Cm_Hmac_Sha1_80,
@@ -209,10 +223,12 @@ mod tests {
         );
         let next = Flight0 {}.parse(&mut state, &cache, &cfg).unwrap();
         assert_eq!(next.to_string(), Flight2 {}.to_string());
+        // Nothing is negotiated from a ClientHello without the cookie.
         assert_eq!(
             state.srtp_protection_profile,
-            SrtpProtectionProfile::Srtp_Aes128_Cm_Hmac_Sha1_32
+            SrtpProtectionProfile::Unsupported
         );
+        assert!(state.cipher_suite.is_none());
 
         // The genuine client's ClientHello, answering our HelloVerifyRequest.
         let cookie = state.cookie.clone();

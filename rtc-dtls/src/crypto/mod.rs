@@ -278,6 +278,48 @@ pub const OID_ED25519: Oid<'static> = oid!(1.3.101.112);
 /// The X.509 algorithm OID for ECDSA with a named curve.
 pub const OID_ECDSA: Oid<'static> = oid!(1.2.840.10045.2.1);
 
+/// The hash and signature pair `der`, an X.509 certificate, is signed with, as a TLS 1.2
+/// SignatureAndHashAlgorithm. `None` for an algorithm with no such pair here (RSASSA-PSS, or
+/// one this crate does not know), and for a certificate that does not parse.
+fn certificate_signature_pair(der: &[u8]) -> Option<SignatureHashAlgorithm> {
+    use crate::signature_hash_algorithm::HashAlgorithm;
+
+    let (_, certificate) = x509_parser::parse_x509_certificate(der).ok()?;
+    let (hash, signature) = match certificate
+        .signature_algorithm
+        .algorithm
+        .to_id_string()
+        .as_str()
+    {
+        "1.2.840.10045.4.1" => (HashAlgorithm::Sha1, SignatureAlgorithm::Ecdsa),
+        "1.2.840.10045.4.3.2" => (HashAlgorithm::Sha256, SignatureAlgorithm::Ecdsa),
+        "1.2.840.10045.4.3.3" => (HashAlgorithm::Sha384, SignatureAlgorithm::Ecdsa),
+        "1.2.840.10045.4.3.4" => (HashAlgorithm::Sha512, SignatureAlgorithm::Ecdsa),
+        "1.2.840.113549.1.1.5" => (HashAlgorithm::Sha1, SignatureAlgorithm::Rsa),
+        "1.2.840.113549.1.1.11" => (HashAlgorithm::Sha256, SignatureAlgorithm::Rsa),
+        "1.2.840.113549.1.1.12" => (HashAlgorithm::Sha384, SignatureAlgorithm::Rsa),
+        "1.2.840.113549.1.1.13" => (HashAlgorithm::Sha512, SignatureAlgorithm::Rsa),
+        "1.3.101.112" => (HashAlgorithm::Ed25519, SignatureAlgorithm::Ed25519),
+        _ => return None,
+    };
+    Some(SignatureHashAlgorithm { hash, signature })
+}
+
+/// Whether every certificate of `chain` is signed with a pair in `schemes`: RFC 5246 7.4.2
+/// asks it of the certificates a server sends (against the client's signature_algorithms) and
+/// 7.4.4 of the ones a client sends (against the CertificateRequest).
+///
+/// A certificate whose signature algorithm has no TLS 1.2 pair this crate knows (see
+/// [`certificate_signature_pair`]) cannot be judged and is let through.
+pub(crate) fn certificates_signed_within(
+    chain: &[CertificateDer<'static>],
+    schemes: &[SignatureHashAlgorithm],
+) -> bool {
+    chain.iter().all(|certificate| {
+        certificate_signature_pair(certificate.as_ref()).is_none_or(|pair| schemes.contains(&pair))
+    })
+}
+
 fn verify_signature(
     crypto: &dyn crypto::RTCCrypto,
     message: &[u8],

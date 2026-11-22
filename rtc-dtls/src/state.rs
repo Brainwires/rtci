@@ -1,9 +1,11 @@
 use super::cipher_suite::*;
+use super::client_certificate_type::ClientCertificateType;
 use super::conn::*;
 use super::curve::named_curve::*;
 use super::extension::extension_use_srtp::SrtpProtectionProfile;
 use super::handshake::handshake_random::*;
 use super::prf::*;
+use super::signature_hash_algorithm::SignatureHashAlgorithm;
 use crypto::RTCCryptoProvider;
 use crypto::SecretVec;
 use rkyv::{Archive, Deserialize, Serialize};
@@ -51,6 +53,21 @@ pub struct State {
     /// The transcript and CertificateVerify signature whose check last passed, so that
     /// re-parsing the same flight does not verify the same signature again.
     pub(crate) verified_certificate_verify: Option<Vec<u8>>,
+    /// Both ends signalled secure renegotiation in this handshake (RFC 5746 3.4, 3.6): the
+    /// ClientHello carried an empty renegotiation_info or the signalling suite, and, for a
+    /// client, the ServerHello answered with an empty renegotiation_info.
+    pub(crate) secure_renegotiation: bool,
+    /// The hash and signature pairs the peer accepts signatures under. For a server: the
+    /// ClientHello's signature_algorithms, or the RFC 5246 7.4.1.4.1 defaults when it sent
+    /// none. For a client: the CertificateRequest's supported_signature_algorithms.
+    pub(crate) remote_signature_schemes: Vec<SignatureHashAlgorithm>,
+    /// Client: the certificate types the CertificateRequest listed (RFC 5246 7.4.4).
+    pub(crate) remote_certificate_types: Vec<ClientCertificateType>,
+    /// Server: the ClientHello carried ec_point_formats, so the ServerHello may (RFC 8422 5.2).
+    pub(crate) remote_offered_point_formats: bool,
+    /// Server: the pair chosen for the ServerKeyExchange signature, one the client listed and
+    /// the certificate's key can produce (RFC 5246 7.4.3).
+    pub(crate) local_signature_scheme: Option<SignatureHashAlgorithm>,
     //pub(crate) replay_detector: Vec<Box<dyn ReplayDetector>>,
 }
 
@@ -67,6 +84,7 @@ struct SerializedState {
     peer_certificates: Vec<Vec<u8>>,
     identity_hint: Vec<u8>,
     is_client: bool,
+    extended_master_secret: bool,
 }
 
 impl State {
@@ -107,6 +125,11 @@ impl State {
             local_key_signature: vec![],
             peer_certificates_verified: false,
             verified_certificate_verify: None,
+            secure_renegotiation: false,
+            remote_signature_schemes: vec![],
+            remote_certificate_types: vec![],
+            remote_offered_point_formats: false,
+            local_signature_scheme: None,
         }
     }
 }
@@ -152,6 +175,7 @@ impl State {
             peer_certificates: self.peer_certificates.clone(),
             identity_hint: self.identity_hint.clone(),
             is_client: self.is_client,
+            extended_master_secret: self.extended_master_secret,
         })
     }
 
@@ -175,6 +199,7 @@ impl State {
         self.remote_random = HandshakeRandom::unmarshal(&mut reader)?;
 
         self.is_client = serialized.is_client;
+        self.extended_master_secret = serialized.extended_master_secret;
 
         // Set master secret
         self.master_secret.clone_from(&serialized.master_secret);
@@ -299,7 +324,9 @@ impl State {
     /// # Errors
     ///
     /// Returns an error before the handshake completes, when `context` is non-empty, when the
-    /// label is reserved by TLS, or when the negotiated cipher suite is unavailable.
+    /// label is reserved by TLS, when the negotiated cipher suite is unavailable, or when the
+    /// session was established without the extended master secret: such a master secret is not
+    /// bound to the handshake, and RFC 7627 5.4 forbids exporting from it.
     pub fn export_keying_material(
         &self,
         label: &str,
@@ -312,6 +339,8 @@ impl State {
             return Err(Error::ContextUnsupported);
         } else if INVALID_KEYING_LABELS.contains(&label) {
             return Err(Error::ReservedExportKeyingMaterial);
+        } else if !self.extended_master_secret {
+            return Err(Error::ErrExportWithoutExtendedMasterSecret);
         }
 
         let mut local_random = vec![];

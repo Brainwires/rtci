@@ -8,6 +8,8 @@
 //! Normally an application drives [`Endpoint`](crate::endpoint::Endpoint) instead, which owns one
 //! of these per remote address.
 #[cfg(test)]
+mod conn_conformance_test;
+#[cfg(test)]
 mod conn_ported_test;
 #[cfg(test)]
 mod conn_test;
@@ -327,12 +329,39 @@ impl DTLSConn {
                     alert_description: desc,
                 }),
             ),
-            should_encrypt: self.is_handshake_completed(),
+            should_encrypt: self.protects_alerts(),
             reset_local_sequence_number: false,
         }]);
         if is_fatal {
             // Sending a fatal alert ends the association (RFC 5246 7.2.2).
             self.fail();
+        }
+    }
+
+    /// Whether an alert sent now is protected: once this side has sent ChangeCipherSpec its
+    /// records are epoch-1 records, and the peer reads nothing else from that epoch (RFC 5246
+    /// 7.1). That is before the handshake completes for whoever sends its Finished first, so an
+    /// alert about the peer's Finished (decrypt_error) has to be encrypted to be understood.
+    fn protects_alerts(&self) -> bool {
+        self.get_local_epoch() > 0
+    }
+
+    /// Whether `handshake` is a ClientHello this server must not take as the one answering its
+    /// HelloVerifyRequest: it comes after the first ClientHello and does not echo the cookie
+    /// (RFC 6347 4.2.1). Anyone can send such a message from the client's address; it is
+    /// dropped without a trace, so that the genuine ClientHello, under the same message
+    /// sequence number, is still accepted when it arrives.
+    fn is_client_hello_without_our_cookie(&self, handshake: &Handshake) -> bool {
+        if self.is_client || self.address_verified {
+            return false;
+        }
+        match &handshake.handshake_message {
+            HandshakeMessage::ClientHello(client_hello) => {
+                handshake.handshake_header.message_sequence > 0
+                    && (self.state.cookie.is_empty()
+                        || !crypto::constant_time_eq(&self.state.cookie, &client_hello.cookie))
+            }
+            _ => false,
         }
     }
 
@@ -569,7 +598,7 @@ impl DTLSConn {
                             alert_description: alert.alert_description,
                         }),
                     ),
-                    should_encrypt: self.is_handshake_completed(),
+                    should_encrypt: self.protects_alerts(),
                     reset_local_sequence_number: false,
                 });
 
@@ -628,7 +657,7 @@ impl DTLSConn {
                                 alert_description: alert.alert_description,
                             }),
                         ),
-                        should_encrypt: self.is_handshake_completed(),
+                        should_encrypt: self.protects_alerts(),
                         reset_local_sequence_number: false,
                     });
 
@@ -883,6 +912,15 @@ impl DTLSConn {
                         continue;
                     }
                 };
+                if self.is_client_hello_without_our_cookie(&raw_handshake) {
+                    debug!(
+                        "{}: discarded ClientHello without the cookie (seq: {})",
+                        srv_cli_str(self.is_client),
+                        raw_handshake.handshake_header.message_sequence
+                    );
+                    self.fragment_buffer.unpop();
+                    continue;
+                }
 
                 delivered |= self.cache.push(
                     out,
@@ -1023,18 +1061,16 @@ impl DTLSConn {
             }
             Content::ApplicationData(a) => {
                 if h.epoch == 0 {
-                    warn!(
-                        "{}: <- Unexpected ApplicationData Message",
+                    // Application data is never sent unprotected, so this record is invalid;
+                    // it is also unauthenticated, and anyone who knows the peer's address can
+                    // send it. It is silently discarded [RFC6347 Section-4.1.2.7]: an alert
+                    // would let one spoofed datagram end the handshake.
+                    debug!(
+                        "{}: discarded application data in epoch 0 (seq: {})",
                         srv_cli_str(self.is_client),
+                        h.sequence_number,
                     );
-                    return (
-                        false,
-                        Some(Alert {
-                            alert_level: AlertLevel::Fatal,
-                            alert_description: AlertDescription::UnexpectedMessage,
-                        }),
-                        Some(Error::ErrApplicationDataEpochZero),
-                    );
+                    return (false, None, None);
                 }
 
                 if !self.is_handshake_completed() && !self.has_room_for_early_application_data(&a) {

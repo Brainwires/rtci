@@ -7,6 +7,7 @@ fn test_extension_use_srtp() -> Result<()> {
     let raw_use_srtp = vec![0x00, 0x05, 0x00, 0x02, 0x00, 0x01, 0x00]; //0x00, 0x0e,
     let parsed_use_srtp = ExtensionUseSrtp {
         protection_profiles: vec![SrtpProtectionProfile::Srtp_Aes128_Cm_Hmac_Sha1_80],
+        mki: vec![],
     };
 
     let mut raw = vec![];

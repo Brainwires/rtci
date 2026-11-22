@@ -34,6 +34,18 @@ pub const DTLS1_0MINOR: u8 = 0xff;
 /// DTLS 1.2 as a single 16-bit value.
 pub const VERSION_DTLS12: u16 = 0xfefd;
 
+/// The first byte of every DTLS version: {254, 255} is 1.0, {254, 253} is 1.2, and the second
+/// byte goes down as the version goes up.
+pub(crate) const DTLS_VERSION_MAJOR: u8 = 0xfe;
+
+impl ProtocolVersion {
+    /// Whether this is DTLS 1.2 or a later version of DTLS. A ClientHello with a later version
+    /// than the server speaks is answered with the server's highest, 1.2 (RFC 5246 E.1).
+    pub(crate) fn is_dtls1_2_or_later(&self) -> bool {
+        self.major == DTLS_VERSION_MAJOR && self.minor <= PROTOCOL_VERSION1_2.minor
+    }
+}
+
 /// DTLS 1.0 as a [`ProtocolVersion`].
 pub const PROTOCOL_VERSION1_0: ProtocolVersion = ProtocolVersion {
     major: DTLS1_0MAJOR,
@@ -114,7 +126,13 @@ impl RecordLayerHeader {
         let sequence_number = u64::from_be_bytes(be);
 
         let protocol_version = ProtocolVersion { major, minor };
-        if protocol_version != PROTOCOL_VERSION1_0 && protocol_version != PROTOCOL_VERSION1_2 {
+        // RFC 5246 E.1: a ClientHello may come under any record-layer version of the protocol
+        // family ({254, xx}), so every epoch-0 record is taken; which version is spoken is
+        // settled by the hellos. Protected records carry the negotiated version (the AEAD
+        // additional data covers the field).
+        let known =
+            protocol_version == PROTOCOL_VERSION1_0 || protocol_version == PROTOCOL_VERSION1_2;
+        if !known && !(major == DTLS_VERSION_MAJOR && epoch == 0) {
             return Err(Error::ErrUnsupportedProtocolVersion);
         }
         let content_len = reader.read_u16::<BigEndian>()?;

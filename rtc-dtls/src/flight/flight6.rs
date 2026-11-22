@@ -1,3 +1,4 @@
+use super::flight4::verify_client_finished;
 use super::*;
 use crate::change_cipher_spec::*;
 use crate::content::*;
@@ -46,7 +47,10 @@ impl Flight for Flight6 {
 
         if let Some(message) = msgs.get(&HandshakeType::Finished) {
             match message {
-                HandshakeMessage::Finished(_) => {}
+                // RFC 5246 7.4.9: a Finished is only ever taken with its verify_data checked.
+                HandshakeMessage::Finished(finished) => {
+                    verify_client_finished(state, cache, cfg, finished)?
+                }
                 _ => {
                     return Err((
                         Some(Alert {

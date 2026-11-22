@@ -343,6 +343,8 @@ fn test_export_keying_material() -> Result<()> {
     c.state.local_random = random_at(500);
     c.state.remote_random = random_at(1000);
     c.state.local_sequence_number = vec![0, 0];
+    // RFC 7627 5.4: only a session with the extended master secret exports key material.
+    c.state.extended_master_secret = true;
     c.state.cipher_suite = Some(Box::new(
         crate::cipher_suite::cipher_suite_aes_128_gcm_sha256::CipherSuiteAes128GcmSha256::new(
             false,
@@ -528,12 +530,14 @@ fn test_srtp_configuration() -> Result<()> {
             None,
         ),
         (
+            // RFC 5764 4.1.1: a server that does not do DTLS-SRTP ignores use_srtp; it is the
+            // client, which asked for SRTP, that refuses a ServerHello without it.
             "SRTP client only",
             vec![SrtpProtectionProfile::Srtp_Aes128_Cm_Hmac_Sha1_80],
             vec![],
             SrtpProtectionProfile::Unsupported,
+            Some(Error::ErrRequestedButNoSrtpExtension),
             Some(Error::ErrAlertFatalOrClose),
-            Some(Error::ErrServerNoMatchingSrtpProfile),
         ),
         (
             "SRTP server only",
@@ -1268,11 +1272,11 @@ fn test_protocol_version_validation() -> Result<()> {
         major: 0xfe,
         minor: 0xff,
     };
-    let client_hello = |version: ProtocolVersion, sequence: u64| {
+    let client_hello = |version: ProtocolVersion, sequence: u64, cookie: &[u8]| {
         let mut handshake =
             Handshake::new(HandshakeMessage::ClientHello(HandshakeMessageClientHello {
                 version,
-                cookie: cookie.clone(),
+                cookie: cookie.to_vec(),
                 random: random.clone(),
                 cipher_suites: vec![CipherSuiteId::Tls_Ecdhe_Ecdsa_With_Aes_128_Gcm_Sha256],
                 compression_methods: default_compression_methods(),
@@ -1284,28 +1288,42 @@ fn test_protocol_version_validation() -> Result<()> {
         record
     };
 
-    // Server
-    let server_cases = vec![
-        ("ClientHelloVersion", vec![client_hello(downgraded, 0)]),
-        (
-            "SecondsClientHelloVersion",
-            vec![
-                client_hello(PROTOCOL_VERSION1_2, 0),
-                client_hello(downgraded, 1),
-            ],
-        ),
-    ];
-    for (name, records) in server_cases {
+    // Server: a ClientHello of an unsupported version, as the first one and as the one that
+    // answers HelloVerifyRequest. The second must echo the server's cookie: without it the
+    // message is not the client's and is discarded whatever it says (RFC 6347 4.2.1).
+    for (name, downgrade_second) in [
+        ("ClientHelloVersion", false),
+        ("SecondsClientHelloVersion", true),
+    ] {
         let mut server = test_server(
             builder()
                 .with_cipher_suites(vec![CipherSuiteId::Tls_Ecdhe_Ecdsa_With_Aes_128_Gcm_Sha256])
                 .with_flight_interval(Duration::from_millis(100)),
             true,
         )?;
-        let mut last_error = None;
-        let mut resp = vec![];
-        for record in &records {
-            last_error = feed(&mut server, Instant::now(), &record_bytes(record)?).err();
+        let first_version = if downgrade_second {
+            PROTOCOL_VERSION1_2
+        } else {
+            downgraded
+        };
+        let first = record_bytes(&client_hello(first_version, 0, &cookie))?;
+        let mut last_error = feed(&mut server, Instant::now(), &first).err();
+        let mut resp = drain(&mut server);
+        if downgrade_second {
+            assert_eq!(
+                last_error, None,
+                "{name}: the first ClientHello is accepted"
+            );
+            let server_cookie =
+                match first_record(resp.first().expect("HelloVerifyRequest"))?.content {
+                    Content::Handshake(h) => match h.handshake_message {
+                        HandshakeMessage::HelloVerifyRequest(h) => h.cookie,
+                        other => panic!("{name}: unexpected handshake message {other:?}"),
+                    },
+                    other => panic!("{name}: unexpected content {other:?}"),
+                };
+            let second = record_bytes(&client_hello(downgraded, 1, &server_cookie))?;
+            last_error = feed(&mut server, Instant::now(), &second).err();
             resp = drain(&mut server);
         }
         assert_eq!(

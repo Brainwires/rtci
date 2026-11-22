@@ -685,3 +685,118 @@ fn unverified_source_addresses_are_capped_and_cost_no_key_pair() -> Result<()> {
     assert!(server.connections.len() <= MAX_UNVERIFIED_ASSOCIATIONS + 1);
     Ok(())
 }
+
+// ---------------------------------------------------------------------------------------------
+// Unauthenticated input does not end a handshake (RFC 6347 4.1.2.7, 4.2.1).
+// ---------------------------------------------------------------------------------------------
+
+/// A plaintext application-data record, which needs no keys: `17 fe fd`, epoch 0, the given
+/// sequence number, one byte of data.
+fn plaintext_application_data(sequence_number: u64) -> BytesMut {
+    let mut datagram = vec![0x17, 0xfe, 0xfd, 0, 0];
+    datagram.extend_from_slice(&sequence_number.to_be_bytes()[2..]);
+    datagram.extend_from_slice(&[0, 1, 0]);
+    BytesMut::from(datagram.as_slice())
+}
+
+/// RFC 6347 4.1.2.7: an application-data record in epoch 0 is invalid, and anyone who knows the
+/// peer's address can send one. It is discarded without an alert, on either side, and the
+/// handshake completes.
+#[test]
+fn plaintext_application_data_during_the_handshake_is_discarded() -> Result<()> {
+    let now = Instant::now();
+    let mut client = Endpoint::new(client_addr(), TransportProtocol::UDP, None);
+    let mut server = Endpoint::new(
+        server_addr(),
+        TransportProtocol::UDP,
+        Some(server_config()?),
+    );
+    client.connect(now, server_addr(), client_config()?, None)?;
+    let to_server = take_transmits(&mut client);
+    deliver(&mut server, client_addr(), to_server, now);
+    let to_client = take_transmits(&mut server);
+
+    let events = server.read(now, client_addr(), None, plaintext_application_data(1000))?;
+    assert!(events.is_empty());
+    assert!(!server.is_connection_failed(&client_addr()));
+    assert!(
+        take_transmits(&mut server).is_empty(),
+        "no alert answers it"
+    );
+
+    let events = client.read(now, server_addr(), None, plaintext_application_data(1000))?;
+    assert!(events.is_empty());
+    assert!(!client.is_connection_failed(&server_addr()));
+    assert!(
+        take_transmits(&mut client).is_empty(),
+        "no alert answers it"
+    );
+
+    deliver(&mut client, server_addr(), to_client, now);
+    complete_handshake(&mut client, &mut server, now);
+    Ok(())
+}
+
+/// A ClientHello with message sequence 1, as the one answering HelloVerifyRequest has, carrying
+/// `cookie`. Written out byte by byte: it is what an attacker sends, not what this crate builds.
+fn forged_second_client_hello(cookie: &[u8]) -> BytesMut {
+    let mut body = vec![0xfe, 0xfd];
+    body.extend_from_slice(&[0x66; 32]);
+    body.push(0);
+    body.push(cookie.len() as u8);
+    body.extend_from_slice(cookie);
+    body.extend_from_slice(&[0, 2, 0xc0, 0x2b, 1, 0, 0, 0]);
+
+    let length = (body.len() as u32).to_be_bytes();
+    let mut message = vec![1];
+    message.extend_from_slice(&length[1..]);
+    message.extend_from_slice(&[0, 1, 0, 0, 0]);
+    message.extend_from_slice(&length[1..]);
+    message.extend_from_slice(&body);
+
+    let mut datagram = vec![HANDSHAKE, 0xfe, 0xfd, 0, 0, 0, 0, 0, 0, 0, 1];
+    datagram.extend_from_slice(&(message.len() as u16).to_be_bytes());
+    datagram.extend_from_slice(&message);
+    BytesMut::from(datagram.as_slice())
+}
+
+/// RFC 6347 4.2.1: a ClientHello with an invalid cookie is not an error. One spoofed datagram
+/// (a wrong cookie, or none, under the message sequence number of the genuine second
+/// ClientHello) must not end the handshake, be answered with an alert, or take the place of the
+/// genuine ClientHello, which is still accepted afterwards.
+#[test]
+fn a_client_hello_with_a_wrong_cookie_does_not_block_the_genuine_one() -> Result<()> {
+    for forged_cookie in [vec![0x99; 20], vec![]] {
+        let now = Instant::now();
+        let mut client = Endpoint::new(client_addr(), TransportProtocol::UDP, None);
+        let mut server = Endpoint::new(
+            server_addr(),
+            TransportProtocol::UDP,
+            Some(server_config()?),
+        );
+        client.connect(now, server_addr(), client_config()?, None)?;
+        let to_server = take_transmits(&mut client);
+        deliver(&mut server, client_addr(), to_server, now);
+        let hello_verify_request = take_transmits(&mut server);
+        assert_eq!(hello_verify_request.len(), 1);
+
+        let events = server.read(
+            now,
+            client_addr(),
+            None,
+            forged_second_client_hello(&forged_cookie),
+        )?;
+        assert!(events.is_empty());
+        assert!(!server.is_connection_failed(&client_addr()));
+        for datagram in take_transmits(&mut server) {
+            assert!(
+                !record_content_types(&datagram).contains(&ALERT),
+                "a wrong cookie is not answered with an alert"
+            );
+        }
+
+        deliver(&mut client, server_addr(), hello_verify_request, now);
+        complete_handshake(&mut client, &mut server, now);
+    }
+    Ok(())
+}

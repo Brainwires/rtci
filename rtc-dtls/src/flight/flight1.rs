@@ -123,45 +123,7 @@ impl Flight for Flight1 {
             return Err((None, Some(error)));
         }
 
-        let mut extensions = vec![
-            Extension::SupportedSignatureAlgorithms(ExtensionSupportedSignatureAlgorithms {
-                signature_hash_algorithms: cfg.local_signature_schemes.clone(),
-            }),
-            Extension::RenegotiationInfo(ExtensionRenegotiationInfo {
-                renegotiated_connection: 0,
-            }),
-        ];
-
-        if cfg.local_psk_callback.is_none() {
-            extensions.extend_from_slice(&[
-                Extension::SupportedEllipticCurves(ExtensionSupportedEllipticCurves {
-                    elliptic_curves: cfg.local_named_curves.clone(),
-                }),
-                Extension::SupportedPointFormats(ExtensionSupportedPointFormats {
-                    point_formats: vec![ELLIPTIC_CURVE_POINT_FORMAT_UNCOMPRESSED],
-                }),
-            ]);
-        }
-
-        if !cfg.local_srtp_protection_profiles.is_empty() {
-            extensions.push(Extension::UseSrtp(ExtensionUseSrtp {
-                protection_profiles: cfg.local_srtp_protection_profiles.clone(),
-            }));
-        }
-
-        if cfg.extended_master_secret == ExtendedMasterSecretType::Request
-            || cfg.extended_master_secret == ExtendedMasterSecretType::Require
-        {
-            extensions.push(Extension::UseExtendedMasterSecret(
-                ExtensionUseExtendedMasterSecret { supported: true },
-            ));
-        }
-
-        if !cfg.server_name.is_empty() {
-            extensions.push(Extension::ServerName(ExtensionServerName {
-                server_name: cfg.server_name.clone(),
-            }));
-        }
+        let extensions = client_hello_extensions(cfg);
 
         Ok(vec![Packet {
             record: RecordLayer::new(
@@ -183,4 +145,52 @@ impl Flight for Flight1 {
             reset_local_sequence_number: false,
         }])
     }
+}
+
+/// The extensions of this client's ClientHello: the same in the first one and in the one that
+/// answers HelloVerifyRequest (RFC 6347 4.2.1), and the set a ServerHello's extensions are
+/// checked against (RFC 5246 7.4.1.4).
+pub(crate) fn client_hello_extensions(cfg: &HandshakeConfig) -> Vec<Extension> {
+    let mut extensions = vec![
+        Extension::SupportedSignatureAlgorithms(ExtensionSupportedSignatureAlgorithms {
+            signature_hash_algorithms: cfg.local_signature_schemes.clone(),
+        }),
+        // RFC 5746 3.4: empty in an initial handshake. The signalling suite is not sent as
+        // well.
+        Extension::RenegotiationInfo(ExtensionRenegotiationInfo::default()),
+    ];
+
+    if cfg.local_psk_callback.is_none() {
+        extensions.extend_from_slice(&[
+            Extension::SupportedEllipticCurves(ExtensionSupportedEllipticCurves {
+                elliptic_curves: cfg.local_named_curves.clone(),
+            }),
+            Extension::SupportedPointFormats(ExtensionSupportedPointFormats {
+                point_formats: vec![ELLIPTIC_CURVE_POINT_FORMAT_UNCOMPRESSED],
+            }),
+        ]);
+    }
+
+    if !cfg.local_srtp_protection_profiles.is_empty() {
+        extensions.push(Extension::UseSrtp(ExtensionUseSrtp {
+            protection_profiles: cfg.local_srtp_protection_profiles.clone(),
+            mki: vec![],
+        }));
+    }
+
+    if cfg.extended_master_secret == ExtendedMasterSecretType::Request
+        || cfg.extended_master_secret == ExtendedMasterSecretType::Require
+    {
+        extensions.push(Extension::UseExtendedMasterSecret(
+            ExtensionUseExtendedMasterSecret { supported: true },
+        ));
+    }
+
+    if !cfg.server_name.is_empty() {
+        extensions.push(Extension::ServerName(ExtensionServerName {
+            server_name: cfg.server_name.clone(),
+        }));
+    }
+
+    extensions
 }
