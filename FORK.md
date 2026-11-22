@@ -94,6 +94,10 @@ history stays intact.
 | A renegotiated codec re-binds a sender's streams | `src/rtp_transceiver/rtp_sender/internal.rs` (`rebind_local_streams`, `local_stream_infos`), `src/peer_connection/internal.rs` (`start_rtp_senders`), `rtc-interceptor/src/report/sender.rs` | A negotiation that changes the codec an encoding is sent with (or its RTX / FEC flow or header extensions) unbinds and re-binds its streams with the same SSRCs; the sender report keeps its counts and sends no BYE over it; the NACK responder's buffer and the TWCC send side restart. Bound streams name no RTX / FEC SSRC without the repair payload type. |
 | Remote-outbound round trip time over RTCP XR | `rtc-interceptor/src/report/{receiver,sender}.rs` (`RTCP_FB_RRTR`), `src/statistics/accumulator/{rtcp_reports.rs,rtp_stream/inbound.rs}`, `src/peer_connection/configuration/interceptor_registry.rs` (`configure_receiver_reference_time`) | A stream that negotiated `a=rtcp-fb:<pt> rrtr` (libwebrtc's name) gets an XR receiver reference time block with each receiver report (RFC 3611 section 4.4); the sender answers every one with a DLRR block (section 4.5), as libwebrtc does; the receiver's remote-outbound stats report `roundTripTime`, `totalRoundTripTime`, `roundTripTimeMeasurements`. |
 | ECN / L4S on RTP media and the ECN / RFC 8888 statistics | `rtc-shared/src/transport.rs` (`TransportContext::ecn`), `SettingEngineBuilder::with_ecn`, `src/peer_connection/handler/{ice,interceptor}.rs`, `rtc-interceptor/src/rfc8888/sender.rs`, `src/statistics/accumulator/{ccfb,rtcp_reports}.rs`, `configure_congestion_control_feedback` | The sans-I/O engine takes each received datagram's ECN codepoint in `TransportContext::ecn` and names the one to set on each datagram it sends. With `with_ecn(true)`, RTP media (RTX included) of a stream that negotiated `a=rtcp-fb:<pt> ack ccfb` (RFC 8888) is sent ECT(1), the L4S identifier; nothing else is marked. RFC 8888 reports carry each packet's codepoint. Stats: inbound `packetsReceivedWithEct1` / `packetsReceivedWithCe` / `packetsReportedAsLost` / `packetsReportedAsLostButRecovered`, outbound `packetsSentWithEct1`, remote-inbound `packetsReceivedWithEct1` / `packetsReceivedWithCe` / `packetsReportedAsLost` / `packetsReportedAsLostButRecovered` / `packetsWithBleachedEct1Marking`. Opt-in: off by default, TWCC stays the default feedback and the default SDP is unchanged. `tests/ecn_l4s_rtc2rtc.rs`. |
+| SRTP key lifetime and key-exhaustion events (RFC 3711 sections 3.3.1, 3.4, 9.2; RFC 7714 sections 9.4, 13.1) | `rtc-srtp/src/context/{mod,srtp,srtcp}.rs` (`check_key_lifetime`, `count_packet`, `poll_event`), `rtc-srtp/src/keying.rs` (`KeyLifetime`, `KeyUsage`, `ContextEvent`) | Packets are counted per master key; the one past 2^48 SRTP / 2^31 SRTCP (or the lifetime set) is refused in both directions, and `KeyLifetimeExpiring` / `KeyExhausted` tell the application to re-key. Upstream wraps the SRTCP index under the same key. `key_lifetime_test.rs`. |
+| Encrypted header extensions (RFC 6904; RFC 7714 section 8.3) | `rtc-srtp/src/header_extension.rs`, `Context::set_encrypted_header_extensions` | The transform, per extension id, for every profile; not signalled by a peer connection. `header_extension_test.rs` (RFC 6904 Appendix A and libsrtp's vectors). |
+| MKI with a master-key table, key derivation rate (RFC 3711 sections 3.1, 4.3.1, 8.1) | `rtc-srtp/src/keying.rs` (`Keying`, `KeyDerivationRate`), `Context::{with_keying, add_master_key, set_sending_mki, remove_master_key}`, `rtc-srtp/src/cipher/mod.rs` (`KeySource`, `Epochs`) | Crate level; DTLS-SRTP uses neither. `keying_test.rs`. |
+| AES-192 counter mode (RFC 6188), the NULL cipher (RFC 3711 section 5.1), unencrypted SRTCP on send | `rtc-crypto` (`Aes192`, `Aes192Ctr`), `rtc-srtp/src/protection_profile.rs` (`Aes192CmHmacSha1_*`, `NullHmacSha1_*`, `dtls_srtp_id`), `Context::set_srtcp_encryption` | Crate level. The NULL profiles are never offered by a peer connection; the RFC 6188 suites have no DTLS-SRTP code point. `profiles_test.rs`, `rfc_vectors_test.rs`, `rfc7714_test.rs`. |
 | CI: benchmarks, fuzzing, OSS-Fuzz, git-cliff release notes | `.github/workflows/{bench,fuzz,release}.yml`, `oss-fuzz/`, `cliff.toml` | |
 
 ### Hardening (fork only)
@@ -101,7 +105,9 @@ history stays intact.
 Peer-input hardening upstream does not have: bounded DTLS fragment reassembly, early-record queue
 and handshake cache; AEAD-only default DTLS suites; ChangeCipherSpec honoured only for the
 handshake's one epoch transition; SRTP state only after authentication, and SRTCP authenticated
-whatever its E flag; ICE source filtering, authenticated role conflicts and consent, candidate
+whatever its E flag (AES-GCM included), no SRTP / SRTCP packet past a master key's lifetime and no
+ROC wrap on reception, replay protection on by default with a window of at least 64, nothing
+sent in the clear when Cryptex is required, master keys zeroized and never printed; ICE source filtering, authenticated role conflicts and consent, candidate
 caps (mDNS-resolved ones included), mDNS answers only from the mDNS socket, at most 64 published
 mDNS names (a host candidate past them is dropped, not sent with its address); bounded RFC 4571
 frame decoding; bounded SCTP
@@ -147,6 +153,13 @@ reason. Today there are two:
   (upstream's points one name at 127.0.0.1 and hides none).
 
 ### Defaults the fork narrows on purpose
+
+- SRTP (`rtc-srtp`), each following RFC 3711 where upstream does not: a `Context` created without
+  replay options has a 64-packet replay window (upstream: none; pass
+  `srtp_no_replay_protection()`); `srtp_replay_protection(n)` / `srtcp_replay_protection(n)`
+  refuse n below 64 (section 3.3.2); the first SRTCP index is 0, not 1 (section 3.4); a master key
+  is refused after its lifetime (section 9.2), which is 2^31 packets for the AES-192 / AES-256
+  counter-mode suites (RFC 6188 section 4; `Context::set_key_lifetime` changes it).
 
 - DTLS: the default WebRTC cipher suites are AEAD only (AES-128-GCM, ChaCha20-Poly1305); the
   AES-256-CBC-SHA suites are opt-in. This is the one deliberate exception to rule 1, decided by
