@@ -111,20 +111,23 @@ pub struct RTCInboundRtpStreamStats {
     )]
     pub last_packet_received_timestamp: Option<SystemInstant>,
 
-    /// Total bytes received in RTP headers.
+    /// Total RTP header and padding bytes received, those of retransmissions and of the
+    /// stream's RTX and FEC packets included.
     pub header_bytes_received: u64,
 
     /// Number of packets the jitter buffer discarded (application-provided).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub packets_discarded: Option<u64>,
 
-    /// Total bytes received for forward error correction.
+    /// Total FEC payload bytes received: those of the stream's FEC SSRC, and the in-band FEC
+    /// the application reports. A subset of `bytes_received`.
     pub fec_bytes_received: u64,
 
-    /// Number of FEC packets received.
+    /// Number of FEC packets received: on the stream's FEC SSRC, and the in-band ones the
+    /// application reports.
     pub fec_packets_received: u64,
 
-    /// Number of FEC packets discarded; not measured, left out of the JSON.
+    /// Number of FEC packets whose correction was not used (application-provided).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fec_packets_discarded: Option<u64>,
 
@@ -134,17 +137,19 @@ pub struct RTCInboundRtpStreamStats {
     /// Number of NACK packets sent.
     pub nack_count: u32,
 
-    /// Number of FIR packets sent.
-    pub fir_count: u32,
+    /// Number of FIR packets sent; video only, `None` (and left out of the JSON) for audio.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fir_count: Option<u32>,
 
-    /// Number of PLI packets sent.
-    pub pli_count: u32,
+    /// Number of PLI packets sent; video only, `None` (and left out of the JSON) for audio.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pli_count: Option<u32>,
 
     /// Total processing delay, in seconds (application-provided).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_processing_delay: Option<f64>,
 
-    /// Estimated playout timestamp; needs a playout clock, left out of the JSON.
+    /// The track's playout position on the sender's clock (application-provided).
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -228,11 +233,16 @@ pub struct RTCInboundRtpStreamStats {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_assembly_time: Option<f64>,
 
-    /// Number of retransmitted packets received.
-    pub retransmitted_packets_received: u64,
+    /// Number of retransmitted packets received: RTX packets that repeat a packet (a
+    /// padding-only RTX packet repeats none). `None`, and left out of the JSON, for a stream
+    /// without an RTX stream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retransmitted_packets_received: Option<u64>,
 
-    /// Bytes received via retransmission.
-    pub retransmitted_bytes_received: u64,
+    /// Payload bytes of the retransmitted packets received, without the RTX original sequence
+    /// number. `None`, and left out of the JSON, for a stream without an RTX stream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retransmitted_bytes_received: Option<u64>,
 
     /// SSRC of the RTX stream; left out of the JSON when there is none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -242,15 +252,15 @@ pub struct RTCInboundRtpStreamStats {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fec_ssrc: Option<u32>,
 
-    /// Total corruption probability; needs a decoder, left out of the JSON.
+    /// Sum of the corruption probability measurements (application-provided).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_corruption_probability: Option<f64>,
 
-    /// Sum of squared corruption probabilities; needs a decoder, left out of the JSON.
+    /// Sum of the squared corruption probability measurements (application-provided).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_squared_corruption_probability: Option<f64>,
 
-    /// Number of corruption measurements; needs a decoder, left out of the JSON.
+    /// Number of corruption probability measurements (application-provided).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub corruption_measurements: Option<u64>,
 }

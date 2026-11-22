@@ -54,10 +54,10 @@ pub struct IceCandidatePairAccumulator {
     pub consent_requests_sent: u64,
 
     // Discard counters
-    /// Packets discarded due to send failure.
-    pub packets_discarded_on_send: u32,
-    /// Bytes discarded due to send failure.
-    pub bytes_discarded_on_send: u32,
+    /// Packets the application's socket refused, `None` until the application reports one.
+    pub packets_discarded_on_send: Option<u32>,
+    /// Bytes the application's socket refused, `None` until the application reports some.
+    pub bytes_discarded_on_send: Option<u64>,
 
     // Bitrate estimation (from TWCC/congestion control)
     /// Estimated available outgoing bitrate in bits per second (0: no estimate).
@@ -118,10 +118,19 @@ impl IceCandidatePairAccumulator {
         self.consent_requests_sent += 1;
     }
 
-    /// Called when a packet send fails.
+    /// Called when the application reports that its socket refused a datagram of `bytes`
+    /// bytes for this pair.
     pub fn on_packet_discarded(&mut self, bytes: usize) {
-        self.packets_discarded_on_send += 1;
-        self.bytes_discarded_on_send += bytes as u32;
+        self.packets_discarded_on_send = Some(
+            self.packets_discarded_on_send
+                .unwrap_or(0)
+                .saturating_add(1),
+        );
+        self.bytes_discarded_on_send = Some(
+            self.bytes_discarded_on_send
+                .unwrap_or(0)
+                .saturating_add(bytes as u64),
+        );
     }
 
     /// Creates a snapshot of the accumulated stats at the given timestamp.
@@ -261,13 +270,29 @@ mod tests {
     fn test_on_packet_discarded() {
         let mut acc = IceCandidatePairAccumulator::default();
 
+        // Nothing reported: nothing measured, and the members are left out of the report.
+        let stats = acc.snapshot(Instant::now(), "pair");
+        assert_eq!(stats.packets_discarded_on_send, None);
+        assert_eq!(stats.bytes_discarded_on_send, None);
+        let json = serde_json::to_value(&stats).unwrap();
+        assert!(json.get("packetsDiscardedOnSend").is_none());
+        assert!(json.get("bytesDiscardedOnSend").is_none());
+
         acc.on_packet_discarded(100);
-        assert_eq!(acc.packets_discarded_on_send, 1);
-        assert_eq!(acc.bytes_discarded_on_send, 100);
+        assert_eq!(acc.packets_discarded_on_send, Some(1));
+        assert_eq!(acc.bytes_discarded_on_send, Some(100));
 
         acc.on_packet_discarded(200);
-        assert_eq!(acc.packets_discarded_on_send, 2);
-        assert_eq!(acc.bytes_discarded_on_send, 300);
+        assert_eq!(acc.packets_discarded_on_send, Some(2));
+        assert_eq!(acc.bytes_discarded_on_send, Some(300));
+
+        // `bytesDiscardedOnSend` is an unsigned long long: it does not wrap at 4 GiB.
+        acc.on_packet_discarded(u32::MAX as usize);
+        acc.on_packet_discarded(u32::MAX as usize);
+        assert_eq!(
+            acc.bytes_discarded_on_send,
+            Some(300 + 2 * u64::from(u32::MAX))
+        );
     }
 
     #[test]

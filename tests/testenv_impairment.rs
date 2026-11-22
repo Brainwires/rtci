@@ -630,7 +630,7 @@ fn gcc_follows_a_rate_limited_link() {
                     .outbound_rtp_streams()
                     .find(|o| o.sent_rtp_stream_stats.rtp_stream_stats.ssrc == ssrc)
                 {
-                    samples.push(o.target_bitrate);
+                    samples.push(o.target_bitrate.unwrap_or(0.0));
                 }
             }
         }

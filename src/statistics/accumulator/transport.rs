@@ -22,9 +22,9 @@ pub struct TransportStatsAccumulator {
     pub packets_sent: u64,
     /// Total packets received through the transport.
     pub packets_received: u64,
-    /// Total bytes sent through the transport.
+    /// Total payload bytes sent through the transport: DTLS and SRTP datagrams, not STUN.
     pub bytes_sent: u64,
-    /// Total bytes received through the transport.
+    /// Total payload bytes received through the transport: DTLS and SRTP datagrams, not STUN.
     pub bytes_received: u64,
 
     // ICE state
@@ -69,22 +69,41 @@ pub struct TransportStatsAccumulator {
 }
 
 impl TransportStatsAccumulator {
-    /// Called when a packet is sent through the transport.
-    pub fn on_packet_sent(&mut self, bytes: usize) {
+    /// Called when a datagram of `bytes` bytes is sent through the transport. `is_payload` is
+    /// false for an ICE connectivity or consent check (STUN), whose bytes webrtc-stats leaves
+    /// out of `bytesSent`.
+    pub fn on_packet_sent(&mut self, bytes: usize, is_payload: bool) {
         self.packets_sent += 1;
-        self.bytes_sent += bytes as u64;
+        if is_payload {
+            self.bytes_sent += bytes as u64;
+        }
     }
 
-    /// Called when a packet is received through the transport.
-    pub fn on_packet_received(&mut self, bytes: usize) {
+    /// Called when a datagram of `bytes` bytes is received through the transport.
+    /// `is_payload` is false for STUN (and mDNS), whose bytes webrtc-stats leaves out of
+    /// `bytesReceived`.
+    pub fn on_packet_received(&mut self, bytes: usize, is_payload: bool) {
         self.packets_received += 1;
-        self.bytes_received += bytes as u64;
+        if is_payload {
+            self.bytes_received += bytes as u64;
+        }
     }
 
     /// Called when the selected candidate pair changes.
     pub fn on_selected_candidate_pair_changed(&mut self, pair_id: String) {
         self.selected_candidate_pair_id = pair_id;
         self.selected_candidate_pair_changes += 1;
+    }
+
+    /// Called when the transport is left without a selected candidate pair (ICE failed or
+    /// closed). webrtc-stats `selectedCandidatePairChanges`: "going from not having a selected
+    /// candidate pair to having a selected candidate pair, or the other way around, also
+    /// increases this counter".
+    pub fn on_selected_candidate_pair_lost(&mut self) {
+        if !self.selected_candidate_pair_id.is_empty() {
+            self.selected_candidate_pair_id.clear();
+            self.selected_candidate_pair_changes += 1;
+        }
     }
 
     /// Called when ICE state changes.
@@ -208,11 +227,11 @@ mod tests {
     fn test_on_packet_sent() {
         let mut acc = TransportStatsAccumulator::default();
 
-        acc.on_packet_sent(100);
+        acc.on_packet_sent(100, true);
         assert_eq!(acc.packets_sent, 1);
         assert_eq!(acc.bytes_sent, 100);
 
-        acc.on_packet_sent(200);
+        acc.on_packet_sent(200, true);
         assert_eq!(acc.packets_sent, 2);
         assert_eq!(acc.bytes_sent, 300);
     }
@@ -221,11 +240,11 @@ mod tests {
     fn test_on_packet_received() {
         let mut acc = TransportStatsAccumulator::default();
 
-        acc.on_packet_received(150);
+        acc.on_packet_received(150, true);
         assert_eq!(acc.packets_received, 1);
         assert_eq!(acc.bytes_received, 150);
 
-        acc.on_packet_received(250);
+        acc.on_packet_received(250, true);
         assert_eq!(acc.packets_received, 2);
         assert_eq!(acc.bytes_received, 400);
     }
@@ -313,12 +332,12 @@ mod tests {
         let mut acc = TransportStatsAccumulator::default();
 
         // Simulate traffic flow
-        acc.on_packet_sent(100);
-        acc.on_packet_received(80);
-        acc.on_packet_sent(200);
-        acc.on_packet_received(150);
-        acc.on_packet_sent(50);
-        acc.on_packet_received(120);
+        acc.on_packet_sent(100, true);
+        acc.on_packet_received(80, true);
+        acc.on_packet_sent(200, true);
+        acc.on_packet_received(150, true);
+        acc.on_packet_sent(50, true);
+        acc.on_packet_received(120, true);
 
         assert_eq!(acc.packets_sent, 3);
         assert_eq!(acc.bytes_sent, 350);
@@ -330,8 +349,8 @@ mod tests {
     fn test_snapshot() {
         let mut acc = TransportStatsAccumulator::default();
         acc.transport_id = "RTCTransport_0".to_string();
-        acc.on_packet_sent(100);
-        acc.on_packet_received(80);
+        acc.on_packet_sent(100, true);
+        acc.on_packet_received(80, true);
         acc.on_ice_state_changed(RTCIceTransportState::Connected);
         acc.on_dtls_state_changed(RTCDtlsTransportState::Connected);
         acc.on_dtls_handshake_complete(
@@ -369,8 +388,8 @@ mod tests {
     #[test]
     fn test_snapshot_json_serialization() {
         let mut acc = TransportStatsAccumulator::default();
-        acc.on_packet_sent(500);
-        acc.on_packet_received(400);
+        acc.on_packet_sent(500, true);
+        acc.on_packet_received(400, true);
 
         let now = Instant::now();
         let stats = acc.snapshot(now);

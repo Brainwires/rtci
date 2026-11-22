@@ -90,14 +90,23 @@ impl<'a>
 
     fn handle_read(&mut self, msg: TaggedRTCMessageInternal) -> Result<(), Self::Error> {
         if let RTCMessageInternal::Raw(message) = msg.message {
-            // Update transport stats for received packet
-            self.stats.transport.on_packet_received(message.len());
+            // Every datagram is a packet received on the transport; its bytes count only when
+            // it is DTLS or SRTP (webrtc-stats `RTCTransportStats.bytesReceived`: payload bytes,
+            // "not including headers, padding or ICE connectivity checks"). What is neither is
+            // STUN, or mDNS from the host's mDNS socket.
+            let is_mdns = msg.transport.local_addr.port() == mdns::MDNS_PORT
+                && msg.transport.peer_addr.port() == mdns::MDNS_PORT;
+            let is_payload = !is_mdns
+                && message
+                    .first()
+                    .is_some_and(|first| matches!(demux(*first), Demuxed::Dtls | Demuxed::Srtp));
+            self.stats
+                .transport
+                .on_packet_received(message.len(), is_payload);
 
             if message.is_empty() {
                 error!("drop invalid packet due to zero length");
-            } else if msg.transport.local_addr.port() == mdns::MDNS_PORT
-                && msg.transport.peer_addr.port() == mdns::MDNS_PORT
-            {
+            } else if is_mdns {
                 // mDNS from the host's mDNS socket goes to the ICE agent, which resolves remote
                 // `.local` candidates and answers for its own. RFC 7983's first-byte ranges
                 // don't apply to DNS: a message ID of 20-63 or 128-191 would otherwise send it
@@ -140,13 +149,18 @@ impl<'a>
     }
 
     fn handle_write(&mut self, msg: TaggedRTCMessageInternal) -> Result<(), Self::Error> {
+        // Every datagram is a packet sent on the transport; its bytes count unless it is STUN
+        // (webrtc-stats `RTCTransportStats.bytesSent`: payload bytes, "not including headers,
+        // padding or ICE connectivity checks").
+        let is_payload = !matches!(msg.message, RTCMessageInternal::Stun(_));
         match msg.message {
             RTCMessageInternal::Raw(message)
             | RTCMessageInternal::Stun(STUNMessage::Raw(message))
             | RTCMessageInternal::Dtls(DTLSMessage::Raw(message))
             | RTCMessageInternal::Rtp(RTPMessage::Raw(message)) => {
-                // Update transport stats for sent packet
-                self.stats.transport.on_packet_sent(message.len());
+                self.stats
+                    .transport
+                    .on_packet_sent(message.len(), is_payload);
 
                 self.ctx.write_outs.push_back(TaggedRTCMessageInternal {
                     now: msg.now,

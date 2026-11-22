@@ -15,6 +15,19 @@
 //! [`update_video_source_stats`](crate::peer_connection::RTCPeerConnection::update_video_source_stats)
 //! and
 //! [`update_audio_playout_stats`](crate::peer_connection::RTCPeerConnection::update_audio_playout_stats).
+//! The socket is the application's too: what it could not send and what its receive-side
+//! congestion control estimates reach the candidate pair in use through
+//! [`on_send_discarded`](crate::peer_connection::RTCPeerConnection::on_send_discarded) and
+//! [`update_available_incoming_bitrate`](crate::peer_connection::RTCPeerConnection::update_available_incoming_bitrate).
+//!
+//! # Ids and timestamps
+//!
+//! An id is opaque: it is stable for its object for the life of the peer connection, differs
+//! from one connection to the next, and is found by following a reference from another object
+//! of the report or through the report's typed accessors, never built by hand. Every timestamp
+//! of a report is epoch milliseconds on one wall-clock anchor, so two timestamps differ by
+//! exactly the time between the instants they describe; a remote-inbound or remote-outbound
+//! object is stamped with the arrival of the RTCP report it was built from.
 //!
 //! # Stats Selection
 //!
@@ -42,6 +55,8 @@
 use crate::rtp_transceiver::{RTCRtpReceiverId, RTCRtpSenderId};
 
 #[cfg(test)]
+mod conformance_test;
+#[cfg(test)]
 mod feed_test;
 #[cfg(test)]
 mod members_test;
@@ -59,7 +74,7 @@ pub mod stats;
 // playout), for the `update_*_stats` methods of `RTCPeerConnection` (see `feed`).
 pub use accumulator::{
     AudioPlayoutStatsUpdate, AudioReceiverStatsUpdate, AudioSourceStatsUpdate, DecoderStatsUpdate,
-    EncoderStatsUpdate, VideoSourceStatsUpdate,
+    EncoderStatsUpdate, PsnrSum, QualityLimitationDurations, VideoSourceStatsUpdate,
 };
 
 /// Selector for filtering statistics in `get_stats()`.

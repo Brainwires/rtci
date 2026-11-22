@@ -19,6 +19,7 @@ mod rtcp_reports;
 #[cfg(test)]
 mod rtcp_reports_test;
 mod rtp_stream;
+mod seal;
 mod transport;
 
 pub(crate) use ccfb::CcfbTally;
@@ -31,8 +32,9 @@ pub use media::app_provided::*;
 pub(crate) use media::audio_playout::AudioPlayoutStatsAccumulator;
 pub(crate) use media::media_source::{MediaSourceStatsAccumulator, media_source_stats_id};
 pub(crate) use peer_connection::PeerConnectionStatsAccumulator;
-pub(crate) use rtp_stream::inbound::{InboundRtpStreamAccumulator, inbound_stats_id};
-pub(crate) use rtp_stream::outbound::{OutboundRtpStreamAccumulator, outbound_stats_id};
+pub(crate) use rtp_stream::inbound::InboundRtpStreamAccumulator;
+pub(crate) use rtp_stream::outbound::OutboundRtpStreamAccumulator;
+pub(crate) use seal::Seal;
 pub(crate) use transport::TransportStatsAccumulator;
 
 use crate::data_channel::RTCDataChannelId;
@@ -42,7 +44,9 @@ use crate::statistics::StatsSelector;
 use crate::statistics::report::{RTCStatsReport, RTCStatsReportEntry};
 use ice::CandidatePairStats;
 use sctp::StreamId;
-use std::collections::HashMap;
+use shared::time::SystemInstant;
+use std::collections::{HashMap, HashSet};
+use std::sync::OnceLock;
 use std::time::Instant;
 
 /// Master statistics accumulator for a peer connection.
@@ -115,6 +119,21 @@ pub(crate) struct RTCStatsAccumulator {
     /// The application's socket layer carries ECN (`SettingEngineBuilder::with_ecn`): RTP
     /// streams report their ECN counts.
     pub(crate) ecn: bool,
+
+    /// How many RTP stream objects have been deleted. A stream object created now carries it in
+    /// its id, so that id differs from the id of every deleted object with the same SSRC
+    /// (webrtc-stats 4.3: the id of a deleted object is never reused). One counter rather than
+    /// a memory of the SSRCs that went: a peer can go through any number of those.
+    streams_retired: u64,
+
+    /// The salt the report's ids are hashed with, drawn once per peer connection (webrtc 8.4:
+    /// an id must not be predictable by an application). `None` (an accumulator built outside
+    /// a peer connection) leaves the ids as the accumulators name them.
+    id_salt: Option<[u64; 2]>,
+
+    /// The wall-clock anchor of the report timestamps, taken at the first report (see
+    /// [`Seal`]). A `OnceLock` rather than a `OnceCell`: the accumulator stays `Sync`.
+    anchor: OnceLock<SystemInstant>,
 }
 
 /// Asserts a stats record was stamped with `expected`, ignoring the wall-clock half.
@@ -150,6 +169,89 @@ impl RTCStatsAccumulator {
             ecn,
             ..Self::default()
         }
+    }
+
+    /// The accumulator of a peer connection: [`with_ecn`](Self::with_ecn), and report ids
+    /// hashed with `id_salt`, which the connection draws at random.
+    pub(crate) fn for_connection(ecn: bool, id_salt: [u64; 2]) -> Self {
+        Self {
+            ecn,
+            id_salt: Some(id_salt),
+            ..Self::default()
+        }
+    }
+
+    /// What seals a report taken at `now`: the connection's id salt and the timestamp anchor,
+    /// which the first report sets.
+    fn seal(&self, now: Instant) -> Seal {
+        Seal::new(
+            self.id_salt,
+            *self.anchor.get_or_init(|| SystemInstant::now(now)),
+        )
+    }
+
+    /// The report holding `entries`, with their ids and timestamps sealed.
+    fn report(&self, now: Instant, mut entries: Vec<RTCStatsReportEntry>) -> RTCStatsReport {
+        let seal = self.seal(now);
+        for entry in &mut entries {
+            seal.entry(entry);
+        }
+        RTCStatsReport::new(entries)
+    }
+
+    /// The id a report gives the object the accumulators name `name` (for a test that looks
+    /// an object up by what it is).
+    #[cfg(test)]
+    pub(crate) fn report_id(&self, now: Instant, name: &str) -> String {
+        self.seal(now).id_of(name)
+    }
+
+    /// The outbound-rtp object of `stream`.
+    ///
+    /// Its `targetBitrate` is the encoder's target for the stream. The application supplies
+    /// it; without that, the congestion controller's estimate stands in for it while the
+    /// connection sends one stream, which then has the whole estimate. With several streams
+    /// the estimate is not any one stream's target, and the member is left out.
+    fn outbound_snapshot(
+        &self,
+        now: Instant,
+        stream: &OutboundRtpStreamAccumulator,
+    ) -> crate::statistics::stats::rtp_stream::sent::outbound::RTCOutboundRtpStreamStats {
+        let mut stats = stream.snapshot(now, &stream.stats_id());
+        if stream.encoder_stats.target_bitrate.is_none() && self.outbound_rtp_streams.len() > 1 {
+            stats.target_bitrate = None;
+        }
+        stats
+    }
+
+    /// The remote-candidate entries.
+    ///
+    /// webrtc-stats `RTCIceCandidateStats.address`: a remote candidate's address is null
+    /// unless the application supplied that address itself (`addIceCandidate`, or a candidate
+    /// line of a remote description); then every remote candidate with that address shows it.
+    /// A peer-reflexive candidate learned from a connectivity check is the case that matters:
+    /// its address was never given to the application.
+    fn remote_candidate_entries(&self, now: Instant) -> Vec<RTCStatsReportEntry> {
+        let signalled: HashSet<&str> = self
+            .remote_candidates
+            .values()
+            .filter(|candidate| candidate.signalled)
+            .filter_map(|candidate| candidate.address.as_deref())
+            .collect();
+        self.remote_candidates
+            .iter()
+            .map(|(id, candidate)| {
+                let mut stats = candidate.snapshot_remote(now, id);
+                if !stats
+                    .address
+                    .as_deref()
+                    .is_some_and(|address| signalled.contains(address))
+                {
+                    stats.address = None;
+                }
+                RTCStatsReportEntry::RemoteCandidate(stats)
+            })
+            .collect()
     }
 
     /// Creates a snapshot of all accumulated stats at the given timestamp.
@@ -190,11 +292,7 @@ impl RTCStatsAccumulator {
         }
 
         // Remote ICE candidate stats
-        for (id, candidate) in &self.remote_candidates {
-            entries.push(RTCStatsReportEntry::RemoteCandidate(
-                candidate.snapshot_remote(now, id),
-            ));
-        }
+        entries.extend(self.remote_candidate_entries(now));
 
         // Certificate stats
         for (id, cert) in &self.certificates {
@@ -215,8 +313,8 @@ impl RTCStatsAccumulator {
 
         // Inbound RTP stream stats, each with its remote-outbound object once an RTCP SR has
         // created it (webrtc-stats 6.1)
-        for (ssrc, stream) in &self.inbound_rtp_streams {
-            let id = inbound_stats_id(stream.kind, *ssrc);
+        for stream in self.inbound_rtp_streams.values() {
+            let id = stream.stats_id();
             entries.push(RTCStatsReportEntry::InboundRtp(stream.snapshot(now, &id)));
             if stream.has_remote() {
                 entries.push(RTCStatsReportEntry::RemoteOutboundRtp(
@@ -227,9 +325,10 @@ impl RTCStatsAccumulator {
 
         // Outbound RTP stream stats, each with its remote-inbound object once a reception
         // report has created it (webrtc-stats 6.1)
-        for (ssrc, stream) in &self.outbound_rtp_streams {
-            let id = outbound_stats_id(stream.kind, *ssrc);
-            entries.push(RTCStatsReportEntry::OutboundRtp(stream.snapshot(now, &id)));
+        for stream in self.outbound_rtp_streams.values() {
+            entries.push(RTCStatsReportEntry::OutboundRtp(
+                self.outbound_snapshot(now, stream),
+            ));
             if stream.has_remote() {
                 entries.push(RTCStatsReportEntry::RemoteInboundRtp(
                     stream.snapshot_remote(now),
@@ -249,7 +348,7 @@ impl RTCStatsAccumulator {
             entries.push(RTCStatsReportEntry::AudioPlayout(playout.snapshot(now, id)));
         }
 
-        RTCStatsReport::new(entries)
+        self.report(now, entries)
     }
 
     /// The report entry of the media source for the track `track_id`.
@@ -305,18 +404,17 @@ impl RTCStatsAccumulator {
         now: Instant,
         transceiver_id: RTCRtpTransceiverId,
     ) -> RTCStatsReport {
-        use std::collections::HashSet;
-
         let mut entries = Vec::new();
         let mut referenced_codec_ids = HashSet::new();
         let mut has_streams = false;
 
         // Collect outbound RTP streams for this sender
-        for (ssrc, stream) in &self.outbound_rtp_streams {
+        for stream in self.outbound_rtp_streams.values() {
             if stream.transceiver_id == transceiver_id {
                 has_streams = true;
-                let id = outbound_stats_id(stream.kind, *ssrc);
-                entries.push(RTCStatsReportEntry::OutboundRtp(stream.snapshot(now, &id)));
+                entries.push(RTCStatsReportEntry::OutboundRtp(
+                    self.outbound_snapshot(now, stream),
+                ));
                 if stream.has_remote() {
                     entries.push(RTCStatsReportEntry::RemoteInboundRtp(
                         stream.snapshot_remote(now),
@@ -365,11 +463,7 @@ impl RTCStatsAccumulator {
             }
 
             // Remote ICE candidate stats
-            for (id, candidate) in &self.remote_candidates {
-                entries.push(RTCStatsReportEntry::RemoteCandidate(
-                    candidate.snapshot_remote(now, id),
-                ));
-            }
+            entries.extend(self.remote_candidate_entries(now));
 
             // Certificate stats (referenced by transport)
             for (id, cert) in &self.certificates {
@@ -377,7 +471,7 @@ impl RTCStatsAccumulator {
             }
         }
 
-        RTCStatsReport::new(entries)
+        self.report(now, entries)
     }
 
     /// Creates a snapshot for a specific receiver (inbound streams).
@@ -386,18 +480,16 @@ impl RTCStatsAccumulator {
         now: Instant,
         transceiver_id: RTCRtpTransceiverId,
     ) -> RTCStatsReport {
-        use std::collections::HashSet;
-
         let mut entries = Vec::new();
         let mut referenced_codec_ids = HashSet::new();
         let mut referenced_playout_ids: HashSet<String> = HashSet::new();
         let mut has_streams = false;
 
         // Collect inbound RTP streams for this receiver
-        for (ssrc, stream) in &self.inbound_rtp_streams {
+        for stream in self.inbound_rtp_streams.values() {
             if stream.transceiver_id == transceiver_id {
                 has_streams = true;
-                let id = inbound_stats_id(stream.kind, *ssrc);
+                let id = stream.stats_id();
                 entries.push(RTCStatsReportEntry::InboundRtp(stream.snapshot(now, &id)));
                 if stream.has_remote() {
                     entries.push(RTCStatsReportEntry::RemoteOutboundRtp(
@@ -448,11 +540,7 @@ impl RTCStatsAccumulator {
             }
 
             // Remote ICE candidate stats
-            for (id, candidate) in &self.remote_candidates {
-                entries.push(RTCStatsReportEntry::RemoteCandidate(
-                    candidate.snapshot_remote(now, id),
-                ));
-            }
+            entries.extend(self.remote_candidate_entries(now));
 
             // Certificate stats (referenced by transport)
             for (id, cert) in &self.certificates {
@@ -460,7 +548,7 @@ impl RTCStatsAccumulator {
             }
         }
 
-        RTCStatsReport::new(entries)
+        self.report(now, entries)
     }
 
     // ========================================================================
@@ -516,6 +604,7 @@ impl RTCStatsAccumulator {
                     rtx_ssrc,
                     fec_ssrc,
                     transceiver_id,
+                    generation: self.streams_retired,
                     ecn: self.ecn,
                     ..Default::default()
                 });
@@ -533,7 +622,9 @@ impl RTCStatsAccumulator {
     /// every RTX / FEC lookup that points at it, once the stream is no longer bound (its rid
     /// moved to another SSRC).
     pub(crate) fn remove_inbound_rtp_stream(&mut self, ssrc: SSRC) {
-        self.inbound_rtp_streams.remove(&ssrc);
+        if self.inbound_rtp_streams.remove(&ssrc).is_some() {
+            self.streams_retired += 1;
+        }
         self.inbound_rtx_ssrc_to_primary
             .retain(|_, primary| *primary != ssrc);
         self.fec_ssrc_to_primary
@@ -618,6 +709,7 @@ impl RTCStatsAccumulator {
                 encoding_index,
                 rtx_ssrc,
                 transceiver_id,
+                generation: self.streams_retired,
                 active: true,
                 ecn: self.ecn,
                 ..Default::default()
@@ -643,11 +735,25 @@ impl RTCStatsAccumulator {
                 // The wire value is filled in by `set_data_channel_stream_id` once the SCTP
                 // connected procedure assigns one; the map itself is keyed by handle, so an
                 // accumulator can exist before then.
-                data_channel_identifier: 0,
+                data_channel_identifier: None,
                 label: label.to_string(),
                 protocol: protocol.to_string(),
                 ..Default::default()
             })
+    }
+
+    /// A data channel is gone for good: its stats object goes with it, and if the channel had
+    /// been open it is counted in `dataChannelsClosed` (webrtc-stats: the channels that "left
+    /// the open state"; one that never opened, closed while connecting or by the handshake
+    /// timeout, is not one of them).
+    pub(crate) fn on_data_channel_gone(&mut self, id: RTCDataChannelId) {
+        if self
+            .data_channels
+            .remove(&id)
+            .is_some_and(|channel| channel.opened)
+        {
+            self.peer_connection.on_data_channel_closed();
+        }
     }
 
     /// Records the SCTP stream identifier a data channel was assigned.
@@ -655,10 +761,10 @@ impl RTCStatsAccumulator {
     /// The accumulator is keyed by the channel's handle, which exists from creation, but
     /// `data_channel_identifier` is the W3C-defined *wire* value and is only known once the
     /// SCTP connected procedure assigns one (RFC 8832 section 6). This fills it in at that
-    /// point; until then it reads 0.
+    /// point; until then the report leaves the member out.
     pub(crate) fn set_data_channel_stream_id(&mut self, id: RTCDataChannelId, stream_id: StreamId) {
         if let Some(dc) = self.data_channels.get_mut(&id) {
-            dc.data_channel_identifier = stream_id;
+            dc.data_channel_identifier = Some(stream_id);
         }
     }
 
@@ -699,6 +805,29 @@ impl RTCStatsAccumulator {
         self.remote_candidates.insert(id, candidate);
     }
 
+    /// Deletes the candidates that are gone: those the ICE agent no longer holds and no
+    /// candidate pair object names.
+    ///
+    /// webrtc-stats 7.1: a candidate object is deleted when the ICE transport does an ICE
+    /// restart and the candidate is no longer a member of any non-deleted candidate pair. A
+    /// restart is when the agent lets go of its candidates; the selected pair's stay until
+    /// another pair is selected, as that pair does.
+    pub(crate) fn retain_candidates(
+        &mut self,
+        local_held: &HashSet<String>,
+        remote_held: &HashSet<String>,
+    ) {
+        let (mut local_paired, mut remote_paired) = (HashSet::new(), HashSet::new());
+        for pair in self.ice_candidate_pairs.values() {
+            local_paired.insert(pair.local_candidate_id.clone());
+            remote_paired.insert(pair.remote_candidate_id.clone());
+        }
+        self.local_candidates
+            .retain(|id, _| local_held.contains(id) || local_paired.contains(id));
+        self.remote_candidates
+            .retain(|id, _| remote_held.contains(id) || remote_paired.contains(id));
+    }
+
     /// Registers a certificate.
     pub(crate) fn register_certificate(
         &mut self,
@@ -736,39 +865,74 @@ impl RTCStatsAccumulator {
             })
     }
 
-    pub(crate) fn on_rtx_packet_sent_if_rtx(
+    /// Notes that the application wrote an RTP packet for the stream `ssrc` at `now`, before
+    /// the interceptor chain has it (`totalPacketSendDelay` runs from here).
+    pub(crate) fn on_rtp_written(&mut self, ssrc: SSRC, sequence_number: u16, now: Instant) {
+        if let Some(stream) = self.outbound_rtp_streams.get_mut(&ssrc) {
+            stream.on_rtp_written(sequence_number, now);
+        }
+    }
+
+    /// Counts an RTP packet going out on `ssrc`: `overhead_bytes` is its header and padding,
+    /// `payload_bytes` its payload, and `retransmission` says it answers a NACK.
+    ///
+    /// * On a stream's own SSRC it is a packet of the stream, and with `retransmission` (the
+    ///   stream has no RTX stream, so the packet is sent again as it was, RFC 4585) one of its
+    ///   retransmitted packets too.
+    /// * On a stream's RTX SSRC it is a packet of that stream as well (webrtc-stats 7.1: an
+    ///   RTX stream is no object of its own and counts in `packetsSent` / `bytesSent`). One
+    ///   that repeats a packet is a retransmitted packet whose bytes are the repeated payload;
+    ///   the original sequence number in front of it (RFC 4588 section 4) is header. One too
+    ///   short to repeat anything (padding only: a bandwidth probe) is header and padding and
+    ///   no retransmission.
+    pub(crate) fn on_rtp_sent(
         &mut self,
-        rtx_ssrc: SSRC,
+        ssrc: SSRC,
+        sequence_number: u16,
+        overhead_bytes: usize,
         payload_bytes: usize,
-    ) -> bool {
-        if let Some(primary_ssrc) = self.outbound_rtx_ssrc_to_primary.get(&rtx_ssrc)
+        retransmission: bool,
+        now: Instant,
+    ) {
+        if let Some(stream) = self.outbound_rtp_streams.get_mut(&ssrc) {
+            stream.on_rtp_sent(overhead_bytes, payload_bytes, now);
+            stream.on_sequence_number_sent(sequence_number);
+            if retransmission {
+                stream.on_rtx_sent(payload_bytes);
+            } else {
+                stream.on_written_rtp_sent(sequence_number, now);
+            }
+        } else if let Some(primary_ssrc) = self.outbound_rtx_ssrc_to_primary.get(&ssrc)
             && let Some(stream) = self.outbound_rtp_streams.get_mut(primary_ssrc)
         {
-            stream.on_rtx_sent(payload_bytes);
-            return true;
+            match payload_bytes.checked_sub(RTX_OSN_BYTES) {
+                Some(repeated_bytes) => {
+                    stream.on_rtp_sent(overhead_bytes + RTX_OSN_BYTES, repeated_bytes, now);
+                    stream.on_rtx_sent(repeated_bytes);
+                }
+                None => stream.on_rtp_sent(overhead_bytes + payload_bytes, 0, now),
+            }
         }
-        false
     }
 
     /// The ECN codepoint to send an outgoing RTP packet with: ECT(1) for a packet (RTX
     /// included) of a stream that sends ECT(1) ([`OutboundRtpStreamAccumulator::ect1_marking`]),
-    /// counted on the stream when it is the stream's own SSRC; Not-ECT (`None`) otherwise.
+    /// counted on that stream; Not-ECT (`None`) otherwise.
     pub(crate) fn ecn_for_rtp_sent(&mut self, ssrc: SSRC) -> Option<shared::EcnCodepoint> {
         if !self.ecn {
             return None;
         }
-        if let Some(stream) = self.outbound_rtp_streams.get_mut(&ssrc) {
-            if !stream.ect1_marking {
-                return None;
-            }
-            stream.on_ect1_sent();
-            return Some(shared::EcnCodepoint::Ect1);
+        let primary = if self.outbound_rtp_streams.contains_key(&ssrc) {
+            ssrc
+        } else {
+            *self.outbound_rtx_ssrc_to_primary.get(&ssrc)?
+        };
+        let stream = self.outbound_rtp_streams.get_mut(&primary)?;
+        if !stream.ect1_marking {
+            return None;
         }
-        self.outbound_rtx_ssrc_to_primary
-            .get(&ssrc)
-            .and_then(|primary| self.outbound_rtp_streams.get(primary))
-            .filter(|stream| stream.ect1_marking)
-            .map(|_| shared::EcnCodepoint::Ect1)
+        stream.on_ect1_sent();
+        Some(shared::EcnCodepoint::Ect1)
     }
 
     /// Counts the ECN codepoint an RTP packet of the inbound stream `ssrc` arrived with.
@@ -797,44 +961,87 @@ impl RTCStatsAccumulator {
         }
     }
 
-    /// Tracks an RTX packet received for an inbound stream.
+    /// Counts an RTP packet that arrived on `ssrc` as it is (not a retransmission that was
+    /// taken out of its RTX packet:
+    /// [`on_retransmission_received`](Self::on_retransmission_received) counts that):
+    /// `overhead_bytes` is its header and padding, `payload_bytes` its payload.
     ///
-    /// Call this when an RTP packet is received with an SSRC that matches
-    /// a stream's `rtx_ssrc`. This updates the retransmission stats.
+    /// * On a stream's own SSRC it is a packet of the stream.
+    /// * On a stream's FEC SSRC it is a packet of that stream too, and a FEC packet
+    ///   (webrtc-stats 7.1: a FEC stream is no object of its own; `fecBytesReceived` is a
+    ///   subset of `bytesReceived`).
+    /// * On a stream's RTX SSRC, still there because it repeats no packet (padding only, a
+    ///   bandwidth probe: RFC 4588 section 4), it is a packet of the stream made of header and
+    ///   padding, and not a retransmission.
     ///
-    /// Returns `true` if the RTX packet was tracked, `false` if no matching stream found.
-    pub(crate) fn on_rtx_packet_received_if_rtx(
+    /// Returns whether a stream counted it.
+    pub(crate) fn on_rtp_received(
         &mut self,
-        rtx_ssrc: SSRC,
+        ssrc: SSRC,
+        overhead_bytes: usize,
         payload_bytes: usize,
+        now: Instant,
     ) -> bool {
-        if let Some(primary_ssrc) = self.inbound_rtx_ssrc_to_primary.get(&rtx_ssrc)
+        if let Some(stream) = self.inbound_rtp_streams.get_mut(&ssrc) {
+            stream.on_rtp_received(overhead_bytes, payload_bytes, now);
+            return true;
+        }
+        if let Some(primary_ssrc) = self.fec_ssrc_to_primary.get(&ssrc)
             && let Some(stream) = self.inbound_rtp_streams.get_mut(primary_ssrc)
         {
-            stream.on_rtx_received(payload_bytes);
+            stream.on_fec_received(overhead_bytes, payload_bytes, now);
+            return true;
+        }
+        if let Some(primary_ssrc) = self.inbound_rtx_ssrc_to_primary.get(&ssrc)
+            && let Some(stream) = self.inbound_rtp_streams.get_mut(primary_ssrc)
+        {
+            stream.on_rtx_padding_received(overhead_bytes + payload_bytes, now);
             return true;
         }
         false
     }
 
-    /// Tracks a FEC packet received for an inbound stream.
+    /// Counts a retransmission that arrived in an RTX packet for the stream `primary_ssrc`:
+    /// `overhead_bytes` is the RTX packet's header and padding, `payload_bytes` its payload,
+    /// which starts with the original sequence number (RFC 4588 section 4).
     ///
-    /// Call this when an RTP packet is received with an SSRC that matches
-    /// a stream's `fec_ssrc`. This updates the FEC stats.
-    ///
-    /// Returns `true` if the FEC packet was tracked, `false` if no matching stream found.
-    pub(crate) fn on_fec_packet_received_if_fec(
+    /// It is a packet of the stream (`packetsReceived` includes retransmissions) and one of
+    /// its retransmitted packets, whose bytes are the repeated payload; the original sequence
+    /// number is header. Returns whether the stream exists.
+    pub(crate) fn on_retransmission_received(
         &mut self,
-        fec_ssrc: SSRC,
+        primary_ssrc: SSRC,
+        overhead_bytes: usize,
         payload_bytes: usize,
+        now: Instant,
     ) -> bool {
-        if let Some(primary_ssrc) = self.fec_ssrc_to_primary.get(&fec_ssrc)
-            && let Some(stream) = self.inbound_rtp_streams.get_mut(primary_ssrc)
+        let Some(stream) = self.inbound_rtp_streams.get_mut(&primary_ssrc) else {
+            return false;
+        };
+        let repeated_bytes = payload_bytes.saturating_sub(RTX_OSN_BYTES);
+        stream.on_rtp_received(
+            overhead_bytes + (payload_bytes - repeated_bytes),
+            repeated_bytes,
+            now,
+        );
+        stream.on_rtx_received(repeated_bytes);
+        true
+    }
+
+    /// Counts a datagram of `bytes` bytes the application's socket refused to send, on the
+    /// candidate pair in use (`packetsDiscardedOnSend`, `bytesDiscardedOnSend`). Returns
+    /// `false`, and counts nothing, while no pair is selected.
+    pub(crate) fn on_send_discarded(&mut self, bytes: usize) -> bool {
+        match self
+            .ice_candidate_pairs
+            .get_mut(&self.transport.selected_candidate_pair_id)
         {
-            stream.on_fec_received(payload_bytes);
-            return true;
+            Some(pair) => {
+                pair.on_packet_discarded(bytes);
+                true
+            }
+            None => false,
         }
-        false
     }
 
     // ========================================================================
@@ -878,6 +1085,36 @@ impl RTCStatsAccumulator {
                 true
             }
             None => false,
+        }
+    }
+
+    /// Makes the media sources those of `attached`: the (transceiver, track id, kind) of every
+    /// sender that has a track.
+    ///
+    /// webrtc-stats 8.11: a media-source object exists from the time its track is attached to
+    /// a sender until it is attached to none. A track newly attached gets an object, which has
+    /// the track's id and kind until the application supplies what it captured; the object of
+    /// a track no sender has any more is deleted. Each sender's outbound streams name their
+    /// track's object (`mediaSourceId`).
+    pub(crate) fn sync_media_sources(
+        &mut self,
+        attached: &[(RTCRtpTransceiverId, String, RtpCodecKind)],
+    ) {
+        self.media_sources.retain(|track_id, _| {
+            attached
+                .iter()
+                .any(|(_, attached_id, _)| attached_id == track_id)
+        });
+        for stream in self.outbound_rtp_streams.values_mut() {
+            stream.media_source_id.clear();
+        }
+        for (transceiver_id, track_id, kind) in attached {
+            if !matches!(kind, RtpCodecKind::Audio | RtpCodecKind::Video) {
+                continue;
+            }
+            let source = self.get_or_create_media_source(track_id, *kind);
+            source.transceiver_id = Some(*transceiver_id);
+            self.link_media_source(track_id, *transceiver_id);
         }
     }
 
@@ -1026,42 +1263,97 @@ impl RTCStatsAccumulator {
         }
     }
 
+    /// Sets the receive-side estimate the application's congestion control made for the
+    /// incoming streams: the selected candidate pair's `availableIncomingBitrate`. Returns
+    /// `false`, and sets nothing, while no pair is selected.
+    pub(crate) fn on_available_incoming_bitrate(&mut self, bits_per_second: f64) -> bool {
+        match self
+            .ice_candidate_pairs
+            .get_mut(&self.transport.selected_candidate_pair_id)
+        {
+            Some(pair) => {
+                pair.available_incoming_bitrate = bits_per_second;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The transport selected the candidate pair `pair_id` (`None`: it has none any more).
+    ///
+    /// The pair it leaves no longer carries the streams the bitrate estimates were made for
+    /// (webrtc-stats: `availableOutgoingBitrate` / `availableIncomingBitrate` are those of a
+    /// pair in use), so it gives them up.
+    pub(crate) fn on_selected_candidate_pair(&mut self, pair_id: Option<String>) {
+        let previous = self.transport.selected_candidate_pair_id.clone();
+        if pair_id.as_deref() == Some(previous.as_str()) {
+            return;
+        }
+        if let Some(pair) = self.ice_candidate_pairs.get_mut(&previous) {
+            pair.available_outgoing_bitrate = 0.0;
+            pair.available_incoming_bitrate = 0.0;
+        }
+        match pair_id {
+            Some(pair_id) => self.transport.on_selected_candidate_pair_changed(pair_id),
+            None => self.transport.on_selected_candidate_pair_lost(),
+        }
+    }
+
     // ========================================================================
     // Codec stats methods
     // ========================================================================
+
+    /// Registers the codec `payload_type` means in `direction` on the transport, and returns
+    /// the id of its stats object.
+    ///
+    /// A payload type has one codec object on a transport (webrtc-stats 8.3), which both
+    /// directions share. Only when the two directions give it different parameters (another
+    /// `sdpFmtpLine`) does the second one registered get an object of its own.
+    fn register_codec(
+        &mut self,
+        direction: CodecDirection,
+        codec: &RTCRtpCodec,
+        payload_type: PayloadType,
+    ) -> String {
+        let transport_id = self.transport.transport_id.clone();
+        let accumulator = CodecStatsAccumulator {
+            transport_id: transport_id.clone(),
+            ..CodecStatsAccumulator::from_codec(codec, payload_type)
+        };
+        let directional_id =
+            CodecStatsAccumulator::generate_id(&transport_id, direction, payload_type);
+        if self.codecs.contains_key(&directional_id) {
+            return directional_id;
+        }
+        let shared_id = CodecStatsAccumulator::shared_id(&transport_id, payload_type);
+        match self.codecs.get(&shared_id) {
+            Some(shared) if !shared.same_codec(&accumulator) => {
+                self.codecs.insert(directional_id.clone(), accumulator);
+                directional_id
+            }
+            Some(_) => shared_id,
+            None => {
+                self.codecs.insert(shared_id.clone(), accumulator);
+                shared_id
+            }
+        }
+    }
 
     /// Registers a codec for an inbound RTP stream and sets the codec_id.
     ///
     /// Per W3C spec, codecs are only exposed when referenced by an RTP stream.
     /// This method registers the codec (if not already registered) and links it
     /// to the inbound RTP stream.
-    ///
-    /// # Parameters
-    ///
-    /// * `ssrc` - The SSRC of the inbound RTP stream
-    /// * `codec` - The codec information
-    /// * `payload_type` - The payload type for this codec
     pub(crate) fn register_inbound_codec(
         &mut self,
         ssrc: SSRC,
         codec: &RTCRtpCodec,
         payload_type: PayloadType,
     ) {
-        let transport_id = self.transport.transport_id.clone();
-        let codec_id = CodecStatsAccumulator::generate_id(
-            &transport_id,
-            CodecDirection::Receive,
-            payload_type,
-        );
-
-        // Register the codec if not already present
-        self.codecs
-            .entry(codec_id.clone())
-            .or_insert_with(|| CodecStatsAccumulator {
-                transport_id: transport_id.clone(),
-                ..CodecStatsAccumulator::from_codec(codec, payload_type)
-            });
-
+        if !self.inbound_rtp_streams.contains_key(&ssrc) {
+            return;
+        }
+        let codec_id = self.register_codec(CodecDirection::Receive, codec, payload_type);
         // Link the codec to the inbound RTP stream; its clock rate is what the RTCP jitter is
         // counted in
         if let Some(stream) = self.inbound_rtp_streams.get_mut(&ssrc) {
@@ -1075,30 +1367,16 @@ impl RTCStatsAccumulator {
     /// Per W3C spec, codecs are only exposed when referenced by an RTP stream.
     /// This method registers the codec (if not already registered) and links it
     /// to the outbound RTP stream.
-    ///
-    /// # Parameters
-    ///
-    /// * `ssrc` - The SSRC of the outbound RTP stream
-    /// * `codec` - The codec information
-    /// * `payload_type` - The payload type for this codec
     pub(crate) fn register_outbound_codec(
         &mut self,
         ssrc: SSRC,
         codec: &RTCRtpCodec,
         payload_type: PayloadType,
     ) {
-        let transport_id = self.transport.transport_id.clone();
-        let codec_id =
-            CodecStatsAccumulator::generate_id(&transport_id, CodecDirection::Send, payload_type);
-
-        // Register the codec if not already present
-        self.codecs
-            .entry(codec_id.clone())
-            .or_insert_with(|| CodecStatsAccumulator {
-                transport_id: transport_id.clone(),
-                ..CodecStatsAccumulator::from_codec(codec, payload_type)
-            });
-
+        if !self.outbound_rtp_streams.contains_key(&ssrc) {
+            return;
+        }
+        let codec_id = self.register_codec(CodecDirection::Send, codec, payload_type);
         // Link the codec to the outbound RTP stream; its clock rate is what the RTCP jitter is
         // counted in
         if let Some(stream) = self.outbound_rtp_streams.get_mut(&ssrc) {
@@ -1136,6 +1414,7 @@ impl RTCStatsAccumulator {
     /// reverse-lookup entry.
     pub(crate) fn remove_outbound_rtp_stream(&mut self, ssrc: SSRC) {
         if let Some(stream) = self.outbound_rtp_streams.remove(&ssrc) {
+            self.streams_retired += 1;
             dissociate(
                 &mut self.outbound_rtx_ssrc_to_primary,
                 stream.rtx_ssrc,
@@ -1234,6 +1513,10 @@ fn dissociate(map: &mut HashMap<SSRC, SSRC>, repair_ssrc: Option<SSRC>, primary:
         map.remove(&repair_ssrc);
     }
 }
+
+/// The two bytes an RTX packet's payload starts with: the original sequence number (RFC 4588
+/// section 4).
+const RTX_OSN_BYTES: usize = 2;
 
 /// The stats id of the candidate-pair object for the ICE agent's candidates `local_id` and
 /// `remote_id`.

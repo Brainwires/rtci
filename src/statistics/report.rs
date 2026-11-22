@@ -132,9 +132,11 @@ impl RTCStatsReportEntry {
 ///     println!("{:?}: {:?}", entry.stats_type(), entry.id());
 /// }
 ///
-/// // Get a specific stat by ID
-/// if let Some(entry) = report.get("RTCPeerConnection") {
-///     println!("Found peer connection stats");
+/// // Follow a reference: an id is opaque, and comes from another object of the report
+/// if let Some(transport) = report.transport()
+///     && let Some(pair) = report.get(&transport.selected_candidate_pair_id)
+/// {
+///     println!("Selected pair: {:?}", pair.id());
 /// }
 ///
 /// // Filter by type
@@ -210,7 +212,7 @@ impl RTCStatsReport {
 
     /// Returns the peer connection stats if present.
     pub fn peer_connection(&self) -> Option<&RTCPeerConnectionStats> {
-        self.get("RTCPeerConnection").and_then(|e| match e {
+        self.iter().find_map(|e| match e {
             RTCStatsReportEntry::PeerConnection(s) => Some(s),
             _ => None,
         })

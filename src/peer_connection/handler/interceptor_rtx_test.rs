@@ -211,3 +211,61 @@ fn a_padding_only_rtx_probe_reaches_the_chain_unchanged() {
     assert_eq!(RTX_PT, seen[0].header.payload_type);
     assert_eq!(9, seen[0].header.sequence_number);
 }
+
+/// Hand `messages` to an interceptor handler past the handshake, the primary stream having
+/// its statistics object; return that object.
+fn stats_after(
+    messages: Vec<TaggedRTCMessageInternal>,
+) -> crate::statistics::accumulator::InboundRtpStreamAccumulator {
+    let mut ctx = InterceptorHandlerContext {
+        is_dtls_handshake_complete: true,
+        ..Default::default()
+    };
+    let mut transceivers = vec![transceiver()];
+    let media_engine = MediaEngine::default();
+    let mut chain = RecordingChain::default();
+    let mut stats = RTCStatsAccumulator::default();
+    stats.get_or_create_inbound_rtp_streams(
+        PRIMARY_SSRC,
+        RtpCodecKind::Video,
+        "track",
+        "0",
+        Some(RTX_SSRC),
+        None,
+        0,
+    );
+    for message in messages {
+        InterceptorHandler::new(
+            &mut ctx,
+            &mut transceivers,
+            &media_engine,
+            &mut chain,
+            &mut stats,
+        )
+        .handle_read(message)
+        .expect("handle_read");
+    }
+    stats
+        .inbound_rtp_streams
+        .remove(&PRIMARY_SSRC)
+        .expect("the stream's statistics")
+}
+
+/// webrtc-stats 8.5 `retransmittedPacketsReceived`: retransmissions. A padding-only RTX packet
+/// (a bandwidth probe, RFC 4588 section 4) repeats no packet; it was counted as one, before
+/// de-encapsulation found there was nothing in it.
+#[test]
+fn a_padding_only_rtx_probe_is_not_a_retransmission() {
+    let stream = stats_after(vec![rtx_packet(&[]), rtx_packet(&[0x00])]);
+    assert_eq!(0, stream.retransmitted_packets_received);
+    assert_eq!(0, stream.retransmitted_bytes_received);
+}
+
+/// A retransmission is counted with the payload it repeats: the two bytes of the original
+/// sequence number in front of it (RFC 4588 section 4) are not payload of the stream.
+#[test]
+fn a_retransmission_is_counted_with_the_payload_it_repeats() {
+    let stream = stats_after(vec![rtx_packet(&[0x00, 0x2A, 0xDE, 0xAD, 0xBE])]);
+    assert_eq!(1, stream.retransmitted_packets_received);
+    assert_eq!(3, stream.retransmitted_bytes_received);
+}

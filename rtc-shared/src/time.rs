@@ -29,6 +29,18 @@ impl SystemInstant {
         }
     }
 
+    /// Pairs a monotonic instant with the wall-clock time the caller says it corresponds to.
+    ///
+    /// Reads no clock: for a time derived from another [`SystemInstant`] (an earlier or later
+    /// instant on the same anchor) or carried by a protocol field (an RTCP sender report's NTP
+    /// timestamp).
+    pub fn at(instant: Instant, duration_since_unix_epoch: Duration) -> Self {
+        Self {
+            instant,
+            duration_since_unix_epoch,
+        }
+    }
+
     /// Only used for deserialization
     pub fn from_epoch(duration_since_unix_epoch: Duration) -> Self {
         let system_now = SystemTime::now(); // Exemption: wall-clock is correct here to deserialization only

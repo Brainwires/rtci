@@ -21,7 +21,6 @@ use log::{debug, trace, warn};
 use rustc_hash::FxHashMap;
 use shared::TransportContext;
 use shared::error::{Error, Result};
-use shared::marshal::MarshalSize;
 use std::collections::VecDeque;
 use std::time::Instant;
 
@@ -273,16 +272,9 @@ impl<'a> EndpointHandler<'a> {
 
         let ssrc = rtp_packet.header.ssrc;
 
+        // The packet was counted on its stream when it arrived, before the interceptor chain
+        // (`InterceptorHandler::handle_read`).
         if let Some(track_id) = self.find_track_id(ssrc, Some(&rtp_packet.header)) {
-            // Track RTP stats if accumulator exists (created when OnOpen event is fired)
-            if let Some(stream) = self.stats.inbound_rtp_streams.get_mut(&ssrc) {
-                stream.on_rtp_received(
-                    rtp_packet.header.marshal_size(),
-                    rtp_packet.payload.len(),
-                    now,
-                );
-            }
-
             self.ctx.read_outs.push_back(TaggedRTCMessageInternal {
                 now,
                 transport: transport_context,

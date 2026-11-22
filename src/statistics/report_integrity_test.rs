@@ -75,7 +75,6 @@ const NEVER_WRITTEN: &[&str] = &[
     "packetsReportedAsLostButRecovered",
     "packetsWithBleachedEct1Marking",
     "packetsSentWithEct1",
-    "totalEncodedBytesTarget",
     "framesSent",
     "hugeFramesSent",
     "framesEncoded",
@@ -83,14 +82,17 @@ const NEVER_WRITTEN: &[&str] = &[
     "psnrSum",
     "psnrMeasurements",
     "totalEncodeTime",
-    "totalPacketSendDelay",
     "qualityLimitationReason",
     "qualityLimitationDurations",
     "qualityLimitationResolutionChanges",
     "encoderImplementation",
     "powerEfficientEncoder",
     "scalabilityMode",
-    "mediaSourceId",
+    "availableIncomingBitrate",
+    "packetsDiscardedOnSend",
+    "bytesDiscardedOnSend",
+    // Removed from webrtc-stats: never written, supplied or not.
+    "totalEncodedBytesTarget",
 ];
 
 /// Members whose empty string is a real value rather than "none".

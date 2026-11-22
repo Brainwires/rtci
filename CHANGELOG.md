@@ -354,6 +354,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in `rtcp_feedback`. `History::take_reports` returns only packets a feedback described.
   `RateControlState::default()` is `Increase`.
 
+- **stats**: report ids are opaque: `report.get("RTCPeerConnection")` and ids built from an
+  SSRC no longer find anything; use the typed accessors or follow a reference.
+- **stats**: field types. `RTCInboundRtpStreamStats`: `fir_count`, `pli_count`: `Option<u32>`;
+  `retransmitted_packets_received`, `retransmitted_bytes_received`: `Option<u64>`.
+  `RTCOutboundRtpStreamStats`: `fir_count`, `pli_count`: `Option<u32>`; `target_bitrate`:
+  `Option<f64>`; `total_packet_send_delay`: `f64`; `total_encoded_bytes_target` removed (also
+  from `EncoderStatsUpdate`). `RTCRemoteOutboundRtpStreamStats::remote_timestamp`:
+  `Option<SystemInstant>`. `RTCIceCandidatePairStats`: `packets_discarded_on_send`:
+  `Option<u32>`, `bytes_discarded_on_send`: `Option<u64>`.
+  `RTCDataChannelStats::data_channel_identifier`: `Option<u16>`. The update structs
+  (`DecoderStatsUpdate`, `AudioReceiverStatsUpdate`, `EncoderStatsUpdate`) have new fields.
+- **stats**: the id an application passes to `update_audio_playout_stats` is no longer the
+  `media-playout` object's id in the report; an inbound stream's `playoutId` names it.
+
 ### Security
 
 - **dtls**: the server verifies the client's Finished (RFC 5246 section 7.4.9). `Flight4` only
@@ -1043,6 +1057,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **receiver**: `RTCRtpReceiver::streams()`, the ids of the remote MediaStreams the track is
   in (W3C `[[AssociatedRemoteMediaStreams]]`).
 
+- **stats**: `RTCPeerConnection::on_send_discarded`, `update_available_incoming_bitrate` and
+  `try_get_stats` (an `InvalidAccessError` for a selector that is not the connection's).
+- **stats**: the application feed carries `estimatedPlayoutTimestamp`, corruption
+  probability, `fecPacketsDiscarded`, in-band FEC, `psnrSum` / `psnrMeasurements`,
+  `qualityLimitationDurations` and a per-stream `targetBitrate` (`PsnrSum`,
+  `QualityLimitationDurations`).
+- **stats**: `totalPacketSendDelay` (time between `write_rtp` and `poll_write`),
+  `issuerCertificateId` (certificate chains), `relayProtocol` of a local relay candidate (from
+  its TURN URL), a `media-source` object for every track attached to a sender, one `codec`
+  object per payload type shared by both directions.
+- **shared**: `SystemInstant::at`, `Error::InvalidAccessError`.
+
 ### Bug Fixes
 
 - **ice**: attributes after MESSAGE-INTEGRITY are ignored (RFC 8489 section 14.5). The HMAC does
@@ -1373,6 +1399,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of the first protected packet.
 - **flexfec-03**: the initial sequence number of a repair stream is random (section 4.2). It
   was 0.
+
+- **stats**: a remote-outbound object's `remoteTimestamp` is the NTP time of the latest RTCP
+  sender report (it was the time of the `get_stats` call), and is left out when that time is
+  before 1970; the `timestamp` of a remote-inbound / remote-outbound object is when its report
+  arrived. Every timestamp of a report is now on one wall-clock anchor: `lastPacketReceivedTimestamp`
+  and `lastPacketSentTimestamp` were the time of the call too.
+- **stats**: `active` follows the encoding's `active` (`set_parameters`); it was always `true`.
+- **stats**: members that do not apply or that nothing measures are left out instead of written
+  as 0: `firCount` / `pliCount` (and every other video-only member) on an audio stream,
+  audio-only members on a video stream, `retransmittedPacketsReceived` /
+  `retransmittedBytesReceived` without RTX, `packetsDiscardedOnSend` / `bytesDiscardedOnSend`
+  until the application reports a discard, `dataChannelIdentifier` before the channel has an
+  id, `totalEncodedBytesTarget` (removed from webrtc-stats).
+- **stats**: `dataChannelsClosed` no longer counts a channel that never opened.
+- **stats**: a remote candidate's `address` is null unless the application supplied that
+  address; a peer-reflexive remote candidate learned from a check no longer shows its address
+  or a `usernameFragment`.
+- **stats**: RTP accounting. `packetsSent` / `bytesSent` / `headerBytesSent` include the
+  packets sent on the RTX SSRC; a retransmission on the stream's own SSRC (no RTX) counts in
+  `retransmittedPacketsSent`; retransmitted bytes are the repeated payload, without the RTX
+  original sequence number; a padding-only RTX packet is not a retransmission; header bytes
+  include padding; packets on the FEC SSRC count in `packetsReceived` / `bytesReceived`.
+  Arrivals are counted before the interceptor chain, so a packet a FEC decoder rebuilds is not
+  counted as received.
+- **stats**: transport `bytesSent` / `bytesReceived` leave out STUN and mDNS datagrams.
+- **stats**: an id is hashed with a salt drawn per peer connection (W3C: "MUST NOT be
+  predictable by an application"), and a recycled SSRC gets a new id, never the deleted
+  object's.
+- **stats**: `roundTripTime` gating as webrtc-stats words it (no measurement from a DLSR or
+  DLRR delay of 0; the remote-outbound value is cleared by a sender report without a DLRR
+  block); the remote receiver's `packetsReceived` never decreases; `selectedCandidatePairChanges`
+  counts the loss of the selected pair; a pair that stops being selected gives up its bitrate
+  estimates; candidates no agent and no reported pair holds are deleted (ICE restart);
+  `targetBitrate` is no longer the connection's estimate copied to every stream.
 
 ### Dependencies
 
