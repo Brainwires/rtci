@@ -103,6 +103,10 @@ const REDUCED_SIZE_MAX: usize = 400;
 const REDUCED_SIZE_UNANSWERED_LIMIT: u32 = 8;
 /// The most report blocks one SR or RR carries (RFC 3550 6.4.1: RC is five bits).
 const MAX_REPORT_BLOCKS: usize = 31;
+
+/// The fraction lost (in 1/256: about 10%) from which a stream's report goes before the round
+/// robin when not every report fits (RFC 8083 section 4.3).
+const HIGH_LOSS_FRACTION: u8 = 26;
 /// The least interval the session computes, in seconds. RTP/AVPF has no minimum for a
 /// point-to-point session (RFC 4585 3.5.1), so with enough bandwidth the calculated interval
 /// tends to nothing; a timer cannot.
@@ -1530,6 +1534,11 @@ impl RtcpSessionInterceptor {
 
     /// The report blocks of this interval: up to `max` remote streams, taken round robin so
     /// that each is reported in turn when they do not all fit (RFC 3550 6.1).
+    ///
+    /// When they do not all fit, streams losing [`HIGH_LOSS_FRACTION`] or more since their
+    /// last report go first, the worst first, in up to half of the blocks (RFC 8083 section
+    /// 4.3: "priority SHOULD be given to reports on sources that have high packet loss
+    /// rates"); the other half stays round robin, so every stream is still reported in turn.
     fn report_blocks(&mut self, now: Instant, max: usize) -> Vec<ReceptionReport> {
         let candidates: Vec<u32> = self
             .remote_order
@@ -1544,12 +1553,32 @@ impl RtcpSessionInterceptor {
         if candidates.is_empty() || max == 0 {
             return vec![];
         }
-        let count = candidates.len().min(max);
-        let start = self.report_cursor % candidates.len();
-        self.report_cursor = (start + count) % candidates.len();
-        (0..count)
-            .filter_map(|offset| {
-                let ssrc = candidates[(start + offset) % candidates.len()];
+        let mut chosen: Vec<u32> = Vec::new();
+        if candidates.len() > max {
+            let mut lossy: Vec<(u8, u32)> = candidates
+                .iter()
+                .filter_map(|ssrc| {
+                    let loss = self.remotes.get(ssrc)?.stream.pending_fraction_lost();
+                    (loss >= HIGH_LOSS_FRACTION).then_some((loss, *ssrc))
+                })
+                .collect();
+            lossy.sort_by_key(|(loss, _)| std::cmp::Reverse(*loss));
+            chosen.extend(lossy.iter().take(max / 2).map(|(_, ssrc)| *ssrc));
+        }
+        let rest: Vec<u32> = candidates
+            .iter()
+            .copied()
+            .filter(|ssrc| !chosen.contains(ssrc))
+            .collect();
+        if !rest.is_empty() {
+            let count = rest.len().min(max - chosen.len());
+            let start = self.report_cursor % rest.len();
+            self.report_cursor = (start + count) % rest.len();
+            chosen.extend((0..count).map(|offset| rest[(start + offset) % rest.len()]));
+        }
+        chosen
+            .into_iter()
+            .filter_map(|ssrc| {
                 self.remotes
                     .get_mut(&ssrc)
                     .map(|remote| remote.stream.generate_reception_report(now))

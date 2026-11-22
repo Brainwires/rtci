@@ -504,8 +504,12 @@ fn the_interceptor_inbound_fuzz_logic_holds_over_a_fixed_corpus() {
     ] {
         interceptor_inbound(input);
     }
-    let mut rng = Lcg(0xC0FF_EE01);
-    for _ in 0..1_500 {
-        interceptor_inbound(&input(&mut rng));
+    // Three sequences of 1500 sessions each: the corpus grows by seed, so each run covers the
+    // same inputs.
+    for seed in [0xC0FF_EE01, 0x5EED_CC02, 0x5EED_CC03] {
+        let mut rng = Lcg(seed);
+        for _ in 0..1_500 {
+            interceptor_inbound(&input(&mut rng));
+        }
     }
 }

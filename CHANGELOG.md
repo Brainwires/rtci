@@ -984,6 +984,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behaviour changes
 
+- **gcc**: a pause in sending lowers the estimate the flow resumes at, the more the longer
+  the pause (RFC 8836 section 2, requirement 5a): up to 2 s it is kept, beyond that each 10 s
+  halves it, never below the starting estimate (`PAUSE_KEEPS_SHARE`, `PAUSE_HALVING`). It was
+  kept across any pause.
+- **rtcp_session**: when the report blocks do not all fit the MTU, streams losing 10% or more
+  since their last report go first, worst first, in up to half the blocks; the rest stay round
+  robin (RFC 8083 section 4.3).
 - **fec**: the amount of FEC follows the loss the receiver reports (draft-ietf-payload-flexible-fec-scheme-03
   section 8, RFC 8627 section 8, RFC 5109 section 12). The FlexFEC draft-03, RFC 8627 FlexFEC and
   ULPFEC senders read the receiver reports of their protected streams (smoothed, weight 0.3) and
@@ -2997,6 +3004,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Testing
 
+- **interceptor**: larger fixed corpora for the fuzz targets' logic (ULPFEC and FlexFEC receive:
+  four seeds of 3000 inputs; the inbound interceptor chain: three seeds of 1500 sessions), and
+  fixed-corpus invariant tests for the ECN validation and the FEC rate. Writing the latter found
+  a panic in `FecRate::fec_packets` with a bound of zero (`clamp(1, 0)`), fixed before release.
 - **fec**: a FlexFEC repair SSRC is an RTCP participant between two peer connections: it sends
   sender reports and the connection's CNAME once it has sent, and the receiver learns that CNAME
   for it (`the_receiver_learns_the_cname_of_the_fec_ssrc_from_its_rtcp`).

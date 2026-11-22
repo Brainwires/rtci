@@ -55,6 +55,13 @@ pub const PROBE_RESULT_HOLD: Duration = Duration::from_secs(6);
 /// [`PROBE_RESULT_HOLD`]): the cluster arrived at about the rate the estimate already is.
 pub const PROBE_CONFIRMS_ESTIMATE: f64 = 0.9;
 
+/// A pause in sending up to this long keeps the estimate (RFC 8836 section 2, requirement
+/// 5a: the flow regains its share fast).
+pub const PAUSE_KEEPS_SHARE: Duration = Duration::from_secs(2);
+/// Beyond [`PAUSE_KEEPS_SHARE`], each such stretch of pause halves the estimate the flow resumes
+/// at (requirement 5a: less aggressively the longer the interruption).
+pub const PAUSE_HALVING: Duration = Duration::from_secs(10);
+
 /// Google Congestion Control.
 ///
 /// # The two halves
@@ -103,6 +110,8 @@ pub struct Gcc {
     /// The range the application configured; `min` and `max` are this, narrowed by the limits
     /// from outside.
     configured: (f64, f64),
+    /// The starting estimate, which a long pause in sending falls back towards.
+    initial: f64,
     /// When feedback was last read, once any has been.
     last_feedback: Option<Instant>,
     /// When a packet was last sent.
@@ -135,6 +144,26 @@ impl Default for Gcc {
 }
 
 impl Gcc {
+    /// RFC 8836 section 2, requirement 5a: after a pause in sending the flow "SHOULD [...]
+    /// regain [its previous share] fast, but [...] less aggressively the longer the
+    /// interruption". A pause up to [`PAUSE_KEEPS_SHARE`] keeps the estimate; a longer one
+    /// halves it for every [`PAUSE_HALVING`] beyond that (the path may have changed meanwhile),
+    /// down to the starting estimate at most, from where the controller (and bandwidth probing)
+    /// climbs again.
+    fn resume_after(&mut self, pause: Duration) {
+        let Some(beyond) = pause.checked_sub(PAUSE_KEEPS_SHARE) else {
+            return;
+        };
+        let factor = 0.5f64.powf(beyond.as_secs_f64() / PAUSE_HALVING.as_secs_f64());
+        let floor = self.initial.min(self.target);
+        let resumed = (self.target * factor).max(floor).clamp(self.min, self.max);
+        if resumed < self.target {
+            self.target = resumed;
+            self.delay_control.set_target(resumed);
+            self.delay_control.reset_convergence();
+            self.loss_control.cap(resumed);
+        }
+    }
     /// An estimator starting at `initial`, held within `min..=max`.
     pub fn new(initial: f64, min: f64, max: f64) -> Self {
         let initial = initial.clamp(min, max);
@@ -151,6 +180,7 @@ impl Gcc {
             arrival_anchor: None,
             newest_arrival: None,
             configured: (min, max),
+            initial,
             last_feedback: None,
             last_sent: None,
             feedback_deadline: None,
@@ -338,6 +368,9 @@ impl BandwidthEstimator for Gcc {
     }
 
     fn on_packet_sent(&mut self, now: Instant, _size: usize) {
+        if let Some(last) = self.last_sent {
+            self.resume_after(now.saturating_duration_since(last));
+        }
         self.last_sent = Some(now);
         // Only once feedback has a rhythm (two reports) is its absence unexpected: a receiver
         // that never sends any is handled by the receiver-report fallback, and one that has
@@ -470,6 +503,26 @@ mod tests {
             arrival: arrival_ms.map(Duration::from_millis),
             ecn: Ecn::default(),
         }
+    }
+
+    /// RFC 8836 section 2, requirement 5a: a short pause keeps the estimate, a long one brings
+    /// it down, the more the longer the pause, never below the starting estimate.
+    #[test]
+    fn a_pause_in_sending_keeps_the_estimate_and_a_long_one_lowers_it() {
+        let epoch = Instant::now();
+        let resumed_after = |pause: Duration| {
+            let mut gcc = Gcc::new(300_000.0, 100_000.0, 10_000_000.0);
+            gcc.on_probe_result(epoch, 2_000_000.0);
+            gcc.on_packet_sent(epoch, 1200);
+            gcc.on_packet_sent(epoch + pause, 1200);
+            gcc.target_bitrate()
+        };
+        assert_eq!(resumed_after(Duration::from_millis(500)), 2_000_000.0);
+        assert_eq!(resumed_after(PAUSE_KEEPS_SHARE), 2_000_000.0);
+        let twelve = resumed_after(PAUSE_KEEPS_SHARE + PAUSE_HALVING);
+        assert!((twelve - 1_000_000.0).abs() < 1.0, "{twelve}");
+        let long = resumed_after(Duration::from_secs(120));
+        assert_eq!(long, 300_000.0, "down to the starting estimate, not below");
     }
 
     /// Empty feedback says nothing and must not move anything.
