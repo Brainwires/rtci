@@ -1213,6 +1213,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+- **cc**: the media receiver's side of TMMBR (RFC 5104 section 4.2.1.2). An application asks a
+  remote sender to stay under a bit rate with `TmmbrControl::Limit` (and lifts it with
+  `TmmbrControl::Clear`) written into the chain; the congestion control interceptor sends the
+  TMMBR at once for a remote stream that negotiated `ccm tmmbr` (and never for one that did
+  not), with the overhead measured on the stream as section 4.2.1.2's running average, capped
+  at `TmmbrControl::NegotiatedMaximum`. It keeps the latest TMMBN of each sender, asks again
+  as owner when its tuple changed or as non-owner when its tuple would enter the bounding set,
+  and repeats an unacknowledged request every `TMMBR_REPEAT_INTERVAL` (1 s). Inbound TMMBN,
+  typed or raw, is read (it was dropped).
 - **gcc**: the receive-side variant of draft-ietf-rmcat-gcc-02 (section 3) in the default
   set (`configure_remb`): `RembGeneratorInterceptor` sends a REMB for every remote stream that
   negotiated `goog-remb` and neither transport-wide feedback nor RFC 8888, from the delay-based

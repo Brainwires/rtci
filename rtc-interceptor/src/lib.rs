@@ -266,6 +266,7 @@ pub use cc::probe::{
     ProbeRequest, probe_estimate,
 };
 pub use cc::tmmbr::{TMMBR_OWNER_TIMEOUT, TmmbEntry};
+pub use cc::tmmbr_request::{TMMBR_REPEAT_INTERVAL, TmmbrControl};
 pub use circuit_breaker::{
     CircuitBreakerBuilder, CircuitBreakerHandle, CircuitBreakerInterceptor, CircuitBreakerReason,
     CircuitBreakerState,

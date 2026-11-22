@@ -71,7 +71,7 @@ pub(crate) fn stream_supports_ccfb(info: &StreamInfo) -> bool {
 }
 
 /// An SSRC for a participant that sends no media: random, and never 0 (RFC 3550 section 8).
-fn random_ssrc() -> u32 {
+pub(crate) fn random_ssrc() -> u32 {
     loop {
         let ssrc: u32 = rand::random();
         if ssrc != 0 {
