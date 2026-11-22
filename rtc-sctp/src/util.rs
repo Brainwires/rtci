@@ -1,6 +1,8 @@
 use crate::shared::AssociationId;
 
 use bytes::Bytes;
+use std::fmt;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// This function is non-inline to prevent the optimizer from looking inside it.
@@ -77,6 +79,79 @@ impl AssociationIdGenerator for RandomAssociationIdGenerator {
 
     fn aid_lifetime(&self) -> Option<Duration> {
         self.lifetime
+    }
+}
+
+/// Where an endpoint and its associations draw their random values from: verification tags,
+/// initial TSNs, unauthenticated State Cookies, the Initiate Tag of an INIT ACK for an
+/// existing association, HEARTBEAT nonces and the HEARTBEAT timer's jitter.
+///
+/// By default `rand`'s thread-local CSPRNG, so that `rtc-sctp` stays usable without an RTC
+/// crypto provider. With one ([`EndpointConfig::random_source`](crate::EndpointConfig::random_source))
+/// every value comes from `RTCCryptoProvider::random()`, as in the other crates of the
+/// workspace: a caller that seeds that source gets the same values in every run. Should the
+/// provider fail to give randomness, the value comes from `rand` instead: the values need
+/// unpredictability, not a particular source.
+#[derive(Clone, Default)]
+pub(crate) struct RandomSource(Option<Arc<dyn crypto::RTCCryptoProvider>>);
+
+impl RandomSource {
+    pub(crate) fn new(provider: Option<Arc<dyn crypto::RTCCryptoProvider>>) -> Self {
+        Self(provider)
+    }
+
+    pub(crate) fn fill(&self, output: &mut [u8]) {
+        let drawn = self
+            .0
+            .as_ref()
+            .is_some_and(|provider| provider.random().fill(output).is_ok());
+        if !drawn {
+            rand::RngExt::fill(&mut rand::rng(), output);
+        }
+    }
+
+    pub(crate) fn u32(&self) -> u32 {
+        let mut bytes = [0u8; 4];
+        self.fill(&mut bytes);
+        u32::from_be_bytes(bytes)
+    }
+
+    pub(crate) fn u64(&self) -> u64 {
+        let mut bytes = [0u8; 8];
+        self.fill(&mut bytes);
+        u64::from_be_bytes(bytes)
+    }
+
+    /// A random value other than zero (a verification tag, RFC 9260 3.3.2).
+    pub(crate) fn nonzero_u32(&self) -> u32 {
+        loop {
+            let value = self.u32();
+            if value != 0 {
+                return value;
+            }
+        }
+    }
+}
+
+impl fmt::Debug for RandomSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("RandomSource")
+            .field(&self.0.as_ref().map(|provider| provider.name()))
+            .finish()
+    }
+}
+
+/// The verification tags of an endpoint whose configuration names a random source.
+#[derive(Debug, Clone)]
+pub(crate) struct SourcedAssociationIdGenerator(pub(crate) RandomSource);
+
+impl AssociationIdGenerator for SourcedAssociationIdGenerator {
+    fn generate_aid(&mut self) -> AssociationId {
+        self.0.nonzero_u32()
+    }
+
+    fn aid_lifetime(&self) -> Option<Duration> {
+        None
     }
 }
 

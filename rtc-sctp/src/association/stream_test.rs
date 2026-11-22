@@ -19,6 +19,7 @@ fn established() -> Association {
         SocketAddr::from(([0, 0, 0, 0], 0)),
         TransportProtocol::UDP,
         Instant::now(),
+        crate::util::RandomSource::default(),
     );
     a.control_queue.clear();
     a.timers.stop(Timer::T1Init);

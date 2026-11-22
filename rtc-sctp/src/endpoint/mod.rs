@@ -11,6 +11,8 @@ pub(crate) mod link_test;
 #[cfg(test)]
 mod loss_recovery_test;
 #[cfg(test)]
+mod random_source_test;
+#[cfg(test)]
 mod sctp_port_test;
 
 use std::{
@@ -41,7 +43,7 @@ use crate::packet::{CommonHeader, Packet};
 use crate::shared::{
     AssociationEvent, AssociationEventInner, AssociationId, EndpointEvent, EndpointEventInner,
 };
-use crate::util::{AssociationIdGenerator, RandomAssociationIdGenerator};
+use crate::util::AssociationIdGenerator;
 use shared::{EcnCodepoint, TransportContext, TransportMessage, TransportProtocol};
 
 use bytes::Bytes;
@@ -477,6 +479,7 @@ impl Endpoint {
             self.local_addr,
             self.transport_protocol,
             now,
+            self.endpoint_config.random.clone(),
         );
         association.set_cookie_signer(signer);
         association.handle_event(AssociationEvent(AssociationEventInner::Datagram(
@@ -725,7 +728,7 @@ impl Endpoint {
             return Err(ConnectError::InvalidRemoteAddress(remote));
         }
 
-        let remote_aid = RandomAssociationIdGenerator::new().generate_aid();
+        let remote_aid = self.endpoint_config.random.nonzero_u32();
         let local_aid = self.new_aid();
 
         let ports = (
@@ -850,6 +853,7 @@ impl Endpoint {
             self.local_addr,
             self.transport_protocol,
             now,
+            self.endpoint_config.random.clone(),
         );
 
         let peer = (remote_addr, ports.0, ports.1);

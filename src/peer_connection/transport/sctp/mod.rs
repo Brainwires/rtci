@@ -163,8 +163,10 @@ pub(crate) struct SctpTransport {
     pub(crate) limit_message_size_without_interleaving: bool,
 
     // The crypto provider State Cookies are authenticated with (RFC 9260 section 5.1.3). With
-    // one the accepting side of the handshake keeps no state before the COOKIE ECHO. `None`
-    // only in unit tests that build a transport by hand.
+    // one the accepting side of the handshake keeps no state before the COOKIE ECHO. The
+    // endpoint's random values (verification tags, initial TSNs, HEARTBEAT nonces and jitter)
+    // come from its `random()` too, as ICE's and DTLS's do. `None` only in unit tests that
+    // build a transport by hand.
     pub(crate) cookie_provider: Option<Arc<dyn crypto::RTCCryptoProvider>>,
 
     /// The largest SCTP packet the path below carries, as worked out from the selected
@@ -416,7 +418,8 @@ impl SctpTransport {
     }
 
     /// Authenticates the State Cookies of the endpoint `start()` builds with an HMAC from
-    /// `provider` (RFC 9260 section 5.1.3).
+    /// `provider` (RFC 9260 section 5.1.3), and draws the endpoint's random values from
+    /// `provider.random()`.
     pub(crate) fn with_cookie_provider(
         mut self,
         provider: Arc<dyn crypto::RTCCryptoProvider>,
@@ -604,6 +607,9 @@ impl SctpTransport {
         self.receive_message_limit = can_send_size as usize;
 
         let mut sctp_endpoint_config = ::sctp::EndpointConfig::default();
+        if let Some(provider) = &self.cookie_provider {
+            sctp_endpoint_config.random_source(provider.clone());
+        }
         if let Some(mtu) = self.packet_budget() {
             sctp_endpoint_config.max_payload_size(::sctp::max_payload_size_for_mtu(mtu));
         }
