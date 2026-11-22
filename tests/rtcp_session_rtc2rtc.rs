@@ -64,6 +64,10 @@ struct Peer {
     read_rtcp: Vec<Box<dyn rtc::rtcp::Packet>>,
     /// The RTCP datagrams this peer put on the wire.
     rtcp_datagrams: usize,
+    /// The SSRCs `OnSsrcCollision` named.
+    collisions: Vec<u32>,
+    /// How many times negotiation was asked for.
+    negotiation_needed: usize,
 }
 
 impl Peer {
@@ -123,6 +127,8 @@ impl Peer {
             muted: 0,
             read_rtcp: Vec::new(),
             rtcp_datagrams: 0,
+            collisions: Vec::new(),
+            negotiation_needed: 0,
         })
     }
 
@@ -230,6 +236,10 @@ impl World {
                     }
                     RTCPeerConnectionEvent::OnTrack(RTCTrackEvent::OnMute(_)) => {
                         peer.muted += 1;
+                    }
+                    RTCPeerConnectionEvent::OnSsrcCollision(ssrc) => peer.collisions.push(ssrc),
+                    RTCPeerConnectionEvent::OnNegotiationNeededEvent => {
+                        peer.negotiation_needed += 1
                     }
                     _ => {}
                 }
@@ -668,11 +678,10 @@ fn a_sender_moves_to_a_new_ssrc_after_a_collision() -> Result<()> {
     let (_, rtx_before) = encoding_ssrcs(&mut world, 0, senders[0]);
     for peer in world.peers.iter_mut() {
         while peer.pc.poll_event().is_some() {}
+        peer.negotiation_needed = 0;
     }
 
     // Both write with the shared SSRC, as the application keeps doing.
-    let mut collisions = vec![];
-    let mut negotiation_needed = 0;
     let mut wire_ssrcs = vec![];
     for n in 0..20u16 {
         for (i, sender) in senders.iter().enumerate() {
@@ -710,18 +719,15 @@ fn a_sender_moves_to_a_new_ssrc_after_a_collision() -> Result<()> {
                 message: msg.message,
             });
         }
-        while let Some(event) = world.peers[0].pc.poll_event() {
-            match event {
-                RTCPeerConnectionEvent::OnSsrcCollision(ssrc) => collisions.push(ssrc),
-                RTCPeerConnectionEvent::OnNegotiationNeededEvent => negotiation_needed += 1,
-                _ => {}
-            }
-        }
+        world.pump()?;
         let step = world.now + Duration::from_millis(20);
         world.run_until(step)?;
     }
-    assert_eq!(collisions, vec![SHARED], "reported once");
-    assert!(negotiation_needed >= 1, "the new SSRC is to be signalled");
+    assert_eq!(world.peers[0].collisions, vec![SHARED], "reported once");
+    assert!(
+        world.peers[0].negotiation_needed >= 1,
+        "the new SSRC is to be signalled"
+    );
 
     let (moved, rtx_after) = encoding_ssrcs(&mut world, 0, senders[0]);
     assert_ne!(moved, SHARED, "the sender has a new SSRC");
@@ -776,12 +782,7 @@ fn a_description_that_names_a_local_ssrc_moves_the_sender_at_once() -> Result<()
         offerer, SHARED,
         "the offerer, whose SSRC no description took, keeps it"
     );
-    let collided: Vec<u32> = std::iter::from_fn(|| world.peers[1].pc.poll_event())
-        .filter_map(|event| match event {
-            RTCPeerConnectionEvent::OnSsrcCollision(ssrc) => Some(ssrc),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(collided, vec![SHARED]);
+    world.pump()?;
+    assert_eq!(world.peers[1].collisions, vec![SHARED]);
     Ok(())
 }
