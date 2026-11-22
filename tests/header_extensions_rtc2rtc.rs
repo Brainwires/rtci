@@ -438,6 +438,7 @@ fn the_absolute_capture_time_reaches_the_receivers_synchronization_source() -> R
         .expect("sender")
         .write_rtp(now, packet(2, 99_000))?;
     world.pump()?;
+    // (The pacer releases it by its RTP timestamp, 100 ms after the first.)
     world.run_until(now + Duration::from_millis(200))?;
     assert_eq!(
         source(&mut world),
