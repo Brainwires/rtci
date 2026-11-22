@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **interceptor**: the default interceptor set offers RFC 8888 congestion control feedback
+  (`a=rtcp-fb:* ack ccfb`) beside `transport-cc`, and `a=rtcp-fb:<pt> ccm tmmbr`, on audio and
+  video; its chain has the RFC 8888 recorder at `Slot::Rfc8888` beside the TWCC receiver
+  (`register_default_interceptors_without_congestion_control` too). An answer to an offer with
+  both feedback mechanisms keeps `ack ccfb` and drops `transport-cc` (RFC 8888 section 6), and
+  two engines now run on RFC 8888; a browser answers `transport-cc` alone and nothing changes
+  towards it. `CongestionFeedback::Twcc` in `DefaultInterceptorOptions` restores the old offer.
+- **interceptor**: `CongestionFeedback` has a new default variant, `Negotiated`; `Twcc` and
+  `Rfc8888` now mean that mechanism only.
+- **interceptor**: a TMMBR is honoured, and answered with a TMMBN, only for a stream that
+  negotiated `ccm tmmbr` (RFC 5104 sections 7.1 and 7.2). It was honoured for every stream.
+  `CongestionControlBuilder::with_unnegotiated_tmmbr(true)` (`unnegotiated_tmmbr` in
+  `DefaultInterceptorOptions`) is the lenient setting.
+- **interceptor**: `TwccReceiverBuilder` and `Rfc8888Builder` stretch their interval to what the
+  RTCP bandwidth holds one report in, up to 400 ms (`with_adaptive_interval`, on by default);
+  `with_interval` is now the shortest interval, not the only one. `with_adaptive_interval(false)`
+  keeps it fixed.
+- **interceptor**: the pacer releases a packet that is inside its budget, with nothing queued
+  ahead, from `handle_write` instead of from the next `handle_timeout`
+  (`PacerBuilder::with_immediate_release(false)` restores the wait).
+- **interceptor**: `RedPlacement::WithNextMedia` is the default of `UlpfecSendBuilder::red` and
+  of `configure_ulpfec` (RFC 5109 section 14.2: FEC is not sent by itself). libwebrtc reads only
+  the other form: towards a browser use `configure_ulpfec_with_placement(..,
+  RedPlacement::OwnPacket)`.
+- **media engine**: a remote description that carries both RFC 8627 `flexfec` and `rtx`
+  negotiates no `rtx` (RFC 8627 section 1.1.7); `MediaEngine::set_flexfec_with_retransmission`
+  is the setting that keeps it. `flexfec-03` is not affected.
+
 - **ice**: candidate constructors and `unmarshal_candidate` return an error for a priority above
   2^31 - 1 or a component above 256.
 - **ice**: a local candidate added without a priority after another of its type no longer has
@@ -440,6 +468,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   GCC's 300 kbit/s until the first change.
 
 ### Features
+
+- **interceptor**: `negotiated_congestion_feedback` / `CongestionFeedbackFormat`: the one
+  feedback format a stream runs on, from its negotiated feedback (RFC 8888 when `ack ccfb` is
+  there, transport-wide congestion control otherwise). The TWCC sender does not number a stream
+  that runs on RFC 8888, the TWCC receiver does not report it, and the congestion controller
+  reads each stream's packets from one format only.
+- **interceptor**: `DefaultInterceptorOptions` and `register_default_interceptors_with_options`:
+  the settings of the default set in one place (`congestion_feedback`, `unnegotiated_tmmbr`,
+  `pacer_immediate_release`). `configure_tmmbr`, `configure_ulpfec_with_placement`.
+- **interceptor**: congestion control feedback follows the RTCP bandwidth. The generators read
+  the session's `b=` lines and `a=rtcp-rsize` (`RtcpSessionControl`) and measure the media rate
+  as the RTCP session does, and build one report per RTCP packet the session may send. Measured
+  on a virtual clock, two engines, RFC defaults (5% RTCP bandwidth, `T_rr_interval` 0, compound
+  RTCP): at 64 kbit/s of media 2.5 feedback datagrams a second with at most 0.66 s (TWCC) or
+  0.79 s (RFC 8888) between two, where a fixed 100 ms interval gave 2.07 and 1.87 a second with
+  gaps of 1.15 s and 1.35 s; at 100 kbit/s 3.1 and 2.5 a second (gaps 0.5 s; fixed: 4.0 and 3.5
+  with gaps of 0.6 s and 0.7 s); from 300 kbit/s up 10 a second either way
+  (`rtc-interceptor/tests/congestion_feedback_rate.rs`).
+- **interceptor**: with reduced-size RTCP negotiated, TWCC and RFC 8888 feedback leave as early
+  RTCP without a compound packet around them (RFC 8888 section 3.1, RFC 5506).
 
 - **congestion control is on by default** (RFC 8834 section 7). `register_default_interceptors`
   now installs `Gcc` over the receiver's TWCC or RFC 8888 feedback, the pacer that releases
