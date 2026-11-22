@@ -683,6 +683,9 @@ impl RTCRtpSender<'_> {
         // two-byte form "SHOULD negotiate the use of IDs above 14"), and from the first packet
         // that needed the two-byte form on. With mixing, each packet takes the smallest form
         // its elements fit.
+        let in_dtmf_stream = encodings
+            .first()
+            .is_some_and(|first| first.rtp_coding_parameters.ssrc == Some(packet.header.ssrc));
         if !mixed && packet.header.extension {
             let two_byte_ids = parameters
                 .rtp_parameters
@@ -700,11 +703,7 @@ impl RTCRtpSender<'_> {
         // RFC 4733 section 2.5.1.2: DTMF events share the stream's sequence numbers. The
         // first encoding's stream carries them; the application's packets there move past
         // the event packets sent before them.
-        if from_application
-            && encodings
-                .first()
-                .is_some_and(|first| first.rtp_coding_parameters.ssrc == Some(packet.header.ssrc))
-        {
+        if from_application && in_dtmf_stream {
             sender.dtmf.on_media_packet(now, &mut packet);
         }
 
