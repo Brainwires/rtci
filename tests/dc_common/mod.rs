@@ -13,7 +13,7 @@ use rtc::peer_connection::message::RTCMessage;
 use rtc::peer_connection::sdp::RTCSessionDescription;
 use rtc::peer_connection::state::RTCPeerConnectionState;
 use rtc::peer_connection::transport::{
-    CandidateConfig, CandidateHostConfig, RTCDtlsRole, RTCIceCandidate,
+    CandidateConfig, CandidateHostConfig, RTCDtlsRole, RTCIceCandidate, RTCIceCandidateInit,
 };
 use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
 use rtc::sansio::Protocol;
@@ -43,6 +43,13 @@ pub struct Peer {
     pub received: Vec<Received>,
     /// While set, every datagram this peer writes is lost on the way.
     pub drop_outgoing: bool,
+    /// The size of every datagram this peer wrote, in order (lost ones included).
+    pub written_sizes: Vec<usize>,
+    /// Whether a datagram the peer connection refuses is passed over instead of failing the
+    /// run: while a DTLS association is being replaced, records of the old one still arrive.
+    pub tolerate_read_errors: bool,
+    /// The addresses this peer had before [`Peer::move_to`].
+    earlier_addrs: Vec<SocketAddr>,
 }
 
 impl Peer {
@@ -62,24 +69,12 @@ impl Peer {
         // The default codecs, for the tests that negotiate a media section beside the data.
         let mut media_engine = MediaEngine::default();
         media_engine.register_default_codecs()?;
-        let mut pc = RTCPeerConnectionBuilder::new()
+        let pc = RTCPeerConnectionBuilder::new()
             .with_configuration(RTCConfigurationBuilder::new().build())
             .with_setting_engine(setting_engine.build())
             .with_media_engine(media_engine)
             .build(now)?;
-        let host = CandidateHostConfig {
-            base_config: CandidateConfig {
-                network: "udp".to_owned(),
-                address: addr.ip().to_string(),
-                port: addr.port(),
-                component: 1,
-                ..Default::default()
-            },
-            ..Default::default()
-        }
-        .new_candidate_host()?;
-        pc.add_local_candidate(RTCIceCandidate::from(&host).to_json()?)?;
-        Ok(Self {
+        let mut peer = Self {
             pc,
             addr,
             inbox: Vec::new(),
@@ -87,14 +82,39 @@ impl Peer {
             connection_states: Vec::new(),
             received: Vec::new(),
             drop_outgoing: false,
-        })
+            written_sizes: Vec::new(),
+            tolerate_read_errors: false,
+            earlier_addrs: Vec::new(),
+        };
+        let candidate = peer.candidate()?;
+        peer.pc.add_local_candidate(candidate)?;
+        Ok(peer)
+    }
+
+    /// This peer's host candidate, as it is signalled.
+    pub fn candidate(&self) -> Result<RTCIceCandidateInit> {
+        let host = CandidateHostConfig {
+            base_config: CandidateConfig {
+                network: "udp".to_owned(),
+                address: self.addr.ip().to_string(),
+                port: self.addr.port(),
+                component: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+        .new_candidate_host()?;
+        Ok(RTCIceCandidate::from(&host).to_json()?)
     }
 
     /// One turn: everything that reached this peer, then its events and reads. Returns the
     /// datagrams it wrote.
     fn turn(&mut self) -> Result<Vec<TaggedBytesMut>> {
         for datagram in self.inbox.drain(..) {
-            self.pc.handle_read(datagram)?;
+            let read = self.pc.handle_read(datagram);
+            if !self.tolerate_read_errors {
+                read?;
+            }
         }
         while let Some(event) = self.pc.poll_event() {
             match event {
@@ -113,6 +133,7 @@ impl Peer {
         }
         let mut written = Vec::new();
         while let Some(datagram) = self.pc.poll_write() {
+            self.written_sizes.push(datagram.message.len());
             written.push(datagram);
         }
         if self.drop_outgoing {
@@ -121,24 +142,33 @@ impl Peer {
         Ok(written)
     }
 
-    /// Hands this peer the datagrams `from` wrote to it, as its socket would.
+    /// Hands this peer the datagrams `from` wrote to it, as its sockets would: each arrives
+    /// at the address it was written to, from the address it was written from.
     fn deliver(&mut self, from: SocketAddr, datagrams: Vec<TaggedBytesMut>, now: Instant) {
         for datagram in datagrams {
-            assert_eq!(
-                datagram.transport.peer_addr, self.addr,
-                "{from} wrote to an address other than its peer's"
+            let to = datagram.transport.peer_addr;
+            assert!(
+                to == self.addr || self.earlier_addrs.contains(&to),
+                "{from} wrote to {to}, an address its peer never had"
             );
             self.inbox.push(TaggedBytesMut {
                 now,
                 transport: TransportContext {
-                    local_addr: self.addr,
-                    peer_addr: from,
+                    local_addr: to,
+                    peer_addr: datagram.transport.local_addr,
                     ecn: None,
                     transport_protocol: TransportProtocol::UDP,
                 },
                 message: datagram.message,
             });
         }
+    }
+
+    /// Moves this peer to `addr`: its next candidate is there. What is still written to the
+    /// address it had arrives there, as on a host that keeps both interfaces.
+    pub fn move_to(&mut self, addr: SocketAddr) {
+        self.earlier_addrs.push(self.addr);
+        self.addr = addr;
     }
 
     /// Whether the peer connection is `connected`.
@@ -204,6 +234,128 @@ impl Pair {
             start: now,
             now,
         })
+    }
+
+    /// A pair of the two given peers, built at `now`.
+    pub fn of(offerer: Peer, answerer: Peer, now: Instant) -> Self {
+        Self {
+            offerer,
+            answerer,
+            start: now,
+            now,
+        }
+    }
+
+    /// Two peers at `offerer_addr` and `answerer_addr`, built from the given setting engines.
+    pub fn with_setting_engines(
+        offerer_addr: &str,
+        offerer: SettingEngineBuilder,
+        answerer_addr: &str,
+        answerer: SettingEngineBuilder,
+    ) -> Result<Self> {
+        let now = Instant::now();
+        Ok(Self::of(
+            Peer::with_setting_engine(offerer_addr.parse()?, offerer, now)?,
+            Peer::with_setting_engine(answerer_addr.parse()?, answerer, now)?,
+            now,
+        ))
+    }
+
+    /// Opens `label` from the offerer, negotiates and runs until it is open on both sides.
+    /// Returns the offerer's handle of it; the answerer's is its last opened channel.
+    pub fn open_channel(&mut self, label: &str) -> Result<RTCDataChannelId> {
+        let before = self.answerer.opened().len();
+        let id = self.offerer.pc.create_data_channel(label, None)?.id();
+        self.negotiate()?;
+        anyhow::ensure!(
+            self.run_until(
+                |p| p.offerer.opened().contains(&id) && p.answerer.opened().len() > before
+            )?,
+            "channel {label} never opened"
+        );
+        Ok(id)
+    }
+
+    /// Gives each peer its host candidate again and signals it to the other: after an ICE
+    /// restart the candidates of the new generation are trickled.
+    pub fn trickle(&mut self) -> Result<()> {
+        let offerer = self.offerer.candidate()?;
+        let answerer = self.answerer.candidate()?;
+        self.offerer.pc.add_local_candidate(offerer.clone())?;
+        self.answerer.pc.add_remote_candidate(offerer)?;
+        self.answerer.pc.add_local_candidate(answerer.clone())?;
+        self.offerer.pc.add_remote_candidate(answerer)?;
+        Ok(())
+    }
+
+    /// An offer/answer exchange started by the offerer, or by the answerer when
+    /// `from_answerer`; the offer goes through `munge_offer` and the answer through
+    /// `munge_answer` on their way to the other peer. Returns the offer and the answer as
+    /// their authors wrote them.
+    pub fn exchange_with(
+        &mut self,
+        from_answerer: bool,
+        munge_offer: impl Fn(&str) -> String,
+        munge_answer: impl Fn(&str) -> String,
+    ) -> Result<(String, String)> {
+        let now = self.now;
+        let (first, second) = if from_answerer {
+            (&mut self.answerer, &mut self.offerer)
+        } else {
+            (&mut self.offerer, &mut self.answerer)
+        };
+        let offer = first.pc.create_offer(None)?;
+        first.pc.set_local_description(now, offer.clone())?;
+        second
+            .pc
+            .set_remote_description(now, RTCSessionDescription::offer(munge_offer(&offer.sdp))?)?;
+        let answer = second.pc.create_answer(None)?;
+        second.pc.set_local_description(now, answer.clone())?;
+        first.pc.set_remote_description(
+            now,
+            RTCSessionDescription::answer(munge_answer(&answer.sdp))?,
+        )?;
+        Ok((offer.sdp, answer.sdp))
+    }
+
+    /// Sends `payload` as a binary message on the offerer's channel `from` and waits for it
+    /// on the answerer, or the other way round when `from_answerer`. Returns whether it
+    /// arrived before the deadline.
+    pub fn deliver(
+        &mut self,
+        from_answerer: bool,
+        channel: RTCDataChannelId,
+        payload: &[u8],
+    ) -> Result<bool> {
+        let now = self.now;
+        let (sender, before) = if from_answerer {
+            (&mut self.answerer, self.offerer.received.len())
+        } else {
+            (&mut self.offerer, self.answerer.received.len())
+        };
+        sender
+            .pc
+            .data_channel(channel)
+            .ok_or_else(|| anyhow::anyhow!("no such channel"))?
+            .send(now, bytes::BytesMut::from(payload))?;
+        let arrived = self.run_until(|p| {
+            let receiver = if from_answerer {
+                &p.offerer
+            } else {
+                &p.answerer
+            };
+            receiver.received.len() > before
+        })?;
+        let receiver = if from_answerer {
+            &self.offerer
+        } else {
+            &self.answerer
+        };
+        Ok(arrived
+            && receiver
+                .received
+                .last()
+                .is_some_and(|(_, _, data)| data == payload))
     }
 
     /// A pair connected over one data channel, `label`, that the offerer opened. Returns the

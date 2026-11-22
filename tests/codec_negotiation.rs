@@ -142,16 +142,15 @@ fn test_add_transceiver_from_kind_negotiates_non_first_codec() {
         .expect("add transceiver from kind");
 
     {
-        let sender = offerer
+        // A transceiver made from a kind has a sender without a track (W3C addTransceiver);
+        // its encodings are the sender's.
+        let mut sender = offerer
             .rtp_sender(RTCRtpSenderId::from(transceiver_id))
             .expect("offerer sender");
-        let provisional_track = sender.track().clone();
-        assert_eq!(provisional_track.kind(), RtpCodecKind::Video);
-        assert_eq!(provisional_track.codings().len(), 1);
-        assert_eq!(
-            provisional_track.codings()[0].rtp_coding_parameters.ssrc,
-            Some(BASE_SSRC)
-        );
+        assert!(sender.track().is_none());
+        let encodings = sender.get_parameters().encodings.clone();
+        assert_eq!(encodings.len(), 1);
+        assert_eq!(encodings[0].rtp_coding_parameters.ssrc, Some(BASE_SSRC));
     }
 
     let offer = offerer.create_offer(None).expect("create offer");
@@ -225,7 +224,7 @@ fn test_add_transceiver_from_track_negotiates_non_first_codec() {
         let sender = offerer
             .rtp_sender(RTCRtpSenderId::from(transceiver_id))
             .expect("offerer sender");
-        let provisional_track = sender.track().clone();
+        let provisional_track = sender.track().expect("the sender has a track").clone();
         assert_eq!(provisional_track.codings().len(), 1);
         assert_eq!(
             provisional_track.codings()[0].rtp_coding_parameters.ssrc,
@@ -295,7 +294,7 @@ fn test_add_track_negotiates_non_first_codec() {
 
     {
         let sender = offerer.rtp_sender(sender_id).expect("offerer sender");
-        let provisional_track = sender.track().clone();
+        let provisional_track = sender.track().expect("the sender has a track").clone();
         assert_eq!(provisional_track.codings().len(), 1);
         assert_eq!(
             provisional_track.codings()[0].rtp_coding_parameters.ssrc,
@@ -370,10 +369,11 @@ fn test_add_transceiver_from_kind_preserves_simulcast() {
         .expect("add transceiver from kind");
 
     {
-        let sender = offerer
+        let mut sender = offerer
             .rtp_sender(RTCRtpSenderId::from(transceiver_id))
             .expect("offerer sender");
-        assert_eq!(sender.track().codings().len(), 2);
+        assert!(sender.track().is_none());
+        assert_eq!(sender.get_parameters().encodings.len(), 2);
     }
 
     let offer = offerer.create_offer(None).expect("create offer");
@@ -441,7 +441,14 @@ fn test_add_transceiver_from_track_preserves_simulcast() {
         let sender = offerer
             .rtp_sender(RTCRtpSenderId::from(transceiver_id))
             .expect("offerer sender");
-        assert_eq!(sender.track().codings().len(), 2);
+        assert_eq!(
+            sender
+                .track()
+                .expect("the sender has a track")
+                .codings()
+                .len(),
+            2
+        );
     }
 
     let offer = offerer.create_offer(None).expect("create offer");
@@ -500,7 +507,14 @@ fn test_add_track_preserves_simulcast() {
 
     {
         let sender = offerer.rtp_sender(sender_id).expect("offerer sender");
-        assert_eq!(sender.track().codings().len(), 2);
+        assert_eq!(
+            sender
+                .track()
+                .expect("the sender has a track")
+                .codings()
+                .len(),
+            2
+        );
     }
 
     let offer = offerer.create_offer(None).expect("create offer");

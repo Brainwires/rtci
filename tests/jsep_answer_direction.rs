@@ -43,7 +43,8 @@ fn every_offered_direction_is_answered_with_its_complement() -> TestResult {
         offerer
             .rtp_transceiver(RTCRtpTransceiverId::from(offered))
             .expect("transceiver")
-            .set_direction(offer_dir);
+            .set_direction(offer_dir)
+            .expect("the change is accepted");
         let (offer, answer) = exchange(&mut offerer, &mut answerer)?;
         assert_eq!(
             direction_line(&answer),
@@ -85,7 +86,8 @@ fn a_one_way_answer_does_not_ask_for_renegotiation() -> TestResult {
     offerer
         .rtp_transceiver(RTCRtpTransceiverId::from(offered))
         .expect("transceiver")
-        .set_direction(RTCRtpTransceiverDirection::Sendonly);
+        .set_direction(RTCRtpTransceiverDirection::Sendonly)
+        .expect("the change is accepted");
     let (_, answer) = exchange(&mut offerer, &mut answerer)?;
     assert_eq!(direction_line(&answer), "a=recvonly", "{answer}");
     assert_eq!(

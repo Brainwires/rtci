@@ -168,11 +168,26 @@ fn an_answer_without_rtcp_mux_is_refused_and_the_offer_stays_pending() -> TestRe
     Ok(())
 }
 
+/// A peer that writes the BUNDLE attributes in the tagged section only (RFC 9143 section
+/// 7.1.3), which is `SettingEngineBuilder::with_bundle_attributes_repeated(false)`.
+fn tagged_only_peer() -> Result<RTCPeerConnection, Box<dyn std::error::Error>> {
+    let mut media_engine = MediaEngine::default();
+    media_engine.register_default_codecs()?;
+    Ok(RTCPeerConnectionBuilder::new()
+        .with_setting_engine(
+            SettingEngineBuilder::new()
+                .with_bundle_attributes_repeated(false)
+                .build(),
+        )
+        .with_media_engine(media_engine)
+        .build(Instant::now())?)
+}
+
 /// RFC 9143 section 9.3.1.2: when the offerer-tagged section had `a=rtcp-mux-only`, the
 /// answerer-tagged section says so too; no other answered section does (RFC 8858 section 4.3).
 #[test]
 fn the_answerer_tagged_section_repeats_rtcp_mux_only() -> TestResult {
-    let mut pc = default_peer()?;
+    let mut pc = tagged_only_peer()?;
     pc.set_remote_description(
         Instant::now(),
         offer(
@@ -365,7 +380,7 @@ a=rtcp-xr:rcvr-rtt=all
 /// `a=rtcp-rsize` only if the most recent answer had it.
 #[test]
 fn a_subsequent_offer_follows_the_most_recent_answer() -> TestResult {
-    let mut offerer = default_peer()?;
+    let mut offerer = tagged_only_peer()?;
     let mut answerer = default_peer()?;
     offerer.add_track(video_track("first", 0x0404_0404))?;
     let offer = offerer.create_offer(None)?;
@@ -408,24 +423,11 @@ fn a_subsequent_offer_follows_the_most_recent_answer() -> TestResult {
     Ok(())
 }
 
-/// With the BUNDLE attributes repeated (`with_bundle_attributes_repeated`), a subsequent
-/// offer's new section says `a=rtcp-mux-only` (RFC 9429 section 4.1.1: "into any new 'm='
+/// With the BUNDLE attributes repeated (the default), a subsequent offer's new section says `a=rtcp-mux-only` (RFC 9429 section 4.1.1: "into any new 'm='
 /// sections in offers it generates"), and a negotiated one does not (section 5.2.2).
 #[test]
 fn a_repeating_offerer_marks_the_new_section_of_a_subsequent_offer() -> TestResult {
-    let repeating = || -> Result<RTCPeerConnection, Box<dyn std::error::Error>> {
-        let mut media_engine = MediaEngine::default();
-        media_engine.register_default_codecs()?;
-        Ok(RTCPeerConnectionBuilder::new()
-            .with_setting_engine(
-                SettingEngineBuilder::new()
-                    .with_bundle_attributes_repeated(true)
-                    .build(),
-            )
-            .with_media_engine(media_engine)
-            .build(Instant::now())?)
-    };
-    let mut offerer = repeating()?;
+    let mut offerer = default_peer()?;
     let mut answerer = default_peer()?;
     offerer.add_track(video_track("first", 0x0404_0404))?;
     exchange(&mut offerer, &mut answerer)?;

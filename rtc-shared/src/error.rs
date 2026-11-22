@@ -2030,6 +2030,10 @@ pub enum Error {
     #[error("Range error {0}")]
     RangeError(String),
 
+    /// Type error: an argument is not a value the operation takes (W3C / WebIDL `TypeError`).
+    #[error("Type error {0}")]
+    TypeError(String),
+
     /// ErrSenderWithNoCodecs indicates that a RTPSender was created without any codecs. To send media the MediaEngine needs at
     /// least one configured codec.
     #[error("unable to populate media section, RTPSender created with no codecs")]

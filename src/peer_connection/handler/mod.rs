@@ -27,6 +27,7 @@ use crate::peer_connection::message::{
 };
 use crate::peer_connection::state::peer_connection_state::RTCPeerConnectionState;
 use crate::peer_connection::state::signaling_state::RTCSignalingState;
+use crate::peer_connection::transport::sctp::SctpPath;
 use crate::statistics::accumulator::RTCStatsAccumulator;
 use ::interceptor::Packet;
 use log::warn;
@@ -210,10 +211,56 @@ impl RTCPeerConnection {
         // own `read_outs` — the pipeline empties that within a single `handle_read` — and it
         // is data-channel output only, so unrelated media cannot throttle SCTP.
         let downstream_backlog = self.pipeline_context.data_read_outs.len();
-        SctpHandler::new(
+        // The path under SCTP is looked at again only when ICE selected a pair or a DTLS
+        // handshake completed since it was last looked at: a comparison, not work, per call.
+        let selected_pair_changes = self
+            .pipeline_context
+            .ice_handler_context
+            .selected_pair_changes;
+        let path = self
+            .pipeline_context
+            .sctp_handler_context
+            .take_path_refresh(selected_pair_changes)
+            .then(|| self.sctp_path());
+        let mut handler = SctpHandler::new(
             &mut self.pipeline_context.sctp_handler_context,
             downstream_backlog,
-        )
+        );
+        if let Some(path) = path {
+            handler.apply_path(path);
+        }
+        handler
+    }
+
+    /// What lies under the SCTP association: the selected candidate pair (its address
+    /// family, its transport, whether this side's candidate is relayed) and what the DTLS
+    /// cipher suite adds to a record. `None` while no pair is selected.
+    fn sctp_path(&self) -> Option<SctpPath> {
+        let (local, remote) = self
+            .pipeline_context
+            .ice_handler_context
+            .ice_transport
+            .agent
+            .get_selected_candidate_pair()?;
+        let dtls_record_expansion = self
+            .pipeline_context
+            .dtls_handler_context
+            .dtls_transport
+            .dtls_endpoint
+            .as_ref()
+            .and_then(|endpoint| {
+                endpoint.get_connection_state(shared::TransportContext::default().peer_addr)
+            })
+            .and_then(|state| state.cipher_suite())
+            .map_or(SctpPath::DEFAULT_DTLS_RECORD_EXPANSION, |suite| {
+                suite.record_expansion()
+            });
+        Some(SctpPath {
+            ipv6: remote.addr().is_ipv6(),
+            tcp: local.network_type().is_tcp(),
+            relayed: local.candidate_type() == ::ice::candidate::CandidateType::Relay,
+            dtls_record_expansion,
+        })
     }
 
     pub(crate) fn get_datachannel_handler(&mut self) -> DataChannelHandler<'_> {

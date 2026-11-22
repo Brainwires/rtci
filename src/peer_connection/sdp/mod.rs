@@ -1106,7 +1106,7 @@ impl RTCPeerConnection {
         }
         if codecs.is_empty() {
             // If we are sender and have no codecs throw an error early
-            if transceiver.sender().is_some() {
+            if transceiver.describes_sender() {
                 return Err(Error::ErrSenderWithNoCodecs);
             }
 
@@ -1298,7 +1298,11 @@ impl RTCPeerConnection {
         let mut send_rids = vec![];
 
         let cname = media_engine.rtcp_cname.as_str();
-        if let Some(sender) = transceiver.sender_mut() {
+        // Every transceiver has a sender; one that has neither a track nor a sending
+        // direction is not described (RFC 9429 section 5.2.1).
+        if transceiver.describes_sender()
+            && let Some(sender) = transceiver.sender_mut()
+        {
             let (encodings, track) = (
                 sender.get_parameters(media_engine).encodings.clone(),
                 sender.track(),
@@ -1695,7 +1699,7 @@ pub(crate) struct PopulateSdpParams {
     /// (RFC 9429 section 5.2.2: in a subsequent offer "an 'a=bundle-only' line ... MUST NOT
     /// be added").
     pub(crate) initial_offer: bool,
-    /// Not `SettingEngineBuilder::with_bundle_attributes_repeated`: the form of RFC 9143
+    /// `SettingEngineBuilder::with_bundle_attributes_repeated(false)`: the form of RFC 9143
     /// section 7.1.3.
     pub(crate) bundle_attributes_in_tagged_section_only: bool,
     pub(crate) sctp_max_message_size: usize,

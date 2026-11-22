@@ -31,6 +31,7 @@ pub struct PacerBuilder {
     bitrate: f64,
     burst_bits: Option<f64>,
     queue_limit: usize,
+    immediate_release: bool,
 }
 
 impl Default for PacerBuilder {
@@ -39,6 +40,7 @@ impl Default for PacerBuilder {
             bitrate: DEFAULT_BITRATE,
             burst_bits: None,
             queue_limit: DEFAULT_QUEUE_LIMIT,
+            immediate_release: true,
         }
     }
 }
@@ -69,13 +71,32 @@ impl PacerBuilder {
         self
     }
 
+    /// Whether a packet the budget already covers leaves when it is written, with nothing
+    /// queued ahead of it. On by default.
+    ///
+    /// The pacer exists to keep a sender from putting more than its target rate times the
+    /// burst time on the path at once (draft-ietf-rmcat-gcc-02 section 4: a group of packets
+    /// of that size every `burst_time`, 5 ms recommended). The budget is that bound: it never
+    /// holds more than one burst and refills at the target rate. A packet inside it adds
+    /// nothing to what the bound allows, and holding it until the next wake-up only adds
+    /// delay the sender caused itself, which RFC 8836 section 2 (requirement 1) asks a
+    /// congestion controller for interactive media to keep as low as possible; no RFC asks
+    /// for the wait. `false` restores it: every packet is queued and leaves from the next
+    /// timeout, so departures happen only on the driver's clock.
+    pub fn with_immediate_release(mut self, immediate_release: bool) -> Self {
+        self.immediate_release = immediate_release;
+        self
+    }
+
     /// Build the interceptor.
     pub fn build(self) -> PacerInterceptor {
         let bucket = match self.burst_bits {
             Some(burst_bits) => LeakyBucket::new(self.bitrate).with_burst_bits(burst_bits),
             None => LeakyBucket::new(self.bitrate),
         };
-        PacerInterceptor::new(bucket, self.queue_limit)
+        let mut pacer = PacerInterceptor::new(bucket, self.queue_limit);
+        pacer.immediate_release = self.immediate_release;
+        pacer
     }
 }
 
@@ -106,6 +127,8 @@ pub struct PacerInterceptor {
     pacer: LeakyBucket,
     queue: VecDeque<TaggedPacket>,
     queue_limit: usize,
+    /// Whether a packet inside the budget leaves at once when nothing is queued ahead of it.
+    immediate_release: bool,
     /// Packets refused because the queue was full.
     dropped: u64,
     /// Packets the budget has released, waiting to join the belt.
@@ -126,6 +149,7 @@ impl PacerInterceptor {
             pacer,
             queue: VecDeque::new(),
             queue_limit: queue_limit.max(1),
+            immediate_release: true,
             dropped: 0,
         }
     }
@@ -215,6 +239,17 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for PacerInterceptor {
         // Keeping the budget current at enqueue time is what lets `poll_timeout` compute a
         // deadline that is never in the past, even before the first `handle_timeout`.
         self.pacer.refill(msg.now);
+
+        // Inside the budget and first in line: it leaves now. The budget is the bound on what
+        // may enter the path at once, so nothing is gained by holding the packet for a timer.
+        if self.immediate_release && self.queue.is_empty() {
+            let bits = Self::bits_of(&msg);
+            if self.pacer.can_release(bits) {
+                self.pacer.consume(bits);
+                self.released.push_back(msg);
+                return Ok(());
+            }
+        }
 
         if self.queue.len() >= self.queue_limit {
             // Refuse the arrival rather than evicting something already queued: the queued

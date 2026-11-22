@@ -670,12 +670,21 @@ fn with_sender(packet: Box<dyn rtcp::Packet>, ssrc: u32) -> Box<dyn rtcp::Packet
 }
 
 /// RFC 5506 4.2.1: whether the delivery of `packet` shows in what the peer does next (a
-/// retransmission, a key frame), so it may travel reduced-size on its own.
+/// retransmission, a key frame, a sender that goes on raising its rate), so it may travel
+/// reduced-size on its own.
+///
+/// Congestion control feedback is of that kind: RFC 8888 section 3.1 has it sent "in a
+/// non-compound RTCP packet if supported by the session participants", and a sender whose
+/// feedback does not arrive cuts its rate (RFC 8888 section 5), which the receiver sees.
+/// Without the report and SDES around it the feedback is half the size, and at low media
+/// rates twice as many fit the RTCP bandwidth.
 fn delivery_shows(packet: &dyn rtcp::Packet) -> bool {
     let any = packet.as_any();
     any.is::<TransportLayerNack>()
         || any.is::<PictureLossIndication>()
         || any.is::<FullIntraRequest>()
+        || any.is::<TransportLayerCc>()
+        || any.is::<CcFeedbackReport>()
 }
 
 impl RtcpSessionInterceptor {

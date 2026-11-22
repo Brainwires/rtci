@@ -302,10 +302,14 @@ impl Session {
         let registry = register_default_interceptors(Registry::new(), &mut me)?;
         // 256 KiB messages (what Chromium and WebKit state; RFC 8841 6.1), `.local` remote
         // candidates resolved over mDNS (a browser hides its host address by default).
+        // Browsers do not announce SCTP message interleaving, and the engine's default then
+        // holds what it sends to 16 KB (RFC 8831 section 6.6); the scenarios echo 64 KiB and
+        // 256 KiB messages to a browser, so this peer sends as browsers do.
         let setting_engine = SettingEngineBuilder::new()
             .with_sctp_max_message_size(SctpMaxMessageSize::Bounded(
                 SctpMaxMessageSize::MAX_MESSAGE_SIZE,
             ))
+            .with_sctp_message_size_limit_without_interleaving(false)
             .with_multicast_dns_mode(MulticastDnsMode::QueryOnly)
             .build();
         let pc = RTCPeerConnectionBuilder::new()

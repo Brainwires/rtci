@@ -392,7 +392,6 @@ async fn run(
                                 .ok_or(Error::ErrRTPTransceiverCodecUnsupported)?
                         };
                         rtp_packet.header.ssrc = rtp_sender
-                            .track()
                             .ssrcs()
                             .last()
                             .ok_or(Error::ErrSenderWithNoSSRCs)?;

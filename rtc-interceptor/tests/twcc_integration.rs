@@ -336,6 +336,7 @@ fn test_twcc_receiver_generates_feedback_on_timeout() {
         .with(
             Slot::TwccReceiver,
             TwccReceiverBuilder::new()
+                .with_adaptive_interval(false)
                 .with_interval(Duration::from_millis(100))
                 .build(),
         )
@@ -396,6 +397,7 @@ fn test_twcc_receiver_feedback_contains_packet_info() {
         .with(
             Slot::TwccReceiver,
             TwccReceiverBuilder::new()
+                .with_adaptive_interval(false)
                 .with_interval(Duration::from_millis(100))
                 .build(),
         )
@@ -464,6 +466,7 @@ fn test_twcc_receiver_ignores_streams_without_twcc() {
         .with(
             Slot::TwccReceiver,
             TwccReceiverBuilder::new()
+                .with_adaptive_interval(false)
                 .with_interval(Duration::from_millis(100))
                 .build(),
         )
@@ -517,7 +520,10 @@ fn test_twcc_receiver_configurable_interval() {
     let mut chain = Registry::new()
         .with(
             Slot::TwccReceiver,
-            TwccReceiverBuilder::new().with_interval(interval).build(),
+            TwccReceiverBuilder::new()
+                .with_adaptive_interval(false)
+                .with_interval(interval)
+                .build(),
         )
         .build();
 
@@ -549,6 +555,7 @@ fn test_combined_twcc_sender_and_receiver() {
         .with(
             Slot::TwccReceiver,
             TwccReceiverBuilder::new()
+                .with_adaptive_interval(false)
                 .with_interval(Duration::from_millis(100))
                 .build(),
         )
@@ -635,6 +642,7 @@ fn test_twcc_unbind_stops_processing() {
         .with(
             Slot::TwccReceiver,
             TwccReceiverBuilder::new()
+                .with_adaptive_interval(false)
                 .with_interval(Duration::from_millis(100))
                 .build(),
         )
@@ -690,6 +698,7 @@ fn test_twcc_multiple_remote_streams() {
         .with(
             Slot::TwccReceiver,
             TwccReceiverBuilder::new()
+                .with_adaptive_interval(false)
                 .with_interval(Duration::from_millis(100))
                 .build(),
         )
@@ -786,6 +795,7 @@ fn test_full_interceptor_chain_with_reports_and_twcc() {
         .with(
             Slot::TwccReceiver,
             TwccReceiverBuilder::new()
+                .with_adaptive_interval(false)
                 .with_interval(Duration::from_millis(100))
                 .build(),
         )
@@ -881,6 +891,7 @@ fn test_twcc_receiver_records_unbound_ssrcs() {
         .with(
             Slot::TwccReceiver,
             TwccReceiverBuilder::new()
+                .with_adaptive_interval(false)
                 .with_interval(Duration::from_millis(100))
                 .build(),
         )
@@ -964,6 +975,7 @@ fn test_twcc_receiver_ignores_unbound_ssrcs_without_any_binding() {
         .with(
             Slot::TwccReceiver,
             TwccReceiverBuilder::new()
+                .with_adaptive_interval(false)
                 .with_interval(Duration::from_millis(100))
                 .build(),
         )
