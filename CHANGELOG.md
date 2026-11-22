@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **dtls**: `use_srtp` follows RFC 5764 section 4.1 by default: the DTLS client offers it only
+  when the session has an audio or video section. A data-channel-only session is set up
+  without it, and when it gains a media section a new DTLS association with `use_srtp`
+  replaces it (the offer carries a new `a=tls-id`, RFC 8842 section 5.5; the DTLS roles are
+  kept). Offering it on every association, as browsers and the engine until now did, is
+  `SettingEngineBuilder::with_dtls_use_srtp_on_every_association(true)`: set it for a peer that
+  fails an association without an SRTP profile (pion-lineage stacks) or that does not act on
+  `tls-id` when media is added later (browsers). The earlier, never released, setting to turn
+  `use_srtp` off and the error for media on an association without SRTP keys are gone.
+- **sdp**: a remote `a=fingerprint` with lower-case hex digits is refused (RFC 8122 section 5:
+  `UHEX`); `SettingEngineBuilder::with_lowercase_fingerprints_accepted(true)` reads it, as
+  browsers do.
+- **dtls**: an `rtc-dtls` server that shares no SRTP profile with the client leaves `use_srtp`
+  out and the association falls back to DTLS without SRTP (RFC 5764 section 4.1.1, SHOULD); it
+  aborted with `ErrServerNoMatchingSrtpProfile`. `ConfigBuilder::with_use_srtp_required(true)`
+  keeps the alert; the peer connection sets it for a session with a media section.
+- **dtls**: a new association asked for by an `actpass` description keeps the DTLS roles (it
+  chose them anew from the configuration and the ICE role); only a transport that was closed
+  chooses again.
+
 - **ice**: candidate constructors and `unmarshal_candidate` return an error for a priority above
   2^31 - 1 or a component above 256.
 - **ice**: a local candidate added without a priority after another of its type no longer has
@@ -327,7 +347,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   video section (RFC 5764 section 4.1). As the DTLS server the engine left its transport in
   `connecting`; as the client it aborted the handshake. A session with a media section still
   needs it: the transport fails, and a description that adds media to an association without
-  SRTP keys is refused (`ErrSessionDescriptionMediaWithoutSrtp`).
+  SRTP keys gets a new association with them.
 - **dtls**: a certificate is verified with any fingerprint hash function of RFC 8122 section 5
   (sha-256, sha-512, sha-384, sha-224, sha-1; never md5 or md2), using the most preferred one
   the peer offers. Only sha-256 was compared, so a peer that gave another one could not connect.
@@ -572,7 +592,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   client, which asked for SRTP, is the one that aborts (`ErrRequestedButNoSrtpExtension`)
   unless built with `with_use_srtp_optional`.
 - **sdp**: errors `ErrSessionDescriptionInvalidSetup`, `ErrSessionDescriptionInvalidTlsId`,
-  `ErrSessionDescriptionMediaWithoutSrtp`, `ErrInvalidIdentityAssertion`.
+  `ErrInvalidIdentityAssertion`.
 - **rtp**: a two-byte header-extension block is parsed whatever its appbits (RFC 8285 section
   4.3). Only the exact profile `0x1000` selected the two-byte parser; `0x1001` to `0x100F` came
   back as one opaque element with ID 0, so MID, RID and the transport-wide number in it were not
@@ -1085,9 +1105,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **sdp**: `a=identity` (RFC 8827 section 5) is carried: `RTCPeerConnection::
   set_identity_assertion` and `remote_identity_assertion`. Making and verifying an assertion
   stays the application's.
-- **dtls**: `SettingEngineBuilder::with_disable_dtls_use_srtp` for a data-channel-only
-  endpoint (no `use_srtp`, media sections refused); `RTCCertificate::fingerprint` for one hash
-  function; `rtc_dtls::config::ConfigBuilder::with_use_srtp_optional`.
+- **dtls**: `SettingEngineBuilder::with_dtls_use_srtp_on_every_association`;
+  `RTCCertificate::fingerprint` for one hash function;
+  `rtc_dtls::config::ConfigBuilder::with_use_srtp_optional`.
 - **crypto**: `HashAlgorithm::{Sha1, Sha224, Sha384, Sha512}` in the built-in providers, for
   certificate fingerprints.
 

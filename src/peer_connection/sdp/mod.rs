@@ -2091,7 +2091,10 @@ pub(crate) fn has_rtp_media(desc: &SessionDescription) -> bool {
 /// 5), `a=setup` (RFC 4145 section 4, RFC 8842 section 5.1) and `a=tls-id` (RFC 8842 section
 /// 4). Whether the description has the fingerprints it needs is [`extract_fingerprints`]'s
 /// question.
-pub(crate) fn validate_dtls_attributes(desc: &SessionDescription) -> Result<()> {
+pub(crate) fn validate_dtls_attributes(
+    desc: &SessionDescription,
+    accept_lowercase_fingerprints: bool,
+) -> Result<()> {
     let fingerprints = |attributes: &[sdp::description::common::Attribute]| -> Result<()> {
         for attribute in attributes.iter().filter(|a| a.key == "fingerprint") {
             parse_fingerprint_attribute(
@@ -2099,6 +2102,7 @@ pub(crate) fn validate_dtls_attributes(desc: &SessionDescription) -> Result<()> 
                     .value
                     .as_deref()
                     .ok_or(Error::ErrSessionDescriptionInvalidFingerprint)?,
+                accept_lowercase_fingerprints,
             )?;
         }
         Ok(())
@@ -2137,6 +2141,8 @@ pub(crate) fn extract_fingerprints(desc: &SessionDescription) -> Result<Vec<RTCD
                         .value
                         .as_deref()
                         .ok_or(Error::ErrSessionDescriptionInvalidFingerprint)?,
+                    // The case of the digits is `validate_dtls_attributes`' question.
+                    true,
                 )?);
             }
             // sha-256 first; the order within an algorithm is kept.
@@ -3464,30 +3470,33 @@ a=candidate:1 1 udp 1 10.0.0.2 2000 typ host\r\n";
                 section("video", "1", 0, video)
             ))
         };
-        assert_eq!(validate_dtls_attributes(&sdp("", "", "")), Ok(()));
-        assert_eq!(validate_dtls_attributes(&sdp(&good, &good, &good)), Ok(()));
+        assert_eq!(validate_dtls_attributes(&sdp("", "", ""), false), Ok(()));
+        assert_eq!(
+            validate_dtls_attributes(&sdp(&good, &good, &good), false),
+            Ok(())
+        );
         let bad = "a=fingerprint:sha-256 AA:BB\r\n";
         for (session, audio, video) in [(bad, "", ""), ("", bad, ""), ("", "", bad)] {
             assert_eq!(
-                validate_dtls_attributes(&sdp(session, audio, video)),
+                validate_dtls_attributes(&sdp(session, audio, video), false),
                 Err(Error::ErrSessionDescriptionInvalidFingerprint)
             );
         }
         assert_eq!(
-            validate_dtls_attributes(&sdp("a=fingerprint\r\n", "", "")),
+            validate_dtls_attributes(&sdp("a=fingerprint\r\n", "", ""), false),
             Err(Error::ErrSessionDescriptionInvalidFingerprint)
         );
         let holdconn = "a=setup:holdconn\r\n";
         for (session, audio, video) in [(holdconn, "", ""), ("", holdconn, ""), ("", "", holdconn)]
         {
             assert_eq!(
-                validate_dtls_attributes(&sdp(session, audio, video)),
+                validate_dtls_attributes(&sdp(session, audio, video), false),
                 Err(Error::ErrSessionDescriptionInvalidSetup)
             );
         }
         for (audio, video) in [("a=tls-id:short\r\n", ""), ("", "a=tls-id:short\r\n")] {
             assert_eq!(
-                validate_dtls_attributes(&sdp("", audio, video)),
+                validate_dtls_attributes(&sdp("", audio, video), false),
                 Err(Error::ErrSessionDescriptionInvalidTlsId)
             );
         }

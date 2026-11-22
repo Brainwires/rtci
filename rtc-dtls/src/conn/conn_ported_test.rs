@@ -536,6 +536,17 @@ fn test_srtp_configuration() -> Result<()> {
             Some(Error::ErrAlertFatalOrClose),
         ),
         (
+            // RFC 5764 section 4.1.1: with no shared profile the server leaves the extension
+            // out (the association would fall back to plain DTLS); this client did not allow
+            // going without and aborts.
+            "No shared profile",
+            vec![SrtpProtectionProfile::Srtp_Aes128_Cm_Hmac_Sha1_80],
+            vec![SrtpProtectionProfile::Srtp_Aes128_Cm_Hmac_Sha1_32],
+            SrtpProtectionProfile::Unsupported,
+            Some(Error::ErrRequestedButNoSrtpExtension),
+            Some(Error::ErrAlertFatalOrClose),
+        ),
+        (
             "SRTP server only",
             vec![],
             vec![SrtpProtectionProfile::Srtp_Aes128_Cm_Hmac_Sha1_80],
@@ -598,6 +609,49 @@ fn test_srtp_configuration() -> Result<()> {
             }
         }
     }
+    Ok(())
+}
+
+/// RFC 5764 section 4.1.1: with no shared profile the server omits `use_srtp` and a client
+/// that allows it gets an association without SRTP; a server for which that is not acceptable
+/// (`with_use_srtp_required`) answers with a fatal alert instead.
+#[test]
+fn a_server_without_a_shared_srtp_profile_falls_back_or_refuses() -> Result<()> {
+    let offered = vec![SrtpProtectionProfile::Srtp_Aes128_Cm_Hmac_Sha1_80];
+    let other = vec![SrtpProtectionProfile::Srtp_Aes128_Cm_Hmac_Sha1_32];
+
+    let (client, server) = run_handshake(
+        test_client(
+            builder()
+                .with_srtp_protection_profiles(offered.clone())
+                .with_use_srtp_optional(true),
+            true,
+        ),
+        test_server(builder().with_srtp_protection_profiles(other.clone()), true),
+    );
+    for conn in [client?, server?] {
+        assert_eq!(
+            conn.selected_srtp_protection_profile(),
+            SrtpProtectionProfile::Unsupported
+        );
+    }
+
+    let (client, server) = run_handshake(
+        test_client(
+            builder()
+                .with_srtp_protection_profiles(offered)
+                .with_use_srtp_optional(true),
+            true,
+        ),
+        test_server(
+            builder()
+                .with_srtp_protection_profiles(other)
+                .with_use_srtp_required(true),
+            true,
+        ),
+    );
+    assert_eq!(server.err(), Some(Error::ErrServerNoMatchingSrtpProfile));
+    assert_eq!(client.err(), Some(Error::ErrAlertFatalOrClose));
     Ok(())
 }
 

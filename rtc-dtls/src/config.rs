@@ -116,6 +116,7 @@ pub struct ConfigBuilder {
     signature_schemes: Vec<SignatureScheme>,
     srtp_protection_profiles: Vec<SrtpProtectionProfile>,
     use_srtp_optional: bool,
+    use_srtp_required: bool,
     client_auth: ClientAuthType,
     extended_master_secret: ExtendedMasterSecretType,
     flight_interval: Duration,
@@ -145,6 +146,7 @@ impl Default for ConfigBuilder {
             signature_schemes: vec![],
             srtp_protection_profiles: vec![],
             use_srtp_optional: false,
+            use_srtp_required: false,
             client_auth: ClientAuthType::default(),
             extended_master_secret: ExtendedMasterSecretType::default(),
             flight_interval: Duration::default(),
@@ -217,6 +219,17 @@ impl ConfigBuilder {
     /// a fatal alert.
     pub fn with_use_srtp_optional(mut self, use_srtp_optional: bool) -> Self {
         self.use_srtp_optional = use_srtp_optional;
+        self
+    }
+
+    /// Makes a server refuse a client whose `use_srtp` shares no profile with it, with a fatal
+    /// insufficient_security alert. RFC 5764 section 4.1.1: with no shared profile "the server
+    /// SHOULD NOT return the use_srtp extension at which point the connection falls back to
+    /// the negotiated DTLS cipher suite. If that is not acceptable, the server SHOULD return
+    /// an appropriate DTLS alert". `false` (the default) falls back; set `true` when the
+    /// association is of no use without SRTP.
+    pub fn with_use_srtp_required(mut self, use_srtp_required: bool) -> Self {
+        self.use_srtp_required = use_srtp_required;
         self
     }
 
@@ -650,6 +663,7 @@ impl ConfigBuilder {
             extended_master_secret: self.extended_master_secret,
             local_srtp_protection_profiles: self.srtp_protection_profiles,
             use_srtp_optional: self.use_srtp_optional,
+            use_srtp_required: self.use_srtp_required,
             server_name,
             client_auth: self.client_auth,
             local_certificates: self.certificates,
@@ -713,6 +727,7 @@ pub struct HandshakeConfig {
     pub(crate) extended_master_secret: ExtendedMasterSecretType, // Policy for the Extended Master Support extension
     pub(crate) local_srtp_protection_profiles: Vec<SrtpProtectionProfile>, // Available SRTPProtectionProfiles, if empty no SRTP support
     pub(crate) use_srtp_optional: bool, // A client goes on when the server leaves use_srtp out
+    pub(crate) use_srtp_required: bool, // A server refuses a client it shares no SRTP profile with
     pub(crate) server_name: String,
     pub(crate) client_auth: ClientAuthType, // If we are a client should we request a client certificate
     pub(crate) local_certificates: Vec<Certificate>,
@@ -774,6 +789,7 @@ impl HandshakeConfig {
             extended_master_secret: ExtendedMasterSecretType::Disable,
             local_srtp_protection_profiles: vec![],
             use_srtp_optional: false,
+            use_srtp_required: false,
             server_name: String::new(),
             client_auth: ClientAuthType::NoClientCert,
             local_certificates: vec![],
