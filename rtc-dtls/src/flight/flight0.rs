@@ -277,7 +277,8 @@ pub(crate) fn negotiate_client_hello(
     }
 
     // RFC 5764 4.1.1: a server that does not do DTLS-SRTP ignores use_srtp. One that does and
-    // shares no profile with the client refuses, rather than falling back to no SRTP.
+    // shares no profile with the client leaves the extension out too, and the association
+    // falls back to DTLS without SRTP; it refuses only when told that is not acceptable.
     if let Some(use_srtp) = client_use_srtp
         && !cfg.local_srtp_protection_profiles.is_empty()
     {
@@ -286,12 +287,13 @@ pub(crate) fn negotiate_client_hello(
             &cfg.local_srtp_protection_profiles,
         ) {
             Ok(profile) => state.srtp_protection_profile = profile,
-            Err(_) => {
+            Err(_) if cfg.use_srtp_required => {
                 return Err(fatal(
                     AlertDescription::InsufficientSecurity,
                     Error::ErrServerNoMatchingSrtpProfile,
                 ));
             }
+            Err(_) => {}
         }
     }
 

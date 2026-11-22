@@ -1966,14 +1966,6 @@ pub enum Error {
     #[error("set_remote_description called with an invalid tls-id attribute")]
     ErrSessionDescriptionInvalidTlsId,
 
-    /// ErrSessionDescriptionMediaWithoutSrtp indicates set_remote_description was called with a SessionDescription
-    /// that has an RTP media section while the DTLS association cannot key SRTP (`use_srtp` was not negotiated,
-    /// or is turned off)
-    #[error(
-        "set_remote_description called with media sections on a DTLS transport without use_srtp"
-    )]
-    ErrSessionDescriptionMediaWithoutSrtp,
-
     /// ErrInvalidIdentityAssertion indicates an `a=identity` value that does not follow RFC 8827 section 5
     #[error("invalid identity assertion")]
     ErrInvalidIdentityAssertion,

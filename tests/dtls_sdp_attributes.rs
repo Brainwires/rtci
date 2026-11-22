@@ -62,6 +62,8 @@ fn a_malformed_fingerprint_is_refused_by_set_remote_description() -> Result<()> 
         "sha-256".to_owned(),
         format!("sha-256 {}", &value[..92]),
         format!("sha-256 {value}:AB"),
+        // `UHEX`: upper-case digits.
+        format!("sha-256 {}", value.to_lowercase()),
         format!("sha-256 {}", value.replace(':', "")),
         format!("sha-256 {}", value.replacen(':', "::", 1)),
         format!("sha-256 {}G{}", &value[..1], &value[2..]),
@@ -332,5 +334,44 @@ fn nothing_is_accepted_before_the_fingerprint_arrives() -> Result<()> {
         peers.iter().all(|p| p.connected() && p.channel.is_some())
     })?;
     world.ping_pong("after the answer")?;
+    Ok(())
+}
+
+/// RFC 8122 section 5: `UHEX = DIGIT / %x41-46`. A lower-case fingerprint is refused by default
+/// (see `a_malformed_fingerprint_is_refused_by_set_remote_description`);
+/// `SettingEngineBuilder::with_lowercase_fingerprints_accepted` reads it, as browsers do, and
+/// the certificate is verified against it.
+#[test]
+fn lower_case_fingerprints_are_read_on_request() -> Result<()> {
+    let mut world = World::new(
+        Peer::new("10.0.0.1:5000", SettingEngineBuilder::new().build())?,
+        Peer::new(
+            "10.0.0.2:5000",
+            SettingEngineBuilder::new()
+                .with_lowercase_fingerprints_accepted(true)
+                .build(),
+        )?,
+    );
+    world.peers[0].pc.create_data_channel("data", None)?;
+    world.exchange_with(
+        0,
+        |sdp| {
+            let fingerprint = attribute_values(sdp, "fingerprint").remove(0);
+            let (hash, value) = fingerprint
+                .split_once(' ')
+                .expect("hash-func SP fingerprint");
+            replace_lines(
+                sdp,
+                "a=fingerprint:",
+                Some(&format!("a=fingerprint:{hash} {}", value.to_lowercase())),
+            )
+        },
+        keep,
+    )?;
+    world.trickle()?;
+    world.run("a lower-case fingerprint", |peers| {
+        peers.iter().all(|p| p.connected() && p.channel.is_some())
+    })?;
+    world.ping_pong("a lower-case fingerprint")?;
     Ok(())
 }
