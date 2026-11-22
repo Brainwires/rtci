@@ -4813,6 +4813,28 @@ a=rtcp-mux\r\n";
         }
     }
 
+    /// RFC 9429 section 5.8.2: "Any 'a=remote-candidates' attributes MUST be parsed as
+    /// specified in [RFC8839], Section 5.2, but their values are ignored".
+    #[test]
+    fn a_malformed_remote_candidates_line_refuses_the_description() {
+        let offer = audio_video_offer();
+        for (line, accepted) in [
+            (
+                "a=remote-candidates:1 192.0.2.3 45664 2 192.0.2.3 45665",
+                true,
+            ),
+            ("a=remote-candidates:1 192.0.2.3", false),
+            ("a=remote-candidates:1 192.0.2.3 port", false),
+        ] {
+            let sdp = offer
+                .sdp
+                .replacen("a=mid:", &format!("{line}\r\na=mid:"), 1);
+            let result = media_pc()
+                .set_remote_description(Instant::now(), RTCSessionDescription::offer(sdp).unwrap());
+            assert_eq!(result.is_ok(), accepted, "{line}: {result:?}");
+        }
+    }
+
     /// RFC 8838 section 9: a trickled candidate without a usernameFragment whose line has a
     /// `ufrag` extension naming another ICE generation is stale: ignored, not refused.
     #[test]

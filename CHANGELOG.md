@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **jsep**: what descriptions say of the selected ICE pair (RFC 8839 sections 4.2.1.2, 4.3.4,
+  4.4.1.2.2, 4.4.1.3, 4.4.2, 5.1, 5.2; RFC 8445 section 8.2). Descriptions differ on the wire:
+  - Once ICE has selected a pair (and no restart is staged), the `m=` / `c=` destination of
+    later offers and answers is the pair's local candidate; an offer of the controlling agent
+    carries `a=remote-candidates:1 <address> <port>` of its remote candidate, and an answer to
+    such an offer takes the local candidate it names as its destination.
+  - Every candidate line a description carries ends with the `ufrag` extension (the section's
+    `ice-ufrag`). A trickled candidate without `usernameFragment` whose line's `ufrag` names
+    another ICE generation is ignored (RFC 8838 section 9).
+  - A remote `a=remote-candidates` line that does not parse refuses the description (RFC 9429
+    section 5.8.2).
+  - Two lite agents: the controlling one's `Event::LiteCandidateUpdate` raises
+    negotiation-needed; its next offer lists the chosen local candidate alone with
+    `a=remote-candidates`, and the controlled peer connection applies it with
+    `ice::Agent::replace_remote_candidates`, its answer listing the named candidate alone.
 - **jsep**: a rolled-back remote offer leaves the transports as they were (RFC 9429 section
   5.7). The answerer's ICE and DTLS transports take a remote offer's parameters when the local
   answer (or provisional answer) is applied, not when the offer is: the first offer starts
