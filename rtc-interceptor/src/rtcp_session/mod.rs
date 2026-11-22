@@ -1466,14 +1466,16 @@ impl RtcpSessionInterceptor {
         })
     }
 
-    /// Moves what is waiting into `packets`, as far as `budget` octets go.
+    /// Moves what is waiting into `packets`, as far as `budget` octets go. What does not fit
+    /// waits for the next packet; a packet too large for any compound packet goes anyway.
     fn take_pending(&mut self, packets: &mut Vec<Box<dyn rtcp::Packet>>, budget: &mut usize) {
+        /// A report without blocks and an SDES with one CNAME: what a minimal compound
+        /// packet spends before its feedback.
+        const MINIMAL_OVERHEAD: usize = 64;
         let mut kept = vec![];
         for packet in std::mem::take(&mut self.pending) {
             let size = packet.marshal_size();
-            if size <= *budget || (packets.len() <= 2 && kept.is_empty()) {
-                // The first one goes even when it is larger than what is left: a packet that
-                // fits nowhere would otherwise wait for ever.
+            if size <= *budget || size + MINIMAL_OVERHEAD > self.mtu {
                 *budget = budget.saturating_sub(size);
                 packets.push(packet);
             } else {
