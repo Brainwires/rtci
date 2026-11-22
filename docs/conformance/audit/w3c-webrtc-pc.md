@@ -10,7 +10,7 @@ Totals (rows 957):
 
 The section 8 rows (statistics) carry the verdicts of branch `conf/stats-conformance`; the totals include them.
 
-- MUST: tested 704 / untested 32 / partial 84 / missing 42 / violated 6 / n-a 61
+- MUST: tested 705 / untested 32 / partial 83 / missing 42 / violated 6 / n-a 61
 - SHOULD: tested 4 / untested 0 / partial 1 / missing 0 / violated 0 / n-a 5
 - MAY: tested 3 / untested 2 / partial 0 / missing 0 / violated 0 / n-a 13
 
@@ -264,7 +264,7 @@ By pass:
 | WEBRTC-4.4.2-36 | 4.4.2 | MUST | createAnswer outside have-remote-offer / have-local-pranswer fails with InvalidStateError | tested | src/peer_connection/mod.rs:1030 | `tests/jsep_description_state.rs::create_answer_needs_a_remote_offer` |  |
 | WEBRTC-4.4.2-37 | 4.4.2 | MUST | createAnswer filters [[PreferredCodecs]] by direction without reordering | partial | src/peer_connection/internal.rs:2108 | tests/answer_preserves_offer_codec_order.rs | as 4.4.2-28 |
 | WEBRTC-4.4.2-38 | 4.4.2 | MUST | createAnswer to a simulcast offer: only the first of comma-separated rid alternatives is kept | tested | src/peer_connection/sdp/mod.rs:592 | an_answer_to_simulcast_keeps_the_first_rid_of_each_alternative | implemented in get_rids; no test with alternatives found |
-| WEBRTC-4.4.2-39 | 4.4.2 | MUST | createAnswer: identically named rids are reduced to the first; no restrictions set | partial | src/peer_connection/sdp/mod.rs:630 |  | RFC 8853 section 5.2 makes an a=simulcast line naming a rid twice malformed (get_rids ignores it), where W3C reduces it to the first; the answer keeps the offered rid restrictions (RFC 8851 section 6.3) where W3C sets none. JSEP's to decide |
+| WEBRTC-4.4.2-39 | 4.4.2 | MUST | createAnswer: identically named rids are reduced to the first; no restrictions set | tested | `sdp/simulcast.rs` (`without_repeated_rids`, `bare_line`), `pc/mod.rs` (`apply_set_remote_description`), `SettingEngineBuilder::with_w3c_simulcast_answer` | `tests/jsep_simulcast.rs::the_w3c_answer_form_reduces_a_repeated_rid_and_sets_no_restrictions`, `tests/jsep_simulcast.rs::a_simulcast_line_that_repeats_a_rid_or_a_direction_refuses_the_description` | Owner rule, RFC form by default: a line naming a rid twice refuses the description (RFC 8853 section 5.2, RFC 9429 section 5.8) and the answer keeps the offered restrictions (RFC 8851 section 6.3). The W3C form is `with_w3c_simulcast_answer(true)`. No browser cell is affected: browsers offer rids without restrictions and never repeat one |
 | WEBRTC-4.4.2-40 | 4.4.2 | MUST | createAnswer: rids not in the sender's [[SendEncodings]] are left out of the answer | missing | src/peer_connection/internal.rs:519 | | the remote-receives-simulcast case is not implemented (4.4.1.4-49) |
 | WEBRTC-4.4.2-41 | 4.4.2 | MUST | createAnswer returns type "answer" and stores the SDP as [[LastCreatedAnswer]] | tested | src/peer_connection/mod.rs:1086 | sections_without_ssrc_lines_are_answered | |
 | WEBRTC-4.4.2-42 | 4.4.2 | MUST | A provisional answer is made by setting the type of a created answer to "pranswer" | tested | src/peer_connection/internal.rs:746 | provisional_answers_repeat_and_keep_the_offerer_controlling | |

@@ -72,6 +72,9 @@ pub(crate) struct RTCRtpTransceiverInternal {
     header_extensions_to_negotiate: Option<Vec<String>>,
     /// Reduced-size RTCP (RFC 5506) as the last answer negotiated it for this media section.
     rtcp_reduced_size: bool,
+    /// The rids of the simulcast streams this transceiver's offers ask to receive
+    /// (`RTCRtpTransceiver::set_receive_simulcast`, RFC 8853 section 5.3.1); empty for none.
+    receive_simulcast: Vec<String>,
     /// The `b=` lines of this transceiver's section of the remote description.
     remote_bandwidth: RTCRemoteBandwidth,
     /// The `xr-format`s of the remote description's `a=rtcp-xr` for this section (RFC 3611
@@ -130,6 +133,7 @@ impl RTCRtpTransceiverInternal {
             associable_with_remote_offer: true,
             header_extensions_to_negotiate: None,
             rtcp_reduced_size: false,
+            receive_simulcast: vec![],
             remote_bandwidth: RTCRemoteBandwidth::default(),
             remote_rtcp_xr: None,
             remote_packet_time: RTCPacketTime::default(),
@@ -191,6 +195,16 @@ impl RTCRtpTransceiverInternal {
     /// # Specification
     ///
     /// See [RTCRtpTransceiver.mid](https://www.w3.org/TR/webrtc/#dom-rtptransceiver-mid).
+    /// See [`Self::receive_simulcast`].
+    pub(crate) fn set_receive_simulcast(&mut self, rids: Vec<String>) {
+        self.receive_simulcast = rids;
+    }
+
+    /// The rids of the simulcast streams this transceiver's offers ask to receive.
+    pub(crate) fn receive_simulcast(&self) -> &[String] {
+        &self.receive_simulcast
+    }
+
     pub(crate) fn mid(&self) -> &Option<String> {
         &self.mid
     }

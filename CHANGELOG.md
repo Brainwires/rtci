@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **jsep**: simulcast leftovers.
+  - New `RTCRtpTransceiver::set_receive_simulcast(rids)`: offers ask to receive simulcast
+    (`a=rid:<rid> recv`, `a=simulcast:recv ...`, RFC 8853 section 5.3.1); the answer's send
+    streams become the receiver's layers.
+  - New `SettingEngineBuilder::with_w3c_simulcast_answer(true)`: the W3C webrtc-pc
+    `createAnswer` form, where a remote `a=simulcast` line naming a rid twice keeps its first
+    occurrence and an answer's `a=rid` lines carry no restrictions. The default stays the RFC
+    form (RFC 8853 section 5.2: refused; RFC 8851 section 6.3: restrictions echoed).
+  - RFC 9143 section 9.2: a stream the engine placed by itself (an SSRC no description
+    declares) moves to another m= section when a later packet's MID header extension names
+    it and that section's receiver is free.
 - **jsep**: video size negotiation with `a=imageattr` (RFC 9429 sections 3.6, 5.2.1, 5.3.1,
   5.8.2, 5.10; RFC 6236). New `SettingEngineBuilder::with_video_receive_limits` and
   `with_codec_video_receive_limits` (new public `RTCVideoResolutionRange`): receiving video

@@ -1585,6 +1585,19 @@ impl RTCPeerConnection {
                 }
             }
         }
+        // An offer that asks to receive simulcast (RFC 8853 section 5.3.1): the streams the
+        // application named, unless the remote side's send streams are mirrored above.
+        if is_offer
+            && direction.has_recv()
+            && recv_sc_list.is_empty()
+            && transceiver.receive_simulcast().len() > 1
+        {
+            for rid in transceiver.receive_simulcast() {
+                media =
+                    media.with_value_attribute(SDP_ATTRIBUTE_RID.to_owned(), format!("{rid} recv"));
+                recv_sc_list.push(rid.clone());
+            }
+        }
         // The streams this endpoint sends: one `a=rid ... send` per encoding of a sender with
         // several encodings (RFC 9429 section 5.2.1). An answer has only the ones the offer
         // asked to receive (RFC 8853 section 5.3.2: "The answerer MUST NOT add any simulcast

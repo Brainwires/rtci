@@ -537,3 +537,56 @@ fn the_w3c_answer_form_reduces_a_repeated_rid_and_sets_no_restrictions() -> Test
     );
     Ok(())
 }
+
+/// RFC 8853 section 5.3.1: an offerer may ask to receive simulcast; it is then "prepared to
+/// receive" each stream. `set_receive_simulcast` writes the `recv` rids and `a=simulcast:recv`;
+/// a simulcast sender answers with the streams it has, and the offerer's receiver takes them
+/// as its layers.
+#[test]
+fn an_offer_can_ask_to_receive_simulcast() -> TestResult {
+    let mut offerer = default_peer()?;
+    let id = offerer.add_transceiver_from_kind(
+        RtpCodecKind::Video,
+        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+    )?;
+    let mut transceiver = offerer.rtp_transceiver(id).expect("the transceiver");
+    assert!(
+        transceiver
+            .set_receive_simulcast(vec!["f".to_owned()])
+            .is_err()
+    );
+    assert!(
+        transceiver
+            .set_receive_simulcast(vec!["f".to_owned(), "f".to_owned()])
+            .is_err()
+    );
+    transceiver.set_receive_simulcast(vec!["f".to_owned(), "h".to_owned(), "q".to_owned()])?;
+
+    let (mut answerer, _) = simulcast_sender(&[("f", None), ("h", None), ("q", None)])?;
+    let (offer, answer) = exchange(&mut offerer, &mut answerer)?;
+    assert_eq!(
+        lines_with(&offer, "a=rid:"),
+        vec!["a=rid:f recv", "a=rid:h recv", "a=rid:q recv"],
+        "{offer}"
+    );
+    assert_eq!(
+        lines_with(&offer, "a=simulcast:"),
+        vec!["a=simulcast:recv f;h;q"]
+    );
+    assert_eq!(
+        lines_with(&answer, "a=simulcast:"),
+        vec!["a=simulcast:send f;h;q"],
+        "{answer}"
+    );
+
+    let receiver = offerer.get_receivers().next().expect("a receiver");
+    let receiver = offerer.rtp_receiver(receiver).expect("receiver");
+    let layers: Vec<String> = receiver
+        .track()
+        .codings()
+        .iter()
+        .map(|c| c.rtp_coding_parameters.rid.clone())
+        .collect();
+    assert_eq!(layers, vec!["f", "h", "q"]);
+    Ok(())
+}

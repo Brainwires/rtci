@@ -519,6 +519,30 @@ impl RTCRtpTransceiver<'_> {
         Ok(())
     }
 
+    /// Asks, in this transceiver's offers, to receive simulcast: one `a=rid:<rid> recv` line
+    /// for each of `rids` and `a=simulcast:recv <rid>;...` (RFC 8853 section 5.3.1, RFC 8851
+    /// section 6.1), in a section that receives. The answer's `send` streams are then received
+    /// as the layers of the transceiver's receiver. At least two rids, each 1 to 255
+    /// alphanumerics (RFC 8852 section 3.1), all different; an empty list asks for none (the
+    /// default). Takes effect with the next offer.
+    ///
+    /// Not a W3C method (JSEP section 3.7: "only to receive a single encoding"): a fork
+    /// addition, for an endpoint that receives simulcast (an SFU).
+    pub fn set_receive_simulcast(&mut self, rids: Vec<String>) -> Result<()> {
+        let valid = |rid: &String| {
+            !rid.is_empty() && rid.len() <= 255 && rid.bytes().all(|b| b.is_ascii_alphanumeric())
+        };
+        let distinct = rids
+            .iter()
+            .enumerate()
+            .all(|(i, rid)| !rids[..i].contains(rid));
+        if !rids.is_empty() && (rids.len() < 2 || !rids.iter().all(valid) || !distinct) {
+            return Err(Error::ErrRTPSenderRidInvalid);
+        }
+        self.peer_connection.rtp_transceivers[self.id].set_receive_simulcast(rids);
+        Ok(())
+    }
+
     /// Sets the preferred codec list for this transceiver.
     ///
     /// This overrides the default codec preferences from the media engine. An empty list
