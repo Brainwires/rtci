@@ -1577,6 +1577,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+- **ice**: a controlling agent could lose the nomination it had queued: an answer to a second
+  check on the same pair (one the peer's request triggered) took the pair off the
+  triggered-check queue, so no request with USE-CANDIDATE left and the agent stayed in
+  checking until its failed timeout. It made `test_data_channel_create_rtc_to_webrtc` time
+  out about once in 200 runs.
 - **sctp**: an association accepted from the peer's INIT after an earlier one was lost left
   the transport reporting the loss, so every later offer asked for a new `a=sctp-port` and
   replaced the association it had.
