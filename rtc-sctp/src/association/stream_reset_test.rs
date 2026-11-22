@@ -7,6 +7,7 @@ fn response(rsn: u32, result: ReconfigResult) -> ChunkReconfig {
         param_a: Some(Box::new(ParamReconfigResponse {
             reconfig_response_sequence_number: rsn,
             result,
+            next_tsns: None,
         })),
         param_b: None,
     }

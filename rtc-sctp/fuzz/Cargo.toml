@@ -227,6 +227,27 @@ doc = false
 bench = false
 
 [[bin]]
+name = "param_param_incoming_reset_request_unmarshal"
+path = "fuzz_targets/param_param_incoming_reset_request_unmarshal.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "param_param_ssn_tsn_reset_request_unmarshal"
+path = "fuzz_targets/param_param_ssn_tsn_reset_request_unmarshal.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "param_param_add_streams_request_unmarshal"
+path = "fuzz_targets/param_param_add_streams_request_unmarshal.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "param_param_unknown_unmarshal"
 path = "fuzz_targets/param_param_unknown_unmarshal.rs"
 test = false

@@ -471,6 +471,31 @@ impl ReassemblyQueue {
         self.unordered_ends.drain(..n);
     }
 
+    /// RFC 6525 5.2.4 G4, G5 and 5.2.7 H5: the TSNs and Stream Sequence Numbers start over.
+    /// As after a FORWARD TSN past everything received, the messages that are complete are
+    /// delivered, in their order, and the fragments of the others are dropped; the next
+    /// ordered message expected has sequence number 0.
+    pub(crate) fn reset_sequence_numbers(&mut self) {
+        let mut dropped = 0;
+        for set in std::mem::take(&mut self.ordered) {
+            if set.is_complete() {
+                // Readable whatever its number: the numbers before it will not come.
+                self.unordered.push_back(set);
+            } else {
+                dropped += set.len();
+            }
+        }
+        dropped += self
+            .unordered_chunks
+            .drain(..)
+            .map(|c| c.user_data.len())
+            .sum::<usize>();
+        self.unordered_begins.clear();
+        self.unordered_ends.clear();
+        self.subtract_num_bytes(dropped);
+        self.next_ssn = 0;
+    }
+
     pub(crate) fn subtract_num_bytes(&mut self, n_bytes: usize) {
         if self.n_bytes >= n_bytes {
             self.n_bytes -= n_bytes;

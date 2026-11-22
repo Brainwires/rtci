@@ -1910,16 +1910,15 @@ fn test_reset_request_is_echoed_only_for_an_open_outgoing_stream() -> Result<()>
         a.set_state(AssociationState::Established);
         a.create_stream(3, true, PayloadProtocolIdentifier::Binary);
         a.streams.get_mut(&3).unwrap().state = state;
-        let request = ParamOutgoingResetRequest {
-            reconfig_request_sequence_number: 7,
-            reconfig_response_sequence_number: 0,
-            sender_last_tsn: a.peer_last_tsn,
-            stream_identifiers: vec![3],
-        };
-        let mut reply = vec![];
-        a.reset_streams_if_any(&request, true, &mut reply)?;
-        // The response always; a reset request of this side's own only when echoed.
-        assert_eq!(reply.len(), if echoed { 2 } else { 1 }, "{state:?}");
+        let reply = a.handle_reconfig(&reset_request_chunk(7, a.peer_last_tsn, vec![3]))?;
+        // The response always; a reset request of this side's own, in the same chunk (RFC
+        // 6525 5.2.1), only when echoed.
+        assert_eq!(1, reply.len(), "{state:?}: one RE-CONFIG chunk");
+        assert_eq!(
+            if echoed { vec![16, 13] } else { vec![16] },
+            reconfig_param_types(&reply[0]),
+            "{state:?}"
+        );
         assert!(
             !a.streams.contains_key(&3),
             "{state:?}: the stream is reset"
@@ -1934,15 +1933,13 @@ fn test_reset_request_is_echoed_only_for_an_open_outgoing_stream() -> Result<()>
 fn test_reset_request_for_an_unknown_stream_is_reported_and_echoed() -> Result<()> {
     let mut a = create_association(TransportConfig::default());
     a.set_state(AssociationState::Established);
-    let request = ParamOutgoingResetRequest {
-        reconfig_request_sequence_number: 7,
-        reconfig_response_sequence_number: 0,
-        sender_last_tsn: a.peer_last_tsn,
-        stream_identifiers: vec![4],
-    };
-    let mut reply = vec![];
-    a.reset_streams_if_any(&request, true, &mut reply)?;
-    assert_eq!(reply.len(), 2, "a response and this side's own reset");
+    let reply = a.handle_reconfig(&reset_request_chunk(7, a.peer_last_tsn, vec![4]))?;
+    assert_eq!(1, reply.len());
+    assert_eq!(
+        vec![16, 13],
+        reconfig_param_types(&reply[0]),
+        "a response and this side's own reset"
+    );
     assert!(a.events.iter().any(|e| matches!(
         e,
         Event::AssociationLost {
@@ -1951,6 +1948,18 @@ fn test_reset_request_for_an_unknown_stream_is_reported_and_echoed() -> Result<(
         }
     )));
     Ok(())
+}
+
+/// The parameter types of the RE-CONFIG chunk in `packet`, in order.
+fn reconfig_param_types(packet: &Packet) -> Vec<u16> {
+    packet
+        .chunks
+        .iter()
+        .filter_map(|c| c.as_any().downcast_ref::<ChunkReconfig>())
+        .flat_map(|c| [&c.param_a, &c.param_b])
+        .flatten()
+        .map(|p| u16::from(p.header().typ))
+        .collect()
 }
 
 fn reset_request_chunk(rsn: u32, sender_last_tsn: u32, ids: Vec<u16>) -> ChunkReconfig {
@@ -2013,7 +2022,11 @@ fn test_retransmitted_reset_request_is_performed_once() -> Result<()> {
     let req = reset_request_chunk(7, a.peer_last_tsn, vec![4, 4, 4]);
 
     let reply = a.handle_reconfig(&req)?;
-    assert_eq!(reply.len(), 2, "a response and this side's own reset");
+    assert_eq!(
+        vec![16, 13],
+        reconfig_param_types(&reply[0]),
+        "a response and this side's own reset, in one chunk"
+    );
     let lost = |a: &Association| {
         a.events
             .iter()
@@ -2028,7 +2041,7 @@ fn test_retransmitted_reset_request_is_performed_once() -> Result<()> {
         assert_eq!(
             reply.len(),
             1,
-            "a retransmission is answered with a response alone"
+            "a retransmission is answered with the chunk it was answered with"
         );
     }
     assert_eq!(lost(&a), 1);
@@ -2181,3 +2194,6 @@ mod stream_reconfig_test;
 
 #[path = "untested_rows_test.rs"]
 mod untested_rows_test;
+
+#[path = "reconfig_test.rs"]
+mod reconfig_test;

@@ -1810,6 +1810,19 @@ Each bug below was confirmed by a failing test first (`rtc-rtcp/tests/audit_bugs
   strictly and written back byte for byte, and a deterministic mutation test of the parse and
   marshal fixed point. Fuzzing: `description_roundtrip` checks that fixed point (strict and
   lenient) and reads every typed accessor; new target `attribute_parse`.
+- **sctp**: stream resets follow the rest of RFC 6525. One re-configuration request is in
+  flight at a time and the others wait (section 5.1.1); closing several data channels put
+  several in flight. A request names the peer's last request sequence number (5.1.2), and the
+  peer's numbers are checked: a request older than the ones remembered is answered "Error -
+  Bad Sequence Number" where it used to be performed again, resetting a stream that had been
+  reused (5.2.1). The response and this side's own reset of the stream leave in one chunk,
+  with a SACK. Data written to a stream whose reset is not answered yet waits, without a
+  Stream Sequence Number, where it used to be sent with the old sequence and held back by the
+  peer for good (5.1.2 A1); DATA received beyond the last TSN of a deferred reset is kept for
+  the stream as it is after the reset, where it used to be dropped (5.2.2 E2). `Stream::stop`
+  and `close` fail when the peer did not announce the extension. An unanswered request now
+  counts against the association like an unanswered HEARTBEAT (5.1.1), except after "In
+  progress".
 - **sctp**: Gap Ack Blocks are offsets in serial number arithmetic (RFC 9260 section 3.3.4).
   Once the received TSNs had wrapped past zero and the cumulative TSN had not, a SACK named a
   TSN the peer never sent, and a peer running this engine closed the association over it.
@@ -1936,6 +1949,54 @@ Each bug below was confirmed by a failing test first (`rtc-rtcp/tests/audit_bugs
   6525 section 5.2.2); it reset none and was answered "Success - Performed".
 - **sctp**: the re-configuration requests that are not performed (Incoming SSN Reset, SSN/TSN
   Reset, Add Streams) are answered "Denied" (RFC 6525 section 5.2.1) instead of not at all.
+
+### Features
+
+- **sctp**: the other re-configuration requests of RFC 6525, in both directions: Incoming SSN
+  Reset (`Association::request_incoming_stream_reset`), SSN/TSN Reset
+  (`request_ssn_tsn_reset`) and Add Outgoing / Incoming Streams (`add_outgoing_streams`,
+  `add_incoming_streams`, with `set_stream_limits` for what a peer may add). They were
+  answered "Denied". `Event::Reconfig` reports the outcome of a request and what the peer
+  changed.
+- **sctp**: `Stream::write_sctp_with_ppid` and `Chunks::ppid` for a Payload Protocol
+  Identifier `PayloadProtocolIdentifier` has no name for; `PayloadProtocolIdentifier::number`;
+  `ChunkPayloadData::ppid`; `Association::verification_tag`.
+- **sctp**: `Endpoint::poll_transmit` (the endpoint's answers to out-of-the-blue packets);
+  `TransportConfig::with_valid_cookie_life` / `valid_cookie_life`.
+- **sctp**: `TransportConfig::with_heartbeat_interval` / `heartbeat_interval`,
+  `Association::set_heartbeat_interval`, `Event::PathInactive`, `Event::PathActive`.
+- **sctp**: `Association::on_path_change` restarts congestion control and the RTO when the
+  transport underneath moves to another path (RFC 9260 section 7.2.5; for the peer
+  connection to call when ICE selects another candidate pair).
+  `Association::congestion_window`, `slow_start_threshold`, `rto`.
+- **sctp**: `TransportConfig::with_slow_start_growth_limit` (L of RFC 9260 section 7.2.1,
+  default 1), `with_max_burst` (Max.Burst, off by default), `with_sack_delay` (200 ms by
+  default, at most 500 ms).
+- **sctp**: `Association::partial_reliability` (whether PR-SCTP is in use),
+  `TransportConfig::with_partial_reliability`.
+- **fuzz**: `rtc-sctp` targets `association_handle_chunks` (an established association fed
+  chunks, timers running) and `chunk_chunk_unknown_unmarshal`.
+
+### Breaking Changes
+
+- **sctp**: `PayloadProtocolIdentifier::Unknown` is sent as 0 ("not specified", RFC 9260
+  section 3.3.1), not 58. `Chunks` has a new public field, `ppid`.
+- **sctp**: `Stream::write*` with an empty message returns an error.
+- **sctp**: `Association::open_stream` fails for a stream id at or past the negotiated
+  outbound stream count.
+- **sctp**: `TimerConfig::default().max_t2_shutdown_retrans` is 10, not unlimited.
+- **sctp**: `TimerConfig::default().max_t3_rtx_retrans` is 10, not unlimited: an association
+  whose peer answers nothing for about five minutes ends with `TimedOut`. `usize::MAX` keeps
+  the old behaviour.
+- **sctp**: an established association sends HEARTBEATs when idle and so always has a timer
+  running; `with_heartbeat_interval(None)` turns them off.
+- **sctp**: slow start grows the congestion window by one packet per SACK, as the RFC has
+  it, not by everything the SACK acknowledges. A receiver that acknowledges many packets with
+  one SACK slows the sender's ramp; `with_slow_start_growth_limit` sets a larger L.
+- **sctp**: the retransmissions after a timeout are paced by the congestion window (one
+  packet, then slow start) instead of leaving at once.
+- **sctp**: a SACK for a TSN never sent, and an INIT ACK without a State Cookie, end the
+  association with an ABORT (`TransportError`, `HandshakeFailed`).
 
 ## [0.22.0+brainwires.5] - 2026-11-20
 

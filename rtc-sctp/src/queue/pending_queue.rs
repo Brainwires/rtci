@@ -222,9 +222,24 @@ fn tagged_whole(entry: (u128, PendingEntry)) -> Option<ChunkPayloadData> {
 }
 
 /// A reset is control state, with no DATA payload or reliability policy.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub(crate) struct ResetMarker {
     pub(crate) stream_identifier: u16,
+    /// The stream as it was when the reset was asked for; a later stream with the same
+    /// identifier is another stream.
+    pub(crate) generation: u64,
+    /// The Incoming SSN Reset Request of the peer this reset answers (RFC 6525 5.2.3).
+    pub(crate) response_to: Option<u32>,
+}
+
+impl ResetMarker {
+    #[cfg(test)]
+    pub(crate) fn new(stream_identifier: u16) -> Self {
+        ResetMarker {
+            stream_identifier,
+            ..Default::default()
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -553,6 +568,53 @@ impl PendingQueue {
         self.n_bytes
     }
 
+    /// Whether a message is part sent: its remaining fragments go before anything else.
+    pub(crate) fn is_mid_message(&self) -> bool {
+        self.selected
+    }
+
+    /// Gives every ordered message still queued a new Stream Sequence Number, in the order
+    /// its stream sends them: `next` is called with the stream of each (RFC 6525 5.2.4 G5,
+    /// 5.2.7 H5: after an SSN/TSN reset every stream sends from SSN 0).
+    pub(crate) fn renumber_ordered(&mut self, mut next: impl FnMut(u16) -> u16) {
+        let mut renumber = |entry: &mut PendingEntry| {
+            let PendingEntry::Message(message) = entry else {
+                return;
+            };
+            match message {
+                QueuedMessage::Whole(c) => {
+                    if !c.unordered {
+                        c.stream_sequence_number = next(c.stream_identifier);
+                    }
+                }
+                QueuedMessage::Fragmented {
+                    snapshot,
+                    fragments,
+                    ..
+                } => {
+                    if !snapshot.unordered {
+                        let ssn = next(snapshot.stream_identifier);
+                        snapshot.stream_sequence_number = ssn;
+                        for c in fragments.iter_mut() {
+                            c.stream_sequence_number = ssn;
+                        }
+                    }
+                }
+            }
+        };
+        if let Some(wfq) = self.wfq.as_mut() {
+            let mut streams: Vec<u16> = wfq.streams.keys().copied().collect();
+            streams.sort_unstable();
+            for stream in streams {
+                if let Some(s) = wfq.streams.get_mut(&stream) {
+                    s.entries.iter_mut().for_each(|(_, e)| renumber(e));
+                }
+            }
+        } else {
+            self.ordered_queue.iter_mut().for_each(&mut renumber);
+        }
+    }
+
     pub(crate) fn len(&self) -> usize {
         self.queue_len
     }
@@ -747,9 +809,7 @@ mod tests {
                     fragment(true, false, unordered),
                     fragment(false, true, unordered),
                 ]);
-                queue.push_reset(ResetMarker {
-                    stream_identifier: 0,
-                });
+                queue.push_reset(ResetMarker::new(0));
                 let mut later = fragment(true, true, false);
                 later.message_id = MessageId::new(1);
                 later.stream_generation += 1;
@@ -889,9 +949,7 @@ mod tests {
     fn a_reset_waits_only_for_its_own_streams_messages() {
         let mut queue = wfq();
         queue.push_message(message(1, 0, &[100]));
-        queue.push_reset(ResetMarker {
-            stream_identifier: 1,
-        });
+        queue.push_reset(ResetMarker::new(1));
         for i in 1..10 {
             queue.push_message(message(2, i, &[100]));
         }

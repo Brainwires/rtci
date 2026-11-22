@@ -74,6 +74,9 @@ pub(crate) struct ParamReconfigResponse {
     pub(crate) reconfig_response_sequence_number: u32,
     /// This value describes the result of the processing of the request.
     pub(crate) result: ReconfigResult,
+    /// Sender's Next TSN and Receiver's Next TSN, in that order: both present in the answer
+    /// to an SSN/TSN Reset Request and in no other (RFC 6525 4.4, 5.1.7 D3, D4).
+    pub(crate) next_tsns: Option<(u32, u32)>,
 }
 
 impl fmt::Display for ParamReconfigResponse {
@@ -120,10 +123,12 @@ impl Param for ParamReconfigResponse {
 
         let reconfig_response_sequence_number = reader.get_u32();
         let result = reader.get_u32().into();
+        let next_tsns = (reader.remaining() >= 8).then(|| (reader.get_u32(), reader.get_u32()));
 
         Ok(ParamReconfigResponse {
             reconfig_response_sequence_number,
             result,
+            next_tsns,
         })
     }
 
@@ -131,11 +136,15 @@ impl Param for ParamReconfigResponse {
         self.header().marshal_to(buf)?;
         buf.put_u32(self.reconfig_response_sequence_number);
         buf.put_u32(self.result as u32);
+        if let Some((sender_next_tsn, receiver_next_tsn)) = self.next_tsns {
+            buf.put_u32(sender_next_tsn);
+            buf.put_u32(receiver_next_tsn);
+        }
         Ok(buf.len())
     }
 
     fn value_length(&self) -> usize {
-        8
+        if self.next_tsns.is_some() { 16 } else { 8 }
     }
 
     fn clone_to(&self) -> Box<dyn Param> {
