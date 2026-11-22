@@ -255,6 +255,7 @@ pub use adaptive_jitter_buffer::{
     JitterBufferInterceptor as AdaptiveJitterBufferInterceptor,
 };
 pub use cc::estimator::{BandwidthEstimator, ConstantBitrate, EstimatorStats};
+pub use cc::feedback::{CongestionFeedbackFormat, negotiated_congestion_feedback};
 pub use cc::interceptor::{
     CongestionControlBuilder, CongestionControlHandle, CongestionControlInterceptor,
     DEFAULT_PRUNE_HORIZON as CONGESTION_CONTROL_DEFAULT_PRUNE_HORIZON, REMB_TIMEOUT,

@@ -29,6 +29,13 @@ const MEDIA_PT: u8 = 96;
 const RED_PT: u8 = 116;
 const FEC_PT: u8 = 117;
 
+/// The RED carriage with FEC in RED packets of its own (libwebrtc's form), which most of these
+/// tests are about. The builder's default is the form of RFC 5109 14.2 (FEC with the next media
+/// packet); tests of that say so with `with_red_placement`.
+fn red_builder() -> UlpfecSendBuilder {
+    UlpfecSendBuilder::red(RED_PT, FEC_PT).with_red_placement(RedPlacement::OwnPacket)
+}
+
 fn stream(separate_fec: bool) -> StreamInfo {
     StreamInfo {
         ssrc: MEDIA_SSRC,
@@ -198,7 +205,7 @@ fn every_single_loss_is_rebuilt_as_sent(
 #[test]
 fn red_fec_in_its_own_packets_rebuilds_the_packet_as_sent_under_twcc() {
     let mut chain = sender(
-        UlpfecSendBuilder::red(RED_PT, FEC_PT)
+        red_builder()
             .with_num_media_packets(5)
             .with_num_fec_packets(1),
         false,
@@ -226,7 +233,7 @@ fn red_fec_in_its_own_packets_rebuilds_the_packet_as_sent_under_twcc() {
 #[test]
 fn red_fec_riding_with_the_next_media_packet_rebuilds_the_packet_as_sent_under_twcc() {
     let mut chain = sender(
-        UlpfecSendBuilder::red(RED_PT, FEC_PT)
+        red_builder()
             .with_red_placement(RedPlacement::WithNextMedia)
             .with_num_media_packets(5)
             .with_num_fec_packets(1),
@@ -297,7 +304,7 @@ fn a_separate_fec_stream_rebuilds_the_packet_as_sent_under_twcc() {
 #[test]
 fn the_media_stream_has_no_gap_and_no_duplicate_sequence_number_on_the_wire() {
     let mut chain = sender(
-        UlpfecSendBuilder::red(RED_PT, FEC_PT)
+        red_builder()
             .with_num_media_packets(5)
             .with_num_fec_packets(2),
         false,
@@ -331,7 +338,7 @@ fn the_media_stream_has_no_gap_and_no_duplicate_sequence_number_on_the_wire() {
 /// repeated, and every loss is still rebuilt.
 #[test]
 fn a_pacer_between_encoder_and_wire_reorders_fec_but_leaves_no_gap() {
-    let mut fec = UlpfecSendBuilder::red(RED_PT, FEC_PT)
+    let mut fec = red_builder()
         .with_num_media_packets(5)
         .with_num_fec_packets(1)
         .build();
@@ -340,7 +347,12 @@ fn a_pacer_between_encoder_and_wire_reorders_fec_but_leaves_no_gap() {
         .with(Slot::FecEncoder, fec)
         .with(
             Slot::Pacer,
-            PacerBuilder::new().with_target_bitrate(400_000.0).build(),
+            // Every packet queues, as when the budget is already spent: the case this test
+            // is about. (By default a packet inside the budget leaves as it is written.)
+            PacerBuilder::new()
+                .with_target_bitrate(400_000.0)
+                .with_immediate_release(false)
+                .build(),
         )
         .with(Slot::TwccSender, TwccSenderBuilder::new().build())
         .with(Slot::FecWireImage, tap)
@@ -447,7 +459,7 @@ impl Interceptor for DropOnTheWay {
 /// sequence number is still used, and the blocks after it are protected as usual.
 #[test]
 fn a_media_packet_dropped_before_the_wire_does_not_stall_the_encoder() {
-    let mut fec = UlpfecSendBuilder::red(RED_PT, FEC_PT)
+    let mut fec = red_builder()
         .with_num_media_packets(5)
         .with_num_fec_packets(1)
         .build();

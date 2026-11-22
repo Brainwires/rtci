@@ -70,16 +70,30 @@ fn stream() -> StreamInfo {
         ssrc: LOCAL,
         clock_rate: 90_000,
         payload_type: 96,
-        rtcp_feedback: vec![RTCPFeedback {
-            typ: "transport-cc".to_owned(),
-            parameter: String::new(),
-        }],
+        rtcp_feedback: vec![
+            RTCPFeedback {
+                typ: "transport-cc".to_owned(),
+                parameter: String::new(),
+            },
+            // RFC 5104 section 7.1: TMMBR is in use on a stream that negotiated it.
+            RTCPFeedback {
+                typ: "ccm".to_owned(),
+                parameter: "tmmbr".to_owned(),
+            },
+        ],
         rtp_header_extensions: vec![RTPHeaderExtension {
             uri: TRANSPORT_CC_URI.to_owned(),
             id: 5,
         }],
         ..Default::default()
     }
+}
+
+/// The same stream from a session whose description has no `a=rtcp-fb:<pt> ccm tmmbr`.
+fn stream_without_tmmbr() -> StreamInfo {
+    let mut info = stream();
+    info.rtcp_feedback.retain(|feedback| feedback.typ != "ccm");
+    info
 }
 
 struct Harness {
@@ -99,12 +113,19 @@ fn ms(milliseconds: u64) -> Duration {
 
 impl Harness {
     fn new<E: BandwidthEstimator + 'static>(estimator: E) -> Self {
-        let (interceptor, handle) = CongestionControlBuilder::new(estimator).build_with_handle();
+        Self::with(CongestionControlBuilder::new(estimator), &stream())
+    }
+
+    fn with<E: BandwidthEstimator + 'static>(
+        builder: CongestionControlBuilder<E>,
+        info: &StreamInfo,
+    ) -> Self {
+        let (interceptor, handle) = builder.build_with_handle();
         let mut chain = Registry::new()
             .with(Slot::CongestionControl, interceptor)
             .with(Slot::TwccSender, TwccSenderBuilder::new().build())
             .build();
-        chain.bind_local_stream(&stream());
+        chain.bind_local_stream(info);
         Self {
             chain: Box::new(chain),
             handle,
@@ -368,6 +389,59 @@ fn a_tmmbr_for_another_sender_is_not_answered() {
 
     assert_eq!(None, told.max());
     assert!(harness.tmmbns().is_empty());
+}
+
+/// RFC 5104 sections 7.1 and 7.2: a codec control message is in use when the session
+/// description names it (`a=rtcp-fb:<pt> ccm tmmbr`), and an answerer removes what it does not
+/// support. A TMMBR for a stream that did not negotiate it limits nothing and is not answered.
+#[test]
+fn a_tmmbr_for_a_stream_that_did_not_negotiate_it_is_ignored() {
+    let told = Told::default();
+    let mut harness = Harness::with(
+        CongestionControlBuilder::new(told.clone()),
+        &stream_without_tmmbr(),
+    );
+
+    harness.receive(ms(100), tmmbr(REMOTE, LOCAL, 2, 65_536, 40));
+
+    assert_eq!(
+        None,
+        told.max(),
+        "no limit from a message the session lacks"
+    );
+    assert_eq!(None, harness.handle.tmmbr_limit());
+    assert!(harness.tmmbns().is_empty(), "and no TMMBN for it");
+}
+
+/// The lenient setting: a TMMBR limits the stream it names whatever was negotiated.
+#[test]
+fn the_lenient_setting_honours_a_tmmbr_that_was_not_negotiated() {
+    let told = Told::default();
+    let mut harness = Harness::with(
+        CongestionControlBuilder::new(told.clone()).with_unnegotiated_tmmbr(true),
+        &stream_without_tmmbr(),
+    );
+
+    harness.receive(ms(100), tmmbr(REMOTE, LOCAL, 2, 65_536, 40));
+
+    assert_eq!(Some(262_144.0), told.max());
+    assert_eq!(vec![(LOCAL, vec![(REMOTE, 262_144, 40)])], harness.tmmbns());
+}
+
+/// `tmmbr smaxpr=<n>` (RFC 5104 section 7.1) is TMMBR negotiated, with a packet rate bound.
+#[test]
+fn tmmbr_negotiated_with_a_maximum_packet_rate_is_honoured() {
+    let told = Told::default();
+    let mut info = stream_without_tmmbr();
+    info.rtcp_feedback.push(RTCPFeedback {
+        typ: "ccm".to_owned(),
+        parameter: "tmmbr smaxpr=120".to_owned(),
+    });
+    let mut harness = Harness::with(CongestionControlBuilder::new(told.clone()), &info);
+
+    harness.receive(ms(100), tmmbr(REMOTE, LOCAL, 2, 65_536, 40));
+
+    assert_eq!(Some(262_144.0), told.max());
 }
 
 /// RFC 5104 section 4.2.2.2: a TMMBR that changes nothing still results in a TMMBN, and when

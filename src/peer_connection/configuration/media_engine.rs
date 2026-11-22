@@ -143,8 +143,8 @@ use crate::peer_connection::sdp::{
 use crate::rtp_transceiver::direction::RTCRtpTransceiverDirection;
 use crate::rtp_transceiver::fmtp;
 use crate::rtp_transceiver::rtp_sender::rtp_codec::{
-    CodecMatch, RTCRtpCodec, RtpCodecKind, codec_parameters_fuzzy_search, is_repair_codec,
-    parse_rtx_apt, repair_family, rtcp_feedback_intersection,
+    CodecMatch, RTCRtpCodec, RtpCodecKind, codec_parameters_fuzzy_search, is_flexfec_mime_type,
+    is_repair_codec, parse_rtx_apt, repair_family, rtcp_feedback_intersection,
 };
 use crate::rtp_transceiver::rtp_sender::rtp_codec_parameters::RTCRtpCodecParameters;
 use crate::rtp_transceiver::rtp_sender::rtp_header_extension_capability::RTCRtpHeaderExtensionCapability;
@@ -370,6 +370,10 @@ pub struct MediaEngine {
 
     pub(crate) header_extensions: Vec<MediaEngineHeaderExtension>,
     pub(crate) negotiated_header_extensions: HashMap<u16, MediaEngineHeaderExtension>,
+
+    /// Whether RTP retransmission (RFC 4588) is negotiated beside RFC 8627 FlexFEC.
+    /// See [`MediaEngine::set_flexfec_with_retransmission`].
+    pub(crate) flexfec_with_retransmission: bool,
 }
 
 impl MediaEngine {
@@ -866,8 +870,27 @@ impl MediaEngine {
             audio_codecs: self.audio_codecs.clone(),
             application_codecs: self.application_codecs.clone(),
             header_extensions: self.header_extensions.clone(),
+            flexfec_with_retransmission: self.flexfec_with_retransmission,
             ..Default::default()
         }
+    }
+
+    /// Whether RTP retransmission (`rtx`, RFC 4588) stays negotiated in a video section that
+    /// also negotiates RFC 8627 FlexFEC ([`MIME_TYPE_FLEX_FEC`]). `false` by default.
+    ///
+    /// RFC 8627 section 1.1.7: "If a peer supporting both FLEX FEC and other RTP
+    /// retransmission methods (see RFC 4588) receives an Offer including both FLEX FEC and
+    /// another RTP retransmission method, it MUST respond with an Answer containing only FLEX
+    /// FEC." So when a remote description carries both and this engine has both registered,
+    /// the retransmission formats are not negotiated and the answer has none; FlexFEC's own
+    /// retransmission form (section 4.2.2.1, a repair packet with `R` set) replaces them.
+    ///
+    /// The rule is for the `flexfec` format of the RFC. [`MIME_TYPE_FLEX_FEC03`], the format
+    /// browsers negotiate, comes from a draft that has no such rule and is always answered
+    /// together with `rtx`, as libwebrtc does. `true` gives the RFC format the same lenient
+    /// treatment.
+    pub fn set_flexfec_with_retransmission(&mut self, allowed: bool) {
+        self.flexfec_with_retransmission = allowed;
     }
 
     /// set_multi_codec_negotiation enables or disables the negotiation of multiple codecs.
@@ -1284,6 +1307,19 @@ impl MediaEngine {
                         && parse_rtx_apt(&codec.rtp_codec.sdp_fmtp_line)
                             .is_some_and(|apt| removed.contains(&apt)))
             });
+
+            // RFC 8627 section 1.1.7: offered FlexFEC and another RTP retransmission method,
+            // the answer contains only FlexFEC.
+            if !self.flexfec_with_retransmission {
+                for matches in [&mut exact_matches, &mut partial_matches] {
+                    if matches
+                        .iter()
+                        .any(|codec| is_flexfec_mime_type(&codec.rtp_codec.mime_type))
+                    {
+                        matches.retain(|codec| repair_family(&codec.rtp_codec) != "rtx");
+                    }
+                }
+            }
 
             // use exact matches when they exist, otherwise fall back to partial
             if !exact_matches.is_empty() {
