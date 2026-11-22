@@ -94,6 +94,8 @@ pub struct Gcc {
     /// feedback are waiting for theirs.
     feedback_deadline: Option<Instant>,
     feedback_timeout: Duration,
+    /// Whether the loss-based estimate is held at or below the delay-based one.
+    loss_capped_by_delay: bool,
     /// Smoothed interval between feedback reports, as the receiver actually sends them.
     feedback_interval: Option<Duration>,
     round_trip_time: Option<Duration>,
@@ -130,6 +132,7 @@ impl Gcc {
             last_sent: None,
             feedback_deadline: None,
             feedback_timeout: DEFAULT_FEEDBACK_TIMEOUT,
+            loss_capped_by_delay: true,
             feedback_interval: None,
             round_trip_time: None,
         }
@@ -139,6 +142,21 @@ impl Gcc {
     /// halved (and halved again each time the same period passes).
     pub fn with_feedback_timeout(mut self, feedback_timeout: Duration) -> Self {
         self.feedback_timeout = feedback_timeout;
+        self
+    }
+
+    /// Whether the loss-based estimate As_hat is held at or below the delay-based estimate
+    /// A_hat after every update (the default), or left free with only the minimum of the two
+    /// taken as the sending rate.
+    ///
+    /// draft-ietf-rmcat-gcc-02 section 6 has the loss-based controller work from the available
+    /// bandwidth estimate of the delay-based one. Left free, As_hat grows 5% per interval
+    /// whenever loss is under 2%, whatever the path carries: after five quiet seconds it is
+    /// several times the rate being sent, and `As_hat(i) = As_hat(i-1)(1 - 0.5p)` then has to
+    /// cut it back through all of that before the sending rate moves at all. Capped, a loss
+    /// cut is taken from the rate actually being sent, and the climb back starts from there.
+    pub fn with_loss_estimate_capped_by_delay_estimate(mut self, capped: bool) -> Self {
+        self.loss_capped_by_delay = capped;
         self
     }
 
@@ -224,7 +242,11 @@ impl BandwidthEstimator for Gcc {
 
         // Loss: a fraction over this batch.
         let lost = reports.iter().filter(|report| !report.arrived).count();
-        let loss_target = self.loss_control.update(now, lost, reports.len());
+        self.loss_control.update(now, lost, reports.len());
+        if self.loss_capped_by_delay {
+            self.loss_control.cap(delay_target);
+        }
+        let loss_target = self.loss_control.target();
 
         // Whichever half is more pessimistic wins, clamped once (D3).
         self.target = delay_target.min(loss_target).clamp(self.min, self.max);

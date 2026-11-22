@@ -404,6 +404,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (scaled by the response time), and back to multiplicative increase when the received rate
   rises above them; the controller stayed additive for ever after the first over-use. It starts
   in the Increase state.
+- **gcc**: the loss-based estimate is held at or below the delay-based one
+  (draft-ietf-rmcat-gcc-02 section 6). Left free it grew 5% per interval whenever loss was
+  under 2%, to several times the rate being sent, and a loss episode was absorbed by the
+  inflated estimate before the target moved. `Gcc::with_loss_estimate_capped_by_delay_estimate(false)`
+  keeps the old behaviour.
 - **fec**: the ULPFEC encoder protects the packets as sent, in RED carriage and as a separate
   stream (`UlpfecSendInterceptor::wire_tap`). With the tap, a media packet gets its wire
   sequence number and RED wrapping as it passes the encoder, the sequence numbers its block's
