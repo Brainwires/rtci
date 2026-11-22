@@ -54,6 +54,12 @@ fn demux(first_byte: u8) -> Demuxed {
 
 #[derive(Default)]
 pub(crate) struct DemuxerHandlerContext {
+    /// Whether every datagram that reaches local port 5353 is mDNS, whatever port it came
+    /// from: true when this peer connection answers for `.local` names (mDNS mode
+    /// `QueryAndGather`). RFC 6762 Section 6.7: a "legacy unicast" query comes from a port
+    /// other than 5353 and must still be answered. Off otherwise, so that an ICE socket an
+    /// application happens to bind on port 5353 keeps its DTLS and media.
+    pub(crate) mdns_legacy_unicast: bool,
     pub(crate) read_outs: VecDeque<TaggedRTCMessageInternal>,
     pub(crate) write_outs: VecDeque<TaggedRTCMessageInternal>,
     pub(crate) event_outs: VecDeque<TaggedRTCEventInternal>,
@@ -95,7 +101,8 @@ impl<'a>
             // "not including headers, padding or ICE connectivity checks"). What is neither is
             // STUN, or mDNS from the host's mDNS socket.
             let is_mdns = msg.transport.local_addr.port() == mdns::MDNS_PORT
-                && msg.transport.peer_addr.port() == mdns::MDNS_PORT;
+                && (msg.transport.peer_addr.port() == mdns::MDNS_PORT
+                    || self.ctx.mdns_legacy_unicast);
             let is_payload = !is_mdns
                 && message
                     .first()
@@ -209,7 +216,15 @@ mod tests {
     use shared::{TransportContext, TransportProtocol};
 
     fn try_read(local: &str, peer: &str, first_byte: u8) -> Option<RTCMessageInternal> {
-        let mut ctx = DemuxerHandlerContext::default();
+        try_read_with(DemuxerHandlerContext::default(), local, peer, first_byte)
+    }
+
+    fn try_read_with(
+        mut ctx: DemuxerHandlerContext,
+        local: &str,
+        peer: &str,
+        first_byte: u8,
+    ) -> Option<RTCMessageInternal> {
         let mut stats = RTCStatsAccumulator::new();
         let mut handler = DemuxerHandler::new(&mut ctx, &mut stats);
         let mut message = BytesMut::from(&[0u8; 12][..]);
@@ -282,6 +297,36 @@ mod tests {
         assert!(matches!(
             read("192.168.1.2:50000", "192.168.1.9:40000", 128),
             RTCMessageInternal::Rtp(_)
+        ));
+    }
+
+    /// RFC 6762 Section 6.7: a legacy unicast query reaches port 5353 from another port. A
+    /// peer connection that answers for its `.local` names takes it as mDNS; one that does not
+    /// demultiplexes it by RFC 7983 like any datagram (an ICE socket on port 5353 keeps its
+    /// DTLS).
+    #[test]
+    fn a_legacy_unicast_query_reaches_ice_when_this_peer_answers_mdns() {
+        let responder = || DemuxerHandlerContext {
+            mdns_legacy_unicast: true,
+            ..Default::default()
+        };
+        for first_byte in [0u8, 22, 128, 255] {
+            assert!(
+                matches!(
+                    try_read_with(responder(), "0.0.0.0:5353", "192.168.1.9:40000", first_byte),
+                    Some(RTCMessageInternal::Stun(_))
+                ),
+                "first byte {first_byte}"
+            );
+        }
+        assert!(matches!(
+            read("0.0.0.0:5353", "192.168.1.9:40000", 22),
+            RTCMessageInternal::Dtls(_)
+        ));
+        // Only port 5353 is the mDNS socket.
+        assert!(matches!(
+            try_read_with(responder(), "192.168.1.2:50000", "192.168.1.9:40000", 22),
+            Some(RTCMessageInternal::Dtls(_))
         ));
     }
 

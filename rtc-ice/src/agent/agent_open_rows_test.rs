@@ -363,7 +363,9 @@ fn test_hard_icmp_error_fails_the_pair_whose_check_is_in_flight() {
 }
 
 /// A controlling agent with one active TCP candidate and `n` remote passive candidates on one
-/// IP address (ports 5001...).
+/// IP address (ports 5001...), each with a foundation of its own: candidates of one type on one
+/// address would share a foundation, and RFC 8445 Section 6.1.2.6 then leaves all but the best
+/// pair Frozen until it succeeds, so only one connection would ever be attempted.
 fn tcp_agent(now: Instant, n: u16) -> Agent {
     let cfg = AgentConfig {
         failed_timeout: Some(Duration::ZERO),
@@ -373,13 +375,22 @@ fn tcp_agent(now: Instant, n: u16) -> Agent {
     a.add_local_candidate(candidate("tcp", "192.168.0.2", 9, 0, TcpType::Active))
         .unwrap();
     for i in 1..=n {
-        a.add_remote_candidate(candidate(
-            "tcp",
-            "192.168.0.3",
-            5000 + i,
-            10_000 - u32::from(i),
-            TcpType::Passive,
-        ))
+        a.add_remote_candidate(
+            CandidateHostConfig {
+                base_config: CandidateConfig {
+                    network: "tcp".to_owned(),
+                    address: "192.168.0.3".to_owned(),
+                    port: 5000 + i,
+                    component: 1,
+                    priority: 10_000 - u32::from(i),
+                    foundation: format!("t{i}"),
+                    ..Default::default()
+                },
+                tcp_type: TcpType::Passive,
+            }
+            .new_candidate_host()
+            .unwrap(),
+        )
         .unwrap();
     }
     a.start_connectivity_checks(now, true, REMOTE_UFRAG.to_owned(), REMOTE_PWD.to_owned())

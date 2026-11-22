@@ -52,7 +52,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   checks.
 - **ice**: what arrives on the mDNS socket (local port 5353) goes to the mDNS connection
   whatever its source port (it had to be 5353), so that a legacy unicast query is answered
-  (RFC 6762 section 6.7).
+  (RFC 6762 section 6.7). The peer connection's demultiplexer does the same when its mDNS mode
+  is `QueryAndGather`; in the other modes a datagram on port 5353 from another port is still
+  demultiplexed as STUN / DTLS / SRTP.
 - **api**: `RTCIceCandidate` has a new public field, `username_fragment`; `rtc_ice::Event`
   has the variants `LocalCandidateRenamed` and `LiteCandidateUpdate`; `AgentConfig` the fields
   `multicast_dns_first_query_delay`, `multicast_dns_destination_reported`,

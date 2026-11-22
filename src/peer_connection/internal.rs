@@ -242,7 +242,11 @@ impl RTCPeerConnection {
         // own a crypto provider, and deriving `Default` for them would mean resolving one
         // implicitly. The provider is chosen once above and threaded from here.
         let pipeline_context = PipelineContext {
-            demuxer_handler_context: DemuxerHandlerContext::default(),
+            demuxer_handler_context: DemuxerHandlerContext {
+                mdns_legacy_unicast: setting_engine.multicast_dns.mode
+                    == ice::mdns::MulticastDnsMode::QueryAndGather,
+                ..Default::default()
+            },
             ice_handler_context,
             dtls_handler_context,
             sctp_handler_context,

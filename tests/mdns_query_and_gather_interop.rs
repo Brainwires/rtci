@@ -168,6 +168,30 @@ fn create_rtc_peer_with_mdns(
         .build(Instant::now())?)
 }
 
+/// The error a test that timed out returns: what the rtc peer's ICE agent had by then (its
+/// candidates, with the addresses resolved `.local` names became, and its pairs with their
+/// states), so that a failure on a CI runner says which side of the mDNS exchange did not happen.
+fn timed_out(rtc_pc: &mut RtcPeerConnection) -> anyhow::Error {
+    use rtc::statistics::StatsSelector;
+    use rtc::statistics::report::RTCStatsReportEntry;
+    let report = rtc_pc.get_stats(Instant::now(), StatsSelector::None);
+    let mut lines = Vec::new();
+    for entry in report.iter() {
+        match entry {
+            RTCStatsReportEntry::LocalCandidate(c) => lines.push(format!("local candidate {c:?}")),
+            RTCStatsReportEntry::RemoteCandidate(c) => {
+                lines.push(format!("remote candidate {c:?}"))
+            }
+            RTCStatsReportEntry::IceCandidatePair(p) => lines.push(format!("pair {p:?}")),
+            _ => {}
+        }
+    }
+    anyhow::anyhow!(
+        "Test timeout; the rtc peer's ICE state:\n{}",
+        lines.join("\n")
+    )
+}
+
 /// Run the RTC event loop with mDNS support
 async fn run_rtc_event_loop(
     rtc_pc: &mut RtcPeerConnection,
@@ -191,7 +215,7 @@ async fn run_rtc_event_loop(
                 .await
             {
                 Ok(n) => {
-                    log::trace!("mDNS sent {} bytes to {}", n, msg.transport.peer_addr);
+                    log::info!("mDNS sent {} bytes to {}", n, msg.transport.peer_addr);
                 }
                 Err(err) => {
                     log::error!("mDNS socket write error: {}", err);
@@ -308,7 +332,8 @@ async fn run_rtc_event_loop(
             }
             res = mdns_socket.recv_from(&mut mdns_buf) => {
                 if let Ok((n, peer_addr)) = res {
-                    log::trace!("mDNS received {} bytes from {}", n, peer_addr);
+                    // Info, not trace: on a CI runner the mDNS traffic is what a failure turns on.
+                    log::info!("mDNS received {} bytes from {}", n, peer_addr);
                     rtc_pc.handle_read(TaggedBytesMut {
                         now: Instant::now(),
                         transport: TransportContext {
@@ -491,7 +516,7 @@ async fn test_mdns_query_only_webrtc_offerer_rtc_answerer() -> Result<()> {
         }
     }
 
-    Err(anyhow::anyhow!("Test timeout"))
+    Err(timed_out(&mut rtc_pc))
 }
 
 // =============================================================================
@@ -649,7 +674,7 @@ async fn test_mdns_query_and_gather_webrtc_offerer_rtc_answerer() -> Result<()> 
         }
     }
 
-    Err(anyhow::anyhow!("Test timeout"))
+    Err(timed_out(&mut rtc_pc))
 }
 
 // =============================================================================
@@ -825,7 +850,7 @@ async fn test_mdns_query_only_rtc_offerer_webrtc_answerer() -> Result<()> {
         }
     }
 
-    Err(anyhow::anyhow!("Test timeout"))
+    Err(timed_out(&mut rtc_pc))
 }
 
 // =============================================================================
@@ -1001,5 +1026,5 @@ async fn test_mdns_query_and_gather_rtc_offerer_webrtc_answerer() -> Result<()> 
         }
     }
 
-    Err(anyhow::anyhow!("Test timeout"))
+    Err(timed_out(&mut rtc_pc))
 }
