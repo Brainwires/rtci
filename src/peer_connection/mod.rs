@@ -285,10 +285,11 @@ use crate::peer_connection::sdp::MediaDescriptionExt;
 use crate::peer_connection::sdp::session_description::RTCSessionDescription;
 use crate::peer_connection::sdp::{
     RemoteIceDetails, check_answer_against_offer, codecs_from_media_description,
-    extract_fingerprints, extract_ice_details, get_application_media,
-    get_application_media_section_max_message_size, get_application_media_section_sctp_port,
-    get_mid_value, get_peer_direction, has_ice_trickle_option, insert_media_line, is_lite_set,
-    is_rejected_media, media_ice_credentials, sdp_type::RTCSdpType, update_sdp_origin,
+    discard_stray_bundle_only, effective_direction, extract_fingerprints, extract_ice_details,
+    get_application_media, get_application_media_section_max_message_size,
+    get_application_media_section_sctp_port, get_mid_value, get_peer_direction,
+    has_ice_trickle_option, insert_media_line, is_lite_set, is_rejected_media, is_sdp_token,
+    media_ice_credentials, sdp_type::RTCSdpType, update_sdp_origin,
 };
 use crate::peer_connection::state::RTCIceGatheringState;
 use crate::peer_connection::state::ice_connection_state::RTCIceConnectionState;
@@ -776,6 +777,9 @@ pub struct RTCPeerConnection {
 
     greater_mid: isize,
     sdp_origin: Origin,
+    /// The text of the description `create_offer` or `create_answer` made last: the next one
+    /// takes the following `o=` session version when it differs (`update_sdp_origin`).
+    last_generated_sdp: String,
     last_offer: String,
     last_answer: String,
 
@@ -917,7 +921,7 @@ impl RTCPeerConnection {
         // wpt100:hdrext — `a=cryptex` per the RTCRtpHeaderEncryptionPolicy (RFC 9335).
         let mut d = self.add_cryptex_attribute(d, true);
 
-        update_sdp_origin(&mut self.sdp_origin, &mut d);
+        update_sdp_origin(&mut self.sdp_origin, &mut self.last_generated_sdp, &mut d);
 
         let sdp = d.marshal();
 
@@ -1096,7 +1100,7 @@ impl RTCPeerConnection {
         // wpt100:hdrext — `a=cryptex` when the offer had it (RFC 9335 section 4).
         let mut d = self.add_cryptex_attribute(d, false);
 
-        update_sdp_origin(&mut self.sdp_origin, &mut d);
+        update_sdp_origin(&mut self.sdp_origin, &mut self.last_generated_sdp, &mut d);
 
         let sdp = d.marshal();
 
@@ -1509,6 +1513,7 @@ impl RTCPeerConnection {
         if remote_description.sdp_type != RTCSdpType::Rollback {
             let mut parsed = remote_description.unmarshal()?;
             self.assign_missing_mids(&mut parsed, answers);
+            discard_stray_bundle_only(&mut parsed, answers);
             // `RTCRtpHeaderEncryptionPolicy::Require`: refused before any of it is applied.
             self.check_required_cryptex(&parsed)?;
             remote_description.parsed = Some(parsed);
@@ -1566,9 +1571,23 @@ impl RTCPeerConnection {
         parsed: &::sdp::description::session::SessionDescription,
         answers: bool,
     ) -> Result<()> {
+        let mut mids: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for media in &parsed.media_descriptions {
-            if !get_mid_value(media).is_some_and(|mid| !mid.is_empty()) {
+            let Some(mid) = get_mid_value(media).filter(|mid| !mid.is_empty()) else {
                 return Err(Error::ErrPeerConnRemoteDescriptionWithoutMidValue);
+            };
+            // RFC 5888 section 4: the identification-tag is a token, and "MUST be unique
+            // within an SDP session description" (RFC 9429 section 5.8.2: "if a MID is
+            // repeated, this is an error").
+            if !is_sdp_token(mid) {
+                return Err(Error::SdpInvalidValue(format!(
+                    "a=mid:{mid} is not a token (RFC 5888 section 4)"
+                )));
+            }
+            if !mids.insert(mid.as_str()) {
+                return Err(Error::SdpInvalidValue(format!(
+                    "a=mid:{mid} names more than one media section (RFC 5888 section 4)"
+                )));
             }
         }
 
@@ -1587,7 +1606,6 @@ impl RTCPeerConnection {
                     || is_rejected_media(media)
                     || RtpCodecKind::from(media.media_name.media.as_str())
                         == RtpCodecKind::Unspecified
-                    || get_peer_direction(media) == RTCRtpTransceiverDirection::Unspecified
                 {
                     continue;
                 }
@@ -1738,10 +1756,10 @@ impl RTCPeerConnection {
                         }
 
                         let kind = RtpCodecKind::from(media.media_name.media.as_str());
-                        let direction = get_peer_direction(media);
-                        if kind == RtpCodecKind::Unspecified
-                            || direction == RTCRtpTransceiverDirection::Unspecified
-                        {
+                        // A section with no direction attribute, its own or the session's,
+                        // is sendrecv (RFC 8866 section 6.7, RFC 3264 section 6.1).
+                        let direction = effective_direction(parsed_remote_description, media);
+                        if kind == RtpCodecKind::Unspecified {
                             continue;
                         }
 
@@ -1774,18 +1792,16 @@ impl RTCPeerConnection {
                                 transceiver_by_mid.entry(mid_value.to_string()).or_insert(i);
                             }
                         } else {
-                            let local_direction =
-                                if direction == RTCRtpTransceiverDirection::Recvonly {
-                                    RTCRtpTransceiverDirection::Sendonly
-                                } else {
-                                    RTCRtpTransceiverDirection::Recvonly
-                                };
-
+                            // W3C webrtc-pc "set a session description": "Create an
+                            // RTCRtpTransceiver with ... direction 'recvonly'", whatever the
+                            // offered direction (RFC 9429 section 5.10). It has no sender
+                            // until `addTrack` gives it one, so a section offered recvonly is
+                            // answered inactive.
                             let mut transceiver = RTCRtpTransceiverInternal::new(
                                 kind,
                                 None,
                                 RTCRtpTransceiverInit {
-                                    direction: local_direction,
+                                    direction: RTCRtpTransceiverDirection::Recvonly,
                                     streams: vec![],
                                     send_encodings: vec![],
                                 },
@@ -1835,10 +1851,8 @@ impl RTCPeerConnection {
                         }
 
                         let kind = RtpCodecKind::from(media.media_name.media.as_str());
-                        let mut direction = get_peer_direction(media);
-                        if kind == RtpCodecKind::Unspecified
-                            || direction == RTCRtpTransceiverDirection::Unspecified
-                        {
+                        let mut direction = effective_direction(parsed_remote_description, media);
+                        if kind == RtpCodecKind::Unspecified {
                             continue;
                         }
 

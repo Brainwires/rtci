@@ -6,7 +6,7 @@
 //! exactly as it was, so a refused answer leaves the offer pending and can be followed by a
 //! correct one.
 
-use super::{ATTR_KEY_BUNDLE_ONLY, get_mid_value, is_rejected_media};
+use super::{get_mid_value, is_rejected_media};
 use crate::rtp_transceiver::direction::RTCRtpTransceiverDirection;
 use sdp::description::media::MediaDescription;
 use sdp::description::session::{ATTR_KEY_GROUP, SessionDescription};
@@ -271,12 +271,6 @@ pub(crate) fn check_answer_against_offer(
         if is_rejected_media(offered) {
             return Err(mismatch(index, "offered with port zero, answered accepted"));
         }
-        // RFC 9143 section 7.3.3 leaves bundle-only to offers: an answered section with port
-        // zero is rejected, which `is_rejected_media` reads as kept when the attribute is there.
-        if answered.media_name.port.value == 0 && answered.has_attribute(ATTR_KEY_BUNDLE_ONLY) {
-            return Err(mismatch(index, "a=bundle-only with port zero in an answer"));
-        }
-
         let offered_direction = effective_direction(offer, offered);
         let answered_direction = effective_direction(answer, answered);
         if !direction_answers(offered_direction, answered_direction) {

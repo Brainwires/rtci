@@ -6,9 +6,10 @@ use crate::peer_connection::handler::endpoint::EndpointHandlerContext;
 use crate::peer_connection::handler::interceptor::InterceptorHandlerContext;
 use crate::peer_connection::handler::srtp::SrtpHandlerContext;
 use crate::peer_connection::sdp::{
-    MediaSection, PopulateSdpParams, add_candidates_to_media_descriptions, get_by_mid,
-    get_peer_direction, get_rids, have_data_channel, is_ext_map_allow_mixed_set,
-    rtp_extensions_from_media_description, track_details_from_sdp, unknown_media_name,
+    BundleMode, MediaSection, PopulateSdpParams, add_candidates_to_media_descriptions,
+    effective_direction, get_by_mid, get_peer_direction, get_rids, have_data_channel,
+    is_ext_map_allow_mixed_set, is_rtp_profile, rtp_extensions_from_media_description,
+    track_details_from_sdp, unknown_media_name,
 };
 use crate::peer_connection::state::signaling_state::check_next_signaling_state;
 use crate::peer_connection::transport::dtls::state::RTCDtlsTransportState;
@@ -32,6 +33,7 @@ use crate::statistics::accumulator::{
     IceCandidateAccumulator, local_candidate_stats_id, remote_candidate_stats_id,
 };
 use ::sdp::description::common::Attribute;
+use ::sdp::description::media::MediaDescription;
 use ::sdp::description::session::*;
 use ::sdp::util::ConnectionRole;
 use rand::RngExt;
@@ -256,6 +258,7 @@ impl RTCPeerConnection {
             removed_transceivers: Vec::new(),
             greater_mid: -1,
             sdp_origin: Origin::default(),
+            last_generated_sdp: String::new(),
             last_offer: String::new(),
             last_answer: String::new(),
             ice_restart_requested: None,
@@ -369,7 +372,7 @@ impl RTCPeerConnection {
             is_extmap_allow_mixed: true,
             connection_role: DEFAULT_DTLS_ROLE_OFFER.to_connection_role(),
             ice_gathering_state: self.ice_transport().ice_gathering_state,
-            match_bundle_group: None,
+            bundle: BundleMode::Offer,
             sctp_max_message_size: self.setting_engine.sctp_max_message_size.as_usize(),
             ignore_rid_pause_for_recv: false,
             write_ssrc_attributes_for_simulcast: self
@@ -407,12 +410,19 @@ impl RTCPeerConnection {
         let is_extmap_allow_mixed = is_ext_map_allow_mixed_set(self.remote_description());
         let local_mids = self.local_description_mids();
 
-        // Extract media descriptions to avoid borrowing conflicts
-        let media_descriptions = self
+        // Extract the description to avoid borrowing conflicts
+        let remote_parsed = self
             .remote_description()
-            .as_ref()
             .and_then(|r| r.parsed.as_ref())
+            .cloned();
+        let media_descriptions = remote_parsed
+            .as_ref()
             .map(|parsed| parsed.media_descriptions.clone());
+        // An answer repeats each offered m= line's proto (RFC 9429 section 5.1.2); an offer
+        // states this endpoint's own.
+        let offered_protos = |media: &MediaDescription| {
+            (!include_unmatched).then(|| media.media_name.protos.clone())
+        };
 
         // The mids the remote description has: a transceiver whose mid isn't among them is new
         // to this negotiation, and may take a rejected m-line's place in an offer.
@@ -482,6 +492,7 @@ impl RTCPeerConnection {
                             rejected_kind: media.media_name.media.clone(),
                             transceiver_index: usize::MAX,
                             rejected_name: unknown_media_name(media),
+                            offered_protos: offered_protos(media),
                             ..Default::default()
                         });
                         continue;
@@ -492,6 +503,7 @@ impl RTCPeerConnection {
                             mid: mid_value.to_owned(),
                             transceiver_index: usize::MAX,
                             data: true,
+                            offered_protos: offered_protos(media),
                             ..Default::default()
                         });
                         already_have_application_media_section = true;
@@ -511,6 +523,24 @@ impl RTCPeerConnection {
                             rejected_kind: media.media_name.media.clone(),
                             transceiver_index: usize::MAX,
                             rejected_name: unknown_media_name(media),
+                            ..Default::default()
+                        });
+                        continue;
+                    }
+
+                    // An audio or video section offered with a profile that is none of the
+                    // RTP profiles of RFC 9429 section 5.1.2 is not RTP this endpoint can
+                    // answer: rejected, its proto and formats kept.
+                    if !include_unmatched
+                        && matches!(kind, RtpCodecKind::Audio | RtpCodecKind::Video)
+                        && !is_rtp_profile(media)
+                    {
+                        media_sections.push(MediaSection {
+                            mid: mid_value.to_owned(),
+                            rejected: true,
+                            rejected_kind: media.media_name.media.clone(),
+                            transceiver_index: usize::MAX,
+                            rejected_name: Some(media.media_name.clone()),
                             ..Default::default()
                         });
                         continue;
@@ -545,7 +575,10 @@ impl RTCPeerConnection {
                         let answer_direction = (!include_unmatched).then(|| {
                             answered_direction(
                                 self.rtp_transceivers[i].direction(),
-                                get_peer_direction(media),
+                                remote_parsed.as_ref().map_or_else(
+                                    || get_peer_direction(media),
+                                    |parsed| effective_direction(parsed, media),
+                                ),
                             )
                         });
                         media_sections.push(MediaSection {
@@ -554,6 +587,7 @@ impl RTCPeerConnection {
                             match_extensions: extensions,
                             rid_map: get_rids(media),
                             answer_direction,
+                            offered_protos: offered_protos(media),
                             ..Default::default()
                         });
                     } else {
@@ -625,14 +659,13 @@ impl RTCPeerConnection {
                     ..Default::default()
                 });
             }
-            None
+            BundleMode::Offer
         } else {
-            self.remote_description()
+            // The offered BUNDLE group, whatever other `a=group` lines the offer has
+            // (RFC 9429 section 5.3.1); none when the offer has none.
+            remote_parsed
                 .as_ref()
-                .and_then(|d| d.parsed.as_ref())
-                .and_then(|d| d.attribute(ATTR_KEY_GROUP))
-                .map(ToOwned::to_owned)
-                .or(Some(String::new()))
+                .map_or(BundleMode::Answer(None), BundleMode::answering)
         };
 
         let dtls_fingerprints = self.local_dtls_fingerprints()?;
@@ -643,7 +676,7 @@ impl RTCPeerConnection {
             is_extmap_allow_mixed,
             connection_role,
             ice_gathering_state: self.ice_transport().ice_gathering_state,
-            match_bundle_group,
+            bundle: match_bundle_group,
             sctp_max_message_size: self.setting_engine.sctp_max_message_size.as_usize(),
             ignore_rid_pause_for_recv,
             write_ssrc_attributes_for_simulcast: self

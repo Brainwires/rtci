@@ -158,7 +158,7 @@ mod rejected_mline_tests {
             is_extmap_allow_mixed: false,
             connection_role: ConnectionRole::Active,
             ice_gathering_state: RTCIceGatheringState::Complete,
-            match_bundle_group: None,
+            bundle: BundleMode::Offer,
             sctp_max_message_size: 0,
             ignore_rid_pause_for_recv: false,
             write_ssrc_attributes_for_simulcast: false,
@@ -284,13 +284,13 @@ mod answer_check;
 pub(crate) mod sdp_type;
 pub(crate) mod session_description;
 
-pub(crate) use answer_check::check_answer_against_offer;
+pub(crate) use answer_check::{bundle_groups, check_answer_against_offer, effective_direction};
 
 pub use sdp_type::RTCSdpType;
 pub use session_description::RTCSessionDescription;
 
 use crate::media_stream::MediaStreamId;
-use crate::media_stream::track::MediaStreamTrackId;
+use crate::media_stream::track::{MediaStreamTrack, MediaStreamTrackId};
 use crate::peer_connection::RTCPeerConnection;
 use crate::peer_connection::configuration::media_engine::MediaEngine;
 use crate::peer_connection::state::ice_gathering_state::RTCIceGatheringState;
@@ -792,13 +792,13 @@ pub(crate) fn add_candidates_to_media_descriptions(
         m.with_value_attribute("candidate".to_owned(), marshaled)
     };
 
+    // RTP candidates only (component 1). RTP and RTCP are multiplexed on one port, so there
+    // is no RTCP component to describe: RFC 8858 section 5.3 (updating RFC 8839), "the offerer
+    // MUST NOT include RTCP candidates" when it cannot use a separate RTCP port, and RFC 5761
+    // section 5.1.3 for the answer.
     for c in candidates {
         let mut candidate = c.to_ice()?;
-
         candidate.set_component(1);
-        m = append_candidate_if_new(&candidate, m);
-
-        candidate.set_component(2);
         m = append_candidate_if_new(&candidate, m);
     }
 
@@ -1240,29 +1240,12 @@ impl RTCPeerConnection {
                             );
                         }
 
-                        media = media.with_media_source(
-                            ssrc,
-                            track.stream_id().clone(),    /* cname */
-                            track.stream_id().to_owned(), /* stream_id */
-                            track.track_id().to_owned(),
-                        );
-
+                        media = with_source_attributes(media, ssrc, track);
                         if let Some(rtx) = rtx_flow {
-                            media = media.with_media_source(
-                                rtx.ssrc,
-                                track.stream_id().clone(),    /* cname */
-                                track.stream_id().to_owned(), /* stream_id */
-                                track.track_id().to_owned(),
-                            );
+                            media = with_source_attributes(media, rtx.ssrc, track);
                         }
-
                         if let Some(fec) = fec_flow {
-                            media = media.with_media_source(
-                                fec.ssrc,
-                                track.stream_id().clone(),    /* cname */
-                                track.stream_id().to_owned(), /* stream_id */
-                                track.track_id().to_owned(),
-                            );
+                            media = with_source_attributes(media, fec.ssrc, track);
                         }
                     }
                 }
@@ -1286,6 +1269,26 @@ impl RTCPeerConnection {
 
         (media, send_rids)
     }
+}
+
+/// The source attributes of one of a sender's SSRCs (RFC 5576 section 4.1): `cname` (section
+/// 6.1) and `msid` (RFC 8830 appendix A, registered as a source attribute). The Plan B
+/// `mslabel` and `label` attributes are not written: RFC 5576 section 4.1 has source
+/// attributes registered with IANA, and neither is.
+fn with_source_attributes(
+    media: MediaDescription,
+    ssrc: SSRC,
+    track: &MediaStreamTrack,
+) -> MediaDescription {
+    media
+        .with_value_attribute(
+            ATTR_KEY_SSRC.to_owned(),
+            format!("{ssrc} cname:{}", track.stream_id()),
+        )
+        .with_value_attribute(
+            ATTR_KEY_SSRC.to_owned(),
+            format!("{ssrc} msid:{} {}", track.stream_id(), track.track_id()),
+        )
 }
 
 /// Whether an m-section has a format for a sender's RTX (RFC 4588) and FlexFEC
@@ -1345,10 +1348,31 @@ impl TryFrom<&String> for SimulcastRid {
     }
 }
 
-fn bundle_match(bundle: Option<&String>, id: &str) -> bool {
-    match bundle {
-        None => true,
-        Some(b) => b.split_whitespace().any(|s| s == id),
+/// What a generated description does about BUNDLE (RFC 9143).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum BundleMode {
+    /// An offer: every media section that is not rejected is in the one BUNDLE group.
+    Offer,
+    /// An answer to an offer with this BUNDLE group (its identification-tags, in the offer's
+    /// order), or with none. With a group, the answer's group holds the accepted sections of
+    /// it, in its order (RFC 9143 section 7.3.1: the answerer-tagged section is the first the
+    /// offer suggested that is accepted), and a section outside it, which would need a
+    /// transport of its own, is rejected. With none, no group is written and no section is
+    /// rejected for it (RFC 9143 section 7.3: "The answerer MUST NOT include a BUNDLE group in
+    /// the answer unless the offer contained one"; RFC 9429 section 5.3.1).
+    Answer(Option<Vec<String>>),
+}
+
+impl BundleMode {
+    /// The mode of the answer to `offer`: its first non-empty `a=group:BUNDLE` (an
+    /// `a=group` line of other semantics, such as LS, is not one).
+    pub(crate) fn answering(offer: &SessionDescription) -> Self {
+        BundleMode::Answer(
+            bundle_groups(offer)
+                .into_iter()
+                .find(|group| !group.is_empty())
+                .map(|group| group.into_iter().map(str::to_owned).collect()),
+        )
     }
 }
 
@@ -1375,6 +1399,31 @@ pub(crate) struct MediaSection {
     pub(crate) answer_direction: Option<RTCRtpTransceiverDirection>,
     pub(crate) match_extensions: HashMap<String, u16>,
     pub(crate) rid_map: Vec<SimulcastRid>,
+    /// In an answer, the `<proto>` of the offered m= line, which the answer repeats (RFC 9429
+    /// section 5.1.2: "The profile in any 'm=' line in any generated answer MUST exactly match
+    /// the profile provided in the offer"). `None` in an offer, which states this endpoint's
+    /// own profile.
+    pub(crate) offered_protos: Option<Vec<String>>,
+}
+
+/// The profiles of a media (RTP) m= line RFC 9429 section 5.1.2 has accepted in an offer:
+/// whatever the string, the section is DTLS-SRTP with feedback when it carries
+/// `a=fingerprint`.
+const RTP_PROFILES: [&str; 8] = [
+    "RTP/AVP",
+    "RTP/AVPF",
+    "RTP/SAVP",
+    "RTP/SAVPF",
+    "TCP/DTLS/RTP/SAVP",
+    "TCP/DTLS/RTP/SAVPF",
+    "UDP/TLS/RTP/SAVP",
+    "UDP/TLS/RTP/SAVPF",
+];
+
+/// Whether an audio or video m= line's `<proto>` is one of the RTP profiles RFC 9429 section
+/// 5.1.2 lists. Another one (`udptl`, say) is not RTP this endpoint can answer.
+pub(crate) fn is_rtp_profile(media: &MediaDescription) -> bool {
+    RTP_PROFILES.contains(&media.media_name.protos.join("/").as_str())
 }
 
 pub(crate) struct PopulateSdpParams {
@@ -1383,7 +1432,7 @@ pub(crate) struct PopulateSdpParams {
     pub(crate) is_extmap_allow_mixed: bool,
     pub(crate) connection_role: ConnectionRole,
     pub(crate) ice_gathering_state: RTCIceGatheringState,
-    pub(crate) match_bundle_group: Option<String>,
+    pub(crate) bundle: BundleMode,
     pub(crate) sctp_max_message_size: usize,
     pub(crate) ignore_rid_pause_for_recv: bool,
     pub(crate) write_ssrc_attributes_for_simulcast: bool,
@@ -1461,13 +1510,8 @@ impl RTCPeerConnection {
             vec![]
         };
 
-        let mut bundle_value = "BUNDLE".to_owned();
-        let mut bundle_count = 0;
-        let append_bundle = |mid_value: &str, value: &mut String, count: &mut i32| {
-            value.push(' ');
-            value.push_str(mid_value);
-            *count += 1;
-        };
+        // The mids of the BUNDLE group, in media section order.
+        let mut bundled: Vec<String> = vec![];
 
         let mut candidates_added = false;
         for m in media_sections.iter() {
@@ -1520,6 +1564,11 @@ impl RTCPeerConnection {
                     }
                     .with_value_attribute(ATTR_KEY_MID.to_owned(), m.mid.clone()),
                 );
+                if let (Some(protos), Some(desc)) =
+                    (&m.offered_protos, d.media_descriptions.last_mut())
+                {
+                    desc.media_name.protos.clone_from(protos);
+                }
                 if m.stopped
                     && let Some(desc) = d.media_descriptions.last_mut()
                 {
@@ -1556,8 +1605,7 @@ impl RTCPeerConnection {
                     ice_gathering_state: params.ice_gathering_state,
                     ignore_rid_pause_for_recv: params.ignore_rid_pause_for_recv,
                     write_ssrc_attributes_for_simulcast: params.write_ssrc_attributes_for_simulcast,
-                    // An answer matches the remote offer's bundle group; an offer has none.
-                    is_offer: params.match_bundle_group.is_none(),
+                    is_offer: params.bundle == BundleMode::Offer,
                 };
                 let (d1, should_add_id) = RTCPeerConnection::add_transceiver_sdp(
                     d,
@@ -1575,14 +1623,27 @@ impl RTCPeerConnection {
 
             candidates_added = true;
 
+            if let (Some(protos), Some(desc)) = (&m.offered_protos, d.media_descriptions.last_mut())
+            {
+                desc.media_name.protos.clone_from(protos);
+            }
+
             if should_add_id {
-                if bundle_match(params.match_bundle_group.as_ref(), &m.mid) {
-                    append_bundle(&m.mid, &mut bundle_value, &mut bundle_count);
-                } else if let Some(desc) = d.media_descriptions.last_mut() {
-                    desc.media_name.port = RangedPort {
-                        value: 0,
-                        range: None,
+                match &params.bundle {
+                    BundleMode::Offer => bundled.push(m.mid.clone()),
+                    BundleMode::Answer(Some(group)) if group.contains(&m.mid) => {
+                        bundled.push(m.mid.clone())
                     }
+                    BundleMode::Answer(Some(_)) => {
+                        // Outside the offered group: it would need a transport of its own.
+                        if let Some(desc) = d.media_descriptions.last_mut() {
+                            desc.media_name.port = RangedPort {
+                                value: 0,
+                                range: None,
+                            }
+                        }
+                    }
+                    BundleMode::Answer(None) => {}
                 }
             }
         }
@@ -1611,8 +1672,15 @@ impl RTCPeerConnection {
             d = d.with_property_attribute(ATTR_KEY_EXTMAP_ALLOW_MIXED.to_owned());
         }
 
-        if bundle_count > 0 {
-            d = d.with_value_attribute(ATTR_KEY_GROUP.to_owned(), bundle_value);
+        if let BundleMode::Answer(Some(group)) = &params.bundle {
+            // The offer's order: its first accepted tag is the answerer-tagged section.
+            bundled.sort_by_key(|mid| group.iter().position(|tag| tag == mid));
+        }
+        if !bundled.is_empty() {
+            d = d.with_value_attribute(
+                ATTR_KEY_GROUP.to_owned(),
+                format!("BUNDLE {}", bundled.join(" ")),
+            );
         }
 
         Ok(d)
@@ -1744,6 +1812,41 @@ pub(crate) struct RemoteIceDetails {
 /// m-section that is only reachable through its BUNDLE group also has port zero).
 pub(crate) fn is_rejected_media(m: &MediaDescription) -> bool {
     m.media_name.port.value == 0 && !m.has_attribute(ATTR_KEY_BUNDLE_ONLY)
+}
+
+/// Whether `s` is a `token` of RFC 8866 section 9: one or more of the characters
+/// `!#$%&'*+-.0-9A-Z^_`a-z{|}~`.
+pub(crate) fn is_sdp_token(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes().all(|b| {
+            matches!(b,
+                0x21 | 0x23..=0x27 | 0x2A..=0x2B | 0x2D..=0x2E | 0x30..=0x39 | 0x41..=0x5A
+                | 0x5E..=0x7E)
+        })
+}
+
+/// Drops the `a=bundle-only` attributes of a received description that do not mean
+/// "this section has port zero because it is only reachable through its BUNDLE group":
+///
+/// - RFC 9143 section 6: "If an offerer or answerer receives a 'bundle-only' attribute in a
+///   non-bundled 'm=' section, the offerer or answerer MUST discard the attribute." Without
+///   it a port-zero section is what port zero says: rejected (RFC 3264 section 6).
+/// - RFC 9143 sections 7.3.2 and 7.3.3 and RFC 9429 section 5.3.1: no m= section of an
+///   answer has the attribute, so one in an answer is discarded too.
+///
+/// Only the parsed description changes: the SDP text stays as given.
+pub(crate) fn discard_stray_bundle_only(desc: &mut SessionDescription, answers: bool) {
+    let bundled: HashSet<String> = bundle_groups(desc)
+        .into_iter()
+        .flatten()
+        .map(str::to_owned)
+        .collect();
+    for media in &mut desc.media_descriptions {
+        let in_group = get_mid_value(media).is_some_and(|mid| bundled.contains(mid.as_str()));
+        if answers || !in_group {
+            media.attributes.retain(|a| a.key != ATTR_KEY_BUNDLE_ONLY);
+        }
+    }
 }
 
 /// The mids of the description's first `a=group:BUNDLE` (RFC 8843 §7.1), in order.
@@ -2355,30 +2458,32 @@ fn reoffered_header_extensions_adds_listed_extensions_back() {
     assert_eq!(added, vec![(2u16, "urn:3gpp:video-orientation".to_owned())]);
 }
 
-/// update_sdp_origin saves sdp.Origin in PeerConnection when creating 1st local SDP;
-/// for subsequent calling, it updates Origin for SessionDescription from saved one
-/// and increments session version by one.
-/// <https://datatracker.ietf.org/doc/html/rfc9429#section-5.2.2>
-pub(crate) fn update_sdp_origin(origin: &mut Origin, d: &mut SessionDescription) {
-    if origin.session_version == 0 {
-        // store
-        origin.session_version = d.origin.session_version;
-        //atomic.StoreUint64(&origin.SessionID, d.Origin.SessionID)
-        origin.session_id = d.origin.session_id;
+/// Gives a generated description the session's `o=` line (RFC 9429 sections 5.2.2 and 5.3.2:
+/// "The 'o=' line MUST stay the same except for the <session-version> field, which MUST
+/// increment by one on each call ... if the offer might differ from the output of the
+/// previous call"; RFC 3264 section 8: "the version in the origin field MUST increment by one
+/// from the previous SDP").
+///
+/// The first description generated sets the session's origin (`origin`). Each later one gets
+/// that origin, with the version one higher than the previous description's when it differs
+/// from it (`last_generated`, the text of the previous one) and the same version when it is
+/// the same text. Offers and answers are one sequence: they describe one session.
+pub(crate) fn update_sdp_origin(
+    origin: &mut Origin,
+    last_generated: &mut String,
+    d: &mut SessionDescription,
+) {
+    if last_generated.is_empty() {
+        *origin = d.origin.clone();
     } else {
-        // load
-        /*for { // awaiting for saving session id
-            d.Origin.SessionID = atomic.LoadUint64(&origin.SessionID)
-            if d.Origin.SessionID != 0 {
-                break
-            }
-        }*/
-        d.origin.session_id = origin.session_id;
-
-        //d.Origin.SessionVersion = atomic.AddUint64(&origin.SessionVersion, 1)
-        origin.session_version += 1;
-        d.origin.session_version += 1;
+        d.origin = origin.clone();
+        if d.marshal() == *last_generated {
+            return;
+        }
+        origin.session_version = origin.session_version.wrapping_add(1);
+        d.origin.session_version = origin.session_version;
     }
+    *last_generated = d.marshal();
 }
 
 pub(crate) fn is_ext_map_allow_mixed_set(
