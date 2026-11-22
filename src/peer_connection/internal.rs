@@ -2983,6 +2983,24 @@ impl RTCPeerConnection {
                 }
                 codec_preferences.push(codec.clone());
             }
+            // So does telephone-event at a named codec's clock rate (RFC 4733, RFC 7874
+            // section 5): naming the audio codec does not take DTMF away (W3C webrtc-pc 7.3:
+            // DTMF needs telephone-event negotiated for sending).
+            let named_rates: Vec<u32> = codec_preferences
+                .iter()
+                .map(|preference| preference.rtp_codec.clock_rate)
+                .collect();
+            for codec in &media_engine_codecs {
+                if codec.rtp_codec.mime_type.eq_ignore_ascii_case(
+                    crate::rtp_transceiver::rtp_sender::dtmf::MIME_TYPE_TELEPHONE_EVENT,
+                ) && named_rates.contains(&codec.rtp_codec.clock_rate)
+                    && !codec_preferences
+                        .iter()
+                        .any(|preference| preference.payload_type == codec.payload_type)
+                {
+                    codec_preferences.push(codec.clone());
+                }
+            }
         }
 
         Ok(codec_preferences)
