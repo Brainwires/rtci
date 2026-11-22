@@ -6,7 +6,7 @@ The engine is the layer under the JS API: an `RTCPriorityType` string is the bin
 
 Totals:
 
-- MUST: tested 12 / untested 1 / partial 0 / missing 1 / violated 0 / n-a 0
+- MUST: tested 13 / untested 0 / partial 0 / missing 1 / violated 0 / n-a 0
 - SHOULD: tested 0 / untested 0 / partial 0 / missing 0 / violated 0 / n-a 0
 - MAY: tested 0 / untested 0 / partial 0 / missing 0 / violated 0 / n-a 1
 
@@ -22,7 +22,7 @@ Totals:
 | PRIO-3.2-4 | 3.2 | MUST | networkPriority sets the DSCP marking of the encoding's packets (rtcweb-transports 4.2) | tested | src/peer_connection/priority.rs (RTCPeerConnection::dscp) | datagrams_are_marked_by_their_flows_priority | the engine performs no I/O: `dscp(&datagram)` gives the socket layer the codepoint of each datagram poll_write returned |
 | PRIO-3.2-5 | 3.2 | MUST | With networkPriority unset, priority controls the DSCP marking | tested | src/peer_connection/priority.rs (rtp_dscp) | datagrams_are_marked_by_their_flows_priority |  |
 | PRIO-4.1-1 | 4.1 | MUST | RTCDataChannel.priority returns the channel's [[DataChannelPriority]] | tested | `src/data_channel/mod.rs:168` | `an_accepted_channel_reports_the_peers_priority` | Returned as the DCEP integer |
-| PRIO-4.2-1 | 4.2 | MUST | RTCDataChannelInit.priority, default "low" | untested | `src/data_channel/init.rs:89`, `src/data_channel/init.rs:110` | - | Default is 256 ("normal" = "low"); no test reads back a non-default value from the creating side or the wire |
+| PRIO-4.2-1 | 4.2 | MUST | RTCDataChannelInit.priority, default "low" | tested | `src/data_channel/init.rs:89`, `src/data_channel/init.rs:110` | a_data_channels_priority_defaults_to_low_and_reaches_the_peer | default 256 (low) read back on both sides; 512 (medium) reaches the peer in DATA_CHANNEL_OPEN |
 | PRIO-4.3-1 | 4.3 | MUST | Creating a channel initializes [[DataChannelPriority]] from the option | tested | src/data_channel/mod.rs (priority_type) | datagrams_are_marked_by_their_flows_priority |  |
 | PRIO-4.3-2 | 4.3 | MUST | An incoming channel takes its priority from the DCEP value | tested | `src/data_channel/internal.rs:265` | `an_accepted_channel_reports_the_peers_priority` | - |
 | PRIO-4.3-3 | 4.3 | MUST | Mapping of the integer: 0-128 very-low, 129-256 low, 257-512 medium, 513+ high | tested | src/peer_connection/priority.rs (from_dcep_priority) | priority_classes_map_to_and_from_dcep_values |  |

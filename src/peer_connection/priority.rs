@@ -181,6 +181,28 @@ impl crate::peer_connection::RTCPeerConnection {
             .map(|priority| dscp_for(RTCFlowType::Data, priority))
     }
 
+    /// RFC 8837 section 5: "if the DSCP of an SCTP association is changed, the congestion
+    /// controller MUST be reset" (an association whose packets carry another codepoint may
+    /// take another queue, another path in effect). The data channels' codepoint
+    /// ([`Self::data_dscp`]) is compared with the one last seen; when it changed, each live
+    /// association's congestion control and RTO start over, as on a path change (RFC 9260
+    /// section 7.2.5).
+    pub(crate) fn restart_sctp_congestion_control_on_dscp_change(
+        &mut self,
+        now: std::time::Instant,
+    ) {
+        let dscp = self.data_dscp();
+        let previous = std::mem::replace(&mut self.last_data_dscp, dscp);
+        if previous.is_none() || previous == dscp {
+            return;
+        }
+        for association in self.sctp_transport_mut().sctp_associations.values_mut() {
+            if !association.is_ended() {
+                association.on_path_change(now);
+            }
+        }
+    }
+
     /// The codepoint every flow over one TCP connection shares: the highest-priority flow's.
     fn highest_dscp(&self) -> u8 {
         use crate::rtp_transceiver::rtp_sender::RtpCodecKind;

@@ -305,6 +305,12 @@ impl RTCIceTransport<'_> {
         self.peer_connection.ice_transport().get_remote_candidates()
     }
 
+    /// webrtc-extensions 7 `getCandidatePairs()`: the ICE agent's candidate pairs, in the
+    /// order they were formed (`OnIceCandidatePairAdd` announced each).
+    pub fn get_candidate_pairs(&self) -> Vec<RTCIceCandidatePair> {
+        self.peer_connection.ice_transport().get_candidate_pairs()
+    }
+
     /// The nominated candidate pair, or `None` until ICE selects one.
     pub fn get_selected_candidate_pair(&self) -> Option<RTCIceCandidatePair> {
         self.peer_connection
@@ -425,6 +431,18 @@ impl<'a> RTCSctpTransport<'a> {
     /// smaller of the negotiated inbound and outbound stream counts.
     pub fn max_channels(&self) -> Option<u16> {
         self.peer_connection.sctp_transport().max_channels()
+    }
+
+    /// The SCTP association's congestion window in bytes (RFC 9260 section 7.2), `None`
+    /// without a live association. A diagnostic, not a W3C member (earlier webrtc-stats drafts
+    /// had `RTCSctpTransportStats.congestionWindow`).
+    pub fn congestion_window(&self) -> Option<u32> {
+        self.peer_connection
+            .sctp_transport()
+            .sctp_associations
+            .values()
+            .find(|association| !association.is_ended())
+            .map(|association| association.congestion_window())
     }
 }
 
