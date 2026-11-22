@@ -112,6 +112,9 @@ pub struct RateController {
     decrease_factor: f64,
     increase_factor: f64,
     round_trip_time: Duration,
+    /// What a probe measured the path to deliver, while that is news the received rate has
+    /// not caught up with.
+    measured_rate: Option<f64>,
     convergence: Convergence,
     last_change: Option<Instant>,
 }
@@ -130,6 +133,7 @@ impl RateController {
             decrease_factor: DEFAULT_DECREASE_FACTOR,
             increase_factor: DEFAULT_INCREASE_FACTOR,
             round_trip_time: DEFAULT_ROUND_TRIP_TIME,
+            measured_rate: None,
             convergence: Convergence::new(),
             last_change: None,
         }
@@ -166,6 +170,15 @@ impl RateController {
     /// Replace the target, as when the path changed and the old estimate describes nothing.
     pub fn set_target(&mut self, target: f64) {
         self.target = target.clamp(self.min, self.max);
+    }
+
+    /// A rate the path was measured to deliver apart from the running received rate (a probe
+    /// cluster), or `None` to forget it. While set, the bound of the estimate by one and a
+    /// half times the received rate (section 5.5) is taken from the larger of the two: the
+    /// received rate lags a sender that has only just been told it may send more, and would
+    /// pull the estimate straight back to where it was. Over-use forgets it.
+    pub fn set_measured_rate(&mut self, measured: Option<f64>) {
+        self.measured_rate = measured;
     }
 
     /// Forget where the path's capacity was thought to be: the next climb is multiplicative.
@@ -214,6 +227,7 @@ impl RateController {
                     self.convergence.reset();
                 }
                 self.convergence.on_decrease(received);
+                self.measured_rate = None;
                 self.target = (received * self.decrease_factor).clamp(self.min, self.max);
                 self.last_change = Some(now);
             }
@@ -245,9 +259,12 @@ impl RateController {
 
         // A_hat(i) < 1.5 * R_hat(i): the estimate does not run away from what is sent.
         if let Some(received) = received {
+            let delivered = self
+                .measured_rate
+                .map_or(received, |rate| rate.max(received));
             self.target = self
                 .target
-                .min(MAX_ESTIMATE_TO_RECEIVED_RATIO * received)
+                .min(MAX_ESTIMATE_TO_RECEIVED_RATIO * delivered)
                 .clamp(self.min, self.max);
         }
 

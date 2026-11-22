@@ -7,6 +7,7 @@ use super::rate_control::RateController;
 use super::slope::SlopeEstimator;
 use crate::cc::estimator::{BandwidthEstimator, EstimatorStats};
 use crate::rtpfb::acknowledgement::PacketReport;
+use rtcp::transport_feedbacks::cc_feedback_report::Ecn;
 use std::time::{Duration, Instant};
 
 /// The most delay-gradient readings the trend is scaled by before it meets the threshold.
@@ -37,6 +38,16 @@ pub const DEFAULT_FEEDBACK_TIMEOUT: Duration = Duration::from_millis(500);
 /// What the target is multiplied by each time [`DEFAULT_FEEDBACK_TIMEOUT`] passes without
 /// feedback.
 pub const FEEDBACK_TIMEOUT_DECREASE: f64 = 0.5;
+
+/// How long a probe result stands in for the received rate in the bound of the estimate by
+/// one and a half times what is received (section 5.5). A sender that follows the target is
+/// received at the new rate within a window of the received-rate measurement and the bound
+/// is the draft's again. A sender with less to send than the target is probed again every
+/// five seconds: the result stands until the next one is due and has had its second to
+/// arrive, so the estimate rests on a measurement no older than that instead of falling back
+/// to one and a half times what the application happens to send and jumping up again with
+/// every probe. Over-use ends it at once.
+pub const PROBE_RESULT_HOLD: Duration = Duration::from_secs(6);
 
 /// Google Congestion Control.
 ///
@@ -99,6 +110,8 @@ pub struct Gcc {
     /// Smoothed interval between feedback reports, as the receiver actually sends them.
     feedback_interval: Option<Duration>,
     round_trip_time: Option<Duration>,
+    /// When the last probe result was taken.
+    probed_at: Option<Instant>,
 }
 
 impl Default for Gcc {
@@ -135,6 +148,7 @@ impl Gcc {
             loss_capped_by_delay: true,
             feedback_interval: None,
             round_trip_time: None,
+            probed_at: None,
         }
     }
 
@@ -211,6 +225,14 @@ impl BandwidthEstimator for Gcc {
         if reports.is_empty() {
             return;
         }
+        // A probe's measurement stands in for the received rate until the received rate has
+        // had its window to follow.
+        if let Some(probed_at) = self.probed_at
+            && now.saturating_duration_since(probed_at) > PROBE_RESULT_HOLD
+        {
+            self.probed_at = None;
+            self.delay_control.set_measured_rate(None);
+        }
 
         // Delay: group, filter, detect, control.
         let mut usage = self.detector.usage();
@@ -240,8 +262,13 @@ impl BandwidthEstimator for Gcc {
             .and_then(|newest| self.rate.rate_bits_per_second(newest));
         let delay_target = self.delay_control.update(now, usage, received);
 
-        // Loss: a fraction over this batch.
-        let lost = reports.iter().filter(|report| !report.arrived).count();
+        // Loss: a fraction over this batch. A packet that arrived marked ECN-CE counts as one
+        // that did not: "a CE mark is a congestion signal" (RFC 8888 section 7 with RFC 6679
+        // section 7.3.3: the sender reacts to it as to a lost packet, without retransmitting).
+        let lost = reports
+            .iter()
+            .filter(|report| !report.arrived || report.ecn == Ecn::Ce)
+            .count();
         self.loss_control.update(now, lost, reports.len());
         if self.loss_capped_by_delay {
             self.loss_control.cap(delay_target);
@@ -293,6 +320,27 @@ impl BandwidthEstimator for Gcc {
         self.loss_control.update_fraction(now, fraction_lost);
         self.target = self.loss_control.target().clamp(self.min, self.max);
         self.delay_control.set_target(self.target);
+    }
+
+    fn on_probe_result(&mut self, now: Instant, bits_per_second: f64) {
+        // A probe only ever raises the estimate: one that came out below it says the cluster
+        // met a queue, which the delay-based controller hears about by itself.
+        if !bits_per_second.is_finite() || bits_per_second <= self.target {
+            return;
+        }
+        // The path carried the cluster at this rate. Both halves start from it, the climb
+        // from here is multiplicative again, and for a while the measurement stands in for
+        // the received rate, which only follows once the application sends at the new target.
+        self.delay_control.set_target(bits_per_second);
+        self.delay_control.reset_convergence();
+        self.delay_control.set_measured_rate(Some(bits_per_second));
+        self.probed_at = Some(now);
+        self.loss_control.raise(bits_per_second);
+        self.target = self
+            .delay_control
+            .target()
+            .min(self.loss_control.target())
+            .clamp(self.min, self.max);
     }
 
     fn on_path_change(&mut self, _now: Instant) {
@@ -375,6 +423,40 @@ mod tests {
         gcc.on_reports(epoch, &[]);
 
         assert_eq!(before, gcc.target_bitrate());
+    }
+
+    /// RFC 8888 section 7 / RFC 6679 section 7.3.3: a packet the receiver reports as arrived
+    /// with ECN-CE is a congestion signal, answered as a loss is. Every packet arrives, and
+    /// promptly; three in twenty carry the mark; the loss-based half backs off. The same
+    /// arrivals without marks leave it where it was or higher.
+    #[test]
+    fn congestion_experienced_marks_lower_the_target_as_losses_do() {
+        let run = |marked: bool| {
+            let epoch = Instant::now();
+            let mut gcc = Gcc::new(1_000_000.0, 100_000.0, 10_000_000.0);
+            for batch in 0..20u64 {
+                let at = epoch + Duration::from_millis(batch * 200);
+                let reports: Vec<PacketReport> = (0..20)
+                    .map(|index| {
+                        let id = batch * 20 + index;
+                        let departure = at + Duration::from_millis(index * 10);
+                        let mut report = report(id, departure, Some(batch * 200 + index * 10 + 20));
+                        if marked && index % 7 == 0 {
+                            report.ecn = Ecn::Ce;
+                        }
+                        report
+                    })
+                    .collect();
+                gcc.on_reports(at + Duration::from_millis(200), &reports);
+            }
+            gcc.loss_based_bitrate()
+        };
+
+        let marked = run(true);
+        let clean = run(false);
+        assert!(marked < 1_000_000.0, "15% marked: {marked}");
+        assert!(clean >= 1_000_000.0, "no marks, no losses: {clean}");
+        assert!(marked < 0.8 * clean, "{marked} vs {clean}");
     }
 
     /// The more pessimistic half wins. Here loss is catastrophic while delay is quiet, so the
