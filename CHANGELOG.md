@@ -28,6 +28,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **dtls**: a new association asked for by an `actpass` description keeps the DTLS roles (it
   chose them anew from the configuration and the ICE role); only a transport that was closed
   chooses again.
+- **sender**: `RTCRtpSender::write_rtp` writes the MID header extension (the transceiver's mid)
+  and RtpStreamId (the rid of the packet's encoding) into every packet when the extension is
+  negotiated (RFC 9143 section 15, RFC 8852 section 3.3); the application had to. A packet
+  that already carries the extension keeps its value.
+- **media_engine**: `register_default_codecs` offers `audio/telephone-event` at 48000 Hz
+  (payload type 112) and 8000 Hz (115) with the DTMF events `0-15` (RFC 7874 section 3, RFC
+  4733 section 2.4.1). An application that registered telephone-event itself under one of
+  these numbers keeps its own registration only if it comes first.
+- **interceptors**: `register_default_interceptors` also registers the MID header extension
+  for audio, the client-to-mixer audio level (RFC 6464) for audio and the video orientation
+  extension for video (`configure_default_header_extensions`): descriptions carry three more
+  `a=extmap` lines.
+
 - **rtcp**: `configure_rtcp_reports` (and so `register_default_interceptors`) builds the RTCP
   session with a `T_rr_interval` of zero, the RFC 4585 section 4.2 default when no `trr-int`
   is signalled: regular reports are spaced by the RTCP bandwidth (5% of the session's, RFC
@@ -820,6 +833,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no per-packet feedback (draft section 7). `CongestionControlHandle::notify_path_change` restarts the delay side.
 - **pacer**: the burst is one 5 ms group at the target rate (draft-ietf-rmcat-gcc-02 section
   4), floored at one 1500-byte packet; it was 100 ms of the target.
+- **setting_engine**: `SettingEngineBuilder::with_implicit_rollback`: a remote offer applied
+  while a local offer is pending rolls the local offer back first (W3C webrtc-pc "set a session
+  description"), in one call; an offer that is then refused leaves the local offer pending.
+  Off by default: RFC 9429 sections 5.6 and 5.7 have the application roll back.
+- **media_engine**: a VP9 format without `profile-id` is the same format as one with
+  `profile-id=0` when negotiated codecs are merged (RFC 9628 section 6).
+
+- **receiver**: an RTP stream whose SSRC no description declares and whose packets carry no
+  MID is delivered to the one transceiver that receives its payload type (RFC 9143 section
+  9.2); with several transceivers it was dropped. An RTCP SDES MID item maps its SSRC to the m=
+  section it names, for such a stream. The MID header extension is read when RtpStreamId is
+  not negotiated; it was ignored then.
+
 - **jsep**: what an applied answer negotiates reaches the interceptors that act on it, as
   control messages written into the chain (`RTCPeerConnection` did not feed them):
   `a=rtcp-rsize` in the offer and the answer as `RtcpSessionControl::ReducedSize`; the remote
