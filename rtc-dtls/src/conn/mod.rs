@@ -8,7 +8,7 @@
 //! Normally an application drives [`Endpoint`](crate::endpoint::Endpoint) instead, which owns one
 //! of these per remote address.
 #[cfg(test)]
-mod conn_conformance_test;
+pub(crate) mod conn_conformance_test;
 #[cfg(test)]
 mod conn_ported_test;
 #[cfg(test)]
@@ -163,6 +163,10 @@ pub struct DTLSConn {
     /// sent again when the peer keeps sending handshake records (RFC 6347 4.2.7: alerts are
     /// not retransmitted on a timer, but the offending record arriving again draws a new one).
     pub(crate) fatal_alert_sent: Option<(Alert, usize)>,
+    /// How many records of an epoch after 0 have authenticated. An endpoint that holds two
+    /// associations for one address (RFC 6347 4.2.8) reads from it which of them a protected
+    /// record belongs to.
+    pub(crate) authenticated_records: u64,
 
     pub(crate) current_flight: Box<dyn Flight>,
     pub(crate) flights: Option<Vec<Packet>>,
@@ -253,6 +257,7 @@ impl DTLSConn {
             handshake_started: None,
             handshake_mtu: handshake_config.maximum_transmission_unit,
             fatal_alert_sent: None,
+            authenticated_records: 0,
 
             current_flight: flight,
             flights: None,
@@ -263,6 +268,49 @@ impl DTLSConn {
             peer_repeated_flight: false,
             address_verified: is_client || resumed,
         }
+    }
+
+    /// Creates the server association for a client whose address is verified: the endpoint
+    /// has checked the cookie of its ClientHello without keeping state (RFC 6347 4.2.1), or
+    /// the cookie exchange is switched off. The association performs no cookie exchange of
+    /// its own; it takes the ClientHello with `message_sequence` as the one to negotiate from.
+    ///
+    /// Its first handshake message carries the ClientHello's message_seq and its first record
+    /// the ClientHello's record sequence number (RFC 6347 4.2.1, 4.2.2), which is why both are
+    /// passed.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the provider's random number generator does.
+    pub(crate) fn accept(
+        handshake_config: Arc<HandshakeConfig>,
+        message_sequence: u16,
+        record_sequence: u64,
+    ) -> Result<Self> {
+        let mut conn = Self::new(handshake_config, false, None);
+        let cfg = conn.handshake_config.clone();
+
+        // What `Flight0::generate` sets up for a server that runs the cookie exchange itself.
+        conn.state.local_epoch = 0;
+        conn.state.remote_epoch = 0;
+        conn.state.named_curve = match cfg.local_named_curves.first() {
+            Some(curve) if cfg.local_psk_callback.is_none() => *curve,
+            _ => DEFAULT_NAMED_CURVE,
+        };
+        conn.state.local_random.populate(cfg.provider().random())?;
+
+        // As if the HelloVerifyRequest had just been sent: waiting for the ClientHello that
+        // answers it.
+        conn.state.cookie_verified_by_endpoint = true;
+        conn.address_verified = true;
+        conn.state.handshake_recv_sequence = message_sequence as isize;
+        conn.state.handshake_send_sequence = message_sequence as isize;
+        conn.fragment_buffer.start_at(message_sequence);
+        conn.state.local_sequence_number = vec![record_sequence];
+        conn.current_flight = Box::new(crate::flight::flight2::Flight2 {});
+        conn.current_handshake_state = HandshakeState::Waiting;
+        conn.retransmit = false;
+        Ok(conn)
     }
 
     // Read reads data from the connection.
@@ -1017,6 +1065,8 @@ impl DTLSConn {
                     }
                 };
             }
+
+            self.authenticated_records += 1;
 
             // RFC 5246 6.2.1, 7.2.2: an authenticated record that opens to more than 2^14
             // bytes is the peer's error, and fatal: record_overflow.

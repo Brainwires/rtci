@@ -85,8 +85,11 @@ impl Flight for Flight2 {
             // nothing about its sender and is no error of the association either: keep
             // waiting for the one that echoes the cookie. (`DTLSConn` discards such a
             // ClientHello on arrival, so that it does not take the genuine one's place.)
-            if client_hello.cookie.is_empty()
-                || !crypto::constant_time_eq(&state.cookie, &client_hello.cookie)
+            // An association the endpoint made for a ClientHello whose cookie it has verified
+            // (statelessly, see `cookie.rs`) holds no cookie of its own to compare.
+            if !state.cookie_verified_by_endpoint
+                && (client_hello.cookie.is_empty()
+                    || !crypto::constant_time_eq(&state.cookie, &client_hello.cookie))
             {
                 return Err((None, None));
             }

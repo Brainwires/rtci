@@ -599,8 +599,13 @@ fn a_received_fatal_alert_closes_the_association_unanswered() -> Result<()> {
         Some(server_config()?),
     );
     client.connect(now, server_addr(), client_config()?, None)?;
+    // Through the cookie exchange: only then does the server have an association to fail.
     let flight1 = take_transmits(&mut client);
     deliver(&mut server, client_addr(), flight1, now);
+    let hello_verify_request = take_transmits(&mut server);
+    deliver(&mut client, server_addr(), hello_verify_request, now);
+    let flight3 = take_transmits(&mut client);
+    deliver(&mut server, client_addr(), flight3, now);
     take_transmits(&mut server);
 
     let result = server.read(
@@ -735,20 +740,56 @@ fn an_undecodable_plaintext_record_is_discarded_not_fatal() -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------------------------
-// A standalone server does per-association work only for addresses that echoed a cookie
-// (RFC 6347 4.2.1).
+// The stateless cookie exchange (RFC 6347 4.2.1): no state, no work and no amplification for a
+// source address before it has echoed a cookie.
 // ---------------------------------------------------------------------------------------------
+
+use crate::conn::conn_conformance_test::{
+    CLIENT_HELLO, ECDSA_GCM, HELLO_VERIFY_REQUEST, SERVER_HELLO, body_of, client_hello_body,
+    handshake_message, plaintext_handshake_messages, plaintext_record, usual_client_extensions,
+};
 
 fn spoofed_addr(index: usize) -> SocketAddr {
     SocketAddr::from(([10, 0, (index >> 8) as u8, index as u8], 7000))
 }
 
-/// One cookieless ClientHello replayed from more source addresses than the cap: the server keeps
-/// at most `MAX_UNVERIFIED_ASSOCIATIONS` of them, generates no key pair for any, still answers
-/// each with a HelloVerifyRequest, and still completes a genuine client's handshake, which then
-/// survives a second flood.
+/// A ClientHello datagram written by hand: `message_sequence`, `record_sequence`, `cookie`,
+/// the random filled with `random`.
+fn raw_client_hello(
+    message_sequence: u16,
+    record_sequence: u64,
+    cookie: &[u8],
+    random: u8,
+) -> BytesMut {
+    let mut body = client_hello_body(&[], cookie, &[ECDSA_GCM], Some(&usual_client_extensions()));
+    body[2..34].fill(random);
+    let record = plaintext_record(
+        HANDSHAKE,
+        record_sequence,
+        &handshake_message(CLIENT_HELLO, message_sequence, &body),
+    );
+    BytesMut::from(record.as_slice())
+}
+
+/// The cookie of the HelloVerifyRequest in `datagram`.
+fn cookie_of(datagram: &[u8]) -> Vec<u8> {
+    let body = body_of(
+        &plaintext_handshake_messages(&[datagram.to_vec()]),
+        HELLO_VERIFY_REQUEST,
+    )
+    .expect("a HelloVerifyRequest");
+    body[3..3 + body[2] as usize].to_vec()
+}
+
+fn datagrams_as_vecs(datagrams: &[BytesMut]) -> Vec<Vec<u8>> {
+    datagrams.iter().map(|datagram| datagram.to_vec()).collect()
+}
+
+/// A cookieless ClientHello from any number of source addresses: each is answered with one
+/// HelloVerifyRequest, smaller than the ClientHello, and the server keeps nothing. A genuine
+/// client still completes, before and after.
 #[test]
-fn unverified_source_addresses_are_capped_and_cost_no_key_pair() -> Result<()> {
+fn a_client_hello_without_a_valid_cookie_costs_the_server_no_state() -> Result<()> {
     let now = Instant::now();
     let mut genuine = Endpoint::new(client_addr(), TransportProtocol::UDP, None);
     let mut server = Endpoint::new(
@@ -760,43 +801,546 @@ fn unverified_source_addresses_are_capped_and_cost_no_key_pair() -> Result<()> {
     let mut prober = Endpoint::new(client_addr(), TransportProtocol::UDP, None);
     prober.connect(now, server_addr(), client_config()?, None)?;
     let client_hello = take_transmits(&mut prober);
-    assert!(!client_hello.is_empty());
+    assert_eq!(client_hello.len(), 1);
 
-    let flood = MAX_UNVERIFIED_ASSOCIATIONS + 10;
-    for index in 0..flood {
-        let (_, errored) = deliver(&mut server, spoofed_addr(index), client_hello.clone(), now);
-        assert!(!errored, "a cookieless ClientHello is not an error");
+    for index in 0..300 {
+        let (events, errored) =
+            deliver(&mut server, spoofed_addr(index), client_hello.clone(), now);
+        assert!(!errored && events.is_empty());
+        let answer = take_transmits(&mut server);
+        assert_eq!(answer.len(), 1, "one HelloVerifyRequest");
         assert!(
-            !take_transmits(&mut server).is_empty(),
-            "each one is answered with a HelloVerifyRequest"
+            answer[0].len() < client_hello[0].len(),
+            "the answer is smaller than what it answers"
         );
     }
-    assert!(
-        server.connections.len() <= MAX_UNVERIFIED_ASSOCIATIONS,
-        "{} associations kept for unverified addresses",
-        server.connections.len()
-    );
-    assert!(
-        server
-            .connections
-            .values()
-            .all(|conn| conn.state.local_keypair.is_none()),
-        "no key pair is generated before the cookie comes back"
-    );
+    assert!(server.connections.is_empty(), "no association is kept");
+    assert!(server.pending.is_empty());
 
     genuine.connect(now, server_addr(), client_config()?, None)?;
     complete_handshake(&mut genuine, &mut server, now);
-    assert!(server.connections[&client_addr()].is_address_verified());
+    assert_eq!(server.connections.len(), 1);
 
-    for index in flood..2 * flood {
-        deliver(&mut server, spoofed_addr(index), client_hello.clone(), now);
+    // Something that is not a ClientHello, from an address without an association: dropped.
+    let events = server.read(now, spoofed_addr(999), None, plaintext_application_data(1))?;
+    assert!(events.is_empty());
+    assert!(take_transmits(&mut server).is_empty());
+    assert_eq!(server.connections.len(), 1);
+    Ok(())
+}
+
+/// RFC 6347 4.2.1: the cookie is made from the client's address and the ClientHello
+/// parameters, and checked against both when it comes back. A cookie issued to one address,
+/// or for another random, is not valid: the ClientHello is answered with a HelloVerifyRequest
+/// again, as one without a cookie.
+#[test]
+fn a_cookie_is_bound_to_the_address_and_the_client_hello_parameters() -> Result<()> {
+    let now = Instant::now();
+    let mut server = Endpoint::new(
+        server_addr(),
+        TransportProtocol::UDP,
+        Some(server_config()?),
+    );
+    server.read(now, client_addr(), None, raw_client_hello(0, 0, &[], 0x11))?;
+    let cookie = cookie_of(&take_transmits(&mut server)[0]);
+    assert_eq!(cookie.len(), 20);
+
+    // The same ClientHello gets the same cookie: nothing was remembered to make it.
+    server.read(now, client_addr(), None, raw_client_hello(0, 0, &[], 0x11))?;
+    assert_eq!(cookie_of(&take_transmits(&mut server)[0]), cookie);
+
+    for (what, source, random) in [
+        ("another address", spoofed_addr(1), 0x11),
+        ("another random", client_addr(), 0x22),
+    ] {
+        server.read(now, source, None, raw_client_hello(1, 1, &cookie, random))?;
+        let answer = take_transmits(&mut server);
+        assert_eq!(answer.len(), 1, "{what}");
+        assert_ne!(
+            cookie_of(&answer[0]),
+            cookie,
+            "{what}: answered as cookieless"
+        );
+        assert!(server.connections.is_empty(), "{what}");
+    }
+
+    // From the address and with the parameters it was issued for, it is accepted.
+    server.read(
+        now,
+        client_addr(),
+        None,
+        raw_client_hello(1, 1, &cookie, 0x11),
+    )?;
+    assert_eq!(server.connections.len(), 1);
+    let flight = datagrams_as_vecs(&take_transmits(&mut server));
+    assert!(body_of(&plaintext_handshake_messages(&flight), SERVER_HELLO).is_some());
+    Ok(())
+}
+
+/// RFC 6347 4.2.1: the HelloVerifyRequest record carries the record sequence number of the
+/// ClientHello it answers, and the server's first ServerHello record that of the ClientHello
+/// with the cookie; the records after it count up from there. RFC 6347 4.2.2: the answer's
+/// message_seq is the ClientHello's.
+#[test]
+fn the_servers_answers_take_their_sequence_numbers_from_the_client_hello() -> Result<()> {
+    let now = Instant::now();
+    let mut server = Endpoint::new(
+        server_addr(),
+        TransportProtocol::UDP,
+        Some(server_config()?),
+    );
+    let sequence_of = |record: &[u8]| {
+        let mut bytes = [0u8; 8];
+        bytes[2..].copy_from_slice(&record[5..11]);
+        u64::from_be_bytes(bytes)
+    };
+    let message_sequence_of = |record: &[u8]| u16::from_be_bytes([record[17], record[18]]);
+
+    server.read(
+        now,
+        client_addr(),
+        None,
+        raw_client_hello(0, 0x1234, &[], 0x11),
+    )?;
+    let hello_verify_request = take_transmits(&mut server);
+    assert_eq!(sequence_of(&hello_verify_request[0]), 0x1234);
+    assert_eq!(message_sequence_of(&hello_verify_request[0]), 0);
+    // The version the ServerHello will carry.
+    assert_eq!(&hello_verify_request[0][25..27], &[0xfe, 0xfd]);
+    let cookie = cookie_of(&hello_verify_request[0]);
+
+    // A second exchange (message_seq 1) is answered with message_seq 1.
+    server.read(
+        now,
+        client_addr(),
+        None,
+        raw_client_hello(1, 0x1235, &[0xee; 20], 0x11),
+    )?;
+    let again = take_transmits(&mut server);
+    assert_eq!(sequence_of(&again[0]), 0x1235);
+    assert_eq!(message_sequence_of(&again[0]), 1);
+
+    server.read(
+        now,
+        client_addr(),
+        None,
+        raw_client_hello(1, 0x4321, &cookie, 0x11),
+    )?;
+    let records: Vec<Vec<u8>> = take_transmits(&mut server)
+        .iter()
+        .flat_map(|datagram| crate::record_layer::unpack_datagram(datagram).unwrap())
+        .collect();
+    assert!(
+        records.len() >= 4,
+        "ServerHello, Certificate, ServerKeyExchange, ServerHelloDone"
+    );
+    assert_eq!(records[0][13], SERVER_HELLO);
+    for (index, record) in records.iter().enumerate() {
+        assert_eq!(sequence_of(record), 0x4321 + index as u64);
+        assert_eq!(message_sequence_of(record), 1 + index as u16);
+    }
+    Ok(())
+}
+
+/// The cookie secret changes with time: a cookie is good for at least one lifetime of the
+/// secret and at most two. A client whose cookie has expired gets a new HelloVerifyRequest,
+/// under the message sequence number it expects, and completes with the new cookie (RFC 6347
+/// 4.2.1: a client answers each HelloVerifyRequest with a new ClientHello).
+#[test]
+fn an_expired_cookie_is_answered_with_a_new_hello_verify_request() -> Result<()> {
+    use crate::cookie::COOKIE_SECRET_LIFETIME;
+
+    let start = Instant::now();
+    for (wait, exchanges) in [
+        (COOKIE_SECRET_LIFETIME + Duration::from_secs(1), 1),
+        (2 * COOKIE_SECRET_LIFETIME + Duration::from_secs(1), 2),
+    ] {
+        let mut client = Endpoint::new(client_addr(), TransportProtocol::UDP, None);
+        let mut server = Endpoint::new(
+            server_addr(),
+            TransportProtocol::UDP,
+            Some(server_config()?),
+        );
+        let config = Arc::new(
+            client_builder()
+                .with_handshake_timeout(None)
+                .build(true, None)?,
+        );
+        client.connect(start, server_addr(), config, None)?;
+        let to_server = take_transmits(&mut client);
+        deliver(&mut server, client_addr(), to_server, start);
+        let to_client = take_transmits(&mut server);
+        deliver(&mut client, server_addr(), to_client, start);
+
+        // The ClientHello with the cookie arrives late.
+        let late = start + wait;
+        let second_client_hello = take_transmits(&mut client);
+        deliver(&mut server, client_addr(), second_client_hello, late);
+        let answer = datagrams_as_vecs(&take_transmits(&mut server));
+        let messages = plaintext_handshake_messages(&answer);
+        if exchanges == 1 {
+            assert!(
+                body_of(&messages, SERVER_HELLO).is_some(),
+                "a cookie of the previous secret is still good"
+            );
+        } else {
+            assert!(
+                body_of(&messages, HELLO_VERIFY_REQUEST).is_some(),
+                "a cookie two secrets old is not"
+            );
+            assert!(server.connections.is_empty());
+        }
+
+        let to_client: Vec<BytesMut> = answer
+            .iter()
+            .map(|datagram| BytesMut::from(datagram.as_slice()))
+            .collect();
+        deliver(&mut client, server_addr(), to_client, late);
+        complete_handshake(&mut client, &mut server, late);
+    }
+    Ok(())
+}
+
+/// A ClientHello too large for one datagram is cut into fragments (RFC 6347 4.2.3). What the
+/// cookie covers is in its first fragment, so the exchange stays stateless and the handshake
+/// completes.
+#[test]
+fn a_fragmented_client_hello_completes_the_cookie_exchange() -> Result<()> {
+    let now = Instant::now();
+    let mut client = Endpoint::new(client_addr(), TransportProtocol::UDP, None);
+    let mut server = Endpoint::new(
+        server_addr(),
+        TransportProtocol::UDP,
+        Some(server_config()?),
+    );
+    let config = Arc::new(client_builder().with_mtu(128).build(true, None)?);
+    client.connect(now, server_addr(), config, None)?;
+    let first = take_transmits(&mut client);
+    assert!(first.len() > 1, "the ClientHello is fragmented");
+    let (_, errored) = deliver(&mut server, client_addr(), first, now);
+    assert!(!errored);
+    assert!(server.connections.is_empty());
+    let to_client = take_transmits(&mut server);
+    assert_eq!(
+        to_client.len(),
+        1,
+        "one HelloVerifyRequest, for the first fragment"
+    );
+    deliver(&mut client, server_addr(), to_client, now);
+    complete_handshake(&mut client, &mut server, now);
+    Ok(())
+}
+
+/// RFC 6347 4.2.1: a server can be configured not to perform the cookie exchange. The first
+/// ClientHello then gets the server's flight at once.
+#[test]
+fn a_server_configured_without_the_cookie_exchange_answers_the_first_client_hello() -> Result<()> {
+    let now = Instant::now();
+    let provider = provider();
+    let server_config = Arc::new(
+        ConfigBuilder::default()
+            .with_crypto_provider(provider.clone())
+            .with_cipher_suites(vec![SUITE])
+            .with_certificates(vec![Certificate::generate_self_signed(
+                vec!["localhost".to_owned()],
+                provider.crypto(),
+            )?])
+            .with_cookie_exchange(false)
+            .build(false, None)?,
+    );
+    let mut client = Endpoint::new(client_addr(), TransportProtocol::UDP, None);
+    let mut server = Endpoint::new(server_addr(), TransportProtocol::UDP, Some(server_config));
+    client.connect(now, server_addr(), client_config()?, None)?;
+    let to_server = take_transmits(&mut client);
+    deliver(&mut server, client_addr(), to_server, now);
+    let flight = take_transmits(&mut server);
+    let messages = plaintext_handshake_messages(&datagrams_as_vecs(&flight));
+    assert!(body_of(&messages, HELLO_VERIFY_REQUEST).is_none());
+    assert!(body_of(&messages, SERVER_HELLO).is_some());
+    deliver(&mut client, server_addr(), flight, now);
+    complete_handshake(&mut client, &mut server, now);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------------------------
+// A new association on an address that has one (RFC 6347 4.2.8).
+// ---------------------------------------------------------------------------------------------
+
+/// Whether `data`, written by `from`, arrives at `to` as application data.
+fn arrives(
+    from: &mut Endpoint,
+    to: &mut Endpoint,
+    to_addr: SocketAddr,
+    from_addr: SocketAddr,
+    data: &[u8],
+    now: Instant,
+) -> bool {
+    if from.write(now, to_addr, data).is_err() {
+        return false;
+    }
+    let datagrams = take_transmits(from);
+    let (events, _) = deliver(to, from_addr, datagrams, now);
+    events
+        .iter()
+        .any(|event| matches!(event, EndpointEvent::ApplicationData(got) if got[..] == data[..]))
+}
+
+/// RFC 6347 4.2.8: a client that lost its state starts over from the same address. The server
+/// keeps the existing association, and keeps using it, until the new client has completed a
+/// handshake; then the new association replaces the old one.
+#[test]
+fn a_new_handshake_from_the_same_address_replaces_the_association_once_it_completes() -> Result<()>
+{
+    let now = Instant::now();
+    let (mut old_client, mut server) = connected_pair()?;
+    assert!(arrives(
+        &mut old_client,
+        &mut server,
+        server_addr(),
+        client_addr(),
+        b"before",
+        now
+    ));
+
+    // The restarted client: same address, no memory of the association.
+    let mut new_client = Endpoint::new(client_addr(), TransportProtocol::UDP, None);
+    new_client.connect(now, server_addr(), client_config()?, None)?;
+
+    // Its first ClientHello is answered with a HelloVerifyRequest and changes nothing.
+    let to_server = take_transmits(&mut new_client);
+    let (events, errored) = deliver(&mut server, client_addr(), to_server, now);
+    assert!(events.is_empty() && !errored);
+    assert!(server.pending.is_empty());
+    let hello_verify_request = take_transmits(&mut server);
+    assert_eq!(hello_verify_request.len(), 1);
+    assert!(arrives(
+        &mut old_client,
+        &mut server,
+        server_addr(),
+        client_addr(),
+        b"during 1",
+        now
+    ));
+
+    // The ClientHello with the cookie starts the new handshake beside the old association,
+    // which still carries data both ways.
+    deliver(&mut new_client, server_addr(), hello_verify_request, now);
+    let to_server = take_transmits(&mut new_client);
+    let (events, _) = deliver(&mut server, client_addr(), to_server, now);
+    assert!(events.is_empty());
+    assert_eq!(server.pending.len(), 1);
+    let server_flight = take_transmits(&mut server);
+    assert!(arrives(
+        &mut old_client,
+        &mut server,
+        server_addr(),
+        client_addr(),
+        b"during 2",
+        now
+    ));
+    assert!(arrives(
+        &mut server,
+        &mut old_client,
+        client_addr(),
+        server_addr(),
+        b"during 3",
+        now
+    ));
+
+    // The new client completes: the server reports a completed handshake and the new
+    // association is the one for the address.
+    deliver(&mut new_client, server_addr(), server_flight, now);
+    let to_server = take_transmits(&mut new_client);
+    let (events, _) = deliver(&mut server, client_addr(), to_server, now);
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, EndpointEvent::HandshakeComplete)),
+        "the new handshake completes on the server"
+    );
+    assert!(server.pending.is_empty());
+    let to_client = take_transmits(&mut server);
+    let (events, _) = deliver(&mut new_client, server_addr(), to_client, now);
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, EndpointEvent::HandshakeComplete))
+    );
+
+    assert!(arrives(
+        &mut new_client,
+        &mut server,
+        server_addr(),
+        client_addr(),
+        b"after",
+        now
+    ));
+    assert!(arrives(
+        &mut server,
+        &mut new_client,
+        client_addr(),
+        server_addr(),
+        b"after",
+        now
+    ));
+    // The previous association is abandoned: its records open nothing any more.
+    assert!(!arrives(
+        &mut old_client,
+        &mut server,
+        server_addr(),
+        client_addr(),
+        b"stale",
+        now
+    ));
+    Ok(())
+}
+
+/// RFC 6347 4.2.8: the existing association survives a new handshake that does not complete.
+/// The association in the making goes at its deadline and the established one is as it was.
+#[test]
+fn a_new_handshake_that_does_not_complete_leaves_the_association_in_place() -> Result<()> {
+    let start = Instant::now();
+    let (mut old_client, mut server) = connected_pair()?;
+
+    let mut new_client = Endpoint::new(client_addr(), TransportProtocol::UDP, None);
+    new_client.connect(start, server_addr(), client_config()?, None)?;
+    let to_server = take_transmits(&mut new_client);
+    deliver(&mut server, client_addr(), to_server, start);
+    let to_client = take_transmits(&mut server);
+    deliver(&mut new_client, server_addr(), to_client, start);
+    let to_server = take_transmits(&mut new_client);
+    deliver(&mut server, client_addr(), to_server, start);
+    assert_eq!(server.pending.len(), 1);
+    take_transmits(&mut server);
+
+    // The new client is never heard from again. The server retransmits its flight for the
+    // association in the making until that one's deadline.
+    let mut now = start;
+    while let Some(at) = server.poll_timeout(&client_addr()) {
+        now = at;
+        server.handle_timeout(client_addr(), now)?;
         take_transmits(&mut server);
     }
-    assert!(
-        server.connections.contains_key(&client_addr()),
-        "a verified association is never displaced by unverified ones"
+    assert_eq!(now.duration_since(start), Duration::from_secs(30));
+    assert!(server.pending.is_empty());
+    assert!(!server.is_connection_failed(&client_addr()));
+    assert!(arrives(
+        &mut old_client,
+        &mut server,
+        server_addr(),
+        client_addr(),
+        b"still here",
+        now
+    ));
+    Ok(())
+}
+
+/// A late copy of the ClientHello an association was made from is that association's own
+/// ClientHello, not a client starting over: it starts nothing.
+#[test]
+fn a_repeat_of_the_associations_own_client_hello_starts_no_new_handshake() -> Result<()> {
+    let now = Instant::now();
+    let mut client = Endpoint::new(client_addr(), TransportProtocol::UDP, None);
+    let mut server = Endpoint::new(
+        server_addr(),
+        TransportProtocol::UDP,
+        Some(server_config()?),
     );
-    assert!(server.connections.len() <= MAX_UNVERIFIED_ASSOCIATIONS + 1);
+    client.connect(now, server_addr(), client_config()?, None)?;
+    let to_server = take_transmits(&mut client);
+    deliver(&mut server, client_addr(), to_server, now);
+    let to_client = take_transmits(&mut server);
+    deliver(&mut client, server_addr(), to_client, now);
+    let client_hello_with_cookie = take_transmits(&mut client);
+    deliver(
+        &mut server,
+        client_addr(),
+        client_hello_with_cookie.clone(),
+        now,
+    );
+    complete_handshake(&mut client, &mut server, now);
+
+    let (events, errored) = deliver(&mut server, client_addr(), client_hello_with_cookie, now);
+    assert!(events.is_empty() && !errored);
+    assert!(server.pending.is_empty());
+    assert!(take_transmits(&mut server).is_empty());
+    assert!(arrives(
+        &mut client,
+        &mut server,
+        server_addr(),
+        client_addr(),
+        b"fine",
+        now
+    ));
+    Ok(())
+}
+
+/// A failed server association is replaced when the client starts over with a ClientHello and
+/// echoes the cookie; until then the peer's repeated flight draws the fatal alert again (RFC
+/// 6347 4.2.7) and nothing else.
+#[test]
+fn a_failed_association_is_replaced_by_a_new_handshake() -> Result<()> {
+    let now = Instant::now();
+    let provider = provider();
+    let server_config = Arc::new(
+        ConfigBuilder::default()
+            .with_crypto_provider(provider.clone())
+            .with_cipher_suites(vec![SUITE])
+            .with_certificates(vec![Certificate::generate_self_signed(
+                vec!["localhost".to_owned()],
+                provider.crypto(),
+            )?])
+            .with_client_auth(crate::config::ClientAuthType::RequireAnyClientCert)
+            .build(false, None)?,
+    );
+    let mut server = Endpoint::new(server_addr(), TransportProtocol::UDP, Some(server_config));
+
+    // A client without a certificate: the server fails the association.
+    let mut client = Endpoint::new(client_addr(), TransportProtocol::UDP, None);
+    client.connect(now, server_addr(), client_config()?, None)?;
+    let mut last_flight = vec![];
+    for _ in 0..4 {
+        let to_server = take_transmits(&mut client);
+        if !to_server.is_empty() {
+            last_flight = to_server.clone();
+        }
+        deliver(&mut server, client_addr(), to_server, now);
+        if server.is_connection_failed(&client_addr()) {
+            break;
+        }
+        let to_client = take_transmits(&mut server);
+        deliver(&mut client, server_addr(), to_client, now);
+    }
+    assert!(server.is_connection_failed(&client_addr()));
+    let alert = take_transmits(&mut server);
+    assert_eq!(record_content_types(&alert[0]), vec![ALERT]);
+
+    // The same flight again: the alert again, and no error for the caller.
+    let events = server.read(now, client_addr(), None, last_flight[0].clone())?;
+    assert!(events.is_empty());
+    let again = take_transmits(&mut server);
+    assert_eq!(again.len(), 1);
+    assert_eq!(record_content_types(&again[0]), vec![ALERT]);
+    assert_eq!(
+        again[0][13..],
+        alert[0][13..],
+        "the same alert, in a new record"
+    );
+    assert_ne!(again[0][5..11], alert[0][5..11]);
+
+    // A client with a certificate starts over from the same address.
+    let mut retry = Endpoint::new(client_addr(), TransportProtocol::UDP, None);
+    let config = Arc::new(
+        client_builder()
+            .with_certificates(vec![Certificate::generate_self_signed(
+                vec!["localhost".to_owned()],
+                provider.crypto(),
+            )?])
+            .build(true, None)?,
+    );
+    retry.connect(now, server_addr(), config, None)?;
+    complete_handshake(&mut retry, &mut server, now);
+    assert!(!server.is_connection_failed(&client_addr()));
     Ok(())
 }
 

@@ -70,6 +70,10 @@ pub struct State {
     pub(crate) local_signature_scheme: Option<SignatureHashAlgorithm>,
     /// The association failed and its secrets have been overwritten (RFC 5246 7.2.2).
     pub(crate) secrets_forgotten: bool,
+    /// Server: the cookie of the ClientHello this association was made for has been verified
+    /// by the endpoint, statelessly (RFC 6347 4.2.1), so the association itself keeps no
+    /// cookie and takes that ClientHello as the one to negotiate from.
+    pub(crate) cookie_verified_by_endpoint: bool,
     //pub(crate) replay_detector: Vec<Box<dyn ReplayDetector>>,
 }
 
@@ -133,6 +137,7 @@ impl State {
             remote_offered_point_formats: false,
             local_signature_scheme: None,
             secrets_forgotten: false,
+            cookie_verified_by_endpoint: false,
         }
     }
 }

@@ -120,6 +120,7 @@ pub struct ConfigBuilder {
     flight_interval: Duration,
     maximum_flight_interval: Duration,
     handshake_timeout: Option<Duration>,
+    cookie_exchange: bool,
     psk: Option<PskCallback>,
     psk_identity_hint: Option<Vec<u8>>,
     insecure_skip_verify: bool,
@@ -147,6 +148,7 @@ impl Default for ConfigBuilder {
             flight_interval: Duration::default(),
             maximum_flight_interval: MAXIMUM_RETRANSMIT_INTERVAL,
             handshake_timeout: Some(DEFAULT_HANDSHAKE_TIMEOUT),
+            cookie_exchange: true,
             psk: None,
             psk_identity_hint: None,
             insecure_skip_verify: false,
@@ -246,6 +248,20 @@ impl ConfigBuilder {
     /// RFC 6347 sets no limit; this is the one rule that ends a handshake nobody answers.
     pub fn with_handshake_timeout(mut self, handshake_timeout: Option<Duration>) -> Self {
         self.handshake_timeout = handshake_timeout;
+        self
+    }
+
+    /// Whether a server [`Endpoint`](crate::endpoint::Endpoint) answers a ClientHello that
+    /// carries no valid cookie with a HelloVerifyRequest (RFC 6347 4.2.1). On by default, as
+    /// the RFC asks: until a client echoes the cookie the server keeps no state for it and
+    /// sends it nothing larger than what it received.
+    ///
+    /// Off, the first ClientHello gets an association and the server's whole first flight. That
+    /// saves a round trip where something else has already shown that the client receives at
+    /// its address (ICE connectivity checks do, for WebRTC), and makes the server an
+    /// amplifier and a holder of state for spoofed addresses where nothing has.
+    pub fn with_cookie_exchange(mut self, cookie_exchange: bool) -> Self {
+        self.cookie_exchange = cookie_exchange;
         self
     }
 
@@ -633,6 +649,7 @@ impl ConfigBuilder {
             retransmit_interval,
             maximum_retransmit_interval,
             handshake_timeout: self.handshake_timeout,
+            cookie_exchange: self.cookie_exchange,
             initial_epoch: 0,
             maximum_transmission_unit,
             maximum_retransmit_number,
@@ -694,6 +711,7 @@ pub struct HandshakeConfig {
     pub(crate) retransmit_interval: Duration,
     pub(crate) maximum_retransmit_interval: Duration,
     pub(crate) handshake_timeout: Option<Duration>,
+    pub(crate) cookie_exchange: bool,
     pub(crate) initial_epoch: u16,
     pub(crate) maximum_transmission_unit: usize,
     pub(crate) maximum_retransmit_number: usize,
@@ -755,6 +773,7 @@ impl HandshakeConfig {
             retransmit_interval: std::time::Duration::from_secs(0),
             maximum_retransmit_interval: MAXIMUM_RETRANSMIT_INTERVAL,
             handshake_timeout: None,
+            cookie_exchange: true,
             initial_epoch: 0,
             maximum_transmission_unit: DEFAULT_MTU,
             maximum_retransmit_number: DEFAULT_MAXIMUM_RETRANSMIT_NUMBER,

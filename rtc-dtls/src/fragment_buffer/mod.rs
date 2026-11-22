@@ -56,6 +56,13 @@ impl FragmentBuffer {
         }
     }
 
+    /// Makes `message_sequence` the next message expected: a server association starts at
+    /// the message_seq of the ClientHello whose cookie the endpoint verified, which is 1 after
+    /// one HelloVerifyRequest and more after several (RFC 6347 4.2.2).
+    pub(crate) fn start_at(&mut self, message_sequence: u16) {
+        self.current_message_sequence_number = message_sequence;
+    }
+
     // Attempts to push a DTLS packet to the FragmentBuffer
     // when it returns true it means the FragmentBuffer has inserted and the buffer shouldn't be handled
     // when an error returns it is fatal, and the DTLS connection should be stopped

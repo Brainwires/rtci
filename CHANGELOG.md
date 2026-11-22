@@ -107,8 +107,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **dtls**: `CipherSuite::record_expansion` reports what a suite adds to a record's payload, so an
   application can size its datagrams (RFC 6347 section 4.1.1.1).
 
+### Cookie exchange and new associations
+
+- **dtls**: a server `Endpoint` performs the cookie exchange without keeping state (RFC 6347
+  section 4.2.1). The cookie is an HMAC-SHA-256, under a secret that changes every 60 seconds
+  (the previous one still verifies), over the client's address and the ClientHello's version,
+  random, session id, cipher suites and compression methods. A ClientHello without a valid
+  cookie is answered with a HelloVerifyRequest and forgotten; an association is made only when
+  the cookie comes back. It used to make an association per source address at the first
+  ClientHello (at most 256 unverified ones), whose replacement left a genuine client's second
+  ClientHello unanswerable. The HelloVerifyRequest record carries the ClientHello's record
+  sequence number and message_seq, and the first ServerHello record that of the ClientHello with
+  the cookie. `ConfigBuilder::with_cookie_exchange(false)` switches the exchange off (section
+  4.2.1 allows it; ICE has already shown the client reachable in WebRTC).
+- **dtls**: a new association on an address that has one (RFC 6347 section 4.2.8). A ClientHello
+  that echoes a cookie, on an address with an established association, starts a new handshake
+  beside it. The established association stays in use until the new handshake completes, and is
+  then replaced: `EndpointEvent::HandshakeComplete` is reported again. A new handshake that fails
+  or times out changes nothing. A failed server association is replaced the same way.
+
 ### Breaking changes
 
+- **dtls**: a server `Endpoint` makes no association for a datagram that is not a ClientHello
+  with a valid cookie (such a datagram from an unknown address is dropped), and reports
+  `HandshakeComplete` a second time for an address when its client completes a new handshake
+  (RFC 6347 section 4.2.8). A datagram for a failed server association returns `Ok` (it was fed
+  to a fresh association). New: `ConfigBuilder::with_cookie_exchange`.
 - **dtls**: a handshake nobody answers fails after 30 seconds with `ErrHandshakeTimeout`, where
   it failed after 8 seconds with `ErrInvalidFsmTransition`; its retransmissions are 1, 3, 7 and
   15 seconds in instead of every second.

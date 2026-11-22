@@ -23,7 +23,7 @@ use crate::signature_hash_algorithm::{
 // Harness
 // ---------------------------------------------------------------------------------------------
 
-const ECDSA_GCM: u16 = 0xc02b;
+pub(crate) const ECDSA_GCM: u16 = 0xc02b;
 const SCSV: u16 = 0x00ff;
 
 const EXT_SUPPORTED_GROUPS: u16 = 10;
@@ -39,22 +39,22 @@ const ALERT_HANDSHAKE_FAILURE: u8 = 40;
 const ALERT_ILLEGAL_PARAMETER: u8 = 47;
 const ALERT_DECRYPT_ERROR: u8 = 51;
 
-pub(super) fn provider() -> Arc<dyn crypto::RTCCryptoProvider> {
+pub(crate) fn provider() -> Arc<dyn crypto::RTCCryptoProvider> {
     crypto::default_provider().expect("a built-in crypto provider is enabled for tests")
 }
 
-pub(super) fn self_signed() -> Certificate {
+pub(crate) fn self_signed() -> Certificate {
     Certificate::generate_self_signed(vec!["localhost".to_owned()], provider().crypto())
         .expect("a self-signed certificate is generated")
 }
 
-pub(super) fn builder() -> ConfigBuilder {
+pub(crate) fn builder() -> ConfigBuilder {
     ConfigBuilder::default()
         .with_crypto_provider(provider())
         .with_cipher_suites(vec![CipherSuiteId::Tls_Ecdhe_Ecdsa_With_Aes_128_Gcm_Sha256])
 }
 
-pub(super) fn client(builder: ConfigBuilder) -> DTLSConn {
+pub(crate) fn client(builder: ConfigBuilder) -> DTLSConn {
     let config = builder
         .with_insecure_skip_verify(true)
         .build(true, None)
@@ -62,7 +62,7 @@ pub(super) fn client(builder: ConfigBuilder) -> DTLSConn {
     DTLSConn::new(Arc::new(config), true, None)
 }
 
-pub(super) fn server(builder: ConfigBuilder) -> DTLSConn {
+pub(crate) fn server(builder: ConfigBuilder) -> DTLSConn {
     let config = builder
         .with_certificates(vec![self_signed()])
         .build(false, None)
@@ -71,7 +71,7 @@ pub(super) fn server(builder: ConfigBuilder) -> DTLSConn {
 }
 
 /// One received datagram, handled as `Endpoint::read` handles it.
-pub(super) fn feed(conn: &mut DTLSConn, now: Instant, datagram: &[u8]) -> Result<()> {
+pub(crate) fn feed(conn: &mut DTLSConn, now: Instant, datagram: &[u8]) -> Result<()> {
     conn.read(datagram)?;
     if !conn.is_handshake_completed() {
         conn.handshake(now)?;
@@ -82,7 +82,7 @@ pub(super) fn feed(conn: &mut DTLSConn, now: Instant, datagram: &[u8]) -> Result
     Ok(())
 }
 
-pub(super) fn drain(conn: &mut DTLSConn) -> Vec<Vec<u8>> {
+pub(crate) fn drain(conn: &mut DTLSConn) -> Vec<Vec<u8>> {
     let mut datagrams = vec![];
     while let Some(datagram) = conn.outgoing_raw_packet() {
         datagrams.push(datagram.to_vec());
@@ -91,23 +91,23 @@ pub(super) fn drain(conn: &mut DTLSConn) -> Vec<Vec<u8>> {
 }
 
 /// A client and a server driven against each other, with everything each sent.
-pub(super) struct Exchange {
-    pub(super) client: DTLSConn,
-    pub(super) server: DTLSConn,
-    pub(super) client_err: Option<Error>,
-    pub(super) server_err: Option<Error>,
-    pub(super) from_client: Vec<Vec<u8>>,
-    pub(super) from_server: Vec<Vec<u8>>,
+pub(crate) struct Exchange {
+    pub(crate) client: DTLSConn,
+    pub(crate) server: DTLSConn,
+    pub(crate) client_err: Option<Error>,
+    pub(crate) server_err: Option<Error>,
+    pub(crate) from_client: Vec<Vec<u8>>,
+    pub(crate) from_server: Vec<Vec<u8>>,
 }
 
 impl Exchange {
-    pub(super) fn run(client: DTLSConn, server: DTLSConn) -> Self {
+    pub(crate) fn run(client: DTLSConn, server: DTLSConn) -> Self {
         Self::run_altering(client, server, |_| {}, |_| {})
     }
 
     /// As [`Self::run`], with every datagram passed through `to_server` or `to_client` on its
     /// way: what someone on the path can do to the unprotected part of a handshake.
-    pub(super) fn run_altering(
+    pub(crate) fn run_altering(
         mut client: DTLSConn,
         mut server: DTLSConn,
         mut to_server: impl FnMut(&mut Vec<u8>),
@@ -156,7 +156,7 @@ impl Exchange {
         }
     }
 
-    pub(super) fn completed(&self) -> bool {
+    pub(crate) fn completed(&self) -> bool {
         self.client_err.is_none()
             && self.server_err.is_none()
             && self.client.is_handshake_completed()
@@ -165,7 +165,7 @@ impl Exchange {
 }
 
 /// The (level, description) of every plaintext alert record in `datagrams`.
-pub(super) fn plaintext_alerts(datagrams: &[Vec<u8>]) -> Vec<(u8, u8)> {
+pub(crate) fn plaintext_alerts(datagrams: &[Vec<u8>]) -> Vec<(u8, u8)> {
     let mut alerts = vec![];
     for datagram in datagrams {
         for record in unpack_datagram(datagram).expect("a datagram splits into records") {
@@ -179,7 +179,7 @@ pub(super) fn plaintext_alerts(datagrams: &[Vec<u8>]) -> Vec<(u8, u8)> {
 }
 
 /// The (type, body) of every unfragmented plaintext handshake message in `datagrams`.
-pub(super) fn plaintext_handshake_messages(datagrams: &[Vec<u8>]) -> Vec<(u8, Vec<u8>)> {
+pub(crate) fn plaintext_handshake_messages(datagrams: &[Vec<u8>]) -> Vec<(u8, Vec<u8>)> {
     let mut messages = vec![];
     for datagram in datagrams {
         for record in unpack_datagram(datagram).expect("a datagram splits into records") {
@@ -203,7 +203,7 @@ pub(super) fn plaintext_handshake_messages(datagrams: &[Vec<u8>]) -> Vec<(u8, Ve
 
 /// Where the body of the first unfragmented plaintext handshake message of `handshake_type`
 /// lies in `datagram`.
-pub(super) fn handshake_body_range(
+pub(crate) fn handshake_body_range(
     datagram: &[u8],
     handshake_type: u8,
 ) -> Option<std::ops::Range<usize>> {
@@ -220,16 +220,16 @@ pub(super) fn handshake_body_range(
     None
 }
 
-pub(super) fn body_of(messages: &[(u8, Vec<u8>)], handshake_type: u8) -> Option<Vec<u8>> {
+pub(crate) fn body_of(messages: &[(u8, Vec<u8>)], handshake_type: u8) -> Option<Vec<u8>> {
     messages
         .iter()
         .find(|(typ, _)| *typ == handshake_type)
         .map(|(_, body)| body.clone())
 }
 
-const CLIENT_HELLO: u8 = 1;
-const SERVER_HELLO: u8 = 2;
-const HELLO_VERIFY_REQUEST: u8 = 3;
+pub(crate) const CLIENT_HELLO: u8 = 1;
+pub(crate) const SERVER_HELLO: u8 = 2;
+pub(crate) const HELLO_VERIFY_REQUEST: u8 = 3;
 const CERTIFICATE: u8 = 11;
 const SERVER_KEY_EXCHANGE: u8 = 12;
 const SERVER_HELLO_DONE: u8 = 14;
@@ -282,7 +282,7 @@ fn use_srtp(profiles: &[u16], mki: &[u8]) -> Vec<u8> {
 }
 
 /// The extensions an ordinary ECDHE client sends, less the optional ones.
-fn usual_client_extensions() -> Vec<u8> {
+pub(crate) fn usual_client_extensions() -> Vec<u8> {
     [
         signature_algorithms(&[ECDSA_SHA256]),
         supported_groups(&[0x001d, 0x0017]),
@@ -292,7 +292,7 @@ fn usual_client_extensions() -> Vec<u8> {
 }
 
 /// A ClientHello body. `extensions: None` ends the message after the compression methods.
-fn client_hello_body(
+pub(crate) fn client_hello_body(
     session_id: &[u8],
     cookie: &[u8],
     cipher_suites: &[u16],
@@ -331,7 +331,7 @@ fn server_hello_body(cipher_suite: u16, compression: u8, extensions: Option<&[u8
 }
 
 /// A handshake message with its 12-byte header, unfragmented.
-pub(super) fn handshake_message(handshake_type: u8, message_sequence: u16, body: &[u8]) -> Vec<u8> {
+pub(crate) fn handshake_message(handshake_type: u8, message_sequence: u16, body: &[u8]) -> Vec<u8> {
     let length = (body.len() as u32).to_be_bytes();
     let mut out = vec![handshake_type];
     out.extend_from_slice(&length[1..]);
@@ -343,7 +343,7 @@ pub(super) fn handshake_message(handshake_type: u8, message_sequence: u16, body:
 }
 
 /// A plaintext (epoch 0) record around `payload`.
-pub(super) fn plaintext_record(content_type: u8, sequence_number: u64, payload: &[u8]) -> Vec<u8> {
+pub(crate) fn plaintext_record(content_type: u8, sequence_number: u64, payload: &[u8]) -> Vec<u8> {
     let mut out = vec![content_type, 0xfe, 0xfd, 0, 0];
     out.extend_from_slice(&sequence_number.to_be_bytes()[2..]);
     out.extend_from_slice(&(payload.len() as u16).to_be_bytes());
@@ -351,7 +351,7 @@ pub(super) fn plaintext_record(content_type: u8, sequence_number: u64, payload: 
     out
 }
 
-fn client_hello_datagram(message_sequence: u16, body: &[u8]) -> Vec<u8> {
+pub(crate) fn client_hello_datagram(message_sequence: u16, body: &[u8]) -> Vec<u8> {
     plaintext_record(
         22,
         message_sequence as u64,
@@ -389,7 +389,7 @@ impl ServerAnswer {
 }
 
 /// The extensions that start at `offset` of a hello body (none when the body ends there).
-fn extensions_after(body: &[u8], offset: usize) -> Vec<(u16, Vec<u8>)> {
+pub(crate) fn extensions_after(body: &[u8], offset: usize) -> Vec<(u16, Vec<u8>)> {
     let mut extensions = vec![];
     if body.len() == offset {
         return extensions;
@@ -406,7 +406,7 @@ fn extensions_after(body: &[u8], offset: usize) -> Vec<(u16, Vec<u8>)> {
     extensions
 }
 
-fn extension_types_after(body: &[u8], offset: usize) -> Vec<u16> {
+pub(crate) fn extension_types_after(body: &[u8], offset: usize) -> Vec<u16> {
     extensions_after(body, offset)
         .into_iter()
         .map(|(typ, _)| typ)

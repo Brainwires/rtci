@@ -30,6 +30,15 @@ impl Default for HandshakeRandom {
 }
 
 impl HandshakeRandom {
+    /// The 32 bytes this random is on the wire.
+    pub(crate) fn marshal_fixed(&self) -> [u8; HANDSHAKE_RANDOM_LENGTH] {
+        let mut out = [0u8; HANDSHAKE_RANDOM_LENGTH];
+        let mut writer = &mut out[..];
+        // Writing 32 bytes into a 32-byte slice cannot fail.
+        let _ = self.marshal(&mut writer);
+        out
+    }
+
     /// The encoded size of this message in bytes.
     pub fn size(&self) -> usize {
         4 + RANDOM_BYTES_LENGTH
