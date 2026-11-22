@@ -131,7 +131,11 @@ impl Kalman {
         // Clamped from below: with no floor, a run of identical samples drives the variance to
         // zero and the filter starts believing each new sample absolutely. Section 5.3's outlier
         // filter: a residual beyond three deviations enters the variance as three deviations.
-        let limit = 3.0 * self.measurement_variance.max(self.min_measurement_variance).sqrt();
+        let limit = 3.0
+            * self
+                .measurement_variance
+                .max(self.min_measurement_variance)
+                .sqrt();
         let counted = residual.clamp(-limit, limit);
         self.measurement_variance = ((1.0 - noise_gain) * self.measurement_variance
             + noise_gain * counted * counted)
@@ -266,7 +270,10 @@ mod tests {
             "{}",
             with_outlier.measurement_variance
         );
-        assert_eq!(with_outlier.measurement_variance, with_three.measurement_variance);
+        assert_eq!(
+            with_outlier.measurement_variance,
+            with_three.measurement_variance
+        );
     }
 
     /// Section 5.3: alpha follows the highest group rate. Groups 5 ms apart weigh each sample

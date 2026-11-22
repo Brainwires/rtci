@@ -237,10 +237,8 @@ mod tests {
         let epoch = Instant::now();
         let mut detector = OveruseDetector::new();
         for step in 0..10u64 {
-            let usage = detector.update(
-                epoch + Duration::from_millis(step * 20),
-                40.0 - step as f64,
-            );
+            let usage =
+                detector.update(epoch + Duration::from_millis(step * 20), 40.0 - step as f64);
             assert_eq!(Usage::Normal, usage, "at step {step}");
         }
     }

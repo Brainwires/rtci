@@ -115,7 +115,9 @@ impl ArrivalGroupAccumulator {
         // negative inter-group delay variation (it caught up: the path delivered a backlog at
         // once, after an outage) is part of the current group.
         let arrival_delta = arrival.saturating_sub(current.arrival);
-        let departure_delta = report.departure.saturating_duration_since(current.departure);
+        let departure_delta = report
+            .departure
+            .saturating_duration_since(current.departure);
         if arrival_delta < self.burst_interval && arrival_delta < departure_delta {
             current.departure = current.departure.max(report.departure);
             current.arrival = current.arrival.max(arrival);
