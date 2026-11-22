@@ -109,10 +109,29 @@ fn buffered_amount_follows_the_queue_and_close_is_once() -> Result<()> {
 }
 
 /// W3C `send()`: "If [[BufferedAmount]] increased by the byte size of data is above
-/// [[MaxBufferSize]], throw an OperationError"; [[MaxBufferSize]] is the larger of the two
-/// sides' max-message-size. A fixed limit replaces it when the application sets one.
+/// [[MaxBufferSize]], throw an OperationError"; [[MaxBufferSize]] is the larger of the peer's
+/// max-message-size and canSendSize, "the size of the local send buffer" (6.1.1.2), which the
+/// spec leaves to the implementation: 16 MiB here, as in Chromium. Between two default peers a
+/// bulk sender queues far more than one max-message-size (64 KiB) before it is refused. A
+/// fixed limit replaces the rule when the application sets one.
 #[test]
 fn send_refuses_data_above_the_max_buffer_size() -> Result<()> {
+    const SEND_BUFFER: usize = 16 * 1024 * 1024;
+    fn fill(
+        channel: &mut rtc::data_channel::RTCDataChannel<'_>,
+        now: std::time::Instant,
+        size: usize,
+    ) -> (usize, Error) {
+        let mut queued = 0usize;
+        loop {
+            match channel.send(now, BytesMut::from(&vec![1u8; size][..])) {
+                Ok(()) => queued += size,
+                Err(err) => break (queued, err),
+            }
+            assert!(queued <= 2 * SEND_BUFFER, "never refused");
+        }
+    }
+
     let (mut pair, first) = Pair::connected(RTCDtlsRole::Client, "first")?;
     let now = pair.now;
     let max_message = pair
@@ -122,35 +141,31 @@ fn send_refuses_data_above_the_max_buffer_size() -> Result<()> {
         .and_then(|s| s.max_message_size())
         .expect("negotiated") as usize;
     let mut channel = pair.offerer.pc.data_channel(first).expect("open");
-    // 256 KiB: the larger of the two max-message-size values (both sides' default).
-    let mut queued = 0usize;
-    let refused = loop {
-        match channel.send(now, BytesMut::from(&vec![1u8; max_message][..])) {
-            Ok(()) => queued += max_message,
-            Err(err) => break err,
-        }
-        assert!(queued <= 1 << 20, "never refused");
-    };
+    let (queued, refused) = fill(&mut channel, now, max_message);
     assert!(
         matches!(refused, Error::ErrDataChannelBufferFull),
         "{refused:?}"
     );
-    assert!(channel.buffered_amount() <= 256 * 1024);
+    assert!(
+        queued > SEND_BUFFER - max_message && queued <= SEND_BUFFER,
+        "refused at {queued} bytes, not at the 16 MiB send buffer"
+    );
+    assert!(channel.buffered_amount() as usize <= SEND_BUFFER);
 
     let mut pair = Pair::with_setting_engines(
         "127.0.0.1:52020",
-        engine(RTCDtlsRole::Client).with_data_channel_max_buffer_size(Some(1 << 22)),
+        engine(RTCDtlsRole::Client).with_data_channel_max_buffer_size(Some(1 << 18)),
         "127.0.0.1:52021",
         engine(RTCDtlsRole::Server),
     )?;
-    let id = pair.offerer.pc.create_data_channel("big", None)?.id();
+    let id = pair.offerer.pc.create_data_channel("small", None)?.id();
     pair.negotiate()?;
     assert!(pair.run_until(|p| p.offerer.opened().contains(&id))?);
     let now = pair.now;
     let mut channel = pair.offerer.pc.data_channel(id).expect("open");
-    for _ in 0..8 {
-        channel.send(now, BytesMut::from(&vec![1u8; max_message][..]))?;
-    }
+    let (queued, refused) = fill(&mut channel, now, max_message);
+    assert!(matches!(refused, Error::ErrDataChannelBufferFull));
+    assert!(queued <= 1 << 18 && queued > (1 << 18) - max_message);
     Ok(())
 }
 

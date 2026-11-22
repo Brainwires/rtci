@@ -27,6 +27,13 @@ pub(crate) const MAX_SCTP_ASSOCIATIONS_PER_DTLS_TRANSPORT: u32 = 1;
 /// user messages, "16 KB".
 pub(crate) const MAX_MESSAGE_SIZE_WITHOUT_INTERLEAVING: u32 = 16 * 1024;
 
+/// The size of this side's send buffer per data channel: the `canSendSize` that W3C
+/// webrtc-pc 6.1.1.2 ("the size of the local send buffer") makes the floor of
+/// `[[MaxBufferSize]]`. The spec leaves the size to the implementation; 16 MiB is Chromium's,
+/// so an application that keeps `bufferedAmount` under it by back-pressure
+/// (`bufferedAmountLowThreshold`) behaves the same against both.
+pub(crate) const DEFAULT_SEND_BUFFER_SIZE: u32 = 16 * 1024 * 1024;
+
 /// The SCTP port this side advertises (`a=sctp-port`) for its first association: the value
 /// every browser uses.
 pub(crate) const DEFAULT_SCTP_PORT: u16 = 5000;
@@ -133,8 +140,8 @@ pub(crate) struct SctpTransport {
     // above with the peer's `max-message-size` SDP attribute, computed once in `start()`.
     // `None` before the association has been negotiated.
     pub(crate) negotiated_max_message_size: Option<u32>,
-    /// W3C `[[MaxBufferSize]]`: the larger of the peer's `max-message-size` and what this side
-    /// can send, once negotiated (webrtc-pc 6.1.1.2).
+    /// W3C `[[MaxBufferSize]]`: the larger of the peer's `max-message-size` and this side's
+    /// send buffer (`DEFAULT_SEND_BUFFER_SIZE`), once negotiated (webrtc-pc 6.1.1.2).
     pub(crate) negotiated_max_buffer_size: Option<u32>,
     /// A fixed send buffer limit that replaces `[[MaxBufferSize]]`, when the application set
     /// one (`SettingEngineBuilder::with_data_channel_max_buffer_size`).
@@ -617,9 +624,17 @@ impl SctpTransport {
         // the buffer and the transport config, and then discarded, which left nothing for
         // `maxMessageSize` to report.
         self.negotiated_max_message_size = Some(max_message_size);
-        // W3C 6.1.1.2: [[MaxBufferSize]] is the larger of the two (the remote's 0, "any size",
-        // leaves this side's, which is never 0 here).
-        self.negotiated_max_buffer_size = Some(remote_caps.max_message_size.max(can_send_size));
+        // W3C 6.1.1.2: [[MaxBufferSize]] is the larger of the remote's max-message-size and
+        // canSendSize, "the size of the local send buffer" (the remote's 0, "any size", leaves
+        // this side's, which is never 0 here). The send buffer is not the message-size ceiling
+        // above: messages are bounded by the working buffer, the queue of them by
+        // `DEFAULT_SEND_BUFFER_SIZE`.
+        self.negotiated_max_buffer_size = Some(
+            remote_caps
+                .max_message_size
+                .max(can_send_size)
+                .max(DEFAULT_SEND_BUFFER_SIZE),
+        );
 
         // RFC 8841 6.1: each side's `max-message-size` limits what the *other* side sends. So
         // what this side accepts is what it advertised (`can_send_size`, which is what
