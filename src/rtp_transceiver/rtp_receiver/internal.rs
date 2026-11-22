@@ -77,6 +77,9 @@ pub(crate) struct RTCRtpReceiverInternal {
     /// What the public `getParameters` returns while the negotiated direction does not
     /// receive: the parameters without codecs (W3C [[ReceiveCodecs]] is empty then).
     not_receiving_parameters: Option<RTCRtpReceiveParameters>,
+    /// The last absolute capture time each synchronization source sent (webrtc-extensions
+    /// 8), what packets without one are interpolated from.
+    capture_references: Vec<CaptureReference>,
 
     /// The track id the remote description's `a=msid` gives the track (its appdata), which
     /// identifies the remote sender's track across descriptions. Not the id of this
@@ -106,6 +109,7 @@ impl RTCRtpReceiverInternal {
             rtcp_reduced_size: false,
             last_returned_parameters: None,
             not_receiving_parameters: None,
+            capture_references: vec![],
             remote_track_id: String::new(),
             remote_streams: vec![],
             last_stable_remote_streams: vec![],
@@ -294,6 +298,7 @@ impl RTCRtpReceiverInternal {
     /// `audio_level` is the packet's RFC 6464 level (-dBov) when its header carries one, and
     /// `csrc_levels` its RFC 6465 levels, one per CSRC in the order of the CSRC list (a list
     /// of another length is not attributed); a source without a level reports none.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn record_sources(
         &mut self,
         now: Instant,
@@ -301,6 +306,8 @@ impl RTCRtpReceiverInternal {
         header: &rtp::Header,
         audio_level: Option<u8>,
         csrc_levels: Option<&[u8]>,
+        capture: Option<rtp::extension::abs_capture_time_extension::AbsCaptureTimeExtension>,
+        clock_rate: Option<u32>,
     ) {
         let timestamp = wall_clock.unix(now);
         let live = |source: &RTCRtpContributingSource| {
@@ -311,12 +318,18 @@ impl RTCRtpReceiverInternal {
             source,
             audio_level,
             rtp_timestamp: header.timestamp,
+            capture_timestamp: None,
+            sender_capture_time_offset: None,
         };
+        let (capture_timestamp, sender_capture_time_offset) =
+            self.capture_time_of(header, capture, clock_rate);
 
         self.synchronization_sources
             .retain(|source| source.source != header.ssrc && live(source));
-        self.synchronization_sources
-            .push(entry(header.ssrc, audio_level.map(linear_audio_level)));
+        let mut synchronization = entry(header.ssrc, audio_level.map(linear_audio_level));
+        synchronization.capture_timestamp = capture_timestamp;
+        synchronization.sender_capture_time_offset = sender_capture_time_offset;
+        self.synchronization_sources.push(synchronization);
         let csrc_levels = csrc_levels.filter(|levels| levels.len() == header.csrc.len());
 
         self.contributing_sources
@@ -335,6 +348,55 @@ impl RTCRtpReceiverInternal {
             let excess = self.contributing_sources.len() - MAX_CONTRIBUTING_SOURCES;
             self.contributing_sources.drain(..excess);
         }
+    }
+
+    /// webrtc-extensions 8: the capture time and the sender's clock offset of a packet of
+    /// `header.ssrc`, in milliseconds. From the packet's `abs-capture-time` when it has one
+    /// (remembered with its RTP timestamp); otherwise interpolated from the last one the
+    /// source sent, by the RTP timestamp difference at `clock_rate`, and the last offset.
+    fn capture_time_of(
+        &mut self,
+        header: &rtp::Header,
+        capture: Option<rtp::extension::abs_capture_time_extension::AbsCaptureTimeExtension>,
+        clock_rate: Option<u32>,
+    ) -> (Option<f64>, Option<f64>) {
+        // 32.32 fixed point seconds to milliseconds.
+        let ms_of = |fixed: f64| fixed / 4_294_967_296.0 * 1000.0;
+        let known = self
+            .capture_references
+            .iter()
+            .position(|r| r.ssrc == header.ssrc);
+        if let Some(capture) = capture {
+            let offset = capture
+                .estimated_capture_clock_offset
+                .map(|o| ms_of(o as f64))
+                .or_else(|| known.and_then(|i| self.capture_references[i].offset_ms));
+            let reference = CaptureReference {
+                ssrc: header.ssrc,
+                capture_ms: ms_of(capture.timestamp as f64),
+                rtp_timestamp: header.timestamp,
+                offset_ms: offset,
+            };
+            let capture_ms = reference.capture_ms;
+            match known {
+                Some(i) => self.capture_references[i] = reference,
+                None => {
+                    if self.capture_references.len() >= MAX_CONTRIBUTING_SOURCES {
+                        self.capture_references.remove(0);
+                    }
+                    self.capture_references.push(reference);
+                }
+            }
+            return (Some(capture_ms), offset);
+        }
+        let Some(reference) = known.map(|i| &self.capture_references[i]) else {
+            return (None, None);
+        };
+        let interpolated = clock_rate.filter(|rate| *rate > 0).map(|rate| {
+            let elapsed = header.timestamp.wrapping_sub(reference.rtp_timestamp) as i32;
+            reference.capture_ms + f64::from(elapsed) * 1000.0 / f64::from(rate)
+        });
+        (interpolated, reference.offset_ms)
     }
 
     /// A source said BYE (RFC 3550 6.6): it is no longer a source of this receiver.
@@ -1002,4 +1064,14 @@ mod repair_association_test {
         assert_eq!(None, media.ssrc_rtx);
         assert_eq!(None, media.payload_type_rtx);
     }
+}
+
+/// A synchronization source's last `abs-capture-time`: the capture time and the offset in
+/// milliseconds, with the RTP timestamp of its packet.
+#[derive(Debug, Clone, Copy)]
+struct CaptureReference {
+    ssrc: u32,
+    capture_ms: f64,
+    rtp_timestamp: u32,
+    offset_ms: Option<f64>,
 }

@@ -43,6 +43,13 @@ impl Peer {
         let mut media_engine = MediaEngine::default();
         media_engine.register_default_codecs()?;
         let registry = register_default_interceptors(Registry::new(), &mut media_engine)?;
+        media_engine.register_header_extension(
+            rtc::rtp_transceiver::rtp_sender::RTCRtpHeaderExtensionCapability {
+                uri: rtc::rtp::extension::ABS_CAPTURE_TIME_URI.to_owned(),
+            },
+            RtpCodecKind::Video,
+            None,
+        )?;
         let pc = RTCPeerConnectionBuilder::new()
             .with_configuration(RTCConfigurationBuilder::new().build())
             .with_media_engine(media_engine)
@@ -348,6 +355,81 @@ fn an_extension_negotiated_encrypted_is_encrypted_on_the_wire() -> Result<()> {
         vec![Some(0x2A); 8],
         received,
         "and decrypted for the receiver"
+    );
+    Ok(())
+}
+
+/// webrtc-extensions 8: a sender stamps a packet's absolute capture time
+/// (`write_rtp_with_capture_time`, the `abs-capture-time` extension); the receiver's
+/// synchronization source reports it as `captureTimestamp` with the offset as
+/// `senderCaptureTimeOffset`, and a later packet without the extension reports a capture time
+/// interpolated by its RTP timestamp, with the last offset.
+#[test]
+fn the_absolute_capture_time_reaches_the_receivers_synchronization_source() -> Result<()> {
+    let (mut world, sender) = World::connected(RtpCodecKind::Video, |sdp| sdp)?;
+    let (ssrc, pt) = {
+        let mut sender = world.peers[0].pc.rtp_sender(sender).expect("sender");
+        let parameters = sender.get_parameters();
+        (
+            parameters.encodings[0]
+                .rtp_coding_parameters
+                .ssrc
+                .expect("an SSRC"),
+            parameters.rtp_parameters.codecs[0].payload_type,
+        )
+    };
+    let packet = |seq: u16, timestamp: u32| rtc::rtp::Packet {
+        header: Header {
+            version: 2,
+            payload_type: pt,
+            sequence_number: seq,
+            timestamp,
+            ssrc,
+            marker: true,
+            ..Default::default()
+        },
+        payload: Bytes::from(vec![0x10u8; 100]),
+    };
+    // 1000 s and a quarter on the capturer's NTP clock; the sender's clock half a second
+    // ahead of it.
+    let capture_ntp: u64 = (1000u64 << 32) | (1u64 << 30);
+    let offset: i64 = 1 << 31;
+    let capture_ms = 1_000_250.0;
+    let source = |world: &mut World| {
+        let receiver = world.peers[1]
+            .pc
+            .get_receivers()
+            .next()
+            .expect("a receiver");
+        let receiver = world.peers[1].pc.rtp_receiver(receiver).expect("receiver");
+        receiver
+            .get_synchronization_sources()
+            .find(|s| s.source == ssrc)
+            .map(|s| (s.capture_timestamp, s.sender_capture_time_offset))
+    };
+
+    let now = world.now;
+    world.peers[0]
+        .pc
+        .rtp_sender(sender)
+        .expect("sender")
+        .write_rtp_with_capture_time(now, packet(1, 90_000), capture_ntp, Some(offset))?;
+    world.pump()?;
+    world.run_until(now + Duration::from_millis(20))?;
+    assert_eq!(source(&mut world), Some((Some(capture_ms), Some(500.0))));
+
+    // 100 ms later at 90 kHz, without the extension.
+    let now = world.now;
+    world.peers[0]
+        .pc
+        .rtp_sender(sender)
+        .expect("sender")
+        .write_rtp(now, packet(2, 99_000))?;
+    world.pump()?;
+    world.run_until(now + Duration::from_millis(20))?;
+    assert_eq!(
+        source(&mut world),
+        Some((Some(capture_ms + 100.0), Some(500.0)))
     );
     Ok(())
 }
