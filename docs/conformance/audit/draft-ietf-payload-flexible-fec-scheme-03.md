@@ -11,7 +11,7 @@ by default, and `video/flexfec-03` is not in `register_default_codecs`.
 
 Totals:
 
-- MUST: tested 19 / untested 8 / partial 1 / missing 3 / violated 6 / n-a 2 (total 39)
+- MUST: tested 20 / untested 8 / partial 0 / missing 3 / violated 6 / n-a 2 (total 39)
 - SHOULD: tested 1 / untested 0 / partial 1 / missing 5 / violated 0 / n-a 3 (total 10)
 - MAY: tested 0 / untested 1 / partial 0 / missing 6 / violated 0 / n-a 0 (total 7)
 
@@ -20,7 +20,7 @@ Paths are relative to the repo root; `fec/` abbreviates `rtc-interceptor/src/fle
 
 | ID | § | Level | Clause (short paraphrase) | Verdict | Code | Test | Note |
 |---|---|---|---|---|---|---|---|
-| FLEXFEC03-4.1-1 | 4.1 | MUST | Source packets are sent unmodified; the FEC covers the packets as they are on the wire | partial | `fec/draft03/sender.rs:136-170` | `it/flexfec_send.rs::media_precedes_the_repair_packets_that_protect_it` | The interceptor does not alter media, but it encodes at `Slot::FecEncoder` (5000), before `TwccSenderInterceptor` (2000) adds or rewrites the transport-cc header extension (`twcc/sender.rs:112-126`). The protected image is then not the wire image. See Bug 1 |
+| FLEXFEC03-4.1-1 | 4.1 | MUST | Source packets are sent unmodified; the FEC covers the packets as they are on the wire | tested | `rtc-interceptor/src/wire_image.rs` (`WireImageTap` at `Slot::FecWireImage`, below the TWCC sender), `fec/draft03/sender.rs` (`wire_tap`, `protect_wire_images`) | `it/fec_with_transport_cc.rs::a_lost_packet_is_recovered_as_it_was_sent_when_the_twcc_sender_rewrites_it`, `it/flexfec_send.rs::media_precedes_the_repair_packets_that_protect_it` | The encoder stays a generator at `Slot::FecEncoder` and reads the media packets from a tap below everything that edits them, so it protects the wire image; its repair packets still pass the pacer, the TWCC sender and the send history. Bugs 1, 4 and 5 below are fixed: the arrival recorders now run before the FEC decoder (`Slot::FecDecoder` 10_300), tests `a_repair_packet_is_reported_as_received_by_the_twcc_receiver`, `a_packet_recovered_by_fec_is_not_reported_as_arrived`. An application that registers the encoder without the tap keeps the old behaviour |
 | FLEXFEC03-4.2-1 | 4.2 | MUST | Repair packet carries a FEC header identifying the source block and the packets protected | tested | `fec/draft03/encoder.rs:222-241` | `encoder.rs::the_header_names_the_stream_and_block_it_protects` | |
 | FLEXFEC03-4.2-2 | 4.2 | MUST | Marker bit of a repair packet SHALL be 0 | untested | `fec/draft03/encoder.rs:249-262` (`..Default::default()`) | none | No test reads `header.marker` of a repair packet |
 | FLEXFEC03-4.2-3 | 4.2 | MUST | Repair packets use a dynamic payload type determined out of band | tested | `fec/draft03/sender.rs:193-205`, `src/rtp_transceiver/rtp_sender/rtp_codec.rs:347-352` | `encoder.rs::repair_packets_form_their_own_stream`, `tests/repair_codec_negotiation.rs::flexfec_codec_is_offered_alongside_the_track_codec` | |
