@@ -18,8 +18,9 @@ const NALU_TTYPE_SPS: u32 = 7;
 const NALU_TYPE_BITMASK: u32 = 0x1F;
 const ANNEXB_NALUSTART_CODE: &[u8] = &[0x00, 0x00, 0x00, 0x01];
 /// Largest H.265 NAL unit reassembled from fragmentation units, as for H.264 FU-A
-/// (`rtp::codec::h264::MAX_FUA_NALU_SIZE`). The depacketizer enforces it.
-pub const MAX_H265_FU_NALU_SIZE: usize = rtp::codec::h265::MAX_H265_FU_NALU_SIZE;
+/// (`rtp::codec::h264::MAX_FUA_NALU_SIZE`). The depacketizer enforces it
+/// (`rtp::codec::h265::MAX_H265_FU_NALU_SIZE`, the same value).
+pub const MAX_H265_FU_NALU_SIZE: usize = 4 * 1024 * 1024;
 
 fn is_key_frame(data: &[u8]) -> bool {
     if data.len() < 4 {
