@@ -382,6 +382,14 @@ impl Drop for Conn13 {
     }
 }
 
+/// How many bytes a protected DTLS 1.3 record, as this stack writes it (the full unified
+/// header of RFC 9147 section 4 with a 16-bit sequence number and the length, and
+/// `connection_id_len` bytes of the peer's connection id), adds to its content under `suite`:
+/// the header, the inner content type and the tag.
+pub(crate) fn protected_record_overhead(suite: Suite13, connection_id_len: usize) -> usize {
+    HeaderForm::FULL.header_len(connection_id_len) + 1 + suite.tag_len()
+}
+
 impl Conn13 {
     pub(crate) fn new(cfg: Arc<HandshakeConfig>, is_client: bool, state: HandshakeState) -> Self {
         let provider = cfg.provider().clone();
@@ -602,8 +610,10 @@ impl Conn13 {
         if epoch == 0 {
             PLAINTEXT_HEADER_LEN
         } else {
-            let tag_len = self.suite.map_or(16, |suite| suite.tag_len());
-            HeaderForm::FULL.header_len(self.remote_connection_id.len()) + 1 + tag_len
+            match self.suite {
+                Some(suite) => protected_record_overhead(suite, self.remote_connection_id.len()),
+                None => HeaderForm::FULL.header_len(self.remote_connection_id.len()) + 1 + 16,
+            }
         }
     }
 

@@ -65,6 +65,12 @@ impl LossController {
         self.target = self.target.clamp(self.min, self.max);
     }
 
+    /// Bring the target up to `bound` if it is below it: a measurement showed the path
+    /// carries that much (a probe).
+    pub fn raise(&mut self, bound: f64) {
+        self.target = self.target.max(bound).clamp(self.min, self.max);
+    }
+
     /// Bring the target down to `bound` if it is above it: a deliberate cut (missing feedback).
     pub fn cap(&mut self, bound: f64) {
         self.target = self.target.min(bound).clamp(self.min, self.max);

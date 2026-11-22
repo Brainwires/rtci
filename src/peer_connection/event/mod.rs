@@ -159,7 +159,9 @@ pub(crate) mod track_event;
 pub use data_channel_event::RTCDataChannelEvent;
 pub use ice_error_event::RTCPeerConnectionIceErrorEvent;
 pub use ice_event::RTCPeerConnectionIceEvent;
-pub use track_event::{RTCTrackEvent, RTCTrackEventInit};
+pub use track_event::{
+    RTCRemoteStreamsChange, RTCRemoteTrackEventInit, RTCTrackEvent, RTCTrackEventInit,
+};
 
 /// Events that can be emitted by an `RTCPeerConnection`.
 ///

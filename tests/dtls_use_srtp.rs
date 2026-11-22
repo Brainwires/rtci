@@ -9,7 +9,8 @@
 //! - When a data-channel-only session gains a media section, a new association with
 //!   `use_srtp` replaces the one that has no SRTP keys; the offer says so with a new `tls-id`
 //!   (RFC 8842 section 5.5).
-//! - `SettingEngineBuilder::with_dtls_use_srtp_on_every_association` is the browsers' way:
+//! - `SettingEngineBuilder::with_dtls_use_srtp_on_every_association(true)` is the browsers' way, and
+//!   the default (no browser follows a new association):
 //!   offered on every association, so adding media needs no new one.
 
 mod dtls_sdp_common;
@@ -199,6 +200,24 @@ fn media_added_keeps_an_association_that_has_use_srtp() -> Result<()> {
             .any(|datagram| datagram.first() == Some(&22)),
         "a handshake record was sent"
     );
+    let now = world.now;
+    for i in 0..2 {
+        assert_eq!(world.peers[i].srtp_cipher(now), GCM, "peer {i}");
+    }
+    Ok(())
+}
+
+/// The default is the browsers' form: `use_srtp` is offered on a data-channel-only session
+/// too, so media added later needs no new association (no browser acts on the new `tls-id`
+/// the RFC 5764 section 4.1 form needs; browser matrix, train round 8).
+#[test]
+fn by_default_use_srtp_is_offered_on_every_association() -> Result<()> {
+    let mut world = World::new(
+        Peer::new("10.0.0.1:5000", SettingEngineBuilder::new().build())?,
+        Peer::new("10.0.0.2:5000", SettingEngineBuilder::new().build())?,
+    );
+    world.connect()?;
+    world.ping_pong("default settings")?;
     let now = world.now;
     for i in 0..2 {
         assert_eq!(world.peers[i].srtp_cipher(now), GCM, "peer {i}");
