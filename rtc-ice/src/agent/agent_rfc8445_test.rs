@@ -501,9 +501,10 @@ fn test_binding_request_before_remote_credentials_is_answered() {
     .unwrap();
 }
 
-/// Without the right password an early request gets nothing.
+/// Without the right password an early request gets no success response: it is answered 401
+/// (RFC 8489 Section 9.1.3), unsigned, and nothing of it is remembered.
 #[test]
-fn test_early_request_with_a_wrong_password_is_not_answered() {
+fn test_early_request_with_a_wrong_password_is_answered_401() {
     let now = Instant::now();
     let mut a = bare_agent(now, config(true));
     let mut m = Message::new();
@@ -522,7 +523,12 @@ fn test_early_request_with_a_wrong_password_is_not_answered() {
     ])
     .unwrap();
     assert!(deliver(&mut a, now, &m, REMOTE_A).is_err());
-    assert!(sent(&mut a).is_empty());
+    let out = sent(&mut a);
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].0.typ, BINDING_ERROR);
+    assert_eq!(out[0].0.transaction_id, m.transaction_id);
+    assert_eq!(error_code(&out[0].0), 401);
+    assert!(a.early_requests.is_empty());
 }
 
 /// Section 7.3: once the peer's credentials arrive, the early request is processed as in
@@ -595,7 +601,13 @@ fn test_username_is_valid_when_its_first_part_is_the_local_ufrag() {
     assert!(deliver(&mut a, now, &wrong_first_part, REMOTE_A).is_err());
     assert!(deliver(&mut a, now, &no_colon, REMOTE_A).is_err());
     assert!(deliver(&mut a, now, &fragment_is_a_prefix_only, REMOTE_A).is_err());
-    assert!(sent(&mut a).is_empty());
+    // A username that is not valid here: 401 (RFC 8489 Section 9.1.3), never a success.
+    let out = sent(&mut a);
+    assert_eq!(out.len(), 3);
+    assert!(
+        out.iter()
+            .all(|(m, _)| m.typ == BINDING_ERROR && error_code(m) == 401)
+    );
 }
 
 // --- Section 7.1.1 and 7.3.1.3: PRIORITY ---
@@ -1107,4 +1119,459 @@ fn test_message_with_a_wrong_fingerprint_is_discarded() {
     // The same messages intact are taken.
     deliver(&mut a, now, &response, &to.to_string()).unwrap();
     assert_eq!(a.candidate_pairs[0].state, CandidatePairState::Succeeded);
+}
+
+// --- RFC 8489 Section 9.1.3 (through RFC 8445 Section 7.3): requests that fail authentication ---
+
+/// A Binding request to `a` with the given USERNAME and, when `password` is given,
+/// MESSAGE-INTEGRITY made with it. ICE-CONTROLLING, PRIORITY and FINGERPRINT as in a check.
+fn request_with(username: Option<String>, password: Option<&str>) -> Message {
+    let provider = provider();
+    let mut setters: Vec<Box<dyn Setter>> =
+        vec![Box::new(BINDING_REQUEST), Box::new(TransactionId::new())];
+    if let Some(username) = username {
+        setters.push(Box::new(Username::new(ATTR_USERNAME, username)));
+    }
+    setters.push(Box::new(AttrControlling(1)));
+    setters.push(Box::new(PriorityAttr(1000)));
+    if let Some(password) = password {
+        setters.push(Box::new(
+            MessageIntegrity::new_short_term_integrity_with_provider(
+                password.to_owned(),
+                provider.crypto(),
+            ),
+        ));
+    }
+    setters.push(Box::new(FINGERPRINT));
+    let mut msg = Message::new();
+    msg.build(&setters).unwrap();
+    msg
+}
+
+fn valid_username(a: &Agent) -> String {
+    a.ufrag_pwd.local_credentials.ufrag.clone() + ":" + REMOTE_UFRAG
+}
+
+/// "If the message does not contain 1) a MESSAGE-INTEGRITY or a MESSAGE-INTEGRITY-SHA256
+/// attribute and 2) a USERNAME attribute: If the message is a request, the server MUST reject
+/// the request with an error response. This response MUST use an error code of 400 (Bad
+/// Request)." "If the USERNAME does not contain a username value currently valid within the
+/// server: [...] 401 (Unauthenticated)", and the same for a MESSAGE-INTEGRITY that does not
+/// match.
+#[test]
+fn test_unauthenticated_requests_are_answered_400_or_401() {
+    let now = Instant::now();
+    let mut a = started_agent(now, config(false), &[REMOTE_A]);
+    let _ = sent(&mut a);
+    let pwd = a.ufrag_pwd.local_credentials.pwd.clone();
+    let cases: Vec<(&str, Message, u16)> = vec![
+        ("no credentials at all", request_with(None, None), 400),
+        (
+            "USERNAME without MESSAGE-INTEGRITY",
+            request_with(Some(valid_username(&a)), None),
+            400,
+        ),
+        (
+            "MESSAGE-INTEGRITY without USERNAME",
+            request_with(None, Some(&pwd)),
+            400,
+        ),
+        (
+            "a username that is not this agent's",
+            request_with(Some(format!("someoneelse:{REMOTE_UFRAG}")), Some(&pwd)),
+            401,
+        ),
+        (
+            "a MESSAGE-INTEGRITY made with another password",
+            request_with(Some(valid_username(&a)), Some("not the password at all")),
+            401,
+        ),
+    ];
+    for (what, request, code) in cases {
+        assert!(deliver(&mut a, now, &request, REMOTE_B).is_err(), "{what}");
+        let out = sent(&mut a);
+        assert_eq!(out.len(), 1, "{what}");
+        let (response, to) = &out[0];
+        assert_eq!(*to, addr(REMOTE_B), "{what}");
+        assert_eq!(response.typ, BINDING_ERROR, "{what}");
+        assert_eq!(response.transaction_id, request.transaction_id, "{what}");
+        assert_eq!(error_code(response), code, "{what}");
+        // Nothing to sign it with, and nothing in it but the code: no reflection of any use.
+        assert!(!response.contains(ATTR_MESSAGE_INTEGRITY), "{what}");
+        assert!(response.contains(ATTR_FINGERPRINT), "{what}");
+        assert!(response.raw.len() <= request.raw.len(), "{what}");
+        assert_eq!(response.raw.len(), 36, "{what}");
+    }
+    // None of it touched the agent: no candidate for the source, no role change.
+    assert!(a.find_remote_candidate(addr(REMOTE_B)).is_none());
+    assert!(!a.is_controlling);
+}
+
+/// The error responses cannot be used to reflect traffic: a burst of five, then one per
+/// 200 ms, whatever arrives; never a response longer than its request; nothing for an
+/// indication; nothing at all with `UnauthenticatedRequests::Drop`.
+#[test]
+fn test_error_responses_to_unauthenticated_requests_are_rate_limited() {
+    let now = Instant::now();
+    let mut a = started_agent(now, config(false), &[REMOTE_A]);
+    let _ = sent(&mut a);
+
+    for _ in 0..50 {
+        let _ = deliver(&mut a, now, &request_with(None, None), REMOTE_B);
+    }
+    assert_eq!(
+        sent(&mut a).len(),
+        MAX_UNAUTHENTICATED_RESPONSE_BURST as usize
+    );
+
+    // 200 ms later: one more, however many arrive.
+    let later = now + UNAUTHENTICATED_RESPONSE_INTERVAL;
+    for _ in 0..50 {
+        let _ = deliver(&mut a, later, &request_with(None, None), REMOTE_B);
+    }
+    assert_eq!(sent(&mut a).len(), 1);
+
+    // After a quiet spell the burst is back, and no larger.
+    let much_later = later + Duration::from_secs(60);
+    for _ in 0..50 {
+        let _ = deliver(&mut a, much_later, &request_with(None, None), REMOTE_B);
+    }
+    assert_eq!(
+        sent(&mut a).len(),
+        MAX_UNAUTHENTICATED_RESPONSE_BURST as usize
+    );
+
+    // A request shorter than the response would be (a bare header) is not answered: the
+    // agent never sends more bytes than it was sent.
+    let much_later = much_later + Duration::from_secs(60);
+    let mut bare = Message::new();
+    bare.build(&[Box::new(BINDING_REQUEST), Box::new(TransactionId::new())])
+        .unwrap();
+    assert_eq!(bare.raw.len(), 20);
+    let _ = deliver(&mut a, much_later, &bare, REMOTE_B);
+    assert!(sent(&mut a).is_empty());
+
+    // "If the message is an indication, the agent MUST silently discard the indication."
+    let mut indication = Message::new();
+    indication
+        .build(&[
+            Box::new(MessageType::new(METHOD_BINDING, CLASS_INDICATION)),
+            Box::new(TransactionId::new()),
+            Box::new(PriorityAttr(1)),
+            Box::new(FINGERPRINT),
+        ])
+        .unwrap();
+    let _ = deliver(&mut a, much_later, &indication, REMOTE_B);
+    assert!(sent(&mut a).is_empty());
+
+    // A source the destination policy refuses is not answered either.
+    let _ = deliver(&mut a, much_later, &request_with(None, None), "127.0.0.1:9");
+    assert!(sent(&mut a).is_empty());
+}
+
+/// The setting that keeps the earlier behaviour: nothing is sent.
+#[test]
+fn test_unauthenticated_requests_can_be_dropped_silently() {
+    let now = Instant::now();
+    let cfg = AgentConfig {
+        unauthenticated_requests: UnauthenticatedRequests::Drop,
+        ..config(false)
+    };
+    let mut a = started_agent(now, cfg, &[REMOTE_A]);
+    let _ = sent(&mut a);
+    let pwd = a.ufrag_pwd.local_credentials.pwd.clone();
+    for request in [
+        request_with(None, None),
+        request_with(Some(format!("someoneelse:{REMOTE_UFRAG}")), Some(&pwd)),
+        request_with(Some(valid_username(&a)), Some("not the password at all")),
+    ] {
+        assert!(deliver(&mut a, now, &request, REMOTE_B).is_err());
+    }
+    assert!(sent(&mut a).is_empty());
+}
+
+// --- Sections 5.2, 6.1.1, 7.3.1.1: the tiebreaker, roles, and a conflict after the nomination ---
+
+/// Section 5.2 / 7.1.3: a configured tiebreaker is the one the checks carry.
+#[test]
+fn test_configured_tiebreaker_is_sent() {
+    let now = Instant::now();
+    let cfg = AgentConfig {
+        tie_breaker: Some(0x0123_4567_89ab_cdef),
+        ..config(true)
+    };
+    let mut a = started_agent(now, cfg, &[REMOTE_A]);
+    assert_eq!(a.tie_breaker(), 0x0123_4567_89ab_cdef);
+    let (check, _) = first_check(&mut a, now);
+    assert_eq!(
+        check.get(ATTR_ICE_CONTROLLING).unwrap(),
+        0x0123_4567_89ab_cdef_u64.to_be_bytes()
+    );
+}
+
+/// Section 6.1.2.3: the pair priority depends on the role, so a role set from outside (the
+/// roles are determined again when an agent changes between full and lite, Section 6.1.1)
+/// re-prioritises the pairs, and a nomination in the making is dropped.
+#[test]
+fn test_set_role_reprioritises_the_pairs() {
+    let now = Instant::now();
+    let mut a = bare_agent(now, config(true));
+    a.add_remote_candidate(host_with_priority(addr(REMOTE_A), 5000))
+        .unwrap();
+    let controlling = a.candidate_pairs[0].priority();
+    a.candidate_pairs[0].nominate = true;
+    a.nominated_pair = Some(0);
+    a.set_role(false);
+    assert!(!a.role());
+    assert_ne!(a.candidate_pairs[0].priority(), controlling);
+    assert!(!a.candidate_pairs[0].nominate);
+    assert_eq!(a.nominated_pair, None);
+    a.set_role(true);
+    assert_eq!(a.candidate_pairs[0].priority(), controlling);
+}
+
+/// A connected, controlling agent with the given tiebreaker and its selected pair to
+/// `REMOTE_A`.
+fn connected_controlling(now: Instant, tie_breaker: u64) -> Agent {
+    let cfg = AgentConfig {
+        tie_breaker: Some(tie_breaker),
+        ..config(true)
+    };
+    let mut a = started_agent(now, cfg, &[REMOTE_A]);
+    run_answering(&mut a, now, now + Duration::from_secs(1), |_, _| true);
+    assert_eq!(a.state(), ConnectionState::Connected);
+    while a.poll_event().is_some() {}
+    a
+}
+
+/// Section 7.3.1.1 after the nomination, the agent's tiebreaker being the larger one: a peer
+/// that lost its state without an ICE restart (a new agent with the same address and
+/// credentials, which believes it is controlling) is answered 487 and takes the controlled
+/// role, and it has no nominated pair. The agent keeps its role and its selected pair, and
+/// nominates that pair again: one more check with USE-CANDIDATE, on no other pair. Without
+/// it the peer waited forever for a nomination that had been made before it existed.
+#[test]
+fn test_controlling_agent_that_wins_a_conflict_after_nominating_repeats_the_nomination() {
+    let now = Instant::now();
+    let mut a = connected_controlling(now, 100);
+    let later = now + Duration::from_secs(2);
+
+    let conflicting = peer_request(
+        &a,
+        vec![Box::new(AttrControlling(5)), Box::new(PriorityAttr(1000))],
+    );
+    deliver(&mut a, later, &conflicting, REMOTE_A).unwrap();
+    let out = sent(&mut a);
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].0.typ, BINDING_ERROR);
+    assert_eq!(error_code(&out[0].0), CODE_ROLE_CONFLICT.0);
+    assert!(a.role(), "the larger tiebreaker keeps the controlling role");
+
+    let out = run_answering(&mut a, later, later + Duration::from_secs(1), |_, _| true);
+    let nominations: Vec<_> = requests(&out)
+        .into_iter()
+        .filter(|(m, _)| m.contains(ATTR_USE_CANDIDATE))
+        .collect();
+    assert_eq!(nominations.len(), 1, "the nomination is repeated, once");
+    let (nomination, to) = nominations[0];
+    assert_eq!(*to, addr(REMOTE_A));
+    assert_eq!(
+        nomination.get(ATTR_ICE_CONTROLLING).unwrap(),
+        100u64.to_be_bytes()
+    );
+    // The selected pair did not change, and nothing was reported.
+    assert_eq!(
+        a.get_selected_candidate_pair().unwrap().1.addr(),
+        addr(REMOTE_A)
+    );
+    assert_eq!(a.state(), ConnectionState::Connected);
+    assert!(a.poll_event().is_none());
+
+    // The consent checks that follow are plain again.
+    let out = run_answering(
+        &mut a,
+        later + Duration::from_secs(1),
+        later + Duration::from_secs(20),
+        |_, _| true,
+    );
+    assert!(requests(&out).len() >= 3);
+    assert!(
+        requests(&out)
+            .iter()
+            .all(|(m, _)| !m.contains(ATTR_USE_CANDIDATE))
+    );
+}
+
+/// The same conflict with the smaller tiebreaker: the agent "switches to the controlled
+/// role", answers the check, keeps its selected pair, and takes the peer's nomination of that
+/// pair without reporting a change. Its consent checks are a controlled agent's from then on.
+#[test]
+fn test_controlling_agent_that_loses_a_conflict_after_nominating_becomes_controlled() {
+    let now = Instant::now();
+    let mut a = connected_controlling(now, 5);
+    let later = now + Duration::from_secs(2);
+
+    let conflicting = peer_request(
+        &a,
+        vec![Box::new(AttrControlling(100)), Box::new(PriorityAttr(1000))],
+    );
+    deliver(&mut a, later, &conflicting, REMOTE_A).unwrap();
+    let out = sent(&mut a);
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].0.typ, BINDING_SUCCESS);
+    assert!(!a.role());
+    let events: Vec<Event> = std::iter::from_fn(|| a.poll_event())
+        .map(|e| e.event)
+        .collect();
+    assert!(matches!(events.as_slice(), [Event::RoleChange(false)]));
+
+    let nomination = peer_request(
+        &a,
+        vec![
+            Box::new(AttrControlling(100)),
+            Box::new(PriorityAttr(1000)),
+            Box::new(UseCandidateAttr::new()),
+        ],
+    );
+    deliver(&mut a, later, &nomination, REMOTE_A).unwrap();
+    assert_eq!(sent(&mut a)[0].0.typ, BINDING_SUCCESS);
+    assert_eq!(
+        a.get_selected_candidate_pair().unwrap().1.addr(),
+        addr(REMOTE_A)
+    );
+    assert_eq!(a.state(), ConnectionState::Connected);
+    assert!(a.poll_event().is_none(), "the pair in use did not change");
+
+    let out = run_answering(&mut a, later, later + Duration::from_secs(20), |_, _| true);
+    assert!(requests(&out).len() >= 3);
+    assert!(requests(&out).iter().all(|(m, _)| {
+        m.contains(ATTR_ICE_CONTROLLED)
+            && !m.contains(ATTR_ICE_CONTROLLING)
+            && !m.contains(ATTR_USE_CANDIDATE)
+    }));
+    assert_eq!(a.state(), ConnectionState::Connected);
+}
+
+// --- Section 12: sending and receiving data ---
+
+fn datagram(local: &str, from: &str) -> TransportContext {
+    TransportContext {
+        local_addr: addr(local),
+        peer_addr: addr(from),
+        ecn: None,
+        transport_protocol: TransportProtocol::UDP,
+    }
+}
+
+/// A controlled agent whose checks to A and B were answered (two valid pairs), with a third
+/// remote candidate that never answered, and no nomination yet.
+fn two_valid_pairs(now: Instant, cfg: AgentConfig) -> Agent {
+    const SILENT: &str = "192.168.0.5:4000";
+    let mut a = started_agent(now, cfg, &[REMOTE_A, REMOTE_B, SILENT]);
+    run_answering(&mut a, now, now + Duration::from_secs(1), |_, to| {
+        to != addr(SILENT)
+    });
+    assert!(a.get_selected_candidate_pair().is_none());
+    assert_eq!(a.candidate_pairs.iter().filter(|p| p.valid).count(), 2);
+    a
+}
+
+fn nominate(a: &mut Agent, now: Instant, from: &str) {
+    let m = peer_request(
+        a,
+        vec![
+            Box::new(AttrControlling(1)),
+            Box::new(PriorityAttr(1000)),
+            Box::new(UseCandidateAttr::new()),
+        ],
+    );
+    deliver(a, now, &m, from).unwrap();
+    let _ = sent(a);
+}
+
+/// Section 12.2: "ICE implementations SHOULD by default be prepared to receive data on any of
+/// the candidates provided in the most recent candidate exchange", from the peer, which the
+/// agent knows "as a consequence of the STUN exchange": the remote candidate of a valid pair.
+/// Not from a candidate no check was answered from, not from an address that is no candidate.
+#[test]
+fn test_data_is_accepted_from_every_valid_pair() {
+    let now = Instant::now();
+    let mut a = two_valid_pairs(now, config(false));
+    // Section 12.1: nothing is selected, so there is nothing to send on, and nothing is taken.
+    assert!(a.media_path().is_none());
+    assert!(!a.accepts_data(datagram(LOCAL, REMOTE_A)));
+
+    nominate(&mut a, now + Duration::from_secs(1), REMOTE_A);
+    assert_eq!(a.media_path().unwrap().peer_addr, addr(REMOTE_A));
+    assert!(matches!(
+        a.data_path(datagram(LOCAL, REMOTE_A)),
+        Some(DataPath::InUse)
+    ));
+    match a.data_path(datagram(LOCAL, REMOTE_B)) {
+        Some(DataPath::Valid(local, remote)) => {
+            assert_eq!(local.addr(), addr(LOCAL));
+            assert_eq!(remote.addr(), addr(REMOTE_B));
+        }
+        other => panic!("data from the other valid pair: {other:?}"),
+    }
+    assert!(
+        !a.accepts_data(datagram(LOCAL, "192.168.0.5:4000")),
+        "a remote candidate no check was answered from"
+    );
+    assert!(
+        !a.accepts_data(datagram(LOCAL, "192.168.0.9:4000")),
+        "an address that is no candidate"
+    );
+    assert!(
+        !a.accepts_data(datagram("192.168.0.2:1001", REMOTE_B)),
+        "an address that is no local candidate"
+    );
+    // Data is still sent on the selected pair only (Section 12.1).
+    assert_eq!(a.media_path().unwrap().peer_addr, addr(REMOTE_A));
+}
+
+/// `data_from_selected_pair_only`, the fork's hardening: the selected pair's remote address
+/// and no other.
+#[test]
+fn test_data_can_be_restricted_to_the_selected_pair() {
+    let now = Instant::now();
+    let cfg = AgentConfig {
+        data_from_selected_pair_only: true,
+        ..config(false)
+    };
+    let mut a = two_valid_pairs(now, cfg);
+    nominate(&mut a, now + Duration::from_secs(1), REMOTE_A);
+    assert!(a.accepts_data(datagram(LOCAL, REMOTE_A)));
+    assert!(!a.accepts_data(datagram(LOCAL, REMOTE_B)));
+}
+
+/// Section 12.1: "An ICE agent MAY send data on any valid pair before selected pairs have
+/// been produced for the data stream. Once selected pairs have been produced for a data
+/// stream, an agent MUST send data on those pairs only." With
+/// `send_data_before_nomination` the path is the best valid pair's until a pair is selected.
+#[test]
+fn test_data_can_be_sent_on_a_valid_pair_before_the_nomination() {
+    let now = Instant::now();
+    let cfg = AgentConfig {
+        send_data_before_nomination: true,
+        ..config(false)
+    };
+    let mut a = bare_agent(now, cfg);
+    a.add_remote_candidate(host_with_priority(addr(REMOTE_A), 1000))
+        .unwrap();
+    a.add_remote_candidate(host_with_priority(addr(REMOTE_B), 2000))
+        .unwrap();
+    a.start_connectivity_checks(now, false, REMOTE_UFRAG.to_owned(), REMOTE_PWD.to_owned())
+        .unwrap();
+    assert!(a.media_path().is_none(), "no valid pair yet");
+    run_answering(&mut a, now, now + Duration::from_secs(1), |_, _| true);
+    assert!(a.get_selected_candidate_pair().is_none());
+    let path = a.media_path().expect("the best valid pair");
+    assert_eq!(path.peer_addr, addr(REMOTE_B));
+    assert_eq!(path.local_addr, addr(LOCAL));
+    assert!(a.accepts_data(datagram(LOCAL, REMOTE_A)));
+
+    // The nomination decides from then on, whatever the priorities.
+    nominate(&mut a, now + Duration::from_secs(1), REMOTE_A);
+    assert_eq!(a.media_path().unwrap().peer_addr, addr(REMOTE_A));
 }

@@ -169,6 +169,12 @@ impl RTCPeerConnection {
                 .candidates
                 .allow_link_local_remote_candidates,
             remote_address_filter: setting_engine.candidates.remote_address_filter.clone(),
+            tie_breaker: setting_engine.ice.tie_breaker,
+            nomination_acceptance: setting_engine.ice.nomination_acceptance,
+            nominate_on_consent_checks: setting_engine.ice.nominate_on_consent_checks,
+            unauthenticated_requests: setting_engine.ice.unauthenticated_requests,
+            data_from_selected_pair_only: setting_engine.ice.data_from_selected_pair_only,
+            send_data_before_nomination: setting_engine.ice.send_data_before_nomination,
             nat_1to1_ips: setting_engine.candidates.nat_1to1_ips.clone(),
             nat_1to1_ip_candidate_type: match setting_engine.candidates.nat_1to1_ip_candidate_type {
                 RTCIceCandidateType::Srflx => ice::candidate::CandidateType::ServerReflexive,

@@ -115,6 +115,7 @@ use dtls::extension::extension_use_srtp::SrtpProtectionProfile;
 use ice::agent::remote_policy::RemoteAddressFilter;
 use ice::mdns::MulticastDnsMode;
 use ice::network_type::NetworkType;
+use ice::{NominationAcceptance, UnauthenticatedRequests};
 //TODO: use ice::udp_network::UDPNetwork;
 use crate::peer_connection::transport::dtls::role::RTCDtlsRole;
 use crate::peer_connection::transport::ice::candidate_type::RTCIceCandidateType;
@@ -258,6 +259,25 @@ pub struct Candidates {
     pub remote_address_filter: Option<RemoteAddressFilter>,
 }
 
+/// Where the ICE agent follows RFC 8445 / RFC 8489 by default and a browser (libwebrtc)
+/// behaviour, or one of this fork's hardenings, can be chosen instead. Every default is the
+/// RFC's.
+#[derive(Default, Clone)]
+pub struct IceBehaviour {
+    /// See [`SettingEngineBuilder::with_ice_tie_breaker`].
+    pub tie_breaker: Option<u64>,
+    /// See [`SettingEngineBuilder::with_ice_nomination_acceptance`].
+    pub nomination_acceptance: NominationAcceptance,
+    /// See [`SettingEngineBuilder::with_ice_nomination_on_consent_checks`].
+    pub nominate_on_consent_checks: bool,
+    /// See [`SettingEngineBuilder::with_ice_unauthenticated_requests`].
+    pub unauthenticated_requests: UnauthenticatedRequests,
+    /// See [`SettingEngineBuilder::with_ice_data_from_selected_pair_only`].
+    pub data_from_selected_pair_only: bool,
+    /// See [`SettingEngineBuilder::with_ice_data_before_nomination`].
+    pub send_data_before_nomination: bool,
+}
+
 /// Replay attack protection window sizes.
 ///
 /// Larger windows provide better protection against packet reordering
@@ -363,6 +383,7 @@ pub struct SettingEngine {
     pub(crate) data_channel: DataChannel,
     pub(crate) turn_allocation_refresh_interval_cap: Option<Duration>,
     pub(crate) candidates: Candidates,
+    pub(crate) ice: IceBehaviour,
     pub(crate) multicast_dns: MulticastDNS,
     pub(crate) replay_protection: ReplayProtection,
     pub(crate) sdp_media_level_fingerprints: bool,
@@ -1211,6 +1232,83 @@ impl SettingEngineBuilder {
     pub fn with_remote_candidate_scopes(mut self, loopback: bool, link_local: bool) -> Self {
         self.0.candidates.allow_loopback_remote_candidates = loopback;
         self.0.candidates.allow_link_local_remote_candidates = link_local;
+        self
+    }
+
+    /// Fixes the ICE tiebreaker (RFC 8445 section 5.2), which is random otherwise. It decides
+    /// who keeps the controlling role when both agents claim it (section 7.3.1.1): the larger
+    /// one. For reproducible sessions and tests.
+    pub fn with_ice_tie_breaker(mut self, tie_breaker: u64) -> Self {
+        self.0.ice.tie_breaker = Some(tie_breaker);
+        self
+    }
+
+    /// Which pair a controlled ICE agent uses when the controlling agent nominates more than
+    /// one.
+    ///
+    /// The default, [`NominationAcceptance::HighestPriority`], is RFC 8445 section 8.1.1: the
+    /// nominated pair with the highest priority (a nominated pair of lower priority takes over
+    /// when consent is lost on the selected one). [`NominationAcceptance::Latest`] is
+    /// libwebrtc's rule: the latest nomination wins (with its `NOMINATION` attribute, the
+    /// highest value), whatever the pair's priority; the session then follows a browser that
+    /// moves to another pair and stops answering on the one it left.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    /// use rtc::ice::NominationAcceptance;
+    ///
+    /// let _setting_engine = SettingEngineBuilder::new()
+    ///     .with_ice_nomination_acceptance(NominationAcceptance::Latest)
+    ///     .build();
+    /// ```
+    pub fn with_ice_nomination_acceptance(mut self, acceptance: NominationAcceptance) -> Self {
+        self.0.ice.nomination_acceptance = acceptance;
+        self
+    }
+
+    /// Makes the controlling ICE agent's consent checks carry USE-CANDIDATE, as libwebrtc's
+    /// do. Off by default: RFC 8445 section 7.1.2 has the attribute sent "in order to nominate
+    /// a candidate pair", once (section 8.1.1), and a consent check is a plain Binding request
+    /// (RFC 7675 section 5.1). Without it the agent repeats its nomination only when the peer
+    /// shows it lost it (a role conflict after the nomination).
+    pub fn with_ice_nomination_on_consent_checks(mut self, enabled: bool) -> Self {
+        self.0.ice.nominate_on_consent_checks = enabled;
+        self
+    }
+
+    /// What a STUN Binding request that fails the ICE short-term credential check gets.
+    ///
+    /// The default, [`UnauthenticatedRequests::Reject`], is RFC 8489 section 9.1.3: 400 (Bad
+    /// Request) without MESSAGE-INTEGRITY or USERNAME, 401 (Unauthenticated) for an unknown
+    /// username or a MESSAGE-INTEGRITY that does not match. The responses are rate limited,
+    /// never longer than the request, and unsigned. [`UnauthenticatedRequests::Drop`] answers
+    /// nothing (what this crate did before).
+    pub fn with_ice_unauthenticated_requests(mut self, requests: UnauthenticatedRequests) -> Self {
+        self.0.ice.unauthenticated_requests = requests;
+        self
+    }
+
+    /// Accepts data (DTLS, SRTP) only from the selected candidate pair's remote address.
+    ///
+    /// Off by default: RFC 8445 section 12.2 has an agent "prepared to receive data on any of
+    /// the candidates provided in the most recent candidate exchange", and data is accepted
+    /// from the remote candidate of any valid pair (one a connectivity check of this agent
+    /// succeeded on). A peer that sends before it nominates, or from a pair it moved to, is
+    /// then heard. Turning this on restores the fork's hardening: everything from another
+    /// address is dropped before DTLS sees it.
+    pub fn with_ice_data_from_selected_pair_only(mut self, enabled: bool) -> Self {
+        self.0.ice.data_from_selected_pair_only = enabled;
+        self
+    }
+
+    /// Lets data be sent on the best valid candidate pair before a pair is selected (RFC 8445
+    /// section 12.1: "An ICE agent MAY send data on any valid pair before selected pairs have
+    /// been produced"). Off by default. With it a DTLS server answers a ClientHello that
+    /// arrives before the nomination does.
+    pub fn with_ice_data_before_nomination(mut self, enabled: bool) -> Self {
+        self.0.ice.send_data_before_nomination = enabled;
         self
     }
 
