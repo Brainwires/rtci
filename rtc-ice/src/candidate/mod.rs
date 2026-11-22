@@ -229,6 +229,9 @@ pub struct Candidate {
     /// preferred): the local preference is the largest value less this rank. `None` until the
     /// application or the agent ranks it. See [`Candidate::set_local_preference_rank`].
     pub(crate) local_preference_rank: Option<u16>,
+    /// The related address (the base) is a host address hidden behind an mDNS name: it is
+    /// not signalled. See [`Candidate::signalled_related_address`].
+    pub(crate) hide_related_address: bool,
 
     pub(crate) network: String,
 
@@ -258,6 +261,7 @@ impl Default for Candidate {
             foundation_override: String::new(),
             priority_override: 0,
             local_preference_rank: None,
+            hide_related_address: false,
             network: String::new(),
 
             url: None,
@@ -412,6 +416,12 @@ impl Candidate {
         self.tcp_type
     }
 
+    /// Sets the TCP role of an ICE-TCP candidate of any type (RFC 6544 Section 4.5: every TCP
+    /// candidate is signalled with a `tcptype`).
+    pub fn set_tcp_type(&mut self, tcp_type: TcpType) {
+        self.tcp_type = tcp_type;
+    }
+
     /// The STUN or TURN server this candidate was gathered from, if any.
     pub fn url(&self) -> Option<&str> {
         self.url.as_deref()
@@ -430,11 +440,9 @@ impl Candidate {
             self.candidate_type()
         );
 
-        if self.tcp_type != TcpType::Unspecified {
-            val += format!(" tcptype {}", self.tcp_type()).as_str();
-        }
-
-        if let Some(related_address) = self.related_address() {
+        // RFC 8839 Section 5.1: rel-addr and rel-port come before the extension attributes,
+        // of which `tcptype` (RFC 6544 Section 4.5) is one, for every candidate type.
+        if let Some(related_address) = self.signalled_related_address() {
             val += format!(
                 " raddr {} rport {}",
                 related_address.address, related_address.port,
@@ -442,7 +450,30 @@ impl Candidate {
             .as_str();
         }
 
+        if self.tcp_type != TcpType::Unspecified {
+            val += format!(" tcptype {}", self.tcp_type()).as_str();
+        }
+
         val
+    }
+
+    /// The related address to signal and to show in statistics: the candidate's own, or,
+    /// when its base is a host address hidden behind an mDNS name, `0.0.0.0` (`::`) and port
+    /// 9 (draft-ietf-mmusic-mdns-ice-candidates Section 3.1.2.2: "the agent MUST set the
+    /// rel-addr and rel-port fields of the candidate to 0.0.0.0/:: and 9").
+    pub fn signalled_related_address(&self) -> Option<CandidateRelatedAddress> {
+        let related = self.related_address()?;
+        if !self.hide_related_address {
+            return Some(related);
+        }
+        Some(CandidateRelatedAddress {
+            address: if self.network_type().is_ipv6() {
+                "::".to_owned()
+            } else {
+                "0.0.0.0".to_owned()
+            },
+            port: 9,
+        })
     }
 
     /// The candidate's socket address.
@@ -674,7 +705,7 @@ pub fn unmarshal_candidate(raw: &str) -> Result<Candidate> {
     let mut tcp_type = TcpType::Unspecified;
 
     if split.len() > 8 {
-        let split2 = &split[8..];
+        let mut split2 = &split[8..];
 
         if split2[0] == "raddr" {
             if split2.len() < 4 {
@@ -689,15 +720,21 @@ pub fn unmarshal_candidate(raw: &str) -> Result<Candidate> {
 
             // RelatedPort
             rel_port = split2[3].parse()?;
-        } else if split2[0] == "tcptype" {
-            if split2.len() < 2 {
-                return Err(Error::Other(format!(
-                    "{:?}: incorrect length",
-                    Error::ErrParseType
-                )));
-            }
+            split2 = &split2[4..];
+        }
 
-            tcp_type = TcpType::from(split2[1]);
+        // The extension attributes are name / value pairs in any order (RFC 8839 Section
+        // 5.1); `tcptype` (RFC 6544 Section 4.5) is one of them, for every candidate type.
+        for extension in split2.chunks(2) {
+            if extension[0] == "tcptype" {
+                if extension.len() < 2 {
+                    return Err(Error::Other(format!(
+                        "{:?}: incorrect length",
+                        Error::ErrParseType
+                    )));
+                }
+                tcp_type = TcpType::from(extension[1]);
+            }
         }
     }
 
@@ -732,7 +769,10 @@ pub fn unmarshal_candidate(raw: &str) -> Result<Candidate> {
                 rel_port,
                 url: None,
             };
-            config.new_candidate_server_reflexive()
+            config.new_candidate_server_reflexive().map(|mut c| {
+                c.tcp_type = tcp_type;
+                c
+            })
         }
         "prflx" => {
             let config = CandidatePeerReflexiveConfig {
@@ -749,7 +789,10 @@ pub fn unmarshal_candidate(raw: &str) -> Result<Candidate> {
                 rel_port,
             };
 
-            config.new_candidate_peer_reflexive()
+            config.new_candidate_peer_reflexive().map(|mut c| {
+                c.tcp_type = tcp_type;
+                c
+            })
         }
         "relay" => {
             let config = CandidateRelayConfig {
@@ -766,7 +809,10 @@ pub fn unmarshal_candidate(raw: &str) -> Result<Candidate> {
                 rel_port,
                 url: None,
             };
-            config.new_candidate_relay()
+            config.new_candidate_relay().map(|mut c| {
+                c.tcp_type = tcp_type;
+                c
+            })
         }
         _ => Err(Error::Other(format!(
             "{:?} ({})",

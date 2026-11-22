@@ -1990,6 +1990,10 @@ impl RTCPeerConnection {
                 candidates,
             }) = extract_ice_details(parsed_remote_description)?
             {
+                let remote_end_of_candidates = parsed_remote_description
+                    .media_descriptions
+                    .iter()
+                    .any(|m| !is_rejected_media(m) && m.has_attribute(ATTR_KEY_END_OF_CANDIDATES));
                 // A description that sets up a transport consumes the closure of the last one.
                 let new_association = std::mem::take(&mut self.transport_closed);
                 // If one of the agents is lite and the other one is not, the lite agent must be
@@ -2070,6 +2074,14 @@ impl RTCPeerConnection {
 
                 for candidate in candidates {
                     self.ice_transport_mut().add_remote_candidate(candidate)?;
+                }
+                // `a=end-of-candidates` (RFC 8838 section 14): the candidates above were the
+                // generation's last. The agent ignores later ones and can fail without
+                // waiting for its timeout when none of them works.
+                if remote_end_of_candidates {
+                    self.ice_transport_mut()
+                        .agent
+                        .set_remote_end_of_candidates();
                 }
 
                 if !transports_started {
@@ -2272,6 +2284,26 @@ impl RTCPeerConnection {
                     None,
                 );
             }
+            // One transport carries every section (BUNDLE): its agent is told.
+            self.ice_transport_mut()
+                .agent
+                .set_remote_end_of_candidates();
+            return Ok(());
+        }
+
+        // RFC 8838 section 14: "After an agent has received an end-of-candidates indication, it
+        // MUST ignore any newly received candidates for that data stream". Such a candidate is
+        // checked and then ignored: it reaches neither the agent nor the description's text.
+        let after_end_of_candidates = match section {
+            Some(i) => parsed.media_descriptions[i].has_attribute(ATTR_KEY_END_OF_CANDIDATES),
+            None => parsed
+                .media_descriptions
+                .iter()
+                .any(|m| m.has_attribute(ATTR_KEY_END_OF_CANDIDATES)),
+        };
+        if after_end_of_candidates {
+            unmarshal_candidate(candidate_value)?;
+            log::warn!("ignoring remote candidate: it follows end-of-candidates");
             return Ok(());
         }
 
@@ -2418,6 +2450,11 @@ impl RTCPeerConnection {
             self.add_ice_local_candidate(candidate_value, local_candidate.url.as_deref())?;
         } else {
             self.ice_transport_mut().ice_gathering_state = RTCIceGatheringState::Complete;
+            // RFC 8838 section 13: no candidate follows the end-of-candidates indication of
+            // its generation; the agent refuses one from here on, until an ICE restart.
+            self.ice_transport_mut()
+                .agent
+                .set_local_gathering_complete();
             // Emit OnIceGatheringStateChangeEvent
             self.pipeline_context.event_outs.push_back(
                 RTCPeerConnectionEvent::OnIceGatheringStateChangeEvent(
@@ -4390,6 +4427,51 @@ a=rtcp-mux\r\n";
             .unwrap();
         let sdp = &pc.remote_description().unwrap().sdp;
         assert_eq!(sdp.matches("a=end-of-candidates\r\n").count(), 2);
+    }
+
+    /// RFC 8838 section 14: a remote candidate that follows the end-of-candidates indication
+    /// of its generation is ignored: the ICE agent does not take it and the remote
+    /// description does not show it after `a=end-of-candidates`.
+    #[test]
+    fn remote_candidates_after_end_of_candidates_are_ignored() {
+        let mut pc = media_pc();
+        pc.set_remote_description(
+            Instant::now(),
+            remote(RTCSdpType::Offer, PER_SECTION_UFRAG_OFFER),
+        )
+        .unwrap();
+        let line = "candidate:1 1 udp 2113929471 203.0.113.100 10100 typ host";
+        pc.add_remote_candidate(candidate(line, Some("a1"), None))
+            .unwrap();
+        let held = pc.ice_transport().get_remote_candidates().len();
+        let recorded = |pc: &RTCPeerConnection| {
+            pc.remote_description()
+                .unwrap()
+                .sdp
+                .matches("a=candidate:")
+                .count()
+        };
+        let lines = recorded(&pc);
+
+        // End-of-candidates, then one more candidate.
+        pc.add_remote_candidate(candidate("", Some("a1"), None))
+            .unwrap();
+        assert!(
+            pc.remote_description()
+                .unwrap()
+                .sdp
+                .contains("a=end-of-candidates")
+        );
+        let late = "candidate:2 1 udp 2113929471 203.0.113.101 10101 typ host";
+        pc.add_remote_candidate(candidate(late, Some("a1"), None))
+            .unwrap();
+        assert_eq!(pc.ice_transport().get_remote_candidates().len(), held);
+        assert_eq!(recorded(&pc), lines);
+        // What does not parse is still an error.
+        assert!(
+            pc.add_remote_candidate(candidate("candidate:nonsense", Some("a1"), None))
+                .is_err()
+        );
     }
 
     #[test]

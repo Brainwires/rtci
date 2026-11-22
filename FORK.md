@@ -156,6 +156,8 @@ whatever its E flag; ICE source filtering, authenticated role conflicts and cons
 whatever its E flag (AES-GCM included), no SRTP / SRTCP packet past a master key's lifetime and no
 ROC wrap on reception, replay protection on by default with a window of at least 64, nothing
 sent in the clear when Cryptex is required, master keys zeroized and never printed; ICE source filtering, authenticated role conflicts and consent, candidate
+whatever the timeouts, also on the path an ICE restart leaves in use; a response must come
+back from where its request went, on the socket it left from), candidate
 caps (mDNS-resolved ones included), mDNS answers only from the mDNS socket, at most 64 published
 mDNS names (a host candidate past them is dropped, not sent with its address), a bounded mDNS
 cache (256 addresses), bounded reading of an mDNS message (256 questions, 512 records, 9000

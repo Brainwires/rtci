@@ -7,6 +7,158 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Bug Fixes
+
+- **ice**: attributes after MESSAGE-INTEGRITY are ignored (RFC 8489 section 14.5). The HMAC does
+  not cover them, so someone who saw one valid check could replay it with ICE-CONTROLLED or
+  ICE-CONTROLLING appended and flip the agent's role.
+- **ice**: role conflicts follow RFC 8445 section 7.3.1.1. A conflicting request gets one
+  answer: the 487 when this agent keeps its role (and then nothing else comes of the request),
+  the success response when it switches. It got both. A controlled agent switches on an equal
+  tiebreaker (`>=`, it was `>`).
+- **ice**: a 487 (Role Conflict) response is acted on (section 7.2.5.1): the role switches, the
+  tiebreaker changes and the pair is checked again. Error responses were dropped unread, so an
+  agent whose peer answered 487 never left the conflict. Any other authenticated error response
+  fails the pair (section 7.2.5.2.4).
+- **ice**: a Binding request that arrives before the remote description is answered at once and
+  finished when the peer's credentials arrive: peer-reflexive candidate, triggered check,
+  nomination (section 7.3). It was dropped, so an offerer whose answerer started checking first
+  left those checks to time out. A request's USERNAME is valid when its first part is the local
+  fragment.
+- **ice**: pair priority is `2^32 * MIN(G,D) + 2 * MAX(G,D) + (G > D)` (section 6.1.2.3); it
+  multiplied MIN by `2^32 - 1`. `test_candidate_pair_priority` pinned the wrong values.
+- **ice**: PRIORITY in a check is the local candidate's priority as a peer-reflexive candidate
+  (section 7.1.1), not its own; a peer-reflexive remote candidate takes its priority from the
+  request (section 7.3.1.3) and is paired only with the local candidate the request arrived on.
+- **ice**: local candidates of one type get unique local preferences, IPv4 and IPv6 interleaved
+  (RFC 8445 section 5.1.2.1, RFC 8421 section 4; RFC 6544 section 4.2 for a TCP candidate's
+  other-pref). Two host candidates on two interfaces had the same priority.
+- **ice**: a candidate's foundation is made of its type, its base's IP address, its server and
+  its transport (section 5.1.1.3); it used the candidate's own address and no server.
+- **ice**: a nomination that gets no answer is given up after `max_binding_requests` requests
+  and the controlling agent nominates its next valid pair. It repeated the nomination until the
+  agent failed.
+- **ice**: a lite agent sends no connectivity checks (sections 6.2 and 7.3.2): a request with
+  USE-CANDIDATE selects the pair. It sent a triggered check and waited for the answer.
+- **ice**: a request on a pair that already succeeded triggers no check from the controlled
+  agent (section 7.3.1.4; every consent check of the peer cost a check back), and a request on a
+  Failed pair gives the pair a fresh budget on the controlled side too.
+- **ice**: an ICE restart given the credentials in use (`SettingEngine::set_ice_credentials`)
+  generates new ones (section 9). The offer carried the old pair, so the peer saw no restart
+  while this side had flushed its state.
+- **ice**: candidate constructors take component 0 (the `Default`) as 1 and refuse a component
+  above 256 or a priority above 2^31 - 1; `COMPONENT_RTCP` is 2.
+
+- **ice**: consent freshness follows RFC 7675 section 5.1. Consent checks on the selected pair
+  are 0.8 to 1.2 times the period apart, drawn anew each time, the period 5 seconds by default
+  and never less (it was a fixed 2 seconds); `poll_timeout` returns the drawn instant. Consent
+  expires 30 seconds after the last response whatever the configured timeouts (a zero
+  `failed_timeout` kept a connected agent sending for ever), and the open transactions go with
+  it.
+- **ice**: consent is kept up on the path an ICE restart leaves in use (RFC 7675 section 5.1).
+  The agent goes on sending consent requests there with the replaced generation's credentials,
+  answers the peer's, and gives the path up 30 seconds after the last response. Until now data
+  flowed on it unchecked until the restart selected a pair or failed.
+- **ice**: a lite agent keeps its selected pair alive with a Binding indication after 15
+  silent seconds (RFC 8445 section 11); it sent nothing.
+
+- **ice**: the agent runs the checklist of RFC 8445 instead of pinging every pair every 200 ms.
+  - Pairs have the five states of section 6.1.2.6, `Frozen` included: of the pairs with one
+    foundation the best is checked first and the others wait for it (RFC 8838 section 12 for
+    pairs that arrive later).
+  - Checks start one per Ta (50 ms by default, never under 5 ms), the highest-priority Waiting
+    pair first; a request from the peer puts its pair on the triggered-check queue, which is
+    served first (sections 6.1.4.1 and 6.1.4.2). A triggered check was sent the instant the
+    request arrived, and all pairs were pinged in one burst.
+  - A check is one STUN transaction: the same request is retransmitted after RTO, 2 RTO,
+    4 RTO, ... (RTO = max(500 ms, Ta x pairs Waiting or In-Progress), section 14.3), seven
+    requests by default, and the pair fails 16 RTO after the last. Over TCP it is sent once
+    (RFC 6544 section 7.1). The pair used to get a new request, with a new transaction id,
+    every 200 ms and failed after 1.6 s.
+  - A reflexive local candidate stands for its base: its pair with a remote candidate is
+    pruned as redundant with the host candidate's (section 6.1.2.4), so each check leaves a
+    socket once. The checklist holds 100 pairs at most (section 6.1.2.5), the best ones.
+  - A response is matched to its pair by transaction id and must come back the way the
+    request went, source and local address both, or the pair fails (section 7.2.5.2.1). Its
+    mapped address names the valid pair's local candidate, a new local peer-reflexive candidate
+    when the agent does not know it (sections 7.2.5.3.1 and 7.2.5.3.2).
+  - Once a pair is nominated the other pairs' transactions are cancelled and no ordinary check
+    is started (section 8.1.2); the controlling agent nominates one pair, with one transaction.
+  - A checking agent fails as soon as every pair has failed, once no candidate is to come (local
+    gathering complete and end-of-candidates received; section 7.2.5.4, RFC 8838 section 8).
+- **ice**: end-of-candidates reaches the agent (RFC 8838 sections 13 and 14): a remote candidate
+  that follows it, trickled or in a description, is ignored (it was paired and written into the
+  remote description after `a=end-of-candidates`), and a local candidate added after the empty
+  one is refused until an ICE restart.
+- **ice**: a signalled candidate with the address of a peer-reflexive one learned from a check
+  replaces it (RFC 8838 section 11); it was kept as a second candidate whose pair could never
+  succeed. A local candidate with the address and base of one already added is not kept (RFC
+  8445 section 5.1.3), and candidates of different components are not paired.
+- **ice**: a consent request waits for its response four times the pair's round-trip time
+  (500 ms to 4 s; RFC 7675 section 5.1) instead of a fixed 4 s.
+- **stats**: a candidate pair's state can be `frozen`.
+- **ice**: the agent receives STUN through `rtc_stun::validated::Validator`: FINGERPRINT is
+  verified when present (it never was), a request with an unknown comprehension-required
+  attribute is answered 420 with UNKNOWN-ATTRIBUTES and a response with one is discarded (RFC
+  8489 section 6.3), and only what the integrity covers is read.
+- **ice**: `Url`'s `Display` writes every IPv6 host in brackets (one without `::` was not).
+- **ice**: mDNS privacy (draft-ietf-mmusic-mdns-ice-candidates). A local relay candidate is not
+  paired with a remote mDNS candidate (section 3.3.2: the TURN server learned the hidden
+  address); a relay-only agent ignores remote mDNS candidates instead of resolving them
+  (section 3.2.1); with `QueryAndGather` a reflexive or relayed candidate is signalled with
+  raddr 0.0.0.0 rport 9 (section 3.1.2.2: it gave the hidden host address away); the address
+  of a peer-reflexive remote candidate is left out of the statistics unless the peer signalled
+  it (section 3.3.1).
+- **ice**: `tcptype` is written after raddr / rport and read wherever it stands among the
+  extension attributes, for every candidate type (RFC 6544 section 4.5); a TCP
+  server-reflexive or relayed candidate lost it on the way to SDP and back.
+- **ice**: when the selected TCP pair's connection is opened again (another source port), the
+  passive side moves to the new connection once its check succeeds (RFC 6544 section 11.1);
+  it kept writing to the dead one.
+
+### Features
+
+- **ice**: `Agent::checklist_state` (`ChecklistState`: Running, Completed, Failed), the state of
+  the checklist in RFC 8445's terms. The transport state reaches `Completed` (it never did):
+  a nominated pair, local gathering complete and end-of-candidates received.
+- **ice**: `AgentConfig::ta` and `AgentConfig::max_candidate_pairs`;
+  `Agent::set_remote_end_of_candidates`, `set_local_gathering_complete`,
+  `get_local_candidates_to_signal`; `CandidatePairState::Frozen`.
+- **ice**: `Candidate::set_local_preference_rank` / `local_preference_rank` (rank a local
+  candidate among those of its type, for example an unreliable interface last, RFC 8421
+  section 3) and `Candidate::peer_reflexive_priority`.
+
+### Breaking Changes
+
+- **ice**: candidate constructors and `unmarshal_candidate` return an error for a priority above
+  2^31 - 1 or a component above 256.
+- **ice**: a local candidate added without a priority after another of its type no longer has
+  the same priority as that one (its local preference is lower by its rank), and foundations of
+  server-reflexive candidates change (they follow the base, not the mapped address).
+
+- **ice**: `AgentConfig::keepalive_interval` (`with_ice_timeouts`) is the basic period of the
+  consent checks: default 5 seconds (was 2), a shorter non-zero value is raised to 5 seconds,
+  and each interval is 0.8 to 1.2 times it.
+- **ice**: a connected full agent is `Disconnected` when a consent request has gone unanswered
+  for `disconnected_timeout` (9 to 11 seconds after the last response by default; it was 5
+  seconds after it), and `Failed` 30 seconds after the last response at the latest:
+  `disconnected_timeout + failed_timeout` above 30 seconds, or a zero `failed_timeout`, no
+  longer keeps it alive longer. A shorter sum still fails it sooner.
+
+- **ice**: `AgentConfig` has two new fields (`ta`, `max_candidate_pairs`): a struct literal
+  without `..Default::default()` no longer compiles. `max_binding_requests` now counts the
+  requests of one transaction (Rc of RFC 8489), which back off from 500 ms: with the default 7
+  an unanswered pair fails after 39.5 s (it was 1.6 s), so in practice a silent pair is given up
+  by the agent's checking timeout or by end-of-candidates.
+- **ice**: `Agent::add_remote_candidate` returns `false` for a candidate it does not hold (a
+  duplicate, one after end-of-candidates); it returned `true` for a duplicate.
+- **ice**: the state after a nomination is `Completed`, not `Connected`, when the application
+  has signalled the end of local candidates and the peer the end of its own. Code that waits
+  for `Connected` alone should accept both (`RTCPeerConnectionState::Connected` covers both).
+- **ice**: `Agent::get_local_candidates` also returns the local peer-reflexive candidates the
+  agent learns; the selected pair's local candidate can be one of them (type `prflx`), its
+  base being the socket in use.
+
 ### Breaking changes
 
 - **stun**: `Message::decode` (and `unmarshal_binary`, `write`, `read_from`, `clone_to`) refuses

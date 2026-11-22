@@ -143,13 +143,7 @@ impl sansio::Protocol<TaggedBytesMut, (), ()> for Agent {
         // peer's new credentials.
         self.maintain_previous_generation(now);
 
-        if self.ufrag_pwd.remote_credentials.is_some()
-            && (self.force_candidate_contact
-                || self
-                    .selected_pair_deadline()
-                    .is_some_and(|deadline| deadline <= now)
-                || self.last_checking_time + self.get_timeout_interval() <= now)
-        {
+        if self.ice_deadline().is_some_and(|deadline| deadline <= now) {
             self.contact(now);
         }
         Ok(())
@@ -162,25 +156,7 @@ impl sansio::Protocol<TaggedBytesMut, (), ()> for Agent {
             None
         };
 
-        let ice_timeout = if self.ufrag_pwd.remote_credentials.is_some()
-            && !matches!(
-                self.connection_state,
-                ConnectionState::Failed | ConnectionState::Closed
-            ) {
-            if self.force_candidate_contact {
-                // A connectivity check was requested; ask the driver to call
-                // `handle_timeout` as soon as possible. `last_checking_time` is in the
-                // past, so the resulting deadline is immediate.
-                Some(self.last_checking_time)
-            } else if let Some(deadline) = self.selected_pair_deadline() {
-                // Connected: the next consent request, or the moment its silence counts.
-                Some(deadline)
-            } else {
-                Some(self.last_checking_time + self.get_timeout_interval())
-            }
-        } else {
-            None
-        };
+        let ice_timeout = self.ice_deadline();
 
         // This treats the options as a collection and picks the minimum
         [

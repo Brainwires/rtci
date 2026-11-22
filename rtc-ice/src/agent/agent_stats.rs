@@ -272,11 +272,20 @@ impl Agent {
     pub fn get_remote_candidates_stats(&self, now: Instant) -> Vec<CandidateStats> {
         let mut res = Vec::with_capacity(self.remote_candidates.len());
         for c in &self.remote_candidates {
+            // A peer-reflexive candidate's address is shown only when the peer signalled that
+            // address itself: it may be the one an mDNS name hides (mDNS draft Section 3.3.1).
+            let ip = if c.candidate_type() == CandidateType::PeerReflexive
+                && !self.is_signalled_remote_ip(c.addr().ip())
+            {
+                String::new()
+            } else {
+                c.address().to_owned()
+            };
             let stat = CandidateStats {
                 timestamp: now,
                 id: c.id().to_string(),
                 network_type: c.network_type(),
-                ip: c.address().to_owned(),
+                ip,
                 port: c.port(),
                 candidate_type: c.candidate_type(),
                 priority: c.priority(),

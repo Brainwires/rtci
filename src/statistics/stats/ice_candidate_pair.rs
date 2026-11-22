@@ -48,6 +48,7 @@ impl From<CandidatePairState> for RTCStatsIceCandidatePairState {
             CandidatePairState::InProgress => RTCStatsIceCandidatePairState::InProgress,
             CandidatePairState::Failed => RTCStatsIceCandidatePairState::Failed,
             CandidatePairState::Succeeded => RTCStatsIceCandidatePairState::Succeeded,
+            CandidatePairState::Frozen => RTCStatsIceCandidatePairState::Frozen,
             _ => RTCStatsIceCandidatePairState::Unspecified,
         }
     }

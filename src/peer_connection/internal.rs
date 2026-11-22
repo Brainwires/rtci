@@ -779,8 +779,10 @@ impl RTCPeerConnection {
         }
 
         if let Some(sd) = session_description {
+            // The candidates to signal: not the peer-reflexive ones the agent learned from
+            // its checks (RFC 8445 section 7.2.5.3.1).
             let candidates = rtc_ice_candidates_from_ice_candidates(
-                self.ice_transport().agent.get_local_candidates(),
+                &self.ice_transport().agent.get_local_candidates_to_signal(),
             );
 
             let mut parsed = match sd.unmarshal() {
@@ -2165,7 +2167,18 @@ impl RTCPeerConnection {
                         .remote_candidates
                         .contains_key(&remote_candidate_stats_id(c.id()))
             })
-            .map(RTCIceCandidate::from)
+            .map(|c| {
+                let mut candidate = RTCIceCandidate::from(c);
+                // draft-ietf-mmusic-mdns-ice-candidates section 3.3.1: a peer-reflexive
+                // candidate's address is shown only when the peer signalled that address
+                // itself; it may be the one an mDNS name hides.
+                if c.candidate_type() == ::ice::candidate::CandidateType::PeerReflexive
+                    && !agent.is_signalled_remote_ip(c.addr().ip())
+                {
+                    candidate.address.clear();
+                }
+                candidate
+            })
             .collect();
 
         if !unregistered_local.is_empty() {

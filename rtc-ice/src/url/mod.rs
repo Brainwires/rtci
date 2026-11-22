@@ -115,7 +115,9 @@ pub struct Url {
 
 impl fmt::Display for Url {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let host = if self.host.contains("::") {
+        // An IPv6 literal goes in brackets (RFC 7064 / RFC 7065 through RFC 3986's
+        // IP-literal), whether or not it has a "::" in it.
+        let host = if self.host.contains(':') {
             "[".to_owned() + self.host.as_str() + "]"
         } else {
             self.host.clone()

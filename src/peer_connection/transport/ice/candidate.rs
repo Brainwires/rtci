@@ -132,7 +132,8 @@ impl From<&Candidate> for RTCIceCandidate {
     fn from(c: &Candidate) -> Self {
         let typ: RTCIceCandidateType = c.candidate_type().into();
         let protocol = RTCIceProtocol::from(c.network_type().network_short().as_str());
-        let (related_address, related_port) = if let Some(ra) = c.related_address() {
+        // What is signalled: a base hidden behind an mDNS name is not (mDNS draft 3.1.2.2).
+        let (related_address, related_port) = if let Some(ra) = c.signalled_related_address() {
             (ra.address, ra.port)
         } else {
             (String::new(), 0)
@@ -169,7 +170,7 @@ impl RTCIceCandidate {
             priority: self.priority,
         };
 
-        let c = match self.typ {
+        let mut c = match self.typ {
             RTCIceCandidateType::Host => {
                 let config = CandidateHostConfig {
                     base_config,
@@ -205,6 +206,10 @@ impl RTCIceCandidate {
             }
             _ => return Err(Error::ErrICECandidateTypeUnknown),
         };
+        // RFC 6544 section 4.5: a TCP candidate of any type has a `tcptype`.
+        if self.typ != RTCIceCandidateType::Host {
+            c.set_tcp_type(self.tcp_type.to_ice());
+        }
 
         Ok(c)
     }

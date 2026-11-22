@@ -8,8 +8,36 @@ use crate::mdns::*;
 use crate::network_type::NetworkType;
 use crate::url::*;
 
-/// The interval at which the agent performs candidate checks in the connecting phase.
+/// How often the agent looks at its state while connecting, when nothing else wakes it sooner
+/// (a check to send, a retransmission, a transaction that times out).
 pub(crate) const DEFAULT_CHECK_INTERVAL: Duration = Duration::from_millis(200);
+
+/// Ta, the pacing timer of connectivity checks (RFC 8445 Section 14.2: "ICE agents SHOULD use a
+/// default Ta value, 50 ms").
+pub(crate) const DEFAULT_TA: Duration = Duration::from_millis(50);
+
+/// RFC 8445 Section 14.2: "regardless of the Ta value chosen for each agent, the combination of
+/// all transactions from all agents (if a given implementation runs several concurrent agents)
+/// will not be sent more often than once every 5 ms".
+pub(crate) const MIN_TA: Duration = Duration::from_millis(5);
+
+/// RFC 8445 Section 14.3: "RTO = MAX (500ms, Ta * N * (Num-Waiting + Num-In-Progress))", and
+/// the RTO is never under 500 ms.
+pub(crate) const MIN_RTO: Duration = Duration::from_millis(500);
+
+/// Rm of RFC 8489 Section 6.2.1: after the last request of a transaction the agent waits
+/// Rm times the RTO for a response.
+pub(crate) const STUN_RM: u32 = 16;
+
+/// Ti of RFC 8489 Section 6.2.2: how long a transaction over a reliable transport (TCP) waits
+/// for its response; such a request is never retransmitted (RFC 6544 Section 7.1).
+pub(crate) const STUN_TI: Duration = Duration::from_millis(39_500);
+
+/// RFC 8445 Section 6.1.2.5: "The limit MUST default to 100" candidate pairs.
+pub(crate) const DEFAULT_MAX_CANDIDATE_PAIRS: usize = 100;
+
+/// Most local peer-reflexive candidates learned from the mapped addresses of responses.
+pub(crate) const MAX_LOCAL_PEER_REFLEXIVE_CANDIDATES: usize = 16;
 
 /// The basic period of the consent checks on the selected pair (RFC 7675 Section 5.1:
 /// "Implementations SHOULD set a default interval of 5 seconds, resulting in a period between
@@ -46,17 +74,23 @@ pub(crate) const DEFAULT_PRFLX_ACCEPTANCE_MIN_WAIT: Duration = Duration::from_mi
 /// Wait time before nominating a relay candidate.
 pub(crate) const DEFAULT_RELAY_ACCEPTANCE_MIN_WAIT: Duration = Duration::from_millis(2000);
 
-/// Max binding request before considering a pair failed.
+/// Rc of RFC 8489 Section 6.2.1: the requests of one STUN transaction (the first and its
+/// retransmissions) before the pair is considered failed. "Rc SHOULD be configurable and SHOULD
+/// have a default of 7."
 pub(crate) const DEFAULT_MAX_BINDING_REQUESTS: u16 = 7;
 
 /// The number of bytes that can be buffered before we start to error.
 pub(crate) const MAX_BUFFER_SIZE: usize = 1000 * 1000; // 1MB
 
-/// Wait time before binding requests can be deleted.
+/// The longest a consent request waits for its response. The wait is four times the pair's
+/// last round-trip time, at least 500 ms (RFC 7675 Section 5.1: "for a time based on the
+/// estimated round-trip time (RTT) [...] with an allowance for variation in network delay"),
+/// and never longer than this, which is also less than the shortest consent interval.
 pub(crate) const MAX_BINDING_REQUEST_TIMEOUT: Duration = Duration::from_millis(4000);
 
-/// The most outstanding Binding requests the agent tracks; sending one more forgets the oldest
-/// (its response, if it ever arrives, is then ignored).
+/// The most open transactions the agent tracks beyond one per candidate pair: consent requests
+/// and cancelled transactions still waiting out their timeout. Past it the oldest of those is
+/// forgotten (its response, if it ever arrives, is then ignored).
 pub(crate) const MAX_PENDING_BINDING_REQUESTS: usize = 50;
 
 impl AgentConfig {
@@ -156,13 +190,23 @@ pub struct AgentConfig {
     /// If empty, all network types are supported.
     pub network_types: Vec<NetworkType>,
 
-    /// Controls how often our internal task loop runs when in the connecting state.
-    /// Only useful for testing.
+    /// Controls how often our internal task loop runs when in the connecting state and nothing
+    /// is due sooner. Only useful for testing.
     pub check_interval: Duration,
 
-    /// The max amount of binding requests the agent will send over a candidate pair for validation
-    /// or nomination, if after max_binding_requests the candidate is yet to answer a binding
-    /// request or a nomination we set the pair as failed.
+    /// Ta, the pacing of connectivity checks: one check is started per Ta (RFC 8445 Section
+    /// 6.1.4.2). 50 ms when nil; never under 5 ms (Section 14.2).
+    pub ta: Option<Duration>,
+
+    /// The most candidate pairs the checklist holds (RFC 8445 Section 6.1.2.5). 100 when nil.
+    /// When it is full a new pair replaces a Failed one, else a lower-priority one that has
+    /// not been checked yet, else it is dropped.
+    pub max_candidate_pairs: Option<usize>,
+
+    /// The requests of one connectivity-check transaction, the first and its retransmissions
+    /// (Rc of RFC 8489 Section 6.2.1; 7 when nil). They go out RTO, 2 RTO, 4 RTO, ... apart
+    /// (RTO is at least 500 ms), and the pair fails 16 RTO after the last one. Over TCP a
+    /// request is sent once.
     pub max_binding_requests: Option<u16>,
 
     /// Whether this agent takes the controlling role.
