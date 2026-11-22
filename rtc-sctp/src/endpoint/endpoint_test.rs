@@ -2124,6 +2124,9 @@ fn test_assoc_congestion_control_congestion_avoidance() -> Result<()> {
     {
         let a = pair.client_conn_mut(client_ch);
         a.ssthresh = ssthresh;
+        // This test reads the window at the end, when nothing is outstanding: Max.Burst
+        // (RFC 9260 6.1 D) would have brought it down to four packets by then.
+        a.max_burst = None;
         a.stats.reset();
         pair.server_conn_mut(server_ch).stats.reset();
     }
@@ -3228,11 +3231,14 @@ fn kps_repro_816_bundled_data_and_reset_must_not_lose_data() -> Result<()> {
 
     // Build one packet: DATA(tsn) + RECONFIG(sender_last_tsn = tsn) — pion's
     // write-then-close on a data channel.
-    let (vtag, tsn, sport, dport) = {
+    // The request carries the client's next request sequence number: any other is
+    // answered "Bad Sequence Number" (RFC 6525 5.2.1).
+    let (vtag, tsn, rsn, sport, dport) = {
         let a = pair.client_conn_mut(client_ch);
         (
             a.peer_verification_tag,
             a.my_next_tsn,
+            a.my_next_rsn,
             a.source_port,
             a.destination_port,
         )
@@ -3256,7 +3262,7 @@ fn kps_repro_816_bundled_data_and_reset_must_not_lose_data() -> Result<()> {
             }),
             Box::new(ChunkReconfig {
                 param_a: Some(Box::new(ParamOutgoingResetRequest {
-                    reconfig_request_sequence_number: 100,
+                    reconfig_request_sequence_number: rsn,
                     reconfig_response_sequence_number: 0,
                     sender_last_tsn: tsn,
                     stream_identifiers: vec![si],

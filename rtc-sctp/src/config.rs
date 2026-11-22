@@ -52,15 +52,35 @@ pub fn max_payload_size_for_mtu(mtu: u32) -> u32 {
 }
 pub(crate) const DEFAULT_MAX_MESSAGE_SIZE: u32 = 262144;
 
-/// How an association picks the stream whose message it sends next.
+/// How an association picks the stream whose data it sends next: the stream schedulers of
+/// RFC 8260 section 3.
+///
+/// Without user message interleaving a message that is part sent is finished before another
+/// stream is served, so a scheduler chooses between messages. With interleaving
+/// ([`TransportConfig::with_message_interleaving`], when the peer supports it too) it chooses
+/// for every chunk, and a large message no longer holds the others up.
+///
+/// A stream's priority is set with [`Stream::set_priority`](crate::Stream::set_priority).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum StreamScheduler {
-    /// One queue in the order messages were written, unordered messages first.
+    /// Messages leave in the order they were written, whatever their stream (RFC 8260
+    /// section 3.1).
     #[default]
     FirstComeFirstServed,
-    /// Each stream gets a share of the bytes sent in proportion to its weight, a whole message
-    /// at a time (RFC 8260 section 3.6, which RFC 8831 section 6.4 asks of WebRTC).
+    /// The streams with something to send take turns: a message each, or a chunk each when
+    /// interleaving (section 3.2).
+    RoundRobin,
+    /// Round robin that changes stream only when a new packet is started, so a packet
+    /// carries the data of one stream and its loss holds up that stream alone (section 3.3).
+    RoundRobinPerPacket,
+    /// The stream with the highest priority goes first, as long as it has something to send;
+    /// streams of equal priority take turns (section 3.4).
+    Priority,
+    /// Each stream gets the same share of the bytes sent (section 3.5).
+    FairCapacity,
+    /// Each stream gets a share of the bytes sent in proportion to its priority, taken as
+    /// its weight (section 3.6, which RFC 8831 section 6.4 asks of WebRTC).
     WeightedFairQueueing,
 }
 
@@ -83,6 +103,8 @@ pub struct TransportConfig {
     max_burst: Option<u32>,
     sack_delay: Duration,
     partial_reliability: bool,
+    message_interleaving: bool,
+    zero_checksum: bool,
 }
 
 impl Default for TransportConfig {
@@ -100,9 +122,11 @@ impl Default for TransportConfig {
             valid_cookie_life: Duration::from_secs(60),
             heartbeat_interval: Some(Duration::from_secs(30)),
             slow_start_growth_limit: 1,
-            max_burst: None,
+            max_burst: Some(4),
             sack_delay: Duration::from_millis(200),
             partial_reliability: true,
+            message_interleaving: false,
+            zero_checksum: false,
         }
     }
 }
@@ -139,6 +163,46 @@ impl TransportConfig {
         self.partial_reliability
     }
 
+    /// Whether user message interleaving (RFC 8260) is announced to the peer. When the peer
+    /// announces it too, user data travels in I-DATA chunks: the fragments of messages on
+    /// different streams may be interleaved, so a large message on one stream no longer
+    /// holds up the others, and the [stream scheduler](Self::with_stream_scheduler) chooses
+    /// the stream for every chunk. RFC 8831 section 6.1 says WebRTC data channels SHOULD use
+    /// it. Off by default; an application reads whole messages either way, so it needs no
+    /// change to turn it on.
+    pub fn with_message_interleaving(mut self, value: bool) -> Self {
+        self.message_interleaving = value;
+        self
+    }
+
+    /// See [`with_message_interleaving`](Self::with_message_interleaving).
+    pub fn message_interleaving(&self) -> bool {
+        self.message_interleaving
+    }
+
+    /// Says that the association runs over DTLS (RFC 8261), which detects errors better than
+    /// SCTP's CRC32c does, and so allows the zero checksum of RFC 9653 with the "SCTP over
+    /// DTLS" error detection method (section 6):
+    ///
+    /// - the INIT or INIT ACK carries the Zero Checksum Acceptable parameter, and packets
+    ///   that arrive with a checksum of zero are taken, their CRC32c not computed;
+    /// - when the peer announces the same, packets are sent with a checksum of zero and
+    ///   their CRC32c is not computed either. The packets RFC 9653 section 5.2 excepts keep
+    ///   a correct one: an INIT, a COOKIE ECHO, an answer to an out-of-the-blue packet.
+    ///
+    /// Off by default: every packet carries its CRC32c and one without is dropped. It MUST
+    /// NOT be turned on for an association that does not run over DTLS; a WebRTC data
+    /// channel transport always does.
+    pub fn with_zero_checksum(mut self, value: bool) -> Self {
+        self.zero_checksum = value;
+        self
+    }
+
+    /// See [`with_zero_checksum`](Self::with_zero_checksum).
+    pub fn zero_checksum(&self) -> bool {
+        self.zero_checksum
+    }
+
     /// Sets SACK.Delay (RFC 9260 sections 6.2 and 16): how long the acknowledgement of a DATA
     /// chunk may wait for a second one. Defaults to 200 ms. The RFC forbids more than 500 ms,
     /// so a longer delay is taken as 500 ms.
@@ -152,10 +216,11 @@ impl TransportConfig {
         self.sack_delay
     }
 
-    /// Sets Max.Burst (RFC 9260 sections 6.1 D and 16, where the recommended value is 4):
-    /// before DATA is sent the congestion window is brought down to what is outstanding plus
-    /// this many packets. `None`, the default, applies no such limit: an owner that
-    /// acknowledges in batches would have its peer's window cut on every SACK.
+    /// Sets Max.Burst (RFC 9260 sections 6.1 D and 16): before DATA is sent the congestion
+    /// window is brought down to what is outstanding plus this many packets, so that one
+    /// SACK for many packets does not release as many at once. Defaults to 4, the value the
+    /// RFC recommends. `None` applies no limit: a peer that acknowledges in batches (one that
+    /// reads its socket in bursts) otherwise has this side's window cut back on every SACK.
     pub fn with_max_burst(mut self, value: Option<u32>) -> Self {
         self.max_burst = value;
         self
@@ -390,13 +455,26 @@ impl fmt::Debug for EndpointConfig {
 /// Parameters governing incoming associations
 ///
 /// Default values should be suitable for most internet applications.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ServerConfig {
     /// Transport configuration to use for incoming associations
     pub transport: Arc<TransportConfig>,
 
     /// Maximum number of concurrent associations
     pub(crate) concurrent_associations: u32,
+
+    /// The crypto provider State Cookies are authenticated with, when one was given.
+    pub(crate) cookie_provider: Option<Arc<dyn crypto::RTCCryptoProvider>>,
+}
+
+impl fmt::Debug for ServerConfig {
+    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt.debug_struct("ServerConfig")
+            .field("transport", &self.transport)
+            .field("concurrent_associations", &self.concurrent_associations)
+            .field("cookie_authentication", &self.cookie_provider.is_some())
+            .finish()
+    }
 }
 
 impl Default for ServerConfig {
@@ -404,6 +482,7 @@ impl Default for ServerConfig {
         ServerConfig {
             transport: Arc::new(TransportConfig::default()),
             concurrent_associations: 100_000,
+            cookie_provider: None,
         }
     }
 }
@@ -414,7 +493,34 @@ impl ServerConfig {
         ServerConfig {
             transport: Arc::new(transport),
             concurrent_associations: 100_000,
+            cookie_provider: None,
         }
+    }
+
+    /// Gives the endpoint a crypto provider to authenticate State Cookies with, and makes
+    /// the handshake stateless on the accepting side, as RFC 9260 sections 5.1 and 5.1.3
+    /// have it.
+    ///
+    /// With a provider, the State Cookie of an INIT ACK holds everything the association is
+    /// made from, the time it was made, and an HMAC-SHA-256 over them under a random key of
+    /// the endpoint's (replaced every hour). The endpoint answers an INIT and keeps nothing:
+    /// [`Endpoint::handle`](crate::Endpoint::handle) returns `None` for it and the INIT ACK
+    /// leaves by [`Endpoint::poll_transmit`](crate::Endpoint::poll_transmit). The
+    /// association is made, and returned as
+    /// [`DatagramEvent::NewAssociation`](crate::DatagramEvent::NewAssociation), when a
+    /// COOKIE ECHO brings back a cookie whose MAC verifies and which is no older than
+    /// [`TransportConfig::with_valid_cookie_life`]; it is established at once.
+    ///
+    /// Without a provider (the default) the cookie is 32 random bytes and the endpoint makes
+    /// the association when the INIT arrives, remembering the cookie to compare it with the
+    /// one echoed. `rtc-sctp` names no cryptographic implementation of its own, so the MAC
+    /// is there only when the application supplies the provider.
+    pub fn cookie_authentication(
+        &mut self,
+        provider: Arc<dyn crypto::RTCCryptoProvider>,
+    ) -> &mut Self {
+        self.cookie_provider = Some(provider);
+        self
     }
 
     /// Maximum number of associations the endpoint holds at once. An INIT that would start

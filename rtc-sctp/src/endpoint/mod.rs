@@ -35,6 +35,7 @@ use crate::chunk::chunk_type::{
 };
 use crate::chunk::{Chunk, ErrorCause, OUT_OF_RESOURCE, STALE_COOKIE_ERROR};
 use crate::config::{ClientConfig, EndpointConfig, ServerConfig, TransportConfig};
+use crate::cookie::{CookieSigner, cookie_key_id};
 use crate::packet::PartialDecode;
 use crate::packet::{CommonHeader, Packet};
 use crate::shared::{
@@ -85,7 +86,17 @@ pub struct Endpoint {
     reject_new_associations: bool,
     /// Answers to packets that belong to no association (RFC 9260 8.4), for `poll_transmit`.
     transmits: VecDeque<TransportMessage<Payload>>,
+    /// The keys State Cookies are authenticated with, the current one first, when the server
+    /// configuration gives a crypto provider (`ServerConfig::cookie_authentication`).
+    cookie_signers: Vec<Arc<CookieSigner>>,
+    /// The zero of the cookies' timestamps: the first time the endpoint was given.
+    cookie_epoch: Option<Instant>,
 }
+
+/// How long a State Cookie key is used before another replaces it (RFC 9260 5.1.3: "it
+/// SHOULD be changed reasonably frequently"). The key before the current one is kept, so a
+/// cookie made just before the change is still good for its lifetime.
+const COOKIE_KEY_LIFETIME: std::time::Duration = std::time::Duration::from_secs(3600);
 
 /// Answers to out-of-the-blue packets kept until the owner collects them. An answer past
 /// this many is not made: the endpoint must not be a store for whoever sends it packets.
@@ -125,9 +136,17 @@ impl Endpoint {
             local_cid_generator: (endpoint_config.aid_generator_factory.as_ref())(),
             reject_new_associations: false,
             transmits: VecDeque::new(),
+            cookie_signers: vec![],
+            cookie_epoch: None,
             endpoint_config,
             server_config,
         }
+    }
+
+    /// How many associations the endpoint holds, ended ones not yet drained included.
+    #[cfg(test)]
+    pub(crate) fn association_count(&self) -> usize {
+        self.associations.len()
     }
 
     /// Replace the server configuration, affecting new incoming associations only
@@ -311,6 +330,27 @@ impl Endpoint {
             ));
         }
 
+        // RFC 9653 5.2, 5.3: a packet for no association has a correct CRC32c (an INIT
+        // always has), so one with a checksum of zero is dropped unless zero is its CRC32c.
+        if !partial_decode.checksum_ok(false) {
+            trace!("discarding a packet with a zero checksum that belongs to no association");
+            return None;
+        }
+
+        // RFC 9260 5.1, 5.1.3: with authenticated State Cookies the accepting side keeps
+        // nothing between the INIT and the COOKIE ECHO.
+        if let Some(signer) = self.cookie_signer(now) {
+            if partial_decode.first_chunk_type == CT_INIT && dst_cid == 0 {
+                self.answer_init_without_state(now, remote, ecn, partial_decode, signer);
+                return None;
+            }
+            if partial_decode.first_chunk_type == CT_COOKIE_ECHO {
+                return self
+                    .accept_cookie_echo(now, remote, ecn, partial_decode)
+                    .map(|(ch, a)| (ch, DatagramEvent::NewAssociation(a)));
+            }
+        }
+
         //
         // Potentially create a new association
         //
@@ -346,6 +386,233 @@ impl Endpoint {
 
         self.handle_out_of_the_blue(now, remote, &partial_decode);
         None
+    }
+
+    /// The signer of State Cookies, when the server configuration asks for authenticated
+    /// cookies: the current key, replaced when it has been in use for its lifetime.
+    fn cookie_signer(&mut self, now: Instant) -> Option<Arc<CookieSigner>> {
+        let provider = self.server_config.as_ref()?.cookie_provider.clone()?;
+        let epoch = *self.cookie_epoch.get_or_insert(now);
+        let expired = self
+            .cookie_signers
+            .first()
+            .is_none_or(|s| now.saturating_duration_since(s.since) >= COOKIE_KEY_LIFETIME);
+        if expired {
+            let key_id = self
+                .cookie_signers
+                .first()
+                .map_or(0, |s| s.key_id().wrapping_add(1));
+            let signer = Arc::new(CookieSigner::new(provider, key_id, epoch, now)?);
+            self.cookie_signers.insert(0, signer);
+            self.cookie_signers.truncate(2);
+        }
+        self.cookie_signers.first().cloned()
+    }
+
+    /// Whether the endpoint has room for one more association.
+    fn has_room(&mut self) -> bool {
+        let Some(limit) = self
+            .server_config
+            .as_ref()
+            .map(|config| config.concurrent_associations as usize)
+        else {
+            return false;
+        };
+        if self.live >= limit {
+            // An association that ended has given its place back.
+            self.release_ended();
+        }
+        self.live < limit && !self.reject_new_associations && !self.is_full()
+    }
+
+    /// RFC 9260 5.1 B: an INIT is answered with an INIT ACK whose State Cookie holds all the
+    /// association will be made from, and nothing is kept. The answer is worked out by an
+    /// association that lives for this call only.
+    fn answer_init_without_state(
+        &mut self,
+        now: Instant,
+        remote: SocketAddr,
+        ecn: Option<EcnCodepoint>,
+        partial_decode: PartialDecode,
+        signer: Arc<CookieSigner>,
+    ) {
+        let Some(initiate_tag) = partial_decode.initiate_tag else {
+            return;
+        };
+        let received = CommonHeader {
+            source_port: partial_decode.common_header.source_port,
+            destination_port: partial_decode.common_header.destination_port,
+            verification_tag: 0,
+        };
+        if !self.has_room() {
+            // RFC 9260 5.1, 8.4 3): an INIT that cannot be accepted is answered with an
+            // ABORT sent to its Initiate Tag.
+            if initiate_tag != 0 {
+                self.respond(
+                    now,
+                    remote,
+                    &received,
+                    initiate_tag,
+                    Box::new(ChunkAbort {
+                        error_causes: vec![ErrorCause {
+                            code: OUT_OF_RESOURCE,
+                            ..Default::default()
+                        }],
+                        tag_reflected: false,
+                    }),
+                );
+            }
+            return;
+        }
+        let Some(server_config) = self.server_config.clone() else {
+            return;
+        };
+        let local_aid = self.new_aid();
+        let mut association = Association::new(
+            Some(server_config.clone()),
+            server_config.transport.clone(),
+            self.endpoint_config.get_max_payload_size(),
+            local_aid,
+            remote,
+            self.local_addr,
+            self.transport_protocol,
+            now,
+        );
+        association.set_cookie_signer(signer);
+        association.handle_event(AssociationEvent(AssociationEventInner::Datagram(
+            TransportMessage {
+                now,
+                transport: TransportContext {
+                    local_addr: self.local_addr,
+                    peer_addr: remote,
+                    ecn,
+                    transport_protocol: self.transport_protocol,
+                },
+                message: Payload::PartialDecode(partial_decode),
+            },
+        )));
+        // The INIT ACK, or the ABORT that refuses the INIT.
+        while let Some(transmit) = association.poll_transmit(now) {
+            if self.transmits.len() >= MAX_QUEUED_OOTB_RESPONSES {
+                trace!("too many answers queued; not answering an INIT");
+                break;
+            }
+            self.transmits.push_back(TransportMessage {
+                now,
+                transport: TransportContext {
+                    local_addr: self.local_addr,
+                    peer_addr: remote,
+                    ecn: None,
+                    transport_protocol: self.transport_protocol,
+                },
+                message: transmit.message,
+            });
+        }
+    }
+
+    /// RFC 9260 5.1.5: a COOKIE ECHO for an association this endpoint does not hold. The
+    /// cookie's MAC is verified with the key it names, then its age; a good cookie makes the
+    /// association, which then takes the packet (and answers COOKIE ACK).
+    fn accept_cookie_echo(
+        &mut self,
+        now: Instant,
+        remote: SocketAddr,
+        ecn: Option<EcnCodepoint>,
+        partial_decode: PartialDecode,
+    ) -> Option<(AssociationHandle, Association)> {
+        let header = &partial_decode.common_header;
+        let received = CommonHeader {
+            source_port: header.source_port,
+            destination_port: header.destination_port,
+            verification_tag: header.verification_tag,
+        };
+        let cookie = partial_decode
+            .chunk_headers()
+            .into_iter()
+            .find(|(typ, _)| *typ == CT_COOKIE_ECHO)
+            .map(|(_, value)| value)?;
+        // 1), 2): a cookie whose key is gone, or whose MAC does not verify, is discarded
+        // silently.
+        let key_id = cookie_key_id(&cookie)?;
+        let signer = self
+            .cookie_signers
+            .iter()
+            .find(|s| s.key_id() == key_id)
+            .cloned()?;
+        let fields = signer.open(&cookie)?;
+        // 3): the tag and the ports of the packet are those the cookie was made for.
+        if fields.my_tag != received.verification_tag
+            || fields.destination_port != received.source_port
+            || fields.source_port != received.destination_port
+        {
+            return None;
+        }
+        let server_config = self.server_config.clone()?;
+        // 4): past its lifetime the cookie is refused with an ERROR "Stale Cookie", which
+        // says by how many microseconds.
+        let age = signer.age(&fields, now);
+        let life = server_config.transport.valid_cookie_life();
+        if age > life {
+            let staleness = u32::try_from((age - life).as_micros()).unwrap_or(u32::MAX);
+            self.respond(
+                now,
+                remote,
+                &received,
+                fields.peer_tag,
+                Box::new(crate::chunk::chunk_error::ChunkError {
+                    error_causes: vec![ErrorCause {
+                        code: STALE_COOKIE_ERROR,
+                        raw: Bytes::copy_from_slice(&staleness.to_be_bytes()),
+                    }],
+                }),
+            );
+            return None;
+        }
+        if self.association_ids.contains_key(&fields.my_tag) {
+            return None;
+        }
+        if !self.has_room() {
+            self.respond(
+                now,
+                remote,
+                &received,
+                fields.peer_tag,
+                Box::new(ChunkAbort {
+                    error_causes: vec![ErrorCause {
+                        code: OUT_OF_RESOURCE,
+                        ..Default::default()
+                    }],
+                    tag_reflected: false,
+                }),
+            );
+            return None;
+        }
+
+        // 5): the association is made from what the cookie says.
+        let (ch, mut association) = self.add_association(
+            fields.peer_tag,
+            fields.my_tag,
+            remote,
+            (received.source_port, received.destination_port),
+            now,
+            Some(server_config.clone()),
+            server_config.transport.clone(),
+        );
+        self.association_ids_init.insert(fields.peer_tag, ch);
+        association.restore_from_cookie(&fields, cookie, signer, now);
+        association.handle_event(AssociationEvent(AssociationEventInner::Datagram(
+            TransportMessage {
+                now,
+                transport: TransportContext {
+                    local_addr: self.local_addr,
+                    peer_addr: remote,
+                    ecn,
+                    transport_protocol: self.transport_protocol,
+                },
+                message: Payload::PartialDecode(partial_decode),
+            },
+        )));
+        Some((ch, association))
     }
 
     /// RFC 9260 8.4: a packet that belongs to no association of this endpoint.

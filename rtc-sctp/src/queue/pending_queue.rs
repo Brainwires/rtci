@@ -2,7 +2,7 @@ use crate::chunk::chunk_payload_data::{
     ChunkPayloadData, MessageId, MessageReliability, PayloadProtocolIdentifier,
 };
 use crate::config::StreamScheduler;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use shared::error::{Error, Result};
 
 use std::collections::{BTreeSet, VecDeque};
@@ -199,26 +199,18 @@ fn pop_front_fragment<T>(
     }
 }
 
-fn entry_message(entry: &mut PendingEntry) -> Option<&mut QueuedMessage> {
-    match entry {
+fn tagged_message(entry: &mut (u64, PendingEntry)) -> Option<&mut QueuedMessage> {
+    match &mut entry.1 {
         PendingEntry::Message(message) => Some(message),
         PendingEntry::Reset(_) => None,
     }
 }
 
-fn entry_whole(entry: PendingEntry) -> Option<ChunkPayloadData> {
-    match entry {
+fn tagged_whole(entry: (u64, PendingEntry)) -> Option<ChunkPayloadData> {
+    match entry.1 {
         PendingEntry::Message(QueuedMessage::Whole(c)) => Some(c),
         _ => None,
     }
-}
-
-fn tagged_message(entry: &mut (u128, PendingEntry)) -> Option<&mut QueuedMessage> {
-    entry_message(&mut entry.1)
-}
-
-fn tagged_whole(entry: (u128, PendingEntry)) -> Option<ChunkPayloadData> {
-    entry_whole(entry.1)
 }
 
 /// A reset is control state, with no DATA payload or reliability policy.
@@ -248,87 +240,60 @@ enum PendingEntry {
     Reset(ResetMarker),
 }
 
-/// One stream's queue under weighted fair queueing, each entry with its finish tag.
-#[derive(Debug)]
-struct WfqStream {
-    entries: VecDeque<(u128, PendingEntry)>,
-    weight: u16,
-    last_finish: u128,
-}
+/// What a stream with a message at its head is scheduled by: the lowest key goes next.
+type Key = (u128, u64);
 
-impl Default for WfqStream {
-    fn default() -> Self {
-        Self {
-            entries: VecDeque::new(),
-            weight: DEFAULT_STREAM_WEIGHT,
-            last_finish: 0,
-        }
-    }
-}
-
-/// Self-clocked fair queueing: a message's finish tag is the later of the virtual time and its
-/// stream's last tag, plus its bytes over the stream's weight, and the lowest head tag goes next.
+/// One outgoing stream's queue: its messages and resets in the order they were written,
+/// each with its arrival number.
 #[derive(Debug, Default)]
-struct Wfq {
-    streams: FxHashMap<u16, WfqStream>,
-    /// Each non-empty stream keyed by its head: a reset head sorts first, then message head tags.
-    heads: BTreeSet<(u128, u16)>,
-    /// The finish tag of the message most recently started.
-    virtual_time: u128,
+struct StreamQueue {
+    entries: VecDeque<(u64, PendingEntry)>,
+    /// The key of the stream while a message is at its head.
+    key: Option<Key>,
+    /// The message at the head has had a fragment sent.
+    part_sent: bool,
+    /// Fair queueing: the finish tag of the unit (message, or chunk when interleaving) last
+    /// scheduled.
+    last_finish: u128,
+    /// Round robin per packet: the turn the stream holds until its packet is full.
+    turn: Option<u64>,
 }
 
-impl Wfq {
-    fn head_key(&self, stream: u16) -> Option<(u128, u16)> {
-        match self.streams.get(&stream)?.entries.front()? {
-            (_, PendingEntry::Reset(_)) => Some((0, stream)),
-            (tag, PendingEntry::Message(_)) => Some((tag.saturating_add(1), stream)),
-        }
-    }
-
-    /// Runs `change` on one stream's queue and re-keys the stream by its new head.
-    fn update<T>(&mut self, stream: u16, change: impl FnOnce(&mut WfqStream, u128) -> T) -> T {
-        if let Some(key) = self.head_key(stream) {
-            self.heads.remove(&key);
-        }
-        let virtual_time = self.virtual_time;
-        let result = change(self.streams.entry(stream).or_default(), virtual_time);
-        if let Some(key) = self.head_key(stream) {
-            self.heads.insert(key);
-        }
-        result
-    }
-
-    fn push(&mut self, stream: u16, bytes: usize, entry: PendingEntry) {
-        self.update(stream, |s, virtual_time| {
-            let start = s.last_finish.max(virtual_time);
-            let tag = start + ((bytes as u128) << 16) / u128::from(s.weight);
-            s.last_finish = tag;
-            s.entries.push_back((tag, entry));
-        });
-    }
-
-    /// The stream whose head goes next, and whether that head is a reset.
-    fn next(&self) -> Option<(u16, bool)> {
-        self.heads.first().map(|&(key, stream)| (stream, key == 0))
-    }
-
-    fn queue_mut(&mut self, stream: u16) -> Option<&mut VecDeque<(u128, PendingEntry)>> {
-        self.streams.get_mut(&stream).map(|s| &mut s.entries)
-    }
-}
-
+/// The messages waiting to be sent, one queue per stream, and the stream scheduler (RFC 8260
+/// section 3) that picks the stream whose data goes next.
+///
+/// Without user message interleaving a message that has had a fragment sent is finished
+/// before any other stream is served (its fragments need consecutive TSNs), so the scheduler
+/// chooses at message boundaries. With interleaving (I-DATA) it chooses for every chunk, and
+/// each stream still sends one message at a time.
 #[derive(Debug, Default)]
 pub(crate) struct PendingQueue {
-    unordered_queue: VecDeque<PendingEntry>,
-    ordered_queue: VecDeque<PendingEntry>,
+    scheduler: StreamScheduler,
+    interleaving: bool,
+    streams: FxHashMap<u16, StreamQueue>,
+    /// The priority (or weight) of each stream that was given one.
+    priorities: FxHashMap<u16, u16>,
+    /// The streams with a message at their head, by key.
+    heads: BTreeSet<(Key, u16)>,
+    /// The streams with a reset at their head, by arrival.
+    resets: BTreeSet<(u64, u16)>,
+    /// Without interleaving: the stream whose message is part sent.
+    locked: Option<u16>,
+    /// The streams whose head message is part sent.
+    part_sent: FxHashSet<u16>,
+    /// Only messages that are part sent may go on (see `set_only_part_sent`).
+    only_part_sent: bool,
+    next_arrival: u64,
+    next_turn: u64,
+    /// Fair queueing: the finish tag of the unit most recently started.
+    virtual_time: u128,
+    /// Round robin per packet: what a packet holds, what the current one holds so far, and
+    /// the stream it belongs to.
+    packet_budget: usize,
+    packet_used: usize,
+    packet_stream: Option<u16>,
     queue_len: usize,
     n_bytes: usize,
-    selected: bool,
-    unordered_is_selected: bool,
-    /// Present when messages are scheduled by weighted fair queueing.
-    wfq: Option<Wfq>,
-    /// Under weighted fair queueing, the stream whose message is part sent.
-    selected_stream: u16,
 }
 
 impl PendingQueue {
@@ -338,15 +303,154 @@ impl PendingQueue {
 
     pub(crate) fn with_scheduler(scheduler: StreamScheduler) -> Self {
         PendingQueue {
-            wfq: (scheduler == StreamScheduler::WeightedFairQueueing).then(Wfq::default),
+            scheduler,
             ..PendingQueue::default()
         }
     }
 
-    /// Sets the weight a stream's later messages are scheduled with; zero counts as one.
+    /// Whether the scheduler may switch streams between the fragments of a message: user
+    /// message interleaving was negotiated (RFC 8260 2.2.2).
+    pub(crate) fn set_interleaving(&mut self, interleaving: bool) {
+        self.interleaving = interleaving;
+    }
+
+    /// Whether a packet carries the DATA of one stream only (RFC 8260 3.3).
+    pub(crate) fn one_stream_per_packet(&self) -> bool {
+        self.scheduler == StreamScheduler::RoundRobinPerPacket
+    }
+
+    /// The room a packet has for DATA chunks, for the round-robin-per-packet scheduler.
+    pub(crate) fn set_packet_budget(&mut self, bytes: usize) {
+        self.packet_budget = bytes;
+    }
+
+    /// Sets a stream's priority: its weight under weighted fair queueing (a stream with n
+    /// times the weight gets n times the capacity) and its rank under the priority scheduler
+    /// (the higher value goes first). Zero counts as one.
     pub(crate) fn set_weight(&mut self, stream: u16, weight: u16) {
-        if let Some(wfq) = self.wfq.as_mut() {
-            wfq.streams.entry(stream).or_default().weight = weight.max(1);
+        self.priorities.insert(stream, weight.max(1));
+        if self.scheduler == StreamScheduler::Priority
+            && let Some(q) = self.streams.get_mut(&stream)
+            && let Some(key) = q.key
+        {
+            self.heads.remove(&(key, stream));
+            let key = (u128::from(u16::MAX - weight.max(1)), key.1);
+            q.key = Some(key);
+            self.heads.insert((key, stream));
+        }
+    }
+
+    /// A new stream took this identifier: it starts with the default priority.
+    pub(crate) fn forget_weight(&mut self, stream: u16) {
+        if self.priorities.remove(&stream).is_some() {
+            self.set_weight(stream, DEFAULT_STREAM_WEIGHT);
+            self.priorities.remove(&stream);
+        }
+    }
+
+    fn weight(&self, stream: u16) -> u16 {
+        self.priorities
+            .get(&stream)
+            .copied()
+            .unwrap_or(DEFAULT_STREAM_WEIGHT)
+    }
+
+    /// The bytes of the unit at the head of a message that the fair schedulers account for:
+    /// the chunk when interleaving, the whole message otherwise.
+    fn unit_bytes(&self, message: &QueuedMessage) -> usize {
+        if self.interleaving {
+            message.peek().map_or(0, |c| c.user_data.len())
+        } else {
+            message.bytes()
+        }
+    }
+
+    /// Takes the stream out of the scheduler's sets.
+    fn unschedule(&mut self, stream: u16) {
+        let Some(q) = self.streams.get_mut(&stream) else {
+            return;
+        };
+        if let Some(key) = q.key.take() {
+            self.heads.remove(&(key, stream));
+        }
+        if let Some((arrival, PendingEntry::Reset(_))) = q.entries.front() {
+            self.resets.remove(&(*arrival, stream));
+        }
+    }
+
+    /// Puts the stream into the scheduler's sets by what is at its head now: a new unit.
+    fn schedule(&mut self, stream: u16) {
+        let weight = u128::from(self.weight(stream));
+        let Some(q) = self.streams.get(&stream) else {
+            return;
+        };
+        let (arrival, unit) = match q.entries.front() {
+            None => {
+                self.streams.remove(&stream);
+                if self.packet_stream == Some(stream) {
+                    self.packet_stream = None;
+                    self.packet_used = 0;
+                }
+                return;
+            }
+            Some((arrival, PendingEntry::Reset(_))) => {
+                self.resets.insert((*arrival, stream));
+                return;
+            }
+            Some((arrival, PendingEntry::Message(message))) => (*arrival, self.unit_bytes(message)),
+        };
+        let fresh_turn = self.next_turn;
+        let virtual_time = self.virtual_time;
+        let Some(q) = self.streams.get_mut(&stream) else {
+            return;
+        };
+        let key: Key = match self.scheduler {
+            // RFC 8260 3.1: the order the application delivered the messages in.
+            StreamScheduler::FirstComeFirstServed => (u128::from(arrival), 0),
+            // 3.2: the streams take turns, a message or (interleaving) a chunk each.
+            StreamScheduler::RoundRobin => {
+                self.next_turn += 1;
+                (0, fresh_turn)
+            }
+            // 3.3: a stream keeps its turn until its packet is full.
+            StreamScheduler::RoundRobinPerPacket => {
+                if q.turn.is_none() {
+                    self.next_turn += 1;
+                }
+                (0, *q.turn.get_or_insert(fresh_turn))
+            }
+            // 3.4: the higher priority first; equal priorities take turns.
+            StreamScheduler::Priority => {
+                self.next_turn += 1;
+                (u128::from(u16::MAX - weight as u16), fresh_turn)
+            }
+            // 3.5, 3.6: self-clocked fair queueing. A unit's finish tag is the later of the
+            // virtual time and its stream's last tag, plus its bytes over the stream's
+            // weight; the lowest tag goes next. Fair capacity is every weight equal.
+            StreamScheduler::FairCapacity | StreamScheduler::WeightedFairQueueing => {
+                let weight = if self.scheduler == StreamScheduler::FairCapacity {
+                    1
+                } else {
+                    weight
+                };
+                let start = q.last_finish.max(virtual_time);
+                let finish = start + ((unit as u128) << 16) / weight;
+                q.last_finish = finish;
+                (finish, 0)
+            }
+        };
+        q.key = Some(key);
+        self.heads.insert((key, stream));
+    }
+
+    fn push(&mut self, stream: u16, entry: PendingEntry) {
+        let arrival = self.next_arrival;
+        self.next_arrival += 1;
+        let q = self.streams.entry(stream).or_default();
+        let was_empty = q.entries.is_empty();
+        q.entries.push_back((arrival, entry));
+        if was_empty {
+            self.schedule(stream);
         }
     }
 
@@ -358,209 +462,192 @@ impl PendingQueue {
         };
         self.n_bytes += message.bytes();
         self.queue_len += message.len();
-        let snapshot = message.snapshot();
-        if let Some(wfq) = self.wfq.as_mut() {
-            wfq.push(
-                snapshot.stream_identifier,
-                message.bytes(),
-                PendingEntry::Message(message),
-            );
-            return;
-        }
-        let queue = if snapshot.unordered {
-            &mut self.unordered_queue
-        } else {
-            &mut self.ordered_queue
-        };
-        queue.push_back(PendingEntry::Message(message));
+        let stream = message.snapshot().stream_identifier;
+        self.push(stream, PendingEntry::Message(message));
     }
 
     pub(crate) fn push_reset(&mut self, reset: ResetMarker) {
         self.queue_len += 1;
-        if let Some(wfq) = self.wfq.as_mut() {
-            wfq.push(reset.stream_identifier, 0, PendingEntry::Reset(reset));
-            return;
-        }
-        self.ordered_queue.push_back(PendingEntry::Reset(reset));
+        self.push(reset.stream_identifier, PendingEntry::Reset(reset));
     }
 
-    /// Under weighted fair queueing, the stream whose message goes next; `None` while a reset
-    /// waits at a stream's head and no message is part sent.
-    fn next_wfq_stream(&self) -> Option<u16> {
-        let wfq = self.wfq.as_ref()?;
-        if self.selected {
-            return Some(self.selected_stream);
+    /// The stream whose message goes next.
+    fn next_stream(&self) -> Option<u16> {
+        if let Some(stream) = self.locked {
+            return Some(stream);
         }
-        match wfq.next()? {
-            (stream, false) => Some(stream),
-            (_, true) => None,
+        if self.only_part_sent {
+            return self.part_sent.iter().copied().min();
         }
+        if let Some(stream) = self.packet_stream
+            && self.streams.get(&stream).is_some_and(|q| q.key.is_some())
+        {
+            return Some(stream);
+        }
+        self.heads.first().map(|(_, stream)| *stream)
     }
 
-    fn next_wfq_message(&self) -> Option<&QueuedMessage> {
-        let stream = self.next_wfq_stream()?;
-        match self.wfq.as_ref()?.streams.get(&stream)?.entries.front()? {
+    fn head_message(&self, stream: u16) -> Option<&QueuedMessage> {
+        match self.streams.get(&stream)?.entries.front()? {
             (_, PendingEntry::Message(message)) => Some(message),
             (_, PendingEntry::Reset(_)) => None,
         }
     }
 
-    fn front_queue(&self) -> &VecDeque<PendingEntry> {
-        if self.selected {
-            if self.unordered_is_selected {
-                &self.unordered_queue
-            } else {
-                &self.ordered_queue
-            }
-        } else if !self.unordered_queue.is_empty() {
-            &self.unordered_queue
-        } else {
-            &self.ordered_queue
-        }
-    }
-
     pub(crate) fn peek(&self) -> Option<&ChunkPayloadData> {
-        if self.wfq.is_some() {
-            return self.next_wfq_message()?.peek();
-        }
-        match self.front_queue().front()? {
-            PendingEntry::Message(message) => message.peek(),
-            PendingEntry::Reset(_) => None,
-        }
+        self.head_message(self.next_stream()?)?.peek()
     }
 
-    /// Preserve the existing ordered/unordered scheduling and reset position. Under weighted fair
-    /// queueing a reset leaves once its stream's earlier messages have, ahead of other streams.
+    /// A reset leaves once the messages written to its stream before it have left. It waits
+    /// for no other stream, and not for a message that is part sent without interleaving.
     pub(crate) fn pop_ready_reset(&mut self) -> Option<ResetMarker> {
-        if let Some(wfq) = self.wfq.as_mut() {
-            if self.selected {
-                return None;
-            }
-            let (stream, true) = wfq.next()? else {
-                return None;
-            };
-            let queue_len = self.queue_len.checked_sub(1)?;
-            let reset = wfq.update(stream, |s, _| match s.entries.front()? {
-                (_, PendingEntry::Reset(_)) => match s.entries.pop_front()? {
-                    (_, PendingEntry::Reset(reset)) => Some(reset),
-                    _ => None,
-                },
-                _ => None,
-            })?;
-            self.queue_len = queue_len;
-            return Some(reset);
-        }
-        if self.selected || !self.unordered_queue.is_empty() {
+        if self.locked.is_some() {
             return None;
         }
-        let PendingEntry::Reset(_) = self.ordered_queue.front()? else {
-            return None;
-        };
+        let (_, stream) = *self.resets.first()?;
         let queue_len = self.queue_len.checked_sub(1)?;
-        let PendingEntry::Reset(reset) = self.ordered_queue.pop_front()? else {
+        self.unschedule(stream);
+        let entry = self.streams.get_mut(&stream)?.entries.pop_front();
+        self.schedule(stream);
+        let Some((_, PendingEntry::Reset(reset))) = entry else {
             return None;
         };
         self.queue_len = queue_len;
         Some(reset)
     }
 
+    /// The stream whose head is the message `id`, among the streams a message can be
+    /// abandoned on: the one that goes next and the ones part sent.
+    fn stream_of_head(&self, id: MessageId) -> Option<u16> {
+        let is_head = |stream: &u16| {
+            self.head_message(*stream)
+                .is_some_and(|m| m.snapshot().id == Some(id))
+        };
+        self.locked
+            .into_iter()
+            .chain(self.next_stream())
+            .chain(self.part_sent.iter().copied())
+            .find(is_head)
+    }
+
     /// Remove the rest of this message once. A repeated call cannot consume
     /// the next message, even when it has the same stream and policy metadata.
     pub(crate) fn drain_message(&mut self, id: MessageId) -> Result<Vec<ChunkPayloadData>> {
-        let next = if self.wfq.is_some() {
-            self.next_wfq_message()
-        } else {
-            match self.front_queue().front() {
-                Some(PendingEntry::Message(message)) => Some(message),
-                _ => None,
-            }
-        };
-        let Some(message) = next else {
+        let Some(stream) = self.stream_of_head(id) else {
             return Ok(vec![]);
         };
-        let snapshot = message.snapshot();
-        if snapshot.id != Some(id) {
+        let Some(message) = self.head_message(stream) else {
             return Ok(vec![]);
-        }
+        };
         let (count, bytes) = message.validate_tail()?;
         if count > self.queue_len || bytes > self.n_bytes {
             return Err(Error::OtherSctpErr(
                 "invalid pending message accounting".into(),
             ));
         }
-        let entry = match self.wfq.as_mut() {
-            Some(wfq) => wfq
-                .update(snapshot.stream_identifier, |s, _| s.entries.pop_front())
-                .map(|(_, entry)| entry),
-            None if snapshot.unordered => self.unordered_queue.pop_front(),
-            None => self.ordered_queue.pop_front(),
-        };
-        let Some(PendingEntry::Message(message)) = entry else {
+        self.unschedule(stream);
+        let entry = self
+            .streams
+            .get_mut(&stream)
+            .and_then(|q| q.entries.pop_front());
+        self.finish_message(stream);
+        self.schedule(stream);
+        let Some((_, PendingEntry::Message(message))) = entry else {
             return Err(Error::OtherSctpErr("missing pending message".into()));
         };
         self.queue_len -= count;
         self.n_bytes -= bytes;
-        self.selected = false;
         Ok(message.into_fragments())
     }
 
+    /// The message at the head of `stream` is over: sent to its last fragment, or abandoned.
+    fn finish_message(&mut self, stream: u16) {
+        if self.locked == Some(stream) {
+            self.locked = None;
+        }
+        self.part_sent.remove(&stream);
+        if let Some(q) = self.streams.get_mut(&stream) {
+            q.part_sent = false;
+        }
+    }
+
+    /// Round robin per packet: the packet being filled is closed, and the stream it
+    /// belonged to gives up its turn. Called when a new packet is started.
+    pub(crate) fn start_packet(&mut self) {
+        self.packet_used = 0;
+        let Some(stream) = self.packet_stream.take() else {
+            return;
+        };
+        if let Some(q) = self.streams.get_mut(&stream)
+            && q.turn.take().is_some()
+            && q.key.is_some()
+        {
+            self.unschedule(stream);
+            self.schedule(stream);
+        }
+    }
+
+    /// Takes the next fragment of the stream the scheduler picks. `beginning_fragment` is
+    /// what the caller saw with `peek`: a fragment that does not match it is not taken.
     pub(crate) fn pop(
         &mut self,
         beginning_fragment: bool,
-        unordered: bool,
+        _unordered: bool,
     ) -> Option<ChunkPayloadData> {
-        if self.wfq.is_some() {
-            return self.pop_wfq(beginning_fragment);
+        let stream = self.next_stream()?;
+        let head = self.head_message(stream)?.peek()?;
+        if head.beginning_fragment != beginning_fragment {
+            return None;
         }
-        let unordered = if self.selected {
-            self.unordered_is_selected
-        } else if beginning_fragment {
-            unordered
-        } else {
-            return None;
-        };
-        let queue = if unordered {
-            &mut self.unordered_queue
-        } else {
-            &mut self.ordered_queue
-        };
-        let PendingEntry::Message(message) = queue.front()? else {
-            return None;
-        };
-        let n_bytes = self.n_bytes.checked_sub(message.peek()?.user_data.len())?;
+        let n_bytes = self.n_bytes.checked_sub(head.user_data.len())?;
         let queue_len = self.queue_len.checked_sub(1)?;
-        let c = pop_front_fragment(queue, entry_message, entry_whole)?;
-        self.selected = !c.ending_fragment;
-        self.unordered_is_selected = unordered;
+        let fair = matches!(
+            self.scheduler,
+            StreamScheduler::FairCapacity | StreamScheduler::WeightedFairQueueing
+        );
+        let q = self.streams.get_mut(&stream)?;
+        let key = q.key;
+        let c = pop_front_fragment(&mut q.entries, tagged_message, tagged_whole)?;
+        q.part_sent = !c.ending_fragment;
         self.n_bytes = n_bytes;
         self.queue_len = queue_len;
-        Some(c)
-    }
 
-    /// Takes the next fragment from the stream weighted fair queueing picks, moving the virtual
-    /// time to a message's finish tag as the message starts.
-    fn pop_wfq(&mut self, beginning_fragment: bool) -> Option<ChunkPayloadData> {
-        if !self.selected && !beginning_fragment {
-            return None;
+        // The virtual time moves to a unit's finish tag as the unit starts.
+        if fair
+            && (self.interleaving || c.beginning_fragment)
+            && let Some((finish, _)) = key
+        {
+            self.virtual_time = self.virtual_time.max(finish);
         }
-        let stream = self.next_wfq_stream()?;
-        let n_bytes = self
-            .n_bytes
-            .checked_sub(self.next_wfq_message()?.peek()?.user_data.len())?;
-        let queue_len = self.queue_len.checked_sub(1)?;
-        let starting = !self.selected;
-        let wfq = self.wfq.as_mut()?;
-        let (c, tag) = wfq.update(stream, |s, _| {
-            let tag = s.entries.front()?.0;
-            pop_front_fragment(&mut s.entries, tagged_message, tagged_whole).map(|c| (c, tag))
-        })?;
-        if starting {
-            wfq.virtual_time = wfq.virtual_time.max(tag);
+
+        if c.ending_fragment {
+            self.finish_message(stream);
+        } else {
+            self.part_sent.insert(stream);
+            if !self.interleaving {
+                self.locked = Some(stream);
+            }
         }
-        self.selected = !c.ending_fragment;
-        self.selected_stream = stream;
-        self.n_bytes = n_bytes;
-        self.queue_len = queue_len;
+
+        if self.scheduler == StreamScheduler::RoundRobinPerPacket {
+            self.packet_stream = Some(stream);
+            self.packet_used += c.wire_size();
+        }
+        // The unit is done when its message is, or with every chunk when interleaving.
+        if c.ending_fragment || self.interleaving {
+            self.unschedule(stream);
+            self.schedule(stream);
+        }
+        if self.scheduler == StreamScheduler::RoundRobinPerPacket && self.locked.is_none() {
+            // The stream keeps the packet while its next chunk still fits.
+            let fits = self
+                .head_message(stream)
+                .and_then(QueuedMessage::peek)
+                .is_some_and(|next| self.packet_used + next.wire_size() <= self.packet_budget);
+            if !fits {
+                self.start_packet();
+            }
+        }
         Some(c)
     }
 
@@ -568,50 +655,57 @@ impl PendingQueue {
         self.n_bytes
     }
 
-    /// Whether a message is part sent: its remaining fragments go before anything else.
+    /// Whether a message is part sent: its remaining fragments go before a pause in sending.
     pub(crate) fn is_mid_message(&self) -> bool {
-        self.selected
+        !self.part_sent.is_empty()
     }
 
-    /// Gives every ordered message still queued a new Stream Sequence Number, in the order
-    /// its stream sends them: `next` is called with the stream of each (RFC 6525 5.2.4 G5,
-    /// 5.2.7 H5: after an SSN/TSN reset every stream sends from SSN 0).
-    pub(crate) fn renumber_ordered(&mut self, mut next: impl FnMut(u16) -> u16) {
-        let mut renumber = |entry: &mut PendingEntry| {
-            let PendingEntry::Message(message) = entry else {
-                return;
+    /// While set, only the messages that are part sent go on; nothing new is started.
+    pub(crate) fn set_only_part_sent(&mut self, only: bool) {
+        self.only_part_sent = only;
+    }
+
+    /// Gives every message still queued new numbers, in the order its stream sends them:
+    /// `number` is called with the stream of each message and whether it is unordered, and
+    /// returns its Stream Sequence Number and Message Identifier (RFC 6525 5.2.4 G5, 5.2.7
+    /// H5: after an SSN/TSN reset every stream starts over).
+    pub(crate) fn renumber(&mut self, mut number: impl FnMut(u16, bool) -> (u16, u32)) {
+        let mut streams: Vec<u16> = self.streams.keys().copied().collect();
+        streams.sort_unstable();
+        for stream in streams {
+            let Some(q) = self.streams.get_mut(&stream) else {
+                continue;
             };
-            match message {
-                QueuedMessage::Whole(c) => {
-                    if !c.unordered {
-                        c.stream_sequence_number = next(c.stream_identifier);
-                    }
-                }
-                QueuedMessage::Fragmented {
-                    snapshot,
-                    fragments,
-                    ..
-                } => {
-                    if !snapshot.unordered {
-                        let ssn = next(snapshot.stream_identifier);
-                        snapshot.stream_sequence_number = ssn;
-                        for c in fragments.iter_mut() {
+            for (_, entry) in q.entries.iter_mut() {
+                let PendingEntry::Message(message) = entry else {
+                    continue;
+                };
+                match message {
+                    QueuedMessage::Whole(c) => {
+                        let (ssn, mid) = number(c.stream_identifier, c.unordered);
+                        if !c.unordered {
                             c.stream_sequence_number = ssn;
+                        }
+                        c.mid = mid;
+                    }
+                    QueuedMessage::Fragmented {
+                        snapshot,
+                        fragments,
+                        ..
+                    } => {
+                        let (ssn, mid) = number(snapshot.stream_identifier, snapshot.unordered);
+                        if !snapshot.unordered {
+                            snapshot.stream_sequence_number = ssn;
+                        }
+                        for c in fragments.iter_mut() {
+                            if !snapshot.unordered {
+                                c.stream_sequence_number = ssn;
+                            }
+                            c.mid = mid;
                         }
                     }
                 }
             }
-        };
-        if let Some(wfq) = self.wfq.as_mut() {
-            let mut streams: Vec<u16> = wfq.streams.keys().copied().collect();
-            streams.sort_unstable();
-            for stream in streams {
-                if let Some(s) = wfq.streams.get_mut(&stream) {
-                    s.entries.iter_mut().for_each(|(_, e)| renumber(e));
-                }
-            }
-        } else {
-            self.ordered_queue.iter_mut().for_each(&mut renumber);
         }
     }
 
@@ -660,7 +754,7 @@ mod tests {
                 assert_eq!(Some(id), queue.peek().unwrap().message_id);
                 assert_eq!(len, queue.len());
                 assert_eq!(bytes, queue.get_num_bytes());
-                assert!(!queue.selected);
+                assert!(!queue.is_mid_message());
             }
         }
     }
@@ -700,7 +794,7 @@ mod tests {
                 assert_eq!(Some(id), queue.peek().unwrap().message_id);
                 assert_eq!(len, queue.len());
                 assert_eq!(bytes, queue.get_num_bytes());
-                assert_eq!(!early_end, queue.selected);
+                assert_eq!(!early_end, queue.is_mid_message());
             }
         }
     }
@@ -725,7 +819,7 @@ mod tests {
             assert_eq!(1, tail.len());
             assert_eq!(buffer, tail.as_ptr());
             assert!(queue.drain_message(id)?.is_empty());
-            assert!(!queue.selected);
+            assert!(!queue.is_mid_message());
             assert_eq!(1, queue.len());
             assert_eq!(4, queue.get_num_bytes());
             assert_eq!(!unordered, queue.peek().unwrap().unordered);
@@ -752,8 +846,8 @@ mod tests {
         let buffer = chunks.as_ptr();
         let capacity = chunks.capacity();
         queue.push_message(chunks);
-        let Some(PendingEntry::Message(QueuedMessage::Fragmented { fragments, .. })) =
-            queue.ordered_queue.front()
+        let Some((_, PendingEntry::Message(QueuedMessage::Fragmented { fragments, .. }))) =
+            queue.streams[&0].entries.front()
         else {
             panic!("expected a fragmented message");
         };
@@ -766,11 +860,14 @@ mod tests {
         queue.push_message(vec![other]);
         assert_eq!(MessageId::new(0), queue.peek().unwrap().message_id);
         assert!(matches!(
-            queue.ordered_queue.front(),
-            Some(PendingEntry::Message(QueuedMessage::Fragmented {
-                next_fragment: 1,
-                ..
-            }))
+            queue.streams[&0].entries.front(),
+            Some((
+                _,
+                PendingEntry::Message(QueuedMessage::Fragmented {
+                    next_fragment: 1,
+                    ..
+                })
+            ))
         ));
         let tail = queue.pop(false, false).unwrap();
         assert_eq!(Some(created), tail.created_at);
@@ -906,7 +1003,7 @@ mod tests {
         for _ in 0..5 {
             pop_next(&mut queue).unwrap();
         }
-        let in_flight = queue.selected;
+        let in_flight = queue.is_mid_message();
         queue.push_message(message(3, 100, &[10]));
 
         let mut ahead = 0;
@@ -954,8 +1051,12 @@ mod tests {
             queue.push_message(message(2, i, &[100]));
         }
 
+        assert!(
+            queue.pop_ready_reset().is_none(),
+            "the stream's message first"
+        );
         assert_eq!(1, pop_next(&mut queue).unwrap().stream_identifier);
-        assert!(queue.peek().is_none(), "the reset goes ahead of stream 2");
+        // The reset is ready with nine messages of stream 2 still queued.
         assert_eq!(1, queue.pop_ready_reset().unwrap().stream_identifier);
         assert_eq!(2, pop_next(&mut queue).unwrap().stream_identifier);
         assert_eq!(8, queue.len());
@@ -971,10 +1072,320 @@ mod tests {
         let next = queue.peek().unwrap().message_id.unwrap();
         assert_eq!(MessageId::new(0), Some(next));
         assert_eq!(3, queue.drain_message(next)?.len());
-        assert!(!queue.selected);
+        assert!(!queue.is_mid_message());
         assert_eq!(2, pop_next(&mut queue).unwrap().stream_identifier);
         assert!(queue.is_empty());
         assert_eq!(0, queue.get_num_bytes());
         Ok(())
+    }
+    // ---- the stream schedulers of RFC 8260 section 3 ---------------------------------------
+
+    fn scheduled(scheduler: StreamScheduler, interleaving: bool) -> PendingQueue {
+        let mut queue = PendingQueue::with_scheduler(scheduler);
+        queue.set_interleaving(interleaving);
+        queue
+    }
+
+    fn streams_in_order(queue: &mut PendingQueue) -> Vec<u16> {
+        std::iter::from_fn(|| pop_next(queue))
+            .map(|c| c.stream_identifier)
+            .collect()
+    }
+
+    /// The queues of RFC 8260 Figures 1 and 2: streams 0 and 2 each hold one message of
+    /// three chunks, stream 1 three messages of one chunk.
+    fn figure_queues(queue: &mut PendingQueue) {
+        queue.push_message(message(0, 0, &[100; 3]));
+        for id in 1..=3 {
+            queue.push_message(message(1, id, &[100]));
+        }
+        queue.push_message(message(2, 4, &[100; 3]));
+    }
+
+    /// RFC 8260 Figure 1: round robin without interleaving cycles the streams a message at
+    /// a time.
+    #[test]
+    fn round_robin_without_interleaving_sends_as_figure_1() {
+        let mut queue = scheduled(StreamScheduler::RoundRobin, false);
+        figure_queues(&mut queue);
+        assert_eq!(
+            vec![0, 0, 0, 1, 2, 2, 2, 1, 1],
+            streams_in_order(&mut queue)
+        );
+    }
+
+    /// RFC 8260 Figure 2: round robin with interleaving cycles the streams a chunk at a
+    /// time, and each stream still sends one message after the other.
+    #[test]
+    fn round_robin_with_interleaving_sends_as_figure_2() {
+        let mut queue = scheduled(StreamScheduler::RoundRobin, true);
+        figure_queues(&mut queue);
+        let mut order = vec![];
+        while let Some(c) = pop_next(&mut queue) {
+            order.push((c.stream_identifier, c.message_id.unwrap()));
+        }
+        let id = |n| MessageId::new(n).unwrap();
+        assert_eq!(
+            vec![
+                (0, id(0)),
+                (1, id(1)),
+                (2, id(4)),
+                (0, id(0)),
+                (1, id(2)),
+                (2, id(4)),
+                (0, id(0)),
+                (1, id(3)),
+                (2, id(4)),
+            ],
+            order
+        );
+    }
+
+    /// RFC 8260 3.1: first come, first served is the order of writing, and interleaving
+    /// changes nothing about it.
+    #[test]
+    fn first_come_first_served_is_the_same_with_interleaving() {
+        for interleaving in [false, true] {
+            let mut queue = scheduled(StreamScheduler::FirstComeFirstServed, interleaving);
+            figure_queues(&mut queue);
+            assert_eq!(
+                vec![0, 0, 0, 1, 1, 1, 2, 2, 2],
+                streams_in_order(&mut queue),
+                "interleaving: {interleaving}"
+            );
+        }
+    }
+
+    /// RFC 8260 3.3: round robin per packet changes stream only when a packet is full, so
+    /// a packet holds chunks of one stream.
+    #[test]
+    fn round_robin_per_packet_fills_a_packet_from_one_stream() {
+        // Room for three chunks of 100 bytes (116 on the wire each).
+        let budget = 3 * 116 + 50;
+        let mut queue = scheduled(StreamScheduler::RoundRobinPerPacket, false);
+        queue.set_packet_budget(budget);
+        for id in 0..6 {
+            queue.push_message(message(1, id, &[100]));
+            queue.push_message(message(2, 10 + id, &[100]));
+        }
+        assert_eq!(
+            vec![1, 1, 1, 2, 2, 2, 1, 1, 1, 2, 2, 2],
+            streams_in_order(&mut queue)
+        );
+
+        // With interleaving a message larger than a packet gives the next packet away.
+        let mut queue = scheduled(StreamScheduler::RoundRobinPerPacket, true);
+        queue.set_packet_budget(budget);
+        queue.push_message(message(1, 0, &[100; 6]));
+        for id in 1..=3 {
+            queue.push_message(message(2, id, &[100]));
+        }
+        assert_eq!(
+            vec![1, 1, 1, 2, 2, 2, 1, 1, 1],
+            streams_in_order(&mut queue)
+        );
+
+        // Without it the message is finished first: its fragments need consecutive TSNs.
+        let mut queue = scheduled(StreamScheduler::RoundRobinPerPacket, false);
+        queue.set_packet_budget(budget);
+        queue.push_message(message(1, 0, &[100; 6]));
+        for id in 1..=3 {
+            queue.push_message(message(2, id, &[100]));
+        }
+        assert_eq!(
+            vec![1, 1, 1, 1, 1, 1, 2, 2, 2],
+            streams_in_order(&mut queue)
+        );
+
+        // A packet that is closed half full (the window stopped the sender) ends the turn.
+        let mut queue = scheduled(StreamScheduler::RoundRobinPerPacket, false);
+        queue.set_packet_budget(budget);
+        for id in 0..4 {
+            queue.push_message(message(1, id, &[100]));
+            queue.push_message(message(2, 10 + id, &[100]));
+        }
+        assert_eq!(1, pop_next(&mut queue).unwrap().stream_identifier);
+        queue.start_packet();
+        assert_eq!(vec![2, 2, 2, 1, 1, 1, 2], streams_in_order(&mut queue));
+    }
+
+    /// RFC 8260 3.4: the stream with the higher priority is scheduled first; streams of the
+    /// same priority take turns. With interleaving a large message of lower priority does
+    /// not delay a message of higher priority; without, only the message already begun does.
+    #[test]
+    fn the_priority_scheduler_serves_the_highest_priority_first() {
+        let mut queue = scheduled(StreamScheduler::Priority, false);
+        queue.set_weight(1, 128);
+        queue.set_weight(2, 512);
+        queue.set_weight(3, 512);
+        for id in 0..3 {
+            queue.push_message(message(1, id, &[100]));
+            queue.push_message(message(2, 10 + id, &[100]));
+            queue.push_message(message(3, 20 + id, &[100]));
+        }
+        assert_eq!(
+            vec![2, 3, 2, 3, 2, 3, 1, 1, 1],
+            streams_in_order(&mut queue)
+        );
+
+        for (interleaving, expected) in [
+            (true, vec![1, 1, 2, 2, 1, 1, 1, 1]),
+            (false, vec![1, 1, 1, 1, 1, 1, 2, 2]),
+        ] {
+            let mut queue = scheduled(StreamScheduler::Priority, interleaving);
+            queue.set_weight(1, 128);
+            queue.set_weight(2, 1024);
+            queue.push_message(message(1, 0, &[100; 6]));
+            let mut order = vec![
+                pop_next(&mut queue).unwrap().stream_identifier,
+                pop_next(&mut queue).unwrap().stream_identifier,
+            ];
+            queue.push_message(message(2, 1, &[100; 2]));
+            order.extend(streams_in_order(&mut queue));
+            assert_eq!(expected, order, "interleaving: {interleaving}");
+        }
+
+        // A priority set while the stream waits applies to what it has queued.
+        let mut queue = scheduled(StreamScheduler::Priority, false);
+        queue.push_message(message(1, 0, &[100]));
+        queue.push_message(message(2, 1, &[100]));
+        queue.set_weight(2, 1024);
+        assert_eq!(vec![2, 1], streams_in_order(&mut queue));
+    }
+
+    /// RFC 8260 3.5: fair capacity gives the streams equal shares of the bytes, whatever
+    /// the sizes of their messages and whatever their priorities.
+    #[test]
+    fn fair_capacity_gives_every_stream_the_same_bytes() {
+        for interleaving in [false, true] {
+            let mut queue = scheduled(StreamScheduler::FairCapacity, interleaving);
+            queue.set_weight(1, 1024);
+            for id in 0..40 {
+                queue.push_message(message(1, id, &[500, 500]));
+            }
+            for id in 0..400 {
+                queue.push_message(message(2, 1000 + id, &[100]));
+            }
+            let mut sent = [0usize; 3];
+            while sent[1] < 30_000 {
+                let c = pop_next(&mut queue).unwrap();
+                sent[c.stream_identifier as usize] += c.user_data.len();
+                assert!(
+                    sent[1].abs_diff(sent[2]) <= 1000,
+                    "interleaving {interleaving}: {sent:?}"
+                );
+            }
+        }
+    }
+
+    /// RFC 8260 3.6 with interleaving: the weights share the capacity chunk by chunk, so the
+    /// small messages of one stream pass through the middle of a large message of another.
+    #[test]
+    fn weighted_fair_queueing_interleaves_small_messages_with_a_large_one() {
+        let mut queue = scheduled(StreamScheduler::WeightedFairQueueing, true);
+        queue.push_message(message(1, 0, &[1000; 64]));
+        for _ in 0..4 {
+            assert_eq!(1, pop_next(&mut queue).unwrap().stream_identifier);
+        }
+        for id in 1..=10 {
+            queue.push_message(message(2, id, &[100]));
+        }
+        let order = streams_in_order(&mut queue);
+        let last_small = order.iter().rposition(|s| *s == 2).unwrap();
+        let large_chunks_before = order[..last_small].iter().filter(|s| **s == 1).count();
+        assert!(
+            large_chunks_before <= 2,
+            "{large_chunks_before} chunks of the large message went before the small ones"
+        );
+        assert_eq!(60, order.iter().filter(|s| **s == 1).count());
+
+        // And in proportion to the weights: 512 against 256 is two bytes for one.
+        let mut queue = scheduled(StreamScheduler::WeightedFairQueueing, true);
+        queue.set_weight(1, 512);
+        queue.set_weight(2, 256);
+        queue.push_message(message(1, 0, &[1000; 300]));
+        queue.push_message(message(2, 1, &[1000; 300]));
+        let mut sent = [0usize; 3];
+        for _ in 0..300 {
+            let c = pop_next(&mut queue).unwrap();
+            sent[c.stream_identifier as usize] += c.user_data.len();
+        }
+        assert!(sent[1].abs_diff(2 * sent[2]) <= 2000, "{sent:?}");
+    }
+
+    /// A stream sends one message at a time under every scheduler, with interleaving too
+    /// (RFC 8260 2.2.2), and a reset waits for its own stream only.
+    #[test]
+    fn every_scheduler_keeps_a_streams_messages_whole_and_in_order() {
+        for scheduler in [
+            StreamScheduler::FirstComeFirstServed,
+            StreamScheduler::RoundRobin,
+            StreamScheduler::RoundRobinPerPacket,
+            StreamScheduler::Priority,
+            StreamScheduler::FairCapacity,
+            StreamScheduler::WeightedFairQueueing,
+        ] {
+            for interleaving in [false, true] {
+                let mut queue = scheduled(scheduler, interleaving);
+                queue.set_packet_budget(400);
+                let mut id = 0;
+                for round in 0..5usize {
+                    for stream in 1..=4u16 {
+                        let pieces = vec![50 * stream as usize; 1 + (round + stream as usize) % 4];
+                        queue.push_message(message(stream, id, &pieces));
+                        id += 1;
+                    }
+                }
+                queue.push_reset(ResetMarker::new(3));
+                let (bytes, len) = (queue.get_num_bytes(), queue.len());
+
+                let mut last: FxHashMap<u16, (MessageId, bool)> = FxHashMap::default();
+                let (mut popped_bytes, mut popped, mut reset_seen) = (0, 0, false);
+                loop {
+                    if let Some(reset) = queue.pop_ready_reset() {
+                        assert_eq!(3, reset.stream_identifier);
+                        assert!(
+                            !queue.streams.contains_key(&3),
+                            "{scheduler:?}: the reset left before its stream's messages"
+                        );
+                        reset_seen = true;
+                        popped += 1;
+                        continue;
+                    }
+                    let Some(c) = pop_next(&mut queue) else {
+                        break;
+                    };
+                    let message_id = c.message_id.unwrap();
+                    if let Some((previous, ended)) = last.get(&c.stream_identifier) {
+                        if *ended {
+                            assert!(c.beginning_fragment && message_id != *previous);
+                        } else {
+                            assert!(
+                                !c.beginning_fragment && message_id == *previous,
+                                "{scheduler:?}: two messages of a stream in process"
+                            );
+                        }
+                    } else {
+                        assert!(c.beginning_fragment);
+                    }
+                    if !interleaving && !c.ending_fragment {
+                        let next = queue.peek().unwrap();
+                        assert_eq!(
+                            Some(message_id),
+                            next.message_id,
+                            "{scheduler:?}: another message between the fragments"
+                        );
+                    }
+                    last.insert(c.stream_identifier, (message_id, c.ending_fragment));
+                    popped_bytes += c.user_data.len();
+                    popped += 1;
+                }
+                assert!(reset_seen, "{scheduler:?}");
+                assert_eq!((bytes, len), (popped_bytes, popped), "{scheduler:?}");
+                assert!(queue.is_empty() && queue.streams.is_empty());
+                assert!(queue.heads.is_empty() && queue.resets.is_empty());
+                assert!(!queue.is_mid_message());
+            }
+        }
     }
 }
