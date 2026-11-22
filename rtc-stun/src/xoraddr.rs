@@ -3,7 +3,6 @@ mod xoraddr_test;
 
 use crate::addr::*;
 use crate::attributes::*;
-use crate::checks::*;
 use crate::message::*;
 use shared::error::*;
 
@@ -65,7 +64,8 @@ pub fn xor_bytes(dst: &mut [u8], a: &[u8], b: &[u8]) -> usize {
 
 /// XORMappedAddress implements XOR-MAPPED-ADDRESS attribute.
 ///
-/// RFC 5389 Section 15.2
+/// RFC 8489 Section 14.2
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct XorMappedAddress {
     /// The IP address.
     pub ip: IpAddr,
@@ -133,36 +133,19 @@ impl XorMappedAddress {
     /// getting it as for t type.
     pub fn get_from_as(&mut self, m: &Message, t: AttrType) -> Result<()> {
         let v = m.get(t)?;
-        if v.len() <= 4 {
-            return Err(Error::ErrUnexpectedEof);
-        }
-
-        let family = u16::from_be_bytes([v[0], v[1]]);
-        if family != FAMILY_IPV6 && family != FAMILY_IPV4 {
-            return Err(Error::Other(format!("bad value {family}")));
-        }
-
-        check_overflow(
-            t,
-            v[4..].len(),
-            if family == FAMILY_IPV4 {
-                IPV4LEN
-            } else {
-                IPV6LEN
-            },
-        )?;
-        self.port = u16::from_be_bytes([v[2], v[3]]) ^ (MAGIC_COOKIE >> 16) as u16;
+        let (family, x_port, x_address) = split_address_value(&v)?;
+        self.port = x_port ^ (MAGIC_COOKIE >> 16) as u16;
         let mut xor_value = vec![0; 4 + TRANSACTION_ID_SIZE];
         xor_value[0..4].copy_from_slice(&MAGIC_COOKIE.to_be_bytes());
         xor_value[4..].copy_from_slice(&m.transaction_id.0);
 
         if family == FAMILY_IPV6 {
             let mut ip = [0; IPV6LEN];
-            xor_bytes(&mut ip, &v[4..], &xor_value);
+            xor_bytes(&mut ip, x_address, &xor_value);
             self.ip = IpAddr::V6(Ipv6Addr::from(ip));
         } else {
             let mut ip = [0; IPV4LEN];
-            xor_bytes(&mut ip, &v[4..], &xor_value);
+            xor_bytes(&mut ip, x_address, &xor_value);
             self.ip = IpAddr::V4(Ipv4Addr::from(ip));
         };
 
