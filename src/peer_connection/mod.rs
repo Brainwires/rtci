@@ -1522,13 +1522,13 @@ impl RTCPeerConnection {
         now: Instant,
         remote_description: RTCSessionDescription,
     ) -> Result<()> {
-        // W3C webrtc-pc "set a session description", the implicit rollback: a remote offer
-        // that arrives while a local offer is pending rolls the local offer back and is then
-        // applied, as one operation. RFC 9429 has no such step (section 5.6 has the offer
-        // refused in `have-local-offer`, and section 5.7 the application roll back), so it
-        // is done only when asked for (`SettingEngineBuilder::with_implicit_rollback`). An
+        // W3C webrtc-pc section 4.4.2 (`setRemoteDescription`), the implicit rollback: a remote
+        // offer that arrives while a local offer is pending rolls the local offer back and is then applied, as
+        // one operation. RFC 9429's state machine is kept (the rollback of section 5.7, then
+        // the offer in `stable`); `SettingEngineBuilder::with_implicit_rollback(false)`
+        // leaves the rollback to the application and refuses the offer (section 5.6). An
         // offer that is then refused leaves the local offer pending.
-        if self.setting_engine.implicit_rollback
+        if !self.setting_engine.explicit_rollback_only
             && remote_description.sdp_type == RTCSdpType::Offer
             && self.signaling_state == RTCSignalingState::HaveLocalOffer
             && self.peer_connection_state != RTCPeerConnectionState::Closed
@@ -2016,8 +2016,8 @@ impl RTCPeerConnection {
                     .any(|m| !is_rejected_media(m) && m.has_attribute(ATTR_KEY_END_OF_CANDIDATES));
                 // A description that sets up a transport consumes the closure of the last one.
                 let new_association = std::mem::take(&mut self.transport_closed);
-                // If one of the agents is lite and the other one is not, the lite agent must be
-                // the controlling agent. If both or neither agents are lite the offering agent
+                // If one of the agents is lite and the other one is not, the full agent is the
+                // controlling one. If both or neither agents are lite the offering agent
                 // is controlling. RFC 8445 S6.1.1
                 let remote_is_lite = is_lite_set(parsed_remote_description);
                 let local_ice_role = if (we_offer
@@ -2066,6 +2066,35 @@ impl RTCPeerConnection {
                 }
 
                 if transports_started {
+                    // RFC 8445 section 6.1.1: "Once the roles are determined for a session,
+                    // they persist throughout the lifetime of the session", an ICE restart
+                    // included ("an ICE agent MUST NOT redetermine the role as part of an ICE
+                    // restart unless" a full agent became lite, or a role conflict is
+                    // repaired, which the agent does by itself). So whoever offers later, the
+                    // ICE agent keeps its role, except that with one lite and one full agent
+                    // the full one is controlling, and that a transport set up again after it
+                    // was closed is a new session: its roles are determined as the first
+                    // time, by who offers. (`local_ice_role`, which follows the offerer, is
+                    // what the DTLS role is derived from when `a=setup` leaves it open.)
+                    let local_is_lite = self.setting_engine.candidates.ice_lite;
+                    let role = if remote_is_lite != local_is_lite {
+                        Some(if local_is_lite {
+                            RTCIceRole::Controlled
+                        } else {
+                            RTCIceRole::Controlling
+                        })
+                    } else if new_association {
+                        Some(local_ice_role)
+                    } else {
+                        None
+                    };
+                    if let Some(role) = role
+                        && role != self.ice_transport().role()
+                    {
+                        self.ice_transport_mut().set_role(role);
+                        self.pipeline_context.stats.transport.ice_role = role;
+                    }
+
                     // RFC 8842 section 3.1: the DTLS association goes on, across an ICE restart
                     // too, unless the description changes the roles, the fingerprints or the
                     // `tls-id`, or sets up a transport that was closed; then a new association
@@ -3255,6 +3284,28 @@ impl RTCPeerConnection {
     /// [`Self::replace_sctp_association`] is called.
     pub fn close_sctp_association(&mut self) {
         self.sctp_transport_mut().staged = Some(SctpRenegotiation::Close);
+        self.trigger_negotiation_needed();
+    }
+
+    /// Asks for the data section to be rejected, which closes the SCTP association and the
+    /// DTLS association under it.
+    ///
+    /// RFC 8841 section 10.5: "If the offerer wants to close an existing SCTP association and
+    /// the underlying DTLS association ..., it MUST assign a zero port value to the 'm=' line
+    /// associated with the SCTP and DTLS associations". The next offer carries the data
+    /// section with port zero; so does the answer to the peer's next offer, should that come
+    /// first (section 10.3: an answerer that does not accept the "m=" line). When the
+    /// exchange completes the association is closed and every data channel with it. The DTLS
+    /// association is closed too when the data section was the only one that used it: the
+    /// next description that sets a section up establishes a new DTLS association, with a
+    /// new `a=tls-id`. With BUNDLE and media sections the transport is theirs as well, and
+    /// stays; to close the SCTP association alone, whatever the session carries, use
+    /// [`Self::close_sctp_association`].
+    ///
+    /// A data channel created afterwards brings a new data section with the next offer, and
+    /// a new association on a new `a=sctp-port`.
+    pub fn reject_data_section(&mut self) {
+        self.sctp_transport_mut().staged = Some(SctpRenegotiation::Reject);
         self.trigger_negotiation_needed();
     }
 
@@ -4638,6 +4689,75 @@ a=rtcp-mux\r\n";
             .unwrap();
         assert_eq!(offerer.signaling_state, RTCSignalingState::Stable);
         assert_eq!(offerer.ice_transport().role(), RTCIceRole::Controlling);
+    }
+
+    /// RFC 8445 section 6.1.1: "Once the roles are determined for a session, they persist
+    /// throughout the lifetime of the session. The roles can be redetermined as part of an ICE
+    /// restart, but an ICE agent MUST NOT redetermine the role as part of an ICE restart
+    /// unless [...] the controlling agent is full, and switches to lite". The offerer of the
+    /// first exchange is the controlling agent; a restart the other side offers changes
+    /// nothing; when the controlling agent comes back lite, the full peer takes the role.
+    #[test]
+    fn ice_roles_persist_across_a_restart_and_follow_a_peer_that_becomes_lite() {
+        let now = Instant::now();
+        let mut first = media_pc();
+        first
+            .add_transceiver_from_kind(RtpCodecKind::Audio, None)
+            .unwrap();
+        let mut second = media_pc();
+        let exchange = |offerer: &mut RTCPeerConnection,
+                        answerer: &mut RTCPeerConnection,
+                        ice_restart: bool,
+                        munge: &dyn Fn(&str) -> String| {
+            let offer = offerer
+                .create_offer(Some(RTCOfferOptions { ice_restart }))
+                .unwrap();
+            offerer.set_local_description(now, offer.clone()).unwrap();
+            answerer
+                .set_remote_description(now, remote(RTCSdpType::Offer, &munge(&offer.sdp)))
+                .unwrap();
+            let answer = answerer.create_answer(None).unwrap();
+            answerer.set_local_description(now, answer.clone()).unwrap();
+            offerer.set_remote_description(now, answer).unwrap();
+        };
+        let keep = |sdp: &str| sdp.to_owned();
+
+        exchange(&mut first, &mut second, false, &keep);
+        assert_eq!(first.ice_transport().role(), RTCIceRole::Controlling);
+        assert_eq!(second.ice_transport().role(), RTCIceRole::Controlled);
+        let first_ufrag = first
+            .ice_transport()
+            .get_local_user_credentials()
+            .0
+            .to_owned();
+
+        // The controlled side offers an ICE restart: the roles stay.
+        exchange(&mut second, &mut first, true, &keep);
+        assert_ne!(
+            first.ice_transport().get_local_user_credentials().0,
+            first_ufrag,
+            "an ICE restart"
+        );
+        assert_eq!(first.ice_transport().role(), RTCIceRole::Controlling);
+        assert_eq!(second.ice_transport().role(), RTCIceRole::Controlled);
+
+        // And when the controlling side offers one: they stay as well.
+        exchange(&mut first, &mut second, true, &keep);
+        assert_eq!(first.ice_transport().role(), RTCIceRole::Controlling);
+        assert_eq!(second.ice_transport().role(), RTCIceRole::Controlled);
+
+        // The controlling agent restarts as a lite implementation: the full peer controls.
+        let lite = |sdp: &str| sdp.replacen("t=0 0\r\n", "t=0 0\r\na=ice-lite\r\n", 1);
+        assert!(lite("t=0 0\r\n").contains("a=ice-lite"));
+        exchange(&mut first, &mut second, true, &lite);
+        assert_eq!(second.ice_transport().role(), RTCIceRole::Controlling);
+        assert_eq!(
+            second
+                .get_stats(now, crate::statistics::StatsSelector::None)
+                .transport()
+                .map(|t| t.ice_role),
+            Some(RTCIceRole::Controlling)
+        );
     }
 
     #[test]

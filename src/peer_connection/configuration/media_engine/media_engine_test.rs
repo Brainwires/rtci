@@ -437,3 +437,102 @@ fn test_media_engine_clone_to() -> Result<()> {
     assert_eq!(opus_codec.rtp_codec.mime_type, MIME_TYPE_OPUS);
     Ok(())
 }
+
+fn vp8_rtx_and(fec_mime_type: &str, fec_fmtp: &str) -> MediaEngine {
+    let mut m = MediaEngine::default();
+    for (payload_type, mime_type, fmtp) in [
+        (96, MIME_TYPE_VP8, ""),
+        (97, MIME_TYPE_RTX, "apt=96"),
+        (118, fec_mime_type, fec_fmtp),
+    ] {
+        m.register_codec(
+            RTCRtpCodecParameters {
+                rtp_codec: codec(mime_type, 90000, 0, fmtp),
+                payload_type,
+            },
+            RtpCodecKind::Video,
+        )
+        .expect("register");
+    }
+    m
+}
+
+fn offer_with_rtx_and(fec_name: &str, fec_fmtp: &str) -> SessionDescription {
+    remote(&format!(
+        "m=video 9 UDP/TLS/RTP/SAVPF 96 97 118\r\n\
+         a=rtpmap:96 VP8/90000\r\n\
+         a=rtpmap:97 rtx/90000\r\n\
+         a=fmtp:97 apt=96\r\n\
+         a=rtpmap:118 {fec_name}/90000\r\n\
+         a=fmtp:118 {fec_fmtp}\r\n"
+    ))
+}
+
+fn negotiated_video_names(m: &MediaEngine) -> Vec<String> {
+    m.negotiated_video_codecs
+        .iter()
+        .map(|codec| codec.rtp_codec.mime_type.to_lowercase())
+        .collect()
+}
+
+/// RFC 8627 section 1.1.7: an offer with both FlexFEC and RTP retransmission (RFC 4588) is
+/// answered with FlexFEC only.
+#[test]
+fn flexfec_offered_with_rtx_is_negotiated_without_rtx() -> Result<()> {
+    let mut m = vp8_rtx_and(MIME_TYPE_FLEX_FEC, "repair-window=200000");
+    m.update_from_remote_description(&offer_with_rtx_and("flexfec", "repair-window=200000"))?;
+
+    assert_eq!(
+        vec!["video/vp8".to_owned(), "video/flexfec".to_owned()],
+        negotiated_video_names(&m),
+        "no retransmission format beside FlexFEC"
+    );
+    Ok(())
+}
+
+/// The rule belongs to the RFC's `flexfec`. `flexfec-03`, the draft format browsers offer, has
+/// none: it is answered together with RTX, as libwebrtc does.
+#[test]
+fn flexfec03_offered_with_rtx_keeps_rtx() -> Result<()> {
+    let mut m = vp8_rtx_and(MIME_TYPE_FLEX_FEC03, "repair-window=10000000");
+    m.update_from_remote_description(&offer_with_rtx_and("flexfec-03", "repair-window=10000000"))?;
+
+    assert_eq!(
+        vec![
+            "video/vp8".to_owned(),
+            "video/rtx".to_owned(),
+            "video/flexfec-03".to_owned()
+        ],
+        negotiated_video_names(&m)
+    );
+    Ok(())
+}
+
+/// The lenient setting answers the RFC format with RTX too.
+#[test]
+fn the_lenient_setting_keeps_rtx_beside_flexfec() -> Result<()> {
+    let mut m = vp8_rtx_and(MIME_TYPE_FLEX_FEC, "repair-window=200000");
+    m.set_flexfec_with_retransmission(true);
+    m.update_from_remote_description(&offer_with_rtx_and("flexfec", "repair-window=200000"))?;
+
+    assert!(negotiated_video_names(&m).contains(&"video/rtx".to_owned()));
+    Ok(())
+}
+
+/// Without FlexFEC in the offer, RTX is negotiated as before.
+#[test]
+fn rtx_is_negotiated_when_flexfec_is_registered_but_not_offered() -> Result<()> {
+    let mut m = vp8_rtx_and(MIME_TYPE_FLEX_FEC, "repair-window=200000");
+    m.update_from_remote_description(&remote(
+        "m=video 9 UDP/TLS/RTP/SAVPF 96 97\r\n\
+         a=rtpmap:96 VP8/90000\r\n\
+         a=rtpmap:97 rtx/90000\r\n\
+         a=fmtp:97 apt=96\r\n",
+    ))?;
+
+    assert_eq!(
+        vec!["video/vp8".to_owned(), "video/rtx".to_owned()],
+        negotiated_video_names(&m)
+    );
+    Ok(())
+}

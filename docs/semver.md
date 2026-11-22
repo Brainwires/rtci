@@ -33,13 +33,13 @@ The subcrates are in scope for this policy, not an afterthought.
 
 ## Inventory
 
-140 public enums, all with an explicit decision:
+141 public enums, all with an explicit decision:
 
 | Area | `#[non_exhaustive]` | Kept exhaustive |
 |---|---:|---:|
 | `rtc/src` | 34 | 0 |
-| protocol subcrates | 81 | 25 |
-| **total** | **115** | **25** |
+| protocol subcrates | 82 | 25 |
+| **total** | **116** | **25** |
 
 ### `rtc/src` — all 34 marked
 
@@ -78,7 +78,7 @@ is worth more to callers than room for a variant we have no way to add.
 | `rtc-sdp` | `ConnectionRole` | active / passive / actpass / holdconn (RFC 4145). |
 | `rtc-interceptor` | `FlexFecProtected`, `FlexFecLayout` | Flexible mask or fixed L/D: the one F bit of the RFC 8627 FEC header. |
 
-### Protocol subcrates — marked (81)
+### Protocol subcrates — marked (82)
 
 Everything else, falling into four families:
 
@@ -92,7 +92,8 @@ Everything else, falling into four families:
 - **State machines**: `ConnectionState`, `GatheringState`, `CandidatePairState`,
   `RecvSendState`, `ReliabilityType`, …
 - **Event streams**: `Event` (ice, turn, sctp), `EndpointEvent`, `DatagramEvent`,
-  `StunEvent`, `ClientAgent`, `MdnsEvent`, `StreamEvent`, `TelephoneEventReport`, …
+  `StunEvent`, `ClientAgent`, `MdnsEvent`, `StreamEvent`, `ReconfigEvent` (the outcomes of an
+  RFC 6525 re-configuration), `TelephoneEventReport`, …
 - **Error taxonomies**: `Error` (shared, media), `AssociationError`, `ConnectError`,
   `FlexFecHeaderError`, `FlexFecEncodeError`.
 

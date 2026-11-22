@@ -1,6 +1,7 @@
 //! Records what left, ingests what the remote said about it, and drives an estimator.
 
 use super::estimator::{BandwidthEstimator, EstimatorStats};
+use super::feedback::{CongestionFeedbackFormat, negotiated_congestion_feedback};
 use super::tmmbr::{self, TmmbrState};
 use crate::Interceptor;
 use crate::circuit_breaker::CircuitBreakerHandle;
@@ -37,6 +38,18 @@ pub const REMB_TIMEOUT: Duration = Duration::from_secs(3);
 /// Per-stream state: the header-extension id the transport-wide sequence number is written under.
 struct LocalStream {
     hdr_ext_id: u8,
+    /// The one feedback format this stream is reported in; reports in the other are not read.
+    feedback: Option<CongestionFeedbackFormat>,
+    /// Whether `a=rtcp-fb:<pt> ccm tmmbr` was negotiated for the stream (RFC 5104 section 7.1).
+    tmmbr: bool,
+}
+
+/// Whether a stream negotiated TMMBR: `ccm tmmbr`, with or without `smaxpr=` (RFC 5104
+/// section 7.1).
+fn stream_negotiated_tmmbr(info: &StreamInfo) -> bool {
+    info.rtcp_feedback.iter().any(|feedback| {
+        feedback.typ == "ccm" && feedback.parameter.split_whitespace().next() == Some("tmmbr")
+    })
 }
 
 /// Builder for [`CongestionControlInterceptor`].
@@ -55,6 +68,7 @@ pub struct CongestionControlBuilder<E: BandwidthEstimator> {
     estimator: E,
     prune_horizon: Duration,
     circuit_breaker: Option<CircuitBreakerHandle>,
+    unnegotiated_tmmbr: bool,
 }
 
 impl<E: BandwidthEstimator> CongestionControlBuilder<E> {
@@ -64,6 +78,7 @@ impl<E: BandwidthEstimator> CongestionControlBuilder<E> {
             estimator,
             prune_horizon: DEFAULT_PRUNE_HORIZON,
             circuit_breaker: None,
+            unnegotiated_tmmbr: false,
         }
     }
 
@@ -77,6 +92,19 @@ impl<E: BandwidthEstimator> CongestionControlBuilder<E> {
     /// the rate (RFC 8083 section 4.3) the limit becomes an upper bound of the estimator.
     pub fn with_circuit_breaker(mut self, handle: CircuitBreakerHandle) -> Self {
         self.circuit_breaker = Some(handle);
+        self
+    }
+
+    /// Whether a TMMBR is honoured for a stream that did not negotiate `ccm tmmbr`.
+    ///
+    /// Off by default: RFC 5104 section 7.1 has a codec control message used only when the
+    /// session description names it (`a=rtcp-fb:<pt> ccm tmmbr`), and section 7.2 has the
+    /// answerer remove what it does not support, so a TMMBR for a stream without it is a
+    /// message the session never agreed to and is ignored, unanswered. `true` is the lenient
+    /// behaviour: every TMMBR that names one of this endpoint's streams limits it and is
+    /// answered with a TMMBN.
+    pub fn with_unnegotiated_tmmbr(mut self, honoured: bool) -> Self {
+        self.unnegotiated_tmmbr = honoured;
         self
     }
 
@@ -108,6 +136,7 @@ impl<E: BandwidthEstimator> CongestionControlBuilder<E> {
                 departures: VecDeque::new(),
                 per_packet_feedback: false,
                 applied_max: None,
+                unnegotiated_tmmbr: self.unnegotiated_tmmbr,
                 circuit_breaker: self.circuit_breaker,
                 shared: shared.clone(),
                 read_queue: VecDeque::new(),
@@ -247,6 +276,8 @@ pub struct CongestionControlInterceptor<E: BandwidthEstimator> {
     per_packet_feedback: bool,
     /// The external maximum last handed to the estimator.
     applied_max: Option<Option<f64>>,
+    /// Whether a TMMBR limits a stream that did not negotiate `ccm tmmbr`.
+    unnegotiated_tmmbr: bool,
     circuit_breaker: Option<CircuitBreakerHandle>,
     shared: Arc<Mutex<Shared>>,
     prune_horizon: Duration,
@@ -369,6 +400,13 @@ impl<E: BandwidthEstimator> CongestionControlInterceptor<E> {
             let (report_delay, per_stream) = self.timeline.convert_ccfb(feedback);
             let mut round_trip: Option<Duration> = None;
             for (ssrc, acknowledgements) in per_stream {
+                // A stream that runs on transport-wide feedback is not also read from RFC 8888
+                // reports: the estimator would count each of its packets twice.
+                if self.streams.get(&ssrc).is_some_and(|stream| {
+                    stream.feedback == Some(CongestionFeedbackFormat::TransportCc)
+                }) {
+                    continue;
+                }
                 for acknowledgement in acknowledgements {
                     if let Some(rtt) = self.history.on_ccfb_feedback(now, ssrc, acknowledgement)
                         && acknowledgement.arrived
@@ -424,8 +462,13 @@ impl<E: BandwidthEstimator> CongestionControlInterceptor<E> {
             let round_trip_time = self.round_trip_time.unwrap_or_default();
             let mut owed = false;
             for entry in packet.entries {
-                // An entry is for the media sender its SSRC names.
-                if self.streams.contains_key(&entry.ssrc) {
+                // An entry is for the media sender its SSRC names, and binds it only when the
+                // session negotiated the message for that stream (RFC 5104 section 7.1).
+                if self
+                    .streams
+                    .get(&entry.ssrc)
+                    .is_some_and(|stream| stream.tmmbr || self.unnegotiated_tmmbr)
+                {
                     owed |= self.tmmbr.on_request(
                         now,
                         packet.sender_ssrc,
@@ -667,9 +710,24 @@ impl<E: BandwidthEstimator> Interceptor for CongestionControlInterceptor<E> {
         // The retransmission and FEC SSRCs are recorded with the media SSRC: their packets are
         // bytes on the same path, and a history without them reads the path as carrying less
         // than it does.
-        let hdr_ext_id = stream_supports_twcc(info).unwrap_or_default();
+        // One feedback format per stream (RFC 8888 section 6): with RFC 8888 negotiated the
+        // TWCC sender does not number the stream, and no number is looked for.
+        let feedback = negotiated_congestion_feedback(info);
+        let tmmbr = stream_negotiated_tmmbr(info);
+        let hdr_ext_id = if feedback == Some(CongestionFeedbackFormat::TransportCc) {
+            stream_supports_twcc(info).unwrap_or_default()
+        } else {
+            0
+        };
         for ssrc in flow_ssrcs(info) {
-            self.streams.insert(ssrc, LocalStream { hdr_ext_id });
+            self.streams.insert(
+                ssrc,
+                LocalStream {
+                    hdr_ext_id,
+                    feedback,
+                    tmmbr,
+                },
+            );
         }
         if !self.local_ssrcs.contains(&info.ssrc) {
             self.local_ssrcs.push(info.ssrc);

@@ -176,6 +176,7 @@ fn receiver() -> impl Interceptor {
             Slot::TwccReceiver,
             TwccReceiverBuilder::new()
                 .with_interval(Duration::from_millis(100))
+                .with_adaptive_interval(false)
                 .build(),
         )
         .with(

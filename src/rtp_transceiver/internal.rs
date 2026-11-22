@@ -433,7 +433,7 @@ impl RTCRtpTransceiverInternal {
     /// implies it (`stop()` sets both), so this reads `[[Stopping]]`, not `[[Stopped]]`.
     #[allow(clippy::misnamed_getters)]
     pub(crate) fn stopped(&self) -> bool {
-        self.stopping
+        self.stopping || self.stopped
     }
 
     /// W3C `[[Stopped]]`.

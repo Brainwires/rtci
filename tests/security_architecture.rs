@@ -121,10 +121,16 @@ fn dtls_srtp_is_offered_for_every_media_section() -> Result<()> {
     )?;
     world.peers[0].pc.create_data_channel("data", None)?;
     let (offer, answer) = world.exchange(0)?;
-    // The initial offer states the role in each section; the answer in the tagged section of
-    // the BUNDLE group only, where it is in force for every bundled section (RFC 9143 section
-    // 7.1.3).
-    for (sdp, setups) in [(offer, 3), (answer, 1)] {
+    // RFC 8859 puts `a=setup` and `a=fingerprint` in the TRANSPORT category: the one of the
+    // tagged section of the BUNDLE group is in force for every bundled section (RFC 9143
+    // section 7.1.3), whether or not the others repeat it. So the tagged section (the first:
+    // `a=group:BUNDLE 0 ...`) states a role, every role stated is the same one, and the
+    // fingerprint is the session's.
+    for sdp in [offer, answer] {
+        let sections: Vec<&str> = sdp.split("\r\nm=").skip(1).collect();
+        assert!(sections[0].contains("\r\na=setup:"), "{sdp}");
+        let roles = attribute_values(&sdp, "setup");
+        assert!(roles.iter().all(|role| role == &roles[0]), "{sdp}");
         let media_lines: Vec<&str> = sdp.lines().filter(|line| line.starts_with("m=")).collect();
         assert_eq!(media_lines.len(), 3, "{sdp}");
         for line in media_lines {
@@ -137,7 +143,6 @@ fn dtls_srtp_is_offered_for_every_media_section() -> Result<()> {
         }
         assert!(!sdp.contains("a=crypto"), "{sdp}");
         assert_eq!(attribute_values(&sdp, "fingerprint").len(), 1, "{sdp}");
-        assert_eq!(attribute_values(&sdp, "setup").len(), setups, "{sdp}");
         assert!(sdp.contains("a=group:BUNDLE "), "{sdp}");
     }
     Ok(())
