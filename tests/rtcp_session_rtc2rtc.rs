@@ -170,7 +170,9 @@ struct World {
     now: Instant,
     /// Drop the sender's RTP packet with this SSRC and sequence number, once.
     drop_once: Option<(u32, u16)>,
-    /// The sender's RTP packets with [`FEC_SSRC`] put on the wire.
+    /// The FEC SSRC the engine minted for the sender's encoding, once connected.
+    fec_ssrc: Option<u32>,
+    /// The sender's RTP packets with that FEC SSRC put on the wire.
     fec_on_wire: usize,
 }
 
@@ -195,7 +197,7 @@ impl World {
                 break;
             }
             for (i, from, to, data) in in_flight {
-                if i == 0 && wire_rtp(&data).is_some_and(|(ssrc, _)| ssrc == FEC_SSRC) {
+                if i == 0 && wire_rtp(&data).is_some_and(|(ssrc, _)| Some(ssrc) == self.fec_ssrc) {
                     self.fec_on_wire += 1;
                 }
                 if i == 0
@@ -287,6 +289,7 @@ impl World {
             ],
             now: Instant::now(),
             drop_once: None,
+            fec_ssrc: None,
             fec_on_wire: 0,
         };
         let transceiver = world.peers[0].pc.add_transceiver_from_kind(
@@ -346,6 +349,16 @@ impl World {
                 .unwrap_or(world.now);
             world.run_until(next.max(world.now + Duration::from_millis(1)))?;
         }
+        world.fec_ssrc = world.peers[0]
+            .pc
+            .rtp_sender(sender)
+            .expect("sender")
+            .get_parameters()
+            .encodings[0]
+            .rtp_coding_parameters
+            .fec
+            .as_ref()
+            .map(|fec| fec.ssrc);
         Ok((world, sender))
     }
 
