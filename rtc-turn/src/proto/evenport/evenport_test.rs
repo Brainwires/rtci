@@ -77,3 +77,24 @@ fn test_even_port_add_to() -> Result<()> {
 
     Ok(())
 }
+
+/// RFC 8656 §18.7: the R bit is the first bit of the one-byte value, and a caller can ask
+/// for it.
+#[test]
+fn test_even_port_reservation_is_the_first_bit() -> Result<()> {
+    let mut m = Message::new();
+    EvenPort { reserve_port: true }.add_to(&mut m)?;
+    assert_eq!(m.get(ATTR_EVEN_PORT)?, vec![0x80]);
+
+    let mut plain = Message::new();
+    EvenPort {
+        reserve_port: false,
+    }
+    .add_to(&mut plain)?;
+    assert_eq!(plain.get(ATTR_EVEN_PORT)?, vec![0x00]);
+
+    let mut got = EvenPort::default();
+    got.get_from(&m)?;
+    assert!(got.reserve_port);
+    Ok(())
+}

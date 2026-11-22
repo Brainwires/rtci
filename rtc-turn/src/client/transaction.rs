@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 use stun::message::*;
 
 use crate::client::RelayedAddr;
+use crate::client::allocation::AllocateState;
 use shared::{TransportContext, TransportMessage, TransportProtocol};
-use stun::textattrs::TextAttribute;
 
 const MAX_RTX_INTERVAL_IN_MS: u64 = 1600;
 const MAX_RTX_COUNT: u16 = 7; // total 7 requests (Rc)
@@ -61,11 +61,12 @@ impl Retry {
 
 pub(crate) enum TransactionType {
     BindingRequest,
-    /// The anonymous Allocate. It carries the id the authenticated retry will go out under,
-    /// which [`Client::allocate`](crate::client::Client::allocate) hands to its caller and
+    /// The Allocate without a credential. Its state carries the id
+    /// [`Client::allocate`](crate::client::Client::allocate) handed to its caller, which
     /// everything the caller is told about that allocation names.
-    AllocateAttempt(TransactionId),
-    AllocateRequest(TextAttribute),
+    AllocateAttempt(Box<AllocateState>),
+    /// The Allocate with the credential the server asked for.
+    AllocateRequest(Box<AllocateState>),
     /// The relay, the peer a caller asked for (`None` for a permission refresh), every peer
     /// the request names, and its retry state.
     CreatePermissionRequest(RelayedAddr, Option<SocketAddr>, Vec<SocketAddr>, Retry),
@@ -73,6 +74,9 @@ pub(crate) enum TransactionType {
     RefreshRequest(RelayedAddr, Duration, Retry),
     /// The relay, the peer being bound, and the retry state.
     ChannelBindRequest(RelayedAddr, SocketAddr, Retry),
+    /// The Refresh with LIFETIME 0 that deletes one address family (its
+    /// REQUESTED-ADDRESS-FAMILY value) of an allocation that has two, and its retry state.
+    FamilyRelease(RelayedAddr, u8, Retry),
     /// A Refresh with LIFETIME 0 for an allocation the client does not keep: the server made
     /// it, but its success response was unusable. Nothing is reported about it.
     OrphanRelease,
@@ -84,6 +88,7 @@ impl TransactionType {
         match self {
             Self::CreatePermissionRequest(relayed, ..)
             | Self::RefreshRequest(relayed, ..)
+            | Self::FamilyRelease(relayed, ..)
             | Self::ChannelBindRequest(relayed, ..) => Some(*relayed),
             Self::BindingRequest
             | Self::AllocateAttempt(_)
@@ -96,11 +101,12 @@ impl TransactionType {
     /// was handed, which a retry or the Allocate exchange does not put on the wire.
     pub(crate) fn report_id(&self, wire: TransactionId) -> TransactionId {
         match self {
-            Self::AllocateAttempt(allocation_id) => *allocation_id,
+            Self::AllocateAttempt(state) | Self::AllocateRequest(state) => state.report_id,
             Self::CreatePermissionRequest(_, _, _, retry)
             | Self::RefreshRequest(_, _, retry)
+            | Self::FamilyRelease(_, _, retry)
             | Self::ChannelBindRequest(_, _, retry) => retry.report_id(wire),
-            Self::BindingRequest | Self::AllocateRequest(_) | Self::OrphanRelease => wire,
+            Self::BindingRequest | Self::OrphanRelease => wire,
         }
     }
 }

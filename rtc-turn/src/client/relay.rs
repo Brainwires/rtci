@@ -38,7 +38,7 @@ pub(crate) const MAX_PEERS_PER_CREATE_PERMISSION: usize = 16;
 /// The timer advances by a fixed cadence from its own previous value, which keeps the refresh
 /// schedule drift-free. That only works while the step is positive. `lifetime` is assigned
 /// straight from the server's LIFETIME attribute, and a refresh carrying `LIFETIME=0` — how
-/// RFC 5766 deallocates, and what [`Relay::close`] sends — makes `lifetime / 2` zero. The timer
+/// RFC 8656 §8 deallocates, and what [`Relay::close`] sends — makes `lifetime / 2` zero. The timer
 /// then freezes on an already-expired instant and `poll_timeout` reports that same instant
 /// forever. A caller that treats an expired deadline as "handle it and go round again" spins
 /// on it without ever reaching its socket reads, which is
@@ -54,7 +54,20 @@ fn allocation_refresh_interval(lifetime: Duration, interval_cap: Option<Duration
 
 // RelayState is a set of params use by Relay
 pub(crate) struct RelayState {
+    /// The address the allocation is kept under: the first relayed address it was given.
     pub(crate) relayed_addr: RelayedAddr,
+    /// The relayed addresses the allocation has now: one, or an IPv4 and an IPv6 one after
+    /// ADDITIONAL-ADDRESS-FAMILY (RFC 8656 §7.1), IPv4 first.
+    pub(crate) addrs: Vec<RelayedAddr>,
+    /// The XOR-MAPPED-ADDRESS of the Allocate success response: the client's
+    /// server-reflexive address.
+    pub(crate) mapped_addr: Option<SocketAddr>,
+    /// The RESERVATION-TOKEN of the Allocate success response.
+    pub(crate) reservation_token: Option<proto::rsrvtoken::ReservationToken>,
+    /// Why the server did not allocate one of the two families asked for.
+    pub(crate) address_error: Option<proto::addrerror::AddressErrorCode>,
+    /// Whether the server took an Allocate with DONT-FRAGMENT, so supports it.
+    pub(crate) dont_fragment: bool,
     pub(crate) long_term_integrity_key: Vec<u8>,
     pub(crate) nonce: Nonce,
     pub(crate) lifetime: Duration,
@@ -90,6 +103,11 @@ impl RelayState {
 
         Self {
             relayed_addr,
+            addrs: vec![relayed_addr],
+            mapped_addr: None,
+            reservation_token: None,
+            address_error: None,
+            dont_fragment: false,
             long_term_integrity_key,
             nonce,
             lifetime,
@@ -111,6 +129,19 @@ impl RelayState {
     /// asking for a credential (RFC 8656 §7.2 step 1) has no key.
     pub(crate) fn key(&self) -> Option<Vec<u8>> {
         (!self.long_term_integrity_key.is_empty()).then(|| self.long_term_integrity_key.clone())
+    }
+
+    /// Whether the allocation has a relayed address of `peer`'s family. A peer of another
+    /// family cannot be reached through it: the server answers 443 (RFC 8656 §10.2, §12.2).
+    pub(crate) fn relays_family_of(&self, peer: &IpAddr) -> bool {
+        self.addrs
+            .iter()
+            .any(|addr| addr.is_ipv4() == peer.is_ipv4())
+    }
+
+    /// The address events name the allocation by: its first relayed address.
+    pub(crate) fn name(&self) -> RelayedAddr {
+        self.addrs.first().copied().unwrap_or(self.relayed_addr)
     }
 
     /// Whether the client holds a permission for `ip`, asked for or installed, that has not
@@ -142,8 +173,9 @@ impl Relay<'_> {
     ///
     /// # Errors
     ///
-    /// Fails if the allocation no longer exists or was released, or the request cannot be
-    /// encoded.
+    /// Fails if the allocation no longer exists or was released, if `peer_addr` is not of
+    /// the family of a relayed address of the allocation (RFC 8656 §10.1), or if the request
+    /// cannot be encoded.
     pub fn create_permission(
         &mut self,
         now: Instant,
@@ -152,6 +184,9 @@ impl Relay<'_> {
         if let Some(relay) = self.client.relays.get_mut(&self.relayed_addr) {
             if relay.releasing {
                 return Err(Error::ErrConnClosed);
+            }
+            if !relay.relays_family_of(&peer_addr.ip()) {
+                return Err(peer_family_mismatch(peer_addr));
             }
             relay
                 .perm_map
@@ -280,8 +315,236 @@ impl Relay<'_> {
         {
             return Err(Error::ErrNoPermission);
         }
+        // The peer of a channel binding is of the relayed address's family (RFC 8656 §12.1).
+        if !relay.relays_family_of(&peer_addr.ip()) {
+            return Err(peer_family_mismatch(peer_addr));
+        }
 
         self.send(now, p, peer_addr)
+    }
+
+    /// Sends `p` to `peer_addr` in a Send indication carrying DONT-FRAGMENT, which asks the
+    /// server to set the DF bit on the datagram it sends the peer (RFC 8656 §11.1). The data
+    /// never goes as ChannelData, which cannot say so.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::send_to`]; and if the allocation was not made with
+    /// [`AllocateOptions::dont_fragment`](crate::client::AllocateOptions), or the server
+    /// answered that request with 420: the server is not known to support the attribute
+    /// (RFC 8656 §7.1).
+    pub fn send_to_dont_fragment(
+        &mut self,
+        now: Instant,
+        p: &[u8],
+        peer_addr: SocketAddr,
+    ) -> Result<()> {
+        let Some(relay) = self.client.relays.get(&self.relayed_addr) else {
+            return Err(Error::ErrConnClosed);
+        };
+        if relay.releasing {
+            return Err(Error::ErrConnClosed);
+        }
+        if !relay.dont_fragment {
+            return Err(Error::Other(
+                "DONT-FRAGMENT is not known to be supported for this allocation".to_owned(),
+            ));
+        }
+        if !relay
+            .perm_map
+            .get(&peer_addr.ip())
+            .is_some_and(|perm| perm.is_permitted(now))
+        {
+            return Err(Error::ErrNoPermission);
+        }
+        if !relay.relays_family_of(&peer_addr.ip()) {
+            return Err(peer_family_mismatch(peer_addr));
+        }
+        self.send_indication(now, p, peer_addr, true)
+    }
+
+    /// The relayed addresses of the allocation: one, or an IPv4 and an IPv6 address when it
+    /// was made with [`AllocateOptions::additional_ipv6`](crate::client::AllocateOptions)
+    /// and the server gave both. Peers of either family can then be reached through it.
+    #[must_use]
+    pub fn relayed_addrs(&self) -> Vec<RelayedAddr> {
+        self.state()
+            .map_or_else(Vec::new, |relay| relay.addrs.clone())
+    }
+
+    /// The client's address as the server saw the Allocate request arrive from: its
+    /// server-reflexive address (RFC 8656 §7.3), from the response's XOR-MAPPED-ADDRESS.
+    #[must_use]
+    pub fn mapped_addr(&self) -> Option<SocketAddr> {
+        self.state()?.mapped_addr
+    }
+
+    /// The lifetime the server last granted the allocation.
+    #[must_use]
+    pub fn lifetime(&self) -> Option<Duration> {
+        self.state().map(|relay| relay.lifetime)
+    }
+
+    /// The RESERVATION-TOKEN of the Allocate success response: the port the server holds for
+    /// a later allocation, after an EVEN-PORT that asked for it (RFC 8656 §7.1).
+    #[must_use]
+    pub fn reservation_token(&self) -> Option<proto::rsrvtoken::ReservationToken> {
+        self.state()?.reservation_token.clone()
+    }
+
+    /// Whether the server supports DONT-FRAGMENT: the allocation was made with it and the
+    /// server took it.
+    #[must_use]
+    pub fn dont_fragment(&self) -> bool {
+        self.state().is_some_and(|relay| relay.dont_fragment)
+    }
+
+    /// The ADDRESS-ERROR-CODE of the Allocate success response: which of the two address
+    /// families asked for the server did not allocate, and why (RFC 8656 §7.3).
+    #[must_use]
+    pub fn address_error(&self) -> Option<proto::addrerror::AddressErrorCode> {
+        self.state()?.address_error.clone()
+    }
+
+    fn state(&self) -> Option<&RelayState> {
+        self.client.relays.get(&self.relayed_addr)
+    }
+
+    /// The address events name this allocation by.
+    fn name(&self) -> RelayedAddr {
+        self.state().map_or(self.relayed_addr, RelayState::name)
+    }
+
+    /// Deletes the relayed address of one family from an allocation that has two, with a
+    /// Refresh of LIFETIME 0 naming the family (RFC 8656 §8.1). The other address, with its
+    /// permissions and channel bindings, stays. [`Event::AllocationReleased`] names the
+    /// address when the server confirms. For an allocation with one address this is
+    /// [`Self::close`].
+    ///
+    /// # Errors
+    ///
+    /// Fails if the allocation is gone or was released, or has no relayed address of
+    /// `family`: REQUESTED-ADDRESS-FAMILY may only name a family the allocation holds.
+    pub fn release_family(
+        &mut self,
+        now: Instant,
+        family: proto::reqfamily::RequestedAddressFamily,
+    ) -> Result<()> {
+        let Some(relay) = self.client.relays.get(&self.relayed_addr) else {
+            return Err(Error::ErrConnClosed);
+        };
+        if relay.releasing {
+            return Err(Error::ErrConnClosed);
+        }
+        let ipv6 = family == proto::reqfamily::REQUESTED_FAMILY_IPV6;
+        if (family != proto::reqfamily::REQUESTED_FAMILY_IPV4 && !ipv6)
+            || !relay.addrs.iter().any(|addr| addr.is_ipv6() == ipv6)
+        {
+            return Err(Error::Other(format!(
+                "the allocation has no {family} relayed address"
+            )));
+        }
+        if relay.addrs.len() == 1 {
+            return self.close(now);
+        }
+        self.release_family_with(now, family, Retry::default())
+    }
+
+    pub(super) fn release_family_with(
+        &mut self,
+        now: Instant,
+        family: proto::reqfamily::RequestedAddressFamily,
+        retry: Retry,
+    ) -> Result<()> {
+        let Some(relay) = self.client.relays.get(&self.relayed_addr) else {
+            return Err(Error::ErrConnClosed);
+        };
+        let msg = self.client.build_request(
+            METHOD_REFRESH,
+            vec![
+                Box::new(proto::lifetime::Lifetime(Duration::ZERO)),
+                Box::new(family),
+            ],
+            relay,
+        )?;
+        let integrity_key = relay.key();
+        let _ = self.client.perform_transaction(
+            now,
+            &msg,
+            self.client.turn_server_addr_or_err()?,
+            TransactionType::FamilyRelease(self.relayed_addr, family.0, retry),
+            integrity_key,
+        );
+        Ok(())
+    }
+
+    /// Handles the response to the Refresh that deletes the relayed address of `family`.
+    pub(super) fn handle_family_release_response(
+        &mut self,
+        now: Instant,
+        res: Message,
+        family: u8,
+        retry: Retry,
+    ) -> Result<()> {
+        let family = proto::reqfamily::RequestedAddressFamily(family);
+        let ipv6 = family == proto::reqfamily::REQUESTED_FAMILY_IPV6;
+        if res.typ.class == CLASS_ERROR_RESPONSE {
+            let mut err = RequestError::of(&res);
+            if self.take_challenge(&res) {
+                if !retry.stale_nonce {
+                    return self.release_family_with(
+                        now,
+                        family,
+                        retry.after_stale_nonce(res.transaction_id),
+                    );
+                }
+                err = RequestError::Failed(Error::ErrTryAgain);
+            }
+            if err.is(CODE_ALLOC_MISMATCH) {
+                self.lose(err);
+                return Ok(());
+            }
+            // 443 (Peer Address Family Mismatch): the server holds no address of that
+            // family (RFC 8656 §8.2), so there is none to keep here. Anything else leaves
+            // the address where it was.
+            if !err.is(CODE_PEER_ADDR_FAMILY_MISMATCH) {
+                let name = self.name();
+                self.client.events.push_back(Event::RefreshError(name, err));
+                return Ok(());
+            }
+        }
+
+        let Some(relay) = self.client.relays.get_mut(&self.relayed_addr) else {
+            return Ok(());
+        };
+        // The other family's address, permissions and channel bindings are untouched.
+        let gone: Vec<RelayedAddr> = relay
+            .addrs
+            .iter()
+            .copied()
+            .filter(|addr| addr.is_ipv6() == ipv6)
+            .collect();
+        relay.addrs.retain(|addr| addr.is_ipv6() != ipv6);
+        relay.perm_map.retain(|ip, _| ip.is_ipv6() != ipv6);
+        let bound: Vec<SocketAddr> = relay
+            .binding_mgr
+            .iter()
+            .map(|b| b.addr)
+            .filter(|addr| addr.is_ipv6() == ipv6)
+            .collect();
+        for addr in bound {
+            relay.binding_mgr.delete_by_addr(&addr);
+        }
+        if relay.addrs.is_empty() {
+            self.released();
+            return Ok(());
+        }
+        for addr in gone {
+            self.client
+                .events
+                .push_back(Event::AllocationReleased(addr));
+        }
+        Ok(())
     }
 
     fn send(&mut self, now: Instant, p: &[u8], peer_addr: SocketAddr) -> Result<()> {
@@ -367,14 +630,19 @@ impl Relay<'_> {
                 }
                 self.send_channel_data(now, p, channel_number)
             }
-            None => self.send_indication(now, p, peer_addr),
+            None => self.send_indication(now, p, peer_addr, false),
         }
     }
 
     /// Sends `p` to `peer_addr` in a Send indication (RFC 8656 §11.1).
-    fn send_indication(&mut self, now: Instant, p: &[u8], peer_addr: SocketAddr) -> Result<()> {
-        let mut msg = Message::new();
-        msg.build(&[
+    fn send_indication(
+        &mut self,
+        now: Instant,
+        p: &[u8],
+        peer_addr: SocketAddr,
+        dont_fragment: bool,
+    ) -> Result<()> {
+        let mut setters: Vec<Box<dyn Setter>> = vec![
             Box::new(TransactionId::new()),
             Box::new(MessageType::new(METHOD_SEND, CLASS_INDICATION)),
             Box::new(proto::data::Data(p.to_vec())),
@@ -382,8 +650,13 @@ impl Relay<'_> {
                 ip: peer_addr.ip(),
                 port: peer_addr.port(),
             }),
-            Box::new(FINGERPRINT),
-        ])?;
+        ];
+        if dont_fragment {
+            setters.push(Box::new(proto::dontfrag::DontFragmentAttr));
+        }
+        setters.push(Box::new(FINGERPRINT));
+        let mut msg = Message::new();
+        msg.build(&setters)?;
 
         // indication has no transaction (fire-and-forget)
         self.client
@@ -431,20 +704,22 @@ impl Relay<'_> {
     /// The server no longer holds the allocation: the client drops its copy, with its
     /// permissions and channel bindings, and says so.
     pub(super) fn lose(&mut self, err: RequestError) {
-        debug!("allocation {} lost: {err}", self.relayed_addr);
+        let name = self.name();
+        debug!("allocation {name} lost: {err}");
         self.forget();
         self.client
             .events
-            .push_back(Event::AllocationLost(self.relayed_addr, err));
+            .push_back(Event::AllocationLost(name, err));
     }
 
     /// The allocation the application released is done with.
     pub(super) fn released(&mut self) {
-        debug!("allocation released; relay {} dropped", self.relayed_addr);
+        let name = self.name();
+        debug!("allocation released; relay {name} dropped");
         self.forget();
         self.client
             .events
-            .push_back(Event::AllocationReleased(self.relayed_addr));
+            .push_back(Event::AllocationReleased(name));
     }
 
     fn create_permissions(
@@ -668,11 +943,10 @@ impl Relay<'_> {
             if let Some(relay) = self.client.relays.get_mut(&self.relayed_addr) {
                 relay.perm_map.remove(&peer_addr.ip());
             }
-            self.client.events.push_back(Event::PermissionLost(
-                self.relayed_addr,
-                peer_addr.ip(),
-                err,
-            ));
+            let name = self.name();
+            self.client
+                .events
+                .push_back(Event::PermissionLost(name, peer_addr.ip(), err));
         }
 
         Ok(())
@@ -798,9 +1072,8 @@ impl Relay<'_> {
             // the server said: a 437 means it was gone already (RFC 8656 §8.3), and after
             // anything else, or silence, the server drops it when its lifetime runs out.
             if matches!(err, RequestError::Rejected(_)) && !err.is(CODE_ALLOC_MISMATCH) {
-                self.client
-                    .events
-                    .push_back(Event::RefreshError(self.relayed_addr, err));
+                let name = relay.name();
+                self.client.events.push_back(Event::RefreshError(name, err));
             }
             self.released();
             return;
@@ -820,9 +1093,8 @@ impl Relay<'_> {
         if sooner < relay.refresh_alloc_timer {
             relay.refresh_alloc_timer = sooner;
         }
-        self.client
-            .events
-            .push_back(Event::RefreshError(self.relayed_addr, err));
+        let name = relay.name();
+        self.client.events.push_back(Event::RefreshError(name, err));
     }
 
     pub(super) fn refresh_permissions(&mut self, now: Instant) -> Result<()> {
@@ -983,9 +1255,10 @@ impl Relay<'_> {
         // and starting afresh.
         let allocation_gone = err.is(CODE_ALLOC_MISMATCH);
         let out_of_step = err.is(CODE_BAD_REQUEST);
+        let name = self.name();
         self.client
             .events
-            .push_back(Event::ChannelBindError(self.relayed_addr, bind_addr, err));
+            .push_back(Event::ChannelBindError(name, bind_addr, err));
         if allocation_gone {
             self.lose(RequestError::of(&res));
         } else if out_of_step {
@@ -1026,4 +1299,11 @@ impl Relay<'_> {
 
         Ok(())
     }
+}
+
+/// The error for a peer no relayed address of the allocation can reach.
+fn peer_family_mismatch(peer_addr: SocketAddr) -> Error {
+    Error::Other(format!(
+        "{peer_addr} is not of the address family of a relayed address of the allocation"
+    ))
 }

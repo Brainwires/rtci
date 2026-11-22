@@ -11,8 +11,14 @@
 #[cfg(test)]
 mod proto_test;
 
+/// The `ADDITIONAL-ADDRESS-FAMILY` attribute, for asking for an IPv6 relayed address beside
+/// the IPv4 one.
+pub mod addfamily;
 /// Address helpers and the five-tuple that identifies an allocation.
 pub mod addr;
+/// The `ADDRESS-ERROR-CODE` attribute, which says why one of two address families was not
+/// allocated.
+pub mod addrerror;
 /// ChannelData messages — the compact 4-byte framing for relayed data.
 pub mod chandata;
 /// The `CHANNEL-NUMBER` attribute.
@@ -23,6 +29,8 @@ pub mod data;
 pub mod dontfrag;
 /// The `EVEN-PORT` attribute, requesting an even relayed port (for RTP/RTCP pairs).
 pub mod evenport;
+/// The `ICMP` attribute, which reports an ICMP error a relayed datagram met.
+pub mod icmp;
 /// The `LIFETIME` attribute, which sets and reports allocation expiry.
 pub mod lifetime;
 /// The `XOR-PEER-ADDRESS` attribute, naming the peer in permission and data messages.
@@ -40,7 +48,7 @@ use std::fmt;
 
 use stun::message::*;
 
-// proto implements RFC 5766 Traversal Using Relays around NAT.
+// proto implements RFC 8656 Traversal Using Relays around NAT.
 
 /// `Protocol` is IANA assigned protocol number.
 #[derive(PartialEq, Eq, Default, Debug, Clone, Copy, Hash)]
@@ -64,7 +72,7 @@ impl fmt::Display for Protocol {
     }
 }
 
-// Default ports for TURN from RFC 5766 Section 4.
+// Default ports for TURN from RFC 8656 Section 4.1.
 
 /// `DEFAULT_PORT` for TURN is same as STUN.
 pub const DEFAULT_PORT: u16 = stun::DEFAULT_PORT;

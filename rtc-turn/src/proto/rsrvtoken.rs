@@ -15,8 +15,8 @@ use stun::message::*;
 /// attribute in a subsequent Allocate request to request the server use
 /// that relayed transport address for the allocation.
 ///
-/// [RFC 5766 Section 14.9](https://www.rfc-editor.org/rfc/rfc5766#section-14.9).
-#[derive(Debug, Default, PartialEq, Eq)]
+/// [RFC 8656 Section 18.10](https://www.rfc-editor.org/rfc/rfc8656#section-18.10).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ReservationToken(pub Vec<u8>);
 
 const RESERVATION_TOKEN_SIZE: usize = 8; // 8 bytes

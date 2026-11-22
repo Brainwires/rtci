@@ -16,7 +16,10 @@ use std::time::{Duration, Instant};
 use bytes::BytesMut;
 use sansio::Protocol;
 use shared::{TaggedBytesMut, TransportContext, TransportProtocol};
-use stun::attributes::{ATTR_NONCE, ATTR_REALM, AttrType};
+use stun::attributes::{
+    ATTR_ALTERNATE_SERVER, ATTR_LIFETIME, ATTR_NONCE, ATTR_REALM, ATTR_RESERVATION_TOKEN,
+    ATTR_UNKNOWN_ATTRIBUTES, ATTR_XOR_RELAYED_ADDRESS, ATTR_XORMAPPED_ADDRESS, AttrType,
+};
 use stun::error_code::{CODE_STALE_NONCE, CODE_UNAUTHORIZED, ErrorCode, ErrorCodeAttribute};
 use stun::fingerprint::FINGERPRINT;
 use stun::integrity::MessageIntegrity;
@@ -28,16 +31,37 @@ use stun::message::{
 use stun::textattrs::TextAttribute;
 use stun::xoraddr::XorMappedAddress;
 
-use crate::client::{Client, ClientConfig, Event};
+use crate::client::{AllocateOptions, Client, ClientConfig, Event};
+use crate::proto::addfamily::ATTR_ADDITIONAL_ADDRESS_FAMILY;
+use crate::proto::addrerror::ATTR_ADDRESS_ERROR_CODE;
 use crate::proto::chandata::ChannelData;
 use crate::proto::channum::ChannelNumber;
 use crate::proto::data::Data;
+use crate::proto::evenport::EvenPort;
+use crate::proto::icmp::ATTR_ICMP;
 use crate::proto::lifetime::Lifetime;
 use crate::proto::peeraddr::PeerAddress;
 use crate::proto::relayaddr::RelayedAddress;
+use crate::proto::reqfamily::RequestedAddressFamily;
+use crate::proto::rsrvtoken::ReservationToken;
 
 const USERNAME: &str = "fuzz-user";
 const PASSWORD: &str = "fuzz-password";
+
+/// Attributes the client reads from a server's responses beside the ones the harness builds:
+/// RESERVATION-TOKEN, ADDITIONAL-ADDRESS-FAMILY, ADDRESS-ERROR-CODE, ICMP, UNKNOWN-ATTRIBUTES,
+/// ALTERNATE-SERVER, XOR-RELAYED-ADDRESS (a second one), XOR-MAPPED-ADDRESS, LIFETIME.
+const RESPONSE_ATTRS: [AttrType; 9] = [
+    ATTR_RESERVATION_TOKEN,
+    ATTR_ADDITIONAL_ADDRESS_FAMILY,
+    ATTR_ADDRESS_ERROR_CODE,
+    ATTR_ICMP,
+    ATTR_UNKNOWN_ATTRIBUTES,
+    ATTR_ALTERNATE_SERVER,
+    ATTR_XOR_RELAYED_ADDRESS,
+    ATTR_XORMAPPED_ADDRESS,
+    ATTR_LIFETIME,
+];
 
 /// How many of the client's outgoing requests the harness remembers.
 const REQUESTS: usize = 16;
@@ -226,11 +250,14 @@ impl Harness {
         let mut m = Message::new();
         if m.build(&setters).is_ok() {
             if flags & 0x80 != 0 {
-                // One more attribute, raw: type and value from the input.
-                m.add(
-                    AttrType(u16::from(byte(arg, 11)) << 8 | 0x22),
-                    text.as_bytes(),
-                );
+                // One more attribute, raw: the value from the input, the type one the
+                // client reads from a response or any other.
+                let typ = if byte(arg, 11) & 0x04 != 0 {
+                    RESPONSE_ATTRS[usize::from(byte(arg, 9)) % RESPONSE_ATTRS.len()]
+                } else {
+                    AttrType(u16::from(byte(arg, 11)) << 8 | 0x22)
+                };
+                m.add(typ, text.as_bytes());
                 m.write_length();
             }
             let from = self.source(byte(arg, 11) >> 4, to);
@@ -257,6 +284,11 @@ impl Harness {
         }
         let mut m = Message::new();
         if m.build(&setters).is_ok() {
+            if flags & 0x04 != 0 {
+                // An ICMP attribute (RFC 8656 §18.13), of whatever length the input has.
+                m.add(ATTR_ICMP, arg.get(2..).unwrap_or(&[]));
+                m.write_length();
+            }
             let from = self.source(flags >> 4, turn_server());
             self.inbound(from, m.raw);
         }
@@ -307,12 +339,14 @@ impl Harness {
 /// The first byte sets the client's options (a STUN server, the refresh cap). The rest is a
 /// sequence of ops, each an op byte followed by a length-prefixed argument:
 ///
-/// - client actions: Allocate, Binding requests, CreatePermission, send (which binds a channel),
-///   closing a relay, refreshing allocations, new credentials;
+/// - client actions: Allocate with any options, Binding requests, CreatePermission, send (which
+///   binds a channel), send with DONT-FRAGMENT, closing a relay or one of its address
+///   families, refreshing allocations, new credentials;
 /// - a response to one of the client's requests, with fuzzed class, error code, relayed and
 ///   mapped address, lifetime, NONCE / REALM, MESSAGE-INTEGRITY, FINGERPRINT, an extra raw
-///   attribute, and source address;
-/// - a Data indication or ChannelData, from the server or elsewhere;
+///   attribute (of a type the client reads, or any), and source address;
+/// - a Data indication (with DATA, ICMP or neither) or ChannelData, from the server or
+///   elsewhere;
 /// - a raw datagram; advancing the clock, which drives retransmissions and refreshes.
 pub fn client_handle_inbound(mut data: &[u8], start: Instant) {
     let Some((&config, rest)) = data.split_first() else {
@@ -365,9 +399,25 @@ pub fn client_handle_inbound(mut data: &[u8], start: Instant) {
         }
         let arg = take_arg(&mut data);
         let now = h.now;
-        match op % 14 {
+        match op % 16 {
             0 => {
-                let _ = h.client.allocate(now);
+                // An Allocate with the options the argument picks; every combination the
+                // RFC forbids must be refused, not sent.
+                let flags = byte(arg, 0);
+                let options = AllocateOptions {
+                    address_family: (flags & 0x01 != 0)
+                        .then(|| RequestedAddressFamily(1 + (flags >> 1 & 0x01))),
+                    additional_ipv6: flags & 0x04 != 0,
+                    lifetime: (flags & 0x08 != 0)
+                        .then(|| Duration::from_secs(u64::from(byte(arg, 1)) * 60)),
+                    dont_fragment: flags & 0x10 != 0,
+                    even_port: (flags & 0x20 != 0).then_some(EvenPort {
+                        reserve_port: flags & 0x40 != 0,
+                    }),
+                    reservation_token: (flags & 0x80 != 0)
+                        .then(|| ReservationToken(vec![byte(arg, 1); 8])),
+                };
+                let _ = h.client.allocate_with(now, options);
                 h.drain();
             }
             1 => {
@@ -417,6 +467,20 @@ pub fn client_handle_inbound(mut data: &[u8], start: Instant) {
                     String::from_utf8_lossy(arg).into_owned(),
                     PASSWORD.to_owned(),
                 );
+            }
+            13 => {
+                let p = peer(byte(arg, 1));
+                let payload = arg.get(2..).unwrap_or(&[]).to_vec();
+                h.with_relay(byte(arg, 0), |relay, now| {
+                    let _ = relay.send_to_dont_fragment(now, &payload, p);
+                });
+            }
+            14 => {
+                let family = RequestedAddressFamily(byte(arg, 1) & 0x03);
+                h.with_relay(byte(arg, 0), |relay, now| {
+                    let _ = relay.release_family(now, family);
+                });
+                h.client.clear_allocate_restrictions();
             }
             _ => {
                 let _ = h.client.close();

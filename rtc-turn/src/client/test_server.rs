@@ -432,3 +432,88 @@ pub(super) fn drive_accepting(
     }
     Ok((all, events))
 }
+
+impl TestServer {
+    /// The 401 (Unauthorized) that asks for the long-term credential, with a nonce and the
+    /// realm, unsigned as a server sends it.
+    pub(super) fn challenge(
+        &self,
+        client: &mut Client,
+        now: Instant,
+        request: &Message,
+    ) -> Result<()> {
+        self.answer(
+            client,
+            now,
+            request,
+            CLASS_ERROR_RESPONSE,
+            vec![
+                Box::new(ErrorCodeAttribute {
+                    code: stun::error_code::CODE_UNAUTHORIZED,
+                    reason: b"Unauthorized".to_vec(),
+                }),
+                Box::new(Nonce::new(ATTR_NONCE, "nonce".to_owned())),
+                Box::new(Realm::new(ATTR_REALM, REALM.to_owned())),
+            ],
+            None,
+        )
+    }
+
+    /// Starts an Allocate with `options` and takes it through the 401: returns the id the
+    /// client handed out, the first request and the authenticated one.
+    pub(super) fn begin_allocate(
+        &self,
+        client: &mut Client,
+        now: Instant,
+        options: AllocateOptions,
+    ) -> Result<(TransactionId, Message, Message)> {
+        let tid = client.allocate_with(now, options)?;
+        let first = self.next_request(client);
+        self.challenge(client, now, &first)?;
+        let authenticated = self.next_request(client);
+        Ok((tid, first, authenticated))
+    }
+
+    /// Runs an Allocate with `options` that the server answers with `attrs`, signed.
+    pub(super) fn allocate_with(
+        &self,
+        client: &mut Client,
+        now: Instant,
+        options: AllocateOptions,
+        attrs: Vec<Box<dyn Setter>>,
+    ) -> Result<(TransactionId, Message)> {
+        let (tid, _, authenticated) = self.begin_allocate(client, now, options)?;
+        self.answer(
+            client,
+            now,
+            &authenticated,
+            CLASS_SUCCESS_RESPONSE,
+            attrs,
+            Some(&self.key),
+        )?;
+        Ok((tid, authenticated))
+    }
+}
+
+/// An XOR-RELAYED-ADDRESS for `addr`.
+pub(super) fn relayed(addr: SocketAddr) -> Box<dyn Setter> {
+    Box::new(RelayedAddress {
+        ip: addr.ip(),
+        port: addr.port(),
+    })
+}
+
+/// A LIFETIME of `secs` seconds.
+pub(super) fn lifetime(secs: u64) -> Box<dyn Setter> {
+    Box::new(Lifetime(Duration::from_secs(secs)))
+}
+
+/// The values of every attribute of type `t` in `m`.
+pub(super) fn values_of(m: &Message, t: AttrType) -> Vec<Vec<u8>> {
+    m.attributes
+        .0
+        .iter()
+        .filter(|a| a.typ == t)
+        .map(|a| a.value.clone())
+        .collect()
+}

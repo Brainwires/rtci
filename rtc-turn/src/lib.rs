@@ -4,9 +4,14 @@
 
 //! TURN for the Sans-I/O WebRTC stack.
 //!
-//! Traversal Using Relays around NAT ([RFC 5766]) with IPv6 support ([RFC 6156]). TURN is
-//! ICE's fallback: when no direct path between two peers can be found, each relays its
+//! Traversal Using Relays around NAT ([RFC 8656], which replaced RFC 5766 and RFC 6156). TURN
+//! is ICE's fallback: when no direct path between two peers can be found, each relays its
 //! media through a server, which allocates a public address on their behalf.
+//!
+//! The client covers the client role of RFC 8656: UDP relayed addresses of either family or
+//! both (`REQUESTED-ADDRESS-FAMILY`, `ADDITIONAL-ADDRESS-FAMILY`), permissions, channels,
+//! `DONT-FRAGMENT`, even and reserved ports, ICMP errors, and the long-term credential of
+//! RFC 5389. There is no TURN server here.
 //!
 //! # Structure
 //!
@@ -41,13 +46,12 @@
 //! assert_eq!(config.turn_serv_addr, "turn.example.com:3478");
 //! ```
 //!
-//! Most applications do not depend on this crate directly — [`rtc-ice`] gathers relay
-//! candidates through it, and the [`rtc`](https://docs.rs/rtc) crate drives that.
+//! The application owns the socket: it feeds what arrives to the client, sends what the client
+//! queues, and adds the relayed address to its ICE agent as a relay candidate. The crate is
+//! re-exported as `rtc::turn`.
 //!
-//! [RFC 5766]: https://datatracker.ietf.org/doc/html/rfc5766
-//! [RFC 6156]: https://datatracker.ietf.org/doc/html/rfc6156
+//! [RFC 8656]: https://datatracker.ietf.org/doc/html/rfc8656
 //! [`rtc-stun`]: https://docs.rs/rtc-stun
-//! [`rtc-ice`]: https://docs.rs/rtc-ice
 
 /// The Sans-I/O TURN client: allocate a relayed address and send through it.
 /// The crypto provider API.

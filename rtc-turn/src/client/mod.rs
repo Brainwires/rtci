@@ -8,6 +8,8 @@
 //! The three address kinds are easy to confuse: [`RelayedAddr`] is what peers send to,
 //! [`ReflexiveAddr`] is how the server sees this client, and [`PeerAddr`] is the far end.
 #[cfg(test)]
+mod client_allocate_options_test;
+#[cfg(test)]
 mod client_allocate_test;
 #[cfg(test)]
 mod client_channel_test;
@@ -28,6 +30,7 @@ mod client_test;
 #[cfg(test)]
 mod test_server;
 
+mod allocation;
 /// Channel bindings, which replace the 36-byte Data indication header with a 4-byte one.
 pub mod binding;
 mod error;
@@ -53,18 +56,20 @@ use stun::message::*;
 use stun::textattrs::*;
 use stun::xoraddr::*;
 
+pub use allocation::AllocateOptions;
+use allocation::FamilyBlock;
 pub use error::{ErrorResponse, RequestError};
 use transaction::*;
 
 use crate::client::relay::{Relay, RelayState};
-use crate::proto::PROTO_UDP;
 use crate::proto::chandata::*;
 use crate::proto::channum::ChannelNumber;
 use crate::proto::data::*;
+use crate::proto::icmp::Icmp;
 use crate::proto::lifetime::Lifetime;
 use crate::proto::peeraddr::*;
-use crate::proto::relayaddr::RelayedAddress;
-use crate::proto::reqtrans::RequestedTransport;
+#[cfg(test)]
+use crate::proto::{PROTO_UDP, relayaddr::RelayedAddress, reqtrans::RequestedTransport};
 use shared::error::{Error, Result};
 use shared::util::lookup_host;
 use shared::{TransportContext, TransportMessage, TransportProtocol};
@@ -124,6 +129,11 @@ pub enum Event {
     /// The server refused to refresh the permission for a peer's IP address. The client has
     /// dropped it: nothing is sent to that address until a new permission is created.
     PermissionLost(RelayedAddr, IpAddr, RequestError),
+    /// A datagram the server relayed to this peer was answered with an ICMP error, for
+    /// example "fragmentation needed" with the path MTU after a send with DONT-FRAGMENT
+    /// (RFC 8656 §11.6). The peer address tells whether the type and code are ICMPv4 or
+    /// ICMPv6.
+    IcmpError(PeerAddr, Icmp),
     /// A ChannelBind for a peer failed. Data to it keeps going as Send indications, and the
     /// bind is tried again later. After a 437, or a 400 (the channels of client and server are
     /// out of step, RFC 8656 §12.3), [`Event::AllocationLost`] follows.
@@ -211,7 +221,12 @@ pub struct Client {
     rto_in_ms: u64,
     allocation_refresh_interval_cap: Option<Duration>,
 
+    /// Allocations, each under the first relayed address it was given.
     relays: HashMap<RelayedAddr, RelayState>,
+    /// Address families the server refused, by `REQUESTED-ADDRESS-FAMILY` value less one.
+    family_blocks: [Option<FamilyBlock>; 2],
+    /// Whether the server answered an Allocate with a family that was not asked for.
+    family_mismatch: bool,
     transmits: VecDeque<TransportMessage<BytesMut>>,
     events: VecDeque<Event>,
 }
@@ -257,6 +272,8 @@ impl Client {
             },
             allocation_refresh_interval_cap: config.allocation_refresh_interval_cap,
             relays: HashMap::new(),
+            family_blocks: [None, None],
+            family_mismatch: false,
             transmits: VecDeque::new(),
             events: VecDeque::new(),
         })
@@ -362,11 +379,20 @@ impl Client {
                 peer_addr.get_from(&msg)?;
                 let from = SocketAddr::new(peer_addr.ip, peer_addr.port);
 
+                // A Data indication carries the peer's data, or the ICMP error a datagram
+                // relayed to that peer met (RFC 8656 §11.4, §11.6). One with neither is
+                // discarded.
                 let mut data = Data::default();
-                data.get_from(&msg)?;
+                let mut icmp = Icmp::default();
+                let has_data = msg.contains(ATTR_DATA);
+                if has_data {
+                    data.get_from(&msg)?;
+                } else {
+                    icmp.get_from(&msg)?;
+                }
 
                 // The server relays only from addresses the client installed a permission
-                // for, so anything else is not what it claims to be (RFC 8656 §11.4).
+                // for, so anything else is not what it claims to be (RFC 8656 §11.4, §11.6).
                 if !self
                     .relays
                     .values()
@@ -376,13 +402,17 @@ impl Client {
                     return Ok(());
                 }
 
-                debug!("data indication received from {}", from);
-
-                self.events.push_back(Event::DataIndicationOrChannelData(
-                    None,
-                    from,
-                    BytesMut::from(&data.0[..]),
-                ))
+                if has_data {
+                    debug!("data indication received from {}", from);
+                    self.events.push_back(Event::DataIndicationOrChannelData(
+                        None,
+                        from,
+                        BytesMut::from(&data.0[..]),
+                    ))
+                } else {
+                    debug!("{icmp} reported for {from}");
+                    self.events.push_back(Event::IcmpError(from, icmp))
+                }
             }
 
             return Ok(());
@@ -437,11 +467,30 @@ impl Client {
                         }
                     }
                 }
-                METHOD_ALLOCATE => {
-                    self.handle_allocate_response(now, msg, tr.transaction_type)?;
-                }
+                METHOD_ALLOCATE => match tr.transaction_type {
+                    TransactionType::AllocateAttempt(state) => {
+                        self.handle_allocate_response(now, msg, *state, false)?;
+                    }
+                    TransactionType::AllocateRequest(state) => {
+                        self.handle_allocate_response(now, msg, *state, true)?;
+                    }
+                    _ => {}
+                },
                 // A release of an allocation the client did not keep: nothing to do.
                 METHOD_REFRESH if matches!(tr.transaction_type, TransactionType::OrphanRelease) => {
+                }
+                METHOD_REFRESH
+                    if matches!(tr.transaction_type, TransactionType::FamilyRelease(..)) =>
+                {
+                    if let TransactionType::FamilyRelease(relayed_addr, family, retry) =
+                        tr.transaction_type
+                    {
+                        let mut relay = Relay {
+                            relayed_addr,
+                            client: self,
+                        };
+                        relay.handle_family_release_response(now, msg, family, retry)?;
+                    }
                 }
                 METHOD_CREATE_PERMISSION => {
                     if let TransactionType::CreatePermissionRequest(
@@ -501,7 +550,7 @@ impl Client {
         match tr.transaction_type {
             TransactionType::RefreshRequest(relayed_addr, lifetime, retry) => {
                 if !retry.timeout
-                    && let Ok(mut relay) = self.relay(relayed_addr)
+                    && let Some(mut relay) = self.relay_by_key(relayed_addr)
                     && relay
                         .refresh_allocation_with(
                             now,
@@ -513,7 +562,7 @@ impl Client {
                     debug!("refresh timed out; sent again");
                     return;
                 }
-                let Ok(mut relay) = self.relay(relayed_addr) else {
+                let Some(mut relay) = self.relay_by_key(relayed_addr) else {
                     return;
                 };
                 let releasing = lifetime.is_zero();
@@ -525,7 +574,7 @@ impl Client {
             }
             TransactionType::ChannelBindRequest(relayed_addr, bind_addr, retry) => {
                 if !retry.timeout
-                    && let Ok(mut relay) = self.relay(relayed_addr)
+                    && let Some(mut relay) = self.relay_by_key(relayed_addr)
                     && relay
                         .rebind_channel(now, bind_addr, retry.after_timeout(tr.transaction_id))
                         .is_ok()
@@ -533,9 +582,32 @@ impl Client {
                     debug!("channel bind for {bind_addr} timed out; sent again");
                     return;
                 }
-                if let Ok(mut relay) = self.relay(relayed_addr) {
+                if let Some(mut relay) = self.relay_by_key(relayed_addr) {
                     relay.channel_bind_timed_out(bind_addr);
                 }
+            }
+            TransactionType::FamilyRelease(relayed_addr, family, retry) => {
+                if !retry.timeout
+                    && let Some(mut relay) = self.relay_by_key(relayed_addr)
+                    && relay
+                        .release_family_with(
+                            now,
+                            crate::proto::reqfamily::RequestedAddressFamily(family),
+                            retry.after_timeout(tr.transaction_id),
+                        )
+                        .is_ok()
+                {
+                    return;
+                }
+                // Nothing says the server deleted the address, so it is kept; the periodic
+                // Refresh keeps the whole allocation alive.
+                if let Some(relay) = self.relays.get(&relayed_addr) {
+                    self.events.push_back(Event::RefreshError(
+                        relay.name(),
+                        RequestError::Failed(Error::ErrTimeout),
+                    ));
+                }
+                return;
             }
             TransactionType::OrphanRelease => return,
             _ => {}
@@ -595,14 +667,26 @@ impl Client {
     /// Fails if this client has no allocation for that address — it was never allocated, or has
     /// already been closed.
     pub fn relay(&mut self, relayed_addr: SocketAddr) -> Result<Relay<'_>> {
-        if !self.relays.contains_key(&relayed_addr) {
-            Err(Error::ErrStreamNotExisted)
-        } else {
-            Ok(Relay {
-                relayed_addr,
-                client: self,
-            })
-        }
+        // An allocation is kept under its first relayed address and found by any address it
+        // has now: either of the two of a dual allocation.
+        let key = self
+            .relays
+            .iter()
+            .find(|(_, relay)| relay.addrs.contains(&relayed_addr))
+            .map(|(key, _)| *key)
+            .ok_or(Error::ErrStreamNotExisted)?;
+        Ok(Relay {
+            relayed_addr: key,
+            client: self,
+        })
+    }
+
+    /// The allocation kept under `key`, whatever relayed addresses it has now.
+    fn relay_by_key(&mut self, key: RelayedAddr) -> Option<Relay<'_>> {
+        self.relays.contains_key(&key).then_some(Relay {
+            relayed_addr: key,
+            client: self,
+        })
     }
 
     /// Whether this client is waiting on a response for transaction `id`.
@@ -771,222 +855,11 @@ impl Client {
             .collect();
 
         for (relayed_addr, lifetime) in relays {
-            self.relay(relayed_addr)?
-                .refresh_allocation(now, lifetime)?;
-        }
-
-        Ok(())
-    }
-
-    /// Allocate sends a TURN allocation request to the given transport address
-    pub fn allocate(&mut self, now: Instant) -> Result<TransactionId> {
-        let mut msg = Message::new();
-        msg.build(&[
-            Box::new(TransactionId::new()),
-            Box::new(MessageType::new(METHOD_ALLOCATE, CLASS_REQUEST)),
-            Box::new(RequestedTransport {
-                // Always a UDP relay, however the server is reached: REQUESTED-TRANSPORT
-                // names what the allocation relays, not the client-to-server transport
-                // (RFC 8656 §7.1). TCP allocations (RFC 6062) are not implemented here.
-                protocol: PROTO_UDP,
-            }),
-            Box::new(FINGERPRINT),
-        ])?;
-
-        // The authenticated retry that follows the 401 goes out under an id of its own, drawn
-        // here at random rather than derived from this request's (RFC 8489 §6.3.1: every new
-        // request takes a new transaction id). It is the one the caller is handed, because the
-        // retry is the request that carries the allocation.
-        let allocation_id = TransactionId::new();
-
-        debug!("client.Allocate call PerformTransaction 1");
-        self.perform_transaction(
-            now,
-            &msg,
-            self.turn_server_addr_or_err()?,
-            TransactionType::AllocateAttempt(allocation_id),
-            None,
-        );
-        Ok(allocation_id)
-    }
-
-    fn handle_allocate_response(
-        &mut self,
-        now: Instant,
-        response: Message,
-        allocate_state: TransactionType,
-    ) -> Result<()> {
-        match allocate_state {
-            TransactionType::AllocateAttempt(allocation_id) => {
-                // The first request carries no credential. A server that wants none answers
-                // it with the allocation (RFC 8656 §7.2 step 1).
-                if response.typ.class != CLASS_ERROR_RESPONSE {
-                    return self.handle_allocate_success(
-                        now,
-                        &response,
-                        allocation_id,
-                        vec![],
-                        Nonce::new(ATTR_NONCE, String::new()),
-                    );
-                }
-
-                // Only a 401 (Unauthorized) asks for the credential (RFC 8489 §9.2.5). Any
-                // other error is the answer to the Allocate, reported with its code under the
-                // id allocate() handed out.
-                let err = RequestError::of(&response);
-                if !err.is(stun::error_code::CODE_UNAUTHORIZED) {
-                    self.events
-                        .push_back(Event::AllocateError(allocation_id, err));
-                    return Ok(());
-                }
-                let nonce = match Nonce::get_from_as(&response, ATTR_NONCE) {
-                    Ok(nonce) => nonce,
-                    Err(err) => {
-                        self.events
-                            .push_back(Event::AllocateError(allocation_id, err.into()));
-                        return Ok(());
-                    }
-                };
-                self.realm = match Realm::get_from_as(&response, ATTR_REALM) {
-                    Ok(realm) => realm,
-                    Err(err) => {
-                        self.events
-                            .push_back(Event::AllocateError(allocation_id, err.into()));
-                        return Ok(());
-                    }
-                };
-
-                let integrity_key = MessageIntegrity::long_term_integrity_key(
-                    self.username.text.clone(),
-                    self.realm.text.clone(),
-                    self.password.clone(),
-                    self.crypto_provider.crypto(),
-                )?;
-                let integrity = MessageIntegrity::new_raw_integrity_with_provider(
-                    integrity_key.clone(),
-                    self.crypto_provider.crypto(),
-                );
-
-                let mut msg = Message::new();
-
-                // Trying to authorize, under the id allocate() returned, so the caller can
-                // match Event::AllocateResponse with it.
-                msg.build(&[
-                    Box::new(allocation_id),
-                    Box::new(MessageType::new(METHOD_ALLOCATE, CLASS_REQUEST)),
-                    Box::new(RequestedTransport {
-                        // Always a UDP relay, however the server is reached: REQUESTED-TRANSPORT
-                        // names what the allocation relays, not the client-to-server transport
-                        // (RFC 8656 §7.1). TCP allocations (RFC 6062) are not implemented here.
-                        protocol: PROTO_UDP,
-                    }),
-                    Box::new(self.username.clone()),
-                    Box::new(self.realm.clone()),
-                    Box::new(nonce.clone()),
-                    Box::new(integrity),
-                    Box::new(FINGERPRINT),
-                ])?;
-
-                debug!("client.Allocate call PerformTransaction 2");
-                self.perform_transaction(
-                    now,
-                    &msg,
-                    self.turn_server_addr_or_err()?,
-                    TransactionType::AllocateRequest(nonce),
-                    Some(integrity_key),
-                );
+            if let Some(mut relay) = self.relay_by_key(relayed_addr) {
+                relay.refresh_allocation(now, lifetime)?;
             }
-            TransactionType::AllocateRequest(nonce) => {
-                if response.typ.class == CLASS_ERROR_RESPONSE {
-                    self.events.push_back(Event::AllocateError(
-                        response.transaction_id,
-                        RequestError::of(&response),
-                    ));
-                    return Ok(());
-                }
-                let key = MessageIntegrity::long_term_integrity_key(
-                    self.username.text.clone(),
-                    self.realm.text.clone(),
-                    self.password.clone(),
-                    self.crypto_provider.crypto(),
-                )?;
-                return self.handle_allocate_success(
-                    now,
-                    &response,
-                    response.transaction_id,
-                    key,
-                    nonce,
-                );
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
-    /// Takes the allocation of an Allocate success response, reported under `id`. `key` and
-    /// `nonce` are the credential the request was made with; `key` is empty when the server
-    /// asked for none.
-    fn handle_allocate_success(
-        &mut self,
-        now: Instant,
-        response: &Message,
-        id: TransactionId,
-        key: Vec<u8>,
-        nonce: Nonce,
-    ) -> Result<()> {
-        // Getting relayed addresses and lifetime from response.
-        let mut relayed = RelayedAddress::default();
-        let mut lifetime = Lifetime::default();
-        if let Err(err) = relayed
-            .get_from(response)
-            .and_then(|()| lifetime.get_from(response))
-        {
-            // The server made an allocation this client cannot use: it is deleted, not left
-            // to hold the 5-tuple until it expires (RFC 8656 §7.3), and the caller is told.
-            let _ = self.release_orphan(now, &key, &nonce);
-            self.events
-                .push_back(Event::AllocateError(id, RequestError::Failed(err)));
-            return Ok(());
-        }
-        let relayed_addr = RelayedAddr::new(relayed.ip, relayed.port);
-
-        // A zero lifetime here is a protocol violation, not a degenerate allocation.
-        // RFC 8656 §7.2 has the server take `min(client proposed, server maximum)` and
-        // fall back to the *default* lifetime (600 s) whenever that computation does
-        // not exceed it — so the value returned by a successful Allocate is never
-        // below the default, and certainly never zero. Zero is meaningful only on the
-        // Refresh path (§8), where it means "allocation deleted".
-        //
-        // Accepting it would build a `RelayState` whose `refresh_alloc_timer` is
-        // `now.add(0)` — expired the instant it is created — for an allocation that is
-        // already gone. That relay then reports an expired refresh deadline forever,
-        // which is what a caller polling deadlines hot-loops on. See
-        // [webrtc#862](https://github.com/webrtc-rs/webrtc/issues/862).
-        if lifetime.0.is_zero() {
-            self.events.push_back(Event::AllocateError(
-                id,
-                RequestError::Failed(Error::Other(
-                    "Allocate success response carried LIFETIME=0; RFC 8656 §7.2 \
-                     requires at least the default lifetime"
-                        .to_owned(),
-                )),
-            ));
-            return Ok(());
         }
 
-        self.relays.insert(
-            relayed_addr,
-            RelayState::new(
-                now,
-                relayed_addr,
-                key,
-                nonce,
-                lifetime.0,
-                self.allocation_refresh_interval_cap,
-            ),
-        );
-        self.events
-            .push_back(Event::AllocateResponse(id, relayed_addr));
         Ok(())
     }
 
@@ -1009,11 +882,28 @@ impl Client {
         key: &[u8],
         nonce: &Nonce,
     ) -> Result<Message> {
+        self.build_request_as(TransactionId::new(), method, attrs, key, nonce)
+    }
+
+    /// Builds the request `id`: `attrs`, SOFTWARE when the client has one (RFC 8656 §5: in
+    /// every Allocate and Refresh, and allowed in any other request), the credential when
+    /// `key` is not empty, and FINGERPRINT.
+    pub(crate) fn build_request_as(
+        &self,
+        id: TransactionId,
+        method: Method,
+        attrs: Vec<Box<dyn Setter>>,
+        key: &[u8],
+        nonce: &Nonce,
+    ) -> Result<Message> {
         let mut setters: Vec<Box<dyn Setter + '_>> = vec![
-            Box::new(TransactionId::new()),
+            Box::new(id),
             Box::new(MessageType::new(method, CLASS_REQUEST)),
         ];
         setters.extend(attrs);
+        if !self.software.text.is_empty() {
+            setters.push(Box::new(self.software.clone()));
+        }
         if !key.is_empty() {
             setters.push(Box::new(self.username.clone()));
             setters.push(Box::new(self.realm.clone()));

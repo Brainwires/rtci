@@ -14,7 +14,7 @@ use shared::error::Result;
 /// the UDP header if the data was been sent directly between the client
 /// and the peer).
 ///
-/// [RFC 5766 Section 14.4](https://www.rfc-editor.org/rfc/rfc5766#section-14.4).
+/// [RFC 8656 Section 18.4](https://www.rfc-editor.org/rfc/rfc8656#section-18.4).
 #[derive(Default, Debug, PartialEq, Eq)]
 pub struct Data(pub Vec<u8>);
 

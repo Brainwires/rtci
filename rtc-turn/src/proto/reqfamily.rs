@@ -9,15 +9,15 @@ use stun::message::*;
 
 use shared::error::{Error, Result};
 
-// Values for RequestedAddressFamily as defined in RFC 6156 Section 4.1.1.
+// Values for RequestedAddressFamily as defined in RFC 8656 Section 18.6.
 /// Requests an IPv4 relayed address.
 pub const REQUESTED_FAMILY_IPV4: RequestedAddressFamily = RequestedAddressFamily(0x01);
 /// Requests an IPv6 relayed address.
 pub const REQUESTED_FAMILY_IPV6: RequestedAddressFamily = RequestedAddressFamily(0x02);
 
 /// `RequestedAddressFamily` represents the `REQUESTED-ADDRESS-FAMILY` Attribute as
-/// defined in [RFC 6156 Section 4.1.1](https://www.rfc-editor.org/rfc/rfc6156#section-4.1.1).
-#[derive(Debug, Default, PartialEq, Eq)]
+/// defined in [RFC 8656 Section 18.6](https://www.rfc-editor.org/rfc/rfc8656#section-18.6).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct RequestedAddressFamily(pub u8);
 
 impl fmt::Display for RequestedAddressFamily {

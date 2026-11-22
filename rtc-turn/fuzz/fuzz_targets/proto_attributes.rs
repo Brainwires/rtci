@@ -2,15 +2,19 @@
 //! Parser target: what a TURN server sends a client (RFC 8656). ChannelData messages
 //! (section 12.4), and STUN messages decoded with every TURN attribute getter: CHANNEL-NUMBER,
 //! LIFETIME, XOR-PEER-ADDRESS, XOR-RELAYED-ADDRESS, DATA, EVEN-PORT, REQUESTED-TRANSPORT,
-//! REQUESTED-ADDRESS-FAMILY, DONT-FRAGMENT and RESERVATION-TOKEN.
+//! REQUESTED-ADDRESS-FAMILY, DONT-FRAGMENT, RESERVATION-TOKEN, ADDITIONAL-ADDRESS-FAMILY,
+//! ADDRESS-ERROR-CODE and ICMP.
 
 use libfuzzer_sys::fuzz_target;
 use rtc_stun::message::{Getter, Message};
+use rtc_turn::proto::addfamily::AdditionalAddressFamily;
+use rtc_turn::proto::addrerror::AddressErrorCode;
 use rtc_turn::proto::chandata::ChannelData;
 use rtc_turn::proto::channum::ChannelNumber;
 use rtc_turn::proto::data::Data;
 use rtc_turn::proto::dontfrag::DontFragmentAttr;
 use rtc_turn::proto::evenport::EvenPort;
+use rtc_turn::proto::icmp::Icmp;
 use rtc_turn::proto::lifetime::Lifetime;
 use rtc_turn::proto::peeraddr::PeerAddress;
 use rtc_turn::proto::relayaddr::RelayedAddress;
@@ -43,4 +47,7 @@ fuzz_target!(|data: &[u8]| {
     let _ = RequestedAddressFamily::default().get_from(&m);
     let _ = DontFragmentAttr.get_from(&m);
     let _ = ReservationToken::default().get_from(&m);
+    let _ = AdditionalAddressFamily::default().get_from(&m);
+    let _ = AddressErrorCode::default().get_from(&m);
+    let _ = Icmp::default().get_from(&m);
 });
