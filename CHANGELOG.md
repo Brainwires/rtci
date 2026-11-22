@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Features
+
+- **ulpfec**: ULPFEC (RFC 5109), new in `rtc-interceptor` (`ulpfec` module) and opt-in.
+  `UlpfecPacket` reads and writes the FEC header and the level headers (16- and 48-bit masks, any
+  number of levels); `UlpfecEncoder` is the protection operation of section 8, with
+  `validate_ulpfec_scheme` for the mask rules of 7.4; `UlpfecDecoder` recovers level by level,
+  iterating until nothing more can be rebuilt, over a bounded window, and does not hand out a
+  packet rebuilt only in part. The examples of RFC 5109 section 10 are test vectors.
+- **ulpfec**: two carriages as interceptors (`UlpfecSendBuilder`, `UlpfecReceiveBuilder`). In RED
+  (RFC 2198; `video/red` + `video/ulpfec`, what browsers negotiate) media leaves as RED primary
+  blocks and FEC either as a RED packet of its own in the media stream's sequence space
+  (`RedPlacement::OwnPacket`, libwebrtc's form; later media packets are renumbered to make room)
+  or as a redundant block of the next media packet (`RedPlacement::WithNextMedia`, RFC 5109
+  10.3). Received RED is delivered as the media it carries, with lost packets rebuilt and marked
+  `Attribute::RecoveredByFec`; a RED packet that held only FEC travels the read leg emptied and
+  marked `UlpfecRepair`, so sequence-number accounting stays whole, and is not delivered to the
+  application. As a separate stream the FEC goes on the stream's repair SSRC
+  (`StreamInfo::ssrc_fec`). `onelevelonly` is honoured (`with_one_level_only`,
+  `ulpfec_one_level_only_from_fmtp`).
+- **ulpfec**: `configure_ulpfec(registry, red_payload_type, ulpfec_payload_type)` adds the RED
+  carriage in both directions. The default codecs still do not offer `ulpfec` or `red`; register
+  them and pass the negotiated payload types.
+- **fuzz**: targets `ulpfec_packet` and `ulpfec_receive` (crate `rtc`).
+
 ## [0.22.0+brainwires.5] - 2026-11-20
 
 ### Bug Fixes
