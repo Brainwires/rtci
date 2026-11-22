@@ -48,7 +48,13 @@ fn self_signed(name: &str) -> Certificate {
 }
 
 fn builder() -> ConfigBuilder {
-    ConfigBuilder::default().with_crypto_provider(provider())
+    // These are the tests of the DTLS 1.2 handshake; DTLS 1.3 has its own in `dtls13`.
+    ConfigBuilder::default()
+        .with_crypto_provider(provider())
+        .with_protocol_versions(
+            crate::config::DtlsVersion::Dtls1_2,
+            crate::config::DtlsVersion::Dtls1_2,
+        )
 }
 
 /// What `create_test_client` did: a self-signed certificate when asked, and no CA check.

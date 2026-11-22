@@ -7,15 +7,22 @@
 //! ([`key_schedule`]) and handshake.
 
 pub(crate) mod codec;
+pub(crate) mod conn;
+pub(crate) mod handshake;
+pub(crate) mod hello;
 pub(crate) mod key_schedule;
 pub(crate) mod messages;
 pub(crate) mod record;
 pub(crate) mod suite;
 
 #[cfg(test)]
+mod handshake_test;
+#[cfg(test)]
 mod key_schedule_test;
 #[cfg(test)]
 mod record_test;
+#[cfg(test)]
+mod reliability_test;
 
 /// DTLS 1.3 on the wire, in `supported_versions` (RFC 9147 section 5.3).
 pub(crate) const DTLS1_3_WIRE_VERSION: u16 = 0xfefc;
