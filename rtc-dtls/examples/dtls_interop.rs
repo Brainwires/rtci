@@ -103,6 +103,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let key_update = std::env::var("DTLS_KEY_UPDATE").as_deref() == Ok("1");
     let mut complete_at = None;
     let mut key_update_sent = false;
+    let mut after_key_update_sent = false;
     let mut buffer = vec![0u8; 65536];
 
     loop {
@@ -115,11 +116,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         // After the handshake: say something, and then, if asked, update the keys and say
         // something under the new ones.
-        if let (Some(at), Some(remote)) = (complete_at, remote) {
-            if key_update && !key_update_sent && now >= at + Duration::from_secs(1) {
+        if let (Some(at), Some(remote)) = (complete_at, remote)
+            && key_update
+        {
+            if !key_update_sent && now >= at + Duration::from_millis(300) {
                 key_update_sent = true;
                 endpoint.update_keys(now, remote, true)?;
                 println!("key update sent");
+                continue;
+            }
+            // A second later the peer has acknowledged it: this goes out under the new keys.
+            if key_update_sent && !after_key_update_sent && now >= at + Duration::from_millis(1300)
+            {
+                after_key_update_sent = true;
+                endpoint.write(now, remote, b"after the key update\n")?;
+                let epoch = endpoint.poll_transmit().map(|transmit| {
+                    let first = transmit.message[0];
+                    socket
+                        .send_to(&transmit.message, transmit.transport.peer_addr)
+                        .ok();
+                    first & 3
+                });
+                println!("sent after the key update, epoch bits {epoch:?}");
                 continue;
             }
         }
@@ -193,10 +211,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 EndpointEvent::ApplicationData(data) => {
                     println!("data {}", String::from_utf8_lossy(&data).trim_end());
-                    if key_update_sent {
-                        endpoint.write(Instant::now(), remote, b"after the key update\n")?;
-                        key_update_sent = false;
-                    }
                 }
                 EndpointEvent::PeerClosed => println!("closed"),
                 _ => {}

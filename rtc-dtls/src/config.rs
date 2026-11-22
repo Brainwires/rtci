@@ -132,6 +132,7 @@ pub struct ConfigBuilder {
     max_version: DtlsVersion,
     connection_id: Option<usize>,
     connection_id_migration: bool,
+    invalid_record_limit: Option<u64>,
     psk: Option<PskCallback>,
     psk_identity_hint: Option<Vec<u8>>,
     insecure_skip_verify: bool,
@@ -168,6 +169,7 @@ impl Default for ConfigBuilder {
             max_version: DtlsVersion::Dtls1_3,
             connection_id: Some(0),
             connection_id_migration: false,
+            invalid_record_limit: None,
             psk: None,
             psk_identity_hint: None,
             insecure_skip_verify: false,
@@ -374,6 +376,17 @@ impl ConfigBuilder {
     /// selected pair anyway.
     pub fn with_connection_id_migration(mut self, migration: bool) -> Self {
         self.connection_id_migration = migration;
+        self
+    }
+
+    /// How many invalid records (malformed, or failing authentication) a DTLS 1.3
+    /// association takes before it gives its peer up as persistently misbehaving and fails,
+    /// without an alert (RFC 9147 section 5.10). `None`, the default, never does: over UDP
+    /// anyone who knows the addresses can send such records, and a limit lets them end the
+    /// association. A limit suits a transport where only the peer can send (under ICE, a
+    /// selected pair with consent checks narrows it to on-path senders).
+    pub fn with_invalid_record_limit(mut self, limit: Option<u64>) -> Self {
+        self.invalid_record_limit = limit;
         self
     }
 
@@ -882,6 +895,7 @@ impl ConfigBuilder {
                 None
             },
             connection_id_migration: self.connection_id_migration,
+            invalid_record_limit: self.invalid_record_limit,
             initial_epoch: 0,
             maximum_transmission_unit,
             maximum_retransmit_number,
@@ -959,6 +973,7 @@ pub struct HandshakeConfig {
     /// connection_id extension at all.
     pub(crate) connection_id: Option<usize>,
     pub(crate) connection_id_migration: bool,
+    pub(crate) invalid_record_limit: Option<u64>,
     pub(crate) initial_epoch: u16,
     pub(crate) maximum_transmission_unit: usize,
     pub(crate) maximum_retransmit_number: usize,
@@ -1030,11 +1045,31 @@ impl HandshakeConfig {
             local_tls13_cipher_suites: vec![],
             connection_id: None,
             connection_id_migration: false,
+            invalid_record_limit: None,
             initial_epoch: 0,
             maximum_transmission_unit: DEFAULT_MTU,
             maximum_retransmit_number: DEFAULT_MAXIMUM_RETRANSMIT_NUMBER,
             replay_protection_window: DEFAULT_REPLAY_PROTECTION_WINDOW,
         }
+    }
+
+    /// This configuration with another initial value for the handshake retransmission
+    /// timer: for a caller that learns the round trip time of the path after the
+    /// configuration was built (ICE does), and sets the timer to 1.5 times it as RFC 9147
+    /// section 5.8.2 asks. The maximum the timer doubles to is raised to it if need be.
+    pub fn with_flight_interval(&self, flight_interval: std::time::Duration) -> Self {
+        let mut config = self.clone();
+        if !flight_interval.is_zero() {
+            config.retransmit_interval = flight_interval;
+            config.maximum_retransmit_interval =
+                config.maximum_retransmit_interval.max(flight_interval);
+        }
+        config
+    }
+
+    /// The initial value of the handshake retransmission timer.
+    pub fn flight_interval(&self) -> std::time::Duration {
+        self.retransmit_interval
     }
 
     pub(crate) fn provider(&self) -> &Arc<dyn RTCCryptoProvider> {

@@ -908,3 +908,78 @@ fn an_association_on_its_own_runs_the_cookie_exchange() -> Result<()> {
     let _ = SecretVec::new(vec![]);
     Ok(())
 }
+
+/// RFC 9147 section 5.8.2: the timer keeps its backed-off value from one flight to the next,
+/// and goes back to its initial value after ten times that value of quiet.
+#[test]
+fn the_backed_off_timer_returns_to_its_start_after_a_quiet_period() -> Result<()> {
+    let mut pair = no_cookies()?;
+    let client_hello = take(&mut pair.client);
+    pair.deliver_to_server(client_hello);
+    take(&mut pair.server);
+    fire(&mut pair, false);
+    take(&mut pair.server);
+    fire(&mut pair, false);
+    let flight = take(&mut pair.server);
+    pair.deliver_to_client(flight);
+    let mut pair = pair.complete();
+
+    // Two retransmissions took the server's timer from one second to four, and the next
+    // thing it has to retransmit starts from there.
+    let now = pair.now;
+    pair.server.update_keys(now, client_addr(), false)?;
+    let key_update_timer = |pair: &mut Pair| {
+        pair.server_conn()
+            .next_timeout()
+            .map(|at| at.saturating_duration_since(pair.now))
+    };
+    assert_eq!(key_update_timer(&mut pair), Some(Duration::from_secs(4)));
+    pair.run();
+
+    // Forty seconds later it starts from one second again.
+    pair.now += Duration::from_secs(41);
+    let now = pair.now;
+    pair.server.update_keys(now, client_addr(), false)?;
+    assert_eq!(key_update_timer(&mut pair), Some(Duration::from_secs(1)));
+    Ok(())
+}
+
+/// RFC 9147 section 5.10: where a limit is configured, a peer that keeps sending invalid
+/// records is given up on. Without one it never is.
+#[test]
+fn a_peer_that_keeps_sending_invalid_records_is_given_up_on_where_configured() -> Result<()> {
+    let mut pair = Pair::new(
+        client_builder(),
+        server_builder()
+            .with_cookie_exchange(false)
+            .with_invalid_record_limit(Some(3)),
+    )?
+    .complete();
+    pair.client.write(pair.now, server_addr(), b"genuine")?;
+    let genuine = take(&mut pair.client);
+    for attempt in 1..=4u8 {
+        let mut forged = genuine[0].to_vec();
+        let last = forged.len() - 1;
+        forged[last] ^= attempt;
+        let _ = pair
+            .server
+            .read(pair.now, client_addr(), None, BytesMut::from(&forged[..]));
+        assert_eq!(
+            pair.server.is_connection_failed(&client_addr()),
+            attempt == 4,
+            "after {attempt} invalid records"
+        );
+        assert!(take(&mut pair.server).is_empty(), "no alert for them");
+    }
+    // The client, which has no limit, takes any number.
+    for _ in 0..100 {
+        let _ = pair.client.read(
+            pair.now,
+            server_addr(),
+            None,
+            BytesMut::from(&[0x2f, 1, 2, 3][..]),
+        );
+    }
+    assert!(!pair.client.is_connection_failed(&server_addr()));
+    Ok(())
+}

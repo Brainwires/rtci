@@ -593,6 +593,35 @@ fn a_client_certificate_is_requested_and_verified() -> Result<()> {
     .complete();
     let state = pair.server.get_connection_state(client_addr()).unwrap();
     assert_eq!(state.peer_certificates, vec![der]);
+
+    // A client that authenticates is not done at its own Finished: the server can still
+    // refuse its certificate. It completes when the server has acknowledged the flight.
+    let certificate =
+        Certificate::generate_self_signed(vec!["client".to_owned()], provider().crypto())?;
+    let mut waiting = Pair::new(
+        client_builder().with_certificates(vec![certificate]),
+        server_builder()
+            .with_cookie_exchange(false)
+            .with_client_auth(ClientAuthType::RequireAnyClientCert),
+    )?;
+    let client_hello = take(&mut waiting.client);
+    waiting.deliver_to_server(client_hello);
+    let flight = take(&mut waiting.server);
+    waiting.deliver_to_client(flight);
+    assert!(
+        !waiting.client_complete,
+        "the server has not seen the certificate yet"
+    );
+    waiting.client.write(waiting.now, server_addr(), b"held")?;
+    let client_flight = take(&mut waiting.client);
+    assert_eq!(client_flight.len(), 1, "no application data before that");
+    waiting.deliver_to_server(client_flight);
+    assert!(waiting.server_complete);
+    let ack = take(&mut waiting.server);
+    waiting.deliver_to_client(ack);
+    assert!(waiting.client_complete);
+    waiting.run();
+    assert_eq!(application_data(&waiting.to_server), vec![b"held".to_vec()]);
     assert_eq!(
         pair.client_sends(b"authenticated"),
         vec![b"authenticated".to_vec()]
@@ -890,5 +919,60 @@ fn an_rsa_certificate_signs_with_rsassa_pss() -> Result<()> {
         assert_eq!(scheme.map(|scheme| scheme.signature), Some(expected));
         assert_eq!(pair.client_sends(b"rsa"), vec![b"rsa".to_vec()]);
     }
+    Ok(())
+}
+
+/// RFC 8446 section 4.4.2.2: of its certificates a server sends one whose chain is signed
+/// with algorithms the client lists, when it has one, and otherwise one the client can at
+/// least verify the handshake signature of.
+#[test]
+fn the_server_sends_a_chain_signed_with_algorithms_the_client_lists() -> Result<()> {
+    use crate::signature_hash_algorithm::SignatureScheme;
+
+    let provider = provider();
+    // A P-256 leaf issued by an Ed25519 authority, and a self-signed P-256 certificate.
+    let authority_key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+    let authority = rcgen::Issuer::new(
+        rcgen::CertificateParams::new(vec!["authority".to_owned()]).unwrap(),
+        authority_key,
+    );
+    let leaf_key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+    let leaf = rcgen::CertificateParams::new(vec!["localhost".to_owned()])
+        .unwrap()
+        .signed_by(&leaf_key, &authority)
+        .unwrap();
+    let issued = Certificate {
+        certificate: vec![leaf.der().to_owned()],
+        private_key: crate::crypto::CryptoPrivateKey::from_key_pair(&leaf_key, provider.crypto())?,
+    };
+    let self_signed =
+        Certificate::generate_self_signed(vec!["localhost".to_owned()], provider.crypto())?;
+    let issued_der = issued.certificate[0].as_ref().to_vec();
+    let self_signed_der = self_signed.certificate[0].as_ref().to_vec();
+    let server = |certificates: Vec<Certificate>| {
+        ConfigBuilder::default()
+            .with_crypto_provider(provider.clone())
+            .with_certificates(certificates)
+    };
+    let ecdsa_only =
+        || client_builder().with_signature_schemes(vec![SignatureScheme::EcdsaWithP256AndSha256]);
+    let sent = |pair: &Pair| {
+        pair.client
+            .get_connection_state(server_addr())
+            .unwrap()
+            .peer_certificates
+            .clone()
+    };
+
+    // The client does not list Ed25519: the certificate issued under it is passed over for
+    // the one signed with ECDSA, although it comes first.
+    let pair = Pair::new(ecdsa_only(), server(vec![issued.clone(), self_signed]))?.complete();
+    assert_eq!(sent(&pair), vec![self_signed_der]);
+    // A client that lists Ed25519 too gets the first.
+    let pair = Pair::new(client_builder(), server(vec![issued.clone()]))?.complete();
+    assert_eq!(sent(&pair), vec![issued_der.clone()]);
+    // With nothing better to offer the server sends what it has, and the client decides.
+    let pair = Pair::new(ecdsa_only(), server(vec![issued]))?.complete();
+    assert_eq!(sent(&pair), vec![issued_der]);
     Ok(())
 }

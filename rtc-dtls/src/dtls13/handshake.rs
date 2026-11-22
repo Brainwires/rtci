@@ -507,8 +507,10 @@ impl Conn13 {
                 _ => return Err(illegal(Error::ErrInvalidExtensionType)),
             }
         }
-        // As with DTLS 1.2: a client that asked for DTLS-SRTP does not go on without it.
+        // As with DTLS 1.2: a client that asked for DTLS-SRTP does not go on without it,
+        // unless its configuration says the association may do without.
         if !self.cfg.local_srtp_protection_profiles.is_empty()
+            && !self.cfg.use_srtp_optional
             && self.srtp_profile == SrtpProtectionProfile::Unsupported
         {
             return Err(refuse(
@@ -647,6 +649,7 @@ impl Conn13 {
         // The client's flight, under the handshake keys: its certificate if one was asked
         // for, and its Finished.
         let mut flight = Flight::new(FlightKind::ClientFinal);
+        let authenticates = self.certificate_requested.is_some();
         if let Some(schemes) = self.certificate_requested.take() {
             let credentials = self
                 .cfg
@@ -706,6 +709,13 @@ impl Conn13 {
         self.install_write_epoch(EPOCH_APPLICATION, local.as_ref())
             .map_err(internal)?;
         self.set_application_secrets(local, remote);
+        if authenticates {
+            // The server has yet to accept this client's certificate: the handshake is
+            // complete when it has said so (its ACK, or anything under its application
+            // keys).
+            self.state = HandshakeState::ClientWaitConfirmation;
+            return Ok(());
+        }
         debug!("client: handshake complete");
         self.establish().map_err(internal)
     }
