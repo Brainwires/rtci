@@ -269,7 +269,7 @@ use crate::data_channel::state::RTCDataChannelState;
 use crate::data_channel::{RTCDataChannel, RTCDataChannelId, internal::RTCDataChannelInternal};
 use crate::media_stream::track::MediaStreamTrack;
 use crate::peer_connection::configuration::media_engine::MediaEngine;
-use crate::peer_connection::configuration::setting_engine::{SctpMaxMessageSize, SettingEngine};
+use crate::peer_connection::configuration::setting_engine::SettingEngine;
 use crate::peer_connection::configuration::{
     RTCConfiguration, RTCIceTransportPolicy,
     offer_answer_options::{RTCAnswerOptions, RTCOfferOptions},
@@ -282,10 +282,10 @@ use crate::peer_connection::handler::sctp::SctpHandlerContext;
 use crate::peer_connection::sdp::MediaDescriptionExt;
 use crate::peer_connection::sdp::session_description::RTCSessionDescription;
 use crate::peer_connection::sdp::{
-    RemoteIceDetails, extract_fingerprints, extract_ice_details, get_application_media,
-    get_application_media_section_max_message_size, get_application_media_section_sctp_port,
-    get_mid_value, get_peer_direction, has_ice_trickle_option, insert_media_line, is_lite_set,
-    is_rejected_media, media_ice_credentials, sdp_type::RTCSdpType, update_sdp_origin,
+    RemoteIceDetails, SctpNegotiation, extract_fingerprints, extract_ice_details, get_mid_value,
+    get_peer_direction, has_ice_trickle_option, insert_media_line, is_lite_set, is_rejected_media,
+    is_unknown_application_media, media_ice_credentials, negotiated_sctp, sdp_type::RTCSdpType,
+    update_sdp_origin, validate_application_media_section,
 };
 use crate::peer_connection::state::RTCIceGatheringState;
 use crate::peer_connection::state::ice_connection_state::RTCIceConnectionState;
@@ -305,8 +305,9 @@ use crate::peer_connection::transport::ice::candidate::RTCIceCandidateInit;
 use crate::peer_connection::transport::ice::parameters::RTCIceParameters;
 use crate::peer_connection::transport::ice::role::RTCIceRole;
 use crate::peer_connection::transport::ice::state::RTCIceTransportState;
-use crate::peer_connection::transport::sctp::SctpTransport;
-use crate::peer_connection::transport::sctp::capabilities::SCTPTransportCapabilities;
+use crate::peer_connection::transport::sctp::{
+    SctpNegotiationOutcome, SctpRenegotiation, SctpTransport,
+};
 use crate::rtp_transceiver::direction::RTCRtpTransceiverDirection;
 use crate::rtp_transceiver::rtp_receiver::RTCRtpReceiver;
 use crate::rtp_transceiver::rtp_sender::RTCRtpCodecParameters;
@@ -1259,6 +1260,7 @@ impl RTCPeerConnection {
                 let kind = RtpCodecKind::from(media.media_name.media.as_str());
                 let mut direction = get_peer_direction(media);
                 if kind == RtpCodecKind::Unspecified
+                    || is_unknown_application_media(media)
                     || direction == RTCRtpTransceiverDirection::Unspecified
                 {
                     continue;
@@ -1282,36 +1284,13 @@ impl RTCPeerConnection {
             if let Some(remote_description) = self.remote_description().cloned()
                 && let Some(parsed_remote_description) = remote_description.parsed.as_ref()
             {
-                // only start sctp transport if application media has been negotiated
-                if let (Some(local_application_media), Some(remote_application_media)) = (
-                    get_application_media(parsed_local_description),
-                    get_application_media(parsed_remote_description),
-                ) {
-                    let (dtls_role, remote_caps, local_sctp_port, remote_sctp_port) = (
-                        self.dtls_transport().role(),
-                        SCTPTransportCapabilities {
-                            max_message_size: get_application_media_section_max_message_size(
-                                remote_application_media,
-                            )
-                            .unwrap_or(SctpMaxMessageSize::DEFAULT_MESSAGE_SIZE),
-                        },
-                        get_application_media_section_sctp_port(local_application_media)
-                            .unwrap_or(5000),
-                        get_application_media_section_sctp_port(remote_application_media)
-                            .unwrap_or(5000),
-                    );
-
-                    // we_answer: we first call set_remote_description,
-                    // then, we create_answer() and set_local_description() here
-                    // Now we should have done SDP negotiation.
-                    // Therefore, it is ready to start sctp and rtp.
-                    self.sctp_transport_mut().start(
-                        dtls_role,
-                        remote_caps,
-                        local_sctp_port,
-                        remote_sctp_port,
-                    )?;
-                }
+                // we_answer: we first call set_remote_description,
+                // then, we create_answer() and set_local_description() here
+                // Now we should have done SDP negotiation.
+                // Therefore, it is ready to start sctp and rtp.
+                let negotiated =
+                    negotiated_sctp(parsed_local_description, parsed_remote_description);
+                self.apply_sctp_negotiation(now, negotiated)?;
                 self.start_rtp(remote_description)?;
             }
         }
@@ -1434,6 +1413,8 @@ impl RTCPeerConnection {
             self.assign_missing_mids(&mut parsed, answers);
             // `RTCRtpHeaderEncryptionPolicy::Require`: refused before any of it is applied.
             self.check_required_cryptex(&parsed)?;
+            // RFC 8841 section 5.1: a data section without a valid `a=sctp-port` is invalid.
+            validate_application_media_section(&parsed)?;
             remote_description.parsed = Some(parsed);
         }
 
@@ -1562,6 +1543,7 @@ impl RTCPeerConnection {
                         let kind = RtpCodecKind::from(media.media_name.media.as_str());
                         let direction = get_peer_direction(media);
                         if kind == RtpCodecKind::Unspecified
+                            || is_unknown_application_media(media)
                             || direction == RTCRtpTransceiverDirection::Unspecified
                         {
                             continue;
@@ -1659,6 +1641,7 @@ impl RTCPeerConnection {
                         let kind = RtpCodecKind::from(media.media_name.media.as_str());
                         let mut direction = get_peer_direction(media);
                         if kind == RtpCodecKind::Unspecified
+                            || is_unknown_application_media(media)
                             || direction == RTCRtpTransceiverDirection::Unspecified
                         {
                             continue;
@@ -1797,36 +1780,13 @@ impl RTCPeerConnection {
                     .as_ref()
                     .and_then(|desc| desc.parsed.as_ref())
             {
-                // only start sctp transport if application media has been negotiated
-                if let (Some(local_application_media), Some(remote_application_media)) = (
-                    get_application_media(parsed_local_description),
-                    get_application_media(parsed_remote_description),
-                ) {
-                    let (dtls_role, remote_caps, local_sctp_port, remote_sctp_port) = (
-                        self.dtls_transport().role(),
-                        SCTPTransportCapabilities {
-                            max_message_size: get_application_media_section_max_message_size(
-                                remote_application_media,
-                            )
-                            .unwrap_or(SctpMaxMessageSize::DEFAULT_MESSAGE_SIZE),
-                        },
-                        get_application_media_section_sctp_port(local_application_media)
-                            .unwrap_or(5000),
-                        get_application_media_section_sctp_port(remote_application_media)
-                            .unwrap_or(5000),
-                    );
-
-                    // we_offer: we create_offer() and set_local_description() first
-                    // then, after call set_remote_description here,
-                    // Now we should have done SDP negotiation.
-                    // Therefore, it is ready to start sctp and rtp.
-                    self.sctp_transport_mut().start(
-                        dtls_role,
-                        remote_caps,
-                        local_sctp_port,
-                        remote_sctp_port,
-                    )?;
-                }
+                // we_offer: we create_offer() and set_local_description() first
+                // then, after call set_remote_description here,
+                // Now we should have done SDP negotiation.
+                // Therefore, it is ready to start sctp and rtp.
+                let negotiated =
+                    negotiated_sctp(parsed_local_description, parsed_remote_description);
+                self.apply_sctp_negotiation(now, negotiated)?;
                 self.start_rtp(remote_description)?;
             }
         }
@@ -2300,7 +2260,10 @@ impl RTCPeerConnection {
     ///
     /// Returns an error if:
     /// - The peer connection is closed (`ErrConnectionClosed`)
-    /// - The label or sub-protocol exceeds the length the DCEP OPEN message can carry
+    /// - The label or sub-protocol exceeds the 65535 bytes the DCEP OPEN message can carry
+    ///   (`ErrLabelTooLarge`, `ErrProtocolTooLarge`)
+    /// - `negotiated` names a stream id that already carries a data channel
+    ///   (`ErrDataChannelIdInUse`), or 65535 (`ErrMaxDataChannelID`)
     ///
     /// # Specification
     ///
@@ -2317,6 +2280,12 @@ impl RTCPeerConnection {
         // https://www.w3.org/TR/webrtc/#peer-to-peer-data-api (Step #2)
         if self.peer_connection_state == RTCPeerConnectionState::Closed {
             return Err(Error::ErrConnectionClosed);
+        }
+
+        // RFC 8832 section 5.1: the DATA_CHANNEL_OPEN carries the label behind a 16-bit
+        // length (W3C createDataChannel: a longer one throws a TypeError).
+        if label.len() > 65535 {
+            return Err(Error::ErrLabelTooLarge);
         }
 
         let mut params = DataChannelParameters {
@@ -2360,6 +2329,21 @@ impl RTCPeerConnection {
         // its stream id has to wait for the DTLS role, per RFC 8832 §6. Nothing is guessed
         // here — see `assign_stream_ids`.
         params.negotiated = options.negotiated;
+        if let Some(id) = options.negotiated {
+            // An SCTP association has at most 65535 streams, numbered from 0 (W3C
+            // createDataChannel: an id of 65535 throws a TypeError).
+            if id == u16::MAX {
+                return Err(Error::ErrMaxDataChannelID);
+            }
+            // RFC 8831 section 6.5: "If it attempts to reuse a stream that is part of an
+            // existing data channel, the addition MUST fail"; W3C createDataChannel throws
+            // an OperationError when the id "is being used by an existing RTCDataChannel",
+            // whoever opened it. A second channel used to be accepted and took over the
+            // first one's stream.
+            if self.data_channels.stream_id_in_use(&id) {
+                return Err(Error::ErrDataChannelIdInUse);
+            }
+        }
 
         // The registry assigns the handle. Note this happens before any dial: the channel is
         // addressable from the moment it exists, whether or not it has a stream id yet.
@@ -2368,6 +2352,12 @@ impl RTCPeerConnection {
         let mut internal = RTCDataChannelInternal::new(params);
         internal.priority = options.priority;
         let id = self.data_channels.insert(internal);
+
+        // A data channel needs an association: after one was closed with `a=sctp-port:0`
+        // (RFC 8841 section 10.5), the next offer asks for a new one.
+        if self.sctp_transport().port_zero && self.sctp_transport().staged.is_none() {
+            self.sctp_transport_mut().staged = Some(SctpRenegotiation::Replace);
+        }
 
         // https://www.w3.org/TR/webrtc/#peer-to-peer-data-api (Step #23)
         // Open the channel's data transport immediately when an SCTP association already
@@ -2390,12 +2380,16 @@ impl RTCPeerConnection {
             self.data_channels
                 .assign_stream_ids(dtls_role, max_channels)?;
         }
+        // Only an association that is up. One still in its handshake (both sides initiate
+        // when DTLS connects, so there is always such a moment) dials every waiting channel
+        // when it comes up, on `SCTPHandshakeComplete`; one that has ended, which the
+        // endpoint may still hold, carries nothing any more.
         if let Some(handle) = self
             .sctp_transport()
             .sctp_associations
-            .keys()
-            .next()
-            .copied()
+            .iter()
+            .find(|(_, association)| !association.is_ended() && !association.is_handshaking())
+            .map(|(handle, _)| *handle)
             && matches!(dtls_role, RTCDtlsRole::Client | RTCDtlsRole::Server)
         {
             let data_channel = self
@@ -2882,6 +2876,62 @@ impl RTCPeerConnection {
         }
     }
 
+    /// Asks for the SCTP association to be replaced by a new one.
+    ///
+    /// The next offer carries a new `a=sctp-port` (RFC 8841 section 10.5: "If the offerer
+    /// wants to close an SCTP association and immediately establish a new SCTP association,
+    /// it MUST associate an SDP 'sctp-port' attribute with a new ... attribute value"). When
+    /// that exchange completes, the association is closed, its data channels with it, and a
+    /// new one is established over the same DTLS transport; data channels created from then
+    /// on, and those created earlier that had no association to open on yet, open on the
+    /// new one. It also brings back an association closed with
+    /// [`Self::close_sctp_association`]. Nothing changes until an offer is made and answered.
+    pub fn replace_sctp_association(&mut self) {
+        self.sctp_transport_mut().staged = Some(SctpRenegotiation::Replace);
+        self.trigger_negotiation_needed();
+    }
+
+    /// Asks for the SCTP association to be closed without a new one.
+    ///
+    /// The next offer, or the answer to the peer's next offer, carries `a=sctp-port:0`
+    /// (RFC 8841 sections 10.3 and 10.5). When that exchange completes the association is
+    /// closed and every data channel with it; the DTLS transport and the media it carries are
+    /// not affected. Offers keep saying 0 until a data channel is created or
+    /// [`Self::replace_sctp_association`] is called.
+    pub fn close_sctp_association(&mut self) {
+        self.sctp_transport_mut().staged = Some(SctpRenegotiation::Close);
+        self.trigger_negotiation_needed();
+    }
+
+    /// Brings the SCTP transport in line with what a completed offer/answer exchange
+    /// negotiated for the data section (RFC 8841 sections 10.3 and 10.4).
+    ///
+    /// The first association is started (and initiated once DTLS is connected). A rejected
+    /// data section or an `a=sctp-port` of zero establishes none and closes the one that
+    /// exists; a new `a=sctp-port` on either side closes it and establishes a new one. The
+    /// data channels of a closed association are closed with it.
+    fn apply_sctp_negotiation(&mut self, now: Instant, negotiated: SctpNegotiation) -> Result<()> {
+        let refused = matches!(
+            negotiated,
+            SctpNegotiation::Rejected | SctpNegotiation::PortZero
+        );
+        if self.sctp_transport().closes_on(negotiated) {
+            self.get_sctp_handler()
+                .close_for_renegotiation(now, !refused);
+        } else if refused && !self.data_channels.is_empty() {
+            // Nothing runs, and nothing will: the channels waiting for an association fail.
+            self.get_sctp_handler().close_for_renegotiation(now, false);
+        }
+        match self.sctp_transport_mut().negotiate(negotiated)? {
+            SctpNegotiationOutcome::Started | SctpNegotiationOutcome::Replaced => {
+                // Nothing happens here before DTLS is connected: the handler initiates then.
+                self.get_sctp_handler().connect(now)?;
+            }
+            SctpNegotiationOutcome::Closed | SctpNegotiationOutcome::Unchanged => {}
+        }
+        Ok(())
+    }
+
     /// Returns a handle to the [`RTCRtpSender`] with the given id, or `None` if no such
     /// sender exists on this peer connection.
     ///
@@ -3063,7 +3113,6 @@ mod tests {
         // section; it is the predicate `sctp()` keys off.
         pc.sctp_transport_mut()
             .start(
-                RTCDtlsRole::Client,
                 crate::peer_connection::transport::sctp::capabilities::SCTPTransportCapabilities {
                     max_message_size: 0,
                 },
@@ -3109,7 +3158,6 @@ mod tests {
             .unwrap();
         pc.sctp_transport_mut()
             .start(
-                RTCDtlsRole::Client,
                 crate::peer_connection::transport::sctp::capabilities::SCTPTransportCapabilities {
                     max_message_size: 0,
                 },
@@ -3257,7 +3305,6 @@ mod tests {
                 .unwrap();
             pc.sctp_transport_mut()
                 .start(
-                    RTCDtlsRole::Client,
                     crate::peer_connection::transport::sctp::capabilities::SCTPTransportCapabilities {
                         max_message_size: 0,
                     },
@@ -3280,17 +3327,18 @@ mod tests {
         assert_ne!(a_ice, b_ice);
     }
 
+    /// An association still in its handshake is not dialed on: the channel gets its stream id
+    /// (the DTLS role is known) and waits for `SCTPHandshakeComplete`, which dials every
+    /// waiting channel. A channel created on an established association is dialed at once
+    /// (`data_sent_before_the_ack_arrives_on_an_unordered_channel`).
     #[test]
-    fn create_data_channel_dials_immediately_when_sctp_association_present() {
+    fn create_data_channel_waits_for_an_association_still_in_its_handshake() {
         let mut pc = RTCPeerConnectionBuilder::new()
             .build(Instant::now())
             .unwrap();
 
-        // Simulate an SCTP association so create_data_channel sees a transport
-        // that is ready to open streams, and the resolved DTLS role that always accompanies
-        // one in practice — the association is built by `SCTPTransport::start`, which runs
-        // after `prepare_transport` has settled the role. Without it there is no correct
-        // stream-id parity to pick and the channel would rightly defer (RFC 8832 §6).
+        // The resolved DTLS role that always accompanies an association in practice, and an
+        // association as `connect` leaves it: its INIT sent, nothing answered yet.
         pc.dtls_transport_mut().dtls_role = RTCDtlsRole::Client;
         pc.sctp_transport_mut()
             .sctp_associations
@@ -3303,12 +3351,8 @@ mod tests {
             .values()
             .next()
             .expect("data channel must be stored internally");
-        assert!(internal.data_channel.is_some());
-        assert_eq!(
-            internal.ready_state,
-            RTCDataChannelState::Connecting,
-            "a dialed in-band channel stays Connecting until its DATA_CHANNEL_ACK arrives"
-        );
+        assert!(internal.data_channel.is_none());
+        assert_eq!(internal.ready_state, RTCDataChannelState::Connecting);
         assert_eq!(
             internal.stream_id,
             Some(0),

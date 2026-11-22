@@ -172,12 +172,18 @@ impl Marshal for DataChannelOpen {
             });
         }
 
+        // RFC 8832 section 5.1: both lengths are 16-bit fields. A longer string used to be
+        // written whole behind its length modulo 65536, which no receiver can parse.
+        let label_len = u16::try_from(self.label.len()).map_err(|_| Error::ErrLabelTooLarge)?;
+        let protocol_len =
+            u16::try_from(self.protocol.len()).map_err(|_| Error::ErrProtocolTooLarge)?;
+
         let n = self.channel_type.marshal_to(buf)?;
         buf = &mut buf[n..];
         buf.put_u16(self.priority);
         buf.put_u32(self.reliability_parameter);
-        buf.put_u16(self.label.len() as u16);
-        buf.put_u16(self.protocol.len() as u16);
+        buf.put_u16(label_len);
+        buf.put_u16(protocol_len);
         buf.put_slice(self.label.as_slice());
         buf.put_slice(self.protocol.as_slice());
         Ok(self.marshal_size())
@@ -435,6 +441,46 @@ mod tests {
 
         assert_eq!(bytes_written, channel_open.marshal_size());
         assert_eq!(&bytes[..], &MARSHALED_BYTES);
+        Ok(())
+    }
+
+    /// RFC 8832 section 5.1: Label Length and Protocol Length are 16-bit fields. A longer
+    /// string cannot be sent; it used to be written whole behind a length taken modulo 65536,
+    /// so a 65536-byte label went out with length 0 and the label read as the protocol.
+    #[test]
+    fn test_channel_open_marshal_refuses_strings_over_65535_bytes() {
+        let open = |label: usize, protocol: usize| DataChannelOpen {
+            channel_type: ChannelType::Reliable,
+            priority: 0,
+            reliability_parameter: 0,
+            label: vec![b'l'; label],
+            protocol: vec![b'p'; protocol],
+        };
+        assert_eq!(
+            open(65536, 0).marshal().unwrap_err(),
+            Error::ErrLabelTooLarge
+        );
+        assert_eq!(
+            open(0, 65536).marshal().unwrap_err(),
+            Error::ErrProtocolTooLarge
+        );
+    }
+
+    /// RFC 8832 section 7: a receiver has to take label and protocol strings of the maximum
+    /// length, 65535 bytes each, and the sender can produce them.
+    #[test]
+    fn test_channel_open_round_trips_maximum_length_strings() -> Result<()> {
+        let open = DataChannelOpen {
+            channel_type: ChannelType::PartialReliableTimedUnordered,
+            priority: 512,
+            reliability_parameter: 7,
+            label: vec![b'l'; 65535],
+            protocol: vec![b'p'; 65535],
+        };
+        let wire = open.marshal()?;
+        assert_eq!(wire.len(), CHANNEL_OPEN_HEADER_LEN + 2 * 65535);
+        assert_eq!(&wire[7..11], &[0xff, 0xff, 0xff, 0xff], "both lengths");
+        assert_eq!(DataChannelOpen::unmarshal(&mut &wire[..])?, open);
         Ok(())
     }
 }

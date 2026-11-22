@@ -32,24 +32,25 @@ counts optional features.
 | [RFC 8261](rfc8261.md) SCTP over DTLS | 27 | MUST | 2 | 4 | 0 | 3 | 0 | 4 |
 | | | SHOULD | 0 | 1 | 1 | 2 | 1 | 2 |
 | | | MAY | 2 | 0 | 0 | 5 | 0 | 0 |
-| [RFC 8831](rfc8831.md) data channels | 42 | MUST | 19 | 4 | 1 | 1 | 1 | 1 |
-| | | SHOULD | 2 | 2 | 0 | 6 | 1 | 1 |
+| [RFC 8831](rfc8831.md) data channels | 42 | MUST | 23 | 1 | 1 | 1 | 0 | 1 |
+| | | SHOULD | 4 | 1 | 0 | 5 | 1 | 1 |
 | | | MAY | 1 | 0 | 0 | 2 | 0 | 0 |
-| [RFC 8832](rfc8832.md) DCEP | 34 | MUST | 20 | 6 | 2 | 1 | 3 | 0 |
+| [RFC 8832](rfc8832.md) DCEP | 34 | MUST | 32 | 0 | 0 | 0 | 0 | 0 |
 | | | SHOULD | 0 | 0 | 0 | 0 | 0 | 0 |
-| | | MAY | 0 | 2 | 0 | 0 | 0 | 0 |
-| [RFC 8841](rfc8841.md) SDP for SCTP over DTLS | 60 | MUST | 12 | 8 | 8 | 13 | 4 | 8 |
+| | | MAY | 2 | 0 | 0 | 0 | 0 | 0 |
+| [RFC 8841](rfc8841.md) SDP for SCTP over DTLS | 60 | MUST | 39 | 2 | 2 | 3 | 0 | 7 |
 | | | SHOULD | 2 | 0 | 0 | 0 | 0 | 1 |
-| | | MAY | 2 | 0 | 0 | 2 | 0 | 0 |
+| | | MAY | 3 | 0 | 1 | 0 | 0 | 0 |
 | [RFC 9653](rfc9653.md) zero checksum | 22 | MUST | 3 | 3 | 0 | 3 | 0 | 6 |
 | | | SHOULD | 0 | 0 | 0 | 1 | 0 | 0 |
 | | | MAY | 0 | 0 | 0 | 5 | 0 | 1 |
-| **Area** | **971** | MUST | 220 | 117 | 63 | 108 | 44 | 55 |
-| | | SHOULD | 55 | 34 | 20 | 89 | 11 | 32 |
-| | | MAY | 23 | 2 | 6 | 72 | 2 | 18 |
+| **Area** | **971** | MUST | 263 | 102 | 55 | 97 | 36 | 54 |
+| | | SHOULD | 57 | 33 | 20 | 88 | 11 | 32 |
+| | | MAY | 26 | 0 | 7 | 70 | 2 | 18 |
 
-Of the 552 MUST clauses that bind this engine, 220 are tested; 117 are implemented without a test;
-215 are partial, missing or violated.
+Of the 553 MUST clauses that bind this engine, 263 are tested; 102 are implemented without a test;
+188 are partial, missing or violated. (The RFC 8831, RFC 8832 and RFC 8841 rows are as of branch
+`conf/datachannel-dcep`; the gap and bug lists below are the audit's.)
 
 ## Top gaps
 

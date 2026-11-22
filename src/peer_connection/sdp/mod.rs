@@ -160,6 +160,8 @@ mod rejected_mline_tests {
             ice_gathering_state: RTCIceGatheringState::Complete,
             match_bundle_group: None,
             sctp_max_message_size: 0,
+            sctp_port: 5000,
+            sctp_over_tcp: false,
             ignore_rid_pause_for_recv: false,
             write_ssrc_attributes_for_simulcast: false,
         }
@@ -311,7 +313,6 @@ use sdp::extmap::ExtMap;
 use sdp::util::ConnectionRole;
 use shared::error::{Error, Result};
 use std::collections::{HashMap, HashSet};
-use std::str::FromStr;
 use url::Url;
 
 /// `a=bundle-only` (RFC 8843 §6).
@@ -388,7 +389,7 @@ pub(crate) fn track_details_from_sdp(s: &SessionDescription) -> Vec<TrackDetails
         }
 
         let codec_type = RtpCodecKind::from(media.media_name.media.as_str());
-        if codec_type == RtpCodecKind::Unspecified {
+        if codec_type == RtpCodecKind::Unspecified || is_unknown_application_media(media) {
             continue;
         }
 
@@ -818,6 +819,11 @@ pub(crate) struct AddDataMediaSectionParams {
     dtls_role: ConnectionRole,
     ice_gathering_state: RTCIceGatheringState,
     sctp_max_message_size: usize,
+    /// The `a=sctp-port` value (RFC 8841 section 5); 0 asks for no association.
+    sctp_port: u16,
+    /// Whether the m= line says `TCP/DTLS/SCTP`: in an answer, when the offer does (RFC 8841
+    /// section 10.3: "an 'm=' line proto value identical to the value in the offer").
+    sctp_over_tcp: bool,
 }
 
 pub(crate) fn add_data_media_section(
@@ -833,7 +839,11 @@ pub(crate) fn add_data_media_section(
                 value: 9,
                 range: None,
             },
-            protos: vec!["UDP".to_owned(), "DTLS".to_owned(), "SCTP".to_owned()],
+            protos: vec![
+                if params.sctp_over_tcp { "TCP" } else { "UDP" }.to_owned(),
+                "DTLS".to_owned(),
+                "SCTP".to_owned(),
+            ],
             formats: vec!["webrtc-datachannel".to_owned()],
         },
         media_title: None,
@@ -856,7 +866,7 @@ pub(crate) fn add_data_media_section(
     )
     .with_value_attribute(ATTR_KEY_MID.to_owned(), params.mid_value)
     .with_property_attribute(RTCRtpTransceiverDirection::Sendrecv.to_string())
-    .with_property_attribute("sctp-port:5000".to_owned())
+    .with_value_attribute("sctp-port".to_owned(), params.sctp_port.to_string())
     // RFC 8841 6.1: 0 would promise messages of any size, which this endpoint cannot take:
     // what it accepts is bounded by `SctpMaxMessageSize::MAX_MESSAGE_SIZE`, so that bound is
     // advertised instead, and it is the limit the SCTP transport receives by.
@@ -1382,6 +1392,10 @@ pub(crate) struct PopulateSdpParams {
     pub(crate) ice_gathering_state: RTCIceGatheringState,
     pub(crate) match_bundle_group: Option<String>,
     pub(crate) sctp_max_message_size: usize,
+    /// The data section's `a=sctp-port`.
+    pub(crate) sctp_port: u16,
+    /// Whether the data section's proto is `TCP/DTLS/SCTP` (an answer to such an offer).
+    pub(crate) sctp_over_tcp: bool,
     pub(crate) ignore_rid_pause_for_recv: bool,
     pub(crate) write_ssrc_attributes_for_simulcast: bool,
 }
@@ -1542,6 +1556,8 @@ impl RTCPeerConnection {
                     dtls_role: params.connection_role,
                     ice_gathering_state: params.ice_gathering_state,
                     sctp_max_message_size: params.sctp_max_message_size,
+                    sctp_port: params.sctp_port,
+                    sctp_over_tcp: params.sctp_over_tcp,
                 };
                 d = add_data_media_section(d, &media_dtls_fingerprints, candidates, params)?;
                 true
@@ -1931,56 +1947,153 @@ pub(crate) trait MediaDescriptionExt {
 }
 
 impl MediaDescriptionExt for MediaDescription {
+    /// RFC 8841 section 4.4.2: media `application`, proto `UDP/DTLS/SCTP` or `TCP/DTLS/SCTP`,
+    /// and the one fmt `webrtc-datachannel`. Any other `m=application` line is not a data
+    /// channel section, the `DTLS/SCTP <port>` line with `a=sctpmap` of the drafts before
+    /// the RFC among them: an offer with one is answered like any media this endpoint does
+    /// not know, rejected with its proto and fmt kept.
     fn is_webrtc_datachannel(&self) -> bool {
         self.media_name.media == MEDIA_SECTION_APPLICATION
             && self.media_name.formats == ["webrtc-datachannel"]
+            && (self.media_name.protos == ["UDP", "DTLS", "SCTP"]
+                || self.media_name.protos == ["TCP", "DTLS", "SCTP"])
     }
 }
 
+/// Whether `media` is an `m=application` line that is neither a data channel section
+/// (RFC 8841) nor application media over RTP: the `DTLS/SCTP <sctp-port>` data section of the
+/// drafts before the RFC (with `a=sctpmap`), or an application protocol this endpoint does
+/// not know. It is answered like a media type this endpoint does not know, rejected with its
+/// own m= line, and gets no transceiver.
+pub(crate) fn is_unknown_application_media(media_desc: &MediaDescription) -> bool {
+    media_desc.media_name.media == MEDIA_SECTION_APPLICATION
+        && !media_desc.is_webrtc_datachannel()
+        && !media_desc
+            .media_name
+            .protos
+            .iter()
+            .any(|proto| proto == "RTP")
+}
+
+/// The `a=sctp-port` of a data channel section (RFC 8841 section 5): `Ok(None)` when the
+/// attribute is absent, an error when its value is not `1*5(DIGIT)` in 0..=65535.
+///
+/// Leading zeroes are taken: section 5.2 forbids writing them, not reading them.
 pub(crate) fn get_application_media_section_sctp_port(
     media_desc: &MediaDescription,
-) -> Option<u16> {
-    if media_desc.is_webrtc_datachannel() {
-        return if let Some(sctp_port_attr) = media_desc
-            .attributes
-            .iter()
-            .find(|attr| attr.key == "sctp-port")
-        {
-            let sctp_port_value = sctp_port_attr.value.as_ref();
-
-            sctp_port_value.and_then(|attr| attr.parse::<u16>().ok())
-        } else if let Some(sctp_port_attr) = media_desc
-            .attributes
-            .iter()
-            .find(|attr| attr.key == "sctpmap")
-        {
-            if let Some(sctp_port_attr_value) = sctp_port_attr.value.as_ref() {
-                sctp_port_attr_value
-                    .split(" ")
-                    .next()
-                    .and_then(|port| u16::from_str(port).ok())
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+) -> Result<Option<u16>> {
+    let Some(attribute) = media_desc
+        .attributes
+        .iter()
+        .find(|attr| attr.key == "sctp-port")
+    else {
+        return Ok(None);
+    };
+    let value = attribute.value.as_deref().unwrap_or_default();
+    if value.is_empty() || value.len() > 5 || !value.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(Error::ErrSDPSctpPortInvalid);
     }
-
-    None
+    value
+        .parse::<u16>()
+        .map(Some)
+        .map_err(|_| Error::ErrSDPSctpPortInvalid)
 }
 
+/// Checks the data channel section of a remote description, if it has one that is not
+/// rejected, and returns its `a=sctp-port`.
+///
+/// RFC 8841 section 5.1: "No default value is defined for the SDP 'sctp-port' attribute.
+/// Therefore, if the attribute is not present, the associated 'm=' line MUST be considered
+/// invalid." A description with such a line, or with a port that is not one, is refused; it
+/// used to be taken with port 5000 assumed. A port of 0 is valid: it asks for no association
+/// (section 9.3).
+pub(crate) fn validate_application_media_section(desc: &SessionDescription) -> Result<()> {
+    match get_application_media(desc) {
+        Some(media) if !is_rejected_application_media(media) => {
+            match get_application_media_section_sctp_port(media)? {
+                Some(_) => Ok(()),
+                None => Err(Error::ErrSDPSctpPortInvalid),
+            }
+        }
+        _ => Ok(()),
+    }
+}
+
+/// A data channel section with port zero: rejected (RFC 3264 section 6) or, in an offer,
+/// closed (RFC 8841 section 10.5).
+fn is_rejected_application_media(media_desc: &MediaDescription) -> bool {
+    media_desc.media_name.port.value == 0
+}
+
+/// What an offer/answer pair negotiated for the SCTP association (RFC 8841 section 10).
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub(crate) enum SctpNegotiation {
+    /// One of the descriptions has no data channel section: nothing was negotiated about
+    /// SCTP, and what exists stays as it is.
+    NoSection,
+    /// The data section is rejected, m= port zero in the offer or in the answer (sections
+    /// 10.3, 10.4 and 10.5): no association is established, and one that exists is closed.
+    Rejected,
+    /// One side's `a=sctp-port` is zero (section 9.3): no association is established, and
+    /// one that exists is closed; DTLS is not affected.
+    PortZero,
+    /// An association between these two SCTP ports, with the largest message the peer
+    /// takes (0: any size).
+    Association {
+        local_port: u16,
+        remote_port: u16,
+        remote_max_message_size: u32,
+    },
+}
+
+/// Reads [`SctpNegotiation`] off the two descriptions of a completed exchange.
+pub(crate) fn negotiated_sctp(
+    local: &SessionDescription,
+    remote: &SessionDescription,
+) -> SctpNegotiation {
+    let (Some(local), Some(remote)) = (get_application_media(local), get_application_media(remote))
+    else {
+        return SctpNegotiation::NoSection;
+    };
+    if is_rejected_application_media(local) || is_rejected_application_media(remote) {
+        return SctpNegotiation::Rejected;
+    }
+    // A local section always has the attribute, and a remote one was checked when the
+    // description was applied; one without is no association either.
+    let port = |media| {
+        get_application_media_section_sctp_port(media)
+            .ok()
+            .flatten()
+            .unwrap_or(0)
+    };
+    match (port(local), port(remote)) {
+        (0, _) | (_, 0) => SctpNegotiation::PortZero,
+        (local_port, remote_port) => SctpNegotiation::Association {
+            local_port,
+            remote_port,
+            // RFC 8841 section 6.1: "If the SDP 'max-message-size' attribute is not present,
+            // the default value is 64K."
+            remote_max_message_size: get_application_media_section_max_message_size(remote)
+                .unwrap_or(crate::peer_connection::configuration::setting_engine::SctpMaxMessageSize::DEFAULT_MESSAGE_SIZE),
+        },
+    }
+}
+
+/// The `a=max-message-size` of a data channel section (RFC 8841 section 6): the largest
+/// message its sender takes, 0 for any size, `None` when absent (the default is then 64K).
+/// A value above what 32 bits hold is as good as no limit; one that is not a number is taken
+/// as absent, the smaller and so the safe reading.
 pub(crate) fn get_application_media_section_max_message_size(
     media_desc: &MediaDescription,
 ) -> Option<u32> {
-    if media_desc.is_webrtc_datachannel() {
-        media_desc
-            .attribute(ATTR_KEY_MAX_MESSAGE_SIZE)??
-            .parse()
-            .ok()
-    } else {
-        None
+    if !media_desc.is_webrtc_datachannel() {
+        return None;
     }
+    let value = media_desc.attribute(ATTR_KEY_MAX_MESSAGE_SIZE)??;
+    if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some(value.parse::<u32>().unwrap_or(0))
 }
 
 pub(crate) fn get_by_mid<'a>(
@@ -1999,10 +2112,20 @@ pub(crate) fn get_by_mid<'a>(
     None
 }
 
+/// The data channel section of a description: the one in use if it has several (an offer
+/// made after a data section was rejected carries the rejected one and a new one).
 pub(crate) fn get_application_media(desc: &SessionDescription) -> Option<&MediaDescription> {
-    desc.media_descriptions
+    let mut sections = desc
+        .media_descriptions
         .iter()
-        .find(|media_description| media_description.is_webrtc_datachannel())
+        .filter(|media_description| media_description.is_webrtc_datachannel());
+    let first = sections.next()?;
+    if !is_rejected_application_media(first) {
+        return Some(first);
+    }
+    sections
+        .find(|media_description| !is_rejected_application_media(media_description))
+        .or(Some(first))
 }
 
 /// have_data_channel return MediaDescription with MediaName equal application
@@ -2089,11 +2212,14 @@ pub(crate) fn codecs_from_media_description(
     Ok(out)
 }
 
-/// The m= line of a section whose media type this endpoint doesn't know
-/// (not audio, video or application), for a rejection that reproduces it.
+/// The m= line of a section whose media type this endpoint doesn't know (not audio or
+/// video), for a rejection that reproduces it. An `m=application` line is reproduced too:
+/// a data channel section keeps its proto (`TCP/DTLS/SCTP` stays that), and one that is not
+/// a data channel section (the pre-RFC `DTLS/SCTP 5000` form, application media over RTP)
+/// is not answered as if it had been one.
 pub(crate) fn unknown_media_name(media: &MediaDescription) -> Option<MediaName> {
     let kind = media.media_name.media.as_str();
-    if matches!(kind, "audio" | "video" | MEDIA_SECTION_APPLICATION) {
+    if matches!(kind, "audio" | "video") {
         return None;
     }
     let mut name = media.media_name.clone();

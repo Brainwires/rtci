@@ -107,6 +107,8 @@ history stays intact.
 | Encrypted header extensions (RFC 6904; RFC 7714 section 8.3) | `rtc-srtp/src/header_extension.rs`, `Context::set_encrypted_header_extensions` | The transform, per extension id, for every profile; not signalled by a peer connection. `header_extension_test.rs` (RFC 6904 Appendix A and libsrtp's vectors). |
 | MKI with a master-key table, key derivation rate (RFC 3711 sections 3.1, 4.3.1, 8.1) | `rtc-srtp/src/keying.rs` (`Keying`, `KeyDerivationRate`), `Context::{with_keying, add_master_key, set_sending_mki, remove_master_key}`, `rtc-srtp/src/cipher/mod.rs` (`KeySource`, `Epochs`) | Crate level; DTLS-SRTP uses neither. `keying_test.rs`. |
 | AES-192 counter mode (RFC 6188), the NULL cipher (RFC 3711 section 5.1), unencrypted SRTCP on send | `rtc-crypto` (`Aes192`, `Aes192Ctr`), `rtc-srtp/src/protection_profile.rs` (`Aes192CmHmacSha1_*`, `NullHmacSha1_*`, `dtls_srtp_id`), `Context::set_srtcp_encryption` | Crate level. The NULL profiles are never offered by a peer connection; the RFC 6188 suites have no DTLS-SRTP code point. `profiles_test.rs`, `rfc_vectors_test.rs`, `rfc7714_test.rs`. |
+| SCTP association lifecycle by `a=sctp-port` (RFC 8841) | `src/peer_connection/transport/sctp/mod.rs` (`negotiate`, `offer_port`, `answer_port`), `src/peer_connection/handler/sctp.rs` (`connect`, `close_for_renegotiation`, `init_for_existing_association`), `src/peer_connection/mod.rs` (`apply_sctp_negotiation`, `replace_sctp_association`, `close_sctp_association`), `src/peer_connection/sdp/mod.rs` (`negotiated_sctp`) | Both endpoints initiate, crossing INITs make one association, a rejected data section or `a=sctp-port:0` closes it, a new `a=sctp-port` replaces it over the same DTLS transport. Upstream starts the transport once with the DTLS client initiating, and never looks at a later description. `init_for_existing_association` is a workaround to remove when `rtc-sctp`'s `Endpoint::handle` routes a peer's INIT to the association this side initiated. |
+| DCEP error handling (RFC 8832 section 6, RFC 8831 section 6.6) | `src/peer_connection/handler/datachannel.rs` (`fail_channel`, `reset_stream`), `src/peer_connection/handler/sctp.rs` (`ordered_until_reply`), `rtc-datachannel/src/data_channel/mod.rs` | An OPEN on a stream in use, a malformed OPEN, data on a stream never opened and an unsupported PPID close the channel; data before the ACK is sent ordered; the channel priority weighs the stream. |
 | CI: benchmarks, fuzzing, OSS-Fuzz, git-cliff release notes | `.github/workflows/{bench,fuzz,release}.yml`, `oss-fuzz/`, `cliff.toml` | |
 
 ### Hardening (fork only)
@@ -132,6 +134,8 @@ frame decoding; bounded SCTP
 FORWARD-TSN/SACK/receive window and stream-id checks; DCEP stream-id parity and internal message
 types refused from the wire; TURN client server-address filtering, response MESSAGE-INTEGRITY
 checks and relayed data only from peers with a permission; errors instead of panics on malformed DTLS/SCTP/DCEP/ICE/SDP/RTCP input; NACK
+types refused from the wire; SCTP packets only between the negotiated `a=sctp-port` values; TURN client server-address filtering and response MESSAGE-INTEGRITY
+checks; errors instead of panics on malformed DTLS/SCTP/DCEP/ICE/SDP/RTCP input; NACK
 retransmission de-duplication and rate limit; bounded H.264 FU-A and AV1 reassembly, AV1 OBU
 checks, VP9 per-picture state; RTP extension blocks consumed whole; SLI on PT 206; bounded IVF and
 H.265 writer buffers; sha-256 fingerprint selection; fuzzing CI fixes and stateful SCTP targets.

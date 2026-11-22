@@ -590,6 +590,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ContextEvent::CryptexRequiredViolation`; `Context::profile`.
 - **srtp**: known-answer tests from RFC 3711 Appendix B, RFC 6188 section 7, RFC 6904 Appendix
   A, RFC 7714 sections 16 and 17, and libsrtp's RFC 6904 vectors.
+### Behaviour changes
+
+- **sctp, sdp**: both endpoints initiate the SCTP association (RFC 8841 section 9.3), in either
+  DTLS role; only the DTLS client did. The peer's INIT is answered by the association this side
+  initiated (RFC 9260 section 5.2.1), so the two make one association, and an association no
+  longer waits for a retransmission when one of the two INITs is lost.
+- **sdp**: a data channel section without a valid `a=sctp-port` is refused with
+  `ErrSDPSctpPortInvalid` (RFC 8841 section 5.1); it was taken with port 5000 assumed, and
+  `a=sctpmap` is no longer read as a port. A section is a data channel section only with
+  proto `UDP/DTLS/SCTP` or `TCP/DTLS/SCTP`.
+- **sctp**: an SCTP packet that is not between the two negotiated `a=sctp-port` values is
+  dropped (RFC 8841 section 9.3).
+- **datachannel**: an in-band channel that the peer resets before acknowledging it reports
+  `OnError` before `OnClose`, and no `OnClosing` (RFC 8832 section 6: its setup failed).
+- **datachannel**: `rtc_datachannel::DataChannel::handle_read` returns an error for a
+  DATA_CHANNEL_OPEN on a channel in use (it answered with a DATA_CHANNEL_ACK) and for a message
+  under a PPID that is not a data channel's (it queued it for `poll_read`); a refused message
+  is not counted. `DataChannelOpen::marshal` returns an error for a label or protocol over 65535
+  bytes.
+
+### Bug Fixes
+
+- **datachannel**: a DATA_CHANNEL_OPEN on a stream that already carries a channel closes that
+  channel and is not acknowledged (RFC 8832 section 6). It was acknowledged and the channel left
+  open.
+- **datachannel**: a malformed DATA_CHANNEL_OPEN, and user data or a stray ACK on a stream no
+  OPEN opened, reset the stream (RFC 8832 section 6). The error was returned and dropped, and
+  the stream stayed half open.
+- **datachannel**: user data sent before the DATA_CHANNEL_ACK arrives is sent ordered on an
+  unordered channel too (RFC 8832 section 6). It left unordered, could overtake the OPEN, and
+  the peer then dropped it: between two of these engines none of it arrived.
+- **datachannel**: a message under an unsupported PPID (the deprecated partial PPIDs 52 and 54
+  included) and a DCEP message that does not parse close the channel (RFC 8831 section 6.6).
+  The first was delivered to the application as binary data, the second left the channel open.
+- **datachannel**: `create_data_channel` refuses a label over 65535 bytes (`ErrLabelTooLarge`;
+  the OPEN went out with a length taken modulo 65536), a negotiated id whose stream already
+  carries a channel (`ErrDataChannelIdInUse`; the second channel took the stream over, RFC
+  8831 section 6.5) and the id 65535 (`ErrMaxDataChannelID`).
+- **datachannel**: the channel priority is the weight of its SCTP stream under weighted fair
+  queueing (RFC 8831 section 6.4), for channels opened locally, by the peer and out of band.
+  It was carried in the OPEN and reported, never applied.
+- **sdp**: a rejected data section (m= port zero, in the offer or the answer) and an
+  `a=sctp-port` of zero start no SCTP transport, and close the association that exists (RFC
+  8841 sections 10.3 and 10.4). A rejected section started it all the same, port 0 became the
+  destination port of the INIT, and the data channels stayed `connecting`: they now fail with
+  `OnError` and `OnClose`.
+- **sdp**: the answer to an offer with a new `a=sctp-port` carries a new port, to one with
+  port zero carries zero (RFC 8841 section 10.3), and repeats the offer's proto, so
+  `TCP/DTLS/SCTP` is answered as such; it always said `UDP/DTLS/SCTP` and 5000.
+- **sdp**: an `m=application` line that is neither a data channel section nor RTP (the
+  pre-RFC `DTLS/SCTP 5000` form with `a=sctpmap`, which no current browser sends) is answered
+  like a media type the endpoint does not know: rejected, with its own proto and fmt. It was
+  taken for application media over RTP, and no answer could be made.
+- **sctp**: a new `a=sctp-port` on either side closes the association and establishes a new
+  one over the same DTLS transport (RFC 8841 section 9.3); later descriptions never reached the
+  SCTP transport. An association added to a session whose DTLS transport is already connected
+  is initiated at once.
+- **sctp**: a DTLS handshake that completes again starts no second association (RFC 8841
+  section 10.5); the SCTP transport stays `closed`, not `connecting`, once a lost association
+  has been let go of, and the next offer carries a new `a=sctp-port` for a new one.
+
+### Features
+
+- **sctp**: `RTCPeerConnection::replace_sctp_association` (the next offer carries a new
+  `a=sctp-port`) and `RTCPeerConnection::close_sctp_association` (it carries
+  `a=sctp-port:0`), RFC 8841 section 10.5.
+- **shared**: `Error::ErrLabelTooLarge`, `Error::ErrDataChannelIdInUse`,
+  `Error::ErrSDPSctpPortInvalid`.
+
+### Testing
+
+- **conformance**: the clause audits of RFC 8831, RFC 8832, RFC 8841 and RFC 8261 under
+  `docs/conformance/audit/`, with the rows this change closes.
 
 ## [0.22.0+brainwires.5] - 2026-11-20
 
