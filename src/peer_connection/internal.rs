@@ -3169,6 +3169,11 @@ impl RTCPeerConnection {
         let is_rtx_enabled = self
             .media_engine
             .is_rtx_enabled(track.kind(), RTCRtpTransceiverDirection::Sendonly);
+        // Likewise a FEC repair flow (RFC 5956 `FEC-FR`, flexfec-03 / RFC 8627) when a FEC
+        // format is registered: the application names no FEC SSRC either.
+        let is_fec_enabled = self
+            .media_engine
+            .is_fec_enabled(track.kind(), RTCRtpTransceiverDirection::Sendonly);
         let mut minted: Vec<SSRC> = send_encodings
             .iter()
             .flat_map(|encoding| {
@@ -3187,6 +3192,11 @@ impl RTCPeerConnection {
             }
             if is_rtx_enabled && encoding.rtp_coding_parameters.rtx.is_none() {
                 encoding.rtp_coding_parameters.rtx = Some(RTCRtpRtxParameters {
+                    ssrc: self.unused_ssrc(&mut minted),
+                });
+            }
+            if is_fec_enabled && encoding.rtp_coding_parameters.fec.is_none() {
+                encoding.rtp_coding_parameters.fec = Some(RTCRtpFecParameters {
                     ssrc: self.unused_ssrc(&mut minted),
                 });
             }

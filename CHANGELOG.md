@@ -1040,6 +1040,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behaviour changes
 
+- **fec**: an encoding the application gives without a FEC SSRC gets one when a FEC format
+  (flexfec-03, RFC 8627 FlexFEC) is registered, as it gets an RTX SSRC: the offer carries the
+  `a=ssrc-group:FEC-FR` and the repair flow is bound
+  (`a_minted_fec_ssrc_carries_the_repair_flow_that_recovers_a_lost_packet`).
+- **tmmbr**: new `RTCRtpReceiver::set_remote_bitrate_limit(now, Option<u64>)` asks the remote
+  sender for an RFC 5104 TMMBR limit through the congestion control interceptor (only for a
+  stream that negotiated `ccm tmmbr`; `None` lifts it)
+  (`a_receiver_asks_the_sender_to_limit_its_rate_with_tmmbr`).
+
 - **sctp / dscp** (RFC 8837 section 5): when the data channels' codepoint changes (a channel
   of another priority comes or goes) the association's congestion control and RTO start over,
   at the next `handle_timeout`, as on a path change. New diagnostic

@@ -21,8 +21,7 @@ use rtc::peer_connection::transport::{
 use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
 use rtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 use rtc::rtp_transceiver::rtp_sender::{
-    RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters,
-    RTCRtpFecParameters, RtpCodecKind,
+    RTCRtpCodec, RTCRtpCodecParameters, RTCRtpEncodingParameters, RtpCodecKind,
 };
 use rtc::rtp_transceiver::{
     RTCRtpReceiverId, RTCRtpSenderId, RTCRtpTransceiverDirection, RTCRtpTransceiverInit,
@@ -36,7 +35,6 @@ const CONNECT_WITHIN: Duration = Duration::from_secs(10);
 const VP8_PT: u8 = 96;
 const RTX_PT: u8 = 97;
 const FLEX_FEC_PT: u8 = 49;
-const FEC_SSRC: u32 = 0x0FEC_0FEC;
 const FIRST_SEQ: u16 = 4000;
 
 fn codec(mime_type: &str, sdp_fmtp_line: &str) -> RTCRtpCodec {
@@ -62,6 +60,8 @@ struct Peer {
     muted: usize,
     /// The RTCP packets `poll_read` yielded.
     read_rtcp: Vec<Box<dyn rtc::rtcp::Packet>>,
+    /// The (SSRC, sequence number) of the RTP packets `poll_read` yielded.
+    read_rtp: Vec<(u32, u16)>,
     /// The RTCP datagrams this peer put on the wire.
     rtcp_datagrams: usize,
 }
@@ -73,7 +73,14 @@ impl Peer {
         let mut media_engine = MediaEngine::default();
         media_engine.register_codec(
             RTCRtpCodecParameters {
-                rtp_codec: codec(MIME_TYPE_VP8, ""),
+                rtp_codec: RTCRtpCodec {
+                    // RFC 5104 TMMBR negotiated for the stream.
+                    rtcp_feedback: vec![rtc::rtp_transceiver::rtp_sender::RTCPFeedback {
+                        typ: "ccm".to_owned(),
+                        parameter: "tmmbr".to_owned(),
+                    }],
+                    ..codec(MIME_TYPE_VP8, "")
+                },
                 payload_type: VP8_PT,
             },
             RtpCodecKind::Video,
@@ -114,6 +121,7 @@ impl Peer {
             closed: 0,
             muted: 0,
             read_rtcp: Vec::new(),
+            read_rtp: Vec::new(),
             rtcp_datagrams: 0,
         })
     }
@@ -222,8 +230,12 @@ impl World {
                 }
             }
             while let Some(message) = peer.pc.poll_read() {
-                if let RTCMessage::RtcpPacket(_, packets) = message.message {
-                    peer.read_rtcp.extend(packets);
+                match message.message {
+                    RTCMessage::RtcpPacket(_, packets) => peer.read_rtcp.extend(packets),
+                    RTCMessage::RtpPacket(_, packet) => peer
+                        .read_rtp
+                        .push((packet.header.ssrc, packet.header.sequence_number)),
+                    _ => {}
                 }
             }
         }
@@ -270,12 +282,8 @@ impl World {
                 streams: vec![],
                 send_encodings: vec![RTCRtpEncodingParameters {
                     active: true,
-                    // An encoding the application gives gets an RTX SSRC from the engine
-                    // but no FEC SSRC (`normalize_sender_track`): it names one.
-                    rtp_coding_parameters: RTCRtpCodingParameters {
-                        fec: fec.then_some(RTCRtpFecParameters { ssrc: FEC_SSRC }),
-                        ..Default::default()
-                    },
+                    // An encoding the application gives gets its RTX and FEC SSRCs from the
+                    // engine (`normalize_sender_track`): it names none.
                     ..Default::default()
                 }],
             }),
@@ -537,5 +545,77 @@ fn closing_the_sender_mutes_the_receivers_track() -> Result<()> {
 
     assert_eq!(1, world.peers[1].muted, "the BYE muted the remote track");
     assert_eq!(0, world.peers[1].closed, "and did not end it");
+    Ok(())
+}
+
+/// RFC 5956 / flexfec-03: with a FEC format registered, an encoding the application gives
+/// without a FEC SSRC gets one, offered in an `a=ssrc-group:FEC-FR`, and its repair flow
+/// recovers a media packet the link lost; the test names no FEC SSRC.
+#[test]
+fn a_minted_fec_ssrc_carries_the_repair_flow_that_recovers_a_lost_packet() -> Result<()> {
+    let (mut world, sender) = World::connected_with(true)?;
+    let (ssrc, _, _) = world.sender_stream(sender);
+    let fec_ssrc = {
+        let mut sender = world.peers[0].pc.rtp_sender(sender).expect("sender");
+        sender.get_parameters().encodings[0]
+            .rtp_coding_parameters
+            .fec
+            .as_ref()
+            .map(|fec| fec.ssrc)
+            .expect("a FEC SSRC was minted")
+    };
+    let local = world.peers[0]
+        .pc
+        .current_local_description()
+        .expect("negotiated")
+        .sdp;
+    assert!(
+        local.contains(&format!("a=ssrc-group:FEC-FR {ssrc} {fec_ssrc}")),
+        "{local}"
+    );
+    let lost = FIRST_SEQ + 10;
+    world.drop_once = Some((ssrc, lost));
+    world.send_media(sender, FIRST_SEQ, 40)?;
+    let until = world.now + Duration::from_secs(2);
+    world.run_until(until)?;
+    assert!(world.drop_once.is_none(), "the link lost the packet");
+    assert!(
+        world.peers[1].read_rtp.contains(&(ssrc, lost)),
+        "the lost packet was recovered"
+    );
+    Ok(())
+}
+
+/// RFC 5104 TMMBR from the receiving application: `RTCRtpReceiver::set_remote_bitrate_limit`
+/// has the receiver's congestion control send a TMMBR for the sender's media SSRC, which the
+/// sending application reads; `None` lifts it with another TMMBR.
+#[test]
+fn a_receiver_asks_the_sender_to_limit_its_rate_with_tmmbr() -> Result<()> {
+    use rtc::rtcp::transport_feedbacks::tmmb::TemporaryMaximumBitrateRequest;
+    let (mut world, sender) = World::connected()?;
+    let (ssrc, _, _) = world.sender_stream(sender);
+    world.send_media(sender, FIRST_SEQ, 10)?;
+    let receiver = *world.peers[1].opened.first().expect("the track opened");
+    let now = world.now;
+    world.peers[1]
+        .pc
+        .rtp_receiver(receiver)
+        .expect("receiver")
+        .set_remote_bitrate_limit(now, Some(250_000))?;
+    world.pump()?;
+    let until = world.now + Duration::from_secs(3);
+    world.run_until(until)?;
+    let tmmbrs: Vec<&TemporaryMaximumBitrateRequest> = world.peers[0]
+        .read_rtcp
+        .iter()
+        .filter_map(|p| p.as_any().downcast_ref::<TemporaryMaximumBitrateRequest>())
+        .collect();
+    assert!(!tmmbrs.is_empty(), "{:?}", world.peers[0].read_rtcp);
+    assert!(
+        tmmbrs
+            .iter()
+            .any(|t| format!("{t:?}").contains(&ssrc.to_string())),
+        "{tmmbrs:?}"
+    );
     Ok(())
 }
