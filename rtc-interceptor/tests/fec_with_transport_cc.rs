@@ -321,3 +321,81 @@ fn a_packet_recovered_by_fec_is_not_reported_as_arrived() {
         "and the receiver report counts one packet lost"
     );
 }
+
+/// The same for the RFC 8627 coder (`video/flexfec`): section 4.1 has the source packets
+/// transmitted unaltered and protected as sent. Sender: FEC encoder with its wire tap and a TWCC
+/// sender that adds the extension. Receiver: the RFC 8627 receive interceptor. The packet the
+/// path drops comes back byte for byte.
+#[test]
+fn an_rfc8627_repair_packet_recovers_the_packet_as_sent_under_twcc() {
+    use rtc_interceptor::{FlexFecProtection, FlexFecReceiveBuilder, FlexFecSendBuilder};
+
+    let epoch = Instant::now();
+    let info = StreamInfo {
+        mime_type_fec: "video/flexfec".to_owned(),
+        sdp_fmtp_line_fec: "repair-window=10000000".to_owned(),
+        ..stream()
+    };
+
+    let mut fec = FlexFecSendBuilder::new()
+        .with_protection(FlexFecProtection::Row { l: 5 })
+        .build();
+    let tap = fec.wire_tap();
+    let mut sender = Registry::new()
+        .with(Slot::FecEncoder, fec)
+        .with(Slot::TwccSender, TwccSenderBuilder::new().build())
+        .with(Slot::FecWireImage, tap)
+        .build();
+    sender.bind_local_stream(&info);
+
+    let mut wire = Vec::new();
+    for sequence_number in 0..5u16 {
+        sender
+            .handle_write(tagged(epoch, media(sequence_number)))
+            .expect("write");
+        while let Some(packet) = sender.poll_write() {
+            if let Packet::Rtp(rtp) = packet.message.packet {
+                wire.push(rtp);
+            }
+        }
+    }
+    let lost = wire
+        .iter()
+        .find(|packet| packet.header.ssrc == MEDIA_SSRC && packet.header.sequence_number == 2)
+        .expect("media packet 2 was sent")
+        .clone();
+    assert_eq!(
+        Some(2),
+        transport_sequence(&lost),
+        "numbered below the encoder"
+    );
+    assert_eq!(
+        1,
+        wire.iter()
+            .filter(|packet| packet.header.ssrc == REPAIR_SSRC)
+            .count(),
+        "one row repair packet for the five"
+    );
+
+    let mut receiver = Registry::new()
+        .with(Slot::FecDecoder, FlexFecReceiveBuilder::new().build())
+        .build();
+    receiver.bind_remote_stream(&info);
+    let mut recovered = Vec::new();
+    for packet in wire {
+        if packet.header.ssrc == MEDIA_SSRC && packet.header.sequence_number == 2 {
+            continue;
+        }
+        receiver.handle_read(tagged(epoch, packet)).expect("read");
+        while let Some(out) = receiver.poll_read() {
+            if out.message.has(&Attribute::RecoveredByFec)
+                && let Packet::Rtp(rtp) = out.message.packet
+            {
+                recovered.push(rtp);
+            }
+        }
+    }
+
+    assert_eq!(1, recovered.len(), "the lost packet is rebuilt");
+    assert_eq!(wire_bytes(&lost), wire_bytes(&recovered[0]));
+}

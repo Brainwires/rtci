@@ -139,7 +139,8 @@ use crate::rtp_transceiver::rtp_sender::{
 };
 use crate::rtp_transceiver::{PayloadType, SSRC};
 use interceptor::{
-    BandwidthEstimator, CongestionControlBuilder, KeyFrameRequestInterceptor, NackGeneratorBuilder,
+    BandwidthEstimator, CircuitBreakerBuilder, CircuitBreakerHandle, CongestionControlBuilder,
+    CongestionControlHandle, Gcc, KeyFrameRequestInterceptor, NackGeneratorBuilder,
     NackResponderBuilder, PacerBuilder, Rfc8888Builder, RtcpSessionBuilder, TwccReceiverBuilder,
     TwccSenderBuilder,
 };
@@ -158,9 +159,30 @@ use shared::error::Result;
 /// - **NACK**: Detects packet loss and requests retransmissions (video only)
 /// - **RTCP Reports**: Generates Sender Reports (SR) and Receiver Reports (RR)
 /// - **Simulcast Headers**: Enables RTP extensions for multi-resolution streaming
-/// - **TWCC Receiver**: Generates transport-wide congestion control feedback
+/// - **TWCC**: numbers outgoing packets and generates transport-wide congestion control feedback
+/// - **Congestion control**: Google Congestion Control ([`Gcc`]) over the receiver's TWCC or
+///   RFC 8888 feedback, with a pacer that releases media at its target (RFC 8834 section 7)
+/// - **RTP circuit breaker**: stops a flow whose receiver has gone or that persistently
+///   overloads the path (RFC 8083; RFC 8834 section 7.1)
 /// - **Key-frame requests**: Delivers inbound PLI and FIR to the application, the encoder that
 ///   has to answer them (fork addition; see [`configure_key_frame_requests`])
+///
+/// # Congestion control is on
+///
+/// RFC 8834 section 7 requires a WebRTC endpoint to adapt its RTP traffic to the capacity of
+/// the path and to implement the RTP circuit breaker, so the standard set does both. The
+/// estimate is what the application's encoder should produce: read it from
+/// [`DefaultInterceptorHandles::congestion_control`]
+/// (see [`register_default_interceptors_with_handles`]), from the statistics report
+/// (`availableOutgoingBitrate`), or keep using the fork's pull-style
+/// [`GccHandle`](interceptor::GccHandle) by placing a
+/// [`GccInterceptor`](interceptor::GccInterceptor) in [`Slot::CongestionControl`], which replaces
+/// the estimator registered here (a slot holds one interceptor) while the pacer follows it.
+/// Media written faster than the target is queued by the pacer, not sent.
+///
+/// An application that brings its own congestion control, or runs where none is wanted (a
+/// loopback test, a closed network with reserved capacity), opts out explicitly with
+/// [`register_default_interceptors_without_congestion_control`].
 ///
 /// # Parameters
 ///
@@ -199,8 +221,89 @@ pub fn register_default_interceptors(
     registry: Registry,
     media_engine: &mut MediaEngine,
 ) -> Result<Registry> {
+    register_default_interceptors_with_handles(registry, media_engine)
+        .map(|(registry, _handles)| registry)
+}
+
+/// What an application holds on to from the standard interceptor set.
+#[derive(Clone)]
+pub struct DefaultInterceptorHandles {
+    /// The congestion controller: the target bit rate for the encoder, and where the limits
+    /// from signalling go (`b=AS` / `b=TIAS`, a path change).
+    pub congestion_control: CongestionControlHandle,
+    /// The RTP circuit breaker: which flows have ceased transmission and why, and how one is
+    /// restarted.
+    pub circuit_breaker: CircuitBreakerHandle,
+}
+
+/// [`register_default_interceptors`], returning the handles of the congestion controller and
+/// the circuit breaker it installs.
+///
+/// # Errors
+///
+/// As [`register_default_interceptors`].
+pub fn register_default_interceptors_with_handles(
+    registry: Registry,
+    media_engine: &mut MediaEngine,
+) -> Result<(Registry, DefaultInterceptorHandles)> {
     // Order is not decided here — `Registry::build` decides it. These may be called in
     // any sequence.
+    let registry = configure_nack(registry, media_engine);
+
+    configure_simulcast_extension_headers(media_engine)?;
+
+    // Both halves of transport-wide congestion control: the numbers this endpoint's packets
+    // carry, and the feedback about the remote's.
+    let registry = configure_twcc(registry, media_engine)?;
+
+    let (registry, circuit_breaker) = configure_circuit_breaker(registry);
+
+    // The estimator runs on whichever per-packet feedback the remote sends: TWCC, or RFC 8888
+    // when `ack ccfb` was negotiated (`configure_congestion_control_feedback`).
+    let estimator = Gcc::default();
+    let initial_target = estimator.target_bitrate();
+    let (congestion_control, handle) = CongestionControlBuilder::new(estimator)
+        .with_circuit_breaker(circuit_breaker.clone())
+        .build_with_handle();
+    let registry = registry
+        .with(Slot::CongestionControl, congestion_control)
+        .with(
+            Slot::Pacer,
+            PacerBuilder::new()
+                .with_target_bitrate(initial_target)
+                .build(),
+        );
+
+    let registry = configure_rtcp_reports(registry);
+    configure_receiver_reference_time(media_engine);
+
+    let registry = configure_key_frame_requests(registry);
+
+    Ok((
+        registry,
+        DefaultInterceptorHandles {
+            congestion_control: handle,
+            circuit_breaker,
+        },
+    ))
+}
+
+/// The standard set without congestion control: no estimator, no pacer, no transport-wide
+/// sequence numbers on outgoing packets, no circuit breaker. NACK, RTCP reports, TWCC feedback
+/// for the remote, and key-frame requests are as in [`register_default_interceptors`].
+///
+/// This is the explicit opt-out. RFC 8834 section 7 requires congestion control and the RTP
+/// circuit breaker of a WebRTC endpoint: use this only when the application provides them
+/// itself (its own interceptors, [`configure_congestion_control`] with its own estimator) or
+/// when the traffic never leaves a network where they are not needed.
+///
+/// # Errors
+///
+/// As [`register_default_interceptors`].
+pub fn register_default_interceptors_without_congestion_control(
+    registry: Registry,
+    media_engine: &mut MediaEngine,
+) -> Result<Registry> {
     let registry = configure_nack(registry, media_engine);
 
     configure_simulcast_extension_headers(media_engine)?;
@@ -213,6 +316,17 @@ pub fn register_default_interceptors(
     let registry = configure_key_frame_requests(registry);
 
     Ok(registry)
+}
+
+/// Installs the RTP circuit breaker (RFC 8083) at [`Slot::CircuitBreaker`] with the RFC's
+/// recommended parameters, and returns the handle that reports what it stopped.
+///
+/// It needs nothing negotiated: it reads the report blocks of the RTCP sender and receiver
+/// reports every RTP endpoint sends. A flow it stops is restarted only by the application,
+/// through the handle.
+pub fn configure_circuit_breaker(registry: Registry) -> (Registry, CircuitBreakerHandle) {
+    let (breaker, handle) = CircuitBreakerBuilder::new().build();
+    (registry.with(Slot::CircuitBreaker, breaker), handle)
 }
 
 /// Delivers inbound key-frame requests (RTCP PLI and FIR) to the application.
@@ -1012,6 +1126,10 @@ mod slot_order_tests {
         assert_eq!(
             vec![
                 Slot::RtcpSession,
+                Slot::CongestionControl,
+                Slot::TwccSender,
+                Slot::CircuitBreaker,
+                Slot::Pacer,
                 Slot::NackResponder,
                 Slot::TwccReceiver,
                 Slot::NackGenerator,
@@ -1075,22 +1193,48 @@ mod slot_order_tests {
         );
     }
 
-    /// **D6.** Congestion control implies pacing, pacing implies queueing delay, and that is not
-    /// something an application should acquire without asking.
+    /// RFC 8834 section 7: a WebRTC endpoint adapts its RTP traffic to the path and implements
+    /// the RTP circuit breaker (section 7.1), so the standard set carries an estimator, the
+    /// pacer that enforces its target, and the breaker.
     #[test]
-    fn the_default_chain_has_no_congestion_control() {
+    fn the_default_chain_has_congestion_control_and_a_circuit_breaker() {
         let mut media_engine = MediaEngine::default();
         let registry = register_default_interceptors(Registry::new(), &mut media_engine)
             .expect("default interceptors");
 
-        let slots = slots(&registry);
-        assert!(
-            !slots.contains(&(Slot::CongestionControl)),
-            "no estimator by default: {slots:?}"
-        );
-        assert!(
-            !slots.contains(&(Slot::Pacer)),
-            "and no pacer by default: {slots:?}"
+        let named: Vec<(Slot, String)> = registry.slots();
+        for (slot, name) in [
+            (Slot::CongestionControl, "CongestionControlInterceptor<Gcc>"),
+            (Slot::TwccSender, "TwccSenderInterceptor"),
+            (Slot::CircuitBreaker, "CircuitBreakerInterceptor"),
+            (Slot::Pacer, "PacerInterceptor"),
+        ] {
+            assert!(
+                named.contains(&(slot, name.to_owned())),
+                "{name} is missing from the default chain: {named:?}"
+            );
+        }
+    }
+
+    /// The opt-out is explicit, and is the set without the four congestion-control slots.
+    #[test]
+    fn the_opt_out_chain_has_no_congestion_control() {
+        let mut media_engine = MediaEngine::default();
+        let registry = register_default_interceptors_without_congestion_control(
+            Registry::new(),
+            &mut media_engine,
+        )
+        .expect("interceptors");
+
+        assert_eq!(
+            vec![
+                Slot::RtcpSession,
+                Slot::NackResponder,
+                Slot::TwccReceiver,
+                Slot::NackGenerator,
+                Slot::KeyFrameRequests,
+            ],
+            slots(&registry)
         );
     }
 
@@ -1131,6 +1275,13 @@ mod slot_order_tests {
         assert_eq!(
             vec![
                 (Slot::RtcpSession, "RtcpSessionInterceptor".to_owned()),
+                (
+                    Slot::CongestionControl,
+                    "CongestionControlInterceptor<Gcc>".to_owned()
+                ),
+                (Slot::TwccSender, "TwccSenderInterceptor".to_owned()),
+                (Slot::CircuitBreaker, "CircuitBreakerInterceptor".to_owned()),
+                (Slot::Pacer, "PacerInterceptor".to_owned()),
                 (Slot::NackResponder, "NackResponderInterceptor".to_owned()),
                 (Slot::TwccReceiver, "TwccReceiverInterceptor".to_owned()),
                 (Slot::NackGenerator, "NackGeneratorInterceptor".to_owned()),

@@ -60,6 +60,18 @@ pub enum Slot {
     /// never passes this slot is never numbered, and the remote cannot report on what it cannot
     /// name. A retransmission is exactly that case.
     TwccSender = 2_000,
+    /// `CircuitBreakerInterceptor` — the RTP circuit breaker of RFC 8083: stops a flow whose
+    /// receiver has gone, whose media is not arriving, or that persistently takes ten times what
+    /// TCP would.
+    ///
+    /// **Both legs.** *Write:* counts every departing RTP packet, and drops the packets of a
+    /// flow that has ceased transmission. *Read:* reads the report blocks of inbound SR and RR.
+    ///
+    /// **Why here — below the pacer, above the numbering.** Below the pacer it counts what is
+    /// actually released, retransmissions and repair packets included. Above the TWCC sender
+    /// and the send history, a packet it drops is never numbered and never recorded as sent: a
+    /// ceased flow does not read as loss to the congestion controller.
+    CircuitBreaker = 2_500,
     /// `PacerInterceptor` — gates departures, releasing at the estimated rate.
     ///
     /// **Outbound, with one inbound read.** *Write:* queues RTP and releases it on a timer; RTCP
@@ -228,6 +240,7 @@ impl Slot {
             Self::CongestionControl => 1_000,
             Self::FecWireImage => 1_500,
             Self::TwccSender => 2_000,
+            Self::CircuitBreaker => 2_500,
             Self::Pacer => 3_000,
             Self::NackResponder => 4_000,
             Self::FecEncoder => 5_000,
@@ -686,6 +699,7 @@ mod tests {
             Slot::CongestionControl,
             Slot::FecWireImage,
             Slot::TwccSender,
+            Slot::CircuitBreaker,
             Slot::Pacer,
             Slot::NackResponder,
             Slot::FecEncoder,

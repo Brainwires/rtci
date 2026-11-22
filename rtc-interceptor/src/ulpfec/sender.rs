@@ -5,6 +5,7 @@ use super::header::LONG_MASK_BITS;
 use super::red;
 use crate::Interceptor;
 use crate::stream_info::StreamInfo;
+use crate::wire_image::{WireImageTap, WireImages, wire_image_tap};
 use crate::{AttributedPacket, Packet, TaggedPacket};
 use bytes::Bytes;
 use sansio::Protocol;
@@ -190,6 +191,7 @@ impl UlpfecSendBuilder {
             filter: self.filter,
             streams: HashMap::new(),
             sequence_offsets: HashMap::new(),
+            wire: None,
             read_queue: VecDeque::new(),
             write_queue: VecDeque::new(),
         }
@@ -206,6 +208,32 @@ struct ProtectedStream {
     packetizer: Option<UlpfecStreamPacketizer>,
     /// The sequence number of the last packet sent on the media SSRC, media or FEC.
     last_wire_sequence: u16,
+    /// With a wire tap: media packets that passed this slot and have not been seen leaving
+    /// yet, oldest first.
+    in_flight: VecDeque<InFlight>,
+    /// With a wire tap: media packets that passed this slot since the last block was closed.
+    passing: usize,
+}
+
+/// The most media packets remembered between this slot and the wire tap. The pacer between the
+/// two holds at most its queue limit; anything older than this was dropped on the way.
+const MAX_IN_FLIGHT: usize = 4096;
+
+/// A media packet on its way from this slot to the wire.
+struct InFlight {
+    /// Its sequence number on the wire.
+    sequence_number: u16,
+    /// Set on the packet that closes a block.
+    closes: Option<BlockEnd>,
+}
+
+/// What was decided about a block's FEC when its last media packet passed this slot.
+struct BlockEnd {
+    /// RED with [`RedPlacement::OwnPacket`]: the sequence numbers of the media stream set aside
+    /// for the block's FEC packets.
+    reserved: Vec<u16>,
+    /// The RTP timestamp of the block's last media packet, which its FEC packets carry.
+    timestamp: u32,
 }
 
 /// Produces ULPFEC (RFC 5109) for outgoing media.
@@ -244,6 +272,9 @@ pub struct UlpfecSendInterceptor {
     /// `streams` so a stream that is unbound and bound again continues where it was: going back
     /// would reuse sequence numbers already on the wire.
     sequence_offsets: HashMap<u32, u16>,
+    /// Where the media packets are read from once [`wire_tap`](Self::wire_tap) was called: as
+    /// they left, below everything that edits them.
+    wire: Option<WireImages>,
     read_queue: VecDeque<TaggedPacket>,
     write_queue: VecDeque<TaggedPacket>,
 }
@@ -293,6 +324,264 @@ impl UlpfecSendInterceptor {
     }
 }
 
+impl UlpfecSendInterceptor {
+    /// The tap this encoder reads the media packets from, to register at
+    /// [`Slot::FecWireImage`](crate::Slot::FecWireImage).
+    ///
+    /// FEC protects the packets as they are sent (RFC 5109 section 8). This interceptor sits
+    /// above the pacer, where a media packet is not final: the TWCC sender below writes the
+    /// transport-wide sequence number into it, adding the header extension when the packet has
+    /// none, and the receiver XORs what arrived. With the tap registered the work is split in
+    /// two:
+    ///
+    /// - **here**, as a media packet passes: it gets its sequence number on the wire and its
+    ///   RED wrapping, and when it closes a block the sequence numbers the block's FEC packets
+    ///   will take are set aside (RED carriage with [`RedPlacement::OwnPacket`]), so later
+    ///   media is numbered past them;
+    /// - **at the tap**, as the packet leaves: its image goes into the block, and when the
+    ///   block's last packet has left the FEC is computed over those images and sent, in the
+    ///   sequence numbers set aside for it, on the FEC stream, or with the next media packet.
+    ///
+    /// A FEC packet therefore leaves after the block it protects has left, a few packets
+    /// later than its sequence number says when a pacer holds the media in between. Every
+    /// sequence number of the media stream is still used exactly once.
+    ///
+    /// Without a tap (this method never called) the encoder protects the packets as they pass
+    /// this slot, which is the wire image only when nothing below edits them.
+    pub fn wire_tap(&mut self) -> WireImageTap {
+        let (tap, images) = wire_image_tap();
+        for ssrc in self.streams.keys() {
+            images.watch(*ssrc);
+        }
+        self.wire = Some(images);
+        tap
+    }
+
+    /// With a wire tap: send a protected media packet on its way, numbered and wrapped, and
+    /// note what its block's FEC will need. `msg` already has its wire sequence number.
+    fn pass_to_the_wire(&mut self, mut msg: TaggedPacket) {
+        let Packet::Rtp(rtp_packet) = &mut msg.message.packet else {
+            self.write_queue.push_back(msg);
+            return;
+        };
+        let ssrc = rtp_packet.header.ssrc;
+        let Some(stream) = self.streams.get_mut(&ssrc) else {
+            self.write_queue.push_back(msg);
+            return;
+        };
+        let sequence_number = rtp_packet.header.sequence_number;
+        let timestamp = rtp_packet.header.timestamp;
+        let marker = rtp_packet.header.marker;
+        stream.last_wire_sequence = sequence_number;
+
+        // RED: the media packet becomes the primary block, behind any FEC waiting for a ride.
+        if let Carriage::Red {
+            red_payload_type,
+            fec_payload_type,
+        } = self.carriage
+        {
+            let pending: Vec<Bytes> = stream.pending.drain(..).collect();
+            let redundant: Vec<(u8, u16, &[u8])> = pending
+                .iter()
+                .map(|fec| (fec_payload_type, 0u16, &fec[..]))
+                .collect();
+            if let Ok(payload) = red::write(
+                &redundant,
+                rtp_packet.header.payload_type,
+                &rtp_packet.payload,
+            ) {
+                rtp_packet.payload = payload;
+                rtp_packet.header.payload_type = red_payload_type;
+            }
+        }
+
+        stream.passing += 1;
+        let closes = (stream.passing >= self.num_media_packets || (self.flush_on_marker && marker))
+            .then(|| {
+                let fec_packets = self.num_fec_packets.min(stream.passing);
+                stream.passing = 0;
+                // The FEC packets of this block take the next sequence numbers of the media
+                // stream, now, so the media that follows is numbered past them.
+                let own_packets = matches!(self.carriage, Carriage::Red { .. })
+                    && self.placement == RedPlacement::OwnPacket;
+                let reserved = if own_packets {
+                    let offset = self.sequence_offsets.entry(ssrc).or_insert(0);
+                    (0..fec_packets)
+                        .map(|_| {
+                            *offset = offset.wrapping_add(1);
+                            stream.last_wire_sequence = stream.last_wire_sequence.wrapping_add(1);
+                            stream.last_wire_sequence
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                BlockEnd {
+                    reserved,
+                    timestamp,
+                }
+            });
+        if stream.in_flight.len() == MAX_IN_FLIGHT {
+            stream.in_flight.pop_front();
+        }
+        stream.in_flight.push_back(InFlight {
+            sequence_number,
+            closes,
+        });
+        self.write_queue.push_back(msg);
+    }
+
+    /// With a wire tap: take the media packets that left since the last call into their blocks,
+    /// and send the FEC of every block whose last packet has left.
+    fn protect_wire_images(&mut self) {
+        let Some(images) = self.wire.as_ref().map(WireImages::take) else {
+            return;
+        };
+        for image in images {
+            let Packet::Rtp(rtp_packet) = &image.message.packet else {
+                continue;
+            };
+            self.on_wire_image(image.now, image.transport, rtp_packet);
+        }
+    }
+
+    /// One packet of a protected stream, as it left.
+    fn on_wire_image(
+        &mut self,
+        now: Instant,
+        transport: shared::TransportContext,
+        rtp_packet: &rtp::Packet,
+    ) {
+        let ssrc = rtp_packet.header.ssrc;
+        let sequence_number = rtp_packet.header.sequence_number;
+        let Some(stream) = self.streams.get_mut(&ssrc) else {
+            return;
+        };
+        // Only the media this interceptor sent on its way: a retransmission, a FEC packet of
+        // its own, or a packet the application built as RED itself is not waited for.
+        let Some(position) = stream
+            .in_flight
+            .iter()
+            .position(|waiting| waiting.sequence_number == sequence_number)
+        else {
+            return;
+        };
+        // Whatever was sent before it and has not been seen never reached the wire (the pacer
+        // refused it, a circuit breaker stopped the flow). A block one of those closed is
+        // closed with what did leave.
+        let mut ends = Vec::new();
+        for _ in 0..position {
+            if let Some(end) = stream.in_flight.pop_front().and_then(|lost| lost.closes) {
+                ends.push((end, std::mem::take(&mut stream.block)));
+            }
+        }
+        let Some(arrived) = stream.in_flight.pop_front() else {
+            return;
+        };
+
+        // The packet FEC protects: in RED, the virtual packet of RFC 5109 section 14.2, which is
+        // the packet on the wire without its block headers and redundant data, under the
+        // primary's payload type. That is what the receiver rebuilds from what arrives.
+        let protected = match self.carriage {
+            Carriage::Stream => wire_image(rtp_packet).ok(),
+            Carriage::Red { .. } => {
+                red::parse(&rtp_packet.payload)
+                    .ok()
+                    .and_then(|(_, primary)| {
+                        let mut header = rtp_packet.header.clone();
+                        header.payload_type = primary.payload_type;
+                        wire_image(&rtp::Packet {
+                            header,
+                            payload: Bytes::copy_from_slice(primary.data),
+                        })
+                        .ok()
+                    })
+            }
+        };
+        if let Some(protected) = protected {
+            stream.block.push((sequence_number, protected));
+        }
+        if let Some(packetizer) = stream.packetizer.as_mut() {
+            packetizer.on_media(rtp_packet.header.timestamp, now);
+        }
+        if let Some(end) = arrived.closes {
+            ends.push((end, std::mem::take(&mut stream.block)));
+        }
+
+        for (end, block) in ends {
+            self.send_block_fec(now, transport, ssrc, end, &block);
+        }
+    }
+
+    /// Send the FEC of a block whose packets have left.
+    fn send_block_fec(
+        &mut self,
+        now: Instant,
+        transport: shared::TransportContext,
+        ssrc: u32,
+        end: BlockEnd,
+        block: &[(u16, Bytes)],
+    ) {
+        let mut fec_payloads: VecDeque<Bytes> = self.encode_block(block).into();
+        let Some(stream) = self.streams.get_mut(&ssrc) else {
+            return;
+        };
+        let mut packets = Vec::new();
+        match self.carriage {
+            Carriage::Stream => {
+                for fec in fec_payloads {
+                    if let Some(packetizer) = stream.packetizer.as_mut()
+                        && let Ok(parsed) = super::header::UlpfecPacket::parse(&fec)
+                    {
+                        packets.push(packetizer.packetize(&parsed, now));
+                    }
+                }
+            }
+            Carriage::Red {
+                red_payload_type,
+                fec_payload_type,
+            } => {
+                if self.placement == RedPlacement::WithNextMedia {
+                    stream.pending.extend(
+                        fec_payloads
+                            .into_iter()
+                            .filter(|fec| fec.len() <= red::MAX_REDUNDANT_BLOCK),
+                    );
+                    return;
+                }
+                // Every sequence number set aside is used, so the stream has no hole of this
+                // interceptor's making: a slot the block gave no FEC for (packets of it never
+                // left, or the encoder refused it) carries an empty FEC block.
+                for sequence_number in end.reserved {
+                    let fec = fec_payloads.pop_front().unwrap_or_default();
+                    let Ok(payload) = red::write(&[], fec_payload_type, &fec) else {
+                        continue;
+                    };
+                    packets.push(rtp::Packet {
+                        header: rtp::header::Header {
+                            version: 2,
+                            marker: false,
+                            payload_type: red_payload_type,
+                            sequence_number,
+                            timestamp: end.timestamp,
+                            ssrc,
+                            ..Default::default()
+                        },
+                        payload,
+                    });
+                }
+            }
+        }
+        for packet in packets {
+            self.write_queue.push_back(TaggedPacket {
+                now,
+                transport,
+                message: AttributedPacket::new(Packet::Rtp(packet)),
+            });
+        }
+    }
+}
+
 impl Protocol<TaggedPacket, TaggedPacket, ()> for UlpfecSendInterceptor {
     type Rout = TaggedPacket;
     type Wout = TaggedPacket;
@@ -310,6 +599,8 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for UlpfecSendInterceptor {
     }
 
     fn handle_write(&mut self, mut msg: TaggedPacket) -> Result<(), Self::Error> {
+        // FEC for what has left goes ahead of what is passing now.
+        self.protect_wire_images();
         let Packet::Rtp(rtp_packet) = &mut msg.message.packet else {
             self.write_queue.push_back(msg);
             return Ok(());
@@ -346,6 +637,11 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for UlpfecSendInterceptor {
             self.write_queue.push_back(msg);
             return Ok(());
         }
+        if self.wire.is_some() {
+            self.pass_to_the_wire(msg);
+            return Ok(());
+        }
+
         // A packet that cannot be protected (it does not serialise) still leaves.
         let Ok(image) = wire_image(rtp_packet) else {
             self.write_queue.push_back(msg);
@@ -459,6 +755,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for UlpfecSendInterceptor {
     }
 
     fn poll_write(&mut self) -> Option<TaggedPacket> {
+        self.protect_wire_images();
         self.write_queue.pop_front()
     }
 
@@ -502,14 +799,22 @@ impl Interceptor for UlpfecSendInterceptor {
                 pending: VecDeque::new(),
                 packetizer,
                 last_wire_sequence: 0,
+                in_flight: VecDeque::new(),
+                passing: 0,
             },
         );
+        if let Some(images) = &self.wire {
+            images.watch(info.ssrc);
+        }
     }
 
     fn unbind_local_stream(&mut self, info: &StreamInfo) {
         // A partly filled block goes with it: its packets have left, and FEC for a stream that
         // has stopped has nothing left to repair. The sequence offset stays.
         self.streams.remove(&info.ssrc);
+        if let Some(images) = &self.wire {
+            images.unwatch(info.ssrc);
+        }
     }
 
     fn bind_remote_stream(&mut self, _info: &StreamInfo) {}

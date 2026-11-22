@@ -9,6 +9,10 @@ use std::time::{Duration, Instant};
 /// larger-than-burst path and the rate would stop being enforced at all.
 pub const MIN_BURST_BITS: f64 = 8.0 * 1500.0;
 
+/// The pacing interval: a group of packets leaves every 5 ms
+/// (draft-ietf-rmcat-gcc-02 section 4).
+pub const BURST_TIME: Duration = Duration::from_millis(5);
+
 /// A token bucket in bits, refilled from elapsed time.
 ///
 /// Unlike upstream's `rate.Limiter`, nothing here reads a clock: the budget is a pure function of
@@ -53,13 +57,20 @@ impl Pacer {
     /// the rate must not quietly widen that.
     pub fn with_burst_bits(mut self, burst_bits: f64) -> Self {
         self.configured_burst_bits = Some(burst_bits.max(MIN_BURST_BITS));
-        self.budget_bits = self.budget_bits.min(self.burst_bits());
+        // A pacer starts with a full bucket, whatever size the bucket is.
+        self.budget_bits = if self.last_refill.is_none() {
+            self.burst_bits()
+        } else {
+            self.budget_bits.min(self.burst_bits())
+        };
         self
     }
 
-    /// The burst that goes with a rate: a tenth of a second's worth, floored at one packet.
+    /// The burst that goes with a rate: what the target sends in one [`BURST_TIME`], floored
+    /// at one packet (draft-ietf-rmcat-gcc-02 section 4: the pacer sends a group of packets
+    /// every burst_time of 5 ms, of size target bitrate times burst_time).
     fn burst_for(bits_per_second: f64) -> f64 {
-        (bits_per_second / 10.0).max(MIN_BURST_BITS)
+        (bits_per_second * BURST_TIME.as_secs_f64()).max(MIN_BURST_BITS)
     }
 
     /// The rate currently being paced at, in bits per second.
@@ -272,20 +283,21 @@ mod tests {
     fn changing_the_rate_changes_how_fast_the_budget_refills() {
         let now = Instant::now();
         // A derived burst, so the burst grows with the rate and does not cap what is asserted.
-        let mut pacer = Pacer::new(1_000_000.0);
+        let mut pacer = Pacer::new(10_000_000.0);
         pacer.refill(now);
         pacer.consume(pacer.budget_bits());
 
-        pacer.set_target_bitrate(2_000_000.0);
-        pacer.refill(now + Duration::from_millis(10));
+        pacer.set_target_bitrate(20_000_000.0);
+        pacer.refill(now + Duration::from_millis(2));
 
-        // Twice the rate, twice the budget for the same elapsed time.
+        // Twice the rate, twice the budget for the same elapsed time (and inside the 5 ms
+        // burst, which would otherwise cap it).
         assert!(
-            (pacer.budget_bits() - 20_000.0).abs() < 1.0,
+            (pacer.budget_bits() - 40_000.0).abs() < 1.0,
             "{}",
             pacer.budget_bits()
         );
-        assert_eq!(2_000_000.0, pacer.target_bitrate());
+        assert_eq!(20_000_000.0, pacer.target_bitrate());
     }
 
     /// Lowering the rate must not leave a budget accumulated at the old one, or the first thing
@@ -335,12 +347,17 @@ mod tests {
     /// The derived default still tracks the rate — pinning is opt-in, not the new default.
     #[test]
     fn a_derived_burst_follows_the_rate() {
-        let mut pacer = Pacer::new(1_000_000.0);
+        // draft-ietf-rmcat-gcc-02 section 4: group size = target bitrate * burst_time (5 ms).
+        let mut pacer = Pacer::new(10_000_000.0);
+        assert_eq!(50_000.0, pacer.burst_bits());
+
+        pacer.set_target_bitrate(20_000_000.0);
+
         assert_eq!(100_000.0, pacer.burst_bits());
 
-        pacer.set_target_bitrate(2_000_000.0);
-
-        assert_eq!(200_000.0, pacer.burst_bits());
+        // Never less than one full-sized packet, or nothing could ever leave.
+        pacer.set_target_bitrate(300_000.0);
+        assert_eq!(MIN_BURST_BITS, pacer.burst_bits());
     }
 
     /// A packet larger than the burst waits for a full budget rather than going unconditionally,

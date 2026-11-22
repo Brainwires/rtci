@@ -426,6 +426,12 @@ impl UlpfecDecoder {
         if matches!(self.media.get(&missing), Some(Entry::Failed)) {
             return None;
         }
+        // The SN base of a held FEC packet is inside the window, but its mask reaches up to 47
+        // packets further: a packet out there is not rebuilt, and no state is kept for it. The
+        // media table holds the window and nothing else.
+        if !self.in_window(missing) {
+            return None;
+        }
 
         // Step two (9.1, 9.2): the recovery bit string is the XOR of the FEC bit string and the
         // protected bit strings of the other packets.
