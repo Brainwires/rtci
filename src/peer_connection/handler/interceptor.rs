@@ -5,7 +5,7 @@ use crate::peer_connection::event::RTCPeerConnectionEvent;
 use crate::peer_connection::event::track_event::{RTCTrackEvent, RTCTrackEventInit};
 use crate::peer_connection::event::{RTCEventInternal, TaggedRTCEventInternal};
 use crate::peer_connection::handler::endpoint::{
-    SsrcOwners, deencapsulate_rtx, is_repair_mime_type, resolve_rtx_primary,
+    SsrcOwners, deencapsulate_rtx, is_repair_mime_type, repair_flow_codec, resolve_rtx_primary,
 };
 use crate::peer_connection::message::internal::{
     RTCMessageInternal, RTPMessage, TaggedRTCMessageInternal,
@@ -31,6 +31,7 @@ use rtcp::source_description::{
 };
 use shared::error::{Error, Result};
 use shared::marshal::MarshalSize;
+use shared::time::SystemInstant;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
@@ -54,6 +55,9 @@ pub(crate) struct InterceptorHandlerContext {
     connection_cname: Option<String>,
     /// Receiver SSRCs the remote has said BYE for, until every SSRC of their track has.
     goodbye_ssrcs: HashSet<SSRC>,
+    /// The wall clock paired with the engine's clock, taken once, for the timestamps of the
+    /// receivers' synchronization and contributing sources.
+    wall_clock: Option<SystemInstant>,
 }
 
 fn receiver_declares_ssrc(transceiver: &RTCRtpTransceiverInternal, ssrc: SSRC) -> bool {
@@ -198,6 +202,13 @@ impl<'a> InterceptorHandler<'a> {
                 continue;
             };
             for &source in &goodbye.sources {
+                // The source left, whether it was a stream of its own or a contributor to a
+                // mixer's (a CSRC): no receiver lists it any more.
+                for transceiver in self.rtp_transceivers.iter_mut() {
+                    if let Some(receiver) = transceiver.receiver_mut() {
+                        receiver.forget_source(source);
+                    }
+                }
                 let Some(index) = self.rtp_transceivers.iter().position(|transceiver| {
                     transceiver
                         .receiver()
@@ -432,7 +443,7 @@ impl<'a> InterceptorHandler<'a> {
                 payload_type_rtx,
                 None,
                 None,
-                &codec,
+                &repair_flow_codec(&codec),
                 &parameters.rtp_parameters.header_extensions,
             );
         }
@@ -447,7 +458,7 @@ impl<'a> InterceptorHandler<'a> {
                 payload_type_fec,
                 None,
                 None,
-                &codec,
+                &repair_flow_codec(&codec),
                 &parameters.rtp_parameters.header_extensions,
             );
         }
@@ -653,7 +664,7 @@ impl<'a> InterceptorHandler<'a> {
                 codec.payload_type,
                 None,
                 None,
-                &codec.rtp_codec,
+                &repair_flow_codec(&codec.rtp_codec),
                 &parameters.rtp_parameters.header_extensions,
             );
         }
@@ -666,7 +677,7 @@ impl<'a> InterceptorHandler<'a> {
             codec.payload_type,
             None,
             None,
-            &codec.rtp_codec,
+            &repair_flow_codec(&codec.rtp_codec),
             &parameters.rtp_parameters.header_extensions,
         );
 
@@ -836,7 +847,7 @@ impl<'a> InterceptorHandler<'a> {
                 payload_type_rtx,
                 None,
                 None,
-                &codec.rtp_codec,
+                &repair_flow_codec(&codec.rtp_codec),
                 &parameters.rtp_parameters.header_extensions,
             );
         }
@@ -851,7 +862,7 @@ impl<'a> InterceptorHandler<'a> {
                 payload_type_fec,
                 None,
                 None,
-                &codec.rtp_codec,
+                &repair_flow_codec(&codec.rtp_codec),
                 &parameters.rtp_parameters.header_extensions,
             );
         }
@@ -906,6 +917,39 @@ impl<'a> InterceptorHandler<'a> {
                 }),
             )),
         });
+    }
+
+    /// Records the SSRC and CSRCs of a packet the chain released, on the receiver that owns
+    /// the SSRC (`RTCRtpReceiver::get_synchronization_sources`, `get_contributing_sources`).
+    fn record_sources(&mut self, now: Instant, header: &rtp::Header) {
+        let Some(id) =
+            self.ctx
+                .ssrc_owners
+                .find(header.ssrc, self.rtp_transceivers, receiver_declares_ssrc)
+        else {
+            return;
+        };
+        // RFC 6464: one octet, the voice activity flag and the level in -dBov.
+        let audio_level = if header.extension {
+            let (extension_id, audio, _) =
+                self.media_engine
+                    .get_header_extension_id(RTCRtpHeaderExtensionCapability {
+                        uri: ::sdp::extmap::AUDIO_LEVEL_URI.to_owned(),
+                    });
+            (audio && extension_id != 0)
+                .then(|| header.get_extension(extension_id as u8))
+                .flatten()
+                .and_then(|payload| payload.first().copied())
+        } else {
+            None
+        };
+        let wall_clock = *self
+            .ctx
+            .wall_clock
+            .get_or_insert_with(|| SystemInstant::now(now));
+        if let Some(receiver) = self.rtp_transceivers[id].receiver_mut() {
+            receiver.record_sources(now, wall_clock, header, audio_level);
+        }
     }
 
     fn get_rtp_header_extension_ids(
@@ -1061,8 +1105,16 @@ impl<'a>
                     continue;
                 }
 
-                if let Packet::Rtcp(rtcp_packet) = &packet.message.packet {
-                    trace!("Interceptor forwarded a RTCP packet {:?}", rtcp_packet);
+                match &packet.message.packet {
+                    Packet::Rtcp(rtcp_packet) => {
+                        trace!("Interceptor forwarded a RTCP packet {:?}", rtcp_packet);
+                    }
+                    // Media on its way to the application: its sources are the receiver's
+                    // synchronization and contributing sources from now on.
+                    Packet::Rtp(rtp_packet) => {
+                        self.record_sources(packet.now, &rtp_packet.header);
+                    }
+                    _ => {}
                 }
 
                 self.ctx.read_outs.push_back(TaggedRTCMessageInternal {
@@ -1187,6 +1239,14 @@ mod interceptor_sdes_test;
 #[cfg(test)]
 #[path = "interceptor_goodbye_test.rs"]
 mod interceptor_goodbye_test;
+
+#[cfg(test)]
+#[path = "interceptor_repair_feedback_test.rs"]
+mod interceptor_repair_feedback_test;
+
+#[cfg(test)]
+#[path = "interceptor_sources_test.rs"]
+mod interceptor_sources_test;
 
 #[cfg(test)]
 mod boundary_tests {

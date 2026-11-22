@@ -208,6 +208,23 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for NackGeneratorInterceptor {
     type Time = Instant;
 
     fn handle_read(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
+        // RFC 4588 5.3: "a receiver MUST stop requesting retransmissions for an SSRC on
+        // receiving its BYE" (RFC 3550 6.6: the source has left). Its receive log goes, and
+        // with it every gap still open; packets arriving later under that SSRC are not tracked.
+        if let Packet::Rtcp(ref rtcp_packets) = msg.message.packet {
+            for rtcp_packet in rtcp_packets {
+                if let Some(goodbye) = rtcp_packet
+                    .as_any()
+                    .downcast_ref::<rtcp::goodbye::Goodbye>()
+                {
+                    for source in &goodbye.sources {
+                        self.receive_logs.remove(source);
+                        self.nack_counts.remove(source);
+                    }
+                }
+            }
+        }
+
         // Track incoming RTP packets
         if let Packet::Rtp(ref rtp_packet) = msg.message.packet
             && let Some(receive_log) = self.receive_logs.get_mut(&rtp_packet.header.ssrc)

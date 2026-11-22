@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Bug Fixes
+
+- **rtcp**: each packet of an inbound compound RTCP packet reaches the application with the track
+  it is about (RFC 3550 6.1). The whole datagram was routed by its first packet, so a PLI behind
+  an empty receiver report was dropped and one behind a report about another stream arrived
+  tagged with that stream's track.
+- **rtcp**: reception reports follow RFC 3550 Appendix A.1 / A.3: the cumulative loss is expected
+  less received (a late packet is no longer lost, duplicates make it negative, it is clamped to
+  the signed 24 bits at both ends) and a source that restarts starts the statistics again. Loss
+  was counted per report from a bitmap and never revisited.
+- **rtcp**: a stream that stopped sending issues no sender report after two report intervals
+  (RFC 3550 6.4). It issued one every interval for as long as it was bound.
+- **rtcp**: a sender report's RTP timestamp wraps modulo 2^32; it stopped at `u32::MAX` once a
+  stream had been idle for 2^32 ticks.
+- **nack**: no NACK is sent for an RTX or FEC SSRC (RFC 4588 6.3). Repair flows were bound with
+  their primary's feedback, so the gaps between padding-only RTX probes were asked for every
+  100 ms, for ever.
+- **nack**: retransmission requests for a source stop at its BYE (RFC 4588 5.3).
+- **rtx**: an RTX stream's sequence numbers carry on when its stream is bound again by a
+  renegotiation, and start at a random value (RFC 4588 4). They restarted at 0, repeating SRTP
+  packet indices of a live SSRC, which the SRTP layer refuses: retransmissions stopped until the
+  counter passed its old high-water mark.
+- **receiver**: `RTCRtpReceiver::get_synchronization_sources` and `get_contributing_sources` list
+  the sources of the packets delivered in the last ten seconds (W3C webrtc 5.3). They were always
+  empty.
+
 ## [0.22.0+brainwires.5] - 2026-11-20
 
 ### Bug Fixes

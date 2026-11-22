@@ -104,6 +104,10 @@ pub const MIN_RETRANSMIT_INTERVAL: std::time::Duration = std::time::Duration::fr
 /// packets are not queued until the queue drains.
 pub const MAX_QUEUED_RETRANSMISSIONS: usize = 1024;
 
+/// The most retransmission SSRCs whose next sequence number is remembered after their stream
+/// was unbound.
+const MAX_REMEMBERED_RTX_SSRCS: usize = 1024;
+
 /// Interceptor that responds to NACK requests by retransmitting packets.
 ///
 /// This interceptor buffers outgoing RTP packets on local streams and
@@ -114,6 +118,13 @@ pub struct NackResponderInterceptor {
 
     /// Send buffers per local stream SSRC
     streams: HashMap<u32, LocalStream>,
+
+    /// The next sequence number of each retransmission SSRC this interceptor has sent on,
+    /// kept when its stream is unbound: a stream bound again with the same RTX SSRC (a
+    /// renegotiation re-binding it) carries on from here. Starting over would repeat sequence
+    /// numbers on a live SSRC, which SRTP refuses to protect twice (the packet index is the
+    /// SSRC's rollover counter and sequence number).
+    rtx_sequence_numbers: HashMap<u32, u16>,
 
     /// Queue for retransmitted packets
     write_queue: VecDeque<TaggedPacket>,
@@ -129,6 +140,7 @@ impl NackResponderInterceptor {
             read_queue: VecDeque::new(),
             size,
             streams: HashMap::new(),
+            rtx_sequence_numbers: HashMap::new(),
             write_queue: VecDeque::new(),
             retransmissions_queued: 0,
         }
@@ -314,13 +326,20 @@ impl Interceptor for NackResponderInterceptor {
         if stream_supports_nack(info)
             && let Some(send_buffer) = SendBuffer::new(self.size)
         {
+            // RFC 4588 4: the initial sequence number of the retransmission stream is random
+            // (RFC 3550 5.1), and the stream is the RTX SSRC's, not the binding's: a stream
+            // bound again continues where the SSRC left off.
+            let rtx_sequence_number = info
+                .ssrc_rtx
+                .and_then(|ssrc_rtx| self.rtx_sequence_numbers.get(&ssrc_rtx).copied())
+                .unwrap_or_else(rand::random::<u16>);
             self.streams.insert(
                 info.ssrc,
                 LocalStream {
                     send_buffer,
                     ssrc_rtx: info.ssrc_rtx,
                     payload_type_rtx: info.payload_type_rtx,
-                    rtx_sequence_number: 0,
+                    rtx_sequence_number,
                     last_retransmit: HashMap::new(),
                     rid_extension_id: extension_id(info, RTP_STREAM_ID_URI),
                     repaired_rid_extension_id: extension_id(info, REPAIRED_RTP_STREAM_ID_URI),
@@ -332,7 +351,17 @@ impl Interceptor for NackResponderInterceptor {
     }
 
     fn unbind_local_stream(&mut self, info: &StreamInfo) {
-        self.streams.remove(&info.ssrc);
+        if let Some(stream) = self.streams.remove(&info.ssrc)
+            && let Some(ssrc_rtx) = stream.ssrc_rtx
+        {
+            if self.rtx_sequence_numbers.len() >= MAX_REMEMBERED_RTX_SSRCS
+                && !self.rtx_sequence_numbers.contains_key(&ssrc_rtx)
+            {
+                self.rtx_sequence_numbers.clear();
+            }
+            self.rtx_sequence_numbers
+                .insert(ssrc_rtx, stream.rtx_sequence_number);
+        }
     }
 
     fn bind_remote_stream(&mut self, _info: &StreamInfo) {}

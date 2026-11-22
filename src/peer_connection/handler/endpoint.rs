@@ -11,7 +11,9 @@ use crate::peer_connection::message::internal::{
 use crate::media_stream::track::MediaStreamTrackId;
 use crate::peer_connection::configuration::media_engine::MIME_TYPE_RTX;
 use crate::rtp_transceiver::rtp_sender::rtp_codec::parse_rtx_apt;
-use crate::rtp_transceiver::rtp_sender::{RTCRtpCodecParameters, RTCRtpCodingParameters};
+use crate::rtp_transceiver::rtp_sender::{
+    RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters,
+};
 use crate::rtp_transceiver::{PayloadType, SSRC, internal::RTCRtpTransceiverInternal};
 use crate::statistics::accumulator::RTCStatsAccumulator;
 use interceptor::Packet;
@@ -33,6 +35,19 @@ pub(crate) fn is_repair_mime_type(mime_type: &str) -> bool {
         || mt.ends_with("/ulpfec")
         || mt.ends_with("/flexfec")
         || mt.ends_with("/flexfec-03")
+}
+
+/// The codec a repair flow (an RTX or FEC SSRC) is bound to the interceptors with: its
+/// primary's, less the feedback that is addressed to a media stream. RFC 4588 6.3: "the
+/// receiver MUST NOT send NACKs for the retransmission stream"; a picture loss indication or
+/// a full intra request for a repair SSRC means nothing either. Transport-wide feedback
+/// (`transport-cc`, `ack ccfb`) stays: repair packets are on the path like any other.
+pub(crate) fn repair_flow_codec(codec: &RTCRtpCodec) -> RTCRtpCodec {
+    let mut codec = codec.clone();
+    codec
+        .rtcp_feedback
+        .retain(|feedback| feedback.typ != "nack" && feedback.typ != "ccm");
+    codec
 }
 
 /// The most SSRCs [`SsrcOwners`] remembers; past it the cache starts over.
@@ -290,27 +305,42 @@ impl<'a> EndpointHandler<'a> {
     ) -> Result<()> {
         debug!("handle_rtcp_message {}", transport_context.peer_addr);
 
-        let rtcp_ssrc = if let Some(rtcp_packet) = rtcp_packets.first() {
-            rtcp_packet.destination_ssrc().first().cloned()
-        } else {
-            None
-        };
-
-        if let Some(rtcp_ssrc) = rtcp_ssrc {
-            if let Some(track_id) = self.find_track_id(rtcp_ssrc, None) {
-                self.ctx.read_outs.push_back(TaggedRTCMessageInternal {
-                    now,
-                    transport: transport_context,
-                    message: RTCMessageInternal::Rtp(RTPMessage::TrackPacket(TrackPacket {
-                        track_id,
-                        packet: Packet::Rtcp(rtcp_packets),
-                    })),
-                });
-            } else {
-                debug!("drop rtcp packet ssrc = {}", rtcp_ssrc);
+        // RFC 3550 6.1: a compound packet is several packets in one datagram, and each is
+        // about its own sources. Every one is delivered with the track it concerns: the
+        // receiver whose stream a sender report, SDES or BYE names, the sender a report block
+        // or a feedback message is about. A packet that concerns several tracks goes to each;
+        // one that concerns none (an empty receiver report, an SDES for an unknown source) is
+        // the interceptors' business alone and stops here.
+        let mut by_track: Vec<(MediaStreamTrackId, Vec<Box<dyn rtcp::Packet>>)> = vec![];
+        for rtcp_packet in &rtcp_packets {
+            let mut track_ids: Vec<MediaStreamTrackId> = vec![];
+            for ssrc in rtcp_packet.destination_ssrc() {
+                if let Some(track_id) = self.find_track_id(ssrc, None)
+                    && !track_ids.contains(&track_id)
+                {
+                    track_ids.push(track_id);
+                }
             }
-        } else {
-            debug!("drop rtcp packet due to empty ssrc");
+            for track_id in track_ids {
+                match by_track.iter_mut().find(|(id, _)| *id == track_id) {
+                    Some((_, packets)) => packets.push(rtcp_packet.clone()),
+                    None => by_track.push((track_id, vec![rtcp_packet.clone()])),
+                }
+            }
+        }
+
+        if by_track.is_empty() {
+            debug!("drop rtcp packet: it names no stream of a track");
+        }
+        for (track_id, packets) in by_track {
+            self.ctx.read_outs.push_back(TaggedRTCMessageInternal {
+                now,
+                transport: transport_context,
+                message: RTCMessageInternal::Rtp(RTPMessage::TrackPacket(TrackPacket {
+                    track_id,
+                    packet: Packet::Rtcp(packets),
+                })),
+            });
         }
 
         Ok(())
@@ -519,6 +549,10 @@ pub(crate) fn deencapsulate_rtx(
 
     true
 }
+
+#[cfg(test)]
+#[path = "endpoint_rtcp_routing_test.rs"]
+mod endpoint_rtcp_routing_test;
 
 #[cfg(test)]
 mod rtx_test {

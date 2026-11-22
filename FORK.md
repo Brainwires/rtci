@@ -95,6 +95,7 @@ history stays intact.
 | Remote-outbound round trip time over RTCP XR | `rtc-interceptor/src/report/{receiver,sender}.rs` (`RTCP_FB_RRTR`), `src/statistics/accumulator/{rtcp_reports.rs,rtp_stream/inbound.rs}`, `src/peer_connection/configuration/interceptor_registry.rs` (`configure_receiver_reference_time`) | A stream that negotiated `a=rtcp-fb:<pt> rrtr` (libwebrtc's name) gets an XR receiver reference time block with each receiver report (RFC 3611 section 4.4); the sender answers every one with a DLRR block (section 4.5), as libwebrtc does; the receiver's remote-outbound stats report `roundTripTime`, `totalRoundTripTime`, `roundTripTimeMeasurements`. |
 | ECN / L4S on RTP media and the ECN / RFC 8888 statistics | `rtc-shared/src/transport.rs` (`TransportContext::ecn`), `SettingEngineBuilder::with_ecn`, `src/peer_connection/handler/{ice,interceptor}.rs`, `rtc-interceptor/src/rfc8888/sender.rs`, `src/statistics/accumulator/{ccfb,rtcp_reports}.rs`, `configure_congestion_control_feedback` | The sans-I/O engine takes each received datagram's ECN codepoint in `TransportContext::ecn` and names the one to set on each datagram it sends. With `with_ecn(true)`, RTP media (RTX included) of a stream that negotiated `a=rtcp-fb:<pt> ack ccfb` (RFC 8888) is sent ECT(1), the L4S identifier; nothing else is marked. RFC 8888 reports carry each packet's codepoint. Stats: inbound `packetsReceivedWithEct1` / `packetsReceivedWithCe` / `packetsReportedAsLost` / `packetsReportedAsLostButRecovered`, outbound `packetsSentWithEct1`, remote-inbound `packetsReceivedWithEct1` / `packetsReceivedWithCe` / `packetsReportedAsLost` / `packetsReportedAsLostButRecovered` / `packetsWithBleachedEct1Marking`. Opt-in: off by default, TWCC stays the default feedback and the default SDP is unchanged. `tests/ecn_l4s_rtc2rtc.rs`. |
 | CI: benchmarks, fuzzing, OSS-Fuzz, git-cliff release notes | `.github/workflows/{bench,fuzz,release}.yml`, `oss-fuzz/`, `cliff.toml` | |
+| RTCP and RTX conformance fixes | `rtc-interceptor/src/report/{receiver_stream,sender_stream,sender}.rs`, `rtc-interceptor/src/nack/{generator,responder}.rs`, `src/peer_connection/handler/{endpoint,interceptor}.rs`, `src/rtp_transceiver/rtp_receiver/internal.rs` | Reception reports per RFC 3550 Appendix A.1 / A.3 (signed cumulative loss, source restart); no sender report from a stream silent for two intervals; no NACK for RTX / FEC SSRCs or after a BYE; RTX sequence numbers random and kept over a re-bind; every packet of an inbound compound RTCP packet delivered with its own track; `get_synchronization_sources` / `get_contributing_sources` filled. Rows in `docs/conformance/w4.md`. |
 
 ### Hardening (fork only)
 
@@ -136,8 +137,9 @@ reason. Today there are two:
 ### Defaults the fork widens
 
 - `register_default_interceptors` includes `KeyFrameRequestInterceptor`: an application on the
-  defaults now receives the compound RTCP packets that carry a PLI or FIR as
-  `RTCMessage::RtcpPacket` (upstream delivers no RTCP by default). Build the chain without it to
+  defaults now receives the RTCP packets of a compound packet that carries a PLI or FIR as
+  `RTCMessage::RtcpPacket`, each with the track it is about (upstream delivers no RTCP by
+  default). Build the chain without it to
   keep upstream's behaviour.
 - `register_default_interceptors` registers `configure_receiver_reference_time`: the default
   SDP offers `a=rtcp-fb:<pt> rrtr` on video, and a video stream's receiver sends RTCP XR
