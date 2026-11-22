@@ -28,6 +28,7 @@ FUZZ_CRATES=(
     rtc-datachannel
     rtc-media
     rtc-shared
+    rtc-sframe
     rtc
 )
 
