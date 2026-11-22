@@ -305,3 +305,61 @@ fn test_nonce_add_to() -> Result<()> {
 
     Ok(())
 }
+
+/// RFC 8489 section 14.3: a USERNAME is fewer than 509 bytes.
+#[test]
+fn test_username_of_509_bytes_is_refused() -> Result<()> {
+    let mut m = Message::new();
+    m.write_header();
+    TextAttribute::new(ATTR_USERNAME, "u".repeat(508)).add_to(&mut m)?;
+    let result = TextAttribute::new(ATTR_USERNAME, "u".repeat(509)).add_to(&mut m);
+    assert_eq!(result, Err(Error::ErrAttributeSizeOverflow));
+    Ok(())
+}
+
+/// RFC 8489 sections 14.9, 14.10 and 14.14: REALM, NONCE and SOFTWARE are fewer than 128
+/// characters when sent, which is at most 509 bytes.
+#[test]
+fn test_realm_nonce_and_software_are_fewer_than_128_characters() {
+    for attr in [ATTR_REALM, ATTR_NONCE, ATTR_SOFTWARE] {
+        let add = |text: String| {
+            let mut m = Message::new();
+            m.write_header();
+            TextAttribute::new(attr, text).add_to(&mut m)
+        };
+        assert!(add("x".repeat(127)).is_ok(), "{attr}");
+        assert_eq!(
+            add("x".repeat(128)),
+            Err(Error::ErrAttributeSizeOverflow),
+            "{attr}"
+        );
+        // 127 characters can take 508 bytes.
+        assert!(add("\u{1f600}".repeat(127)).is_ok(), "{attr}");
+        assert_eq!(
+            add("\u{1f600}".repeat(128)),
+            Err(Error::ErrAttributeSizeOverflow),
+            "{attr}"
+        );
+    }
+}
+
+/// RFC 8489 section 14.3: a USERNAME of up to 763 bytes is parsed, for compatibility with RFC
+/// 5389; so are a REALM, a NONCE and a SOFTWARE of that length (sections 14.9, 14.10, 14.14).
+#[test]
+fn test_text_attributes_of_763_bytes_are_parsed() -> Result<()> {
+    for attr in [ATTR_USERNAME, ATTR_REALM, ATTR_NONCE, ATTR_SOFTWARE] {
+        let text = "u".repeat(763);
+        let mut m = Message::new();
+        m.write_header();
+        m.add(attr, text.as_bytes());
+        let mut decoded = Message::new();
+        decoded.unmarshal_binary(&m.raw)?;
+        assert_eq!(TextAttribute::get_from_as(&decoded, attr)?.text, text);
+    }
+    // Not UTF-8: not a text attribute.
+    let mut m = Message::new();
+    m.write_header();
+    m.add(ATTR_USERNAME, &[0xff, 0xfe, 0xfd]);
+    assert!(TextAttribute::get_from_as(&m, ATTR_USERNAME).is_err());
+    Ok(())
+}

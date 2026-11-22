@@ -19,6 +19,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   holds a permission for (asked for or installed), as RFC 8656 sections 11.4 and 12.6 recommend.
 - **turn**: `Relay::send_to` fails with `ErrNoPermission` once a permission's 300 s have run out
   without a refresh, and with `ErrConnClosed` after `Relay::close`.
+- **stun**: `Message::decode` (and `unmarshal_binary`, `write`, `read_from`, `clone_to`) refuses
+  what RFC 8489 section 6.3 has a receiver check: a first byte with either of its top two bits
+  set, a length that is not a multiple of four, and bytes after the message the header
+  describes. `is_stun_message` is false for the first of these.
+- **stun**: `addr::AlternateServer`, `ResponseOrigin` and `OtherAddress` are types of their own
+  that encode and decode under their own attribute types (0x8023, 0x802b, 0x802c). They were
+  aliases of `MappedAddress`, so `add_to` wrote a MAPPED-ADDRESS.
+- **stun**: what is sent keeps RFC 8489's limits: a USERNAME is at most 508 bytes (was 513); a
+  REALM, NONCE or SOFTWARE is fewer than 128 characters and at most 509 bytes (was 763 bytes);
+  an ERROR-CODE has a code from 300 to 699 and a UTF-8 reason phrase of fewer than 128
+  characters. A received ERROR-CODE whose class is not 3 to 6 or whose number is over 99 is an
+  error. The default reason phrase of 401 is "Unauthenticated" (new constant
+  `CODE_UNAUTHENTICATED`).
+- **stun**: `FingerprintAttr::check` fails when FINGERPRINT is not the last attribute (RFC 8489
+  section 14.7).
+- **stun**: `MessageIntegrity::new_long_term_integrity_with_provider` and
+  `long_term_integrity_key` apply the OpaqueString profile (RFC 8265) to the user name, realm
+  and password, as RFC 8489 section 9.2.2 has it: a string the profile does not allow (a
+  control character, say) is an error, and one it normalises gives the normalised key.
+- **stun**: `Client` follows RFC 8489 section 6.2. The initial RTO is 500 ms (was 300 ms); the
+  interval doubles (it grew linearly); a request is sent 7 times (was 8) and its transaction
+  fails 16 x RTO after the last, 39.5 s by default (was 10.8 s); over
+  `TransportProtocol::TCP` a request is sent once and fails after Ti = 39.5 s;
+  `handle_timeout(t)` acts on a deadline equal to `t` (it needed a later instant, so a driver
+  that slept until `poll_timeout` made no progress) and queues the retransmission itself (it
+  was queued by `poll_event`); at most ten transactions are outstanding and a UDP message fits
+  the path MTU (548 / 1232 bytes of STUN when it is unknown), `handle_write` failing otherwise;
+  an indication starts no transaction. `with_no_retransmit` is Rc = 1.
+  `ClientBuilder::with_timeout_rate` and `with_buffer_size`, which had no effect, are
+  deprecated.
 
 ### Bug Fixes
 
@@ -65,6 +95,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not a new username (the server answers 441, RFC 8656 section 5).
 - **turn**: the `turn_client_tcp` example no longer names RFC 6062; it is a UDP allocation
   reached over TCP (RFC 8656 section 3.1).
+- **stun**: `Client` delivers a response of any length. It read into a 120-byte buffer, so a
+  132-byte Binding response (what coturn sends over IPv6) failed to decode and the transaction
+  timed out. `Message::read_from` reads its reader to the end.
+- **stun**: `Client` takes as the response only a success or error response of the request's
+  method that comes from the server (RFC 8489 section 6.3). Any message with a known
+  transaction id, a request or an indication from any address included, ended the transaction.
+- **stun**: a truncated MAPPED-ADDRESS or XOR-MAPPED-ADDRESS is an error; it decoded to an
+  address filled up with zeros. The first byte of the value is ignored (RFC 8489 section 14.1);
+  a non-zero one failed the attribute.
+- **stun**: the reserved bits of ERROR-CODE are ignored (RFC 8489 section 14.8). With one set
+  next to the class, a 438 decoded as 1238 and a stale nonce went unrecognised.
+- **stun**: `Uri`'s `Display` writes every IPv6 host in brackets; one without `::` came out as
+  `stun:2001:db8:1:2:3:4:5:6:3478`, which does not parse back.
+- **stun**: `MessageIntegrity::check` no longer rewrites the message's length field while it
+  runs, and checks by the attribute's position, whatever follows it.
 
 ### Features
 
@@ -122,6 +167,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tests/testenv_turn_client.rs`: the TURN client's Allocate options, IPv6 and dual
   allocations, 440 and 441, and a TCP allocation with a connection out and one in, against a
   real server.
+- **stun**: `rtc_stun::validated`, the receive path for every usage. `Validator` runs the
+  FINGERPRINT check (required with `require_fingerprint`; always right and last), the integrity
+  check (`authenticate`: MESSAGE-INTEGRITY-SHA256 when present, else MESSAGE-INTEGRITY;
+  `authenticate_with` for the algorithm the request used; `unauthenticated` for messages
+  without credentials) and the unknown comprehension-required attribute check
+  (`known_attributes`, `STUN_ATTRIBUTES`), and returns a `ValidatedMessage` that holds only the
+  attributes ahead of the first integrity attribute. RFC 8489 section 9 has agents ignore
+  everything after it; reading attributes off the raw `Message` after
+  `MessageIntegrity::check` does not, and an attribute appended to a genuine message was
+  obeyed. `unknown_attributes_response` builds the 420 with UNKNOWN-ATTRIBUTES. `rtc-ice` and
+  `rtc-turn` are to receive through it.
+- **stun**: MESSAGE-INTEGRITY-SHA256 (`MessageIntegritySha256`, truncation only where the usage
+  allows it), USERHASH (`userhash::Userhash`), PASSWORD-ALGORITHM and PASSWORD-ALGORITHMS
+  (`password_algorithm`), ALTERNATE-DOMAIN (`textattrs::AlternateDomain`), the SHA-256
+  long-term key (`integrity::long_term_key`), the OpaqueString profile (`opaque::opaque_string`,
+  `MessageIntegrity::short_term`) and the nonce cookie's security features
+  (`nonce_cookie::SecurityFeatures`). Checked against RFC 5769 and RFC 8489 appendix B.1.
+- **stun**: `long_term::LongTermCredentials`, the client rules of the long-term credential
+  mechanism (RFC 8489 section 9.2) without I/O: the first request carries no credentials; a
+  401 / 438 is turned into the retry's attributes (USERNAME or USERHASH, REALM, NONCE,
+  PASSWORD-ALGORITHMS, PASSWORD-ALGORITHM, the integrity attribute), or refused when the nonce
+  cookie shows PASSWORD-ALGORITHMS was stripped (bid-down), when no offered algorithm is
+  supported, or when the same credentials were just rejected; `check_response` says whether a
+  response is authenticated, a challenge, or to be discarded.
+- **stun**: `alternate::TryAlternate` reads the alternate servers and domain out of an
+  authenticated 300 (Try Alternate); `RedirectGuard` refuses a redirection to a server tried
+  within five minutes (RFC 8489 section 10).
+- **stun**: `Client` computes its RTO as RFC 6298 does (kept per server for ten minutes,
+  `with_rto_estimation`), has `with_rc`, `with_rm`, `with_ti`,
+  `with_max_outstanding_transactions`, `with_path_mtu` and `with_known_attributes`, drops a
+  response with a wrong FINGERPRINT, fails a transaction whose response has unknown
+  comprehension-required attributes or no ERROR-CODE (`StunEvent::TransactionFailed`), and with
+  `with_response_integrity` discards unauthentic responses and reports an integrity violation
+  instead of a timeout (at once over TCP), as RFC 8489 section 9.1.4 requires.
+- **stun**: `Uri::port_or_default`, `Uri::srv_query_name`, `Uri::is_secure`, `Uri::host_is_ip`,
+  and `Uri::parse_uri_strict`, which refuses a `stuns` URI with an IP address (RFC 8489 section
+  8.1; `parse_uri` keeps accepting it, as browsers do). `Message::unknown_required_attributes`.
+
+### Dependencies
+
+- **stun**: `precis-profiles` 0.2 (MIT / Apache-2.0, pure Rust) for the OpaqueString profile.
 
 ## [0.22.0+brainwires.5] - 2026-11-20
 

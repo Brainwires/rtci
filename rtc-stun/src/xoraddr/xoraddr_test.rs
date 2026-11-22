@@ -272,3 +272,46 @@ fn test_xormapped_address_string() -> Result<()> {
 
     Ok(())
 }
+
+fn message_with_attribute(t: AttrType, value: &[u8]) -> Message {
+    let mut m = Message::new();
+    m.write_header();
+    m.add(t, value);
+    m
+}
+
+/// RFC 8489 section 14.2: an X-Address is 32 bits for IPv4 and 128 bits for IPv6; a shorter
+/// value is not an address.
+#[test]
+fn test_xormapped_address_of_the_wrong_length_is_refused() {
+    let mut v6 = vec![0x00, 0x02, 0x12, 0x34];
+    v6.extend_from_slice(&[0xaa; 6]);
+    let v4_short = vec![0x00, 0x01, 0x12, 0x34, 0xaa, 0xaa];
+    let mut v4_long = vec![0x00, 0x01, 0x12, 0x34];
+    v4_long.extend_from_slice(&[0xaa; 16]);
+    for value in [v6, v4_short, v4_long] {
+        let m = message_with_attribute(ATTR_XORMAPPED_ADDRESS, &value);
+        let mut got = XorMappedAddress::default();
+        assert!(got.get_from(&m).is_err(), "{value:02x?} decoded as {got}");
+    }
+}
+
+/// RFC 8489 section 14.2: the first 8 bits are ignored by a receiver.
+#[test]
+fn test_xormapped_address_ignores_its_first_byte() -> Result<()> {
+    let mut expected = Message::new();
+    expected.write_header();
+    XorMappedAddress {
+        ip: "192.0.2.1".parse().unwrap(),
+        port: 4660,
+    }
+    .add_to(&mut expected)?;
+    let mut value = expected.attributes.0[0].value.clone();
+    value[0] = 0xff;
+
+    let m = message_with_attribute(ATTR_XORMAPPED_ADDRESS, &value);
+    let mut got = XorMappedAddress::default();
+    got.get_from(&m)?;
+    assert_eq!(got.to_string(), "192.0.2.1:4660");
+    Ok(())
+}

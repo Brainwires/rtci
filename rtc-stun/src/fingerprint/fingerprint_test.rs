@@ -72,3 +72,24 @@ fn test_fingerprint_check_bad() -> Result<()> {
 
     Ok(())
 }
+
+/// RFC 8489 section 14.7: FINGERPRINT is the last attribute; one that is followed by another
+/// attribute does not check, even when its own CRC was right for the message ahead of it.
+#[test]
+fn test_fingerprint_that_is_not_last_does_not_check() -> Result<()> {
+    let mut m = Message::new();
+    m.build(&[
+        Box::new(crate::message::BINDING_REQUEST),
+        Box::new(TransactionId([2; TRANSACTION_ID_SIZE])),
+        Box::new(FINGERPRINT),
+    ])?;
+    FINGERPRINT.check(&m)?;
+    m.add(crate::attributes::ATTR_SOFTWARE, b"late");
+    let mut received = Message::new();
+    received.unmarshal_binary(&m.raw)?;
+    assert_eq!(
+        FINGERPRINT.check(&received),
+        Err(Error::ErrFingerprintMismatch)
+    );
+    Ok(())
+}
