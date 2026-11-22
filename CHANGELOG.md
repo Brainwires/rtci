@@ -970,6 +970,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **media_engine**: the H.264 default listed twice under payload type 127 is listed once (the
   second was discarded at registration; the registered codecs do not change).
 
+- **jsep**: the bundle policy is read (RFC 9429 section 4.1.1); it was a stored value with no
+  effect. In an initial offer, `balanced` (the default, also for an unset policy) marks the
+  second and later m= section of each media type `a=bundle-only`, `max-bundle` (accepted as
+  must-bundle) every section but the first, and `max-compat` none. A bundle-only section has
+  port zero and none of the BUNDLE attributes (RFC 9143 sections 6 and 7.1.3); an answerer
+  reads its `a=rtcp-mux` and `a=rtcp-rsize` from the offerer-tagged section. Subsequent offers
+  mark nothing bundle-only (RFC 9429 section 5.2.2). Answering an offer with no BUNDLE group,
+  `balanced` accepts the first section of each type, `max-bundle` the first section, and
+  `max-compat` all of them. **The default offer changes**: a second audio or video section of
+  an initial offer now has port 0 and `a=bundle-only`.
+
+### Features
+
 - **shared**: `Error::ErrAnswerDoesNotMatchOffer(String)`.
 - **transceiver**: `RTCRtpTransceiver::remote_bandwidth()` (`RTCRemoteBandwidth`: `b=TIAS` /
   `b=AS`, `b=RS`, `b=RR` of the remote media section, RFC 9429 section 5.10),

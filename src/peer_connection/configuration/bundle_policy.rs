@@ -56,7 +56,8 @@ pub enum RTCBundlePolicy {
     ///
     /// **Use when:** Connecting to peers that may not support bundling
     ///
-    /// **In this engine:** behaves as [`MaxBundle`](Self::MaxBundle) (one transport).
+    /// **In this engine:** the default. In an initial offer the second and later m= section
+    /// of each media type is `a=bundle-only`; every section shares one transport.
     #[serde(rename = "balanced")]
     Balanced = 1,
 
@@ -68,7 +69,8 @@ pub enum RTCBundlePolicy {
     ///
     /// **Use when:** Maximum compatibility with legacy systems is required
     ///
-    /// **In this engine:** behaves as [`MaxBundle`](Self::MaxBundle) (one transport).
+    /// **In this engine:** no m= section is `a=bundle-only`, but there is one transport:
+    /// every section carries the same ICE credentials.
     #[serde(rename = "max-compat")]
     MaxCompat = 2,
 
