@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **rtcp**: `configure_rtcp_reports` (and so `register_default_interceptors`) builds the RTCP
+  session with a `T_rr_interval` of zero, the RFC 4585 section 4.2 default when no `trr-int`
+  is signalled: regular reports are spaced by the RTCP bandwidth (5% of the session's, RFC
+  3550 section 6.2), no longer at least a second apart. The browsers' one second is
+  `configure_rtcp_reports_with(registry, RtcpSessionBuilder::new())`.
+
 - **jsep**: answers and subsequent offers carry the BUNDLE attributes (`a=ice-ufrag`,
   `a=ice-pwd`, `a=setup`, a media-level `a=fingerprint`, `a=rtcp-mux`, `a=rtcp-mux-only`,
   `a=rtcp-rsize`, candidates) in the tagged m= section only, as RFC 9143 section 7.1.3
