@@ -2363,6 +2363,11 @@ impl Agent {
                 return true;
             }
             let is_success = m.typ.class == CLASS_SUCCESS_RESPONSE;
+            if is_success && !m.contains(stun::attributes::ATTR_XORMAPPED_ADDRESS) {
+                // RFC 8489 Section 6.3.3: a Binding success response without
+                // XOR-MAPPED-ADDRESS fails the client's checks; discarded, no consent.
+                return true;
+            }
             if let Some(previous) = &mut self.previous_generation {
                 previous.pending.remove(position);
                 if is_success {
