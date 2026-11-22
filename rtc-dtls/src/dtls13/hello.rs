@@ -265,18 +265,34 @@ pub(crate) fn negotiate(
 
     // RFC 8446 section 4.4.3: a scheme the client lists, valid for TLS 1.3, that the
     // certificate's key can sign with. In this server's order of preference.
-    let certificate = cfg
+    let named = cfg
         .get_certificate(&server_name)
         .map_err(|error| refuse(alert::HANDSHAKE_FAILURE, error))?;
-    let signature_scheme = cfg
-        .local_signature_schemes
+    let scheme_for = |certificate: &Certificate| {
+        cfg.local_signature_schemes
+            .iter()
+            .find(|scheme| {
+                scheme.is_tls13_signature()
+                    && schemes.contains(&scheme.scheme_code())
+                    && scheme.is_compatible(&certificate.private_key)
+            })
+            .copied()
+    };
+    // RFC 8446 section 4.4.2.2: the chain is one signed with algorithms the client lists,
+    // if this server has one (the certificate for the name first, then its others); if it
+    // has none, the handshake goes on with a chain whose key the client can verify with,
+    // and the client decides.
+    let client_pairs: Vec<SignatureHashAlgorithm> = schemes
         .iter()
-        .find(|scheme| {
-            scheme.is_tls13_signature()
-                && schemes.contains(&scheme.scheme_code())
-                && scheme.is_compatible(&certificate.private_key)
+        .map(|code| SignatureHashAlgorithm::from_scheme_code(*code))
+        .collect();
+    let candidates = || std::iter::once(&named).chain(cfg.local_certificates.iter());
+    let (certificate, signature_scheme) = candidates()
+        .filter(|certificate| {
+            crate::crypto::certificates_signed_within(&certificate.certificate, &client_pairs)
         })
-        .copied()
+        .chain(candidates())
+        .find_map(|certificate| scheme_for(certificate).map(|scheme| (certificate.clone(), scheme)))
         .ok_or_else(|| {
             refuse(
                 alert::HANDSHAKE_FAILURE,
@@ -284,23 +300,28 @@ pub(crate) fn negotiate(
             )
         })?;
 
-    // RFC 5764 section 4.1.1: a server that does DTLS-SRTP and shares no profile with the
-    // client refuses; one that does not do it ignores the extension.
+    // RFC 5764 section 4.1.1: a server that does not do DTLS-SRTP ignores the extension.
     let mut srtp_profile = SrtpProtectionProfile::Unsupported;
     if let Some(data) = hello.extension(EXT_USE_SRTP)
         && !cfg.local_srtp_protection_profiles.is_empty()
     {
         let (profiles, _mki) = parse_use_srtp(data).map_err(decode_error)?;
-        srtp_profile = profiles
+        match profiles
             .iter()
             .map(|profile| SrtpProtectionProfile::from(*profile))
             .find(|profile| cfg.local_srtp_protection_profiles.contains(profile))
-            .ok_or_else(|| {
-                refuse(
+        {
+            Some(profile) => srtp_profile = profile,
+            // As in DTLS 1.2: without a shared profile the association goes on without
+            // SRTP unless the configuration requires it.
+            None if cfg.use_srtp_required => {
+                return Err(refuse(
                     alert::INSUFFICIENT_SECURITY,
                     Error::ErrServerNoMatchingSrtpProfile,
-                )
-            })?;
+                ));
+            }
+            None => {}
+        }
     }
 
     let client_connection_id = match hello.extension(EXT_CONNECTION_ID) {

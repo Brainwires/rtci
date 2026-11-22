@@ -1592,7 +1592,9 @@ fn a_transport_reports_the_session_it_negotiated() -> Result<()> {
             "{transport}"
         );
         assert_eq!(transport["dtlsState"], "connected");
-        assert_eq!(transport["tlsVersion"], "FEFD", "DTLS 1.2");
+        // Two peers of this engine negotiate DTLS 1.3 ({254, 252}): the media counted
+        // below went through SRTP keyed from its exporter.
+        assert_eq!(transport["tlsVersion"], "FEFC", "DTLS 1.3");
         assert_eq!(
             transport["iceLocalUsernameFragment"],
             sdp_attribute(&sdp[i], "ice-ufrag").as_str()
@@ -1608,8 +1610,8 @@ fn a_transport_reports_the_session_it_negotiated() -> Result<()> {
     assert_eq!(transports[0]["srtpCipher"], transports[1]["srtpCipher"]);
     let dtls_cipher = transports[0]["dtlsCipher"].as_str().expect("dtlsCipher");
     assert!(
-        dtls_cipher.starts_with("TLS_") && dtls_cipher.contains("_WITH_"),
-        "an IANA TLS cipher suite name: {dtls_cipher}"
+        dtls_cipher.starts_with("TLS_AES_") || dtls_cipher.starts_with("TLS_CHACHA20_"),
+        "an IANA TLS 1.3 cipher suite name: {dtls_cipher}"
     );
     let srtp_cipher = transports[0]["srtpCipher"].as_str().expect("srtpCipher");
     assert!(

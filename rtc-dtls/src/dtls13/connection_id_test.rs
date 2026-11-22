@@ -302,3 +302,24 @@ fn an_association_follows_its_peer_to_a_new_address_only_for_a_newer_authentic_r
     }
     Ok(())
 }
+
+/// RFC 9147 section 9: an excessive number of RequestConnectionId messages ends the
+/// association with too_many_cids_requested.
+#[test]
+fn an_excessive_number_of_connection_id_requests_is_refused() -> Result<()> {
+    let mut pair = pair(Some(4), Some(4))?;
+    for request in 0..=super::conn::MAX_CONNECTION_ID_REQUESTS {
+        let now = pair.now;
+        pair.client.request_connection_ids(now, server_addr(), 1)?;
+        pair.run();
+        let excessive = request == super::conn::MAX_CONNECTION_ID_REQUESTS;
+        assert_eq!(
+            pair.server.is_connection_failed(&client_addr()),
+            excessive,
+            "request {request}"
+        );
+        // The alert is protected; that it was fatal shows at the client.
+        assert_eq!(pair.client.is_connection_failed(&server_addr()), excessive);
+    }
+    Ok(())
+}

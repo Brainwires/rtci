@@ -695,7 +695,12 @@ impl Endpoint {
             // Two associations for this address (RFC 6347 4.2.8). An epoch-0 record is the new
             // handshake's. A protected one is whichever association's keys open it: the
             // established one is asked first, so that its traffic goes on undisturbed.
-            let plaintext = data.get(3..5) == Some(&[0, 0][..]);
+            // (A DTLS 1.3 protected record has no epoch field there: its first byte says
+            // what it is.)
+            let plaintext = data.get(3..5) == Some(&[0, 0][..])
+                && !data
+                    .first()
+                    .is_some_and(|first| crate::dtls13::record::is_unified_header(*first));
             if !plaintext {
                 let authenticated = |endpoint: &Self| {
                     endpoint

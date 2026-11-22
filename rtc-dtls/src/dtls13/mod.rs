@@ -8,6 +8,8 @@
 
 pub(crate) mod codec;
 pub(crate) mod conn;
+#[cfg(any(fuzzing, test))]
+pub(crate) mod fuzz_harness;
 pub(crate) mod handshake;
 pub(crate) mod hello;
 pub(crate) mod key_schedule;
@@ -17,6 +19,8 @@ pub(crate) mod suite;
 
 #[cfg(test)]
 mod connection_id_test;
+#[cfg(test)]
+mod fuzz_corpus_test;
 #[cfg(test)]
 mod handshake_test;
 #[cfg(test)]

@@ -53,6 +53,12 @@ const MAX_SENT_RECORDS: usize = 512;
 const MAX_ACK_RECORDS: usize = 64;
 /// The most protected records held because their keys are not there yet.
 const MAX_EARLY_RECORDS: usize = 16;
+/// The most RequestConnectionId messages an association answers (RFC 9147 section 9): one
+/// more is an excessive number, and ends it with too_many_cids_requested.
+pub(crate) const MAX_CONNECTION_ID_REQUESTS: u32 = 32;
+/// How many times the current timer value a quiet period lasts before the retransmission
+/// timer goes back to its initial value (RFC 9147 section 5.8.2: no less than 10).
+const IDLE_TIMER_RESET_FACTOR: u32 = 10;
 /// The most spare connection ids kept from the peer's NewConnectionId messages.
 const MAX_SPARE_CONNECTION_IDS: usize = 8;
 
@@ -65,6 +71,9 @@ pub(crate) enum HandshakeState {
     ClientWaitCertificate,
     ClientWaitCertificateVerify,
     ClientWaitFinished,
+    /// The client has sent its certificate and Finished and waits to learn that the server
+    /// took them: the ACK of that flight, or anything under the server's application keys.
+    ClientWaitConfirmation,
     ServerWaitClientHello,
     ServerWaitCertificate,
     ServerWaitCertificateVerify,
@@ -312,6 +321,12 @@ pub(crate) struct Conn13 {
     /// meanwhile.
     key_update_requested_by_peer: bool,
     connection_id_request_outstanding: bool,
+    connection_id_requests_received: u32,
+    /// When a flight was last sent, answered or acknowledged.
+    last_flight_activity: Option<Instant>,
+    flight_activity: bool,
+    /// How many records were discarded as invalid: malformed, or failing authentication.
+    pub(crate) invalid_records: u64,
 
     // The client's hello, until the server has answered it.
     pub(crate) offer: Option<ClientOffer>,
@@ -399,6 +414,10 @@ impl Conn13 {
             fatal_alert_sent: None,
             key_update_requested_by_peer: false,
             connection_id_request_outstanding: false,
+            connection_id_requests_received: 0,
+            last_flight_activity: None,
+            flight_activity: false,
+            invalid_records: 0,
             offer: None,
             client_hello: vec![],
             hello_retry_seen: false,
@@ -841,10 +860,12 @@ impl Conn13 {
     }
 
     fn on_flight_acknowledged(&mut self, kind: FlightKind) {
+        self.flight_activity = true;
         match kind {
             FlightKind::Handshake => {}
             FlightKind::ClientFinal => {
                 debug!("client: final flight acknowledged");
+                self.confirm();
                 // Nothing of the handshake epoch is sent or expected any more.
                 self.drop_write_epoch(EPOCH_HANDSHAKE);
                 self.drop_read_epoch(EPOCH_HANDSHAKE);
@@ -960,6 +981,29 @@ impl Conn13 {
             }
         }
 
+        // RFC 9147 section 5.8.2: after a quiet period of ten times the timer's value, the
+        // backed-off timer goes back to where it starts.
+        let idle = self
+            .flight
+            .iter()
+            .chain(self.post_handshake.iter())
+            .all(|flight| flight.timer.is_none() && flight.retransmissions == 0);
+        if idle
+            && !self.flight_activity
+            && self.last_flight_activity.is_some_and(|last| {
+                now.saturating_duration_since(last)
+                    >= self.retransmit_interval * IDLE_TIMER_RESET_FACTOR
+            })
+        {
+            self.retransmit_interval = self.cfg.retransmit_interval;
+        }
+        if std::mem::take(&mut self.flight_activity)
+            || self.flight.is_some()
+            || !self.post_handshake.is_empty()
+        {
+            self.last_flight_activity = Some(now);
+        }
+
         let interval = self.retransmit_interval;
         for flight in self.flight.iter_mut().chain(self.post_handshake.iter_mut()) {
             if std::mem::take(&mut flight.arm) {
@@ -1046,6 +1090,7 @@ impl Conn13 {
                 self.transmit(&mut flight)?;
             }
             if flight.kind == FlightKind::ClientFinal
+                && self.state == HandshakeState::Established
                 && flight.retransmissions > self.cfg.maximum_retransmit_number
             {
                 // The handshake is complete for this client and nothing has acknowledged
@@ -1105,6 +1150,7 @@ impl Conn13 {
                     // RFC 9147 sections 4.1 and 4.5.2: an invalid record is discarded, and
                     // with it what follows, which cannot be delimited.
                     debug!("discarded {} bytes of a datagram: {err}", rest.len());
+                    self.note_invalid_record();
                     break;
                 }
             };
@@ -1242,6 +1288,10 @@ impl Conn13 {
                     // AEAD's limit the association is closed.
                     read.failures += 1;
                     let failures = read.failures;
+                    self.note_invalid_record();
+                    if self.failed {
+                        return Ok(());
+                    }
                     if failures >= integrity_limit {
                         warn!("too many records failed authentication in epoch {epoch}");
                         self.fail();
@@ -1279,6 +1329,11 @@ impl Conn13 {
         read.next_expected = read.next_expected.max(sequence + 1);
         self.authenticated_records += 1;
         self.peer_uses_keys = true;
+        if epoch >= EPOCH_APPLICATION {
+            // A server protects nothing under its application keys before it has taken the
+            // client's Finished.
+            self.confirm();
+        }
         if epoch > EPOCH_APPLICATION {
             // RFC 9147 section 8: the keys before an update are kept until a record under
             // the new ones has been read.
@@ -1348,6 +1403,26 @@ impl Conn13 {
                 alert::UNEXPECTED_MESSAGE,
                 Error::ErrInvalidContentType,
             )),
+        }
+    }
+
+    /// RFC 9147 section 5.10: a peer that keeps sending records that are not valid is
+    /// given up on, where the configuration sets a limit
+    /// ([`ConfigBuilder::with_invalid_record_limit`](crate::config::ConfigBuilder::with_invalid_record_limit)).
+    /// The local state goes without an alert: whoever sends such records is not known to be
+    /// the peer.
+    fn note_invalid_record(&mut self) {
+        self.invalid_records += 1;
+        if self
+            .cfg
+            .invalid_record_limit
+            .is_some_and(|limit| self.invalid_records > limit)
+        {
+            warn!(
+                "dtls 1.3: {} invalid records, over the configured limit",
+                self.invalid_records
+            );
+            self.fail();
         }
     }
 
@@ -1591,6 +1666,18 @@ impl Conn13 {
         if !self.closed {
             self.closed = true;
             self.send_alert(alert::CLOSE_NOTIFY);
+        }
+    }
+
+    /// A client that authenticated itself learns that the server accepted it: only now is
+    /// its handshake complete. Until the server has verified the client's certificate it
+    /// can still refuse it, and a client that reported completion at its own Finished would
+    /// report a connection the server never had.
+    fn confirm(&mut self) {
+        if self.state == HandshakeState::ClientWaitConfirmation
+            && let Err(err) = self.establish()
+        {
+            warn!("dtls 1.3 client: {err}");
         }
     }
 
@@ -1860,6 +1947,15 @@ impl Conn13 {
                     return Err(unexpected());
                 }
                 let count = parse_request_connection_id(body)?;
+                // RFC 9147 section 9: an excessive number of requests may be answered with
+                // too_many_cids_requested.
+                self.connection_id_requests_received += 1;
+                if self.connection_id_requests_received > MAX_CONNECTION_ID_REQUESTS {
+                    return Err(refuse(
+                        alert::TOO_MANY_CIDS_REQUESTED,
+                        Error::Other("too many RequestConnectionId messages".to_owned()),
+                    ));
+                }
                 // As many as asked for, up to what this side cares to track; none when a
                 // NewConnectionId of ours is still unacknowledged.
                 let count = usize::from(count).min(MAX_SPARE_CONNECTION_IDS);

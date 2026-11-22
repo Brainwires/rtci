@@ -331,6 +331,17 @@ async fn test_data_channel_create_rtc_to_webrtc() -> Result<()> {
                     "RTC should have received the echoed message from WebRTC"
                 );
 
+                // The webrtc 0.17 peer speaks DTLS 1.2 only: the offer of DTLS 1.3 in the
+                // same ClientHello falls back to it (RFC 9147 section 5.3).
+                let stats = rtc_pc.get_stats(Instant::now(), rtc::statistics::StatsSelector::None);
+                assert_eq!(
+                    stats
+                        .transport()
+                        .map(|transport| transport.tls_version.as_str()),
+                    Some("FEFD"),
+                    "DTLS 1.2 with a peer that has no DTLS 1.3"
+                );
+
                 webrtc_pc.close().await?;
                 rtc_pc.close()?;
                 return Ok(());
