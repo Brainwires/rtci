@@ -98,6 +98,7 @@ history stays intact.
 | The TURN client's RFC 8656 Allocate options, dual allocation and ICMP | `rtc-turn/src/client/allocation.rs` (`AllocateOptions`, `Client::allocate_with`), `rtc-turn/src/client/relay.rs` (`Relay::{relayed_addrs, mapped_addr, release_family, send_to_dont_fragment}`), `rtc-turn/src/proto/{addfamily,addrerror,icmp}.rs` | REQUESTED-ADDRESS-FAMILY, ADDITIONAL-ADDRESS-FAMILY (two relayed addresses on one allocation), ADDRESS-ERROR-CODE, LIFETIME, DONT-FRAGMENT (with the 420 fallback), EVEN-PORT / RESERVATION-TOKEN, SOFTWARE on every request, the ICMP attribute as `Event::IcmpError`. A 300 is reported with its ALTERNATE-SERVER, not followed: the application owns the socket and chooses the server. Upstream's client sends REQUESTED-TRANSPORT only. |
 | TCP allocations in the TURN client (RFC 6062) | `rtc-turn/src/client/data_connection.rs` (`DataConnection`), `rtc-turn/src/client/relay.rs` (`Relay::{connect, data_connection}`), `rtc-turn/src/client/allocation.rs` (`RelayTransport`), `rtc-turn/src/proto/connid.rs` | Client side, sans-I/O: the application opens the TCP connections, the client drives Allocate (REQUESTED-TRANSPORT TCP), Connect and ConnectionAttempt on the control connection, and a `DataConnection` per peer sends ConnectionBind and then passes the bytes as they are. ICE gathers no relayed TCP candidate from it. Upstream has the code points only. |
 | STUN as RFC 8489 has it, and a receive path that shows only authenticated attributes | `rtc-stun/src/{validated,long_term,nonce_cookie,password_algorithm,userhash,opaque,alternate,integrity,client}.rs` | `rtc_stun::validated` (`Validator`, `ValidatedMessage`): FINGERPRINT, MESSAGE-INTEGRITY(-SHA256) and unknown comprehension-required attributes checked in one place, and only the attributes ahead of the integrity attribute readable afterwards. MESSAGE-INTEGRITY-SHA256, USERHASH, PASSWORD-ALGORITHM(S), ALTERNATE-DOMAIN, OpaqueString (`precis-profiles`), the nonce cookie and bid-down protection (`LongTermCredentials`), 300 (Try Alternate) data with the loop rule, and the retransmission timer of section 6.2 in `Client` (doubling RTO, Rc, Rm, Ti, RFC 6298 estimate, ten outstanding transactions, path MTU). Upstream follows RFC 5389, reads attributes wherever they sit, and its client truncates responses over 120 bytes and backs off linearly. |
+| The TURN client as a STUN client of RFC 8489 | `rtc-turn/src/client/{mod,credential,transaction,allocation,relay,data_connection,error}.rs` (`Response`, `Credential`, `TransactionMap`, `RetransmissionConfig`, `Client::follow_alternate`, `ErrorResponse::try_alternate`), `rtc-stun/src/timer.rs` | Every received message goes through `rtc_stun::validated::Validator` and only the validated attributes are read; the long-term credential is `rtc_stun::long_term::LongTermCredentials` (SHA-256 password algorithm, USERHASH, nonce cookie and bid-down protection, MESSAGE-INTEGRITY-SHA256, the retry rules of section 9.2.5, integrity violations told from timeouts); requests go out on the section 6.2 timer shared with `rtc-stun` (500 ms, doubling, Rc 7, Rm 16, Ti over TCP, RFC 6298 estimate, ten outstanding transactions, configurable); a 300 is reported, and an application that follows it gets the loop and authentication rules of section 10. Upstream's client follows RFC 5389 with MD5 only, reads attributes wherever they sit, and retransmits from 200 ms up to 1600 ms for 7.8 s. |
 | CI: benchmarks, fuzzing, OSS-Fuzz, git-cliff release notes | `.github/workflows/{bench,fuzz,release}.yml`, `oss-fuzz/`, `cliff.toml` | |
 
 ### Hardening (fork only)
@@ -125,6 +126,16 @@ request restores it. Only a sender that passes the server-address filter can do 
 cannot release the allocation or forge any other response. An unsigned 401 or 438 to a
 permission refresh ends that refresh only: the permissions keep the time the server last
 granted and are asked for again.
+
+The same goes for what RFC 8489 section 9.2.5 has a client take from an unsigned 401 or 438:
+the realm (a 401 naming another realm is answered with the key for that realm, once per
+request, and the server's own 401 on that retry restores the realm), the password algorithm
+among those the client accepts (`ClientConfig::password_algorithms` leaves MD5 out for a
+deployment that never needs it) and whether the user name goes hashed (the nonce cookie that
+says so is not authenticated, so a sender that passes the server-address filter can have the
+user name sent in the clear, as it is to any RFC 5389 server). The one downgrade the RFC does
+guard, PASSWORD-ALGORITHMS stripped from a response whose nonce cookie announces it, is
+refused.
 
 Also as the RFC has it: a success response to the first, unauthenticated Allocate is an
 allocation (RFC 8656 section 7.2 step 1 lets a server ask for no credential). Nothing can sign
