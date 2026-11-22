@@ -301,6 +301,7 @@ impl RTCRtpReceiverInternal {
         header: &rtp::Header,
         audio_level: Option<u8>,
         csrc_levels: Option<&[u8]>,
+        vad: bool,
     ) {
         let timestamp = wall_clock.unix(now);
         let live = |source: &RTCRtpContributingSource| {
@@ -311,12 +312,16 @@ impl RTCRtpReceiverInternal {
             source,
             audio_level,
             rtp_timestamp: header.timestamp,
+            voice_activity_flag: None,
         };
 
         self.synchronization_sources
             .retain(|source| source.source != header.ssrc && live(source));
-        self.synchronization_sources
-            .push(entry(header.ssrc, audio_level.map(linear_audio_level)));
+        self.synchronization_sources.push(RTCRtpContributingSource {
+            // RFC 6464 section 3: the V bit is the level octet's high bit.
+            voice_activity_flag: audio_level.filter(|_| vad).map(|level| level & 0x80 != 0),
+            ..entry(header.ssrc, audio_level.map(linear_audio_level))
+        });
         let csrc_levels = csrc_levels.filter(|levels| levels.len() == header.csrc.len());
 
         self.contributing_sources

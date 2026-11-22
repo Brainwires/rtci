@@ -173,6 +173,21 @@ impl KeySchedule {
         self.derive_secret(crypto, self.current.as_ref(), label, &empty_hash)
     }
 
+    /// `client_early_traffic_secret = Derive-Secret(Early Secret, "c e traffic", ClientHello)`
+    /// (RFC 8446 section 7.1): the keys of 0-RTT data, epoch 1 (RFC 9147 section 6.1).
+    pub(crate) fn client_early_traffic_secret(
+        &self,
+        crypto: &dyn RTCCrypto,
+        client_hello_hash: &[u8],
+    ) -> Result<SecretVec> {
+        self.derive_secret(
+            crypto,
+            self.current.as_ref(),
+            "c e traffic",
+            client_hello_hash,
+        )
+    }
+
     /// Moves from the current secret to the next one in the chain:
     /// `HKDF-Extract(Derive-Secret(current, "derived", ""), input)`.
     fn advance(&mut self, crypto: &dyn RTCCrypto, input: &[u8]) -> Result<()> {

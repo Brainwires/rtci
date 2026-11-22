@@ -27,6 +27,9 @@ pub struct DelayTrend {
 pub struct SlopeEstimator {
     groups: ArrivalGroupAccumulator,
     kalman: Kalman,
+    /// When the last group closed departed, for the group period the filter's noise weight
+    /// follows (draft-ietf-rmcat-gcc-02 section 5.3, `f_max`).
+    last_departure: Option<Instant>,
 }
 
 impl SlopeEstimator {
@@ -40,6 +43,7 @@ impl SlopeEstimator {
         Self {
             groups: ArrivalGroupAccumulator::new(burst_interval),
             kalman: Kalman::new(),
+            last_departure: None,
         }
     }
 
@@ -61,9 +65,13 @@ impl SlopeEstimator {
     }
 
     fn filter(&mut self, delay: InterGroupDelay) -> DelayTrend {
+        let period_ms = self.last_departure.map_or(0.0, |last| {
+            delay.at.saturating_duration_since(last).as_secs_f64() * 1_000.0
+        });
+        self.last_departure = Some(delay.at);
         DelayTrend {
             measurement_ms: delay.delta_ms,
-            estimate_ms: self.kalman.update(delay.delta_ms),
+            estimate_ms: self.kalman.update_with_period(delay.delta_ms, period_ms),
             at: delay.at,
             size: delay.size,
         }

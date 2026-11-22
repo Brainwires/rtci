@@ -1255,12 +1255,37 @@ mod tests {
             .is_some_and(State::resumed)
     }
 
-    /// The extension types of the ClientHello that starts `datagram` (an unfragmented one in
-    /// the first plaintext record), read field by field (RFC 6347 section 4.2.2).
-    fn client_hello_extensions(datagram: &[u8]) -> Vec<u16> {
-        assert_eq!(datagram[0], 22, "a handshake record");
-        assert_eq!(datagram[13], 1, "a ClientHello");
-        let body = &datagram[13 + 12..];
+    /// The extension types of the first ClientHello in `datagrams`, put together from its
+    /// fragments (with the hybrid post-quantum key share it takes two records) and read field
+    /// by field (RFC 6347 section 4.2.2).
+    fn client_hello_extensions(datagrams: &[bytes::BytesMut]) -> Vec<u16> {
+        let mut body: Option<Vec<u8>> = None;
+        let mut received = 0;
+        'datagrams: for datagram in datagrams {
+            let mut rest = &datagram[..];
+            while rest.len() >= 13 + 12 {
+                let length = usize::from(u16::from_be_bytes([rest[11], rest[12]]));
+                let record = &rest[13..13 + length];
+                rest = &rest[13 + length..];
+                let u24 = |at: usize| {
+                    (usize::from(record[at]) << 16)
+                        | (usize::from(record[at + 1]) << 8)
+                        | usize::from(record[at + 2])
+                };
+                if record.first() != Some(&1) || record[4..6] != [0, 0] {
+                    continue;
+                }
+                let (total, offset, fragment_length) = (u24(1), u24(6), u24(9));
+                let whole = body.get_or_insert_with(|| vec![0; total]);
+                whole[offset..offset + fragment_length]
+                    .copy_from_slice(&record[12..12 + fragment_length]);
+                received += fragment_length;
+                if received >= total {
+                    break 'datagrams;
+                }
+            }
+        }
+        let body = body.expect("a ClientHello");
         let mut at = 2 + 32;
         at += 1 + usize::from(body[at]); // session_id
         at += 1 + usize::from(body[at]); // cookie
@@ -1362,7 +1387,7 @@ mod tests {
             RTCDtlsTransportState::Connected
         );
         assert!(!handler_resumed(&pair));
-        let extensions = client_hello_extensions(&pair.sent[0]);
+        let extensions = client_hello_extensions(&pair.sent);
         assert!(
             extensions.contains(&43),
             "supported_versions: a DTLS 1.3 offer"

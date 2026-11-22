@@ -9,6 +9,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **jsep**: small rules.
+  - `RTCRtpSender::write_rtp` takes out the header extension elements whose id is not
+    negotiated for the sender (RFC 8285 section 4.1.2); they were passed through. New
+    `SettingEngineBuilder::with_unnegotiated_header_extensions(true)` passes them through.
+  - A remote description with `a=extmap` lines at both session and media level is refused
+    (`SdpInvalidValue`, RFC 8285 section 5).
+  - A remote `a=simulcast` line that does not parse (a rid-id or a direction twice, RFC 8853
+    section 5.2) refuses the description (RFC 9429 section 5.8); it was ignored.
+  - `RTCRtpContributingSource` has a new public field `voice_activity_flag`: the V bit of the
+    client-to-mixer audio level on a synchronization source, `None` when the extension was
+    negotiated `vad=off` (RFC 6464 sections 3, 4).
+- **jsep**: description rules.
+  - Lip synchronization groups (RFC 5888 section 7, RFC 9429 sections 5.2.1, 5.2.2, 5.3.1):
+    an offer has `a=group:LS` for each stream more than one transceiver is associated with,
+    and keeps the groups of the most recent answer; an answer keeps an offered group's
+    transceivers that share a stream or have none, when there are two. New
+    `RTCPeerConnection::remote_lip_sync_groups`.
+  - Default destination (RFC 8839 section 4.2.1.2, RFC 9429 sections 5.2.1 to 5.3.2): once
+    there are local candidates the `m=` port and `c=` address are the default candidate's
+    (relayed, else server-reflexive, else host; never an mDNS name), shared by every bundled
+    section that is not bundle-only (RFC 9143 section 7.2); a new section of an offer says
+    `a=rtcp:9 IN IP4 0.0.0.0` (or the default candidate's), and no other description has
+    `a=rtcp`. Descriptions with candidates differ from before.
+  - A minted local SSRC is drawn again while a remote description mentions it or another
+    local stream has it (RFC 5576 sections 5, 8).
+- **jsep**: codec parameters, the rest.
+  - H.265 formats match by their configuration (RFC 7798 section 7.2.2: `profile-space`,
+    `profile-id`, `tier-flag`, `interop-constraints`, `profile-compatibility-indicator` and
+    `tx-mode`, each with its section 7.1 default; `level-id` and the `sprop-*` parameters do
+    not count), and an answer's `level-id` is not above the offer's. The default H.265 format
+    states `level-id=93;profile-id=1;tier-flag=0;tx-mode=SRST`, so an offer of Main 10 or of
+    MRST / MRMT is no longer answered with it.
+  - H.264: a `packetization-mode` other than 0, 1 or 2 matches no format and has no payloader
+    (it was sent as mode 1). New `RTCRtpCodec::h264_depacketizer` (mode 2 de-interleaving
+    from `sprop-interleaving-depth` / `sprop-max-don-diff`), `h265_depacketizer` (DONL and
+    the de-packetization buffer from `sprop-max-don-diff` / `sprop-depack-buf-nalus`; SRST
+    only) and `sprop_parameter_sets` (the decoded `sprop-parameter-sets`, `sprop-vps` /
+    `sprop-sps` / `sprop-pps` / `sprop-sei`).
+  - `a=ptime` / `a=maxptime` (RFC 8866 sections 6.4, 6.5; Opus's `ptime` / `maxptime`, RFC
+    7587 section 7): written in audio sections when set with the new
+    `MediaEngine::set_audio_packet_time(RTCPacketTime)`, and the remote side's read into
+    `RTCRtpTransceiver::remote_packet_time`.
+  - `ccm tmmbr smaxpr=<n>` (RFC 5104 section 7.2) is answered as `ccm tmmbr` with the higher
+    `smaxpr` of the two sides, and without `smaxpr` when the offer has none (an offer with
+    `smaxpr` lost TMMBR before).
+  - `a=rtcp-xr` (RFC 3611 section 5): an offer whose video formats take receiver reference
+    times (`configure_receiver_reference_time`, part of the default interceptors) says
+    `a=rtcp-xr:rcvr-rtt=all` beside `a=rtcp-fb:<pt> rrtr`, so default video offers have one
+    more line. A remote `a=rtcp-xr:rcvr-rtt=<mode>` negotiates them as the `rrtr` feedback
+    does; a remote `a=rtcp-xr` that does not list `rcvr-rtt` turns them off whatever its
+    `a=rtcp-fb` lines say (section 5.1). An answer to an offer with the attribute states the
+    offered mode it takes, or an empty `a=rtcp-xr:` (section 5.2); a session-level attribute
+    applies to sections without their own.
+- **jsep**: ICE options. Every description says `a=ice-options:trickle ice2` (a lite agent
+  `ice2`; RFC 8445 section 10), so the line differs from before. A Ta configured with the new
+  `SettingEngineBuilder::with_ice_pacing` (it was not reachable before) is proposed as
+  `a=ice-pacing` (RFC 8839 section 5.5) when it is not the default, and the peer's
+  `a=ice-pacing` reaches the ICE agent, which uses the higher value (RFC 8445 section 14.2).
+  New `RTCPeerConnection::remote_ice_options`.
 - **rtp header extension control** (webrtc-extensions 4): `RTCRtpTransceiver::
   set_header_extensions_to_negotiate` takes a `Vec<RTCRtpHeaderExtensionToNegotiate>` (uri and
   direction, "stopped" for not negotiated) and returns a `Result`: an InvalidModificationError
@@ -988,6 +1047,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with `T_rr_interval` zero spends its RTCP share). The TWCC and RFC 8888 generators' cadence
   reads the same nominal figure. A `Gcc` sender fed by the engine's receiver reaches 2 Mbit/s
   from 300 kbit/s in 0.24 s (0.58 s before).
+- **ecn**: ECN is initiated and watched as RFC 8888 section 7 requires (RFC 6679 sections
+  7.2-7.4). With `SettingEngineBuilder::with_ecn(true)` and `ack ccfb` negotiated, a stream
+  no longer sends every packet ECT(1) from the first: one packet in ten (and one at least every
+  500 ms) is an ECT(1) probe until the RFC 8888 feedback shows two arrived ECT or CE, then every
+  packet is ECT(1). A probe reported Not-ECT, or more than three lost with none received, fails
+  the initiation (retried after 60 s); in use, a path that clears the ECN field stops the
+  marking, and a high loss of ECT packets sends Not-ECT to compare, initiating again when the
+  loss went with the marking (the second time ECN stays off for the stream). New
+  `rtc_interceptor::{EcnValidation, EcnState, EcnInitiation}` and
+  `SettingEngineBuilder::with_ecn_initiation` (`EcnInitiation::LeapOfFaith`, RFC 6679 section
+  7.2.3, marks from the first packet as browsers sending L4S do; failure detection still
+  applies). `packetsWithBleachedEct1Marking` counts only packets that were sent ECT(1).
+- **rfc8888**: an RTX packet is reported under the RTX SSRC and the sequence number it arrived
+  with (sections 3.1 and 6), read from `Attribute::Retransmitted`; it was reported as the
+  original packet it is rewritten into before the chain, which told the sender a lost packet
+  had arrived, at the retransmission's arrival time.
+- **jsep**: offered both `ack ccfb` and `nack ecn`, an answer keeps `ack ccfb` only (RFC 8888
+  section 7). New `RTCP_FB_NACK_ECN`.
+- **rtcp_session**: congestion control feedback (TWCC, RFC 8888) leaves as its generator
+  builds it, outside RFC 4585's one Early packet per regular interval and outside the
+  regular reports' timing (`RtcpSessionBuilder::with_immediate_congestion_feedback`, default
+  `true`; reduced-size where negotiated, else a minimal compound packet). The generators size
+  it to the media it reports on: 5% of the media received, every 50 to 250 ms
+  (`FeedbackCadence`; the RTCP bandwidth no longer stretches it). The rest of RTCP follows RFC
+  3550 section 6.2 on the media measured both ways, with a start-up value before it is
+  measured (`RTCP_SESSION_NOMINAL_VIDEO_BANDWIDTH` 1 Mbit/s with video,
+  `RTCP_SESSION_NOMINAL_AUDIO_BANDWIDTH` 64 kbit/s with audio). Before, feedback waited for the
+  RTCP bandwidth of the measured rate: a sender that started low (a browser with three
+  simulcast layers) heard 6.3 times a second, with gaps to 387 ms, and did not climb. Measured
+  now (receiver side, one stream / three layers): feedback gaps at most 250 ms from 64 kbit/s
+  up, 50 ms from 300 kbit/s; the receiver's RTCP 5.6% of the media at 64 kbit/s, 5.1% at 300
+  kbit/s, 3.1% at 1 Mbit/s, 2.5% at 2.5 Mbit/s; a `Gcc` sender fed by it reaches 2 Mbit/s from
+  300 kbit/s in 0.49 s. Regular reports at 1 and 2.5 Mbit/s are 50 and 125 a second (RTP/AVPF
+  with `T_rr_interval` zero spends the RTCP share).
 - **data_channel**: no DCEP handshake timeout by default
   (`SettingEngine::data_channel.dcep_handshake_timeout` is `None`; it was 30 s). RFC 8832 has
   none: the DATA_CHANNEL_OPEN and DATA_CHANNEL_ACK travel on a reliable stream. Under heavy
@@ -1005,6 +1098,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SettingEngineBuilder::with_sctp_message_size_limit_without_interleaving(false)` lifts it.
   A send over the peer's `max-message-size` still gets `ErrOutboundPacketTooLarge`. Test:
   `the_16_kb_limit_applies_only_when_i_data_was_not_negotiated`.
+- **rtcp_session**: congestion control feedback (TWCC, RFC 8888) leaves as its generator
+  builds it, outside RFC 4585's one Early packet per regular interval and outside the
+  regular reports' timing (`RtcpSessionBuilder::with_immediate_congestion_feedback`, default
+  `true`; reduced-size where negotiated, else a minimal compound packet). The generators size
+  it to the media it reports on: 5% of the media received, every 50 to 250 ms
+  (`FeedbackCadence`; the RTCP bandwidth no longer stretches it). The rest of RTCP follows RFC
+  3550 section 6.2 on the media measured both ways, with a start-up value before it is
+  measured (`RTCP_SESSION_NOMINAL_VIDEO_BANDWIDTH` 1 Mbit/s with video,
+  `RTCP_SESSION_NOMINAL_AUDIO_BANDWIDTH` 64 kbit/s with audio). Before, feedback waited for the
+  RTCP bandwidth of the measured rate: a sender that started low (a browser with three
+  simulcast layers) heard 6.3 times a second, with gaps to 387 ms, and did not climb. Measured
+  now (receiver side, one stream / three layers): feedback gaps at most 250 ms from 64 kbit/s
+  up, 50 ms from 300 kbit/s; the receiver's RTCP 5.6% of the media at 64 kbit/s, 5.1% at 300
+  kbit/s, 3.1% at 1 Mbit/s, 2.5% at 2.5 Mbit/s; a `Gcc` sender fed by it reaches 2 Mbit/s from
+  300 kbit/s in 0.49 s. Regular reports at 1 and 2.5 Mbit/s are 50 and 125 a second (RTP/AVPF
+  with `T_rr_interval` zero spends the RTCP share).
 - **interceptor**: bandwidth probing is on in the default interceptor set
   (`DefaultInterceptorOptions::bandwidth_probing` now `true`; `false` is the opt-out). RFC 8836
   section 2 (requirement 4, a SHOULD) asks a congestion controller to adapt as quickly as
@@ -1240,6 +1349,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+- **cc**: the media receiver's side of TMMBR (RFC 5104 section 4.2.1.2). An application asks a
+  remote sender to stay under a bit rate with `TmmbrControl::Limit` (and lifts it with
+  `TmmbrControl::Clear`) written into the chain; the congestion control interceptor sends the
+  TMMBR at once for a remote stream that negotiated `ccm tmmbr` (and never for one that did
+  not), with the overhead measured on the stream as section 4.2.1.2's running average, capped
+  at `TmmbrControl::NegotiatedMaximum`. It keeps the latest TMMBN of each sender, asks again
+  as owner when its tuple changed or as non-owner when its tuple would enter the bounding set,
+  and repeats an unacknowledged request every `TMMBR_REPEAT_INTERVAL` (1 s). Inbound TMMBN,
+  typed or raw, is read (it was dropped).
+- **gcc**: the receive-side variant of draft-ietf-rmcat-gcc-02 (section 3) in the default
+  set (`configure_remb`): `RembGeneratorInterceptor` sends a REMB for every remote stream that
+  negotiated `goog-remb` and neither transport-wide feedback nor RFC 8888, from the delay-based
+  controller run on its arrivals against abs-send-time or the RTP timestamp, at once when the
+  estimate falls by 3% or more and otherwise once a second; `AbsSendTimeInterceptor` stamps
+  abs-send-time on the packets of local streams that negotiated it, as they leave the pacer.
+  `goog-remb` was offered on video without any REMB ever being sent.
 - **srtp**: `OnSrtpKeyLifetimeExpiring` (the SRTP contexts' `KeyLifetimeExpiring`) and
   `OnCryptexRequiredViolation` reach the application; `SettingEngineBuilder::with_srtp_key_lifetime`;
   the SRTP profile is mapped from its DTLS-SRTP code point (`ProtectionProfile::from_dtls_srtp_id`),
@@ -2116,6 +2241,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+- **ice**: a Binding success response without XOR-MAPPED-ADDRESS was taken as a success: it
+  made the checked pair valid and refreshed consent. RFC 8489 section 6.3.3 has the client
+  check the attribute is present and process the response only if the checks succeed: it is
+  now discarded (the transaction goes on), also for the consent checks of a restart's
+  previous path. A response whose address cannot be decoded is still processed, the value
+  ignored. Test: `agent_rfc8445_test.rs::test_a_success_response_without_xor_mapped_address_is_discarded`;
+  with `test_a_retransmitted_check_gets_the_same_answer_and_changes_nothing` and
+  `test_every_message_the_agent_sends_ends_with_fingerprint` for RFC 8489 6.3.1, 6.3.1.1, 7
+  and 9.1.3.
+- **test**: `tests/ice_restart_by_webrtc_interop.rs` failed now and then on macOS with "ICE
+  Agent can not be restarted when gathering": the webrtc 0.17 peer refuses a restart while it
+  still gathers (its server-reflexive candidate from the public STUN server can take longer
+  than the connection did). The test waits for the peer's gathering to complete before the
+  restart.
+- **test**: `tests/lossy_link_rtc2rtc.rs` at 30 % loss could pass or fail with the same seed
+  and crypto backend (it failed the crypto-ring baseline job of round 18cd90cd with every seed
+  lapsing): the engine's randomness (ICE credentials, the tie-breaker, the 4 to 6 s consent
+  intervals, DTLS randoms, SCTP) changes each run's datagram sequence and so which datagrams
+  the seeded link drops, and whether consent lapses at 30 % loss is chance. Every run is now
+  judged by RFC 7675 section 5.1 on every datagram, whatever the number a run takes: no
+  application data before the first Binding success response or more than 30 s after the
+  last; both peers are built at the virtual start time. New:
+  `ice_does_not_fail_while_consent_is_fresh_over_thirty_percent_loss` (seeds 0xa, 0x1c, 0x21,
+  0x24), where the peer connection fails at 30 s with ICE connected: the DTLS handshake's
+  deadline, not ICE.
+- **test**: ICE on a relayed TCP candidate through coturn
+  (`tests/testenv_turn_client.rs::ice_connects_on_a_relayed_tcp_candidate_through_coturn`,
+  environment test): the active relayed candidate's checks over a Connect and its data
+  connection; the TCP allocation's XOR-MAPPED-ADDRESS as an active server-reflexive TCP
+  candidate is paired and checked (RFC 6544 section 5).
+- **twcc**: a transport-wide feedback packet is kept within `MAX_FEEDBACK_OCTETS` (1100); a
+  longer reporting window continues in the next packet (draft-holmer-rmcat-transport-wide-cc-
+  extensions-01 section 3.1.5). A long window yielded one packet of any size.
+- **gcc**: the pre-filter and the Kalman filter as draft-ietf-rmcat-gcc-02 sections 5.1 to 5.3
+  have them: a packet that arrives within burst_time of its group with a negative delay
+  variation joins the group (a backlog delivered at once after an outage was read as a draining
+  queue); a packet received out of order is left out of the arrival-time model; the noise
+  variance weight is `1 - (1 - chi)^(30 / (1000 f_max))` over the last 60 groups' rate
+  (`Kalman::update_with_period`, chi 0.001; it was a constant); a residual beyond three
+  deviations enters the variance as three deviations (the outlier filter was missing). The
+  multi-flow properties hold as before (late flow 0.48 / 0.49, `Gcc` / TCP 0.19 / 0.81 and 0.37
+  / 0.63, burst recovered in 4 s).
 - **data channels**: an in-band channel created once the SCTP association is up had no DCEP
   handshake deadline, so a lost `DATA_CHANNEL_ACK` left it connecting for ever; it has the
   deadline now. Stream id assignment refused the last id below `maxChannels`.
@@ -2714,6 +2881,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   handshake and reports `EndpointEvent::PeerAuthenticated`; `State::peer_certificates` then
   holds the new chain.
 
+### DTLS 1.3 0-RTT
+
+- **dtls**: 0-RTT data for DTLS 1.3 (RFC 8446 sections 2.3 and 4.2.10), off by default on
+  both sides. `ConfigBuilder::with_max_early_data(n)` makes a server's tickets allow n bytes
+  and has it take them: only with the first PSK, a ticket of its own used for the first time
+  (section 8.1), of the same suite, in a first ClientHello, whose age agrees with the
+  server's within ten seconds (section 8.3); it is delivered as `EndpointEvent::EarlyData`
+  before the handshake completes. `Endpoint::connect_with_early_data` sends it from a client
+  whose session store has such a ticket; `State::early_data_accepted` says whether it was
+  taken. A HelloRetryRequest rules 0-RTT out, so it needs `with_cookie_exchange(false)`.
+
 ### DTLS 1.2: the RFC by default
 
 - **dtls**: `HelloVerifyRequest.server_version` is DTLS 1.0, as RFC 6347 section 4.2.1 asks
@@ -2860,6 +3038,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Testing
 
+- **interceptor (nack)**: the test environment's `nack_recovers_lost_rtp` counts from the
+  first packet that arrives, as its virtual-clock twin `nack_recovery_under_loss.rs` does: a
+  receiver knows of no packet sent before the first it receives, and a Generic NACK names
+  packets missing between ones it saw (RFC 4585 section 6.2.1), so with 5% loss one run in
+  twenty lost the stream's first packet and failed although NACK repaired every gap. It still
+  prints what stayed lost and fails on any gap after the first packet.
+- **rtp**: `a_stream_mixes_header_forms_only_when_extmap_allow_mixed_was_negotiated` takes the
+  media stream's SSRC from the sender, not from the first packet on the wire, which with
+  bandwidth probing on by default is an RTX padding probe.
 - **sctp**: the SCTP association across DTLS changes, between two engines
   (`tests/sctp_across_dtls_associations_rtc2rtc.rs`): a new DTLS association (a changed
   `tls-id`, swapped roles) leaves the association and its channels as they are, and a DTLS

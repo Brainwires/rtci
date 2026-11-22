@@ -36,6 +36,9 @@ pub(crate) struct ClientOffer {
     /// The PSKs offered (RFC 8446 section 4.2.11), in the order of the identities: a ticket
     /// first, if the session store had one, then the external PSKs.
     pub(crate) psks: Vec<OfferedPsk>,
+    /// The 0-RTT data sent with the ClientHello, if early_data is offered (RFC 8446 section
+    /// 4.2.10): with the first PSK, a ticket that allows that much.
+    pub(crate) early_data: Option<Vec<u8>>,
 }
 
 impl HandshakeConfig {
@@ -64,7 +67,11 @@ impl ClientOffer {
     /// Makes the key shares of a ClientHello, and takes the PSKs it offers: one ticket from
     /// the session store for the server name, if it has one that is valid at `now` and of a
     /// hash this client's suites have, and the external PSKs.
-    pub(crate) fn new(cfg: &HandshakeConfig, now: Option<Instant>) -> Result<Self> {
+    pub(crate) fn new(
+        cfg: &HandshakeConfig,
+        now: Option<Instant>,
+        early_data: &[u8],
+    ) -> Result<Self> {
         let mut key_shares = vec![];
         for curve in cfg.local_tls13_groups.iter().take(KEY_SHARES_OFFERED) {
             key_shares.push(curve.generate_keypair_with_crypto(cfg.provider().crypto())?);
@@ -95,10 +102,23 @@ impl ClientOffer {
                 psks.push(psk);
             }
         }
+        // RFC 8446 section 4.2.10: early data goes with the first PSK, and only a ticket
+        // that says how much it allows (an external PSK has no single-use record at the
+        // server, so no 0-RTT is offered with one).
+        let early_data = psks
+            .first()
+            .filter(|psk| {
+                !early_data.is_empty()
+                    && !psk.external
+                    && early_data.len() <= psk.max_early_data as usize
+                    && early_data.len() <= super::record::MAX_PLAINTEXT
+            })
+            .map(|_| early_data.to_vec());
         Ok(Self {
             key_shares,
             connection_id: cfg.connection_id_offer(),
             psks,
+            early_data,
         })
     }
 
@@ -147,6 +167,12 @@ impl ClientOffer {
             extensions.push(Extension::Unknown {
                 extension_type: EXT_PSK_KEY_EXCHANGE_MODES,
                 data: psk_key_exchange_modes_data(&cfg.psk_key_exchange_modes()),
+            });
+        }
+        if self.early_data.is_some() {
+            extensions.push(Extension::Unknown {
+                extension_type: EXT_EARLY_DATA,
+                data: vec![],
             });
         }
         // RFC 8446 section 4.2.11: the last extension of the ClientHello. Its binders are

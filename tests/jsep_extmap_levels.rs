@@ -1,6 +1,6 @@
 //! `a=extmap` at session level and with a direction (RFC 8285 sections 5 and 7, RFC 9429
-//! section 5.8.1): a session-level mapping is every RTP section's unless the section has its
-//! own, and an extension offered for one direction is answered for the other.
+//! section 5.8.1): a session-level mapping is every RTP section's, a description that mixes the
+//! two levels is refused, and an extension offered for one direction is answered for the other.
 
 mod jsep_common;
 
@@ -79,11 +79,7 @@ a=sendrecv
 
 #[test]
 fn a_session_level_extmap_is_every_rtp_sections() -> TestResult {
-    let answered = answered_extmaps(
-        &format!("a=extmap:3 {MID}\na=extmap:5 {ABS}\n"),
-        // The video section maps the MID extension itself: it is not added a second time.
-        &["", &format!("a=extmap:3 {MID}\n")],
-    )?;
+    let answered = answered_extmaps(&format!("a=extmap:3 {MID}\na=extmap:5 {ABS}\n"), &["", ""])?;
     assert_eq!(
         answered,
         vec![
@@ -151,4 +147,15 @@ fn extmap_ids_outside_the_element_range_do_not_fail_the_description() -> TestRes
         ]
     );
     Ok(())
+}
+
+/// RFC 8285 section 5: "The definitions MUST be either all session level or all media level;
+/// it is not permitted to mix the two styles": such a description is refused.
+#[test]
+fn a_description_with_extmap_lines_at_both_levels_is_refused() {
+    let refused = answered_extmaps(
+        &format!("a=extmap:3 {MID}\n"),
+        &["", &format!("a=extmap:5 {ABS}\n")],
+    );
+    assert!(refused.is_err(), "{refused:?}");
 }

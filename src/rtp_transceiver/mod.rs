@@ -283,6 +283,18 @@ impl RTCRtpTransceiver<'_> {
         self.peer_connection.rtp_transceivers[self.id].remote_rtcp_xr()
     }
 
+    /// The packet times the remote description states for this transceiver's media section
+    /// (`a=ptime`, `a=maxptime`, in milliseconds; RFC 8866 sections 6.4, 6.5): how much media
+    /// the remote side wants in a packet, and the most it takes. For Opus they are its
+    /// `ptime` and `maxptime` (RFC 7587 section 7). All `None` before a remote description
+    /// states them. This endpoint's own are
+    /// [`MediaEngine::set_audio_packet_time`](crate::peer_connection::configuration::media_engine::MediaEngine::set_audio_packet_time).
+    pub fn remote_packet_time(
+        &self,
+    ) -> crate::peer_connection::configuration::media_engine::RTCPacketTime {
+        self.peer_connection.rtp_transceivers[self.id].remote_packet_time()
+    }
+
     /// Whether the last answer negotiated reduced-size RTCP for this transceiver's media
     /// section (`a=rtcp-rsize` in the offer and in the answer, RFC 5506 section 5).
     pub fn rtcp_reduced_size(&self) -> bool {
