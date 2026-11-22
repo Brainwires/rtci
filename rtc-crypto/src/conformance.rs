@@ -90,6 +90,44 @@ pub fn assert_hashes_and_hmac(crypto: &dyn RTCCrypto) {
         crypto.hash(HashAlgorithm::Sha256, b"abc").unwrap(),
         bytes("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
     );
+    // The other certificate fingerprint hashes (RFC 8122 section 5) are optional for a
+    // provider; one that reports them must compute them right (FIPS 180-4 "abc" vectors).
+    for (algorithm, expected) in [
+        (
+            HashAlgorithm::Sha1,
+            "a9993e364706816aba3e25717850c26c9cd0d89d",
+        ),
+        (
+            HashAlgorithm::Sha224,
+            "23097d223405d8228642a477bda255b32aadbce4bda0b3f7e36c9da7",
+        ),
+        (
+            HashAlgorithm::Sha384,
+            "cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed\
+             8086072ba1e7cc2358baeca134c825a7",
+        ),
+        (
+            HashAlgorithm::Sha512,
+            "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a\
+             2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f",
+        ),
+    ] {
+        if crypto.supports(CryptoAlgorithm::Hash(algorithm)) {
+            assert_eq!(
+                crypto.hash(algorithm, b"abc").unwrap(),
+                bytes(expected),
+                "{algorithm:?}"
+            );
+        } else {
+            assert_eq!(
+                crypto.hash(algorithm, b"abc"),
+                Err(CryptoError::UnsupportedAlgorithm(CryptoAlgorithm::Hash(
+                    algorithm
+                ))),
+                "{algorithm:?}"
+            );
+        }
+    }
 
     let key = [0x0b; 20];
     let mut sha1 = [0; 20];

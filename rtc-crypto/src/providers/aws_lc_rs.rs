@@ -63,8 +63,14 @@ impl RTCCrypto for AwsLcRsCrypto {
     fn supports(&self, algorithm: CryptoAlgorithm) -> bool {
         matches!(
             algorithm,
-            CryptoAlgorithm::Hash(HashAlgorithm::Md5 | HashAlgorithm::Sha256)
-                | CryptoAlgorithm::Hmac(HmacAlgorithm::Sha1 | HmacAlgorithm::Sha256)
+            CryptoAlgorithm::Hash(
+                HashAlgorithm::Md5
+                    | HashAlgorithm::Sha256
+                    | HashAlgorithm::Sha1
+                    | HashAlgorithm::Sha224
+                    | HashAlgorithm::Sha384
+                    | HashAlgorithm::Sha512
+            ) | CryptoAlgorithm::Hmac(HmacAlgorithm::Sha1 | HmacAlgorithm::Sha256)
                 | CryptoAlgorithm::Aead(
                     AeadAlgorithm::Aes128Gcm
                         | AeadAlgorithm::Aes256Gcm
@@ -109,6 +115,12 @@ impl RTCCrypto for AwsLcRsCrypto {
         match algorithm {
             HashAlgorithm::Md5 => Ok(common::md5(data)),
             HashAlgorithm::Sha256 => Ok(digest::digest(&digest::SHA256, data).as_ref().to_vec()),
+            HashAlgorithm::Sha1 => Ok(digest::digest(&digest::SHA1_FOR_LEGACY_USE_ONLY, data)
+                .as_ref()
+                .to_vec()),
+            HashAlgorithm::Sha224 => Ok(digest::digest(&digest::SHA224, data).as_ref().to_vec()),
+            HashAlgorithm::Sha384 => Ok(digest::digest(&digest::SHA384, data).as_ref().to_vec()),
+            HashAlgorithm::Sha512 => Ok(digest::digest(&digest::SHA512, data).as_ref().to_vec()),
         }
     }
 

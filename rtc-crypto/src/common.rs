@@ -42,6 +42,12 @@ pub(crate) fn md5(data: &[u8]) -> Vec<u8> {
     Md5::digest(data).to_vec()
 }
 
+/// SHA-224 for the ring provider, which has none of its own.
+#[cfg(feature = "crypto-ring")]
+pub(crate) fn sha224(data: &[u8]) -> Vec<u8> {
+    sha2::Sha224::digest(data).to_vec()
+}
+
 pub(crate) fn block_encrypt(
     algorithm: BlockCipherAlgorithm,
     key: &[u8],
