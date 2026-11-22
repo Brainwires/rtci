@@ -5,6 +5,64 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Bug Fixes
+
+- **ice**: attributes after MESSAGE-INTEGRITY are ignored (RFC 8489 section 14.5). The HMAC does
+  not cover them, so someone who saw one valid check could replay it with ICE-CONTROLLED or
+  ICE-CONTROLLING appended and flip the agent's role.
+- **ice**: role conflicts follow RFC 8445 section 7.3.1.1. A conflicting request gets one
+  answer: the 487 when this agent keeps its role (and then nothing else comes of the request),
+  the success response when it switches. It got both. A controlled agent switches on an equal
+  tiebreaker (`>=`, it was `>`).
+- **ice**: a 487 (Role Conflict) response is acted on (section 7.2.5.1): the role switches, the
+  tiebreaker changes and the pair is checked again. Error responses were dropped unread, so an
+  agent whose peer answered 487 never left the conflict. Any other authenticated error response
+  fails the pair (section 7.2.5.2.4).
+- **ice**: a Binding request that arrives before the remote description is answered at once and
+  finished when the peer's credentials arrive: peer-reflexive candidate, triggered check,
+  nomination (section 7.3). It was dropped, so an offerer whose answerer started checking first
+  left those checks to time out. A request's USERNAME is valid when its first part is the local
+  fragment.
+- **ice**: pair priority is `2^32 * MIN(G,D) + 2 * MAX(G,D) + (G > D)` (section 6.1.2.3); it
+  multiplied MIN by `2^32 - 1`. `test_candidate_pair_priority` pinned the wrong values.
+- **ice**: PRIORITY in a check is the local candidate's priority as a peer-reflexive candidate
+  (section 7.1.1), not its own; a peer-reflexive remote candidate takes its priority from the
+  request (section 7.3.1.3) and is paired only with the local candidate the request arrived on.
+- **ice**: local candidates of one type get unique local preferences, IPv4 and IPv6 interleaved
+  (RFC 8445 section 5.1.2.1, RFC 8421 section 4; RFC 6544 section 4.2 for a TCP candidate's
+  other-pref). Two host candidates on two interfaces had the same priority.
+- **ice**: a candidate's foundation is made of its type, its base's IP address, its server and
+  its transport (section 5.1.1.3); it used the candidate's own address and no server.
+- **ice**: a nomination that gets no answer is given up after `max_binding_requests` requests
+  and the controlling agent nominates its next valid pair. It repeated the nomination until the
+  agent failed.
+- **ice**: a lite agent sends no connectivity checks (sections 6.2 and 7.3.2): a request with
+  USE-CANDIDATE selects the pair. It sent a triggered check and waited for the answer.
+- **ice**: a request on a pair that already succeeded triggers no check from the controlled
+  agent (section 7.3.1.4; every consent check of the peer cost a check back), and a request on a
+  Failed pair gives the pair a fresh budget on the controlled side too.
+- **ice**: an ICE restart given the credentials in use (`SettingEngine::set_ice_credentials`)
+  generates new ones (section 9). The offer carried the old pair, so the peer saw no restart
+  while this side had flushed its state.
+- **ice**: candidate constructors take component 0 (the `Default`) as 1 and refuse a component
+  above 256 or a priority above 2^31 - 1; `COMPONENT_RTCP` is 2.
+
+### Features
+
+- **ice**: `Candidate::set_local_preference_rank` / `local_preference_rank` (rank a local
+  candidate among those of its type, for example an unreliable interface last, RFC 8421
+  section 3) and `Candidate::peer_reflexive_priority`.
+
+### Breaking Changes
+
+- **ice**: candidate constructors and `unmarshal_candidate` return an error for a priority above
+  2^31 - 1 or a component above 256.
+- **ice**: a local candidate added without a priority after another of its type no longer has
+  the same priority as that one (its local preference is lower by its rank), and foundations of
+  server-reflexive candidates change (they follow the base, not the mapped address).
+
 ## [0.22.0+brainwires.5] - 2026-11-20
 
 ### Bug Fixes

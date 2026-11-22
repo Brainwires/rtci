@@ -317,6 +317,9 @@ fn test_handle_peer_reflexive_unknown_remote() -> Result<()> {
             transaction_id: tid,
             destination: SocketAddr::from_str("0.0.0.0:0")?,
             is_use_candidate: false,
+            local_index: 0,
+            remote_index: 0,
+            sent_as_controlling: true,
         }];
         a.ufrag_pwd.remote_credentials = Some(Credentials {
             ufrag: "".to_string(),
@@ -1865,7 +1868,7 @@ fn test_controlling_rechecks_failed_pair_on_inbound_binding_request() -> Result<
         Box::new(FINGERPRINT),
     ])?;
 
-    a.handle_binding_request(now, &msg, 0, 0);
+    a.process_binding_request(now, &msg, 0, remote_addr, true)?;
 
     assert_eq!(
         a.candidate_pairs[0].state,

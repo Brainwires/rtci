@@ -77,6 +77,8 @@ pub struct CandidatePair {
     pub remote_priority: u32,
     pub(crate) ice_role_controlling: bool,
     pub(crate) binding_request_count: u16,
+    /// Nomination requests (USE-CANDIDATE) sent on this pair that are still unanswered.
+    pub(crate) nomination_request_count: u16,
     pub(crate) state: CandidatePairState,
     pub(crate) nominated: bool,
     /// The highest nomination the controlling peer has sent on this pair (controlled agent):
@@ -159,6 +161,7 @@ impl CandidatePair {
             ice_role_controlling,
             state: CandidatePairState::Waiting,
             binding_request_count: 0,
+            nomination_request_count: 0,
             nominated: false,
             remote_nomination: 0,
             nomination_pending: false,
@@ -174,7 +177,7 @@ impl CandidatePair {
         }
     }
 
-    /// RFC 5245 - 5.7.2.  Computing Pair Priority and Ordering Pairs
+    /// RFC 8445 Section 6.1.2.3, Computing Pair Priority and Ordering Pairs.
     /// Let G be the priority for the candidate provided by the controlling
     /// agent.  Let D be the priority for the candidate provided by the
     /// controlled agent.
@@ -186,11 +189,12 @@ impl CandidatePair {
             (self.remote_priority, self.local_priority)
         };
 
-        // 1<<32 overflows uint32; and if both g && d are
-        // maxUint32, this result would overflow uint64
-        ((1 << 32_u64) - 1) * u64::from(std::cmp::min(g, d))
-            + 2 * u64::from(std::cmp::max(g, d))
-            + u64::from(g > d)
+        // Candidate priorities are at most 2^31 - 1 (Section 5.1.2), so the sum is under 2^63.
+        // The arithmetic wraps rather than panics for a priority a raw `Candidate` was given
+        // outside that range.
+        (u64::from(std::cmp::min(g, d)) << 32)
+            .wrapping_add(2 * u64::from(std::cmp::max(g, d)))
+            .wrapping_add(u64::from(g > d))
     }
 
     /// Called when a STUN binding request is sent.

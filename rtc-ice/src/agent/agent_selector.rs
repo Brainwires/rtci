@@ -144,7 +144,11 @@ impl Agent {
                         Box::new(Username::new(ATTR_USERNAME, username)),
                         Box::<UseCandidateAttr>::default(),
                         Box::new(AttrControlling(self.tie_breaker)),
-                        Box::new(PriorityAttr(pair.local_priority)),
+                        // RFC 8445 Section 7.1.1: the priority the local candidate would have as
+                        // a peer-reflexive one, which is what the peer makes of an unknown source.
+                        Box::new(PriorityAttr(
+                            self.local_candidates[pair.local_index].peer_reflexive_priority(),
+                        )),
                         Box::new(MessageIntegrity::new_short_term_integrity_with_provider(
                             remote_credentials.pwd.clone(),
                             self.crypto_provider.crypto(),
@@ -173,8 +177,35 @@ impl Agent {
         };
 
         if let Some((msg, local, remote)) = result {
+            if let Some(pair_index) = self.nominated_pair {
+                self.candidate_pairs[pair_index].nomination_request_count += 1;
+            }
             self.send_binding_request(now, &msg, local, remote);
         }
+    }
+
+    /// Gives up a nomination that got no answer to `max_binding_requests` requests: the pair
+    /// is Failed and no longer valid (RFC 8445 Section 7.2.5.3.4), and the controlling agent is
+    /// free to nominate another valid pair. Returns whether it did give one up.
+    fn abandon_unanswered_nomination(&mut self) -> bool {
+        let Some(pair_index) = self.nominated_pair else {
+            return false;
+        };
+        let p = self.candidate_pairs[pair_index];
+        if p.nomination_request_count < self.max_binding_requests {
+            return false;
+        }
+        warn!(
+            "[{}]: nomination of {} got no answer to {} requests: the pair failed",
+            self.get_name(),
+            p,
+            p.nomination_request_count
+        );
+        let p = &mut self.candidate_pairs[pair_index];
+        p.state = CandidatePairState::Failed;
+        p.nominated = false;
+        self.nominated_pair = None;
+        true
     }
 
     pub(crate) fn start(&mut self, now: Instant) {
@@ -260,6 +291,10 @@ impl ControllingSelector for Agent {
             trace!("now falling back to full agent");
         }
 
+        // A nomination nobody answers is given up, and the next valid pair is nominated below.
+        if self.get_selected_pair().is_none() {
+            self.abandon_unanswered_nomination();
+        }
         let nominated_pair_is_some = self.nominated_pair.is_some();
 
         if self.get_selected_pair().is_some() {
@@ -313,7 +348,9 @@ impl ControllingSelector for Agent {
                 Box::new(TransactionId::new()),
                 Box::new(Username::new(ATTR_USERNAME, username)),
                 Box::new(AttrControlling(self.tie_breaker)),
-                Box::new(PriorityAttr(self.local_candidates[local_index].priority())),
+                Box::new(PriorityAttr(
+                    self.local_candidates[local_index].peer_reflexive_priority(),
+                )),
                 Box::new(MessageIntegrity::new_short_term_integrity_with_provider(
                     remote_credentials.pwd.clone(),
                     self.crypto_provider.crypto(),
@@ -393,70 +430,58 @@ impl ControllingSelector for Agent {
     fn handle_binding_request(
         &mut self,
         now: Instant,
-        m: &Message,
+        _m: &Message,
         local_index: usize,
         remote_index: usize,
     ) {
-        self.send_binding_success(now, m, local_index, remote_index);
-        trace!("controllingSelector: sendBindingSuccess");
+        // The caller answered the request and made sure the pair exists.
+        let Some(pair_index) = self.find_pair(local_index, remote_index) else {
+            return;
+        };
 
-        if let Some(pair_index) = self.find_pair(local_index, remote_index) {
-            // Track request received on the candidate pair
-            self.candidate_pairs[pair_index].on_request_received();
-
-            // RFC 8445 §7.3.1.4: a Binding request on a pair that is not yet Succeeded
-            // triggers a check on it, including a pair that had been marked Failed.
-            let p = &mut self.candidate_pairs[pair_index];
-            if p.state != CandidatePairState::Succeeded {
-                if p.state == CandidatePairState::Failed {
-                    // Restart the retransmission budget so the next tick does not re-fail it.
-                    p.binding_request_count = 0;
-                }
-                p.state = CandidatePairState::InProgress;
-                trace!("controllingSelector: triggered check on {}", p);
-                self.ping_candidate(now, local_index, remote_index);
+        // RFC 8445 §7.3.1.4: a Binding request on a pair that is not yet Succeeded
+        // triggers a check on it, including a pair that had been marked Failed.
+        let p = &mut self.candidate_pairs[pair_index];
+        if p.state != CandidatePairState::Succeeded {
+            if p.state == CandidatePairState::Failed {
+                // Restart the retransmission budget so the next tick does not re-fail it.
+                p.binding_request_count = 0;
+                p.nomination_request_count = 0;
             }
+            p.state = CandidatePairState::InProgress;
+            trace!("controllingSelector: triggered check on {}", p);
+            self.ping_candidate(now, local_index, remote_index);
+        }
 
-            let p = &self.candidate_pairs[pair_index];
-            let nominated_pair_is_none = self.nominated_pair.is_none();
+        let p = &self.candidate_pairs[pair_index];
+        let nominated_pair_is_none = self.nominated_pair.is_none();
 
-            trace!(
-                "controllingSelector: after findPair {}, p.state: {}, {}",
-                p,
-                p.state,
-                nominated_pair_is_none,
-                //self.get_selected_pair().await.is_none() //, {}
-            );
-            if p.state == CandidatePairState::Succeeded
-                && nominated_pair_is_none
-                && self.get_selected_pair().is_none()
-            {
-                if let Some(best_pair_index) = self.get_best_available_pair() {
+        trace!(
+            "controllingSelector: after findPair {}, p.state: {}, {}",
+            p, p.state, nominated_pair_is_none,
+        );
+        if p.state == CandidatePairState::Succeeded
+            && nominated_pair_is_none
+            && self.get_selected_pair().is_none()
+        {
+            if let Some(best_pair_index) = self.get_best_available_pair() {
+                trace!(
+                    "controllingSelector: getBestAvailableCandidatePair {}",
+                    best_pair_index
+                );
+                if best_pair_index == pair_index
+                    && self.is_nominatable(now, p.local_index, true)
+                    && self.is_nominatable(now, p.remote_index, false)
+                {
                     trace!(
-                        "controllingSelector: getBestAvailableCandidatePair {}",
-                        best_pair_index
+                        "The candidate ({}, {}) is the best candidate available, marking it as nominated",
+                        p.local_index, p.remote_index
                     );
-                    if best_pair_index == pair_index
-                        && self.is_nominatable(now, p.local_index, true)
-                        && self.is_nominatable(now, p.remote_index, false)
-                    {
-                        trace!(
-                            "The candidate ({}, {}) is the best candidate available, marking it as nominated",
-                            p.local_index, p.remote_index
-                        );
-                        self.nominated_pair = Some(pair_index);
-                        self.nominate_pair(now);
-                    }
-                } else {
-                    trace!("No best pair available");
+                    self.nominated_pair = Some(pair_index);
+                    self.nominate_pair(now);
                 }
-            }
-        } else {
-            trace!("controllingSelector: addPair");
-            self.add_pair(local_index, remote_index);
-            // Track request received on newly created pair
-            if let Some(pair_index) = self.find_pair(local_index, remote_index) {
-                self.candidate_pairs[pair_index].on_request_received();
+            } else {
+                trace!("No best pair available");
             }
         }
     }
@@ -494,7 +519,9 @@ impl ControlledSelector for Agent {
                 Box::new(TransactionId::new()),
                 Box::new(Username::new(ATTR_USERNAME, username)),
                 Box::new(AttrControlled(self.tie_breaker)),
-                Box::new(PriorityAttr(self.local_candidates[local_index].priority())),
+                Box::new(PriorityAttr(
+                    self.local_candidates[local_index].peer_reflexive_priority(),
+                )),
                 Box::new(MessageIntegrity::new_short_term_integrity_with_provider(
                     remote_credentials.pwd.clone(),
                     self.crypto_provider.crypto(),
@@ -583,46 +610,56 @@ impl ControlledSelector for Agent {
         local_index: usize,
         remote_index: usize,
     ) {
-        if self.find_pair(local_index, remote_index).is_none() {
-            self.add_pair(local_index, remote_index);
-        }
+        // The caller answered the request (RFC 8445 Section 7.3.1.4: an authenticated request
+        // is answered whatever the pair's state) and made sure the pair exists.
+        let Some(pair_index) = self.find_pair(local_index, remote_index) else {
+            return;
+        };
 
-        if let Some(pair_index) = self.find_pair(local_index, remote_index) {
-            // Track request received on the candidate pair
-            self.candidate_pairs[pair_index].on_request_received();
+        // A nomination is `USE-CANDIDATE` (value 1) or libwebrtc's `NOMINATION` value,
+        // read only from the part of the request MESSAGE-INTEGRITY covers.
+        let nomination = nomination_of(m);
+        let p = &mut self.candidate_pairs[pair_index];
+        p.remote_nomination = p.remote_nomination.max(nomination);
 
-            // A nomination is `USE-CANDIDATE` (value 1) or libwebrtc's `NOMINATION` value,
-            // read only from the part of the request MESSAGE-INTEGRITY covers.
-            let nomination = nomination_of(m);
-            let p = &mut self.candidate_pairs[pair_index];
-            p.remote_nomination = p.remote_nomination.max(nomination);
-            let succeeded = p.state == CandidatePairState::Succeeded;
-
-            // RFC 8445 Section 7.3.1.4: an authenticated request is answered whatever the
-            // pair's state. (A nomination on a pair whose check had not succeeded went
-            // unanswered, so the peer could only retransmit it.)
-            self.send_binding_success(now, m, local_index, remote_index);
-
-            if nomination > 0 && succeeded {
-                // RFC 8445 Section 7.3.1.5: "If the state of this pair is Succeeded, it means
-                // that the check previously sent by this pair produced a successful response
-                // and generated a valid pair. The agent sets the nominated flag value of the
-                // valid pair to true." The controlled agent follows the controlling agent's
-                // nomination, a later one included: libwebrtc moves the session to another
-                // pair after it connects (regular nomination on the new pair, or a higher
-                // NOMINATION value), and the pair it leaves stops carrying media. The first
-                // nomination used to be final.
+        if self.lite {
+            // RFC 8445 Section 7.3.2: a lite agent sends no checks. A request with
+            // USE-CANDIDATE is all it gets: "the agent constructs a candidate pair [...]
+            // This candidate pair is then added to the valid list" and its nominated flag is
+            // set. Without USE-CANDIDATE there is nothing more to do than answer.
+            if nomination > 0 {
+                self.candidate_pairs[pair_index].state = CandidatePairState::Succeeded;
                 self.accept_nomination(now, pair_index);
-            } else {
-                if nomination > 0 {
-                    // The nomination takes effect once our triggered check on this pair
-                    // succeeds (see `handle_success_response`). If the check fails, the pair
-                    // is not used.
-                    self.candidate_pairs[pair_index].nomination_pending = true;
-                }
-                // Triggered check (RFC 8445 Section 7.3.1.4).
-                self.ping_candidate(now, local_index, remote_index);
             }
+            return;
         }
+
+        let state = self.candidate_pairs[pair_index].state;
+        if state == CandidatePairState::Succeeded {
+            // RFC 8445 Section 7.3.1.4: "If the state of that pair is Succeeded, nothing
+            // further is done." Section 7.3.1.5: with USE-CANDIDATE, "the agent sets the
+            // nominated flag value of the valid pair to true". The controlled agent follows
+            // the controlling agent's nomination, a later one included: libwebrtc moves the
+            // session to another pair after it connects (regular nomination on the new pair,
+            // or a higher NOMINATION value), and the pair it leaves stops carrying media.
+            if nomination > 0 {
+                self.accept_nomination(now, pair_index);
+            }
+            return;
+        }
+
+        let p = &mut self.candidate_pairs[pair_index];
+        if nomination > 0 {
+            // The nomination takes effect once our triggered check on this pair succeeds (see
+            // `handle_success_response`). If the check fails, the pair is not used.
+            p.nomination_pending = true;
+        }
+        if state == CandidatePairState::Failed {
+            // The peer reaches us on this pair after all: it gets a fresh budget.
+            p.binding_request_count = 0;
+        }
+        // Triggered check (RFC 8445 Section 7.3.1.4).
+        p.state = CandidatePairState::InProgress;
+        self.ping_candidate(now, local_index, remote_index);
     }
 }
