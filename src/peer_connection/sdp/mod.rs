@@ -300,7 +300,9 @@ use crate::media_stream::MediaStreamId;
 use crate::media_stream::track::{MediaStreamTrack, MediaStreamTrackId};
 use crate::peer_connection::RTCPeerConnection;
 use crate::peer_connection::configuration::RTCBundlePolicy;
-use crate::peer_connection::configuration::media_engine::MediaEngine;
+use crate::peer_connection::configuration::media_engine::{
+    MediaEngine, is_rtcp_conflicting_payload_type,
+};
 use crate::peer_connection::state::ice_gathering_state::RTCIceGatheringState;
 use crate::peer_connection::transport::dtls::fingerprint::{
     RTCDtlsFingerprint, parse_fingerprint_attribute,
@@ -1295,6 +1297,7 @@ impl RTCPeerConnection {
     ) -> (MediaDescription, Vec<RtpStreamId>) {
         let mut send_rids = vec![];
 
+        let cname = media_engine.rtcp_cname.as_str();
         if let Some(sender) = transceiver.sender_mut() {
             let (encodings, track) = (
                 sender.get_parameters(media_engine).encodings.clone(),
@@ -1362,12 +1365,12 @@ impl RTCPeerConnection {
                             );
                         }
 
-                        media = with_source_attributes(media, ssrc, track);
+                        media = with_source_attributes(media, ssrc, track, cname);
                         if let Some(rtx) = rtx_flow {
-                            media = with_source_attributes(media, rtx.ssrc, track);
+                            media = with_source_attributes(media, rtx.ssrc, track, cname);
                         }
                         if let Some(fec) = fec_flow {
-                            media = with_source_attributes(media, fec.ssrc, track);
+                            media = with_source_attributes(media, fec.ssrc, track, cname);
                         }
                     }
                 }
@@ -1394,19 +1397,19 @@ impl RTCPeerConnection {
 }
 
 /// The source attributes of one of a sender's SSRCs (RFC 5576 section 4.1): `cname` (section
-/// 6.1) and `msid` (RFC 8830 appendix A, registered as a source attribute). The Plan B
+/// 6.1: "the same as the CNAME that the source uses in RTCP", so the connection's one CNAME,
+/// RFC 7022, whatever the track) and `msid` (RFC 8830 appendix A, registered as a source
+/// attribute). The Plan B
 /// `mslabel` and `label` attributes are not written: RFC 5576 section 4.1 has source
 /// attributes registered with IANA, and neither is.
 fn with_source_attributes(
     media: MediaDescription,
     ssrc: SSRC,
     track: &MediaStreamTrack,
+    cname: &str,
 ) -> MediaDescription {
     media
-        .with_value_attribute(
-            ATTR_KEY_SSRC.to_owned(),
-            format!("{ssrc} cname:{}", track.stream_id()),
-        )
+        .with_value_attribute(ATTR_KEY_SSRC.to_owned(), format!("{ssrc} cname:{cname}"))
         .with_value_attribute(
             ATTR_KEY_SSRC.to_owned(),
             format!("{ssrc} msid:{} {}", track.stream_id(), track.track_id()),
@@ -1502,6 +1505,27 @@ pub(crate) fn has_bundle_attribute(
     key: &str,
 ) -> bool {
     media.has_attribute(key) || tagged_section(desc, media).is_some_and(|m| m.has_attribute(key))
+}
+
+/// Whether an RTP section of a remote description multiplexes RTP and RTCP. A section says so
+/// itself with `a=rtcp-mux`. In an initial offer every bundled RTP section does, the
+/// bundle-only ones excepted (RFC 9143 section 9.3.1.1: "the offerer MUST include an SDP
+/// 'rtcp-mux' attribute in each bundled 'm=' section (excluding any bundle-only 'm='
+/// sections)"), so only a bundle-only section takes the attribute from the offerer-tagged
+/// one there. In a subsequent offer or an answer the attribute is in the tagged section only
+/// (section 7.1.3) and applies to every bundled section.
+pub(crate) fn section_multiplexes_rtcp(
+    desc: &SessionDescription,
+    media: &MediaDescription,
+    initial_offer: bool,
+) -> bool {
+    if has_rtcp_mux(media) {
+        return true;
+    }
+    if initial_offer && !media.has_attribute(ATTR_KEY_BUNDLE_ONLY) {
+        return false;
+    }
+    has_bundle_attribute(desc, media, ATTR_KEY_RTCPMUX)
 }
 
 /// The tagged section of the BUNDLE group `media` is in: the first tag of the group that is
@@ -1671,7 +1695,8 @@ pub(crate) struct PopulateSdpParams {
     /// (RFC 9429 section 5.2.2: in a subsequent offer "an 'a=bundle-only' line ... MUST NOT
     /// be added").
     pub(crate) initial_offer: bool,
-    /// `SettingEngineBuilder::with_bundle_attributes_in_tagged_section_only`.
+    /// Not `SettingEngineBuilder::with_bundle_attributes_repeated`: the form of RFC 9143
+    /// section 7.1.3.
     pub(crate) bundle_attributes_in_tagged_section_only: bool,
     pub(crate) sctp_max_message_size: usize,
     /// The data section's `a=sctp-port`.
@@ -1901,7 +1926,7 @@ impl RTCPeerConnection {
                 let without_transport = has_carrier
                     && match params.bundle_policy {
                         RTCBundlePolicy::MaxCompat => false,
-                        RTCBundlePolicy::MaxBundle => true,
+                        RTCBundlePolicy::MustBundle => true,
                         _ => with_transport.contains(&media_type),
                     };
                 match &params.bundle {
@@ -1994,9 +2019,51 @@ impl RTCPeerConnection {
                 sdp::description::common::Attribute::new(ATTR_KEY_RTCP_MUX_ONLY.to_owned(), None),
             );
         }
-        // RFC 9143 section 7.1.3, when asked for: in an answer or a subsequent offer only the
-        // tagged section (the first of the group) carries the BUNDLE attributes.
+        // RFC 9143 section 7.1.3: in an answer or a subsequent offer only the tagged section
+        // (the first of the group) carries the BUNDLE attributes, unless the application
+        // asked for the browsers' repeated form.
         if params.bundle_attributes_in_tagged_section_only && !params.initial_offer {
+            // The tagged section speaks for the group, also when it is not RTP itself (RFC
+            // 9143 section 7.1.3, the note: "the tagged 'm=' section might contain an SDP
+            // 'rtcp-mux' attribute even if the tagged 'm=' section does not describe
+            // RTP-based media"; section 9.3.1.2: "MUST include an SDP 'rtcp-mux' attribute
+            // in the answerer-tagged 'm=' section"). So when the tagged section is the data
+            // section it takes `a=rtcp-mux` from the RTP sections that are about to lose it,
+            // and `a=rtcp-rsize` when each of them has it.
+            let others: Vec<&MediaDescription> = bundled
+                .iter()
+                .skip(1)
+                .filter_map(|mid| {
+                    d.media_descriptions
+                        .iter()
+                        .find(|media| get_mid_value(media) == Some(mid))
+                })
+                .filter(|media| media.media_name.media != MEDIA_SECTION_APPLICATION)
+                .collect();
+            let mux = others
+                .iter()
+                .any(|media| media.has_attribute(ATTR_KEY_RTCPMUX));
+            let rsize = !others.is_empty()
+                && others
+                    .iter()
+                    .all(|media| media.has_attribute(ATTR_KEY_RTCPRSIZE));
+            if let Some(tagged) = bundled.first().and_then(|tag| {
+                d.media_descriptions
+                    .iter_mut()
+                    .find(|media| get_mid_value(media) == Some(tag))
+            }) && tagged.media_name.media == MEDIA_SECTION_APPLICATION
+            {
+                for (key, wanted) in [(ATTR_KEY_RTCPMUX, mux), (ATTR_KEY_RTCPRSIZE, rsize)] {
+                    if wanted && !tagged.has_attribute(key) {
+                        tagged
+                            .attributes
+                            .push(sdp::description::common::Attribute::new(
+                                key.to_owned(),
+                                None,
+                            ));
+                    }
+                }
+            }
             for mid in bundled.iter().skip(1) {
                 if let Some(media) = d
                     .media_descriptions
@@ -2774,6 +2841,12 @@ pub(crate) fn codecs_from_media_description(
         if std::mem::replace(&mut seen[payload_type as usize], true) {
             continue;
         }
+        // RFC 5761 section 4: "RTP payload types in the range 64-95 MUST NOT be used" where
+        // RTP and RTCP share a port, as they always do here. A format numbered so is one this
+        // endpoint cannot receive or send: left out, like a format it does not know.
+        if is_rtcp_conflicting_payload_type(payload_type) {
+            continue;
+        }
         // A payload type with no `a=rtpmap` (only `a=fmtp` / `a=rtcp-fb`
         // lines, or none) is RFC 3551's static assignment for audio, else a
         // format this description doesn't define: RFC 9429 section 5.3.1 and
@@ -3002,6 +3075,19 @@ pub(crate) fn rtp_extensions_from_media_description(
                 .as_deref()
                 .and_then(|v| v.split_whitespace().nth(1))
                 .is_some_and(|uri| Url::parse(uri).is_err())
+            {
+                continue;
+            }
+            // RFC 8285 sections 5 and 6: 256 is the `appbits` mapping and 4096 to 4351 are
+            // extensions the offerer left for the answerer to number. Neither is an id a
+            // packet carries (`ExtMap::is_element_id`). They are valid in a description, so
+            // they do not fail it; this endpoint does not use them, which leaves them out of
+            // the answer (an answerer "MAY" take a 4096+ extension by renumbering it).
+            if a.value
+                .as_deref()
+                .and_then(|v| v.split([' ', '/']).next())
+                .and_then(|id| id.parse::<u32>().ok())
+                .is_some_and(|id| id == 256 || (4096..=4351).contains(&id))
             {
                 continue;
             }

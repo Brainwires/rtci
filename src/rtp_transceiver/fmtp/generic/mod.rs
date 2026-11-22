@@ -43,6 +43,26 @@ impl Fmtp for GenericFmtp {
                 return false;
             }
 
+            // RFC 4588 section 8.1: `rtx-time` is how long that side's sender keeps packets,
+            // each endpoint's own figure. Two retransmission formats that differ in it alone
+            // are the same format (the `apt` decides).
+            if self
+                .mime_type
+                .rsplit('/')
+                .next()
+                .is_some_and(|subtype| subtype.eq_ignore_ascii_case("rtx"))
+            {
+                let without_rtx_time = |parameters: &HashMap<String, String>| {
+                    let mut parameters = parameters.clone();
+                    parameters.remove("rtx-time");
+                    parameters
+                };
+                return fmtp_consist(
+                    &without_rtx_time(&self.parameters),
+                    &without_rtx_time(&c.parameters),
+                );
+            }
+
             fmtp_consist(&self.parameters, &c.parameters)
         } else {
             false

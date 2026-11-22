@@ -1,5 +1,6 @@
 use super::*;
-use crate::peer_connection::configuration::RTCRtcpMuxPolicy;
+use crate::peer_connection::configuration::remote_bitrate_limit::RemoteBitrateLimit;
+use crate::peer_connection::configuration::{RTCBundlePolicy, RTCRtcpMuxPolicy};
 use crate::peer_connection::event::{RTCPeerConnectionEvent, RTCPeerConnectionIceEvent};
 use crate::peer_connection::handler::datachannel::DataChannelHandlerContext;
 use crate::peer_connection::handler::demuxer::DemuxerHandlerContext;
@@ -8,6 +9,7 @@ use crate::peer_connection::handler::interceptor::InterceptorHandlerContext;
 use crate::peer_connection::handler::srtp::SrtpHandlerContext;
 use crate::peer_connection::sdp::answered_extension_directions;
 use crate::peer_connection::sdp::has_bundle_attribute;
+use crate::peer_connection::sdp::section_multiplexes_rtcp;
 use crate::peer_connection::sdp::{
     ATTR_KEY_RTCP_MUX_ONLY, BundleMode, MediaSection, PopulateSdpParams,
     add_candidates_to_media_descriptions, bundle_group_mids, effective_direction,
@@ -28,7 +30,7 @@ use crate::rtp_transceiver::rtp_receiver::internal::RTCRtpReceiverInternal;
 use crate::rtp_transceiver::rtp_sender::RTCRtpCodec;
 use crate::rtp_transceiver::rtp_sender::negotiates_ccfb;
 use crate::rtp_transceiver::rtp_sender::rtp_codec::{
-    encoding_send_codec, is_repair_codec, parse_rtx_apt,
+    encoding_send_codec, is_repair_codec, is_rtx_mime_type, parse_rtx_apt, parse_rtx_time,
 };
 use crate::rtp_transceiver::rtp_sender::rtp_coding_parameters::{
     RTCRtpCodingParameters, RTCRtpFecParameters, RTCRtpRtxParameters,
@@ -248,6 +250,10 @@ impl RTCPeerConnection {
             now,
         };
 
+        // One CNAME for the connection (RFC 7022, RFC 8834 section 4.9): what RTCP says, what
+        // the descriptions say (`a=ssrc:<ssrc> cname:`) and what the parameters report.
+        media_engine.rtcp_cname = pipeline_context.interceptor_handler_context.cname.clone();
+
         Ok(Self {
             configuration,
             media_engine,
@@ -286,6 +292,25 @@ impl RTCPeerConnection {
     /// because the description advertises the new credentials and the candidates gathered
     /// so far belong to the old ones (RFC 8839 section 5.4, JSEP section 5.2.3.1: a restart
     /// starts a new gathering phase, whose candidates are signalled as they come).
+    /// The bundle policy in effect (RFC 9429 section 4.1.1): the deprecated `max-bundle` is
+    /// ignored, which leaves the default, unless the application made it an alias of
+    /// `must-bundle`.
+    fn effective_bundle_policy(&self) -> RTCBundlePolicy {
+        match self.configuration.bundle_policy {
+            RTCBundlePolicy::MaxBundle if self.setting_engine.max_bundle_as_must_bundle => {
+                RTCBundlePolicy::MustBundle
+            }
+            RTCBundlePolicy::MaxBundle => RTCBundlePolicy::Unspecified,
+            policy => policy,
+        }
+    }
+
+    /// No offer/answer exchange has completed yet: an offer applied now is an initial offer
+    /// (RFC 9143 section 2, "initial BUNDLE offer").
+    pub(super) fn is_initial_exchange(&self) -> bool {
+        self.current_local_description.is_none() && self.current_remote_description.is_none()
+    }
+
     fn offered_local_candidates(&self) -> Result<Vec<RTCIceCandidate>> {
         if self.ice_transport().has_pending_restart() {
             return Ok(Vec::new());
@@ -387,11 +412,11 @@ impl RTCPeerConnection {
             bundle: BundleMode::Offer,
             offered_tag_rtcp_mux_only: false,
             rtcp_mux_only: self.configuration.rtcp_mux_policy != RTCRtcpMuxPolicy::Negotiate,
-            bundle_policy: self.configuration.bundle_policy,
+            bundle_policy: self.effective_bundle_policy(),
             initial_offer: true,
-            bundle_attributes_in_tagged_section_only: self
+            bundle_attributes_in_tagged_section_only: !self
                 .setting_engine
-                .bundle_attributes_in_tagged_section_only,
+                .bundle_attributes_repeated,
             sctp_max_message_size: self.setting_engine.sctp_max_message_size.as_usize(),
             sctp_port: self.sctp_transport().offer_port(),
             sctp_over_tcp: false,
@@ -430,6 +455,7 @@ impl RTCPeerConnection {
         let mut already_have_application_media_section = false;
         let is_extmap_allow_mixed = is_ext_map_allow_mixed_set(self.remote_description());
         let local_mids = self.local_description_mids();
+        let initial_remote_offer = !include_unmatched && self.is_initial_exchange();
 
         // Extract the description to avoid borrowing conflicts
         let remote_parsed = self
@@ -560,7 +586,7 @@ impl RTCPeerConnection {
                         && matches!(kind, RtpCodecKind::Audio | RtpCodecKind::Video)
                         && (!is_rtp_profile(media)
                             || !remote_parsed.as_ref().is_some_and(|parsed| {
-                                has_bundle_attribute(parsed, media, ATTR_KEY_RTCPMUX)
+                                section_multiplexes_rtcp(parsed, media, initial_remote_offer)
                             }))
                     {
                         media_sections.push(MediaSection {
@@ -742,11 +768,11 @@ impl RTCPeerConnection {
             is_extmap_allow_mixed,
             connection_role,
             ice_gathering_state: self.ice_transport().ice_gathering_state,
-            bundle_policy: self.configuration.bundle_policy,
+            bundle_policy: self.effective_bundle_policy(),
             initial_offer: false,
-            bundle_attributes_in_tagged_section_only: self
+            bundle_attributes_in_tagged_section_only: !self
                 .setting_engine
-                .bundle_attributes_in_tagged_section_only,
+                .bundle_attributes_repeated,
             rtcp_mux_only: self.configuration.rtcp_mux_policy != RTCRtcpMuxPolicy::Negotiate,
             offered_tag_rtcp_mux_only: !include_unmatched
                 && remote_parsed
@@ -1242,8 +1268,14 @@ impl RTCPeerConnection {
                         .collect()
                 });
             self.rtp_transceivers[i].set_remote_rtcp_xr(rtcp_xr);
+            let application_specific = of("AS").map(|kbps| kbps.saturating_mul(1000));
             self.rtp_transceivers[i].set_remote_bandwidth(RTCRemoteBandwidth {
-                max_bitrate: of("TIAS").or_else(|| of("AS").map(|kbps| kbps.saturating_mul(1000))),
+                // RFC 9429 section 5.10: "TIAS = AS * 1000 * 0.95 - (50 * 40 * 8)".
+                max_bitrate: of("TIAS").or_else(|| {
+                    application_specific
+                        .map(|bps| (bps / 100).saturating_mul(95).saturating_sub(50 * 40 * 8))
+                }),
+                session_bitrate: of("TIAS").or(application_specific),
                 rtcp_senders_bitrate: of("RS"),
                 rtcp_receivers_bitrate: of("RR"),
             });
@@ -1279,6 +1311,143 @@ impl RTCPeerConnection {
                 && has_bundle_attribute(answer, answered, ATTR_KEY_RTCPRSIZE);
             self.rtp_transceivers[i].set_rtcp_reduced_size(reduced_size);
         }
+    }
+
+    /// Hands what an applied answer negotiated to the parts of the interceptor chain that
+    /// act on it. Each goes as a control message written into the chain; a chain without
+    /// the interceptor a message is for drops it.
+    ///
+    /// - Reduced-size RTCP (`a=rtcp-rsize` in the offer and in the answer, RFC 5506 section
+    ///   5), when every media section negotiated it:
+    ///   [`RtcpSessionControl::ReducedSize`](interceptor::RtcpSessionControl).
+    /// - The bandwidth of the remote description's `b=` lines, summed over the media sections
+    ///   when each has the line (RFC 8859 section 6: `b=AS`, `b=RS` and `b=RR` are of the SUM
+    ///   category, and the values of `b=TIAS` are added): the session bandwidth (RFC 3550
+    ///   section 6.2) and
+    ///   the RTCP bandwidth of senders and receivers (RFC 3556 section 2), as
+    ///   [`RtcpSessionControl::Bandwidth`](interceptor::RtcpSessionControl).
+    /// - `trr-int` of the local description (RFC 4585 section 4.2: this endpoint's minimum
+    ///   interval between regular RTCP packets), the longest when sections differ:
+    ///   [`RtcpSessionControl::TrrInt`](interceptor::RtcpSessionControl).
+    /// - The most the remote side accepts (`b=TIAS`, else `b=AS`; RFC 9429 section 5.10),
+    ///   summed over the sections this endpoint sends in when each has a limit, as the upper
+    ///   bound of the congestion controller's estimate ([`RemoteBitrateLimit`]).
+    /// - `rtx-time` of the retransmission formats (RFC 4588 section 8.1): the local
+    ///   description's is how long the NACK responder keeps a sent packet, the remote
+    ///   description's how long the NACK generator asks for a missing one
+    ///   ([`NackControl`](interceptor::NackControl)).
+    pub(super) fn apply_negotiated_session(
+        &mut self,
+        now: Instant,
+        local: &SessionDescription,
+        remote: &SessionDescription,
+    ) -> Result<()> {
+        use interceptor::{NackControl, RtcpBandwidth, RtcpSessionControl};
+        use std::time::Duration;
+
+        let live = |t: &&RTCRtpTransceiverInternal| t.mid().is_some() && !t.stopped();
+        let sum = |values: Vec<Option<u64>>| -> Option<u64> {
+            if values.is_empty() {
+                return None;
+            }
+            values
+                .into_iter()
+                .try_fold(0u64, |total, value| Some(total.saturating_add(value?)))
+        };
+        let of_live = |value: fn(&RTCRemoteBandwidth) -> Option<u64>| -> Vec<Option<u64>> {
+            self.rtp_transceivers
+                .iter()
+                .filter(live)
+                .map(|t| value(&t.remote_bandwidth()))
+                .collect()
+        };
+
+        let reduced_size = self.rtp_transceivers.iter().any(|t| live(&t))
+            && self
+                .rtp_transceivers
+                .iter()
+                .filter(live)
+                .all(|t| t.rtcp_reduced_size());
+        let bandwidth = RtcpBandwidth {
+            session: sum(of_live(|b| b.session_bitrate)),
+            rs: sum(of_live(|b| b.rtcp_senders_bitrate)),
+            rr: sum(of_live(|b| b.rtcp_receivers_bitrate)),
+        };
+        let send_limit = sum(self
+            .rtp_transceivers
+            .iter()
+            .filter(live)
+            .filter(|t| t.sender().is_some() && t.current_direction().has_send())
+            .map(|t| t.remote_bandwidth().max_bitrate)
+            .collect());
+
+        let transceiver_by_mid =
+            RTCPeerConnection::transceiver_index_by_mid(&self.rtp_transceivers);
+        let negotiated_sections = |desc: &SessionDescription| -> Vec<Vec<RTCRtpCodecParameters>> {
+            desc.media_descriptions
+                .iter()
+                .filter(|media| {
+                    !is_rejected_media(media)
+                        && get_mid_value(media)
+                            .is_some_and(|mid| transceiver_by_mid.contains_key(mid.as_str()))
+                })
+                .filter_map(|media| codecs_from_media_description(media).ok())
+                .collect()
+        };
+        let local_sections = negotiated_sections(local);
+        let remote_sections = negotiated_sections(remote);
+        let trr_int = local_sections
+            .iter()
+            .flatten()
+            .flat_map(|codec| &codec.rtp_codec.rtcp_feedback)
+            .filter(|feedback| feedback.typ == "trr-int")
+            .filter_map(|feedback| feedback.parameter.trim().parse::<u64>().ok())
+            .max();
+        let rtx_times = |sections: &[Vec<RTCRtpCodecParameters>]| -> Vec<(u8, Option<Duration>)> {
+            sections
+                .iter()
+                .flatten()
+                .filter(|codec| is_rtx_mime_type(&codec.rtp_codec.mime_type))
+                .map(|codec| {
+                    (
+                        codec.payload_type,
+                        parse_rtx_time(&codec.rtp_codec.sdp_fmtp_line),
+                    )
+                })
+                .collect()
+        };
+
+        let mut controls = vec![
+            RtcpSessionControl::ReducedSize(reduced_size).into_packet(now),
+            RtcpSessionControl::Bandwidth(bandwidth).into_packet(now),
+        ];
+        if let Some(trr_int) = trr_int {
+            controls
+                .push(RtcpSessionControl::TrrInt(Duration::from_millis(trr_int)).into_packet(now));
+        }
+        controls.push(RemoteBitrateLimit(send_limit.map(|limit| limit as f64)).into_packet(now));
+        for (payload_type_rtx, rtx_time) in rtx_times(&local_sections) {
+            controls.push(
+                NackControl::LocalRtxTime {
+                    payload_type_rtx,
+                    rtx_time,
+                }
+                .into_packet(now),
+            );
+        }
+        for (payload_type_rtx, rtx_time) in rtx_times(&remote_sections) {
+            controls.push(
+                NackControl::RemoteRtxTime {
+                    payload_type_rtx,
+                    rtx_time,
+                }
+                .into_packet(now),
+            );
+        }
+        for control in controls {
+            self.interceptor.handle_write(control)?;
+        }
+        Ok(())
     }
 
     /// Gives each m= section of a remote description that has no `a=mid` one (RFC 9429,

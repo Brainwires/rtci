@@ -123,9 +123,9 @@
 //! use rtc::peer_connection::configuration::{RTCConfigurationBuilder, RTCBundlePolicy};
 //!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! // Use max-bundle for best performance (single transport)
+//! // Only the first m= section of an initial offer carries a transport
 //! let config = RTCConfigurationBuilder::new()
-//!     .with_bundle_policy(RTCBundlePolicy::MaxBundle)
+//!     .with_bundle_policy(RTCBundlePolicy::MustBundle)
 //!     .build();
 //! # Ok(())
 //! # }
@@ -175,7 +175,7 @@
 //!         },
 //!     ])
 //!     .with_ice_transport_policy(RTCIceTransportPolicy::All)
-//!     .with_bundle_policy(RTCBundlePolicy::MaxBundle)
+//!     .with_bundle_policy(RTCBundlePolicy::MustBundle)
 //!     .with_rtcp_mux_policy(RTCRtcpMuxPolicy::Require)
 //!     .with_certificates(vec![certificate])
 //!     .with_ice_candidate_pool_size(5)
@@ -192,7 +192,9 @@
 //!
 //! - **Balanced** - Bundle audio/video separately if peer doesn't support bundling
 //! - **MaxCompat** - Separate transports for each track (maximum compatibility)
-//! - **MaxBundle** - Single transport for all media (best performance, recommended)
+//! - **MustBundle** - Only the first m= section of an initial offer carries a transport
+//! - **MaxBundle** - Deprecated (RFC 9429 section 4.1.1) and ignored unless the setting engine
+//!   makes it an alias of `MustBundle`
 //!
 //! ## ICE Transport Policy
 //!
@@ -225,6 +227,7 @@ pub(crate) mod ice_transport_policy;
 pub mod interceptor_registry;
 pub mod media_engine;
 pub(crate) mod offer_answer_options;
+pub mod remote_bitrate_limit;
 pub(crate) mod rtcp_mux_policy;
 pub(crate) mod sdp_semantics;
 pub mod setting_engine;
@@ -589,13 +592,16 @@ impl RTCConfigurationBuilder {
 
     /// Sets the bundle policy.
     ///
-    /// The W3C policies are:
-    /// - `Balanced`: Bundle audio/video separately if peer doesn't support bundling
-    /// - `MaxCompat`: Separate transports for each track (maximum compatibility)
-    /// - `MaxBundle`: Single transport for all media (best performance)
+    /// The policies of RFC 9429 section 4.1.1 are:
+    /// - `Balanced` (the default): in an initial offer the second and later m= section of
+    ///   each media type is bundle-only
+    /// - `MaxCompat`: no m= section is bundle-only
+    /// - `MustBundle`: every m= section but the first is bundle-only
+    /// - `MaxBundle`: deprecated and ignored, unless
+    ///   `SettingEngineBuilder::with_max_bundle_as_must_bundle(true)`
     ///
-    /// This engine has a single transport, so every policy behaves as `MaxBundle`: all m=
-    /// sections are bundled on one ICE/DTLS transport. See [`RTCBundlePolicy`].
+    /// This engine has a single transport: all m= sections are bundled on one ICE/DTLS
+    /// transport whatever the policy. See [`RTCBundlePolicy`].
     ///
     /// # Examples
     ///
@@ -603,7 +609,7 @@ impl RTCConfigurationBuilder {
     /// use rtc::peer_connection::configuration::{RTCConfigurationBuilder, RTCBundlePolicy};
     ///
     /// let config = RTCConfigurationBuilder::new()
-    ///     .with_bundle_policy(RTCBundlePolicy::MaxBundle)
+    ///     .with_bundle_policy(RTCBundlePolicy::MustBundle)
     ///     .build();
     /// ```
     pub fn with_bundle_policy(mut self, bundle_policy: RTCBundlePolicy) -> Self {

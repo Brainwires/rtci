@@ -12,6 +12,7 @@ use jsep_common::{
     SESSION, TestResult, crlf, default_peer, exchange, media_sections, port_of, video_track,
 };
 use rtc::peer_connection::configuration::media_engine::MediaEngine;
+use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtc::peer_connection::configuration::{RTCConfigurationBuilder, RTCRtcpMuxPolicy};
 use rtc::peer_connection::sdp::RTCSessionDescription;
 use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
@@ -186,7 +187,9 @@ fn the_answerer_tagged_section_repeats_rtcp_mux_only() -> TestResult {
     let sections = media_sections(&answer.sdp);
     assert!(has(&sections[0], "a=rtcp-mux"), "{}", answer.sdp);
     assert!(has(&sections[0], "a=rtcp-mux-only"), "{}", answer.sdp);
-    assert!(has(&sections[1], "a=rtcp-mux"), "{}", answer.sdp);
+    // RFC 9143 section 7.1.3: the BUNDLE attributes of an answer are in the tagged section
+    // only.
+    assert!(!has(&sections[1], "a=rtcp-mux"), "{}", answer.sdp);
     assert!(!has(&sections[1], "a=rtcp-mux-only"), "{}", answer.sdp);
 
     // Not offered: not answered.
@@ -313,6 +316,7 @@ a=rtcp-xr:rcvr-rtt=all
     let first = pc.rtp_transceiver(ids[0]).expect("transceiver");
     let bandwidth = first.remote_bandwidth();
     assert_eq!(bandwidth.max_bitrate, Some(400_000), "TIAS wins over AS");
+    assert_eq!(bandwidth.session_bitrate, Some(400_000));
     assert_eq!(bandwidth.rtcp_senders_bitrate, Some(2000));
     assert_eq!(bandwidth.rtcp_receivers_bitrate, Some(0));
     assert_eq!(
@@ -323,7 +327,16 @@ a=rtcp-xr:rcvr-rtt=all
 
     let second = pc.rtp_transceiver(ids[1]).expect("transceiver");
     let bandwidth = second.remote_bandwidth();
-    assert_eq!(bandwidth.max_bitrate, Some(300_000), "AS is in kilobits");
+    assert_eq!(
+        bandwidth.max_bitrate,
+        Some(269_000),
+        "TIAS = AS * 1000 * 0.95 - (50 * 40 * 8)"
+    );
+    assert_eq!(
+        bandwidth.session_bitrate,
+        Some(300_000),
+        "AS is in kilobits"
+    );
     assert_eq!(bandwidth.rtcp_senders_bitrate, None);
     assert_eq!(
         second.remote_rtcp_xr().map(<[String]>::to_vec),
@@ -368,13 +381,22 @@ fn a_subsequent_offer_follows_the_most_recent_answer() -> TestResult {
     let offer = offerer.create_offer(None)?;
     let sections = media_sections(&offer.sdp);
     assert_eq!(sections.len(), 2, "{}", offer.sdp);
-    // The negotiated section.
+    // The negotiated section, which is the offerer-tagged one.
     assert!(has(&sections[0], "a=rtcp-mux"), "{}", offer.sdp);
     assert!(!has(&sections[0], "a=rtcp-mux-only"), "{}", offer.sdp);
     assert!(!has(&sections[0], "a=rtcp-rsize"), "{}", offer.sdp);
-    // The new one.
+    // The new one is bundled: in a subsequent offer the BUNDLE attributes are the tagged
+    // section's alone (RFC 9143 section 7.1.3; RFC 9429 section 5.2.2: "MUST simply omit
+    // parameters in the IDENTICAL and TRANSPORT categories for bundled 'm=' sections").
     for line in ["a=rtcp-mux", "a=rtcp-mux-only", "a=rtcp-rsize"] {
-        assert!(has(&sections[1], line), "{line}:\n{}", offer.sdp);
+        assert!(!has(&sections[1], line), "{line}:\n{}", offer.sdp);
+    }
+    // And the answerer takes it.
+    offerer.set_local_description(Instant::now(), offer.clone())?;
+    answerer.set_remote_description(Instant::now(), offer)?;
+    let answer = answerer.create_answer(None)?;
+    for section in media_sections(&answer.sdp) {
+        assert_ne!(port_of(&section), 0, "{}", answer.sdp);
     }
 
     // Under "negotiate" no section says it only multiplexes.
@@ -383,5 +405,103 @@ fn a_subsequent_offer_follows_the_most_recent_answer() -> TestResult {
     let offer = pc.create_offer(None)?;
     assert!(offer.sdp.contains("a=rtcp-mux\r\n"), "{}", offer.sdp);
     assert!(!offer.sdp.contains("a=rtcp-mux-only"), "{}", offer.sdp);
+    Ok(())
+}
+
+/// With the BUNDLE attributes repeated (`with_bundle_attributes_repeated`), a subsequent
+/// offer's new section says `a=rtcp-mux-only` (RFC 9429 section 4.1.1: "into any new 'm='
+/// sections in offers it generates"), and a negotiated one does not (section 5.2.2).
+#[test]
+fn a_repeating_offerer_marks_the_new_section_of_a_subsequent_offer() -> TestResult {
+    let repeating = || -> Result<RTCPeerConnection, Box<dyn std::error::Error>> {
+        let mut media_engine = MediaEngine::default();
+        media_engine.register_default_codecs()?;
+        Ok(RTCPeerConnectionBuilder::new()
+            .with_setting_engine(
+                SettingEngineBuilder::new()
+                    .with_bundle_attributes_repeated(true)
+                    .build(),
+            )
+            .with_media_engine(media_engine)
+            .build(Instant::now())?)
+    };
+    let mut offerer = repeating()?;
+    let mut answerer = default_peer()?;
+    offerer.add_track(video_track("first", 0x0404_0404))?;
+    exchange(&mut offerer, &mut answerer)?;
+    offerer.add_track(video_track("second", 0x0505_0505))?;
+    let offer = offerer.create_offer(None)?;
+    let sections = media_sections(&offer.sdp);
+    assert_eq!(sections.len(), 2, "{}", offer.sdp);
+    assert!(has(&sections[0], "a=rtcp-mux"), "{}", offer.sdp);
+    assert!(!has(&sections[0], "a=rtcp-mux-only"), "{}", offer.sdp);
+    for line in ["a=rtcp-mux", "a=rtcp-mux-only", "a=rtcp-rsize"] {
+        assert!(has(&sections[1], line), "{line}:\n{}", offer.sdp);
+    }
+    Ok(())
+}
+
+/// RFC 9143 section 9.3.1.1: in an initial offer "the offerer MUST include an SDP 'rtcp-mux'
+/// attribute in each bundled 'm=' section (excluding any bundle-only 'm=' sections)". A
+/// bundled section without it does not take the offerer-tagged section's: under "require"
+/// the offer is refused, under "negotiate" the section is rejected. A bundle-only section
+/// carries no BUNDLE attribute and does take it.
+#[test]
+fn an_initial_offer_needs_rtcp_mux_in_every_bundled_section_but_the_bundle_only_ones() -> TestResult
+{
+    let lacking = || offer("0 1", &[audio("0", "a=rtcp-mux\n"), video("1", "")]);
+
+    let mut pc = default_peer()?;
+    let refused = pc.set_remote_description(Instant::now(), lacking()?);
+    assert!(
+        matches!(&refused, Err(Error::SdpInvalidValue(why)) if why.contains("a=rtcp-mux")),
+        "{refused:?}"
+    );
+    assert!(pc.remote_description().is_none());
+
+    let mut pc = peer_with(RTCRtcpMuxPolicy::Negotiate)?;
+    pc.set_remote_description(Instant::now(), lacking()?)?;
+    let answer = pc.create_answer(None)?;
+    let sections = media_sections(&answer.sdp);
+    assert_ne!(port_of(&sections[0]), 0, "{}", answer.sdp);
+    assert_eq!(port_of(&sections[1]), 0, "{}", answer.sdp);
+
+    // Bundle-only: port zero, no transport lines, no a=rtcp-mux.
+    let bundle_only = "m=video 0 UDP/TLS/RTP/SAVPF 96
+c=IN IP4 0.0.0.0
+a=mid:1
+a=bundle-only
+a=sendrecv
+a=rtpmap:96 VP8/90000
+";
+    let mut pc = default_peer()?;
+    pc.set_remote_description(
+        Instant::now(),
+        offer("0 1", &[audio("0", "a=rtcp-mux\n"), bundle_only.to_owned()])?,
+    )?;
+    let answer = pc.create_answer(None)?;
+    for section in media_sections(&answer.sdp) {
+        assert_ne!(port_of(&section), 0, "{}", answer.sdp);
+    }
+    Ok(())
+}
+
+/// RFC 9143 section 7.1.3: a subsequent offer has `a=rtcp-mux` in the offerer-tagged section
+/// only, and it applies to every bundled section, new ones included.
+#[test]
+fn a_subsequent_offer_with_rtcp_mux_in_the_tagged_section_only_is_taken() -> TestResult {
+    let mut pc = default_peer()?;
+    pc.set_remote_description(Instant::now(), offer("0", &[audio("0", "a=rtcp-mux\n")])?)?;
+    let answer = pc.create_answer(None)?;
+    pc.set_local_description(Instant::now(), answer)?;
+
+    pc.set_remote_description(
+        Instant::now(),
+        offer("0 1", &[audio("0", "a=rtcp-mux\n"), video("1", "")])?,
+    )?;
+    let answer = pc.create_answer(None)?;
+    for section in media_sections(&answer.sdp) {
+        assert_ne!(port_of(&section), 0, "{}", answer.sdp);
+    }
     Ok(())
 }

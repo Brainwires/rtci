@@ -130,6 +130,9 @@
 //! - [draft-holmer-rmcat-transport-wide-cc](https://datatracker.ietf.org/doc/html/draft-holmer-rmcat-transport-wide-cc-extensions-01) - TWCC
 
 use crate::peer_connection::configuration::media_engine::MediaEngine;
+use crate::peer_connection::configuration::remote_bitrate_limit::{
+    REMOTE_BITRATE_LIMIT_SLOT, RemoteBitrateLimitInterceptor,
+};
 use crate::rtp_transceiver::rtp_sender::rtcp_parameters::{
     RTCP_FB_ACK_CCFB, TYPE_RTCP_FB_ACK, TYPE_RTCP_FB_NACK, TYPE_RTCP_FB_TRANSPORT_CC,
 };
@@ -144,6 +147,7 @@ use interceptor::{
     NackResponderBuilder, PacerBuilder, Rfc8888Builder, RtcpSessionBuilder, TwccReceiverBuilder,
     TwccSenderBuilder,
 };
+use std::time::Duration;
 
 /// The chain registry these helpers take and return, and the positions they place interceptors at.
 ///
@@ -416,6 +420,8 @@ pub fn configure_nack(registry: Registry, media_engine: &mut MediaEngine) -> Reg
 ///   last SR and the delay since (RFC 3550 6.4, Appendix A.3).
 /// - **One CNAME** (RFC 7022) in an SDES for every reporting SSRC, and a BYE for an SSRC that
 ///   stops and for all of them when the connection closes.
+/// - **`T_rr_interval` of zero**, the RFC 4585 section 4.2 default when no `trr-int` is
+///   signalled: see [`configure_rtcp_reports_with`] for the browsers' one second.
 /// - **Timing** by RFC 3550 6.3 (interval from the member count, the average packet size and
 ///   the RTCP bandwidth, randomised, with timer reconsideration) and the RTP/AVPF rules of
 ///   RFC 4585 3.5: feedback the other interceptors and the application write (NACK, PLI, FIR,
@@ -464,7 +470,35 @@ pub fn configure_nack(registry: Registry, media_engine: &mut MediaEngine) -> Reg
 /// - [RFC 4585 Section 3](https://datatracker.ietf.org/doc/html/rfc4585#section-3) - RTP/AVPF timing
 /// - [RFC 8108](https://datatracker.ietf.org/doc/html/rfc8108) - several SSRCs in one session
 pub fn configure_rtcp_reports(registry: Registry) -> Registry {
-    registry.with(Slot::RtcpSession, RtcpSessionBuilder::new().build())
+    configure_rtcp_reports_with(
+        registry,
+        RtcpSessionBuilder::new().with_t_rr_interval(Duration::ZERO),
+    )
+}
+
+/// [`configure_rtcp_reports`] with the RTCP session built from `session`, for the settings a
+/// session description does not carry.
+///
+/// The one [`configure_rtcp_reports`] itself sets is `T_rr_interval`, the minimum interval
+/// between regular RTCP packets under RTP/AVPF: zero, as RFC 4585 section 4.2 has it when
+/// `trr-int` is not signalled ("If trr-int is not specified, a default of 0 is assumed"), so
+/// regular reports are spaced by the RTCP bandwidth alone (RFC 3550 section 6.2: 5% of the
+/// session bandwidth). Browsers space them about a second apart whatever the bandwidth; that
+/// is `RtcpSessionBuilder::new()` as it comes
+/// ([`RTCP_SESSION_DEFAULT_T_RR_INTERVAL`](interceptor::RTCP_SESSION_DEFAULT_T_RR_INTERVAL)):
+///
+/// ```
+/// use rtc::interceptor::{Registry, RtcpSessionBuilder};
+/// use rtc::peer_connection::configuration::interceptor_registry::configure_rtcp_reports_with;
+///
+/// // Regular reports at most once a second, as browsers send them.
+/// let registry = configure_rtcp_reports_with(Registry::new(), RtcpSessionBuilder::new());
+/// ```
+///
+/// A `trr-int` this endpoint announces in its description replaces either value when the
+/// answer is applied.
+pub fn configure_rtcp_reports_with(registry: Registry, session: RtcpSessionBuilder) -> Registry {
+    registry.with(Slot::RtcpSession, session.build())
 }
 
 /// Negotiates receiver-side round trip time measurement for video (`a=rtcp-fb:<pt> rrtr`,
@@ -863,6 +897,7 @@ pub enum CongestionFeedback {
 /// |---|---|---|
 /// | [`Slot::CongestionControl`] | send history and feedback ingest | the only position that sees every byte that leaves |
 /// | [`Slot::TwccSender`] | transport-wide sequence numbers | so the history keys on a number that already exists |
+/// | [`REMOTE_BITRATE_LIMIT_SLOT`] | bounds the estimate by the remote description's `b=TIAS` / `b=AS` | between the controller, which announces the estimate, and the pacer, which reads it |
 /// | [`Slot::Pacer`] | paces departures | above the two, so `packet.now` is the release instant |
 /// | [`Slot::TwccReceiver`] or [`Slot::Rfc8888`] | records arrivals, reports them to the remote | an arrival recorder, so it precedes the jitter buffer |
 ///
@@ -949,6 +984,12 @@ pub fn configure_congestion_control<E: BandwidthEstimator + 'static>(
         .with(
             Slot::CongestionControl,
             CongestionControlBuilder::new(estimator).build(),
+        )
+        // The remote description's `b=TIAS` / `b=AS` bounds the estimate on its way to the
+        // pacer (RFC 9429 section 5.10).
+        .with(
+            Slot::Custom(REMOTE_BITRATE_LIMIT_SLOT),
+            RemoteBitrateLimitInterceptor::new(initial_target),
         )
         .with(
             Slot::Pacer,

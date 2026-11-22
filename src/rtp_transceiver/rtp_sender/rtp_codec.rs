@@ -301,6 +301,25 @@ pub(crate) fn parse_rtx_apt(sdp_fmtp_line: &str) -> Option<PayloadType> {
         .find_map(|value| value.trim().parse::<PayloadType>().ok())
 }
 
+/// The `rtx-time` of a retransmission format's fmtp line (RFC 4588 section 8.1: "the time in
+/// milliseconds (measured from the time a packet was first sent) that the sender keeps an RTP
+/// packet in its buffers available for retransmission"), e.g. of `"apt=96;rtx-time=3000"`.
+pub(crate) fn parse_rtx_time(sdp_fmtp_line: &str) -> Option<std::time::Duration> {
+    sdp_fmtp_line
+        .split(';')
+        .filter_map(|param| param.trim().strip_prefix("rtx-time="))
+        .find_map(|value| value.trim().parse::<u64>().ok())
+        .map(std::time::Duration::from_millis)
+}
+
+/// Whether `mime_type` is a retransmission format (`audio/rtx`, `video/rtx`; RFC 4588
+/// section 8).
+pub(crate) fn is_rtx_mime_type(mime_type: &str) -> bool {
+    mime_type
+        .split_once('/')
+        .is_some_and(|(_, subtype)| subtype.eq_ignore_ascii_case("rtx"))
+}
+
 /// Whether `codec` repairs another stream rather than carrying media of its own.
 ///
 /// Covers retransmission (RTX, RFC 4588) and forward error correction (FlexFEC, ULPFEC, RED).
@@ -394,6 +413,10 @@ pub(crate) fn find_fec_payload_type(haystack: &[RTCRtpCodecParameters]) -> Optio
 /// Returns feedback mechanisms that are supported by both lists,
 /// matching on both type and parameter fields.
 ///
+/// `trr-int` matches on the type alone and keeps the parameter of `a`: its number is each
+/// endpoint's own minimum interval between regular RTCP packets (RFC 4585 section 4.2), not
+/// a capability the two have to agree on, so an answer states its own.
+///
 /// # Parameters
 ///
 /// * `a` - First feedback list
@@ -409,7 +432,9 @@ pub(crate) fn rtcp_feedback_intersection(
     let mut out = vec![];
     for a_feedback in a {
         for b_feeback in b {
-            if a_feedback.typ == b_feeback.typ && a_feedback.parameter == b_feeback.parameter {
+            if a_feedback.typ == b_feeback.typ
+                && (a_feedback.parameter == b_feeback.parameter || a_feedback.typ == "trr-int")
+            {
                 out.push(a_feedback.clone());
                 break;
             }
@@ -431,7 +456,7 @@ mod rtp_codec_flexfec_test;
 mod rtx_apt_test {
     use super::{
         RTCRtpCodec, RTCRtpCodecParameters, encoding_send_codec, find_rtx_payload_type,
-        parse_rtx_apt,
+        is_rtx_mime_type, parse_rtx_apt, parse_rtx_time,
     };
 
     fn media(mime_type: &str, payload_type: u8) -> RTCRtpCodecParameters {
@@ -525,6 +550,13 @@ mod rtx_apt_test {
         assert_eq!(parse_rtx_apt("apt=96;rtx-time=3000"), Some(96));
         assert_eq!(parse_rtx_apt("rtx-time=3000;apt=102"), Some(102));
         assert_eq!(parse_rtx_apt("apt=98 ; rtx-time=1000"), Some(98));
+        let ms = std::time::Duration::from_millis;
+        assert_eq!(parse_rtx_time("apt=96;rtx-time=3000"), Some(ms(3000)));
+        assert_eq!(parse_rtx_time("rtx-time=250; apt=102"), Some(ms(250)));
+        assert_eq!(parse_rtx_time("apt=96"), None);
+        assert_eq!(parse_rtx_time("apt=96;rtx-time=soon"), None);
+        assert!(is_rtx_mime_type("video/rtx") && is_rtx_mime_type("audio/RTX"));
+        assert!(!is_rtx_mime_type("video/VP8"));
     }
 
     #[test]
