@@ -93,6 +93,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `a=ice-pacing` (RFC 8839 section 5.5) when it is not the default, and the peer's
   `a=ice-pacing` reaches the ICE agent, which uses the higher value (RFC 8445 section 14.2).
   New `RTCPeerConnection::remote_ice_options`.
+- **abs-capture-time** (webrtc-extensions 8): `RTCRtpContributingSource` gains
+  `capture_timestamp` and `sender_capture_time_offset` (milliseconds; struct literals need
+  them). The receiver takes them from the `abs-capture-time` extension when it was negotiated,
+  or interpolates the capture time by RTP timestamp from the source's last one;
+  `RTCRtpSender::write_rtp_with_capture_time` stamps a packet.
+
+- **ice candidate pairs** (webrtc-extensions 7): new `RTCPeerConnectionEvent::
+  OnIceCandidatePairAdd` / `OnIceCandidatePairRemove` (the enum is `#[non_exhaustive]`), new
+  `ice::Event::CandidatePairAdded` / `CandidatePairRemoved` (an exhaustive match on the agent's
+  events needs the arms), `RTCIceTransport::get_candidate_pairs`,
+  `RTCPeerConnection::select_candidate_pair` / `remove_candidate_pair` (InvalidStateError when
+  closed or the ICE state is new / failed / closed, new `Error::NotFoundError` for a pair not
+  listed), `ice::Agent::{get_candidate_pairs, select_candidate_pair, remove_candidate_pair}`.
+  A removed pair is not checked again and not listed; removing the selected pair hands the
+  data to the best other valid pair. The cancelable `icecandidatepairnominate` and the
+  cancelable removal proposals are not implemented.
+
+- **rtp header extension control** (webrtc-extensions 4): `RTCRtpTransceiver::
+  set_header_extensions_to_negotiate` takes a `Vec<RTCRtpHeaderExtensionToNegotiate>` (uri and
+  direction, "stopped" for not negotiated) and returns a `Result`: an InvalidModificationError
+  for another size, another URI at an index, the mid not "sendrecv", or a mandatory-to-implement
+  extension (mid, audio level) stopped. New `get_header_extensions_to_negotiate` and
+  `get_negotiated_header_extensions`. Offers carry each extension that is not stopped with its
+  direction (`/inactive` too); answers carry an offered one within the offer's direction; an
+  applied answer sets both lists (reversed for a remote one, stopped for one it left out); a
+  new transceiver copies the list of the first of its kind that is not stopping.
+
 - **srtp**: `RTCPeerConnectionBuilder::build` refuses an SRTP or SRTCP replay window of 1 to
   63 packets (new `Error::ErrSrtpReplayWindowTooSmall`; RFC 3711 3.3.2); it used to fail when
   the first DTLS handshake completed. DTLS-SRTP keys of the AES-CM profiles live 2^31 packets
@@ -1037,6 +1064,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `TLS_EMPTY_RENEGOTIATION_INFO_SCSV`.
 
 ### Behaviour changes
+
+- **fec**: an encoding the application gives without a FEC SSRC gets one when a FEC format
+  (flexfec-03, RFC 8627 FlexFEC) is registered, as it gets an RTX SSRC: the offer carries the
+  `a=ssrc-group:FEC-FR` and the repair flow is bound
+  (`a_minted_fec_ssrc_carries_the_repair_flow_that_recovers_a_lost_packet`).
+- **tmmbr**: new `RTCRtpReceiver::set_remote_bitrate_limit(now, Option<u64>)` asks the remote
+  sender for an RFC 5104 TMMBR limit through the congestion control interceptor (only for a
+  stream that negotiated `ccm tmmbr`; `None` lifts it)
+  (`a_receiver_asks_the_sender_to_limit_its_rate_with_tmmbr`).
+
+- **sctp / dscp** (RFC 8837 section 5): when the data channels' codepoint changes (a channel
+  of another priority comes or goes) the association's congestion control and RTO start over,
+  at the next `handle_timeout`, as on a path change. New diagnostic
+  `RTCSctpTransport::congestion_window`
+  (`a_new_codepoint_restarts_the_associations_congestion_control`).
+- **tests**: SFrame-encrypted frames sent by the application through the opaque payloader
+  survive loss with NACK / RTX between two engines
+  (`sframe_encrypted_frames_survive_loss_through_nack_and_rtx`); Cryptex end to end
+  (`with_cryptex_the_extensions_are_encrypted_on_the_wire_and_read_in_the_clear`); the
+  webrtc-svc `setParameters` checks and the data channel priority on the wire.
 
 - **rtp receiver** (W3C webrtc-pc 4.4.1.4): `RTCRtpReceiver::get_parameters` lists no codecs
   once a description negotiated a direction that does not receive (sendonly, inactive): W3C

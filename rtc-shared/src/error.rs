@@ -2062,6 +2062,11 @@ pub enum Error {
     #[error("Invalid modification error")]
     InvalidModificationError,
 
+    /// Not found error: an argument names an object the callee does not have (W3C
+    /// `NotFoundError`), such as a candidate pair that is not on the ICE agent's list.
+    #[error("Not found error")]
+    NotFoundError,
+
     /// Invalid access error: an argument names something that is not the object's (W3C
     /// `InvalidAccessError`), such as a statistics selector that is not a sender or receiver
     /// of the peer connection.

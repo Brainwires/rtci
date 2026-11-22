@@ -176,3 +176,137 @@ fn an_sframe_ciphertext_crosses_the_opaque_payloader() -> Result<()> {
     assert_eq!(receiver.decrypt(b"", &out)?, frame);
     Ok(())
 }
+
+/// A peer whose only video codec is VP8 (temporal layers only: L1T1 to L1T3).
+fn vp8_only_peer() -> Result<rtc::peer_connection::RTCPeerConnection> {
+    use rtc::peer_connection::configuration::media_engine::MIME_TYPE_VP8;
+    use rtc::rtp_transceiver::rtp_sender::RTCRtpCodecParameters;
+    let mut media_engine = MediaEngine::default();
+    media_engine.register_codec(
+        RTCRtpCodecParameters {
+            rtp_codec: RTCRtpCodec {
+                mime_type: MIME_TYPE_VP8.to_owned(),
+                clock_rate: 90000,
+                ..Default::default()
+            },
+            payload_type: 96,
+        },
+        RtpCodecKind::Video,
+    )?;
+    Ok(RTCPeerConnectionBuilder::new()
+        .with_media_engine(media_engine)
+        .build(Instant::now())?)
+}
+
+fn set_mode(
+    pc: &mut rtc::peer_connection::RTCPeerConnection,
+    sender: RTCRtpSenderId,
+    modes: &[Option<&str>],
+) -> rtc::shared::error::Result<()> {
+    let mut handle = pc.rtp_sender(sender).expect("sender");
+    let mut parameters = handle.get_parameters().clone();
+    for (encoding, mode) in parameters.encodings.iter_mut().zip(modes) {
+        encoding.scalability_mode = mode.map(str::to_owned);
+    }
+    handle.set_parameters(parameters, None)
+}
+
+/// webrtc-svc 3.2.1 / 3.2.2: a mode no implemented send codec supports is refused by
+/// addTransceiver (OperationError) and, before negotiation, by setParameters
+/// (InvalidModificationError), as is one the encoding's own codec cannot carry; after
+/// negotiation a mode the negotiated codecs cannot carry is refused, and several active
+/// encodings with an active "S" mode are refused.
+#[test]
+fn set_parameters_refuses_modes_the_codecs_cannot_carry() -> Result<()> {
+    let mut pc = vp8_only_peer()?;
+    assert!(matches!(
+        add(
+            &mut pc,
+            RtpCodecKind::Video,
+            vec![encoding("", Some("L2T1"), "")]
+        ),
+        Err(Error::ErrOperationError(_))
+    ));
+    let sender = add(&mut pc, RtpCodecKind::Video, vec![encoding("", None, "")])?;
+    assert!(matches!(
+        set_mode(&mut pc, sender, &[Some("L2T1")]),
+        Err(Error::InvalidModificationError)
+    ));
+    set_mode(&mut pc, sender, &[Some("L1T3")])?;
+
+    let mut pc = peer()?;
+    let vp8 = add(
+        &mut pc,
+        RtpCodecKind::Video,
+        vec![encoding("", None, "video/VP8")],
+    )?;
+    assert!(matches!(
+        set_mode(&mut pc, vp8, &[Some("L3T3")]),
+        Err(Error::InvalidModificationError)
+    ));
+
+    let simulcast = add(
+        &mut pc,
+        RtpCodecKind::Video,
+        vec![encoding("a", None, ""), encoding("b", None, "")],
+    )?;
+    assert!(matches!(
+        set_mode(&mut pc, simulcast, &[Some("S2T1"), None]),
+        Err(Error::InvalidModificationError)
+    ));
+
+    // Negotiated with a VP8-only peer: the send codecs carry no spatial layers.
+    let mut offerer = peer()?;
+    let mut answerer = vp8_only_peer()?;
+    let sender = add(
+        &mut offerer,
+        RtpCodecKind::Video,
+        vec![encoding("", None, "")],
+    )?;
+    let now = Instant::now();
+    let offer = offerer.create_offer(None)?;
+    offerer.set_local_description(now, offer.clone())?;
+    answerer.set_remote_description(now, offer)?;
+    let answer = answerer.create_answer(None)?;
+    answerer.set_local_description(now, answer.clone())?;
+    offerer.set_remote_description(now, answer)?;
+    assert!(matches!(
+        set_mode(&mut offerer, sender, &[Some("L2T2")]),
+        Err(Error::InvalidModificationError)
+    ));
+    set_mode(&mut offerer, sender, &[Some("L1T2")])?;
+    Ok(())
+}
+
+/// webrtc-svc 3.2.3: after negotiation getParameters returns the mode an encoding was given,
+/// and none for an encoding that was given none.
+#[test]
+fn get_parameters_after_negotiation_returns_the_configured_mode() -> Result<()> {
+    let mut offerer = peer()?;
+    let mut answerer = peer()?;
+    let with = add(
+        &mut offerer,
+        RtpCodecKind::Video,
+        vec![encoding("", Some("L1T3"), "")],
+    )?;
+    let without = add(
+        &mut offerer,
+        RtpCodecKind::Video,
+        vec![encoding("", None, "")],
+    )?;
+    let now = Instant::now();
+    let offer = offerer.create_offer(None)?;
+    offerer.set_local_description(now, offer.clone())?;
+    answerer.set_remote_description(now, offer)?;
+    let answer = answerer.create_answer(None)?;
+    answerer.set_local_description(now, answer.clone())?;
+    offerer.set_remote_description(now, answer)?;
+    let mode = |pc: &mut rtc::peer_connection::RTCPeerConnection, s: RTCRtpSenderId| {
+        pc.rtp_sender(s).expect("sender").get_parameters().encodings[0]
+            .scalability_mode
+            .clone()
+    };
+    assert_eq!(mode(&mut offerer, with).as_deref(), Some("L1T3"));
+    assert_eq!(mode(&mut offerer, without), None);
+    Ok(())
+}

@@ -223,7 +223,7 @@ impl Agent {
     /// Returns a list of candidate pair stats.
     pub fn get_candidate_pairs_stats(&self, now: Instant) -> Vec<CandidatePairStats> {
         let mut res = Vec::with_capacity(self.candidate_pairs.len());
-        for cp in &self.candidate_pairs {
+        for cp in self.candidate_pairs.iter().filter(|p| !p.removed) {
             let stat = CandidatePairStats {
                 timestamp: now,
                 local_candidate_id: self.local_candidates[cp.local_index].id().to_string(),
