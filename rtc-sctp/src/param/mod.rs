@@ -1,27 +1,32 @@
 #[cfg(test)]
 mod param_test;
 
+pub(crate) mod param_add_streams_request;
 pub(crate) mod param_chunk_list;
 pub(crate) mod param_forward_tsn_supported;
 pub(crate) mod param_header;
 pub(crate) mod param_heartbeat_info;
+pub(crate) mod param_incoming_reset_request;
 pub(crate) mod param_outgoing_reset_request;
 pub(crate) mod param_random;
 pub(crate) mod param_reconfig_response;
 pub(crate) mod param_requested_hmac_algorithm;
+pub(crate) mod param_ssn_tsn_reset_request;
 pub(crate) mod param_state_cookie;
 pub(crate) mod param_supported_extensions;
 pub(crate) mod param_type;
 pub(crate) mod param_uknown;
 
 use crate::param::{
-    param_chunk_list::ParamChunkList, param_forward_tsn_supported::ParamForwardTsnSupported,
+    param_add_streams_request::ParamAddStreamsRequest, param_chunk_list::ParamChunkList,
+    param_forward_tsn_supported::ParamForwardTsnSupported,
     param_heartbeat_info::ParamHeartbeatInfo,
+    param_incoming_reset_request::ParamIncomingResetRequest,
     param_outgoing_reset_request::ParamOutgoingResetRequest, param_random::ParamRandom,
     param_reconfig_response::ParamReconfigResponse,
     param_requested_hmac_algorithm::ParamRequestedHmacAlgorithm,
-    param_state_cookie::ParamStateCookie, param_supported_extensions::ParamSupportedExtensions,
-    param_uknown::ParamUnknown,
+    param_ssn_tsn_reset_request::ParamSsnTsnResetRequest, param_state_cookie::ParamStateCookie,
+    param_supported_extensions::ParamSupportedExtensions, param_uknown::ParamUnknown,
 };
 use param_header::*;
 use param_type::*;
@@ -75,6 +80,11 @@ pub(crate) fn build_param(raw_param: &Bytes) -> Result<Box<dyn Param>> {
         ParamType::HeartbeatInfo => Ok(Box::new(ParamHeartbeatInfo::unmarshal(raw_param)?)),
         ParamType::OutSsnResetReq => Ok(Box::new(ParamOutgoingResetRequest::unmarshal(raw_param)?)),
         ParamType::ReconfigResp => Ok(Box::new(ParamReconfigResponse::unmarshal(raw_param)?)),
+        ParamType::IncSsnResetReq => Ok(Box::new(ParamIncomingResetRequest::unmarshal(raw_param)?)),
+        ParamType::SsnTsnResetReq => Ok(Box::new(ParamSsnTsnResetRequest::unmarshal(raw_param)?)),
+        ParamType::AddOutStreamsReq | ParamType::AddIncStreamsReq => {
+            Ok(Box::new(ParamAddStreamsRequest::unmarshal(raw_param)?))
+        }
         // A parameter the engine has no parser for is kept as it arrived. What becomes of it
         // depends on the chunk it is in and on the upper two bits of its type (RFC 9260
         // 3.2.1), which is for the code that handles that chunk to decide: failing the parse

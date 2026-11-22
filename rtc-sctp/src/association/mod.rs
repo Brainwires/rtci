@@ -24,7 +24,7 @@ use crate::chunk::{
     chunk_shutdown::ChunkShutdown,
     chunk_shutdown_ack::ChunkShutdownAck,
     chunk_shutdown_complete::ChunkShutdownComplete,
-    chunk_type::CT_FORWARD_TSN,
+    chunk_type::{CT_FORWARD_TSN, CT_RECONFIG},
     chunk_unknown::ChunkUnknown,
 };
 use crate::config::{COMMON_HEADER_SIZE, DATA_CHUNK_HEADER_SIZE, ServerConfig, TransportConfig};
@@ -57,6 +57,8 @@ use crate::association::stream::RecvSendState;
 use bytes::{Bytes, BytesMut};
 use log::{debug, error, trace, warn};
 use rand::random;
+pub use reconfig::ReconfigEvent;
+use reconfig::{IncomingResetWaiting, OwnRequest};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
@@ -66,6 +68,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use thiserror::Error;
 
+pub(crate) mod reconfig;
 pub(crate) mod state;
 pub(crate) mod stats;
 pub(crate) mod stream;
@@ -85,8 +88,10 @@ pub(crate) const MAX_PENDING_RECONFIG_REQUESTS: usize = 64;
 /// retransmission is answered again without being performed a second time.
 pub(crate) const MAX_COMPLETED_RECONFIG_REQUESTS: usize = 64;
 
-/// Reset requests of this side's own, sent in answer to the peer's, that may await the peer's
-/// response at once. Past it a peer request is still performed and answered, but not echoed.
+/// Re-configuration requests of this side's own that may wait for the one in flight to be
+/// answered (RFC 6525 5.1.1 has one in flight). Past it a peer's reset is still performed and
+/// answered, but this side's own direction is not reset in turn, and the application's
+/// requests are refused.
 pub(crate) const MAX_OUTSTANDING_RECONFIGS: usize = 64;
 
 /// How long an accepting association waits for the COOKIE ECHO after an INIT before it gives
@@ -131,6 +136,8 @@ struct CookieTcb {
     inbound_streams: u16,
     outbound_streams: u16,
     use_forward_tsn: bool,
+    /// The INIT listed the RE-CONFIG chunk among its supported extensions (RFC 6525 5.1.1).
+    reconfig: bool,
     /// This side's port and the peer's, as the INIT's packet had them.
     source_port: u16,
     destination_port: u16,
@@ -147,6 +154,8 @@ struct HandshakeParams {
     forward_tsn: bool,
     /// The peer reported this side's Forward-TSN-Supported parameter as unrecognized.
     forward_tsn_rejected: bool,
+    /// The Supported Extensions parameter lists the RE-CONFIG chunk (RFC 6525 5.1.1).
+    reconfig: bool,
 }
 
 /// The Forward-TSN-Supported parameter (RFC 3758 3.1).
@@ -246,6 +255,9 @@ pub enum Event {
     Stream(StreamEvent),
     /// One or more application datagrams have been received
     DatagramReceived,
+    /// The outcome of a stream re-configuration (RFC 6525): a request of this side's own was
+    /// answered, or the peer changed the association.
+    Reconfig(ReconfigEvent),
 }
 
 /// Selection is stable even after fragments leave either queue.
@@ -310,9 +322,45 @@ pub struct Association {
 
     // Reconfig
     my_next_rsn: u32,
+    /// The request in flight, by its sequence number, as the chunk that is retransmitted.
+    /// RFC 6525 5.1.1: there is at most one.
     reconfigs: HashMap<u32, ChunkReconfig>,
+    /// What the request in flight asks for.
+    reconfig_in_flight: Option<OwnRequest>,
+    /// The peer answered the request in flight "In progress": the next expiry of its timer
+    /// is not counted as an error (RFC 6525 5.2.7 H2).
+    reconfig_in_progress: bool,
+    /// Requests waiting for the one in flight to be answered.
+    reconfig_queue: VecDeque<OwnRequest>,
+    /// The peer's Outgoing SSN Reset Requests not performed yet: its TSN is not reached, or
+    /// the application has not read what the streams hold.
     reconfig_requests: HashMap<u32, ParamOutgoingResetRequest>,
-    completed_reconfig_requests: VecDeque<u32>,
+    /// The peer's requests answered for good, each with the chunk it was answered with: a
+    /// retransmission gets the same chunk again (RFC 6525 5.2.1).
+    completed_reconfig_requests: VecDeque<(u32, ChunkReconfig)>,
+    /// The request sequence numbers accepted from the peer: the lowest still acceptable and
+    /// the next one expected. `None` until the peer's initial TSN is known.
+    peer_rsn_window: Option<(u32, u32)>,
+    /// The peer listed the RE-CONFIG chunk in its Supported Extensions (RFC 6525 5.1.1).
+    peer_supports_reconfig: bool,
+    /// The peer's Incoming SSN Reset Requests being answered: the Outgoing SSN Reset Request
+    /// that answers one goes out when the data queued on its streams has been sent.
+    incoming_resets_waiting: HashMap<u32, IncomingResetWaiting>,
+    /// DATA held back while a reset of its stream is deferred, or while this side's SSN/TSN
+    /// reset is in flight: it belongs to the stream as it is after the reset (RFC 6525 5.2.2
+    /// E2). Its bytes count against the receive window.
+    held_reset_data: Vec<ChunkPayloadData>,
+    /// This side asked for an SSN/TSN reset that is not answered yet: no new DATA is sent
+    /// (RFC 6525 5.1.4 C2).
+    tsn_reset_requested: bool,
+    /// The peer's SSN/TSN Reset Request, answered "In progress" until what this side has
+    /// outstanding is acknowledged.
+    deferred_tsn_reset: Option<u32>,
+    /// When this side last sent an SSN/TSN Reset Request (RFC 6525 5.1.4: one per 30 s).
+    last_tsn_reset_request: Option<Instant>,
+    /// Messages written to streams whose outgoing reset is not answered yet, across all
+    /// streams: they are still to be sent.
+    held_write_count: usize,
 
     // Non-RFC internal data
     remote_addr: SocketAddr,
@@ -485,8 +533,19 @@ impl Default for Association {
             // Reconfig
             my_next_rsn: 0,
             reconfigs: HashMap::default(),
+            reconfig_in_flight: None,
+            reconfig_in_progress: false,
+            reconfig_queue: VecDeque::new(),
             reconfig_requests: HashMap::default(),
             completed_reconfig_requests: VecDeque::new(),
+            peer_rsn_window: None,
+            peer_supports_reconfig: true,
+            incoming_resets_waiting: HashMap::default(),
+            held_reset_data: vec![],
+            tsn_reset_requested: false,
+            deferred_tsn_reset: None,
+            last_tsn_reset_request: None,
+            held_write_count: 0,
 
             // Non-RFC internal data
             remote_addr: SocketAddr::from_str("0.0.0.0:0").unwrap(),
@@ -1030,7 +1089,7 @@ impl Association {
         // flight or queued, and the queued DATA was never sent.
         self.set_state(AssociationState::ShutdownPending);
 
-        if self.inflight_queue.is_empty() && self.pending_queue.is_empty() {
+        if self.nothing_left_to_send() {
             // No more outstanding, send shutdown.
             self.send_shutdown();
         }
@@ -1268,42 +1327,14 @@ impl Association {
         if let Some(mut s) = self.streams.remove(&stream_identifier) {
             debug!("[{}] unregister_stream {}", self.side, stream_identifier);
             self.reindex_stream(stream_identifier, s.get_num_bytes_in_reassembly_queue());
+            // Messages held for a reset of the stream go with it.
+            self.held_write_count = self.held_write_count.saturating_sub(s.held_writes.len());
             self.events.push_back(Event::AssociationLost {
                 reason,
                 id: stream_identifier,
             });
             s.state = RecvSendState::Closed;
         }
-    }
-
-    /// Re-run any reset request that was answered In Progress because
-    /// `stream_identifier` still had data the application had not collected
-    /// Called when that stream drains.
-    ///
-    /// The reply is queued like any other control packet; a request naming
-    /// several streams is retried as a whole and simply defers again if another
-    /// of its streams is still readable.
-    pub(crate) fn retry_deferred_resets(&mut self, stream_identifier: StreamId) {
-        let pending: Vec<ParamOutgoingResetRequest> = self
-            .reconfig_requests
-            .values()
-            .filter(|p| p.stream_identifiers.contains(&stream_identifier))
-            .cloned()
-            .collect();
-        if pending.is_empty() {
-            return;
-        }
-
-        let mut reply = vec![];
-        for p in pending {
-            if let Err(err) = self.reset_streams_if_any(&p, true, &mut reply) {
-                debug!("[{}] retry of deferred reset failed: {:?}", self.side, err);
-            }
-        }
-        for packet in reply {
-            self.control_queue.push_back(packet);
-        }
-        self.awake_write_loop();
     }
 
     /// set_state atomically sets the state of the Association.
@@ -1777,6 +1808,9 @@ impl Association {
                 if v.chunk_types.contains(&CT_FORWARD_TSN) {
                     out.forward_tsn = true;
                 }
+                if v.chunk_types.contains(&CT_RECONFIG) {
+                    out.reconfig = true;
+                }
             } else if any.downcast_ref::<ParamForwardTsnSupported>().is_some() {
                 // RFC 3758 3.3.1: this parameter alone announces PR-SCTP.
                 out.forward_tsn = true;
@@ -1881,6 +1915,7 @@ impl Association {
             inbound_streams,
             outbound_streams,
             use_forward_tsn: params.forward_tsn && self.partial_reliability_enabled,
+            reconfig: params.reconfig,
             source_port,
             destination_port,
         };
@@ -1962,6 +1997,9 @@ impl Association {
         debug!("[{}] initial rwnd={}", self.side, self.rwnd);
         self.ssthresh = self.rwnd;
         self.use_forward_tsn = tcb.use_forward_tsn;
+        self.peer_supports_reconfig = tcb.reconfig;
+        // RFC 6525 4.1: the peer's request sequence numbers start at its initial TSN.
+        self.peer_rsn_window = Some((tcb.peer_initial_tsn, tcb.peer_initial_tsn));
     }
 
     /// RFC 9260 5.2.2: the INIT ACK for an INIT that arrives while the association exists. It
@@ -2057,6 +2095,9 @@ impl Association {
         if !self.use_forward_tsn {
             warn!("[{}] not using ForwardTSN (on initAck)", self.side);
         }
+        self.peer_supports_reconfig = params.reconfig;
+        // RFC 6525 4.1: the peer's request sequence numbers start at its initial TSN.
+        self.peer_rsn_window = Some((i.initial_tsn, i.initial_tsn));
 
         if let Some(host_name) = params.host_name {
             // RFC 9260 3.3.3, 5.1.2: an INIT ACK with a Host Name Address is answered with
@@ -2605,7 +2646,31 @@ impl Association {
             self.awake_write_loop();
         }
 
-        if stream_handle_data && let Some(s) = self.streams.get_mut(&d.stream_identifier) {
+        if stream_handle_data {
+            if self.holds_for_reset(d) {
+                // RFC 6525 5.2.2 E2: this DATA belongs to its stream as it will be after a
+                // reset that is not performed yet. Its TSN is acknowledged; it is delivered
+                // when the reset is done.
+                debug!(
+                    "[{}] holding DATA tsn={} of stream {} for a deferred reset",
+                    self.side, d.tsn, d.stream_identifier
+                );
+                self.reassembly_bytes = self.reassembly_bytes.saturating_add(d.user_data.len());
+                self.held_reset_data.push(d.clone());
+            } else {
+                self.deliver_to_stream(d);
+            }
+        }
+
+        self.handle_peer_last_tsn_and_acknowledgement(immediate_sack)
+    }
+
+    /// Hands a DATA chunk that was accepted to its stream.
+    fn deliver_to_stream(&mut self, d: &ChunkPayloadData) {
+        if self.get_or_create_stream(d.stream_identifier).is_none() {
+            return;
+        }
+        if let Some(s) = self.streams.get_mut(&d.stream_identifier) {
             self.events.push_back(Event::DatagramReceived);
             let bytes_before = s.get_num_bytes_in_reassembly_queue();
             if s.handle_data(d) && s.reassembly_queue.is_readable() {
@@ -2615,8 +2680,6 @@ impl Association {
             }
             self.reindex_stream(d.stream_identifier, bytes_before);
         }
-
-        self.handle_peer_last_tsn_and_acknowledgement(immediate_sack)
     }
 
     fn handle_sack(&mut self, d: &ChunkSelectiveAck, now: Instant) -> Result<Vec<Packet>> {
@@ -2739,23 +2802,8 @@ impl Association {
 
         self.postprocess_sack(state, cum_tsn_ack_point_advanced, now);
 
-        Ok(vec![])
-    }
-
-    fn handle_reconfig(&mut self, c: &ChunkReconfig) -> Result<Vec<Packet>> {
-        trace!("[{}] handle_reconfig", self.side);
-
-        let mut pp = vec![];
-
-        if let Some(param_a) = &c.param_a {
-            self.handle_reconfig_param(param_a, &mut pp)?;
-        }
-
-        if let Some(param_b) = &c.param_b {
-            self.handle_reconfig_param(param_b, &mut pp)?;
-        }
-
-        Ok(pp)
+        // The peer's SSN/TSN reset waited for what this side had outstanding.
+        Ok(self.perform_deferred_tsn_reset())
     }
 
     fn handle_forward_tsn(&mut self, c: &ChunkForwardTsn) -> Result<Vec<Packet>> {
@@ -2878,7 +2926,7 @@ impl Association {
                 return Ok(vec![]);
             }
 
-            if !self.inflight_queue.is_empty() || !self.pending_queue.is_empty() {
+            if !self.nothing_left_to_send() {
                 self.set_state(AssociationState::ShutdownReceived);
             } else {
                 // No more outstanding, send shutdown ack.
@@ -2997,101 +3045,6 @@ impl Association {
         }
 
         Ok(reply)
-    }
-
-    #[allow(clippy::borrowed_box)]
-    fn handle_reconfig_param(
-        &mut self,
-        raw: &Box<dyn Param>,
-        reply: &mut Vec<Packet>,
-    ) -> Result<()> {
-        if let Some(p) = raw.as_any().downcast_ref::<ParamOutgoingResetRequest>() {
-            let rsn = p.reconfig_request_sequence_number;
-            // A retransmission of a request already held or already performed is answered
-            // again, but not performed again (RFC 6525 section 5.2.1).
-            if self.reconfig_requests.contains_key(&rsn) {
-                reply.push(self.create_reconfig_response(rsn, ReconfigResult::InProgress));
-                return Ok(());
-            }
-            if self.completed_reconfig_requests.contains(&rsn) {
-                reply.push(self.create_reconfig_response(rsn, ReconfigResult::SuccessPerformed));
-                return Ok(());
-            }
-            if self.reconfig_requests.len() >= MAX_PENDING_RECONFIG_REQUESTS {
-                debug!(
-                    "[{}] deny reset request rsn={}: {} requests already pending",
-                    self.side,
-                    rsn,
-                    self.reconfig_requests.len()
-                );
-                reply.push(self.create_reconfig_response(rsn, ReconfigResult::Denied));
-                return Ok(());
-            }
-            self.reconfig_requests.insert(rsn, p.clone());
-            self.reset_streams_if_any(p, true, reply)?;
-            Ok(())
-        } else if let Some(p) = raw.as_any().downcast_ref::<ParamReconfigResponse>() {
-            // RFC 6525 5.1.1: "In progress" is not the outcome. The request stays outstanding
-            // (and its timer running), so the final response still finds it.
-            if p.result == ReconfigResult::InProgress
-                && self
-                    .reconfigs
-                    .contains_key(&p.reconfig_response_sequence_number)
-            {
-                self.restart_reconfig_timer = true;
-            }
-            if p.result != ReconfigResult::InProgress
-                && let Some(request) = self.reconfigs.remove(&p.reconfig_response_sequence_number)
-                && matches!(
-                    p.result,
-                    ReconfigResult::SuccessPerformed | ReconfigResult::SuccessNop
-                )
-            {
-                self.reset_outgoing_sequence_numbers(&request);
-            }
-            if self.reconfigs.is_empty() {
-                self.timers.stop(Timer::Reconfig);
-            }
-            Ok(())
-        } else {
-            // RFC 6525 5.2.1: every request is answered. The requests this side does not
-            // perform (Incoming SSN Reset, SSN/TSN Reset, Add Outgoing / Incoming Streams)
-            // are denied; each starts with its Re-configuration Request Sequence Number.
-            if let Some(unknown) = raw.as_any().downcast_ref::<ParamUnknown>()
-                && matches!(unknown.typ(), 14 | 15 | 17 | 18)
-                && unknown.value().len() >= 4
-            {
-                let v = unknown.value();
-                let rsn = u32::from_be_bytes([v[0], v[1], v[2], v[3]]);
-                debug!(
-                    "[{}] denying RE-CONFIG request {}",
-                    self.side,
-                    unknown.typ()
-                );
-                reply.push(self.create_reconfig_response(rsn, ReconfigResult::Denied));
-                return Ok(());
-            }
-            // Anything else is no reason to end the association.
-            debug!("[{}] ignoring RE-CONFIG parameter {}", self.side, raw);
-            Ok(())
-        }
-    }
-
-    /// RFC 6525 5.1.2: once the peer has performed our Outgoing SSN Reset Request, the
-    /// streams it named send again from SSN 0, which is what the peer now expects. A stream
-    /// still registered here (the peer did not reset its own direction too, or the channel
-    /// above reuses the stream) kept its old SSN, so the peer held every later ordered message
-    /// back waiting for SSN 0.
-    fn reset_outgoing_sequence_numbers(&mut self, request: &ChunkReconfig) {
-        for param in [&request.param_a, &request.param_b].into_iter().flatten() {
-            if let Some(reset) = param.as_any().downcast_ref::<ParamOutgoingResetRequest>() {
-                for id in &reset.stream_identifiers {
-                    if let Some(stream) = self.streams.get_mut(id) {
-                        stream.sequence_number = 0;
-                    }
-                }
-            }
-        }
     }
 
     fn process_selective_ack(
@@ -3462,7 +3415,7 @@ impl Association {
             trace!("[{}] T3-rtx timer start (pt3)", self.side);
             self.timers
                 .start_if_idle(Timer::T3RTX, now, self.rto_mgr.get_rto());
-        } else if !self.pending_queue.is_empty() {
+        } else if !self.pending_queue.is_empty() || self.held_write_count > 0 {
             // Queued DATA still goes out before the shutdown proceeds (RFC 9260 9.2).
         } else if state == AssociationState::ShutdownPending {
             // No more outstanding, send shutdown.
@@ -3478,196 +3431,6 @@ impl Association {
         if should_awake_write_loop {
             self.awake_write_loop();
         }
-    }
-
-    /// Streams named by `p` that still hold a complete message the application
-    /// has not collected, so a reset naming them cannot be performed yet.
-    ///
-    /// Only *readable* data counts: an incomplete fragment set can never be
-    /// completed once the peer has reset, so it is discardable and must not
-    /// hold the reset open forever.
-    fn streams_awaiting_drain(&self, p: &ParamOutgoingResetRequest) -> Vec<StreamId> {
-        p.stream_identifiers
-            .iter()
-            .copied()
-            .filter(|id| {
-                self.streams
-                    .get(id)
-                    .is_some_and(|s| s.reassembly_queue.is_readable())
-            })
-            .collect()
-    }
-
-    fn reset_streams_if_any(
-        &mut self,
-        p: &ParamOutgoingResetRequest,
-        respond: bool,
-        reply: &mut Vec<Packet>,
-    ) -> Result<()> {
-        // RFC 6525 5.2.2: a request without stream numbers is for every stream.
-        let all_streams;
-        let p = if p.stream_identifiers.is_empty() {
-            let mut stream_identifiers: Vec<u16> = self.streams.keys().copied().collect();
-            stream_identifiers.sort_unstable();
-            all_streams = ParamOutgoingResetRequest {
-                stream_identifiers,
-                ..p.clone()
-            };
-            &all_streams
-        } else {
-            p
-        };
-        let mut result = ReconfigResult::SuccessPerformed;
-        let mut sis_to_reset = vec![];
-
-        if sna32lte(p.sender_last_tsn, self.peer_last_tsn) {
-            debug!(
-                "[{}] resetStream(): senderLastTSN={} <= peer_last_tsn={}",
-                self.side, p.sender_last_tsn, self.peer_last_tsn
-            );
-
-            let draining = self.streams_awaiting_drain(p);
-            let mut seen = FxHashSet::default();
-
-            for id in &p.stream_identifiers {
-                if draining.contains(id) || !seen.insert(*id) {
-                    continue;
-                }
-                if let Some(stream) = self.streams.get(id) {
-                    // RFC 8831 section 6.7: the receiver of a reset resets its own outgoing
-                    // stream too, unless it already has (the peer's request is then the
-                    // second half of a close this side started). Echoing it again would
-                    // send a reset after the stream id is free, and reset the next channel
-                    // that takes the id.
-                    let outgoing_open = (stream.state as u8) & 0x1 != 0;
-                    if respond && outgoing_open {
-                        sis_to_reset.push(*id);
-                    }
-                    self.unregister_stream(*id, AssociationError::Reset);
-                } else if respond
-                    && (self.my_max_num_inbound_streams == 0
-                        || *id < self.my_max_num_inbound_streams)
-                {
-                    // A stream this side never sent or received on (a pre-negotiated data
-                    // channel left idle) has no state here, but the application still
-                    // holds it: report the reset, and reset the outgoing direction too.
-                    // An id past the negotiated stream count names no such channel.
-                    sis_to_reset.push(*id);
-                    self.events.push_back(Event::AssociationLost {
-                        reason: AssociationError::Reset,
-                        id: *id,
-                    });
-                }
-            }
-
-            if draining.is_empty() {
-                self.reconfig_requests
-                    .remove(&p.reconfig_request_sequence_number);
-                if !self
-                    .completed_reconfig_requests
-                    .contains(&p.reconfig_request_sequence_number)
-                {
-                    if self.completed_reconfig_requests.len() >= MAX_COMPLETED_RECONFIG_REQUESTS {
-                        self.completed_reconfig_requests.pop_front();
-                    }
-                    self.completed_reconfig_requests
-                        .push_back(p.reconfig_request_sequence_number);
-                }
-            } else {
-                debug!(
-                    "[{}] resetStream(): deferring reset of {:?}, application has not drained",
-                    self.side, draining
-                );
-                result = ReconfigResult::InProgress;
-                // Keep only the streams still waiting, so a retry performs each reset once.
-                self.reconfig_requests.insert(
-                    p.reconfig_request_sequence_number,
-                    ParamOutgoingResetRequest {
-                        stream_identifiers: draining,
-                        ..p.clone()
-                    },
-                );
-            }
-        } else {
-            debug!(
-                "[{}] resetStream(): senderLastTSN={} > peer_last_tsn={}",
-                self.side, p.sender_last_tsn, self.peer_last_tsn
-            );
-            result = ReconfigResult::InProgress;
-        }
-
-        // Answer incoming reset requests with the same reset request, but with
-        // reconfig_response_sequence_number.
-        if !sis_to_reset.is_empty() && self.reconfigs.len() >= MAX_OUTSTANDING_RECONFIGS {
-            debug!(
-                "[{}] resetStream(): not echoing reset of {:?}, {} requests unanswered",
-                self.side,
-                sis_to_reset,
-                self.reconfigs.len()
-            );
-        } else if !sis_to_reset.is_empty() {
-            let rsn = self.generate_next_rsn();
-            let tsn = self.my_next_tsn.wrapping_sub(1);
-
-            let c = ChunkReconfig {
-                param_a: Some(Box::new(ParamOutgoingResetRequest {
-                    reconfig_request_sequence_number: rsn,
-                    reconfig_response_sequence_number: p.reconfig_request_sequence_number,
-                    sender_last_tsn: tsn,
-                    stream_identifiers: sis_to_reset,
-                })),
-                ..Default::default()
-            };
-
-            self.reconfigs.insert(rsn, c.clone()); // store in the map for retransmission
-
-            let p = self.create_packet(vec![Box::new(c)]);
-            reply.push(p);
-        }
-
-        let packet = self.create_reconfig_response(p.reconfig_request_sequence_number, result);
-
-        debug!("[{}] RESET RESPONSE: {}", self.side, packet);
-
-        reply.push(packet);
-
-        Ok(())
-    }
-
-    /// Performs the stored reset requests whose sender's last TSN the cumulative TSN reached
-    /// since it stood at `prev_peer_last_tsn`.
-    fn reset_streams_reached_since(
-        &mut self,
-        prev_peer_last_tsn: u32,
-        reply: &mut Vec<Packet>,
-    ) -> Result<()> {
-        if self.peer_last_tsn == prev_peer_last_tsn || self.reconfig_requests.is_empty() {
-            return Ok(());
-        }
-        let peer_last_tsn = self.peer_last_tsn;
-        let reached: Vec<ParamOutgoingResetRequest> = self
-            .reconfig_requests
-            .values()
-            .filter(|p| {
-                sna32gt(p.sender_last_tsn, prev_peer_last_tsn)
-                    && sna32lte(p.sender_last_tsn, peer_last_tsn)
-            })
-            .cloned()
-            .collect();
-        for rst_req in reached {
-            self.reset_streams_if_any(&rst_req, false, reply)?;
-        }
-        Ok(())
-    }
-
-    fn create_reconfig_response(&self, rsn: u32, result: ReconfigResult) -> Packet {
-        self.create_packet(vec![Box::new(ChunkReconfig {
-            param_a: Some(Box::new(ParamReconfigResponse {
-                reconfig_response_sequence_number: rsn,
-                result,
-            })),
-            param_b: None,
-        })])
     }
 
     /// create_packet wraps chunks in a packet.
@@ -3863,7 +3626,7 @@ impl Association {
                 raw_packets = self.gather_outbound_forward_tsn_packets(raw_packets);
                 // Everything handed over is sent and acknowledged (a queue can also empty by
                 // abandonment, with no SACK to notice it): the shutdown proceeds.
-                if self.inflight_queue.is_empty() && self.pending_queue.is_empty() {
+                if self.nothing_left_to_send() {
                     if state == AssociationState::ShutdownPending {
                         self.send_shutdown();
                     } else if state == AssociationState::ShutdownReceived {
@@ -3903,7 +3666,7 @@ impl Association {
     ) -> Vec<Bytes> {
         // Pop unsent data chunks from the pending queue to send as much as
         // cwnd and rwnd allow.
-        let (chunks, sis_to_reset) = self.pop_pending_data_chunks_to_send(now);
+        let (chunks, resets) = self.pop_pending_data_chunks_to_send(now);
         if self.state() == AssociationState::Closed {
             return vec![];
         }
@@ -3916,63 +3679,39 @@ impl Association {
             self.bundle_data_chunks_into_packets(chunks, &mut raw_packets);
         }
 
-        if !sis_to_reset.is_empty() || self.will_retransmit_reconfig {
-            if self.will_retransmit_reconfig {
-                self.will_retransmit_reconfig = false;
-                debug!(
-                    "[{}] retransmit {} RECONFIG chunk(s)",
-                    self.side,
-                    self.reconfigs.len()
-                );
-                for c in self.reconfigs.values() {
-                    let p = self.create_packet(vec![Box::new(c.clone())]);
-                    if let Ok(raw) = p.marshal() {
-                        raw_packets.push(raw);
-                    } else {
-                        warn!(
-                            "[{}] failed to serialize a RECONFIG packet to be retransmitted",
-                            self.side,
-                        );
-                    }
-                }
-            }
-
-            if !sis_to_reset.is_empty() {
-                let rsn = self.generate_next_rsn();
-                let tsn = self.my_next_tsn.wrapping_sub(1);
-                debug!(
-                    "[{}] sending RECONFIG: rsn={} tsn={} streams={:?}",
-                    self.side,
-                    rsn,
-                    self.my_next_tsn.wrapping_sub(1),
-                    sis_to_reset
-                );
-
-                let c = ChunkReconfig {
-                    param_a: Some(Box::new(ParamOutgoingResetRequest {
-                        reconfig_request_sequence_number: rsn,
-                        sender_last_tsn: tsn,
-                        stream_identifiers: sis_to_reset,
-                        ..Default::default()
-                    })),
-                    ..Default::default()
-                };
-                self.reconfigs.insert(rsn, c.clone()); // store in the map for retransmission
-
-                let p = self.create_packet(vec![Box::new(c)]);
+        // RFC 6525 5.1.1: the request in flight is sent again when its timer has expired.
+        if std::mem::take(&mut self.will_retransmit_reconfig) {
+            debug!(
+                "[{}] retransmit {} RECONFIG chunk(s)",
+                self.side,
+                self.reconfigs.len()
+            );
+            for c in self.reconfigs.values() {
+                let p = self.create_packet(vec![Box::new(c.clone())]);
                 if let Ok(raw) = p.marshal() {
                     raw_packets.push(raw);
                 } else {
                     warn!(
-                        "[{}] failed to serialize a RECONFIG packet to be transmitted",
-                        self.side
+                        "[{}] failed to serialize a RECONFIG packet to be retransmitted",
+                        self.side,
                     );
                 }
             }
+        }
 
-            if !self.reconfigs.is_empty() {
-                self.timers
-                    .start(Timer::Reconfig, now, self.rto_mgr.get_rto());
+        // The resets whose streams have sent what was queued before them become requests,
+        // and the next request goes out if none is in flight.
+        for marker in resets {
+            self.on_reset_marker_ready(marker);
+        }
+        while let Some(packet) = self.next_reconfig_request(now) {
+            if let Ok(raw) = packet.marshal() {
+                raw_packets.push(raw);
+            } else {
+                warn!(
+                    "[{}] failed to serialize a RECONFIG packet to be transmitted",
+                    self.side
+                );
             }
         }
 
@@ -4607,9 +4346,12 @@ impl Association {
     fn pop_pending_data_chunks_to_send(
         &mut self,
         now: Instant,
-    ) -> (Vec<ChunkPayloadData>, Vec<u16>) {
+    ) -> (Vec<ChunkPayloadData>, Vec<ResetMarker>) {
         let mut chunks = vec![];
-        let mut sis_to_reset = vec![]; // stream identifiers to reset
+        let mut resets = vec![]; // the stream resets whose turn has come
+        // RFC 6525 5.1.4 C2: while an SSN/TSN reset is under way no new DATA is sent. A
+        // message part sent is finished first: its fragments have consecutive TSNs.
+        let suspended = self.sending_suspended();
         if !self.pending_queue.is_empty() {
             self.decay_idle_congestion_window(now);
             // RFC 9260 6.1 D: with Max.Burst, cwnd is brought down to what is outstanding
@@ -4631,9 +4373,12 @@ impl Association {
             //      the receiver if allowed by cwnd (see rule B, below).
 
             loop {
+                if suspended && !self.pending_queue.is_mid_message() {
+                    break;
+                }
                 let Some(c) = self.pending_queue.peek() else {
                     if let Some(reset) = self.pending_queue.pop_ready_reset() {
-                        sis_to_reset.push(reset.stream_identifier);
+                        resets.push(reset);
                         continue;
                     }
                     break;
@@ -4710,7 +4455,10 @@ impl Association {
             }
 
             // the data sender can always have one DATA chunk in flight to the receiver
-            if chunks.is_empty() && self.inflight_queue.is_empty() {
+            if chunks.is_empty()
+                && self.inflight_queue.is_empty()
+                && !(suspended && !self.pending_queue.is_mid_message())
+            {
                 // Send zero window probe
                 if let Some(c) = self.pending_queue.peek() {
                     let (beginning_fragment, unordered) = (c.beginning_fragment, c.unordered);
@@ -4731,7 +4479,7 @@ impl Association {
             }
         }
 
-        (chunks, sis_to_reset)
+        (chunks, resets)
     }
 
     /// bundle_data_chunks_into_packets packs DATA chunks into packets. It tries to bundle
@@ -5026,25 +4774,6 @@ impl Association {
         }
     }
 
-    /// Queues an outgoing stream-reset marker (RFC 6525). Its retransmission
-    /// timer starts when the RE-CONFIG request is emitted, not when queued.
-    pub(crate) fn send_reset_request(
-        &mut self,
-        _now: Instant,
-        stream_identifier: StreamId,
-    ) -> Result<()> {
-        let state = self.state();
-        if state != AssociationState::Established {
-            return Err(Error::ErrResetPacketInStateNotExist);
-        }
-
-        self.pending_queue
-            .push_reset(ResetMarker { stream_identifier });
-        self.awake_write_loop();
-
-        Ok(())
-    }
-
     /// Allocate an identity before consuming input or changing stream state.
     pub(crate) fn allocate_message_id(&mut self) -> Result<MessageId> {
         let state = self.state();
@@ -5076,6 +4805,14 @@ impl Association {
     /// This is used only by testing.
     pub(crate) fn buffered_amount(&self) -> usize {
         self.pending_queue.get_num_bytes() + self.inflight_queue.get_num_bytes()
+    }
+
+    /// Whether everything the application handed over has been sent and acknowledged
+    /// (RFC 9260 9.2), messages held for a stream reset included.
+    fn nothing_left_to_send(&self) -> bool {
+        self.inflight_queue.is_empty()
+            && self.pending_queue.is_empty()
+            && self.held_write_count == 0
     }
 
     fn awake_write_loop(&self) {
@@ -5195,6 +4932,13 @@ impl Association {
             }
 
             Timer::Reconfig => {
+                // RFC 6525 5.1.1: an expiry counts against the association and the path,
+                // and past the retransmission limit the association ends. 5.2.7 H2: not the
+                // expiry that follows an "In progress" answer, which only says the peer is
+                // not done yet.
+                if !std::mem::take(&mut self.reconfig_in_progress) && self.on_path_failure() {
+                    return;
+                }
                 self.will_retransmit_reconfig = true;
                 self.awake_write_loop();
             }

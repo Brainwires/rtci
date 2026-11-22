@@ -180,6 +180,7 @@ fn test_param_reconfig_response_success() -> Result<()> {
         ParamReconfigResponse {
             reconfig_response_sequence_number: 1,
             result: ReconfigResult::SuccessPerformed,
+            next_tsns: None,
         },
     )];
 

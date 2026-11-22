@@ -264,7 +264,19 @@ impl Stream<'_> {
         let (p, _) = source.pop_chunk(self.association.max_message_size() as usize);
 
         if let Some(s) = self.association.streams.get_mut(&self.stream_identifier) {
-            let (is_buffered_amount_high, chunks) = s.packetize(now, &p, ppi, ppid);
+            let (is_buffered_amount_high, mut chunks) = s.packetize(now, &p, ppi, ppid);
+            // RFC 6525 5.1.2 A1: while a reset of this outgoing stream is not answered, new
+            // data gets no Stream Sequence Number and is queued. It goes out when the answer
+            // is in: numbered from 0 if the peer performed the reset, and on from where the
+            // stream was if it did not.
+            let held = s.outgoing_reset_pending;
+            if held {
+                for c in &mut chunks {
+                    c.message_id = Some(id);
+                }
+                s.held_writes.push(chunks);
+                chunks = vec![];
+            }
 
             if is_buffered_amount_high {
                 trace!("StreamEvent::BufferedAmountHigh");
@@ -275,7 +287,11 @@ impl Stream<'_> {
                     }))
             }
 
-            self.association.send_payload_data(id, chunks);
+            if held {
+                self.association.held_write_count += 1;
+            } else {
+                self.association.send_payload_data(id, chunks);
+            }
 
             Ok(p.len())
         } else {
@@ -515,6 +531,12 @@ pub struct StreamState {
     pub(crate) bytes_dequeued: u64,
     pub(crate) buffered_amount_low: usize,
     pub(crate) buffered_amount_high: usize,
+    /// A reset of this outgoing stream was asked for and is not answered yet (RFC 6525
+    /// 5.1.2 A1).
+    pub(crate) outgoing_reset_pending: bool,
+    /// The messages written while the reset is pending, each as its fragments, without a
+    /// Stream Sequence Number.
+    pub(crate) held_writes: Vec<Vec<ChunkPayloadData>>,
 }
 impl StreamState {
     pub(crate) fn new(
@@ -539,6 +561,23 @@ impl StreamState {
             bytes_dequeued: 0,
             buffered_amount_low: 0,
             buffered_amount_high: u32::MAX as usize,
+            outgoing_reset_pending: false,
+            held_writes: vec![],
+        }
+    }
+
+    /// Gives a message that was held for a stream reset its Stream Sequence Number.
+    pub(crate) fn number_held_message(&mut self, chunks: &mut [ChunkPayloadData]) {
+        let Some(first) = chunks.first() else {
+            return;
+        };
+        if first.unordered {
+            return;
+        }
+        let ssn = self.sequence_number;
+        self.sequence_number = self.sequence_number.wrapping_add(1);
+        for c in chunks {
+            c.stream_sequence_number = ssn;
         }
     }
 
@@ -612,7 +651,11 @@ impl StreamState {
                 immediate_sack: false,
                 payload_type: ppi,
                 payload_protocol_id: ppid,
-                stream_sequence_number: self.sequence_number,
+                stream_sequence_number: if self.outgoing_reset_pending {
+                    0
+                } else {
+                    self.sequence_number
+                },
                 ..Default::default()
             };
 
@@ -626,7 +669,7 @@ impl StreamState {
         // Note: When transmitting ordered and unordered data, an endpoint does
         // not increment its Stream Sequence Number when transmitting a DATA
         // chunk with U flag set to 1.
-        if !unordered {
+        if !unordered && !self.outgoing_reset_pending {
             self.sequence_number = self.sequence_number.wrapping_add(1);
         }
 

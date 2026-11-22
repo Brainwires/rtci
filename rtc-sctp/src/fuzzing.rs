@@ -28,14 +28,17 @@ use crate::chunk::chunk_shutdown_complete::ChunkShutdownComplete;
 use crate::chunk::chunk_unknown::ChunkUnknown;
 use crate::packet::{Packet, PartialDecode};
 use crate::param::Param;
+use crate::param::param_add_streams_request::ParamAddStreamsRequest;
 use crate::param::param_chunk_list::ParamChunkList;
 use crate::param::param_forward_tsn_supported::ParamForwardTsnSupported;
 use crate::param::param_header::ParamHeader;
 use crate::param::param_heartbeat_info::ParamHeartbeatInfo;
+use crate::param::param_incoming_reset_request::ParamIncomingResetRequest;
 use crate::param::param_outgoing_reset_request::ParamOutgoingResetRequest;
 use crate::param::param_random::ParamRandom;
 use crate::param::param_reconfig_response::ParamReconfigResponse;
 use crate::param::param_requested_hmac_algorithm::ParamRequestedHmacAlgorithm;
+use crate::param::param_ssn_tsn_reset_request::ParamSsnTsnResetRequest;
 use crate::param::param_state_cookie::ParamStateCookie;
 use crate::param::param_supported_extensions::ParamSupportedExtensions;
 use crate::param::param_uknown::ParamUnknown;
@@ -286,6 +289,24 @@ pub fn param_param_outgoing_reset_request_unmarshal(data: &[u8]) -> Result<()> {
 pub fn param_param_reconfig_response_unmarshal(data: &[u8]) -> Result<()> {
     let raw = to_bytes(data);
     let _ = ParamReconfigResponse::unmarshal(&raw)?;
+    Ok(())
+}
+
+pub fn param_param_incoming_reset_request_unmarshal(data: &[u8]) -> Result<()> {
+    let raw = to_bytes(data);
+    let _ = ParamIncomingResetRequest::unmarshal(&raw)?;
+    Ok(())
+}
+
+pub fn param_param_ssn_tsn_reset_request_unmarshal(data: &[u8]) -> Result<()> {
+    let raw = to_bytes(data);
+    let _ = ParamSsnTsnResetRequest::unmarshal(&raw)?;
+    Ok(())
+}
+
+pub fn param_param_add_streams_request_unmarshal(data: &[u8]) -> Result<()> {
+    let raw = to_bytes(data);
+    let _ = ParamAddStreamsRequest::unmarshal(&raw)?;
     Ok(())
 }
 

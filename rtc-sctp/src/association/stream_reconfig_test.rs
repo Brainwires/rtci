@@ -4,13 +4,12 @@
 
 use super::robustness_test::*;
 use super::*;
-use crate::chunk::chunk_type::*;
 use crate::endpoint::link_test::Link;
 
 const PPI: PayloadProtocolIdentifier = PayloadProtocolIdentifier::Binary;
 
 /// The parameters (type, value) of the RE-CONFIG chunks among `datagrams`.
-fn reconfig_params(datagrams: &[Bytes]) -> Vec<(u16, Vec<u8>)> {
+pub(super) fn reconfig_params(datagrams: &[Bytes]) -> Vec<(u16, Vec<u8>)> {
     chunks_of_type(datagrams, CT_RECONFIG.0)
         .iter()
         .flat_map(|chunk| tlvs(&chunk[4..]))
@@ -105,6 +104,7 @@ fn a_reset_request_is_retransmitted_until_it_is_answered() -> Result<()> {
             param_a: Some(Box::new(ParamReconfigResponse {
                 reconfig_response_sequence_number: rsn,
                 result: ReconfigResult::InProgress,
+                next_tsns: None,
             })),
             param_b: None,
         })?;
@@ -113,8 +113,9 @@ fn a_reset_request_is_retransmitted_until_it_is_answered() -> Result<()> {
     }
     assert_eq!(12, retransmissions);
 
-    // And twelve more with no answer at all.
-    for _ in 0..12 {
+    // And five more with no answer at all: these count against the association (5.1.1),
+    // which has ten to lose.
+    for _ in 0..5 {
         now = a
             .timers
             .get(Timer::Reconfig)
@@ -125,12 +126,14 @@ fn a_reset_request_is_retransmitted_until_it_is_answered() -> Result<()> {
             .filter(|(typ, _)| *typ == 13)
             .count();
     }
-    assert_eq!(24, retransmissions);
+    assert_eq!(17, retransmissions);
+    assert!(!a.is_ended());
 
     a.handle_reconfig(&ChunkReconfig {
         param_a: Some(Box::new(ParamReconfigResponse {
             reconfig_response_sequence_number: rsn,
             result: ReconfigResult::SuccessPerformed,
+            next_tsns: None,
         })),
         param_b: None,
     })?;
@@ -197,33 +200,45 @@ fn a_reset_request_without_streams_resets_every_stream() -> Result<()> {
     Ok(())
 }
 
-/// RFC 6525 5.2.1: every request parameter is answered. The requests this implementation
-/// does not perform (Incoming SSN Reset 14, SSN/TSN Reset 15, Add Outgoing Streams 17, Add
-/// Incoming Streams 18) got no answer, so the peer retransmitted them to its limit. They are
-/// answered "Denied", and DATA bundled with them is delivered.
+/// RFC 6525 5.2.1: every request parameter is answered, and what is bundled with it is not
+/// lost. A RE-CONFIG with an Incoming SSN Reset (14), SSN/TSN Reset (15), Add Outgoing
+/// Streams (17) or Add Incoming Streams (18) request used to fail the parse of its whole
+/// packet: the DATA in it was dropped and the request never answered.
 #[test]
-fn a_request_that_is_not_performed_is_denied() {
-    for typ in [14u16, 15, 17, 18] {
+fn every_request_parameter_is_answered() {
+    // Incoming reset of a stream that has sent nothing: nothing to do (0). SSN/TSN reset
+    // with nothing outstanding: performed (1). More streams than the 65535 there are:
+    // denied (2).
+    for (typ, extra, result) in [
+        (14u16, &[0u8, 1][..], 0u8),
+        (15, &[][..], 1),
+        (17, &[0, 1, 0, 0][..], 2),
+        (18, &[0, 1, 0, 0][..], 2),
+    ] {
         let mut link = connected_link(502);
         let now = link.now;
         let a = link.server.conn();
         let tsn = a.peer_last_tsn.wrapping_add(1);
-        let mut value = 0x0102_0304u32.to_be_bytes().to_vec();
-        value.extend_from_slice(&[0, 1, 0, 0]);
+        let rsn = a.peer_rsn_window.expect("known from the INIT").1;
+        let mut value = rsn.to_be_bytes().to_vec();
+        value.extend_from_slice(extra);
         let request = raw_chunk(CT_RECONFIG.0, 0, &raw_tlv(typ, &value));
         let raw = packet_to(a, &[data_chunk(tsn, 1, 0, b"bundled"), request]);
         inject(a, now, raw);
 
         assert!(!a.is_ended());
-        assert_eq!(tsn, a.peer_last_tsn, "the DATA bundled with request {typ}");
-        let responses: Vec<(u16, Vec<u8>)> = reconfig_params(&sent_datagrams(a, now))
+        assert_eq!(
+            vec![Bytes::from_static(b"bundled")],
+            read_all(a, 1),
+            "the DATA bundled with request {typ}"
+        );
+        let responses: Vec<Vec<u8>> = reconfig_params(&sent_datagrams(a, now))
             .into_iter()
             .filter(|(t, _)| *t == 16)
+            .map(|(_, value)| value)
             .collect();
-        assert_eq!(
-            vec![(16u16, vec![1, 2, 3, 4, 0, 0, 0, 2])],
-            responses,
-            "request {typ}: a response with its sequence number and result Denied"
-        );
+        assert_eq!(1, responses.len(), "request {typ}");
+        assert_eq!(&rsn.to_be_bytes()[..], &responses[0][..4], "request {typ}");
+        assert_eq!(&[0, 0, 0, result][..], &responses[0][4..8], "request {typ}");
     }
 }
