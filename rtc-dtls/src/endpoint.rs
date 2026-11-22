@@ -42,6 +42,11 @@ pub enum EndpointEvent {
     PeerClosed,
 }
 
+/// The most associations a server endpoint holds for addresses it has not verified: those
+/// of ClientHellos too long for one record, which have to be put together before the cookie
+/// exchange can be run (RFC 9147 section 5.1).
+const MAX_UNVERIFIED_ASSOCIATIONS: usize = 32;
+
 /// What a server endpoint makes of a datagram before an association sees it.
 enum Admission {
     /// It has been dealt with (answered with a HelloVerifyRequest, or dropped).
@@ -132,7 +137,7 @@ impl Endpoint {
     }
 
     /// The connection with `remote`, for the fuzz harness to reach its record state.
-    #[cfg(fuzzing)]
+    #[cfg(any(fuzzing, test))]
     pub(crate) fn connection_mut(&mut self, remote: &SocketAddr) -> Option<&mut DTLSConn> {
         self.connections.get_mut(remote)
     }
@@ -246,7 +251,11 @@ impl Endpoint {
     ) -> Result<()> {
         let is_handshake_completed_before = conn.is_handshake_completed();
         conn.read(data)?;
-        if !conn.is_handshake_completed() {
+        if conn.is_dtls13() {
+            // DTLS 1.3 has handshake messages after the handshake too (ACKs, key updates),
+            // so its timers are set after every datagram.
+            conn.handshake(now)?;
+        } else if !conn.is_handshake_completed() {
             conn.handshake(now)?;
             // Drain any queued future-epoch packets (e.g. Finished that arrived
             // before ChangeCipherSpec bumped remote_epoch). If draining sets
@@ -319,6 +328,13 @@ impl Endpoint {
             return Ok(Admission::Deliver);
         }
 
+        if config.supports_dtls13()
+            && let Some(admission) =
+                self.admit_dtls13(now, remote, ecn, data, config, &hello, established)?
+        {
+            return Ok(admission);
+        }
+
         let provider = config.provider().clone();
         let verified = !config.cookie_exchange
             || self
@@ -364,6 +380,277 @@ impl Endpoint {
         Ok(Admission::Deliver)
     }
 
+    /// A server's part before any association for a ClientHello that may be for DTLS 1.3
+    /// (RFC 9147 section 5.1): the cookie exchange by HelloRetryRequest, without state. `None`
+    /// when the ClientHello is DTLS 1.2's to answer.
+    #[allow(clippy::too_many_arguments)]
+    fn admit_dtls13(
+        &mut self,
+        now: Instant,
+        remote: SocketAddr,
+        ecn: Option<EcnCodepoint>,
+        data: &[u8],
+        config: &Arc<HandshakeConfig>,
+        prefix: &ClientHelloPrefix<'_>,
+        established: bool,
+    ) -> Result<Option<Admission>> {
+        use crate::dtls13::handshake::hello_retry_request;
+        use crate::dtls13::hello::{RetryCookie, negotiate, parse_cookie, whole_client_hello};
+        use crate::dtls13::messages::{self, ClientHello};
+        use crate::dtls13::record::{CONTENT_TYPE_ALERT, CONTENT_TYPE_HANDSHAKE, plaintext_record};
+
+        let Some((body, record_sequence, message_seq)) = whole_client_hello(data) else {
+            // A ClientHello cut into several records cannot be judged from its first: its
+            // extensions say which version it is for. With a DTLS 1.2 cookie it is DTLS
+            // 1.2's. Without one, and with the cookie exchange on, it gets an association
+            // that puts it together and runs the exchange itself, for either version; that
+            // is state for an address nobody has verified, so only a bounded number exist.
+            if prefix.cookie.is_empty() && config.cookie_exchange {
+                let unverified = self
+                    .connections
+                    .values()
+                    .chain(self.pending.values())
+                    .filter(|conn| !conn.is_failed() && !conn.is_address_verified())
+                    .count();
+                if unverified >= MAX_UNVERIFIED_ASSOCIATIONS {
+                    return Ok(Some(Admission::Done));
+                }
+                let conn = DTLSConn::new(config.clone(), false, None);
+                if established {
+                    self.pending.insert(remote, conn);
+                } else {
+                    self.connections.insert(remote, conn);
+                }
+                return Ok(Some(Admission::Deliver));
+            }
+            return Ok(None);
+        };
+        let Ok(hello) = ClientHello::parse(body) else {
+            return Ok(None);
+        };
+        let send = |endpoint: &mut Self, content_type: u8, fragment: &[u8]| {
+            endpoint.transmits.push_back(TransportMessage {
+                now,
+                transport: TransportContext {
+                    local_addr: endpoint.local_addr,
+                    peer_addr: remote,
+                    ecn,
+                    transport_protocol: endpoint.transport_protocol,
+                },
+                message: BytesMut::from(
+                    plaintext_record(content_type, record_sequence, fragment).as_slice(),
+                ),
+            });
+        };
+        if !hello.offers_dtls13() {
+            if !config.supports_dtls12() {
+                // RFC 8446 section 4.2.1: no version in common.
+                send(
+                    self,
+                    CONTENT_TYPE_ALERT,
+                    &[2, messages::alert::PROTOCOL_VERSION],
+                );
+                return Ok(Some(Admission::Done));
+            }
+            return Ok(None);
+        }
+
+        let provider = config.provider().clone();
+        let secrets = self.cookie_secrets.secrets(now, provider.as_ref())?;
+        let verified_retry = match hello.extension(messages::EXT_COOKIE) {
+            Some(extension) => {
+                let secrets: Vec<&[u8]> = secrets.iter().map(|secret| secret.as_ref()).collect();
+                let opened = match parse_cookie(extension) {
+                    Ok(cookie) => {
+                        RetryCookie::open(provider.as_ref(), &secrets, Some(remote), cookie)?
+                            .map(|opened| (cookie.to_vec(), opened))
+                    }
+                    Err(_) => None,
+                };
+                let Some(opened) = opened else {
+                    // RFC 9147 section 5.1: a ClientHello with an invalid cookie is an
+                    // illegal_parameter, so that the client can start again without one.
+                    send(
+                        self,
+                        CONTENT_TYPE_ALERT,
+                        &[2, messages::alert::ILLEGAL_PARAMETER],
+                    );
+                    return Ok(Some(Admission::Done));
+                };
+                Some(opened)
+            }
+            None => {
+                let negotiated = match negotiate(config, &hello) {
+                    Ok(negotiated) => negotiated,
+                    Err(refusal) => {
+                        send(self, CONTENT_TYPE_ALERT, &[2, refusal.alert]);
+                        return Ok(Some(Admission::Done));
+                    }
+                };
+                if config.cookie_exchange || negotiated.client_share.is_none() {
+                    // Answered with a HelloRetryRequest and forgotten: the cookie carries
+                    // what the second ClientHello has to be continued from.
+                    let Some(secret) = secrets.first() else {
+                        return Err(Error::Crypto("no cookie secret".to_owned()));
+                    };
+                    let (retry, _) = hello_retry_request(
+                        provider.as_ref(),
+                        secret.as_ref(),
+                        Some(remote),
+                        body,
+                        &negotiated,
+                    )?;
+                    send(
+                        self,
+                        CONTENT_TYPE_HANDSHAKE,
+                        &messages::handshake_fragment(
+                            messages::SERVER_HELLO,
+                            retry.len(),
+                            0,
+                            0,
+                            &retry,
+                        ),
+                    );
+                    return Ok(Some(Admission::Done));
+                }
+                None
+            }
+        };
+
+        let mut conn = DTLSConn::accept(config.clone(), message_seq, record_sequence)?;
+        conn.verified_retry = verified_retry;
+        if established {
+            self.pending.insert(remote, conn);
+        } else {
+            self.connections.insert(remote, conn);
+        }
+        Ok(Some(Admission::Deliver))
+    }
+
+    /// RFC 9146 section 6, RFC 9147 section 9: a datagram from an address without an
+    /// association, under a connection id of an association at another address. When the
+    /// configuration allows it, that association takes the datagram; if a record of it
+    /// authenticates and is newer than any before, the association is at `remote` from now
+    /// on. `None` when no association owns the datagram.
+    fn migrate(
+        &mut self,
+        now: Instant,
+        remote: SocketAddr,
+        data: &[u8],
+    ) -> Option<Vec<EndpointEvent>> {
+        let previous = self.connections.iter().find_map(|(address, conn)| {
+            let migrates = conn.handshake_config.connection_id_migration
+                && conn.is_handshake_completed()
+                && !conn.is_failed()
+                && conn
+                    .v13
+                    .as_ref()
+                    .is_some_and(|v13| v13.owns_connection_id(data));
+            migrates.then_some(*address)
+        })?;
+        let conn = self.connections.get_mut(&previous)?;
+        // An authentic, newer record is what moves the association. A replay or a forgery
+        // is dropped by it like any other, and leaves it where it was.
+        let authenticated = conn.authenticated_records;
+        let _ = conn.read(data);
+        let _ = conn.handshake(now);
+        let newest = conn.v13.as_ref().is_some_and(|v13| v13.newest_record_read);
+        let moves = conn.authenticated_records != authenticated && newest;
+        let mut events = vec![];
+        while let Some(message) = conn.incoming_application_data() {
+            events.push(EndpointEvent::ApplicationData(message));
+        }
+        let destination = if moves { remote } else { previous };
+        Self::queue_transmits(
+            &mut self.transmits,
+            conn,
+            now,
+            self.local_addr,
+            destination,
+            None,
+            self.transport_protocol,
+        );
+        if moves && let Some(conn) = self.connections.remove(&previous) {
+            self.connections.insert(remote, conn);
+        }
+        Some(events)
+    }
+
+    /// Hands the peer at `remote` `count` new connection ids: see
+    /// [`DTLSConn::new_connection_ids`].
+    pub fn new_connection_ids(
+        &mut self,
+        now: Instant,
+        remote: SocketAddr,
+        count: usize,
+        immediate: bool,
+    ) -> Result<()> {
+        self.with_dtls13(now, remote, |conn| {
+            conn.new_connection_ids(count, immediate)
+        })
+    }
+
+    /// Asks the peer at `remote` for `count` more connection ids: see
+    /// [`DTLSConn::request_connection_ids`].
+    pub fn request_connection_ids(
+        &mut self,
+        now: Instant,
+        remote: SocketAddr,
+        count: u8,
+    ) -> Result<()> {
+        self.with_dtls13(now, remote, |conn| conn.request_connection_ids(count))
+    }
+
+    /// Runs `action` on the association with `remote`, sets its timers and queues what it
+    /// wants sent.
+    fn with_dtls13(
+        &mut self,
+        now: Instant,
+        remote: SocketAddr,
+        action: impl FnOnce(&mut DTLSConn) -> Result<()>,
+    ) -> Result<()> {
+        let Some(conn) = self.connections.get_mut(&remote) else {
+            return Err(Error::InvalidRemoteAddress(remote));
+        };
+        action(conn)?;
+        conn.handshake(now)?;
+        Self::queue_transmits(
+            &mut self.transmits,
+            conn,
+            now,
+            self.local_addr,
+            remote,
+            None,
+            self.transport_protocol,
+        );
+        Ok(())
+    }
+
+    /// Starts a key update on the DTLS 1.3 association with `remote` (RFC 9147 section 8):
+    /// see [`DTLSConn::update_keys`].
+    pub fn update_keys(
+        &mut self,
+        now: Instant,
+        remote: SocketAddr,
+        request_peer: bool,
+    ) -> Result<()> {
+        let Some(conn) = self.connections.get_mut(&remote) else {
+            return Err(Error::InvalidRemoteAddress(remote));
+        };
+        conn.update_keys(request_peer)?;
+        conn.handshake(now)?;
+        Self::queue_transmits(
+            &mut self.transmits,
+            conn,
+            now,
+            self.local_addr,
+            remote,
+            None,
+            self.transport_protocol,
+        );
+        Ok(())
+    }
+
     /// Process an incoming UDP datagram
     pub fn read(
         &mut self,
@@ -372,6 +659,12 @@ impl Endpoint {
         ecn: Option<EcnCodepoint>,
         data: BytesMut,
     ) -> Result<Vec<EndpointEvent>> {
+        if !self.connections.contains_key(&remote)
+            && !self.pending.contains_key(&remote)
+            && let Some(events) = self.migrate(now, remote, &data)
+        {
+            return Ok(events);
+        }
         if let Some(config) = self.server_config.clone() {
             if let Admission::Done = self.admit(now, remote, ecn, &data, &config)? {
                 return Ok(vec![]);
@@ -513,6 +806,9 @@ impl Endpoint {
     pub fn write(&mut self, now: Instant, remote: SocketAddr, data: &[u8]) -> Result<()> {
         if let Some(conn) = self.connections.get_mut(&remote) {
             conn.write(data)?;
+            if conn.is_dtls13() {
+                conn.handshake(now)?;
+            }
             Self::queue_transmits(
                 &mut self.transmits,
                 conn,

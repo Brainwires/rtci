@@ -131,6 +131,7 @@ pub struct ConfigBuilder {
     min_version: DtlsVersion,
     max_version: DtlsVersion,
     connection_id: Option<usize>,
+    connection_id_migration: bool,
     psk: Option<PskCallback>,
     psk_identity_hint: Option<Vec<u8>>,
     insecure_skip_verify: bool,
@@ -165,7 +166,8 @@ impl Default for ConfigBuilder {
             early_data_retransmit: true,
             min_version: DtlsVersion::Dtls1_2,
             max_version: DtlsVersion::Dtls1_3,
-            connection_id: None,
+            connection_id: Some(0),
+            connection_id_migration: false,
             psk: None,
             psk_identity_hint: None,
             insecure_skip_verify: false,
@@ -202,6 +204,12 @@ impl ConfigBuilder {
 
     /// cipher_suites is a list of supported cipher suites.
     /// If cipher_suites is nil, a default list is used
+    ///
+    /// The list is exact, and with it the versions: the TLS 1.3 suites in it
+    /// (`Tls_Aes_128_Gcm_Sha256` and the others of that family) are what DTLS 1.3 is
+    /// negotiated with, the rest what DTLS 1.2 is. A list without a TLS 1.3 suite therefore
+    /// negotiates DTLS 1.2 only, and one with nothing else DTLS 1.3 only. The default list
+    /// has both.
     pub fn with_cipher_suites(mut self, cipher_suites: Vec<CipherSuiteId>) -> Self {
         self.cipher_suites = cipher_suites;
         self
@@ -339,6 +347,33 @@ impl ConfigBuilder {
     pub fn with_protocol_versions(mut self, min: DtlsVersion, max: DtlsVersion) -> Self {
         self.min_version = min;
         self.max_version = max;
+        self
+    }
+
+    /// Whether, and how, this side uses connection ids (RFC 9147 section 9, on RFC 9146's
+    /// `connection_id` extension): `Some(n)` sends the extension and asks the peer to put a
+    /// connection id of `n` random bytes in every protected record it sends, `Some(0)` sends
+    /// it and asks for none (the peer may still ask for one in the other direction), `None`
+    /// does not use the extension. Negotiated when both sides send it. The default is
+    /// `Some(0)`, as RFC 9147 section 5.1 asks of a client that wants no connection id.
+    ///
+    /// With DTLS 1.3 only: the DTLS 1.2 record format of RFC 9146 (`tls12_cid`) is not
+    /// implemented, so a ClientHello that also offers DTLS 1.2 leaves the extension out, and
+    /// a server answers it only when it negotiates DTLS 1.3.
+    pub fn with_connection_id(mut self, length: Option<usize>) -> Self {
+        self.connection_id = length;
+        self
+    }
+
+    /// Whether a server [`Endpoint`](crate::endpoint::Endpoint) follows an association to a
+    /// new address when a record under one of its connection ids arrives from there, is
+    /// authentic and is newer than any before it (RFC 9146 section 6). Off by default: the
+    /// RFC also requires a strategy that shows the new address receives, and none is run
+    /// here. An application that has one (ICE has: consent and connectivity checks on the
+    /// new pair) turns this on; under ICE the engine addresses an association by the
+    /// selected pair anyway.
+    pub fn with_connection_id_migration(mut self, migration: bool) -> Self {
+        self.connection_id_migration = migration;
         self
     }
 
@@ -671,11 +706,12 @@ impl ConfigBuilder {
         let mut max_version = self.max_version;
         let mut local_tls13_cipher_suites = vec![];
         if max_version == DtlsVersion::Dtls1_3 && !psk_only {
-            let configured = self.configured_suites(true);
-            local_tls13_cipher_suites = if configured.is_empty() {
+            // A configured list is exact: without a TLS 1.3 suite in it there is no
+            // DTLS 1.3.
+            local_tls13_cipher_suites = if self.cipher_suites.is_empty() {
                 crate::dtls13::suite::DEFAULT_SUITES.to_vec()
             } else {
-                configured
+                self.configured_suites(true)
             };
             local_tls13_cipher_suites.retain(|suite| suite.supported_by(crypto_provider.crypto()));
             let signs = local_signature_schemes.iter().any(|scheme| {
@@ -696,6 +732,15 @@ impl ConfigBuilder {
             }
             max_version = DtlsVersion::Dtls1_2;
         }
+        // A list with TLS 1.3 suites only leaves nothing to negotiate DTLS 1.2 with.
+        let min_version = if max_version == DtlsVersion::Dtls1_3
+            && !self.cipher_suites.is_empty()
+            && self.configured_suites(false).is_empty()
+        {
+            DtlsVersion::Dtls1_3
+        } else {
+            self.min_version
+        };
 
         let retransmit_interval = if self.flight_interval != Duration::from_secs(0) {
             self.flight_interval
@@ -704,6 +749,11 @@ impl ConfigBuilder {
         };
 
         let maximum_transmission_unit = if self.mtu == 0 { DEFAULT_MTU } else { self.mtu };
+        if self.connection_id.is_some_and(|length| length > 255) {
+            return Err(Error::Other(
+                "a connection id is at most 255 bytes".to_owned(),
+            ));
+        }
         if maximum_transmission_unit < MINIMUM_MTU {
             return Err(Error::Other(format!(
                 "mtu {maximum_transmission_unit} is below the minimum of {MINIMUM_MTU}"
@@ -817,10 +867,21 @@ impl ConfigBuilder {
             cookie_exchange: self.cookie_exchange,
             hello_verify_request_version: self.hello_verify_request_version,
             early_data_retransmit: self.early_data_retransmit,
-            min_version: self.min_version,
+            min_version,
             max_version,
             local_tls13_cipher_suites,
-            connection_id: self.connection_id,
+            // The extension belongs to both versions, and only DTLS 1.3 has its records
+            // here. Where a hello is for DTLS 1.3 alone it carries the extension even when
+            // no connection id was asked for (RFC 9147 section 5.1: so that the peer can
+            // ask for one), unless that is switched off.
+            // A server answers the offer of a DTLS 1.3 client whatever else it speaks: its
+            // DTLS 1.2 handshake does not know the extension.
+            connection_id: if !is_client || min_version == DtlsVersion::Dtls1_3 {
+                self.connection_id
+            } else {
+                None
+            },
+            connection_id_migration: self.connection_id_migration,
             initial_epoch: 0,
             maximum_transmission_unit,
             maximum_retransmit_number,
@@ -897,6 +958,7 @@ pub struct HandshakeConfig {
     /// The length of the connection ids this side asks its peer to send, if it uses the
     /// connection_id extension at all.
     pub(crate) connection_id: Option<usize>,
+    pub(crate) connection_id_migration: bool,
     pub(crate) initial_epoch: u16,
     pub(crate) maximum_transmission_unit: usize,
     pub(crate) maximum_retransmit_number: usize,
@@ -967,6 +1029,7 @@ impl HandshakeConfig {
             max_version: DtlsVersion::Dtls1_2,
             local_tls13_cipher_suites: vec![],
             connection_id: None,
+            connection_id_migration: false,
             initial_epoch: 0,
             maximum_transmission_unit: DEFAULT_MTU,
             maximum_retransmit_number: DEFAULT_MAXIMUM_RETRANSMIT_NUMBER,
