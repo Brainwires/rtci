@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **webrtc-extensions** (pc-17).
+  - `RTCRtpEncodingParameters` has `scale_resolution_down_to: Option<RTCResolutionRestriction>`,
+    `ptime: Option<u32>` and `adaptive_ptime: bool` (section 5): validated in addTransceiver
+    (OperationError) and setParameters (InvalidModificationError); `adaptive_ptime` with
+    `ptime` is an InvalidModificationError; `scale_down_factor(width, height)` gives the
+    encoder's factor (never an upscale, orientation agnostic). A struct literal needs the
+    new fields.
+  - `RTCRtpHeaderEncryptionPolicy::default()` is `Negotiate` (W3C 10.2), so a connection
+    offers and answers `a=cryptex` unless configured otherwise; `RTCConfiguration` has
+    `rtp_header_encryption_policy` and `always_negotiate_data_channels`
+    (`RTCConfigurationBuilder::with_rtp_header_encryption_policy`,
+    `with_always_negotiate_data_channels`), and `set_configuration` refuses another value
+    (InvalidModificationError). `set_rtp_header_encryption_policy` and
+    `set_always_negotiate_data_channels` return `Result<()>` and are refused once a
+    description was set.
+  - Events `OnSsrcChange(receiver)` and `OnCsrcChange(receiver)` (section 11:
+    `ssrcchange`, `csrcchange`), `OnIceCandidatePairNominate(pair)` (section 7).
+  - Cancelable nomination (section 7): `SettingEngineBuilder::with_candidate_pair_proposals`
+    has the controlling agent propose each nomination; `resolve_candidate_pair_nomination`
+    accepts or cancels it; `select_candidate_pair` / `remove_candidate_pair` refuse while a
+    proposal is pending. rtc-ice: `AgentConfig::candidate_pair_proposals`,
+    `Event::CandidatePairNominationProposed`, `Agent::proposal_pending`,
+    `Agent::resolve_nomination_proposal` (additive; an `AgentConfig` literal needs the field).
+  - Header extension control (section 4.1): an extension the section's negotiated direction
+    leaves no use for is "stopped" after the answer.
 - **media_stream**: remote tracks and the mediacapture-main model (pc-16).
   - `MediaStreamTrack::apply_constraints` returns `Result<()>`: on a remote track (a
     receiver's; new `is_remote()`) constraints naming `width`, `height`, `frameRate` or

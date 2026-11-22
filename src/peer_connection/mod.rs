@@ -2840,13 +2840,27 @@ impl RTCPeerConnection {
         now: Instant,
         pair: &crate::peer_connection::transport::RTCIceCandidatePair,
     ) -> Result<()> {
-        if self.is_closed() {
+        if self.is_closed() || self.ice_transport().agent.proposal_pending() {
             return Err(Error::InvalidStateError);
         }
         let (local, remote) = self.listed_candidate_pair(pair)?;
         self.ice_transport_mut()
             .agent
             .select_candidate_pair(now, &local, &remote)
+    }
+
+    /// webrtc-extensions 7: answers the `OnIceCandidatePairNominate` proposal (with
+    /// `SettingEngineBuilder::with_candidate_pair_proposals(true)`): `accept` has the agent
+    /// nominate the pair; `false` is a cancelled event, the agent does not nominate it and
+    /// keeps checking. `[[ProposalPending]]` (which `select_candidate_pair` and
+    /// `remove_candidate_pair` refuse with InvalidStateError) ends either way.
+    pub fn resolve_candidate_pair_nomination(&mut self, now: Instant, accept: bool) {
+        if self.is_closed() {
+            return;
+        }
+        self.ice_transport_mut()
+            .agent
+            .resolve_nomination_proposal(now, accept);
     }
 
     /// webrtc-extensions 7 `RTCIceTransport.removeCandidatePair(pair)`: the ICE agent stops
@@ -2862,7 +2876,7 @@ impl RTCPeerConnection {
         now: Instant,
         pair: &crate::peer_connection::transport::RTCIceCandidatePair,
     ) -> Result<()> {
-        if self.is_closed() {
+        if self.is_closed() || self.ice_transport().agent.proposal_pending() {
             return Err(Error::InvalidStateError);
         }
         let (local, remote) = self.listed_candidate_pair(pair)?;
@@ -2985,6 +2999,14 @@ impl RTCPeerConnection {
         }
         if configuration.rtcp_mux_policy != self.configuration.rtcp_mux_policy {
             return Err(Error::ErrModifyingRTCPMuxPolicy);
+        }
+        // webrtc-extensions 10.2 and 13.2: neither policy changes after construction.
+        if configuration.rtp_header_encryption_policy
+            != self.configuration.rtp_header_encryption_policy
+            || configuration.always_negotiate_data_channels
+                != self.configuration.always_negotiate_data_channels
+        {
+            return Err(Error::InvalidModificationError);
         }
         if configuration.ice_candidate_pool_size != self.configuration.ice_candidate_pool_size
             && self.local_description_was_set
@@ -3506,6 +3528,11 @@ impl RTCPeerConnection {
                 &implemented,
                 Error::ErrOperationError,
             )?;
+            crate::rtp_transceiver::rtp_sender::internal::validate_extension_members(
+                track.kind(),
+                &mut send_encodings,
+                Error::ErrOperationError,
+            )?;
             send_encodings
         };
         let (track, send_encodings, codec_preferences) =
@@ -3594,6 +3621,11 @@ impl RTCPeerConnection {
                 kind,
                 &mut init.send_encodings,
                 &implemented,
+                Error::ErrOperationError,
+            )?;
+            crate::rtp_transceiver::rtp_sender::internal::validate_extension_members(
+                kind,
+                &mut init.send_encodings,
                 Error::ErrOperationError,
             )?;
         }

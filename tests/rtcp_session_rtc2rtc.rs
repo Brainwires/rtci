@@ -64,6 +64,8 @@ struct Peer {
     read_rtp: Vec<(u32, u16)>,
     /// The RTCP datagrams this peer put on the wire.
     rtcp_datagrams: usize,
+    /// The `ssrcchange` / `csrcchange` events (webrtc-extensions 11), in order.
+    source_changes: Vec<&'static str>,
 }
 
 impl Peer {
@@ -131,6 +133,7 @@ impl Peer {
             read_rtcp: Vec::new(),
             read_rtp: Vec::new(),
             rtcp_datagrams: 0,
+            source_changes: Vec::new(),
         })
     }
 
@@ -259,6 +262,8 @@ impl World {
                     RTCPeerConnectionEvent::OnTrack(RTCTrackEvent::OnMute(_)) => {
                         peer.muted += 1;
                     }
+                    RTCPeerConnectionEvent::OnSsrcChange(_) => peer.source_changes.push("ssrc"),
+                    RTCPeerConnectionEvent::OnCsrcChange(_) => peer.source_changes.push("csrc"),
                     _ => {}
                 }
             }
@@ -762,6 +767,68 @@ fn stop_says_bye_for_the_senders_streams_and_stops_receiving() -> Result<()> {
         world.peers[1].read_rtp.len(),
         received,
         "nothing is received"
+    );
+    Ok(())
+}
+
+/// webrtc-extensions 11: the receiver fires `ssrcchange` when the synchronization source of
+/// the last frame changes (the first frame's included) and `csrcchange` when its contributing
+/// sources do, `ssrcchange` first, once both lists are updated; frames that change nothing
+/// fire nothing.
+#[test]
+fn source_changes_fire_ssrcchange_and_csrcchange() -> Result<()> {
+    let (mut world, sender) = World::connected()?;
+    let (ssrc, _, pt) = world.sender_stream(sender);
+    let send = |world: &mut World, seq: u16, csrc: Vec<u32>| -> Result<()> {
+        let now = world.now;
+        world.peers[0]
+            .pc
+            .rtp_sender(sender)
+            .expect("sender")
+            .write_rtp(
+                now,
+                rtc::rtp::Packet {
+                    header: rtc::rtp::header::Header {
+                        version: 2,
+                        payload_type: pt,
+                        sequence_number: seq,
+                        timestamp: u32::from(seq) * 1800,
+                        ssrc,
+                        marker: true,
+                        csrc,
+                        ..Default::default()
+                    },
+                    payload: Bytes::from(vec![0x10u8; 200]),
+                },
+            )?;
+        world.pump()?;
+        let until = now + Duration::from_millis(20);
+        world.run_until(until)
+    };
+    send(&mut world, FIRST_SEQ, vec![])?;
+    assert_eq!(
+        world.peers[1].source_changes,
+        ["ssrc"],
+        "the first frame's source"
+    );
+    send(&mut world, FIRST_SEQ + 1, vec![])?;
+    assert_eq!(world.peers[1].source_changes, ["ssrc"], "nothing changed");
+    send(&mut world, FIRST_SEQ + 2, vec![11, 12])?;
+    assert_eq!(world.peers[1].source_changes, ["ssrc", "csrc"]);
+    send(&mut world, FIRST_SEQ + 3, vec![11, 12])?;
+    send(&mut world, FIRST_SEQ + 4, vec![12])?;
+    assert_eq!(world.peers[1].source_changes, ["ssrc", "csrc", "csrc"]);
+    let receiver = *world.peers[1].opened.first().expect("the track opened");
+    let contributing: Vec<u32> = world.peers[1]
+        .pc
+        .rtp_receiver(receiver)
+        .expect("receiver")
+        .get_contributing_sources()
+        .map(|source| source.source)
+        .collect();
+    assert!(
+        contributing.contains(&12),
+        "the list was updated first: {contributing:?}"
     );
     Ok(())
 }

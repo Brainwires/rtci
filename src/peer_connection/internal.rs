@@ -146,6 +146,7 @@ impl RTCPeerConnection {
 
         let agent_config = AgentConfig {
             lite: setting_engine.candidates.ice_lite,
+            candidate_pair_proposals: setting_engine.candidates.candidate_pair_proposals,
             urls: validated_servers,
             disconnected_timeout: setting_engine.timeout.ice_disconnected_timeout,
             failed_timeout: setting_engine.timeout.ice_failed_timeout,
@@ -255,6 +256,7 @@ impl RTCPeerConnection {
         .with_cookie_provider(crypto_provider)
         .with_max_buffer_size(setting_engine.data_channel_max_buffer_size);
 
+        let always_negotiate = configuration.always_negotiate_data_channels;
         // Create Pipeline Context
         let ice_handler_context = IceHandlerContext::new(ice_transport);
         let dtls_handler_context = DtlsHandlerContext::new(dtls_transport);
@@ -273,7 +275,10 @@ impl RTCPeerConnection {
             dtls_handler_context,
             sctp_handler_context,
             datachannel_handler_context: DataChannelHandlerContext::new(now),
-            srtp_handler_context: SrtpHandlerContext::default(),
+            srtp_handler_context: SrtpHandlerContext {
+                rtp_header_encryption_policy: configuration.rtp_header_encryption_policy,
+                ..Default::default()
+            },
             interceptor_handler_context: InterceptorHandlerContext::default(),
             endpoint_handler_context: EndpointHandlerContext::default(),
             media_read_outs: VecDeque::new(),
@@ -326,7 +331,7 @@ impl RTCPeerConnection {
             last_stable_state: None,
             negotiation_needed_state: NegotiationNeededState::Empty,
             is_negotiation_ongoing: false,
-            always_negotiate_data_channels: false,
+            always_negotiate_data_channels: always_negotiate,
             announced: super::states_events::AnnouncedStates::new(),
             last_data_dscp: None,
         })

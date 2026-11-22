@@ -17,14 +17,14 @@ pub(crate) const ATTR_KEY_CRYPTEX: &str = "cryptex";
 
 /// `RTCRtpHeaderEncryptionPolicy` (webrtc-extensions): whether a connection negotiates the
 /// encryption of RTP header extensions and CSRCs (Cryptex, RFC 9335).
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum RTCRtpHeaderEncryptionPolicy {
     /// No `a=cryptex` in offers or answers; packets are protected as RFC 3711 has it.
-    /// The default here, so a connection that never sets a policy is unchanged (the W3C
-    /// API's default is `Negotiate`).
-    #[default]
     Disable,
-    /// Offer Cryptex, answer it when offered, and use it once both sides signalled it.
+    /// Offer Cryptex, answer it when offered, and use it once both sides signalled it. The
+    /// default, as W3C webrtc-extensions 10.2 has it.
+    #[default]
     Negotiate,
     /// As `Negotiate`, and refuse received packets whose CSRCs or header extensions are
     /// not protected with Cryptex once it is negotiated (RFC 9335 section 5.2).
@@ -60,11 +60,29 @@ fn parsed_has_cryptex(description: Option<&RTCSessionDescription>) -> bool {
 impl RTCPeerConnection {
     /// Sets the `RTCRtpHeaderEncryptionPolicy` (webrtc-extensions). It applies to the next
     /// offer or answer, and to the SRTP contexts at once.
-    pub fn set_rtp_header_encryption_policy(&mut self, policy: RTCRtpHeaderEncryptionPolicy) {
+    pub fn set_rtp_header_encryption_policy(
+        &mut self,
+        policy: RTCRtpHeaderEncryptionPolicy,
+    ) -> Result<()> {
+        // webrtc-extensions 10.2: the W3C member is `RTCConfiguration`'s and cannot change
+        // after construction; this engine setting may until a description has been set.
+        if policy != self.rtp_header_encryption_policy() && self.a_description_was_set() {
+            return Err(Error::InvalidModificationError);
+        }
         self.pipeline_context
             .srtp_handler_context
             .rtp_header_encryption_policy = policy;
+        self.configuration.rtp_header_encryption_policy = policy;
         self.update_cryptex();
+        Ok(())
+    }
+
+    /// Whether a local or remote description has been set (a rollback included).
+    pub(crate) fn a_description_was_set(&self) -> bool {
+        self.local_description_was_set
+            || self.current_remote_description.is_some()
+            || self.pending_remote_description.is_some()
+            || self.current_local_description.is_some()
     }
 
     /// The `RTCRtpHeaderEncryptionPolicy` in force.

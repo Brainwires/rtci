@@ -212,7 +212,7 @@ pub use rtp_codec_parameters::RTCRtpCodecParameters;
 pub use rtp_coding_parameters::{
     RTCRtpCodingParameters, RTCRtpFecParameters, RTCRtpRidRestrictions, RTCRtpRtxParameters,
 };
-pub use rtp_encoding_parameters::RTCRtpEncodingParameters;
+pub use rtp_encoding_parameters::{RTCResolutionRestriction, RTCRtpEncodingParameters};
 pub use rtp_header_extension_capability::{
     RTCRtpHeaderExtensionCapability, RTCRtpHeaderExtensionEncryption,
     RTCRtpHeaderExtensionToNegotiate,

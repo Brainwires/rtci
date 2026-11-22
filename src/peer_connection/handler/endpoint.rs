@@ -764,6 +764,9 @@ mod rtx_test {
                 priority: Default::default(),
                 network_priority: None,
                 scalability_mode: None,
+                scale_resolution_down_to: None,
+                ptime: None,
+                adaptive_ptime: false,
             }],
         ));
         transceiver

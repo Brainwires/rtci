@@ -1711,6 +1711,22 @@ impl Agent {
         {
             return;
         }
+        if self.candidate_pair_proposals {
+            // webrtc-extensions 7: propose the pair, once; the application decides.
+            if self.nomination_proposal.is_some() || self.declined_nominations.contains(&pair_index)
+            {
+                return;
+            }
+            self.nomination_proposal = Some(pair_index);
+            self.event_outs.push_back(crate::agent::TaggedEvent {
+                now,
+                event: crate::agent::Event::CandidatePairNominationProposed(
+                    Box::new(self.local_candidates[p.local_index].clone()),
+                    Box::new(self.remote_candidates[p.remote_index].clone()),
+                ),
+            });
+            return;
+        }
         trace!(
             "Nominatable pair found, nominating ({}, {})",
             self.local_candidates[p.local_index], self.remote_candidates[p.remote_index],
