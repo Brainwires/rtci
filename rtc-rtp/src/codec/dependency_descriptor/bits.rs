@@ -72,7 +72,7 @@ impl BitWriter {
     pub(super) fn f(&mut self, n: usize, v: u32) {
         debug_assert!(n <= 32 && (n == 32 || v >> n == 0));
         for i in (0..n).rev() {
-            if self.pos % 8 == 0 {
+            if self.pos == self.data.len() * 8 {
                 self.data.push(0);
             }
             let bit = ((v >> i) & 1) as u8;

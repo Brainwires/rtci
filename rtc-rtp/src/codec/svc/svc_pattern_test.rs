@@ -478,13 +478,13 @@ fn vp8_carries_the_temporal_modes() {
                 }
             }
         }
-        for dt in 0..targets.len() {
+        for (dt, forwarded) in forwarded.iter().enumerate() {
             let expected: Vec<u64> = frames
                 .iter()
                 .filter(|(_, f)| f.dtis[dt].is_present())
                 .map(|(n, _)| *n)
                 .collect();
-            assert_eq!(forwarded[dt], expected, "{mode} DT{dt}");
+            assert_eq!(forwarded, &expected, "{mode} DT{dt}");
         }
     }
     // In the three-layer pattern the first T2 frame and the T1 frame depend on the base layer

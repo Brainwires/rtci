@@ -44,6 +44,7 @@ use crate::codec::vp9::{Vp9FrameInfo, Vp9PictureGroupEntry, Vp9ScalabilityStruct
 /// How the spatial layers of a mode depend on each other (the "Inter-layer dependency" column
 /// of the specification's table, and its `_KEY` suffix).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum InterLayerPrediction {
     /// `LxTy`: every frame of a spatial layer predicts from the frame of the layer below in
     /// the same picture. A single spatial layer is this case too.
@@ -56,6 +57,7 @@ pub enum InterLayerPrediction {
 
 /// The ratio between the resolutions of two neighbouring spatial layers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ResolutionRatio {
     /// 2:1, the default.
     TwoToOne,
@@ -68,8 +70,12 @@ macro_rules! scalability_modes {
         /// A scalability mode: a value of `RTCRtpEncodingParameters.scalabilityMode` (W3C
         /// webrtc-svc, section 5). The identifiers are case sensitive and limited to the
         /// specification's table; [`FromStr`] accepts exactly those.
+        ///
+        /// The table can grow (section 5.1 says how a mode is added), so the enum is
+        /// non-exhaustive.
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
         #[allow(non_camel_case_types)]
+        #[non_exhaustive]
         pub enum ScalabilityMode {
             $(
                 #[doc = concat!("`\"", $name, "\"`.")]

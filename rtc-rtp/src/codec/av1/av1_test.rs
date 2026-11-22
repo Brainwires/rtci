@@ -72,7 +72,7 @@ fn test_packetize_one_obu_without_size_and_extension() -> Result<()> {
             .without_size()
             .with_payload(vec![1, 2, 3, 4, 5, 6, 7]),
     ]);
-    let mut payloader = Av1Payloader {};
+    let mut payloader = Av1Payloader::default();
     assert_eq!(
         payloader.payload(1200, &frame)?,
         vec![vec![
@@ -98,7 +98,7 @@ fn test_packetize_one_obu_without_size_with_extension() -> Result<()> {
             .with_extension(OBU_EXTENSION_S1T1)
             .with_payload(vec![2, 3, 4, 5, 6, 7]),
     ]);
-    let mut payloader = Av1Payloader {};
+    let mut payloader = Av1Payloader::default();
     assert_eq!(
         payloader.payload(1200, &frame)?,
         vec![vec![
@@ -121,7 +121,7 @@ fn removes_obu_size_field_without_extension() -> Result<()> {
     let frame = build_av1_frame(&vec![
         Av1Obu::new(OBU_TYPE_FRAME).with_payload(vec![11, 12, 13, 14, 15, 16, 17]),
     ]);
-    let mut payloader = Av1Payloader {};
+    let mut payloader = Av1Payloader::default();
     assert_eq!(
         payloader.payload(1200, &frame)?,
         vec![vec![
@@ -146,7 +146,7 @@ fn removes_obu_size_field_with_extension() -> Result<()> {
             .with_extension(OBU_EXTENSION_S1T1)
             .with_payload(vec![1, 2, 3, 4, 5, 6, 7]),
     ]);
-    let mut payloader = Av1Payloader {};
+    let mut payloader = Av1Payloader::default();
     assert_eq!(
         payloader.payload(1200, &frame)?,
         vec![vec![
@@ -172,7 +172,7 @@ fn test_omits_size_for_last_obu_when_three_obus_fits_into_the_packet() -> Result
         Av1Obu::new(OBU_TYPE_METADATA).with_payload(vec![11, 12, 13, 14]),
         Av1Obu::new(OBU_TYPE_FRAME).with_payload(vec![21, 22, 23, 24, 25, 26]),
     ]);
-    let mut payloader = Av1Payloader {};
+    let mut payloader = Av1Payloader::default();
     assert_eq!(
         payloader.payload(1200, &frame)?,
         vec![vec![
@@ -211,7 +211,7 @@ fn test_use_size_for_all_obus_when_four_obus_fits_into_the_packet() -> Result<()
         Av1Obu::new(OBU_TYPE_FRAME).with_payload(vec![21, 22, 23]),
         Av1Obu::new(OBU_TYPE_TILE_GROUP).with_payload(vec![31, 32, 33, 34, 35, 36]),
     ]);
-    let mut payloader = Av1Payloader {};
+    let mut payloader = Av1Payloader::default();
     assert_eq!(
         payloader.payload(1200, &frame)?,
         vec![vec![
@@ -257,7 +257,7 @@ fn test_discards_temporal_delimiter_and_tile_list_obu() -> Result<()> {
         Av1Obu::new(OBU_TYPE_FRAME_HEADER).with_payload(vec![21, 22, 23]),
         Av1Obu::new(OBU_TYPE_TILE_GROUP).with_payload(vec![31, 32, 33, 34, 35, 36]),
     ]);
-    let mut payloader = Av1Payloader {};
+    let mut payloader = Av1Payloader::default();
     assert_eq!(
         payloader.payload(1200, &frame)?,
         vec![vec![
@@ -291,7 +291,7 @@ fn test_split_two_obus_into_two_packet_force_split_obu_header() -> Result<()> {
             .with_extension(OBU_EXTENSION_S1T1)
             .with_payload(vec![11, 12, 13, 14]),
     ]);
-    let mut payloader = Av1Payloader {};
+    let mut payloader = Av1Payloader::default();
 
     // Craft expected payloads so that there is only one way to split original
     // frame into two packets.
@@ -331,7 +331,7 @@ fn test_sets_n_bit_at_the_first_packet_of_a_key_frame_with_sequence_header() -> 
         Av1Obu::new(OBU_TYPE_SEQUENCE_HEADER).with_payload(vec![1, 2, 3, 4, 5, 6, 7]),
         Av1Obu::new(OBU_TYPE_FRAME).with_payload(vec![SHOWN_KEY_FRAME, 2, 3]),
     ]);
-    let mut payloader = Av1Payloader {};
+    let mut payloader = Av1Payloader::default();
     let result = payloader.payload(6, &frame)?;
     assert!(result.len() >= 2);
     assert_eq!(
@@ -351,7 +351,7 @@ fn test_doesnt_set_n_bit_for_a_sequence_header_alone() -> Result<()> {
     let frame = build_av1_frame(&vec![
         Av1Obu::new(OBU_TYPE_SEQUENCE_HEADER).with_payload(vec![1, 2, 3, 4, 5, 6, 7]),
     ]);
-    let mut payloader = Av1Payloader {};
+    let mut payloader = Av1Payloader::default();
     for packet in payloader.payload(6, &frame)? {
         assert_eq!(packet[0] & NEW_CODED_VIDEO_SEQUENCE_BIT, 0);
     }
@@ -363,7 +363,7 @@ fn test_doesnt_set_n_bit_at_the_packets_of_a_key_frame_without_sequence_header()
     let frame = build_av1_frame(&vec![
         Av1Obu::new(OBU_TYPE_FRAME).with_payload(vec![1, 2, 3, 4, 5, 6, 7]),
     ]);
-    let mut payloader = Av1Payloader {};
+    let mut payloader = Av1Payloader::default();
     let result = payloader.payload(6, &frame)?;
     assert_eq!(result.len(), 2);
     assert_eq!(result[0][0] & NEW_CODED_VIDEO_SEQUENCE_BIT, 0);
@@ -378,7 +378,7 @@ fn test_doesnt_set_n_bit_at_the_packets_of_a_delta_frame() -> Result<()> {
         Av1Obu::new(OBU_TYPE_SEQUENCE_HEADER).with_payload(vec![1, 2, 3, 4, 5, 6, 7]),
         Av1Obu::new(OBU_TYPE_FRAME).with_payload(vec![SHOWN_INTER_FRAME, 2, 3]),
     ]);
-    let mut payloader = Av1Payloader {};
+    let mut payloader = Av1Payloader::default();
     for packet in payloader.payload(6, &frame)? {
         assert_eq!(packet[0] & NEW_CODED_VIDEO_SEQUENCE_BIT, 0);
     }
@@ -394,7 +394,7 @@ fn test_doesnt_set_n_bit_for_a_key_frame_of_a_higher_temporal_layer() -> Result<
             .with_extension(0x20)
             .with_payload(vec![SHOWN_KEY_FRAME, 2, 3]),
     ]);
-    let mut payloader = Av1Payloader {};
+    let mut payloader = Av1Payloader::default();
     for packet in payloader.payload(6, &frame)? {
         assert_eq!(packet[0] & NEW_CODED_VIDEO_SEQUENCE_BIT, 0);
     }
@@ -406,7 +406,7 @@ fn test_split_single_obu_into_two_packets() -> Result<()> {
     let frame = build_av1_frame(&vec![
         Av1Obu::new(OBU_TYPE_FRAME).with_payload(vec![11, 12, 13, 14, 15, 16, 17, 18, 19]),
     ]);
-    let mut payloader = Av1Payloader {};
+    let mut payloader = Av1Payloader::default();
     // let result = payloader.payload(8, &frame)?;
     // println!("{:?}", result[0].to_vec());
     // println!("{:?}", result[1].to_vec());
@@ -440,7 +440,7 @@ fn test_split_single_obu_into_many_packets() -> Result<()> {
     let frame = build_av1_frame(&vec![
         Av1Obu::new(OBU_TYPE_FRAME).with_payload(vec![27; 1200]),
     ]);
-    let mut payloader = Av1Payloader {};
+    let mut payloader = Av1Payloader::default();
     let result = payloader.payload(100, &frame)?;
     assert_eq!(result.len(), 13);
     assert_eq!(result[0], {
@@ -479,7 +479,7 @@ fn test_split_two_obus_into_two_packets() -> Result<()> {
         Av1Obu::new(OBU_TYPE_SEQUENCE_HEADER).with_payload(vec![11, 12]),
         Av1Obu::new(OBU_TYPE_FRAME).with_payload(vec![1, 2, 3, 4, 5, 6, 7, 8, 9]),
     ]);
-    let mut payloader = Av1Payloader {};
+    let mut payloader = Av1Payloader::default();
     let result = payloader.payload(8, &frame)?;
     assert_eq!(
         result,

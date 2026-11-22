@@ -1,7 +1,9 @@
 use bytes::{BufMut, Bytes, BytesMut};
 
 use crate::codec::av1::leb128::BytesMutExt;
-use crate::codec::av1::obu::{OBU_HAS_SIZE_BIT, obu_has_extension, parse_obus};
+use crate::codec::av1::obu::{
+    OBU_HAS_SIZE_BIT, OBU_TYPE_SEQUENCE_HEADER, Obu, obu_has_extension, obu_type, parse_obus,
+};
 use crate::codec::av1::packetizer::{
     AGGREGATION_HEADER_SIZE, MAX_NUM_OBUS_TO_OMIT_SIZE, get_aggregation_header, packet_layer,
     packetize,
@@ -30,7 +32,15 @@ pub use depacketizer::Av1Depacketizer;
 /// where the OBUs' `temporal_id` / `spatial_id` change, and at a sequence header, which starts
 /// its own packet. Temporal delimiter, tile list and padding OBUs are dropped and the OBU size
 /// fields removed.
-pub struct Av1Payloader {}
+pub struct Av1Payloader {
+    /// Repeats the temporal unit's sequence header in front of every spatial layer after the
+    /// first. For an "S" mode (simulcast encodings in one RTP stream) "a sequence header OBU
+    /// SHOULD be aggregated with each spatial layer", so that a forwarder can drop the other
+    /// encodings and still leave a decodable stream (AV1 RTP sections 5 and 6.1). Off by
+    /// default: an encoder that writes a sequence header per layer needs no help, and with
+    /// inter-layer prediction the base layer's is enough.
+    pub sequence_header_per_spatial_layer: bool,
+}
 
 /// The packets of one frame of a temporal unit, from [`Av1Payloader::payload_frames`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -130,7 +140,10 @@ impl Av1Payloader {
         // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 
         // Parse the payload into series of OBUs.
-        let obus = parse_obus(payload)?;
+        let mut obus = parse_obus(payload)?;
+        if self.sequence_header_per_spatial_layer {
+            repeat_sequence_header(&mut obus);
+        }
 
         // Packetize the OBUs, possibly aggregating multiple OBUs into a single packet,
         // or splitting a single OBU across multiple packets.
@@ -203,6 +216,34 @@ impl Av1Payloader {
         }
 
         Ok(payloads)
+    }
+}
+
+/// Puts a copy of the unit's sequence header in front of the first OBU of every spatial layer
+/// that does not already start with one.
+fn repeat_sequence_header(obus: &mut Vec<Obu>) {
+    let is_sequence_header = |obu: &Obu| obu_type(obu.header) == OBU_TYPE_SEQUENCE_HEADER;
+    let Some(sequence_header) = obus.iter().find(|obu| is_sequence_header(obu)).cloned() else {
+        return;
+    };
+    let mut spatial_id = None;
+    let mut i = 0;
+    while i < obus.len() {
+        if obu_has_extension(obus[i].header) {
+            let obu_spatial_id = (obus[i].extension_header >> 3) & 0x03;
+            let first_of_layer = spatial_id.is_some_and(|s| s != obu_spatial_id);
+            spatial_id = Some(obu_spatial_id);
+            // The OBUs of no layer just before it belong with the layer they lead.
+            let mut start = i;
+            while start > 0 && !obu_has_extension(obus[start - 1].header) {
+                start -= 1;
+            }
+            if first_of_layer && !obus[start..i].iter().any(is_sequence_header) {
+                obus.insert(start, sequence_header.clone());
+                i += 1;
+            }
+        }
+        i += 1;
     }
 }
 

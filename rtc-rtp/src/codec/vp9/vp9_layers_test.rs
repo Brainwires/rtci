@@ -292,6 +292,41 @@ fn an_mtu_too_small_for_the_descriptor_is_an_error() -> Result<()> {
     Ok(())
 }
 
+/// RFC 9628 4.2.1: "The SS data MUST only be changed on the picture that corresponds to the
+/// first picture specified in the previous SS data's PG." A structure set in the middle of a
+/// stream waits for the next key picture, and until then the old picture group is the one
+/// frames are checked against.
+#[test]
+fn a_new_structure_waits_for_the_next_key_picture() -> Result<()> {
+    let mut pck = payloader(false);
+    pck.set_scalability_structure(Some(l2t2_structure()))?;
+    let key = Bytes::from(vp9_key_frame_640x480());
+    let inter = vp9_inter_frame(0x01, 0);
+    let single = layer(0, 0, false, true, true);
+    pck.payload_layer_frame(1200, &key, &single)?;
+
+    let one_temporal_layer = Vp9ScalabilityStructure {
+        spatial_layers: 1,
+        resolutions: vec![(640, 480)],
+        picture_group: vec![],
+    };
+    pck.set_scalability_structure(Some(one_temporal_layer.clone()))?;
+    // Still the two-layer picture group: the second picture is of temporal layer 1, and no
+    // SS is sent with it.
+    assert!(pck.payload_layer_frame(1200, &inter, &single).is_err());
+    let out = pck.payload_layer_frame(1200, &inter, &layer(1, 0, false, true, true))?;
+    assert_eq!(out[0][0] & 0x02, 0, "no SS outside a key picture");
+
+    // The next key picture carries the new structure, and its group applies from there.
+    let out = pck.payload_layer_frame(1200, &key, &single)?;
+    let mut packet = Vp9Packet::default();
+    packet.depacketize(&out[0])?;
+    assert_eq!(packet.scalability_structure(), Some(one_temporal_layer));
+    assert!(pck.payload_layer_frame(1200, &inter, &single).is_ok());
+    assert!(pck.payload_layer_frame(1200, &inter, &single).is_ok());
+    Ok(())
+}
+
 /// RFC 9628 4.2: "All frames of the same picture MUST have the same PID value", it is
 /// incremented by one per picture, and it wraps after 0x7FFF.
 #[test]

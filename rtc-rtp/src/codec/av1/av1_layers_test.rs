@@ -297,3 +297,72 @@ fn the_marker_is_on_the_last_packet_of_the_temporal_unit_only() -> Result<()> {
     );
     Ok(())
 }
+
+/// AV1 RTP 5 and 6.1: in an "S" mode "a sequence header OBU SHOULD be aggregated with each
+/// spatial layer". With `sequence_header_per_spatial_layer` the payloader repeats the unit's
+/// sequence header for the layers that come without one, so each layer's packets stand alone.
+#[test]
+fn the_sequence_header_can_be_repeated_for_every_spatial_layer() -> Result<()> {
+    let unit = build_av1_frame(&vec![
+        Av1Obu::new(OBU_TYPE_TEMPORAL_DELIMITER),
+        Av1Obu::new(OBU_TYPE_SEQUENCE_HEADER).with_payload(vec![0x00, 0x42]),
+        Av1Obu::new(OBU_TYPE_FRAME)
+            .with_extension(layer(0, 0))
+            .with_payload(vec![0x10, 1]),
+        Av1Obu::new(OBU_TYPE_METADATA).with_payload(vec![9]),
+        Av1Obu::new(OBU_TYPE_FRAME)
+            .with_extension(layer(0, 1))
+            .with_payload(vec![0x10, 2]),
+        Av1Obu::new(OBU_TYPE_FRAME)
+            .with_extension(layer(0, 2))
+            .with_payload(vec![0x10, 3]),
+    ]);
+    let mut payloader = Av1Payloader {
+        sequence_header_per_spatial_layer: true,
+    };
+    let frames = payloader.payload_frames(1200, &unit)?;
+    assert_eq!(frames.len(), 3);
+    assert_eq!(
+        obus_of(&frames[0].payloads[0]),
+        [
+            (OBU_TYPE_SEQUENCE_HEADER, None),
+            (OBU_TYPE_FRAME, Some(layer(0, 0)))
+        ]
+    );
+    // The sequence header leads the layer's packet, before the metadata that came with it.
+    assert_eq!(
+        obus_of(&frames[1].payloads[0]),
+        [
+            (OBU_TYPE_SEQUENCE_HEADER, None),
+            (OBU_TYPE_METADATA, None),
+            (OBU_TYPE_FRAME, Some(layer(0, 1)))
+        ]
+    );
+    assert_eq!(
+        obus_of(&frames[2].payloads[0]),
+        [
+            (OBU_TYPE_SEQUENCE_HEADER, None),
+            (OBU_TYPE_FRAME, Some(layer(0, 2)))
+        ]
+    );
+    // The copy is the unit's sequence header, byte for byte.
+    for frame in &frames {
+        let out = Av1Depacketizer::new().depacketize(&frame.payloads[0])?;
+        assert_eq!(&out[..4], &[0x0A, 0x02, 0x00, 0x42]);
+    }
+    // Still one coded video sequence: N on its first packet only.
+    let n: Vec<bool> = frames
+        .iter()
+        .map(|f| f.payloads[0][0] & 0x08 != 0)
+        .collect();
+    assert_eq!(n, [true, false, false]);
+
+    // Off by default: the layers after the first have none; a unit without a sequence
+    // header gets none either.
+    let frames = Av1Payloader::default().payload_frames(1200, &unit)?;
+    assert_eq!(
+        obus_of(&frames[2].payloads[0]),
+        [(OBU_TYPE_FRAME, Some(layer(0, 2)))]
+    );
+    Ok(())
+}

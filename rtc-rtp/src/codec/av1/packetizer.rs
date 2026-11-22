@@ -62,8 +62,7 @@ pub fn packetize(obus: &[Obu], mtu: usize) -> Vec<PacketMetadata> {
     // packet being filled.
     let mut packet_layer: Option<u8> = None;
 
-    for obu_index in 0..obus.len() {
-        let obu = &obus[obu_index];
+    for (obu_index, obu) in obus.iter().enumerate() {
         let layer = obu_layer(obu);
 
         // Putting |obu| into the last packet would make last obu element stored in

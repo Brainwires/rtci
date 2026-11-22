@@ -369,7 +369,8 @@ fn the_dynamic_prediction_example_uses_custom_differences() -> Result<()> {
     reader.read(&key.marshal(&structure)?)?.unwrap();
 
     // frame_number, template, custom FrameFdiff[], custom frame_chain_fdiff[0], and the size.
-    let frames: [(u16, usize, Option<&[u16]>, Option<u8>, usize); 5] = [
+    type Row = (u16, usize, Option<&'static [u16]>, Option<u8>, usize);
+    let frames: [Row; 5] = [
         (104, 3, None, None, 3),
         (105, 2, None, Some(2), 5),
         (106, 2, None, Some(3), 5),
@@ -657,7 +658,8 @@ fn a_structure_has_at_most_64_templates() -> Result<()> {
 fn a_structure_the_syntax_cannot_carry_does_not_validate() {
     let good = l3t3_structure();
     assert!(good.validate().is_ok());
-    let cases: Vec<(&str, Box<dyn Fn(&mut FrameDependencyStructure)>)> = vec![
+    type Break = Box<dyn Fn(&mut FrameDependencyStructure)>;
+    let cases: Vec<(&str, Break)> = vec![
         (
             "template_id_offset 64",
             Box::new(|s| s.template_id_offset = 64),
@@ -786,4 +788,62 @@ fn a_frame_that_contradicts_its_structure_is_refused() {
     let mut bad = good.clone();
     bad.attached_structure = Some(l3t3_structure());
     assert!(bad.marshal(&structure).is_err());
+}
+
+/// Whatever bytes arrive, reading them is an answer and never a panic, and what does read is
+/// written back and reads the same (the fuzz target `dependency_descriptor` runs the same
+/// check on generated input). The inputs here are the L3T3 key frame descriptor with bytes
+/// changed, and noise.
+#[test]
+fn mutated_descriptors_never_panic_and_round_trip() {
+    let structure = l3t3_structure();
+    let mut key = DependencyDescriptor::from_template(&structure, 0, 1).unwrap();
+    key.attached_structure = Some(structure.clone());
+    let valid = key.marshal(&structure).unwrap().to_vec();
+
+    let mut seed = 0x1234_5678u32;
+    let mut random = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        seed
+    };
+    let mut interpreted = 0;
+    for round in 0..20_000 {
+        let mut input = if round % 2 == 0 {
+            valid.clone()
+        } else {
+            (0..random() % 40).map(|_| random() as u8).collect()
+        };
+        for _ in 0..random() % 4 {
+            if !input.is_empty() {
+                let at = random() as usize % input.len();
+                input[at] ^= 1 << (random() % 8);
+            }
+        }
+        input.truncate(input.len() - (random() as usize % 3).min(input.len()));
+
+        let known = (round % 3 == 0).then_some(&structure);
+        let Ok(Some(descriptor)) = DependencyDescriptor::unmarshal(&input, known) else {
+            continue;
+        };
+        interpreted += 1;
+        let in_force = descriptor
+            .attached_structure
+            .clone()
+            .unwrap_or(structure.clone());
+        in_force.validate().unwrap();
+        let bytes = descriptor.marshal(&in_force).unwrap();
+        let again = DependencyDescriptor::unmarshal(&bytes, Some(&in_force))
+            .unwrap()
+            .unwrap();
+        let mut expected = descriptor;
+        if expected.attached_structure.is_some()
+            && expected.active_decode_targets_bitmask == Some(in_force.all_decode_targets())
+        {
+            expected.active_decode_targets_bitmask = None;
+        }
+        assert_eq!(again, expected);
+    }
+    assert!(interpreted > 1000, "{interpreted} inputs were interpreted");
 }

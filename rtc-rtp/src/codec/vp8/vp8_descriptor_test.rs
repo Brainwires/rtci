@@ -32,8 +32,10 @@ fn every_packet_the_payloader_emits_depacketizes() -> Result<()> {
     let frame = Bytes::from_static(&[0x90, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96]);
     for enable_picture_id in [false, true] {
         for mtu in 2..=12 {
-            let mut payloader = Vp8Payloader::default();
-            payloader.enable_picture_id = enable_picture_id;
+            let mut payloader = Vp8Payloader {
+                enable_picture_id,
+                ..Default::default()
+            };
             let payloads = payloader.payload(mtu, &frame)?;
             if payloads.is_empty() {
                 continue;
