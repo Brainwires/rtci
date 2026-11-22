@@ -431,6 +431,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **stats**: the id an application passes to `update_audio_playout_stats` is no longer the
   `media-playout` object's id in the report; an inbound stream's `playoutId` names it.
 
+- **sctp**: `PayloadProtocolIdentifier::Unknown` is sent as 0 ("not specified", RFC 9260
+  section 3.3.1), not 58. `Chunks` has a new public field, `ppid`.
+- **sctp**: `Stream::write*` with an empty message returns an error.
+- **sctp**: `Association::open_stream` fails for a stream id at or past the negotiated
+  outbound stream count.
+- **sctp**: `TimerConfig::default().max_t2_shutdown_retrans` is 10, not unlimited.
+- **sctp**: `TimerConfig::default().max_t3_rtx_retrans` is 10, not unlimited: an association
+  whose peer answers nothing for about five minutes ends with `TimedOut`. `usize::MAX` keeps
+  the old behaviour.
+- **sctp**: an established association sends HEARTBEATs when idle and so always has a timer
+  running; `with_heartbeat_interval(None)` turns them off.
+- **sctp**: slow start grows the congestion window by one packet per SACK, as the RFC has
+  it, not by everything the SACK acknowledges. A receiver that acknowledges many packets with
+  one SACK slows the sender's ramp; `with_slow_start_growth_limit` sets a larger L.
+- **sctp**: the retransmissions after a timeout are paced by the congestion window (one
+  packet, then slow start) instead of leaving at once.
+- **sctp**: a SACK for a TSN never sent, and an INIT ACK without a State Cookie, end the
+  association with an ABORT (`TransportError`, `HandshakeFailed`).
+
 ### Security
 
 - **dtls**: the server verifies the client's Finished (RFC 5246 section 7.4.9). `Flight4` only
@@ -1216,6 +1235,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   object per payload type shared by both directions.
 - **shared**: `SystemInstant::at`, `Error::InvalidAccessError`.
 
+- **sctp**: the other re-configuration requests of RFC 6525, in both directions: Incoming SSN
+  Reset (`Association::request_incoming_stream_reset`), SSN/TSN Reset
+  (`request_ssn_tsn_reset`) and Add Outgoing / Incoming Streams (`add_outgoing_streams`,
+  `add_incoming_streams`, with `set_stream_limits` for what a peer may add). They were
+  answered "Denied". `Event::Reconfig` reports the outcome of a request and what the peer
+  changed.
+- **sctp**: `Stream::write_sctp_with_ppid` and `Chunks::ppid` for a Payload Protocol
+  Identifier `PayloadProtocolIdentifier` has no name for; `PayloadProtocolIdentifier::number`;
+  `ChunkPayloadData::ppid`; `Association::verification_tag`.
+- **sctp**: `Endpoint::poll_transmit` (the endpoint's answers to out-of-the-blue packets);
+  `TransportConfig::with_valid_cookie_life` / `valid_cookie_life`.
+- **sctp**: `TransportConfig::with_heartbeat_interval` / `heartbeat_interval`,
+  `Association::set_heartbeat_interval`, `Event::PathInactive`, `Event::PathActive`.
+- **sctp**: `Association::on_path_change` restarts congestion control and the RTO when the
+  transport underneath moves to another path (RFC 9260 section 7.2.5; for the peer
+  connection to call when ICE selects another candidate pair).
+  `Association::congestion_window`, `slow_start_threshold`, `rto`.
+- **sctp**: `TransportConfig::with_slow_start_growth_limit` (L of RFC 9260 section 7.2.1,
+  default 1), `with_max_burst` (Max.Burst, off by default), `with_sack_delay` (200 ms by
+  default, at most 500 ms).
+- **sctp**: `Association::partial_reliability` (whether PR-SCTP is in use),
+  `TransportConfig::with_partial_reliability`.
+- **fuzz**: `rtc-sctp` targets `association_handle_chunks` (an established association fed
+  chunks, timers running) and `chunk_chunk_unknown_unmarshal`.
+
 ### Bug Fixes
 
 - **ice**: attributes after MESSAGE-INTEGRITY are ignored (RFC 8489 section 14.5). The HMAC does
@@ -1959,54 +2003,6 @@ Each bug below was confirmed by a failing test first (`rtc-rtcp/tests/audit_bugs
   6525 section 5.2.2); it reset none and was answered "Success - Performed".
 - **sctp**: the re-configuration requests that are not performed (Incoming SSN Reset, SSN/TSN
   Reset, Add Streams) are answered "Denied" (RFC 6525 section 5.2.1) instead of not at all.
-
-### Features
-
-- **sctp**: the other re-configuration requests of RFC 6525, in both directions: Incoming SSN
-  Reset (`Association::request_incoming_stream_reset`), SSN/TSN Reset
-  (`request_ssn_tsn_reset`) and Add Outgoing / Incoming Streams (`add_outgoing_streams`,
-  `add_incoming_streams`, with `set_stream_limits` for what a peer may add). They were
-  answered "Denied". `Event::Reconfig` reports the outcome of a request and what the peer
-  changed.
-- **sctp**: `Stream::write_sctp_with_ppid` and `Chunks::ppid` for a Payload Protocol
-  Identifier `PayloadProtocolIdentifier` has no name for; `PayloadProtocolIdentifier::number`;
-  `ChunkPayloadData::ppid`; `Association::verification_tag`.
-- **sctp**: `Endpoint::poll_transmit` (the endpoint's answers to out-of-the-blue packets);
-  `TransportConfig::with_valid_cookie_life` / `valid_cookie_life`.
-- **sctp**: `TransportConfig::with_heartbeat_interval` / `heartbeat_interval`,
-  `Association::set_heartbeat_interval`, `Event::PathInactive`, `Event::PathActive`.
-- **sctp**: `Association::on_path_change` restarts congestion control and the RTO when the
-  transport underneath moves to another path (RFC 9260 section 7.2.5; for the peer
-  connection to call when ICE selects another candidate pair).
-  `Association::congestion_window`, `slow_start_threshold`, `rto`.
-- **sctp**: `TransportConfig::with_slow_start_growth_limit` (L of RFC 9260 section 7.2.1,
-  default 1), `with_max_burst` (Max.Burst, off by default), `with_sack_delay` (200 ms by
-  default, at most 500 ms).
-- **sctp**: `Association::partial_reliability` (whether PR-SCTP is in use),
-  `TransportConfig::with_partial_reliability`.
-- **fuzz**: `rtc-sctp` targets `association_handle_chunks` (an established association fed
-  chunks, timers running) and `chunk_chunk_unknown_unmarshal`.
-
-### Breaking Changes
-
-- **sctp**: `PayloadProtocolIdentifier::Unknown` is sent as 0 ("not specified", RFC 9260
-  section 3.3.1), not 58. `Chunks` has a new public field, `ppid`.
-- **sctp**: `Stream::write*` with an empty message returns an error.
-- **sctp**: `Association::open_stream` fails for a stream id at or past the negotiated
-  outbound stream count.
-- **sctp**: `TimerConfig::default().max_t2_shutdown_retrans` is 10, not unlimited.
-- **sctp**: `TimerConfig::default().max_t3_rtx_retrans` is 10, not unlimited: an association
-  whose peer answers nothing for about five minutes ends with `TimedOut`. `usize::MAX` keeps
-  the old behaviour.
-- **sctp**: an established association sends HEARTBEATs when idle and so always has a timer
-  running; `with_heartbeat_interval(None)` turns them off.
-- **sctp**: slow start grows the congestion window by one packet per SACK, as the RFC has
-  it, not by everything the SACK acknowledges. A receiver that acknowledges many packets with
-  one SACK slows the sender's ramp; `with_slow_start_growth_limit` sets a larger L.
-- **sctp**: the retransmissions after a timeout are paced by the congestion window (one
-  packet, then slow start) instead of leaving at once.
-- **sctp**: a SACK for a TSN never sent, and an INIT ACK without a State Cookie, end the
-  association with an ABORT (`TransportError`, `HandshakeFailed`).
 
 ## [0.22.0+brainwires.5] - 2026-11-20
 
