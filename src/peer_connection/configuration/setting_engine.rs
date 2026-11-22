@@ -1945,10 +1945,11 @@ impl SettingEngineBuilder {
     /// Replaces the SCTP transport's `[[MaxBufferSize]]` with a fixed limit: `send()` refuses
     /// data that would take a channel's `bufferedAmount` above `limit` bytes
     /// (`ErrDataChannelBufferFull`). `None`, the default, is the W3C rule (webrtc-pc 6.1.1.2):
-    /// the larger of the peer's `max-message-size` and this side's, typically 256 KiB.
+    /// the larger of the peer's `max-message-size` and this side's send buffer, 16 MiB (the
+    /// spec leaves the send buffer's size to the implementation; 16 MiB is Chromium's).
     ///
-    /// Chromium buffers up to 16 MiB per channel instead (and closes the channel past it);
-    /// `Some(16 * 1024 * 1024)` is the setting for an application written to that.
+    /// A smaller limit makes `send()` refuse sooner; an application that keeps
+    /// `bufferedAmount` low by `bufferedAmountLowThreshold` needs none.
     pub fn with_data_channel_max_buffer_size(mut self, limit: Option<u32>) -> Self {
         self.0.data_channel_max_buffer_size = limit;
         self
