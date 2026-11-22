@@ -119,6 +119,7 @@ fn a_side_can_ask_for_no_connection_id_and_a_side_can_leave_the_extension_out() 
     );
 
     // Only one side uses the extension: nothing is negotiated.
+    // (`Some(0)` is the default.)
     for (client, server) in [(Some(4), None), (None, Some(4)), (None, None)] {
         let mut pair = pair_of(client, server)?;
         let ((client_local, client_remote), (server_local, server_remote)) =

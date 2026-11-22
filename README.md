@@ -335,7 +335,7 @@ over SRTP and is subject to none of SCTP's flow control.
 - ✅ **Pluggable crypto** - `ring` or `aws-lc-rs` built in, or bring your own provider
 
 Each claim above, with its specification section, where it is implemented and the test that proves it, is in
-[docs/conformance.md](docs/conformance.md), which also lists what is not implemented on purpose (media coding, DTLS 1.3,
+[docs/conformance.md](docs/conformance.md), which also lists what is not implemented on purpose (media coding, DTLS 1.3 resumption and 0-RTT,
 I-DATA, a TURN server and others).
 
 ## What's New in 0.21
@@ -576,7 +576,7 @@ This implementation follows these specifications:
 | API | [W3C WebRTC 1.0](https://www.w3.org/TR/webrtc/), [W3C WebRTC Statistics](https://www.w3.org/TR/webrtc-stats/) |
 | Signaling | [RFC 9429](https://datatracker.ietf.org/doc/html/rfc9429) (JSEP), [RFC 8866](https://datatracker.ietf.org/doc/html/rfc8866) (SDP), [RFC 8843](https://datatracker.ietf.org/doc/html/rfc8843) (BUNDLE), [RFC 8853](https://datatracker.ietf.org/doc/html/rfc8853) (Simulcast) |
 | Connectivity | [RFC 8445](https://datatracker.ietf.org/doc/html/rfc8445) (ICE), [RFC 8838](https://datatracker.ietf.org/doc/html/rfc8838) (Trickle ICE), [RFC 8839](https://datatracker.ietf.org/doc/html/rfc8839) (SDP for ICE), [RFC 8489](https://datatracker.ietf.org/doc/html/rfc8489) (STUN), [RFC 8656](https://datatracker.ietf.org/doc/html/rfc8656) (TURN) |
-| Security | [RFC 6347](https://datatracker.ietf.org/doc/html/rfc6347) (DTLS 1.2), [RFC 5764](https://datatracker.ietf.org/doc/html/rfc5764) (DTLS-SRTP), [RFC 3711](https://datatracker.ietf.org/doc/html/rfc3711) (SRTP) |
+| Security | [RFC 9147](https://datatracker.ietf.org/doc/html/rfc9147) (DTLS 1.3), [RFC 6347](https://datatracker.ietf.org/doc/html/rfc6347) (DTLS 1.2), [RFC 5764](https://datatracker.ietf.org/doc/html/rfc5764) (DTLS-SRTP), [RFC 3711](https://datatracker.ietf.org/doc/html/rfc3711) (SRTP) |
 | Data | [RFC 9260](https://datatracker.ietf.org/doc/html/rfc9260) (SCTP), [RFC 8261](https://datatracker.ietf.org/doc/html/rfc8261) (SCTP over DTLS), [RFC 8831](https://datatracker.ietf.org/doc/html/rfc8831) (Data Channels), [RFC 8832](https://datatracker.ietf.org/doc/html/rfc8832) (DCEP) |
 | Media | [RFC 3550](https://datatracker.ietf.org/doc/html/rfc3550) (RTP/RTCP), [RFC 4588](https://datatracker.ietf.org/doc/html/rfc4588) (RTX), [RFC 8285](https://datatracker.ietf.org/doc/html/rfc8285) (Header Extensions), [RFC 5761](https://datatracker.ietf.org/doc/html/rfc5761) (RTP/RTCP Mux) |
 

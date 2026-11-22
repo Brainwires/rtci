@@ -282,6 +282,9 @@ pub(crate) struct Conn13 {
     handshake_started: Option<Instant>,
     /// The peer repeated a flight this side has answered: the answer is sent again.
     peer_retransmitted: bool,
+    /// Application data has arrived ahead of the peer's Finished, and the flight has been
+    /// sent again for it.
+    early_data_seen: bool,
     /// A flight was answered or acknowledged: (when it first went out, if never again).
     answered: Option<Option<Instant>>,
 
@@ -376,6 +379,7 @@ impl Conn13 {
             handshake_mtu: cfg.maximum_transmission_unit,
             handshake_started: None,
             peer_retransmitted: false,
+            early_data_seen: false,
             answered: None,
             received_records: vec![],
             ack_now: false,
@@ -1325,6 +1329,11 @@ impl Conn13 {
                     self.incoming.push_back(BytesMut::from(&content[..]));
                 } else {
                     // RFC 9147 section 5.8.1: held until the peer's Finished has arrived.
+                    // The peer is past its Finished, so that was lost or is late: our
+                    // flight goes out again at once, which draws it again.
+                    if !std::mem::replace(&mut self.early_data_seen, true) {
+                        self.peer_retransmitted = true;
+                    }
                     let held: usize = self.held_application_data.iter().map(BytesMut::len).sum();
                     if self.held_application_data.len() < MAX_PRE_HANDSHAKE_APPLICATION_DATA_PACKETS
                         && held + content.len() <= MAX_PRE_HANDSHAKE_APPLICATION_DATA_BYTES

@@ -542,6 +542,14 @@ impl DTLSConn {
                     self.sync_dtls13();
                     return VersionOutcome::Dtls13;
                 }
+                // RFC 8446 4.2.1: supported_versions in a ServerHello selects DTLS 1.3 and
+                // nothing else; any other value there is an illegal_parameter.
+                if hello.extension(messages::EXT_SUPPORTED_VERSIONS).is_some() {
+                    return VersionOutcome::Refuse(
+                        AlertDescription::IllegalParameter,
+                        Error::ErrUnsupportedProtocolVersion,
+                    );
+                }
                 if !cfg.supports_dtls12() {
                     return VersionOutcome::Refuse(
                         AlertDescription::ProtocolVersion,

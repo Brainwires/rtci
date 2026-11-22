@@ -53,7 +53,7 @@ README.
 | Area | Not implemented | Why |
 |---|---|---|
 | Media | Encoding, decoding, capture, playout | The engine is a transport. Statistics members that need them are left out of the report, not reported as 0. |
-| DTLS | DTLS 1.3, RSA-PSS, connection id | Never claimed. Browsers negotiate DTLS 1.2 with it. |
+| DTLS | In DTLS 1.3: pre-shared keys (resumption with NewSessionTicket, external PSKs), 0-RTT, post-handshake authentication, the hybrid ML-KEM groups. In DTLS 1.2: the connection id record format (RFC 9146) | DTLS 1.3 itself, RSASSA-PSS and DTLS 1.3 connection ids are implemented (`conformance/w3.md`). WebRTC makes one association per transport and authenticates it with certificates, so nothing is resumed and no PSK exists; a configuration with a pre-shared key negotiates DTLS 1.2. What each would take is in `conformance/audit/rfc9147.md` and `rfc9146.md`. |
 | DTLS | Renegotiation; session resumption (session ids, tickets) | RFC 8827 section 6.5 forbids renegotiation in WebRTC and DTLS 1.3 removed it: a request is refused with the no_renegotiation warning (RFC 5746). WebRTC makes one association per transport, so nothing would be resumed: a ClientHello's session id is read and answered with a full handshake, and none is offered. What implementing resumption would take is written down in [`conformance/audit/rfc5246.md`](conformance/audit/rfc5246.md). |
 | SCTP | I-DATA (RFC 8260), Add Streams (RFC 6525 4.5), path MTU discovery, zero checksum (RFC 9653), RACK-TLP | Never claimed; none is needed for a browser data channel. |
 | TURN | TCP allocations (RFC 6062), a TURN server | Never claimed. The TURN client is implemented. |

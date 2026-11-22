@@ -162,7 +162,7 @@ impl Default for ConfigBuilder {
             early_data_retransmit: true,
             min_version: DtlsVersion::Dtls1_2,
             max_version: DtlsVersion::Dtls1_3,
-            connection_id: None,
+            connection_id: Some(0),
             connection_id_migration: false,
             psk: None,
             psk_identity_hint: None,
@@ -328,7 +328,8 @@ impl ConfigBuilder {
     /// `connection_id` extension): `Some(n)` sends the extension and asks the peer to put a
     /// connection id of `n` random bytes in every protected record it sends, `Some(0)` sends
     /// it and asks for none (the peer may still ask for one in the other direction), `None`
-    /// does not use the extension. Negotiated when both sides send it.
+    /// does not use the extension. Negotiated when both sides send it. The default is
+    /// `Some(0)`, as RFC 9147 section 5.1 asks of a client that wants no connection id.
     ///
     /// With DTLS 1.3 only: the DTLS 1.2 record format of RFC 9146 (`tls12_cid`) is not
     /// implemented, so a hello that also offers DTLS 1.2 leaves the extension out.
@@ -840,10 +841,15 @@ impl ConfigBuilder {
             min_version,
             max_version,
             local_tls13_cipher_suites,
-            // The extension belongs to both versions, and only DTLS 1.3 has its records here.
-            connection_id: self
-                .connection_id
-                .filter(|_| min_version == DtlsVersion::Dtls1_3),
+            // The extension belongs to both versions, and only DTLS 1.3 has its records
+            // here. Where a hello is for DTLS 1.3 alone it carries the extension even when
+            // no connection id was asked for (RFC 9147 section 5.1: so that the peer can
+            // ask for one), unless that is switched off.
+            connection_id: if min_version == DtlsVersion::Dtls1_3 {
+                self.connection_id
+            } else {
+                None
+            },
             connection_id_migration: self.connection_id_migration,
             initial_epoch: 0,
             maximum_transmission_unit,

@@ -209,6 +209,95 @@ fn application_data_ahead_of_the_clients_finished_is_held() -> Result<()> {
     Ok(())
 }
 
+/// RFC 9147 section 5.8.1: application data under the new keys ahead of the peer's Finished
+/// says the Finished was lost, and the flight it answers is sent again at once.
+#[test]
+fn early_application_data_draws_the_flight_again() -> Result<()> {
+    let mut pair = no_cookies()?;
+    pair.round();
+    let _lost_finished = take(&mut pair.client);
+    pair.client.write(pair.now, server_addr(), b"early")?;
+    let early = take(&mut pair.client);
+    pair.deliver_to_server(early);
+    let again = take(&mut pair.server);
+    assert_eq!(
+        record_count(&again),
+        5,
+        "the server's flight, without waiting for the timer"
+    );
+    // The client, done already, takes the repeat as the sign that its own flight was lost.
+    pair.deliver_to_client(again);
+    let finished = take(&mut pair.client);
+    assert_eq!(record_first_bytes(&finished[0]), [0x2e]);
+    pair.deliver_to_server(finished);
+    assert!(pair.server_complete);
+    assert_eq!(application_data(&pair.to_server), vec![b"early".to_vec()]);
+    // More early data does not send the flight a third time.
+    Ok(())
+}
+
+/// RFC 9147 sections 5.2 and 5.5: messages that arrive ahead of their turn are queued, and
+/// fragments are taken in any order.
+#[test]
+fn a_flight_that_arrives_in_reverse_order_completes() -> Result<()> {
+    let mut pair = Pair::new(
+        client_builder(),
+        server_builder().with_cookie_exchange(false).with_mtu(200),
+    )?;
+    let client_hello = take(&mut pair.client);
+    pair.deliver_to_server(client_hello);
+    let mut flight = take(&mut pair.server);
+    assert!(flight.len() >= 4);
+    // The ServerHello first (the client has no keys before it), the rest backwards.
+    let server_hello = flight.remove(0);
+    flight.reverse();
+    pair.deliver_to_client(vec![server_hello]);
+    pair.deliver_to_client(flight);
+    assert!(pair.client_complete);
+    pair.complete();
+    Ok(())
+}
+
+/// RFC 9147 section 5.5: overlapping fragments are taken, and a byte that differs between
+/// two of them is an illegal_parameter.
+#[test]
+fn overlapping_fragments_are_taken_unless_they_disagree() -> Result<()> {
+    let ticket: Vec<u8> = vec![0, 0, 14, 16, 1, 2, 3, 4, 1, 9, 0, 4, 1, 2, 3, 4, 0, 0];
+    for conflict in [false, true] {
+        let mut pair = no_cookies()?.complete();
+        let message_seq = pair.server_conn().next_send_seq;
+        let fragment = |offset: usize, bytes: &[u8]| {
+            messages::handshake_fragment(
+                messages::NEW_SESSION_TICKET,
+                ticket.len(),
+                message_seq,
+                offset,
+                bytes,
+            )
+        };
+        let mut second = ticket[6..].to_vec();
+        if conflict {
+            second[2] ^= 0xff;
+        }
+        let first = fragment(0, &ticket[..12]);
+        let second = fragment(6, &second);
+        for content in [first, second] {
+            let record = pair
+                .server_conn()
+                .seal_for_fuzzing(CONTENT_TYPE_HANDSHAKE, &content)
+                .unwrap();
+            pair.deliver_to_client(vec![BytesMut::from(&record[..])]);
+        }
+        assert_eq!(pair.client.is_connection_failed(&server_addr()), conflict);
+        if !conflict {
+            // The whole ticket was put together and acknowledged.
+            let ack = take(&mut pair.client);
+            assert_eq!(record_count(&ack), 1);
+        }
+    }
+    Ok(())
+}
+
 /// RFC 9147 section 5.1: a ClientHello with a cookie this server did not make for that
 /// address is an illegal_parameter, and costs no state.
 #[test]
@@ -293,6 +382,36 @@ fn the_downgrade_sentinel_is_set_and_checked() -> Result<()> {
     pair.deliver_to_server(client_hello);
     let flight = take(&mut pair.server);
     assert_ne!(&flight[0][51..59], &messages::DOWNGRADE_TO_1_2);
+
+    // RFC 8446 section 4.2.1: supported_versions in a ServerHello selects DTLS 1.3 or is an
+    // illegal_parameter. Here it is appended to the DTLS 1.2 ServerHello, selecting DTLS 1.2.
+    let mut with_versions =
+        flight[0][..13 + u16::from_be_bytes([flight[0][11], flight[0][12]]) as usize].to_vec();
+    with_versions.extend_from_slice(&[0, 43, 0, 2, 0xfe, 0xfd]);
+    let grow = |bytes: &mut Vec<u8>, at: usize, width: usize| {
+        let mut value = [0u8; 4];
+        value[4 - width..].copy_from_slice(&bytes[at..at + width]);
+        let grown = (u32::from_be_bytes(value) + 6).to_be_bytes();
+        bytes[at..at + width].copy_from_slice(&grown[4 - width..]);
+    };
+    grow(&mut with_versions, 11, 2); // record length
+    grow(&mut with_versions, 14, 3); // message length
+    grow(&mut with_versions, 22, 3); // fragment length
+    let extensions_at = 13 + 12 + 2 + 32 + 1 + usize::from(with_versions[13 + 12 + 34]) + 3;
+    grow(&mut with_versions, extensions_at, 2);
+    {
+        let mut pair = Pair::new(
+            client_builder(),
+            server_builder()
+                .with_cookie_exchange(false)
+                .with_protocol_versions(Dtls1_2, Dtls1_2),
+        )?;
+        take(&mut pair.client);
+        pair.deliver_to_client(vec![BytesMut::from(&with_versions[..])]);
+        assert!(pair.client.is_connection_failed(&server_addr()));
+        let alerts = take(&mut pair.client);
+        assert_eq!(&alerts[0][13..15], &[2, alert::ILLEGAL_PARAMETER]);
+    }
 
     // The same ServerHello with the mark, as an attacker who removed DTLS 1.3 from the
     // ClientHello would have caused: illegal_parameter.

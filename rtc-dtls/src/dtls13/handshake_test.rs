@@ -632,7 +632,7 @@ fn a_client_certificate_is_requested_and_verified() -> Result<()> {
 }
 
 #[test]
-fn the_certificate_can_be_ed25519_or_rsa() -> Result<()> {
+fn the_certificate_can_be_ed25519_or_ecdsa() -> Result<()> {
     let provider = provider();
     for alg in [&rcgen::PKCS_ED25519, &rcgen::PKCS_ECDSA_P256_SHA256] {
         let certificate = Certificate::generate_self_signed_with_alg(
@@ -846,12 +846,13 @@ fn an_rsa_certificate_signs_with_rsassa_pss() -> Result<()> {
             ]),
         server().with_cookie_exchange(false),
     )?;
-    pair.run();
+    let client_hello = take(&mut pair.client);
+    pair.deliver_to_server(client_hello);
+    let answer = take(&mut pair.server);
+    assert_eq!(plaintext_alerts(&answer), [(2, alert::HANDSHAKE_FAILURE)]);
+    pair.deliver_to_client(answer);
     assert!(!pair.client_complete && !pair.server_complete);
-    assert!(matches!(
-        pair.server_error,
-        Some(Error::ErrNoAvailableSignatureSchemes)
-    ));
+    assert!(pair.client.is_connection_failed(&server_addr()));
 
     // DTLS 1.2, ECDHE_RSA: the ServerKeyExchange is signed with the pair the server prefers
     // among those the client lists.

@@ -7,6 +7,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### DTLS 1.3
+
+- **dtls**: DTLS 1.3 (RFC 9147, on the TLS 1.3 handshake of RFC 8446), next to DTLS 1.2. A
+  client offers both in one ClientHello and a server takes 1.3 from a client that offers it;
+  the downgrade sentinel of RFC 8446 section 4.1.3 is set and checked.
+  `ConfigBuilder::with_protocol_versions` sets the range (default 1.2 to 1.3), and
+  `State::negotiated_version` says which was negotiated (`DtlsVersion::protocol_version` gives
+  the bytes of webrtc-stats' `tlsVersion`: `FEFC` for 1.3).
+- **dtls**: the record layer of RFC 9147 section 4: the unified header, record number
+  encryption, epochs with their own keys and replay windows, ACK records.
+- **dtls**: the handshake with certificates (ECDSA P-256, Ed25519, RSASSA-PSS), a stateless
+  cookie exchange by HelloRetryRequest (on by default), client certificates, `use_srtp` in
+  EncryptedExtensions and the exporter of RFC 8446 section 7.5 behind the same
+  `State::export_keying_material` (which takes a context for a DTLS 1.3 association).
+  Suites: `TLS_AES_128_GCM_SHA256`, `TLS_CHACHA20_POLY1305_SHA256`, `TLS_AES_256_GCM_SHA384`
+  by default, `TLS_AES_128_CCM_SHA256` and `TLS_AES_128_CCM_8_SHA256` when named. Groups:
+  P-256, X25519, P-384.
+- **dtls**: flights, retransmission and ACKs as RFC 9147 sections 5.8 and 7 define them; the
+  timer follows the measured round trip once a flight gets through without loss.
+- **dtls**: key update (`Endpoint::update_keys`, `DTLSConn::update_keys`), started by
+  itself before a key reaches the number of records its AEAD allows; an association is closed
+  when too many records fail authentication under one key (RFC 9147 section 4.5.3).
+- **dtls**: connection ids for DTLS 1.3 (RFC 9147 section 9): `ConfigBuilder::with_connection_id`,
+  `Endpoint::{new_connection_ids, request_connection_ids}`, `DTLSConn::use_next_connection_id`,
+  and `with_connection_id_migration` for an endpoint that may follow a peer to a new address.
+- **dtls**: RSASSA-PSS (`rsa_pss_rsae_sha256/384/512`) in DTLS 1.2 as well: listed by default
+  after PKCS#1 v1.5, verified and signed.
+- **crypto**: `hkdf_extract`, `hkdf_expand`, `hkdf_expand_label`; `HashAlgorithm::Sha384`,
+  `HmacAlgorithm::Sha384`; `RTCCrypto::new_header_mask` with `HeaderMask` and
+  `HeaderMaskAlgorithm` (record number encryption); `SignatureScheme::RsaPssSha256/384/512`,
+  which an imported RSA key signs with.
+- Not in it: pre-shared keys in DTLS 1.3 (resumption, external PSKs, 0-RTT), post-handshake
+  authentication, the DTLS 1.2 record format of RFC 9146. A configuration with a pre-shared key
+  negotiates DTLS 1.2.
+
+### DTLS 1.2: the RFC by default
+
+- **dtls**: `HelloVerifyRequest.server_version` is DTLS 1.0, as RFC 6347 section 4.2.1 asks
+  whatever version follows; `ConfigBuilder::with_hello_verify_request_version` restores DTLS 1.2.
+- **dtls**: the `server_name` extension is not sent for an IP address (RFC 6066 section 3),
+  and is sent without a trailing dot.
+- **dtls**: a server with an Ed25519 certificate offers the ECDHE_ECDSA suites (RFC 8422
+  section 5.1.1); its configuration used to fail to build.
+- **dtls**: a client that receives authentic application data before the server's Finished
+  sends its last flight again at once (RFC 6347 section 4.2.4;
+  `ConfigBuilder::with_early_data_retransmit`), and that data is delivered when the handshake
+  completes: it used to be dropped when the early-record queue was drained.
+
+### Breaking changes (DTLS 1.3)
+
+- **dtls**: a `ConfigBuilder` without a cipher suite list negotiates DTLS 1.3 with a peer that
+  has it. A list is exact: one without a TLS 1.3 suite negotiates DTLS 1.2 only, as before.
+- **dtls**: `CipherSuiteId` has the five TLS 1.3 suites, `CipherSuiteHash` has `Sha384`,
+  `SignatureAlgorithm` has the three RSASSA-PSS values (and `Unsupported` is `0xff`), and the
+  default signature schemes list them.
+- **dtls**: a HelloVerifyRequest says DTLS 1.0 (see above).
+- **dtls**: `State::marshal_binary` fails for a DTLS 1.3 association.
+- **crypto**: `HashAlgorithm`, `HmacAlgorithm`, `SignatureScheme` and `CryptoAlgorithm` have
+  new variants (all `non_exhaustive`).
+
 ### Security
 
 - **dtls**: the server verifies the client's Finished (RFC 5246 section 7.4.9). `Flight4` only
