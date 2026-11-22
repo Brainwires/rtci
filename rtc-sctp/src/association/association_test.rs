@@ -27,6 +27,8 @@ fn create_association(config: TransportConfig) -> Association {
 #[test]
 fn test_create_forward_tsn_forward_one_abandoned() -> Result<()> {
     let mut a = Association::default();
+    // A FORWARD TSN fits one packet: a default association has no path MTU yet.
+    a.mtu = crate::config::INITIAL_MTU;
 
     a.cumulative_tsn_ack_point = 9;
     a.advanced_peer_tsn_ack_point = 10;
@@ -46,6 +48,8 @@ fn test_create_forward_tsn_forward_one_abandoned() -> Result<()> {
 #[test]
 fn test_create_forward_tsn_forward_two_abandoned_with_the_same_si() -> Result<()> {
     let mut a = Association::default();
+    // A FORWARD TSN fits one packet: a default association has no path MTU yet.
+    a.mtu = crate::config::INITIAL_MTU;
 
     a.cumulative_tsn_ack_point = 9;
     a.advanced_peer_tsn_ack_point = 12;
@@ -86,6 +90,8 @@ fn test_create_forward_tsn_omits_unordered_streams() -> Result<()> {
     // per-stream list (see handle_forward_tsn), so create_forward_tsn must not
     // report them — only ordered streams contribute.
     let mut a = Association::default();
+    // A FORWARD TSN fits one packet: a default association has no path MTU yet.
+    a.mtu = crate::config::INITIAL_MTU;
 
     a.cumulative_tsn_ack_point = 9;
     a.advanced_peer_tsn_ack_point = 11;
