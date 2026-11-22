@@ -471,6 +471,23 @@ fn test_first_answer_that_is_not_stun_fails_the_pairs_of_that_remote_candidate()
     assert!(a.pending_binding_requests.is_empty());
 }
 
+/// The same, as the peer connection reports it (`Agent::handle_non_stun_before_validation`):
+/// non-STUN data on a TCP connection this agent opened, from its active candidate, while the
+/// check is in flight. Over UDP it concludes nothing.
+#[test]
+fn test_non_stun_data_on_a_connection_this_agent_opened_fails_the_pairs() {
+    let now = Instant::now();
+    let mut a = tcp_agent(now, 2);
+    run(&mut a, now, now + 10 * MS);
+    assert_eq!(tcp_state(&a, 5001), CandidatePairState::InProgress);
+    let mut udp = tcp_path(5001);
+    udp.transport_protocol = TransportProtocol::UDP;
+    assert!(!a.handle_non_stun_before_validation(now + 10 * MS, udp));
+    assert_eq!(tcp_state(&a, 5001), CandidatePairState::InProgress);
+    assert!(a.handle_non_stun_before_validation(now + 10 * MS, tcp_path(5001)));
+    assert_eq!(tcp_state(&a, 5001), CandidatePairState::Failed);
+}
+
 // --- RFC 6544 Sections 4.1, 4.2, 4.5: relayed TCP candidates (RFC 6062 allocations) ---
 
 const RELAYED: &str = "203.0.113.5";

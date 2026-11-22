@@ -1502,6 +1502,33 @@ impl Agent {
         !failed.is_empty()
     }
 
+    /// Something other than STUN arrived over TCP on `transport`, on no valid pair: what a
+    /// driver that demultiplexes the connection itself (the peer connection does) calls
+    /// instead of deciding on [`TransportError::NotStun`] on its own.
+    ///
+    /// RFC 6544 Section 7.1 concludes from "the response to the first connectivity check on
+    /// the established TCP connection". Only on a connection this agent opened (its local
+    /// candidate is active) are the peer's first bytes that response: the agent sends its
+    /// check as soon as the connection is up, and the peer has nothing to send before it. On
+    /// a connection the peer opened (a passive local candidate) the peer may send DTLS before
+    /// it answers this agent's triggered check, so nothing is concluded there. Returns
+    /// whether a pair failed; closing the connection is the caller's.
+    pub fn handle_non_stun_before_validation(
+        &mut self,
+        now: Instant,
+        transport: shared::TransportContext,
+    ) -> bool {
+        if transport.transport_protocol != shared::TransportProtocol::TCP {
+            return false;
+        }
+        let opened_here = self
+            .find_local_candidate(transport.local_addr, transport.transport_protocol)
+            .is_some_and(|local| {
+                self.local_candidates[local].tcp_type() == crate::tcp_type::TcpType::Active
+            });
+        opened_here && self.handle_transport_error(now, transport, TransportError::NotStun)
+    }
+
     /// Two lite agents (RFC 8445 Sections 6.2 and 8.2): "the agent pairs local candidates
     /// with remote candidates that are of the same data stream and have the same component,
     /// transport protocol, and IP address family. [...] if there is only one candidate pair,

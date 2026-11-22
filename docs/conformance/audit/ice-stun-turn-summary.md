@@ -31,7 +31,7 @@ is listed too. Where a file counts those separately the "proc" row below carries
 | | | SHOULD | 1 | 0 | 1 | 4 | 0 | 2 |
 | | | MAY | 6 | 1 | 0 | 2 | 0 | 3 |
 | RFC 6544 ICE-TCP | `rfc6544.md` | MUST | 22 | 4 | 2 | 1 | 0 | 10 |
-| | | SHOULD | 7 | 1 | 4 | 0 | 0 | 21 |
+| | | SHOULD | 8 | 1 | 3 | 0 | 0 | 21 |
 | | | MAY | 3 | 1 | 0 | 4 | 0 | 1 |
 | RFC 7675 consent | `rfc7675.md` | MUST | 12 | 1 | 0 | 0 | 0 | 0 |
 | | | SHOULD | 2 | 0 | 0 | 0 | 0 | 2 |

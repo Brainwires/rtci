@@ -947,6 +947,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `set_remote_pacing`, `pacing`. (Writing and reading `a=ice-pacing` is not wired yet.)
 - **ice**: at most five TCP connection attempts are outstanding to one remote IP address (RFC
   6544 section 12).
+- **ice**: the peer connection fails the pairs of a remote TCP candidate whose first answer, on
+  a connection its active candidate opened, is not STUN (RFC 6544 section 7.1);
+  `Agent::handle_non_stun_before_validation` for other drivers.
 - **ice**: an mDNS name lost to another host (RFC 6762 section 9) is replaced by a new
   `<uuid>.local` name and the candidate announced again (`Event::LocalCandidateRenamed`,
   `OnIceCandidateEvent`).
