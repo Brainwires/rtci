@@ -1770,7 +1770,13 @@ impl Agent {
                 self.next_consent_at = Some(now + self.next_consent_interval());
                 self.consent_unanswered_since.get_or_insert(now);
                 self.candidate_pairs[pair_index].on_consent_request_sent();
-                self.send_check(now, pair_index, false, true);
+                // The controlling agent's consent checks repeat the nomination of the pair
+                // they are sent on (USE-CANDIDATE), as libwebrtc's do. It nominates no other
+                // pair (RFC 8445 Section 8.1.1), and a peer that lost its state without an
+                // ICE restart (a new peer connection that takes over the address and the
+                // credentials) learns from them which pair is in use: as the controlled
+                // agent it would otherwise wait for a nomination that was made long ago.
+                self.send_check(now, pair_index, self.is_controlling, true);
             }
             Some(_) => {}
         }
