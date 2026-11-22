@@ -488,7 +488,7 @@ pub struct Association {
     /// L of RFC 9260 7.2.1: in slow start one SACK grows cwnd by at most L x PMDCS.
     slow_start_growth_limit: u32,
     /// Max.Burst (RFC 9260 6.1 D), when applied.
-    max_burst: Option<u32>,
+    pub(crate) max_burst: Option<u32>,
     /// When DATA was last sent, for the decay of an idle congestion window (7.2.1).
     last_data_sent: Option<Instant>,
     /// Set by a T3-rtx expiry: the retransmission that follows is one packet (6.3.3 E3).

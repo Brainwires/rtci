@@ -2124,6 +2124,9 @@ fn test_assoc_congestion_control_congestion_avoidance() -> Result<()> {
     {
         let a = pair.client_conn_mut(client_ch);
         a.ssthresh = ssthresh;
+        // This test reads the window at the end, when nothing is outstanding: Max.Burst
+        // (RFC 9260 6.1 D) would have brought it down to four packets by then.
+        a.max_burst = None;
         a.stats.reset();
         pair.server_conn_mut(server_ch).stats.reset();
     }
