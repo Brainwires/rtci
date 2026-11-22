@@ -432,3 +432,52 @@ fn the_nack_interceptors_are_told_the_rtx_time_of_each_description() -> TestResu
     );
     Ok(())
 }
+
+/// RFC 9143 section 15: the RTCP MID SDES item "SHOULD be sent in the first few RTCP packets
+/// after joining the session and SHOULD be sent regularly thereafter"; RFC 8852 sections 3.1
+/// and 3.2 for the rids. Each SSRC the sender sends on (its RTX one included) is handed to the
+/// RTCP session with the mid of its m= section; what the session writes is tested in
+/// `rtc-interceptor/tests/rtcp_session_reports.rs`.
+#[test]
+fn the_rtcp_session_is_told_the_mid_of_each_sent_stream() -> TestResult {
+    let (mut a, seen_a) = peer("apt=96", None)?;
+    let (mut b, _) = peer("apt=96", None)?;
+    add_media(&mut a)?;
+    let (offer, _) = negotiate(&mut a, &mut b, str::to_owned)?;
+    let video = media_sections(&offer)
+        .into_iter()
+        .find(|section| section[0].starts_with("m=video"))
+        .expect("a video section");
+    let mid = video
+        .iter()
+        .find_map(|line| line.strip_prefix("a=mid:"))
+        .expect("a mid")
+        .to_owned();
+    let rtx_ssrc: u32 = video
+        .iter()
+        .find_map(|line| line.strip_prefix("a=ssrc-group:FID "))
+        .and_then(|group| group.split_whitespace().nth(1))
+        .expect("an RTX SSRC")
+        .parse()?;
+
+    let mut identified: Vec<(u32, Option<String>, Option<String>, Option<String>)> = take(&seen_a)
+        .into_iter()
+        .filter_map(|control| match control {
+            Control::Session(RtcpSessionControl::StreamIdentifiers {
+                ssrc,
+                mid,
+                rid,
+                repaired_rid,
+            }) => Some((ssrc, mid, rid, repaired_rid)),
+            _ => None,
+        })
+        .collect();
+    identified.sort();
+    let mut expected = vec![
+        (0x0a0a_0a0a, Some(mid.clone()), None, None),
+        (rtx_ssrc, Some(mid), None, None),
+    ];
+    expected.sort();
+    assert_eq!(identified, expected);
+    Ok(())
+}
