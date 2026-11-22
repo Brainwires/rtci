@@ -5,12 +5,14 @@ use super::decoder::FLEXFEC_DEFAULT_REPAIR_WINDOW;
 use super::encoder::{FlexFecEncoder, FlexFecProtection};
 use super::params::FlexFecParameters;
 use crate::Interceptor;
+use crate::cc::fec_rate::FecRate;
 use crate::stream_info::StreamInfo;
 use crate::wire_image::{WireImageTap, WireImages, wire_image_tap};
 use crate::{Attribute, AttributedPacket, Packet, TaggedPacket};
 use sansio::Protocol;
 use shared::TransportContext;
 use shared::error::Error;
+use shared::marshal::MarshalSize;
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
@@ -20,6 +22,21 @@ pub const FLEXFEC_DEFAULT_PROTECTION: FlexFecProtection = FlexFecProtection::Mas
     media_packets: 5,
     fec_packets: 2,
 };
+
+/// A protection's source packets per block and repair packets per block.
+fn protection_shape(protection: FlexFecProtection) -> (u32, u32) {
+    match protection {
+        FlexFecProtection::Mask {
+            media_packets,
+            fec_packets,
+        } => (media_packets, fec_packets),
+        FlexFecProtection::Row { l } => (u32::from(l), 1),
+        FlexFecProtection::Column { l, d } => (u32::from(l) * u32::from(d), u32::from(l)),
+        FlexFecProtection::RowAndColumn { l, d } => {
+            (u32::from(l) * u32::from(d), u32::from(l) + u32::from(d))
+        }
+    }
+}
 
 /// Source packets a stream keeps to answer NACKs from, when retransmissions are on.
 const RETRANSMISSION_HISTORY: usize = 512;
@@ -45,6 +62,7 @@ const MIN_RETRANSMIT_INTERVAL: Duration = Duration::from_millis(100);
 /// ```
 pub struct FlexFecSendBuilder {
     protection: FlexFecProtection,
+    adaptive_rate: bool,
     repair_window: Duration,
     retransmissions: bool,
     initial_sequence_number: Option<u16>,
@@ -55,6 +73,7 @@ impl Default for FlexFecSendBuilder {
     fn default() -> Self {
         Self {
             protection: FLEXFEC_DEFAULT_PROTECTION,
+            adaptive_rate: true,
             repair_window: FLEXFEC_DEFAULT_REPAIR_WINDOW,
             retransmissions: false,
             initial_sequence_number: None,
@@ -112,9 +131,20 @@ impl FlexFecSendBuilder {
         self
     }
 
+    /// Whether the amount of FEC follows the loss the receiver reports (the default), or
+    /// stays as configured. See [`FecRate`](crate::FecRate): no repair under 0.5% loss, enough
+    /// for twice the loss above it, at most half the block (flexible masks; rows and columns are sent or not); the FEC sent is taken out of the
+    /// target the application encodes at.
+    pub fn with_adaptive_rate(mut self, adaptive: bool) -> Self {
+        self.adaptive_rate = adaptive;
+        self
+    }
+
     /// Build the interceptor.
     pub fn build(self) -> FlexFecSendInterceptor {
+        let (media_packets, fec_packets) = protection_shape(self.protection);
         FlexFecSendInterceptor {
+            rate: FecRate::new(media_packets, fec_packets, self.adaptive_rate),
             protection: self.protection,
             repair_window: self.repair_window,
             retransmissions: self.retransmissions,
@@ -175,6 +205,8 @@ struct ProtectedStream {
 /// completed their block, on the repair SSRC, with the protected SSRC in their CSRC list.
 pub struct FlexFecSendInterceptor {
     protection: FlexFecProtection,
+    /// The loss-driven amount of FEC.
+    rate: FecRate,
     repair_window: Duration,
     retransmissions: bool,
     initial_sequence_number: Option<u16>,
@@ -298,17 +330,29 @@ impl FlexFecSendInterceptor {
                 if within_window
                     && let Some(repair) = self.repair_streams.get_mut(&stream.repair_ssrc)
                 {
-                    let timestamp = repair.timestamp_at(now);
-                    repair_packets =
-                        repair
-                            .encoder
-                            .encode_block(self.protection, &stream.block, timestamp);
+                    // The loss decides how much: flexible masks carry as many repair packets as
+                    // it asks for, the fixed shapes are sent or not.
+                    let protection = match self.protection {
+                        FlexFecProtection::Mask { media_packets, .. } => FlexFecProtection::Mask {
+                            media_packets,
+                            fec_packets: self.rate.fec_packets(),
+                        },
+                        fixed => fixed,
+                    };
+                    if self.rate.protects() {
+                        let timestamp = repair.timestamp_at(now);
+                        repair_packets =
+                            repair
+                                .encoder
+                                .encode_block(protection, &stream.block, timestamp);
+                    }
                 }
                 stream.block.clear();
             }
         }
 
         for packet in repair_packets {
+            self.rate.on_repair_sent(now, packet.marshal_size());
             self.write_queue.push_back(TaggedPacket {
                 now,
                 transport,
@@ -338,7 +382,10 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for FlexFecSendInterceptor {
     type Error = Error;
     type Time = Instant;
 
-    fn handle_read(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
+    fn handle_read(&mut self, mut msg: TaggedPacket) -> Result<(), Self::Error> {
+        let streams = &self.streams;
+        self.rate
+            .on_read(&mut msg, |ssrc| streams.contains_key(&ssrc));
         if self.retransmissions
             && let Packet::Rtcp(rtcp_packets) = &msg.message.packet
         {

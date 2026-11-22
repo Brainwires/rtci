@@ -984,6 +984,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behaviour changes
 
+- **fec**: the amount of FEC follows the loss the receiver reports (draft-ietf-payload-flexible-fec-scheme-03
+  section 8, RFC 8627 section 8, RFC 5109 section 12). The FlexFEC draft-03, RFC 8627 FlexFEC and
+  ULPFEC senders read the receiver reports of their protected streams (smoothed, weight 0.3) and
+  give each block `ceil(2 x loss x block)` repair packets, none under 0.5% loss and at most half
+  the block; flexible masks take the number, the fixed RFC 8627 shapes are sent or not. Before
+  any report the configured amount is sent. The repair bit rate of the last second is taken out
+  of the congestion controller's target (`Attribute::TargetBitrateChanged`) on its way to the
+  application, so media and FEC together stay at the target. New `rtc_interceptor::FecRate`,
+  `FEC_MIN_LOSS` and `with_adaptive_rate(bool)` on `FlexFec03SendBuilder`, `FlexFecSendBuilder`
+  and `UlpfecSendBuilder` (`false`: the configured amount whatever the loss, as before).
 - **ecn**: ECN is initiated and watched as RFC 8888 section 7 requires (RFC 6679 sections
   7.2-7.4). With `SettingEngineBuilder::with_ecn(true)` and `ack ccfb` negotiated, a stream
   no longer sends every packet ECT(1) from the first: one packet in ten (and one at least every
@@ -2987,6 +2997,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Testing
 
+- **fec**: a FlexFEC repair SSRC is an RTCP participant between two peer connections: it sends
+  sender reports and the connection's CNAME once it has sent, and the receiver learns that CNAME
+  for it (`the_receiver_learns_the_cname_of_the_fec_ssrc_from_its_rtcp`).
 - **interceptor (nack)**: the test environment's `nack_recovers_lost_rtp` counts from the
   first packet that arrives, as its virtual-clock twin `nack_recovery_under_loss.rs` does: a
   receiver knows of no packet sent before the first it receives, and a Generic NACK names

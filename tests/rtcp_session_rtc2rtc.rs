@@ -5,11 +5,11 @@
 
 use anyhow::{Result, bail};
 use bytes::Bytes;
-use rtc::interceptor::Registry;
+use rtc::interceptor::{FlexFec03ReceiveBuilder, FlexFec03SendBuilder, Registry, Slot};
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
 use rtc::peer_connection::configuration::media_engine::{
-    MIME_TYPE_RTX, MIME_TYPE_VP8, MediaEngine,
+    MIME_TYPE_FLEX_FEC03, MIME_TYPE_RTX, MIME_TYPE_VP8, MediaEngine,
 };
 use rtc::peer_connection::event::RTCPeerConnectionEvent;
 use rtc::peer_connection::event::RTCTrackEvent;
@@ -21,7 +21,8 @@ use rtc::peer_connection::transport::{
 use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
 use rtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 use rtc::rtp_transceiver::rtp_sender::{
-    RTCRtpCodec, RTCRtpCodecParameters, RTCRtpEncodingParameters, RtpCodecKind,
+    RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters,
+    RTCRtpFecParameters, RtpCodecKind,
 };
 use rtc::rtp_transceiver::{
     RTCRtpReceiverId, RTCRtpSenderId, RTCRtpTransceiverDirection, RTCRtpTransceiverInit,
@@ -34,6 +35,8 @@ use std::time::{Duration, Instant};
 const CONNECT_WITHIN: Duration = Duration::from_secs(10);
 const VP8_PT: u8 = 96;
 const RTX_PT: u8 = 97;
+const FLEX_FEC_PT: u8 = 49;
+const FEC_SSRC: u32 = 0x0FEC_0FEC;
 const FIRST_SEQ: u16 = 4000;
 
 fn codec(mime_type: &str, sdp_fmtp_line: &str) -> RTCRtpCodec {
@@ -64,7 +67,9 @@ struct Peer {
 }
 
 impl Peer {
-    fn new(addr: &str) -> Result<Self> {
+    /// A peer with VP8 and RTX in the default interceptor set; with `fec`, FlexFEC
+    /// (`flexfec-03`) too, its encoder and decoder in the chain.
+    fn new(addr: &str, fec: bool) -> Result<Self> {
         let mut media_engine = MediaEngine::default();
         media_engine.register_codec(
             RTCRtpCodecParameters {
@@ -80,7 +85,21 @@ impl Peer {
             },
             RtpCodecKind::Video,
         )?;
-        let registry = register_default_interceptors(Registry::new(), &mut media_engine)?;
+        if fec {
+            media_engine.register_codec(
+                RTCRtpCodecParameters {
+                    rtp_codec: codec(MIME_TYPE_FLEX_FEC03, "repair-window=10000000"),
+                    payload_type: FLEX_FEC_PT,
+                },
+                RtpCodecKind::Video,
+            )?;
+        }
+        let mut registry = register_default_interceptors(Registry::new(), &mut media_engine)?;
+        if fec {
+            registry = registry
+                .with(Slot::FecEncoder, FlexFec03SendBuilder::new().build())
+                .with(Slot::FecDecoder, FlexFec03ReceiveBuilder::new().build());
+        }
         let pc = RTCPeerConnectionBuilder::new()
             .with_configuration(RTCConfigurationBuilder::new().build())
             .with_media_engine(media_engine)
@@ -231,8 +250,16 @@ impl World {
 
     /// The offerer sends video; the answerer receives it. Connected over host candidates.
     fn connected() -> Result<(Self, RTCRtpSenderId)> {
+        Self::connected_with(false)
+    }
+
+    /// [`connected`](Self::connected), with FlexFEC negotiated when `fec`.
+    fn connected_with(fec: bool) -> Result<(Self, RTCRtpSenderId)> {
         let mut world = World {
-            peers: [Peer::new("10.0.0.1:5000")?, Peer::new("10.0.0.2:5000")?],
+            peers: [
+                Peer::new("10.0.0.1:5000", fec)?,
+                Peer::new("10.0.0.2:5000", fec)?,
+            ],
             now: Instant::now(),
             drop_once: None,
         };
@@ -243,6 +270,12 @@ impl World {
                 streams: vec![],
                 send_encodings: vec![RTCRtpEncodingParameters {
                     active: true,
+                    // An encoding the application gives gets an RTX SSRC from the engine
+                    // but no FEC SSRC (`normalize_sender_track`): it names one.
+                    rtp_coding_parameters: RTCRtpCodingParameters {
+                        fec: fec.then_some(RTCRtpFecParameters { ssrc: FEC_SSRC }),
+                        ..Default::default()
+                    },
                     ..Default::default()
                 }],
             }),
@@ -375,6 +408,43 @@ fn the_receiver_learns_one_cname_for_the_media_and_the_rtx_ssrc() -> Result<()> 
         Some(cname.as_str()),
         world.peers[1].pc.remote_rtcp_cname(rtx_ssrc),
         "the RTX SSRC is described with the same CNAME"
+    );
+    Ok(())
+}
+
+/// draft-ietf-payload-flexible-fec-scheme-03 section 4.2 ("the RTCP CNAME [...] to associate
+/// [the repair flow] with the source flow") and RFC 8627 section 4.2.1 (the repair stream's
+/// CNAME is the protected stream's): once the FEC SSRC has sent repair packets it is an RTCP
+/// participant of its own, with sender reports and the connection's CNAME in its SDES (RFC
+/// 3550 6.4, 6.5), and the receiver learns that CNAME for it.
+#[test]
+fn the_receiver_learns_the_cname_of_the_fec_ssrc_from_its_rtcp() -> Result<()> {
+    let (mut world, sender) = World::connected_with(true)?;
+    let (ssrc, _, _) = world.sender_stream(sender);
+    let fec_ssrc = {
+        let mut sender = world.peers[0].pc.rtp_sender(sender).expect("sender");
+        sender.get_parameters().encodings[0]
+            .rtp_coding_parameters
+            .fec
+            .as_ref()
+            .map(|fec| fec.ssrc)
+            .expect("FlexFEC is negotiated: the encoding has a repair SSRC")
+    };
+    assert_ne!(fec_ssrc, ssrc);
+    let cname = world.peers[0].pc.rtcp_cname().to_owned();
+
+    world.send_media(sender, FIRST_SEQ, 150)?;
+    let until = world.now + Duration::from_secs(3);
+    world.run_until(until)?;
+
+    assert_eq!(
+        Some(cname.as_str()),
+        world.peers[1].pc.remote_rtcp_cname(ssrc)
+    );
+    assert_eq!(
+        Some(cname.as_str()),
+        world.peers[1].pc.remote_rtcp_cname(fec_ssrc),
+        "the FEC SSRC is described with the source flow's CNAME"
     );
     Ok(())
 }
