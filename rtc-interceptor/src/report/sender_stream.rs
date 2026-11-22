@@ -74,7 +74,13 @@ impl SenderStream {
             if self.last_rtp_time_time.is_none() || pkt.header.timestamp != self.last_rtp_time_rtp {
                 self.last_rtp_time_rtp = pkt.header.timestamp;
                 self.last_rtp_time_time = Some(now);
-                self.time_baseline = Some(SystemInstant::now(now));
+                // The wall clock is read once, when the stream starts; every later NTP
+                // timestamp is that reading plus the time the caller says has passed. Read
+                // again at each frame, the NTP time followed the machine's clock instead of
+                // the caller's, so two sender reports were not as far apart in NTP time as
+                // the instants they were written at.
+                self.time_baseline
+                    .get_or_insert_with(|| SystemInstant::now(now));
             }
         }
 
