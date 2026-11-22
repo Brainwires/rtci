@@ -1162,7 +1162,9 @@ impl RTCPeerConnection {
             let Some(direction) = extension_direction(
                 registered,
                 media_section.match_extension_directions.get(uri).cloned(),
-                transceiver.direction(),
+                media_section
+                    .answer_direction
+                    .unwrap_or_else(|| transceiver.direction()),
             ) else {
                 continue;
             };
@@ -3216,9 +3218,10 @@ pub(crate) fn reoffered_header_extensions(
 /// - `answered`: answering, the reverse of the direction the offer gave the extension
 ///   ([`answered_extension_directions`]), `None` when the offer gave none (it then has the
 ///   section's direction).
-/// - `section`: the transceiver's direction.
+/// - `section`: the section's direction (an answer's, or the transceiver's in an offer).
 ///
-/// An extension registered to send only or receive only says so when the section does both.
+/// An extension registered to send only or receive only says so, and is left out of a
+/// section that does not go that way.
 /// An answer to a restricted extension keeps the reversed direction when the registration
 /// allows it, and otherwise drops the extension (RFC 8285 section 7: an answerer that does
 /// not want to receive an extension offered sendonly, or cannot send one offered recvonly,
@@ -3239,14 +3242,14 @@ pub(crate) fn extension_direction(
         (Some(Direction::SendOnly), Some(RTCRtpTransceiverDirection::Recvonly))
         | (Some(Direction::RecvOnly), Some(RTCRtpTransceiverDirection::Sendonly)) => None,
         (Some(answered), _) => Some(answered),
-        (None, Some(r)) if section == RTCRtpTransceiverDirection::Sendrecv => {
-            Some(if r == RTCRtpTransceiverDirection::Sendonly {
-                Direction::SendOnly
-            } else {
-                Direction::RecvOnly
-            })
+        // RFC 6465 section 5: a client that does not mix "would hence have to always include
+        // the direction parameter"; RFC 8285 section 7: "It is an error to use an extension
+        // direction incompatible with the stream direction".
+        (None, Some(RTCRtpTransceiverDirection::Sendonly)) => {
+            section.has_send().then_some(Direction::SendOnly)
         }
-        (None, _) => Some(Direction::Unspecified),
+        (None, Some(_)) => section.has_recv().then_some(Direction::RecvOnly),
+        (None, None) => Some(Direction::Unspecified),
     }
 }
 
