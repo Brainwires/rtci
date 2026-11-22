@@ -321,14 +321,21 @@ fn null_srtp_profiles_are_never_selected() -> Result<()> {
                 .with_srtp_protection_profiles(profiles.clone()),
         )?;
         let mut client_hello = take(&mut pair.client)[0].to_vec();
-        // use_srtp (14): two profiles, 0x0001 and 0x0007, and an empty MKI.
-        let offered = [
-            0x00, 0x0e, 0x00, 0x05, 0x00, 0x04, 0x00, 0x01, 0x00, 0x07, 0x00,
-        ];
+        // use_srtp (14): two profiles, in the client's order, and an empty MKI.
+        let offered = [0x00, 0x0e, 0x00, 0x07, 0x00, 0x04];
         let at = client_hello
             .windows(offered.len())
             .position(|window| window == offered)
-            .expect("the ClientHello offers the two profiles");
+            .unwrap_or_else(|| panic!("no use_srtp of two profiles in {client_hello:02x?}"));
+        let listed: Vec<u16> = client_hello[at + 6..at + 10]
+            .chunks(2)
+            .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+            .collect();
+        assert!(
+            listed.contains(&0x0001) && listed.contains(&0x0007),
+            "{listed:04x?}"
+        );
+        assert_eq!(client_hello[at + 10], 0, "no MKI");
         if null_profiles {
             client_hello[at + 6..at + 10].copy_from_slice(&[0x00, 0x05, 0x00, 0x06]);
         }
