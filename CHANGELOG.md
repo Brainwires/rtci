@@ -1195,6 +1195,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+- **gcc**: the receive-side variant of draft-ietf-rmcat-gcc-02 (section 3) in the default
+  set (`configure_remb`): `RembGeneratorInterceptor` sends a REMB for every remote stream that
+  negotiated `goog-remb` and neither transport-wide feedback nor RFC 8888, from the delay-based
+  controller run on its arrivals against abs-send-time or the RTP timestamp, at once when the
+  estimate falls by 3% or more and otherwise once a second; `AbsSendTimeInterceptor` stamps
+  abs-send-time on the packets of local streams that negotiated it, as they leave the pacer.
+  `goog-remb` was offered on video without any REMB ever being sent.
 - **states and events** (W3C webrtc-pc): the getters `signaling_state()`,
   `ice_gathering_state()`, `ice_connection_state()`, `connection_state()`; the transport
   events `OnIceTransportStateChange`, `OnIceGathererStateChange`,
