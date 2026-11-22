@@ -81,17 +81,27 @@ fn an_estimate_reaches_the_end_of_the_chain_as_a_carrier() {
 #[test]
 fn an_unannotated_report_still_stops_at_the_terminus() {
     let mut chain = chain_with_congestion_control();
+    let report = || TaggedPacket {
+        now: Instant::now(),
+        transport: TransportContext::default(),
+        message: AttributedPacket::new(Packet::Rtcp(vec![Box::new(
+            rtcp::receiver_report::ReceiverReport::default(),
+        )])),
+    };
 
-    chain
-        .handle_read(TaggedPacket {
-            now: Instant::now(),
-            transport: TransportContext::default(),
-            message: AttributedPacket::new(Packet::Rtcp(vec![Box::new(
-                rtcp::receiver_report::ReceiverReport::default(),
-            )])),
-        })
-        .expect("read");
+    // The first inbound packet carries the estimator's starting target to the pacer and on to
+    // the crate boundary, as an empty carrier: the report itself is stripped.
+    chain.handle_read(report()).expect("read");
+    let first = chain
+        .poll_read()
+        .expect("the starting target is announced once");
+    assert!(
+        matches!(&first.message.packet, Packet::Rtcp(packets) if packets.is_empty()),
+        "the payload must be stripped: the application did not ask for RTCP"
+    );
+    assert!(chain.poll_read().is_none());
 
+    chain.handle_read(report()).expect("read");
     assert!(
         chain.poll_read().is_none(),
         "inbound RTCP is for the interceptors unless something asked for it"
