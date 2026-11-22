@@ -73,3 +73,39 @@ fn test_handshake_message_client_hello() -> Result<()> {
 
     Ok(())
 }
+
+/// RFC 5246 7.4.1.4: an extension of a type this crate does not implement is no error. It is
+/// kept with its type and data, so the hello re-encodes to the bytes received.
+#[test]
+fn test_client_hello_keeps_unknown_extensions() -> Result<()> {
+    let mut raw_client_hello = vec![0xfe, 0xfd];
+    raw_client_hello.extend_from_slice(&[0x11; 32]);
+    raw_client_hello.extend_from_slice(&[
+        0x00, // session id
+        0x00, // cookie
+        0x00, 0x02, 0xc0, 0x2b, // cipher suites
+        0x01, 0x00, // compression methods
+        0x00, 0x11, // extensions
+        0x00, 0x10, 0x00, 0x05, 0x00, 0x03, 0x02, b'h', b'2', // ALPN, not implemented
+        0x00, 0x0a, 0x00, 0x04, 0x00, 0x02, 0x00, 0x1d, // supported_groups
+    ]);
+
+    let c = HandshakeMessageClientHello::unmarshal(&mut raw_client_hello.as_slice())?;
+    assert_eq!(
+        c.extensions,
+        vec![
+            Extension::Unknown {
+                extension_type: 16,
+                data: vec![0x00, 0x03, 0x02, b'h', b'2'],
+            },
+            Extension::SupportedEllipticCurves(ExtensionSupportedEllipticCurves {
+                elliptic_curves: vec![NamedCurve::X25519],
+            }),
+        ]
+    );
+
+    let mut raw = vec![];
+    c.marshal(&mut raw)?;
+    assert_eq!(raw, raw_client_hello);
+    Ok(())
+}

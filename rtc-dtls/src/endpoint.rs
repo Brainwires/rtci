@@ -16,6 +16,7 @@ use shared::{EcnCodepoint, TransportContext};
 use shared::{TransportMessage, TransportProtocol};
 
 use crate::config::HandshakeConfig;
+use crate::cookie::{ClientHelloPrefix, CookieSecrets};
 use crate::state::State;
 use bytes::BytesMut;
 use std::collections::hash_map::Keys;
@@ -28,6 +29,10 @@ use std::time::Instant;
 #[non_exhaustive]
 pub enum EndpointEvent {
     /// The handshake finished; application data may now be sent, and SRTP keys can be exported.
+    ///
+    /// A server endpoint reports it again for an address that already had an association when
+    /// the client there completed a new handshake (RFC 6347 4.2.8): the new association has
+    /// replaced the old one, and with it the keys.
     HandshakeComplete,
     /// Decrypted application data arrived.
     ApplicationData(BytesMut),
@@ -37,26 +42,38 @@ pub enum EndpointEvent {
     PeerClosed,
 }
 
-/// Most server associations kept for source addresses that have not yet echoed a cookie
-/// (RFC 6347 4.2.1). Until a client does, its address is only a claim anyone can make, so past
-/// this the oldest such association makes way for the new one: spoofed addresses cannot hold
-/// memory without limit, and a verified association is never displaced.
-pub(crate) const MAX_UNVERIFIED_ASSOCIATIONS: usize = 256;
+/// What a server endpoint makes of a datagram before an association sees it.
+enum Admission {
+    /// It has been dealt with (answered with a HelloVerifyRequest, or dropped).
+    Done,
+    /// It goes to the association, or associations, of its source address.
+    Deliver,
+}
 
 /// The main entry point to the library
 ///
 /// This object performs no I/O whatsoever. Instead, it generates a stream of packets to send via
 /// `poll_transmit`, and consumes incoming packets and connections-generated events via `handle` and
 /// `handle_event`.
+///
+/// As a server it performs the cookie exchange of RFC 6347 4.2.1 without keeping state: a
+/// ClientHello that carries no valid cookie is answered with a HelloVerifyRequest and
+/// forgotten, and an association exists only once a client has echoed the cookie, which
+/// proves it receives at the address it sends from. See
+/// [`ConfigBuilder::with_cookie_exchange`](crate::config::ConfigBuilder::with_cookie_exchange).
 pub struct Endpoint {
     local_addr: SocketAddr,
     transport_protocol: TransportProtocol,
     transmits: VecDeque<TransportMessage<BytesMut>>,
     connections: HashMap<SocketAddr, DTLSConn>,
+    /// Server associations in the making for addresses that already have an established one:
+    /// the client there has echoed a cookie for a new ClientHello (RFC 6347 4.2.8). The
+    /// established association stays in `connections`, and in use, until the new handshake
+    /// completes; then this one takes its place.
+    pending: HashMap<SocketAddr, DTLSConn>,
     server_config: Option<Arc<HandshakeConfig>>,
-    /// Server associations whose client has not yet echoed a cookie, oldest first. Entries for
-    /// associations since verified or removed are pruned when room is made.
-    unverified: VecDeque<SocketAddr>,
+    /// What the server's cookies are made with.
+    cookie_secrets: CookieSecrets,
 }
 
 impl Endpoint {
@@ -73,8 +90,9 @@ impl Endpoint {
             transport_protocol: protocol,
             transmits: VecDeque::new(),
             connections: HashMap::new(),
+            pending: HashMap::new(),
             server_config,
-            unverified: VecDeque::new(),
+            cookie_secrets: CookieSecrets::default(),
         }
     }
 
@@ -104,7 +122,7 @@ impl Endpoint {
     }
 
     /// Whether the association with `remote` has failed: a fatal alert was sent or received, or
-    /// its handshake gave up (a handshake error, or the retransmissions ran out). An ordinary
+    /// its handshake gave up (a handshake error, or its deadline passed). An ordinary
     /// retransmission or a discarded record never fails it. `false` when there is no such
     /// association.
     pub fn is_connection_failed(&self, remote: &SocketAddr) -> bool {
@@ -117,6 +135,30 @@ impl Endpoint {
     #[cfg(fuzzing)]
     pub(crate) fn connection_mut(&mut self, remote: &SocketAddr) -> Option<&mut DTLSConn> {
         self.connections.get_mut(remote)
+    }
+
+    /// Queues everything `conn` wants to send to `remote`.
+    fn queue_transmits(
+        transmits: &mut VecDeque<TransportMessage<BytesMut>>,
+        conn: &mut DTLSConn,
+        now: Instant,
+        local_addr: SocketAddr,
+        remote: SocketAddr,
+        ecn: Option<EcnCodepoint>,
+        transport_protocol: TransportProtocol,
+    ) {
+        while let Some(payload) = conn.outgoing_raw_packet() {
+            transmits.push_back(TransportMessage {
+                now,
+                transport: TransportContext {
+                    local_addr,
+                    peer_addr: remote,
+                    ecn,
+                    transport_protocol,
+                },
+                message: payload,
+            });
+        }
     }
 
     /// Initiate an Association
@@ -134,20 +176,15 @@ impl Endpoint {
         if let Vacant(e) = self.connections.entry(remote) {
             let mut conn = DTLSConn::new(client_config, true, initial_state);
             conn.handshake(now)?;
-
-            while let Some(payload) = conn.outgoing_raw_packet() {
-                self.transmits.push_back(TransportMessage {
-                    now,
-                    transport: TransportContext {
-                        local_addr: self.local_addr,
-                        peer_addr: remote,
-                        ecn: None,
-                        transport_protocol: self.transport_protocol,
-                    },
-                    message: payload,
-                });
-            }
-
+            Self::queue_transmits(
+                &mut self.transmits,
+                &mut conn,
+                now,
+                self.local_addr,
+                remote,
+                None,
+                self.transport_protocol,
+            );
             e.insert(conn);
         }
 
@@ -160,20 +197,18 @@ impl Endpoint {
     /// parameter rather than something the endpoint samples: it owns no sockets and reads no
     /// clock.
     pub fn stop(&mut self, now: Instant, remote: SocketAddr) -> Option<DTLSConn> {
+        self.pending.remove(&remote);
         if let Some(conn) = self.connections.get_mut(&remote) {
             conn.close();
-            while let Some(payload) = conn.outgoing_raw_packet() {
-                self.transmits.push_back(TransportMessage {
-                    now,
-                    transport: TransportContext {
-                        local_addr: self.local_addr,
-                        peer_addr: remote,
-                        ecn: None,
-                        transport_protocol: self.transport_protocol,
-                    },
-                    message: payload,
-                });
-            }
+            Self::queue_transmits(
+                &mut self.transmits,
+                conn,
+                now,
+                self.local_addr,
+                remote,
+                None,
+                self.transport_protocol,
+            );
         }
         self.connections.remove(&remote)
     }
@@ -184,20 +219,18 @@ impl Endpoint {
     pub fn close(&mut self, now: Instant) -> Result<()> {
         for (remote_addr, conn) in self.connections.iter_mut() {
             conn.close();
-            while let Some(payload) = conn.outgoing_raw_packet() {
-                self.transmits.push_back(TransportMessage {
-                    now,
-                    transport: TransportContext {
-                        local_addr: self.local_addr,
-                        peer_addr: *remote_addr,
-                        ecn: None,
-                        transport_protocol: self.transport_protocol,
-                    },
-                    message: payload,
-                });
-            }
+            Self::queue_transmits(
+                &mut self.transmits,
+                conn,
+                now,
+                self.local_addr,
+                *remote_addr,
+                None,
+                self.transport_protocol,
+            );
         }
         self.connections.clear();
+        self.pending.clear();
 
         Ok(())
     }
@@ -245,6 +278,88 @@ impl Endpoint {
         Ok(())
     }
 
+    /// The server's part before any association: the stateless cookie exchange (RFC 6347
+    /// 4.2.1), and with it the decision whether a ClientHello gets a new association. No
+    /// association is made, and nothing is remembered, for a ClientHello that does not carry
+    /// the cookie this server would have sent its source address for it.
+    fn admit(
+        &mut self,
+        now: Instant,
+        remote: SocketAddr,
+        ecn: Option<EcnCodepoint>,
+        data: &[u8],
+        config: &Arc<HandshakeConfig>,
+    ) -> Result<Admission> {
+        let existing = self.connections.get(&remote);
+        let failed = existing.is_some_and(|conn| conn.is_failed());
+        let established = existing.is_some_and(|conn| !failed && conn.is_handshake_completed());
+        let handshaking = existing.is_some() && !failed && !established;
+        // A handshake under way takes its own records, a repeated ClientHello included; so
+        // does one under way beside an established association.
+        if handshaking || self.pending.contains_key(&remote) {
+            return Ok(Admission::Deliver);
+        }
+
+        let Some(hello) = ClientHelloPrefix::parse(data) else {
+            // Not a ClientHello. With no association there is nothing it could belong to.
+            return Ok(if existing.is_some() {
+                Admission::Deliver
+            } else {
+                Admission::Done
+            });
+        };
+
+        // RFC 6347 4.2.8: a ClientHello on an established association may be a client that
+        // lost its state and starts over. One that repeats the random of the ClientHello the
+        // association was made from is that very ClientHello, late or duplicated.
+        if established
+            && existing
+                .is_some_and(|conn| conn.state.remote_random.marshal_fixed() == hello.random())
+        {
+            return Ok(Admission::Deliver);
+        }
+
+        let provider = config.provider().clone();
+        let verified = !config.cookie_exchange
+            || self
+                .cookie_secrets
+                .verify(now, provider.as_ref(), remote, &hello)?;
+        if !verified {
+            // RFC 6347 4.2.1: a ClientHello without the cookie, or with an invalid one, is
+            // answered with a HelloVerifyRequest. Nothing is kept, and the answer is smaller
+            // than what it answers. An established association is not touched (4.2.8).
+            let cookie = self
+                .cookie_secrets
+                .issue(now, provider.as_ref(), remote, &hello)?;
+            self.transmits.push_back(TransportMessage {
+                now,
+                transport: TransportContext {
+                    local_addr: self.local_addr,
+                    peer_addr: remote,
+                    ecn,
+                    transport_protocol: self.transport_protocol,
+                },
+                message: BytesMut::from(hello.hello_verify_request(&cookie).as_slice()),
+            });
+            return Ok(Admission::Done);
+        }
+
+        // The client receives at `remote`: it gets an association. Beside the established one,
+        // if there is one, which stays until the new handshake completes (RFC 6347 4.2.8); in
+        // place of a failed one.
+        let conn = DTLSConn::accept(
+            config.clone(),
+            hello.message_sequence,
+            hello.record_sequence,
+        )?;
+        if established {
+            self.pending.insert(remote, conn);
+        } else {
+            self.connections.insert(remote, conn);
+        }
+        Ok(Admission::Deliver)
+    }
+
     /// Process an incoming UDP datagram
     pub fn read(
         &mut self,
@@ -253,47 +368,88 @@ impl Endpoint {
         ecn: Option<EcnCodepoint>,
         data: BytesMut,
     ) -> Result<Vec<EndpointEvent>> {
-        // A failed association is finished. As a server, a later datagram from that address
-        // starts afresh rather than meeting the dead association forever.
-        if self.server_config.is_some() && self.is_connection_failed(&remote) {
-            self.connections.remove(&remote);
-        }
-        if !self.connections.contains_key(&remote) {
-            let Some(handshake_config) = self.server_config.clone() else {
-                return Err(Error::NoServerConfig);
-            };
-            self.make_room_for_unverified();
-            self.connections
-                .insert(remote, DTLSConn::new(handshake_config, false, None));
-            self.unverified.push_back(remote);
+        if let Some(config) = self.server_config.clone() {
+            if let Admission::Done = self.admit(now, remote, ecn, &data, &config)? {
+                return Ok(vec![]);
+            }
+            // A failed server association takes no more input. It still says its fatal alert
+            // again when the peer repeats a flight (RFC 6347 4.2.7), which is not an error
+            // for the caller: a datagram for an association that is over is simply dropped.
+            if self.is_connection_failed(&remote) {
+                if let Some(conn) = self.connections.get_mut(&remote) {
+                    let _ = conn.read(&data);
+                    Self::queue_transmits(
+                        &mut self.transmits,
+                        conn,
+                        now,
+                        self.local_addr,
+                        remote,
+                        ecn,
+                        self.transport_protocol,
+                    );
+                }
+                return Ok(vec![]);
+            }
+        } else if !self.connections.contains_key(&remote) {
+            return Err(Error::NoServerConfig);
         }
 
+        if self.pending.contains_key(&remote) {
+            // Two associations for this address (RFC 6347 4.2.8). An epoch-0 record is the new
+            // handshake's. A protected one is whichever association's keys open it: the
+            // established one is asked first, so that its traffic goes on undisturbed.
+            let plaintext = data.get(3..5) == Some(&[0, 0][..]);
+            if !plaintext {
+                let authenticated = |endpoint: &Self| {
+                    endpoint
+                        .connections
+                        .get(&remote)
+                        .map(|conn| conn.authenticated_records)
+                };
+                let before = authenticated(self);
+                let result = self.read_association(now, remote, ecn, &data);
+                if authenticated(self) != before || !self.connections.contains_key(&remote) {
+                    return result;
+                }
+            }
+            return self.read_pending(now, remote, ecn, &data);
+        }
+
+        self.read_association(now, remote, ecn, &data)
+    }
+
+    /// Hands a datagram to the association of `remote`.
+    fn read_association(
+        &mut self,
+        now: Instant,
+        remote: SocketAddr,
+        ecn: Option<EcnCodepoint>,
+        data: &[u8],
+    ) -> Result<Vec<EndpointEvent>> {
         // Handle packet on existing association, if any
         let mut messages = vec![];
         if let Some(conn) = self.connections.get_mut(&remote) {
-            let result = Self::read_into(conn, now, &data, &mut messages);
+            let result = Self::read_into(conn, now, data, &mut messages);
             // Whatever the outcome, deliver the data that arrived and send what the connection
             // queued: an alert in reply to the peer's (its close_notify, or a fatal alert) has to
             // go out even though this read is ending in an error.
             while let Some(message) = conn.incoming_application_data() {
                 messages.push(EndpointEvent::ApplicationData(message));
             }
-            while let Some(payload) = conn.outgoing_raw_packet() {
-                self.transmits.push_back(TransportMessage {
-                    now,
-                    transport: TransportContext {
-                        local_addr: self.local_addr,
-                        peer_addr: remote,
-                        ecn,
-                        transport_protocol: self.transport_protocol,
-                    },
-                    message: payload,
-                });
-            }
+            Self::queue_transmits(
+                &mut self.transmits,
+                conn,
+                now,
+                self.local_addr,
+                remote,
+                ecn,
+                self.transport_protocol,
+            );
             // A peer's close_notify ends the connection gracefully: report it rather than the
             // error the connection returns for it.
             if conn.closed_by_peer {
                 self.connections.remove(&remote);
+                self.pending.remove(&remote);
                 messages.push(EndpointEvent::PeerClosed);
                 return Ok(messages);
             }
@@ -303,87 +459,136 @@ impl Endpoint {
         Ok(messages)
     }
 
-    /// Before a new server association: drops the oldest association still waiting for its
-    /// client to echo the cookie while [`MAX_UNVERIFIED_ASSOCIATIONS`] are.
-    fn make_room_for_unverified(&mut self) {
-        let connections = &self.connections;
-        self.unverified.retain(|addr| {
-            connections
-                .get(addr)
-                .is_some_and(|conn| !conn.is_address_verified())
-        });
-        while self.unverified.len() >= MAX_UNVERIFIED_ASSOCIATIONS {
-            if let Some(oldest) = self.unverified.pop_front() {
-                self.connections.remove(&oldest);
-            }
+    /// Hands a datagram to the association in the making for `remote` (RFC 6347 4.2.8). When
+    /// its handshake completes, the client has shown with a verified Finished that it is the
+    /// peer, and the association takes the established one's place; if it fails, it goes and
+    /// the established one is as it was.
+    fn read_pending(
+        &mut self,
+        now: Instant,
+        remote: SocketAddr,
+        ecn: Option<EcnCodepoint>,
+        data: &[u8],
+    ) -> Result<Vec<EndpointEvent>> {
+        let mut messages = vec![];
+        let Some(conn) = self.pending.get_mut(&remote) else {
+            return Ok(messages);
+        };
+        let result = Self::read_into(conn, now, data, &mut messages);
+        Self::queue_transmits(
+            &mut self.transmits,
+            conn,
+            now,
+            self.local_addr,
+            remote,
+            ecn,
+            self.transport_protocol,
+        );
+        if result.is_err() || conn.is_failed() {
+            self.pending.remove(&remote);
+            return Ok(vec![]);
         }
+        if conn.is_handshake_completed()
+            && let Some(mut conn) = self.pending.remove(&remote)
+        {
+            while let Some(message) = conn.incoming_application_data() {
+                messages.push(EndpointEvent::ApplicationData(message));
+            }
+            self.connections.insert(remote, conn);
+        }
+        Ok(messages)
     }
 
     /// Queues application data for `remote`.
     ///
     /// # Errors
     ///
-    /// Fails if there is no association with `remote`, or its handshake has not completed.
+    /// Fails if there is no association with `remote`, if the association is closed, or if
+    /// `data` is longer than a record may carry
+    /// ([`MAX_RECORD_PAYLOAD`](crate::conn::MAX_RECORD_PAYLOAD)).
     pub fn write(&mut self, now: Instant, remote: SocketAddr, data: &[u8]) -> Result<()> {
         if let Some(conn) = self.connections.get_mut(&remote) {
             conn.write(data)?;
-            while let Some(payload) = conn.outgoing_raw_packet() {
-                self.transmits.push_back(TransportMessage {
-                    now,
-                    transport: TransportContext {
-                        local_addr: self.local_addr,
-                        peer_addr: remote,
-                        ecn: None,
-                        transport_protocol: self.transport_protocol,
-                    },
-                    message: payload,
-                });
-            }
+            Self::queue_transmits(
+                &mut self.transmits,
+                conn,
+                now,
+                self.local_addr,
+                remote,
+                None,
+                self.transport_protocol,
+            );
             Ok(())
         } else {
             Err(Error::InvalidRemoteAddress(remote))
         }
     }
 
-    /// Advances `remote`'s association to `now`, driving handshake retransmissions.
+    /// Advances `remote`'s association to `now`: retransmits its handshake flight when the
+    /// retransmission timer has expired (RFC 6347 4.2.4), and gives the handshake up at its
+    /// deadline ([`ConfigBuilder::with_handshake_timeout`](crate::config::ConfigBuilder::with_handshake_timeout)).
     ///
     /// # Errors
     ///
-    /// Fails if the handshake has exhausted its retransmissions.
+    /// `ErrHandshakeTimeout` when the handshake did not complete in time; the association has
+    /// then failed.
     pub fn handle_timeout(&mut self, remote: SocketAddr, now: Instant) -> Result<()> {
-        if let Some(conn) = self.connections.get_mut(&remote) {
-            if let Some(current_retransmit_timer) = &conn.current_retransmit_timer
-                && now >= *current_retransmit_timer
-            {
-                if conn.current_retransmit_timer.take().is_some() && !conn.is_handshake_completed()
-                {
-                    conn.handshake_timeout(now)?;
-                }
-                while let Some(payload) = conn.outgoing_raw_packet() {
-                    self.transmits.push_back(TransportMessage {
-                        now,
-                        transport: TransportContext {
-                            local_addr: self.local_addr,
-                            peer_addr: remote,
-                            ecn: None,
-                            transport_protocol: self.transport_protocol,
-                        },
-                        message: payload,
-                    });
-                }
+        // An association in the making beside an established one has its own timers; when it
+        // gives up, it goes and nothing else changes.
+        if let Some(conn) = self.pending.get_mut(&remote) {
+            let result = if conn.next_timeout().is_some_and(|at| now >= at) {
+                conn.handle_timeout(now)
+            } else {
+                Ok(())
+            };
+            Self::queue_transmits(
+                &mut self.transmits,
+                conn,
+                now,
+                self.local_addr,
+                remote,
+                None,
+                self.transport_protocol,
+            );
+            if result.is_err() {
+                self.pending.remove(&remote);
             }
-            Ok(())
+        }
+        if let Some(conn) = self.connections.get_mut(&remote) {
+            let result = if conn.next_timeout().is_some_and(|at| now >= at) {
+                conn.handle_timeout(now)
+            } else {
+                Ok(())
+            };
+            Self::queue_transmits(
+                &mut self.transmits,
+                conn,
+                now,
+                self.local_addr,
+                remote,
+                None,
+                self.transport_protocol,
+            );
+            result
         } else {
             Err(Error::InvalidRemoteAddress(remote))
         }
     }
 
-    /// When `remote`'s association next needs [`Self::handle_timeout`].
+    /// When `remote`'s association next needs [`Self::handle_timeout`]: the retransmission
+    /// timer or the handshake deadline, whichever comes first.
     pub fn poll_timeout(&self, remote: &SocketAddr) -> Option<Instant> {
-        if let Some(conn) = self.connections.get(remote) {
-            conn.current_retransmit_timer
-        } else {
-            None
+        let established = self
+            .connections
+            .get(remote)
+            .and_then(|conn| conn.next_timeout());
+        let pending = self
+            .pending
+            .get(remote)
+            .and_then(|conn| conn.next_timeout());
+        match (established, pending) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
         }
     }
 }
@@ -1267,6 +1472,9 @@ mod tests {
             .poll_transmit()
             .expect("the server answers with an alert");
         assert_eq!(alert.message.first(), Some(&(ContentType::Alert as u8)));
+        // RFC 6347 4.1.2.1: the alert for a record that fails authentication is
+        // bad_record_mac(20), at fatal level (4.1.2.7).
+        assert_eq!(&alert.message[13..], &[2, 20]);
         Ok(())
     }
 }

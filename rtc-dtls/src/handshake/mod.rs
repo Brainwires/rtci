@@ -273,11 +273,20 @@ impl Handshake {
         let handshake_header = HandshakeHeader::unmarshal(reader)?;
 
         let handshake_message = match handshake_header.handshake_type {
+            // A hello may or may not end with an extensions block (RFC 5246 7.4.1.2, 7.4.1.3),
+            // so its parser has to know where the message ends: it is given exactly the
+            // `length` bytes the header announces, and bytes it leaves over are an error.
             HandshakeType::ClientHello => {
-                HandshakeMessage::ClientHello(HandshakeMessageClientHello::unmarshal(reader)?)
+                let body = read_body(reader, handshake_header.length)?;
+                HandshakeMessage::ClientHello(HandshakeMessageClientHello::unmarshal(
+                    &mut body.as_slice(),
+                )?)
             }
             HandshakeType::ServerHello => {
-                HandshakeMessage::ServerHello(HandshakeMessageServerHello::unmarshal(reader)?)
+                let body = read_body(reader, handshake_header.length)?;
+                HandshakeMessage::ServerHello(HandshakeMessageServerHello::unmarshal(
+                    &mut body.as_slice(),
+                )?)
             }
             HandshakeType::HelloVerifyRequest => HandshakeMessage::HelloVerifyRequest(
                 HandshakeMessageHelloVerifyRequest::unmarshal(reader)?,
@@ -311,4 +320,14 @@ impl Handshake {
             handshake_message,
         })
     }
+}
+
+/// Reads the `length` bytes of a handshake message body.
+fn read_body<R: Read>(reader: &mut R, length: u32) -> Result<Vec<u8>> {
+    let mut body = vec![];
+    reader.take(length as u64).read_to_end(&mut body)?;
+    if body.len() != length as usize {
+        return Err(Error::ErrBufferTooSmall);
+    }
+    Ok(body)
 }

@@ -56,6 +56,11 @@ impl CipherSuite for CipherSuiteChaCha20Poly1305Sha256 {
         self.cipher.is_some()
     }
 
+    fn record_expansion(&self) -> usize {
+        // The 16-byte tag; the nonce is not carried (RFC 7905).
+        16
+    }
+
     fn init(
         &mut self,
         provider: Arc<dyn RTCCryptoProvider>,

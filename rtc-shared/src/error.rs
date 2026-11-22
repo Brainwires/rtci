@@ -1203,6 +1203,34 @@ pub enum Error {
     /// Alert is Fatal or Close Notify.
     #[error("Alert is Fatal or Close Notify")]
     ErrAlertFatalOrClose,
+    /// A hello's renegotiation_info was not empty in an initial handshake (RFC 5746 3.4, 3.6).
+    #[error("renegotiation_info is not empty in an initial handshake")]
+    ErrRenegotiationInfoNotEmpty,
+    /// The ServerHello carried an extension the ClientHello did not offer (RFC 5246 7.4.1.4).
+    #[error("server sent an extension the client did not offer")]
+    ErrUnsolicitedExtension,
+    /// The ServerHello selected a compression method the ClientHello did not offer.
+    #[error("server selected a compression method the client did not offer")]
+    ErrCompressionMethodNotOffered,
+    /// The ClientHello did not offer the null compression method (RFC 5246 7.4.1.2).
+    #[error("client did not offer the null compression method")]
+    ErrNoNullCompressionMethod,
+    /// The server's use_srtp held an MKI the client did not offer, or not exactly one profile
+    /// (RFC 5764 4.1.1, 4.1.3).
+    #[error("server's use_srtp extension is not a valid answer to the client's")]
+    ErrInvalidUseSrtpAnswer,
+    /// Key material was asked of a session without the extended master secret (RFC 7627 5.4).
+    #[error("no keying material is exported without the extended master secret")]
+    ErrExportWithoutExtendedMasterSecret,
+    /// The handshake did not complete within the configured time.
+    #[error("handshake did not complete in time")]
+    ErrHandshakeTimeout,
+    /// A record's payload is longer than the 2^14 bytes a record may carry (RFC 5246 6.2.1).
+    #[error("record payload exceeds 2^14 bytes")]
+    ErrRecordOverflow,
+    /// A hello carried two extensions of one type (RFC 5246 7.4.1.4).
+    #[error("hello carries an extension type twice")]
+    ErrDuplicateExtension,
     /// Fragment buffer overflow. New size is greater than specified max.
     #[error(
         "Fragment buffer overflow. New size {new_size} is greater than specified max {max_size}"

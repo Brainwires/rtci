@@ -79,6 +79,7 @@ pub mod config;
 pub mod conn;
 /// Record content types: handshake, alert, change-cipher-spec and application data.
 pub mod content;
+pub(crate) mod cookie;
 /// Cryptographic primitives: the AEAD and CBC ciphers, certificates and signatures.
 pub mod crypto;
 /// Elliptic curves and the key-exchange values exchanged over them.

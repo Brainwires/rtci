@@ -18,7 +18,9 @@ mod config_test;
 
 use crate::cipher_suite::*;
 use crate::conn::{
-    DEFAULT_MAXIMUM_RETRANSMIT_NUMBER, DEFAULT_REPLAY_PROTECTION_WINDOW, INITIAL_TICKER_INTERVAL,
+    DEFAULT_HANDSHAKE_TIMEOUT, DEFAULT_MAXIMUM_RETRANSMIT_NUMBER, DEFAULT_REPLAY_PROTECTION_WINDOW,
+    INITIAL_TICKER_INTERVAL, MAXIMUM_RETRANSMIT_INTERVAL, MINIMUM_MTU,
+    MINIMUM_REPLAY_PROTECTION_WINDOW,
 };
 use crate::crypto::*;
 use crate::curve::named_curve::NamedCurve;
@@ -116,6 +118,9 @@ pub struct ConfigBuilder {
     client_auth: ClientAuthType,
     extended_master_secret: ExtendedMasterSecretType,
     flight_interval: Duration,
+    maximum_flight_interval: Duration,
+    handshake_timeout: Option<Duration>,
+    cookie_exchange: bool,
     psk: Option<PskCallback>,
     psk_identity_hint: Option<Vec<u8>>,
     insecure_skip_verify: bool,
@@ -141,6 +146,9 @@ impl Default for ConfigBuilder {
             client_auth: ClientAuthType::default(),
             extended_master_secret: ExtendedMasterSecretType::default(),
             flight_interval: Duration::default(),
+            maximum_flight_interval: MAXIMUM_RETRANSMIT_INTERVAL,
+            handshake_timeout: Some(DEFAULT_HANDSHAKE_TIMEOUT),
+            cookie_exchange: true,
             psk: None,
             psk_identity_hint: None,
             insecure_skip_verify: false,
@@ -216,10 +224,44 @@ impl ConfigBuilder {
         self
     }
 
-    /// flight_interval controls how often we send outbound handshake messages
-    /// defaults to time.Second
+    /// The initial value of the handshake retransmission timer: how long a flight waits for
+    /// its answer before it is sent again. The timer doubles at each retransmission, up to
+    /// [`Self::with_maximum_flight_interval`], and keeps its value until a flight is answered
+    /// without loss (RFC 6347 4.2.4.1). Defaults to one second.
     pub fn with_flight_interval(mut self, flight_interval: Duration) -> Self {
         self.flight_interval = flight_interval;
+        self
+    }
+
+    /// The value the handshake retransmission timer doubles up to. Defaults to 60 seconds, the
+    /// least RFC 6347 4.2.4.1 allows as a maximum; a value below the initial interval is
+    /// raised to it.
+    pub fn with_maximum_flight_interval(mut self, maximum_flight_interval: Duration) -> Self {
+        self.maximum_flight_interval = maximum_flight_interval;
+        self
+    }
+
+    /// How long a handshake may take, from the first flight sent or received, before the
+    /// association fails with `ErrHandshakeTimeout`. `None` never gives up: the flight is
+    /// retransmitted for as long as the association exists. Defaults to 30 seconds.
+    ///
+    /// RFC 6347 sets no limit; this is the one rule that ends a handshake nobody answers.
+    pub fn with_handshake_timeout(mut self, handshake_timeout: Option<Duration>) -> Self {
+        self.handshake_timeout = handshake_timeout;
+        self
+    }
+
+    /// Whether a server [`Endpoint`](crate::endpoint::Endpoint) answers a ClientHello that
+    /// carries no valid cookie with a HelloVerifyRequest (RFC 6347 4.2.1). On by default, as
+    /// the RFC asks: until a client echoes the cookie the server keeps no state for it and
+    /// sends it nothing larger than what it received.
+    ///
+    /// Off, the first ClientHello gets an association and the server's whole first flight. That
+    /// saves a round trip where something else has already shown that the client receives at
+    /// its address (ICE connectivity checks do, for WebRTC), and makes the server an
+    /// amplifier and a holder of state for spoofed addresses where nothing has.
+    pub fn with_cookie_exchange(mut self, cookie_exchange: bool) -> Self {
+        self.cookie_exchange = cookie_exchange;
         self
     }
 
@@ -323,6 +365,8 @@ impl ConfigBuilder {
     /// Duplication of the sequence number is checked in this window size.
     /// Packet with sequence number older than this value compared to the latest
     /// accepted packet will be discarded. (default is 64)
+    ///
+    /// RFC 6347 4.1.2.6 requires a window of at least 32: a smaller value is raised to 32.
     pub fn with_replay_protection_window(mut self, replay_protection_window: usize) -> Self {
         self.replay_protection_window = replay_protection_window;
         self
@@ -502,6 +546,12 @@ impl ConfigBuilder {
         };
 
         let maximum_transmission_unit = if self.mtu == 0 { DEFAULT_MTU } else { self.mtu };
+        if maximum_transmission_unit < MINIMUM_MTU {
+            return Err(Error::Other(format!(
+                "mtu {maximum_transmission_unit} is below the minimum of {MINIMUM_MTU}"
+            )));
+        }
+        let maximum_retransmit_interval = self.maximum_flight_interval.max(retransmit_interval);
 
         // `..Default::default()` used to supply this; when P7 replaced that with an explicit
         // field list it wrote `0`, which means *no retransmits are permitted at all*. The very
@@ -516,6 +566,12 @@ impl ConfigBuilder {
 
         let replay_protection_window = if self.replay_protection_window == 0 {
             DEFAULT_REPLAY_PROTECTION_WINDOW
+        } else if self.replay_protection_window < MINIMUM_REPLAY_PROTECTION_WINDOW {
+            warn!(
+                "replay protection window {} raised to the minimum of {}",
+                self.replay_protection_window, MINIMUM_REPLAY_PROTECTION_WINDOW
+            );
+            MINIMUM_REPLAY_PROTECTION_WINDOW
         } else {
             self.replay_protection_window
         };
@@ -591,6 +647,9 @@ impl ConfigBuilder {
             server_cert_verifier,
             client_cert_verifier,
             retransmit_interval,
+            maximum_retransmit_interval,
+            handshake_timeout: self.handshake_timeout,
+            cookie_exchange: self.cookie_exchange,
             initial_epoch: 0,
             maximum_transmission_unit,
             maximum_retransmit_number,
@@ -650,6 +709,9 @@ pub struct HandshakeConfig {
     pub(crate) server_cert_verifier: Option<Arc<dyn ServerCertVerifier>>,
     pub(crate) client_cert_verifier: Option<Arc<dyn ClientCertVerifier>>,
     pub(crate) retransmit_interval: Duration,
+    pub(crate) maximum_retransmit_interval: Duration,
+    pub(crate) handshake_timeout: Option<Duration>,
+    pub(crate) cookie_exchange: bool,
     pub(crate) initial_epoch: u16,
     pub(crate) maximum_transmission_unit: usize,
     pub(crate) maximum_retransmit_number: usize,
@@ -709,6 +771,9 @@ impl HandshakeConfig {
             }),
             client_cert_verifier: None,
             retransmit_interval: std::time::Duration::from_secs(0),
+            maximum_retransmit_interval: MAXIMUM_RETRANSMIT_INTERVAL,
+            handshake_timeout: None,
+            cookie_exchange: true,
             initial_epoch: 0,
             maximum_transmission_unit: DEFAULT_MTU,
             maximum_retransmit_number: DEFAULT_MAXIMUM_RETRANSMIT_NUMBER,

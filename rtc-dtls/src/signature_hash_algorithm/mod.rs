@@ -193,6 +193,64 @@ pub(crate) fn select_signature_scheme(
     Err(Error::ErrNoAvailableSignatureSchemes)
 }
 
+/// The pairs a client that sends no signature_algorithms extension is taken to accept
+/// (RFC 5246 7.4.1.4.1): SHA-1 with the signature algorithm of the negotiated key exchange.
+pub(crate) fn default_remote_signature_schemes() -> Vec<SignatureHashAlgorithm> {
+    vec![
+        SignatureHashAlgorithm {
+            hash: HashAlgorithm::Sha1,
+            signature: SignatureAlgorithm::Rsa,
+        },
+        SignatureHashAlgorithm {
+            hash: HashAlgorithm::Sha1,
+            signature: SignatureAlgorithm::Ecdsa,
+        },
+    ]
+}
+
+/// The most preferred of `local` (in its order) that the peer lists in `remote` and
+/// `private_key` can sign with: the pair for a ServerKeyExchange (RFC 5246 7.4.3) or a
+/// CertificateVerify (7.4.8).
+pub(crate) fn select_common_signature_scheme(
+    local: &[SignatureHashAlgorithm],
+    remote: &[SignatureHashAlgorithm],
+    private_key: &CryptoPrivateKey,
+) -> Result<SignatureHashAlgorithm> {
+    local
+        .iter()
+        .find(|scheme| remote.contains(scheme) && scheme.is_compatible(private_key))
+        .copied()
+        .ok_or(Error::ErrNoAvailableSignatureSchemes)
+}
+
+/// The certificate type (RFC 5246 7.4.4, RFC 8422 5.5) a certificate with `private_key` is:
+/// rsa_sign for an RSA key, ecdsa_sign for an ECDSA or EdDSA one.
+pub(crate) fn client_certificate_type(
+    private_key: &CryptoPrivateKey,
+) -> crate::client_certificate_type::ClientCertificateType {
+    use crate::client_certificate_type::ClientCertificateType;
+
+    let is_rsa = [
+        HashAlgorithm::Sha1,
+        HashAlgorithm::Sha256,
+        HashAlgorithm::Sha384,
+        HashAlgorithm::Sha512,
+    ]
+    .into_iter()
+    .any(|hash| {
+        SignatureHashAlgorithm {
+            hash,
+            signature: SignatureAlgorithm::Rsa,
+        }
+        .is_compatible(private_key)
+    });
+    if is_rsa {
+        ClientCertificateType::RsaSign
+    } else {
+        ClientCertificateType::EcdsaSign
+    }
+}
+
 // SignatureScheme identifies a signature algorithm supported by TLS. See
 // RFC 8446, Section 4.2.3.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]

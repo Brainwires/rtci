@@ -76,6 +76,11 @@ pub enum CipherSuiteId {
     /// `TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256` (`0xcca9`).
     Tls_Ecdhe_Ecdsa_With_ChaCha20_Poly1305_Sha256 = 0xcca9,
 
+    /// `TLS_EMPTY_RENEGOTIATION_INFO_SCSV` (`0x00ff`): not a cipher suite. A client lists it
+    /// to signal secure renegotiation without the renegotiation_info extension (RFC 5746 3.3).
+    /// It is recognised in a ClientHello and never negotiated or offered.
+    Tls_Empty_Renegotiation_Info_Scsv = 0x00ff,
+
     /// A code point this crate does not implement.
     Unsupported,
 }
@@ -113,6 +118,10 @@ impl fmt::Display for CipherSuiteId {
                 write!(f, "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256")
             }
 
+            CipherSuiteId::Tls_Empty_Renegotiation_Info_Scsv => {
+                write!(f, "TLS_EMPTY_RENEGOTIATION_INFO_SCSV")
+            }
+
             _ => write!(f, "Unsupported CipherSuiteID"),
         }
     }
@@ -140,6 +149,8 @@ impl From<u16> for CipherSuiteId {
             // CHACHA20_POLY1305_SHA256
             0xcca8 => CipherSuiteId::Tls_Ecdhe_Rsa_With_ChaCha20_Poly1305_Sha256,
             0xcca9 => CipherSuiteId::Tls_Ecdhe_Ecdsa_With_ChaCha20_Poly1305_Sha256,
+
+            0x00ff => CipherSuiteId::Tls_Empty_Renegotiation_Info_Scsv,
 
             _ => CipherSuiteId::Unsupported,
         }
@@ -201,7 +212,7 @@ impl CipherSuiteId {
             | Self::Tls_Ecdhe_Rsa_With_ChaCha20_Poly1305_Sha256 => {
                 CryptoAlgorithm::Aead(AeadAlgorithm::ChaCha20Poly1305)
             }
-            Self::Unsupported => return false,
+            Self::Tls_Empty_Renegotiation_Info_Scsv | Self::Unsupported => return false,
         };
         crypto.supports(CryptoAlgorithm::Hash(HashAlgorithm::Sha256))
             && crypto.supports(CryptoAlgorithm::Hmac(HmacAlgorithm::Sha256))
@@ -242,6 +253,10 @@ pub trait CipherSuite: Send {
     fn is_psk(&self) -> bool;
     /// Whether keys have been installed, so records can be protected.
     fn is_initialized(&self) -> bool;
+    /// The most bytes this suite's record protection adds to a record's payload (explicit
+    /// nonce or IV, authentication tag or MAC, padding), on top of the 13-byte record header.
+    /// An application sizing its datagrams for a path MTU subtracts both (RFC 6347 4.1.1.1).
+    fn record_expansion(&self) -> usize;
 
     // Generate the internal encryption state
     /// Installs the keying material derived from the handshake.

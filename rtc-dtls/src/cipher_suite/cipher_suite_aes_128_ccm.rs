@@ -59,6 +59,14 @@ impl CipherSuite for CipherSuiteAes128Ccm {
         self.ccm.is_some()
     }
 
+    fn record_expansion(&self) -> usize {
+        // The 8-byte explicit nonce and the 16- or 8-byte tag (RFC 6655).
+        8 + match self.crypto_ccm_tag_len {
+            CryptoCcmTagLen::CryptoCcm8TagLength => 8,
+            CryptoCcmTagLen::CryptoCcmTagLength => 16,
+        }
+    }
+
     fn init(
         &mut self,
         provider: Arc<dyn RTCCryptoProvider>,

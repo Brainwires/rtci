@@ -56,6 +56,12 @@ impl CipherSuite for CipherSuiteAes256CbcSha {
         self.cbc.is_some()
     }
 
+    fn record_expansion(&self) -> usize {
+        // The 16-byte explicit IV, the 20-byte HMAC-SHA1 and up to a block of padding
+        // (RFC 5246 6.2.3.2).
+        16 + 20 + 16
+    }
+
     fn init(
         &mut self,
         provider: Arc<dyn RTCCryptoProvider>,

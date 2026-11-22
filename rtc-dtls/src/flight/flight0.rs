@@ -1,11 +1,15 @@
 use super::flight2::*;
 use super::*;
+use crate::compression_methods::CompressionMethodId;
 use crate::config::*;
 use crate::conn::*;
+use crate::crypto::certificates_signed_within;
 use crate::extension::*;
 use crate::handshake::handshake_message_client_hello::HandshakeMessageClientHello;
 use crate::handshake::*;
-use crate::record_layer::record_layer_header::*;
+use crate::signature_hash_algorithm::{
+    default_remote_signature_schemes, select_common_signature_scheme,
+};
 use crate::*;
 use shared::error::Error;
 
@@ -59,7 +63,9 @@ impl Flight for Flight0 {
                 }
             };
 
-            if client_hello.version != PROTOCOL_VERSION1_2 {
+            // RFC 5246 E.1: a client offering a later version than 1.2 is answered with 1.2
+            // (the ServerHello's version); one offering only an earlier version is refused.
+            if !client_hello.version.is_dtls1_2_or_later() {
                 return Err((
                     Some(Alert {
                         alert_level: AlertLevel::Fatal,
@@ -69,11 +75,11 @@ impl Flight for Flight0 {
                 ));
             }
 
-            negotiate_client_hello(state, client_hello, cfg)?;
-
-            // The ECDHE key pair waits until the client has echoed the cookie (see
-            // `DTLSConn::on_peer_address_verified` and `ensure_local_keypair`): a cookieless
-            // ClientHello costs no key generation, whatever source address it claims.
+            // Nothing is negotiated from this ClientHello: it carries no cookie, so anyone can
+            // have sent it from this address, and it is not part of the handshake transcript.
+            // The parameters (and any alert about them) come from the ClientHello that echoes
+            // the cookie (`Flight2::parse`), and so does the ECDHE key pair (see
+            // `DTLSConn::on_peer_address_verified` and `ensure_local_keypair`).
             Ok(Box::new(Flight2 {}))
         } else {
             Err((
@@ -113,9 +119,19 @@ impl Flight for Flight0 {
     }
 }
 
-/// Selects the connection parameters (random, cipher suite, curve, SRTP profile, extended master
-/// secret, server name) from a ClientHello. The server runs it on the first ClientHello and again
-/// on the cookie-verified one, whose parameters are the ones used: the first ClientHello is
+fn fatal(description: AlertDescription, err: Error) -> (Option<Alert>, Option<Error>) {
+    (
+        Some(Alert {
+            alert_level: AlertLevel::Fatal,
+            alert_description: description,
+        }),
+        Some(err),
+    )
+}
+
+/// Selects the connection parameters (random, cipher suite, curve, signature algorithm, SRTP
+/// profile, extended master secret, renegotiation indication, server name) from a ClientHello.
+/// The server runs it on the ClientHello that echoes its cookie: the first one is
 /// unauthenticated and not part of the handshake transcript.
 pub(crate) fn negotiate_client_hello(
     state: &mut State,
@@ -130,68 +146,39 @@ pub(crate) fn negotiate_client_hello(
     {
         state.named_curve = *curve;
     }
+    state.cipher_suite = None;
     state.srtp_protection_profile = SrtpProtectionProfile::Unsupported;
     state.extended_master_secret = false;
+    state.secure_renegotiation = false;
+    state.remote_offered_point_formats = false;
+    state.local_signature_scheme = None;
     state.server_name.clear();
 
     state.remote_random = client_hello.random.clone();
 
-    if let Ok(id) =
-        find_matching_cipher_suite(&client_hello.cipher_suites, &cfg.local_cipher_suites)
+    // RFC 5246 7.4.1.2: the list always holds the null method, the only one this crate has.
+    if !client_hello
+        .compression_methods
+        .ids
+        .contains(&CompressionMethodId::Null)
     {
-        if let Ok(cipher_suite) = cipher_suite_for_id(id) {
-            debug!(
-                "[handshake:{}] use cipher suite: {}",
-                srv_cli_str(state.is_client),
-                cipher_suite.to_string()
-            );
-            state.cipher_suite = Some(cipher_suite);
-        }
-    } else {
-        return Err((
-            Some(Alert {
-                alert_level: AlertLevel::Fatal,
-                alert_description: AlertDescription::InsufficientSecurity,
-            }),
-            Some(Error::ErrCipherSuiteNoIntersection),
+        return Err(fatal(
+            AlertDescription::IllegalParameter,
+            Error::ErrNoNullCompressionMethod,
         ));
     }
 
+    let mut client_curves = None;
+    let mut client_signature_schemes = None;
+    let mut client_use_srtp = None;
     for extension in &client_hello.extensions {
         match extension {
-            Extension::SupportedEllipticCurves(e) => {
-                if e.elliptic_curves.is_empty() {
-                    return Err((
-                        Some(Alert {
-                            alert_level: AlertLevel::Fatal,
-                            alert_description: AlertDescription::InsufficientSecurity,
-                        }),
-                        Some(Error::ErrNoSupportedEllipticCurves),
-                    ));
-                }
-                for curve in e.elliptic_curves.iter() {
-                    if cfg.local_named_curves.contains(curve) {
-                        state.named_curve = *curve;
-                        break;
-                    }
-                }
+            Extension::SupportedEllipticCurves(e) => client_curves = Some(&e.elliptic_curves),
+            Extension::SupportedPointFormats(_) => state.remote_offered_point_formats = true,
+            Extension::SupportedSignatureAlgorithms(e) => {
+                client_signature_schemes = Some(e.signature_hash_algorithms.clone())
             }
-            Extension::UseSrtp(e) => {
-                if let Ok(profile) = find_matching_srtp_profile(
-                    &e.protection_profiles,
-                    &cfg.local_srtp_protection_profiles,
-                ) {
-                    state.srtp_protection_profile = profile;
-                } else {
-                    return Err((
-                        Some(Alert {
-                            alert_level: AlertLevel::Fatal,
-                            alert_description: AlertDescription::InsufficientSecurity,
-                        }),
-                        Some(Error::ErrServerNoMatchingSrtpProfile),
-                    ));
-                }
-            }
+            Extension::UseSrtp(e) => client_use_srtp = Some(e),
             Extension::UseExtendedMasterSecret(_)
                 if cfg.extended_master_secret != ExtendedMasterSecretType::Disable =>
             {
@@ -200,19 +187,121 @@ pub(crate) fn negotiate_client_hello(
             Extension::ServerName(e) => {
                 state.server_name.clone_from(&e.server_name); // remote server name
             }
+            Extension::RenegotiationInfo(e) => {
+                // RFC 5746 3.6: this is an initial handshake, so the field is empty.
+                if !e.renegotiated_connection.is_empty() {
+                    return Err(fatal(
+                        AlertDescription::HandshakeFailure,
+                        Error::ErrRenegotiationInfoNotEmpty,
+                    ));
+                }
+                state.secure_renegotiation = true;
+            }
             _ => {}
         }
     }
+    // RFC 5746 3.6: the signalling suite says the same as an empty renegotiation_info.
+    if client_hello
+        .cipher_suites
+        .contains(&CipherSuiteId::Tls_Empty_Renegotiation_Info_Scsv)
+    {
+        state.secure_renegotiation = true;
+    }
 
+    // RFC 5246 7.4.1.4.1: without the extension the client accepts the SHA-1 defaults only.
+    state.remote_signature_schemes =
+        client_signature_schemes.unwrap_or_else(default_remote_signature_schemes);
+
+    // What a certificate (ECDHE) suite needs besides the suite itself. RFC 8422 5.1: a curve
+    // the client listed (any of ours when it sent no list). RFC 5246 7.4.2, 7.4.3: a
+    // certificate signed with, and a key able to sign the ServerKeyExchange with, a pair the
+    // client listed.
+    let curve = match client_curves {
+        None => cfg.local_named_curves.first().copied(),
+        Some(curves) => curves
+            .iter()
+            .find(|curve| cfg.local_named_curves.contains(curve))
+            .copied(),
+    };
+    let signature_scheme = cfg
+        .get_certificate(&cfg.server_name)
+        .ok()
+        .filter(|certificate| {
+            certificates_signed_within(&certificate.certificate, &state.remote_signature_schemes)
+        })
+        .and_then(|certificate| {
+            select_common_signature_scheme(
+                &cfg.local_signature_schemes,
+                &state.remote_signature_schemes,
+                &certificate.private_key,
+            )
+            .ok()
+        });
+
+    // RFC 5246 7.4.1.3, 7.4.3: the first suite of the client's list that this server has and
+    // whose requirements the ClientHello meets. Suites it does not know are skipped.
+    let mut common_suite = false;
+    for id in &client_hello.cipher_suites {
+        if !cfg.local_cipher_suites.contains(id) {
+            continue;
+        }
+        let Ok(cipher_suite) = cipher_suite_for_id(*id) else {
+            continue;
+        };
+        common_suite = true;
+        if !cipher_suite.is_psk() {
+            let (Some(curve), Some(signature_scheme)) = (curve, signature_scheme) else {
+                continue;
+            };
+            state.named_curve = curve;
+            state.local_signature_scheme = Some(signature_scheme);
+        }
+        debug!(
+            "[handshake:{}] use cipher suite: {}",
+            srv_cli_str(state.is_client),
+            cipher_suite.to_string()
+        );
+        state.cipher_suite = Some(cipher_suite);
+        break;
+    }
+    if state.cipher_suite.is_none() {
+        // RFC 5246 7.2.2: handshake_failure, no acceptable set of parameters.
+        let err = if !common_suite {
+            Error::ErrCipherSuiteNoIntersection
+        } else if curve.is_none() {
+            Error::ErrNoSupportedEllipticCurves
+        } else {
+            Error::ErrNoAvailableSignatureSchemes
+        };
+        return Err(fatal(AlertDescription::HandshakeFailure, err));
+    }
+
+    // RFC 5764 4.1.1: a server that does not do DTLS-SRTP ignores use_srtp. One that does and
+    // shares no profile with the client refuses, rather than falling back to no SRTP.
+    if let Some(use_srtp) = client_use_srtp
+        && !cfg.local_srtp_protection_profiles.is_empty()
+    {
+        match find_matching_srtp_profile(
+            &use_srtp.protection_profiles,
+            &cfg.local_srtp_protection_profiles,
+        ) {
+            Ok(profile) => state.srtp_protection_profile = profile,
+            Err(_) => {
+                return Err(fatal(
+                    AlertDescription::InsufficientSecurity,
+                    Error::ErrServerNoMatchingSrtpProfile,
+                ));
+            }
+        }
+    }
+
+    // RFC 7627 5.2: handshake_failure.
     if cfg.extended_master_secret == ExtendedMasterSecretType::Require
         && !state.extended_master_secret
     {
-        return Err((
-            Some(Alert {
-                alert_level: AlertLevel::Fatal,
-                alert_description: AlertDescription::InsufficientSecurity,
-            }),
-            Some(Error::ErrServerRequiredButNoClientEms),
+        return Err(fatal(
+            AlertDescription::HandshakeFailure,
+            Error::ErrServerRequiredButNoClientEms,
         ));
     }
     Ok(())
