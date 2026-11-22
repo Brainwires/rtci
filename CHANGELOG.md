@@ -95,6 +95,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Event::PathActive` when it answers again). `TimerConfig::max_t3_rtx_retrans` was unlimited
   by default, so SCTP itself never declared a peer unreachable.
 
+- **sctp**: congestion control follows RFC 9260 section 7.2. The initial cwnd is min(4 x
+  PMDCS, max(2 x PMDCS, 4404)) (4344 over IPv6). In slow start a SACK grows cwnd by at most
+  one packet, and only when cwnd was in full use (a single SACK could double it); new DATA is
+  sent while less than cwnd is outstanding, so the last chunk may cross it (section 6.1 B).
+  In congestion avoidance `partial_bytes_acked` counts every SACK, is capped while cwnd is not
+  in full use, and starts over when everything is acknowledged. Fast Recovery lasts until all
+  that was outstanding at the loss is acknowledged (it ended at the highest TSN newly
+  acknowledged, so a second loss in the window cut cwnd again); a Fast Retransmit of the
+  first outstanding chunk restarts T3-rtx, and chunks that do not fit its one packet wait
+  for the window. An idle cwnd decays, once per RTO, to no less than 4 x PMDCS.
+- **sctp**: after a T3-rtx expiry one packet is in flight until it is acknowledged (RFC 9260
+  sections 6.3.3, 7.2.3). Retransmissions were bounded by cwnd per call, and each poll sent
+  another window's worth: everything outstanding was retransmitted at once.
+- **sctp**: a SACK announces the receive window when the application drains a window that
+  was advertised as closed (RFC 9260 section 6.2). Reading never sent a SACK, so a sender
+  stopped by a_rwnd 0 waited for its next window probe, a retransmission timeout later.
+- **sctp**: a DATA chunk dropped for lack of receive window is answered with a SACK at once,
+  and a window smaller than a packet is advertised as closed (RFC 9260 section 6.2, silly
+  window syndrome avoidance).
+
 ### Features
 
 - **sctp**: `Stream::write_sctp_with_ppid` and `Chunks::ppid` for a Payload Protocol
@@ -104,6 +124,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `TransportConfig::with_valid_cookie_life` / `valid_cookie_life`.
 - **sctp**: `TransportConfig::with_heartbeat_interval` / `heartbeat_interval`,
   `Association::set_heartbeat_interval`, `Event::PathInactive`, `Event::PathActive`.
+- **sctp**: `Association::on_path_change` restarts congestion control and the RTO when the
+  transport underneath moves to another path (RFC 9260 section 7.2.5; for the peer
+  connection to call when ICE selects another candidate pair).
+  `Association::congestion_window`, `slow_start_threshold`, `rto`.
+- **sctp**: `TransportConfig::with_slow_start_growth_limit` (L of RFC 9260 section 7.2.1,
+  default 1), `with_max_burst` (Max.Burst, off by default), `with_sack_delay` (200 ms by
+  default, at most 500 ms).
 - **fuzz**: `rtc-sctp` targets `association_handle_chunks` (an established association fed
   chunks, timers running) and `chunk_chunk_unknown_unmarshal`.
 
@@ -120,6 +147,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the old behaviour.
 - **sctp**: an established association sends HEARTBEATs when idle and so always has a timer
   running; `with_heartbeat_interval(None)` turns them off.
+- **sctp**: slow start grows the congestion window by one packet per SACK, as the RFC has
+  it, not by everything the SACK acknowledges. A receiver that acknowledges many packets with
+  one SACK slows the sender's ramp; `with_slow_start_growth_limit` sets a larger L.
+- **sctp**: the retransmissions after a timeout are paced by the congestion window (one
+  packet, then slow start) instead of leaving at once.
 - **sctp**: a SACK for a TSN never sent, and an INIT ACK without a State Cookie, end the
   association with an ABORT (`TransportError`, `HandshakeFailed`).
 
