@@ -358,7 +358,8 @@ impl Vp9Payloader {
     /// above 7; `D` on spatial layer 0; a frame that is not inter-picture predicted outside
     /// temporal layer 0; spatial layers out of order within a picture; more than three
     /// reference indices, or one outside 1 to 127; in non-flexible mode a `TID` that is not
-    /// the one the picture group gives the picture.
+    /// the one the picture group gives the picture; an MTU with no room for the descriptor
+    /// (and, on a key picture's first packet, the scalability structure).
     pub fn payload_layer_frame(
         &mut self,
         mtu: usize,
@@ -549,7 +550,15 @@ impl Vp9Payloader {
 
         let header_size = 1 + descriptor.len();
         if mtu <= header_size + ss.len() {
-            return Ok(vec![]);
+            // No room for a single octet of the frame. Without layer information this has
+            // always meant "no packets"; a caller that describes its frames is told.
+            return match info {
+                Some(_) => fail(format!(
+                    "an MTU of {mtu} has no room for a descriptor of {} octets",
+                    header_size + ss.len()
+                )),
+                None => Ok(vec![]),
+            };
         }
 
         let mut payloads = vec![];

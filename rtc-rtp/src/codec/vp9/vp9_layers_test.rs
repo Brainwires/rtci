@@ -271,6 +271,27 @@ fn layer_information_the_rfc_forbids_is_refused() -> Result<()> {
     Ok(())
 }
 
+/// An MTU that leaves no room for the frame is an error for a described frame, not an empty
+/// result that looks like a frame without packets.
+#[test]
+fn an_mtu_too_small_for_the_descriptor_is_an_error() -> Result<()> {
+    let mut pck = payloader(false);
+    pck.set_scalability_structure(Some(l2t2_structure()))?;
+    let key = Bytes::from(vp9_key_frame_640x480());
+    // The descriptor is 5 octets and the SS 14.
+    assert!(
+        pck.payload_layer_frame(19, &key, &layer(0, 0, false, false, true))
+            .is_err()
+    );
+    let out = pck.payload_layer_frame(20, &key, &layer(0, 0, false, false, true))?;
+    assert_eq!(out[0].len(), 20);
+    // The refused call consumed nothing: this is the first picture.
+    assert_eq!(&out[0][1..3], &[0x92, 0x34]);
+    // Without layer information the old answer stands: no packets.
+    assert!(payloader(false).payload(5, &key)?.is_empty());
+    Ok(())
+}
+
 /// RFC 9628 4.2: "All frames of the same picture MUST have the same PID value", it is
 /// incremented by one per picture, and it wraps after 0x7FFF.
 #[test]

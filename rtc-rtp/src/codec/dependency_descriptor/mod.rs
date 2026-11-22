@@ -24,7 +24,7 @@
 
 mod bits;
 #[cfg(test)]
-mod dependency_descriptor_test;
+pub(crate) mod dependency_descriptor_test;
 mod selector;
 #[cfg(test)]
 mod selector_test;
