@@ -25,8 +25,8 @@ bugs G1, G2, G3 and G4 are fixed, each first reproduced by a failing test
 
 Totals (MUST includes MUST NOT/SHALL; SHOULD includes SHOULD NOT/RECOMMENDED):
 
-- MUST: tested 27 / untested 3 / partial 3 / missing 2 / violated 0 / n-a 0
-- SHOULD: tested 12 / untested 3 / partial 2 / missing 0 / violated 0 / n-a 0
+- MUST: tested 34 / untested 0 / partial 1 / missing 0 / violated 0 / n-a 0
+- SHOULD: tested 15 / untested 0 / partial 2 / missing 0 / violated 0 / n-a 0
 - MAY: tested 1 / untested 0 / partial 0 / missing 0 / violated 0 / n-a 0
 
 | ID | § | Level | Clause (short paraphrase) | Verdict | Code | Test | Note |
@@ -43,25 +43,25 @@ Totals (MUST includes MUST NOT/SHALL; SHOULD includes SHOULD NOT/RECOMMENDED):
 | GCC-4-2 | 4 | SHOULD | The pacer sends a group every burst_time = 5 ms; group size = target bitrate x burst_time | tested | `pacing/pacer.rs` `burst_for`, `BURST_TIME` (5 ms of the target, floored at one 1500-byte packet) | `a_derived_burst_follows_the_rate`, `a_larger_burst_releases_more_at_once`, `a_packet_inside_the_budget_leaves_when_it_is_written` | The budget refills continuously and is capped at one 5 ms group. A packet inside it leaves as it is written (RFC 8836 section 2 requirement 1: no self-inflicted delay); `PacerBuilder::with_immediate_release(false)` holds every packet for the driver's next wake-up |
 | GCC-5.1-1 | 5.1 | MUST | d(i) = t(i) - t(i-1) - (T(i) - T(i-1)) between consecutive groups | tested | `gcc/arrival_group.rs:123-134` | `a_path_that_does_not_queue_has_a_zero_gradient`, `a_growing_queue_has_a_positive_gradient`, `a_draining_queue_has_a_negative_gradient` | |
 | GCC-5.1-2 | 5.1 | MUST | T(i) is the departure time of the last packet of the group | tested | `gcc/arrival_group.rs:91` | `packets_sent_together_form_one_group` | |
-| GCC-5.1-3 | 5.1 | MUST | t(i) is the arrival time of the last packet of the group | untested | `gcc/arrival_group.rs:92` (latest arrival in the group) | none separates "last packet" from "latest arrival" | |
-| GCC-5.1-4 | 5.1 | MUST | Packets received out of order are ignored by the arrival-time model | partial | `gcc/arrival_group.rs:70-109`, `rtpfb/history.rs:136-157` (reports in send order) | none | Send order is guaranteed, so departures never go back. A packet that arrived before its predecessor is still folded into its group instead of being skipped |
+| GCC-5.1-3 | 5.1 | MUST | t(i) is the arrival time of the last packet of the group | tested | `gcc/arrival_group.rs:92` (latest arrival in the group) | `a_packet_received_out_of_order_is_ignored` | The group's latest arrival, which with out-of-order packets left out (GCC-5.1-4) is its last packet's |
+| GCC-5.1-4 | 5.1 | MUST | Packets received out of order are ignored by the arrival-time model | tested | `gcc/arrival_group.rs` (`accumulate`) | `a_packet_received_out_of_order_is_ignored` | A packet that arrived before the group it follows is left out of the arrival-time model |
 | GCC-5.2-1 | 5.2 | MUST | Packets sent within one burst_time (5 ms) form one group | tested | `gcc/arrival_group.rs:9`, `:86-96` | `packets_sent_together_form_one_group` | Measured from the group's first departure |
-| GCC-5.2-2 | 5.2 | MUST | A packet with inter-arrival time below burst_time and d(i) < 0 joins the current group | missing | `gcc/arrival_group.rs:86-96` (departure test only) | none | Bursts delivered after an outage are measured as separate groups |
+| GCC-5.2-2 | 5.2 | MUST | A packet with inter-arrival time below burst_time and d(i) < 0 joins the current group | tested | `gcc/arrival_group.rs` (`accumulate`) | `a_backlog_delivered_at_once_is_one_group` | |
 | GCC-5.3-1 | 5.3 | MUST | Kalman update: z = d - m_hat; k = (e + q) / (var_v + e + q); m_hat += z k; e = (1 - k)(e + q) | tested | `gcc/kalman.rs:67-84` | `a_sustained_gradient_is_tracked`, `a_negative_gradient_is_tracked_too`, `a_zero_signal_keeps_a_zero_estimate`, `symmetric_noise_does_not_move_the_estimate` | |
-| GCC-5.3-2 | 5.3 | SHOULD | q = 10^-3 | untested | `gcc/kalman.rs:43` | none pins the default | |
-| GCC-5.3-3 | 5.6 | SHOULD | e(0) = 0.1 | untested | `gcc/kalman.rs:41` | none | |
-| GCC-5.3-4 | 5.3 | MUST | var_v_hat = max(alpha var_v_hat + (1 - alpha) z^2, 1) | untested | `gcc/kalman.rs:73-75` | none asserts the variance or its floor | Starts at 0, so the floor of 1 rules from the first sample |
-| GCC-5.3-5 | 5.3 | MUST | alpha = (1 - chi)^(30 / (1000 f_max)), chi in [0.001, 0.1], f_max the highest group rate over the last K groups | partial | `gcc/kalman.rs:44` (fixed `noise_gain: 3e-4`) | none | A constant; f_max is never measured, so the filter does not adapt to the sampling rate |
-| GCC-5.3-6 | 5.3 | MUST | Outlier filter: when z > 3 sqrt(var_v_hat), the variance update uses 3 sqrt(var_v_hat) | missing | `gcc/kalman.rs:73-75` | none | |
+| GCC-5.3-2 | 5.3 | SHOULD | q = 10^-3 | tested | `gcc/kalman.rs:43` | `the_first_step_is_set_by_e0_q_and_the_variance_floor` | |
+| GCC-5.3-3 | 5.6 | SHOULD | e(0) = 0.1 | tested | `gcc/kalman.rs:41` | `the_first_step_is_set_by_e0_q_and_the_variance_floor` | |
+| GCC-5.3-4 | 5.3 | MUST | var_v_hat = max(alpha var_v_hat + (1 - alpha) z^2, 1) | tested | `gcc/kalman.rs:73-75` | `the_first_step_is_set_by_e0_q_and_the_variance_floor`, `an_outlier_enters_the_variance_as_three_deviations` | Starts at 0, so the floor of 1 rules from the first sample |
+| GCC-5.3-5 | 5.3 | MUST | alpha = (1 - chi)^(30 / (1000 f_max)), chi in [0.001, 0.1], f_max the highest group rate over the last K groups | tested | `gcc/kalman.rs` (`update_with_period`, `DEFAULT_CHI` 0.001, `PERIOD_HISTORY` 60), `gcc/slope.rs` (`filter`) | `the_noise_weight_follows_the_group_rate` | f_max from the departure periods of the last 60 groups; chi 0.001, which at 100 groups a second is the constant the filter had |
+| GCC-5.3-6 | 5.3 | MUST | Outlier filter: when z > 3 sqrt(var_v_hat), the variance update uses 3 sqrt(var_v_hat) | tested | `gcc/kalman.rs` (`update_with_noise_gain`) | `an_outlier_enters_the_variance_as_three_deviations` | Signed: a residual beyond plus or minus three deviations is clamped to them |
 | GCC-5.4-1 | 5.4 | MUST | m(i) > del_var_th(i) is an over-use indication; m(i) < -del_var_th(i) is under-use; otherwise normal | tested | `gcc/overuse.rs:43-73`, `gcc/estimator.rs:140-145` | `a_sustained_growing_trend_is_overuse`, `a_draining_queue_reads_under`, `a_quiet_path_reads_normal`, `overuse_is_detected_on_a_queueing_path_and_not_on_a_steady_one` | What is compared is m(i) x min(readings, 60), as libwebrtc and pion do; the draft compares m(i) |
 | GCC-5.4-2 | 5.4 | MUST | Over-use is signalled only after the condition has held for overuse_time_th | tested | `gcc/overuse.rs:48-57` | `one_spike_is_not_overuse` | Also needs a second consecutive reading (libwebrtc) |
-| GCC-5.4-3 | 5.4 | MUST | Over-use is not signalled when m(i) < m(i-1) | untested | `gcc/overuse.rs:51` | `a_high_but_flat_trend_does_not_re_declare_overuse` returns below the threshold, so it does not reach this rule | |
+| GCC-5.4-3 | 5.4 | MUST | Over-use is not signalled when m(i) < m(i-1) | tested | `gcc/overuse.rs:51` | `a_trend_above_the_threshold_but_falling_is_not_overuse` | |
 | GCC-5.4-4 | 5.4 | MUST | del_var_th(i) = del_var_th(i-1) + (t(i) - t(i-1)) K(i) (abs(m(i)) - del_var_th(i-1)), K = K_d inside the threshold, K_u outside | partial | `gcc/threshold.rs:28-55` | `a_trend_outside_the_threshold_raises_it`, `a_trend_inside_the_threshold_lowers_it` | The time step is the gap between group departures (`trend.at`), not arrivals, and is capped at 100 ms (libwebrtc). Checked against the draft for RFC8836-2-2a: the bounds and the gains are the draft's, and the threshold falls back to 6 ms within seconds of a calm path |
 | GCC-5.4-5 | 5.4 | SHOULD NOT | The threshold is not updated when abs(m(i)) - del_var_th(i) > 15 | tested | `gcc/threshold.rs:41-43` | `an_outlier_does_not_move_it` | |
 | GCC-5.4-6 | 5.4 | SHOULD | del_var_th is clamped to [6, 600] | tested | `gcc/threshold.rs:53` | `it_stays_within_bounds` | |
 | GCC-5.4-7 | 5.4 | SHOULD | K_u > K_d; K_u = 0.01, K_d = 0.00018 | tested | `gcc/threshold.rs:15-16` | `it_rises_faster_than_it_falls` | |
 | GCC-5.4-8 | 5.4 | SHOULD | del_var_th(0) = 12.5 ms | tested | `gcc/threshold.rs:3` | `it_starts_at_the_drafts_value` | |
-| GCC-5.4-9 | 5.4 | SHOULD | overuse_time_th = 10 ms | untested | `gcc/overuse.rs:11` | none pins the value | |
+| GCC-5.4-9 | 5.4 | SHOULD | overuse_time_th = 10 ms | tested | `gcc/overuse.rs:11` | `overuse_needs_ten_milliseconds_outside_the_threshold` | |
 | GCC-5.5-1 | 5.5 | MUST | State table: Over-use leads to Decrease; Normal: Hold to Increase, Decrease to Hold; Under-use: Increase and Decrease to Hold | tested | `gcc/state.rs:11-23` | `overuse_always_decreases`, `recovery_holds_once_before_climbing`, `a_quiet_path_keeps_increasing`, `a_draining_queue_holds`, `every_transition_is_defined` | |
 | GCC-5.5-2 | 5.5 | MUST | The subsystem starts in the Increase state | tested | `gcc/state.rs` (`#[default] Increase`) | `the_controller_starts_in_the_increase_state` |  |
 | GCC-5.5-3 | 5.5 | MUST | Multiplicative increase: eta = 1.08^min(dt, 1 s); A_hat = eta A_hat | tested | `gcc/rate_control.rs:77-78` | `a_quiet_path_increases`, `gcc_climbs_on_a_healthy_path` | |

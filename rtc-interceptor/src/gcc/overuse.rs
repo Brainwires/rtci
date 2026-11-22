@@ -228,4 +228,41 @@ mod tests {
             "a settled path must return to normal"
         );
     }
+
+    /// Section 5.4: "if m(i) < m(i-1), over-use will not be signaled even if all the above
+    /// conditions are met". A trend above the threshold for long enough, but falling, is not
+    /// over-use.
+    #[test]
+    fn a_trend_above_the_threshold_but_falling_is_not_overuse() {
+        let epoch = Instant::now();
+        let mut detector = OveruseDetector::new();
+        for step in 0..10u64 {
+            let usage = detector.update(
+                epoch + Duration::from_millis(step * 20),
+                40.0 - step as f64,
+            );
+            assert_eq!(Usage::Normal, usage, "at step {step}");
+        }
+    }
+
+    /// Section 5.4, overuse_time_th = 10 ms: a growing trend above the threshold is over-use
+    /// once it has lasted 10 ms, not before.
+    #[test]
+    fn overuse_needs_ten_milliseconds_outside_the_threshold() {
+        let epoch = Instant::now();
+        let mut detector = OveruseDetector::new();
+        assert_eq!(Usage::Normal, detector.update(epoch, 20.0));
+        assert_eq!(
+            Usage::Normal,
+            detector.update(epoch + Duration::from_millis(5), 21.0)
+        );
+        assert_eq!(
+            Usage::Normal,
+            detector.update(epoch + Duration::from_millis(9), 22.0)
+        );
+        assert_eq!(
+            Usage::Over,
+            detector.update(epoch + Duration::from_millis(10), 23.0)
+        );
+    }
 }

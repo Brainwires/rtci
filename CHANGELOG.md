@@ -2050,6 +2050,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+- **gcc**: the pre-filter and the Kalman filter as draft-ietf-rmcat-gcc-02 sections 5.1 to 5.3
+  have them: a packet that arrives within burst_time of its group with a negative delay
+  variation joins the group (a backlog delivered at once after an outage was read as a draining
+  queue); a packet received out of order is left out of the arrival-time model; the noise
+  variance weight is `1 - (1 - chi)^(30 / (1000 f_max))` over the last 60 groups' rate
+  (`Kalman::update_with_period`, chi 0.001; it was a constant); a residual beyond three
+  deviations enters the variance as three deviations (the outlier filter was missing). The
+  multi-flow properties hold as before (late flow 0.48 / 0.49, `Gcc` / TCP 0.19 / 0.81 and 0.37
+  / 0.63, burst recovered in 4 s).
 - **sctp**: a stream parked by back-pressure resumed only from `poll_read` or the peer's next
   datagram, and the SACK that reopens the window waited for the next `poll_write`, which a
   caller has usually made before it reads: a sender stopped by a zero window then waited for
