@@ -170,9 +170,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             break;
         }
 
-        // Calculate how long to wait
-        let wait_duration = mdns_client
-            .poll_timeout()
+        // Calculate how long to wait: until the earlier deadline of the two connections (the
+        // server probes for and announces its names on timers)
+        let wait_duration = [mdns_client.poll_timeout(), mdns_server.poll_timeout()]
+            .into_iter()
+            .flatten()
+            .min()
             .map(|t| t.saturating_duration_since(Instant::now()))
             .unwrap_or(Duration::from_millis(100));
 
