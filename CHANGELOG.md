@@ -62,8 +62,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **ice**: a lite agent keeps its selected pair alive with a Binding indication after 15
   silent seconds (RFC 8445 section 11); it sent nothing.
 
+- **ice**: the agent runs the checklist of RFC 8445 instead of pinging every pair every 200 ms.
+  - Pairs have the five states of section 6.1.2.6, `Frozen` included: of the pairs with one
+    foundation the best is checked first and the others wait for it (RFC 8838 section 12 for
+    pairs that arrive later).
+  - Checks start one per Ta (50 ms by default, never under 5 ms), the highest-priority Waiting
+    pair first; a request from the peer puts its pair on the triggered-check queue, which is
+    served first (sections 6.1.4.1 and 6.1.4.2). A triggered check was sent the instant the
+    request arrived, and all pairs were pinged in one burst.
+  - A check is one STUN transaction: the same request is retransmitted after RTO, 2 RTO,
+    4 RTO, ... (RTO = max(500 ms, Ta x pairs Waiting or In-Progress), section 14.3), seven
+    requests by default, and the pair fails 16 RTO after the last. Over TCP it is sent once
+    (RFC 6544 section 7.1). The pair used to get a new request, with a new transaction id,
+    every 200 ms and failed after 1.6 s.
+  - A reflexive local candidate stands for its base: its pair with a remote candidate is
+    pruned as redundant with the host candidate's (section 6.1.2.4), so each check leaves a
+    socket once. The checklist holds 100 pairs at most (section 6.1.2.5), the best ones.
+  - A response is matched to its pair by transaction id and must come back the way the
+    request went, source and local address both, or the pair fails (section 7.2.5.2.1). Its
+    mapped address names the valid pair's local candidate, a new local peer-reflexive candidate
+    when the agent does not know it (sections 7.2.5.3.1 and 7.2.5.3.2).
+  - Once a pair is nominated the other pairs' transactions are cancelled and no ordinary check
+    is started (section 8.1.2); the controlling agent nominates one pair, with one transaction.
+  - A checking agent fails as soon as every pair has failed, once no candidate is to come (local
+    gathering complete and end-of-candidates received; section 7.2.5.4, RFC 8838 section 8).
+- **ice**: end-of-candidates reaches the agent (RFC 8838 sections 13 and 14): a remote candidate
+  that follows it, trickled or in a description, is ignored (it was paired and written into the
+  remote description after `a=end-of-candidates`), and a local candidate added after the empty
+  one is refused until an ICE restart.
+- **ice**: a signalled candidate with the address of a peer-reflexive one learned from a check
+  replaces it (RFC 8838 section 11); it was kept as a second candidate whose pair could never
+  succeed. A local candidate with the address and base of one already added is not kept (RFC
+  8445 section 5.1.3), and candidates of different components are not paired.
+- **ice**: a consent request waits for its response four times the pair's round-trip time
+  (500 ms to 4 s; RFC 7675 section 5.1) instead of a fixed 4 s.
+- **stats**: a candidate pair's state can be `frozen`.
+
 ### Features
 
+- **ice**: `Agent::checklist_state` (`ChecklistState`: Running, Completed, Failed), the state of
+  the checklist in RFC 8445's terms. The transport state reaches `Completed` (it never did):
+  a nominated pair, local gathering complete and end-of-candidates received.
+- **ice**: `AgentConfig::ta` and `AgentConfig::max_candidate_pairs`;
+  `Agent::set_remote_end_of_candidates`, `set_local_gathering_complete`,
+  `get_local_candidates_to_signal`; `CandidatePairState::Frozen`.
 - **ice**: `Candidate::set_local_preference_rank` / `local_preference_rank` (rank a local
   candidate among those of its type, for example an unreliable interface last, RFC 8421
   section 3) and `Candidate::peer_reflexive_priority`.
@@ -84,6 +126,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   seconds after it), and `Failed` 30 seconds after the last response at the latest:
   `disconnected_timeout + failed_timeout` above 30 seconds, or a zero `failed_timeout`, no
   longer keeps it alive longer. A shorter sum still fails it sooner.
+
+- **ice**: `AgentConfig` has two new fields (`ta`, `max_candidate_pairs`): a struct literal
+  without `..Default::default()` no longer compiles. `max_binding_requests` now counts the
+  requests of one transaction (Rc of RFC 8489), which back off from 500 ms: with the default 7
+  an unanswered pair fails after 39.5 s (it was 1.6 s), so in practice a silent pair is given up
+  by the agent's checking timeout or by end-of-candidates.
+- **ice**: `Agent::add_remote_candidate` returns `false` for a candidate it does not hold (a
+  duplicate, one after end-of-candidates); it returned `true` for a duplicate.
+- **ice**: the state after a nomination is `Completed`, not `Connected`, when the application
+  has signalled the end of local candidates and the peer the end of its own. Code that waits
+  for `Connected` alone should accept both (`RTCPeerConnectionState::Connected` covers both).
+- **ice**: `Agent::get_local_candidates` also returns the local peer-reflexive candidates the
+  agent learns; the selected pair's local candidate can be one of them (type `prflx`), its
+  base being the socket in use.
 
 ## [0.22.0+brainwires.5] - 2026-11-20
 

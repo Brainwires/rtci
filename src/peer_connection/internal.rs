@@ -635,8 +635,10 @@ impl RTCPeerConnection {
         }
 
         if let Some(sd) = session_description {
+            // The candidates to signal: not the peer-reflexive ones the agent learned from
+            // its checks (RFC 8445 section 7.2.5.3.1).
             let candidates = rtc_ice_candidates_from_ice_candidates(
-                self.ice_transport().agent.get_local_candidates(),
+                &self.ice_transport().agent.get_local_candidates_to_signal(),
             );
 
             let mut parsed = match sd.unmarshal() {

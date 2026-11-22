@@ -273,6 +273,8 @@ fn test_nomination_before_the_check_succeeds_applies_when_it_does() {
     let req = peer_request(&a, true, None);
     let request_id = req.transaction_id;
     deliver(&mut a, now, req, REMOTE_B);
+    // The triggered check leaves the queue when Ta allows it: at once here.
+    a.handle_timeout(now).unwrap();
     let out = sent(&mut a);
     assert!(
         out.contains(&(BINDING_SUCCESS, request_id, addr(REMOTE_B))),
@@ -306,6 +308,7 @@ fn test_first_nomination_before_the_check_succeeds() {
     let req = peer_request(&a, true, None);
     deliver(&mut a, base, req, REMOTE_A);
     assert!(a.get_selected_pair().is_none());
+    a.handle_timeout(base).unwrap();
     let check = sent(&mut a)
         .into_iter()
         .find(|(typ, _, to)| *typ == BINDING_REQUEST && *to == addr(REMOTE_A))

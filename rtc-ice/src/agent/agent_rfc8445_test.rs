@@ -646,6 +646,11 @@ fn test_lite_agent_selects_on_use_candidate_and_sends_no_checks() {
         .get_selected_candidate_pair()
         .expect("USE-CANDIDATE alone selects the pair on a lite agent");
     assert_eq!(remote.addr(), addr(REMOTE_A));
+    // Section 8.2: the nomination concludes ICE for a lite agent.
+    assert_eq!(
+        a.checklist_state(),
+        crate::agent::agent_selector::ChecklistState::Completed
+    );
     let mut out = sent(&mut a);
     out.extend(run(&mut a, now, now + Duration::from_secs(3)));
     assert!(
@@ -691,7 +696,12 @@ fn test_request_on_a_succeeded_pair_triggers_no_check() {
 fn test_request_on_a_failed_pair_rechecks_it() {
     for controlling in [true, false] {
         let now = Instant::now();
-        let mut a = started_agent(now, config(controlling), &[REMOTE_A]);
+        // Two requests per transaction: sent at 0 and 0.5 s, given up 8 s later.
+        let cfg = AgentConfig {
+            max_binding_requests: Some(2),
+            ..config(controlling)
+        };
+        let mut a = started_agent(now, cfg, &[REMOTE_A]);
         // Nobody answers: the pair fails.
         let mut end = now;
         while a.candidate_pairs.first().map(|p| p.state) != Some(CandidatePairState::Failed) {
