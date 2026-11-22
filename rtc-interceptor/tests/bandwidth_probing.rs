@@ -367,7 +367,8 @@ fn without_rtx_probing_adds_no_packet_of_its_own() {
 /// about the room above what is sent, and without probing the estimate is bound to one and a
 /// half times the received rate (draft-ietf-rmcat-gcc-02 section 5.5). With it, a cluster
 /// every five seconds measures the path, and the estimate rests on the last measurement: near
-/// the capacity, never past it. The price is the clusters, here on the RTX stream.
+/// the capacity, never past it (measured: 0.95 of it at the end, peak 2.37 Mbit/s). The price
+/// is the clusters, here on the RTX stream: 58 packets in 30 s, 3.8% of the octets.
 #[test]
 fn an_application_limited_sender_is_probed_now_and_then() {
     let outcome = run(true, true, 0.2, Duration::from_secs(30));

@@ -24,3 +24,5 @@ check fails, naming each one, until they are. The same tests are `port` rows in
 
 | Kind | File | Test | Reason | Covered by |
 |---|---|---|---|---|
+| ignored | `rtc-interceptor/tests/rfc8836_multi_flow.rs` | `a_flow_that_joins_late_gets_a_useful_share` | RFC 8836 section 2 (2a) is not met by `Gcc` (draft-ietf-rmcat-gcc-02 as implemented): a flow joining an established one falls to the floor. The test asserts the requirement and fails; it stays until the algorithm changes (`docs/conformance/audit/rfc8836.md`, RFC8836-2-2a) | `two_gcc_flows_share_a_bottleneck` (fairness of flows started together) |
+| ignored | `rtc-interceptor/tests/rfc8836_multi_flow.rs` | `gcc_does_not_starve_a_tcp_like_transfer` | RFC 8836 section 2 (3) is not met by `Gcc`: a TCP-like transfer behind a full tail-drop queue gets 3% of the path. The test asserts the requirement and fails (RFC8836-2-3) | `gcc_is_not_starved_by_a_tcp_like_transfer` (the same run, the other direction) |

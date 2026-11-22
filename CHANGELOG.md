@@ -925,6 +925,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`rtc-interceptor/tests/bandwidth_probing.rs`). No RFC requires probing (RFC 8836 section 2
   names it as one way to start faster; draft-ietf-rmcat-gcc-02 has none), and it sends packets
   the application did not write, so it is not a default.
+  With probing, an application that sends less than the target keeps the estimate near
+  the path's capacity: over-use after a probe backs off from what the probe measured, and a
+  probe that arrives at about the estimate renews the measurement
+  (`gcc::estimator::PROBE_CONFIRMS_ESTIMATE`); before, the estimate fell back to one and a half
+  times what the application sent, and with it what the application was told to send, to the
+  floor (0.04 of the capacity after 30 s; now 0.95).
+- **test**: `rtc-interceptor/tests/rfc8836_multi_flow.rs`, a deterministic multi-flow
+  bottleneck (FIFO with tail drop or random early drop, capacity changes, `Gcc` flows, a
+  TCP-like transfer, cross traffic) for the RFC 8836 section 2 properties. Two flows share
+  evenly, bursts leave no queue, a pause and an AQM leave the flow stable. Two requirements
+  are not met and are recorded as ignored tests and `violated` rows: a flow that joins late
+  is held to the floor (2 (2a)), and `Gcc` starves a TCP-like transfer (2 (3)).
+- **test**: `rtc-interceptor/tests/nack_recovery_under_loss.rs`: NACK recovers every packet
+  over 5% loss each way with jitter on the virtual clock, with and without the RTCP session.
+  `tests/testenv_impairment.rs` prints the packets NACK left lost, and the first one received.
 - **gcc**: a packet the receiver reports as arrived with ECN-CE counts as a lost one in the
   loss-based controller (RFC 8888 section 7, RFC 6679 section 7.3.3); the mark was only counted
   in statistics.
