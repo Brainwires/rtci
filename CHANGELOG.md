@@ -352,6 +352,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pair up after 30 s of silence (`FailedNomination::Retry`); before, the pair failed, or the
   agent with it at the 30 s timer. `AgentConfig` has a new field, `failed_nomination`: a struct
   literal without `..Default::default()` no longer compiles.
+- **ice**: a controlling agent's failed nomination fails the pair and the checklist by default
+  (RFC 8445 section 7.2.5.3.4: "the agent MUST remove the candidate pair from the valid list,
+  set the candidate pair state to Failed, and set the checklist state to Failed"):
+  `FailedNomination::FailChecklist` is now the default of `AgentConfig::failed_nomination` and
+  `SettingEngineBuilder::with_ice_failed_nomination`, and `FailedNomination::Retry` (send the
+  nomination again while the peer is heard from) the setting. The nomination fails as a
+  request does (section 7.2.5.2): at the end of its transaction (Rc requests, 39.5 s at an RTO
+  of 500 ms, section 14.3), on an unrecoverable error response, or on a response from another
+  address; with `FailChecklist` the 30 s silence bound of `Retry` does not end it earlier, and
+  an error or non-symmetric response fails the checklist instead of moving to the next valid
+  pair. Every ICE default is now the RFC's.
 - **turn**: the client's Binding request (`send_binding_request`, `send_binding_request_to`)
   ends with FINGERPRINT, as every other message it sends does (RFC 8489 section 7).
 - **ice**: where the fork followed libwebrtc or its own hardening instead of the RFC, the RFC is
@@ -1566,11 +1577,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (RFC 9260 section 8.2) changes neither the transport's state nor a channel's.
 
 - **ice**: `AgentConfig::failed_nomination` / `SettingEngineBuilder::with_ice_failed_nomination`
-  (`FailedNomination::{Retry, FailChecklist}`): what a controlling agent does when its
-  nomination times out. `Retry`, the default, nominates the pair again while the peer is heard
-  from; `FailChecklist` is RFC 8445 section 7.2.5.3.4 to the letter (the pair and the checklist
-  fail). The one ICE default that is not the RFC's; see `docs/conformance/audit/rfc8445.md`
-  ("Decisions").
+  (`FailedNomination::{FailChecklist, Retry}`): what a controlling agent does when its
+  nomination fails. `FailChecklist`, the default, is RFC 8445 section 7.2.5.3.4 (the pair and
+  the checklist fail); `Retry` nominates the pair again while the peer is heard from (see
+  `docs/conformance/audit/rfc8445.md`, "Decisions").
 - **ice**: `rank_local_candidates` and `Agent::add_local_candidates` rank candidates gathered
   together as RFC 8421 section 4 recommends for a dual-stack host: the IPv6 candidates of a type
   get a head start of (N4 + N6) / N4 places, then the families alternate. Candidates added one

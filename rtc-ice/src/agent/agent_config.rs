@@ -141,25 +141,30 @@ pub enum NominationAcceptance {
     Latest,
 }
 
-/// What the controlling agent does when the transaction of its nomination (a check with
-/// USE-CANDIDATE on a valid pair) times out.
+/// What the controlling agent does when its nomination (a check with USE-CANDIDATE on a valid
+/// pair) fails (RFC 8445 Section 7.2.5.2): its transaction times out (`Rc` requests, the
+/// last given `Rm` times the RTO, Section 14.3 and RFC 8489 Section 6.2.1: 39.5 seconds at an
+/// RTO of 500 ms), it is answered with an unrecoverable error response, or the response is
+/// not symmetric.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum FailedNomination {
-    /// The pair stays valid (it has received a success response, RFC 8445 Section
-    /// 7.2.5.3.3) and is nominated again, for as long as the peer is heard from on it (an
-    /// authenticated request or response less than the consent expiry, 30 seconds, ago).
-    /// Once the peer has not been heard from for that long, the pair fails and the next valid
-    /// pair is nominated; with none left the checklist fails. Under heavy loss every request
-    /// of a transaction, or every response, can be lost while the peer is there and has
-    /// accepted the nomination: giving up then leaves the peer connected and this agent
-    /// failed.
-    #[default]
-    Retry,
-    /// RFC 8445 Section 7.2.5.3.4 to the letter: "If the request fails (Section 7.2.5.2), the
+    /// RFC 8445 Section 7.2.5.3.4 (the default): "If the request fails (Section 7.2.5.2), the
     /// agent MUST remove the candidate pair from the valid list, set the candidate pair state
-    /// to Failed, and set the checklist state to Failed." The agent fails.
+    /// to Failed, and set the checklist state to Failed." The agent fails; the peer, which
+    /// may have accepted the nomination with every response lost, may stay connected until
+    /// its consent expires (RFC 7675).
+    #[default]
     FailChecklist,
+    /// The pair stays valid (it has received a success response, RFC 8445 Section
+    /// 7.2.5.3.3) and a nomination that times out is sent again, for as long as the peer is
+    /// heard from on it (an authenticated request or response less than the consent expiry,
+    /// 30 seconds, ago). Once the peer has not been heard from for that long, or the
+    /// nomination is answered with an error or from the wrong address, the pair fails and
+    /// the next valid pair is nominated; with none left the checklist fails. Under heavy
+    /// loss every request of a transaction, or every response, can be lost while the peer is
+    /// there and has accepted the nomination: this keeps both sides connected then.
+    Retry,
 }
 
 /// What the agent does with a Binding request that fails the short-term credential check.
@@ -328,10 +333,10 @@ pub struct AgentConfig {
     /// libwebrtc's.
     pub nomination_acceptance: NominationAcceptance,
 
-    /// What the controlling agent does when its nomination times out:
-    /// [`FailedNomination::Retry`] (the default) nominates the pair again while the peer is
-    /// heard from; [`FailedNomination::FailChecklist`] is RFC 8445 Section 7.2.5.3.4 to the
-    /// letter.
+    /// What the controlling agent does when its nomination fails:
+    /// [`FailedNomination::FailChecklist`] (the default) is RFC 8445 Section 7.2.5.3.4, the
+    /// pair and the checklist fail; [`FailedNomination::Retry`] nominates the pair again
+    /// while the peer is heard from.
     pub failed_nomination: FailedNomination,
 
     /// The controlling agent's consent checks on the selected pair carry USE-CANDIDATE, as

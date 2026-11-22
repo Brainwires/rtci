@@ -272,7 +272,7 @@ pub struct Candidates {
 
 /// Where the ICE agent follows RFC 8445 / RFC 8489 by default and a browser (libwebrtc)
 /// behaviour, or one of this fork's hardenings, can be chosen instead. Every default is the
-/// RFC's but one: [`SettingEngineBuilder::with_ice_failed_nomination`].
+/// RFC's.
 #[derive(Default, Clone)]
 pub struct IceBehaviour {
     /// See [`SettingEngineBuilder::with_ice_tie_breaker`].
@@ -1354,16 +1354,17 @@ impl SettingEngineBuilder {
         self
     }
 
-    /// What the controlling ICE agent does when the transaction of its nomination times out.
+    /// What the controlling ICE agent does when its nomination fails (RFC 8445 section
+    /// 7.2.5.2: the transaction times out after `Rc` requests, 39.5 s at an RTO of 500 ms, or
+    /// is answered with an error or from another address).
     ///
-    /// The default, [`FailedNomination::Retry`], keeps the pair (it has received a success
-    /// response) and nominates it again while the peer is heard from on it, for up to the
-    /// consent expiry of 30 seconds of silence; then the next valid pair is nominated.
-    /// [`FailedNomination::FailChecklist`] is RFC 8445 section 7.2.5.3.4 to the letter: the
-    /// pair and the checklist fail, and with them the ICE transport. This is the one ICE
-    /// setting whose default is not the RFC's: under heavy loss a whole transaction's
-    /// requests or responses can be lost while the peer has accepted the nomination, and
-    /// failing then leaves the peer connected and this side failed.
+    /// The default, [`FailedNomination::FailChecklist`], is RFC 8445 section 7.2.5.3.4: the
+    /// pair and the checklist fail, and with them the ICE transport. Under heavy loss a whole
+    /// transaction's requests or responses can be lost while the peer has accepted the
+    /// nomination; the peer then stays connected until its consent expires.
+    /// [`FailedNomination::Retry`] keeps the pair (it has received a success response) and
+    /// nominates it again while the peer is heard from on it, for up to the consent expiry of
+    /// 30 seconds of silence; then the next valid pair is nominated.
     ///
     /// # Examples
     ///
@@ -1372,7 +1373,7 @@ impl SettingEngineBuilder {
     /// use rtc::ice::FailedNomination;
     ///
     /// let _setting_engine = SettingEngineBuilder::new()
-    ///     .with_ice_failed_nomination(FailedNomination::FailChecklist)
+    ///     .with_ice_failed_nomination(FailedNomination::Retry)
     ///     .build();
     /// ```
     pub fn with_ice_failed_nomination(mut self, failed_nomination: FailedNomination) -> Self {

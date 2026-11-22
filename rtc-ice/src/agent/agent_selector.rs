@@ -827,21 +827,13 @@ impl Agent {
             };
             let pair = self.candidate_pairs[pair_index];
             // A nomination is a check on a valid pair: the pair has received a success
-            // response and stays Succeeded (Section 7.2.5.3.3). When it times out, it is sent
-            // again for as long as the peer is heard from (see `nomination_is_alive`).
-            let nomination = r.is_use_candidate
-                && self.is_controlling
-                && self.selected_pair.is_none()
-                && pair.valid
-                && pair.state == CandidatePairState::Succeeded;
+            // response and stays Succeeded (Section 7.2.5.3.3). When it times out, the pair
+            // and the checklist fail (Section 7.2.5.3.4), or with `FailedNomination::Retry`
+            // it is sent again for as long as the peer is heard from (see
+            // `nomination_is_alive`).
+            let nomination = self.is_open_nomination(&r, pair_index);
             if nomination && self.failed_nomination == FailedNomination::FailChecklist {
-                warn!(
-                    "[{}]: no response to the nomination of {}: the pair and the checklist failed",
-                    self.get_name(),
-                    pair
-                );
-                self.fail_pair(pair_index);
-                self.update_connection_state(Some(now), ConnectionState::Failed);
+                self.fail_nomination(now, pair_index, "no response");
                 return;
             }
             if nomination && self.nomination_is_alive(now, pair_index) {
@@ -905,6 +897,33 @@ impl Agent {
                 failed(&mut self.candidate_pairs[index]);
             }
         }
+    }
+
+    /// Whether `request` is the controlling agent's nomination of `pair_index`, a valid pair,
+    /// with no pair selected yet: the check Section 7.2.5.3.4 says the checklist fails with.
+    fn is_open_nomination(&self, request: &BindingRequest, pair_index: usize) -> bool {
+        let pair = &self.candidate_pairs[pair_index];
+        request.is_use_candidate
+            && request.sent_as_controlling
+            && self.is_controlling
+            && self.selected_pair.is_none()
+            && pair.valid
+            && pair.state == CandidatePairState::Succeeded
+    }
+
+    /// Section 7.2.5.3.4: "If the request fails (Section 7.2.5.2), the agent MUST remove the
+    /// candidate pair from the valid list, set the candidate pair state to Failed, and set the
+    /// checklist state to Failed." (`FailedNomination::FailChecklist`.)
+    fn fail_nomination(&mut self, now: Instant, pair_index: usize, why: &str) {
+        warn!(
+            "[{}]: {} to the nomination of {}: the pair and the checklist failed",
+            self.get_name(),
+            why,
+            self.candidate_pairs[pair_index]
+        );
+        self.fail_pair(pair_index);
+        self.nomination_started = None;
+        self.update_connection_state(Some(now), ConnectionState::Failed);
     }
 
     /// Takes the open transaction `id`, if there is one.
@@ -978,6 +997,12 @@ impl Agent {
             if let Some(pair_index) = checked
                 && !request.consent
             {
+                if self.failed_nomination == FailedNomination::FailChecklist
+                    && self.is_open_nomination(&request, pair_index)
+                {
+                    self.fail_nomination(now, pair_index, "a response from another address");
+                    return;
+                }
                 self.fail_pair(pair_index);
                 self.maybe_nominate(now);
             }
@@ -1312,6 +1337,12 @@ impl Agent {
         {
             // (An error answer to a consent check on the selected pair grants no consent, RFC
             // 7675 Section 5.1, and takes nothing away either.)
+            if self.failed_nomination == FailedNomination::FailChecklist
+                && self.is_open_nomination(&pending, pair_index)
+            {
+                self.fail_nomination(now, pair_index, "an error response");
+                return;
+            }
             debug!(
                 "[{}]: error response {} from {}: pair {} failed",
                 self.get_name(),
@@ -1770,15 +1801,19 @@ impl Agent {
             .is_some_and(|at| now.saturating_duration_since(at) < self.consent_expiry())
     }
 
-    /// Controlling agent, checking: a nomination the peer has not been heard from on for the
-    /// consent expiry is given up. The pair fails (its transactions with it), and the next
-    /// valid pair, if there is one, is nominated (Section 8.1.1: "If the nomination fails,
-    /// the controlling agent [...] may nominate a different pair").
+    /// Controlling agent, checking, with `FailedNomination::Retry`: a nomination the peer has
+    /// not been heard from on for the consent expiry is given up. The pair fails (its
+    /// transactions with it), and the next valid pair, if there is one, is nominated.
+    ///
+    /// With `FailedNomination::FailChecklist` (RFC 8445 Section 7.2.5.3.4) a nomination fails
+    /// only as a request does (Section 7.2.5.2): at the end of its transaction (Section 14.3),
+    /// by an error response or by a response from another address; not by this.
     pub(crate) fn expire_unanswered_nomination(&mut self, now: Instant) {
         let Some(nominated) = self.nominated_pair else {
             return;
         };
-        if !self.is_controlling
+        if self.failed_nomination != FailedNomination::Retry
+            || !self.is_controlling
             || self.selected_pair.is_some()
             || self.nomination_is_alive(now, nominated)
         {

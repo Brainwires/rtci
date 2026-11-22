@@ -775,13 +775,21 @@ fn test_request_on_a_failed_pair_rechecks_it() {
 
 // --- Section 8.1.1 / 7.2.5.3.4: a nomination that fails ---
 
-/// The controlling agent has two valid pairs and nominates the better one; the path dies before
-/// the nomination is answered. It gives that pair up and nominates the other one instead of
-/// repeating the nomination until the agent fails.
+/// With `FailedNomination::Retry`: the controlling agent has two valid pairs and nominates the
+/// better one; the path dies before the nomination is answered. It gives that pair up and
+/// nominates the other one instead of repeating the nomination until the agent fails. (By
+/// default, RFC 8445 Section 7.2.5.3.4, the checklist fails instead:
+/// `agent_checklist_test.rs::test_a_nomination_that_times_out_fails_the_pair_and_the_checklist`.)
 #[test]
 fn test_failed_nomination_falls_back_to_the_next_valid_pair() {
     let now = Instant::now();
-    let mut a = bare_agent(now, config(true));
+    let mut a = bare_agent(
+        now,
+        AgentConfig {
+            failed_nomination: FailedNomination::Retry,
+            ..config(true)
+        },
+    );
     a.add_remote_candidate(host_with_priority(addr(REMOTE_A), 2130706431))
         .unwrap();
     a.add_remote_candidate(host_with_priority(addr(REMOTE_B), 2130706175))

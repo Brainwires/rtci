@@ -1430,16 +1430,16 @@ fn nominations(out: &[Sent]) -> Vec<(Duration, usize)> {
 /// (`disconnected_timeout + failed_timeout`, 30 s from entering checking) failed the agent.
 ///
 /// Now the timer fails the agent only once nothing is left in progress. The pair has received a
-/// success response, so it stays Succeeded, and the nomination whose transaction timed out is
-/// sent again while the peer is heard from (`FailedNomination::Retry`); once a response comes
-/// the pair is selected.
+/// success response, so it stays Succeeded, and with `FailedNomination::Retry` the nomination
+/// whose transaction timed out is sent again while the peer is heard from; once a response
+/// comes the pair is selected.
 #[test]
 fn test_an_unanswered_nomination_is_sent_again_while_the_peer_is_heard_from() {
     let start = Instant::now();
     let answered_from = Duration::from_secs(45);
     let (a, out, seen) = nominating_over_loss(
         start,
-        config(true),
+        retrying(config(true)),
         Duration::from_secs(60),
         Some(Duration::from_secs(5)),
         |at| at >= answered_from,
@@ -1469,16 +1469,19 @@ fn test_an_unanswered_nomination_is_sent_again_while_the_peer_is_heard_from() {
 }
 
 /// The bound of [`test_an_unanswered_nomination_is_sent_again_while_the_peer_is_heard_from`]: with
-/// the peer silent, the nomination is given up 30 seconds (the consent expiry, RFC 7675
-/// Section 5.1) after the peer was last heard from or the nomination started, the pair fails
-/// with it, and with no pair left the agent fails: not before.
+/// `FailedNomination::Retry` and the peer silent, the nomination is given up 30 seconds (the
+/// consent expiry, RFC 7675 Section 5.1) after the peer was last heard from or the nomination
+/// started, the pair fails with it, and with no pair left the agent fails: not before.
 #[test]
 fn test_a_nomination_is_given_up_when_the_peer_is_not_heard_from_for_thirty_seconds() {
     let start = Instant::now();
-    let (a, out, seen) =
-        nominating_over_loss(start, config(true), Duration::from_secs(40), None, |_| {
-            false
-        });
+    let (a, out, seen) = nominating_over_loss(
+        start,
+        retrying(config(true)),
+        Duration::from_secs(40),
+        None,
+        |_| false,
+    );
     let (nominated_at, _) = nominations(&out)[0];
     let failed_at = seen
         .iter()
@@ -1493,36 +1496,149 @@ fn test_a_nomination_is_given_up_when_the_peer_is_not_heard_from_for_thirty_seco
     assert_eq!(a.state(), ConnectionState::Failed);
 }
 
-/// `FailedNomination::FailChecklist`, RFC 8445 Section 7.2.5.3.4 to the letter: when the
-/// nomination's transaction times out, the pair and the checklist fail, also while the peer
-/// is heard from; not at the 30 second timer before that.
+/// `AgentConfig::failed_nomination` with `FailedNomination::Retry`.
+fn retrying(cfg: AgentConfig) -> AgentConfig {
+    AgentConfig {
+        failed_nomination: FailedNomination::Retry,
+        ..cfg
+    }
+}
+
+/// When the agent failed, if it did, among `seen`.
+fn failed_at(seen: &[(Duration, ConnectionState)]) -> Option<Duration> {
+    seen.iter()
+        .find(|(_, s)| *s == ConnectionState::Failed)
+        .map(|(at, _)| *at)
+}
+
+/// RFC 8445 Section 7.2.5.3.4, the default (`FailedNomination::FailChecklist`): "If the request
+/// fails (Section 7.2.5.2), the agent MUST remove the candidate pair from the valid list, set
+/// the candidate pair state to Failed, and set the checklist state to Failed." A request fails
+/// by timing out (Section 7.2.5.2.3) at the end of its transaction: `Rc` (7) requests, RTO,
+/// 2 RTO, ... apart, the last given `Rm` (16) RTOs (Section 14.3, RFC 8489 Section 6.2.1),
+/// 39.5 s at an RTO of 500 ms. The pair and the checklist fail then, also while the peer is
+/// heard from; not at the 30 second checking timer before that, and the nomination is not
+/// sent again.
 #[test]
-fn test_a_failed_nomination_fails_the_checklist_when_set_to() {
+fn test_a_nomination_that_times_out_fails_the_pair_and_the_checklist() {
     let start = Instant::now();
-    let cfg = AgentConfig {
-        failed_nomination: FailedNomination::FailChecklist,
-        ..config(true)
-    };
     let (a, out, seen) = nominating_over_loss(
         start,
-        cfg,
+        config(true),
         Duration::from_secs(50),
         Some(Duration::from_secs(5)),
         |_| false,
     );
     let nominations = nominations(&out);
-    assert_eq!(nominations.len(), 1, "not nominated again");
+    assert_eq!(nominations.len(), 1, "not nominated again: {nominations:?}");
     let (nominated_at, count) = nominations[0];
-    assert_eq!(count, 7);
-    let failed_at = seen
-        .iter()
-        .find(|(_, s)| *s == ConnectionState::Failed)
-        .map(|(at, _)| *at)
-        .expect("the agent fails");
+    assert_eq!(count, 7, "a whole transaction");
+    let failed_at = failed_at(&seen).expect("the agent fails");
     assert!(
         failed_at >= nominated_at + Duration::from_millis(39_400)
             && failed_at <= nominated_at + Duration::from_secs(45),
         "failed at {failed_at:?}, nominated at {nominated_at:?}"
     );
     assert_eq!(a.checklist_state(), ChecklistState::Failed);
+    // (A failed agent clears its pairs: none is left valid.)
+    assert!(!a.candidate_pairs.iter().any(|p| p.valid));
+    assert!(a.get_selected_candidate_pair().is_none());
+}
+
+/// The same with the peer silent: the nomination fails when its transaction does, 39.5 s
+/// after it was sent, and not when the peer has not been heard from for 30 s (that bound is
+/// `FailedNomination::Retry`'s).
+#[test]
+fn test_a_nomination_to_a_silent_peer_fails_at_the_end_of_its_transaction() {
+    let start = Instant::now();
+    let (a, out, seen) =
+        nominating_over_loss(start, config(true), Duration::from_secs(50), None, |_| {
+            false
+        });
+    let nominations = nominations(&out);
+    assert_eq!(nominations.len(), 1, "{nominations:?}");
+    let (nominated_at, count) = nominations[0];
+    assert_eq!(count, 7, "a whole transaction");
+    let failed_at = failed_at(&seen).expect("the agent fails");
+    assert!(
+        failed_at >= nominated_at + Duration::from_millis(39_400)
+            && failed_at <= nominated_at + Duration::from_secs(41),
+        "failed at {failed_at:?}, nominated at {nominated_at:?}"
+    );
+    assert_eq!(a.checklist_state(), ChecklistState::Failed);
+}
+
+/// Sections 7.2.5.2.4 and 7.2.5.3.4: a nomination answered with an unrecoverable error
+/// response has failed; the pair leaves the valid list and the checklist fails, though another
+/// valid pair is left.
+#[test]
+fn test_a_nomination_answered_with_an_error_fails_the_checklist() {
+    let start = Instant::now();
+    let mut a = agent_with(start, config(true), &[(1, 500), (2, 400)]);
+    let out = run_with(&mut a, start, Duration::ZERO, Duration::from_secs(5), |s| {
+        if s.message.contains(ATTR_USE_CANDIDATE) {
+            Answer::Error(CODE_BAD_REQUEST)
+        } else {
+            Answer::Success(addr(LOCAL))
+        }
+    });
+    let seen = states(&mut a);
+    assert_eq!(nominations(&out).len(), 1, "no other pair is nominated");
+    assert!(seen.contains(&ConnectionState::Failed), "{seen:?}");
+    assert_eq!(a.checklist_state(), ChecklistState::Failed);
+    assert!(!a.candidate_pairs.iter().any(|p| p.valid));
+    assert!(a.get_selected_candidate_pair().is_none());
+}
+
+/// With `FailedNomination::Retry` an error response fails the pair only, and the next valid
+/// pair is nominated and selected.
+#[test]
+fn test_a_nomination_answered_with_an_error_moves_on_when_set_to_retry() {
+    let start = Instant::now();
+    let mut a = agent_with(start, retrying(config(true)), &[(1, 500), (2, 400)]);
+    let mut first = true;
+    let out = run_with(&mut a, start, Duration::ZERO, Duration::from_secs(5), |s| {
+        if s.message.contains(ATTR_USE_CANDIDATE) && std::mem::take(&mut first) {
+            Answer::Error(CODE_BAD_REQUEST)
+        } else {
+            Answer::Success(addr(LOCAL))
+        }
+    });
+    assert_eq!(nominations(&out).len(), 2);
+    assert_ne!(a.checklist_state(), ChecklistState::Failed);
+    assert!(a.get_selected_candidate_pair().is_some());
+}
+
+/// Sections 7.2.5.2.1 and 7.2.5.3.4: a success response to a nomination from another address
+/// than the request went to is a failed request; the pair and the checklist fail.
+#[test]
+fn test_a_nomination_answered_from_another_address_fails_the_checklist() {
+    let start = Instant::now();
+    let mut a = agent_with(start, config(true), &[(1, 500), (2, 400)]);
+    let mut nomination = None;
+    run_with(&mut a, start, Duration::ZERO, Duration::from_secs(5), |s| {
+        if s.message.contains(ATTR_USE_CANDIDATE) {
+            nomination.get_or_insert((s.message.transaction_id, s.to));
+            Answer::Silence
+        } else {
+            Answer::Success(addr(LOCAL))
+        }
+    });
+    let (id, to) = nomination.expect("a pair is nominated");
+    let other = [remote_addr(1), remote_addr(2)]
+        .into_iter()
+        .find(|r| *r != to)
+        .unwrap();
+    let response = peer_response(BINDING_SUCCESS, id, addr(LOCAL), None);
+    deliver(
+        &mut a,
+        start + Duration::from_secs(5),
+        &response,
+        &other.to_string(),
+    )
+    .unwrap();
+    let seen = states(&mut a);
+    assert!(seen.contains(&ConnectionState::Failed), "{seen:?}");
+    assert_eq!(a.checklist_state(), ChecklistState::Failed);
+    assert!(a.get_selected_candidate_pair().is_none());
 }
