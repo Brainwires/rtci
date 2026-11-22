@@ -1939,6 +1939,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+- **test**: `tests/lossy_link_rtc2rtc.rs` seeds the engine's provider randomness: each peer's
+  `RTCCryptoProvider::random()` (ICE credentials, the tie-breaker, the consent intervals, DTLS
+  randoms and cookies) is a generator seeded from the test's seed, so ICE takes the same course
+  under every crypto provider. Still drawn from the OS: the providers' own key generation and
+  signatures, STUN transaction IDs, SCTP's tags and heartbeat jitter (`rtc-sctp` uses `rand`
+  directly). Seeded, two failures outside ICE reproduce on every run: with aws-lc-rs only
+  (DTLS 1.3, X25519MLKEM768 key share, a two-datagram ClientHello) the 5 % and 10 % sessions
+  of seed 1 never open: the server's HelloRetryRequest is lost and no retransmitted
+  ClientHello is answered for 30 s; and seed 0x5eed at 30 % does not open its channel within
+  400 s, on every backend, with the path up.
 - **ice**: a Binding success response without XOR-MAPPED-ADDRESS was taken as a success: it
   made the checked pair valid and refreshed consent. RFC 8489 section 6.3.3 has the client
   check the attribute is present and process the response only if the checks succeed: it is

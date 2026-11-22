@@ -33,10 +33,13 @@
 //! ceiling), and Karn's algorithm (C5) takes no RTT sample from a retransmitted chunk, so once
 //! every message is out the RTO stays backed off until the last is acknowledged.
 //!
-//! The engine draws random numbers of its own (ICE credentials and tie-breakers, the 4 to 6
-//! second consent intervals, DTLS randoms, SCTP tags and heartbeat jitter), so a seed fixes
-//! the link, not the whole run: the same seed can take a different course. Both peers are
-//! built at the virtual start time.
+//! A seed fixes the link, and as much of the engine as a test can reach: each peer draws its
+//! randomness from a generator seeded from the test's seed (its crypto provider's `random()`:
+//! ICE credentials, the tie-breaker and the 4 to 6 second consent intervals, DTLS randoms and
+//! cookies), and both are built at the virtual start time, so ICE takes the same course under
+//! every crypto provider. Not everything is seeded: the provider's own key generation and
+//! signatures, STUN transaction IDs and SCTP's tags and heartbeat jitter draw from the OS
+//! (`rand`), so the same seed can still take a different course where SCTP's heartbeats fall.
 //!
 //! At every loss rate the consent rule is judged on every datagram, whatever the number of
 //! datagrams a run takes: a peer sends no application data (anything but STUN, RFC 7983)
@@ -46,8 +49,10 @@
 
 use anyhow::{Result, bail};
 use bytes::BytesMut;
+use rtc::crypto::{CryptoError, RTCCrypto, RTCCryptoProvider, RTCRandom, default_provider};
 use rtc::data_channel::{RTCDataChannelId, RTCDataChannelInit};
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
+use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtc::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
 use rtc::peer_connection::message::RTCMessage;
 use rtc::peer_connection::state::{RTCIceConnectionState, RTCPeerConnectionState};
@@ -59,6 +64,7 @@ use rtc::sansio::Protocol;
 use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use std::collections::{BTreeMap, HashSet};
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// A small deterministic generator (SplitMix64): the tests need reproducible loss, not quality.
@@ -76,6 +82,38 @@ impl Rng {
     /// Uniform in [0, 1).
     fn unit(&mut self) -> f64 {
         (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
+    }
+}
+
+/// The built-in crypto provider with its random source replaced by a seeded [`Rng`], so what
+/// the engine draws through `RTCCryptoProvider::random()` is the same in every run and under
+/// every provider. Not secure; a test of loss handling needs no secrecy.
+struct SeededProvider {
+    inner: Arc<dyn RTCCryptoProvider>,
+    rng: Mutex<Rng>,
+}
+
+impl RTCCryptoProvider for SeededProvider {
+    fn name(&self) -> &'static str {
+        self.inner.name()
+    }
+
+    fn crypto(&self) -> &dyn RTCCrypto {
+        self.inner.crypto()
+    }
+
+    fn random(&self) -> &dyn RTCRandom {
+        self
+    }
+}
+
+impl RTCRandom for SeededProvider {
+    fn fill(&self, output: &mut [u8]) -> Result<(), CryptoError> {
+        let mut rng = self.rng.lock().map_err(|_| CryptoError::RandomnessFailed)?;
+        for chunk in output.chunks_mut(8) {
+            chunk.copy_from_slice(&rng.next_u64().to_le_bytes()[..chunk.len()]);
+        }
+        Ok(())
     }
 }
 
@@ -109,9 +147,18 @@ struct Peer {
 }
 
 impl Peer {
-    fn new(addr: &str, now: Instant) -> Result<Self> {
+    fn new(addr: &str, now: Instant, seed: u64) -> Result<Self> {
+        let provider = Arc::new(SeededProvider {
+            inner: default_provider()?,
+            rng: Mutex::new(Rng(seed)),
+        });
         let pc = RTCPeerConnectionBuilder::new()
             .with_configuration(RTCConfigurationBuilder::new().build())
+            .with_setting_engine(
+                SettingEngineBuilder::new()
+                    .with_crypto_provider(provider)
+                    .build(),
+            )
             .build(now)?;
         Ok(Self {
             pc,
@@ -163,10 +210,12 @@ struct World {
 impl World {
     fn new(link: Link, seed: u64) -> Result<Self> {
         let now = Instant::now();
+        // Each peer its own stream, apart from each other and from the link's.
+        let peer_seed = |i: u64| Rng(seed ^ (0x5eed_0000 + i)).next_u64();
         Ok(Self {
             peers: [
-                Peer::new("10.0.0.1:5000", now)?,
-                Peer::new("10.0.0.2:5000", now)?,
+                Peer::new("10.0.0.1:5000", now, peer_seed(1))?,
+                Peer::new("10.0.0.2:5000", now, peer_seed(2))?,
             ],
             now,
             link,
