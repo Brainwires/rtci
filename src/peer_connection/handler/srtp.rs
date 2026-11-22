@@ -146,7 +146,11 @@ impl<'a>
             if is_rtcp(&message) {
                 if let Some(context) = self.ctx.remote_srtp_context.as_mut() {
                     let mut decrypted = context.decrypt_rtcp(&message)?;
-                    let rtcp_packets = rtcp::packet::unmarshal(&mut decrypted)?;
+                    // RFC 8834 section 4.1 (RFC 3550 section 6.1): of a compound packet, the
+                    // packets that can be understood are processed. One of a known type that
+                    // fails its own parse is passed on as a raw packet; it does not cost the
+                    // others. The framing (version, lengths) still has to hold.
+                    let rtcp_packets = rtcp::packet::unmarshal_lenient(&mut decrypted)?;
                     if rtcp_packets.is_empty() {
                         return Err(Error::Other("empty rtcp_packets".to_string()));
                     }
@@ -492,5 +496,112 @@ mod tests {
             })
             .unwrap();
         assert!(SrtpHandler::new(&mut ctx).poll_read().is_some());
+    }
+
+    /// The RTCP packets read from one protected datagram.
+    fn read_rtcp(ctx: &mut SrtpHandlerContext, plain: &[u8]) -> Vec<Box<dyn rtcp::Packet>> {
+        let protected = context(1).encrypt_rtcp(plain).unwrap();
+        SrtpHandler::new(ctx)
+            .handle_read(TaggedRTCMessageInternal {
+                now: Instant::now(),
+                transport: TransportContext::default(),
+                message: RTCMessageInternal::Rtp(RTPMessage::Raw(protected)),
+            })
+            .unwrap();
+        match SrtpHandler::new(ctx).poll_read().map(|m| m.message) {
+            Some(RTCMessageInternal::Rtp(RTPMessage::Packet(Packet::Rtcp(packets)))) => packets,
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    fn sender_report() -> Vec<u8> {
+        rtcp::sender_report::SenderReport {
+            ssrc: 0x0102_0304,
+            ntp_time: 1,
+            rtp_time: 2,
+            packet_count: 3,
+            octet_count: 4,
+            ..Default::default()
+        }
+        .marshal()
+        .unwrap()
+        .to_vec()
+    }
+
+    fn source_description() -> Vec<u8> {
+        rtcp::source_description::SourceDescription {
+            chunks: vec![rtcp::source_description::SourceDescriptionChunk {
+                source: 0x0102_0304,
+                items: vec![rtcp::source_description::SourceDescriptionItem {
+                    sdes_type: rtcp::source_description::SdesType::SdesCname,
+                    text: bytes::Bytes::from_static(b"cname"),
+                }],
+            }],
+        }
+        .marshal()
+        .unwrap()
+        .to_vec()
+    }
+
+    /// RFC 8834 section 4.1 ("process the known packet types and ignore the unknown"), RFC
+    /// 3550 section 6.1: a compound packet whose middle packet is a receiver report that does
+    /// not parse (it says one report block, its length holds none) still delivers the sender
+    /// report before it and the SDES after it; the broken one comes along as a raw packet.
+    #[test]
+    fn a_broken_packet_in_a_compound_packet_does_not_cost_the_others() {
+        let mut ctx = SrtpHandlerContext::default();
+        handshake_complete(&mut ctx, 1);
+        // V=2, RC=1, PT=201 (RR), length 1: the reporter's SSRC and no room for its block.
+        let broken_receiver_report = [0x81u8, 201, 0, 1, 0, 0, 0, 9];
+        let mut plain = sender_report();
+        plain.extend_from_slice(&broken_receiver_report);
+        plain.extend_from_slice(&source_description());
+
+        let packets = read_rtcp(&mut ctx, &plain);
+        assert_eq!(3, packets.len(), "{packets:?}");
+        assert!(
+            packets[0]
+                .as_any()
+                .downcast_ref::<rtcp::sender_report::SenderReport>()
+                .is_some()
+        );
+        let raw = packets[1]
+            .as_any()
+            .downcast_ref::<rtcp::raw_packet::RawPacket>()
+            .expect("the broken packet as it came");
+        assert_eq!(&raw.0[..], &broken_receiver_report[..]);
+        assert!(
+            packets[2]
+                .as_any()
+                .downcast_ref::<rtcp::source_description::SourceDescription>()
+                .is_some()
+        );
+    }
+
+    /// RFC 8834 section 4.1, RFC 3550 section 6.1: a packet of a type this endpoint does not
+    /// know (here 210) between known ones is skipped by its length; the known ones are read.
+    #[test]
+    fn a_packet_of_an_unknown_type_in_a_compound_packet_is_passed_over() {
+        let mut ctx = SrtpHandlerContext::default();
+        handshake_complete(&mut ctx, 1);
+        let unknown = [0x80u8, 210, 0, 2, 1, 2, 3, 4, 5, 6, 7, 8];
+        let mut plain = sender_report();
+        plain.extend_from_slice(&unknown);
+        plain.extend_from_slice(&source_description());
+
+        let packets = read_rtcp(&mut ctx, &plain);
+        assert_eq!(3, packets.len(), "{packets:?}");
+        assert!(
+            packets[0]
+                .as_any()
+                .downcast_ref::<rtcp::sender_report::SenderReport>()
+                .is_some()
+        );
+        assert!(
+            packets[2]
+                .as_any()
+                .downcast_ref::<rtcp::source_description::SourceDescription>()
+                .is_some()
+        );
     }
 }

@@ -8,7 +8,7 @@ Appendix A (Dependency Descriptor header extension, A.3 to A.9). Sections 1 to 3
 and A.10 carry no normative keyword. MUST NOT / SHALL / REQUIRED count as MUST, RECOMMENDED / SHOULD NOT
 as SHOULD, OPTIONAL as MAY.
 
-- MUST: tested 55 / untested 1 / partial 2 / missing 1 / violated 0 / n-a 12
+- MUST: tested 56 / untested 1 / partial 1 / missing 1 / violated 0 / n-a 12
 - SHOULD: tested 13 / untested 0 / partial 1 / missing 0 / violated 0 / n-a 1
 - MAY: tested 7 / untested 0 / partial 0 / missing 0 / violated 0 / n-a 3
 
@@ -139,7 +139,7 @@ produces, or what a decoder does, are `n-a` and say so.
 | AV1RTP-A.8.3-28 | A.8.3 | MUST | With `chain_cnt > 0` every Decode target is protected by exactly one Chain | tested | `rtc-rtp/src/codec/dependency_descriptor/mod.rs` `FrameDependencyStructure::validate` | `a_structure_the_syntax_cannot_carry_does_not_validate` |  |
 | AV1RTP-A.8.3-29 | A.8.3 | MUST | `fdiff_minus_one` immediately follows `fdiff_follows_flag` = 1 | tested | `rtc-rtp/src/codec/dependency_descriptor/mod.rs` | `the_l1t3_example_structure_is_written_bit_for_bit`, `the_l3t3_example_structure_is_written_bit_for_bit` |  |
 | AV1RTP-A.8.3-30 | A.8.3 | MUST | `fdiff_minus_one` immediately follows a non-zero `next_fdiff_size` | tested | `rtc-rtp/src/codec/dependency_descriptor/mod.rs` | `custom_frame_differences_are_written_bit_for_bit`, `frame_differences_round_trip_at_their_limits_and_wrap` |  |
-| AV1RTP-A.9-1 | A.9 | MUST | The extmap URI is `https://aomediacodec.github.io/av1-rtp-spec/#dependency-descriptor-rtp-header-extension` | partial | `rtc-rtp/src/codec/dependency_descriptor/mod.rs` `DEPENDENCY_DESCRIPTOR_URI` | `the_extmap_uri_is_the_specifications` | The constant exists. It is not among the default header extensions and nothing registers it: an application registers the URI itself (peer connection plumbing, open) |
+| AV1RTP-A.9-1 | A.9 | MUST | The extmap URI is `https://aomediacodec.github.io/av1-rtp-spec/#dependency-descriptor-rtp-header-extension` | tested | `rtc-rtp/src/codec/dependency_descriptor`, `configuration/interceptor_registry.rs` (`configure_default_header_extensions`) | `the_dependency_descriptor_is_offered_for_video` | Registered for video by default |
 
 Non-normative text checked (not counted):
 

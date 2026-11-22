@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **media conformance**: RTP usage (RFC 8834).
+  - Received RTCP is parsed with `rtcp::packet::unmarshal_lenient`: of a compound packet, a
+    packet of a known type that does not parse is delivered as a `RawPacket` and the others
+    are processed (RFC 8834 section 4.1, RFC 3550 section 6.1); the whole datagram used to be
+    dropped. A datagram whose framing is broken is still dropped.
+  - New `scripts/audit-count.py` (in the Python gates of `cargo.yml`, with `--check`): counts
+    the clause audit's tables by level and verdict, fails on an unknown level or verdict or a
+    totals line that disagrees with its table, and writes `docs/conformance/audit/COUNTS.md`.
 - **jsep**: small rules.
   - `RTCRtpSender::write_rtp` takes out the header extension elements whose id is not
     negotiated for the sender (RFC 8285 section 4.1.2); they were passed through. New
