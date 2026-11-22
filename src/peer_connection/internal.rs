@@ -815,10 +815,16 @@ impl RTCPeerConnection {
         op: StateChangeOp,
         next_state: RTCSignalingState,
     ) -> Result<()> {
-        // An offer applied in the stable state: what the last completed exchange negotiated is
-        // remembered, so that a rollback can bring it back (W3C: the [[LastStableState...]]
-        // slots). An offer applied over a pending one keeps what was remembered.
-        if sd.sdp_type == RTCSdpType::Offer && self.signaling_state == RTCSignalingState::Stable {
+        // A remote offer applied in the stable state: what the last completed exchange
+        // negotiated is remembered, so that a rollback can bring it back (W3C: the
+        // [[LastStableState...]] slots). An offer applied over a pending one keeps what was
+        // remembered. A local offer changes none of it, so there is nothing to remember, and
+        // what the application sets while its own offer is pending (codec preferences, say)
+        // survives the rollback.
+        if sd.sdp_type == RTCSdpType::Offer
+            && op == StateChangeOp::SetRemote
+            && self.signaling_state == RTCSignalingState::Stable
+        {
             self.last_stable_state = Some(LastStableState {
                 media_engine: self.media_engine.clone(),
                 rtp_transceivers: self.rtp_transceivers.clone(),
