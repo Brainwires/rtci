@@ -93,8 +93,11 @@ impl Fmtp for H264Fmtp {
                 .get(key)
                 .map_or_else(|| default.to_owned(), |v| v.trim().to_owned())
         };
-        get(self, "packetization-mode", DEFAULT_PACKETIZATION_MODE)
-            == get(c, "packetization-mode", DEFAULT_PACKETIZATION_MODE)
+        // RFC 6184 section 8.1: "packetization-mode ... MUST be equal to 0, 1, or 2"; a
+        // format with another value is no format this endpoint can send or receive.
+        let mode = get(self, "packetization-mode", DEFAULT_PACKETIZATION_MODE);
+        ["0", "1", "2"].contains(&mode.as_str())
+            && mode == get(c, "packetization-mode", DEFAULT_PACKETIZATION_MODE)
             && profile_level_id_matches(
                 &get(self, "profile-level-id", DEFAULT_PROFILE_LEVEL_ID),
                 &get(c, "profile-level-id", DEFAULT_PROFILE_LEVEL_ID),

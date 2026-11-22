@@ -20,6 +20,12 @@ const MAX_RUN_LENGTH_CAP: usize = 0x1fff; // 13 bits
 const MAX_ONE_BIT_CAP: usize = 14;
 const MAX_TWO_BIT_CAP: usize = 7;
 
+/// The most octets one feedback packet takes (draft-holmer-rmcat-transport-wide-cc-extensions-01
+/// section 3.1.5: a feedback packet stays within the path MTU; what does not fit continues in
+/// the next). 1100 leaves room for SRTCP and the minimal compound packet around it within the
+/// 1200 octets the engine keeps RTCP under.
+pub const MAX_FEEDBACK_OCTETS: usize = 1100;
+
 /// Sequence number unwrapper to handle 16-bit wraparound.
 struct SequenceUnwrapper {
     last_unwrapped: Option<i64>,
@@ -289,12 +295,26 @@ impl Feedback {
             self.next_sequence_number = self.next_sequence_number.wrapping_add(1);
         }
 
-        let recv_delta = if (0..=0xff).contains(&delta_250us) {
-            self.len += 1;
-            SymbolTypeTcc::PacketReceivedSmallDelta
-        } else {
+        let large = !(0..=0xff).contains(&delta_250us);
+        // What the packet would be with this arrival (and the not-received run before it): the
+        // fixed 20 octets, the chunks (one more for the open one and one for a run that may
+        // start), the deltas, padding.
+        let missing = usize::from(sequence_number.wrapping_sub(self.next_sequence_number));
+        let would_be = 20
+            + 2 * (self.chunks.len() + 2 + missing / MAX_RUN_LENGTH_CAP)
+            + self.len
+            + if large { 2 } else { 1 }
+            + 3;
+        if self.sequence_number_count > 0 && would_be > MAX_FEEDBACK_OCTETS {
+            return false;
+        }
+
+        let recv_delta = if large {
             self.len += 2;
             SymbolTypeTcc::PacketReceivedLargeDelta
+        } else {
+            self.len += 1;
+            SymbolTypeTcc::PacketReceivedSmallDelta
         };
 
         if !self.last_chunk.can_add(recv_delta) {
@@ -505,5 +525,34 @@ mod tests {
         assert!(fb.add_received(2, 64500));
         assert_eq!(fb.sequence_number_count, 3); // 0, 1 (not received), 2
         assert_eq!(fb.next_sequence_number, 3);
+    }
+
+    /// Section 3.1.5: a reporting window too long for one packet continues in the next, each
+    /// within `MAX_FEEDBACK_OCTETS`, every packet reported once.
+    #[test]
+    fn a_long_window_is_split_within_the_mtu() {
+        let mut recorder = Recorder::new(5000);
+        // 700 packets in 490 ms, every other one arriving before its predecessor (a large
+        // delta), so each needs about two octets.
+        for n in 0..700i64 {
+            let arrival = 64_000 + n * 700 - if n % 2 == 1 { 5_000 } else { 0 };
+            recorder.record(1234, n as u16, arrival);
+        }
+        let packets = recorder.build_feedback_packet();
+        assert!(packets.len() >= 2, "{} packets", packets.len());
+        let mut covered = 0usize;
+        for packet in &packets {
+            assert!(
+                packet.marshal_size() <= MAX_FEEDBACK_OCTETS,
+                "{}",
+                packet.marshal_size()
+            );
+            let twcc = packet
+                .as_any()
+                .downcast_ref::<rtcp::transport_feedbacks::transport_layer_cc::TransportLayerCc>()
+                .unwrap();
+            covered += usize::from(twcc.packet_status_count);
+        }
+        assert_eq!(700, covered);
     }
 }

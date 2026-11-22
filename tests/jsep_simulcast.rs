@@ -387,6 +387,29 @@ fn a_simulcast_rid_without_its_rid_line_refuses_the_description() -> TestResult 
     Ok(())
 }
 
+/// RFC 8853 section 5.2: "a single rid-id MUST NOT occur more than once per 'a=simulcast'
+/// line", and "each direction MUST NOT occur more than once"; RFC 9429 section 5.8: a line that
+/// is not well formed rejects the whole description (the line used to be ignored).
+#[test]
+fn a_simulcast_line_that_repeats_a_rid_or_a_direction_refuses_the_description() -> TestResult {
+    for line in [
+        "a=simulcast:send f;f",
+        "a=simulcast:send f,h;h",
+        "a=simulcast:send f send h",
+    ] {
+        let mut pc = default_peer()?;
+        let result = pc.set_remote_description(
+            Instant::now(),
+            remote_offer("sendonly", &format!("a=rid:f send\na=rid:h send\n{line}\n"))?,
+        );
+        assert!(
+            matches!(result, Err(Error::SdpInvalidValue(ref reason)) if reason.contains("a=simulcast")),
+            "{line}: {result:?}"
+        );
+    }
+    Ok(())
+}
+
 /// W3C webrtc-pc addTransceiver: a rid outside the grammar is refused. The rid is sent as the
 /// RtpStreamId of RFC 8852, which section 3.1 limits to 1 to 255 alphanumeric characters.
 #[test]

@@ -291,13 +291,14 @@ use crate::peer_connection::sdp::section_multiplexes_rtcp;
 use crate::peer_connection::sdp::session_description::RTCSessionDescription;
 use crate::peer_connection::sdp::{
     ATTR_KEY_RTCP_MUX_ONLY, RemoteIceDetails, SctpNegotiation, check_answer_against_offer,
-    check_extmap_ids, codecs_from_media_description, discard_stray_bundle_only,
-    effective_direction, extract_fingerprints, extract_ice_details, extract_tls_id, get_mid_value,
-    get_peer_direction, has_ice_trickle_option, has_rtcp_mux, has_rtp_media,
-    inherit_session_extmap, insert_media_line, is_lite_set, is_live_rtp_section, is_rejected_media,
-    is_sdp_token, is_unknown_application_media, media_ice_credentials, negotiated_sctp,
-    remap_answerer_assigned_extmaps, sdp_type::RTCSdpType, update_sdp_origin,
-    validate_application_media_section, validate_dtls_attributes,
+    check_extmap_ids, check_extmap_levels, codecs_from_media_description,
+    discard_stray_bundle_only, effective_direction, extract_fingerprints, extract_ice_details,
+    extract_tls_id, get_mid_value, get_peer_direction, has_ice_trickle_option, has_rtcp_mux,
+    has_rtp_media, inherit_session_extmap, inherit_session_rtcp_xr, insert_media_line, is_lite_set,
+    is_live_rtp_section, is_rejected_media, is_sdp_token, is_unknown_application_media,
+    media_ice_credentials, negotiated_sctp, remap_answerer_assigned_extmaps, remote_ice_options,
+    remote_ice_pacing, sdp_type::RTCSdpType, update_sdp_origin, validate_application_media_section,
+    validate_dtls_attributes,
 };
 use crate::peer_connection::state::RTCIceGatheringState;
 use crate::peer_connection::state::ice_connection_state::RTCIceConnectionState;
@@ -1537,6 +1538,28 @@ impl RTCPeerConnection {
         self.can_trickle_ice_candidates
     }
 
+    /// The ICE options of the current remote description (`a=ice-options`, RFC 8839 section
+    /// 5.6), each once: `trickle` (RFC 8840), `ice2` (RFC 8445 section 10: the peer implements
+    /// RFC 8445 rather than RFC 5245), and any other the peer states. Empty without a remote
+    /// description.
+    pub fn remote_ice_options(&self) -> Vec<String> {
+        self.remote_description()
+            .and_then(|r| r.parsed.as_ref())
+            .map(remote_ice_options)
+            .unwrap_or_default()
+    }
+
+    /// The lip synchronization groups of the current remote description (`a=group:LS`, RFC
+    /// 5888 section 7), each the mids of media sections whose playout the remote side wants
+    /// synchronized: the receivers of those transceivers are played out in sync by an
+    /// application that renders them. Empty without a remote description or groups.
+    pub fn remote_lip_sync_groups(&self) -> Vec<Vec<String>> {
+        self.remote_description()
+            .and_then(|r| r.parsed.as_ref())
+            .map(crate::peer_connection::sdp::ls_groups)
+            .unwrap_or_default()
+    }
+
     /// Sets the remote description as part of the offer/answer negotiation.
     ///
     /// This changes the remote description associated with the connection. This description
@@ -1604,7 +1627,9 @@ impl RTCPeerConnection {
             let mut parsed = remote_description.unmarshal()?;
             self.assign_missing_mids(&mut parsed, answers);
             discard_stray_bundle_only(&mut parsed, answers);
+            check_extmap_levels(&parsed)?;
             inherit_session_extmap(&mut parsed);
+            inherit_session_rtcp_xr(&mut parsed);
             check_extmap_ids(&parsed)?;
             if !answers {
                 let taken: Vec<u16> = self
@@ -1758,6 +1783,11 @@ impl RTCPeerConnection {
                 && RtpCodecKind::from(media.media_name.media.as_str()) != RtpCodecKind::Unspecified
             {
                 codecs_from_media_description(media)?;
+                if let Some(err) = sdp::simulcast::malformed_simulcast_line(media) {
+                    return Err(Error::SdpInvalidValue(format!(
+                        "{err} (RFC 9429 section 5.8, RFC 8853 section 5.2)"
+                    )));
+                }
                 // RFC 9429 section 5.8.3: "All rid-ids referenced in an 'a=simulcast' line
                 // MUST exist as 'a=rid' lines."
                 if let Some(rid) = sdp::simulcast::simulcast_rid_without_line(media) {
@@ -2229,6 +2259,12 @@ impl RTCPeerConnection {
                     )?;
                     self.dtls_transport_mut().remote_tls_id = remote_tls_id;
                 }
+                // RFC 8445 section 14.2: "Both agents MUST use the higher out of the two
+                // proposed values"; the peer's is its `a=ice-pacing` (RFC 8839 section 5.5),
+                // the default when it states none. Every description states it again.
+                self.ice_transport_mut()
+                    .agent
+                    .set_remote_pacing(remote_ice_pacing(parsed_remote_description));
             }
 
             if is_final_answer
@@ -5043,7 +5079,7 @@ a=rtcp-mux\r\n";
         )
         .unwrap();
         let offer = pc.create_offer(None).unwrap();
-        assert!(offer.sdp.contains("a=ice-options:trickle\r\n"));
+        assert!(offer.sdp.contains("a=ice-options:trickle ice2\r\n"));
         assert_eq!(offer.sdp.matches("a=fingerprint:sha-256 ").count(), 2);
 
         // The other side takes both and trickles back.
@@ -5052,7 +5088,66 @@ a=rtcp-mux\r\n";
             .set_remote_description(Instant::now(), offer)
             .unwrap();
         let answer = answerer.create_answer(None).unwrap();
-        assert!(answer.sdp.contains("a=ice-options:trickle\r\n"));
+        assert!(answer.sdp.contains("a=ice-options:trickle ice2\r\n"));
+    }
+
+    /// RFC 8445 section 14.2: an agent that wants a Ta other than the default proposes it
+    /// (`a=ice-pacing`, RFC 8839 section 5.5), and "Both agents MUST use the higher out of the
+    /// two proposed values"; RFC 8445 section 10: both say `ice2`.
+    #[test]
+    fn a_proposed_ice_pacing_is_signalled_and_both_agents_use_the_higher_value() {
+        use std::time::Duration;
+        let peer = |ta: Option<Duration>| {
+            let mut me = MediaEngine::default();
+            me.register_default_codecs().unwrap();
+            RTCPeerConnectionBuilder::new()
+                .with_media_engine(me)
+                .with_setting_engine(SettingEngineBuilder::new().with_ice_pacing(ta).build())
+                .build(Instant::now())
+                .unwrap()
+        };
+        let mut offerer = peer(Some(Duration::from_millis(80)));
+        let mut answerer = peer(Some(Duration::from_millis(20)));
+        offerer
+            .add_transceiver_from_kind(RtpCodecKind::Audio, None)
+            .unwrap();
+        let now = Instant::now();
+        let offer = offerer.create_offer(None).unwrap();
+        assert!(offer.sdp.contains("a=ice-pacing:80\r\n"), "{}", offer.sdp);
+        offerer.set_local_description(now, offer.clone()).unwrap();
+        answerer.set_remote_description(now, offer).unwrap();
+        let answer = answerer.create_answer(None).unwrap();
+        assert!(answer.sdp.contains("a=ice-pacing:20\r\n"), "{}", answer.sdp);
+        answerer.set_local_description(now, answer.clone()).unwrap();
+        offerer.set_remote_description(now, answer).unwrap();
+
+        assert_eq!(
+            Duration::from_millis(80),
+            offerer.ice_transport().agent.pacing()
+        );
+        assert_eq!(
+            Duration::from_millis(80),
+            answerer.ice_transport().agent.pacing()
+        );
+        assert!(offerer.remote_ice_options().contains(&"ice2".to_owned()));
+        assert!(
+            answerer
+                .remote_ice_options()
+                .contains(&"trickle".to_owned())
+        );
+
+        // The default Ta is not proposed.
+        let mut plain = peer(None);
+        plain
+            .add_transceiver_from_kind(RtpCodecKind::Audio, None)
+            .unwrap();
+        assert!(
+            !plain
+                .create_offer(None)
+                .unwrap()
+                .sdp
+                .contains("a=ice-pacing")
+        );
     }
 
     /// `SettingEngineBuilder::with_mid_generator` was stored and never read.

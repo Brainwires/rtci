@@ -4,6 +4,7 @@ use super::estimator::{BandwidthEstimator, EstimatorStats};
 use super::feedback::{CongestionFeedbackFormat, negotiated_congestion_feedback};
 use super::probe::{ProbeController, ProbePacket, probe_estimate};
 use super::tmmbr::{self, TmmbrState};
+use super::tmmbr_request::{TmmbrControl, TmmbrRequester};
 use crate::Interceptor;
 use crate::circuit_breaker::CircuitBreakerHandle;
 use crate::rtpfb::acknowledgement::PacketReport;
@@ -205,6 +206,8 @@ impl<E: BandwidthEstimator> CongestionControlBuilder<E> {
         (
             CongestionControlInterceptor {
                 tmmbn_owed: false,
+                tmmbr_requests: TmmbrRequester::default(),
+                receiver_ssrc: crate::rfc8888::sender::random_ssrc(),
                 path: None,
                 path_candidate: None,
                 probing,
@@ -368,6 +371,11 @@ pub struct CongestionControlInterceptor<E: BandwidthEstimator> {
     unnegotiated_tmmbr: bool,
     /// Whether the compound packet being read asks for a TMMBN.
     tmmbn_owed: bool,
+    /// The receiver side of TMMBR: the limits this endpoint asks of remote senders.
+    tmmbr_requests: TmmbrRequester,
+    /// The SSRC a receive-only endpoint sends its TMMBRs from (RFC 3550 section 8: random,
+    /// never 0); a sending endpoint uses its first media SSRC.
+    receiver_ssrc: u32,
     /// The addresses inbound packets arrive between: the path, as far as this interceptor
     /// can see it.
     path: Option<PathKey>,
@@ -470,6 +478,42 @@ impl<E: BandwidthEstimator> CongestionControlInterceptor<E> {
             now,
             transport: shared::TransportContext::default(),
             message: AttributedPacket::new(Packet::Rtcp(vec![Box::new(notification)])),
+        });
+    }
+
+    /// The SSRC this endpoint's TMMBRs come from, which a TMMBN names as owner.
+    fn own_ssrc(&self) -> u32 {
+        self.local_ssrcs
+            .first()
+            .copied()
+            .unwrap_or(self.receiver_ssrc)
+    }
+
+    /// Queue the TMMBR the receiver side owes now, if any: one packet with an entry per media
+    /// sender asked (RFC 5104 section 4.2.1.1).
+    fn send_tmmbr(&mut self, now: Instant) {
+        let own_ssrc = self.own_ssrc();
+        let entries = self.tmmbr_requests.poll_request(now, own_ssrc);
+        if entries.is_empty() {
+            return;
+        }
+        let request = TemporaryMaximumBitrateRequest {
+            sender_ssrc: own_ssrc,
+            entries: entries
+                .iter()
+                .map(|entry| {
+                    rtcp::transport_feedbacks::tmmb::TmmbEntry::new(
+                        entry.ssrc,
+                        entry.bitrate,
+                        entry.overhead,
+                    )
+                })
+                .collect(),
+        };
+        self.write_queue.push_back(TaggedPacket {
+            now,
+            transport: shared::TransportContext::default(),
+            message: AttributedPacket::new(Packet::Rtcp(vec![Box::new(request)])),
         });
     }
 
@@ -599,6 +643,37 @@ impl<E: BandwidthEstimator> CongestionControlInterceptor<E> {
                     .on_owner_left(now, *source, packet_rate, round_trip_time);
             }
             self.tmmbn_owed |= owed;
+            return false;
+        }
+
+        // TMMBN (RFC 5104 section 4.2.2): a media sender's bounding set, which the receiver
+        // side saves and decides its next TMMBR by (section 4.2.1.2).
+        let notification = if let Some(notification) =
+            payload.downcast_ref::<TemporaryMaximumBitrateNotification>()
+        {
+            Some((
+                notification.sender_ssrc,
+                notification
+                    .entries
+                    .iter()
+                    .map(|entry| tmmbr::TmmbEntry {
+                        ssrc: entry.ssrc,
+                        bitrate: entry.bitrate(),
+                        overhead: entry.measured_overhead,
+                    })
+                    .collect::<Vec<_>>(),
+            ))
+        } else {
+            payload
+                .downcast_ref::<rtcp::raw_packet::RawPacket>()
+                .and_then(|raw| tmmbr::parse(&raw.0))
+                .filter(|packet| packet.fmt == tmmbr::FMT_TMMBN)
+                .map(|packet| (packet.sender_ssrc, packet.entries))
+        };
+        if let Some((media_sender, entries)) = notification {
+            let own_ssrc = self.own_ssrc();
+            self.tmmbr_requests
+                .on_tmmbn(media_sender, entries, own_ssrc);
             return false;
         }
 
@@ -805,6 +880,15 @@ impl<E: BandwidthEstimator> Protocol<TaggedPacket, TaggedPacket, ()>
         if !matches!(&msg.message.packet, Packet::Rtcp(packets) if packets.is_empty()) {
             self.observe_path(msg.now, &msg.transport);
         }
+        if let Packet::Rtp(ref rtp_packet) = msg.message.packet {
+            self.tmmbr_requests.on_rtp(
+                rtp_packet.header.ssrc,
+                rtp_packet
+                    .marshal_size()
+                    .saturating_sub(rtp_packet.payload.len()),
+                msg.transport.peer_addr.is_ipv6(),
+            );
+        }
         let mut reported = false;
         if let Packet::Rtcp(ref rtcp_packets) = msg.message.packet {
             // `for` over a borrow of `msg` while `self` is borrowed mutably: collect first.
@@ -816,6 +900,7 @@ impl<E: BandwidthEstimator> Protocol<TaggedPacket, TaggedPacket, ()>
         if std::mem::take(&mut self.tmmbn_owed) {
             self.send_tmmbn(msg.now);
         }
+        self.send_tmmbr(msg.now);
 
         if reported {
             self.per_packet_feedback = true;
@@ -845,6 +930,12 @@ impl<E: BandwidthEstimator> Protocol<TaggedPacket, TaggedPacket, ()>
     }
 
     fn handle_write(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
+        if let Some(control) = msg.message.custom::<TmmbrControl>().copied() {
+            let own_ssrc = self.own_ssrc();
+            self.tmmbr_requests.on_control(control, own_ssrc);
+            // The first TMMBR goes at once (RFC 5104 section 4.2.1.3).
+            self.send_tmmbr(msg.now);
+        }
         if let Packet::Rtp(ref rtp_packet) = msg.message.packet {
             let twcc_sequence_number = self.twcc_sequence_number(rtp_packet);
             // Only a stream this endpoint is sending is tracked; anything else has no sequence
@@ -911,6 +1002,7 @@ impl<E: BandwidthEstimator> Protocol<TaggedPacket, TaggedPacket, ()>
             self.send_tmmbn(now);
         }
 
+        self.send_tmmbr(now);
         self.estimator.handle_timeout(now);
         self.apply_bounds(now);
         self.poll_probe(now);
@@ -934,6 +1026,7 @@ impl<E: BandwidthEstimator> Protocol<TaggedPacket, TaggedPacket, ()>
         [
             self.estimator.poll_timeout(),
             self.tmmbr.poll_timeout(),
+            self.tmmbr_requests.poll_timeout(),
             self.remb.map(|(_, at)| at + REMB_TIMEOUT),
             self.probing
                 .as_ref()
@@ -983,6 +1076,14 @@ impl<E: BandwidthEstimator> Interceptor for CongestionControlInterceptor<E> {
         self.local_ssrcs.retain(|ssrc| *ssrc != info.ssrc);
     }
 
-    fn bind_remote_stream(&mut self, _info: &StreamInfo) {}
-    fn unbind_remote_stream(&mut self, _info: &StreamInfo) {}
+    /// A remote stream that negotiated `ccm tmmbr` can be asked for a limit
+    /// ([`TmmbrControl`]); one that did not is never sent a TMMBR (RFC 5104 section 7.2).
+    fn bind_remote_stream(&mut self, info: &StreamInfo) {
+        self.tmmbr_requests
+            .bind(info.ssrc, stream_negotiated_tmmbr(info));
+    }
+
+    fn unbind_remote_stream(&mut self, info: &StreamInfo) {
+        self.tmmbr_requests.unbind(info.ssrc);
+    }
 }

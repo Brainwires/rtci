@@ -105,6 +105,27 @@ impl ArrivalGroupAccumulator {
             return None;
         }
 
+        // draft-ietf-rmcat-gcc-02 section 5.1: a packet received out of order (before the
+        // group it follows) is ignored by the arrival-time model.
+        if arrival < current.arrival {
+            return None;
+        }
+
+        // Section 5.2: a packet that arrives within burst_time of the group and with a
+        // negative inter-group delay variation (it caught up: the path delivered a backlog at
+        // once, after an outage) is part of the current group.
+        let arrival_delta = arrival.saturating_sub(current.arrival);
+        let departure_delta = report
+            .departure
+            .saturating_duration_since(current.departure);
+        if arrival_delta < self.burst_interval && arrival_delta < departure_delta {
+            current.departure = current.departure.max(report.departure);
+            current.arrival = current.arrival.max(arrival);
+            current.packets += 1;
+            current.size += report.size;
+            return None;
+        }
+
         // A new burst begins, so the one that just closed can be measured against its predecessor.
         let closed = *current;
         self.current = Some(ArrivalGroup {
@@ -285,5 +306,66 @@ mod tests {
         arrival_ms: u64,
     ) -> Option<InterGroupDelay> {
         accumulator.accumulate(&report(departure, arrival_ms, 1200))
+    }
+
+    /// Section 5.2: after an outage the path delivers its backlog at once. Packets sent 20 ms
+    /// apart that arrive 1 ms apart (inter-arrival under burst_time, negative delay variation)
+    /// are one group with the one they caught up with, not a run of groups each reading as a
+    /// draining queue.
+    #[test]
+    fn a_backlog_delivered_at_once_is_one_group() {
+        let epoch = Instant::now();
+        let mut accumulator = ArrivalGroupAccumulator::default();
+        let mut emitted = Vec::new();
+        // Steady: 20 ms apart both ways.
+        for n in 0..3u64 {
+            emitted.extend(accumulator.accumulate(&report(
+                epoch + Duration::from_millis(n * 20),
+                100 + n * 20,
+                1200,
+            )));
+        }
+        // An outage: the next five arrive together, 1 ms apart.
+        for n in 3..8u64 {
+            emitted.extend(accumulator.accumulate(&report(
+                epoch + Duration::from_millis(n * 20),
+                300 + n,
+                1200,
+            )));
+        }
+        // Steady again.
+        emitted.extend(accumulator.accumulate(&report(
+            epoch + Duration::from_millis(8 * 20),
+            330,
+            1200,
+        )));
+        emitted.extend(accumulator.flush());
+        let sizes: Vec<usize> = emitted.iter().map(|delay| delay.size).collect();
+        assert!(
+            sizes.contains(&(5 * 1200)),
+            "the backlog is one group of five: {sizes:?}"
+        );
+    }
+
+    /// Section 5.1: t(i) is the arrival of the group's last packet, and a packet that arrived
+    /// before the group it follows (reordered on the path) is left out of the model.
+    #[test]
+    fn a_packet_received_out_of_order_is_ignored() {
+        let epoch = Instant::now();
+        let mut accumulator = ArrivalGroupAccumulator::default();
+        accumulator.accumulate(&report(epoch, 100, 1200));
+        accumulator.accumulate(&report(epoch + Duration::from_millis(20), 140, 1200));
+        // Sent after the second, arrived before it.
+        assert_eq!(
+            None,
+            accumulator.accumulate(&report(epoch + Duration::from_millis(40), 130, 1200))
+        );
+        let delay = accumulator
+            .accumulate(&report(epoch + Duration::from_millis(60), 160, 1200))
+            .expect("the second group closes");
+        // Against the first: arrival 140 - 100 less departure 20 - 0, the reordered packet
+        // not part of it.
+        assert!((delay.delta_ms - 20.0).abs() < 1e-9, "{}", delay.delta_ms);
+        assert_eq!(1200, delay.size);
     }
 }

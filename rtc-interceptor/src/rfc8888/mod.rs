@@ -13,6 +13,7 @@
 //! - [RFC 8888](https://www.rfc-editor.org/rfc/rfc8888) — RTCP Congestion Control Feedback
 //!
 //! [RFC 8888]: https://www.rfc-editor.org/rfc/rfc8888
+pub(crate) mod ecn;
 pub(crate) mod recorder;
 pub(crate) mod sender;
 pub(crate) mod stream_log;

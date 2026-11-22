@@ -1,47 +1,44 @@
-//! How often congestion control feedback is generated, given the RTCP bandwidth it has to fit.
+//! How often congestion control feedback is generated: a share of the media it reports on.
 
-use crate::rtcp_session::{RtcpBandwidth, RtcpSessionControl, nominal_session_bandwidth};
-use crate::stream_info::StreamInfo;
+use crate::rtcp_session::{RtcpBandwidth, RtcpSessionControl};
 use crate::{Packet, TaggedPacket};
 use shared::marshal::MarshalSize;
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-/// RFC 3550 section 6.2: the recommended share of the session bandwidth for RTCP.
-const RTCP_FRACTION: f64 = 0.05;
-/// The window the media bit rate is measured over, as the RTCP session does when no session
-/// bandwidth was signalled.
+/// The share of the media it reports on that congestion control feedback may take: the 5%
+/// RFC 3550 section 6.2 recommends for RTCP.
+pub(crate) const FEEDBACK_SHARE: f64 = 0.05;
+/// The window the received media bit rate is measured over.
 const RATE_WINDOW: Duration = Duration::from_secs(2);
 const RATE_BUCKET: Duration = Duration::from_millis(250);
-/// What goes out with a feedback packet in the minimal compound RTCP packet early feedback
-/// travels in (RFC 4585 section 3.1): a receiver report and an SDES with a short CNAME.
+/// What goes out with a feedback packet in the minimal compound RTCP packet it travels in
+/// without reduced-size RTCP (RFC 4585 section 3.1): a receiver report and an SDES with a
+/// short CNAME.
 const COMPOUND_OCTETS: f64 = 28.0;
 /// UDP over IPv4, which RFC 3550 section 6.2 counts in the size of an RTCP packet.
 const LOWER_LAYER_OCTETS: f64 = 28.0;
 /// The size assumed for a feedback packet before one has been built.
 const INITIAL_FEEDBACK_OCTETS: f64 = 40.0;
-/// The longest interval the cadence stretches to. A congestion controller hears from the
-/// receiver at least this often however little RTCP bandwidth there is (`Gcc` converges as
-/// fast with a report every 500 ms as with one every 50 ms, and markedly slower beyond); the
-/// RTCP session still decides when the packet may leave.
-pub(crate) const MAX_ADAPTIVE_INTERVAL: Duration = Duration::from_millis(400);
+/// The shortest interval the cadence goes to, however much media there is.
+pub(crate) const MIN_ADAPTIVE_INTERVAL: Duration = Duration::from_millis(50);
+/// The longest interval the cadence stretches to while media flows: a sender's estimator
+/// works as well with a report every 50 ms as every 250 ms, and markedly worse with one a
+/// second (`gcc_feedback_rate.rs`); libwebrtc holds its transport feedback to the same range.
+pub(crate) const MAX_ADAPTIVE_INTERVAL: Duration = Duration::from_millis(250);
 
 /// The interval between two feedback packets of a generator (TWCC or RFC 8888).
 ///
-/// The RTCP session keeps all RTCP of the endpoint inside the RTCP bandwidth (RFC 3550
-/// section 6.2; RFC 4585 section 3.5), so a generator that builds a report every 100 ms hands
-/// the session more than it may send whenever a tenth of a second of RTCP bandwidth does not
-/// hold one report: the reports queue, the queue has an end, and what the sender finally
-/// hears is late or missing. "The RTCP reporting interval SHOULD be chosen" by what the
-/// bandwidth allows (RFC 8888 sections 3.1 and 4; draft-holmer-rmcat-transport-wide-cc-
-/// extensions-01 section 3: "with low uplink bandwidth feedback may be sent less often").
-///
-/// So the interval is the one in which the RTCP bandwidth of one of two members holds one
-/// RTCP packet with one report in it, by the arithmetic of RFC 3550 section 6.3.1, and never
-/// shorter than the configured interval: one report then rides every packet the session may
-/// send, and each covers everything since the one before.
+/// Congestion control feedback is sized to what it reports on, not to the rest of RTCP: the
+/// interval in which [`FEEDBACK_SHARE`] of the media received holds one feedback packet
+/// (with its lower layers, and the minimal compound packet around it unless reduced-size RTCP
+/// was negotiated), held within [`MIN_ADAPTIVE_INTERVAL`] and [`MAX_ADAPTIVE_INTERVAL`]. RFC
+/// 8888 section 3.1 asks that the reporting interval be chosen by the bandwidth it may use
+/// and sized for the congestion controller's needs; the RTCP session sends the packets as
+/// they come (`RtcpSessionBuilder::with_immediate_congestion_feedback`). `b=RR` (RFC 3556),
+/// when negotiated, is the share instead.
 pub(crate) struct FeedbackCadence {
-    /// The shortest interval: the configured one.
+    /// The fixed interval, when not adaptive.
     floor: Duration,
     adaptive: bool,
     /// `b=` lines of the session, as the RTCP session is told them.
@@ -52,8 +49,6 @@ pub(crate) struct FeedbackCadence {
     first_media: Option<Instant>,
     /// A running mean of the size of the feedback built, RTCP octets.
     feedback_octets: f64,
-    /// The media of the streams bound, by SSRC: whether each is video (else audio).
-    streams: std::collections::HashMap<u32, bool>,
 }
 
 impl FeedbackCadence {
@@ -66,24 +61,7 @@ impl FeedbackCadence {
             buckets: VecDeque::new(),
             first_media: None,
             feedback_octets: INITIAL_FEEDBACK_OCTETS,
-            streams: std::collections::HashMap::new(),
         }
-    }
-
-    /// A stream of the session was bound (either direction): its media counts towards the
-    /// nominal session bandwidth, as it does in the RTCP session.
-    pub(crate) fn on_bind(&mut self, info: &StreamInfo) {
-        let mime = info.mime_type.to_ascii_lowercase();
-        if mime.starts_with("video/") {
-            self.streams.insert(info.ssrc, true);
-        } else if mime.starts_with("audio/") {
-            self.streams.insert(info.ssrc, false);
-        }
-    }
-
-    /// A stream was unbound.
-    pub(crate) fn on_unbind(&mut self, info: &StreamInfo) {
-        self.streams.remove(&info.ssrc);
     }
 
     /// Whether no interval was configured at all: the generator is off.
@@ -91,7 +69,7 @@ impl FeedbackCadence {
         self.floor.is_zero()
     }
 
-    /// An RTP packet of the session passed, in either direction.
+    /// An RTP packet arrived: the media the feedback reports on.
     pub(crate) fn on_packet(&mut self, message: &TaggedPacket) {
         let Packet::Rtp(packet) = &message.message.packet else {
             return;
@@ -122,7 +100,7 @@ impl FeedbackCadence {
             Some(RtcpSessionControl::ReducedSize(reduced_size)) => {
                 self.reduced_size = *reduced_size;
             }
-            _ => self.on_packet(message),
+            _ => {}
         }
     }
 
@@ -149,35 +127,17 @@ impl FeedbackCadence {
         octets as f64 * 8.0 / span
     }
 
-    /// The RTCP bandwidth of the whole session, bits per second.
-    fn rtcp_bits_per_second(&self, now: Instant) -> f64 {
-        let session = match self.negotiated.session {
-            Some(session) => session as f64,
-            None => self
-                .media_bits_per_second(now)
-                .max(nominal_session_bandwidth(
-                    self.streams.values().any(|video| *video),
-                    self.streams.values().any(|video| !*video),
-                )),
-        };
-        match (self.negotiated.rs, self.negotiated.rr) {
-            (None, None) => session * RTCP_FRACTION,
-            // RFC 3556: a modifier that is absent keeps its default share of the 5%.
-            (rs, rr) => {
-                rs.map_or(session * RTCP_FRACTION * 0.25, |rs| rs as f64)
-                    + rr.map_or(session * RTCP_FRACTION * 0.75, |rr| rr as f64)
-            }
-        }
-    }
-
     /// The interval to the next feedback packet, as of `now`.
     pub(crate) fn interval(&self, now: Instant) -> Duration {
         if !self.adaptive || self.floor.is_zero() {
             return self.floor;
         }
-        let rtcp_bits = self.rtcp_bits_per_second(now);
-        if rtcp_bits <= 0.0 {
-            return MAX_ADAPTIVE_INTERVAL.max(self.floor);
+        let share = match self.negotiated.rr {
+            Some(rr) => rr as f64,
+            None => FEEDBACK_SHARE * self.media_bits_per_second(now),
+        };
+        if share <= 0.0 {
+            return MAX_ADAPTIVE_INTERVAL;
         }
         let packet_octets = self.feedback_octets
             + LOWER_LAYER_OCTETS
@@ -186,12 +146,8 @@ impl FeedbackCadence {
             } else {
                 COMPOUND_OCTETS
             };
-        // Two members share the RTCP bandwidth alike (RFC 3550 section 6.3.1): the interval
-        // in which this one's half holds one packet.
-        let seconds = packet_octets * 8.0 * 2.0 / rtcp_bits;
-        Duration::from_secs_f64(seconds.min(MAX_ADAPTIVE_INTERVAL.as_secs_f64()))
-            .max(self.floor)
-            .min(MAX_ADAPTIVE_INTERVAL.max(self.floor))
+        Duration::from_secs_f64(packet_octets * 8.0 / share)
+            .clamp(MIN_ADAPTIVE_INTERVAL, MAX_ADAPTIVE_INTERVAL)
     }
 }
 
@@ -215,7 +171,7 @@ mod tests {
         }
     }
 
-    /// `bits_per_second` of media for three seconds.
+    /// `bits_per_second` of media received for three seconds.
     fn after_media(cadence: &mut FeedbackCadence, bits_per_second: f64) -> Instant {
         let epoch = Instant::now();
         let octets = 500usize;
@@ -228,24 +184,27 @@ mod tests {
         epoch + Duration::from_secs(3)
     }
 
-    /// RFC 3550 section 6.2 and 6.3.1: at 100 kbit/s of media the RTCP bandwidth is 5 kbit/s,
-    /// half of it this member's, and a minimal compound packet with one 40-octet report is 96
-    /// octets with its lower layers: one fits every 0.31 s, not every 0.1 s.
+    /// At 64 kbit/s of media 5% is 3.2 kbit/s, and a 40-octet report in a minimal compound
+    /// packet with its lower layers is 96 octets: one every 0.24 s.
     #[test]
-    fn the_interval_is_what_the_rtcp_bandwidth_holds_one_report_in() {
+    fn the_interval_holds_the_feedback_in_five_percent_of_the_media() {
         let mut cadence = FeedbackCadence::new(Duration::from_millis(100), true);
-        let now = after_media(&mut cadence, 100_000.0);
+        let now = after_media(&mut cadence, 64_000.0);
         let interval = cadence.interval(now).as_secs_f64();
-        assert!((0.28..=0.34).contains(&interval), "{interval}");
+        assert!((0.22..=0.25).contains(&interval), "{interval}");
     }
 
-    /// With bandwidth to spare the configured interval rules: feedback is never generated
-    /// more often than asked for.
+    /// With much media the interval stops at 50 ms; with little, at 250 ms.
     #[test]
-    fn the_configured_interval_is_the_shortest() {
-        let mut cadence = FeedbackCadence::new(Duration::from_millis(100), true);
-        let now = after_media(&mut cadence, 2_000_000.0);
-        assert_eq!(Duration::from_millis(100), cadence.interval(now));
+    fn the_interval_is_held_between_50_and_250_ms() {
+        let mut fast = FeedbackCadence::new(Duration::from_millis(100), true);
+        let now = after_media(&mut fast, 5_000_000.0);
+        assert_eq!(MIN_ADAPTIVE_INTERVAL, fast.interval(now));
+        let mut slow = FeedbackCadence::new(Duration::from_millis(100), true);
+        let now = after_media(&mut slow, 16_000.0);
+        assert_eq!(MAX_ADAPTIVE_INTERVAL, slow.interval(now));
+        let idle = FeedbackCadence::new(Duration::from_millis(100), true);
+        assert_eq!(MAX_ADAPTIVE_INTERVAL, idle.interval(Instant::now()));
     }
 
     /// Reduced-size RTCP (RFC 5506) takes the report without the compound packet around it,
@@ -260,9 +219,9 @@ mod tests {
         assert!(reduced.interval(then) < compound.interval(now).mul_f64(0.8));
     }
 
-    /// `b=RS` / `b=RR` (RFC 3556) replace the 5%, here as there.
+    /// `b=RR` (RFC 3556) replaces the 5%.
     #[test]
-    fn negotiated_rtcp_bandwidth_sets_the_interval() {
+    fn negotiated_receiver_rtcp_bandwidth_sets_the_interval() {
         let mut cadence = FeedbackCadence::new(Duration::from_millis(50), true);
         let now = after_media(&mut cadence, 64_000.0);
         let before = cadence.interval(now);
@@ -275,7 +234,21 @@ mod tests {
             .into_packet(now),
         );
         let after = cadence.interval(now);
-        assert!(after < before.mul_f64(0.2), "{before:?} -> {after:?}");
+        assert!(after < before.mul_f64(0.5), "{before:?} -> {after:?}");
+    }
+
+    /// Media this endpoint sends is not what the feedback reports on.
+    #[test]
+    fn media_sent_does_not_count() {
+        let mut cadence = FeedbackCadence::new(Duration::from_millis(100), true);
+        let now = Instant::now();
+        for n in 0..1_000u64 {
+            cadence.on_write(&media(now + Duration::from_millis(n), 1_200));
+        }
+        assert_eq!(
+            MAX_ADAPTIVE_INTERVAL,
+            cadence.interval(now + Duration::from_secs(1))
+        );
     }
 
     /// The fixed setting ignores all of it.
@@ -284,20 +257,5 @@ mod tests {
         let mut cadence = FeedbackCadence::new(Duration::from_millis(100), false);
         let now = after_media(&mut cadence, 64_000.0);
         assert_eq!(Duration::from_millis(100), cadence.interval(now));
-    }
-
-    /// However little bandwidth there is, the interval stops at its bound.
-    #[test]
-    fn the_interval_is_bounded() {
-        let mut cadence = FeedbackCadence::new(Duration::from_millis(100), true);
-        cadence.on_write(
-            &RtcpSessionControl::Bandwidth(RtcpBandwidth {
-                session: Some(8_000),
-                rs: None,
-                rr: None,
-            })
-            .into_packet(Instant::now()),
-        );
-        assert_eq!(MAX_ADAPTIVE_INTERVAL, cadence.interval(Instant::now()));
     }
 }
