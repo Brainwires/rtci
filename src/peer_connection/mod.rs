@@ -3234,7 +3234,7 @@ impl RTCPeerConnection {
                 track.kind(),
                 &mut send_encodings,
                 &implemented,
-                |why| Error::ErrOperationError(why),
+                Error::ErrOperationError,
             )?;
             send_encodings
         };
@@ -3324,7 +3324,7 @@ impl RTCPeerConnection {
                 kind,
                 &mut init.send_encodings,
                 &implemented,
-                |why| Error::ErrOperationError(why),
+                Error::ErrOperationError,
             )?;
         }
         let mut codec_preferences = vec![];
