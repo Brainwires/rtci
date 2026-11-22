@@ -177,15 +177,15 @@ impl RTCPeerConnection {
     pub(crate) fn announce_receiver_track_ended(&mut self, id: RTCRtpTransceiverId) {
         let Some(receiver) = self
             .rtp_transceivers
-            .get(id)
-            .and_then(|transceiver| transceiver.receiver().as_ref())
+            .get_mut(id)
+            .and_then(|transceiver| transceiver.receiver_mut().as_mut())
         else {
             return;
         };
-        let track_id = receiver.track().track_id().clone();
-        if track_id.is_empty() {
+        if !receiver.take_unannounced_end() {
             return;
         }
+        let track_id = receiver.track().track_id().clone();
         self.pipeline_context
             .event_outs
             .push_back(RTCPeerConnectionEvent::OnTrack(RTCTrackEvent::OnClose(
