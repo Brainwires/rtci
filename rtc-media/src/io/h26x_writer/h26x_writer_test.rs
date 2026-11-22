@@ -51,10 +51,6 @@ fn test_h26x_writer_h265_flushes_exact_full_tail_fragment() {
         writer.writer.is_empty(),
         "writer must not flush before the final HEVC fragment"
     );
-    assert!(
-        !writer.buffer.is_empty(),
-        "writer should buffer the in-progress fragmented HEVC NAL"
-    );
 
     writer
         .write_rtp(&Packet {
@@ -63,10 +59,6 @@ fn test_h26x_writer_h265_flushes_exact_full_tail_fragment() {
         })
         .expect("write last fragment");
 
-    assert!(
-        writer.buffer.is_empty(),
-        "writer buffer should be drained after the final HEVC fragment"
-    );
     assert_eq!(
         writer.writer,
         vec![0x00, 0x00, 0x00, 0x01, 0x02, 0x01, 1, 2, 3, 4, 5, 6],
@@ -109,7 +101,6 @@ fn test_h26x_writer_h265_fragment_buffer_is_bounded() {
 
     // A middle fragment with no start is not buffered.
     writer.write_rtp(&fragment(0x01)).unwrap();
-    assert!(writer.buffer.is_empty());
 
     writer.write_rtp(&fragment(0x81)).unwrap(); // S=1, type 1
     let mut refused = false;
@@ -118,9 +109,9 @@ fn test_h26x_writer_h265_fragment_buffer_is_bounded() {
             refused = true;
             break;
         }
-        assert!(writer.buffer.len() <= MAX_H265_FU_NALU_SIZE);
     }
     assert!(refused, "the NAL unit grew past MAX_H265_FU_NALU_SIZE");
-    assert!(writer.buffer.is_empty(), "the partial NAL unit is dropped");
+    // The partial NAL unit is dropped: its end fragment completes nothing.
+    writer.write_rtp(&fragment(0x41)).unwrap();
     assert!(writer.writer.is_empty());
 }

@@ -5,7 +5,7 @@ mod h26x_writer_test;
 
 use std::io::Write;
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use rtp::codec::h264::H264Packet;
 use rtp::codec::h265::H265Packet;
 use rtp::packetizer::Depacketizer;
@@ -55,8 +55,6 @@ pub struct H26xWriter<W: Write> {
     is_hevc: bool,
     // H264-specific fields
     has_key_frame: bool,
-    // H265-specific fields
-    buffer: BytesMut,
 }
 
 impl<W: Write> H26xWriter<W> {
@@ -72,7 +70,6 @@ impl<W: Write> H26xWriter<W> {
             },
             is_hevc,
             has_key_frame: false,
-            buffer: BytesMut::new(),
         }
     }
 }
@@ -93,11 +90,8 @@ impl<W: Write> Writer for H26xWriter<W> {
 
     /// close closes the underlying writer
     fn close(&mut self) -> Result<()> {
-        // Flush any remaining buffered data (for H265 fragmentation units)
-        if !self.buffer.is_empty() {
-            self.writer.write_all(&self.buffer)?;
-            self.buffer.clear();
-        }
+        // A NAL unit whose last fragment never came stays in the depacketizer: an incomplete
+        // NAL unit is not written.
         self.writer.flush()?;
         Ok(())
     }
