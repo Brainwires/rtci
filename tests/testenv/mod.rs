@@ -776,9 +776,10 @@ impl EnvPeer {
                     TurnEvent::TransactionTimeout(tid) => {
                         self.errors.push(format!("transaction timeout {tid:?}"))
                     }
-                    TurnEvent::BindingError(_, e)
-                    | TurnEvent::AllocateError(_, e)
-                    | TurnEvent::CreatePermissionError(_, e) => self.errors.push(e.to_string()),
+                    TurnEvent::BindingError(_, e) => self.errors.push(e.to_string()),
+                    TurnEvent::AllocateError(_, e) | TurnEvent::CreatePermissionError(_, e) => {
+                        self.errors.push(e.to_string())
+                    }
                     _ => {}
                 }
             }

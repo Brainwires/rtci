@@ -73,9 +73,25 @@ pub(crate) enum TransactionType {
     RefreshRequest(RelayedAddr, Duration, Retry),
     /// The relay, the peer being bound, and the retry state.
     ChannelBindRequest(RelayedAddr, SocketAddr, Retry),
+    /// A Refresh with LIFETIME 0 for an allocation the client does not keep: the server made
+    /// it, but its success response was unusable. Nothing is reported about it.
+    OrphanRelease,
 }
 
 impl TransactionType {
+    /// The allocation the request is about, if it is about one.
+    pub(crate) fn relay(&self) -> Option<RelayedAddr> {
+        match self {
+            Self::CreatePermissionRequest(relayed, ..)
+            | Self::RefreshRequest(relayed, ..)
+            | Self::ChannelBindRequest(relayed, ..) => Some(*relayed),
+            Self::BindingRequest
+            | Self::AllocateAttempt(_)
+            | Self::AllocateRequest(_)
+            | Self::OrphanRelease => None,
+        }
+    }
+
     /// The id events about the request sent as `wire` are reported under: the id its caller
     /// was handed, which a retry or the Allocate exchange does not put on the wire.
     pub(crate) fn report_id(&self, wire: TransactionId) -> TransactionId {
@@ -84,7 +100,7 @@ impl TransactionType {
             Self::CreatePermissionRequest(_, _, _, retry)
             | Self::RefreshRequest(_, _, retry)
             | Self::ChannelBindRequest(_, _, retry) => retry.report_id(wire),
-            Self::BindingRequest | Self::AllocateRequest(_) => wire,
+            Self::BindingRequest | Self::AllocateRequest(_) | Self::OrphanRelease => wire,
         }
     }
 }
@@ -281,6 +297,12 @@ impl TransactionMap {
     // Delete deletes a transaction by its key
     pub(crate) fn delete(&mut self, tid: &TransactionId) -> Option<Transaction> {
         self.tr_map.remove(tid)
+    }
+
+    /// Drops every transaction `gone` says belongs to something that no longer exists, so
+    /// nothing is retransmitted or reported for it.
+    pub(crate) fn delete_where(&mut self, gone: impl Fn(&TransactionType) -> bool) {
+        self.tr_map.retain(|_, tr| !gone(&tr.transaction_type));
     }
 
     // close_and_delete_all closes and deletes all transactions

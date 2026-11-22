@@ -14,7 +14,8 @@ use super::permission::*;
 use super::transaction::*;
 use crate::proto;
 
-use crate::client::binding::BindingState;
+use crate::client::binding::{BINDING_REFRESH_AGE, BindingManager, BindingState};
+use crate::client::error::RequestError;
 use crate::client::{Client, Event, RelayedAddr};
 use shared::error::{Error, Result};
 
@@ -23,6 +24,11 @@ const PERM_REFRESH_INTERVAL: Duration = Duration::from_secs(120);
 // The Permission Lifetime MUST be 300 seconds (= 5 minutes).
 const PERM_LIFETIME: Duration = Duration::from_secs(300);
 const MAX_RETRY_ATTEMPTS: u16 = 3;
+/// How often the bindings of an allocation are looked over for ones to rebind.
+const BINDING_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
+/// How long a ChannelBind the server refused is not sent again. The data goes as Send
+/// indications meanwhile, so this only bounds how often a server that keeps refusing is asked.
+const CHANNEL_BIND_RETRY_INTERVAL: Duration = Duration::from_secs(60);
 /// Most peer addresses one CreatePermission names. A refresh of more permissions is split into
 /// several requests, which keeps each well inside one UDP datagram (an IPv6 XOR-PEER-ADDRESS is
 /// 24 bytes) and far from the 64 KiB a STUN length field can describe.
@@ -52,12 +58,23 @@ pub(crate) struct RelayState {
     pub(crate) long_term_integrity_key: Vec<u8>,
     pub(crate) nonce: Nonce,
     pub(crate) lifetime: Duration,
+    /// When the server deletes the allocation unless a Refresh reaches it first: the lifetime
+    /// it last returned, counted from that response.
+    pub(crate) expires_at: Instant,
+    /// Whether the application released the allocation ([`Relay::close`]). Nothing is sent
+    /// for it any more but the Refresh with LIFETIME 0 and its retries.
+    pub(crate) releasing: bool,
     allocation_refresh_interval_cap: Option<Duration>,
     /// Permissions by peer IP address: a permission covers every port on that address
     /// (RFC 8656 §9).
-    perm_map: HashMap<IpAddr, Permission>,
+    pub(crate) perm_map: HashMap<IpAddr, Permission>,
+    /// The allocation's channel bindings. They are the allocation's own and end with it
+    /// (RFC 8656 §12).
+    pub(crate) binding_mgr: BindingManager,
     refresh_alloc_timer: Instant,
     refresh_perms_timer: Instant,
+    /// When the bindings are next looked over; `None` while no binding is live.
+    bindings_timer: Option<Instant>,
 }
 
 impl RelayState {
@@ -76,14 +93,33 @@ impl RelayState {
             long_term_integrity_key,
             nonce,
             lifetime,
+            expires_at: now.add(lifetime),
+            releasing: false,
             allocation_refresh_interval_cap,
             perm_map: HashMap::new(),
+            binding_mgr: BindingManager::new(),
             refresh_alloc_timer: now.add(allocation_refresh_interval(
                 lifetime,
                 allocation_refresh_interval_cap,
             )),
             refresh_perms_timer: now.add(PERM_REFRESH_INTERVAL),
+            bindings_timer: None,
         }
+    }
+
+    /// Whether requests for this allocation are signed. An allocation a server gave without
+    /// asking for a credential (RFC 8656 §7.2 step 1) has no key.
+    pub(crate) fn key(&self) -> Option<Vec<u8>> {
+        (!self.long_term_integrity_key.is_empty()).then(|| self.long_term_integrity_key.clone())
+    }
+
+    /// Whether the client holds a permission for `ip`, asked for or installed, that has not
+    /// run out at `now`: data from an address without one is not relayed by the server
+    /// (RFC 8656 §11.4, §12.6).
+    pub(crate) fn expects_data_from(&self, ip: &IpAddr, now: Instant) -> bool {
+        self.perm_map
+            .get(ip)
+            .is_some_and(|perm| perm.state() == PermState::Idle || perm.is_permitted(now))
     }
 }
 
@@ -106,19 +142,23 @@ impl Relay<'_> {
     ///
     /// # Errors
     ///
-    /// Fails if the allocation no longer exists or the request cannot be encoded.
+    /// Fails if the allocation no longer exists or was released, or the request cannot be
+    /// encoded.
     pub fn create_permission(
         &mut self,
         now: Instant,
         peer_addr: SocketAddr,
     ) -> Result<Option<TransactionId>> {
         if let Some(relay) = self.client.relays.get_mut(&self.relayed_addr) {
+            if relay.releasing {
+                return Err(Error::ErrConnClosed);
+            }
             relay
                 .perm_map
                 .entry(peer_addr.ip())
                 .or_insert_with(Permission::default);
             if let Some(perm) = relay.perm_map.get(&peer_addr.ip())
-                && perm.state() == PermState::Idle
+                && !perm.is_permitted(now)
             {
                 return Ok(Some(self.create_permissions(
                     now,
@@ -134,178 +174,277 @@ impl Relay<'_> {
     }
 
     pub(crate) fn poll_timeout(&self) -> Option<Instant> {
-        if let Some(relay) = self.client.relays.get(&self.relayed_addr) {
-            if relay.refresh_alloc_timer < relay.refresh_perms_timer {
-                Some(relay.refresh_alloc_timer)
-            } else {
-                Some(relay.refresh_perms_timer)
-            }
-        } else {
-            None
+        let relay = self.client.relays.get(&self.relayed_addr)?;
+        if relay.releasing {
+            // Only the release is outstanding, and its transaction has its own deadline.
+            return None;
         }
+        let mut deadline = relay.refresh_alloc_timer.min(relay.refresh_perms_timer);
+        if let Some(bindings_timer) = relay.bindings_timer {
+            deadline = deadline.min(bindings_timer);
+        }
+        Some(deadline)
     }
 
     pub(crate) fn handle_timeout(&mut self, now: Instant) {
-        let (refresh_alloc_timer, refresh_perms_timer) =
-            if let Some(relay) = self.client.relays.get_mut(&self.relayed_addr) {
-                let refresh_alloc_timer = if relay.refresh_alloc_timer <= now {
-                    // Floored so the timer always moves. A zero step would leave it pinned to an
-                    // instant already in the past — see `MIN_ALLOC_REFRESH_INTERVAL`.
-                    let step = allocation_refresh_interval(
-                        relay.lifetime,
-                        relay.allocation_refresh_interval_cap,
-                    );
-                    relay.refresh_alloc_timer = now.add(step);
-                    Some(relay.lifetime)
-                } else {
-                    None
-                };
+        let Some(relay) = self.client.relays.get_mut(&self.relayed_addr) else {
+            return;
+        };
+        if relay.releasing {
+            return;
+        }
 
-                let refresh_perms_timer = if relay.refresh_perms_timer <= now {
-                    relay.refresh_perms_timer = now.add(PERM_REFRESH_INTERVAL);
-                    true
-                } else {
-                    false
-                };
+        let refresh_alloc = if relay.refresh_alloc_timer <= now {
+            // Floored so the timer always moves. A zero step would leave it pinned to an
+            // instant already in the past — see `MIN_ALLOC_REFRESH_INTERVAL`.
+            let step =
+                allocation_refresh_interval(relay.lifetime, relay.allocation_refresh_interval_cap);
+            relay.refresh_alloc_timer = now.add(step);
+            Some(relay.lifetime)
+        } else {
+            None
+        };
 
-                (refresh_alloc_timer, refresh_perms_timer)
-            } else {
-                (None, false)
-            };
+        let refresh_perms = if relay.refresh_perms_timer <= now {
+            relay.refresh_perms_timer = now.add(PERM_REFRESH_INTERVAL);
+            true
+        } else {
+            false
+        };
 
-        if let Some(lifetime) = refresh_alloc_timer {
+        // A binding lasts 10 minutes from its last ChannelBind (RFC 8656 §12). One that
+        // carried data since then is rebound before a send would do it, so a channel the
+        // client only receives on does not run out.
+        let mut rebind = vec![];
+        if relay.bindings_timer.is_some_and(|at| at <= now) {
+            let mut any_live = false;
+            for b in relay.binding_mgr.iter_mut() {
+                if !b.is_live(now) {
+                    continue;
+                }
+                any_live = true;
+                if b.state() == BindingState::Ready
+                    && b.used
+                    && now.saturating_duration_since(b.refreshed_at()) + BINDING_SWEEP_INTERVAL
+                        >= BINDING_REFRESH_AGE
+                {
+                    b.set_state(BindingState::Refresh);
+                    rebind.push(b.addr);
+                }
+            }
+            relay.bindings_timer = any_live.then(|| now.add(BINDING_SWEEP_INTERVAL));
+        }
+
+        if let Some(lifetime) = refresh_alloc {
             let _ = self.refresh_allocation(now, lifetime);
         }
-        if refresh_perms_timer {
+        if refresh_perms {
             let _ = self.refresh_permissions(now);
+        }
+        for bind_addr in rebind {
+            if self
+                .rebind_channel(now, bind_addr, Retry::default())
+                .is_err()
+                && let Some(relay) = self.client.relays.get_mut(&self.relayed_addr)
+                && let Some(b) = relay.binding_mgr.get_by_addr(&bind_addr)
+            {
+                b.set_state(BindingState::Ready);
+            }
         }
     }
 
     /// Sends `p` to `peer_addr` through the relay.
     ///
-    /// Uses ChannelData framing if a channel is bound for that peer, otherwise a Data indication.
+    /// Uses ChannelData framing once a channel is bound for that peer, and a Send indication
+    /// until then. A channel is bound for every peer address sent to, as long as channel
+    /// numbers are free; without one the data keeps going as Send indications.
     ///
     /// # Errors
     ///
-    /// Fails if the allocation is gone, or if no permission exists for `peer_addr`.
+    /// Fails if the allocation is gone or was released, if no permission is in place for
+    /// `peer_addr` (none was created, the server refused it, or its 300 s ran out without a
+    /// refresh), or if `p` is longer than the message that would carry it can say (65 535
+    /// bytes of ChannelData).
     pub fn send_to(&mut self, now: Instant, p: &[u8], peer_addr: SocketAddr) -> Result<()> {
-        // check if we have a permission for the destination IP addr
-        let result = if let Some(relay) = self.client.relays.get_mut(&self.relayed_addr) {
-            if let Some(perm) = relay.perm_map.get_mut(&peer_addr.ip()) {
-                if perm.state() != PermState::Permitted {
-                    Err(Error::ErrNoPermission)
-                } else {
-                    Ok((relay.long_term_integrity_key.clone(), relay.nonce.clone()))
-                }
-            } else {
-                Err(Error::ErrNoPermission)
-            }
-        } else {
-            Err(Error::ErrConnClosed)
+        let Some(relay) = self.client.relays.get(&self.relayed_addr) else {
+            return Err(Error::ErrConnClosed);
         };
+        if relay.releasing {
+            return Err(Error::ErrConnClosed);
+        }
+        // check if we have a permission for the destination IP addr
+        if !relay
+            .perm_map
+            .get(&peer_addr.ip())
+            .is_some_and(|perm| perm.is_permitted(now))
+        {
+            return Err(Error::ErrNoPermission);
+        }
 
-        let (long_term_integrity_key, nonce) = result?;
-
-        self.send(now, p, peer_addr, long_term_integrity_key, nonce)
+        self.send(now, p, peer_addr)
     }
 
-    fn send(
-        &mut self,
-        now: Instant,
-        p: &[u8],
-        peer_addr: SocketAddr,
-        long_term_integrity_key: Vec<u8>,
-        nonce: Nonce,
-    ) -> Result<()> {
-        let channel_number = {
-            let (bind_st, bind_at, bind_number, bind_addr) = {
-                let b = if let Some(b) = self.client.binding_mgr.find_by_addr(&peer_addr) {
-                    b
-                } else {
-                    self.client
-                        .binding_mgr
-                        .create(now, peer_addr)
-                        .ok_or_else(|| Error::Other("Addr not found".to_owned()))?
-                };
-                (b.state(), b.refreshed_at(), b.number, b.addr)
-            };
-
-            if bind_st == BindingState::Idle
-                || bind_st == BindingState::Request
-                || bind_st == BindingState::Failed
-            {
-                // block only callers with the same binding until
-                // the binding transaction has been complete
-                // binding state may have been changed while waiting. check again.
-                if bind_st == BindingState::Idle {
-                    if let Some(b) = self.client.binding_mgr.get_by_addr(&bind_addr) {
-                        b.set_state(BindingState::Request);
-                    }
-                    self.channel_bind(
-                        now,
-                        self.relayed_addr,
-                        bind_addr,
-                        bind_number,
-                        nonce,
-                        long_term_integrity_key,
-                        Retry::default(),
-                    )?;
-                }
-
-                // send data using SendIndication
-                let mut msg = Message::new();
-                msg.build(&[
-                    Box::new(TransactionId::new()),
-                    Box::new(MessageType::new(METHOD_SEND, CLASS_INDICATION)),
-                    Box::new(proto::data::Data(p.to_vec())),
-                    Box::new(proto::peeraddr::PeerAddress {
-                        ip: peer_addr.ip(),
-                        port: peer_addr.port(),
-                    }),
-                    Box::new(FINGERPRINT),
-                ])?;
-
-                // indication has no transaction (fire-and-forget)
-                self.client
-                    .write_to(now, &msg.raw, self.client.turn_server_addr_or_err()?);
-                return Ok(());
-            }
-
-            // binding is ready
-            // check if the binding needs a refresh
-            if bind_st == BindingState::Ready
-                && now.saturating_duration_since(bind_at) > PERM_LIFETIME
-            {
-                if let Some(b) = self.client.binding_mgr.get_by_addr(&bind_addr) {
-                    b.set_state(BindingState::Refresh);
-                }
-                self.channel_bind(
-                    now,
-                    self.relayed_addr,
-                    bind_addr,
-                    bind_number,
-                    nonce,
-                    long_term_integrity_key,
-                    Retry::default(),
-                )?;
-            }
-
-            bind_number
+    fn send(&mut self, now: Instant, p: &[u8], peer_addr: SocketAddr) -> Result<()> {
+        let Some(relay) = self.client.relays.get_mut(&self.relayed_addr) else {
+            return Err(Error::ErrConnClosed);
         };
 
-        // send via ChannelData
-        self.send_channel_data(now, p, channel_number)
+        // What to do about the channel for this peer: bind it, rebind it, or neither; and
+        // whether the data can go on it.
+        let mut bind = None;
+        let mut channel = None;
+        if relay.binding_mgr.find_by_addr(&peer_addr).is_none() {
+            // Out of channel numbers: binding is optional (RFC 8656 §12), the data goes as a
+            // Send indication.
+            let _ = relay.binding_mgr.create(now, peer_addr);
+        }
+        if let Some(b) = relay.binding_mgr.get_by_addr(&peer_addr) {
+            if b.state() == BindingState::Failed && b.retry_at.is_none_or(|at| at <= now) {
+                b.set_state(BindingState::Idle);
+            }
+            match b.state() {
+                BindingState::Idle => {
+                    b.set_state(BindingState::Request);
+                    bind = Some(b.number);
+                }
+                BindingState::Request | BindingState::Failed => {}
+                BindingState::Ready | BindingState::Refresh => {
+                    if !b.is_live(now) {
+                        // The binding ran out on the server, which now drops ChannelData on
+                        // that number: bind it again, the same number to the same peer.
+                        if b.state() == BindingState::Ready {
+                            b.set_state(BindingState::Request);
+                            bind = Some(b.number);
+                        }
+                    } else {
+                        if b.state() == BindingState::Ready
+                            && now.saturating_duration_since(b.refreshed_at()) > BINDING_REFRESH_AGE
+                        {
+                            b.set_state(BindingState::Refresh);
+                            bind = Some(b.number);
+                        }
+                        channel = Some(b.number);
+                    }
+                }
+            }
+        }
+
+        if let Some(channel_number) = channel
+            && p.len() > usize::from(u16::MAX)
+        {
+            // Refused before anything is sent for it, the rebind included.
+            if bind.is_some()
+                && let Some(b) = relay.binding_mgr.get_by_addr(&peer_addr)
+            {
+                b.set_state(BindingState::Ready);
+            }
+            debug!(
+                "{} bytes do not fit ChannelData on {channel_number}",
+                p.len()
+            );
+            return Err(Error::ErrBadChannelDataLength);
+        }
+
+        if let Some(bind_number) = bind {
+            let (nonce, key) = (relay.nonce.clone(), relay.long_term_integrity_key.clone());
+            self.channel_bind(
+                now,
+                self.relayed_addr,
+                peer_addr,
+                bind_number,
+                nonce,
+                key,
+                Retry::default(),
+            )?;
+        }
+
+        match channel {
+            Some(channel_number) => {
+                if let Some(relay) = self.client.relays.get_mut(&self.relayed_addr)
+                    && let Some(b) = relay.binding_mgr.get_by_addr(&peer_addr)
+                {
+                    b.used = true;
+                }
+                self.send_channel_data(now, p, channel_number)
+            }
+            None => self.send_indication(now, p, peer_addr),
+        }
+    }
+
+    /// Sends `p` to `peer_addr` in a Send indication (RFC 8656 §11.1).
+    fn send_indication(&mut self, now: Instant, p: &[u8], peer_addr: SocketAddr) -> Result<()> {
+        let mut msg = Message::new();
+        msg.build(&[
+            Box::new(TransactionId::new()),
+            Box::new(MessageType::new(METHOD_SEND, CLASS_INDICATION)),
+            Box::new(proto::data::Data(p.to_vec())),
+            Box::new(proto::peeraddr::PeerAddress {
+                ip: peer_addr.ip(),
+                port: peer_addr.port(),
+            }),
+            Box::new(FINGERPRINT),
+        ])?;
+
+        // indication has no transaction (fire-and-forget)
+        self.client
+            .write_to(now, &msg.raw, self.client.turn_server_addr_or_err()?);
+        Ok(())
     }
 
     // Close closes the connection.
     // Any blocked ReadFrom or write_to operations will be unblocked and return errors.
-    /// Releases the allocation by refreshing it with a zero lifetime.
+    /// Releases the allocation by refreshing it with a zero lifetime (RFC 8656 §8).
+    ///
+    /// From here on the allocation is not refreshed and nothing can be sent through it,
+    /// whatever becomes of the request. [`Event::AllocationReleased`] follows when the server
+    /// confirms, answers 437 (it no longer had the allocation), or never answers; in that last
+    /// case the server drops the allocation when its lifetime runs out.
     ///
     /// # Errors
     ///
     /// Fails if the refresh request cannot be sent.
     pub fn close(&mut self, now: Instant) -> Result<()> {
+        let Some(relay) = self.client.relays.get_mut(&self.relayed_addr) else {
+            return Err(Error::ErrConnClosed);
+        };
+        if relay.releasing {
+            return Ok(());
+        }
+        relay.releasing = true;
+        // Whatever else is under way for the allocation no longer matters.
+        let relayed_addr = self.relayed_addr;
+        self.client
+            .tr_map
+            .delete_where(|tr| tr.relay() == Some(relayed_addr));
         self.refresh_allocation(now, Duration::from_secs(0))
+    }
+
+    /// Forgets the allocation and everything under way for it.
+    fn forget(&mut self) {
+        let relayed_addr = self.relayed_addr;
+        self.client.relays.remove(&relayed_addr);
+        self.client
+            .tr_map
+            .delete_where(|tr| tr.relay() == Some(relayed_addr));
+    }
+
+    /// The server no longer holds the allocation: the client drops its copy, with its
+    /// permissions and channel bindings, and says so.
+    pub(super) fn lose(&mut self, err: RequestError) {
+        debug!("allocation {} lost: {err}", self.relayed_addr);
+        self.forget();
+        self.client
+            .events
+            .push_back(Event::AllocationLost(self.relayed_addr, err));
+    }
+
+    /// The allocation the application released is done with.
+    pub(super) fn released(&mut self) {
+        debug!("allocation released; relay {} dropped", self.relayed_addr);
+        self.forget();
+        self.client
+            .events
+            .push_back(Event::AllocationReleased(self.relayed_addr));
     }
 
     fn create_permissions(
@@ -315,51 +454,34 @@ impl Relay<'_> {
         peer_addr_opt: Option<SocketAddr>,
         retry: Retry,
     ) -> Result<TransactionId> {
-        let (username, realm) = (self.client.username(), self.client.realm());
-        if let Some(relay) = self.client.relays.get_mut(&self.relayed_addr) {
-            let msg = {
-                let mut setters: Vec<Box<dyn Setter + '_>> = vec![
-                    Box::new(TransactionId::new()),
-                    Box::new(MessageType::new(METHOD_CREATE_PERMISSION, CLASS_REQUEST)),
-                ];
-
-                for addr in peer_addrs {
-                    setters.push(Box::new(proto::peeraddr::PeerAddress {
-                        ip: addr.ip(),
-                        port: addr.port(),
-                    }));
-                }
-
-                setters.push(Box::new(username));
-                setters.push(Box::new(realm));
-                setters.push(Box::new(relay.nonce.clone()));
-                setters.push(Box::new(MessageIntegrity::new_raw_integrity_with_provider(
-                    relay.long_term_integrity_key.clone(),
-                    self.client.crypto_provider.crypto(),
-                )));
-                setters.push(Box::new(FINGERPRINT));
-
-                let mut msg = Message::new();
-                msg.build(&setters)?;
-                msg
-            };
-
-            let integrity_key = relay.long_term_integrity_key.clone();
-            Ok(self.client.perform_transaction(
-                now,
-                &msg,
-                self.client.turn_server_addr_or_err()?,
-                TransactionType::CreatePermissionRequest(
-                    self.relayed_addr,
-                    peer_addr_opt,
-                    peer_addrs.to_vec(),
-                    retry,
-                ),
-                Some(integrity_key),
-            ))
-        } else {
-            Err(Error::ErrConnClosed)
-        }
+        let Some(relay) = self.client.relays.get(&self.relayed_addr) else {
+            return Err(Error::ErrConnClosed);
+        };
+        let attrs: Vec<Box<dyn Setter>> = peer_addrs
+            .iter()
+            .map(|addr| {
+                Box::new(proto::peeraddr::PeerAddress {
+                    ip: addr.ip(),
+                    port: addr.port(),
+                }) as Box<dyn Setter>
+            })
+            .collect();
+        let msg = self
+            .client
+            .build_request(METHOD_CREATE_PERMISSION, attrs, relay)?;
+        let integrity_key = relay.key();
+        Ok(self.client.perform_transaction(
+            now,
+            &msg,
+            self.client.turn_server_addr_or_err()?,
+            TransactionType::CreatePermissionRequest(
+                self.relayed_addr,
+                peer_addr_opt,
+                peer_addrs.to_vec(),
+                retry,
+            ),
+            integrity_key,
+        ))
     }
 
     /// Takes the NONCE, and the REALM when there is one, from a 438 (Stale Nonce) response so
@@ -407,6 +529,51 @@ impl Relay<'_> {
         }
     }
 
+    /// Whether the error response `res` is one the request can be sent again after, and takes
+    /// what that needs from it: the nonce of a 438 (Stale Nonce), or the realm and nonce of a
+    /// 401 (Unauthorized) to a request that carried no credential because the server had not
+    /// asked for one when it made the allocation.
+    fn take_challenge(&mut self, res: &Message) -> bool {
+        let mut code = ErrorCodeAttribute::default();
+        if code.get_from(res).is_err() {
+            return false;
+        }
+        if code.code == CODE_STALE_NONCE {
+            return self.take_stale_nonce(res);
+        }
+        if code.code != CODE_UNAUTHORIZED
+            || self
+                .client
+                .relays
+                .get(&self.relayed_addr)
+                .is_none_or(|relay| relay.key().is_some())
+        {
+            return false;
+        }
+        let (Ok(nonce), Ok(realm)) = (
+            Nonce::get_from_as(res, ATTR_NONCE),
+            Realm::get_from_as(res, ATTR_REALM),
+        ) else {
+            return false;
+        };
+        let Ok(key) = MessageIntegrity::long_term_integrity_key(
+            self.client.username.text.clone(),
+            realm.text.clone(),
+            self.client.password.clone(),
+            self.client.crypto_provider.crypto(),
+        ) else {
+            return false;
+        };
+        self.client.realm = realm;
+        if let Some(relay) = self.client.relays.get_mut(&self.relayed_addr) {
+            relay.long_term_integrity_key = key;
+            relay.nonce = nonce;
+            true
+        } else {
+            false
+        }
+    }
+
     pub(super) fn handle_create_permission_response(
         &mut self,
         now: Instant,
@@ -416,46 +583,96 @@ impl Relay<'_> {
         retry: Retry,
     ) -> Result<()> {
         if !self.client.relays.contains_key(&self.relayed_addr) {
-            return Err(Error::ErrConnClosed);
+            return Ok(());
         }
         let id = retry.report_id(res.transaction_id);
 
-        if res.typ.class == CLASS_ERROR_RESPONSE {
-            let mut code = ErrorCodeAttribute::default();
-            let result = code.get_from(&res);
-            let err = if result.is_err() {
-                Error::Other(format!("{}", res.typ))
-            } else if code.code == CODE_STALE_NONCE {
-                if self.take_stale_nonce(&res) && !retry.stale_nonce {
-                    // The same peers again, with the new nonce and a new transaction id.
-                    self.create_permissions(
-                        now,
-                        &peer_addrs,
-                        peer_addr_opt,
-                        retry.after_stale_nonce(res.transaction_id),
-                    )?;
-                    return Ok(());
-                }
-                Error::ErrTryAgain
-            } else {
-                Error::Other(format!("{} (error {})", res.typ, code))
+        if res.typ.class != CLASS_ERROR_RESPONSE {
+            let Some(relay) = self.client.relays.get_mut(&self.relayed_addr) else {
+                return Ok(());
             };
+            // The server installed or refreshed every permission the request named, for 300 s
+            // from now (RFC 8656 §9, §10.3).
+            let until = now.add(PERM_LIFETIME);
             if let Some(peer_addr) = peer_addr_opt {
-                self.client
-                    .events
-                    .push_back(Event::CreatePermissionError(id, err));
-                if let Some(relay) = self.client.relays.get_mut(&self.relayed_addr) {
-                    relay.perm_map.remove(&peer_addr.ip());
+                if let Some(perm) = relay.perm_map.get_mut(&peer_addr.ip()) {
+                    perm.permit_until(until);
+                    self.client
+                        .events
+                        .push_back(Event::CreatePermissionResponse(id, peer_addr));
+                }
+            } else {
+                for peer_addr in &peer_addrs {
+                    if let Some(perm) = relay.perm_map.get_mut(&peer_addr.ip())
+                        && perm.state() == PermState::Permitted
+                    {
+                        perm.permit_until(until);
+                    }
                 }
             }
-        } else if let Some(peer_addr) = peer_addr_opt
-            && let Some(relay) = self.client.relays.get_mut(&self.relayed_addr)
-            && let Some(perm) = relay.perm_map.get_mut(&peer_addr.ip())
-        {
-            perm.set_state(PermState::Permitted);
+            return Ok(());
+        }
+
+        let mut err = RequestError::of(&res);
+        if self.take_challenge(&res) {
+            if !retry.stale_nonce {
+                // The same peers again, with the new nonce and a new transaction id.
+                self.create_permissions(
+                    now,
+                    &peer_addrs,
+                    peer_addr_opt,
+                    retry.after_stale_nonce(res.transaction_id),
+                )?;
+                return Ok(());
+            }
+            err = RequestError::Failed(Error::ErrTryAgain);
+        }
+
+        // 437 (Allocation Mismatch) to anything but an Allocate: the allocation no longer
+        // exists (RFC 8656 §5).
+        let allocation_gone = err.is(CODE_ALLOC_MISMATCH);
+        if let Some(peer_addr) = peer_addr_opt {
+            if let Some(relay) = self.client.relays.get_mut(&self.relayed_addr) {
+                relay.perm_map.remove(&peer_addr.ip());
+            }
             self.client
                 .events
-                .push_back(Event::CreatePermissionResponse(id, peer_addr));
+                .push_back(Event::CreatePermissionError(id, err));
+            if allocation_gone {
+                self.lose(RequestError::of(&res));
+            }
+        } else if allocation_gone {
+            self.lose(err);
+        } else if !res.contains(ATTR_MESSAGE_INTEGRITY)
+            && self
+                .client
+                .relays
+                .get(&self.relayed_addr)
+                .is_some_and(|relay| relay.key().is_some())
+        {
+            // An unsigned 401 or 438 is all a server can say about a credential or nonce it
+            // does not accept, and all anyone else can forge. It ends this refresh, not the
+            // permissions: they last what the server last granted, and are asked for again.
+            debug!("permission refresh failed ({err}); the permissions keep their time");
+        } else if peer_addrs.len() > 1 {
+            // The server refuses a request for one address it will not permit, and with it
+            // the refresh of every other address the request named. Each is asked for on its
+            // own, so only the refused ones end.
+            debug!("permission refresh refused ({err}); refreshing each address on its own");
+            for peer_addr in &peer_addrs {
+                self.create_permissions(now, &[*peer_addr], None, Retry::default())?;
+            }
+        } else if let Some(peer_addr) = peer_addrs.first() {
+            // The permission is not refreshed: it ends on the server within 300 s of its last
+            // refresh, and here now, so nothing more is sent to a peer the server will drop.
+            if let Some(relay) = self.client.relays.get_mut(&self.relayed_addr) {
+                relay.perm_map.remove(&peer_addr.ip());
+            }
+            self.client.events.push_back(Event::PermissionLost(
+                self.relayed_addr,
+                peer_addr.ip(),
+                err,
+            ));
         }
 
         Ok(())
@@ -471,36 +688,23 @@ impl Relay<'_> {
         lifetime: Duration,
         retry: Retry,
     ) -> Result<()> {
-        let (username, realm) = (self.client.username(), self.client.realm());
-        if let Some(relay) = self.client.relays.get_mut(&self.relayed_addr) {
-            let mut msg = Message::new();
-            msg.build(&[
-                Box::new(TransactionId::new()),
-                Box::new(MessageType::new(METHOD_REFRESH, CLASS_REQUEST)),
-                Box::new(proto::lifetime::Lifetime(lifetime)),
-                Box::new(username),
-                Box::new(realm),
-                Box::new(relay.nonce.clone()),
-                Box::new(MessageIntegrity::new_raw_integrity_with_provider(
-                    relay.long_term_integrity_key.clone(),
-                    self.client.crypto_provider.crypto(),
-                )),
-                Box::new(FINGERPRINT),
-            ])?;
-
-            let integrity_key = relay.long_term_integrity_key.clone();
-            let _ = self.client.perform_transaction(
-                now,
-                &msg,
-                self.client.turn_server_addr_or_err()?,
-                TransactionType::RefreshRequest(self.relayed_addr, lifetime, retry),
-                Some(integrity_key),
-            );
-
-            Ok(())
-        } else {
-            Err(Error::ErrConnClosed)
-        }
+        let Some(relay) = self.client.relays.get(&self.relayed_addr) else {
+            return Err(Error::ErrConnClosed);
+        };
+        let msg = self.client.build_request(
+            METHOD_REFRESH,
+            vec![Box::new(proto::lifetime::Lifetime(lifetime))],
+            relay,
+        )?;
+        let integrity_key = relay.key();
+        let _ = self.client.perform_transaction(
+            now,
+            &msg,
+            self.client.turn_server_addr_or_err()?,
+            TransactionType::RefreshRequest(self.relayed_addr, lifetime, retry),
+            integrity_key,
+        );
+        Ok(())
     }
 
     /// Handles a Refresh response as if it answered a first request for the current lifetime.
@@ -527,52 +731,98 @@ impl Relay<'_> {
         retry: Retry,
     ) -> Result<()> {
         if !self.client.relays.contains_key(&self.relayed_addr) {
-            return Err(Error::ErrConnClosed);
+            return Ok(());
         }
 
         if res.typ.class == CLASS_ERROR_RESPONSE {
-            let mut code = ErrorCodeAttribute::default();
-            if code.get_from(&res).is_err() {
-                return Err(Error::Other(format!("{}", res.typ)));
+            let mut err = RequestError::of(&res);
+            if self.take_challenge(&res) {
+                if !retry.stale_nonce {
+                    // The same LIFETIME again (zero for a release), with the new nonce and a
+                    // new transaction id.
+                    return self.refresh_allocation_with(
+                        now,
+                        lifetime,
+                        retry.after_stale_nonce(res.transaction_id),
+                    );
+                }
+                err = RequestError::Failed(Error::ErrTryAgain);
             }
-            if code.code == CODE_STALE_NONCE && self.take_stale_nonce(&res) && !retry.stale_nonce {
-                // The same LIFETIME again (zero for a release), with the new nonce and a new
-                // transaction id.
-                return self.refresh_allocation_with(
-                    now,
-                    lifetime,
-                    retry.after_stale_nonce(res.transaction_id),
-                );
-            }
-            return Err(Error::Other(format!("{} (error {})", res.typ, code)));
+            self.refresh_failed(now, lifetime, err);
+            return Ok(());
         }
 
-        let mut released = false;
-        if let Some(relay) = self.client.relays.get_mut(&self.relayed_addr) {
-            // Getting lifetime from response
-            let mut updated_lifetime = proto::lifetime::Lifetime::default();
-            updated_lifetime.get_from(&res)?;
+        // Getting lifetime from response
+        let mut updated_lifetime = proto::lifetime::Lifetime::default();
+        if let Err(err) = updated_lifetime.get_from(&res) {
+            // A success that does not say for how long: nothing to extend the allocation by.
+            self.refresh_failed(now, lifetime, RequestError::Failed(err));
+            return Ok(());
+        }
 
+        // A zero lifetime is the server confirming deallocation — the reply to the refresh
+        // `close()` sends. The allocation no longer exists, so neither should the relay:
+        // leaving it in the map means it keeps reporting refresh deadlines for something that
+        // is gone, and keeps trying to refresh it.
+        if updated_lifetime.0.is_zero() {
+            if lifetime.is_zero() {
+                self.released();
+            } else {
+                self.lose(RequestError::Failed(Error::ErrFailedToRefreshAllocation));
+            }
+            return Ok(());
+        }
+
+        if let Some(relay) = self.client.relays.get_mut(&self.relayed_addr) {
             relay.lifetime = updated_lifetime.0;
+            relay.expires_at = now.add(relay.lifetime);
             relay.refresh_alloc_timer = now.add(allocation_refresh_interval(
                 relay.lifetime,
                 relay.allocation_refresh_interval_cap,
             ));
             debug!("updated lifetime: {} seconds", relay.lifetime.as_secs());
-
-            // A zero lifetime is the server confirming deallocation — the reply to the
-            // refresh `close()` sends. The allocation no longer exists, so neither should
-            // the relay: leaving it in the map means it keeps reporting refresh deadlines
-            // for something that is gone, and keeps trying to refresh it.
-            released = relay.lifetime.is_zero();
-        }
-
-        if released {
-            self.client.relays.remove(&self.relayed_addr);
-            debug!("allocation released; relay {} dropped", self.relayed_addr);
         }
 
         Ok(())
+    }
+
+    /// A Refresh that asked for `lifetime` got no usable answer, or an error other than a
+    /// challenge it could be sent again after.
+    pub(super) fn refresh_failed(&mut self, now: Instant, lifetime: Duration, err: RequestError) {
+        let Some(relay) = self.client.relays.get_mut(&self.relayed_addr) else {
+            return;
+        };
+
+        if lifetime.is_zero() || relay.releasing {
+            // The application released the allocation, so it is not refreshed again whatever
+            // the server said: a 437 means it was gone already (RFC 8656 §8.3), and after
+            // anything else, or silence, the server drops it when its lifetime runs out.
+            if matches!(err, RequestError::Rejected(_)) && !err.is(CODE_ALLOC_MISMATCH) {
+                self.client
+                    .events
+                    .push_back(Event::RefreshError(self.relayed_addr, err));
+            }
+            self.released();
+            return;
+        }
+
+        // 437 (Allocation Mismatch): the allocation no longer exists (RFC 8656 §5, §8.3). So
+        // it does, for the client, once its lifetime ran out with no Refresh answered.
+        if err.is(CODE_ALLOC_MISMATCH) || now >= relay.expires_at {
+            self.lose(err);
+            return;
+        }
+
+        // The allocation still has time: the next Refresh does not wait for the usual
+        // interval, which may end at the expiry itself.
+        let remaining = relay.expires_at.saturating_duration_since(now);
+        let sooner = now.add((remaining / 2).max(MIN_ALLOC_REFRESH_INTERVAL));
+        if sooner < relay.refresh_alloc_timer {
+            relay.refresh_alloc_timer = sooner;
+        }
+        self.client
+            .events
+            .push_back(Event::RefreshError(self.relayed_addr, err));
     }
 
     pub(super) fn refresh_permissions(&mut self, now: Instant) -> Result<()> {
@@ -607,32 +857,26 @@ impl Relay<'_> {
         long_term_integrity_key: Vec<u8>,
         retry: Retry,
     ) -> Result<()> {
-        let (msg, turn_server_addr) = {
-            let setters: Vec<Box<dyn Setter + '_>> = vec![
-                Box::new(TransactionId::new()),
-                Box::new(MessageType::new(METHOD_CHANNEL_BIND, CLASS_REQUEST)),
+        let msg = self.client.build_request_with(
+            METHOD_CHANNEL_BIND,
+            vec![
                 Box::new(proto::peeraddr::PeerAddress {
                     ip: bind_addr.ip(),
                     port: bind_addr.port(),
                 }),
                 Box::new(proto::channum::ChannelNumber(bind_number)),
-                Box::new(self.client.username()),
-                Box::new(self.client.realm()),
-                Box::new(nonce),
-                // Built here rather than by the caller: it borrows `crypto_provider`, and that
-                // borrow must end with `setters` so the `&mut self` transaction below is free.
-                Box::new(MessageIntegrity::new_raw_integrity_with_provider(
-                    long_term_integrity_key.clone(),
-                    self.client.crypto_provider.crypto(),
-                )),
-                Box::new(FINGERPRINT),
-            ];
+            ],
+            &long_term_integrity_key,
+            &nonce,
+        )?;
+        let turn_server_addr = self.client.turn_server_addr_or_err()?;
 
-            let mut msg = Message::new();
-            msg.build(&setters)?;
-
-            (msg, self.client.turn_server_addr_or_err()?)
-        };
+        if let Some(relay) = self.client.relays.get_mut(&relayed_addr)
+            && let Some(b) = relay.binding_mgr.get_by_addr(&bind_addr)
+        {
+            // From here on the server may hold the binding, whatever comes back.
+            b.last_request_at = Some(now);
+        }
 
         debug!("UDPConn.bind call PerformTransaction 1");
         let _ = self.client.perform_transaction(
@@ -640,7 +884,7 @@ impl Relay<'_> {
             &msg,
             turn_server_addr,
             TransactionType::ChannelBindRequest(relayed_addr, bind_addr, retry),
-            Some(long_term_integrity_key),
+            (!long_term_integrity_key.is_empty()).then_some(long_term_integrity_key),
         );
 
         Ok(())
@@ -654,18 +898,18 @@ impl Relay<'_> {
         bind_addr: SocketAddr,
         retry: Retry,
     ) -> Result<()> {
-        let bind_number = self
+        let relay = self
             .client
+            .relays
+            .get(&self.relayed_addr)
+            .ok_or(Error::ErrConnClosed)?;
+        let bind_number = relay
             .binding_mgr
             .find_by_addr(&bind_addr)
             .map(|b| b.number)
             .ok_or(Error::ErrChannelBindNotFound)?;
-        let (nonce, long_term_integrity_key) = self
-            .client
-            .relays
-            .get(&self.relayed_addr)
-            .map(|relay| (relay.nonce.clone(), relay.long_term_integrity_key.clone()))
-            .ok_or(Error::ErrConnClosed)?;
+        let (nonce, long_term_integrity_key) =
+            (relay.nonce.clone(), relay.long_term_integrity_key.clone());
         self.channel_bind(
             now,
             self.relayed_addr,
@@ -685,49 +929,88 @@ impl Relay<'_> {
         retry: Retry,
     ) -> Result<()> {
         if !self.client.relays.contains_key(&self.relayed_addr) {
-            return Err(Error::ErrConnClosed);
+            return Ok(());
         }
 
-        let result = if res.typ.class == CLASS_ERROR_RESPONSE {
-            let mut code = ErrorCodeAttribute::default();
-            let result = code.get_from(&res);
-            if result.is_err() {
-                Err(Error::Other(format!("{}", res.typ)))
-            } else if code.code == CODE_STALE_NONCE {
-                if self.take_stale_nonce(&res)
-                    && !retry.stale_nonce
-                    && self
-                        .rebind_channel(now, bind_addr, retry.after_stale_nonce(res.transaction_id))
-                        .is_ok()
-                {
-                    // Sent again with the new nonce; the binding keeps waiting on it.
-                    return Ok(());
+        if res.typ.class != CLASS_ERROR_RESPONSE {
+            let Some(relay) = self.client.relays.get_mut(&self.relayed_addr) else {
+                return Ok(());
+            };
+            if let Some(b) = relay.binding_mgr.get_by_addr(&bind_addr) {
+                b.set_refreshed_at(now);
+                b.set_state(BindingState::Ready);
+                b.bound = true;
+                b.used = false;
+                b.retry_at = None;
+                debug!("channel binding successful: {}", bind_addr);
+                if relay.bindings_timer.is_none() {
+                    relay.bindings_timer = Some(now.add(BINDING_SWEEP_INTERVAL));
                 }
-                Err(Error::ErrTryAgain)
-            } else {
-                Err(Error::Other(format!("{} (error {})", res.typ, code)))
             }
-        } else if res.typ != MessageType::new(METHOD_CHANNEL_BIND, CLASS_SUCCESS_RESPONSE) {
-            Err(Error::ErrUnexpectedResponse)
-        } else {
-            Ok(())
-        };
-
-        if let Err(err) = result {
-            if Error::ErrUnexpectedResponse != err {
-                self.client.binding_mgr.delete_by_addr(&bind_addr);
-            } else if let Some(b) = self.client.binding_mgr.get_by_addr(&bind_addr) {
-                b.set_state(BindingState::Failed);
+            // A ChannelBind also installs or refreshes the permission for the peer's address
+            // (RFC 8656 §12.3).
+            if let Some(perm) = relay.perm_map.get_mut(&bind_addr.ip()) {
+                perm.permit_until(now.add(PERM_LIFETIME));
             }
+            return Ok(());
+        }
 
-            // keep going...
-            warn!("bind() failed: {}", err);
-        } else if let Some(b) = self.client.binding_mgr.get_by_addr(&bind_addr) {
-            b.set_refreshed_at(now);
-            b.set_state(BindingState::Ready);
-            debug!("channel binding successful: {}", bind_addr);
+        let mut err = RequestError::of(&res);
+        if self.take_challenge(&res) {
+            if !retry.stale_nonce
+                && self
+                    .rebind_channel(now, bind_addr, retry.after_stale_nonce(res.transaction_id))
+                    .is_ok()
+            {
+                // Sent again with the new nonce; the binding keeps waiting on it.
+                return Ok(());
+            }
+            err = RequestError::Failed(Error::ErrTryAgain);
+        }
+        warn!("ChannelBind for {bind_addr} failed: {err}");
+
+        // The data keeps going as Send indications, and the ChannelBind is not sent again
+        // with every one of them.
+        if let Some(relay) = self.client.relays.get_mut(&self.relayed_addr)
+            && let Some(b) = relay.binding_mgr.get_by_addr(&bind_addr)
+        {
+            b.set_state(BindingState::Failed);
+            b.retry_at = Some(now.add(CHANNEL_BIND_RETRY_INTERVAL));
+        }
+
+        // 437: the allocation no longer exists (RFC 8656 §5). 400: the client's channels and
+        // the server's are out of step, and RFC 8656 §12.3 recommends deleting the allocation
+        // and starting afresh.
+        let allocation_gone = err.is(CODE_ALLOC_MISMATCH);
+        let out_of_step = err.is(CODE_BAD_REQUEST);
+        self.client
+            .events
+            .push_back(Event::ChannelBindError(self.relayed_addr, bind_addr, err));
+        if allocation_gone {
+            self.lose(RequestError::of(&res));
+        } else if out_of_step {
+            // Released on the server and dropped here at once: its state cannot be trusted.
+            let credential = self
+                .client
+                .relays
+                .get(&self.relayed_addr)
+                .map(|relay| (relay.long_term_integrity_key.clone(), relay.nonce.clone()));
+            if let Some((key, nonce)) = credential {
+                let _ = self.client.release_orphan(now, &key, &nonce);
+            }
+            self.lose(RequestError::of(&res));
         }
         Ok(())
+    }
+
+    /// A ChannelBind for `bind_addr` and the one sent after it both went unanswered: the next
+    /// send to that peer binds it again.
+    pub(super) fn channel_bind_timed_out(&mut self, bind_addr: SocketAddr) {
+        if let Some(relay) = self.client.relays.get_mut(&self.relayed_addr)
+            && let Some(b) = relay.binding_mgr.get_by_addr(&bind_addr)
+        {
+            b.set_state(BindingState::Idle);
+        }
     }
 
     fn send_channel_data(&mut self, now: Instant, data: &[u8], channel_number: u16) -> Result<()> {
@@ -736,7 +1019,7 @@ impl Relay<'_> {
             number: proto::channum::ChannelNumber(channel_number),
             ..Default::default()
         };
-        ch_data.encode();
+        ch_data.encode()?;
 
         self.client
             .write_to(now, &ch_data.raw, self.client.turn_server_addr_or_err()?);

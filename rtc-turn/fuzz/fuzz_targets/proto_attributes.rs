@@ -25,7 +25,7 @@ fuzz_target!(|data: &[u8]| {
             ..Default::default()
         };
         if channel_data.decode().is_ok() {
-            channel_data.encode();
+            let _ = channel_data.encode();
         }
     }
 

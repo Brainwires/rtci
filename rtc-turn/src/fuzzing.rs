@@ -275,7 +275,7 @@ impl Harness {
             number: ChannelNumber(number),
             raw: vec![],
         };
-        channel_data.encode();
+        let _ = channel_data.encode();
         if flags & 0x02 != 0 && channel_data.raw.len() >= 4 {
             // A length field that disagrees with the payload.
             channel_data.raw[2] = byte(arg, 2);
