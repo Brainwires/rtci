@@ -50,6 +50,12 @@ use webrtc::peer_connection::sdp::session_description::RTCSessionDescription as 
 mod common;
 
 const DEFAULT_TIMEOUT_DURATION: Duration = Duration::from_secs(30);
+
+/// The tests of this file share the host's mDNS group and port, and the same names: each
+/// peer of one test hears the queries, probes and answers of every other test's peers (two
+/// responders for one name, a query suppressed because another test asked the same). They run
+/// one at a time, so that what a test resolves is what its own peers published.
+static MDNS_GROUP_IN_USE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 const MDNS_LOCAL_NAME: &str = "webrtc-rs-test-mdns.local";
 // The receiving agent resolves only `<uuid>.local` names (draft-ietf-mmusic-mdns-ice-candidates),
 // the form browsers publish.
@@ -162,6 +168,30 @@ fn create_rtc_peer_with_mdns(
         .build(Instant::now())?)
 }
 
+/// The error a test that timed out returns: what the rtc peer's ICE agent had by then (its
+/// candidates, with the addresses resolved `.local` names became, and its pairs with their
+/// states), so that a failure on a CI runner says which side of the mDNS exchange did not happen.
+fn timed_out(rtc_pc: &mut RtcPeerConnection) -> anyhow::Error {
+    use rtc::statistics::StatsSelector;
+    use rtc::statistics::report::RTCStatsReportEntry;
+    let report = rtc_pc.get_stats(Instant::now(), StatsSelector::None);
+    let mut lines = Vec::new();
+    for entry in report.iter() {
+        match entry {
+            RTCStatsReportEntry::LocalCandidate(c) => lines.push(format!("local candidate {c:?}")),
+            RTCStatsReportEntry::RemoteCandidate(c) => {
+                lines.push(format!("remote candidate {c:?}"))
+            }
+            RTCStatsReportEntry::IceCandidatePair(p) => lines.push(format!("pair {p:?}")),
+            _ => {}
+        }
+    }
+    anyhow::anyhow!(
+        "Test timeout; the rtc peer's ICE state:\n{}",
+        lines.join("\n")
+    )
+}
+
 /// Run the RTC event loop with mDNS support
 async fn run_rtc_event_loop(
     rtc_pc: &mut RtcPeerConnection,
@@ -185,7 +215,7 @@ async fn run_rtc_event_loop(
                 .await
             {
                 Ok(n) => {
-                    log::trace!("mDNS sent {} bytes to {}", n, msg.transport.peer_addr);
+                    log::info!("mDNS sent {} bytes to {}", n, msg.transport.peer_addr);
                 }
                 Err(err) => {
                     log::error!("mDNS socket write error: {}", err);
@@ -302,7 +332,8 @@ async fn run_rtc_event_loop(
             }
             res = mdns_socket.recv_from(&mut mdns_buf) => {
                 if let Ok((n, peer_addr)) = res {
-                    log::trace!("mDNS received {} bytes from {}", n, peer_addr);
+                    // Info, not trace: on a CI runner the mDNS traffic is what a failure turns on.
+                    log::info!("mDNS received {} bytes from {}", n, peer_addr);
                     rtc_pc.handle_read(TaggedBytesMut {
                         now: Instant::now(),
                         transport: TransportContext {
@@ -331,6 +362,7 @@ async fn run_rtc_event_loop(
 /// advertise its own IP via mDNS.
 #[tokio::test]
 async fn test_mdns_query_only_webrtc_offerer_rtc_answerer() -> Result<()> {
+    let _one_test_on_the_group = MDNS_GROUP_IN_USE.lock().await;
     common::install_crypto_provider();
     env_logger::builder()
         .filter_level(log::LevelFilter::Info)
@@ -484,7 +516,7 @@ async fn test_mdns_query_only_webrtc_offerer_rtc_answerer() -> Result<()> {
         }
     }
 
-    Err(anyhow::anyhow!("Test timeout"))
+    Err(timed_out(&mut rtc_pc))
 }
 
 // =============================================================================
@@ -497,6 +529,7 @@ async fn test_mdns_query_only_webrtc_offerer_rtc_answerer() -> Result<()> {
 /// advertises its own IP via an mDNS name.
 #[tokio::test]
 async fn test_mdns_query_and_gather_webrtc_offerer_rtc_answerer() -> Result<()> {
+    let _one_test_on_the_group = MDNS_GROUP_IN_USE.lock().await;
     common::install_crypto_provider();
     env_logger::builder()
         .filter_level(log::LevelFilter::Info)
@@ -641,7 +674,7 @@ async fn test_mdns_query_and_gather_webrtc_offerer_rtc_answerer() -> Result<()> 
         }
     }
 
-    Err(anyhow::anyhow!("Test timeout"))
+    Err(timed_out(&mut rtc_pc))
 }
 
 // =============================================================================
@@ -651,6 +684,7 @@ async fn test_mdns_query_and_gather_webrtc_offerer_rtc_answerer() -> Result<()> 
 /// Test mDNS QueryOnly mode: sansio RTC as offerer, webrtc as answerer
 #[tokio::test]
 async fn test_mdns_query_only_rtc_offerer_webrtc_answerer() -> Result<()> {
+    let _one_test_on_the_group = MDNS_GROUP_IN_USE.lock().await;
     common::install_crypto_provider();
     env_logger::builder()
         .filter_level(log::LevelFilter::Info)
@@ -816,7 +850,7 @@ async fn test_mdns_query_only_rtc_offerer_webrtc_answerer() -> Result<()> {
         }
     }
 
-    Err(anyhow::anyhow!("Test timeout"))
+    Err(timed_out(&mut rtc_pc))
 }
 
 // =============================================================================
@@ -826,6 +860,7 @@ async fn test_mdns_query_only_rtc_offerer_webrtc_answerer() -> Result<()> {
 /// Test mDNS QueryAndGather mode: sansio RTC as offerer, webrtc as answerer
 #[tokio::test]
 async fn test_mdns_query_and_gather_rtc_offerer_webrtc_answerer() -> Result<()> {
+    let _one_test_on_the_group = MDNS_GROUP_IN_USE.lock().await;
     common::install_crypto_provider();
     env_logger::builder()
         .filter_level(log::LevelFilter::Info)
@@ -991,5 +1026,5 @@ async fn test_mdns_query_and_gather_rtc_offerer_webrtc_answerer() -> Result<()> 
         }
     }
 
-    Err(anyhow::anyhow!("Test timeout"))
+    Err(timed_out(&mut rtc_pc))
 }

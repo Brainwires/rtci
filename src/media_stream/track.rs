@@ -701,6 +701,7 @@ impl MediaStreamTrack {
                     ssrc: Some(ssrc),
                     rtx: None,
                     fec: None,
+                    ..Default::default()
                 },
                 codec,
                 ..Default::default()
@@ -730,6 +731,7 @@ impl MediaStreamTrack {
                     ssrc: Some(ssrc),
                     rtx: None,
                     fec: None,
+                    ..Default::default()
                 },
                 codec,
                 ..Default::default()

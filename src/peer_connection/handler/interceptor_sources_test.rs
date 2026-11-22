@@ -37,6 +37,7 @@ fn coding() -> RTCRtpCodingParameters {
         ssrc: Some(SSRC),
         rtx: None,
         fec: None,
+        ..Default::default()
     }
 }
 

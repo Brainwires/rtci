@@ -244,6 +244,7 @@ impl IceTransport {
             return Err(Error::ErrICETransportNotInNew);
         }
 
+        self.agent.set_remote_lite(remote_ice_parameters.ice_lite);
         self.agent.start_connectivity_checks(
             now,
             local_ice_role == RTCIceRole::Controlling,

@@ -58,6 +58,7 @@ fn coding(ssrc: u32, rtx: Option<u32>) -> RTCRtpCodingParameters {
         ssrc: Some(ssrc),
         rtx: rtx.map(|ssrc| RTCRtpRtxParameters { ssrc }),
         fec: None,
+        ..Default::default()
     }
 }
 

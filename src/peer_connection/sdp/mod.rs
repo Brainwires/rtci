@@ -169,6 +169,7 @@ mod rejected_mline_tests {
             sctp_over_tcp: false,
             ignore_rid_pause_for_recv: false,
             write_ssrc_attributes_for_simulcast: false,
+            rid_pause_marks: false,
         }
     }
 
@@ -290,8 +291,10 @@ mod rejected_mline_tests {
 mod answer_check;
 pub(crate) mod sdp_type;
 pub(crate) mod session_description;
+pub(crate) mod simulcast;
 
 pub(crate) use answer_check::{bundle_groups, check_answer_against_offer, effective_direction};
+pub(crate) use simulcast::{SimulcastDirection, SimulcastRid, get_rids};
 
 pub use sdp_type::RTCSdpType;
 pub use session_description::RTCSessionDescription;
@@ -315,8 +318,9 @@ use crate::rtp_transceiver::rtp_sender::rtp_codec::{
     RTCRtpCodec, RtpCodecKind, is_fec_mime_type, repair_family,
 };
 use crate::rtp_transceiver::rtp_sender::rtp_codec_parameters::RTCRtpCodecParameters;
+use crate::rtp_transceiver::rtp_sender::rtp_coding_parameters::RTCRtpRidRestrictions;
 use crate::rtp_transceiver::{
-    PayloadType, RtpStreamId, SSRC,
+    PayloadType, SSRC,
     internal::RTCRtpTransceiverInternal,
     rtp_sender::rtcp_parameters::{
         RTCP_FB_ACK_CCFB, RTCPFeedback, TYPE_RTCP_FB_ACK, negotiates_ccfb,
@@ -363,6 +367,8 @@ pub(crate) struct TrackDetails {
     pub(crate) rtx_ssrc: Option<SSRC>,
     pub(crate) fec_ssrc: Option<SSRC>,
     pub(crate) rids: Vec<String>,
+    /// What each rid's `a=rid` line restricts the stream to (RFC 8851 section 5).
+    pub(crate) rid_restrictions: HashMap<String, RTCRtpRidRestrictions>,
 }
 
 pub(crate) fn track_details_for_ssrc(
@@ -604,7 +610,12 @@ pub(crate) fn track_details_from_sdp(s: &SessionDescription) -> Vec<TrackDetails
         // This is in particular important for Firefox, as it uses both 'rid', 'simulcast'
         // and 'a=ssrc' lines.
         if has_media_msid || (!track_id.is_empty() && !stream_id.is_empty()) {
-            let rids = get_rids(media);
+            // The streams the remote side sends: its `send` rids. A `recv` rid is one of this
+            // endpoint's own streams, which the remote side takes.
+            let rids: Vec<SimulcastRid> = get_rids(media)
+                .into_iter()
+                .filter(|rid| rid.direction == SimulcastDirection::Send)
+                .collect();
             if !rids.is_empty() {
                 let simulcast_track = TrackDetails {
                     mid: mid_value.to_string(),
@@ -613,6 +624,10 @@ pub(crate) fn track_details_from_sdp(s: &SessionDescription) -> Vec<TrackDetails
                     stream_ids: stream_ids_of(stream_id),
                     track_id: track_id.to_owned(),
                     rids: rids.iter().map(|r| r.id.clone()).collect(),
+                    rid_restrictions: rids
+                        .iter()
+                        .map(|r| (r.id.clone(), r.to_restrictions()))
+                        .collect(),
                     ..Default::default()
                 };
 
@@ -672,91 +687,6 @@ pub(crate) fn media_msid(media: &MediaDescription) -> Option<(Vec<MediaStreamId>
         }
     }
     found.then_some((stream_ids, track_id))
-}
-
-pub(crate) fn get_rids(media: &MediaDescription) -> Vec<SimulcastRid> {
-    let mut rids = vec![];
-    let mut simulcast_attr: Option<String> = None;
-    for attr in &media.attributes {
-        if attr.key.as_str() == SDP_ATTRIBUTE_RID {
-            if let Err(err) = attr
-                .value
-                .as_ref()
-                .ok_or(Error::SimulcastRidParseErrorSyntaxIdDirSplit)
-                .and_then(SimulcastRid::try_from)
-                .map(|rid| rids.push(rid))
-            {
-                log::warn!("Failed to parse RID: {err}");
-            }
-        } else if attr.key.as_str() == SDP_ATTRIBUTE_SIMULCAST {
-            simulcast_attr.clone_from(&attr.value);
-        }
-    }
-
-    if let Some(attr) = simulcast_attr {
-        // Order the rids by first appearance in the `a=simulcast` attribute. Per
-        // RFC 8853 §5.2 that list "suggests a proposed order of preference, in
-        // decreasing order"; the order of the `a=rid` lines is not significant.
-        // Mirroring it back in the answer is best-effort (§5.3.2 mandates
-        // reversing send<->recv but does not require preserving order). Without
-        // this, the order followed the incidental `a=rid` line order — fine for
-        // Firefox/Chrome (which agree) but not for a peer that lists them
-        // differently.
-        //
-        // Of a layer's comma-separated alternatives only the first is used
-        // (RFC 8853 section 5.2 lets an answerer pick one; W3C webrtc-pc
-        // "set the RTCSessionDescription" uses the first), so the others'
-        // `a=rid` lines are dropped below and never echoed in an answer.
-        // First position of each id in the attribute, and the first rid declared with each id:
-        // both by lookup, so neither pass below scans a list per entry.
-        let mut simulcast_order: HashMap<String, usize> = HashMap::new();
-        let mut alternatives: HashSet<String> = HashSet::new();
-        let mut rid_by_id: HashMap<String, usize> = HashMap::new();
-        for (i, rid) in rids.iter().enumerate() {
-            rid_by_id.entry(rid.id.clone()).or_insert(i);
-        }
-        let mut split = attr.split(' ');
-        loop {
-            let _dir = split.next();
-            let sc_str_list = split.next();
-            if let Some(list) = sc_str_list {
-                for layer in list.split(';') {
-                    for (n, sc_id) in layer.split(',').enumerate() {
-                        let (sc_id, paused) = if let Some(sc_id) = sc_id.strip_prefix('~') {
-                            (sc_id, true)
-                        } else {
-                            (sc_id, false)
-                        };
-                        if n > 0 {
-                            alternatives.insert(sc_id.to_owned());
-                            continue;
-                        }
-
-                        if let Some(&i) = rid_by_id.get(sc_id) {
-                            rids[i].paused = paused;
-                        }
-                        let position = simulcast_order.len();
-                        simulcast_order.entry(sc_id.to_owned()).or_insert(position);
-                    }
-                }
-            } else {
-                break;
-            }
-        }
-        rids.retain(|rid| simulcast_order.contains_key(&rid.id) || !alternatives.contains(&rid.id));
-
-        // Reorder to match the `a=simulcast` preference order. `sort_by_key` is
-        // stable, so any rid not referenced by the attribute (should not happen
-        // in a valid offer) keeps its `a=rid` declaration order at the end.
-        rids.sort_by_key(|rid| simulcast_order.get(&rid.id).copied().unwrap_or(usize::MAX));
-    }
-
-    // A rid declared twice (`a=rid:foo recv` on two lines, a layer listed
-    // twice in `a=simulcast`) is one layer: the first declaration stands.
-    let mut seen: HashSet<String> = HashSet::new();
-    rids.retain(|rid| seen.insert(rid.id.clone()));
-
-    rids
 }
 
 #[test]
@@ -823,9 +753,7 @@ fn get_rids_orders_and_pauses_by_lookup() {
     for i in 0..RIDS {
         media = media.with_value_attribute(SDP_ATTRIBUTE_RID.to_owned(), format!("r{i} send"));
     }
-    // A duplicate declaration: the first one stands and the duplicate is dropped.
-    media = media.with_value_attribute(SDP_ATTRIBUTE_RID.to_owned(), "r0 send".to_owned());
-    // Reverse order, every third one paused, one id listed twice and one unknown id.
+    // Reverse order, every third one paused, and one unknown id.
     let mut list: Vec<String> = (0..RIDS)
         .rev()
         .map(|i| {
@@ -836,24 +764,36 @@ fn get_rids_orders_and_pauses_by_lookup() {
             }
         })
         .collect();
-    list.push("r1".to_owned());
     list.push("unknown".to_owned());
-    media = media.with_value_attribute(
+    let simulcast = media.clone().with_value_attribute(
         SDP_ATTRIBUTE_SIMULCAST.to_owned(),
         format!("send {}", list.join(";")),
     );
 
-    let rids = get_rids(&media);
+    let rids = get_rids(&simulcast);
 
     assert_eq!(rids.len(), RIDS);
     for (position, rid) in rids.iter().enumerate() {
         let i = RIDS - 1 - position;
         assert_eq!(rid.id, format!("r{i}"));
         assert_eq!(rid.paused, i % 3 == 0, "rid r{i}");
+        assert!(rid.simulcast);
     }
-    // r0 is one layer: its first declaration, the one the attribute pauses.
-    assert_eq!(rids[RIDS - 1].id, "r0");
-    assert!(rids[RIDS - 1].paused);
+
+    // RFC 8853 section 5.2: a rid-id "MUST NOT" occur twice on the line. One that does is
+    // malformed and not used: the rids stay, in a=rid order, as no simulcast streams.
+    list.push("r1".to_owned());
+    let repeated = media.with_value_attribute(
+        SDP_ATTRIBUTE_SIMULCAST.to_owned(),
+        format!("send {}", list.join(";")),
+    );
+    let rids = get_rids(&repeated);
+    assert_eq!(rids.len(), RIDS);
+    assert!(
+        rids.iter()
+            .enumerate()
+            .all(|(i, rid)| rid.id == format!("r{i}") && !rid.simulcast)
+    );
 }
 
 pub(crate) fn add_candidates_to_media_descriptions(
@@ -988,6 +928,8 @@ pub(crate) struct AddTransceiverSdpParams {
     dtls_role: ConnectionRole,
     ice_gathering_state: RTCIceGatheringState,
     ignore_rid_pause_for_recv: bool,
+    /// `SettingEngineBuilder::with_rid_pause_marks`: `~` is written without RFC 7728.
+    rid_pause_marks: bool,
     write_ssrc_attributes_for_simulcast: bool,
     /// An offer (initial or subsequent) rather than an answer.
     is_offer: bool,
@@ -1196,78 +1138,134 @@ impl RTCPeerConnection {
             });
         }
 
-        let mut recv_sc_list: Vec<String> = vec![];
-        let mut send_sc_list: Vec<String> = vec![];
-        if !media_section.rid_map.is_empty() {
-            for rid in &media_section.rid_map {
-                let rid_syntax = match rid.direction {
-                    SimulcastDirection::Send => {
-                        // If Send rid, then reply with a recv rid
-                        if rid.paused {
-                            recv_sc_list.push(format!("~{}", rid.id));
-                        } else {
-                            recv_sc_list.push(rid.id.to_owned());
-                        }
-                        format!("{} recv", rid.id)
-                    }
-                    SimulcastDirection::Recv => {
-                        // If Recv rid, then reply with a send rid
-                        if rid.paused && !ignore_rid_pause_for_recv {
-                            send_sc_list.push(format!("~{}", rid.id));
-                        } else {
-                            send_sc_list.push(rid.id.to_owned());
-                        }
-                        format!("{} send", rid.id)
-                    }
-                };
-                media = media.with_value_attribute(SDP_ATTRIBUTE_RID.to_owned(), rid_syntax);
-            }
-        }
-
-        media = {
-            // When the remote description requested simulcast reception, the
-            // rid loop above already emitted one `a=rid:<id> send` line per
-            // offered rid (honoring pause state and the offered preference
-            // order) and collected them into `send_sc_list`. In that case the
-            // sender must not describe its encodings a second time: doing so
-            // duplicated every `a=rid:<id> send` line and produced a second
-            // `send` list in the simulcast attribute (`a=simulcast:send f;h;q
-            // send f;h;q`), which is invalid per the RFC 8853 Section 5.1 ABNF
-            // (at most one list per direction) and rejected by WebKit with
-            // "Malformed simulcast line".
-            let (media, send_rids) = RTCPeerConnection::add_sender_sdp(
-                media,
-                media_engine,
-                transceiver,
-                write_ssrc_attributes_for_simulcast,
-                send_sc_list.is_empty(),
-                repair_flows,
-            );
-
-            // Simulcast
-            let mut sc_attr = vec![];
-            if !recv_sc_list.is_empty() {
-                sc_attr.push(format!("recv {}", recv_sc_list.join(";")));
-            }
-            if !send_sc_list.is_empty() {
-                sc_attr.push(format!("send {}", send_sc_list.join(";")));
-            }
-            if !send_rids.is_empty() {
-                sc_attr.push(format!("send {}", send_rids.join(";")));
-            }
-            if !sc_attr.is_empty() {
-                media.with_value_attribute(SDP_ATTRIBUTE_SIMULCAST.to_owned(), sc_attr.join(" "))
-            } else {
-                media
-            }
-        };
-
-        // An answer's direction is the transceiver's [[Direction]] intersected with the reverse
-        // of the offered one (RFC 9429 section 5.3.1, RFC 3264 section 6.1); an offer states
-        // [[Direction]] itself.
+        // The section's direction: an answer's is the transceiver's [[Direction]] intersected
+        // with the reverse of the offered one (RFC 9429 section 5.3.1, RFC 3264 section 6.1);
+        // an offer states [[Direction]] itself.
         let direction = media_section
             .answer_direction
             .unwrap_or_else(|| transceiver.direction());
+
+        // `a=rid` and `a=simulcast` (RFC 8851, RFC 8853).
+        let formats: HashSet<u8> = codecs.iter().map(|codec| codec.payload_type).collect();
+        // RFC 8851 section 6.3 step 4: a `pt=` keeps the formats this description has, and a
+        // line that would keep none is discarded. `None`: the line is discarded.
+        let kept_formats = |rid: &SimulcastRid| -> Option<Vec<u8>> {
+            let kept: Vec<u8> = rid
+                .formats
+                .iter()
+                .copied()
+                .filter(|pt| formats.contains(pt))
+                .collect();
+            (rid.formats.is_empty() || !kept.is_empty()).then_some(kept)
+        };
+        // RFC 8853 section 5.2: `~` marks a stream initially paused, which "MUST" go with
+        // RFC 7728 pause/resume negotiated for the section. The engine does not implement RFC
+        // 7728, so it writes the mark only when told to write it regardless.
+        let sc_id = |id: &str, paused: bool| -> String {
+            if paused && params.rid_pause_marks {
+                format!("~{id}")
+            } else {
+                id.to_owned()
+            }
+        };
+        let mut recv_sc_list: Vec<String> = vec![];
+        let mut send_sc_list: Vec<String> = vec![];
+        // The streams the remote side sends: each of its `send` rids is answered `recv` with
+        // its restrictions kept (RFC 8851 section 6.3), and mirrored in a later offer.
+        if direction.has_recv() {
+            for rid in media_section
+                .rid_map
+                .iter()
+                .filter(|rid| rid.direction == SimulcastDirection::Send)
+            {
+                let Some(pts) = kept_formats(rid) else {
+                    continue;
+                };
+                media = media.with_value_attribute(
+                    SDP_ATTRIBUTE_RID.to_owned(),
+                    rid.line(SimulcastDirection::Recv, pts),
+                );
+                if rid.simulcast {
+                    recv_sc_list.push(sc_id(&rid.id, rid.paused));
+                }
+            }
+        }
+        // The streams this endpoint sends: one `a=rid ... send` per encoding of a sender with
+        // several encodings (RFC 9429 section 5.2.1). An answer has only the ones the offer
+        // asked to receive (RFC 8853 section 5.3.2: "The answerer MUST NOT add any simulcast
+        // streams"), with the offered restrictions (RFC 8851 section 6.3); an offer has each
+        // encoding, with the restrictions the application gave it.
+        if direction.has_send()
+            && let Some(sender) = transceiver.sender()
+        {
+            let encodings = sender.send_encodings();
+            let is_simulcast = encodings.len() > 1
+                && encodings
+                    .iter()
+                    .all(|encoding| !encoding.rtp_coding_parameters.rid.is_empty());
+            if is_simulcast {
+                let mut lines = 0;
+                for encoding in encodings {
+                    let coding = &encoding.rtp_coding_parameters;
+                    let (rid, listed) = if is_offer {
+                        (
+                            SimulcastRid::from_restrictions(
+                                &coding.rid,
+                                SimulcastDirection::Send,
+                                &coding.rid_restrictions,
+                            ),
+                            true,
+                        )
+                    } else {
+                        let Some(offered) = media_section.rid_map.iter().find(|rid| {
+                            rid.direction == SimulcastDirection::Recv && rid.id == coding.rid
+                        }) else {
+                            continue;
+                        };
+                        (offered.clone(), offered.simulcast)
+                    };
+                    let Some(pts) = kept_formats(&rid) else {
+                        continue;
+                    };
+                    media = media.with_value_attribute(
+                        SDP_ATTRIBUTE_RID.to_owned(),
+                        rid.line(SimulcastDirection::Send, pts),
+                    );
+                    lines += 1;
+                    if listed {
+                        let paused = !encoding.active
+                            || (!is_offer && rid.paused && !ignore_rid_pause_for_recv);
+                        send_sc_list.push(sc_id(&coding.rid, paused));
+                    }
+                }
+                // RFC 9429 section 5.2.1: an `a=simulcast` line when "more than one 'a=rid'
+                // line has been generated".
+                if is_offer && lines < 2 {
+                    send_sc_list.clear();
+                }
+            }
+        }
+
+        media = RTCPeerConnection::add_sender_sdp(
+            media,
+            media_engine,
+            transceiver,
+            write_ssrc_attributes_for_simulcast,
+            repair_flows,
+        );
+        // RFC 8853 section 5.1: one line, each direction at most once.
+        let mut sc_attr = vec![];
+        if !recv_sc_list.is_empty() {
+            sc_attr.push(format!("recv {}", recv_sc_list.join(";")));
+        }
+        if !send_sc_list.is_empty() {
+            sc_attr.push(format!("send {}", send_sc_list.join(";")));
+        }
+        if !sc_attr.is_empty() {
+            media =
+                media.with_value_attribute(SDP_ATTRIBUTE_SIMULCAST.to_owned(), sc_attr.join(" "));
+        }
+
         media = media.with_property_attribute(direction.to_string());
 
         for fingerprint in dtls_fingerprints {
@@ -1284,19 +1282,14 @@ impl RTCPeerConnection {
         Ok((d.with_media(media), true))
     }
 
-    /// `write_rid_attributes` is false when the media section's rid map has
-    /// already emitted the `a=rid:<id> send` lines for this section, in which
-    /// case the sender's encodings must not be described a second time.
+    /// The sender's `a=msid` lines and source attributes. Its `a=rid` lines are the caller's.
     fn add_sender_sdp(
         mut media: MediaDescription,
         media_engine: &MediaEngine,
         transceiver: &mut RTCRtpTransceiverInternal,
         write_ssrc_attributes_for_simulcast: bool,
-        write_rid_attributes: bool,
         repair_flows: RepairFlows,
-    ) -> (MediaDescription, Vec<RtpStreamId>) {
-        let mut send_rids = vec![];
-
+    ) -> MediaDescription {
         let cname = media_engine.rtcp_cname.as_str();
         // Every transceiver has a sender; one that has neither a track nor a sending
         // direction is not described (RFC 9429 section 5.2.1).
@@ -1379,24 +1372,9 @@ impl RTCPeerConnection {
                     }
                 }
             }
-
-            if is_simulcast && write_rid_attributes {
-                for encoding in &encodings {
-                    media = media.with_value_attribute(
-                        SDP_ATTRIBUTE_RID.to_owned(),
-                        format!("{} send", encoding.rtp_coding_parameters.rid),
-                    );
-                    // RFC 8853, Section 5.3: an inactive encoding's rid is paused.
-                    if encoding.active {
-                        send_rids.push(encoding.rtp_coding_parameters.rid.to_string());
-                    } else {
-                        send_rids.push(format!("~{}", encoding.rtp_coding_parameters.rid));
-                    }
-                }
-            }
         }
 
-        (media, send_rids)
+        media
     }
 }
 
@@ -1427,55 +1405,6 @@ fn with_source_attributes(
 pub(crate) struct RepairFlows {
     pub(crate) rtx: bool,
     pub(crate) fec: bool,
-}
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub(crate) enum SimulcastDirection {
-    Send,
-    Recv,
-}
-
-impl TryFrom<&str> for SimulcastDirection {
-    type Error = Error;
-    fn try_from(value: &str) -> std::result::Result<Self, Self::Error> {
-        match value.to_lowercase().as_str() {
-            "send" => Ok(SimulcastDirection::Send),
-            "recv" => Ok(SimulcastDirection::Recv),
-            _ => Err(Error::SimulcastRidParseErrorUnknownDirection),
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct SimulcastRid {
-    pub(crate) id: String,
-    pub(crate) direction: SimulcastDirection,
-    pub(crate) params: String,
-    pub(crate) paused: bool,
-}
-
-impl TryFrom<&String> for SimulcastRid {
-    type Error = Error;
-    fn try_from(value: &String) -> std::result::Result<Self, Self::Error> {
-        let mut split = value.split(' ');
-        let id = split
-            .next()
-            .ok_or(Error::SimulcastRidParseErrorSyntaxIdDirSplit)?
-            .to_owned();
-        let direction = SimulcastDirection::try_from(
-            split
-                .next()
-                .ok_or(Error::SimulcastRidParseErrorSyntaxIdDirSplit)?,
-        )?;
-        let params = split.collect();
-
-        Ok(Self {
-            id,
-            direction,
-            params,
-            paused: false,
-        })
-    }
 }
 
 /// Makes a section of an initial offer bundle-only (RFC 9143 sections 6 and 7.2.1): port
@@ -1708,6 +1637,7 @@ pub(crate) struct PopulateSdpParams {
     /// Whether the data section's proto is `TCP/DTLS/SCTP` (an answer to such an offer).
     pub(crate) sctp_over_tcp: bool,
     pub(crate) ignore_rid_pause_for_recv: bool,
+    pub(crate) rid_pause_marks: bool,
     pub(crate) write_ssrc_attributes_for_simulcast: bool,
 }
 
@@ -1882,6 +1812,7 @@ impl RTCPeerConnection {
                     dtls_role: params.connection_role,
                     ice_gathering_state: params.ice_gathering_state,
                     ignore_rid_pause_for_recv: params.ignore_rid_pause_for_recv,
+                    rid_pause_marks: params.rid_pause_marks,
                     write_ssrc_attributes_for_simulcast: params.write_ssrc_attributes_for_simulcast,
                     is_offer: params.bundle == BundleMode::Offer,
                     rtcp_mux_only: params.rtcp_mux_only,
@@ -2988,15 +2919,26 @@ fn codecs_from_media_description_keeps_format_order_and_attributes() {
 #[test]
 fn get_rids_uses_each_layers_first_alternative_once() {
     let mut m = MediaDescription::default();
-    for rid in ["foo", "bar", "1", "2", "foo"] {
+    for rid in ["foo", "bar", "1", "2"] {
         m = m.with_value_attribute(SDP_ATTRIBUTE_RID.to_owned(), format!("{rid} recv"));
     }
-    m = m.with_value_attribute(
+    let simulcast = m.clone().with_value_attribute(
+        SDP_ATTRIBUTE_SIMULCAST.to_owned(),
+        "recv foo,bar;1,2".to_owned(),
+    );
+    let ids: Vec<(String, bool)> = get_rids(&simulcast)
+        .into_iter()
+        .map(|r| (r.id, r.simulcast))
+        .collect();
+    // The first alternative of each stream is the stream; the others are dropped.
+    assert_eq!(ids, [("foo".to_owned(), true), ("1".to_owned(), true)]);
+
+    // A rid-id listed twice makes the line malformed (RFC 8853 section 5.2): it is not used.
+    let repeated = m.with_value_attribute(
         SDP_ATTRIBUTE_SIMULCAST.to_owned(),
         "recv foo,bar;1,2;foo".to_owned(),
     );
-    let ids: Vec<String> = get_rids(&m).into_iter().map(|r| r.id).collect();
-    assert_eq!(ids, ["foo", "1"]);
+    assert!(get_rids(&repeated).iter().all(|r| !r.simulcast));
 }
 
 /// The extensions an offer adds back for a transceiver with an explicit list of header

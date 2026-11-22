@@ -66,6 +66,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     contributing sources take their RFC 6465 levels. `get_contributing_sources` /
     `get_synchronization_sources` list the sources most recent first, and only those heard in
     the 10 seconds before the connection's newest time.
+- **simulcast**: `a=rid` and `a=simulcast` follow RFC 8851 and RFC 8853 (`src/peer_connection/sdp/simulcast.rs`).
+  `RTCRtpCodingParameters` has a new public field `rid_restrictions: RTCRtpRidRestrictions`
+  (`pt=`, `max-width`, `max-height`, `max-fps`, `max-fs`, `max-br`, `max-pps`, `max-bpp`,
+  `depend`; RFC 8851 section 5): struct literals need `..Default::default()`. An offer writes
+  a sender encoding's restrictions on its `a=rid ... send` line (a `pt=` keeps the formats the
+  section has), an answer echoes the offered restrictions with the direction reversed, and a
+  receiver's coding parameters carry what the remote `a=rid ... send` line says.
+  - An answer adds a `send` rid only for a `recv` rid the offer listed and the sender has an
+    encoding for (RFC 8853 section 5.3.2: "MUST NOT add any simulcast streams"); it used to
+    echo every offered `recv` rid as `send`, and to add the sender's own rids to an offer that
+    listed none.
+  - An applied answer (local or remote) leaves the sender the encodings it accepted, or its
+    first encoding when it accepted none or has no simulcast (W3C webrtc-pc "set a session
+    description", RFC 8853 section 5.3.3). The removed encodings leave `getParameters` and
+    later offers, their streams are not bound, and `write_rtp` drops their packets. A remote
+    answer's `a=rid` line that loosens a restriction or adds a `pt=` is discarded with its
+    stream (RFC 8851 section 6.4); one that tightens a restriction sets it on the encoding.
+  - The pause mark `~` is no longer written, neither for an inactive encoding nor echoed from
+    an offer: RFC 8853 section 5.2 has it go with RFC 7728 pause / resume, which the engine
+    does not implement. `SettingEngineBuilder::with_rid_pause_marks(true)` writes it as
+    before (and as libwebrtc does).
+  - Received lines are checked per RFC 8851 section 6.2.2: a rid-id on two lines discards
+    both, a `pt=` keeps the m= line's formats only, a `recv` line with an unknown restriction
+    and a line whose `depend` does not resolve are discarded; per RFC 8853 section 5.2 a
+    rid-id is used only with its own direction, the first usable alternative of a stream is
+    taken, and a section with more than one `a=simulcast` line (or one that repeats a rid-id)
+    has no simulcast stream. A remote description whose `a=simulcast` names a rid-id without
+    an `a=rid` line is refused with `SdpInvalidValue` (RFC 9429 section 5.8.3).
+  - A local encoding's rid must be 1 to 255 alphanumeric characters (RFC 8852 section 3.1,
+    W3C webrtc-pc addTransceiver): anything else is the new `Error::ErrRTPSenderRidInvalid`.
 - **sender**: `RTCRtpSender::write_rtp` writes the MID header extension (the transceiver's mid)
   and RtpStreamId (the rid of the packet's encoding) into every packet when the extension is
   negotiated (RFC 9143 section 15, RFC 8852 section 3.3); the application had to. A packet
@@ -108,6 +138,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   section 12.2); it always said `UDP/DTLS/SCTP`.
 - **sctp**: an association that signalling closed by rejecting the data section takes a new
   `a=sctp-port` when a data section is negotiated again (RFC 8841 section 10.5).
+- **sender**: `RTCRtpSender::write_rtp` writes the MID header extension (the transceiver's mid)
+  and RtpStreamId (the rid of the packet's encoding) into every packet when the extension is
+  negotiated (RFC 9143 section 15, RFC 8852 section 3.3); the application had to. A packet
+  that already carries the extension keeps its value.
+- **media_engine**: `register_default_codecs` offers `audio/telephone-event` at 48000 Hz
+  (payload type 112) and 8000 Hz (115) with the DTMF events `0-15` (RFC 7874 section 3, RFC
+  4733 section 2.4.1). An application that registered telephone-event itself under one of
+  these numbers keeps its own registration only if it comes first.
+- **interceptors**: `register_default_interceptors` also registers the MID header extension
+  for audio, the client-to-mixer audio level (RFC 6464) for audio and the video orientation
+  extension for video (`configure_default_header_extensions`): descriptions carry three more
+  `a=extmap` lines.
 
 - **ice**: where the fork followed libwebrtc or its own hardening instead of the RFC, the RFC is
   now the default and the other behaviour a setting (`AgentConfig`, and
@@ -133,6 +175,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only stored the flag). The peer connection sets the role again at an ICE restart only when
   one agent is lite and the other is not (RFC 8445 section 6.1.1), and for a transport set up
   again after it was closed.
+- **ice**: a local candidate added after a pair is nominated is not taken, and so not
+  announced (RFC 8838 section 13: "an agent MUST NOT trickle any new candidates within an ICE
+  session after nomination"); `add_local_candidate` returns `Ok(false)`. An ICE restart takes
+  candidates again.
+- **ice**: the first mDNS query for a remote `.local` candidate waits a random 20 to 120 ms
+  (RFC 6762 section 5.2) instead of leaving with the next `handle_timeout`;
+  `multicast_dns_first_query_delay: Some(false)` /
+  `with_multicast_dns_first_query_delay(false)` keeps the old timing. A driver must keep
+  following `poll_timeout`.
+- **ice**: an IPv6 link-local local candidate is no longer paired with a remote candidate that
+  is not link-local (RFC 8445 section 6.1.2.2), and `allow_link_local_remote_candidates` no
+  longer pairs an IPv6 link-local remote candidate with another local one (it still does for
+  IPv4 link-local).
+- **ice**: a lite agent told that its peer is lite too (`Agent::set_remote_lite`; the peer
+  connection passes `a=ice-lite`) sends no checks and selects its pair from the candidate
+  exchange (RFC 8445 section 8.2); as the controlling agent it used to run a full agent's
+  checks.
+- **ice**: what arrives on the mDNS socket (local port 5353) goes to the mDNS connection
+  whatever its source port (it had to be 5353), so that a legacy unicast query is answered
+  (RFC 6762 section 6.7). The peer connection's demultiplexer does the same when its mDNS mode
+  is `QueryAndGather`; in the other modes a datagram on port 5353 from another port is still
+  demultiplexed as STUN / DTLS / SRTP.
+- **api**: `RTCIceCandidate` has a new public field, `username_fragment`; `rtc_ice::Event`
+  has the variants `LocalCandidateRenamed` and `LiteCandidateUpdate`; `AgentConfig` the fields
+  `multicast_dns_first_query_delay`, `multicast_dns_destination_reported`,
+  `multicast_dns_unicast_response`, `multicast_dns_rate_limit`; `setting_engine::MulticastDNS`
+  the fields `first_query_delay`, `destination_reported`, `unicast_response`, `rate_limit`.
 - **api**: `rtc_ice::AgentConfig` has new public fields (`tie_breaker`,
   `nomination_acceptance`, `nominate_on_consent_checks`, `unauthenticated_requests`,
   `data_from_selected_pair_only`, `send_data_before_nomination`): a struct literal without
@@ -779,6 +848,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behaviour changes
 
+- **rtcp_session**: the SDES chunk of each local SSRC carries, after the CNAME, the MID of
+  its m= section (RFC 9143 section 15.1: "SHOULD be sent in the first few RTCP packets ... and
+  regularly thereafter"), the encoding's rid as RtpStreamId and, on RTX and FEC SSRCs, as
+  RepairedRtpStreamId (RFC 8852 sections 3.1, 3.2), in every compound packet. The peer
+  connection hands them over after each negotiation with the new
+  `RtcpSessionControl::StreamIdentifiers`.
+- **association**: an RtpStreamId / RepairedRtpStreamId SDES item from the remote names the
+  rid of a stream whose packets carry no RID / RRID header extension, as an SDES MID item
+  already named its m= section (RFC 8852 section 3). A value that is not 1 to 255
+  alphanumerics is ignored.
 - **sctp, sdp**: both endpoints initiate the SCTP association (RFC 8841 section 9.3), in either
   DTLS role; only the DTLS client did. The peer's INIT is answered by the association this side
   initiated (RFC 9260 section 5.2.1), so the two make one association, and an association no
@@ -969,6 +1048,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+- **sctp**: `RTCPeerConnection::reject_data_section` asks for the data section to be rejected
+  (m= port zero) in the next offer, or in the answer to the peer's next offer: RFC 8841
+  section 10.5, closing the SCTP association and the DTLS association under it. A data
+  channel created afterwards brings a new section, with a new `a=tls-id` and `a=sctp-port`.
+- **sctp**: when ICE selects another candidate pair the association is told (RFC 8831
+  section 5): its congestion control and RTO start over and its packet size is set for the
+  new path.
+- **sctp**: a stream reset the peer answers with "denied" or an error fails the data channel
+  it was closing (`OnError`, `OnClose`) instead of leaving it `closing`; an inactive path
+  (RFC 9260 section 8.2) changes neither the transport's state nor a channel's.
 - **setting_engine**: `SettingEngineBuilder::with_implicit_rollback`: a remote offer applied
   while a local offer is pending rolls the local offer back first (W3C webrtc-pc "set a session
   description"), in one call; an offer that is then refused leaves the local offer pending.
@@ -992,6 +1081,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it was closing (`OnError`, `OnClose`) instead of leaving it `closing`; an inactive path
   (RFC 9260 section 8.2) changes neither the transport's state nor a channel's.
 
+- **ice**: `Agent::handle_transport_error` / `RTCPeerConnection::handle_ice_transport_error`:
+  the application reports a hard ICMP error (RFC 8445 section 7.2.5.2.2), a TCP connection
+  that could not be established, or one whose first answer is not STUN (RFC 6544 section 7.1),
+  and the pair fails at once. A pair a check has validated is never failed that way.
+- **ice**: Ta agreed with the peer (RFC 8445 section 14.2): `Agent::proposed_pacing`,
+  `set_remote_pacing`, `pacing`. (Writing and reading `a=ice-pacing` is not wired yet.)
+- **ice**: at most five TCP connection attempts are outstanding to one remote IP address (RFC
+  6544 section 12).
+- **ice**: an mDNS name lost to another host (RFC 6762 section 9) is replaced by a new
+  `<uuid>.local` name and the candidate announced again (`Event::LocalCandidateRenamed`,
+  `OnIceCandidateEvent`).
+- **ice**: mDNS options of `rtc-mdns` reachable from the agent and the peer connection:
+  the datagram's destination reported by the driver, the QU bit, and one `MdnsRateLimit`
+  shared by several peer connections (`with_multicast_dns_destination_reported`,
+  `with_multicast_dns_unicast_response`, `with_multicast_dns_rate_limit`).
+- **ice**: the candidate of `OnIceCandidateEvent` carries the username fragment of its ICE
+  generation, and `to_json` hands it on (RFC 8838 section 9).
 - **ice**: `AgentConfig::tie_breaker` / `SettingEngineBuilder::with_ice_tie_breaker` fix the ICE
   tiebreaker (RFC 8445 section 5.2); `Agent::tie_breaker`, `Agent::is_lite`.
 - **ice**: `AgentConfig::send_data_before_nomination` /
@@ -1727,9 +1833,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+- **ice**: a controlling agent could lose the nomination it had queued: an answer to a second
+  check on the same pair (one the peer's request triggered) took the pair off the
+  triggered-check queue, so no request with USE-CANDIDATE left and the agent stayed in
+  checking until its failed timeout. It made `test_data_channel_create_rtc_to_webrtc` time
+  out about once in 200 runs.
 - **sctp**: an association accepted from the peer's INIT after an earlier one was lost left
   the transport reporting the loss, so every later offer asked for a new `a=sctp-port` and
   replaced the association it had.
+- **stats**: a remote mDNS candidate has its statistics object, with its name as the address,
+  from the moment it is submitted, resolved or not (draft-ietf-mmusic-mdns-ice-candidates
+  section 3.3.1). It appeared only once resolved, and then as a candidate "learned from a
+  check": type `host` with a null address, which is what the browser interop cell "mDNS-hidden
+  browser candidates resolve on the Rust side" read. A signalled candidate that takes the
+  place of a peer-reflexive one (it keeps that one's id and pairs) now shows its own type and
+  its signalled address.
+- **test**: the four mDNS interop tests share the host's mDNS group, port and names; they run
+  one at a time.
 - **jsep**: two retransmission formats that differ only in `rtx-time` are one format (RFC
   4588 section 8.1: each sender's own figure); an offer whose RTX `fmtp` had another
   `rtx-time` than the local one was answered without RTX.

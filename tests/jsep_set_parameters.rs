@@ -6,11 +6,15 @@ mod jsep_common;
 
 use jsep_common::{TestResult, default_peer, video_track, vp8};
 use rtc::media_stream::MediaStreamTrack;
+use rtc::peer_connection::RTCPeerConnectionBuilder;
+use rtc::peer_connection::configuration::media_engine::MediaEngine;
+use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtc::rtp_transceiver::RTCRtpTransceiverId;
 use rtc::rtp_transceiver::rtp_sender::{
     RTCRtpCodingParameters, RTCRtpEncodingParameters, RtpCodecKind,
 };
 use rtc::shared::error::Error;
+use std::time::Instant;
 
 #[test]
 fn set_parameters_needs_the_last_returned_parameters() -> TestResult {
@@ -94,47 +98,66 @@ fn a_stopped_transceivers_sender_takes_no_parameters() -> TestResult {
     Ok(())
 }
 
+/// An inactive encoding is listed in `a=simulcast` without the pause mark `~` by default:
+/// RFC 8853 section 5.2 has the mark go with RTP stream pause / resume (RFC 7728), which the
+/// engine does not negotiate. `with_rid_pause_marks(true)` writes it all the same.
 #[test]
-fn an_inactive_encoding_is_a_paused_rid() -> TestResult {
-    let mut pc = default_peer()?;
-    let encodings = ["f", "h"]
-        .into_iter()
-        .enumerate()
-        .map(|(i, rid)| RTCRtpEncodingParameters {
-            rtp_coding_parameters: RTCRtpCodingParameters {
-                rid: rid.to_owned(),
-                ssrc: Some(0x0303_0100 + i as u32),
+fn an_inactive_encoding_is_a_paused_rid_only_when_pause_marks_are_written() -> TestResult {
+    for rid_pause_marks in [false, true] {
+        let mut media_engine = MediaEngine::default();
+        media_engine.register_default_codecs()?;
+        let mut pc = RTCPeerConnectionBuilder::new()
+            .with_setting_engine(
+                SettingEngineBuilder::new()
+                    .with_rid_pause_marks(rid_pause_marks)
+                    .build(),
+            )
+            .with_media_engine(media_engine)
+            .build(Instant::now())?;
+        let encodings = ["f", "h"]
+            .into_iter()
+            .enumerate()
+            .map(|(i, rid)| RTCRtpEncodingParameters {
+                rtp_coding_parameters: RTCRtpCodingParameters {
+                    rid: rid.to_owned(),
+                    ssrc: Some(0x0303_0100 + i as u32),
+                    ..Default::default()
+                },
+                codec: vp8(),
                 ..Default::default()
-            },
-            codec: vp8(),
-            ..Default::default()
-        })
-        .collect();
-    let sender = pc.add_track(MediaStreamTrack::new(
-        "stream".to_owned(),
-        "simulcast".to_owned(),
-        "simulcast".to_owned(),
-        RtpCodecKind::Video,
-        encodings,
-    ))?;
+            })
+            .collect();
+        let sender = pc.add_track(MediaStreamTrack::new(
+            "stream".to_owned(),
+            "simulcast".to_owned(),
+            "simulcast".to_owned(),
+            RtpCodecKind::Video,
+            encodings,
+        ))?;
 
-    let offer = pc.create_offer(None)?;
-    assert!(offer.sdp.contains("a=simulcast:send f;h"), "{}", offer.sdp);
+        let offer = pc.create_offer(None)?;
+        assert!(offer.sdp.contains("a=simulcast:send f;h"), "{}", offer.sdp);
 
-    let mut s = pc.rtp_sender(sender).expect("sender");
-    let mut params = s.get_parameters().clone();
-    assert!(
-        params.encodings.iter().all(|e| e.active),
-        "encodings are active by default"
-    );
-    params.encodings[1].active = false;
-    s.set_parameters(params, None)?;
+        let mut s = pc.rtp_sender(sender).expect("sender");
+        let mut params = s.get_parameters().clone();
+        assert!(
+            params.encodings.iter().all(|e| e.active),
+            "encodings are active by default"
+        );
+        params.encodings[1].active = false;
+        s.set_parameters(params, None)?;
 
-    let offer = pc.create_offer(None)?;
-    assert!(
-        offer.sdp.contains("a=simulcast:send f;~h"),
-        "the inactive encoding's rid is paused:\n{}",
-        offer.sdp
-    );
+        let offer = pc.create_offer(None)?;
+        let expected = if rid_pause_marks {
+            "a=simulcast:send f;~h"
+        } else {
+            "a=simulcast:send f;h"
+        };
+        assert!(
+            offer.sdp.contains(expected),
+            "pause marks {rid_pause_marks}: {expected}\n{}",
+            offer.sdp
+        );
+    }
     Ok(())
 }
