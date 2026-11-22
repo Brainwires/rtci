@@ -13,8 +13,8 @@ default (resolve, do not publish). "proc" rows are procedure steps that carry no
 
 Totals (rows; MUST includes MUST NOT, SHOULD includes SHOULD NOT):
 
-- MUST: tested 8 / untested 3 / partial 1 / missing 0 / violated 0 / n/a 0 (rows: 12)
-- SHOULD: tested 5 / untested 1 / partial 2 / missing 1 / violated 1 / n/a 5 (rows: 15)
+- MUST: tested 9 / untested 2 / partial 1 / missing 0 / violated 0 / n/a 0 (rows: 12)
+- SHOULD: tested 8 / untested 0 / partial 2 / missing 0 / violated 0 / n/a 5 (rows: 15)
 - MAY: tested 1 / untested 1 / partial 0 / missing 2 / violated 0 / n/a 1 (rows: 5)
 - Procedure steps (no keyword): tested 7 / untested 1 / partial 2 / missing 0 / violated 0 / n/a 0 (rows: 10)
 

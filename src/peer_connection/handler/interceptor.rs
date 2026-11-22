@@ -5,7 +5,8 @@ use crate::peer_connection::event::RTCPeerConnectionEvent;
 use crate::peer_connection::event::track_event::{RTCTrackEvent, RTCTrackEventInit};
 use crate::peer_connection::event::{RTCEventInternal, TaggedRTCEventInternal};
 use crate::peer_connection::handler::endpoint::{
-    SsrcOwners, deencapsulate_rtx, is_repair_mime_type, repair_flow_codec, resolve_rtx_primary,
+    SsrcOwners, deencapsulate_rtx, is_auxiliary_mime_type, is_repair_mime_type, repair_flow_codec,
+    resolve_rtx_primary,
 };
 use crate::peer_connection::message::internal::{
     RTCMessageInternal, RTPMessage, TaggedRTCMessageInternal,
@@ -73,8 +74,6 @@ pub(crate) struct InterceptorHandlerContext {
     /// Local SSRCs another source was heard using (RFC 3550 8.2), until their stream is
     /// replaced.
     pub(crate) ssrc_collisions: HashSet<SSRC>,
-    /// Receiver SSRCs the remote has said BYE for, until every SSRC of their track has.
-    goodbye_ssrcs: HashSet<SSRC>,
     /// The wall clock paired with the engine's clock, taken once, for the timestamps of the
     /// receivers' synchronization and contributing sources.
     pub(crate) wall_clock: Option<SystemInstant>,
@@ -103,7 +102,6 @@ impl Default for InterceptorHandlerContext {
             sdes_mids: Default::default(),
             sdes_rids: Default::default(),
             ssrc_collisions: Default::default(),
-            goodbye_ssrcs: Default::default(),
             wall_clock: None,
         }
     }
@@ -311,8 +309,9 @@ impl<'a> InterceptorHandler<'a> {
         (mid, rid, rrid)
     }
 
-    /// RFC 3550 6.6: a BYE says a source has left. Once every SSRC of a remote track has said
-    /// so, the track ends and `OnClose` fires for it.
+    /// RFC 3550 6.6: a BYE says a source has left. W3C webrtc 9.3: when one of the SSRCs a
+    /// receiver receives is removed by a BYE, its track is muted (`OnMute`); it is not
+    /// ended (only negotiation ends a remote track), and its next RTP packet unmutes it.
     fn process_goodbyes(&mut self, now: Instant, rtcp_packets: &[Box<dyn rtcp::Packet>]) {
         for packet in rtcp_packets {
             let Some(goodbye) = packet.as_any().downcast_ref::<Goodbye>() else {
@@ -334,27 +333,19 @@ impl<'a> InterceptorHandler<'a> {
                 }) else {
                     continue;
                 };
-                self.ctx.goodbye_ssrcs.insert(source);
-
                 let Some(receiver) = self.rtp_transceivers[index].receiver_mut() else {
                     continue;
                 };
                 let track = receiver.track_mut();
-                let all_left = track
-                    .ssrcs()
-                    .all(|ssrc| self.ctx.goodbye_ssrcs.contains(&ssrc));
-                if !all_left || track.ready_state() == MediaStreamTrackState::Ended {
+                if track.muted() || track.ready_state() == MediaStreamTrackState::Ended {
                     continue;
                 }
-                track.stop();
+                track.set_muted(true);
                 let track_id = track.track_id().clone();
-                for ssrc in track.ssrcs() {
-                    self.ctx.goodbye_ssrcs.remove(&ssrc);
-                }
                 self.ctx.event_outs.push_back(TaggedRTCEventInternal {
                     now,
                     event: RTCEventInternal::RTCPeerConnectionEvent(
-                        RTCPeerConnectionEvent::OnTrack(RTCTrackEvent::OnClose(track_id)),
+                        RTCPeerConnectionEvent::OnTrack(RTCTrackEvent::OnMute(track_id)),
                     ),
                 });
             }
@@ -520,13 +511,14 @@ impl<'a> InterceptorHandler<'a> {
             .is_some_and(|codec| codec.mime_type.is_empty());
 
         // `payload_type` is the *primary* codec's: an RTX packet was resolved back to the stream it
-        // repairs before we got here. FEC de-encapsulation is still TODO (see #12).
+        // repairs before we got here. FEC de-encapsulation is still TODO (see #12). A DTMF or
+        // comfort-noise packet that comes first leaves the stream unestablished: the next media
+        // packet says what the track's codec is.
         let track_codec = if is_track_codec_empty
-            && let Some(codec) = receiver
-                .get_codec_preferences()
-                .iter()
-                .find(|codec| codec.payload_type == payload_type)
-        {
+            && let Some(codec) = receiver.get_codec_preferences().iter().find(|codec| {
+                codec.payload_type == payload_type
+                    && !is_auxiliary_mime_type(&codec.rtp_codec.mime_type)
+            }) {
             Some((codec.rtp_codec.clone(), codec.payload_type))
         } else {
             None
@@ -712,10 +704,15 @@ impl<'a> InterceptorHandler<'a> {
         let Some(receiver) = transceiver.receiver_mut() else {
             return false;
         };
+        // A DTMF or comfort-noise packet does not say what the stream is sent with: the stream
+        // is placed by its first media packet.
         let Some(codec) = receiver
             .get_codec_preferences()
             .iter()
-            .find(|codec| codec.payload_type == payload_type)
+            .find(|codec| {
+                codec.payload_type == payload_type
+                    && !is_auxiliary_mime_type(&codec.rtp_codec.mime_type)
+            })
             .cloned()
         else {
             return false;
@@ -912,6 +909,7 @@ impl<'a> InterceptorHandler<'a> {
             .find(|codec| {
                 codec.payload_type == payload_type
                     && !is_repair_mime_type(&codec.rtp_codec.mime_type)
+                    && !is_auxiliary_mime_type(&codec.rtp_codec.mime_type)
             })
             .cloned()
         else {
@@ -1134,6 +1132,7 @@ impl<'a> InterceptorHandler<'a> {
             .ctx
             .wall_clock
             .get_or_insert_with(|| SystemInstant::now(now));
+        let receptive = self.rtp_transceivers[id].receptive();
         if let Some(receiver) = self.rtp_transceivers[id].receiver_mut() {
             receiver.record_sources(
                 now,
@@ -1142,6 +1141,19 @@ impl<'a> InterceptorHandler<'a> {
                 audio_level,
                 csrc_levels.as_ref().map(|ext| ext.levels.as_slice()),
             );
+            // W3C webrtc 9.3: data for a muted, not ended track of a receptive transceiver
+            // unmutes it.
+            let track = receiver.track_mut();
+            if receptive && track.muted() && track.ready_state() != MediaStreamTrackState::Ended {
+                track.set_muted(false);
+                let track_id = track.track_id().clone();
+                self.ctx.event_outs.push_back(TaggedRTCEventInternal {
+                    now,
+                    event: RTCEventInternal::RTCPeerConnectionEvent(
+                        RTCPeerConnectionEvent::OnTrack(RTCTrackEvent::OnUnmute(track_id)),
+                    ),
+                });
+            }
         }
     }
 

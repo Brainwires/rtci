@@ -444,6 +444,30 @@ fn tmmbr_negotiated_with_a_maximum_packet_rate_is_honoured() {
     assert_eq!(Some(262_144.0), told.max());
 }
 
+/// RFC 5104 section 4.2.2.2: "only a single TMMBN SHALL be sent, even if more than one TMMBR
+/// is received" between two: two TMMBR packets in one compound RTCP packet are answered with
+/// one TMMBN, which carries the bounding set after both.
+#[test]
+fn several_tmmbrs_in_one_compound_packet_get_one_tmmbn() {
+    let told = Told::default();
+    let mut harness = Harness::new(told.clone());
+
+    let first: Box<dyn rtcp::Packet> = tmmbr(REMOTE, LOCAL, 2, 65_536, 40);
+    let second: Box<dyn rtcp::Packet> = tmmbr(REMOTE + 1, LOCAL, 1, 65_536, 40);
+    let message = harness.tagged(ms(100), Packet::Rtcp(vec![first, second]));
+    harness.chain.handle_read(message).expect("read");
+    harness.drain();
+
+    let tmmbns = harness.tmmbns();
+    assert_eq!(1, tmmbns.len(), "one notification for the compound packet");
+    assert_eq!(
+        vec![(REMOTE + 1, 131_072, 40)],
+        tmmbns[0].1,
+        "the tighter of the two limits is the bounding set"
+    );
+    assert_eq!(Some(131_072.0), told.max());
+}
+
 /// RFC 5104 section 4.2.2.2: a TMMBR that changes nothing still results in a TMMBN, and when
 /// the owner of the bounding tuple leaves, a TMMBN without it is sent, with no FCI when the set
 /// is empty.
@@ -513,6 +537,48 @@ fn a_path_change_is_passed_to_the_estimator() {
 }
 
 /// The round trip time the feedback implies reaches the estimator: the additive increase of
+/// RFC 8836 section 2, requirement 1: the controller reacts to a change of the path. The
+/// engine does not have to be asked: packets that keep arriving between other addresses than
+/// before (another candidate pair) are a path change, and the estimator is told once. A
+/// single packet from elsewhere is not one.
+#[test]
+fn packets_arriving_between_new_addresses_are_a_path_change() {
+    let told = Told::default();
+    let mut harness = Harness::new(told.clone());
+    let from = |port: u16| TransportContext {
+        peer_addr: std::net::SocketAddr::from(([192, 0, 2, 7], port)),
+        ..TransportContext::default()
+    };
+    let mut at = 100;
+    let mut receive = |harness: &mut Harness, port: u16| {
+        let mut message = harness.tagged(ms(at), Packet::Rtcp(vec![remb(1e6, vec![LOCAL])]));
+        message.transport = from(port);
+        harness.chain.handle_read(message).expect("read");
+        harness.drain();
+        at += 20;
+    };
+
+    for _ in 0..5 {
+        receive(&mut harness, 5000);
+    }
+    assert_eq!(
+        0,
+        *told.path_changes.lock().unwrap(),
+        "the first path is no change"
+    );
+
+    // One stray packet from another address, then the old one again.
+    receive(&mut harness, 6000);
+    receive(&mut harness, 5000);
+    assert_eq!(0, *told.path_changes.lock().unwrap());
+
+    // The peer moved.
+    for _ in 0..5 {
+        receive(&mut harness, 6000);
+    }
+    assert_eq!(1, *told.path_changes.lock().unwrap(), "told once");
+}
+
 /// draft-ietf-rmcat-gcc-02 section 5.5 is scaled by it.
 #[test]
 fn the_round_trip_time_from_feedback_reaches_the_estimator() {

@@ -424,3 +424,46 @@ fn an_sdes_rtp_stream_id_item_places_a_layer_whose_packets_carry_no_rid() {
     );
     assert!(opened.is_empty(), "{opened:?}");
 }
+
+/// A DTMF event (RFC 4733 section 2.1: on the audio stream's SSRC) that arrives before any
+/// audio does not make `telephone-event` the stream's codec: the track opens on the first
+/// audio packet, with the audio codec.
+#[test]
+fn a_dtmf_packet_that_comes_first_does_not_set_the_tracks_codec() {
+    const DTMF: u8 = 101;
+    let transceivers = vec![
+        transceiver(
+            RtpCodecKind::Audio,
+            "0",
+            vec![
+                codec("audio/opus", OPUS),
+                codec("audio/telephone-event", DTMF),
+            ],
+        ),
+        transceiver(RtpCodecKind::Video, "1", vec![codec("video/VP8", VP8)]),
+    ];
+    let (opened, transceivers) = opened(
+        transceivers,
+        &[
+            Arrival {
+                ssrc: 5000,
+                payload_type: DTMF,
+                mid: Some("0"),
+            },
+            Arrival {
+                ssrc: 5000,
+                payload_type: OPUS,
+                mid: Some("0"),
+            },
+        ],
+    );
+    assert_eq!(opened, vec![(0, 5000)]);
+    let receiver = transceivers[0].receiver().as_ref().expect("a receiver");
+    assert_eq!(
+        receiver
+            .track()
+            .get_codec_by_ssrc(5000)
+            .map(|codec| codec.mime_type.as_str()),
+        Some("audio/opus")
+    );
+}

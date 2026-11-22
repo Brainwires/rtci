@@ -308,13 +308,16 @@ a=rtpmap:96 VP8/90000
     ))
 }
 
-/// Whether `pc` has an `OnTrack` event waiting; drains its events.
+/// Whether `pc` has a W3C track event waiting; drains its events.
 fn fired_track(pc: &mut rtc::peer_connection::RTCPeerConnection) -> bool {
+    use rtc::peer_connection::event::{RTCPeerConnectionEvent, RTCTrackEvent};
     let mut fired = false;
     while let Some(event) = pc.poll_event() {
         if matches!(
             event,
-            rtc::peer_connection::event::RTCPeerConnectionEvent::OnTrack(_)
+            RTCPeerConnectionEvent::OnTrack(
+                RTCTrackEvent::OnRemoteTrack(_) | RTCTrackEvent::OnOpen(_)
+            )
         ) {
             fired = true;
         }

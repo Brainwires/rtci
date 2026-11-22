@@ -65,7 +65,7 @@ impl SctpPath {
     /// The largest SCTP packet (common header and chunks) that fits the path: the IP-layer
     /// MTU less the IP header, the UDP header (or the TCP header and the two-byte frame
     /// length of RFC 4571), the four-byte TURN ChannelData header on a relayed candidate, and
-    /// the DTLS record header and expansion.
+    /// the DTLS record overhead.
     pub(crate) fn packet_budget(&self) -> u32 {
         let (path_mtu, ip_header) = if self.ipv6 {
             (Self::IPV6_PATH_MTU, 40)
@@ -74,10 +74,9 @@ impl SctpPath {
         };
         let transport_header = if self.tcp { 20 + 2 } else { 8 };
         let turn_header = if self.relayed { 4 } else { 0 };
-        let dtls = self.dtls_record_overhead as u32;
         path_mtu
             .saturating_sub(ip_header + transport_header + turn_header)
-            .saturating_sub(dtls)
+            .saturating_sub(u32::try_from(self.dtls_record_overhead).unwrap_or(u32::MAX))
             .max(::sctp::MIN_DATA_PACKET_MTU)
     }
 }
@@ -1002,12 +1001,21 @@ mod tests {
     /// RFC 8831 section 5: "The initial Path MTU at the IP layer SHOULD NOT exceed 1200 bytes
     /// for IPv4 and 1280 bytes for IPv6." An SCTP packet of the budget, in its DTLS record,
     /// under the headers of the path, is exactly that large at the IP layer, whatever the
-    /// path and the cipher suite; the fixed 1191 gave 1256 bytes over IPv4.
+    /// path, the DTLS version and the cipher suite; the fixed 1191 gave 1256 bytes over IPv4.
     #[test]
     fn the_packet_budget_keeps_the_ip_packet_within_the_initial_path_mtu() {
         // DTLS 1.2: AES-GCM, ChaCha20-Poly1305, AES-CCM-8, AES-256-CBC-SHA; DTLS 1.3 (a
-        // five-byte unified header and the inner content type): a 16-byte tag, AES-CCM-8.
-        for dtls_record_overhead in [13 + 24usize, 13 + 16, 13 + 16, 13 + 52, 5 + 17, 5 + 9] {
+        // five-byte unified header and the inner content type): a 16-byte tag, AES-CCM-8, and a
+        // 16-byte tag with an eight-byte connection id.
+        for dtls_record_overhead in [
+            13 + 24usize,
+            13 + 16,
+            13 + 16,
+            13 + 52,
+            5 + 17,
+            5 + 9,
+            5 + 8 + 17,
+        ] {
             for ipv6 in [false, true] {
                 for tcp in [false, true] {
                     for relayed in [false, true] {
