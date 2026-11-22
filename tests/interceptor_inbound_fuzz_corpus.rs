@@ -7,7 +7,7 @@
 //! chain is the one a peer connection builds by default, with its settings varied: both
 //! feedback formats or one, bandwidth probing on or off, a stream that negotiated RFC 8888 or
 //! transport-wide congestion control. Nothing may panic, the chain's queues drain, and the
-//! congestion controller's target stays a positive, finite number.
+//! congestion controller's target stays a finite number that is not negative.
 
 use bytes::Bytes;
 use rtc::interceptor::{
@@ -222,9 +222,10 @@ fn interceptor_inbound(data: &[u8]) {
         }
         assert!(drain(&mut chain), "the chain's queues did not drain");
 
+        // Zero is a target too: the circuit breaker has stopped the flow (RFC 8083).
         let target = handles.congestion_control.target_bitrate();
         assert!(
-            target.is_finite() && target > 0.0,
+            target.is_finite() && target >= 0.0,
             "the target bit rate is {target}"
         );
     }

@@ -173,10 +173,11 @@ impl RateController {
     }
 
     /// A rate the path was measured to deliver apart from the running received rate (a probe
-    /// cluster), or `None` to forget it. While set, the bound of the estimate by one and a
-    /// half times the received rate (section 5.5) is taken from the larger of the two: the
-    /// received rate lags a sender that has only just been told it may send more, and would
-    /// pull the estimate straight back to where it was. Over-use forgets it.
+    /// cluster), or `None` to forget it. While set, the estimate may be as high as this
+    /// measurement even where one and a half times the received rate (the bound of section
+    /// 5.5) is less: the received rate lags a sender that has only just been told it may
+    /// send more, and would pull the estimate straight back to where it was. Over-use
+    /// forgets it.
     pub fn set_measured_rate(&mut self, measured: Option<f64>) {
         self.measured_rate = measured;
     }
@@ -227,8 +228,16 @@ impl RateController {
                     self.convergence.reset();
                 }
                 self.convergence.on_decrease(received);
-                self.measured_rate = None;
-                self.target = (received * self.decrease_factor).clamp(self.min, self.max);
+                // What the path delivers is the received rate, or what a probe just measured
+                // when the sender has less to send than that: backing off from the received
+                // rate of an application-limited sender would cut the estimate to a fraction
+                // of what it sends, and again with every probe. The measurement is used once:
+                // over-use that lasts is answered from the received rate.
+                let delivered = self
+                    .measured_rate
+                    .take()
+                    .map_or(received, |measured| measured.max(received).min(self.target));
+                self.target = (delivered * self.decrease_factor).clamp(self.min, self.max);
                 self.last_change = Some(now);
             }
 
@@ -259,13 +268,12 @@ impl RateController {
 
         // A_hat(i) < 1.5 * R_hat(i): the estimate does not run away from what is sent.
         if let Some(received) = received {
-            let delivered = self
-                .measured_rate
-                .map_or(received, |rate| rate.max(received));
-            self.target = self
-                .target
-                .min(MAX_ESTIMATE_TO_RECEIVED_RATIO * delivered)
-                .clamp(self.min, self.max);
+            // One and a half times what is received, or what a probe measured the path to
+            // deliver when that is more: a measurement is a bound in itself, with no margin
+            // on top, so an estimate that rests on a probe never passes what the probe saw.
+            let bound =
+                (MAX_ESTIMATE_TO_RECEIVED_RATIO * received).max(self.measured_rate.unwrap_or(0.0));
+            self.target = self.target.min(bound).clamp(self.min, self.max);
         }
 
         self.target
