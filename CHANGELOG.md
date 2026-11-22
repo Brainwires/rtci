@@ -15,8 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **data channels** (W3C webrtc-pc 6.1, 6.2): `send()` / `send_text()` refuse on a closing
   channel (`ErrDataChannelNotOpen`; an in-band channel awaiting its ACK still accepts data, as
   RFC 8832 section 6 allows); they refuse data that would take `buffered_amount()` above the SCTP transport's
-  `[[MaxBufferSize]]` (new `Error::ErrDataChannelBufferFull`): the larger of the two sides'
-  `max-message-size`, 64 KiB between two default engines, unless
+  `[[MaxBufferSize]]` (new `Error::ErrDataChannelBufferFull`): the larger of the peer's
+  `max-message-size` and this side's send buffer, which the spec leaves to the implementation
+  ("the size of the local send buffer", 6.1.1.2) and which is 16 MiB, Chromium's, unless
   `SettingEngineBuilder::with_data_channel_max_buffer_size` sets a limit. A negotiated id at
   or above the connected transport's `maxChannels` is refused (new
   `Error::ErrDataChannelIdAboveMaxChannels`). A closed channel's stats object stays in the
