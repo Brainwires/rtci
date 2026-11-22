@@ -228,6 +228,84 @@ fn an_answer_to_an_out_of_the_blue_packet_has_its_crc32c() {
     assert!(has_crc32c(&answer[0]) && !checksum_is_zero(&answer[0]));
 }
 
+/// RFC 9653 5.3 (MAY: "faster SCTP association failure detection"), RFC 9260 8.4: an
+/// association that ended on one side, without the other hearing of it, is ended on the other
+/// by the ABORT that answers its next packet, zero checksum and all. A lossy-link run found
+/// the case: one side's handshake ran out of COOKIE ECHO retransmissions while the other,
+/// whose COOKIE ACKs were all lost, was established and kept sending its DATA (the data
+/// channel's DATA_CHANNEL_OPEN) and HEARTBEATs into the void; the out-of-the-blue packets
+/// had a zero checksum and were dropped unanswered, and the data channel neither opened nor
+/// failed for minutes after. An endpoint that does not run under DTLS still drops them.
+#[test]
+fn a_peer_whose_association_ended_here_is_aborted_by_its_next_packet() {
+    {
+        let config = over_dtls();
+        let aborted = true;
+        let mut link = Link::new(config.clone(), config, 966);
+        link.connect();
+        link.server.endpoint_answers = true;
+        // The server's association ends and says nothing.
+        link.server
+            .conn()
+            .close(AssociationError::TimedOut)
+            .expect("close");
+        assert!(link.server.conn().is_ended());
+
+        let now = link.now;
+        link.client
+            .conn()
+            .open_stream(1, PPI)
+            .unwrap()
+            .write_sctp(now, &Bytes::from_static(b"open"), PPI)
+            .unwrap();
+        let deadline = link.now + Duration::from_secs(5);
+        let ended = link.run_until(deadline, |l| {
+            l.client
+                .association
+                .as_ref()
+                .is_some_and(|(_, conn)| conn.is_ended())
+        });
+        assert_eq!(ended, aborted, "the client's association is aborted");
+        assert!(
+            link.client
+                .events
+                .iter()
+                .any(|event| matches!(event, Event::AssociationClosed { .. })),
+            "the application hears of it"
+        );
+    }
+
+    // The same stray packet with a zero checksum: answered by an endpoint that announces the
+    // zero checksum, dropped by one that does not (it cannot tell a zero from corruption).
+    for (config, answered) in [(over_dtls(), true), (TransportConfig::default(), false)] {
+        let mut endpoint = crate::endpoint::Endpoint::new(
+            SocketAddr::from(([10, 0, 0, 2], 5000)),
+            TransportProtocol::UDP,
+            Arc::new(crate::EndpointConfig::default()),
+            Some(Arc::new(crate::ServerConfig::new(config))),
+        );
+        let mut stray =
+            raw_packet(5000, 5000, 0x1234_5678, &[data_chunk(1, 1, 0, b"stray")]).to_vec();
+        stray[8..12].fill(0);
+        let remote = SocketAddr::from(([10, 0, 0, 1], 5000));
+        assert!(
+            endpoint
+                .handle(Instant::now(), remote, None, Bytes::from(stray))
+                .is_none()
+        );
+        let answer = endpoint.poll_transmit();
+        assert_eq!(answer.is_some(), answered, "answered: {answered}");
+        if let Some(TransportMessage {
+            message: Payload::RawEncode(answer),
+            ..
+        }) = answer
+        {
+            assert_eq!(CT_ABORT.0, answer[0][12]);
+            assert!(has_crc32c(&answer[0]), "RFC 9653 5.2 1.b");
+        }
+    }
+}
+
 // ---- path MTU -----------------------------------------------------------------------------
 
 /// RFC 9260 7.3, RFC 8261 4: the transport tells the association the path MTU, and packets,

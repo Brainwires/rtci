@@ -214,10 +214,12 @@ struct World {
 }
 
 impl World {
-    fn new(link: Link, seed: u64) -> Result<Self> {
+    /// `salt` changes what the peers draw (and so the course of ICE, DTLS and SCTP) and not
+    /// the link's losses and delays.
+    fn new(link: Link, seed: u64, salt: u64) -> Result<Self> {
         let now = Instant::now();
         // Each peer its own stream, apart from each other and from the link's.
-        let peer_seed = |i: u64| Rng(seed ^ (0x5eed_0000 + i)).next_u64();
+        let peer_seed = |i: u64| Rng(seed ^ (0x5eed_0000 + i) ^ (salt << 32)).next_u64();
         Ok(Self {
             peers: [
                 Peer::new("10.0.0.1:5000", now, peer_seed(1))?,
@@ -399,7 +401,28 @@ fn session_over(
     deliver_within: Duration,
     lapse_allowed: bool,
 ) -> Result<Outcome> {
-    let mut world = World::new(link, seed)?;
+    session_over_salted(
+        link,
+        seed,
+        0,
+        count,
+        open_within,
+        deliver_within,
+        lapse_allowed,
+    )
+}
+
+/// [`session_over`], with the peers' randomness salted (see [`World::new`]).
+fn session_over_salted(
+    link: Link,
+    seed: u64,
+    salt: u64,
+    count: u32,
+    open_within: Duration,
+    deliver_within: Duration,
+    lapse_allowed: bool,
+) -> Result<Outcome> {
+    let mut world = World::new(link, seed, salt)?;
     world.peers[0].pc.create_data_channel(
         "lossy-link",
         Some(RTCDataChannelInit {
@@ -665,6 +688,32 @@ fn a_fragmented_client_hello_is_put_together_over_thirty_percent_loss() -> Resul
         session_over(
             THIRTY_PERCENT,
             seed,
+            50,
+            Duration::from_secs(400),
+            Duration::from_secs(900),
+            true,
+        )?;
+    }
+    Ok(())
+}
+
+/// Seed 0x5eed with the peers' randomness salted 12, 157 and 280 (a sweep of 300 salts under
+/// ring): the channel neither opened nor failed within 400 seconds, with ICE and DTLS up. The
+/// INITs crossed; one side, its COOKIE ACKs all lost, was established and sent its
+/// DATA_CHANNEL_OPEN, which the other discarded in COOKIE-ECHOED until its T1-cookie ran out
+/// after Max.Init.Retransmits (RFC 9260 section 5.1) and its association ended. The
+/// established side never heard of it: its DATA and HEARTBEATs now reached no association,
+/// carried a zero checksum (RFC 9653) and were dropped unanswered, so it went on until its
+/// own Association.Max.Retrans, well after 400 seconds. An out-of-the-blue packet with a zero
+/// checksum is now answered with an ABORT under DTLS (RFC 9653 section 5.3 allows it), and
+/// the channel fails with an error when the association does: `AssociationFailed`.
+#[test]
+fn a_channel_whose_association_ends_on_one_side_fails_on_the_other() -> Result<()> {
+    for salt in [12, 157, 280] {
+        session_over_salted(
+            THIRTY_PERCENT,
+            0x5eed,
+            salt,
             50,
             Duration::from_secs(400),
             Duration::from_secs(900),
