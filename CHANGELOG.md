@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **rtp header extension control** (webrtc-extensions 4): `RTCRtpTransceiver::
+  set_header_extensions_to_negotiate` takes a `Vec<RTCRtpHeaderExtensionToNegotiate>` (uri and
+  direction, "stopped" for not negotiated) and returns a `Result`: an InvalidModificationError
+  for another size, another URI at an index, the mid not "sendrecv", or a mandatory-to-implement
+  extension (mid, audio level) stopped. New `get_header_extensions_to_negotiate` and
+  `get_negotiated_header_extensions`. Offers carry each extension that is not stopped with its
+  direction (`/inactive` too); answers carry an offered one within the offer's direction; an
+  applied answer sets both lists (reversed for a remote one, stopped for one it left out); a
+  new transceiver copies the list of the first of its kind that is not stopping.
+
 - **srtp**: `RTCPeerConnectionBuilder::build` refuses an SRTP or SRTCP replay window of 1 to
   63 packets (new `Error::ErrSrtpReplayWindowTooSmall`; RFC 3711 3.3.2); it used to fail when
   the first DTLS handshake completed. DTLS-SRTP keys of the AES-CM profiles live 2^31 packets
