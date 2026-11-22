@@ -83,7 +83,7 @@ const DROP_FILTER_SLOT: usize = 400;
 
 /// The recorder sits immediately application-ward of `Slot::FecDecoder` (10_300) — the earliest
 /// point at which [`Attribute::RecoveredByFec`] exists to be read.
-const RECOVERY_RECORDER_SLOT: usize = 10_400;
+const RECOVERY_RECORDER_SLOT: usize = 10_450;
 
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
