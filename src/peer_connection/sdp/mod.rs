@@ -171,6 +171,8 @@ mod rejected_mline_tests {
             write_ssrc_attributes_for_simulcast: false,
             ice_pacing: None,
             ls_groups: vec![],
+            selected_destination: None,
+            remote_candidates: vec![],
             rid_pause_marks: false,
         }
     }
@@ -345,6 +347,59 @@ pub(crate) const ATTR_KEY_BUNDLE_ONLY: &str = "bundle-only";
 pub(crate) const ATTR_KEY_ICE_OPTIONS: &str = "ice-options";
 /// `a=ice-pacing` (RFC 8839 §5.5).
 pub(crate) const ATTR_KEY_ICE_PACING: &str = "ice-pacing";
+/// RFC 8839 section 5.2.
+pub(crate) const ATTR_KEY_REMOTE_CANDIDATES: &str = "remote-candidates";
+
+/// The remote candidates an offer's `a=remote-candidates` lines name, as (address, port), of
+/// the sections that carry candidates (RFC 8839 section 5.2). RFC 9429 section 5.8.2: they
+/// "MUST be parsed ... but their values are ignored": one that does not parse refuses the
+/// description; a full agent then only takes its default destination from them.
+pub(crate) fn remote_candidates(desc: &SessionDescription) -> Result<Vec<(String, u16)>> {
+    use sdp::attribute::{RemoteCandidates, TypedAttribute};
+    let mut named = vec![];
+    for m in &desc.media_descriptions {
+        for a in m
+            .attributes
+            .iter()
+            .filter(|a| a.key == ATTR_KEY_REMOTE_CANDIDATES)
+        {
+            let value = a.value.as_deref().unwrap_or_default();
+            let parsed = RemoteCandidates::parse(value).map_err(|_| {
+                Error::SdpInvalidValue(format!(
+                    "a=remote-candidates:{value} (RFC 8839 section 5.2)"
+                ))
+            })?;
+            if is_rejected_media(m) {
+                continue;
+            }
+            named.extend(
+                parsed
+                    .candidates
+                    .into_iter()
+                    .filter(|c| c.component == 1)
+                    .map(|c| (c.address, c.port)),
+            );
+        }
+    }
+    Ok(named)
+}
+
+/// The `ufrag` extension attribute of a candidate line (`candidate-attribute` without the
+/// `candidate:` prefix), the ICE generation it names (RFC 8839 section 5.1, RFC 8838 section
+/// 9).
+pub(crate) fn candidate_line_ufrag(value: &str) -> Option<&str> {
+    let fields: Vec<&str> = value.split_ascii_whitespace().collect();
+    // foundation component transport priority address port "typ" type, then raddr/rport and
+    // the extension pairs.
+    let mut i = 8;
+    while i + 1 < fields.len() {
+        if fields[i] == "ufrag" {
+            return Some(fields[i + 1]);
+        }
+        i += 2;
+    }
+    None
+}
 /// `a=ptime` (RFC 8866 section 6.4).
 pub(crate) const ATTR_KEY_PTIME: &str = "ptime";
 /// `a=maxptime` (RFC 8866 section 6.5).
@@ -967,8 +1022,20 @@ pub(crate) fn add_candidates_to_media_descriptions(
     mut m: MediaDescription,
     ice_gathering_state: RTCIceGatheringState,
 ) -> Result<MediaDescription> {
+    // Each line names its ICE generation with the `ufrag` extension attribute (RFC 8839
+    // section 5.1 `extension-att-name`; RFC 8838 section 9: a candidate is tied to an ICE
+    // session), the section's own `a=ice-ufrag`, as trickled candidates already do
+    // (`usernameFragment`).
+    let ufrag = m
+        .attribute("ice-ufrag")
+        .flatten()
+        .filter(|ufrag| !ufrag.is_empty())
+        .map(str::to_owned);
     let append_candidate_if_new = |c: &Candidate, m: MediaDescription| -> MediaDescription {
-        let marshaled = c.marshal();
+        let mut marshaled = c.marshal();
+        if let Some(ufrag) = &ufrag {
+            marshaled = format!("{marshaled} ufrag {ufrag}");
+        }
         for a in &m.attributes {
             if let Some(value) = &a.value
                 && &marshaled == value
@@ -1959,6 +2026,13 @@ pub(crate) struct PopulateSdpParams {
     /// In an offer, the `a=group:LS` groups of the most recent answer; in an answer, the
     /// offer's (RFC 9429 sections 5.2.2, 5.3.1).
     pub(crate) ls_groups: Vec<Vec<String>>,
+    /// Once ICE has selected a pair (and no restart is staged), the `m=` / `c=` destination of
+    /// the sections that carry the candidates: the selected pair's local candidate (RFC 8839
+    /// sections 4.2.1.2, 4.3.4, 4.4.1.2.2), or the one an offer's `a=remote-candidates` names.
+    pub(crate) selected_destination: Option<(std::net::IpAddr, u16)>,
+    /// The values of the `a=remote-candidates` lines (RFC 8839 sections 4.4.1.2.2, 5.2) an
+    /// offer of the controlling agent carries once ICE has selected a pair.
+    pub(crate) remote_candidates: Vec<String>,
 }
 
 impl RTCPeerConnection {
@@ -2348,6 +2422,21 @@ impl RTCPeerConnection {
             );
         }
 
+        // After ICE selected a pair: the sections that carry the candidates name it.
+        for m in &mut d.media_descriptions {
+            if m.media_name.port.value == 0 || m.attribute("candidate").is_none() {
+                continue;
+            }
+            if let Some((ip, port)) = params.selected_destination {
+                set_default_destination(m, ip, port);
+            }
+            for value in &params.remote_candidates {
+                m.attributes.push(sdp::description::common::Attribute::new(
+                    ATTR_KEY_REMOTE_CANDIDATES.to_owned(),
+                    Some(value.clone()),
+                ));
+            }
+        }
         share_bundle_destination(&mut d);
 
         // Lip synchronization groups (RFC 5888 section 7; RFC 9429 sections 5.2.1, 5.2.2,
