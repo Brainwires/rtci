@@ -2078,9 +2078,10 @@ pub enum Error {
     ErrInvalidDirection,
 
     /// ErrRegisterHeaderExtensionNoFreeID indicates that there was no extension ID available which
-    /// in turn means that all 15 available id(1 through 14) have been used.
+    /// in turn means that all 254 ids an RTP header can carry (1 to 14, and 16 to 255 in the
+    /// two-byte form, RFC 8285) have been used.
     #[error(
-        "no header extension ID was free to use(this means the maximum of 15 extensions have been registered)"
+        "no header extension ID was free to use (the maximum of 254 extensions have been registered)"
     )]
     ErrRegisterHeaderExtensionNoFreeID,
 

@@ -9,6 +9,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **jsep**: codec parameters.
+  - The default audio formats include comfort noise, `CN/8000` on payload type 13 (RFC 7874
+    section 3, RFC 3389): default audio offers have one more format. New `MIME_TYPE_CN`,
+    with a payloader. A track that names its codec keeps the telephone-event and CN formats on
+    that codec's clock in the offer (they were dropped). A CN or telephone-event packet the
+    application writes when its format is not negotiated is dropped, not rewritten to the
+    media payload type.
+  - Codec matching compares the channel count when both formats state one (RFC 7587 section
+    7: Opus is `opus/48000/2`; a remote `opus/48000/1` is not answered).
+  - H.264: an absent `packetization-mode` is 0 and an absent `profile-level-id` is `42000a`
+    (RFC 6184 section 8.1); profiles compare by RFC 6184 Table 5, so `42e01f` and `4d801f`
+    (both Constrained Baseline) match. Offers without these parameters are now answered.
+  - AV1: formats match by `profile` (absent: 0), and an answer states this endpoint's own
+    `level-idx` / `tier` (AV1 RTP section 7.2); a remote `profile=1` no longer matches a
+    `profile=0` codec.
+- **jsep**: header extensions per RFC 8285, RFC 6904, RFC 6464 and RFC 6465.
+  - Ids up to 255: offers take 1 to 14, then 16 to 255 (never 15), and up to 254 extensions
+    can be registered (`ErrRegisterHeaderExtensionNoFreeID` beyond that; it was 15).
+  - `a=extmap-allow-mixed` is read at media level too and reaches the sender: without it on
+    both sides a stream stays in one form (two-byte throughout once an id above 14 is
+    negotiated for it, or from its first two-byte packet on); the stamped MID / RtpStreamId
+    take the two-byte form when they need it instead of failing `write_rtp`.
+  - A received description whose `a=extmap` lines map one id to two extensions, or one
+    extension to two ids, in a section or a BUNDLE group, is refused (`SdpInvalidValue`); a
+    mapping to the reserved id 15 is not used.
+  - An offer's extensions numbered 4096 to 4351 are remapped to a free id and answered
+    (RFC 8285 section 7), the first registered alternative of each id.
+  - An extension registered for one direction says so (`a=extmap:N/recvonly`); an answer
+    keeps a reversed direction only where the registration allows it, and drops the extension
+    otherwise.
+  - RFC 6904 header extension encryption is negotiated: `a=extmap:N
+    urn:ietf:params:rtp-hdrext:encrypt <uri>` is written and read, an answer takes the
+    encrypted form whenever it is offered (the clear one answered `inactive`), and the SRTP
+    contexts encrypt and decrypt the negotiated ids. New
+    `MediaEngine::set_header_extension_encryption` with `RTCRtpHeaderExtensionEncryption`
+    (`Clear`, the default for application extensions, `BestEffort`, `Encrypted`).
+  - The default interceptors register the mixer-to-client audio level
+    (`urn:ietf:params:rtp-hdrext:csrc-audio-level`, receive only) and offer both audio level
+    extensions encrypted as well as in the clear (RFC 8834 sections 5.2.2, 5.2.3): default
+    audio offers have four more `a=extmap` lines. Registering an audio level extension for
+    video, or the `encrypt` URI itself, is a `TypeError`.
+  - `RTCRtpHeaderExtensionParameters` has a new public field `attributes` (the peer's
+    extension attributes, e.g. `vad=off`); `encrypted` is now set.
 - **remote tracks**: by description, not by media (W3C webrtc-pc 4.4.1.6, 5.1.1, 5.3, 9.3).
   New `RTCTrackEvent` variants: `OnRemoteTrack(RTCRemoteTrackEventInit)` (the W3C `track`
   event, queued when a description makes a transceiver receive or adds streams, with the
