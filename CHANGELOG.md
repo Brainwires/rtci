@@ -3005,6 +3005,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `HandshakeType::NewSessionTicket`; the hellos carry their `session_id`. Interop with OpenSSL
   3.5.4, both roles, by session id (`-no_ticket`) and by ticket.
 
+- **dtls**: `examples/dtls_interop.rs` takes `DTLS_CID=<n>` (ask for an n-byte connection id,
+  count the `tls12_cid` records each way) and `DTLS_SRTP_OPTIONAL=1`. With them, DTLS 1.2
+  connection ids (RFC 9146) interoperate with Mbed TLS 3.6.2 in both roles.
+
 ### DTLS 1.3 pre-shared keys
 
 - **dtls**: session resumption with tickets for DTLS 1.3 (RFC 8446 sections 2.2, 4.2.9,
