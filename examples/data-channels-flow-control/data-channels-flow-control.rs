@@ -18,7 +18,6 @@ use rtc::peer_connection::event::RTCPeerConnectionEvent;
 use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
 use rtc::peer_connection::sdp::RTCSessionDescription;
 use rtc::peer_connection::state::RTCPeerConnectionState;
-use rtc::peer_connection::transport::RTCIceServer;
 use rtc::peer_connection::transport::{CandidateConfig, CandidateHostConfig, RTCIceCandidate};
 
 const DEFAULT_TIMEOUT_DURATION: Duration = Duration::from_secs(86400); // 1 day duration
@@ -128,11 +127,7 @@ async fn run_requester(
     offer_tx: tokio::sync::mpsc::Sender<RTCSessionDescription>,
     mut answer_rx: tokio::sync::mpsc::Receiver<RTCSessionDescription>,
 ) -> Result<()> {
-    let requester_config = RTCConfigurationBuilder::new()
-        .with_ice_servers(vec![RTCIceServer {
-            ..Default::default()
-        }])
-        .build();
+    let requester_config = RTCConfigurationBuilder::new().build();
 
     // Create requester (sender) peer connection
     let mut requester = RTCPeerConnectionBuilder::new()
@@ -293,11 +288,7 @@ async fn run_responder(
     mut offer_rx: tokio::sync::mpsc::Receiver<RTCSessionDescription>,
     answer_tx: tokio::sync::mpsc::Sender<RTCSessionDescription>,
 ) -> Result<()> {
-    let responder_config = RTCConfigurationBuilder::new()
-        .with_ice_servers(vec![RTCIceServer {
-            ..Default::default()
-        }])
-        .build();
+    let responder_config = RTCConfigurationBuilder::new().build();
 
     // Create responder (receiver) peer connection
     let mut responder = RTCPeerConnectionBuilder::new()

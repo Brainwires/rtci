@@ -43,6 +43,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `a=ice-pacing` (RFC 8839 section 5.5) when it is not the default, and the peer's
   `a=ice-pacing` reaches the ICE agent, which uses the higher value (RFC 8445 section 14.2).
   New `RTCPeerConnection::remote_ice_options`.
+- **srtp**: `RTCPeerConnectionBuilder::build` refuses an SRTP or SRTCP replay window of 1 to
+  63 packets (new `Error::ErrSrtpReplayWindowTooSmall`; RFC 3711 3.3.2); it used to fail when
+  the first DTLS handshake completed. DTLS-SRTP keys of the AES-CM profiles live 2^31 packets
+  (RFC 5764 4.1.2; they had RFC 3711's 2^48); at a key's limit the DTLS transport fails with
+  `dtls-failure` (no re-keying: a browser does not take a new DTLS association on a transport
+  that has one).
+- **svc**: `RTCRtpEncodingParameters` has a new public member `scalability_mode`
+  (`Option<String>`, W3C webrtc-svc), validated by `add_transceiver_*` (new
+  `Error::ErrOperationError`) and `set_parameters` (`InvalidModificationError`). The default
+  header extensions (`register_default_interceptors`) offer the Dependency Descriptor for
+  video.
+- **priority**: `RTCRtpEncodingParameters` has two new public members, `priority`
+  (`RTCPriorityType`, `low` by default) and `network_priority` (`Option<RTCPriorityType>`): a
+  struct literal without `..Default::default()` needs them.
+- **data channels** (W3C webrtc-pc 6.1, 6.2): `send()` / `send_text()` refuse on a closing
+  channel (`ErrDataChannelNotOpen`; an in-band channel awaiting its ACK still accepts data, as
+  RFC 8832 section 6 allows); they refuse data that would take `buffered_amount()` above the SCTP transport's
+  `[[MaxBufferSize]]` (new `Error::ErrDataChannelBufferFull`): the larger of the two sides'
+  `max-message-size`, 64 KiB between two default engines, unless
+  `SettingEngineBuilder::with_data_channel_max_buffer_size` sets a limit. A negotiated id at
+  or above the connected transport's `maxChannels` is refused (new
+  `Error::ErrDataChannelIdAboveMaxChannels`). A closed channel's stats object stays in the
+  report, closed (the last 64 channels).
 - **jsep**: codec parameters.
   - The default audio formats include comfort noise, `CN/8000` on payload type 13 (RFC 7874
     section 3, RFC 3389): default audio offers have one more format. New `MIME_TYPE_CN`,
@@ -1264,6 +1287,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   estimate falls by 3% or more and otherwise once a second; `AbsSendTimeInterceptor` stamps
   abs-send-time on the packets of local streams that negotiated it, as they leave the pacer.
   `goog-remb` was offered on video without any REMB ever being sent.
+- **srtp**: `OnSrtpKeyLifetimeExpiring` (the SRTP contexts' `KeyLifetimeExpiring`) and
+  `OnCryptexRequiredViolation` reach the application; `SettingEngineBuilder::with_srtp_key_lifetime`;
+  the SRTP profile is mapped from its DTLS-SRTP code point (`ProtectionProfile::from_dtls_srtp_id`),
+  a NULL-cipher profile never taken. rtc-srtp: `keying::validate_key_lifetime`.
+- **encoded transform**: `rtc::sframe` re-exports `rtc-sframe` (RFC 9605); `rtp::codec::opaque`
+  is a format-agnostic payloader / depacketizer for bytes the RTP layer does not parse (a
+  whole-frame SFrame ciphertext over several packets; start and end flags in a one-byte
+  header; a unit missing a fragment is dropped whole).
+- **priority** (W3C webrtc-priority, RFC 8837): `RTCPriorityType` with its DCEP values,
+  encodings' `priority` / `network_priority` (set with `setParameters`),
+  `RTCDataChannel::priority_type()`, and `RTCPeerConnection::dscp(&datagram)`: the DSCP of
+  RFC 8837 Table 1 the socket layer sets on each datagram `poll_write` returned (per RTP
+  stream, one for the SCTP association, one for everything over TCP).
+  `SettingEngineBuilder::with_non_interactive_video` selects the AF3x video codepoints.
+- **dtmf**: `RTCDTMFSender` (W3C webrtc-pc section 7) as `RTCRtpSender::dtmf()` for an audio
+  sender: `insert_dtmf(now, tones, duration, inter_tone_gap)`, `tone_buffer()`,
+  `can_insert_dtmf()`; `RTCPeerConnectionEvent::OnDtmfToneChange`. The tones play out on the
+  connection's timers as RFC 4733 telephone-event packets in the sender's first stream: the
+  engine numbers them in the stream's sequence and moves the application's later audio
+  packets past them (`write_rtp` adds the count of event packets sent), timestamps follow the
+  last audio packet, the final packet goes three times 50 ms apart.
+- **rtp**: `TelephoneEventSender` sends the final report of each segment of a long event three
+  times, as the final report of the event (RFC 4733 section 2.5.1.4 SHOULD).
+- **data channels**: `RTCDataChannel::buffered_amount()` (W3C `bufferedAmount`). At the
+  SCTP connected procedure a channel without a usable id fails alone (`OnError` with
+  `data-channel-failure`, then `OnClose`) instead of the whole event failing; the DCEP
+  handshake timeout fires `OnError` before `OnClose`; a second `close()` while closing does
+  nothing.
 - **states and events** (W3C webrtc-pc): the getters `signaling_state()`,
   `ice_gathering_state()`, `ice_connection_state()`, `connection_state()`; the transport
   events `OnIceTransportStateChange`, `OnIceGathererStateChange`,
@@ -2154,6 +2205,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deviations enters the variance as three deviations (the outlier filter was missing). The
   multi-flow properties hold as before (late flow 0.48 / 0.49, `Gcc` / TCP 0.19 / 0.81 and 0.37
   / 0.63, burst recovered in 4 s).
+- **data channels**: an in-band channel created once the SCTP association is up had no DCEP
+  handshake deadline, so a lost `DATA_CHANNEL_ACK` left it connecting for ever; it has the
+  deadline now. Stream id assignment refused the last id below `maxChannels`.
 - **sctp**: a stream parked by back-pressure resumed only from `poll_read` or the peer's next
   datagram, and the SACK that reopens the window waited for the next `poll_write`, which a
   caller has usually made before it reads: a sender stopped by a zero window then waited for

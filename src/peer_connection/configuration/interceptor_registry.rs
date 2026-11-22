@@ -448,6 +448,9 @@ pub fn register_default_interceptors_without_congestion_control(
 ///   reports the levels as the audio level of its contributing sources.
 /// - **Coordination of video orientation** (`urn:3gpp:video-orientation`) for video: the
 ///   application writes and reads it.
+/// - **Dependency Descriptor** (the AV1 RTP specification, appendix A) for video: the layer
+///   structure a forwarder that cannot parse the payload routes by (W3C webrtc-svc section 4,
+///   SFrame). The application writes it (`rtp::codec::dependency_descriptor`).
 ///
 /// The two audio level extensions are offered encrypted as well as in the clear (RFC 6904
 /// section 4.1 best-effort encryption): RFC 8834 sections 5.2.2 and 5.2.3 require that an
@@ -472,6 +475,13 @@ pub fn configure_default_header_extensions(media_engine: &mut MediaEngine) -> Re
         ),
         (
             ::sdp::extmap::VIDEO_ORIENTATION_URI,
+            RtpCodecKind::Video,
+            None,
+        ),
+        // The AV1 RTP specification's Dependency Descriptor (appendix A): what a forwarder
+        // that cannot read the payload (SFrame, W3C webrtc-svc section 4) routes layers by.
+        (
+            ::rtp::codec::dependency_descriptor::DEPENDENCY_DESCRIPTOR_URI,
             RtpCodecKind::Video,
             None,
         ),
