@@ -1,6 +1,8 @@
 //! `a=msid` in a remote description (RFC 8830 sections 2 and 3, RFC 9429 sections 5.2.1 and
 //! 5.8.2): the form without appdata that RFC 9429 has senders write, several lines for a
-//! track in several MediaStreams, `-` for none, and lines that are not well formed.
+//! track in several MediaStreams, `-` for none, and lines that are not well formed. The
+//! receiver's track id is the engine's own, never the msid appdata (W3C webrtc-pc 5.3 "create
+//! an RTCRtpReceiver": a new track whose id is not mapped to the remote's).
 
 mod jsep_common;
 
@@ -71,8 +73,8 @@ fn several_msid_lines_put_one_track_in_several_streams() -> TestResult {
         ),
     )?;
     assert_eq!(streams, vec!["first", "second"]);
-    assert_eq!(stream, "first");
-    assert_eq!(track, "track", "the a=msid lines win over a=ssrc msid");
+    assert_eq!(stream, "first", "the a=msid lines win over a=ssrc msid");
+    assert_ne!(track, "track", "W3C 5.3: not the msid appdata");
     Ok(())
 }
 
@@ -81,7 +83,8 @@ fn a_dash_is_no_stream() -> TestResult {
     let mut pc = default_peer()?;
     let (streams, stream, track) = remote_track(&mut pc, offer("a=msid:- track\n", ""))?;
     assert!(streams.is_empty(), "{streams:?}");
-    assert_eq!((stream.as_str(), track.as_str()), ("-", "track"));
+    assert_eq!(stream, "-");
+    assert_ne!(track, "track", "W3C 5.3: not the msid appdata");
     Ok(())
 }
 
@@ -95,7 +98,7 @@ fn a_malformed_msid_line_is_ignored() -> TestResult {
         offer("a=msid:one two three\na=msid:good track\n", ""),
     )?;
     assert_eq!(streams, vec!["good"]);
-    assert_eq!(track, "track");
+    assert!(!track.is_empty());
     Ok(())
 }
 
@@ -108,6 +111,7 @@ fn a_source_level_msid_is_used_when_there_is_no_msid_line() -> TestResult {
         offer("", "a=ssrc:1234 cname:c\na=ssrc:1234 msid:legacy other\n"),
     )?;
     assert_eq!(streams, vec!["legacy"]);
-    assert_eq!((stream.as_str(), track.as_str()), ("legacy", "other"));
+    assert_eq!(stream, "legacy");
+    assert_ne!(track, "other", "W3C 5.3: not the msid appdata");
     Ok(())
 }

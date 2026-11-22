@@ -701,14 +701,14 @@ fn an_ack_lists_record_numbers() -> Result<()> {
     Ok(())
 }
 
-/// `DtlsVersion::record_overhead` is what a protected record as this stack sends it (the full
-/// header form) adds to its content, under every suite, with and without a connection id: a
-/// layer above that sizes its datagrams by it (SCTP over DTLS, RFC 8261 section 5) fills the
-/// path exactly.
+/// The overhead `DTLSConn::record_overhead` reports for DTLS 1.3 is what a protected record as
+/// this stack sends it (the full header form) adds to its content, under every suite, with
+/// and without a connection id: a layer above that sizes its datagrams by it (SCTP over DTLS,
+/// RFC 8261 section 5) fills the path exactly.
 #[test]
 fn the_record_overhead_is_what_a_sealed_record_adds() -> Result<()> {
     for id in ALL_SUITES {
-        let (_, mut sender, _) = key_pair(id)?;
+        let (suite, mut sender, _) = key_pair(id)?;
         for connection_id in [&b""[..], &b"\x01\x02\x03\x04\x05\x06\x07\x08"[..]] {
             let content = vec![0x5a; 1100];
             let record = sender.seal(
@@ -719,9 +719,7 @@ fn the_record_overhead_is_what_a_sealed_record_adds() -> Result<()> {
                 &content,
                 0,
             )?;
-            let overhead = crate::config::DtlsVersion::Dtls1_3
-                .record_overhead(id, connection_id.len())
-                .expect("a DTLS 1.3 suite");
+            let overhead = super::conn::protected_record_overhead(suite, connection_id.len());
             assert_eq!(
                 record.len() - content.len(),
                 overhead,

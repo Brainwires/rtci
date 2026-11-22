@@ -234,7 +234,7 @@ impl RTCPeerConnection {
 
     /// What lies under the SCTP association: the selected candidate pair (its address
     /// family, its transport, whether this side's candidate is relayed) and what the DTLS
-    /// cipher suite adds to a record. `None` while no pair is selected.
+    /// version and cipher suite add to a record. `None` while no pair is selected.
     fn sctp_path(&self) -> Option<SctpPath> {
         let (local, remote) = self
             .pipeline_context
@@ -242,8 +242,8 @@ impl RTCPeerConnection {
             .ice_transport
             .agent
             .get_selected_candidate_pair()?;
-        // What each record adds for the negotiated version and suite (and connection id),
-        // as the DTLS association writes them.
+        // The record overhead of the version and suite negotiated (a DTLS 1.3 record is
+        // smaller than a DTLS 1.2 one).
         let dtls_record_overhead = self
             .pipeline_context
             .dtls_handler_context

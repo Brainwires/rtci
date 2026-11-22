@@ -249,6 +249,7 @@ pub mod event;
 pub(crate) mod handler;
 mod internal;
 mod object_model;
+mod remote_tracks;
 // wpt100:hdrext
 mod always_negotiate;
 pub mod message;
@@ -784,6 +785,9 @@ pub struct RTCPeerConnection {
     /// The transceivers removed since `take_removed_transceivers` was last called, each by the
     /// id it had when it was removed, in removal order.
     pub(super) removed_transceivers: Vec<RTCRtpTransceiverId>,
+    /// The id of the "default" remote MediaStream of the session (RFC 9429 section 5.8), once
+    /// a media section without `a=msid` needed one.
+    pub(super) default_remote_stream_id: Option<crate::media_stream::MediaStreamId>,
 
     greater_mid: isize,
     sdp_origin: Origin,
@@ -1296,9 +1300,12 @@ impl RTCPeerConnection {
         // What is left can only fail inside a transport; should it, the description state is
         // put back as it was.
         let snapshot = self.description_snapshot();
+        let sdp_type = local_description.sdp_type;
         let applied = self.apply_local_description(now, local_description, next_state);
         if applied.is_err() {
             self.restore_description_snapshot(snapshot);
+        } else {
+            self.after_local_description(sdp_type);
         }
         applied
     }
@@ -1622,6 +1629,7 @@ impl RTCPeerConnection {
         // What is left can only fail inside a transport; should it, the description state is
         // put back as it was.
         let snapshot = self.description_snapshot();
+        let (sdp_type, prior_state) = (remote_description.sdp_type, self.signaling_state);
         let applied = self.apply_remote_description(
             now,
             remote_description,
@@ -1630,6 +1638,8 @@ impl RTCPeerConnection {
         );
         if applied.is_err() {
             self.restore_description_snapshot(snapshot);
+        } else {
+            self.after_remote_description(sdp_type, prior_state);
         }
         applied
     }
@@ -3189,8 +3199,9 @@ impl RTCPeerConnection {
     /// # Errors
     ///
     /// - [`Error::ErrConnectionClosed`] when the peer connection is closed
-    /// - [`Error::ErrPeerConnAddTransceiverFromKindSupport`] when the kind is neither audio
-    ///   nor video, or the direction is `Unspecified` or `Stopped` (W3C `TypeError`)
+    /// - [`Error::ErrPeerConnAddTransceiverFromKindSupport`] when the kind is `Unspecified`,
+    ///   or the direction is `Unspecified` or `Stopped` (W3C `TypeError`; `Application` is
+    ///   the fork's RTP-in-`m=application` extension and is accepted)
     /// - [`Error::TypeError`] for a rid that is not RFC 8851 section 10 syntax,
     ///   [`Error::ErrRTPSenderRidNil`] when some but not all encodings have a rid and
     ///   [`Error::ErrRTPSenderRIDCollision`] for a repeated rid (all W3C `TypeError`)
@@ -3217,7 +3228,10 @@ impl RTCPeerConnection {
         if self.is_closed() {
             return Err(Error::ErrConnectionClosed);
         }
-        if !matches!(kind, RtpCodecKind::Audio | RtpCodecKind::Video) {
+        // W3C: a kind other than audio or video is a TypeError. The fork also carries RTP in
+        // `m=application` sections (SMPTE ST 336 / KLV, `RtpCodecKind::Application`), an
+        // engine extension the W3C API has no kind for; only `Unspecified` is refused.
+        if kind == RtpCodecKind::Unspecified {
             return Err(Error::ErrPeerConnAddTransceiverFromKindSupport);
         }
 

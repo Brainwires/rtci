@@ -60,9 +60,12 @@ test("mDNS-hidden browser candidates resolve on the Rust side", async ({ page })
     `its own icecandidate events with default settings: ${JSON.stringify(r.hosts)}`,
   );
   // WebKit's Linux ports publish their mDNS names through the Avahi daemon over the system
-  // D-Bus; the test image runs neither, so nothing answers for WebKit's name.
+  // D-Bus; the test image runs neither, so nothing answers for WebKit's name. Its candidate is
+  // still in Rust's report (an `RTCIceCandidateStats` exists for every submitted mDNS
+  // candidate, draft-ietf-mmusic-mdns-ice-candidates section 3.3.1), but it has no pair: a
+  // pair is made only once the name resolved.
   naEnv(
-    test.info().project.name.startsWith("webkit") && !r.remote.some((c) => /\.local$/.test(c.address || "")),
+    test.info().project.name.startsWith("webkit") && !r.pairs.some((p) => /\.local$/.test(p.remoteAddress || "")),
     "the test image runs no Avahi daemon, which WebKitGTK / WPE register their mDNS candidate names with",
     "WebKit Source/WebKit/NetworkProcess/glib/NetworkMDNSRegisterGLib.cpp (org.freedesktop.Avahi " +
       "EntryGroup.AddAddress on the system bus); the image (mcr.microsoft.com/playwright, " +

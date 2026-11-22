@@ -46,9 +46,9 @@ pub(crate) struct SctpPath {
     pub(crate) tcp: bool,
     /// The local candidate is a relayed one: the data travels in TURN ChannelData.
     pub(crate) relayed: bool,
-    /// What a DTLS record adds to its content: the record header and the cipher suite's
-    /// expansion, for the negotiated version and suite and, under DTLS 1.3, the connection id
-    /// (`dtls::endpoint::Endpoint::record_overhead`).
+    /// What a protected DTLS record adds to its payload: its header, and what the negotiated
+    /// version and cipher suite add (explicit nonce, tag, padding; for DTLS 1.3 the inner
+    /// content type; a connection id).
     pub(crate) dtls_record_overhead: usize,
 }
 
@@ -57,9 +57,9 @@ impl SctpPath {
     const IPV4_PATH_MTU: u32 = 1200;
     const IPV6_PATH_MTU: u32 = 1280;
     /// The record overhead assumed while no cipher suite is negotiated: a DTLS 1.2 record
-    /// header (13 bytes, RFC 6347 section 4.1) and an AEAD suite with an 8-byte explicit
-    /// nonce and a 16-byte tag (AES-GCM), more than any DTLS 1.3 AEAD record without a
-    /// connection id.
+    /// (RFC 6347 section 4.1: a 13-byte header) of an AEAD suite with an 8-byte explicit
+    /// nonce and a 16-byte tag (AES-GCM), the largest of the AEAD records; a DTLS 1.3 record
+    /// is smaller.
     pub(crate) const DEFAULT_DTLS_RECORD_OVERHEAD: usize = 13 + 24;
 
     /// The largest SCTP packet (common header and chunks) that fits the path: the IP-layer
@@ -1032,44 +1032,18 @@ mod tests {
     /// path, the DTLS version and the cipher suite; the fixed 1191 gave 1256 bytes over IPv4.
     #[test]
     fn the_packet_budget_keeps_the_ip_packet_within_the_initial_path_mtu() {
-        use ::dtls::cipher_suite::CipherSuiteId;
-        use ::dtls::config::DtlsVersion;
-        // What `rtc-dtls` says each record adds, for the suites of both versions, with and
-        // without a DTLS 1.3 connection id.
-        let overheads = [
-            (
-                DtlsVersion::Dtls1_2,
-                CipherSuiteId::Tls_Ecdhe_Ecdsa_With_Aes_128_Gcm_Sha256,
-                0,
-            ),
-            (
-                DtlsVersion::Dtls1_2,
-                CipherSuiteId::Tls_Ecdhe_Ecdsa_With_ChaCha20_Poly1305_Sha256,
-                0,
-            ),
-            (
-                DtlsVersion::Dtls1_2,
-                CipherSuiteId::Tls_Ecdhe_Ecdsa_With_Aes_128_Ccm_8,
-                0,
-            ),
-            (
-                DtlsVersion::Dtls1_2,
-                CipherSuiteId::Tls_Ecdhe_Ecdsa_With_Aes_256_Cbc_Sha,
-                0,
-            ),
-            (
-                DtlsVersion::Dtls1_3,
-                CipherSuiteId::Tls_Aes_128_Gcm_Sha256,
-                0,
-            ),
-            (
-                DtlsVersion::Dtls1_3,
-                CipherSuiteId::Tls_ChaCha20_Poly1305_Sha256,
-                8,
-            ),
-        ]
-        .map(|(version, suite, cid)| version.record_overhead(suite, cid).expect("a suite"));
-        for dtls_record_overhead in overheads {
+        // DTLS 1.2: AES-GCM, ChaCha20-Poly1305, AES-CCM-8, AES-256-CBC-SHA; DTLS 1.3 (a
+        // five-byte unified header and the inner content type): a 16-byte tag, AES-CCM-8, and a
+        // 16-byte tag with an eight-byte connection id.
+        for dtls_record_overhead in [
+            13 + 24usize,
+            13 + 16,
+            13 + 16,
+            13 + 52,
+            5 + 17,
+            5 + 9,
+            5 + 8 + 17,
+        ] {
             for ipv6 in [false, true] {
                 for tcp in [false, true] {
                     for relayed in [false, true] {

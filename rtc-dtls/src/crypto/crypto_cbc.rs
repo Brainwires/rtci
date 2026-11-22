@@ -72,6 +72,17 @@ impl CryptoCbc {
     ///
     /// Fails if the cipher rejects the input.
     pub fn encrypt(&mut self, pkt_rlh: &RecordLayerHeader, raw: &[u8]) -> Result<Vec<u8>> {
+        self.encrypt_with(pkt_rlh, raw, None)
+    }
+
+    /// [`Self::encrypt`], for a `tls12_cid` record when `cid` is given (RFC 9146 section
+    /// 5.1): the MAC then covers the connection id, which is not in `raw`.
+    pub(crate) fn encrypt_with(
+        &mut self,
+        pkt_rlh: &RecordLayerHeader,
+        raw: &[u8],
+        cid: Option<&[u8]>,
+    ) -> Result<Vec<u8>> {
         let mut payload = raw[RECORD_LAYER_HEADER_SIZE..].to_vec();
         let raw = &raw[..RECORD_LAYER_HEADER_SIZE];
 
@@ -84,6 +95,7 @@ impl CryptoCbc {
             h.sequence_number,
             h.content_type,
             h.protocol_version,
+            cid,
             &payload,
         )?;
         payload.extend_from_slice(&mac);
@@ -118,6 +130,12 @@ impl CryptoCbc {
     ///
     /// Fails if authentication fails or the record is too short.
     pub fn decrypt(&mut self, r: &[u8]) -> Result<Vec<u8>> {
+        self.decrypt_with(r, None)
+    }
+
+    /// [`Self::decrypt`], for a `tls12_cid` record when `cid` is given (RFC 9146); `r` is
+    /// the record without its connection id.
+    pub(crate) fn decrypt_with(&mut self, r: &[u8], cid: Option<&[u8]>) -> Result<Vec<u8>> {
         let mut reader = Cursor::new(r);
         let h = RecordLayerHeader::unmarshal(&mut reader)?;
         if h.content_type == ContentType::ChangeCipherSpec {
@@ -164,6 +182,7 @@ impl CryptoCbc {
             h.sequence_number,
             h.content_type,
             h.protocol_version,
+            cid,
             content,
         )?;
         let _equalizer = prf_mac(
@@ -172,6 +191,7 @@ impl CryptoCbc {
             h.sequence_number,
             h.content_type,
             h.protocol_version,
+            cid,
             &decrypted[..strip],
         )?;
 

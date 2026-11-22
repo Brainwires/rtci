@@ -26,7 +26,7 @@ use crate::crypto::*;
 use crate::curve::named_curve::NamedCurve;
 use crate::extension::extension_use_srtp::SrtpProtectionProfile;
 use crate::record_layer::record_layer_header::{
-    PROTOCOL_VERSION1_0, PROTOCOL_VERSION1_2, ProtocolVersion, RECORD_LAYER_HEADER_SIZE,
+    PROTOCOL_VERSION1_0, PROTOCOL_VERSION1_2, ProtocolVersion,
 };
 use crate::signature_hash_algorithm::{
     SignatureHashAlgorithm, SignatureScheme, parse_signature_schemes,
@@ -133,6 +133,7 @@ pub struct ConfigBuilder {
     connection_id: Option<usize>,
     connection_id_migration: bool,
     invalid_record_limit: Option<u64>,
+    post_quantum_key_share: bool,
     psk: Option<PskCallback>,
     psk_identity_hint: Option<Vec<u8>>,
     insecure_skip_verify: bool,
@@ -170,6 +171,7 @@ impl Default for ConfigBuilder {
             connection_id: Some(0),
             connection_id_migration: false,
             invalid_record_limit: None,
+            post_quantum_key_share: true,
             psk: None,
             psk_identity_hint: None,
             insecure_skip_verify: false,
@@ -359,9 +361,9 @@ impl ConfigBuilder {
     /// does not use the extension. Negotiated when both sides send it. The default is
     /// `Some(0)`, as RFC 9147 section 5.1 asks of a client that wants no connection id.
     ///
-    /// With DTLS 1.3 only: the DTLS 1.2 record format of RFC 9146 (`tls12_cid`) is not
-    /// implemented, so a ClientHello that also offers DTLS 1.2 leaves the extension out, and
-    /// a server answers it only when it negotiates DTLS 1.3.
+    /// Both versions: DTLS 1.2 uses RFC 9146 (`tls12_cid` records), DTLS 1.3 its own record
+    /// header. A ClientHello that offers both carries the extension once, for both (RFC 9147
+    /// section 5.1).
     pub fn with_connection_id(mut self, length: Option<usize>) -> Self {
         self.connection_id = length;
         self
@@ -376,6 +378,16 @@ impl ConfigBuilder {
     /// selected pair anyway.
     pub fn with_connection_id_migration(mut self, migration: bool) -> Self {
         self.connection_id_migration = migration;
+        self
+    }
+
+    /// Whether DTLS 1.3 offers and accepts the hybrid post-quantum group X25519MLKEM768
+    /// (draft-ietf-tls-ecdhe-mlkem, code point 0x11EC), preferred over the curves. On by
+    /// default; it takes effect only with a crypto provider that has ML-KEM (the built-in
+    /// aws-lc-rs one; ring has none). Its key share is 1216 bytes, so a ClientHello that
+    /// carries it does not fit one datagram and is sent as two fragments.
+    pub fn with_post_quantum_key_share(mut self, post_quantum_key_share: bool) -> Self {
+        self.post_quantum_key_share = post_quantum_key_share;
         self
     }
 
@@ -521,26 +533,6 @@ impl DtlsVersion {
                 minor: 252,
             },
         }
-    }
-
-    /// How many bytes a protected record of this version adds to its content under `suite`,
-    /// as this crate writes it: the record header and the suite's
-    /// [`record_expansion`](CipherSuite::record_expansion). For DTLS 1.2 the header is the
-    /// 13 bytes of RFC 6347 section 4.1 (RFC 9146 connection ids are not implemented). For
-    /// DTLS 1.3 it is the unified header of RFC 9147 section 4 with a 16-bit sequence number
-    /// and the length, `connection_id_len` bytes of the peer's connection id in it, and the
-    /// expansion is the inner content type and the tag. A layer above that sizes its
-    /// datagrams for a path MTU takes this off (RFC 6347 section 4.1.1.1, RFC 9147 section
-    /// 4.4). `None` for a suite this crate does not have.
-    pub fn record_overhead(self, suite: CipherSuiteId, connection_id_len: usize) -> Option<usize> {
-        let expansion = cipher_suite_for_id(suite).ok()?.record_expansion();
-        let header = match self {
-            DtlsVersion::Dtls1_2 => RECORD_LAYER_HEADER_SIZE,
-            DtlsVersion::Dtls1_3 => {
-                crate::dtls13::record::HeaderForm::FULL.header_len(connection_id_len)
-            }
-        };
-        Some(header + expansion)
     }
 }
 
@@ -765,6 +757,14 @@ impl ConfigBuilder {
             }
             max_version = DtlsVersion::Dtls1_2;
         }
+        // The groups of DTLS 1.3: the hybrid with ML-KEM first where the provider has it
+        // (and the configuration does not switch it off), then the curves.
+        let mut local_tls13_groups = vec![];
+        if self.post_quantum_key_share && hybrid_key_share_works(crypto_provider.crypto()) {
+            local_tls13_groups.push(NamedCurve::X25519MlKem768);
+        }
+        local_tls13_groups.extend_from_slice(&local_named_curves);
+
         // A list with TLS 1.3 suites only leaves nothing to negotiate DTLS 1.2 with.
         let min_version = if max_version == DtlsVersion::Dtls1_3
             && !self.cipher_suites.is_empty()
@@ -903,17 +903,12 @@ impl ConfigBuilder {
             min_version,
             max_version,
             local_tls13_cipher_suites,
-            // The extension belongs to both versions, and only DTLS 1.3 has its records
-            // here. Where a hello is for DTLS 1.3 alone it carries the extension even when
-            // no connection id was asked for (RFC 9147 section 5.1: so that the peer can
-            // ask for one), unless that is switched off.
-            // A server answers the offer of a DTLS 1.3 client whatever else it speaks: its
-            // DTLS 1.2 handshake does not know the extension.
-            connection_id: if !is_client || min_version == DtlsVersion::Dtls1_3 {
-                self.connection_id
-            } else {
-                None
-            },
+            local_tls13_groups,
+            // The extension belongs to both versions (RFC 9146 for DTLS 1.2, RFC 9147
+            // section 9 for 1.3). A hello carries it even when no connection id is asked for
+            // (RFC 9147 section 5.1: so that the peer can ask for one), unless that is
+            // switched off.
+            connection_id: self.connection_id,
             connection_id_migration: self.connection_id_migration,
             invalid_record_limit: self.invalid_record_limit,
             initial_epoch: 0,
@@ -989,6 +984,9 @@ pub struct HandshakeConfig {
     pub(crate) max_version: DtlsVersion,
     /// The TLS 1.3 cipher suites, for DTLS 1.3. Empty when DTLS 1.3 is not negotiated.
     pub(crate) local_tls13_cipher_suites: Vec<CipherSuiteId>,
+    /// The key exchange groups of DTLS 1.3, most preferred first: `local_named_curves`,
+    /// with X25519MLKEM768 in front where the provider has it.
+    pub(crate) local_tls13_groups: Vec<NamedCurve>,
     /// The length of the connection ids this side asks its peer to send, if it uses the
     /// connection_id extension at all.
     pub(crate) connection_id: Option<usize>,
@@ -1063,6 +1061,7 @@ impl HandshakeConfig {
             min_version: DtlsVersion::Dtls1_2,
             max_version: DtlsVersion::Dtls1_2,
             local_tls13_cipher_suites: vec![],
+            local_tls13_groups: vec![],
             connection_id: None,
             connection_id_migration: false,
             invalid_record_limit: None,
@@ -1153,4 +1152,27 @@ impl HandshakeConfig {
         // If nothing matches, return the first certificate.
         Ok(self.local_certificates[0].clone())
     }
+}
+
+/// Whether `crypto` can do both ends of the X25519MLKEM768 exchange: it says so, and one
+/// exchange made at once with it (a client share, the server's answer by encapsulation, the
+/// client's decapsulation) gives both sides the same secret. A provider that wraps another
+/// and passes `supports` through while leaving `key_exchange_respond` at its Diffie-Hellman
+/// default says yes and cannot answer a hybrid share; such a provider is not offered the
+/// group, rather than failing every handshake that picks it.
+fn hybrid_key_share_works(crypto: &dyn crypto::RTCCrypto) -> bool {
+    let algorithm = crypto::KeyExchangeAlgorithm::X25519MlKem768;
+    if !crypto.supports(crypto::CryptoAlgorithm::KeyExchange(algorithm)) {
+        return false;
+    }
+    let Ok(client) = crypto.start_key_exchange(algorithm) else {
+        return false;
+    };
+    let Ok((share, server_secret)) = crypto.key_exchange_respond(algorithm, client.public_key())
+    else {
+        return false;
+    };
+    client
+        .complete(&share)
+        .is_ok_and(|client_secret| client_secret.as_ref() == server_secret.as_ref())
 }

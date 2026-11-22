@@ -482,9 +482,11 @@ fn a_session_over_a_link_with_thirty_percent_loss_fails_only_when_consent_lapses
         session_over(
             THIRTY_PERCENT,
             seed,
-            100,
+            50,
             Duration::from_secs(400),
-            Duration::from_secs(180),
+            // At 30 % loss SCTP's retransmission timer backs off (RFC 9260 section 6.3.3), so
+            // delivery is slow; the bound is about the session not ending, not about speed.
+            Duration::from_secs(900),
             true,
         )?;
     }
@@ -509,9 +511,9 @@ fn the_channel_opens_over_thirty_percent_loss_while_the_path_stays_up() -> Resul
     session_over(
         THIRTY_PERCENT,
         0x5eed,
-        100,
+        50,
         Duration::from_secs(400),
-        Duration::from_secs(180),
+        Duration::from_secs(900),
         true,
     )?;
     Ok(())

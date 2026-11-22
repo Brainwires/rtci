@@ -12,8 +12,8 @@ mod dc_common;
 
 use anyhow::Result;
 use dc_common::Pair;
-use dtls::cipher_suite::CipherSuiteId;
-use dtls::config::DtlsVersion;
+use dtls::cipher_suite::{CipherSuite, CipherSuiteId, cipher_suite_for_id};
+use dtls::record_layer::record_layer_header::RECORD_LAYER_HEADER_SIZE;
 use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtc::peer_connection::transport::RTCSctpTransportState;
 use rtc::shared::error::Error;
@@ -276,25 +276,28 @@ fn dtls_versions() -> [(&'static str, Settings); 2] {
     ]
 }
 
-/// What each DTLS record the offerer sends adds to its content, worked out by `rtc-dtls` from
-/// the version and cipher suite the connection reports in its statistics (`tlsVersion`,
-/// `dtlsCipher`). Neither side asks for a connection id.
+/// What each DTLS record the offerer sends adds to its content, from the version and cipher
+/// suite the connection reports in its statistics (`tlsVersion`, `dtlsCipher`): the record
+/// header of that version and what `rtc-dtls` says the suite adds to a record
+/// (`CipherSuite::record_expansion`). Neither side asks for a connection id.
 fn negotiated_record_overhead(pair: &mut Pair) -> usize {
     let now = pair.now;
     let stats = pair.offerer.pc.get_stats(now, StatsSelector::None);
     let transport = stats.transport().expect("a transport");
-    let version = match transport.tls_version.as_str() {
-        "FEFC" => DtlsVersion::Dtls1_3,
-        "FEFD" => DtlsVersion::Dtls1_2,
+    let header = match transport.tls_version.as_str() {
+        // RFC 9147 section 4: the unified header with a 16-bit sequence number and the
+        // length, and no connection id: 1 + 2 + 2 bytes.
+        "FEFC" => 5,
+        // RFC 6347 section 4.1.
+        "FEFD" => RECORD_LAYER_HEADER_SIZE,
         other => panic!("tlsVersion {other}"),
     };
     let suite = (0..=u16::MAX)
         .map(CipherSuiteId::from)
         .find(|id| id.to_string() == transport.dtls_cipher)
         .unwrap_or_else(|| panic!("dtlsCipher {}", transport.dtls_cipher));
-    version
-        .record_overhead(suite, 0)
-        .expect("a suite rtc-dtls has")
+    let suite: Box<dyn CipherSuite> = cipher_suite_for_id(suite).expect("a suite rtc-dtls has");
+    header + suite.record_expansion()
 }
 
 /// The largest datagram that carries a full SCTP packet on a path whose UDP payload is at
