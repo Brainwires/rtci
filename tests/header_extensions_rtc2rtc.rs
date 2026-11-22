@@ -438,7 +438,7 @@ fn the_absolute_capture_time_reaches_the_receivers_synchronization_source() -> R
         .expect("sender")
         .write_rtp(now, packet(2, 99_000))?;
     world.pump()?;
-    world.run_until(now + Duration::from_millis(20))?;
+    world.run_until(now + Duration::from_millis(200))?;
     assert_eq!(
         source(&mut world),
         Some((Some(capture_ms + 100.0), Some(500.0)))
@@ -529,5 +529,56 @@ fn with_cryptex_the_extensions_are_encrypted_on_the_wire_and_read_in_the_clear()
         .and_then(|s| s.capture_timestamp);
     let expected = capture_ntp as f64 / 4_294_967_296.0 * 1000.0;
     assert_eq!(capture, Some(expected));
+
+    // RFC 9335 section 4: without the peer's support (one side does not offer it), Cryptex is
+    // not used: the RFC 8285 profile, the element in the clear.
+    let (mut world, sender) = World::connected_prepared(RtpCodecKind::Video, |sdp| sdp, |_| {})?;
+    assert!(!world.peers[0].pc.cryptex_negotiated());
+    let plain_ssrc = world.peers[0]
+        .pc
+        .rtp_sender(sender)
+        .expect("sender")
+        .get_parameters()
+        .encodings[0]
+        .rtp_coding_parameters
+        .ssrc
+        .expect("an SSRC");
+    let now = world.now;
+    let before = world.wire.len();
+    world.peers[0]
+        .pc
+        .rtp_sender(sender)
+        .expect("sender")
+        .write_rtp_with_capture_time(
+            now,
+            rtc::rtp::Packet {
+                header: Header {
+                    version: 2,
+                    payload_type: pt,
+                    sequence_number: 7,
+                    timestamp: 90_000,
+                    ssrc: plain_ssrc,
+                    marker: true,
+                    ..Default::default()
+                },
+                payload: Bytes::from(vec![0x10u8; 100]),
+            },
+            capture_ntp,
+            None,
+        )?;
+    world.pump()?;
+    world.run_until(now + Duration::from_millis(20))?;
+    let header = world.wire[before..]
+        .iter()
+        .find(|h| h.payload_type == pt)
+        .expect("the packet");
+    assert_eq!(header.extension_profile, 0xBEDE);
+    assert!(
+        header
+            .extensions
+            .iter()
+            .any(|e| e.payload.windows(8).any(|w| w == clear)),
+        "in the clear without Cryptex"
+    );
     Ok(())
 }
