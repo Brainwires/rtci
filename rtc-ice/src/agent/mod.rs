@@ -222,29 +222,26 @@ fn assert_inbound_username(m: &Message, local_ufrag: &str) -> Result<()> {
     }
 }
 
-/// Drops from the decoded view of `m` every attribute that follows MESSAGE-INTEGRITY, except
-/// FINGERPRINT. Call it once MESSAGE-INTEGRITY has been verified.
-///
-/// RFC 8489 Section 14.5: "the agent MUST ignore all other attributes that follow
-/// MESSAGE-INTEGRITY", bar MESSAGE-INTEGRITY-SHA256 and FINGERPRINT. The HMAC does not cover
-/// them, so anyone who sees one valid check could append an attribute (ICE-CONTROLLED,
-/// USE-CANDIDATE, PRIORITY) to a replay of it.
-///
-/// `rtc-stun` is getting a validated-message API (branch `conf/stun-rfc8489`) that returns
-/// only the authenticated attributes; this function is the place to switch over to it.
-fn strip_unauthenticated_attributes(m: &mut Message) {
-    if let Some(integrity) = m
-        .attributes
-        .0
-        .iter()
-        .position(|a| a.typ == ATTR_MESSAGE_INTEGRITY)
-    {
-        let mut index = 0;
-        m.attributes.0.retain(|a| {
-            let keep = index <= integrity || a.typ == ATTR_FINGERPRINT;
-            index += 1;
-            keep
-        });
+/// The comprehension-required attributes the ICE usage understands: STUN's own and ICE's
+/// (RFC 8445 Section 16.1). A request with another one is answered 420 (Unknown Attribute), a
+/// response with one is discarded (RFC 8489 Section 6.3). ICE-CONTROLLED, ICE-CONTROLLING and
+/// libwebrtc's NOMINATION are comprehension-optional.
+fn ice_known_attributes() -> Vec<AttrType> {
+    let mut known = stun::attributes::STUN_ATTRIBUTES.to_vec();
+    known.extend([ATTR_PRIORITY, ATTR_USE_CANDIDATE]);
+    known
+}
+
+/// What a received message is refused with, as the error the agent reports.
+fn rejection_error(rejection: &stun::validated::Rejection) -> Error {
+    use stun::validated::Rejection;
+    match rejection {
+        Rejection::IntegrityMismatch => Error::ErrIntegrityMismatch,
+        Rejection::IntegrityMissing => Error::ErrAttributeNotFound,
+        Rejection::FingerprintMissing | Rejection::FingerprintMismatch => {
+            Error::ErrFingerprintMismatch
+        }
+        other => Error::Other(other.to_string()),
     }
 }
 
@@ -2180,6 +2177,40 @@ impl Agent {
         }
     }
 
+    /// Answers a request that carries unknown comprehension-required attributes with a 420
+    /// (Unknown Attribute) error response listing them (RFC 8489 Section 6.3.1), signed like
+    /// every response.
+    fn send_unknown_attributes_error(
+        &mut self,
+        now: Instant,
+        m: &Message,
+        unknown: &[AttrType],
+        local_index: usize,
+        remote_addr: SocketAddr,
+    ) {
+        let local_pwd = self.ufrag_pwd.local_credentials.pwd.clone();
+        let response = stun::validated::unknown_attributes_response(
+            m,
+            unknown,
+            &[
+                Box::new(MessageIntegrity::new_short_term_integrity_with_provider(
+                    local_pwd,
+                    self.crypto_provider.crypto(),
+                )),
+                Box::new(FINGERPRINT),
+            ],
+        );
+        match response {
+            Ok(out) => self.send_stun_to(now, &out, local_index, remote_addr),
+            Err(err) => warn!(
+                "[{}]: cannot build the 420 response for {}: {}",
+                self.get_name(),
+                remote_addr,
+                err
+            ),
+        }
+    }
+
     /// Switches the ICE agent role and recomputes all candidate pair priorities.
     /// RFC 8445 Section 7.3.1.1
     pub(crate) fn switch_role(&mut self, now: Instant) {
@@ -2305,20 +2336,28 @@ impl Agent {
 
         let remote_candidate_index = self.find_remote_candidate(remote_addr);
         if m.typ.class == CLASS_SUCCESS_RESPONSE || m.typ.class == CLASS_ERROR_RESPONSE {
-            if let Err(err) = assert_inbound_message_integrity(
-                m,
-                remote_credentials.pwd.as_bytes(),
-                self.crypto_provider.crypto(),
-            ) {
-                warn!(
-                    "[{}]: discard message from ({}), {}",
-                    self.get_name(),
-                    remote_addr,
-                    err
-                );
-                return Err(err);
+            // A response: FINGERPRINT when present, MESSAGE-INTEGRITY with the peer's
+            // password, no unknown comprehension-required attribute, or it is discarded (RFC
+            // 8489 Sections 6.3.3 and 9.1.4). Only what the integrity covers is read.
+            let known = ice_known_attributes();
+            match stun::validated::Validator::new()
+                .known_attributes(&known)
+                .authenticate(
+                    m,
+                    remote_credentials.pwd.as_bytes(),
+                    self.crypto_provider.crypto(),
+                ) {
+                Ok(valid) => *m = valid.into_message(),
+                Err(rejection) => {
+                    warn!(
+                        "[{}]: discard message from ({}), {}",
+                        self.get_name(),
+                        remote_addr,
+                        rejection
+                    );
+                    return Err(rejection_error(&rejection));
+                }
             }
-            strip_unauthenticated_attributes(m);
 
             // A response is matched to its request by transaction id (RFC 8445 Section
             // 7.2.5); where it came from is then checked against where the request went.
@@ -2361,22 +2400,36 @@ impl Agent {
         local_index: usize,
         remote_addr: SocketAddr,
     ) -> Result<()> {
-        if let Err(err) = assert_inbound_message_integrity(
-            m,
-            self.ufrag_pwd.local_credentials.pwd.as_bytes(),
-            self.crypto_provider.crypto(),
-        ) {
-            warn!(
-                "[{}]: discard message from ({}), {}",
-                self.get_name(),
-                remote_addr,
-                err
+        // RFC 8489 Sections 6.3 and 9.1.3, through `rtc-stun`'s validator: FINGERPRINT is
+        // verified when present, MESSAGE-INTEGRITY with the local password, and from here on
+        // only what the integrity covers is read: USERNAME, the role attributes, PRIORITY,
+        // USE-CANDIDATE. An attribute appended after it does not exist for the agent.
+        let known = ice_known_attributes();
+        let validated = stun::validated::Validator::new()
+            .known_attributes(&known)
+            .authenticate(
+                m,
+                self.ufrag_pwd.local_credentials.pwd.as_bytes(),
+                self.crypto_provider.crypto(),
             );
-            return Err(err);
+        match validated {
+            Ok(valid) => *m = valid.into_message(),
+            Err(stun::validated::Rejection::UnknownAttributes(unknown)) => {
+                // RFC 8489 Section 6.3.1: an authenticated request with a comprehension-
+                // required attribute the agent does not know is answered 420 with the list.
+                self.send_unknown_attributes_error(now, m, &unknown, local_index, remote_addr);
+                return Err(Error::ErrUnhandledStunpacket);
+            }
+            Err(rejection) => {
+                warn!(
+                    "[{}]: discard message from ({}), {}",
+                    self.get_name(),
+                    remote_addr,
+                    rejection
+                );
+                return Err(rejection_error(&rejection));
+            }
         }
-        // From here on only what MESSAGE-INTEGRITY covers is read: USERNAME, the role
-        // attributes, PRIORITY, USE-CANDIDATE.
-        strip_unauthenticated_attributes(m);
         if let Err(err) = assert_inbound_username(m, &self.ufrag_pwd.local_credentials.ufrag) {
             warn!(
                 "[{}]: discard message from ({}), {}",

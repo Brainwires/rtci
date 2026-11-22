@@ -140,3 +140,22 @@ fn test_parse_url_failure() -> Result<()> {
 
     Ok(())
 }
+
+/// An IPv6 host is written in brackets, with or without a `::` in it, so the text parses back.
+#[test]
+fn test_ipv6_host_is_written_in_brackets() {
+    for host in ["2001:db8:1:2:3:4:5:6", "2001:db8::1", "::1"] {
+        let url = Url {
+            scheme: SchemeType::Stun,
+            host: host.to_owned(),
+            port: 3478,
+            username: String::new(),
+            password: String::new(),
+            proto: ProtoType::Udp,
+        };
+        assert_eq!(url.to_string(), format!("stun:[{host}]:3478"));
+        let parsed = Url::parse_url(&url.to_string()).unwrap();
+        assert_eq!(parsed.host, host);
+        assert_eq!(parsed.port, 3478);
+    }
+}

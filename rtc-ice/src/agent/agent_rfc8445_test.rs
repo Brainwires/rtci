@@ -1000,3 +1000,85 @@ fn test_peer_reflexive_remote_candidate_is_paired_with_the_arrival_candidate_onl
     assert_eq!(a.local_candidates[pair.local_index].addr(), addr(LOCAL));
     assert_eq!(pair.remote_priority, 77);
 }
+
+// --- RFC 8489 Sections 6.3 and 14.7 on the agent's receive path ---
+
+/// A request with an unknown comprehension-required attribute is answered 420 (Unknown
+/// Attribute) with the attribute listed, signed like every response, and does nothing else.
+#[test]
+fn test_request_with_an_unknown_required_attribute_is_answered_420() {
+    let now = Instant::now();
+    let mut a = started_agent(now, config(false), &[]);
+    let _ = sent(&mut a);
+    let unknown = stun::attributes::AttrType(0x7f00);
+    let m = peer_request(
+        &a,
+        vec![
+            Box::new(AttrControlling(1)),
+            Box::new(PriorityAttr(1000)),
+            Box::new(stun::attributes::RawAttribute {
+                typ: unknown,
+                length: 4,
+                value: vec![1, 2, 3, 4],
+            }),
+        ],
+    );
+    assert!(deliver(&mut a, now, &m, REMOTE_A).is_err());
+    let out = sent(&mut a);
+    assert_eq!(out.len(), 1);
+    let (response, to) = &out[0];
+    assert_eq!(*to, addr(REMOTE_A));
+    assert_eq!(response.typ, BINDING_ERROR);
+    assert_eq!(response.transaction_id, m.transaction_id);
+    assert_eq!(error_code(response), 420);
+    let mut listed = stun::uattrs::UnknownAttributes(vec![]);
+    listed.get_from(response).unwrap();
+    assert_eq!(listed.0, vec![unknown]);
+    let mut copy = response.clone();
+    MessageIntegrity::check(
+        &mut copy,
+        a.ufrag_pwd.local_credentials.pwd.as_bytes(),
+        provider().crypto(),
+    )
+    .unwrap();
+    assert!(
+        a.remote_candidates.is_empty(),
+        "no candidate from such a request"
+    );
+}
+
+/// FINGERPRINT is verified on what the agent receives: a request or a response whose
+/// FINGERPRINT does not match is discarded, whatever its MESSAGE-INTEGRITY.
+#[test]
+fn test_message_with_a_wrong_fingerprint_is_discarded() {
+    let now = Instant::now();
+    let mut a = started_agent(now, config(true), &[REMOTE_A]);
+    let (check, to) = first_check(&mut a, now);
+
+    let corrupt = |m: &Message| {
+        let mut raw = m.raw.clone();
+        let last = raw.len() - 1;
+        raw[last] ^= 0xff;
+        raw
+    };
+    let response = peer_response(BINDING_SUCCESS, check.transaction_id, addr(LOCAL), None);
+    assert!(deliver_raw(&mut a, now, &corrupt(&response), &to.to_string()).is_err());
+    assert_eq!(a.candidate_pairs[0].state, CandidatePairState::InProgress);
+    assert_eq!(
+        a.pending_binding_requests.len(),
+        1,
+        "the transaction is still open"
+    );
+
+    let request = peer_request(
+        &a,
+        vec![Box::new(AttrControlled(1)), Box::new(PriorityAttr(1000))],
+    );
+    assert!(deliver_raw(&mut a, now, &corrupt(&request), REMOTE_B).is_err());
+    assert!(sent(&mut a).is_empty(), "nothing is answered");
+    assert_eq!(a.remote_candidates.len(), 1);
+
+    // The same messages intact are taken.
+    deliver(&mut a, now, &response, &to.to_string()).unwrap();
+    assert_eq!(a.candidate_pairs[0].state, CandidatePairState::Succeeded);
+}

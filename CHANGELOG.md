@@ -97,6 +97,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **ice**: a consent request waits for its response four times the pair's round-trip time
   (500 ms to 4 s; RFC 7675 section 5.1) instead of a fixed 4 s.
 - **stats**: a candidate pair's state can be `frozen`.
+- **ice**: the agent receives STUN through `rtc_stun::validated::Validator`: FINGERPRINT is
+  verified when present (it never was), a request with an unknown comprehension-required
+  attribute is answered 420 with UNKNOWN-ATTRIBUTES and a response with one is discarded (RFC
+  8489 section 6.3), and only what the integrity covers is read.
+- **ice**: `Url`'s `Display` writes every IPv6 host in brackets (one without `::` was not).
 - **ice**: mDNS privacy (draft-ietf-mmusic-mdns-ice-candidates). A local relay candidate is not
   paired with a remote mDNS candidate (section 3.3.2: the TURN server learned the hidden
   address); a relay-only agent ignores remote mDNS candidates instead of resolving them
