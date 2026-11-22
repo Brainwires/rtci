@@ -380,6 +380,7 @@ pub fn register_default_interceptors_with_options(
     configure_receiver_reference_time(media_engine);
 
     let registry = configure_key_frame_requests(registry);
+    let registry = configure_remb(registry);
 
     // Last, so the ids of the extensions registered above stay what they were.
     configure_default_header_extensions(media_engine)?;
@@ -491,6 +492,26 @@ pub fn configure_default_header_extensions(media_engine: &mut MediaEngine) -> Re
             .set_header_extension_encryption(uri, RTCRtpHeaderExtensionEncryption::BestEffort)?;
     }
     Ok(())
+}
+
+/// The receive-side variant of congestion control (draft-ietf-rmcat-gcc-02 section 3): a
+/// REMB for every remote stream that negotiated `goog-remb` and neither transport-wide
+/// congestion control nor RFC 8888, so a sender that only understands REMB still hears what
+/// the path carries; and the abs-send-time header extension stamped on the packets of every
+/// local stream that negotiated it, as they leave the pacer. Part of
+/// [`register_default_interceptors`]. The default media engine offers `goog-remb` on video but
+/// does not register abs-send-time: a peer's offer of it is answered only when the
+/// application registers it.
+pub fn configure_remb(registry: Registry) -> Registry {
+    registry
+        .with(
+            Slot::Custom(interceptor::REMB_GENERATOR_SLOT),
+            interceptor::RembGeneratorBuilder::new().build(),
+        )
+        .with(
+            Slot::Custom(interceptor::ABS_SEND_TIME_SLOT),
+            interceptor::AbsSendTimeInterceptor::new(),
+        )
 }
 
 /// Offers TMMBR for audio and video: `a=rtcp-fb:<pt> ccm tmmbr` (RFC 5104 section 7.1).
@@ -1434,6 +1455,7 @@ mod slot_order_tests {
             vec![
                 Slot::RtcpSession,
                 Slot::CongestionControl,
+                Slot::Custom(interceptor::ABS_SEND_TIME_SLOT),
                 Slot::TwccSender,
                 Slot::Custom(REMOTE_BITRATE_LIMIT_SLOT),
                 Slot::CircuitBreaker,
@@ -1441,6 +1463,7 @@ mod slot_order_tests {
                 Slot::NackResponder,
                 Slot::TwccReceiver,
                 Slot::Rfc8888,
+                Slot::Custom(interceptor::REMB_GENERATOR_SLOT),
                 Slot::NackGenerator,
                 Slot::KeyFrameRequests,
             ],
@@ -1596,6 +1619,10 @@ mod slot_order_tests {
                     Slot::CongestionControl,
                     "CongestionControlInterceptor<Gcc>".to_owned()
                 ),
+                (
+                    Slot::Custom(interceptor::ABS_SEND_TIME_SLOT),
+                    "AbsSendTimeInterceptor".to_owned()
+                ),
                 (Slot::TwccSender, "TwccSenderInterceptor".to_owned()),
                 (
                     Slot::Custom(REMOTE_BITRATE_LIMIT_SLOT),
@@ -1606,6 +1633,10 @@ mod slot_order_tests {
                 (Slot::NackResponder, "NackResponderInterceptor".to_owned()),
                 (Slot::TwccReceiver, "TwccReceiverInterceptor".to_owned()),
                 (Slot::Rfc8888, "Rfc8888Interceptor".to_owned()),
+                (
+                    Slot::Custom(interceptor::REMB_GENERATOR_SLOT),
+                    "RembGeneratorInterceptor".to_owned()
+                ),
                 (Slot::NackGenerator, "NackGeneratorInterceptor".to_owned()),
                 (
                     Slot::KeyFrameRequests,

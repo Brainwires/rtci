@@ -23,7 +23,7 @@ T5 are in `rtc-rtcp`; T6 is unchanged (libwebrtc behaviour, a decision).
 
 Totals (MUST includes MUST NOT/SHALL; SHOULD includes SHOULD NOT/RECOMMENDED):
 
-- MUST: tested 31 / untested 1 / partial 2 / missing 1 / violated 1 / n-a 0
+- MUST: tested 32 / untested 1 / partial 2 / missing 0 / violated 1 / n-a 0
 - SHOULD: tested 1 / untested 0 / partial 2 / missing 0 / violated 0 / n-a 0
 - MAY: tested 1 / untested 0 / partial 0 / missing 0 / violated 0 / n-a 0
 
@@ -68,7 +68,7 @@ Totals (MUST includes MUST NOT/SHALL; SHOULD includes SHOULD NOT/RECOMMENDED):
 | TWCC-3.1.5-3 | 3.1.5 | MUST | Large or negative delta: 16-bit signed, -8192.0 to 8191.75 ms | tested | same, `twcc/recorder.rs:287-290` | `a_large_delta_run_needs_two_bytes_each`, `a_negative_delta_moves_the_arrival_backwards` | |
 | TWCC-3.1.5-4 | 3.1.5 | MUST | A delta beyond the 16-bit range starts a new feedback message, whose reference time absorbs the gap | untested | `twcc/recorder.rs:271-274` (`add_received` returns false), `:185-187`, `:154-164` | none (no test has an arrival gap above 8.19 s) | |
 | TWCC-3.1.5-5 | 3.1.5 | MUST (implied) | The sender reconstructs each arrival time from the reference time and the running deltas, negative ones included | tested | `rtpfb/convert.rs:36-64`, `gcc/twcc_gcc/mod.rs` `process_status` | `deltas_accumulate_from_the_reference_time`, `a_negative_delta_moves_the_arrival_backwards`, `more_received_packets_than_deltas_does_not_panic` | |
-| TWCC-3.1.5-6 | 3.1.5 | MUST (implied) | A feedback packet stays within the path MTU; a longer window continues in the next packet | missing | `twcc/recorder.rs:238` (`len` is counted, never compared with a limit) | none | A long reporting window yields one arbitrarily large packet |
+| TWCC-3.1.5-6 | 3.1.5 | MUST (implied) | A feedback packet stays within the path MTU; a longer window continues in the next packet | tested | `twcc/recorder.rs` (`MAX_FEEDBACK_OCTETS`, `Feedback::add_received`) | `a_long_window_is_split_within_the_mtu` | A feedback packet is kept within 1100 octets (room for SRTCP and a minimal compound packet within 1200); the rest of the window continues in the next packet, each arrival reported once |
 
 ## Gaps, in order of importance
 

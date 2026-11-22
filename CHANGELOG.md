@@ -973,6 +973,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with `T_rr_interval` zero spends its RTCP share). The TWCC and RFC 8888 generators' cadence
   reads the same nominal figure. A `Gcc` sender fed by the engine's receiver reaches 2 Mbit/s
   from 300 kbit/s in 0.24 s (0.58 s before).
+- **rtcp_session**: congestion control feedback (TWCC, RFC 8888) leaves as its generator
+  builds it, outside RFC 4585's one Early packet per regular interval and outside the
+  regular reports' timing (`RtcpSessionBuilder::with_immediate_congestion_feedback`, default
+  `true`; reduced-size where negotiated, else a minimal compound packet). The generators size
+  it to the media it reports on: 5% of the media received, every 50 to 250 ms
+  (`FeedbackCadence`; the RTCP bandwidth no longer stretches it). The rest of RTCP follows RFC
+  3550 section 6.2 on the media measured both ways, with a start-up value before it is
+  measured (`RTCP_SESSION_NOMINAL_VIDEO_BANDWIDTH` 1 Mbit/s with video,
+  `RTCP_SESSION_NOMINAL_AUDIO_BANDWIDTH` 64 kbit/s with audio). Before, feedback waited for the
+  RTCP bandwidth of the measured rate: a sender that started low (a browser with three
+  simulcast layers) heard 6.3 times a second, with gaps to 387 ms, and did not climb. Measured
+  now (receiver side, one stream / three layers): feedback gaps at most 250 ms from 64 kbit/s
+  up, 50 ms from 300 kbit/s; the receiver's RTCP 5.6% of the media at 64 kbit/s, 5.1% at 300
+  kbit/s, 3.1% at 1 Mbit/s, 2.5% at 2.5 Mbit/s; a `Gcc` sender fed by it reaches 2 Mbit/s from
+  300 kbit/s in 0.49 s. Regular reports at 1 and 2.5 Mbit/s are 50 and 125 a second (RTP/AVPF
+  with `T_rr_interval` zero spends the RTCP share).
 - **data_channel**: no DCEP handshake timeout by default
   (`SettingEngine::data_channel.dcep_handshake_timeout` is `None`; it was 30 s). RFC 8832 has
   none: the DATA_CHANNEL_OPEN and DATA_CHANNEL_ACK travel on a reliable stream. Under heavy
@@ -1241,6 +1257,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+- **gcc**: the receive-side variant of draft-ietf-rmcat-gcc-02 (section 3) in the default
+  set (`configure_remb`): `RembGeneratorInterceptor` sends a REMB for every remote stream that
+  negotiated `goog-remb` and neither transport-wide feedback nor RFC 8888, from the delay-based
+  controller run on its arrivals against abs-send-time or the RTP timestamp, at once when the
+  estimate falls by 3% or more and otherwise once a second; `AbsSendTimeInterceptor` stamps
+  abs-send-time on the packets of local streams that negotiated it, as they leave the pacer.
+  `goog-remb` was offered on video without any REMB ever being sent.
 - **states and events** (W3C webrtc-pc): the getters `signaling_state()`,
   `ice_gathering_state()`, `ice_connection_state()`, `connection_state()`; the transport
   events `OnIceTransportStateChange`, `OnIceGathererStateChange`,
@@ -2119,6 +2142,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   environment test): the active relayed candidate's checks over a Connect and its data
   connection; the TCP allocation's XOR-MAPPED-ADDRESS as an active server-reflexive TCP
   candidate is paired and checked (RFC 6544 section 5).
+- **twcc**: a transport-wide feedback packet is kept within `MAX_FEEDBACK_OCTETS` (1100); a
+  longer reporting window continues in the next packet (draft-holmer-rmcat-transport-wide-cc-
+  extensions-01 section 3.1.5). A long window yielded one packet of any size.
+- **gcc**: the pre-filter and the Kalman filter as draft-ietf-rmcat-gcc-02 sections 5.1 to 5.3
+  have them: a packet that arrives within burst_time of its group with a negative delay
+  variation joins the group (a backlog delivered at once after an outage was read as a draining
+  queue); a packet received out of order is left out of the arrival-time model; the noise
+  variance weight is `1 - (1 - chi)^(30 / (1000 f_max))` over the last 60 groups' rate
+  (`Kalman::update_with_period`, chi 0.001; it was a constant); a residual beyond three
+  deviations enters the variance as three deviations (the outlier filter was missing). The
+  multi-flow properties hold as before (late flow 0.48 / 0.49, `Gcc` / TCP 0.19 / 0.81 and 0.37
+  / 0.63, burst recovered in 4 s).
 - **sctp**: a stream parked by back-pressure resumed only from `poll_read` or the peer's next
   datagram, and the SACK that reopens the window waited for the next `poll_write`, which a
   caller has usually made before it reads: a sender stopped by a zero window then waited for
@@ -2871,6 +2906,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Testing
 
+- **interceptor (nack)**: the test environment's `nack_recovers_lost_rtp` counts from the
+  first packet that arrives, as its virtual-clock twin `nack_recovery_under_loss.rs` does: a
+  receiver knows of no packet sent before the first it receives, and a Generic NACK names
+  packets missing between ones it saw (RFC 4585 section 6.2.1), so with 5% loss one run in
+  twenty lost the stream's first packet and failed although NACK repaired every gap. It still
+  prints what stayed lost and fails on any gap after the first packet.
+- **rtp**: `a_stream_mixes_header_forms_only_when_extmap_allow_mixed_was_negotiated` takes the
+  media stream's SSRC from the sender, not from the first packet on the wire, which with
+  bandwidth probing on by default is an RTX padding probe.
 - **sctp**: the SCTP association across DTLS changes, between two engines
   (`tests/sctp_across_dtls_associations_rtc2rtc.rs`): a new DTLS association (a changed
   `tls-id`, swapped roles) leaves the association and its channels as they are, and a DTLS
