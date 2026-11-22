@@ -1025,6 +1025,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with `T_rr_interval` zero spends its RTCP share). The TWCC and RFC 8888 generators' cadence
   reads the same nominal figure. A `Gcc` sender fed by the engine's receiver reaches 2 Mbit/s
   from 300 kbit/s in 0.24 s (0.58 s before).
+- **gcc**: a pause in sending lowers the estimate the flow resumes at, the more the longer
+  the pause (RFC 8836 section 2, requirement 5a): up to 2 s it is kept, beyond that each 10 s
+  halves it, never below the starting estimate (`PAUSE_KEEPS_SHARE`, `PAUSE_HALVING`). It was
+  kept across any pause.
+- **rtcp_session**: when the report blocks do not all fit the MTU, streams losing 10% or more
+  since their last report go first, worst first, in up to half the blocks; the rest stay round
+  robin (RFC 8083 section 4.3).
+- **fec**: the amount of FEC follows the loss the receiver reports (draft-ietf-payload-flexible-fec-scheme-03
+  section 8, RFC 8627 section 8, RFC 5109 section 12). The FlexFEC draft-03, RFC 8627 FlexFEC and
+  ULPFEC senders read the receiver reports of their protected streams (smoothed, weight 0.3) and
+  give each block `ceil(2 x loss x block)` repair packets, none under 0.5% loss and at most half
+  the block; flexible masks take the number, the fixed RFC 8627 shapes are sent or not. Before
+  any report the configured amount is sent. The repair bit rate of the last second is taken out
+  of the congestion controller's target (`Attribute::TargetBitrateChanged`) on its way to the
+  application, so media and FEC together stay at the target. New `rtc_interceptor::FecRate`,
+  `FEC_MIN_LOSS` and `with_adaptive_rate(bool)` on `FlexFec03SendBuilder`, `FlexFecSendBuilder`
+  and `UlpfecSendBuilder` (`false`: the configured amount whatever the loss, as before).
 - **ecn**: ECN is initiated and watched as RFC 8888 section 7 requires (RFC 6679 sections
   7.2-7.4). With `SettingEngineBuilder::with_ecn(true)` and `ack ccfb` negotiated, a stream
   no longer sends every packet ECT(1) from the first: one packet in ten (and one at least every
@@ -1043,6 +1060,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   had arrived, at the retransmission's arrival time.
 - **jsep**: offered both `ack ccfb` and `nack ecn`, an answer keeps `ack ccfb` only (RFC 8888
   section 7). New `RTCP_FB_NACK_ECN`.
+- **rtcp_session**: without `b=` lines the session bandwidth is the nominal one of the media
+  bound (`RTCP_SESSION_NOMINAL_VIDEO_BANDWIDTH` 1 Mbit/s with video,
+  `RTCP_SESSION_NOMINAL_AUDIO_BANDWIDTH` 64 kbit/s with audio), or the measured media rate when
+  that is more (RFC 3550 section 6.2: a share of the *session* bandwidth). It was the measured
+  rate alone, so a sender that started low got little RTCP from its receiver, hence little
+  congestion feedback, and climbed slowly: a browser sending three simulcast layers to the
+  engine was held near 300 kbit/s (6.3 feedback datagrams a second, gaps to 387 ms). Now 10 a
+  second at every rate from 64 kbit/s, no gap over 110 ms, the receiver's RTCP 2.4% of the
+  session bandwidth (37% of a 64 kbit/s stream, 8% of 300 kbit/s, 2.4% of 1 Mbit/s: RTP/AVPF
+  with `T_rr_interval` zero spends its RTCP share). The TWCC and RFC 8888 generators' cadence
+  reads the same nominal figure. A `Gcc` sender fed by the engine's receiver reaches 2 Mbit/s
+  from 300 kbit/s in 0.24 s (0.58 s before).
 - **rtcp_session**: congestion control feedback (TWCC, RFC 8888) leaves as its generator
   builds it, outside RFC 4585's one Early packet per regular interval and outside the
   regular reports' timing (`RtcpSessionBuilder::with_immediate_congestion_feedback`, default
@@ -3073,6 +3102,13 @@ Found by the seeded lossy-link test (`tests/lossy_link_rtc2rtc.rs`).
 
 ### Testing
 
+- **interceptor**: larger fixed corpora for the fuzz targets' logic (ULPFEC and FlexFEC receive:
+  four seeds of 3000 inputs; the inbound interceptor chain: three seeds of 1500 sessions), and
+  fixed-corpus invariant tests for the ECN validation and the FEC rate. Writing the latter found
+  a panic in `FecRate::fec_packets` with a bound of zero (`clamp(1, 0)`), fixed before release.
+- **fec**: a FlexFEC repair SSRC is an RTCP participant between two peer connections: it sends
+  sender reports and the connection's CNAME once it has sent, and the receiver learns that CNAME
+  for it (`the_receiver_learns_the_cname_of_the_fec_ssrc_from_its_rtcp`).
 - **interceptor (nack)**: the test environment's `nack_recovers_lost_rtp` counts from the
   first packet that arrives, as its virtual-clock twin `nack_recovery_under_loss.rs` does: a
   receiver knows of no packet sent before the first it receives, and a Generic NACK names

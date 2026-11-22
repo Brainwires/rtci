@@ -174,6 +174,24 @@ impl ReceiverStream {
 
     /// The reception report block for this stream (RFC 3550 section 6.4.1, Appendix A.3),
     /// closing the reporting interval: the next block's fraction lost counts from here.
+    /// The fraction lost (in 1/256) a report made now would carry, without making one: the
+    /// interval's state is left as it is.
+    pub(crate) fn pending_fraction_lost(&self) -> u8 {
+        if !self.started {
+            return 0;
+        }
+        let extended_max = self.cycles.wrapping_add(u32::from(self.max_seq));
+        let expected = extended_max.wrapping_sub(self.base_seq).wrapping_add(1);
+        let expected_interval = expected.wrapping_sub(self.expected_prior);
+        let received_interval = self.received.wrapping_sub(self.received_prior);
+        let lost_interval = i64::from(expected_interval) - i64::from(received_interval);
+        if expected_interval == 0 || lost_interval <= 0 {
+            0
+        } else {
+            ((lost_interval << 8) / i64::from(expected_interval)).min(255) as u8
+        }
+    }
+
     pub(crate) fn generate_reception_report(
         &mut self,
         now: Instant,

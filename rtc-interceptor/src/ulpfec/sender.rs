@@ -4,6 +4,7 @@ use super::encoder::{ProtectionLevel, RTP_FIXED_HEADER, UlpfecEncoder, wire_imag
 use super::header::LONG_MASK_BITS;
 use super::red;
 use crate::Interceptor;
+use crate::cc::fec_rate::FecRate;
 use crate::stream_info::StreamInfo;
 use crate::wire_image::{WireImageTap, WireImages, wire_image_tap};
 use crate::{AttributedPacket, Packet, TaggedPacket};
@@ -80,6 +81,7 @@ pub struct UlpfecSendBuilder {
     placement: RedPlacement,
     num_media_packets: usize,
     num_fec_packets: usize,
+    adaptive_rate: bool,
     level_lengths: Vec<u16>,
     one_level_only: bool,
     flush_on_marker: bool,
@@ -94,6 +96,7 @@ impl UlpfecSendBuilder {
             placement: RedPlacement::default(),
             num_media_packets: ULPFEC_DEFAULT_NUM_MEDIA_PACKETS,
             num_fec_packets: ULPFEC_DEFAULT_NUM_FEC_PACKETS,
+            adaptive_rate: true,
             level_lengths: Vec::new(),
             one_level_only: false,
             flush_on_marker: false,
@@ -179,6 +182,15 @@ impl UlpfecSendBuilder {
         self
     }
 
+    /// Whether the amount of FEC follows the loss the receiver reports (the default), or
+    /// stays as configured. See [`FecRate`](crate::FecRate): no repair under 0.5% loss, enough
+    /// for twice the loss above it, at most half the block; the FEC sent is taken out of the
+    /// target the application encodes at.
+    pub fn with_adaptive_rate(mut self, adaptive: bool) -> Self {
+        self.adaptive_rate = adaptive;
+        self
+    }
+
     /// Build the interceptor.
     pub fn build(self) -> UlpfecSendInterceptor {
         let mut level_lengths = self.level_lengths;
@@ -190,6 +202,11 @@ impl UlpfecSendBuilder {
             placement: self.placement,
             num_media_packets: self.num_media_packets,
             num_fec_packets: self.num_fec_packets,
+            rate: FecRate::new(
+                self.num_media_packets as u32,
+                self.num_fec_packets as u32,
+                self.adaptive_rate,
+            ),
             level_lengths,
             flush_on_marker: self.flush_on_marker,
             initial_fec_sequence_number: self.initial_fec_sequence_number,
@@ -267,6 +284,8 @@ pub struct UlpfecSendInterceptor {
     placement: RedPlacement,
     num_media_packets: usize,
     num_fec_packets: usize,
+    /// The loss-driven amount of FEC.
+    rate: FecRate,
     level_lengths: Vec<u16>,
     flush_on_marker: bool,
     initial_fec_sequence_number: Option<u16>,
@@ -528,6 +547,9 @@ impl UlpfecSendInterceptor {
         block: &[(u16, Bytes)],
     ) {
         let mut fec_payloads: VecDeque<Bytes> = self.encode_block(block).into();
+        for fec in &fec_payloads {
+            self.rate.on_repair_sent(now, fec.len());
+        }
         let Some(stream) = self.streams.get_mut(&ssrc) else {
             return;
         };
@@ -594,7 +616,10 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for UlpfecSendInterceptor {
     type Error = Error;
     type Time = Instant;
 
-    fn handle_read(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
+    fn handle_read(&mut self, mut msg: TaggedPacket) -> Result<(), Self::Error> {
+        let streams = &self.streams;
+        self.rate
+            .on_read(&mut msg, |ssrc| streams.contains_key(&ssrc));
         self.read_queue.push_back(msg);
         Ok(())
     }
@@ -604,6 +629,8 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for UlpfecSendInterceptor {
     }
 
     fn handle_write(&mut self, mut msg: TaggedPacket) -> Result<(), Self::Error> {
+        // The amount of FEC for the blocks that close from here on (the loss reported so far).
+        self.num_fec_packets = self.rate.fec_packets() as usize;
         // FEC for what has left goes ahead of what is passing now.
         self.protect_wire_images();
         let Packet::Rtp(rtp_packet) = &mut msg.message.packet else {
@@ -703,6 +730,9 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for UlpfecSendInterceptor {
         }
 
         let fec_payloads = self.encode_block(&block);
+        for fec in &fec_payloads {
+            self.rate.on_repair_sent(now, fec.len());
+        }
         let Some(stream) = self.streams.get_mut(&ssrc) else {
             return Ok(());
         };
