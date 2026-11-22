@@ -6,6 +6,8 @@ use crate::chunk::chunk_error::ChunkError;
 use crate::chunk::chunk_forward_tsn::ChunkForwardTsn;
 use crate::chunk::chunk_header::*;
 use crate::chunk::chunk_heartbeat::ChunkHeartbeat;
+use crate::chunk::chunk_heartbeat_ack::ChunkHeartbeatAck;
+use crate::chunk::chunk_i_forward_tsn::ChunkIForwardTsn;
 use crate::chunk::chunk_init::ChunkInit;
 use crate::chunk::chunk_payload_data::ChunkPayloadData;
 use crate::chunk::chunk_reconfig::ChunkReconfig;
@@ -14,6 +16,7 @@ use crate::chunk::chunk_shutdown::ChunkShutdown;
 use crate::chunk::chunk_shutdown_ack::ChunkShutdownAck;
 use crate::chunk::chunk_shutdown_complete::ChunkShutdownComplete;
 use crate::chunk::chunk_type::*;
+use crate::chunk::chunk_unknown::ChunkUnknown;
 use crate::util::*;
 use shared::error::{Error, Result};
 
@@ -66,9 +69,23 @@ pub struct PartialDecode {
     pub(crate) first_chunk_type: ChunkType,
     pub(crate) initiate_tag: Option<u32>,
     pub(crate) cookie: Option<Bytes>,
+    /// The packet's checksum field is zero and its CRC32c has not been computed: the whole
+    /// packet, for whoever will not take a zero checksum on trust (RFC 9653 5.3).
+    pub(crate) unverified: Option<Bytes>,
 }
 
 impl PartialDecode {
+    /// Whether the packet may be processed. A packet whose checksum field is zero is taken
+    /// as it is by an endpoint that announced "Zero Checksum Acceptable" (RFC 9653 5.3);
+    /// for any other, zero has to be the packet's CRC32c.
+    pub(crate) fn checksum_ok(&self, zero_acceptable: bool) -> bool {
+        match &self.unverified {
+            None => true,
+            Some(_) if zero_acceptable => true,
+            Some(raw) => generate_packet_checksum(raw) == 0,
+        }
+    }
+
     pub(crate) fn unmarshal(raw: &Bytes) -> Result<Self> {
         if raw.len() < PACKET_HEADER_SIZE {
             return Err(Error::ErrPacketRawTooSmall);
@@ -80,9 +97,10 @@ impl PartialDecode {
         let destination_port = reader.get_u16();
         let verification_tag = reader.get_u32();
         let their_checksum = reader.get_u32_le();
-        let our_checksum = generate_packet_checksum(raw);
-
-        if their_checksum != our_checksum {
+        // RFC 9653: a checksum of zero is left for the association the packet is for to
+        // judge, which may have said that it takes zero; the CRC32c is then not computed.
+        let unverified = (their_checksum == 0).then(|| raw.clone());
+        if unverified.is_none() && their_checksum != generate_packet_checksum(raw) {
             return Err(Error::ErrChecksumMismatch);
         }
 
@@ -121,61 +139,84 @@ impl PartialDecode {
             first_chunk_type: header.typ,
             initiate_tag,
             cookie,
+            unverified,
         })
     }
 
-    pub(crate) fn finish(self) -> Result<Packet> {
-        let mut chunks = vec![];
+    /// The type and value of each chunk in the packet, as far as their headers are sound.
+    /// For a packet no association will parse (RFC 9260 8.4).
+    pub(crate) fn chunk_headers(&self) -> Vec<(ChunkType, Bytes)> {
+        let raw = &self.remaining;
+        let mut out = vec![];
         let mut offset = 0;
-        loop {
-            // Exact match, no more chunks
-            if offset == self.remaining.len() {
+        while offset + CHUNK_HEADER_SIZE <= raw.len() {
+            let length = u16::from_be_bytes([raw[offset + 2], raw[offset + 3]]) as usize;
+            if length < CHUNK_HEADER_SIZE || offset + length > raw.len() {
                 break;
-            } else if offset + CHUNK_HEADER_SIZE > self.remaining.len() {
-                return Err(Error::ErrParseSctpChunkNotEnoughData);
             }
-
-            let chunk_buf = slice_chunk(&self.remaining, offset)?;
-            let ct = ChunkType(self.remaining[offset]);
-            let c: Box<dyn Chunk> = match ct {
-                CT_INIT => Box::new(ChunkInit::unmarshal(&chunk_buf)?),
-                CT_INIT_ACK => Box::new(ChunkInit::unmarshal(&chunk_buf)?),
-                CT_ABORT => Box::new(ChunkAbort::unmarshal(&chunk_buf)?),
-                CT_COOKIE_ECHO => Box::new(ChunkCookieEcho::unmarshal(&chunk_buf)?),
-                CT_COOKIE_ACK => Box::new(ChunkCookieAck::unmarshal(&chunk_buf)?),
-                CT_HEARTBEAT => Box::new(ChunkHeartbeat::unmarshal(&chunk_buf)?),
-                CT_PAYLOAD_DATA => Box::new(ChunkPayloadData::unmarshal(&chunk_buf)?),
-                CT_SACK => Box::new(ChunkSelectiveAck::unmarshal(&chunk_buf)?),
-                CT_RECONFIG => Box::new(ChunkReconfig::unmarshal(&chunk_buf)?),
-                CT_FORWARD_TSN => Box::new(ChunkForwardTsn::unmarshal(&chunk_buf)?),
-                CT_ERROR => Box::new(ChunkError::unmarshal(&chunk_buf)?),
-                CT_SHUTDOWN => Box::new(ChunkShutdown::unmarshal(&chunk_buf)?),
-                CT_SHUTDOWN_ACK => Box::new(ChunkShutdownAck::unmarshal(&chunk_buf)?),
-                CT_SHUTDOWN_COMPLETE => Box::new(ChunkShutdownComplete::unmarshal(&chunk_buf)?),
-                _ => return Err(Error::ErrUnmarshalUnknownChunkType),
-            };
-
-            let chunk_value_padding = get_padding_size(c.value_length());
-            offset += CHUNK_HEADER_SIZE + c.value_length() + chunk_value_padding;
-            chunks.push(c);
+            out.push((
+                ChunkType(raw[offset]),
+                raw.slice(offset + CHUNK_HEADER_SIZE..offset + length),
+            ));
+            offset += length + get_padding_size(length);
         }
+        out
+    }
 
+    pub(crate) fn finish(self) -> Result<Packet> {
         Ok(Packet {
+            chunks: parse_chunks(&self.remaining, 0)?,
             common_header: self.common_header,
-            chunks,
         })
     }
 }
 
-fn slice_chunk(raw: &Bytes, offset: usize) -> Result<Bytes> {
-    let chunk_length = u16::from_be_bytes([raw[offset + 2], raw[offset + 3]]) as usize;
-    if chunk_length < CHUNK_HEADER_SIZE {
-        return Err(Error::ErrChunkHeaderInvalidLength);
+/// Parses the chunks of a packet, from `offset` in `raw` to its end.
+///
+/// A chunk of a type the engine has no parser for becomes a [`ChunkUnknown`]: RFC 9260 3.2
+/// has the receiver act on the upper two bits of its type, which is the association's work.
+/// A partial chunk at the end (one the packet is too short to hold) is dropped and the chunks
+/// before it stand (RFC 9260 6.10). A chunk of a known type that does not parse fails the
+/// packet.
+fn parse_chunks(raw: &Bytes, mut offset: usize) -> Result<Vec<Box<dyn Chunk>>> {
+    let mut chunks: Vec<Box<dyn Chunk>> = vec![];
+    while offset + CHUNK_HEADER_SIZE <= raw.len() {
+        let chunk_length = u16::from_be_bytes([raw[offset + 2], raw[offset + 3]]) as usize;
+        if chunk_length < CHUNK_HEADER_SIZE {
+            return Err(Error::ErrChunkHeaderInvalidLength);
+        }
+        if offset + chunk_length > raw.len() {
+            // A partial chunk: with nothing before it the packet holds no chunk at all.
+            if chunks.is_empty() {
+                return Err(Error::ErrChunkHeaderNotEnoughSpace);
+            }
+            break;
+        }
+        let chunk_buf = raw.slice(offset..offset + chunk_length);
+        let c: Box<dyn Chunk> = match ChunkType(raw[offset]) {
+            CT_INIT => Box::new(ChunkInit::unmarshal(&chunk_buf)?),
+            CT_INIT_ACK => Box::new(ChunkInit::unmarshal(&chunk_buf)?),
+            CT_ABORT => Box::new(ChunkAbort::unmarshal(&chunk_buf)?),
+            CT_COOKIE_ECHO => Box::new(ChunkCookieEcho::unmarshal(&chunk_buf)?),
+            CT_COOKIE_ACK => Box::new(ChunkCookieAck::unmarshal(&chunk_buf)?),
+            CT_HEARTBEAT => Box::new(ChunkHeartbeat::unmarshal(&chunk_buf)?),
+            CT_HEARTBEAT_ACK => Box::new(ChunkHeartbeatAck::unmarshal(&chunk_buf)?),
+            CT_PAYLOAD_DATA | CT_I_DATA => Box::new(ChunkPayloadData::unmarshal(&chunk_buf)?),
+            CT_SACK => Box::new(ChunkSelectiveAck::unmarshal(&chunk_buf)?),
+            CT_RECONFIG => Box::new(ChunkReconfig::unmarshal(&chunk_buf)?),
+            CT_FORWARD_TSN => Box::new(ChunkForwardTsn::unmarshal(&chunk_buf)?),
+            CT_I_FORWARD_TSN => Box::new(ChunkIForwardTsn::unmarshal(&chunk_buf)?),
+            CT_ERROR => Box::new(ChunkError::unmarshal(&chunk_buf)?),
+            CT_SHUTDOWN => Box::new(ChunkShutdown::unmarshal(&chunk_buf)?),
+            CT_SHUTDOWN_ACK => Box::new(ChunkShutdownAck::unmarshal(&chunk_buf)?),
+            CT_SHUTDOWN_COMPLETE => Box::new(ChunkShutdownComplete::unmarshal(&chunk_buf)?),
+            _ => Box::new(ChunkUnknown::unmarshal(&chunk_buf)?),
+        };
+        // By the length on the wire, not the one the parsed chunk would be written with.
+        offset += chunk_length + get_padding_size(chunk_length);
+        chunks.push(c);
     }
-    if offset + chunk_length > raw.len() {
-        return Err(Error::ErrChunkHeaderNotEnoughSpace);
-    }
-    Ok(raw.slice(offset..offset + chunk_length))
+    Ok(chunks)
 }
 
 #[derive(Default, Debug)]
@@ -222,40 +263,7 @@ impl Packet {
             return Err(Error::ErrChecksumMismatch);
         }
 
-        let mut chunks = vec![];
-        let mut offset = PACKET_HEADER_SIZE;
-        loop {
-            // Exact match, no more chunks
-            if offset == raw.len() {
-                break;
-            } else if offset + CHUNK_HEADER_SIZE > raw.len() {
-                return Err(Error::ErrParseSctpChunkNotEnoughData);
-            }
-
-            let chunk_buf = slice_chunk(raw, offset)?;
-            let ct = ChunkType(raw[offset]);
-            let c: Box<dyn Chunk> = match ct {
-                CT_INIT => Box::new(ChunkInit::unmarshal(&chunk_buf)?),
-                CT_INIT_ACK => Box::new(ChunkInit::unmarshal(&chunk_buf)?),
-                CT_ABORT => Box::new(ChunkAbort::unmarshal(&chunk_buf)?),
-                CT_COOKIE_ECHO => Box::new(ChunkCookieEcho::unmarshal(&chunk_buf)?),
-                CT_COOKIE_ACK => Box::new(ChunkCookieAck::unmarshal(&chunk_buf)?),
-                CT_HEARTBEAT => Box::new(ChunkHeartbeat::unmarshal(&chunk_buf)?),
-                CT_PAYLOAD_DATA => Box::new(ChunkPayloadData::unmarshal(&chunk_buf)?),
-                CT_SACK => Box::new(ChunkSelectiveAck::unmarshal(&chunk_buf)?),
-                CT_RECONFIG => Box::new(ChunkReconfig::unmarshal(&chunk_buf)?),
-                CT_FORWARD_TSN => Box::new(ChunkForwardTsn::unmarshal(&chunk_buf)?),
-                CT_ERROR => Box::new(ChunkError::unmarshal(&chunk_buf)?),
-                CT_SHUTDOWN => Box::new(ChunkShutdown::unmarshal(&chunk_buf)?),
-                CT_SHUTDOWN_ACK => Box::new(ChunkShutdownAck::unmarshal(&chunk_buf)?),
-                CT_SHUTDOWN_COMPLETE => Box::new(ChunkShutdownComplete::unmarshal(&chunk_buf)?),
-                _ => return Err(Error::ErrUnmarshalUnknownChunkType),
-            };
-
-            let chunk_value_padding = get_padding_size(c.value_length());
-            offset += CHUNK_HEADER_SIZE + c.value_length() + chunk_value_padding;
-            chunks.push(c);
-        }
+        let chunks = parse_chunks(raw, PACKET_HEADER_SIZE)?;
 
         Ok(Packet {
             common_header: CommonHeader {
@@ -294,6 +302,19 @@ impl Packet {
         )
     }
 
+    /// As [`marshal`](Self::marshal), with the checksum field left zero when `zero_checksum`
+    /// is set (RFC 9653 5.2: for a peer that announced it takes that).
+    pub(crate) fn marshal_with(&self, zero_checksum: bool) -> Result<Bytes> {
+        let mut buf = BytesMut::with_capacity(self.marshaled_len());
+        Self::write_framed_with(
+            &self.common_header,
+            self.chunks.iter().map(|c| &**c as &dyn Chunk),
+            &mut buf,
+            zero_checksum,
+        )
+        .map(|_| buf.freeze())
+    }
+
     pub(crate) fn marshal(&self) -> Result<Bytes> {
         // Allocate the exact packet length once, up front. `with_capacity` is a
         // cheaper direct allocation than growing an empty `BytesMut` via
@@ -320,6 +341,17 @@ impl Packet {
         chunks: impl Iterator<Item = &'a dyn Chunk>,
         writer: &mut BytesMut,
     ) -> Result<usize> {
+        Self::write_framed_with(common_header, chunks, writer, false)
+    }
+
+    /// As [`write_framed`](Self::write_framed); with `zero_checksum` the CRC32c is not
+    /// computed and the checksum field stays zero (RFC 9653).
+    pub(crate) fn write_framed_with<'a>(
+        common_header: &CommonHeader,
+        chunks: impl Iterator<Item = &'a dyn Chunk>,
+        writer: &mut BytesMut,
+        zero_checksum: bool,
+    ) -> Result<usize> {
         let start = writer.len();
 
         // Populate static headers
@@ -343,6 +375,10 @@ impl Packet {
             if padding_needed != 0 {
                 writer.put_bytes(0, padding_needed);
             }
+        }
+
+        if zero_checksum {
+            return Ok(writer.len());
         }
 
         // CRC-32C over the whole packet, checksum field still zero.
@@ -378,14 +414,15 @@ impl Packet {
 
         // Check values on the packet that are specific to a particular chunk type
         for c in &self.chunks {
-            if let Some(ci) = c.as_any().downcast_ref::<ChunkInit>()
-                && !ci.is_ack
-            {
+            if let Some(ci) = c.as_any().downcast_ref::<ChunkInit>() {
                 // An INIT or INIT ACK chunk MUST NOT be bundled with any other chunk.
                 // They MUST be the only chunks present in the SCTP packets that carry
                 // them.
                 if self.chunks.len() != 1 {
                     return Err(Error::ErrInitChunkBundled);
+                }
+                if ci.is_ack {
+                    continue;
                 }
 
                 // A packet containing an INIT chunk MUST have a zero Verification
@@ -619,6 +656,7 @@ mod test {
                         code: PROTOCOL_VIOLATION,
                         ..Default::default()
                     }],
+                    tag_reflected: false,
                 }),
                 Box::new(ChunkError {
                     error_causes: vec![ErrorCause {

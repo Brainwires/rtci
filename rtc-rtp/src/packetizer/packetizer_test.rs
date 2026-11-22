@@ -55,6 +55,7 @@ fn test_packetizer_abs_send_time() -> Result<()> {
         clock_rate: 90000,
         abs_send_time_ext_id: 0,
         time_baseline,
+        talkspurt_start: false,
     };
     pktizer.enable_abs_send_time(1);
 
@@ -66,7 +67,8 @@ fn test_packetizer_abs_send_time() -> Result<()> {
             version: 2,
             padding: false,
             extension: true,
-            marker: true,
+            // G.722 is audio: no marker without a talkspurt start (RFC 3551 4.1).
+            marker: false,
             payload_type: 98,
             sequence_number: 1234,
             timestamp: 45678,

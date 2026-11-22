@@ -11,7 +11,11 @@ use std::fmt;
 ///|   Type = 14   |Reserved     |T|      Length = 4               |
 ///+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 #[derive(Default, Debug, Clone)]
-pub(crate) struct ChunkShutdownComplete;
+pub(crate) struct ChunkShutdownComplete {
+    /// The T bit (RFC 9260 3.3.13): sent without a TCB, with the Verification Tag of the
+    /// SHUTDOWN ACK it answers.
+    pub(crate) tag_reflected: bool,
+}
 
 /// makes chunkShutdownComplete printable
 impl fmt::Display for ChunkShutdownComplete {
@@ -24,7 +28,7 @@ impl Chunk for ChunkShutdownComplete {
     fn header(&self) -> ChunkHeader {
         ChunkHeader {
             typ: CT_SHUTDOWN_COMPLETE,
-            flags: 0,
+            flags: u8::from(self.tag_reflected),
             value_length: self.value_length() as u16,
         }
     }
@@ -36,7 +40,9 @@ impl Chunk for ChunkShutdownComplete {
             return Err(Error::ErrChunkTypeNotShutdownComplete);
         }
 
-        Ok(ChunkShutdownComplete {})
+        Ok(ChunkShutdownComplete {
+            tag_reflected: header.flags & 1 != 0,
+        })
     }
 
     fn marshal_to(&self, writer: &mut BytesMut) -> Result<usize> {

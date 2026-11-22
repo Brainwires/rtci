@@ -32,7 +32,13 @@ impl Association {
             .with_certificates(vec![certificate])
             // Self-signed peers keep this packet-loss regression independent of a CA.
             .with_insecure_skip_verify(true)
-            .with_client_auth(ClientAuthType::RequireAnyClientCert);
+            .with_client_auth(ClientAuthType::RequireAnyClientCert)
+            // These are regressions of the DTLS 1.2 flights (RFC 6347 4.2.4); DTLS 1.3's
+            // retransmission is tested in `src/dtls13/reliability_test.rs`.
+            .with_protocol_versions(
+                rtc_dtls::config::DtlsVersion::Dtls1_2,
+                rtc_dtls::config::DtlsVersion::Dtls1_2,
+            );
         let client_addr: SocketAddr = "127.0.0.1:44001".parse()?;
         let server_addr: SocketAddr = "127.0.0.1:44002".parse()?;
         let mut client = Endpoint::new(client_addr, TransportProtocol::UDP, None);

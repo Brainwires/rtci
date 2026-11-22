@@ -257,10 +257,11 @@ impl DataChannel {
 
         match msg {
             Message::DataChannelOpen(_) => {
-                // Note: DATA_CHANNEL_OPEN message is handled inside Server() method.
-                // Therefore, the message will not reach here.
-                debug!("Received DATA_CHANNEL_OPEN");
-                self.write_data_channel_ack()?;
+                // RFC 8832 section 6: a DATA_CHANNEL_OPEN "received on an already used stream"
+                // gets no DATA_CHANNEL_ACK and closes the channel, which is the caller's to
+                // do (it owns the stream). The OPEN that opens a channel goes to `accept`.
+                debug!("Received DATA_CHANNEL_OPEN on a stream in use");
+                return Err(Error::ErrStreamAlreadyExist);
             }
             Message::DataChannelAck(_) => {
                 debug!("Received DATA_CHANNEL_ACK");
@@ -445,19 +446,36 @@ impl sansio::Protocol<DataChannelMessage, DataChannelMessage, ()> for DataChanne
     type Error = Error;
     type Time = ();
 
-    /// ReadDataChannel reads a packet of len(p) bytes. It returns the number of bytes read and
-    /// `true` if the data read is a string.
+    /// Takes one message the peer sent on this channel's stream: a DCEP message is processed
+    /// here, and a user message is queued for `poll_read`.
+    ///
+    /// An error means the peer broke the protocol on this channel (a `DATA_CHANNEL_OPEN` on a
+    /// stream in use, a DCEP message that does not parse, an unsupported PPID): RFC 8832
+    /// section 6 and RFC 8831 section 6.6 have the receiver close the channel. Such a message
+    /// is neither delivered nor counted.
     fn handle_read(&mut self, msg: DataChannelMessage) -> Result<()> {
+        match msg.ppi {
+            PayloadProtocolIdentifier::Dcep => {
+                let mut data_buf = &msg.payload[..];
+                self.handle_dcep(&mut data_buf)?;
+            }
+            PayloadProtocolIdentifier::String
+            | PayloadProtocolIdentifier::Binary
+            | PayloadProtocolIdentifier::StringEmpty
+            | PayloadProtocolIdentifier::BinaryEmpty => {}
+            // RFC 8831 section 6.6: the PPID is what says how the payload is to be read, so
+            // a message under any other one (the deprecated partial PPIDs 52 and 54 among
+            // them) has no interpretation. It is an error for the caller to close the
+            // channel on, never binary data.
+            other => return Err(Error::InvalidPayloadProtocolIdentifier(other as u8)),
+        }
+
         self.messages_received += 1;
         self.bytes_received += user_bytes(&msg);
-
-        if msg.ppi == PayloadProtocolIdentifier::Dcep {
-            let mut data_buf = &msg.payload[..];
-            self.handle_dcep(&mut data_buf)
-        } else {
+        if msg.ppi != PayloadProtocolIdentifier::Dcep {
             self.read_outs.push_back(msg);
-            Ok(())
         }
+        Ok(())
     }
 
     fn poll_read(&mut self) -> Option<DataChannelMessage> {

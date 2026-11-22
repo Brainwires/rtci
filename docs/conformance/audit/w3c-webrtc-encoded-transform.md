@@ -6,9 +6,9 @@ Scope. The API puts a transform between encoder and packetizer on the sender and
 
 Totals:
 
-- MUST: tested 10 / untested 5 / partial 6 / missing 20 / violated 0 / n-a 12
+- MUST: tested 18 / untested 5 / partial 7 / missing 11 / violated 0 / n-a 12
 - SHOULD: tested 0 / untested 0 / partial 0 / missing 0 / violated 0 / n-a 0
-- MAY: tested 0 / untested 0 / partial 1 / missing 0 / violated 0 / n-a 0
+- MAY: tested 1 / untested 0 / partial 0 / missing 0 / violated 0 / n-a 0
 
 | ID | § | Level | Clause (short paraphrase) | Verdict | Code | Test | Note |
 |---|---|---|---|---|---|---|---|
@@ -22,20 +22,20 @@ Totals:
 | ENCTRANS-2.1.1-4 | 2.1.1 | MUST | A transform cannot reorder frames; it may delay or drop them | n/a | - | - | Guard on JS frame objects |
 | ENCTRANS-2.1.1-5 | 2.1.1 | MUST | Sender: frames reach the transform in encoder output order, and packet sequence numbers follow that order | tested | `src/rtp_transceiver/rtp_sender/mod.rs:402` | `test_packetizer` | Sequence numbers are assigned in write order |
 | ENCTRANS-2.1.1-6 | 2.1.1 | MUST | Receiver: frames reach the transform in encoder output order (packets reordered by sequence number first) | tested | `rtc-media/src/io/sample_builder/mod.rs:1`, `rtc-interceptor/src/jitterbuffer/mod.rs:1` | `test_sample_builder` | `SampleBuilder` and the jitter-buffer interceptor reorder |
-| ENCTRANS-2.1.1-7 | 2.1.1 | MAY | The packetizer may expect transformed data to keep the original format | partial | `rtc-rtp/src/codec/mod.rs:1` | - | Codec payloaders parse the payload (AV1 OBUs, H.264 NAL units, VP9 header): an encrypted frame needs a format-agnostic payloader, which does not exist |
+| ENCTRANS-2.1.1-7 | 2.1.1 | MAY | The packetizer may expect transformed data to keep the original format | tested | rtc-rtp/src/codec/opaque/mod.rs | an_sframe_ciphertext_crosses_the_opaque_payloader, a_unit_is_split_and_reassembled_unparsed | `OpaquePayloader` / `OpaqueDepacketizer` carry transformed bytes without parsing them (S / E flags in a one-byte header, the engine's framing, not yet the draft-ietf-avtcore-rtp-sframe format) |
 | ENCTRANS-2.2-1 | 2.2 | MUST | Setting an SFrame transform on a transceiver whose [[useSFrame]] is false, or a non-SFrame one when true, is an InvalidModificationError | missing | - | - | No [[useSFrame]] |
 | ENCTRANS-2.2-2 | 2.2 | MUST | A transform already owned by another sender or receiver is an InvalidStateError | n/a | - | - | JS object ownership |
 | ENCTRANS-2.2-3 | 2.2 | MUST | A transform can be replaced or removed at any time; removal restores passthrough | n/a | - | - | The step is the application's |
-| ENCTRANS-3-1 | 3 | MUST | SFrameCipherSuite: the five RFC 9605 suites and the three AES-256-CTR-HMAC suites | missing | - | - | No SFrame implementation in any crate (`grep -ri sframe` finds nothing) |
-| ENCTRANS-3-2 | 3 | MUST | RTCRtpSFrameEncryptor / RTCRtpSFrameDecryptor / SFrameEncryptorStream / SFrameDecryptorStream with a cipher suite option | missing | - | - | - |
+| ENCTRANS-3-1 | 3 | MUST | SFrameCipherSuite: the five RFC 9605 suites and the three AES-256-CTR-HMAC suites | tested | `rtc-sframe/src/cipher_suite.rs` (`CipherSuite`) | `cipher_suites_have_their_registry_values_and_names`, `rfc9605_c3_every_suite_encrypts_to_the_given_sframe_ciphertext`, `aes_256_ctr_suites_encrypt_and_decrypt_the_registry_vectors` | All eight, by registry value and by the API's names |
+| ENCTRANS-3-2 | 3 | MUST | RTCRtpSFrameEncryptor / RTCRtpSFrameDecryptor / SFrameEncryptorStream / SFrameDecryptorStream with a cipher suite option | partial | `rtc-sframe/src/context.rs` (`SFrameContext`) | `every_suite_round_trips_and_adds_only_header_and_tag` | The encryptor / decryptor an application needs, with a cipher suite option; no sender or receiver takes it as a transform (the step is the application's) |
 | ENCTRANS-3-3 | 3 | MUST | SFrameType "per-frame" (default) and "per-packet" sending | missing | - | - | - |
-| ENCTRANS-3.1-1 | 3.1 | MUST | SFrame transform: encrypt on a sender, decrypt on a receiver, replacing the frame data with the RFC 9605 result | missing | - | - | - |
-| ENCTRANS-3.1-2 | 3.1 | MUST | Decryption failure by format raises an error event of type "syntax" with the frame | missing | - | - | - |
-| ENCTRANS-3.1-3 | 3.1 | MUST | Unknown key id raises an error event of type "keyID" with the parsed KID | missing | - | - | - |
-| ENCTRANS-3.1-4 | 3.1 | MUST | Authentication tag failure raises an error event of type "authentication" | missing | - | - | - |
-| ENCTRANS-3.2-1 | 3.2 | MUST | setEncryptionKey(key, keyId): key ids up to 2^64-1; failure is an InvalidModificationError | missing | - | - | - |
-| ENCTRANS-3.2-2 | 3.2 | MUST | addDecryptionKey(key, keyId) adds to the key store | missing | - | - | - |
-| ENCTRANS-3.2-3 | 3.2 | MUST | removeDecryptionKey(keyId) removes from the key store | missing | - | - | - |
+| ENCTRANS-3.1-1 | 3.1 | MUST | SFrame transform: encrypt on a sender, decrypt on a receiver, replacing the frame data with the RFC 9605 result | tested | `rtc-sframe/src/context.rs` (`SFrameContext::encrypt`, `decrypt`) | `rfc9605_c3_every_suite_encrypts_to_the_given_sframe_ciphertext`, `rfc9605_c3_every_suite_decrypts_the_given_sframe_ciphertext` | The application calls it between its encoder and the payloader, and between depacketizer and decoder |
+| ENCTRANS-3.1-2 | 3.1 | MUST | Decryption failure by format raises an error event of type "syntax" with the frame | tested | `rtc-sframe/src/error.rs` (`Error::kind`, `ErrorKind::Syntax`) | `decrypt_refuses_every_truncation`, `header_decode_refuses_every_truncation` | A returned error, not an event; the caller still holds the frame |
+| ENCTRANS-3.1-3 | 3.1 | MUST | Unknown key id raises an error event of type "keyID" with the parsed KID | tested | `rtc-sframe/src/error.rs` (`Error::UnknownKeyId`, `ErrorKind::KeyId`, `Error::key_id`) | `decrypt_reports_an_unknown_kid_with_its_value` | - |
+| ENCTRANS-3.1-4 | 3.1 | MUST | Authentication tag failure raises an error event of type "authentication" | tested | `rtc-sframe/src/error.rs` (`Error::AuthenticationFailed`, `ErrorKind::Authentication`) | `decrypt_refuses_a_wrong_tag_and_releases_nothing` | - |
+| ENCTRANS-3.2-1 | 3.2 | MUST | setEncryptionKey(key, keyId): key ids up to 2^64-1; failure is an InvalidModificationError | tested | `rtc-sframe/src/context.rs` (`SFrameContext::add_send_key`) | `every_suite_round_trips_and_adds_only_header_and_tag`, `sender_refuses_to_restart_a_keys_counter` | Key ids are `u64`; a failure is a returned error |
+| ENCTRANS-3.2-2 | 3.2 | MUST | addDecryptionKey(key, keyId) adds to the key store | tested | `rtc-sframe/src/context.rs` (`SFrameContext::add_recv_key`) | `a_ciphertext_whose_key_arrives_later_can_be_decrypted_then` | - |
+| ENCTRANS-3.2-3 | 3.2 | MUST | removeDecryptionKey(keyId) removes from the key store | tested | `rtc-sframe/src/context.rs` (`SFrameContext::remove_key`) | `removed_key_no_longer_encrypts_or_decrypts` | - |
 | ENCTRANS-4.1-1 | 4.1 | MUST | Metadata synchronizationSource: the SSRC of the frame's packets | tested | `src/peer_connection/message/mod.rs:420` | `every_reference_resolves_and_nothing_unmeasured_is_reported` | Received packets keep their RTP header |
 | ENCTRANS-4.1-2 | 4.1 | MUST | Metadata payloadType | tested | `src/peer_connection/message/mod.rs:420` | `tests/codec_negotiation.rs` | Header field |
 | ENCTRANS-4.1-3 | 4.1 | MUST | Metadata contributingSources: the CSRC list | untested | `src/peer_connection/message/mod.rs:420`, `src/rtp_transceiver/rtp_receiver/mod.rs:299` | - | Header field; no test sends CSRCs end to end |
@@ -69,7 +69,7 @@ Totals:
 
 ## Gaps, in order of importance
 
-1. **SFrame in the engine (L).** `ENCTRANS-3-1` to `ENCTRANS-3-3`, `ENCTRANS-3.1-1` to `ENCTRANS-3.1-4`, `ENCTRANS-3.2-1` to `ENCTRANS-3.2-3`: an `rtc-sframe` crate (see rfc9605.md) with the encryptor / decryptor, key store and the three error kinds.
+1. **SFrame in the engine (L).** Done as the standalone `rtc-sframe` crate (see rfc9605.md): the cipher suites, the encryptor / decryptor with its key store and the three error kinds. Left: `ENCTRANS-3-2` as a transform a sender or receiver takes, `ENCTRANS-3-3`.
 2. **SFrame RTP packetization and its negotiation (M).** `ENCTRANS-2.1-1`, `ENCTRANS-2.1-2`, `ENCTRANS-2.2-1`, `ENCTRANS-5-2`, `ENCTRANS-2.1.1-7`: the SFrame RTP payload format (per-frame and per-packet), its SDP signalling, a per-transceiver flag, and a format-agnostic payloader for encrypted frames.
 3. **Absolute capture time and dependency descriptor (M each).** `ENCTRANS-2.1.1-1`, `ENCTRANS-4.1-6`, `ENCTRANS-4.1-7`, `ENCTRANS-4.2-1`, `ENCTRANS-4.2-2`: the two header extensions, parse and write.
 4. **Per-frame metadata for a receiver (S to M).** `ENCTRANS-4.1-5` (arrival time on `RTCMessage::RtpPacket`), `ENCTRANS-4.2-3`, `ENCTRANS-4.2-4`, `ENCTRANS-4.3-1` (width, height, layer indices, key-frame flag from every depacketizer), `ENCTRANS-4.3-3` (one frame per spatial layer).

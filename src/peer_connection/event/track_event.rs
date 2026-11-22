@@ -4,7 +4,38 @@
 
 use crate::media_stream::MediaStreamId;
 use crate::media_stream::track::MediaStreamTrackId;
-use crate::rtp_transceiver::{RTCRtpReceiverId, RtpStreamId};
+use crate::rtp_transceiver::{RTCRtpReceiverId, RTCRtpTransceiverId, RtpStreamId};
+
+/// The W3C `track` event (webrtc-pc 5.1.1 "process the addition of a remote track"): a
+/// remote description made the transceiver receive, or added streams to its track. Fired
+/// when the description is applied, whether or not media ever arrives; the track starts
+/// muted and is unmuted by its first RTP packet
+/// ([`RTCTrackEvent::OnUnmute`]).
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
+pub struct RTCRemoteTrackEventInit {
+    /// The receiver whose track this is.
+    pub receiver_id: RTCRtpReceiverId,
+    /// The transceiver of the receiver.
+    pub transceiver_id: RTCRtpTransceiverId,
+    /// The receiver's track: an id the engine generated, not the remote's msid.
+    pub track_id: MediaStreamTrackId,
+    /// The remote MediaStreams the track is in (W3C `[[AssociatedRemoteMediaStreams]]`), one
+    /// per `a=msid` of the media section; empty for none.
+    pub stream_ids: Vec<MediaStreamId>,
+}
+
+/// W3C "set the associated remote streams": the remote streams a receiver's track was
+/// removed from and added to by a description (mediacapture-main `removetrack` and
+/// `addtrack` on those streams).
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
+pub struct RTCRemoteStreamsChange {
+    /// The receiver's track.
+    pub track_id: MediaStreamTrackId,
+    /// The streams the track left.
+    pub removed: Vec<MediaStreamId>,
+    /// The streams the track joined.
+    pub added: Vec<MediaStreamId>,
+}
 
 /// Initialization data for a track event.
 ///
@@ -187,8 +218,27 @@ pub enum RTCTrackEvent {
 
     /// Track has closed.
     ///
-    /// The track is no longer usable and resources should be cleaned up.
+    /// The track is no longer usable and resources should be cleaned up. A remote track ends
+    /// by negotiation only: its transceiver stopped (`stop()`, a rejected m= section) or
+    /// removed (a rollback); an RTCP BYE mutes it instead ([`OnMute`](Self::OnMute)).
     OnClose(MediaStreamTrackId),
+
+    /// The W3C `track` event: a remote description made the receiver receive (see
+    /// [`RTCRemoteTrackEventInit`]). [`OnOpen`](Self::OnOpen) still follows for each RTP
+    /// stream when its first packet arrives.
+    OnRemoteTrack(RTCRemoteTrackEventInit),
+
+    /// The track became muted (mediacapture-main "set the muted state" to true): a remote
+    /// description stopped the receiver receiving, or one of its SSRCs said BYE (W3C webrtc
+    /// 9.3).
+    OnMute(MediaStreamTrackId),
+
+    /// The track became unmuted: an RTP packet arrived for it while it was muted and its
+    /// transceiver is receptive (W3C webrtc 9.3).
+    OnUnmute(MediaStreamTrackId),
+
+    /// A description changed the remote streams the track is in.
+    OnStreamsChanged(RTCRemoteStreamsChange),
 }
 
 impl Default for RTCTrackEvent {

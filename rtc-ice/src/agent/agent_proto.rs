@@ -1,5 +1,5 @@
 use super::*;
-use mdns::{MDNS_PORT, MdnsEvent};
+use mdns::MDNS_PORT;
 
 impl sansio::Protocol<TaggedBytesMut, (), ()> for Agent {
     type Rout = TaggedBytesMut;
@@ -14,44 +14,27 @@ impl sansio::Protocol<TaggedBytesMut, (), ()> for Agent {
         // an ICE socket, and an answer taken from there could point a `.local` candidate at an
         // address of the sender's choosing. Datagrams on ICE sockets are ICE traffic, whatever
         // their source port.
+        // (Whatever arrives on the mDNS socket goes to the mDNS connection, from any source
+        // port: a query from another port is a legacy unicast query, which RFC 6762 Section
+        // 6.7 has answered by unicast; a response from another port is refused there. With
+        // `multicast_dns_destination_reported` the local address is the datagram's
+        // destination, the mDNS group's or the host's own.)
         if msg.transport.local_addr.port() == MDNS_PORT
-            && msg.transport.peer_addr.port() == MDNS_PORT
+            && self
+                .find_local_candidate(msg.transport.local_addr, msg.transport.transport_protocol)
+                .is_none()
         {
-            let remote_candidates = if let Some(mdns_conn) = &mut self.mdns {
+            let now = msg.now;
+            if let Some(mdns_conn) = &mut self.mdns {
                 mdns_conn.handle_read(msg)?;
-
-                let mut remote_candidates = vec![];
-                // After mdns handle_read, check any query result
-                while let Some(event) = mdns_conn.poll_event() {
-                    match event {
-                        MdnsEvent::QueryAnswered(id, addr) => {
-                            if let Some(mut c) = self.mdns_queries.remove(&id)
-                                && c.set_ip(&addr).is_ok()
-                            {
-                                debug!(
-                                    "mDNS query id {} answered Candidate {} with resolved_addr {} is added into remote candidates",
-                                    id,
-                                    c,
-                                    c.addr()
-                                );
-                                remote_candidates.push(c);
-                            }
-                        }
-                        MdnsEvent::QueryTimeout(id) => {
-                            if let Some(c) = self.mdns_queries.remove(&id) {
-                                error!("mDNS Query {} timed out for {}", id, c.address());
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                remote_candidates
-            } else {
-                vec![]
-            };
-
+            }
+            let remote_candidates = self.drain_mdns_events(now);
             self.trigger_request_connectivity_check(remote_candidates);
 
+            Ok(())
+        } else if self.handle_previous_generation(&msg) {
+            // Consent traffic of the generation an ICE restart replaced, on the path that is
+            // still in use.
             Ok(())
         } else if let Some(local_index) =
             self.find_local_candidate(msg.transport.local_addr, msg.transport.transport_protocol)
@@ -95,44 +78,23 @@ impl sansio::Protocol<TaggedBytesMut, (), ()> for Agent {
     }
 
     fn handle_timeout(&mut self, now: Self::Time) -> std::result::Result<(), Self::Error> {
-        let remote_candidates = if let Some(mdns_conn) = &mut self.mdns {
+        if let Some(mdns_conn) = &mut self.mdns {
             let _ = mdns_conn.handle_timeout(now);
-
-            let mut remote_candidates = vec![];
-            // After mdns handle_timeout, check any query result
-            while let Some(event) = mdns_conn.poll_event() {
-                match event {
-                    MdnsEvent::QueryAnswered(id, addr) => {
-                        if let Some(mut c) = self.mdns_queries.remove(&id)
-                            && c.set_ip(&addr).is_ok()
-                        {
-                            debug!(
-                                "mDNS query id {} answered Candidate {} with resolved_addr {} is added into remote candidates",
-                                id,
-                                c,
-                                c.addr()
-                            );
-                            remote_candidates.push(c);
-                        }
-                    }
-                    MdnsEvent::QueryTimeout(id) => {
-                        if let Some(c) = self.mdns_queries.remove(&id) {
-                            error!("mDNS Query {} timed out for {}", id, c.address());
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            remote_candidates
-        } else {
-            vec![]
-        };
+        }
+        let remote_candidates = self.drain_mdns_events(now);
         self.trigger_request_connectivity_check(remote_candidates);
 
-        if self.ufrag_pwd.remote_credentials.is_some()
-            && (self.force_candidate_contact
-                || self.last_checking_time + self.get_timeout_interval() <= now)
-        {
+        // Requests that were answered before the peer's credentials arrived (RFC 8445
+        // Section 7.3) are processed now that there are some.
+        if !self.early_requests.is_empty() {
+            self.process_early_requests(now);
+        }
+
+        // The path an ICE restart left in use keeps its consent checks, with or without the
+        // peer's new credentials.
+        self.maintain_previous_generation(now);
+
+        if self.ice_deadline().is_some_and(|deadline| deadline <= now) {
             self.contact(now);
         }
         Ok(())
@@ -145,25 +107,17 @@ impl sansio::Protocol<TaggedBytesMut, (), ()> for Agent {
             None
         };
 
-        let ice_timeout = if self.ufrag_pwd.remote_credentials.is_some()
-            && !matches!(
-                self.connection_state,
-                ConnectionState::Failed | ConnectionState::Closed
-            ) {
-            if self.force_candidate_contact {
-                // A connectivity check was requested; ask the driver to call
-                // `handle_timeout` as soon as possible. `last_checking_time` is in the
-                // past, so the resulting deadline is immediate.
-                Some(self.last_checking_time)
-            } else {
-                Some(self.last_checking_time + self.get_timeout_interval())
-            }
-        } else {
-            None
-        };
+        let ice_timeout = self.ice_deadline();
 
-        // This treats the two options as a collection and picks the minimum
-        [mdns_timeout, ice_timeout].into_iter().flatten().min()
+        // This treats the options as a collection and picks the minimum
+        [
+            mdns_timeout,
+            ice_timeout,
+            self.previous_generation_deadline(),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     fn close(&mut self) -> std::result::Result<(), Self::Error> {

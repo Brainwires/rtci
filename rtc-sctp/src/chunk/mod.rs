@@ -9,6 +9,7 @@ pub(crate) mod chunk_forward_tsn;
 pub(crate) mod chunk_header;
 pub(crate) mod chunk_heartbeat;
 pub(crate) mod chunk_heartbeat_ack;
+pub(crate) mod chunk_i_forward_tsn;
 pub(crate) mod chunk_init;
 pub mod chunk_payload_data;
 pub(crate) mod chunk_reconfig;
@@ -17,7 +18,9 @@ pub(crate) mod chunk_shutdown;
 pub(crate) mod chunk_shutdown_ack;
 pub(crate) mod chunk_shutdown_complete;
 pub(crate) mod chunk_type;
+pub(crate) mod chunk_unknown;
 
+use crate::util::get_padding_size;
 use chunk_header::*;
 use shared::error::{Error, Result};
 
@@ -129,6 +132,29 @@ pub(crate) const ERROR_CAUSE_HEADER_LENGTH: usize = 4;
 impl fmt::Display for ErrorCause {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.code)
+    }
+}
+
+/// The bytes `causes` take in a chunk: every cause but the last is padded to four bytes
+/// (RFC 9260 3.2: the chunk length leaves out the padding of the last one).
+pub(crate) fn error_causes_length(causes: &[ErrorCause]) -> usize {
+    let mut length = 0;
+    for (i, cause) in causes.iter().enumerate() {
+        length += cause.length();
+        if i + 1 != causes.len() {
+            length += get_padding_size(cause.length());
+        }
+    }
+    length
+}
+
+/// Writes `causes` as [`error_causes_length`] counts them.
+pub(crate) fn marshal_error_causes(causes: &[ErrorCause], writer: &mut BytesMut) {
+    for (i, cause) in causes.iter().enumerate() {
+        cause.marshal_to(writer);
+        if i + 1 != causes.len() {
+            writer.put_bytes(0, get_padding_size(cause.length()));
+        }
     }
 }
 

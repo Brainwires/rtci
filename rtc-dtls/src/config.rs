@@ -19,10 +19,14 @@ mod config_test;
 use crate::cipher_suite::*;
 use crate::conn::{
     DEFAULT_MAXIMUM_RETRANSMIT_NUMBER, DEFAULT_REPLAY_PROTECTION_WINDOW, INITIAL_TICKER_INTERVAL,
+    MAXIMUM_RETRANSMIT_INTERVAL, MINIMUM_MTU, MINIMUM_REPLAY_PROTECTION_WINDOW,
 };
 use crate::crypto::*;
 use crate::curve::named_curve::NamedCurve;
 use crate::extension::extension_use_srtp::SrtpProtectionProfile;
+use crate::record_layer::record_layer_header::{
+    PROTOCOL_VERSION1_0, PROTOCOL_VERSION1_2, ProtocolVersion,
+};
 use crate::signature_hash_algorithm::{
     SignatureHashAlgorithm, SignatureScheme, parse_signature_schemes,
 };
@@ -113,11 +117,31 @@ pub struct ConfigBuilder {
     cipher_suites: Vec<CipherSuiteId>,
     signature_schemes: Vec<SignatureScheme>,
     srtp_protection_profiles: Vec<SrtpProtectionProfile>,
+    use_srtp_optional: bool,
+    use_srtp_required: bool,
     client_auth: ClientAuthType,
     extended_master_secret: ExtendedMasterSecretType,
     flight_interval: Duration,
+    maximum_flight_interval: Duration,
+    handshake_timeout: Option<Duration>,
+    cookie_exchange: bool,
+    hello_verify_request_version: ProtocolVersion,
+    early_data_retransmit: bool,
+    min_version: DtlsVersion,
+    max_version: DtlsVersion,
+    connection_id: Option<usize>,
+    connection_id_migration: bool,
+    invalid_record_limit: Option<u64>,
+    post_quantum_key_share: bool,
     psk: Option<PskCallback>,
     psk_identity_hint: Option<Vec<u8>>,
+    session_tickets: u8,
+    session_ticket_lifetime: Duration,
+    session_store: Option<Arc<dyn crate::session::SessionStore>>,
+    external_psks: Vec<crate::session::ExternalPsk>,
+    psk_without_key_exchange: bool,
+    post_handshake_auth: bool,
+    max_early_data: u32,
     insecure_skip_verify: bool,
     insecure_hashes: bool,
     insecure_verification: bool,
@@ -138,11 +162,31 @@ impl Default for ConfigBuilder {
             cipher_suites: vec![],
             signature_schemes: vec![],
             srtp_protection_profiles: vec![],
+            use_srtp_optional: false,
+            use_srtp_required: false,
             client_auth: ClientAuthType::default(),
             extended_master_secret: ExtendedMasterSecretType::default(),
             flight_interval: Duration::default(),
+            maximum_flight_interval: MAXIMUM_RETRANSMIT_INTERVAL,
+            handshake_timeout: None,
+            cookie_exchange: true,
+            hello_verify_request_version: PROTOCOL_VERSION1_0,
+            early_data_retransmit: true,
+            min_version: DtlsVersion::Dtls1_2,
+            max_version: DtlsVersion::Dtls1_3,
+            connection_id: Some(0),
+            connection_id_migration: false,
+            invalid_record_limit: None,
+            post_quantum_key_share: true,
             psk: None,
             psk_identity_hint: None,
+            session_tickets: 0,
+            session_ticket_lifetime: crate::dtls13::psk::DEFAULT_TICKET_LIFETIME,
+            session_store: None,
+            external_psks: vec![],
+            psk_without_key_exchange: false,
+            post_handshake_auth: false,
+            max_early_data: 0,
             insecure_skip_verify: false,
             insecure_hashes: false,
             insecure_verification: false,
@@ -177,6 +221,12 @@ impl ConfigBuilder {
 
     /// cipher_suites is a list of supported cipher suites.
     /// If cipher_suites is nil, a default list is used
+    ///
+    /// The list is exact, and with it the versions: the TLS 1.3 suites in it
+    /// (`Tls_Aes_128_Gcm_Sha256` and the others of that family) are what DTLS 1.3 is
+    /// negotiated with, the rest what DTLS 1.2 is. A list without a TLS 1.3 suite therefore
+    /// negotiates DTLS 1.2 only, and one with nothing else DTLS 1.3 only. The default list
+    /// has both.
     pub fn with_cipher_suites(mut self, cipher_suites: Vec<CipherSuiteId>) -> Self {
         self.cipher_suites = cipher_suites;
         self
@@ -199,6 +249,28 @@ impl ConfigBuilder {
         self
     }
 
+    /// Lets a client that offers `use_srtp` go on when the server's ServerHello carries no
+    /// `use_srtp` extension (RFC 5764 section 4.1.1: a server that does not take the extension
+    /// leaves it out). The association then has no SRTP profile
+    /// ([`SrtpProtectionProfile::Unsupported`]) and carries DTLS application data only: the
+    /// caller decides whether that is enough. `false` (the default) aborts such a handshake with
+    /// a fatal alert.
+    pub fn with_use_srtp_optional(mut self, use_srtp_optional: bool) -> Self {
+        self.use_srtp_optional = use_srtp_optional;
+        self
+    }
+
+    /// Makes a server refuse a client whose `use_srtp` shares no profile with it, with a fatal
+    /// insufficient_security alert. RFC 5764 section 4.1.1: with no shared profile "the server
+    /// SHOULD NOT return the use_srtp extension at which point the connection falls back to
+    /// the negotiated DTLS cipher suite. If that is not acceptable, the server SHOULD return
+    /// an appropriate DTLS alert". `false` (the default) falls back; set `true` when the
+    /// association is of no use without SRTP.
+    pub fn with_use_srtp_required(mut self, use_srtp_required: bool) -> Self {
+        self.use_srtp_required = use_srtp_required;
+        self
+    }
+
     /// client_auth determines the server's policy for
     /// TLS Client Authentication. The default is NoClientCert.
     pub fn with_client_auth(mut self, client_auth: ClientAuthType) -> Self {
@@ -216,10 +288,204 @@ impl ConfigBuilder {
         self
     }
 
-    /// flight_interval controls how often we send outbound handshake messages
-    /// defaults to time.Second
+    /// The initial value of the handshake retransmission timer: how long a flight waits for
+    /// its answer before it is sent again. The timer doubles at each retransmission, up to
+    /// [`Self::with_maximum_flight_interval`], and keeps its value until a flight is answered
+    /// without loss (RFC 6347 4.2.4.1). Defaults to one second.
     pub fn with_flight_interval(mut self, flight_interval: Duration) -> Self {
         self.flight_interval = flight_interval;
+        self
+    }
+
+    /// The value the handshake retransmission timer doubles up to. Defaults to 60 seconds, the
+    /// least RFC 6347 4.2.4.1 allows as a maximum; a value below the initial interval is
+    /// raised to it.
+    pub fn with_maximum_flight_interval(mut self, maximum_flight_interval: Duration) -> Self {
+        self.maximum_flight_interval = maximum_flight_interval;
+        self
+    }
+
+    /// How long a handshake may take, from the first flight sent or received, before the
+    /// association fails with `ErrHandshakeTimeout`. `None`, the default, never gives up:
+    /// the flight is retransmitted, at the timer that doubles up to
+    /// [`Self::with_maximum_flight_interval`], for as long as the association exists.
+    ///
+    /// RFC 6347 section 4.2.4 and RFC 9147 section 5.8 define the retransmission timer and
+    /// set no total limit, so by default none is set here either: what ends a handshake is
+    /// the transport under it (in a peer connection, ICE: consent expiry or the failure of
+    /// every candidate pair, RFC 7675), a fatal alert, or the application closing the
+    /// association. An application that runs DTLS over a transport that cannot tell it that
+    /// the peer is gone sets a limit here. A server endpoint drops an association it made
+    /// for an address the client has not verified after a fixed time whatever this says
+    /// (the cookie exchange of a fragmented DTLS 1.3 ClientHello).
+    pub fn with_handshake_timeout(mut self, handshake_timeout: Option<Duration>) -> Self {
+        self.handshake_timeout = handshake_timeout;
+        self
+    }
+
+    /// Whether a server [`Endpoint`](crate::endpoint::Endpoint) answers a ClientHello that
+    /// carries no valid cookie with a HelloVerifyRequest (RFC 6347 4.2.1). On by default, as
+    /// the RFC asks: until a client echoes the cookie the server keeps no state for it and
+    /// sends it nothing larger than what it received.
+    ///
+    /// Off, the first ClientHello gets an association and the server's whole first flight. That
+    /// saves a round trip where something else has already shown that the client receives at
+    /// its address (ICE connectivity checks do, for WebRTC), and makes the server an
+    /// amplifier and a holder of state for spoofed addresses where nothing has.
+    pub fn with_cookie_exchange(mut self, cookie_exchange: bool) -> Self {
+        self.cookie_exchange = cookie_exchange;
+        self
+    }
+
+    /// The server_version a server writes into its HelloVerifyRequest. The default is DTLS 1.0
+    /// ([`PROTOCOL_VERSION1_0`]): RFC 6347 4.2.1 says a server should use it there whatever
+    /// version it goes on to negotiate, so that a client of any version takes the message.
+    /// [`PROTOCOL_VERSION1_2`] writes the version the ServerHello will carry instead, which is
+    /// what this stack sent before and what some stacks do. A client is required to ignore the
+    /// field, and this one does, so the setting changes nothing but that field.
+    ///
+    /// [`Self::build`] refuses any other version.
+    pub fn with_hello_verify_request_version(mut self, version: ProtocolVersion) -> Self {
+        self.hello_verify_request_version = version;
+        self
+    }
+
+    /// Whether a client that receives protected application data while it still waits for the
+    /// server's Finished sends its final flight again at once, instead of when its timer fires
+    /// (RFC 6347 4.2.4, a MAY: such data means the server has its keys and its Finished was
+    /// lost or is late). On by default. Only a record that authenticates under the negotiated
+    /// keys counts, and a flight is sent again for this reason once at most.
+    pub fn with_early_data_retransmit(mut self, early_data_retransmit: bool) -> Self {
+        self.early_data_retransmit = early_data_retransmit;
+        self
+    }
+
+    /// The DTLS versions to negotiate: the lowest and the highest, both included. The default
+    /// is DTLS 1.2 to DTLS 1.3, with 1.3 preferred: a client offers both in
+    /// `supported_versions`, a server takes 1.3 from a client that offers it and 1.2 from one
+    /// that does not (RFC 9147 section 5.3, RFC 8446 section 4.2.1), and each end checks the
+    /// downgrade sentinel of RFC 8446 section 4.1.3.
+    ///
+    /// DTLS 1.3 authenticates with certificates here; a configuration with a pre-shared key
+    /// negotiates DTLS 1.2 (its PSK cipher suites), and [`Self::build`] refuses one that asks
+    /// for DTLS 1.3 as the minimum. It also refuses a minimum above the maximum.
+    pub fn with_protocol_versions(mut self, min: DtlsVersion, max: DtlsVersion) -> Self {
+        self.min_version = min;
+        self.max_version = max;
+        self
+    }
+
+    /// Whether, and how, this side uses connection ids (RFC 9147 section 9, on RFC 9146's
+    /// `connection_id` extension): `Some(n)` sends the extension and asks the peer to put a
+    /// connection id of `n` random bytes in every protected record it sends, `Some(0)` sends
+    /// it and asks for none (the peer may still ask for one in the other direction), `None`
+    /// does not use the extension. Negotiated when both sides send it. The default is
+    /// `Some(0)`, as RFC 9147 section 5.1 asks of a client that wants no connection id.
+    ///
+    /// Both versions: DTLS 1.2 uses RFC 9146 (`tls12_cid` records), DTLS 1.3 its own record
+    /// header. A ClientHello that offers both carries the extension once, for both (RFC 9147
+    /// section 5.1).
+    pub fn with_connection_id(mut self, length: Option<usize>) -> Self {
+        self.connection_id = length;
+        self
+    }
+
+    /// Whether a server [`Endpoint`](crate::endpoint::Endpoint) follows an association to a
+    /// new address when a record under one of its connection ids arrives from there, is
+    /// authentic and is newer than any before it (RFC 9146 section 6). Off by default: the
+    /// RFC also requires a strategy that shows the new address receives, and none is run
+    /// here. An application that has one (ICE has: consent and connectivity checks on the
+    /// new pair) turns this on; under ICE the engine addresses an association by the
+    /// selected pair anyway.
+    pub fn with_connection_id_migration(mut self, migration: bool) -> Self {
+        self.connection_id_migration = migration;
+        self
+    }
+
+    /// Whether DTLS 1.3 offers and accepts the hybrid post-quantum group X25519MLKEM768
+    /// (draft-ietf-tls-ecdhe-mlkem, code point 0x11EC), preferred over the curves. On by
+    /// default; it takes effect only with a crypto provider that has ML-KEM (the built-in
+    /// aws-lc-rs one; ring has none). Its key share is 1216 bytes, so a ClientHello that
+    /// carries it does not fit one datagram and is sent as two fragments.
+    pub fn with_post_quantum_key_share(mut self, post_quantum_key_share: bool) -> Self {
+        self.post_quantum_key_share = post_quantum_key_share;
+        self
+    }
+
+    /// How many invalid records (malformed, or failing authentication) a DTLS 1.3
+    /// association takes before it gives its peer up as persistently misbehaving and fails,
+    /// without an alert (RFC 9147 section 5.10). `None`, the default, never does: over UDP
+    /// anyone who knows the addresses can send such records, and a limit lets them end the
+    /// association. A limit suits a transport where only the peer can send (under ICE, a
+    /// selected pair with consent checks narrows it to on-path senders).
+    pub fn with_invalid_record_limit(mut self, limit: Option<u64>) -> Self {
+        self.invalid_record_limit = limit;
+        self
+    }
+
+    /// DTLS 1.3 server: how many tickets (NewSessionTicket messages, RFC 8446 section 4.6.1)
+    /// to send after each handshake, for the client to resume with. 0, the default, sends
+    /// none and accepts none. Tickets are sealed under a key the configuration makes at
+    /// random when it is built, and each is accepted once: see [`crate::session`].
+    pub fn with_session_tickets(mut self, count: u8) -> Self {
+        self.session_tickets = count;
+        self
+    }
+
+    /// DTLS 1.3 server: how long a ticket it issues may be used for (`ticket_lifetime`).
+    /// Two hours by default; at most seven days (RFC 8446 section 4.6.1).
+    pub fn with_session_ticket_lifetime(mut self, lifetime: Duration) -> Self {
+        self.session_ticket_lifetime = lifetime;
+        self
+    }
+
+    /// DTLS 1.3 client: where to keep the tickets servers send, and take one from for the
+    /// next handshake with the same server name. Without a store (the default) a client
+    /// offers no PSK and drops the tickets it is sent.
+    pub fn with_session_store(
+        mut self,
+        store: Option<Arc<dyn crate::session::SessionStore>>,
+    ) -> Self {
+        self.session_store = store;
+        self
+    }
+
+    /// DTLS 1.3: external pre-shared keys (RFC 8446 section 2.2). A client offers each of
+    /// them; a server accepts one whose identity it has in place of a certificate exchange.
+    /// The DTLS 1.2 PSK suites are configured with [`Self::with_psk`] instead.
+    pub fn with_external_psks(mut self, psks: Vec<crate::session::ExternalPsk>) -> Self {
+        self.external_psks = psks;
+        self
+    }
+
+    /// DTLS 1.3: whether a PSK may also be used alone, without an (EC)DHE exchange (the
+    /// `psk_ke` mode of RFC 8446 section 4.2.9). Off by default: `psk_dhe_ke` only, which
+    /// keeps forward secrecy (RFC 8446 section E.1).
+    pub fn with_psk_without_key_exchange(mut self, allowed: bool) -> Self {
+        self.psk_without_key_exchange = allowed;
+        self
+    }
+
+    /// DTLS 1.3 client: offer post-handshake authentication (the `post_handshake_auth`
+    /// extension, RFC 8446 section 4.2.6), so that the server may ask for this client's
+    /// certificate at any time after the handshake ([`DTLSConn::request_client_certificate`](crate::conn::DTLSConn::request_client_certificate)).
+    /// It is answered at once, with the configured certificate if the request allows it and
+    /// with an empty Certificate otherwise. Off by default.
+    pub fn with_post_handshake_auth(mut self, offer: bool) -> Self {
+        self.post_handshake_auth = offer;
+        self
+    }
+
+    /// DTLS 1.3 server: take up to `size` bytes of 0-RTT data (RFC 8446 section 4.2.10)
+    /// with the tickets it issues ([`Self::with_session_tickets`]). 0, the default, takes
+    /// none. 0-RTT data can be replayed by anyone who saw it: each ticket is accepted once
+    /// (RFC 8446 section 8.1), and the ticket's age has to agree with the server's within ten
+    /// seconds (section 8.3), but the application decides what is safe to do before the
+    /// handshake is complete ([`EndpointEvent::EarlyData`](crate::endpoint::EndpointEvent::EarlyData)).
+    /// A ClientHello answered with a HelloRetryRequest has no 0-RTT, so this takes effect
+    /// only with the cookie exchange off ([`Self::with_cookie_exchange`]).
+    pub fn with_max_early_data(mut self, size: u32) -> Self {
+        self.max_early_data = size;
         self
     }
 
@@ -323,6 +589,8 @@ impl ConfigBuilder {
     /// Duplication of the sequence number is checked in this window size.
     /// Packet with sequence number older than this value compared to the latest
     /// accepted packet will be discarded. (default is 64)
+    ///
+    /// RFC 6347 4.1.2.6 requires a window of at least 32: a smaller value is raised to 32.
     pub fn with_replay_protection_window(mut self, replay_protection_window: usize) -> Self {
         self.replay_protection_window = replay_protection_window;
         self
@@ -330,6 +598,30 @@ impl ConfigBuilder {
 }
 
 pub(crate) const DEFAULT_MTU: usize = 1200; // bytes
+
+/// A version of DTLS this crate negotiates.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[non_exhaustive]
+pub enum DtlsVersion {
+    /// DTLS 1.2 (RFC 6347), `{254, 253}` on the wire.
+    Dtls1_2,
+    /// DTLS 1.3 (RFC 9147), `{254, 252}` on the wire.
+    Dtls1_3,
+}
+
+impl DtlsVersion {
+    /// The version as a [`ProtocolVersion`]: what `supported_versions` carries, and the two
+    /// bytes webrtc-stats' `tlsVersion` is the hex of (`FEFD`, `FEFC`).
+    pub fn protocol_version(self) -> ProtocolVersion {
+        match self {
+            DtlsVersion::Dtls1_2 => PROTOCOL_VERSION1_2,
+            DtlsVersion::Dtls1_3 => ProtocolVersion {
+                major: 254,
+                minor: 252,
+            },
+        }
+    }
+}
 
 /// PSKCallback is called once we have the remote's psk_identity_hint.
 /// If the remote provided none it will be nil
@@ -369,6 +661,7 @@ pub enum ExtendedMasterSecretType {
 
 impl ConfigBuilder {
     fn offered_cipher_suites(&self, is_client: bool) -> Result<Vec<Box<dyn CipherSuite>>> {
+        let legacy_suites = self.configured_suites(false);
         // a client offers one family or the other, while a server can only offer them if
         // it actually holds a certificate.
         let exclude_certificate = if is_client {
@@ -377,10 +670,30 @@ impl ConfigBuilder {
             self.certificates.is_empty()
         };
 
-        parse_cipher_suites(&self.cipher_suites, self.psk.is_none(), exclude_certificate)
+        parse_cipher_suites(&legacy_suites, self.psk.is_none(), exclude_certificate)
+    }
+
+    /// The cipher suites of the configured list that belong to one family: the TLS 1.3
+    /// suites, or the others.
+    fn configured_suites(&self, tls13: bool) -> Vec<CipherSuiteId> {
+        self.cipher_suites
+            .iter()
+            .copied()
+            .filter(|suite| suite.is_tls13() == tls13)
+            .collect()
     }
 
     fn validate(&self, is_client: bool) -> Result<()> {
+        if self.min_version > self.max_version {
+            return Err(Error::ErrUnsupportedProtocolVersion);
+        }
+        // A pre-shared key means the DTLS 1.2 PSK suites: a client with one offers nothing
+        // else, and a server with nothing else has no certificate for DTLS 1.3.
+        let psk_only = self.psk.is_some() && (is_client || self.certificates.is_empty());
+        if psk_only && self.min_version == DtlsVersion::Dtls1_3 {
+            return Err(Error::ErrUnsupportedProtocolVersion);
+        }
+
         if is_client && self.psk.is_some() && self.psk_identity_hint.is_none() {
             return Err(Error::ErrPskAndIdentityMustBeSetForClient);
         }
@@ -467,17 +780,20 @@ impl ConfigBuilder {
             local_cipher_suites.retain(|(id, is_psk)| {
                 *is_psk
                     || local_signature_schemes.iter().any(|algorithm| {
-                        let signature_family_matches =
-                            match id {
-                                CipherSuiteId::Tls_Ecdhe_Rsa_With_Aes_128_Gcm_Sha256
-                                | CipherSuiteId::Tls_Ecdhe_Rsa_With_Aes_256_Cbc_Sha
-                                | CipherSuiteId::Tls_Ecdhe_Rsa_With_ChaCha20_Poly1305_Sha256 => {
-                                    algorithm.signature
-                                        == crate::signature_hash_algorithm::SignatureAlgorithm::Rsa
-                                }
-                                _ => algorithm.signature
-                                    == crate::signature_hash_algorithm::SignatureAlgorithm::Ecdsa,
-                            };
+                        let signature_family_matches = match id {
+                            CipherSuiteId::Tls_Ecdhe_Rsa_With_Aes_128_Gcm_Sha256
+                            | CipherSuiteId::Tls_Ecdhe_Rsa_With_Aes_256_Cbc_Sha
+                            | CipherSuiteId::Tls_Ecdhe_Rsa_With_ChaCha20_Poly1305_Sha256 => {
+                                algorithm.signature.is_rsa()
+                            }
+                            // RFC 8422 5.1.1, 5.2: an ECDHE_ECDSA suite takes a
+                            // certificate with an ECDSA- or EdDSA-capable key.
+                            _ => matches!(
+                                algorithm.signature,
+                                crate::signature_hash_algorithm::SignatureAlgorithm::Ecdsa
+                                    | crate::signature_hash_algorithm::SignatureAlgorithm::Ed25519
+                            ),
+                        };
                         signature_family_matches
                             && algorithm
                                 .crypto_scheme()
@@ -495,6 +811,57 @@ impl ConfigBuilder {
         let local_cipher_suites: Vec<CipherSuiteId> =
             local_cipher_suites.into_iter().map(|(id, _)| id).collect();
 
+        // DTLS 1.3: its own suites (the configured ones of that family, or the defaults),
+        // certificates only. Without a usable suite, group or signature scheme the highest
+        // version is DTLS 1.2.
+        let psk_only = self.psk.is_some() && (is_client || self.certificates.is_empty());
+        let mut max_version = self.max_version;
+        let mut local_tls13_cipher_suites = vec![];
+        if max_version == DtlsVersion::Dtls1_3 && !psk_only {
+            // A configured list is exact: without a TLS 1.3 suite in it there is no
+            // DTLS 1.3.
+            local_tls13_cipher_suites = if self.cipher_suites.is_empty() {
+                crate::dtls13::suite::DEFAULT_SUITES.to_vec()
+            } else {
+                self.configured_suites(true)
+            };
+            local_tls13_cipher_suites.retain(|suite| suite.supported_by(crypto_provider.crypto()));
+            let signs = local_signature_schemes.iter().any(|scheme| {
+                scheme.is_tls13_signature()
+                    && (is_client
+                        || self
+                            .certificates
+                            .first()
+                            .is_some_and(|c| scheme.is_compatible(&c.private_key)))
+            });
+            if local_tls13_cipher_suites.is_empty() || local_named_curves.is_empty() || !signs {
+                local_tls13_cipher_suites.clear();
+            }
+        }
+        if local_tls13_cipher_suites.is_empty() {
+            if self.min_version == DtlsVersion::Dtls1_3 {
+                return Err(Error::ErrNoAvailableCipherSuites);
+            }
+            max_version = DtlsVersion::Dtls1_2;
+        }
+        // The groups of DTLS 1.3: the hybrid with ML-KEM first where the provider has it
+        // (and the configuration does not switch it off), then the curves.
+        let mut local_tls13_groups = vec![];
+        if self.post_quantum_key_share && hybrid_key_share_works(crypto_provider.crypto()) {
+            local_tls13_groups.push(NamedCurve::X25519MlKem768);
+        }
+        local_tls13_groups.extend_from_slice(&local_named_curves);
+
+        // A list with TLS 1.3 suites only leaves nothing to negotiate DTLS 1.2 with.
+        let min_version = if max_version == DtlsVersion::Dtls1_3
+            && !self.cipher_suites.is_empty()
+            && self.configured_suites(false).is_empty()
+        {
+            DtlsVersion::Dtls1_3
+        } else {
+            self.min_version
+        };
+
         let retransmit_interval = if self.flight_interval != Duration::from_secs(0) {
             self.flight_interval
         } else {
@@ -502,6 +869,22 @@ impl ConfigBuilder {
         };
 
         let maximum_transmission_unit = if self.mtu == 0 { DEFAULT_MTU } else { self.mtu };
+        if self.connection_id.is_some_and(|length| length > 255) {
+            return Err(Error::Other(
+                "a connection id is at most 255 bytes".to_owned(),
+            ));
+        }
+        if maximum_transmission_unit < MINIMUM_MTU {
+            return Err(Error::Other(format!(
+                "mtu {maximum_transmission_unit} is below the minimum of {MINIMUM_MTU}"
+            )));
+        }
+        let maximum_retransmit_interval = self.maximum_flight_interval.max(retransmit_interval);
+        if self.hello_verify_request_version != PROTOCOL_VERSION1_0
+            && self.hello_verify_request_version != PROTOCOL_VERSION1_2
+        {
+            return Err(Error::ErrUnsupportedProtocolVersion);
+        }
 
         // `..Default::default()` used to supply this; when P7 replaced that with an explicit
         // field list it wrote `0`, which means *no retransmits are permitted at all*. The very
@@ -516,6 +899,12 @@ impl ConfigBuilder {
 
         let replay_protection_window = if self.replay_protection_window == 0 {
             DEFAULT_REPLAY_PROTECTION_WINDOW
+        } else if self.replay_protection_window < MINIMUM_REPLAY_PROTECTION_WINDOW {
+            warn!(
+                "replay protection window {} raised to the minimum of {}",
+                self.replay_protection_window, MINIMUM_REPLAY_PROTECTION_WINDOW
+            );
+            MINIMUM_REPLAY_PROTECTION_WINDOW
         } else {
             self.replay_protection_window
         };
@@ -569,6 +958,26 @@ impl ConfigBuilder {
             None
         };
 
+        // DTLS 1.3 pre-shared keys: a server's tickets, and the external PSKs (RFC 8446
+        // section 4.2.11: an identity of at least one byte).
+        let ticket_issuer = if !is_client && self.session_tickets > 0 {
+            Some(Arc::new(crate::dtls13::psk::TicketIssuer::new(
+                crypto_provider.as_ref(),
+                self.session_tickets,
+                self.session_ticket_lifetime,
+            )?))
+        } else {
+            None
+        };
+        let external_psks = std::mem::take(&mut self.external_psks);
+        if external_psks.iter().any(|psk| {
+            psk.identity.is_empty() || psk.identity.len() > 0xffff || psk.secret.is_empty()
+        }) {
+            return Err(Error::Other(
+                "an external PSK has an identity of 1 to 65535 bytes and a secret".to_owned(),
+            ));
+        }
+
         // Fields not derived from the builder come from `HandshakeConfig::new`, which also
         // supplies `crypto_provider`.
         Ok(HandshakeConfig {
@@ -580,6 +989,8 @@ impl ConfigBuilder {
             local_signature_schemes,
             extended_master_secret: self.extended_master_secret,
             local_srtp_protection_profiles: self.srtp_protection_profiles,
+            use_srtp_optional: self.use_srtp_optional,
+            use_srtp_required: self.use_srtp_required,
             server_name,
             client_auth: self.client_auth,
             local_certificates: self.certificates,
@@ -591,6 +1002,34 @@ impl ConfigBuilder {
             server_cert_verifier,
             client_cert_verifier,
             retransmit_interval,
+            maximum_retransmit_interval,
+            handshake_timeout: self.handshake_timeout,
+            cookie_exchange: self.cookie_exchange,
+            hello_verify_request_version: self.hello_verify_request_version,
+            early_data_retransmit: self.early_data_retransmit,
+            min_version,
+            max_version,
+            local_tls13_cipher_suites,
+            local_tls13_groups,
+            // The extension belongs to both versions (RFC 9146 for DTLS 1.2, RFC 9147
+            // section 9 for 1.3). A hello carries it even when no connection id is asked for
+            // (RFC 9147 section 5.1: so that the peer can ask for one), unless that is
+            // switched off.
+            connection_id: self.connection_id,
+            connection_id_migration: self.connection_id_migration,
+            invalid_record_limit: self.invalid_record_limit,
+            ticket_issuer,
+            session_store: if is_client {
+                self.session_store.take()
+            } else {
+                None
+            },
+            external_psks,
+            psk_without_key_exchange: self.psk_without_key_exchange,
+            post_handshake_auth: is_client && self.post_handshake_auth,
+            max_early_data: if is_client { 0 } else { self.max_early_data },
+            #[cfg(test)]
+            psk_modes_for_test: None,
             initial_epoch: 0,
             maximum_transmission_unit,
             maximum_retransmit_number,
@@ -639,6 +1078,8 @@ pub struct HandshakeConfig {
     pub(crate) local_signature_schemes: Vec<SignatureHashAlgorithm>, // Available signature schemes
     pub(crate) extended_master_secret: ExtendedMasterSecretType, // Policy for the Extended Master Support extension
     pub(crate) local_srtp_protection_profiles: Vec<SrtpProtectionProfile>, // Available SRTPProtectionProfiles, if empty no SRTP support
+    pub(crate) use_srtp_optional: bool, // A client goes on when the server leaves use_srtp out
+    pub(crate) use_srtp_required: bool, // A server refuses a client it shares no SRTP profile with
     pub(crate) server_name: String,
     pub(crate) client_auth: ClientAuthType, // If we are a client should we request a client certificate
     pub(crate) local_certificates: Vec<Certificate>,
@@ -650,6 +1091,40 @@ pub struct HandshakeConfig {
     pub(crate) server_cert_verifier: Option<Arc<dyn ServerCertVerifier>>,
     pub(crate) client_cert_verifier: Option<Arc<dyn ClientCertVerifier>>,
     pub(crate) retransmit_interval: Duration,
+    pub(crate) maximum_retransmit_interval: Duration,
+    pub(crate) handshake_timeout: Option<Duration>,
+    pub(crate) cookie_exchange: bool,
+    pub(crate) hello_verify_request_version: ProtocolVersion,
+    pub(crate) early_data_retransmit: bool,
+    /// The lowest version negotiated.
+    pub(crate) min_version: DtlsVersion,
+    /// The highest version negotiated: DTLS 1.3 only when there is something to negotiate it
+    /// with (`local_tls13_cipher_suites`).
+    pub(crate) max_version: DtlsVersion,
+    /// The TLS 1.3 cipher suites, for DTLS 1.3. Empty when DTLS 1.3 is not negotiated.
+    pub(crate) local_tls13_cipher_suites: Vec<CipherSuiteId>,
+    /// The key exchange groups of DTLS 1.3, most preferred first: `local_named_curves`,
+    /// with X25519MLKEM768 in front where the provider has it.
+    pub(crate) local_tls13_groups: Vec<NamedCurve>,
+    /// The length of the connection ids this side asks its peer to send, if it uses the
+    /// connection_id extension at all.
+    pub(crate) connection_id: Option<usize>,
+    pub(crate) connection_id_migration: bool,
+    pub(crate) invalid_record_limit: Option<u64>,
+    /// DTLS 1.3 server: the tickets it issues and has accepted, if it issues any.
+    pub(crate) ticket_issuer: Option<Arc<crate::dtls13::psk::TicketIssuer>>,
+    /// DTLS 1.3 client: where it keeps tickets, if it resumes.
+    pub(crate) session_store: Option<Arc<dyn crate::session::SessionStore>>,
+    pub(crate) external_psks: Vec<crate::session::ExternalPsk>,
+    pub(crate) psk_without_key_exchange: bool,
+    /// DTLS 1.3 client: it offers post-handshake authentication.
+    pub(crate) post_handshake_auth: bool,
+    /// DTLS 1.3 server: the most 0-RTT data it takes with a ticket.
+    pub(crate) max_early_data: u32,
+    /// The PSK key exchange modes a client offers, in place of the configured ones: for the
+    /// tests of a peer that offers psk_ke alone.
+    #[cfg(test)]
+    pub(crate) psk_modes_for_test: Option<Vec<u8>>,
     pub(crate) initial_epoch: u16,
     pub(crate) maximum_transmission_unit: usize,
     pub(crate) maximum_retransmit_number: usize,
@@ -696,6 +1171,8 @@ impl HandshakeConfig {
             local_signature_schemes: vec![],
             extended_master_secret: ExtendedMasterSecretType::Disable,
             local_srtp_protection_profiles: vec![],
+            use_srtp_optional: false,
+            use_srtp_required: false,
             server_name: String::new(),
             client_auth: ClientAuthType::NoClientCert,
             local_certificates: vec![],
@@ -709,6 +1186,26 @@ impl HandshakeConfig {
             }),
             client_cert_verifier: None,
             retransmit_interval: std::time::Duration::from_secs(0),
+            maximum_retransmit_interval: MAXIMUM_RETRANSMIT_INTERVAL,
+            handshake_timeout: None,
+            cookie_exchange: true,
+            hello_verify_request_version: PROTOCOL_VERSION1_0,
+            early_data_retransmit: true,
+            min_version: DtlsVersion::Dtls1_2,
+            max_version: DtlsVersion::Dtls1_2,
+            local_tls13_cipher_suites: vec![],
+            local_tls13_groups: vec![],
+            connection_id: None,
+            connection_id_migration: false,
+            invalid_record_limit: None,
+            ticket_issuer: None,
+            session_store: None,
+            external_psks: vec![],
+            psk_without_key_exchange: false,
+            post_handshake_auth: false,
+            max_early_data: 0,
+            #[cfg(test)]
+            psk_modes_for_test: None,
             initial_epoch: 0,
             maximum_transmission_unit: DEFAULT_MTU,
             maximum_retransmit_number: DEFAULT_MAXIMUM_RETRANSMIT_NUMBER,
@@ -716,8 +1213,49 @@ impl HandshakeConfig {
         }
     }
 
+    /// This configuration with another initial value for the handshake retransmission
+    /// timer: for a caller that learns the round trip time of the path after the
+    /// configuration was built (ICE does), and sets the timer to 1.5 times it as RFC 9147
+    /// section 5.8.2 asks. The maximum the timer doubles to is raised to it if need be.
+    pub fn with_flight_interval(&self, flight_interval: std::time::Duration) -> Self {
+        let mut config = self.clone();
+        if !flight_interval.is_zero() {
+            config.retransmit_interval = flight_interval;
+            config.maximum_retransmit_interval =
+                config.maximum_retransmit_interval.max(flight_interval);
+        }
+        config
+    }
+
+    /// The initial value of the handshake retransmission timer.
+    pub fn flight_interval(&self) -> std::time::Duration {
+        self.retransmit_interval
+    }
+
     pub(crate) fn provider(&self) -> &Arc<dyn RTCCryptoProvider> {
         &self.crypto_provider
+    }
+
+    /// Whether DTLS 1.3 is negotiated at all.
+    pub(crate) fn supports_dtls13(&self) -> bool {
+        self.max_version == DtlsVersion::Dtls1_3
+    }
+
+    /// Whether DTLS 1.2 is negotiated at all.
+    pub(crate) fn supports_dtls12(&self) -> bool {
+        self.min_version == DtlsVersion::Dtls1_2
+    }
+
+    /// The connection id a hello of this side carries, if it uses the extension: random
+    /// bytes of the configured length, none for a length of zero.
+    pub(crate) fn connection_id_offer(&self) -> Option<Vec<u8>> {
+        let length = self.connection_id?;
+        let mut connection_id = vec![0u8; length];
+        self.crypto_provider
+            .random()
+            .fill(&mut connection_id)
+            .ok()?;
+        Some(connection_id)
     }
 
     pub(crate) fn get_certificate(&self, server_name: &str) -> Result<Certificate> {
@@ -755,4 +1293,27 @@ impl HandshakeConfig {
         // If nothing matches, return the first certificate.
         Ok(self.local_certificates[0].clone())
     }
+}
+
+/// Whether `crypto` can do both ends of the X25519MLKEM768 exchange: it says so, and one
+/// exchange made at once with it (a client share, the server's answer by encapsulation, the
+/// client's decapsulation) gives both sides the same secret. A provider that wraps another
+/// and passes `supports` through while leaving `key_exchange_respond` at its Diffie-Hellman
+/// default says yes and cannot answer a hybrid share; such a provider is not offered the
+/// group, rather than failing every handshake that picks it.
+fn hybrid_key_share_works(crypto: &dyn crypto::RTCCrypto) -> bool {
+    let algorithm = crypto::KeyExchangeAlgorithm::X25519MlKem768;
+    if !crypto.supports(crypto::CryptoAlgorithm::KeyExchange(algorithm)) {
+        return false;
+    }
+    let Ok(client) = crypto.start_key_exchange(algorithm) else {
+        return false;
+    };
+    let Ok((share, server_secret)) = crypto.key_exchange_respond(algorithm, client.public_key())
+    else {
+        return false;
+    };
+    client
+        .complete(&share)
+        .is_ok_and(|client_secret| client_secret.as_ref() == server_secret.as_ref())
 }

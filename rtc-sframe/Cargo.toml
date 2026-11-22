@@ -1,0 +1,29 @@
+[package]
+name = "rtc-sframe"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+description = "RTC SFrame (RFC 9605) in Rust"
+license.workspace = true
+documentation = "https://docs.rs/rtc-sframe"
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
+[features]
+default = ["crypto-ring"]
+crypto-ring = ["crypto/crypto-ring"]
+crypto-aws-lc-rs = ["crypto/crypto-aws-lc-rs"]
+
+[dependencies]
+crypto.workspace = true
+
+thiserror.workspace = true
+zeroize.workspace = true
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(fuzzing)'
+] }

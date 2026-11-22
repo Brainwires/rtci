@@ -7,12 +7,11 @@
 //!    back that offer, then call createOffer and have an "m=" section for the added track appear
 //!    in the generated offer."
 //!
-//! There are two variants, one per rollback entry point. Note these are NOT interchangeable at
-//! the same signaling state: the state machine only permits `SetLocal(rollback)` from
-//! `have-local-offer` and `SetRemote(rollback)` from `have-remote-offer`. So the polite peer in
-//! the classic glare position (it sent an offer and a remote offer collides) rolls back its own
-//! offer via `set_local_description`, whereas rolling back an already-applied remote offer uses
-//! `set_remote_description`.
+//! There are two variants, one per rollback entry point. Either method rolls back the pending
+//! offer, local or remote (RFC 9429 section 5.7; `tests/jsep_rollback.rs` crosses them): here
+//! the polite peer in the classic glare position (it sent an offer and a remote offer collides)
+//! rolls back its own offer via `set_local_description`, and an already-applied remote offer is
+//! rolled back via `set_remote_description`.
 
 use rtc::media_stream::MediaStreamTrack;
 use rtc::peer_connection::RTCPeerConnection;
@@ -158,6 +157,85 @@ fn polite_peer_glare_recovery_with_local_offer_rollback() {
         "follow-up offer must renegotiate the rolled-back local video track: {}",
         followup.sdp
     );
+}
+
+/// Perfect negotiation as W3C webrtc-pc writes it (`setRemoteDescription` in section 4.4.2,
+/// and the "perfect negotiation" example): the polite peer does not roll back itself, it applies the colliding offer, and
+/// `set_remote_description` rolls its own offer back first. The impolite peer's answer to
+/// the polite peer's discarded offer never comes; the polite peer's track resurfaces in its
+/// next offer, which the impolite peer answers.
+#[test]
+fn polite_peer_glare_recovery_with_the_implicit_rollback() {
+    let mut polite = media_pc();
+    polite
+        .add_track(track(RtpCodecKind::Video, "polite", 11111))
+        .unwrap();
+    let polite_offer = polite.create_offer(None).unwrap();
+    polite
+        .set_local_description(Instant::now(), polite_offer.clone())
+        .unwrap();
+    drain_events(&mut polite);
+
+    let mut impolite = media_pc();
+    impolite
+        .add_track(track(RtpCodecKind::Audio, "impolite", 22222))
+        .unwrap();
+    let impolite_offer = impolite.create_offer(None).unwrap();
+    impolite
+        .set_local_description(Instant::now(), impolite_offer.clone())
+        .unwrap();
+
+    // The polite peer applies the colliding offer with its own still pending.
+    polite
+        .set_remote_description(Instant::now(), impolite_offer)
+        .unwrap();
+    assert!(polite.pending_local_description().is_none());
+    assert!(polite.pending_remote_description().is_some());
+    let answer = polite.create_answer(None).unwrap();
+    assert_eq!(count_media(&answer, "audio"), 1, "{}", answer.sdp);
+    assert_eq!(count_media(&answer, "video"), 0, "{}", answer.sdp);
+    polite
+        .set_local_description(Instant::now(), answer.clone())
+        .unwrap();
+    drain_events(&mut polite);
+
+    // The impolite peer ignored the polite offer and takes the answer to its own.
+    impolite
+        .set_remote_description(Instant::now(), answer)
+        .unwrap();
+    drain_events(&mut impolite);
+
+    // Negotiation is still needed on the polite side: its video track was never negotiated.
+    let followup = polite.create_offer(None).unwrap();
+    assert_eq!(count_media(&followup, "audio"), 1, "{}", followup.sdp);
+    assert_eq!(count_media(&followup, "video"), 1, "{}", followup.sdp);
+    polite
+        .set_local_description(Instant::now(), followup.clone())
+        .unwrap();
+    impolite
+        .set_remote_description(Instant::now(), followup)
+        .unwrap();
+    let final_answer = impolite.create_answer(None).unwrap();
+    impolite
+        .set_local_description(Instant::now(), final_answer.clone())
+        .unwrap();
+    polite
+        .set_remote_description(Instant::now(), final_answer.clone())
+        .unwrap();
+    assert_eq!(
+        count_media(&final_answer, "audio"),
+        1,
+        "{}",
+        final_answer.sdp
+    );
+    assert_eq!(
+        count_media(&final_answer, "video"),
+        1,
+        "{}",
+        final_answer.sdp
+    );
+    assert!(polite.pending_local_description().is_none());
+    assert!(polite.pending_remote_description().is_none());
 }
 
 /// Rollback of an already-applied remote offer via `set_remote_description(rollback)`.

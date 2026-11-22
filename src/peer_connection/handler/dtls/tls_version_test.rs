@@ -15,6 +15,7 @@ fn handshake_completion_reports_the_tls_version_as_server_hello_hex() -> Result<
             certificates: vec![],
             answering_dtls_role: Default::default(),
             srtp_protection_profiles: vec![],
+            use_srtp_always: true,
             dtls_cipher_suites: vec![],
             allow_insecure_verification_algorithm: false,
             disable_certificate_fingerprint_verification: false,
@@ -30,9 +31,20 @@ fn handshake_completion_reports_the_tls_version_as_server_hello_hex() -> Result<
         SrtpProtectionProfile::Srtp_Aead_Aes_128_Gcm,
         &[vec![0x30u8, 0x82, 0x01, 0x0a]],
         Some("TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256".to_owned()),
+        Some(dtls::config::DtlsVersion::Dtls1_2),
     )?;
 
     assert_eq!(stats.transport.tls_version, "FEFD");
     assert_ne!(stats.transport.tls_version, "DTLS 1.2");
+
+    // DTLS 1.3 is {254, 252}, the value of supported_versions (RFC 9147 section 5.3).
+    let mut handler = DtlsHandler::new(&mut context, &mut stats);
+    handler.update_dtls_stats_from_profile(
+        SrtpProtectionProfile::Srtp_Aead_Aes_128_Gcm,
+        &[vec![0x30u8, 0x82, 0x01, 0x0a]],
+        Some("TLS_AES_128_GCM_SHA256".to_owned()),
+        Some(dtls::config::DtlsVersion::Dtls1_3),
+    )?;
+    assert_eq!(stats.transport.tls_version, "FEFC");
     Ok(())
 }

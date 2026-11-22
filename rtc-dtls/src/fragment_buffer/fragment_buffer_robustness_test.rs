@@ -144,3 +144,115 @@ fn a_repeated_message_is_taken_by_pop_stale() -> Result<()> {
     assert!(f.cache.is_empty());
     Ok(())
 }
+
+// ---------------------------------------------------------------------------------------------
+// RFC 6347 4.2.3: a receiver handles fragments whose ranges overlap, repeat or arrive in any
+// order. A peer that retransmits after its path MTU estimate changed sends exactly that.
+// ---------------------------------------------------------------------------------------------
+
+fn pattern(len: usize) -> Vec<u8> {
+    (0..len).map(|i| (i % 251) as u8).collect()
+}
+
+/// Pushes `ranges` of a 150-byte message (message sequence 0) and returns what `pop` gives.
+fn reassemble(ranges: &[(usize, usize)]) -> Result<(Vec<u8>, u16)> {
+    let message = pattern(150);
+    let mut f = FragmentBuffer::new();
+    for (index, (start, end)) in ranges.iter().enumerate() {
+        f.push(&fragment_record(
+            index as u8,
+            11,
+            150,
+            0,
+            *start as u32,
+            &message[*start..*end],
+        ))?;
+    }
+    f.pop()
+}
+
+#[test]
+fn overlapping_fragments_reassemble() -> Result<()> {
+    let (message, _) = reassemble(&[(0, 100), (50, 150)])?;
+    assert_eq!(&message[HANDSHAKE_HEADER_LENGTH..], pattern(150).as_slice());
+    // The header is rebuilt as for one unfragmented message (RFC 6347 4.2.6).
+    assert_eq!(
+        &message[..HANDSHAKE_HEADER_LENGTH],
+        &[11, 0, 0, 150, 0, 0, 0, 0, 0, 0, 0, 150]
+    );
+    Ok(())
+}
+
+#[test]
+fn fragments_in_any_order_with_repeats_and_containment_reassemble() -> Result<()> {
+    for ranges in [
+        // Reverse order.
+        vec![(100, 150), (50, 100), (0, 50)],
+        // A repeat of the first fragment.
+        vec![(0, 60), (0, 60), (60, 150)],
+        // One fragment inside another, then the rest.
+        vec![(0, 120), (30, 60), (110, 150)],
+        // Different fragmentations of the same message, interleaved.
+        vec![(0, 40), (75, 150), (25, 80)],
+    ] {
+        let (message, _) = reassemble(&ranges)?;
+        assert_eq!(
+            &message[HANDSHAKE_HEADER_LENGTH..],
+            pattern(150).as_slice(),
+            "{ranges:?}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn a_message_with_a_hole_is_not_complete() {
+    assert!(reassemble(&[(0, 50), (51, 150)]).is_err());
+    assert!(reassemble(&[(1, 150)]).is_err());
+    assert!(reassemble(&[(0, 149)]).is_err());
+}
+
+/// A fragment that claims bytes past the end of its message is not part of it.
+#[test]
+fn a_fragment_past_the_end_of_its_message_is_ignored() -> Result<()> {
+    let message = pattern(150);
+    let mut f = FragmentBuffer::new();
+    // Offset 140, 20 bytes, of a 150-byte message.
+    f.push(&fragment_record(0, 11, 150, 0, 140, &[0xee; 20]))?;
+    f.push(&fragment_record(1, 11, 150, 0, 0, &message[..100]))?;
+    assert!(f.pop().is_err());
+    f.push(&fragment_record(2, 11, 150, 0, 100, &message[100..]))?;
+    let (reassembled, _) = f.pop()?;
+    assert_eq!(&reassembled[HANDSHAKE_HEADER_LENGTH..], message.as_slice());
+    Ok(())
+}
+
+/// A forged fragment that overlaps the genuine ones with other bytes must not corrupt or block
+/// the message, whether it arrives before or after them.
+#[test]
+fn a_conflicting_overlapping_fragment_does_not_corrupt_the_message() -> Result<()> {
+    let message = pattern(150);
+    for forged_first in [true, false] {
+        let mut f = FragmentBuffer::new();
+        let mut sequence = 0u8;
+        let mut push = |f: &mut FragmentBuffer, offset: usize, data: &[u8]| {
+            sequence += 1;
+            f.push(&fragment_record(sequence, 11, 150, 0, offset as u32, data))
+        };
+        if forged_first {
+            push(&mut f, 40, &[0xee; 20])?;
+        }
+        push(&mut f, 0, &message[..100])?;
+        push(&mut f, 50, &message[50..])?;
+        if !forged_first {
+            push(&mut f, 40, &[0xee; 20])?;
+        }
+        let (reassembled, _) = f.pop()?;
+        assert_eq!(
+            &reassembled[HANDSHAKE_HEADER_LENGTH..],
+            message.as_slice(),
+            "forged first: {forged_first}"
+        );
+    }
+    Ok(())
+}

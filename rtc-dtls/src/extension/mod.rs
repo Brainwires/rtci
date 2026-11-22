@@ -84,12 +84,61 @@ pub enum Extension {
     UseExtendedMasterSecret(ExtensionUseExtendedMasterSecret),
     /// The renegotiation info extension.
     RenegotiationInfo(ExtensionRenegotiationInfo),
+    /// An extension this crate does not implement, or one of a known type whose contents did
+    /// not parse: kept with its type, so a hello can be checked for extensions that were not
+    /// offered (RFC 5246 7.4.1.4), and otherwise ignored.
+    Unknown {
+        /// The extension type code point.
+        extension_type: u16,
+        /// The extension_data, as received.
+        data: Vec<u8>,
+    },
 }
 
+/// The `connection_id` extension type (RFC 9146 section 3, RFC 9147 section 9).
+pub(crate) const EXTENSION_CONNECTION_ID: u16 = 54;
+
 impl Extension {
+    /// A `connection_id` extension (RFC 9146 section 3): `opaque cid<0..2^8-1>`, the
+    /// connection id the sender wants in the records it receives.
+    pub(crate) fn connection_id(connection_id: &[u8]) -> Self {
+        let mut data = vec![connection_id.len() as u8];
+        data.extend_from_slice(connection_id);
+        Extension::Unknown {
+            extension_type: EXTENSION_CONNECTION_ID,
+            data,
+        }
+    }
+
+    /// The connection id of a `connection_id` extension: `None` for another extension,
+    /// an error when its contents are not one length-prefixed connection id.
+    pub(crate) fn as_connection_id(&self) -> Option<Result<&[u8]>> {
+        match self {
+            Extension::Unknown {
+                extension_type: EXTENSION_CONNECTION_ID,
+                data,
+            } => Some(match data.split_first() {
+                Some((length, connection_id)) if usize::from(*length) == connection_id.len() => {
+                    Ok(connection_id)
+                }
+                _ => Err(Error::Other("malformed connection_id extension".to_owned())),
+            }),
+            _ => None,
+        }
+    }
+
+    /// The extension type code point this value is carried under.
+    pub fn extension_type(&self) -> u16 {
+        match self {
+            Extension::Unknown { extension_type, .. } => *extension_type,
+            known => known.extension_value() as u16,
+        }
+    }
+
     /// The extension type this value is carried under.
     pub fn extension_value(&self) -> ExtensionValue {
         match self {
+            Extension::Unknown { .. } => ExtensionValue::Unsupported,
             Extension::ServerName(ext) => ext.extension_value(),
             Extension::SupportedEllipticCurves(ext) => ext.extension_value(),
             Extension::SupportedPointFormats(ext) => ext.extension_value(),
@@ -112,6 +161,7 @@ impl Extension {
             Extension::UseSrtp(ext) => ext.size(),
             Extension::UseExtendedMasterSecret(ext) => ext.size(),
             Extension::RenegotiationInfo(ext) => ext.size(),
+            Extension::Unknown { data, .. } => 2 + data.len(),
         };
 
         len
@@ -123,8 +173,13 @@ impl Extension {
     ///
     /// Fails on a write error, or if a field exceeds the length its wire format allows.
     pub fn marshal<W: Write>(&self, writer: &mut W) -> Result<()> {
-        writer.write_u16::<BigEndian>(self.extension_value() as u16)?;
+        writer.write_u16::<BigEndian>(self.extension_type())?;
         match self {
+            Extension::Unknown { data, .. } => {
+                writer.write_u16::<BigEndian>(data.len() as u16)?;
+                writer.write_all(data)?;
+                Ok(writer.flush()?)
+            }
             Extension::ServerName(ext) => ext.marshal(writer),
             Extension::SupportedEllipticCurves(ext) => ext.marshal(writer),
             Extension::SupportedPointFormats(ext) => ext.marshal(writer),
@@ -167,4 +222,65 @@ impl Extension {
             _ => Err(Error::ErrInvalidExtensionType),
         }
     }
+}
+
+/// Decodes the extensions that may end a ClientHello or ServerHello (RFC 5246 7.4.1.2,
+/// 7.4.1.3): either nothing at all (the hello ends after the compression methods) or a 2-byte
+/// length followed by exactly that many bytes of extensions. `reader` must end where the hello
+/// ends.
+///
+/// An extension of a type this crate does not implement, or whose contents do not parse, is
+/// returned as [`Extension::Unknown`].
+///
+/// # Errors
+///
+/// Fails if the block is truncated, is followed by further bytes, or holds two extensions of
+/// one type (RFC 5246 7.4.1.4).
+pub(crate) fn unmarshal_hello_extensions<R: Read>(reader: &mut R) -> Result<Vec<Extension>> {
+    let mut rest = vec![];
+    reader.read_to_end(&mut rest)?;
+    if rest.is_empty() {
+        return Ok(vec![]);
+    }
+    if rest.len() < 2 {
+        return Err(Error::ErrBufferTooSmall);
+    }
+    let block = &rest[2..];
+    if u16::from_be_bytes([rest[0], rest[1]]) as usize != block.len() {
+        return Err(Error::ErrLengthMismatch);
+    }
+
+    let mut extensions = vec![];
+    let mut seen: Vec<u16> = vec![];
+    let mut offset = 0;
+    while offset < block.len() {
+        if offset + 4 > block.len() {
+            return Err(Error::ErrBufferTooSmall);
+        }
+        let extension_type = u16::from_be_bytes([block[offset], block[offset + 1]]);
+        let data_len = u16::from_be_bytes([block[offset + 2], block[offset + 3]]) as usize;
+        let end = offset + 4 + data_len;
+        if end > block.len() {
+            return Err(Error::ErrBufferTooSmall);
+        }
+        if seen.contains(&extension_type) {
+            return Err(Error::ErrDuplicateExtension);
+        }
+        seen.push(extension_type);
+
+        let mut extension_reader = &block[offset..end];
+        match Extension::unmarshal(&mut extension_reader) {
+            Ok(extension) => extensions.push(extension),
+            Err(err) => {
+                log::debug!("extension type {extension_type} kept unparsed: {err}");
+                extensions.push(Extension::Unknown {
+                    extension_type,
+                    data: block[offset + 4..end].to_vec(),
+                });
+            }
+        }
+        offset = end;
+    }
+
+    Ok(extensions)
 }

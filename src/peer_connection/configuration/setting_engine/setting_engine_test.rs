@@ -27,10 +27,16 @@ fn pc_with(setting_engine: SettingEngine) -> crate::peer_connection::RTCPeerConn
 /// An offer with an audio and a video section, from a peer with `setting_engine`.
 fn offer_with(setting_engine: SettingEngine) -> String {
     let mut pc = pc_with(setting_engine);
-    pc.add_transceiver_from_kind(RtpCodecKind::Audio, None)
-        .expect("audio");
-    pc.add_transceiver_from_kind(RtpCodecKind::Video, None)
-        .expect("video");
+    pc.add_transceiver_from_kind(
+        RtpCodecKind::Audio,
+        Some(crate::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+    )
+    .expect("audio");
+    pc.add_transceiver_from_kind(
+        RtpCodecKind::Video,
+        Some(crate::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+    )
+    .expect("video");
     pc.create_offer(None).expect("offer").sdp
 }
 
@@ -43,10 +49,8 @@ fn test_setting_engine_defaults() {
     assert!(!s.disable_certificate_fingerprint_verification);
     assert!(!s.allow_insecure_verification_algorithm);
     assert_eq!(s.answering_dtls_role, RTCDtlsRole::Unspecified);
-    assert_eq!(
-        s.data_channel.dcep_handshake_timeout,
-        Some(Duration::from_secs(30))
-    );
+    // RFC 8832 has no DCEP handshake timeout.
+    assert_eq!(s.data_channel.dcep_handshake_timeout, None);
     assert_eq!(s.multicast_dns.timeout, Some(Duration::from_secs(10)));
     assert_eq!(s.multicast_dns.mode, MulticastDnsMode::QueryOnly);
     assert_eq!(s.replay_protection.dtls, 0);
@@ -150,7 +154,10 @@ fn test_answering_dtls_role_in_answer() {
     ] {
         let mut offerer = pc_with(SettingEngine::default());
         offerer
-            .add_transceiver_from_kind(RtpCodecKind::Video, None)
+            .add_transceiver_from_kind(
+                RtpCodecKind::Video,
+                Some(crate::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+            )
             .expect("video");
         let offer = offerer.create_offer(None).expect("offer");
 
@@ -260,7 +267,7 @@ fn test_set_sctp_parameters() {
     assert_eq!(s.sctp_max_message_size.as_usize(), 1024);
     assert_eq!(s.sctp_max_receive_buffer_size, Some(4096));
     assert_eq!(s.sctp_mtu, Some(1100));
-    assert!(s.sctp_weighted_fair_queueing);
+    assert_eq!(s.sctp_weighted_fair_queueing, Some(true));
     assert_eq!(s.data_channel.dcep_handshake_timeout, None);
 
     // A bound past the implementation ceiling, and no bound at all, both resolve to the ceiling.

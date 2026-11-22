@@ -21,6 +21,9 @@ use shared::{
 
 use bytes::{Buf, BufMut, Bytes};
 
+/// The RTP header validity checks of RFC 3550 Appendix A.1, on raw bytes.
+pub mod validity;
+
 /// The length of the extension-profile and length fields that precede header extensions.
 pub const HEADER_LENGTH: usize = 4;
 /// Bit offset of the version field in the first header octet.
@@ -40,8 +43,62 @@ pub const EXTENSION_PROFILE_ONE_BYTE: u16 = 0xBEDE;
 /// Extension profile `0x1000`, which selects two-byte header extension ids, allowing ids
 /// above 14.
 pub const EXTENSION_PROFILE_TWO_BYTE: u16 = 0x1000;
+/// The bits of "defined by profile" that select the two-byte form. The low four bits are
+/// `appbits`, which a receiver ignores ([RFC 8285] section 4.3).
+///
+/// [RFC 8285]: https://datatracker.ietf.org/doc/html/rfc8285
+pub const EXTENSION_PROFILE_TWO_BYTE_MASK: u16 = 0xFFF0;
 /// Extension id 15, reserved by the RFC and never assigned.
 pub const EXTENSION_ID_RESERVED: u8 = 0xF;
+/// The RTP version this crate reads and writes (RFC 3550 section 5.1).
+pub const RTP_VERSION: u8 = 2;
+/// The highest id the one-byte form can carry (RFC 8285 section 4.2).
+pub const ONE_BYTE_EXTENSION_MAX_ID: u8 = 14;
+/// The longest element the one-byte form can carry, in bytes.
+pub const ONE_BYTE_EXTENSION_MAX_LEN: usize = 16;
+/// The longest element the two-byte form can carry, in bytes.
+pub const TWO_BYTE_EXTENSION_MAX_LEN: usize = 255;
+
+/// The form of a header-extension block, as its "defined by profile" field selects it.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum ExtensionForm {
+    /// RFC 8285 one-byte form (`0xBEDE`): ids 1 to 14, 1 to 16 bytes each.
+    OneByte,
+    /// RFC 8285 two-byte form (`0x100` and four `appbits`): ids 1 to 255, 0 to 255 bytes each.
+    TwoByte,
+    /// Any other profile: one opaque RFC 3550 section 5.3.1 extension, kept under id 0.
+    Rfc3550,
+}
+
+impl ExtensionForm {
+    /// The form a "defined by profile" value selects. The two-byte form is recognised whatever
+    /// its `appbits` are (RFC 8285 section 4.3: the receiver ignores them).
+    pub fn of_profile(extension_profile: u16) -> Self {
+        if extension_profile == EXTENSION_PROFILE_ONE_BYTE {
+            ExtensionForm::OneByte
+        } else if extension_profile & EXTENSION_PROFILE_TWO_BYTE_MASK == EXTENSION_PROFILE_TWO_BYTE
+        {
+            ExtensionForm::TwoByte
+        } else {
+            ExtensionForm::Rfc3550
+        }
+    }
+
+    /// Bytes of element header in this form: the id / length byte or bytes.
+    fn element_header_len(self) -> usize {
+        match self {
+            ExtensionForm::OneByte => 1,
+            ExtensionForm::TwoByte => 2,
+            ExtensionForm::Rfc3550 => 0,
+        }
+    }
+
+    /// Whether an element with this id and length can be written in the one-byte form.
+    fn one_byte_fits(id: u8, payload_len: usize) -> bool {
+        (1..=ONE_BYTE_EXTENSION_MAX_ID).contains(&id)
+            && (1..=ONE_BYTE_EXTENSION_MAX_LEN).contains(&payload_len)
+    }
+}
 /// Bit mask of the CSRC count field.
 pub const CC_MASK: u8 = 0xF;
 /// Bit offset of the marker bit.
@@ -78,9 +135,10 @@ pub struct Extension {
 
 /// Header represents an RTP packet header
 /// NOTE: PayloadOffset is populated by Marshal/Unmarshal and should not be modified
-#[derive(Debug, Eq, PartialEq, Default, Clone)]
+#[derive(Debug, Eq, PartialEq, Clone)]
 pub struct Header {
-    /// The RTP version, always 2.
+    /// The RTP version, always 2. [`Header::default`] sets it; marshal and unmarshal refuse any
+    /// other value (RFC 3550 section 5.1).
     pub version: u8,
     /// Whether the payload is followed by padding octets, the last giving the padding length.
     pub padding: bool,
@@ -112,6 +170,27 @@ pub struct Header {
     pub padding_size: u8,
 }
 
+impl Default for Header {
+    /// A header of version 2 with every other field zero or empty.
+    fn default() -> Self {
+        Header {
+            version: RTP_VERSION,
+            padding: false,
+            extension: false,
+            marker: false,
+            payload_type: 0,
+            sequence_number: 0,
+            timestamp: 0,
+            ssrc: 0,
+            csrc: Vec::new(),
+            extension_profile: 0,
+            extensions: Vec::new(),
+            extensions_padding: 0,
+            padding_size: 0,
+        }
+    }
+}
+
 impl Unmarshal for Header {
     /// Unmarshal parses the passed byte slice and stores the result in the Header this method is called upon
     fn unmarshal<B>(raw_packet: &mut B) -> Result<Self>
@@ -139,6 +218,10 @@ impl Unmarshal for Header {
          */
         let b0 = raw_packet.get_u8();
         let version = b0 >> VERSION_SHIFT & VERSION_MASK;
+        if version != RTP_VERSION {
+            // RFC 3550 section 5.1 and Appendix A.1: anything else is not an RTP packet.
+            return Err(Error::BadVersion);
+        }
         let padding = (b0 >> PADDING_SHIFT & PADDING_MASK) > 0;
         let extension = (b0 >> EXTENSION_SHIFT & EXTENSION_MASK) > 0;
         let cc = (b0 & CC_MASK) as usize;
@@ -181,9 +264,9 @@ impl Unmarshal for Header {
             // wire: each item is bounded by the block, not by the rest of the packet.
             let mut block = raw_packet.copy_to_bytes(extension_length);
             let mut extensions = vec![];
-            match extension_profile {
+            match ExtensionForm::of_profile(extension_profile) {
                 // RFC 8285 RTP One Byte Header Extension
-                EXTENSION_PROFILE_ONE_BYTE => {
+                ExtensionForm::OneByte => {
                     while block.has_remaining() {
                         let b = block.get_u8();
                         if b == 0x00 {
@@ -195,9 +278,11 @@ impl Unmarshal for Header {
                         let extid = b >> 4;
                         let len = ((b & (0xFF ^ 0xF0)) + 1) as usize;
 
-                        if extid == EXTENSION_ID_RESERVED {
-                            // RFC 8285 §4.2: processing stops at ID 15 and the rest of the
-                            // block is ignored. It is still part of the header.
+                        if extid == EXTENSION_ID_RESERVED || extid == 0 {
+                            // RFC 8285 section 4.2: processing stops at ID 15 and the rest of
+                            // the block is ignored. Section 4.1.2: the same for ID 0 with a
+                            // non-zero length, whose length is ignored. The elements before it
+                            // are kept, and the rest is still part of the header.
                             extensions_padding += 1 + block.remaining();
                             break;
                         }
@@ -212,8 +297,8 @@ impl Unmarshal for Header {
                         });
                     }
                 }
-                // RFC 8285 RTP Two Byte Header Extension
-                EXTENSION_PROFILE_TWO_BYTE => {
+                // RFC 8285 RTP Two Byte Header Extension, whatever its appbits (section 4.3)
+                ExtensionForm::TwoByte => {
                     while block.has_remaining() {
                         let b = block.get_u8();
                         if b == 0x00 {
@@ -241,7 +326,7 @@ impl Unmarshal for Header {
                     }
                 }
                 // RFC3550 Extension
-                _ => {
+                ExtensionForm::Rfc3550 => {
                     extensions.push(Extension {
                         id: 0,
                         payload: block,
@@ -334,6 +419,15 @@ impl Marshal for Header {
         if self.csrc.len() > 15 {
             return Err(Error::TooManyCSRCs(self.csrc.len())); // reject early to avoid truncating CC
         }
+        // RFC 3550 section 5.1: the version is 2. Any other value would be read by the peer as
+        // STUN or DTLS (RFC 7983), and a value above 3 does not fit the field.
+        if self.version != RTP_VERSION {
+            return Err(Error::BadVersion);
+        }
+        // The payload type is a 7-bit field; a larger value would set the marker bit.
+        if self.payload_type > PT_MASK {
+            return Err(Error::WrongPayloadType);
+        }
         let mut b0 = (self.version << VERSION_SHIFT) | self.csrc.len() as u8;
         if self.padding {
             b0 |= 1 << PADDING_SHIFT;
@@ -362,24 +456,26 @@ impl Marshal for Header {
         if self.extension {
             buf.put_u16(self.extension_profile);
 
-            // extension_payload_len computed once at the top of this function.
-            // It is narrowed to u16 below, so reject anything that would truncate.
-            if extension_payload_len > u16::MAX as usize {
-                return Err(Error::ExtensionPayloadTotalOverflow(extension_payload_len));
+            // extension_payload_len computed once at the top of this function. The block is
+            // as long as `marshal_size` says: the elements, then `extensions_padding` (what a
+            // parsed block had after its elements, an ignored tail after ID 0 or 15 included),
+            // rounded up to 32-bit words. A block over 65535 bytes fits no datagram and is
+            // refused, as it always was.
+            let padded_len = extension_payload_len + self.extensions_padding;
+            if padded_len > u16::MAX as usize {
+                return Err(Error::ExtensionPayloadTotalOverflow(padded_len));
             }
-            if self.extension_profile != EXTENSION_PROFILE_ONE_BYTE
-                && self.extension_profile != EXTENSION_PROFILE_TWO_BYTE
-                && !extension_payload_len.is_multiple_of(4)
-            {
+            let form = ExtensionForm::of_profile(self.extension_profile);
+            if form == ExtensionForm::Rfc3550 && !extension_payload_len.is_multiple_of(4) {
                 //the payload must be in 32-bit words.
                 return Err(Error::HeaderExtensionPayloadNot32BitWords);
             }
-            let extension_payload_size = (extension_payload_len as u16).div_ceil(4);
+            let extension_payload_size = padded_len.div_ceil(4) as u16;
             buf.put_u16(extension_payload_size);
 
-            match self.extension_profile {
+            match form {
                 // RFC 8285 RTP One Byte Header Extension
-                EXTENSION_PROFILE_ONE_BYTE => {
+                ExtensionForm::OneByte => {
                     for extension in &self.extensions {
                         // validate each extension before writing
                         // RFC 8285 §4.2: IDs 0 and 15 are reserved.
@@ -400,7 +496,7 @@ impl Marshal for Header {
                     }
                 }
                 // RFC 8285 RTP Two Byte Header Extension
-                EXTENSION_PROFILE_TWO_BYTE => {
+                ExtensionForm::TwoByte => {
                     for extension in &self.extensions {
                         // RFC 8285 §4.3: ID 0 is padding in two-byte format;
                         // marshaling it as an extension would confuse receivers.
@@ -421,7 +517,7 @@ impl Marshal for Header {
                     }
                 }
                 // RFC3550 Extension
-                _ => {
+                ExtensionForm::Rfc3550 => {
                     if self.extensions.len() != 1 {
                         return Err(Error::ErrRfc3550headerIdrange);
                     }
@@ -457,100 +553,144 @@ impl Header {
             .sum();
 
         let profile_len = self.extensions.len()
-            * match self.extension_profile {
-                EXTENSION_PROFILE_ONE_BYTE => 1,
-                EXTENSION_PROFILE_TWO_BYTE => 2,
-                _ => 0,
-            };
+            * ExtensionForm::of_profile(self.extension_profile).element_header_len();
 
         payload_len + profile_len
     }
 
-    /// SetExtension sets an RTP header extension
+    /// The form of this header's extension block, or `None` when it has none.
+    pub fn extension_form(&self) -> Option<ExtensionForm> {
+        self.extension
+            .then(|| ExtensionForm::of_profile(self.extension_profile))
+    }
+
+    /// The padding that brings the extension block to a 32-bit boundary.
+    fn canonical_extensions_padding(&self) -> usize {
+        match ExtensionForm::of_profile(self.extension_profile) {
+            ExtensionForm::Rfc3550 => 0,
+            _ => (4 - self.get_extension_payload_len() % 4) % 4,
+        }
+    }
+
+    /// Sets an RTP header extension, keeping the form the header already has.
+    ///
+    /// A header that has no extension yet takes the one-byte form when the element fits it
+    /// (id 1 to 14, 1 to 16 bytes) and the two-byte form otherwise (RFC 8285 section 4.2: an
+    /// id above 14 is never sent in the one-byte form; section 4.1.2: the two-byte form is not
+    /// used when everything fits the one-byte form).
+    ///
+    /// A header that already has extensions keeps its form, because a stream carries one form
+    /// only unless `a=extmap-allow-mixed` was negotiated (RFC 8285 sections 4.1.2 and 6). Use
+    /// [`Header::set_extension_upgrading`] when mixing is allowed, or
+    /// [`Header::upgrade_to_two_byte`] on every packet of a stream that is two-byte throughout.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the id or the length does not fit the header's form, or no RFC 8285 form at
+    /// all (id 0 on a header without extensions, more than 255 bytes).
     pub fn set_extension(&mut self, id: u8, payload: Bytes) -> Result<()> {
-        let payload_len = payload.len() as isize;
-        if self.extension {
-            let extension_profile_len = match self.extension_profile {
-                EXTENSION_PROFILE_ONE_BYTE => {
-                    if !(1..=14).contains(&id) {
-                        return Err(Error::ErrRfc8285oneByteHeaderIdrange);
-                    }
-                    // RFC 8285 §4.2: payload must be 1–16 bytes.
-                    if payload_len == 0 || payload_len > 16 {
-                        return Err(Error::ErrRfc8285oneByteHeaderSize);
-                    }
-                    1
-                }
-                EXTENSION_PROFILE_TWO_BYTE => {
-                    if id < 1 {
-                        return Err(Error::ErrRfc8285twoByteHeaderIdrange);
-                    }
-                    if payload_len > 255 {
-                        return Err(Error::ErrRfc8285twoByteHeaderSize);
-                    }
-                    2
-                }
-                _ => {
-                    if id != 0 {
-                        return Err(Error::ErrRfc3550headerIdrange);
-                    }
-                    0
-                }
-            };
+        self.set_extension_in(id, payload, false)
+    }
 
-            let delta;
-            // Update existing if it exists else add new extension
-            if let Some(extension) = self
-                .extensions
-                .iter_mut()
-                .find(|extension| extension.id == id)
-            {
-                delta = payload_len - extension.payload.len() as isize;
-                extension.payload = payload;
-            } else {
-                delta = payload_len + extension_profile_len;
-                self.extensions.push(Extension { id, payload });
-            }
+    /// Sets an RTP header extension, converting a one-byte header to the two-byte form when the
+    /// element needs it (an id above 14, an empty element or one over 16 bytes).
+    ///
+    /// The conversion changes the form of this packet only. RFC 8285 section 4.1.2 lets a
+    /// stream mix the forms only when `a=extmap-allow-mixed` was negotiated (section 6), so
+    /// call this when it was, or when the element is set on every packet of the stream (the
+    /// stream is then two-byte throughout).
+    ///
+    /// # Errors
+    ///
+    /// Fails when the element fits neither form (id 0, more than 255 bytes), or the header
+    /// carries an RFC 3550 extension that is not RFC 8285.
+    pub fn set_extension_upgrading(&mut self, id: u8, payload: Bytes) -> Result<()> {
+        self.set_extension_in(id, payload, true)
+    }
 
-            match delta.cmp(&0) {
-                std::cmp::Ordering::Less => {
-                    self.extensions_padding =
-                        ((self.extensions_padding as isize - delta) % 4) as usize;
-                }
-                std::cmp::Ordering::Greater => {
-                    let extension_padding = (delta % 4) as usize;
-                    if self.extensions_padding < extension_padding {
-                        self.extensions_padding = (self.extensions_padding + 4) - extension_padding;
-                    } else {
-                        self.extensions_padding -= extension_padding
-                    }
-                }
-                _ => {}
+    /// Converts a one-byte extension block to the two-byte form, with `appbits` 0. Every
+    /// one-byte element is valid in the two-byte form (RFC 8285 section 4.3: one id space).
+    /// A header without extensions, or already two-byte, is left as it is.
+    ///
+    /// # Errors
+    ///
+    /// Fails for a header whose extension is not RFC 8285.
+    pub fn upgrade_to_two_byte(&mut self) -> Result<()> {
+        match self.extension_form() {
+            None | Some(ExtensionForm::TwoByte) => Ok(()),
+            Some(ExtensionForm::OneByte) => {
+                self.extension_profile = EXTENSION_PROFILE_TWO_BYTE;
+                self.extensions_padding = self.canonical_extensions_padding();
+                Ok(())
             }
+            Some(ExtensionForm::Rfc3550) => Err(Error::ErrRfc3550headerIdrange),
+        }
+    }
+
+    fn set_extension_in(&mut self, id: u8, payload: Bytes, upgrade: bool) -> Result<()> {
+        let payload_len = payload.len();
+        let form = match self.extension_form() {
+            Some(ExtensionForm::OneByte) => {
+                if ExtensionForm::one_byte_fits(id, payload_len) {
+                    ExtensionForm::OneByte
+                } else if upgrade && id != 0 && payload_len <= TWO_BYTE_EXTENSION_MAX_LEN {
+                    self.extension_profile = EXTENSION_PROFILE_TWO_BYTE;
+                    ExtensionForm::TwoByte
+                } else if !(1..=ONE_BYTE_EXTENSION_MAX_ID).contains(&id) {
+                    return Err(Error::ErrRfc8285oneByteHeaderIdrange);
+                } else {
+                    // RFC 8285 section 4.2: the element is 1 to 16 bytes.
+                    return Err(Error::ErrRfc8285oneByteHeaderSize);
+                }
+            }
+            Some(ExtensionForm::TwoByte) => {
+                if id < 1 {
+                    return Err(Error::ErrRfc8285twoByteHeaderIdrange);
+                }
+                if payload_len > TWO_BYTE_EXTENSION_MAX_LEN {
+                    return Err(Error::ErrRfc8285twoByteHeaderSize);
+                }
+                ExtensionForm::TwoByte
+            }
+            Some(ExtensionForm::Rfc3550) => {
+                if id != 0 {
+                    return Err(Error::ErrRfc3550headerIdrange);
+                }
+                ExtensionForm::Rfc3550
+            }
+            None => {
+                // No extension yet: the smallest form the element fits (RFC 8285 sections
+                // 4.1.2 and 4.2).
+                if id == 0 {
+                    return Err(Error::ErrRfc8285oneByteHeaderIdrange);
+                }
+                if payload_len > TWO_BYTE_EXTENSION_MAX_LEN {
+                    return Err(Error::ErrRfc8285twoByteHeaderSize);
+                }
+                self.extensions.clear();
+                self.extension = true;
+                if ExtensionForm::one_byte_fits(id, payload_len) {
+                    self.extension_profile = EXTENSION_PROFILE_ONE_BYTE;
+                    ExtensionForm::OneByte
+                } else {
+                    self.extension_profile = EXTENSION_PROFILE_TWO_BYTE;
+                    ExtensionForm::TwoByte
+                }
+            }
+        };
+
+        // Update the element if it exists, else add it.
+        if let Some(extension) = self
+            .extensions
+            .iter_mut()
+            .find(|extension| extension.id == id)
+        {
+            extension.payload = payload;
         } else {
-            // No existing header extensions
-            self.extension = true;
-            let mut extension_profile_len = 0;
-            self.extension_profile = match payload_len {
-                0..=16 => {
-                    extension_profile_len = 1;
-                    EXTENSION_PROFILE_ONE_BYTE
-                }
-                17..=255 => {
-                    extension_profile_len = 2;
-                    EXTENSION_PROFILE_TWO_BYTE
-                }
-                _ => self.extension_profile,
-            };
-
-            let extension_padding = (payload.len() + extension_profile_len) % 4;
-            if self.extensions_padding < extension_padding {
-                self.extensions_padding = self.extensions_padding + 4 - extension_padding;
-            } else {
-                self.extensions_padding -= extension_padding
-            }
             self.extensions.push(Extension { id, payload });
         }
+        debug_assert_eq!(form, ExtensionForm::of_profile(self.extension_profile));
+        self.extensions_padding = self.canonical_extensions_padding();
         Ok(())
     }
 
@@ -575,7 +715,11 @@ impl Header {
         }
     }
 
-    /// Removes an RTP Header extension
+    /// Removes an RTP Header extension.
+    ///
+    /// Removing the last element removes the extension block too: the X bit is cleared, since
+    /// the block is present only when the packet carries at least one element (RFC 8285
+    /// section 4.1.1).
     pub fn del_extension(&mut self, id: u8) -> Result<()> {
         if self.extension {
             if let Some(index) = self
@@ -583,16 +727,13 @@ impl Header {
                 .iter()
                 .position(|extension| extension.id == id)
             {
-                let extension = self.extensions.remove(index);
-
-                let extension_profile_len = match self.extension_profile {
-                    EXTENSION_PROFILE_ONE_BYTE => 1,
-                    EXTENSION_PROFILE_TWO_BYTE => 2,
-                    _ => 0,
-                };
-
-                let extension_padding = (extension.payload.len() + extension_profile_len) % 4;
-                self.extensions_padding = (self.extensions_padding + extension_padding) % 4;
+                self.extensions.remove(index);
+                if self.extensions.is_empty() {
+                    self.extension = false;
+                    self.extensions_padding = 0;
+                } else {
+                    self.extensions_padding = self.canonical_extensions_padding();
+                }
 
                 Ok(())
             } else {
@@ -606,3 +747,5 @@ impl Header {
 
 #[cfg(test)]
 mod header_test;
+#[cfg(test)]
+mod rfc8285_test;

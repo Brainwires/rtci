@@ -30,10 +30,15 @@ pub struct RTCRtpContributingSource {
     /// The audio level of the contributing source, ranging from 0 to 1.
     /// A value of 0 indicates silence, and 1 indicates the maximum audio level.
     ///
+    /// `None` when the packet carried no level for the source: for a synchronization source
+    /// the RFC 6464 client-to-mixer extension, for a contributing source the RFC 6465
+    /// mixer-to-client extension (each has to be negotiated). A level `l` in -dBov is
+    /// `10^(-l/20)`, and 127 (digital silence) is 0.
+    ///
     /// # Specification
     /// Corresponds to the `audioLevel` attribute in
     /// [RTCRtpContributingSource](https://www.w3.org/TR/webrtc/#dom-rtcrtpcontributingsource-audiolevel).
-    pub audio_level: f64,
+    pub audio_level: Option<f64>,
 
     /// The RTP timestamp of the media. This is the timestamp at which the media was sampled,
     /// as defined in RFC 3550 section 5.1.
@@ -42,6 +47,17 @@ pub struct RTCRtpContributingSource {
     /// Corresponds to the `rtpTimestamp` attribute in
     /// [RTCRtpContributingSource](https://www.w3.org/TR/webrtc/#dom-rtcrtpcontributingsource-rtptimestamp).
     pub rtp_timestamp: u32,
+
+    /// Whether the last packet from this synchronization source said there is voice in it: the
+    /// V bit of the RFC 6464 client-to-mixer audio level. `None` for a contributing source,
+    /// for a packet without the level, and when the extension was negotiated `vad=off`, where
+    /// the bit "is not in use" and "MUST" be ignored (RFC 6464 sections 3 and 4; no `vad`
+    /// attribute is `vad=on`).
+    ///
+    /// # Specification
+    /// Corresponds to `voiceActivityFlag` of `RTCRtpSynchronizationSource` in
+    /// [WebRTC Extensions](https://www.w3.org/TR/webrtc-extensions/#rtcrtpsynchronizationsource-dictionary).
+    pub voice_activity_flag: Option<bool>,
 }
 
 /// Synchronization source information.

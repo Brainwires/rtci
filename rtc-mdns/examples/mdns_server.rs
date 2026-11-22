@@ -20,7 +20,7 @@ use std::time::Instant;
 
 use bytes::BytesMut;
 use clap::Parser;
-use rtc_mdns::{Mdns, MdnsConfig, MulticastSocket};
+use rtc_mdns::{Mdns, MdnsConfig, MdnsEvent, MulticastSocket};
 use sansio::Protocol;
 use shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use tokio::net::UdpSocket;
@@ -47,15 +47,13 @@ struct Args {
 fn get_local_ip() -> Option<Ipv4Addr> {
     // Try to get a reasonable local IP address
     // This is a simple heuristic - in production you'd want to be more careful
-    if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
-        // Connect to a public address to determine the local interface
-        if socket.connect("8.8.8.8:80").is_ok() {
-            if let Ok(addr) = socket.local_addr() {
-                if let IpAddr::V4(ip) = addr.ip() {
-                    return Some(ip);
-                }
-            }
-        }
+    // Connect to a public address to determine the local interface
+    if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0")
+        && socket.connect("8.8.8.8:80").is_ok()
+        && let Ok(addr) = socket.local_addr()
+        && let IpAddr::V4(ip) = addr.ip()
+    {
+        return Some(ip);
     }
     None
 }
@@ -102,6 +100,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut buf = vec![0u8; 1500];
 
     loop {
+        // Send what the connection has queued: probes and announcements for the name,
+        // responses to queries.
+        while let Some(packet) = conn.poll_write() {
+            log::debug!(
+                "Sending {} bytes to {}",
+                packet.message.len(),
+                packet.transport.peer_addr
+            );
+            if let Err(e) = socket
+                .send_to(&packet.message, packet.transport.peer_addr)
+                .await
+            {
+                log::warn!("Failed to send packet: {}", e);
+            }
+        }
+
+        // The connection's next deadline, if it has one. The name is probed for and
+        // announced on timers (RFC 6762 section 8), and some responses are delayed.
+        let deadline = conn.poll_timeout();
+        let timer = async {
+            match deadline {
+                Some(at) => tokio::time::sleep(at.saturating_duration_since(Instant::now())).await,
+                None => std::future::pending().await,
+            }
+        };
+
         tokio::select! {
             result = socket.recv_from(&mut buf) => {
                 match result {
@@ -120,22 +144,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if let Err(e) = conn.handle_read(msg) {
                             log::warn!("Failed to handle packet: {}", e);
                         }
-
-                        // Send any response packets
-                        while let Some(packet) = conn.poll_write() {
-                            log::debug!(
-                                "Sending {} bytes to {}",
-                                packet.message.len(),
-                                packet.transport.peer_addr
-                            );
-                            if let Err(e) = socket.send_to(&packet.message, packet.transport.peer_addr).await {
-                                log::warn!("Failed to send packet: {}", e);
-                            }
-                        }
                     }
                     Err(e) => {
                         log::warn!("Socket recv error: {}", e);
                     }
+                }
+            }
+            _ = timer => {
+                if let Err(e) = conn.handle_timeout(Instant::now()) {
+                    log::warn!("Failed to handle timeout: {}", e);
                 }
             }
             _ = tokio::signal::ctrl_c() => {
@@ -143,8 +160,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 break;
             }
         }
+
+        while let Some(event) = conn.poll_event() {
+            if let MdnsEvent::LocalNameConflict(name) = event {
+                log::error!("Another host on the link answers for {name}: the name is given up");
+            }
+        }
     }
 
+    // Closing queues a goodbye for the name, so that neighbours drop it at once.
     conn.close()?;
+    while let Some(packet) = conn.poll_write() {
+        let _ = socket
+            .send_to(&packet.message, packet.transport.peer_addr)
+            .await;
+    }
     Ok(())
 }

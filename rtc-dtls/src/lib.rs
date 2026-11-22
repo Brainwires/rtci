@@ -79,10 +79,12 @@ pub mod config;
 pub mod conn;
 /// Record content types: handshake, alert, change-cipher-spec and application data.
 pub mod content;
+pub(crate) mod cookie;
 /// Cryptographic primitives: the AEAD and CBC ciphers, certificates and signatures.
 pub mod crypto;
 /// Elliptic curves and the key-exchange values exchanged over them.
 pub mod curve;
+pub(crate) mod dtls13;
 /// The Sans-I/O entry point: feed it datagrams, poll it for output and events.
 pub mod endpoint;
 /// ClientHello and ServerHello extensions, including `use_srtp` and SNI.
@@ -103,6 +105,8 @@ pub mod handshaker;
 pub mod prf;
 /// The record layer: framing, sequence numbers and epochs.
 pub mod record_layer;
+/// DTLS 1.3 pre-shared keys: session tickets and their store, external PSKs.
+pub mod session;
 /// Signature and hash algorithm pairs, as negotiated for certificate verification.
 pub mod signature_hash_algorithm;
 /// The negotiated connection state: keys, sequence numbers and peer identity.

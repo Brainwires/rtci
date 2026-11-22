@@ -77,6 +77,96 @@
 //! # }
 //! ```
 
+/// Whether a codec's fmtp parameters are part of what the format is, so that a format with
+/// other parameters is another format, not a variant to fall back to: H.264
+/// (`profile-level-id`, `packetization-mode`; RFC 6184 section 8.2.2), VP9 (`profile-id`;
+/// RFC 9628 section 6), AV1 (`profile`; AV1 RTP section 7.2) and H.265 (`profile-space`,
+/// `profile-id`, `tier-flag`, `interop-constraints`, `profile-compatibility-indicator`,
+/// `tx-mode`; RFC 7798 section 7.2.2).
+pub(crate) fn has_symmetric_configuration(codec: &RTCRtpCodec) -> bool {
+    [MIME_TYPE_H264, MIME_TYPE_VP9, MIME_TYPE_AV1, MIME_TYPE_HEVC]
+        .iter()
+        .any(|mime_type| codec.mime_type.eq_ignore_ascii_case(mime_type))
+}
+
+/// The fmtp line of an H.264 answer: this endpoint's parameters (`local`), with the offer's
+/// profile and the level RFC 6184 section 8.2.2 allows: this endpoint's own when both sides
+/// say `level-asymmetry-allowed=1`, else the lower of the two.
+fn h264_answer_fmtp(local: &str, offered: &str) -> String {
+    let parameter = |line: &str, key: &str| -> Option<String> {
+        line.split(';').find_map(|p| {
+            let (k, v) = p.trim().split_once('=')?;
+            k.trim()
+                .eq_ignore_ascii_case(key)
+                .then(|| v.trim().to_owned())
+        })
+    };
+    let asymmetric =
+        |line: &str| parameter(line, "level-asymmetry-allowed").as_deref() == Some("1");
+    let (Some(local_id), Some(offered_id)) = (
+        parameter(local, "profile-level-id").filter(|id| id.len() == 6 && id.is_ascii()),
+        parameter(offered, "profile-level-id").filter(|id| id.len() == 6 && id.is_ascii()),
+    ) else {
+        return local.to_owned();
+    };
+    let level = |id: &str| u8::from_str_radix(&id[4..], 16).ok();
+    let (Some(local_level), Some(offered_level)) = (level(&local_id), level(&offered_id)) else {
+        return local.to_owned();
+    };
+    let answered_level = if asymmetric(local) && asymmetric(offered) {
+        local_level
+    } else {
+        local_level.min(offered_level)
+    };
+    let answered_id = format!("{}{answered_level:02x}", &offered_id[..4]);
+    local
+        .split(';')
+        .map(|p| match p.trim().split_once('=') {
+            Some((k, _)) if k.trim().eq_ignore_ascii_case("profile-level-id") => {
+                format!("{}={answered_id}", k.trim())
+            }
+            _ => p.trim().to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+/// The fmtp line of an H.265 answer: this endpoint's parameters (`local`) with a `level-id`
+/// no higher than the offer's (RFC 7798 section 7.2.2: "the value of level-id is changeable
+/// as long as the highest level indicated by the answer is not higher than that indicated by
+/// the offer"); an absent `level-id` is 93 (section 7.1).
+fn h265_answer_fmtp(local: &str, offered: &str) -> String {
+    let level = |line: &str| -> Option<u8> {
+        let fmtp = crate::rtp_transceiver::fmtp::parse(MIME_TYPE_HEVC, line);
+        fmtp.as_any()
+            .downcast_ref::<crate::rtp_transceiver::fmtp::h265::H265Fmtp>()?
+            .level_id()
+    };
+    let (Some(local_level), Some(offered_level)) = (level(local), level(offered)) else {
+        return local.to_owned();
+    };
+    if local_level <= offered_level {
+        return local.to_owned();
+    }
+    let mut written = false;
+    let mut parameters: Vec<String> = local
+        .split(';')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(|p| match p.split_once('=') {
+            Some((k, _)) if k.trim().eq_ignore_ascii_case("level-id") => {
+                written = true;
+                format!("{}={offered_level}", k.trim())
+            }
+            _ => p.to_owned(),
+        })
+        .collect();
+    if !written {
+        parameters.insert(0, format!("level-id={offered_level}"));
+    }
+    parameters.join(";")
+}
+
 #[cfg(test)]
 mod h264_high_profile_test;
 #[cfg(test)]
@@ -85,24 +175,29 @@ mod media_engine_test;
 mod multi_codec_test;
 
 use crate::peer_connection::sdp::{
-    MediaDescriptionExt, codecs_from_media_description, rtp_extensions_from_media_description,
+    ENCRYPT_URI, MediaDescriptionExt, SectionExtension, codecs_from_media_description,
+    is_unknown_application_media, rtp_extensions_from_media_description,
 };
 use crate::rtp_transceiver::direction::RTCRtpTransceiverDirection;
 use crate::rtp_transceiver::fmtp;
 use crate::rtp_transceiver::rtp_sender::rtp_codec::{
-    CodecMatch, RTCRtpCodec, RtpCodecKind, codec_parameters_fuzzy_search, parse_rtx_apt,
-    repair_family, rtcp_feedback_intersection,
+    CodecMatch, RTCRtpCodec, RtpCodecKind, codec_parameters_fuzzy_search, is_flexfec_mime_type,
+    is_repair_codec, parse_rtx_apt, repair_family, rtcp_feedback_intersection,
 };
 use crate::rtp_transceiver::rtp_sender::rtp_codec_parameters::RTCRtpCodecParameters;
-use crate::rtp_transceiver::rtp_sender::rtp_header_extension_capability::RTCRtpHeaderExtensionCapability;
+use crate::rtp_transceiver::rtp_sender::rtp_header_extension_capability::{
+    RTCRtpHeaderExtensionCapability, RTCRtpHeaderExtensionEncryption,
+};
 use crate::rtp_transceiver::rtp_sender::rtp_header_extension_parameters::RTCRtpHeaderExtensionParameters;
 use crate::rtp_transceiver::rtp_sender::rtp_parameters::RTCRtpParameters;
-use crate::rtp_transceiver::{PayloadType, rtp_sender::rtcp_parameters::RTCPFeedback};
+use crate::rtp_transceiver::{
+    PayloadType,
+    rtp_sender::rtcp_parameters::{RTCPFeedback, RTCRtcpParameters},
+};
 use sdp::MediaDescription;
 use sdp::description::session::SessionDescription;
 use shared::error::{Error, Result};
 use std::collections::HashMap;
-use std::ops::Range;
 use unicase::UniCase;
 
 /// H.264 video codec MIME type.
@@ -169,12 +264,19 @@ pub const MIME_TYPE_PCMA: &str = "audio/PCMA";
 /// Note: MIME type matching is case-insensitive.
 pub const MIME_TYPE_RTX: &str = "video/rtx";
 
-/// FlexFEC forward error correction MIME type.
+/// FlexFEC forward error correction MIME type, as published: RFC 8627.
+///
+/// Its coder is `interceptor::FlexFecSendBuilder` / `interceptor::FlexFecReceiveBuilder`
+/// (opt-in). The payload format is not compatible with [`MIME_TYPE_FLEX_FEC03`], and each name
+/// selects its own coder. Register it with its required `repair-window` parameter
+/// (`interceptor::FlexFecParameters::to_fmtp`).
 ///
 /// Note: MIME type matching is case-insensitive.
 pub const MIME_TYPE_FLEX_FEC: &str = "video/flexfec";
 
-/// FlexFEC-03 forward error correction MIME type.
+/// FlexFEC-03 forward error correction MIME type: draft-ietf-payload-flexible-fec-scheme-03,
+/// the FlexFEC browsers send. Its coder is `interceptor::FlexFec03SendBuilder` /
+/// `interceptor::FlexFec03ReceiveBuilder` (opt-in).
 ///
 /// Note: MIME type matching is case-insensitive.
 pub const MIME_TYPE_FLEX_FEC03: &str = "video/flexfec-03";
@@ -190,13 +292,31 @@ pub const MIME_TYPE_ULP_FEC: &str = "video/ulpfec";
 /// Note: MIME type matching is case-insensitive.
 pub const MIME_TYPE_TELEPHONE_EVENT: &str = "audio/telephone-event";
 
+/// Comfort noise MIME type (RFC 3389).
+///
+/// Used for the noise parameters a sender of G.711 (or another codec without comfort noise of
+/// its own) sends during silence; static payload type 13 at 8000 Hz.
+/// Note: MIME type matching is case-insensitive.
+pub const MIME_TYPE_CN: &str = "audio/CN";
+
 /// SMPTE ST 336 (KLV) metadata MIME type
 ///
 /// Used for transmitting KLV (key-length-value) metadata.
 /// Note: MIME type matching is case-insensitive.
 pub const MIME_TYPE_SMPTE336M: &str = "application/smpte336m";
 
-const VALID_EXT_IDS: Range<u16> = 1..15;
+/// The ids this endpoint gives the header extensions it offers, in the order it takes them:
+/// the one-byte ids 1 to 14 first (RFC 8285 section 4.1.2: "the one-byte header form is
+/// preferred"), then 16 to 255, which need the two-byte form (section 4.3; 15 is reserved in
+/// the one-byte form and not used, section 5). An offer only takes an id above 14 when the
+/// one-byte ids are all taken, so a stream is two-byte only when it has to be.
+pub(crate) fn local_extension_ids() -> impl Iterator<Item = u16> {
+    (1..=14).chain(16..=255)
+}
+
+/// The most header extensions that can be registered: one per id of
+/// [`local_extension_ids`].
+const MAX_HEADER_EXTENSIONS: usize = 254;
 
 #[derive(Default, Clone)]
 pub(crate) struct MediaEngineHeaderExtension {
@@ -204,6 +324,14 @@ pub(crate) struct MediaEngineHeaderExtension {
     pub(crate) is_audio: bool,
     pub(crate) is_video: bool,
     pub(crate) allowed_direction: Option<RTCRtpTransceiverDirection>,
+    /// A registered extension: how offers signal it (RFC 6904).
+    pub(crate) encryption: RTCRtpHeaderExtensionEncryption,
+    /// A negotiated mapping: whether it is the encrypted form (`a=extmap:<id>
+    /// urn:ietf:params:rtp-hdrext:encrypt <uri>`, RFC 6904 section 4).
+    pub(crate) encrypted: bool,
+    /// A negotiated mapping: the extension attributes the peer's description gave it (for
+    /// the client-to-mixer audio level, `vad=on` or `vad=off`, RFC 6464 section 4).
+    pub(crate) attributes: Option<String>,
 }
 
 impl MediaEngineHeaderExtension {
@@ -310,6 +438,38 @@ pub struct MediaEngine {
 
     pub(crate) header_extensions: Vec<MediaEngineHeaderExtension>,
     pub(crate) negotiated_header_extensions: HashMap<u16, MediaEngineHeaderExtension>,
+
+    /// Whether RTP retransmission (RFC 4588) is negotiated beside RFC 8627 FlexFEC.
+    /// See [`MediaEngine::set_flexfec_with_retransmission`].
+    pub(crate) flexfec_with_retransmission: bool,
+
+    /// The RTCP CNAME of the connection this media engine belongs to (RFC 7022), set when the
+    /// connection is built: what `a=ssrc:<ssrc> cname:` lines and `RTCRtcpParameters::cname`
+    /// say. Empty in a media engine no connection has taken yet.
+    pub(crate) rtcp_cname: String,
+
+    /// The packet times this endpoint states in its audio sections; see
+    /// [`MediaEngine::set_audio_packet_time`].
+    pub(crate) audio_packet_time: RTCPacketTime,
+}
+
+/// The packet times of a media section, in milliseconds: `a=ptime`, the length of media one
+/// packet should carry, and `a=maxptime`, the most it may carry (RFC 8866 sections 6.4, 6.5).
+/// They are what the endpoint that states them would like to receive (RFC 3264 section 5);
+/// for Opus they are its `ptime` and `maxptime` parameters (RFC 7587 section 7).
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RTCPacketTime {
+    /// `a=ptime`; `None` when not stated.
+    pub ptime: Option<u32>,
+    /// `a=maxptime`; `None` when not stated.
+    pub maxptime: Option<u32>,
+}
+
+/// Whether an RTP payload type cannot be told from an RTCP packet type once RTP and RTCP share
+/// a port (RFC 5761 section 4): with the marker bit set, payload types 64 to 95 give the second
+/// octet the values 192 to 223, the RTCP packet types.
+pub(crate) fn is_rtcp_conflicting_payload_type(payload_type: PayloadType) -> bool {
+    (64..=95).contains(&payload_type)
 }
 
 impl MediaEngine {
@@ -322,6 +482,7 @@ impl MediaEngine {
     /// - G.722 (8kHz wideband)
     /// - PCMU/G.711 μ-law (8kHz)
     /// - PCMA/G.711 A-law (8kHz)
+    /// - telephone-event at 48 kHz and 8 kHz, events 0-15 (DTMF, RFC 4733)
     ///
     /// **Video Codecs:**
     /// - VP8 with RTCP feedback
@@ -393,6 +554,48 @@ impl MediaEngine {
                     rtcp_feedback: vec![],
                 },
                 payload_type: 8,
+            },
+            // Comfort noise (RFC 3389), which RFC 7874 section 3 has every WebRTC endpoint
+            // support "for streams encoded with G.711 or any other supported codec that does
+            // not provide its own CN": at 8000 Hz, the clock of G.711 and of G.722's RTP
+            // timestamps, on its static payload type (RFC 3389 section 4: "Other clock rates
+            // MUST use dynamic payload types", RFC 3551 table 4). None for Opus, which has its
+            // own (RFC 7874: RFC 3389 CN with Opus is "NOT RECOMMENDED").
+            RTCRtpCodecParameters {
+                rtp_codec: RTCRtpCodec {
+                    mime_type: MIME_TYPE_CN.to_owned(),
+                    clock_rate: 8000,
+                    channels: 0,
+                    sdp_fmtp_line: "".to_owned(),
+                    rtcp_feedback: vec![],
+                },
+                payload_type: 13,
+            },
+            // DTMF as named telephone events (RFC 4733), which RFC 7874 section 3 has every
+            // WebRTC endpoint implement, with events 0 to 15, the DTMF digits. One format per
+            // clock rate of the audio codecs above (the event stream runs on the clock of the
+            // audio it goes with), each stating the events it takes (RFC 4733 section 2.4.1:
+            // `a=fmtp:<pt> 0-15`). The application sends and reads the event packets
+            // (`rtp::codec::telephone_event`).
+            RTCRtpCodecParameters {
+                rtp_codec: RTCRtpCodec {
+                    mime_type: MIME_TYPE_TELEPHONE_EVENT.to_owned(),
+                    clock_rate: 48000,
+                    channels: 0,
+                    sdp_fmtp_line: "0-15".to_owned(),
+                    rtcp_feedback: vec![],
+                },
+                payload_type: 112,
+            },
+            RTCRtpCodecParameters {
+                rtp_codec: RTCRtpCodec {
+                    mime_type: MIME_TYPE_TELEPHONE_EVENT.to_owned(),
+                    clock_rate: 8000,
+                    channels: 0,
+                    sdp_fmtp_line: "0-15".to_owned(),
+                    rtcp_feedback: vec![],
+                },
+                payload_type: 115,
             },
         ] {
             self.register_codec(codec, RtpCodecKind::Audio)?;
@@ -526,18 +729,6 @@ impl MediaEngine {
                     clock_rate: 90000,
                     channels: 0,
                     sdp_fmtp_line:
-                        "level-asymmetry-allowed=1;packetization-mode=0;profile-level-id=42001f"
-                            .to_owned(),
-                    rtcp_feedback: video_rtcp_feedback.clone(),
-                },
-                payload_type: 127,
-            },
-            RTCRtpCodecParameters {
-                rtp_codec: RTCRtpCodec {
-                    mime_type: MIME_TYPE_H264.to_owned(),
-                    clock_rate: 90000,
-                    channels: 0,
-                    sdp_fmtp_line:
                         "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640032"
                             .to_owned(),
                     rtcp_feedback: video_rtcp_feedback.clone(),
@@ -619,7 +810,10 @@ impl MediaEngine {
                     mime_type: MIME_TYPE_HEVC.to_owned(),
                     clock_rate: 90000,
                     channels: 0,
-                    sdp_fmtp_line: "".to_owned(),
+                    // Main profile, main tier, level 3.1, one RTP stream (RFC 7798 section
+                    // 7.1): stated, so that another configuration is not matched by name
+                    // (section 7.2.2), in the form browsers offer it.
+                    sdp_fmtp_line: "level-id=93;profile-id=1;tier-flag=0;tx-mode=SRST".to_owned(),
                     rtcp_feedback: video_rtcp_feedback,
                 },
                 payload_type: 126,
@@ -690,12 +884,23 @@ impl MediaEngine {
     /// ```
     /// # Errors
     ///
-    /// Returns [`Error::ErrUnknownType`] if `typ` is not `Audio`, `Video` or `Application`.
+    /// Returns [`Error::ErrUnknownType`] if `typ` is not `Audio`, `Video` or `Application`,
+    /// and [`Error::SdpInvalidValue`] for a payload type of 64 to 95: RFC 5761 section 4,
+    /// "RTP payload types in the range 64-95 MUST NOT be used". With the marker bit set such
+    /// a packet has the second octet of an RTCP packet (types 192 to 223), and this endpoint
+    /// always multiplexes RTP and RTCP on one port.
     pub fn register_codec(
         &mut self,
         codec: RTCRtpCodecParameters,
         typ: RtpCodecKind,
     ) -> Result<()> {
+        if is_rtcp_conflicting_payload_type(codec.payload_type) {
+            return Err(Error::SdpInvalidValue(format!(
+                "payload type {} of {}: 64 to 95 cannot be used with RTP/RTCP multiplexing \
+                 (RFC 5761 section 4)",
+                codec.payload_type, codec.rtp_codec.mime_type
+            )));
+        }
         match typ {
             RtpCodecKind::Audio => {
                 MediaEngine::add_codec(&mut self.audio_codecs, codec);
@@ -724,8 +929,14 @@ impl MediaEngine {
     ///
     /// - [`Error::ErrRegisterHeaderExtensionInvalidDirection`] if `allowed_direction` is
     ///   `Unspecified`.
-    /// - [`Error::ErrRegisterHeaderExtensionNoFreeID`] if every valid one-byte extension id
-    ///   (RFC 8285) is already taken.
+    /// - [`Error::ErrRegisterHeaderExtensionNoFreeID`] if 254 extensions are registered
+    ///   already: one for each id RFC 8285 lets an RTP header carry (1 to 14 in the one-byte
+    ///   form, 16 to 255 in the two-byte form). Offers take the one-byte ids first.
+    /// - [`Error::TypeError`] for an audio level extension (RFC 6464, RFC 6465) registered for
+    ///   a kind other than audio (RFC 6465 section 5: "They MUST NOT be advertised with other
+    ///   media types"), and for `urn:ietf:params:rtp-hdrext:encrypt`, which is not an
+    ///   extension of its own (RFC 6904 section 4; see
+    ///   [`set_header_extension_encryption`](Self::set_header_extension_encryption)).
     pub fn register_header_extension(
         &mut self,
         extension: RTCRtpHeaderExtensionCapability,
@@ -738,6 +949,23 @@ impl MediaEngine {
         {
             return Err(Error::ErrRegisterHeaderExtensionInvalidDirection);
         }
+        if typ != RtpCodecKind::Audio
+            && matches!(
+                extension.uri.as_str(),
+                ::sdp::extmap::AUDIO_LEVEL_URI | rtp::extension::CSRC_AUDIO_LEVEL_URI
+            )
+        {
+            return Err(Error::TypeError(format!(
+                "{} is defined for audio only (RFC 6464 section 4, RFC 6465 section 5)",
+                extension.uri
+            )));
+        }
+        if extension.uri == ENCRYPT_URI {
+            return Err(Error::TypeError(format!(
+                "{ENCRYPT_URI} encrypts another extension (RFC 6904 section 4): use \
+                 MediaEngine::set_header_extension_encryption"
+            )));
+        }
 
         let ext = {
             match self
@@ -748,7 +976,7 @@ impl MediaEngine {
                 Some(ext) => ext,
                 None => {
                     // We have registered too many extensions
-                    if self.header_extensions.len() > VALID_EXT_IDS.end as usize {
+                    if self.header_extensions.len() >= MAX_HEADER_EXTENSIONS {
                         return Err(Error::ErrRegisterHeaderExtensionNoFreeID);
                     }
                     self.header_extensions
@@ -769,6 +997,38 @@ impl MediaEngine {
         ext.uri = extension.uri;
         ext.allowed_direction = allowed_direction;
 
+        Ok(())
+    }
+
+    /// Sets how offers signal a registered header extension with respect to RFC 6904
+    /// header extension encryption: in the clear (the default for an extension the
+    /// application registers), encrypted, or both, with the peer choosing (RFC 6904 section
+    /// 4.1 "best-effort encryption").
+    ///
+    /// The encrypted form is `a=extmap:<id> urn:ietf:params:rtp-hdrext:encrypt <uri>`; once
+    /// negotiated, the SRTP contexts encrypt and decrypt that element's payload (RFC 6904
+    /// section 3) and its [`RTCRtpHeaderExtensionParameters::encrypted`] is true. Answering,
+    /// the engine takes the encrypted form whenever the offer has it, whatever this says
+    /// (section 4.1: answerers "SHOULD choose the encrypted form ... and mark the
+    /// unencrypted form 'inactive'"). The default interceptors set
+    /// [`BestEffort`](RTCRtpHeaderExtensionEncryption::BestEffort) for the audio level
+    /// extensions (RFC 8834 sections 5.2.2 and 5.2.3: their encryption is RECOMMENDED);
+    /// [`Clear`](RTCRtpHeaderExtensionEncryption::Clear) turns that off.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ErrUnknownType`] when `uri` is not a registered header extension.
+    pub fn set_header_extension_encryption(
+        &mut self,
+        uri: &str,
+        encryption: RTCRtpHeaderExtensionEncryption,
+    ) -> Result<()> {
+        let ext = self
+            .header_extensions
+            .iter_mut()
+            .find(|ext| ext.uri == uri)
+            .ok_or(Error::ErrUnknownType)?;
+        ext.encryption = encryption;
         Ok(())
     }
 
@@ -818,8 +1078,38 @@ impl MediaEngine {
             audio_codecs: self.audio_codecs.clone(),
             application_codecs: self.application_codecs.clone(),
             header_extensions: self.header_extensions.clone(),
+            flexfec_with_retransmission: self.flexfec_with_retransmission,
             ..Default::default()
         }
+    }
+
+    /// Whether RTP retransmission (`rtx`, RFC 4588) stays negotiated in a video section that
+    /// also negotiates RFC 8627 FlexFEC ([`MIME_TYPE_FLEX_FEC`]). `false` by default.
+    ///
+    /// RFC 8627 section 1.1.7: "If a peer supporting both FLEX FEC and other RTP
+    /// retransmission methods (see RFC 4588) receives an Offer including both FLEX FEC and
+    /// another RTP retransmission method, it MUST respond with an Answer containing only FLEX
+    /// FEC." So when a remote description carries both and this engine has both registered,
+    /// the retransmission formats are not negotiated and the answer has none; FlexFEC's own
+    /// retransmission form (section 4.2.2.1, a repair packet with `R` set) replaces them.
+    ///
+    /// The rule is for the `flexfec` format of the RFC. [`MIME_TYPE_FLEX_FEC03`], the format
+    /// browsers negotiate, comes from a draft that has no such rule and is always answered
+    /// together with `rtx`, as libwebrtc does. `true` gives the RFC format the same lenient
+    /// treatment.
+    pub fn set_flexfec_with_retransmission(&mut self, allowed: bool) {
+        self.flexfec_with_retransmission = allowed;
+    }
+
+    /// The packet times this endpoint states in each audio section it offers or answers, as
+    /// `a=ptime` and `a=maxptime` (RFC 8866 sections 6.4, 6.5; RFC 7587 section 7 maps Opus's
+    /// `ptime` and `maxptime` to them, and section 7.1 handles `maxptime` "in the same way as
+    /// ptime": each side states what it wants to receive, RFC 3264 section 5). Neither is
+    /// stated by default. What the remote side states is
+    /// [`RTCRtpTransceiver::remote_packet_time`](crate::rtp_transceiver::RTCRtpTransceiver::remote_packet_time),
+    /// which an application that packetizes audio follows.
+    pub fn set_audio_packet_time(&mut self, packet_time: RTCPacketTime) {
+        self.audio_packet_time = packet_time;
     }
 
     /// set_multi_codec_negotiation enables or disables the negotiation of multiple codecs.
@@ -982,20 +1272,39 @@ impl MediaEngine {
 
         let extensions = rtp_extensions_from_media_description(media)?;
 
-        for (extension, id) in extensions {
-            self.update_header_extension(id, extension.as_str(), typ)?;
+        for (extension, mapping) in extensions {
+            self.update_header_extension_mapping(extension.as_str(), typ, &mapping);
         }
 
         Ok(())
     }
 
-    /// Look up a header extension and enable if it exists
+    /// Look up a header extension and enable if it exists: a clear mapping of `id`.
     pub(crate) fn update_header_extension(
         &mut self,
         id: u16,
         extension: &str,
         typ: RtpCodecKind,
     ) -> Result<()> {
+        self.update_header_extension_mapping(
+            extension,
+            typ,
+            &SectionExtension {
+                id,
+                ..Default::default()
+            },
+        );
+        Ok(())
+    }
+
+    /// Look up a header extension and enable it, as a section of a description maps it.
+    pub(crate) fn update_header_extension_mapping(
+        &mut self,
+        extension: &str,
+        typ: RtpCodecKind,
+        mapping: &SectionExtension,
+    ) {
+        let id = mapping.id;
         for local_extension in &self.header_extensions {
             if local_extension.uri == extension {
                 let mut negotiated = self
@@ -1008,6 +1317,10 @@ impl MediaEngine {
                         allowed_direction: local_extension.allowed_direction,
                         ..Default::default()
                     });
+                // One form of an extension is negotiated (RFC 6904 section 4.1: "answerers
+                // MUST NOT negotiate the use of ... both encrypted and unencrypted forms").
+                negotiated.encrypted = mapping.encrypted;
+                negotiated.attributes.clone_from(&mapping.attributes);
                 // A retired section cannot retain a conflicting ID or duplicate
                 // this URI at its previous ID. RTP and SDP use the same mapping.
                 self.negotiated_header_extensions
@@ -1021,7 +1334,6 @@ impl MediaEngine {
                 self.negotiated_header_extensions.insert(id, negotiated);
             }
         }
-        Ok(())
     }
 
     pub(crate) fn push_codecs(&mut self, codecs: Vec<RTCRtpCodecParameters>, typ: RtpCodecKind) {
@@ -1125,7 +1437,9 @@ impl MediaEngine {
         desc: &SessionDescription,
     ) -> Result<()> {
         for media in &desc.media_descriptions {
-            if media.is_webrtc_datachannel() {
+            // A data channel section, or an `m=application` line that is not RTP (the pre-RFC
+            // 8841 `DTLS/SCTP` data section): no codecs to read.
+            if media.is_webrtc_datachannel() || is_unknown_application_media(media) {
                 continue;
             }
 
@@ -1209,6 +1523,45 @@ impl MediaEngine {
                 }
             }
 
+            // A format matched by its name alone has parameters this endpoint did not register.
+            // For H.264, VP9 and AV1 those parameters say what the bitstream is (profile,
+            // packetization mode), and "the answerer MUST either maintain all configuration
+            // parameters or remove the media format (payload type) completely" (RFC 6184
+            // section 8.2.2; RFC 9628 section 6; AV1 RTP section 7.2): such a format is not
+            // negotiated, nor is its RTX.
+            // A codec registered with no parameters at all states no configuration, and
+            // keeps matching by name.
+            let removed: Vec<PayloadType> =
+                partial_matches
+                    .iter()
+                    .filter(|codec| {
+                        has_symmetric_configuration(&codec.rtp_codec)
+                            && self.match_remote_codec(codec, typ, &[], &[]).is_ok_and(
+                                |(local, _)| !local.rtp_codec.sdp_fmtp_line.trim().is_empty(),
+                            )
+                    })
+                    .map(|codec| codec.payload_type)
+                    .collect();
+            partial_matches.retain(|codec| {
+                !removed.contains(&codec.payload_type)
+                    && !(is_repair_codec(&codec.rtp_codec)
+                        && parse_rtx_apt(&codec.rtp_codec.sdp_fmtp_line)
+                            .is_some_and(|apt| removed.contains(&apt)))
+            });
+
+            // RFC 8627 section 1.1.7: offered FlexFEC and another RTP retransmission method,
+            // the answer contains only FlexFEC.
+            if !self.flexfec_with_retransmission {
+                for matches in [&mut exact_matches, &mut partial_matches] {
+                    if matches
+                        .iter()
+                        .any(|codec| is_flexfec_mime_type(&codec.rtp_codec.mime_type))
+                    {
+                        matches.retain(|codec| repair_family(&codec.rtp_codec) != "rtx");
+                    }
+                }
+            }
+
             // use exact matches when they exist, otherwise fall back to partial
             if !exact_matches.is_empty() {
                 self.push_codecs(exact_matches, typ);
@@ -1223,6 +1576,61 @@ impl MediaEngine {
         }
 
         Ok(())
+    }
+
+    /// The `a=fmtp` parameters this endpoint states for `codec`, a format of a media section it
+    /// is describing. `codec` may be a negotiated format, whose fmtp line is the remote
+    /// side's; a description states this endpoint's own parameters, not the peer's (RFC 3264
+    /// section 6.1: the answerer's "own" parameters; RFC 7587 section 7.1: Opus parameters
+    /// are "declarative" and each side's own; AV1 RTP section 7.2.3; RFC 9628 section 6.1.2).
+    ///
+    /// - A repair format (RTX, its `apt`) keeps its line.
+    /// - A format one of the registered codecs matches is described with that codec's line.
+    /// - H.264 (RFC 6184 section 8.2.2): the profile and `packetization-mode` are symmetric,
+    ///   so an answer keeps the offer's profile; the level is this endpoint's own when both
+    ///   sides say `level-asymmetry-allowed=1`, else the lower of the two ("the level ... in
+    ///   the answer MUST NOT be higher than the level in the offer").
+    /// - A format no registered codec matches keeps its line.
+    pub(crate) fn local_fmtp_line(
+        &self,
+        typ: RtpCodecKind,
+        codec: &RTCRtpCodecParameters,
+        answering: bool,
+    ) -> String {
+        let registered = match typ {
+            RtpCodecKind::Audio => &self.audio_codecs,
+            RtpCodecKind::Video => &self.video_codecs,
+            RtpCodecKind::Application => &self.application_codecs,
+            RtpCodecKind::Unspecified => return codec.rtp_codec.sdp_fmtp_line.clone(),
+        };
+        if is_repair_codec(&codec.rtp_codec) {
+            return codec.rtp_codec.sdp_fmtp_line.clone();
+        }
+        let (local, matched) = codec_parameters_fuzzy_search(&codec.rtp_codec, registered);
+        if matched == CodecMatch::None
+            || (matched == CodecMatch::Partial && has_symmetric_configuration(&codec.rtp_codec))
+        {
+            return codec.rtp_codec.sdp_fmtp_line.clone();
+        }
+        let local_line = local.rtp_codec.sdp_fmtp_line;
+        if !answering {
+            return local_line;
+        }
+        if codec
+            .rtp_codec
+            .mime_type
+            .eq_ignore_ascii_case(MIME_TYPE_H264)
+        {
+            h264_answer_fmtp(&local_line, &codec.rtp_codec.sdp_fmtp_line)
+        } else if codec
+            .rtp_codec
+            .mime_type
+            .eq_ignore_ascii_case(MIME_TYPE_HEVC)
+        {
+            h265_answer_fmtp(&local_line, &codec.rtp_codec.sdp_fmtp_line)
+        } else {
+            local_line
+        }
     }
 
     pub(crate) fn get_codecs_by_kind(&self, typ: RtpCodecKind) -> Vec<RTCRtpCodecParameters> {
@@ -1269,37 +1677,41 @@ impl MediaEngine {
                     header_extensions.push(RTCRtpHeaderExtensionParameters {
                         id: *id,
                         uri: e.uri.clone(),
-                        ..Default::default()
+                        encrypted: e.encrypted,
+                        attributes: e.attributes.clone(),
                     });
                 }
             }
         } else {
-            let mut media_header_extensions = HashMap::new();
-
+            // Each registered extension in each form its encryption setting offers (RFC 6904
+            // section 4.1), with the id it was negotiated with or the first free one.
+            let mut assigned: Vec<(u16, &MediaEngineHeaderExtension, bool)> = vec![];
             for ext in &self.header_extensions {
-                let mut using_negotiated_id = false;
-                for (id, negotiated_extension) in &self.negotiated_header_extensions {
-                    if negotiated_extension.uri == ext.uri {
-                        using_negotiated_id = true;
-                        media_header_extensions.insert(*id, ext);
-                        break;
-                    }
-                }
-                if !using_negotiated_id {
-                    for id in 1..15 {
-                        let mut id_available = true;
-                        if media_header_extensions.contains_key(&id) {
-                            id_available = false
-                        }
-                        if id_available && !self.negotiated_header_extensions.contains_key(&id) {
-                            media_header_extensions.insert(id, ext);
-                            break;
-                        }
+                let forms: &[bool] = match ext.encryption {
+                    RTCRtpHeaderExtensionEncryption::Clear => &[false],
+                    RTCRtpHeaderExtensionEncryption::BestEffort => &[false, true],
+                    RTCRtpHeaderExtensionEncryption::Encrypted => &[true],
+                };
+                for &encrypted in forms {
+                    let negotiated_id = self
+                        .negotiated_header_extensions
+                        .iter()
+                        .find(|(_, n)| n.uri == ext.uri && n.encrypted == encrypted)
+                        .map(|(id, _)| *id);
+                    let id = negotiated_id.or_else(|| {
+                        local_extension_ids().find(|id| {
+                            !assigned.iter().any(|(taken, _, _)| taken == id)
+                                && !self.negotiated_header_extensions.contains_key(id)
+                        })
+                    });
+                    if let Some(id) = id {
+                        assigned.push((id, ext, encrypted));
                     }
                 }
             }
+            assigned.sort_by_key(|(id, _, _)| *id);
 
-            for (id, e) in media_header_extensions {
+            for (id, e, encrypted) in assigned {
                 if e.is_matching_direction(direction)
                     && (e.is_audio && typ == RtpCodecKind::Audio
                         || e.is_video && typ == RtpCodecKind::Video)
@@ -1307,7 +1719,8 @@ impl MediaEngine {
                     header_extensions.push(RTCRtpHeaderExtensionParameters {
                         id,
                         uri: e.uri.clone(),
-                        ..Default::default()
+                        encrypted,
+                        attributes: None,
                     })
                 }
             }
@@ -1316,7 +1729,10 @@ impl MediaEngine {
         RTCRtpParameters {
             header_extensions,
             codecs: found_codecs,
-            ..Default::default()
+            rtcp: RTCRtcpParameters {
+                cname: self.rtcp_cname.clone(),
+                reduced_size: false,
+            },
         }
     }
 
@@ -1333,7 +1749,8 @@ impl MediaEngine {
                 header_extensions.push(RTCRtpHeaderExtensionParameters {
                     uri: e.uri.clone(),
                     id: *id,
-                    ..Default::default()
+                    encrypted: e.encrypted,
+                    attributes: e.attributes.clone(),
                 });
             }
         }
@@ -1364,13 +1781,13 @@ impl MediaEngine {
         kind: RtpCodecKind,
         direction: RTCRtpTransceiverDirection,
     ) -> bool {
-        // Only the FlexFEC this engine implements (draft-03), matched exactly: RFC 8627's
-        // `video/flexfec` is another wire format.
+        // The FEC formats the engine has a coder for, each matched exactly: FlexFEC draft-03
+        // (`video/flexfec-03`) and RFC 8627 (`video/flexfec`).
         self.get_rtp_parameters_by_kind(kind, direction)
             .codecs
             .iter()
             .any(|codec| {
-                crate::rtp_transceiver::rtp_sender::rtp_codec::is_flexfec03_mime_type(
+                crate::rtp_transceiver::rtp_sender::rtp_codec::is_fec_mime_type(
                     &codec.rtp_codec.mime_type,
                 )
             })
@@ -1400,11 +1817,53 @@ fn fmtp_parameter_set(line: &str) -> Vec<(String, String)> {
 /// Whether `a` and `b` describe one format (RFC 8866 section 6.6, `a=rtpmap` and `a=fmtp`):
 /// the same encoding name, clock rate, channels and fmtp parameters. The payload type that
 /// numbers it is not part of the format.
+///
+/// A VP9 format without `profile-id` is profile 0 (RFC 9628 section 6: "If no profile-id is
+/// present, Profile 0 MUST be inferred"), so it is the format that says `profile-id=0`.
 fn same_format(a: &RTCRtpCodec, b: &RTCRtpCodec) -> bool {
+    let parameters = |codec: &RTCRtpCodec| {
+        let mut set = fmtp_parameter_set(&codec.sdp_fmtp_line);
+        if codec.mime_type.eq_ignore_ascii_case(MIME_TYPE_VP9)
+            && !set.iter().any(|(key, _)| key == "profile-id")
+        {
+            set.push(("profile-id".to_owned(), "0".to_owned()));
+            set.sort();
+        }
+        set
+    };
     a.mime_type.eq_ignore_ascii_case(&b.mime_type)
         && a.clock_rate == b.clock_rate
         && a.channels == b.channels
-        && fmtp_parameter_set(&a.sdp_fmtp_line) == fmtp_parameter_set(&b.sdp_fmtp_line)
+        && parameters(a) == parameters(b)
+}
+
+#[cfg(test)]
+mod same_format_test {
+    use super::*;
+
+    fn vp9(fmtp: &str) -> RTCRtpCodec {
+        RTCRtpCodec {
+            mime_type: MIME_TYPE_VP9.to_owned(),
+            clock_rate: 90000,
+            channels: 0,
+            sdp_fmtp_line: fmtp.to_owned(),
+            rtcp_feedback: vec![],
+        }
+    }
+
+    #[test]
+    fn a_vp9_format_without_a_profile_id_is_profile_0() {
+        assert!(same_format(&vp9(""), &vp9("profile-id=0")));
+        assert!(same_format(&vp9("profile-id=0"), &vp9("")));
+        assert!(!same_format(&vp9(""), &vp9("profile-id=2")));
+        assert!(!same_format(&vp9("profile-id=0"), &vp9("profile-id=2")));
+        // Only VP9 has that default.
+        let other = |fmtp: &str| RTCRtpCodec {
+            mime_type: MIME_TYPE_VP8.to_owned(),
+            ..vp9(fmtp)
+        };
+        assert!(!same_format(&other(""), &other("profile-id=0")));
+    }
 }
 
 #[cfg(test)]

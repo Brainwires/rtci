@@ -158,13 +158,13 @@ fn test_video_call_statistics_flow() {
         // Sending video
         outbound_acc.on_rtp_sent(12, 10000, t); // ~10KB per frame
         outbound_acc.on_frame_sent(i == 0); // First frame is huge (keyframe)
-        transport_acc.on_packet_sent(10012);
+        transport_acc.on_packet_sent(10012, true);
         pair_acc.on_packet_sent(10012, t);
 
         // Receiving video
         inbound_acc.on_rtp_received(12, 8000, t);
         inbound_acc.on_frame_received();
-        transport_acc.on_packet_received(8012);
+        transport_acc.on_packet_received(8012, true);
         pair_acc.on_packet_received(8012, t);
     }
 
@@ -177,7 +177,7 @@ fn test_video_call_statistics_flow() {
     outbound_acc.on_rtx_sent(10000);
 
     // Simulate RTCP reports
-    inbound_acc.on_rtcp_sr_received(30, 300000, now);
+    inbound_acc.on_rtcp_sr_received(30, 300000, 0, now);
     outbound_acc.on_receiver_report(&reception_report(28, 2, 270), now);
 
     // Generate stats report
@@ -227,7 +227,7 @@ fn test_video_call_statistics_flow() {
     assert_eq!(inbound.bytes_received, 240000); // 30 * 8000
     assert_eq!(inbound.frames_received, Some(30));
     assert_eq!(inbound.nack_count, 1);
-    assert_eq!(inbound.retransmitted_packets_received, 1);
+    assert_eq!(inbound.retransmitted_packets_received, Some(1));
     assert_eq!(inbound.received_rtp_stream_stats.packets_lost, 2);
 
     // Verify outbound RTP stats
@@ -247,7 +247,7 @@ fn test_data_channel_statistics_flow() {
 
     let mut pc_acc = PeerConnectionStatsAccumulator::default();
     let mut dc_acc = DataChannelStatsAccumulator {
-        data_channel_identifier: 1,
+        data_channel_identifier: Some(1),
         label: "chat".to_string(),
         protocol: "".to_string(),
         state: RTCDataChannelState::Connecting,
@@ -271,7 +271,7 @@ fn test_data_channel_statistics_flow() {
     let pc_stats = pc_acc.snapshot(now);
 
     // Verify data channel stats
-    assert_eq!(dc_stats.data_channel_identifier, 1);
+    assert_eq!(dc_stats.data_channel_identifier, Some(1));
     assert_eq!(dc_stats.label, "chat");
     assert_eq!(dc_stats.state, RTCDataChannelState::Open);
     assert_eq!(dc_stats.messages_sent, 10);
@@ -397,13 +397,13 @@ fn test_stats_report_iteration() {
     let pc_acc = PeerConnectionStatsAccumulator::default();
     let transport_acc = TransportStatsAccumulator::default();
     let mut dc_acc1 = DataChannelStatsAccumulator {
-        data_channel_identifier: 1,
+        data_channel_identifier: Some(1),
         label: "channel1".to_string(),
         state: RTCDataChannelState::Open,
         ..Default::default()
     };
     let mut dc_acc2 = DataChannelStatsAccumulator {
-        data_channel_identifier: 2,
+        data_channel_identifier: Some(2),
         label: "channel2".to_string(),
         state: RTCDataChannelState::Open,
         ..Default::default()
@@ -665,27 +665,39 @@ fn test_rtx_fec_tracking() {
         stream.on_rtp_received(12, 1000, now);
     }
 
-    // Track RTX packet (should update retransmitted counters)
-    let rtx_tracked = master.on_rtx_packet_received_if_rtx(rtx_ssrc, 1000);
-    assert!(rtx_tracked);
+    // A retransmission, taken out of its RTX packet: 2 bytes of original sequence number in
+    // front of the 1000 bytes it repeats
+    assert!(master.on_retransmission_received(primary_ssrc, 12, 1002, now));
 
-    // Track FEC packet
-    let fec_tracked = master.on_fec_packet_received_if_fec(fec_ssrc, 500);
-    assert!(fec_tracked);
+    // A packet on the FEC SSRC
+    assert!(master.on_rtp_received(fec_ssrc, 12, 500, now));
+
+    // A packet on the RTX SSRC that repeats nothing: 12 bytes of header and 100 of padding
+    // (a bandwidth probe, RFC 4588 section 4)
+    assert!(master.on_rtp_received(rtx_ssrc, 112, 0, now));
 
     // Unknown SSRC should not be tracked
-    let unknown_tracked = master.on_rtx_packet_received_if_rtx(99999999, 1000);
-    assert!(!unknown_tracked);
+    assert!(!master.on_rtp_received(99999999, 12, 1000, now));
 
-    // Verify stats
+    // Verify stats: the RTX and FEC streams are no objects of their own, their packets are
+    // the stream's (webrtc-stats 7.1)
     let report = master.snapshot(now);
+    assert_eq!(report.inbound_rtp_streams().count(), 1);
     let inbound = report.inbound_rtp_streams().next().unwrap();
 
-    assert_eq!(inbound.received_rtp_stream_stats.packets_received, 2);
-    assert_eq!(inbound.retransmitted_packets_received, 1);
-    assert_eq!(inbound.retransmitted_bytes_received, 1000);
+    assert_eq!(inbound.received_rtp_stream_stats.packets_received, 5);
+    assert_eq!(inbound.bytes_received, 2000 + 1000 + 500);
+    assert_eq!(inbound.header_bytes_received, 24 + (12 + 2) + 12 + 112);
+    // The probe is a packet received and no retransmission; the retransmitted bytes are the
+    // repeated payload, without the original sequence number
+    assert_eq!(inbound.retransmitted_packets_received, Some(1));
+    assert_eq!(inbound.retransmitted_bytes_received, Some(1000));
+    // FEC is a subset of what was received
     assert_eq!(inbound.fec_packets_received, 1);
     assert_eq!(inbound.fec_bytes_received, 500);
+    // The repair streams are named on the stream they repair
+    assert_eq!(inbound.rtx_ssrc, Some(rtx_ssrc));
+    assert_eq!(inbound.fec_ssrc, Some(fec_ssrc));
 }
 
 /// Test JSON snapshot comparison for peer connection stats.
@@ -720,8 +732,8 @@ fn test_transport_json_snapshot() {
         ..Default::default()
     };
 
-    transport_acc.on_packet_sent(1000);
-    transport_acc.on_packet_received(800);
+    transport_acc.on_packet_sent(1000, true);
+    transport_acc.on_packet_received(800, true);
     transport_acc.on_ice_state_changed(RTCIceTransportState::Connected);
     transport_acc.on_dtls_state_changed(RTCDtlsTransportState::Connected);
     transport_acc.on_dtls_handshake_complete(
@@ -1079,7 +1091,7 @@ fn test_stats_selector_receiver_includes_remote_outbound() {
         0,
     );
     inbound.on_rtp_received(12, 1200, now);
-    inbound.on_rtcp_sr_received(500, 600000, now);
+    inbound.on_rtcp_sr_received(500, 600000, 0, now);
 
     // Snapshot with Receiver selector
     let report = master.snapshot_with_selector(now, StatsSelector::Receiver(RTCRtpReceiverId(0)));
@@ -1479,18 +1491,17 @@ fn test_update_inbound_rtx_ssrc() {
         "rtx_ssrc should be updated to the repair SSRC"
     );
 
-    // Verify the reverse lookup map is updated (used by on_rtx_packet_received_if_rtx)
-    // We can test this indirectly: calling on_rtx_packet_received_if_rtx should now
-    // recognize the RTX SSRC and update the primary stream's retransmission stats.
-    accumulator.on_rtx_packet_received_if_rtx(rtx_ssrc, 50);
+    // Verify the reverse lookup map is updated: a packet on the RTX SSRC is now a packet of
+    // the primary stream.
+    assert!(accumulator.on_rtp_received(rtx_ssrc, 62, 0, Instant::now()));
 
     let stream = accumulator.inbound_rtp_streams.get(&primary_ssrc).unwrap();
     assert_eq!(
-        stream.retransmitted_packets_received, 1,
+        stream.packets_received, 1,
         "RTX packet should be attributed to primary stream via reverse lookup"
     );
     assert_eq!(
-        stream.retransmitted_bytes_received, 50,
+        stream.header_bytes_received, 62,
         "RTX bytes should be attributed to primary stream"
     );
 }
@@ -1516,8 +1527,8 @@ fn test_update_inbound_rtx_ssrc_no_existing_stream() {
 
     // But the reverse lookup should still be populated so that when the
     // inbound stream is created later, RTX packets can be attributed.
-    // Verify by calling on_rtx_packet_received_if_rtx (should not panic).
-    accumulator.on_rtx_packet_received_if_rtx(rtx_ssrc, 50);
+    // Verify by counting a packet on it (should not panic, and counts nowhere yet).
+    assert!(!accumulator.on_rtp_received(rtx_ssrc, 62, 0, Instant::now()));
 }
 
 /// W3C `RTCIceCandidatePairStats.localCandidateId` / `remoteCandidateId` are the ids of the

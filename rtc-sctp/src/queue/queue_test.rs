@@ -328,6 +328,9 @@ fn test_pending_queue_append() -> Result<()> {
     Ok(())
 }
 
+/// RFC 8260 3.1: first come, first served sends the messages in the order they were written.
+/// Unordered messages used to go ahead of every ordered one (upstream's "unordered wins"),
+/// which let a steady flow of them starve the ordered messages.
 #[test]
 fn test_pending_queue_unordered_wins() -> Result<()> {
     let mut pq = PendingQueue::new();
@@ -341,37 +344,12 @@ fn test_pending_queue_unordered_wins() -> Result<()> {
     pq.push_message(vec![make_data_chunk(3, true, NO_FRAGMENT)]);
     assert_eq!(40, pq.get_num_bytes(), "total bytes mismatch");
 
-    let c = pq.peek();
-    assert!(c.is_some(), "peek error");
-    let c = c.unwrap();
-    assert_eq!(1, c.tsn, "TSN should match");
-    let (beginning_fragment, unordered) = (c.beginning_fragment, c.unordered);
-    let result = pq.pop(beginning_fragment, unordered);
-    assert!(result.is_some(), "should not error");
-
-    let c = pq.peek();
-    assert!(c.is_some(), "peek error");
-    let c = c.unwrap();
-    assert_eq!(3, c.tsn, "TSN should match");
-    let (beginning_fragment, unordered) = (c.beginning_fragment, c.unordered);
-    let result = pq.pop(beginning_fragment, unordered);
-    assert!(result.is_some(), "should not error");
-
-    let c = pq.peek();
-    assert!(c.is_some(), "peek error");
-    let c = c.unwrap();
-    assert_eq!(0, c.tsn, "TSN should match");
-    let (beginning_fragment, unordered) = (c.beginning_fragment, c.unordered);
-    let result = pq.pop(beginning_fragment, unordered);
-    assert!(result.is_some(), "should not error");
-
-    let c = pq.peek();
-    assert!(c.is_some(), "peek error");
-    let c = c.unwrap();
-    assert_eq!(2, c.tsn, "TSN should match");
-    let (beginning_fragment, unordered) = (c.beginning_fragment, c.unordered);
-    let result = pq.pop(beginning_fragment, unordered);
-    assert!(result.is_some(), "should not error");
+    for expected in 0..4 {
+        let c = pq.peek().expect("peek error");
+        assert_eq!(expected, c.tsn, "the order the messages were written in");
+        let (beginning_fragment, unordered) = (c.beginning_fragment, c.unordered);
+        assert!(pq.pop(beginning_fragment, unordered).is_some());
+    }
 
     assert_eq!(0, pq.get_num_bytes(), "total bytes mismatch");
 
@@ -392,7 +370,8 @@ fn test_pending_queue_fragments() -> Result<()> {
         make_data_chunk(5, true, FRAG_END),
     ]);
 
-    let expects = vec![3, 4, 5, 0, 1, 2];
+    // In the order written: the unordered message does not go ahead.
+    let expects = vec![0, 1, 2, 3, 4, 5];
 
     for exp in expects {
         let c = pq.peek();

@@ -42,7 +42,10 @@ ipset / tc, coturn and GStreamer.
   resolve each other's names sit on this private LAN, as on a real one.
 
 `coturn/` runs STUN and TURN on 203.0.113.10: UDP and TCP on 3478, TLS on 5349 with a CA made
-for the run (user `test`, password `test`, realm `rtc.test`).
+for the run (user `test`, password `test`, realm `rtc.test`). Two more servers run beside it: one on
+3479 whose nonces go stale after 10 s (`turnserver-stale.conf`), and one on 3480 for the TURN
+client's own tests (`turnserver-client.conf`), which relays on an IPv6 address as well
+(`fd00:203:113::10`, on the namespace's loopback) and knows a second user (`other`).
 
 `entry.sh` also makes the media fixtures with GStreamer (`videotestsrc` / `audiotestsrc`
 encoded to VP8 and VP9 IVF, H.264 Annex B and Opus Ogg) and exports the `RTC_TESTENV_*`
@@ -69,6 +72,15 @@ variables the tests read.
   - `testenv_turn`: a relayed call that must keep carrying messages for 50 s through a second
     coturn (port 3479, `coturn/turnserver-stale.conf`) whose nonces go stale after 10 s and whose
     allocations last 30 s, so the allocation survives only if a 438 Stale Nonce is retried.
+  - `testenv_turn_client`: the TURN client alone against coturn (port 3480): Allocate with
+    LIFETIME, DONT-FRAGMENT and EVEN-PORT, the reserved port taken with its RESERVATION-TOKEN, a
+    Send indication with DONT-FRAGMENT relayed to a peer, an IPv6 and a dual (IPv4 + IPv6)
+    allocation request (coturn 4.6.1 ignores ADDITIONAL-ADDRESS-FAMILY and gives the IPv4
+    address alone), 440 from the IPv4-only server and an IPv4 address from it afterwards, a
+    Refresh under another username that is not accepted, a 401 for a wrong password that is not answered again, and the
+    500 ms initial RTO kept after the server's round-trip time was measured; and a TCP allocation (RFC 6062) over a TCP control connection: a
+    Connect to a listener in `open-b`, a connection from `open-b` to the relayed address
+    accepted from its ConnectionAttempt, bytes both ways over each data connection.
   - `testenv_dtls`: a wrong `a=fingerprint` in the offer or the answer must end the checking
     side's connection as `failed`.
   - `testenv_ice_tcp`: ICE over TCP from an active candidate behind a symmetric NAT to a passive

@@ -19,6 +19,11 @@ bytes.workspace = true
 log.workspace = true
 socket2.workspace = true
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(fuzzing)'
+] }
+
 [dev-dependencies]
 env_logger.workspace = true
 tokio.workspace = true

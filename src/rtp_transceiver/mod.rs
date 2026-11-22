@@ -106,7 +106,7 @@ use crate::rtp_transceiver::rtp_sender::RTCRtpCodecParameters;
 use crate::rtp_transceiver::rtp_sender::rtp_encoding_parameters::RTCRtpEncodingParameters;
 pub use direction::RTCRtpTransceiverDirection;
 use log::trace;
-use shared::error::Result;
+use shared::error::{Error, Result};
 
 pub(crate) mod direction;
 pub(crate) mod fmtp;
@@ -202,14 +202,37 @@ impl From<RTCRtpTransceiverId> for RTCRtpReceiverId {
 /// # Specification
 ///
 /// See [RTCRtpTransceiverInit](https://www.w3.org/TR/webrtc/#dom-rtcrtptransceiverinit)
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct RTCRtpTransceiverInit {
-    /// The initial direction of the transceiver.
+    /// The initial direction of the transceiver; sendrecv by default.
     pub direction: RTCRtpTransceiverDirection,
     /// The stream IDs associated with the transceiver's sender.
     pub streams: Vec<MediaStreamId>,
     /// The encoding parameters to use when sending media.
     pub send_encodings: Vec<RTCRtpEncodingParameters>,
+}
+
+impl Default for RTCRtpTransceiverInit {
+    /// W3C `RTCRtpTransceiverInit`: direction "sendrecv", no streams, no send encodings.
+    fn default() -> Self {
+        Self::with_direction(RTCRtpTransceiverDirection::Sendrecv)
+    }
+}
+
+impl RTCRtpTransceiverInit {
+    /// An init with `direction`, no streams and no send encodings.
+    pub fn with_direction(direction: RTCRtpTransceiverDirection) -> Self {
+        Self {
+            direction,
+            streams: vec![],
+            send_encodings: vec![],
+        }
+    }
+
+    /// The init of a transceiver that offers to receive only.
+    pub fn recvonly() -> Self {
+        Self::with_direction(RTCRtpTransceiverDirection::Recvonly)
+    }
 }
 
 /// RTCRtpTransceiver represents a permanent pairing of an RTP sender and RTP receiver that share a common mid.
@@ -223,7 +246,60 @@ pub struct RTCRtpTransceiver<'a> {
     pub(crate) peer_connection: &'a mut RTCPeerConnection,
 }
 
+/// What the `b=` lines of a remote media section say (RFC 9429 section 5.10), in bits per
+/// second. `None`: the section has no such line.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct RTCRemoteBandwidth {
+    /// The most RTP the remote side accepts from this endpoint in the section: `b=TIAS` (RFC
+    /// 3890, the bit rate without transport overhead), else the value RFC 9429 section 5.10
+    /// derives from `b=AS` (kilobits per second, RFC 8866 section 5.8): "TIAS = AS * 1000 *
+    /// 0.95 - (50 * 40 * 8)", which takes out RTCP's 5% and an estimate of the header
+    /// overhead. The bound of the congestion controller's estimate, and what an encoder caps
+    /// its target with.
+    pub max_bitrate: Option<u64>,
+    /// The session bandwidth of the section (RFC 3550 section 6.2), which RTCP's share is
+    /// taken from: `b=TIAS`, else `b=AS` times 1000.
+    pub session_bitrate: Option<u64>,
+    /// `b=RS` (RFC 3556): the RTCP bandwidth allocated to active data senders.
+    pub rtcp_senders_bitrate: Option<u64>,
+    /// `b=RR` (RFC 3556): the RTCP bandwidth allocated to receivers; 0 turns their RTCP off.
+    pub rtcp_receivers_bitrate: Option<u64>,
+}
+
 impl RTCRtpTransceiver<'_> {
+    /// The bandwidth limits the remote description states for this transceiver's media
+    /// section (`b=TIAS` / `b=AS`, `b=RS`, `b=RR`); all `None` before a remote description
+    /// with such lines is applied.
+    pub fn remote_bandwidth(&self) -> RTCRemoteBandwidth {
+        self.peer_connection.rtp_transceivers[self.id].remote_bandwidth()
+    }
+
+    /// The `xr-format`s the remote description lists in `a=rtcp-xr` for this transceiver's
+    /// media section (RFC 3611 section 5.1; the media-level attribute, else the session's),
+    /// such as `rcvr-rtt=all`. `None`: no such attribute. `Some` of an empty list: the remote
+    /// side wants no XR blocks (RFC 3611 section 5.2).
+    pub fn remote_rtcp_xr(&self) -> Option<&[String]> {
+        self.peer_connection.rtp_transceivers[self.id].remote_rtcp_xr()
+    }
+
+    /// The packet times the remote description states for this transceiver's media section
+    /// (`a=ptime`, `a=maxptime`, in milliseconds; RFC 8866 sections 6.4, 6.5): how much media
+    /// the remote side wants in a packet, and the most it takes. For Opus they are its
+    /// `ptime` and `maxptime` (RFC 7587 section 7). All `None` before a remote description
+    /// states them. This endpoint's own are
+    /// [`MediaEngine::set_audio_packet_time`](crate::peer_connection::configuration::media_engine::MediaEngine::set_audio_packet_time).
+    pub fn remote_packet_time(
+        &self,
+    ) -> crate::peer_connection::configuration::media_engine::RTCPacketTime {
+        self.peer_connection.rtp_transceivers[self.id].remote_packet_time()
+    }
+
+    /// Whether the last answer negotiated reduced-size RTCP for this transceiver's media
+    /// section (`a=rtcp-rsize` in the offer and in the answer, RFC 5506 section 5).
+    pub fn rtcp_reduced_size(&self) -> bool {
+        self.peer_connection.rtp_transceivers[self.id].rtcp_reduced_size()
+    }
+
     /// Returns the media stream identification tag (mid) for this transceiver.
     ///
     /// The mid uniquely identifies the media description in the SDP. When not already set,
@@ -238,41 +314,29 @@ impl RTCRtpTransceiver<'_> {
         self.peer_connection.rtp_transceivers[self.id].mid()
     }
 
-    /// Returns the id of this transceiver's [`RTCRtpSender`], if it has one.
+    /// Returns the id of this transceiver's [`RTCRtpSender`].
+    ///
+    /// Every transceiver has a sender from its creation, with or without a track (W3C webrtc
+    /// 5.4 `[[Sender]]`); the value is always `Some`.
     ///
     /// [`RTCRtpSender`]: crate::rtp_transceiver::rtp_sender::RTCRtpSender
     pub fn sender(&self) -> Option<RTCRtpSenderId> {
-        // peer_connection is mutable borrow, its rtp_transceivers won't be resized,
-        // so, [self.id] here is safe.
-        if self.peer_connection.rtp_transceivers[self.id]
-            .sender()
-            .is_some()
-        {
-            Some(RTCRtpSenderId::from(self.id))
-        } else {
-            None
-        }
+        Some(RTCRtpSenderId::from(self.id))
     }
 
-    /// Returns the id of this transceiver's [`RTCRtpReceiver`], if it has one.
+    /// Returns the id of this transceiver's [`RTCRtpReceiver`].
+    ///
+    /// Every transceiver has a receiver from its creation, whatever its direction (W3C webrtc
+    /// 5.4 `[[Receiver]]`); the value is always `Some`.
     ///
     /// [`RTCRtpReceiver`]: crate::rtp_transceiver::rtp_receiver::RTCRtpReceiver
     pub fn receiver(&self) -> Option<RTCRtpReceiverId> {
-        // peer_connection is mutable borrow, its rtp_transceivers won't be resized,
-        // so, [self.id] here is safe.
-        if self.peer_connection.rtp_transceivers[self.id]
-            .receiver()
-            .is_some()
-        {
-            Some(RTCRtpReceiverId::from(self.id))
-        } else {
-            None
-        }
+        Some(RTCRtpReceiverId::from(self.id))
     }
 
-    /// Returns the preferred direction of the transceiver.
-    ///
-    /// This indicates the direction that the application prefers for media flow.
+    /// Returns the preferred direction of the transceiver:
+    /// [`Stopped`](RTCRtpTransceiverDirection::Stopped) once [`stop`](Self::stop) was called
+    /// or the transceiver is stopped, otherwise the direction the application prefers.
     ///
     /// # Specification
     ///
@@ -280,17 +344,30 @@ impl RTCRtpTransceiver<'_> {
     pub fn direction(&self) -> RTCRtpTransceiverDirection {
         // peer_connection is mutable borrow, its rtp_transceivers won't be resized,
         // so, [self.id] here is safe.
-        self.peer_connection.rtp_transceivers[self.id].direction()
+        let transceiver = &self.peer_connection.rtp_transceivers[self.id];
+        if transceiver.stopped() {
+            RTCRtpTransceiverDirection::Stopped
+        } else {
+            transceiver.direction()
+        }
     }
 
-    /// Whether the transceiver is stopped: by [`stop`](Self::stop), or created stopped for a
-    /// rejected m= section of a remote offer. A stopped transceiver sends and receives nothing.
+    /// Whether the transceiver is stopping or stopped: [`stop`](Self::stop) was called, or a
+    /// description rejected its m= section. Such a transceiver sends and receives nothing and
+    /// is offered rejected; see [`is_stopped`](Self::is_stopped) for the second state alone.
     ///
     /// # Specification
     ///
-    /// See [RTCRtpTransceiver.stopped](https://www.w3.org/TR/webrtc/#dfn-stopped).
+    /// See [RTCRtpTransceiver.stop()](https://www.w3.org/TR/webrtc/#dom-rtcrtptransceiver-stop).
     pub fn stopped(&self) -> bool {
         self.peer_connection.rtp_transceivers[self.id].stopped()
+    }
+
+    /// W3C `[[Stopped]]`: a description rejected this transceiver's m= section (or it was
+    /// created for a rejected one). [`stop`](Self::stop) alone leaves it stopping, not
+    /// stopped, until the exchange that rejects the section completes.
+    pub fn is_stopped(&self) -> bool {
+        self.peer_connection.rtp_transceivers[self.id].is_stopped()
     }
 
     /// Whether a remote offer's new media section may be associated with this transceiver.
@@ -335,37 +412,55 @@ impl RTCRtpTransceiver<'_> {
 
     /// Sets the preferred direction of this transceiver.
     ///
-    /// Changing the direction may trigger renegotiation to update the session description.
+    /// Changing the direction updates the negotiation-needed flag; setting the direction it
+    /// already has does nothing.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::ErrConnectionClosed`] when the connection is closed and
+    ///   [`Error::InvalidStateError`] when the transceiver is stopping or stopped (both W3C
+    ///   `InvalidStateError`)
+    /// - [`Error::ErrInvalidDirection`] for
+    ///   [`Stopped`](RTCRtpTransceiverDirection::Stopped) or
+    ///   [`Unspecified`](RTCRtpTransceiverDirection::Unspecified) (W3C `TypeError`)
     ///
     /// # Specification
     ///
     /// See [RTCRtpTransceiver.direction](https://www.w3.org/TR/webrtc/#dom-rtcrtptransceiver-direction).
-    pub fn set_direction(&mut self, direction: RTCRtpTransceiverDirection) {
+    pub fn set_direction(&mut self, direction: RTCRtpTransceiverDirection) -> Result<()> {
+        if self.peer_connection.is_closed() {
+            return Err(Error::ErrConnectionClosed);
+        }
         // peer_connection is mutable borrow, its rtp_transceivers won't be resized,
         // so, [self.id] here is safe.
-        let previous_direction = self.peer_connection.rtp_transceivers[self.id].direction();
-        self.peer_connection.rtp_transceivers[self.id].set_direction(direction);
-        // Compare the effective direction after the setter (rather than the requested value) so
-        // any future normalization inside `set_direction` cannot bypass this check.
-        let current_direction = self.peer_connection.rtp_transceivers[self.id].direction();
-
-        // https://www.w3.org/TR/webrtc/#dom-rtcrtptransceiver-direction
-        // The direction setter is a no-op when the new direction equals the current one;
-        // otherwise its final step updates the negotiation-needed flag for the connection,
-        // which may fire a `negotiationneeded` event.
-        if current_direction != previous_direction {
-            trace!(
-                "Changing direction of transceiver from {previous_direction} to {current_direction}"
-            );
-            self.peer_connection.on_transceiver_direction_changed();
+        if self.peer_connection.rtp_transceivers[self.id].stopped() {
+            return Err(Error::InvalidStateError);
         }
+        if matches!(
+            direction,
+            RTCRtpTransceiverDirection::Stopped | RTCRtpTransceiverDirection::Unspecified
+        ) {
+            return Err(Error::ErrInvalidDirection);
+        }
+        let previous_direction = self.peer_connection.rtp_transceivers[self.id].direction();
+        if direction == previous_direction {
+            return Ok(());
+        }
+        // A sender that is to send needs encodings (SSRCs) to describe.
+        if direction.has_send() {
+            self.peer_connection.ensure_send_encodings(self.id)?;
+        }
+        self.peer_connection.rtp_transceivers[self.id].set_direction(direction);
+        trace!("Changing direction of transceiver from {previous_direction} to {direction}");
+        self.peer_connection.on_transceiver_direction_changed();
+        Ok(())
     }
 
     /// Returns the negotiated direction of the transceiver.
     ///
-    /// This indicates the current direction as established by the most recent session description
-    /// exchange. If this transceiver has never been negotiated or if it's stopped, this returns
-    /// [`RTCRtpTransceiverDirection::Unspecified`].
+    /// The direction the last completed offer/answer exchange negotiated;
+    /// [`RTCRtpTransceiverDirection::Unspecified`] (W3C null) before the first, and
+    /// [`RTCRtpTransceiverDirection::Stopped`] once the transceiver is stopped.
     ///
     /// # Specification
     ///
@@ -373,46 +468,69 @@ impl RTCRtpTransceiver<'_> {
     pub fn current_direction(&self) -> RTCRtpTransceiverDirection {
         // peer_connection is mutable borrow, its rtp_transceivers won't be resized,
         // so, [self.id] here is safe.
-        self.peer_connection.rtp_transceivers[self.id].current_direction()
+        let transceiver = &self.peer_connection.rtp_transceivers[self.id];
+        if transceiver.is_stopped() {
+            RTCRtpTransceiverDirection::Stopped
+        } else {
+            transceiver.current_direction()
+        }
     }
 
     /// Irreversibly stops the transceiver.
     ///
-    /// After calling this method, the transceiver will no longer send or receive media.
-    /// This operation cannot be undone.
+    /// The sender stops sending (an RTCP BYE goes out for each stream it sent), the receiver
+    /// stops receiving and its track ends
+    /// ([`RTCTrackEvent::OnClose`](crate::peer_connection::event::RTCTrackEvent::OnClose)),
+    /// and the direction reads [`Stopped`](RTCRtpTransceiverDirection::Stopped). The
+    /// transceiver is then stopping: the next offer rejects its m= section, an answer made
+    /// before that still answers it (inactive), and it is stopped
+    /// ([`is_stopped`](Self::is_stopped)) and removed once an exchange rejecting the section
+    /// completes. Stopping a stopping transceiver does nothing.
     ///
     /// # Errors
     ///
-    /// Returns an error if the sender's interceptor bindings cannot be torn down.
+    /// [`Error::ErrConnectionClosed`] when the connection is closed (W3C
+    /// `InvalidStateError`), or an error if the sender's interceptor bindings cannot be torn
+    /// down.
     ///
     /// # Specification
     ///
     /// See [RTCRtpTransceiver.stop()](https://www.w3.org/TR/webrtc/#dom-rtcrtptransceiver-stop).
     pub fn stop(&mut self) -> Result<()> {
+        if self.peer_connection.is_closed() {
+            return Err(Error::ErrConnectionClosed);
+        }
         // peer_connection is mutable borrow, its rtp_transceivers won't be resized,
         // so, [self.id] here is safe.
-        let was_stopped = self.peer_connection.rtp_transceivers[self.id].stopped();
-        self.peer_connection.rtp_transceivers[self.id].stop(
+        if self.peer_connection.rtp_transceivers[self.id].stopped() {
+            return Ok(());
+        }
+        let ended = self.peer_connection.rtp_transceivers[self.id].stop_sending_and_receiving(
             &self.peer_connection.media_engine,
             &mut self.peer_connection.interceptor,
         )?;
-        // https://www.w3.org/TR/webrtc/#dom-rtcrtptransceiver-stop, last step: update the
-        // negotiation-needed flag. Stopping a stopped transceiver does nothing.
-        if !was_stopped {
-            self.peer_connection
-                .on_transceiver_stopped_or_streams_changed();
+        if ended {
+            self.peer_connection.announce_receiver_track_ended(self.id);
         }
+        // https://www.w3.org/TR/webrtc/#dom-rtcrtptransceiver-stop, last step: update the
+        // negotiation-needed flag.
+        self.peer_connection
+            .on_transceiver_stopped_or_streams_changed();
         Ok(())
     }
 
     /// Sets the preferred codec list for this transceiver.
     ///
-    /// This overrides the default codec preferences from the media engine. If an empty list is
-    /// provided, the transceiver resets to use the default codecs from the media engine.
+    /// This overrides the default codec preferences from the media engine. An empty list
+    /// resets the transceiver to the engine's codecs; duplicates are removed, keeping the
+    /// first.
     ///
     /// # Errors
     ///
-    /// Returns an error if any codec in the list is not supported by the media engine.
+    /// [`Error::InvalidModificationError`] (W3C webrtc 5.4 `setCodecPreferences`) when a codec
+    /// matches none the engine can send or receive for this kind (the codec dictionary match:
+    /// MIME type, clock rate, channels and format parameters), or when the list has only
+    /// retransmission, redundancy, forward error correction or comfort noise formats.
     ///
     /// # Specification
     ///
@@ -420,6 +538,8 @@ impl RTCRtpTransceiver<'_> {
     pub fn set_codec_preferences(&mut self, codecs: Vec<RTCRtpCodecParameters>) -> Result<()> {
         // peer_connection is mutable borrow, its rtp_transceivers won't be resized,
         // so, [self.id] here is safe.
+        let codecs = self.peer_connection.rtp_transceivers[self.id]
+            .validate_codec_preferences(codecs, &self.peer_connection.media_engine)?;
         self.peer_connection.rtp_transceivers[self.id]
             .set_codec_preferences(codecs, &self.peer_connection.media_engine)
     }
@@ -484,10 +604,16 @@ mod tests {
         let mut answerer = build_pc();
 
         let tid = offerer
-            .add_transceiver_from_kind(RtpCodecKind::Video, None)
+            .add_transceiver_from_kind(
+                RtpCodecKind::Video,
+                Some(crate::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+            )
             .expect("add offerer transceiver");
         answerer
-            .add_transceiver_from_kind(RtpCodecKind::Video, None)
+            .add_transceiver_from_kind(
+                RtpCodecKind::Video,
+                Some(crate::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+            )
             .expect("add answerer transceiver");
 
         negotiate(&mut offerer, &mut answerer);
@@ -502,7 +628,8 @@ mod tests {
         offerer
             .rtp_transceiver(tid)
             .expect("transceiver exists")
-            .set_direction(RTCRtpTransceiverDirection::Inactive);
+            .set_direction(RTCRtpTransceiverDirection::Sendrecv)
+            .expect("the change is accepted");
 
         assert_eq!(
             count_negotiation_needed(&mut offerer),
@@ -517,10 +644,16 @@ mod tests {
         let mut answerer = build_pc();
 
         let tid = offerer
-            .add_transceiver_from_kind(RtpCodecKind::Video, None)
+            .add_transceiver_from_kind(
+                RtpCodecKind::Video,
+                Some(crate::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+            )
             .expect("add offerer transceiver");
         answerer
-            .add_transceiver_from_kind(RtpCodecKind::Video, None)
+            .add_transceiver_from_kind(
+                RtpCodecKind::Video,
+                Some(crate::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+            )
             .expect("add answerer transceiver");
 
         negotiate(&mut offerer, &mut answerer);
@@ -531,7 +664,8 @@ mod tests {
         offerer
             .rtp_transceiver(tid)
             .expect("transceiver exists")
-            .set_direction(current);
+            .set_direction(current)
+            .expect("the change is accepted");
 
         assert_eq!(
             count_negotiation_needed(&mut offerer),
@@ -573,17 +707,21 @@ mod tests {
         let offer = pc.create_offer(None).expect("create offer");
         assert_eq!(msid_lines(&offer.sdp), vec!["- track"]);
 
-        pc.rtp_sender(tid.into()).expect("sender").set_streams(vec![
-            "one".to_string(),
-            "two".to_string(),
-            "one".to_string(),
-        ]);
+        pc.rtp_sender(tid.into())
+            .expect("sender")
+            .set_streams(vec![
+                "one".to_string(),
+                "two".to_string(),
+                "one".to_string(),
+            ])
+            .expect("the change is accepted");
         let offer = pc.create_offer(None).expect("create offer");
         assert_eq!(msid_lines(&offer.sdp), vec!["one track", "two track"]);
 
         pc.rtp_sender(tid.into())
             .expect("sender")
-            .set_streams(vec![]);
+            .set_streams(vec![])
+            .expect("the change is accepted");
         let offer = pc.create_offer(None).expect("create offer");
         assert_eq!(msid_lines(&offer.sdp), vec!["- track"]);
     }

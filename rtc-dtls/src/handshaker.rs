@@ -79,9 +79,15 @@ impl DTLSConn {
     /// has been queued for the peer where one applies), or the retransmissions ran out. The
     /// association is then failed and stays failed (W3C webrtc 5.5.1 RTCDtlsTransport "failed").
     pub(crate) fn handshake(&mut self, now: Instant) -> Result<()> {
+        self.state.clock = Some(now);
+        if self.v13.is_some() {
+            return self.drive_dtls13(now, false);
+        }
         if self.failed {
             return Err(Error::ErrConnClosed);
         }
+        // The handshake deadline counts from the first time the handshake is driven.
+        self.handshake_started.get_or_insert(now);
         let peer_repeated_flight = std::mem::take(&mut self.peer_repeated_flight);
         let flight_before = self.current_flight.to_string();
         let mut result = self.handshake_steps(now);
@@ -95,6 +101,21 @@ impl DTLSConn {
         if result.is_err() {
             self.fail();
         }
+        result
+    }
+
+    /// Advances the DTLS 1.3 association to `now`: sets the timers that what has happened
+    /// since armed, and with `timeout` acts on those that are due.
+    pub(crate) fn drive_dtls13(&mut self, now: Instant, timeout: bool) -> Result<()> {
+        let Some(v13) = &mut self.v13 else {
+            return Ok(());
+        };
+        let result = if timeout {
+            v13.handle_timeout(now)
+        } else {
+            v13.drive(now)
+        };
+        self.sync_dtls13();
         result
     }
 
@@ -168,6 +189,7 @@ impl DTLSConn {
 
         // Prepare flights
         self.current_retransmit_count = 0;
+        self.early_data_retransmit_done = false;
         self.retransmit = self.current_flight.has_retransmit();
 
         let result =
@@ -226,9 +248,66 @@ impl DTLSConn {
         if self.current_flight.is_last_send_flight() || self.is_handshake_completed() {
             Ok(HandshakeState::Finished)
         } else {
-            self.current_retransmit_timer = Some(now + self.handshake_config.retransmit_interval);
+            // RFC 6347 4.2.4.1: the timer's current value, which doubles at each expiry.
+            self.current_retransmit_timer = Some(now + self.current_retransmit_interval);
             Ok(HandshakeState::Waiting)
         }
+    }
+
+    /// When the handshake is given up, if a limit is configured and it has started.
+    pub(crate) fn handshake_deadline(&self) -> Option<Instant> {
+        if self.is_handshake_completed() || self.failed {
+            return None;
+        }
+        Some(self.handshake_started? + self.handshake_config.handshake_timeout?)
+    }
+
+    /// When this association next needs [`Self::handle_timeout`]: its retransmission timer or,
+    /// if sooner, the handshake deadline.
+    pub(crate) fn next_timeout(&self) -> Option<Instant> {
+        if let Some(v13) = &self.v13 {
+            return v13.next_timeout();
+        }
+        match (self.current_retransmit_timer, self.handshake_deadline()) {
+            (Some(timer), Some(deadline)) => Some(timer.min(deadline)),
+            (timer, deadline) => timer.or(deadline),
+        }
+    }
+
+    /// Advances the association's timers to `now`: gives the handshake up at its deadline,
+    /// retransmits the current flight when the retransmission timer has expired.
+    ///
+    /// # Errors
+    ///
+    /// `ErrHandshakeTimeout` when the handshake did not complete in the configured time. The
+    /// association has then failed.
+    pub(crate) fn handle_timeout(&mut self, now: Instant) -> Result<()> {
+        if self.v13.is_some() {
+            return self.drive_dtls13(now, true);
+        }
+        if self
+            .handshake_deadline()
+            .is_some_and(|deadline| now >= deadline)
+        {
+            warn!(
+                "[handshake:{}] {} did not complete in time",
+                srv_cli_str(self.state.is_client),
+                self.current_flight,
+            );
+            self.current_handshake_state = HandshakeState::Errored;
+            self.fail();
+            return Err(Error::ErrHandshakeTimeout);
+        }
+        if self
+            .current_retransmit_timer
+            .is_some_and(|timer| now >= timer)
+        {
+            self.current_retransmit_timer = None;
+            if !self.is_handshake_completed() {
+                self.handshake_timeout(now)?;
+            }
+        }
+        Ok(())
     }
     fn wait(&mut self) -> Result<HandshakeState> {
         if self.handshake_rx.take().is_some() {
@@ -267,6 +346,12 @@ impl DTLSConn {
                     // A partial or repeated flight must not cancel retransmission.
                     // Only a complete next flight advances the handshake (RFC 6347 4.2.4).
                     self.current_retransmit_timer = None;
+                    // RFC 6347 4.2.4.1: the backed-off timer value is kept until a flight gets
+                    // through without loss, and this one did if it was never retransmitted.
+                    if self.current_retransmit_count == 0 {
+                        self.current_retransmit_interval =
+                            self.handshake_config.retransmit_interval;
+                    }
                     debug!(
                         "[handshake:{}] {} -> {}",
                         srv_cli_str(self.state.is_client),
@@ -336,6 +421,7 @@ impl DTLSConn {
     }
 
     pub(crate) fn handshake_timeout(&mut self, now: Instant) -> Result<()> {
+        self.state.clock = Some(now);
         let next_handshake_state = if self.current_handshake_state == HandshakeState::Waiting {
             debug!(
                 "[handshake:{}] {} retransmit_timer",
@@ -350,19 +436,21 @@ impl DTLSConn {
                 self.maximum_retransmit_number,
             );
             if self.retransmit {
+                // RFC 6347 4.2.4.1: retransmit, and double the timer up to its maximum. There
+                // is no count of retransmissions to run out of: the handshake deadline
+                // (`handle_timeout`) is what gives a handshake up.
                 self.current_retransmit_count += 1;
-                if self.current_retransmit_count > self.maximum_retransmit_number {
-                    warn!(
-                        "[handshake:{}] {} current_retransmit_count {} > maximum_retransmit_number {}, HandshakeState::Errored",
-                        srv_cli_str(self.state.is_client),
-                        self.current_flight,
-                        self.current_retransmit_count,
-                        self.maximum_retransmit_number,
-                    );
-                    Some(HandshakeState::Errored)
-                } else {
-                    Some(HandshakeState::Sending)
+                self.current_retransmit_interval = (self.current_retransmit_interval * 2)
+                    .min(self.handshake_config.maximum_retransmit_interval)
+                    .max(self.handshake_config.retransmit_interval);
+                // RFC 6347 4.1.1.1: when retransmissions go unanswered the records may be too
+                // large for the path, so they are cut smaller.
+                if self.current_retransmit_count > RETRANSMITS_BEFORE_MTU_BACKOFF {
+                    self.handshake_mtu = (self.handshake_mtu / 2)
+                        .max(FALLBACK_HANDSHAKE_MTU)
+                        .min(self.handshake_mtu);
                 }
+                Some(HandshakeState::Sending)
             } else {
                 self.current_retransmit_timer =
                     Some(now + self.handshake_config.retransmit_interval);

@@ -27,6 +27,7 @@ use crate::peer_connection::message::{
 };
 use crate::peer_connection::state::peer_connection_state::RTCPeerConnectionState;
 use crate::peer_connection::state::signaling_state::RTCSignalingState;
+use crate::peer_connection::transport::sctp::SctpPath;
 use crate::statistics::accumulator::RTCStatsAccumulator;
 use ::interceptor::Packet;
 use log::warn;
@@ -210,10 +211,55 @@ impl RTCPeerConnection {
         // own `read_outs` — the pipeline empties that within a single `handle_read` — and it
         // is data-channel output only, so unrelated media cannot throttle SCTP.
         let downstream_backlog = self.pipeline_context.data_read_outs.len();
-        SctpHandler::new(
+        // The path under SCTP is looked at again only when ICE selected a pair or a DTLS
+        // handshake completed since it was last looked at: a comparison, not work, per call.
+        let selected_pair_changes = self
+            .pipeline_context
+            .ice_handler_context
+            .selected_pair_changes;
+        let path = self
+            .pipeline_context
+            .sctp_handler_context
+            .take_path_refresh(selected_pair_changes)
+            .then(|| self.sctp_path());
+        let mut handler = SctpHandler::new(
             &mut self.pipeline_context.sctp_handler_context,
             downstream_backlog,
-        )
+        );
+        if let Some(path) = path {
+            handler.apply_path(path);
+        }
+        handler
+    }
+
+    /// What lies under the SCTP association: the selected candidate pair (its address
+    /// family, its transport, whether this side's candidate is relayed) and what the DTLS
+    /// version and cipher suite add to a record. `None` while no pair is selected.
+    fn sctp_path(&self) -> Option<SctpPath> {
+        let (local, remote) = self
+            .pipeline_context
+            .ice_handler_context
+            .ice_transport
+            .agent
+            .get_selected_candidate_pair()?;
+        // The record overhead of the version and suite negotiated (a DTLS 1.3 record is
+        // smaller than a DTLS 1.2 one).
+        let dtls_record_overhead = self
+            .pipeline_context
+            .dtls_handler_context
+            .dtls_transport
+            .dtls_endpoint
+            .as_ref()
+            .and_then(|endpoint| {
+                endpoint.record_overhead(shared::TransportContext::default().peer_addr)
+            })
+            .unwrap_or(SctpPath::DEFAULT_DTLS_RECORD_OVERHEAD);
+        Some(SctpPath {
+            ipv6: remote.addr().is_ipv6(),
+            tcp: local.network_type().is_tcp(),
+            relayed: local.candidate_type() == ::ice::candidate::CandidateType::Relay,
+            dtls_record_overhead,
+        })
     }
 
     pub(crate) fn get_datachannel_handler(&mut self) -> DataChannelHandler<'_> {
@@ -392,22 +438,55 @@ impl RTCPeerConnection {
             }
         }));
 
-        // Finally, put intermediate_eouts into RTCPeerConnection's eouts
+        // Finally, put intermediate_eouts into RTCPeerConnection's eouts, with the transport
+        // and connection state events each causes, in the spec's order: the transport's own
+        // event, then the connection's (W3C webrtc-pc 4.4.1.3, 5.5, 5.6).
         while let Some(evt_internal) = intermediate_eouts.pop_front() {
-            match &evt_internal.event {
+            match evt_internal.event {
                 RTCEventInternal::RTCPeerConnectionEvent(
-                    RTCPeerConnectionEvent::OnIceConnectionStateChangeEvent(_),
-                )
-                | RTCEventInternal::DTLSHandshakeComplete(_, _)
-                | RTCEventInternal::DTLSClosed => {
+                    RTCPeerConnectionEvent::OnIceConnectionStateChangeEvent(state),
+                ) => {
+                    // `close()` sets the ICE connection state without an event; what the
+                    // agent reports once it is closed is not told either.
+                    if self.is_closed() {
+                        continue;
+                    }
+                    self.announce_ice_transport_state(state);
+                    self.pipeline_context.event_outs.push_back(
+                        RTCPeerConnectionEvent::OnIceConnectionStateChangeEvent(state),
+                    );
                     self.update_connection_state(false);
                 }
+                RTCEventInternal::DTLSHandshakeComplete(_, _) | RTCEventInternal::DTLSClosed => {
+                    self.announce_transport_states();
+                    self.update_connection_state(false);
+                }
+                RTCEventInternal::SRTPKeyExhausted => {
+                    // RFC 3711 section 9.2: re-key or end the session. A new DTLS association
+                    // is not something a browser peer takes on a transport that has one, so
+                    // the session ends: the transport fails with the reason.
+                    use crate::peer_connection::rtc_error::{RTCError, RTCErrorDetailType};
+                    let now = evt_internal.now;
+                    self.get_dtls_handler().fail_with(
+                        now,
+                        RTCError::new(
+                            RTCErrorDetailType::DtlsFailure,
+                            "the SRTP master key reached its lifetime (RFC 3711 section 9.2)",
+                        ),
+                    );
+                    self.announce_transport_states();
+                }
+                RTCEventInternal::RTCPeerConnectionEvent(evt) => {
+                    self.pipeline_context.event_outs.push_back(evt);
+                }
                 _ => {}
-            };
-
-            if let RTCEventInternal::RTCPeerConnectionEvent(evt) = evt_internal.event {
-                self.pipeline_context.event_outs.push_back(evt);
             }
+        }
+        // The SCTP transport's state follows its association, which any event may have moved;
+        // the selected pair is the agent's, whose change event the DTLS handler consumes.
+        self.announce_transport_states();
+        if !self.is_closed() {
+            self.announce_selected_candidate_pair();
         }
 
         raised
@@ -493,6 +572,9 @@ impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCP
     }
 
     fn poll_event(&mut self) -> Option<Self::Eout> {
+        // A description or a timeout may have moved a transport's state (DTLS to "connecting"
+        // when its handshake starts, say): announce it behind what is queued.
+        self.announce_transport_states();
         // Drain the backlog before sweeping the pipeline again: anything a sweep adds lands
         // behind it anyway, and the sweep runs once the backlog is empty.
         if let Some(evt) = self.pipeline_context.event_outs.pop_front() {
@@ -515,6 +597,8 @@ impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCP
         for_each_handler!(forward: process_handler!(self, handler, {
             handler.handle_timeout(now)?;
         }));
+        // The DTMF senders' playout (W3C webrtc-pc section 7).
+        self.run_dtmf(now)?;
         Ok(())
     }
 
@@ -525,6 +609,9 @@ impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCP
                 eto = Some(eto.map_or(next, |curr| std::cmp::min(curr, next)));
             }
         }));
+        if let Some(dtmf) = self.dtmf_timeout() {
+            eto = Some(eto.map_or(dtmf, |curr| curr.min(dtmf)));
+        }
         eto
     }
 
@@ -546,6 +633,8 @@ impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCP
         // selected candidate pair every outbound packet is addressed with; the packets wait in
         // `write_outs` for the caller's next `poll_write`.
         let now = self.pipeline_context.now;
+        // RFC 3550 6.6: the SSRCs of a participant that leaves say BYE.
+        self.get_interceptor_handler().request_goodbye(now);
         self.get_sctp_handler().request_abort();
         self.get_dtls_handler().request_close(now);
         self.flush_writes();
@@ -569,7 +658,20 @@ impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCP
         //   DtlsHandler::close()        → dtls_transport.stop()
         //   IceHandler::close()         → ice_transport.agent.close()
 
-        self.update_connection_state(true);
+        // https://www.w3.org/TR/webrtc/#dom-rtcpeerconnection-close (steps #6 to #11): every
+        // transceiver is stopped, and the transports' and the connection's states become
+        // "closed", all without an event.
+        for transceiver in &mut self.rtp_transceivers {
+            if !transceiver.is_stopped()
+                && let Err(err) = transceiver.stop(&self.media_engine, &mut *self.interceptor)
+            {
+                close_errs.push(err);
+            }
+        }
+        self.ice_transport_mut().ice_connection_state =
+            crate::peer_connection::state::ice_connection_state::RTCIceConnectionState::Closed;
+        self.peer_connection_state = RTCPeerConnectionState::Closed;
+        self.close_announced_states();
 
         flatten_errs(close_errs)
     }

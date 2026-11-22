@@ -25,8 +25,10 @@ use serde_json::Value;
 use std::collections::HashSet;
 use std::time::Duration;
 
-/// Members that need an encoder, a decoder, capture, playout, ECN or RFC 8888 feedback: the
-/// engine measures none of them, so with nothing supplied none may appear.
+/// Members that need an encoder, a decoder, capture or playout: the engine measures none of
+/// them, so with nothing supplied none may appear. (The RFC 8888 members are not among them:
+/// the default interceptor set negotiates `ack ccfb` between two engines, and reports what
+/// the feedback says.)
 const NEVER_WRITTEN: &[&str] = &[
     "framesDecoded",
     "keyFramesDecoded",
@@ -69,13 +71,7 @@ const NEVER_WRITTEN: &[&str] = &[
     "totalCorruptionProbability",
     "totalSquaredCorruptionProbability",
     "corruptionMeasurements",
-    "packetsReceivedWithEct1",
-    "packetsReceivedWithCe",
-    "packetsReportedAsLost",
-    "packetsReportedAsLostButRecovered",
-    "packetsWithBleachedEct1Marking",
     "packetsSentWithEct1",
-    "totalEncodedBytesTarget",
     "framesSent",
     "hugeFramesSent",
     "framesEncoded",
@@ -83,14 +79,17 @@ const NEVER_WRITTEN: &[&str] = &[
     "psnrSum",
     "psnrMeasurements",
     "totalEncodeTime",
-    "totalPacketSendDelay",
     "qualityLimitationReason",
     "qualityLimitationDurations",
     "qualityLimitationResolutionChanges",
     "encoderImplementation",
     "powerEfficientEncoder",
     "scalabilityMode",
-    "mediaSourceId",
+    "availableIncomingBitrate",
+    "packetsDiscardedOnSend",
+    "bytesDiscardedOnSend",
+    // Removed from webrtc-stats: never written, supplied or not.
+    "totalEncodedBytesTarget",
 ];
 
 /// Members whose empty string is a real value rather than "none".

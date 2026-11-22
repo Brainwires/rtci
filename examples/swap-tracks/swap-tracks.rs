@@ -405,7 +405,7 @@ async fn run(
                                 .rtp_sender(output_sender_id)
                                 .ok_or(Error::ErrRTPSenderNotExisted)?;
 
-                            output_sender.track().ssrcs().next().unwrap_or(0)
+                            output_sender.ssrcs().next().unwrap_or(0)
                         };
 
                         rtp_packet.header.ssrc = output_ssrc;

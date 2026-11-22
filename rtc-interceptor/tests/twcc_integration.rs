@@ -174,6 +174,54 @@ fn test_twcc_sender_adds_sequence_numbers() {
     );
 }
 
+/// RFC 8285 4.2: a transport-wide sequence number mapped to an ID above 14 is sent in the
+/// two-byte form, on a packet without extensions and on one that came with one-byte elements;
+/// before, the first could not be marshalled and the second went out unnumbered.
+#[test]
+fn test_twcc_sender_numbers_packets_when_the_id_needs_the_two_byte_form() {
+    let mut chain = Registry::new()
+        .with(Slot::TwccSender, TwccSenderBuilder::new().build())
+        .build();
+
+    let ssrc = 0x12345678;
+    let ext_id = 20u16;
+    chain.bind_local_stream(&twcc_stream_info(ssrc, ext_id));
+
+    let bare = create_rtp_packet(ssrc, 1, 3000, 100);
+    let mut with_one_byte_element = create_rtp_packet(ssrc, 2, 6000, 100);
+    if let Packet::Rtp(rtp) = &mut with_one_byte_element.message.packet {
+        rtp.header.version = 2;
+        rtp.header
+            .set_extension(3, bytes::Bytes::from_static(b"0"))
+            .unwrap();
+    }
+    chain.handle_write(bare).unwrap();
+    chain.handle_write(with_one_byte_element).unwrap();
+
+    let mut numbers = Vec::new();
+    while let Some(pkt) = chain.poll_write() {
+        let Packet::Rtp(rtp) = &pkt.message.packet else {
+            continue;
+        };
+        // What the peer parses from the wire.
+        let raw = rtp.marshal().expect("the stamped packet marshals");
+        let parsed = rtp::Packet::unmarshal(&mut raw.freeze()).unwrap();
+        assert_eq!(
+            rtp::header::EXTENSION_PROFILE_TWO_BYTE,
+            parsed.header.extension_profile
+        );
+        numbers.push(extract_twcc_seq(&parsed, ext_id as u8));
+        if parsed.header.sequence_number == 2 {
+            assert_eq!(
+                Some(bytes::Bytes::from_static(b"0")),
+                parsed.header.get_extension(3),
+                "the element the packet came with is kept"
+            );
+        }
+    }
+    assert_eq!(vec![Some(0), Some(1)], numbers);
+}
+
 #[test]
 fn test_twcc_sender_multiple_streams_share_counter() {
     let mut chain = Registry::new()
@@ -288,6 +336,7 @@ fn test_twcc_receiver_generates_feedback_on_timeout() {
         .with(
             Slot::TwccReceiver,
             TwccReceiverBuilder::new()
+                .with_adaptive_interval(false)
                 .with_interval(Duration::from_millis(100))
                 .build(),
         )
@@ -348,6 +397,7 @@ fn test_twcc_receiver_feedback_contains_packet_info() {
         .with(
             Slot::TwccReceiver,
             TwccReceiverBuilder::new()
+                .with_adaptive_interval(false)
                 .with_interval(Duration::from_millis(100))
                 .build(),
         )
@@ -416,6 +466,7 @@ fn test_twcc_receiver_ignores_streams_without_twcc() {
         .with(
             Slot::TwccReceiver,
             TwccReceiverBuilder::new()
+                .with_adaptive_interval(false)
                 .with_interval(Duration::from_millis(100))
                 .build(),
         )
@@ -469,7 +520,10 @@ fn test_twcc_receiver_configurable_interval() {
     let mut chain = Registry::new()
         .with(
             Slot::TwccReceiver,
-            TwccReceiverBuilder::new().with_interval(interval).build(),
+            TwccReceiverBuilder::new()
+                .with_adaptive_interval(false)
+                .with_interval(interval)
+                .build(),
         )
         .build();
 
@@ -501,6 +555,7 @@ fn test_combined_twcc_sender_and_receiver() {
         .with(
             Slot::TwccReceiver,
             TwccReceiverBuilder::new()
+                .with_adaptive_interval(false)
                 .with_interval(Duration::from_millis(100))
                 .build(),
         )
@@ -587,6 +642,7 @@ fn test_twcc_unbind_stops_processing() {
         .with(
             Slot::TwccReceiver,
             TwccReceiverBuilder::new()
+                .with_adaptive_interval(false)
                 .with_interval(Duration::from_millis(100))
                 .build(),
         )
@@ -642,6 +698,7 @@ fn test_twcc_multiple_remote_streams() {
         .with(
             Slot::TwccReceiver,
             TwccReceiverBuilder::new()
+                .with_adaptive_interval(false)
                 .with_interval(Duration::from_millis(100))
                 .build(),
         )
@@ -738,6 +795,7 @@ fn test_full_interceptor_chain_with_reports_and_twcc() {
         .with(
             Slot::TwccReceiver,
             TwccReceiverBuilder::new()
+                .with_adaptive_interval(false)
                 .with_interval(Duration::from_millis(100))
                 .build(),
         )
@@ -833,6 +891,7 @@ fn test_twcc_receiver_records_unbound_ssrcs() {
         .with(
             Slot::TwccReceiver,
             TwccReceiverBuilder::new()
+                .with_adaptive_interval(false)
                 .with_interval(Duration::from_millis(100))
                 .build(),
         )
@@ -916,6 +975,7 @@ fn test_twcc_receiver_ignores_unbound_ssrcs_without_any_binding() {
         .with(
             Slot::TwccReceiver,
             TwccReceiverBuilder::new()
+                .with_adaptive_interval(false)
                 .with_interval(Duration::from_millis(100))
                 .build(),
         )

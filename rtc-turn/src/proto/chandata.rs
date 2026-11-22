@@ -19,7 +19,7 @@ const CHANNEL_DATA_NUMBER_SIZE: usize = CHANNEL_DATA_LENGTH_SIZE;
 const CHANNEL_DATA_HEADER_SIZE: usize = CHANNEL_DATA_LENGTH_SIZE + CHANNEL_DATA_NUMBER_SIZE;
 
 /// `ChannelData` represents the `ChannelData` Message defined in
-/// [RFC 5766 Section 11.4](https://www.rfc-editor.org/rfc/rfc5766#section-11.4).
+/// [RFC 8656 Section 12.4](https://www.rfc-editor.org/rfc/rfc8656#section-12.4).
 #[derive(Default, Debug)]
 pub struct ChannelData {
     /// The relayed payload. May be a subslice of [`Self::raw`].
@@ -45,15 +45,24 @@ impl ChannelData {
     }
 
     /// Encodes this to [`Self::raw`].
-    pub fn encode(&mut self) {
+    ///
+    /// # Errors
+    ///
+    /// Fails if [`Self::data`] is longer than the 16-bit length field can say (65 535 bytes,
+    /// RFC 8656 §12.4). Nothing is written then.
+    pub fn encode(&mut self) -> Result<()> {
+        if self.data.len() > usize::from(u16::MAX) {
+            return Err(Error::ErrBadChannelDataLength);
+        }
         self.raw.clear();
-        self.write_header();
+        self.write_header()?;
         self.raw.extend_from_slice(&self.data);
         let padded = nearest_padded_value_length(self.raw.len());
         let bytes_to_add = padded - self.raw.len();
         if bytes_to_add > 0 {
             self.raw.extend_from_slice(&vec![0; bytes_to_add]);
         }
+        Ok(())
     }
 
     /// Decodes this from [`Self::raw`].
@@ -80,7 +89,13 @@ impl ChannelData {
     }
 
     /// Writes channel number and length.
-    pub fn write_header(&mut self) {
+    ///
+    /// # Errors
+    ///
+    /// Fails if [`Self::data`] is longer than the length field can say; the header is left
+    /// as it was.
+    pub fn write_header(&mut self) -> Result<()> {
+        let length = u16::try_from(self.data.len()).map_err(|_| Error::ErrBadChannelDataLength)?;
         if self.raw.len() < CHANNEL_DATA_HEADER_SIZE {
             // Making WriteHeader call valid even when c.Raw
             // is nil or len(c.Raw) is less than needed for header.
@@ -89,7 +104,8 @@ impl ChannelData {
         }
         self.raw[..CHANNEL_DATA_NUMBER_SIZE].copy_from_slice(&self.number.0.to_be_bytes());
         self.raw[CHANNEL_DATA_NUMBER_SIZE..CHANNEL_DATA_HEADER_SIZE]
-            .copy_from_slice(&(self.data.len() as u16).to_be_bytes());
+            .copy_from_slice(&length.to_be_bytes());
+        Ok(())
     }
 
     /// Returns `true` if `buf` looks like the `ChannelData` Message.

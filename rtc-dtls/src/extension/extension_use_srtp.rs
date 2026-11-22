@@ -48,6 +48,9 @@ const EXTENSION_USE_SRTPHEADER_SIZE: usize = 6;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExtensionUseSrtp {
     pub(crate) protection_profiles: Vec<SrtpProtectionProfile>,
+    /// `srtp_mki<0..255>` (RFC 5764 4.1.3). This crate never offers one (RFC 8827 6.5 forbids
+    /// the MKI in WebRTC) and answers a client's with an empty one.
+    pub(crate) mki: Vec<u8>,
 }
 
 impl ExtensionUseSrtp {
@@ -58,7 +61,7 @@ impl ExtensionUseSrtp {
 
     /// The encoded size of this message in bytes.
     pub fn size(&self) -> usize {
-        2 + 2 + self.protection_profiles.len() * 2 + 1
+        2 + 2 + self.protection_profiles.len() * 2 + 1 + self.mki.len()
     }
 
     /// Encodes this message to `writer`.
@@ -67,16 +70,19 @@ impl ExtensionUseSrtp {
     ///
     /// Fails on a write error, or if a field exceeds the length its wire format allows.
     pub fn marshal<W: Write>(&self, writer: &mut W) -> Result<()> {
+        if self.mki.len() > 255 {
+            return Err(Error::ErrInvalidPacketLength);
+        }
         writer.write_u16::<BigEndian>(
-            2 + /* MKI Length */ 1 + 2 * self.protection_profiles.len() as u16,
+            2 + 2 * self.protection_profiles.len() as u16 + 1 + self.mki.len() as u16,
         )?;
         writer.write_u16::<BigEndian>(2 * self.protection_profiles.len() as u16)?;
         for v in &self.protection_profiles {
             writer.write_u16::<BigEndian>(*v as u16)?;
         }
 
-        /* MKI Length */
-        writer.write_u8(0x00)?;
+        writer.write_u8(self.mki.len() as u8)?;
+        writer.write_all(&self.mki)?;
 
         Ok(writer.flush()?)
     }
@@ -87,20 +93,28 @@ impl ExtensionUseSrtp {
     ///
     /// Fails if `reader` is truncated or its contents are not a valid encoding.
     pub fn unmarshal<R: Read>(reader: &mut R) -> Result<Self> {
-        let _ = reader.read_u16::<BigEndian>()?;
+        let extension_len = reader.read_u16::<BigEndian>()? as usize;
 
-        let profile_count = reader.read_u16::<BigEndian>()? as usize / 2;
+        let profiles_len = reader.read_u16::<BigEndian>()? as usize;
+        if !profiles_len.is_multiple_of(2) {
+            return Err(Error::ErrInvalidPacketLength);
+        }
         let mut protection_profiles = vec![];
-        for _ in 0..profile_count {
+        for _ in 0..profiles_len / 2 {
             let protection_profile = reader.read_u16::<BigEndian>()?.into();
             protection_profiles.push(protection_profile);
         }
 
-        /* MKI Length */
-        let _ = reader.read_u8()?;
+        let mki_len = reader.read_u8()? as usize;
+        if extension_len != 2 + profiles_len + 1 + mki_len {
+            return Err(Error::ErrInvalidPacketLength);
+        }
+        let mut mki = vec![0u8; mki_len];
+        reader.read_exact(&mut mki)?;
 
         Ok(ExtensionUseSrtp {
             protection_profiles,
+            mki,
         })
     }
 }

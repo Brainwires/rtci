@@ -15,6 +15,12 @@ openssl x509 -req -in turn.csr -CA ca.crt -CAkey ca.key -CAcreateserial -days 2 
 ip netns exec turn turnserver -c "$(dirname "$0")/turnserver.conf" > "$D/turnserver.log" 2>&1 &
 # The short-nonce server for tests/testenv_turn.rs (turnserver-stale.conf).
 ip netns exec turn turnserver -c "$(dirname "$0")/turnserver-stale.conf" > "$D/turnserver-stale.log" 2>&1 &
+# The server for tests/testenv_turn_client.rs (turnserver-client.conf). Its IPv6 relay address
+# lives on the namespace's loopback; the topology turns IPv6 off everywhere else.
+{ ip netns exec turn sysctl -qw net.ipv6.conf.lo.disable_ipv6=0 \
+  && ip -n turn -6 addr add fd00:203:113::10/128 dev lo; } \
+  || echo "no IPv6 address on the turn namespace's loopback: the IPv6 relay tests will fail" >&2
+ip netns exec turn turnserver -c "$(dirname "$0")/turnserver-client.conf" > "$D/turnserver-client.log" 2>&1 &
 wait_for() {
   local port=$1 log=$2
   for _ in $(seq 1 50); do
@@ -23,4 +29,5 @@ wait_for() {
   done
   echo "coturn on $port did not start:" >&2; cat "$log" >&2; return 1
 }
-wait_for 3478 "$D/turnserver.log" && wait_for 3479 "$D/turnserver-stale.log" && echo "coturn up (3478, 3479)"
+wait_for 3478 "$D/turnserver.log" && wait_for 3479 "$D/turnserver-stale.log" \
+  && wait_for 3480 "$D/turnserver-client.log" && echo "coturn up (3478, 3479, 3480)"

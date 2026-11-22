@@ -1,5 +1,6 @@
 use super::flight3::*;
 use super::*;
+use crate::cipher_suite::CipherSuiteId;
 use crate::compression_methods::*;
 use crate::config::*;
 use crate::conn::*;
@@ -98,13 +99,11 @@ impl Flight for Flight1 {
             state.handshake_recv_sequence = seq;
             Ok(Box::new(Flight3 {}))
         } else {
-            Err((
-                Some(Alert {
-                    alert_level: AlertLevel::Fatal,
-                    alert_description: AlertDescription::InternalError,
-                }),
-                None,
-            ))
+            // Neither a HelloVerifyRequest nor a ServerHello has arrived yet: a handshake
+            // record that delivered nothing (a fragment, or one that was discarded) is no
+            // reason for an alert. This used to answer any such record, which anyone can send
+            // from the server's address, with a fatal internal_error that ended the handshake.
+            Err((None, None))
         }
     }
 
@@ -123,64 +122,194 @@ impl Flight for Flight1 {
             return Err((None, Some(error)));
         }
 
-        let mut extensions = vec![
-            Extension::SupportedSignatureAlgorithms(ExtensionSupportedSignatureAlgorithms {
-                signature_hash_algorithms: cfg.local_signature_schemes.clone(),
-            }),
-            Extension::RenegotiationInfo(ExtensionRenegotiationInfo {
-                renegotiated_connection: 0,
-            }),
-        ];
-
-        if cfg.local_psk_callback.is_none() {
-            extensions.extend_from_slice(&[
-                Extension::SupportedEllipticCurves(ExtensionSupportedEllipticCurves {
-                    elliptic_curves: cfg.local_named_curves.clone(),
-                }),
-                Extension::SupportedPointFormats(ExtensionSupportedPointFormats {
-                    point_formats: vec![ELLIPTIC_CURVE_POINT_FORMAT_UNCOMPRESSED],
-                }),
-            ]);
+        // DTLS 1.3 is offered in the same ClientHello (RFC 9147 section 5.3): its suites
+        // ahead of the DTLS 1.2 ones, and supported_versions and key_share among the
+        // extensions. The key shares are kept until the server has answered.
+        state.tls13_offer = None;
+        if cfg.supports_dtls13() {
+            match crate::dtls13::hello::ClientOffer::new(
+                cfg,
+                state.clock,
+                &std::mem::take(&mut state.early_data),
+            ) {
+                Ok(offer) => state.tls13_offer = Some(offer),
+                Err(error) => return Err((None, Some(error))),
+            }
         }
+        // RFC 9146 section 3: the connection id this client wants in the records it
+        // receives. A ClientHello that also offers DTLS 1.3 carries one extension for both
+        // versions (RFC 9147 section 5.1), the one of that offer.
+        state.connection_id_offer = match &state.tls13_offer {
+            Some(offer) => offer.connection_id.clone(),
+            None => cfg.connection_id_offer(),
+        };
+        state.local_connection_id = None;
+        state.remote_connection_id = None;
+        let extensions = client_hello_extensions(
+            cfg,
+            state.tls13_offer.as_ref(),
+            state.connection_id_offer.as_deref(),
+        );
 
-        if !cfg.local_srtp_protection_profiles.is_empty() {
-            extensions.push(Extension::UseSrtp(ExtensionUseSrtp {
-                protection_profiles: cfg.local_srtp_protection_profiles.clone(),
-            }));
+        let mut client_hello = HandshakeMessageClientHello {
+            version: PROTOCOL_VERSION1_2,
+            random: state.local_random.clone(),
+            cookie: state.cookie.clone(),
+
+            cipher_suites: client_hello_cipher_suites(cfg),
+            compression_methods: default_compression_methods(),
+            extensions,
+        };
+        if let Err(error) = bind_client_hello(cfg, state.tls13_offer.as_ref(), &mut client_hello) {
+            return Err((None, Some(error)));
         }
-
-        if cfg.extended_master_secret == ExtendedMasterSecretType::Request
-            || cfg.extended_master_secret == ExtendedMasterSecretType::Require
+        // RFC 9147 section 6.1: the 0-RTT data, in epoch 1, goes out after the ClientHello.
+        state.early_datagrams.clear();
+        state.early_data_accepted = None;
+        if let Some(offer) = &state.tls13_offer
+            && let (Some(data), Some(psk)) = (&offer.early_data, offer.psks.first())
         {
-            extensions.push(Extension::UseExtendedMasterSecret(
-                ExtensionUseExtendedMasterSecret { supported: true },
-            ));
-        }
-
-        if !cfg.server_name.is_empty() {
-            extensions.push(Extension::ServerName(ExtensionServerName {
-                server_name: cfg.server_name.clone(),
-            }));
+            let mut body = vec![];
+            let record = client_hello.marshal(&mut body).and_then(|()| {
+                crate::dtls13::psk::early_data_record(cfg.provider().crypto(), psk, &body, data)
+            });
+            match record {
+                Ok(record) => {
+                    state
+                        .early_datagrams
+                        .push(bytes::BytesMut::from(&record[..]));
+                    state.early_data_accepted = Some(false);
+                }
+                Err(error) => return Err((None, Some(error))),
+            }
         }
 
         Ok(vec![Packet {
             record: RecordLayer::new(
                 PROTOCOL_VERSION1_2,
                 0,
-                Content::Handshake(Handshake::new(HandshakeMessage::ClientHello(
-                    HandshakeMessageClientHello {
-                        version: PROTOCOL_VERSION1_2,
-                        random: state.local_random.clone(),
-                        cookie: state.cookie.clone(),
-
-                        cipher_suites: cfg.local_cipher_suites.clone(),
-                        compression_methods: default_compression_methods(),
-                        extensions,
-                    },
-                ))),
+                Content::Handshake(Handshake::new(HandshakeMessage::ClientHello(client_hello))),
             ),
             should_encrypt: false,
             reset_local_sequence_number: false,
         }])
     }
+}
+
+/// The extensions of this client's ClientHello: the same in the first one and in the one that
+/// answers HelloVerifyRequest (RFC 6347 4.2.1), and the set a ServerHello's extensions are
+/// checked against (RFC 5246 7.4.1.4).
+pub(crate) fn client_hello_extensions(
+    cfg: &HandshakeConfig,
+    tls13_offer: Option<&crate::dtls13::hello::ClientOffer>,
+    connection_id: Option<&[u8]>,
+) -> Vec<Extension> {
+    let mut extensions = vec![
+        Extension::SupportedSignatureAlgorithms(ExtensionSupportedSignatureAlgorithms {
+            signature_hash_algorithms: cfg.local_signature_schemes.clone(),
+        }),
+        // RFC 5746 3.4: empty in an initial handshake. The signalling suite is not sent as
+        // well.
+        Extension::RenegotiationInfo(ExtensionRenegotiationInfo::default()),
+    ];
+
+    if cfg.local_psk_callback.is_none() {
+        extensions.extend_from_slice(&[
+            Extension::SupportedEllipticCurves(ExtensionSupportedEllipticCurves {
+                // With DTLS 1.3 offered the list has its groups too (the hybrid one); a
+                // DTLS 1.2 server takes the first curve of it that it knows.
+                elliptic_curves: if tls13_offer.is_some() {
+                    cfg.local_tls13_groups.clone()
+                } else {
+                    cfg.local_named_curves.clone()
+                },
+            }),
+            Extension::SupportedPointFormats(ExtensionSupportedPointFormats {
+                point_formats: vec![ELLIPTIC_CURVE_POINT_FORMAT_UNCOMPRESSED],
+            }),
+        ]);
+    }
+
+    if !cfg.local_srtp_protection_profiles.is_empty() {
+        extensions.push(Extension::UseSrtp(ExtensionUseSrtp {
+            protection_profiles: cfg.local_srtp_protection_profiles.clone(),
+            mki: vec![],
+        }));
+    }
+
+    if cfg.extended_master_secret == ExtendedMasterSecretType::Request
+        || cfg.extended_master_secret == ExtendedMasterSecretType::Require
+    {
+        extensions.push(Extension::UseExtendedMasterSecret(
+            ExtensionUseExtendedMasterSecret { supported: true },
+        ));
+    }
+
+    if let Some(host_name) = sni_host_name(&cfg.server_name) {
+        extensions.push(Extension::ServerName(ExtensionServerName {
+            server_name: host_name.to_owned(),
+        }));
+    }
+
+    if let Some(offer) = tls13_offer {
+        // Its connection_id, when it has one, is `connection_id`.
+        extensions.extend(offer.extensions(cfg));
+    } else if let Some(connection_id) = connection_id {
+        extensions.push(Extension::connection_id(connection_id));
+    }
+
+    extensions
+}
+
+/// Writes the binders of the DTLS 1.3 PSKs `offer` carries into `client_hello`, whose last
+/// extension is their pre_shared_key (RFC 8446 section 4.2.11.2): the binders cover the
+/// ClientHello as it is written, up to the binders themselves.
+pub(crate) fn bind_client_hello(
+    cfg: &HandshakeConfig,
+    offer: Option<&crate::dtls13::hello::ClientOffer>,
+    client_hello: &mut HandshakeMessageClientHello,
+) -> shared::error::Result<()> {
+    let Some(offer) = offer.filter(|offer| !offer.psks.is_empty()) else {
+        return Ok(());
+    };
+    let mut body = vec![];
+    client_hello.marshal(&mut body)?;
+    offer.bind(cfg, &mut body)?;
+    let length = crate::dtls13::psk::binders_len(&offer.psks);
+    let binders = &body[body.len() - length..];
+    match client_hello.extensions.last_mut() {
+        Some(Extension::Unknown {
+            extension_type: crate::dtls13::messages::EXT_PRE_SHARED_KEY,
+            data,
+        }) if data.len() >= length => {
+            let at = data.len() - length;
+            data[at..].copy_from_slice(binders);
+            Ok(())
+        }
+        _ => Err(Error::ErrInvalidExtensionType),
+    }
+}
+
+/// The cipher suites of this client's ClientHello: the TLS 1.3 ones when DTLS 1.3 is offered,
+/// then the DTLS 1.2 ones unless DTLS 1.3 is the least it accepts.
+pub(crate) fn client_hello_cipher_suites(cfg: &HandshakeConfig) -> Vec<CipherSuiteId> {
+    let mut suites = cfg.local_tls13_cipher_suites.clone();
+    if cfg.supports_dtls12() || suites.is_empty() {
+        suites.extend_from_slice(&cfg.local_cipher_suites);
+    }
+    suites
+}
+
+/// The HostName a client puts in its server_name extension for `server_name`, if it may send
+/// one: RFC 6066 section 3 permits DNS host names only, not literal IPv4 or IPv6 addresses,
+/// and writes them without a trailing dot. The configured name still names the certificate
+/// that is expected; an address is simply not announced.
+pub(crate) fn sni_host_name(server_name: &str) -> Option<&str> {
+    let host_name = server_name.strip_suffix('.').unwrap_or(server_name);
+    let is_address = host_name.parse::<std::net::IpAddr>().is_ok()
+        || host_name
+            .strip_prefix('[')
+            .and_then(|rest| rest.strip_suffix(']'))
+            .is_some_and(|inner| inner.parse::<std::net::Ipv6Addr>().is_ok());
+    (!host_name.is_empty() && !is_address).then_some(host_name)
 }

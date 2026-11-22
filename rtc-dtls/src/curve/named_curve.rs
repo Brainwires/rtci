@@ -15,6 +15,9 @@ pub enum NamedCurve {
     P384 = 0x0018,
     /// `X25519` (`0x001d`).
     X25519 = 0x001d,
+    /// `X25519MLKEM768` (`0x11ec`, draft-ietf-tls-ecdhe-mlkem): the hybrid of ML-KEM-768
+    /// and X25519. A group of DTLS 1.3 only, and only with a provider that has ML-KEM.
+    X25519MlKem768 = 0x11ec,
 }
 
 impl From<u16> for NamedCurve {
@@ -23,6 +26,7 @@ impl From<u16> for NamedCurve {
             0x0017 => NamedCurve::P256,
             0x0018 => NamedCurve::P384,
             0x001d => NamedCurve::X25519,
+            0x11ec => NamedCurve::X25519MlKem768,
             _ => NamedCurve::Unsupported,
         }
     }
@@ -54,8 +58,27 @@ impl NamedCurve {
             Self::P256 => Ok(KeyExchangeAlgorithm::P256),
             Self::P384 => Ok(KeyExchangeAlgorithm::P384),
             Self::X25519 => Ok(KeyExchangeAlgorithm::X25519),
+            Self::X25519MlKem768 => Ok(KeyExchangeAlgorithm::X25519MlKem768),
             Self::Unsupported => Err(Error::ErrInvalidNamedCurve),
         }
+    }
+
+    /// Whether the group is one of TLS 1.3 only: not an elliptic curve a DTLS 1.2 ECDHE
+    /// exchange can use.
+    pub(crate) const fn is_tls13_only(self) -> bool {
+        matches!(self, Self::X25519MlKem768)
+    }
+
+    /// The responder's side of a key exchange over this group: its share for the peer's,
+    /// and the shared secret.
+    pub(crate) fn respond_with_crypto(
+        self,
+        crypto: &dyn RTCCrypto,
+        peer_share: &[u8],
+    ) -> Result<(Vec<u8>, crypto::SecretVec)> {
+        crypto
+            .key_exchange_respond(self.crypto_algorithm()?, peer_share)
+            .map_err(|error| Error::Crypto(error.to_string()))
     }
 
     pub(crate) fn generate_keypair_with_crypto(

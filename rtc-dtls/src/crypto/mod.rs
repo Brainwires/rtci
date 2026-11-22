@@ -22,6 +22,7 @@ pub mod crypto_chacha20;
 pub mod crypto_gcm;
 pub(crate) mod padding;
 
+use crate::content::ContentType;
 use std::convert::TryFrom;
 use std::sync::Arc;
 
@@ -278,6 +279,48 @@ pub const OID_ED25519: Oid<'static> = oid!(1.3.101.112);
 /// The X.509 algorithm OID for ECDSA with a named curve.
 pub const OID_ECDSA: Oid<'static> = oid!(1.2.840.10045.2.1);
 
+/// The hash and signature pair `der`, an X.509 certificate, is signed with, as a TLS 1.2
+/// SignatureAndHashAlgorithm. `None` for an algorithm with no such pair here (RSASSA-PSS, or
+/// one this crate does not know), and for a certificate that does not parse.
+fn certificate_signature_pair(der: &[u8]) -> Option<SignatureHashAlgorithm> {
+    use crate::signature_hash_algorithm::HashAlgorithm;
+
+    let (_, certificate) = x509_parser::parse_x509_certificate(der).ok()?;
+    let (hash, signature) = match certificate
+        .signature_algorithm
+        .algorithm
+        .to_id_string()
+        .as_str()
+    {
+        "1.2.840.10045.4.1" => (HashAlgorithm::Sha1, SignatureAlgorithm::Ecdsa),
+        "1.2.840.10045.4.3.2" => (HashAlgorithm::Sha256, SignatureAlgorithm::Ecdsa),
+        "1.2.840.10045.4.3.3" => (HashAlgorithm::Sha384, SignatureAlgorithm::Ecdsa),
+        "1.2.840.10045.4.3.4" => (HashAlgorithm::Sha512, SignatureAlgorithm::Ecdsa),
+        "1.2.840.113549.1.1.5" => (HashAlgorithm::Sha1, SignatureAlgorithm::Rsa),
+        "1.2.840.113549.1.1.11" => (HashAlgorithm::Sha256, SignatureAlgorithm::Rsa),
+        "1.2.840.113549.1.1.12" => (HashAlgorithm::Sha384, SignatureAlgorithm::Rsa),
+        "1.2.840.113549.1.1.13" => (HashAlgorithm::Sha512, SignatureAlgorithm::Rsa),
+        "1.3.101.112" => (HashAlgorithm::Ed25519, SignatureAlgorithm::Ed25519),
+        _ => return None,
+    };
+    Some(SignatureHashAlgorithm { hash, signature })
+}
+
+/// Whether every certificate of `chain` is signed with a pair in `schemes`: RFC 5246 7.4.2
+/// asks it of the certificates a server sends (against the client's signature_algorithms) and
+/// 7.4.4 of the ones a client sends (against the CertificateRequest).
+///
+/// A certificate whose signature algorithm has no TLS 1.2 pair this crate knows (see
+/// [`certificate_signature_pair`]) cannot be judged and is let through.
+pub(crate) fn certificates_signed_within(
+    chain: &[CertificateDer<'static>],
+    schemes: &[SignatureHashAlgorithm],
+) -> bool {
+    chain.iter().all(|certificate| {
+        certificate_signature_pair(certificate.as_ref()).is_none_or(|pair| schemes.contains(&pair))
+    })
+}
+
 fn verify_signature(
     crypto: &dyn crypto::RTCCrypto,
     message: &[u8],
@@ -296,10 +339,13 @@ fn verify_signature(
     let encoding = match hash_algorithm.signature {
         SignatureAlgorithm::Ed25519 => PublicKeyEncoding::Ed25519Raw,
         SignatureAlgorithm::Ecdsa => PublicKeyEncoding::EcUncompressedPoint,
-        SignatureAlgorithm::Rsa => PublicKeyEncoding::RsaPkcs1Der,
+        SignatureAlgorithm::Rsa
+        | SignatureAlgorithm::RsaPssRsaeSha256
+        | SignatureAlgorithm::RsaPssRsaeSha384
+        | SignatureAlgorithm::RsaPssRsaeSha512 => PublicKeyEncoding::RsaPkcs1Der,
         SignatureAlgorithm::Unsupported => return Err(Error::ErrKeySignatureVerifyUnimplemented),
     };
-    if hash_algorithm.signature == SignatureAlgorithm::Rsa
+    if hash_algorithm.signature.is_rsa()
         && remote_key_signature.len() < 256
         && !insecure_verification
     {
@@ -470,6 +516,37 @@ pub(crate) fn record_explicit_nonce(h: &RecordLayerHeader) -> [u8; 8] {
     nonce[..2].copy_from_slice(&h.epoch.to_be_bytes());
     nonce[2..].copy_from_slice(&h.sequence_number.to_be_bytes()[2..]);
     nonce
+}
+
+/// The additional data of an AEAD record, and the pseudo-header a MAC covers in front of
+/// the content: RFC 5246 6.2.3.3 / 6.2.3.1 for an ordinary record, and RFC 9146 section 5
+/// for a `tls12_cid` record, whose connection id `cid` is given (the header then has the
+/// content type `tls12_cid`, and `payload_len` is the length of the DTLSInnerPlaintext).
+///
+/// ```text
+/// seq_num_placeholder (8 x 0xff) || tls12_cid || cid_length || tls12_cid || version
+///     || epoch || sequence_number || cid || length_of_DTLSInnerPlaintext
+/// ```
+pub(crate) fn record_additional_data(
+    h: &RecordLayerHeader,
+    payload_len: usize,
+    cid: Option<&[u8]>,
+) -> Vec<u8> {
+    let Some(cid) = cid else {
+        return generate_aead_additional_data(h, payload_len).to_vec();
+    };
+    let mut data = Vec::with_capacity(23 + cid.len());
+    data.extend_from_slice(&[0xff; 8]);
+    data.push(ContentType::Tls12Cid as u8);
+    data.push(cid.len() as u8);
+    data.push(ContentType::Tls12Cid as u8);
+    data.push(h.protocol_version.major);
+    data.push(h.protocol_version.minor);
+    data.extend_from_slice(&h.epoch.to_be_bytes());
+    data.extend_from_slice(&h.sequence_number.to_be_bytes()[2..]);
+    data.extend_from_slice(cid);
+    data.extend_from_slice(&(payload_len as u16).to_be_bytes());
+    data
 }
 
 pub(crate) fn generate_aead_additional_data(h: &RecordLayerHeader, payload_len: usize) -> [u8; 13] {

@@ -13,12 +13,38 @@ pub(crate) const FAMILY_IPV6: u16 = 0x02;
 pub(crate) const IPV4LEN: usize = 4;
 pub(crate) const IPV6LEN: usize = 16;
 
+/// Splits the value of an address attribute (MAPPED-ADDRESS, XOR-MAPPED-ADDRESS and the
+/// attributes encoded like them) into its family, its port field and its address field.
+///
+/// RFC 8489 section 14.1: the first 8 bits are ignored, the family is 0x01 or 0x02, and the
+/// address is exactly 32 bits (IPv4) or 128 bits (IPv6).
+pub(crate) fn split_address_value(v: &[u8]) -> Result<(u16, u16, &[u8])> {
+    if v.len() <= 4 {
+        return Err(Error::ErrUnexpectedEof);
+    }
+    let family = u16::from(v[1]);
+    let expected = match family {
+        FAMILY_IPV4 => IPV4LEN,
+        FAMILY_IPV6 => IPV6LEN,
+        _ => return Err(Error::Other(format!("bad value {family}"))),
+    };
+    let address = &v[4..];
+    if address.len() < expected {
+        return Err(Error::ErrUnexpectedEof);
+    }
+    if address.len() > expected {
+        return Err(Error::ErrAttributeSizeOverflow);
+    }
+    Ok((family, u16::from_be_bytes([v[2], v[3]]), address))
+}
+
 /// MappedAddress represents MAPPED-ADDRESS attribute.
 ///
 /// This attribute is used only by servers for achieving backwards
 /// compatibility with RFC 3489 clients.
 ///
-/// RFC 5389 Section 15.1
+/// RFC 8489 Section 14.1
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MappedAddress {
     /// The IP address.
     pub ip: IpAddr,
@@ -62,25 +88,16 @@ impl MappedAddress {
     /// get_from_as decodes MAPPED-ADDRESS value in message m as an attribute of type t.
     pub fn get_from_as(&mut self, m: &Message, t: AttrType) -> Result<()> {
         let v = m.get(t)?;
-        if v.len() <= 4 {
-            return Err(Error::ErrUnexpectedEof);
-        }
-
-        let family = u16::from_be_bytes([v[0], v[1]]);
-        if family != FAMILY_IPV6 && family != FAMILY_IPV4 {
-            return Err(Error::Other(format!("bad value {family}")));
-        }
-        self.port = u16::from_be_bytes([v[2], v[3]]);
+        let (family, port, address) = split_address_value(&v)?;
+        self.port = port;
 
         if family == FAMILY_IPV6 {
             let mut ip = [0; IPV6LEN];
-            let l = std::cmp::min(ip.len(), v[4..].len());
-            ip[..l].copy_from_slice(&v[4..4 + l]);
+            ip.copy_from_slice(address);
             self.ip = IpAddr::V6(Ipv6Addr::from(ip));
         } else {
             let mut ip = [0; IPV4LEN];
-            let l = std::cmp::min(ip.len(), v[4..].len());
-            ip[..l].copy_from_slice(&v[4..4 + l]);
+            ip.copy_from_slice(address);
             self.ip = IpAddr::V4(Ipv4Addr::from(ip));
         };
 
@@ -109,17 +126,79 @@ impl MappedAddress {
     }
 }
 
-/// AlternateServer represents ALTERNATE-SERVER attribute.
-///
-/// RFC 5389 Section 15.11
-pub type AlternateServer = MappedAddress;
+/// Defines an attribute that is encoded as MAPPED-ADDRESS under its own attribute type.
+macro_rules! address_attribute {
+    ($(#[$doc:meta])* $name:ident, $attr:expr) => {
+        $(#[$doc])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub struct $name {
+            /// The IP address.
+            pub ip: IpAddr,
+            /// The port.
+            pub port: u16,
+        }
 
-/// ResponseOrigin represents RESPONSE-ORIGIN attribute.
-///
-/// RFC 5780 Section 7.3
-pub type ResponseOrigin = MappedAddress;
+        impl Default for $name {
+            fn default() -> Self {
+                $name {
+                    ip: IpAddr::V4(Ipv4Addr::from(0)),
+                    port: 0,
+                }
+            }
+        }
 
-/// OtherAddress represents OTHER-ADDRESS attribute.
-///
-/// RFC 5780 Section 7.4
-pub type OtherAddress = MappedAddress;
+        impl fmt::Display for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "{}", std::net::SocketAddr::new(self.ip, self.port))
+            }
+        }
+
+        impl Setter for $name {
+            fn add_to(&self, m: &mut Message) -> Result<()> {
+                MappedAddress {
+                    ip: self.ip,
+                    port: self.port,
+                }
+                .add_to_as(m, $attr)
+            }
+        }
+
+        impl Getter for $name {
+            fn get_from(&mut self, m: &Message) -> Result<()> {
+                let mut a = MappedAddress::default();
+                a.get_from_as(m, $attr)?;
+                self.ip = a.ip;
+                self.port = a.port;
+                Ok(())
+            }
+        }
+    };
+}
+
+address_attribute!(
+    /// AlternateServer represents the ALTERNATE-SERVER attribute (type 0x8023): the server a
+    /// 300 (Try Alternate) error response redirects to.
+    ///
+    /// It is encoded as MAPPED-ADDRESS. RFC 8489 Section 14.15; see
+    /// [`alternate`](crate::alternate) for the client side of the mechanism.
+    AlternateServer,
+    ATTR_ALTERNATE_SERVER
+);
+
+address_attribute!(
+    /// ResponseOrigin represents the RESPONSE-ORIGIN attribute (type 0x802b), encoded as
+    /// MAPPED-ADDRESS.
+    ///
+    /// RFC 5780 Section 7.3
+    ResponseOrigin,
+    ATTR_RESPONSE_ORIGIN
+);
+
+address_attribute!(
+    /// OtherAddress represents the OTHER-ADDRESS attribute (type 0x802c), encoded as
+    /// MAPPED-ADDRESS.
+    ///
+    /// RFC 5780 Section 7.4
+    OtherAddress,
+    ATTR_OTHER_ADDRESS
+);

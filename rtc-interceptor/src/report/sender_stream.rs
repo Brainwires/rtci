@@ -20,6 +20,9 @@ pub(crate) struct SenderStream {
     last_rtp_time_time: Option<Instant>,
     time_baseline: Option<SystemInstant>,
 
+    /// Regular reports issued since the stream last sent an RTP packet.
+    reports_since_sent: u32,
+
     counters: Counters,
 }
 
@@ -36,6 +39,7 @@ impl SenderStream {
             last_rtp_time_rtp: 0,
             last_rtp_time_time: None,
             time_baseline: None,
+            reports_since_sent: 0,
 
             counters: Default::default(),
         }
@@ -74,9 +78,17 @@ impl SenderStream {
             if self.last_rtp_time_time.is_none() || pkt.header.timestamp != self.last_rtp_time_rtp {
                 self.last_rtp_time_rtp = pkt.header.timestamp;
                 self.last_rtp_time_time = Some(now);
-                self.time_baseline = Some(SystemInstant::now(now));
+                // The wall clock is read once, when the stream starts; every later NTP
+                // timestamp is that reading plus the time the caller says has passed. Read
+                // again at each frame, the NTP time followed the machine's clock instead of
+                // the caller's, so two sender reports were not as far apart in NTP time as
+                // the instants they were written at.
+                self.time_baseline
+                    .get_or_insert_with(|| SystemInstant::now(now));
             }
         }
+
+        self.reports_since_sent = 0;
 
         // Always count packets and octets regardless of order
         self.counters.increment_packets();
@@ -88,6 +100,36 @@ impl SenderStream {
         self.last_rtp_time_time.is_some()
     }
 
+    /// When the stream last sent the first packet of a frame.
+    pub(crate) fn last_sent(&self) -> Option<Instant> {
+        self.last_rtp_time_time
+    }
+
+    /// The regular report of this stream for an interval that ends now, or `None` when the
+    /// stream is not a sender.
+    ///
+    /// RFC 3550 section 6.4: a sender report is issued "if a site has sent any data packets
+    /// during the interval since issuing the last report or the previous one". A stream that
+    /// has been silent for two reports sends no further sender report until it sends again.
+    pub(crate) fn generate_regular_report(
+        &mut self,
+        now: Instant,
+    ) -> Option<rtcp::sender_report::SenderReport> {
+        if self.reports_since_sent >= 2 {
+            return None;
+        }
+        let report = self.generate_report(now)?;
+        self.reports_since_sent += 1;
+        Some(report)
+    }
+
+    /// Whether [`generate_regular_report`](Self::generate_regular_report) would give a sender
+    /// report: the stream sent during the last two reporting intervals.
+    pub(crate) fn is_sender(&self) -> bool {
+        self.has_sent() && self.reports_since_sent < 2
+    }
+
+    /// The sender report of this stream as of `now`, whether or not it sent lately.
     pub(crate) fn generate_report(
         &mut self,
         now: Instant,
@@ -95,12 +137,16 @@ impl SenderStream {
         if let (Some(last_rtp_time_time), Some(time_baseline)) =
             (self.last_rtp_time_time, self.time_baseline)
         {
+            // RFC 3550 section 6.4.1: the RTP timestamp of the instant the NTP timestamp
+            // names, extrapolated from the last packet. The ticks elapsed are reduced modulo
+            // 2^32 like every RTP timestamp; a float cast to `u32` would stop at `u32::MAX`
+            // instead once a stream has been idle for 2^32 ticks (13 h at 90 kHz).
+            let elapsed_ticks =
+                (now.duration_since(last_rtp_time_time).as_secs_f64() * self.clock_rate) as u64;
             Some(rtcp::sender_report::SenderReport {
                 ssrc: self.ssrc,
                 ntp_time: time_baseline.ntp(now),
-                rtp_time: self.last_rtp_time_rtp.wrapping_add(
-                    (now.duration_since(last_rtp_time_time).as_secs_f64() * self.clock_rate) as u32,
-                ),
+                rtp_time: self.last_rtp_time_rtp.wrapping_add(elapsed_ticks as u32),
                 packet_count: self.counters.packet_count(),
                 octet_count: self.counters.octet_count(),
                 ..Default::default()
@@ -335,5 +381,68 @@ mod tests {
 
         counters.count_octets(1);
         assert_eq!(counters.octet_count(), 0);
+    }
+
+    /// RFC 3550 6.4.1: the RTP timestamp is the last packet's plus the ticks elapsed since,
+    /// modulo 2^32, however long the stream has been idle.
+    #[test]
+    fn the_extrapolated_rtp_timestamp_wraps_instead_of_saturating() {
+        let mut stream = SenderStream::new(123456, 90000, false);
+        let base = Instant::now();
+        stream.process_rtp(base, &make_rtp_packet(0, 1000, 10));
+
+        let hour = std::time::Duration::from_secs(3600);
+        let at_14h = stream.generate_report(base + 14 * hour).unwrap();
+        let at_15h = stream.generate_report(base + 15 * hour).unwrap();
+
+        let ticks = |hours: u64| (hours * 3600 * 90_000) as u32; // truncating: modulo 2^32
+        assert_eq!(at_14h.rtp_time, 1000u32.wrapping_add(ticks(14)));
+        assert_eq!(at_15h.rtp_time, 1000u32.wrapping_add(ticks(15)));
+        assert_ne!(at_14h.rtp_time, at_15h.rtp_time);
+    }
+
+    /// RFC 3550 6.4.1: the NTP timestamp is the wallclock time of the report, and the RTP
+    /// timestamp "corresponds to the same time".
+    #[test]
+    fn the_report_pairs_the_ntp_time_with_the_rtp_time_of_the_same_instant() {
+        let mut stream = SenderStream::new(123456, 48000, false);
+        let base = Instant::now();
+        stream.process_rtp(base, &make_rtp_packet(0, 5000, 10));
+
+        let first = stream.generate_report(base).unwrap();
+        let later = stream
+            .generate_report(base + std::time::Duration::from_millis(1500))
+            .unwrap();
+
+        // 1.5 s later: 72000 ticks at 48 kHz, and 1.5 in 32.32 fixed point NTP seconds.
+        assert_eq!(later.rtp_time.wrapping_sub(first.rtp_time), 72_000);
+        let ntp_delta = later.ntp_time - first.ntp_time;
+        let expected = 3u64 << 31;
+        assert!(
+            ntp_delta.abs_diff(expected) < (1 << 12),
+            "ntp advanced by {ntp_delta:#x}, expected {expected:#x}"
+        );
+    }
+
+    /// RFC 3550 6.4: a sender report only while data was sent "during the interval since
+    /// issuing the last report or the previous one".
+    #[test]
+    fn a_silent_stream_stops_being_a_sender_after_two_reports() {
+        let mut stream = SenderStream::new(123456, 90000, false);
+        let base = Instant::now();
+        let second = std::time::Duration::from_secs(1);
+        stream.process_rtp(base, &make_rtp_packet(0, 1000, 10));
+
+        assert!(stream.generate_regular_report(base + second).is_some());
+        assert!(stream.generate_regular_report(base + 2 * second).is_some());
+        assert!(stream.generate_regular_report(base + 3 * second).is_none());
+        assert!(stream.generate_regular_report(base + 4 * second).is_none());
+        assert!(!stream.is_sender());
+
+        // Sending again makes it a sender again.
+        stream.process_rtp(base + 5 * second, &make_rtp_packet(1, 2000, 10));
+        assert!(stream.is_sender());
+        let report = stream.generate_regular_report(base + 6 * second).unwrap();
+        assert_eq!(report.packet_count, 2);
     }
 }

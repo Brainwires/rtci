@@ -23,6 +23,17 @@ use crate::MDNS_PORT;
 use crate::proto::MDNS_MULTICAST_IPV4;
 use socket2::{Domain, Protocol, Socket, Type};
 
+/// The IP TTL mDNS packets are sent with (RFC 6762 section 11): older queriers take any
+/// other value for a packet from off the link and drop it.
+const MDNS_IP_TTL: u32 = 255;
+
+/// Sets the TTL of what `socket` sends, multicast and unicast, to [`MDNS_IP_TTL`]. The
+/// operating system's default for multicast is 1.
+fn set_mdns_ttl(socket: &Socket) -> io::Result<()> {
+    socket.set_multicast_ttl_v4(MDNS_IP_TTL)?;
+    socket.set_ttl_v4(MDNS_IP_TTL)
+}
+
 /// A builder for creating multicast UDP sockets suitable for mDNS.
 ///
 /// `MulticastSocket` provides a convenient way to create properly configured
@@ -33,6 +44,7 @@ use socket2::{Domain, Protocol, Socket, Type};
 /// - Configured with `SO_REUSEPORT` enabled (on supported platforms)
 /// - Set to non-blocking mode for async compatibility
 /// - Joined to the mDNS multicast group (224.0.0.251)
+/// - Sending with IP TTL 255, multicast and unicast (RFC 6762 section 11)
 ///
 /// # Examples
 ///
@@ -142,6 +154,7 @@ impl MulticastSocket {
     /// - `SO_REUSEPORT` enabled on Unix platforms (except Solaris/illumos)
     /// - Non-blocking mode enabled (for async compatibility)
     /// - Joined to the mDNS multicast group (224.0.0.251)
+    /// - IP TTL 255 on what it sends (RFC 6762 section 11)
     ///
     /// # Errors
     ///
@@ -180,6 +193,9 @@ impl MulticastSocket {
 
         // Set non-blocking mode for async compatibility
         socket.set_nonblocking(true)?;
+
+        // RFC 6762 section 11: responses leave with IP TTL 255
+        set_mdns_ttl(&socket)?;
 
         let multicast_local_ip = if let Some(multicast_local_ipv4) = self.multicast_local_ipv4 {
             IpAddr::V4(multicast_local_ipv4)
@@ -240,6 +256,16 @@ mod tests {
             .with_multicast_local_port(5353)
             .with_interface(interface);
         assert_eq!(builder.interface, Some(interface));
+    }
+
+    // RFC 6762 section 11. The socket is neither bound nor used: only its options are read.
+    #[test]
+    fn test_mdns_socket_sends_with_ip_ttl_255() {
+        let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).unwrap();
+        assert_ne!(socket.multicast_ttl_v4().unwrap(), 255, "not the default");
+        set_mdns_ttl(&socket).unwrap();
+        assert_eq!(socket.multicast_ttl_v4().unwrap(), 255);
+        assert_eq!(socket.ttl_v4().unwrap(), 255);
     }
 
     // Note: Socket creation tests would require actual network access

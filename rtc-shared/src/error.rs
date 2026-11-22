@@ -1203,6 +1203,34 @@ pub enum Error {
     /// Alert is Fatal or Close Notify.
     #[error("Alert is Fatal or Close Notify")]
     ErrAlertFatalOrClose,
+    /// A hello's renegotiation_info was not empty in an initial handshake (RFC 5746 3.4, 3.6).
+    #[error("renegotiation_info is not empty in an initial handshake")]
+    ErrRenegotiationInfoNotEmpty,
+    /// The ServerHello carried an extension the ClientHello did not offer (RFC 5246 7.4.1.4).
+    #[error("server sent an extension the client did not offer")]
+    ErrUnsolicitedExtension,
+    /// The ServerHello selected a compression method the ClientHello did not offer.
+    #[error("server selected a compression method the client did not offer")]
+    ErrCompressionMethodNotOffered,
+    /// The ClientHello did not offer the null compression method (RFC 5246 7.4.1.2).
+    #[error("client did not offer the null compression method")]
+    ErrNoNullCompressionMethod,
+    /// The server's use_srtp held an MKI the client did not offer, or not exactly one profile
+    /// (RFC 5764 4.1.1, 4.1.3).
+    #[error("server's use_srtp extension is not a valid answer to the client's")]
+    ErrInvalidUseSrtpAnswer,
+    /// Key material was asked of a session without the extended master secret (RFC 7627 5.4).
+    #[error("no keying material is exported without the extended master secret")]
+    ErrExportWithoutExtendedMasterSecret,
+    /// The handshake did not complete within the configured time.
+    #[error("handshake did not complete in time")]
+    ErrHandshakeTimeout,
+    /// A record's payload is longer than the 2^14 bytes a record may carry (RFC 5246 6.2.1).
+    #[error("record payload exceeds 2^14 bytes")]
+    ErrRecordOverflow,
+    /// A hello carried two extensions of one type (RFC 5246 7.4.1.4).
+    #[error("hello carries an extension type twice")]
+    ErrDuplicateExtension,
     /// Fragment buffer overflow. New size is greater than specified max.
     #[error(
         "Fragment buffer overflow. New size {new_size} is greater than specified max {max_size}"
@@ -1554,6 +1582,21 @@ pub enum Error {
     /// Outbound packet larger than maximum message size.
     #[error("outbound packet larger than maximum message size")]
     ErrOutboundPacketTooLarge,
+    /// A data channel message over the 16 KB a sender keeps to on an SCTP association without
+    /// user message interleaving (RFC 8831 section 6.6), which is every association with a
+    /// peer that does not announce I-DATA (RFC 8260), current browsers among them.
+    #[error(
+        "a {size} byte message is over the {limit} byte limit of an SCTP association without \
+         message interleaving (RFC 8831 section 6.6: the peer did not announce I-DATA); \
+         SettingEngineBuilder::with_sctp_message_size_limit_without_interleaving(false) lifts it \
+         up to the peer's max-message-size"
+    )]
+    ErrMessageTooLargeWithoutInterleaving {
+        /// The size of the message refused.
+        size: usize,
+        /// The limit, `maxMessageSize` (16384).
+        limit: u32,
+    },
     /// Stream closed.
     #[error("Stream closed")]
     ErrStreamClosed,
@@ -1778,6 +1821,11 @@ pub enum Error {
     #[error("x509Cert expired")]
     ErrCertificateExpired,
 
+    /// An ICE server with no url (W3C "set a configuration": "If urls is empty, throw a
+    /// SyntaxError").
+    #[error("an ICE server has no url")]
+    ErrNoIceServerUrls,
+
     /// ErrNoTurnCredentials indicates that a TURN server URL was provided
     /// without required credentials.
     #[error("turn server credentials required")]
@@ -1891,6 +1939,38 @@ pub enum Error {
     #[error("protocol is larger then 65535 bytes")]
     ErrProtocolTooLarge,
 
+    /// ErrLabelTooLarge indicates that the label given for a data channel is longer than the
+    /// 65535 bytes a DATA_CHANNEL_OPEN can carry (RFC 8832 section 5.1)
+    #[error("label is larger than 65535 bytes")]
+    ErrLabelTooLarge,
+
+    /// An SRTP or SRTCP replay window of 1 to 63 packets (RFC 3711 section 3.3.2: at least 64).
+    #[error("the {0} replay window of {1} packets is below the 64 RFC 3711 requires")]
+    ErrSrtpReplayWindowTooSmall(&'static str, usize),
+
+    /// W3C `OperationError`, with what failed.
+    #[error("OperationError: {0}")]
+    ErrOperationError(String),
+
+    /// A character `insertDTMF` does not take (W3C: an `InvalidCharacterError`).
+    #[error("{0:?} is not a DTMF tone")]
+    ErrDtmfInvalidCharacter(char),
+
+    /// A send would take a data channel's `bufferedAmount` above the SCTP transport's
+    /// `[[MaxBufferSize]]` (W3C `send()`: an `OperationError`).
+    #[error("the data channel's send buffer is full")]
+    ErrDataChannelBufferFull,
+
+    /// A negotiated data channel id at or above the connected SCTP transport's `maxChannels`
+    /// (W3C createDataChannel: an `OperationError`).
+    #[error("the data channel id is not below the SCTP transport's maxChannels")]
+    ErrDataChannelIdAboveMaxChannels,
+
+    /// ErrDataChannelIdInUse indicates that a data channel was created with a negotiated id
+    /// whose SCTP stream already carries a data channel (RFC 8831 section 6.5)
+    #[error("data channel id is already in use")]
+    ErrDataChannelIdInUse,
+
     /// ErrSenderNotCreatedByConnection indicates remove_track was called with a RtpSender not created
     /// by this PeerConnection
     #[error("RtpSender not created by this PeerConnection")]
@@ -1915,6 +1995,22 @@ pub enum Error {
     /// has an conflicting fingerprints
     #[error("set_remote_description called with multiple conflicting fingerprint")]
     ErrSessionDescriptionConflictingFingerprints,
+
+    /// ErrSessionDescriptionInvalidSetup indicates set_remote_description was called with a SessionDescription whose
+    /// `a=setup` value is not `active`, `passive` or `actpass` (RFC 4145 section 4; RFC 8842 section 5.1 bars
+    /// `holdconn` from DTLS), or whose sections give different values for the one transport
+    #[error("set_remote_description called with an invalid setup attribute")]
+    ErrSessionDescriptionInvalidSetup,
+
+    /// ErrSessionDescriptionInvalidTlsId indicates set_remote_description was called with a SessionDescription whose
+    /// `a=tls-id` value is not 20 to 255 characters of the RFC 8842 section 4 alphabet, or whose sections give
+    /// different values for the one transport
+    #[error("set_remote_description called with an invalid tls-id attribute")]
+    ErrSessionDescriptionInvalidTlsId,
+
+    /// ErrInvalidIdentityAssertion indicates an `a=identity` value that does not follow RFC 8827 section 5
+    #[error("invalid identity assertion")]
+    ErrInvalidIdentityAssertion,
 
     /// ErrSessionDescriptionMissingIceUfrag indicates set_remote_description was called with a SessionDescription that
     /// is missing an ice-ufrag value
@@ -1966,9 +2062,29 @@ pub enum Error {
     #[error("Invalid modification error")]
     InvalidModificationError,
 
+    /// Invalid access error: an argument names something that is not the object's (W3C
+    /// `InvalidAccessError`), such as a statistics selector that is not a sender or receiver
+    /// of the peer connection.
+    #[error("Invalid access error")]
+    InvalidAccessError,
+
     /// Range error.
     #[error("Range error {0}")]
     RangeError(String),
+
+    /// Type error: an argument is not a value the operation takes (W3C / WebIDL `TypeError`).
+    #[error("Type error {0}")]
+    TypeError(String),
+
+    /// A session description that does not parse (W3C webrtc-pc section 11.1, an `RTCError`
+    /// with `errorDetail` `sdp-syntax-error`): what the SDP parser found, and on which line.
+    #[error("SDP syntax error{}: {error}", .line_number.map(|n| format!(" on line {n}")).unwrap_or_default())]
+    SdpSyntaxError {
+        /// The line the error is about, from 1; `None` when it is about the whole description.
+        line_number: Option<usize>,
+        /// The parser's error.
+        error: Box<Error>,
+    },
 
     /// ErrSenderWithNoCodecs indicates that a RTPSender was created without any codecs. To send media the MediaEngine needs at
     /// least one configured codec.
@@ -2014,9 +2130,10 @@ pub enum Error {
     ErrInvalidDirection,
 
     /// ErrRegisterHeaderExtensionNoFreeID indicates that there was no extension ID available which
-    /// in turn means that all 15 available id(1 through 14) have been used.
+    /// in turn means that all 254 ids an RTP header can carry (1 to 14, and 16 to 255 in the
+    /// two-byte form, RFC 8285) have been used.
     #[error(
-        "no header extension ID was free to use(this means the maximum of 15 extensions have been registered)"
+        "no header extension ID was free to use (the maximum of 254 extensions have been registered)"
     )]
     ErrRegisterHeaderExtensionNoFreeID,
 
@@ -2090,6 +2207,10 @@ pub enum Error {
     /// New SDP does not match previous answer.
     #[error("new sdp does not match previous answer")]
     ErrSDPDoesNotMatchAnswer,
+    /// A remote answer does not answer the pending local offer (RFC 3264 section 6, RFC 9429
+    /// section 5.8.3): the text names the media section and what differs.
+    #[error("the answer does not match the offer: {0}")]
+    ErrAnswerDoesNotMatchOffer(String),
     /// Provided value is not a valid enum value of type SDPType.
     #[error("provided value is not a valid enum value of type SDPType")]
     ErrPeerConnSDPTypeInvalidValue,
@@ -2192,6 +2313,10 @@ pub enum Error {
     /// Sender cannot encoding due to RID collision.
     #[error("Sender cannot encoding due to RID collision")]
     ErrRTPSenderRIDCollision,
+    /// An encoding's rid is not 1 to 255 alphanumeric characters (RFC 8852 section 3.1, the
+    /// RtpStreamId the rid is sent as; RFC 8851 section 10).
+    #[error("Sender cannot add encoding as its rid is not 1 to 255 alphanumeric characters")]
+    ErrRTPSenderRidInvalid,
     /// Sender does not have track for RID.
     #[error("Sender does not have track for RID")]
     ErrRTPSenderNoTrackForRID,
@@ -2228,6 +2353,9 @@ pub enum Error {
     /// Add_transceiver_SDP called with 0 transceivers.
     #[error("add_transceiver_sdp() called with 0 transceivers")]
     ErrSDPZeroTransceivers,
+    /// A data channel m= section without a valid `a=sctp-port` (RFC 8841 section 5).
+    #[error("invalid Media Section. Data channel section without a valid a=sctp-port")]
+    ErrSDPSctpPortInvalid,
     /// Invalid Media Section. Media + DataChannel both enabled.
     #[error("invalid Media Section. Media + DataChannel both enabled")]
     ErrSDPMediaSectionMediaDataChanInvalid,

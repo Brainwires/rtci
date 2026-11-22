@@ -115,6 +115,7 @@ use dtls::extension::extension_use_srtp::SrtpProtectionProfile;
 use ice::agent::remote_policy::RemoteAddressFilter;
 use ice::mdns::MulticastDnsMode;
 use ice::network_type::NetworkType;
+use ice::{NominationAcceptance, UnauthenticatedRequests};
 //TODO: use ice::udp_network::UDPNetwork;
 use crate::peer_connection::transport::dtls::role::RTCDtlsRole;
 use crate::peer_connection::transport::ice::candidate_type::RTCIceCandidateType;
@@ -168,19 +169,18 @@ pub struct Timeout {
 }
 
 /// Data-channel configuration for in-band channels.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct DataChannel {
     /// Maximum time to wait for a peer's `DATA_CHANNEL_ACK` before failing an
-    /// in-band data channel. `None` disables the timeout.
+    /// in-band data channel, counted from the moment the association came up on this side.
+    /// `None` (the default) disables the timeout.
+    ///
+    /// RFC 8832 has none: the `DATA_CHANNEL_OPEN` and the `DATA_CHANNEL_ACK` are sent on a
+    /// reliable, ordered stream, so they arrive while the association lives, and a channel
+    /// whose association fails gets an error with it. A fixed timeout instead closed channels
+    /// on a lossy path that was still up, where SCTP's retransmissions (which back off) or
+    /// the peer's half of the SCTP handshake (a lost COOKIE ACK) took longer than it.
     pub dcep_handshake_timeout: Option<Duration>,
-}
-
-impl Default for DataChannel {
-    fn default() -> Self {
-        Self {
-            dcep_handshake_timeout: Some(Duration::from_secs(30)),
-        }
-    }
 }
 
 /// MulticastDNS configuration for mDNS.
@@ -195,6 +195,14 @@ pub struct MulticastDNS {
     pub local_name: String,
     /// Control mDNS local IP address
     pub local_ip: Option<IpAddr>,
+    /// See [`SettingEngineBuilder::with_multicast_dns_first_query_delay`]. `None`: on.
+    pub first_query_delay: Option<bool>,
+    /// See [`SettingEngineBuilder::with_multicast_dns_destination_reported`].
+    pub destination_reported: bool,
+    /// See [`SettingEngineBuilder::with_multicast_dns_unicast_response`].
+    pub unicast_response: bool,
+    /// See [`SettingEngineBuilder::with_multicast_dns_rate_limit`].
+    pub rate_limit: Option<ice::mdns::MdnsRateLimit>,
 }
 
 impl Default for MulticastDNS {
@@ -210,6 +218,10 @@ impl Default for MulticastDNS {
             mode: MulticastDnsMode::QueryOnly,
             local_name: "".to_string(),
             local_ip: None,
+            first_query_delay: None,
+            destination_reported: false,
+            unicast_response: false,
+            rate_limit: None,
         }
     }
 }
@@ -256,6 +268,27 @@ pub struct Candidates {
     pub allow_link_local_remote_candidates: bool,
     /// See `SettingEngineBuilder::with_remote_address_filter`.
     pub remote_address_filter: Option<RemoteAddressFilter>,
+}
+
+/// Where the ICE agent follows RFC 8445 / RFC 8489 by default and a browser (libwebrtc)
+/// behaviour, or one of this fork's hardenings, can be chosen instead. Every default is the
+/// RFC's.
+#[derive(Default, Clone)]
+pub struct IceBehaviour {
+    /// See [`SettingEngineBuilder::with_ice_tie_breaker`].
+    pub tie_breaker: Option<u64>,
+    /// See [`SettingEngineBuilder::with_ice_nomination_acceptance`].
+    pub nomination_acceptance: NominationAcceptance,
+    /// See [`SettingEngineBuilder::with_ice_nomination_on_consent_checks`].
+    pub nominate_on_consent_checks: bool,
+    /// See [`SettingEngineBuilder::with_ice_pacing`].
+    pub pacing: Option<Duration>,
+    /// See [`SettingEngineBuilder::with_ice_unauthenticated_requests`].
+    pub unauthenticated_requests: UnauthenticatedRequests,
+    /// See [`SettingEngineBuilder::with_ice_data_from_selected_pair_only`].
+    pub data_from_selected_pair_only: bool,
+    /// See [`SettingEngineBuilder::with_ice_data_before_nomination`].
+    pub send_data_before_nomination: bool,
 }
 
 /// Replay attack protection window sizes.
@@ -363,9 +396,26 @@ pub struct SettingEngine {
     pub(crate) data_channel: DataChannel,
     pub(crate) turn_allocation_refresh_interval_cap: Option<Duration>,
     pub(crate) candidates: Candidates,
+    pub(crate) ice: IceBehaviour,
     pub(crate) multicast_dns: MulticastDNS,
     pub(crate) replay_protection: ReplayProtection,
     pub(crate) sdp_media_level_fingerprints: bool,
+    pub(crate) disable_sdp_tls_id: bool,
+    /// `use_srtp` only on an association that carries SRTP media (RFC 5764 section 4.1);
+    /// inverted so that the derived `Default` is the browsers' form, the default.
+    pub(crate) dtls_use_srtp_only_with_media: bool,
+    pub(crate) accept_lowercase_fingerprints: bool,
+    /// Answers and subsequent offers repeat the BUNDLE attributes in every bundled m=
+    /// section instead of carrying them in the tagged one only (RFC 9143 section 7.1.3); see
+    /// [`SettingEngineBuilder::with_bundle_attributes_repeated`].
+    /// Inverted so that the derived default is "repeated".
+    pub(crate) bundle_attributes_tagged_only: bool,
+    /// [`SettingEngineBuilder::with_max_bundle_as_must_bundle`].
+    /// Inverted so that the derived default is "honoured".
+    pub(crate) max_bundle_ignored: bool,
+    /// [`SettingEngineBuilder::with_implicit_rollback`].
+    /// Inverted so that the derived default is "implicit rollback on".
+    pub(crate) explicit_rollback_only: bool,
     pub(crate) answering_dtls_role: RTCDtlsRole,
     pub(crate) disable_certificate_fingerprint_verification: bool,
     pub(crate) allow_insecure_verification_algorithm: bool,
@@ -384,13 +434,35 @@ pub struct SettingEngine {
     /// budget via rtc-sctp's `max_payload_size_for_mtu`. `None` uses the rtc-sctp
     /// default (`INITIAL_MTU`, 1191 — the TURN-relayed IPv6 minimum-MTU budget).
     pub(crate) sctp_mtu: Option<u32>,
-    /// SCTP streams share the bytes sent by weight (RFC 8260 section 3.6), off by default.
-    pub(crate) sctp_weighted_fair_queueing: bool,
+    /// SCTP streams share the bytes sent by weight (RFC 8260 section 3.6, RFC 8831 section
+    /// 6.4). `None` is the default, on.
+    pub(crate) sctp_weighted_fair_queueing: Option<bool>,
+    /// SCTP user message interleaving (RFC 8260) is announced. `None` is the default, on.
+    pub(crate) sctp_message_interleaving: Option<bool>,
+    /// The SCTP zero checksum (RFC 9653) is announced as acceptable. `None` is the default,
+    /// on.
+    pub(crate) sctp_zero_checksum: Option<bool>,
+    /// A message over 16 KB is refused on an association without message interleaving
+    /// (RFC 8831 section 6.6). `None` is the default, on.
+    pub(crate) sctp_message_size_limit_without_interleaving: Option<bool>,
+    /// [`SettingEngineBuilder::with_data_channel_max_buffer_size`].
+    pub(crate) data_channel_max_buffer_size: Option<u32>,
+    /// [`SettingEngineBuilder::with_non_interactive_video`].
+    pub(crate) non_interactive_video: bool,
+    /// [`SettingEngineBuilder::with_srtp_key_lifetime`].
+    pub(crate) srtp_key_lifetime: Option<srtp::keying::KeyLifetime>,
     pub(crate) ignore_rid_pause_for_recv: bool,
+    /// [`SettingEngineBuilder::with_rid_pause_marks`].
+    pub(crate) rid_pause_marks: bool,
+    /// Whether `write_rtp` sends header extension elements whose id is not negotiated; see
+    /// [`SettingEngineBuilder::with_unnegotiated_header_extensions`].
+    pub(crate) unnegotiated_header_extensions: bool,
     pub(crate) write_ssrc_attributes_for_simulcast: bool,
     /// The application's socket layer reports each received datagram's ECN codepoint and
     /// applies the one each sent datagram carries ([`SettingEngineBuilder::with_ecn`]).
     pub(crate) ecn: bool,
+    /// How a stream starts marking ([`SettingEngineBuilder::with_ecn_initiation`]).
+    pub(crate) ecn_initiation: interceptor::EcnInitiation,
 }
 
 impl SettingEngine {
@@ -612,6 +684,9 @@ impl SettingEngineBuilder {
     }
 
     /// Configures the DCEP handshake timeout for in-band data channels.
+    ///
+    /// Off by default (RFC 8832 has no such timeout; see [`DataChannel::dcep_handshake_timeout`]).
+    /// A channel whose `DATA_CHANNEL_ACK` has not arrived in time gets an error and is closed.
     ///
     /// # Parameters
     ///
@@ -1205,6 +1280,131 @@ impl SettingEngineBuilder {
         self
     }
 
+    /// Whether the first mDNS query for a remote `.local` candidate waits a random 20 to 120
+    /// ms (RFC 6762 section 5.2). On by default; `false` sends it at once.
+    pub fn with_multicast_dns_first_query_delay(mut self, delay: bool) -> Self {
+        self.0.multicast_dns.first_query_delay = Some(delay);
+        self
+    }
+
+    /// Declares that the application hands every datagram of its mDNS socket to `handle_read`
+    /// with the datagram's destination address in `local_addr` (`IP_PKTINFO` /
+    /// `IPV6_PKTINFO`): the mDNS group's (`224.0.0.251:5353`, `[ff02::fb]:5353`) for one that
+    /// arrived by multicast, the host's own for one sent to it by unicast. A unicast arrival
+    /// is then held to RFC 6762's rules for it (a query is answered by unicast and only to an
+    /// on-link sender, section 5.5; a response is taken only when a recent question asked for
+    /// a unicast response, section 6). Off by default.
+    pub fn with_multicast_dns_destination_reported(mut self, reported: bool) -> Self {
+        self.0.multicast_dns.destination_reported = reported;
+        self
+    }
+
+    /// Makes the first mDNS query for a name ask for a unicast response (the QU bit, RFC 6762
+    /// section 5.4; draft-ietf-mmusic-mdns-ice-candidates section 3.2.1). Off by default: a
+    /// unicast response reaches only one of the sockets bound to port 5353 on a host (RFC 6762
+    /// section 15.1). Use it with
+    /// [`with_multicast_dns_destination_reported`](Self::with_multicast_dns_destination_reported)
+    /// when the application's socket is the only one.
+    pub fn with_multicast_dns_unicast_response(mut self, unicast: bool) -> Self {
+        self.0.multicast_dns.unicast_response = unicast;
+        self
+    }
+
+    /// Shares one limit on mDNS messages between peer connections
+    /// (draft-ietf-mmusic-mdns-ice-candidates section 7.1: the limit is the implementation's).
+    /// Give every peer connection of the process a clone of one `MdnsRateLimit`. Without it
+    /// each peer connection has a limit of its own.
+    pub fn with_multicast_dns_rate_limit(mut self, limit: ice::mdns::MdnsRateLimit) -> Self {
+        self.0.multicast_dns.rate_limit = Some(limit);
+        self
+    }
+
+    /// Fixes the ICE tiebreaker (RFC 8445 section 5.2), which is random otherwise. It decides
+    /// who keeps the controlling role when both agents claim it (section 7.3.1.1): the larger
+    /// one. For reproducible sessions and tests.
+    pub fn with_ice_tie_breaker(mut self, tie_breaker: u64) -> Self {
+        self.0.ice.tie_breaker = Some(tie_breaker);
+        self
+    }
+
+    /// Which pair a controlled ICE agent uses when the controlling agent nominates more than
+    /// one.
+    ///
+    /// The default, [`NominationAcceptance::HighestPriority`], is RFC 8445 section 8.1.1: the
+    /// nominated pair with the highest priority (a nominated pair of lower priority takes over
+    /// when consent is lost on the selected one). [`NominationAcceptance::Latest`] is
+    /// libwebrtc's rule: the latest nomination wins (with its `NOMINATION` attribute, the
+    /// highest value), whatever the pair's priority; the session then follows a browser that
+    /// moves to another pair and stops answering on the one it left.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    /// use rtc::ice::NominationAcceptance;
+    ///
+    /// let _setting_engine = SettingEngineBuilder::new()
+    ///     .with_ice_nomination_acceptance(NominationAcceptance::Latest)
+    ///     .build();
+    /// ```
+    pub fn with_ice_nomination_acceptance(mut self, acceptance: NominationAcceptance) -> Self {
+        self.0.ice.nomination_acceptance = acceptance;
+        self
+    }
+
+    /// Ta, the pacing of connectivity checks (RFC 8445 section 14.2), `None` for the default
+    /// of 50 ms (never under 5 ms). A value other than the default is proposed to the peer as
+    /// `a=ice-pacing` (RFC 8839 section 5.5) in every description, and both agents use the
+    /// higher of the two proposals.
+    pub fn with_ice_pacing(mut self, ta: Option<Duration>) -> Self {
+        self.0.ice.pacing = ta;
+        self
+    }
+
+    /// Makes the controlling ICE agent's consent checks carry USE-CANDIDATE, as libwebrtc's
+    /// do. Off by default: RFC 8445 section 7.1.2 has the attribute sent "in order to nominate
+    /// a candidate pair", once (section 8.1.1), and a consent check is a plain Binding request
+    /// (RFC 7675 section 5.1). Without it the agent repeats its nomination only when the peer
+    /// shows it lost it (a role conflict after the nomination).
+    pub fn with_ice_nomination_on_consent_checks(mut self, enabled: bool) -> Self {
+        self.0.ice.nominate_on_consent_checks = enabled;
+        self
+    }
+
+    /// What a STUN Binding request that fails the ICE short-term credential check gets.
+    ///
+    /// The default, [`UnauthenticatedRequests::Reject`], is RFC 8489 section 9.1.3: 400 (Bad
+    /// Request) without MESSAGE-INTEGRITY or USERNAME, 401 (Unauthenticated) for an unknown
+    /// username or a MESSAGE-INTEGRITY that does not match. The responses are rate limited,
+    /// never longer than the request, and unsigned. [`UnauthenticatedRequests::Drop`] answers
+    /// nothing (what this crate did before).
+    pub fn with_ice_unauthenticated_requests(mut self, requests: UnauthenticatedRequests) -> Self {
+        self.0.ice.unauthenticated_requests = requests;
+        self
+    }
+
+    /// Accepts data (DTLS, SRTP) only from the selected candidate pair's remote address.
+    ///
+    /// Off by default: RFC 8445 section 12.2 has an agent "prepared to receive data on any of
+    /// the candidates provided in the most recent candidate exchange", and data is accepted
+    /// from the remote candidate of any valid pair (one a connectivity check of this agent
+    /// succeeded on). A peer that sends before it nominates, or from a pair it moved to, is
+    /// then heard. Turning this on restores the fork's hardening: everything from another
+    /// address is dropped before DTLS sees it.
+    pub fn with_ice_data_from_selected_pair_only(mut self, enabled: bool) -> Self {
+        self.0.ice.data_from_selected_pair_only = enabled;
+        self
+    }
+
+    /// Lets data be sent on the best valid candidate pair before a pair is selected (RFC 8445
+    /// section 12.1: "An ICE agent MAY send data on any valid pair before selected pairs have
+    /// been produced"). Off by default. With it a DTLS server answers a ClientHello that
+    /// arrives before the nomination does.
+    pub fn with_ice_data_before_nomination(mut self, enabled: bool) -> Self {
+        self.0.ice.send_data_before_nomination = enabled;
+        self
+    }
+
     /// Sets a filter asked about every remote candidate's address (an mDNS candidate's once it
     /// resolves) before the ICE agent holds it; `false` drops the candidate, so no check is ever
     /// sent there. Use it to apply the host's own network policy to peer-chosen destinations.
@@ -1252,6 +1452,145 @@ impl SettingEngineBuilder {
     /// ```
     pub fn with_sdp_media_level_fingerprints(mut self, sdp_media_level_fingerprints: bool) -> Self {
         self.0.sdp_media_level_fingerprints = sdp_media_level_fingerprints;
+        self
+    }
+
+    /// Leaves the `a=tls-id` attribute (RFC 8842 section 4) out of offers and answers.
+    ///
+    /// By default every offer carries the DTLS association's `tls-id` on its first m-section
+    /// (the BUNDLE tag), and an answer carries one when the offer did: the value stays the same
+    /// while the association is kept and changes when a new one is asked for. Peers that do not
+    /// know the attribute ignore it. Set `true` only for a peer that cannot take an unknown
+    /// attribute. A received `a=tls-id` is read either way.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    ///
+    /// let setting_engine = SettingEngineBuilder::new()
+    ///     .with_disable_sdp_tls_id(true)
+    ///     .build();
+    /// ```
+    pub fn with_disable_sdp_tls_id(mut self, is_disabled: bool) -> Self {
+        self.0.disable_sdp_tls_id = is_disabled;
+        self
+    }
+
+    /// Offers the DTLS `use_srtp` extension on every association, as browsers do (the
+    /// default), or, with `false`, only on one that carries SRTP media.
+    ///
+    /// RFC 5764 section 4.1: "The use_srtp extension MUST only be used when the data being
+    /// transported is RTP or RTCP". With `false` the engine follows it: as the DTLS client it
+    /// offers `use_srtp` when the session has an audio or video section, and a
+    /// data-channel-only session is set up without it; when such a session gains a media
+    /// section later, a new DTLS association is established for it (the offer carries a new
+    /// `a=tls-id`, RFC 8842). No browser acts on that `tls-id`: Chromium, Firefox and WebKit
+    /// keep the first association, so the engine's new handshake never completes and neither
+    /// the media nor the data channels flow afterwards (the browser matrix's "Rust offers
+    /// media", "rollback" and "glare" cells, train round 8). The browsers' form is therefore
+    /// the default, and the RFC form the setting, for peers that handle `tls-id` (this engine
+    /// does). (As the DTLS server the engine takes a profile whenever the client offers one.)
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    ///
+    /// let setting_engine = SettingEngineBuilder::new()
+    ///     .with_dtls_use_srtp_on_every_association(true)
+    ///     .build();
+    /// ```
+    pub fn with_dtls_use_srtp_on_every_association(mut self, on_every_association: bool) -> Self {
+        self.0.dtls_use_srtp_only_with_media = !on_every_association;
+        self
+    }
+
+    /// Reads lower-case hex digits in a remote `a=fingerprint`, as browsers do.
+    ///
+    /// RFC 8122 section 5 defines the fingerprint as upper-case hex (`2UHEX *(":" 2UHEX)`), and
+    /// by default a description with anything else is refused as malformed. Set `true` for a
+    /// peer that writes lower-case digits.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    ///
+    /// let setting_engine = SettingEngineBuilder::new()
+    ///     .with_lowercase_fingerprints_accepted(true)
+    ///     .build();
+    /// ```
+    pub fn with_lowercase_fingerprints_accepted(mut self, is_accepted: bool) -> Self {
+        self.0.accept_lowercase_fingerprints = is_accepted;
+        self
+    }
+
+    /// Whether answers and subsequent offers repeat the BUNDLE attributes (the IDENTICAL and
+    /// TRANSPORT categories of RFC 8859: `a=ice-ufrag`, `a=ice-pwd`, `a=setup`, media-level
+    /// `a=fingerprint`, `a=rtcp-mux`, `a=rtcp-mux-only`, `a=rtcp-rsize`, candidates) in every
+    /// bundled m= section. The default is `true`.
+    ///
+    /// RFC 9143 section 7.1.3 (and RFC 9429 sections 5.2.2 and 5.3.1): "In a subsequent offer
+    /// or in an answer ... the offerer and answerer MUST include IDENTICAL and TRANSPORT
+    /// multiplexing category SDP attributes (BUNDLE attributes) only in the tagged 'm='
+    /// section" and "MUST NOT include such attributes in any other bundled 'm=' section".
+    /// `false` writes that form.
+    ///
+    /// It is not the default because no browser takes it: given an answer or a subsequent
+    /// offer whose second bundled section has no `a=rtcp-mux` of its own, Chromium and WebKit
+    /// refuse the description with "rtcp-mux must be enabled when BUNDLE is enabled" and
+    /// Firefox with "m-section at level 1 is missing a=rtcp-mux, which is required by
+    /// rtcpMuxPolicy" (browser matrix, 2026-11-22). Browsers themselves repeat the
+    /// attributes.
+    ///
+    /// Either form is accepted from the remote side whatever this is set to: the tagged
+    /// section's attributes apply to every bundled section.
+    pub fn with_bundle_attributes_repeated(mut self, repeated: bool) -> Self {
+        self.0.bundle_attributes_tagged_only = !repeated;
+        self
+    }
+
+    /// Whether a remote offer that arrives while a local offer is pending rolls the local
+    /// offer back and is applied, in one `set_remote_description` call. The default is `true`.
+    ///
+    /// W3C webrtc-pc section 4.4.2, the `setRemoteDescription` steps: a description of type
+    /// "offer" that "is invalid for the current connection.[[SignalingState]] as described in
+    /// [RFC9429]" has the local description set to `{type: "rollback"}` first, and is then
+    /// set. This engine's
+    /// `set_remote_description` is that operation, browsers perform it and "perfect
+    /// negotiation" relies on it. RFC 9429 does not forbid it: its state machine (section
+    /// 3.2) is kept, because the rollback is applied first (section 5.7) and the offer is
+    /// then applied in `stable` (section 5.6).
+    ///
+    /// With `false` the layer above does the rollback: a remote offer in `have-local-offer`
+    /// is refused, as RFC 9429 section 5.6 has it for a description whose type is not valid
+    /// in the current state.
+    ///
+    /// An offer that is refused after the implicit rollback leaves the local offer pending,
+    /// as if nothing had been called; one that is applied emits the `stable` and then the
+    /// `have-remote-offer` signaling state.
+    pub fn with_implicit_rollback(mut self, implicit_rollback: bool) -> Self {
+        self.0.explicit_rollback_only = !implicit_rollback;
+        self
+    }
+
+    /// Whether the bundle policy `max-bundle` is honoured as the policy RFC 9429 names
+    /// `must-bundle`. The default is `true`.
+    ///
+    /// W3C webrtc-pc section 4.2.5 (`RTCBundlePolicy`) defines `max-bundle` ("Gather ICE
+    /// candidates for only one track. If the remote endpoint is not bundle-aware, negotiate
+    /// only one media track") and has no `must-bundle`; RFC 9429 section 4.1.1 introduces
+    /// "an identically defined 'must-bundle' policy". So both names select the one policy:
+    /// every m= section of an initial offer but the first is bundle-only.
+    ///
+    /// RFC 9429 section 4.1.1 also says "'max-bundle' is considered deprecated, and
+    /// implementations compliant with this specification SHOULD ignore attempts by the
+    /// application to select this bundle policy (although some phase-out period may be
+    /// necessary to avoid application breakage)". `false` does that: a configuration with
+    /// `RTCBundlePolicy::MaxBundle` then behaves as the default policy, `balanced`.
+    pub fn with_max_bundle_as_must_bundle(mut self, honoured: bool) -> Self {
+        self.0.max_bundle_ignored = !honoured;
         self
     }
 
@@ -1531,39 +1870,157 @@ impl SettingEngineBuilder {
     /// (INIT, INIT ACK, RECONFIG, FORWARD TSN, shutdown) marshal without consulting this value.
     ///
     /// Each SCTP packet becomes one DTLS record carried in one UDP datagram, so the wire
-    /// size is roughly this value + ~37 bytes of DTLS record overhead + IP/UDP headers
-    /// (+ 4 bytes of TURN ChannelData framing when relayed). The default (1191) is the
-    /// TURN-relayed IPv6 minimum-MTU budget of `1280 - 40 IPv6 - 8 UDP - 4 TURN
-    /// ChannelData - 37 DTLS` (webrtc-rs/rtc#178). Set this only for paths with a known
-    /// different budget: raise it where the path genuinely carries more (fewer, larger
-    /// packets cut per-packet overhead), lower it for tunnels with an even smaller MTU.
+    /// size is this value plus the DTLS record overhead (13 bytes of header and what the
+    /// cipher suite adds: 24 bytes with AES-GCM, 16 with ChaCha20-Poly1305), the UDP and IP
+    /// headers, and 4 bytes of TURN ChannelData framing when relayed.
+    ///
+    /// Left unset, the budget follows the path: RFC 8831 section 5 says the initial path MTU
+    /// at the IP layer "SHOULD NOT exceed 1200 bytes for IPv4 and 1280 bytes for IPv6", and
+    /// the association does not probe for more, so an SCTP packet is what is left of that
+    /// under the headers of the selected candidate pair and the negotiated DTLS cipher suite
+    /// (1135 bytes over IPv4 and UDP with AES-GCM, 1195 over IPv6), recomputed when ICE
+    /// selects another pair. Until a pair is selected it is 1191 (the TURN-relayed IPv6
+    /// budget, webrtc-rs/rtc#178). Set this only for paths with a known different budget:
+    /// raise it where the path genuinely carries more (fewer, larger packets cut per-packet
+    /// overhead), lower it for tunnels with an even smaller MTU. A value set here is used as
+    /// it is on every path.
     ///
     /// The per-chunk payload budget is derived from this value by the inverse of the
     /// default derivation (minus the 12-byte common header and 16-byte DATA chunk header,
     /// rounded down to the SCTP 4-byte chunk-padding boundary), so a single maximum-size
     /// DATA chunk always marshals within this budget. Values below 32 — the smallest
-    /// representable padded DATA packet — are raised to 32 with a warning. To keep the
-    /// default, leave this unset.
+    /// representable padded DATA packet — are raised to 32 with a warning.
     pub fn with_sctp_mtu(mut self, mtu: u32) -> Self {
         self.0.sctp_mtu = Some(mtu);
         self
     }
 
-    /// Has SCTP send from its data channels by weighted fair queueing (RFC 8260 section 3.6,
-    /// RFC 8831 section 6.4), each channel's share of the bytes in proportion to its weight.
+    /// Whether SCTP sends from its data channels by weighted fair queueing (RFC 8260 section
+    /// 3.6), each channel's share of the bytes in proportion to its priority. On by default:
+    /// RFC 8831 section 6.4 says the priorities of data channels "MUST be interpreted as
+    /// weighted-fair-queuing scheduling priorities per the definition of the corresponding
+    /// stream scheduler supporting interleaving in [RFC8260]". `false` sends the messages in
+    /// the order they were written, whatever their channel, and the priority of a channel is
+    /// then carried to the peer and not otherwise used.
     pub fn with_sctp_weighted_fair_queueing(mut self, enabled: bool) -> Self {
-        self.0.sctp_weighted_fair_queueing = enabled;
+        self.0.sctp_weighted_fair_queueing = Some(enabled);
         self
     }
 
-    /// Controls whether to ignore RID pause signals for receiving transceivers.
+    /// Whether SCTP announces user message interleaving (RFC 8260). On by default: RFC 8831
+    /// sections 6.1 and 6.6 say it "SHOULD be used", so that a large message on one data
+    /// channel does not hold up the others. It is used when the peer announces it too;
+    /// otherwise the association sends DATA chunks, and nothing else changes. `false` does
+    /// not announce it, which is what a browser that has not turned it on does.
+    pub fn with_sctp_message_interleaving(mut self, enabled: bool) -> Self {
+        self.0.sctp_message_interleaving = Some(enabled);
+        self
+    }
+
+    /// Whether SCTP announces that it accepts packets with a zero checksum (RFC 9653) and
+    /// sends them to a peer that announces the same. On by default: the association runs over
+    /// DTLS, whose record protection detects errors better than the CRC32c (RFC 9653 section
+    /// 6, "SCTP over DTLS"), and section 5.2 says an endpoint "SHOULD use zero as the checksum"
+    /// then. A peer that does not announce it gets a CRC32c on every packet, and must send
+    /// one. `false` does not announce it.
+    pub fn with_sctp_zero_checksum(mut self, enabled: bool) -> Self {
+        self.0.sctp_zero_checksum = Some(enabled);
+        self
+    }
+
+    /// Whether a message over 16 KB is refused when the SCTP association does not interleave
+    /// user messages. On by default: RFC 8831 section 6.6 says "As long as message
+    /// interleaving is not supported, the sender SHOULD limit the maximum message size to
+    /// 16 KB to avoid monopolization", since such a message holds up every other data channel
+    /// until all of it has been sent. With the limit,
+    /// [`RTCSctpTransport::max_message_size`](crate::peer_connection::transport::RTCSctpTransport::max_message_size)
+    /// reports at most 16384 once the association is up without interleaving, and `send`
+    /// refuses a larger message. Between two endpoints that both interleave (two of this
+    /// engine, by default) the limit does not apply.
     ///
-    /// RID (RTP Stream Identifier) can signal pause/resume for individual streams
-    /// in simulcast scenarios. This setting controls whether to honor those signals.
+    /// `false` is what browsers do: they send messages up to the peer's `max-message-size`
+    /// whether or not the association interleaves, and current browsers do not announce
+    /// interleaving. An application that sends more than 16 KB at a time to a browser sets
+    /// this to `false`.
+    pub fn with_sctp_message_size_limit_without_interleaving(mut self, enabled: bool) -> Self {
+        self.0.sctp_message_size_limit_without_interleaving = Some(enabled);
+        self
+    }
+
+    /// Replaces the SCTP transport's `[[MaxBufferSize]]` with a fixed limit: `send()` refuses
+    /// data that would take a channel's `bufferedAmount` above `limit` bytes
+    /// (`ErrDataChannelBufferFull`). `None`, the default, is the W3C rule (webrtc-pc 6.1.1.2):
+    /// the larger of the peer's `max-message-size` and this side's send buffer, 16 MiB (the
+    /// spec leaves the send buffer's size to the implementation; 16 MiB is Chromium's).
+    ///
+    /// A smaller limit makes `send()` refuse sooner; an application that keeps
+    /// `bufferedAmount` low by `bufferedAmountLowThreshold` needs none.
+    pub fn with_data_channel_max_buffer_size(mut self, limit: Option<u32>) -> Self {
+        self.0.data_channel_max_buffer_size = limit;
+        self
+    }
+
+    /// Marks video as non-interactive for [`RTCPeerConnection::dscp`]: the AF3x codepoints of
+    /// RFC 8837 Table 1 instead of the AF4x ones. RFC 8837 section 5: "Non-browser
+    /// implementations of WebRTC MAY use the AF3x DSCP values for video that is known not to
+    /// be interactive, e.g., all video in a WebRTC video playback application". The default
+    /// is `false`: all WebRTC video is interactive.
+    ///
+    /// [`RTCPeerConnection::dscp`]: crate::peer_connection::RTCPeerConnection::dscp
+    pub fn with_non_interactive_video(mut self, non_interactive: bool) -> Self {
+        self.0.non_interactive_video = non_interactive;
+        self
+    }
+
+    /// Sets how many packets a DTLS-SRTP master key may protect. `None`, the default, is the
+    /// profile's: 2^31 for the RFC 5764 profiles (section 4.1.2), 2^48 SRTP and 2^31 SRTCP
+    /// packets for the AEAD ones (RFC 7714). Shortly before a key runs out the connection
+    /// raises `OnSrtpKeyLifetimeExpiring`; at the limit nothing more is protected with it and
+    /// the DTLS transport fails (`dtls-failure`): browsers do not take a new DTLS association
+    /// on a transport that has one, so the engine does not attempt one (RFC 3711 section 9.2:
+    /// re-key, or end the session).
+    ///
+    /// A lifetime of zero, or above the RFC 3711 limits, makes building the peer connection
+    /// fail.
+    pub fn with_srtp_key_lifetime(mut self, lifetime: Option<srtp::keying::KeyLifetime>) -> Self {
+        self.0.srtp_key_lifetime = lifetime;
+        self
+    }
+
+    /// Writes the pause mark `~` of `a=simulcast` (RFC 8853 section 5.2) although RTP stream
+    /// pause and resume (RFC 7728) is not negotiated: for an inactive encoding of a sender,
+    /// and for a stream the offer being answered marks. The default is `false`.
+    ///
+    /// RFC 8853 section 5.2: "The use of [the pause mark] MUST be accompanied by support
+    /// for RTP stream pause/resume [RFC7728] ... signaled under the same 'm=' line", and
+    /// section 5.3.2: an answerer "MUST NOT" mark a stream paused when the offer shows no
+    /// such support. The engine does not implement RFC 7728 and never signals it, so by
+    /// default it writes no `~`: an inactive encoding is listed and not sent, and an offered
+    /// `~` is answered without the mark. `true` writes the mark all the same, as libwebrtc
+    /// does for inactive layers.
+    pub fn with_rid_pause_marks(mut self, rid_pause_marks: bool) -> Self {
+        self.0.rid_pause_marks = rid_pause_marks;
+        self
+    }
+
+    /// Sends the header extension elements an application puts in a packet whose id is not
+    /// negotiated for the sender, as the fork did before. The default is `false`.
+    ///
+    /// RFC 8285 section 4.1.2: "the local identifier ... MUST be one that has been negotiated"
+    /// for an element that appears in a stream, so by default `RTCRtpSender::write_rtp` takes
+    /// such an element out of the packet (with a trace log) and sends the rest. `true` passes
+    /// them through.
+    pub fn with_unnegotiated_header_extensions(mut self, pass_through: bool) -> Self {
+        self.0.unnegotiated_header_extensions = pass_through;
+        self
+    }
+
+    /// With [`Self::with_rid_pause_marks`], controls whether the `~` an offer puts on a
+    /// stream it asks to receive is left out of the answer's `send` list.
     ///
     /// # Parameters
     ///
-    /// * `ignore_rid_pause_for_recv` - `true` to ignore pause signals, `false` to honor them
+    /// * `ignore_rid_pause_for_recv` - `true` to leave the mark out, `false` to repeat it
     pub fn with_ignore_rid_pause_for_recv(mut self, ignore_rid_pause_for_recv: bool) -> Self {
         self.0.ignore_rid_pause_for_recv = ignore_rid_pause_for_recv;
         self
@@ -1593,16 +2050,32 @@ impl SettingEngineBuilder {
     ///   [`TransportContext::ecn`](shared::TransportContext::ecn) (`IP_TOS` / `IPV6_TCLASS`;
     ///   `None` for Not-ECT).
     ///
-    /// With it on, every RTP packet (RTX included) of a stream whose codec negotiated RFC 8888
-    /// congestion control feedback (`a=rtcp-fb:<pt> ack ccfb`, see
-    /// `configure_congestion_control_feedback`) is sent ECT(1), the L4S identifier: a sender
-    /// marks only where the receiver reports the CE marks back. STUN, DTLS, SCTP and RTCP are
-    /// never marked. Inbound RTP streams count their ECT(1) and CE receptions
+    /// With it on, the RTP packets of a stream whose codec negotiated RFC 8888 congestion
+    /// control feedback (`a=rtcp-fb:<pt> ack ccfb`, see `configure_congestion_control_feedback`)
+    /// are sent ECT(1), the L4S identifier: a sender marks only where the receiver reports the
+    /// CE marks back. As RFC 8888 section 7 requires, the stream first initiates ECN as RFC 6679
+    /// section 7.2.1 has it (one packet in ten a probe, until the feedback shows the probes
+    /// arrive ECT), then marks every packet (RTX included), and stops when the feedback shows
+    /// the path clears the marking or drops marked packets (section 7.4); see
+    /// [`with_ecn_initiation`](Self::with_ecn_initiation) and
+    /// [`EcnValidation`](interceptor::EcnValidation). STUN, DTLS, SCTP and RTCP are never
+    /// marked. Inbound RTP streams count their ECT(1) and CE receptions
     /// (`packetsReceivedWithEct1`, `packetsReceivedWithCe`) and outbound ones their ECT(1)
     /// packets (`packetsSentWithEct1`); with it off those members are left out of the stats,
     /// since the engine cannot see the IP header itself. Off by default.
     pub fn with_ecn(mut self, enabled: bool) -> Self {
         self.0.ecn = enabled;
+        self
+    }
+
+    /// How a stream with ECN on ([`with_ecn`](Self::with_ecn)) starts marking:
+    /// [`EcnInitiation::RtpAndRtcp`](interceptor::EcnInitiation::RtpAndRtcp), the default,
+    /// probes first (RFC 6679 section 7.2.1, the method RFC 8888 section 7 requires);
+    /// [`EcnInitiation::LeapOfFaith`](interceptor::EcnInitiation::LeapOfFaith) marks every
+    /// packet from the first, as browsers that send L4S do (RFC 6679 section 7.2.3). Failure
+    /// detection applies to both.
+    pub fn with_ecn_initiation(mut self, initiation: interceptor::EcnInitiation) -> Self {
+        self.0.ecn_initiation = initiation;
         self
     }
 

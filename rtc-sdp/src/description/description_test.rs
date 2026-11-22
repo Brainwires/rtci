@@ -20,14 +20,12 @@ const CANONICAL_MARSHAL_SDP: &str = "v=0\r\n\
      t=3034423619 3042462419\r\n\
      r=604800 3600 0 90000\r\n\
      z=2882844526 -3600 2898848070 0\r\n\
-     k=prompt\r\n\
      a=candidate:0 1 UDP 2113667327 203.0.113.1 54400 typ host\r\n\
      a=recvonly\r\n\
      m=audio 49170 RTP/AVP 0\r\n\
      i=Vivamus a posuere nisl\r\n\
      c=IN IP4 203.0.113.1\r\n\
      b=X-YZ:128\r\n\
-     k=prompt\r\n\
      a=sendrecv\r\n\
      m=video 51372 RTP/AVP 99\r\n\
      a=rtpmap:99 h263-1998/90000\r\n";
@@ -58,8 +56,8 @@ fn test_marshal() -> Result<()> {
         session_name: "SDP Seminar".to_string(),
         session_information: Some("A Seminar on the session description protocol".to_string()),
         uri: Some(Url::parse("http://www.example.com/seminars/sdp.pdf")?),
-        email_address: Some("j.doe@example.com (Jane Doe)".to_string()),
-        phone_number: Some("+1 617 555-6011".to_string()),
+        email_addresses: vec!["j.doe@example.com (Jane Doe)".to_string()],
+        phone_numbers: vec!["+1 617 555-6011".to_string()],
         connection_information: Some(ConnectionInformation {
             network_type: "IN".to_string(),
             address_type: "IP4".to_string(),
@@ -88,6 +86,7 @@ fn test_marshal() -> Result<()> {
                     stop_time: 2873404696,
                 },
                 repeat_times: vec![],
+                time_zones: vec![],
             },
             TimeDescription {
                 timing: Timing {
@@ -99,18 +98,20 @@ fn test_marshal() -> Result<()> {
                     duration: 3600,
                     offsets: vec![0, 90000],
                 }],
+                time_zones: vec![
+                    TimeZone {
+                        adjustment_time: 2882844526,
+                        offset: -3600,
+                    },
+                    TimeZone {
+                        adjustment_time: 2898848070,
+                        offset: 0,
+                    },
+                ],
             },
         ],
-        time_zones: vec![
-            TimeZone {
-                adjustment_time: 2882844526,
-                offset: -3600,
-            },
-            TimeZone {
-                adjustment_time: 2898848070,
-                offset: 0,
-            },
-        ],
+        // RFC 8866 section 5.12: a k= line "MUST NOT be included": a key that is set is
+        // not written (CANONICAL_MARSHAL_SDP has none).
         encryption_key: Some("prompt".to_string()),
         attributes: vec![
             Attribute::new(
@@ -290,13 +291,15 @@ const TIME_ZONES_SDP: &str = "v=0\r\n\
 o=jdoe 2890844526 2890842807 IN IP4 10.47.16.5\r\n\
 s=SDP Seminar\r\n\
 t=2873397496 2873404696\r\n\
-r=2882844526 -1h 2898848070 0\r\n";
+r=7d 1h 0 25h\r\n\
+z=2882844526 -1h 2898848070 0\r\n";
 
 const TIME_ZONES_SDPEXPECTED: &str = "v=0\r\n\
 o=jdoe 2890844526 2890842807 IN IP4 10.47.16.5\r\n\
 s=SDP Seminar\r\n\
 t=2873397496 2873404696\r\n\
-r=2882844526 -3600 2898848070 0\r\n";
+r=604800 3600 0 90000\r\n\
+z=2882844526 -3600 2898848070 0\r\n";
 
 const TIME_ZONES_SDP2: &str = "v=0\r\n\
 o=jdoe 2890844526 2890842807 IN IP4 10.47.16.5\r\n\
@@ -503,11 +506,6 @@ fn test_round_trip() -> Result<()> {
             SESSION_INFORMATION_SDPLFONLY,
             Some(SESSION_INFORMATION_SDP),
         ),
-        (
-            "SessionInformationSDPExtraCRLF",
-            SESSION_INFORMATION_SDPEXTRA_CRLF,
-            Some(SESSION_INFORMATION_SDP),
-        ),
         ("SessionInformation", SESSION_INFORMATION_SDP, None),
         ("URI", URI_SDP, None),
         ("EmailAddress", EMAIL_ADDRESS_SDP, None),
@@ -523,11 +521,16 @@ fn test_round_trip() -> Result<()> {
             None,
         ),
         ("SessionBandwidth", SESSION_BANDWIDTH_SDP, None),
-        ("SessionEncryptionKey", SESSION_ENCRYPTION_KEY_SDP, None),
+        // RFC 8866 section 5.12: a received k= line is discarded.
+        (
+            "SessionEncryptionKey",
+            SESSION_ENCRYPTION_KEY_SDP,
+            Some(TIMING_SDP),
+        ),
         (
             "SessionEncryptionKeyExtraCRLF",
             SESSION_ENCRYPTION_KEY_SDPEXTRA_CRLF,
-            Some(SESSION_ENCRYPTION_KEY_SDP),
+            Some(TIMING_SDP),
         ),
         ("SessionAttributes", SESSION_ATTRIBUTES_SDP, None),
         (
@@ -557,42 +560,90 @@ fn test_round_trip() -> Result<()> {
             MEDIA_CONNECTION_INFORMATION_SDPEXTRA_CRLF,
             Some(MEDIA_CONNECTION_INFORMATION_SDP),
         ),
-        (
-            "MediaDescriptionOutOfOrder",
-            MEDIA_DESCRIPTION_OUT_OF_ORDER_SDP,
-            Some(MEDIA_DESCRIPTION_OUT_OF_ORDER_SDPACTUAL),
-        ),
         ("MediaBandwidth", MEDIA_BANDWIDTH_SDP, None),
         (
             "MediaTransportBandwidth",
             MEDIA_TRANSPORT_BANDWIDTH_SDP,
             None,
         ),
-        ("MediaEncryptionKey", MEDIA_ENCRYPTION_KEY_SDP, None),
+        (
+            "MediaEncryptionKey",
+            MEDIA_ENCRYPTION_KEY_SDP,
+            Some(MEDIA_NAME_SDP),
+        ),
         (
             "MediaEncryptionKeyExtraCRLF",
             MEDIA_ENCRYPTION_KEY_SDPEXTRA_CRLF,
-            Some(MEDIA_ENCRYPTION_KEY_SDP),
+            Some(MEDIA_NAME_SDP),
         ),
         ("MediaAttributes", MEDIA_ATTRIBUTES_SDP, None),
-        ("CanonicalUnmarshal", CANONICAL_UNMARSHAL_SDP, None),
+        (
+            "CanonicalUnmarshal",
+            CANONICAL_UNMARSHAL_SDP,
+            Some(CANONICAL_MARSHAL_SDP),
+        ),
     ];
 
     for (name, sdp_str, expected) in tests {
         let mut reader = Cursor::new(sdp_str.as_bytes());
         let sdp = SessionDescription::unmarshal(&mut reader);
-        if let Ok(sdp) = sdp {
-            let actual = sdp.marshal();
-            if let Some(expected) = expected {
-                assert_eq!(actual.as_str(), expected, "{name}\n{sdp_str}");
-            } else {
-                assert_eq!(actual.as_str(), sdp_str, "{name}\n{sdp_str}");
+        match sdp {
+            Ok(sdp) => {
+                let actual = sdp.marshal();
+                if let Some(expected) = expected {
+                    assert_eq!(actual.as_str(), expected, "{name}\n{sdp_str}");
+                } else {
+                    assert_eq!(actual.as_str(), sdp_str, "{name}\n{sdp_str}");
+                }
             }
-        } else {
-            panic!("{name}\n{sdp_str}");
+            Err(err) => panic!("{name}: {err}\n{sdp_str}"),
         }
     }
 
+    Ok(())
+}
+
+fn unmarshal_lenient(sdp: &str) -> Result<SessionDescription> {
+    SessionDescription::unmarshal_with_options(
+        &mut Cursor::new(sdp.as_bytes()),
+        &ParseOptions::lenient(),
+    )
+}
+
+// Empty lines between lines are not SDP: the default parse refuses them, and
+// `ParseOptions::blank_lines` skips them, as some media players do.
+#[test]
+fn test_blank_lines_inside_a_description_need_the_blank_lines_option() -> Result<()> {
+    assert!(unmarshal_str(SESSION_INFORMATION_SDPEXTRA_CRLF).is_err());
+
+    let options = ParseOptions {
+        blank_lines: true,
+        ..ParseOptions::strict()
+    };
+    let sdp = SessionDescription::unmarshal_with_options(
+        &mut Cursor::new(SESSION_INFORMATION_SDPEXTRA_CRLF.as_bytes()),
+        &options,
+    )?;
+    assert_eq!(sdp.marshal(), SESSION_INFORMATION_SDP);
+    Ok(())
+}
+
+// RFC 8866 section 5 / RFC 9429 section 5.8.2: the lines of a media description come in the
+// order m i c b k a. `ParseOptions::unordered_media_lines` accepts them in any order, and
+// marshalling writes them back in the right one.
+#[test]
+fn test_media_lines_out_of_order_need_the_unordered_media_lines_option() -> Result<()> {
+    assert!(unmarshal_str(MEDIA_DESCRIPTION_OUT_OF_ORDER_SDP).is_err());
+
+    let options = ParseOptions {
+        unordered_media_lines: true,
+        ..ParseOptions::strict()
+    };
+    let sdp = SessionDescription::unmarshal_with_options(
+        &mut Cursor::new(MEDIA_DESCRIPTION_OUT_OF_ORDER_SDP.as_bytes()),
+        &options,
+    )?;
+    assert_eq!(sdp.marshal(), MEDIA_DESCRIPTION_OUT_OF_ORDER_SDPACTUAL);
     Ok(())
 }
 
@@ -611,7 +662,7 @@ fn test_unmarshal_repeat_times_overflow() -> Result<()> {
     let result = SessionDescription::unmarshal(&mut reader);
     assert!(result.is_err());
     assert_eq!(
-        Error::SdpInvalidValue("106751991167301d".to_owned()),
+        Error::SdpInvalidValue("typed-time: `106751991167301d`".to_owned()),
         result.unwrap_err()
     );
     Ok(())
@@ -628,15 +679,21 @@ fn test_unmarshal_time_zones() -> Result<()> {
 
 #[test]
 fn test_unmarshal_non_nil_address() -> Result<()> {
+    // `0` is not a unicast address and `c=` needs one (RFC 8866 section 9): the default
+    // parse refuses both, `ParseOptions::loose_fields` keeps them as they are.
     let input = "v=0\r\no=0 0 0 IN IP4 0\r\ns=0\r\nc=IN IP4\r\nt=0 0\r\n";
-    let mut reader = Cursor::new(input);
-    let sdp = SessionDescription::unmarshal(&mut reader);
-    if let Ok(sdp) = sdp {
-        let output = sdp.marshal();
-        assert_eq!(output.as_str(), input);
-    } else {
-        panic!("{}", input);
-    }
+    assert!(unmarshal_str(input).is_err());
+    assert!(
+        unmarshal_str("v=0\r\no=0 0 0 IN IP4 0.0.0.0\r\ns=0\r\nc=IN IP4\r\nt=0 0\r\n").is_err()
+    );
+
+    let sdp = unmarshal_lenient(input)?;
+    assert!(
+        sdp.connection_information
+            .as_ref()
+            .is_some_and(|c| c.address.is_none())
+    );
+    assert_eq!(sdp.marshal().as_str(), input);
     Ok(())
 }
 

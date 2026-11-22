@@ -1,24 +1,52 @@
+use crate::media_stream::MediaStreamId;
 use crate::media_stream::track::MediaStreamTrack;
 use crate::peer_connection::configuration::interceptor_registry::create_stream_info;
 use crate::peer_connection::configuration::media_engine::MediaEngine;
+use crate::peer_connection::handler::endpoint::repair_flow_codec;
 use crate::rtp_transceiver::direction::RTCRtpTransceiverDirection;
 use crate::rtp_transceiver::rtp_receiver::rtp_contributing_source::{
     RTCRtpContributingSource, RTCRtpSynchronizationSource,
 };
+use crate::rtp_transceiver::rtp_sender::internal::rtp_capabilities;
 use crate::rtp_transceiver::rtp_sender::rtp_capabilities::RTCRtpCapabilities;
 use crate::rtp_transceiver::rtp_sender::rtp_codec::{
-    CodecMatch, RtpCodecKind, codec_parameters_fuzzy_search, find_fec_payload_type,
+    CodecMatch, FecFormat, RtpCodecKind, codec_parameters_fuzzy_search, find_fec_format,
     find_rtx_payload_type, is_repair_codec, parse_rtx_apt, repair_family,
 };
 use crate::rtp_transceiver::rtp_sender::rtp_codec_parameters::RTCRtpCodecParameters;
 use crate::rtp_transceiver::rtp_sender::rtp_coding_parameters::RTCRtpCodingParameters;
-use crate::rtp_transceiver::rtp_sender::rtp_header_extension_capability::RTCRtpHeaderExtensionCapability;
 use crate::rtp_transceiver::rtp_sender::rtp_receiver_parameters::RTCRtpReceiveParameters;
 use crate::rtp_transceiver::rtp_sender::{RTCRtpCodec, RTCRtpHeaderExtensionParameters};
 use crate::rtp_transceiver::{PayloadType, SSRC};
 use interceptor::Interceptor;
 use shared::error::Result;
-use std::time::Duration;
+use shared::time::SystemInstant;
+use std::time::{Duration, Instant};
+
+/// How long a source stays in `get_contributing_sources` / `get_synchronization_sources`
+/// after its last packet (W3C webrtc 5.3: sources of "the last 10 seconds").
+pub(crate) const SOURCE_LIFETIME: Duration = Duration::from_secs(10);
+
+/// The greatest `jitterBufferTarget` (W3C webrtc 5.3: a target above 4000 milliseconds is a
+/// `RangeError`).
+pub(crate) const MAX_JITTER_BUFFER_TARGET: Duration = Duration::from_millis(4000);
+
+/// The most contributing sources a receiver lists; a packet carries at most 15 and a mixer
+/// rotates through its participants, so the least recent make room past this.
+pub(crate) const MAX_CONTRIBUTING_SOURCES: usize = 64;
+
+/// The mixer-to-client audio level extension (RFC 6465 section 6): the level of each
+/// contributing source of a mixed packet.
+pub(crate) const CSRC_AUDIO_LEVEL_URI: &str = "urn:ietf:params:rtp-hdrext:csrc-audio-level";
+
+/// The linear audio level (0 to 1) of an RFC 6464 / RFC 6465 level in -dBov, as W3C webrtc
+/// 5.3 defines the conversion: 127 is silence, otherwise `10^(-level / 20)`.
+pub(crate) fn linear_audio_level(level: u8) -> f64 {
+    match level & 0x7F {
+        127 => 0.0,
+        level => 10f64.powf(-f64::from(level) / 20.0),
+    }
+}
 
 /// RTPReceiver allows an application to inspect the receipt of a TrackRemote
 ///
@@ -35,12 +63,32 @@ pub(crate) struct RTCRtpReceiverInternal {
     track: MediaStreamTrack,
     contributing_sources: Vec<RTCRtpContributingSource>,
     synchronization_sources: Vec<RTCRtpSynchronizationSource>,
-    jitter_buffer_target: Duration,
+    jitter_buffer_target: Option<Duration>,
 
     receive_codings: Vec<RTCRtpCodingParameters>,
     receive_codecs: Vec<RTCRtpCodecParameters>,
+    /// The ids of the remote MediaStreams the track is in, as the remote description's
+    /// `a=msid` lines name them (W3C `[[AssociatedRemoteMediaStreams]]`).
+    associated_media_stream_ids: Vec<MediaStreamId>,
+    /// Reduced-size RTCP as negotiated for the media section (`RTCRtcpParameters::reduced_size`).
+    rtcp_reduced_size: bool,
 
     last_returned_parameters: Option<RTCRtpReceiveParameters>,
+    /// What the public `getParameters` returns while the negotiated direction does not
+    /// receive: the parameters without codecs (W3C [[ReceiveCodecs]] is empty then).
+    not_receiving_parameters: Option<RTCRtpReceiveParameters>,
+
+    /// The track id the remote description's `a=msid` gives the track (its appdata), which
+    /// identifies the remote sender's track across descriptions. Not the id of this
+    /// receiver's track: that one is the engine's own (W3C webrtc 5.3).
+    remote_track_id: String,
+    /// W3C `[[AssociatedRemoteMediaStreams]]`, as "process remote tracks" sets it.
+    remote_streams: Vec<MediaStreamId>,
+    /// W3C `[[LastStableStateAssociatedRemoteMediaStreams]]`.
+    last_stable_remote_streams: Vec<MediaStreamId>,
+    /// The track ended and the application has not been told yet
+    /// ([`take_unannounced_end`](Self::take_unannounced_end)).
+    end_unannounced: bool,
 }
 
 impl RTCRtpReceiverInternal {
@@ -50,12 +98,107 @@ impl RTCRtpReceiverInternal {
             track: Default::default(),
             contributing_sources: vec![],
             synchronization_sources: vec![],
-            jitter_buffer_target: Default::default(),
+            jitter_buffer_target: None,
             receive_codings,
 
             receive_codecs: vec![],
+            associated_media_stream_ids: vec![],
+            rtcp_reduced_size: false,
             last_returned_parameters: None,
+            not_receiving_parameters: None,
+            remote_track_id: String::new(),
+            remote_streams: vec![],
+            last_stable_remote_streams: vec![],
+            end_unannounced: false,
         }
+        .with_own_track()
+    }
+
+    /// W3C webrtc 5.3 "create an RTCRtpReceiver": the receiver's track has an id the engine
+    /// generates (not one a remote description names), is labelled "remote " + kind, and
+    /// starts muted, live.
+    fn with_own_track(mut self) -> Self {
+        let mut track = MediaStreamTrack::new(
+            String::new(),
+            shared::util::math_rand_alpha(16),
+            format!("remote {}", self.kind),
+            self.kind,
+            vec![],
+        );
+        track.set_muted(true);
+        self.track = track;
+        self
+    }
+
+    /// Takes the track a remote description describes (its stream, codings and the msid
+    /// track id) while keeping what makes it this receiver's track: its id, label, muted
+    /// state and ready state (W3C webrtc 5.3: the track is created with the receiver and
+    /// keeps its identity).
+    pub(crate) fn set_remote_track(&mut self, mut track: MediaStreamTrack) {
+        self.remote_track_id = std::mem::take(&mut track.track_id);
+        track.track_id = self.track.track_id.clone();
+        track.label = self.track.label.clone();
+        track.set_muted(self.track.muted());
+        if self.track.ready_state()
+            == crate::media_stream::track_state::MediaStreamTrackState::Ended
+        {
+            track.stop();
+        }
+        self.track = track;
+    }
+
+    /// The msid track id of the remote sender's track, as the last remote description named
+    /// it; empty when none did.
+    pub(crate) fn remote_track_id(&self) -> &str {
+        &self.remote_track_id
+    }
+
+    /// W3C `[[AssociatedRemoteMediaStreams]]`.
+    pub(crate) fn remote_streams(&self) -> &[MediaStreamId] {
+        &self.remote_streams
+    }
+
+    /// W3C "set the associated remote streams": the streams become `msids` (deduplicated);
+    /// returns the stream ids removed from and added to the track's streams.
+    pub(crate) fn set_remote_streams(
+        &mut self,
+        msids: Vec<MediaStreamId>,
+    ) -> (Vec<MediaStreamId>, Vec<MediaStreamId>) {
+        let mut streams: Vec<MediaStreamId> = Vec::with_capacity(msids.len());
+        for msid in msids {
+            if !streams.contains(&msid) {
+                streams.push(msid);
+            }
+        }
+        let removed = self
+            .remote_streams
+            .iter()
+            .filter(|stream| !streams.contains(stream))
+            .cloned()
+            .collect();
+        let added = streams
+            .iter()
+            .filter(|stream| !self.remote_streams.contains(stream))
+            .cloned()
+            .collect();
+        self.remote_streams = streams;
+        (removed, added)
+    }
+
+    pub(crate) fn last_stable_remote_streams(&self) -> &[MediaStreamId] {
+        &self.last_stable_remote_streams
+    }
+
+    /// Signaling is stable: the associated remote streams are what a rollback returns to.
+    pub(crate) fn save_stable_remote_streams(&mut self) {
+        self.last_stable_remote_streams = self.remote_streams.clone();
+    }
+
+    /// W3C "stop the RTCRtpTransceiver": no associated remote streams, now or after a
+    /// rollback.
+    pub(crate) fn clear_remote_streams(&mut self) {
+        self.remote_streams.clear();
+        self.last_stable_remote_streams.clear();
     }
 
     pub(crate) fn kind(&self) -> RtpCodecKind {
@@ -66,40 +209,48 @@ impl RTCRtpReceiverInternal {
         &self.track
     }
 
+    pub(crate) fn set_rtcp_reduced_size(&mut self, reduced_size: bool) {
+        if self.rtcp_reduced_size != reduced_size {
+            self.rtcp_reduced_size = reduced_size;
+            self.last_returned_parameters = None;
+        }
+    }
+
+    pub(crate) fn streams(&self) -> &[MediaStreamId] {
+        &self.associated_media_stream_ids
+    }
+
+    pub(crate) fn set_streams(&mut self, streams: Vec<MediaStreamId>) {
+        self.associated_media_stream_ids = streams;
+    }
+
     pub(crate) fn track_mut(&mut self) -> &mut MediaStreamTrack {
         &mut self.track
     }
 
+    /// The RTP capabilities of the engine for receiving `kind` (W3C webrtc 5.3
+    /// `RTCRtpReceiver.getCapabilities`, a static method); `None` for a kind that is neither
+    /// audio nor video.
     pub(crate) fn get_capabilities(
-        &self,
         kind: RtpCodecKind,
         media_engine: &MediaEngine,
     ) -> Option<RTCRtpCapabilities> {
-        if kind == RtpCodecKind::Unspecified {
-            return None;
+        rtp_capabilities(kind, RTCRtpTransceiverDirection::Recvonly, media_engine)
+    }
+
+    /// W3C `[[JitterBufferTarget]]`: `None` is null, the engine's own choice.
+    pub(crate) fn jitter_buffer_target(&self) -> Option<Duration> {
+        self.jitter_buffer_target
+    }
+
+    pub(crate) fn set_jitter_buffer_target(&mut self, target: Option<Duration>) -> Result<()> {
+        if target.is_some_and(|target| target > MAX_JITTER_BUFFER_TARGET) {
+            return Err(shared::error::Error::RangeError(
+                "jitterBufferTarget must be at most 4000 ms".to_string(),
+            ));
         }
-
-        let rtp_parameters = media_engine
-            .get_rtp_parameters_by_kind(self.kind(), RTCRtpTransceiverDirection::Recvonly);
-
-        Some(RTCRtpCapabilities {
-            codecs: self
-                .receive_codecs
-                .iter()
-                .filter(|codec| {
-                    codec
-                        .rtp_codec
-                        .mime_type
-                        .contains(kind.to_string().as_str())
-                })
-                .map(|codec| codec.rtp_codec.clone())
-                .collect(),
-            header_extensions: rtp_parameters
-                .header_extensions
-                .into_iter()
-                .map(|h| RTCRtpHeaderExtensionCapability { uri: h.uri })
-                .collect(),
-        })
+        self.jitter_buffer_target = target;
+        Ok(())
     }
 
     pub(crate) fn get_parameters(
@@ -112,6 +263,7 @@ impl RTCRtpReceiverInternal {
 
             rtp_parameters.codecs =
                 RTCRtpReceiverInternal::get_codecs(&self.receive_codecs, self.kind(), media_engine);
+            rtp_parameters.rtcp.reduced_size = self.rtcp_reduced_size;
 
             self.last_returned_parameters = Some(RTCRtpReceiveParameters { rtp_parameters });
         }
@@ -119,16 +271,119 @@ impl RTCRtpReceiverInternal {
         self.last_returned_parameters.as_ref().unwrap()
     }
 
+    /// W3C `getParameters`: [`Self::get_parameters`], without codecs when the negotiated
+    /// direction does not receive (`receiving` false).
+    pub(crate) fn get_public_parameters(
+        &mut self,
+        media_engine: &MediaEngine,
+        receiving: bool,
+    ) -> &RTCRtpReceiveParameters {
+        if receiving {
+            return self.get_parameters(media_engine);
+        }
+        let mut parameters = self.get_parameters(media_engine).clone();
+        parameters.rtp_parameters.codecs.clear();
+        self.not_receiving_parameters.insert(parameters)
+    }
+
+    /// Records the sources of an RTP packet delivered to this receiver's track: its SSRC as a
+    /// synchronization source and each CSRC as a contributing source (RFC 3550 5.1; W3C
+    /// webrtc 5.3 `getSynchronizationSources`, `getContributingSources`). One entry per
+    /// source, the most recent packet's; entries older than [`SOURCE_LIFETIME`] are dropped.
+    ///
+    /// `audio_level` is the packet's RFC 6464 level (-dBov) when its header carries one, and
+    /// `csrc_levels` its RFC 6465 levels, one per CSRC in the order of the CSRC list (a list
+    /// of another length is not attributed); a source without a level reports none.
+    pub(crate) fn record_sources(
+        &mut self,
+        now: Instant,
+        wall_clock: SystemInstant,
+        header: &rtp::Header,
+        audio_level: Option<u8>,
+        csrc_levels: Option<&[u8]>,
+        vad: bool,
+    ) {
+        let timestamp = wall_clock.unix(now);
+        let live = |source: &RTCRtpContributingSource| {
+            timestamp.saturating_sub(source.timestamp) < SOURCE_LIFETIME
+        };
+        let entry = |source: u32, audio_level: Option<f64>| RTCRtpContributingSource {
+            timestamp,
+            source,
+            audio_level,
+            rtp_timestamp: header.timestamp,
+            voice_activity_flag: None,
+        };
+
+        self.synchronization_sources
+            .retain(|source| source.source != header.ssrc && live(source));
+        self.synchronization_sources.push(RTCRtpContributingSource {
+            // RFC 6464 section 3: the V bit is the level octet's high bit.
+            voice_activity_flag: audio_level.filter(|_| vad).map(|level| level & 0x80 != 0),
+            ..entry(header.ssrc, audio_level.map(linear_audio_level))
+        });
+        let csrc_levels = csrc_levels.filter(|levels| levels.len() == header.csrc.len());
+
+        self.contributing_sources
+            .retain(|source| !header.csrc.contains(&source.source) && live(source));
+        for (n, &csrc) in header.csrc.iter().enumerate() {
+            if !self
+                .contributing_sources
+                .iter()
+                .any(|source| source.source == csrc)
+            {
+                let level = csrc_levels.map(|levels| linear_audio_level(levels[n]));
+                self.contributing_sources.push(entry(csrc, level));
+            }
+        }
+        if self.contributing_sources.len() > MAX_CONTRIBUTING_SOURCES {
+            let excess = self.contributing_sources.len() - MAX_CONTRIBUTING_SOURCES;
+            self.contributing_sources.drain(..excess);
+        }
+    }
+
+    /// A source said BYE (RFC 3550 6.6): it is no longer a source of this receiver.
+    pub(crate) fn forget_source(&mut self, source: u32) {
+        self.contributing_sources
+            .retain(|entry| entry.source != source);
+        self.synchronization_sources
+            .retain(|entry| entry.source != source);
+    }
+
     pub(crate) fn get_contributing_sources(
         &self,
     ) -> impl Iterator<Item = &RTCRtpContributingSource> {
-        self.contributing_sources.iter()
+        // Kept oldest first (a source heard again moves to the end): W3C webrtc 5.3 lists
+        // them in descending timestamp order.
+        self.contributing_sources.iter().rev()
     }
 
     pub(crate) fn get_synchronization_sources(
         &self,
     ) -> impl Iterator<Item = &RTCRtpSynchronizationSource> {
-        self.synchronization_sources.iter()
+        self.synchronization_sources.iter().rev()
+    }
+
+    /// The contributing sources heard in the [`SOURCE_LIFETIME`] before `now` (the wall-clock
+    /// time since the Unix epoch, as the entries' timestamps are), most recent first. Entries
+    /// are otherwise dropped only when a packet arrives, so a receiver that hears nothing
+    /// more would keep listing its last sources.
+    pub(crate) fn live_contributing_sources(
+        &self,
+        now: Duration,
+    ) -> impl Iterator<Item = &RTCRtpContributingSource> {
+        self.get_contributing_sources()
+            .filter(move |source| now.saturating_sub(source.timestamp) < SOURCE_LIFETIME)
+    }
+
+    /// [`live_contributing_sources`](Self::live_contributing_sources) for the synchronization
+    /// sources.
+    pub(crate) fn live_synchronization_sources(
+        &self,
+        now: Duration,
+    ) -> impl Iterator<Item = &RTCRtpSynchronizationSource> {
+        self.get_synchronization_sources()
+            .filter(move |source| now.saturating_sub(source.timestamp) < SOURCE_LIFETIME)
     }
 
     pub(crate) fn get_codecs(
@@ -225,8 +480,36 @@ impl RTCRtpReceiverInternal {
         self.last_returned_parameters = None;
     }
 
+    /// The receive codecs of the last stable state, after a rollback (W3C webrtc-pc
+    /// `[[LastStableStateReceiveCodecs]]`).
+    pub(crate) fn restore_negotiated_state(&mut self, saved: &RTCRtpReceiverInternal) {
+        self.receive_codecs.clone_from(&saved.receive_codecs);
+        self.last_returned_parameters = None;
+    }
+
     pub(crate) fn set_track(&mut self, track: MediaStreamTrack) {
         self.track = track;
+    }
+
+    /// Ends the receiver's track (W3C webrtc 5.4 "stop sending and receiving").
+    ///
+    /// # Returns
+    ///
+    /// Whether the track was live, so that its end is announced once.
+    pub(crate) fn end_track(&mut self) -> bool {
+        use crate::media_stream::track_state::MediaStreamTrackState;
+        if self.track.ready_state() == MediaStreamTrackState::Ended {
+            return false;
+        }
+        self.track.stop();
+        self.end_unannounced = true;
+        true
+    }
+
+    /// Whether the track ended since the application was last told (once: the flag is
+    /// cleared).
+    pub(crate) fn take_unannounced_end(&mut self) -> bool {
+        std::mem::take(&mut self.end_unannounced)
     }
 
     pub(crate) fn stop(
@@ -257,7 +540,7 @@ impl RTCRtpReceiverInternal {
         ssrc_fec: Option<SSRC>,
         payload_type: PayloadType,
         payload_type_rtx: Option<PayloadType>,
-        payload_type_fec: Option<PayloadType>,
+        fec_format: Option<&FecFormat>,
         rtp_codec: &RTCRtpCodec,
         header_extensions: &[RTCRtpHeaderExtensionParameters],
     ) {
@@ -267,7 +550,7 @@ impl RTCRtpReceiverInternal {
             ssrc_fec,
             payload_type,
             payload_type_rtx,
-            payload_type_fec,
+            fec_format,
             rtp_codec,
             header_extensions,
         );
@@ -301,8 +584,8 @@ impl RTCRtpReceiverInternal {
                         .map(|payload_type| (rtx.ssrc, payload_type))
                 });
                 let fec = coding.rtp_coding_parameters.fec.as_ref().and_then(|fec| {
-                    find_fec_payload_type(&parameters.rtp_parameters.codecs)
-                        .map(|payload_type| (fec.ssrc, payload_type))
+                    find_fec_format(&parameters.rtp_parameters.codecs)
+                        .map(|fec_format| (fec.ssrc, fec_format))
                 });
 
                 RTCRtpReceiverInternal::interceptor_remote_stream_op(
@@ -310,10 +593,10 @@ impl RTCRtpReceiverInternal {
                     is_binding,
                     ssrc,
                     rtx.map(|(ssrc_rtx, _)| ssrc_rtx),
-                    fec.map(|(ssrc_fec, _)| ssrc_fec),
+                    fec.as_ref().map(|(ssrc_fec, _)| *ssrc_fec),
                     codec.payload_type,
                     rtx.map(|(_, payload_type_rtx)| payload_type_rtx),
-                    fec.map(|(_, payload_type_fec)| payload_type_fec),
+                    fec.as_ref().map(|(_, fec_format)| fec_format),
                     &codec.rtp_codec,
                     &parameters.rtp_parameters.header_extensions,
                 );
@@ -332,22 +615,22 @@ impl RTCRtpReceiverInternal {
                         payload_type_rtx,
                         None,
                         None,
-                        &codec.rtp_codec,
+                        &repair_flow_codec(&codec.rtp_codec),
                         &parameters.rtp_parameters.header_extensions,
                     );
                 }
 
-                if let Some((ssrc_fec, payload_type_fec)) = fec {
+                if let Some((ssrc_fec, fec_format)) = fec {
                     RTCRtpReceiverInternal::interceptor_remote_stream_op(
                         interceptor,
                         is_binding,
                         ssrc_fec,
                         None,
                         None,
-                        payload_type_fec,
+                        fec_format.payload_type,
                         None,
                         None,
-                        &codec.rtp_codec,
+                        &repair_flow_codec(&codec.rtp_codec),
                         &parameters.rtp_parameters.header_extensions,
                     );
                 }
@@ -374,7 +657,7 @@ mod repair_association_test {
     use super::{RTCRtpReceiverInternal, RtpCodecKind};
     use crate::media_stream::track::MediaStreamTrack;
     use crate::peer_connection::configuration::media_engine::{
-        MIME_TYPE_FLEX_FEC03, MIME_TYPE_RTX, MIME_TYPE_VP8, MediaEngine,
+        MIME_TYPE_FLEX_FEC, MIME_TYPE_FLEX_FEC03, MIME_TYPE_RTX, MIME_TYPE_VP8, MediaEngine,
     };
     use crate::rtp_transceiver::rtp_sender::rtp_codec_parameters::RTCRtpCodecParameters;
     use crate::rtp_transceiver::rtp_sender::rtp_coding_parameters::RTCRtpCodingParameters;
@@ -492,6 +775,7 @@ mod repair_association_test {
                 ssrc: Some(ssrc),
                 rtx: rtx_ssrc.map(|ssrc| RTCRtpRtxParameters { ssrc }),
                 fec: fec_ssrc.map(|ssrc| RTCRtpFecParameters { ssrc }),
+                ..Default::default()
             },
             codec: RTCRtpCodec {
                 mime_type: MIME_TYPE_VP8.to_owned(),
@@ -565,6 +849,53 @@ mod repair_association_test {
             Some(98),
             media.payload_type_fec,
             "and the FlexFEC payload type, which is the other half of the interceptor's gate"
+        );
+    }
+
+    /// The stream says which FEC format its repair flow is, so the right coder binds: draft-03
+    /// here, as negotiated.
+    #[test]
+    fn the_media_stream_names_its_fec_format() {
+        let streams = run(
+            &media_engine(),
+            vec![encoding("", 1000, None, Some(3000))],
+            true,
+        );
+
+        let media = primary(&streams, 1000);
+        assert_eq!(MIME_TYPE_FLEX_FEC03, media.mime_type_fec);
+        assert!(media.fec_is_flexfec03() && !media.fec_is_flexfec());
+    }
+
+    /// RFC 8627 section 7: with `video/flexfec` negotiated, the `FEC-FR` repair flow is bound as
+    /// RFC 8627 FlexFEC, and its `repair-window` (section 5.1) goes with it.
+    #[test]
+    fn an_rfc_8627_repair_flow_is_bound_as_flexfec_with_its_repair_window() {
+        let mut media_engine = media_engine_without_fec();
+        media_engine
+            .register_codec(
+                codec(110, MIME_TYPE_FLEX_FEC, "repair-window=200000"),
+                RtpCodecKind::Video,
+            )
+            .expect("flexfec");
+
+        let streams = run(
+            &media_engine,
+            vec![encoding("", 1000, None, Some(3000))],
+            true,
+        );
+
+        let media = primary(&streams, 1000);
+        assert_eq!(
+            (Some(3000), Some(110)),
+            (media.ssrc_fec, media.payload_type_fec)
+        );
+        assert_eq!(MIME_TYPE_FLEX_FEC, media.mime_type_fec);
+        assert_eq!("repair-window=200000", media.sdp_fmtp_line_fec);
+        assert!(media.fec_is_flexfec() && !media.fec_is_flexfec03());
+        assert!(
+            streams.iter().any(|info| info.ssrc == 3000),
+            "the repair flow is bound in its own right: {streams:?}"
         );
     }
 

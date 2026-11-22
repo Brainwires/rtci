@@ -1,10 +1,16 @@
 use super::*;
 
-/// UnknownReportBlock is used to store bytes for any report block
-/// that has an unknown Report Block Type.
+/// UnknownReportBlock stores a report block that is not parsed: one of a type this crate does
+/// not model, or one of a known type that is malformed.
+///
+/// It keeps what the block header said, so the block is written back as what it was.
 #[derive(Debug, Default, PartialEq, Eq, Clone)]
 pub struct UnknownReportBlock {
-    /// The block's bytes, left unparsed.
+    /// The block's type.
+    pub block_type: BlockType,
+    /// The type-specific octet of the block header.
+    pub type_specific: TypeSpecificField,
+    /// The block's bytes after its header, left unparsed. A whole number of 32-bit words.
     pub bytes: Bytes,
 }
 
@@ -18,8 +24,8 @@ impl UnknownReportBlock {
     /// The XR block header describing this block's type and length.
     pub fn xr_header(&self) -> XRHeader {
         XRHeader {
-            block_type: BlockType::Unknown,
-            type_specific: 0,
+            block_type: self.block_type,
+            type_specific: self.type_specific,
             block_length: (self.raw_size() / 4 - 1) as u16,
         }
     }
@@ -59,6 +65,10 @@ impl MarshalSize for UnknownReportBlock {
 impl Marshal for UnknownReportBlock {
     /// marshal_to encodes the UnknownReportBlock in binary
     fn marshal_to(&self, mut buf: &mut [u8]) -> Result<usize> {
+        // RFC 3611 3: the block length counts 32-bit words, in 16 bits.
+        if !self.bytes.len().is_multiple_of(4) || self.bytes.len() / 4 > u16::MAX as usize {
+            return Err(Error::InvalidBlockSize);
+        }
         if buf.remaining_mut() < self.marshal_size() {
             return Err(Error::BufferTooShort);
         }
@@ -95,6 +105,10 @@ impl Unmarshal for UnknownReportBlock {
 
         let bytes = raw_packet.copy_to_bytes(block_length as usize);
 
-        Ok(UnknownReportBlock { bytes })
+        Ok(UnknownReportBlock {
+            block_type: xr_header.block_type,
+            type_specific: xr_header.type_specific,
+            bytes,
+        })
     }
 }

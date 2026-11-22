@@ -3,8 +3,10 @@ use std::time::{Duration, Instant};
 pub(crate) const ACK_INTERVAL: u64 = 200;
 const MAX_INIT_RETRANS: usize = 8;
 const PATH_MAX_RETRANS: usize = 5;
+/// Association.Max.Retrans (RFC 9260 16).
+const ASSOCIATION_MAX_RETRANS: usize = 10;
 const NO_MAX_RETRANS: usize = usize::MAX;
-const TIMER_COUNT: usize = 6;
+const TIMER_COUNT: usize = 9;
 
 #[derive(Debug, Copy, Clone)]
 /// Retransmission limits for the association's timers.
@@ -16,16 +18,27 @@ pub struct TimerConfig {
     pub max_t1_init_retrans: usize,
     /// How many times COOKIE-ECHO may be retransmitted (T1-cookie).
     pub max_t1_cookie_retrans: usize,
-    /// How many times SHUTDOWN may be retransmitted (T2-shutdown).
+    /// How many times SHUTDOWN (or SHUTDOWN ACK) may be retransmitted without a packet from
+    /// the peer (T2-shutdown) before the association ends with
+    /// [`AssociationError::TimedOut`](crate::AssociationError::TimedOut). Defaults to
+    /// Association.Max.Retrans, 10 (RFC 9260 9.2).
     pub max_t2_shutdown_retrans: usize,
     /// How many consecutive T3-rtx expiries, with no new DATA acknowledged in between, are
     /// tolerated before the peer is declared unreachable and the association closes with
     /// [`AssociationError::TimedOut`](crate::AssociationError::TimedOut) (RFC 9260 8.1).
     ///
-    /// Defaults to unlimited, leaving reliability to the per-stream partial-reliability settings
-    /// and path failure to ICE.
+    /// An unanswered HEARTBEAT counts as one more.
+    ///
+    /// Defaults to Association.Max.Retrans, 10 (RFC 9260 16): with the RTO doubling up to
+    /// RTO.Max that is about five minutes without an answer. `usize::MAX` never gives up and
+    /// leaves the failure of the path to whatever runs underneath (ICE consent, for WebRTC).
     pub max_t3_rtx_retrans: usize,
-    /// How many times a RE-CONFIG chunk (stream reset) may be retransmitted.
+    /// Not a limit of its own any more: a RE-CONFIG request (RFC 6525 5.1.1) is retransmitted
+    /// until it is answered, its timer doubling up to RTO.Max, and each expiry that does not
+    /// follow an "In progress" answer counts toward
+    /// [`max_t3_rtx_retrans`](Self::max_t3_rtx_retrans), as an unanswered HEARTBEAT does.
+    /// Past that limit the association ends with
+    /// [`AssociationError::TimedOut`](crate::AssociationError::TimedOut).
     pub max_reconfig_retrans: usize,
     /// How many times a delayed SACK may be retransmitted.
     pub max_ack_retrans: usize,
@@ -36,8 +49,8 @@ impl Default for TimerConfig {
         Self {
             max_t1_init_retrans: MAX_INIT_RETRANS,
             max_t1_cookie_retrans: MAX_INIT_RETRANS,
-            max_t2_shutdown_retrans: NO_MAX_RETRANS,
-            max_t3_rtx_retrans: NO_MAX_RETRANS,
+            max_t2_shutdown_retrans: ASSOCIATION_MAX_RETRANS,
+            max_t3_rtx_retrans: ASSOCIATION_MAX_RETRANS,
             max_reconfig_retrans: PATH_MAX_RETRANS,
             max_ack_retrans: PATH_MAX_RETRANS,
         }
@@ -52,6 +65,15 @@ pub(crate) enum Timer {
     T3RTX = 3,
     Reconfig = 4,
     Ack = 5,
+    /// How long an accepting association waits for the COOKIE ECHO. Its first expiry ends
+    /// the association.
+    HalfOpen = 6,
+    /// T5-shutdown-guard (RFC 9260 9.2): bounds a graceful shutdown. Its first expiry aborts
+    /// the association.
+    T5ShutdownGuard = 7,
+    /// The heartbeat timer (RFC 9260 8.3): the wait before a HEARTBEAT on an idle path, then
+    /// the wait for its HEARTBEAT ACK.
+    Heartbeat = 8,
 }
 
 impl Timer {
@@ -62,6 +84,9 @@ impl Timer {
         Timer::T3RTX,
         Timer::Reconfig,
         Timer::Ack,
+        Timer::HalfOpen,
+        Timer::T5ShutdownGuard,
+        Timer::Heartbeat,
     ];
 }
 
@@ -85,6 +110,9 @@ impl TimerTable {
                 time_config.max_t3_rtx_retrans,      //T3RTX
                 time_config.max_reconfig_retrans,    //Reconfig
                 time_config.max_ack_retrans,         //Ack
+                0,                                   //HalfOpen
+                0,                                   //T5ShutdownGuard
+                NO_MAX_RETRANS,                      //Heartbeat
             ],
             ..Default::default()
         }
@@ -119,7 +147,10 @@ impl TimerTable {
             // compound T3 backoff nor apply this control timer's backoff twice.
             // See RFC 9260 9.2 and RFC 6525 5.1.1.
             *current.get_or_insert(interval)
-        } else if matches!(timer, Timer::Ack | Timer::T3RTX) {
+        } else if matches!(
+            timer,
+            Timer::Ack | Timer::T3RTX | Timer::HalfOpen | Timer::T5ShutdownGuard
+        ) {
             interval
         } else {
             calculate_next_timeout(interval, self.retrans[timer as usize])
@@ -145,6 +176,19 @@ impl TimerTable {
         if let Some(interval) = self.control_interval(timer) {
             *interval = None;
         }
+    }
+
+    /// Counts a failure that is not this timer's own expiry against its limit (an
+    /// unanswered HEARTBEAT counts with the T3-rtx expiries, RFC 9260 8.1). Returns whether
+    /// the limit is passed.
+    pub fn count_error(&mut self, timer: Timer) -> bool {
+        self.retrans[timer as usize] = self.retrans[timer as usize].saturating_add(1);
+        self.retrans[timer as usize] > self.max_retrans[timer as usize]
+    }
+
+    /// How many times `timer` may expire before it fails.
+    pub fn max_retrans(&self, timer: Timer) -> usize {
+        self.max_retrans[timer as usize]
     }
 
     pub fn reset_retrans(&mut self, timer: Timer) {
@@ -173,6 +217,8 @@ impl TimerTable {
 const RTO_INITIAL: u64 = 1000; // msec
 const RTO_MIN: u64 = 1000; // msec
 const RTO_MAX: u64 = 60000; // msec
+/// G of RFC 9260 6.3.1: the granularity of the clock, in milliseconds.
+const CLOCK_GRANULARITY: f64 = 1.0;
 const RTO_ALPHA: u64 = 1;
 const RTO_BETA: u64 = 2;
 const RTO_BASE: u64 = 8;
@@ -212,6 +258,12 @@ impl RtoManager {
                 + RTO_BETA as f64 * (self.srtt as i64 - rtt as i64).abs() as f64)
                 / RTO_BASE as f64;
             self.srtt = ((RTO_BASE - RTO_ALPHA) * self.srtt + RTO_ALPHA * rtt) / RTO_BASE;
+        }
+
+        // RFC 9260 6.3.1 G1: "Whenever RTTVAR is computed, if RTTVAR == 0, then adjust
+        // RTTVAR <- G", the clock granularity: a millisecond here.
+        if self.rttvar == 0.0 {
+            self.rttvar = CLOCK_GRANULARITY;
         }
 
         self.rto = (self.srtt + (4.0 * self.rttvar) as u64).clamp(RTO_MIN, RTO_MAX);

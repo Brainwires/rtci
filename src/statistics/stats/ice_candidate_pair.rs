@@ -48,6 +48,7 @@ impl From<CandidatePairState> for RTCStatsIceCandidatePairState {
             CandidatePairState::InProgress => RTCStatsIceCandidatePairState::InProgress,
             CandidatePairState::Failed => RTCStatsIceCandidatePairState::Failed,
             CandidatePairState::Succeeded => RTCStatsIceCandidatePairState::Succeeded,
+            CandidatePairState::Frozen => RTCStatsIceCandidatePairState::Frozen,
             _ => RTCStatsIceCandidatePairState::Unspecified,
         }
     }
@@ -137,11 +138,18 @@ pub struct RTCIceCandidatePairStats {
     /// Number of ICE consent freshness requests sent.
     pub consent_requests_sent: u64,
 
-    /// Number of packets discarded due to send errors.
-    pub packets_discarded_on_send: u32,
+    /// Number of packets for this pair discarded because the socket refused them.
+    ///
+    /// The socket is the application's: `None`, and left out of the JSON, until the
+    /// application reports a discard through
+    /// [`RTCPeerConnection::on_send_discarded`](crate::peer_connection::RTCPeerConnection::on_send_discarded).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub packets_discarded_on_send: Option<u32>,
 
-    /// Number of bytes discarded due to send errors.
-    pub bytes_discarded_on_send: u32,
+    /// Number of bytes for this pair discarded because the socket refused them; see
+    /// `packets_discarded_on_send`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes_discarded_on_send: Option<u64>,
 
     /// Estimated available outgoing bitrate in bits per second.
     ///

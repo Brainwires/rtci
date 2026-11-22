@@ -6,7 +6,8 @@
 //! from PRE-01, since a report that cannot be encoded and decoded is worth nothing.
 
 use rtc_interceptor::{
-    AttributedPacket, Interceptor, Packet, Registry, Rfc8888Builder, Slot, StreamInfo, TaggedPacket,
+    Attribute, AttributedPacket, Interceptor, Packet, RTCPFeedback, Registry, Rfc8888Builder, Slot,
+    StreamInfo, TaggedPacket,
 };
 use rtcp::transport_feedbacks::cc_feedback_report::CcFeedbackReport;
 use rtcp::transport_feedbacks::cc_feedback_report::Ecn;
@@ -18,6 +19,19 @@ use std::time::{Duration, Instant};
 const SSRC: u32 = 1000;
 const SENDER_SSRC: u32 = 7;
 const INTERVAL: Duration = Duration::from_millis(100);
+
+/// A stream whose payload type carries `a=rtcp-fb:<pt> ack ccfb`.
+fn negotiated(ssrc: u32) -> StreamInfo {
+    StreamInfo {
+        ssrc,
+        clock_rate: 90_000,
+        rtcp_feedback: vec![RTCPFeedback {
+            typ: "ack".to_owned(),
+            parameter: "ccfb".to_owned(),
+        }],
+        ..Default::default()
+    }
+}
 
 struct Harness {
     chain: Box<dyn Interceptor>,
@@ -31,6 +45,10 @@ impl Harness {
                 Slot::Rfc8888,
                 Rfc8888Builder::new()
                     .with_interval(INTERVAL)
+                    // These tests are about what a report says, at a fixed rhythm. (By
+                    // default the interval stretches to the RTCP bandwidth, which for a few
+                    // test packets is that of one audio stream.)
+                    .with_adaptive_interval(false)
                     .with_sender_ssrc(SENDER_SSRC)
                     .build(),
             )
@@ -43,11 +61,7 @@ impl Harness {
     }
 
     fn bind(&mut self, ssrc: u32) {
-        self.chain.bind_remote_stream(&StreamInfo {
-            ssrc,
-            clock_rate: 90_000,
-            ..Default::default()
-        });
+        self.chain.bind_remote_stream(&negotiated(ssrc));
     }
 
     fn arrive(&mut self, at: Duration, ssrc: u32, sequence_number: u16) {
@@ -381,5 +395,339 @@ fn reports_are_drained_from_the_write_side() {
     assert!(
         harness.drain_reports().is_empty(),
         "drained once, not queued forever"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Negotiation and identity (RFC 8888 sections 3.1 and 6)
+// ---------------------------------------------------------------------------------------------
+
+/// RFC 8888 section 6 / RFC 4585 section 4.2: feedback is sent only for a stream whose payload
+/// type negotiated it. A peer that declined `ack ccfb` gets no report (rfc8888.md bug B2).
+#[test]
+fn a_stream_that_did_not_negotiate_ccfb_gets_no_report() {
+    let mut harness = Harness::new();
+    harness.chain.bind_remote_stream(&StreamInfo {
+        ssrc: SSRC,
+        clock_rate: 90_000,
+        ..Default::default()
+    });
+
+    for sequence_number in 0..5 {
+        harness.arrive(ms(0), SSRC, sequence_number);
+    }
+    harness.tick(INTERVAL);
+    harness.tick(INTERVAL * 2);
+
+    assert!(
+        harness.drain_reports().is_empty(),
+        "no `ack ccfb` on the stream, so nothing is reported"
+    );
+    assert_eq!(None, harness.next_timeout(), "and no timer runs for it");
+}
+
+/// The same chain reports the stream that did negotiate it and not the one that did not.
+#[test]
+fn only_the_streams_that_negotiated_ccfb_are_reported() {
+    let mut harness = Harness::new();
+    harness.bind(SSRC);
+    harness.chain.bind_remote_stream(&StreamInfo {
+        ssrc: 2000,
+        clock_rate: 48_000,
+        ..Default::default()
+    });
+
+    harness.arrive(ms(0), SSRC, 1);
+    harness.arrive(ms(0), 2000, 1);
+    harness.tick(INTERVAL);
+
+    let reports = harness.drain_reports();
+    assert_eq!(1, reports.len());
+    assert_eq!(
+        vec![SSRC],
+        reports[0]
+            .report_blocks
+            .iter()
+            .map(|block| block.media_ssrc)
+            .collect::<Vec<_>>()
+    );
+}
+
+fn unconfigured_chain() -> Box<dyn Interceptor> {
+    Box::new(
+        Registry::new()
+            .with(
+                Slot::Rfc8888,
+                Rfc8888Builder::new()
+                    .with_interval(INTERVAL)
+                    .with_adaptive_interval(false)
+                    .build(),
+            )
+            .build(),
+    )
+}
+
+/// RFC 8888 section 3.1: the header SSRC is the SSRC of the RTCP packet sender. Built without
+/// one, the interceptor must not claim SSRC 0 (rfc8888.md bug B3): a receive-only endpoint
+/// reports from a random SSRC of its own.
+#[test]
+fn a_receive_only_endpoint_reports_from_a_non_zero_ssrc_of_its_own() {
+    let mut harness = Harness {
+        chain: unconfigured_chain(),
+        epoch: Instant::now(),
+    };
+    harness.bind(SSRC);
+
+    harness.arrive(ms(0), SSRC, 1);
+    harness.tick(INTERVAL);
+    harness.arrive(ms(150), SSRC, 2);
+    harness.tick(INTERVAL * 2);
+
+    let reports = harness.drain_reports();
+    assert_eq!(2, reports.len());
+    assert_ne!(0, reports[0].sender_ssrc);
+    assert_ne!(SSRC, reports[0].sender_ssrc, "not the media source's");
+    assert_eq!(
+        reports[0].sender_ssrc, reports[1].sender_ssrc,
+        "one participant, one SSRC"
+    );
+}
+
+/// An endpoint that sends media reports from its media SSRC: that is the SSRC of the RTCP
+/// packet sender the peer already knows.
+#[test]
+fn an_endpoint_that_sends_media_reports_from_its_media_ssrc() {
+    let mut harness = Harness {
+        chain: unconfigured_chain(),
+        epoch: Instant::now(),
+    };
+    harness.chain.bind_local_stream(&StreamInfo {
+        ssrc: 0x5E4D_E401,
+        clock_rate: 90_000,
+        ..Default::default()
+    });
+    harness.bind(SSRC);
+
+    harness.arrive(ms(0), SSRC, 1);
+    harness.tick(INTERVAL);
+
+    let reports = harness.drain_reports();
+    assert_eq!(1, reports.len());
+    assert_eq!(0x5E4D_E401, reports[0].sender_ssrc);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Duplicates, gaps and report size (RFC 8888 section 3.1)
+// ---------------------------------------------------------------------------------------------
+
+/// RFC 8888 section 3.1: for duplicate copies the arrival time of the first copy is reported,
+/// and ECN-CE if any copy was CE-marked (rfc8888.md bug B4).
+#[test]
+fn a_duplicate_reports_the_first_arrival_and_ce_if_any_copy_was_marked() {
+    let mut harness = Harness::new();
+    harness.bind(SSRC);
+
+    // The report goes out one interval after the first arrival, at 140 ms.
+    harness.arrive_with_ecn(ms(40), SSRC, 100, Some(EcnCodepoint::Ce));
+    harness.arrive_with_ecn(ms(90), SSRC, 100, Some(EcnCodepoint::Ect1));
+    harness.tick(ms(140));
+
+    let reports = harness.drain_reports();
+    let metric = &reports[0].report_blocks[0].metric_blocks[0];
+    assert_eq!(1, reports[0].report_blocks[0].metric_blocks.len());
+    assert_eq!(Ecn::Ce, metric.ecn, "one copy was CE");
+    // 100 ms before the report is 102 units of 1/1024 s; the second copy would be 51.
+    assert!(
+        (101..=103).contains(&metric.arrival_time_offset),
+        "the first copy arrived 100 ms before the report, got {}",
+        metric.arrival_time_offset
+    );
+}
+
+/// One packet that never arrives must not make every later report describe everything since
+/// (rfc8888.md bug B6): each arrival is reported once, the gap once.
+#[test]
+fn one_lost_packet_does_not_make_every_report_repeat_the_window() {
+    let mut harness = Harness::new();
+    harness.bind(SSRC);
+
+    // 50 packets per 100 ms; sequence number 5 is lost.
+    let mut sequence_number = 0u16;
+    let mut described = Vec::new();
+    for interval in 0..10u32 {
+        for index in 0..50u32 {
+            if sequence_number != 5 {
+                harness.arrive(
+                    INTERVAL * interval + ms(u64::from(index) * 2),
+                    SSRC,
+                    sequence_number,
+                );
+            }
+            sequence_number += 1;
+        }
+        harness.tick(INTERVAL * (interval + 1));
+        for report in harness.drain_reports() {
+            described.push(report.report_blocks[0].metric_blocks.len());
+        }
+    }
+
+    assert_eq!(10, described.len(), "one report per interval");
+    assert!(
+        described.iter().all(|count| *count <= 50),
+        "each report describes one interval's packets: {described:?}"
+    );
+    assert_eq!(500, described.iter().sum::<usize>());
+}
+
+/// RFC 8888 section 3.1: overlapping reports are sent when a packet is reordered across a
+/// report boundary, and what was reported received stays reported received.
+#[test]
+fn a_packet_reordered_across_a_report_boundary_is_reported_in_an_overlapping_report() {
+    let mut harness = Harness::new();
+    harness.bind(SSRC);
+
+    harness.arrive(ms(0), SSRC, 100);
+    harness.arrive(ms(20), SSRC, 102);
+    harness.tick(INTERVAL);
+    let first = harness.drain_reports();
+    assert_eq!(vec![true, false, true], received(&first[0], 0));
+
+    harness.arrive(ms(120), SSRC, 101);
+    harness.arrive(ms(130), SSRC, 103);
+    harness.tick(INTERVAL * 2);
+    let second = harness.drain_reports();
+    assert_eq!(101, second[0].report_blocks[0].begin_sequence);
+    assert_eq!(vec![true, true, true], received(&second[0], 0));
+}
+
+/// RFC 8888 section 3.1: feedback too large for the path MTU is split into several feedback
+/// packets rather than cut.
+#[test]
+fn feedback_too_large_for_the_report_size_is_split_into_several_packets() {
+    let chain = Registry::new()
+        .with(
+            Slot::Rfc8888,
+            Rfc8888Builder::new()
+                .with_interval(INTERVAL)
+                .with_adaptive_interval(false)
+                .with_sender_ssrc(SENDER_SSRC)
+                // 12 + 8 bytes of overhead and 100 two-byte metric blocks.
+                .with_max_report_size(220)
+                .build(),
+        )
+        .build();
+    let mut harness = Harness {
+        chain: Box::new(chain),
+        epoch: Instant::now(),
+    };
+    harness.bind(SSRC);
+
+    for sequence_number in 0..250u16 {
+        harness.arrive(ms(0), SSRC, sequence_number);
+    }
+    harness.tick(INTERVAL);
+
+    let reports = harness.drain_reports();
+    assert_eq!(
+        vec![(0u16, 100usize), (100, 100), (200, 50)],
+        reports
+            .iter()
+            .map(|report| (
+                report.report_blocks[0].begin_sequence,
+                report.report_blocks[0].metric_blocks.len()
+            ))
+            .collect::<Vec<_>>()
+    );
+    for report in &reports {
+        assert!(report.marshal_size() <= 220, "each within the budget");
+        assert_eq!(reports[0].report_timestamp, report.report_timestamp);
+    }
+}
+
+/// RFC 8888 section 6: the feedback covers every packet of the session's payload types, FEC
+/// and retransmission included. The repair flows of a stream are reported under their own SSRC.
+#[test]
+fn the_repair_flows_of_a_negotiated_stream_are_reported_under_their_own_ssrc() {
+    let mut harness = Harness::new();
+    harness.chain.bind_remote_stream(&StreamInfo {
+        ssrc_fec: Some(3000),
+        payload_type_fec: Some(118),
+        ..negotiated(SSRC)
+    });
+
+    harness.arrive(ms(0), SSRC, 10);
+    harness.arrive(ms(1), 3000, 700);
+    harness.tick(INTERVAL);
+
+    let reports = harness.drain_reports();
+    assert_eq!(
+        vec![(SSRC, 10u16), (3000, 700)],
+        reports[0]
+            .report_blocks
+            .iter()
+            .map(|block| (block.media_ssrc, block.begin_sequence))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// RFC 8888 sections 3.1 and 6: a retransmission is reported as what arrived on the wire, a
+/// packet of the RTX stream under its own SSRC and sequence number, although the chain sees it
+/// rewritten into the original (RFC 4588 de-encapsulation happens before the chain). Reporting
+/// it as the original would tell the sender that a packet the path lost arrived, at the time
+/// the retransmission did.
+#[test]
+fn a_retransmission_is_reported_under_the_rtx_ssrc_and_sequence_number() {
+    let mut harness = Harness::new();
+    harness.chain.bind_remote_stream(&StreamInfo {
+        ssrc_rtx: Some(4000),
+        payload_type_rtx: Some(97),
+        ..negotiated(SSRC)
+    });
+
+    harness.arrive(ms(0), SSRC, 10);
+    harness.arrive(ms(1), SSRC, 12);
+    // Sequence number 11 was lost; the RTX packet 900 carries it, rewritten before the chain.
+    harness
+        .chain
+        .handle_read(TaggedPacket {
+            now: harness.epoch + ms(30),
+            transport: TransportContext::default(),
+            message: AttributedPacket::new(Packet::Rtp(rtp::Packet {
+                header: rtp::header::Header {
+                    version: 2,
+                    payload_type: 96,
+                    sequence_number: 11,
+                    ssrc: SSRC,
+                    ..Default::default()
+                },
+                payload: vec![1, 2, 3].into(),
+            }))
+            .with(Attribute::Retransmitted {
+                ssrc: 4000,
+                sequence_number: 900,
+            }),
+        })
+        .expect("handle_read");
+    harness.tick(INTERVAL);
+
+    let reports = harness.drain_reports();
+    let blocks: Vec<(u32, u16, Vec<bool>)> = reports
+        .iter()
+        .flat_map(|report| &report.report_blocks)
+        .map(|block| {
+            (
+                block.media_ssrc,
+                block.begin_sequence,
+                block.metric_blocks.iter().map(|m| m.received).collect(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        vec![
+            (SSRC, 10u16, vec![true, false, true]),
+            (4000, 900, vec![true])
+        ],
+        blocks,
+        "11 stays lost on the media stream; the RTX stream's 900 arrived"
     );
 }

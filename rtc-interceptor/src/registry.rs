@@ -18,6 +18,10 @@ use std::collections::BTreeMap;
 #[non_exhaustive]
 #[repr(usize)]
 pub enum Slot {
+    /// The RTCP session ([`RtcpSessionInterceptor`](crate::RtcpSessionInterceptor)): the
+    /// last thing every outbound RTCP packet passes and the first to see what arrives, so it
+    /// counts what really left and arrived and no RTCP leaves except in its compound packets.
+    RtcpSession = 500,
     /// `CongestionControlInterceptor` — the send history, and the ingest of returning feedback.
     ///
     /// **Both legs.** *Read:* ingests inbound TWCC or CCFB and hands the reports to the estimator.
@@ -31,6 +35,19 @@ pub enum Slot {
     /// sequence number the history keys on has already been assigned at 2_000, so a report naming
     /// that number can be matched to the packet that carried it.
     CongestionControl = 1_000,
+    /// `WireImageTap` — copies departing media packets, as they leave, for an FEC encoder.
+    ///
+    /// **Outbound only**, and it changes nothing: every packet passes through untouched.
+    ///
+    /// **Why here — below the last thing that edits a packet.** FEC protects the source packets
+    /// as they are on the wire: the receiver XORs what arrived. [`Slot::TwccSender`] at 2_000
+    /// writes the transport-wide sequence number into each departing packet, adding the header
+    /// extension when the packet had none, so an encoder that read the packet above it protects
+    /// an image the receiver never sees, and what it recovers is corrupt. The encoder itself
+    /// cannot move down here: it generates packets, and a generator has to stay above the pacer
+    /// and the TWCC sender so its repair packets are metered and numbered. So the encoder stays
+    /// at [`Slot::FecEncoder`] and reads the wire image from this tap.
+    FecWireImage = 1_500,
     /// `TwccSenderInterceptor` — stamps each departing RTP packet with the transport-wide sequence
     /// number the remote will report against.
     ///
@@ -43,6 +60,18 @@ pub enum Slot {
     /// never passes this slot is never numbered, and the remote cannot report on what it cannot
     /// name. A retransmission is exactly that case.
     TwccSender = 2_000,
+    /// `CircuitBreakerInterceptor` — the RTP circuit breaker of RFC 8083: stops a flow whose
+    /// receiver has gone, whose media is not arriving, or that persistently takes ten times what
+    /// TCP would.
+    ///
+    /// **Both legs.** *Write:* counts every departing RTP packet, and drops the packets of a
+    /// flow that has ceased transmission. *Read:* reads the report blocks of inbound SR and RR.
+    ///
+    /// **Why here — below the pacer, above the numbering.** Below the pacer it counts what is
+    /// actually released, retransmissions and repair packets included. Above the TWCC sender
+    /// and the send history, a packet it drops is never numbered and never recorded as sent: a
+    /// ceased flow does not read as loss to the congestion controller.
+    CircuitBreaker = 2_500,
     /// `PacerInterceptor` — gates departures, releasing at the estimated rate.
     ///
     /// **Outbound, with one inbound read.** *Write:* queues RTP and releases it on a timer; RTCP
@@ -70,35 +99,19 @@ pub enum Slot {
     /// not see them believes the path is carrying less than it is — then raises the rate during
     /// loss, which is the worst moment to do it.
     NackResponder = 4_000,
-    /// `FlexFec03SendInterceptor` — generates repair packets for the media it sees leaving.
+    /// The FEC send interceptor (`FlexFec03SendInterceptor`) — generates repair packets for the
+    /// media it sees leaving.
     ///
     /// **Outbound only.**
     ///
     /// **Why here — a generator, so above the pacer.** Its repair packets are real bytes and are
-    /// metered and recorded like any other. Being above the NACK responder also means the media it
-    /// protects has already been buffered for retransmission, so the two recovery mechanisms cover
-    /// the same packets rather than racing to protect different ones.
+    /// metered, numbered and recorded like any other. Being above the NACK responder also means
+    /// the media it protects has already been buffered for retransmission, so the two recovery
+    /// mechanisms cover the same packets rather than racing to protect different ones.
+    ///
+    /// What it protects is the packet as sent, and at this slot the packet is not final yet: see
+    /// [`Slot::FecWireImage`], where the encoder reads it from.
     FecEncoder = 5_000,
-    /// `FlexFec03ReceiveInterceptor` — rebuilds packets the path dropped.
-    ///
-    /// **Inbound only.** Nothing on the write leg.
-    ///
-    /// **Why here — before anything reads a sequence number.** The read walk runs wire to
-    /// application, so this recovers a packet before the NACK generator at 7_000 can notice it was
-    /// missing. Placed the other way round, this endpoint would ask the remote to retransmit
-    /// packets it was about to rebuild locally — paying for the same data twice, and adding a round
-    /// trip to data it already had.
-    FecDecoder = 6_000,
-    /// `NackGeneratorInterceptor` — asks the remote for what did not arrive.
-    ///
-    /// **Both legs.** *Read:* detects gaps in the inbound sequence space. *Write:* emits NACK on a
-    /// timer.
-    ///
-    /// **Why here — after recovery, before re-timing.** After the FEC decoder (6_000), so a rebuilt
-    /// packet counts as arrived and is not requested again. Before the jitter buffer (13_000), so
-    /// it judges loss from arrival order rather than from playout order. And, being a generator,
-    /// application-ward of the pacer so its NACKs are metered.
-    NackGenerator = 7_000,
     /// `TwccReceiverInterceptor` — reports arrival times to the **remote** sender's congestion
     /// controller.
     ///
@@ -127,6 +140,31 @@ pub enum Slot {
     /// because it generates; before the jitter buffer because the jitter it measures must be the
     /// path's, not this endpoint's buffering.
     ReceiverReport = 10_000,
+    /// The FEC receive interceptor (`FlexFec03ReceiveInterceptor`) — rebuilds packets the path
+    /// dropped.
+    ///
+    /// **Inbound only.** Nothing on the write leg.
+    ///
+    /// **Why here — after the arrival recorders, before anything reads a sequence number.** The
+    /// read walk runs wire to application. The arrival recorders ([`Slot::TwccReceiver`],
+    /// [`Slot::Rfc8888`], [`Slot::ReceiverReport`]) come first: they report what the path
+    /// delivered, so they have to see the repair packets this interceptor consumes, and they must
+    /// not see the packets it rebuilds. A repair packet swallowed before them is reported to the
+    /// sender as lost, and a rebuilt packet counted by them hides a loss from the sender's
+    /// congestion controller and from `fraction lost`. The NACK generator comes after
+    /// ([`Slot::NackGenerator`]): this endpoint must not ask the remote to retransmit a packet it
+    /// is about to rebuild locally.
+    FecDecoder = 10_300,
+    /// `NackGeneratorInterceptor` — asks the remote for what did not arrive.
+    ///
+    /// **Both legs.** *Read:* detects gaps in the inbound sequence space. *Write:* emits NACK on a
+    /// timer.
+    ///
+    /// **Why here — after recovery, before re-timing.** After the FEC decoder (10_300), so a
+    /// rebuilt packet counts as present and is not requested again. Before the jitter buffer
+    /// (13_000), so it judges loss from arrival order rather than from playout order. And, being
+    /// a generator, application-ward of the pacer so its NACKs are metered.
+    NackGenerator = 10_600,
     /// `SenderReportInterceptor` — emits SR on a timer, describing what this endpoint has sent.
     ///
     /// **Outbound only.**
@@ -155,8 +193,8 @@ pub enum Slot {
     JitterBuffer = 13_000,
     /// Anywhere else, for an interceptor this crate knows nothing about.
     ///
-    /// The named slots are spaced a thousand apart so one of your own fits between any two of them
-    /// without renumbering anything: `Slot::from(6_500)` sits after the FEC decoder and before the
+    /// The named slots are spaced so one of your own fits between any two of them
+    /// without renumbering anything: `Slot::from(10_450)` sits after the FEC decoder and before the
     /// NACK generator. Reach it through [`From<usize>`](#impl-From<usize>-for-Slot) rather than by
     /// naming the variant, so the spelling survives this gaining a richer representation.
     ///
@@ -171,7 +209,7 @@ pub enum Slot {
     ///   reception statistics. Put it **below [`Slot::JitterBuffer`]** (< 13_000), so it sees the
     ///   order and timing the path produced rather than the order this endpoint replays.
     /// * *It repairs or recovers inbound packets.* Put it **below anything that would otherwise ask
-    ///   for them again** — below [`Slot::NackGenerator`] (< 7_000), as the FEC decoder is.
+    ///   for them again** — below [`Slot::NackGenerator`] (< 10_600), as the FEC decoder is.
     /// * *It only observes, and emits nothing.* Nothing pins it; pick a slot that reads well next to
     ///   its neighbours.
     ///
@@ -198,16 +236,19 @@ impl Slot {
     /// The named slots are the thousands; a custom one is whatever it was built from.
     pub const fn slot(self) -> usize {
         match self {
+            Self::RtcpSession => 500,
             Self::CongestionControl => 1_000,
+            Self::FecWireImage => 1_500,
             Self::TwccSender => 2_000,
+            Self::CircuitBreaker => 2_500,
             Self::Pacer => 3_000,
             Self::NackResponder => 4_000,
             Self::FecEncoder => 5_000,
-            Self::FecDecoder => 6_000,
-            Self::NackGenerator => 7_000,
             Self::TwccReceiver => 8_000,
             Self::Rfc8888 => 9_000,
             Self::ReceiverReport => 10_000,
+            Self::FecDecoder => 10_300,
+            Self::NackGenerator => 10_600,
             Self::SenderReport => 11_000,
             Self::IntervalPli => 12_000,
             Self::JitterBuffer => 13_000,
@@ -275,7 +316,7 @@ impl std::hash::Hash for Slot {
 /// ```text
 /// Registry::new()
 ///     .with(Slot::TwccSender, a)     // 2_000: closest to the wire
-///     .with(Slot::NackGenerator, b)  // 7_000
+///     .with(Slot::NackGenerator, b)  // 10_600
 ///     .with(Slot::JitterBuffer, c)   // 13_000: closest to the application
 ///     .build()
 ///
@@ -285,7 +326,7 @@ impl std::hash::Hash for Slot {
 ///
 /// Declaring the position rather than relying on call order is what makes the helpers in
 /// `rtc` composable: `configure_twcc` places interceptors at 2_000 and 8_000, `configure_nack` at
-/// 4_000 and 7_000, and the two interleave correctly however the caller sequences them. With order taken
+/// 4_000 and 10_600, and the two interleave correctly however the caller sequences them. With order taken
 /// from insertion, calling them in either sequence produced a chain that was wrong in a different
 /// way each time, and nothing caught it — the nested registry that preceded this added *innermost*
 /// first, so `register_default_interceptors` assembled TWCC receiver → RTCP reports → NACK
@@ -618,7 +659,7 @@ mod tests {
         let mut chain = Registry::new()
             .with(Slot::FecDecoder, Marker::new("fec", log.clone()))
             .with(Slot::NackGenerator, Marker::new("nack", log.clone()))
-            .with(Slot::from(6_500), Marker::new("mine", log.clone()))
+            .with(Slot::from(10_450), Marker::new("mine", log.clone()))
             .build();
 
         chain.handle_read(packet()).unwrap();
@@ -627,7 +668,7 @@ mod tests {
         assert_eq!(
             vec!["fec", "mine", "nack"],
             *log.0.lock().unwrap(),
-            "6_500 belongs after the FEC decoder at 6_000 and before the NACK generator at 7_000"
+            "10_450 belongs after the FEC decoder at 10_300 and before the NACK generator at 10_600"
         );
     }
 
@@ -650,20 +691,23 @@ mod tests {
         );
     }
 
-    /// The named slots keep the spacing the doc promises, so `Slot::from` has room to aim at.
+    /// The named slots keep room between them, so `Slot::from` has somewhere to aim, and they are
+    /// in the order the chain contract gives.
     #[test]
-    fn the_named_slots_are_spaced_by_a_thousand() {
+    fn the_named_slots_are_in_contract_order_with_room_between() {
         let named = [
             Slot::CongestionControl,
+            Slot::FecWireImage,
             Slot::TwccSender,
+            Slot::CircuitBreaker,
             Slot::Pacer,
             Slot::NackResponder,
             Slot::FecEncoder,
-            Slot::FecDecoder,
-            Slot::NackGenerator,
             Slot::TwccReceiver,
             Slot::Rfc8888,
             Slot::ReceiverReport,
+            Slot::FecDecoder,
+            Slot::NackGenerator,
             Slot::SenderReport,
             Slot::IntervalPli,
             Slot::JitterBuffer,
@@ -671,10 +715,9 @@ mod tests {
         ];
 
         for pair in named.windows(2) {
-            assert_eq!(
-                1_000,
-                pair[1].slot() - pair[0].slot(),
-                "{:?} and {:?} must stay a thousand apart",
+            assert!(
+                pair[1].slot() >= pair[0].slot() + 300,
+                "{:?} and {:?} must stay in order with room for a custom slot between",
                 pair[0],
                 pair[1]
             );

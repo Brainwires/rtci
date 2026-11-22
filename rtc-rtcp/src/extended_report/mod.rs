@@ -1,5 +1,7 @@
 #[cfg(test)]
 mod extended_report_test;
+#[cfg(test)]
+mod report_blocks_test;
 
 /// Delay Since Last Receiver Report blocks, for round-trip time between receivers.
 pub mod dlrr;
@@ -25,8 +27,8 @@ pub use unknown::UnknownReportBlock;
 pub use vm::VoIPMetricsReportBlock;
 
 use crate::Packet;
-use crate::header::{HEADER_LENGTH, Header, PacketType, SSRC_LENGTH};
-use crate::util::{get_padding_size, put_padding};
+use crate::header::{HEADER_LENGTH, Header, PacketType, SSRC_LENGTH, read_packet};
+use crate::util::get_padding_size;
 use bytes::{Buf, BufMut, Bytes};
 use shared::{
     error::{Error, Result},
@@ -39,31 +41,38 @@ const XR_HEADER_LENGTH: usize = 4;
 
 /// BlockType specifies the type of report in a report block
 /// Extended Report block types from RFC 3611.
+///
+/// The enum converts to and from the type octet with `u8::from` / `BlockType::from`. A type
+/// that later documents define is kept as [`BlockType::Other`], so such a block is written
+/// back as what it was.
 #[derive(Default, Debug, Copy, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum BlockType {
     #[default]
-    /// A block type this crate does not model.
-    Unknown = 0,
+    /// No block type: the type octet 0.
+    Unknown,
     /// Loss RLE report block ([RFC 3611] §4.1).
-    LossRLE = 1, // RFC 3611, section 4.1
+    LossRLE, // 1, RFC 3611, section 4.1
     /// Duplicate RLE report block ([RFC 3611] §4.2).
-    DuplicateRLE = 2, // RFC 3611, section 4.2
+    DuplicateRLE, // 2, RFC 3611, section 4.2
     /// Packet Receipt Times report block ([RFC 3611] §4.3).
-    PacketReceiptTimes = 3, // RFC 3611, section 4.3
+    PacketReceiptTimes, // 3, RFC 3611, section 4.3
     /// Receiver Reference Time report block ([RFC 3611] §4.4).
-    ReceiverReferenceTime = 4, // RFC 3611, section 4.4
+    ReceiverReferenceTime, // 4, RFC 3611, section 4.4
     /// Delay Since Last Receiver Report block ([RFC 3611] §4.5).
-    DLRR = 5, // RFC 3611, section 4.5
+    DLRR, // 5, RFC 3611, section 4.5
     /// Statistics Summary report block ([RFC 3611] §4.6).
-    StatisticsSummary = 6, // RFC 3611, section 4.6
+    StatisticsSummary, // 6, RFC 3611, section 4.6
     /// VoIP Metrics report block ([RFC 3611] §4.7).
-    VoIPMetrics = 7, // RFC 3611, section 4.7
+    VoIPMetrics, // 7, RFC 3611, section 4.7
+    /// A block type this crate does not model, with its type octet.
+    Other(u8),
 }
 
 impl From<u8> for BlockType {
     fn from(v: u8) -> Self {
         match v {
+            0 => BlockType::Unknown,
             1 => BlockType::LossRLE,
             2 => BlockType::DuplicateRLE,
             3 => BlockType::PacketReceiptTimes,
@@ -71,7 +80,23 @@ impl From<u8> for BlockType {
             5 => BlockType::DLRR,
             6 => BlockType::StatisticsSummary,
             7 => BlockType::VoIPMetrics,
-            _ => BlockType::Unknown,
+            other => BlockType::Other(other),
+        }
+    }
+}
+
+impl From<BlockType> for u8 {
+    fn from(t: BlockType) -> Self {
+        match t {
+            BlockType::Unknown => 0,
+            BlockType::LossRLE => 1,
+            BlockType::DuplicateRLE => 2,
+            BlockType::PacketReceiptTimes => 3,
+            BlockType::ReceiverReferenceTime => 4,
+            BlockType::DLRR => 5,
+            BlockType::StatisticsSummary => 6,
+            BlockType::VoIPMetrics => 7,
+            BlockType::Other(other) => other,
         }
     }
 }
@@ -127,7 +152,7 @@ impl Marshal for XRHeader {
             return Err(Error::BufferTooShort);
         }
 
-        buf.put_u8(self.block_type as u8);
+        buf.put_u8(self.block_type.into());
         buf.put_u8(self.type_specific);
         buf.put_u16(self.block_length);
 
@@ -190,7 +215,8 @@ impl Packet for ExtendedReport {
     /// Header returns the Header associated with this packet.
     fn header(&self) -> Header {
         Header {
-            padding: get_padding_size(self.raw_size()) != 0,
+            // Every report block is a whole number of 32-bit words (RFC 3611 3).
+            padding: false,
             count: 0,
             packet_type: PacketType::ExtendedReport,
             length: ((self.marshal_size() / 4) - 1) as u16,
@@ -253,11 +279,47 @@ impl Marshal for ExtendedReport {
             buf = &mut buf[n..];
         }
 
-        if h.padding {
-            put_padding(buf, self.raw_size());
-        }
-
         Ok(self.marshal_size())
+    }
+}
+
+impl ExtendedReport {
+    /// Parses one report block, `block` holding exactly that block.
+    ///
+    /// A block of a type this crate does not model, and a block of a known type that fails its
+    /// own parse (a length its type does not allow, a value its type forbids), is kept as an
+    /// [`UnknownReportBlock`] with its type and bytes: one such block costs neither the blocks
+    /// around it nor the packets around this one (RFC 3611 4: a receiver skips what it cannot
+    /// use by the block length).
+    fn unmarshal_block(block_type: BlockType, block: Bytes) -> Result<Box<dyn Packet>> {
+        let raw_block = &mut block.clone();
+        let parsed: Result<Box<dyn Packet>> = match block_type {
+            BlockType::LossRLE => {
+                LossRLEReportBlock::unmarshal(raw_block).map(|b| Box::new(b) as Box<dyn Packet>)
+            }
+            BlockType::DuplicateRLE => DuplicateRLEReportBlock::unmarshal(raw_block)
+                .map(|b| Box::new(b) as Box<dyn Packet>),
+            BlockType::PacketReceiptTimes => PacketReceiptTimesReportBlock::unmarshal(raw_block)
+                .map(|b| Box::new(b) as Box<dyn Packet>),
+            BlockType::ReceiverReferenceTime => {
+                ReceiverReferenceTimeReportBlock::unmarshal(raw_block)
+                    .map(|b| Box::new(b) as Box<dyn Packet>)
+            }
+            BlockType::DLRR => {
+                DLRRReportBlock::unmarshal(raw_block).map(|b| Box::new(b) as Box<dyn Packet>)
+            }
+            BlockType::StatisticsSummary => StatisticsSummaryReportBlock::unmarshal(raw_block)
+                .map(|b| Box::new(b) as Box<dyn Packet>),
+            BlockType::VoIPMetrics => {
+                VoIPMetricsReportBlock::unmarshal(raw_block).map(|b| Box::new(b) as Box<dyn Packet>)
+            }
+            _ => Err(Error::WrongType),
+        };
+
+        match parsed {
+            Ok(report) => Ok(report),
+            Err(_) => Ok(Box::new(UnknownReportBlock::unmarshal(&mut block.clone())?)),
+        }
     }
 }
 
@@ -268,47 +330,32 @@ impl Unmarshal for ExtendedReport {
         Self: Sized,
         B: Buf,
     {
-        let raw_packet_len = raw_packet.remaining();
-        if raw_packet_len < (HEADER_LENGTH + SSRC_LENGTH) {
-            return Err(Error::PacketTooShort);
-        }
-
-        let header = Header::unmarshal(raw_packet)?;
+        // The padding the P bit announces ends the packet before the report blocks do. The
+        // five reserved bits that share the first octet are ignored (RFC 3611 2).
+        let (header, mut body) = read_packet(raw_packet)?;
         if header.packet_type != PacketType::ExtendedReport {
             return Err(Error::WrongType);
         }
+        if body.len() < SSRC_LENGTH {
+            return Err(Error::PacketTooShort);
+        }
 
-        let sender_ssrc = raw_packet.get_u32();
+        let sender_ssrc = body.get_u32();
 
-        let mut offset = HEADER_LENGTH + SSRC_LENGTH;
         let mut reports = vec![];
-        while raw_packet.remaining() > 0 {
-            if offset + XR_HEADER_LENGTH > raw_packet_len {
+        while body.has_remaining() {
+            // Every block says how long it is, whatever its type, and that is what frames it.
+            if body.len() < XR_HEADER_LENGTH {
                 return Err(Error::PacketTooShort);
             }
+            let block_length = u16::from_be_bytes([body[2], body[3]]) as usize * 4;
+            if body.len() < XR_HEADER_LENGTH + block_length {
+                return Err(Error::PacketTooShort);
+            }
+            let block_type: BlockType = body[0].into();
+            let block = body.split_to(XR_HEADER_LENGTH + block_length);
 
-            let block_type: BlockType = raw_packet.chunk()[0].into();
-            let report: Box<dyn Packet> = match block_type {
-                BlockType::LossRLE => Box::new(LossRLEReportBlock::unmarshal(raw_packet)?),
-                BlockType::DuplicateRLE => {
-                    Box::new(DuplicateRLEReportBlock::unmarshal(raw_packet)?)
-                }
-                BlockType::PacketReceiptTimes => {
-                    Box::new(PacketReceiptTimesReportBlock::unmarshal(raw_packet)?)
-                }
-                BlockType::ReceiverReferenceTime => {
-                    Box::new(ReceiverReferenceTimeReportBlock::unmarshal(raw_packet)?)
-                }
-                BlockType::DLRR => Box::new(DLRRReportBlock::unmarshal(raw_packet)?),
-                BlockType::StatisticsSummary => {
-                    Box::new(StatisticsSummaryReportBlock::unmarshal(raw_packet)?)
-                }
-                BlockType::VoIPMetrics => Box::new(VoIPMetricsReportBlock::unmarshal(raw_packet)?),
-                _ => Box::new(UnknownReportBlock::unmarshal(raw_packet)?),
-            };
-
-            offset += report.marshal_size();
-            reports.push(report);
+            reports.push(Self::unmarshal_block(block_type, block)?);
         }
 
         Ok(ExtendedReport {

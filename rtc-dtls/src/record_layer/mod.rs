@@ -101,24 +101,46 @@ impl RecordLayer {
 // separate records.
 // https://tools.ietf.org/html/rfc6347#section-4.2.3
 pub(crate) fn unpack_datagram(buf: &[u8]) -> Result<Vec<Vec<u8>>> {
+    let (records, well_formed) = split_datagram(buf, 0);
+    if well_formed {
+        Ok(records)
+    } else {
+        Err(Error::ErrInvalidPacketLength)
+    }
+}
+
+/// The records at the start of `buf`, and whether they are all of it. What follows the last
+/// whole record (too few bytes for a header, or a header announcing more than the datagram
+/// holds) is one invalid record, which is discarded alone (RFC 6347 4.1.2.7): the valid records
+/// in front of it are still processed.
+///
+/// `connection_id_len` is the length of the connection id a `tls12_cid` record carries
+/// between its sequence number and its length (RFC 9146 section 4); a receiver knows it
+/// from what it negotiated, the record does not say.
+pub(crate) fn split_datagram(buf: &[u8], connection_id_len: usize) -> (Vec<Vec<u8>>, bool) {
     let mut out = vec![];
 
     let mut offset = 0;
     while buf.len() != offset {
-        if buf.len() - offset <= RECORD_LAYER_HEADER_SIZE {
-            return Err(Error::ErrInvalidPacketLength);
+        let header_len = if buf[offset] == ContentType::Tls12Cid as u8 {
+            RECORD_LAYER_HEADER_SIZE + connection_id_len
+        } else {
+            RECORD_LAYER_HEADER_SIZE
+        };
+        if buf.len() - offset < header_len {
+            return (out, false);
         }
 
-        let pkt_len = RECORD_LAYER_HEADER_SIZE
-            + (((buf[offset + RECORD_LAYER_HEADER_SIZE - 2] as usize) << 8)
-                | buf[offset + RECORD_LAYER_HEADER_SIZE - 1] as usize);
+        let pkt_len = header_len
+            + (((buf[offset + header_len - 2] as usize) << 8)
+                | buf[offset + header_len - 1] as usize);
         if offset + pkt_len > buf.len() {
-            return Err(Error::ErrInvalidPacketLength);
+            return (out, false);
         }
 
         out.push(buf[offset..offset + pkt_len].to_vec());
         offset += pkt_len
     }
 
-    Ok(out)
+    (out, true)
 }

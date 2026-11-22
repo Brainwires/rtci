@@ -58,10 +58,12 @@ pub fn packetize(obus: &[Obu], mtu: usize) -> Vec<PacketMetadata> {
     // packets, specifically last one would be generally smaller.
     packets.push(PacketMetadata::new(0));
     let mut packet_remaining_bytes = max_payload_size;
+    // The layer (temporal_id and spatial_id) of the OBUs with an extension header in the
+    // packet being filled.
+    let mut packet_layer: Option<u8> = None;
 
-    for obu_index in 0..obus.len() {
-        let is_last_obu = obu_index == obus.len() - 1;
-        let obu = &obus[obu_index];
+    for (obu_index, obu) in obus.iter().enumerate() {
+        let layer = obu_layer(obu);
 
         // Putting |obu| into the last packet would make last obu element stored in
         // that packet not last. All not last OBU elements must be prepend with the
@@ -74,12 +76,24 @@ pub fn packetize(obus: &[Obu], mtu: usize) -> Vec<PacketMetadata> {
         } else {
             1
         };
-        if packet_remaining_bytes < previous_obu_extra_size + min_required_size {
+        // AV1 RTP 5: the OBUs with an extension header in one packet MUST all be of one
+        // layer; a sequence header SHOULD be the first OBU of its packet; OBUs without an
+        // extension header SHOULD be at the beginning of a packet. Greedy aggregation used to
+        // cross all three, so a temporal unit with two spatial layers went out with both in
+        // one packet.
+        let layer_boundary = packet.num_obu_elements > 0
+            && (obu_type(obu.header) == OBU_TYPE_SEQUENCE_HEADER
+                || (packet_layer.is_some() && layer != packet_layer));
+        if layer_boundary || packet_remaining_bytes < previous_obu_extra_size + min_required_size {
             // Start a new packet.
             packets.push(packet);
             packet = PacketMetadata::new(obu_index);
             packet_remaining_bytes = max_payload_size;
             previous_obu_extra_size = 0;
+            packet_layer = None;
+        }
+        if layer.is_some() {
+            packet_layer = layer;
         }
         packet.packet_size += previous_obu_extra_size;
         packet_remaining_bytes -= previous_obu_extra_size;
@@ -91,7 +105,8 @@ pub fn packetize(obus: &[Obu], mtu: usize) -> Vec<PacketMetadata> {
         if must_write_obu_element_size {
             required_bytes += leb128_size(obu.size as u32);
         }
-        if required_bytes < packet_remaining_bytes {
+        // (`<=`: an OBU that exactly fills the packet used to be cut in two.)
+        if required_bytes <= packet_remaining_bytes {
             // Insert the obu into the packet unfragmented.
             packet.last_obu_size = obu.size;
             packet.packet_size += required_bytes;
@@ -142,29 +157,8 @@ pub fn packetize(obus: &[Obu], mtu: usize) -> Vec<PacketMetadata> {
             obu_offset += max_payload_size;
         }
 
-        // Add the last fragment of the obu.
-        let mut last_fragment_size = obu.size - obu_offset;
-        // Check for corner case where last fragment of the last obu is too large
-        // to fit into last packet, but may fully fit into semi-last packet.
-        if is_last_obu && last_fragment_size > max_payload_size {
-            // Split last fragments into two.
-            // Try to even packet sizes rather than payload sizes across the last
-            // two packets.
-            let mut semi_last_fragment_size = last_fragment_size / 2;
-            // But leave at least one payload byte for the last packet to avoid
-            // weird scenarios where size of the fragment is zero and rtp payload has
-            // nothing except for an aggregation header.
-            if semi_last_fragment_size >= last_fragment_size {
-                semi_last_fragment_size = last_fragment_size - 1;
-            }
-            last_fragment_size -= semi_last_fragment_size;
-            let mut packet = PacketMetadata::new(obu_index);
-            packet.first_obu_offset = obu_offset;
-            packet.last_obu_size = semi_last_fragment_size;
-            packet.packet_size = semi_last_fragment_size;
-            packets.push(packet);
-            obu_offset += semi_last_fragment_size
-        }
+        // Add the last fragment of the obu. The loop above leaves at most a packet's worth.
+        let last_fragment_size = obu.size - obu_offset;
         let mut last_packet = PacketMetadata::new(obu_index);
         last_packet.num_obu_elements = 1;
         last_packet.first_obu_offset = obu_offset;
@@ -172,9 +166,26 @@ pub fn packetize(obus: &[Obu], mtu: usize) -> Vec<PacketMetadata> {
         last_packet.packet_size = last_fragment_size;
         packets.push(last_packet);
         packet_remaining_bytes = max_payload_size - last_fragment_size;
+        // The packet being filled now holds the tail of this OBU and nothing else.
+        packet_layer = layer;
     }
 
     packets
+}
+
+/// The layer of an OBU with an extension header: `temporal_id` (three bits) and `spatial_id`
+/// (two bits), as one value. `None` for an OBU without one, which belongs to every layer.
+pub fn obu_layer(obu: &Obu) -> Option<u8> {
+    obu_has_extension(obu.header).then_some(obu.extension_header >> 3)
+}
+
+/// The layer of the OBUs in a packet (AV1 RTP 6: "the entire packet is considered associated
+/// with the layer identified by the temporal_id and spatial_id combination"), or `None` when
+/// none of them has an extension header.
+pub fn packet_layer(obus: &[Obu], packet: &PacketMetadata) -> Option<u8> {
+    obus[packet.first_obu_index..packet.first_obu_index + packet.num_obu_elements]
+        .iter()
+        .find_map(obu_layer)
 }
 
 /// Returns the aggregation header for the packet.

@@ -53,3 +53,20 @@ fn test_lifetime_add_to() -> Result<()> {
 
     Ok(())
 }
+
+/// RFC 8656 §18.2: LIFETIME is a 32-bit count of seconds. A longer duration is the longest
+/// it can say, not its low 32 bits.
+#[test]
+fn test_lifetime_longer_than_32_bits_saturates() -> Result<()> {
+    for (secs, expected) in [
+        (u64::from(u32::MAX), u32::MAX),
+        (u64::from(u32::MAX) + 1, u32::MAX),
+        (u64::from(u32::MAX) + 600, u32::MAX),
+        (3600, 3600),
+    ] {
+        let mut m = Message::new();
+        Lifetime(Duration::from_secs(secs)).add_to(&mut m)?;
+        assert_eq!(m.get(ATTR_LIFETIME)?, expected.to_be_bytes().to_vec());
+    }
+    Ok(())
+}

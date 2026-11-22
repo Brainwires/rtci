@@ -9,7 +9,7 @@ use std::fmt;
 
 /// UNKNOWN-ATTRIBUTES attribute.
 ///
-/// RFC 5389 Section 15.9.
+/// RFC 8489 Section 14.13.
 pub struct UnknownAttributes(pub Vec<AttrType>);
 
 impl fmt::Display for UnknownAttributes {

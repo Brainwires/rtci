@@ -99,6 +99,19 @@ fn dc_open_id(p: &EnvPeer) -> Option<rtc::data_channel::RTCDataChannelId> {
     })
 }
 
+/// A peer's ICE and peer connection state changes, in order: a peer connection that fails while
+/// its ICE state stays connected failed in DTLS, not in ICE (checks, consent).
+fn state_changes(p: &EnvPeer) -> Vec<String> {
+    p.events
+        .iter()
+        .filter_map(|e| match e {
+            RTCPeerConnectionEvent::OnIceConnectionStateChangeEvent(s) => Some(format!("ice {s}")),
+            RTCPeerConnectionEvent::OnConnectionStateChangeEvent(s) => Some(format!("pc {s}")),
+            _ => None,
+        })
+        .collect()
+}
+
 fn dc_messages(p: &EnvPeer) -> Vec<u32> {
     p.reads
         .iter()
@@ -178,8 +191,10 @@ fn send_numbered(
     assert_eq!(
         next,
         count,
-        "a could not send everything (state {:?})",
-        a.connection_state()
+        "a could not send everything (state {:?}); state changes: a {:?}, b {:?}",
+        a.connection_state(),
+        state_changes(&a),
+        state_changes(&b)
     );
     let dc_stats = |p: &mut EnvPeer| {
         let r = p.pc.get_stats(Instant::now(), StatsSelector::None);
@@ -384,10 +399,16 @@ fn rtp_received(p: &EnvPeer) -> impl Iterator<Item = &rtc::rtp::Packet> {
 }
 
 /// Sends `count` 1000-byte RTP packets at 200 packets/s and returns the fraction of distinct
-/// sequence numbers the receiver got (after any recovery the chain does).
-/// The share of the first `count` packets that arrive. A short uncounted tail follows them: a
-/// receiver learns a packet is lost from a later one, so the last packet of a stream, if lost,
-/// can never be NACKed, and the tail keeps that out of the measurement.
+/// sequence numbers the receiver got (after any recovery the chain does), counted from the
+/// first packet that arrived.
+///
+/// Both ends of the stream are outside what a receiver can repair. A receiver learns a packet
+/// is lost from a later one, so the last packet of a stream, if lost, can never be NACKed: a
+/// short uncounted tail follows the counted packets. And a receiver knows of no packet sent
+/// before the first it receives: a Generic NACK names packets missing between ones it saw
+/// (RFC 4585 section 6.2.1), and there is no gap before the first. With 5% loss the stream's
+/// first packet is lost in one run of twenty, so those packets are not counted either (as in
+/// the virtual-clock twin, `rtc-interceptor/tests/nack_recovery_under_loss.rs`).
 fn rtp_delivery(chain: Chain, count: u16) -> f64 {
     const TAIL: u16 = 20;
     let total = count + TAIL;
@@ -447,7 +468,22 @@ fn rtp_delivery(chain: Chain, count: u16) -> f64 {
         .map(|p| p.header.sequence_number)
         .filter(|&seq| seq.wrapping_sub(start_seq) < count)
         .collect();
-    seqs.len() as f64 / count as f64
+    let first = (0..count)
+        .find(|n| seqs.contains(&start_seq.wrapping_add(*n)))
+        .expect("no counted packet arrived");
+    let missing: Vec<u16> = (first..count)
+        .filter(|n| !seqs.contains(&start_seq.wrapping_add(*n)))
+        .collect();
+    if chain.nack && (first > 0 || !missing.is_empty()) {
+        // Names what stayed lost, to tell a NACK failure (a gap after the first packet)
+        // from the start-up packets no receiver can ask for.
+        eprintln!(
+            "NACK: first packet received is #{first} (earlier ones not counted); never received after it: {:?}",
+            &missing[..missing.len().min(32)]
+        );
+    }
+    let counted = count - first;
+    f64::from(counted - missing.len() as u16) / f64::from(counted)
 }
 
 #[test]
@@ -630,7 +666,7 @@ fn gcc_follows_a_rate_limited_link() {
                     .outbound_rtp_streams()
                     .find(|o| o.sent_rtp_stream_stats.rtp_stream_stats.ssrc == ssrc)
                 {
-                    samples.push(o.target_bitrate);
+                    samples.push(o.target_bitrate.unwrap_or(0.0));
                 }
             }
         }

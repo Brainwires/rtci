@@ -325,17 +325,20 @@ over SRTP and is subject to none of SCTP's flow control.
 - ✅ **Media Tracks** - Audio/video RTP transport (encoding, decoding, capture and playout are the application's)
 - ✅ **Trickle ICE** - Progressive candidate gathering, and ICE restart
 - ✅ **ICE over TCP** - Active and passive
-- ✅ **Simulcast** - RID-based simulcast, sending and receiving (no SVC layer packetization for VP9 / AV1)
-- ✅ **RTX & FEC** - RFC 4588 retransmission; FlexFEC (draft-ietf-payload-flexible-fec-scheme-03, not RFC 8627) through an
-  opt-in interceptor; ULPFEC can be registered for an application with its own coder but is not encoded or decoded
+- ✅ **Simulcast** - RID-based simulcast, sending and receiving
+- ✅ **SVC signalling in `rtc-rtp`** - the W3C scalability modes and their layer structures, VP8 / VP9 layer descriptors, the AV1 Dependency Descriptor, and forwarder-side layer selectors (`scalabilityMode` on an encoding is not there yet)
+- ✅ **RTX & FEC** - RFC 4588 retransmission; FlexFEC through opt-in interceptors, both as browsers send it
+  (draft-ietf-payload-flexible-fec-scheme-03, `video/flexfec-03`) and as published (RFC 8627, `video/flexfec`: masks,
+  row / column / 2-D protection, retransmission); ULPFEC (RFC 5109) in RED, as browsers send it for video, through
+  `configure_ulpfec` (opt-in, not in the default codecs)
 - ✅ **Statistics** - `getStats` per the W3C WebRTC Statistics API, for what a transport measures (members that need an
   encoder, decoder or playout are left out, not reported as 0)
-- ✅ **Interceptors** - Composable RTP/RTCP pipeline: NACK, TWCC feedback, RTCP reports and key-frame requests by default;
-  bandwidth estimation (GCC), pacing, the jitter buffer and FlexFEC are opt-in
+- ✅ **Interceptors** - Composable RTP/RTCP pipeline: the RTCP session (reports, CNAME, BYE, RFC 3550 / RFC 4585 timing, compound packets), NACK, TWCC feedback and key-frame requests by default;
+  bandwidth estimation (GCC), pacing, the jitter buffer, FlexFEC and ULPFEC are opt-in
 - ✅ **Pluggable crypto** - `ring` or `aws-lc-rs` built in, or bring your own provider
 
 Each claim above, with its specification section, where it is implemented and the test that proves it, is in
-[docs/conformance.md](docs/conformance.md), which also lists what is not implemented on purpose (media coding, DTLS 1.3,
+[docs/conformance.md](docs/conformance.md), which also lists what is not implemented on purpose (media coding, DTLS 1.3 resumption and 0-RTT,
 I-DATA, a TURN server and others).
 
 ## What's New in 0.21
@@ -576,7 +579,7 @@ This implementation follows these specifications:
 | API | [W3C WebRTC 1.0](https://www.w3.org/TR/webrtc/), [W3C WebRTC Statistics](https://www.w3.org/TR/webrtc-stats/) |
 | Signaling | [RFC 9429](https://datatracker.ietf.org/doc/html/rfc9429) (JSEP), [RFC 8866](https://datatracker.ietf.org/doc/html/rfc8866) (SDP), [RFC 8843](https://datatracker.ietf.org/doc/html/rfc8843) (BUNDLE), [RFC 8853](https://datatracker.ietf.org/doc/html/rfc8853) (Simulcast) |
 | Connectivity | [RFC 8445](https://datatracker.ietf.org/doc/html/rfc8445) (ICE), [RFC 8838](https://datatracker.ietf.org/doc/html/rfc8838) (Trickle ICE), [RFC 8839](https://datatracker.ietf.org/doc/html/rfc8839) (SDP for ICE), [RFC 8489](https://datatracker.ietf.org/doc/html/rfc8489) (STUN), [RFC 8656](https://datatracker.ietf.org/doc/html/rfc8656) (TURN) |
-| Security | [RFC 6347](https://datatracker.ietf.org/doc/html/rfc6347) (DTLS 1.2), [RFC 5764](https://datatracker.ietf.org/doc/html/rfc5764) (DTLS-SRTP), [RFC 3711](https://datatracker.ietf.org/doc/html/rfc3711) (SRTP) |
+| Security | [RFC 9147](https://datatracker.ietf.org/doc/html/rfc9147) (DTLS 1.3), [RFC 6347](https://datatracker.ietf.org/doc/html/rfc6347) (DTLS 1.2), [RFC 5764](https://datatracker.ietf.org/doc/html/rfc5764) (DTLS-SRTP), [RFC 3711](https://datatracker.ietf.org/doc/html/rfc3711) (SRTP) |
 | Data | [RFC 9260](https://datatracker.ietf.org/doc/html/rfc9260) (SCTP), [RFC 8261](https://datatracker.ietf.org/doc/html/rfc8261) (SCTP over DTLS), [RFC 8831](https://datatracker.ietf.org/doc/html/rfc8831) (Data Channels), [RFC 8832](https://datatracker.ietf.org/doc/html/rfc8832) (DCEP) |
 | Media | [RFC 3550](https://datatracker.ietf.org/doc/html/rfc3550) (RTP/RTCP), [RFC 4588](https://datatracker.ietf.org/doc/html/rfc4588) (RTX), [RFC 8285](https://datatracker.ietf.org/doc/html/rfc8285) (Header Extensions), [RFC 5761](https://datatracker.ietf.org/doc/html/rfc5761) (RTP/RTCP Mux) |
 

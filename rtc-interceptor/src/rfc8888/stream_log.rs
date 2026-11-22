@@ -4,8 +4,9 @@ use crate::jitterbuffer::sequence::SequenceExtender;
 use rtcp::transport_feedbacks::cc_feedback_report::{
     CcFeedbackMetricBlock, CcFeedbackReportBlock, Ecn,
 };
-use std::collections::HashMap;
-use std::time::Instant;
+use std::collections::hash_map::Entry;
+use std::collections::{HashMap, VecDeque};
+use std::time::{Duration, Instant};
 
 /// The most packets one report block can describe, from the 16-bit `num_reports` field.
 pub(crate) const MAX_REPORTS_PER_BLOCK: usize = 16384;
@@ -19,6 +20,17 @@ const OFFSET_TOO_OLD: u16 = 0x1FFE;
 /// The largest offset that fits before the two reserved values above.
 const OFFSET_MAX: u16 = 0x1FFD;
 
+/// How long a packet already reported stays in the log, so a late arrival just before it can be
+/// reported in a report that overlaps it.
+///
+/// RFC 8888 section 3.1 asks for overlapping reports when packets are reordered across a report
+/// boundary, and requires a packet once reported as received to be reported as received in every
+/// later report that covers it. Both need the arrivals of the overlapped range, for as long as a
+/// reordered packet is still worth reporting. Half a second is the reordering window the
+/// transport-wide recorder uses as well; a packet later than that has long been declared lost by
+/// the sender.
+pub(crate) const REORDER_WINDOW: Duration = Duration::from_millis(500);
+
 /// What was observed about one packet.
 #[derive(Debug, Clone, Copy)]
 struct PacketReport {
@@ -26,7 +38,8 @@ struct PacketReport {
     ecn: Ecn,
 }
 
-/// Arrival times for one media stream, kept until they have been reported.
+/// Arrival times for one media stream, kept until they have been reported and the reordering
+/// window has passed.
 ///
 /// Sequence numbers are extended before use: the log spans an unbounded run of packets, and a
 /// wrap would otherwise put a newer packet behind an older one.
@@ -38,6 +51,12 @@ pub(crate) struct StreamLog {
     next_to_report: u64,
     /// The highest sequence number seen.
     highest_received: u64,
+    /// The lowest sequence number whose fate is still known: everything from here up is either
+    /// in `log` or was not received. A report never starts below it.
+    floor: u64,
+    /// Where each past report ended (exclusive) and when it was built, oldest first: what
+    /// moves `floor` once the reordering window has passed.
+    reported: VecDeque<(Instant, u64)>,
     initialised: bool,
     log: HashMap<u64, PacketReport>,
 }
@@ -49,6 +68,8 @@ impl StreamLog {
             extender: SequenceExtender::new(),
             next_to_report: 0,
             highest_received: 0,
+            floor: 0,
+            reported: VecDeque::new(),
             initialised: false,
             log: HashMap::new(),
         }
@@ -56,86 +77,116 @@ impl StreamLog {
 
     /// Record a packet's arrival.
     ///
-    /// Packets older than the report window are dropped: they have already been reported, and
-    /// reporting them again would tell the sender a packet arrived twice.
+    /// A duplicate keeps the arrival time of the first copy, and reports ECN-CE if any copy
+    /// carried it (RFC 8888 section 3.1). A packet that arrives after a report already described
+    /// its sequence number as not received moves the start of the next report back to it, so the
+    /// next report overlaps the previous one; one older than the reordering window is dropped.
     pub(crate) fn add(&mut self, arrival: Instant, sequence_number: u16, ecn: Ecn) {
         let extended = self.extender.extend(sequence_number);
 
         if !self.initialised {
             self.initialised = true;
             self.next_to_report = extended;
+            self.floor = extended;
+            self.highest_received = extended;
         }
-        if extended < self.next_to_report {
+        if extended < self.floor {
             return;
         }
 
-        self.log.insert(extended, PacketReport { arrival, ecn });
+        match self.log.entry(extended) {
+            Entry::Occupied(mut first) => {
+                if ecn == Ecn::Ce && first.get().ecn != Ecn::Ce {
+                    first.get_mut().ecn = Ecn::Ce;
+                    // The mark changed what the sender must be told about this packet.
+                    self.next_to_report = self.next_to_report.min(extended);
+                }
+            }
+            Entry::Vacant(slot) => {
+                slot.insert(PacketReport { arrival, ecn });
+                self.next_to_report = self.next_to_report.min(extended);
+            }
+        }
         self.highest_received = self.highest_received.max(extended);
     }
 
-    /// Build the report block covering everything not yet reported.
+    /// Forget what the reordering window no longer needs.
+    fn prune(&mut self, now: Instant) {
+        let mut floor = self.floor;
+        while let Some(&(at, end)) = self.reported.front() {
+            if now.saturating_duration_since(at) < REORDER_WINDOW {
+                break;
+            }
+            floor = floor.max(end);
+            self.reported.pop_front();
+        }
+        // Never past what has not been reported yet.
+        let floor = floor.min(self.next_to_report);
+        if floor > self.floor {
+            self.floor = floor;
+            self.log
+                .retain(|&sequence_number, _| sequence_number >= floor);
+        }
+    }
+
+    /// Build the report block for what has not been reported yet, at most `max_blocks` packets
+    /// of it, oldest first. What does not fit stays for the next call, so a window too large for
+    /// one feedback packet continues in the next one.
     ///
     /// Offsets are measured back from `reference`, which is the instant the whole report is
-    /// stamped with — every stream in a report shares it, so the sender can compare arrival times
+    /// stamped with: every stream in a report shares it, so the sender can compare arrival times
     /// across streams.
+    ///
+    /// Every packet is described once. A packet missing when its range is reported is reported
+    /// as not received, and the report moves on: a gap that never fills does not make every later
+    /// report repeat everything after it. If the packet does arrive within the reordering
+    /// window, [`add`](Self::add) moves the start back and the next report overlaps.
     pub(crate) fn metrics_after(
         &mut self,
         reference: Instant,
         max_blocks: usize,
     ) -> CcFeedbackReportBlock {
-        if self.log.is_empty() {
+        self.prune(reference);
+
+        if self.is_empty() || max_blocks == 0 {
+            // Nothing new: the block says so with the highest sequence number received and no
+            // metric blocks (RFC 8888 section 3.1).
             return CcFeedbackReportBlock {
                 media_ssrc: self.ssrc,
-                begin_sequence: self.next_to_report as u16,
+                begin_sequence: self.highest_received as u16,
                 metric_blocks: Vec::new(),
             };
         }
 
-        // A report block cannot describe more packets than this, so the oldest end of the window
-        // is given up rather than reporting a range the format cannot express.
-        let mut count = self.highest_received - self.next_to_report + 1;
-        if count > max_blocks as u64 {
-            count = max_blocks as u64;
-            let new_next = self.highest_received + 1 - count;
+        // One block describes at most a quarter of the sequence space. A jump further than that
+        // (a stream that restarted its numbering) gives up the oldest end: the format cannot
+        // express the range.
+        let pending = self.highest_received - self.next_to_report + 1;
+        if pending > MAX_REPORTS_PER_BLOCK as u64 {
+            let new_next = self.highest_received + 1 - MAX_REPORTS_PER_BLOCK as u64;
+            self.next_to_report = new_next;
+            self.floor = self.floor.max(new_next);
             self.log
                 .retain(|&sequence_number, _| sequence_number >= new_next);
-            self.next_to_report = new_next;
-        }
-        if count == 0 {
-            return CcFeedbackReportBlock {
-                media_ssrc: self.ssrc,
-                begin_sequence: self.next_to_report as u16,
-                metric_blocks: Vec::new(),
-            };
         }
 
         let begin = self.next_to_report;
-        let mut metric_blocks = Vec::with_capacity(count as usize);
+        let count = (self.highest_received - begin + 1).min(max_blocks as u64);
+        let end = begin + count;
 
-        // Reporting only advances across a contiguous run from the start of the window. A packet
-        // not yet seen may still arrive, so the window stops at the first gap and everything from
-        // there is reported again next time — the sender needs to know the gap is still a gap.
-        //
-        // The advancing condition carries that on its own: once `next_to_report` stops at a gap,
-        // `extended` keeps climbing past it and the two can never be equal again. Upstream also
-        // tracks a separate `gapDetected` flag, which can only short-circuit work and never
-        // changes the outcome; it is not reproduced here.
-        for extended in begin..=self.highest_received {
-            let report = self.log.get(&extended).copied();
-            metric_blocks.push(match report {
+        let metric_blocks = (begin..end)
+            .map(|extended| match self.log.get(&extended) {
                 Some(report) => CcFeedbackMetricBlock {
                     received: true,
                     ecn: report.ecn,
                     arrival_time_offset: arrival_time_offset(reference, report.arrival),
                 },
                 None => CcFeedbackMetricBlock::default(),
-            });
+            })
+            .collect();
 
-            if report.is_some() && extended == self.next_to_report {
-                self.log.remove(&extended);
-                self.next_to_report += 1;
-            }
-        }
+        self.next_to_report = end;
+        self.reported.push_back((reference, end));
 
         CcFeedbackReportBlock {
             media_ssrc: self.ssrc,
@@ -144,9 +195,9 @@ impl StreamLog {
         }
     }
 
-    /// Whether anything is waiting to be reported.
+    /// Whether nothing is waiting to be reported.
     pub(crate) fn is_empty(&self) -> bool {
-        self.log.is_empty()
+        !self.initialised || self.next_to_report > self.highest_received
     }
 }
 
@@ -170,7 +221,6 @@ fn arrival_time_offset(reference: Instant, arrival: Instant) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
 
     fn received(block: &CcFeedbackReportBlock) -> Vec<bool> {
         block
@@ -212,10 +262,10 @@ mod tests {
         );
     }
 
-    /// A gap may still be filled, so reporting stops advancing there — the sender needs to be
-    /// told again, in case the packet turns up.
+    /// A gap is reported once, as not received. The next report starts after it: a packet that
+    /// never arrives must not make every later report repeat the window (rfc8888.md bug B6).
     #[test]
-    fn reporting_stops_advancing_at_a_gap() {
+    fn a_gap_is_reported_once_and_the_next_report_moves_on() {
         let now = Instant::now();
         let mut log = StreamLog::new(1);
         log.add(now, 100, Ecn::NotEct);
@@ -225,15 +275,92 @@ mod tests {
         assert_eq!(100, block.begin_sequence);
         assert_eq!(vec![true, false, true], received(&block));
 
-        // 101 arrives late and is still inside the window.
-        log.add(now, 101, Ecn::NotEct);
+        log.add(now, 103, Ecn::NotEct);
         let second = log.metrics_after(now, MAX_REPORTS_PER_BLOCK);
-        assert_eq!(101, second.begin_sequence, "resumes where it stopped");
-        assert_eq!(vec![true, true], received(&second));
+        assert_eq!(103, second.begin_sequence, "101 is not described again");
+        assert_eq!(vec![true], received(&second));
+    }
+
+    /// RFC 8888 section 3.1: overlapping reports need to be sent when packets are reordered
+    /// across a report boundary, and a packet once reported as received is reported as received
+    /// in every later report that covers it.
+    #[test]
+    fn a_late_arrival_is_reported_in_an_overlapping_report() {
+        let now = Instant::now();
+        let mut log = StreamLog::new(1);
+        log.add(now, 100, Ecn::NotEct);
+        log.add(now, 102, Ecn::NotEct);
+        log.metrics_after(now, MAX_REPORTS_PER_BLOCK);
+
+        // 101 arrives late, inside the reordering window.
+        let later = now + Duration::from_millis(100);
+        log.add(later, 101, Ecn::NotEct);
+        let second = log.metrics_after(later, MAX_REPORTS_PER_BLOCK);
+        assert_eq!(101, second.begin_sequence, "back to the late packet");
+        assert_eq!(
+            vec![true, true],
+            received(&second),
+            "102 was reported received and is reported received again"
+        );
     }
 
     #[test]
-    fn a_packet_older_than_the_window_is_not_reported_again() {
+    fn an_arrival_older_than_the_reordering_window_is_dropped() {
+        let now = Instant::now();
+        let mut log = StreamLog::new(1);
+        log.add(now, 100, Ecn::NotEct);
+        log.add(now, 102, Ecn::NotEct);
+        log.metrics_after(now, MAX_REPORTS_PER_BLOCK);
+
+        let later = now + REORDER_WINDOW + Duration::from_millis(1);
+        log.add(later, 103, Ecn::NotEct);
+        log.metrics_after(later, MAX_REPORTS_PER_BLOCK);
+        log.add(later, 101, Ecn::NotEct);
+        assert!(log.is_empty(), "too late to be worth an overlapping report");
+    }
+
+    /// RFC 8888 section 3.1: the arrival time of the first copy is reported.
+    #[test]
+    fn a_duplicate_keeps_the_first_arrival_time() {
+        let now = Instant::now();
+        let mut log = StreamLog::new(1);
+        log.add(now, 100, Ecn::NotEct);
+        log.add(now + Duration::from_millis(50), 100, Ecn::NotEct);
+
+        let block = log.metrics_after(now + Duration::from_millis(60), MAX_REPORTS_PER_BLOCK);
+        assert_eq!(1, block.metric_blocks.len());
+        assert_eq!(
+            arrival_time_offset(now + Duration::from_millis(60), now),
+            block.metric_blocks[0].arrival_time_offset,
+            "60 ms before the report, not 10"
+        );
+    }
+
+    /// RFC 8888 section 3.1: ECN-CE if any copy carried it, otherwise the first copy's mark.
+    #[test]
+    fn a_duplicate_reports_ce_if_any_copy_was_marked() {
+        let now = Instant::now();
+        let mut log = StreamLog::new(1);
+        log.add(now, 100, Ecn::Ce);
+        log.add(now, 100, Ecn::Ect1);
+        log.add(now, 101, Ecn::Ect1);
+        log.add(now, 101, Ecn::Ce);
+        log.add(now, 102, Ecn::Ect0);
+        log.add(now, 102, Ecn::Ect1);
+
+        let block = log.metrics_after(now, MAX_REPORTS_PER_BLOCK);
+        assert_eq!(
+            vec![Ecn::Ce, Ecn::Ce, Ecn::Ect0],
+            block
+                .metric_blocks
+                .iter()
+                .map(|metric| metric.ecn)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_packet_already_reported_is_not_reported_again() {
         let now = Instant::now();
         let mut log = StreamLog::new(1);
         log.add(now, 100, Ecn::NotEct);
@@ -242,12 +369,13 @@ mod tests {
         log.add(now, 100, Ecn::NotEct);
         assert!(
             log.is_empty(),
-            "already reported: saying so again would claim it arrived twice"
+            "already reported: a second copy changes nothing the sender was told"
         );
     }
 
+    /// RFC 8888 section 3.1: a window too large for one feedback packet is split, not cut.
     #[test]
-    fn the_window_gives_up_its_oldest_end_rather_than_overflowing_the_block() {
+    fn a_window_larger_than_the_block_continues_in_the_next_one() {
         let now = Instant::now();
         let mut log = StreamLog::new(1);
         for offset in 0..10u16 {
@@ -256,10 +384,30 @@ mod tests {
 
         let block = log.metrics_after(now, 4);
         assert_eq!(4, block.metric_blocks.len(), "capped at the limit");
-        assert_eq!(
-            106, block.begin_sequence,
-            "the newest four, since the oldest are the least useful"
-        );
+        assert_eq!(100, block.begin_sequence, "oldest first");
+        assert!(!log.is_empty());
+
+        let next = log.metrics_after(now, 4);
+        assert_eq!(104, next.begin_sequence);
+        let last = log.metrics_after(now, 4);
+        assert_eq!(108, last.begin_sequence);
+        assert_eq!(2, last.metric_blocks.len());
+        assert!(log.is_empty());
+    }
+
+    /// RFC 8888 section 3.1: with nothing received in the interval the block carries the highest
+    /// sequence number received and no metric blocks.
+    #[test]
+    fn an_idle_stream_reports_the_highest_sequence_number_received() {
+        let now = Instant::now();
+        let mut log = StreamLog::new(1);
+        log.add(now, 100, Ecn::NotEct);
+        log.add(now, 101, Ecn::NotEct);
+        log.metrics_after(now, MAX_REPORTS_PER_BLOCK);
+
+        let idle = log.metrics_after(now + Duration::from_millis(100), MAX_REPORTS_PER_BLOCK);
+        assert_eq!(101, idle.begin_sequence);
+        assert!(idle.metric_blocks.is_empty());
     }
 
     #[test]

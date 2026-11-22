@@ -1445,8 +1445,9 @@ fn test_assoc_timed_reliability_bounds_time_spent_in_pending_queue() -> Result<(
     )?;
 
     // Shrink the congestion window so exactly one message fits in flight. The
-    // second write then has to wait in the pending queue behind the first.
-    pair.client_conn_mut(client_ch).cwnd = 1200;
+    // second write then has to wait in the pending queue behind the first: new DATA
+    // goes out only while less than cwnd is outstanding (RFC 9260 6.1 B).
+    pair.client_conn_mut(client_ch).cwnd = 1000;
 
     // Message 0 leaves immediately and occupies the whole window.
     sbuf[0..4].copy_from_slice(&0u32.to_be_bytes());
@@ -2116,8 +2117,17 @@ fn test_assoc_congestion_control_congestion_avoidance() -> Result<()> {
 
     establish_session_pair(&mut pair, client_ch, server_ch, si)?;
 
+    // The initial ssthresh is the peer's whole window, which a sender held back by that
+    // same window never grows past (RFC 9260 7.2.1: cwnd grows only when it is in full
+    // use). A lower threshold lets slow start hand over to congestion avoidance here.
+    let ssthresh: u32 = 16 * 1024;
     {
-        pair.client_conn_mut(client_ch).stats.reset();
+        let a = pair.client_conn_mut(client_ch);
+        a.ssthresh = ssthresh;
+        // This test reads the window at the end, when nothing is outstanding: Max.Burst
+        // (RFC 9260 6.1 D) would have brought it down to four packets by then.
+        a.max_burst = None;
+        a.stats.reset();
         pair.server_conn_mut(server_ch).stats.reset();
     }
 
@@ -2185,11 +2195,9 @@ fn test_assoc_congestion_control_congestion_avoidance() -> Result<()> {
             a.cwnd > a.ssthresh,
             "should be in congestion avoidance mode"
         );
-        assert!(
-            a.ssthresh >= max_receive_buffer_size,
-            "{} should not be less than the initial size of 128KB {}",
-            a.ssthresh,
-            max_receive_buffer_size
+        assert_eq!(
+            ssthresh, a.ssthresh,
+            "no loss: the slow start threshold is as it was set"
         );
 
         debug!("nSACKs      : {}", a.stats.get_num_sacks());
@@ -2599,6 +2607,7 @@ fn test_assoc_abort() -> Result<()> {
                 code: PROTOCOL_VIOLATION,
                 ..Default::default()
             }],
+            tag_reflected: false,
         };
 
         let packet = pair
@@ -2769,6 +2778,7 @@ fn test_assoc_abort_bundled_after_error_chunk() -> Result<()> {
             code: PROTOCOL_VIOLATION,
             ..Default::default()
         }],
+        tag_reflected: false,
     };
 
     debug!("send ChunkError + ChunkAbort");
@@ -2973,6 +2983,7 @@ fn test_association_handle_packet_before_init() -> Result<()> {
             local,
             TransportProtocol::UDP,
             Instant::now(),
+            crate::util::RandomSource::default(),
         );
 
         let packet = packet.marshal()?;
@@ -3032,8 +3043,9 @@ fn test_old_rtx_on_regular_acks() -> Result<()> {
         pair.time += Duration::from_millis(500);
     }
 
-    pair.drive_client();
-    pair.drive_server();
+    // What was lost is recovered one packet per round trip after the timeout (RFC 9260
+    // 7.2.3), not in one burst: run until it is.
+    pair.drive();
 
     let mut buf = vec![0u8; 3000];
 
@@ -3220,11 +3232,14 @@ fn kps_repro_816_bundled_data_and_reset_must_not_lose_data() -> Result<()> {
 
     // Build one packet: DATA(tsn) + RECONFIG(sender_last_tsn = tsn) — pion's
     // write-then-close on a data channel.
-    let (vtag, tsn, sport, dport) = {
+    // The request carries the client's next request sequence number: any other is
+    // answered "Bad Sequence Number" (RFC 6525 5.2.1).
+    let (vtag, tsn, rsn, sport, dport) = {
         let a = pair.client_conn_mut(client_ch);
         (
             a.peer_verification_tag,
             a.my_next_tsn,
+            a.my_next_rsn,
             a.source_port,
             a.destination_port,
         )
@@ -3248,7 +3263,7 @@ fn kps_repro_816_bundled_data_and_reset_must_not_lose_data() -> Result<()> {
             }),
             Box::new(ChunkReconfig {
                 param_a: Some(Box::new(ParamOutgoingResetRequest {
-                    reconfig_request_sequence_number: 100,
+                    reconfig_request_sequence_number: rsn,
                     reconfig_response_sequence_number: 0,
                     sender_last_tsn: tsn,
                     stream_identifiers: vec![si],
@@ -3289,6 +3304,72 @@ fn kps_repro_816_bundled_data_and_reset_must_not_lose_data() -> Result<()> {
         delivered,
         "data bundled with the stream reset was lost at the receiver (errors: {errors:?})"
     );
+    Ok(())
+}
+
+/// The mirror of `kps_repro_816_bundled_data_and_reset_must_not_lose_data`: the same two
+/// chunks with the RE-CONFIG first, which is the order RFC 9260 6.10 asks of a sender
+/// (control chunks before DATA). The reset names the DATA that follows it as the sender's
+/// last TSN, so it is deferred (RFC 6525 5.2.2 E2), the DATA is delivered to the stream as
+/// it was, and the reset is applied once the application has read it.
+#[test]
+fn a_reset_bundled_ahead_of_its_data_must_not_lose_data() -> Result<()> {
+    let si: u16 = 1;
+    let msg = Bytes::from_static(b"payload-that-follows-its-reset-in-the-packet");
+
+    let (mut pair, client_ch, server_ch) = create_association_pair(AckMode::NoDelay, 0)?;
+    establish_session_pair(&mut pair, client_ch, server_ch, si)?;
+
+    let (vtag, tsn, rsn, sport, dport) = {
+        let a = pair.client_conn_mut(client_ch);
+        (
+            a.peer_verification_tag,
+            a.my_next_tsn,
+            a.my_next_rsn,
+            a.source_port,
+            a.destination_port,
+        )
+    };
+    let packet = Packet {
+        common_header: CommonHeader {
+            source_port: sport,
+            destination_port: dport,
+            verification_tag: vtag,
+        },
+        chunks: vec![
+            Box::new(ChunkReconfig {
+                param_a: Some(Box::new(ParamOutgoingResetRequest {
+                    reconfig_request_sequence_number: rsn,
+                    reconfig_response_sequence_number: 0,
+                    sender_last_tsn: tsn,
+                    stream_identifiers: vec![si],
+                })),
+                ..Default::default()
+            }),
+            Box::new(ChunkPayloadData {
+                beginning_fragment: true,
+                ending_fragment: true,
+                tsn,
+                stream_identifier: si,
+                stream_sequence_number: 1, // 0 was the DCEP hello in establish_session_pair
+                payload_type: PayloadProtocolIdentifier::Binary,
+                user_data: msg.clone(),
+                ..Default::default()
+            }),
+        ],
+    };
+    pair.server
+        .inbound
+        .push_back((pair.time, None, packet.marshal()?));
+
+    let (delivered, errors) = deliver_to_server_rtc_style(&mut pair, server_ch);
+    assert_eq!(
+        vec![msg.to_vec()],
+        delivered,
+        "data that follows its stream reset in the packet was lost (errors: {errors:?})"
+    );
+    let server = pair.server_conn_mut(server_ch);
+    assert!(server.stream(si).is_err(), "the reset was never applied");
     Ok(())
 }
 

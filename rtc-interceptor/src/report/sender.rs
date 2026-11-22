@@ -298,7 +298,9 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for SenderReportInterceptor {
             self.next_timeout = Some(now + self.interval);
 
             for stream in self.streams.values_mut() {
-                if let Some(sr) = stream.generate_report(now) {
+                // RFC 3550 6.4: only a stream that sent during the last two reporting intervals
+                // issues a sender report; a silent one reports nothing from here.
+                if let Some(sr) = stream.generate_regular_report(now) {
                     let mut compound: Vec<Box<dyn rtcp::Packet>> = vec![Box::new(sr)];
                     // The DLRR block answers every reference time received since the last
                     // reports, once, from the first stream that reports (RFC 3611 section 4.5).
@@ -363,23 +365,37 @@ impl Interceptor for SenderReportInterceptor {
             return;
         };
         let goodbye = match self.last_now {
-            Some(now) if stream.has_sent() => stream.generate_report(now).map(|report| {
-                let sources = std::iter::once(info.ssrc)
-                    .chain(info.ssrc_rtx)
-                    .chain(info.ssrc_fec)
-                    .collect();
-                TaggedPacket {
-                    now,
-                    transport: TransportContext::default(),
-                    message: AttributedPacket::new(Packet::Rtcp(vec![
-                        Box::new(report),
-                        Box::new(rtcp::goodbye::Goodbye {
-                            sources,
-                            reason: Default::default(),
-                        }),
-                    ])),
-                }
-            }),
+            Some(now) if stream.has_sent() => {
+                // RFC 3550 6.4: a sender report only from a stream that sent lately; one that
+                // fell silent leads its goodbye with an empty receiver report instead.
+                let report: Option<Box<dyn rtcp::Packet>> = if stream.is_sender() {
+                    stream
+                        .generate_report(now)
+                        .map(|report| Box::new(report) as Box<dyn rtcp::Packet>)
+                } else {
+                    Some(Box::new(rtcp::receiver_report::ReceiverReport {
+                        ssrc: info.ssrc,
+                        ..Default::default()
+                    }))
+                };
+                report.map(|report| {
+                    let sources = std::iter::once(info.ssrc)
+                        .chain(info.ssrc_rtx)
+                        .chain(info.ssrc_fec)
+                        .collect();
+                    TaggedPacket {
+                        now,
+                        transport: TransportContext::default(),
+                        message: AttributedPacket::new(Packet::Rtcp(vec![
+                            report,
+                            Box::new(rtcp::goodbye::Goodbye {
+                                sources,
+                                reason: Default::default(),
+                            }),
+                        ])),
+                    }
+                })
+            }
             _ => None,
         };
         self.departing.retain(|d| d.ssrc != info.ssrc);

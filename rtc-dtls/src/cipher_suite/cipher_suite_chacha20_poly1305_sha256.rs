@@ -56,6 +56,11 @@ impl CipherSuite for CipherSuiteChaCha20Poly1305Sha256 {
         self.cipher.is_some()
     }
 
+    fn record_expansion(&self) -> usize {
+        // The 16-byte tag; the nonce is not carried (RFC 7905).
+        16
+    }
+
     fn init(
         &mut self,
         provider: Arc<dyn RTCCryptoProvider>,
@@ -110,5 +115,28 @@ impl CipherSuite for CipherSuiteChaCha20Poly1305Sha256 {
             "CipherSuite has not been initialized, unable to decrypt".to_owned(),
         ))?;
         cg.decrypt(input)
+    }
+
+    fn encrypt_with_connection_id(
+        &mut self,
+        pkt_rlh: &RecordLayerHeader,
+        raw: &[u8],
+        connection_id: &[u8],
+    ) -> Result<Vec<u8>> {
+        let cg = self.cipher.as_mut().ok_or(Error::Other(
+            "CipherSuite has not been initialized, unable to encrypt".to_owned(),
+        ))?;
+        cg.encrypt_with(pkt_rlh, raw, Some(connection_id))
+    }
+
+    fn decrypt_with_connection_id(
+        &mut self,
+        input: &[u8],
+        connection_id: &[u8],
+    ) -> Result<Vec<u8>> {
+        let cg = self.cipher.as_mut().ok_or(Error::Other(
+            "CipherSuite has not been initialized, unable to decrypt".to_owned(),
+        ))?;
+        cg.decrypt_with(input, Some(connection_id))
     }
 }

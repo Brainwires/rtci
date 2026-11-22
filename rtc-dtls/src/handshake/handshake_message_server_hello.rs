@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod handshake_message_server_hello_test;
 
+use super::handshake_message_client_hello::MAX_SESSION_ID_LENGTH;
 use super::handshake_random::*;
 use super::*;
 use crate::cipher_suite::*;
@@ -10,7 +11,7 @@ use crate::record_layer::record_layer_header::*;
 
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use std::fmt;
-use std::io::{BufReader, BufWriter};
+use std::io::BufWriter;
 
 /*
 The server will send this message in response to a ClientHello
@@ -118,42 +119,21 @@ impl HandshakeMessageServerHello {
         let minor = reader.read_u8()?;
         let random = HandshakeRandom::unmarshal(reader)?;
 
-        // Session ID
+        // SessionID<0..32>
         let session_id_len = reader.read_u8()? as usize;
-        let mut session_id_buffer = vec![0u8; session_id_len];
-        reader.read_exact(&mut session_id_buffer)?;
+        if session_id_len > MAX_SESSION_ID_LENGTH {
+            return Err(Error::ErrInvalidPacketLength);
+        }
+        let mut session_id = [0u8; MAX_SESSION_ID_LENGTH];
+        reader.read_exact(&mut session_id[..session_id_len])?;
 
         let cipher_suite: CipherSuiteId = reader.read_u16::<BigEndian>()?.into();
 
         let compression_method = reader.read_u8()?.into();
-        let mut extensions = vec![];
 
-        let extension_buffer_len = reader.read_u16::<BigEndian>()? as usize;
-        let mut extension_buffer = vec![0u8; extension_buffer_len];
-        reader.read_exact(&mut extension_buffer)?;
-
-        let mut offset = 0;
-        while offset < extension_buffer_len {
-            if offset + 4 > extension_buffer_len {
-                return Err(Error::ErrBufferTooSmall);
-            }
-
-            let mut extension_reader = BufReader::new(&extension_buffer[offset..]);
-            if let Ok(extension) = Extension::unmarshal(&mut extension_reader) {
-                extensions.push(extension);
-            } else {
-                log::warn!(
-                    "Unsupported Extension Type {} {}",
-                    extension_buffer[offset],
-                    extension_buffer[offset + 1]
-                );
-            }
-
-            let extension_len =
-                u16::from_be_bytes([extension_buffer[offset + 2], extension_buffer[offset + 3]])
-                    as usize;
-            offset += 4 + extension_len;
-        }
+        // The message may end here (RFC 5246 7.4.1.3); otherwise the extensions block follows
+        // and ends the message.
+        let extensions = unmarshal_hello_extensions(reader)?;
 
         Ok(HandshakeMessageServerHello {
             version: ProtocolVersion { major, minor },

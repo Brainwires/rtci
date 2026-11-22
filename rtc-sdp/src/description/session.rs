@@ -11,11 +11,14 @@
 
 use std::collections::HashMap;
 use std::convert::TryFrom;
+use std::io::Read;
+use std::str::FromStr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{fmt, io};
 
 use url::Url;
 
+use crate::grammar::{self, invalid, syntax};
 use crate::lexer::*;
 use crate::util::*;
 use shared::error::{Error, Result};
@@ -63,6 +66,57 @@ pub const ATTR_KEY_EXT_MAP: &str = "extmap";
 pub const ATTR_KEY_EXTMAP_ALLOW_MIXED: &str = "extmap-allow-mixed";
 /// `a=max-message-size`: the largest SCTP message this endpoint accepts.
 pub const ATTR_KEY_MAX_MESSAGE_SIZE: &str = "max-message-size";
+/// `a=rtcp-mux-only`: RTP and RTCP share one port and nothing else is supported (RFC 8858).
+pub const ATTR_KEY_RTCPMUX_ONLY: &str = "rtcp-mux-only";
+/// `a=rtcp`: the RTCP port and address (RFC 3605).
+pub const ATTR_KEY_RTCP: &str = "rtcp";
+/// `a=rtcp-fb`: an RTCP feedback capability (RFC 4585).
+pub const ATTR_KEY_RTCP_FB: &str = "rtcp-fb";
+/// `a=rtcp-xr`: RTCP extended reports (RFC 3611).
+pub const ATTR_KEY_RTCP_XR: &str = "rtcp-xr";
+/// `a=rtpmap`: the codec of a payload type.
+pub const ATTR_KEY_RTPMAP: &str = "rtpmap";
+/// `a=fmtp`: format-specific parameters.
+pub const ATTR_KEY_FMTP: &str = "fmtp";
+/// `a=ptime`: the preferred packet duration, in milliseconds.
+pub const ATTR_KEY_PTIME: &str = "ptime";
+/// `a=maxptime`: the longest packet duration, in milliseconds.
+pub const ATTR_KEY_MAXPTIME: &str = "maxptime";
+/// `a=framerate`: the maximum video frame rate.
+pub const ATTR_KEY_FRAMERATE: &str = "framerate";
+/// `a=imageattr`: image sizes a payload type sends or receives (RFC 6236).
+pub const ATTR_KEY_IMAGEATTR: &str = "imageattr";
+/// `a=content`: what a media stream shows (RFC 4796).
+pub const ATTR_KEY_CONTENT: &str = "content";
+/// `a=rid`: an RTP stream identifier and its restrictions (RFC 8851).
+pub const ATTR_KEY_RID: &str = "rid";
+/// `a=simulcast`: the simulcast streams of a media section (RFC 8853).
+pub const ATTR_KEY_SIMULCAST: &str = "simulcast";
+/// `a=ice-ufrag`: the ICE user name fragment.
+pub const ATTR_KEY_ICE_UFRAG: &str = "ice-ufrag";
+/// `a=ice-pwd`: the ICE password.
+pub const ATTR_KEY_ICE_PWD: &str = "ice-pwd";
+/// `a=ice-options`: the ICE options the agent supports.
+pub const ATTR_KEY_ICE_OPTIONS: &str = "ice-options";
+/// `a=ice-pacing`: the ICE pacing interval, in milliseconds.
+pub const ATTR_KEY_ICE_PACING: &str = "ice-pacing";
+/// `a=remote-candidates`: the remote candidates the controlling agent selected.
+pub const ATTR_KEY_REMOTE_CANDIDATES: &str = "remote-candidates";
+/// `a=fingerprint`: a certificate fingerprint (RFC 8122).
+pub const ATTR_KEY_FINGERPRINT: &str = "fingerprint";
+/// `a=tls-id`: the DTLS association identifier (RFC 8842).
+pub const ATTR_KEY_TLS_ID: &str = "tls-id";
+/// `a=sctp-port`: the SCTP port (RFC 8841).
+pub const ATTR_KEY_SCTP_PORT: &str = "sctp-port";
+/// `a=sctpmap`: the SCTP association of an old-style data section
+/// (draft-ietf-mmusic-sctp-sdp-05; replaced by `a=sctp-port`).
+pub const ATTR_KEY_SCTPMAP: &str = "sctpmap";
+/// `a=bundle-only`: the section is used only inside its BUNDLE group (RFC 9143).
+pub const ATTR_KEY_BUNDLE_ONLY: &str = "bundle-only";
+/// `a=cryptex`: RTP header extensions and CSRCs are encrypted (RFC 9335).
+pub const ATTR_KEY_CRYPTEX: &str = "cryptex";
+/// `BUNDLE`: the m= sections share one transport (RFC 9143).
+pub const SEMANTIC_TOKEN_BUNDLE: &str = "BUNDLE";
 
 /// Constants for semantic tokens used in JSEP
 pub const SEMANTIC_TOKEN_LIP_SYNCHRONIZATION: &str = "LS";
@@ -159,9 +213,9 @@ pub type EmailAddress = String;
 /// conference.
 pub type PhoneNumber = String;
 
-/// TimeZone defines the structured object for "z=" line which describes
+/// TimeZone is one `<adjustment time> <offset>` pair of a "z=" line, which describes
 /// repeated sessions scheduling.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct TimeZone {
     /// The time at which the offset takes effect.
     pub adjustment_time: u64,
@@ -175,25 +229,36 @@ impl fmt::Display for TimeZone {
     }
 }
 
-/// TimeDescription describes "t=", "r=" fields of the session description
-/// which are used to specify the start and stop times for a session as well as
-/// repeat intervals and durations for the scheduled session.
+/// TimeDescription describes the "t=", "r=" and "z=" fields of the session description,
+/// which specify the start and stop times of a session, its repeat intervals and durations,
+/// and the time zone adjustments of those repetitions.
+///
+/// RFC 8866 section 9: `time-description = time-field [repeat-description]`,
+/// `repeat-description = 1*repeat-field [zone-field]`.
 #[derive(Debug, Default, Clone)]
 pub struct TimeDescription {
     /// `t=<start-time> <stop-time>`
     ///
-    /// <https://tools.ietf.org/html/rfc4566#section-5.9>
+    /// <https://www.rfc-editor.org/rfc/rfc8866#section-5.9>
     pub timing: Timing,
 
     /// `r=<repeat interval> <active duration> <offsets from start-time>`
     ///
-    /// <https://tools.ietf.org/html/rfc4566#section-5.10>
+    /// <https://www.rfc-editor.org/rfc/rfc8866#section-5.10>
     pub repeat_times: Vec<RepeatTime>,
+
+    /// `z=<adjustment time> <offset> <adjustment time> <offset> ...`
+    ///
+    /// The zone adjustments of this time description's repetitions. Written after the `r=`
+    /// lines.
+    ///
+    /// <https://www.rfc-editor.org/rfc/rfc8866#section-5.11>
+    pub time_zones: Vec<TimeZone>,
 }
 
 /// Timing defines the "t=" field's structured representation for the start and
 /// stop times.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Timing {
     /// Session start time in NTP seconds; `0` means unbounded.
     pub start_time: u64,
@@ -209,7 +274,7 @@ impl fmt::Display for Timing {
 
 /// RepeatTime describes the "r=" fields of the session description which
 /// represents the intervals and durations for repeated scheduled sessions.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct RepeatTime {
     /// How often the session repeats, in seconds.
     pub interval: i64,
@@ -236,89 +301,98 @@ impl fmt::Display for RepeatTime {
 pub struct SessionDescription {
     /// `v=0`
     ///
-    /// <https://tools.ietf.org/html/rfc4566#section-5.1>
+    /// <https://www.rfc-editor.org/rfc/rfc8866#section-5.1>
     pub version: Version,
 
     /// `o=<username> <sess-id> <sess-version> <nettype> <addrtype> <unicast-address>`
     ///
-    /// <https://tools.ietf.org/html/rfc4566#section-5.2>
+    /// <https://www.rfc-editor.org/rfc/rfc8866#section-5.2>
     pub origin: Origin,
 
     /// `s=<session name>`
     ///
-    /// <https://tools.ietf.org/html/rfc4566#section-5.3>
+    /// Never empty in SDP: an empty name is written as `-`.
+    ///
+    /// <https://www.rfc-editor.org/rfc/rfc8866#section-5.3>
     pub session_name: SessionName,
 
     /// `i=<session description>`
     ///
-    /// <https://tools.ietf.org/html/rfc4566#section-5.4>
+    /// <https://www.rfc-editor.org/rfc/rfc8866#section-5.4>
     pub session_information: Option<Information>,
 
     /// `u=<uri>`
     ///
-    /// <https://tools.ietf.org/html/rfc4566#section-5.5>
+    /// <https://www.rfc-editor.org/rfc/rfc8866#section-5.5>
     pub uri: Option<Url>,
 
-    /// `e=<email-address>`
+    /// `e=<email-address>`, any number of lines.
     ///
-    /// <https://tools.ietf.org/html/rfc4566#section-5.6>
-    pub email_address: Option<EmailAddress>,
+    /// <https://www.rfc-editor.org/rfc/rfc8866#section-5.6>
+    pub email_addresses: Vec<EmailAddress>,
 
-    /// `p=<phone-number>`
+    /// `p=<phone-number>`, any number of lines.
     ///
-    /// <https://tools.ietf.org/html/rfc4566#section-5.6>
-    pub phone_number: Option<PhoneNumber>,
+    /// <https://www.rfc-editor.org/rfc/rfc8866#section-5.6>
+    pub phone_numbers: Vec<PhoneNumber>,
 
     /// `c=<nettype> <addrtype> <connection-address>`
     ///
-    /// <https://tools.ietf.org/html/rfc4566#section-5.7>
+    /// <https://www.rfc-editor.org/rfc/rfc8866#section-5.7>
     pub connection_information: Option<ConnectionInformation>,
 
     /// `b=<bwtype>:<bandwidth>`
     ///
-    /// <https://tools.ietf.org/html/rfc4566#section-5.8>
+    /// <https://www.rfc-editor.org/rfc/rfc8866#section-5.8>
     pub bandwidth: Vec<Bandwidth>,
 
-    /// <https://tools.ietf.org/html/rfc4566#section-5.9>
-    /// <https://tools.ietf.org/html/rfc4566#section-5.10>
+    /// The time descriptions: `t=`, each with its `r=` and `z=` lines. SDP needs at least
+    /// one: an empty list is written as `t=0 0`.
+    ///
+    /// <https://www.rfc-editor.org/rfc/rfc8866#section-5.9>
     pub time_descriptions: Vec<TimeDescription>,
 
-    /// `z=<adjustment time> <offset> <adjustment time> <offset> ...`
-    ///
-    /// <https://tools.ietf.org/html/rfc4566#section-5.11>
-    pub time_zones: Vec<TimeZone>,
-
-    /// `k=<method>`
-    ///
-    /// `k=<method>:<encryption key>`
-    ///
-    /// <https://tools.ietf.org/html/rfc4566#section-5.12>
+    /// Obsolete. RFC 8866 section 5.12: a `k=` line "MUST NOT be included in an SDP
+    /// description and MUST be discarded if received". The parser never sets this field
+    /// and nothing writes it; it is kept so that code naming it still builds.
     pub encryption_key: Option<EncryptionKey>,
 
     /// `a=<attribute>`
     ///
     /// `a=<attribute>:<value>`
     ///
-    /// <https://tools.ietf.org/html/rfc4566#section-5.13>
+    /// <https://www.rfc-editor.org/rfc/rfc8866#section-5.13>
     pub attributes: Vec<Attribute>,
 
-    /// <https://tools.ietf.org/html/rfc4566#section-5.14>
+    /// <https://www.rfc-editor.org/rfc/rfc8866#section-5.14>
     pub media_descriptions: Vec<MediaDescription>,
 }
 
+/// Writes the description in the order RFC 8866 section 9 requires, whatever order its
+/// parts were set in: `v o s i u e* p* c b* (t r* z)+ a*`, then for each media description
+/// `m i c b* a*`.
 impl fmt::Display for SessionDescription {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write_key_value(f, "v=", Some(&self.version))?;
         write_key_value(f, "o=", Some(&self.origin))?;
-        write_key_value(f, "s=", Some(&self.session_name))?;
+        if self.session_name.is_empty() {
+            // Section 5.3: "The 's=' line MUST NOT be empty"; `s=-` names a nameless session.
+            write_key_value(f, "s=", Some("-"))?;
+        } else {
+            write_key_value(f, "s=", Some(&self.session_name))?;
+        }
 
         write_key_value(f, "i=", self.session_information.as_ref())?;
 
         if let Some(uri) = &self.uri {
             write_key_value(f, "u=", Some(uri))?;
         }
-        write_key_value(f, "e=", self.email_address.as_ref())?;
-        write_key_value(f, "p=", self.phone_number.as_ref())?;
+        for email_address in &self.email_addresses {
+            write_key_value(f, "e=", Some(email_address))?;
+        }
+        for phone_number in &self.phone_numbers {
+            write_key_value(f, "p=", Some(phone_number))?;
+        }
         if let Some(connection_information) = &self.connection_information {
             write_key_value(f, "c=", Some(&connection_information))?;
         }
@@ -326,16 +400,18 @@ impl fmt::Display for SessionDescription {
         for bandwidth in &self.bandwidth {
             write_key_value(f, "b=", Some(&bandwidth))?;
         }
+        if self.time_descriptions.is_empty() {
+            // Section 9: `1*time-description`.
+            write_key_value(f, "t=", Some("0 0"))?;
+        }
         for time_description in &self.time_descriptions {
             write_key_value(f, "t=", Some(&time_description.timing))?;
             for repeat_time in &time_description.repeat_times {
                 write_key_value(f, "r=", Some(&repeat_time))?;
             }
+            write_key_slice_of_values(f, "z=", &time_description.time_zones)?;
         }
 
-        write_key_slice_of_values(f, "z=", &self.time_zones)?;
-
-        write_key_value(f, "k=", self.encryption_key.as_ref())?;
         for attribute in &self.attributes {
             write_key_value(f, "a=", Some(&attribute))?;
         }
@@ -349,7 +425,6 @@ impl fmt::Display for SessionDescription {
             for bandwidth in &media_description.bandwidth {
                 write_key_value(f, "b=", Some(&bandwidth))?;
             }
-            write_key_value(f, "k=", media_description.encryption_key.as_ref())?;
             for attribute in &media_description.attributes {
                 write_key_value(f, "a=", Some(&attribute))?;
             }
@@ -359,14 +434,86 @@ impl fmt::Display for SessionDescription {
     }
 }
 
+/// What [`SessionDescription::unmarshal_with_options`] accepts beyond the RFC 8866 grammar.
+///
+/// [`SessionDescription::unmarshal`] parses with [`ParseOptions::strict`]: RFC 9429 section
+/// 5.8 has a description that is not well formed rejected, so the engine's own parsing is
+/// the grammar and nothing else. An application that has to read what other software calls
+/// SDP can ask for each leniency by name, or for all of them with
+/// [`ParseOptions::lenient`].
+///
+/// # What is accepted in every mode
+///
+/// These are the places where the parser is deliberately wider than the grammar, each for
+/// a reason:
+///
+/// * A line may end in a bare LF instead of CRLF. RFC 8866 section 5: "parsers SHOULD be
+///   tolerant and also accept lines terminated with a single newline character".
+/// * The last line may have no line ending, and empty lines may follow it. Descriptions
+///   that went through a text field or a `trim()` look like this.
+/// * `z=` may follow a `t=` line that has no `r=` line. RFC 4566 allowed it, and RFC 8866
+///   moved `z=` into the repeat description; a description written to RFC 4566 still parses.
+/// * `k=` lines are checked for syntax and dropped (RFC 8866 section 5.12: "MUST be
+///   discarded if received").
+/// * `a=name:` with an empty value is kept as an attribute whose value is the empty string.
+///   RFC 3611 defines one (`a=rtcp-xr:`), although the RFC 8866 `byte-string` is never empty.
+/// * An attribute this crate does not know is kept as it is, at either level (RFC 8866
+///   section 5.13: "an attribute that is not understood MUST be ignored"). The typed
+///   accessors are where the value of a known attribute is checked.
+/// * Several `c=` lines in one media description are accepted; the last one is kept.
+///
+/// # What is always refused
+///
+/// A type letter RFC 8866 does not define (section 5: such a description is ignored or
+/// rejected whole), a line that is not `<type>=<value>`, NUL, a bare CR, text that is not
+/// UTF-8 (`a=charset` is not supported), session-level lines out of order, and a
+/// description without `v=`, `o=`, `s=` or `t=`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ParseOptions {
+    /// Skip empty lines before and between lines, as some media players accept.
+    pub blank_lines: bool,
+    /// Accept `i=`, `c=`, `b=` and `k=` after `a=` lines inside a media description. Some
+    /// gateways write them so; RFC 8866 section 5 has them "in exactly the order given".
+    pub unordered_media_lines: bool,
+    /// Do not check what the fields of a line contain beyond what the parser needs:
+    /// fields may be separated and surrounded by any run of spaces and tabs; `t=` times may
+    /// be any number; addresses in `o=` and `c=` need only be free of white space (and `c=`
+    /// may lack one); `i=`, `e=` and `p=` text is kept unchecked; `s=` may be empty; extra
+    /// fields after the stop time of `t=` are ignored.
+    pub loose_fields: bool,
+}
+
+impl ParseOptions {
+    /// The RFC 8866 grammar, with only the tolerance every mode has. The default.
+    pub const fn strict() -> Self {
+        ParseOptions {
+            blank_lines: false,
+            unordered_media_lines: false,
+            loose_fields: false,
+        }
+    }
+
+    /// Every leniency.
+    pub const fn lenient() -> Self {
+        ParseOptions {
+            blank_lines: true,
+            unordered_media_lines: true,
+            loose_fields: true,
+        }
+    }
+}
+
 /// Reset cleans the SessionDescription, and sets all fields back to their default values
 impl SessionDescription {
-    /// API to match draft-ietf-rtcweb-jsep
-    /// Move to webrtc or its own package?
-    /// NewJSEPSessionDescription creates a new SessionDescription with
-    /// some settings that are required by the JSEP spec.
-    pub fn new_jsep_session_description(identity: bool) -> Self {
-        let d = SessionDescription {
+    /// A session description with the session-level lines RFC 9429 section 5.2.1 gives an
+    /// offer: `v=0`, `o=- <sess-id> <sess-version> IN IP4 0.0.0.0` with a random 63-bit
+    /// session id, `s=-` and `t=0 0`.
+    ///
+    /// `_identity` is ignored. It used to add a bare `a=identity`, which is not SDP: the
+    /// attribute carries an assertion (RFC 8827 section 5). An application that has one
+    /// adds it with `with_typed(&Identity)`.
+    pub fn new_jsep_session_description(_identity: bool) -> Self {
+        SessionDescription {
             version: 0,
             origin: Origin {
                 username: "-".to_string(),
@@ -382,8 +529,8 @@ impl SessionDescription {
             session_name: "-".to_string(),
             session_information: None,
             uri: None,
-            email_address: None,
-            phone_number: None,
+            email_addresses: vec![],
+            phone_numbers: vec![],
             connection_information: None,
             bandwidth: vec![],
             time_descriptions: vec![TimeDescription {
@@ -392,17 +539,11 @@ impl SessionDescription {
                     stop_time: 0,
                 },
                 repeat_times: vec![],
+                time_zones: vec![],
             }],
-            time_zones: vec![],
             encryption_key: None,
-            attributes: vec![], // TODO: implement trickle ICE
+            attributes: vec![],
             media_descriptions: vec![],
-        };
-
-        if identity {
-            d.with_property_attribute(ATTR_KEY_IDENTITY.to_string())
-        } else {
-            d
         }
     }
 
@@ -479,122 +620,69 @@ impl SessionDescription {
         None
     }
 
-    /// Marshal takes a SDP struct to text
+    /// The value of the first session-level `b=` line of `kind`, in the unit of that
+    /// modifier.
+    pub fn bandwidth_of(&self, kind: BandwidthKind) -> Option<u64> {
+        find_bandwidth(&self.bandwidth, kind)
+    }
+
+    crate::attribute::common_accessors!();
+    crate::attribute::session_accessors!();
+
+    /// Marshal takes a SDP struct to text, in the order RFC 8866 section 9 gives:
     ///
-    /// <https://tools.ietf.org/html/rfc4566#section-5>
-    ///
+    /// ```text
     /// Session description
     ///    v=  (protocol version)
     ///    o=  (originator and session identifier)
     ///    s=  (session name)
     ///    i=* (session information)
     ///    u=* (URI of description)
-    ///    e=* (email address)
-    ///    p=* (phone number)
-    ///    c=* (connection information -- not required if included in
-    ///         all media)
+    ///    e=* (zero or more email address lines)
+    ///    p=* (zero or more phone number lines)
+    ///    c=* (connection information -- not required if included in all media)
     ///    b=* (zero or more bandwidth information lines)
-    ///    One or more time descriptions ("t=" and "r=" lines; see below)
-    ///    z=* (time zone adjustments)
-    ///    k=* (encryption key)
+    ///    One or more time descriptions:
+    ///       t=  (time the session is active)
+    ///       r=* (zero or more repeat times)
+    ///       z=* (time zone adjustments of those repeat times)
     ///    a=* (zero or more session attribute lines)
-    ///    Zero or more media descriptions
+    ///    Zero or more media descriptions:
+    ///       m=  (media name and transport address)
+    ///       i=* (media title)
+    ///       c=* (connection information -- optional if included at session level)
+    ///       b=* (zero or more bandwidth information lines)
+    ///       a=* (zero or more media attribute lines)
+    /// ```
     ///
-    /// Time description
-    ///    t=  (time the session is active)
-    ///    r=* (zero or more repeat times)
-    ///
-    /// Media description, if present
-    ///    m=  (media name and transport address)
-    ///    i=* (media title)
-    ///    c=* (connection information -- optional if included at
-    ///         session level)
-    ///    b=* (zero or more bandwidth information lines)
-    ///    k=* (encryption key)
-    ///    a=* (zero or more media attribute lines)
+    /// `k=` is never written (section 5.12). An empty session name is written as `s=-` and
+    /// an empty list of time descriptions as `t=0 0`, so that what comes out has the
+    /// required lines. Field values are written as they are: build them from parsed or
+    /// checked input.
     pub fn marshal(&self) -> String {
         self.to_string()
     }
 
-    /// Unmarshal is the primary function that deserializes the session description
-    /// message and stores it inside of a structured SessionDescription object.
+    /// Unmarshal deserializes a session description, with [`ParseOptions::strict`]: the
+    /// RFC 8866 section 9 grammar, line by line and in its order.
     ///
-    /// The States Transition Table describes the computation flow between functions
-    /// (namely s1, s2, s3, ...) for a parsing procedure that complies with the
-    /// specifications laid out by the rfc4566#section-5 as well as by JavaScript
-    /// Session Establishment Protocol draft. Links:
-    ///     <https://tools.ietf.org/html/rfc4566#section-5>
-    ///     <https://tools.ietf.org/html/draft-ietf-rtcweb-jsep-24>
+    /// See [`ParseOptions`] for what is accepted beyond the grammar, and for what is
+    /// refused. Attribute values are kept as text: use the typed accessors
+    /// (`mid()`, `rtpmaps()`, `candidates()`, ...) or [`SessionDescription::validate`] to
+    /// check them.
     ///
-    /// <https://tools.ietf.org/html/rfc4566#section-5>
-    ///
-    /// Session description
-    ///    v=  (protocol version)
-    ///    o=  (originator and session identifier)
-    ///    s=  (session name)
-    ///    i=* (session information)
-    ///    u=* (URI of description)
-    ///    e=* (email address)
-    ///    p=* (phone number)
-    ///    c=* (connection information -- not required if included in
-    ///         all media)
-    ///    b=* (zero or more bandwidth information lines)
-    ///    One or more time descriptions ("t=" and "r=" lines; see below)
-    ///    z=* (time zone adjustments)
-    ///    k=* (encryption key)
-    ///    a=* (zero or more session attribute lines)
-    ///    Zero or more media descriptions
-    ///
-    /// Time description
-    ///    t=  (time the session is active)
-    ///    r=* (zero or more repeat times)
-    ///
-    /// Media description, if present
-    ///    m=  (media name and transport address)
-    ///    i=* (media title)
-    ///    c=* (connection information -- optional if included at
-    ///         session level)
-    ///    b=* (zero or more bandwidth information lines)
-    ///    k=* (encryption key)
-    ///    a=* (zero or more media attribute lines)
-    ///
-    /// In order to generate the following state table and draw subsequent
-    /// deterministic finite-state automota ("DFA") the following regex was used to
-    /// derive the DFA:
-    ///    vosi?u?e?p?c?b*(tr*)+z?k?a*(mi?c?b*k?a*)*
-    /// possible place and state to exit:
-    ///                    **   * * *  ** * * * *
-    ///                    99   1 1 1  11 1 1 1 1
-    ///                         3 1 1  26 5 5 4 4
-    ///
-    /// Please pay close attention to the `k`, and `a` parsing states. In the table
-    /// below in order to distinguish between the states belonging to the media
-    /// description as opposed to the session description, the states are marked
-    /// with an asterisk ("a*", "k*").
-    ///
-    /// ```ignore
-    /// +--------+----+-------+----+-----+----+-----+---+----+----+---+---+-----+---+---+----+---+----+
-    /// | STATES | a* | a*,k* | a  | a,k | b  | b,c | e | i  | m  | o | p | r,t | s | t | u  | v | z  |
-    /// +--------+----+-------+----+-----+----+-----+---+----+----+---+---+-----+---+---+----+---+----+
-    /// |   s1   |    |       |    |     |    |     |   |    |    |   |   |     |   |   |    | 2 |    |
-    /// |   s2   |    |       |    |     |    |     |   |    |    | 3 |   |     |   |   |    |   |    |
-    /// |   s3   |    |       |    |     |    |     |   |    |    |   |   |     | 4 |   |    |   |    |
-    /// |   s4   |    |       |    |     |    |   5 | 6 |  7 |    |   | 8 |     |   | 9 | 10 |   |    |
-    /// |   s5   |    |       |    |     |  5 |     |   |    |    |   |   |     |   | 9 |    |   |    |
-    /// |   s6   |    |       |    |     |    |   5 |   |    |    |   | 8 |     |   | 9 |    |   |    |
-    /// |   s7   |    |       |    |     |    |   5 | 6 |    |    |   | 8 |     |   | 9 | 10 |   |    |
-    /// |   s8   |    |       |    |     |    |   5 |   |    |    |   |   |     |   | 9 |    |   |    |
-    /// |   s9   |    |       |    |  11 |    |     |   |    | 12 |   |   |   9 |   |   |    |   | 13 |
-    /// |   s10  |    |       |    |     |    |   5 | 6 |    |    |   | 8 |     |   | 9 |    |   |    |
-    /// |   s11  |    |       | 11 |     |    |     |   |    | 12 |   |   |     |   |   |    |   |    |
-    /// |   s12  |    |    14 |    |     |    |  15 |   | 16 | 12 |   |   |     |   |   |    |   |    |
-    /// |   s13  |    |       |    |  11 |    |     |   |    | 12 |   |   |     |   |   |    |   |    |
-    /// |   s14  | 14 |       |    |     |    |     |   |    | 12 |   |   |     |   |   |    |   |    |
-    /// |   s15  |    |    14 |    |     | 15 |     |   |    | 12 |   |   |     |   |   |    |   |    |
-    /// |   s16  |    |    14 |    |     |    |  15 |   |    | 12 |   |   |     |   |   |    |   |    |
-    /// +--------+----+-------+----+-----+----+-----+---+----+----+---+---+-----+---+---+----+---+----+
-    /// ```
+    /// The input is bounded: [`MAX_SDP_SIZE`] bytes, [`MAX_SDP_LINES`] lines,
+    /// [`MAX_MEDIA_DESCRIPTIONS`] media descriptions, [`MAX_ATTRIBUTES_PER_SECTION`]
+    /// attributes at each level and [`MAX_FORMATS_PER_MEDIA`] formats on an `m=` line.
     pub fn unmarshal<R: io::BufRead + io::Seek>(reader: &mut R) -> Result<Self> {
+        Self::unmarshal_with_options(reader, &ParseOptions::strict())
+    }
+
+    /// [`SessionDescription::unmarshal`] with the leniencies `options` names.
+    pub fn unmarshal_with_options<R: io::BufRead + io::Seek>(
+        reader: &mut R,
+        options: &ParseOptions,
+    ) -> Result<Self> {
         let start = reader.stream_position()?;
         let end = reader.seek(io::SeekFrom::End(0))?;
         reader.seek(io::SeekFrom::Start(start))?;
@@ -602,40 +690,67 @@ impl SessionDescription {
             return Err(over_limit("bytes", MAX_SDP_SIZE));
         }
 
-        let mut lexer = Lexer {
-            desc: SessionDescription {
-                version: 0,
-                origin: Origin::new(),
-                session_name: "".to_owned(),
-                session_information: None,
-                uri: None,
-                email_address: None,
-                phone_number: None,
-                connection_information: None,
-                bandwidth: vec![],
-                time_descriptions: vec![],
-                time_zones: vec![],
-                encryption_key: None,
-                attributes: vec![],
-                media_descriptions: vec![],
-            },
-            reader,
-        };
-
-        // Each line takes two steps (its type, then its value), plus one to read the end.
-        let max_steps = 2 * MAX_SDP_LINES + 1;
-        let mut steps = 0usize;
-        let mut state = Some(StateFn { f: s1 });
-        while let Some(s) = state {
-            steps += 1;
-            if steps > max_steps {
-                return Err(over_limit("lines", MAX_SDP_LINES));
-            }
-            state = (s.f)(&mut lexer)?;
+        let mut bytes = Vec::with_capacity(end.saturating_sub(start) as usize);
+        io::Read::take(&mut *reader, MAX_SDP_SIZE as u64 + 1).read_to_end(&mut bytes)?;
+        if bytes.len() > MAX_SDP_SIZE {
+            return Err(over_limit("bytes", MAX_SDP_SIZE));
         }
-
-        Ok(lexer.desc)
+        let text = core::str::from_utf8(&bytes)
+            .map_err(|_| Error::SdpInvalidSyntax("the description is not UTF-8".to_owned()))?;
+        Self::parse_with_options(text, options)
     }
+
+    /// Parses a session description from text, with the leniencies `options` names.
+    pub fn parse_with_options(text: &str, options: &ParseOptions) -> Result<Self> {
+        Self::parse_located(text, options).map_err(|err| err.error)
+    }
+
+    /// [`Self::parse_with_options`], saying which line a syntax error is on (W3C webrtc-pc
+    /// section 11.1: an `sdp-syntax-error` carries its `sdpLineNumber`).
+    ///
+    /// # Errors
+    ///
+    /// The error [`Self::parse_with_options`] returns, with the number (from 1, blank lines
+    /// counted) of the line it is about; `None` for an error about the description as a whole
+    /// (its size, or a missing `t=` line at its end).
+    pub fn parse_located(
+        text: &str,
+        options: &ParseOptions,
+    ) -> std::result::Result<Self, SdpParseError> {
+        let unlocated = |error| SdpParseError {
+            line_number: None,
+            error,
+        };
+        if text.len() > MAX_SDP_SIZE {
+            return Err(unlocated(over_limit("bytes", MAX_SDP_SIZE)));
+        }
+        let mut parser = Parser::new(*options);
+        let lines = lines_located(text, options.blank_lines, MAX_SDP_LINES).map_err(
+            |(number, error)| SdpParseError {
+                line_number: Some(number),
+                error,
+            },
+        )?;
+        for line in lines {
+            let number = line.number;
+            parser.line(line).map_err(|error| SdpParseError {
+                line_number: Some(number),
+                error,
+            })?;
+        }
+        parser.finish().map_err(unlocated)
+    }
+}
+
+/// A description that does not parse, and where: what
+/// [`SessionDescription::parse_located`] returns.
+#[derive(Debug, PartialEq)]
+pub struct SdpParseError {
+    /// The line the error is about, from 1 (blank lines counted); `None` when it is about the
+    /// description as a whole.
+    pub line_number: Option<usize>,
+    /// What is wrong.
+    pub error: Error,
 }
 
 impl From<SessionDescription> for String {
@@ -647,827 +762,741 @@ impl From<SessionDescription> for String {
 impl TryFrom<String> for SessionDescription {
     type Error = Error;
     fn try_from(sdp_string: String) -> Result<Self> {
-        let mut reader = io::Cursor::new(sdp_string.as_bytes());
-        let session_description = SessionDescription::unmarshal(&mut reader)?;
-        Ok(session_description)
+        SessionDescription::parse_with_options(&sdp_string, &ParseOptions::strict())
     }
 }
 
-fn s1<'a, R: io::BufRead + io::Seek>(lexer: &mut Lexer<'a, R>) -> Result<Option<StateFn<'a, R>>> {
-    let (key, _) = read_type(lexer.reader)?;
-    if &key == b"v=" {
-        return Ok(Some(StateFn {
-            f: unmarshal_protocol_version,
-        }));
-    }
-
-    Err(Error::SdpInvalidSyntax(String::from_utf8(key)?))
-}
-
-fn s2<'a, R: io::BufRead + io::Seek>(lexer: &mut Lexer<'a, R>) -> Result<Option<StateFn<'a, R>>> {
-    let (key, _) = read_type(lexer.reader)?;
-    if &key == b"o=" {
-        return Ok(Some(StateFn {
-            f: unmarshal_origin,
-        }));
-    }
-
-    Err(Error::SdpInvalidSyntax(String::from_utf8(key)?))
-}
-
-fn s3<'a, R: io::BufRead + io::Seek>(lexer: &mut Lexer<'a, R>) -> Result<Option<StateFn<'a, R>>> {
-    let (key, _) = read_type(lexer.reader)?;
-    if &key == b"s=" {
-        return Ok(Some(StateFn {
-            f: unmarshal_session_name,
-        }));
-    }
-
-    Err(Error::SdpInvalidSyntax(String::from_utf8(key)?))
-}
-
-fn s4<'a, R: io::BufRead + io::Seek>(lexer: &mut Lexer<'a, R>) -> Result<Option<StateFn<'a, R>>> {
-    let (key, _) = read_type(lexer.reader)?;
-    match key.as_slice() {
-        b"i=" => Ok(Some(StateFn {
-            f: unmarshal_session_information,
-        })),
-        b"u=" => Ok(Some(StateFn { f: unmarshal_uri })),
-        b"e=" => Ok(Some(StateFn { f: unmarshal_email })),
-        b"p=" => Ok(Some(StateFn { f: unmarshal_phone })),
-        b"c=" => Ok(Some(StateFn {
-            f: unmarshal_session_connection_information,
-        })),
-        b"b=" => Ok(Some(StateFn {
-            f: unmarshal_session_bandwidth,
-        })),
-        b"t=" => Ok(Some(StateFn {
-            f: unmarshal_timing,
-        })),
-        _ => Err(Error::SdpInvalidSyntax(String::from_utf8(key)?)),
+impl FromStr for SessionDescription {
+    type Err = Error;
+    fn from_str(sdp: &str) -> Result<Self> {
+        SessionDescription::parse_with_options(sdp, &ParseOptions::strict())
     }
 }
 
-fn s5<'a, R: io::BufRead + io::Seek>(lexer: &mut Lexer<'a, R>) -> Result<Option<StateFn<'a, R>>> {
-    let (key, _) = read_type(lexer.reader)?;
-    match key.as_slice() {
-        b"b=" => Ok(Some(StateFn {
-            f: unmarshal_session_bandwidth,
-        })),
-        b"t=" => Ok(Some(StateFn {
-            f: unmarshal_timing,
-        })),
-        _ => Err(Error::SdpInvalidSyntax(String::from_utf8(key)?)),
-    }
+/// Where the parser is in `v o s i u e* p* c b* (t r* z)+ k a* m*`: the rank of the
+/// earliest line type that may still come.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum SessionRank {
+    Version,
+    Origin,
+    Name,
+    Information,
+    Uri,
+    Email,
+    Phone,
+    Connection,
+    Bandwidth,
+    Time,
+    Key,
+    Attribute,
 }
 
-fn s6<'a, R: io::BufRead + io::Seek>(lexer: &mut Lexer<'a, R>) -> Result<Option<StateFn<'a, R>>> {
-    let (key, _) = read_type(lexer.reader)?;
-    match key.as_slice() {
-        b"p=" => Ok(Some(StateFn { f: unmarshal_phone })),
-        b"c=" => Ok(Some(StateFn {
-            f: unmarshal_session_connection_information,
-        })),
-        b"b=" => Ok(Some(StateFn {
-            f: unmarshal_session_bandwidth,
-        })),
-        b"t=" => Ok(Some(StateFn {
-            f: unmarshal_timing,
-        })),
-        _ => Err(Error::SdpInvalidSyntax(String::from_utf8(key)?)),
-    }
+/// Where the parser is inside a time description.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TimeState {
+    /// No `t=` line yet, or a line that is not part of a time description came since.
+    Outside,
+    /// The last line was `t=`.
+    Timing,
+    /// The last line was `r=`.
+    Repeat,
+    /// The last line was `z=`.
+    Zone,
 }
 
-fn s7<'a, R: io::BufRead + io::Seek>(lexer: &mut Lexer<'a, R>) -> Result<Option<StateFn<'a, R>>> {
-    let (key, _) = read_type(lexer.reader)?;
-    match key.as_slice() {
-        b"u=" => Ok(Some(StateFn { f: unmarshal_uri })),
-        b"e=" => Ok(Some(StateFn { f: unmarshal_email })),
-        b"p=" => Ok(Some(StateFn { f: unmarshal_phone })),
-        b"c=" => Ok(Some(StateFn {
-            f: unmarshal_session_connection_information,
-        })),
-        b"b=" => Ok(Some(StateFn {
-            f: unmarshal_session_bandwidth,
-        })),
-        b"t=" => Ok(Some(StateFn {
-            f: unmarshal_timing,
-        })),
-        _ => Err(Error::SdpInvalidSyntax(String::from_utf8(key)?)),
-    }
+/// Where the parser is in `m i c* b* k a*`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum MediaRank {
+    Information,
+    Connection,
+    Bandwidth,
+    Key,
+    Attribute,
 }
 
-fn s8<'a, R: io::BufRead + io::Seek>(lexer: &mut Lexer<'a, R>) -> Result<Option<StateFn<'a, R>>> {
-    let (key, _) = read_type(lexer.reader)?;
-    match key.as_slice() {
-        b"c=" => Ok(Some(StateFn {
-            f: unmarshal_session_connection_information,
-        })),
-        b"b=" => Ok(Some(StateFn {
-            f: unmarshal_session_bandwidth,
-        })),
-        b"t=" => Ok(Some(StateFn {
-            f: unmarshal_timing,
-        })),
-        _ => Err(Error::SdpInvalidSyntax(String::from_utf8(key)?)),
-    }
+struct Parser {
+    options: ParseOptions,
+    desc: SessionDescription,
+    rank: SessionRank,
+    time: TimeState,
+    /// `Some` once the first `m=` line was read.
+    media: Option<MediaState>,
 }
 
-fn s9<'a, R: io::BufRead + io::Seek>(lexer: &mut Lexer<'a, R>) -> Result<Option<StateFn<'a, R>>> {
-    let (key, num_bytes) = read_type(lexer.reader)?;
-    if key.is_empty() && num_bytes == 0 {
-        return Ok(None);
-    }
-
-    match key.as_slice() {
-        b"z=" => Ok(Some(StateFn {
-            f: unmarshal_time_zones,
-        })),
-        b"k=" => Ok(Some(StateFn {
-            f: unmarshal_session_encryption_key,
-        })),
-        b"a=" => Ok(Some(StateFn {
-            f: unmarshal_session_attribute,
-        })),
-        b"r=" => Ok(Some(StateFn {
-            f: unmarshal_repeat_times,
-        })),
-        b"t=" => Ok(Some(StateFn {
-            f: unmarshal_timing,
-        })),
-        b"m=" => Ok(Some(StateFn {
-            f: unmarshal_media_description,
-        })),
-        _ => Err(Error::SdpInvalidSyntax(String::from_utf8(key)?)),
-    }
+struct MediaState {
+    rank: MediaRank,
+    has_title: bool,
+    has_key: bool,
 }
 
-fn s10<'a, R: io::BufRead + io::Seek>(lexer: &mut Lexer<'a, R>) -> Result<Option<StateFn<'a, R>>> {
-    let (key, _) = read_type(lexer.reader)?;
-    match key.as_slice() {
-        b"e=" => Ok(Some(StateFn { f: unmarshal_email })),
-        b"p=" => Ok(Some(StateFn { f: unmarshal_phone })),
-        b"c=" => Ok(Some(StateFn {
-            f: unmarshal_session_connection_information,
-        })),
-        b"b=" => Ok(Some(StateFn {
-            f: unmarshal_session_bandwidth,
-        })),
-        b"t=" => Ok(Some(StateFn {
-            f: unmarshal_timing,
-        })),
-        _ => Err(Error::SdpInvalidSyntax(String::from_utf8(key)?)),
-    }
+fn out_of_order(kind: u8) -> Error {
+    Error::SdpInvalidSyntax(format!(
+        "a `{}=` line where the grammar has none",
+        kind as char
+    ))
 }
 
-fn s11<'a, R: io::BufRead + io::Seek>(lexer: &mut Lexer<'a, R>) -> Result<Option<StateFn<'a, R>>> {
-    let (key, num_bytes) = read_type(lexer.reader)?;
-    if key.is_empty() && num_bytes == 0 {
-        return Ok(None);
-    }
-
-    match key.as_slice() {
-        b"a=" => Ok(Some(StateFn {
-            f: unmarshal_session_attribute,
-        })),
-        b"m=" => Ok(Some(StateFn {
-            f: unmarshal_media_description,
-        })),
-        _ => Err(Error::SdpInvalidSyntax(String::from_utf8(key)?)),
-    }
-}
-
-fn s12<'a, R: io::BufRead + io::Seek>(lexer: &mut Lexer<'a, R>) -> Result<Option<StateFn<'a, R>>> {
-    let (key, num_bytes) = read_type(lexer.reader)?;
-    if key.is_empty() && num_bytes == 0 {
-        return Ok(None);
-    }
-
-    match key.as_slice() {
-        b"a=" => Ok(Some(StateFn {
-            f: unmarshal_media_attribute,
-        })),
-        b"k=" => Ok(Some(StateFn {
-            f: unmarshal_media_encryption_key,
-        })),
-        b"b=" => Ok(Some(StateFn {
-            f: unmarshal_media_bandwidth,
-        })),
-        b"c=" => Ok(Some(StateFn {
-            f: unmarshal_media_connection_information,
-        })),
-        b"i=" => Ok(Some(StateFn {
-            f: unmarshal_media_title,
-        })),
-        b"m=" => Ok(Some(StateFn {
-            f: unmarshal_media_description,
-        })),
-        _ => Err(Error::SdpInvalidSyntax(String::from_utf8(key)?)),
-    }
-}
-
-fn s13<'a, R: io::BufRead + io::Seek>(lexer: &mut Lexer<'a, R>) -> Result<Option<StateFn<'a, R>>> {
-    let (key, num_bytes) = read_type(lexer.reader)?;
-    if key.is_empty() && num_bytes == 0 {
-        return Ok(None);
-    }
-
-    match key.as_slice() {
-        b"a=" => Ok(Some(StateFn {
-            f: unmarshal_session_attribute,
-        })),
-        b"k=" => Ok(Some(StateFn {
-            f: unmarshal_session_encryption_key,
-        })),
-        b"m=" => Ok(Some(StateFn {
-            f: unmarshal_media_description,
-        })),
-        _ => Err(Error::SdpInvalidSyntax(String::from_utf8(key)?)),
-    }
-}
-
-fn s14<'a, R: io::BufRead + io::Seek>(lexer: &mut Lexer<'a, R>) -> Result<Option<StateFn<'a, R>>> {
-    let (key, num_bytes) = read_type(lexer.reader)?;
-    if key.is_empty() && num_bytes == 0 {
-        return Ok(None);
-    }
-
-    match key.as_slice() {
-        b"a=" => Ok(Some(StateFn {
-            f: unmarshal_media_attribute,
-        })),
-        // Non-spec ordering
-        b"k=" => Ok(Some(StateFn {
-            f: unmarshal_media_encryption_key,
-        })),
-        // Non-spec ordering
-        b"b=" => Ok(Some(StateFn {
-            f: unmarshal_media_bandwidth,
-        })),
-        // Non-spec ordering
-        b"c=" => Ok(Some(StateFn {
-            f: unmarshal_media_connection_information,
-        })),
-        // Non-spec ordering
-        b"i=" => Ok(Some(StateFn {
-            f: unmarshal_media_title,
-        })),
-        b"m=" => Ok(Some(StateFn {
-            f: unmarshal_media_description,
-        })),
-        _ => Err(Error::SdpInvalidSyntax(String::from_utf8(key)?)),
-    }
-}
-
-fn s15<'a, R: io::BufRead + io::Seek>(lexer: &mut Lexer<'a, R>) -> Result<Option<StateFn<'a, R>>> {
-    let (key, num_bytes) = read_type(lexer.reader)?;
-    if key.is_empty() && num_bytes == 0 {
-        return Ok(None);
-    }
-
-    match key.as_slice() {
-        b"a=" => Ok(Some(StateFn {
-            f: unmarshal_media_attribute,
-        })),
-        b"k=" => Ok(Some(StateFn {
-            f: unmarshal_media_encryption_key,
-        })),
-        b"b=" => Ok(Some(StateFn {
-            f: unmarshal_media_bandwidth,
-        })),
-        b"c=" => Ok(Some(StateFn {
-            f: unmarshal_media_connection_information,
-        })),
-        // Non-spec ordering
-        b"i=" => Ok(Some(StateFn {
-            f: unmarshal_media_title,
-        })),
-        b"m=" => Ok(Some(StateFn {
-            f: unmarshal_media_description,
-        })),
-        _ => Err(Error::SdpInvalidSyntax(String::from_utf8(key)?)),
-    }
-}
-
-fn s16<'a, R: io::BufRead + io::Seek>(lexer: &mut Lexer<'a, R>) -> Result<Option<StateFn<'a, R>>> {
-    let (key, num_bytes) = read_type(lexer.reader)?;
-    if key.is_empty() && num_bytes == 0 {
-        return Ok(None);
-    }
-
-    match key.as_slice() {
-        b"a=" => Ok(Some(StateFn {
-            f: unmarshal_media_attribute,
-        })),
-        b"k=" => Ok(Some(StateFn {
-            f: unmarshal_media_encryption_key,
-        })),
-        b"c=" => Ok(Some(StateFn {
-            f: unmarshal_media_connection_information,
-        })),
-        b"b=" => Ok(Some(StateFn {
-            f: unmarshal_media_bandwidth,
-        })),
-        // Non-spec ordering
-        b"i=" => Ok(Some(StateFn {
-            f: unmarshal_media_title,
-        })),
-        b"m=" => Ok(Some(StateFn {
-            f: unmarshal_media_description,
-        })),
-        _ => Err(Error::SdpInvalidSyntax(String::from_utf8(key)?)),
-    }
-}
-
-fn unmarshal_protocol_version<'a, R: io::BufRead + io::Seek>(
-    lexer: &mut Lexer<'a, R>,
-) -> Result<Option<StateFn<'a, R>>> {
-    let (value, _) = read_value(lexer.reader)?;
-
-    let version = value.parse::<u32>()?;
-
-    // As off the latest draft of the rfc this value is required to be 0.
-    // https://tools.ietf.org/html/draft-ietf-rtcweb-jsep-24#section-5.8.1
-    if version != 0 {
-        return Err(Error::SdpInvalidSyntax(value));
-    }
-
-    Ok(Some(StateFn { f: s2 }))
-}
-
-fn unmarshal_origin<'a, R: io::BufRead + io::Seek>(
-    lexer: &mut Lexer<'a, R>,
-) -> Result<Option<StateFn<'a, R>>> {
-    let (value, _) = read_value(lexer.reader)?;
-
-    let fields: Vec<&str> = value.split_whitespace().collect();
-    if fields.len() != 6 {
-        return Err(Error::SdpInvalidSyntax(format!("`o={value}`")));
-    }
-
-    let session_id = fields[1].parse::<u64>()?;
-    let session_version = fields[2].parse::<u64>()?;
-
-    // Set according to currently registered with IANA
-    // https://tools.ietf.org/html/rfc4566#section-8.2.6
-    let i = index_of(fields[3], &["IN"]);
-    if i == -1 {
-        return Err(Error::SdpInvalidValue(fields[3].to_owned()));
-    }
-
-    // Set according to currently registered with IANA
-    // https://tools.ietf.org/html/rfc4566#section-8.2.7
-    let i = index_of(fields[4], &["IP4", "IP6"]);
-    if i == -1 {
-        return Err(Error::SdpInvalidValue(fields[4].to_owned()));
-    }
-
-    // TODO validated UnicastAddress
-
-    lexer.desc.origin = Origin {
-        username: fields[0].to_owned(),
-        session_id,
-        session_version,
-        network_type: fields[3].to_owned(),
-        address_type: fields[4].to_owned(),
-        unicast_address: fields[5].to_owned(),
-    };
-
-    Ok(Some(StateFn { f: s3 }))
-}
-
-fn unmarshal_session_name<'a, R: io::BufRead + io::Seek>(
-    lexer: &mut Lexer<'a, R>,
-) -> Result<Option<StateFn<'a, R>>> {
-    let (value, _) = read_value(lexer.reader)?;
-    lexer.desc.session_name = value;
-    Ok(Some(StateFn { f: s4 }))
-}
-
-fn unmarshal_session_information<'a, R: io::BufRead + io::Seek>(
-    lexer: &mut Lexer<'a, R>,
-) -> Result<Option<StateFn<'a, R>>> {
-    let (value, _) = read_value(lexer.reader)?;
-    lexer.desc.session_information = Some(value);
-    Ok(Some(StateFn { f: s7 }))
-}
-
-fn unmarshal_uri<'a, R: io::BufRead + io::Seek>(
-    lexer: &mut Lexer<'a, R>,
-) -> Result<Option<StateFn<'a, R>>> {
-    let (value, _) = read_value(lexer.reader)?;
-    lexer.desc.uri = Some(Url::parse(&value)?);
-    Ok(Some(StateFn { f: s10 }))
-}
-
-fn unmarshal_email<'a, R: io::BufRead + io::Seek>(
-    lexer: &mut Lexer<'a, R>,
-) -> Result<Option<StateFn<'a, R>>> {
-    let (value, _) = read_value(lexer.reader)?;
-    lexer.desc.email_address = Some(value);
-    Ok(Some(StateFn { f: s6 }))
-}
-
-fn unmarshal_phone<'a, R: io::BufRead + io::Seek>(
-    lexer: &mut Lexer<'a, R>,
-) -> Result<Option<StateFn<'a, R>>> {
-    let (value, _) = read_value(lexer.reader)?;
-    lexer.desc.phone_number = Some(value);
-    Ok(Some(StateFn { f: s8 }))
-}
-
-fn unmarshal_session_connection_information<'a, R: io::BufRead + io::Seek>(
-    lexer: &mut Lexer<'a, R>,
-) -> Result<Option<StateFn<'a, R>>> {
-    let (value, _) = read_value(lexer.reader)?;
-    lexer.desc.connection_information = unmarshal_connection_information(&value)?;
-    Ok(Some(StateFn { f: s5 }))
-}
-
-fn unmarshal_connection_information(value: &str) -> Result<Option<ConnectionInformation>> {
-    let fields: Vec<&str> = value.split_whitespace().collect();
-    if fields.len() < 2 {
-        return Err(Error::SdpInvalidSyntax(format!("`c={value}`")));
-    }
-
-    // Set according to currently registered with IANA
-    // https://tools.ietf.org/html/rfc4566#section-8.2.6
-    let i = index_of(fields[0], &["IN"]);
-    if i == -1 {
-        return Err(Error::SdpInvalidValue(fields[0].to_owned()));
-    }
-
-    // Set according to currently registered with IANA
-    // https://tools.ietf.org/html/rfc4566#section-8.2.7
-    let i = index_of(fields[1], &["IP4", "IP6"]);
-    if i == -1 {
-        return Err(Error::SdpInvalidValue(fields[1].to_owned()));
-    }
-
-    let address = if fields.len() > 2 {
-        Some(Address {
-            address: fields[2].to_owned(),
-            ttl: None,
-            range: None,
-        })
-    } else {
-        None
-    };
-
-    Ok(Some(ConnectionInformation {
-        network_type: fields[0].to_owned(),
-        address_type: fields[1].to_owned(),
-        address,
-    }))
-}
-
-fn unmarshal_session_bandwidth<'a, R: io::BufRead + io::Seek>(
-    lexer: &mut Lexer<'a, R>,
-) -> Result<Option<StateFn<'a, R>>> {
-    let (value, _) = read_value(lexer.reader)?;
-    lexer.desc.bandwidth.push(unmarshal_bandwidth(&value)?);
-    Ok(Some(StateFn { f: s5 }))
-}
-
-fn unmarshal_bandwidth(value: &str) -> Result<Bandwidth> {
-    let mut parts: Vec<&str> = value.split(':').collect();
-    if parts.len() != 2 {
-        return Err(Error::SdpInvalidSyntax(format!("`b={value}`")));
-    }
-
-    let experimental = parts[0].starts_with("X-");
-    if experimental {
-        parts[0] = parts[0].trim_start_matches("X-");
-    }
-    // RFC 8866 section 5.8: SDP parsers MUST ignore bandwidth-fields with unknown <bwtype> names.
-    // Accept any bandwidth type instead of validating against a specific list.
-
-    let bandwidth = parts[1].parse::<u64>()?;
-
-    Ok(Bandwidth {
-        experimental,
-        bandwidth_type: parts[0].to_owned(),
-        bandwidth,
-    })
-}
-
-fn unmarshal_timing<'a, R: io::BufRead + io::Seek>(
-    lexer: &mut Lexer<'a, R>,
-) -> Result<Option<StateFn<'a, R>>> {
-    let (value, _) = read_value(lexer.reader)?;
-
-    let fields: Vec<&str> = value.split_whitespace().collect();
-    if fields.len() < 2 {
-        return Err(Error::SdpInvalidSyntax(format!("`t={value}`")));
-    }
-
-    let start_time = fields[0].parse::<u64>()?;
-    let stop_time = fields[1].parse::<u64>()?;
-
-    lexer.desc.time_descriptions.push(TimeDescription {
-        timing: Timing {
-            start_time,
-            stop_time,
-        },
-        repeat_times: vec![],
-    });
-
-    Ok(Some(StateFn { f: s9 }))
-}
-
-fn unmarshal_repeat_times<'a, R: io::BufRead + io::Seek>(
-    lexer: &mut Lexer<'a, R>,
-) -> Result<Option<StateFn<'a, R>>> {
-    let (value, _) = read_value(lexer.reader)?;
-
-    let fields: Vec<&str> = value.split_whitespace().collect();
-    if fields.len() < 3 {
-        return Err(Error::SdpInvalidSyntax(format!("`r={value}`")));
-    }
-
-    if let Some(latest_time_desc) = lexer.desc.time_descriptions.last_mut() {
-        let interval = parse_time_units(fields[0])?;
-        let duration = parse_time_units(fields[1])?;
-        let mut offsets = vec![];
-        for field in fields.iter().skip(2) {
-            let offset = parse_time_units(field)?;
-            offsets.push(offset);
+impl Parser {
+    fn new(options: ParseOptions) -> Self {
+        Parser {
+            options,
+            desc: SessionDescription::default(),
+            rank: SessionRank::Version,
+            time: TimeState::Outside,
+            media: None,
         }
-        latest_time_desc.repeat_times.push(RepeatTime {
+    }
+
+    fn finish(self) -> Result<SessionDescription> {
+        // v=, o=, s= and one t= are required, in that order: a t= line means all four.
+        if self.desc.time_descriptions.is_empty() {
+            return Err(Error::SdpInvalidSyntax(
+                "the description ends before its `t=` line".to_owned(),
+            ));
+        }
+        Ok(self.desc)
+    }
+
+    /// The fields of a structured line: separated by one space, or by any white space when
+    /// `loose_fields` is set.
+    fn fields<'a>(&self, what: &str, value: &'a str) -> Result<Vec<&'a str>> {
+        if self.options.loose_fields {
+            let fields: Vec<&str> = value.split_whitespace().collect();
+            if fields.is_empty() {
+                return Err(syntax(what, value));
+            }
+            Ok(fields)
+        } else {
+            grammar::fields(what, value)
+        }
+    }
+
+    fn line(&mut self, line: Line<'_>) -> Result<()> {
+        if !matches!(
+            line.kind,
+            b'v' | b'o'
+                | b's'
+                | b'i'
+                | b'u'
+                | b'e'
+                | b'p'
+                | b'c'
+                | b'b'
+                | b't'
+                | b'r'
+                | b'z'
+                | b'k'
+                | b'a'
+                | b'm'
+        ) {
+            // RFC 8866 section 5: a parser "MUST completely ignore or reject any session
+            // description that contains a type letter that it does not understand".
+            return Err(Error::SdpInvalidSyntax(format!(
+                "unknown line type `{}=`",
+                line.kind.escape_ascii()
+            )));
+        }
+
+        if line.kind == b'm' {
+            // A media description may only start once the session level is complete.
+            if self.desc.time_descriptions.is_empty() {
+                return Err(out_of_order(line.kind));
+            }
+            self.media_line(line.value)?;
+            self.media = Some(MediaState {
+                rank: MediaRank::Information,
+                has_title: false,
+                has_key: false,
+            });
+            return Ok(());
+        }
+
+        if self.media.is_some() {
+            self.media_level(line)
+        } else {
+            self.session_level(line)
+        }
+    }
+
+    fn session_level(&mut self, line: Line<'_>) -> Result<()> {
+        use SessionRank as R;
+
+        let value = line.value;
+        let was_time = self.time;
+        if !matches!(line.kind, b'r' | b'z') {
+            self.time = TimeState::Outside;
+        }
+
+        // (rank of this line, rank of the earliest line that may follow it)
+        let (rank, next) = match line.kind {
+            b'v' => (R::Version, R::Origin),
+            b'o' => (R::Origin, R::Name),
+            b's' => (R::Name, R::Information),
+            b'i' => (R::Information, R::Uri),
+            b'u' => (R::Uri, R::Email),
+            b'e' => (R::Email, R::Email),
+            b'p' => (R::Phone, R::Phone),
+            b'c' => (R::Connection, R::Bandwidth),
+            b'b' => (R::Bandwidth, R::Bandwidth),
+            b't' | b'r' | b'z' => (R::Time, R::Time),
+            b'k' => (R::Key, R::Attribute),
+            b'a' => (R::Attribute, R::Attribute),
+            _ => return Err(out_of_order(line.kind)),
+        };
+
+        // v=, o= and s= are required and come first, in that order; a t= line is required
+        // before anything that follows the time descriptions.
+        let allowed = match self.rank {
+            R::Version | R::Origin | R::Name => rank == self.rank,
+            earliest => {
+                rank >= earliest && (rank <= R::Time || !self.desc.time_descriptions.is_empty())
+            }
+        };
+        if !allowed {
+            return Err(out_of_order(line.kind));
+        }
+
+        match line.kind {
+            b'v' => {
+                // `1*DIGIT`, and RFC 9429 section 5.8.1: the version is 0.
+                if grammar::digits::<u32>("v=", value)? != 0 {
+                    return Err(syntax("v=", value));
+                }
+                self.desc.version = 0;
+            }
+            b'o' => self.desc.origin = self.origin(value)?,
+            b's' => {
+                if !(grammar::is_byte_string(value)
+                    || (value.is_empty() && self.options.loose_fields))
+                {
+                    return Err(syntax("s=", value));
+                }
+                self.desc.session_name = value.to_owned();
+            }
+            b'i' => self.desc.session_information = Some(self.text("i=", value)?),
+            b'u' => {
+                self.desc.uri = Some(Url::parse(value).map_err(|_| syntax("u=", value))?);
+            }
+            b'e' => {
+                if !self.options.loose_fields && !is_email_address(value) {
+                    return Err(syntax("e=", value));
+                }
+                self.desc.email_addresses.push(value.to_owned());
+            }
+            b'p' => {
+                if !self.options.loose_fields && !is_phone_number(value) {
+                    return Err(syntax("p=", value));
+                }
+                self.desc.phone_numbers.push(value.to_owned());
+            }
+            b'c' => self.desc.connection_information = Some(self.connection(value)?),
+            b'b' => self.desc.bandwidth.push(self.bandwidth(value)?),
+            b't' => {
+                let timing = self.timing(value)?;
+                self.desc.time_descriptions.push(TimeDescription {
+                    timing,
+                    repeat_times: vec![],
+                    time_zones: vec![],
+                });
+                self.time = TimeState::Timing;
+            }
+            b'r' => {
+                if !matches!(was_time, TimeState::Timing | TimeState::Repeat) {
+                    return Err(out_of_order(line.kind));
+                }
+                let repeat = self.repeat(value)?;
+                // `was_time` is not `Outside`, so a time description exists.
+                if let Some(last) = self.desc.time_descriptions.last_mut() {
+                    last.repeat_times.push(repeat);
+                }
+                self.time = TimeState::Repeat;
+            }
+            b'z' => {
+                if !matches!(was_time, TimeState::Timing | TimeState::Repeat) {
+                    return Err(out_of_order(line.kind));
+                }
+                let zones = self.zones(value)?;
+                if let Some(last) = self.desc.time_descriptions.last_mut() {
+                    last.time_zones = zones;
+                }
+                self.time = TimeState::Zone;
+            }
+            b'k' => check_key(value)?,
+            _ => {
+                if self.desc.attributes.len() >= MAX_ATTRIBUTES_PER_SECTION {
+                    return Err(over_limit("session attributes", MAX_ATTRIBUTES_PER_SECTION));
+                }
+                self.desc.attributes.push(parse_attribute(value)?);
+            }
+        }
+
+        self.rank = next;
+        Ok(())
+    }
+
+    fn media_level(&mut self, line: Line<'_>) -> Result<()> {
+        use MediaRank as M;
+
+        let value = line.value;
+        let (rank, next) = match line.kind {
+            b'i' => (M::Information, M::Connection),
+            b'c' => (M::Connection, M::Connection),
+            b'b' => (M::Bandwidth, M::Bandwidth),
+            b'k' => (M::Key, M::Attribute),
+            b'a' => (M::Attribute, M::Attribute),
+            _ => return Err(out_of_order(line.kind)),
+        };
+
+        let unordered = self.options.unordered_media_lines;
+        let Some(state) = self.media.as_mut() else {
+            return Err(out_of_order(line.kind));
+        };
+        if !unordered && rank < state.rank {
+            return Err(out_of_order(line.kind));
+        }
+        // One i= and one k= at most, in any mode.
+        match line.kind {
+            b'i' if std::mem::replace(&mut state.has_title, true) => {
+                return Err(out_of_order(line.kind));
+            }
+            b'k' if std::mem::replace(&mut state.has_key, true) => {
+                return Err(out_of_order(line.kind));
+            }
+            _ => {}
+        }
+        state.rank = state.rank.max(next);
+
+        match line.kind {
+            b'i' => {
+                let title = self.text("i=", value)?;
+                self.last_media()?.media_title = Some(title);
+            }
+            b'c' => {
+                let connection = self.connection(value)?;
+                self.last_media()?.connection_information = Some(connection);
+            }
+            b'b' => {
+                let bandwidth = self.bandwidth(value)?;
+                self.last_media()?.bandwidth.push(bandwidth);
+            }
+            b'k' => check_key(value)?,
+            _ => {
+                let attribute = parse_attribute(value)?;
+                let media = self.last_media()?;
+                if media.attributes.len() >= MAX_ATTRIBUTES_PER_SECTION {
+                    return Err(over_limit(
+                        "attributes in one media section",
+                        MAX_ATTRIBUTES_PER_SECTION,
+                    ));
+                }
+                media.attributes.push(attribute);
+            }
+        }
+        Ok(())
+    }
+
+    fn last_media(&mut self) -> Result<&mut MediaDescription> {
+        self.desc
+            .media_descriptions
+            .last_mut()
+            .ok_or(Error::SdpEmptyTimeDescription)
+    }
+
+    /// `text = byte-string`.
+    fn text(&self, what: &str, value: &str) -> Result<String> {
+        if !(grammar::is_byte_string(value) || self.options.loose_fields) {
+            return Err(syntax(what, value));
+        }
+        Ok(value.to_owned())
+    }
+
+    /// `username SP sess-id SP sess-version SP nettype SP addrtype SP unicast-address`.
+    fn origin(&self, value: &str) -> Result<Origin> {
+        let fields = self.fields("o=", value)?;
+        let [
+            username,
+            session_id,
+            session_version,
+            network_type,
+            address_type,
+            address,
+        ] = fields[..]
+        else {
+            return Err(syntax("o=", value));
+        };
+        if !grammar::is_non_ws_string(username)
+            || !grammar::is_token(network_type)
+            || !grammar::is_token(address_type)
+        {
+            return Err(syntax("o=", value));
+        }
+        let address_ok = if self.options.loose_fields {
+            grammar::is_non_ws_string(address)
+        } else {
+            grammar::is_unicast_address(address_type, address)
+        };
+        if !address_ok {
+            return Err(syntax("o= unicast-address", value));
+        }
+        Ok(Origin {
+            username: username.to_owned(),
+            // The grammar has no upper bound; RFC 9429 section 5.2.1 keeps both within
+            // 64 bits, and so does this type.
+            session_id: grammar::digits("o= sess-id", session_id)?,
+            session_version: grammar::digits("o= sess-version", session_version)?,
+            network_type: network_type.to_owned(),
+            address_type: address_type.to_owned(),
+            unicast_address: address.to_owned(),
+        })
+    }
+
+    fn connection(&self, value: &str) -> Result<ConnectionInformation> {
+        let fields = self.fields("c=", value)?;
+        if !self.options.loose_fields {
+            return ConnectionInformation::parse_fields(&fields, value);
+        }
+        if !(2..=3).contains(&fields.len())
+            || !grammar::is_token(fields[0])
+            || !grammar::is_token(fields[1])
+        {
+            return Err(syntax("c=", value));
+        }
+        Ok(ConnectionInformation {
+            network_type: fields[0].to_owned(),
+            address_type: fields[1].to_owned(),
+            address: fields.get(2).map(|address| {
+                // Kept whole when it is not an address the grammar knows.
+                Address::parse(fields[1], address).unwrap_or_else(|_| Address {
+                    address: (*address).to_owned(),
+                    ttl: None,
+                    range: None,
+                })
+            }),
+        })
+    }
+
+    fn bandwidth(&self, value: &str) -> Result<Bandwidth> {
+        if self.options.loose_fields {
+            Bandwidth::parse(value.trim())
+        } else {
+            Bandwidth::parse(value)
+        }
+    }
+
+    /// `start-time SP stop-time`, each `time / "0"`, `time = POS-DIGIT 9*DIGIT`.
+    fn timing(&self, value: &str) -> Result<Timing> {
+        let fields = self.fields("t=", value)?;
+        let loose = self.options.loose_fields;
+        if fields.len() < 2 || (fields.len() > 2 && !loose) {
+            return Err(syntax("t=", value));
+        }
+        let time = |field: &str| -> Result<u64> {
+            if !(loose || field == "0" || (grammar::is_integer(field) && field.len() >= 10)) {
+                return Err(syntax("t=", value));
+            }
+            grammar::digits("t=", field)
+        };
+        Ok(Timing {
+            start_time: time(fields[0])?,
+            stop_time: time(fields[1])?,
+        })
+    }
+
+    /// `repeat-interval SP typed-time 1*(SP typed-time)`.
+    fn repeat(&self, value: &str) -> Result<RepeatTime> {
+        let fields = self.fields("r=", value)?;
+        if fields.len() < 3 {
+            return Err(syntax("r=", value));
+        }
+        // repeat-interval = POS-DIGIT *DIGIT [fixed-len-time-unit]
+        if fields[0].starts_with('0') {
+            return Err(syntax("r= repeat-interval", value));
+        }
+        let interval = parse_typed_time(fields[0])?;
+        let duration = parse_typed_time(fields[1])?;
+        let mut offsets = Vec::with_capacity(fields.len() - 2);
+        for field in &fields[2..] {
+            offsets.push(parse_typed_time(field)?);
+        }
+        Ok(RepeatTime {
             interval,
             duration,
             offsets,
-        });
-
-        Ok(Some(StateFn { f: s9 }))
-    } else {
-        Err(Error::SdpEmptyTimeDescription)
-    }
-}
-
-fn unmarshal_time_zones<'a, R: io::BufRead + io::Seek>(
-    lexer: &mut Lexer<'a, R>,
-) -> Result<Option<StateFn<'a, R>>> {
-    let (value, _) = read_value(lexer.reader)?;
-
-    // These fields are transimitted in pairs
-    // z=<adjustment time> <offset> <adjustment time> <offset> ....
-    // so we are making sure that there are actually multiple of 2 total.
-    let fields: Vec<&str> = value.split_whitespace().collect();
-    if !fields.len().is_multiple_of(2) {
-        return Err(Error::SdpInvalidSyntax(format!("`t={value}`")));
-    }
-
-    for i in (0..fields.len()).step_by(2) {
-        let adjustment_time = fields[i].parse::<u64>()?;
-        let offset = parse_time_units(fields[i + 1])?;
-
-        lexer.desc.time_zones.push(TimeZone {
-            adjustment_time,
-            offset,
-        });
-    }
-
-    Ok(Some(StateFn { f: s13 }))
-}
-
-fn unmarshal_session_encryption_key<'a, R: io::BufRead + io::Seek>(
-    lexer: &mut Lexer<'a, R>,
-) -> Result<Option<StateFn<'a, R>>> {
-    let (value, _) = read_value(lexer.reader)?;
-    lexer.desc.encryption_key = Some(value);
-    Ok(Some(StateFn { f: s11 }))
-}
-
-fn unmarshal_session_attribute<'a, R: io::BufRead + io::Seek>(
-    lexer: &mut Lexer<'a, R>,
-) -> Result<Option<StateFn<'a, R>>> {
-    let (value, _) = read_value(lexer.reader)?;
-
-    let fields: Vec<&str> = value.splitn(2, ':').collect();
-    let attribute = if fields.len() == 2 {
-        Attribute {
-            key: fields[0].to_owned(),
-            value: Some(fields[1].to_owned()),
-        }
-    } else {
-        Attribute {
-            key: fields[0].to_owned(),
-            value: None,
-        }
-    };
-    if lexer.desc.attributes.len() >= MAX_ATTRIBUTES_PER_SECTION {
-        return Err(over_limit("session attributes", MAX_ATTRIBUTES_PER_SECTION));
-    }
-    lexer.desc.attributes.push(attribute);
-
-    Ok(Some(StateFn { f: s11 }))
-}
-
-fn unmarshal_media_description<'a, R: io::BufRead + io::Seek>(
-    lexer: &mut Lexer<'a, R>,
-) -> Result<Option<StateFn<'a, R>>> {
-    let (value, _) = read_value(lexer.reader)?;
-
-    if lexer.desc.media_descriptions.len() >= MAX_MEDIA_DESCRIPTIONS {
-        return Err(over_limit("media sections", MAX_MEDIA_DESCRIPTIONS));
-    }
-
-    let fields: Vec<&str> = value.split_whitespace().collect();
-    if fields.len() < 4 {
-        return Err(Error::SdpInvalidSyntax(format!("`m={value}`")));
-    }
-    if fields.len() - 3 > MAX_FORMATS_PER_MEDIA {
-        return Err(over_limit("formats on one m= line", MAX_FORMATS_PER_MEDIA));
-    }
-
-    // <media>
-    // RFC 8866 section 5.14: <media> is a token ("audio", "video", "text",
-    // "application", "message", "image" are registered, and new media types
-    // may be), so an unknown one is parsed: it is the offer/answer layer that
-    // rejects a media type it doesn't know (RFC 9429 section 5.3.1 answers
-    // it with port 0), not the parser.
-    if !is_token(fields[0]) {
-        return Err(Error::SdpInvalidValue(fields[0].to_owned()));
-    }
-
-    // <port>
-    let parts: Vec<&str> = fields[1].split('/').collect();
-    let port_value = parts[0].parse::<u16>()? as isize;
-    let port_range = if parts.len() > 1 {
-        Some(parts[1].parse::<i32>()? as isize)
-    } else {
-        None
-    };
-
-    // <proto>
-    // RFC 8866 section 5.14: <proto> is the media transport protocol and is
-    // extensible -- "New transport protocols MAY be defined, and MUST be
-    // registered with IANA." Accept any "/"-separated proto token instead of
-    // validating against a fixed list, so IANA-registered transports beyond the
-    // RTP/SAVPF set interoperate, e.g. UDP/BFCP (RFC 8856), TCP/DTLS/SCTP
-    // (RFC 8841) or TCP/MRCPv2. A genuinely malformed proto (an empty
-    // "/"-separated token) is still rejected as SdpInvalidValue.
-    let mut protos = vec![];
-    for proto in fields[2].split('/').collect::<Vec<&str>>() {
-        if proto.is_empty() {
-            return Err(Error::SdpInvalidValue(fields[2].to_owned()));
-        }
-        protos.push(proto.to_owned());
-    }
-
-    // <fmt>...
-    let mut formats = vec![];
-    for field in fields.iter().skip(3) {
-        formats.push(field.to_string());
-    }
-
-    lexer.desc.media_descriptions.push(MediaDescription {
-        media_name: MediaName {
-            media: fields[0].to_owned(),
-            port: RangedPort {
-                value: port_value,
-                range: port_range,
-            },
-            protos,
-            formats,
-        },
-        media_title: None,
-        connection_information: None,
-        bandwidth: vec![],
-        encryption_key: None,
-        attributes: vec![],
-    });
-
-    Ok(Some(StateFn { f: s12 }))
-}
-
-/// RFC 8866 section 9 `token`: one or more of the visible ASCII characters
-/// other than the separators.
-fn is_token(value: &str) -> bool {
-    !value.is_empty()
-        && value.bytes().all(|b| {
-            b.is_ascii_alphanumeric()
-                || matches!(
-                    b,
-                    b'!' | b'#'
-                        | b'$'
-                        | b'%'
-                        | b'&'
-                        | b'\''
-                        | b'*'
-                        | b'+'
-                        | b'-'
-                        | b'.'
-                        | b'^'
-                        | b'_'
-                        | b'`'
-                        | b'{'
-                        | b'|'
-                        | b'}'
-                        | b'~'
-                )
         })
-}
+    }
 
-fn unmarshal_media_title<'a, R: io::BufRead + io::Seek>(
-    lexer: &mut Lexer<'a, R>,
-) -> Result<Option<StateFn<'a, R>>> {
-    let (value, _) = read_value(lexer.reader)?;
+    /// `time SP ["-"] typed-time *(SP time SP ["-"] typed-time)`.
+    fn zones(&self, value: &str) -> Result<Vec<TimeZone>> {
+        let fields = self.fields("z=", value)?;
+        if !fields.len().is_multiple_of(2) {
+            return Err(syntax("z=", value));
+        }
+        let mut zones = Vec::with_capacity(fields.len() / 2);
+        for pair in fields.chunks(2) {
+            let time = pair[0];
+            if !(self.options.loose_fields || (grammar::is_integer(time) && time.len() >= 10)) {
+                return Err(syntax("z= adjustment time", value));
+            }
+            let adjustment_time = grammar::digits("z= adjustment time", time)?;
+            let offset = match pair[1].strip_prefix('-') {
+                Some(positive) => parse_typed_time(positive)?
+                    .checked_neg()
+                    .ok_or_else(|| invalid("z= offset", value))?,
+                None => parse_typed_time(pair[1])?,
+            };
+            zones.push(TimeZone {
+                adjustment_time,
+                offset,
+            });
+        }
+        Ok(zones)
+    }
 
-    if let Some(latest_media_desc) = lexer.desc.media_descriptions.last_mut() {
-        latest_media_desc.media_title = Some(value);
-        Ok(Some(StateFn { f: s16 }))
-    } else {
-        Err(Error::SdpEmptyTimeDescription)
+    /// `media SP port ["/" integer] SP proto 1*(SP fmt)`.
+    fn media_line(&mut self, value: &str) -> Result<()> {
+        if self.desc.media_descriptions.len() >= MAX_MEDIA_DESCRIPTIONS {
+            return Err(over_limit("media sections", MAX_MEDIA_DESCRIPTIONS));
+        }
+
+        let fields = self.fields("m=", value)?;
+        if fields.len() < 4 {
+            return Err(syntax("m=", value));
+        }
+        if fields.len() - 3 > MAX_FORMATS_PER_MEDIA {
+            return Err(over_limit("formats on one m= line", MAX_FORMATS_PER_MEDIA));
+        }
+
+        // <media>
+        // RFC 8866 section 5.14: <media> is a token ("audio", "video", "text",
+        // "application", "message", "image" are registered, and new media types
+        // may be), so an unknown one is parsed: it is the offer/answer layer that
+        // rejects a media type it doesn't know (RFC 9429 section 5.3.1 answers
+        // it with port 0), not the parser.
+        if !grammar::is_token(fields[0]) {
+            return Err(Error::SdpInvalidValue(fields[0].to_owned()));
+        }
+
+        // <port> ["/" integer]
+        let (port, count) = match fields[1].split_once('/') {
+            Some((port, count)) => (port, Some(count)),
+            None => (fields[1], None),
+        };
+        let port_value = grammar::port(port)? as isize;
+        let port_range = match count {
+            Some(count) => {
+                if !grammar::is_integer(count) {
+                    return Err(syntax("m= number of ports", value));
+                }
+                Some(
+                    count
+                        .parse::<u16>()
+                        .map_err(|_| invalid("m= number of ports", value))?
+                        as isize,
+                )
+            }
+            None => None,
+        };
+
+        // <proto>
+        // RFC 8866 section 5.14: <proto> is the media transport protocol and is
+        // extensible -- "New transport protocols MAY be defined, and MUST be
+        // registered with IANA." Any `token *("/" token)` is accepted instead of a fixed
+        // list, so IANA-registered transports beyond the RTP/SAVPF set interoperate, e.g.
+        // UDP/BFCP (RFC 8856), TCP/DTLS/SCTP (RFC 8841) or TCP/MRCPv2.
+        let mut protos = vec![];
+        for proto in fields[2].split('/') {
+            if !grammar::is_token(proto) {
+                return Err(Error::SdpInvalidValue(fields[2].to_owned()));
+            }
+            protos.push(proto.to_owned());
+        }
+
+        // <fmt>...
+        let mut formats = Vec::with_capacity(fields.len() - 3);
+        for field in &fields[3..] {
+            if !grammar::is_token(field) {
+                return Err(syntax("m= fmt", value));
+            }
+            formats.push((*field).to_owned());
+        }
+
+        self.desc.media_descriptions.push(MediaDescription {
+            media_name: MediaName {
+                media: fields[0].to_owned(),
+                port: RangedPort {
+                    value: port_value,
+                    range: port_range,
+                },
+                protos,
+                formats,
+            },
+            media_title: None,
+            connection_information: None,
+            bandwidth: vec![],
+            encryption_key: None,
+            attributes: vec![],
+        });
+        Ok(())
     }
 }
 
-fn unmarshal_media_connection_information<'a, R: io::BufRead + io::Seek>(
-    lexer: &mut Lexer<'a, R>,
-) -> Result<Option<StateFn<'a, R>>> {
-    let (value, _) = read_value(lexer.reader)?;
+/// `attribute = (attribute-name ":" attribute-value) / attribute-name`, the name a token.
+///
+/// The value starts after the first colon and is kept whole.
+pub(crate) fn parse_attribute(value: &str) -> Result<Attribute> {
+    let (key, value) = match value.split_once(':') {
+        Some((key, value)) => (key, Some(value)),
+        None => (value, None),
+    };
+    if !grammar::is_token(key) {
+        return Err(syntax("attribute name", key));
+    }
+    Ok(Attribute {
+        key: key.to_owned(),
+        value: value.map(str::to_owned),
+    })
+}
 
-    if let Some(latest_media_desc) = lexer.desc.media_descriptions.last_mut() {
-        latest_media_desc.connection_information = unmarshal_connection_information(&value)?;
-        Ok(Some(StateFn { f: s15 }))
+/// `key-type = "prompt" / "clear:" text / "base64:" base64 / "uri:" uri`. The line is
+/// obsolete and its content is not kept (RFC 8866 section 5.12).
+fn check_key(value: &str) -> Result<()> {
+    let ok = if value == "prompt" {
+        true
+    } else if let Some(text) = value.strip_prefix("clear:") {
+        grammar::is_byte_string(text)
+    } else if let Some(key) = value.strip_prefix("base64:") {
+        grammar::is_base64(key)
+    } else if let Some(uri) = value.strip_prefix("uri:") {
+        grammar::is_non_ws_string(uri)
     } else {
-        Err(Error::SdpEmptyTimeDescription)
+        false
+    };
+    if ok {
+        Ok(())
+    } else {
+        // The key is not quoted in the error: it may be one.
+        Err(Error::SdpInvalidSyntax("k= line".to_owned()))
     }
 }
 
-fn unmarshal_media_bandwidth<'a, R: io::BufRead + io::Seek>(
-    lexer: &mut Lexer<'a, R>,
-) -> Result<Option<StateFn<'a, R>>> {
-    let (value, _) = read_value(lexer.reader)?;
-
-    if let Some(latest_media_desc) = lexer.desc.media_descriptions.last_mut() {
-        let bandwidth = unmarshal_bandwidth(&value)?;
-        latest_media_desc.bandwidth.push(bandwidth);
-        Ok(Some(StateFn { f: s15 }))
-    } else {
-        Err(Error::SdpEmptyTimeDescription)
-    }
+/// `email-safe`: any byte except NUL, CR, LF and the quoting characters `()<>`.
+fn is_email_safe(value: &str) -> bool {
+    !value.is_empty()
+        && !value
+            .bytes()
+            .any(|b| matches!(b, 0 | b'\r' | b'\n' | b'(' | b')' | b'<' | b'>'))
 }
 
-fn unmarshal_media_encryption_key<'a, R: io::BufRead + io::Seek>(
-    lexer: &mut Lexer<'a, R>,
-) -> Result<Option<StateFn<'a, R>>> {
-    let (value, _) = read_value(lexer.reader)?;
-
-    if let Some(latest_media_desc) = lexer.desc.media_descriptions.last_mut() {
-        latest_media_desc.encryption_key = Some(value);
-        Ok(Some(StateFn { f: s14 }))
-    } else {
-        Err(Error::SdpEmptyTimeDescription)
-    }
+/// RFC 5322 `atext`.
+fn is_atext(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b"!#$%&'*+-/=?^_`{|}~".contains(&b)
 }
 
-fn unmarshal_media_attribute<'a, R: io::BufRead + io::Seek>(
-    lexer: &mut Lexer<'a, R>,
-) -> Result<Option<StateFn<'a, R>>> {
-    let (value, _) = read_value(lexer.reader)?;
+/// RFC 5322 `dot-atom-text = 1*atext *("." 1*atext)`.
+fn is_dot_atom(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .split('.')
+            .all(|atom| !atom.is_empty() && atom.bytes().all(is_atext))
+}
 
-    let fields: Vec<&str> = value.splitn(2, ':').collect();
-    let attribute = if fields.len() == 2 {
-        Attribute {
-            key: fields[0].to_owned(),
-            value: Some(fields[1].to_owned()),
+/// RFC 5322 `addr-spec = local-part "@" domain`, without comments, folding white space or
+/// the obsolete forms: the local part is a dot-atom or a quoted string, the domain a
+/// dot-atom or a domain literal.
+fn is_addr_spec(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let at = if bytes.first() == Some(&b'"') {
+        // quoted-string: DQUOTE *(qtext / quoted-pair / WSP) DQUOTE
+        let mut i = 1;
+        loop {
+            match bytes.get(i) {
+                Some(b'"') => break i + 1,
+                Some(b'\\') if matches!(bytes.get(i + 1), Some(0x20..=0x7e | b'\t')) => i += 2,
+                Some(b' ' | b'\t' | 0x21 | 0x23..=0x5b | 0x5d..=0x7e) => i += 1,
+                _ => return false,
+            }
         }
     } else {
-        Attribute {
-            key: fields[0].to_owned(),
-            value: None,
+        match value.find('@') {
+            Some(at) if is_dot_atom(&value[..at]) => at,
+            _ => return false,
         }
     };
-
-    if let Some(latest_media_desc) = lexer.desc.media_descriptions.last_mut() {
-        if latest_media_desc.attributes.len() >= MAX_ATTRIBUTES_PER_SECTION {
-            return Err(over_limit(
-                "attributes in one media section",
-                MAX_ATTRIBUTES_PER_SECTION,
-            ));
-        }
-        latest_media_desc.attributes.push(attribute);
-        Ok(Some(StateFn { f: s14 }))
-    } else {
-        Err(Error::SdpEmptyTimeDescription)
+    if bytes.get(at) != Some(&b'@') {
+        return false;
+    }
+    let domain = &value[at + 1..];
+    match domain.strip_prefix('[').and_then(|d| d.strip_suffix(']')) {
+        // domain-literal: "[" *dtext "]"
+        Some(literal) => literal
+            .bytes()
+            .all(|b| matches!(b, 0x21..=0x5a | 0x5e..=0x7e)),
+        None => is_dot_atom(domain),
     }
 }
 
-fn parse_time_units(value: &str) -> Result<i64> {
-    // Some time offsets in the protocol can be provided with a shorthand
-    // notation. This code ensures to convert it to NTP timestamp format.
-    let val = value.as_bytes();
-    let len = val.len();
-    let (num, factor) = match val.last() {
-        Some(b'd') => (&value[..len - 1], 86400), // days
-        Some(b'h') => (&value[..len - 1], 3600),  // hours
-        Some(b'm') => (&value[..len - 1], 60),    // minutes
-        Some(b's') => (&value[..len - 1], 1),     // seconds (allowed for completeness)
+/// `email-address = address-and-comment / dispname-and-address / addr-spec`.
+fn is_email_address(value: &str) -> bool {
+    if let Some(rest) = value.strip_suffix(')') {
+        // addr-spec 1*SP "(" 1*email-safe ")"
+        let Some((address, comment)) = rest.split_once('(') else {
+            return false;
+        };
+        let spec = address.trim_end_matches(' ');
+        return spec.len() < address.len() && is_addr_spec(spec) && is_email_safe(comment);
+    }
+    if let Some(rest) = value.strip_suffix('>') {
+        // 1*email-safe 1*SP "<" addr-spec ">"
+        let Some((name, address)) = rest.split_once('<') else {
+            return false;
+        };
+        return name.ends_with(' ')
+            && is_email_safe(name.trim_end_matches(' '))
+            && is_addr_spec(address);
+    }
+    is_addr_spec(value)
+}
+
+/// `phone = ["+"] DIGIT 1*(SP / "-" / DIGIT)`.
+fn is_phone(value: &str) -> bool {
+    let digits = value.strip_prefix('+').unwrap_or(value).as_bytes();
+    digits.len() >= 2
+        && digits[0].is_ascii_digit()
+        && digits[1..]
+            .iter()
+            .all(|b| b.is_ascii_digit() || *b == b' ' || *b == b'-')
+}
+
+/// `phone-number = phone *SP "(" 1*email-safe ")" / 1*email-safe "<" phone ">" / phone`.
+fn is_phone_number(value: &str) -> bool {
+    if let Some(rest) = value.strip_suffix(')') {
+        let Some((phone, comment)) = rest.split_once('(') else {
+            return false;
+        };
+        // `phone` itself may end in spaces: `*SP` adds nothing to check.
+        return is_phone(phone) && is_email_safe(comment);
+    }
+    if let Some(rest) = value.strip_suffix('>') {
+        let Some((name, phone)) = rest.split_once('<') else {
+            return false;
+        };
+        return is_email_safe(name) && is_phone(phone);
+    }
+    is_phone(value)
+}
+
+/// `typed-time = 1*DIGIT [fixed-len-time-unit]`, in seconds.
+///
+/// The units are `d`, `h`, `m` and `s`, case-sensitive.
+fn parse_typed_time(value: &str) -> Result<i64> {
+    let (number, factor) = match value.as_bytes().last() {
+        Some(b'd') => (&value[..value.len() - 1], 86400),
+        Some(b'h') => (&value[..value.len() - 1], 3600),
+        Some(b'm') => (&value[..value.len() - 1], 60),
+        Some(b's') => (&value[..value.len() - 1], 1),
         _ => (value, 1),
     };
-    num.parse::<i64>()?
+    grammar::digits::<i64>("typed-time", number)?
         .checked_mul(factor)
-        .ok_or_else(|| Error::SdpInvalidValue(value.to_owned()))
+        .ok_or_else(|| invalid("typed-time", value))
 }

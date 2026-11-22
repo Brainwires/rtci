@@ -486,6 +486,25 @@ fn test_srv_pack_unpack() -> Result<()> {
     Ok(())
 }
 
+// RFC 6762 section 18.14: an SRV target may be compressed in mDNS, and must be decoded. The
+// unicast DNS rule (RFC 2782: never compressed) used to be applied, and such a record failed.
+#[test]
+fn test_srv_with_a_compressed_target_unpacks() -> Result<()> {
+    // "example.com." at offset 0, then the SRV data whose target is "srv" + a pointer to it.
+    let mut b = Name::new("example.com.")?.pack(vec![], &mut None, 0)?;
+    let rdata_off = b.len();
+    b.extend_from_slice(&[0, 8, 0, 9, 0, 11]);
+    b.extend_from_slice(&[3, b's', b'r', b'v', 0xC0, 0x00]);
+
+    let mut got = SrvResource::default();
+    let end = got.unpack(&b, rdata_off, b.len() - rdata_off)?;
+    assert_eq!(end, b.len());
+    assert_eq!((got.priority, got.weight, got.port), (8, 9, 11));
+    assert_eq!(got.target.data, "srv.example.com.");
+
+    Ok(())
+}
+
 #[test]
 fn test_dns_pack_unpack() -> Result<()> {
     let wants = vec![

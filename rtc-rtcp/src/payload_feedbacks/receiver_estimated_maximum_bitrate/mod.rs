@@ -45,7 +45,9 @@ impl fmt::Display for ReceiverEstimatedMaximumBitrate {
         let mut powers = 0;
 
         // Keep dividing the bitrate until it's under 1000
-        while bitrate >= 1000.0 && powers < BIT_UNITS.len() {
+        // (and stop at the last unit: a peer can state a bit rate far beyond exabits, and the
+        // table must not be indexed past its end)
+        while bitrate >= 1000.0 && powers < BIT_UNITS.len() - 1 {
             bitrate /= 1000.0;
             powers += 1;
         }
@@ -128,6 +130,10 @@ impl Marshal for ReceiverEstimatedMaximumBitrate {
            |  ...                                                          |
         */
 
+        // Num SSRC is one octet.
+        if self.ssrcs.len() > u8::MAX as usize {
+            return Err(Error::TooManySources);
+        }
         if buf.remaining_mut() < self.marshal_size() {
             return Err(Error::BufferTooShort);
         }
@@ -185,6 +191,13 @@ impl Marshal for ReceiverEstimatedMaximumBitrate {
     }
 }
 
+/// Whether `body`, what follows the header of a PSFB FMT=15 packet, is a REMB: after the two
+/// SSRCs its FCI opens with `REMB`.
+pub(crate) fn is_remb(body: &[u8]) -> bool {
+    body.get(FEEDBACK_SSRCS_LENGTH..FEEDBACK_SSRCS_LENGTH + UNIQUE_IDENTIFIER.len())
+        == Some(&UNIQUE_IDENTIFIER[..])
+}
+
 impl Unmarshal for ReceiverEstimatedMaximumBitrate {
     /// Unmarshal reads a REMB packet from the given byte slice.
     fn unmarshal<B>(raw_packet: &mut B) -> Result<Self>
@@ -192,11 +205,6 @@ impl Unmarshal for ReceiverEstimatedMaximumBitrate {
         Self: Sized,
         B: Buf,
     {
-        let raw_packet_len = raw_packet.remaining();
-        if raw_packet_len < SSRC_ENTRY_OFFSET {
-            return Err(Error::PacketTooShort);
-        }
-
         const MANTISSA_MAX: u32 = 0x7FFFFF;
         /*
             0                   1                   2                   3
@@ -216,48 +224,31 @@ impl Unmarshal for ReceiverEstimatedMaximumBitrate {
            +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
            |  ...                                                          |
         */
-        let header = Header::unmarshal(raw_packet)?;
-
-        if header.packet_type != PacketType::PayloadSpecificFeedback || header.count != FORMAT_REMB
-        {
-            return Err(Error::WrongType);
+        let (sender_ssrc, media_ssrc, mut fci) =
+            read_feedback(raw_packet, PacketType::PayloadSpecificFeedback, FORMAT_REMB)?;
+        // The identifier and the word with the SSRC count and the bit rate.
+        if fci.len() < SSRC_ENTRY_OFFSET - HEADER_LENGTH - FEEDBACK_SSRCS_LENGTH {
+            return Err(Error::PacketTooShort);
         }
-
-        let sender_ssrc = raw_packet.get_u32();
-        let media_ssrc = raw_packet.get_u32();
         if media_ssrc != 0 {
             return Err(Error::SsrcMustBeZero);
         }
 
-        // REMB rules all around me
         let mut unique_identifier = [0; 4];
-        unique_identifier[0] = raw_packet.get_u8();
-        unique_identifier[1] = raw_packet.get_u8();
-        unique_identifier[2] = raw_packet.get_u8();
-        unique_identifier[3] = raw_packet.get_u8();
-        if unique_identifier[0] != UNIQUE_IDENTIFIER[0]
-            || unique_identifier[1] != UNIQUE_IDENTIFIER[1]
-            || unique_identifier[2] != UNIQUE_IDENTIFIER[2]
-            || unique_identifier[3] != UNIQUE_IDENTIFIER[3]
-        {
+        fci.copy_to_slice(&mut unique_identifier);
+        if unique_identifier != UNIQUE_IDENTIFIER {
             return Err(Error::MissingRembIdentifier);
         }
 
-        // The next byte is the number of SSRC entries at the end.
-        let ssrcs_len = raw_packet.get_u8() as usize;
-        if raw_packet_len < SSRC_ENTRY_OFFSET + ssrcs_len * 4 {
-            return Err(Error::PacketTooShort);
-        }
+        let ssrcs_len = fci.get_u8() as usize;
 
-        // Get the 6-bit exponent value.
-        let b17 = raw_packet.get_u8();
+        let b17 = fci.get_u8();
         let mut exp = (b17 as u64) >> 2;
         exp += 127; // bias for IEEE754
         exp += 23; // IEEE754 biases the decimal to the left, abs-send-time biases it to the right
 
-        // The remaining 2-bits plus the next 16-bits are the mantissa.
-        let b18 = raw_packet.get_u8();
-        let b19 = raw_packet.get_u8();
+        let b18 = fci.get_u8();
+        let b19 = fci.get_u8();
         let mut mantissa = ((b17 & 3) as u32) << 16 | (b18 as u32) << 8 | b19 as u32;
 
         if mantissa != 0 {
@@ -268,23 +259,26 @@ impl Unmarshal for ReceiverEstimatedMaximumBitrate {
             }
         }
 
-        // bitrate = mantissa * 2^exp
-        let bitrate = f32::from_bits(((exp as u32) << 23) | (mantissa & MANTISSA_MAX));
+        // bitrate = mantissa * 2^exp. A mantissa of zero is a bit rate of zero whatever the
+        // exponent: it has no leading bit to normalise, and the bits below would read as
+        // 2^(exp + 23).
+        let bitrate = if mantissa == 0 {
+            0.0
+        } else {
+            f32::from_bits(((exp as u32) << 23) | (mantissa & MANTISSA_MAX))
+        };
 
-        let mut ssrcs = vec![];
-        for _i in 0..ssrcs_len {
-            ssrcs.push(raw_packet.get_u32());
+        // draft-alvestrand-rmcat-remb-03 2.2: Num SSRC entries follow, and nothing else.
+        if fci.len() != ssrcs_len * SSRC_LENGTH {
+            return Err(Error::SsrcNumAndLengthMismatch);
         }
-
-        if
-        /*header.padding &&*/
-        raw_packet.has_remaining() {
-            raw_packet.advance(raw_packet.remaining());
+        let mut ssrcs = Vec::with_capacity(ssrcs_len);
+        for _ in 0..ssrcs_len {
+            ssrcs.push(fci.get_u32());
         }
 
         Ok(ReceiverEstimatedMaximumBitrate {
             sender_ssrc,
-            //media_ssrc,
             bitrate,
             ssrcs,
         })

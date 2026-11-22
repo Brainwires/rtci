@@ -61,6 +61,16 @@ impl ParamStateCookie {
             cookie: cookie.freeze(),
         }
     }
+
+    /// The same, drawn from an endpoint's random source.
+    pub(crate) fn random(random: &crate::util::RandomSource) -> Self {
+        let mut cookie = BytesMut::new();
+        cookie.resize(32, 0);
+        random.fill(cookie.as_mut());
+        ParamStateCookie {
+            cookie: cookie.freeze(),
+        }
+    }
 }
 
 #[cfg(test)]

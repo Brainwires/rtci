@@ -24,20 +24,27 @@
 //!
 //! | # | Interceptor | Why there |
 //! |---|---|---|
+//! | wire | RTCP session | counts what left and arrived per SSRC; every RTCP packet written above leaves in its compound packets |
 //! | 0 | congestion control — send history, feedback ingest | records what actually left, after everything |
-//! | 1 | TWCC sender | tags every departing packet, before the history keys on it |
-//! | 2 | pacer | gates departures; everything that generates a packet sits above it |
-//! | 3 | NACK responder | its retransmissions reach 2, 1, 0 |
-//! | 4 | FEC encoder | its repair packets reach 3, 2, 1, 0 |
-//! | 5 | FEC decoder | recovery before anything inspects sequence numbers |
-//! | 6 | NACK generator | loss detected from arrivals, not from released packets |
-//! | 7–9 | TWCC receiver, RFC 8888, RTCP receiver reports | **arrival recorders — must precede the jitter buffer** |
-//! | 10–11 | RTCP sender reports, interval PLI | generators with no read-side ordering constraint |
-//! | 12 | jitter buffer | delays and re-stamps; releases toward the application |
+//! | 1 | FEC wire-image tap | copies departing media as it leaves, below the last thing that edits it |
+//! | 2 | TWCC sender | tags every departing packet, before the history keys on it |
+//! | 3 | pacer | gates departures; everything that generates a packet sits above it |
+//! | 4 | NACK responder | its retransmissions reach 3, 2, 1, 0 |
+//! | 5 | FEC encoder | its repair packets reach 4, 3, 2, 1, 0; it reads the media from the tap at 1 |
+//! | 6–8 | TWCC receiver, RFC 8888, RTCP receiver reports | **arrival recorders — must precede the FEC decoder and the jitter buffer** |
+//! | 9 | FEC decoder | recovery after the recorders saw what arrived, before anything else inspects sequence numbers |
+//! | 10 | NACK generator | loss detected from arrivals, after recovery, not from released packets |
+//! | 11–12 | RTCP sender reports, interval PLI | generators with no read-side ordering constraint |
+//! | 13 | jitter buffer | delays and re-stamps; releases toward the application |
 //!
 //! TWCC receiver and RFC 8888 do the same job in different formats — a chain carries one or the
 //! other — so they are listed together; the receiver reports beside them are RFC 3550 reception
 //! quality, not congestion-control feedback. Their order relative to each other does not matter.
+//!
+//! Arrival recorders precede the FEC decoder because they report what the path delivered: a
+//! repair packet is a delivered packet and the decoder consumes it, and a packet the decoder
+//! rebuilds was not delivered. A recorder above the decoder reports every repair packet as lost
+//! and every recovered packet as received.
 //!
 //! Arrival recorders precede the jitter buffer because the buffer re-stamps a packet with its
 //! *release* instant. A recorder below it would report local playout times to the remote as

@@ -14,6 +14,10 @@ const BLOCK_OVERHEAD: usize = 8;
 /// Bytes per reported packet.
 const METRIC_BLOCK_SIZE: usize = 2;
 
+/// The most feedback packets one call builds. Eight packets of 1200 bytes describe about 4700
+/// arrivals, far more than one reporting interval holds at any rate this engine carries.
+pub const MAX_REPORTS_PER_CALL: usize = 8;
+
 /// Records packet arrivals per stream and builds feedback reports from them.
 #[derive(Debug, Default)]
 pub struct CcFeedbackRecorder {
@@ -39,15 +43,10 @@ impl CcFeedbackRecorder {
         self.streams.values().all(StreamLog::is_empty)
     }
 
-    /// Build a report of everything observed since the last one.
+    /// Build one feedback report for what has not been reported yet, within `max_size` bytes.
     ///
-    /// `max_size` is the byte budget for the whole report, shared evenly between streams: a
-    /// report that does not fit the path's MTU would be fragmented or dropped, and feedback that
-    /// does not arrive is worse than feedback that describes fewer packets.
-    ///
-    /// `report_timestamp` is the middle 32 bits of an NTP timestamp. It is supplied rather than
-    /// read from a clock because a sans-I/O interceptor has none — `shared::time::SystemInstant`
-    /// is how the caller converts the monotonic `now` into wall-clock time.
+    /// What does not fit stays in the recorder for the next call:
+    /// [`build_reports`](Self::build_reports) is the form that sends all of it.
     pub fn build_report(
         &mut self,
         now: Instant,
@@ -55,26 +54,74 @@ impl CcFeedbackRecorder {
         report_timestamp: u32,
         max_size: usize,
     ) -> CcFeedbackReport {
+        self.build_one(now, sender_ssrc, report_timestamp, max_size, true)
+    }
+
+    /// Build the feedback for everything not reported yet, as one report or, when it does not
+    /// fit `max_size` bytes, as several (RFC 8888 section 3.1: a feedback packet too large for
+    /// the path MTU is split into multiple feedback packets).
+    ///
+    /// The first report carries a block for every stream, the ones with nothing new included;
+    /// the following ones only the streams that still have something to say. At most
+    /// [`MAX_REPORTS_PER_CALL`] reports are built: what is left after that goes out next time.
+    pub fn build_reports(
+        &mut self,
+        now: Instant,
+        sender_ssrc: u32,
+        report_timestamp: u32,
+        max_size: usize,
+    ) -> Vec<CcFeedbackReport> {
+        let mut reports = vec![self.build_one(now, sender_ssrc, report_timestamp, max_size, true)];
+        while reports.len() < MAX_REPORTS_PER_CALL && !self.is_empty() {
+            let report = self.build_one(now, sender_ssrc, report_timestamp, max_size, false);
+            // A budget too small for a single metric block makes no progress: stop, rather
+            // than emit empty reports.
+            if report
+                .report_blocks
+                .iter()
+                .all(|block| block.metric_blocks.is_empty())
+            {
+                break;
+            }
+            reports.push(report);
+        }
+        reports
+    }
+
+    fn build_one(
+        &mut self,
+        now: Instant,
+        sender_ssrc: u32,
+        report_timestamp: u32,
+        max_size: usize,
+        every_stream: bool,
+    ) -> CcFeedbackReport {
         let mut report = CcFeedbackReport {
             sender_ssrc,
             report_blocks: Vec::new(),
             report_timestamp,
         };
 
-        let stream_count = self.streams.len();
+        // Ordered so a report is reproducible; a `HashMap` would otherwise vary run to run.
+        let mut ssrcs: Vec<u32> = self
+            .streams
+            .iter()
+            .filter(|(_, stream)| every_stream || !stream.is_empty())
+            .map(|(&ssrc, _)| ssrc)
+            .collect();
+        ssrcs.sort_unstable();
+
+        let stream_count = ssrcs.len();
         if stream_count == 0 {
             return report;
         }
 
+        // Split the remaining bytes evenly, so one busy stream cannot crowd out the rest.
         let budget = max_size
             .saturating_sub(REPORT_OVERHEAD)
             .saturating_sub(BLOCK_OVERHEAD * stream_count)
             / METRIC_BLOCK_SIZE;
         let per_stream = (budget / stream_count).min(MAX_REPORTS_PER_BLOCK);
-
-        // Ordered so a report is reproducible; a `HashMap` would otherwise vary run to run.
-        let mut ssrcs: Vec<u32> = self.streams.keys().copied().collect();
-        ssrcs.sort_unstable();
 
         for ssrc in ssrcs {
             let Some(stream) = self.streams.get_mut(&ssrc) else {
@@ -165,8 +212,33 @@ mod tests {
         );
     }
 
-    /// A report has to fit the path. Describing fewer packets is better than a report that gets
-    /// fragmented or dropped, since feedback that does not arrive is worth nothing.
+    /// RFC 8888 section 3.1: feedback too large for the path MTU is split into several feedback
+    /// packets, each within the budget, together describing every arrival once.
+    #[test]
+    fn feedback_larger_than_the_budget_is_split_into_several_reports() {
+        let now = Instant::now();
+        let mut recorder = CcFeedbackRecorder::new();
+        for sequence_number in 0..25u16 {
+            recorder.add_packet(now, 1, sequence_number, Ecn::NotEct);
+        }
+
+        // 12 report overhead + 8 block overhead leaves 20 bytes, i.e. 10 metric blocks.
+        let reports = recorder.build_reports(now, 9, 0, 40);
+        assert_eq!(
+            vec![(0u16, 10usize), (10, 10), (20, 5)],
+            reports
+                .iter()
+                .map(|report| (
+                    report.report_blocks[0].begin_sequence,
+                    report.report_blocks[0].metric_blocks.len()
+                ))
+                .collect::<Vec<_>>()
+        );
+        assert!(reports.iter().all(|report| report.sender_ssrc == 9));
+        assert!(recorder.is_empty());
+    }
+
+    /// A report has to fit the path: one report never describes more than the budget holds.
     #[test]
     fn the_byte_budget_bounds_what_a_report_describes() {
         let now = Instant::now();

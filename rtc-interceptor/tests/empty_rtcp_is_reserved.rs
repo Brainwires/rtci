@@ -50,11 +50,17 @@ fn generators() -> impl Interceptor {
         )
         .with(
             Slot::TwccReceiver,
-            TwccReceiverBuilder::new().with_interval(TICK).build(),
+            TwccReceiverBuilder::new()
+                .with_interval(TICK)
+                .with_adaptive_interval(false)
+                .build(),
         )
         .with(
             Slot::Rfc8888,
-            Rfc8888Builder::new().with_interval(TICK).build(),
+            Rfc8888Builder::new()
+                .with_interval(TICK)
+                .with_adaptive_interval(false)
+                .build(),
         )
         .with(
             Slot::ReceiverReport,

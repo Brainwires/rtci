@@ -12,14 +12,17 @@ use std::time::Instant;
 /// This struct tracks message/byte counters and state for a data channel.
 #[derive(Debug, Default)]
 pub struct DataChannelStatsAccumulator {
-    /// The SCTP stream identifier, or 0 while the channel has not been assigned one.
-    pub data_channel_identifier: StreamId,
+    /// The SCTP stream identifier, `None` while the channel has not been assigned one.
+    pub data_channel_identifier: Option<StreamId>,
     /// The label assigned to the data channel.
     pub label: String,
     /// The sub-protocol name.
     pub protocol: String,
     /// The current state of the data channel.
     pub state: RTCDataChannelState,
+    /// The channel has been in the `open` state: only then is its end one of the peer
+    /// connection's `dataChannelsClosed`.
+    pub opened: bool,
 
     // Message/byte counters
     /// Total messages sent through the data channel.
@@ -45,8 +48,15 @@ impl DataChannelStatsAccumulator {
         self.bytes_received += bytes as u64;
     }
 
+    /// Called when the data channel enters the `open` state.
+    pub fn on_opened(&mut self) {
+        self.opened = true;
+        self.state = RTCDataChannelState::Open;
+    }
+
     /// Called when the data channel state changes.
     pub fn on_state_changed(&mut self, state: RTCDataChannelState) {
+        self.opened |= state == RTCDataChannelState::Open;
         self.state = state;
     }
 
@@ -78,7 +88,7 @@ mod tests {
     #[test]
     fn test_default() {
         let acc = DataChannelStatsAccumulator::default();
-        assert_eq!(acc.data_channel_identifier, 0);
+        assert_eq!(acc.data_channel_identifier, None);
         assert_eq!(acc.label, "");
         assert_eq!(acc.protocol, "");
         assert_eq!(acc.state, RTCDataChannelState::default());
@@ -151,7 +161,7 @@ mod tests {
     #[test]
     fn test_snapshot() {
         let mut acc = DataChannelStatsAccumulator {
-            data_channel_identifier: 42,
+            data_channel_identifier: Some(42),
             label: "test-channel".to_string(),
             protocol: "json".to_string(),
             state: RTCDataChannelState::Open,
@@ -167,7 +177,7 @@ mod tests {
         assert_eq!(stats.stats.id, "RTCDataChannel_42");
         assert_eq!(stats.stats.typ, RTCStatsType::DataChannel);
         assert_stamped_at(stats.stats.timestamp, now);
-        assert_eq!(stats.data_channel_identifier, 42);
+        assert_eq!(stats.data_channel_identifier, Some(42));
         assert_eq!(stats.label, "test-channel");
         assert_eq!(stats.protocol, "json");
         assert_eq!(stats.state, RTCDataChannelState::Open);
@@ -180,7 +190,7 @@ mod tests {
     #[test]
     fn test_snapshot_json_serialization() {
         let mut acc = DataChannelStatsAccumulator {
-            data_channel_identifier: 1,
+            data_channel_identifier: Some(1),
             label: "my-channel".to_string(),
             protocol: "".to_string(),
             state: RTCDataChannelState::Open,

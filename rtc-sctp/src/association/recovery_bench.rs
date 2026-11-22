@@ -19,6 +19,7 @@ fn recovery_window(count: u32, now: Instant) -> Result<Association> {
         SocketAddr::from(([0, 0, 0, 0], 0)),
         TransportProtocol::UDP,
         now,
+        crate::util::RandomSource::default(),
     );
     a.control_queue.clear();
     a.timers.stop(Timer::T1Init);

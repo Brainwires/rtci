@@ -10,7 +10,7 @@ use crc::{CRC_32_ISO_HDLC, Crc, Table};
 
 /// FINGERPRINT attribute.
 ///
-/// RFC 5389 Section 15.5.
+/// RFC 8489 Section 14.7.
 pub struct FingerprintAttr;
 
 /// Shorthand for FingerprintAttr.
@@ -63,11 +63,25 @@ impl Setter for FingerprintAttr {
 impl FingerprintAttr {
     /// Check reads fingerprint value from m and checks it, returning error if any.
     /// Can return *AttrLengthErr, ErrAttributeNotFound, and *CRCMismatch.
+    ///
+    /// RFC 8489 section 14.7: FINGERPRINT is the last attribute of the message, and its value
+    /// is the CRC-32 of everything ahead of it. A FINGERPRINT that is followed by another
+    /// attribute fails the check (`ErrFingerprintMismatch`): what follows it is covered by
+    /// nothing.
     pub fn check(&self, m: &Message) -> Result<()> {
-        let b = m.get(ATTR_FINGERPRINT)?;
+        let index = m
+            .position(ATTR_FINGERPRINT)
+            .ok_or(Error::ErrAttributeNotFound)?;
+        let b = &m.attributes.0[index].value;
         check_size(ATTR_FINGERPRINT, b.len(), FINGERPRINT_SIZE)?;
+        if index + 1 != m.attributes.0.len() {
+            return Err(Error::ErrFingerprintMismatch);
+        }
         let val = u32::from_be_bytes([b[0], b[1], b[2], b[3]]);
-        let attr_start = m.raw.len() - (FINGERPRINT_SIZE + ATTRIBUTE_HEADER_SIZE);
+        let attr_start = m.attribute_offset(index);
+        if attr_start + FINGERPRINT_SIZE + ATTRIBUTE_HEADER_SIZE != m.raw.len() {
+            return Err(Error::ErrFingerprintMismatch);
+        }
         let expected = fingerprint_value(&m.raw[..attr_start]);
         check_fingerprint(val, expected)
     }

@@ -1,6 +1,7 @@
 //! `CipherAeadAesGcm::new` refuses what it cannot build instead of panicking.
 
 use super::cipher_aead_aes_gcm::CipherAeadAesGcm;
+use crate::keying::KeyDerivationRate;
 use crate::protection_profile::ProtectionProfile;
 use shared::error::Error;
 
@@ -13,6 +14,8 @@ fn test_aead_cipher_refuses_a_non_gcm_profile() {
         &vec![0u8; profile.key_len()],
         &vec![0u8; profile.salt_len()],
         provider.crypto(),
+        KeyDerivationRate::ZERO,
+        None,
     );
     assert!(matches!(result, Err(Error::ErrNoSuchSrtpProfile)));
 }
@@ -26,6 +29,8 @@ fn test_aead_cipher_refuses_a_wrong_salt_length() {
         &vec![0u8; profile.key_len()],
         &[0u8; 14],
         provider.crypto(),
+        KeyDerivationRate::ZERO,
+        None,
     );
     assert!(matches!(result, Err(Error::SrtpSaltLength(12, 14))));
 }

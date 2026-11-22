@@ -1,6 +1,9 @@
 use crate::peer_connection::configuration::UNSPECIFIED_STR;
 use crate::peer_connection::configuration::media_engine::*;
-use crate::rtp_transceiver::rtp_sender::rtcp_parameters::RTCPFeedback;
+use crate::rtp_transceiver::rtp_sender::rtcp_parameters::{
+    RTCP_FB_ACK_CCFB, RTCP_FB_NACK_ECN, RTCPFeedback, TYPE_RTCP_FB_ACK, TYPE_RTCP_FB_CCM,
+    TYPE_RTCP_FB_NACK, TYPE_RTCP_FB_TRANSPORT_CC,
+};
 use crate::rtp_transceiver::rtp_sender::rtp_codec_parameters::RTCRtpCodecParameters;
 use crate::rtp_transceiver::rtp_sender::rtp_encoding_parameters::RTCRtpEncodingParameters;
 use crate::rtp_transceiver::{PayloadType, fmtp};
@@ -95,11 +98,12 @@ impl RTCRtpCodec {
         let mime_type = self.mime_type.to_lowercase();
         if mime_type == MIME_TYPE_H264.to_lowercase() {
             // RFC 6184 6.2: the negotiated packetization mode decides whether STAP-A and FU-A
-            // may be sent at all; an absent parameter means mode 0.
+            // may be sent at all; an absent parameter means mode 0, mode 2 is interleaved
+            // (section 6.4), and a value above 2 is no mode (section 8.1).
             Ok(Box::new(
-                rtp::codec::h264::H264Payloader::with_packetization_mode(h264_packetization_mode(
-                    &self.sdp_fmtp_line,
-                )),
+                rtp::codec::h264::H264Payloader::try_with_packetization_mode(
+                    h264_packetization_mode(&self.sdp_fmtp_line),
+                )?,
             ))
         } else if mime_type == MIME_TYPE_HEVC.to_lowercase() {
             Ok(Box::<rtp::codec::h265::HevcPayloader>::default())
@@ -117,6 +121,8 @@ impl RTCRtpCodec {
             || mime_type == MIME_TYPE_TELEPHONE_EVENT.to_lowercase()
         {
             Ok(Box::<rtp::codec::g7xx::G7xxPayloader>::default())
+        } else if mime_type == MIME_TYPE_CN.to_lowercase() {
+            Ok(Box::<rtp::codec::comfort_noise::ComfortNoisePayloader>::default())
         } else if mime_type == MIME_TYPE_AV1.to_lowercase() {
             Ok(Box::<rtp::codec::av1::Av1Payloader>::default())
         } else if mime_type == MIME_TYPE_SMPTE336M.to_lowercase() {
@@ -125,16 +131,121 @@ impl RTCRtpCodec {
             Err(Error::ErrNoPayloaderForCodec)
         }
     }
+
+    /// Creates an H.264 depacketizer for a stream received with this codec, configured from
+    /// the sender's stream properties in its fmtp line: with `packetization-mode=2` NAL units
+    /// leave in decoding order through a de-interleaving buffer sized by
+    /// `sprop-interleaving-depth` and `sprop-max-don-diff` (RFC 6184 sections 7.2.2, 8.1).
+    ///
+    /// Use it on a remote track's codec: its fmtp line is the one the sender described.
+    ///
+    /// # Errors
+    ///
+    /// `Error::ErrNoPayloaderForCodec` for a codec other than H.264; an error for a
+    /// `packetization-mode` other than 0, 1 or 2.
+    pub fn h264_depacketizer(&self) -> Result<rtp::codec::h264::H264Packet> {
+        if !self.mime_type.eq_ignore_ascii_case(MIME_TYPE_H264) {
+            return Err(Error::ErrNoPayloaderForCodec);
+        }
+        let packet = rtp::codec::h264::H264Packet::default();
+        match h264_packetization_mode(&self.sdp_fmtp_line) {
+            0 | 1 => Ok(packet),
+            2 => Ok(
+                packet.with_deinterleaving(rtp::codec::h264::H264DeinterleavingBuffer::new(
+                    fmtp_number(&self.sdp_fmtp_line, "sprop-interleaving-depth").unwrap_or(0),
+                    fmtp_number(&self.sdp_fmtp_line, "sprop-max-don-diff"),
+                )),
+            ),
+            other => Err(Error::Other(format!(
+                "H.264 packetization-mode is 0, 1 or 2, not {other}"
+            ))),
+        }
+    }
+
+    /// Creates an H.265 depacketizer for a stream received with this codec, configured from
+    /// the sender's stream properties in its fmtp line: with `sprop-max-don-diff` above 0
+    /// the DONL and DOND fields are read and NAL units leave in decoding order through a
+    /// de-packetization buffer of `sprop-depack-buf-nalus` (RFC 7798 sections 6, 7.1).
+    ///
+    /// # Errors
+    ///
+    /// `Error::ErrNoPayloaderForCodec` for a codec other than H.265; an error for a `tx-mode`
+    /// other than SRST, which the depacketizer does not do (RFC 7798 section 7.1: "If the
+    /// value is equal to "MRST", MRST MUST be in use").
+    pub fn h265_depacketizer(&self) -> Result<rtp::codec::h265::H265Packet> {
+        if !self.mime_type.eq_ignore_ascii_case(MIME_TYPE_HEVC) {
+            return Err(Error::ErrNoPayloaderForCodec);
+        }
+        let tx_mode = fmtp_value(&self.sdp_fmtp_line, "tx-mode");
+        if tx_mode.is_some_and(|mode| !mode.eq_ignore_ascii_case("SRST")) {
+            return Err(Error::Other(format!(
+                "H.265 tx-mode {} is not supported, only SRST",
+                tx_mode.unwrap_or_default()
+            )));
+        }
+        let mut packet = rtp::codec::h265::H265Packet::default();
+        let max_don_diff = fmtp_number(&self.sdp_fmtp_line, "sprop-max-don-diff").unwrap_or(0);
+        if max_don_diff > 0 {
+            packet.with_depacketization_buffer(rtp::codec::h265::H265DepacketizationBuffer::new(
+                max_don_diff,
+                fmtp_number(&self.sdp_fmtp_line, "sprop-depack-buf-nalus").unwrap_or(0),
+            ));
+        }
+        Ok(packet)
+    }
+
+    /// The out-of-band parameter sets of the sender's stream, in the order the fmtp line
+    /// gives them: H.264 `sprop-parameter-sets` (RFC 6184 section 8.1, base64 NAL units
+    /// separated by commas), H.265 `sprop-vps`, `sprop-sps`, `sprop-pps` and `sprop-sei`
+    /// (RFC 7798 section 7.1). A decoder takes them before the first NAL unit of the stream
+    /// (RFC 6184 section 8.2.2, RFC 7798 section 7.2.2). Empty for another codec or a line
+    /// without them.
+    ///
+    /// # Errors
+    ///
+    /// A value that is not base64.
+    pub fn sprop_parameter_sets(&self) -> Result<Vec<bytes::Bytes>> {
+        use base64::Engine as _;
+        let keys: &[&str] = if self.mime_type.eq_ignore_ascii_case(MIME_TYPE_H264) {
+            &["sprop-parameter-sets"]
+        } else if self.mime_type.eq_ignore_ascii_case(MIME_TYPE_HEVC) {
+            &["sprop-vps", "sprop-sps", "sprop-pps", "sprop-sei"]
+        } else {
+            &[]
+        };
+        let mut sets = vec![];
+        for key in keys {
+            let Some(value) = fmtp_value(&self.sdp_fmtp_line, key) else {
+                continue;
+            };
+            for set in value.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                let nal_unit = base64::engine::general_purpose::STANDARD
+                    .decode(set)
+                    .map_err(|e| Error::Other(format!("{key}: {e}")))?;
+                sets.push(bytes::Bytes::from(nal_unit));
+            }
+        }
+        Ok(sets)
+    }
+}
+
+/// The value of an fmtp parameter, trimmed; parameter names compare without regard to case.
+fn fmtp_value<'a>(sdp_fmtp_line: &'a str, key: &str) -> Option<&'a str> {
+    sdp_fmtp_line
+        .split(';')
+        .filter_map(|parameter| parameter.trim().split_once('='))
+        .find(|(k, _)| k.trim().eq_ignore_ascii_case(key))
+        .map(|(_, value)| value.trim())
+}
+
+fn fmtp_number<T: std::str::FromStr>(sdp_fmtp_line: &str, key: &str) -> Option<T> {
+    fmtp_value(sdp_fmtp_line, key)?.parse().ok()
 }
 
 /// The `packetization-mode` an H.264 fmtp line names, 0 when it names none (RFC 6184 8.1).
 pub(crate) fn h264_packetization_mode(sdp_fmtp_line: &str) -> u8 {
-    sdp_fmtp_line
-        .split(';')
-        .filter_map(|parameter| parameter.trim().split_once('='))
-        .find(|(key, _)| key.trim().eq_ignore_ascii_case("packetization-mode"))
-        .and_then(|(_, value)| value.trim().parse().ok())
-        .unwrap_or(0)
+    fmtp_number::<u32>(sdp_fmtp_line, "packetization-mode")
+        .map_or(0, |mode| u8::try_from(mode).unwrap_or(u8::MAX))
 }
 
 /// Codec match quality result from fuzzy search.
@@ -167,9 +278,23 @@ pub(crate) fn codec_parameters_fuzzy_search(
     haystack: &[RTCRtpCodecParameters],
 ) -> (RTCRtpCodecParameters, CodecMatch) {
     let needle_fmtp = fmtp::parse(&needle_rtp_codec.mime_type, &needle_rtp_codec.sdp_fmtp_line);
+    // A format is its encoding name and its clock rate (RFC 8866 section 6.6, `a=rtpmap`):
+    // `telephone-event/8000` and `telephone-event/48000` are two formats. A needle that
+    // states no clock rate (an encoding that leaves its codec to negotiation) matches any.
+    // So are its encoding parameters, the channel count of an audio format (`opus/48000/2`;
+    // RFC 7587 section 7: Opus "MUST" be `opus/48000/2`): two formats that state different
+    // counts are different formats. One that states none matches any.
+    let same_clock_rate = |c: &RTCRtpCodecParameters| {
+        (needle_rtp_codec.clock_rate == 0
+            || c.rtp_codec.clock_rate == 0
+            || c.rtp_codec.clock_rate == needle_rtp_codec.clock_rate)
+            && (needle_rtp_codec.channels == 0
+                || c.rtp_codec.channels == 0
+                || c.rtp_codec.channels == needle_rtp_codec.channels)
+    };
 
     // First attempt to match on mime_type + sdpfmtp_line
-    for c in haystack {
+    for c in haystack.iter().filter(|c| same_clock_rate(c)) {
         let cfmpt = fmtp::parse(&c.rtp_codec.mime_type, &c.rtp_codec.sdp_fmtp_line);
         if needle_fmtp.match_fmtp(&*cfmpt) {
             return (c.clone(), CodecMatch::Exact);
@@ -177,7 +302,7 @@ pub(crate) fn codec_parameters_fuzzy_search(
     }
 
     // Fallback to just mime_type
-    for c in haystack {
+    for c in haystack.iter().filter(|c| same_clock_rate(c)) {
         // MIME types are ASCII-only; eq_ignore_ascii_case is sufficient and allocation-free.
         if c.rtp_codec
             .mime_type
@@ -188,6 +313,33 @@ pub(crate) fn codec_parameters_fuzzy_search(
     }
 
     (RTCRtpCodecParameters::default(), CodecMatch::None)
+}
+
+/// W3C webrtc 5.4 "codec dictionary match": whether two codec dictionaries name the same
+/// codec. The MIME types are equal without regard to case, the clock rates equal, the
+/// channels both absent (0) or equal, and the `sdpFmtpLine`s both absent (empty) or
+/// matching: compared by the format's own rules where it has key-value parameters
+/// (`fmtp::match_fmtp`: H.264 profile and packetization mode, and so on) and as strings
+/// otherwise.
+pub(crate) fn codec_dictionary_match(first: &RTCRtpCodec, second: &RTCRtpCodec) -> bool {
+    if !first.mime_type.eq_ignore_ascii_case(&second.mime_type)
+        || first.clock_rate != second.clock_rate
+        || first.channels != second.channels
+    {
+        return false;
+    }
+    let (first_fmtp, second_fmtp) = (first.sdp_fmtp_line.trim(), second.sdp_fmtp_line.trim());
+    if first_fmtp.is_empty() != second_fmtp.is_empty() {
+        return false;
+    }
+    if first_fmtp.is_empty() {
+        return true;
+    }
+    if !first_fmtp.contains('=') || !second_fmtp.contains('=') {
+        return first_fmtp == second_fmtp;
+    }
+    fmtp::parse(&first.mime_type, first_fmtp)
+        .match_fmtp(&*fmtp::parse(&second.mime_type, second_fmtp))
 }
 
 /// The negotiated codec an encoding is sent with.
@@ -301,6 +453,25 @@ pub(crate) fn parse_rtx_apt(sdp_fmtp_line: &str) -> Option<PayloadType> {
         .find_map(|value| value.trim().parse::<PayloadType>().ok())
 }
 
+/// The `rtx-time` of a retransmission format's fmtp line (RFC 4588 section 8.1: "the time in
+/// milliseconds (measured from the time a packet was first sent) that the sender keeps an RTP
+/// packet in its buffers available for retransmission"), e.g. of `"apt=96;rtx-time=3000"`.
+pub(crate) fn parse_rtx_time(sdp_fmtp_line: &str) -> Option<std::time::Duration> {
+    sdp_fmtp_line
+        .split(';')
+        .filter_map(|param| param.trim().strip_prefix("rtx-time="))
+        .find_map(|value| value.trim().parse::<u64>().ok())
+        .map(std::time::Duration::from_millis)
+}
+
+/// Whether `mime_type` is a retransmission format (`audio/rtx`, `video/rtx`; RFC 4588
+/// section 8).
+pub(crate) fn is_rtx_mime_type(mime_type: &str) -> bool {
+    mime_type
+        .split_once('/')
+        .is_some_and(|(_, subtype)| subtype.eq_ignore_ascii_case("rtx"))
+}
+
 /// Whether `codec` repairs another stream rather than carrying media of its own.
 ///
 /// Covers retransmission (RTX, RFC 4588) and forward error correction (FlexFEC, ULPFEC, RED).
@@ -334,8 +505,8 @@ pub(crate) fn repair_family(codec: &RTCRtpCodec) -> &'static str {
     }
 }
 
-/// Whether `mime_type` names the FlexFEC this engine implements: draft-ietf-payload-flexible-fec
-/// -scheme-03 (`video/flexfec-03`), matched exactly.
+/// Whether `mime_type` names FlexFEC draft-ietf-payload-flexible-fec-scheme-03
+/// (`video/flexfec-03`), matched exactly.
 ///
 /// RFC 8627's `video/flexfec` is a different wire format (its own header layout and masks), so a
 /// substring match, which also took `video/flexfec`, handed RFC 8627 packets to the draft-03
@@ -344,18 +515,59 @@ pub(crate) fn is_flexfec03_mime_type(mime_type: &str) -> bool {
     mime_type.eq_ignore_ascii_case(MIME_TYPE_FLEX_FEC03)
 }
 
-/// The payload type of the FlexFEC draft-03 format in `haystack`, the only FEC implemented.
-pub(crate) fn find_fec_payload_type(haystack: &[RTCRtpCodecParameters]) -> Option<PayloadType> {
+/// Whether `mime_type` names RFC 8627 FlexFEC (`video/flexfec`), matched exactly: never
+/// `video/flexfec-03`, which is the draft-03 coder's.
+pub(crate) fn is_flexfec_mime_type(mime_type: &str) -> bool {
+    mime_type.eq_ignore_ascii_case(MIME_TYPE_FLEX_FEC)
+}
+
+/// Whether `mime_type` names a FEC format the engine has a coder for: FlexFEC draft-03
+/// (`video/flexfec-03`) or RFC 8627 (`video/flexfec`).
+pub(crate) fn is_fec_mime_type(mime_type: &str) -> bool {
+    is_flexfec03_mime_type(mime_type) || is_flexfec_mime_type(mime_type)
+}
+
+/// The FEC format a stream's repair flow uses: its payload type and what selects and
+/// configures the coder (the interceptors read the MIME type and the `a=fmtp` line).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FecFormat {
+    pub(crate) payload_type: PayloadType,
+    pub(crate) mime_type: String,
+    pub(crate) sdp_fmtp_line: String,
+}
+
+/// The FEC format of `haystack`: FlexFEC draft-03 when it is there (what browsers send), else
+/// RFC 8627 FlexFEC.
+pub(crate) fn find_fec_format(haystack: &[RTCRtpCodecParameters]) -> Option<FecFormat> {
     haystack
         .iter()
         .find(|c| is_flexfec03_mime_type(&c.rtp_codec.mime_type))
-        .map(|c| c.payload_type)
+        .or_else(|| {
+            haystack
+                .iter()
+                .find(|c| is_flexfec_mime_type(&c.rtp_codec.mime_type))
+        })
+        .map(|c| FecFormat {
+            payload_type: c.payload_type,
+            mime_type: c.rtp_codec.mime_type.clone(),
+            sdp_fmtp_line: c.rtp_codec.sdp_fmtp_line.clone(),
+        })
+}
+
+/// The payload type of the FEC format in `haystack` ([`find_fec_format`]).
+#[cfg(test)]
+pub(crate) fn find_fec_payload_type(haystack: &[RTCRtpCodecParameters]) -> Option<PayloadType> {
+    find_fec_format(haystack).map(|format| format.payload_type)
 }
 
 /// Computes the intersection of two RTCP feedback lists.
 ///
 /// Returns feedback mechanisms that are supported by both lists,
 /// matching on both type and parameter fields.
+///
+/// `trr-int` matches on the type alone and keeps the parameter of `a`: its number is each
+/// endpoint's own minimum interval between regular RTCP packets (RFC 4585 section 4.2), not
+/// a capability the two have to agree on, so an answer states its own.
 ///
 /// # Parameters
 ///
@@ -365,6 +577,32 @@ pub(crate) fn find_fec_payload_type(haystack: &[RTCRtpCodecParameters]) -> Optio
 /// # Returns
 ///
 /// Vector of common feedback mechanisms
+/// `ccm tmmbr` of both lists, whatever their `smaxpr` (RFC 5104 section 7.1: "tmmbr
+/// smaxpr=<n>", the session maximum packet rate). Section 7.2: "the highest value from offer
+/// and answer SHALL be used. If the session maximum packet rate parameter is not present in an
+/// offer, it SHALL NOT be included by the answerer": `b` is the remote side's list, and
+/// without its `smaxpr` the result has none. `None` when the two are not both `ccm tmmbr`.
+fn tmmbr_intersection(a: &RTCPFeedback, b: &RTCPFeedback) -> Option<RTCPFeedback> {
+    let smaxpr = |f: &RTCPFeedback| -> Option<Option<u64>> {
+        if f.typ != TYPE_RTCP_FB_CCM {
+            return None;
+        }
+        let mut tokens = f.parameter.split_whitespace();
+        if tokens.next() != Some("tmmbr") {
+            return None;
+        }
+        Some(tokens.find_map(|t| t.strip_prefix("smaxpr=")?.parse().ok()))
+    };
+    let (ours, theirs) = (smaxpr(a)?, smaxpr(b)?);
+    Some(RTCPFeedback {
+        typ: TYPE_RTCP_FB_CCM.to_owned(),
+        parameter: match theirs {
+            Some(theirs) => format!("tmmbr smaxpr={}", ours.unwrap_or(0).max(theirs)),
+            None => "tmmbr".to_owned(),
+        },
+    })
+}
+
 pub(crate) fn rtcp_feedback_intersection(
     a: &[RTCPFeedback],
     b: &[RTCPFeedback],
@@ -372,14 +610,117 @@ pub(crate) fn rtcp_feedback_intersection(
     let mut out = vec![];
     for a_feedback in a {
         for b_feeback in b {
-            if a_feedback.typ == b_feeback.typ && a_feedback.parameter == b_feeback.parameter {
+            if a_feedback.typ == b_feeback.typ
+                && (a_feedback.parameter == b_feeback.parameter || a_feedback.typ == "trr-int")
+            {
                 out.push(a_feedback.clone());
+                break;
+            }
+            // Receiver reference times, from an `a=rtcp-fb ... rrtr` line or from
+            // `a=rtcp-xr:rcvr-rtt` (RFC 3611 section 5.1): the remote side's form is kept, so
+            // that an answer repeats the form the offer used.
+            if a_feedback.typ == interceptor::RTCP_FB_RRTR && b_feeback.typ == a_feedback.typ {
+                out.push(b_feeback.clone());
+                break;
+            }
+            if let Some(tmmbr) = tmmbr_intersection(a_feedback, b_feeback) {
+                out.push(tmmbr);
                 break;
             }
         }
     }
 
+    // RFC 8888 section 6: of several congestion control feedback mechanisms "that offer
+    // substantially the same semantics", the answer SHOULD include only one, and the same one
+    // in a later answer to the same offer. RFC 8888 is kept and transport-wide congestion
+    // control dropped, which is also what the interceptors run a stream on when a peer
+    // answered both (`interceptor::negotiated_congestion_feedback`).
+    //
+    // RFC 8888 section 7: "If an SDP offer signals support for both RTP Congestion Control
+    // Feedback Packets and the RTCP ECN Feedback Packet, the answering party SHOULD signal
+    // support for one, but not both": the RFC 6679 ECN feedback (`nack ecn`) duplicates what
+    // the RFC 8888 report carries per packet, and goes as well.
+    let is_ccfb = |f: &RTCPFeedback| f.typ == TYPE_RTCP_FB_ACK && f.parameter == RTCP_FB_ACK_CCFB;
+    if out.iter().any(is_ccfb) {
+        out.retain(|f| {
+            f.typ != TYPE_RTCP_FB_TRANSPORT_CC
+                && !(f.typ == TYPE_RTCP_FB_NACK && f.parameter == RTCP_FB_NACK_ECN)
+        });
+    }
+
     out
+}
+
+#[cfg(test)]
+mod congestion_feedback_answer_test {
+    use super::*;
+
+    fn feedback(typ: &str, parameter: &str) -> RTCPFeedback {
+        RTCPFeedback {
+            typ: typ.to_owned(),
+            parameter: parameter.to_owned(),
+        }
+    }
+
+    /// RFC 8888 section 6: offered RFC 8888 and transport-wide congestion control together,
+    /// the answer keeps one of them, RFC 8888, and the same one every time.
+    #[test]
+    fn an_answer_keeps_one_congestion_feedback_mechanism() {
+        let ours = [
+            feedback("nack", ""),
+            feedback("transport-cc", ""),
+            feedback("ack", "ccfb"),
+        ];
+        let offered_both = [
+            feedback("ack", "ccfb"),
+            feedback("transport-cc", ""),
+            feedback("nack", ""),
+        ];
+        let expected = vec![feedback("nack", ""), feedback("ack", "ccfb")];
+        assert_eq!(expected, rtcp_feedback_intersection(&ours, &offered_both));
+        assert_eq!(
+            expected,
+            rtcp_feedback_intersection(&ours, &offered_both),
+            "a later answer to the same offer chooses the same mechanism"
+        );
+    }
+
+    /// RFC 8888 section 7: offered RFC 8888 feedback and the RFC 6679 ECN feedback packet
+    /// (`nack ecn`) together, the answer signals one, RFC 8888, even where the answerer
+    /// registered both; plain `nack` is another matter and stays.
+    #[test]
+    fn an_offer_of_ccfb_and_nack_ecn_is_answered_with_ccfb_only() {
+        let ours = [
+            feedback("nack", ""),
+            feedback("nack", "ecn"),
+            feedback("ack", "ccfb"),
+        ];
+        let offered = [
+            feedback("nack", "ecn"),
+            feedback("ack", "ccfb"),
+            feedback("nack", ""),
+        ];
+        assert_eq!(
+            vec![feedback("nack", ""), feedback("ack", "ccfb")],
+            rtcp_feedback_intersection(&ours, &offered)
+        );
+        // Without RFC 8888 in the answer, `nack ecn` is the ECN feedback and is kept.
+        assert_eq!(
+            vec![feedback("nack", "ecn")],
+            rtcp_feedback_intersection(&ours[1..2], &offered)
+        );
+    }
+
+    /// A peer that offers transport-wide congestion control alone, as browsers do, gets it.
+    #[test]
+    fn transport_cc_is_answered_when_rfc8888_was_not_offered() {
+        let ours = [feedback("transport-cc", ""), feedback("ack", "ccfb")];
+        let offered = [feedback("transport-cc", ""), feedback("nack", "")];
+        assert_eq!(
+            vec![feedback("transport-cc", "")],
+            rtcp_feedback_intersection(&ours, &offered)
+        );
+    }
 }
 
 #[cfg(test)]
@@ -394,7 +735,7 @@ mod rtp_codec_flexfec_test;
 mod rtx_apt_test {
     use super::{
         RTCRtpCodec, RTCRtpCodecParameters, encoding_send_codec, find_rtx_payload_type,
-        parse_rtx_apt,
+        is_rtx_mime_type, parse_rtx_apt, parse_rtx_time,
     };
 
     fn media(mime_type: &str, payload_type: u8) -> RTCRtpCodecParameters {
@@ -488,6 +829,13 @@ mod rtx_apt_test {
         assert_eq!(parse_rtx_apt("apt=96;rtx-time=3000"), Some(96));
         assert_eq!(parse_rtx_apt("rtx-time=3000;apt=102"), Some(102));
         assert_eq!(parse_rtx_apt("apt=98 ; rtx-time=1000"), Some(98));
+        let ms = std::time::Duration::from_millis;
+        assert_eq!(parse_rtx_time("apt=96;rtx-time=3000"), Some(ms(3000)));
+        assert_eq!(parse_rtx_time("rtx-time=250; apt=102"), Some(ms(250)));
+        assert_eq!(parse_rtx_time("apt=96"), None);
+        assert_eq!(parse_rtx_time("apt=96;rtx-time=soon"), None);
+        assert!(is_rtx_mime_type("video/rtx") && is_rtx_mime_type("audio/RTX"));
+        assert!(!is_rtx_mime_type("video/VP8"));
     }
 
     #[test]

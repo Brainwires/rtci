@@ -1,16 +1,18 @@
 use crate::peer_connection::certificate::RTCCertificate;
 use crate::peer_connection::configuration::setting_engine::ReplayProtection;
+use crate::peer_connection::rtc_error::{RTCError, RTCErrorDetailType};
 use crate::peer_connection::transport::RTCTransportId;
-use crate::peer_connection::transport::dtls::fingerprint::RTCDtlsFingerprint;
+use crate::peer_connection::transport::dtls::fingerprint::{
+    RTCDtlsFingerprint, format_fingerprint, preferred_fingerprints,
+};
 use crate::peer_connection::transport::dtls::parameters::RTCDtlsParameters;
 use crate::peer_connection::transport::dtls::role::{DEFAULT_DTLS_ROLE_ANSWER, RTCDtlsRole};
 use crate::peer_connection::transport::dtls::state::RTCDtlsTransportState;
 use crate::peer_connection::transport::ice::role::RTCIceRole;
-use crypto::{HashAlgorithm, RTCCryptoProvider};
+use crypto::RTCCryptoProvider;
 use dtls::cipher_suite::CipherSuiteId;
 use dtls::config::{ClientAuthType, VerifyPeerCertificateFn};
 use dtls::extension::extension_use_srtp::SrtpProtectionProfile;
-use rcgen::CertificateParams;
 use rustls::pki_types::CertificateDer;
 use shared::error::{Error, Result};
 use shared::{TransportContext, TransportProtocol};
@@ -22,13 +24,26 @@ pub(crate) mod parameters;
 pub(crate) mod role;
 pub(crate) mod state;
 
+/// The initial DTLS retransmission timer of a peer connection: what RFC 9147 section 5.8.2
+/// recommends for DTLS-SRTP, where latencies of real-time paths are short.
+pub(crate) const DTLS_SRTP_FLIGHT_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(400);
+/// The least the timer is set to from ICE's round trip time: on a local path 1.5 times the
+/// round trip is less than the time the peer needs to answer a flight.
+pub(crate) const MINIMUM_FLIGHT_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(100);
+
 /// The DTLS cipher suites a peer connection offers when the application configures none: the
-/// `dtls` crate's defaults without the AES-256-CBC-SHA suites. Browsers negotiate GCM, and the
-/// CBC suites' MAC-then-encrypt record handling is the part of DTLS with a history of padding
+/// TLS 1.3 suites, with which DTLS 1.3 (RFC 9147) is negotiated and preferred, and for DTLS
+/// 1.2 the `dtls` crate's defaults without the AES-256-CBC-SHA suites. Browsers negotiate GCM,
+/// and the CBC suites' MAC-then-encrypt record handling is the part of DTLS with a history of padding
 /// and length bugs (rtc#96 was one). An application that needs CBC can still list it with
 /// `SettingEngineBuilder::with_dtls_cipher_suites`.
 pub(crate) fn webrtc_default_cipher_suites() -> Vec<CipherSuiteId> {
     vec![
+        CipherSuiteId::Tls_Aes_128_Gcm_Sha256,
+        CipherSuiteId::Tls_ChaCha20_Poly1305_Sha256,
+        CipherSuiteId::Tls_Aes_256_Gcm_Sha384,
         CipherSuiteId::Tls_Ecdhe_Ecdsa_With_Aes_128_Gcm_Sha256,
         CipherSuiteId::Tls_Ecdhe_Rsa_With_Aes_128_Gcm_Sha256,
         CipherSuiteId::Tls_Ecdhe_Ecdsa_With_ChaCha20_Poly1305_Sha256,
@@ -73,6 +88,16 @@ pub(crate) struct DtlsTransport {
     pub(crate) state: RTCDtlsTransportState,
     pub(crate) certificates: Vec<RTCCertificate>,
 
+    /// Set by the certificate check when the peer's certificate matched none of the remote
+    /// description's fingerprints: the transport's failure is then `fingerprint-failure`
+    /// rather than `dtls-failure` (W3C webrtc-pc section 5.5).
+    pub(crate) fingerprint_mismatch: Arc<std::sync::atomic::AtomicBool>,
+    /// The error the transport failed with (W3C `RTCDtlsTransport` `error` event), until the
+    /// peer connection has announced it.
+    pub(crate) failure: Option<crate::peer_connection::rtc_error::RTCError>,
+    /// The SRTP key lifetime the setting engine sets, if any (`DtlsHandler::key_lifetime`).
+    pub(crate) srtp_key_lifetime: Option<srtp::keying::KeyLifetime>,
+
     // The peer's certificate chain in DER form, retained at handshake completion so
     // `get_remote_certificates()` has something to return. Previously the bytes reached
     // `update_dtls_stats_from_profile`, were hex-encoded into `RTCCertificateStats`, and then
@@ -84,9 +109,35 @@ pub(crate) struct DtlsTransport {
     // for, so an ICE restart that leaves them unchanged keeps the session (Brainwires fork).
     pub(crate) remote_dtls_parameters: Option<RTCDtlsParameters>,
 
+    /// The peer's `a=tls-id` (RFC 8842 section 4) for the current association, when it sends
+    /// one: a different value in a later description asks for a new association.
+    pub(crate) remote_tls_id: Option<String>,
+    /// This endpoint's `a=tls-id` for the current association: the same in every offer and
+    /// answer while the association is kept, replaced when a new one is decided.
+    pub(crate) local_tls_id: String,
+    /// The `tls-id` an offer that asks for a new association carries (`create_offer` has no
+    /// side effects): it becomes `local_tls_id` when the answer starts that association.
+    pub(crate) staged_local_tls_id: Option<String>,
+
+    /// Whether the session has an RTP media section, which needs SRTP keys from the
+    /// association (RFC 5764; RFC 8827 section 6.5: no media without SRTP).
+    pub(crate) srtp_required: bool,
+    /// Whether the current association negotiated `use_srtp`; `None` until its handshake
+    /// completes.
+    pub(crate) srtp_negotiated: Option<bool>,
+    /// The retransmission timer the client's handshake was started with: 400 ms, or 1.5
+    /// times the round trip time ICE measured (RFC 9147 section 5.8.2).
+    pub(crate) flight_interval: Option<std::time::Duration>,
+
     // From SettingEngine
     pub(crate) answering_dtls_role: RTCDtlsRole,
     pub(crate) srtp_protection_profiles: Vec<SrtpProtectionProfile>,
+    /// Offer `use_srtp` on every association, as browsers do, and not only on one that carries
+    /// SRTP media (`SettingEngineBuilder::with_dtls_use_srtp_on_every_association`).
+    pub(crate) use_srtp_always: bool,
+    /// Whether the handshake config of the current association offers (as the client) or
+    /// accepts (as the server) `use_srtp`.
+    pub(crate) srtp_configured: bool,
     /// Empty means "use the WebRTC default set", [`webrtc_default_cipher_suites`] (see
     /// [`SettingEngineBuilder::with_dtls_cipher_suites`](crate::peer_connection::configuration::setting_engine::SettingEngineBuilder::with_dtls_cipher_suites)).
     pub(crate) dtls_cipher_suites: Vec<CipherSuiteId>,
@@ -101,11 +152,46 @@ pub(crate) struct RTCDtlsTransportConfig {
     pub(crate) certificates: Vec<RTCCertificate>,
     pub(crate) answering_dtls_role: RTCDtlsRole,
     pub(crate) srtp_protection_profiles: Vec<SrtpProtectionProfile>,
+    pub(crate) use_srtp_always: bool,
     pub(crate) dtls_cipher_suites: Vec<CipherSuiteId>,
     pub(crate) allow_insecure_verification_algorithm: bool,
     pub(crate) disable_certificate_fingerprint_verification: bool,
     pub(crate) replay_protection: ReplayProtection,
     pub(crate) crypto_provider: Arc<dyn RTCCryptoProvider>,
+}
+
+/// What a remote description means for the DTLS association the transport has (RFC 8842
+/// section 3.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DtlsAssociationUpdate {
+    /// The association goes on (or the transport has not started).
+    Kept,
+    /// A new association replaces it: the endpoint was reset and a handshake is due.
+    New,
+}
+
+/// Why a remote description may need a new DTLS association besides what it says itself.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct DtlsRemoteUpdate {
+    /// The description answers this endpoint's offer (else it is the peer's offer).
+    pub(crate) we_offer: bool,
+    /// The exchange restarts ICE: an association that failed or was closed is replaced too.
+    pub(crate) ice_restart: bool,
+    /// The transport the association ran on was closed (every m-section of its BUNDLE group
+    /// was rejected, RFC 8843 section 7.1.3, RFC 9429 section 5.10): the peer starts a new
+    /// association on the new one even with the same certificate and `setup` role.
+    pub(crate) transport_closed: bool,
+}
+
+/// A new `tls-id` value (RFC 8842 section 4): 128 bits from the provider's random source as
+/// 32 hex digits, within the attribute's `20*255(ALPHA / DIGIT / "+" / "/" / "-" / "_")`.
+fn generate_tls_id(crypto_provider: &Arc<dyn RTCCryptoProvider>) -> Result<String> {
+    let mut random = [0u8; 16];
+    crypto_provider
+        .random()
+        .fill(&mut random)
+        .map_err(|error| Error::Crypto(error.to_string()))?;
+    Ok(random.iter().map(|b| format!("{b:02x}")).collect())
 }
 
 impl DtlsTransport {
@@ -116,26 +202,30 @@ impl DtlsTransport {
             mut certificates,
             answering_dtls_role,
             srtp_protection_profiles,
+            use_srtp_always,
             dtls_cipher_suites,
             allow_insecure_verification_algorithm,
             disable_certificate_fingerprint_verification,
             replay_protection,
             crypto_provider,
         } = config;
+        // Wall-clock time for X.509 validity: the expiry of configured certificates, the
+        // validity period of a generated one.
+        let now = SystemTime::now(); // Exemption: wall-clock is correct here to check X.509 certificate expiry
         if !certificates.is_empty() {
-            let now = SystemTime::now(); // Exemption: wall-clock is correct here to check X.509 certificate expiry
             for cert in &certificates {
                 cert.expires
                     .duration_since(now)
                     .map_err(|_| Error::ErrCertificateExpired)?;
             }
         } else {
-            let params = CertificateParams::new(vec![shared::util::math_rand_alpha(16)])
-                .map_err(|error| Error::Other(error.to_string()))?;
-            let cert = RTCCertificate::generate(
+            // W3C constructor: "generate one or more new RTCCertificate instances", as
+            // generateCertificate does (random names and serial, 30 days).
+            let cert = RTCCertificate::generate_certificate(
                 crypto_provider.crypto(),
                 crypto::SignatureScheme::EcdsaP256Sha256,
-                params,
+                None,
+                now,
             )?;
             certificates = vec![cert];
         };
@@ -148,11 +238,22 @@ impl DtlsTransport {
             dtls_endpoint: None,
             state: RTCDtlsTransportState::New,
             certificates,
+            fingerprint_mismatch: Arc::default(),
+            failure: None,
+            srtp_key_lifetime: None,
             remote_certificates: vec![],
             remote_dtls_parameters: None,
+            remote_tls_id: None,
+            local_tls_id: generate_tls_id(&crypto_provider)?,
+            staged_local_tls_id: None,
+            srtp_required: false,
+            srtp_negotiated: None,
+            flight_interval: None,
 
             answering_dtls_role,
             srtp_protection_profiles,
+            use_srtp_always,
+            srtp_configured: false,
             dtls_cipher_suites,
             allow_insecure_verification_algorithm,
             disable_certificate_fingerprint_verification,
@@ -161,7 +262,50 @@ impl DtlsTransport {
         })
     }
 
+    /// The `RTCError` of the association's failure (W3C webrtc-pc section 11.2):
+    /// `fingerprint-failure` when the peer's certificate matched no fingerprint, else
+    /// `dtls-failure` with the fatal alert this side sent or received, if one was.
+    pub(crate) fn failure_error(&self) -> RTCError {
+        if self
+            .fingerprint_mismatch
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return RTCError::new(
+                RTCErrorDetailType::FingerprintFailure,
+                "the remote certificate matches no fingerprint of the remote description",
+            );
+        }
+        let (sent_alert, received_alert) = self
+            .dtls_endpoint
+            .as_ref()
+            .and_then(|endpoint| {
+                endpoint
+                    .get_connections_keys()
+                    .next()
+                    .and_then(|remote| endpoint.connection_fatal_alerts(remote))
+            })
+            .unwrap_or_default();
+        RTCError {
+            sent_alert,
+            received_alert,
+            ..RTCError::new(
+                RTCErrorDetailType::DtlsFailure,
+                match (sent_alert, received_alert) {
+                    (_, Some(alert)) => format!("fatal alert {alert} received"),
+                    (Some(alert), None) => format!("fatal alert {alert} sent"),
+                    (None, None) => "the DTLS handshake failed".to_owned(),
+                },
+            )
+        }
+    }
+
     pub(crate) fn state_change(&mut self, state: RTCDtlsTransportState) {
+        if state == RTCDtlsTransportState::Connecting {
+            // A new association: what the last one failed with is not this one's.
+            self.fingerprint_mismatch
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            self.failure = None;
+        }
         self.state = state;
     }
 
@@ -212,7 +356,8 @@ impl DtlsTransport {
 
     /// Build a DTLS HandshakeConfig from remote fingerprints, for the role already in
     /// `self.dtls_role`. Does not check or change transport state, so it serves both the
-    /// initial start and [`restart`](Self::restart). (Brainwires fork; see FORK.md.)
+    /// initial start and a new association ([`update_remote`](Self::update_remote)).
+    /// (Brainwires fork; see FORK.md.)
     fn make_handshake_config(
         &self,
         remote_dtls_parameters: &RTCDtlsParameters,
@@ -228,47 +373,44 @@ impl DtlsTransport {
         // need this. libp2p's WebRTC-Direct is the canonical case: the server synthesizes the
         // client's offer locally with a placeholder fingerprint and authenticates the peer
         // afterwards with a Noise handshake over the data channel.
-        let verify_peer_certificate: Option<VerifyPeerCertificateFn> =
-            if !self.disable_certificate_fingerprint_verification {
-                let fingerprint_crypto = self.crypto_provider.clone();
-                Some(Arc::new(
-                    move |certs: &[Vec<u8>], _chains: &[CertificateDer<'static>]| -> Result<()> {
-                        if certs.is_empty() {
-                            return Err(Error::ErrNonCertificate);
-                        }
+        let verify_peer_certificate: Option<VerifyPeerCertificateFn> = if !self
+            .disable_certificate_fingerprint_verification
+        {
+            let fingerprint_crypto = self.crypto_provider.clone();
+            let fingerprint_mismatch = self.fingerprint_mismatch.clone();
+            Some(Arc::new(
+                move |certs: &[Vec<u8>], _chains: &[CertificateDer<'static>]| -> Result<()> {
+                    if certs.is_empty() {
+                        return Err(Error::ErrNonCertificate);
+                    }
 
-                        // Only sha-256 is checked; other algorithms the peer lists are skipped
-                        // rather than failing the whole check while a sha-256 one may follow.
-                        if !remote_fingerprints
-                            .iter()
-                            .any(|fp| fp.algorithm.eq_ignore_ascii_case("sha-256"))
-                        {
-                            return Err(Error::ErrUnsupportedFingerprintAlgorithm);
-                        }
-                        for fp in &remote_fingerprints {
-                            if !fp.algorithm.eq_ignore_ascii_case("sha-256") {
-                                continue;
-                            }
+                    // RFC 8122 section 5.1: the fingerprints of the most preferred hash
+                    // function among those the peer offered, and the certificate must
+                    // match one of that set. MD5, MD2 and unknown functions are never used.
+                    let Some((algorithm, fingerprints)) =
+                        preferred_fingerprints(&remote_fingerprints, fingerprint_crypto.crypto())
+                    else {
+                        return Err(Error::ErrUnsupportedFingerprintAlgorithm);
+                    };
+                    let hashed = fingerprint_crypto
+                        .crypto()
+                        .hash(algorithm, &certs[0])
+                        .map_err(|error| Error::Crypto(error.to_string()))?;
+                    let certificate_value = format_fingerprint(&hashed);
+                    if fingerprints
+                        .iter()
+                        .any(|fp| fp.value.eq_ignore_ascii_case(&certificate_value))
+                    {
+                        return Ok(());
+                    }
 
-                            let hashed = fingerprint_crypto
-                                .crypto()
-                                .hash(HashAlgorithm::Sha256, &certs[0])
-                                .map_err(|error| Error::Crypto(error.to_string()))?;
-                            let values: Vec<String> =
-                                hashed.iter().map(|x| format!("{x:02x}")).collect();
-                            let remote_value = values.join(":").to_lowercase();
-
-                            if remote_value == fp.value.to_lowercase() {
-                                return Ok(());
-                            }
-                        }
-
-                        Err(Error::ErrNoMatchingCertificateFingerprint)
-                    },
-                ))
-            } else {
-                None
-            };
+                    fingerprint_mismatch.store(true, std::sync::atomic::Ordering::Relaxed);
+                    Err(Error::ErrNoMatchingCertificateFingerprint)
+                },
+            ))
+        } else {
+            None
+        };
 
         let certificate = if let Some(cert) = self.certificates.first() {
             cert.dtls_certificate.clone()
@@ -276,13 +418,26 @@ impl DtlsTransport {
             return Err(Error::ErrNonCertificate);
         };
 
-        let profiles = self.supported_srtp_protection_profiles()?;
+        // RFC 5764 section 4.1: `use_srtp` is for an association that carries RTP or RTCP.
+        let profiles = if self.offers_use_srtp() {
+            self.supported_srtp_protection_profiles()?
+        } else {
+            vec![]
+        };
 
         Ok(Arc::new(
             ::dtls::config::ConfigBuilder::default()
                 .with_crypto_provider(self.crypto_provider.clone())
                 .with_certificates(vec![certificate])
                 .with_srtp_protection_profiles(profiles)
+                // A server that leaves `use_srtp` out is a data-channel-only peer, not a
+                // failed handshake: whether the session can do without SRTP is decided when
+                // the handshake completes (`DtlsHandler`), from the session's media sections.
+                .with_use_srtp_optional(true)
+                // As the server: with no shared profile the association falls back to DTLS
+                // without SRTP (RFC 5764 section 4.1.1), unless the session has a media
+                // section, for which that is not acceptable.
+                .with_use_srtp_required(self.srtp_required)
                 // Empty means the WebRTC default set (AEAD only); a non-empty list replaces it.
                 .with_cipher_suites(if self.dtls_cipher_suites.is_empty() {
                     webrtc_default_cipher_suites()
@@ -295,6 +450,19 @@ impl DtlsTransport {
                 .with_verify_peer_certificate(verify_peer_certificate)
                 .with_extended_master_secret(::dtls::config::ExtendedMasterSecretType::Require)
                 .with_replay_protection_window(self.replay_protection.dtls)
+                // RFC 9147 section 5.8.2: 400 ms is the retransmission timer recommended
+                // for DTLS-SRTP. A client that knows the round trip time of the selected
+                // pair from ICE starts from 1.5 times that instead (`DtlsHandler`).
+                .with_flight_interval(DTLS_SRTP_FLIGHT_INTERVAL)
+                // No session resumption (RFC 8446 section 2.2): WebRTC authenticates each
+                // association by the certificate fingerprints of its SDP (RFC 8827 section
+                // 6.5) and makes a new one per session, so a ticket would have no caller and
+                // a resumed handshake would carry no certificate to check. As a server this
+                // side issues no tickets (and accepts none: it has no key to open one with);
+                // as a client it keeps none and offers no PSK.
+                .with_session_tickets(0)
+                .with_session_store(None)
+                .with_external_psks(vec![])
                 .build(self.dtls_role == RTCDtlsRole::Client, None)?,
         ))
     }
@@ -310,6 +478,7 @@ impl DtlsTransport {
 
         self.dtls_role = self.derive_role(ice_role, remote_dtls_parameters.role);
         let dtls_handshake_config = self.make_handshake_config(&remote_dtls_parameters)?;
+        self.srtp_configured = self.offers_use_srtp();
         self.state_change(RTCDtlsTransportState::Connecting);
         self.remote_dtls_parameters = Some(remote_dtls_parameters);
         Ok(dtls_handshake_config)
@@ -317,71 +486,143 @@ impl DtlsTransport {
 
     /// Re-initialise the DTLS transport for re-handshake after an ICE restart, when one is needed.
     ///
-    /// An ICE restart alone does not need a new DTLS session (RFC 8842 §5 / RFC 8445: DTLS is
+    /// An ICE restart alone does not need a new DTLS session (RFC 8842 section 6: DTLS is
     /// bound to the ICE transport, not to a 5-tuple), and browsers do not start one, so a
-    /// `Connected` or `Connecting` session whose remote fingerprints and derived role are
-    /// unchanged is kept. The session is replaced when those change (a new remote identity or
-    /// `setup` role), or when it is `Failed` or `Closed`; the next
-    /// `ICESelectedCandidatePairChange` event then starts a fresh handshake.
-    /// No-ops if state is `New` (initial `start_transports` handles it).
-    ///
-    /// **Note on identity**: the local certificate and its fingerprint are *not*
-    /// regenerated — the same identity is reused across ICE restarts.  Only the
-    /// DTLS endpoint and handshake state are reset, which is sufficient for a new
-    /// handshake over the refreshed ICE transport.
+    /// `Connected` or `Connecting` session whose remote fingerprints, `tls-id` and roles are
+    /// unchanged is kept. See [`update_remote`](Self::update_remote).
     ///
     /// Brainwires fork feature; see FORK.md.
+    #[cfg(test)]
     pub(crate) fn restart(
         &mut self,
         local_ice_role: RTCIceRole,
         remote_dtls_parameters: RTCDtlsParameters,
     ) -> Result<()> {
-        self.restart_with(local_ice_role, remote_dtls_parameters, true)
+        self.update_remote(
+            local_ice_role,
+            remote_dtls_parameters,
+            None,
+            DtlsRemoteUpdate {
+                ice_restart: true,
+                ..Default::default()
+            },
+        )
+        .map(|_| ())
     }
 
     /// Re-initialise the DTLS transport for a new association whatever its state: the transport
-    /// it ran on was closed (every m-section of its BUNDLE group was rejected, RFC 8843 §7.1.3,
-    /// RFC 9429 §5.10), so the peer starts a new DTLS association on the new one even with the
-    /// same certificate and `setup` role. No-ops if state is `New`.
+    /// it ran on was closed. No-ops if state is `New`.
+    #[cfg(test)]
     pub(crate) fn restart_new_association(
         &mut self,
         local_ice_role: RTCIceRole,
         remote_dtls_parameters: RTCDtlsParameters,
     ) -> Result<()> {
-        self.restart_with(local_ice_role, remote_dtls_parameters, false)
+        self.update_remote(
+            local_ice_role,
+            remote_dtls_parameters,
+            None,
+            DtlsRemoteUpdate {
+                ice_restart: true,
+                transport_closed: true,
+                ..Default::default()
+            },
+        )
+        .map(|_| ())
     }
 
-    fn restart_with(
+    /// Applies the DTLS parameters of a remote description to a started transport: keeps the
+    /// association, or replaces it with a new one when RFC 8842 section 3.1 says so. A no-op
+    /// while the state is `New` (the first description starts the transport).
+    ///
+    /// A new association is established when
+    ///
+    /// - the description changes the DTLS roles: its `a=setup` takes the role this endpoint
+    ///   has (`actpass` takes none, so it never changes them: the roles of an association are
+    ///   fixed for its life, whichever side offers and whatever the ICE roles become);
+    /// - its fingerprint set differs from the one the association was built for;
+    /// - its `a=tls-id` differs from the association's (when both descriptions have one);
+    /// - the transport was closed and is set up again;
+    /// - the session has a media section and the association cannot key SRTP (it was set up
+    ///   for data channels only, without `use_srtp`); or
+    /// - ICE restarts and the association had failed or was closed.
+    ///
+    /// Otherwise the association goes on, across ICE restarts too (RFC 8842 section 6).
+    ///
+    /// For a new association the endpoint is replaced and the state goes back to
+    /// `Connecting`: a server accepts the peer's ClientHello from then on, a client starts
+    /// its handshake at the next `ICESelectedCandidatePairChange`, or at once when the caller
+    /// asks the handler to (`DtlsHandlerContext::connect_requested`). The roles are the
+    /// inverse of an explicit remote role; with `actpass` they stay as they were, and after a
+    /// closed transport they are chosen anew (the configured answering role, else from the ICE
+    /// role). The answerer takes a new local `tls-id` (RFC 8842 section 5.3); the
+    /// offerer's is the one its offer carried.
+    ///
+    /// **Note on identity**: the local certificate and its fingerprint are *not*
+    /// regenerated: the same identity is used by every association of the connection.
+    pub(crate) fn update_remote(
         &mut self,
         local_ice_role: RTCIceRole,
         remote_dtls_parameters: RTCDtlsParameters,
-        keep_unchanged_session: bool,
-    ) -> Result<()> {
+        remote_tls_id: Option<String>,
+        update: DtlsRemoteUpdate,
+    ) -> Result<DtlsAssociationUpdate> {
         if self.state == RTCDtlsTransportState::New {
-            // Not started yet — initial start_transports handles this path.
-            return Ok(());
+            // Not started yet: the initial start_transports handles this path.
+            return Ok(DtlsAssociationUpdate::Kept);
         }
 
-        let new_role = self.derive_role(local_ice_role, remote_dtls_parameters.role);
         let healthy = matches!(
             self.state,
             RTCDtlsTransportState::Connected | RTCDtlsTransportState::Connecting
         );
-        let same_remote = self
+        let same_fingerprints = self
             .remote_dtls_parameters
             .as_ref()
             .is_some_and(|previous| {
                 same_fingerprints(&previous.fingerprints, &remote_dtls_parameters.fingerprints)
             });
-        if keep_unchanged_session && healthy && same_remote && new_role == self.dtls_role {
-            // Nothing DTLS depends on changed: keep the session over the restarted ICE path.
-            return Ok(());
+        // A peer that sends no `tls-id` (now, or before) signals nothing with it (RFC 8842
+        // section 4).
+        let same_tls_id = match (&self.remote_tls_id, &remote_tls_id) {
+            (Some(previous), Some(new)) => previous == new,
+            _ => true,
+        };
+        let same_roles = match remote_dtls_parameters.role {
+            RTCDtlsRole::Client => self.dtls_role == RTCDtlsRole::Server,
+            RTCDtlsRole::Server => self.dtls_role == RTCDtlsRole::Client,
+            _ => matches!(self.dtls_role, RTCDtlsRole::Client | RTCDtlsRole::Server),
+        };
+        // A session that gained a media section on an association without SRTP keys needs
+        // one that has them.
+        let needs_srtp = self.srtp_required && !self.can_key_srtp();
+        if !update.transport_closed
+            && !needs_srtp
+            && same_fingerprints
+            && same_tls_id
+            && same_roles
+            && (healthy || !update.ice_restart)
+        {
+            // Nothing DTLS depends on changed: keep the association (over the restarted ICE
+            // path, if ICE restarts).
+            if remote_tls_id.is_some() {
+                self.remote_tls_id = remote_tls_id;
+            }
+            return Ok(DtlsAssociationUpdate::Kept);
         }
 
-        // Derive the role (it may differ if the ICE role swapped during restart), but only
-        // commit it once the new handshake config has been built.
+        // The roles of the new association, committed only once its handshake config has been
+        // built.
         let previous_role = self.dtls_role;
-        self.dtls_role = new_role;
+        // An `actpass` description leaves the choice here: the roles the endpoints have are
+        // kept, so what runs over DTLS (SCTP takes its role from it) is not turned around.
+        // Only a transport that was closed chooses anew.
+        if update.transport_closed
+            || remote_dtls_parameters.role != RTCDtlsRole::Auto
+            || !matches!(previous_role, RTCDtlsRole::Client | RTCDtlsRole::Server)
+        {
+            self.dtls_role = self.derive_role(local_ice_role, remote_dtls_parameters.role);
+        }
         let dtls_handshake_config = match self.make_handshake_config(&remote_dtls_parameters) {
             Ok(config) => config,
             Err(err) => {
@@ -389,11 +630,43 @@ impl DtlsTransport {
                 return Err(err);
             }
         };
+        let local_tls_id = if update.we_offer {
+            self.staged_local_tls_id.take()
+        } else {
+            match generate_tls_id(&self.crypto_provider) {
+                Ok(tls_id) => Some(tls_id),
+                Err(err) => {
+                    self.dtls_role = previous_role;
+                    return Err(err);
+                }
+            }
+        };
+        if let Some(local_tls_id) = local_tls_id {
+            self.local_tls_id = local_tls_id;
+        }
 
         self.state_change(RTCDtlsTransportState::Connecting);
         self.install_endpoint(dtls_handshake_config);
         self.remote_dtls_parameters = Some(remote_dtls_parameters);
-        Ok(())
+        self.remote_tls_id = remote_tls_id;
+        self.remote_certificates.clear();
+        self.srtp_negotiated = None;
+        self.srtp_configured = self.offers_use_srtp();
+        Ok(DtlsAssociationUpdate::New)
+    }
+
+    /// The `tls-id` an offer carries (RFC 8842 section 5.5): the association's, or, when the
+    /// offer asks for a new association (`new_association`: the transport was closed and the
+    /// offer sets one up again), a new value, the same for every such offer until an answer
+    /// starts that association.
+    pub(crate) fn offer_tls_id(&mut self, new_association: bool) -> Result<String> {
+        if !new_association || self.state == RTCDtlsTransportState::New {
+            return Ok(self.local_tls_id.clone());
+        }
+        if self.staged_local_tls_id.is_none() {
+            self.staged_local_tls_id = Some(generate_tls_id(&self.crypto_provider)?);
+        }
+        Ok(self.staged_local_tls_id.clone().unwrap_or_default())
     }
 
     /// Installs a fresh endpoint for `self.dtls_role`: a client keeps the config until the
@@ -415,6 +688,22 @@ impl DtlsTransport {
                 Some(dtls_handshake_config),
             ));
         }
+    }
+
+    /// Whether the handshake config for the role and session at hand takes part in `use_srtp`
+    /// (RFC 5764 section 4.1: "only when the data being transported is RTP or RTCP"). A client
+    /// offers it when the session has a media section, or on every association when the
+    /// application asked for that; a server takes a profile whenever the client offers one
+    /// (section 4.1.1 leaves that to the server), which costs nothing and lets a peer that
+    /// always offers it add media later without a new association.
+    fn offers_use_srtp(&self) -> bool {
+        self.use_srtp_always || self.srtp_required || self.dtls_role == RTCDtlsRole::Server
+    }
+
+    /// Whether the current association has, or once its handshake completes can have, SRTP
+    /// keys.
+    pub(crate) fn can_key_srtp(&self) -> bool {
+        self.srtp_negotiated.unwrap_or(self.srtp_configured)
     }
 
     fn supported_srtp_protection_profiles(&self) -> Result<Vec<SrtpProtectionProfile>> {
@@ -497,7 +786,7 @@ mod tests {
         RTCTransportId::new(0xabcd_ef01_2345_6789, kind)
     }
 
-    use crypto::{AeadAlgorithm, CryptoAlgorithm, RTCCrypto, RTCRandom};
+    use crypto::{AeadAlgorithm, CryptoAlgorithm, HashAlgorithm, RTCCrypto, RTCRandom};
 
     struct MissingAes128Gcm;
 
@@ -533,6 +822,7 @@ mod tests {
             certificates: vec![],
             answering_dtls_role: DEFAULT_DTLS_ROLE_ANSWER,
             srtp_protection_profiles: vec![],
+            use_srtp_always: true,
             dtls_cipher_suites,
             allow_insecure_verification_algorithm: false,
             disable_certificate_fingerprint_verification: false,
@@ -626,7 +916,7 @@ mod tests {
         let certificate = RTCCertificate::generate(
             default_provider.crypto(),
             crypto::SignatureScheme::EcdsaP256Sha256,
-            CertificateParams::new(vec!["webrtc.rs".to_owned()])
+            rcgen::CertificateParams::new(vec!["webrtc.rs".to_owned()])
                 .map_err(|e| Error::Other(e.to_string()))?,
         )?;
         let provider: Arc<dyn RTCCryptoProvider> = Arc::new(ProfileFilteringProvider {
@@ -641,6 +931,7 @@ mod tests {
                 certificates: vec![certificate.clone()],
                 answering_dtls_role: DEFAULT_DTLS_ROLE_ANSWER,
                 srtp_protection_profiles: profiles,
+                use_srtp_always: true,
                 dtls_cipher_suites: vec![],
                 allow_insecure_verification_algorithm: false,
                 disable_certificate_fingerprint_verification: false,
@@ -1038,6 +1329,432 @@ mod tests {
         t.restart(RTCIceRole::Controlled, dummy_params(RTCDtlsRole::Auto))
             .unwrap();
         assert_eq!(t.state, RTCDtlsTransportState::Connecting);
+    }
+
+    // ── update_remote: RFC 8842 section 3.1 ──────────────────────────
+
+    /// A transport connected as `role`, built for `dummy_params`' fingerprint.
+    fn connected_as(role: RTCDtlsRole) -> DtlsTransport {
+        let mut t = auto_role_transport();
+        // The remote took the other role.
+        let remote = if role == RTCDtlsRole::Client {
+            RTCDtlsRole::Server
+        } else {
+            RTCDtlsRole::Client
+        };
+        t.start(RTCIceRole::Controlling, dummy_params(remote))
+            .unwrap();
+        assert_eq!(t.dtls_role, role);
+        t.state_change(RTCDtlsTransportState::Connected);
+        t.dtls_handshake_config = None; // a completed client handshake has consumed it
+        t.remote_certificates = vec![vec![0x30]];
+        t.srtp_negotiated = Some(true);
+        t
+    }
+
+    fn update(we_offer: bool, ice_restart: bool) -> DtlsRemoteUpdate {
+        DtlsRemoteUpdate {
+            we_offer,
+            ice_restart,
+            transport_closed: false,
+        }
+    }
+
+    /// RFC 8842 section 5.3: the roles of an association are fixed. An `actpass` offer takes
+    /// no role, so it changes none, whatever this endpoint's ICE role and configured
+    /// answering role would give a new association: the server that answers a later offer
+    /// (now ICE-controlled, default answering role client) stays the server, with or without
+    /// an ICE restart.
+    #[test]
+    fn an_actpass_offer_keeps_the_roles_of_the_association() {
+        for role in [RTCDtlsRole::Server, RTCDtlsRole::Client] {
+            for ice_role in [RTCIceRole::Controlling, RTCIceRole::Controlled] {
+                for ice_restart in [false, true] {
+                    for answering in [RTCDtlsRole::Auto, RTCDtlsRole::Client, RTCDtlsRole::Server] {
+                        let mut t = connected_as(role);
+                        t.answering_dtls_role = answering;
+                        let local_tls_id = t.local_tls_id.clone();
+                        let kept = t
+                            .update_remote(
+                                ice_role,
+                                dummy_params(RTCDtlsRole::Auto),
+                                None,
+                                update(false, ice_restart),
+                            )
+                            .unwrap();
+                        assert_eq!(kept, DtlsAssociationUpdate::Kept);
+                        assert_eq!(t.dtls_role, role);
+                        assert_eq!(t.state, RTCDtlsTransportState::Connected);
+                        assert_eq!(t.local_tls_id, local_tls_id);
+                        assert_eq!(t.remote_certificates.len(), 1);
+                        assert!(t.dtls_handshake_config.is_none());
+                    }
+                }
+            }
+        }
+    }
+
+    /// An answer (or a legacy offer) that repeats the negotiated roles keeps the association;
+    /// one that takes the role this endpoint has changes the roles, which establishes a new
+    /// association (RFC 8842 section 3.1), with the roles the description gives.
+    #[test]
+    fn an_explicit_remote_role_keeps_or_replaces_the_association() {
+        for role in [RTCDtlsRole::Server, RTCDtlsRole::Client] {
+            let other = if role == RTCDtlsRole::Client {
+                RTCDtlsRole::Server
+            } else {
+                RTCDtlsRole::Client
+            };
+            let mut t = connected_as(role);
+            assert_eq!(
+                t.update_remote(
+                    RTCIceRole::Controlling,
+                    dummy_params(other),
+                    None,
+                    update(true, false)
+                )
+                .unwrap(),
+                DtlsAssociationUpdate::Kept
+            );
+            assert_eq!(t.dtls_role, role);
+
+            // The remote now takes this endpoint's role.
+            assert_eq!(
+                t.update_remote(
+                    RTCIceRole::Controlling,
+                    dummy_params(role),
+                    None,
+                    update(true, false)
+                )
+                .unwrap(),
+                DtlsAssociationUpdate::New
+            );
+            assert_eq!(t.dtls_role, other);
+            assert_eq!(t.state, RTCDtlsTransportState::Connecting);
+            assert_eq!(
+                t.dtls_handshake_config.is_some(),
+                other == RTCDtlsRole::Client,
+                "a client holds the config of the handshake it will start"
+            );
+            assert!(t.remote_certificates.is_empty());
+            assert_eq!(t.srtp_negotiated, None);
+        }
+    }
+
+    /// A changed fingerprint set establishes a new association without an ICE restart too
+    /// (RFC 8842 section 3.1); the new fingerprints are the ones in force.
+    #[test]
+    fn a_changed_fingerprint_replaces_the_association_without_an_ice_restart() {
+        let mut t = connected_as(RTCDtlsRole::Server);
+        let mut params = dummy_params(RTCDtlsRole::Auto);
+        params.fingerprints[0].value = params.fingerprints[0].value.replace("00", "11");
+        assert_eq!(
+            t.update_remote(
+                RTCIceRole::Controlled,
+                params.clone(),
+                None,
+                update(false, false)
+            )
+            .unwrap(),
+            DtlsAssociationUpdate::New
+        );
+        assert_eq!(t.state, RTCDtlsTransportState::Connecting);
+        assert_eq!(t.remote_dtls_parameters, Some(params.clone()));
+        // An `actpass` description leaves the roles as they were.
+        assert_eq!(t.dtls_role, RTCDtlsRole::Server);
+
+        // An added fingerprint is a changed set as well; hex case and order are not.
+        let mut t = connected_as(RTCDtlsRole::Server);
+        let mut added = dummy_params(RTCDtlsRole::Auto);
+        added.fingerprints.push(params.fingerprints[0].clone());
+        assert_eq!(
+            t.update_remote(RTCIceRole::Controlled, added, None, update(false, false))
+                .unwrap(),
+            DtlsAssociationUpdate::New
+        );
+        let mut t = connected_as(RTCDtlsRole::Server);
+        let mut same = dummy_params(RTCDtlsRole::Auto);
+        same.fingerprints[0].algorithm = "SHA-256".to_owned();
+        assert_eq!(
+            t.update_remote(RTCIceRole::Controlled, same, None, update(false, false))
+                .unwrap(),
+            DtlsAssociationUpdate::Kept
+        );
+    }
+
+    /// RFC 8842 sections 3.1 and 4: a changed remote `tls-id` asks for a new association; the
+    /// same value, a first value from a peer that sent none, or no value does not.
+    #[test]
+    fn a_changed_remote_tls_id_replaces_the_association() {
+        let first = Some("abc3de65cddef001be82".to_owned());
+        let second = Some("abc3de65cddef001be83".to_owned());
+        let apply = |t: &mut DtlsTransport, tls_id: &Option<String>| {
+            t.update_remote(
+                RTCIceRole::Controlled,
+                dummy_params(RTCDtlsRole::Auto),
+                tls_id.clone(),
+                update(false, false),
+            )
+            .unwrap()
+        };
+        let mut t = connected_as(RTCDtlsRole::Server);
+        assert_eq!(t.remote_tls_id, None);
+        // The peer starts to send one: nothing to compare it with.
+        assert_eq!(apply(&mut t, &first), DtlsAssociationUpdate::Kept);
+        assert_eq!(t.remote_tls_id, first);
+        assert_eq!(apply(&mut t, &first), DtlsAssociationUpdate::Kept);
+        // A description without one says nothing about the association.
+        assert_eq!(apply(&mut t, &None), DtlsAssociationUpdate::Kept);
+        assert_eq!(t.remote_tls_id, first);
+        assert_eq!(apply(&mut t, &second), DtlsAssociationUpdate::New);
+        assert_eq!(t.remote_tls_id, second);
+        assert_eq!(t.state, RTCDtlsTransportState::Connecting);
+    }
+
+    /// RFC 8842 sections 4 and 5.3: the local `tls-id` is 20 to 255 characters of the
+    /// attribute's alphabet with at least 120 random bits; the answerer that establishes a new
+    /// association takes a new one; the offerer keeps the one its offer carried, a staged one
+    /// if the offer asked for the new association.
+    #[test]
+    fn the_local_tls_id_changes_with_the_association() {
+        let mut t = connected_as(RTCDtlsRole::Server);
+        let first = t.local_tls_id.clone();
+        assert_eq!(first.len(), 32);
+        assert!(first.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert_ne!(first, connected_as(RTCDtlsRole::Server).local_tls_id);
+        assert_eq!(t.offer_tls_id(false).unwrap(), first);
+
+        // As the answerer.
+        let mut changed = dummy_params(RTCDtlsRole::Auto);
+        changed.fingerprints[0].value = changed.fingerprints[0].value.replace("00", "11");
+        assert_eq!(
+            t.update_remote(RTCIceRole::Controlled, changed, None, update(false, false))
+                .unwrap(),
+            DtlsAssociationUpdate::New
+        );
+        let second = t.local_tls_id.clone();
+        assert_ne!(second, first);
+        assert_eq!(second.len(), 32);
+
+        // As the offerer of an offer that asks for a new association: the staged value is
+        // the offer's, every time it is created, and the association's once the answer starts
+        // it.
+        t.state_change(RTCDtlsTransportState::Connected);
+        let staged = t.offer_tls_id(true).unwrap();
+        assert_ne!(staged, second);
+        assert_eq!(t.offer_tls_id(true).unwrap(), staged);
+        assert_eq!(t.local_tls_id, second, "creating an offer changes nothing");
+        assert_eq!(
+            t.update_remote(
+                RTCIceRole::Controlling,
+                dummy_params(RTCDtlsRole::Client),
+                None,
+                DtlsRemoteUpdate {
+                    we_offer: true,
+                    ice_restart: true,
+                    transport_closed: true,
+                },
+            )
+            .unwrap(),
+            DtlsAssociationUpdate::New
+        );
+        assert_eq!(t.local_tls_id, staged);
+        assert_eq!(t.staged_local_tls_id, None);
+
+        // As the offerer whose answer changes the association: the offer's value stays.
+        t.state_change(RTCDtlsTransportState::Connected);
+        let mut changed = dummy_params(RTCDtlsRole::Client);
+        changed.fingerprints[0].value = changed.fingerprints[0].value.replace("00", "22");
+        assert_eq!(
+            t.update_remote(RTCIceRole::Controlling, changed, None, update(true, false))
+                .unwrap(),
+            DtlsAssociationUpdate::New
+        );
+        assert_eq!(t.local_tls_id, staged);
+    }
+
+    /// RFC 5764 section 4.1: `use_srtp` only when the association carries RTP. A client offers
+    /// it for a session with a media section (or always, on request); an association set up
+    /// without it is replaced when the session gains one, with the roles kept.
+    #[test]
+    fn use_srtp_follows_the_sessions_media() {
+        // (always, media at start, role) -> configured
+        for (always, media, role, configured) in [
+            (false, false, RTCDtlsRole::Client, false),
+            (false, true, RTCDtlsRole::Client, true),
+            (true, false, RTCDtlsRole::Client, true),
+            (false, false, RTCDtlsRole::Server, true),
+        ] {
+            let mut t = auto_role_transport();
+            t.use_srtp_always = always;
+            t.srtp_required = media;
+            let remote = if role == RTCDtlsRole::Client {
+                RTCDtlsRole::Server
+            } else {
+                RTCDtlsRole::Client
+            };
+            t.start(RTCIceRole::Controlling, dummy_params(remote))
+                .unwrap();
+            assert_eq!(t.srtp_configured, configured, "{always} {media} {role}");
+            assert_eq!(t.can_key_srtp(), configured);
+        }
+
+        for role in [RTCDtlsRole::Client, RTCDtlsRole::Server] {
+            let mut t = connected_as(role);
+            t.srtp_negotiated = Some(false);
+            // Still no media: kept.
+            assert_eq!(
+                t.update_remote(
+                    RTCIceRole::Controlled,
+                    dummy_params(RTCDtlsRole::Auto),
+                    None,
+                    update(false, false)
+                )
+                .unwrap(),
+                DtlsAssociationUpdate::Kept
+            );
+            // A media section arrives.
+            t.srtp_required = true;
+            assert_eq!(
+                t.update_remote(
+                    RTCIceRole::Controlled,
+                    dummy_params(RTCDtlsRole::Auto),
+                    None,
+                    update(false, false)
+                )
+                .unwrap(),
+                DtlsAssociationUpdate::New
+            );
+            assert_eq!(t.dtls_role, role, "the roles are kept");
+            assert!(t.srtp_configured && t.can_key_srtp());
+            // With keys, the next description keeps it.
+            t.state_change(RTCDtlsTransportState::Connected);
+            t.srtp_negotiated = Some(true);
+            assert_eq!(
+                t.update_remote(
+                    RTCIceRole::Controlled,
+                    dummy_params(RTCDtlsRole::Auto),
+                    None,
+                    update(false, false)
+                )
+                .unwrap(),
+                DtlsAssociationUpdate::Kept
+            );
+        }
+    }
+
+    /// A transport that failed or was closed is not brought back by a description that
+    /// changes nothing and restarts nothing; an ICE restart, or a description that asks for a
+    /// new association, does.
+    #[test]
+    fn a_failed_association_is_replaced_only_when_asked() {
+        for state in [RTCDtlsTransportState::Failed, RTCDtlsTransportState::Closed] {
+            let mut t = connected_as(RTCDtlsRole::Client);
+            t.state_change(state);
+            assert_eq!(
+                t.update_remote(
+                    RTCIceRole::Controlled,
+                    dummy_params(RTCDtlsRole::Auto),
+                    None,
+                    update(false, false)
+                )
+                .unwrap(),
+                DtlsAssociationUpdate::Kept
+            );
+            assert_eq!(t.state, state);
+            assert_eq!(
+                t.update_remote(
+                    RTCIceRole::Controlled,
+                    dummy_params(RTCDtlsRole::Auto),
+                    None,
+                    update(false, true)
+                )
+                .unwrap(),
+                DtlsAssociationUpdate::New
+            );
+            assert_eq!(t.state, RTCDtlsTransportState::Connecting);
+        }
+    }
+
+    /// The certificate check uses the peer's fingerprints of the most preferred hash function
+    /// offered (RFC 8122 section 5.1), and the verification callback is what the handshake
+    /// config carries: a handshake against a peer whose description gave only a sha-512
+    /// fingerprint completes, and one whose sha-512 fingerprint is of another certificate does
+    /// not.
+    #[test]
+    fn the_handshake_verifies_a_sha512_fingerprint() -> Result<()> {
+        use ::dtls::config::ConfigBuilder;
+        use ::dtls::endpoint::{Endpoint, EndpointEvent};
+        use std::net::SocketAddr;
+
+        let provider = crypto::default_provider().map_err(|e| Error::Other(e.to_string()))?;
+        let handshake = |fingerprint_of_presented: bool| -> Result<bool> {
+            let client_certificate = ::dtls::crypto::Certificate::generate_self_signed(
+                vec!["localhost".into()],
+                provider.crypto(),
+            )?;
+            let other_certificate = ::dtls::crypto::Certificate::generate_self_signed(
+                vec!["localhost".into()],
+                provider.crypto(),
+            )?;
+            let fingerprinted = if fingerprint_of_presented {
+                &client_certificate
+            } else {
+                &other_certificate
+            };
+            let hashed = provider
+                .crypto()
+                .hash(HashAlgorithm::Sha512, &fingerprinted.certificate[0])
+                .map_err(|e| Error::Other(e.to_string()))?;
+            let mut transport = transport(vec![]);
+            let server_config = transport.prepare_transport(
+                RTCIceRole::Controlling,
+                RTCDtlsParameters {
+                    role: RTCDtlsRole::Client,
+                    fingerprints: vec![RTCDtlsFingerprint {
+                        algorithm: "sha-512".to_owned(),
+                        value: format_fingerprint(&hashed).to_uppercase(),
+                    }],
+                },
+            )?;
+            let client_config = ConfigBuilder::default()
+                .with_crypto_provider(provider.clone())
+                .with_certificates(vec![client_certificate])
+                .with_srtp_protection_profiles(default_srtp_protection_profiles())
+                .with_insecure_skip_verify(true)
+                .with_extended_master_secret(::dtls::config::ExtendedMasterSecretType::Require)
+                .build(true, None)?;
+
+            let client_addr: SocketAddr = "127.0.0.1:45001".parse().unwrap();
+            let server_addr: SocketAddr = "127.0.0.1:45002".parse().unwrap();
+            let mut client = Endpoint::new(client_addr, TransportProtocol::UDP, None);
+            let mut server =
+                Endpoint::new(server_addr, TransportProtocol::UDP, Some(server_config));
+            let now = std::time::Instant::now();
+            client.connect(now, server_addr, Arc::new(client_config), None)?;
+            let mut completed = false;
+            for _ in 0..6 {
+                while let Some(packet) = client.poll_transmit() {
+                    if let Ok(events) =
+                        server.read(now, client_addr, packet.transport.ecn, packet.message)
+                    {
+                        completed |= events
+                            .iter()
+                            .any(|e| matches!(e, EndpointEvent::HandshakeComplete));
+                    }
+                }
+                while let Some(packet) = server.poll_transmit() {
+                    let _ = client.read(now, server_addr, packet.transport.ecn, packet.message);
+                }
+            }
+            Ok(completed)
+        };
+        assert!(
+            handshake(true)?,
+            "the certificate matches its sha-512 fingerprint"
+        );
+        assert!(!handshake(false)?, "another certificate's fingerprint");
+        Ok(())
     }
 
     /// A peer that offers only AES-256-CBC-SHA must not get a session with the default

@@ -4,7 +4,9 @@
 //! codepoint in `TransportContext::ecn`: it names the codepoint each received datagram arrived
 //! with, and the engine names the codepoint each datagram to send is to carry. With ECN on
 //! (`SettingEngineBuilder::with_ecn`) and `ack ccfb` negotiated, RTP media goes out ECT(1)
-//! and nothing else is marked; the receiver counts ECT(1) / CE receptions, reports each packet's
+//! once ECN is initiated (RFC 8888 section 7, RFC 6679 section 7.2.1: a few probes first,
+//! every packet once the feedback shows they arrive marked; marking stops when the path
+//! clears it or drops marked packets, section 7.4) and nothing else is marked; the receiver counts ECT(1) / CE receptions, reports each packet's
 //! marking back in RFC 8888 feedback, and the sender turns the reports into remote-inbound
 //! statistics (marks, losses, recoveries, bleached ECT(1)).
 //!
@@ -13,7 +15,7 @@
 
 use anyhow::{Result, bail};
 use bytes::{Bytes, BytesMut};
-use rtc::interceptor::Registry;
+use rtc::interceptor::{EcnInitiation, Registry};
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 use rtc::peer_connection::configuration::interceptor_registry::{
     configure_congestion_control_feedback, configure_nack, configure_rtcp_reports,
@@ -67,6 +69,8 @@ struct Setup {
     ccfb: bool,
     /// `configure_nack` (NACK + RTX repair).
     nack: bool,
+    /// `SettingEngineBuilder::with_ecn_initiation(EcnInitiation::LeapOfFaith)`.
+    leap_of_faith: bool,
 }
 
 struct Peer {
@@ -102,7 +106,16 @@ impl Peer {
         }
         let pc = RTCPeerConnectionBuilder::new()
             .with_configuration(RTCConfigurationBuilder::new().build())
-            .with_setting_engine(SettingEngineBuilder::new().with_ecn(setup.ecn).build())
+            .with_setting_engine(
+                SettingEngineBuilder::new()
+                    .with_ecn(setup.ecn)
+                    .with_ecn_initiation(if setup.leap_of_faith {
+                        EcnInitiation::LeapOfFaith
+                    } else {
+                        EcnInitiation::RtpAndRtcp
+                    })
+                    .build(),
+            )
             .with_media_engine(media_engine)
             .with_interceptor_registry(registry)
             .build(Instant::now())?;
@@ -163,6 +176,10 @@ struct Path {
     drop: HashSet<u16>,
     /// Dropped once; a retransmission goes through.
     drop_once: Option<u16>,
+    /// Every packet sent ECT has its ECN field cleared (a bleaching router on the path).
+    bleach_ect: bool,
+    /// Every packet sent ECT is dropped (a middlebox that discards ECN-capable traffic).
+    drop_ect: bool,
 }
 
 /// A datagram on the wire: whether the sender sent it, its SSRC and sequence number if it is
@@ -231,8 +248,11 @@ impl World {
                     && let Some((ssrc, seq)) = rtp
                     && Some(ssrc) == self.media_ssrc
                 {
-                    if self.path.drop.contains(&seq) {
+                    if self.path.drop.contains(&seq) || (self.path.drop_ect && ecn.is_some()) {
                         continue;
+                    }
+                    if self.path.bleach_ect {
+                        ecn = None;
                     }
                     if self.path.drop_once == Some(seq) {
                         self.path.drop_once = None;
@@ -389,8 +409,18 @@ impl World {
 
     /// Writes `PACKETS` RTP packets, 20 ms apart, then lets RTCP run for `settle`.
     fn send_media(&mut self, sender: RTCRtpSenderId, settle: Duration) -> Result<()> {
+        self.send_media_from(sender, 0, settle)
+    }
+
+    /// [`send_media`](Self::send_media) from the `start`-th packet of the stream on.
+    fn send_media_from(
+        &mut self,
+        sender: RTCRtpSenderId,
+        start: u16,
+        settle: Duration,
+    ) -> Result<()> {
         let (ssrc, _) = self.sender_stream(sender);
-        for n in 0..PACKETS {
+        for n in start..start + PACKETS {
             let now = self.now;
             self.peers[0]
                 .pc
@@ -443,40 +473,64 @@ const ECN_CCFB: Setup = Setup {
     ecn: true,
     ccfb: true,
     nack: false,
+    leap_of_faith: false,
 };
+
+/// The media packets the sender put on the wire, in order: (sequence number, sent ECT(1)).
+fn media_on_the_wire(world: &World, ssrc: u32) -> Vec<(u16, bool)> {
+    world
+        .sent
+        .iter()
+        .filter_map(|(from_sender, rtp, ecn)| match rtp {
+            Some((s, seq)) if *from_sender && *s == ssrc => {
+                Some((*seq, *ecn == Some(EcnCodepoint::Ect1)))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The sequence number from which every media packet went out ECT(1), if they all did from
+/// some point on.
+fn marked_from(media: &[(u16, bool)]) -> Option<u16> {
+    let last_unmarked = media.iter().rposition(|(_, marked)| !marked);
+    match last_unmarked {
+        None => media.first().map(|(seq, _)| *seq),
+        Some(i) => media.get(i + 1).map(|(seq, _)| *seq),
+    }
+}
 
 /// The whole path: ECT(1) on the wire for media only, CE marks and bleaching counted by the
 /// receiver from what its socket layer reports, and reported back over RFC 8888 so the sender's
 /// remote-inbound object has the same marks, the bleached packets, the losses and the recovery.
+/// The path does its marking once the stream is past the initiation (RFC 6679 section 7.2.1),
+/// when every packet is ECT(1); a Not-ECT probe-phase packet is not "bleached".
 #[test]
 fn media_is_sent_ect1_and_both_sides_count_what_the_path_did() -> Result<()> {
     let (mut world, sender, offer) = World::connected(ECN_CCFB, ECN_CCFB)?;
     assert!(
-        offer.contains(&format!("a=rtcp-fb:{VP8_PT} ack ccfb")),
+        offer.contains("a=rtcp-fb:* ack ccfb"),
         "the offer negotiates RFC 8888 feedback:\n{offer}"
     );
     let (ssrc, _) = world.sender_stream(sender);
 
-    world.path.mark_ce = (10..15).map(|n| FIRST_SEQ + n).collect();
-    world.path.bleach = (20..23).map(|n| FIRST_SEQ + n).collect();
-    world.path.delay = Some((FIRST_SEQ + 40, Duration::from_millis(400)));
-    world.path.drop = HashSet::from([FIRST_SEQ + 60]);
+    world.path.mark_ce = (50..55).map(|n| FIRST_SEQ + n).collect();
+    world.path.bleach = (60..63).map(|n| FIRST_SEQ + n).collect();
+    world.path.delay = Some((FIRST_SEQ + 70, Duration::from_millis(400)));
+    world.path.drop = HashSet::from([FIRST_SEQ + 80]);
     world.send_media(sender, Duration::from_secs(1))?;
 
-    // On the wire: every RTP packet of the stream ECT(1); nothing else marked, in either
-    // direction (STUN, DTLS, SRTCP).
-    let media: Vec<_> = world
-        .sent
-        .iter()
-        .filter(|(from_sender, rtp, _)| *from_sender && rtp.is_some_and(|(s, _)| s == ssrc))
-        .collect();
+    // On the wire: the RTP packets of the stream ECT(1) once initiated, before the path's
+    // marking starts; nothing else marked, in either direction (STUN, DTLS, SRTCP).
+    let media = media_on_the_wire(&world, ssrc);
     assert_eq!(media.len(), usize::from(PACKETS));
+    let from = marked_from(&media).expect("media is sent ECT(1)");
     assert!(
-        media
-            .iter()
-            .all(|(_, _, ecn)| *ecn == Some(EcnCodepoint::Ect1)),
-        "media is sent ECT(1)"
+        from.wrapping_sub(FIRST_SEQ) < 50,
+        "every packet ECT(1) from #{} on",
+        from.wrapping_sub(FIRST_SEQ)
     );
+    let marked = media.iter().filter(|(_, m)| *m).count() as u64;
     let others: Vec<_> = world
         .sent
         .iter()
@@ -488,14 +542,15 @@ fn media_is_sent_ect1_and_both_sides_count_what_the_path_did() -> Result<()> {
         "STUN, DTLS and RTCP are not marked"
     );
 
-    // Delivered: 100 sent, 1 lost; of the 99, 5 CE, 3 bleached, 91 ECT(1).
+    // Delivered: 100 sent, 1 lost (an ECT(1) one); of the ECT(1) packets, 5 arrive CE, 3
+    // bleached, the rest ECT(1).
     let sender_stats = world.stats(0);
     let outbound = stats_json(&sender_stats, "outbound-rtp", ssrc).expect("outbound-rtp");
-    assert_eq!(outbound["packetsSentWithEct1"], PACKETS, "{outbound}");
+    assert_eq!(outbound["packetsSentWithEct1"], marked, "{outbound}");
 
     let inbound = stats_json(&world.stats(1), "inbound-rtp", ssrc).expect("inbound-rtp");
     assert_eq!(inbound["packetsReceivedWithCe"], 5, "{inbound}");
-    assert_eq!(inbound["packetsReceivedWithEct1"], 91, "{inbound}");
+    assert_eq!(inbound["packetsReceivedWithEct1"], marked - 9, "{inbound}");
     assert_eq!(
         inbound["packetsReportedAsLost"], 2,
         "the delayed packet and the dropped one were reported lost: {inbound}"
@@ -507,7 +562,7 @@ fn media_is_sent_ect1_and_both_sides_count_what_the_path_did() -> Result<()> {
 
     let remote = stats_json(&sender_stats, "remote-inbound-rtp", ssrc).expect("remote-inbound-rtp");
     assert_eq!(remote["packetsReceivedWithCe"], 5, "{remote}");
-    assert_eq!(remote["packetsReceivedWithEct1"], 91, "{remote}");
+    assert_eq!(remote["packetsReceivedWithEct1"], marked - 9, "{remote}");
     assert_eq!(remote["packetsReportedAsLost"], 2, "{remote}");
     assert_eq!(remote["packetsReportedAsLostButRecovered"], 1, "{remote}");
     assert_eq!(remote["packetsWithBleachedEct1Marking"], 3, "{remote}");
@@ -524,7 +579,8 @@ fn a_retransmission_is_sent_ect1() -> Result<()> {
     let (mut world, sender, _) = World::connected(setup, setup)?;
     let (_, rtx_ssrc) = world.sender_stream(sender);
     let rtx_ssrc = rtx_ssrc.expect("RTX is negotiated");
-    world.path.drop_once = Some(FIRST_SEQ + 30);
+    // Past the initiation, when the stream marks every packet: an RTX packet is never a probe.
+    world.path.drop_once = Some(FIRST_SEQ + 60);
     world.send_media(sender, Duration::from_millis(500))?;
 
     let rtx: Vec<_> = world
@@ -616,5 +672,133 @@ fn ccfb_offered_but_not_answered_marks_nothing() -> Result<()> {
     assert!(offer.contains("ack ccfb"));
     world.send_media(sender, Duration::from_millis(200))?;
     assert!(world.sent.iter().all(|(_, _, ecn)| ecn.is_none()));
+    Ok(())
+}
+
+/// RFC 8888 section 7 / RFC 6679 section 7.2.1: ECN starts with a few ECT probes, "a small
+/// fraction of its RTP traffic", never every packet; once RFC 8888 feedback shows the probes
+/// arrived ECT, every packet is sent ECT(1) (section 7.3.1).
+#[test]
+fn ecn_is_initiated_with_a_few_probes_before_all_media_is_marked() -> Result<()> {
+    let (mut world, sender, _) = World::connected(ECN_CCFB, ECN_CCFB)?;
+    let (ssrc, _) = world.sender_stream(sender);
+    world.send_media(sender, Duration::from_millis(500))?;
+
+    let media = media_on_the_wire(&world, ssrc);
+    let from = marked_from(&media).expect("all media marked once initiated");
+    let initiating: Vec<bool> = media
+        .iter()
+        .take_while(|(seq, _)| *seq != from)
+        .map(|(_, m)| *m)
+        .collect();
+    assert!(initiating.len() >= 5, "an initiation phase: {initiating:?}");
+    let probes = initiating.iter().filter(|m| **m).count();
+    assert!(probes >= 2, "probes: {initiating:?}");
+    assert!(
+        probes * 4 <= initiating.len(),
+        "a small fraction: {initiating:?}"
+    );
+    assert!(
+        initiating.windows(2).all(|w| !(w[0] && w[1])),
+        "never two probes in a row: {initiating:?}"
+    );
+    assert!(
+        from.wrapping_sub(FIRST_SEQ) < 50,
+        "initiated within a second: from #{}",
+        from.wrapping_sub(FIRST_SEQ)
+    );
+    Ok(())
+}
+
+/// RFC 6679 section 7.4 (RFC 8888 section 7): a path that clears the ECN field is detected
+/// from the feedback (the probes come back Not-ECT) and the sender stops marking.
+#[test]
+fn a_path_that_bleaches_ect_ends_the_marking() -> Result<()> {
+    let (mut world, sender, _) = World::connected(ECN_CCFB, ECN_CCFB)?;
+    let (ssrc, _) = world.sender_stream(sender);
+    world.path.bleach_ect = true;
+    world.send_media(sender, Duration::from_millis(500))?;
+
+    let media = media_on_the_wire(&world, ssrc);
+    let probes: Vec<u16> = media
+        .iter()
+        .filter(|(_, m)| *m)
+        .map(|(seq, _)| seq.wrapping_sub(FIRST_SEQ))
+        .collect();
+    assert!(!probes.is_empty(), "initiation was attempted");
+    assert!(
+        media[40..].iter().all(|(_, m)| !m),
+        "nothing marked once the feedback showed the bleaching; probes {probes:?}"
+    );
+    let remote = stats_json(&world.stats(0), "remote-inbound-rtp", ssrc).expect("remote-inbound");
+    assert_eq!(
+        remote["packetsWithBleachedEct1Marking"],
+        probes.len(),
+        "only the probes were sent ECT(1): {remote}"
+    );
+    Ok(())
+}
+
+/// RFC 6679 section 7.2.1: the initiation fails when the receiver "should have received
+/// multiple (>3) ECT-marked RTP packets" and none arrived; the media itself, sent Not-ECT,
+/// goes on arriving.
+#[test]
+fn a_path_that_drops_ect_packets_ends_the_marking() -> Result<()> {
+    let (mut world, sender, _) = World::connected(ECN_CCFB, ECN_CCFB)?;
+    let (ssrc, _) = world.sender_stream(sender);
+    world.path.drop_ect = true;
+    world.send_media(sender, Duration::from_millis(500))?;
+
+    let media = media_on_the_wire(&world, ssrc);
+    let probes = media.iter().filter(|(_, m)| *m).count();
+    assert!(
+        probes > 3,
+        "more than three probes before giving up: {probes}"
+    );
+    assert!(
+        probes * 4 <= media.len(),
+        "the probes were a small fraction: {probes} of {}",
+        media.len()
+    );
+    assert!(
+        media[media.len() - 40..].iter().all(|(_, m)| !m),
+        "nothing marked at the end"
+    );
+    let inbound = stats_json(&world.stats(1), "inbound-rtp", ssrc).expect("inbound-rtp");
+    assert_eq!(
+        inbound["packetsReceived"],
+        media.len() - probes,
+        "every Not-ECT packet arrived: {inbound}"
+    );
+    Ok(())
+}
+
+/// The leap-of-faith initiation (RFC 6679 section 7.2.3), a setting: every packet is ECT(1)
+/// from the first, as browsers that send L4S do, and failure detection still applies.
+#[test]
+fn leap_of_faith_initiation_marks_from_the_first_packet_and_still_stops_on_bleaching() -> Result<()>
+{
+    let setup = Setup {
+        leap_of_faith: true,
+        ..ECN_CCFB
+    };
+    let (mut world, sender, _) = World::connected(setup, setup)?;
+    let (ssrc, _) = world.sender_stream(sender);
+    world.send_media(sender, Duration::from_millis(200))?;
+    let media = media_on_the_wire(&world, ssrc);
+    assert!(media.iter().all(|(_, m)| *m), "every packet ECT(1)");
+
+    world.path.bleach_ect = true;
+    let before = media.len();
+    world.send_media_from(sender, PACKETS, Duration::from_millis(200))?;
+    let media = media_on_the_wire(&world, ssrc);
+    assert!(
+        media[before..].iter().any(|(_, m)| *m),
+        "marked until the feedback showed the bleaching"
+    );
+    assert!(
+        media[media.len() - 30..].iter().all(|(_, m)| !m),
+        "and not after"
+    );
     Ok(())
 }

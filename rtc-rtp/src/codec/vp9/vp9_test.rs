@@ -34,6 +34,7 @@ fn test_vp9_packet_unmarshal() -> Result<()> {
             Vp9Packet {
                 i: true,
                 picture_id: 0x01FF,
+                picture_id_15_bits: true,
                 ..Default::default()
             },
             Bytes::from_static(&[0xAA]),
@@ -288,7 +289,10 @@ fn test_vp9_payloader_payload() -> Result<()> {
             vec![
                 Bytes::from(vec![0x98, rands[0][0], rands[0][1], 0x01, 0x02]),
                 Bytes::from(vec![0x94, rands[0][0], rands[0][1], 0x03]),
-                Bytes::from(vec![0x9C, rands[1][0], rands[1][1], 0x04]),
+                // Not a VP9 frame and not the first of the stream: nothing says it does not
+                // depend on what came before, so P=1 with the reference index flexible mode
+                // then requires (P_DIFF 1, N 0). It used to go out as P=0.
+                Bytes::from(vec![0xDC, rands[1][0], rands[1][1], 0x02, 0x04]),
             ],
         ),
     ];
@@ -314,7 +318,7 @@ fn test_vp9_payloader_payload() -> Result<()> {
         };
         let mut p_prev = Vp9Packet::default();
         for i in 0..0x8000 {
-            let res = pck.payload(4, &Bytes::from_static(&[0x01]))?;
+            let res = pck.payload(5, &Bytes::from_static(&[0x01]))?;
             let mut p = Vp9Packet::default();
             p.depacketize(&res[0])?;
 
@@ -370,8 +374,9 @@ fn test_vp9_partition_head_checker_is_partition_head() -> Result<()> {
 #[test]
 fn test_vp9_per_picture_state_does_not_accumulate() -> Result<()> {
     let mut pck = Vp9Packet::default();
-    // P=1, F=1; two P_DIFFs (1 with N=1, then 1 with N=0); one payload byte.
-    let flexible = Bytes::from_static(&[0x50, 0x03, 0x02, 0xaa]);
+    // I=1, P=1, F=1; picture ID 5; two P_DIFFs (1 with N=1, then 1 with N=0); one payload
+    // byte. (F only counts with I=1, RFC 9628 4.2.)
+    let flexible = Bytes::from_static(&[0xd0, 0x05, 0x03, 0x02, 0xaa]);
     for _ in 0..10 {
         let payload = pck.depacketize(&flexible)?;
         assert_eq!(&payload[..], &[0xaa]);
@@ -400,7 +405,7 @@ fn test_vp9_per_picture_state_does_not_accumulate() -> Result<()> {
 /// frame_type 0 (key), show_frame 1, error_resilient_mode 0, the sync code,
 /// color_space 1 (BT.601), color_range 0, then width-1 = 639 and
 /// height-1 = 479 (16 bits each), then frame data.
-fn vp9_key_frame_640x480() -> Vec<u8> {
+pub(super) fn vp9_key_frame_640x480() -> Vec<u8> {
     // Bits: 10 0 0 0 0 1 0 | 0x49 0x83 0x42 | 001 0 | 0x027F | 0x01DF | pad
     let mut bits: Vec<u8> = vec![1, 0, 0, 0, 0, 0, 1, 0];
     for byte in [0x49u8, 0x83, 0x42] {
@@ -432,13 +437,18 @@ fn test_vp9_frame_header_parse() {
         header,
         Vp9FrameHeader {
             key_frame: true,
-            width: 640,
-            height: 480
+            size: Some((640, 480)),
+            ..Default::default()
         }
     );
-    // An inter frame: frame_type 1.
+    // An inter frame: frame_type 1. The header ends before the reference fields.
     let inter = Vp9FrameHeader::parse(&[0x86, 0x00]).unwrap();
-    assert!(!inter.key_frame);
+    assert!(!inter.key_frame && !inter.intra_only);
+    assert_eq!(inter.ref_frame_idx, None);
+    // A whole inter frame header: refresh_frame_flags 0x04, references to slots 1, 2 and 3.
+    let inter = Vp9FrameHeader::parse(&[0x86, 0x01, 0x09, 0x18]).unwrap();
+    assert_eq!(inter.refresh_frame_flags, Some(0x04));
+    assert_eq!(inter.ref_frame_idx, Some([1, 2, 3]));
     // Not VP9: frame_marker isn't 2.
     assert!(Vp9FrameHeader::parse(&[0x01, 0x02]).is_none());
 }

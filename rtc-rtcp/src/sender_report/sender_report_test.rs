@@ -12,7 +12,7 @@ fn test_sender_report_unmarshal() {
         (
             "valid",
             Bytes::from_static(&[
-                0x81u8, 0xc8, 0x0, 0x7, // v=2, p=0, count=1, SR, len=7
+                0x81u8, 0xc8, 0x0, 0xc, // v=2, p=0, count=1, SR, len=12
                 0x90, 0x2f, 0x9e, 0x2e, // ssrc=0x902f9e2e
                 0xda, 0x8b, 0xd1, 0xfc, 0xdd, 0xdd, 0xa0, 0x5a, // ntp=0xda8bd1fcdddda05a
                 0xaa, 0xf4, 0xed, 0xd5, // rtp=0xaaf4edd5
@@ -66,7 +66,8 @@ fn test_sender_report_unmarshal() {
         (
             "bad count in header",
             Bytes::from_static(&[
-                0x82, 0xc8, 0x0, 0x7, // v=2, p=0, count=1, SR, len=7
+                0x82, 0xc8, 0x0,
+                0xc, // v=2, p=0, count=2, SR, len=12: one report block missing
                 0x90, 0x2f, 0x9e, 0x2e, // ssrc=0x902f9e2e
                 0xda, 0x8b, 0xd1, 0xfc, 0xdd, 0xdd, 0xa0, 0x5a, // ntp=0xda8bd1fcdddda05a
                 0xaa, 0xf4, 0xed, 0xd5, // rtp=0xaaf4edd5
@@ -85,7 +86,8 @@ fn test_sender_report_unmarshal() {
         (
             "with extension", // issue #447
             Bytes::from_static(&[
-                0x80, 0xc8, 0x0, 0x6, // v=2, p=0, count=0, SR, len=6
+                0x80, 0xc8, 0x0,
+                0xd, // v=2, p=0, count=0, SR, len=13: the extension is in the packet
                 0x2b, 0x7e, 0xc0, 0xc5, // ssrc=0x2b7ec0c5
                 0xe0, 0x20, 0xa2, 0xa9, 0x52, 0xa5, 0x3f, 0xc0, // ntp=0xe020a2a952a53fc0
                 0x2e, 0x48, 0xa5, 0x52, // rtp=0x2e48a552
@@ -249,4 +251,95 @@ fn test_sender_report_roundtrip() {
             )
         }
     }
+}
+
+/// A sender report with no report block.
+const BARE_SENDER_REPORT: [u8; 28] = [
+    0x80, 0xc8, 0x00, 0x06, // v=2, p=0, count=0, SR, len=6
+    0x90, 0x2f, 0x9e, 0x2e, // ssrc
+    0xda, 0x8b, 0xd1, 0xfc, 0xdd, 0xdd, 0xa0, 0x5a, // ntp
+    0xaa, 0xf4, 0xed, 0xd5, // rtp
+    0x00, 0x00, 0x00, 0x01, // packet count
+    0x00, 0x00, 0x00, 0x02, // octet count
+];
+
+// RFC 3550 6.4.1: with the P bit set the packet "contains some additional padding octets at
+// the end which are not part of the control information but are included in the length
+// field". They are not a profile-specific extension.
+#[test]
+fn rtcp_padding_of_a_sender_report_is_cut_off() {
+    let mut raw = BARE_SENDER_REPORT.to_vec();
+    raw[0] |= 0x20;
+    raw[3] += 2;
+    raw.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 8]);
+
+    let sr = SenderReport::unmarshal(&mut Bytes::from(raw)).unwrap();
+    assert!(sr.profile_extensions.is_empty());
+    assert_eq!(2, sr.octet_count);
+    assert_eq!(&BARE_SENDER_REPORT[..], &sr.marshal().unwrap()[..]);
+
+    // An extension and padding after it: the extension is kept, the padding cut.
+    let mut raw = BARE_SENDER_REPORT.to_vec();
+    raw[0] |= 0x20;
+    raw[3] += 2;
+    raw.extend_from_slice(&[1, 2, 3, 4, 0, 0, 0, 4]);
+    let sr = SenderReport::unmarshal(&mut Bytes::from(raw)).unwrap();
+    assert_eq!(&[1, 2, 3, 4][..], &sr.profile_extensions[..]);
+}
+
+#[test]
+fn a_sender_report_with_impossible_padding_is_refused() {
+    for count in [0u8, 29, 255] {
+        let mut raw = BARE_SENDER_REPORT.to_vec();
+        raw[0] |= 0x20;
+        raw[3] += 1;
+        raw.extend_from_slice(&[0, 0, 0, count]);
+        assert_eq!(
+            Err(Error::WrongPadding),
+            SenderReport::unmarshal(&mut Bytes::from(raw)),
+            "padding count {count}"
+        );
+    }
+    // Padding that eats into the sender information.
+    let mut raw = BARE_SENDER_REPORT.to_vec();
+    raw[0] |= 0x20;
+    raw[27] = 8;
+    assert_eq!(
+        Err(Error::PacketTooShort),
+        SenderReport::unmarshal(&mut Bytes::from(raw))
+    );
+}
+
+// RFC 3550 6.4.1: a profile-specific extension is a whole number of 32-bit words. It is not
+// filled up with RTCP padding: an SR opens a compound packet, where the P bit is clear.
+#[test]
+fn a_profile_extension_that_is_not_whole_words_is_not_marshalled() {
+    let sr = SenderReport {
+        ssrc: 1,
+        profile_extensions: Bytes::from_static(&[1, 2, 3]),
+        ..Default::default()
+    };
+    assert_eq!(Err(Error::WrongMarshalSize), sr.marshal());
+
+    let sr = SenderReport {
+        ssrc: 1,
+        profile_extensions: Bytes::from_static(&[1, 2, 3, 4, 5, 6, 7, 8]),
+        ..Default::default()
+    };
+    let raw = sr.marshal().unwrap();
+    assert_eq!(0x80, raw[0], "P is clear");
+    assert_eq!(sr, SenderReport::unmarshal(&mut raw.freeze()).unwrap());
+}
+
+// The length field ends the packet: what follows it in the datagram is the next packet, not
+// this report's extension.
+#[test]
+fn a_sender_report_ends_where_its_length_says() {
+    let mut datagram = BARE_SENDER_REPORT.to_vec();
+    datagram.extend_from_slice(&[0x81, 0xcb, 0x00, 0x01, 0, 0, 0, 1]); // BYE
+    let mut datagram = Bytes::from(datagram);
+
+    let sr = SenderReport::unmarshal(&mut datagram).unwrap();
+    assert!(sr.profile_extensions.is_empty());
+    assert_eq!(8, datagram.len(), "the BYE is still there");
 }

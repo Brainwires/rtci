@@ -18,6 +18,31 @@ pub struct ParamUnknown {
     value: Bytes,
 }
 
+impl ParamUnknown {
+    pub(crate) fn new(typ: u16, value: Bytes) -> Self {
+        Self { typ, value }
+    }
+
+    /// The parameter type as it is on the wire.
+    pub(crate) fn typ(&self) -> u16 {
+        self.typ
+    }
+
+    pub(crate) fn value(&self) -> &Bytes {
+        &self.value
+    }
+
+    /// RFC 9260 3.2.1, upper bits 00 and 01: stop processing the parameters of the chunk.
+    pub(crate) fn stops_processing(&self) -> bool {
+        self.typ & 0x8000 == 0
+    }
+
+    /// RFC 9260 3.2.1, upper bits 01 and 11: report the parameter as unrecognized.
+    pub(crate) fn is_reported(&self) -> bool {
+        self.typ & 0x4000 != 0
+    }
+}
+
 impl Display for ParamUnknown {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "ParamUnknown( {} {:?} )", self.header(), self.value)

@@ -99,7 +99,7 @@
 //!     // Get CSRC information for mixed audio
 //!     for csrc in receiver.get_contributing_sources() {
 //!         println!("CSRC: {}, timestamp: {:?}", csrc.source, csrc.timestamp);
-//!         println!("  Audio level: {}", csrc.audio_level);
+//!         println!("  Audio level: {:?}", csrc.audio_level);
 //!         println!("  RTP timestamp: {}", csrc.rtp_timestamp);
 //!     }
 //! }
@@ -223,6 +223,17 @@ impl RTCRtpReceiver<'_> {
             peer_connection: self.peer_connection,
         })
     }
+    /// The ids of the remote MediaStreams this receiver's track is in: one per `a=msid` line
+    /// of the remote media section, in order, without the `-` that stands for no stream
+    /// (RFC 8830 sections 2 and 3; W3C `[[AssociatedRemoteMediaStreams]]`, the `streams` of
+    /// the track event). Empty until an answer is applied, and for a track in no stream.
+    pub fn streams(&self) -> &[crate::media_stream::MediaStreamId] {
+        self.peer_connection.rtp_transceivers[self.id.0]
+            .receiver()
+            .as_ref()
+            .map_or(&[], |receiver| receiver.streams())
+    }
+
     /// Returns the track associated with this receiver.
     ///
     /// The [`track`](RTCRtpReceiver::track) method returns the [`MediaStreamTrack`] that is
@@ -241,27 +252,44 @@ impl RTCRtpReceiver<'_> {
             .track()
     }
 
-    /// Returns the RTP capabilities for the specified codec kind.
-    ///
-    /// The static [`get_capabilities`](RTCRtpReceiver::get_capabilities) method returns the most
-    /// optimistic view of the capabilities of the system for receiving media of the given kind
-    /// as defined in the [W3C WebRTC specification](https://www.w3.org/TR/webrtc/#dom-rtcrtpreceiver-getcapabilities).
+    /// The RTP capabilities of the engine for receiving `kind`: every codec the media engine
+    /// has registered for it (the retransmission format once, without an `sdpFmtpLine`) and
+    /// the header extensions registered for receiving. Nothing negotiated is read (W3C
+    /// `RTCRtpReceiver.getCapabilities`, a static method). `None` for a kind that is neither
+    /// audio nor video.
     ///
     /// # Parameters
     ///
     /// * `kind` - The codec kind (audio or video)
-    ///
-    /// # Returns
-    ///
-    /// Returns the RTP capabilities supported by this receiver for the specified codec kind.
     pub fn get_capabilities(&self, kind: RtpCodecKind) -> Option<RTCRtpCapabilities> {
-        // peer_connection is mutable borrow, its rtp_transceivers won't be resized and
-        // the direction won't be changed too, so, unwrap() here is safe.
+        internal::RTCRtpReceiverInternal::get_capabilities(kind, &self.peer_connection.media_engine)
+    }
+
+    /// The jitter buffer target the application asked for (W3C `jitterBufferTarget`): `None`
+    /// (null) leaves the delay to the engine.
+    ///
+    /// The engine keeps the value for the application's jitter buffer to read; the jitter
+    /// buffer interceptors take their delay when they are built.
+    pub fn jitter_buffer_target(&self) -> Option<std::time::Duration> {
         self.peer_connection.rtp_transceivers[self.id.0]
             .receiver()
             .as_ref()
-            .unwrap()
-            .get_capabilities(kind, &self.peer_connection.media_engine)
+            .and_then(|receiver| receiver.jitter_buffer_target())
+    }
+
+    /// Sets the jitter buffer target; `None` resets it to the engine's choice.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::RangeError`](shared::error::Error::RangeError) for a target above 4000
+    /// milliseconds (a `Duration` cannot be negative, the other value W3C refuses); the
+    /// stored target is then unchanged.
+    pub fn set_jitter_buffer_target(&mut self, target: Option<std::time::Duration>) -> Result<()> {
+        self.peer_connection.rtp_transceivers[self.id.0]
+            .receiver_mut()
+            .as_mut()
+            .expect("every transceiver has a receiver")
+            .set_jitter_buffer_target(target)
     }
 
     /// Returns the RTP receive parameters for this receiver.
@@ -274,13 +302,21 @@ impl RTCRtpReceiver<'_> {
     ///
     /// Returns a reference to the RTP receive parameters.
     pub fn get_parameters(&mut self) -> &RTCRtpReceiveParameters {
+        use crate::rtp_transceiver::RTCRtpTransceiverDirection;
+        // W3C 4.4.1.4: once a description negotiated a direction without receiving
+        // (sendonly, inactive), [[ReceiveCodecs]] is empty.
+        let transceiver = &mut self.peer_connection.rtp_transceivers[self.id.0];
+        let receiving = !matches!(
+            transceiver.current_direction(),
+            RTCRtpTransceiverDirection::Sendonly | RTCRtpTransceiverDirection::Inactive
+        );
         // peer_connection is mutable borrow, its rtp_transceivers won't be resized and
         // the direction won't be changed too, so, unwrap() here is safe.
-        self.peer_connection.rtp_transceivers[self.id.0]
+        transceiver
             .receiver_mut()
             .as_mut()
             .unwrap()
-            .get_parameters(&self.peer_connection.media_engine)
+            .get_public_parameters(&self.peer_connection.media_engine, receiving)
     }
 
     /// Returns an iterator over the contributing sources for this receiver.
@@ -297,13 +333,24 @@ impl RTCRtpReceiver<'_> {
     ///
     /// Returns an iterator over [`RTCRtpContributingSource`] objects.
     pub fn get_contributing_sources(&self) -> impl Iterator<Item = &RTCRtpContributingSource> {
-        // peer_connection is mutable borrow, its rtp_transceivers won't be resized and
-        // the direction won't be changed too, so, unwrap() here is safe.
+        let now = self.sources_now();
         self.peer_connection.rtp_transceivers[self.id.0]
             .receiver()
             .as_ref()
-            .unwrap()
-            .get_contributing_sources()
+            .expect("every transceiver has a receiver")
+            .live_contributing_sources(now)
+    }
+
+    /// The wall-clock time (since the Unix epoch) of the newest instant the connection has
+    /// been given, which the sources' timestamps are compared with: a source not heard in the
+    /// ten seconds before it is not listed.
+    fn sources_now(&self) -> std::time::Duration {
+        let context = &self.peer_connection.pipeline_context;
+        context
+            .interceptor_handler_context
+            .wall_clock
+            .map(|wall_clock| wall_clock.unix(context.now))
+            .unwrap_or_default()
     }
 
     /// Returns an iterator over the synchronization sources for this receiver.
@@ -321,13 +368,12 @@ impl RTCRtpReceiver<'_> {
     pub fn get_synchronization_sources(
         &self,
     ) -> impl Iterator<Item = &RTCRtpSynchronizationSource> {
-        // peer_connection is mutable borrow, its rtp_transceivers won't be resized and
-        // the direction won't be changed too, so, unwrap() here is safe.
+        let now = self.sources_now();
         self.peer_connection.rtp_transceivers[self.id.0]
             .receiver()
             .as_ref()
-            .unwrap()
-            .get_synchronization_sources()
+            .expect("every transceiver has a receiver")
+            .live_synchronization_sources(now)
     }
 
     /// Writes RTCP feedback packets for this receiver.

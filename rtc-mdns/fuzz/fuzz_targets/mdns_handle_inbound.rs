@@ -6,8 +6,9 @@
 //! resolver (answers for pending queries). Besides raw datagrams the input can build a question
 //! for one of our names or an answer for one of our pending queries around fuzzed bytes, so the
 //! matching paths are reached without the fuzzer having to guess a name. Queries are started,
-//! cancelled and retried on a clock the input advances. No randomness: an input replays
-//! identically.
+//! cancelled and retried, and names registered, probed for, announced and removed, on a clock
+//! the input advances. The delays RFC 6762 leaves to chance come from a seeded generator, so
+//! an input replays identically.
 
 use bytes::BytesMut;
 use libfuzzer_sys::fuzz_target;
@@ -95,10 +96,21 @@ impl Harness {
     }
 
     fn datagram(&mut self, from: SocketAddr, message: &[u8]) {
+        // Datagrams from a host whose last address byte is even arrive on the group, the
+        // others by unicast, which has rules of its own.
+        let unicast = match from.ip() {
+            IpAddr::V4(ip) => ip.octets()[3] & 0x01 != 0,
+            IpAddr::V6(ip) => ip.octets()[15] & 0x01 != 0,
+        };
+        let local_addr = if unicast {
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 2)), 5353)
+        } else {
+            MDNS_DEST_ADDR
+        };
         let _ = self.mdns.handle_read(TaggedBytesMut {
             now: self.now,
             transport: TransportContext {
-                local_addr: MDNS_DEST_ADDR,
+                local_addr,
                 peer_addr: from,
                 transport_protocol: TransportProtocol::UDP,
                 ecn: None,
@@ -130,6 +142,10 @@ fuzz_target!(|data: &[u8]| {
     data = rest;
 
     let mut mdns_config = MdnsConfig::default()
+        .with_jitter_seed(u64::from(config))
+        .with_destination_reported(config & 0x40 != 0)
+        .with_unicast_response(config & 0x80 != 0)
+        .with_first_query_delay(config & 0x01 != 0)
         .with_query_interval(Duration::from_millis(u64::from(config & 0x0f) * 100));
     if config & 0x10 != 0 {
         mdns_config =
@@ -231,7 +247,11 @@ fuzz_target!(|data: &[u8]| {
                         u16::from(byte(arg, 0)),
                     ))
                 };
-                let _ = h.mdns.add_local_name(&name, ip);
+                if byte(arg, 0) & 0x02 == 0 {
+                    let _ = h.mdns.add_local_name(&name, ip);
+                } else {
+                    let _ = h.mdns.remove_local_name(&name);
+                }
             }
         }
     }

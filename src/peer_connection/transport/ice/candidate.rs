@@ -119,6 +119,25 @@ pub struct RTCIceCandidate {
     pub relay_protocol: RTCIceServerTransportProtocol,
     /// The URL of the STUN/TURN server used to gather this candidate, if any.
     pub url: Option<String>,
+    /// The username fragment of the ICE generation the candidate belongs to (W3C
+    /// `RTCIceCandidate.usernameFragment`; RFC 8838 section 9: a trickled candidate is tied to
+    /// its ICE session, so that one that arrives after an ICE restart is recognised and
+    /// ignored). Set on the local candidates the peer connection announces.
+    #[serde(default)]
+    pub username_fragment: Option<String>,
+    /// W3C `RTCIceCandidate.sdpMid`: the mid of the media section whose transport the
+    /// candidate belongs to. Set on the local candidates the peer connection announces (the
+    /// section of the BUNDLE transport), `None` otherwise.
+    #[serde(default)]
+    pub sdp_mid: Option<String>,
+    /// W3C `RTCIceCandidate.sdpMLineIndex`: the index, from 0, of that media section.
+    #[serde(default)]
+    pub sdp_mline_index: Option<u16>,
+    /// Whether this is the end-of-candidates indication of a generation (W3C webrtc-pc section
+    /// 5.6, "the ICE agent has finished gathering"): a candidate whose `candidate` attribute is
+    /// the empty string. See [`RTCIceCandidate::end_of_candidates`].
+    #[serde(default)]
+    pub end_of_candidates: bool,
 }
 
 /// Conversion for ice_candidates
@@ -132,7 +151,8 @@ impl From<&Candidate> for RTCIceCandidate {
     fn from(c: &Candidate) -> Self {
         let typ: RTCIceCandidateType = c.candidate_type().into();
         let protocol = RTCIceProtocol::from(c.network_type().network_short().as_str());
-        let (related_address, related_port) = if let Some(ra) = c.related_address() {
+        // What is signalled: a base hidden behind an mDNS name is not (mDNS draft 3.1.2.2).
+        let (related_address, related_port) = if let Some(ra) = c.signalled_related_address() {
             (ra.address, ra.port)
         } else {
             (String::new(), 0)
@@ -152,6 +172,10 @@ impl From<&Candidate> for RTCIceCandidate {
             related_port,
             relay_protocol: Default::default(),
             url: c.url().map(|u| u.to_string()),
+            username_fragment: None,
+            sdp_mid: None,
+            sdp_mline_index: None,
+            end_of_candidates: false,
         }
     }
 }
@@ -169,7 +193,7 @@ impl RTCIceCandidate {
             priority: self.priority,
         };
 
-        let c = match self.typ {
+        let mut c = match self.typ {
             RTCIceCandidateType::Host => {
                 let config = CandidateHostConfig {
                     base_config,
@@ -205,6 +229,10 @@ impl RTCIceCandidate {
             }
             _ => return Err(Error::ErrICECandidateTypeUnknown),
         };
+        // RFC 6544 section 4.5: a TCP candidate of any type has a `tcptype`.
+        if self.typ != RTCIceCandidateType::Host {
+            c.set_tcp_type(self.tcp_type.to_ice());
+        }
 
         Ok(c)
     }
@@ -220,21 +248,57 @@ impl RTCIceCandidate {
     ///
     /// See [RTCIceCandidate.toJSON()](https://www.w3.org/TR/webrtc/#dom-rtcicecandidate-tojson)
     ///
-    /// The candidate knows no media section of its own, so `sdp_mid` is `None` and
-    /// `sdp_mline_index` is `0` (the first m-section, the one a BUNDLE group's transport
-    /// belongs to). An empty `sdp_mid` would name a section no description has, and
+    /// `candidate`, `sdpMid`, `sdpMLineIndex` and `usernameFragment` are the candidate's own.
+    /// A candidate that knows no media section (one built by hand) has `sdp_mid` `None` and
+    /// `sdp_mline_index` `0` (the first m-section, the one a BUNDLE group's transport belongs
+    /// to): an empty `sdp_mid` would name a section no description has, and
     /// `add_remote_candidate` matches `sdp_mid` before `sdp_mline_index` (W3C
-    /// `addIceCandidate`), so the remote side would refuse it.
+    /// `addIceCandidate`), so the remote side would refuse it. The end-of-candidates
+    /// indication gives an empty `candidate`.
     pub fn to_json(&self) -> Result<RTCIceCandidateInit> {
-        let candidate = self.to_ice()?;
-
+        let sdp_mline_index = if self.sdp_mid.is_none() && self.sdp_mline_index.is_none() {
+            Some(0u16)
+        } else {
+            self.sdp_mline_index
+        };
         Ok(RTCIceCandidateInit {
-            candidate: format!("candidate:{}", candidate.marshal()),
-            sdp_mid: None,
-            sdp_mline_index: Some(0u16),
-            username_fragment: None,
+            candidate: self.candidate()?,
+            sdp_mid: self.sdp_mid.clone(),
+            sdp_mline_index,
+            username_fragment: self.username_fragment.clone(),
             url: None,
         })
+    }
+
+    /// W3C `RTCIceCandidate.candidate`: the `candidate-attribute` (RFC 8839 section 5.1),
+    /// `candidate:` included; the empty string for the end-of-candidates indication.
+    ///
+    /// # Errors
+    ///
+    /// When the candidate's members do not make a candidate (an unknown type, say).
+    pub fn candidate(&self) -> Result<String> {
+        if self.end_of_candidates {
+            return Ok(String::new());
+        }
+        Ok(format!("candidate:{}", self.to_ice()?.marshal()))
+    }
+
+    /// The end-of-candidates indication of the ICE generation `username_fragment` names, for
+    /// the media section `sdp_mid` / `sdp_mline_index` (W3C webrtc-pc section 5.6: "a new
+    /// RTCIceCandidate whose candidate attribute is set to an empty string"). Every other
+    /// member is empty.
+    pub fn end_of_candidates_for(
+        username_fragment: Option<String>,
+        sdp_mid: Option<String>,
+        sdp_mline_index: Option<u16>,
+    ) -> Self {
+        Self {
+            username_fragment,
+            sdp_mid,
+            sdp_mline_index,
+            end_of_candidates: true,
+            ..Default::default()
+        }
     }
 }
 

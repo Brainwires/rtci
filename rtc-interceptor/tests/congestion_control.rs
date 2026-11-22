@@ -254,9 +254,24 @@ fn a_changed_estimate_rides_out_on_the_feedback_packet() {
     chain.bind_local_stream(&stream());
     send_and_drain(&mut chain, epoch, 3);
 
-    // Unchanged: nothing to announce.
+    // The first inbound packet announces the estimator's starting rate: the pacer has to learn
+    // it too, not only its changes.
     chain
         .handle_read(twcc_feedback(epoch + Duration::from_millis(200), 0, 3))
+        .expect("read");
+    let first = chain.poll_read().expect("the feedback packet carries on");
+    assert!(matches!(
+        first.message.get(&Attribute::TargetBitrateChanged {
+            bits_per_second: 0.0
+        }),
+        Some(Attribute::TargetBitrateChanged { bits_per_second }) if *bits_per_second == BITRATE
+    ));
+    while chain.poll_read().is_some() {}
+
+    // Unchanged: nothing to announce.
+    send_and_drain(&mut chain, epoch + Duration::from_millis(210), 3);
+    chain
+        .handle_read(twcc_feedback(epoch + Duration::from_millis(280), 3, 3))
         .expect("read");
     let unchanged = chain.poll_read().expect("the feedback packet carries on");
     assert!(
@@ -271,7 +286,7 @@ fn a_changed_estimate_rides_out_on_the_feedback_packet() {
     estimator.set_target(BITRATE / 2.0);
     send_and_drain(&mut chain, epoch + Duration::from_millis(300), 3);
     chain
-        .handle_read(twcc_feedback(epoch + Duration::from_millis(500), 3, 3))
+        .handle_read(twcc_feedback(epoch + Duration::from_millis(500), 6, 3))
         .expect("read");
 
     let mut announced = None;
@@ -351,9 +366,13 @@ fn unacknowledged_packets_are_written_off_after_the_prune_horizon() {
 ///
 /// This is what the plan expected `Attribute::Retransmission` to be needed for. It is not: the NACK
 /// responder is application-ward of this interceptor, so its retransmission travels the write leg
-/// and passes here like any other departing packet, picking up its own transport-wide sequence
-/// number from the TWCC sender on the way. Two departures, two history entries — by ordering, not
-/// by inspection.
+/// and passes here like any other departing packet. Two departures, two history entries — by
+/// ordering, not by inspection.
+///
+/// Without RTX the retransmission is the original packet sent again, and the TWCC sender gives it
+/// the transport-wide number it gave the original: a new number would change its bytes, and the
+/// SRTP sender below the chain refuses a second, different packet under one index (RFC 3711
+/// section 3.3.1). Both entries therefore carry the same number.
 ///
 /// The attribute still earns its place by letting an estimator *tell them apart* if it wants to;
 /// it is not needed for the byte total to be right.
@@ -415,9 +434,9 @@ fn a_retransmission_is_recorded_as_a_separate_departure() {
     }
     assert_eq!(1, retransmitted, "the responder retransmitted the packet");
 
-    // Both departures are on the books, with distinct transport-wide numbers.
+    // Both departures are on the books, under the one transport-wide number they share.
     chain
-        .handle_read(twcc_feedback(epoch + Duration::from_millis(100), 0, 2))
+        .handle_read(twcc_feedback(epoch + Duration::from_millis(100), 0, 1))
         .expect("read");
     while chain.poll_read().is_some() {}
 
@@ -429,12 +448,12 @@ fn a_retransmission_is_recorded_as_a_separate_departure() {
          saw only one would under-count the bytes on the wire exactly when the path is lossy"
     );
     assert_eq!(
-        vec![0, 1],
+        vec![0, 0],
         reports
             .iter()
             .map(|report| report.twcc_sequence_number)
             .collect::<Vec<_>>(),
-        "each transmission gets its own transport-wide number"
+        "a retransmission without RTX keeps the original's transport-wide number"
     );
 }
 

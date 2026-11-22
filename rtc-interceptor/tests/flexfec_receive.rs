@@ -83,8 +83,8 @@ impl Harness {
         let chain = Registry::new()
             .with(Slot::FecDecoder, FlexFec03ReceiveBuilder::new().build())
             .with(
-                // Application-ward of the FEC decoder at 6_000, so it sees recovered packets.
-                Slot::from(6_500),
+                // Application-ward of the FEC decoder at 10_300, so it sees recovered packets.
+                Slot::from(10_450),
                 Marker {
                     seen: marker_seen,
                     read_queue: VecDeque::new(),
@@ -153,7 +153,7 @@ fn block(first: u16, count: u16) -> Vec<rtp::Packet> {
 }
 
 fn encode(media: &[rtp::Packet], num_fec_packets: u32) -> Vec<rtp::Packet> {
-    FlexFec03Encoder::new(REPAIR_PT, REPAIR_SSRC).encode(media, num_fec_packets)
+    FlexFec03Encoder::new(REPAIR_PT, REPAIR_SSRC).encode(media, num_fec_packets, 0)
 }
 
 fn bytes_of(packet: &rtp::Packet) -> Vec<u8> {

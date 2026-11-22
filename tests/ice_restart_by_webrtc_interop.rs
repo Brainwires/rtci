@@ -151,6 +151,12 @@ async fn test_ice_restart_interop() -> Result<()> {
     log::info!("RTC peer bound to {}", rtc_local_addr);
 
     let rtc_setting_engine = SettingEngineBuilder::new()
+        // The webrtc 0.17 peer fails its DTLS transport when no SRTP profile was negotiated
+        // (pion lineage: `ErrNoSRTPProtectionProfile`), data channels only or not. The rtc peer
+        // answers here, so it is the DTLS client: under the RFC 5764 section 4.1 default it
+        // would offer no `use_srtp` on this data-channel-only session and the peer would never
+        // connect. So this peer offers it on every association, as browsers do.
+        .with_dtls_use_srtp_on_every_association(true)
         .with_answering_dtls_role(RTCDtlsRole::Client)
         .build();
 
@@ -509,6 +515,22 @@ async fn test_ice_restart_interop() -> Result<()> {
     }
 
     log::info!("Messages exchanged successfully before ICE restart");
+
+    // The webrtc 0.17 agent refuses a restart while it is still gathering
+    // (`ErrRestartWhenGathering`, "ICE Agent can not be restarted when gathering"), and
+    // `create_offer` with `ice_restart` fails with it. Its gathering includes the
+    // server-reflexive candidate from the STUN server above, which can take longer than the
+    // connection and the first messages did (a slow DNS answer on a CI runner), so the restart
+    // waits for the end of gathering. An already complete gathering resolves at once.
+    let mut webrtc_gathering_done = webrtc_pc.gathering_complete_promise().await;
+    if timeout(Duration::from_secs(15), webrtc_gathering_done.recv())
+        .await
+        .is_err()
+    {
+        return Err(anyhow::anyhow!(
+            "the webrtc peer was still gathering after 15 s; it cannot restart before"
+        ));
+    }
 
     // Perform ICE restart from webrtc side
     log::info!("Performing ICE restart...");

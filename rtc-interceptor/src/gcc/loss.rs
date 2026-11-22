@@ -58,6 +58,32 @@ impl LossController {
         }
     }
 
+    /// Change the range the target is held in, and bring the target into it.
+    pub fn set_bounds(&mut self, min: f64, max: f64) {
+        self.min = min;
+        self.max = max.max(min);
+        self.target = self.target.clamp(self.min, self.max);
+    }
+
+    /// Bring the target up to `bound` if it is below it: a measurement showed the path
+    /// carries that much (a probe).
+    pub fn raise(&mut self, bound: f64) {
+        self.target = self.target.max(bound).clamp(self.min, self.max);
+    }
+
+    /// Bring the target down to `bound` if it is above it: a deliberate cut (missing feedback).
+    pub fn cap(&mut self, bound: f64) {
+        self.target = self.target.min(bound).clamp(self.min, self.max);
+    }
+
+    /// Update from a fraction lost a receiver report gave, when there is no per-packet
+    /// feedback to count from (section 7).
+    pub fn update_fraction(&mut self, now: Instant, fraction_lost: f64) -> f64 {
+        // 256 packets is the resolution of the field.
+        let lost = (fraction_lost.clamp(0.0, 1.0) * 256.0).round() as usize;
+        self.update(now, lost, 256)
+    }
+
     /// The current loss-based target, in bits per second.
     pub fn target(&self) -> f64 {
         self.target

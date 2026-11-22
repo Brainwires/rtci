@@ -105,20 +105,23 @@ fn test_fragment_buffer() -> Result<()> {
             ],
             0,
         ),
-        // Ensure zero length fragments don't cause an infinite recursive loop which in turn causes
-        // a stack overflow.
-        (
-            "Zero length fragment",
-            vec![vec![
+    ];
+
+    // A zero-length fragment of a one-byte message, followed in its record by a byte that is
+    // no handshake header. It must not loop or recurse (it once overflowed the stack), and it
+    // carries none of the message: nothing is reassembled from it. (It used to end the message
+    // with whatever followed it in the record.)
+    let mut fragment_buffer = FragmentBuffer::new();
+    assert!(
+        fragment_buffer
+            .push(&[
                 0x16, 0xfe, 0xfd, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0d, 0x00,
                 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            ]],
-            vec![vec![
-                0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
-            ]],
-            0,
-        ),
-    ];
+            ])
+            .is_err(),
+        "the byte after the zero-length fragment is not a handshake header"
+    );
+    assert!(fragment_buffer.pop().is_err());
 
     for (name, inputs, expects, expected_epoch) in tests {
         let mut fragment_buffer = FragmentBuffer::new();

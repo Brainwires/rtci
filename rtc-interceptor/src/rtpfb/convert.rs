@@ -7,7 +7,7 @@
 use super::acknowledgement::Acknowledgement;
 use rtcp::transport_feedbacks::cc_feedback_report::{CcFeedbackReport, Ecn};
 use rtcp::transport_feedbacks::transport_layer_cc::{
-    PacketStatusChunk, SymbolTypeTcc, TransportLayerCc,
+    PacketStatusChunk, ReferenceTimeUnwrapper, SymbolTypeTcc, TransportLayerCc,
 };
 use std::collections::HashMap;
 use std::time::Duration;
@@ -25,16 +25,123 @@ const CCFB_OFFSET_DENOMINATOR: u32 = 1024;
 /// arrival time.
 const CCFB_OFFSET_AFTER_REPORT: u16 = 0x1FFF;
 
+/// The RFC 8888 offset meaning "arrived 8189/1024 s or more before the report timestamp": the
+/// packet arrived, but when is not known (RFC 8888 section 3.1).
+const CCFB_OFFSET_TOO_OLD: u16 = 0x1FFE;
+
+/// RFC 8888 report timestamps are the middle 32 bits of an NTP timestamp: units of 1/65536 s.
+const CCFB_TIMESTAMP_DENOMINATOR: f64 = 65_536.0;
+
+/// A counter of `bits` bits that wraps, followed from one reading to the next.
+#[derive(Debug, Clone, Copy)]
+struct WrappingCounter {
+    bits: u32,
+    /// The last raw reading and the extended value it was given.
+    last: Option<(u32, u64)>,
+}
+
+impl WrappingCounter {
+    const fn new(bits: u32) -> Self {
+        Self { bits, last: None }
+    }
+
+    /// The reading as a count that does not wrap. The first reading is placed one full period
+    /// up, so a later reading a little *behind* it (feedback read out of order) does not go
+    /// below zero.
+    fn extend(&mut self, raw: u32) -> u64 {
+        let period = 1u64 << self.bits;
+        let raw = u64::from(raw) & (period - 1);
+        let extended = match self.last {
+            None => period + raw,
+            Some((last_raw, last_extended)) => {
+                // The shorter way round the circle: forwards if less than half a period ahead,
+                // backwards otherwise.
+                let ahead = raw.wrapping_sub(u64::from(last_raw)) & (period - 1);
+                if ahead < period / 2 {
+                    last_extended + ahead
+                } else {
+                    last_extended.saturating_sub(period - ahead)
+                }
+            }
+        };
+        self.last = Some((raw as u32, extended));
+        extended
+    }
+}
+
+/// The receiver's clock as successive feedback reports give it, without the wraps.
+///
+/// Both feedback formats time arrivals against a short counter: TWCC's reference time is 24 bits
+/// of 64 ms (it wraps every 12.4 days, and is a signed value, so a receiver may start it
+/// anywhere), RFC 8888's report timestamp is 32 bits of 1/65536 s (it wraps every 18.2 hours).
+/// Arrival times are only useful as differences, across reports as much as within one, so the
+/// counters have to be followed through their wraps: read raw, the report after a wrap places
+/// its arrivals days before the previous report's.
+///
+/// One per connection, fed every report in the order it is read.
+#[derive(Debug, Clone)]
+pub struct FeedbackTimeline {
+    twcc_reference: ReferenceTimeUnwrapper,
+    ccfb_timestamp: WrappingCounter,
+}
+
+impl Default for FeedbackTimeline {
+    fn default() -> Self {
+        Self {
+            twcc_reference: ReferenceTimeUnwrapper::new(),
+            ccfb_timestamp: WrappingCounter::new(32),
+        }
+    }
+}
+
+impl FeedbackTimeline {
+    /// A timeline that has seen no report yet.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Convert a TWCC feedback packet, placing its arrivals after those of the reports before
+    /// it.
+    pub fn convert_twcc(&mut self, feedback: &TransportLayerCc) -> Vec<Acknowledgement> {
+        // Signed ticks from the receiver's own origin; one period is added so a reference time
+        // that starts negative, or steps back a little, stays a non-negative duration.
+        let ticks = self.twcc_reference.unwrap(feedback.reference_time) + (1i64 << 24);
+        twcc_acknowledgements(
+            feedback,
+            Duration::from_millis(ticks.max(0) as u64 * TWCC_REFERENCE_TICK.as_millis() as u64),
+        )
+    }
+
+    /// Convert an RFC 8888 report, placing its arrivals after those of the reports before it.
+    pub fn convert_ccfb(
+        &mut self,
+        feedback: &CcFeedbackReport,
+    ) -> (Duration, HashMap<u32, Vec<Acknowledgement>>) {
+        let units = self.ccfb_timestamp.extend(feedback.report_timestamp);
+        ccfb_acknowledgements(
+            feedback,
+            Duration::from_secs_f64(units as f64 / CCFB_TIMESTAMP_DENOMINATOR),
+        )
+    }
+}
+
 /// Convert a TWCC feedback packet into one acknowledgement per reported packet.
 ///
 /// Arrival times are relative to the feedback's own 24-bit reference time, so they are comparable
-/// across successive TWCC reports but not with any other clock.
+/// across successive TWCC reports only until that counter wraps: a connection converts through a
+/// [`FeedbackTimeline`], which follows it.
 pub fn convert_twcc(feedback: &TransportLayerCc) -> Vec<Acknowledgement> {
+    twcc_acknowledgements(feedback, TWCC_REFERENCE_TICK * feedback.reference_time)
+}
+
+/// The acknowledgements of one TWCC feedback packet whose reference time is `reference` on the
+/// receiver's clock.
+fn twcc_acknowledgements(feedback: &TransportLayerCc, reference: Duration) -> Vec<Acknowledgement> {
     let mut acknowledgements = Vec::new();
 
     // The reference time is a count of 64 ms ticks on the receiver's clock; deltas accumulate
     // from there, so each arrival depends on every arrival before it in the same report.
-    let mut arrival = TWCC_REFERENCE_TICK * feedback.reference_time;
+    let mut arrival = reference;
     let mut delta_index = 0usize;
     let mut offset = 0u16;
 
@@ -125,7 +232,20 @@ pub fn convert_twcc(feedback: &TransportLayerCc) -> Vec<Acknowledgement> {
 /// The returned delay is the gap between the newest arrival the report describes and the instant
 /// it was stamped. A round trip measured without subtracting it counts the receiver's own
 /// reporting interval as network time.
+///
+/// Each arrival time is the report timestamp minus the packet's arrival time offset (RFC 8888
+/// section 3.1), on the receiver's clock: a later arrival is a larger value, within a report and
+/// from one report to the next, until the 32-bit report timestamp wraps. A connection converts
+/// through a [`FeedbackTimeline`], which follows the wrap.
 pub fn convert_ccfb(feedback: &CcFeedbackReport) -> (Duration, HashMap<u32, Vec<Acknowledgement>>) {
+    FeedbackTimeline::new().convert_ccfb(feedback)
+}
+
+/// The acknowledgements of one RFC 8888 report stamped at `report_time` on the receiver's clock.
+fn ccfb_acknowledgements(
+    feedback: &CcFeedbackReport,
+    report_time: Duration,
+) -> (Duration, HashMap<u32, Vec<Acknowledgement>>) {
     let mut per_stream = HashMap::new();
     // Arrivals are offsets *back* from the report timestamp, so the newest arrival is the
     // smallest offset.
@@ -142,9 +262,12 @@ pub fn convert_ccfb(feedback: &CcFeedbackReport) -> (Duration, HashMap<u32, Vec<
                 continue;
             }
 
-            // The reserved offset says the packet arrived after the report was stamped, which
-            // leaves no usable time.
-            let arrival = if metric.arrival_time_offset == CCFB_OFFSET_AFTER_REPORT {
+            // The two reserved offsets say the packet arrived after the report was stamped, or
+            // longer before it than the field can express. Neither is a measurement: the packet
+            // counts as received and contributes no arrival time.
+            let arrival = if metric.arrival_time_offset == CCFB_OFFSET_AFTER_REPORT
+                || metric.arrival_time_offset == CCFB_OFFSET_TOO_OLD
+            {
                 None
             } else {
                 let offset = Duration::from_secs_f64(
@@ -154,7 +277,8 @@ pub fn convert_ccfb(feedback: &CcFeedbackReport) -> (Duration, HashMap<u32, Vec<
                     Some(newest) => newest.min(offset),
                     None => offset,
                 });
-                Some(offset)
+                // The offset counts *back* from the report timestamp.
+                Some(report_time.saturating_sub(offset))
             };
 
             acknowledgements.push(Acknowledgement::received(
@@ -426,12 +550,124 @@ mod tests {
 
         let first = &per_stream[&10];
         assert_eq!(100, first[0].sequence_number);
-        assert_eq!(Some(Duration::from_millis(500)), first[0].arrival);
         assert!(!first[1].arrived);
 
         let second = &per_stream[&20];
         assert_eq!(5, second[0].sequence_number);
         assert_eq!(Ecn::Ce, second[0].ecn, "ECN survives conversion");
+
+        // The arrival time is the report timestamp minus the offset: the packet with the
+        // smaller offset (256/1024 s) arrived a quarter of a second after the other.
+        assert_eq!(
+            Duration::from_millis(250),
+            second[0].arrival.unwrap() - first[0].arrival.unwrap()
+        );
+    }
+
+    fn one_packet_report(report_timestamp: u32, offset: u16, sequence: u16) -> CcFeedbackReport {
+        CcFeedbackReport {
+            sender_ssrc: 1,
+            report_blocks: vec![CcFeedbackReportBlock {
+                media_ssrc: 10,
+                begin_sequence: sequence,
+                metric_blocks: vec![metric(true, offset, Ecn::NotEct)],
+            }],
+            report_timestamp,
+        }
+    }
+
+    /// RFC 8888 section 3.1: the arrival time is "an offset before the time represented by the
+    /// Report Timestamp". Across two reports the arrival of a later packet is later by the
+    /// difference of the timestamps less the difference of the offsets.
+    #[test]
+    fn ccfb_arrivals_are_measured_back_from_each_reports_timestamp() {
+        let mut timeline = FeedbackTimeline::new();
+        // 100 ms apart (6554 units of 1/65536 s); offsets of 10/1024 s and 5/1024 s.
+        let (_, first) = timeline.convert_ccfb(&one_packet_report(0x0001_0000, 10, 1));
+        let (_, second) = timeline.convert_ccfb(&one_packet_report(0x0001_0000 + 6554, 5, 2));
+
+        let gap = second[&10][0].arrival.unwrap() - first[&10][0].arrival.unwrap();
+        let expected = Duration::from_secs_f64(6554.0 / 65536.0 + 5.0 / 1024.0);
+        assert!(
+            gap.abs_diff(expected) < Duration::from_micros(10),
+            "expected {expected:?}, got {gap:?}"
+        );
+    }
+
+    /// The report timestamp wraps every 18.2 hours. The report after the wrap is later, not
+    /// 18 hours earlier.
+    #[test]
+    fn the_ccfb_report_timestamp_is_followed_through_its_wrap() {
+        let mut timeline = FeedbackTimeline::new();
+        let (_, before) = timeline.convert_ccfb(&one_packet_report(0xFFFF_F000, 0, 1));
+        let (_, after) = timeline.convert_ccfb(&one_packet_report(0x0000_0A00, 0, 2));
+
+        let gap = after[&10][0].arrival.unwrap() - before[&10][0].arrival.unwrap();
+        let expected = Duration::from_secs_f64(f64::from(0x1000u32 + 0xA00) / 65536.0);
+        assert!(
+            gap.abs_diff(expected) < Duration::from_micros(10),
+            "expected {expected:?}, got {gap:?}"
+        );
+    }
+
+    fn one_packet_feedback(reference_time: u32, sequence: u16) -> TransportLayerCc {
+        TransportLayerCc {
+            base_sequence_number: sequence,
+            packet_status_count: 1,
+            reference_time,
+            packet_chunks: vec![run_length(SymbolTypeTcc::PacketReceivedSmallDelta, 1)],
+            recv_deltas: vec![RecvDelta {
+                type_tcc_packet: SymbolTypeTcc::PacketReceivedSmallDelta,
+                delta: 0,
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// draft-holmer-rmcat-transport-wide-cc-extensions-01 section 3.1: the reference time is a
+    /// 24-bit value in multiples of 64 ms. It wraps every 12.4 days, and a receiver may start it
+    /// anywhere: the feedback after 0xFFFFFF is 64 ms later, not 12.4 days earlier (audit bug
+    /// T5).
+    #[test]
+    fn the_twcc_reference_time_is_followed_through_its_wrap() {
+        let mut timeline = FeedbackTimeline::new();
+        let before = timeline.convert_twcc(&one_packet_feedback(0x00FF_FFFF, 1));
+        let after = timeline.convert_twcc(&one_packet_feedback(0x0000_0000, 2));
+        let later = timeline.convert_twcc(&one_packet_feedback(0x0000_0002, 3));
+
+        assert_eq!(
+            Duration::from_millis(64),
+            after[0].arrival.unwrap() - before[0].arrival.unwrap()
+        );
+        assert_eq!(
+            Duration::from_millis(128),
+            later[0].arrival.unwrap() - after[0].arrival.unwrap()
+        );
+    }
+
+    /// Feedback read out of order steps the clock back by the difference, not forward by almost
+    /// a whole period.
+    #[test]
+    fn a_reference_time_behind_the_last_one_steps_back() {
+        let mut timeline = FeedbackTimeline::new();
+        let first = timeline.convert_twcc(&one_packet_feedback(10, 1));
+        let earlier = timeline.convert_twcc(&one_packet_feedback(8, 2));
+
+        assert_eq!(
+            Duration::from_millis(128),
+            first[0].arrival.unwrap() - earlier[0].arrival.unwrap()
+        );
+    }
+
+    /// RFC 8888 section 3.1: 0x1FFE is an over-range measurement, not an arrival 8 seconds
+    /// before the report (rfc8888.md bug B7).
+    #[test]
+    fn the_over_range_offset_yields_no_arrival_time() {
+        let (delay, per_stream) = convert_ccfb(&one_packet_report(0x0010_0000, 0x1FFE, 1));
+
+        assert!(per_stream[&10][0].arrived, "it did arrive");
+        assert_eq!(None, per_stream[&10][0].arrival, "when is not known");
+        assert_eq!(Duration::ZERO, delay);
     }
 
     /// The receiver's own reporting delay is not network time. Without subtracting it, a round

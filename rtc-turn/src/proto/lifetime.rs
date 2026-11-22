@@ -9,9 +9,9 @@ use stun::attributes::*;
 use stun::checks::*;
 use stun::message::*;
 
-/// `DEFAULT_LIFETIME` in RFC 5766 is 10 minutes.
+/// `DEFAULT_LIFETIME` in RFC 8656 is 10 minutes.
 ///
-/// [RFC 5766 Section 2.2](https://www.rfc-editor.org/rfc/rfc5766#section-2.2).
+/// [RFC 8656 Section 3.2](https://www.rfc-editor.org/rfc/rfc8656#section-3.2).
 pub const DEFAULT_LIFETIME: Duration = Duration::from_secs(10 * 60);
 
 /// `Lifetime` represents `LIFETIME` attribute.
@@ -22,7 +22,7 @@ pub const DEFAULT_LIFETIME: Duration = Duration::from_secs(10 * 60);
 /// unsigned integral value representing the number of seconds remaining
 /// until expiration.
 ///
-/// [RFC 5766 Section 14.2](https://www.rfc-editor.org/rfc/rfc5766#section-14.2).
+/// [RFC 8656 Section 18.2](https://www.rfc-editor.org/rfc/rfc8656#section-18.2).
 #[derive(Default, Debug, PartialEq, Eq)]
 pub struct Lifetime(pub Duration);
 
@@ -39,7 +39,10 @@ impl Setter for Lifetime {
     /// Adds `LIFETIME` to message.
     fn add_to(&self, m: &mut Message) -> Result<()> {
         let mut v = vec![0; LIFETIME_SIZE];
-        v.copy_from_slice(&(self.0.as_secs() as u32).to_be_bytes());
+        // A 32-bit count of seconds (RFC 8656 §18.2): a longer duration is the longest it
+        // can say, not its low 32 bits.
+        let seconds = u32::try_from(self.0.as_secs()).unwrap_or(u32::MAX);
+        v.copy_from_slice(&seconds.to_be_bytes());
         m.add(ATTR_LIFETIME, &v);
         Ok(())
     }

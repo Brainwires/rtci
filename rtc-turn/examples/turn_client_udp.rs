@@ -93,6 +93,7 @@ fn main() -> Result<()> {
         software: String::new(),
         rto_in_ms: 0,
         allocation_refresh_interval_cap: None,
+        ..Default::default()
     };
 
     // An application selects the crypto provider; library code never resolves a default.
@@ -162,7 +163,7 @@ fn main() -> Result<()> {
                         assert!(false, "relayed address is not none");
                     }
                 }
-                Event::AllocateError(_, err) => return Err(err),
+                Event::AllocateError(_, err) => return Err(err.into()),
                 Event::CreatePermissionResponse(tid, peer_addr) => {
                     println!("CreatePermission for peer addr {} is granted", peer_addr);
                     if let Some(id) = create_permission_tid {
@@ -173,7 +174,7 @@ fn main() -> Result<()> {
                         assert!(false, "create_permission_tid is none");
                     }
                 }
-                Event::CreatePermissionError(_, err) => return Err(err),
+                Event::CreatePermissionError(_, err) => return Err(err.into()),
                 Event::DataIndicationOrChannelData(_, from, data) => {
                     println!("relay read: {:?} from {}", &data[..], from);
 

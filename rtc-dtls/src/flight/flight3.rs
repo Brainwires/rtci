@@ -1,13 +1,9 @@
+use super::flight1::client_hello_extensions;
 use super::flight5::*;
 use super::*;
 use crate::compression_methods::*;
 use crate::config::*;
 use crate::content::*;
-use crate::extension::extension_server_name::*;
-use crate::extension::extension_supported_elliptic_curves::*;
-use crate::extension::extension_supported_point_formats::*;
-use crate::extension::extension_supported_signature_algorithms::*;
-use crate::extension::extension_use_extended_master_secret::*;
 use crate::extension::extension_use_srtp::*;
 use crate::extension::*;
 use crate::handshake::handshake_message_client_hello::*;
@@ -20,8 +16,6 @@ use shared::error::Error;
 use crate::cipher_suite::cipher_suite_for_id;
 use crate::prf::{prf_pre_master_secret, prf_psk_pre_master_secret};
 use crate::{find_matching_cipher_suite, find_matching_srtp_profile};
-
-use crate::extension::renegotiation_info::ExtensionRenegotiationInfo;
 
 use log::*;
 use std::fmt;
@@ -181,9 +175,83 @@ impl Flight for Flight3 {
                 ));
             }
 
+            // RFC 5246 7.4.1.3: null is the only compression method this client offers.
+            if h.compression_method != CompressionMethodId::Null {
+                return Err((
+                    Some(Alert {
+                        alert_level: AlertLevel::Fatal,
+                        alert_description: AlertDescription::IllegalParameter,
+                    }),
+                    Some(Error::ErrCompressionMethodNotOffered),
+                ));
+            }
+
+            // RFC 5246 7.4.1.4: an extension type the ClientHello did not carry is answered
+            // with unsupported_extension.
+            let offered: Vec<u16> = client_hello_extensions(
+                cfg,
+                state.tls13_offer.as_ref(),
+                state.connection_id_offer.as_deref(),
+            )
+            .iter()
+            .map(|extension| extension.extension_type())
+            .collect();
+            if h.extensions
+                .iter()
+                .any(|extension| !offered.contains(&extension.extension_type()))
+            {
+                return Err((
+                    Some(Alert {
+                        alert_level: AlertLevel::Fatal,
+                        alert_description: AlertDescription::UnsupportedExtension,
+                    }),
+                    Some(Error::ErrUnsolicitedExtension),
+                ));
+            }
+
+            state.srtp_protection_profile = SrtpProtectionProfile::Unsupported;
+            state.extended_master_secret = false;
+            state.secure_renegotiation = false;
+            // RFC 9146 section 3: with the extension in both hellos, connection ids are
+            // negotiated. The server's is what this client puts in its records; the one
+            // this client offered is what the server puts in its own. (An extension the
+            // ClientHello did not carry was refused above.)
+            state.local_connection_id = None;
+            state.remote_connection_id = None;
+            for extension in &h.extensions {
+                match extension.as_connection_id() {
+                    Some(Ok(connection_id)) => {
+                        state.remote_connection_id = Some(connection_id.to_vec());
+                        state
+                            .local_connection_id
+                            .clone_from(&state.connection_id_offer);
+                    }
+                    Some(Err(error)) => {
+                        return Err((
+                            Some(Alert {
+                                alert_level: AlertLevel::Fatal,
+                                alert_description: AlertDescription::DecodeError,
+                            }),
+                            Some(error),
+                        ));
+                    }
+                    None => {}
+                }
+            }
             for extension in &h.extensions {
                 match extension {
                     Extension::UseSrtp(e) => {
+                        // RFC 5764 4.1.1: exactly one profile. 4.1.3: this client offers no
+                        // MKI, so a server that returns one has changed the offer.
+                        if e.protection_profiles.len() != 1 || !e.mki.is_empty() {
+                            return Err((
+                                Some(Alert {
+                                    alert_level: AlertLevel::Fatal,
+                                    alert_description: AlertDescription::IllegalParameter,
+                                }),
+                                Some(Error::ErrInvalidUseSrtpAnswer),
+                            ));
+                        }
                         let profile = match find_matching_srtp_profile(
                             &e.protection_profiles,
                             &cfg.local_srtp_protection_profiles,
@@ -201,27 +269,40 @@ impl Flight for Flight3 {
                         };
                         state.srtp_protection_profile = profile;
                     }
-                    Extension::UseExtendedMasterSecret(_)
-                        if cfg.extended_master_secret != ExtendedMasterSecretType::Disable =>
-                    {
+                    Extension::UseExtendedMasterSecret(_) => {
                         state.extended_master_secret = true;
+                    }
+                    Extension::RenegotiationInfo(e) => {
+                        // RFC 5746 3.4: this is an initial handshake, so the field is empty.
+                        if !e.renegotiated_connection.is_empty() {
+                            return Err((
+                                Some(Alert {
+                                    alert_level: AlertLevel::Fatal,
+                                    alert_description: AlertDescription::HandshakeFailure,
+                                }),
+                                Some(Error::ErrRenegotiationInfoNotEmpty),
+                            ));
+                        }
+                        state.secure_renegotiation = true;
                     }
                     _ => {}
                 };
             }
 
+            // RFC 7627 5.2: handshake_failure.
             if cfg.extended_master_secret == ExtendedMasterSecretType::Require
                 && !state.extended_master_secret
             {
                 return Err((
                     Some(Alert {
                         alert_level: AlertLevel::Fatal,
-                        alert_description: AlertDescription::InsufficientSecurity,
+                        alert_description: AlertDescription::HandshakeFailure,
                     }),
                     Some(Error::ErrClientRequiredButNoServerEms),
                 ));
             }
             if !cfg.local_srtp_protection_profiles.is_empty()
+                && !cfg.use_srtp_optional
                 && state.srtp_protection_profile == SrtpProtectionProfile::Unsupported
             {
                 return Err((
@@ -232,6 +313,7 @@ impl Flight for Flight3 {
                     Some(Error::ErrRequestedButNoSrtpExtension),
                 ));
             }
+            // RFC 5246 7.4.1.3: the suite is one of the ClientHello's.
             if find_matching_cipher_suite(&[h.cipher_suite], &cfg.local_cipher_suites).is_err() {
                 debug!(
                     "[handshake:{}] use cipher suite: {}",
@@ -242,7 +324,7 @@ impl Flight for Flight3 {
                 return Err((
                     Some(Alert {
                         alert_level: AlertLevel::Fatal,
-                        alert_description: AlertDescription::InsufficientSecurity,
+                        alert_description: AlertDescription::IllegalParameter,
                     }),
                     Some(Error::ErrCipherSuiteNoIntersection),
                 ));
@@ -313,8 +395,8 @@ impl Flight for Flight3 {
         }
 
         if let Some(message) = msgs.get(&HandshakeType::CertificateRequest) {
-            match message {
-                HandshakeMessage::CertificateRequest(_) => {}
+            let h = match message {
+                HandshakeMessage::CertificateRequest(h) => h,
                 _ => {
                     return Err((
                         Some(Alert {
@@ -326,6 +408,13 @@ impl Flight for Flight3 {
                 }
             };
             state.remote_requested_certificate = true;
+            // RFC 5246 7.4.4: what the client's certificate and CertificateVerify must fit.
+            state
+                .remote_certificate_types
+                .clone_from(&h.certificate_types);
+            state
+                .remote_signature_schemes
+                .clone_from(&h.signature_hash_algorithms);
         }
 
         Ok(Box::new(Flight5 {}) as Box<dyn Flight>)
@@ -337,61 +426,34 @@ impl Flight for Flight3 {
         _cache: &HandshakeCache,
         cfg: &HandshakeConfig,
     ) -> Result<Vec<Packet>, (Option<Alert>, Option<Error>)> {
-        let mut extensions = vec![
-            Extension::SupportedSignatureAlgorithms(ExtensionSupportedSignatureAlgorithms {
-                signature_hash_algorithms: cfg.local_signature_schemes.clone(),
-            }),
-            Extension::RenegotiationInfo(ExtensionRenegotiationInfo {
-                renegotiated_connection: 0,
-            }),
-        ];
+        // RFC 6347 4.2.1: the same parameters as the first ClientHello, plus the cookie.
+        let extensions = client_hello_extensions(
+            cfg,
+            state.tls13_offer.as_ref(),
+            state.connection_id_offer.as_deref(),
+        );
 
-        if cfg.local_psk_callback.is_none() {
-            extensions.extend_from_slice(&[
-                Extension::SupportedEllipticCurves(ExtensionSupportedEllipticCurves {
-                    elliptic_curves: cfg.local_named_curves.clone(),
-                }),
-                Extension::SupportedPointFormats(ExtensionSupportedPointFormats {
-                    point_formats: vec![ELLIPTIC_CURVE_POINT_FORMAT_UNCOMPRESSED],
-                }),
-            ]);
-        }
+        let mut client_hello = HandshakeMessageClientHello {
+            version: PROTOCOL_VERSION1_2,
+            random: state.local_random.clone(),
+            cookie: state.cookie.clone(),
 
-        if !cfg.local_srtp_protection_profiles.is_empty() {
-            extensions.push(Extension::UseSrtp(ExtensionUseSrtp {
-                protection_profiles: cfg.local_srtp_protection_profiles.clone(),
-            }));
-        }
-
-        if cfg.extended_master_secret == ExtendedMasterSecretType::Request
-            || cfg.extended_master_secret == ExtendedMasterSecretType::Require
+            cipher_suites: super::flight1::client_hello_cipher_suites(cfg),
+            compression_methods: default_compression_methods(),
+            extensions,
+        };
+        // The PSK binders cover the cookie too.
+        if let Err(error) =
+            super::flight1::bind_client_hello(cfg, state.tls13_offer.as_ref(), &mut client_hello)
         {
-            extensions.push(Extension::UseExtendedMasterSecret(
-                ExtensionUseExtendedMasterSecret { supported: true },
-            ));
-        }
-
-        if !cfg.server_name.is_empty() {
-            extensions.push(Extension::ServerName(ExtensionServerName {
-                server_name: cfg.server_name.clone(),
-            }));
+            return Err((None, Some(error)));
         }
 
         Ok(vec![Packet {
             record: RecordLayer::new(
                 PROTOCOL_VERSION1_2,
                 0,
-                Content::Handshake(Handshake::new(HandshakeMessage::ClientHello(
-                    HandshakeMessageClientHello {
-                        version: PROTOCOL_VERSION1_2,
-                        random: state.local_random.clone(),
-                        cookie: state.cookie.clone(),
-
-                        cipher_suites: cfg.local_cipher_suites.clone(),
-                        compression_methods: default_compression_methods(),
-                        extensions,
-                    },
-                ))),
+                Content::Handshake(Handshake::new(HandshakeMessage::ClientHello(client_hello))),
             ),
             should_encrypt: false,
             reset_local_sequence_number: false,
@@ -442,10 +504,12 @@ pub(crate) fn handle_server_key_exchange(
             match prf_pre_master_secret(&h.public_key, &mut local_keypair, curve) {
                 Ok(pre_master_secret) => pre_master_secret,
                 Err(err) => {
+                    // RFC 8422 5.10: a peer's point that is not on the curve (or otherwise
+                    // unusable) is refused: illegal_parameter.
                     return Err((
                         Some(Alert {
                             alert_level: AlertLevel::Fatal,
-                            alert_description: AlertDescription::InternalError,
+                            alert_description: AlertDescription::IllegalParameter,
                         }),
                         Some(err),
                     ));

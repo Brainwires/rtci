@@ -145,7 +145,6 @@ pub(crate) mod track_state;
 pub(crate) mod track_supported_constraints;
 
 use crate::rtp_transceiver::rtp_sender::RtpCodecKind;
-use std::collections::HashMap;
 
 pub use track::{MediaStreamTrack, MediaStreamTrackId};
 pub use track_capabilities::MediaTrackCapabilities;
@@ -202,8 +201,8 @@ pub type MediaStreamId = String;
 #[derive(Default, Debug, Clone)]
 pub struct MediaStream {
     stream_id: MediaStreamId,
-    tracks: HashMap<MediaStreamTrackId, MediaStreamTrack>,
-    active: bool,
+    /// The track set, in the order the tracks were added; a track id is in it at most once.
+    tracks: Vec<MediaStreamTrack>,
 }
 
 impl MediaStream {
@@ -249,12 +248,16 @@ impl MediaStream {
     pub fn new(stream_id: MediaStreamId, tracks: Vec<MediaStreamTrack>) -> Self {
         Self {
             stream_id,
-            tracks: tracks
-                .into_iter()
-                .map(|track| (track.stream_id().to_string(), track))
-                .collect(),
-            active: true,
+            tracks: vec![],
         }
+        .with_tracks(tracks)
+    }
+
+    fn with_tracks(mut self, tracks: Vec<MediaStreamTrack>) -> Self {
+        for track in tracks {
+            self.add_track(track);
+        }
+        self
     }
 
     /// Returns the unique identifier of this stream.
@@ -277,7 +280,9 @@ impl MediaStream {
     ///
     /// See [MediaStream.active](https://www.w3.org/TR/mediacapture-streams/#dom-mediastream-active).
     pub fn active(&self) -> bool {
-        self.active
+        self.tracks
+            .iter()
+            .any(|track| track.ready_state() != track_state::MediaStreamTrackState::Ended)
     }
 
     /// Returns an iterator over all audio tracks in this stream.
@@ -300,7 +305,7 @@ impl MediaStream {
     /// ```
     pub fn get_audio_tracks(&self) -> impl Iterator<Item = &MediaStreamTrack> {
         self.tracks
-            .values()
+            .iter()
             .filter(|track| track.kind() == RtpCodecKind::Audio)
     }
 
@@ -311,7 +316,7 @@ impl MediaStream {
     /// See [MediaStream.getAudioTracks()](https://www.w3.org/TR/mediacapture-streams/#dom-mediastream-getaudiotracks).
     pub fn get_audio_tracks_mut(&mut self) -> impl Iterator<Item = &mut MediaStreamTrack> {
         self.tracks
-            .values_mut()
+            .iter_mut()
             .filter(|track| track.kind() == RtpCodecKind::Audio)
     }
 
@@ -335,7 +340,7 @@ impl MediaStream {
     /// ```
     pub fn get_video_tracks(&self) -> impl Iterator<Item = &MediaStreamTrack> {
         self.tracks
-            .values()
+            .iter()
             .filter(|track| track.kind() == RtpCodecKind::Video)
     }
 
@@ -346,7 +351,7 @@ impl MediaStream {
     /// See [MediaStream.getVideoTracks()](https://www.w3.org/TR/mediacapture-streams/#dom-mediastream-getvideotracks).
     pub fn get_video_tracks_mut(&mut self) -> impl Iterator<Item = &mut MediaStreamTrack> {
         self.tracks
-            .values_mut()
+            .iter_mut()
             .filter(|track| track.kind() == RtpCodecKind::Video)
     }
 
@@ -367,7 +372,7 @@ impl MediaStream {
     /// # }
     /// ```
     pub fn get_tracks(&self) -> impl Iterator<Item = &MediaStreamTrack> {
-        self.tracks.values()
+        self.tracks.iter()
     }
 
     /// Returns a mutable iterator over all tracks in this stream.
@@ -376,7 +381,7 @@ impl MediaStream {
     ///
     /// See [MediaStream.getTracks()](https://www.w3.org/TR/mediacapture-streams/#dom-mediastream-gettracks).
     pub fn get_tracks_mut(&mut self) -> impl Iterator<Item = &mut MediaStreamTrack> {
-        self.tracks.values_mut()
+        self.tracks.iter_mut()
     }
 
     /// Returns a reference to the track with the specified ID, if it exists.
@@ -409,7 +414,9 @@ impl MediaStream {
     /// # }
     /// ```
     pub fn get_track_by_id(&self, track_id: &MediaStreamTrackId) -> Option<&MediaStreamTrack> {
-        self.tracks.get(track_id)
+        self.tracks
+            .iter()
+            .find(|track| track.track_id() == track_id)
     }
 
     /// Returns a mutable reference to the track with the specified ID, if it exists.
@@ -430,7 +437,9 @@ impl MediaStream {
         &mut self,
         track_id: &MediaStreamTrackId,
     ) -> Option<&mut MediaStreamTrack> {
-        self.tracks.get_mut(track_id)
+        self.tracks
+            .iter_mut()
+            .find(|track| track.track_id() == track_id)
     }
 
     /// Adds a track to this stream.
@@ -476,7 +485,10 @@ impl MediaStream {
     /// # }
     /// ```
     pub fn add_track(&mut self, track: MediaStreamTrack) {
-        self.tracks.insert(track.track_id().to_string(), track);
+        // mediacapture-main 4.2 addTrack: a track already in the set is not added again.
+        if self.get_track_by_id(track.track_id()).is_none() {
+            self.tracks.push(track);
+        }
     }
 
     /// Removes a track from this stream and returns it.
@@ -520,6 +532,79 @@ impl MediaStream {
     /// # }
     /// ```
     pub fn remove_track(&mut self, track_id: &MediaStreamTrackId) -> Option<MediaStreamTrack> {
-        self.tracks.remove(track_id)
+        let index = self
+            .tracks
+            .iter()
+            .position(|track| track.track_id() == track_id)?;
+        Some(self.tracks.remove(index))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn track(id: &str, kind: RtpCodecKind) -> MediaStreamTrack {
+        MediaStreamTrack::new("s".to_owned(), id.to_owned(), id.to_owned(), kind, vec![])
+    }
+
+    /// mediacapture-main 4.2: the track set holds every track of the stream, by track id, once.
+    #[test]
+    fn a_streams_tracks_of_one_stream_id_are_all_kept() {
+        let mut stream = MediaStream::new(
+            "s".to_owned(),
+            vec![
+                track("a", RtpCodecKind::Audio),
+                track("v", RtpCodecKind::Video),
+            ],
+        );
+        assert_eq!(stream.stream_id(), "s");
+        assert_eq!(stream.get_tracks().count(), 2);
+        assert_eq!(stream.get_audio_tracks().count(), 1);
+        assert_eq!(stream.get_video_tracks().count(), 1);
+        assert!(stream.get_track_by_id(&"v".to_owned()).is_some());
+        assert!(stream.get_track_by_id(&"x".to_owned()).is_none());
+
+        let mut again = track("a", RtpCodecKind::Audio);
+        again.set_enabled(false);
+        stream.add_track(again);
+        assert_eq!(stream.get_tracks().count(), 2, "a track already in the set");
+        assert!(
+            stream
+                .get_track_by_id(&"a".to_owned())
+                .is_some_and(|t| t.enabled()),
+            "is not added again"
+        );
+        assert!(stream.remove_track(&"a".to_owned()).is_some());
+        assert!(stream.remove_track(&"a".to_owned()).is_none());
+        assert_eq!(
+            stream
+                .get_tracks()
+                .map(|t| t.track_id().as_str())
+                .collect::<Vec<_>>(),
+            vec!["v"]
+        );
+    }
+
+    /// mediacapture-main 4.2: a stream is active while one of its tracks has not ended.
+    #[test]
+    fn a_stream_is_active_while_a_track_has_not_ended() {
+        let mut stream = MediaStream::new(
+            "s".to_owned(),
+            vec![
+                track("a", RtpCodecKind::Audio),
+                track("v", RtpCodecKind::Video),
+            ],
+        );
+        assert!(stream.active());
+        if let Some(track) = stream.get_tracks_mut().next() {
+            track.stop();
+        }
+        assert!(stream.active(), "one track is still live");
+        for track in stream.get_tracks_mut() {
+            track.stop();
+        }
+        assert!(!stream.active());
+        assert!(!MediaStream::new("e".to_owned(), vec![]).active());
     }
 }

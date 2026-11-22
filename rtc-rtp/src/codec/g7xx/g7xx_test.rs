@@ -48,3 +48,43 @@ fn test_g7xx_payload() -> Result<()> {
 
     Ok(())
 }
+
+#[test]
+fn a_sample_based_payload_is_cut_at_any_octet_and_each_octet_is_one_tick() -> Result<()> {
+    // RFC 3551 4.3: any number of samples per packet; the duration follows from the octets.
+    let mut payloader = G7xxPayloader;
+    let buffer = Bytes::from((0..=249u8).collect::<Vec<u8>>());
+    let payloads = payloader.payload(100, &buffer)?;
+    assert_eq!(
+        vec![100, 100, 50],
+        payloads.iter().map(Bytes::len).collect::<Vec<_>>()
+    );
+    // Nothing is lost, repeated or reordered.
+    assert_eq!(buffer.to_vec(), payloads.concat());
+    for payload in &payloads {
+        assert_eq!(
+            Some(payload.len() as u32),
+            payloader.payload_duration(payload)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn the_static_payload_types_and_clock_of_rfc3551_table_4() {
+    use crate::header::Header;
+    use shared::marshal::Marshal;
+
+    // PCMU 0, PCMA 8, G722 9, all with an 8000 Hz RTP clock (4.5.2 for G722).
+    for (payload_type, second_octet) in [
+        (PCMU_PAYLOAD_TYPE, 0x00u8),
+        (PCMA_PAYLOAD_TYPE, 0x08),
+        (G722_PAYLOAD_TYPE, 0x09),
+    ] {
+        let header = Header {
+            payload_type,
+            ..Default::default()
+        };
+        assert_eq!(second_octet, header.marshal().unwrap()[1]);
+    }
+}

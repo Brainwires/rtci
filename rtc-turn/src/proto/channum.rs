@@ -27,7 +27,7 @@ pub const MAX_CHANNEL_NUMBER: u16 = 0x4FFF;
 ///
 /// The `CHANNEL-NUMBER` attribute contains the number of the channel.
 ///
-/// [RFC 5766 Section 14.1](https://www.rfc-editor.org/rfc/rfc5766#section-14.1).
+/// [RFC 8656 Section 18.1](https://www.rfc-editor.org/rfc/rfc8656#section-18.1).
 #[derive(Default, Eq, PartialEq, Debug, Copy, Clone, Hash)]
 pub struct ChannelNumber(pub u16);
 

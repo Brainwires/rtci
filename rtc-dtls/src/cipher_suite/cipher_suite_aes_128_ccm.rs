@@ -59,6 +59,14 @@ impl CipherSuite for CipherSuiteAes128Ccm {
         self.ccm.is_some()
     }
 
+    fn record_expansion(&self) -> usize {
+        // The 8-byte explicit nonce and the 16- or 8-byte tag (RFC 6655).
+        8 + match self.crypto_ccm_tag_len {
+            CryptoCcmTagLen::CryptoCcm8TagLength => 8,
+            CryptoCcmTagLen::CryptoCcmTagLength => 16,
+        }
+    }
+
     fn init(
         &mut self,
         provider: Arc<dyn RTCCryptoProvider>,
@@ -115,5 +123,28 @@ impl CipherSuite for CipherSuiteAes128Ccm {
             "CipherSuite has not been initialized, unable to decrypt".to_owned(),
         ))?;
         ccm.decrypt(input)
+    }
+
+    fn encrypt_with_connection_id(
+        &mut self,
+        pkt_rlh: &RecordLayerHeader,
+        raw: &[u8],
+        connection_id: &[u8],
+    ) -> Result<Vec<u8>> {
+        let ccm = self.ccm.as_mut().ok_or(Error::Other(
+            "CipherSuite has not been initialized, unable to encrypt".to_owned(),
+        ))?;
+        ccm.encrypt_with(pkt_rlh, raw, Some(connection_id))
+    }
+
+    fn decrypt_with_connection_id(
+        &mut self,
+        input: &[u8],
+        connection_id: &[u8],
+    ) -> Result<Vec<u8>> {
+        let ccm = self.ccm.as_mut().ok_or(Error::Other(
+            "CipherSuite has not been initialized, unable to decrypt".to_owned(),
+        ))?;
+        ccm.decrypt_with(input, Some(connection_id))
     }
 }

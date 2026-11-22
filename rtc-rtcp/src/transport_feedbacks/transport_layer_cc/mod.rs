@@ -9,6 +9,8 @@
 #[cfg(test)]
 mod delta_bounds_test;
 #[cfg(test)]
+mod reference_time_test;
+#[cfg(test)]
 mod transport_layer_cc_test;
 
 use crate::{header::*, packet::*, util::*};
@@ -468,6 +470,64 @@ pub struct TransportLayerCc {
     pub recv_deltas: Vec<RecvDelta>,
 }
 
+/// The reference time counts 64 ms ticks.
+pub const TYPE_TCC_REFERENCE_TIME_TICK_MILLIS: i64 = 64;
+
+/// The reference time field is 24 bits wide.
+const REFERENCE_TIME_BITS: u32 = 24;
+const REFERENCE_TIME_MASK: u32 = (1 << REFERENCE_TIME_BITS) - 1;
+
+impl TransportLayerCc {
+    /// The reference time as the draft defines it: a 24-bit signed count of 64 ms ticks.
+    ///
+    /// `reference_time` holds the 24 bits as they are on the wire; this sign-extends them, so
+    /// `0xFFFFFF` reads as -1. The origin is the receiver's own, so only differences between
+    /// feedback packets mean anything: use [`ReferenceTimeUnwrapper`] to follow them.
+    pub fn reference_time_signed(&self) -> i32 {
+        ((self.reference_time << (32 - REFERENCE_TIME_BITS)) as i32) >> (32 - REFERENCE_TIME_BITS)
+    }
+}
+
+/// Follows the 24-bit reference time of successive transport-wide feedback packets across its
+/// wrap, which comes every 2^24 ticks of 64 ms: about 12.4 days.
+///
+/// Feed it the `reference_time` of each feedback packet of one sender, in the order received.
+/// It returns a 64-bit tick count that moves by the shortest signed distance from the last
+/// one, so a step from `0xFFFFFF` to `0` is one tick forward (64 ms) and not 2^24 ticks back,
+/// and a feedback packet that arrives out of order steps back by the little it is behind.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ReferenceTimeUnwrapper {
+    last: Option<i64>,
+}
+
+impl ReferenceTimeUnwrapper {
+    /// A fresh unwrapper. The first value it sees is taken as is, sign-extended.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The unwrapped tick count for `reference_time`, the 24 bits a feedback packet carries.
+    pub fn unwrap(&mut self, reference_time: u32) -> i64 {
+        const SHIFT: u32 = 32 - REFERENCE_TIME_BITS;
+        let reference_time = reference_time & REFERENCE_TIME_MASK;
+        let unwrapped = match self.last {
+            None => (((reference_time << SHIFT) as i32) >> SHIFT) as i64,
+            Some(last) => {
+                // The distance from the last value, modulo 2^24, read as signed.
+                let step = reference_time.wrapping_sub(last as u32) & REFERENCE_TIME_MASK;
+                last + (((step << SHIFT) as i32) >> SHIFT) as i64
+            }
+        };
+        self.last = Some(unwrapped);
+        unwrapped
+    }
+
+    /// The unwrapped reference time of `reference_time` in milliseconds.
+    pub fn unwrap_millis(&mut self, reference_time: u32) -> i64 {
+        self.unwrap(reference_time) * TYPE_TCC_REFERENCE_TIME_TICK_MILLIS
+    }
+}
+
 impl fmt::Display for TransportLayerCc {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut out = String::new();
@@ -583,28 +643,20 @@ impl Unmarshal for TransportLayerCc {
         Self: Sized,
         B: Buf,
     {
-        let raw_packet_len = raw_packet.remaining();
-        if raw_packet_len < (HEADER_LENGTH + SSRC_LENGTH) {
-            return Err(Error::PacketTooShort);
-        }
-
-        let h = Header::unmarshal(raw_packet)?;
-
-        // https://tools.ietf.org/html/rfc4585#page-33
-        // header's length + payload's length
-        let total_length = 4 * (h.length as usize + 1);
-
-        if total_length < HEADER_LENGTH + PACKET_CHUNK_OFFSET {
-            return Err(Error::PacketTooShort);
-        }
-
-        if raw_packet_len < total_length {
-            return Err(Error::PacketTooShort);
-        }
-
+        // The P bit is honoured here: the padding octets are counted in `length` but are not
+        // control information, so the chunks and the deltas end before them.
+        let (h, mut body) = read_packet(raw_packet)?;
         if h.packet_type != PacketType::TransportSpecificFeedback || h.count != FORMAT_TCC {
             return Err(Error::WrongType);
         }
+
+        // https://tools.ietf.org/html/rfc4585#page-33
+        // header's length + payload's length
+        let total_length = HEADER_LENGTH + body.len();
+        if total_length < HEADER_LENGTH + PACKET_CHUNK_OFFSET {
+            return Err(Error::PacketTooShort);
+        }
+        let raw_packet = &mut body;
 
         let sender_ssrc = raw_packet.get_u32();
         let media_ssrc = raw_packet.get_u32();
@@ -627,7 +679,9 @@ impl Unmarshal for TransportLayerCc {
         // cannot claim tens of thousands of deltas the packet does not carry.
         let mut delta_bytes_needed = 0usize;
         while processed_packet_num < packet_status_count {
-            if packet_status_pos + PACKET_STATUS_CHUNK_LENGTH >= total_length {
+            // A chunk may be the last thing in the packet: a report of packets that were not
+            // received has no delta after its chunks.
+            if packet_status_pos + PACKET_STATUS_CHUNK_LENGTH > total_length {
                 return Err(Error::PacketTooShort);
             }
 
@@ -681,8 +735,13 @@ impl Unmarshal for TransportLayerCc {
                 StatusChunkTypeTcc::StatusVectorChunk => {
                     let packet_status = StatusVectorChunk::unmarshal(&mut chunk_reader)?;
 
-                    delta_bytes_needed += packet_status
-                        .symbol_list
+                    // The status count ends the list: the symbols of the last chunk beyond it
+                    // describe no packet and own no delta.
+                    let remaining = (packet_status_count - processed_packet_num) as usize;
+                    let reported = &packet_status.symbol_list
+                        [..packet_status.symbol_list.len().min(remaining)];
+
+                    delta_bytes_needed += reported
                         .iter()
                         .map(|sym| match sym {
                             SymbolTypeTcc::PacketReceivedLargeDelta
@@ -702,7 +761,7 @@ impl Unmarshal for TransportLayerCc {
 
                     match packet_status.symbol_size {
                         SymbolSizeTypeTcc::OneBit => {
-                            for sym in &packet_status.symbol_list {
+                            for sym in reported {
                                 if *sym == SymbolTypeTcc::PacketReceivedSmallDelta {
                                     recv_deltas.push(RecvDelta {
                                         type_tcc_packet: SymbolTypeTcc::PacketReceivedSmallDelta,
@@ -713,7 +772,7 @@ impl Unmarshal for TransportLayerCc {
                         }
 
                         SymbolSizeTypeTcc::TwoBit => {
-                            for sym in &packet_status.symbol_list {
+                            for sym in reported {
                                 if *sym == SymbolTypeTcc::PacketReceivedSmallDelta
                                     || *sym == SymbolTypeTcc::PacketReceivedLargeDelta
                                 {
@@ -754,12 +813,6 @@ impl Unmarshal for TransportLayerCc {
                 *delta = RecvDelta::unmarshal(&mut delta_reader)?;
                 recv_deltas_pos += 2;
             }
-        }
-
-        if
-        /*h.padding &&*/
-        raw_packet.has_remaining() {
-            raw_packet.advance(raw_packet.remaining());
         }
 
         Ok(TransportLayerCc {

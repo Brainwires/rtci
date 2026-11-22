@@ -2,7 +2,9 @@
 #![warn(missing_docs)]
 #![allow(dead_code)]
 
-//! Package rtcp implements encoding and decoding of RTCP packets according to RFCs 3550 and 5506.
+//! Package rtcp implements encoding and decoding of RTCP packets according to RFCs 3550 and 5506,
+//! with the feedback messages of RFC 4585 and RFC 5104, the extended reports of RFC 3611 and the
+//! congestion control feedback of RFC 8888.
 //!
 //! RTCP is a sister protocol of the Real-time Transport Protocol (RTP). Its basic functionality
 //! and packet structure is defined in RFC 3550. RTCP provides out-of-band statistics and control
@@ -58,6 +60,8 @@
 //! # }
 //! ```
 
+/// The APP packet: application-defined data under a four-character name.
+pub mod application_defined;
 /// Compound RTCP packets — the several reports that share one datagram.
 pub mod compound_packet;
 /// Extended reports (XR, [RFC 3611]): loss/discard run lengths, receipt times and per-block
@@ -71,7 +75,8 @@ pub mod goodbye;
 pub mod header;
 /// The [`Packet`] trait every RTCP packet type implements.
 pub mod packet;
-/// Payload-specific feedback (PT 206): PLI, FIR, SLI and REMB.
+/// Payload-specific feedback (PT 206): PLI, SLI, RPSI, FIR, TSTR, TSTN, VBCM, LRR, REMB and
+/// other application layer feedback.
 pub mod payload_feedbacks;
 /// An unparsed packet, used for types this crate does not model.
 pub mod raw_packet;
@@ -83,9 +88,15 @@ pub mod reception_report;
 pub mod sender_report;
 /// The SDES packet, which carries CNAME and other source metadata.
 pub mod source_description;
-/// Transport-specific feedback (PT 205): NACK and transport-wide congestion control.
+/// Transport-specific feedback (PT 205): NACK, TMMBR, TMMBN, rapid resynchronisation,
+/// transport-wide congestion control and RFC 8888 feedback.
 pub mod transport_feedbacks;
 mod util;
+
+#[cfg(test)]
+mod feedback_rules_test;
+#[cfg(test)]
+mod packet_dispatch_test;
 
 pub use header::Header;
 pub use packet::Packet;

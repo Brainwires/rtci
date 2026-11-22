@@ -14,13 +14,29 @@ use std::time::{Duration, Instant};
 pub struct History {
     /// Monotonic id, so reports come out in send order however sequence numbers wrap.
     next_id: u64,
-    packets: HashMap<u64, PacketReport>,
+    packets: HashMap<u64, Sent>,
     twcc_index: HashMap<u16, u64>,
     ssrc_sequence_index: HashMap<(u32, u16), u64>,
     /// Highest id acknowledged so far.
     highest_acknowledged: Option<u64>,
     /// Lowest id not yet reported to the consumer.
     next_to_report: u64,
+    /// The `fb_pkt_count` of the last TWCC feedback read.
+    last_feedback_count: Option<u8>,
+    /// Feedback packets the count shows were sent and never read.
+    lost_feedback: u64,
+    /// Sent packets no feedback ever described, released without a verdict.
+    unreported: u64,
+}
+
+/// A sent packet and whether any feedback has described it yet.
+#[derive(Debug)]
+struct Sent {
+    report: PacketReport,
+    /// A feedback packet named this packet, as received or as not received. A packet no
+    /// feedback named has no verdict: the report that would have carried it was lost, or the
+    /// receiver does not report on its stream at all.
+    covered: bool,
 }
 
 impl History {
@@ -58,25 +74,35 @@ impl History {
         let id = self.next_id;
         self.next_id += 1;
 
-        if is_twcc {
-            self.twcc_index.insert(twcc_sequence_number, id);
+        if is_twcc
+            && let Some(previous) = self.twcc_index.insert(twcc_sequence_number, id)
+            && let Some(earlier) = self.packets.get_mut(&previous)
+        {
+            // The same transport-wide number again: a retransmission sent as it was (no RTX),
+            // which keeps its number. The receiver reports a number once, so its verdict goes
+            // to this transmission; the earlier one was asked for again because it did not
+            // arrive, and is reported as the loss it was.
+            earlier.covered = true;
         }
         self.ssrc_sequence_index
             .insert((ssrc, rtp_sequence_number), id);
 
         self.packets.insert(
             id,
-            PacketReport {
-                ssrc,
-                id,
-                rtp_sequence_number,
-                is_twcc,
-                twcc_sequence_number,
-                size,
-                arrived: false,
-                departure,
-                arrival: None,
-                ecn: Ecn::NotEct,
+            Sent {
+                report: PacketReport {
+                    ssrc,
+                    id,
+                    rtp_sequence_number,
+                    is_twcc,
+                    twcc_sequence_number,
+                    size,
+                    arrived: false,
+                    departure,
+                    arrival: None,
+                    ecn: Ecn::NotEct,
+                },
+                covered: false,
             },
         );
 
@@ -115,7 +141,9 @@ impl History {
         id: u64,
         acknowledgement: Acknowledgement,
     ) -> Option<Duration> {
-        let packet = self.packets.get_mut(&id)?;
+        let sent = self.packets.get_mut(&id)?;
+        sent.covered = true;
+        let packet = &mut sent.report;
 
         packet.arrived = acknowledgement.arrived;
         packet.arrival = acknowledgement.arrival;
@@ -133,9 +161,49 @@ impl History {
         Some(received_at.saturating_duration_since(packet.departure))
     }
 
-    /// Take everything up to the highest *arrived* packet since the last call, in send order.
+    /// Note the feedback packet count of a TWCC feedback just read, and return how many feedback
+    /// packets the receiver sent between the previous one and this one that never arrived.
     ///
-    /// Packets older than that which are still unreported are treated as lost and then dropped.
+    /// The count is the only thing that tells a lost feedback packet from a quiet receiver
+    /// (draft-holmer-rmcat-transport-wide-cc-extensions-01 section 3.1). The packets a lost
+    /// feedback would have described get no verdict at all, see
+    /// [`take_reports`](Self::take_reports); this is the measure of how often that happened.
+    pub fn on_twcc_feedback_count(&mut self, feedback_packet_count: u8) -> u8 {
+        let missed = match self.last_feedback_count {
+            // A count at or behind the last one is a reordered or repeated feedback: nothing
+            // is known to be missing.
+            Some(last) => {
+                let ahead = feedback_packet_count.wrapping_sub(last);
+                if ahead == 0 || ahead > 127 {
+                    return 0;
+                }
+                ahead - 1
+            }
+            None => 0,
+        };
+        self.last_feedback_count = Some(feedback_packet_count);
+        self.lost_feedback += u64::from(missed);
+        missed
+    }
+
+    /// How many TWCC feedback packets were sent by the receiver and never read here.
+    pub fn lost_feedback(&self) -> u64 {
+        self.lost_feedback
+    }
+
+    /// How many sent packets were released without any feedback describing them.
+    pub fn unreported(&self) -> u64 {
+        self.unreported
+    }
+
+    /// Take every packet a feedback described, up to the highest *arrived* one, since the last
+    /// call, in send order.
+    ///
+    /// A packet the receiver reported as not received is a loss. A packet below the highest
+    /// arrival that **no feedback described** is neither: the feedback that covered it was lost,
+    /// or the receiver does not report on its stream (no transport-wide sequence number, an SSRC
+    /// outside the RFC 8888 report). The draft is explicit that such packets are ignored, not
+    /// counted as lost or received (section 3), so they are released here without a report.
     /// Loss feedback alone does not advance the reporting window; losses are emitted when a later
     /// packet is reported as arrived.
     pub fn take_reports(&mut self) -> Vec<PacketReport> {
@@ -148,13 +216,18 @@ impl History {
 
         let mut reports = Vec::new();
         for id in self.next_to_report..=highest {
-            if let Some(packet) = self.packets.remove(&id) {
+            if let Some(sent) = self.packets.remove(&id) {
+                let packet = sent.report;
                 if packet.is_twcc {
                     self.twcc_index.remove(&packet.twcc_sequence_number);
                 }
                 self.ssrc_sequence_index
                     .remove(&(packet.ssrc, packet.rtp_sequence_number));
-                reports.push(packet);
+                if sent.covered {
+                    reports.push(packet);
+                } else {
+                    self.unreported += 1;
+                }
             }
         }
         self.next_to_report = highest + 1;
@@ -170,12 +243,13 @@ impl History {
         let stale: Vec<u64> = self
             .packets
             .iter()
-            .filter(|(_, packet)| packet.departure < cutoff && !packet.arrived)
+            .filter(|(_, sent)| sent.report.departure < cutoff && !sent.report.arrived)
             .map(|(&id, _)| id)
             .collect();
 
         for id in stale {
-            if let Some(packet) = self.packets.remove(&id) {
+            if let Some(sent) = self.packets.remove(&id) {
+                let packet = sent.report;
                 // Only a TWCC packet has an entry under its transport-wide sequence number. A
                 // non-TWCC packet carries whatever the caller passed — typically 0 — and removing
                 // that key would evict whichever real TWCC packet holds it.
@@ -226,10 +300,110 @@ mod tests {
         assert_eq!(Some(Duration::from_millis(80)), rtt);
 
         let reports = history.take_reports();
-        assert_eq!(2, reports.len(), "everything up to the acknowledgement");
-        assert_eq!(101, reports[1].rtp_sequence_number);
-        assert!(reports[1].arrived);
-        assert!(!reports[0].arrived, "never acknowledged, so a loss");
+        assert_eq!(1, reports.len(), "only what the feedback described");
+        assert_eq!(101, reports[0].rtp_sequence_number);
+        assert!(reports[0].arrived);
+    }
+
+    /// draft-holmer-rmcat-transport-wide-cc-extensions-01 section 3: when a feedback packet is
+    /// lost, the packets it would have reported are ignored, "not counted as lost or received".
+    #[test]
+    fn packets_whose_feedback_was_lost_are_not_reported_as_lost() {
+        let now = Instant::now();
+        let mut history = History::new();
+        for sequence_number in 0..20u16 {
+            history.add_outgoing(1, 100 + sequence_number, true, sequence_number, 1200, now);
+        }
+
+        // The feedback for 0..=9 never arrives; the one for 10..=19 does.
+        for sequence_number in 10..20u16 {
+            history.on_twcc_feedback(
+                now + Duration::from_millis(50),
+                Acknowledgement::received(sequence_number, None, Ecn::NotEct),
+            );
+        }
+
+        let reports = history.take_reports();
+        assert_eq!(10, reports.len(), "the ten packets the feedback described");
+        assert!(
+            reports.iter().all(|report| report.arrived),
+            "no loss was reported by the receiver, so none is reported here"
+        );
+        assert_eq!(110, reports[0].rtp_sequence_number);
+        assert_eq!(
+            10,
+            history.unreported(),
+            "the uncovered ten have no verdict"
+        );
+        assert!(history.is_empty(), "and are not kept");
+    }
+
+    /// A retransmission that keeps its transport-wide number takes the receiver's verdict; the
+    /// transmission it replaces is the loss that caused it, and stays one.
+    #[test]
+    fn a_transmission_superseded_under_the_same_number_is_reported_lost() {
+        let now = Instant::now();
+        let mut history = History::new();
+        history.add_outgoing(1, 100, true, 7, 1200, now);
+        history.add_outgoing(1, 100, true, 7, 1200, now + Duration::from_millis(40));
+
+        history.on_twcc_feedback(
+            now + Duration::from_millis(80),
+            Acknowledgement::received(7, None, Ecn::NotEct),
+        );
+
+        let reports = history.take_reports();
+        assert_eq!(
+            vec![false, true],
+            reports
+                .iter()
+                .map(|report| report.arrived)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(0, history.unreported());
+    }
+
+    /// A packet the receiver itself reports as not received is still a loss.
+    #[test]
+    fn a_packet_reported_not_received_is_a_loss() {
+        let now = Instant::now();
+        let mut history = history_with_three_packets(now);
+
+        history.on_twcc_feedback(now, Acknowledgement::lost(0));
+        history.on_twcc_feedback(now, Acknowledgement::received(1, None, Ecn::NotEct));
+        history.on_twcc_feedback(now, Acknowledgement::received(2, None, Ecn::NotEct));
+
+        let reports = history.take_reports();
+        assert_eq!(
+            vec![false, true, true],
+            reports
+                .iter()
+                .map(|report| report.arrived)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(0, history.unreported());
+    }
+
+    /// The feedback packet count is how a lost feedback packet is told from a quiet receiver
+    /// (section 3.1).
+    #[test]
+    fn a_gap_in_the_feedback_packet_count_is_a_lost_feedback_packet() {
+        let mut history = History::new();
+
+        assert_eq!(0, history.on_twcc_feedback_count(254), "the first one");
+        assert_eq!(0, history.on_twcc_feedback_count(255), "consecutive");
+        assert_eq!(
+            2,
+            history.on_twcc_feedback_count(2),
+            "0 and 1 are missing, across the wrap"
+        );
+        assert_eq!(
+            0,
+            history.on_twcc_feedback_count(1),
+            "a late one is not a gap"
+        );
+        assert_eq!(0, history.on_twcc_feedback_count(3));
+        assert_eq!(2, history.lost_feedback());
     }
 
     /// RFC 8888 names packets by the stream's own sequence number, so two streams can use the
@@ -247,14 +421,13 @@ mod tests {
             Acknowledgement::received(500, Some(Duration::from_millis(1)), Ecn::Ce),
         );
 
+        // Stream 1's packet was sent first and no report block described it: it has no verdict,
+        // and is not a loss (draft-ietf-rmcat-gcc bug G2).
         let reports = history.take_reports();
-        assert_eq!(2, reports.len());
-        assert!(
-            !reports[0].arrived,
-            "stream 1's packet was not acknowledged"
-        );
-        assert!(reports[1].arrived, "stream 2's was");
-        assert_eq!(Ecn::Ce, reports[1].ecn);
+        assert_eq!(1, reports.len());
+        assert_eq!(2, reports[0].ssrc);
+        assert!(reports[0].arrived, "stream 2's was acknowledged");
+        assert_eq!(Ecn::Ce, reports[0].ecn);
     }
 
     /// Feedback naming a stream that never sent that sequence number must not match another
@@ -304,6 +477,8 @@ mod tests {
         let now = Instant::now();
         let mut history = history_with_three_packets(now);
 
+        history.on_twcc_feedback(now, Acknowledgement::lost(0));
+        history.on_twcc_feedback(now, Acknowledgement::received(1, None, Ecn::NotEct));
         history.on_twcc_feedback(now, Acknowledgement::received(2, None, Ecn::NotEct));
         assert_eq!(3, history.take_reports().len());
         assert!(history.take_reports().is_empty());
@@ -371,8 +546,8 @@ mod tests {
         let mut history = History::new();
 
         // The non-TWCC packet is sent *first*, so reporting it does not sweep up the TWCC one:
-        // the reporting window runs to the highest arrived id, and anything below it is dropped
-        // as a loss regardless. Ordering this way isolates the index eviction from that.
+        // the reporting window runs to the highest arrived id, and anything below it is released
+        // regardless. Ordering this way isolates the index eviction from that.
         history.add_outgoing(2, 200, false, 0, 1200, now);
         // A real TWCC packet holding transport-wide sequence 0, sent after.
         history.add_outgoing(1, 100, true, 0, 1200, now);

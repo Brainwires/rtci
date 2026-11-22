@@ -4,7 +4,9 @@ use crate::peer_connection::message::internal::{
     RTCMessageInternal, STUNMessage, TaggedRTCMessageInternal,
 };
 use crate::peer_connection::transport::ice::IceTransport;
-use crate::statistics::accumulator::RTCStatsAccumulator;
+use crate::statistics::accumulator::{
+    IceCandidatePairAccumulator, RTCStatsAccumulator, candidate_pair_stats_id,
+};
 use crate::statistics::stats::ice_candidate_pair::RTCStatsIceCandidatePairState;
 use log::{debug, trace};
 use shared::error::{Error, Result};
@@ -25,6 +27,12 @@ pub(crate) struct IceHandlerContext {
     /// accumulator up with this key instead of re-`format!`ing it on every packet
     /// — that formatting was a heap allocation on the hot path in both directions.
     pub(crate) selected_pair_key: Option<String>,
+
+    /// How many times the agent has reported another selected candidate pair. The SCTP
+    /// transport, which runs on a placeholder address and so cannot see the path change under
+    /// it, is told through this (RFC 8831 section 5: "SCTP SHOULD be notified when an address
+    /// change has happened"): the event itself ends at the DTLS handler.
+    pub(crate) selected_pair_changes: u64,
 }
 
 impl IceHandlerContext {
@@ -37,6 +45,7 @@ impl IceHandlerContext {
             event_outs: VecDeque::new(),
 
             selected_pair_key: None,
+            selected_pair_changes: 0,
         }
     }
 }
@@ -54,6 +63,39 @@ impl<'a> IceHandler<'a> {
 
     pub(crate) fn name(&self) -> &'static str {
         "IceHandler"
+    }
+
+    /// Counts a datagram on the candidate pair it travels on (webrtc-stats
+    /// `RTCIceCandidatePairStats.packetsSent` / `packetsReceived`: the packets "on this candidate
+    /// pair", every one of them).
+    ///
+    /// The pair's statistics are found through the key cached at the last
+    /// `SelectedCandidatePairChange`, so the per-packet path formats nothing. The agent can
+    /// have a selected pair before that event has been polled, though, and a datagram that
+    /// crosses in between travels on that pair all the same: when the cache does not name a
+    /// pair with statistics, it is filled from the agent's selected pair. (During an ICE
+    /// restart the agent has none and the path is the previous pair's, which the cache still
+    /// names.)
+    fn count_on_pair_in_use(&mut self, count: impl FnOnce(&mut IceCandidatePairAccumulator)) {
+        let cached = self
+            .ctx
+            .selected_pair_key
+            .as_ref()
+            .is_some_and(|key| self.stats.ice_candidate_pairs.contains_key(key));
+        if !cached
+            && let Some((local, remote)) =
+                self.ctx.ice_transport.agent.get_selected_candidate_pair()
+        {
+            let (local_id, remote_id) = (local.id().to_owned(), remote.id().to_owned());
+            self.stats
+                .get_or_create_candidate_pair(&local_id, &remote_id);
+            self.ctx.selected_pair_key = Some(candidate_pair_stats_id(&local_id, &remote_id));
+        }
+        if let Some(key) = &self.ctx.selected_pair_key
+            && let Some(pair) = self.stats.ice_candidate_pairs.get_mut(key)
+        {
+            count(pair);
+        }
     }
 }
 
@@ -74,20 +116,43 @@ impl<'a>
                 transport: msg.transport,
                 message,
             })?;
-        } else if let Some(path) = self.ctx.ice_transport.agent.media_path() {
-            // Only the selected pair's remote may send DTLS/SRTP: a datagram from any other
-            // address is not part of this connection (ICE consent covers that one address), so
-            // drop it rather than hand it to DTLS, where it would cost a decrypt attempt or
-            // reach handshake processing. During an ICE restart that is the pair the session
-            // had before it, until the restart selects one (RFC 8445 Section 9).
-            let remote_addr = path.peer_addr;
-            if msg.transport.peer_addr != remote_addr {
-                trace!(
-                    "drop non-STUN message from {:?}: not the selected pair's remote {:?}",
-                    msg.transport.peer_addr, remote_addr
-                );
-                return Ok(());
-            }
+        } else if self.ctx.ice_transport.agent.media_path().is_some() {
+            // Data is taken from the path it is sent on (the selected pair's; during an ICE
+            // restart the pair the session had before it, RFC 8445 Section 9) and from the
+            // remote candidate of any other valid pair (Section 12.2: an agent is "prepared to
+            // receive data on any of the candidates" it provided, and knows the data is the
+            // peer's "as a consequence of the STUN exchange"). A datagram from an address no
+            // check of ours was answered from is not part of this connection: it is dropped
+            // rather than handed to DTLS, where it would cost a decrypt attempt or reach
+            // handshake processing. With `with_ice_data_from_selected_pair_only` only the
+            // selected pair's remote address is accepted.
+            let other_pair = match self.ctx.ice_transport.agent.data_path(msg.transport) {
+                None => {
+                    trace!(
+                        "drop non-STUN message from {:?}: not from a valid pair",
+                        msg.transport.peer_addr
+                    );
+                    // RFC 6544 Section 7.1: on a TCP connection this agent opened, a first
+                    // answer that is not STUN fails the pairs of that remote candidate (the
+                    // application closes the connection).
+                    if self
+                        .ctx
+                        .ice_transport
+                        .agent
+                        .handle_non_stun_before_validation(msg.now, msg.transport)
+                    {
+                        debug!(
+                            "the first answer on the TCP connection to {:?} is not STUN: its pairs failed",
+                            msg.transport.peer_addr
+                        );
+                    }
+                    return Ok(());
+                }
+                Some(::ice::DataPath::InUse) => None,
+                Some(::ice::DataPath::Valid(local, remote)) => {
+                    Some((local.id().to_owned(), remote.id().to_owned()))
+                }
+            };
 
             // only ICE connection is ready and bypass it
             debug!("bypass ice read {:?}", msg.transport.peer_addr);
@@ -96,10 +161,14 @@ impl<'a>
             // the accumulator up via the cached key (set on the last
             // SelectedCandidatePairChange) to avoid allocating the key per packet.
             let bytes = msg.message.len();
-            if let Some(key) = &self.ctx.selected_pair_key
-                && let Some(pair) = self.stats.ice_candidate_pairs.get_mut(key)
-            {
-                pair.on_packet_received(bytes, msg.now);
+            let now = msg.now;
+            match other_pair {
+                None => self.count_on_pair_in_use(|pair| pair.on_packet_received(bytes, now)),
+                // (Off the path in use: rare, so the key is made per packet.)
+                Some((local_id, remote_id)) => self
+                    .stats
+                    .get_or_create_candidate_pair(&local_id, &remote_id)
+                    .on_packet_received(bytes, now),
             }
 
             // When ICE restarts and the selected candidate pair changes,
@@ -123,6 +192,11 @@ impl<'a>
                 "drop message from {:?} to {:?} before ICE connection is connected",
                 msg.transport.peer_addr, msg.transport.local_addr
             );
+            // RFC 6544 Section 7.1, as above.
+            self.ctx
+                .ice_transport
+                .agent
+                .handle_non_stun_before_validation(msg.now, msg.transport);
         }
 
         Ok(())
@@ -158,11 +232,8 @@ impl<'a>
             // Track packets/bytes sent on the selected candidate pair. Look the
             // accumulator up via the cached key to avoid allocating it per packet.
             let bytes = msg.message.len();
-            if let Some(key) = &self.ctx.selected_pair_key
-                && let Some(pair) = self.stats.ice_candidate_pairs.get_mut(key)
-            {
-                pair.on_packet_sent(bytes, msg.now);
-            }
+            let now = msg.now;
+            self.count_on_pair_in_use(|pair| pair.on_packet_sent(bytes, now));
 
             self.ctx.write_outs.push_back(msg);
         } else {
@@ -206,6 +277,14 @@ impl<'a>
                     // Update transport stats for ICE state change
                     // Use the original ice state which converts to RTCIceTransportState
                     self.stats.transport.on_ice_state_changed(state.into());
+                    // A transport that failed or closed has no selected pair any more.
+                    if matches!(
+                        state,
+                        ::ice::state::ConnectionState::Failed
+                            | ::ice::state::ConnectionState::Closed
+                    ) {
+                        self.stats.on_selected_candidate_pair(None);
+                    }
 
                     self.ctx.event_outs.push_back(TaggedRTCEventInternal {
                         now,
@@ -233,10 +312,11 @@ impl<'a>
                     // Cache the pair's stats key so the per-packet path can look
                     // the accumulator up by borrow instead of re-formatting (and
                     // allocating) the key on every read/write.
-                    let key = format!("RTCIceCandidatePair_{}_{}", local.id(), remote.id());
+                    let key = candidate_pair_stats_id(local.id(), remote.id());
                     self.ctx.selected_pair_key = Some(key.clone());
+                    self.ctx.selected_pair_changes += 1;
                     // Update transport stats for selected candidate pair change
-                    self.stats.transport.on_selected_candidate_pair_changed(key);
+                    self.stats.on_selected_candidate_pair(Some(key));
 
                     self.ctx.event_outs.push_back(TaggedRTCEventInternal {
                         now,
@@ -245,6 +325,32 @@ impl<'a>
                 }
                 ::ice::Event::RoleChange(is_controlling) => {
                     self.stats.transport.on_ice_role_changed(is_controlling);
+                }
+                ::ice::Event::LocalCandidateRenamed(candidate) => {
+                    // The candidate's mDNS name was lost to another host and replaced (RFC
+                    // 6762 section 9): it is announced again, for the application to convey,
+                    // and its statistics show the new name.
+                    let mut rtc_candidate =
+                        crate::peer_connection::transport::RTCIceCandidate::from(&*candidate);
+                    self.ctx
+                        .ice_transport
+                        .describe_local_candidate(&mut rtc_candidate);
+                    if let Some(known) = self.stats.local_candidates.get_mut(
+                        &crate::statistics::accumulator::local_candidate_stats_id(candidate.id()),
+                    ) {
+                        known.address = Some(rtc_candidate.address.clone());
+                    }
+                    self.ctx.event_outs.push_back(TaggedRTCEventInternal {
+                        now,
+                        event: RTCEventInternal::RTCPeerConnectionEvent(
+                            RTCPeerConnectionEvent::OnIceCandidateEvent(
+                                crate::peer_connection::event::RTCPeerConnectionIceEvent {
+                                    candidate: Some(rtc_candidate),
+                                    url: None,
+                                },
+                            ),
+                        ),
+                    });
                 }
                 _ => {}
             }

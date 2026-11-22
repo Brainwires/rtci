@@ -285,6 +285,7 @@ async fn run_main_loop(cli: Cli) -> Result<()> {
                     software: String::new(),
                     rto_in_ms: 0,
                     allocation_refresh_interval_cap: None,
+                    ..Default::default()
                 };
 
                 let mut client = TurnClient::new(cfg, crypto::default_provider()?)?;

@@ -440,6 +440,8 @@ fn test_encrypt_aead_aes_128_gcm_rtcp() {
     )
     .expect("Error creating srtp context");
 
+    // The known answer was made with SRTCP index 1.
+    ctx.set_index(0xcafebabe, 1);
     let gotten_encrypted_rtcp_packet = ctx
         .encrypt_rtcp(&DECRYPTED_RTCP_PACKET)
         .expect("Error encrypting rtcp payload");
@@ -522,6 +524,8 @@ fn test_encrypt_aes_256_cm_rtcp() {
     )
     .expect("Error creating srtp context");
 
+    // The known answer was made with SRTCP index 1.
+    ctx.set_index(0xcafebabe, 1);
     let gotten_encrypted_rtcp_packet = ctx
         .encrypt_rtcp(&DECRYPTED_RTCP_PACKET)
         .expect("Error encrypting rtcp payload");

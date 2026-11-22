@@ -91,6 +91,22 @@ impl CodecStatsAccumulator {
         format!("RTCCodec_{}_{}_PT{}", transport_id, direction, payload_type)
     }
 
+    /// The stats id of the one codec object a payload type has on a transport when it means
+    /// the same codec in both directions (webrtc-stats 8.3: "a single codec entry per payload
+    /// type per transport, unless sdpFmtpLine is different when sending and receiving").
+    pub fn shared_id(transport_id: &str, payload_type: PayloadType) -> String {
+        format!("RTCCodec_{transport_id}_PT{payload_type}")
+    }
+
+    /// Whether `other` describes the same codec: one object can stand for both.
+    pub fn same_codec(&self, other: &Self) -> bool {
+        self.payload_type == other.payload_type
+            && self.mime_type.eq_ignore_ascii_case(&other.mime_type)
+            && self.channels == other.channels
+            && self.clock_rate == other.clock_rate
+            && self.sdp_fmtp_line == other.sdp_fmtp_line
+    }
+
     /// Creates a snapshot of the accumulated stats at the given timestamp.
     pub fn snapshot(&self, now: Instant, id: &str) -> RTCCodecStats {
         RTCCodecStats {

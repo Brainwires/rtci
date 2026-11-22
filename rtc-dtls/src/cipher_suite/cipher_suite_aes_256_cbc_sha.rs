@@ -56,6 +56,12 @@ impl CipherSuite for CipherSuiteAes256CbcSha {
         self.cbc.is_some()
     }
 
+    fn record_expansion(&self) -> usize {
+        // The 16-byte explicit IV, the 20-byte HMAC-SHA1 and up to a block of padding
+        // (RFC 5246 6.2.3.2).
+        16 + 20 + 16
+    }
+
     fn init(
         &mut self,
         provider: Arc<dyn RTCCryptoProvider>,
@@ -110,5 +116,28 @@ impl CipherSuite for CipherSuiteAes256CbcSha {
             "CipherSuite has not been initialized, unable to decrypt".to_owned(),
         ))?;
         cg.decrypt(input)
+    }
+
+    fn encrypt_with_connection_id(
+        &mut self,
+        pkt_rlh: &RecordLayerHeader,
+        raw: &[u8],
+        connection_id: &[u8],
+    ) -> Result<Vec<u8>> {
+        let cg = self.cbc.as_mut().ok_or(Error::Other(
+            "CipherSuite has not been initialized, unable to encrypt".to_owned(),
+        ))?;
+        cg.encrypt_with(pkt_rlh, raw, Some(connection_id))
+    }
+
+    fn decrypt_with_connection_id(
+        &mut self,
+        input: &[u8],
+        connection_id: &[u8],
+    ) -> Result<Vec<u8>> {
+        let cg = self.cbc.as_mut().ok_or(Error::Other(
+            "CipherSuite has not been initialized, unable to decrypt".to_owned(),
+        ))?;
+        cg.decrypt_with(input, Some(connection_id))
     }
 }

@@ -53,14 +53,12 @@ struct Cli {
 }
 
 fn get_local_ip() -> IpAddr {
-    if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
-        if socket.connect("8.8.8.8:80").is_ok() {
-            if let Ok(addr) = socket.local_addr() {
-                if let IpAddr::V4(ip) = addr.ip() {
-                    return ip.into();
-                }
-            }
-        }
+    if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0")
+        && socket.connect("8.8.8.8:80").is_ok()
+        && let Ok(addr) = socket.local_addr()
+        && let IpAddr::V4(ip) = addr.ip()
+    {
+        return ip.into();
     }
     Ipv4Addr::new(127, 0, 0, 1).into()
 }
@@ -170,9 +168,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             break;
         }
 
-        // Calculate how long to wait
-        let wait_duration = mdns_client
-            .poll_timeout()
+        // Calculate how long to wait: until the earlier deadline of the two connections (the
+        // server probes for and announces its names on timers)
+        let wait_duration = [mdns_client.poll_timeout(), mdns_server.poll_timeout()]
+            .into_iter()
+            .flatten()
+            .min()
             .map(|t| t.saturating_duration_since(Instant::now()))
             .unwrap_or(Duration::from_millis(100));
 
@@ -197,7 +198,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // Server A will respond to questions, Server B will receive answers
                         let msg_clone = TaggedBytesMut {
                             now,
-                            transport: msg.transport.clone(),
+                            transport: msg.transport,
                             message: msg.message.clone(),
                         };
 

@@ -135,7 +135,7 @@ fn test_full_intra_request_round_trip() {
             "valid",
             FullIntraRequest {
                 sender_ssrc: 1,
-                media_ssrc: 2,
+                media_ssrc: 0,
                 fir: vec![FirEntry {
                     ssrc: 3,
                     sequence_number: 42,
@@ -147,7 +147,7 @@ fn test_full_intra_request_round_trip() {
             "also valid",
             FullIntraRequest {
                 sender_ssrc: 5000,
-                media_ssrc: 6000,
+                media_ssrc: 0,
                 fir: vec![FirEntry {
                     ssrc: 3,
                     sequence_number: 57,

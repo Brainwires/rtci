@@ -6,12 +6,14 @@
 //!
 //! # Available Interceptors
 //!
-//! ## RTCP Reports
+//! ## RTCP
 //!
 //! | Interceptor | Description |
 //! |-------------|-------------|
-//! | [`SenderReportInterceptor`] | Generates RTCP Sender Reports (SR) for local streams and filters hop-by-hop RTCP feedback |
-//! | [`ReceiverReportInterceptor`] | Generates RTCP Receiver Reports (RR) based on incoming RTP statistics |
+//! | [`RtcpSessionInterceptor`] | The endpoint's RTCP session: one CNAME and reporting identity, SR / RR / SDES / BYE, the timing of RFC 3550 6.3 and RFC 4585 3.5, every outbound RTCP packet in a compound packet (RFC 8108, RFC 5506) |
+//! | [`SenderReportInterceptor`] | Sender Reports (SR) for local streams on a fixed timer, for a chain built without the session |
+//! | [`ReceiverReportInterceptor`] | Receiver Reports (RR) on a fixed timer, for a chain built without the session |
+//! | [`KeyFrameRequestInterceptor`] | Delivers inbound PLI and FIR (each FIR command once) to the application |
 //!
 //! ## NACK (Negative Acknowledgement)
 //!
@@ -228,6 +230,7 @@ pub(crate) mod registry;
 
 pub(crate) mod adaptive_jitter_buffer;
 pub(crate) mod cc;
+pub(crate) mod circuit_breaker;
 pub(crate) mod flexfec;
 pub(crate) mod gcc;
 pub(crate) mod intervalpli;
@@ -238,9 +241,12 @@ pub(crate) mod pacing;
 pub(crate) mod packet;
 pub(crate) mod report;
 pub(crate) mod rfc8888;
+pub(crate) mod rtcp_session;
 pub(crate) mod rtpfb;
 pub(crate) mod stream_info;
 pub(crate) mod twcc;
+pub(crate) mod ulpfec;
+pub(crate) mod wire_image;
 
 // Fork additions kept over upstream (see FORK.md): the TWCC-driven GCC interceptor with its
 // shared bitrate handle, and the adaptive (RFC 3550 jitter + playout-delay extension) jitter buffer.
@@ -249,18 +255,51 @@ pub use adaptive_jitter_buffer::{
     JitterBufferInterceptor as AdaptiveJitterBufferInterceptor,
 };
 pub use cc::estimator::{BandwidthEstimator, ConstantBitrate, EstimatorStats};
+pub use cc::fec_rate::{FecRate, MIN_LOSS as FEC_MIN_LOSS};
+pub use cc::feedback::{CongestionFeedbackFormat, negotiated_congestion_feedback};
 pub use cc::interceptor::{
-    CongestionControlBuilder, CongestionControlInterceptor,
-    DEFAULT_PRUNE_HORIZON as CONGESTION_CONTROL_DEFAULT_PRUNE_HORIZON,
+    CongestionControlBuilder, CongestionControlHandle, CongestionControlInterceptor,
+    DEFAULT_PRUNE_HORIZON as CONGESTION_CONTROL_DEFAULT_PRUNE_HORIZON, REMB_TIMEOUT,
+};
+pub use cc::probe::{
+    PROBE_AFTER_DROP_TIMEOUT, PROBE_APPLICATION_LIMITED_INTERVAL, PROBE_MAX_OCTETS,
+    PROBE_MIN_DURATION, PROBE_MIN_PACKETS, PROBE_RESULT_TIMEOUT, ProbeController, ProbePacket,
+    ProbeRequest, probe_estimate,
+};
+pub use cc::tmmbr::{TMMBR_OWNER_TIMEOUT, TmmbEntry};
+pub use cc::tmmbr_request::{TMMBR_REPEAT_INTERVAL, TmmbrControl};
+pub use circuit_breaker::{
+    CircuitBreakerBuilder, CircuitBreakerHandle, CircuitBreakerInterceptor, CircuitBreakerReason,
+    CircuitBreakerState,
+    DEFAULT_NON_REPORTING_THRESHOLD as CIRCUIT_BREAKER_NON_REPORTING_THRESHOLD,
+    DEFAULT_RTCP_INTERVAL as CIRCUIT_BREAKER_RTCP_INTERVAL, MediaUsability,
 };
 pub use flexfec::bit_array::BitArray;
 pub use flexfec::coverage::{MAX_FEC_PACKETS, MAX_MEDIA_PACKETS, ProtectionCoverage};
 pub use flexfec::draft03::decoder::{FlexFec03Decoder, ParseError as FlexFecParseError};
+pub use flexfec::draft03::encoder::DRAFT03_MAX_MEDIA_PACKETS as FLEXFEC03_MAX_MEDIA_PACKETS;
 pub use flexfec::draft03::encoder::FlexFec03Encoder;
 pub use flexfec::draft03::receiver::{FlexFec03ReceiveBuilder, FlexFec03ReceiveInterceptor};
 pub use flexfec::draft03::sender::{
     DEFAULT_NUM_FEC_PACKETS, DEFAULT_NUM_MEDIA_PACKETS, FlexFec03SendBuilder,
     FlexFec03SendInterceptor,
+};
+pub use flexfec::rfc8627::decoder::{
+    FLEXFEC_DEFAULT_REPAIR_WINDOW, FlexFecDecoder, FlexFecDecoderConfig, FlexFecDecoderStats,
+};
+pub use flexfec::rfc8627::encoder::{
+    FlexFecEncodeError, FlexFecEncoder, FlexFecLayout, FlexFecProtection,
+};
+pub use flexfec::rfc8627::header::{
+    FLEXFEC_MAX_MASK_BITS, FLEXFEC_MAX_PROTECTED_SSRCS, FLEXFEC_RECOVERY_SIZE, FlexFecBlock,
+    FlexFecHeader, FlexFecHeaderError, FlexFecProtected,
+};
+pub use flexfec::rfc8627::params::FlexFecParameters;
+pub use flexfec::rfc8627::receiver::{
+    FLEXFEC_MAX_REPAIR_WINDOW, FlexFecReceiveBuilder, FlexFecReceiveInterceptor,
+};
+pub use flexfec::rfc8627::sender::{
+    FLEXFEC_DEFAULT_PROTECTION, FlexFecSendBuilder, FlexFecSendInterceptor,
 };
 pub use gcc::arrival_group::{
     ArrivalGroup, ArrivalGroupAccumulator, DEFAULT_BURST_INTERVAL as GCC_DEFAULT_BURST_INTERVAL,
@@ -276,10 +315,19 @@ pub use gcc::loss::{
     DEFAULT_LOW_LOSS as GCC_LOW_LOSS, LossController,
 };
 pub use gcc::overuse::{DEFAULT_OVERUSE_TIME as GCC_DEFAULT_OVERUSE_TIME, OveruseDetector, Usage};
+pub use gcc::queue_limit::{
+    QUEUE_AT_LIMIT_MIN_DELAY, QUEUE_AT_LIMIT_SHARE, QUEUE_BASE_WINDOW, QUEUE_HIGH_WINDOW,
+    QueueLimitDetector,
+};
 pub use gcc::rate_calc::{DEFAULT_WINDOW as GCC_RATE_WINDOW, RateCalculator};
 pub use gcc::rate_control::{
     DEFAULT_DECREASE_FACTOR as GCC_DECREASE_FACTOR, DEFAULT_INCREASE_FACTOR as GCC_INCREASE_FACTOR,
     DEFAULT_RATE_CONTROL_INTERVAL as GCC_RATE_CONTROL_INTERVAL, RateController,
+};
+pub use gcc::remb::{
+    ABS_SEND_TIME_SLOT, ABS_SEND_TIME_URI, AbsSendTimeInterceptor, GOOG_REMB,
+    REMB_DECREASE_TRIGGER, REMB_GENERATOR_SLOT, REMB_INITIALIZATION_TIME, REMB_MAX_INTERVAL,
+    REMB_UPDATE_INTERVAL, RembGeneratorBuilder, RembGeneratorInterceptor,
 };
 pub use gcc::slope::{DelayTrend, SlopeEstimator};
 pub use gcc::state::RateControlState;
@@ -297,11 +345,18 @@ pub use jitterbuffer::receiver::{
     DEFAULT_CAPACITY as JITTER_BUFFER_DEFAULT_CAPACITY,
     DEFAULT_DEPTH as JITTER_BUFFER_DEFAULT_DEPTH, JitterBufferBuilder, JitterBufferInterceptor,
 };
-pub use keyframe::KeyFrameRequestInterceptor;
-pub use nack::generator::{NackGeneratorBuilder, NackGeneratorInterceptor};
-pub use nack::responder::{NackResponderBuilder, NackResponderInterceptor};
+pub use keyframe::{FirCommands, KeyFrameRequestInterceptor};
+pub use nack::NackControl;
+pub use nack::generator::{
+    DEFAULT_MAX_NACKS_PER_PACKET as NACK_DEFAULT_MAX_NACKS_PER_PACKET,
+    DEFAULT_MAX_PACKET_AGE as NACK_DEFAULT_MAX_PACKET_AGE, NackGeneratorBuilder,
+    NackGeneratorInterceptor,
+};
+pub use nack::responder::{NackResponderBuilder, NackResponderInterceptor, PROBE_PADDING_OCTETS};
 pub use noop::NoopInterceptor;
-pub use pacing::pacer::{MIN_BURST_BITS as PACER_MIN_BURST_BITS, Pacer};
+pub use pacing::pacer::{
+    BURST_TIME as PACER_BURST_TIME, MIN_BURST_BITS as PACER_MIN_BURST_BITS, Pacer,
+};
 pub use pacing::sender::{
     DEFAULT_BITRATE as PACER_DEFAULT_BITRATE, DEFAULT_QUEUE_LIMIT as PACER_DEFAULT_QUEUE_LIMIT,
     PacerBuilder, PacerInterceptor,
@@ -311,17 +366,41 @@ pub use pass_through::PassThroughInterceptor;
 pub use registry::{Registry, Slot};
 pub use report::receiver::{RTCP_FB_RRTR, ReceiverReportBuilder, ReceiverReportInterceptor};
 pub use report::sender::{SenderReportBuilder, SenderReportInterceptor};
+pub use rfc8888::ecn::{
+    CONFIRMATIONS as ECN_CONFIRMATIONS, DEFAULT_RETRY_AFTER as ECN_DEFAULT_RETRY_AFTER,
+    EcnInitiation, EcnState, EcnValidation, PROBE_INTERVAL as ECN_PROBE_INTERVAL,
+    PROBE_SPACING as ECN_PROBE_SPACING,
+};
 pub use rfc8888::recorder::CcFeedbackRecorder;
 pub use rfc8888::sender::{
     DEFAULT_INTERVAL as RFC8888_DEFAULT_INTERVAL,
     DEFAULT_MAX_REPORT_SIZE as RFC8888_DEFAULT_MAX_REPORT_SIZE, Rfc8888Builder, Rfc8888Interceptor,
 };
+pub use rtcp_session::identity::{RtcpRandom, generate_rtcp_cname};
+pub use rtcp_session::{
+    RTCP_SESSION_DEFAULT_MTU, RTCP_SESSION_DEFAULT_T_RR_INTERVAL, RTCP_SESSION_MIN_BANDWIDTH,
+    RTCP_SESSION_NOMINAL_AUDIO_BANDWIDTH, RTCP_SESSION_NOMINAL_VIDEO_BANDWIDTH, RtcpBandwidth,
+    RtcpProfile, RtcpSessionBuilder, RtcpSessionControl, RtcpSessionEvent, RtcpSessionInterceptor,
+};
 pub use rtpfb::acknowledgement::{Acknowledgement, PacketReport, Report};
-pub use rtpfb::convert::{convert_ccfb, convert_twcc};
+pub use rtpfb::convert::{FeedbackTimeline, convert_ccfb, convert_twcc};
 pub use rtpfb::history::History;
 pub use stream_info::{RTCPFeedback, RTPHeaderExtension, StreamInfo};
 pub use twcc::receiver::{TwccReceiverBuilder, TwccReceiverInterceptor};
 pub use twcc::sender::{TwccSenderBuilder, TwccSenderInterceptor};
+pub use ulpfec::decoder::{ULPFEC_MAX_HELD_FEC, ULPFEC_MEDIA_WINDOW};
+pub use ulpfec::sender::{ULPFEC_DEFAULT_NUM_FEC_PACKETS, ULPFEC_DEFAULT_NUM_MEDIA_PACKETS};
+pub use ulpfec::{
+    FEC_HEADER_LENGTH as ULPFEC_HEADER_LENGTH, LONG_MASK_BITS as ULPFEC_LONG_MASK_BITS,
+    MAX_LEVELS as ULPFEC_MAX_LEVELS, ProtectionLevel as UlpfecProtectionLevel, RedFecPayload,
+    RedPlacement, SHORT_MASK_BITS as ULPFEC_SHORT_MASK_BITS, UlpfecDecoder, UlpfecDecoderStats,
+    UlpfecEncoder, UlpfecError, UlpfecLevel, UlpfecPacket, UlpfecReceiveBuilder,
+    UlpfecReceiveInterceptor, UlpfecRepair, UlpfecSendBuilder, UlpfecSendInterceptor,
+    UlpfecStreamPacketizer, depacketize_red as depacketize_red_for_ulpfec,
+    one_level_only_from_fmtp as ulpfec_one_level_only_from_fmtp,
+    validate_scheme as validate_ulpfec_scheme,
+};
+pub use wire_image::{MAX_HELD_WIRE_IMAGES, WireImageTap, WireImages, wire_image_tap};
 
 /// One interceptor of packet processing.
 ///

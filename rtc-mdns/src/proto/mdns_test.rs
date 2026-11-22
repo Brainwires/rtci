@@ -1,4 +1,5 @@
 use super::*;
+use crate::message::DnsType;
 use sansio::Protocol;
 use shared::error::Error;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -63,7 +64,7 @@ fn test_multiple_close() {
 
     // After close, handle_read should return ErrConnectionClosed
     let msg = TaggedBytesMut {
-        now: now,
+        now,
         transport: TransportContext {
             local_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 5353),
             peer_addr: MDNS_DEST_ADDR,
@@ -89,7 +90,7 @@ fn test_query_timeout_behavior() {
     // In sansio, timeout behavior is caller-controlled.
     // This test verifies that queries remain pending until explicitly
     // answered or cancelled, and that handle_timeout triggers retries.
-    let config = MdnsConfig::default().with_query_interval(Duration::from_millis(100));
+    let config = MdnsConfig::default().with_query_interval(Duration::from_secs(1));
     let mut conn = Mdns::new(now, config);
 
     // Start a query
@@ -107,7 +108,7 @@ fn test_query_timeout_behavior() {
     assert!(conn.is_query_pending(query_id));
 
     // Simulate time passing and trigger timeout
-    let retry_at = now + Duration::from_millis(150);
+    let retry_at = now + Duration::from_millis(1500);
     let result = conn.handle_timeout(retry_at);
     assert!(result.is_ok());
 
@@ -194,10 +195,22 @@ fn test_query_interval_default() {
     let conn = Mdns::new(now, config);
     assert_eq!(conn.query_interval, DEFAULT_QUERY_INTERVAL);
 
-    // Non-zero interval should be used
+    // RFC 6762 section 5.2: at least one second between the first two queries. A shorter
+    // interval is brought up to it.
     let config = MdnsConfig::default().with_query_interval(Duration::from_millis(500));
     let conn = Mdns::new(now, config);
-    assert_eq!(conn.query_interval, Duration::from_millis(500));
+    assert_eq!(conn.query_interval, Duration::from_secs(1));
+
+    // A longer interval should be used, up to an hour
+    let config = MdnsConfig::default().with_query_interval(Duration::from_secs(5));
+    let conn = Mdns::new(now, config);
+    assert_eq!(conn.query_interval, Duration::from_secs(5));
+    let config = MdnsConfig::default().with_query_interval(Duration::MAX);
+    let mut conn = Mdns::new(now, config.with_query_timeout(Duration::MAX));
+    assert_eq!(conn.query_interval, Duration::from_secs(3600));
+    // Neither the longest interval nor the longest timeout overflows the clock.
+    conn.query_now(now, "far-future.local");
+    assert_eq!(conn.poll_timeout(), Some(now + Duration::from_secs(3600)));
 }
 
 #[test]
@@ -325,8 +338,8 @@ fn test_query_timeout_multiple_queries() {
 #[test]
 fn test_no_timeout_without_config() {
     let now = Instant::now();
-    // Default config has no timeout
-    let config = MdnsConfig::default().with_query_interval(Duration::from_millis(100));
+    // Without a timeout a query is retried until it is answered or cancelled
+    let config = MdnsConfig::default().without_query_timeout();
     let mut conn = Mdns::new(now, config);
 
     let query_id = conn.query_now(now, "no-timeout.local");
@@ -351,8 +364,11 @@ fn test_query_timeout_config() {
     let conn = Mdns::new(now, config);
     assert_eq!(conn.query_timeout, Some(Duration::from_secs(10)));
 
-    // Default should be None
+    // The default is 30 seconds; it can be removed
     let config = MdnsConfig::default();
+    let conn = Mdns::new(now, config);
+    assert_eq!(conn.query_timeout, Some(Duration::from_secs(30)));
+    let config = MdnsConfig::default().without_query_timeout();
     let conn = Mdns::new(now, config);
     assert_eq!(conn.query_timeout, None);
 }
@@ -428,7 +444,11 @@ fn test_add_local_name_refuses_duplicates_and_caps() {
         assert!(conn.add_local_name(&format!("n{i}.local"), ip));
     }
     assert!(!conn.add_local_name("one-too-many.local", ip));
-    assert_eq!(conn.local_records.len(), MAX_LOCAL_NAMES);
+    assert_eq!(conn.records.len(), MAX_LOCAL_NAMES);
+    assert!(
+        !conn.add_local_name("DUP.local", ip),
+        "same name, in another case"
+    );
 }
 
 #[test]

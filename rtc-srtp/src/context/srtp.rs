@@ -15,23 +15,38 @@ impl Context {
     ///
     /// # Errors
     ///
-    /// Fails if authentication fails, if the packet is a replay, or if it is too short to hold
-    /// the profile's auth tag.
+    /// Fails if authentication fails, if the packet is a replay, if it is too short to hold
+    /// the profile's auth tag, if it names a master key the context does not have, or with
+    /// [`Error::ErrExceededMaxPackets`] once the master key reached its lifetime or the packet
+    /// index would pass 2^48 - 1 (RFC 3711 sections 3.3.1 and 9.2).
     pub fn decrypt_rtp_with_header(
         &mut self,
         encrypted: &[u8],
         header: &rtp::Header,
     ) -> Result<BytesMut> {
-        let auth_tag_len = self.cipher.rtp_auth_tag_len();
-        if encrypted.len() < header.marshal_size() + auth_tag_len {
+        let auth_tag_len = self.profile.rtp_auth_tag_len();
+        let mki_len = self.mki_field_len();
+        if encrypted.len() < header.marshal_size() + auth_tag_len + mki_len {
             return Err(Error::ErrTooShortRtp);
         }
+
+        // The MKI, which nothing authenticates, only selects the key the packet is then
+        // authenticated with.
+        let key = self.receiving_key(encrypted, auth_tag_len)?;
+        self.check_key_lifetime(key, PacketKind::Rtp)?;
 
         // Per-SSRC state is created only once a packet for that SSRC authenticates, so packets
         // under made-up SSRCs cannot grow the state map.
         let (roc, diff) = match self.srtp_ssrc_states.get_mut(&header.ssrc) {
             Some(state) => {
-                let (roc, diff, _) = state.next_rollover_count(header.sequence_number);
+                let (roc, diff, overflow) = state.next_rollover_count(header.sequence_number);
+                if overflow {
+                    // The estimate is past ROC 2^32 - 1, i.e. packet index 2^48 or more. The
+                    // rollover counter does not wrap under a master key (RFC 3711 section
+                    // 3.3.1, RFC 7714 section 13.1): trying the packet with ROC 0 would accept
+                    // a keystream (or GCM nonce) used at the start of the stream.
+                    return Err(Error::ErrExceededMaxPackets);
+                }
                 if let Some(replay_detector) = &mut state.replay_detector
                     && !replay_detector.check(header.sequence_number as u64)
                 {
@@ -54,22 +69,36 @@ impl Context {
             }
         };
 
+        let mki_end = encrypted.len() - auth_tag_len;
+        let options = PacketOptions {
+            mki: &encrypted[mki_end - mki_len..mki_end],
+            header_extensions: &self.encrypted_header_extensions,
+        };
+        let cipher = &mut self.keys[key].cipher;
         let dst = match cryptex::received(encrypted) {
             cryptex::Received::Cryptex(layout) => {
-                let mut dst = self
-                    .cipher
-                    .decrypt_rtp_cryptex(encrypted, header, roc, layout)?;
+                let mut dst =
+                    cipher.decrypt_rtp_cryptex(encrypted, header, roc, layout, options)?;
                 cryptex::restore_profile(&mut dst, layout);
                 dst
             }
             cryptex::Received::Clear if self.cryptex.require => {
+                // Authenticate before blaming the peer: only a packet it really sent is a
+                // violation of the policy (RFC 9335 section 5.2). The packet is discarded
+                // either way, and leaves no state behind.
+                cipher.decrypt_rtp(encrypted, header, roc, options)?;
+                if !self.cryptex_violation_reported {
+                    self.cryptex_violation_reported = true;
+                    self.events
+                        .push_back(ContextEvent::CryptexRequiredViolation { ssrc: header.ssrc });
+                }
                 return Err(Error::Other(format!(
                     "SRTP packet (SSRC {}, sequence number {}) carries CSRCs or header \
                      extensions without Cryptex, which is required",
                     header.ssrc, header.sequence_number
                 )));
             }
-            _ => self.cipher.decrypt_rtp(encrypted, header, roc)?,
+            _ => cipher.decrypt_rtp(encrypted, header, roc, options)?,
         };
         {
             let is_new = !self.srtp_ssrc_states.contains_key(&header.ssrc);
@@ -82,6 +111,7 @@ impl Context {
             }
             state.update_rollover_count(header.sequence_number, diff);
         }
+        self.count_packet(key, PacketKind::Rtp);
 
         Ok(dst)
     }
@@ -105,11 +135,26 @@ impl Context {
     /// protected a different packet, or lies more than a window behind the highest index sent.
     /// The same packet under the same index (a retransmission) is protected again, which yields
     /// the same bytes.
+    ///
+    /// Fails with [`Error::ErrExceededMaxPackets`] once the master key reached its lifetime, or
+    /// the stream its 2^48th packet (RFC 3711 sections 3.3.1 and 9.2); see
+    /// [`ContextEvent::KeyExhausted`].
+    ///
+    /// With Cryptex required ([`Cryptex::require`]), fails for a packet that has CSRCs or a
+    /// header extension and cannot be protected with Cryptex (an extension that is not RFC
+    /// 8285's, or two-byte headers with non-zero "appbits"): nothing leaves with them in the
+    /// clear.
     pub fn encrypt_rtp_with_header(
         &mut self,
         plaintext: &[u8],
         header: &rtp::Header,
     ) -> Result<BytesMut> {
+        if plaintext.len() < header.marshal_size() {
+            return Err(Error::ErrTooShortRtp);
+        }
+        let key = self.sending_key;
+        self.check_key_lifetime(key, PacketKind::Rtp)?;
+
         let digest = self.sent_digest_hasher.hash_one(plaintext);
         let (roc, diff, index, is_new) = {
             let state = self.get_srtp_ssrc_state(header.ssrc)?;
@@ -136,16 +181,36 @@ impl Context {
             (roc, diff, index, is_new)
         };
 
-        let dst = match self
+        let cryptex_packet = self
             .cryptex
             .send
             .then(|| cryptex::sender_packet(plaintext))
-            .flatten()
+            .flatten();
+        if cryptex_packet.is_none()
+            && self.cryptex.require
+            && cryptex::carries_csrcs_or_extension(plaintext)
         {
-            Some((packet, layout)) => self
+            // RFC 9335 section 5.1 applies Cryptex to RFC 8285 extensions only, and the peer,
+            // under the same policy, discards anything else that has CSRCs or an extension.
+            return Err(Error::Other(format!(
+                "RTP packet (SSRC {}, sequence number {}) has CSRCs or a header extension that \
+                 Cryptex, which is required, cannot protect",
+                header.ssrc, header.sequence_number
+            )));
+        }
+
+        let master_key = &mut self.keys[key];
+        let options = PacketOptions {
+            mki: &master_key.mki,
+            header_extensions: &self.encrypted_header_extensions,
+        };
+        let dst = match cryptex_packet {
+            Some((packet, layout)) => master_key
                 .cipher
-                .encrypt_rtp_cryptex(&packet, header, roc, layout)?,
-            None => self.cipher.encrypt_rtp(plaintext, header, roc)?,
+                .encrypt_rtp_cryptex(&packet, header, roc, layout, options)?,
+            None => master_key
+                .cipher
+                .encrypt_rtp(plaintext, header, roc, options)?,
         };
 
         if is_new {
@@ -155,6 +220,9 @@ impl Context {
             }
             state.update_rollover_count(header.sequence_number, diff);
         }
+        // Protecting the same packet again counts too: the count is of packets secured with the
+        // key, and it only ever errs on the side of re-keying early.
+        self.count_packet(key, PacketKind::Rtp);
 
         Ok(dst)
     }

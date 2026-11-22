@@ -312,12 +312,12 @@ fn test_handle_peer_reflexive_unknown_remote() -> Result<()> {
     tid.0[..3].copy_from_slice("ABC".as_bytes());
 
     let remote_pwd = {
-        a.pending_binding_requests = vec![BindingRequest {
-            timestamp: Instant::now(),
-            transaction_id: tid,
-            destination: SocketAddr::from_str("0.0.0.0:0")?,
-            is_use_candidate: false,
-        }];
+        a.pending_binding_requests = vec![BindingRequest::sent_once(
+            Instant::now(),
+            tid,
+            SocketAddr::from_str("0.0.0.0:0")?,
+            Duration::from_secs(4),
+        )];
         a.ufrag_pwd.remote_credentials = Some(Credentials {
             ufrag: "".to_string(),
             pwd: "".to_string(),
@@ -1017,10 +1017,9 @@ fn test_keepalive_sent_during_media_flow() -> Result<()> {
 
     // Virtual time: the agent is told the instant, so nothing here sleeps or samples a clock.
     let base = Instant::now();
-    let keepalive_interval = a.keepalive_interval;
 
-    // Pretend the last consent ping was long ago such that the interval has elapsed
-    a.last_consent_sent = base - Duration::from_secs(10);
+    // The consent interval has run out.
+    a.next_consent_at = Some(base);
 
     // Drain any events/writes from setup
     a.write_outs.clear();
@@ -1038,14 +1037,18 @@ fn test_keepalive_sent_during_media_flow() -> Result<()> {
     a.check_keepalive(base);
     assert!(
         a.write_outs.is_empty(),
-        "check_keepalive must not send again before keepalive_interval elapses"
+        "check_keepalive must not send again before the consent interval elapses"
     );
+    // RFC 7675 Section 5.1: never less than 4 seconds between two checks.
+    a.check_keepalive(base + Duration::from_millis(3999));
+    assert!(a.write_outs.is_empty());
 
-    // Advance virtual time past the interval: the next ping goes out, instantly and reproducibly.
-    a.check_keepalive(base + keepalive_interval + Duration::from_millis(1));
+    // Advance virtual time past the longest interval (1.2 times 5 seconds): the next ping goes
+    // out, instantly and reproducibly.
+    a.check_keepalive(base + Duration::from_millis(6001));
     assert!(
         !a.write_outs.is_empty(),
-        "check_keepalive must send again once keepalive_interval has elapsed"
+        "check_keepalive must send again once the consent interval has elapsed"
     );
 
     a.close()?;
@@ -1361,6 +1364,9 @@ fn test_query_only_agent_queries_mdns_remote_candidate() -> Result<()> {
         base,
         Arc::new(AgentConfig {
             multicast_dns_mode: crate::mdns::MulticastDnsMode::QueryOnly,
+            // The RFC 6762 section 5.2 first-query delay has its own test
+            // (`agent_open_rows_test.rs`); this one asks at once.
+            multicast_dns_first_query_delay: Some(false),
             ..Default::default()
         }),
         test_crypto_provider(),
@@ -1843,9 +1849,8 @@ fn test_controlling_rechecks_failed_pair_on_inbound_binding_request() -> Result<
     });
 
     assert_eq!(a.candidate_pairs.len(), 1);
-    // The pair exhausted its retransmission budget and was failed by ping_all_candidates.
+    // The pair's check timed out and the pair failed.
     a.candidate_pairs[0].state = CandidatePairState::Failed;
-    a.candidate_pairs[0].binding_request_count = a.max_binding_requests + 1;
     a.write_outs.clear();
     a.pending_binding_requests.clear();
 
@@ -1865,14 +1870,20 @@ fn test_controlling_rechecks_failed_pair_on_inbound_binding_request() -> Result<
         Box::new(FINGERPRINT),
     ])?;
 
-    a.handle_binding_request(now, &msg, 0, 0);
+    a.process_binding_request(now, &msg, 0, remote_addr, true)?;
 
+    // RFC 8445 Section 7.3.1.4: the pair is Waiting and on the triggered-check queue, and the
+    // request has been answered.
     assert_eq!(
         a.candidate_pairs[0].state,
-        CandidatePairState::InProgress,
-        "a Binding request on a Failed pair must move it back to InProgress"
+        CandidatePairState::Waiting,
+        "a Binding request on a Failed pair must move it back to Waiting"
     );
-    assert_eq!(a.candidate_pairs[0].binding_request_count, 0);
+    assert_eq!(a.triggered_queue.len(), 1);
+    assert_eq!(a.write_outs.len(), 1, "the success response");
+    // The triggered check goes out when Ta allows it: at once here.
+    a.handle_timeout(now)?;
+    assert_eq!(a.candidate_pairs[0].state, CandidatePairState::InProgress);
     assert_eq!(
         a.pending_binding_requests.len(),
         1,
@@ -1895,17 +1906,20 @@ fn test_controlling_rechecks_failed_pair_on_inbound_binding_request() -> Result<
     }
     assert_eq!(types, vec![BINDING_SUCCESS, BINDING_REQUEST]);
 
-    // The next tick must keep checking the pair rather than failing it again at once.
-    a.ping_all_candidates(now);
+    // The pair is being checked again: it stays In-Progress while its transaction runs (it
+    // is retransmitted, not failed again at once).
+    a.handle_timeout(now + Duration::from_millis(600))?;
     assert_eq!(a.candidate_pairs[0].state, CandidatePairState::InProgress);
+    assert_eq!(a.pending_binding_requests[0].transmissions, 2);
 
     a.close()?;
     Ok(())
 }
 
-/// Every authenticated Binding request on a pair that has not succeeded triggers a check, and
-/// each check is a pending transaction. The pending list stays bounded however many requests
-/// arrive, keeps the newest transactions, and still matches their responses.
+/// Every authenticated Binding request on a pair that has not succeeded triggers a check, which
+/// cancels the transaction in progress (kept until its timeout, in case its response comes)
+/// and opens a new one. The pending list stays bounded however many requests arrive, keeps the
+/// newest transactions, and still matches their responses.
 #[test]
 fn test_pending_binding_requests_are_bounded() -> Result<()> {
     let now = Instant::now();
@@ -1948,6 +1962,7 @@ fn test_pending_binding_requests_are_bounded() -> Result<()> {
 
     let username = a.ufrag_pwd.local_credentials.ufrag.clone() + ":remote_ufrag";
     let local_pwd = a.ufrag_pwd.local_credentials.pwd.clone();
+    let mut tick = now;
     for _ in 0..(MAX_PENDING_BINDING_REQUESTS * 20) {
         let mut msg = Message::new();
         msg.build(&[
@@ -1962,9 +1977,12 @@ fn test_pending_binding_requests_are_bounded() -> Result<()> {
             )),
             Box::new(FINGERPRINT),
         ])?;
-        a.handle_binding_request(now, &msg, 0, 0);
+        a.handle_binding_request(tick, &msg, 0, 0);
+        // The triggered check goes out one Ta later.
+        tick += a.ta;
+        a.handle_timeout(tick)?;
         assert!(
-            a.pending_binding_requests.len() <= MAX_PENDING_BINDING_REQUESTS,
+            a.pending_binding_requests.len() <= MAX_PENDING_BINDING_REQUESTS + 1,
             "{} pending binding requests",
             a.pending_binding_requests.len()
         );
@@ -1972,9 +1990,17 @@ fn test_pending_binding_requests_are_bounded() -> Result<()> {
     }
     assert_eq!(
         a.pending_binding_requests.len(),
-        MAX_PENDING_BINDING_REQUESTS,
-        "every request triggered a check"
+        MAX_PENDING_BINDING_REQUESTS + 1,
+        "every request triggered a check: the one in progress and the cancelled ones kept"
     );
+    assert_eq!(
+        a.pending_binding_requests
+            .iter()
+            .filter(|r| !r.cancelled)
+            .count(),
+        1
+    );
+    let now = tick;
 
     // The newest transaction is still tracked and its response matches once.
     let newest = a
@@ -1986,8 +2012,8 @@ fn test_pending_binding_requests_are_bounded() -> Result<()> {
     assert!(a.handle_inbound_binding_success(now, newest).is_none());
 
     // Pending requests still expire.
-    let later = now + MAX_BINDING_REQUEST_TIMEOUT + Duration::from_millis(1);
-    a.invalidate_pending_binding_requests(later);
+    let later = now + Duration::from_secs(60);
+    a.run_transactions(later);
     assert!(a.pending_binding_requests.is_empty());
 
     a.close()?;
@@ -2191,6 +2217,9 @@ fn agent_with_answered_mdns_query(base: Instant) -> Result<(Agent, TaggedBytesMu
         base,
         Arc::new(AgentConfig {
             multicast_dns_mode: crate::mdns::MulticastDnsMode::QueryOnly,
+            // The RFC 6762 section 5.2 first-query delay has its own test
+            // (`agent_open_rows_test.rs`); this one asks at once.
+            multicast_dns_first_query_delay: Some(false),
             ..Default::default()
         }),
         test_crypto_provider(),
@@ -2455,6 +2484,9 @@ fn mdns_agent(mode: crate::mdns::MulticastDnsMode, local_ip: Option<IpAddr>) -> 
         Arc::new(AgentConfig {
             multicast_dns_mode: mode,
             multicast_dns_local_ip: local_ip,
+            // The RFC 6762 section 5.2 first-query delay has its own test
+            // (`agent_open_rows_test.rs`); these ask at once.
+            multicast_dns_first_query_delay: Some(false),
             ..Default::default()
         }),
         test_crypto_provider(),

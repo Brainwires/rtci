@@ -227,6 +227,27 @@ doc = false
 bench = false
 
 [[bin]]
+name = "param_param_incoming_reset_request_unmarshal"
+path = "fuzz_targets/param_param_incoming_reset_request_unmarshal.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "param_param_ssn_tsn_reset_request_unmarshal"
+path = "fuzz_targets/param_param_ssn_tsn_reset_request_unmarshal.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "param_param_add_streams_request_unmarshal"
+path = "fuzz_targets/param_param_add_streams_request_unmarshal.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "param_param_unknown_unmarshal"
 path = "fuzz_targets/param_param_unknown_unmarshal.rs"
 test = false
@@ -243,6 +264,48 @@ bench = false
 [[bin]]
 name = "endpoint_handle_datagrams"
 path = "fuzz_targets/endpoint_handle_datagrams.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "chunk_chunk_unknown_unmarshal"
+path = "fuzz_targets/chunk_chunk_unknown_unmarshal.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "association_handle_chunks"
+path = "fuzz_targets/association_handle_chunks.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "chunk_chunk_i_data_unmarshal"
+path = "fuzz_targets/chunk_chunk_i_data_unmarshal.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "chunk_chunk_i_forward_tsn_unmarshal"
+path = "fuzz_targets/chunk_chunk_i_forward_tsn_unmarshal.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "association_handle_chunks_interleaved"
+path = "fuzz_targets/association_handle_chunks_interleaved.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "param_param_zero_checksum_acceptable_unmarshal"
+path = "fuzz_targets/param_param_zero_checksum_acceptable_unmarshal.rs"
 test = false
 doc = false
 bench = false

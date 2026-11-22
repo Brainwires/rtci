@@ -218,13 +218,33 @@ fn test_connectivity_on_startup() -> Result<()> {
         "the first datagram is a Binding request"
     );
 
-    // Everything after the first check is triggered by the answers: no further tick is needed.
-    let t1 = base + Duration::from_millis(10);
-    carry(first, &mut b, t1);
-    settle(&mut a, &mut b, t1);
+    // From here each agent is woken only when it asks to be (the periodic look at the state
+    // is an hour away): the triggered check, the nomination and their answers each leave
+    // when Ta allows, and the two connect within a few of them.
+    let mut now = base + Duration::from_millis(10);
+    carry(first, &mut b, now);
+    for _ in 0..100 {
+        settle(&mut a, &mut b, now);
+        if a.state() == ConnectionState::Connected && b.state() == ConnectionState::Connected {
+            break;
+        }
+        let next = [a.poll_timeout(), b.poll_timeout()]
+            .into_iter()
+            .flatten()
+            .min()
+            .expect("an agent that is checking has a deadline");
+        now = next.max(now);
+        a.handle_timeout(now)?;
+        b.handle_timeout(now)?;
+    }
 
     assert_eq!(a.state(), ConnectionState::Connected);
     assert_eq!(b.state(), ConnectionState::Connected);
+    assert!(
+        now.duration_since(base) < Duration::from_millis(500),
+        "connected after {:?}",
+        now.duration_since(base)
+    );
 
     a.close()?;
     b.close()?;
@@ -306,7 +326,8 @@ fn test_inbound_validity() -> Result<()> {
         a.close()?;
     }
 
-    // Non-binding messages are discarded: an error response, and a request of another method.
+    // An error response the peer did not sign (this one carries our own password, not the
+    // peer's) is discarded, and so is a request of another method.
     {
         let mut a = inbound_agent(base)?;
         let local_pwd = a.ufrag_pwd.local_credentials.pwd.clone();
@@ -317,7 +338,7 @@ fn test_inbound_validity() -> Result<()> {
         )?;
         assert_eq!(
             a.handle_inbound(base, &mut msg, 0, remote).unwrap_err(),
-            Error::ErrUnhandledStunpacket
+            Error::ErrIntegrityMismatch
         );
         assert_eq!(
             a.remote_candidates.len(),
@@ -802,15 +823,16 @@ fn test_binding_request_timeout() -> Result<()> {
         now - Duration::from_millis(4100), // expired
         now - Duration::from_secs(75),     // expired
     ] {
-        a.pending_binding_requests.push(BindingRequest {
+        // Each waits 4 seconds for its response.
+        a.pending_binding_requests.push(BindingRequest::sent_once(
             timestamp,
-            transaction_id: TransactionId::new(),
+            TransactionId::new(),
             destination,
-            is_use_candidate: false,
-        });
+            Duration::from_secs(4),
+        ));
     }
 
-    a.invalidate_pending_binding_requests(now);
+    a.run_transactions(now);
     assert_eq!(
         a.pending_binding_requests.len(),
         EXPECTED_REMAINING,

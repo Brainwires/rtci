@@ -92,6 +92,17 @@ jobs:
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # On GitHub's macOS image the multicast route leads to an interface that cannot carry it:
+      # an mDNS send fails with "No route to host" and the mDNS interop tests time out. Both
+      # peers of those tests are on this machine, so the route is moved to loopback. Our own
+      # runners are left alone.
+      - name: Multicast route over loopback (GitHub-hosted macOS)
+        if: runner.os == 'macOS' && runner.environment == 'github-hosted'
+        run: |
+          netstat -rn -f inet | grep -E '^(224|default)' || true
+          sudo route -nq delete -net 224.0.0.0/4 || true
+          sudo route -nq add -net 224.0.0.0/4 -interface lo0
+          netstat -rn -f inet | grep -E '^224' || true
       - name: Test workspace
         run: cargo test --workspace --no-fail-fast --verbose
       - name: Doctests
@@ -148,6 +159,7 @@ jobs:
           cargo check --package rtc-dtls --no-default-features --features ${{ matrix.backend }} --verbose
           cargo check --package rtc-srtp --no-default-features --features ${{ matrix.backend }} --verbose
           cargo check --package rtc-stun --no-default-features --features ${{ matrix.backend }} --verbose
+          cargo check --package rtc-sframe --no-default-features --features ${{ matrix.backend }} --verbose
 
   rtc_crypto_provider_matrix:
     name: rtc-crypto (${{ matrix.name }})
@@ -244,6 +256,7 @@ jobs:
           cargo check --package rtc-stun   --no-default-features --features ${{ matrix.backend }} --all-targets --verbose
           cargo check --package rtc-ice    --no-default-features --features ${{ matrix.backend }} --all-targets --verbose
           cargo check --package rtc-turn   --no-default-features --features ${{ matrix.backend }} --all-targets --verbose
+          cargo check --package rtc-sframe --no-default-features --features ${{ matrix.backend }} --all-targets --verbose
       # These perform no cryptography and must not have acquired a provider dependency.
       - name: Check crates that must stay crypto-free
         run: |

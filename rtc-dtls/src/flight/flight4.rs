@@ -8,7 +8,6 @@ use crate::content::*;
 use crate::crypto::*;
 use crate::curve::named_curve::*;
 use crate::curve::*;
-use crate::extension::extension_supported_elliptic_curves::*;
 use crate::extension::extension_supported_point_formats::*;
 use crate::extension::extension_use_extended_master_secret::*;
 use crate::extension::extension_use_srtp::*;
@@ -126,11 +125,13 @@ impl Flight for Flight4 {
                 }
             };
 
+            // RFC 5246 7.4.8: CertificateVerify follows a client certificate; without one it
+            // is out of place. (no_certificate(41) is an SSLv3 alert TLS 1.2 reserves.)
             if state.peer_certificates.is_empty() {
                 return Err((
                     Some(Alert {
                         alert_level: AlertLevel::Fatal,
-                        alert_description: AlertDescription::NoCertificate,
+                        alert_description: AlertDescription::UnexpectedMessage,
                     }),
                     Some(Error::ErrCertificateVerifyNoCertificate),
                 ));
@@ -196,10 +197,11 @@ impl Flight for Flight4 {
                 }
             }
             if !valid_signature_scheme {
+                // RFC 5246 7.4.8: the pair is one the CertificateRequest listed.
                 return Err((
                     Some(Alert {
                         alert_level: AlertLevel::Fatal,
-                        alert_description: AlertDescription::InsufficientSecurity,
+                        alert_description: AlertDescription::IllegalParameter,
                     }),
                     Some(Error::ErrNoAvailableSignatureSchemes),
                 ));
@@ -242,10 +244,11 @@ impl Flight for Flight4 {
                     &state.peer_certificates,
                     cfg.insecure_verification,
                 ) {
+                    // RFC 5246 7.2.2: decrypt_error, a signature that does not verify.
                     return Err((
                         Some(Alert {
                             alert_level: AlertLevel::Fatal,
-                            alert_description: AlertDescription::BadCertificate,
+                            alert_description: AlertDescription::DecryptError,
                         }),
                         Some(err),
                     ));
@@ -429,6 +432,10 @@ impl Flight for Flight4 {
                     };
                 }
 
+                // RFC 5246 8.1: the premaster secret is deleted once the master secret has
+                // been computed.
+                drop(crypto::SecretVec::new(pre_master_secret));
+
                 if let Some(cipher_suite) = &mut state.cipher_suite
                     && let Err(err) = cipher_suite.init(
                         cfg.provider().clone(),
@@ -480,17 +487,19 @@ impl Flight for Flight4 {
 
         state.handshake_recv_sequence = seq;
 
-        if let Some(HandshakeMessage::Finished(h)) = msgs.get(&HandshakeType::Finished) {
-            h
-        } else {
-            return Err((
-                Some(Alert {
-                    alert_level: AlertLevel::Fatal,
-                    alert_description: AlertDescription::InternalError,
-                }),
-                None,
-            ));
-        };
+        let finished =
+            if let Some(HandshakeMessage::Finished(h)) = msgs.get(&HandshakeType::Finished) {
+                h
+            } else {
+                return Err((
+                    Some(Alert {
+                        alert_level: AlertLevel::Fatal,
+                        alert_description: AlertDescription::InternalError,
+                    }),
+                    None,
+                ));
+            };
+        verify_client_finished(state, cache, cfg, finished)?;
 
         // A psk suite is sent no CertificateRequest (see `generate`), so skip `client_auth`
         // rather than fail it for a certificate it was never asked for.
@@ -507,9 +516,11 @@ impl Flight for Flight4 {
                 );
                 if state.peer_certificates.is_empty() {
                     return Err((
+                        // RFC 5246 7.4.6: handshake_failure for a required certificate
+                        // that was not sent.
                         Some(Alert {
                             alert_level: AlertLevel::Fatal,
-                            alert_description: AlertDescription::NoCertificate,
+                            alert_description: AlertDescription::HandshakeFailure,
                         }),
                         Some(Error::ErrClientCertificateRequired),
                     ));
@@ -529,9 +540,11 @@ impl Flight for Flight4 {
             ClientAuthType::RequireAndVerifyClientCert => {
                 if state.peer_certificates.is_empty() {
                     return Err((
+                        // RFC 5246 7.4.6: handshake_failure for a required certificate
+                        // that was not sent.
                         Some(Alert {
                             alert_level: AlertLevel::Fatal,
-                            alert_description: AlertDescription::NoCertificate,
+                            alert_description: AlertDescription::HandshakeFailure,
                         }),
                         Some(Error::ErrClientCertificateRequired),
                     ));
@@ -560,9 +573,30 @@ impl Flight for Flight4 {
         _cache: &HandshakeCache,
         cfg: &HandshakeConfig,
     ) -> Result<Vec<Packet>, (Option<Alert>, Option<Error>)> {
-        let mut extensions = vec![Extension::RenegotiationInfo(ExtensionRenegotiationInfo {
-            renegotiated_connection: 0,
-        })];
+        // RFC 5246 7.4.1.4: only extension types the ClientHello carried.
+        let mut extensions = vec![];
+        // RFC 5746 3.6: an empty renegotiation_info when the client signalled secure
+        // renegotiation, by the extension or by the signalling suite (the one case where the
+        // ClientHello need not have carried the type).
+        // RFC 9146 section 3: the client offered connection ids and this server has them
+        // configured: its own, which may be empty, goes in the ServerHello, and from the
+        // first protected record on both use `tls12_cid` records where the receiver's
+        // connection id is not empty.
+        if state.remote_connection_id.is_some() {
+            if state.local_connection_id.is_none() {
+                state.local_connection_id = cfg.connection_id_offer();
+            }
+            if let Some(connection_id) = &state.local_connection_id {
+                extensions.push(Extension::connection_id(connection_id));
+            } else {
+                state.remote_connection_id = None;
+            }
+        }
+        if state.secure_renegotiation {
+            extensions.push(Extension::RenegotiationInfo(
+                ExtensionRenegotiationInfo::default(),
+            ));
+        }
         if (cfg.extended_master_secret == ExtendedMasterSecretType::Request
             || cfg.extended_master_secret == ExtendedMasterSecretType::Require)
             && state.extended_master_secret
@@ -573,20 +607,22 @@ impl Flight for Flight4 {
         }
 
         if state.srtp_protection_profile != SrtpProtectionProfile::Unsupported {
+            // RFC 5764 4.1.1: the one chosen profile. 4.1.3: an empty MKI, whatever the client
+            // offered.
             extensions.push(Extension::UseSrtp(ExtensionUseSrtp {
                 protection_profiles: vec![state.srtp_protection_profile],
+                mki: vec![],
             }));
         }
 
-        if !state.is_cipher_suite_psk() {
-            extensions.extend_from_slice(&[
-                Extension::SupportedEllipticCurves(ExtensionSupportedEllipticCurves {
-                    elliptic_curves: cfg.local_named_curves.clone(),
-                }),
-                Extension::SupportedPointFormats(ExtensionSupportedPointFormats {
+        // RFC 8422 5.2: ec_point_formats answers the client's; supported_groups is not a
+        // ServerHello extension.
+        if !state.is_cipher_suite_psk() && state.remote_offered_point_formats {
+            extensions.push(Extension::SupportedPointFormats(
+                ExtensionSupportedPointFormats {
                     point_formats: vec![ELLIPTIC_CURVE_POINT_FORMAT_UNCOMPRESSED],
-                }),
-            ]);
+                },
+            ));
         }
 
         let mut pkts = vec![Packet {
@@ -656,19 +692,17 @@ impl Flight for Flight4 {
                 let _ = state.remote_random.marshal(&mut writer);
             }
 
-            // Find compatible signature scheme
-            let signature_hash_algo = match select_signature_scheme(
-                &cfg.local_signature_schemes,
-                &certificate.private_key,
-            ) {
-                Ok(s) => s,
-                Err(err) => {
+            // RFC 5246 7.4.3: a pair the client listed that the key can sign with, as chosen
+            // with the cipher suite (`negotiate_client_hello`).
+            let signature_hash_algo = match state.local_signature_scheme {
+                Some(scheme) => scheme,
+                None => {
                     return Err((
                         Some(Alert {
                             alert_level: AlertLevel::Fatal,
-                            alert_description: AlertDescription::InsufficientSecurity,
+                            alert_description: AlertDescription::HandshakeFailure,
                         }),
-                        Some(err),
+                        Some(Error::ErrNoAvailableSignatureSchemes),
                     ));
                 }
             };
@@ -783,6 +817,67 @@ impl Flight for Flight4 {
     }
 }
 
+/// RFC 5246 7.4.9: checks the client's Finished against the handshake messages this server
+/// sent and received, up to but not including that Finished. Without it nothing tells the
+/// server that the client saw the same handshake: a ClientHello altered on the way would be
+/// noticed by the client alone, after the server had completed and exported keys.
+pub(crate) fn verify_client_finished(
+    state: &State,
+    cache: &HandshakeCache,
+    cfg: &HandshakeConfig,
+    finished: &crate::handshake::handshake_message_finished::HandshakeMessageFinished,
+) -> Result<(), (Option<Alert>, Option<Error>)> {
+    let rule = |typ, is_client| HandshakeCachePullRule {
+        typ,
+        epoch: cfg.initial_epoch,
+        is_client,
+        optional: false,
+    };
+    let plain_text = cache.pull_and_merge(&[
+        rule(HandshakeType::ClientHello, true),
+        rule(HandshakeType::ServerHello, false),
+        rule(HandshakeType::Certificate, false),
+        rule(HandshakeType::ServerKeyExchange, false),
+        rule(HandshakeType::CertificateRequest, false),
+        rule(HandshakeType::ServerHelloDone, false),
+        rule(HandshakeType::Certificate, true),
+        rule(HandshakeType::ClientKeyExchange, true),
+        rule(HandshakeType::CertificateVerify, true),
+    ]);
+
+    let internal_error = |err| {
+        (
+            Some(Alert {
+                alert_level: AlertLevel::Fatal,
+                alert_description: AlertDescription::InternalError,
+            }),
+            Some(err),
+        )
+    };
+    let Some(cipher_suite) = &state.cipher_suite else {
+        return Err(internal_error(Error::ErrCipherSuiteUnset));
+    };
+    let expected_verify_data = prf_verify_data_client(
+        cfg.provider().crypto(),
+        &state.master_secret,
+        &plain_text,
+        cipher_suite.hash_func(),
+    )
+    .map_err(internal_error)?;
+
+    if !crypto::constant_time_eq(&expected_verify_data, &finished.verify_data) {
+        // RFC 5246 7.2.2: decrypt_error, a Finished that does not verify.
+        return Err((
+            Some(Alert {
+                alert_level: AlertLevel::Fatal,
+                alert_description: AlertDescription::DecryptError,
+            }),
+            Some(Error::ErrVerifyDataMismatch),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -808,6 +903,9 @@ mod tests {
         }
         fn is_initialized(&self) -> bool {
             panic!("is_initialized called with Certificate but not CertificateVerify");
+        }
+        fn record_expansion(&self) -> usize {
+            unimplemented!();
         }
 
         // Generate the internal encryption state

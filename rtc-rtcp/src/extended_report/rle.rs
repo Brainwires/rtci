@@ -142,6 +142,33 @@ pub type LossRLEReportBlock = RLEReportBlock;
 pub type DuplicateRLEReportBlock = RLEReportBlock;
 
 impl RLEReportBlock {
+    /// Checks what RFC 3611 4.1 requires of the block's content.
+    fn validate(&self) -> Result<()> {
+        // "A report block MUST NOT report on a sequence number range of 65,534 or more."
+        if self.end_seq.wrapping_sub(self.begin_seq) >= 65534 {
+            return Err(Error::InvalidBlockSize);
+        }
+        for chunk in &self.chunks {
+            // The terminating null chunk "MUST NOT appear anywhere else": it is not one of
+            // the chunks here, it is added when the block is written and dropped when read.
+            if chunk.0 == 0 {
+                return Err(Error::WrongChunkType);
+            }
+            // A run length is "a value between 1 and 16,383". Zero with the run type 0 is
+            // the null chunk; zero with the run type 1 is nothing at all.
+            if chunk.chunk_type() == ChunkType::RunLength && chunk.value() == 0 {
+                return Err(Error::WrongChunkType);
+            }
+        }
+        Ok(())
+    }
+
+    /// The chunks on the wire: `chunks`, and a terminating null chunk when one is needed to
+    /// round the block up to a 32-bit boundary.
+    fn wire_chunks(&self) -> usize {
+        self.chunks.len() + self.chunks.len() % 2
+    }
+
     /// The XR block header describing this block's type and length.
     pub fn xr_header(&self) -> XRHeader {
         XRHeader {
@@ -173,7 +200,7 @@ impl Packet for RLEReportBlock {
     }
 
     fn raw_size(&self) -> usize {
-        XR_HEADER_LENGTH + RLE_REPORT_BLOCK_MIN_LENGTH as usize + self.chunks.len() * 2
+        XR_HEADER_LENGTH + RLE_REPORT_BLOCK_MIN_LENGTH as usize + self.wire_chunks() * 2
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -196,6 +223,10 @@ impl MarshalSize for RLEReportBlock {
 impl Marshal for RLEReportBlock {
     /// marshal_to encodes the RLEReportBlock in binary
     fn marshal_to(&self, mut buf: &mut [u8]) -> Result<usize> {
+        self.validate()?;
+        if self.raw_size() / 4 - 1 > u16::MAX as usize {
+            return Err(Error::InvalidBlockSize);
+        }
         if buf.remaining_mut() < self.marshal_size() {
             return Err(Error::BufferTooShort);
         }
@@ -209,6 +240,10 @@ impl Marshal for RLEReportBlock {
         buf.put_u16(self.end_seq);
         for chunk in &self.chunks {
             buf.put_u16(chunk.0);
+        }
+        if self.wire_chunks() != self.chunks.len() {
+            // The terminating null chunk.
+            buf.put_u16(0);
         }
 
         Ok(self.marshal_size())
@@ -238,6 +273,11 @@ impl Unmarshal for RLEReportBlock {
             return Err(Error::PacketTooShort);
         }
 
+        if xr_header.block_type != BlockType::LossRLE
+            && xr_header.block_type != BlockType::DuplicateRLE
+        {
+            return Err(Error::WrongType);
+        }
         let is_loss_rle = xr_header.block_type == BlockType::LossRLE;
         let t = xr_header.type_specific & 0x0F;
 
@@ -251,13 +291,22 @@ impl Unmarshal for RLEReportBlock {
             chunks.push(Chunk(raw_packet.get_u16()));
         }
 
-        Ok(RLEReportBlock {
+        // "If the chunks do not end on a 32-bit boundary, a terminating null chunk is added":
+        // it pads, and is not one of the block's chunks.
+        while chunks.last() == Some(&Chunk(0)) {
+            chunks.pop();
+        }
+
+        let block = RLEReportBlock {
             is_loss_rle,
             t,
             ssrc,
             begin_seq,
             end_seq,
             chunks,
-        })
+        };
+        block.validate()?;
+
+        Ok(block)
     }
 }

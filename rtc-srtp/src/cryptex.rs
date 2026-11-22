@@ -30,8 +30,10 @@ pub struct Cryptex {
     /// Protect outgoing packets that carry CSRCs or RFC 8285 header extensions with Cryptex.
     /// Set it only once the peer has signalled that it receives Cryptex (`a=cryptex`).
     pub send: bool,
-    /// Refuse received packets that carry CSRCs or header extensions without Cryptex
-    /// (RFC 9335 section 5.2, when its use is mandatory).
+    /// Cryptex is mandatory (RFC 9335 section 5.2): refuse received packets that carry CSRCs
+    /// or header extensions without it, and refuse to protect a packet that has CSRCs or a
+    /// header extension and would leave without it (`send` unset, or an extension Cryptex
+    /// does not apply to).
     pub require: bool,
 }
 
@@ -127,6 +129,12 @@ pub(crate) fn sender_packet(packet: &[u8]) -> Option<(Vec<u8>, CryptexLayout)> {
     } else {
         None
     }
+}
+
+/// Whether a raw RTP packet has anything Cryptex is there to protect: a CSRC list or a header
+/// extension, of whatever kind.
+pub(crate) fn carries_csrcs_or_extension(packet: &[u8]) -> bool {
+    packet.first().is_some_and(|first| first & 0x1F != 0)
 }
 
 /// What a receiver makes of a protected packet's header (RFC 9335 section 5.2).

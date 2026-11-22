@@ -5,8 +5,12 @@ use crate::param::param_forward_tsn_supported::ParamForwardTsnSupported;
 
 const ACCEPT_CH_SIZE: usize = 16;
 
+/// An association driven by hand. Max.Burst is off unless the test's configuration sets one
+/// of its own: these tests send what a window allows in one call and say so by setting the
+/// window, which Max.Burst (4 packets by default, RFC 9260 6.1 D) would cut back first.
 fn create_association(config: TransportConfig) -> Association {
-    Association::new(
+    let default_burst = config.max_burst() == TransportConfig::default().max_burst();
+    let mut a = Association::new(
         None,
         Arc::new(config),
         1400,
@@ -15,7 +19,12 @@ fn create_association(config: TransportConfig) -> Association {
         SocketAddr::from_str("0.0.0.0:0").unwrap(),
         TransportProtocol::UDP,
         Instant::now(),
-    )
+        crate::util::RandomSource::default(),
+    );
+    if default_burst {
+        a.max_burst = None;
+    }
+    a
 }
 
 // `create_forward_tsn` no longer rescans the in-flight window; it emits the
@@ -337,7 +346,7 @@ fn test_assoc_create_new_stream() -> Result<()> {
     Ok(())
 }
 
-fn handle_init_test(name: &str, initial_state: AssociationState, expect_err: bool) {
+fn handle_init_test(name: &str, initial_state: AssociationState, unexpected: bool) {
     let mut a = create_association(TransportConfig::default());
     a.set_state(initial_state);
     let pkt = Packet {
@@ -358,12 +367,19 @@ fn handle_init_test(name: &str, initial_state: AssociationState, expect_err: boo
     };
     init.set_supported_extensions();
 
-    let result = a.handle_init(&pkt, &init);
-    if expect_err {
-        assert!(result.is_err(), "{} should fail", name);
+    let before = (a.peer_verification_tag, a.peer_last_tsn);
+    let result = a.handle_init(&pkt, &init, Instant::now());
+    assert!(result.is_ok(), "{} should be ok", name);
+    if unexpected {
+        // RFC 9260 5.2.2, 9.2: an INIT for an association that exists changes nothing.
+        assert_eq!(initial_state, a.state(), "{} keeps its state", name);
+        assert_eq!(
+            before,
+            (a.peer_verification_tag, a.peer_last_tsn),
+            "{} keeps its TCB",
+            name
+        );
         return;
-    } else {
-        assert!(result.is_ok(), "{} should be ok", name);
     }
     assert_eq!(
         if init.initial_tsn == 0 {
@@ -375,8 +391,9 @@ fn handle_init_test(name: &str, initial_state: AssociationState, expect_err: boo
         "{} should match",
         name
     );
-    assert_eq!(1001, a.my_max_num_outbound_streams, "{} should match", name);
-    assert_eq!(1002, a.my_max_num_inbound_streams, "{} should match", name);
+    // RFC 9260 5.1.1: own outbound streams against the peer's MIS, own inbound against its OS.
+    assert_eq!(1002, a.my_max_num_outbound_streams, "{} should match", name);
+    assert_eq!(1001, a.my_max_num_inbound_streams, "{} should match", name);
     assert_eq!(5678, a.peer_verification_tag, "{} should match", name);
     assert_eq!(
         pkt.common_header.source_port, a.destination_port,
@@ -468,7 +485,7 @@ fn test_assoc_negotiated_max_streams() -> Result<()> {
         ..Default::default()
     };
     init.set_supported_extensions();
-    a.handle_init(&pkt, &init)?;
+    a.handle_init(&pkt, &init, Instant::now())?;
 
     // `handle_init` narrowed the counts to 1001 outbound / 1002 inbound (see
     // `handle_init_test`), but the handshake is still in flight.
@@ -611,13 +628,14 @@ use crate::config::{INITIAL_MTU, max_payload_size_for_mtu};
 fn create_association_with_mtu(mtu: u32) -> Association {
     Association::new(
         None,
-        Arc::new(TransportConfig::default()),
+        Arc::new(TransportConfig::default().with_max_burst(None)),
         mtu - (COMMON_HEADER_SIZE + DATA_CHUNK_HEADER_SIZE),
         0,
         SocketAddr::from_str("0.0.0.0:0").unwrap(),
         SocketAddr::from_str("0.0.0.0:0").unwrap(),
         TransportProtocol::UDP,
         Instant::now(),
+        crate::util::RandomSource::default(),
     )
 }
 
@@ -704,10 +722,12 @@ fn initial_cwnd_is_computed_safely_for_non_default_mtus() {
     // `(2 * mtu).clamp(4380, 4 * mtu)`, which panicked for effective MTUs
     // below ~1095 (`Ord::clamp` with min > max) and overflowed near
     // `u32::MAX` — reachable through `EndpointConfig::max_payload_size`
-    // and MTU-derived payload budgets. RFC 4960 §7.2.1:
-    // cwnd = min(4*MTU, max(2*MTU, 4380)); for a small MTU that is 4*MTU.
+    // and MTU-derived payload budgets. RFC 9260 7.2.1:
+    // cwnd = min(4 x PMDCS, max(2 x PMDCS, 4404)); for a small packet that is 4 x PMDCS,
+    // where PMDCS is the packet less the 12-byte common header.
     let a = create_association_with_mtu(100);
-    assert_eq!(a.cwnd, 4 * a.mtu);
+    assert_eq!(a.pmdcs, a.mtu - 12);
+    assert_eq!(a.cwnd, 4 * a.pmdcs);
 
     // Directly via the low-level `max_payload_size` setter path: the
     // effective-MTU reconstruction (`max_payload_size + 28`) must saturate
@@ -723,6 +743,7 @@ fn initial_cwnd_is_computed_safely_for_non_default_mtus() {
         SocketAddr::from_str("0.0.0.0:0").unwrap(),
         TransportProtocol::UDP,
         Instant::now(),
+        crate::util::RandomSource::default(),
     );
     assert_eq!(a.mtu, u32::MAX);
     assert_eq!(a.cwnd, u32::MAX);
@@ -1686,6 +1707,7 @@ fn full_buffer_association() -> Association {
             .with_max_receive_buffer_size(FULL_BUFFER_RECV_BUFFER)
             .with_max_message_size(FULL_BUFFER_MAX_MESSAGE),
     );
+    a.set_state(AssociationState::Established);
     assert!(
         a.create_stream(0, true, PayloadProtocolIdentifier::Binary)
             .is_some()
@@ -1814,9 +1836,11 @@ fn test_handle_forward_tsn_far_ahead_is_bounded() -> Result<()> {
     Ok(())
 }
 
-/// A SACK whose cumulative TSN acknowledges DATA this side never sent is ignored.
+/// A SACK whose cumulative TSN acknowledges DATA this side never sent is refused, and nothing
+/// is taken from it (the association is then aborted: RFC 9260 12.4,
+/// `a_sack_for_data_never_sent_aborts_the_association`).
 #[test]
-fn test_handle_sack_beyond_sent_tsns_is_ignored() -> Result<()> {
+fn test_handle_sack_beyond_sent_tsns_is_refused() -> Result<()> {
     let mut a = create_association(TransportConfig::default());
     a.set_state(AssociationState::Established);
     let before = a.cumulative_tsn_ack_point;
@@ -1826,7 +1850,7 @@ fn test_handle_sack_beyond_sent_tsns_is_ignored() -> Result<()> {
         gap_ack_blocks: vec![],
         duplicate_tsn: vec![],
     };
-    a.handle_sack(&sack, Instant::now())?;
+    assert!(a.handle_sack(&sack, Instant::now()).is_err());
     assert_eq!(
         a.cumulative_tsn_ack_point, before,
         "a SACK for never-sent DATA must not move the ack point"
@@ -1834,13 +1858,17 @@ fn test_handle_sack_beyond_sent_tsns_is_ignored() -> Result<()> {
     Ok(())
 }
 
-/// DATA on a stream id past the negotiated inbound stream count creates no stream.
+/// DATA on a stream id past the negotiated inbound stream count creates no stream and takes no
+/// receive window, but its TSN is recorded (RFC 9260 6.5: the chunk is acknowledged and then
+/// discarded), so the cumulative TSN moves past it.
 #[test]
-fn test_handle_data_beyond_stream_limit_is_discarded() -> Result<()> {
+fn test_handle_data_beyond_stream_limit_is_acknowledged_and_discarded() -> Result<()> {
     let mut a = create_association(TransportConfig::default());
+    a.set_state(AssociationState::Established);
     a.my_max_num_inbound_streams = 16;
+    let tsn = a.peer_last_tsn.wrapping_add(1);
     let d = ChunkPayloadData {
-        tsn: a.peer_last_tsn.wrapping_add(1),
+        tsn,
         stream_identifier: 1000,
         beginning_fragment: true,
         ending_fragment: true,
@@ -1852,6 +1880,9 @@ fn test_handle_data_beyond_stream_limit_is_discarded() -> Result<()> {
         !a.streams.contains_key(&1000),
         "a stream past the negotiated limit was created"
     );
+    assert_eq!(tsn, a.peer_last_tsn, "the chunk is acknowledged");
+    assert!(a.payload_queue.is_empty(), "nothing is kept of it");
+    assert_eq!(0, a.bytes_in_reassembly_queues());
     Ok(())
 }
 
@@ -1860,6 +1891,7 @@ fn test_handle_data_beyond_stream_limit_is_discarded() -> Result<()> {
 #[test]
 fn test_handle_data_across_the_tsn_wrap() -> Result<()> {
     let mut a = create_association(TransportConfig::default());
+    a.set_state(AssociationState::Established);
     a.peer_last_tsn = u32::MAX - 1;
     for tsn in [u32::MAX, 0, 1] {
         let d = ChunkPayloadData {
@@ -1892,16 +1924,15 @@ fn test_reset_request_is_echoed_only_for_an_open_outgoing_stream() -> Result<()>
         a.set_state(AssociationState::Established);
         a.create_stream(3, true, PayloadProtocolIdentifier::Binary);
         a.streams.get_mut(&3).unwrap().state = state;
-        let request = ParamOutgoingResetRequest {
-            reconfig_request_sequence_number: 7,
-            reconfig_response_sequence_number: 0,
-            sender_last_tsn: a.peer_last_tsn,
-            stream_identifiers: vec![3],
-        };
-        let mut reply = vec![];
-        a.reset_streams_if_any(&request, true, &mut reply)?;
-        // The response always; a reset request of this side's own only when echoed.
-        assert_eq!(reply.len(), if echoed { 2 } else { 1 }, "{state:?}");
+        let reply = a.handle_reconfig(&reset_request_chunk(7, a.peer_last_tsn, vec![3]))?;
+        // The response always; a reset request of this side's own, in the same chunk (RFC
+        // 6525 5.2.1), only when echoed.
+        assert_eq!(1, reply.len(), "{state:?}: one RE-CONFIG chunk");
+        assert_eq!(
+            if echoed { vec![16, 13] } else { vec![16] },
+            reconfig_param_types(&reply[0]),
+            "{state:?}"
+        );
         assert!(
             !a.streams.contains_key(&3),
             "{state:?}: the stream is reset"
@@ -1916,15 +1947,13 @@ fn test_reset_request_is_echoed_only_for_an_open_outgoing_stream() -> Result<()>
 fn test_reset_request_for_an_unknown_stream_is_reported_and_echoed() -> Result<()> {
     let mut a = create_association(TransportConfig::default());
     a.set_state(AssociationState::Established);
-    let request = ParamOutgoingResetRequest {
-        reconfig_request_sequence_number: 7,
-        reconfig_response_sequence_number: 0,
-        sender_last_tsn: a.peer_last_tsn,
-        stream_identifiers: vec![4],
-    };
-    let mut reply = vec![];
-    a.reset_streams_if_any(&request, true, &mut reply)?;
-    assert_eq!(reply.len(), 2, "a response and this side's own reset");
+    let reply = a.handle_reconfig(&reset_request_chunk(7, a.peer_last_tsn, vec![4]))?;
+    assert_eq!(1, reply.len());
+    assert_eq!(
+        vec![16, 13],
+        reconfig_param_types(&reply[0]),
+        "a response and this side's own reset"
+    );
     assert!(a.events.iter().any(|e| matches!(
         e,
         Event::AssociationLost {
@@ -1933,6 +1962,18 @@ fn test_reset_request_for_an_unknown_stream_is_reported_and_echoed() -> Result<(
         }
     )));
     Ok(())
+}
+
+/// The parameter types of the RE-CONFIG chunk in `packet`, in order.
+fn reconfig_param_types(packet: &Packet) -> Vec<u16> {
+    packet
+        .chunks
+        .iter()
+        .filter_map(|c| c.as_any().downcast_ref::<ChunkReconfig>())
+        .flat_map(|c| [&c.param_a, &c.param_b])
+        .flatten()
+        .map(|p| u16::from(p.header().typ))
+        .collect()
 }
 
 fn reset_request_chunk(rsn: u32, sender_last_tsn: u32, ids: Vec<u16>) -> ChunkReconfig {
@@ -1995,7 +2036,11 @@ fn test_retransmitted_reset_request_is_performed_once() -> Result<()> {
     let req = reset_request_chunk(7, a.peer_last_tsn, vec![4, 4, 4]);
 
     let reply = a.handle_reconfig(&req)?;
-    assert_eq!(reply.len(), 2, "a response and this side's own reset");
+    assert_eq!(
+        vec![16, 13],
+        reconfig_param_types(&reply[0]),
+        "a response and this side's own reset, in one chunk"
+    );
     let lost = |a: &Association| {
         a.events
             .iter()
@@ -2010,7 +2055,7 @@ fn test_retransmitted_reset_request_is_performed_once() -> Result<()> {
         assert_eq!(
             reply.len(),
             1,
-            "a retransmission is answered with a response alone"
+            "a retransmission is answered with the chunk it was answered with"
         );
     }
     assert_eq!(lost(&a), 1);
@@ -2142,3 +2187,39 @@ mod recovery_test;
 
 #[path = "stream_reset_test.rs"]
 mod stream_reset_test;
+
+#[path = "robustness_test.rs"]
+mod robustness_test;
+
+#[path = "handshake_teardown_test.rs"]
+mod handshake_teardown_test;
+
+#[path = "heartbeat_test.rs"]
+mod heartbeat_test;
+
+#[path = "congestion_control_test.rs"]
+mod congestion_control_test;
+
+#[path = "partial_reliability_test.rs"]
+mod partial_reliability_test;
+
+#[path = "stream_reconfig_test.rs"]
+mod stream_reconfig_test;
+
+#[path = "untested_rows_test.rs"]
+mod untested_rows_test;
+
+#[path = "reconfig_test.rs"]
+mod reconfig_test;
+
+#[path = "interleaving_test.rs"]
+mod interleaving_test;
+
+#[path = "bundling_test.rs"]
+mod bundling_test;
+
+#[path = "cookie_test.rs"]
+mod cookie_test;
+
+#[path = "zero_checksum_test.rs"]
+mod zero_checksum_test;

@@ -7,6 +7,8 @@ mod mdns_test;
 
 use mdns::Mdns;
 use mdns::MdnsConfig;
+/// The limit on mDNS messages one or several agents share (`AgentConfig::multicast_dns_rate_limit`).
+pub use mdns::MdnsRateLimit;
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
@@ -77,12 +79,26 @@ pub(crate) fn is_valid_local_mdns_name(name: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
+/// What the agent's configuration says about its mDNS connection beyond names and addresses.
+#[derive(Default, Clone)]
+pub(crate) struct MdnsOptions {
+    /// RFC 6762 Section 5.2: the first query of a series waits 20 to 120 ms.
+    pub(crate) first_query_delay: bool,
+    /// The driver reports each datagram's destination address.
+    pub(crate) destination_reported: bool,
+    /// The first query asks for a unicast response (QU).
+    pub(crate) unicast_response: bool,
+    /// A message limit shared with other connections.
+    pub(crate) rate_limit: Option<mdns::MdnsRateLimit>,
+}
+
 pub(crate) fn create_multicast_dns(
     now: Instant,
     mdns_mode: MulticastDnsMode,
     mdns_local_name: &str,
     mdns_local_ip: &Option<IpAddr>,
     mdns_query_timeout: &Option<Duration>,
+    options: MdnsOptions,
 ) -> Result<Option<Mdns>> {
     if mdns_mode == MulticastDnsMode::Disabled {
         return Ok(None);
@@ -103,6 +119,13 @@ pub(crate) fn create_multicast_dns(
 
     if let Some(query_timeout) = mdns_query_timeout {
         config = config.with_query_timeout(*query_timeout);
+    }
+    config = config
+        .with_first_query_delay(options.first_query_delay)
+        .with_destination_reported(options.destination_reported)
+        .with_unicast_response(options.unicast_response);
+    if let Some(rate_limit) = options.rate_limit {
+        config = config.with_rate_limit(rate_limit);
     }
 
     let mdns_server = Mdns::new(now, config);

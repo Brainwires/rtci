@@ -58,6 +58,17 @@ impl CryptoChaCha20 {
     ///
     /// Fails if the cipher rejects the input.
     pub fn encrypt(&mut self, pkt_rlh: &RecordLayerHeader, raw: &[u8]) -> Result<Vec<u8>> {
+        self.encrypt_with(pkt_rlh, raw, None)
+    }
+
+    /// [`Self::encrypt`], for a `tls12_cid` record when `cid` is given (RFC 9146): the
+    /// additional data then covers the connection id, which is not in `raw`.
+    pub(crate) fn encrypt_with(
+        &mut self,
+        pkt_rlh: &RecordLayerHeader,
+        raw: &[u8],
+        cid: Option<&[u8]>,
+    ) -> Result<Vec<u8>> {
         let payload = &raw[RECORD_LAYER_HEADER_SIZE..];
         let raw = &raw[..RECORD_LAYER_HEADER_SIZE];
 
@@ -66,7 +77,7 @@ impl CryptoChaCha20 {
             .copy_from_slice(&self.local_write_iv[..CRYPTO_CHACHA20_NONCE_LENGTH]);
 
         noncegen(&mut nonce[..], pkt_rlh.epoch, pkt_rlh.sequence_number);
-        let additional_data = generate_aead_additional_data(pkt_rlh, payload.len());
+        let additional_data = record_additional_data(pkt_rlh, payload.len(), cid);
 
         let mut buffer: Vec<u8> = Vec::new();
         buffer.extend_from_slice(payload);
@@ -95,6 +106,12 @@ impl CryptoChaCha20 {
     ///
     /// Fails if authentication fails or the record is too short.
     pub fn decrypt(&mut self, r: &[u8]) -> Result<Vec<u8>> {
+        self.decrypt_with(r, None)
+    }
+
+    /// [`Self::decrypt`], for a `tls12_cid` record when `cid` is given (RFC 9146); `r` is
+    /// the record without its connection id.
+    pub(crate) fn decrypt_with(&mut self, r: &[u8], cid: Option<&[u8]>) -> Result<Vec<u8>> {
         let mut reader = Cursor::new(r);
         let h = RecordLayerHeader::unmarshal(&mut reader)?;
         if h.content_type == ContentType::ChangeCipherSpec {
@@ -112,7 +129,7 @@ impl CryptoChaCha20 {
         }
 
         let additional_data =
-            generate_aead_additional_data(&h, out.len() - CRYPTO_CHACHA20_TAG_LENGTH);
+            record_additional_data(&h, out.len() - CRYPTO_CHACHA20_TAG_LENGTH, cid);
 
         let tag_start = out.len() - CRYPTO_CHACHA20_TAG_LENGTH;
         let mut buffer = out[..tag_start].to_vec();

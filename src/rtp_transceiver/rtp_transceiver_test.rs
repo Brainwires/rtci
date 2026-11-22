@@ -77,7 +77,10 @@ fn test_rtp_transceiver_set_codec_preferences() -> Result<()> {
     let mut pc = crate::peer_connection::RTCPeerConnectionBuilder::new()
         .with_media_engine(m)
         .build(Instant::now())?;
-    let id = pc.add_transceiver_from_kind(RtpCodecKind::Video, None)?;
+    let id = pc.add_transceiver_from_kind(
+        RtpCodecKind::Video,
+        Some(crate::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+    )?;
     let get_codecs = |pc: &RTCPeerConnection| pc.rtp_transceivers[id].get_codecs(&pc.media_engine);
 
     assert_eq!(get_codecs(&pc), media_video_codecs);
@@ -90,7 +93,7 @@ fn test_rtp_transceiver_set_codec_preferences() -> Result<()> {
                 .expect("transceiver")
                 .set_codec_preferences(test_case)
                 .unwrap_err(),
-            Error::ErrRTPTransceiverCodecUnsupported
+            Error::InvalidModificationError
         );
     }
 
@@ -120,6 +123,36 @@ fn test_rtp_transceiver_set_codec_preferences() -> Result<()> {
     pc.close()
 }
 
+/// W3C webrtc 5.4 setCodecPreferences: duplicates are removed, keeping the first; the payload
+/// type is not part of a codec dictionary, so VP8 under two numbers is one codec.
+#[test]
+fn set_codec_preferences_removes_duplicates_keeping_the_first() -> Result<()> {
+    let mut pc = crate::peer_connection::RTCPeerConnectionBuilder::new()
+        .with_media_engine(default_media_engine())
+        .build(Instant::now())?;
+    let id = pc.add_transceiver_from_kind(RtpCodecKind::Video, None)?;
+    let vp9 = RTCRtpCodecParameters {
+        rtp_codec: codec(MIME_TYPE_VP9, 90000, 0, "profile-id=0"),
+        payload_type: 98,
+    };
+    pc.rtp_transceiver(id)
+        .expect("transceiver")
+        .set_codec_preferences(vec![vp8(96), vp9.clone(), vp8(100), vp9])?;
+    let kept: Vec<(String, u8)> = pc.rtp_transceivers[id]
+        .get_codec_preferences()
+        .iter()
+        .map(|c| (c.rtp_codec.mime_type.clone(), c.payload_type))
+        .collect();
+    assert_eq!(
+        kept,
+        vec![
+            (MIME_TYPE_VP8.to_owned(), 96),
+            (MIME_TYPE_VP9.to_owned(), 98)
+        ]
+    );
+    pc.close()
+}
+
 // Assert that SetCodecPreferences properly filters codecs and PayloadTypes are respected
 #[test]
 fn test_rtp_transceiver_set_codec_preferences_payload_type() -> Result<()> {
@@ -133,7 +166,10 @@ fn test_rtp_transceiver_set_codec_preferences_payload_type() -> Result<()> {
     let (mut offer_pc, mut answer_pc) =
         new_pair_with(default_media_engine(), answerer_media_engine)?;
 
-    let _ = offer_pc.add_transceiver_from_kind(RtpCodecKind::Video, None)?;
+    let _ = offer_pc.add_transceiver_from_kind(
+        RtpCodecKind::Video,
+        Some(crate::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+    )?;
 
     // The old transceivers were sendrecv by default; the sans-IO default is recvonly, and a
     // recvonly answerer transceiver cannot take a recvonly offer's m-section. A sending one can.
@@ -194,7 +230,8 @@ fn test_rtp_transceiver_direction_change() -> Result<()> {
     offer_pc
         .rtp_transceiver(offer_sender.0)
         .expect("transceiver")
-        .set_direction(RTCRtpTransceiverDirection::Inactive);
+        .set_direction(RTCRtpTransceiverDirection::Inactive)
+        .expect("the change is accepted");
 
     let offer = offer_pc.create_offer(None)?;
     assert!(offer.sdp.contains("a=inactive"), "{}", offer.sdp);
@@ -239,7 +276,8 @@ fn test_rtp_transceiver_set_direction_causing_negotiation() -> Result<()> {
     offer_pc
         .rtp_transceiver(offer_sender.0)
         .expect("transceiver")
-        .set_direction(RTCRtpTransceiverDirection::Inactive);
+        .set_direction(RTCRtpTransceiverDirection::Inactive)
+        .expect("the change is accepted");
 
     assert_eq!(drain_negotiation_needed(&mut offer_pc), 1);
 
@@ -302,7 +340,10 @@ fn test_rtp_transceiver_codec_preferences_without_overlap_fall_back() -> Result<
     let (mut offer_pc, mut answer_pc) =
         new_pair_with(offerer_media_engine, default_media_engine())?;
 
-    let _ = offer_pc.add_transceiver_from_kind(RtpCodecKind::Video, None)?;
+    let _ = offer_pc.add_transceiver_from_kind(
+        RtpCodecKind::Video,
+        Some(crate::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+    )?;
     let answer_sender = answer_pc.add_track(video_track())?;
     answer_pc
         .rtp_transceiver(answer_sender.0)

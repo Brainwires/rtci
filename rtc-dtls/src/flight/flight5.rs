@@ -1,6 +1,7 @@
 use super::flight3::*;
 use super::*;
 use crate::change_cipher_spec::ChangeCipherSpec;
+use crate::client_certificate_type::ClientCertificateType;
 use crate::content::*;
 use crate::crypto::*;
 use crate::curve::named_curve::*;
@@ -151,11 +152,12 @@ impl Flight for Flight5 {
                     }
                 };
 
-                if expected_verify_data != finished.verify_data {
+                // RFC 5246 7.4.9, 7.2.2: decrypt_error for a Finished that does not verify.
+                if !crypto::constant_time_eq(&expected_verify_data, &finished.verify_data) {
                     return Err((
                         Some(Alert {
                             alert_level: AlertLevel::Fatal,
-                            alert_description: AlertDescription::HandshakeFailure,
+                            alert_description: AlertDescription::DecryptError,
                         }),
                         Some(Error::ErrVerifyDataMismatch),
                     ));
@@ -172,23 +174,43 @@ impl Flight for Flight5 {
         cache: &HandshakeCache,
         cfg: &HandshakeConfig,
     ) -> Result<Vec<Packet>, (Option<Alert>, Option<Error>)> {
-        let certificate = if !cfg.local_certificates.is_empty() {
-            let cert = match cfg.get_certificate(&cfg.server_name) {
-                Ok(cert) => cert,
-                Err(err) => {
-                    return Err((
-                        Some(Alert {
-                            alert_level: AlertLevel::Fatal,
-                            alert_description: AlertDescription::HandshakeFailure,
-                        }),
-                        Some(err),
-                    ));
-                }
+        // RFC 5246 7.4.4, 7.4.6, 7.4.8: the certificate answers the CertificateRequest only
+        // if it is of a type the request lists, is signed with a pair the request lists, and
+        // its key can sign the CertificateVerify with such a pair. Otherwise the client has
+        // no suitable certificate and sends an empty Certificate.
+        let client_certificate =
+            if state.remote_requested_certificate && !cfg.local_certificates.is_empty() {
+                let certificate = match cfg.get_certificate(&cfg.server_name) {
+                    Ok(cert) => cert,
+                    Err(err) => {
+                        return Err((
+                            Some(Alert {
+                                alert_level: AlertLevel::Fatal,
+                                alert_description: AlertDescription::HandshakeFailure,
+                            }),
+                            Some(err),
+                        ));
+                    }
+                };
+                let signature_scheme = select_common_signature_scheme(
+                    &cfg.local_signature_schemes,
+                    &state.remote_signature_schemes,
+                    &certificate.private_key,
+                )
+                .ok()
+                .filter(|_| {
+                    state
+                        .remote_certificate_types
+                        .contains(&client_certificate_type(&certificate.private_key))
+                        && certificates_signed_within(
+                            &certificate.certificate,
+                            &state.remote_signature_schemes,
+                        )
+                });
+                signature_scheme.map(|signature_scheme| (certificate, signature_scheme))
+            } else {
+                None
             };
-            Some(cert)
-        } else {
-            None
-        };
 
         let mut pkts = vec![];
 
@@ -199,7 +221,7 @@ impl Flight for Flight5 {
                     0,
                     Content::Handshake(Handshake::new(HandshakeMessage::Certificate(
                         HandshakeMessageCertificate {
-                            certificate: if let Some(cert) = &certificate {
+                            certificate: if let Some((cert, _)) = &client_certificate {
                                 cert.certificate
                                     .iter()
                                     .map(|x| x.as_ref().to_owned())
@@ -342,7 +364,8 @@ impl Flight for Flight5 {
         // If the client has sent a certificate with signing ability, a digitally-signed
         // CertificateVerify message is sent to explicitly verify possession of the
         // private key in the certificate.
-        if state.remote_requested_certificate && !cfg.local_certificates.is_empty() {
+        if let Some((cert_ref, signature_hash_algo)) = &client_certificate {
+            let signature_hash_algo = *signature_hash_algo;
             let mut plain_text = cache.pull_and_merge(&[
                 HandshakeCachePullRule {
                     typ: HandshakeType::ClientHello,
@@ -395,38 +418,6 @@ impl Flight for Flight5 {
             ]);
 
             plain_text.extend_from_slice(&merged);
-
-            // Note: this path is currently unreachable because the outer guard
-            // ensures `!cfg.local_certificates.is_empty()`, but we keep the
-            // graceful error return rather than panicking for defense-in-depth.
-            let cert_ref = certificate.as_ref().ok_or_else(|| {
-                (
-                    Some(Alert {
-                        alert_level: AlertLevel::Fatal,
-                        alert_description: AlertDescription::InternalError,
-                    }),
-                    Some(Error::Other(
-                        "no local certificate available for DTLS flight5".to_owned(),
-                    )),
-                )
-            })?;
-
-            // Find compatible signature scheme
-            let signature_hash_algo = match select_signature_scheme(
-                &cfg.local_signature_schemes,
-                &cert_ref.private_key,
-            ) {
-                Ok(s) => s,
-                Err(err) => {
-                    return Err((
-                        Some(Alert {
-                            alert_level: AlertLevel::Fatal,
-                            alert_description: AlertDescription::InsufficientSecurity,
-                        }),
-                        Some(err),
-                    ));
-                }
-            };
 
             let cert_verify = match generate_certificate_verify(
                 &plain_text,
@@ -698,6 +689,9 @@ fn initalize_cipher_suite(
         }
     }
 
+    // RFC 5246 8.1: the premaster secret is deleted once the master secret has been computed.
+    state.forget_pre_master_secret();
+
     if cfg.local_psk_callback.is_none() {
         // Verify that the pair of hash algorithm and signiture is listed.
         let mut valid_signature_scheme = false;
@@ -708,12 +702,27 @@ fn initalize_cipher_suite(
             }
         }
         if !valid_signature_scheme {
+            // RFC 5246 7.4.3: the server chose a pair this client did not list.
             return Err((
                 Some(Alert {
                     alert_level: AlertLevel::Fatal,
-                    alert_description: AlertDescription::InsufficientSecurity,
+                    alert_description: AlertDescription::IllegalParameter,
                 }),
                 Some(Error::ErrNoAvailableSignatureSchemes),
+            ));
+        }
+        // RFC 5246 7.4.2: the key the server signs with is of the kind the negotiated key
+        // exchange names: RSA for ECDHE_RSA, ECDSA (or EdDSA, RFC 8422) for ECDHE_ECDSA.
+        let suite_signs_with_rsa = state.cipher_suite.as_ref().is_some_and(|cipher_suite| {
+            cipher_suite.certificate_type() == ClientCertificateType::RsaSign
+        });
+        if suite_signs_with_rsa != h.algorithm.signature.is_rsa() {
+            return Err((
+                Some(Alert {
+                    alert_level: AlertLevel::Fatal,
+                    alert_description: AlertDescription::IllegalParameter,
+                }),
+                Some(Error::ErrInvalidSignatureAlgorithm),
             ));
         }
 
@@ -727,10 +736,11 @@ fn initalize_cipher_suite(
             &state.peer_certificates,
             cfg.insecure_verification,
         ) {
+            // RFC 5246 7.2.2: decrypt_error, a signature that does not verify.
             return Err((
                 Some(Alert {
                     alert_level: AlertLevel::Fatal,
-                    alert_description: AlertDescription::BadCertificate,
+                    alert_description: AlertDescription::DecryptError,
                 }),
                 Some(err),
             ));

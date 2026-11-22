@@ -316,6 +316,20 @@ pub(crate) fn check_next_signaling_state(
         return Err(Error::ErrSignalingStateCannotRollback);
     }
 
+    // A rollback undoes the pending offer, whichever of `set_local_description` and
+    // `set_remote_description` carries it (RFC 9429 section 5.7: "the same effect"; W3C
+    // webrtc-pc "set a session description": valid in have-local-offer and have-remote-offer,
+    // InvalidStateError in the provisional-answer states).
+    if sdp_type == RTCSdpType::Rollback
+        && next == RTCSignalingState::Stable
+        && matches!(
+            cur,
+            RTCSignalingState::HaveLocalOffer | RTCSignalingState::HaveRemoteOffer
+        )
+    {
+        return Ok(next);
+    }
+
     // 4.3.1 valid state transitions
     match cur {
         RTCSignalingState::Stable => {
@@ -572,15 +586,60 @@ mod test {
                 None,
             ),
             (
-                "(invalid) have-remote-offer->SetLocal(rollback)->stable",
+                "have-remote-offer->SetLocal(rollback)->stable",
                 RTCSignalingState::HaveRemoteOffer,
+                RTCSignalingState::Stable,
+                StateChangeOp::SetLocal,
+                RTCSdpType::Rollback,
+                None,
+            ),
+            (
+                "have-remote-offer->SetRemote(rollback)->stable",
+                RTCSignalingState::HaveRemoteOffer,
+                RTCSignalingState::Stable,
+                StateChangeOp::SetRemote,
+                RTCSdpType::Rollback,
+                None,
+            ),
+            (
+                "have-local-offer->SetLocal(rollback)->stable",
+                RTCSignalingState::HaveLocalOffer,
+                RTCSignalingState::Stable,
+                StateChangeOp::SetLocal,
+                RTCSdpType::Rollback,
+                None,
+            ),
+            (
+                "have-local-offer->SetRemote(rollback)->stable",
+                RTCSignalingState::HaveLocalOffer,
+                RTCSignalingState::Stable,
+                StateChangeOp::SetRemote,
+                RTCSdpType::Rollback,
+                None,
+            ),
+            (
+                "(invalid) have-local-pranswer->SetLocal(rollback)->stable",
+                RTCSignalingState::HaveLocalPranswer,
                 RTCSignalingState::Stable,
                 StateChangeOp::SetLocal,
                 RTCSdpType::Rollback,
                 Some(Error::ErrSignalingStateProposedTransitionInvalid(format!(
                     "from {} applying {} {}",
-                    RTCSignalingState::HaveRemoteOffer,
+                    RTCSignalingState::HaveLocalPranswer,
                     true,
+                    RTCSdpType::Rollback
+                ))),
+            ),
+            (
+                "(invalid) have-remote-pranswer->SetRemote(rollback)->stable",
+                RTCSignalingState::HaveRemotePranswer,
+                RTCSignalingState::Stable,
+                StateChangeOp::SetRemote,
+                RTCSdpType::Rollback,
+                Some(Error::ErrSignalingStateProposedTransitionInvalid(format!(
+                    "from {} applying {} {}",
+                    RTCSignalingState::HaveRemotePranswer,
+                    false,
                     RTCSdpType::Rollback
                 ))),
             ),

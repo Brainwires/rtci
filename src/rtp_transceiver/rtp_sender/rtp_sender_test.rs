@@ -159,12 +159,13 @@ fn test_rtp_sender_replace_track() -> Result<()> {
     pair.offerer
         .rtp_sender(sender_id)
         .expect("sender")
-        .replace_track(track(MIME_TYPE_H264, "", Some(ssrc)))?;
+        .replace_track(Some(track(MIME_TYPE_H264, "", Some(ssrc))))?;
     assert_eq!(
         pair.offerer
             .rtp_sender(sender_id)
             .expect("sender")
             .track()
+            .expect("the sender has a track")
             .codings()[0]
             .codec
             .mime_type,
@@ -215,7 +216,7 @@ fn test_rtp_sender_get_parameters() -> Result<()> {
         .sender()
         .expect("a sending transceiver has a sender");
     let mut sender = offerer.rtp_sender(sender_id).expect("sender");
-    let track_ssrc = sender.track().ssrcs().next();
+    let track_ssrc = sender.ssrcs().next();
     assert!(track_ssrc.is_some());
     let parameters = sender.get_parameters();
     assert_ne!(0, parameters.rtp_parameters.codecs.len());
@@ -242,7 +243,7 @@ fn test_rtp_sender_get_parameters_with_rid() -> Result<()> {
     signal_pair(&mut offerer, &mut answerer)?;
 
     let mut sender = offerer.rtp_sender(sender_id).expect("sender");
-    let track_ssrc = sender.track().ssrcs().next();
+    let track_ssrc = sender.ssrcs().next();
     assert!(track_ssrc.is_some());
     let parameters = sender.get_parameters();
     assert_ne!(0, parameters.rtp_parameters.codecs.len());
@@ -280,7 +281,7 @@ fn test_rtp_sender_replace_track_invalid_track_kind_change() -> Result<()> {
         sender
             .rtp_sender(sender_id)
             .expect("sender")
-            .replace_track(audio_track)
+            .replace_track(Some(audio_track))
             .unwrap_err(),
         Error::ErrRTPSenderNewTrackHasIncorrectKind
     );
@@ -316,7 +317,7 @@ fn test_rtp_sender_replace_track_invalid_codec_change() -> Result<()> {
     pair.offerer
         .rtp_sender(sender_id)
         .expect("sender")
-        .replace_track(track(MIME_TYPE_VP9, "", Some(ssrc)))?;
+        .replace_track(Some(track(MIME_TYPE_VP9, "", Some(ssrc))))?;
 
     let codecs = pair
         .offerer
@@ -345,26 +346,37 @@ fn test_rtp_sender_replace_track_invalid_codec_change() -> Result<()> {
     pair.close()
 }
 
-/// Replaced: the old test cleared the sender's track (`replace_track(None)`) and expected no
-/// encodings. A sans-IO `replace_track` takes a track, not an `Option`; a sender stops having a
-/// track when it is removed. After that the transceiver no longer sends and the sender is gone,
-/// so it reports no parameters at all.
+/// W3C webrtc 5.1 `removeTrack` / 5.2 `replaceTrack(null)`: the sender's track becomes null,
+/// and the sender stays: it is still in `getSenders`, keeps its encodings and parameters, and
+/// its transceiver stops offering to send.
 #[test]
 fn test_rtp_sender_get_parameters_replaced() -> Result<()> {
     let (mut sender, mut receiver) = new_pair()?;
     let sender_id = sender.add_track(track(MIME_TYPE_VP8, "", None))?;
-    {
+    let ssrc = {
         let mut rtp_sender = sender.rtp_sender(sender_id).expect("sender");
         assert_eq!(1, rtp_sender.get_parameters().encodings.len());
-    }
+        rtp_sender.get_parameters().encodings[0]
+            .rtp_coding_parameters
+            .ssrc
+    };
 
     sender.remove_track(sender_id)?;
-    assert!(sender.rtp_sender(sender_id).is_none());
-    assert!(sender.get_senders().all(|id| id != sender_id));
+    {
+        let mut rtp_sender = sender
+            .rtp_sender(sender_id)
+            .expect("the sender outlives its track");
+        assert!(rtp_sender.track().is_none());
+        let parameters = rtp_sender.get_parameters().clone();
+        assert_eq!(1, parameters.encodings.len());
+        assert_eq!(ssrc, parameters.encodings[0].rtp_coding_parameters.ssrc);
+        rtp_sender.set_parameters(parameters, None)?;
+    }
+    assert!(sender.get_senders().any(|id| id == sender_id));
     assert_eq!(
         sender
             .rtp_transceiver(sender_id.0)
-            .expect("the transceiver outlives its sender")
+            .expect("transceiver")
             .direction(),
         RTCRtpTransceiverDirection::Recvonly
     );
@@ -373,10 +385,6 @@ fn test_rtp_sender_get_parameters_replaced() -> Result<()> {
     receiver.close()
 }
 
-/// Replaced: the old test called `send` twice and expected `ErrRTPSenderSendAlreadyCalled` on
-/// the second. The sans-IO sender has no `send`: negotiation starts it, binding its streams to
-/// the interceptor chain. What the error protected against is a sender started twice, which
-/// here would bind its streams twice; a second negotiation must not.
 #[test]
 fn test_rtp_sender_send() -> Result<()> {
     let (registry, log) = RecordingInterceptor::registry();
@@ -423,10 +431,9 @@ fn test_rtp_sender_send() -> Result<()> {
     receiver.close()
 }
 
-/// Replaced: the old test expected `send` on a removed sender to fail with
-/// `ErrRTPSenderTrackRemoved`. Without `send`, the sans-IO equivalents are that removing the
-/// track unbinds the sender's streams from the interceptor chain and leaves no sender to write
-/// through.
+/// Removing the track unbinds the sender's streams from the interceptor chain (which has the
+/// sender report interceptor say BYE), and RTP written to the sender is then refused with
+/// `ErrRTPSenderTrackRemoved` until `replace_track` gives it a track again.
 #[test]
 fn test_rtp_sender_send_track_removed() -> Result<()> {
     let (registry, log) = RecordingInterceptor::registry();
@@ -457,7 +464,34 @@ fn test_rtp_sender_send_track_removed() -> Result<()> {
             .any(|info| info.ssrc == ssrc),
         "removing the track unbinds its stream"
     );
-    assert!(sender.rtp_sender(sender_id).is_none());
+    let packet = rtp::Packet {
+        header: rtp::Header {
+            version: 2,
+            ssrc,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut rtp_sender = sender.rtp_sender(sender_id).expect("sender");
+    assert_eq!(
+        rtp_sender.write_rtp(Instant::now(), packet.clone()),
+        Err(Error::ErrRTPSenderTrackRemoved)
+    );
+    // With a track again the sender sends, on the SSRC it had, without negotiation.
+    rtp_sender.replace_track(Some(track(MIME_TYPE_VP8, "", None)))?;
+    assert_eq!(rtp_sender.ssrcs().collect::<Vec<_>>(), vec![ssrc]);
+    assert_eq!(
+        rtp_sender
+            .track()
+            .expect("track")
+            .ssrcs()
+            .collect::<Vec<_>>(),
+        vec![ssrc]
+    );
+    assert_ne!(
+        rtp_sender.write_rtp(Instant::now(), packet),
+        Err(Error::ErrRTPSenderTrackRemoved)
+    );
 
     sender.close()?;
     receiver.close()
@@ -660,12 +694,7 @@ fn test_rtp_sender_rtx() -> Result<()> {
     // used is decided by the codec the encoding sends, below.
     assert!(rtx_ssrc(&mut offerer, sender_b).is_some());
 
-    let vp8_ssrc = offerer
-        .rtp_sender(sender_a)
-        .expect("sender")
-        .track()
-        .ssrcs()
-        .next();
+    let vp8_ssrc = offerer.rtp_sender(sender_a).expect("sender").ssrcs().next();
 
     offerer.close()?;
     answerer.close()?;
@@ -882,4 +911,226 @@ fn a_negotiation_without_rtx_binds_no_rtx_ssrc() -> Result<()> {
 
     sender.close()?;
     receiver.close()
+}
+
+/// A media engine with the default codecs and the MID, RtpStreamId and RepairedRtpStreamId
+/// header extensions for audio and video.
+fn media_engine_with_stream_ids() -> Result<MediaEngine> {
+    let mut media_engine = default_media_engine();
+    crate::peer_connection::configuration::interceptor_registry::configure_simulcast_extension_headers(
+        &mut media_engine,
+    )?;
+    crate::peer_connection::configuration::interceptor_registry::configure_default_header_extensions(
+        &mut media_engine,
+    )?;
+    Ok(media_engine)
+}
+
+fn negotiated_extension_id(sender: &mut RTCRtpSender<'_>, uri: &str) -> u8 {
+    sender
+        .get_parameters()
+        .rtp_parameters
+        .header_extensions
+        .iter()
+        .find(|extension| extension.uri == uri)
+        .unwrap_or_else(|| panic!("{uri} was not negotiated"))
+        .id as u8
+}
+
+/// RFC 9143 section 15: the MID header extension is sent so that the receiver can associate
+/// the RTP stream with its m= section. The sender writes it; the application's packet has no
+/// header extension at all.
+#[test]
+fn the_sender_stamps_the_mid_of_its_transceiver() -> Result<()> {
+    let (mut offerer, mut answerer) = new_pair_with(
+        media_engine_with_stream_ids()?,
+        media_engine_with_stream_ids()?,
+    )?;
+    let audio_ssrc = 0x0a0a_0001;
+    let video_ssrc = 0x0a0a_0002;
+    let audio = offerer.add_track(track_with(
+        "webrtc-rs",
+        "audio",
+        RtpCodecKind::Audio,
+        vec![encoding(MIME_TYPE_OPUS, "", Some(audio_ssrc))],
+    ))?;
+    let video = offerer.add_track(track(MIME_TYPE_VP8, "", Some(video_ssrc)))?;
+
+    signal_pair(&mut offerer, &mut answerer)?;
+    let mut pair = Pair::new(offerer, answerer);
+    pair.connect()?;
+
+    let mut sequence_number = 100;
+    for (sender_id, ssrc, mime_type, marker) in [
+        (audio, audio_ssrc, MIME_TYPE_OPUS, 0xa1u8),
+        (video, video_ssrc, MIME_TYPE_VP8, 0xb2u8),
+    ] {
+        let (payload_type, mid_id, mid) = {
+            let mid = pair.offerer.rtp_transceivers[sender_id.0]
+                .mid()
+                .clone()
+                .expect("a mid");
+            let mut sender = pair.offerer.rtp_sender(sender_id).expect("sender");
+            (
+                negotiated_payload_type(&mut sender, mime_type),
+                negotiated_extension_id(&mut sender, ::sdp::extmap::SDES_MID_URI),
+                mid,
+            )
+        };
+        let received = send_until_seen(
+            &mut pair,
+            sender_id,
+            ssrc,
+            payload_type,
+            marker,
+            &mut sequence_number,
+        );
+        assert_eq!(
+            received.header.get_extension(mid_id).as_deref(),
+            Some(mid.as_bytes()),
+            "{mime_type}: the packet carries mid {mid}"
+        );
+    }
+    pair.close()
+}
+
+/// RFC 8852 section 3.3 and RFC 8853 section 5.5: each simulcast stream carries the rid of its
+/// encoding in the RtpStreamId header extension (and the MID). The description names no SSRC
+/// for a simulcast stream, so the receiver can only place the packet by what the sender
+/// stamped: that it arrives, on the layer's rid, is the stamping.
+#[test]
+fn the_sender_stamps_the_rid_of_each_simulcast_encoding() -> Result<()> {
+    let (mut offerer, mut answerer) = new_pair_with(
+        media_engine_with_stream_ids()?,
+        media_engine_with_stream_ids()?,
+    )?;
+    let layers = [("q", 0x0b0b_0001u32, 0xc1u8), ("f", 0x0b0b_0002, 0xc2)];
+    let sender_id = offerer.add_track(track_with(
+        "webrtc-rs",
+        "video",
+        RtpCodecKind::Video,
+        layers
+            .iter()
+            .map(|(rid, ssrc, _)| encoding(MIME_TYPE_VP8, rid, Some(*ssrc)))
+            .collect(),
+    ))?;
+
+    signal_pair(&mut offerer, &mut answerer)?;
+    let mut pair = Pair::new(offerer, answerer);
+    pair.connect()?;
+
+    let (payload_type, mid_id, rid_id) = {
+        let mut sender = pair.offerer.rtp_sender(sender_id).expect("sender");
+        (
+            negotiated_payload_type(&mut sender, MIME_TYPE_VP8),
+            negotiated_extension_id(&mut sender, ::sdp::extmap::SDES_MID_URI),
+            negotiated_extension_id(&mut sender, ::sdp::extmap::SDES_RTP_STREAM_ID_URI),
+        )
+    };
+    let mid = pair.offerer.rtp_transceivers[sender_id.0]
+        .mid()
+        .clone()
+        .expect("a mid");
+    let mut sequence_number = 500;
+    for (rid, ssrc, marker) in layers {
+        let received = send_until_seen(
+            &mut pair,
+            sender_id,
+            ssrc,
+            payload_type,
+            marker,
+            &mut sequence_number,
+        );
+        assert_eq!(
+            received.header.get_extension(rid_id).as_deref(),
+            Some(rid.as_bytes()),
+            "the packet of layer {rid} carries its rid"
+        );
+        assert_eq!(
+            received.header.get_extension(mid_id).as_deref(),
+            Some(mid.as_bytes())
+        );
+    }
+    // Each layer opened as a track of its own rid on the receiving side.
+    let mut rids: Vec<String> = pair
+        .answerer_seen
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            RTCPeerConnectionEvent::OnTrack(RTCTrackEvent::OnOpen(init)) => init.rid.clone(),
+            _ => None,
+        })
+        .collect();
+    rids.sort();
+    assert_eq!(rids, vec!["f".to_owned(), "q".to_owned()]);
+    pair.close()
+}
+
+/// A packet the application gave the extension itself is sent as it is: one MID element.
+#[test]
+fn a_packet_that_carries_its_mid_is_not_stamped_again() -> Result<()> {
+    let (mut offerer, mut answerer) = new_pair_with(
+        media_engine_with_stream_ids()?,
+        media_engine_with_stream_ids()?,
+    )?;
+    let ssrc = 0x0c0c_0001;
+    let sender_id = offerer.add_track(track(MIME_TYPE_VP8, "", Some(ssrc)))?;
+    signal_pair(&mut offerer, &mut answerer)?;
+    let mut pair = Pair::new(offerer, answerer);
+    pair.connect()?;
+
+    let (payload_type, mid_id) = {
+        let mut sender = pair.offerer.rtp_sender(sender_id).expect("sender");
+        (
+            negotiated_payload_type(&mut sender, MIME_TYPE_VP8),
+            negotiated_extension_id(&mut sender, ::sdp::extmap::SDES_MID_URI),
+        )
+    };
+    let mid = pair.offerer.rtp_transceivers[sender_id.0]
+        .mid()
+        .clone()
+        .expect("a mid");
+    let mut header = rtp::header::Header {
+        version: 2,
+        payload_type,
+        sequence_number: 9,
+        timestamp: 9000,
+        ssrc,
+        ..Default::default()
+    };
+    header.set_extension(mid_id, bytes::Bytes::copy_from_slice(mid.as_bytes()))?;
+    let before = header.clone();
+    let now = pair.now;
+    pair.offerer
+        .rtp_sender(sender_id)
+        .expect("sender")
+        .write_rtp(
+            now,
+            rtp::Packet {
+                header,
+                payload: bytes::Bytes::from_static(&[0xd1]),
+            },
+        )?;
+    let seen = |pair: &mut Pair| {
+        pair.answerer_seen
+            .reads
+            .iter()
+            .any(|m| matches!(m, RTCMessage::RtpPacket(_, p) if p.payload.last() == Some(&0xd1)))
+    };
+    assert!(pair.run_until(std::time::Duration::from_secs(2), seen)?);
+    let received = pair
+        .answerer_seen
+        .reads
+        .iter()
+        .find_map(|m| match m {
+            RTCMessage::RtpPacket(_, p) if p.payload.last() == Some(&0xd1) => Some(p.clone()),
+            _ => None,
+        })
+        .expect("seen");
+    assert_eq!(received.header.extensions.len(), before.extensions.len());
+    assert_eq!(
+        received.header.get_extension(mid_id).as_deref(),
+        Some(mid.as_bytes())
+    );
+    pair.close()
 }

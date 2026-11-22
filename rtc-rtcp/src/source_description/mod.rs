@@ -1,4 +1,6 @@
 #[cfg(test)]
+mod source_description_items_test;
+#[cfg(test)]
 mod source_description_test;
 
 use crate::{header::*, packet::*, util::*};
@@ -21,32 +23,53 @@ const SDES_TEXT_OFFSET: usize = 2;
 
 /// SDESType is the item type used in the RTCP SDES control packet.
 /// RTP SDES item types registered with IANA. See: <https://www.iana.org/assignments/rtp-parameters/rtp-parameters.xhtml#rtp-parameters-5>
+///
+/// The enum converts to and from the type octet with `u8::from` / `SdesType::from`. The
+/// registry grows, so an item of a type that is not named here is kept as
+/// [`SdesType::Other`]: a receiver skips such an item by its length (RFC 3550 §6.5).
 #[derive(Default, Debug, Copy, Clone, PartialEq, Eq)]
-#[repr(u8)]
 #[non_exhaustive]
 pub enum SdesType {
     #[default]
     /// End of the SDES item list ([RFC 3550] §6.5).
-    SdesEnd = 0, // end of SDES list                RFC 3550, 6.5
+    SdesEnd, // 0, end of SDES list                RFC 3550, 6.5
     /// CNAME: the canonical end-point identifier, which ties an SSRC to a participant.
     ///
     /// The one item WebRTC always sends — it is how a receiver associates streams that belong
     /// together.
-    SdesCname = 1, // canonical name                  RFC 3550, 6.5.1
+    SdesCname, // 1, canonical name                  RFC 3550, 6.5.1
     /// NAME: the participant's display name.
-    SdesName = 2, // user name                       RFC 3550, 6.5.2
+    SdesName, // 2, user name                       RFC 3550, 6.5.2
     /// EMAIL: the participant's email address.
-    SdesEmail = 3, // user's electronic mail address  RFC 3550, 6.5.3
+    SdesEmail, // 3, user's electronic mail address  RFC 3550, 6.5.3
     /// PHONE: the participant's phone number.
-    SdesPhone = 4, // user's phone number             RFC 3550, 6.5.4
+    SdesPhone, // 4, user's phone number             RFC 3550, 6.5.4
     /// LOC: the participant's geographic location.
-    SdesLocation = 5, // geographic user location        RFC 3550, 6.5.5
+    SdesLocation, // 5, geographic user location        RFC 3550, 6.5.5
     /// TOOL: the name and version of the sending application.
-    SdesTool = 6, // name of application or tool     RFC 3550, 6.5.6
+    SdesTool, // 6, name of application or tool     RFC 3550, 6.5.6
     /// NOTE: a transient note about the source, such as "on hold".
-    SdesNote = 7, // notice about the source         RFC 3550, 6.5.7
-    /// PRIV: a private extension.
-    SdesPrivate = 8, // private extensions              RFC 3550, 6.5.8  (not implemented)
+    SdesNote, // 7, notice about the source         RFC 3550, 6.5.7
+    /// PRIV: a private extension: a prefix that names it, and a value
+    /// ([`SourceDescriptionItem::private`]).
+    SdesPrivate, // 8, private extensions              RFC 3550, 6.5.8
+    /// RtpStreamId: the RID of the source stream ([RFC 8852] §3.1), ASCII, not null terminated.
+    ///
+    /// [RFC 8852]: https://datatracker.ietf.org/doc/html/rfc8852
+    SdesRtpStreamId, // 12, RFC 8852, 3.1
+    /// RepairedRtpStreamId: on a redundancy stream, the RID of the source stream it repairs
+    /// ([RFC 8852] §3.2).
+    ///
+    /// [RFC 8852]: https://datatracker.ietf.org/doc/html/rfc8852
+    SdesRepairedRtpStreamId, // 13, RFC 8852, 3.2
+    /// MID: the media identification that ties the source to an SDP media section
+    /// ([RFC 8843] §15.1, carried as [RFC 7941] describes).
+    ///
+    /// [RFC 8843]: https://datatracker.ietf.org/doc/html/rfc8843
+    /// [RFC 7941]: https://datatracker.ietf.org/doc/html/rfc7941
+    SdesMid, // 15, RFC 8843, 15.1
+    /// An item type that is not named above, with its type octet.
+    Other(u8),
 }
 
 impl fmt::Display for SdesType {
@@ -61,6 +84,10 @@ impl fmt::Display for SdesType {
             SdesType::SdesTool => "TOOL",
             SdesType::SdesNote => "NOTE",
             SdesType::SdesPrivate => "PRIV",
+            SdesType::SdesRtpStreamId => "RtpStreamId",
+            SdesType::SdesRepairedRtpStreamId => "RepairedRtpStreamId",
+            SdesType::SdesMid => "MID",
+            SdesType::Other(t) => return write!(f, "SDES{t}"),
         };
         write!(f, "{s}")
     }
@@ -69,6 +96,7 @@ impl fmt::Display for SdesType {
 impl From<u8> for SdesType {
     fn from(b: u8) -> Self {
         match b {
+            0 => SdesType::SdesEnd,
             1 => SdesType::SdesCname,
             2 => SdesType::SdesName,
             3 => SdesType::SdesEmail,
@@ -77,7 +105,30 @@ impl From<u8> for SdesType {
             6 => SdesType::SdesTool,
             7 => SdesType::SdesNote,
             8 => SdesType::SdesPrivate,
-            _ => SdesType::SdesEnd,
+            12 => SdesType::SdesRtpStreamId,
+            13 => SdesType::SdesRepairedRtpStreamId,
+            15 => SdesType::SdesMid,
+            other => SdesType::Other(other),
+        }
+    }
+}
+
+impl From<SdesType> for u8 {
+    fn from(t: SdesType) -> Self {
+        match t {
+            SdesType::SdesEnd => 0,
+            SdesType::SdesCname => 1,
+            SdesType::SdesName => 2,
+            SdesType::SdesEmail => 3,
+            SdesType::SdesPhone => 4,
+            SdesType::SdesLocation => 5,
+            SdesType::SdesTool => 6,
+            SdesType::SdesNote => 7,
+            SdesType::SdesPrivate => 8,
+            SdesType::SdesRtpStreamId => 12,
+            SdesType::SdesRepairedRtpStreamId => 13,
+            SdesType::SdesMid => 15,
+            SdesType::Other(other) => other,
         }
     }
 }
@@ -133,10 +184,11 @@ impl Marshal for SourceDescriptionChunk {
         }
 
         // The list of items in each chunk MUST be terminated by one or more null octets
-        buf.put_u8(SdesType::SdesEnd as u8);
+        buf.put_u8(SdesType::SdesEnd.into());
 
         // additional null octets MUST be included if needed to pad until the next 32-bit boundary
-        put_padding(buf, self.raw_size());
+        // (null octets: this is not the padding of the P bit, whose last octet is a count)
+        buf.put_bytes(0, get_padding_size(self.raw_size()));
         Ok(self.marshal_size())
     }
 }
@@ -156,32 +208,34 @@ impl Unmarshal for SourceDescriptionChunk {
          *  |                              ...                              |
          *  +=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+
          */
-        let raw_packet_len = raw_packet.remaining();
-        if raw_packet_len < (SDES_SOURCE_LEN + SDES_TYPE_LEN) {
+        if raw_packet.remaining() < (SDES_SOURCE_LEN + SDES_TYPE_LEN) {
             return Err(Error::PacketTooShort);
         }
 
         let source = raw_packet.get_u32();
 
+        // Octets of this chunk read so far. A chunk starts on a 32-bit boundary, so this also
+        // says how far the next boundary is.
         let mut offset = SDES_SOURCE_LEN;
         let mut items = vec![];
-        while offset < raw_packet_len {
+        loop {
+            // "The list of items in each chunk MUST be terminated by one or more null octets":
+            // a chunk that runs out without one is cut short.
             let item = SourceDescriptionItem::unmarshal(raw_packet)?;
             if item.sdes_type == SdesType::SdesEnd {
-                // offset + 1 (one byte for SdesEnd)
+                // offset + 1 (one byte for SdesEnd), then null octets up to the boundary.
                 let padding_len = get_padding_size(offset + 1);
-                if raw_packet.remaining() >= padding_len {
-                    raw_packet.advance(padding_len);
-                    return Ok(SourceDescriptionChunk { source, items });
-                } else {
+                if raw_packet.remaining() < padding_len {
                     return Err(Error::PacketTooShort);
                 }
+                raw_packet.advance(padding_len);
+                return Ok(SourceDescriptionChunk { source, items });
             }
+            // Every item is kept, of a known type or not: an unknown one is skipped by its
+            // length here, and it is the reader of `items` that passes over it.
             offset += item.marshal_size();
             items.push(item);
         }
-
-        Err(Error::PacketTooShort)
     }
 }
 
@@ -194,6 +248,42 @@ pub struct SourceDescriptionItem {
     pub sdes_type: SdesType,
     /// Text is a unicode text blob associated with the item. Its meaning varies based on the item's Type.
     pub text: Bytes,
+}
+
+impl SourceDescriptionItem {
+    /// A PRIV item (RFC 3550 §6.5.8): `prefix` names the extension, `value` is its content.
+    ///
+    /// The two share the item's 255 octets with the prefix length octet, so together they are
+    /// at most 254 octets long.
+    pub fn private(prefix: &[u8], value: &[u8]) -> Result<Self> {
+        if 1 + prefix.len() + value.len() > SDES_MAX_OCTET_COUNT {
+            return Err(Error::SdesTextTooLong);
+        }
+        let mut text = Vec::with_capacity(1 + prefix.len() + value.len());
+        text.push(prefix.len() as u8);
+        text.extend_from_slice(prefix);
+        text.extend_from_slice(value);
+        Ok(SourceDescriptionItem {
+            sdes_type: SdesType::SdesPrivate,
+            text: Bytes::from(text),
+        })
+    }
+
+    /// The prefix and the value of a PRIV item, or `None` when this is not one or its prefix
+    /// length runs past the item.
+    pub fn as_private(&self) -> Option<(Bytes, Bytes)> {
+        if self.sdes_type != SdesType::SdesPrivate {
+            return None;
+        }
+        let prefix_len = *self.text.first()? as usize;
+        if 1 + prefix_len > self.text.len() {
+            return None;
+        }
+        Some((
+            self.text.slice(1..1 + prefix_len),
+            self.text.slice(1 + prefix_len..),
+        ))
+    }
 }
 
 impl MarshalSize for SourceDescriptionItem {
@@ -220,7 +310,9 @@ impl Marshal for SourceDescriptionItem {
          *  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
          */
 
-        if self.sdes_type == SdesType::SdesEnd {
+        // Type zero ends the list and cannot be an item, whichever way it is spelled.
+        let sdes_type = u8::from(self.sdes_type);
+        if sdes_type == 0 {
             return Err(Error::SdesMissingType);
         }
 
@@ -228,7 +320,7 @@ impl Marshal for SourceDescriptionItem {
             return Err(Error::BufferTooShort);
         }
 
-        buf.put_u8(self.sdes_type as u8);
+        buf.put_u8(sdes_type);
 
         if self.text.len() > SDES_MAX_OCTET_COUNT {
             return Err(Error::SdesTextTooLong);
@@ -307,7 +399,8 @@ impl Packet for SourceDescription {
     /// Header returns the Header associated with this packet.
     fn header(&self) -> Header {
         Header {
-            padding: get_padding_size(self.raw_size()) != 0,
+            // Every chunk ends on a 32-bit boundary, so the packet does too.
+            padding: false,
             count: self.chunks.len() as u8,
             packet_type: PacketType::SourceDescription,
             length: ((self.marshal_size() / 4) - 1) as u16,
@@ -419,29 +512,18 @@ impl Unmarshal for SourceDescription {
          *        |                              ...                              |
          *        +=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+
          */
-        let raw_packet_len = raw_packet.remaining();
-
-        let h = Header::unmarshal(raw_packet)?;
+        let (h, mut body) = read_packet(raw_packet)?;
         if h.packet_type != PacketType::SourceDescription {
             return Err(Error::WrongType);
         }
 
-        let mut offset = HEADER_LENGTH;
-        let mut chunks = vec![];
-        while offset < raw_packet_len {
-            let chunk = SourceDescriptionChunk::unmarshal(raw_packet)?;
-            offset += chunk.marshal_size();
-            chunks.push(chunk);
+        // SC chunks, each ending on a 32-bit boundary, and nothing after them.
+        let mut chunks = Vec::with_capacity(h.count as usize);
+        for _ in 0..h.count {
+            chunks.push(SourceDescriptionChunk::unmarshal(&mut body)?);
         }
-
-        if chunks.len() != h.count as usize {
+        if body.has_remaining() {
             return Err(Error::InvalidHeader);
-        }
-
-        if
-        /*h.padding &&*/
-        raw_packet.has_remaining() {
-            raw_packet.advance(raw_packet.remaining());
         }
 
         Ok(SourceDescription { chunks })

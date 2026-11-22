@@ -7,9 +7,10 @@ use aws_lc_rs::{aead, agreement, digest, hmac};
 use crate::common;
 use crate::{
     ActiveKeyExchange, AeadAlgorithm, AeadCipher, BlockCipherAlgorithm, CbcAlgorithm, CbcCipher,
-    CryptoAlgorithm, CryptoError, HashAlgorithm, HmacAlgorithm, KeyExchangeAlgorithm, Mac,
-    PublicKey, PublicKeyEncoding, RTCCrypto, RTCCryptoProvider, RTCRandom, SecretVec,
-    SignatureScheme, SigningKey, StreamCipher, StreamCipherAlgorithm, constant_time_eq,
+    CryptoAlgorithm, CryptoError, HEADER_MASK_LEN, HEADER_MASK_SAMPLE_LEN, HashAlgorithm,
+    HeaderMask, HeaderMaskAlgorithm, HmacAlgorithm, KeyExchangeAlgorithm, Mac, PublicKey,
+    PublicKeyEncoding, RTCCrypto, RTCCryptoProvider, RTCRandom, SecretVec, SignatureScheme,
+    SigningKey, StreamCipher, StreamCipherAlgorithm, constant_time_eq,
 };
 
 /// The built-in AWS-LC-RS provider bundle.
@@ -63,26 +64,42 @@ impl RTCCrypto for AwsLcRsCrypto {
     fn supports(&self, algorithm: CryptoAlgorithm) -> bool {
         matches!(
             algorithm,
-            CryptoAlgorithm::Hash(HashAlgorithm::Md5 | HashAlgorithm::Sha256)
-                | CryptoAlgorithm::Hmac(HmacAlgorithm::Sha1 | HmacAlgorithm::Sha256)
-                | CryptoAlgorithm::Aead(
-                    AeadAlgorithm::Aes128Gcm
-                        | AeadAlgorithm::Aes256Gcm
-                        | AeadAlgorithm::Aes128Ccm
-                        | AeadAlgorithm::Aes128Ccm8
-                        | AeadAlgorithm::ChaCha20Poly1305,
-                )
-                | CryptoAlgorithm::StreamCipher(
-                    StreamCipherAlgorithm::Aes128Ctr | StreamCipherAlgorithm::Aes256Ctr,
-                )
-                | CryptoAlgorithm::BlockCipher(
-                    BlockCipherAlgorithm::Aes128 | BlockCipherAlgorithm::Aes256,
-                )
-                | CryptoAlgorithm::Cbc(CbcAlgorithm::Aes256Cbc)
+            CryptoAlgorithm::Hash(
+                HashAlgorithm::Md5
+                    | HashAlgorithm::Sha256
+                    | HashAlgorithm::Sha1
+                    | HashAlgorithm::Sha224
+                    | HashAlgorithm::Sha384
+                    | HashAlgorithm::Sha512
+            ) | CryptoAlgorithm::Hmac(
+                HmacAlgorithm::Sha1
+                    | HmacAlgorithm::Sha256
+                    | HmacAlgorithm::Sha384
+                    | HmacAlgorithm::Sha512
+            ) | CryptoAlgorithm::HeaderMask(
+                HeaderMaskAlgorithm::Aes128
+                    | HeaderMaskAlgorithm::Aes256
+                    | HeaderMaskAlgorithm::ChaCha20
+            ) | CryptoAlgorithm::Aead(
+                AeadAlgorithm::Aes128Gcm
+                    | AeadAlgorithm::Aes256Gcm
+                    | AeadAlgorithm::Aes128Ccm
+                    | AeadAlgorithm::Aes128Ccm8
+                    | AeadAlgorithm::ChaCha20Poly1305,
+            ) | CryptoAlgorithm::StreamCipher(
+                StreamCipherAlgorithm::Aes128Ctr
+                    | StreamCipherAlgorithm::Aes256Ctr
+                    | StreamCipherAlgorithm::Aes192Ctr,
+            ) | CryptoAlgorithm::BlockCipher(
+                BlockCipherAlgorithm::Aes128
+                    | BlockCipherAlgorithm::Aes256
+                    | BlockCipherAlgorithm::Aes192,
+            ) | CryptoAlgorithm::Cbc(CbcAlgorithm::Aes256Cbc)
                 | CryptoAlgorithm::KeyExchange(
                     KeyExchangeAlgorithm::P256
                         | KeyExchangeAlgorithm::P384
-                        | KeyExchangeAlgorithm::X25519,
+                        | KeyExchangeAlgorithm::X25519
+                        | KeyExchangeAlgorithm::X25519MlKem768,
                 )
                 | CryptoAlgorithm::Signature(
                     SignatureScheme::Ed25519
@@ -92,7 +109,10 @@ impl RTCCrypto for AwsLcRsCrypto {
                         | SignatureScheme::RsaPkcs1Sha1
                         | SignatureScheme::RsaPkcs1Sha256
                         | SignatureScheme::RsaPkcs1Sha384
-                        | SignatureScheme::RsaPkcs1Sha512,
+                        | SignatureScheme::RsaPkcs1Sha512
+                        | SignatureScheme::RsaPssSha256
+                        | SignatureScheme::RsaPssSha384
+                        | SignatureScheme::RsaPssSha512,
                 )
                 | CryptoAlgorithm::SigningKeyGeneration(
                     SignatureScheme::Ed25519 | SignatureScheme::EcdsaP256Sha256,
@@ -109,6 +129,12 @@ impl RTCCrypto for AwsLcRsCrypto {
         match algorithm {
             HashAlgorithm::Md5 => Ok(common::md5(data)),
             HashAlgorithm::Sha256 => Ok(digest::digest(&digest::SHA256, data).as_ref().to_vec()),
+            HashAlgorithm::Sha1 => Ok(digest::digest(&digest::SHA1_FOR_LEGACY_USE_ONLY, data)
+                .as_ref()
+                .to_vec()),
+            HashAlgorithm::Sha224 => Ok(digest::digest(&digest::SHA224, data).as_ref().to_vec()),
+            HashAlgorithm::Sha384 => Ok(digest::digest(&digest::SHA384, data).as_ref().to_vec()),
+            HashAlgorithm::Sha512 => Ok(digest::digest(&digest::SHA512, data).as_ref().to_vec()),
         }
     }
 
@@ -149,6 +175,22 @@ impl RTCCrypto for AwsLcRsCrypto {
         }
     }
 
+    fn new_header_mask(
+        &self,
+        algorithm: HeaderMaskAlgorithm,
+        key: &[u8],
+    ) -> Result<Box<dyn HeaderMask>, CryptoError> {
+        common::check_key_len(algorithm.key_len(), key.len())?;
+        let backend_algorithm = match algorithm {
+            HeaderMaskAlgorithm::Aes128 => &aead::quic::AES_128,
+            HeaderMaskAlgorithm::Aes256 => &aead::quic::AES_256,
+            HeaderMaskAlgorithm::ChaCha20 => &aead::quic::CHACHA20,
+        };
+        let key = aead::quic::HeaderProtectionKey::new(backend_algorithm, key)
+            .map_err(|_| CryptoError::InvalidPrivateKey)?;
+        Ok(Box::new(AwsLcRsHeaderMask { key }))
+    }
+
     fn new_cbc(
         &self,
         algorithm: CbcAlgorithm,
@@ -161,7 +203,24 @@ impl RTCCrypto for AwsLcRsCrypto {
         &self,
         algorithm: KeyExchangeAlgorithm,
     ) -> Result<Box<dyn ActiveKeyExchange>, CryptoError> {
+        if algorithm == KeyExchangeAlgorithm::X25519MlKem768 {
+            return HybridKeyExchange::start();
+        }
         AwsLcRsKeyExchange::start(algorithm)
+    }
+
+    fn key_exchange_respond(
+        &self,
+        algorithm: KeyExchangeAlgorithm,
+        peer_share: &[u8],
+    ) -> Result<(Vec<u8>, SecretVec), CryptoError> {
+        if algorithm == KeyExchangeAlgorithm::X25519MlKem768 {
+            return HybridKeyExchange::respond(peer_share);
+        }
+        let exchange = self.start_key_exchange(algorithm)?;
+        let share = exchange.public_key().to_vec();
+        let secret = exchange.complete(peer_share)?;
+        Ok((share, secret))
     }
 
     fn generate_signing_key(
@@ -233,6 +292,26 @@ fn hmac_algorithm(algorithm: HmacAlgorithm) -> hmac::Algorithm {
     match algorithm {
         HmacAlgorithm::Sha1 => hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY,
         HmacAlgorithm::Sha256 => hmac::HMAC_SHA256,
+        HmacAlgorithm::Sha512 => hmac::HMAC_SHA512,
+        HmacAlgorithm::Sha384 => hmac::HMAC_SHA384,
+    }
+}
+
+/// A record-number mask generator on the backend's QUIC header-protection key, which is the
+/// computation RFC 9147 section 4.2.3 defines (AES-ECB of the sample, or the ChaCha20 block
+/// function keyed by it).
+struct AwsLcRsHeaderMask {
+    key: aead::quic::HeaderProtectionKey,
+}
+
+impl HeaderMask for AwsLcRsHeaderMask {
+    fn mask(
+        &mut self,
+        sample: &[u8; HEADER_MASK_SAMPLE_LEN],
+    ) -> Result<[u8; HEADER_MASK_LEN], CryptoError> {
+        self.key
+            .new_mask(sample)
+            .map_err(|_| CryptoError::Provider("header mask generation failed".into()))
     }
 }
 
@@ -300,6 +379,114 @@ impl AeadCipher for AwsLcRsAead {
             .open_in_place_separate_tag(nonce, aead::Aad::from(aad), tag, ciphertext_and_plaintext)
             .map(|_| ())
             .map_err(|_| CryptoError::AuthenticationFailed)
+    }
+}
+
+/// The lengths of X25519MLKEM768 (draft-ietf-tls-ecdhe-mlkem section 4.2).
+const ML_KEM_768_ENCAPSULATION_KEY_LEN: usize = 1184;
+const ML_KEM_768_CIPHERTEXT_LEN: usize = 1088;
+const X25519_LEN: usize = 32;
+
+/// The initiator's half of X25519MLKEM768: an ML-KEM-768 decapsulation key and an X25519
+/// private key. Its share is the encapsulation key followed by the X25519 public key.
+struct HybridKeyExchange {
+    decapsulation_key: aws_lc_rs::kem::DecapsulationKey,
+    x25519: agreement::PrivateKey,
+    share: Vec<u8>,
+}
+
+impl HybridKeyExchange {
+    fn failure(what: &'static str) -> CryptoError {
+        CryptoError::Provider(what.into())
+    }
+
+    fn start() -> Result<Box<dyn ActiveKeyExchange>, CryptoError> {
+        let decapsulation_key =
+            aws_lc_rs::kem::DecapsulationKey::generate(&aws_lc_rs::kem::ML_KEM_768)
+                .map_err(|_| CryptoError::RandomnessFailed)?;
+        let encapsulation_key = decapsulation_key
+            .encapsulation_key()
+            .and_then(|key| key.key_bytes())
+            .map_err(|_| Self::failure("ML-KEM key generation failed"))?;
+        let x25519 = agreement::PrivateKey::generate(&agreement::X25519)
+            .map_err(|_| CryptoError::RandomnessFailed)?;
+        let x25519_public = x25519
+            .compute_public_key()
+            .map_err(|_| Self::failure("key exchange public-key generation failed"))?;
+        let mut share = encapsulation_key.as_ref().to_vec();
+        share.extend_from_slice(x25519_public.as_ref());
+        Ok(Box::new(Self {
+            decapsulation_key,
+            x25519,
+            share,
+        }))
+    }
+
+    /// The responder's half: encapsulates to the initiator's ML-KEM key and agrees with its
+    /// X25519 key. The share is the ciphertext followed by an X25519 public key, the secret
+    /// the ML-KEM shared secret followed by the X25519 one.
+    fn respond(peer_share: &[u8]) -> Result<(Vec<u8>, SecretVec), CryptoError> {
+        if peer_share.len() != ML_KEM_768_ENCAPSULATION_KEY_LEN + X25519_LEN {
+            return Err(CryptoError::InvalidPublicKey);
+        }
+        let (encapsulation_key, peer_x25519) =
+            peer_share.split_at(ML_KEM_768_ENCAPSULATION_KEY_LEN);
+        let encapsulation_key =
+            aws_lc_rs::kem::EncapsulationKey::new(&aws_lc_rs::kem::ML_KEM_768, encapsulation_key)
+                .map_err(|_| CryptoError::InvalidPublicKey)?;
+        let (ciphertext, kem_secret) = encapsulation_key
+            .encapsulate()
+            .map_err(|_| CryptoError::InvalidPublicKey)?;
+        let x25519 = agreement::PrivateKey::generate(&agreement::X25519)
+            .map_err(|_| CryptoError::RandomnessFailed)?;
+        let x25519_public = x25519
+            .compute_public_key()
+            .map_err(|_| Self::failure("key exchange public-key generation failed"))?;
+        let mut secret = kem_secret.as_ref().to_vec();
+        agreement::agree(
+            &x25519,
+            agreement::UnparsedPublicKey::new(&agreement::X25519, peer_x25519),
+            CryptoError::InvalidPublicKey,
+            |x25519_secret| {
+                secret.extend_from_slice(x25519_secret);
+                Ok(())
+            },
+        )?;
+        let mut share = ciphertext.as_ref().to_vec();
+        share.extend_from_slice(x25519_public.as_ref());
+        Ok((share, SecretVec::new(secret)))
+    }
+}
+
+impl ActiveKeyExchange for HybridKeyExchange {
+    fn algorithm(&self) -> KeyExchangeAlgorithm {
+        KeyExchangeAlgorithm::X25519MlKem768
+    }
+
+    fn public_key(&self) -> &[u8] {
+        &self.share
+    }
+
+    fn complete(self: Box<Self>, peer_share: &[u8]) -> Result<SecretVec, CryptoError> {
+        if peer_share.len() != ML_KEM_768_CIPHERTEXT_LEN + X25519_LEN {
+            return Err(CryptoError::InvalidPublicKey);
+        }
+        let (ciphertext, peer_x25519) = peer_share.split_at(ML_KEM_768_CIPHERTEXT_LEN);
+        let kem_secret = self
+            .decapsulation_key
+            .decapsulate(ciphertext.into())
+            .map_err(|_| CryptoError::InvalidPublicKey)?;
+        let mut secret = kem_secret.as_ref().to_vec();
+        agreement::agree(
+            &self.x25519,
+            agreement::UnparsedPublicKey::new(&agreement::X25519, peer_x25519),
+            CryptoError::InvalidPublicKey,
+            |x25519_secret| {
+                secret.extend_from_slice(x25519_secret);
+                Ok(())
+            },
+        )?;
+        Ok(SecretVec::new(secret))
     }
 }
 
@@ -438,7 +625,16 @@ impl AwsLcRsSigningKey {
 
 impl SigningKey for AwsLcRsSigningKey {
     fn supports(&self, scheme: SignatureScheme) -> bool {
+        // An RSA key with the rsaEncryption OID signs PKCS#1 v1.5 and RSASSA-PSS alike
+        // (RFC 8446 section 4.2.3, the rsa_pss_rsae schemes).
         self.scheme == scheme
+            || (matches!(self.kind, AwsLcRsSigningKeyKind::Rsa(_))
+                && matches!(
+                    scheme,
+                    SignatureScheme::RsaPssSha256
+                        | SignatureScheme::RsaPssSha384
+                        | SignatureScheme::RsaPssSha512
+                ))
     }
 
     fn public_key(&self) -> PublicKey<'_> {
@@ -461,14 +657,15 @@ impl SigningKey for AwsLcRsSigningKey {
                 .map(|signature| signature.as_ref().to_vec())
                 .map_err(|_| CryptoError::Provider("signature generation failed".into())),
             AwsLcRsSigningKeyKind::Rsa(key) => {
+                let encoding: &'static dyn signature::RsaEncoding = match scheme {
+                    SignatureScheme::RsaPssSha256 => &signature::RSA_PSS_SHA256,
+                    SignatureScheme::RsaPssSha384 => &signature::RSA_PSS_SHA384,
+                    SignatureScheme::RsaPssSha512 => &signature::RSA_PSS_SHA512,
+                    _ => &signature::RSA_PKCS1_SHA256,
+                };
                 let mut signature = vec![0; key.public_modulus_len()];
-                key.sign(
-                    &signature::RSA_PKCS1_SHA256,
-                    &SystemRandom::new(),
-                    message,
-                    &mut signature,
-                )
-                .map_err(|_| CryptoError::Provider("signature generation failed".into()))?;
+                key.sign(encoding, &SystemRandom::new(), message, &mut signature)
+                    .map_err(|_| CryptoError::Provider("signature generation failed".into()))?;
                 Ok(signature)
             }
         }
@@ -483,7 +680,9 @@ fn agreement_algorithm(algorithm: KeyExchangeAlgorithm) -> &'static agreement::A
     match algorithm {
         KeyExchangeAlgorithm::P256 => &agreement::ECDH_P256,
         KeyExchangeAlgorithm::P384 => &agreement::ECDH_P384,
-        KeyExchangeAlgorithm::X25519 => &agreement::X25519,
+        // The hybrid has its own type (`HybridKeyExchange`); its Diffie-Hellman half is
+        // X25519.
+        KeyExchangeAlgorithm::X25519 | KeyExchangeAlgorithm::X25519MlKem768 => &agreement::X25519,
     }
 }
 
@@ -503,6 +702,9 @@ fn verification_algorithm(
         SignatureScheme::RsaPkcs1Sha512 => {
             &signature::RSA_PKCS1_1024_8192_SHA512_FOR_LEGACY_USE_ONLY
         }
+        SignatureScheme::RsaPssSha256 => &signature::RSA_PSS_2048_8192_SHA256,
+        SignatureScheme::RsaPssSha384 => &signature::RSA_PSS_2048_8192_SHA384,
+        SignatureScheme::RsaPssSha512 => &signature::RSA_PSS_2048_8192_SHA512,
     }
 }
 
@@ -523,7 +725,10 @@ fn verify_public_key_encoding(
                 SignatureScheme::RsaPkcs1Sha1
                     | SignatureScheme::RsaPkcs1Sha256
                     | SignatureScheme::RsaPkcs1Sha384
-                    | SignatureScheme::RsaPkcs1Sha512,
+                    | SignatureScheme::RsaPkcs1Sha512
+                    | SignatureScheme::RsaPssSha256
+                    | SignatureScheme::RsaPssSha384
+                    | SignatureScheme::RsaPssSha512,
                 PublicKeyEncoding::RsaPkcs1Der
             )
     );

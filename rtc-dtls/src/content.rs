@@ -25,6 +25,9 @@ pub enum ContentType {
     #[default]
     /// A content type this crate does not recognise.
     Invalid,
+    /// `tls12_cid` (`25`, RFC 9146): a protected DTLS 1.2 record that carries a connection
+    /// id, with the real content type inside its protection.
+    Tls12Cid = 25,
 }
 
 impl From<u8> for ContentType {
@@ -34,6 +37,7 @@ impl From<u8> for ContentType {
             21 => ContentType::Alert,
             22 => ContentType::Handshake,
             23 => ContentType::ApplicationData,
+            25 => ContentType::Tls12Cid,
             _ => ContentType::Invalid,
         }
     }

@@ -7,7 +7,7 @@ fn test_channel_data_encode() -> Result<()> {
         number: ChannelNumber(MIN_CHANNEL_NUMBER + 1),
         ..Default::default()
     };
-    d.encode();
+    d.encode()?;
 
     let mut b = ChannelData::default();
     b.raw.extend_from_slice(&d.raw);
@@ -135,7 +135,7 @@ fn test_channel_data_reset() -> Result<()> {
         number: ChannelNumber(MIN_CHANNEL_NUMBER + 1),
         ..Default::default()
     };
-    d.encode();
+    d.encode()?;
     let mut buf = vec![0; d.raw.len()];
     buf.copy_from_slice(&d.raw);
     d.reset();
@@ -193,7 +193,7 @@ fn test_chrome_channel_data() -> Result<()> {
             number: m.number,
             ..Default::default()
         };
-        encoded.encode();
+        encoded.encode()?;
 
         let mut decoded = ChannelData {
             raw: encoded.raw.clone(),

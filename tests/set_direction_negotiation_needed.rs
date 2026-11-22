@@ -45,8 +45,14 @@ fn test_set_direction_updates_negotiation_needed_flag() -> Result<(), Box<dyn st
         .build(Instant::now())?;
 
     // Add one video transceiver on each side (defaults to "recvonly").
-    let transceiver_id = offerer.add_transceiver_from_kind(RtpCodecKind::Video, None)?;
-    answerer.add_transceiver_from_kind(RtpCodecKind::Video, None)?;
+    let transceiver_id = offerer.add_transceiver_from_kind(
+        RtpCodecKind::Video,
+        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+    )?;
+    answerer.add_transceiver_from_kind(
+        RtpCodecKind::Video,
+        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+    )?;
 
     // Complete a full offer/answer exchange so the offerer settles back into a
     // stable, idle negotiation state.
@@ -82,7 +88,8 @@ fn test_set_direction_updates_negotiation_needed_flag() -> Result<(), Box<dyn st
     offerer
         .rtp_transceiver(transceiver_id)
         .expect("transceiver should exist")
-        .set_direction(RTCRtpTransceiverDirection::Inactive);
+        .set_direction(RTCRtpTransceiverDirection::Sendrecv)
+        .expect("the change is accepted");
 
     assert_eq!(
         count_negotiation_needed(&mut offerer),
@@ -95,7 +102,8 @@ fn test_set_direction_updates_negotiation_needed_flag() -> Result<(), Box<dyn st
     offerer
         .rtp_transceiver(transceiver_id)
         .expect("transceiver should exist")
-        .set_direction(RTCRtpTransceiverDirection::Inactive);
+        .set_direction(RTCRtpTransceiverDirection::Sendrecv)
+        .expect("the change is accepted");
 
     assert_eq!(
         count_negotiation_needed(&mut offerer),

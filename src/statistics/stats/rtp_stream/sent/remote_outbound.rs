@@ -5,7 +5,6 @@
 
 use super::RTCSentRtpStreamStats;
 use ::serde::{Deserialize, Serialize};
-use shared::serde::instant_to_epoch;
 use shared::time::SystemInstant;
 
 /// Statistics for a remote outbound RTP stream.
@@ -31,11 +30,17 @@ pub struct RTCRemoteOutboundRtpStreamStats {
     /// References an [`RTCInboundRtpStreamStats`](super::super::received::inbound::RTCInboundRtpStreamStats) object.
     pub local_id: String,
 
-    /// The remote timestamp from the RTCP SR.
+    /// When the remote endpoint sent these statistics, on its own clock: the NTP timestamp of
+    /// the latest RTCP sender report, as epoch milliseconds.
     ///
-    /// This is the NTP timestamp from the sender report.
-    #[serde(with = "instant_to_epoch")]
-    pub remote_timestamp: SystemInstant,
+    /// `None`, and left out of the JSON, when that timestamp is before 1970: the sender has no
+    /// wall-clock time and put something else there (RFC 3550 section 6.4.1).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::statistics::stats::optional_instant_to_epoch"
+    )]
+    pub remote_timestamp: Option<SystemInstant>,
 
     /// Number of RTCP Sender Reports sent.
     pub reports_sent: u64,

@@ -52,8 +52,32 @@ pub(crate) const DEFAULT_LOCAL_PREFERENCE: u16 = 65535;
 
 /// Indicates that the candidate is used for RTP.
 pub(crate) const COMPONENT_RTP: u16 = 1;
-/// Indicates that the candidate is used for RTCP.
-pub(crate) const COMPONENT_RTCP: u16 = 0;
+/// Indicates that the candidate is used for RTCP (RFC 8445 Section 5.1.1.1: component 2).
+pub(crate) const COMPONENT_RTCP: u16 = 2;
+
+/// The largest candidate priority (RFC 8445 Section 5.1.2: 1 to 2^31 - 1).
+pub(crate) const MAX_CANDIDATE_PRIORITY: u32 = (1 << 31) - 1;
+
+/// The component and priority of a candidate being constructed, checked against RFC 8445
+/// Sections 5.1.2 and 5.1.2.1: a component is 1 to 256 (0, the `Default`, means RTP, 1), and a
+/// given priority is at most 2^31 - 1 (0 means "compute it").
+pub(crate) fn checked_component_and_priority(config: &CandidateConfig) -> Result<u16> {
+    if config.priority > MAX_CANDIDATE_PRIORITY {
+        return Err(Error::Other(format!(
+            "{:?}: priority {} is above 2^31 - 1",
+            Error::ErrParsePriority,
+            config.priority
+        )));
+    }
+    match config.component {
+        0 => Ok(COMPONENT_RTP),
+        1..=256 => Ok(config.component),
+        other => Err(Error::Other(format!(
+            "{:?}: component {other} is outside 1..=256",
+            Error::ErrParseComponent
+        ))),
+    }
+}
 
 /// Represents the type of candidate `CandidateType` enum.
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -201,6 +225,13 @@ pub struct Candidate {
 
     pub(crate) foundation_override: String,
     pub(crate) priority_override: u32,
+    /// Where this candidate stands among the local candidates of its type (0 is the most
+    /// preferred): the local preference is the largest value less this rank. `None` until the
+    /// application or the agent ranks it. See [`Candidate::set_local_preference_rank`].
+    pub(crate) local_preference_rank: Option<u16>,
+    /// The related address (the base) is a host address hidden behind an mDNS name: it is
+    /// not signalled. See [`Candidate::signalled_related_address`].
+    pub(crate) hide_related_address: bool,
 
     pub(crate) network: String,
 
@@ -229,6 +260,8 @@ impl Default for Candidate {
 
             foundation_override: String::new(),
             priority_override: 0,
+            local_preference_rank: None,
+            hide_related_address: false,
             network: String::new(),
 
             url: None,
@@ -263,19 +296,36 @@ impl fmt::Display for Candidate {
 }
 
 impl Candidate {
-    /// The candidate's foundation, computed from its type, base address and transport.
+    /// The candidate's foundation (RFC 8445 Section 5.1.1.3): two candidates have the same one
+    /// when they have the same type, their bases have the same IP address (ports may differ),
+    /// they came from the same STUN or TURN server (reflexive and relayed ones) and they use
+    /// the same transport protocol.
     ///
-    /// A foundation groups equivalent candidates; it is deterministic bookkeeping rather than a
-    /// secret, random identifier. CRC-32C is therefore intentional here.
+    /// A host candidate's base is itself (an mDNS name stands for its address); a reflexive
+    /// candidate's base is its related address; a relayed candidate's base is the relayed
+    /// address. A foundation groups equivalent candidates; it is deterministic bookkeeping
+    /// rather than a secret, random identifier. CRC-32C is therefore intentional here.
     pub fn foundation(&self) -> String {
         if !self.foundation_override.is_empty() {
             return self.foundation_override.clone();
         }
 
+        let base = match (self.candidate_type, &self.related_address) {
+            (CandidateType::ServerReflexive | CandidateType::PeerReflexive, Some(related))
+                if !related.address.is_empty() =>
+            {
+                related.address.as_str()
+            }
+            _ => self.address.as_str(),
+        };
+
         let mut buf = vec![];
         buf.extend_from_slice(self.candidate_type().to_string().as_bytes());
-        buf.extend_from_slice(self.address.as_bytes());
+        buf.extend_from_slice(base.as_bytes());
         buf.extend_from_slice(self.network_type().to_string().as_bytes());
+        if let Some(url) = &self.url {
+            buf.extend_from_slice(url.as_bytes());
+        }
 
         let checksum = Crc::<u32>::new(&CRC_32_ISCSI).checksum(&buf);
 
@@ -343,6 +393,14 @@ impl Candidate {
             + 256u32.saturating_sub(u32::from(self.component()))
     }
 
+    /// The priority this candidate would have as a peer-reflexive one: the value of the
+    /// PRIORITY attribute in a connectivity check sent from it (RFC 8445 Section 7.1.1). The
+    /// peer-reflexive type preference, with this candidate's local preference and component.
+    pub fn peer_reflexive_priority(&self) -> u32 {
+        (u32::from(CandidateType::PeerReflexive.preference()) << 24)
+            | (self.priority() & 0x00ff_ffff)
+    }
+
     /// Returns `Option<CandidateRelatedAddress>`.
     pub fn related_address(&self) -> Option<CandidateRelatedAddress> {
         self.related_address.as_ref().cloned()
@@ -356,6 +414,12 @@ impl Candidate {
     /// The TCP role for ICE-TCP candidates; `Unspecified` for UDP.
     pub fn tcp_type(&self) -> TcpType {
         self.tcp_type
+    }
+
+    /// Sets the TCP role of an ICE-TCP candidate of any type (RFC 6544 Section 4.5: every TCP
+    /// candidate is signalled with a `tcptype`).
+    pub fn set_tcp_type(&mut self, tcp_type: TcpType) {
+        self.tcp_type = tcp_type;
     }
 
     /// The STUN or TURN server this candidate was gathered from, if any.
@@ -376,11 +440,9 @@ impl Candidate {
             self.candidate_type()
         );
 
-        if self.tcp_type != TcpType::Unspecified {
-            val += format!(" tcptype {}", self.tcp_type()).as_str();
-        }
-
-        if let Some(related_address) = self.related_address() {
+        // RFC 8839 Section 5.1: rel-addr and rel-port come before the extension attributes,
+        // of which `tcptype` (RFC 6544 Section 4.5) is one, for every candidate type.
+        if let Some(related_address) = self.signalled_related_address() {
             val += format!(
                 " raddr {} rport {}",
                 related_address.address, related_address.port,
@@ -388,7 +450,30 @@ impl Candidate {
             .as_str();
         }
 
+        if self.tcp_type != TcpType::Unspecified {
+            val += format!(" tcptype {}", self.tcp_type()).as_str();
+        }
+
         val
+    }
+
+    /// The related address to signal and to show in statistics: the candidate's own, or,
+    /// when its base is a host address hidden behind an mDNS name, `0.0.0.0` (`::`) and port
+    /// 9 (draft-ietf-mmusic-mdns-ice-candidates Section 3.1.2.2: "the agent MUST set the
+    /// rel-addr and rel-port fields of the candidate to 0.0.0.0/:: and 9").
+    pub fn signalled_related_address(&self) -> Option<CandidateRelatedAddress> {
+        let related = self.related_address()?;
+        if !self.hide_related_address {
+            return Some(related);
+        }
+        Some(CandidateRelatedAddress {
+            address: if self.network_type().is_ipv6() {
+                "::".to_owned()
+            } else {
+                "0.0.0.0".to_owned()
+            },
+            port: 9,
+        })
     }
 
     /// The candidate's socket address.
@@ -494,8 +579,26 @@ impl Candidate {
         self.last_sent = Some(now);
     }
 
+    /// Ranks this candidate among the local candidates of its type: 0 is the most preferred
+    /// (local preference 65535 for UDP, other-pref 8191 for TCP), each further rank one less.
+    ///
+    /// RFC 8445 Section 5.1.2.1 wants a unique local preference for each candidate of a type,
+    /// and RFC 8421 wants candidates from an unreliable interface last. A candidate the
+    /// application does not rank (and gives no priority) is ranked by
+    /// [`Agent::add_local_candidate`](crate::Agent::add_local_candidate), in the order it is
+    /// added, IPv4 and IPv6 interleaved.
+    pub fn set_local_preference_rank(&mut self, rank: u16) {
+        self.local_preference_rank = Some(rank);
+    }
+
+    /// The rank set by [`Candidate::set_local_preference_rank`] or by the agent.
+    pub fn local_preference_rank(&self) -> Option<u16> {
+        self.local_preference_rank
+    }
+
     /// Returns the local preference for this candidate.
     pub fn local_preference(&self) -> u16 {
+        let rank = self.local_preference_rank.unwrap_or(0);
         if self.network_type().is_tcp() {
             // RFC 6544, section 4.2
             //
@@ -532,7 +635,7 @@ impl Candidate {
             // other-pref is the preference for the particular IP address from which
             // the candidate was obtained.  When there is only a single IP address,
             // this value SHOULD be set to the maximum allowed value (8191).
-            let other_pref: u16 = 8191;
+            let other_pref: u16 = 8191u16.saturating_sub(rank);
 
             let direction_pref: u16 = match self.candidate_type() {
                 CandidateType::Host | CandidateType::Relay => match self.tcp_type() {
@@ -554,7 +657,7 @@ impl Candidate {
 
             (1 << 13) * direction_pref + other_pref
         } else {
-            DEFAULT_LOCAL_PREFERENCE
+            DEFAULT_LOCAL_PREFERENCE.saturating_sub(rank)
         }
     }
 }
@@ -602,7 +705,7 @@ pub fn unmarshal_candidate(raw: &str) -> Result<Candidate> {
     let mut tcp_type = TcpType::Unspecified;
 
     if split.len() > 8 {
-        let split2 = &split[8..];
+        let mut split2 = &split[8..];
 
         if split2[0] == "raddr" {
             if split2.len() < 4 {
@@ -617,15 +720,21 @@ pub fn unmarshal_candidate(raw: &str) -> Result<Candidate> {
 
             // RelatedPort
             rel_port = split2[3].parse()?;
-        } else if split2[0] == "tcptype" {
-            if split2.len() < 2 {
-                return Err(Error::Other(format!(
-                    "{:?}: incorrect length",
-                    Error::ErrParseType
-                )));
-            }
+            split2 = &split2[4..];
+        }
 
-            tcp_type = TcpType::from(split2[1]);
+        // The extension attributes are name / value pairs in any order (RFC 8839 Section
+        // 5.1); `tcptype` (RFC 6544 Section 4.5) is one of them, for every candidate type.
+        for extension in split2.chunks(2) {
+            if extension[0] == "tcptype" {
+                if extension.len() < 2 {
+                    return Err(Error::Other(format!(
+                        "{:?}: incorrect length",
+                        Error::ErrParseType
+                    )));
+                }
+                tcp_type = TcpType::from(extension[1]);
+            }
         }
     }
 
@@ -660,7 +769,10 @@ pub fn unmarshal_candidate(raw: &str) -> Result<Candidate> {
                 rel_port,
                 url: None,
             };
-            config.new_candidate_server_reflexive()
+            config.new_candidate_server_reflexive().map(|mut c| {
+                c.tcp_type = tcp_type;
+                c
+            })
         }
         "prflx" => {
             let config = CandidatePeerReflexiveConfig {
@@ -677,7 +789,10 @@ pub fn unmarshal_candidate(raw: &str) -> Result<Candidate> {
                 rel_port,
             };
 
-            config.new_candidate_peer_reflexive()
+            config.new_candidate_peer_reflexive().map(|mut c| {
+                c.tcp_type = tcp_type;
+                c
+            })
         }
         "relay" => {
             let config = CandidateRelayConfig {
@@ -694,7 +809,10 @@ pub fn unmarshal_candidate(raw: &str) -> Result<Candidate> {
                 rel_port,
                 url: None,
             };
-            config.new_candidate_relay()
+            config.new_candidate_relay().map(|mut c| {
+                c.tcp_type = tcp_type;
+                c
+            })
         }
         _ => Err(Error::Other(format!(
             "{:?} ({})",

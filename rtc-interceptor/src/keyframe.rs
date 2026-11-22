@@ -3,11 +3,11 @@
 use crate::Interceptor;
 use crate::stream_info::StreamInfo;
 use crate::{Attribute, Packet, TaggedPacket};
-use rtcp::payload_feedbacks::full_intra_request::FullIntraRequest;
+use rtcp::payload_feedbacks::full_intra_request::{FirEntry, FullIntraRequest};
 use rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 use sansio::Protocol;
 use shared::error::Error;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
 
 /// Marks inbound RTCP that asks for a key frame — a Picture Loss Indication (RFC 4585 §6.3.1) or
@@ -23,6 +23,15 @@ use std::time::Instant;
 /// asks again and again while the sender never hears it, and the picture stays broken until the
 /// next scheduled key frame. So the requests are delivered: the application reads them as
 /// `RTCMessage::RtcpPacket` (the whole compound packet the request arrived in).
+///
+/// # Repeated full intra requests
+///
+/// A FIR is a command with a sequence number (RFC 5104 section 4.3.1): the requester repeats
+/// it, with the same number, until it sees the key frame, and "the encoder ... does not need
+/// to act on a repetition". An FCI entry whose command sequence number is the one last seen
+/// from that requester for that stream is a repetition and is not delivered again; a FIR left
+/// with no entry is taken out of the compound packet. A PLI has no sequence number and is
+/// always delivered.
 ///
 /// # Where it goes
 ///
@@ -43,9 +52,14 @@ use std::time::Instant;
 /// ```
 #[derive(Default)]
 pub struct KeyFrameRequestInterceptor {
+    /// The last FIR command sequence number seen, by (requester SSRC, target SSRC).
+    fir_commands: HashMap<(u32, u32), u8>,
     reads: VecDeque<TaggedPacket>,
     writes: VecDeque<TaggedPacket>,
 }
+
+/// The most (requester, target) pairs whose last FIR command is remembered.
+const MAX_FIR_COMMANDS: usize = 1024;
 
 impl KeyFrameRequestInterceptor {
     /// An interceptor that delivers inbound PLI and FIR.
@@ -63,6 +77,124 @@ fn asks_for_key_frame(packets: &[Box<dyn rtcp::Packet>]) -> bool {
     })
 }
 
+impl KeyFrameRequestInterceptor {
+    /// Takes the repetitions out of the FIRs of a compound packet (RFC 5104 4.3.1.2): an
+    /// entry is new when its command sequence number differs from the last one this
+    /// requester sent for that stream.
+    fn drop_repeated_firs(&mut self, packets: &mut Vec<Box<dyn rtcp::Packet>>) {
+        if !packets
+            .iter()
+            .any(|packet| packet.as_any().is::<FullIntraRequest>())
+        {
+            return;
+        }
+        let mut kept: Vec<Box<dyn rtcp::Packet>> = Vec::with_capacity(packets.len());
+        for packet in packets.drain(..) {
+            let Some(fir) = packet.as_any().downcast_ref::<FullIntraRequest>() else {
+                kept.push(packet);
+                continue;
+            };
+            if fir.fir.is_empty() {
+                // Nothing to tell a repetition by; the application gets it as it is.
+                kept.push(packet);
+                continue;
+            }
+            let new_commands: Vec<FirEntry> = fir
+                .fir
+                .iter()
+                .filter(|entry| {
+                    let key = (fir.sender_ssrc, entry.ssrc);
+                    if self.fir_commands.get(&key) == Some(&entry.sequence_number) {
+                        return false;
+                    }
+                    if self.fir_commands.len() >= MAX_FIR_COMMANDS
+                        && !self.fir_commands.contains_key(&key)
+                    {
+                        self.fir_commands.clear();
+                    }
+                    self.fir_commands.insert(key, entry.sequence_number);
+                    true
+                })
+                .cloned()
+                .collect();
+            if new_commands.len() == fir.fir.len() {
+                kept.push(packet);
+            } else if !new_commands.is_empty() {
+                kept.push(Box::new(FullIntraRequest {
+                    sender_ssrc: fir.sender_ssrc,
+                    media_ssrc: fir.media_ssrc,
+                    fir: new_commands,
+                }));
+            }
+        }
+        *packets = kept;
+    }
+}
+
+/// The FIR commands an endpoint sends (RFC 5104 section 4.3.1): each new command for a media
+/// sender takes the next command sequence number (modulo 256), a repetition keeps it, and
+/// the "SSRC of media source" field of the packet is zero, the target being in the FCI.
+///
+/// The application decides when a request is new (it needs another key frame) and when it is
+/// repeating one that has not been answered; this keeps the numbers.
+///
+/// ```
+/// use rtc_interceptor::FirCommands;
+///
+/// let mut commands = FirCommands::new();
+/// let first = commands.request(0x1111, 0x2222);
+/// let again = commands.repeat(0x1111, 0x2222).unwrap();
+/// let next = commands.request(0x1111, 0x2222);
+///
+/// assert_eq!(first.fir[0].sequence_number, again.fir[0].sequence_number);
+/// assert_eq!(
+///     first.fir[0].sequence_number.wrapping_add(1),
+///     next.fir[0].sequence_number
+/// );
+/// assert_eq!(0, first.media_ssrc);
+/// ```
+#[derive(Debug, Default, Clone)]
+pub struct FirCommands {
+    /// The sequence number of the last command sent to each media sender.
+    last: HashMap<u32, u8>,
+}
+
+impl FirCommands {
+    /// No command sent yet.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// A new command for the media sender `media_ssrc`, from `sender_ssrc`.
+    pub fn request(&mut self, sender_ssrc: u32, media_ssrc: u32) -> FullIntraRequest {
+        let sequence_number = match self.last.get(&media_ssrc) {
+            Some(last) => last.wrapping_add(1),
+            None => 0,
+        };
+        self.last.insert(media_ssrc, sequence_number);
+        Self::packet(sender_ssrc, media_ssrc, sequence_number)
+    }
+
+    /// The last command for `media_ssrc` again, or `None` when none was sent.
+    pub fn repeat(&self, sender_ssrc: u32, media_ssrc: u32) -> Option<FullIntraRequest> {
+        self.last
+            .get(&media_ssrc)
+            .map(|&sequence_number| Self::packet(sender_ssrc, media_ssrc, sequence_number))
+    }
+
+    fn packet(sender_ssrc: u32, media_ssrc: u32, sequence_number: u8) -> FullIntraRequest {
+        FullIntraRequest {
+            sender_ssrc,
+            // RFC 5104 4.3.1.2: "SSRC of media source ... SHALL be set to 0".
+            media_ssrc: 0,
+            fir: vec![FirEntry {
+                ssrc: media_ssrc,
+                sequence_number,
+            }],
+        }
+    }
+}
+
 impl Protocol<TaggedPacket, TaggedPacket, ()> for KeyFrameRequestInterceptor {
     type Rout = TaggedPacket;
     type Wout = TaggedPacket;
@@ -71,6 +203,15 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for KeyFrameRequestInterceptor {
     type Time = Instant;
 
     fn handle_read(&mut self, mut msg: TaggedPacket) -> Result<(), Self::Error> {
+        if let Packet::Rtcp(packets) = &mut msg.message.packet
+            && !packets.is_empty()
+        {
+            self.drop_repeated_firs(packets);
+            if packets.is_empty() && msg.message.attributes.is_empty() {
+                // The compound packet was a repeated FIR and nothing else.
+                return Ok(());
+            }
+        }
         if let Packet::Rtcp(packets) = &msg.message.packet
             && asks_for_key_frame(packets)
             && !msg.message.has(&Attribute::DeliverToApplication)
@@ -172,6 +313,128 @@ mod tests {
     #[test]
     fn without_it_the_terminus_swallows_them() {
         assert_eq!(delivered(false, vec![pli()]), 0);
+    }
+
+    fn fir_command(requester: u32, target: u32, sequence_number: u8) -> Box<dyn rtcp::Packet> {
+        Box::new(FullIntraRequest {
+            sender_ssrc: requester,
+            media_ssrc: 0,
+            fir: vec![FirEntry {
+                ssrc: target,
+                sequence_number,
+            }],
+        })
+    }
+
+    /// What the application gets from one chain as `compounds` arrive in turn.
+    fn delivered_in_turn(
+        compounds: Vec<Vec<Box<dyn rtcp::Packet>>>,
+    ) -> Vec<Vec<Box<dyn rtcp::Packet>>> {
+        let mut chain = Registry::new()
+            .with(Slot::KeyFrameRequests, KeyFrameRequestInterceptor::new())
+            .build();
+        let mut out = vec![];
+        for compound in compounds {
+            chain.handle_read(rtcp(compound)).unwrap();
+            let mut got = vec![];
+            while let Some(tagged) = chain.poll_read() {
+                if let Packet::Rtcp(packets) = tagged.message.packet {
+                    got.extend(packets);
+                }
+            }
+            out.push(got);
+        }
+        out
+    }
+
+    /// RFC 5104 4.3.1: a FIR repeated with the same command sequence number is one command.
+    #[test]
+    fn a_repeated_fir_is_delivered_once() {
+        let out = delivered_in_turn(vec![
+            vec![fir_command(1, 2, 7)],
+            vec![fir_command(1, 2, 7)],
+            vec![fir_command(1, 2, 7)],
+            // The next command.
+            vec![fir_command(1, 2, 8)],
+        ]);
+        assert_eq!(
+            vec![1, 0, 0, 1],
+            out.iter().map(Vec::len).collect::<Vec<_>>()
+        );
+    }
+
+    /// The sequence numbers are per requester and per target.
+    #[test]
+    fn fir_commands_are_told_apart_by_requester_and_target() {
+        let out = delivered_in_turn(vec![
+            vec![fir_command(1, 2, 7)],
+            vec![fir_command(9, 2, 7)],
+            vec![fir_command(1, 3, 7)],
+            vec![fir_command(1, 2, 7)],
+        ]);
+        assert_eq!(
+            vec![1, 1, 1, 0],
+            out.iter().map(Vec::len).collect::<Vec<_>>()
+        );
+    }
+
+    /// A repetition is taken out of the compound packet; what stands beside it stays, and a
+    /// FIR that repeats one command and gives another keeps the new one.
+    #[test]
+    fn only_the_repeated_entries_are_dropped() {
+        let both: Box<dyn rtcp::Packet> = Box::new(FullIntraRequest {
+            sender_ssrc: 1,
+            media_ssrc: 0,
+            fir: vec![
+                FirEntry {
+                    ssrc: 2,
+                    sequence_number: 7,
+                },
+                FirEntry {
+                    ssrc: 3,
+                    sequence_number: 1,
+                },
+            ],
+        });
+        let out = delivered_in_turn(vec![
+            vec![fir_command(1, 2, 7)],
+            vec![rr(), fir_command(1, 2, 7), pli()],
+            vec![both],
+        ]);
+        // The PLI keeps the second compound packet deliverable, without the FIR.
+        assert_eq!(2, out[1].len());
+        assert!(out[1].iter().all(|p| !p.as_any().is::<FullIntraRequest>()));
+        let fir = out[2][0]
+            .as_any()
+            .downcast_ref::<FullIntraRequest>()
+            .unwrap();
+        assert_eq!(
+            vec![FirEntry {
+                ssrc: 3,
+                sequence_number: 1
+            }],
+            fir.fir
+        );
+    }
+
+    /// RFC 5104 4.3.1.1: the command sequence number goes up by one, modulo 256, per new
+    /// command, and stays for a repetition.
+    #[test]
+    fn fir_command_numbers_count_new_commands_modulo_256() {
+        let mut commands = FirCommands::new();
+        assert!(commands.repeat(1, 2).is_none());
+        let mut last = commands.request(1, 2).fir[0].sequence_number;
+        for _ in 0..300 {
+            assert_eq!(last, commands.repeat(1, 2).unwrap().fir[0].sequence_number);
+            let next = commands.request(1, 2);
+            assert_eq!(last.wrapping_add(1), next.fir[0].sequence_number);
+            assert_eq!(0, next.media_ssrc);
+            assert_eq!(1, next.sender_ssrc);
+            assert_eq!(2, next.fir[0].ssrc);
+            last = next.fir[0].sequence_number;
+        }
+        // Another stream has its own count.
+        assert_eq!(0, commands.request(1, 3).fir[0].sequence_number);
     }
 
     #[test]

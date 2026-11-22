@@ -7,9 +7,10 @@ use super::overuse::Usage;
 pub enum RateControlState {
     /// Hold the current rate — used immediately after a decrease, so the effect of the backoff can
     /// be observed before changing anything again.
-    #[default]
     Hold,
-    /// Climb, looking for more capacity.
+    /// Climb, looking for more capacity. The state the controller starts in
+    /// (draft-ietf-rmcat-gcc-02 section 5.5).
+    #[default]
     Increase,
     /// Back off.
     Decrease,
@@ -46,6 +47,12 @@ mod tests {
     use super::*;
 
     /// Overuse is urgent: it goes to `Decrease` from anywhere, with no intermediate state.
+    /// draft-ietf-rmcat-gcc-02 section 5.5: "The subsystem starts in the increase state".
+    #[test]
+    fn the_controller_starts_in_the_increase_state() {
+        assert_eq!(RateControlState::Increase, RateControlState::default());
+    }
+
     #[test]
     fn overuse_always_decreases() {
         for state in [

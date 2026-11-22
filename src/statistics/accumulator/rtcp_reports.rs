@@ -48,6 +48,23 @@ impl RTCStatsAccumulator {
     /// * An RFC 8888 report block describes, packet by packet, how the remote received one of
     ///   our outbound streams: ECN marks, losses and recoveries (the remote-inbound object).
     pub(crate) fn on_rtcp_received(&mut self, packets: &[Box<dyn rtcp::Packet>], now: Instant) {
+        // The sender reports first, wherever they stand in the compound packet: a sender
+        // report ends the round trip time its stream had (webrtc-stats 8.10: none "if the
+        // latest SR does not contain the DLRR report block"), and the DLRR block that came
+        // with it, before or after it in the compound, gives the new one below.
+        for packet in packets {
+            if let Some(sr) = packet.as_any().downcast_ref::<SenderReport>()
+                && let Some(stream) = self.inbound_rtp_streams.get_mut(&sr.ssrc)
+            {
+                stream.on_rtcp_sr_received(
+                    u64::from(sr.packet_count),
+                    u64::from(sr.octet_count),
+                    sr.ntp_time,
+                    now,
+                );
+            }
+        }
+
         for packet in packets {
             let packet = packet.as_ref();
             if is_ccfb(packet) {
@@ -57,19 +74,9 @@ impl RTCStatsAccumulator {
             if let Some(ccfb) = packet.as_any().downcast_ref::<CcFeedbackReport>() {
                 for block in &ccfb.report_blocks {
                     if let Some(stream) = self.outbound_rtp_streams.get_mut(&block.media_ssrc) {
-                        stream.on_ccfb_block_received(block);
+                        stream.on_ccfb_block_received(block, now);
                     }
                 }
-            }
-
-            if let Some(sr) = packet.as_any().downcast_ref::<SenderReport>()
-                && let Some(stream) = self.inbound_rtp_streams.get_mut(&sr.ssrc)
-            {
-                stream.on_rtcp_sr_received(
-                    u64::from(sr.packet_count),
-                    u64::from(sr.octet_count),
-                    now,
-                );
             }
 
             for report in reception_reports(packet) {

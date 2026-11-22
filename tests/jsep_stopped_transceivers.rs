@@ -18,8 +18,14 @@ use rtc::sansio::Protocol;
 #[test]
 fn a_stopped_transceiver_without_a_mid_gets_no_section() -> TestResult {
     let mut pc = default_peer()?;
-    let kept = pc.add_transceiver_from_kind(RtpCodecKind::Video, None)?;
-    let stopped = pc.add_transceiver_from_kind(RtpCodecKind::Video, None)?;
+    let kept = pc.add_transceiver_from_kind(
+        RtpCodecKind::Video,
+        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+    )?;
+    let stopped = pc.add_transceiver_from_kind(
+        RtpCodecKind::Video,
+        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+    )?;
     pc.rtp_transceiver(stopped).expect("transceiver").stop()?;
 
     let offer = pc.create_offer(None)?;
@@ -140,7 +146,7 @@ a=rtpmap:96 VP8/90000
             (
                 Some("0".to_owned()),
                 true,
-                RTCRtpTransceiverDirection::Inactive
+                RTCRtpTransceiverDirection::Stopped
             ),
             (
                 Some("1".to_owned()),
@@ -302,13 +308,16 @@ a=rtpmap:96 VP8/90000
     ))
 }
 
-/// Whether `pc` has an `OnTrack` event waiting; drains its events.
+/// Whether `pc` has a W3C track event waiting; drains its events.
 fn fired_track(pc: &mut rtc::peer_connection::RTCPeerConnection) -> bool {
+    use rtc::peer_connection::event::{RTCPeerConnectionEvent, RTCTrackEvent};
     let mut fired = false;
     while let Some(event) = pc.poll_event() {
         if matches!(
             event,
-            rtc::peer_connection::event::RTCPeerConnectionEvent::OnTrack(_)
+            RTCPeerConnectionEvent::OnTrack(
+                RTCTrackEvent::OnRemoteTrack(_) | RTCTrackEvent::OnOpen(_)
+            )
         ) {
             fired = true;
         }

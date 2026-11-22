@@ -140,12 +140,8 @@ impl Chunk for ChunkInit {
             return Err(Error::ErrChunkTypeInitUnmarshalFailed);
         }
 
-        // The Chunk Flags field in INIT is reserved, and all bits in it should
-        // be set to 0 by the sender and ignored by the receiver.  The sequence
-        // of parameters within an INIT can be processed in any order.
-        if header.flags != 0 {
-            return Err(Error::ErrChunkTypeInitFlagZero);
-        }
+        // RFC 9260 3.3.2, 3.3.3: the Chunk Flags field of INIT and INIT ACK is reserved, set
+        // to 0 by the sender and ignored by the receiver.
 
         let reader = &mut raw.slice(CHUNK_HEADER_SIZE..CHUNK_HEADER_SIZE + header.value_length());
 
@@ -281,6 +277,45 @@ impl Chunk for ChunkInit {
 }
 
 impl ChunkInit {
+    /// The extensions this side announces in its INIT or INIT ACK: stream re-configuration
+    /// (RFC 6525) and, with `partial_reliability`, PR-SCTP both ways it can be said: chunk 192
+    /// in Supported Extensions (RFC 5061) and the Forward-TSN-Supported parameter RFC 3758
+    /// section 3.1 defines, which is the one a peer that knows only that RFC reads. With
+    /// `interleaving`, user message interleaving (RFC 8260 2.2.1): the I-DATA chunk, and the
+    /// I-FORWARD-TSN chunk that PR-SCTP needs with it (2.3.1).
+    ///
+    /// With `zero_checksum`, the Zero Checksum Acceptable parameter for SCTP over DTLS (RFC
+    /// 9653 5.1): this side takes packets whose checksum is zero.
+    pub(crate) fn announce_extensions(
+        &mut self,
+        partial_reliability: bool,
+        interleaving: bool,
+        zero_checksum: bool,
+    ) {
+        if zero_checksum {
+            self.params.push(Box::new(
+                crate::param::param_zero_checksum_acceptable::ParamZeroChecksumAcceptable {
+                    edmid: crate::param::param_zero_checksum_acceptable::EDMID_SCTP_OVER_DTLS,
+                },
+            ));
+        }
+        let mut chunk_types = vec![CT_RECONFIG];
+        if partial_reliability {
+            chunk_types.push(CT_FORWARD_TSN);
+            self.params.push(Box::new(
+                crate::param::param_forward_tsn_supported::ParamForwardTsnSupported,
+            ));
+        }
+        if interleaving {
+            chunk_types.push(CT_I_DATA);
+            if partial_reliability {
+                chunk_types.push(CT_I_FORWARD_TSN);
+            }
+        }
+        self.params
+            .push(Box::new(ParamSupportedExtensions { chunk_types }));
+    }
+
     pub(crate) fn set_supported_extensions(&mut self) {
         // RFC5061 https://tools.ietf.org/html/rfc6525#section-5.2
         // An implementation supporting this (Supported Extensions Parameter)

@@ -1,5 +1,9 @@
-//! The controlled agent follows the controlling agent's nominations (RFC 8445 Section 7.3.1.5),
-//! a later one included, and libwebrtc's renomination (`NOMINATION`, highest value wins).
+//! The controlled agent accepts the controlling agent's nominations (RFC 8445 Section
+//! 7.3.1.5). Which nominated pair it uses: by default the one with the highest priority
+//! (Section 8.1.1); with `NominationAcceptance::Latest` the latest one, and libwebrtc's
+//! renomination (`NOMINATION`, highest value wins).
+//!
+//! Why `Latest` exists:
 //!
 //! libwebrtc, controlling, moves a session to another pair after it connects (it gathers on
 //! more interfaces once it has camera / microphone permission): it sends `USE-CANDIDATE` on the
@@ -50,14 +54,33 @@ fn host(addr: SocketAddr) -> Candidate {
 /// A controlled agent with one local candidate and two remote ones, A and B: pairs 0 (to A)
 /// and 1 (to B), both still waiting for their checks.
 fn controlled_agent(base: Instant) -> Agent {
+    agent_accepting(base, NominationAcceptance::Latest, 0, 0)
+}
+
+/// A controlled agent with the given rule and the priorities of its remote candidates A and B
+/// (0: the one the agent computes).
+fn agent_accepting(
+    base: Instant,
+    nomination_acceptance: NominationAcceptance,
+    priority_a: u32,
+    priority_b: u32,
+) -> Agent {
     let config = AgentConfig {
         is_controlling: false,
+        nomination_acceptance,
         ..AgentConfig::default()
+    };
+    let remote = |address: &str, priority: u32| {
+        let mut c = host(addr(address));
+        c.priority_override = priority;
+        c
     };
     let mut a = Agent::new(base, Arc::new(config), provider()).unwrap();
     a.add_local_candidate(host(addr(LOCAL))).unwrap();
-    a.add_remote_candidate(host(addr(REMOTE_A))).unwrap();
-    a.add_remote_candidate(host(addr(REMOTE_B))).unwrap();
+    a.add_remote_candidate(remote(REMOTE_A, priority_a))
+        .unwrap();
+    a.add_remote_candidate(remote(REMOTE_B, priority_b))
+        .unwrap();
     a.set_remote_credentials("remoteufrag".to_owned(), "remotepwd".to_owned())
         .unwrap();
     assert_eq!(a.candidate_pairs.len(), 2);
@@ -66,11 +89,26 @@ fn controlled_agent(base: Instant) -> Agent {
 
 /// `controlled_agent` with both pairs' checks succeeded.
 fn checked_agent(base: Instant) -> Agent {
-    let mut a = controlled_agent(base);
-    for p in &mut a.candidate_pairs {
+    checked(controlled_agent(base))
+}
+
+fn checked(mut a: Agent) -> Agent {
+    for (index, p) in a.candidate_pairs.iter_mut().enumerate() {
         p.state = CandidatePairState::Succeeded;
+        p.valid = true;
+        p.valid_pair = Some(index);
     }
     a
+}
+
+/// The default rule (RFC 8445 Section 8.1.1), B's pair having the higher priority.
+fn rfc_agent(base: Instant) -> Agent {
+    checked(agent_accepting(
+        base,
+        NominationAcceptance::HighestPriority,
+        1000,
+        2000,
+    ))
 }
 
 fn pair_to(a: &Agent, remote: &str) -> usize {
@@ -273,6 +311,8 @@ fn test_nomination_before_the_check_succeeds_applies_when_it_does() {
     let req = peer_request(&a, true, None);
     let request_id = req.transaction_id;
     deliver(&mut a, now, req, REMOTE_B);
+    // The triggered check leaves the queue when Ta allows it: at once here.
+    a.handle_timeout(now).unwrap();
     let out = sent(&mut a);
     assert!(
         out.contains(&(BINDING_SUCCESS, request_id, addr(REMOTE_B))),
@@ -306,6 +346,7 @@ fn test_first_nomination_before_the_check_succeeds() {
     let req = peer_request(&a, true, None);
     deliver(&mut a, base, req, REMOTE_A);
     assert!(a.get_selected_pair().is_none());
+    a.handle_timeout(base).unwrap();
     let check = sent(&mut a)
         .into_iter()
         .find(|(typ, _, to)| *typ == BINDING_REQUEST && *to == addr(REMOTE_A))
@@ -369,4 +410,117 @@ fn test_nomination_from_a_disallowed_loopback_remote_is_not_followed() {
             .ip()
             .is_loopback()
     }));
+}
+
+// --- The default: RFC 8445 Section 8.1.1, the nominated pair with the highest priority ---
+
+/// "If more than one candidate pair is nominated by the controlling agent, and if the
+/// controlled agent accepts multiple nominations requests, the agents MUST produce the
+/// selected pairs and use the pairs with the highest priority."
+#[test]
+fn test_controlled_uses_the_nominated_pair_with_the_highest_priority() {
+    let base = Instant::now();
+    let mut a = rfc_agent(base);
+    assert_eq!(
+        a.nomination_acceptance,
+        NominationAcceptance::HighestPriority
+    );
+    let (pa, pb) = (pair_to(&a, REMOTE_A), pair_to(&a, REMOTE_B));
+    assert!(a.candidate_pairs[pb].priority() > a.candidate_pairs[pa].priority());
+
+    // The first nomination is on the lower-priority pair: it is the only nominated one.
+    let req = peer_request(&a, true, None);
+    deliver(&mut a, base, req, REMOTE_A);
+    assert_eq!(selected_remote(&a), Some(addr(REMOTE_A)));
+
+    // A second nomination, on the higher-priority pair: that one is used.
+    let req = peer_request(&a, true, None);
+    deliver(&mut a, base + Duration::from_secs(1), req, REMOTE_B);
+    assert_eq!(selected_remote(&a), Some(addr(REMOTE_B)));
+    assert_eq!(a.media_path().unwrap().peer_addr, addr(REMOTE_B));
+
+    // Nominating the lower-priority pair again, later, changes nothing: it is not the latest
+    // nomination that counts.
+    let req = peer_request(&a, true, None);
+    let id = req.transaction_id;
+    deliver(&mut a, base + Duration::from_secs(2), req, REMOTE_A);
+    assert_eq!(selected_remote(&a), Some(addr(REMOTE_B)));
+    // The nomination is accepted all the same (Section 7.3.1.5): answered with success, and
+    // both pairs carry the nominated flag.
+    assert!(
+        sent(&mut a).contains(&(BINDING_SUCCESS, id, addr(REMOTE_A))),
+        "an accepted nomination is answered with a success response"
+    );
+    assert!(a.candidate_pairs[pa].nominated);
+    assert!(a.candidate_pairs[pb].nominated);
+    assert_eq!(
+        selected_changes(&mut a),
+        vec![addr(REMOTE_A), addr(REMOTE_B)]
+    );
+}
+
+/// libwebrtc's `NOMINATION` value does not outrank the priority under the default rule.
+#[test]
+fn test_nomination_value_does_not_outrank_priority_by_default() {
+    let base = Instant::now();
+    let mut a = rfc_agent(base);
+    let req = peer_request(&a, true, Some(2));
+    deliver(&mut a, base, req, REMOTE_B);
+    let req = peer_request(&a, true, Some(9));
+    deliver(&mut a, base + Duration::from_secs(1), req, REMOTE_A);
+    assert_eq!(selected_remote(&a), Some(addr(REMOTE_B)));
+}
+
+/// A nominated pair of lower priority takes over when the selected pair loses the peer's
+/// consent: with no response to the consent checks on B, the agent is `Disconnected` and moves
+/// to A, which the peer nominated and was heard on since.
+#[test]
+fn test_lower_priority_nominated_pair_takes_over_when_consent_is_lost() {
+    let base = Instant::now();
+    let mut a = rfc_agent(base);
+    a.update_connection_state(Some(base), ConnectionState::Checking);
+    let req = peer_request(&a, true, None);
+    deliver(&mut a, base, req, REMOTE_B);
+    let req = peer_request(&a, true, None);
+    deliver(&mut a, base + Duration::from_secs(1), req, REMOTE_A);
+    assert_eq!(selected_remote(&a), Some(addr(REMOTE_B)));
+    let _ = selected_changes(&mut a);
+
+    // Nothing answers on B: the consent checks go unanswered.
+    let mut now = base + Duration::from_secs(1);
+    let until = base + Duration::from_secs(14);
+    while now <= until && selected_remote(&a) == Some(addr(REMOTE_B)) {
+        a.handle_timeout(now).unwrap();
+        let _ = sent(&mut a);
+        now = a
+            .poll_timeout()
+            .map_or(until + Duration::from_secs(1), |t| {
+                t.max(now + Duration::from_millis(1))
+            });
+    }
+    assert_eq!(
+        selected_remote(&a),
+        Some(addr(REMOTE_A)),
+        "the session stayed on the pair without consent"
+    );
+    assert_eq!(selected_changes(&mut a), vec![addr(REMOTE_A)]);
+    assert!(
+        now < base + Duration::from_secs(14),
+        "before consent expires"
+    );
+}
+
+/// And a nomination that arrives while the agent is `Disconnected` is followed at once,
+/// whatever the pair's priority.
+#[test]
+fn test_nomination_while_disconnected_is_followed() {
+    let base = Instant::now();
+    let mut a = rfc_agent(base);
+    let req = peer_request(&a, true, None);
+    deliver(&mut a, base, req, REMOTE_B);
+    assert_eq!(selected_remote(&a), Some(addr(REMOTE_B)));
+    a.update_connection_state(Some(base), ConnectionState::Disconnected);
+    let req = peer_request(&a, true, None);
+    deliver(&mut a, base + Duration::from_secs(8), req, REMOTE_A);
+    assert_eq!(selected_remote(&a), Some(addr(REMOTE_A)));
 }

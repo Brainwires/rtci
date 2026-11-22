@@ -22,10 +22,24 @@ fn client_hello_record(
     use crate::handshake::handshake_message_client_hello::HandshakeMessageClientHello;
     use crate::handshake::handshake_random::HandshakeRandom;
 
-    let mut extensions = vec![];
+    // What any ECDHE client sends: without signature_algorithms it would be taken to accept
+    // SHA-1 signatures only (RFC 5246 7.4.1.4.1).
+    let mut extensions = vec![
+        Extension::SupportedSignatureAlgorithms(
+            crate::extension::extension_supported_signature_algorithms::ExtensionSupportedSignatureAlgorithms {
+                signature_hash_algorithms:
+                    crate::signature_hash_algorithm::default_signature_schemes(),
+            },
+        ),
+        Extension::SupportedEllipticCurves(
+            crate::extension::extension_supported_elliptic_curves::ExtensionSupportedEllipticCurves {
+                elliptic_curves: vec![NamedCurve::X25519],
+            },
+        ),
+    ];
     if send_renegotiation_info {
         extensions.push(Extension::RenegotiationInfo(ExtensionRenegotiationInfo {
-            renegotiated_connection: 0,
+            renegotiated_connection: vec![],
         }));
     }
 
@@ -55,8 +69,9 @@ fn first_record(datagram: &[u8]) -> Result<RecordLayer> {
     RecordLayer::unmarshal(&mut reader)
 }
 
-// Assert that a DTLS Server always responds with RenegotiationInfo if
-// a ClientHello contained that extension or not
+// RFC 5746 3.6 with RFC 5246 7.4.1.4: a DTLS server answers with renegotiation_info when the
+// ClientHello carried it, and does not when the client offered no renegotiation indication.
+// (The ported test asserted the extension in both cases, which RFC 5246 7.4.1.4 forbids.)
 #[test]
 fn test_renegotation_info() -> Result<()> {
     use crate::cipher_suite::CipherSuiteId;
@@ -130,9 +145,9 @@ fn test_renegotation_info() -> Result<()> {
             .iter()
             .any(|v| matches!(v, Extension::RenegotiationInfo(_)));
 
-        assert!(
-            got_negotation_info,
-            "{name}: Received ServerHello without RenegotiationInfo"
+        assert_eq!(
+            got_negotation_info, send_renegotiation_info,
+            "{name}: RenegotiationInfo in ServerHello"
         );
     }
 
@@ -709,10 +724,10 @@ fn test_pre_handshake_application_data_is_bounded() {
     );
 }
 
-/// A flight whose parse failed (and sent a fatal alert) is terminal: further handshake records
-/// must not make the server parse, and verify, it again.
+/// RFC 6347 4.2.1: a ClientHello whose cookie is wrong is not an error of the association, since
+/// anyone can send one from the client's address. The flight keeps waiting for the genuine one.
 #[test]
-fn test_failed_flight_is_not_parsed_again() {
+fn test_a_wrong_cookie_does_not_end_the_flight() {
     use crate::cipher_suite::CipherSuiteId;
     use crate::compression_methods::default_compression_methods;
     use crate::flight::flight2::Flight2;
@@ -742,21 +757,11 @@ fn test_failed_flight_is_not_parsed_again() {
             .push(data, 0, 1, HandshakeType::ClientHello, true)
     );
 
-    conn.handshake_rx = Some(());
-    assert!(matches!(
-        conn.handshake(Instant::now()),
-        Err(Error::ErrCookieMismatch)
-    ));
-    assert!(conn.current_handshake_state == HandshakeState::Errored);
-
-    // More handshake records: the failed flight is not parsed again. The failed handshake
-    // failed the association, which refuses any further handshake step as closed.
-    for _ in 0..100 {
+    for _ in 0..3 {
         conn.handshake_rx = Some(());
-        assert!(matches!(
-            conn.handshake(Instant::now()),
-            Err(Error::ErrConnClosed)
-        ));
+        assert_eq!(conn.handshake(Instant::now()), Ok(()));
+        assert!(conn.current_handshake_state == HandshakeState::Waiting);
+        assert!(!conn.is_failed());
+        assert!(conn.outgoing_raw_packet().is_none(), "no alert is sent");
     }
-    assert!(conn.current_handshake_state == HandshakeState::Errored);
 }

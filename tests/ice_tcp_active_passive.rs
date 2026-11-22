@@ -566,6 +566,8 @@ async fn test_ice_tcp_bidirectional_data_channel() -> Result<()> {
     let mut answer_dc_id = None;
     let mut offer_received = 0;
     let mut answer_received = 0;
+    let mut offer_sent = 0;
+    let mut answer_sent = 0;
     let messages_each = 2;
 
     // TCP state
@@ -636,24 +638,34 @@ async fn test_ice_tcp_bidirectional_data_channel() -> Result<()> {
             }
         }
 
-        // Send messages from both sides
-        if offer_connected {
-            let sent = offer_received + answer_received;
-            if sent < messages_each * 2
-                && let Some(dc_id) = offer_dc_id
-                && let Some(mut dc) = runner.offer_pc.data_channel(dc_id)
-            {
-                dc.send_text(Instant::now(), "From offer".to_string()).ok();
-            }
+        // Send messages from both sides. Each side sends its next message when the one
+        // before it has arrived, until the other side has `messages_each` of them. The two
+        // sides used to stop together once four messages had arrived in total, whoever had
+        // received them: when one direction was ahead of the other (the answerer's channel
+        // opens first, on the DATA_CHANNEL_OPEN, and a loaded machine widens the gap) one
+        // side ended with three or four and the other with fewer than two, nobody sent any
+        // more, and the test ran into its timeout.
+        if offer_connected
+            && offer_sent == answer_received
+            && offer_sent < messages_each
+            && let Some(dc_id) = offer_dc_id
+            && let Some(mut dc) = runner.offer_pc.data_channel(dc_id)
+            && dc
+                .send_text(Instant::now(), "From offer".to_string())
+                .is_ok()
+        {
+            offer_sent += 1;
         }
-        if answer_connected {
-            let sent = offer_received + answer_received;
-            if sent < messages_each * 2
-                && let Some(dc_id) = answer_dc_id
-                && let Some(mut dc) = runner.answer_pc.data_channel(dc_id)
-            {
-                dc.send_text(Instant::now(), "From answer".to_string()).ok();
-            }
+        if answer_connected
+            && answer_sent == offer_received
+            && answer_sent < messages_each
+            && let Some(dc_id) = answer_dc_id
+            && let Some(mut dc) = runner.answer_pc.data_channel(dc_id)
+            && dc
+                .send_text(Instant::now(), "From answer".to_string())
+                .is_ok()
+        {
+            answer_sent += 1;
         }
 
         // Check completion

@@ -1,9 +1,10 @@
 #[cfg(test)]
 mod prf_test;
 
+use crate::record_layer::record_layer_header::RecordLayerHeader;
 use std::fmt;
 
-use crypto::{HashAlgorithm as CryptoHashAlgorithm, HmacAlgorithm, Mac, RTCCrypto};
+use crypto::{Mac, RTCCrypto};
 
 use crate::cipher_suite::CipherSuiteHash;
 use crate::content::ContentType;
@@ -102,9 +103,7 @@ fn hmac_sha(
     key: &[u8],
     input: &[&[u8]],
 ) -> Result<Vec<u8>> {
-    let algorithm = match h {
-        CipherSuiteHash::Sha256 => HmacAlgorithm::Sha256,
-    };
+    let algorithm = h.hmac_algorithm();
     let mut output = vec![0; algorithm.output_len()];
     crypto
         .new_hmac(algorithm, key)
@@ -220,11 +219,9 @@ pub(crate) fn prf_verify_data(
     label: &str,
     h: CipherSuiteHash,
 ) -> Result<Vec<u8>> {
-    let result = match h {
-        CipherSuiteHash::Sha256 => crypto
-            .hash(CryptoHashAlgorithm::Sha256, handshake_bodies)
-            .map_err(|error| Error::Crypto(error.to_string()))?,
-    };
+    let result = crypto
+        .hash(h.hash_algorithm(), handshake_bodies)
+        .map_err(|error| Error::Crypto(error.to_string()))?;
     let mut seed = label.as_bytes().to_vec();
     seed.extend_from_slice(&result);
 
@@ -272,15 +269,22 @@ pub(crate) fn prf_mac(
     sequence_number: u64,
     content_type: ContentType,
     protocol_version: ProtocolVersion,
+    cid: Option<&[u8]>,
     payload: &[u8],
 ) -> Result<Vec<u8>> {
-    let mut msg = vec![0u8; 13];
-    msg[..2].copy_from_slice(&epoch.to_be_bytes());
-    msg[2..8].copy_from_slice(&sequence_number.to_be_bytes()[2..]);
-    msg[8] = content_type as u8;
-    msg[9] = protocol_version.major;
-    msg[10] = protocol_version.minor;
-    msg[11..].copy_from_slice(&(payload.len() as u16).to_be_bytes());
+    // RFC 9146 section 5.1 for a `tls12_cid` record (its connection id given), RFC 5246
+    // 6.2.3.1 otherwise.
+    let msg = crate::crypto::record_additional_data(
+        &RecordLayerHeader {
+            content_type,
+            protocol_version,
+            epoch,
+            sequence_number,
+            content_len: 0,
+        },
+        payload.len(),
+        cid,
+    );
 
     let mut output = vec![0; mac.output_len()];
     mac.sign(&[&msg, payload], &mut output)

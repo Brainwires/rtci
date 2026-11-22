@@ -11,48 +11,73 @@ use shared::{
     marshal::{Marshal, MarshalSize, Unmarshal},
 };
 
-use bytes::{Buf, BufMut};
+use bytes::{Buf, BufMut, Bytes};
 
 /// PacketType specifies the type of an RTCP packet
 /// RTCP packet types registered with IANA. See: <https://www.iana.org/assignments/rtp-parameters/rtp-parameters.xhtml#rtp-parameters-4>
+///
+/// The enum converts to and from the type octet with `u8::from` / `PacketType::from`; a value
+/// this crate does not model is kept in [`PacketType::Other`], so a packet of an unknown type
+/// is written back with the type it arrived with.
 #[derive(Default, Debug, Copy, Clone, PartialEq, Eq)]
-#[repr(u8)]
 #[non_exhaustive]
 pub enum PacketType {
     #[default]
-    /// A packet type this crate does not model.
-    Unsupported = 0,
+    /// No packet type: the type octet 0, and the value of a default header.
+    Unsupported,
     /// Sender Report ([RFC 3550] §6.4.1): a sender's timing and packet counts.
-    SenderReport = 200, // RFC 3550, 6.4.1
+    SenderReport, // 200, RFC 3550, 6.4.1
     /// Receiver Report ([RFC 3550] §6.4.2): reception quality from a receiver.
-    ReceiverReport = 201, // RFC 3550, 6.4.2
+    ReceiverReport, // 201, RFC 3550, 6.4.2
     /// Source Description ([RFC 3550] §6.5): CNAME and other source metadata.
-    SourceDescription = 202, // RFC 3550, 6.5
+    SourceDescription, // 202, RFC 3550, 6.5
     /// BYE ([RFC 3550] §6.6): the source is leaving the session.
-    Goodbye = 203, // RFC 3550, 6.6
-    /// APP ([RFC 3550] §6.7): application-defined data. Not modelled by this crate.
-    ApplicationDefined = 204, // RFC 3550, 6.7 (unimplemented)
-    /// Transport-layer feedback ([RFC 4585]): NACK and transport-wide CC.
-    TransportSpecificFeedback = 205, // RFC 4585, 6051
-    /// Payload-specific feedback ([RFC 4585] §6.3): PLI, FIR, SLI, REMB.
-    PayloadSpecificFeedback = 206, // RFC 4585, 6.3
+    Goodbye, // 203, RFC 3550, 6.6
+    /// APP ([RFC 3550] §6.7): application-defined data.
+    ApplicationDefined, // 204, RFC 3550, 6.7
+    /// Transport-layer feedback ([RFC 4585]): NACK, TMMBR, TMMBN, transport-wide CC, CCFB.
+    TransportSpecificFeedback, // 205, RFC 4585, 6.2
+    /// Payload-specific feedback ([RFC 4585] §6.3): PLI, SLI, RPSI, FIR, TSTR, TSTN, VBCM, LRR,
+    /// application-layer feedback (REMB).
+    PayloadSpecificFeedback, // 206, RFC 4585, 6.3
     /// Extended Report ([RFC 3611]).
-    ExtendedReport = 207, // RFC 3611
+    ExtendedReport, // 207, RFC 3611
+    /// A packet type this crate does not model, with its type octet.
+    Other(u8),
 }
 
-/// Transport and Payload specific feedback messages overload the count field to act as a message type. those are listed here
+// Transport and payload specific feedback messages overload the count field to act as a
+// message type (FMT). Those are listed here.
+
+/// FMT of the Slice Loss Indication (PSFB, RFC 4585 §6.3.2).
 pub const FORMAT_SLI: u8 = 2;
-/// Transport and Payload specific feedback messages overload the count field to act as a message type. those are listed here
+/// FMT of the Picture Loss Indication (PSFB, RFC 4585 §6.3.1).
 pub const FORMAT_PLI: u8 = 1;
-/// Transport and Payload specific feedback messages overload the count field to act as a message type. those are listed here
+/// FMT of the Reference Picture Selection Indication (PSFB, RFC 4585 §6.3.3).
+pub const FORMAT_RPSI: u8 = 3;
+/// FMT of the Full Intra Request (PSFB, RFC 5104 §4.3.1).
 pub const FORMAT_FIR: u8 = 4;
-/// Transport and Payload specific feedback messages overload the count field to act as a message type. those are listed here
+/// FMT of the Temporal-Spatial Trade-off Request (PSFB, RFC 5104 §4.3.2).
+pub const FORMAT_TSTR: u8 = 5;
+/// FMT of the Temporal-Spatial Trade-off Notification (PSFB, RFC 5104 §4.3.3).
+pub const FORMAT_TSTN: u8 = 6;
+/// FMT of the Video Back Channel Message (PSFB, RFC 5104 §4.3.4).
+pub const FORMAT_VBCM: u8 = 7;
+/// FMT of the Layer Refresh Request (PSFB, RFC 9627 §3).
+pub const FORMAT_LRR: u8 = 10;
+/// FMT of application-layer feedback (PSFB, RFC 4585 §6.4), which REMB is one kind of.
+pub const FORMAT_AFB: u8 = 15;
+/// FMT of the generic NACK (RTPFB, RFC 4585 §6.2.1).
 pub const FORMAT_TLN: u8 = 1;
-/// Transport and Payload specific feedback messages overload the count field to act as a message type. those are listed here
+/// FMT of the Temporary Maximum Media Stream Bit Rate Request (RTPFB, RFC 5104 §4.2.1).
+pub const FORMAT_TMMBR: u8 = 3;
+/// FMT of the Temporary Maximum Media Stream Bit Rate Notification (RTPFB, RFC 5104 §4.2.2).
+pub const FORMAT_TMMBN: u8 = 4;
+/// FMT of the Rapid Resynchronisation Request (RTPFB, RFC 6051 §3.2).
 pub const FORMAT_RRR: u8 = 5;
-/// Transport and Payload specific feedback messages overload the count field to act as a message type. those are listed here
+/// FMT of REMB: application-layer feedback whose payload starts with `REMB`.
 pub const FORMAT_REMB: u8 = 15;
-/// Transport and Payload specific feedback messages overload the count field to act as a message type. those are listed here.
+/// FMT of transport-wide congestion control feedback (RTPFB).
 /// <https://tools.ietf.org/html/draft-holmer-rmcat-transport-wide-cc-extensions-01#page-5>
 pub const FORMAT_TCC: u8 = 15;
 /// FMT value for CCFB (Congestion Control Feedback) per RFC 8888
@@ -62,6 +87,7 @@ impl std::fmt::Display for PacketType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
             PacketType::Unsupported => "Unsupported",
+            PacketType::Other(pt) => return write!(f, "PT{pt}"),
             PacketType::SenderReport => "SR",
             PacketType::ReceiverReport => "RR",
             PacketType::SourceDescription => "SDES",
@@ -78,15 +104,33 @@ impl std::fmt::Display for PacketType {
 impl From<u8> for PacketType {
     fn from(b: u8) -> Self {
         match b {
-            200 => PacketType::SenderReport,              // RFC 3550, 6.4.1
-            201 => PacketType::ReceiverReport,            // RFC 3550, 6.4.2
-            202 => PacketType::SourceDescription,         // RFC 3550, 6.5
-            203 => PacketType::Goodbye,                   // RFC 3550, 6.6
-            204 => PacketType::ApplicationDefined,        // RFC 3550, 6.7 (unimplemented)
-            205 => PacketType::TransportSpecificFeedback, // RFC 4585, 6051
-            206 => PacketType::PayloadSpecificFeedback,   // RFC 4585, 6.3
-            207 => PacketType::ExtendedReport,            // RFC 3611
-            _ => PacketType::Unsupported,
+            0 => PacketType::Unsupported,
+            200 => PacketType::SenderReport,       // RFC 3550, 6.4.1
+            201 => PacketType::ReceiverReport,     // RFC 3550, 6.4.2
+            202 => PacketType::SourceDescription,  // RFC 3550, 6.5
+            203 => PacketType::Goodbye,            // RFC 3550, 6.6
+            204 => PacketType::ApplicationDefined, // RFC 3550, 6.7
+            205 => PacketType::TransportSpecificFeedback, // RFC 4585, 6.2
+            206 => PacketType::PayloadSpecificFeedback, // RFC 4585, 6.3
+            207 => PacketType::ExtendedReport,     // RFC 3611
+            other => PacketType::Other(other),
+        }
+    }
+}
+
+impl From<PacketType> for u8 {
+    fn from(t: PacketType) -> Self {
+        match t {
+            PacketType::Unsupported => 0,
+            PacketType::SenderReport => 200,
+            PacketType::ReceiverReport => 201,
+            PacketType::SourceDescription => 202,
+            PacketType::Goodbye => 203,
+            PacketType::ApplicationDefined => 204,
+            PacketType::TransportSpecificFeedback => 205,
+            PacketType::PayloadSpecificFeedback => 206,
+            PacketType::ExtendedReport => 207,
+            PacketType::Other(other) => other,
         }
     }
 }
@@ -170,7 +214,7 @@ impl Marshal for Header {
             | (self.count << COUNT_SHIFT);
 
         buf.put_u8(b0);
-        buf.put_u8(self.packet_type as u8);
+        buf.put_u8(self.packet_type.into());
         buf.put_u16(self.length);
 
         Ok(HEADER_LENGTH)
@@ -213,6 +257,94 @@ impl Unmarshal for Header {
             length,
         })
     }
+}
+
+/// Length of the part every feedback packet starts with after the header: the SSRC of the
+/// packet sender and the SSRC of the media source (RFC 4585 §6.1).
+pub(crate) const FEEDBACK_SSRCS_LENGTH: usize = 2 * SSRC_LENGTH;
+
+/// Reads one RTCP packet off `raw`: its header, and its body without the padding the P bit
+/// announces.
+///
+/// The body is exactly the `length` words the header declares; what follows them in `raw` is
+/// the next packet of the datagram and is left there. RFC 3550 §6.4.1: with the P bit set the
+/// last octet of the packet counts the padding octets, itself included, and those octets are
+/// not control information.
+pub(crate) fn read_packet<B>(raw: &mut B) -> Result<(Header, Bytes)>
+where
+    B: Buf,
+{
+    let header = Header::unmarshal(raw)?;
+    let length = header.length as usize * 4;
+    if raw.remaining() < length {
+        return Err(Error::PacketTooShort);
+    }
+    let mut body = raw.copy_to_bytes(length);
+    if header.padding {
+        let padding = body.last().copied().unwrap_or(0) as usize;
+        if padding == 0 || padding > body.len() {
+            return Err(Error::WrongPadding);
+        }
+        body.truncate(body.len() - padding);
+    }
+    Ok((header, body))
+}
+
+/// Reads one feedback packet (RFC 4585 §6.1) of the given type and FMT off `raw` and returns
+/// the SSRC of the packet sender, the SSRC of the media source and the FCI.
+pub(crate) fn read_feedback<B>(
+    raw: &mut B,
+    packet_type: PacketType,
+    format: u8,
+) -> Result<(u32, u32, Bytes)>
+where
+    B: Buf,
+{
+    let (header, mut body) = read_packet(raw)?;
+    if header.packet_type != packet_type || header.count != format {
+        return Err(Error::WrongType);
+    }
+    if body.len() < FEEDBACK_SSRCS_LENGTH {
+        return Err(Error::PacketTooShort);
+    }
+    let sender_ssrc = body.get_u32();
+    let media_ssrc = body.get_u32();
+    Ok((sender_ssrc, media_ssrc, body))
+}
+
+/// The header of a packet of `size` octets, `size` a multiple of four no larger than the 16-bit
+/// length field can describe.
+pub(crate) fn header_for(packet_type: PacketType, count: u8, size: usize) -> Result<Header> {
+    if !size.is_multiple_of(4) || size < HEADER_LENGTH {
+        return Err(Error::WrongMarshalSize);
+    }
+    let length = u16::try_from(size / 4 - 1).map_err(|_| Error::TooManyReports)?;
+    Ok(Header {
+        padding: false,
+        count,
+        packet_type,
+        length,
+    })
+}
+
+/// Writes the header and the two SSRCs of a feedback packet of `size` octets and returns the
+/// rest of `buf`, where the FCI goes.
+pub(crate) fn put_feedback_start(
+    buf: &mut [u8],
+    packet_type: PacketType,
+    format: u8,
+    size: usize,
+    sender_ssrc: u32,
+    media_ssrc: u32,
+) -> Result<&mut [u8]> {
+    if buf.len() < size {
+        return Err(Error::BufferTooShort);
+    }
+    let n = header_for(packet_type, format, size)?.marshal_to(buf)?;
+    let mut rest = &mut buf[n..];
+    rest.put_u32(sender_ssrc);
+    rest.put_u32(media_ssrc);
+    Ok(rest)
 }
 
 #[cfg(test)]

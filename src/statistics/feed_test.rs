@@ -109,7 +109,18 @@ fn supplied_stats_reach_the_report_and_their_references_resolve() {
     let report = pair.offerer.get_stats(now, StatsSelector::None);
     let outbound = report.outbound_rtp_streams().next().expect("outbound");
     assert_eq!(outbound.frames_encoded, None);
-    assert!(outbound.media_source_id.is_empty());
+    // The track is attached to the sender, so its media source exists (webrtc-stats 8.11),
+    // with what the engine knows of it: the track's id and kind.
+    let source = report
+        .iter()
+        .find_map(|entry| match entry {
+            RTCStatsReportEntry::VideoSource(source) => Some(source),
+            _ => None,
+        })
+        .expect("the media source of the attached track");
+    assert_eq!(outbound.media_source_id, source.media_source_stats.stats.id);
+    assert_eq!(source.media_source_stats.track_identifier, "feed-video");
+    assert_eq!((source.width, source.frames), (None, None));
 
     // Sender side.
     assert!(pair.offerer.update_encoder_stats(
@@ -181,12 +192,16 @@ fn supplied_stats_reach_the_report_and_their_references_resolve() {
     let inbound = report.inbound_rtp_streams().next().expect("inbound");
     assert_eq!(inbound.frames_decoded, Some(1));
     assert_eq!(inbound.key_frames_decoded, Some(1));
-    let playout_id = inbound.playout_id.clone().expect("playoutId once supplied");
-    match report.get(&playout_id) {
-        Some(RTCStatsReportEntry::AudioPlayout(playout)) => {
-            assert_eq!(playout.total_samples_count, Some(4800));
-            assert_eq!(playout.total_playout_delay, None);
-        }
-        other => panic!("playoutId {playout_id} names no playout: {other:?}"),
-    }
+    // The playout object is there with what was supplied. `playoutId` is an audio stream's
+    // member (webrtc-stats 8.5), so this video stream does not name it.
+    assert_eq!(inbound.playout_id, None);
+    let playout = report
+        .iter()
+        .find_map(|entry| match entry {
+            RTCStatsReportEntry::AudioPlayout(playout) => Some(playout),
+            _ => None,
+        })
+        .expect("the playout object");
+    assert_eq!(playout.total_samples_count, Some(4800));
+    assert_eq!(playout.total_playout_delay, None);
 }

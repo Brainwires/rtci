@@ -29,6 +29,41 @@
 //! # }
 //! ```
 //!
+//! # Message size
+//!
+//! **Toward a browser, a message is at most 16 KB by default.** RFC 8831 section 6.6: "As
+//! long as message interleaving is not supported, the sender SHOULD limit the maximum message
+//! size to 16 KB to avoid monopolization." Interleaving is RFC 8260 (I-DATA); this engine
+//! offers it, and no current browser does. So once the association with such a peer is
+//! established, [`RTCSctpTransport::max_message_size`] (W3C `maxMessageSize`) is 16384, and
+//! [`RTCDataChannel::send`] / [`RTCDataChannel::send_text`] refuse a larger message with
+//! [`Error::ErrMessageTooLargeWithoutInterleaving`], whose text names the limit and the setting.
+//! Between two peers that both interleave (two instances of this engine, by default) the limit
+//! is the peer's `a=max-message-size` (RFC 8841 section 6.1).
+//!
+//! An application that needs larger messages toward browsers, as the browsers themselves
+//! send them, lifts the limit up to the peer's `a=max-message-size`:
+//!
+//! ```no_run
+//! # use std::time::Instant;
+//! use rtc::peer_connection::RTCPeerConnectionBuilder;
+//! use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+//!
+//! # fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! let setting_engine = SettingEngineBuilder::new()
+//!     .with_sctp_message_size_limit_without_interleaving(false)
+//!     .build();
+//! let pc = RTCPeerConnectionBuilder::new()
+//!     .with_setting_engine(setting_engine)
+//!     .build(Instant::now())?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! A large message then holds up every other channel of the association until it is sent.
+//!
+//! [`RTCSctpTransport::max_message_size`]: crate::peer_connection::transport::RTCSctpTransport::max_message_size
+//!
 //! # Specification
 //!
 //! * [W3C WebRTC - RTCDataChannel](https://www.w3.org/TR/webrtc/#rtcdatachannel)
@@ -161,6 +196,12 @@ impl RTCDataChannel<'_> {
             .get(&self.id)
             .unwrap()
             .protocol()
+    }
+
+    /// W3C webrtc-priority `RTCDataChannel.priority`: the class of [`Self::priority`]
+    /// (webrtc-priority 4.3: 0 to 128 very-low, to 256 low, to 512 medium, above high).
+    pub fn priority_type(&self) -> crate::peer_connection::priority::RTCPriorityType {
+        crate::peer_connection::priority::RTCPriorityType::from_dcep_priority(self.priority())
     }
 
     /// The channel's DCEP priority (RFC 8832 §5.1): the one it was created with, or for a
@@ -316,20 +357,31 @@ impl RTCDataChannel<'_> {
             .get(&self.id)
             .ok_or(Error::ErrDataChannelClosed)?;
 
-        if dc.data_channel.is_none() {
-            // No stream yet: either it is still being negotiated, or it is already gone.
-            return Err(if dc.ready_state == RTCDataChannelState::Connecting {
-                Error::ErrDataChannelNotOpen
-            } else {
-                Error::ErrDataChannelClosed
-            });
+        // W3C `send()`: "If channel.[[ReadyState]] is not "open", throw an
+        // InvalidStateError". A closing channel still has its stream, and refuses. An in-band
+        // channel waiting for its DATA_CHANNEL_ACK is "connecting" here, but RFC 8832 section
+        // 6 lets its opener send on the stream at once ("MAY start sending messages
+        // containing user data without waiting for the reception of the corresponding
+        // DATA_CHANNEL_ACK"), which is what a browser's channel, open by then, does: it is
+        // accepted.
+        match dc.ready_state {
+            RTCDataChannelState::Open | RTCDataChannelState::Connecting
+                if dc.data_channel.is_some() => {}
+            RTCDataChannelState::Closed => return Err(Error::ErrDataChannelClosed),
+            _ => return Err(Error::ErrDataChannelNotOpen),
         }
 
-        // W3C `send()`: data larger than `maxMessageSize` throws.
-        if let Some(max_message_size) = self.peer_connection.sctp_transport().max_message_size()
-            && data_len > max_message_size as usize
+        // W3C `send()`: data larger than `maxMessageSize` throws (a TypeError).
+        self.peer_connection
+            .sctp_transport()
+            .check_message_size(data_len)?;
+
+        // W3C `send()`: "If the value of [[BufferedAmount]] increased by the byte size of data
+        // is above [[MaxBufferSize]], throw an OperationError."
+        if let Some(max_buffer_size) = self.peer_connection.sctp_transport().max_buffer_size()
+            && self.buffered_amount() + data_len as u64 > u64::from(max_buffer_size)
         {
-            return Err(Error::ErrOutboundPacketTooLarge);
+            return Err(Error::ErrDataChannelBufferFull);
         }
 
         Ok(())
@@ -349,6 +401,8 @@ impl RTCDataChannel<'_> {
     /// - [`Error::ErrDataChannelClosed`] once the channel is gone.
     /// - [`Error::ErrOutboundPacketTooLarge`] if `data` is larger than the negotiated
     ///   [`max_message_size`](crate::peer_connection::transport::RTCSctpTransport::max_message_size).
+    /// - [`Error::ErrMessageTooLargeWithoutInterleaving`] if `data` is larger than 16384 bytes
+    ///   and the peer does not interleave messages (see [the module docs](self#message-size)).
     ///
     /// The check is made here, synchronously, rather than deeper in the pipeline where an error
     /// could only be logged. A rejected send never charges [`Self::outstanding_bytes`].
@@ -370,6 +424,7 @@ impl RTCDataChannel<'_> {
         // is the synchronous send-boundary accounting used for back-pressure.
         if let Some(dc) = self.peer_connection.data_channels.get_mut(&self.id) {
             dc.outstanding_bytes += data_len;
+            dc.bytes_queued += data_len as u64;
         }
         Ok(())
     }
@@ -396,8 +451,22 @@ impl RTCDataChannel<'_> {
         })?;
         if let Some(dc) = self.peer_connection.data_channels.get_mut(&self.id) {
             dc.outstanding_bytes += data_len;
+            dc.bytes_queued += data_len as u64;
         }
         Ok(())
+    }
+
+    /// W3C `bufferedAmount`: the application bytes `send()` queued that SCTP has not yet
+    /// taken from the stream's queue to send ("the underlying data transport sends data from
+    /// its queue"), framing excluded. It rises at each `send()` and falls as packets go out,
+    /// not when the peer acknowledges them (that is [`Self::outstanding_bytes`]).
+    pub fn buffered_amount(&self) -> u64 {
+        let queued = self
+            .peer_connection
+            .data_channels
+            .get(&self.id)
+            .map_or(0, |dc| dc.bytes_queued);
+        queued.saturating_sub(self.bytes_dequeued())
     }
 
     /// Application bytes of this channel that SCTP has taken from its send queue: sent for
@@ -438,7 +507,7 @@ impl RTCDataChannel<'_> {
     /// Closes the data channel.
     ///
     /// Moves the channel to `Closing` and starts the DCEP/SCTP teardown. Closing a channel that
-    /// is already `Closed` is a no-op and succeeds.
+    /// is already `Closing` or `Closed` is a no-op and succeeds.
     ///
     /// # Errors
     ///
@@ -446,7 +515,12 @@ impl RTCDataChannel<'_> {
     /// peer connection any more.
     pub fn close(&mut self) -> Result<()> {
         if let Some(dc) = self.peer_connection.data_channels.get_mut(&self.id) {
-            if dc.ready_state == RTCDataChannelState::Closed {
+            // W3C close(): "If channel.[[ReadyState]] is "closing" or "closed", then abort
+            // these steps": a second close() while closing starts nothing again.
+            if matches!(
+                dc.ready_state,
+                RTCDataChannelState::Closing | RTCDataChannelState::Closed
+            ) {
                 return Ok(());
             }
             dc.ready_state = RTCDataChannelState::Closing;

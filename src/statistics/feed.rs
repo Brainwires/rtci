@@ -115,13 +115,36 @@ impl RTCPeerConnection {
         }
     }
 
+    /// Reports that the application's socket refused to send a datagram of `bytes` bytes that
+    /// [`poll_write`](sansio::Protocol::poll_write) handed it: the candidate pair in use counts
+    /// it in `packetsDiscardedOnSend` and `bytesDiscardedOnSend`.
+    ///
+    /// The engine opens no socket, so it cannot see a send fail; those two members are left
+    /// out of the report until the application reports a discard here. Returns `false`, and
+    /// counts nothing, while no candidate pair is selected.
+    pub fn on_send_discarded(&mut self, bytes: usize) -> bool {
+        self.stats_mut().on_send_discarded(bytes)
+    }
+
+    /// Supplies the receive-side bandwidth estimate the application's congestion control made
+    /// for the incoming RTP streams, in bits per second: the `availableIncomingBitrate` of the
+    /// candidate pair in use.
+    ///
+    /// The engine estimates the send side only, so the member is left out of the report until
+    /// this is called. Returns `false`, and sets nothing, while no candidate pair is selected.
+    pub fn update_available_incoming_bitrate(&mut self, bits_per_second: f64) -> bool {
+        self.stats_mut()
+            .on_available_incoming_bitrate(bits_per_second)
+    }
+
     /// Supplies audio playout statistics for the playout device the application names
     /// `playout_id`: its `media-playout` stats object (`synthesizedSamplesDuration`,
     /// `totalPlayoutDelay`, ...), created on the first update, which each inbound stream in
     /// `inbound_ssrcs` then names as its `playoutId`.
     ///
-    /// `playout_id` is the stats object's id as the report gives it. Merged into what was
-    /// supplied before.
+    /// `playout_id` is the application's name for the device: the same name updates the same
+    /// object. The object's id in the report is opaque, like every id; an inbound audio
+    /// stream's `playoutId` gives it. Merged into what was supplied before.
     pub fn update_audio_playout_stats(
         &mut self,
         playout_id: &str,

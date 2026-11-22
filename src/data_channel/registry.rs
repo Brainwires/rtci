@@ -1,5 +1,6 @@
 use crate::data_channel::RTCDataChannelId;
 use crate::data_channel::internal::RTCDataChannelInternal;
+use crate::peer_connection::rtc_error::RTCError;
 use crate::peer_connection::transport::dtls::role::RTCDtlsRole;
 use crate::peer_connection::transport::sctp::SCTP_MAX_CHANNELS;
 use sctp::StreamId;
@@ -32,7 +33,18 @@ pub(crate) struct DataChannelRegistry {
 
     /// Monotonic handle counter. Never decremented, never reused.
     next_handle: RTCDataChannelId,
+
+    /// The `RTCError` of each channel's `OnError`, newest last, for the application to read
+    /// once the event has come (W3C `RTCErrorEvent.error`); kept after the channel closed, at
+    /// most [`MAX_KEPT_CHANNEL_ERRORS`].
+    errors: std::collections::VecDeque<(RTCDataChannelId, RTCError)>,
+
+    /// The SCTP cause code of the association's failure, once it was aborted with one.
+    pub(crate) sctp_failure_cause: Option<u16>,
 }
+
+/// How many data channel errors [`DataChannelRegistry`] keeps.
+pub(crate) const MAX_KEPT_CHANNEL_ERRORS: usize = 64;
 
 impl DataChannelRegistry {
     pub(crate) fn new() -> Self {
@@ -40,7 +52,27 @@ impl DataChannelRegistry {
             channels: HashMap::new(),
             by_stream: HashMap::new(),
             next_handle: 0,
+            errors: std::collections::VecDeque::new(),
+            sctp_failure_cause: None,
         }
+    }
+
+    /// Records the error channel `id` fails with, the oldest record going past
+    /// [`MAX_KEPT_CHANNEL_ERRORS`].
+    pub(crate) fn record_error(&mut self, id: RTCDataChannelId, error: RTCError) {
+        self.errors.retain(|(channel, _)| *channel != id);
+        if self.errors.len() == MAX_KEPT_CHANNEL_ERRORS {
+            self.errors.pop_front();
+        }
+        self.errors.push_back((id, error));
+    }
+
+    /// The error channel `id` failed with, if it did and the record is still kept.
+    pub(crate) fn error(&self, id: RTCDataChannelId) -> Option<&RTCError> {
+        self.errors
+            .iter()
+            .find(|(channel, _)| *channel == id)
+            .map(|(_, error)| error)
     }
 
     /// Registers `data_channel`, assigning it a fresh handle and indexing its stream id if it
@@ -108,6 +140,17 @@ impl DataChannelRegistry {
     ) -> Option<RTCDataChannelInternal> {
         let handle = self.by_stream.remove(stream_id)?;
         self.channels.remove(&handle)
+    }
+
+    /// Removes channel `handle`, freeing its stream id if it has one.
+    pub(crate) fn remove(&mut self, handle: &RTCDataChannelId) -> Option<RTCDataChannelInternal> {
+        let channel = self.channels.remove(handle)?;
+        if let Some(stream_id) = channel.stream_id
+            && self.by_stream.get(&stream_id) == Some(handle)
+        {
+            self.by_stream.remove(&stream_id);
+        }
+        Some(channel)
     }
 
     /// Whether `stream_id` is already claimed, by a channel of any origin.
@@ -178,10 +221,12 @@ impl DataChannelRegistry {
             // Skip ids already claimed — by an out-of-band channel the application pinned, or
             // by one the peer opened first. Carrying the cursor across iterations rather than
             // restarting the scan keeps this a single pass.
-            while next < max.saturating_sub(1) && self.stream_id_in_use(&next) {
+            // Ids run from 0 to `max - 1` (W3C 6.1.1.3: an id "equal to or greater than"
+            // [[MaxChannels]] is unusable); 65535 is never one (`SCTP_MAX_CHANNELS`).
+            while next < max && self.stream_id_in_use(&next) {
                 next += 2;
             }
-            if next >= max.saturating_sub(1) {
+            if next >= max {
                 return Err(Error::ErrMaxDataChannelID);
             }
             self.assign_stream_id(handle, next);

@@ -268,11 +268,16 @@ fn run(offerer: TcpType, answerer: TcpType, messages: &[Vec<u8>]) -> Result<(Vec
         if !net.in_flight.is_empty() {
             continue;
         }
+        // The next timer, and 50 ms at most: a stream the pipeline's back-pressure parked is
+        // resumed by `poll_read`, with no timer of its own, so each pass of this loop moves a
+        // bounded amount of data and must not cost seconds of virtual time when the only
+        // timer left is the next ICE consent check (4 to 6 seconds away, RFC 7675).
         let next = peers
             .iter_mut()
             .filter_map(|p| p.pc.poll_timeout())
             .min()
-            .unwrap_or(now + Duration::from_millis(50));
+            .unwrap_or(now + Duration::from_millis(50))
+            .min(now + Duration::from_millis(50));
         now = next.max(now + Duration::from_millis(1));
         for peer in peers.iter_mut() {
             let _ = peer.pc.handle_timeout(now);
@@ -344,6 +349,54 @@ fn ice_tcp_selected_pair_reports_tcp() -> Result<()> {
         assert!(
             report.candidate_pairs().any(|p| p.nominated),
             "a TCP pair was nominated"
+        );
+    }
+    Ok(())
+}
+
+/// The proto of the data section of `sdp`: `UDP/DTLS/SCTP` or `TCP/DTLS/SCTP`.
+fn data_proto(sdp: &str) -> String {
+    sdp.lines()
+        .find(|line| line.starts_with("m=application"))
+        .and_then(|line| line.split_whitespace().nth(2))
+        .unwrap_or_else(|| panic!("a data section in\n{sdp}"))
+        .to_owned()
+}
+
+/// RFC 8841 section 12.2: "When a subsequent SDP offer or answer is sent after ICE nomination
+/// is complete, and it does not initiate ICE restart, ... the proto value MUST match the
+/// transport protocol associated with the nominated ICE candidate pair. ... If TCP transport
+/// is used for the nominated pair, then the 'TCP/DTLS/SCTP' proto value MUST be used." Two
+/// peers connected over a TCP pair say so in a later offer, from either side, and the answer
+/// repeats it; the association and its channel are not affected. The first offer, made
+/// before any candidate was gathered, says `UDP/DTLS/SCTP`. Later offers used to as well.
+#[test]
+fn an_offer_after_nomination_over_tcp_says_tcp_dtls_sctp() -> Result<()> {
+    let (mut peers, _) = run(TcpType::Passive, TcpType::Active, &[b"x".to_vec()])?;
+    let first_offer = peers[0].pc.local_description().expect("the offer").sdp;
+    assert_eq!(data_proto(&first_offer), "UDP/DTLS/SCTP");
+
+    let now = Instant::now();
+    for offerer in [0, 1] {
+        let answerer = 1 - offerer;
+        let offer = peers[offerer].pc.create_offer(None)?;
+        assert_eq!(data_proto(&offer.sdp), "TCP/DTLS/SCTP", "peer {offerer}");
+        peers[offerer]
+            .pc
+            .set_local_description(now, offer.clone())?;
+        peers[answerer].pc.set_remote_description(now, offer)?;
+        let answer = peers[answerer].pc.create_answer(None)?;
+        assert_eq!(data_proto(&answer.sdp), "TCP/DTLS/SCTP", "peer {answerer}");
+        peers[answerer]
+            .pc
+            .set_local_description(now, answer.clone())?;
+        peers[offerer].pc.set_remote_description(now, answer)?;
+    }
+    for peer in peers.iter_mut() {
+        let channel = peer.channel_open.expect("the channel");
+        assert!(
+            peer.pc.data_channel(channel).is_some(),
+            "the channel is still there"
         );
     }
     Ok(())

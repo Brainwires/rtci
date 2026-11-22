@@ -4,9 +4,9 @@
 //! them in priority order. A pair's combined priority is computed from both sides' priorities with
 //! the controlling agent's dominating, so both agents derive the same ordering.
 //!
-//! [`CandidatePairState`](crate::candidate::candidate_pair::CandidatePairState) tracks how far a pair has got: waiting, in progress, succeeded or
-//! failed. The controlling agent nominates one of the succeeded pairs, and that pair carries the
-//! media.
+//! [`CandidatePairState`](crate::candidate::candidate_pair::CandidatePairState) tracks how far a pair has got (RFC 8445 Section 6.1.2.6): frozen,
+//! waiting, in progress, succeeded or failed. The controlling agent nominates one of the valid
+//! pairs, and that pair carries the media.
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::time::Duration;
@@ -36,6 +36,11 @@ pub enum CandidatePairState {
     /// Means a check for this pair was already done and produced a successful result.
     #[serde(rename = "succeeded")]
     Succeeded = 4,
+
+    /// Means a check for this pair has not been sent, and it cannot be sent until the pair is
+    /// unfrozen: another pair with the same foundation is being checked first.
+    #[serde(rename = "frozen")]
+    Frozen = 5,
 }
 
 impl From<u8> for CandidatePairState {
@@ -45,6 +50,7 @@ impl From<u8> for CandidatePairState {
             2 => Self::InProgress,
             3 => Self::Failed,
             4 => Self::Succeeded,
+            5 => Self::Frozen,
             _ => Self::Unspecified,
         }
     }
@@ -57,6 +63,7 @@ impl fmt::Display for CandidatePairState {
             Self::InProgress => "in-progress",
             Self::Failed => "failed",
             Self::Succeeded => "succeeded",
+            Self::Frozen => "frozen",
             Self::Unspecified => "unspecified",
         };
 
@@ -76,9 +83,21 @@ pub struct CandidatePair {
     /// The remote candidate's priority.
     pub remote_priority: u32,
     pub(crate) ice_role_controlling: bool,
-    pub(crate) binding_request_count: u16,
     pub(crate) state: CandidatePairState,
+    /// The nominated flag of a valid pair (RFC 8445 Section 7.2.5.3.2).
     pub(crate) nominated: bool,
+    /// The pair's foundation: its two candidates' foundations taken together (a hash of them).
+    /// Pairs that share one are checked one at a time until one succeeds (Section 6.1.2.6).
+    pub(crate) foundation: u32,
+    /// The pair is in the valid list: a check produced it (Section 7.2.5.3.2).
+    pub(crate) valid: bool,
+    /// The valid pair this pair's successful check produced: the pair itself, or one whose
+    /// local candidate is the mapped address the response reported.
+    pub(crate) valid_pair: Option<usize>,
+    /// The pair is in the triggered-check queue (Section 6.1.4.1).
+    pub(crate) triggered: bool,
+    /// Controlling agent: the next check on this pair carries USE-CANDIDATE (Section 8.1.1).
+    pub(crate) nominate: bool,
     /// The highest nomination the controlling peer has sent on this pair (controlled agent):
     /// 1 for `USE-CANDIDATE`, or libwebrtc's `NOMINATION` value. 0 until it nominates the pair.
     pub(crate) remote_nomination: u32,
@@ -158,8 +177,12 @@ impl CandidatePair {
             remote_priority,
             ice_role_controlling,
             state: CandidatePairState::Waiting,
-            binding_request_count: 0,
             nominated: false,
+            foundation: 0,
+            valid: false,
+            valid_pair: None,
+            triggered: false,
+            nominate: false,
             remote_nomination: 0,
             nomination_pending: false,
             // STUN transaction stats
@@ -174,7 +197,7 @@ impl CandidatePair {
         }
     }
 
-    /// RFC 5245 - 5.7.2.  Computing Pair Priority and Ordering Pairs
+    /// RFC 8445 Section 6.1.2.3, Computing Pair Priority and Ordering Pairs.
     /// Let G be the priority for the candidate provided by the controlling
     /// agent.  Let D be the priority for the candidate provided by the
     /// controlled agent.
@@ -186,11 +209,12 @@ impl CandidatePair {
             (self.remote_priority, self.local_priority)
         };
 
-        // 1<<32 overflows uint32; and if both g && d are
-        // maxUint32, this result would overflow uint64
-        ((1 << 32_u64) - 1) * u64::from(std::cmp::min(g, d))
-            + 2 * u64::from(std::cmp::max(g, d))
-            + u64::from(g > d)
+        // Candidate priorities are at most 2^31 - 1 (Section 5.1.2), so the sum is under 2^63.
+        // The arithmetic wraps rather than panics for a priority a raw `Candidate` was given
+        // outside that range.
+        (u64::from(std::cmp::min(g, d)) << 32)
+            .wrapping_add(2 * u64::from(std::cmp::max(g, d)))
+            .wrapping_add(u64::from(g > d))
     }
 
     /// Called when a STUN binding request is sent.

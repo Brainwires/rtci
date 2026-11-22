@@ -738,7 +738,9 @@ async fn test_stats_report_completeness() -> Result<()> {
         match entry {
             RTCStatsReportEntry::PeerConnection(pc) => {
                 has_peer_connection = true;
-                assert_eq!(pc.stats.id, "RTCPeerConnection");
+                // An id is opaque (webrtc 8.4): what can be said of it is that the report
+                // finds the object under it.
+                assert!(stats.contains(&pc.stats.id));
             }
             RTCStatsReportEntry::Transport(_) => {
                 has_transport = true;

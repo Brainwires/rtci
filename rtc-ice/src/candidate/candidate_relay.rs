@@ -21,6 +21,7 @@ pub struct CandidateRelayConfig {
 impl CandidateRelayConfig {
     /// Creates a new relay candidate.
     pub fn new_candidate_relay(self) -> Result<Candidate> {
+        let component = checked_component_and_priority(&self.base_config)?;
         let mut candidate_id = self.base_config.candidate_id;
         if candidate_id.is_empty() {
             candidate_id = generate_cand_id();
@@ -39,7 +40,7 @@ impl CandidateRelayConfig {
             address: self.base_config.address,
             port: self.base_config.port,
             resolved_addr: SocketAddr::new(ip, self.base_config.port),
-            component: self.base_config.component,
+            component,
             foundation_override: self.base_config.foundation,
             priority_override: self.base_config.priority,
             related_address: Some(CandidateRelatedAddress {

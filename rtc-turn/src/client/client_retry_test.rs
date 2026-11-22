@@ -49,9 +49,10 @@ fn test_channel_bind_that_times_out_is_sent_again() -> Result<()> {
     let first = server.next_request(&mut client);
     assert_eq!(first.typ.method, METHOD_CHANNEL_BIND);
 
-    // Nobody answers. Over UDP one transaction gives up after about 8 s at the default RTO, so
-    // a minute covers both attempts and stays short of the 120 s permission refresh.
-    let (requests, events) = drive_until(&server, &mut client, now + Duration::from_secs(60))?;
+    // Nobody answers. Over UDP one transaction gives up after 39.5 s at the default RTO
+    // (RFC 8489 §6.2.1), so 100 s cover both attempts and stay short of the 120 s permission
+    // refresh.
+    let (requests, events) = drive_until(&server, &mut client, now + Duration::from_secs(100))?;
 
     let ids = distinct_ids(&requests, METHOD_CHANNEL_BIND);
     assert_eq!(
@@ -73,15 +74,15 @@ fn test_channel_bind_that_times_out_is_sent_again() -> Result<()> {
         "the binding times out once, under the id of its first request"
     );
     assert_eq!(
-        client.binding_mgr.find_by_addr(&peer).map(|b| b.state()),
-        Some(BindingState::Idle),
+        binding_state(&client, relayed, peer),
+        Some(binding::BindingState::Idle),
         "a binding that failed is attempted again, not left waiting"
     );
 
     // The next send binds the channel again.
     client
         .relay(relayed)?
-        .send_to(now + Duration::from_secs(61), b"again", peer)?;
+        .send_to(now + Duration::from_secs(101), b"again", peer)?;
     let again = server.next_request(&mut client);
     assert_eq!(again.typ.method, METHOD_CHANNEL_BIND);
     assert!(!ids.contains(&again.transaction_id));
@@ -148,7 +149,7 @@ fn test_refresh_answered_after_its_retry_renews_the_allocation() -> Result<()> {
     let first = server.next_request(&mut client);
 
     // Run until the second transaction has gone out, but not until it gives up.
-    let (requests, _) = drive_until(&server, &mut client, now + Duration::from_secs(9))?;
+    let (requests, _) = drive_until(&server, &mut client, now + Duration::from_secs(40))?;
     let retry = requests
         .iter()
         .find(|r| r.typ.method == METHOD_REFRESH && r.transaction_id != first.transaction_id)
@@ -157,7 +158,7 @@ fn test_refresh_answered_after_its_retry_renews_the_allocation() -> Result<()> {
 
     server.answer(
         &mut client,
-        now + Duration::from_secs(9),
+        now + Duration::from_secs(40),
         &retry,
         CLASS_SUCCESS_RESPONSE,
         vec![Box::new(Lifetime(Duration::from_secs(300)))],

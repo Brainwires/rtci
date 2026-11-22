@@ -135,6 +135,9 @@ impl Stream<'_> {
             let drained = !s.reassembly_queue.is_readable();
             self.association
                 .reindex_stream(self.stream_identifier, bytes_before);
+            if chunks.is_some() {
+                self.association.on_receive_buffer_drained();
+            }
             if drained {
                 self.association
                     .retry_deferred_resets(self.stream_identifier);
@@ -155,7 +158,16 @@ impl Stream<'_> {
         p: &Bytes,
         ppi: PayloadProtocolIdentifier,
     ) -> Result<usize> {
-        self.write_source(now, &mut BytesChunk::new(p), ppi)
+        self.write_source(now, &mut BytesChunk::new(p), ppi, ppi.number())
+    }
+
+    /// Sends a message with any Payload Protocol Identifier (RFC 9260 section 3.3.1: the
+    /// value is the application's and SCTP passes it through unchanged). The receiver reads
+    /// it from [`Chunks::ppid`].
+    ///
+    /// [`PayloadProtocolIdentifier`] names only the WebRTC values; this takes the number.
+    pub fn write_sctp_with_ppid(&mut self, now: Instant, p: &Bytes, ppid: u32) -> Result<usize> {
+        self.write_source(now, &mut BytesChunk::new(p), ppid.into(), ppid)
     }
 
     /// Send data on the given stream.
@@ -176,16 +188,13 @@ impl Stream<'_> {
         data: &[u8],
         ppi: PayloadProtocolIdentifier,
     ) -> Result<usize> {
-        self.write_source(now, &mut ByteSlice::from_slice(data), ppi)
+        self.write_source(now, &mut ByteSlice::from_slice(data), ppi, ppi.number())
     }
 
     /// write writes len(p) bytes from p with the default Payload Protocol Identifier
     pub fn write_chunk(&mut self, now: Instant, p: &Bytes) -> Result<usize> {
-        self.write_source(
-            now,
-            &mut BytesChunk::new(p),
-            self.get_default_payload_type()?,
-        )
+        let ppi = self.get_default_payload_type()?;
+        self.write_source(now, &mut BytesChunk::new(p), ppi, ppi.number())
     }
 
     /// Send an owned [`Bytes`] on the stream with a specific payload protocol.
@@ -202,7 +211,7 @@ impl Stream<'_> {
         data: &Bytes,
         ppi: PayloadProtocolIdentifier,
     ) -> Result<usize> {
-        self.write_source(now, &mut BytesChunk::new(data), ppi)
+        self.write_source(now, &mut BytesChunk::new(data), ppi, ppi.number())
     }
 
     /// Send data on the given stream
@@ -212,11 +221,8 @@ impl Stream<'_> {
     /// it will not count this chunk as fully written. However
     /// the chunk will be advanced and contain only non-written data after the call.
     pub fn write_chunks(&mut self, now: Instant, data: &mut [Bytes]) -> Result<usize> {
-        self.write_source(
-            now,
-            &mut BytesArray::from_chunks(data),
-            self.get_default_payload_type()?,
-        )
+        let ppi = self.get_default_payload_type()?;
+        self.write_source(now, &mut BytesArray::from_chunks(data), ppi, ppi.number())
     }
 
     /// write_source writes BytesSource to the DTLS connection
@@ -225,9 +231,20 @@ impl Stream<'_> {
         now: Instant,
         source: &mut B,
         ppi: PayloadProtocolIdentifier,
+        ppid: u32,
     ) -> Result<usize> {
         if !self.is_writable() {
             return Err(Error::ErrStreamClosed);
+        }
+
+        // RFC 9260 3.3.1: a DATA chunk carries at least one byte of user data, so there is no
+        // empty user message. Refused before anything is consumed: an empty write used to
+        // take a Stream Sequence Number and send nothing, and the receiver waited for that
+        // number for ever.
+        if source.remaining() == 0 {
+            return Err(Error::OtherSctpErr(
+                "an empty user message cannot be sent (RFC 9260 3.3.1)".into(),
+            ));
         }
 
         if source.remaining() > self.association.max_message_size() as usize {
@@ -244,10 +261,25 @@ impl Stream<'_> {
         };
 
         let id = self.association.allocate_message_id()?;
+        let fragment_size = self.association.fragment_size() as usize;
+        let i_data = self.association.message_interleaving();
         let (p, _) = source.pop_chunk(self.association.max_message_size() as usize);
 
         if let Some(s) = self.association.streams.get_mut(&self.stream_identifier) {
-            let (is_buffered_amount_high, chunks) = s.packetize(now, &p, ppi);
+            let (is_buffered_amount_high, mut chunks) =
+                s.packetize(now, &p, ppi, ppid, fragment_size, i_data);
+            // RFC 6525 5.1.2 A1: while a reset of this outgoing stream is not answered, new
+            // data gets no Stream Sequence Number and is queued. It goes out when the answer
+            // is in: numbered from 0 if the peer performed the reset, and on from where the
+            // stream was if it did not.
+            let held = s.outgoing_reset_pending;
+            if held {
+                for c in &mut chunks {
+                    c.message_id = Some(id);
+                }
+                s.held_writes.push(chunks);
+                chunks = vec![];
+            }
 
             if is_buffered_amount_high {
                 trace!("StreamEvent::BufferedAmountHigh");
@@ -258,7 +290,11 @@ impl Stream<'_> {
                     }))
             }
 
-            self.association.send_payload_data(id, chunks);
+            if held {
+                self.association.held_write_count += 1;
+            } else {
+                self.association.send_payload_data(id, chunks);
+            }
 
             Ok(p.len())
         } else {
@@ -333,8 +369,20 @@ impl Stream<'_> {
         self.stream_identifier
     }
 
-    /// Sets this stream's weight under weighted fair queueing, in data channel priority units
-    /// (RFC 8832: 128, 256, 512, 1024); messages written afterwards use it.
+    /// Sets this stream's priority, in data channel priority units (RFC 8832 section 5.1:
+    /// 128 below normal, 256 normal, 512 high, 1024 extra high; any value is taken). The
+    /// default is 256.
+    ///
+    /// It is the input of two [stream schedulers](crate::StreamScheduler): under
+    /// `WeightedFairQueueing` it is the stream's weight (a stream with n times the priority
+    /// gets n times the capacity, RFC 8260 section 3.6), under `Priority` its rank (the
+    /// higher value is served first, section 3.4). The other schedulers do not look at it.
+    /// It applies from the next scheduling decision on, to what the stream has queued too,
+    /// and lasts until the stream is reset.
+    ///
+    /// RFC 8831 section 6.4 has a data channel's priority drive the scheduler: the data
+    /// channel layer calls this with the priority of the channel (from `RTCDataChannelInit`
+    /// or the DATA_CHANNEL_OPEN message) when it opens or accepts the stream.
     pub fn set_priority(&mut self, priority: u16) -> Result<()> {
         if !self
             .association
@@ -498,6 +546,16 @@ pub struct StreamState {
     pub(crate) bytes_dequeued: u64,
     pub(crate) buffered_amount_low: usize,
     pub(crate) buffered_amount_high: usize,
+    /// A reset of this outgoing stream was asked for and is not answered yet (RFC 6525
+    /// 5.1.2 A1).
+    pub(crate) outgoing_reset_pending: bool,
+    /// The messages written while the reset is pending, each as its fragments, without a
+    /// Stream Sequence Number.
+    pub(crate) held_writes: Vec<Vec<ChunkPayloadData>>,
+    /// The Message Identifiers of the next ordered and the next unordered message (RFC 8260
+    /// 2.1: two counters for each outgoing stream, both starting at 0).
+    pub(crate) ordered_mid: u32,
+    pub(crate) unordered_mid: u32,
 }
 impl StreamState {
     pub(crate) fn new(
@@ -522,6 +580,51 @@ impl StreamState {
             bytes_dequeued: 0,
             buffered_amount_low: 0,
             buffered_amount_high: u32::MAX as usize,
+            outgoing_reset_pending: false,
+            held_writes: vec![],
+            ordered_mid: 0,
+            unordered_mid: 0,
+        }
+    }
+
+    /// The numbers of the next message of this stream: its Stream Sequence Number (the
+    /// stream's current one for an unordered message, which does not use it up) and its
+    /// Message Identifier.
+    fn next_message_numbers(&mut self, unordered: bool) -> (u16, u32) {
+        if unordered {
+            let mid = self.unordered_mid;
+            self.unordered_mid = self.unordered_mid.wrapping_add(1);
+            (self.sequence_number, mid)
+        } else {
+            let (ssn, mid) = (self.sequence_number, self.ordered_mid);
+            // RFC 9260 6.6: the Stream Sequence Number is not incremented for a message
+            // with the U flag.
+            self.sequence_number = self.sequence_number.wrapping_add(1);
+            self.ordered_mid = self.ordered_mid.wrapping_add(1);
+            (ssn, mid)
+        }
+    }
+
+    /// The stream's outgoing direction was reset: its numbers start over (RFC 6525 5.2.7
+    /// H4; RFC 8260 2.3.2 for the two Message Identifier counters).
+    pub(crate) fn reset_outgoing_numbers(&mut self) {
+        self.sequence_number = 0;
+        self.ordered_mid = 0;
+        self.unordered_mid = 0;
+    }
+
+    /// Gives a message that was held for a stream reset its Stream Sequence Number.
+    pub(crate) fn number_held_message(&mut self, chunks: &mut [ChunkPayloadData]) {
+        let Some(first) = chunks.first() else {
+            return;
+        };
+        let unordered = first.unordered;
+        let (ssn, mid) = self.next_message_numbers(unordered);
+        for c in chunks {
+            if !unordered {
+                c.stream_sequence_number = ssn;
+            }
+            c.mid = mid;
         }
     }
 
@@ -529,21 +632,15 @@ impl StreamState {
         self.reassembly_queue.push(pd.clone())
     }
 
+    /// RFC 3758 3.6: what the peer's FORWARD TSN says is applied whatever this side's own
+    /// setting for the stream: `unordered` is how this side sends, not how the peer does.
     pub(crate) fn handle_forward_tsn_for_ordered(&mut self, ssn: u16) {
-        if self.unordered {
-            return; // unordered chunks are handled by handleForwardUnordered method
-        }
-
         // Remove all chunks older than or equal to the new TSN from
         // the reassembly_queue.
         self.reassembly_queue.forward_tsn_for_ordered(ssn);
     }
 
     pub(crate) fn handle_forward_tsn_for_unordered(&mut self, new_cumulative_tsn: u32) {
-        if !self.unordered {
-            return; // ordered chunks are handled by handleForwardTSNOrdered method
-        }
-
         // Remove all chunks older than or equal to the new TSN from
         // the reassembly_queue.
         self.reassembly_queue
@@ -555,9 +652,13 @@ impl StreamState {
         now: Instant,
         raw: &Bytes,
         ppi: PayloadProtocolIdentifier,
+        ppid: u32,
+        fragment_size: usize,
+        i_data: bool,
     ) -> (bool, Vec<ChunkPayloadData>) {
         let mut i = 0;
         let mut remaining = raw.len();
+        let fragment_size = fragment_size.clamp(1, self.max_payload_size.max(1) as usize);
 
         // From draft-ietf-rtcweb-data-protocol-09, section 6:
         //   All Data Channel Establishment Protocol messages MUST be sent using
@@ -578,9 +679,17 @@ impl StreamState {
         };
 
         let mut chunks = vec![];
+        // While a reset of the stream is pending the message gets its numbers later.
+        let (ssn, mid) = if self.outgoing_reset_pending {
+            (0, 0)
+        } else {
+            self.next_message_numbers(unordered)
+        };
+        let ssn = if unordered { self.sequence_number } else { ssn };
+        let mut fsn = 0u32;
 
         while remaining != 0 {
-            let fragment_size = std::cmp::min(self.max_payload_size as usize, remaining); //self.association.max_payload_size
+            let fragment_size = std::cmp::min(fragment_size, remaining);
 
             // Copy the userdata since we'll have to store it until acked
             // and the caller may re-use the buffer in the mean time
@@ -599,22 +708,19 @@ impl StreamState {
                 ending_fragment: remaining - fragment_size == 0,
                 immediate_sack: false,
                 payload_type: ppi,
-                stream_sequence_number: self.sequence_number,
+                payload_protocol_id: ppid,
+                stream_sequence_number: ssn,
+                i_data,
+                mid,
+                fsn,
                 ..Default::default()
             };
 
             chunks.push(chunk);
+            fsn = fsn.wrapping_add(1);
 
             remaining -= fragment_size;
             i += fragment_size;
-        }
-
-        // RFC 4960 Sec 6.6
-        // Note: When transmitting ordered and unordered data, an endpoint does
-        // not increment its Stream Sequence Number when transmitting a DATA
-        // chunk with U flag set to 1.
-        if !unordered {
-            self.sequence_number = self.sequence_number.wrapping_add(1);
         }
 
         let old_amount = self.buffered_amount;

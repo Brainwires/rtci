@@ -13,10 +13,10 @@ use shared::error::Result;
 /// `RequestedTransport` represents `REQUESTED-TRANSPORT` attribute.
 ///
 /// This attribute is used by the client to request a specific transport
-/// protocol for the allocated transport address. RFC 5766 only allows the use of
+/// protocol for the allocated transport address. RFC 8656 only allows the use of
 /// codepoint 17 (User Datagram protocol).
 ///
-/// [RFC 5766 Section 14.7](https://www.rfc-editor.org/rfc/rfc5766#section-14.7).
+/// [RFC 8656 Section 18.8](https://www.rfc-editor.org/rfc/rfc8656#section-18.8).
 #[derive(Default, Debug, PartialEq, Eq)]
 pub struct RequestedTransport {
     /// The transport the relay should use toward peers. WebRTC always requests UDP.

@@ -144,10 +144,15 @@
 //! - [W3C WebRTC Events](https://www.w3.org/TR/webrtc/#rtcpeerconnection-interface)
 //! - [`RTCPeerConnection`](crate::peer_connection::RTCPeerConnection)
 
+use crate::peer_connection::rtc_error::RTCError;
 use crate::peer_connection::state::ice_connection_state::RTCIceConnectionState;
 use crate::peer_connection::state::ice_gathering_state::RTCIceGatheringState;
 use crate::peer_connection::state::peer_connection_state::RTCPeerConnectionState;
 use crate::peer_connection::state::signaling_state::RTCSignalingState;
+use crate::peer_connection::transport::dtls::state::RTCDtlsTransportState;
+use crate::peer_connection::transport::ice::candidate_pair::RTCIceCandidatePair;
+use crate::peer_connection::transport::ice::state::RTCIceTransportState;
+use crate::peer_connection::transport::sctp::state::RTCSctpTransportState;
 use srtp::context::Context;
 use std::time::Instant;
 
@@ -156,10 +161,13 @@ pub(crate) mod ice_error_event;
 pub(crate) mod ice_event;
 pub(crate) mod track_event;
 
+pub use crate::peer_connection::states_events::ICE_SERVER_UNREACHABLE;
 pub use data_channel_event::RTCDataChannelEvent;
 pub use ice_error_event::RTCPeerConnectionIceErrorEvent;
 pub use ice_event::RTCPeerConnectionIceEvent;
-pub use track_event::{RTCTrackEvent, RTCTrackEventInit};
+pub use track_event::{
+    RTCRemoteStreamsChange, RTCRemoteTrackEventInit, RTCTrackEvent, RTCTrackEventInit,
+};
 
 /// Events that can be emitted by an `RTCPeerConnection`.
 ///
@@ -273,7 +281,9 @@ pub enum RTCPeerConnectionEvent {
     /// match event {
     ///     RTCPeerConnectionEvent::OnIceCandidateEvent(ice_event) => {
     ///         // Send ice_event to remote peer via signaling
-    ///         println!("Send ICE candidate: {}", ice_event.candidate.address);
+    ///         if let Some(candidate) = ice_event.candidate {
+    ///             println!("Send ICE candidate: {}", candidate.address);
+    ///         }
     ///     }
     ///     _ => {}
     /// }
@@ -516,6 +526,71 @@ pub enum RTCPeerConnectionEvent {
     ///
     /// See [track](https://www.w3.org/TR/webrtc/#event-track)
     OnTrack(RTCTrackEvent),
+
+    /// Fired when a remote source is heard using one of this connection's sender SSRCs
+    /// (RFC 3550 section 8.2), once per SSRC.
+    ///
+    /// Two sources of one RTP session cannot share an SSRC. The SSRC of a sender is part of
+    /// the session description, so the engine does not change it by itself: stop the sender
+    /// (or replace its transceiver) and renegotiate, which says BYE for the SSRC and signals
+    /// a new one. Inbound packets carrying the SSRC are dropped meanwhile. The SSRC the
+    /// connection reports from when it sends no media is replaced without this event.
+    ///
+    /// Not a W3C event: a fork addition.
+    OnSsrcCollision(crate::rtp_transceiver::SSRC),
+
+    /// W3C `RTCIceTransport` `statechange`: the connection's ICE transport changed state.
+    ///
+    /// Comes before the `OnIceConnectionStateChangeEvent` and the
+    /// `OnConnectionStateChangeEvent` the same change causes (webrtc-pc section 5.6, "update
+    /// the ICE transport state"). Not fired by `close()`.
+    OnIceTransportStateChange(RTCIceTransportState),
+
+    /// W3C `RTCIceTransport` `gatheringstatechange`: the ICE transport's gatherer changed
+    /// state. Comes before the `OnIceGatheringStateChangeEvent` of the same change.
+    OnIceGathererStateChange(RTCIceGatheringState),
+
+    /// W3C `RTCIceTransport` `selectedcandidatepairchange`: ICE selected a new candidate pair
+    /// to send over (the one `RTCIceTransport::get_selected_candidate_pair` now reports).
+    OnSelectedCandidatePairChange(RTCIceCandidatePair),
+
+    /// W3C `RTCDtlsTransport` `statechange`. Comes before the `OnConnectionStateChangeEvent` it
+    /// causes, and after the `OnDtlsTransportError` of a failure. Not fired by `close()`.
+    OnDtlsTransportStateChange(RTCDtlsTransportState),
+
+    /// W3C `RTCDtlsTransport` `error`: the DTLS transport failed, with `dtls-failure` (and the
+    /// fatal alert sent or received) or `fingerprint-failure`. Comes right before the
+    /// `OnDtlsTransportStateChange` to `Failed`.
+    OnDtlsTransportError(RTCError),
+
+    /// W3C `RTCSctpTransport` `statechange`: the SCTP transport (the one
+    /// `RTCPeerConnection::sctp` returns) changed state. Not fired by `close()`.
+    OnSctpTransportStateChange(RTCSctpTransportState),
+
+    /// W3C `RTCDTMFSender` `tonechange`: a tone began playing out (`,` for a pause), or the
+    /// tone buffer ran out (an empty tone). See
+    /// [`RTCRtpSender::dtmf`](crate::rtp_transceiver::rtp_sender::RTCRtpSender::dtmf).
+    OnDtmfToneChange(crate::rtp_transceiver::rtp_sender::dtmf::RTCDTMFToneChangeEvent),
+
+    /// The SRTP master key of this side's outbound (`outbound` true) or the peer's inbound
+    /// stream has used fifteen sixteenths of its lifetime (RFC 3711 section 9.2): `remaining`
+    /// more packets of `rtcp` (SRTCP) or RTP may be protected with it. At the limit the
+    /// connection's DTLS transport fails (a new DTLS association cannot be had from a browser
+    /// peer without an ICE restart with new DTLS parameters), so an application that will
+    /// reach it restarts the session first. Not a W3C event: a fork addition.
+    OnSrtpKeyLifetimeExpiring {
+        /// Whether it is the key this side sends with.
+        outbound: bool,
+        /// Whether it is the SRTCP count.
+        rtcp: bool,
+        /// Packets left.
+        remaining: u64,
+    },
+
+    /// Cryptex is required and the peer sent an authentic packet on `ssrc` whose header
+    /// extensions or CSRCs were not protected with it (RFC 9335 section 5.2); the packet was
+    /// dropped. Not a W3C event: a fork addition.
+    OnCryptexRequiredViolation(u32),
 }
 
 /// Reserved for future use.
@@ -577,6 +652,18 @@ pub(crate) enum RTCEventInternal {
     /// Parameter: Association handle
     SCTPHandshakeComplete(usize /*AssociationHandle*/),
 
+    /// The SCTP association was closed by signalling (RFC 8841 section 10): its data section
+    /// was rejected, an `a=sctp-port` of zero closed it, or a new `a=sctp-port` replaces it.
+    /// The data channels that ran over it are closed.
+    ///
+    /// Parameter: whether a new association replaces it (the channels not yet opened wait
+    /// for that one) or none does (they are closed too).
+    SCTPClosedBySignalling(bool /*replaced*/),
+
+    /// An SRTP master key reached its lifetime (RFC 3711 section 9.2): nothing more is
+    /// protected or accepted with it, and the DTLS transport that keyed it fails.
+    SRTPKeyExhausted,
+
     /// SCTP stream has been closed
     ///
     /// Parameters:
@@ -593,6 +680,10 @@ pub(crate) enum RTCEventInternal {
     /// - Association handle
     /// - Stream ID
     SCTPStreamFailed(usize /*AssociationHandle*/, u16 /*StreamID*/),
+
+    /// The SCTP cause code of the failure the next `SCTPStreamFailed` / `SCTPAssociationFailed`
+    /// report (W3C `RTCError.sctpCauseCode`), when the association was aborted with one.
+    SCTPFailureCause(u16),
 
     /// The SCTP association was lost to an error (see `SCTPStreamFailed`): every data channel
     /// over it fails, including one that never carried data and so has no SCTP stream.

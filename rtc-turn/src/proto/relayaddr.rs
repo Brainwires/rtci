@@ -14,7 +14,7 @@ use stun::xoraddr::*;
 /// It specifies the address and port that the server allocated to the
 /// client. It is encoded in the same way as `XOR-MAPPED-ADDRESS`.
 ///
-/// [RFC 5766 Section 14.5](https://www.rfc-editor.org/rfc/rfc5766#section-14.5).
+/// [RFC 8656 Section 18.5](https://www.rfc-editor.org/rfc/rfc8656#section-18.5).
 #[derive(PartialEq, Eq, Debug)]
 pub struct RelayedAddress {
     /// The relayed IP address.
@@ -68,5 +68,5 @@ impl Getter for RelayedAddress {
 /// It specifies the address and port that the server allocated to the
 /// client. It is encoded in the same way as `XOR-MAPPED-ADDRESS`.
 ///
-/// [RFC 5766 Section 14.5](https://www.rfc-editor.org/rfc/rfc5766#section-14.5).
+/// [RFC 8656 Section 18.5](https://www.rfc-editor.org/rfc/rfc8656#section-18.5).
 pub type XorRelayedAddress = RelayedAddress;

@@ -709,8 +709,8 @@
 #![allow(dead_code)]
 
 pub use {
-    crypto, datachannel, dtls, ice, interceptor, mdns, media, rtcp, rtp, sansio, sctp, sdp, shared,
-    srtp, stun, turn,
+    crypto, datachannel, dtls, ice, interceptor, mdns, media, rtcp, rtp, sansio, sctp, sdp, sframe,
+    shared, srtp, stun, turn,
 };
 
 pub mod data_channel;
