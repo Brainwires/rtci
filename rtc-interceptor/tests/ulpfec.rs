@@ -940,3 +940,32 @@ fn the_red_reader_refuses_headers_that_overrun_the_payload() {
     );
     assert!(parsed.fec.is_empty());
 }
+
+/// The input the `ulpfec_receive` fuzz target stopped on (bytes `0a 0a`): an empty packet with
+/// the FEC payload type on an SSRC the RED-carriage receiver was never bound with. In the RED
+/// carriage FEC shares the media SSRC, so that SSRC is a stranger's: the packet is not FEC to
+/// this receiver, is not given to its decoder, and passes on exactly as it arrived. (The target
+/// asserted that only media-SSRC packets come out; the assertion was wrong, not the receiver.)
+#[test]
+fn a_packet_on_an_ssrc_the_red_receiver_does_not_know_passes_through_untouched() {
+    let now = Instant::now();
+    let mut receiver =
+        red_receiver(UlpfecReceiveBuilder::red(RED_PT, FEC_PT).with_repair_forwarding(false));
+
+    let stranger = rtp::Packet {
+        header: rtp::header::Header {
+            version: 2,
+            payload_type: FEC_PT,
+            sequence_number: 2560,
+            timestamp: 2560 * 3000,
+            ssrc: FEC_SSRC,
+            ..Default::default()
+        },
+        payload: Bytes::new(),
+    };
+    let delivered = receive(&mut receiver, now, std::slice::from_ref(&stranger));
+
+    assert_eq!(1, delivered.len());
+    assert_eq!(&stranger, rtp_of(&delivered[0]));
+    assert!(!delivered[0].has(&Attribute::RecoveredByFec));
+}

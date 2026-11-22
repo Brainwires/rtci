@@ -46,7 +46,16 @@ fn info(separate: bool) -> StreamInfo {
     }
 }
 
-fn feed(chain: &mut impl Interceptor, now: Instant, packet: &rtc::rtp::packet::Packet) {
+/// `binds_fec_stream`: whether the chain was bound with the separate FEC stream's SSRC. A chain
+/// that was not has no business with a packet on that SSRC and passes it on as it came, like
+/// any packet of a stream it does not know (the RED carriage has no FEC SSRC at all).
+fn feed(
+    chain: &mut impl Interceptor,
+    now: Instant,
+    packet: &rtc::rtp::packet::Packet,
+    binds_fec_stream: bool,
+) {
+    let foreign = packet.header.ssrc != MEDIA_SSRC && !binds_fec_stream;
     let _ = chain.handle_read(TaggedPacket {
         now,
         transport: TransportContext::default(),
@@ -59,6 +68,11 @@ fn feed(chain: &mut impl Interceptor, now: Instant, packet: &rtc::rtp::packet::P
         };
         budget -= 1;
         if let Packet::Rtp(delivered) = &out.message.packet {
+            if foreign {
+                assert_eq!(packet, delivered, "a foreign packet passes through untouched");
+                assert!(!out.message.has(&Attribute::RecoveredByFec));
+                continue;
+            }
             assert_eq!(MEDIA_SSRC, delivered.header.ssrc, "only media is delivered");
             if out.message.custom::<UlpfecRepair>().is_some() {
                 assert!(delivered.payload.is_empty());
@@ -155,8 +169,8 @@ fuzz_target!(|data: &[u8]| {
             }
         }
 
-        feed(&mut red, now, &packet);
-        feed(&mut stream, now, &packet);
+        feed(&mut red, now, &packet, false);
+        feed(&mut stream, now, &packet, true);
 
         let recovered = if op % 6 == 2 || op % 6 == 4 {
             decoder.push_fec(payload).unwrap_or_default()
