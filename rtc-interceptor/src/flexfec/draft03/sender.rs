@@ -3,6 +3,7 @@
 use super::encoder::FlexFec03Encoder;
 use crate::Interceptor;
 use crate::stream_info::StreamInfo;
+use crate::wire_image::{WireImageTap, WireImages, wire_image_tap};
 use crate::{AttributedPacket, Packet, TaggedPacket};
 use sansio::Protocol;
 use shared::error::Error;
@@ -22,8 +23,12 @@ pub const DEFAULT_NUM_FEC_PACKETS: u32 = 2;
 /// ```
 /// use rtc_interceptor::{Slot, FlexFec03SendBuilder, Registry};
 ///
+/// let mut fec = FlexFec03SendBuilder::new().with_num_fec_packets(1).build();
+/// // The encoder protects the packets as they leave: see `wire_tap`.
+/// let tap = fec.wire_tap();
 /// let chain = Registry::new()
-///     .with(Slot::FecEncoder, FlexFec03SendBuilder::new().with_num_fec_packets(1).build())
+///     .with(Slot::FecEncoder, fec)
+///     .with(Slot::FecWireImage, tap)
 ///     .build();
 /// ```
 pub struct FlexFec03SendBuilder {
@@ -140,6 +145,9 @@ pub struct FlexFec03SendInterceptor {
     /// Pinned by the builder; random per repair stream when unset.
     initial_sequence_number: Option<u16>,
     initial_timestamp: Option<u32>,
+    /// Where the media packets are read from once [`wire_tap`](Self::wire_tap) was called: as
+    /// they left, below everything that edits them.
+    wire: Option<WireImages>,
     /// Repair packets the encoder produced, waiting to join the belt.
     /// Inbound packets ready for the next interceptor.
     read_queue: VecDeque<TaggedPacket>,
@@ -158,6 +166,81 @@ impl FlexFec03SendInterceptor {
             streams: HashMap::new(),
             initial_sequence_number: None,
             initial_timestamp: None,
+            wire: None,
+        }
+    }
+
+    /// The tap this encoder reads the media packets from, to register at
+    /// [`Slot::FecWireImage`](crate::Slot::FecWireImage).
+    ///
+    /// FEC covers the source packets as they are on the wire (draft-03 section 4.1). This
+    /// interceptor generates packets, so it sits above the pacer, where a media packet is not
+    /// final: the TWCC sender below writes the transport-wide sequence number into it, adding
+    /// the header extension when the packet has none. Encoding there protects an image the
+    /// receiver never sees, and what it recovers from it is corrupt. With the tap registered the
+    /// encoder protects the packet that left, and the repair packets still enter the chain
+    /// here, so they are paced, numbered and recorded.
+    ///
+    /// Without a tap (this method never called) the encoder reads the packets as they pass this
+    /// slot, which is the wire image only when nothing below edits them: no TWCC sender in the
+    /// chain.
+    pub fn wire_tap(&mut self) -> WireImageTap {
+        let (tap, images) = wire_image_tap();
+        for ssrc in self.streams.keys() {
+            images.watch(*ssrc);
+        }
+        self.wire = Some(images);
+        tap
+    }
+
+    /// Add one media packet to its stream's block and queue the repair packets a full block
+    /// yields.
+    fn protect(
+        &mut self,
+        now: Instant,
+        transport: shared::TransportContext,
+        rtp_packet: &rtp::Packet,
+    ) {
+        let Some(stream) = self.streams.get_mut(&rtp_packet.header.ssrc) else {
+            return;
+        };
+
+        stream.block.push(rtp_packet.clone());
+        if (stream.block.len() as u32) < self.num_media_packets {
+            return;
+        }
+        // The repair packets carry the send clock at `now`: the instant the block's last packet
+        // was written with (from the wire tap, the instant the pacer released it).
+        let timestamp = stream.clock.timestamp_at(now);
+        let repair_packets = stream
+            .encoder
+            .encode(&stream.block, self.num_fec_packets, timestamp);
+        // Cleared either way: a block the encoder refused — a gap, or one longer than the
+        // masks describe — must not be retried packet by packet as more arrive.
+        stream.block.clear();
+
+        for packet in repair_packets {
+            // Queued for `poll_write`, which puts them back on the belt: a repair packet is a real
+            // outgoing RTP packet and still needs every interceptor ahead — a transport-wide sequence
+            // number, the pacer, and a place in the send history congestion control reads.
+            self.write_queue.push_back(TaggedPacket {
+                now,
+                transport,
+                message: AttributedPacket::new(Packet::Rtp(packet)),
+            });
+        }
+    }
+
+    /// Protect the media packets that left since the last call.
+    fn protect_wire_images(&mut self) {
+        let Some(images) = self.wire.as_ref().map(WireImages::take) else {
+            return;
+        };
+        for image in images {
+            if let Packet::Rtp(rtp_packet) = &image.message.packet {
+                // `image.now` is the instant the pacer released the packet.
+                self.protect(image.now, image.transport, rtp_packet);
+            }
         }
     }
 
@@ -184,51 +267,29 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for FlexFec03SendInterceptor {
     }
 
     fn handle_write(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
+        if self.wire.is_some() {
+            // The packets are protected as they leave, from the tap: here they only pass.
+            self.protect_wire_images();
+            self.write_queue.push_back(msg);
+            return Ok(());
+        }
+
         let Packet::Rtp(rtp_packet) = &msg.message.packet else {
             self.write_queue.push_back(msg);
             return Ok(());
         };
-
-        let ssrc = rtp_packet.header.ssrc;
+        let rtp_packet = rtp_packet.clone();
         let now = msg.now;
         let transport = msg.transport;
 
-        let Some(stream) = self.streams.get_mut(&ssrc) else {
-            self.write_queue.push_back(msg);
-            return Ok(());
-        };
-
-        stream.block.push(rtp_packet.clone());
-        let repair_packets = if stream.block.len() as u32 >= self.num_media_packets {
-            let timestamp = stream.clock.timestamp_at(now);
-            let repair = stream
-                .encoder
-                .encode(&stream.block, self.num_fec_packets, timestamp);
-            // Cleared either way: a block the encoder refused — a gap, or one longer than the
-            // masks describe — must not be retried packet by packet as more arrive.
-            stream.block.clear();
-            repair
-        } else {
-            Vec::new()
-        };
-
         // The media packet goes out first; the repair packets protect what has already left.
         self.write_queue.push_back(msg);
-
-        for packet in repair_packets {
-            // Queued for `poll_write`, which puts them back on the belt: a repair packet is a real
-            // outgoing RTP packet and still needs every interceptor ahead — a transport-wide sequence
-            // number, the pacer, and a place in the send history congestion control reads.
-            self.write_queue.push_back(TaggedPacket {
-                now,
-                transport,
-                message: AttributedPacket::new(Packet::Rtp(packet)),
-            });
-        }
+        self.protect(now, transport, &rtp_packet);
         Ok(())
     }
 
     fn poll_write(&mut self) -> Option<TaggedPacket> {
+        self.protect_wire_images();
         self.write_queue.pop_front()
     }
 
@@ -273,6 +334,9 @@ impl Interceptor for FlexFec03SendInterceptor {
                     },
                 },
             );
+            if let Some(images) = &self.wire {
+                images.watch(info.ssrc);
+            }
         }
     }
 
@@ -280,6 +344,9 @@ impl Interceptor for FlexFec03SendInterceptor {
         // Any partly-filled block goes with it: those packets have already been sent unprotected,
         // and a repair packet for a stream that has stopped has nothing left to repair.
         self.streams.remove(&info.ssrc);
+        if let Some(images) = &self.wire {
+            images.unwatch(info.ssrc);
+        }
     }
 
     fn bind_remote_stream(&mut self, _info: &StreamInfo) {}

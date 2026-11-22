@@ -16,10 +16,17 @@ The engine has two implementations:
 - **B, `GccInterceptor`** (`rtc-interceptor/src/gcc/twcc_gcc/{mod,trendline,rate_controller}.rs`): an older,
   self-contained trendline variant with a shared-handle output and no pacer. Its differences are listed after the table.
 
+**Since the audit** (the table and the totals are current; the gap and bug lists below are the audit's):
+bugs G1, G2, G3 and G4 are fixed, each first reproduced by a failing test
+(`an_application_limited_sender_does_not_inflate_the_delay_estimate`,
+`a_stream_the_feedback_does_not_cover_is_not_counted_as_lost`,
+`the_controller_leaves_additive_increase_when_the_path_widens`,
+`the_pacer_follows_the_estimators_starting_rate`).
+
 Totals (MUST includes MUST NOT/SHALL; SHOULD includes SHOULD NOT/RECOMMENDED):
 
-- MUST: tested 20 / untested 3 / partial 6 / missing 5 / violated 1 / n-a 0
-- SHOULD: tested 7 / untested 3 / partial 4 / missing 3 / violated 0 / n-a 0
+- MUST: tested 24 / untested 3 / partial 5 / missing 3 / violated 0 / n-a 0
+- SHOULD: tested 8 / untested 3 / partial 4 / missing 2 / violated 0 / n-a 0
 - MAY: tested 0 / untested 0 / partial 0 / missing 1 / violated 0 / n-a 0
 
 | ID | § | Level | Clause (short paraphrase) | Verdict | Code | Test | Note |
@@ -56,16 +63,16 @@ Totals (MUST includes MUST NOT/SHALL; SHOULD includes SHOULD NOT/RECOMMENDED):
 | GCC-5.4-8 | 5.4 | SHOULD | del_var_th(0) = 12.5 ms | tested | `gcc/threshold.rs:3` | `it_starts_at_the_drafts_value` | |
 | GCC-5.4-9 | 5.4 | SHOULD | overuse_time_th = 10 ms | untested | `gcc/overuse.rs:11` | none pins the value | |
 | GCC-5.5-1 | 5.5 | MUST | State table: Over-use leads to Decrease; Normal: Hold to Increase, Decrease to Hold; Under-use: Increase and Decrease to Hold | tested | `gcc/state.rs:11-23` | `overuse_always_decreases`, `recovery_holds_once_before_climbing`, `a_quiet_path_keeps_increasing`, `a_draining_queue_holds`, `every_transition_is_defined` | |
-| GCC-5.5-2 | 5.5 | MUST | The subsystem starts in the Increase state | violated | `gcc/state.rs:5-6` (`#[default] Hold`) | none | Costs one update: the first Normal moves Hold to Increase |
+| GCC-5.5-2 | 5.5 | MUST | The subsystem starts in the Increase state | tested | `gcc/state.rs` (`#[default] Increase`) | `the_controller_starts_in_the_increase_state` |  |
 | GCC-5.5-3 | 5.5 | MUST | Multiplicative increase: eta = 1.08^min(dt, 1 s); A_hat = eta A_hat | tested | `gcc/rate_control.rs:77-78` | `a_quiet_path_increases`, `gcc_climbs_on_a_healthy_path` | |
-| GCC-5.5-4 | 5.5 | MUST | "Near convergence" means R_hat within three standard deviations of the average incoming rate seen in Decrease | partial | `gcc/rate_control.rs:69-71` (`target > last_decrease_rate * 0.85`) | `it_climbs_carefully_near_a_known_ceiling` | Last decrease rate only; no average, no deviation, and the test compares the target, not R_hat |
-| GCC-5.5-5 | 5.5 | SHOULD | That average and deviation are exponential moving averages with smoothing 0.95 | missing | none | none | |
+| GCC-5.5-4 | 5.5 | MUST | "Near convergence" means R_hat within three standard deviations of the average incoming rate seen in Decrease | tested | `gcc/rate_control.rs` `Convergence` (`band`), `RateController::update` | `the_additive_increase_is_half_a_packet_per_response_time`, `it_climbs_carefully_near_a_known_ceiling`, `a_received_rate_above_the_convergence_band_returns_to_multiplicative_increase` | Average and deviation of R_hat measured at each decrease; "close" is R_hat within three deviations. The variance is normalised by the average and held in [0.4, 2.5] kbit/s as libwebrtc holds it, so the band scales with the rate |
+| GCC-5.5-5 | 5.5 | SHOULD | That average and deviation are exponential moving averages with smoothing 0.95 | tested | `gcc/rate_control.rs` `Convergence::on_decrease` (smoothing 0.95) | `a_received_rate_above_the_convergence_band_returns_to_multiplicative_increase` (band of about 60 kbit/s at 1 Mbit/s), `a_decrease_far_below_the_band_restarts_the_average` |  |
 | GCC-5.5-6 | 5.5 | MUST | Without valid statistics, stay in multiplicative increase | tested | `gcc/rate_control.rs:69-79` (`last_decrease_rate: None`) | `a_quiet_path_increases` | |
-| GCC-5.5-7 | 5.5 | MUST | R_hat rising above three deviations of the average resets the average and returns to multiplicative increase | missing | `gcc/rate_control.rs` (`last_decrease_rate` is never cleared) | none | After the first over-use the controller is additive for as long as the target stays above 85% of that old rate, even after capacity grows |
+| GCC-5.5-7 | 5.5 | MUST | R_hat rising above three deviations of the average resets the average and returns to multiplicative increase | tested | `gcc/rate_control.rs` `RateController::update` (Increase: `convergence.reset()` above the band) | `a_received_rate_above_the_convergence_band_returns_to_multiplicative_increase`, `the_controller_leaves_additive_increase_when_the_path_widens` | A decrease far below the band also restarts the average |
 | GCC-5.5-8 | 5.5 | MUST | R_hat is the incoming rate over a window T | tested | `gcc/rate_calc.rs:24-41`, `gcc/estimator.rs:128-149` | `it_measures_a_steady_stream`, `old_samples_expire`, `it_follows_a_halved_rate` | Measured on the receiver's timeline, with whole-packet sizes |
 | GCC-5.5-9 | 5.5 | SHOULD | T is between 0.5 and 1 s | tested | `gcc/rate_calc.rs:4` (500 ms) | `old_samples_expire` | |
-| GCC-5.5-10 | 5.5 | MUST | Additive increase: response_time = 100 ms + rtt; alpha = 0.5 min(dt / response_time, 1); A_hat += max(1000, alpha x expected_packet_size_bits) | partial | `gcc/rate_control.rs:72-75` (`+ 12_000.0` per update) | `it_climbs_carefully_near_a_known_ceiling` | A fixed 12 kbit per 200 ms step; no RTT, no dt scaling, no packet-size model. `EstimatorStats::round_trip_time` is always `None` |
-| GCC-5.5-11 | 5.5 | MUST | A_hat(i) < 1.5 R_hat(i): the estimate may not run away from the rate actually sent | missing | `gcc/rate_control.rs:65-80` | none | An application-limited sender lets the delay target climb to the configured maximum |
+| GCC-5.5-10 | 5.5 | MUST | Additive increase: response_time = 100 ms + rtt; alpha = 0.5 min(dt / response_time, 1); A_hat += max(1000, alpha x expected_packet_size_bits) | partial | `gcc/rate_control.rs` `RateController::update`, `expected_packet_size_bits`, `set_round_trip_time` | `the_additive_increase_is_half_a_packet_per_response_time` | The formula is the draft's. The RTT is 200 ms until `set_round_trip_time` is called, and `Gcc` does not call it yet: `History::apply` computes an RTT that is dropped |
+| GCC-5.5-11 | 5.5 | MUST | A_hat(i) < 1.5 R_hat(i): the estimate may not run away from the rate actually sent | tested | `gcc/rate_control.rs` `RateController::update` (`MAX_ESTIMATE_TO_RECEIVED_RATIO`) | `the_estimate_stays_within_one_and_a_half_times_the_received_rate`, `an_application_limited_sender_does_not_inflate_the_delay_estimate` | Applied whenever R_hat is known, so an application-limited sender pulls the estimate down to 1.5 times what it sends |
 | GCC-5.5-12 | 5.5 | MUST | On over-use: A_hat = beta R_hat | tested | `gcc/rate_control.rs:56-64` | `overuse_backs_off_from_the_received_rate`, `it_holds_when_the_received_rate_is_unknown`, `gcc_backs_off_on_a_queueing_path` | |
 | GCC-5.5-13 | 5.5 | SHOULD | beta = 0.85 | tested | `gcc/rate_control.rs:5` | `overuse_backs_off_from_the_received_rate` | |
 | GCC-5.5-14 | 5.5 | MUST | On under-use the estimate is held | tested | `gcc/state.rs:17`, `gcc/rate_control.rs:55` | `a_draining_queue_holds` | |

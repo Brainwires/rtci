@@ -3,6 +3,7 @@
 use super::recorder::CcFeedbackRecorder;
 use crate::Interceptor;
 use crate::stream_info::StreamInfo;
+use crate::twcc::flow_ssrcs;
 use crate::{AttributedPacket, Packet, TaggedPacket};
 use rtcp::transport_feedbacks::cc_feedback_report::Ecn;
 use sansio::Protocol;
@@ -44,7 +45,7 @@ fn ecn_of(codepoint: Option<EcnCodepoint>) -> Ecn {
 pub struct Rfc8888Builder {
     interval: Duration,
     max_report_size: usize,
-    sender_ssrc: u32,
+    sender_ssrc: Option<u32>,
 }
 
 impl Default for Rfc8888Builder {
@@ -52,7 +53,25 @@ impl Default for Rfc8888Builder {
         Self {
             interval: DEFAULT_INTERVAL,
             max_report_size: DEFAULT_MAX_REPORT_SIZE,
-            sender_ssrc: 0,
+            sender_ssrc: None,
+        }
+    }
+}
+
+/// Whether a stream negotiated RFC 8888 feedback: `a=rtcp-fb:<pt> ack ccfb` (RFC 8888
+/// section 6).
+pub(crate) fn stream_supports_ccfb(info: &StreamInfo) -> bool {
+    info.rtcp_feedback
+        .iter()
+        .any(|feedback| feedback.typ == "ack" && feedback.parameter == "ccfb")
+}
+
+/// An SSRC for a participant that sends no media: random, and never 0 (RFC 3550 section 8).
+fn random_ssrc() -> u32 {
+    loop {
+        let ssrc: u32 = rand::random();
+        if ssrc != 0 {
+            return ssrc;
         }
     }
 }
@@ -75,15 +94,21 @@ impl Rfc8888Builder {
     /// Byte budget for one report.
     ///
     /// A report larger than the path MTU is fragmented or dropped, and feedback that does not
-    /// arrive is worth nothing, so a report describes fewer packets rather than growing.
+    /// arrive is worth nothing, so feedback that exceeds the budget is split into several
+    /// reports (RFC 8888 section 3.1).
     pub fn with_max_report_size(mut self, max_report_size: usize) -> Self {
         self.max_report_size = max_report_size;
         self
     }
 
     /// The SSRC these reports are sent from.
+    ///
+    /// Left unset, the interceptor uses the SSRC of the first local stream bound to it (the
+    /// RTCP packet sender is then the endpoint's own media source), and while there is none, a
+    /// random non-zero SSRC chosen when it is built, as a receive-only RTP participant has
+    /// (RFC 3550 section 8). It is never 0.
     pub fn with_sender_ssrc(mut self, sender_ssrc: u32) -> Self {
-        self.sender_ssrc = sender_ssrc;
+        self.sender_ssrc = Some(sender_ssrc);
         self
     }
 
@@ -108,7 +133,12 @@ impl Rfc8888Builder {
 pub struct Rfc8888Interceptor {
     interval: Duration,
     max_report_size: usize,
-    sender_ssrc: u32,
+    /// The SSRC set on the builder, if one was.
+    configured_ssrc: Option<u32>,
+    /// The SSRC reports are sent from when none was configured and no local stream is bound.
+    receiver_ssrc: u32,
+    /// Local streams in the order they were bound: the first is the RTCP packet sender.
+    local_ssrcs: Vec<u32>,
     recorder: CcFeedbackRecorder,
     /// Remote streams being reported on.
     streams: HashSet<u32>,
@@ -122,18 +152,28 @@ pub struct Rfc8888Interceptor {
 }
 
 impl Rfc8888Interceptor {
-    fn new(interval: Duration, max_report_size: usize, sender_ssrc: u32) -> Self {
+    fn new(interval: Duration, max_report_size: usize, sender_ssrc: Option<u32>) -> Self {
         Self {
             read_queue: VecDeque::new(),
             interval,
             max_report_size,
-            sender_ssrc,
+            configured_ssrc: sender_ssrc,
+            receiver_ssrc: random_ssrc(),
+            local_ssrcs: Vec::new(),
             recorder: CcFeedbackRecorder::new(),
             streams: HashSet::new(),
             next_timeout: None,
             epoch: None,
             write_queue: VecDeque::new(),
         }
+    }
+
+    /// The SSRC the next report is sent from (RFC 8888 section 3.1: the SSRC of the RTCP packet
+    /// sender).
+    pub fn sender_ssrc(&self) -> u32 {
+        self.configured_ssrc
+            .or_else(|| self.local_ssrcs.first().copied())
+            .unwrap_or(self.receiver_ssrc)
     }
 
     /// The middle 32 bits of the NTP timestamp for `now`, which is what a report carries.
@@ -202,13 +242,16 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for Rfc8888Interceptor {
 
             if !self.recorder.is_empty() {
                 let report_timestamp = self.report_timestamp(now);
-                let report = self.recorder.build_report(
+                let sender_ssrc = self.sender_ssrc();
+                for report in self.recorder.build_reports(
                     now,
-                    self.sender_ssrc,
+                    sender_ssrc,
                     report_timestamp,
                     self.max_report_size,
-                );
-                if !report.report_blocks.is_empty() {
+                ) {
+                    if report.report_blocks.is_empty() {
+                        continue;
+                    }
                     self.write_queue.push_back(TaggedPacket {
                         now,
                         transport: TransportContext::default(),
@@ -226,19 +269,35 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for Rfc8888Interceptor {
 }
 
 impl Interceptor for Rfc8888Interceptor {
+    /// Only a stream that negotiated `ack ccfb` is reported on: RTCP feedback is sent for the
+    /// payload types whose `a=rtcp-fb` line names it and for no other (RFC 4585 section 4.2,
+    /// RFC 8888 section 6). A peer that declined `ack ccfb` gets no report.
+    ///
+    /// The stream's retransmission and FEC SSRCs are reported with it: the feedback covers
+    /// every packet of the session's negotiated payload types, repair included (section 6).
     fn bind_remote_stream(&mut self, info: &StreamInfo) {
-        self.streams.insert(info.ssrc);
+        if stream_supports_ccfb(info) {
+            self.streams.extend(flow_ssrcs(info));
+        }
     }
 
     fn unbind_remote_stream(&mut self, info: &StreamInfo) {
-        self.streams.remove(&info.ssrc);
-        self.recorder.remove_stream(info.ssrc);
+        for ssrc in flow_ssrcs(info) {
+            self.streams.remove(&ssrc);
+            self.recorder.remove_stream(ssrc);
+        }
         if self.streams.is_empty() {
             self.next_timeout = None;
         }
     }
 
-    fn bind_local_stream(&mut self, _info: &StreamInfo) {}
+    fn bind_local_stream(&mut self, info: &StreamInfo) {
+        if !self.local_ssrcs.contains(&info.ssrc) {
+            self.local_ssrcs.push(info.ssrc);
+        }
+    }
 
-    fn unbind_local_stream(&mut self, _info: &StreamInfo) {}
+    fn unbind_local_stream(&mut self, info: &StreamInfo) {
+        self.local_ssrcs.retain(|ssrc| *ssrc != info.ssrc);
+    }
 }

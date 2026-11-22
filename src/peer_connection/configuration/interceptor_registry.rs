@@ -45,7 +45,7 @@
 //! When adding an interceptor that **delays** a packet (jitter buffer, pacer) or **generates**
 //! one (FEC repair, a recovered packet), its position stops being a preference and becomes a
 //! correctness property. The named slots carry those rules; one of your own goes at
-//! `Slot::from(n)`, and they are spaced a thousand apart so there is room between any two. The
+//! `Slot::from(n)`, and they are spaced so there is room between any two. The
 //! rules are documented on [`Slot`],
 //! [`Registry`] and on the interceptor trait itself.
 //!
@@ -827,12 +827,21 @@ pub fn configure_congestion_control<E: BandwidthEstimator + 'static>(
         }
     }
 
+    // The pacer starts at the estimator's own starting rate. Left at its default it would
+    // release at 1 Mbit/s until the first feedback moved the estimate, whatever the estimator
+    // said it wanted to start at.
+    let initial_target = estimator.target_bitrate();
     let registry = registry
         .with(
             Slot::CongestionControl,
             CongestionControlBuilder::new(estimator).build(),
         )
-        .with(Slot::Pacer, PacerBuilder::new().build());
+        .with(
+            Slot::Pacer,
+            PacerBuilder::new()
+                .with_target_bitrate(initial_target)
+                .build(),
+        );
 
     // The other half of the loop: what this endpoint reports about what it *receives*, so the
     // remote's estimator has something to work with. One recorder or the other, never both —
@@ -949,8 +958,8 @@ mod slot_order_tests {
             vec![
                 Slot::RtcpSession,
                 Slot::NackResponder,
-                Slot::NackGenerator,
                 Slot::TwccReceiver,
+                Slot::NackGenerator,
                 Slot::KeyFrameRequests,
             ],
             slots
@@ -981,8 +990,8 @@ mod slot_order_tests {
                 Slot::TwccSender,
                 Slot::Pacer,
                 Slot::NackResponder,
-                Slot::NackGenerator,
                 Slot::TwccReceiver,
+                Slot::NackGenerator,
             ],
             slots(&registry)
         );
@@ -1068,8 +1077,8 @@ mod slot_order_tests {
             vec![
                 (Slot::RtcpSession, "RtcpSessionInterceptor".to_owned()),
                 (Slot::NackResponder, "NackResponderInterceptor".to_owned()),
-                (Slot::NackGenerator, "NackGeneratorInterceptor".to_owned()),
                 (Slot::TwccReceiver, "TwccReceiverInterceptor".to_owned()),
+                (Slot::NackGenerator, "NackGeneratorInterceptor".to_owned()),
                 (
                     Slot::KeyFrameRequests,
                     "KeyFrameRequestInterceptor".to_owned()

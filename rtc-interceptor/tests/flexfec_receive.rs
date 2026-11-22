@@ -83,8 +83,8 @@ impl Harness {
         let chain = Registry::new()
             .with(Slot::FecDecoder, FlexFec03ReceiveBuilder::new().build())
             .with(
-                // Application-ward of the FEC decoder at 6_000, so it sees recovered packets.
-                Slot::from(6_500),
+                // Application-ward of the FEC decoder at 10_300, so it sees recovered packets.
+                Slot::from(10_450),
                 Marker {
                     seen: marker_seen,
                     read_queue: VecDeque::new(),

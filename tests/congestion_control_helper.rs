@@ -70,3 +70,74 @@ fn rfc8888_is_selectable() {
 
     let _chain = registry.build();
 }
+
+/// The pacer the helper installs releases at the estimator's starting rate before any feedback
+/// has arrived (draft-ietf-rmcat-gcc-02 section 4: the pacer sends at the target bitrate), not at
+/// the pacer's own 1 Mbit/s default.
+#[test]
+fn the_helper_paces_at_the_estimators_starting_rate() {
+    use rtc::interceptor::{
+        AttributedPacket, BandwidthEstimator, Interceptor, Packet, StreamInfo, TaggedPacket,
+    };
+    use rtc::sansio::Protocol;
+    use rtc::shared::TransportContext;
+    use rtc::shared::marshal::MarshalSize;
+    use std::time::{Duration, Instant};
+
+    let gcc = Gcc::default();
+    let target = gcc.target_bitrate();
+    let mut media_engine = MediaEngine::default();
+    let mut chain = configure_congestion_control(
+        Registry::new(),
+        gcc,
+        CongestionFeedback::Rfc8888,
+        &mut media_engine,
+    )
+    .expect("congestion control")
+    .build();
+    chain.bind_local_stream(&StreamInfo {
+        ssrc: 7,
+        clock_rate: 90_000,
+        payload_type: 96,
+        ..Default::default()
+    });
+
+    // Two seconds of media at 1 Mbit/s offered at once; count what leaves in two seconds.
+    let epoch = Instant::now();
+    for sequence_number in 0..250u16 {
+        chain
+            .handle_write(TaggedPacket {
+                now: epoch,
+                transport: TransportContext::default(),
+                message: AttributedPacket::new(Packet::Rtp(rtc::rtp::packet::Packet {
+                    header: rtc::rtp::header::Header {
+                        version: 2,
+                        payload_type: 96,
+                        sequence_number,
+                        ssrc: 7,
+                        ..Default::default()
+                    },
+                    payload: vec![0xAB; 1000].into(),
+                })),
+            })
+            .expect("write");
+    }
+    let mut released_bits = 0usize;
+    for step in 0..=2_000u64 {
+        chain
+            .handle_timeout(epoch + Duration::from_millis(step))
+            .expect("timeout");
+        while let Some(packet) = chain.poll_write() {
+            if let Packet::Rtp(rtp) = &packet.message.packet {
+                released_bits += rtp.marshal_size() * 8;
+            }
+        }
+    }
+
+    let rate = released_bits as f64 / 2.0;
+    assert!(
+        rate <= target * 1.15,
+        "released at {rate} bit/s against a target of {target}"
+    );
+    assert!(rate >= target * 0.8, "and not starved either: {rate} bit/s");
+}

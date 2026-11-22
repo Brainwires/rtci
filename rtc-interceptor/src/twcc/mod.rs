@@ -26,6 +26,14 @@ pub(crate) fn stream_supports_twcc(info: &StreamInfo) -> Option<u8> {
         .map(|ext| ext.id as u8)
 }
 
+/// The SSRCs one stream sends on: its media SSRC, then its retransmission and FEC SSRCs when it
+/// has them.
+pub(crate) fn flow_ssrcs(info: &StreamInfo) -> impl Iterator<Item = u32> {
+    std::iter::once(info.ssrc)
+        .chain(info.ssrc_rtx)
+        .chain(info.ssrc_fec)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

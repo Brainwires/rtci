@@ -2,10 +2,10 @@
 
 use super::estimator::BandwidthEstimator;
 use crate::Interceptor;
-use crate::rtpfb::convert::{convert_ccfb, convert_twcc};
+use crate::rtpfb::convert::FeedbackTimeline;
 use crate::rtpfb::history::History;
 use crate::stream_info::StreamInfo;
-use crate::twcc::stream_supports_twcc;
+use crate::twcc::{flow_ssrcs, stream_supports_twcc};
 use crate::{Attribute, Packet, TaggedPacket};
 use sansio::Protocol;
 use shared::error::Error;
@@ -61,10 +61,11 @@ impl<E: BandwidthEstimator> CongestionControlBuilder<E> {
     /// Build the interceptor.
     pub fn build(self) -> CongestionControlInterceptor<E> {
         CongestionControlInterceptor {
-            last_target: self.estimator.target_bitrate(),
+            last_target: None,
             estimator: self.estimator,
             prune_horizon: self.prune_horizon,
             history: History::new(),
+            timeline: FeedbackTimeline::new(),
             streams: HashMap::new(),
             read_queue: VecDeque::new(),
             write_queue: VecDeque::new(),
@@ -99,10 +100,14 @@ impl<E: BandwidthEstimator> CongestionControlBuilder<E> {
 pub struct CongestionControlInterceptor<E: BandwidthEstimator> {
     estimator: E,
     history: History,
+    /// The receiver's clock, followed across feedback reports.
+    timeline: FeedbackTimeline,
     streams: HashMap<u32, LocalStream>,
     prune_horizon: Duration,
     /// The last target handed onward, so an unchanged estimate does not re-announce itself.
-    last_target: f64,
+    /// `None` until the first one has been announced: the pacer has to learn the estimator's
+    /// starting rate too, not only its changes.
+    last_target: Option<f64>,
     read_queue: VecDeque<TaggedPacket>,
     write_queue: VecDeque<TaggedPacket>,
 }
@@ -111,6 +116,12 @@ impl<E: BandwidthEstimator> CongestionControlInterceptor<E> {
     /// The estimator, for reading its stats.
     pub fn estimator(&self) -> &E {
         &self.estimator
+    }
+
+    /// How many TWCC feedback packets the receiver sent that never arrived here, by the gaps
+    /// in the feedback packet count.
+    pub fn lost_feedback(&self) -> u64 {
+        self.history.lost_feedback()
     }
 
     /// How many sent packets are still awaiting a verdict.
@@ -139,7 +150,8 @@ impl<E: BandwidthEstimator> CongestionControlInterceptor<E> {
         if let Some(feedback) = payload
             .downcast_ref::<rtcp::transport_feedbacks::transport_layer_cc::TransportLayerCc>(
         ) {
-            for acknowledgement in convert_twcc(feedback) {
+            self.history.on_twcc_feedback_count(feedback.fb_pkt_count);
+            for acknowledgement in self.timeline.convert_twcc(feedback) {
                 self.history.on_twcc_feedback(now, acknowledgement);
             }
             return true;
@@ -148,7 +160,7 @@ impl<E: BandwidthEstimator> CongestionControlInterceptor<E> {
         if let Some(feedback) = payload
             .downcast_ref::<rtcp::transport_feedbacks::cc_feedback_report::CcFeedbackReport>(
         ) {
-            let (_report_delay, per_stream) = convert_ccfb(feedback);
+            let (_report_delay, per_stream) = self.timeline.convert_ccfb(feedback);
             for (ssrc, acknowledgements) in per_stream {
                 for acknowledgement in acknowledgements {
                     self.history.on_ccfb_feedback(now, ssrc, acknowledgement);
@@ -183,16 +195,20 @@ impl<E: BandwidthEstimator> Protocol<TaggedPacket, TaggedPacket, ()>
         if reported {
             let reports = self.history.take_reports();
             self.estimator.on_reports(msg.now, &reports);
+        }
 
-            let target = self.estimator.target_bitrate();
-            if target != self.last_target {
-                self.last_target = target;
-                // Onto *this* packet: the pacer is application-ward of here, so it sees this
-                // packet after this interceptor does and reads the attribute on its way past.
-                msg.message.add(Attribute::TargetBitrateChanged {
-                    bits_per_second: target,
-                });
-            }
+        // Announced on a change, and once at the start on whatever inbound packet comes first:
+        // a pacer that only ever heard about changes would run at its own default until the
+        // estimate first moved, which with no feedback yet is exactly when the estimator's
+        // cautious starting rate matters.
+        let target = self.estimator.target_bitrate();
+        if self.last_target != Some(target) {
+            self.last_target = Some(target);
+            // Onto *this* packet: the pacer is application-ward of here, so it sees this
+            // packet after this interceptor does and reads the attribute on its way past.
+            msg.message.add(Attribute::TargetBitrateChanged {
+                bits_per_second: target,
+            });
         }
 
         self.read_queue.push_back(msg);
@@ -250,12 +266,19 @@ impl<E: BandwidthEstimator> Interceptor for CongestionControlInterceptor<E> {
     fn bind_local_stream(&mut self, info: &StreamInfo) {
         // Tracked whether or not it negotiated transport-wide CC: RFC 8888 reports against the RTP
         // sequence number and needs no extension, so a stream without one is still worth recording.
+        // The retransmission and FEC SSRCs are recorded with the media SSRC: their packets are
+        // bytes on the same path, and a history without them reads the path as carrying less
+        // than it does.
         let hdr_ext_id = stream_supports_twcc(info).unwrap_or_default();
-        self.streams.insert(info.ssrc, LocalStream { hdr_ext_id });
+        for ssrc in flow_ssrcs(info) {
+            self.streams.insert(ssrc, LocalStream { hdr_ext_id });
+        }
     }
 
     fn unbind_local_stream(&mut self, info: &StreamInfo) {
-        self.streams.remove(&info.ssrc);
+        for ssrc in flow_ssrcs(info) {
+            self.streams.remove(&ssrc);
+        }
     }
 
     fn bind_remote_stream(&mut self, _info: &StreamInfo) {}
