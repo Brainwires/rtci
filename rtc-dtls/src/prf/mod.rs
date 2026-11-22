@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod prf_test;
 
+use crate::record_layer::record_layer_header::RecordLayerHeader;
 use std::fmt;
 
 use crypto::{Mac, RTCCrypto};
@@ -268,15 +269,22 @@ pub(crate) fn prf_mac(
     sequence_number: u64,
     content_type: ContentType,
     protocol_version: ProtocolVersion,
+    cid: Option<&[u8]>,
     payload: &[u8],
 ) -> Result<Vec<u8>> {
-    let mut msg = vec![0u8; 13];
-    msg[..2].copy_from_slice(&epoch.to_be_bytes());
-    msg[2..8].copy_from_slice(&sequence_number.to_be_bytes()[2..]);
-    msg[8] = content_type as u8;
-    msg[9] = protocol_version.major;
-    msg[10] = protocol_version.minor;
-    msg[11..].copy_from_slice(&(payload.len() as u16).to_be_bytes());
+    // RFC 9146 section 5.1 for a `tls12_cid` record (its connection id given), RFC 5246
+    // 6.2.3.1 otherwise.
+    let msg = crate::crypto::record_additional_data(
+        &RecordLayerHeader {
+            content_type,
+            protocol_version,
+            epoch,
+            sequence_number,
+            content_len: 0,
+        },
+        payload.len(),
+        cid,
+    );
 
     let mut output = vec![0; mac.output_len()];
     mac.sign(&[&msg, payload], &mut output)

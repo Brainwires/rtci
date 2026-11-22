@@ -350,6 +350,41 @@ pub trait CipherSuite: Send {
     ///
     /// Fails if authentication fails, or the record is malformed.
     fn decrypt(&mut self, input: &[u8]) -> Result<Vec<u8>>;
+
+    /// [`Self::encrypt`] for a `tls12_cid` record (RFC 9146): `pkt_rlh` and `raw` have the
+    /// content type `tls12_cid` and the DTLSInnerPlaintext, without the connection id,
+    /// which the additional data (or MAC) covers. The result has the 13-byte header too;
+    /// the caller puts the connection id into it.
+    ///
+    /// # Errors
+    ///
+    /// Fails as [`Self::encrypt`] does, and for a suite without `tls12_cid` records.
+    fn encrypt_with_connection_id(
+        &mut self,
+        _pkt_rlh: &RecordLayerHeader,
+        _raw: &[u8],
+        _connection_id: &[u8],
+    ) -> Result<Vec<u8>> {
+        Err(Error::Other(
+            "the cipher suite has no tls12_cid records".to_owned(),
+        ))
+    }
+
+    /// [`Self::decrypt`] for a `tls12_cid` record (RFC 9146), given without its connection
+    /// id; the result is the header and the DTLSInnerPlaintext.
+    ///
+    /// # Errors
+    ///
+    /// Fails as [`Self::decrypt`] does, and for a suite without `tls12_cid` records.
+    fn decrypt_with_connection_id(
+        &mut self,
+        _input: &[u8],
+        _connection_id: &[u8],
+    ) -> Result<Vec<u8>> {
+        Err(Error::Other(
+            "the cipher suite has no tls12_cid records".to_owned(),
+        ))
+    }
 }
 
 // Taken from https://www.iana.org/assignments/tls-parameters/tls-parameters.xml

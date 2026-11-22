@@ -119,11 +119,19 @@ impl Suite13 {
         }
     }
 
+    /// Whether `crypto` has what the suite needs. The record-number mask is also created
+    /// once: it is the one operation only DTLS 1.3 uses, and a provider that wraps another
+    /// and passes `supports` through while leaving `new_header_mask` at its default would
+    /// otherwise negotiate DTLS 1.3 and then fail every record. Such a provider gets DTLS
+    /// 1.2 instead.
     pub(crate) fn supported_by(&self, crypto: &dyn RTCCrypto) -> bool {
         crypto.supports(CryptoAlgorithm::Hash(self.hash()))
             && crypto.supports(CryptoAlgorithm::Hmac(self.hmac()))
             && crypto.supports(CryptoAlgorithm::Aead(self.aead()))
             && crypto.supports(CryptoAlgorithm::HeaderMask(self.header_mask()))
+            && crypto
+                .new_header_mask(self.header_mask(), &vec![0u8; self.key_len()])
+                .is_ok_and(|mut mask| mask.mask(&[0u8; crypto::HEADER_MASK_SAMPLE_LEN]).is_ok())
     }
 }
 

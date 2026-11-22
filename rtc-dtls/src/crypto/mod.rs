@@ -22,6 +22,7 @@ pub mod crypto_chacha20;
 pub mod crypto_gcm;
 pub(crate) mod padding;
 
+use crate::content::ContentType;
 use std::convert::TryFrom;
 use std::sync::Arc;
 
@@ -515,6 +516,37 @@ pub(crate) fn record_explicit_nonce(h: &RecordLayerHeader) -> [u8; 8] {
     nonce[..2].copy_from_slice(&h.epoch.to_be_bytes());
     nonce[2..].copy_from_slice(&h.sequence_number.to_be_bytes()[2..]);
     nonce
+}
+
+/// The additional data of an AEAD record, and the pseudo-header a MAC covers in front of
+/// the content: RFC 5246 6.2.3.3 / 6.2.3.1 for an ordinary record, and RFC 9146 section 5
+/// for a `tls12_cid` record, whose connection id `cid` is given (the header then has the
+/// content type `tls12_cid`, and `payload_len` is the length of the DTLSInnerPlaintext).
+///
+/// ```text
+/// seq_num_placeholder (8 x 0xff) || tls12_cid || cid_length || tls12_cid || version
+///     || epoch || sequence_number || cid || length_of_DTLSInnerPlaintext
+/// ```
+pub(crate) fn record_additional_data(
+    h: &RecordLayerHeader,
+    payload_len: usize,
+    cid: Option<&[u8]>,
+) -> Vec<u8> {
+    let Some(cid) = cid else {
+        return generate_aead_additional_data(h, payload_len).to_vec();
+    };
+    let mut data = Vec::with_capacity(23 + cid.len());
+    data.extend_from_slice(&[0xff; 8]);
+    data.push(ContentType::Tls12Cid as u8);
+    data.push(cid.len() as u8);
+    data.push(ContentType::Tls12Cid as u8);
+    data.push(h.protocol_version.major);
+    data.push(h.protocol_version.minor);
+    data.extend_from_slice(&h.epoch.to_be_bytes());
+    data.extend_from_slice(&h.sequence_number.to_be_bytes()[2..]);
+    data.extend_from_slice(cid);
+    data.extend_from_slice(&(payload_len as u16).to_be_bytes());
+    data
 }
 
 pub(crate) fn generate_aead_additional_data(h: &RecordLayerHeader, payload_len: usize) -> [u8; 13] {

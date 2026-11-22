@@ -142,6 +142,13 @@ pub enum KeyExchangeAlgorithm {
     P384,
     /// X25519.
     X25519,
+    /// X25519MLKEM768 (draft-ietf-tls-ecdhe-mlkem, code point 0x11EC): ML-KEM-768 and
+    /// X25519 side by side. Not a Diffie-Hellman exchange: the initiator's share is an
+    /// ML-KEM encapsulation key followed by an X25519 public key (1216 bytes), the
+    /// responder's an ML-KEM ciphertext followed by an X25519 public key (1120 bytes), and
+    /// the shared secret the ML-KEM secret followed by the X25519 one (64 bytes). A
+    /// responder goes through [`RTCCrypto::key_exchange_respond`](crate::RTCCrypto::key_exchange_respond).
+    X25519MlKem768,
 }
 
 /// Signature schemes currently used by DTLS.
