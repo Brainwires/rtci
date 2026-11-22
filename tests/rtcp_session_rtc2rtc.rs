@@ -170,10 +170,17 @@ struct World {
     now: Instant,
     /// Drop the sender's RTP packet with this SSRC and sequence number, once.
     drop_once: Option<(u32, u16)>,
-    /// The FEC SSRC the engine minted for the sender's encoding, once connected.
+    /// The sender's FEC SSRC, once a test has read it from the sender's parameters.
     fec_ssrc: Option<u32>,
-    /// The sender's RTP packets with that FEC SSRC put on the wire.
+    /// The sender's RTP packets with `fec_ssrc` put on the wire.
     fec_on_wire: usize,
+    /// Drop every copy of the sender's RTP packet with this SSRC and sequence number: the
+    /// original and any retransmission on the media SSRC.
+    lose_for_good: Option<(u32, u16)>,
+    /// How many copies of `lose_for_good` the link dropped.
+    lost_copies: usize,
+    /// Drop every sender RTP packet with one of these SSRCs (an RTX stream).
+    blocked_ssrcs: Vec<u32>,
 }
 
 impl World {
@@ -197,8 +204,19 @@ impl World {
                 break;
             }
             for (i, from, to, data) in in_flight {
-                if i == 0 && wire_rtp(&data).is_some_and(|(ssrc, _)| Some(ssrc) == self.fec_ssrc) {
-                    self.fec_on_wire += 1;
+                if i == 0
+                    && let Some((ssrc, seq)) = wire_rtp(&data)
+                {
+                    if Some(ssrc) == self.fec_ssrc {
+                        self.fec_on_wire += 1;
+                    }
+                    if self.lose_for_good == Some((ssrc, seq)) {
+                        self.lost_copies += 1;
+                        continue;
+                    }
+                    if self.blocked_ssrcs.contains(&ssrc) {
+                        continue;
+                    }
                 }
                 if i == 0
                     && let Some(rtp) = wire_rtp(&data)
@@ -291,6 +309,9 @@ impl World {
             drop_once: None,
             fec_ssrc: None,
             fec_on_wire: 0,
+            lose_for_good: None,
+            lost_copies: 0,
+            blocked_ssrcs: Vec::new(),
         };
         let transceiver = world.peers[0].pc.add_transceiver_from_kind(
             RtpCodecKind::Video,
@@ -349,16 +370,6 @@ impl World {
                 .unwrap_or(world.now);
             world.run_until(next.max(world.now + Duration::from_millis(1)))?;
         }
-        world.fec_ssrc = world.peers[0]
-            .pc
-            .rtp_sender(sender)
-            .expect("sender")
-            .get_parameters()
-            .encodings[0]
-            .rtp_coding_parameters
-            .fec
-            .as_ref()
-            .map(|fec| fec.ssrc);
         Ok((world, sender))
     }
 
@@ -466,6 +477,7 @@ fn the_receiver_learns_the_cname_of_the_fec_ssrc_from_its_rtcp() -> Result<()> {
             .expect("FlexFEC is negotiated: the encoding has a repair SSRC")
     };
     assert_ne!(fec_ssrc, ssrc);
+    world.fec_ssrc = Some(fec_ssrc);
     let cname = world.peers[0].pc.rtcp_cname().to_owned();
 
     // Half a second of media: a repair block closes every five packets (100 ms).
@@ -593,11 +605,14 @@ fn closing_the_sender_mutes_the_receivers_track() -> Result<()> {
 
 /// RFC 5956 / flexfec-03: with a FEC format registered, an encoding the application gives
 /// without a FEC SSRC gets one, offered in an `a=ssrc-group:FEC-FR`, and its repair flow
-/// recovers a media packet the link lost; the test names no FEC SSRC.
+/// recovers a media packet the link lost; the test names no FEC SSRC. NACK and RTX are
+/// negotiated too, so the link drops every copy of the lost packet (the original and any
+/// retransmission on the media SSRC) and the whole RTX stream: the packet can reach the
+/// receiving application only through the FEC decoder.
 #[test]
 fn a_minted_fec_ssrc_carries_the_repair_flow_that_recovers_a_lost_packet() -> Result<()> {
     let (mut world, sender) = World::connected_with(true)?;
-    let (ssrc, _, _) = world.sender_stream(sender);
+    let (ssrc, rtx_ssrc, _) = world.sender_stream(sender);
     let fec_ssrc = {
         let mut sender = world.peers[0].pc.rtp_sender(sender).expect("sender");
         sender.get_parameters().encodings[0]
@@ -616,12 +631,15 @@ fn a_minted_fec_ssrc_carries_the_repair_flow_that_recovers_a_lost_packet() -> Re
         local.contains(&format!("a=ssrc-group:FEC-FR {ssrc} {fec_ssrc}")),
         "{local}"
     );
+    world.fec_ssrc = Some(fec_ssrc);
+    world.blocked_ssrcs.extend(rtx_ssrc);
     let lost = FIRST_SEQ + 10;
-    world.drop_once = Some((ssrc, lost));
+    world.lose_for_good = Some((ssrc, lost));
     world.send_media(sender, FIRST_SEQ, 40)?;
     let until = world.now + Duration::from_secs(2);
     world.run_until(until)?;
-    assert!(world.drop_once.is_none(), "the link lost the packet");
+    assert!(world.lost_copies >= 1, "the link lost the packet");
+    assert!(world.fec_on_wire > 0, "the FEC SSRC sent repair packets");
     assert!(
         world.peers[1].read_rtp.contains(&(ssrc, lost)),
         "the lost packet was recovered"
