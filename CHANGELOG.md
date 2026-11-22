@@ -820,6 +820,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+- **interceptor**: bandwidth probing, as an option that is off by default
+  (`CongestionControlBuilder::with_bandwidth_probing`, `bandwidth_probing` in
+  `DefaultInterceptorOptions`). The congestion controller asks for clusters of packets at a
+  multiple of the target (three and six times the starting rate at the start, twice the result
+  while the path carries what is asked, one every five seconds while the application sends less
+  than the target), the pacer releases a cluster at its rate and marks its packets, the NACK
+  responder fills it with retransmissions of recent packets on the RTX stream, and the estimator
+  takes the rate the cluster arrived at (`BandwidthEstimator::on_probe_result`, `ProbeController`,
+  `ProbeRequest`, `ProbePacket`, `probe_estimate`). On a virtual clock `Gcc` goes from 300 kbit/s
+  to 2.5 Mbit/s in 0.4 s with it and in 26.1 s without
+  (`rtc-interceptor/tests/bandwidth_probing.rs`). No RFC requires probing (RFC 8836 section 2
+  names it as one way to start faster; draft-ietf-rmcat-gcc-02 has none), and it sends packets
+  the application did not write, so it is not a default.
+- **gcc**: a packet the receiver reports as arrived with ECN-CE counts as a lost one in the
+  loss-based controller (RFC 8888 section 7, RFC 6679 section 7.3.3); the mark was only counted
+  in statistics.
+- **cc**: several TMMBRs in one compound RTCP packet are answered with one TMMBN (RFC 5104
+  section 4.2.2.2).
+- **interceptor**: the congestion controller notices a path change by itself: when inbound
+  packets keep arriving between other addresses than before (another candidate pair), the
+  estimator is told (`BandwidthEstimator::on_path_change`) and `Gcc` starts its delay side over
+  (RFC 8836 section 2, requirement 1).
+- **test**: the `interceptor_inbound` fuzz target's logic runs as a unit test over a fixed
+  corpus (`tests/interceptor_inbound_fuzz_corpus.rs`).
+
 - **interceptor**: `negotiated_congestion_feedback` / `CongestionFeedbackFormat`: the one
   feedback format a stream runs on, from its negotiated feedback (RFC 8888 when `ack ccfb` is
   there, transport-wide congestion control otherwise). The TWCC sender does not number a stream
