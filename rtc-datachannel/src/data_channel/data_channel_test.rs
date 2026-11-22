@@ -459,3 +459,135 @@ fn test_one_byte_dcep_payload_is_an_error() {
     };
     assert!(dc.handle_read(msg).is_err());
 }
+
+/// RFC 8832 section 6: a DATA_CHANNEL_OPEN "received on an already used stream" is not
+/// acknowledged. The channel reports it as an error, on which its owner closes the channel;
+/// it used to answer with a second DATA_CHANNEL_ACK and carry on.
+#[test]
+fn test_open_on_a_channel_in_use_is_refused_without_an_ack() -> Result<()> {
+    let open = Message::DataChannelOpen(DataChannelOpen {
+        channel_type: ChannelType::Reliable,
+        priority: CHANNEL_PRIORITY_NORMAL,
+        reliability_parameter: 0,
+        label: b"again".to_vec(),
+        protocol: Vec::new(),
+    })
+    .marshal()?;
+    let open_on = |stream_id| DataChannelMessage {
+        stream_id,
+        ppi: PayloadProtocolIdentifier::Dcep,
+        payload: BytesMut::from(&open[..]),
+        ..Default::default()
+    };
+
+    // A channel the peer opened, one this side opened, and one negotiated out of band.
+    let accepted = DataChannel::accept(
+        DataChannelConfig::default(),
+        0,
+        1,
+        PayloadProtocolIdentifier::Dcep,
+        &open,
+    )?;
+    let dialed = DataChannel::dial(DataChannelConfig::default(), 0, 1)?;
+    let negotiated = DataChannel::dial(
+        DataChannelConfig {
+            negotiated: true,
+            ..Default::default()
+        },
+        0,
+        1,
+    )?;
+    for mut dc in [accepted, dialed, negotiated] {
+        while dc.poll_write().is_some() {}
+        assert!(dc.handle_read(open_on(1)).is_err());
+        assert!(dc.poll_write().is_none(), "no DATA_CHANNEL_ACK");
+        assert_eq!(
+            dc.messages_received(),
+            0,
+            "a refused message is not counted"
+        );
+    }
+    Ok(())
+}
+
+/// RFC 8831 section 6.6: the PPID says how a message is to be read. One under a PPID that is
+/// not a data channel's (52 and 54, the deprecated partial ones, included: all decode to
+/// `Unknown`) is refused, where it used to be queued for the application as binary data.
+#[test]
+fn test_a_message_with_an_unsupported_ppid_is_refused() -> Result<()> {
+    let mut dc = DataChannel::dial(
+        DataChannelConfig {
+            negotiated: true,
+            ..Default::default()
+        },
+        0,
+        1,
+    )?;
+    for wire_ppid in [0u32, 52, 54, 55, 58] {
+        let ppi = PayloadProtocolIdentifier::from(wire_ppid);
+        assert!(
+            dc.handle_read(DataChannelMessage {
+                stream_id: 1,
+                ppi,
+                payload: BytesMut::from(&b"fragment"[..]),
+                ..Default::default()
+            })
+            .is_err(),
+            "PPID {wire_ppid}"
+        );
+    }
+    assert!(dc.poll_read().is_none());
+    assert_eq!(dc.messages_received(), 0);
+    assert_eq!(dc.bytes_received(), 0);
+
+    // The four user PPIDs of RFC 8831 section 8 are delivered.
+    for wire_ppid in [51u32, 53, 56, 57] {
+        dc.handle_read(DataChannelMessage {
+            stream_id: 1,
+            ppi: PayloadProtocolIdentifier::from(wire_ppid),
+            payload: BytesMut::from(&[0u8][..]),
+            ..Default::default()
+        })?;
+        assert!(dc.poll_read().is_some(), "PPID {wire_ppid}");
+    }
+    Ok(())
+}
+
+/// RFC 8832 section 5.1: for reliable data channels the Reliability Parameter "MUST be set to
+/// 0 on the sending side", and the OPEN this side sends carries the priority, label and
+/// protocol the channel was created with.
+#[test]
+fn test_a_dialed_open_carries_the_channels_parameters() -> Result<()> {
+    let (channel_type, reliability_parameter) =
+        DataChannel::get_channel_type_and_reliability_parameter(false, None, None);
+    assert_eq!(
+        (channel_type, reliability_parameter),
+        (ChannelType::ReliableUnordered, 0)
+    );
+    let mut dc = DataChannel::dial(
+        DataChannelConfig {
+            channel_type,
+            reliability_parameter,
+            priority: 1024,
+            label: "label".to_owned(),
+            protocol: "proto".to_owned(),
+            negotiated: false,
+        },
+        0,
+        2,
+    )?;
+    let open = dc.poll_write().expect("the OPEN");
+    assert_eq!(open.ppi, PayloadProtocolIdentifier::Dcep);
+    assert_eq!(open.stream_id, 2);
+    assert_eq!(
+        Message::unmarshal(&mut &open.payload[..])?,
+        Message::DataChannelOpen(DataChannelOpen {
+            channel_type: ChannelType::ReliableUnordered,
+            priority: 1024,
+            reliability_parameter: 0,
+            label: b"label".to_vec(),
+            protocol: b"proto".to_vec(),
+        })
+    );
+    Ok(())
+}

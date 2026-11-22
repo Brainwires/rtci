@@ -1891,6 +1891,16 @@ pub enum Error {
     #[error("protocol is larger then 65535 bytes")]
     ErrProtocolTooLarge,
 
+    /// ErrLabelTooLarge indicates that the label given for a data channel is longer than the
+    /// 65535 bytes a DATA_CHANNEL_OPEN can carry (RFC 8832 section 5.1)
+    #[error("label is larger than 65535 bytes")]
+    ErrLabelTooLarge,
+
+    /// ErrDataChannelIdInUse indicates that a data channel was created with a negotiated id
+    /// whose SCTP stream already carries a data channel (RFC 8831 section 6.5)
+    #[error("data channel id is already in use")]
+    ErrDataChannelIdInUse,
+
     /// ErrSenderNotCreatedByConnection indicates remove_track was called with a RtpSender not created
     /// by this PeerConnection
     #[error("RtpSender not created by this PeerConnection")]
@@ -2228,6 +2238,9 @@ pub enum Error {
     /// Add_transceiver_SDP called with 0 transceivers.
     #[error("add_transceiver_sdp() called with 0 transceivers")]
     ErrSDPZeroTransceivers,
+    /// A data channel m= section without a valid `a=sctp-port` (RFC 8841 section 5).
+    #[error("invalid Media Section. Data channel section without a valid a=sctp-port")]
+    ErrSDPSctpPortInvalid,
     /// Invalid Media Section. Media + DataChannel both enabled.
     #[error("invalid Media Section. Media + DataChannel both enabled")]
     ErrSDPMediaSectionMediaDataChanInvalid,
