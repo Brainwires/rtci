@@ -463,10 +463,12 @@ pub(crate) fn handle_server_key_exchange(
             match prf_pre_master_secret(&h.public_key, &mut local_keypair, curve) {
                 Ok(pre_master_secret) => pre_master_secret,
                 Err(err) => {
+                    // RFC 8422 5.10: a peer's point that is not on the curve (or otherwise
+                    // unusable) is refused: illegal_parameter.
                     return Err((
                         Some(Alert {
                             alert_level: AlertLevel::Fatal,
-                            alert_description: AlertDescription::InternalError,
+                            alert_description: AlertDescription::IllegalParameter,
                         }),
                         Some(err),
                     ));

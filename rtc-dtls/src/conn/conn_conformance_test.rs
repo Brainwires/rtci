@@ -1205,8 +1205,8 @@ fn client_refuses_a_server_key_exchange_with_a_bad_signature() {
         |_| {},
         |datagram| {
             if let Some(body) = handshake_body_range(datagram, SERVER_KEY_EXCHANGE) {
-                // The ECDHE public point: what the signature covers.
-                datagram[body.start + 5] ^= 0x01;
+                // The last byte of the signature.
+                datagram[body.end - 1] ^= 0x01;
             }
         },
     );
@@ -1215,6 +1215,52 @@ fn client_refuses_a_server_key_exchange_with_a_bad_signature() {
     assert_eq!(
         plaintext_alerts(&exchange.from_client),
         vec![(ALERT_FATAL, ALERT_DECRYPT_ERROR)]
+    );
+}
+
+/// RFC 8422 5.10: an ECDHE public key that is not a point of the curve is refused, by either
+/// side, with illegal_parameter. (The server offers secp256r1 first; flipping a bit of the X
+/// coordinate takes the point off the curve.)
+#[test]
+fn an_ecdhe_public_key_that_is_not_on_the_curve_is_refused() {
+    const CLIENT_KEY_EXCHANGE: u8 = 16;
+
+    // The server's point, in ServerKeyExchange: curve_type, named_curve, length, 0x04, X, Y.
+    let exchange = Exchange::run_altering(
+        client(builder()),
+        server(builder()),
+        |_| {},
+        |datagram| {
+            if let Some(body) = handshake_body_range(datagram, SERVER_KEY_EXCHANGE) {
+                assert_eq!(&datagram[body.start..body.start + 5], &[3, 0, 0x17, 65, 4]);
+                datagram[body.start + 10] ^= 0x01;
+            }
+        },
+    );
+    assert!(exchange.client_err.is_some());
+    assert!(exchange.client.is_failed());
+    assert_eq!(
+        plaintext_alerts(&exchange.from_client),
+        vec![(ALERT_FATAL, ALERT_ILLEGAL_PARAMETER)]
+    );
+
+    // The client's point, in ClientKeyExchange: length, 0x04, X, Y.
+    let exchange = Exchange::run_altering(
+        client(builder()),
+        server(builder()),
+        |datagram| {
+            if let Some(body) = handshake_body_range(datagram, CLIENT_KEY_EXCHANGE) {
+                assert_eq!(&datagram[body.start..body.start + 2], &[65, 4]);
+                datagram[body.start + 10] ^= 0x01;
+            }
+        },
+        |_| {},
+    );
+    assert!(exchange.server_err.is_some());
+    assert!(exchange.server.is_failed());
+    assert_eq!(
+        plaintext_alerts(&exchange.from_server),
+        vec![(ALERT_FATAL, ALERT_ILLEGAL_PARAMETER)]
     );
 }
 
