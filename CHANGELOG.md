@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **jsep**: a rolled-back local offer takes back its ICE restart (RFC 9429 section 5.7). The
+  restart is still applied with `set_local_description`, so that checks for the new generation
+  are answered at once, but the session it replaced is kept until the answer arrives: a
+  rollback, explicit or the implicit one of a remote offer, brings back the credentials,
+  candidates, pairs, selected pair and gathering state of that session (with
+  `icegatheringstatechange` back to what it was) instead of leaving the agent in a restarted
+  generation that no answer will complete. New in rtc-ice (additive):
+  `Agent::apply_restart_revertible`, `revert_restart`, `commit_restart`,
+  `has_revertible_restart`.
+- **jsep**: a receive bandwidth. New `RTCRtpTransceiver::set_receive_bandwidth(Option<u64>)`
+  and `receive_bandwidth()`: a receiving section of the next description states it as
+  `b=TIAS:<bits per second>` and `b=AS:<kilobits>` (the smallest value RFC 9429 section 5.10
+  turns back into at least that much); the remote sender keeps under it, and it is the
+  maximum of the TMMBRs this endpoint sends (RFC 5104 section 4.2.1.2).
 - **jsep**: congestion control signalling. `register_default_interceptors` registers the
   abs-send-time header extension on video (new `configure_abs_send_time`): offers carry it
   beside transport-wide congestion control and `ack ccfb`, and an answer to a REMB peer that

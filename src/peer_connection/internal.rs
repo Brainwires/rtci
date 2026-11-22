@@ -1160,7 +1160,21 @@ impl RTCPeerConnection {
         sd: &RTCSessionDescription,
         op: StateChangeOp,
         next_state: RTCSignalingState,
+        now: Instant,
     ) -> Result<()> {
+        // A remote answer keeps the ICE restart of the local offer it answers; a rollback of
+        // that offer takes it back (RFC 9429 section 5.7).
+        if op == StateChangeOp::SetRemote
+            && matches!(sd.sdp_type, RTCSdpType::Answer | RTCSdpType::Pranswer)
+        {
+            self.commit_local_ice_restart();
+        }
+        if sd.sdp_type == RTCSdpType::Rollback
+            && self.signaling_state == RTCSignalingState::HaveLocalOffer
+        {
+            self.revert_local_ice_restart(now);
+        }
+
         // A remote offer applied in the stable state: what the last completed exchange
         // negotiated is remembered, so that a rollback can bring it back (W3C: the
         // [[LastStableState...]] slots). An offer applied over a pending one keeps what was
@@ -2702,6 +2716,49 @@ impl RTCPeerConnection {
         }
     }
 
+    /// Applies the ICE restart a local offer staged (`create_offer`) so that a rollback of
+    /// the offer can take it back ([`Self::revert_local_ice_restart`]; RFC 9429 section 5.7:
+    /// "any resources allocated by the abandoned local description are discarded").
+    pub(super) fn apply_local_offer_ice_restart(&mut self, now: Instant) -> Result<()> {
+        let keep_local_candidates = !self
+            .setting_engine
+            .candidates
+            .discard_local_candidates_during_ice_restart;
+        if self
+            .ice_transport()
+            .gathering_before_local_restart
+            .is_none()
+        {
+            let announced = self.announced_gathering();
+            self.ice_transport_mut().gathering_before_local_restart = Some(announced);
+        }
+        self.ice_transport_mut()
+            .agent
+            .apply_restart_revertible(now, keep_local_candidates)
+    }
+
+    /// The answer to the local offer arrived: its ICE restart is kept.
+    pub(super) fn commit_local_ice_restart(&mut self) {
+        self.ice_transport_mut().agent.commit_restart();
+        self.ice_transport_mut().gathering_before_local_restart = None;
+    }
+
+    /// The local offer was rolled back: the ICE session goes on as before its restart, with
+    /// its credentials, candidates and selected pair, and the gathering state it had (RFC 9429
+    /// section 5.7). A no-op when the offer restarted nothing.
+    pub(super) fn revert_local_ice_restart(&mut self, now: Instant) {
+        let gathering = self
+            .ice_transport_mut()
+            .gathering_before_local_restart
+            .take();
+        if !self.ice_transport_mut().agent.revert_restart(now) {
+            return;
+        }
+        if let Some(gathering) = gathering {
+            self.restore_announced_gathering(gathering);
+        }
+    }
+
     /// Applies a staged ICE restart, restarting the agent's timers at `now`.
     ///
     /// A no-op when nothing is staged, so `set_local_description` can call it unconditionally
@@ -3971,7 +4028,6 @@ a=mid:2\r\n";
 /// make the report grow to.
 const MAX_UNRESOLVED_MDNS_CANDIDATE_STATS: usize = 320;
 
-/// The first of `draws` that is not in `taken` (and not 0, which some peers treat as unset).
 /// The most this endpoint has said it receives in the sections `mids` of its description
 /// `local`: per section `b=TIAS` (bits per second, RFC 3890), else `b=AS` times 1000 (RFC 8866
 /// section 5.8), the smallest of the sections that state one, so that no TMMBR exceeds any of
@@ -3997,6 +4053,7 @@ pub(crate) fn negotiated_receive_maximum(
         .min()
 }
 
+/// The first of `draws` that is not in `taken` (and not 0, which some peers treat as unset).
 pub(crate) fn unused_ssrc_from(
     draws: impl IntoIterator<Item = SSRC>,
     taken: &HashSet<SSRC>,
@@ -4011,8 +4068,6 @@ pub(crate) fn unused_ssrc_from(
 mod unused_ssrc_test {
     use super::*;
 
-    /// RFC 5576 sections 5 and 8: a drawn SSRC that a remote description mentions or another
-    /// local stream has is drawn again.
     /// RFC 5104 section 4.2.1.2: the negotiated maximum is the local description's `b=TIAS`,
     /// else `b=AS` times 1000, of the receiving sections, the smallest when several state one.
     #[test]
@@ -4034,6 +4089,8 @@ m=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:2\r\n";
         assert_eq!(negotiated_receive_maximum(&local, &mids(&["2"])), None);
     }
 
+    /// RFC 5576 sections 5 and 8: a drawn SSRC that a remote description mentions or another
+    /// local stream has is drawn again.
     #[test]
     fn a_taken_ssrc_is_drawn_again() {
         let taken: HashSet<SSRC> = [7, 9].into_iter().collect();

@@ -214,6 +214,25 @@ impl RTCPeerConnection {
         );
     }
 
+    /// The gatherer state last announced and the username fragment of the generation it
+    /// belongs to.
+    pub(crate) fn announced_gathering(&self) -> (RTCIceGatheringState, Option<String>) {
+        (
+            self.announced.gathering,
+            self.announced.gathering_ufrag.clone(),
+        )
+    }
+
+    /// Announces again the gathering [`Self::announced_gathering`] returned: a rolled-back
+    /// local offer's ICE restart was taken back.
+    pub(crate) fn restore_announced_gathering(
+        &mut self,
+        (state, ufrag): (RTCIceGatheringState, Option<String>),
+    ) {
+        self.announced.gathering_ufrag = ufrag;
+        self.set_gathering_state(state);
+    }
+
     /// W3C 5.6 "gathering begins", at `set_local_description`: when the description's ICE
     /// generation (its username fragment) has not gathered yet, the first time or after an ICE
     /// restart, the gatherer goes to "gathering" with its events. A later description of the

@@ -407,6 +407,27 @@ pub(crate) fn candidate_line_ufrag(value: &str) -> Option<&str> {
     }
     None
 }
+/// The `b=` lines that state a receive limit of `tias` bits per second: `b=TIAS:<tias>`
+/// (RFC 3890) and `b=AS` (RFC 8866 section 5.8, kilobits per second) for peers that read only
+/// that one, the smallest value from which RFC 9429 section 5.10 derives at least `tias`
+/// ("TIAS = AS * 1000 * 0.95 - (50 * 40 * 8)").
+pub(crate) fn receive_bandwidth_lines(tias: u64) -> [sdp::description::common::Bandwidth; 2] {
+    use sdp::description::common::Bandwidth;
+    let kbps = tias.saturating_add(50 * 40 * 8).div_ceil(950);
+    [
+        Bandwidth {
+            experimental: false,
+            bandwidth_type: "TIAS".to_owned(),
+            bandwidth: tias,
+        },
+        Bandwidth {
+            experimental: false,
+            bandwidth_type: "AS".to_owned(),
+            bandwidth: kbps,
+        },
+    ]
+}
+
 /// `a=ptime` (RFC 8866 section 6.4).
 pub(crate) const ATTR_KEY_PTIME: &str = "ptime";
 /// `a=maxptime` (RFC 8866 section 6.5).
@@ -1558,6 +1579,14 @@ impl RTCPeerConnection {
         }
         for line in imageattrs {
             media = media.with_value_attribute(ATTR_KEY_IMAGEATTR.to_owned(), line);
+        }
+
+        // What this endpoint would like to receive (RFC 3264 sections 5 and 6:
+        // `RTCRtpTransceiver::set_receive_bandwidth`), in a section that receives.
+        if let Some(tias) = transceiver.receive_bandwidth()
+            && direction.has_recv()
+        {
+            media.bandwidth.extend(receive_bandwidth_lines(tias));
         }
 
         // `a=rid` and `a=simulcast` (RFC 8851, RFC 8853).

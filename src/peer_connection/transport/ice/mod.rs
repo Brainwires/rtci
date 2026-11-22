@@ -39,6 +39,11 @@ pub(crate) struct IceTransport {
     /// first section of the BUNDLE group. The `sdpMid` / `sdpMLineIndex` of the candidates the
     /// connection surfaces (W3C webrtc-pc section 5.6, "surface the candidate").
     pub(crate) local_media_section: Option<(String, u16)>,
+
+    /// While a local offer's ICE restart can still be rolled back
+    /// ([`Agent::apply_restart_revertible`]): the gathering state and the generation's
+    /// username fragment announced before it, which a rollback announces again.
+    pub(crate) gathering_before_local_restart: Option<(RTCIceGatheringState, Option<String>)>,
 }
 
 impl IceTransport {
@@ -58,6 +63,7 @@ impl IceTransport {
             // W3C 4.4.1.1: [[IceConnectionState]] starts "new".
             ice_connection_state: RTCIceConnectionState::New,
             local_media_section: None,
+            gathering_before_local_restart: None,
         })
     }
 

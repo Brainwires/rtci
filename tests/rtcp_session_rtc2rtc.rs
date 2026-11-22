@@ -300,6 +300,15 @@ impl World {
 
     /// [`connected`](Self::connected), with FlexFEC negotiated when `fec`.
     fn connected_with(fec: bool) -> Result<(Self, RTCRtpSenderId)> {
+        Self::connected_with_options(fec, None)
+    }
+
+    /// [`connected_with`](Self::connected_with), the receiver stating `receive_bandwidth`
+    /// (`RTCRtpTransceiver::set_receive_bandwidth`) in its answer.
+    fn connected_with_options(
+        fec: bool,
+        receive_bandwidth: Option<u64>,
+    ) -> Result<(Self, RTCRtpSenderId)> {
         let mut world = World {
             peers: [
                 Peer::new("10.0.0.1:5000", fec)?,
@@ -335,6 +344,14 @@ impl World {
             .pc
             .set_local_description(now, offer.clone())?;
         world.peers[1].pc.set_remote_description(now, offer)?;
+        let receiving: Vec<_> = world.peers[1].pc.get_transceivers().collect();
+        for id in receiving {
+            world.peers[1]
+                .pc
+                .rtp_transceiver(id)
+                .expect("a transceiver")
+                .set_receive_bandwidth(receive_bandwidth);
+        }
         let answer = world.peers[1].pc.create_answer(None)?;
         world.peers[1]
             .pc
@@ -889,5 +906,64 @@ fn a_receiver_asks_the_sender_to_limit_its_rate_with_tmmbr() -> Result<()> {
     let now = world.now;
     let limited = outgoing(&mut world.peers[0].pc, now).expect("an estimate");
     assert!(limited <= LIMIT as f64, "{before} -> {limited}");
+    Ok(())
+}
+
+/// The receive bandwidth API end to end: `RTCRtpTransceiver::set_receive_bandwidth` writes
+/// `b=TIAS` and `b=AS` in the receiver's answer (RFC 3264 section 6: what the answerer "would
+/// like the offerer to send"), the sender reads it as its maximum (RFC 9429 section 5.10), and
+/// after the receiving application asks for more with a TMMBR (which RFC 5104 section 4.2.1.2
+/// keeps at the negotiated value) the sender's estimate stays under it.
+#[test]
+fn the_receive_bandwidth_is_signalled_and_bounds_what_the_sender_sends() -> Result<()> {
+    use rtc::statistics::StatsSelector;
+    use rtc::statistics::report::RTCStatsReportEntry;
+    const CAP: u64 = 80_000;
+    let outgoing = |pc: &mut RTCPeerConnection, now: Instant| -> Option<f64> {
+        pc.get_stats(now, StatsSelector::None)
+            .iter()
+            .find_map(|entry| match entry {
+                RTCStatsReportEntry::IceCandidatePair(pair) if pair.nominated => {
+                    pair.available_outgoing_bitrate
+                }
+                _ => None,
+            })
+    };
+    let (mut world, sender) = World::connected_with_options(false, Some(CAP))?;
+    let answer = world.peers[1]
+        .pc
+        .local_description()
+        .expect("the answer")
+        .sdp;
+    // AS = ceil((80000 + 16000) / 950) = 102.
+    assert!(answer.contains("b=TIAS:80000\r\nb=AS:102\r\n"), "{answer}");
+    let transceiver = world.peers[0]
+        .pc
+        .get_transceivers()
+        .next()
+        .expect("the sender's transceiver");
+    assert_eq!(
+        world.peers[0]
+            .pc
+            .rtp_transceiver(transceiver)
+            .expect("transceiver")
+            .remote_bandwidth()
+            .max_bitrate,
+        Some(CAP)
+    );
+
+    world.send_media(sender, FIRST_SEQ, 25)?;
+    let now = world.now;
+    let receiver = *world.peers[1].opened.first().expect("the track opened");
+    world.peers[1]
+        .pc
+        .rtp_receiver(receiver)
+        .expect("receiver")
+        .set_remote_bitrate_limit(now, Some(4 * CAP))?;
+    world.pump()?;
+    world.send_media(sender, FIRST_SEQ + 25, 50)?;
+    let now = world.now;
+    let estimate = outgoing(&mut world.peers[0].pc, now).expect("an estimate");
+    assert!(estimate <= CAP as f64, "{estimate}");
     Ok(())
 }

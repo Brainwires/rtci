@@ -78,6 +78,9 @@ pub(crate) struct RTCRtpTransceiverInternal {
     /// The rids of the simulcast streams this transceiver's offers ask to receive
     /// (`RTCRtpTransceiver::set_receive_simulcast`, RFC 8853 section 5.3.1); empty for none.
     receive_simulcast: Vec<String>,
+    /// The most this endpoint receives in this transceiver's section, in bits per second
+    /// (`RTCRtpTransceiver::set_receive_bandwidth`): its descriptions' `b=TIAS` / `b=AS`.
+    receive_bandwidth: Option<u64>,
     /// The `b=` lines of this transceiver's section of the remote description.
     remote_bandwidth: RTCRemoteBandwidth,
     /// The `xr-format`s of the remote description's `a=rtcp-xr` for this section (RFC 3611
@@ -138,6 +141,7 @@ impl RTCRtpTransceiverInternal {
             negotiated_header_extensions: vec![],
             rtcp_reduced_size: false,
             receive_simulcast: vec![],
+            receive_bandwidth: None,
             remote_bandwidth: RTCRemoteBandwidth::default(),
             remote_rtcp_xr: None,
             remote_packet_time: RTCPacketTime::default(),
@@ -246,14 +250,6 @@ impl RTCRtpTransceiverInternal {
         self.negotiated_header_extensions = negotiated;
     }
 
-    /// Returns the media stream identification tag (mid) for this transceiver.
-    ///
-    /// The mid uniquely identifies the media description in the SDP. When not already set,
-    /// this value will be assigned during `create_offer` or `create_answer`.
-    ///
-    /// # Specification
-    ///
-    /// See [RTCRtpTransceiver.mid](https://www.w3.org/TR/webrtc/#dom-rtptransceiver-mid).
     /// See [`Self::receive_simulcast`].
     pub(crate) fn set_receive_simulcast(&mut self, rids: Vec<String>) {
         self.receive_simulcast = rids;
@@ -264,6 +260,24 @@ impl RTCRtpTransceiverInternal {
         &self.receive_simulcast
     }
 
+    /// The most this endpoint receives in this transceiver's section, in bits per second.
+    pub(crate) fn receive_bandwidth(&self) -> Option<u64> {
+        self.receive_bandwidth
+    }
+
+    /// See [`Self::receive_bandwidth`].
+    pub(crate) fn set_receive_bandwidth(&mut self, bitrate: Option<u64>) {
+        self.receive_bandwidth = bitrate;
+    }
+
+    /// Returns the media stream identification tag (mid) for this transceiver.
+    ///
+    /// The mid uniquely identifies the media description in the SDP. When not already set,
+    /// this value will be assigned during `create_offer` or `create_answer`.
+    ///
+    /// # Specification
+    ///
+    /// See [RTCRtpTransceiver.mid](https://www.w3.org/TR/webrtc/#dom-rtptransceiver-mid).
     pub(crate) fn mid(&self) -> &Option<String> {
         &self.mid
     }

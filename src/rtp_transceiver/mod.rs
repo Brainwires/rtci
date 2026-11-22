@@ -576,6 +576,27 @@ impl RTCRtpTransceiver<'_> {
         Ok(())
     }
 
+    /// The most this endpoint wants to receive in this transceiver's media section, in bits
+    /// per second of RTP without transport overhead: written in its descriptions as
+    /// `b=TIAS:<bitrate>` (RFC 3890) and, for peers that read only that modifier,
+    /// `b=AS:<kilobits>` (RFC 8866 section 5.8), the value RFC 9429 section 5.10 turns back into
+    /// at least `bitrate` ("TIAS = AS * 1000 * 0.95 - (50 * 40 * 8)"). The remote sender
+    /// keeps under it (RFC 9429 section 5.10), and no TMMBR this endpoint sends for the
+    /// section's streams exceeds it (RFC 5104 section 4.2.1.2, `ccm tmmbr`). `None` (the
+    /// default) writes no `b=` line. Takes effect with the next description this endpoint
+    /// creates; a change does not by itself make negotiation needed.
+    ///
+    /// Not a W3C method (browsers take `b=` lines from the application's SDP): a fork
+    /// addition.
+    pub fn set_receive_bandwidth(&mut self, bitrate: Option<u64>) {
+        self.peer_connection.rtp_transceivers[self.id].set_receive_bandwidth(bitrate);
+    }
+
+    /// See [`Self::set_receive_bandwidth`].
+    pub fn receive_bandwidth(&self) -> Option<u64> {
+        self.peer_connection.rtp_transceivers[self.id].receive_bandwidth()
+    }
+
     /// Sets the preferred codec list for this transceiver.
     ///
     /// This overrides the default codec preferences from the media engine. An empty list

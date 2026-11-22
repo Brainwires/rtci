@@ -1381,13 +1381,17 @@ impl RTCPeerConnection {
         // be the one created and valid in this state: a description that is refused, and a
         // rollback, leave the session on its credentials. A no-op if none was staged, so an
         // offer that was created and then discarded leaves the existing session untouched.
-        if local_description.sdp_type != RTCSdpType::Rollback
+        if local_description.sdp_type == RTCSdpType::Offer
+            && self.ice_transport().has_pending_restart()
+        {
+            self.apply_local_offer_ice_restart(now)?;
+        } else if local_description.sdp_type != RTCSdpType::Rollback
             && self.ice_transport().has_pending_restart()
         {
             self.apply_ice_restart(now)?;
         }
 
-        self.commit_description(&local_description, StateChangeOp::SetLocal, next_state)?;
+        self.commit_description(&local_description, StateChangeOp::SetLocal, next_state, now)?;
 
         // The transports take the remote offer's parameters now that it is answered
         // (`defer_remote_transport`).
@@ -2169,7 +2173,12 @@ impl RTCPeerConnection {
             RTCSdpType::Answer | RTCSdpType::Pranswer
         );
 
-        self.commit_description(&remote_description, StateChangeOp::SetRemote, next_state)?;
+        self.commit_description(
+            &remote_description,
+            StateChangeOp::SetRemote,
+            next_state,
+            now,
+        )?;
         if remote_description.sdp_type != RTCSdpType::Rollback {
             self.trickled_remote_candidates = 0;
         }

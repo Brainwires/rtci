@@ -42,6 +42,7 @@ pub mod agent_stats;
 pub mod remote_policy;
 #[cfg(test)]
 mod remote_policy_test;
+mod restart_undo;
 
 use agent_config::*;
 use bytes::BytesMut;
@@ -354,6 +355,9 @@ pub struct Agent {
     pub(crate) previous_media_path: Option<MediaPath>,
     /// The credentials and consent state that go with `previous_media_path`.
     pub(crate) previous_generation: Option<PreviousGeneration>,
+    /// The session an ICE restart replaced, while that restart can be taken back
+    /// ([`Agent::apply_restart_revertible`]).
+    pub(crate) restart_undo: Option<Box<restart_undo::RestartUndo>>,
 
     /// The open STUN transactions: one per check in flight, the consent requests, and the
     /// cancelled ones still waiting out their timeout.
@@ -545,6 +549,7 @@ impl Agent {
             selected_pair: None,
             previous_media_path: None,
             previous_generation: None,
+            restart_undo: None,
             candidate_pairs: vec![],
 
             connection_state: ConnectionState::New,
@@ -1885,6 +1890,8 @@ impl Agent {
         if self.connection_state == ConnectionState::Closed {
             return Err(Error::ErrClosed);
         }
+        // A restart that is not revertible commits an earlier one.
+        self.restart_undo = None;
         // Data keeps the path it has until the new generation selects a pair (RFC 8445
         // Section 9), whether or not the local candidates are kept: discarding them forgets
         // what was signalled, not the socket the path's packets leave from. An application
