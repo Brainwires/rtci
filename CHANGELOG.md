@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+- **sctp**: stream resets follow the rest of RFC 6525. One re-configuration request is in
+  flight at a time and the others wait (section 5.1.1); closing several data channels put
+  several in flight. A request names the peer's last request sequence number (5.1.2), and the
+  peer's numbers are checked: a request older than the ones remembered is answered "Error -
+  Bad Sequence Number" where it used to be performed again, resetting a stream that had been
+  reused (5.2.1). The response and this side's own reset of the stream leave in one chunk,
+  with a SACK. Data written to a stream whose reset is not answered yet waits, without a
+  Stream Sequence Number, where it used to be sent with the old sequence and held back by the
+  peer for good (5.1.2 A1); DATA received beyond the last TSN of a deferred reset is kept for
+  the stream as it is after the reset, where it used to be dropped (5.2.2 E2). `Stream::stop`
+  and `close` fail when the peer did not announce the extension. An unanswered request now
+  counts against the association like an unanswered HEARTBEAT (5.1.1), except after "In
+  progress".
 - **sctp**: Gap Ack Blocks are offsets in serial number arithmetic (RFC 9260 section 3.3.4).
   Once the received TSNs had wrapped past zero and the cumulative TSN had not, a SACK named a
   TSN the peer never sent, and a peer running this engine closed the association over it.
@@ -138,6 +151,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+- **sctp**: the other re-configuration requests of RFC 6525, in both directions: Incoming SSN
+  Reset (`Association::request_incoming_stream_reset`), SSN/TSN Reset
+  (`request_ssn_tsn_reset`) and Add Outgoing / Incoming Streams (`add_outgoing_streams`,
+  `add_incoming_streams`, with `set_stream_limits` for what a peer may add). They were
+  answered "Denied". `Event::Reconfig` reports the outcome of a request and what the peer
+  changed.
 - **sctp**: `Stream::write_sctp_with_ppid` and `Chunks::ppid` for a Payload Protocol
   Identifier `PayloadProtocolIdentifier` has no name for; `PayloadProtocolIdentifier::number`;
   `ChunkPayloadData::ppid`; `Association::verification_tag`.

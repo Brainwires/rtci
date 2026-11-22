@@ -57,7 +57,7 @@ use std::{fmt, ops};
 
 mod association;
 pub use crate::association::{
-    Association, AssociationError, Event,
+    Association, AssociationError, Event, ReconfigEvent,
     stats::AssociationStats,
     stream::{ReliabilityType, Stream, StreamEvent, StreamId, StreamState},
     timer::TimerConfig,

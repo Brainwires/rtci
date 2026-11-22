@@ -707,6 +707,15 @@ fn an_incoming_reset_request_with_nothing_to_do_says_so() -> Result<()> {
     let reply = a.handle_reconfig(&request(301, vec![7, 5]))?;
     assert_eq!(vec![(301, 0)], responses(&reply));
     assert!(a.reconfig_queue.is_empty(), "no second reset is queued");
+
+    // A request that this side's own only partly covers is processed normally.
+    a.open_stream(8, PPI)?
+        .write_sctp(now, &Bytes::from_static(b"data"), PPI)?;
+    let _ = a.gather_outbound(now);
+    let reply = a.handle_reconfig(&request(302, vec![5, 8]))?;
+    assert!(responses(&reply).is_empty(), "not answered Nothing to do");
+    assert!(a.streams[&8].outgoing_reset_pending);
+    assert_eq!(1, requests_sent(&mut a, now).len() + a.reconfig_queue.len());
     Ok(())
 }
 
