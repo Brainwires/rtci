@@ -461,6 +461,21 @@ impl RTCPeerConnection {
                     self.announce_transport_states();
                     self.update_connection_state(false);
                 }
+                RTCEventInternal::SRTPKeyExhausted => {
+                    // RFC 3711 section 9.2: re-key or end the session. A new DTLS association
+                    // is not something a browser peer takes on a transport that has one, so
+                    // the session ends: the transport fails with the reason.
+                    use crate::peer_connection::rtc_error::{RTCError, RTCErrorDetailType};
+                    let now = evt_internal.now;
+                    self.get_dtls_handler().fail_with(
+                        now,
+                        RTCError::new(
+                            RTCErrorDetailType::DtlsFailure,
+                            "the SRTP master key reached its lifetime (RFC 3711 section 9.2)",
+                        ),
+                    );
+                    self.announce_transport_states();
+                }
                 RTCEventInternal::RTCPeerConnectionEvent(evt) => {
                     self.pipeline_context.event_outs.push_back(evt);
                 }
@@ -582,6 +597,8 @@ impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCP
         for_each_handler!(forward: process_handler!(self, handler, {
             handler.handle_timeout(now)?;
         }));
+        // The DTMF senders' playout (W3C webrtc-pc section 7).
+        self.run_dtmf(now)?;
         Ok(())
     }
 
@@ -592,6 +609,9 @@ impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCP
                 eto = Some(eto.map_or(next, |curr| std::cmp::min(curr, next)));
             }
         }));
+        if let Some(dtmf) = self.dtmf_timeout() {
+            eto = Some(eto.map_or(dtmf, |curr| curr.min(dtmf)));
+        }
         eto
     }
 

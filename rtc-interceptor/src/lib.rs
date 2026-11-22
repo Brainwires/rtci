@@ -322,6 +322,11 @@ pub use gcc::rate_control::{
     DEFAULT_DECREASE_FACTOR as GCC_DECREASE_FACTOR, DEFAULT_INCREASE_FACTOR as GCC_INCREASE_FACTOR,
     DEFAULT_RATE_CONTROL_INTERVAL as GCC_RATE_CONTROL_INTERVAL, RateController,
 };
+pub use gcc::remb::{
+    ABS_SEND_TIME_SLOT, ABS_SEND_TIME_URI, AbsSendTimeInterceptor, GOOG_REMB,
+    REMB_DECREASE_TRIGGER, REMB_GENERATOR_SLOT, REMB_INITIALIZATION_TIME, REMB_MAX_INTERVAL,
+    REMB_UPDATE_INTERVAL, RembGeneratorBuilder, RembGeneratorInterceptor,
+};
 pub use gcc::slope::{DelayTrend, SlopeEstimator};
 pub use gcc::state::RateControlState;
 pub use gcc::threshold::{AdaptiveThreshold, DEFAULT_INITIAL_MS as GCC_THRESHOLD_INITIAL_MS};

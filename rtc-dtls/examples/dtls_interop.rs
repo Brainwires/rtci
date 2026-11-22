@@ -21,6 +21,10 @@
 //! * `DTLS_RESUME=1`: a client that keeps the tickets it is sent and, 1.5 s after its first
 //!   handshake, closes the association and makes a second one from the same port, which
 //!   offers one of them.
+//! * `DTLS_MAX_EARLY_DATA=<n>`: a server whose tickets allow `n` bytes of 0-RTT data (it
+//!   takes them only without the cookie exchange: `DTLS_COOKIE=0`).
+//! * `DTLS_EARLY_DATA=<text>`: with `DTLS_RESUME=1`, the second association sends `text` as
+//!   0-RTT data.
 //! * `DTLS_PHA=1`: a client that offers post-handshake authentication, with a self-signed
 //!   certificate to answer with (DTLS 1.3).
 //! * `DTLS_REQUEST_CERT=1`: a server that asks for the client's certificate 300 ms after the
@@ -83,6 +87,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         builder = builder
             .with_session_store(Some(Arc::new(rtc_dtls::session::MemorySessionStore::new())));
     }
+    if let Some(size) = std::env::var("DTLS_MAX_EARLY_DATA")
+        .ok()
+        .and_then(|size| size.parse().ok())
+    {
+        builder = builder.with_max_early_data(size);
+    }
+    let early_data = std::env::var("DTLS_EARLY_DATA").unwrap_or_default();
     if let Some(tickets) = std::env::var("DTLS_TICKETS")
         .ok()
         .and_then(|count| count.parse().ok())
@@ -168,7 +179,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 socket.send_to(&transmit.message, transmit.transport.peer_addr)?;
             }
             println!("reconnecting");
-            endpoint.connect(now, remote, config.clone(), None)?;
+            endpoint.connect_with_early_data(
+                now,
+                remote,
+                config.clone(),
+                None,
+                early_data.as_bytes(),
+            )?;
             continue;
         }
         // After the handshake: say something, and then, if asked, update the keys and say
@@ -250,7 +267,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .negotiated_version()
                         .map(|version| version.protocol_version());
                     println!(
-                        "complete version={} suite={} srtp={:?} resumed={} exporter={}",
+                        "complete version={} suite={} srtp={:?} resumed={} early_data={:?} exporter={}",
                         version.map_or("?".to_owned(), |v| format!(
                             "{:02X}{:02X}",
                             v.major, v.minor
@@ -260,6 +277,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .map_or("?".to_owned(), |s| s.to_string()),
                         state.srtp_protection_profile(),
                         state.resumed(),
+                        state.early_data_accepted(),
                         hex(state
                             .export_keying_material("EXTRACTOR-dtls_srtp", &[], 60)?
                             .as_ref()),
@@ -276,6 +294,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("data {}", String::from_utf8_lossy(&data).trim_end());
                 }
                 EndpointEvent::PeerClosed => println!("closed"),
+                EndpointEvent::EarlyData(data) => {
+                    println!("early data {}", String::from_utf8_lossy(&data).trim_end());
+                }
                 EndpointEvent::PeerAuthenticated => {
                     let chain = endpoint
                         .get_connection_state(remote)

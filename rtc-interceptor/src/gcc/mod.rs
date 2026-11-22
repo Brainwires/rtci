@@ -21,6 +21,7 @@ pub(crate) mod overuse;
 pub(crate) mod queue_limit;
 pub(crate) mod rate_calc;
 pub(crate) mod rate_control;
+pub(crate) mod remb;
 pub(crate) mod slope;
 pub(crate) mod state;
 pub(crate) mod threshold;

@@ -46,6 +46,9 @@ pub(crate) struct RTCDataChannelInternal {
     /// stream's own `buffered_amount`, which counts only post-packetization. Used
     /// for synchronous send back-pressure.
     pub(crate) outstanding_bytes: usize,
+    /// Application bytes `send()` queued, over the channel's life: W3C `bufferedAmount` is
+    /// this less what SCTP has taken from the stream's queue.
+    pub(crate) bytes_queued: u64,
 
     /// Deadline by which an in-band channel's DCEP handshake must complete.
     /// Set when the channel is dialed; cleared on handshake completion or close.
@@ -78,6 +81,7 @@ impl Default for RTCDataChannelInternal {
             buffered_amount_high_threshold: u32::MAX,
             buffered_amount_low_threshold: 0,
             outstanding_bytes: 0,
+            bytes_queued: 0,
             handshake_deadline: None,
             close_emitted: false,
             failed: false,
@@ -110,6 +114,7 @@ impl RTCDataChannelInternal {
             buffered_amount_high_threshold: u32::MAX,
             buffered_amount_low_threshold: 0,
             outstanding_bytes: 0,
+            bytes_queued: 0,
             handshake_deadline: None,
             close_emitted: false,
             failed: false,

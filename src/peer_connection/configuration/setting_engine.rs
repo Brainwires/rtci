@@ -445,6 +445,12 @@ pub struct SettingEngine {
     /// A message over 16 KB is refused on an association without message interleaving
     /// (RFC 8831 section 6.6). `None` is the default, on.
     pub(crate) sctp_message_size_limit_without_interleaving: Option<bool>,
+    /// [`SettingEngineBuilder::with_data_channel_max_buffer_size`].
+    pub(crate) data_channel_max_buffer_size: Option<u32>,
+    /// [`SettingEngineBuilder::with_non_interactive_video`].
+    pub(crate) non_interactive_video: bool,
+    /// [`SettingEngineBuilder::with_srtp_key_lifetime`].
+    pub(crate) srtp_key_lifetime: Option<srtp::keying::KeyLifetime>,
     pub(crate) ignore_rid_pause_for_recv: bool,
     /// [`SettingEngineBuilder::with_rid_pause_marks`].
     pub(crate) rid_pause_marks: bool,
@@ -1936,6 +1942,45 @@ impl SettingEngineBuilder {
     /// this to `false`.
     pub fn with_sctp_message_size_limit_without_interleaving(mut self, enabled: bool) -> Self {
         self.0.sctp_message_size_limit_without_interleaving = Some(enabled);
+        self
+    }
+
+    /// Replaces the SCTP transport's `[[MaxBufferSize]]` with a fixed limit: `send()` refuses
+    /// data that would take a channel's `bufferedAmount` above `limit` bytes
+    /// (`ErrDataChannelBufferFull`). `None`, the default, is the W3C rule (webrtc-pc 6.1.1.2):
+    /// the larger of the peer's `max-message-size` and this side's, typically 256 KiB.
+    ///
+    /// Chromium buffers up to 16 MiB per channel instead (and closes the channel past it);
+    /// `Some(16 * 1024 * 1024)` is the setting for an application written to that.
+    pub fn with_data_channel_max_buffer_size(mut self, limit: Option<u32>) -> Self {
+        self.0.data_channel_max_buffer_size = limit;
+        self
+    }
+
+    /// Marks video as non-interactive for [`RTCPeerConnection::dscp`]: the AF3x codepoints of
+    /// RFC 8837 Table 1 instead of the AF4x ones. RFC 8837 section 5: "Non-browser
+    /// implementations of WebRTC MAY use the AF3x DSCP values for video that is known not to
+    /// be interactive, e.g., all video in a WebRTC video playback application". The default
+    /// is `false`: all WebRTC video is interactive.
+    ///
+    /// [`RTCPeerConnection::dscp`]: crate::peer_connection::RTCPeerConnection::dscp
+    pub fn with_non_interactive_video(mut self, non_interactive: bool) -> Self {
+        self.0.non_interactive_video = non_interactive;
+        self
+    }
+
+    /// Sets how many packets a DTLS-SRTP master key may protect. `None`, the default, is the
+    /// profile's: 2^31 for the RFC 5764 profiles (section 4.1.2), 2^48 SRTP and 2^31 SRTCP
+    /// packets for the AEAD ones (RFC 7714). Shortly before a key runs out the connection
+    /// raises `OnSrtpKeyLifetimeExpiring`; at the limit nothing more is protected with it and
+    /// the DTLS transport fails (`dtls-failure`): browsers do not take a new DTLS association
+    /// on a transport that has one, so the engine does not attempt one (RFC 3711 section 9.2:
+    /// re-key, or end the session).
+    ///
+    /// A lifetime of zero, or above the RFC 3711 limits, makes building the peer connection
+    /// fail.
+    pub fn with_srtp_key_lifetime(mut self, lifetime: Option<srtp::keying::KeyLifetime>) -> Self {
+        self.0.srtp_key_lifetime = lifetime;
         self
     }
 

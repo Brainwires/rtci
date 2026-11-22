@@ -10,6 +10,8 @@ pub mod g7xx;
 pub mod h264;
 /// H.265/HEVC payload format ([RFC 7798]).
 pub mod h265;
+/// A format-agnostic payload (bytes the RTP layer does not parse, such as SFrame).
+pub mod opaque;
 /// Opus payload format ([RFC 7587]), one packet per frame.
 pub mod opus;
 /// Redundant audio data, RED ([RFC 2198]).

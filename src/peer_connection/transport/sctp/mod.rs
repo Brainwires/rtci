@@ -133,6 +133,12 @@ pub(crate) struct SctpTransport {
     // above with the peer's `max-message-size` SDP attribute, computed once in `start()`.
     // `None` before the association has been negotiated.
     pub(crate) negotiated_max_message_size: Option<u32>,
+    /// W3C `[[MaxBufferSize]]`: the larger of the peer's `max-message-size` and what this side
+    /// can send, once negotiated (webrtc-pc 6.1.1.2).
+    pub(crate) negotiated_max_buffer_size: Option<u32>,
+    /// A fixed send buffer limit that replaces `[[MaxBufferSize]]`, when the application set
+    /// one (`SettingEngineBuilder::with_data_channel_max_buffer_size`).
+    pub(crate) max_buffer_size_override: Option<u32>,
 
     // Optional override for the SCTP receive-buffer size (a_rwnd flow-control window),
     // in bytes. None uses the sctp crate default (INITIAL_RECV_BUF_SIZE, 1 MiB).
@@ -221,6 +227,8 @@ impl SctpTransport {
             is_started: false,
             max_message_size,
             negotiated_max_message_size: None,
+            negotiated_max_buffer_size: None,
+            max_buffer_size_override: None,
             max_receive_buffer_size,
             mtu,
             weighted_fair_queueing: true,
@@ -382,6 +390,7 @@ impl SctpTransport {
         self.sctp_associations.clear();
         self.is_started = false;
         self.negotiated_max_message_size = None;
+        self.negotiated_max_buffer_size = None;
         self.receive_message_limit = 0;
         self.negotiated_ports = None;
         self.lost = false;
@@ -412,6 +421,12 @@ impl SctpTransport {
     /// interleaving (RFC 8831 section 6.6).
     pub(crate) fn with_message_size_limit_without_interleaving(mut self, enabled: bool) -> Self {
         self.limit_message_size_without_interleaving = enabled;
+        self
+    }
+
+    /// A fixed `[[MaxBufferSize]]` in place of the W3C rule's, or `None` for that rule.
+    pub(crate) fn with_max_buffer_size(mut self, limit: Option<u32>) -> Self {
+        self.max_buffer_size_override = limit;
         self
     }
 
@@ -507,6 +522,14 @@ impl SctpTransport {
         })
     }
 
+    /// W3C `[[MaxBufferSize]]`: the most a data channel's `bufferedAmount` may reach, `None`
+    /// until the association has been negotiated (W3C: "initially null"). A limit the
+    /// application set takes its place.
+    pub(crate) fn max_buffer_size(&self) -> Option<u32> {
+        self.max_buffer_size_override
+            .or(self.negotiated_max_buffer_size)
+    }
+
     /// Whether the 16 KB limit of RFC 8831 section 6.6 applies: it is on, and the association
     /// is established without user message interleaving.
     fn limits_message_size_without_interleaving(&self) -> bool {
@@ -594,6 +617,9 @@ impl SctpTransport {
         // the buffer and the transport config, and then discarded, which left nothing for
         // `maxMessageSize` to report.
         self.negotiated_max_message_size = Some(max_message_size);
+        // W3C 6.1.1.2: [[MaxBufferSize]] is the larger of the two (the remote's 0, "any size",
+        // leaves this side's, which is never 0 here).
+        self.negotiated_max_buffer_size = Some(remote_caps.max_message_size.max(can_send_size));
 
         // RFC 8841 6.1: each side's `max-message-size` limits what the *other* side sends. So
         // what this side accepts is what it advertised (`can_send_size`, which is what
