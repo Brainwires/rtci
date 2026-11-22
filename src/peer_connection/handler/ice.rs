@@ -4,7 +4,9 @@ use crate::peer_connection::message::internal::{
     RTCMessageInternal, STUNMessage, TaggedRTCMessageInternal,
 };
 use crate::peer_connection::transport::ice::IceTransport;
-use crate::statistics::accumulator::RTCStatsAccumulator;
+use crate::statistics::accumulator::{
+    IceCandidatePairAccumulator, RTCStatsAccumulator, candidate_pair_stats_id,
+};
 use crate::statistics::stats::ice_candidate_pair::RTCStatsIceCandidatePairState;
 use log::{debug, trace};
 use shared::error::{Error, Result};
@@ -55,6 +57,39 @@ impl<'a> IceHandler<'a> {
     pub(crate) fn name(&self) -> &'static str {
         "IceHandler"
     }
+
+    /// Counts a datagram on the candidate pair it travels on (webrtc-stats
+    /// `RTCIceCandidatePairStats.packetsSent` / `packetsReceived`: the packets "on this candidate
+    /// pair", every one of them).
+    ///
+    /// The pair's statistics are found through the key cached at the last
+    /// `SelectedCandidatePairChange`, so the per-packet path formats nothing. The agent can
+    /// have a selected pair before that event has been polled, though, and a datagram that
+    /// crosses in between travels on that pair all the same: when the cache does not name a
+    /// pair with statistics, it is filled from the agent's selected pair. (During an ICE
+    /// restart the agent has none and the path is the previous pair's, which the cache still
+    /// names.)
+    fn count_on_pair_in_use(&mut self, count: impl FnOnce(&mut IceCandidatePairAccumulator)) {
+        let cached = self
+            .ctx
+            .selected_pair_key
+            .as_ref()
+            .is_some_and(|key| self.stats.ice_candidate_pairs.contains_key(key));
+        if !cached
+            && let Some((local, remote)) =
+                self.ctx.ice_transport.agent.get_selected_candidate_pair()
+        {
+            let (local_id, remote_id) = (local.id().to_owned(), remote.id().to_owned());
+            self.stats
+                .get_or_create_candidate_pair(&local_id, &remote_id);
+            self.ctx.selected_pair_key = Some(candidate_pair_stats_id(&local_id, &remote_id));
+        }
+        if let Some(key) = &self.ctx.selected_pair_key
+            && let Some(pair) = self.stats.ice_candidate_pairs.get_mut(key)
+        {
+            count(pair);
+        }
+    }
 }
 
 impl<'a>
@@ -96,11 +131,8 @@ impl<'a>
             // the accumulator up via the cached key (set on the last
             // SelectedCandidatePairChange) to avoid allocating the key per packet.
             let bytes = msg.message.len();
-            if let Some(key) = &self.ctx.selected_pair_key
-                && let Some(pair) = self.stats.ice_candidate_pairs.get_mut(key)
-            {
-                pair.on_packet_received(bytes, msg.now);
-            }
+            let now = msg.now;
+            self.count_on_pair_in_use(|pair| pair.on_packet_received(bytes, now));
 
             // When ICE restarts and the selected candidate pair changes,
             // WebRTC treats this as a path migration, and DTLS continues unchanged, bound to the ICE transport, not to a fixed 5-tuple.
@@ -158,11 +190,8 @@ impl<'a>
             // Track packets/bytes sent on the selected candidate pair. Look the
             // accumulator up via the cached key to avoid allocating it per packet.
             let bytes = msg.message.len();
-            if let Some(key) = &self.ctx.selected_pair_key
-                && let Some(pair) = self.stats.ice_candidate_pairs.get_mut(key)
-            {
-                pair.on_packet_sent(bytes, msg.now);
-            }
+            let now = msg.now;
+            self.count_on_pair_in_use(|pair| pair.on_packet_sent(bytes, now));
 
             self.ctx.write_outs.push_back(msg);
         } else {
@@ -241,7 +270,7 @@ impl<'a>
                     // Cache the pair's stats key so the per-packet path can look
                     // the accumulator up by borrow instead of re-formatting (and
                     // allocating) the key on every read/write.
-                    let key = format!("RTCIceCandidatePair_{}_{}", local.id(), remote.id());
+                    let key = candidate_pair_stats_id(local.id(), remote.id());
                     self.ctx.selected_pair_key = Some(key.clone());
                     // Update transport stats for selected candidate pair change
                     self.stats.on_selected_candidate_pair(Some(key));
