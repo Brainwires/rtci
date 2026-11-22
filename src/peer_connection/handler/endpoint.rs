@@ -444,6 +444,11 @@ impl<'a> EndpointHandler<'a> {
                 .find(ssrc, self.rtp_transceivers, receiver_track_has_ssrc)
             && let Some(receiver) = self.rtp_transceivers[id].receiver()
         {
+            // W3C webrtc 5.4 "stop sending and receiving": a stopping or stopped
+            // transceiver's receiver receives no more media.
+            if rtp_header.is_some() && self.rtp_transceivers[id].stopped() {
+                return None;
+            }
             return Some(receiver.track().track_id().clone());
         }
 

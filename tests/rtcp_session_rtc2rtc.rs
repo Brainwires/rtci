@@ -652,6 +652,9 @@ fn shared_ssrc_world(signal: fn(&str) -> String) -> Result<(World, Vec<RTCRtpSen
         drop_once: None,
         fec_on_wire: 0,
         fec_ssrc: None,
+        lose_for_good: None,
+        lost_copies: 0,
+        blocked_ssrcs: Vec::new(),
     };
     let mut senders = vec![];
     for peer in world.peers.iter_mut() {
@@ -983,5 +986,76 @@ fn the_receive_bandwidth_is_signalled_and_bounds_what_the_sender_sends() -> Resu
     let now = world.now;
     let estimate = outgoing(&mut world.peers[0].pc, now).expect("an estimate");
     assert!(estimate <= CAP as f64, "{estimate}");
+    Ok(())
+}
+
+/// W3C webrtc 5.3: stopping the receiver's track does not stop the receiver: the media
+/// still arrives and the receiver still sends its reception reports (RFC 3550 6.4.2).
+#[test]
+fn stopping_the_receivers_track_keeps_the_receiver_reporting() -> Result<()> {
+    let (mut world, sender) = World::connected()?;
+    world.send_media(sender, FIRST_SEQ, 25)?;
+    let receiver = *world.peers[1].opened.first().expect("the track opened");
+    world.peers[1]
+        .pc
+        .rtp_receiver(receiver)
+        .expect("receiver")
+        .track_mut()
+        .stop();
+    let received = world.peers[1].read_rtp.len();
+    let reports = world.peers[1].rtcp_datagrams;
+
+    world.send_media(sender, FIRST_SEQ + 25, 150)?;
+    assert!(
+        world.peers[1].read_rtp.len() >= received + 100,
+        "the media still arrives"
+    );
+    // The receiver sends no media: its RTCP is its receiver reports (and their SDES).
+    assert!(
+        world.peers[1].rtcp_datagrams > reports,
+        "the receiver still reports"
+    );
+    Ok(())
+}
+
+/// W3C webrtc 5.4 "stop sending and receiving": `stop()` on the sending transceiver says
+/// BYE for each RTP stream its sender sent (RFC 3550 6.6); on the receiving one, media that
+/// still arrives is no longer received.
+#[test]
+fn stop_says_bye_for_the_senders_streams_and_stops_receiving() -> Result<()> {
+    use rtc::rtp_transceiver::RTCRtpTransceiverId;
+    let (mut world, sender) = World::connected()?;
+    world.send_media(sender, FIRST_SEQ, 25)?;
+    assert_eq!(0, world.peers[1].muted);
+
+    world.peers[0]
+        .pc
+        .rtp_transceiver(RTCRtpTransceiverId::from(sender))
+        .expect("transceiver")
+        .stop()?;
+    let until = world.now + Duration::from_secs(2);
+    world.run_until(until)?;
+    // No description was exchanged: only the BYE for the sender's stream mutes the remote
+    // track (W3C 9.3), which stays live.
+    assert_eq!(1, world.peers[1].muted, "the BYE arrived");
+    assert_eq!(0, world.peers[1].closed);
+
+    // The receiving side stops: what the sender writes is not received any more.
+    let (mut world, sender) = World::connected()?;
+    world.send_media(sender, FIRST_SEQ, 25)?;
+    let receiver = *world.peers[1].opened.first().expect("the track opened");
+    world.peers[1]
+        .pc
+        .rtp_transceiver(RTCRtpTransceiverId::from(receiver))
+        .expect("transceiver")
+        .stop()?;
+    world.pump()?;
+    let received = world.peers[1].read_rtp.len();
+    world.send_media(sender, FIRST_SEQ + 25, 50)?;
+    assert_eq!(
+        world.peers[1].read_rtp.len(),
+        received,
+        "nothing is received"
+    );
     Ok(())
 }

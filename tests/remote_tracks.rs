@@ -404,3 +404,179 @@ fn a_rollback_ends_the_track_of_a_transceiver_it_removes_and_restores_streams() 
     assert_eq!(answerer.get_transceivers().count(), 1);
     Ok(())
 }
+
+/// W3C webrtc-pc 9.3.1: applyConstraints on a remote track always rejects with
+/// OverconstrainedError for the properties defined for remote video (width, height,
+/// frameRate, aspectRatio), in the basic set or an advanced one, and leaves the constraints
+/// as they were; a local track takes them.
+#[test]
+fn a_remote_track_refuses_constraints_on_its_video_properties() -> TestResult {
+    use rtc::media_stream::{Constrain, MediaTrackConstraintSet, MediaTrackConstraints};
+    use rtc::shared::error::Error;
+    let (_offerer, mut answerer, _) = negotiated(&["s"])?;
+    let id = answerer.get_transceivers().next().expect("a transceiver");
+    let mut receiver = answerer.rtp_receiver(id.into()).expect("receiver");
+    assert!(receiver.track().is_remote());
+
+    let cases = [
+        (
+            MediaTrackConstraints::new(
+                MediaTrackConstraintSet::default().with_width(Constrain::Value(640)),
+                vec![],
+            ),
+            "width",
+        ),
+        (
+            MediaTrackConstraints::new(
+                MediaTrackConstraintSet::default().with_height(Constrain::Value(480)),
+                vec![],
+            ),
+            "height",
+        ),
+        (
+            MediaTrackConstraints::new(
+                MediaTrackConstraintSet::default(),
+                vec![MediaTrackConstraintSet::default().with_frame_rate(Constrain::Value(30.0))],
+            ),
+            "frameRate",
+        ),
+        (
+            MediaTrackConstraints::new(
+                MediaTrackConstraintSet::default().with_aspect_ratio(Constrain::Value(1.5)),
+                vec![],
+            ),
+            "aspectRatio",
+        ),
+    ];
+    for (constraints, property) in cases {
+        assert_eq!(
+            receiver
+                .track_mut()
+                .apply_constraints(Some(constraints.clone())),
+            Err(Error::OverconstrainedError(property.to_owned()))
+        );
+        assert!(receiver.track().get_constraints().basic().width().is_none());
+
+        let mut local = video_track("local", 0x0f09_0909);
+        assert!(!local.is_remote());
+        local.apply_constraints(Some(constraints))?;
+    }
+    // Constraints defined nowhere for a remote track (none here) are taken.
+    receiver.track_mut().apply_constraints(None)?;
+    Ok(())
+}
+
+/// W3C webrtc-pc 9.3.1: a remote video track's settings are those of the frames received:
+/// width and height of the latest, its aspect ratio rounded to the tenth decimal place, and
+/// a frame rate estimated from the frames of the last second. The feed is the application's
+/// (its decoder, or a depacketizer that reads the size from a key frame). Nothing is known
+/// before a frame; an audio receiver takes no frames.
+#[test]
+fn a_remote_video_tracks_settings_follow_the_frames_received() -> TestResult {
+    use std::time::Duration;
+    let (_offerer, mut answerer, _) = negotiated(&["s"])?;
+    let id = answerer.get_transceivers().next().expect("a transceiver");
+    let mut receiver = answerer.rtp_receiver(id.into()).expect("receiver");
+    let settings = receiver.track().get_settings().clone();
+    assert_eq!(
+        (
+            settings.width(),
+            settings.height(),
+            settings.frame_rate(),
+            settings.aspect_ratio()
+        ),
+        (None, None, None, None)
+    );
+
+    let start = Instant::now();
+    receiver.report_received_frame(start, 640, 360);
+    let settings = receiver.track().get_settings().clone();
+    assert_eq!(
+        (settings.width(), settings.height()),
+        (Some(640), Some(360))
+    );
+    assert_eq!(settings.aspect_ratio(), Some(1.7777777778));
+    assert_eq!(settings.frame_rate(), None, "one frame gives no rate");
+
+    // 30 frames a second for two seconds, the size changing half-way.
+    for n in 1..=60u32 {
+        let (w, h) = if n <= 30 { (640, 360) } else { (1280, 720) };
+        receiver.report_received_frame(
+            start + Duration::from_millis(u64::from(n) * 1000 / 30),
+            w,
+            h,
+        );
+    }
+    let settings = receiver.track().get_settings().clone();
+    assert_eq!(
+        (settings.width(), settings.height()),
+        (Some(1280), Some(720))
+    );
+    let rate = settings.frame_rate().expect("a rate");
+    assert!((rate - 30.0).abs() < 1.0, "{rate}");
+
+    // Then 10 a second: the estimate follows within a second.
+    let later = start + Duration::from_secs(2);
+    for n in 1..=20u64 {
+        receiver.report_received_frame(later + Duration::from_millis(n * 100), 1280, 720);
+    }
+    let rate = receiver
+        .track()
+        .get_settings()
+        .frame_rate()
+        .expect("a rate");
+    assert!((rate - 10.0).abs() < 0.5, "{rate}");
+
+    // An audio receiver ignores the feed.
+    let mut offerer = default_peer()?;
+    let mut answerer = default_peer()?;
+    offerer.add_transceiver_from_kind(
+        RtpCodecKind::Audio,
+        Some(RTCRtpTransceiverInit::with_direction(
+            RTCRtpTransceiverDirection::Sendonly,
+        )),
+    )?;
+    exchange(&mut offerer, &mut answerer)?;
+    let id = answerer.get_transceivers().next().expect("a transceiver");
+    let mut receiver = answerer.rtp_receiver(id.into()).expect("receiver");
+    receiver.report_received_frame(start, 640, 360);
+    assert_eq!(receiver.track().get_settings().width(), None);
+    Ok(())
+}
+
+/// mediacapture-main 4.4 `MediaStreamTrackEvent`: a description that moves a remote track
+/// between streams gives `removetrack` at each stream it left and `addtrack` at each it
+/// joined, each carrying the track.
+#[test]
+fn a_stream_change_gives_the_media_stream_track_events() -> TestResult {
+    use rtc::media_stream::{MediaStreamTrackEvent, MediaStreamTrackEventKind};
+    let (mut offerer, mut answerer, sender) = negotiated(&["a"])?;
+    let answerer_id = answerer.get_transceivers().next().expect("a transceiver");
+    let (track_id, _) = receiver_track(&mut answerer, answerer_id);
+    track_events(&mut answerer);
+    offerer
+        .rtp_sender(sender)
+        .expect("sender")
+        .set_streams(vec!["b".to_owned()])?;
+    exchange(&mut offerer, &mut answerer)?;
+    let events: Vec<MediaStreamTrackEvent> = stream_changes(&track_events(&mut answerer))
+        .iter()
+        .flat_map(|change| change.media_stream_track_events().collect::<Vec<_>>())
+        .collect();
+    assert_eq!(
+        events,
+        vec![
+            MediaStreamTrackEvent {
+                kind: MediaStreamTrackEventKind::RemoveTrack,
+                stream_id: "a".to_owned(),
+                track_id: track_id.clone(),
+            },
+            MediaStreamTrackEvent {
+                kind: MediaStreamTrackEventKind::AddTrack,
+                stream_id: "b".to_owned(),
+                track_id,
+            },
+        ]
+    );
+    Ok(())
+}

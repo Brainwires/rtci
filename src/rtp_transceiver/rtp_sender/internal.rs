@@ -73,6 +73,10 @@ pub(crate) struct RTCRtpSenderInternal {
     bound_streams: Vec<StreamInfo>,
     /// Reduced-size RTCP as negotiated for the media section (`RTCRtcpParameters::reduced_size`).
     rtcp_reduced_size: bool,
+    /// The transceiver's negotiated direction does not send (a recvonly or inactive
+    /// exchange): W3C 4.4.1.4 sets `[[SendCodecs]]` to the codecs negotiated for sending,
+    /// none, and `get_parameters` lists none.
+    negotiated_not_sending: bool,
     /// The SSRCs of the simulcast encodings an answer removed (`apply_simulcast_answer`): the
     /// track still has them, but they are neither bound nor sent.
     removed_ssrcs: Vec<SSRC>,
@@ -441,7 +445,11 @@ impl RTCRtpSenderInternal {
             let mut rtp_parameters = media_engine
                 .get_rtp_parameters_by_kind(self.kind(), RTCRtpTransceiverDirection::Sendonly);
 
-            rtp_parameters.codecs = self.send_codecs.clone();
+            rtp_parameters.codecs = if self.negotiated_not_sending {
+                vec![]
+            } else {
+                self.send_codecs.clone()
+            };
             rtp_parameters.rtcp.reduced_size = self.rtcp_reduced_size;
             // RFC 7022 / RFC 8834 section 4.9: one CNAME for every stream of the connection.
             rtp_parameters.rtcp.cname = media_engine.rtcp_cname.clone();
@@ -594,6 +602,16 @@ impl RTCRtpSenderInternal {
     pub(crate) fn set_two_byte_stream(&mut self, ssrc: SSRC) {
         if !self.two_byte_ssrcs.contains(&ssrc) {
             self.two_byte_ssrcs.push(ssrc);
+        }
+    }
+
+    /// Records whether the transceiver's negotiated direction does not send; the parameters
+    /// `get_parameters` returned are dropped when that changes (W3C 4.4.1.4: an answer sets
+    /// `[[SendCodecs]]` and `[[LastReturnedParameters]]` to null).
+    pub(crate) fn set_negotiated_not_sending(&mut self, not_sending: bool) {
+        if self.negotiated_not_sending != not_sending {
+            self.negotiated_not_sending = not_sending;
+            self.last_returned_parameters = None;
         }
     }
 

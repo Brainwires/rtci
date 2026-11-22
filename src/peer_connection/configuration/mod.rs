@@ -869,13 +869,16 @@ mod test {
             config.ice_servers[0].urls[0],
             "stun:stun.l.google.com:19302"
         );
-        // Fields not present in JSON should be their Default values
-        assert_eq!(
-            config.ice_transport_policy,
-            RTCIceTransportPolicy::Unspecified
-        );
-        assert_eq!(config.bundle_policy, RTCBundlePolicy::Unspecified);
-        assert_eq!(config.rtcp_mux_policy, RTCRtcpMuxPolicy::Unspecified);
+        // Fields not present in JSON take the dictionary's defaults (W3C webrtc-pc 4.2.1:
+        // iceTransportPolicy "all", bundlePolicy "balanced", rtcpMuxPolicy "require"), and
+        // the configuration serialises them by those names.
+        assert_eq!(config.ice_transport_policy, RTCIceTransportPolicy::All);
+        assert_eq!(config.bundle_policy, RTCBundlePolicy::Balanced);
+        assert_eq!(config.rtcp_mux_policy, RTCRtcpMuxPolicy::Require);
+        let json = serde_json::to_value(RTCConfigurationBuilder::new().build()).expect("json");
+        assert_eq!(json["iceTransportPolicy"], "all");
+        assert_eq!(json["bundlePolicy"], "balanced");
+        assert_eq!(json["rtcpMuxPolicy"], "require");
         assert!(config.certificates.is_empty());
         assert_eq!(config.ice_candidate_pool_size, 0);
     }

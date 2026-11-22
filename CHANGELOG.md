@@ -75,6 +75,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     negotiation-needed; its next offer lists the chosen local candidate alone with
     `a=remote-candidates`, and the controlled peer connection applies it with
     `ice::Agent::replace_remote_candidates`, its answer listing the named candidate alone.
+- **media_stream**: remote tracks and the mediacapture-main model (pc-16).
+  - `MediaStreamTrack::apply_constraints` returns `Result<()>`: on a remote track (a
+    receiver's; new `is_remote()`) constraints naming `width`, `height`, `frameRate` or
+    `aspectRatio` are `Error::OverconstrainedError(<property>)` (webrtc-pc 9.3.1);
+    `apply_constraints(None)` now clears the constraints. New error variant
+    `Error::OverconstrainedError` in rtc-shared.
+  - `Constrain` and `ConstrainRange` are public (`ConstrainRange`'s members are `Option`);
+    `MediaTrackConstraintSet::with_width` / `with_height` / `with_aspect_ratio` /
+    `with_frame_rate` and getters, `MediaTrackConstraints::new` / `basic` / `advanced`.
+  - Remote video settings (webrtc-pc 9.3.1): new `RTCRtpReceiver::report_received_frame(now,
+    width, height)`, the feed the application's decoder or depacketizer supplies; the
+    track's `MediaTrackSettings::width` / `height` / `aspect_ratio` / `frame_rate` report the
+    latest frame and an estimate over the last second. New `RTCRtpReceiver::track_mut`.
+  - mediacapture-main: `generate_id()` (UUID version 4), `MediaStream::with_generated_id`,
+    `MediaStream::clone_stream`, `MediaStreamTrack::with_generated_id`,
+    `MediaStreamTrack::clone_track`; `MediaStreamTrackEvent` / `MediaStreamTrackEventKind`
+    and `RTCRemoteStreamsChange::media_stream_track_events` (addtrack / removetrack).
+  - Fixed: a transceiver that `stop()` made stopping still handed the RTP that kept arriving
+    to the application; its receiver receives nothing any more (webrtc-pc 5.4).
+- **peer_connection**: the open webrtc-pc rows of the W3C object model (pc-15).
+  - `RTCRtpTransceiver::current_direction()` returns `Option<RTCRtpTransceiverDirection>`:
+    `None` (W3C null) before an exchange has negotiated the transceiver.
+  - `Default` for `RTCIceTransportPolicy`, `RTCBundlePolicy` and `RTCRtcpMuxPolicy` is the
+    W3C default (`All`, `Balanced`, `Require`; serialised "all", "balanced", "require"), not
+    `Unspecified`; `Unspecified` still behaves as those. `RTCRtcpMuxPolicy::Negotiate` is
+    documented as RFC 9429's policy, an engine setting outside the W3C enum.
+  - `add_remote_candidate` refuses a candidate that names neither `sdp_mid` nor
+    `sdp_mline_index` (`Error::TypeError`), and every call on a closed connection
+    (`ErrConnectionClosed`), as `add_local_candidate` now does too. A candidate for a media
+    section whose transceiver is stopped is ignored.
+  - A remote candidate on a port of the Fetch bad-port list, and an mDNS candidate under the
+    "relay" policy, is administratively prohibited: written into the remote description and
+    listed, kept in the stats report, never given to the ICE agent.
+  - `RTCIceTransport::get_remote_candidates()` lists the remote description's candidates
+    (never a peer-reflexive one the agent learned); `get_local_parameters()` is `None` until
+    a local description is set and reads it; `role()` is `Unspecified` ("unknown") until the
+    first offer, and a local offer makes it controlling at once;
+    `get_selected_candidate_pair()` is `None` in the new and closed states.
+  - `set_local_description` takes `RTCSessionDescription::default()`: without a type it is an
+    offer in stable / have-local-offer / have-remote-pranswer and an answer otherwise, and
+    without an sdp the connection creates the offer or answer.
+  - Negotiation-needed is false with no current local description and nothing to negotiate
+    (a rollback to an empty stable state no longer fires it).
+  - New `RTCPeerConnection::add_track_with_streams(track, streams)` (W3C `addTrack` with
+    streams). A sender whose transceiver negotiated a direction without send lists no codecs
+    in `get_parameters`. `close()` sets every data channel's state to closed without an
+    event. `iceCandidatePoolSize` is fixed once `set_local_description` has been called,
+    after a rollback too.
 - **jsep**: a rolled-back remote offer leaves the transports as they were (RFC 9429 section
   5.7). The answerer's ICE and DTLS transports take a remote offer's parameters when the local
   answer (or provisional answer) is applied, not when the offer is: the first offer starts

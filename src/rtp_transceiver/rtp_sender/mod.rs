@@ -393,11 +393,17 @@ impl RTCRtpSender<'_> {
     /// [`set_parameters`](Self::set_parameters) return the same parameters, with the same
     /// transaction id.
     pub fn get_parameters(&mut self) -> &RTCRtpSendParameters {
-        self.peer_connection.rtp_transceivers[self.id.0]
+        let transceiver = &mut self.peer_connection.rtp_transceivers[self.id.0];
+        let negotiated = transceiver.current_direction();
+        let negotiated_not_sending = negotiated
+            != crate::rtp_transceiver::RTCRtpTransceiverDirection::Unspecified
+            && !negotiated.has_send();
+        let sender = transceiver
             .sender_mut()
             .as_mut()
-            .expect("every transceiver has a sender")
-            .get_parameters(&self.peer_connection.media_engine)
+            .expect("every transceiver has a sender");
+        sender.set_negotiated_not_sending(negotiated_not_sending);
+        sender.get_parameters(&self.peer_connection.media_engine)
     }
 
     /// The resolution an encoder that produces `width` x `height` for this sender is to send
