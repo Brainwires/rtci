@@ -16,6 +16,7 @@ pub(crate) mod param_state_cookie;
 pub(crate) mod param_supported_extensions;
 pub(crate) mod param_type;
 pub(crate) mod param_uknown;
+pub(crate) mod param_zero_checksum_acceptable;
 
 use crate::param::{
     param_add_streams_request::ParamAddStreamsRequest, param_chunk_list::ParamChunkList,
@@ -74,6 +75,15 @@ pub(crate) fn build_param(raw_param: &Bytes) -> Result<Box<dyn Param>> {
         ParamType::ForwardTsnSupp => Ok(Box::new(ParamForwardTsnSupported::unmarshal(raw_param)?)),
         ParamType::SupportedExt => Ok(Box::new(ParamSupportedExtensions::unmarshal(raw_param)?)),
         ParamType::Random => Ok(Box::new(ParamRandom::unmarshal(raw_param)?)),
+        // RFC 9653 4: a parameter of another length is not this parameter; it is kept as
+        // an unknown one and skipped.
+        ParamType::ZeroChecksumAcceptable => Ok(
+            match param_zero_checksum_acceptable::ParamZeroChecksumAcceptable::unmarshal(raw_param)
+            {
+                Ok(param) => Box::new(param),
+                Err(_) => Box::new(ParamUnknown::unmarshal(raw_param)?),
+            },
+        ),
         ParamType::ReqHmacAlgo => Ok(Box::new(ParamRequestedHmacAlgorithm::unmarshal(raw_param)?)),
         ParamType::ChunkList => Ok(Box::new(ParamChunkList::unmarshal(raw_param)?)),
         ParamType::StateCookie => Ok(Box::new(ParamStateCookie::unmarshal(raw_param)?)),

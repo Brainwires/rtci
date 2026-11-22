@@ -40,6 +40,7 @@ use crate::param::{
     param_state_cookie::ParamStateCookie,
     param_supported_extensions::ParamSupportedExtensions,
     param_uknown::ParamUnknown,
+    param_zero_checksum_acceptable::{EDMID_SCTP_OVER_DTLS, ParamZeroChecksumAcceptable},
 };
 use crate::queue::{
     payload_queue::PayloadQueue,
@@ -144,6 +145,8 @@ struct CookieTcb {
     use_interleaving: bool,
     /// The INIT listed the RE-CONFIG chunk among its supported extensions (RFC 6525 5.1.1).
     reconfig: bool,
+    /// The peer takes a zero checksum over DTLS and this side may send one (RFC 9653 5.2).
+    send_zero_checksum: bool,
     /// This side's port and the peer's, as the INIT's packet had them.
     source_port: u16,
     destination_port: u16,
@@ -166,6 +169,9 @@ struct HandshakeParams {
     i_data: bool,
     /// The Supported Extensions parameter lists the I-FORWARD-TSN chunk (RFC 8260 2.3.1).
     i_forward_tsn: bool,
+    /// The Error Detection Method Identifier of a Zero Checksum Acceptable parameter (RFC
+    /// 9653 4), the first one if the peer sent several.
+    zero_checksum_edmid: Option<u32>,
 }
 
 /// The Forward-TSN-Supported parameter (RFC 3758 3.1).
@@ -331,7 +337,7 @@ pub struct Association {
     will_send_shutdown_complete: bool,
 
     // Reconfig
-    my_next_rsn: u32,
+    pub(crate) my_next_rsn: u32,
     /// The request in flight, by its sequence number, as the chunk that is retransmitted.
     /// RFC 6525 5.1.1: there is at most one.
     reconfigs: HashMap<u32, ChunkReconfig>,
@@ -438,6 +444,12 @@ pub struct Association {
     partial_reliability_enabled: bool,
     /// User message interleaving is announced (`TransportConfig::with_message_interleaving`).
     interleaving_enabled: bool,
+    /// "Zero Checksum Acceptable" is announced, for SCTP over DTLS, and packets with a zero
+    /// checksum are taken (`TransportConfig::with_zero_checksum`; RFC 9653 5.1, 5.3).
+    zero_checksum_enabled: bool,
+    /// The peer announced that it takes a zero checksum over DTLS, and this side may send
+    /// one: the CRC32c of what is sent is not computed (RFC 9653 5.2).
+    send_zero_checksum: bool,
     /// User message interleaving is in use: both sides announced it (RFC 8260 2.2.1). DATA
     /// and FORWARD TSN are then replaced by I-DATA and I-FORWARD-TSN.
     use_interleaving: bool,
@@ -617,6 +629,8 @@ impl Default for Association {
             use_forward_tsn: false,
             partial_reliability_enabled: true,
             interleaving_enabled: false,
+            zero_checksum_enabled: false,
+            send_zero_checksum: false,
             use_interleaving: false,
             i_fwd_tsn_stream_map: FxHashMap::default(),
             fwd_tsn_stream_map: FxHashMap::default(),
@@ -719,6 +733,7 @@ impl Association {
             valid_cookie_life: config.valid_cookie_life(),
             partial_reliability_enabled: config.partial_reliability(),
             interleaving_enabled: config.message_interleaving(),
+            zero_checksum_enabled: config.zero_checksum(),
             heartbeat_interval: config.heartbeat_interval(),
             created_at: Some(now),
             max_payload_size,
@@ -773,7 +788,11 @@ impl Association {
                 advertised_receiver_window_credit: this.max_receive_buffer_size,
                 ..Default::default()
             };
-            init.announce_extensions(this.partial_reliability_enabled, this.interleaving_enabled);
+            init.announce_extensions(
+                this.partial_reliability_enabled,
+                this.interleaving_enabled,
+                this.zero_checksum_enabled,
+            );
 
             this.set_state(AssociationState::CookieWait);
             this.stored_init = Some(init);
@@ -842,6 +861,43 @@ impl Association {
             self.timers.stop(Timer::T3RTX);
             self.timers.start(Timer::T3RTX, now, self.rto_mgr.get_rto());
         }
+    }
+
+    /// The largest SCTP packet (common header and chunks) the association sends: the path
+    /// MTU as it knows it.
+    pub fn path_mtu(&self) -> u32 {
+        self.mtu
+    }
+
+    /// Tells the association the largest SCTP packet the path below carries, in bytes: the
+    /// path MTU less what lies beneath SCTP (for WebRTC: the DTLS record overhead, the UDP
+    /// and IP headers, and TURN framing where a relay is used). The entry point for whatever
+    /// learns the path MTU: the application's own discovery, a transport that probes, or an
+    /// ICMP "Packet Too Big" it has validated (RFC 9260 section 7.3, RFC 8261 section 4).
+    /// The association does not probe by itself.
+    ///
+    /// From now on packets are bundled up to `mtu`, the Path Maximum DATA Chunk Size of the
+    /// congestion control rules follows it, and messages written from now on are fragmented
+    /// to fit. A message already fragmented keeps its fragments: after a reduction they are
+    /// sent as they are, each alone in a packet larger than the new MTU, and the layer below
+    /// has to fragment or the caller to accept the loss (RFC 9260 section 6.9: SCTP does not
+    /// re-fragment). A value below [`MIN_DATA_PACKET_MTU`](crate::MIN_DATA_PACKET_MTU) is
+    /// raised to it.
+    pub fn set_path_mtu(&mut self, mtu: u32) {
+        let mtu = mtu.max(crate::config::MIN_DATA_PACKET_MTU);
+        if mtu == self.mtu {
+            return;
+        }
+        debug!("[{}] path MTU {} -> {}", self.side, self.mtu, mtu);
+        self.mtu = mtu;
+        self.pmdcs = mtu.saturating_sub(COMMON_HEADER_SIZE);
+        self.max_payload_size = crate::config::max_payload_size_for_mtu(mtu);
+        for s in self.streams.values_mut() {
+            s.max_payload_size = self.max_payload_size;
+        }
+        self.pending_queue.set_packet_budget(self.pmdcs as usize);
+        // RFC 9260 7.2.1: cwnd is never below one packet of the size now in use.
+        self.cwnd = self.cwnd.max(self.pmdcs);
     }
 
     /// Returns application-facing event
@@ -978,6 +1034,13 @@ impl Association {
                 }*/
 
                 if let Payload::PartialDecode(partial_decode) = transmit.message {
+                    // RFC 9653 5.3: a zero checksum is taken only by an endpoint that
+                    // announced it; otherwise the packet is dropped as one with a wrong
+                    // CRC32c (RFC 9260 6.8).
+                    if !partial_decode.checksum_ok(self.zero_checksum_enabled) {
+                        debug!("[{}] discarding a packet with a zero checksum", self.side);
+                        return;
+                    }
                     let len = COMMON_HEADER_SIZE as usize + partial_decode.remaining.len();
                     debug!("[{}] recving {} bytes", self.side, len);
                     self.bytes_received = self.bytes_received.saturating_add(len);
@@ -1829,7 +1892,11 @@ impl Association {
             advertised_receiver_window_credit: self.max_receive_buffer_size,
             ..Default::default()
         };
-        init.announce_extensions(self.partial_reliability_enabled, self.interleaving_enabled);
+        init.announce_extensions(
+            self.partial_reliability_enabled,
+            self.interleaving_enabled,
+            self.zero_checksum_enabled,
+        );
         self.stored_init = Some(init);
         self.set_state(AssociationState::CookieWait);
         let _ = self.send_init();
@@ -1864,6 +1931,9 @@ impl Association {
             } else if any.downcast_ref::<ParamForwardTsnSupported>().is_some() {
                 // RFC 3758 3.3.1: this parameter alone announces PR-SCTP.
                 out.forward_tsn = true;
+            } else if let Some(v) = any.downcast_ref::<ParamZeroChecksumAcceptable>() {
+                // RFC 9653 4: the parameter appears once; a second one changes nothing.
+                out.zero_checksum_edmid.get_or_insert(v.edmid);
             } else if let Some(v) = any.downcast_ref::<ParamUnknown>() {
                 if v.typ() == PARAM_HOST_NAME_ADDRESS {
                     out.host_name = param.marshal().ok();
@@ -1964,6 +2034,7 @@ impl Association {
             use_forward_tsn: self.negotiated_partial_reliability(&params),
             use_interleaving: self.negotiated_interleaving(&params),
             reconfig: params.reconfig,
+            send_zero_checksum: self.may_send_zero_checksum(&params),
             source_port,
             destination_port,
         };
@@ -2015,7 +2086,11 @@ impl Association {
                 .push(Box::new(ParamUnknown::new(UNRECOGNIZED_PARAMETER, raw)));
         }
 
-        init_ack.announce_extensions(self.partial_reliability_enabled, self.interleaving_enabled);
+        init_ack.announce_extensions(
+            self.partial_reliability_enabled,
+            self.interleaving_enabled,
+            self.zero_checksum_enabled,
+        );
 
         if state == AssociationState::Closed {
             // The accepting side holds this association from the INIT on. If no COOKIE ECHO
@@ -2049,11 +2124,46 @@ impl Association {
             use_forward_tsn: tcb.use_forward_tsn,
             use_interleaving: tcb.use_interleaving,
             reconfig: tcb.reconfig,
+            send_zero_checksum: tcb.send_zero_checksum,
             source_port: tcb.source_port,
             destination_port: tcb.destination_port,
             local_tie_tag: 0,
             peer_tie_tag: 0,
         }
+    }
+
+    /// RFC 9653 5.2: this side sends a zero checksum when the peer announced that it takes
+    /// one for an error detection method this side uses, which is SCTP over DTLS, and the
+    /// application said the association runs over DTLS (`TransportConfig::with_zero_checksum`).
+    fn may_send_zero_checksum(&self, params: &HandshakeParams) -> bool {
+        self.zero_checksum_enabled && params.zero_checksum_edmid == Some(EDMID_SCTP_OVER_DTLS)
+    }
+
+    /// Whether packets are sent with a zero checksum (RFC 9653): both sides announced that
+    /// they take one over DTLS.
+    pub fn zero_checksum(&self) -> bool {
+        self.send_zero_checksum
+    }
+
+    /// Serializes a packet. Its CRC32c is left out when the peer takes a zero checksum,
+    /// except where RFC 9653 5.2 asks for a correct one: a packet with an INIT or a COOKIE
+    /// ECHO, and one that answers an out-of-the-blue packet (it reflects a tag, or does not
+    /// carry the peer's).
+    fn marshal_packet(&self, p: &Packet) -> Result<Bytes> {
+        let zero = self.send_zero_checksum
+            && p.common_header.verification_tag == self.peer_verification_tag
+            && p.chunks.iter().all(|c| {
+                let any = c.as_any();
+                !any.is::<ChunkCookieEcho>()
+                    && any.downcast_ref::<ChunkInit>().is_none_or(|i| i.is_ack)
+                    && any
+                        .downcast_ref::<ChunkAbort>()
+                        .is_none_or(|a| !a.tag_reflected)
+                    && any
+                        .downcast_ref::<ChunkShutdownComplete>()
+                        .is_none_or(|s| !s.tag_reflected)
+            });
+        p.marshal_with(zero)
     }
 
     /// Has this association make its State Cookies with a MAC.
@@ -2089,6 +2199,7 @@ impl Association {
             use_forward_tsn: fields.use_forward_tsn,
             use_interleaving: fields.use_interleaving,
             reconfig: fields.reconfig,
+            send_zero_checksum: fields.send_zero_checksum,
             source_port: fields.source_port,
             destination_port: fields.destination_port,
         };
@@ -2124,6 +2235,7 @@ impl Association {
         self.use_forward_tsn = tcb.use_forward_tsn;
         self.set_interleaving(tcb.use_interleaving);
         self.peer_supports_reconfig = tcb.reconfig;
+        self.send_zero_checksum = tcb.send_zero_checksum;
         // RFC 6525 4.1: the peer's request sequence numbers start at its initial TSN.
         self.peer_rsn_window = Some((tcb.peer_initial_tsn, tcb.peer_initial_tsn));
     }
@@ -2148,7 +2260,11 @@ impl Association {
             advertised_receiver_window_credit: self.max_receive_buffer_size,
             params: vec![Box::new(ParamStateCookie::new())],
         };
-        init_ack.announce_extensions(self.partial_reliability_enabled, self.interleaving_enabled);
+        init_ack.announce_extensions(
+            self.partial_reliability_enabled,
+            self.interleaving_enabled,
+            self.zero_checksum_enabled,
+        );
         Packet {
             common_header: CommonHeader {
                 verification_tag: i.initiate_tag,
@@ -2218,6 +2334,7 @@ impl Association {
         // the peer reported this side's Forward-TSN-Supported parameter as unrecognized.
         self.use_forward_tsn = self.negotiated_partial_reliability(&params);
         self.set_interleaving(self.negotiated_interleaving(&params));
+        self.send_zero_checksum = self.may_send_zero_checksum(&params);
         if !self.use_forward_tsn {
             warn!("[{}] not using ForwardTSN (on initAck)", self.side);
         }
@@ -3662,7 +3779,12 @@ impl Association {
         let mut buf = BytesMut::with_capacity(
             COMMON_HEADER_SIZE as usize + CHUNK_HEADER_SIZE + chunk.value_length() + 3,
         );
-        Packet::write_framed(&common_header, std::iter::once(chunk), &mut buf)?;
+        Packet::write_framed_with(
+            &common_header,
+            std::iter::once(chunk),
+            &mut buf,
+            self.send_zero_checksum,
+        )?;
         Ok(buf.freeze())
     }
 
@@ -3795,7 +3917,7 @@ impl Association {
         if !self.control_queue.is_empty() {
             let packets: Vec<Packet> = self.control_queue.drain(..).collect();
             for p in self.bundle_control_packets(packets, &mut sack) {
-                if let Ok(raw) = p.marshal() {
+                if let Ok(raw) = self.marshal_packet(&p) {
                     raw_packets.push(raw);
                 } else {
                     warn!("[{}] failed to serialize a control packet", self.side);
@@ -3928,7 +4050,7 @@ impl Association {
             );
             for c in self.reconfigs.values() {
                 let p = self.create_packet(vec![Box::new(c.clone())]);
-                if let Ok(raw) = p.marshal() {
+                if let Ok(raw) = self.marshal_packet(&p) {
                     raw_packets.push(raw);
                 } else {
                     warn!(
@@ -3945,7 +4067,7 @@ impl Association {
             self.on_reset_marker_ready(marker);
         }
         while let Some(packet) = self.next_reconfig_request(now) {
-            if let Ok(raw) = packet.marshal() {
+            if let Ok(raw) = self.marshal_packet(&packet) {
                 raw_packets.push(raw);
             } else {
                 warn!(
@@ -4171,7 +4293,7 @@ impl Association {
                 cumulative_tsn_ack: self.peer_last_tsn,
             };
 
-            if let Ok(raw) = self.create_packet(vec![Box::new(shutdown)]).marshal() {
+            if let Ok(raw) = self.marshal_packet(&self.create_packet(vec![Box::new(shutdown)])) {
                 self.timers
                     .start(Timer::T2Shutdown, now, self.rto_mgr.get_rto());
                 self.start_shutdown_guard(now);
@@ -4184,7 +4306,8 @@ impl Association {
 
             let shutdown_ack = ChunkShutdownAck {};
 
-            if let Ok(raw) = self.create_packet(vec![Box::new(shutdown_ack)]).marshal() {
+            if let Ok(raw) = self.marshal_packet(&self.create_packet(vec![Box::new(shutdown_ack)]))
+            {
                 self.timers
                     .start(Timer::T2Shutdown, now, self.rto_mgr.get_rto());
                 raw_packets.push(raw);
@@ -4196,9 +4319,8 @@ impl Association {
 
             let shutdown_complete = ChunkShutdownComplete::default();
 
-            if let Ok(raw) = self
-                .create_packet(vec![Box::new(shutdown_complete)])
-                .marshal()
+            if let Ok(raw) =
+                self.marshal_packet(&self.create_packet(vec![Box::new(shutdown_complete)]))
             {
                 raw_packets.push(raw);
                 ok = false;
@@ -4811,10 +4933,11 @@ impl Association {
         // Second pass: marshal each datagram into the shared buffer.
         let mut buf = BytesMut::with_capacity(total_len);
         for (start, end) in bundles {
-            match Packet::write_framed(
+            match Packet::write_framed_with(
                 &common_header,
                 chunks[start..end].iter().map(|c| c as &dyn Chunk),
                 &mut buf,
+                self.send_zero_checksum,
             ) {
                 Ok(_) => {
                     let plen = buf.len();

@@ -330,6 +330,13 @@ impl Endpoint {
             ));
         }
 
+        // RFC 9653 5.2, 5.3: a packet for no association has a correct CRC32c (an INIT
+        // always has), so one with a checksum of zero is dropped unless zero is its CRC32c.
+        if !partial_decode.checksum_ok(false) {
+            trace!("discarding a packet with a zero checksum that belongs to no association");
+            return None;
+        }
+
         // RFC 9260 5.1, 5.1.3: with authenticated State Cookies the accepting side keeps
         // nothing between the INIT and the COOKIE ECHO.
         if let Some(signer) = self.cookie_signer(now) {

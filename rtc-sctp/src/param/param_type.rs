@@ -32,6 +32,8 @@ pub(crate) enum ParamType {
     /// Add Outgoing Streams Request Parameter [RFCRFC6525]
     AddIncStreamsReq,
     /// Add Incoming Streams Request Parameter [RFCRFC6525]
+    ZeroChecksumAcceptable,
+    /// Zero Checksum Acceptable (0x8001) [RFC9653]
     Random,
     /// Random (0x8002) [RFCRFC4805]
     ChunkList,
@@ -78,6 +80,7 @@ impl fmt::Display for ParamType {
             ParamType::ReconfigResp => "Re-configuration Response Parameter",
             ParamType::AddOutStreamsReq => "Add Outgoing Streams Request Parameter",
             ParamType::AddIncStreamsReq => "Add Incoming Streams Request Parameter",
+            ParamType::ZeroChecksumAcceptable => "Zero Checksum Acceptable",
             ParamType::Random => "Random",
             ParamType::ChunkList => "Chunk List",
             ParamType::ReqHmacAlgo => "Requested HMAC Algorithm Parameter",
@@ -113,6 +116,7 @@ impl From<u16> for ParamType {
             16 => ParamType::ReconfigResp,
             17 => ParamType::AddOutStreamsReq,
             18 => ParamType::AddIncStreamsReq,
+            32769 => ParamType::ZeroChecksumAcceptable,
             32770 => ParamType::Random,
             32771 => ParamType::ChunkList,
             32772 => ParamType::ReqHmacAlgo,
@@ -146,6 +150,7 @@ impl From<ParamType> for u16 {
             ParamType::ReconfigResp => 16,
             ParamType::AddOutStreamsReq => 17,
             ParamType::AddIncStreamsReq => 18,
+            ParamType::ZeroChecksumAcceptable => 32769,
             ParamType::Random => 32770,
             ParamType::ChunkList => 32771,
             ParamType::ReqHmacAlgo => 32772,

@@ -170,14 +170,17 @@ impl Association {
             destination_port: self.destination_port,
         };
         let mut buf = BytesMut::with_capacity(slot.len() + wire);
-        if Packet::write_framed(&common_header, std::iter::once(chunk), &mut buf).is_err() {
+        if Packet::write_framed_with(&common_header, std::iter::once(chunk), &mut buf, true)
+            .is_err()
+        {
             return false;
         }
         buf.extend_from_slice(&slot[header..]);
-        // The checksum covers the packet with its checksum field zero.
-        buf[8..12].copy_from_slice(&[0; 4]);
-        let checksum = crc32c::crc32c(&buf);
-        buf[8..12].copy_from_slice(&checksum.to_le_bytes());
+        if !self.send_zero_checksum {
+            // The checksum covers the packet with its checksum field zero.
+            let checksum = crc32c::crc32c(&buf);
+            buf[8..12].copy_from_slice(&checksum.to_le_bytes());
+        }
         *slot = buf.freeze();
         true
     }

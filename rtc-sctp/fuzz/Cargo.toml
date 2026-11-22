@@ -302,3 +302,10 @@ path = "fuzz_targets/association_handle_chunks_interleaved.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "param_param_zero_checksum_acceptable_unmarshal"
+path = "fuzz_targets/param_param_zero_checksum_acceptable_unmarshal.rs"
+test = false
+doc = false
+bench = false

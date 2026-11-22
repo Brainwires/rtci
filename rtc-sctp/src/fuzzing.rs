@@ -43,6 +43,7 @@ use crate::param::param_ssn_tsn_reset_request::ParamSsnTsnResetRequest;
 use crate::param::param_state_cookie::ParamStateCookie;
 use crate::param::param_supported_extensions::ParamSupportedExtensions;
 use crate::param::param_uknown::ParamUnknown;
+use crate::param::param_zero_checksum_acceptable::ParamZeroChecksumAcceptable;
 
 fn to_bytes(data: &[u8]) -> Bytes {
     Bytes::copy_from_slice(data)
@@ -330,6 +331,12 @@ pub fn param_param_ssn_tsn_reset_request_unmarshal(data: &[u8]) -> Result<()> {
 pub fn param_param_add_streams_request_unmarshal(data: &[u8]) -> Result<()> {
     let raw = to_bytes(data);
     let _ = ParamAddStreamsRequest::unmarshal(&raw)?;
+    Ok(())
+}
+
+pub fn param_param_zero_checksum_acceptable_unmarshal(data: &[u8]) -> Result<()> {
+    let raw = to_bytes(data);
+    let _ = ParamZeroChecksumAcceptable::unmarshal(&raw)?;
     Ok(())
 }
 

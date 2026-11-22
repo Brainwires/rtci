@@ -104,6 +104,7 @@ pub struct TransportConfig {
     sack_delay: Duration,
     partial_reliability: bool,
     message_interleaving: bool,
+    zero_checksum: bool,
 }
 
 impl Default for TransportConfig {
@@ -125,6 +126,7 @@ impl Default for TransportConfig {
             sack_delay: Duration::from_millis(200),
             partial_reliability: true,
             message_interleaving: false,
+            zero_checksum: false,
         }
     }
 }
@@ -176,6 +178,29 @@ impl TransportConfig {
     /// See [`with_message_interleaving`](Self::with_message_interleaving).
     pub fn message_interleaving(&self) -> bool {
         self.message_interleaving
+    }
+
+    /// Says that the association runs over DTLS (RFC 8261), which detects errors better than
+    /// SCTP's CRC32c does, and so allows the zero checksum of RFC 9653 with the "SCTP over
+    /// DTLS" error detection method (section 6):
+    ///
+    /// - the INIT or INIT ACK carries the Zero Checksum Acceptable parameter, and packets
+    ///   that arrive with a checksum of zero are taken, their CRC32c not computed;
+    /// - when the peer announces the same, packets are sent with a checksum of zero and
+    ///   their CRC32c is not computed either. The packets RFC 9653 section 5.2 excepts keep
+    ///   a correct one: an INIT, a COOKIE ECHO, an answer to an out-of-the-blue packet.
+    ///
+    /// Off by default: every packet carries its CRC32c and one without is dropped. It MUST
+    /// NOT be turned on for an association that does not run over DTLS; a WebRTC data
+    /// channel transport always does.
+    pub fn with_zero_checksum(mut self, value: bool) -> Self {
+        self.zero_checksum = value;
+        self
+    }
+
+    /// See [`with_zero_checksum`](Self::with_zero_checksum).
+    pub fn zero_checksum(&self) -> bool {
+        self.zero_checksum
     }
 
     /// Sets SACK.Delay (RFC 9260 sections 6.2 and 16): how long the acknowledgement of a DATA

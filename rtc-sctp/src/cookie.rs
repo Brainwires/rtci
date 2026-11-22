@@ -43,6 +43,8 @@ pub(crate) struct CookieFields {
     pub(crate) use_forward_tsn: bool,
     pub(crate) use_interleaving: bool,
     pub(crate) reconfig: bool,
+    /// The peer takes a zero checksum and this side may send one (RFC 9653).
+    pub(crate) send_zero_checksum: bool,
     /// This side's port and the peer's.
     pub(crate) source_port: u16,
     pub(crate) destination_port: u16,
@@ -60,7 +62,8 @@ impl CookieFields {
         buf.put_u8(
             u8::from(self.use_forward_tsn)
                 | u8::from(self.use_interleaving) << 1
-                | u8::from(self.reconfig) << 2,
+                | u8::from(self.reconfig) << 2
+                | u8::from(self.send_zero_checksum) << 3,
         );
         buf.put_u8(0);
         buf.put_u64(self.created_ms);
@@ -99,6 +102,7 @@ impl CookieFields {
             use_forward_tsn: flags & 1 != 0,
             use_interleaving: flags & 2 != 0,
             reconfig: flags & 4 != 0,
+            send_zero_checksum: flags & 8 != 0,
             source_port: body.get_u16(),
             destination_port: body.get_u16(),
             local_tie_tag: body.get_u32(),

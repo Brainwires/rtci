@@ -283,7 +283,22 @@ impl ChunkInit {
     /// section 3.1 defines, which is the one a peer that knows only that RFC reads. With
     /// `interleaving`, user message interleaving (RFC 8260 2.2.1): the I-DATA chunk, and the
     /// I-FORWARD-TSN chunk that PR-SCTP needs with it (2.3.1).
-    pub(crate) fn announce_extensions(&mut self, partial_reliability: bool, interleaving: bool) {
+    ///
+    /// With `zero_checksum`, the Zero Checksum Acceptable parameter for SCTP over DTLS (RFC
+    /// 9653 5.1): this side takes packets whose checksum is zero.
+    pub(crate) fn announce_extensions(
+        &mut self,
+        partial_reliability: bool,
+        interleaving: bool,
+        zero_checksum: bool,
+    ) {
+        if zero_checksum {
+            self.params.push(Box::new(
+                crate::param::param_zero_checksum_acceptable::ParamZeroChecksumAcceptable {
+                    edmid: crate::param::param_zero_checksum_acceptable::EDMID_SCTP_OVER_DTLS,
+                },
+            ));
+        }
         let mut chunk_types = vec![CT_RECONFIG];
         if partial_reliability {
             chunk_types.push(CT_FORWARD_TSN);

@@ -2209,3 +2209,6 @@ mod bundling_test;
 
 #[path = "cookie_test.rs"]
 mod cookie_test;
+
+#[path = "zero_checksum_test.rs"]
+mod zero_checksum_test;
