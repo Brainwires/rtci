@@ -9,13 +9,14 @@ fn test_vp8_unmarshal() -> Result<()> {
     let result = pck.depacketize(&empty_bytes);
     assert!(result.is_err(), "Result should be err in case of error");
 
-    // Payload smaller than header size
-    let small_bytes = Bytes::from_static(&[0x00, 0x11, 0x22]);
+    // A descriptor with nothing after it. (Packets of two and three octets used to be refused
+    // here too; they are valid, see `a_continuation_packet_of_two_or_three_octets_is_accepted`.)
+    let small_bytes = Bytes::from_static(&[0x00]);
     let result = pck.depacketize(&small_bytes);
     assert!(result.is_err(), "Result should be err in case of error");
 
-    // Payload smaller than header size
-    let small_bytes = Bytes::from_static(&[0x00, 0x11]);
+    // An extended descriptor cut short
+    let small_bytes = Bytes::from_static(&[0x80, 0x80]);
     let result = pck.depacketize(&small_bytes);
     assert!(result.is_err(), "Result should be err in case of error");
 
@@ -129,6 +130,7 @@ fn test_vp8_payload() -> Result<()> {
             Vp8Payloader {
                 enable_picture_id: true,
                 picture_id: 0x20,
+                ..Default::default()
             },
             5,
             vec![
@@ -148,6 +150,7 @@ fn test_vp8_payload() -> Result<()> {
             Vp8Payloader {
                 enable_picture_id: true,
                 picture_id: 0x120,
+                ..Default::default()
             },
             6,
             vec![
