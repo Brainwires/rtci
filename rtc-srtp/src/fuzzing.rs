@@ -6,17 +6,15 @@
 //! window and the SRTCP index. Fixed keys, no clock: every input replays identically. Gated
 //! behind `cfg(fuzzing)`; not part of the supported API.
 use crate::context::Context;
-use crate::option::{srtcp_replay_protection, srtp_replay_protection};
+use crate::header_extension::EncryptedHeaderExtensions;
+use crate::keying::{KeyDerivationRate, KeyLifetime, Keying};
+use crate::option::{
+    srtcp_no_replay_protection, srtcp_replay_protection, srtp_no_replay_protection,
+    srtp_replay_protection,
+};
 use crate::protection_profile::ProtectionProfile;
 
-const PROFILES: [ProtectionProfile; 6] = [
-    ProtectionProfile::Aes128CmHmacSha1_80,
-    ProtectionProfile::Aes128CmHmacSha1_32,
-    ProtectionProfile::Aes256CmHmacSha1_80,
-    ProtectionProfile::Aes256CmHmacSha1_32,
-    ProtectionProfile::AeadAes128Gcm,
-    ProtectionProfile::AeadAes256Gcm,
-];
+const PROFILES: [ProtectionProfile; 10] = ProtectionProfile::ALL;
 
 /// Splits the next op argument off `data`: a two-byte length, then that many bytes.
 fn take_arg<'a>(data: &mut &'a [u8]) -> &'a [u8] {
@@ -42,8 +40,10 @@ fn with_version(arg: &[u8]) -> Vec<u8> {
 /// Stateful target: SRTP/SRTCP decryption against a context with fixed keys.
 ///
 /// The first byte picks the protection profile and whether the receiver has replay protection
-/// (and its window). The rest is a sequence of ops, each an op byte followed by a two-byte
-/// length and the argument:
+/// (and its window). Its top three bits turn on, for both contexts: an MKI with a key
+/// derivation rate of 16 packets and a lifetime of 48 packets per master key; RFC 6904
+/// encryption of header extension elements 1 to 3; unencrypted (E = 0) SRTCP. The rest is a
+/// sequence of ops, each an op byte followed by a two-byte length and the argument:
 ///
 /// - a raw packet to `decrypt_rtp` or `decrypt_rtcp`;
 /// - fuzzed RTP or RTCP plaintext, protected by the sender and then decrypted by the receiver,
@@ -60,8 +60,11 @@ pub fn context_decrypt(mut data: &[u8]) {
         0 => None,
         1 => Some(64),
         2 => Some(128),
-        _ => Some(1),
+        _ => Some(1024),
     };
+    let keyed = config & 0x20 != 0;
+    let header_extensions = config & 0x40 != 0;
+    let clear_srtcp = config & 0x80 != 0;
 
     let Ok(provider) = crypto::default_provider() else {
         return;
@@ -69,14 +72,47 @@ pub fn context_decrypt(mut data: &[u8]) {
     let master_key: Vec<u8> = (0..profile.key_len() as u8).collect();
     let master_salt: Vec<u8> = (0..profile.salt_len() as u8).map(|b| 0xa0 ^ b).collect();
     let new_context = |replay: Option<usize>| {
-        Context::new(
-            &master_key,
-            &master_salt,
-            profile,
-            replay.map(srtp_replay_protection),
-            replay.map(srtcp_replay_protection),
-            provider.crypto(),
-        )
+        let srtp = match replay {
+            Some(window) => srtp_replay_protection(window)?,
+            None => srtp_no_replay_protection(),
+        };
+        let srtcp = match replay {
+            Some(window) => srtcp_replay_protection(window)?,
+            None => srtcp_no_replay_protection(),
+        };
+        let mut context = if keyed {
+            let mut context = Context::with_keying(
+                &master_key,
+                &master_salt,
+                profile,
+                Keying {
+                    key_derivation_rate: KeyDerivationRate::new(16)?,
+                    mki: Some(vec![0x00, 0x01]),
+                },
+                Some(srtp),
+                Some(srtcp),
+                provider.clone(),
+            )?;
+            context.set_key_lifetime(KeyLifetime {
+                srtp_packets: 48,
+                srtcp_packets: 48,
+            })?;
+            context
+        } else {
+            Context::new(
+                &master_key,
+                &master_salt,
+                profile,
+                Some(srtp),
+                Some(srtcp),
+                provider.crypto(),
+            )?
+        };
+        if header_extensions {
+            context.set_encrypted_header_extensions(EncryptedHeaderExtensions::new(&[1, 2, 3])?);
+        }
+        context.set_srtcp_encryption(!clear_srtcp);
+        shared::error::Result::Ok(context)
     };
     let (Ok(mut sender), Ok(mut receiver)) = (new_context(None), new_context(window)) else {
         return;
@@ -161,7 +197,15 @@ mod tests {
             let rtp = with_version(&[0, 96, 0, 1, 0, 0, 0, 1, 0, 0, 0, 7, 0xde, 0xad]);
             let packet = s.encrypt_rtp(&rtp).unwrap();
             assert_eq!(&r.decrypt_rtp(&packet).unwrap()[..], &rtp[..]);
-            context_decrypt(&[config, 2, 0, rtp.len() as u8]);
+            // Every combination of the option bits, with an op of each kind.
+            for options in 0..8u8 {
+                let mut input = vec![config | (options << 5)];
+                for op in 0..8u8 {
+                    input.extend_from_slice(&[op, 0, rtp.len() as u8]);
+                    input.extend_from_slice(&rtp);
+                }
+                context_decrypt(&input);
+            }
         }
     }
 }

@@ -17,7 +17,9 @@ fn test_crypto_provider() -> std::sync::Arc<dyn crypto::RTCCryptoProvider> {
 }
 
 use bytes::BytesMut;
-use rtc_srtp::option::srtp_replay_protection;
+use rtc_srtp::option::{
+    srtcp_no_replay_protection, srtp_no_replay_protection, srtp_replay_protection,
+};
 use rtc_srtp::{context::Context, protection_profile::ProtectionProfile};
 use shared::marshal::Marshal;
 
@@ -31,8 +33,8 @@ fn new_ctx() -> Context {
         MASTER_KEY,
         MASTER_SALT,
         ProtectionProfile::Aes128CmHmacSha1_80,
-        None,
-        None,
+        Some(srtp_no_replay_protection()),
+        Some(srtcp_no_replay_protection()),
         test_crypto_provider().crypto(),
     )
     .unwrap()
@@ -46,8 +48,8 @@ fn new_gcm_ctx() -> Context {
         MASTER_KEY,
         GCM_MASTER_SALT,
         ProtectionProfile::AeadAes128Gcm,
-        None,
-        None,
+        Some(srtp_no_replay_protection()),
+        Some(srtcp_no_replay_protection()),
         test_crypto_provider().crypto(),
     )
     .unwrap()
@@ -60,7 +62,7 @@ fn new_ctx_replay() -> Context {
         MASTER_KEY,
         MASTER_SALT,
         ProtectionProfile::Aes128CmHmacSha1_80,
-        Some(srtp_replay_protection(128)),
+        Some(srtp_replay_protection(128).unwrap()),
         None,
         test_crypto_provider().crypto(),
     )
