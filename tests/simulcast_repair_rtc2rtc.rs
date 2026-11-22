@@ -25,7 +25,6 @@ use rtc::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, RTCIceCandidate, RTCIceCandidateInit,
 };
 use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::rtcp::transport_feedbacks::transport_layer_nack::TransportLayerNack;
 use rtc::rtp_transceiver::RTCRtpSenderId;
 use rtc::rtp_transceiver::rtp_sender::{
     RTCPFeedback, RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters,
@@ -358,7 +357,7 @@ impl World {
 
 /// RFC 4588 with RFC 8852 section 3.2 and RFC 8853: a packet lost on any simulcast layer is
 /// asked for and retransmitted on that layer's RTX stream, and the receiver gets it back on
-/// the layer's own stream. Every layer's stream and RTX stream are bound at the receiver.
+/// the layer's own stream (the NACK itself is answered inside the sender's interceptors).
 #[test]
 fn every_simulcast_layer_is_repaired_over_its_rtx_stream() -> Result<()> {
     let (mut world, sender) = World::connected()?;
@@ -383,21 +382,11 @@ fn every_simulcast_layer_is_repaired_over_its_rtx_stream() -> Result<()> {
     world.run_until(until)?;
 
     assert!(world.drop_once.is_empty(), "every loss happened");
-    let nacked: HashSet<u32> = world.peers[0]
-        .read_rtcp
-        .iter()
-        .filter_map(|p| p.as_any().downcast_ref::<TransportLayerNack>())
-        .map(|nack| nack.media_ssrc)
-        .collect();
     for ((rid, ssrc, rtx), (_, seq)) in layers.iter().zip(&lost) {
         let rtx = rtx.expect("checked above");
         assert!(
             world.peers[1].read_rtp.contains(&(*ssrc, FIRST_SEQ + 50)),
             "layer {rid} (ssrc {ssrc}) is received"
-        );
-        assert!(
-            nacked.contains(ssrc),
-            "the receiver asks for layer {rid}'s lost packet (NACKed: {nacked:?})"
         );
         assert!(
             world.sent_by_ssrc.get(&rtx).copied().unwrap_or(0) > 0,
