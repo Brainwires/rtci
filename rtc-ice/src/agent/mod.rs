@@ -348,6 +348,8 @@ pub struct Agent {
     pub(crate) remote_candidates: Vec<Candidate>,
     pub(crate) candidate_pairs: Vec<CandidatePair>,
     pub(crate) nominated_pair: Option<usize>,
+    /// When the controlling agent nominated `nominated_pair`.
+    pub(crate) nomination_started: Option<Instant>,
     pub(crate) selected_pair: Option<usize>,
     /// The selected pair's path at the moment an ICE restart was applied, kept until the
     /// restart selects a pair (or the agent fails or closes). See [`Agent::media_path`].
@@ -434,6 +436,8 @@ pub struct Agent {
     pub(crate) configured_ta: Option<Duration>,
     /// Which of several nominations the controlled agent uses.
     pub(crate) nomination_acceptance: NominationAcceptance,
+    /// What a nomination that times out leads to.
+    pub(crate) failed_nomination: FailedNomination,
     /// The controlling agent's consent checks carry USE-CANDIDATE (libwebrtc).
     pub(crate) nominate_on_consent_checks: bool,
     /// Error responses to unauthenticated requests, or nothing.
@@ -441,6 +445,9 @@ pub struct Agent {
     /// The token bucket of those error responses: tokens left, and when it was last filled.
     pub(crate) unauthenticated_response_tokens: u32,
     pub(crate) unauthenticated_response_refill: Instant,
+    /// The integrity attribute of the request being answered: its responses carry the same one
+    /// and no other (RFC 8489 Section 9.1.3).
+    pub(crate) answer_integrity: IntegrityAlgorithm,
     /// Data only from the selected pair's remote address (not RFC 8445 Section 12.2).
     pub(crate) data_from_selected_pair_only: bool,
     /// Data on the best valid pair before a pair is selected (RFC 8445 Section 12.1).
@@ -542,6 +549,7 @@ impl Agent {
             start_time: now,
 
             nominated_pair: None,
+            nomination_started: None,
             selected_pair: None,
             previous_media_path: None,
             previous_generation: None,
@@ -669,10 +677,12 @@ impl Agent {
             lite_update_raised: false,
             configured_ta: config.ta,
             nomination_acceptance: config.nomination_acceptance,
+            failed_nomination: config.failed_nomination,
             nominate_on_consent_checks: config.nominate_on_consent_checks,
             unauthenticated_requests: config.unauthenticated_requests,
             unauthenticated_response_tokens: MAX_UNAUTHENTICATED_RESPONSE_BURST,
             unauthenticated_response_refill: now,
+            answer_integrity: IntegrityAlgorithm::Sha1,
             data_from_selected_pair_only: config.data_from_selected_pair_only,
             send_data_before_nomination: config.send_data_before_nomination,
 
@@ -825,6 +835,20 @@ impl Agent {
         Ok(true)
     }
 
+    /// Adds local candidates gathered together: those without a priority or a rank of their
+    /// own are ranked first as RFC 8421 Section 4 recommends for a dual-stack host (an IPv6
+    /// head start, then the families alternating; see
+    /// [`rank_local_candidates`](crate::candidate::rank_local_candidates)), around the ranks
+    /// of the candidates the agent holds, and then each is added as by
+    /// [`Agent::add_local_candidate`], whose results are returned in order.
+    pub fn add_local_candidates(&mut self, mut candidates: Vec<Candidate>) -> Result<Vec<bool>> {
+        crate::candidate::assign_dual_stack_ranks(&self.local_candidates, &mut candidates);
+        candidates
+            .into_iter()
+            .map(|c| self.add_local_candidate(c))
+            .collect()
+    }
+
     /// Gives a local candidate that has neither a priority nor a rank of its own a local
     /// preference no other local candidate of its type has (RFC 8445 Section 5.1.2.1: "If
     /// there are multiple candidates for a particular component for a particular data stream
@@ -837,8 +861,9 @@ impl Agent {
     /// checked before the other's. The first candidate keeps the largest value (65535), as
     /// Section 5.1.2.1 asks of an agent with one address. A priority that has been signalled
     /// never changes, which is why a later candidate cannot go ahead of an earlier one: an
-    /// application that wants IPv6 first adds an IPv6 candidate first, or ranks candidates
-    /// itself with [`Candidate::set_local_preference_rank`].
+    /// application that wants IPv6 first adds its candidates together with
+    /// [`Agent::add_local_candidates`] (RFC 8421's IPv6 head start), adds an IPv6 candidate
+    /// first, or ranks candidates itself with [`Candidate::set_local_preference_rank`].
     fn rank_local_candidate(&self, c: &mut Candidate) {
         if c.priority_override != 0 || c.local_preference_rank.is_some() {
             return;
@@ -1998,23 +2023,25 @@ impl Agent {
                 self.checking_duration = now;
             }
 
-            // We have been in checking longer then Disconnect+Failed timeout, set the connection to Failed
+            // A nomination the peer has not been heard from for the consent expiry ends: its
+            // pair fails, and the next valid pair is nominated.
+            self.expire_unanswered_nomination(now);
+
+            // Past `disconnected_timeout + failed_timeout` in checking, the agent fails, but
+            // only once nothing is left that may still produce a selected pair (RFC 8445
+            // Sections 6.1.4.2 and 8.1.2: the checklist fails when every pair has failed). A
+            // pair that is still being checked fails by its own transaction (Section 14.3), a
+            // nomination by `expire_unanswered_nomination`.
             if self.failed_timeout != ZERO_DURATION
                 && now
                     .checked_duration_since(self.checking_duration)
                     .unwrap_or_else(|| Duration::from_secs(0))
                     > self.disconnected_timeout + self.failed_timeout
+                && !self.checks_in_progress(now)
             {
-                // The agent does not fail while it holds a valid pair it has not tried to
-                // nominate: a nomination that is still unanswered now is given up, and the
-                // next valid pair gets its turn (and its own share of time).
-                if self.give_up_nomination_for_another_valid_pair() {
-                    self.checking_duration = now;
-                } else {
-                    self.update_connection_state(Some(now), ConnectionState::Failed);
-                    self.last_connection_state = self.connection_state;
-                    return;
-                }
+                self.update_connection_state(Some(now), ConnectionState::Failed);
+                self.last_connection_state = self.connection_state;
+                return;
             }
         }
 
@@ -2641,20 +2668,18 @@ impl Agent {
         remote_addr: SocketAddr,
     ) {
         let (ip, port) = (remote_addr.ip(), remote_addr.port());
-        let local_pwd = self.ufrag_pwd.local_credentials.pwd.clone();
 
         let (out, result) = {
             let mut out = Message::new();
-            let result = out.build(&[
-                Box::new(m.clone()),
-                Box::new(BINDING_SUCCESS),
-                Box::new(XorMappedAddress { ip, port }),
-                Box::new(MessageIntegrity::new_short_term_integrity_with_provider(
-                    local_pwd,
-                    self.crypto_provider.crypto(),
-                )),
-                Box::new(FINGERPRINT),
-            ]);
+            let result = self.answer_integrity_setter().and_then(|integrity| {
+                out.build(&[
+                    Box::new(m.clone()),
+                    Box::new(BINDING_SUCCESS),
+                    Box::new(XorMappedAddress { ip, port }),
+                    integrity,
+                    Box::new(FINGERPRINT),
+                ])
+            });
             (out, result)
         };
 
@@ -2677,6 +2702,24 @@ impl Agent {
         }
     }
 
+    /// The integrity attribute of a response to the request being answered, with the local
+    /// password: MESSAGE-INTEGRITY-SHA256 when the request was authenticated by one, else
+    /// MESSAGE-INTEGRITY (RFC 8489 Section 9.1.3: "A response to a request that contains
+    /// a MESSAGE-INTEGRITY-SHA256 attribute MUST include the MESSAGE-INTEGRITY-SHA256
+    /// attribute [...] only one of these attributes can appear in a response").
+    fn answer_integrity_setter(&self) -> Result<Box<dyn Setter + '_>> {
+        let local_pwd = self.ufrag_pwd.local_credentials.pwd.clone();
+        let crypto = self.crypto_provider.crypto();
+        Ok(match self.answer_integrity {
+            IntegrityAlgorithm::Sha1 => Box::new(
+                MessageIntegrity::new_short_term_integrity_with_provider(local_pwd, crypto),
+            ),
+            IntegrityAlgorithm::Sha256 => {
+                Box::new(MessageIntegritySha256::short_term(&local_pwd, crypto)?)
+            }
+        })
+    }
+
     /// Sends a 487 (Role Conflict) error response.
     /// RFC 8445 Section 7.3.1.1
     pub(crate) fn send_role_conflict_error(
@@ -2688,20 +2731,17 @@ impl Agent {
     ) {
         use stun::error_code::*;
 
-        let local_pwd = self.ufrag_pwd.local_credentials.pwd.clone();
-
         let (out, result) = {
             let mut out = Message::new();
-            let result = out.build(&[
-                Box::new(m.clone()),
-                Box::new(stun::message::BINDING_ERROR),
-                Box::new(CODE_ROLE_CONFLICT),
-                Box::new(MessageIntegrity::new_short_term_integrity_with_provider(
-                    local_pwd,
-                    self.crypto_provider.crypto(),
-                )),
-                Box::new(FINGERPRINT),
-            ]);
+            let result = self.answer_integrity_setter().and_then(|integrity| {
+                out.build(&[
+                    Box::new(m.clone()),
+                    Box::new(stun::message::BINDING_ERROR),
+                    Box::new(CODE_ROLE_CONFLICT),
+                    integrity,
+                    Box::new(FINGERPRINT),
+                ])
+            });
             (out, result)
         };
 
@@ -2735,18 +2775,13 @@ impl Agent {
         local_index: usize,
         remote_addr: SocketAddr,
     ) {
-        let local_pwd = self.ufrag_pwd.local_credentials.pwd.clone();
-        let response = stun::validated::unknown_attributes_response(
-            m,
-            unknown,
-            &[
-                Box::new(MessageIntegrity::new_short_term_integrity_with_provider(
-                    local_pwd,
-                    self.crypto_provider.crypto(),
-                )),
-                Box::new(FINGERPRINT),
-            ],
-        );
+        let response = self.answer_integrity_setter().and_then(|integrity| {
+            stun::validated::unknown_attributes_response(
+                m,
+                unknown,
+                &[integrity, Box::new(FINGERPRINT)],
+            )
+        });
         match response {
             Ok(out) => self.send_stun_to(now, &out, local_index, remote_addr),
             Err(err) => warn!(
@@ -2951,6 +2986,13 @@ impl Agent {
         // verified when present, MESSAGE-INTEGRITY with the local password, and from here on
         // only what the integrity covers is read: USERNAME, the role attributes, PRIORITY,
         // USE-CANDIDATE. An attribute appended after it does not exist for the agent.
+        // The validator verifies MESSAGE-INTEGRITY-SHA256 when the request has it, and the
+        // answers carry the attribute that was verified (Section 9.1.3).
+        self.answer_integrity = if m.contains(ATTR_MESSAGE_INTEGRITY_SHA256) {
+            IntegrityAlgorithm::Sha256
+        } else {
+            IntegrityAlgorithm::Sha1
+        };
         let known = ice_known_attributes();
         let validated = stun::validated::Validator::new()
             .known_attributes(&known)

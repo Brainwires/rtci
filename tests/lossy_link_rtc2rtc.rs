@@ -722,3 +722,48 @@ fn a_channel_whose_association_ends_on_one_side_fails_on_the_other() -> Result<(
     }
     Ok(())
 }
+
+/// 40 % loss each way, delays as [`THIRTY_PERCENT`].
+const FORTY_PERCENT: Link = Link {
+    loss: 0.40,
+    delay: Duration::from_millis(20),
+    jitter: Duration::from_millis(5),
+};
+
+/// Seeds on which the controlling peer went `failed` about 30 seconds in, still checking,
+/// 29.5 seconds after the Binding success response that validated its pair reached it (30 %
+/// loss: 0x4a, 0xff and 0x127 with the aws-lc-rs provider; 40 % loss: 0x1c and 0x21 with
+/// both). The other peer had accepted the nomination and was connected; every response to the
+/// nomination's requests had been lost, its transaction (seven requests over 39.5 seconds,
+/// RFC 8445 section 14.3) still open. ICE's inherited checking timer (`disconnected_timeout +
+/// failed_timeout`, 30 s from entering checking) failed the agent anyway; RFC 8445 sections
+/// 6.1.4.2 and 8.1.2 fail a checklist only when every pair has failed. The agent now fails by
+/// that timer only with nothing left in progress, and a nomination that times out is sent
+/// again while the peer is heard from: on these seeds the session fails only when consent
+/// lapses.
+#[test]
+fn ice_does_not_fail_while_a_nomination_is_in_progress_over_heavy_loss() -> Result<()> {
+    let mut outcomes = Vec::new();
+    for (link, seed) in [
+        (THIRTY_PERCENT, 0x4a),
+        (THIRTY_PERCENT, 0xff),
+        (THIRTY_PERCENT, 0x127),
+        (FORTY_PERCENT, 0x1c),
+        (FORTY_PERCENT, 0x21),
+    ] {
+        outcomes.push((
+            link.loss,
+            seed,
+            session_over(
+                link,
+                seed,
+                50,
+                Duration::from_secs(400),
+                Duration::from_secs(900),
+                true,
+            )?,
+        ));
+    }
+    println!("outcome by loss and seed: {outcomes:?}");
+    Ok(())
+}

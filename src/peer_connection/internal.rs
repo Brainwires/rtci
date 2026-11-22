@@ -203,6 +203,7 @@ impl RTCPeerConnection {
             remote_address_filter: setting_engine.candidates.remote_address_filter.clone(),
             tie_breaker: setting_engine.ice.tie_breaker,
             nomination_acceptance: setting_engine.ice.nomination_acceptance,
+            failed_nomination: setting_engine.ice.failed_nomination,
             nominate_on_consent_checks: setting_engine.ice.nominate_on_consent_checks,
             ta: setting_engine.ice.pacing,
             unauthenticated_requests: setting_engine.ice.unauthenticated_requests,
