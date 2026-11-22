@@ -433,7 +433,7 @@ impl<'a> InterceptorHandler<'a> {
                         };
                         sender.rebind_local_streams(self.media_engine, self.interceptor);
                         if primary == *ssrc {
-                            self.stats.remove_outbound_rtp_stream(*ssrc);
+                            self.stats.replace_outbound_rtp_stream(*ssrc, *replacement);
                         }
                         self.ctx.ssrcs_replaced = true;
                     }

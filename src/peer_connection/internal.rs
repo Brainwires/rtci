@@ -2553,7 +2553,7 @@ impl RTCPeerConnection {
                 sender.rebind_local_streams(&self.media_engine, self.interceptor.as_mut());
             }
             if primary == old {
-                self.stats_mut().remove_outbound_rtp_stream(old);
+                self.stats_mut().replace_outbound_rtp_stream(old, new);
             }
             self.pipeline_context
                 .interceptor_handler_context
