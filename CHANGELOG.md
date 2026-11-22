@@ -223,15 +223,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **media engine**: a remote description that carries both RFC 8627 `flexfec` and `rtx`
   negotiates no `rtx` (RFC 8627 section 1.1.7); `MediaEngine::set_flexfec_with_retransmission`
   is the setting that keeps it. `flexfec-03` is not affected.
-- **dtls**: `use_srtp` follows RFC 5764 section 4.1 by default: the DTLS client offers it only
-  when the session has an audio or video section. A data-channel-only session is set up
-  without it, and when it gains a media section a new DTLS association with `use_srtp`
-  replaces it (the offer carries a new `a=tls-id`, RFC 8842 section 5.5; the DTLS roles are
-  kept). Offering it on every association, as browsers and the engine until now did, is
-  `SettingEngineBuilder::with_dtls_use_srtp_on_every_association(true)`: set it for a peer that
-  fails an association without an SRTP profile (pion-lineage stacks) or that does not act on
-  `tls-id` when media is added later (browsers). The earlier, never released, setting to turn
-  `use_srtp` off and the error for media on an association without SRTP keys are gone.
+- **dtls**: `SettingEngineBuilder::with_dtls_use_srtp_on_every_association(false)` follows RFC
+  5764 section 4.1: the DTLS client offers `use_srtp` only when the session has an audio or
+  video section, a data-channel-only session is set up without it, and when it gains a media
+  section a new DTLS association with `use_srtp` replaces it (the offer carries a new
+  `a=tls-id`, RFC 8842 section 5.5; the DTLS roles are kept). The default offers it on every
+  association, as browsers and the engine always did: the RFC form was the default for a
+  while, and Chromium, Firefox and WebKit do not act on the new `tls-id`, so media added to a
+  data-channel-only session never flowed and the data channels stopped too (browser matrix,
+  train round 8: "Rust offers media, the browser answers and decodes it", "rollback",
+  "glare"). The earlier, never released, setting to turn `use_srtp` off and the error for
+  media on an association without SRTP keys are gone.
 - **sdp**: a remote `a=fingerprint` with lower-case hex digits is refused (RFC 8122 section 5:
   `UHEX`); `SettingEngineBuilder::with_lowercase_fingerprints_accepted(true)` reads it, as
   browsers do.

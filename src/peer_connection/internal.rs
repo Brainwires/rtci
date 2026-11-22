@@ -213,7 +213,7 @@ impl RTCPeerConnection {
             certificates,
             answering_dtls_role: setting_engine.answering_dtls_role,
             srtp_protection_profiles: setting_engine.srtp_protection_profiles.clone(),
-            use_srtp_always: setting_engine.dtls_use_srtp_on_every_association,
+            use_srtp_always: !setting_engine.dtls_use_srtp_only_with_media,
             dtls_cipher_suites: setting_engine.dtls_cipher_suites.clone(),
             allow_insecure_verification_algorithm: setting_engine
                 .allow_insecure_verification_algorithm,
