@@ -167,10 +167,13 @@ impl<'a>
                         )));
                     }
                 }
-                RTPMessage::Raw(raw_packet) => {
-                    // Bypass
-                    debug!("Bypass srtp write {:?}", msg.transport.peer_addr);
-                    raw_packet
+                // RFC 8827 section 6.5: no RTP or RTCP leaves unprotected. Nothing above this
+                // handler writes serialized packets; one that did would pass the SRTP contexts
+                // by, so it is refused instead of forwarded.
+                RTPMessage::Raw(_) => {
+                    return Err(Error::Other(
+                        "serialized rtp/rtcp is never written past srtp unprotected".to_string(),
+                    ));
                 }
                 RTPMessage::TrackPacket(_) => {
                     return Err(Error::Other(
@@ -232,5 +235,188 @@ impl<'a>
 
     fn close(&mut self) -> Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::BytesMut;
+    use sansio::Protocol;
+    use shared::TransportContext;
+
+    fn write(ctx: &mut SrtpHandlerContext, message: RTPMessage) -> Result<()> {
+        SrtpHandler::new(ctx).handle_write(TaggedRTCMessageInternal {
+            now: Instant::now(),
+            transport: TransportContext::default(),
+            message: RTCMessageInternal::Rtp(message),
+        })
+    }
+
+    fn rtp_packet() -> rtp::Packet {
+        rtp::Packet {
+            header: rtp::header::Header {
+                version: 2,
+                payload_type: 96,
+                sequence_number: 1,
+                timestamp: 1,
+                ssrc: 0x1234_5678,
+                ..Default::default()
+            },
+            payload: bytes::Bytes::from_static(b"media"),
+        }
+    }
+
+    /// RFC 8827 section 6.5 (and RFC 5764 section 5.1: no SRTP processing before the handshake
+    /// has keyed the contexts): RTP and RTCP written before DTLS completes are refused, and
+    /// nothing is queued for the wire.
+    #[test]
+    fn rtp_and_rtcp_are_not_sent_before_the_srtp_keys_exist() {
+        let mut ctx = SrtpHandlerContext::default();
+        assert!(write(&mut ctx, RTPMessage::Packet(Packet::Rtp(rtp_packet()))).is_err());
+        let receiver_report: Box<dyn rtcp::packet::Packet> =
+            Box::new(rtcp::receiver_report::ReceiverReport::default());
+        assert!(
+            write(
+                &mut ctx,
+                RTPMessage::Packet(Packet::Rtcp(vec![receiver_report]))
+            )
+            .is_err()
+        );
+        assert!(SrtpHandler::new(&mut ctx).poll_write().is_none());
+    }
+
+    /// RFC 8827 section 6.5: a serialized RTP packet handed to the SRTP handler is not passed
+    /// on as it is, with or without SRTP contexts.
+    #[test]
+    fn serialized_rtp_is_never_forwarded_unprotected() {
+        let mut ctx = SrtpHandlerContext::default();
+        let raw = BytesMut::from(&rtp_packet().marshal().unwrap()[..]);
+        assert!(write(&mut ctx, RTPMessage::Raw(raw)).is_err());
+        assert!(SrtpHandler::new(&mut ctx).poll_write().is_none());
+    }
+
+    /// RFC 5764 section 5.1: inbound SRTP and SRTCP before the handshake completes are not
+    /// processed: an error, and nothing reaches the handlers above.
+    #[test]
+    fn inbound_srtp_before_the_handshake_is_not_processed() {
+        let mut ctx = SrtpHandlerContext::default();
+        let rtp = BytesMut::from(&rtp_packet().marshal().unwrap()[..]);
+        let mut rtcp = BytesMut::from(&[0u8; 12][..]);
+        rtcp[0] = 0x80;
+        rtcp[1] = 201;
+        for raw in [rtp, rtcp] {
+            let read = SrtpHandler::new(&mut ctx).handle_read(TaggedRTCMessageInternal {
+                now: Instant::now(),
+                transport: TransportContext::default(),
+                message: RTCMessageInternal::Rtp(RTPMessage::Raw(raw)),
+            });
+            assert!(read.is_err());
+        }
+        assert!(SrtpHandler::new(&mut ctx).poll_read().is_none());
+    }
+
+    fn context(key_byte: u8) -> Context {
+        let provider = crypto::default_provider().expect("a built-in crypto provider");
+        Context::new(
+            &[key_byte; 16],
+            &[key_byte; 14],
+            srtp::protection_profile::ProtectionProfile::Aes128CmHmacSha1_80,
+            None,
+            None,
+            provider.crypto(),
+        )
+        .expect("an SRTP context")
+    }
+
+    fn handshake_complete(ctx: &mut SrtpHandlerContext, key_byte: u8) {
+        SrtpHandler::new(ctx)
+            .handle_event(TaggedRTCEventInternal {
+                now: Instant::now(),
+                event: RTCEventInternal::DTLSHandshakeComplete(
+                    Some(context(key_byte)),
+                    Some(context(key_byte)),
+                ),
+            })
+            .unwrap();
+    }
+
+    fn protected(ctx: &mut SrtpHandlerContext, sequence_number: u16) -> BytesMut {
+        let mut packet = rtp_packet();
+        packet.header.sequence_number = sequence_number;
+        write(ctx, RTPMessage::Packet(Packet::Rtp(packet))).unwrap();
+        match SrtpHandler::new(ctx).poll_write().unwrap().message {
+            RTCMessageInternal::Rtp(RTPMessage::Raw(protected)) => protected,
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    /// RFC 5764 section 4.1.3: "there MUST be only one SRTP master key in use at a time". The
+    /// keys a DTLS handshake hands over replace the ones in place, in both directions: after a
+    /// second handshake (a new association), packets are protected with the new key only.
+    #[test]
+    fn a_new_handshake_replaces_the_srtp_keys() {
+        let mut ctx = SrtpHandlerContext::default();
+        handshake_complete(&mut ctx, 1);
+        let first = protected(&mut ctx, 1);
+        assert!(context(1).decrypt_rtp(&first).is_ok());
+
+        handshake_complete(&mut ctx, 2);
+        let second = protected(&mut ctx, 2);
+        assert!(context(2).decrypt_rtp(&second).is_ok());
+        assert!(
+            context(1).decrypt_rtp(&second).is_err(),
+            "the first association's key no longer protects packets"
+        );
+        // Inbound, too: a packet under the old key is refused.
+        let old = context(1)
+            .encrypt_rtp(&rtp_packet().marshal().unwrap())
+            .unwrap();
+        let read = SrtpHandler::new(&mut ctx).handle_read(TaggedRTCMessageInternal {
+            now: Instant::now(),
+            transport: TransportContext::default(),
+            message: RTCMessageInternal::Rtp(RTPMessage::Raw(old)),
+        });
+        assert!(read.is_err());
+    }
+
+    /// RFC 5764 section 7.3.1: a packet that fails SRTP authentication produces no DTLS alert
+    /// (and nothing else on the wire): it is an error for the pipeline to log, and the
+    /// contexts go on.
+    #[test]
+    fn an_srtp_failure_sends_nothing() {
+        let mut ctx = SrtpHandlerContext::default();
+        handshake_complete(&mut ctx, 1);
+        let mut forged = context(9)
+            .encrypt_rtp(&rtp_packet().marshal().unwrap())
+            .unwrap();
+        let last = forged.len() - 1;
+        forged[last] ^= 1;
+        let read = SrtpHandler::new(&mut ctx).handle_read(TaggedRTCMessageInternal {
+            now: Instant::now(),
+            transport: TransportContext::default(),
+            message: RTCMessageInternal::Rtp(RTPMessage::Raw(forged)),
+        });
+        assert!(read.is_err());
+        let mut handler = SrtpHandler::new(&mut ctx);
+        assert!(handler.poll_write().is_none());
+        assert!(handler.poll_read().is_none());
+        assert!(
+            handler.poll_event().is_some(),
+            "only the handshake event itself"
+        );
+        assert!(handler.poll_event().is_none());
+        // A genuine packet is still read.
+        let genuine = context(1)
+            .encrypt_rtp(&rtp_packet().marshal().unwrap())
+            .unwrap();
+        SrtpHandler::new(&mut ctx)
+            .handle_read(TaggedRTCMessageInternal {
+                now: Instant::now(),
+                transport: TransportContext::default(),
+                message: RTCMessageInternal::Rtp(RTPMessage::Raw(genuine)),
+            })
+            .unwrap();
+        assert!(SrtpHandler::new(&mut ctx).poll_read().is_some());
     }
 }

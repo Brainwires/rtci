@@ -1954,6 +1954,30 @@ pub enum Error {
     #[error("set_remote_description called with multiple conflicting fingerprint")]
     ErrSessionDescriptionConflictingFingerprints,
 
+    /// ErrSessionDescriptionInvalidSetup indicates set_remote_description was called with a SessionDescription whose
+    /// `a=setup` value is not `active`, `passive` or `actpass` (RFC 4145 section 4; RFC 8842 section 5.1 bars
+    /// `holdconn` from DTLS), or whose sections give different values for the one transport
+    #[error("set_remote_description called with an invalid setup attribute")]
+    ErrSessionDescriptionInvalidSetup,
+
+    /// ErrSessionDescriptionInvalidTlsId indicates set_remote_description was called with a SessionDescription whose
+    /// `a=tls-id` value is not 20 to 255 characters of the RFC 8842 section 4 alphabet, or whose sections give
+    /// different values for the one transport
+    #[error("set_remote_description called with an invalid tls-id attribute")]
+    ErrSessionDescriptionInvalidTlsId,
+
+    /// ErrSessionDescriptionMediaWithoutSrtp indicates set_remote_description was called with a SessionDescription
+    /// that has an RTP media section while the DTLS association cannot key SRTP (`use_srtp` was not negotiated,
+    /// or is turned off)
+    #[error(
+        "set_remote_description called with media sections on a DTLS transport without use_srtp"
+    )]
+    ErrSessionDescriptionMediaWithoutSrtp,
+
+    /// ErrInvalidIdentityAssertion indicates an `a=identity` value that does not follow RFC 8827 section 5
+    #[error("invalid identity assertion")]
+    ErrInvalidIdentityAssertion,
+
     /// ErrSessionDescriptionMissingIceUfrag indicates set_remote_description was called with a SessionDescription that
     /// is missing an ice-ufrag value
     #[error("set_remote_description called with no ice-ufrag")]

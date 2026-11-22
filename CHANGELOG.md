@@ -1215,6 +1215,66 @@ Each bug below was confirmed by a failing test first (`rtc-rtcp/tests/audit_bugs
 - **codecs**: with `video/flexfec` registered and negotiated, a sender's FEC SSRC is now
   described (`a=ssrc-group:FEC-FR`) and its streams are bound with the repair flow, as for
   `video/flexfec-03`. Before, `video/flexfec` was written to SDP with nothing behind it.
+- **dtls**: the roles of a DTLS association are fixed for its life (RFC 8842 section 5.3). The
+  answer to a later offer took its `a=setup` from the answering configuration and the offer
+  alone, so the peer that had offered first (the DTLS server) answered `active` and flipped the
+  roles: libwebrtc refuses such an answer, and with an ICE restart in the same exchange two
+  `rtc` peers tore their own association down. The answer now states the role the transport
+  has, and an `actpass` offer never changes it, whatever the ICE role and
+  `answering_dtls_role` say.
+- **dtls**: a new association is established when a description changes the fingerprints, the
+  `tls-id` or the roles, with or without an ICE restart (RFC 8842 section 3.1). A changed
+  fingerprint or role on the same ICE session was accepted and ignored. The DTLS client of the
+  new association starts its handshake at once when ICE already has a pair.
+- **dtls**: a peer that negotiates no `use_srtp` connects when the session has no audio or
+  video section (RFC 5764 section 4.1). As the DTLS server the engine left its transport in
+  `connecting`; as the client it aborted the handshake. A session with a media section still
+  needs it: the transport fails, and a description that adds media to an association without
+  SRTP keys is refused (`ErrSessionDescriptionMediaWithoutSrtp`).
+- **dtls**: a certificate is verified with any fingerprint hash function of RFC 8122 section 5
+  (sha-256, sha-512, sha-384, sha-224, sha-1; never md5 or md2), using the most preferred one
+  the peer offers. Only sha-256 was compared, so a peer that gave another one could not connect.
+- **dtls**: `RTCCertificate::get_fingerprints` gives the fingerprints of the end-entity
+  certificate only (it gave one per certificate of a chain, the issuer's included), with the
+  hash function of the certificate's signature next to sha-256 when that is sha-384, sha-512 or
+  sha-224 (RFC 8122 section 5.1).
+- **sdp**: malformed DTLS attributes are refused by `set_remote_description`, before anything
+  is applied: an `a=fingerprint` that is not colon-separated hex of its hash function's length,
+  an `a=setup` that is not `active`, `passive` or `actpass` (`holdconn` is not used with DTLS,
+  RFC 8842 section 5.1), an `a=tls-id` outside its syntax, and a description whose only
+  fingerprints are md5 / md2 or unknown.
+- **sdp**: a session-level `a=setup` is read (RFC 4145 section 4); a media-level
+  `a=fingerprint` overrides the session-level one (RFC 8122 section 5) instead of conflicting
+  with it.
+- **demux**: datagrams whose first byte is in no RFC 7983 / RFC 9443 range (4 to 19, 64 to 127,
+  192 to 255) are dropped by the demultiplexer. They went to the ICE agent, which recorded the
+  remote candidate as heard from and logged a warning for each.
+- **srtp**: a serialized RTP packet written into the pipeline is refused instead of leaving
+  unprotected (RFC 8827 section 6.5; nothing in the engine writes one).
+
+### Features
+
+- **sdp**: `a=tls-id` (RFC 8842 section 4). Offers carry the association's value on the
+  BUNDLE-tag m-section, answers carry one when the offer did; the value is kept while the
+  association is and replaced with it; a changed remote value asks for a new association.
+  `SettingEngineBuilder::with_disable_sdp_tls_id` leaves it out.
+- **sdp**: `a=identity` (RFC 8827 section 5) is carried: `RTCPeerConnection::
+  set_identity_assertion` and `remote_identity_assertion`. Making and verifying an assertion
+  stays the application's.
+- **dtls**: `SettingEngineBuilder::with_disable_dtls_use_srtp` for a data-channel-only
+  endpoint (no `use_srtp`, media sections refused); `RTCCertificate::fingerprint` for one hash
+  function; `rtc_dtls::config::ConfigBuilder::with_use_srtp_optional`.
+- **crypto**: `HashAlgorithm::{Sha1, Sha224, Sha384, Sha512}` in the built-in providers, for
+  certificate fingerprints.
+
+### Changed
+
+- **dtls**: an `rtc-dtls` server configured with no SRTP profile ignores a client's `use_srtp`
+  (RFC 5764 section 4.1.1) instead of aborting with `ErrServerNoMatchingSrtpProfile`; the
+  client, which asked for SRTP, is the one that aborts (`ErrRequestedButNoSrtpExtension`)
+  unless built with `with_use_srtp_optional`.
+- **sdp**: errors `ErrSessionDescriptionInvalidSetup`, `ErrSessionDescriptionInvalidTlsId`,
+  `ErrSessionDescriptionMediaWithoutSrtp`, `ErrInvalidIdentityAssertion`.
 
 ## [0.22.0+brainwires.5] - 2026-11-20
 

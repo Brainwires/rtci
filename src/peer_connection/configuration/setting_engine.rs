@@ -366,6 +366,8 @@ pub struct SettingEngine {
     pub(crate) multicast_dns: MulticastDNS,
     pub(crate) replay_protection: ReplayProtection,
     pub(crate) sdp_media_level_fingerprints: bool,
+    pub(crate) disable_sdp_tls_id: bool,
+    pub(crate) disable_dtls_use_srtp: bool,
     pub(crate) answering_dtls_role: RTCDtlsRole,
     pub(crate) disable_certificate_fingerprint_verification: bool,
     pub(crate) allow_insecure_verification_algorithm: bool,
@@ -1252,6 +1254,52 @@ impl SettingEngineBuilder {
     /// ```
     pub fn with_sdp_media_level_fingerprints(mut self, sdp_media_level_fingerprints: bool) -> Self {
         self.0.sdp_media_level_fingerprints = sdp_media_level_fingerprints;
+        self
+    }
+
+    /// Leaves the `a=tls-id` attribute (RFC 8842 section 4) out of offers and answers.
+    ///
+    /// By default every offer carries the DTLS association's `tls-id` on its first m-section
+    /// (the BUNDLE tag), and an answer carries one when the offer did: the value stays the same
+    /// while the association is kept and changes when a new one is asked for. Peers that do not
+    /// know the attribute ignore it. Set `true` only for a peer that cannot take an unknown
+    /// attribute. A received `a=tls-id` is read either way.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    ///
+    /// let setting_engine = SettingEngineBuilder::new()
+    ///     .with_disable_sdp_tls_id(true)
+    ///     .build();
+    /// ```
+    pub fn with_disable_sdp_tls_id(mut self, is_disabled: bool) -> Self {
+        self.0.disable_sdp_tls_id = is_disabled;
+        self
+    }
+
+    /// Makes the DTLS transport one for data channels only: `use_srtp` (RFC 5764 section 4.1)
+    /// is neither offered nor accepted, so the association has no SRTP keys.
+    ///
+    /// RFC 5764 section 4.1 reserves `use_srtp` for associations that carry RTP or RTCP. By
+    /// default the engine offers it on every association, as browsers do, because media can be
+    /// added later; a peer that leaves it out is accepted either way as long as the session has
+    /// no audio or video section. With this set, a remote description that has one is refused
+    /// ([`Error::ErrSessionDescriptionMediaWithoutSrtp`](shared::error::Error::ErrSessionDescriptionMediaWithoutSrtp)):
+    /// no RTP is ever sent unprotected.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    ///
+    /// let setting_engine = SettingEngineBuilder::new()
+    ///     .with_disable_dtls_use_srtp(true)
+    ///     .build();
+    /// ```
+    pub fn with_disable_dtls_use_srtp(mut self, is_disabled: bool) -> Self {
+        self.0.disable_dtls_use_srtp = is_disabled;
         self
     }
 

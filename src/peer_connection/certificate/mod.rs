@@ -221,7 +221,9 @@ use crypto::{HashAlgorithm, PublicKeyEncoding, RTCCrypto, SignatureScheme, Signi
 pub use rcgen::CertificateParams;
 use rustls::pki_types::CertificateDer;
 
-use crate::peer_connection::transport::dtls::fingerprint::RTCDtlsFingerprint;
+use crate::peer_connection::transport::dtls::fingerprint::{
+    FINGERPRINT_HASHES, RTCDtlsFingerprint, format_fingerprint,
+};
 use shared::error::{Error, Result};
 
 /// X.509 certificate used to authenticate WebRTC peer-to-peer communications.
@@ -688,13 +690,11 @@ impl RTCCertificate {
     ///
     /// # Returns
     ///
-    /// A vector of fingerprints, one for each certificate in the chain. In most cases,
-    /// this will contain a single fingerprint for the self-signed certificate.
-    ///
-    /// # Future Enhancement
-    ///
-    /// Currently always uses SHA-256. Future versions may use the digest algorithm
-    /// from the certificate signature.
+    /// The fingerprints of the certificate DTLS presents (the end-entity certificate, the
+    /// first of a chain): SHA-256 first, then, when the certificate is signed with SHA-384,
+    /// SHA-512 or SHA-224, the fingerprint with that hash function too (RFC 8122 section 5.1).
+    /// The other certificates of a chain have no fingerprint: the peer checks the one
+    /// presented.
     ///
     /// # Examples
     ///
@@ -722,21 +722,83 @@ impl RTCCertificate {
     ///
     /// Returns an error if `crypto` cannot compute the digest used for the DTLS fingerprint.
     pub fn get_fingerprints(&self, crypto: &dyn RTCCrypto) -> Result<Vec<RTCDtlsFingerprint>> {
-        let mut fingerprints = Vec::new();
-
-        for c in &self.dtls_certificate.certificate {
-            let hashed = crypto
-                .hash(HashAlgorithm::Sha256, c.as_ref())
-                .map_err(crypto_error)?;
-            let values: Vec<String> = hashed.iter().map(|x| format!("{x:02x}")).collect();
-
-            fingerprints.push(RTCDtlsFingerprint {
-                algorithm: "sha-256".to_owned(),
-                value: values.join(":"),
-            });
+        // RFC 8122 section 5.1: SHA-256, and the hash function of the certificate's own
+        // signature when it is another one. A SHA-1 fingerprint is never produced: for a
+        // certificate signed with SHA-1 the stronger SHA-256 one is the only fingerprint, as
+        // that section allows.
+        let mut algorithms = vec![HashAlgorithm::Sha256];
+        if let Some(signature_hash) = self.signature_hash()
+            && !matches!(signature_hash, HashAlgorithm::Sha256 | HashAlgorithm::Sha1)
+            && crypto.supports(crypto::CryptoAlgorithm::Hash(signature_hash))
+        {
+            algorithms.push(signature_hash);
         }
+        algorithms
+            .into_iter()
+            .map(|algorithm| self.fingerprint(crypto, algorithm))
+            .collect()
+    }
 
-        Ok(fingerprints)
+    /// The fingerprint of this certificate with one hash function of RFC 8122 section 5: the
+    /// hash of the DER form of the certificate DTLS presents (the end-entity certificate; a
+    /// certificate chain's other certificates have no fingerprint in SDP).
+    ///
+    /// For out-of-band verification, or for a peer known to want a hash function other than
+    /// the ones [`get_fingerprints`](Self::get_fingerprints) writes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `algorithm` is not a fingerprint hash function (MD5 is refused, RFC
+    /// 8122 section 5), if `crypto` cannot compute it, or if the certificate is empty.
+    pub fn fingerprint(
+        &self,
+        crypto: &dyn RTCCrypto,
+        algorithm: HashAlgorithm,
+    ) -> Result<RTCDtlsFingerprint> {
+        let Some(&(name, _, _)) = FINGERPRINT_HASHES
+            .iter()
+            .find(|(_, known, _)| *known == algorithm)
+        else {
+            return Err(Error::ErrUnsupportedFingerprintAlgorithm);
+        };
+        let der = self
+            .dtls_certificate
+            .certificate
+            .first()
+            .ok_or(Error::ErrNonCertificate)?;
+        let hashed = crypto.hash(algorithm, der.as_ref()).map_err(crypto_error)?;
+        Ok(RTCDtlsFingerprint {
+            algorithm: name.to_owned(),
+            value: format_fingerprint(&hashed),
+        })
+    }
+
+    /// The hash function of the signature on the end-entity certificate, when it is one
+    /// fingerprints use (RFC 3279 and RFC 4055 RSA PKCS #1 v1.5 and ECDSA signatures). `None`
+    /// for the others (Ed25519 and RSASSA-PSS name no separate hash function this way).
+    fn signature_hash(&self) -> Option<HashAlgorithm> {
+        use x509_parser::prelude::FromDer;
+        let der = self.dtls_certificate.certificate.first()?;
+        let (_, certificate) =
+            x509_parser::certificate::X509Certificate::from_der(der.as_ref()).ok()?;
+        match certificate
+            .signature_algorithm
+            .algorithm
+            .to_id_string()
+            .as_str()
+        {
+            // sha1WithRSAEncryption, ecdsa-with-SHA1
+            "1.2.840.113549.1.1.5" | "1.2.840.10045.4.1" => Some(HashAlgorithm::Sha1),
+            // sha224WithRSAEncryption, ecdsa-with-SHA224
+            "1.2.840.113549.1.1.14" | "1.2.840.10045.4.3.1" => Some(HashAlgorithm::Sha224),
+            // sha256WithRSAEncryption, ecdsa-with-SHA256
+            "1.2.840.113549.1.1.11" | "1.2.840.10045.4.3.2" => Some(HashAlgorithm::Sha256),
+            // sha384WithRSAEncryption, ecdsa-with-SHA384
+            "1.2.840.113549.1.1.12" | "1.2.840.10045.4.3.3" => Some(HashAlgorithm::Sha384),
+            // sha512WithRSAEncryption, ecdsa-with-SHA512
+            "1.2.840.113549.1.1.13" | "1.2.840.10045.4.3.4" => Some(HashAlgorithm::Sha512),
+            _ => None,
+        }
     }
 }
 
@@ -1063,5 +1125,195 @@ mod test {
     fn test_from_key_pair_unsupported_rejects() {
         let kp = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384).unwrap();
         assert!(RTCCertificate::from_key_pair(kp).is_err());
+    }
+
+    // Certificates made with OpenSSL (`openssl req -x509 -newkey ec ... -sha384`), and their
+    // fingerprints as `openssl x509 -fingerprint -<hash>` prints them: reference values this
+    // crate did not compute.
+    const CERT_ECDSA_SHA384: &str = "-----BEGIN CERTIFICATE-----
+MIIBrTCCATOgAwIBAgIUCMBw3Md0YA56C88fCOacMMjgCxUwCgYIKoZIzj0EAwMw
+HTEbMBkGA1UEAwwSZmluZ2VycHJpbnQtc2hhMzg0MCAXDTI2MTEyMjEzMTYzOFoY
+DzIxMjYxMDI5MTMxNjM4WjAdMRswGQYDVQQDDBJmaW5nZXJwcmludC1zaGEzODQw
+djAQBgcqhkjOPQIBBgUrgQQAIgNiAASCEunEK9ms53hgfegOVH0kN6PFj3KJTmQY
+2DRkLyqPjMQXyaXUu4ZqW61NasGpkFvMYebw8V0gWI78UTYjTrdMg5CSubwnjbCM
+SoJtDXqTKYF9ysAzpN09eDkwyTaPvoujMjAwMB0GA1UdDgQWBBSecbBDGMQy6S4s
+iCM4BkO3Llg9EzAPBgNVHRMBAf8EBTADAQH/MAoGCCqGSM49BAMDA2gAMGUCME6B
+QXihO54JAWAKgiGCvdo1HffSDd86idMzxt0e9OrK+3HEOOZD2glNq7W4ktMBKwIx
+AM27leWJvqDi9irlVvBkoBmBgg9oJ5HIexcssuTT10nXXchXHGveNYAqvIVX3D6c
+dw==
+-----END CERTIFICATE-----
+";
+    const CERT_ECDSA_SHA384_FINGERPRINTS: [(HashAlgorithm, &str); 5] = [
+        (
+            HashAlgorithm::Sha1,
+            "3E:A2:8A:A0:85:DA:94:D3:29:4E:99:6C:19:83:8A:CE:EE:78:3B:CD",
+        ),
+        (
+            HashAlgorithm::Sha224,
+            "64:9E:10:69:9C:96:01:49:86:E1:DD:CC:EA:92:94:1C:9E:B8:FA:DF:7A:6C:A6:52:EC:38:5F:9B",
+        ),
+        (
+            HashAlgorithm::Sha256,
+            "D8:FD:6F:9D:DA:08:B6:47:FE:1C:35:71:BC:5A:B8:04:26:3E:2C:51:E2:E3:E0:96:5C:F3:F9:A8:\
+             17:E0:EF:F8",
+        ),
+        (
+            HashAlgorithm::Sha384,
+            "22:D9:4C:AD:E4:15:2E:4E:16:9D:FF:F6:9C:FA:91:04:04:4E:07:85:3E:84:88:80:18:C7:14:2E:\
+             FF:7A:8B:50:16:78:0B:32:5D:47:DE:F5:07:0D:14:93:D9:91:E1:E8",
+        ),
+        (
+            HashAlgorithm::Sha512,
+            "6F:F5:FF:7D:78:E1:69:FB:E7:90:25:2C:5A:CD:C1:EF:FF:2B:45:E6:C9:BC:DB:1D:D7:F3:F0:66:\
+             6A:8D:EA:7F:9C:9E:1B:CA:42:7F:E0:F8:50:6C:69:8F:4A:A9:64:EF:E2:E4:C6:D3:C5:6B:7D:A6:\
+             15:06:50:64:2A:B6:F1:A9",
+        ),
+    ];
+    const CERT_ECDSA_SHA512: &str = "-----BEGIN CERTIFICATE-----
+MIIBcDCCARagAwIBAgIUV5HWUoNIaiUPzHmFIIKHvPwxTaMwCgYIKoZIzj0EAwQw
+HTEbMBkGA1UEAwwSZmluZ2VycHJpbnQtc2hhNTEyMCAXDTI2MTEyMjEzMTYzOFoY
+DzIxMjYxMDI5MTMxNjM4WjAdMRswGQYDVQQDDBJmaW5nZXJwcmludC1zaGE1MTIw
+WTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAATlIxEaJFwF/tS6hvajK1ObUVkTSDb0
+LaLP3qprg2acHwsPBBp8VtQzr/IJip2ySBDVatsqa5/k13KttsdA2mXHozIwMDAd
+BgNVHQ4EFgQUkQ3kOZxm2YT4qFwTO7e4LxUZUKowDwYDVR0TAQH/BAUwAwEB/zAK
+BggqhkjOPQQDBANIADBFAiAmZAjGyJL+LEEesHd6j+8tukFsN45lXVIAsGv2qv2S
+wAIhALlwsNm6fNrP8U3N282VQ714UJNcoHLGIZ3GVnRxx0KL
+-----END CERTIFICATE-----
+";
+    const CERT_ECDSA_SHA512_SHA256: &str = "D0:8C:93:40:32:95:52:08:BB:D8:A5:59:B1:4A:AC:2E:\
+        90:8A:71:D8:74:AF:E2:40:6E:87:70:84:42:50:66:94";
+    const CERT_ECDSA_SHA512_SHA512: &str = "6C:BB:35:B3:58:77:A8:DE:51:B3:3E:BC:A6:0C:C5:DF:\
+        5A:EC:03:B1:40:FA:44:C6:A4:BC:30:6C:8E:65:CA:52:8F:82:D6:30:A2:1C:20:AD:4B:35:32:AC:\
+        45:DF:A6:08:63:74:42:6F:81:28:4D:E8:17:BD:4D:60:AB:E7:E5:00";
+    const CERT_ECDSA_SHA1: &str = "-----BEGIN CERTIFICATE-----
+MIIBajCCARGgAwIBAgIUGYHumsbQdLlZdQQJcLVuvEu99KkwCQYHKoZIzj0EATAb
+MRkwFwYDVQQDDBBmaW5nZXJwcmludC1zaGExMCAXDTI2MTEyMjEzMTYzOFoYDzIx
+MjYxMDI5MTMxNjM4WjAbMRkwFwYDVQQDDBBmaW5nZXJwcmludC1zaGExMFkwEwYH
+KoZIzj0CAQYIKoZIzj0DAQcDQgAEHbHZnBDLrnC8+LVHaMyeFWEd9BEBVkFl1Q5t
+Q4T0utjX6y5U6dq8V8L1rueK8/IAo9X6rL/5fIw79t5gw4lanaMyMDAwHQYDVR0O
+BBYEFDwBuNvfpXLOTl6Vo25SeyfL1HlEMA8GA1UdEwEB/wQFMAMBAf8wCQYHKoZI
+zj0EAQNIADBFAiEAix6bYOROXuhdGaXjT+viSaHtUBynCKIP3iVZS71mQ0sCIA1c
+8cQDIXnqz24vuzRqKnmRmYZ5F0UoRFzQSycWFUhz
+-----END CERTIFICATE-----
+";
+    const CERT_ECDSA_SHA1_SHA256: &str = "09:19:0E:CD:EA:3F:A3:C2:EC:2F:B0:B5:80:87:22:29:\
+        FE:D6:59:2F:CF:12:6C:A8:30:FA:B1:B0:4C:22:B2:27";
+
+    /// An `RTCCertificate` whose chain is the given PEM certificates. The key is any key: a
+    /// fingerprint is a hash of the certificate alone.
+    fn certificate_from_pem_chain(chain: &[&str]) -> Result<RTCCertificate> {
+        let provider = crypto::default_provider().map_err(crypto_error)?;
+        let signing_key = provider
+            .crypto()
+            .generate_signing_key(SignatureScheme::EcdsaP256Sha256)
+            .map_err(crypto_error)?;
+        let chain = chain
+            .iter()
+            .map(|certificate| {
+                let der = pem::parse(certificate).map_err(|e| Error::Other(e.to_string()))?;
+                Ok(CertificateDer::from(der.into_contents()))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(RTCCertificate::from_signing_key(
+            chain,
+            signing_key,
+            // 2096: a fixed instant, the fingerprint tests do not look at the clock.
+            SystemTime::UNIX_EPOCH + Duration::from_secs(4_000_000_000),
+        ))
+    }
+
+    fn written(fingerprints: &[RTCDtlsFingerprint]) -> Vec<(String, String)> {
+        fingerprints
+            .iter()
+            .map(|fp| (fp.algorithm.clone(), fp.value.to_uppercase()))
+            .collect()
+    }
+
+    /// RFC 8122 section 5: the fingerprint is the hash of the certificate's DER form, for
+    /// each of the hash functions the RFC defines (MD5 and MD2 are never computed).
+    #[test]
+    fn fingerprints_match_openssl_for_every_hash_function() -> Result<()> {
+        let provider = crypto::default_provider().map_err(crypto_error)?;
+        let certificate = certificate_from_pem_chain(&[CERT_ECDSA_SHA384])?;
+        for (algorithm, expected) in CERT_ECDSA_SHA384_FINGERPRINTS {
+            let fingerprint = certificate.fingerprint(provider.crypto(), algorithm)?;
+            assert_eq!(fingerprint.value.to_uppercase(), expected, "{algorithm:?}");
+        }
+        assert_eq!(
+            certificate
+                .fingerprint(provider.crypto(), HashAlgorithm::Sha384)?
+                .algorithm,
+            "sha-384"
+        );
+        assert_eq!(
+            certificate.fingerprint(provider.crypto(), HashAlgorithm::Md5),
+            Err(Error::ErrUnsupportedFingerprintAlgorithm)
+        );
+        Ok(())
+    }
+
+    /// RFC 8122 section 5.1: "An endpoint MUST, as a minimum, calculate a fingerprint using
+    /// both the 'SHA-256' hash function algorithm and the hash function used to generate the
+    /// signature on the certificate". A certificate signed with SHA-384 or SHA-512 gets both;
+    /// one signed with SHA-256 gets the one; for one signed with SHA-1 the SHA-1 fingerprint
+    /// is left out (the same section allows it: a stronger hash is included).
+    #[test]
+    fn fingerprints_are_sha256_and_the_signature_hash() -> Result<()> {
+        let provider = crypto::default_provider().map_err(crypto_error)?;
+        let crypto = provider.crypto();
+
+        let sha384 = certificate_from_pem_chain(&[CERT_ECDSA_SHA384])?;
+        assert_eq!(
+            written(&sha384.get_fingerprints(crypto)?),
+            [
+                (
+                    "sha-256".to_owned(),
+                    CERT_ECDSA_SHA384_FINGERPRINTS[2].1.to_owned()
+                ),
+                (
+                    "sha-384".to_owned(),
+                    CERT_ECDSA_SHA384_FINGERPRINTS[3].1.to_owned()
+                ),
+            ]
+        );
+
+        let sha512 = certificate_from_pem_chain(&[CERT_ECDSA_SHA512])?;
+        assert_eq!(
+            written(&sha512.get_fingerprints(crypto)?),
+            [
+                ("sha-256".to_owned(), CERT_ECDSA_SHA512_SHA256.to_owned()),
+                ("sha-512".to_owned(), CERT_ECDSA_SHA512_SHA512.to_owned()),
+            ]
+        );
+
+        let sha1 = certificate_from_pem_chain(&[CERT_ECDSA_SHA1])?;
+        assert_eq!(
+            written(&sha1.get_fingerprints(crypto)?),
+            [("sha-256".to_owned(), CERT_ECDSA_SHA1_SHA256.to_owned())]
+        );
+
+        let sha256 = provider_certificate(crypto)?;
+        let fingerprints = sha256.get_fingerprints(crypto)?;
+        assert_eq!(fingerprints.len(), 1);
+        assert_eq!(fingerprints[0].algorithm, "sha-256");
+        Ok(())
+    }
+
+    /// A certificate chain has the fingerprints of its end-entity certificate only: that is
+    /// the certificate the peer hashes (RFC 8122 section 5), and a fingerprint of the issuer
+    /// would let a certificate that is not this endpoint's pass the check.
+    #[test]
+    fn a_certificate_chain_has_the_fingerprints_of_its_end_entity_certificate() -> Result<()> {
+        let provider = crypto::default_provider().map_err(crypto_error)?;
+        let chain = certificate_from_pem_chain(&[CERT_ECDSA_SHA512, CERT_ECDSA_SHA384])?;
+        assert_eq!(chain.dtls_certificate.certificate.len(), 2);
+        assert_eq!(
+            written(&chain.get_fingerprints(provider.crypto())?),
+            [
+                ("sha-256".to_owned(), CERT_ECDSA_SHA512_SHA256.to_owned()),
+                ("sha-512".to_owned(), CERT_ECDSA_SHA512_SHA512.to_owned()),
+            ]
+        );
+        Ok(())
     }
 }

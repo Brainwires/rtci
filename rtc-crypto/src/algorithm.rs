@@ -6,6 +6,15 @@ pub enum HashAlgorithm {
     Md5,
     /// SHA-256.
     Sha256,
+    /// SHA-1, only to verify a certificate fingerprint a peer gives with no stronger hash
+    /// (RFC 8122 section 5).
+    Sha1,
+    /// SHA-224 (certificate fingerprints, RFC 8122 section 5).
+    Sha224,
+    /// SHA-384 (certificate fingerprints, RFC 8122 section 5).
+    Sha384,
+    /// SHA-512 (certificate fingerprints, RFC 8122 section 5).
+    Sha512,
 }
 
 /// Algorithms accepted by the HMAC operations.
