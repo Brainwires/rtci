@@ -19,8 +19,8 @@ use std::fmt;
 
 // ErrorCodeAttribute represents ERROR-CODE attribute.
 //
-// RFC 5389 Section 15.6
-#[derive(Default)]
+// RFC 8489 Section 14.8
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
 /// The `ERROR-CODE` attribute: a numeric code and a human-readable reason.
 pub struct ErrorCodeAttribute {
     /// The numeric error code.
@@ -44,17 +44,39 @@ impl fmt::Display for ErrorCodeAttribute {
 const ERROR_CODE_CLASS_BYTE: usize = 2;
 const ERROR_CODE_NUMBER_BYTE: usize = 3;
 const ERROR_CODE_REASON_START: usize = 4;
-const ERROR_CODE_REASON_MAX_B: usize = 763;
+/// The longest reason phrase that is sent, in bytes (RFC 8489 section 14.8).
+const ERROR_CODE_REASON_MAX_B: usize = 509;
+/// A reason phrase is fewer than this many characters (RFC 8489 section 14.8).
+const ERROR_CODE_REASON_MAX_CHARS: usize = 128;
 const ERROR_CODE_MODULO: u16 = 100;
+/// The class is the low 3 bits of its byte; the 21 bits ahead of it are reserved.
+const ERROR_CODE_CLASS_MASK: u8 = 0x07;
 
 impl Setter for ErrorCodeAttribute {
-    // add_to adds ERROR-CODE to m.
+    /// Adds ERROR-CODE to `m`.
+    ///
+    /// # Errors
+    ///
+    /// RFC 8489 section 14.8: the code is 300 to 699 (class 3 to 6, number 0 to 99) and the
+    /// reason phrase is UTF-8 of fewer than 128 characters and at most 509 bytes; anything
+    /// else is refused.
     fn add_to(&self, m: &mut Message) -> Result<()> {
+        if !(300..=699).contains(&self.code.0) {
+            return Err(Error::Other(format!(
+                "error code {} is outside 300 to 699",
+                self.code.0
+            )));
+        }
         check_overflow(
             ATTR_ERROR_CODE,
             self.reason.len() + ERROR_CODE_REASON_START,
             ERROR_CODE_REASON_MAX_B + ERROR_CODE_REASON_START,
         )?;
+        let reason = std::str::from_utf8(&self.reason)
+            .map_err(|_| Error::Other("the reason phrase is not UTF-8".to_owned()))?;
+        if reason.chars().count() >= ERROR_CODE_REASON_MAX_CHARS {
+            return Err(Error::ErrAttributeSizeOverflow);
+        }
 
         let mut value: Vec<u8> = Vec::with_capacity(ERROR_CODE_REASON_MAX_B);
 
@@ -72,7 +94,15 @@ impl Setter for ErrorCodeAttribute {
 }
 
 impl Getter for ErrorCodeAttribute {
-    // GetFrom decodes ERROR-CODE from m. Reason is valid until m.Raw is valid.
+    /// Decodes ERROR-CODE from `m`.
+    ///
+    /// The reserved bits are ignored (RFC 8489 section 14.8). The reason phrase is taken as
+    /// sent, whatever its length: it is diagnostic text.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the attribute is absent or shorter than 4 bytes, or when the class is not 3
+    /// to 6 or the number not 0 to 99, which no error code has.
     fn get_from(&mut self, m: &Message) -> Result<()> {
         let v = m.get(ATTR_ERROR_CODE)?;
 
@@ -80,8 +110,13 @@ impl Getter for ErrorCodeAttribute {
             return Err(Error::ErrUnexpectedEof);
         }
 
-        let class = v[ERROR_CODE_CLASS_BYTE] as u16;
+        let class = (v[ERROR_CODE_CLASS_BYTE] & ERROR_CODE_CLASS_MASK) as u16;
         let number = v[ERROR_CODE_NUMBER_BYTE] as u16;
+        if !(3..=6).contains(&class) || number >= ERROR_CODE_MODULO {
+            return Err(Error::Other(format!(
+                "error class {class} and number {number} are not an error code"
+            )));
+        }
         let code = class * ERROR_CODE_MODULO + number;
         self.code = ErrorCode(code);
         self.reason = v[ERROR_CODE_REASON_START..].to_vec();
@@ -91,7 +126,7 @@ impl Getter for ErrorCodeAttribute {
 }
 
 // ErrorCode is code for ERROR-CODE attribute.
-#[derive(PartialEq, Eq, Hash, Copy, Clone, Default)]
+#[derive(PartialEq, Eq, Hash, Copy, Clone, Default, Debug)]
 /// A STUN error code, as carried in `ERROR-CODE`.
 pub struct ErrorCode(pub u16);
 
@@ -115,7 +150,8 @@ impl Setter for ErrorCode {
 pub const CODE_TRY_ALTERNATE: ErrorCode = ErrorCode(300);
 /// 400 Bad Request: the request was malformed.
 pub const CODE_BAD_REQUEST: ErrorCode = ErrorCode(400);
-/// 401 Unauthorized: authentication is required, or the credentials were wrong.
+/// 401 Unauthenticated (RFC 8489; "Unauthorized" in RFC 5389): authentication is required, or
+/// the credentials were wrong.
 pub const CODE_UNAUTHORIZED: ErrorCode = ErrorCode(401);
 /// 420 Unknown Attribute: the request carried a comprehension-required attribute the server
 /// does not understand.
@@ -126,6 +162,9 @@ pub const CODE_STALE_NONCE: ErrorCode = ErrorCode(438);
 pub const CODE_ROLE_CONFLICT: ErrorCode = ErrorCode(487);
 /// 500 Server Error: a temporary failure on the server.
 pub const CODE_SERVER_ERROR: ErrorCode = ErrorCode(500);
+
+/// 401 Unauthenticated, under the name RFC 8489 gives it.
+pub const CODE_UNAUTHENTICATED: ErrorCode = CODE_UNAUTHORIZED;
 
 /// DEPRECATED constants.
 /// DEPRECATED, use CODE_UNAUTHORIZED.
@@ -168,7 +207,7 @@ lazy_static! {
         [
             (CODE_TRY_ALTERNATE,     b"Try Alternate".to_vec()),
             (CODE_BAD_REQUEST,       b"Bad Request".to_vec()),
-            (CODE_UNAUTHORIZED,     b"Unauthorized".to_vec()),
+            (CODE_UNAUTHORIZED,     b"Unauthenticated".to_vec()),
             (CODE_UNKNOWN_ATTRIBUTE, b"Unknown Attribute".to_vec()),
             (CODE_STALE_NONCE,       b"Stale Nonce".to_vec()),
             (CODE_SERVER_ERROR,      b"Server Error".to_vec()),

@@ -754,3 +754,191 @@ fn test_message_marshal_binary() -> Result<()> {
 
     Ok(())
 }
+
+fn encoded_binding_request() -> Vec<u8> {
+    let mut m = Message::new();
+    m.build(&[
+        Box::new(BINDING_REQUEST),
+        Box::new(TransactionId([7; TRANSACTION_ID_SIZE])),
+        Box::new(TextAttribute::new(ATTR_SOFTWARE, "abc".to_owned())),
+    ])
+    .unwrap();
+    m.raw
+}
+
+/// RFC 8489 section 6.3: the first two bits of a STUN message are zero.
+#[test]
+fn test_a_message_whose_first_two_bits_are_set_is_not_stun() {
+    for top in [0x40u8, 0x80, 0xc0] {
+        let mut raw = encoded_binding_request();
+        raw[0] |= top;
+        assert!(!is_stun_message(&raw), "first byte {:#x}", raw[0]);
+        let mut m = Message::new();
+        assert!(
+            m.unmarshal_binary(&raw).is_err(),
+            "first byte {:#x}",
+            raw[0]
+        );
+    }
+    let raw = encoded_binding_request();
+    assert!(is_stun_message(&raw));
+    assert!(Message::new().unmarshal_binary(&raw).is_ok());
+}
+
+/// RFC 8489 section 6.3: the message length must be sensible: a multiple of four (section 5)
+/// that describes the whole datagram.
+#[test]
+fn test_a_message_whose_length_is_not_the_datagram_is_refused() {
+    // Bytes after the message the header describes.
+    let mut trailing = encoded_binding_request();
+    trailing.extend_from_slice(&[0, 0, 0, 0]);
+    assert!(Message::new().unmarshal_binary(&trailing).is_err());
+
+    // A length that is not a multiple of four: an attribute of 3 bytes with no padding.
+    let mut m = Message::new();
+    m.build(&[
+        Box::new(BINDING_REQUEST),
+        Box::new(TransactionId([7; TRANSACTION_ID_SIZE])),
+    ])
+    .unwrap();
+    let mut unpadded = m.raw.clone();
+    unpadded.extend_from_slice(&[0x80, 0x22, 0x00, 0x03, b'a', b'b', b'c']);
+    unpadded[3] = 7;
+    assert!(Message::new().unmarshal_binary(&unpadded).is_err());
+}
+
+/// RFC 8489 section 14: the padding of an attribute is zero when sent, also in a buffer that
+/// held something else before.
+#[test]
+fn test_attribute_padding_is_zero_when_sent() {
+    let mut m = Message::new();
+    m.write_header();
+    m.add(ATTR_SOFTWARE, &[0xff; 16]);
+    m.reset();
+    m.write_header();
+    for (value, padding) in [(&b"a"[..], 3), (b"ab", 2), (b"abc", 1), (b"abcd", 0)] {
+        m.add(ATTR_SOFTWARE, value);
+        let end = m.raw.len();
+        assert!(end.is_multiple_of(4));
+        assert_eq!(&m.raw[end - padding - value.len()..end - padding], value);
+        assert!(m.raw[end - padding..].iter().all(|b| *b == 0), "{value:?}");
+        // The attribute's length field is the value's length without the padding.
+        let header = end - padding - value.len() - ATTRIBUTE_HEADER_SIZE;
+        assert_eq!(&m.raw[header + 2..header + 4], &[0, value.len() as u8]);
+    }
+}
+
+/// RFC 8489 section 14: the padding of an attribute is ignored when received, whatever it
+/// holds.
+#[test]
+fn test_attribute_padding_is_ignored_when_received() -> Result<()> {
+    let mut raw = encoded_binding_request();
+    // SOFTWARE "abc" is the last attribute: its fourth byte is padding.
+    let end = raw.len() - 1;
+    assert_eq!(raw[end], 0);
+    raw[end] = 0xa5;
+    let mut m = Message::new();
+    m.unmarshal_binary(&raw)?;
+    assert_eq!(m.get(ATTR_SOFTWARE)?, b"abc");
+    assert_eq!(TextAttribute::get_from_as(&m, ATTR_SOFTWARE)?.text, "abc");
+    Ok(())
+}
+
+/// RFC 8489 section 14: when an attribute appears more than once, the first one is the one
+/// that is processed.
+#[test]
+fn test_first_of_duplicate_attributes_is_used() -> Result<()> {
+    let mut m = Message::new();
+    m.build(&[
+        Box::new(BINDING_SUCCESS),
+        Box::new(TransactionId([7; TRANSACTION_ID_SIZE])),
+        Box::new(XorMappedAddress {
+            ip: "192.0.2.1".parse().unwrap(),
+            port: 1111,
+        }),
+        Box::new(XorMappedAddress {
+            ip: "192.0.2.2".parse().unwrap(),
+            port: 2222,
+        }),
+    ])?;
+    let mut decoded = Message::new();
+    decoded.unmarshal_binary(&m.raw)?;
+    assert_eq!(decoded.attributes.0.len(), 2);
+    let mut got = XorMappedAddress::default();
+    got.get_from(&decoded)?;
+    assert_eq!(got.to_string(), "192.0.2.1:1111");
+    Ok(())
+}
+
+/// RFC 8489 section 5: transaction ids are random over all 96 bits. Over 256 ids, no two are
+/// equal and every bit takes both values (a fixed or counted bit would fail; a random one
+/// fails once in 2^248 runs).
+#[test]
+fn test_transaction_ids_are_random_in_every_bit() {
+    let mut ids: Vec<TransactionId> = (0..128).map(|_| TransactionId::new()).collect();
+    for _ in 0..128 {
+        let mut m = Message::new();
+        m.write_header();
+        m.new_transaction_id().unwrap();
+        assert_eq!(
+            &m.raw[8..20],
+            &m.transaction_id.0,
+            "the id is in the header"
+        );
+        ids.push(m.transaction_id);
+    }
+    let mut ones = [0u8; TRANSACTION_ID_SIZE];
+    let mut zeros = [0u8; TRANSACTION_ID_SIZE];
+    for id in &ids {
+        for (i, byte) in id.0.iter().enumerate() {
+            ones[i] |= byte;
+            zeros[i] |= !byte;
+        }
+    }
+    assert_eq!(ones, [0xff; TRANSACTION_ID_SIZE]);
+    assert_eq!(zeros, [0xff; TRANSACTION_ID_SIZE]);
+    let distinct: std::collections::HashSet<_> = ids.iter().collect();
+    assert_eq!(distinct.len(), ids.len());
+}
+
+/// A message is read from a reader whole, whatever its length.
+#[test]
+fn test_read_from_reads_a_message_longer_than_the_initial_buffer() -> Result<()> {
+    let mut m = Message::new();
+    m.build(&[
+        Box::new(BINDING_REQUEST),
+        Box::new(TransactionId([7; TRANSACTION_ID_SIZE])),
+        Box::new(TextAttribute::new(ATTR_SOFTWARE, "s".repeat(100))),
+        Box::new(TextAttribute::new(ATTR_USERNAME, "u".repeat(400))),
+    ])?;
+    assert!(m.raw.len() > 500);
+    let mut got = Message::new();
+    let n = got.read_from(&mut BufReader::new(m.raw.as_slice()))?;
+    assert_eq!(n, m.raw.len());
+    assert_eq!(got, m);
+    Ok(())
+}
+
+/// RFC 8489 section 6.3: the comprehension-required attributes a usage does not know are
+/// found; comprehension-optional ones never are.
+#[test]
+fn test_unknown_required_attributes_are_listed_in_order() {
+    let mut m = Message::new();
+    m.write_header();
+    m.add(ATTR_USERNAME, b"user");
+    m.add(AttrType(0x7ffe), &[]);
+    m.add(ATTR_PRIORITY, &[0; 4]);
+    m.add(AttrType(0x8000), &[]);
+    m.add(AttrType(0x7ffe), &[]);
+    m.add(AttrType(0xffff), &[]);
+    assert_eq!(
+        m.unknown_required_attributes(&STUN_ATTRIBUTES),
+        vec![AttrType(0x7ffe), ATTR_PRIORITY]
+    );
+    let with_ice = [&STUN_ATTRIBUTES[..], &[ATTR_PRIORITY]].concat();
+    assert_eq!(
+        m.unknown_required_attributes(&with_ice),
+        vec![AttrType(0x7ffe)]
+    );
+    assert!(STUN_ATTRIBUTES.iter().all(|a| a.required()));
+}

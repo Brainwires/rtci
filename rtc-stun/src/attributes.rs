@@ -1,7 +1,7 @@
 //! STUN attribute types.
 //!
 //! Every attribute is a type code, a length and a value ([`RawAttribute`](crate::attributes::RawAttribute)). This module defines
-//! the code points — those from STUN itself ([RFC 5389]) plus the ones TURN, ICE and the NAT
+//! the code points — those from STUN itself ([RFC 8489]) plus the ones TURN, ICE and the NAT
 //! behaviour discovery extensions add — while the typed accessors live in
 //! [`textattrs`](crate::textattrs), [`xoraddr`](crate::xoraddr),
 //! [`error_code`](crate::error_code) and friends.
@@ -9,9 +9,11 @@
 //! Codes below `0x8000` are *comprehension-required*: a receiver that does not understand one
 //! must reject the message. Codes at or above `0x8000` are comprehension-optional and may be
 //! ignored, which is how `FINGERPRINT` and the ICE attributes can be added without breaking
-//! older peers.
+//! older peers. [`STUN_ATTRIBUTES`](crate::attributes::STUN_ATTRIBUTES) is the
+//! comprehension-required set of STUN itself; a usage adds its own and hands the list to
+//! [`Validator::known_attributes`](crate::validated::Validator::known_attributes).
 //!
-//! [RFC 5389]: https://datatracker.ietf.org/doc/html/rfc5389
+//! [RFC 8489]: https://datatracker.ietf.org/doc/html/rfc8489
 
 #[cfg(test)]
 mod attributes_test;
@@ -207,6 +209,27 @@ pub const ATTR_PASSWORD_ALGORITHMS: AttrType = AttrType(0x8002);
 /// ALTERNATE-DOMAIN.
 pub const ATTR_ALTERNATE_DOMAIN: AttrType = AttrType(0x8003);
 
+/// The comprehension-required attributes RFC 8489 itself defines (section 18.3), which every
+/// STUN agent understands.
+///
+/// A usage's list of known attributes is this plus the comprehension-required attributes the
+/// usage defines (ICE: PRIORITY and USE-CANDIDATE; TURN: CHANNEL-NUMBER, LIFETIME and so on).
+/// See [`Message::unknown_required_attributes`] and
+/// [`Validator::known_attributes`](crate::validated::Validator::known_attributes).
+pub const STUN_ATTRIBUTES: [AttrType; 11] = [
+    ATTR_MAPPED_ADDRESS,
+    ATTR_USERNAME,
+    ATTR_MESSAGE_INTEGRITY,
+    ATTR_ERROR_CODE,
+    ATTR_UNKNOWN_ATTRIBUTES,
+    ATTR_REALM,
+    ATTR_NONCE,
+    ATTR_MESSAGE_INTEGRITY_SHA256,
+    ATTR_PASSWORD_ALGORITHM,
+    ATTR_USER_HASH,
+    ATTR_XORMAPPED_ADDRESS,
+];
+
 /// RawAttribute is a Type-Length-Value (TLV) object that
 /// can be added to a STUN message. Attributes are divided into two
 /// types: comprehension-required and comprehension-optional.  STUN
@@ -246,7 +269,7 @@ pub(crate) const PADDING: usize = 4;
 /// padding so that its value contains a multiple of 4 bytes.  The
 /// padding bits are ignored, and may be any value.
 ///
-/// https://tools.ietf.org/html/rfc5389#section-15
+/// RFC 8489 section 14.
 pub(crate) fn nearest_padded_value_length(l: usize) -> usize {
     let mut n = PADDING * (l / PADDING);
     if n < l {

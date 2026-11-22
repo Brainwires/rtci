@@ -1,5 +1,10 @@
 //! STUN transaction tracking.
 //!
+//! [`Agent`](crate::agent::Agent) is the low-level bookkeeping: it matches a message to a
+//! transaction by id alone and applies none of the checks of RFC 8489 section 6.3 (class,
+//! method, source address, FINGERPRINT, unknown attributes). [`Client`](crate::client::Client)
+//! applies them, and is what talks to a server.
+//!
 //! The agent remembers which requests are outstanding and when each should be considered lost. It
 //! performs no I/O: the caller submits [`ClientAgent`](crate::agent::ClientAgent) commands — start a transaction, hand over
 //! an inbound message, advance time, stop or close — and polls for the resulting [`Event`](crate::agent::Event)s.
@@ -53,6 +58,27 @@ pub enum StunEvent {
     TransactionTimeOut,
     /// A response arrived for this transaction.
     Message(Message),
+    /// The transaction ended without a usable response, for a reason other than time.
+    TransactionFailed {
+        /// The transaction.
+        id: TransactionId,
+        /// Why it failed.
+        reason: TransactionFailure,
+    },
+}
+
+/// Why a transaction failed although the server answered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TransactionFailure {
+    /// The response carried comprehension-required attributes the client does not know (RFC
+    /// 8489 sections 6.3.3 and 6.3.4): it is discarded and the transaction has failed.
+    UnknownAttributes(Vec<crate::attributes::AttrType>),
+    /// An error response without a usable ERROR-CODE (RFC 8489 section 6.3.4).
+    MissingErrorCode,
+    /// Every response that arrived failed the integrity check, or, over a reliable transport,
+    /// one did (RFC 8489 sections 9.1.4 and 9.2.5).
+    IntegrityViolation,
 }
 
 /// AgentTransaction represents transaction in progress.
