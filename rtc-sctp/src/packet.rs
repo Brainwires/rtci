@@ -7,6 +7,7 @@ use crate::chunk::chunk_forward_tsn::ChunkForwardTsn;
 use crate::chunk::chunk_header::*;
 use crate::chunk::chunk_heartbeat::ChunkHeartbeat;
 use crate::chunk::chunk_heartbeat_ack::ChunkHeartbeatAck;
+use crate::chunk::chunk_i_forward_tsn::ChunkIForwardTsn;
 use crate::chunk::chunk_init::ChunkInit;
 use crate::chunk::chunk_payload_data::ChunkPayloadData;
 use crate::chunk::chunk_reconfig::ChunkReconfig;
@@ -68,9 +69,23 @@ pub struct PartialDecode {
     pub(crate) first_chunk_type: ChunkType,
     pub(crate) initiate_tag: Option<u32>,
     pub(crate) cookie: Option<Bytes>,
+    /// The packet's checksum field is zero and its CRC32c has not been computed: the whole
+    /// packet, for whoever will not take a zero checksum on trust (RFC 9653 5.3).
+    pub(crate) unverified: Option<Bytes>,
 }
 
 impl PartialDecode {
+    /// Whether the packet may be processed. A packet whose checksum field is zero is taken
+    /// as it is by an endpoint that announced "Zero Checksum Acceptable" (RFC 9653 5.3);
+    /// for any other, zero has to be the packet's CRC32c.
+    pub(crate) fn checksum_ok(&self, zero_acceptable: bool) -> bool {
+        match &self.unverified {
+            None => true,
+            Some(_) if zero_acceptable => true,
+            Some(raw) => generate_packet_checksum(raw) == 0,
+        }
+    }
+
     pub(crate) fn unmarshal(raw: &Bytes) -> Result<Self> {
         if raw.len() < PACKET_HEADER_SIZE {
             return Err(Error::ErrPacketRawTooSmall);
@@ -82,9 +97,10 @@ impl PartialDecode {
         let destination_port = reader.get_u16();
         let verification_tag = reader.get_u32();
         let their_checksum = reader.get_u32_le();
-        let our_checksum = generate_packet_checksum(raw);
-
-        if their_checksum != our_checksum {
+        // RFC 9653: a checksum of zero is left for the association the packet is for to
+        // judge, which may have said that it takes zero; the CRC32c is then not computed.
+        let unverified = (their_checksum == 0).then(|| raw.clone());
+        if unverified.is_none() && their_checksum != generate_packet_checksum(raw) {
             return Err(Error::ErrChecksumMismatch);
         }
 
@@ -123,6 +139,7 @@ impl PartialDecode {
             first_chunk_type: header.typ,
             initiate_tag,
             cookie,
+            unverified,
         })
     }
 
@@ -184,10 +201,11 @@ fn parse_chunks(raw: &Bytes, mut offset: usize) -> Result<Vec<Box<dyn Chunk>>> {
             CT_COOKIE_ACK => Box::new(ChunkCookieAck::unmarshal(&chunk_buf)?),
             CT_HEARTBEAT => Box::new(ChunkHeartbeat::unmarshal(&chunk_buf)?),
             CT_HEARTBEAT_ACK => Box::new(ChunkHeartbeatAck::unmarshal(&chunk_buf)?),
-            CT_PAYLOAD_DATA => Box::new(ChunkPayloadData::unmarshal(&chunk_buf)?),
+            CT_PAYLOAD_DATA | CT_I_DATA => Box::new(ChunkPayloadData::unmarshal(&chunk_buf)?),
             CT_SACK => Box::new(ChunkSelectiveAck::unmarshal(&chunk_buf)?),
             CT_RECONFIG => Box::new(ChunkReconfig::unmarshal(&chunk_buf)?),
             CT_FORWARD_TSN => Box::new(ChunkForwardTsn::unmarshal(&chunk_buf)?),
+            CT_I_FORWARD_TSN => Box::new(ChunkIForwardTsn::unmarshal(&chunk_buf)?),
             CT_ERROR => Box::new(ChunkError::unmarshal(&chunk_buf)?),
             CT_SHUTDOWN => Box::new(ChunkShutdown::unmarshal(&chunk_buf)?),
             CT_SHUTDOWN_ACK => Box::new(ChunkShutdownAck::unmarshal(&chunk_buf)?),
@@ -284,6 +302,19 @@ impl Packet {
         )
     }
 
+    /// As [`marshal`](Self::marshal), with the checksum field left zero when `zero_checksum`
+    /// is set (RFC 9653 5.2: for a peer that announced it takes that).
+    pub(crate) fn marshal_with(&self, zero_checksum: bool) -> Result<Bytes> {
+        let mut buf = BytesMut::with_capacity(self.marshaled_len());
+        Self::write_framed_with(
+            &self.common_header,
+            self.chunks.iter().map(|c| &**c as &dyn Chunk),
+            &mut buf,
+            zero_checksum,
+        )
+        .map(|_| buf.freeze())
+    }
+
     pub(crate) fn marshal(&self) -> Result<Bytes> {
         // Allocate the exact packet length once, up front. `with_capacity` is a
         // cheaper direct allocation than growing an empty `BytesMut` via
@@ -310,6 +341,17 @@ impl Packet {
         chunks: impl Iterator<Item = &'a dyn Chunk>,
         writer: &mut BytesMut,
     ) -> Result<usize> {
+        Self::write_framed_with(common_header, chunks, writer, false)
+    }
+
+    /// As [`write_framed`](Self::write_framed); with `zero_checksum` the CRC32c is not
+    /// computed and the checksum field stays zero (RFC 9653).
+    pub(crate) fn write_framed_with<'a>(
+        common_header: &CommonHeader,
+        chunks: impl Iterator<Item = &'a dyn Chunk>,
+        writer: &mut BytesMut,
+        zero_checksum: bool,
+    ) -> Result<usize> {
         let start = writer.len();
 
         // Populate static headers
@@ -333,6 +375,10 @@ impl Packet {
             if padding_needed != 0 {
                 writer.put_bytes(0, padding_needed);
             }
+        }
+
+        if zero_checksum {
+            return Ok(writer.len());
         }
 
         // CRC-32C over the whole packet, checksum field still zero.

@@ -44,6 +44,9 @@ pub(crate) struct Peer {
     pub(crate) received: Vec<(StreamId, Bytes)>,
     /// When false, readable streams are left alone (an application that stopped reading).
     pub(crate) auto_read: bool,
+    /// When true, what the endpoint itself has to send (`Endpoint::poll_transmit`: the INIT
+    /// ACK of a stateless handshake, answers to out-of-the-blue packets) goes on the link.
+    pub(crate) endpoint_answers: bool,
 }
 
 impl Peer {
@@ -61,6 +64,7 @@ impl Peer {
             events: vec![],
             received: vec![],
             auto_read: true,
+            endpoint_answers: false,
         }
     }
 
@@ -105,6 +109,13 @@ impl Peer {
     /// Runs due timers, collects events and messages, and returns the datagrams to send.
     fn service(&mut self, now: Instant) -> Vec<Bytes> {
         let mut out = vec![];
+        while self.endpoint_answers
+            && let Some(transmit) = self.endpoint.poll_transmit()
+        {
+            if let Payload::RawEncode(contents) = transmit.message {
+                out.extend(contents);
+            }
+        }
         let Some((_, conn)) = self.association.as_mut() else {
             return out;
         };

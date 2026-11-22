@@ -18,6 +18,9 @@ pub struct Chunk {
 pub struct Chunks {
     /// used only with the ordered chunks
     pub ssn: u16,
+    /// The Message Identifier, when the message came in I-DATA chunks (RFC 8260): counted
+    /// per stream, separately for ordered and unordered messages. Zero otherwise.
+    pub mid: u32,
     /// The payload protocol identifier shared by every fragment of this message.
     pub ppi: PayloadProtocolIdentifier,
     /// The Payload Protocol Identifier as the number the peer sent (RFC 9260 3.3.1): the
@@ -31,6 +34,9 @@ pub struct Chunks {
     /// Arrival order, used only to decide which of two ready messages came first.
     /// A counter rather than an instant: this is sequencing, not time.
     arrival: u64,
+    /// The fragments are I-DATA chunks: ordered and checked by their Fragment Sequence
+    /// Number, not by their TSN (RFC 8260 2.2.3).
+    by_fsn: bool,
 }
 
 impl Chunks {
@@ -129,13 +135,46 @@ impl Chunks {
     ) -> Self {
         Chunks {
             ssn,
+            mid: 0,
             ppi,
             ppid: chunks.first().map_or(ppi.number(), ChunkPayloadData::ppid),
             chunks,
             offset: 0,
             index: 0,
             arrival,
+            by_fsn: false,
         }
+    }
+
+    /// An empty set for the I-DATA fragments of message `mid`.
+    fn new_interleaved(arrival: u64, mid: u32) -> Self {
+        Chunks {
+            ssn: mid as u16,
+            mid,
+            ppi: PayloadProtocolIdentifier::default(),
+            ppid: 0,
+            chunks: vec![],
+            offset: 0,
+            index: 0,
+            arrival,
+            by_fsn: true,
+        }
+    }
+
+    /// Adds an I-DATA fragment at its place by Fragment Sequence Number. `false` for a
+    /// fragment already held.
+    fn insert_fragment(&mut self, chunk: ChunkPayloadData) -> bool {
+        let idx = self.chunks.partition_point(|c| sna32lt(c.fsn, chunk.fsn));
+        if idx < self.chunks.len() && self.chunks[idx].fsn == chunk.fsn {
+            return false;
+        }
+        if chunk.beginning_fragment {
+            // Only the first fragment carries the Payload Protocol Identifier.
+            self.ppi = chunk.payload_type;
+            self.ppid = chunk.ppid();
+        }
+        self.chunks.insert(idx, chunk);
+        true
     }
 
     pub(crate) fn push(&mut self, chunk: ChunkPayloadData) -> bool {
@@ -178,6 +217,11 @@ impl Chunks {
             return false;
         }
 
+        if self.by_fsn {
+            // RFC 8260 2.2.3: by the Fragment Sequence Numbers, whatever the TSNs are.
+            return contiguous_span(self.chunks[0].fsn, self.chunks[n_chunks - 1].fsn, n_chunks);
+        }
+
         // 3. Fragments must have contiguous TSN
         // From RFC 4960 Section 3.3.1:
         //   When a user message is fragmented into multiple chunks, the TSNs are
@@ -217,6 +261,14 @@ pub(crate) struct ReassemblyQueue {
     /// Monotonic counter stamped onto each reassembled message so `read` can tell which of a
     /// ready ordered and a ready unordered message arrived first.
     next_arrival: u64,
+    /// The association uses I-DATA (RFC 8260): messages are told apart by their Message
+    /// Identifier and put together by Fragment Sequence Number. `ordered` is then kept in
+    /// Message Identifier order.
+    pub(crate) interleaved: bool,
+    /// The Message Identifier of the next ordered message to deliver.
+    pub(crate) next_mid: u32,
+    /// The unordered I-DATA messages still incomplete, in Message Identifier order.
+    unordered_partial: Vec<Chunks>,
 }
 
 impl ReassemblyQueue {
@@ -236,12 +288,111 @@ impl ReassemblyQueue {
             unordered_ends: vec![],
             n_bytes: 0,
             next_arrival: 0,
+            interleaved: false,
+            next_mid: 0,
+            unordered_partial: vec![],
         }
+    }
+
+    /// RFC 8260 2.2.3: an I-DATA chunk goes to the message its stream, U bit and Message
+    /// Identifier name, at the place its Fragment Sequence Number gives it. Returns whether
+    /// the message is complete with it.
+    fn push_interleaved(&mut self, chunk: ChunkPayloadData) -> bool {
+        let (mid, len) = (chunk.mid, chunk.user_data.len());
+        if chunk.unordered {
+            let idx = self
+                .unordered_partial
+                .partition_point(|s| sna32lt(s.mid, mid));
+            if self.unordered_partial.get(idx).is_none_or(|s| s.mid != mid) {
+                self.unordered_partial
+                    .insert(idx, Chunks::new_interleaved(0, mid));
+            }
+            let set = &mut self.unordered_partial[idx];
+            if !set.insert_fragment(chunk) {
+                return false;
+            }
+            self.n_bytes += len;
+            if !set.is_complete() {
+                return false;
+            }
+            let mut set = self.unordered_partial.remove(idx);
+            set.arrival = self.next_arrival;
+            self.next_arrival += 1;
+            self.unordered.push_back(set);
+            return true;
+        }
+
+        if sna32lt(mid, self.next_mid) {
+            return false;
+        }
+        let idx = self.ordered.partition_point(|s| sna32lt(s.mid, mid));
+        if self.ordered.get(idx).is_none_or(|s| s.mid != mid) {
+            self.ordered
+                .insert(idx, Chunks::new_interleaved(self.next_arrival, mid));
+            self.next_arrival += 1;
+        }
+        let set = &mut self.ordered[idx];
+        if !set.insert_fragment(chunk) {
+            return false;
+        }
+        self.n_bytes += len;
+        set.is_complete()
+    }
+
+    /// Whether an ordered message is the next one to deliver, or one before it.
+    fn is_due(&self, set: &Chunks) -> bool {
+        if self.interleaved {
+            sna32lte(set.mid, self.next_mid)
+        } else {
+            sna16lte(set.ssn, self.next_ssn)
+        }
+    }
+
+    /// The ordered message `set` is delivered: the one after it is expected next.
+    fn delivered(&mut self, ssn: u16, mid: u32) {
+        if self.interleaved {
+            if mid == self.next_mid {
+                self.next_mid = self.next_mid.wrapping_add(1);
+            }
+        } else if ssn == self.next_ssn {
+            self.next_ssn = self.next_ssn.wrapping_add(1);
+        }
+    }
+
+    /// RFC 8260 2.3.1: an I-FORWARD-TSN entry. The messages of this stream up to `mid`,
+    /// ordered or unordered as the entry says, will not be completed: their fragments are
+    /// dropped, and the ordered messages after them are no longer held back.
+    pub(crate) fn forward_mid(&mut self, unordered: bool, mid: u32) {
+        let mut dropped = 0;
+        if unordered {
+            self.unordered_partial.retain(|s| {
+                let keep = sna32gt(s.mid, mid);
+                if !keep {
+                    dropped += s.len();
+                }
+                keep
+            });
+        } else {
+            self.ordered.retain(|s| {
+                let keep = sna32gt(s.mid, mid) || s.is_complete();
+                if !keep {
+                    dropped += s.len();
+                }
+                keep
+            });
+            if sna32lte(self.next_mid, mid) {
+                self.next_mid = mid.wrapping_add(1);
+            }
+        }
+        self.subtract_num_bytes(dropped);
     }
 
     pub(crate) fn push(&mut self, chunk: ChunkPayloadData) -> bool {
         if chunk.stream_identifier != self.si {
             return false;
+        }
+        if self.interleaved {
+            return self.push_interleaved(chunk);
         }
 
         if chunk.unordered {
@@ -355,7 +506,7 @@ impl ReassemblyQueue {
         // Check ordered sets
         if !self.ordered.is_empty() {
             let cset = &self.ordered[0];
-            if cset.is_complete() && sna16lte(cset.ssn, self.next_ssn) {
+            if cset.is_complete() && self.is_due(cset) {
                 return true;
             }
         }
@@ -372,7 +523,7 @@ impl ReassemblyQueue {
             if !chunks.is_complete() {
                 return None;
             }
-            if sna16gt(chunks.ssn, self.next_ssn) {
+            if !self.is_due(chunks) {
                 return None;
             }
             Some(chunks)
@@ -389,9 +540,8 @@ impl ReassemblyQueue {
             if unordered_chunks.arrival < ordered_chunks.arrival {
                 self.unordered.pop_front().unwrap()
             } else {
-                if ordered_chunks.ssn == self.next_ssn {
-                    self.next_ssn = self.next_ssn.wrapping_add(1);
-                }
+                let (ssn, mid) = (ordered_chunks.ssn, ordered_chunks.mid);
+                self.delivered(ssn, mid);
                 self.ordered.pop_front().unwrap()
             }
         } else {
@@ -404,12 +554,11 @@ impl ReassemblyQueue {
                 if !chunks.is_complete() {
                     return None;
                 }
-                if sna16gt(chunks.ssn, self.next_ssn) {
+                if !self.is_due(chunks) {
                     return None;
                 }
-                if chunks.ssn == self.next_ssn {
-                    self.next_ssn = self.next_ssn.wrapping_add(1);
-                }
+                let (ssn, mid) = (chunks.ssn, chunks.mid);
+                self.delivered(ssn, mid);
                 self.ordered.pop_front().unwrap()
             } else {
                 return None;
@@ -471,6 +620,37 @@ impl ReassemblyQueue {
         self.unordered_ends.drain(..n);
     }
 
+    /// RFC 6525 5.2.4 G4, G5 and 5.2.7 H5: the TSNs and Stream Sequence Numbers start over.
+    /// As after a FORWARD TSN past everything received, the messages that are complete are
+    /// delivered, in their order, and the fragments of the others are dropped; the next
+    /// ordered message expected has sequence number 0.
+    pub(crate) fn reset_sequence_numbers(&mut self) {
+        let mut dropped = 0;
+        for set in std::mem::take(&mut self.ordered) {
+            if set.is_complete() {
+                // Readable whatever its number: the numbers before it will not come.
+                self.unordered.push_back(set);
+            } else {
+                dropped += set.len();
+            }
+        }
+        dropped += self
+            .unordered_chunks
+            .drain(..)
+            .map(|c| c.user_data.len())
+            .sum::<usize>();
+        dropped += self
+            .unordered_partial
+            .drain(..)
+            .map(|s| s.len())
+            .sum::<usize>();
+        self.unordered_begins.clear();
+        self.unordered_ends.clear();
+        self.subtract_num_bytes(dropped);
+        self.next_ssn = 0;
+        self.next_mid = 0;
+    }
+
     pub(crate) fn subtract_num_bytes(&mut self, n_bytes: usize) {
         if self.n_bytes >= n_bytes {
             self.n_bytes -= n_bytes;
@@ -489,5 +669,6 @@ impl ReassemblyQueue {
             && self.ordered.is_empty()
             && self.unordered.is_empty()
             && self.unordered_chunks.is_empty()
+            && self.unordered_partial.is_empty()
     }
 }

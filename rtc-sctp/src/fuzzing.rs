@@ -18,6 +18,7 @@ use crate::chunk::chunk_forward_tsn::{ChunkForwardTsn, ChunkForwardTsnStream};
 use crate::chunk::chunk_header::ChunkHeader;
 use crate::chunk::chunk_heartbeat::ChunkHeartbeat;
 use crate::chunk::chunk_heartbeat_ack::ChunkHeartbeatAck;
+use crate::chunk::chunk_i_forward_tsn::ChunkIForwardTsn;
 use crate::chunk::chunk_init::ChunkInit;
 use crate::chunk::chunk_payload_data::ChunkPayloadData;
 use crate::chunk::chunk_reconfig::ChunkReconfig;
@@ -28,17 +29,21 @@ use crate::chunk::chunk_shutdown_complete::ChunkShutdownComplete;
 use crate::chunk::chunk_unknown::ChunkUnknown;
 use crate::packet::{Packet, PartialDecode};
 use crate::param::Param;
+use crate::param::param_add_streams_request::ParamAddStreamsRequest;
 use crate::param::param_chunk_list::ParamChunkList;
 use crate::param::param_forward_tsn_supported::ParamForwardTsnSupported;
 use crate::param::param_header::ParamHeader;
 use crate::param::param_heartbeat_info::ParamHeartbeatInfo;
+use crate::param::param_incoming_reset_request::ParamIncomingResetRequest;
 use crate::param::param_outgoing_reset_request::ParamOutgoingResetRequest;
 use crate::param::param_random::ParamRandom;
 use crate::param::param_reconfig_response::ParamReconfigResponse;
 use crate::param::param_requested_hmac_algorithm::ParamRequestedHmacAlgorithm;
+use crate::param::param_ssn_tsn_reset_request::ParamSsnTsnResetRequest;
 use crate::param::param_state_cookie::ParamStateCookie;
 use crate::param::param_supported_extensions::ParamSupportedExtensions;
 use crate::param::param_uknown::ParamUnknown;
+use crate::param::param_zero_checksum_acceptable::ParamZeroChecksumAcceptable;
 
 fn to_bytes(data: &[u8]) -> Bytes {
     Bytes::copy_from_slice(data)
@@ -169,6 +174,28 @@ pub fn chunk_chunk_forward_tsn_stream_unmarshal(data: &[u8]) -> Result<()> {
     Ok(())
 }
 
+pub fn chunk_chunk_i_forward_tsn_unmarshal(data: &[u8]) -> Result<()> {
+    let raw = to_bytes(data);
+    let _ = ChunkIForwardTsn::unmarshal(&raw)?;
+    Ok(())
+}
+
+/// An I-DATA chunk (RFC 8260 2.1): the input with the chunk type set to 64.
+pub fn chunk_chunk_i_data_unmarshal(data: &[u8]) -> Result<()> {
+    let mut raw = data.to_vec();
+    if let Some(typ) = raw.first_mut() {
+        *typ = 64;
+    }
+    let chunk = ChunkPayloadData::unmarshal(&Bytes::from(raw))?;
+    // What was read is written back as it was read.
+    let again = ChunkPayloadData::unmarshal(&chunk.marshal()?)?;
+    assert_eq!(
+        (chunk.tsn, chunk.mid, chunk.fsn, chunk.ppid()),
+        (again.tsn, again.mid, again.fsn, again.ppid())
+    );
+    Ok(())
+}
+
 pub fn chunk_chunk_heartbeat_unmarshal(data: &[u8]) -> Result<()> {
     let raw = to_bytes(data);
     let _ = ChunkHeartbeat::unmarshal(&raw)?;
@@ -289,6 +316,30 @@ pub fn param_param_reconfig_response_unmarshal(data: &[u8]) -> Result<()> {
     Ok(())
 }
 
+pub fn param_param_incoming_reset_request_unmarshal(data: &[u8]) -> Result<()> {
+    let raw = to_bytes(data);
+    let _ = ParamIncomingResetRequest::unmarshal(&raw)?;
+    Ok(())
+}
+
+pub fn param_param_ssn_tsn_reset_request_unmarshal(data: &[u8]) -> Result<()> {
+    let raw = to_bytes(data);
+    let _ = ParamSsnTsnResetRequest::unmarshal(&raw)?;
+    Ok(())
+}
+
+pub fn param_param_add_streams_request_unmarshal(data: &[u8]) -> Result<()> {
+    let raw = to_bytes(data);
+    let _ = ParamAddStreamsRequest::unmarshal(&raw)?;
+    Ok(())
+}
+
+pub fn param_param_zero_checksum_acceptable_unmarshal(data: &[u8]) -> Result<()> {
+    let raw = to_bytes(data);
+    let _ = ParamZeroChecksumAcceptable::unmarshal(&raw)?;
+    Ok(())
+}
+
 pub fn param_param_unknown_unmarshal(data: &[u8]) -> Result<()> {
     let raw = to_bytes(data);
     let _ = ParamUnknown::unmarshal(&raw)?;
@@ -397,8 +448,22 @@ pub fn endpoint_handle_datagrams(mut data: &[u8], start: std::time::Instant) {
 /// established association: DATA, SACK, FORWARD TSN, RE-CONFIG, HEARTBEAT, ERROR, ABORT, the
 /// shutdown chunks, and chunks and parameters of types the engine does not know. Time moves
 /// with each datagram, by an amount the input chooses, so the timers run too.
-pub fn association_handle_chunks(mut data: &[u8], start: std::time::Instant) {
-    use crate::{ClientConfig, DatagramEvent, Endpoint, EndpointConfig, Payload, ServerConfig};
+pub fn association_handle_chunks(data: &[u8], start: std::time::Instant) {
+    association_handle_chunks_with(data, start, false)
+}
+
+/// As [`association_handle_chunks`], on an association that negotiated user message
+/// interleaving (RFC 8260): the fuzzer reaches the I-DATA reassembly and I-FORWARD-TSN.
+pub fn association_handle_chunks_interleaved(data: &[u8], start: std::time::Instant) {
+    association_handle_chunks_with(data, start, true)
+}
+
+fn association_handle_chunks_with(mut data: &[u8], start: std::time::Instant, interleaving: bool) {
+    use crate::{
+        ClientConfig, DatagramEvent, Endpoint, EndpointConfig, Payload, ServerConfig,
+        TransportConfig,
+    };
+    let transport = || TransportConfig::default().with_message_interleaving(interleaving);
     use std::net::SocketAddr;
     use std::sync::Arc;
     use std::time::Duration;
@@ -415,9 +480,10 @@ pub fn association_handle_chunks(mut data: &[u8], start: std::time::Instant) {
         server_addr,
         shared::TransportProtocol::UDP,
         Arc::new(EndpointConfig::default()),
-        Some(Arc::new(ServerConfig::default())),
+        Some(Arc::new(ServerConfig::new(transport()))),
     );
-    let Ok((_, mut client)) = client_endpoint.connect(start, ClientConfig::default(), server_addr)
+    let Ok((_, mut client)) =
+        client_endpoint.connect(start, ClientConfig::new(transport()), server_addr)
     else {
         return;
     };

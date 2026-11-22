@@ -367,7 +367,8 @@ pub struct SettingEngine {
     pub(crate) replay_protection: ReplayProtection,
     pub(crate) sdp_media_level_fingerprints: bool,
     pub(crate) disable_sdp_tls_id: bool,
-    pub(crate) disable_dtls_use_srtp: bool,
+    pub(crate) dtls_use_srtp_on_every_association: bool,
+    pub(crate) accept_lowercase_fingerprints: bool,
     /// Answers and subsequent offers repeat the BUNDLE attributes in every bundled m=
     /// section instead of carrying them in the tagged one only (RFC 9143 section 7.1.3); see
     /// [`SettingEngineBuilder::with_bundle_attributes_repeated`].
@@ -1287,15 +1288,21 @@ impl SettingEngineBuilder {
         self
     }
 
-    /// Makes the DTLS transport one for data channels only: `use_srtp` (RFC 5764 section 4.1)
-    /// is neither offered nor accepted, so the association has no SRTP keys.
+    /// Offers the DTLS `use_srtp` extension on every association, as browsers do, instead of
+    /// only on one that carries SRTP media.
     ///
-    /// RFC 5764 section 4.1 reserves `use_srtp` for associations that carry RTP or RTCP. By
-    /// default the engine offers it on every association, as browsers do, because media can be
-    /// added later; a peer that leaves it out is accepted either way as long as the session has
-    /// no audio or video section. With this set, a remote description that has one is refused
-    /// ([`Error::ErrSessionDescriptionMediaWithoutSrtp`](shared::error::Error::ErrSessionDescriptionMediaWithoutSrtp)):
-    /// no RTP is ever sent unprotected.
+    /// RFC 5764 section 4.1: "The use_srtp extension MUST only be used when the data being
+    /// transported is RTP or RTCP". By default the engine follows it: as the DTLS client it
+    /// offers `use_srtp` when the session has an audio or video section, and a
+    /// data-channel-only session is set up without it. When such a session gains a media
+    /// section later, a new DTLS association is established for it (the offer carries a new
+    /// `a=tls-id`, RFC 8842): a peer that does not act on `tls-id`, a browser for one, will
+    /// not follow, and the media cannot flow. (As the DTLS server the engine takes a profile
+    /// whenever the client offers one.)
+    ///
+    /// Set `true` to talk to such peers when media may be added to a data-channel-only
+    /// session, or to peers that refuse an association without `use_srtp` (pion-lineage
+    /// stacks fail their DTLS transport when no SRTP profile was negotiated).
     ///
     /// # Examples
     ///
@@ -1303,11 +1310,31 @@ impl SettingEngineBuilder {
     /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
     ///
     /// let setting_engine = SettingEngineBuilder::new()
-    ///     .with_disable_dtls_use_srtp(true)
+    ///     .with_dtls_use_srtp_on_every_association(true)
     ///     .build();
     /// ```
-    pub fn with_disable_dtls_use_srtp(mut self, is_disabled: bool) -> Self {
-        self.0.disable_dtls_use_srtp = is_disabled;
+    pub fn with_dtls_use_srtp_on_every_association(mut self, on_every_association: bool) -> Self {
+        self.0.dtls_use_srtp_on_every_association = on_every_association;
+        self
+    }
+
+    /// Reads lower-case hex digits in a remote `a=fingerprint`, as browsers do.
+    ///
+    /// RFC 8122 section 5 defines the fingerprint as upper-case hex (`2UHEX *(":" 2UHEX)`), and
+    /// by default a description with anything else is refused as malformed. Set `true` for a
+    /// peer that writes lower-case digits.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    ///
+    /// let setting_engine = SettingEngineBuilder::new()
+    ///     .with_lowercase_fingerprints_accepted(true)
+    ///     .build();
+    /// ```
+    pub fn with_lowercase_fingerprints_accepted(mut self, is_accepted: bool) -> Self {
+        self.0.accept_lowercase_fingerprints = is_accepted;
         self
     }
 

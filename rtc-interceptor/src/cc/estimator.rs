@@ -56,6 +56,30 @@ pub trait BandwidthEstimator: Send + Sync {
         None
     }
 
+    /// A packet left for the network. With [`on_reports`](Self::on_reports) this is what lets
+    /// an estimator tell "nothing was sent" from "something was sent and nothing came back".
+    fn on_packet_sent(&mut self, _now: Instant, _size: usize) {}
+
+    /// A round trip time measured from feedback: the instant a packet left to the instant the
+    /// feedback naming it was read, less nothing, so it includes the receiver's reporting delay.
+    fn on_round_trip_time(&mut self, _now: Instant, _round_trip_time: std::time::Duration) {}
+
+    /// Limits from outside the algorithm, in bits per second: what was negotiated (`b=AS`,
+    /// `b=TIAS`), what the receiver asked for (TMMBR, REMB), what the circuit breaker allows.
+    /// The interceptor combines them and hands over the tightest; `None` lifts the limit. An
+    /// estimator that honours them keeps its target at or below `max` whatever it measures.
+    fn set_external_bounds(&mut self, _min: Option<f64>, _max: Option<f64>) {}
+
+    /// The fraction lost a receiver report gave for a stream this endpoint sends, handed over
+    /// only while the receiver sends no per-packet feedback (no TWCC, no RFC 8888): the
+    /// loss-based half of an estimator can still run on it
+    /// (draft-ietf-rmcat-gcc-02 section 7).
+    fn on_receiver_report(&mut self, _now: Instant, _fraction_lost: f64) {}
+
+    /// The network path changed (a new selected candidate pair, a new interface): what was
+    /// learnt about the old path says nothing about this one (RFC 8836 section 2, 1d).
+    fn on_path_change(&mut self, _now: Instant) {}
+
     /// Whatever the algorithm wants to expose. Never load-bearing.
     fn stats(&self) -> EstimatorStats {
         EstimatorStats::default()

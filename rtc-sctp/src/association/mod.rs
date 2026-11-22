@@ -15,6 +15,7 @@ use crate::chunk::{
     chunk_forward_tsn::ChunkForwardTsnStream,
     chunk_heartbeat::ChunkHeartbeat,
     chunk_heartbeat_ack::ChunkHeartbeatAck,
+    chunk_i_forward_tsn::ChunkIForwardTsn,
     chunk_init::ChunkInit,
     chunk_init::ChunkInitAck,
     chunk_payload_data::ChunkPayloadData,
@@ -24,10 +25,11 @@ use crate::chunk::{
     chunk_shutdown::ChunkShutdown,
     chunk_shutdown_ack::ChunkShutdownAck,
     chunk_shutdown_complete::ChunkShutdownComplete,
-    chunk_type::CT_FORWARD_TSN,
+    chunk_type::{CT_FORWARD_TSN, CT_I_DATA, CT_I_FORWARD_TSN, CT_RECONFIG},
     chunk_unknown::ChunkUnknown,
 };
 use crate::config::{COMMON_HEADER_SIZE, DATA_CHUNK_HEADER_SIZE, ServerConfig, TransportConfig};
+use crate::cookie::{CookieFields, CookieSigner};
 use crate::packet::{CommonHeader, Packet};
 use crate::param::{
     Param, UNRECOGNIZED_PARAMETER,
@@ -38,6 +40,7 @@ use crate::param::{
     param_state_cookie::ParamStateCookie,
     param_supported_extensions::ParamSupportedExtensions,
     param_uknown::ParamUnknown,
+    param_zero_checksum_acceptable::{EDMID_SCTP_OVER_DTLS, ParamZeroChecksumAcceptable},
 };
 use crate::queue::{
     payload_queue::PayloadQueue,
@@ -57,6 +60,8 @@ use crate::association::stream::RecvSendState;
 use bytes::{Bytes, BytesMut};
 use log::{debug, error, trace, warn};
 use rand::random;
+pub use reconfig::ReconfigEvent;
+use reconfig::{IncomingResetWaiting, OwnRequest};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
@@ -66,6 +71,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use thiserror::Error;
 
+pub(crate) mod bundling;
+pub(crate) mod interleaving;
+pub(crate) mod reconfig;
 pub(crate) mod state;
 pub(crate) mod stats;
 pub(crate) mod stream;
@@ -85,8 +93,10 @@ pub(crate) const MAX_PENDING_RECONFIG_REQUESTS: usize = 64;
 /// retransmission is answered again without being performed a second time.
 pub(crate) const MAX_COMPLETED_RECONFIG_REQUESTS: usize = 64;
 
-/// Reset requests of this side's own, sent in answer to the peer's, that may await the peer's
-/// response at once. Past it a peer request is still performed and answered, but not echoed.
+/// Re-configuration requests of this side's own that may wait for the one in flight to be
+/// answered (RFC 6525 5.1.1 has one in flight). Past it a peer's reset is still performed and
+/// answered, but this side's own direction is not reset in turn, and the application's
+/// requests are refused.
 pub(crate) const MAX_OUTSTANDING_RECONFIGS: usize = 64;
 
 /// How long an accepting association waits for the COOKIE ECHO after an INIT before it gives
@@ -131,6 +141,12 @@ struct CookieTcb {
     inbound_streams: u16,
     outbound_streams: u16,
     use_forward_tsn: bool,
+    /// User message interleaving is used: both sides listed I-DATA (RFC 8260 2.2.1).
+    use_interleaving: bool,
+    /// The INIT listed the RE-CONFIG chunk among its supported extensions (RFC 6525 5.1.1).
+    reconfig: bool,
+    /// The peer takes a zero checksum over DTLS and this side may send one (RFC 9653 5.2).
+    send_zero_checksum: bool,
     /// This side's port and the peer's, as the INIT's packet had them.
     source_port: u16,
     destination_port: u16,
@@ -147,6 +163,15 @@ struct HandshakeParams {
     forward_tsn: bool,
     /// The peer reported this side's Forward-TSN-Supported parameter as unrecognized.
     forward_tsn_rejected: bool,
+    /// The Supported Extensions parameter lists the RE-CONFIG chunk (RFC 6525 5.1.1).
+    reconfig: bool,
+    /// The Supported Extensions parameter lists the I-DATA chunk (RFC 8260 2.2.1).
+    i_data: bool,
+    /// The Supported Extensions parameter lists the I-FORWARD-TSN chunk (RFC 8260 2.3.1).
+    i_forward_tsn: bool,
+    /// The Error Detection Method Identifier of a Zero Checksum Acceptable parameter (RFC
+    /// 9653 4), the first one if the peer sent several.
+    zero_checksum_edmid: Option<u32>,
 }
 
 /// The Forward-TSN-Supported parameter (RFC 3758 3.1).
@@ -246,6 +271,9 @@ pub enum Event {
     Stream(StreamEvent),
     /// One or more application datagrams have been received
     DatagramReceived,
+    /// The outcome of a stream re-configuration (RFC 6525): a request of this side's own was
+    /// answered, or the peer changed the association.
+    Reconfig(ReconfigEvent),
 }
 
 /// Selection is stable even after fragments leave either queue.
@@ -309,10 +337,46 @@ pub struct Association {
     will_send_shutdown_complete: bool,
 
     // Reconfig
-    my_next_rsn: u32,
+    pub(crate) my_next_rsn: u32,
+    /// The request in flight, by its sequence number, as the chunk that is retransmitted.
+    /// RFC 6525 5.1.1: there is at most one.
     reconfigs: HashMap<u32, ChunkReconfig>,
+    /// What the request in flight asks for.
+    reconfig_in_flight: Option<OwnRequest>,
+    /// The peer answered the request in flight "In progress": the next expiry of its timer
+    /// is not counted as an error (RFC 6525 5.2.7 H2).
+    reconfig_in_progress: bool,
+    /// Requests waiting for the one in flight to be answered.
+    reconfig_queue: VecDeque<OwnRequest>,
+    /// The peer's Outgoing SSN Reset Requests not performed yet: its TSN is not reached, or
+    /// the application has not read what the streams hold.
     reconfig_requests: HashMap<u32, ParamOutgoingResetRequest>,
-    completed_reconfig_requests: VecDeque<u32>,
+    /// The peer's requests answered for good, each with the chunk it was answered with: a
+    /// retransmission gets the same chunk again (RFC 6525 5.2.1).
+    completed_reconfig_requests: VecDeque<(u32, ChunkReconfig)>,
+    /// The request sequence numbers accepted from the peer: the lowest still acceptable and
+    /// the next one expected. `None` until the peer's initial TSN is known.
+    peer_rsn_window: Option<(u32, u32)>,
+    /// The peer listed the RE-CONFIG chunk in its Supported Extensions (RFC 6525 5.1.1).
+    peer_supports_reconfig: bool,
+    /// The peer's Incoming SSN Reset Requests being answered: the Outgoing SSN Reset Request
+    /// that answers one goes out when the data queued on its streams has been sent.
+    incoming_resets_waiting: HashMap<u32, IncomingResetWaiting>,
+    /// DATA held back while a reset of its stream is deferred, or while this side's SSN/TSN
+    /// reset is in flight: it belongs to the stream as it is after the reset (RFC 6525 5.2.2
+    /// E2). Its bytes count against the receive window.
+    held_reset_data: Vec<ChunkPayloadData>,
+    /// This side asked for an SSN/TSN reset that is not answered yet: no new DATA is sent
+    /// (RFC 6525 5.1.4 C2).
+    tsn_reset_requested: bool,
+    /// The peer's SSN/TSN Reset Request, answered "In progress" until what this side has
+    /// outstanding is acknowledged.
+    deferred_tsn_reset: Option<u32>,
+    /// When this side last sent an SSN/TSN Reset Request (RFC 6525 5.1.4: one per 30 s).
+    last_tsn_reset_request: Option<Instant>,
+    /// Messages written to streams whose outgoing reset is not answered yet, across all
+    /// streams: they are still to be sent.
+    held_write_count: usize,
 
     // Non-RFC internal data
     remote_addr: SocketAddr,
@@ -330,6 +394,10 @@ pub struct Association {
     my_cookie: Option<ParamStateCookie>,
     /// What the INIT answered with `my_cookie` said, applied when the cookie is echoed.
     cookie_tcb: Option<CookieTcb>,
+    /// Makes this association's State Cookies with a MAC (RFC 9260 5.1.3), when the endpoint
+    /// was given a crypto provider for it. Without one a cookie is random bytes, good only
+    /// because this association remembers them.
+    cookie_signer: Option<Arc<CookieSigner>>,
     /// Valid.Cookie.Life (RFC 9260 16): how long a State Cookie is accepted after it was made.
     valid_cookie_life: Duration,
     /// How many times a Stale Cookie error sent this side back to a new INIT.
@@ -341,6 +409,11 @@ pub struct Association {
     sack_packet_immediately: bool,
     /// Set by a chunk handler: the chunks after it in the packet are discarded.
     discard_rest_of_packet: bool,
+    /// The SACK that is due and found no control packet to travel with: it goes with
+    /// outbound DATA, or alone.
+    unbundled_sack: Option<ChunkSelectiveAck>,
+    /// Where the packets of DATA begin among the packets being gathered.
+    first_data_packet: usize,
 
     /// HB.interval (RFC 9260 8.3, 16); `None` sends no HEARTBEAT.
     heartbeat_interval: Option<Duration>,
@@ -369,6 +442,21 @@ pub struct Association {
     use_forward_tsn: bool,
     /// PR-SCTP is announced and used at all (`TransportConfig::with_partial_reliability`).
     partial_reliability_enabled: bool,
+    /// User message interleaving is announced (`TransportConfig::with_message_interleaving`).
+    interleaving_enabled: bool,
+    /// "Zero Checksum Acceptable" is announced, for SCTP over DTLS, and packets with a zero
+    /// checksum are taken (`TransportConfig::with_zero_checksum`; RFC 9653 5.1, 5.3).
+    zero_checksum_enabled: bool,
+    /// The peer announced that it takes a zero checksum over DTLS, and this side may send
+    /// one: the CRC32c of what is sent is not computed (RFC 9653 5.2).
+    send_zero_checksum: bool,
+    /// User message interleaving is in use: both sides announced it (RFC 8260 2.2.1). DATA
+    /// and FORWARD TSN are then replaced by I-DATA and I-FORWARD-TSN.
+    use_interleaving: bool,
+    /// As `fwd_tsn_stream_map`, for I-FORWARD-TSN: the greatest Message Identifier among the
+    /// abandoned chunks of each stream, for its ordered (`false`) and its unordered (`true`)
+    /// messages (RFC 8260 2.3.1).
+    i_fwd_tsn_stream_map: FxHashMap<(u16, bool), u32>,
     /// Max stream-sequence-number per *ordered* stream among abandoned chunks
     /// currently in the forward-TSN window `(cumulative_tsn_ack_point,
     /// advanced_peer_tsn_ack_point]`. Maintained incrementally as chunks are
@@ -400,7 +488,7 @@ pub struct Association {
     /// L of RFC 9260 7.2.1: in slow start one SACK grows cwnd by at most L x PMDCS.
     slow_start_growth_limit: u32,
     /// Max.Burst (RFC 9260 6.1 D), when applied.
-    max_burst: Option<u32>,
+    pub(crate) max_burst: Option<u32>,
     /// When DATA was last sent, for the decay of an idle congestion window (7.2.1).
     last_data_sent: Option<Instant>,
     /// Set by a T3-rtx expiry: the retransmission that follows is one packet (6.3.3 E3).
@@ -485,8 +573,19 @@ impl Default for Association {
             // Reconfig
             my_next_rsn: 0,
             reconfigs: HashMap::default(),
+            reconfig_in_flight: None,
+            reconfig_in_progress: false,
+            reconfig_queue: VecDeque::new(),
             reconfig_requests: HashMap::default(),
             completed_reconfig_requests: VecDeque::new(),
+            peer_rsn_window: None,
+            peer_supports_reconfig: true,
+            incoming_resets_waiting: HashMap::default(),
+            held_reset_data: vec![],
+            tsn_reset_requested: false,
+            deferred_tsn_reset: None,
+            last_tsn_reset_request: None,
+            held_write_count: 0,
 
             // Non-RFC internal data
             remote_addr: SocketAddr::from_str("0.0.0.0:0").unwrap(),
@@ -501,11 +600,14 @@ impl Default for Association {
             configured_outbound_streams: 0,
             my_cookie: None,
             cookie_tcb: None,
+            cookie_signer: None,
             valid_cookie_life: Duration::from_secs(60),
             stale_cookie_restarts: 0,
             first_data_received: false,
             sack_packet_immediately: false,
             discard_rest_of_packet: false,
+            unbundled_sack: None,
+            first_data_packet: 0,
             heartbeat_interval: None,
             heartbeat_outstanding: None,
             last_rtt_probe: None,
@@ -526,6 +628,11 @@ impl Default for Association {
             advanced_peer_tsn_ack_point: 0,
             use_forward_tsn: false,
             partial_reliability_enabled: true,
+            interleaving_enabled: false,
+            zero_checksum_enabled: false,
+            send_zero_checksum: false,
+            use_interleaving: false,
+            i_fwd_tsn_stream_map: FxHashMap::default(),
             fwd_tsn_stream_map: FxHashMap::default(),
 
             rto_mgr: RtoManager::default(),
@@ -625,6 +732,8 @@ impl Association {
             configured_inbound_streams: config.max_num_inbound_streams(),
             valid_cookie_life: config.valid_cookie_life(),
             partial_reliability_enabled: config.partial_reliability(),
+            interleaving_enabled: config.message_interleaving(),
+            zero_checksum_enabled: config.zero_checksum(),
             heartbeat_interval: config.heartbeat_interval(),
             created_at: Some(now),
             max_payload_size,
@@ -635,7 +744,11 @@ impl Association {
 
             rto_mgr: RtoManager::new(),
             timers: TimerTable::new(config.timer_config()),
-            pending_queue: PendingQueue::with_scheduler(config.stream_scheduler()),
+            pending_queue: {
+                let mut queue = PendingQueue::with_scheduler(config.stream_scheduler());
+                queue.set_packet_budget(mtu.saturating_sub(COMMON_HEADER_SIZE) as usize);
+                queue
+            },
 
             mtu,
             cwnd,
@@ -675,7 +788,11 @@ impl Association {
                 advertised_receiver_window_credit: this.max_receive_buffer_size,
                 ..Default::default()
             };
-            init.announce_extensions(this.partial_reliability_enabled);
+            init.announce_extensions(
+                this.partial_reliability_enabled,
+                this.interleaving_enabled,
+                this.zero_checksum_enabled,
+            );
 
             this.set_state(AssociationState::CookieWait);
             this.stored_init = Some(init);
@@ -744,6 +861,43 @@ impl Association {
             self.timers.stop(Timer::T3RTX);
             self.timers.start(Timer::T3RTX, now, self.rto_mgr.get_rto());
         }
+    }
+
+    /// The largest SCTP packet (common header and chunks) the association sends: the path
+    /// MTU as it knows it.
+    pub fn path_mtu(&self) -> u32 {
+        self.mtu
+    }
+
+    /// Tells the association the largest SCTP packet the path below carries, in bytes: the
+    /// path MTU less what lies beneath SCTP (for WebRTC: the DTLS record overhead, the UDP
+    /// and IP headers, and TURN framing where a relay is used). The entry point for whatever
+    /// learns the path MTU: the application's own discovery, a transport that probes, or an
+    /// ICMP "Packet Too Big" it has validated (RFC 9260 section 7.3, RFC 8261 section 4).
+    /// The association does not probe by itself.
+    ///
+    /// From now on packets are bundled up to `mtu`, the Path Maximum DATA Chunk Size of the
+    /// congestion control rules follows it, and messages written from now on are fragmented
+    /// to fit. A message already fragmented keeps its fragments: after a reduction they are
+    /// sent as they are, each alone in a packet larger than the new MTU, and the layer below
+    /// has to fragment or the caller to accept the loss (RFC 9260 section 6.9: SCTP does not
+    /// re-fragment). A value below [`MIN_DATA_PACKET_MTU`](crate::MIN_DATA_PACKET_MTU) is
+    /// raised to it.
+    pub fn set_path_mtu(&mut self, mtu: u32) {
+        let mtu = mtu.max(crate::config::MIN_DATA_PACKET_MTU);
+        if mtu == self.mtu {
+            return;
+        }
+        debug!("[{}] path MTU {} -> {}", self.side, self.mtu, mtu);
+        self.mtu = mtu;
+        self.pmdcs = mtu.saturating_sub(COMMON_HEADER_SIZE);
+        self.max_payload_size = crate::config::max_payload_size_for_mtu(mtu);
+        for s in self.streams.values_mut() {
+            s.max_payload_size = self.max_payload_size;
+        }
+        self.pending_queue.set_packet_budget(self.pmdcs as usize);
+        // RFC 9260 7.2.1: cwnd is never below one packet of the size now in use.
+        self.cwnd = self.cwnd.max(self.pmdcs);
     }
 
     /// Returns application-facing event
@@ -880,6 +1034,13 @@ impl Association {
                 }*/
 
                 if let Payload::PartialDecode(partial_decode) = transmit.message {
+                    // RFC 9653 5.3: a zero checksum is taken only by an endpoint that
+                    // announced it; otherwise the packet is dropped as one with a wrong
+                    // CRC32c (RFC 9260 6.8).
+                    if !partial_decode.checksum_ok(self.zero_checksum_enabled) {
+                        debug!("[{}] discarding a packet with a zero checksum", self.side);
+                        return;
+                    }
                     let len = COMMON_HEADER_SIZE as usize + partial_decode.remaining.len();
                     debug!("[{}] recving {} bytes", self.side, len);
                     self.bytes_received = self.bytes_received.saturating_add(len);
@@ -1030,7 +1191,7 @@ impl Association {
         // flight or queued, and the queued DATA was never sent.
         self.set_state(AssociationState::ShutdownPending);
 
-        if self.inflight_queue.is_empty() && self.pending_queue.is_empty() {
+        if self.nothing_left_to_send() {
             // No more outstanding, send shutdown.
             self.send_shutdown();
         }
@@ -1268,42 +1429,14 @@ impl Association {
         if let Some(mut s) = self.streams.remove(&stream_identifier) {
             debug!("[{}] unregister_stream {}", self.side, stream_identifier);
             self.reindex_stream(stream_identifier, s.get_num_bytes_in_reassembly_queue());
+            // Messages held for a reset of the stream go with it.
+            self.held_write_count = self.held_write_count.saturating_sub(s.held_writes.len());
             self.events.push_back(Event::AssociationLost {
                 reason,
                 id: stream_identifier,
             });
             s.state = RecvSendState::Closed;
         }
-    }
-
-    /// Re-run any reset request that was answered In Progress because
-    /// `stream_identifier` still had data the application had not collected
-    /// Called when that stream drains.
-    ///
-    /// The reply is queued like any other control packet; a request naming
-    /// several streams is retried as a whole and simply defers again if another
-    /// of its streams is still readable.
-    pub(crate) fn retry_deferred_resets(&mut self, stream_identifier: StreamId) {
-        let pending: Vec<ParamOutgoingResetRequest> = self
-            .reconfig_requests
-            .values()
-            .filter(|p| p.stream_identifiers.contains(&stream_identifier))
-            .cloned()
-            .collect();
-        if pending.is_empty() {
-            return;
-        }
-
-        let mut reply = vec![];
-        for p in pending {
-            if let Err(err) = self.reset_streams_if_any(&p, true, &mut reply) {
-                debug!("[{}] retry of deferred reset failed: {:?}", self.side, err);
-            }
-        }
-        for packet in reply {
-            self.control_queue.push_back(packet);
-        }
-        self.awake_write_loop();
     }
 
     /// set_state atomically sets the state of the Association.
@@ -1417,6 +1550,7 @@ impl Association {
         }
 
         self.handle_chunk_start();
+        let replies_before = self.control_queue.len();
 
         // RFC 9260 9.1: a packet that carries an ABORT is not answered. The ABORT is taken
         // first, so nothing queued for the chunks bundled before it goes out.
@@ -1446,6 +1580,8 @@ impl Association {
         }
 
         self.handle_chunk_end(now);
+        // RFC 9260 12.4: one packet of control chunks answers one received packet.
+        self.bundle_replies(replies_before);
 
         Ok(())
     }
@@ -1623,6 +1759,8 @@ impl Association {
             self.handle_reconfig(c)?
         } else if let Some(c) = chunk_any.downcast_ref::<ChunkForwardTsn>() {
             self.handle_forward_tsn(c)?
+        } else if let Some(c) = chunk_any.downcast_ref::<ChunkIForwardTsn>() {
+            self.handle_i_forward_tsn(c)?
         } else if let Some(c) = chunk_any.downcast_ref::<ChunkShutdown>() {
             self.handle_shutdown(c, now)?
         } else if let Some(c) = chunk_any.downcast_ref::<ChunkShutdownAck>() {
@@ -1754,7 +1892,11 @@ impl Association {
             advertised_receiver_window_credit: self.max_receive_buffer_size,
             ..Default::default()
         };
-        init.announce_extensions(self.partial_reliability_enabled);
+        init.announce_extensions(
+            self.partial_reliability_enabled,
+            self.interleaving_enabled,
+            self.zero_checksum_enabled,
+        );
         self.stored_init = Some(init);
         self.set_state(AssociationState::CookieWait);
         let _ = self.send_init();
@@ -1777,9 +1919,21 @@ impl Association {
                 if v.chunk_types.contains(&CT_FORWARD_TSN) {
                     out.forward_tsn = true;
                 }
+                if v.chunk_types.contains(&CT_RECONFIG) {
+                    out.reconfig = true;
+                }
+                if v.chunk_types.contains(&CT_I_DATA) {
+                    out.i_data = true;
+                }
+                if v.chunk_types.contains(&CT_I_FORWARD_TSN) {
+                    out.i_forward_tsn = true;
+                }
             } else if any.downcast_ref::<ParamForwardTsnSupported>().is_some() {
                 // RFC 3758 3.3.1: this parameter alone announces PR-SCTP.
                 out.forward_tsn = true;
+            } else if let Some(v) = any.downcast_ref::<ParamZeroChecksumAcceptable>() {
+                // RFC 9653 4: the parameter appears once; a second one changes nothing.
+                out.zero_checksum_edmid.get_or_insert(v.edmid);
             } else if let Some(v) = any.downcast_ref::<ParamUnknown>() {
                 if v.typ() == PARAM_HOST_NAME_ADDRESS {
                     out.host_name = param.marshal().ok();
@@ -1866,9 +2020,6 @@ impl Association {
                 tcb.peer_verification_tag == i.initiate_tag
                     && now.saturating_duration_since(tcb.created_at) < self.valid_cookie_life
             });
-        if !reuse {
-            self.my_cookie = Some(ParamStateCookie::new());
-        }
         let created_at = match (&self.cookie_tcb, reuse) {
             (Some(tcb), true) => tcb.created_at,
             _ => now,
@@ -1880,7 +2031,10 @@ impl Association {
             peer_rwnd: i.advertised_receiver_window_credit,
             inbound_streams,
             outbound_streams,
-            use_forward_tsn: params.forward_tsn && self.partial_reliability_enabled,
+            use_forward_tsn: self.negotiated_partial_reliability(&params),
+            use_interleaving: self.negotiated_interleaving(&params),
+            reconfig: params.reconfig,
+            send_zero_checksum: self.may_send_zero_checksum(&params),
             source_port,
             destination_port,
         };
@@ -1894,6 +2048,19 @@ impl Association {
             if !self.use_forward_tsn {
                 warn!("[{}] not using ForwardTSN (on init)", self.side);
             }
+        }
+        if !reuse {
+            // RFC 9260 5.1.3: the cookie holds what the association is made from, the time
+            // it was made, and a MAC over both. Without a crypto provider to make the MAC
+            // with, it is random bytes this association remembers.
+            let sealed = self
+                .cookie_signer
+                .as_ref()
+                .and_then(|signer| signer.seal(&self.cookie_fields(&tcb, signer.timestamp(now))));
+            self.my_cookie = Some(match sealed {
+                Some(cookie) => ParamStateCookie { cookie },
+                None => ParamStateCookie::new(),
+            });
         }
         self.cookie_tcb = Some(tcb);
 
@@ -1919,7 +2086,11 @@ impl Association {
                 .push(Box::new(ParamUnknown::new(UNRECOGNIZED_PARAMETER, raw)));
         }
 
-        init_ack.announce_extensions(self.partial_reliability_enabled);
+        init_ack.announce_extensions(
+            self.partial_reliability_enabled,
+            self.interleaving_enabled,
+            self.zero_checksum_enabled,
+        );
 
         if state == AssociationState::Closed {
             // The accepting side holds this association from the INIT on. If no COOKIE ECHO
@@ -1936,6 +2107,106 @@ impl Association {
             },
             chunks: vec![Box::new(init_ack)],
         }])
+    }
+
+    /// What a State Cookie made at `created_ms` says for `tcb` (RFC 9260 5.1.3).
+    fn cookie_fields(&self, tcb: &CookieTcb, created_ms: u64) -> CookieFields {
+        CookieFields {
+            key_id: 0,
+            created_ms,
+            my_tag: self.my_verification_tag,
+            my_initial_tsn: self.my_next_tsn,
+            peer_tag: tcb.peer_verification_tag,
+            peer_initial_tsn: tcb.peer_initial_tsn,
+            peer_rwnd: tcb.peer_rwnd,
+            inbound_streams: tcb.inbound_streams,
+            outbound_streams: tcb.outbound_streams,
+            use_forward_tsn: tcb.use_forward_tsn,
+            use_interleaving: tcb.use_interleaving,
+            reconfig: tcb.reconfig,
+            send_zero_checksum: tcb.send_zero_checksum,
+            source_port: tcb.source_port,
+            destination_port: tcb.destination_port,
+            local_tie_tag: 0,
+            peer_tie_tag: 0,
+        }
+    }
+
+    /// RFC 9653 5.2: this side sends a zero checksum when the peer announced that it takes
+    /// one for an error detection method this side uses, which is SCTP over DTLS, and the
+    /// application said the association runs over DTLS (`TransportConfig::with_zero_checksum`).
+    fn may_send_zero_checksum(&self, params: &HandshakeParams) -> bool {
+        self.zero_checksum_enabled && params.zero_checksum_edmid == Some(EDMID_SCTP_OVER_DTLS)
+    }
+
+    /// Whether packets are sent with a zero checksum (RFC 9653): both sides announced that
+    /// they take one over DTLS.
+    pub fn zero_checksum(&self) -> bool {
+        self.send_zero_checksum
+    }
+
+    /// Serializes a packet. Its CRC32c is left out when the peer takes a zero checksum,
+    /// except where RFC 9653 5.2 asks for a correct one: a packet with an INIT or a COOKIE
+    /// ECHO, and one that answers an out-of-the-blue packet (it reflects a tag, or does not
+    /// carry the peer's).
+    fn marshal_packet(&self, p: &Packet) -> Result<Bytes> {
+        let zero = self.send_zero_checksum
+            && p.common_header.verification_tag == self.peer_verification_tag
+            && p.chunks.iter().all(|c| {
+                let any = c.as_any();
+                !any.is::<ChunkCookieEcho>()
+                    && any.downcast_ref::<ChunkInit>().is_none_or(|i| i.is_ack)
+                    && any
+                        .downcast_ref::<ChunkAbort>()
+                        .is_none_or(|a| !a.tag_reflected)
+                    && any
+                        .downcast_ref::<ChunkShutdownComplete>()
+                        .is_none_or(|s| !s.tag_reflected)
+            });
+        p.marshal_with(zero)
+    }
+
+    /// Has this association make its State Cookies with a MAC.
+    pub(crate) fn set_cookie_signer(&mut self, signer: Arc<CookieSigner>) {
+        self.cookie_signer = Some(signer);
+    }
+
+    /// Makes this association what it was when it answered an INIT with the State Cookie
+    /// `cookie`, whose MAC the endpoint has verified: nothing was kept since, and the
+    /// cookie says it all (RFC 9260 5.1.3, 5.1.5). The COOKIE ECHO is then handled as if the
+    /// association had been there all along.
+    pub(crate) fn restore_from_cookie(
+        &mut self,
+        fields: &CookieFields,
+        cookie: Bytes,
+        signer: Arc<CookieSigner>,
+        now: Instant,
+    ) {
+        let tsn = fields.my_initial_tsn;
+        self.my_next_tsn = tsn;
+        self.my_next_rsn = tsn;
+        self.min_tsn2measure_rtt = tsn;
+        self.cumulative_tsn_ack_point = tsn.wrapping_sub(1);
+        self.advanced_peer_tsn_ack_point = tsn.wrapping_sub(1);
+        let age = signer.age(fields, now);
+        let tcb = CookieTcb {
+            created_at: now.checked_sub(age).unwrap_or(now),
+            peer_verification_tag: fields.peer_tag,
+            peer_initial_tsn: fields.peer_initial_tsn,
+            peer_rwnd: fields.peer_rwnd,
+            inbound_streams: fields.inbound_streams,
+            outbound_streams: fields.outbound_streams,
+            use_forward_tsn: fields.use_forward_tsn,
+            use_interleaving: fields.use_interleaving,
+            reconfig: fields.reconfig,
+            send_zero_checksum: fields.send_zero_checksum,
+            source_port: fields.source_port,
+            destination_port: fields.destination_port,
+        };
+        self.apply_cookie_tcb(&tcb);
+        self.cookie_tcb = Some(tcb);
+        self.my_cookie = Some(ParamStateCookie { cookie });
+        self.cookie_signer = Some(signer);
     }
 
     /// Takes into the TCB what the peer's INIT said (RFC 9260 5.1 B, 5.2.4 B).
@@ -1962,6 +2233,11 @@ impl Association {
         debug!("[{}] initial rwnd={}", self.side, self.rwnd);
         self.ssthresh = self.rwnd;
         self.use_forward_tsn = tcb.use_forward_tsn;
+        self.set_interleaving(tcb.use_interleaving);
+        self.peer_supports_reconfig = tcb.reconfig;
+        self.send_zero_checksum = tcb.send_zero_checksum;
+        // RFC 6525 4.1: the peer's request sequence numbers start at its initial TSN.
+        self.peer_rsn_window = Some((tcb.peer_initial_tsn, tcb.peer_initial_tsn));
     }
 
     /// RFC 9260 5.2.2: the INIT ACK for an INIT that arrives while the association exists. It
@@ -1984,7 +2260,11 @@ impl Association {
             advertised_receiver_window_credit: self.max_receive_buffer_size,
             params: vec![Box::new(ParamStateCookie::new())],
         };
-        init_ack.announce_extensions(self.partial_reliability_enabled);
+        init_ack.announce_extensions(
+            self.partial_reliability_enabled,
+            self.interleaving_enabled,
+            self.zero_checksum_enabled,
+        );
         Packet {
             common_header: CommonHeader {
                 verification_tag: i.initiate_tag,
@@ -2052,11 +2332,15 @@ impl Association {
         let params = self.process_handshake_params(&i.params);
         // RFC 3758 3.3.2, 3.3.3: PR-SCTP is used when the peer announced it too, and not when
         // the peer reported this side's Forward-TSN-Supported parameter as unrecognized.
-        self.use_forward_tsn =
-            params.forward_tsn && self.partial_reliability_enabled && !params.forward_tsn_rejected;
+        self.use_forward_tsn = self.negotiated_partial_reliability(&params);
+        self.set_interleaving(self.negotiated_interleaving(&params));
+        self.send_zero_checksum = self.may_send_zero_checksum(&params);
         if !self.use_forward_tsn {
             warn!("[{}] not using ForwardTSN (on initAck)", self.side);
         }
+        self.peer_supports_reconfig = params.reconfig;
+        // RFC 6525 4.1: the peer's request sequence numbers start at its initial TSN.
+        self.peer_rsn_window = Some((i.initial_tsn, i.initial_tsn));
 
         if let Some(host_name) = params.host_name {
             // RFC 9260 3.3.3, 5.1.2: an INIT ACK with a Host Name Address is answered with
@@ -2160,12 +2444,16 @@ impl Association {
 
     /// RFC 9260 5.1.5 and 5.2.4: a COOKIE ECHO.
     ///
-    /// The State Cookie of this implementation is not a self-contained, MAC-protected TCB:
-    /// the association exists from the INIT on (see `HALF_OPEN_LIFETIME`), so the cookie is
-    /// 32 random bytes and what it stands for is kept beside it (`CookieTcb`). It is
-    /// authenticated by comparing it, in constant time, with the one this association sent,
-    /// which no one who has not seen the INIT ACK can produce; that is what the MAC is for.
-    /// Its creation time and the peer's tag and ports are checked from the kept copy.
+    /// An association handles the COOKIE ECHO for a cookie it sent itself and remembers
+    /// (`my_cookie`, with what it stands for in `cookie_tcb`): the cookie echoed is compared
+    /// with it in constant time, and its creation time and the peer's tag and ports are
+    /// checked from the kept copy. That is so in two cases. Without a crypto provider
+    /// (`ServerConfig::cookie_authentication`) the accepting association exists from the
+    /// INIT on (see `HALF_OPEN_LIFETIME`) and the cookie is 32 random bytes. With one, the
+    /// endpoint keeps nothing after the INIT ACK: the cookie is a MAC-protected TCB
+    /// (`crate::cookie`), the endpoint verifies it and makes this association from it
+    /// (`restore_from_cookie`) just before handing it the COOKIE ECHO, and the MAC is
+    /// verified here once more.
     ///
     /// With one cookie per association there is no cookie whose tags differ from the TCB's,
     /// so of Table 12 only the actions for matching tags arise: B and D (enter or stay in
@@ -2187,6 +2475,15 @@ impl Association {
             self.discard_rest_of_packet = true;
             return Ok(vec![]);
         };
+        // 5.1.5 1), 2): the MAC is computed over the cookie and compared with the one it
+        // carries; a cookie that fails is discarded silently.
+        if let Some(signer) = &self.cookie_signer
+            && signer.open(&c.cookie).is_none()
+        {
+            debug!("[{}] COOKIE-ECHO: the MAC does not verify", self.side);
+            self.discard_rest_of_packet = true;
+            return Ok(vec![]);
+        }
         if !constant_time_eq(&my_cookie.cookie, &c.cookie)
             || p.common_header.source_port != tcb.destination_port
             || p.common_header.destination_port != tcb.source_port
@@ -2449,6 +2746,52 @@ impl Association {
         );
         self.stats.inc_datas();
 
+        // RFC 8260 2.2.3: with user message interleaving negotiated a DATA chunk is a
+        // violation, and without it an I-DATA chunk is: the association is aborted.
+        if d.i_data != self.use_interleaving {
+            warn!(
+                "[{}] {} chunk on an association that uses the other: aborting",
+                self.side,
+                if d.i_data { "I-DATA" } else { "DATA" }
+            );
+            self.abort_with(
+                vec![Self::protocol_violation(if d.i_data {
+                    "I-DATA without user message interleaving (RFC 8260 2.2.3)"
+                } else {
+                    "DATA with user message interleaving (RFC 8260 2.2.3)"
+                })],
+                AssociationError::TransportError,
+            )?;
+            return Ok(vec![]);
+        }
+
+        // RFC 9260 section 6: DATA is received by the normal rules in ESTABLISHED,
+        // SHUTDOWN-PENDING and SHUTDOWN-SENT, and discarded in any other state.
+        match self.state() {
+            AssociationState::Established
+            | AssociationState::ShutdownPending
+            | AssociationState::ShutdownSent => {}
+            AssociationState::Closed if self.side == Side::Server => {
+                // An accepting association that has seen no COOKIE ECHO has no association
+                // to receive on: the DATA is out of the blue (8.4), answered with an ABORT
+                // that reflects the packet's tag.
+                debug!("[{}] DATA before the COOKIE ECHO: ABORT", self.side);
+                self.discard_rest_of_packet = true;
+                return Ok(vec![self.abort_packet(
+                    self.my_verification_tag,
+                    true,
+                    vec![],
+                )]);
+            }
+            state => {
+                // COOKIE-WAIT and COOKIE-ECHOED (DATA that overtook the COOKIE ACK is sent
+                // again by the peer); SHUTDOWN-RECEIVED and SHUTDOWN-ACK-SENT, where the peer
+                // has said it sends nothing more: discarded.
+                debug!("[{}] discarding DATA in state '{}'", self.side, state);
+                return Ok(vec![]);
+            }
+        }
+
         // RFC 9260 section 6.2: a DATA chunk with no user data is answered with an ABORT
         // carrying the "No User Data" cause. Accepting one would cost receive state without
         // counting against the byte-based receive window.
@@ -2605,7 +2948,31 @@ impl Association {
             self.awake_write_loop();
         }
 
-        if stream_handle_data && let Some(s) = self.streams.get_mut(&d.stream_identifier) {
+        if stream_handle_data {
+            if self.holds_for_reset(d) {
+                // RFC 6525 5.2.2 E2: this DATA belongs to its stream as it will be after a
+                // reset that is not performed yet. Its TSN is acknowledged; it is delivered
+                // when the reset is done.
+                debug!(
+                    "[{}] holding DATA tsn={} of stream {} for a deferred reset",
+                    self.side, d.tsn, d.stream_identifier
+                );
+                self.reassembly_bytes = self.reassembly_bytes.saturating_add(d.user_data.len());
+                self.held_reset_data.push(d.clone());
+            } else {
+                self.deliver_to_stream(d);
+            }
+        }
+
+        self.handle_peer_last_tsn_and_acknowledgement(immediate_sack)
+    }
+
+    /// Hands a DATA chunk that was accepted to its stream.
+    fn deliver_to_stream(&mut self, d: &ChunkPayloadData) {
+        if self.get_or_create_stream(d.stream_identifier).is_none() {
+            return;
+        }
+        if let Some(s) = self.streams.get_mut(&d.stream_identifier) {
             self.events.push_back(Event::DatagramReceived);
             let bytes_before = s.get_num_bytes_in_reassembly_queue();
             if s.handle_data(d) && s.reassembly_queue.is_readable() {
@@ -2615,8 +2982,6 @@ impl Association {
             }
             self.reindex_stream(d.stream_identifier, bytes_before);
         }
-
-        self.handle_peer_last_tsn_and_acknowledgement(immediate_sack)
     }
 
     fn handle_sack(&mut self, d: &ChunkSelectiveAck, now: Instant) -> Result<Vec<Packet>> {
@@ -2628,6 +2993,16 @@ impl Association {
             d.advertised_receiver_window_credit
         );
         let state = self.state();
+        if state == AssociationState::Closed && self.side == Side::Server && !self.ended {
+            // RFC 9260 section 6: a SACK for an association that is not there yet is out of
+            // the blue (8.4).
+            self.discard_rest_of_packet = true;
+            return Ok(vec![self.abort_packet(
+                self.my_verification_tag,
+                true,
+                vec![],
+            )]);
+        }
         if state != AssociationState::Established
             && state != AssociationState::ShutdownPending
             && state != AssociationState::ShutdownReceived
@@ -2731,6 +3106,7 @@ impl Association {
                 // Window reset: everything previously tracked is now at/below
                 // the cumulative ack point, so start the stream map fresh.
                 self.fwd_tsn_stream_map.clear();
+                self.i_fwd_tsn_stream_map.clear();
             }
 
             self.advance_peer_ack_point();
@@ -2739,27 +3115,24 @@ impl Association {
 
         self.postprocess_sack(state, cum_tsn_ack_point_advanced, now);
 
-        Ok(vec![])
-    }
-
-    fn handle_reconfig(&mut self, c: &ChunkReconfig) -> Result<Vec<Packet>> {
-        trace!("[{}] handle_reconfig", self.side);
-
-        let mut pp = vec![];
-
-        if let Some(param_a) = &c.param_a {
-            self.handle_reconfig_param(param_a, &mut pp)?;
-        }
-
-        if let Some(param_b) = &c.param_b {
-            self.handle_reconfig_param(param_b, &mut pp)?;
-        }
-
-        Ok(pp)
+        // The peer's SSN/TSN reset waited for what this side had outstanding.
+        Ok(self.perform_deferred_tsn_reset())
     }
 
     fn handle_forward_tsn(&mut self, c: &ChunkForwardTsn) -> Result<Vec<Packet>> {
         trace!("[{}] FwdTSN: {}", self.side, c);
+
+        if self.use_interleaving {
+            // RFC 8260 2.3.1: FORWARD TSN is not used with I-DATA.
+            warn!("[{}] FORWARD TSN with I-DATA in use: aborting", self.side);
+            self.abort_with(
+                vec![Self::protocol_violation(
+                    "FORWARD-TSN with user message interleaving (RFC 8260 2.3.1)",
+                )],
+                AssociationError::TransportError,
+            )?;
+            return Ok(vec![]);
+        }
 
         if !self.use_forward_tsn {
             warn!("[{}] received FwdTSN but not enabled", self.side);
@@ -2784,13 +3157,9 @@ impl Association {
             "[{}] should send ack? newCumTSN={} peer_last_tsn={}",
             self.side, c.new_cumulative_tsn, self.peer_last_tsn
         );
-        if sna32lte(c.new_cumulative_tsn, self.peer_last_tsn) {
-            trace!("[{}] sending ack on Forward TSN", self.side);
-            self.ack_state = AckState::Immediate;
-            self.timers.stop(Timer::Ack);
-            self.awake_write_loop();
+        let Some(prev_peer_last_tsn) = self.forward_cumulative_tsn(c.new_cumulative_tsn) else {
             return Ok(vec![]);
-        }
+        };
 
         // From RFC 3758 Sec 3.6:
         //   the receiver MUST perform the same TSN handling, including duplicate
@@ -2801,17 +3170,6 @@ impl Association {
         //   When a FORWARD TSN chunk arrives, the data receiver MUST first update
         //   its cumulative TSN point to the value carried in the FORWARD TSN
         //   chunk,
-
-        // Advance peer_last_tsn. Drop only the chunks actually queued below the new point and
-        // jump straight to it: stepping one TSN at a time let a FORWARD-TSN about 2^31 ahead
-        // spin for billions of iterations.
-        while let Some(&front) = self.payload_queue.sorted.front() {
-            if !sna32lte(front, c.new_cumulative_tsn) || self.payload_queue.pop(front).is_none() {
-                break;
-            }
-        }
-        let prev_peer_last_tsn = self.peer_last_tsn;
-        self.peer_last_tsn = c.new_cumulative_tsn;
 
         // Report new peer_last_tsn value and abandoned largest SSN value to
         // corresponding streams so that the abandoned chunks can be removed
@@ -2878,7 +3236,7 @@ impl Association {
                 return Ok(vec![]);
             }
 
-            if !self.inflight_queue.is_empty() || !self.pending_queue.is_empty() {
+            if !self.nothing_left_to_send() {
                 self.set_state(AssociationState::ShutdownReceived);
             } else {
                 // No more outstanding, send shutdown ack.
@@ -2999,101 +3357,6 @@ impl Association {
         Ok(reply)
     }
 
-    #[allow(clippy::borrowed_box)]
-    fn handle_reconfig_param(
-        &mut self,
-        raw: &Box<dyn Param>,
-        reply: &mut Vec<Packet>,
-    ) -> Result<()> {
-        if let Some(p) = raw.as_any().downcast_ref::<ParamOutgoingResetRequest>() {
-            let rsn = p.reconfig_request_sequence_number;
-            // A retransmission of a request already held or already performed is answered
-            // again, but not performed again (RFC 6525 section 5.2.1).
-            if self.reconfig_requests.contains_key(&rsn) {
-                reply.push(self.create_reconfig_response(rsn, ReconfigResult::InProgress));
-                return Ok(());
-            }
-            if self.completed_reconfig_requests.contains(&rsn) {
-                reply.push(self.create_reconfig_response(rsn, ReconfigResult::SuccessPerformed));
-                return Ok(());
-            }
-            if self.reconfig_requests.len() >= MAX_PENDING_RECONFIG_REQUESTS {
-                debug!(
-                    "[{}] deny reset request rsn={}: {} requests already pending",
-                    self.side,
-                    rsn,
-                    self.reconfig_requests.len()
-                );
-                reply.push(self.create_reconfig_response(rsn, ReconfigResult::Denied));
-                return Ok(());
-            }
-            self.reconfig_requests.insert(rsn, p.clone());
-            self.reset_streams_if_any(p, true, reply)?;
-            Ok(())
-        } else if let Some(p) = raw.as_any().downcast_ref::<ParamReconfigResponse>() {
-            // RFC 6525 5.1.1: "In progress" is not the outcome. The request stays outstanding
-            // (and its timer running), so the final response still finds it.
-            if p.result == ReconfigResult::InProgress
-                && self
-                    .reconfigs
-                    .contains_key(&p.reconfig_response_sequence_number)
-            {
-                self.restart_reconfig_timer = true;
-            }
-            if p.result != ReconfigResult::InProgress
-                && let Some(request) = self.reconfigs.remove(&p.reconfig_response_sequence_number)
-                && matches!(
-                    p.result,
-                    ReconfigResult::SuccessPerformed | ReconfigResult::SuccessNop
-                )
-            {
-                self.reset_outgoing_sequence_numbers(&request);
-            }
-            if self.reconfigs.is_empty() {
-                self.timers.stop(Timer::Reconfig);
-            }
-            Ok(())
-        } else {
-            // RFC 6525 5.2.1: every request is answered. The requests this side does not
-            // perform (Incoming SSN Reset, SSN/TSN Reset, Add Outgoing / Incoming Streams)
-            // are denied; each starts with its Re-configuration Request Sequence Number.
-            if let Some(unknown) = raw.as_any().downcast_ref::<ParamUnknown>()
-                && matches!(unknown.typ(), 14 | 15 | 17 | 18)
-                && unknown.value().len() >= 4
-            {
-                let v = unknown.value();
-                let rsn = u32::from_be_bytes([v[0], v[1], v[2], v[3]]);
-                debug!(
-                    "[{}] denying RE-CONFIG request {}",
-                    self.side,
-                    unknown.typ()
-                );
-                reply.push(self.create_reconfig_response(rsn, ReconfigResult::Denied));
-                return Ok(());
-            }
-            // Anything else is no reason to end the association.
-            debug!("[{}] ignoring RE-CONFIG parameter {}", self.side, raw);
-            Ok(())
-        }
-    }
-
-    /// RFC 6525 5.1.2: once the peer has performed our Outgoing SSN Reset Request, the
-    /// streams it named send again from SSN 0, which is what the peer now expects. A stream
-    /// still registered here (the peer did not reset its own direction too, or the channel
-    /// above reuses the stream) kept its old SSN, so the peer held every later ordered message
-    /// back waiting for SSN 0.
-    fn reset_outgoing_sequence_numbers(&mut self, request: &ChunkReconfig) {
-        for param in [&request.param_a, &request.param_b].into_iter().flatten() {
-            if let Some(reset) = param.as_any().downcast_ref::<ParamOutgoingResetRequest>() {
-                for id in &reset.stream_identifiers {
-                    if let Some(stream) = self.streams.get_mut(id) {
-                        stream.sequence_number = 0;
-                    }
-                }
-            }
-        }
-    }
-
     fn process_selective_ack(
         &mut self,
         d: &ChunkSelectiveAck,
@@ -3194,7 +3457,12 @@ impl Association {
 
                         trace!("[{}] tsn={} has been sacked", self.side, c.tsn);
 
-                        if !c.abandoned() && c.nsent == 1 {
+                        // RFC 9260 6.3.1 C4, C5: as for the cumulative TSN above, one
+                        // measurement per round trip and none across a retransmission.
+                        if !c.abandoned()
+                            && c.nsent == 1
+                            && sna32gte(c.tsn, self.min_tsn2measure_rtt)
+                        {
                             self.min_tsn2measure_rtt = self.my_next_tsn;
                             if let Some(since) = &c.since {
                                 let rtt = now.duration_since(*since);
@@ -3462,7 +3730,7 @@ impl Association {
             trace!("[{}] T3-rtx timer start (pt3)", self.side);
             self.timers
                 .start_if_idle(Timer::T3RTX, now, self.rto_mgr.get_rto());
-        } else if !self.pending_queue.is_empty() {
+        } else if !self.pending_queue.is_empty() || self.held_write_count > 0 {
             // Queued DATA still goes out before the shutdown proceeds (RFC 9260 9.2).
         } else if state == AssociationState::ShutdownPending {
             // No more outstanding, send shutdown.
@@ -3478,196 +3746,6 @@ impl Association {
         if should_awake_write_loop {
             self.awake_write_loop();
         }
-    }
-
-    /// Streams named by `p` that still hold a complete message the application
-    /// has not collected, so a reset naming them cannot be performed yet.
-    ///
-    /// Only *readable* data counts: an incomplete fragment set can never be
-    /// completed once the peer has reset, so it is discardable and must not
-    /// hold the reset open forever.
-    fn streams_awaiting_drain(&self, p: &ParamOutgoingResetRequest) -> Vec<StreamId> {
-        p.stream_identifiers
-            .iter()
-            .copied()
-            .filter(|id| {
-                self.streams
-                    .get(id)
-                    .is_some_and(|s| s.reassembly_queue.is_readable())
-            })
-            .collect()
-    }
-
-    fn reset_streams_if_any(
-        &mut self,
-        p: &ParamOutgoingResetRequest,
-        respond: bool,
-        reply: &mut Vec<Packet>,
-    ) -> Result<()> {
-        // RFC 6525 5.2.2: a request without stream numbers is for every stream.
-        let all_streams;
-        let p = if p.stream_identifiers.is_empty() {
-            let mut stream_identifiers: Vec<u16> = self.streams.keys().copied().collect();
-            stream_identifiers.sort_unstable();
-            all_streams = ParamOutgoingResetRequest {
-                stream_identifiers,
-                ..p.clone()
-            };
-            &all_streams
-        } else {
-            p
-        };
-        let mut result = ReconfigResult::SuccessPerformed;
-        let mut sis_to_reset = vec![];
-
-        if sna32lte(p.sender_last_tsn, self.peer_last_tsn) {
-            debug!(
-                "[{}] resetStream(): senderLastTSN={} <= peer_last_tsn={}",
-                self.side, p.sender_last_tsn, self.peer_last_tsn
-            );
-
-            let draining = self.streams_awaiting_drain(p);
-            let mut seen = FxHashSet::default();
-
-            for id in &p.stream_identifiers {
-                if draining.contains(id) || !seen.insert(*id) {
-                    continue;
-                }
-                if let Some(stream) = self.streams.get(id) {
-                    // RFC 8831 section 6.7: the receiver of a reset resets its own outgoing
-                    // stream too, unless it already has (the peer's request is then the
-                    // second half of a close this side started). Echoing it again would
-                    // send a reset after the stream id is free, and reset the next channel
-                    // that takes the id.
-                    let outgoing_open = (stream.state as u8) & 0x1 != 0;
-                    if respond && outgoing_open {
-                        sis_to_reset.push(*id);
-                    }
-                    self.unregister_stream(*id, AssociationError::Reset);
-                } else if respond
-                    && (self.my_max_num_inbound_streams == 0
-                        || *id < self.my_max_num_inbound_streams)
-                {
-                    // A stream this side never sent or received on (a pre-negotiated data
-                    // channel left idle) has no state here, but the application still
-                    // holds it: report the reset, and reset the outgoing direction too.
-                    // An id past the negotiated stream count names no such channel.
-                    sis_to_reset.push(*id);
-                    self.events.push_back(Event::AssociationLost {
-                        reason: AssociationError::Reset,
-                        id: *id,
-                    });
-                }
-            }
-
-            if draining.is_empty() {
-                self.reconfig_requests
-                    .remove(&p.reconfig_request_sequence_number);
-                if !self
-                    .completed_reconfig_requests
-                    .contains(&p.reconfig_request_sequence_number)
-                {
-                    if self.completed_reconfig_requests.len() >= MAX_COMPLETED_RECONFIG_REQUESTS {
-                        self.completed_reconfig_requests.pop_front();
-                    }
-                    self.completed_reconfig_requests
-                        .push_back(p.reconfig_request_sequence_number);
-                }
-            } else {
-                debug!(
-                    "[{}] resetStream(): deferring reset of {:?}, application has not drained",
-                    self.side, draining
-                );
-                result = ReconfigResult::InProgress;
-                // Keep only the streams still waiting, so a retry performs each reset once.
-                self.reconfig_requests.insert(
-                    p.reconfig_request_sequence_number,
-                    ParamOutgoingResetRequest {
-                        stream_identifiers: draining,
-                        ..p.clone()
-                    },
-                );
-            }
-        } else {
-            debug!(
-                "[{}] resetStream(): senderLastTSN={} > peer_last_tsn={}",
-                self.side, p.sender_last_tsn, self.peer_last_tsn
-            );
-            result = ReconfigResult::InProgress;
-        }
-
-        // Answer incoming reset requests with the same reset request, but with
-        // reconfig_response_sequence_number.
-        if !sis_to_reset.is_empty() && self.reconfigs.len() >= MAX_OUTSTANDING_RECONFIGS {
-            debug!(
-                "[{}] resetStream(): not echoing reset of {:?}, {} requests unanswered",
-                self.side,
-                sis_to_reset,
-                self.reconfigs.len()
-            );
-        } else if !sis_to_reset.is_empty() {
-            let rsn = self.generate_next_rsn();
-            let tsn = self.my_next_tsn.wrapping_sub(1);
-
-            let c = ChunkReconfig {
-                param_a: Some(Box::new(ParamOutgoingResetRequest {
-                    reconfig_request_sequence_number: rsn,
-                    reconfig_response_sequence_number: p.reconfig_request_sequence_number,
-                    sender_last_tsn: tsn,
-                    stream_identifiers: sis_to_reset,
-                })),
-                ..Default::default()
-            };
-
-            self.reconfigs.insert(rsn, c.clone()); // store in the map for retransmission
-
-            let p = self.create_packet(vec![Box::new(c)]);
-            reply.push(p);
-        }
-
-        let packet = self.create_reconfig_response(p.reconfig_request_sequence_number, result);
-
-        debug!("[{}] RESET RESPONSE: {}", self.side, packet);
-
-        reply.push(packet);
-
-        Ok(())
-    }
-
-    /// Performs the stored reset requests whose sender's last TSN the cumulative TSN reached
-    /// since it stood at `prev_peer_last_tsn`.
-    fn reset_streams_reached_since(
-        &mut self,
-        prev_peer_last_tsn: u32,
-        reply: &mut Vec<Packet>,
-    ) -> Result<()> {
-        if self.peer_last_tsn == prev_peer_last_tsn || self.reconfig_requests.is_empty() {
-            return Ok(());
-        }
-        let peer_last_tsn = self.peer_last_tsn;
-        let reached: Vec<ParamOutgoingResetRequest> = self
-            .reconfig_requests
-            .values()
-            .filter(|p| {
-                sna32gt(p.sender_last_tsn, prev_peer_last_tsn)
-                    && sna32lte(p.sender_last_tsn, peer_last_tsn)
-            })
-            .cloned()
-            .collect();
-        for rst_req in reached {
-            self.reset_streams_if_any(&rst_req, false, reply)?;
-        }
-        Ok(())
-    }
-
-    fn create_reconfig_response(&self, rsn: u32, result: ReconfigResult) -> Packet {
-        self.create_packet(vec![Box::new(ChunkReconfig {
-            param_a: Some(Box::new(ParamReconfigResponse {
-                reconfig_response_sequence_number: rsn,
-                result,
-            })),
-            param_b: None,
-        })])
     }
 
     /// create_packet wraps chunks in a packet.
@@ -3699,7 +3777,12 @@ impl Association {
         let mut buf = BytesMut::with_capacity(
             COMMON_HEADER_SIZE as usize + CHUNK_HEADER_SIZE + chunk.value_length() + 3,
         );
-        Packet::write_framed(&common_header, std::iter::once(chunk), &mut buf)?;
+        Packet::write_framed_with(
+            &common_header,
+            std::iter::once(chunk),
+            &mut buf,
+            self.send_zero_checksum,
+        )?;
         Ok(buf.freeze())
     }
 
@@ -3719,6 +3802,8 @@ impl Association {
 
         s.generation = self.next_stream_generation;
         self.next_stream_generation = self.next_stream_generation.wrapping_add(1);
+        s.reassembly_queue.interleaved = self.use_interleaving;
+        self.pending_queue.forget_weight(stream_identifier);
 
         if accept {
             self.stream_queue.push_back(stream_identifier);
@@ -3808,10 +3893,29 @@ impl Association {
     /// false means the association should be closed down after the final send.
     fn gather_outbound(&mut self, now: Instant) -> (Vec<Bytes>, bool) {
         let mut raw_packets = vec![];
+        let state = self.state();
 
+        // RFC 9260 6.10, 12.4: control chunks share packets. The SACK that is due goes
+        // with them; if there are none it goes with outbound DATA (6.1), or alone.
+        let mut sack = None;
+        if self.ack_state == AckState::Immediate
+            && matches!(
+                state,
+                AssociationState::Established
+                    | AssociationState::ShutdownPending
+                    | AssociationState::ShutdownSent
+                    | AssociationState::ShutdownReceived
+            )
+        {
+            self.ack_state = AckState::Idle;
+            let chunk = self.create_selective_ack_chunk();
+            debug!("[{}] sending SACK: {}", self.side, chunk);
+            sack = Some(chunk);
+        }
         if !self.control_queue.is_empty() {
-            for p in self.control_queue.drain(..) {
-                if let Ok(raw) = p.marshal() {
+            let packets: Vec<Packet> = self.control_queue.drain(..).collect();
+            for p in self.bundle_control_packets(packets, &mut sack) {
+                if let Ok(raw) = self.marshal_packet(&p) {
                     raw_packets.push(raw);
                 } else {
                     warn!("[{}] failed to serialize a control packet", self.side);
@@ -3819,8 +3923,9 @@ impl Association {
                 }
             }
         }
+        self.unbundled_sack = sack;
+        self.first_data_packet = raw_packets.len();
 
-        let state = self.state();
         match state {
             AssociationState::Established => {
                 raw_packets = self.gather_data_packets_to_retransmit(raw_packets, now);
@@ -3863,7 +3968,7 @@ impl Association {
                 raw_packets = self.gather_outbound_forward_tsn_packets(raw_packets);
                 // Everything handed over is sent and acknowledged (a queue can also empty by
                 // abandonment, with no SACK to notice it): the shutdown proceeds.
-                if self.inflight_queue.is_empty() && self.pending_queue.is_empty() {
+                if self.nothing_left_to_send() {
                     if state == AssociationState::ShutdownPending {
                         self.send_shutdown();
                     } else if state == AssociationState::ShutdownReceived {
@@ -3903,7 +4008,7 @@ impl Association {
     ) -> Vec<Bytes> {
         // Pop unsent data chunks from the pending queue to send as much as
         // cwnd and rwnd allow.
-        let (chunks, sis_to_reset) = self.pop_pending_data_chunks_to_send(now);
+        let (chunks, resets) = self.pop_pending_data_chunks_to_send(now);
         if self.state() == AssociationState::Closed {
             return vec![];
         }
@@ -3913,66 +4018,60 @@ impl Association {
             self.timers
                 .start_if_idle(Timer::T3RTX, now, self.rto_mgr.get_rto());
 
-            self.bundle_data_chunks_into_packets(chunks, &mut raw_packets);
-        }
-
-        if !sis_to_reset.is_empty() || self.will_retransmit_reconfig {
-            if self.will_retransmit_reconfig {
-                self.will_retransmit_reconfig = false;
-                debug!(
-                    "[{}] retransmit {} RECONFIG chunk(s)",
-                    self.side,
-                    self.reconfigs.len()
-                );
-                for c in self.reconfigs.values() {
-                    let p = self.create_packet(vec![Box::new(c.clone())]);
-                    if let Ok(raw) = p.marshal() {
-                        raw_packets.push(raw);
-                    } else {
-                        warn!(
-                            "[{}] failed to serialize a RECONFIG packet to be retransmitted",
-                            self.side,
+            if self.pending_queue.one_stream_per_packet() {
+                // RFC 8260 3.3: only chunks of the same stream are bundled in a packet.
+                let mut run: Vec<ChunkPayloadData> = vec![];
+                for chunk in chunks {
+                    if run
+                        .last()
+                        .is_some_and(|last| last.stream_identifier != chunk.stream_identifier)
+                    {
+                        self.bundle_data_chunks_into_packets(
+                            std::mem::take(&mut run),
+                            &mut raw_packets,
                         );
                     }
+                    run.push(chunk);
                 }
+                self.bundle_data_chunks_into_packets(run, &mut raw_packets);
+            } else {
+                self.bundle_data_chunks_into_packets(chunks, &mut raw_packets);
             }
+        }
 
-            if !sis_to_reset.is_empty() {
-                let rsn = self.generate_next_rsn();
-                let tsn = self.my_next_tsn.wrapping_sub(1);
-                debug!(
-                    "[{}] sending RECONFIG: rsn={} tsn={} streams={:?}",
-                    self.side,
-                    rsn,
-                    self.my_next_tsn.wrapping_sub(1),
-                    sis_to_reset
-                );
-
-                let c = ChunkReconfig {
-                    param_a: Some(Box::new(ParamOutgoingResetRequest {
-                        reconfig_request_sequence_number: rsn,
-                        sender_last_tsn: tsn,
-                        stream_identifiers: sis_to_reset,
-                        ..Default::default()
-                    })),
-                    ..Default::default()
-                };
-                self.reconfigs.insert(rsn, c.clone()); // store in the map for retransmission
-
-                let p = self.create_packet(vec![Box::new(c)]);
-                if let Ok(raw) = p.marshal() {
+        // RFC 6525 5.1.1: the request in flight is sent again when its timer has expired.
+        if std::mem::take(&mut self.will_retransmit_reconfig) {
+            debug!(
+                "[{}] retransmit {} RECONFIG chunk(s)",
+                self.side,
+                self.reconfigs.len()
+            );
+            for c in self.reconfigs.values() {
+                let p = self.create_packet(vec![Box::new(c.clone())]);
+                if let Ok(raw) = self.marshal_packet(&p) {
                     raw_packets.push(raw);
                 } else {
                     warn!(
-                        "[{}] failed to serialize a RECONFIG packet to be transmitted",
-                        self.side
+                        "[{}] failed to serialize a RECONFIG packet to be retransmitted",
+                        self.side,
                     );
                 }
             }
+        }
 
-            if !self.reconfigs.is_empty() {
-                self.timers
-                    .start(Timer::Reconfig, now, self.rto_mgr.get_rto());
+        // The resets whose streams have sent what was queued before them become requests,
+        // and the next request goes out if none is in flight.
+        for marker in resets {
+            self.on_reset_marker_ready(marker);
+        }
+        while let Some(packet) = self.next_reconfig_request(now) {
+            if let Ok(raw) = self.marshal_packet(&packet) {
+                raw_packets.push(raw);
+            } else {
+                warn!(
+                    "[{}] failed to serialize a RECONFIG packet to be transmitted",
+                    self.side
+                );
             }
         }
 
@@ -4021,10 +4120,7 @@ impl Association {
                             fast_retrans_size = COMMON_HEADER_SIZE
                                 + to_fast_retrans
                                     .iter()
-                                    .map(|c| {
-                                        (DATA_CHUNK_HEADER_SIZE + c.user_data.len() as u32)
-                                            .next_multiple_of(4)
-                                    })
+                                    .map(|c| c.wire_size() as u32)
                                     .sum::<u32>();
                             i += 1;
                             continue;
@@ -4052,8 +4148,7 @@ impl Association {
                     // Padded wire size, the same accounting
                     // bundle_data_chunks_into_packets uses for bundle
                     // decisions.
-                    let data_chunk_size =
-                        (DATA_CHUNK_HEADER_SIZE + c.user_data.len() as u32).next_multiple_of(4);
+                    let data_chunk_size = c.wire_size() as u32;
                     if self.mtu < fast_retrans_size + data_chunk_size {
                         break;
                     }
@@ -4103,6 +4198,10 @@ impl Association {
                 );
             }
 
+            if !to_fast_retrans.is_empty() {
+                // RFC 9260 6.3.1 C5, as after a T3-rtx retransmission.
+                self.min_tsn2measure_rtt = self.my_next_tsn;
+            }
             for chunk in &mut to_fast_retrans {
                 if let Some(c) = self.inflight_queue.get_mut(chunk.tsn) {
                     c.nsent += 1;
@@ -4121,10 +4220,11 @@ impl Association {
     }
 
     fn gather_outbound_sack_packets(&mut self, mut raw_packets: Vec<Bytes>) -> Vec<Bytes> {
-        if self.ack_state == AckState::Immediate {
-            self.ack_state = AckState::Idle;
-            let sack = self.create_selective_ack_chunk();
-            debug!("[{}] sending SACK: {}", self.side, sack);
+        if let Some(sack) = self.unbundled_sack.take() {
+            // RFC 9260 6.1: "the endpoint SHOULD bundle the SACK with the outbound DATA".
+            if self.bundle_with_data(&sack, &mut raw_packets, self.first_data_packet) {
+                return raw_packets;
+            }
             if let Ok(raw) = self.marshal_control_chunk(&sack) {
                 raw_packets.push(raw);
             } else {
@@ -4147,8 +4247,23 @@ impl Association {
                 self.advanced_peer_tsn_ack_point,
                 self.cumulative_tsn_ack_point,
             ) {
-                let fwd_tsn = self.create_forward_tsn();
-                if let Ok(raw) = self.marshal_control_chunk(&fwd_tsn) {
+                // RFC 8260 2.3.1: with I-DATA the chunk is I-FORWARD-TSN.
+                // RFC 3758 3.5 F2: it goes with outbound DATA when a packet has room.
+                let first_data_packet = self.first_data_packet;
+                let raw = if self.use_interleaving {
+                    let fwd_tsn = self.create_i_forward_tsn();
+                    if self.bundle_with_data(&fwd_tsn, &mut raw_packets, first_data_packet) {
+                        return raw_packets;
+                    }
+                    self.marshal_control_chunk(&fwd_tsn)
+                } else {
+                    let fwd_tsn = self.create_forward_tsn();
+                    if self.bundle_with_data(&fwd_tsn, &mut raw_packets, first_data_packet) {
+                        return raw_packets;
+                    }
+                    self.marshal_control_chunk(&fwd_tsn)
+                };
+                if let Ok(raw) = raw {
                     raw_packets.push(raw);
                 } else {
                     warn!("[{}] failed to serialize a Forward TSN packet", self.side);
@@ -4176,7 +4291,7 @@ impl Association {
                 cumulative_tsn_ack: self.peer_last_tsn,
             };
 
-            if let Ok(raw) = self.create_packet(vec![Box::new(shutdown)]).marshal() {
+            if let Ok(raw) = self.marshal_packet(&self.create_packet(vec![Box::new(shutdown)])) {
                 self.timers
                     .start(Timer::T2Shutdown, now, self.rto_mgr.get_rto());
                 self.start_shutdown_guard(now);
@@ -4189,7 +4304,8 @@ impl Association {
 
             let shutdown_ack = ChunkShutdownAck {};
 
-            if let Ok(raw) = self.create_packet(vec![Box::new(shutdown_ack)]).marshal() {
+            if let Ok(raw) = self.marshal_packet(&self.create_packet(vec![Box::new(shutdown_ack)]))
+            {
                 self.timers
                     .start(Timer::T2Shutdown, now, self.rto_mgr.get_rto());
                 raw_packets.push(raw);
@@ -4201,9 +4317,8 @@ impl Association {
 
             let shutdown_complete = ChunkShutdownComplete::default();
 
-            if let Ok(raw) = self
-                .create_packet(vec![Box::new(shutdown_complete)])
-                .marshal()
+            if let Ok(raw) =
+                self.marshal_packet(&self.create_packet(vec![Box::new(shutdown_complete)]))
             {
                 raw_packets.push(raw);
                 ok = false;
@@ -4270,13 +4385,7 @@ impl Association {
                         .saturating_sub(self.inflight_queue.marked_for_retransmission_bytes())
                         + chunks.iter().map(|c| c.user_data.len()).sum::<usize>();
                     packet_size = COMMON_HEADER_SIZE as usize
-                        + chunks
-                            .iter()
-                            .map(|c| {
-                                (DATA_CHUNK_HEADER_SIZE as usize + c.user_data.len())
-                                    .next_multiple_of(4)
-                            })
-                            .sum::<usize>();
+                        + chunks.iter().map(|c| c.wire_size()).sum::<usize>();
                     i += 1;
                     continue;
                 }
@@ -4284,8 +4393,7 @@ impl Association {
                     break;
                 };
 
-                let wire =
-                    (DATA_CHUNK_HEADER_SIZE as usize + c.user_data.len()).next_multiple_of(4);
+                let wire = c.wire_size();
                 if single_packet && !chunks.is_empty() && packet_size + wire > self.mtu as usize {
                     chunks_remaining = true;
                     break;
@@ -4316,6 +4424,13 @@ impl Association {
         // Cleared once the whole in-flight window has been rescanned with nothing
         // left flagged; kept set while awnd/zero-window left chunks behind.
         self.t3_retransmit_pending = chunks_remaining;
+
+        // RFC 9260 6.3.1 C5: no round trip is measured with a TSN sent before this
+        // retransmission; an acknowledgement of it may be for either transmission of what
+        // was sent again.
+        if !chunks.is_empty() {
+            self.min_tsn2measure_rtt = self.my_next_tsn;
+        }
 
         // A later candidate can abandon an earlier fragment already selected
         // into this batch. Commit attempts only after whole-message retirement.
@@ -4366,8 +4481,13 @@ impl Association {
                 break;
             }
             let (unordered, si, ssn) = (c.unordered, c.stream_identifier, c.stream_sequence_number);
+            let (i_data, mid) = (c.i_data, c.mid);
             self.advanced_peer_tsn_ack_point = tsn;
-            self.note_abandoned_for_forward_tsn(unordered, si, ssn);
+            if i_data {
+                self.note_abandoned_for_i_forward_tsn(unordered, si, mid);
+            } else {
+                self.note_abandoned_for_forward_tsn(unordered, si, ssn);
+            }
             tsn = tsn.wrapping_add(1);
         }
         if sna32gt(
@@ -4377,6 +4497,7 @@ impl Association {
             self.will_send_forward_tsn = true;
         } else {
             self.fwd_tsn_stream_map.clear();
+            self.i_fwd_tsn_stream_map.clear();
         }
     }
 
@@ -4607,9 +4728,12 @@ impl Association {
     fn pop_pending_data_chunks_to_send(
         &mut self,
         now: Instant,
-    ) -> (Vec<ChunkPayloadData>, Vec<u16>) {
+    ) -> (Vec<ChunkPayloadData>, Vec<ResetMarker>) {
         let mut chunks = vec![];
-        let mut sis_to_reset = vec![]; // stream identifiers to reset
+        let mut resets = vec![]; // the stream resets whose turn has come
+        // RFC 6525 5.1.4 C2: while an SSN/TSN reset is under way no new DATA is sent. A
+        // message part sent is finished first: its fragments have consecutive TSNs.
+        let suspended = self.sending_suspended();
         if !self.pending_queue.is_empty() {
             self.decay_idle_congestion_window(now);
             // RFC 9260 6.1 D: with Max.Burst, cwnd is brought down to what is outstanding
@@ -4630,12 +4754,20 @@ impl Association {
             //      is 0), the data sender can always have one DATA chunk in flight to
             //      the receiver if allowed by cwnd (see rule B, below).
 
+            // What is sent now starts a new packet (RFC 8260 3.3, for the scheduler that
+            // gives a packet to one stream).
+            self.pending_queue.start_packet();
+            self.pending_queue.set_only_part_sent(suspended);
             loop {
+                if suspended && !self.pending_queue.is_mid_message() {
+                    break;
+                }
+                // A reset whose stream has sent what was written before it takes no window.
+                if !suspended && let Some(reset) = self.pending_queue.pop_ready_reset() {
+                    resets.push(reset);
+                    continue;
+                }
                 let Some(c) = self.pending_queue.peek() else {
-                    if let Some(reset) = self.pending_queue.pop_ready_reset() {
-                        sis_to_reset.push(reset.stream_identifier);
-                        continue;
-                    }
                     break;
                 };
                 let (beginning_fragment, unordered, data_len) =
@@ -4710,7 +4842,10 @@ impl Association {
             }
 
             // the data sender can always have one DATA chunk in flight to the receiver
-            if chunks.is_empty() && self.inflight_queue.is_empty() {
+            if chunks.is_empty()
+                && self.inflight_queue.is_empty()
+                && !(suspended && !self.pending_queue.is_mid_message())
+            {
                 // Send zero window probe
                 if let Some(c) = self.pending_queue.peek() {
                     let (beginning_fragment, unordered) = (c.beginning_fragment, c.unordered);
@@ -4731,7 +4866,7 @@ impl Association {
             }
         }
 
-        (chunks, sis_to_reset)
+        (chunks, resets)
     }
 
     /// bundle_data_chunks_into_packets packs DATA chunks into packets. It tries to bundle
@@ -4779,8 +4914,7 @@ impl Association {
             // deciding on raw payload sizes admitted bundles that marshalled
             // past the MTU (e.g. payloads of 1147 + 16 pass a payload-only
             // check at an MTU of 1191 but serialize to a 1208-byte packet).
-            let wire =
-                (DATA_CHUNK_HEADER_SIZE as usize + chunk.user_data.len()).next_multiple_of(4);
+            let wire = chunk.wire_size();
             // Close the current bundle before a chunk whose padded wire size
             // would push the datagram past the MTU.
             if bundle_len + wire > self.mtu as usize && i > bundle_start {
@@ -4797,10 +4931,11 @@ impl Association {
         // Second pass: marshal each datagram into the shared buffer.
         let mut buf = BytesMut::with_capacity(total_len);
         for (start, end) in bundles {
-            match Packet::write_framed(
+            match Packet::write_framed_with(
                 &common_header,
                 chunks[start..end].iter().map(|c| c as &dyn Chunk),
                 &mut buf,
+                self.send_zero_checksum,
             ) {
                 Ok(_) => {
                     let plen = buf.len();
@@ -5026,25 +5161,6 @@ impl Association {
         }
     }
 
-    /// Queues an outgoing stream-reset marker (RFC 6525). Its retransmission
-    /// timer starts when the RE-CONFIG request is emitted, not when queued.
-    pub(crate) fn send_reset_request(
-        &mut self,
-        _now: Instant,
-        stream_identifier: StreamId,
-    ) -> Result<()> {
-        let state = self.state();
-        if state != AssociationState::Established {
-            return Err(Error::ErrResetPacketInStateNotExist);
-        }
-
-        self.pending_queue
-            .push_reset(ResetMarker { stream_identifier });
-        self.awake_write_loop();
-
-        Ok(())
-    }
-
     /// Allocate an identity before consuming input or changing stream state.
     pub(crate) fn allocate_message_id(&mut self) -> Result<MessageId> {
         let state = self.state();
@@ -5076,6 +5192,14 @@ impl Association {
     /// This is used only by testing.
     pub(crate) fn buffered_amount(&self) -> usize {
         self.pending_queue.get_num_bytes() + self.inflight_queue.get_num_bytes()
+    }
+
+    /// Whether everything the application handed over has been sent and acknowledged
+    /// (RFC 9260 9.2), messages held for a stream reset included.
+    fn nothing_left_to_send(&self) -> bool {
+        self.inflight_queue.is_empty()
+            && self.pending_queue.is_empty()
+            && self.held_write_count == 0
     }
 
     fn awake_write_loop(&self) {
@@ -5195,6 +5319,13 @@ impl Association {
             }
 
             Timer::Reconfig => {
+                // RFC 6525 5.1.1: an expiry counts against the association and the path,
+                // and past the retransmission limit the association ends. 5.2.7 H2: not the
+                // expiry that follows an "In progress" answer, which only says the peer is
+                // not done yet.
+                if !std::mem::take(&mut self.reconfig_in_progress) && self.on_path_failure() {
+                    return;
+                }
                 self.will_retransmit_reconfig = true;
                 self.awake_write_loop();
             }

@@ -1570,9 +1570,8 @@ impl RTCPeerConnection {
             // RFC 8841 section 5.1: a data section without a valid `a=sctp-port` is invalid.
             validate_application_media_section(&parsed)?;
             // So is a description whose DTLS attributes are malformed (RFC 8122 section 5,
-            // RFC 4145 section 4, RFC 8842 sections 4 and 5.1), or that has media sections
-            // on a DTLS transport that cannot key SRTP (RFC 8827 section 6.5).
-            validate_dtls_attributes(&parsed)?;
+            // RFC 4145 section 4, RFC 8842 sections 4 and 5.1).
+            validate_dtls_attributes(&parsed, self.setting_engine.accept_lowercase_fingerprints)?;
             // RFC 8122 section 5: a certificate is verified with the most preferred hash
             // function the peer offers; MD5, MD2 and functions the crypto provider lacks are
             // never used. A description that offers nothing else cannot be verified at all.
@@ -1587,15 +1586,6 @@ impl RTCPeerConnection {
                 .is_none()
             {
                 return Err(Error::ErrUnsupportedFingerprintAlgorithm);
-            }
-            if has_rtp_media(&parsed) {
-                let dtls_transport = self.dtls_transport();
-                if !dtls_transport.use_srtp
-                    || (dtls_transport.state() == RTCDtlsTransportState::Connected
-                        && dtls_transport.srtp_negotiated == Some(false))
-                {
-                    return Err(Error::ErrSessionDescriptionMediaWithoutSrtp);
-                }
             }
             remote_description.parsed = Some(parsed);
         }
@@ -2043,6 +2033,10 @@ impl RTCPeerConnection {
                 };
 
                 let remote_tls_id = extract_tls_id(parsed_remote_description)?;
+                // A session with media sections needs SRTP keys from the association: it is
+                // set up with `use_srtp`, and one that was not is replaced (RFC 5764 section
+                // 4.1).
+                self.dtls_transport_mut().srtp_required = has_rtp_media(parsed_remote_description);
 
                 // After the transport was closed, the description that sets one up again starts
                 // a new ICE session even when the peer keeps its ICE credentials: some browsers
@@ -2133,9 +2127,6 @@ impl RTCPeerConnection {
                     )?;
                     self.dtls_transport_mut().remote_tls_id = remote_tls_id;
                 }
-
-                // A session with media sections needs SRTP keys from the association.
-                self.dtls_transport_mut().srtp_required = has_rtp_media(parsed_remote_description);
             }
 
             if is_final_answer

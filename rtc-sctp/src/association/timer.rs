@@ -33,10 +33,12 @@ pub struct TimerConfig {
     /// RTO.Max that is about five minutes without an answer. `usize::MAX` never gives up and
     /// leaves the failure of the path to whatever runs underneath (ICE consent, for WebRTC).
     pub max_t3_rtx_retrans: usize,
-    /// How many times a RE-CONFIG request (stream reset) is retransmitted with its timer
-    /// doubling. Past it the request is not given up (RFC 6525 5.1.1: it is retransmitted
-    /// until it is answered): it goes on at the interval reached, at most RTO.Max. An
-    /// association whose peer has gone ends by its other limits.
+    /// Not a limit of its own any more: a RE-CONFIG request (RFC 6525 5.1.1) is retransmitted
+    /// until it is answered, its timer doubling up to RTO.Max, and each expiry that does not
+    /// follow an "In progress" answer counts toward
+    /// [`max_t3_rtx_retrans`](Self::max_t3_rtx_retrans), as an unanswered HEARTBEAT does.
+    /// Past that limit the association ends with
+    /// [`AssociationError::TimedOut`](crate::AssociationError::TimedOut).
     pub max_reconfig_retrans: usize,
     /// How many times a delayed SACK may be retransmitted.
     pub max_ack_retrans: usize,
@@ -215,6 +217,8 @@ impl TimerTable {
 const RTO_INITIAL: u64 = 1000; // msec
 const RTO_MIN: u64 = 1000; // msec
 const RTO_MAX: u64 = 60000; // msec
+/// G of RFC 9260 6.3.1: the granularity of the clock, in milliseconds.
+const CLOCK_GRANULARITY: f64 = 1.0;
 const RTO_ALPHA: u64 = 1;
 const RTO_BETA: u64 = 2;
 const RTO_BASE: u64 = 8;
@@ -254,6 +258,12 @@ impl RtoManager {
                 + RTO_BETA as f64 * (self.srtt as i64 - rtt as i64).abs() as f64)
                 / RTO_BASE as f64;
             self.srtt = ((RTO_BASE - RTO_ALPHA) * self.srtt + RTO_ALPHA * rtt) / RTO_BASE;
+        }
+
+        // RFC 9260 6.3.1 G1: "Whenever RTTVAR is computed, if RTTVAR == 0, then adjust
+        // RTTVAR <- G", the clock granularity: a millisecond here.
+        if self.rttvar == 0.0 {
+            self.rttvar = CLOCK_GRANULARITY;
         }
 
         self.rto = (self.srtt + (4.0 * self.rttvar) as u64).clamp(RTO_MIN, RTO_MAX);

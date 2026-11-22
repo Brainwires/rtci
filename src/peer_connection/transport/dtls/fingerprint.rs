@@ -176,10 +176,15 @@ pub(crate) fn format_fingerprint(digest: &[u8]) -> String {
 /// `hash-func SP 2UHEX *(":" 2UHEX)`.
 ///
 /// The value must be colon-separated bytes of two hex digits each, and for a hash function
-/// RFC 8122 defines, as many bytes as its digest has. Lower-case hex digits are accepted (some
-/// stacks write them; the comparison is on the bytes). A fingerprint of a hash function this
-/// endpoint does not know is kept, syntax-checked, and never matches a certificate.
-pub(crate) fn parse_fingerprint_attribute(value: &str) -> Result<RTCDtlsFingerprint> {
+/// RFC 8122 defines, as many bytes as its digest has. The hex digits are upper-case (`UHEX`);
+/// `accept_lowercase` also reads lower-case ones, as browsers do
+/// (`SettingEngineBuilder::with_lowercase_fingerprints_accepted`). A fingerprint of a hash
+/// function this endpoint does not know is kept, syntax-checked, and never matches a
+/// certificate.
+pub(crate) fn parse_fingerprint_attribute(
+    value: &str,
+    accept_lowercase: bool,
+) -> Result<RTCDtlsFingerprint> {
     let mut parts = value.split(' ');
     let (Some(algorithm), Some(fingerprint), None) = (parts.next(), parts.next(), parts.next())
     else {
@@ -194,7 +199,12 @@ pub(crate) fn parse_fingerprint_attribute(value: &str) -> Result<RTCDtlsFingerpr
     }
     let mut bytes = 0;
     for byte in fingerprint.split(':') {
-        if byte.len() != 2 || !byte.bytes().all(|b| b.is_ascii_hexdigit()) {
+        let is_hex = |b: u8| {
+            b.is_ascii_digit()
+                || (b'A'..=b'F').contains(&b)
+                || (accept_lowercase && (b'a'..=b'f').contains(&b))
+        };
+        if byte.len() != 2 || !byte.bytes().all(is_hex) {
             return Err(Error::ErrSessionDescriptionInvalidFingerprint);
         }
         bytes += 1;
@@ -249,27 +259,33 @@ mod tests {
     /// bytes, as many as the function's digest has.
     #[test]
     fn a_fingerprint_attribute_is_parsed_by_its_abnf() {
-        let parsed = parse_fingerprint_attribute(&format!("sha-256 {SHA256}")).unwrap();
+        let parsed = parse_fingerprint_attribute(&format!("sha-256 {SHA256}"), false).unwrap();
         assert_eq!(parsed.algorithm, "sha-256");
         assert_eq!(parsed.value, SHA256);
         for (name, _, len) in FINGERPRINT_HASHES {
             assert!(
-                parse_fingerprint_attribute(&format!("{name} {}", hex(len))).is_ok(),
+                parse_fingerprint_attribute(&format!("{name} {}", hex(len)), false).is_ok(),
                 "{name}"
             );
             for wrong in [len - 1, len + 1] {
                 assert_eq!(
-                    parse_fingerprint_attribute(&format!("{name} {}", hex(wrong))),
+                    parse_fingerprint_attribute(&format!("{name} {}", hex(wrong)), false),
                     Err(Error::ErrSessionDescriptionInvalidFingerprint),
                     "{name} with {wrong} bytes"
                 );
             }
         }
-        // The name is case-insensitive, lower-case hex is read, and an unknown function's
-        // fingerprint is kept (it is never matched).
-        assert!(parse_fingerprint_attribute(&format!("SHA-256 {}", SHA256.to_lowercase())).is_ok());
-        assert!(parse_fingerprint_attribute("sha3-256 AB:CD").is_ok());
-        assert!(parse_fingerprint_attribute(&format!("md5 {}", hex(16))).is_ok());
+        // The name is case-insensitive, lower-case hex is read only on request, and an
+        // unknown function's fingerprint is kept (it is never matched).
+        let lowercase = format!("SHA-256 {}", SHA256.to_lowercase());
+        assert_eq!(
+            parse_fingerprint_attribute(&lowercase, false),
+            Err(Error::ErrSessionDescriptionInvalidFingerprint),
+            "UHEX is upper-case"
+        );
+        assert!(parse_fingerprint_attribute(&lowercase, true).is_ok());
+        assert!(parse_fingerprint_attribute("sha3-256 AB:CD", false).is_ok());
+        assert!(parse_fingerprint_attribute(&format!("md5 {}", hex(16)), false).is_ok());
     }
 
     #[test]
@@ -293,7 +309,7 @@ mod tests {
             "sha3-256 ",
         ] {
             assert_eq!(
-                parse_fingerprint_attribute(value),
+                parse_fingerprint_attribute(value, true),
                 Err(Error::ErrSessionDescriptionInvalidFingerprint),
                 "{value:?}"
             );

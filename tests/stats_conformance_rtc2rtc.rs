@@ -1530,7 +1530,14 @@ fn a_candidate_pairs_counters_are_the_checks_and_the_payload_on_the_wire() -> Re
             .filter(|d| d.from == other && d.class != Class::Stun)
             .filter(arrived)
             .collect();
-        assert_eq!(u(pair, "packetsSent"), sent.len() as u64);
+        assert_eq!(
+            u(pair, "packetsSent"),
+            sent.len() as u64,
+            "peer {i}: the payload datagrams it sent, as (ms after the first, kind, bytes): {:?}",
+            sent.iter()
+                .map(|d| (millis(d.at - sent[0].at) as u64, d.class, d.len))
+                .collect::<Vec<_>>()
+        );
         assert_eq!(
             u(pair, "bytesSent"),
             sent.iter().map(|d| d.len as u64).sum::<u64>()
@@ -2429,8 +2436,9 @@ fn a_candidate_reports_what_it_was_gathered_as() -> Result<()> {
         ufrag[1].as_str()
     );
 
-    // webrtc-stats 8.21: the pair in use succeeded; the checks toward the candidates nobody
-    // answers at were given up, and those pairs failed.
+    // webrtc-stats 8.21: the pair in use succeeded and is the selected one; the pairs toward
+    // the candidates nobody answers at did not, whichever check list state the agent left
+    // them in when it stopped checking.
     world.run_for(Duration::from_secs(5))?;
     let now = world.now;
     let answerer = world.peers[1].stats(now);
@@ -2445,18 +2453,17 @@ fn a_candidate_reports_what_it_was_gathered_as() -> Result<()> {
         assert_eq!(pair["id"] == *selected, reachable, "{pair}");
         if reachable {
             assert_eq!(pair["state"], "succeeded", "{pair}");
-            continue;
-        }
-        assert_eq!(u(pair, "responsesReceived"), 0, "{pair}");
-        assert!(!has(pair, "currentRoundTripTime"), "{pair}");
-        // A pair that was checked and never answered failed; one the agent never got to
-        // check is still waiting: the UDP candidate against the TCP one, and every pair the
-        // checklist had not reached when the nominated pair completed it (RFC 8445 section
-        // 8.1.2 stops the checks then).
-        if u(pair, "requestsSent") >= 1 {
-            assert_eq!(pair["state"], "failed", "{pair}");
+            assert_eq!(pair["nominated"], true, "{pair}");
         } else {
-            assert_eq!(pair["state"], "waiting", "{pair}");
+            let state = pair["state"].as_str().expect("a state");
+            assert!(
+                ["frozen", "waiting", "in-progress", "failed"].contains(&state),
+                "{pair}"
+            );
+            assert_eq!(pair["nominated"], false, "{pair}");
+            assert_eq!(u(pair, "responsesReceived"), 0, "{pair}");
+            assert_eq!(u(pair, "packetsSent"), 0, "{pair}");
+            assert!(!has(pair, "currentRoundTripTime"), "{pair}");
         }
     }
     Ok(())

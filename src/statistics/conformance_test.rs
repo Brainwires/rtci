@@ -432,6 +432,16 @@ fn remote_outbound_round_trip_time_is_the_latest_sender_reports() {
     stats.on_rtcp_received(&[sr(), dlrr(0, ten_ms)], t0 + Duration::from_millis(3060));
     assert_eq!(rtt(&stats), (None, 1));
 
+    // The block may stand before the sender report in the compound packet: it is that
+    // report's all the same.
+    stats.on_rtcp_received(
+        &[dlrr(0x1234_0000, ten_ms), sr()],
+        t0 + Duration::from_millis(3560),
+    );
+    let (measured, count) = rtt(&stats);
+    assert!((measured.expect("measured") - 3.550).abs() < 0.0001);
+    assert_eq!(count, 2);
+
     // And a good one measures again.
     stats.on_rtcp_received(
         &[sr(), dlrr(0x1234_0000, ten_ms)],
@@ -439,7 +449,7 @@ fn remote_outbound_round_trip_time_is_the_latest_sender_reports() {
     );
     let (measured, count) = rtt(&stats);
     assert!((measured.expect("measured") - 4.050).abs() < 0.0001);
-    assert_eq!(count, 2);
+    assert_eq!(count, 3);
 }
 
 /// webrtc-stats 8.11: a media source "exists from the time a track is attached to a sender

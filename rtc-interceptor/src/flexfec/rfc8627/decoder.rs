@@ -314,6 +314,18 @@ impl FlexFecDecoder {
                         return Vec::new();
                     }
                     let base = buffer.extend(block.sn_base);
+                    // A block that lies wholly outside what this stream's buffer can hold (too
+                    // far behind the newest packet, or too far ahead of it) repairs nothing the
+                    // decoder still has or is about to get: it is not kept, and nothing is
+                    // rebuilt out there.
+                    if let Some(highest) = buffer.highest {
+                        let window = self.config.max_source_packets as i64;
+                        let end = base + i64::from(block.span());
+                        if end <= highest - window || base > highest + window {
+                            self.stats.ignored_repair_packets += 1;
+                            return Vec::new();
+                        }
+                    }
                     // A repair packet ahead of every source packet of its stream anchors the
                     // numbering, so the sources that follow are placed against it.
                     buffer.highest.get_or_insert(base);

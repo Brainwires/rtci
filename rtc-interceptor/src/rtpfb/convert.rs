@@ -7,7 +7,7 @@
 use super::acknowledgement::Acknowledgement;
 use rtcp::transport_feedbacks::cc_feedback_report::{CcFeedbackReport, Ecn};
 use rtcp::transport_feedbacks::transport_layer_cc::{
-    PacketStatusChunk, SymbolTypeTcc, TransportLayerCc,
+    PacketStatusChunk, ReferenceTimeUnwrapper, SymbolTypeTcc, TransportLayerCc,
 };
 use std::collections::HashMap;
 use std::time::Duration;
@@ -79,16 +79,16 @@ impl WrappingCounter {
 /// its arrivals days before the previous report's.
 ///
 /// One per connection, fed every report in the order it is read.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct FeedbackTimeline {
-    twcc_reference: WrappingCounter,
+    twcc_reference: ReferenceTimeUnwrapper,
     ccfb_timestamp: WrappingCounter,
 }
 
 impl Default for FeedbackTimeline {
     fn default() -> Self {
         Self {
-            twcc_reference: WrappingCounter::new(24),
+            twcc_reference: ReferenceTimeUnwrapper::new(),
             ccfb_timestamp: WrappingCounter::new(32),
         }
     }
@@ -103,10 +103,12 @@ impl FeedbackTimeline {
     /// Convert a TWCC feedback packet, placing its arrivals after those of the reports before
     /// it.
     pub fn convert_twcc(&mut self, feedback: &TransportLayerCc) -> Vec<Acknowledgement> {
-        let ticks = self.twcc_reference.extend(feedback.reference_time);
+        // Signed ticks from the receiver's own origin; one period is added so a reference time
+        // that starts negative, or steps back a little, stays a non-negative duration.
+        let ticks = self.twcc_reference.unwrap(feedback.reference_time) + (1i64 << 24);
         twcc_acknowledgements(
             feedback,
-            Duration::from_millis(ticks * TWCC_REFERENCE_TICK.as_millis() as u64),
+            Duration::from_millis(ticks.max(0) as u64 * TWCC_REFERENCE_TICK.as_millis() as u64),
         )
     }
 

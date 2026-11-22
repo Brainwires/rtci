@@ -125,6 +125,12 @@ fn create_rtc_peer_with_mdns(
     is_answerer: bool,
 ) -> Result<RtcPeerConnection> {
     let mut builder = SettingEngineBuilder::new()
+        // The webrtc 0.17 peer fails its DTLS transport when no SRTP profile was negotiated
+        // (pion lineage: `ErrNoSRTPProtectionProfile`), data channels only or not. The rtc peer
+        // answers here, so it is the DTLS client: under the RFC 5764 section 4.1 default it
+        // would offer no `use_srtp` on this data-channel-only session and the peer would never
+        // connect. So this peer offers it on every association, as browsers do.
+        .with_dtls_use_srtp_on_every_association(true)
         .with_answering_dtls_role(if is_answerer {
             RTCDtlsRole::Client
         } else {

@@ -28,7 +28,13 @@ fn pending_reset_waits_for_the_fragment_tail() -> Result<()> {
         a.cwnd = u32::MAX;
         let (tail, resets) = a.pop_pending_data_chunks_to_send(now);
         assert_eq!(2, tail.len());
-        assert_eq!(vec![1], resets);
+        assert_eq!(
+            vec![1],
+            resets
+                .iter()
+                .map(|r| r.stream_identifier)
+                .collect::<Vec<_>>()
+        );
         assert!(tail[1].ending_fragment);
         assert_eq!(head[0].tsn.wrapping_add(1), tail[0].tsn);
         assert_eq!(tail[0].tsn.wrapping_add(1), tail[1].tsn);
@@ -44,7 +50,13 @@ fn pending_reset_waits_for_the_fragment_tail() -> Result<()> {
     a.send_reset_request(now, 2)?;
     let (data, resets) = a.pop_pending_data_chunks_to_send(now);
     assert!(data.is_empty());
-    assert_eq!(vec![2], resets);
+    assert_eq!(
+        vec![2],
+        resets
+            .iter()
+            .map(|r| r.stream_identifier)
+            .collect::<Vec<_>>()
+    );
     assert_eq!(next_tsn, a.my_next_tsn);
     assert!(a.pending_queue.is_empty());
     Ok(())

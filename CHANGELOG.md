@@ -22,6 +22,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   extension for video (`configure_default_header_extensions`): descriptions carry three more
   `a=extmap` lines.
 
+- **dtls**: `use_srtp` follows RFC 5764 section 4.1 by default: the DTLS client offers it only
+  when the session has an audio or video section. A data-channel-only session is set up
+  without it, and when it gains a media section a new DTLS association with `use_srtp`
+  replaces it (the offer carries a new `a=tls-id`, RFC 8842 section 5.5; the DTLS roles are
+  kept). Offering it on every association, as browsers and the engine until now did, is
+  `SettingEngineBuilder::with_dtls_use_srtp_on_every_association(true)`: set it for a peer that
+  fails an association without an SRTP profile (pion-lineage stacks) or that does not act on
+  `tls-id` when media is added later (browsers). The earlier, never released, setting to turn
+  `use_srtp` off and the error for media on an association without SRTP keys are gone.
+- **sdp**: a remote `a=fingerprint` with lower-case hex digits is refused (RFC 8122 section 5:
+  `UHEX`); `SettingEngineBuilder::with_lowercase_fingerprints_accepted(true)` reads it, as
+  browsers do.
+- **dtls**: an `rtc-dtls` server that shares no SRTP profile with the client leaves `use_srtp`
+  out and the association falls back to DTLS without SRTP (RFC 5764 section 4.1.1, SHOULD); it
+  aborted with `ErrServerNoMatchingSrtpProfile`. `ConfigBuilder::with_use_srtp_required(true)`
+  keeps the alert; the peer connection sets it for a session with a media section.
+- **dtls**: a new association asked for by an `actpass` description keeps the DTLS roles (it
+  chose them anew from the configuration and the ICE role); only a transport that was closed
+  chooses again.
 - **rtcp**: `configure_rtcp_reports` (and so `register_default_interceptors`) builds the RTCP
   session with a `T_rr_interval` of zero, the RFC 4585 section 4.2 default when no `trr-int`
   is signalled: regular reports are spaced by the RTCP bandwidth (5% of the session's, RFC
@@ -380,7 +399,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   video section (RFC 5764 section 4.1). As the DTLS server the engine left its transport in
   `connecting`; as the client it aborted the handshake. A session with a media section still
   needs it: the transport fails, and a description that adds media to an association without
-  SRTP keys is refused (`ErrSessionDescriptionMediaWithoutSrtp`).
+  SRTP keys gets a new association with them.
 - **dtls**: a certificate is verified with any fingerprint hash function of RFC 8122 section 5
   (sha-256, sha-512, sha-384, sha-224, sha-1; never md5 or md2), using the most preferred one
   the peer offers. Only sha-256 was compared, so a peer that gave another one could not connect.
@@ -457,6 +476,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (scaled by the response time), and back to multiplicative increase when the received rate
   rises above them; the controller stayed additive for ever after the first over-use. It starts
   in the Increase state.
+- **gcc**: the loss-based estimate is held at or below the delay-based one
+  (draft-ietf-rmcat-gcc-02 section 6). Left free it grew 5% per interval whenever loss was
+  under 2%, to several times the rate being sent, and a loss episode was absorbed by the
+  inflated estimate before the target moved. `Gcc::with_loss_estimate_capped_by_delay_estimate(false)`
+  keeps the old behaviour.
+- **fec**: the ULPFEC encoder protects the packets as sent, in RED carriage and as a separate
+  stream (`UlpfecSendInterceptor::wire_tap`). With the tap, a media packet gets its wire
+  sequence number and RED wrapping as it passes the encoder, the sequence numbers its block's
+  FEC packets will take are set aside there, and the FEC is computed from the wire images when
+  the block's last packet has left and sent in those numbers: no gap and no duplicate on the
+  media stream, and a FEC packet may leave a few packets after its number when a pacer holds
+  media in between. A media packet dropped before the wire does not stall the encoder.
+- **fec decoders**: the ULPFEC decoder keeps no state for, and rebuilds nothing at, a sequence
+  number its window does not cover (a mask reaches 47 packets past an SN base at the window's
+  edge); the RFC 8627 decoder ignores a repair packet whose block lies wholly outside what the
+  stream's buffer holds.
+- **fec**: the RFC 8627 encoder protects the packets as sent too
+  (`FlexFecSendInterceptor::wire_tap`), and keeps the wire image for its retransmissions.
+- **cc**: TMMBR is read from, and TMMBN written as, the typed packets of `rtc-rtcp`
+  (`TemporaryMaximumBitrateRequest` / `Notification`); the raw form is still read.
+- **circuit breaker**: with the RTCP session wire-ward of it the breaker sees no sender report
+  leave and could not measure a round trip time, so its congestion breaker could never trip.
+  It now takes the round trip time the congestion controller measures
+  (`CircuitBreakerHandle::report_round_trip_time`).
+- **gcc**: the missing-feedback timeout follows the receiver's own feedback rhythm (three of
+  its intervals when that is more than 500 ms, and not before two reports have shown one): a
+  receiver that holds its feedback to the RTCP bandwidth is not a receiver gone silent.
+- **twcc**: `FeedbackTimeline` and `GccInterceptor` follow the reference time with
+  `rtcp`'s `ReferenceTimeUnwrapper`; `GccInterceptor` read it raw and jumped 12.4 days at the
+  wrap.
 - **pacer**: the pacer starts at the estimator's rate. `configure_congestion_control` builds it
   with the estimator's starting target, and `CongestionControlInterceptor` announces the target
   on the first inbound packet, not only when it changes; the pacer ran at 1 Mbit/s against
@@ -469,6 +518,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the offset, not the offset. `Rfc8888Interceptor` reports only streams bound with `ack ccfb`
   in `rtcp_feedback`. `History::take_reports` returns only packets a feedback described.
   `RateControlState::default()` is `Increase`.
+- **defaults**: `register_default_interceptors` adds congestion control, a pacer and the RTP
+  circuit breaker. Media written faster than the estimate (300 kbit/s until feedback raises
+  it) is queued by the pacer and released on `handle_timeout`, outgoing packets carry the
+  transport-cc extension, and a flow whose receiver sends no RTCP for 15 s stops. An
+  application that relied on the old set calls
+  `register_default_interceptors_without_congestion_control`.
+- **pacer**: the derived burst is 5 ms of the target instead of 100 ms; `with_burst_bits` still
+  pins one.
 
 - **stats**: report ids are opaque: `report.get("RTCPeerConnection")` and ids built from an
   SSRC no longer find anything; use the typed accessors or follow a reference.
@@ -483,6 +540,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`DecoderStatsUpdate`, `AudioReceiverStatsUpdate`, `EncoderStatsUpdate`) have new fields.
 - **stats**: the id an application passes to `update_audio_playout_stats` is no longer the
   `media-playout` object's id in the report; an inbound stream's `playoutId` names it.
+
+- **sctp**: `PayloadProtocolIdentifier::Unknown` is sent as 0 ("not specified", RFC 9260
+  section 3.3.1), not 58. `Chunks` has a new public field, `ppid`.
+- **sctp**: `Stream::write*` with an empty message returns an error.
+- **sctp**: `Association::open_stream` fails for a stream id at or past the negotiated
+  outbound stream count.
+- **sctp**: `TimerConfig::default().max_t2_shutdown_retrans` is 10, not unlimited.
+- **sctp**: `TimerConfig::default().max_t3_rtx_retrans` is 10, not unlimited: an association
+  whose peer answers nothing for about five minutes ends with `TimedOut`. `usize::MAX` keeps
+  the old behaviour.
+- **sctp**: an established association sends HEARTBEATs when idle and so always has a timer
+  running; `with_heartbeat_interval(None)` turns them off.
+- **sctp**: slow start grows the congestion window by one packet per SACK, as the RFC has
+  it, not by everything the SACK acknowledges. A receiver that acknowledges many packets with
+  one SACK slows the sender's ramp; `with_slow_start_growth_limit` sets a larger L.
+- **sctp**: the retransmissions after a timeout are paced by the congestion window (one
+  packet, then slow start) instead of leaving at once.
+- **sctp**: a SACK for a TSN never sent, and an INIT ACK without a State Cookie, end the
+  association with an ABORT (`TransportError`, `HandshakeFailed`).
+
+- **sctp**: Max.Burst is 4 by default (RFC 9260 sections 6.1 D and 16);
+  `TransportConfig::with_max_burst(None)` restores the unlimited burst.
+- **sctp**: `rtc-sctp` depends on `rtc-crypto` (the traits only, no backend).
+  `ServerConfig` no longer derives `Debug` (it implements it).
+- **sctp**: `Stream::stop` and `close` return an error when the peer did not announce
+  RE-CONFIG; `TimerConfig::max_reconfig_retrans` is no longer a limit of its own.
+- **sctp**: `PayloadProtocolIdentifier::Unknown` is sent as 0 ("not specified", RFC 9260
+  section 3.3.1), not 58. `Chunks` has a new public field, `ppid`.
+- **sctp**: `Stream::write*` with an empty message returns an error.
+- **sctp**: `Association::open_stream` fails for a stream id at or past the negotiated
+  outbound stream count.
+- **sctp**: `TimerConfig::default().max_t2_shutdown_retrans` is 10, not unlimited.
+- **sctp**: `TimerConfig::default().max_t3_rtx_retrans` is 10, not unlimited: an association
+  whose peer answers nothing for about five minutes ends with `TimedOut`. `usize::MAX` keeps
+  the old behaviour.
+- **sctp**: an established association sends HEARTBEATs when idle and so always has a timer
+  running; `with_heartbeat_interval(None)` turns them off.
+- **sctp**: slow start grows the congestion window by one packet per SACK, as the RFC has
+  it, not by everything the SACK acknowledges. A receiver that acknowledges many packets with
+  one SACK slows the sender's ramp; `with_slow_start_growth_limit` sets a larger L.
+- **sctp**: the retransmissions after a timeout are paced by the congestion window (one
+  packet, then slow start) instead of leaving at once.
+- **sctp**: a SACK for a TSN never sent, and an INIT ACK without a State Cookie, end the
+  association with an ABORT (`TransportError`, `HandshakeFailed`).
 
 ### Security
 
@@ -568,7 +669,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   client, which asked for SRTP, is the one that aborts (`ErrRequestedButNoSrtpExtension`)
   unless built with `with_use_srtp_optional`.
 - **sdp**: errors `ErrSessionDescriptionInvalidSetup`, `ErrSessionDescriptionInvalidTlsId`,
-  `ErrSessionDescriptionMediaWithoutSrtp`, `ErrInvalidIdentityAssertion`.
+  `ErrInvalidIdentityAssertion`.
 - **rtp**: a two-byte header-extension block is parsed whatever its appbits (RFC 8285 section
   4.3). Only the exact profile `0x1000` selected the two-byte parser; `0x1001` to `0x100F` came
   back as one opaque element with ID 0, so MID, RID and the transport-wide number in it were not
@@ -682,6 +783,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ALTERNATE-SERVER. Every received message now goes through `rtc_stun::validated::Validator`
   and the handlers read the validated message only. The same holds for indications: nothing
   after an integrity attribute in a Data or ConnectionAttempt indication is read.
+- **turn**: an XOR-RELAYED-ADDRESS of 0.0.0.0:0 in an Allocate success response is passed
+  over. coturn 4.6 sends one beside the real address when it refused the same client another
+  address family before (an IPv6 request answered 440, then an IPv4 one): the client took the
+  two for a family mismatch, deleted the allocation and refused to allocate again.
+- **test-env**: three expectations of `tests/testenv_turn_client.rs` that coturn 4.6.1 does
+  not meet are corrected: it ignores ADDITIONAL-ADDRESS-FAMILY (comprehension-optional; one
+  IPv4 address comes back), its 441 to a Refresh under another username carries no integrity
+  the client can verify (RFC 8489 section 9.2.5 has the client discard it; the test is now
+  `a_refresh_under_another_username_is_not_accepted`), and its Allocate after a 440 carries
+  the all-zero address above.
 - **turn**: a response of another method than its request's no longer ends the transaction. An
   Allocate success response carrying the transaction id of an outstanding Binding request
   removed the transaction and raised no event, so the caller waited for ever.
@@ -704,6 +815,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   section it names, for such a stream. The MID header extension is read when RtpStreamId is
   not negotiated; it was ignored then.
 
+- **congestion control is on by default** (RFC 8834 section 7). `register_default_interceptors`
+  now installs `Gcc` over the receiver's TWCC or RFC 8888 feedback, the pacer that releases
+  media at its target, the TWCC sender, and the RTP circuit breaker.
+  `register_default_interceptors_with_handles` also returns the handles
+  (`DefaultInterceptorHandles`); `register_default_interceptors_without_congestion_control` is
+  the explicit opt-out and is the set the default used to be. The fork's pull-style `GccHandle`
+  / `GccInterceptor` stays: placed in `Slot::CongestionControl` it replaces the default
+  estimator, and it now announces its estimate so the default pacer follows it.
+- **RTP circuit breaker** (RFC 8083; RFC 8834 section 7.1): `CircuitBreakerInterceptor` at the
+  new `Slot::CircuitBreaker`, with all four breakers (RTCP timeout, media timeout, congestion
+  against ten times the TCP throughput, media usability), ceasing transmission per flow or per
+  group, the optional reduction by ten before ceasing, and restart only on request and not
+  before the triggering interval (`CircuitBreakerHandle`). `configure_circuit_breaker` installs
+  it on its own.
+- **external limits on the estimate**: `CongestionControlInterceptor` holds the target under
+  the tightest of the negotiated session bit rate
+  (`CongestionControlHandle::set_session_bitrate_limit`, for `b=AS` / `b=TIAS`), the receiver's
+  REMB (advertised as `goog-remb` and ignored until now; it lapses after 3 s without a repeat),
+  the TMMBR bounding set (RFC 5104 sections 3.5.4 and 4.2: bounding set, owners, overhead at
+  the packet rate in use, the `2 * RTT` hold-off before a looser limit, and a TMMBN for every
+  TMMBR, on owner BYE and on owner timeout), and the circuit breaker's reduced rate.
+  `BandwidthEstimator` gains `on_packet_sent`, `on_round_trip_time`, `set_external_bounds`,
+  `on_receiver_report` and `on_path_change`, all with defaults.
+- **gcc**: missing feedback is treated as over-use (RFC 8888 section 5, RFC 8836 requirement
+  10): 500 ms without feedback while packets are being sent halves the target, and again for
+  each further 500 ms; the change reaches the pacer on an empty RTCP carrier. The round trip
+  time measured from feedback scales the additive increase and is in `EstimatorStats`. The
+  loss-based controller runs on the fraction lost of receiver reports when the receiver sends
+  no per-packet feedback (draft section 7). `CongestionControlHandle::notify_path_change` restarts the delay side.
+- **pacer**: the burst is one 5 ms group at the target rate (draft-ietf-rmcat-gcc-02 section
+  4), floored at one 1500-byte packet; it was 100 ms of the target.
 - **jsep**: what an applied answer negotiates reaches the interceptors that act on it, as
   control messages written into the chain (`RTCPeerConnection` did not feed them):
   `a=rtcp-rsize` in the offer and the answer as `RtcpSessionControl::ReducedSize`; the remote
@@ -1073,9 +1215,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **sdp**: `a=identity` (RFC 8827 section 5) is carried: `RTCPeerConnection::
   set_identity_assertion` and `remote_identity_assertion`. Making and verifying an assertion
   stays the application's.
-- **dtls**: `SettingEngineBuilder::with_disable_dtls_use_srtp` for a data-channel-only
-  endpoint (no `use_srtp`, media sections refused); `RTCCertificate::fingerprint` for one hash
-  function; `rtc_dtls::config::ConfigBuilder::with_use_srtp_optional`.
+- **dtls**: `SettingEngineBuilder::with_dtls_use_srtp_on_every_association`;
+  `RTCCertificate::fingerprint` for one hash function;
+  `rtc_dtls::config::ConfigBuilder::with_use_srtp_optional`.
 - **crypto**: `HashAlgorithm::{Sha1, Sha224, Sha384, Sha512}` in the built-in providers, for
   certificate fingerprints.
 
@@ -1294,6 +1436,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   object per payload type shared by both directions.
 - **shared**: `SystemInstant::at`, `Error::InvalidAccessError`.
 
+- **sctp**: the other re-configuration requests of RFC 6525, in both directions: Incoming SSN
+  Reset (`Association::request_incoming_stream_reset`), SSN/TSN Reset
+  (`request_ssn_tsn_reset`) and Add Outgoing / Incoming Streams (`add_outgoing_streams`,
+  `add_incoming_streams`, with `set_stream_limits` for what a peer may add). They were
+  answered "Denied". `Event::Reconfig` reports the outcome of a request and what the peer
+  changed.
+- **sctp**: `Stream::write_sctp_with_ppid` and `Chunks::ppid` for a Payload Protocol
+  Identifier `PayloadProtocolIdentifier` has no name for; `PayloadProtocolIdentifier::number`;
+  `ChunkPayloadData::ppid`; `Association::verification_tag`.
+- **sctp**: `Endpoint::poll_transmit` (the endpoint's answers to out-of-the-blue packets);
+  `TransportConfig::with_valid_cookie_life` / `valid_cookie_life`.
+- **sctp**: `TransportConfig::with_heartbeat_interval` / `heartbeat_interval`,
+  `Association::set_heartbeat_interval`, `Event::PathInactive`, `Event::PathActive`.
+- **sctp**: `Association::on_path_change` restarts congestion control and the RTO when the
+  transport underneath moves to another path (RFC 9260 section 7.2.5; for the peer
+  connection to call when ICE selects another candidate pair).
+  `Association::congestion_window`, `slow_start_threshold`, `rto`.
+- **sctp**: `TransportConfig::with_slow_start_growth_limit` (L of RFC 9260 section 7.2.1,
+  default 1), `with_max_burst` (Max.Burst, off by default), `with_sack_delay` (200 ms by
+  default, at most 500 ms).
+- **sctp**: `Association::partial_reliability` (whether PR-SCTP is in use),
+  `TransportConfig::with_partial_reliability`.
+- **fuzz**: `rtc-sctp` targets `association_handle_chunks` (an established association fed
+  chunks, timers running) and `chunk_chunk_unknown_unmarshal`.
+
+- **sctp**: State Cookie with a MAC (RFC 9260 section 5.1.3).
+  `ServerConfig::cookie_authentication` takes a crypto provider (`rtc-crypto`); the cookie
+  then holds the association's parameters, its creation time and an HMAC-SHA-256 under a
+  random key replaced hourly, and the accepting endpoint keeps nothing between INIT and
+  COOKIE ECHO: the INIT ACK leaves by `Endpoint::poll_transmit` and the association is
+  returned when the cookie verifies. Without a provider the handshake is unchanged.
+- **sctp**: zero checksum for SCTP over DTLS (RFC 9653): `TransportConfig::with_zero_checksum`,
+  `Association::zero_checksum`.
+- **sctp**: `Association::set_path_mtu` / `path_mtu`, the entry point for a transport that
+  learns the path MTU.
+- **sctp**: user message interleaving (RFC 8260 section 2). With
+  `TransportConfig::with_message_interleaving(true)` on both sides, user data travels in
+  I-DATA chunks and abandoned messages are reported with I-FORWARD-TSN: the fragments of
+  messages on different streams interleave, so a large message no longer holds up the other
+  streams. Off by default. `Association::message_interleaving` says whether it is in use.
+- **sctp**: the stream schedulers of RFC 8260 section 3: `StreamScheduler::RoundRobin`,
+  `RoundRobinPerPacket`, `Priority` and `FairCapacity` beside `FirstComeFirstServed` and
+  `WeightedFairQueueing`. They choose between messages, and between chunks when
+  interleaving. `Stream::set_priority` is the rank under `Priority` and the weight under
+  `WeightedFairQueueing`, and applies to what the stream has queued.
+- **fuzz**: `rtc-sctp` targets `chunk_chunk_i_data_unmarshal`,
+  `chunk_chunk_i_forward_tsn_unmarshal`, `association_handle_chunks_interleaved` and the three
+  RE-CONFIG request parameters.
+- **sctp**: the other re-configuration requests of RFC 6525, in both directions: Incoming SSN
+  Reset (`Association::request_incoming_stream_reset`), SSN/TSN Reset
+  (`request_ssn_tsn_reset`) and Add Outgoing / Incoming Streams (`add_outgoing_streams`,
+  `add_incoming_streams`, with `set_stream_limits` for what a peer may add). They were
+  answered "Denied". `Event::Reconfig` reports the outcome of a request and what the peer
+  changed.
+- **sctp**: `Stream::write_sctp_with_ppid` and `Chunks::ppid` for a Payload Protocol
+  Identifier `PayloadProtocolIdentifier` has no name for; `PayloadProtocolIdentifier::number`;
+  `ChunkPayloadData::ppid`; `Association::verification_tag`.
+- **sctp**: `Endpoint::poll_transmit` (the endpoint's answers to out-of-the-blue packets);
+  `TransportConfig::with_valid_cookie_life` / `valid_cookie_life`.
+- **sctp**: `TransportConfig::with_heartbeat_interval` / `heartbeat_interval`,
+  `Association::set_heartbeat_interval`, `Event::PathInactive`, `Event::PathActive`.
+- **sctp**: `Association::on_path_change` restarts congestion control and the RTO when the
+  transport underneath moves to another path (RFC 9260 section 7.2.5; for the peer
+  connection to call when ICE selects another candidate pair).
+  `Association::congestion_window`, `slow_start_threshold`, `rto`.
+- **sctp**: `TransportConfig::with_slow_start_growth_limit` (L of RFC 9260 section 7.2.1,
+  default 1), `with_max_burst` (Max.Burst, off by default), `with_sack_delay` (200 ms by
+  default, at most 500 ms).
+- **sctp**: `Association::partial_reliability` (whether PR-SCTP is in use),
+  `TransportConfig::with_partial_reliability`.
+- **fuzz**: `rtc-sctp` targets `association_handle_chunks` (an established association fed
+  chunks, timers running) and `chunk_chunk_unknown_unmarshal`.
+
 ### Bug Fixes
 
 - **jsep**: two retransmission formats that differ only in `rtx-time` are one format (RFC
@@ -1392,6 +1607,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **ice**: a consent request waits for its response four times the pair's round-trip time
   (500 ms to 4 s; RFC 7675 section 5.1) instead of a fixed 4 s.
 - **stats**: a candidate pair's state can be `frozen`.
+- **ice**: a remote candidate of a component other than RTP is ignored (the engine is rtcp-mux
+  only). pion and webrtc-rs signal every candidate for both components on one address; held,
+  the RTCP one could not be paired and kept the RTP one out when its mDNS name resolved first.
+- **ice**: the controlling agent's consent checks carry USE-CANDIDATE (as libwebrtc's do), so a
+  peer that takes over an address and its credentials without an ICE restart learns the pair in
+  use; and an agent leaves `Disconnected` with the consent response, not at its next check.
 - **ice**: the agent receives STUN through `rtc_stun::validated::Validator`: FINGERPRINT is
   verified when present (it never was), a request with an unknown comprehension-required
   attribute is answered 420 with UNKNOWN-ATTRIBUTES and a response with one is discarded (RFC
@@ -1906,6 +2127,36 @@ Each bug below was confirmed by a failing test first (`rtc-rtcp/tests/audit_bugs
   strictly and written back byte for byte, and a deterministic mutation test of the parse and
   marshal fixed point. Fuzzing: `description_roundtrip` checks that fixed point (strict and
   lenient) and reads every typed accessor; new target `attribute_parse`.
+- **sctp**: one received packet is answered with one packet of control chunks (RFC 9260
+  section 12.4); a packet of HEARTBEATs got a packet per HEARTBEAT ACK. A SACK that is due
+  and a FORWARD TSN travel with outbound DATA when the packet has room (sections 6.1, 6.10;
+  RFC 3758 section 3.5).
+- **sctp**: DATA is received only in ESTABLISHED, SHUTDOWN-PENDING and SHUTDOWN-SENT, and a
+  SACK or DATA for an association that has seen no COOKIE ECHO is answered as out of the
+  blue (RFC 9260 section 6). DATA was taken in every state.
+- **sctp**: RTT measurement follows RFC 9260 section 6.3.1: one per round trip for
+  gap-acknowledged chunks too (C4), none with a chunk sent before a retransmission (C5), and
+  an RTTVAR of zero becomes the clock granularity (G1).
+- **sctp**: the default stream scheduler sends messages in the order they were written (RFC
+  8260 section 3.1). Unordered messages used to go ahead of every ordered one, so a steady
+  flow of them kept ordered messages, DCEP and stream resets included, from ever leaving. A
+  stream reset now waits for the messages of its own stream only.
+- **sctp**: an I-DATA or I-FORWARD-TSN chunk on an association that did not negotiate user
+  message interleaving is answered with an ABORT, "Protocol Violation" (RFC 8260 sections
+  2.2.3, 2.3.1). The packet was dropped whole and unanswered.
+- **sctp**: stream resets follow the rest of RFC 6525. One re-configuration request is in
+  flight at a time and the others wait (section 5.1.1); closing several data channels put
+  several in flight. A request names the peer's last request sequence number (5.1.2), and the
+  peer's numbers are checked: a request older than the ones remembered is answered "Error -
+  Bad Sequence Number" where it used to be performed again, resetting a stream that had been
+  reused (5.2.1). The response and this side's own reset of the stream leave in one chunk,
+  with a SACK. Data written to a stream whose reset is not answered yet waits, without a
+  Stream Sequence Number, where it used to be sent with the old sequence and held back by the
+  peer for good (5.1.2 A1); DATA received beyond the last TSN of a deferred reset is kept for
+  the stream as it is after the reset, where it used to be dropped (5.2.2 E2). `Stream::stop`
+  and `close` fail when the peer did not announce the extension. An unanswered request now
+  counts against the association like an unanswered HEARTBEAT (5.1.1), except after "In
+  progress".
 - **sctp**: Gap Ack Blocks are offsets in serial number arithmetic (RFC 9260 section 3.3.4).
   Once the received TSNs had wrapped past zero and the cumulative TSN had not, a SACK named a
   TSN the peer never sent, and a peer running this engine closed the association over it.

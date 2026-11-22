@@ -542,16 +542,49 @@ fn test_redundant_local_candidates_are_not_kept() {
     assert_eq!(a.local_candidates.len(), 2);
 }
 
-/// Section 6.1.2.2: candidates are paired only within a component.
+/// Section 6.1.2.2: candidates are paired only within a component. The agent has the RTP
+/// component alone, so a candidate the peer signals for RTCP (pion and webrtc-rs signal every
+/// candidate for both components, on the same address) is not held, and does not keep the RTP
+/// candidate with that address out, whichever of the two arrives or resolves first.
 #[test]
-fn test_candidates_of_different_components_are_not_paired() {
+fn test_candidates_of_another_component_are_ignored() {
     let mut a = bare_agent(Instant::now(), config(true));
     let mut rtcp = remote(1, 500, "f1");
     rtcp.set_component(2);
-    a.add_remote_candidate(rtcp).unwrap();
+    assert!(!a.add_remote_candidate(rtcp).unwrap());
+    assert!(a.remote_candidates.is_empty());
     assert!(a.candidate_pairs.is_empty());
-    a.add_remote_candidate(remote(2, 500, "f2")).unwrap();
+    // The RTP candidate on the same address is taken and paired.
+    assert!(a.add_remote_candidate(remote(1, 500, "f1")).unwrap());
     assert_eq!(a.candidate_pairs.len(), 1);
+
+    // The same for names: of an RTCP and an RTP candidate behind one mDNS name, only the RTP
+    // one is resolved.
+    let named = |component: u16| {
+        let mut c = CandidateHostConfig {
+            base_config: CandidateConfig {
+                network: "udp".to_owned(),
+                address: "9b36eaac-bb2e-49bb-bb78-21c41c499900.local".to_owned(),
+                port: 5000,
+                component: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+        .new_candidate_host()
+        .unwrap();
+        c.set_component(component);
+        c
+    };
+    let cfg = AgentConfig {
+        multicast_dns_mode: crate::mdns::MulticastDnsMode::QueryOnly,
+        ..config(true)
+    };
+    let mut a = bare_agent(Instant::now(), cfg);
+    a.add_remote_candidate(named(2)).unwrap();
+    assert!(a.mdns_queries.is_empty());
+    a.add_remote_candidate(named(1)).unwrap();
+    assert_eq!(a.mdns_queries.len(), 1);
 }
 
 /// Section 6.1.2.5: the checklist holds 100 pairs by default, the limit is configurable, and
@@ -895,9 +928,16 @@ fn test_controlling_agent_nominates_once_and_the_checklist_completes() {
         .into_iter()
         .filter(|s| s.message.contains(ATTR_USE_CANDIDATE))
         .collect();
-    assert_eq!(nominations.len(), 1, "one nomination, one request");
-    assert_eq!(nominations[0].to, remote_addr(1));
+    // One pair is nominated, with one request; USE-CANDIDATE never goes to another pair. (The
+    // consent checks on the nominated pair repeat it.)
+    assert!(nominations.iter().all(|s| s.to == remote_addr(1)));
     let nominated_at = nominations[0].at;
+    assert!(
+        nominations[1..]
+            .iter()
+            .all(|s| s.at >= nominated_at + Duration::from_secs(4)),
+        "the nomination itself is one request"
+    );
 
     // After the nomination nothing more goes to 2 or 3: no ordinary check for 3, no
     // retransmission for 2, and neither is failed by a timeout.
@@ -920,6 +960,83 @@ fn test_controlling_agent_nominates_once_and_the_checklist_completes() {
             .windows(2)
             .all(|w| w[1] - w[0] >= Duration::from_secs(4))
     );
+}
+
+/// A peer that lost its state without an ICE restart (a new peer connection on the same
+/// address with the same credentials) is a controlled agent that never heard the nomination.
+/// The controlling agent's consent checks carry USE-CANDIDATE, so it learns the pair in use
+/// from the next one; the controlled agent's consent checks never carry it.
+#[test]
+fn test_consent_checks_of_the_controlling_agent_repeat_the_nomination() {
+    for controlling in [true, false] {
+        let start = Instant::now();
+        let mut a = agent_with(start, config(controlling), &[(1, 500)]);
+        if !controlling {
+            let nominate = peer_request(
+                &a,
+                vec![
+                    Box::new(AttrControlling(1)),
+                    Box::new(PriorityAttr(1000)),
+                    Box::new(UseCandidateAttr::new()),
+                ],
+            );
+            deliver(&mut a, start, &nominate, "10.0.0.1:5000").unwrap();
+        }
+        answered(&mut a, start, Duration::ZERO, Duration::from_secs(1));
+        assert!(a.get_selected_candidate_pair().is_some());
+        let out = answered(
+            &mut a,
+            start,
+            Duration::from_secs(1),
+            Duration::from_secs(20),
+        );
+        let consent = requests_of(&out);
+        assert!(consent.len() >= 3);
+        assert!(
+            consent
+                .iter()
+                .all(|s| s.message.contains(ATTR_USE_CANDIDATE) == controlling),
+            "controlling: {controlling}"
+        );
+        assert_eq!(a.state(), ConnectionState::Connected);
+    }
+}
+
+/// When consent comes back the agent leaves `Disconnected` with the response, not at its
+/// next consent check seconds later.
+#[test]
+fn test_agent_is_connected_again_as_soon_as_consent_returns() {
+    let start = Instant::now();
+    let mut a = agent_with(start, config(true), &[(1, 500)]);
+    answered(&mut a, start, Duration::ZERO, Duration::from_secs(1));
+    silent(
+        &mut a,
+        start,
+        Duration::from_secs(1),
+        Duration::from_secs(15),
+    );
+    assert_eq!(a.state(), ConnectionState::Disconnected);
+    let _ = states(&mut a);
+    // The next consent check is answered.
+    let mut now = start + Duration::from_secs(15);
+    let answered_at = loop {
+        a.handle_timeout(now).unwrap();
+        if let Some((m, to)) = sent(&mut a)
+            .into_iter()
+            .find(|(m, _)| m.typ == BINDING_REQUEST)
+        {
+            let response = peer_response(BINDING_SUCCESS, m.transaction_id, addr(LOCAL), None);
+            deliver(&mut a, now, &response, &to.to_string()).unwrap();
+            break now;
+        }
+        now = a
+            .poll_timeout()
+            .unwrap()
+            .max(now + Duration::from_micros(1));
+    };
+    assert_eq!(a.poll_timeout().map(|t| t <= answered_at), Some(true));
+    a.handle_timeout(answered_at).unwrap();
+    assert_eq!(states(&mut a), vec![ConnectionState::Connected]);
 }
 
 /// The transport state is `Connected` once a pair is nominated and `Completed` once, in
