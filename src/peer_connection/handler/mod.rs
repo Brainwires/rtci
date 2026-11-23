@@ -163,9 +163,7 @@ impl RTCPeerConnection {
             ..
         }) = &evt
         {
-            self.pipeline_context
-                .ice_handler_context
-                .ice_transport
+            self.ice_transport_mut()
                 .agent
                 .local_candidate_conveyed(&candidate.id);
         }

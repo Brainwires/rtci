@@ -166,7 +166,15 @@ fn test_end_of_candidates_on_both_sides_ends_the_wait_before_nominating() {
     assert_eq!(nominations(&out), 0, "nominated within the wait");
     a.set_remote_end_of_candidates();
     a.set_local_gathering_complete();
-    let out = run_answering(&mut a, second, second + Duration::from_millis(500), |_, _| true);
-    assert!(nominations(&out) > 0, "the wait goes on after end-of-candidates");
+    let out = run_answering(
+        &mut a,
+        second,
+        second + Duration::from_millis(500),
+        |_, _| true,
+    );
+    assert!(
+        nominations(&out) > 0,
+        "the wait goes on after end-of-candidates"
+    );
     assert!(a.get_selected_candidate_pair().is_some());
 }

@@ -2645,9 +2645,17 @@ fn test_host_candidate_past_the_name_cap_is_provided_under_an_unpublished_name()
         );
     }
     let last = &a.local_candidates[cap];
-    assert!(crate::mdns::is_ice_mdns_name(last.address()), "{}", last.address());
+    assert!(
+        crate::mdns::is_ice_mdns_name(last.address()),
+        "{}",
+        last.address()
+    );
     assert!(!last.marshal().contains("10.0."), "{}", last.marshal());
-    assert_eq!(a.mdns_local_names.len(), cap, "the cap is kept: it is not published");
+    assert_eq!(
+        a.mdns_local_names.len(),
+        cap,
+        "the cap is kept: it is not published"
+    );
     a.close()?;
     Ok(())
 }
