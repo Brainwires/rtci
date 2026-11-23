@@ -92,7 +92,7 @@ stage_unit() {
 stage_env() {
   log "stage env: real networks (NAT matrix, TURN, mDNS) and netem impairment"
   cargo test --test testenv_ice --test testenv_mdns --test testenv_impairment \
-    --test testenv_turn --test testenv_turn_client --test testenv_dtls --test testenv_ice_tcp \
+    --test testenv_turn --test testenv_turn_client --test testenv_dtls --test testenv_ice_tcp --test testenv_turn_streams \
     --test testenv_media_fixtures \
     --no-fail-fast -- --ignored --nocapture > "$A/env.log" 2>&1
   local rc=$?

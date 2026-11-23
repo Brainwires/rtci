@@ -160,6 +160,7 @@ pub(crate) mod data_channel_event;
 pub(crate) mod ice_error_event;
 pub(crate) mod ice_event;
 pub(crate) mod track_event;
+pub(crate) mod transport_event;
 
 pub use crate::peer_connection::states_events::ICE_SERVER_UNREACHABLE;
 pub use data_channel_event::RTCDataChannelEvent;
@@ -168,6 +169,7 @@ pub use ice_event::RTCPeerConnectionIceEvent;
 pub use track_event::{
     RTCRemoteStreamsChange, RTCRemoteTrackEventInit, RTCTrackEvent, RTCTrackEventInit,
 };
+pub use transport_event::{RTCTransportEvent, RTCTransportEventKind};
 
 /// Events that can be emitted by an `RTCPeerConnection`.
 ///
@@ -580,6 +582,18 @@ pub enum RTCPeerConnectionEvent {
     /// frame it received changed (`RTCRtpReceiver::get_contributing_sources`).
     OnCsrcChange(crate::rtp_transceiver::RTCRtpReceiverId),
 
+    /// webrtc-encoded-transform 6.4 `keyframerequest`: a Picture Loss Indication or Full
+    /// Intra Request (RFC 4585 6.3.1, RFC 5104 4.3.1) arrived for an SSRC this sender sends;
+    /// the encoder (the application's) should generate a key frame for that layer. `rid` is
+    /// the layer's RID, `None` when the sender's encoding has none (not simulcast). The PLI /
+    /// FIR itself is delivered as well (`RTCMessage::RtcpPacket`).
+    OnKeyFrameRequest {
+        /// The sender whose stream the request names.
+        sender: crate::rtp_transceiver::RTCRtpSenderId,
+        /// The RID of the requested layer.
+        rid: Option<String>,
+    },
+
     /// W3C `RTCDtlsTransport` `statechange`. Comes before the `OnConnectionStateChangeEvent` it
     /// causes, and after the `OnDtlsTransportError` of a failure. Not fired by `close()`.
     OnDtlsTransportStateChange(RTCDtlsTransportState),
@@ -629,6 +643,19 @@ pub enum RTCPeerConnectionEvent {
         /// What was detected.
         failure: interceptor::EcnFailure,
     },
+
+    /// An event of one of the connection's transports, with the transport's ids: the ICE
+    /// transport's `statechange`, `gatheringstatechange` and `selectedcandidatepairchange`,
+    /// the candidate pair events, and the DTLS transport's `statechange` and `error` (W3C
+    /// webrtc-pc 5.5, 5.6; webrtc-extensions 7).
+    ///
+    /// Fired for every transport, the default one included. The single-transport variants
+    /// (`OnIceTransportStateChange`, `OnIceGathererStateChange`,
+    /// `OnSelectedCandidatePairChange`, `OnIceCandidatePair*`, `OnDtlsTransportStateChange`,
+    /// `OnDtlsTransportError`) name no transport and are fired for the default transport only
+    /// (the one every section is on while all are bundled), each right before its
+    /// `OnTransportEvent`.
+    OnTransportEvent(RTCTransportEvent),
 }
 
 /// Reserved for future use.
@@ -701,6 +728,17 @@ pub(crate) enum RTCEventInternal {
     /// An SRTP master key reached its lifetime (RFC 3711 section 9.2): nothing more is
     /// protected or accepted with it, and the DTLS transport that keyed it fails.
     SRTPKeyExhausted,
+
+    /// The application bytes that left a stream's send queue, reported once as the stream is
+    /// closed or lost (just before its `SCTPStreamFailed` / `SCTPStreamClosed`, or before
+    /// signalling closes the association), so the channel's final `bufferedAmount` stays
+    /// readable after it closed (W3C webrtc-pc 6.2: not reset when the channel closes).
+    ///
+    /// Parameters:
+    /// - Association handle
+    /// - Stream ID
+    /// - Bytes taken from the stream's send queue
+    SCTPStreamDequeued(usize /*AssociationHandle*/, u16 /*StreamID*/, u64),
 
     /// SCTP stream has been closed
     ///

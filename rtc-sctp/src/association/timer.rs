@@ -98,6 +98,9 @@ pub(crate) struct TimerTable {
     max_retrans: [usize; TIMER_COUNT],
     shutdown_interval: Option<u64>,
     reconfig_interval: Option<u64>,
+    /// RTO.Max in milliseconds when it is not the default, bounding the backoff of the timers
+    /// that double their own interval.
+    rto_max: Option<u64>,
 }
 
 impl TimerTable {
@@ -116,6 +119,19 @@ impl TimerTable {
             ],
             ..Default::default()
         }
+    }
+
+    /// Bounds the timers' backoff by `config.max` (RTO.Max) instead of the default 60 seconds.
+    pub fn with_rto_config(mut self, config: RtoConfig) -> Self {
+        let max = u64::try_from(config.max.as_millis())
+            .unwrap_or(u64::MAX)
+            .max(1);
+        self.rto_max = Some(max);
+        self
+    }
+
+    fn backoff(&self, interval: u64, n_rtos: usize) -> u64 {
+        calculate_next_timeout(interval, n_rtos, self.rto_max.unwrap_or(RTO_MAX))
     }
 
     pub fn set(&mut self, timer: Timer, time: Option<Instant>) {
@@ -153,7 +169,7 @@ impl TimerTable {
         ) {
             interval
         } else {
-            calculate_next_timeout(interval, self.retrans[timer as usize])
+            self.backoff(interval, self.retrans[timer as usize])
         };
 
         let time = now + Duration::from_millis(interval);
@@ -198,8 +214,9 @@ impl TimerTable {
     pub fn is_expired(&mut self, timer: Timer, after: Instant) -> (bool, bool, usize) {
         let expired = self.data[timer as usize].is_some_and(|x| x <= after);
         let mut failure = false;
+        let rto_max = self.rto_max.unwrap_or(RTO_MAX);
         if expired && let Some(interval) = self.control_interval(timer) {
-            *interval = interval.map(|previous| calculate_next_timeout(previous, 1));
+            *interval = interval.map(|previous| calculate_next_timeout(previous, 1, rto_max));
         }
         if expired {
             self.retrans[timer as usize] += 1;
@@ -223,21 +240,74 @@ const RTO_ALPHA: u64 = 1;
 const RTO_BETA: u64 = 2;
 const RTO_BASE: u64 = 8;
 
+/// RTO.Initial, RTO.Min and RTO.Max (RFC 9260 section 16), the bounds of the retransmission
+/// timeout. `Default` is the RFC's recommended values: 1, 1 and 60 seconds.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct RtoConfig {
+    /// RTO.Initial: the RTO before a round trip was measured (and after a reset).
+    pub initial: Duration,
+    /// RTO.Min: the smallest RTO a measurement gives.
+    pub min: Duration,
+    /// RTO.Max: the largest RTO, measured or backed off.
+    pub max: Duration,
+}
+
+impl Default for RtoConfig {
+    fn default() -> Self {
+        Self {
+            initial: Duration::from_millis(RTO_INITIAL),
+            min: Duration::from_millis(RTO_MIN),
+            max: Duration::from_millis(RTO_MAX),
+        }
+    }
+}
+
 /// rtoManager manages Rtx timeout values.
 /// This is an implementation of RFC 9260 sec 6.3.1.
-#[derive(Default, Debug)]
+#[derive(Debug)]
 pub(crate) struct RtoManager {
     pub(crate) srtt: u64,
     pub(crate) rttvar: f64,
     pub(crate) rto: u64,
     pub(crate) no_update: bool,
+    /// RTO.Initial, RTO.Min, RTO.Max in milliseconds.
+    initial: u64,
+    min: u64,
+    max: u64,
+}
+
+impl Default for RtoManager {
+    fn default() -> Self {
+        RtoManager {
+            srtt: 0,
+            rttvar: 0.0,
+            rto: 0,
+            no_update: false,
+            initial: RTO_INITIAL,
+            min: RTO_MIN,
+            max: RTO_MAX,
+        }
+    }
 }
 
 impl RtoManager {
     /// newRTOManager creates a new rtoManager.
     pub(crate) fn new() -> Self {
+        Self::with_config(RtoConfig::default())
+    }
+
+    /// A manager whose RTO starts at `config.initial` and stays within `config.min` and
+    /// `config.max` (each at least a millisecond, the maximum at least the minimum).
+    pub(crate) fn with_config(config: RtoConfig) -> Self {
+        let millis = |d: Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX).max(1);
+        let min = millis(config.min);
+        let max = millis(config.max).max(min);
+        let initial = millis(config.initial).clamp(min, max);
         RtoManager {
-            rto: RTO_INITIAL,
+            rto: initial,
+            initial,
+            min,
+            max,
             ..Default::default()
         }
     }
@@ -266,7 +336,7 @@ impl RtoManager {
             self.rttvar = CLOCK_GRANULARITY;
         }
 
-        self.rto = (self.srtt + (4.0 * self.rttvar) as u64).clamp(RTO_MIN, RTO_MAX);
+        self.rto = (self.srtt + (4.0 * self.rttvar) as u64).clamp(self.min, self.max);
 
         self.srtt
     }
@@ -279,7 +349,7 @@ impl RtoManager {
     /// RFC 9260 6.3.3 E2: retain backoff until a new RTT measurement updates RTO.
     pub(crate) fn backoff(&mut self) {
         if !self.no_update {
-            self.rto = self.rto.saturating_mul(2).min(RTO_MAX);
+            self.rto = self.rto.saturating_mul(2).min(self.max);
         }
     }
 
@@ -291,7 +361,7 @@ impl RtoManager {
 
         self.srtt = 0;
         self.rttvar = 0.0;
-        self.rto = RTO_INITIAL;
+        self.rto = self.initial;
     }
 
     /// set RTO value for testing
@@ -301,16 +371,16 @@ impl RtoManager {
     }
 }
 
-fn calculate_next_timeout(rto: u64, n_rtos: usize) -> u64 {
+fn calculate_next_timeout(rto: u64, n_rtos: usize, rto_max: u64) -> u64 {
     // RFC 4096 sec 6.3.3.  Handle T3-rtx Expiration
     //   E2)  For the destination address for which the timer expires, set RTO
     //        <- RTO * 2 ("back off the timer").  The maximum value discussed
     //        in rule C7 above (RTO.max) may be used to provide an upper bound
     //        to this doubling operation.
     if n_rtos < 31 {
-        std::cmp::min(rto << n_rtos, RTO_MAX)
+        std::cmp::min(rto << n_rtos, rto_max)
     } else {
-        RTO_MAX
+        rto_max
     }
 }
 

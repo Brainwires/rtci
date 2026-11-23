@@ -99,6 +99,8 @@
       impolite: false,
       // Edits the answer from Rust before it is applied (a test of a wrong fingerprint).
       mungeAnswer: null,
+      // Edits an offer from Rust before it is applied (an answerer that does not bundle).
+      mungeRemoteOffer: null,
     };
     const send = (m) => ws.send(JSON.stringify(m));
     // Trickled candidates follow the description they belong to (RFC 8838 section 4): one is
@@ -145,9 +147,12 @@
             s.ignoredOffers++;
             return;
           }
-          await pc.setRemoteDescription({ type: "offer", sdp: m.sdp });
+          await pc.setRemoteDescription({ type: "offer", sdp: s.mungeRemoteOffer ? s.mungeRemoteOffer(m.sdp) : m.sdp });
           await pc.setLocalDescription();
           sendDescription("answer", pc.localDescription.sdp);
+        } else if (m.type === "candidate") {
+          // Trickled by the Rust side (its engine-gathered TCP candidates).
+          if (m.candidate && m.candidate.candidate) await pc.addIceCandidate(m.candidate);
         } else if (m.type === "report") s.reports.push(m);
         else if (m.type === "error") s.errors.push(m.error);
       } catch (e) {

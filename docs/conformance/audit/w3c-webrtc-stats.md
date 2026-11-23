@@ -8,7 +8,7 @@ How members were judged. The Note column of every member row starts with one of:
 
 Totals (all rows):
 
-- MUST: tested 254 / untested 2 / partial 1 / missing 0 / violated 0 / n-a 1
+- MUST: tested 257 / untested 0 / partial 0 / missing 0 / violated 0 / n-a 1
 - SHOULD: tested 4 / untested 0 / partial 0 / missing 0 / violated 0 / n-a 1
 - MAY: tested 0 / untested 0 / partial 0 / missing 0 / violated 0 / n-a 0
 
@@ -44,7 +44,7 @@ Members by source:
 | STATS-7.1-media-playout | 7.1 | MUST | "media-playout": audio playout path | tested | `src/statistics/accumulator/mod.rs:950`, `src/statistics/accumulator/media/audio_playout.rs:31` | `supplied_stats_reach_the_report_and_their_references_resolve` | app feed |
 | STATS-7.1-peer-connection | 7.1 | MUST | "peer-connection" object | tested | `src/statistics/accumulator/peer_connection.rs:36` | `test_peer_connection_json_snapshot` | - |
 | STATS-7.1-data-channel | 7.1 | MUST | "data-channel": one per RTCDataChannel | tested | `src/statistics/accumulator/mod.rs` (`on_data_channel_gone`, `MAX_CLOSED_DATA_CHANNEL_STATS`) | `a_closed_channel_keeps_its_stats_object`, `a_data_channel_reports_what_it_is_and_what_crossed_it` | A closed channel's object stays, state "closed", with its last counters (webrtc-stats lifetime); only the 64 channels closed last keep theirs, so a peer that opens and closes channels without end cannot grow the report without bound |
-| STATS-7.1-transport | 7.1 | MUST | "transport" object | tested | `src/statistics/accumulator/transport.rs:137` | `test_transport_statistics_collection` | One transport (max-bundle only) |
+| STATS-7.1-transport | 7.1 | MUST | "transport" object | tested | `src/statistics/accumulator/transport.rs:137`, `src/statistics/accumulator/transports.rs` | `test_transport_statistics_collection`, `statistics_have_a_transport_object_per_transport`, `each_transport_counts_into_its_own_transport_object` | One object per transport (mt-4): with several, each has its own selected pair and candidate pairs, and the RTP streams name the transport of their section |
 | STATS-7.1-candidate-pair | 7.1 | MUST | "candidate-pair": one per pair; non-current pairs deleted at ICE restart, current pair once replaced | tested | `src/statistics/accumulator/mod.rs:986`, `src/peer_connection/internal.rs:1854` | `every_candidate_pair_is_reported_with_its_state` | Pairs the agent drops go, except the selected one |
 | STATS-7.1-local-candidate | 7.1 | MUST | "local-candidate": deleted at ICE restart once in no non-deleted pair | tested | `src/statistics/accumulator/mod.rs:815` | `an_ice_restart_replaces_the_pairs_the_candidates_and_the_username_fragment`, `a_candidate_goes_when_the_agent_and_every_pair_let_go_of_it` | Deleted once the agent and every reported pair let go of it |
 | STATS-7.1-remote-candidate | 7.1 | MUST | "remote-candidate": deleted at ICE restart once in no non-deleted pair | tested | `src/statistics/accumulator/mod.rs:815` | `an_ice_restart_replaces_the_pairs_the_candidates_and_the_username_fragment`, `a_candidate_goes_when_the_agent_and_every_pair_let_go_of_it` | Deleted once the agent and every reported pair let go of it |
@@ -131,7 +131,7 @@ Members by source:
 | STATS-8.5-fecSsrc | 8.5 | MUST | fecSsrc: the FEC stream's SSRC; absent without separate-stream FEC | tested | `src/statistics/accumulator/mod.rs:482` | `test_rtx_fec_tracking` | measured |
 | STATS-8.5-totalCorruptionProbability | 8.5 | MUST | totalCorruptionProbability (video only): sum of measurements in [0,1] | tested | `src/statistics/accumulator/media/app_provided.rs:28` | `every_supplied_member_reaches_the_report_of_the_kind_it_applies_to` | app feed |
 | STATS-8.5-totalSquaredCorruptionProbability | 8.5 | MUST | totalSquaredCorruptionProbability (video only) | tested | `src/statistics/accumulator/media/app_provided.rs:28` | `every_supplied_member_reaches_the_report_of_the_kind_it_applies_to` | app feed |
-| STATS-8.5-corruptionMeasurements | 8.5 | MUST | corruptionMeasurements; present when the corruption-detection extension is received | partial | `src/statistics/accumulator/media/app_provided.rs:28` | `every_supplied_member_reaches_the_report_of_the_kind_it_applies_to` | app feed; the corruption-detection header extension is not parsed, so the engine cannot tell that measurements must exist |
+| STATS-8.5-corruptionMeasurements | 8.5 | MUST | corruptionMeasurements; present when the corruption-detection extension is received | tested | `rtc-rtp/src/extension/corruption_detection_extension/mod.rs`, `src/peer_connection/handler/interceptor.rs` (arrival accounting), `src/statistics/accumulator/rtp_stream/inbound.rs` (`corruption_detection_received`), `src/rtp_transceiver/rtp_receiver/mod.rs` (`encoded_frame_metadata`: `corruption_detection`) | `the_corruption_detection_extension_makes_the_corruption_measurements_present`, `a_full_message_parses_field_by_field_and_round_trips`, `every_supplied_member_reaches_the_report_of_the_kind_it_applies_to` | from the first packet with the negotiated corruption-detection extension the three corruption members are present (0 until measured); the frame metadata carries the parsed message (samples, sequence index, std dev, thresholds) and the application's decoder, which measures, feeds DecoderStatsUpdate (pc-26) |
 | STATS-8.5-kindRule | 8.5 | MUST | Video-only members do not exist for audio, audio-only members not for video | tested | `src/statistics/accumulator/rtp_stream/inbound.rs:70` | `every_supplied_member_reaches_the_report_of_the_kind_it_applies_to` | Applied when the report is built |
 | STATS-8.6-timestamp | 8.6 | MUST | timestamp of a remote-inbound object is when the RTCP RR was received | tested | `src/statistics/accumulator/rtp_stream/outbound.rs:440` | `a_receiver_report_with_no_delay_since_last_sr_measures_no_round_trip` | The arrival of the latest report about the stream |
 | STATS-8.6-localId | 8.6 | MUST | localId: the outbound-rtp object for the SSRC | tested | `src/statistics/accumulator/rtp_stream/outbound.rs:359` | `every_reference_resolves_and_nothing_unmeasured_is_reported` | measured |
@@ -273,10 +273,10 @@ Members by source:
 | STATS-8.20-consentRequestsSent | 8.20 | MUST | consentRequestsSent | tested | `src/statistics/accumulator/mod.rs:1004`, `rtc-ice/src/agent/mod.rs:1288` | `a_candidate_pairs_counters_are_the_checks_and_the_payload_on_the_wire` | measured in rtc-ice |
 | STATS-8.20-packetsDiscardedOnSend | 8.20 | MUST | packetsDiscardedOnSend: packets dropped by socket errors | tested | `src/statistics/feed.rs:125` | `every_supplied_member_reaches_the_report_of_the_kind_it_applies_to`, `audio_without_rtx_has_no_video_or_rtx_members_and_no_send_discards` | app feed: the socket is the application's; left out until it reports a discard |
 | STATS-8.20-bytesDiscardedOnSend | 8.20 | MUST | bytesDiscardedOnSend: bytes dropped by socket errors | tested | `src/statistics/feed.rs:125` | `every_supplied_member_reaches_the_report_of_the_kind_it_applies_to`, `test_on_packet_discarded` | app feed; 64-bit |
-| STATS-8.21-frozen | 8.21 | MUST | RTCStatsIceCandidatePairState "frozen" | untested | `src/statistics/stats/ice_candidate_pair.rs:20` | - | Not reached by an rtc-to-rtc call here |
+| STATS-8.21-frozen | 8.21 | MUST | RTCStatsIceCandidatePairState "frozen" | tested | `src/statistics/stats/ice_candidate_pair.rs:20` | `every_agent_pair_state_is_reported_by_its_stats_value` | the agent's frozen state is reported "frozen"; an rtc-to-rtc call does not reach it (pc-25) |
 | STATS-8.21-waiting | 8.21 | MUST | "waiting" | tested | `src/statistics/stats/ice_candidate_pair.rs:20` | `test_ice_candidate_pair_state_transitions` | - |
 | STATS-8.21-in-progress | 8.21 | MUST | "in-progress" | tested | `src/statistics/stats/ice_candidate_pair.rs:20` | `test_ice_candidate_pair_state_transitions` | - |
-| STATS-8.21-failed | 8.21 | MUST | "failed" | untested | `src/statistics/stats/ice_candidate_pair.rs:20` | - | Not reached rtc-to-rtc: once a pair is nominated the agent stops checking the others, which stay waiting |
+| STATS-8.21-failed | 8.21 | MUST | "failed" | tested | `src/statistics/stats/ice_candidate_pair.rs:20` | `every_agent_pair_state_is_reported_by_its_stats_value` | the agent's failed state is reported "failed"; an rtc-to-rtc call does not reach it once a pair is nominated (pc-25) |
 | STATS-8.21-succeeded | 8.21 | MUST | "succeeded" | tested | `src/statistics/stats/ice_candidate_pair.rs:20` | `every_candidate_pair_is_reported_with_its_state` | - |
 | STATS-8.22-fingerprint | 8.22 | MUST | fingerprint: the RFC 4572 fingerprint value | tested | `src/peer_connection/handler/dtls.rs:147` | `a_connection_reports_dtls_state_channel_state_and_every_pair` | measured |
 | STATS-8.22-fingerprintAlgorithm | 8.22 | MUST | fingerprintAlgorithm, such as "sha-256" | tested | `src/peer_connection/handler/dtls.rs:147` | `a_connection_reports_dtls_state_channel_state_and_every_pair` | measured |
@@ -294,12 +294,11 @@ Every bug below is fixed, each with the test named in its row. Running the tests
 4. **A sender report's NTP time followed the machine's clock, not the caller's**: the sender-report interceptor re-read the wall clock at every frame (`rtc-interceptor/src/report/sender_stream.rs`).
 5. **A data channel created after the association is up has no DCEP handshake deadline** (`RTCPeerConnection::create_data_channel` dials without arming it). Not fixed here: it is outside the statistics; reported to the owner.
 
-Gaps closed: 1, 2, 3 (but see below), 4, 5, 7, 8, 9; of gap 6, `totalPacketSendDelay` and `issuerCertificateId`.
+Gaps closed: 1, 2, 3 (but see below), 4, 5, 7, 8, 9 (`STATS-8.5-corruptionMeasurements` with the corruption-detection extension parsed, pc-26); of gap 6, `totalPacketSendDelay` and `issuerCertificateId`.
 
 Still open:
 
-- `STATS-8.5-corruptionMeasurements` (partial): the corruption-detection header extension is not parsed.
-- `STATS-8.21-frozen`, `STATS-8.21-failed` (untested): no rtc-to-rtc call here reaches them (the agent stops checking the other pairs once one is nominated).
+- `STATS-8.21-frozen`, `STATS-8.21-failed`: tested by the state mapping (pc-25); no rtc-to-rtc call here reaches them (the agent stops checking the other pairs once one is nominated).
 - Gap 6, the rest: `fecPacketsDiscarded` (the FlexFEC-03 decoder does not report unused repair packets), `packetsDiscarded` and the jitter-buffer members (the jitter-buffer interceptors do not feed the report), `framesReceived` and the assembly members, `scalabilityMode`, in-band FEC: all reach the report from the application feed only.
 
 ## Gaps, in order of importance

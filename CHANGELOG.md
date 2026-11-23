@@ -12,6 +12,91 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **interceptor**: `InterGroupDelay` and `DelayTrend` (GCC) have a new public field, `arrival`
   (the group's arrival time on the receiver's clock, for `ThresholdTimeBase::Arrival`): a
   struct literal outside the crate must name it.
+
+- **peer connection** (mt-8, W3C webrtc-pc 4.3.3): `connectionState` follows the table over
+  the connection's `iceConnectionState`: "disconnected" whenever that is "disconnected", also
+  while another transport is still checking (it was "connecting" then). An
+  `iceConnectionState` of "completed" counts as "connected", as in browsers.
+
+- **peer connection** (mt-7): the transports a connection has beside the first one (the
+  first section of each media type in a `balanced` initial offer, every section under
+  `max-compat`, the sections answered outside a BUNDLE group) take the first transport's
+  `ice-ufrag` and `ice-pwd` instead of credentials of their own, as browsers write them. With
+  mt-5 every default initial offer with audio and video, or media and a data channel, carried
+  up to three credential sets, and Pion and webrtc-rs 0.17 refuse such a description
+  (`ErrSessionDescriptionConflictingIceUfrag`; `test_simulcast_rtc_to_webrtc` failed at
+  their `setRemoteDescription`). RFC 9429 section 5.2.1's unique credentials per transport
+  are `SettingEngineBuilder::with_unique_transport_credentials(true)`; several transports on
+  one local socket need it (the ICE username then tells them apart).
+- **peer connection** (mt-7): an end-of-candidates passed to `add_local_candidate` without
+  `sdp_mid` and `sdp_mline_index` ends the gathering of every transport, not the default
+  one's only: an application that gathers on one socket reaches `iceGatheringState`
+  "complete" and the null `icecandidate` while the answer is outstanding, as with one
+  transport.
+
+- **peer connection** (mt-6): a subsequent offer keeps the BUNDLE groups of the most recent
+  answer (RFC 9429 section 5.2.2): a section that answer accepted outside every group stays
+  outside (it used to be put in the one group again), and each group of several stays its
+  own. `BundleMode` (internal) carries the groups.
+
+- **peer connection** (mt-5): `bundlePolicy: balanced`, the default, follows RFC 9429
+  section 4.1.1 / 5.2.1 in an initial offer: the first m= section of each media type (audio,
+  video, data) has a transport of its own, with its own ICE credentials, candidates and
+  default destination; the later sections of a type stay bundle-only. Until the answer the
+  offerer has up to three transports (`ice_transport_sections()` lists each); an answer that
+  bundles, as every browser's does, closes all but the tagged section's. An application that
+  gathers only for the first transport still connects with a bundling peer.
+
+- **peer connection** (mt-4): transport identity in the API, for connections with several
+  transports.
+  - `RTCPeerConnectionIceEvent` and `RTCPeerConnectionIceErrorEvent` have an
+    `ice_transport: Option<RTCTransportId>` field: a struct literal needs it (or
+    `..Default::default()`).
+  - The variants that name no transport (`OnIceTransportStateChange`,
+    `OnIceGathererStateChange`, `OnSelectedCandidatePairChange`, `OnIceCandidatePair{Add,
+    Nominate,Remove}`, `OnDtlsTransportStateChange`, `OnDtlsTransportError`) are fired for
+    the default transport only; with several transports the other transports' candidate pair
+    events and DTLS states used to come through them unnamed.
+  - `iceGatheringState` and `OnIceGatheringStateChangeEvent` are the aggregate of every
+    transport's gathering state (W3C 4.3.2), and the null `icecandidate` comes once every
+    transport has finished; they were the first transport's.
+  - The statistics report has a `transport` object per transport (transport 0 keeps its
+    name); RTP stream and codec objects name the transport of their section.
+
+- **data channels** (pc-26, W3C webrtc-pc 6.2 `send()`): `send()` / `send_text()` on an in-band
+  channel still "connecting" (its DATA_CHANNEL_ACK not yet received) fails with
+  `ErrDataChannelNotOpen` (InvalidStateError), as on any channel that is not "open"; it used to
+  be accepted. RFC 8832 section 6's early send is
+  `SettingEngineBuilder::with_data_channel_send_before_ack(true)`.
+- **encoded-transform** (pc-26): `RTCEncodedVideoFrameMetadata` has a new public field,
+  `corruption_detection`; struct literals add it (or `..Default::default()`).
+
+- **ice** (pc-24, W3C webrtc-pc 4.8.1): `RTCIceCandidateInit` has a new public field,
+  `relay_protocol: Option<RTCIceServerTransportProtocol>` (`relayProtocol` of
+  RTCLocalIceCandidateInit); struct literals without `..Default::default()` add
+  `relay_protocol: None`.
+
+- **sctp**: RFC 9260 section 6.2: once a SACK advertised a closed window (a_rwnd 0), new DATA
+  above the largest TSN received is dropped, the in-sequence chunk included. Taking that chunk
+  when nothing is readable (the deadlock escape of webrtc-rs/webrtc#822, up to one message
+  past the buffer) is now `TransportConfig::with_zero_window_overcommit(true)`, off by
+  default. The peer connection turns it on only when the `max-message-size` it advertises is
+  larger than its SCTP receive buffer (not with the defaults).
+- **dtls**: RFC 5246 section 7.4.6: a client certificate that is not X.509v3 is not sent; the
+  client answers the CertificateRequest with an empty Certificate (a server that requires one
+  fails the handshake).
+- **sctp**: `TransportConfig::with_max_receive_buffer_size` raises a value below 1500 to 1500,
+  and `with_max_num_outbound_streams` / `with_max_num_inbound_streams` raise 0 to 1 (RFC 9260
+  3.3.2, 3.3.3: an INIT or INIT ACK may carry neither).
+- **srtp**: the default DTLS-SRTP profiles no longer include `SRTP_AES128_CM_HMAC_SHA1_32`
+  (RFC 3711 sections 5.2 and 9.5: the 32-bit tag only where the application knows its
+  conditions hold); `SettingEngineBuilder::with_srtp_protection_profiles` offers it.
+- **rtp**: an encoding that names an SSRC another local stream of the connection has, or
+  names one twice (media, RTX or FEC), is refused with the new
+  `Error::ErrRTPSenderSsrcTaken` (RFC 3711 sections 8 and 9.1, RFC 5764 section 3: every
+  local stream is under the one SRTP master key); it was accepted.
+- **ice**: with the "relay" ICE transport policy a relayed candidate is signalled with raddr
+  0.0.0.0 rport 9 (RFC 8827 section 6.4).
 - **media conformance**: with ECN on (`SettingEngineBuilder::with_ecn`) RTP packets are marked
   ECT(0), not ECT(1), unless the receiver's `a=ecn-capable-rtp` asks for ECT(1) with `ect=1` (or
   `ect=random`): RFC 6679 section 7.3.1, "SHOULD use ECT(0)". The L4S form (ECT(1) always, what
@@ -101,6 +186,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - New `scripts/audit-count.py` (in the Python gates of `cargo.yml`, with `--check`): counts
     the clause audit's tables by level and verdict, fails on an unknown level or verdict or a
     totals line that disagrees with its table, and writes `docs/conformance/audit/COUNTS.md`.
+- **turn**: `ClientConfig::default()` now sends SOFTWARE `rtc-turn <version>` (it sent none);
+  set `software` to an empty string for the old behaviour. A TURN request over UDP beyond the
+  path MTU is an `ErrPacketTooBig` where it was sent.
+
+- **ICE-TCP built into the engine** (branch `conf/tcp-2-ice-tcp`): TCP candidates are
+  gathered by default (RFC 6544 section 4.1; browsers do), by the engine itself, for a driver
+  that serves the new stream interface. An application that adds a UDP host candidate and
+  polls `poll_stream_command` now gets `StreamCommand::Listen` commands, and the passive,
+  simultaneous-open and active TCP candidates appear as `OnIceCandidateEvent`s; its end of
+  gathering (the empty candidate) is held until those listeners are answered. An
+  application that never touches the stream interface sees no change.
+  `SettingEngineBuilder::with_tcp_candidate_gathering(false)` turns it off. `RTCPeerConnection`
+  has a new field, so nothing outside changes, but `SettingEngine` has one too.
+
 - **sctp**: RFC 9260 section 6.2: once a SACK advertised a closed window (a_rwnd 0), new DATA
   above the largest TSN received is dropped, the in-sequence chunk included. Taking that chunk
   when nothing is readable (the deadlock escape of webrtc-rs/webrtc#822, up to one message
@@ -1409,6 +1508,132 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behaviour changes
 
+- **peer connection** (mt-8): ICE restart and DTLS per transport. `restart_ice()` (W3C
+  restartIce) restarts every transport: the next offer gives each new credentials (one new
+  pair shared by all unless `with_unique_transport_credentials`), and each restarts when the
+  offer is applied. A remote offer that changes the credentials of one transport restarts that
+  one only (RFC 8839 4.4.1.1.1, RFC 9429 5.3.2): its answer has new credentials for it and the
+  same for the others; a new DTLS association a remote offer asks of a transport other than the
+  default one stages the answer's `tls-id` as the default transport's does, and a rollback of
+  the offer drops what it staged on every transport (RFC 9429 5.7). Each transport writes its
+  own `a=tls-id` (RFC 8842 5) in its first section, and a remote description's `tls-id`s are
+  checked per transport; one whose transports had different values was refused
+  (`ErrSessionDescriptionInvalidTlsId`). Consent and keepalives were already per transport
+  (each agent's timers); `one_transport_losing_its_path_disconnects_the_connection_only_through_it`
+  shows it.
+- **peer connection** (mt-8): sections moving between transports in a later exchange are
+  tested: a later remote offer that bundles sections on transports of their own moves them to
+  the group's transport and discards theirs (RFC 9143 7.5.1, 7.4); one that moves a section out
+  of the group (RFC 9143 7.5.2) is answered outside the group with a transport of its own (7.3.2);
+  a rejected section releases its own transport when the description is applied (RFC 8839
+  4.4.3.1). Several transports on one local socket connect when the transports have credentials
+  of their own (`three_transports_share_one_socket_with_unique_credentials`; routing of
+  `conf/tcp-5-train-fixes`). Each transport's `packetsSent` / `bytesSent` / `packetsReceived` /
+  `bytesReceived` / `selectedCandidatePairChanges` is its own (asserted in
+  `statistics_have_a_transport_object_per_transport`).
+- **data channels** (pc-26, W3C webrtc-pc 6.2): a closed channel's final attributes stay
+  readable with `RTCPeerConnection::closed_data_channel(id)` (`RTCClosedDataChannel`: label,
+  protocol, id, reliability, `bufferedAmount` "not reset to zero once the channel closes", the
+  low threshold), for the last 64 closed channels. rtc-sctp: `stream_bytes_dequeued` of a
+  stream that was closed returns its count at the close until the id is opened again.
+- **rtp** (pc-26, webrtc-extensions 4.2): `setHeaderExtensionsToNegotiate` restricts each
+  direction to what the media engine registered the extension for (its allowed direction):
+  "sendrecv" asked of a receive-only extension is stored as "recvonly".
+- **stats** (pc-26, webrtc-stats 8.5): an inbound video stream that received a packet with
+  the negotiated corruption-detection extension reports `corruptionMeasurements`,
+  `totalCorruptionProbability` and `totalSquaredCorruptionProbability` (0 until the
+  application supplies measurements).
+
+- **data channels** (pc-25, RFC 8832 section 6, W3C webrtc-pc 6.2.8): user data that reaches
+  the opener of an in-band channel before its DATA_CHANNEL_ACK completes the handshake as the
+  ACK would ("the DATA_CHANNEL_ACK or any other message"): the channel is announced open, then
+  the data is delivered. It used to be held until the ACK and dropped if the handshake
+  deadline passed first.
+- **ice** (pc-25, W3C webrtc-pc 4.8.1): an exposed remote candidate (candidate pairs, the
+  selected pair, the pair events) has an empty `address` until the application supplied that
+  address in a description or with `add_remote_candidate`: a peer-reflexive candidate learned
+  only from checks no longer shows the peer's address.
+
+- **rtp** (pc-24, W3C webrtc-pc 5.2, 5.3): `getParameters().rtp_parameters.header_extensions`
+  of a sender (receiver) lists only the extensions its transceiver's m= section negotiated in
+  a sending (receiving) direction (`[[NegotiatedHeaderExtensions]]`), and none before an answer
+  was applied; it listed every extension of the kind negotiated anywhere on the connection, or
+  every registered one before negotiation. Video senders drop whole frames above an
+  encoding's `max_framerate` (W3C 5.2.5), judged by RTP timestamp.
+- **data channels** (pc-24, W3C webrtc-pc 6.1, 6.1.2, 6.2.3): a channel the peer opens in-band
+  raises `RTCDataChannelEvent::OnDataChannel(id)` (the `datachannel` event) before its
+  `OnOpen`. `create_data_channel` with no id left (DTLS role known) fails with
+  `ErrMaxDataChannelID` and registers nothing; the channel used to stay registered. An answer
+  that closes the SCTP association fires `OnSctpTransportStateChange(Closed)`.
+- **ice** (pc-24, W3C webrtc-pc 4.8.1): a surfaced local relay candidate has
+  `relay_protocol` (from `RTCIceCandidateInit::relay_protocol`, else its TURN `url`) and `url`;
+  other candidates have neither.
+
+- **sctp / data channels** (pc-22, W3C webrtc-pc 4.4.1.6): `RTCPeerConnection::sctp()` is the
+  transport from the first applied offer (local or remote) that describes an SCTP association,
+  in state "connecting" until the association is up; it was `None` until the association
+  started. An answer that closes the association (rejected data section, `a=sctp-port:0`)
+  makes it `None`, and a rollback brings back the last stable state's
+  (`[[LastStableStateSctpTransport]]`). An in-band data channel that gets no id when an
+  answer settles the DTLS role is closed: `OnError` (`data_channel_error`:
+  data-channel-failure), then `OnClose`; it used to stay connecting without an id.
+- **crypto** (pc-22): the aws-lc-rs provider generates RSA keys (`SignatureScheme::RsaPkcs1Sha256`:
+  2048 bits, exponent 65537), so `RTCCertificate::generate` makes RSA certificates with
+  `crypto-aws-lc-rs` (W3C webrtc-pc 4.9). ring still cannot (no RSA key generation in ring).
+- **bandwidth** (pc-21): `maxBitrate` is enforced and the congestion controller's target is
+  divided among the senders (W3C webrtc 5.2.5, webrtc-priority 3.2, RFC 8835 section 4.1).
+  Every active encoding of a sending transceiver gets a share by `priority` (very-low : low :
+  medium : high = 1 : 2 : 4 : 8), capped at its `maxBitrate` with the rest going to the
+  others; `RTCRtpSender::target_bitrates()` returns the shares by SSRC, and each outbound
+  stream's `targetBitrate` reports its share (also with several streams). `setParameters`
+  divides again. An encoding with a `maxBitrate` has whole frames (the packets of one RTP
+  timestamp) dropped while they would take it above the maximum, counted as TIAS; one frame
+  always goes. A sender that wrote above its `maxBitrate` now loses frames.
+- **jitter buffer** (pc-21): `RTCRtpReceiver::set_jitter_buffer_target` reaches the chain's
+  adaptive jitter buffer (`AdaptiveJitterBufferInterceptor`), which holds the receiver's
+  streams for the target clamped to its minimum and maximum delay (W3C webrtc 5.3);
+  `None` returns to the adaptive delay. rtc-interceptor: `JitterBufferControl` (additive).
+- **ice**: through the peer connection a local candidate is paired only once it has been
+  conveyed to the peer (RFC 8838 section 10): when the application takes its
+  `OnIceCandidateEvent` from `poll_event`, or sets a local description that lists it. An
+  application that adds a candidate and never takes the event (nor sets a description after
+  it) now sends no check from it. `SettingEngineBuilder::with_ice_pairing_before_candidates_are_conveyed(true)`
+  pairs at once, as before. In `rtc-ice`, `Agent::add_local_candidate` still pairs at once (the
+  caller conveys the candidate with that call); new `Agent::add_unconveyed_local_candidate`,
+  `local_candidate_conveyed`, `all_local_candidates_conveyed`, `is_local_candidate_unconveyed`
+  and `AgentConfig::hold_local_candidates_until_conveyed` (`ice_local_candidate_conveyed.rs`,
+  `agent_trickle_test.rs`).
+- **ice**: a STUN response to a check is authenticated by MESSAGE-INTEGRITY only, the attribute
+  every check carries; one with MESSAGE-INTEGRITY-SHA256 instead is discarded (RFC 8489
+  sections 9.1.4, 9.1.5). A check, or any other STUN message, larger than the path MTU allows
+  over UDP is not sent (section 6.1: `AgentConfig::path_mtu`, else 576 / 1280 bytes), and the
+  check's pair fails; so does a check that cannot be built (a USERNAME of 509 bytes or more).
+  A check whose responses all failed their integrity check ends with the new
+  `Event::IntegrityViolation` for its pair (section 9.1.4) (`agent_stun_rows_test.rs`).
+- **ice**: connectivity checks and success responses carry SOFTWARE, `rtc-ice <version>` by
+  default (RFC 8489 sections 6.1, 6.3.1.1); `AgentConfig::software` sets another text, or none
+  with an empty one (section 16.1.2). A lite agent that is dual-stack or IPv6-only takes its
+  local preference from the RFC 6724 precedence of the address (RFC 8445 section 5.2), its
+  rank breaking ties; an IPv4-only one keeps 65535.
+- **ice**: once the peer's end-of-candidates has arrived and local gathering is complete, the
+  per-type waits before nominating (`with_*_acceptance_min_wait`) end (RFC 8838 section 14).
+  A host candidate past the cap of published mDNS names is provided under a `.local` name
+  that is not published, instead of being dropped (draft-ietf-mmusic-mdns-ice-candidates
+  section 3.1.1).
+- **ice**: new `Agent::stop_for_ice_mismatch` ends ICE for the agent's stream (RFC 8839
+  section 5.3: no checks, state failed), for the SDP layer to call on an answer's
+  `a=ice-mismatch`; no RFC 3264 fallback (nothing is sent without consent, RFC 7675).
+- **mdns**: through `rtc-ice` and the peer connection, the answers to a query of more than one
+  question wait 20 to 120 ms even when every question is about the agent's own name (RFC 6762
+  section 6.3); `MdnsConfig::with_multi_question_delay`,
+  `AgentConfig::multicast_dns_multi_question_delay`,
+  `SettingEngineBuilder::with_multicast_dns_multi_question_delay(false)` answers at once as
+  before. `rtc-mdns` alone keeps answering such a query at once unless asked.
+- **mdns**: cached addresses found stale before their TTL ends are flushed (RFC 6762 sections
+  10.4, 10.5): `Mdns::reconfirm(now, name)` (a client's hint) sends two queries and flushes an
+  address no response brought within ten seconds; an address other hosts' queries ask for in
+  vain (two or more in ten seconds) is flushed without a query of our own. New
+  `Mdns::is_reconfirming` (`mdns_stale_test.rs`).
 - **peer connection** (mt-2): a remote description whose sections have different ICE
   credentials outside a BUNDLE group is applied, a transport per section, instead of refused
   with `ErrSessionDescriptionConflictingIceUfrag`; an answer accepts a section offered outside
@@ -1864,6 +2089,205 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     consecutive events in one packet, RFC 4733 section 2.5.1.5 (timestamp of the first event,
     M set, each event's own E bit and duration).
 
+- **Several BUNDLE groups** (mt-6; RFC 9143 section 5, RFC 5888 section 6, RFC 9429 sections
+  5.2.2, 5.3.1): each BUNDLE group of a description is a transport. An offer with several is
+  answered group by group (each answerer-tagged section carries its group's transport
+  attributes), the transports follow the answer, a later offer keeps the groups, and an
+  unknown SSRC is looked up in the payload type and MID tables of the transport it arrived on
+  (RFC 9143 section 9.2).
+- **`bundlePolicy: balanced`** (mt-5; RFC 9429 4.1.1, 5.2.1; RFC 9143 7.2; W3C webrtc-pc
+  4.2.4): an initial offer gathers for each media type in use; a peer that does not bundle
+  answers one audio and one video section (and data) on separate transports, the bundle-only
+  sections rejected. A later offer puts a new section on the BUNDLE transport. Browser
+  scenario: "balanced: Rust's offer has a transport per media type, answered without
+  BUNDLE"; `examples/interop-peer` gathers for its own offer's transports.
+- **Transport identity in the API** (mt-4; W3C webrtc-pc 4.3.2, 5.5, 5.6, webrtc-stats 7.1).
+  - `RTCPeerConnectionEvent::OnTransportEvent(RTCTransportEvent)`: every transport's ICE
+    `statechange`, `gatheringstatechange`, `selectedcandidatepairchange`, candidate pair
+    events and DTLS `statechange` / `error`, with the ids of its ICE and DTLS transports.
+  - `RTCPeerConnection::dtls_transports()` and `dtls_transport_by_id(id)` give the handles;
+    each `RTCIceTransport` reports its own remote candidates and local parameters.
+  - Local candidates and end-of-candidates indications name their transport
+    (`ice_transport`); a transport other than the default one gathers through the same path
+    as the default (its candidates' statistics, generations and server URLs included).
+  - The connection's gathering state aggregates the transports (W3C 4.3.2).
+  - `getStats`: a `transport` object per transport with its own candidate pairs and
+    candidates, each RTP stream's `transportId` the transport of its section.
+  - The browser scenario "unbundled: max-compat without a BUNDLE group" checks both of
+    Rust's transports report DTLS "connected" by `OnTransportEvent` and have a `transport`
+    stats object with a selected pair.
+- **pc** (pc-26): `SettingEngineBuilder::with_sctp_rto(initial, min, max)` (RFC 9260 RTO.Initial,
+  RTO.Min, RTO.Max) and `with_sctp_max_retransmissions` (Association.Max.Retrans), so an
+  unanswering peer fails the association (data channels: `sctp-failure`) within a chosen time;
+  `with_data_channel_send_before_ack`; `RTCRtpSender::set_configured_scalability_mode` (the
+  encoder's configured webrtc-svc mode, returned by `getParameters`). rtc-sctp: `RtoConfig`
+  and `TransportConfig::{with_rto_config, rto_config}`; the timers' backoff stops at the
+  configured RTO.Max.
+- **rtp** (pc-26): `rtp::extension::corruption_detection_extension::CorruptionDetectionExtension`
+  and `CORRUPTION_DETECTION_URI`: the libwebrtc corruption-detection header extension (sequence
+  index with the B flag and its 14-bit extension, std dev, luma / chroma thresholds, up to 13
+  samples, synchronization messages); a received video frame's message is
+  `RTCEncodedVideoFrameMetadata::corruption_detection`.
+
+- **encoded-transform** (pc-25, webrtc-extensions 15): `RTCEncodedFrameMetadata::remote_capture_time`,
+  a received frame's capture time on this side's clock, by the stream's RTCP sender reports
+  (RFC 3550 section 6.4.1) less half the round trip time.
+
+- **pc** (pc-24): `RTCPeerConnection::data_channel_ids()` (W3C `[[DataChannels]]`);
+  `SettingEngineBuilder::with_sctp_max_streams` (the SCTP stream count asked for and accepted,
+  hence `maxChannels`); `RTCCertificate::{serialize, deserialize}` with
+  `RTCSerializedCertificate` and `RTCCertificateKeyHandle` (W3C webrtc-pc 4.9.2: expires, the
+  chain, the origin and a handle to the key, never the key's bytes);
+  `RTCCertificate::{export_pem, import_pem}` (not part of any W3C specification): the key and
+  certificate as standard `PRIVATE KEY` / `CERTIFICATE` PEM blocks with an `EXPIRES` block, so
+  a server keeps its DTLS fingerprint across restarts; the import checks that the key is the
+  certificate's, that the certificate is valid and not expired at the given time, and
+  optionally that it has an expected fingerprint. It also takes PEM from other tools, which is
+  how an RSA certificate is brought to the ring provider.
+
+- **encoded-transform** (pc-20): per-frame metadata of received frames (W3C
+  webrtc-encoded-transform 4). `RTCRtpReceiver::encoded_frame_metadata(packets)` takes the RTP
+  packets of one frame as `poll_read` delivered them and returns
+  `RTCEncodedFrameMetadataKind::{Video, Audio}`: SSRC, payload type, CSRCs, RTP timestamp,
+  MIME type, `receive_time` (the arrival of the frame's last packet, recorded by the
+  receiver), capture time and sender offset (abs-capture-time, or interpolated); for video the
+  frame type (key / delta / empty), `frame_id` and `dependencies` from the Dependency
+  Descriptor (read with the stream's structure as packets arrive, frame numbers unwrapped to
+  64 bits), width / height (descriptor resolution, VP8 key frame header, VP9 scalability
+  structure, H.264 SPS with cropping, AV1 sequence header; a delta frame keeps its stream's
+  last size) and the spatial / temporal indices; for audio the sequence number and the RFC 6464
+  level as linear `audioLevel`. `RTCRtpSender::write_rtp_with_audio_level` writes a locally
+  sourced frame's level as the RFC 6464 element. `RTCRtpReceiver::send_key_frame_request`
+  sends a FIR (RFC 5104 4.3.1, sequence number per request) when receiving with `ccm fir`
+  negotiated, an InvalidStateError on audio. `RTCPeerConnectionEvent::OnKeyFrameRequest {
+  sender, rid }` for each PLI / FIR naming a sender's SSRC (6.4 `keyframerequest`).
+- **Stream transports per transport** (branch `conf/tcp-5-train-fixes`, with mt-2's several
+  transports per connection). Each transport gathers its own ICE-TCP candidates (its own
+  passive and simultaneous-open listeners and active candidate, announced with its section's
+  `sdpMid`) and its own TURN-over-TCP/TLS allocations, and holds back its own end of
+  gathering until they are settled (RFC 9429 section 5.2.1, RFC 6544, RFC 8656 3.1). Every
+  ICE-TCP connection carries one transport: the one whose check opened it, whose listener
+  accepted it, or, on a port several transports share, the one its first Binding request
+  names. A datagram arriving on a local address several transports gathered on (a driver's
+  shared UDP or ICE-TCP port) goes to the transport its Binding request's USERNAME names
+  (RFC 8445 section 7.2.2), then to the one that knows the sender. Removed transports' listeners,
+  connections and TURN links are released. New `RTCPeerConnection::ice_username_fragments` (every
+  transport's ufrag, for a driver's `UfragMux`); a relay candidate on a transport other than the
+  default one carries its `url` and `relayProtocol` as on the default one.
+  Fixed in the merge of ice-19 with mt-2: every transport's agent holds its local candidates
+  until they are conveyed, so a candidate's `OnIceCandidateEvent` and a local description now
+  convey it on the transport it belongs to (by its ufrag), not only on the default one; without
+  this a transport other than the default one never paired a candidate.
+
+- **turn, ice: STUN rows of the TURN client and ICE-TCP** (branch `conf/tcp-4-stun-turn-rows`).
+  The TURN client's requests carry SOFTWARE `rtc-turn <version>` by default
+  (`turn::client::DEFAULT_SOFTWARE`; an empty `ClientConfig::software` sends none, RFC 8489
+  6.1, 16.1.2); a request over UDP larger than the path MTU (`Client::set_path_mtu`, else 576 /
+  1280 bytes) is refused with `ErrPacketTooBig` before anything is sent (6.1); an ICE-TCP check
+  answered by a response that fails its integrity check ends at once as an integrity violation
+  (`Event::IntegrityViolation`, the pair fails; 9.1.4). A 400 to a TURN request is shown not to
+  be retried (14.8).
+
+- **TURN over TCP and TLS in the engine** (RFC 8656 section 3.1, RFC 8305, RFC 7443; branch
+  `conf/tcp-3-turn-tls`). The configuration's `turn:...?transport=tcp` and `turns:` servers are
+  run by the engine over the stream interface: `StreamCommand::Resolve` /
+  `StreamEvent::Resolved` have the driver resolve the name (A and AAAA together), the
+  addresses are interleaved by family and tried 250 ms apart (Happy Eyeballs,
+  `rtc_shared::stream::happy_eyeballs`), TLS is rustls used sans-I/O (`turn_tls::TlsLayer`,
+  ALPN `stun.turn`, TLS 1.3 and 1.2, the certificate checked against the URI's host with the
+  roots or verifier of `SettingEngineBuilder::with_turn_tls`, or the Mozilla roots with the
+  new feature `turn-tls-webpki-roots`), the TURN client allocates over TURN's own framing, the
+  relayed candidate is announced with `relayProtocol` `tcp` or `tls`, permissions are created
+  as the agent sends (datagrams held meanwhile) and relayed data goes both ways. A
+  `turns:...?transport=udp` (DTLS, RFC 7350) server is left alone. `with_turn_over_streams(false)`
+  turns it off; `turn:` over UDP stays the application's. The library's rustls gains its `tls12`
+  feature (no new crate). Tests: `turn_tls_test.rs`, `happy_eyeballs.rs`,
+  `turn_streams.rs`, env `testenv_turn_streams.rs` against coturn over TCP and TLS. Audits
+  `rfc8305.md`, `rfc7350.md`, `rfc5928.md` added; RFC 8656 3.1-1, 3.1-2, 3.9-1 updated.
+
+- **stream driver**: server-side socket choices in `rtc-stream-driver` (branch
+  `conf/tcp-2b-driver-sockets`): `sockets::PortRange` with `bind_udp_in_range` and
+  `bind_tcp_listener_in_range` (and `DriverConfig::tcp_port_range` for the engine's
+  listeners); `sockets::AddressFilter` (bind addresses, interface and IP filters, loopback and
+  IPv6 link-local only on request) for the addresses that get host candidates; one UDP port
+  shared by many peer connections, routed by `sockets::UfragMux` (the receiver's ufrag of the
+  first Binding request from an address, RFC 8445 section 7.2.2, then the address); one passive
+  ICE-TCP port shared the same way (`DriverConfig::shared_passive`,
+  `sockets::accept_by_ufrag`, `StreamDriver::adopt_shared`, which hands the engine the bytes
+  read to route the connection). The engine side is `RTCPeerConnection::ice_username_fragment`.
+  `with_nat_1to1_ips` applies to the engine's TCP candidates too
+  (`nat_1to1_addresses_apply_to_the_engines_tcp_candidates`).
+
+- **ICE-TCP in the engine** (RFC 6544, RFC 4571; branch `conf/tcp-2-ice-tcp`). The
+  application owns the sockets only: `RTCPeerConnection::poll_stream_command` (listen, stop,
+  connect from a local address, close, reset), `poll_stream_transmit` (bytes for a connection),
+  `handle_stream_event` (listening, connected, failed, written, closed, reset),
+  `handle_stream_accepted` (a connection on one of its listeners gets an id) and
+  `handle_stream_read` (bytes in any segmentation). For each address of a UDP host candidate
+  the engine gathers a passive and a simultaneous-open TCP candidate (a listener each) and an
+  active one (port 9); it opens an active candidate's connection from an ephemeral port when
+  its first check goes out and a simultaneous-open one from its own port, reuses an open
+  connection for every later packet of the pair, frames STUN, DTLS, SRTP and SCTP with RFC
+  4571, fails a pair at once when its connection cannot be made (section 7.1), resets a
+  connection whose first answer is not STUN or whose frames stop being STUN / DTLS / RTP
+  (RFC 4571 section 2), reopens a broken selected connection on the next write from the
+  active side (section 11.1), closes the connections that carry no selected pair once ICE
+  has completed (section 8; `with_tcp_close_unused_connections(false)` keeps them) and closes
+  everything on `close()`. Settings: `with_tcp_candidate_gathering`,
+  `with_tcp_simultaneous_open`, `with_tcp_close_unused_connections`, `with_stream_limits`. A
+  TCP candidate the application adds itself stays the application's, as before.
+  `tests/ice_tcp_streams_rtc2rtc.rs` (an in-memory stream network that cuts, delays, refuses
+  and breaks), `tests/testenv_ice_tcp.rs` (through a NAT with the tokio driver, UDP
+  blocked) and the browser cell "ICE-TCP: built into the engine with UDP blocked, ...".
+
+- **shared**: stream transports for the sans-I/O engine (`rtc_shared::stream`, branch
+  `conf/tcp-1-framing`). An engine names its TCP connections and listeners by id
+  (`StreamId`, `ListenerId`) and tells its driver what to do with `StreamCommand` (listen,
+  stop listening, connect from a local address, close after the last byte, reset); the driver
+  answers with `StreamEvent` (listening with the bound address, connected with the local
+  address, failed, bytes written, closed, reset), `StreamTable::accept` for a connection it
+  accepted and `StreamTable::read` for the bytes it read, in any segmentation. `StreamTable`
+  frames messages (`Framing::Rfc4571` for ICE-TCP, RFC 4571 / RFC 6544; `Framing::Turn`, RFC
+  8656 section 12.5), splits reads back into messages with memory bounded by two messages
+  whatever the read size, runs an optional `StreamLayer` (TLS) between the two, and applies
+  back-pressure: at most `StreamConfig::window` bytes a connection not yet reported written,
+  then a queue of `max_queued` bytes beyond which a message is dropped whole, never cut. New
+  errors `ErrUnknownStream`, `ErrStreamConnectionClosed`, `ErrStreamMessageTooLong`.
+  `examples/stream-driver` (`rtc-stream-driver`, not published) is a tokio driver for it,
+  tested over loopback sockets. RFC 4571 audit: `docs/conformance/audit/rfc4571.md`.
+
+- **peer_connection**: `RTCPeerConnection::renew_dtls_association()` asks for a new DTLS
+  association in the next offer (a new `a=tls-id`, RFC 8842 section 5.5): its handshake exports
+  new SRTP master keys and the key lifetime counts start over (RFC 3711 sections 9.2 and 11.3,
+  RFC 7714 sections 8.4 and 9.4). Call it on `OnSrtpKeyLifetimeExpiring`; an rtc peer takes
+  the new association, browsers ignore a new `tls-id`.
+- **Several transports in one peer connection** (mt-2; RFC 9429 sections 4.1.1, 5.2.1, 5.3.1,
+  RFC 9143 section 7, RFC 8835 section 4.2, RFC 8834 section 4.4). An m= section outside a
+  BUNDLE group runs on a transport of its own: its own ICE agent and credentials, candidates,
+  DTLS association (fingerprint check, role) and SRTP keys.
+  - A remote offer without a BUNDLE group, or with sections outside it, is answered with a
+    transport per such section (the bundle policy still decides which sections an answer to
+    an offer without a group accepts: `balanced` the first of each media type, `max-compat`
+    every one, `must-bundle` the first).
+  - `bundlePolicy: max-compat` offers a transport per m= section, each with its own
+    credentials; an answer that bundles them moves the sections to the tagged section's
+    transport and closes the others (RFC 9143 section 7.4, RFC 5888 section 9.2), one without
+    a group keeps them.
+  - The application gathers per transport: `RTCPeerConnection::ice_transport_sections()` lists
+    each transport's first section; `add_local_candidate` and `add_remote_candidate` give a
+    candidate to the transport of its `sdp_mid` / `sdp_mline_index` (the default transport
+    without either; an end-of-candidates without either is for every transport). Datagrams go
+    to the transport that gathered on their local address; packets go out on the transport
+    of their SSRC's section, SCTP on the data section's.
+  - `iceConnectionState` and `connectionState` aggregate every transport (W3C webrtc-pc 4.3.3,
+    4.3.4); `RTCRtpSender/Receiver::transport` and `RTCSctpTransport::transport` name their
+    section's transport.
+  - The browser interop matrix has a scenario for it ("unbundled: max-compat without a BUNDLE
+    group, a transport per section"); `examples/interop-peer` gathers per transport.
+  - Not yet: transport-level events (`OnIceTransportStateChange`, `OnDtlsTransportStateChange`,
+    `OnSelectedCandidatePairChange`, gathering events) and statistics for any transport but the
+    first; `balanced` offers (a transport per media type); several BUNDLE groups; an ICE restart
+    of the other transports.
 - **media conformance**: engine rows.
   - A packet whose sequence number its stream delivered within the last 1024 is not
     delivered to the application again (RFC 7587 section 4.1: "at most one copy"): an RTX or
@@ -2941,6 +3365,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   SCTP transport stays `connected`, channels waiting for an association and the peer's new
   ones open on the new one (`tests/sctp_restart_rtc2rtc.rs`). The peer's new channel on a
   stream id an old channel still held was refused as a protocol violation.
+- **media**: `SampleBuilder` dropped the packets of the first access unit that arrived after
+  a later packet of it (the segment began at the first packet to arrive and the earlier ones
+  were released as consumed); NAL units now come out in sequence-number order from the start
+  (RFC 6184 sections 5.6, 5.8; RFC 7798 section 6).
 - **ice**: at 30 % loss (seeds 0x4a, 0xff and 0x127 of `tests/lossy_link_rtc2rtc.rs` with
   aws-lc-rs) and 40 % loss (0x1c and 0x21, both backends) the controlling peer went `failed`
   about 30 s in, still checking, 29.5 s after the Binding success response that validated its

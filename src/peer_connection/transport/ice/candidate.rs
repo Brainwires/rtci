@@ -386,6 +386,17 @@ mod test {
                 },
                 r#"{"candidate":"candidate:relay123","sdpMid":"0","sdpMLineIndex":0,"usernameFragment":null,"url":"turn:turn.example.com:3478"}"#,
             ),
+            (
+                RTCIceCandidateInit {
+                    candidate: "candidate:relay124".to_string(),
+                    sdp_mid: Some("0".to_string()),
+                    sdp_mline_index: Some(0),
+                    username_fragment: None,
+                    url: Some("turns:turn.example.com:5349".to_string()),
+                    relay_protocol: Some(RTCIceServerTransportProtocol::Tls),
+                },
+                r#"{"candidate":"candidate:relay124","sdpMid":"0","sdpMLineIndex":0,"usernameFragment":null,"url":"turns:turn.example.com:5349","relayProtocol":"tls"}"#,
+            ),
         ];
 
         for (candidate_init, expected_string) in tests {

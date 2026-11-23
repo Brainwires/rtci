@@ -371,6 +371,9 @@ fn the_sframe_payload_format_carries_per_ssrc_keyed_frames_end_to_end() -> Resul
                             timestamp: 3000 * n,
                             ssrc,
                             marker: i + 1 == count,
+                            // draft-ietf-avtcore-rtp-sframe-03 section 4: the CSRCs of the
+                            // media packetization's output are those of the SFrame packets.
+                            csrc: vec![0x1111_2222, 0x3333_4444],
                             ..Default::default()
                         },
                         payload,
@@ -389,6 +392,11 @@ fn the_sframe_payload_format_carries_per_ssrc_keyed_frames_end_to_end() -> Resul
     let mut reassembler = SFrameReassembler::default();
     let mut frames = vec![];
     for packet in world.peers[1].read.iter().filter(|p| p.header.ssrc == ssrc) {
+        assert_eq!(
+            packet.header.csrc,
+            vec![0x1111_2222, 0x3333_4444],
+            "the CSRCs"
+        );
         if let Some(sframe) = reassembler.push(packet) {
             assert_eq!(sframe.origin, SFramePayloadOrigin::Raw);
             assert!(sframe.marker);
@@ -399,6 +407,134 @@ fn the_sframe_payload_format_carries_per_ssrc_keyed_frames_end_to_end() -> Resul
     assert_eq!(frames.len(), FRAMES as usize, "every frame completes");
     for (n, (_, decrypted)) in frames.iter().enumerate() {
         assert_eq!(*decrypted, frame(n as u32), "frame {n}");
+    }
+    Ok(())
+}
+
+/// draft-ietf-avtcore-rtp-sframe-03 section 6: an offerer whose SFrame offer was answered
+/// without `a=sframe` discards the RTP it receives for the section. The answerer sends on a
+/// sendrecv section; with SFrame refused the offerer reads none of it, without SFrame in the
+/// offer at all it reads it.
+#[test]
+fn an_offerer_whose_sframe_was_refused_discards_what_it_receives() -> Result<()> {
+    for refuse in [true, false] {
+        let mut world = World {
+            peers: [Peer::new("10.0.0.1:5000")?, Peer::new("10.0.0.2:5000")?],
+            now: Instant::now(),
+            lose: vec![],
+            lost: vec![],
+        };
+        let transceiver = world.peers[0].pc.add_transceiver_from_kind(
+            RtpCodecKind::Video,
+            Some(RTCRtpTransceiverInit::with_direction(
+                RTCRtpTransceiverDirection::Sendrecv,
+            )),
+        )?;
+        if refuse {
+            world.peers[0]
+                .pc
+                .rtp_transceiver(transceiver)
+                .expect("transceiver")
+                .set_transform_use_sframe(true)?;
+        }
+        let now = world.now;
+        let offer = world.peers[0].pc.create_offer(None)?;
+        world.peers[0]
+            .pc
+            .set_local_description(now, offer.clone())?;
+        world.peers[1].pc.set_remote_description(now, offer)?;
+        let answered = world.peers[1]
+            .pc
+            .get_transceivers()
+            .next()
+            .expect("a transceiver");
+        world.peers[1]
+            .pc
+            .rtp_transceiver(answered)
+            .expect("transceiver")
+            .set_direction(RTCRtpTransceiverDirection::Sendrecv)?;
+        let answer = world.peers[1].pc.create_answer(None)?;
+        world.peers[1]
+            .pc
+            .set_local_description(now, answer.clone())?;
+        let stripped = answer.sdp.replace("a=sframe\r\n", "");
+        world.peers[0].pc.set_remote_description(
+            now,
+            rtc::peer_connection::sdp::RTCSessionDescription::answer(stripped)?,
+        )?;
+        assert_eq!(
+            world.peers[0]
+                .pc
+                .rtp_transceiver(transceiver)
+                .expect("transceiver")
+                .sframe_refused(),
+            refuse
+        );
+        for i in 0..2 {
+            let candidate = world.peers[i].candidate()?;
+            world.peers[i].pc.add_local_candidate(candidate.clone())?;
+            world.peers[1 - i].pc.add_remote_candidate(candidate)?;
+        }
+        let deadline = now + Duration::from_secs(10);
+        while !world
+            .peers
+            .iter()
+            .all(|p| p.pc.connection_state() == RTCPeerConnectionState::Connected)
+        {
+            if world.now >= deadline {
+                bail!("not connected");
+            }
+            let next = world.now + Duration::from_millis(10);
+            world.run_until(next)?;
+        }
+
+        let sender = RTCRtpSenderId::from(answered);
+        let (ssrc, pt) = {
+            let mut sender = world.peers[1].pc.rtp_sender(sender).expect("sender");
+            let parameters = sender.get_parameters();
+            (
+                parameters.encodings[0]
+                    .rtp_coding_parameters
+                    .ssrc
+                    .expect("an SSRC"),
+                parameters.rtp_parameters.codecs[0].payload_type,
+            )
+        };
+        for n in 0..5u16 {
+            let now = world.now;
+            world.peers[1]
+                .pc
+                .rtp_sender(sender)
+                .expect("sender")
+                .write_rtp(
+                    now,
+                    rtc::rtp::Packet {
+                        header: Header {
+                            version: 2,
+                            payload_type: pt,
+                            sequence_number: 100 + n,
+                            timestamp: 3000 * u32::from(n),
+                            ssrc,
+                            marker: true,
+                            ..Default::default()
+                        },
+                        payload: Bytes::from_static(&[0x10, 0x00, 0x9d, 0x01, 0x2a]),
+                    },
+                )?;
+            world.pump()?;
+            let next = world.now + Duration::from_millis(33);
+            world.run_until(next)?;
+        }
+        let received = world.peers[0]
+            .read
+            .iter()
+            .filter(|p| p.header.ssrc == ssrc)
+            .count();
+        if refuse {
+            assert_eq!(received, 0, "refused SFrame: discarded");
+        } else {
+            assert!(received > 0, "without SFrame the media arrives");
+        }
     }
     Ok(())
 }

@@ -63,4 +63,10 @@ pub struct RTCPeerConnectionIceEvent {
     /// W3C `url`: the STUN or TURN URL the candidate was gathered from, `None` for a host
     /// candidate and for the end-of-gathering indications.
     pub url: Option<String>,
+
+    /// The id of the ICE transport the candidate is (or the indication is for): the one the
+    /// candidate's `sdp_mid` section runs over. Not a W3C member: with several transports
+    /// (RFC 9429 section 5.2.1) it says which one gathered it. `None` for the null candidate
+    /// of the connection's `icecandidate` once every transport has finished gathering.
+    pub ice_transport: Option<crate::peer_connection::transport::RTCTransportId>,
 }

@@ -462,7 +462,13 @@ impl sansio::Protocol<DataChannelMessage, DataChannelMessage, ()> for DataChanne
             PayloadProtocolIdentifier::String
             | PayloadProtocolIdentifier::Binary
             | PayloadProtocolIdentifier::StringEmpty
-            | PayloadProtocolIdentifier::BinaryEmpty => {}
+            | PayloadProtocolIdentifier::BinaryEmpty => {
+                // RFC 8832 section 6: "After the DATA_CHANNEL_ACK or any other message has
+                // been received on the data channel", the channel is set up: the peer only
+                // sends user data once it took the OPEN, so a message ahead of a delayed (or
+                // lost) ACK completes the opener's handshake as the ACK would.
+                self.handshake_complete = true;
+            }
             // RFC 8831 section 6.6: the PPID is what says how the payload is to be read, so
             // a message under any other one (the deprecated partial PPIDs 52 and 54 among
             // them) has no interpretation. It is an error for the caller to close the

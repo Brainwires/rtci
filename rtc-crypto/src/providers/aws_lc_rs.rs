@@ -115,7 +115,9 @@ impl RTCCrypto for AwsLcRsCrypto {
                         | SignatureScheme::RsaPssSha512,
                 )
                 | CryptoAlgorithm::SigningKeyGeneration(
-                    SignatureScheme::Ed25519 | SignatureScheme::EcdsaP256Sha256,
+                    SignatureScheme::Ed25519
+                        | SignatureScheme::EcdsaP256Sha256
+                        | SignatureScheme::RsaPkcs1Sha256,
                 )
                 | CryptoAlgorithm::SigningKeyImport(
                     SignatureScheme::Ed25519
@@ -559,6 +561,15 @@ impl AwsLcRsSigningKey {
                 &signature::ECDSA_P256_SHA256_ASN1_SIGNING,
                 &rng,
             ),
+            // W3C webrtc-pc 4.9 generateCertificate: RSASSA-PKCS1-v1_5 with a 2048-bit
+            // modulus, public exponent 65537 (AWS-LC's key generation default), SHA-256.
+            SignatureScheme::RsaPkcs1Sha256 => {
+                use aws_lc_rs::encoding::AsDer;
+                let key = aws_lc_rs::rsa::KeyPair::generate(aws_lc_rs::rsa::KeySize::Rsa2048)
+                    .map_err(|_| CryptoError::RandomnessFailed)?;
+                let pkcs8 = key.as_der().map_err(|_| CryptoError::RandomnessFailed)?;
+                return Self::import(scheme, pkcs8.as_ref());
+            }
             _ => {
                 return Err(CryptoError::UnsupportedAlgorithm(
                     CryptoAlgorithm::SigningKeyGeneration(scheme),

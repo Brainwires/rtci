@@ -85,10 +85,9 @@ README.
 
 ## Specified, not started
 
-Two pieces of the BUNDLE / JSEP model are not implemented. Each is written down here as the
-work it is, with the audit rows it would close, so that it can be started without a second
-analysis. Until then the rows stay as the audit has them and decision D2 stands: one transport,
-one BUNDLE group.
+Two pieces of the BUNDLE / JSEP model were written down here as the work they were, with the
+audit rows they would close. Both are now implemented (mt-1 to mt-6); the "Done" paragraphs
+below say what each step did and the last one what is left.
 
 ### Several BUNDLE groups (size M)
 
@@ -158,10 +157,39 @@ application learns what to gather for from `ice_transport_sections()`. Tests:
 `tests/multi_transport_rtc2rtc.rs` (audio, video and data on three transports; a bundling
 answer leaving one), `set_description_atomic_test.rs`, the aggregation tests in
 `transport_set.rs`, and the browser scenario "unbundled: max-compat without a BUNDLE group".
-Left: the transport-level events and statistics of the other transports (the events name no
-transport: an API change), the gathering state aggregate (W3C 4.3.2), `balanced` offers, an
-ICE restart or a new DTLS association of the other transports, a section moved out of a group
-in a later answer (RFC 9143 7.3.2), and several BUNDLE groups.
+Done (mt-4): transport identity. Every transport fires its own events
+(`RTCPeerConnectionEvent::OnTransportEvent`, naming its ICE and DTLS transports; the variants
+that name no transport are the default transport's), local candidates name their transport and
+go through one path whatever the transport, the gathering state aggregates every transport (W3C
+4.3.2), `dtls_transports()` / `dtls_transport_by_id` give the handles, and the statistics have
+a `transport` object per transport (`src/statistics/accumulator/transports.rs`: the handlers
+update the active transport's, the others are parked).
+Done (mt-5): `balanced` initial offers give the first section of each media type a transport
+(`plan_offer_transports`). Done (mt-6): several BUNDLE groups, each a transport
+(`transport_groups`, `BundleMode` with the groups, `arrival_mids` for the per-group payload
+type and MID tables); a later offer keeps the groups of the most recent answer.
+Done (mt-7): the transports share the first transport's ICE credentials by default (browser
+form; Pion and webrtc-rs 0.17 refuse a description whose sections differ, so the `balanced`
+default offer of mt-5 did not reach them); `with_unique_transport_credentials(true)` is RFC
+9429 5.2.1's unique credentials, and the multi-transport tests run both. An end-of-candidates
+that names no section ends every transport's gathering, so a single-socket application
+completes. Routing on a shared port by the ICE username (stream-transport stack) needs the
+unique credentials.
+Done (mt-8): ICE restart and DTLS per transport (`stage_ice_restart_on_every_transport`,
+`apply_staged_ice_restarts`, `defer_other_remote_transports`, `PendingRemoteTransport::
+other_restarts`): `restart_ice` restarts all, a remote offer restarts the transports whose
+credentials it changes, each transport writes and checks its own `a=tls-id`, a rollback undoes
+each; the connection state follows W3C 4.3.3 over the aggregate ICE state (exhaustive unit
+tables in `transport_set.rs`), consent per transport shown rtc-to-rtc. Sections moving into a
+group (the transport discarded) and out of one (a transport of its own) by a remote offer, a
+rejected section's transport released at once, and three transports on one local socket (with
+unique credentials) are tested; transport counters are per transport.
+Left: a section moved out of a group by this side's offer (RFC
+9143 7.5.2-1; no API asks for it), several transports on one 5-tuple (impossible once DTLS
+runs) or on one socket with shared credentials (use `with_unique_transport_credentials`). The
+RTCP session, transport-wide numbering, congestion controller and pacer are per transport since
+the media stack's `PerRtpSession` (`conf/media-11-train-fixes`, merged at mt-8); bandwidth
+probing per transport is not asserted by a test yet (size S).
 
 1. The transport as a value. `Transport { id, ice: IceTransport, dtls: DtlsTransport, srtp
    contexts, selected pair, stats }` replaces the single fields of the handler contexts

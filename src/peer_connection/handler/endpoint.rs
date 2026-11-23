@@ -274,6 +274,17 @@ impl<'a> EndpointHandler<'a> {
         message: ApplicationMessage,
     ) -> Result<()> {
         match message.data_channel_event {
+            DataChannelEvent::Announced => {
+                self.ctx.event_outs.push_back(TaggedRTCEventInternal {
+                    now,
+                    event: RTCEventInternal::RTCPeerConnectionEvent(
+                        RTCPeerConnectionEvent::OnDataChannel(RTCDataChannelEvent::OnDataChannel(
+                            message.data_channel_id,
+                        )),
+                    ),
+                });
+                Ok(())
+            }
             DataChannelEvent::Open => {
                 self.handle_datachannel_open(now, transport_context, message.data_channel_id)
             }

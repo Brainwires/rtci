@@ -102,7 +102,124 @@ pub fn dscp_for(flow: RTCFlowType, priority: RTCPriorityType) -> u8 {
     }
 }
 
+/// The share of a flow at `priority` against the other flows under the same congestion
+/// control (RFC 8835 section 4.1, W3C webrtc-priority 3.2): each level gets "approximately
+/// twice the transmission capacity" of the level below, so very-low : low : medium : high
+/// is 1 : 2 : 4 : 8.
+pub fn bandwidth_weight(priority: RTCPriorityType) -> f64 {
+    match priority {
+        RTCPriorityType::VeryLow => 1.0,
+        RTCPriorityType::Low => 2.0,
+        RTCPriorityType::Medium => 4.0,
+        RTCPriorityType::High => 8.0,
+    }
+}
+
+/// Divides `total` bits per second among flows by their weights (`bandwidth_weight`), none
+/// above its cap (an encoding's `maxBitrate`): a capped flow gets its cap, and what it leaves
+/// goes to the others in proportion to their weights (weighted max-min fairness). Returns
+/// one share per flow, in order; with every flow capped below its share, the rest of
+/// `total` is left unallocated.
+pub fn allocate_bandwidth(total: f64, flows: &[(f64, Option<f64>)]) -> Vec<f64> {
+    let mut shares = vec![0.0; flows.len()];
+    let mut open: Vec<usize> = (0..flows.len()).filter(|&i| flows[i].0 > 0.0).collect();
+    let mut remaining = total.max(0.0);
+    while !open.is_empty() {
+        let weights: f64 = open.iter().map(|&i| flows[i].0).sum();
+        let capped: Vec<usize> = open
+            .iter()
+            .copied()
+            .filter(|&i| {
+                flows[i]
+                    .1
+                    .is_some_and(|cap| cap <= remaining * flows[i].0 / weights)
+            })
+            .collect();
+        if capped.is_empty() {
+            for &i in &open {
+                shares[i] = remaining * flows[i].0 / weights;
+            }
+            break;
+        }
+        for &i in &capped {
+            let cap = flows[i].1.unwrap_or_default().max(0.0);
+            shares[i] = cap;
+            remaining -= cap;
+        }
+        open.retain(|i| !capped.contains(i));
+    }
+    shares
+}
+
+/// Divides the congestion controller's target among the encodings the connection sends
+/// (W3C webrtc-priority 3.2: "the priority ... influences the bandwidth allocation among
+/// RTCRtpSenders"; webrtc 5.2.5 `maxBitrate` caps an encoding): every active encoding with
+/// an SSRC of a transceiver that is not stopped and has a sending direction takes a share by
+/// its `priority` (`bandwidth_weight`), capped at its `maxBitrate`. Each sender keeps its
+/// encodings' shares (`RTCRtpSender::target_bitrates`); returns them by SSRC.
+pub(crate) fn allocate_target_bitrate(
+    transceivers: &mut [crate::rtp_transceiver::internal::RTCRtpTransceiverInternal],
+    total: f64,
+) -> std::collections::HashMap<u32, f64> {
+    let mut flows = Vec::new();
+    let mut owners = Vec::new();
+    for (index, transceiver) in transceivers.iter().enumerate() {
+        if transceiver.stopped() || !transceiver.direction().has_send() {
+            continue;
+        }
+        let Some(sender) = transceiver.sender() else {
+            continue;
+        };
+        for encoding in sender.send_encodings() {
+            let Some(ssrc) = encoding.rtp_coding_parameters.ssrc else {
+                continue;
+            };
+            if !encoding.active {
+                continue;
+            }
+            flows.push((
+                bandwidth_weight(encoding.priority),
+                (encoding.max_bitrate > 0).then_some(f64::from(encoding.max_bitrate)),
+            ));
+            owners.push((index, ssrc));
+        }
+    }
+    let shares = allocate_bandwidth(total, &flows);
+    let mut by_ssrc = std::collections::HashMap::new();
+    for transceiver in transceivers.iter_mut() {
+        if let Some(sender) = transceiver.sender_mut() {
+            sender.set_allocated_bitrates(vec![]);
+        }
+    }
+    for ((index, ssrc), share) in owners.into_iter().zip(shares) {
+        by_ssrc.insert(ssrc, share);
+        if let Some(sender) = transceivers[index].sender_mut() {
+            let mut current = sender.allocated_bitrates().to_vec();
+            current.push((ssrc, share));
+            sender.set_allocated_bitrates(current);
+        }
+    }
+    by_ssrc
+}
+
 impl crate::peer_connection::RTCPeerConnection {
+    /// Divides the congestion controller's last target among the encodings again
+    /// (`allocate_target_bitrate`), after a change of their parameters. Nothing before the
+    /// first target.
+    pub(crate) fn reallocate_target_bitrate(&mut self) {
+        let Some(total) = self
+            .pipeline_context
+            .interceptor_handler_context
+            .target_bitrate
+        else {
+            return;
+        };
+        let shares = allocate_target_bitrate(&mut self.rtp_transceivers, total);
+        self.pipeline_context
+            .stats
+            .on_target_bitrate(total, &shares);
+    }
+
     /// The DSCP (RFC 8837 Table 1) a datagram [`poll_write`](sansio::Protocol::poll_write)
     /// returned is to be marked with: the socket layer sets it in the upper six bits of
     /// `IP_TOS` / `IPV6_TCLASS`, beside the ECN bits the datagram's transport context gives.
@@ -237,6 +354,44 @@ impl crate::peer_connection::RTCPeerConnection {
 
 #[cfg(test)]
 mod tests {
+    use super::{allocate_bandwidth, bandwidth_weight};
+
+    /// RFC 8835 4.1: each level twice the one below; high gets eight times very-low.
+    #[test]
+    fn each_priority_level_gets_twice_the_share_of_the_level_below() {
+        let flows: Vec<(f64, Option<f64>)> = [
+            RTCPriorityType::VeryLow,
+            RTCPriorityType::Low,
+            RTCPriorityType::Medium,
+            RTCPriorityType::High,
+        ]
+        .into_iter()
+        .map(|p| (bandwidth_weight(p), None))
+        .collect();
+        let shares = allocate_bandwidth(1_500_000.0, &flows);
+        assert_eq!(shares, vec![100_000.0, 200_000.0, 400_000.0, 800_000.0]);
+    }
+
+    /// W3C webrtc 5.2.5 maxBitrate: a flow never gets more than its cap; what it leaves is
+    /// shared among the others by weight; all capped leaves the rest unallocated.
+    #[test]
+    fn a_capped_flow_gets_its_cap_and_the_rest_goes_to_the_others() {
+        let shares = allocate_bandwidth(
+            1_000_000.0,
+            &[(8.0, Some(100_000.0)), (2.0, None), (2.0, None)],
+        );
+        assert_eq!(shares, vec![100_000.0, 450_000.0, 450_000.0]);
+        let shares = allocate_bandwidth(
+            1_000_000.0,
+            &[(2.0, Some(300_000.0)), (2.0, Some(200_000.0))],
+        );
+        assert_eq!(shares, vec![300_000.0, 200_000.0]);
+        // A cap above the fair share does not bind.
+        let shares = allocate_bandwidth(600_000.0, &[(2.0, Some(500_000.0)), (2.0, None)]);
+        assert_eq!(shares, vec![300_000.0, 300_000.0]);
+        assert!(allocate_bandwidth(1.0, &[]).is_empty());
+    }
+
     use super::*;
 
     /// RFC 8837 Table 1, cell by cell; LE, not CS1, for very-low.
@@ -280,5 +435,96 @@ mod tests {
             assert_eq!(RTCPriorityType::from_dcep_priority(value), class, "{value}");
         }
         assert_eq!(RTCPriorityType::default(), Low);
+    }
+
+    /// W3C webrtc-priority 3.2 and webrtc 5.2.5, through the senders: the connection's target
+    /// is divided among the sending encodings by priority, each capped at its maxBitrate; a
+    /// setParameters that changes a priority or a maxBitrate divides it again; a recvonly
+    /// transceiver's sender gets nothing.
+    #[test]
+    fn the_target_is_divided_among_the_senders_by_priority_and_max_bitrate() {
+        use crate::peer_connection::RTCPeerConnectionBuilder;
+        use crate::peer_connection::configuration::media_engine::MediaEngine;
+        use crate::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RtpCodecKind};
+        use crate::rtp_transceiver::{
+            RTCRtpSenderId, RTCRtpTransceiverDirection, RTCRtpTransceiverInit,
+        };
+        let mut media_engine = MediaEngine::default();
+        media_engine.register_default_codecs().unwrap();
+        let mut pc = RTCPeerConnectionBuilder::new()
+            .with_media_engine(media_engine)
+            .build(std::time::Instant::now())
+            .unwrap();
+        let add = |pc: &mut crate::peer_connection::RTCPeerConnection,
+                   priority: RTCPriorityType,
+                   direction: RTCRtpTransceiverDirection| {
+            RTCRtpSenderId::from(
+                pc.add_transceiver_from_kind(
+                    RtpCodecKind::Video,
+                    Some(RTCRtpTransceiverInit {
+                        direction,
+                        streams: vec![],
+                        send_encodings: vec![RTCRtpEncodingParameters {
+                            active: true,
+                            priority,
+                            ..Default::default()
+                        }],
+                    }),
+                )
+                .unwrap(),
+            )
+        };
+        let high = add(
+            &mut pc,
+            RTCPriorityType::High,
+            RTCRtpTransceiverDirection::Sendonly,
+        );
+        let low = add(
+            &mut pc,
+            RTCPriorityType::Low,
+            RTCRtpTransceiverDirection::Sendonly,
+        );
+        let receiving = add(
+            &mut pc,
+            RTCPriorityType::High,
+            RTCRtpTransceiverDirection::Recvonly,
+        );
+        let shares = |pc: &mut crate::peer_connection::RTCPeerConnection, id| {
+            pc.rtp_sender(id)
+                .unwrap()
+                .target_bitrates()
+                .iter()
+                .map(|&(_, bps)| bps)
+                .collect::<Vec<f64>>()
+        };
+        assert!(shares(&mut pc, high).is_empty(), "no target yet");
+
+        pc.pipeline_context
+            .interceptor_handler_context
+            .target_bitrate = Some(1_000_000.0);
+        pc.reallocate_target_bitrate();
+        assert_eq!(shares(&mut pc, high), vec![800_000.0], "8 : 2");
+        assert_eq!(shares(&mut pc, low), vec![200_000.0]);
+        assert!(
+            shares(&mut pc, receiving).is_empty(),
+            "a recvonly transceiver sends nothing"
+        );
+
+        // maxBitrate on the high one: capped, the rest to the other.
+        let mut sender = pc.rtp_sender(high).unwrap();
+        let mut parameters = sender.get_parameters().clone();
+        parameters.encodings[0].max_bitrate = 300_000;
+        sender.set_parameters(parameters, None).unwrap();
+        assert_eq!(shares(&mut pc, high), vec![300_000.0]);
+        assert_eq!(shares(&mut pc, low), vec![700_000.0]);
+
+        // The low one raised to high and capped too: both at their caps.
+        let mut sender = pc.rtp_sender(low).unwrap();
+        let mut parameters = sender.get_parameters().clone();
+        parameters.encodings[0].priority = RTCPriorityType::High;
+        parameters.encodings[0].max_bitrate = 100_000;
+        sender.set_parameters(parameters, None).unwrap();
+        assert_eq!(shares(&mut pc, high), vec![300_000.0]);
+        assert_eq!(shares(&mut pc, low), vec![100_000.0]);
     }
 }

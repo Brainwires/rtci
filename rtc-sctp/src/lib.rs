@@ -61,7 +61,7 @@ pub use crate::association::{
     pmtud::{PathMtuDiscoveryConfig, PathMtuState},
     stats::AssociationStats,
     stream::{ReliabilityType, Stream, StreamEvent, StreamId, StreamState},
-    timer::TimerConfig,
+    timer::{RtoConfig, TimerConfig},
 };
 
 pub(crate) mod chunk;

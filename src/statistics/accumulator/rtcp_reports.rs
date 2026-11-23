@@ -129,6 +129,7 @@ impl RTCStatsAccumulator {
                     sr.ntp_time,
                     now,
                 );
+                stream.on_rtcp_sr_rtp_time(sr.rtp_time);
             }
         }
 

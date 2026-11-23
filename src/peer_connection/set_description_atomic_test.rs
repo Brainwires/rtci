@@ -666,29 +666,6 @@ fn feedback_an_answer_adds_is_not_enabled() -> Result<()> {
     Ok(())
 }
 
-/// RFC 3264 section 5.1: an applied local offer makes its payload types receivable on each
-/// section's receiver until the answer sets the receive codecs, which clears them.
-#[test]
-fn a_local_offer_makes_its_payload_types_receivable_until_the_answer() -> Result<()> {
-    let (mut offerer, answer) = pending_offer()?;
-    let offer = offerer.local_description().expect("offer applied");
-    let parsed = offer.parsed.expect("parsed offer");
-    let video_formats: Vec<u8> = parsed.media_descriptions[1]
-        .media_name
-        .formats
-        .iter()
-        .map(|format| format.parse().unwrap())
-        .collect();
-    assert!(!video_formats.is_empty());
-    let receiver = offerer.rtp_transceivers[1].receiver().as_ref().unwrap();
-    assert_eq!(receiver.offered_payload_types(), video_formats.as_slice());
-
-    offerer.set_remote_description(Instant::now(), description(RTCSdpType::Answer, &answer))?;
-    let receiver = offerer.rtp_transceivers[1].receiver().as_ref().unwrap();
-    assert!(receiver.offered_payload_types().is_empty());
-    Ok(())
-}
-
 #[test]
 fn a_rolled_back_remote_offer_takes_the_transports_it_added_with_it() -> Result<()> {
     let mut pc = peer()?;
@@ -739,5 +716,225 @@ fn a_rolled_back_max_compat_offer_takes_its_transports_with_it() -> Result<()> {
     assert_eq!(pc.ice_transport_sections().len(), 2);
     pc.set_local_description(Instant::now(), RTCSessionDescription::rollback(None)?)?;
     assert_eq!(pc.pipeline_context.transports.len(), 1);
+    Ok(())
+}
+
+/// RFC 3264 section 5.1: an applied local offer makes its payload types receivable on each
+/// section's receiver until the answer sets the receive codecs, which clears them.
+#[test]
+fn a_local_offer_makes_its_payload_types_receivable_until_the_answer() -> Result<()> {
+    let (mut offerer, answer) = pending_offer()?;
+    let offer = offerer.local_description().expect("offer applied");
+    let parsed = offer.parsed.expect("parsed offer");
+    let video_formats: Vec<u8> = parsed.media_descriptions[1]
+        .media_name
+        .formats
+        .iter()
+        .map(|format| format.parse().unwrap())
+        .collect();
+    assert!(!video_formats.is_empty());
+    let receiver = offerer.rtp_transceivers[1].receiver().as_ref().unwrap();
+    assert_eq!(receiver.offered_payload_types(), video_formats.as_slice());
+
+    offerer.set_remote_description(Instant::now(), description(RTCSdpType::Answer, &answer))?;
+    let receiver = offerer.rtp_transceivers[1].receiver().as_ref().unwrap();
+    assert!(receiver.offered_payload_types().is_empty());
+    Ok(())
+}
+
+/// An Opus audio section with the given mid and transport lines.
+fn audio(mid: &str, transport: &str) -> String {
+    format!(
+        "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n\
+c=IN IP4 0.0.0.0\r\n\
+{transport}\
+a=setup:actpass\r\n\
+a=mid:{mid}\r\n\
+a=sendrecv\r\n\
+a=rtcp-mux\r\n\
+a=rtpmap:111 opus/48000/2\r\n"
+    )
+}
+
+/// The `a=ice-ufrag` of each m= section of `sdp`, in order (`None` for a section without).
+fn section_ufrags(sdp: &str) -> Vec<Option<String>> {
+    sdp.split("\r\nm=")
+        .skip(1)
+        .map(|section| {
+            section
+                .lines()
+                .find_map(|l| l.strip_prefix("a=ice-ufrag:"))
+                .map(str::to_owned)
+        })
+        .collect()
+}
+
+/// RFC 9429 section 5.3.1 / RFC 8839 section 4.4.1.1.1, per transport: a remote offer that
+/// changes the ICE credentials of one of two transports restarts ICE on that one only. Its
+/// answer carries new local credentials for that transport and the same ones for the other;
+/// a rollback of the offer leaves the restart unstaged (RFC 9429 section 5.7).
+#[test]
+fn a_remote_offer_with_new_credentials_for_one_transport_restarts_that_one_only() -> Result<()> {
+    let now = Instant::now();
+    let mut pc = peer()?;
+    let first = format!("{ICE}{FINGERPRINT}");
+    let offer = |version: u32, second: &str| {
+        format!(
+            "{}{}{}",
+            SESSION.replace(" 2 IN IP4", &format!(" {version} IN IP4")),
+            video("0", &first, ""),
+            audio("1", &format!("{second}{FINGERPRINT}"))
+        )
+    };
+    let second = "a=ice-ufrag:Zz9x\r\na=ice-pwd:9/9muCWoOi3uLifh0NuRHlkwz\r\n";
+    pc.set_remote_description(now, description(RTCSdpType::Offer, &offer(2, second)))?;
+    let answer = pc.create_answer(None)?;
+    pc.set_local_description(now, answer.clone())?;
+    let before = section_ufrags(&answer.sdp);
+    assert_eq!(before.len(), 2, "{}", answer.sdp);
+    let transports = &pc.pipeline_context.transports;
+    let (default, other) = (
+        transports.transport_id_for("0"),
+        transports.transport_id_for("1"),
+    );
+    assert_ne!(default, other);
+
+    let restarted = "a=ice-ufrag:Rr7q\r\na=ice-pwd:7/7muCWoOi3uLifh0NuRHlkwz\r\n";
+    let restart = description(RTCSdpType::Offer, &offer(3, restarted));
+    pc.set_remote_description(now, restart.clone())?;
+    assert!(pc.ice_transport_of(other).has_pending_restart());
+    assert!(!pc.ice_transport_of(default).has_pending_restart());
+
+    pc.set_remote_description(now, rollback())?;
+    assert!(
+        !pc.ice_transport_of(other).has_pending_restart(),
+        "the rolled-back offer's restart is not staged any more"
+    );
+
+    pc.set_remote_description(now, restart)?;
+    let answer = pc.create_answer(None)?;
+    let after = section_ufrags(&answer.sdp);
+    assert_eq!(
+        after[0], before[0],
+        "the other transport keeps its credentials"
+    );
+    assert_ne!(
+        after[1], before[1],
+        "the restarted one has new ones:\n{}",
+        answer.sdp
+    );
+    pc.set_local_description(now, answer)?;
+    let applied = &pc
+        .ice_transport_of(other)
+        .agent
+        .get_local_credentials()
+        .ufrag;
+    assert_eq!(Some(applied), after[1].as_ref());
+    assert!(!pc.ice_transport_of(other).has_pending_restart());
+    Ok(())
+}
+
+/// RFC 9143 sections 7.5.1 and 7.4, a section moving into a BUNDLE group in a later exchange:
+/// two sections on two transports (an offer without a group), then an offer that bundles them.
+/// The answer bundles them, and once it is applied the second section's transport is
+/// discarded: both sections, their RTP tables included (the payload type and MID tables of
+/// section 9.2 are the transport's), are on the first section's transport.
+#[test]
+fn a_later_offer_that_bundles_two_transports_leaves_the_tagged_ones() -> Result<()> {
+    let now = Instant::now();
+    let mut pc = peer()?;
+    let first = format!("{ICE}{FINGERPRINT}");
+    let second =
+        format!("a=ice-ufrag:Zz9x\r\na=ice-pwd:9/9muCWoOi3uLifh0NuRHlkwz\r\n{FINGERPRINT}");
+    let unbundled = format!("{SESSION}{}{}", video("0", &first, ""), audio("1", &second));
+    pc.set_remote_description(now, description(RTCSdpType::Offer, &unbundled))?;
+    let answer = pc.create_answer(None)?;
+    pc.set_local_description(now, answer)?;
+    assert_eq!(pc.pipeline_context.transports.len(), 2);
+    assert_eq!(pc.dtls_transports().len(), 2);
+
+    let bundled = format!(
+        "{}a=group:BUNDLE 0 1\r\n{}{}",
+        SESSION.replace(" 2 IN IP4", " 3 IN IP4"),
+        video("0", &first, ""),
+        audio("1", &first)
+    );
+    pc.set_remote_description(now, description(RTCSdpType::Offer, &bundled))?;
+    let answer = pc.create_answer(None)?;
+    assert!(answer.sdp.contains("a=group:BUNDLE 0 1"), "{}", answer.sdp);
+    pc.set_local_description(now, answer)?;
+    let transports = &pc.pipeline_context.transports;
+    assert_eq!(transports.len(), 1, "the second transport is discarded");
+    assert_eq!(
+        transports.transport_id_for("1"),
+        transports.transport_id_for("0")
+    );
+    assert_eq!(pc.dtls_transports().len(), 1);
+    assert_eq!(
+        pc.active_transport_mids(),
+        None,
+        "one transport: every section's tables are its"
+    );
+    Ok(())
+}
+
+/// RFC 9143 section 7.5.2 from the remote offerer, and the answer of section 7.3.2: a later
+/// offer moves a bundled section out of the group, with a unique address and attributes of
+/// its own. The answer keeps it out of the group, not bundle-only, with a port and its own
+/// transport attributes, and the section gets a transport of its own.
+#[test]
+fn a_section_the_offer_moves_out_of_the_group_gets_a_transport_of_its_own() -> Result<()> {
+    let now = Instant::now();
+    let mut pc = peer()?;
+    let first = format!("{ICE}{FINGERPRINT}");
+    let bundled = format!(
+        "{SESSION}a=group:BUNDLE 0 1\r\n{}{}",
+        video("0", &first, ""),
+        audio("1", &first)
+    );
+    pc.set_remote_description(now, description(RTCSdpType::Offer, &bundled))?;
+    let answer = pc.create_answer(None)?;
+    pc.set_local_description(now, answer)?;
+    assert_eq!(pc.pipeline_context.transports.len(), 1);
+
+    let own = format!("a=ice-ufrag:Zz9x\r\na=ice-pwd:9/9muCWoOi3uLifh0NuRHlkwz\r\n{FINGERPRINT}");
+    let moved = format!(
+        "{}a=group:BUNDLE 0\r\n{}{}",
+        SESSION.replace(" 2 IN IP4", " 3 IN IP4"),
+        video("0", &first, ""),
+        audio("1", &own)
+    );
+    pc.set_remote_description(now, description(RTCSdpType::Offer, &moved))?;
+    let answer = pc.create_answer(None)?;
+    let group = answer
+        .sdp
+        .lines()
+        .find(|l| l.starts_with("a=group:BUNDLE"))
+        .unwrap_or_default()
+        .to_owned();
+    assert_eq!(group, "a=group:BUNDLE 0", "{}", answer.sdp);
+    let sections: Vec<&str> = answer.sdp.split("\r\nm=").skip(1).collect();
+    assert_eq!(sections.len(), 2, "{}", answer.sdp);
+    let audio_section = sections[1];
+    assert!(
+        !audio_section.starts_with("audio 0 "),
+        "not rejected:\n{}",
+        answer.sdp
+    );
+    assert!(!audio_section.contains("a=bundle-only"), "{}", answer.sdp);
+    for attribute in ["a=ice-ufrag:", "a=ice-pwd:", "a=setup:", "a=rtcp-mux"] {
+        assert!(
+            audio_section.contains(attribute),
+            "{attribute} of its own:\n{}",
+            answer.sdp
+        );
+    }
+    pc.set_local_description(now, answer)?;
+    let transports = &pc.pipeline_context.transports;
+    assert_eq!(transports.len(), 2);
+    assert_ne!(
+        transports.transport_id_for("1"),
+        transports.transport_id_for("0")
+    );
     Ok(())
 }

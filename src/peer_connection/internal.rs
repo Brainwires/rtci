@@ -92,6 +92,11 @@ pub(super) struct PendingRemoteTransport {
     pub(super) new_dtls_role: Option<RTCDtlsRole>,
     /// This offer staged the answer's new `tls-id`.
     pub(super) staged_tls_id: bool,
+    /// The transports other than the default one the offer restarts ICE on or asks a new DTLS
+    /// association of, each on its own (RFC 9429 section 5.3.1, RFC 8842 section 5.3, per
+    /// transport): the gathering state it had before the restart credentials of the answer
+    /// were staged on it (`None`: no restart), and whether the answer's `tls-id` was staged.
+    pub(super) other_restarts: Vec<(TransportId, Option<RTCIceGatheringState>, bool)>,
 }
 
 /// See [`RTCPeerConnection::description_snapshot`].
@@ -165,6 +170,7 @@ pub(super) fn ice_agent_config(
         multicast_dns_local_ip: setting_engine.multicast_dns.local_ip,
         multicast_dns_query_timeout: setting_engine.multicast_dns.timeout,
         multicast_dns_first_query_delay: setting_engine.multicast_dns.first_query_delay,
+        multicast_dns_multi_question_delay: setting_engine.multicast_dns.multi_question_delay,
         multicast_dns_destination_reported: setting_engine.multicast_dns.destination_reported,
         multicast_dns_unicast_response: setting_engine.multicast_dns.unicast_response,
         multicast_dns_rate_limit: setting_engine.multicast_dns.rate_limit.clone(),
@@ -186,6 +192,7 @@ pub(super) fn ice_agent_config(
         unauthenticated_requests: setting_engine.ice.unauthenticated_requests,
         data_from_selected_pair_only: setting_engine.ice.data_from_selected_pair_only,
         send_data_before_nomination: setting_engine.ice.send_data_before_nomination,
+        hold_local_candidates_until_conveyed: !setting_engine.ice.pair_before_conveyed,
         nat_1to1_ips: setting_engine.candidates.nat_1to1_ips.clone(),
         nat_1to1_ip_candidate_type: match setting_engine.candidates.nat_1to1_ip_candidate_type {
             RTCIceCandidateType::Srflx => ice::candidate::CandidateType::ServerReflexive,
@@ -234,6 +241,8 @@ impl RTCPeerConnection {
         interceptor: Box<dyn Interceptor>,
     ) -> Result<Self> {
         configuration.validate()?;
+        let streams_settings = setting_engine.streams;
+        let turn_tls = setting_engine.turn_tls.clone();
 
         // Each media section negotiates its own codecs unless the application asked for one
         // codec set (RFC 9429 section 5.10 answers every m= section from its own formats).
@@ -259,6 +268,11 @@ impl RTCPeerConnection {
         setting_engine.crypto_provider = Some(crypto_provider.clone());
 
         let agent_config = ice_agent_config(&configuration, &setting_engine)?;
+        let engine_turn = super::turn_streams::EngineTurn::new(
+            &agent_config.urls,
+            streams_settings.turn,
+            turn_tls,
+        );
 
         // One random nonce per peer connection, combined with a per-transport discriminator to
         // form the three `RTCTransportId`s. Drawn here rather than from a process-wide counter:
@@ -301,6 +315,9 @@ impl RTCPeerConnection {
         .with_weighted_fair_queueing(setting_engine.sctp_weighted_fair_queueing.unwrap_or(true))
         .with_message_interleaving(setting_engine.sctp_message_interleaving.unwrap_or(true))
         .with_zero_checksum(setting_engine.sctp_zero_checksum.unwrap_or(true))
+        .with_max_streams(setting_engine.sctp_max_streams)
+        .with_rto(setting_engine.sctp_rto)
+        .with_max_retransmissions(setting_engine.sctp_max_retransmissions)
         .with_path_mtu_discovery(setting_engine.sctp_path_mtu_discovery.unwrap_or(Some(
             crate::peer_connection::transport::sctp::SctpPath::DEFAULT_MAX_IP_PACKET,
         )))
@@ -397,6 +414,7 @@ impl RTCPeerConnection {
             always_negotiate_data_channels: always_negotiate,
             announced: super::states_events::AnnouncedStates::new(),
             last_data_dscp: None,
+            streams: super::streams::EngineStreams::new(streams_settings, engine_turn),
         })
     }
 
@@ -655,7 +673,7 @@ impl RTCPeerConnection {
             is_extmap_allow_mixed: true,
             connection_role: DEFAULT_DTLS_ROLE_OFFER.to_connection_role(),
             ice_gathering_state: self.ice_transport().ice_gathering_state,
-            bundle: BundleMode::Offer,
+            bundle: BundleMode::initial_offer(),
             offered_tag_rtcp_mux_only: false,
             rtcp_mux_only: self.configuration.rtcp_mux_policy != RTCRtcpMuxPolicy::Negotiate,
             bundle_policy: self.effective_bundle_policy(),
@@ -1011,13 +1029,22 @@ impl RTCPeerConnection {
                     ..Default::default()
                 });
             }
-            BundleMode::Offer
+            // The BUNDLE groups of the most recent answer stay (RFC 9429 section 5.2.2).
+            [
+                &self.current_local_description,
+                &self.current_remote_description,
+            ]
+            .into_iter()
+            .flatten()
+            .find(|d| d.sdp_type == RTCSdpType::Answer)
+            .and_then(|d| d.parsed.as_ref())
+            .map_or_else(BundleMode::initial_offer, BundleMode::following)
         } else {
             // The offered BUNDLE group, whatever other `a=group` lines the offer has
             // (RFC 9429 section 5.3.1); none when the offer has none.
             remote_parsed
                 .as_ref()
-                .map_or(BundleMode::Answer(None), BundleMode::answering)
+                .map_or(BundleMode::Answer(vec![]), BundleMode::answering)
         };
 
         let dtls_fingerprints = self.local_dtls_fingerprints()?;
@@ -1264,6 +1291,45 @@ impl RTCPeerConnection {
             (_, RTCSdpType::Unspecified) => return Err(Error::ErrPeerConnSDPTypeInvalidValue),
         }
 
+        // W3C 4.4.1.6 [[SctpTransport]]: an offer that describes an SCTP association creates
+        // the transport ("connecting") when there is none; an answer that closes the
+        // association (a rejected data section, `a=sctp-port:0`) makes it null; a rollback
+        // brings back [[LastStableStateSctpTransport]], which every stable state records.
+        let (describes, closes) = describes_sctp_association(sd);
+        match sd.sdp_type {
+            RTCSdpType::Offer if describes => self.sctp_transport_mut().described = true,
+            RTCSdpType::Answer if closes => {
+                // W3C 6.1.2 "closed": the association is closed intentionally by "applying a
+                // remote description that rejects data or changes the SCTP port", so the
+                // transport the application holds goes to "closed" and fires statechange,
+                // although `sctp()` is null from now on.
+                let was = self.sctp().map(|sctp| sctp.state());
+                self.sctp_transport_mut().described = false;
+                if was.is_some_and(|state| {
+                    state != crate::peer_connection::transport::RTCSctpTransportState::Closed
+                }) {
+                    self.announced.sctp = None;
+                    self.pipeline_context.event_outs.push_back(
+                        RTCPeerConnectionEvent::OnSctpTransportStateChange(
+                            crate::peer_connection::transport::RTCSctpTransportState::Closed,
+                        ),
+                    );
+                }
+            }
+            RTCSdpType::Answer | RTCSdpType::Pranswer if describes => {
+                self.sctp_transport_mut().described = true;
+            }
+            RTCSdpType::Rollback => {
+                let last = self.sctp_transport().last_stable_described;
+                self.sctp_transport_mut().described = last;
+            }
+            _ => {}
+        }
+        if next_state == RTCSignalingState::Stable {
+            let described = self.sctp_transport().described;
+            self.sctp_transport_mut().last_stable_described = described;
+        }
+
         if matches!(sd.sdp_type, RTCSdpType::Answer) {
             // W3C "set a session description": an answer resets [[LastCreatedOffer]] and
             // [[LastCreatedAnswer]], so a description created for an exchange that is over
@@ -1465,9 +1531,9 @@ impl RTCPeerConnection {
         f: impl FnOnce(&mut Self) -> R,
     ) -> R {
         let previous = self.pipeline_context.transports.active_id();
-        self.pipeline_context.transports.set_active(id);
+        self.pipeline_context.activate_transport(id);
         let result = f(self);
-        self.pipeline_context.transports.set_active(previous);
+        self.pipeline_context.activate_transport(previous);
         result
     }
 
@@ -1709,6 +1775,17 @@ impl RTCPeerConnection {
                 && has_bundle_attribute(offer, offered, ATTR_KEY_RTCPRSIZE)
                 && has_bundle_attribute(answer, answered, ATTR_KEY_RTCPRSIZE);
             self.rtp_transceivers[i].set_rtcp_reduced_size(reduced_size);
+            // W3C 5.2.9: the send codecs' parameters are the remote description's, the
+            // receive codecs' the local description's.
+            if !is_rejected_media(answered) {
+                let (local, remote) = if we_offered {
+                    (offered, answered)
+                } else {
+                    (answered, offered)
+                };
+                self.rtp_transceivers[i].take_send_fmtp_from_remote(remote);
+                self.rtp_transceivers[i].take_receive_fmtp_from_local(local);
+            }
             // RFC 8285 section 6: a stream mixes one- and two-byte header extensions only when
             // the offer and the answer both have `a=extmap-allow-mixed`.
             let mixed = !is_rejected_media(answered)
@@ -2925,15 +3002,75 @@ impl RTCPeerConnection {
     /// The gathering state does move here, because SDP generation reads it and a restart offer
     /// must not claim end-of-candidates.
     pub(super) fn stage_ice_restart(&mut self) -> Result<()> {
-        let (local_ufrag, local_pwd) = (
-            self.setting_engine.candidates.username_fragment.clone(),
-            self.setting_engine.candidates.password.clone(),
-        );
+        // Fixed credentials from the settings are the default transport's.
+        let (local_ufrag, local_pwd) = if self.pipeline_context.transports.active_id()
+            == self.pipeline_context.transports.default_id()
+        {
+            (
+                self.setting_engine.candidates.username_fragment.clone(),
+                self.setting_engine.candidates.password.clone(),
+            )
+        } else {
+            self.restart_credentials_for_other_transport()
+        };
         self.ice_transport_mut()
             .generate_restart_credentials(local_ufrag, local_pwd)?;
         self.ice_transport_mut().ice_gathering_state = RTCIceGatheringState::Gathering;
 
         Ok(())
+    }
+
+    /// The credentials a transport other than the default one restarts with: the ones the
+    /// default transport has staged when the transports share theirs and it restarts too
+    /// (`with_unique_transport_credentials` off), else new ones (empty: generated).
+    fn restart_credentials_for_other_transport(&self) -> (String, String) {
+        if self.setting_engine.unique_transport_credentials {
+            return (String::new(), String::new());
+        }
+        let default = self.ice_transport_of(self.pipeline_context.transports.default_id());
+        if !default.has_pending_restart() {
+            return (String::new(), String::new());
+        }
+        let staged = default.agent.get_local_credentials();
+        (staged.ufrag.clone(), staged.pwd.clone())
+    }
+
+    /// `restartIce` and an offer of this side that restarts ICE: every transport stages new
+    /// credentials (W3C restartIce: "all ICE transports"), the default one first so that the
+    /// others can take its credentials when they share them.
+    pub(super) fn stage_ice_restart_on_every_transport(&mut self) -> Result<()> {
+        let default = self.pipeline_context.transports.default_id();
+        self.with_transport(default, |pc| pc.stage_ice_restart())?;
+        for id in self.pipeline_context.transports.ids() {
+            if id != default {
+                self.with_transport(id, |pc| pc.stage_ice_restart())?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Applies the ICE restart every transport has staged (`set_local_description`); a
+    /// transport with none staged is left alone.
+    pub(super) fn apply_staged_ice_restarts(&mut self, now: Instant) -> Result<()> {
+        for id in self.pipeline_context.transports.ids() {
+            self.with_transport(id, |pc| {
+                if pc.ice_transport().has_pending_restart() {
+                    pc.apply_ice_restart(now)
+                } else {
+                    Ok(())
+                }
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Whether any transport has an ICE restart staged.
+    pub(super) fn any_ice_restart_staged(&self) -> bool {
+        self.pipeline_context
+            .transports
+            .ids()
+            .into_iter()
+            .any(|id| self.ice_transport_of(id).has_pending_restart())
     }
 
     /// Drops the transport part of the pending remote offer
@@ -2949,6 +3086,20 @@ impl RTCPeerConnection {
         }
         if pending.staged_tls_id {
             self.dtls_transport_mut().staged_local_tls_id = None;
+        }
+        for (id, gathering, staged_tls_id) in pending.other_restarts {
+            if self.pipeline_context.transports.transport(id).is_none() {
+                continue;
+            }
+            self.with_transport(id, |pc| {
+                if let Some(gathering) = gathering {
+                    pc.ice_transport_mut().discard_restart_credentials();
+                    pc.ice_transport_mut().ice_gathering_state = gathering;
+                }
+                if staged_tls_id {
+                    pc.dtls_transport_mut().staged_local_tls_id = None;
+                }
+            });
         }
     }
 
@@ -3129,7 +3280,7 @@ impl RTCPeerConnection {
             // They belong to the new generation too (W3C 5.6, RFC 8838 section 9: the peer
             // discards the candidates of the old one), so one not yet announced for it is
             // announced now, once. Anything else the agent refused stays silent.
-            let gathering = self.ice_gathering_state();
+            let gathering = self.active_announced().gathering;
             let kept = self
                 .ice_transport()
                 .agent
@@ -3140,7 +3291,7 @@ impl RTCPeerConnection {
             match kept {
                 Some(kept)
                     if gathering == RTCIceGatheringState::Gathering
-                        && !self.announced.announced_candidates.iter().any(
+                        && !self.active_announced().announced_candidates.iter().any(
                             |(generation, announced)| {
                                 *generation == ufrag && *announced == kept.to_string()
                             },
@@ -3153,10 +3304,11 @@ impl RTCPeerConnection {
         };
 
         for mut rtc_candidate in added {
-            self.announced
+            let announced = self.active_announced_mut();
+            announced
                 .announced_candidates
                 .retain(|(generation, _)| *generation == ufrag);
-            self.announced
+            announced
                 .announced_candidates
                 .push((ufrag.clone(), rtc_candidate.to_string()));
             // Register local candidate with stats accumulator
@@ -3166,27 +3318,30 @@ impl RTCPeerConnection {
             // also names the media section of the transport (W3C "surface the candidate").
             self.ice_transport()
                 .describe_local_candidate(&mut rtc_candidate);
-            // W3C webrtc-pc 4.8.1 (RTCIceCandidate constructor, RTCLocalIceCandidateInit):
-            // a local candidate carries the url of the server it was gathered from, and a
-            // relay candidate the protocol to its TURN server: the one the application gave,
-            // else the one its TURN URL names. Any other candidate has no relayProtocol.
-            if rtc_candidate.url.is_none()
-                && matches!(
-                    rtc_candidate.typ,
-                    RTCIceCandidateType::Srflx | RTCIceCandidateType::Relay
-                )
-            {
-                rtc_candidate.url = url.map(str::to_owned);
+            // W3C 4.8.1 `url` and `relayProtocol`: the server a local server-reflexive or
+            // relay candidate was gathered from, and for a relay candidate the protocol to
+            // the TURN server (RTCLocalIceCandidateInit; the application gathers, so it
+            // supplies them). Null for every other candidate.
+            match rtc_candidate.typ {
+                RTCIceCandidateType::Srflx | RTCIceCandidateType::Relay => {
+                    if rtc_candidate.url.is_none() {
+                        rtc_candidate.url = url.map(str::to_owned);
+                    }
+                }
+                _ => rtc_candidate.url = None,
             }
-            rtc_candidate.relay_protocol = if rtc_candidate.typ == RTCIceCandidateType::Relay {
-                relay_protocol
+            if rtc_candidate.typ == RTCIceCandidateType::Relay {
+                rtc_candidate.relay_protocol = relay_protocol
                     .filter(|protocol| *protocol != RTCIceServerTransportProtocol::Unspecified)
                     .unwrap_or_else(|| {
-                        url.map_or_else(Default::default, relay_protocol_of_turn_url)
-                    })
-            } else {
-                RTCIceServerTransportProtocol::Unspecified
-            };
+                        rtc_candidate
+                            .url
+                            .as_deref()
+                            .map_or(RTCIceServerTransportProtocol::Unspecified, |u| {
+                                relay_protocol_of_turn_url(u)
+                            })
+                    });
+            }
             let (ufrag, _) = self.ice_transport().get_local_user_credentials();
             let accumulator = self.candidate_to_accumulator(&rtc_candidate, ufrag, url);
             self.stats_mut()
@@ -3197,6 +3352,7 @@ impl RTCPeerConnection {
                 RTCPeerConnectionEvent::OnIceCandidateEvent(RTCPeerConnectionIceEvent {
                     candidate: Some(rtc_candidate),
                     url: url.map(str::to_owned),
+                    ice_transport: Some(self.ice_transport().id),
                 }),
             );
         }
@@ -3213,10 +3369,17 @@ impl RTCPeerConnection {
     /// stats object names resolves in the same report). Pairs the agent no longer holds (an ICE
     /// restart drops them) are dropped from the stats too.
     pub(super) fn update_ice_agent_stats(&mut self, now: Instant) {
+        for id in self.pipeline_context.transports.ids() {
+            self.with_transport(id, |pc| pc.update_ice_agent_stats_on_active(now));
+        }
+    }
+
+    /// `update_ice_agent_stats` for the active transport's agent.
+    fn update_ice_agent_stats_on_active(&mut self, now: Instant) {
         let agent = &self
             .pipeline_context
             .transports
-            .default()
+            .active()
             .ice_handler_context
             .ice_transport
             .agent;
@@ -3331,7 +3494,7 @@ impl RTCPeerConnection {
         let agent = &self
             .pipeline_context
             .transports
-            .default()
+            .active()
             .ice_handler_context
             .ice_transport
             .agent;
@@ -3419,6 +3582,13 @@ impl RTCPeerConnection {
     ///
     /// This is called automatically by `get_stats()`.
     pub(super) fn update_transport_stats(&mut self) {
+        for id in self.pipeline_context.transports.ids() {
+            self.with_transport(id, |pc| pc.update_transport_stats_on_active());
+        }
+    }
+
+    /// `update_transport_stats` for the active transport.
+    fn update_transport_stats_on_active(&mut self) {
         let dtls_state = self.dtls_transport().state();
         // webrtc-stats `iceLocalUsernameFragment`: the local username fragment in use for
         // message validation, which is the ICE agent's current one: the first description's,
@@ -3954,7 +4124,7 @@ fn rejects_every_media_section(desc: &RTCSessionDescription) -> bool {
 /// The transport a TURN URL (RFC 7065) says its server is reached over: TLS for `turns:`, else
 /// the `transport` parameter, UDP when there is none. `Unspecified` for anything that is not a
 /// TURN URL.
-fn relay_protocol_of_turn_url(url: &str) -> RTCIceServerTransportProtocol {
+pub(super) fn relay_protocol_of_turn_url(url: &str) -> RTCIceServerTransportProtocol {
     let lower = url.to_ascii_lowercase();
     if lower.starts_with("turns:") {
         return RTCIceServerTransportProtocol::Tls;
@@ -4410,4 +4580,19 @@ mod unused_ssrc_test {
         assert_eq!(11, unused_ssrc_from([7, 0, 9, 11, 13], &taken));
         assert_eq!(7, unused_ssrc_from([7], &HashSet::new()));
     }
+}
+
+/// Whether `sd` describes an SCTP association (RFC 8841 section 10.2: a data section that is
+/// not rejected, with a non-zero `a=sctp-port`), and whether it closes one (sections 10.3,
+/// 10.4: its data section is rejected or has `a=sctp-port:0`).
+fn describes_sctp_association(sd: &RTCSessionDescription) -> (bool, bool) {
+    let Some(section) = have_data_channel(sd) else {
+        return (false, false);
+    };
+    let zero_port = section
+        .attributes
+        .iter()
+        .any(|a| a.key == "sctp-port" && a.value.as_deref().map(str::trim) == Some("0"));
+    let closed = section.media_name.port.value == 0 || zero_port;
+    (!closed, closed)
 }

@@ -247,3 +247,46 @@ fn a_tagged_data_section_carries_rtcp_mux_for_the_rtp_sections() -> TestResult {
     }
     Ok(())
 }
+
+/// RFC 9143 section 7.1.3 in the tagged-only form, for the descriptions as they are read
+/// back once applied and once candidates were gathered (`local_description()`,
+/// `current_local_description()`), not only as `create_answer` returns them: the BUNDLE
+/// attributes, `a=ice-ufrag` among them, stay in the tagged section.
+#[test]
+fn the_applied_answer_keeps_the_bundle_attributes_in_the_tagged_section_only() -> TestResult {
+    use rtc::peer_connection::transport::{CandidateConfig, CandidateHostConfig, RTCIceCandidate};
+    let mut a = tagged_only_peer()?;
+    let mut b = tagged_only_peer()?;
+    add_media(&mut a)?;
+    let offer = a.create_offer(None)?;
+    a.set_local_description(Instant::now(), offer.clone())?;
+    b.set_remote_description(Instant::now(), offer)?;
+    let answer = b.create_answer(None)?;
+    b.set_local_description(Instant::now(), answer)?;
+    let host = CandidateHostConfig {
+        base_config: CandidateConfig {
+            network: "udp".to_owned(),
+            address: "10.0.0.2".to_owned(),
+            port: 5000,
+            component: 1,
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+    .new_candidate_host()?;
+    b.add_local_candidate(RTCIceCandidate::from(&host).to_json()?)?;
+    for sdp in [
+        b.local_description().expect("applied").sdp,
+        b.current_local_description().expect("current").sdp,
+    ] {
+        let shape = carried(&sdp);
+        assert_eq!(shape[0], BUNDLE_ATTRIBUTES.to_vec(), "{sdp}");
+        assert!(shape[1].is_empty() && shape[2].is_empty(), "{sdp}");
+        let ufrags = sdp
+            .lines()
+            .filter(|l| l.starts_with("a=ice-ufrag:"))
+            .count();
+        assert_eq!(ufrags, 1, "{sdp}");
+    }
+    Ok(())
+}

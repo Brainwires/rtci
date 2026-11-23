@@ -155,6 +155,38 @@ test("ICE-TCP: the browser's active candidate reaches Rust's passive one", async
   expect((r.local?.protocol || "").toLowerCase(), JSON.stringify(r)).toBe("tcp");
 });
 
+test("ICE-TCP: built into the engine with UDP blocked, the browser reaches an engine-gathered TCP candidate", async ({ page }) => {
+  const r = await page.evaluate(async (ws) => {
+    // The Rust side adds only a UDP host candidate and drops all ICE UDP; its engine gathers
+    // passive, simultaneous-open and active TCP candidates, trickles them, and drives the
+    // connections through the stream interface and the tokio reference driver.
+    const s = await Interop.open(ws, { engine_tcp: true, udp_blocked: true });
+    const dc = s.pc.createDataChannel("engine-tcp");
+    await s.negotiate();
+    const tcpCandidates = () => s.localCandidates.filter((c) => / tcp /i.test(c));
+    await Interop.until(() => tcpCandidates().length > 0 || s.pc.iceGatheringState === "complete", 10000, "gathering")
+      .catch(() => {});
+    if (tcpCandidates().length === 0) {
+      s.close();
+      return { noTcp: true, candidates: s.localCandidates };
+    }
+    await s.connected();
+    const e = await Interop.echo(dc, 30, 32768);
+    await e.wait(30, 20000);
+    const sel = await Interop.selectedPair(s.pc);
+    s.close();
+    return { echoed: e.got.length, local: sel?.local, remote: sel?.remote };
+  }, WS);
+  naBrowser(
+    r.noTcp,
+    "this browser gathered no TCP candidate",
+    `its icecandidate events: ${JSON.stringify(r.candidates)}`,
+  );
+  expect(r.echoed).toBe(30);
+  expect((r.local?.protocol || "").toLowerCase(), JSON.stringify(r)).toBe("tcp");
+  expect((r.remote?.protocol || "").toLowerCase(), JSON.stringify(r)).toBe("tcp");
+});
+
 // ---- the browser as the answerer for media ----
 
 test("Rust offers media, the browser answers and decodes it", async ({ page }) => {
@@ -407,17 +439,74 @@ test("unbundled: max-compat without a BUNDLE group, a transport per section", as
       sameTransport,
       echoed: e.got.length,
       rtp,
+      rust: { transportsConnected: report.transportsConnected, stats: report.stats },
       errors: report.errors,
     };
   }, WS);
   expect(r.grouped, "Rust answers an offer without a BUNDLE group without one").toBe(false);
-  expect(r.ufrags, JSON.stringify(r)).toBe(2);
+  // Rust's transports share one set of ICE credentials by default, as the browsers' do
+  // (SettingEngineBuilder::with_unique_transport_credentials); they are two transports still.
+  expect(r.ufrags, JSON.stringify(r)).toBe(1);
   expect(r.sameTransport, "video and data are on two transports").toBe(false);
   // A browser that reports no RTCTransportStats is checked by its sender's and SCTP's
   // transport objects only.
   if (r.transportStats > 0) expect(r.transports, JSON.stringify(r)).toBe(2);
+  // Rust's side: each transport fired its own DTLS "connected" (OnTransportEvent) and has a
+  // transport stats object of its own with a selected candidate pair.
+  expect(r.rust.transportsConnected, JSON.stringify(r.rust)).toBe(2);
+  const rustTransports = r.rust.stats.transports.filter((t) => t.dtlsState === "connected");
+  expect(rustTransports.length, JSON.stringify(r.rust.stats.transports)).toBe(2);
+  expect(rustTransports.every((t) => t.selectedCandidatePairId !== ""), JSON.stringify(rustTransports)).toBe(true);
   expect(r.echoed, JSON.stringify(r)).toBe(1);
   expect(r.rtp.error, JSON.stringify(r)).toBeUndefined();
+  expect(r.errors).toEqual([]);
+});
+
+// ---- bundlePolicy "balanced" (RFC 9429 4.1.1, 5.2.1; W3C webrtc-pc 4.2.4) ----
+
+// Rust's initial offer under the default policy gives the first section of each media type a
+// transport of its own (its own candidates; by default the session's one set of ICE
+// credentials, as the browsers write them). The browser gets the offer
+// without its BUNDLE group, as a peer that does not bundle would, and answers each section on
+// its own transport: audio and video each travel over theirs.
+test("balanced: Rust's offer has a transport per media type, answered without BUNDLE", async ({ page }) => {
+  const r = await page.evaluate(async (ws) => {
+    const s = await Interop.open(ws, {});
+    s.mungeRemoteOffer = (sdp) => sdp.replace(/^a=group:BUNDLE[^\r\n]*\r?\n/m, "");
+    s.pc.ontrack = (e) => Interop.sink(new MediaStream([e.track]));
+    s.send({ type: "request-offer", tracks: ["VP8", "OPUS"] });
+    await Interop.until(() => s.remoteOffers > 0 && s.pc.signalingState === "stable", 15000, "Rust's offer");
+    await s.connected();
+    const video = await Interop.until(async () => {
+      const v = await Interop.inbound(s.pc, "video");
+      return v && v.framesDecoded > 15 && v;
+    }, 25000, "15 decoded frames").catch(async (e) => ({ error: String(e), last: await Interop.inbound(s.pc, "video") }));
+    const audio = await Interop.until(async () => {
+      const a = await Interop.inbound(s.pc, "audio");
+      return a && a.packetsReceived > 50 && a;
+    }, 15000, "50 audio packets").catch(() => Interop.inbound(s.pc, "audio"));
+    const offer = s.pc.remoteDescription.sdp;
+    const ufrags = new Set([...offer.matchAll(/^a=ice-ufrag:(\S+)/gm)].map((m) => m[1]));
+    const stats = await s.pc.getStats();
+    const transportStats = [...stats.values()].filter((x) => x.type === "transport");
+    const transports = transportStats.filter((x) => x.dtlsState === "connected").length;
+    const report = await s.report();
+    s.close();
+    return {
+      ufrags: ufrags.size,
+      transports,
+      transportStats: transportStats.length,
+      video,
+      audio,
+      rust: { transportsConnected: report.transportsConnected },
+      errors: report.errors.concat(s.errors),
+    };
+  }, WS);
+  expect(r.ufrags, "audio and video share the session's ICE credentials").toBe(1);
+  if (r.transportStats > 0) expect(r.transports, JSON.stringify(r)).toBe(2);
+  expect(r.rust.transportsConnected, JSON.stringify(r.rust)).toBe(2);
+  expect(r.video.error, JSON.stringify(r)).toBeUndefined();
+  expect(r.audio?.packetsReceived || 0, JSON.stringify(r.audio)).toBeGreaterThan(50);
   expect(r.errors).toEqual([]);
 });
 
