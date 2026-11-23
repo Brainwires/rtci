@@ -10,13 +10,13 @@ Totals (rows 957):
 
 The section 8 rows (statistics) carry the verdicts of branch `conf/stats-conformance`; the totals include them.
 
-- MUST: tested 833 / untested 1 / partial 20 / missing 15 / violated 0 / n-a 60
+- MUST: tested 834 / untested 1 / partial 19 / missing 15 / violated 0 / n-a 60
 - SHOULD: tested 4 / untested 0 / partial 1 / missing 0 / violated 0 / n-a 5
 - MAY: tested 5 / untested 0 / partial 0 / missing 0 / violated 0 / n-a 13
 
 By pass:
 
-- sections 1 to 4: rows 399; MUST: tested 319 / untested 0 / partial 14 / missing 15 / violated 0 / n-a 34
+- sections 1 to 4: rows 399; MUST: tested 320 / untested 0 / partial 13 / missing 15 / violated 0 / n-a 34
 - section 5: rows 258; MUST: tested 230 / untested 1 / partial 6 / missing 0 / violated 0 / n-a 13
 - sections 6 to 12: rows 300; MUST: tested 284 / untested 0 / partial 0 / missing 0 / violated 0 / n-a 13
 
@@ -88,7 +88,7 @@ By pass:
 | WEBRTC-4.4.1.1-6 | 4.4.1.1 | MUST | Otherwise generate one or more certificates for this connection | tested | src/peer_connection/transport/dtls/mod.rs:133 | test_offer_answer_rtc_to_rtc | |
 | WEBRTC-4.4.1.1-7 | 4.4.1.1 | MAY | Default certificate generation may happen asynchronously | n/a | | | generated synchronously in build() |
 | WEBRTC-4.4.1.1-8 | 4.4.1.1 | MUST | Initialize the connection's ICE agent | tested | src/peer_connection/internal.rs:148 | test_offer_answer_rtc_to_rtc | |
-| WEBRTC-4.4.1.1-9 | 4.4.1.1 | MUST | [[Configuration]] is set through "set the configuration" (all its validation runs) | partial | src/peer_connection/internal.rs:49 | test_configuration_validate_relay_policy | constructor validation differs from set_configuration: stun queries are stripped, see 4.4.1.5 rows |
+| WEBRTC-4.4.1.1-9 | 4.4.1.1 | MUST | [[Configuration]] is set through "set the configuration" (all its validation runs) | tested | `src/peer_connection/configuration/mod.rs` (`RTCConfiguration::validate`, `set_the_configuration`) | `tests/webrtc_pc_signaling_clauses.rs::the_constructor_validates_the_configuration_as_set_configuration_does`, test_configuration_validate_relay_policy | mt-9: the constructor (after its certificate expiry check) and setConfiguration run one "set the configuration": ICE server truncation and validation, the immutable members against the previous configuration when there is one, the relay-only warning; the test fails when the constructor skips it (container, mutation) |
 | WEBRTC-4.4.1.1-10 | 4.4.1.1 | MUST | [[IsClosed]] starts false | tested | src/peer_connection/internal.rs:215 | close_transitions_to_closed_state | represented by the Closed connection state |
 | WEBRTC-4.4.1.1-11 | 4.4.1.1 | MUST | [[NegotiationNeeded]] starts false | tested | src/peer_connection/internal.rs:229 | a_new_connection_has_no_descriptions_and_needs_no_negotiation | `is_negotiation_ongoing` |
 | WEBRTC-4.4.1.1-12 | 4.4.1.1 | MUST | [[SctpTransport]] starts null | tested | src/peer_connection/mod.rs:2875 | sctp_is_none_until_sctp_is_negotiated | |
@@ -193,7 +193,7 @@ By pass:
 | WEBRTC-4.4.1.4-79 | 4.4.1.4 | MUST | Rollback: both pending descriptions null, state stable | tested | src/peer_connection/internal.rs:738 | polite_peer_glare_recovery_with_local_offer_rollback | |
 | WEBRTC-4.4.1.4-80 | 4.4.1.4 | MUST | A rollback is valid in have-local-offer and have-remote-offer whichever method carries it | tested | pc/state/signaling_state.rs `check_next_signaling_state` | `tests/jsep_rollback.rs`, `signaling_state.rs::test_signaling_state_transitions` |  |
 | WEBRTC-4.4.1.4-81 | 4.4.1.4 | MUST | Answer: remove stopped transceivers whose m= section is rejected in a current description | tested | src/peer_connection/internal.rs:947 | stopped_transceivers_are_removed_once_their_sections_are_rejected | |
-| WEBRTC-4.4.1.4-82 | 4.4.1.4 | MUST | Stable: close DTLS and ICE transports no non-stopped transceiver references any more | partial | src/peer_connection/internal.rs:725 | rejects_every_media_section_only_when_all_are_rejected | the single transport is marked closed when every section is rejected; no transport state event |
+| WEBRTC-4.4.1.4-82 | 4.4.1.4 | MUST | Stable: close DTLS and ICE transports no non-stopped transceiver references any more | partial | src/peer_connection/internal.rs:725; `transport_layout.rs` (`apply_transport_layout`), `states_events.rs` (`announce_transport_closed`) | rejects_every_media_section_only_when_all_are_rejected; `tests/multi_transport_rtc2rtc.rs::a_bundling_answer_leaves_the_tagged_sections_transport_only` | mt-9: with several transports, a transport an answer leaves without a section is closed (agent closed, removed) and fires DTLS then ICE "closed" at its objects. Open: with one transport, a description that rejects every section only marks it closed (kept for the next offer, which restarts it), with no close and no event; size S, object model |
 | WEBRTC-4.4.1.4-83 | 4.4.1.4 | MUST | Stable: remove encoding.codec values that match no entry of [[SendCodecs]] | missing | | | not found in the set-description path |
 | WEBRTC-4.4.1.4-84 | 4.4.1.4 | MUST | Stable: clear the negotiation-needed flag and update it | tested | src/peer_connection/internal.rs:841 | stop_raises_negotiation_needed_and_settles_once_rejected | |
 | WEBRTC-4.4.1.4-85 | 4.4.1.4 | MUST | signalingstatechange fires only if the signaling state changed | tested | pc/internal.rs `commit_description` | `pc/set_description_atomic_test.rs::signalingstatechange_fires_only_when_the_state_changes` |  |
@@ -321,7 +321,7 @@ By pass:
 | WEBRTC-4.4.3-7 | 4.4.3 | MAY | offerToReceive true with no receiving transceiver of the kind: add a recvonly transceiver | n/a | | | built by the binding from add_transceiver_from_kind |
 | WEBRTC-4.4.3-8 | 4.4.3 | MUST | That added transceiver must not update the negotiation-needed flag | missing | src/peer_connection/internal.rs:904 | | every add_rtp_transceiver triggers the check; the engine offers no silent add |
 | WEBRTC-4.4.4-1 | 4.4.4 | MUST | The connection is not garbage collected while an event can still fire on it | n/a | | | ownership is the application's |
-| WEBRTC-4.5.1-1 | 4.5.1 | MUST | Failures are reported as rejections or exceptions with the specified error name | partial | rtc-shared/src/error.rs:1740 |  | distinct Error variants exist for each W3C error the engine raises; what is still open is the rows above that are themselves open (JSEP's 4.4.1.4 and 4.4.2 rows) |
+| WEBRTC-4.5.1-1 | 4.5.1 | MUST | Failures are reported as rejections or exceptions with the specified error name | partial | rtc-shared/src/error.rs:1740 |  | distinct Error variants exist for each W3C error the engine raises; what is still open is the rows above that are themselves open: 26 rows of 4.4.1.4 and 4.4.2 (JSEP description processing; recounted at mt-9), so the row stays partial until they are tested |
 | WEBRTC-4.6.1-1 | 4.6.1 | MUST | "offer": the description is treated as an SDP offer | tested | src/peer_connection/sdp/sdp_type.rs:110 | test_offer_answer_rtc_to_rtc | |
 | WEBRTC-4.6.1-2 | 4.6.1 | MUST | "pranswer": treated as a non-final answer; may follow an offer or a previous pranswer | tested | src/peer_connection/sdp/sdp_type.rs:131 | provisional_answers_repeat_and_keep_the_offerer_controlling | |
 | WEBRTC-4.6.1-3 | 4.6.1 | MUST | "answer": treated as the final answer; the exchange is complete | tested | src/peer_connection/sdp/sdp_type.rs:147 | provisional_answers_repeat_and_keep_the_offerer_controlling | |

@@ -1504,6 +1504,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behaviour changes
 
+- **peer connection** (mt-9): several transports on one local socket work with the default
+  shared ICE credentials. A datagram on an address several transports gathered on goes to the
+  transport the full STUN USERNAME names (both parts: the remote ufrag per transport too), else
+  the one that used that 5-tuple (every datagram a transport writes there is recorded), else the
+  one that knows the sender as a remote candidate, else, for a Binding request, the one an
+  earlier request with the same ICE tie-breaker went to; a request none of these settles is
+  dropped (RFC 8445 7.2.2, 14.3): it used to be read by the first transport with a matching
+  ufrag, which answered it on another transport's path. Tested through the reference driver's shared-port `UfragMux`
+  with the remote's candidates arriving late
+  (`three_transports_share_one_port_with_shared_credentials_through_the_drivers_mux`).
+- **peer connection** (mt-9): `RTCRtpTransceiver::set_bundle_request(Some(false))` moves the
+  transceiver's section out of its BUNDLE group at the next offer (RFC 9143 7.5.2: the tag out
+  of the group, no `a=bundle-only`, a transport of its own with its own candidates and DTLS
+  association; the group keeps its transport); `Some(true)` puts it back into the first group
+  (7.5.1); `None` (the default) follows the last answer. `renew_dtls_association()` renews
+  every transport's association (each its own new `a=tls-id` and handshake, RFC 8842 5.5,
+  RFC 5764 4.4), which the security stack's automatic re-keying calls. The transports an
+  answer leaves unused fire DTLS and then ICE "closed" (`OnTransportEvent`, W3C 4.4.1.6).
+  Bandwidth probing is shown per transport (`each_transport_probes_its_own_path`).
+- **interceptor** (mt-9, bug): the NACK responder filled every probe cluster on the RTX
+  stream that sent last, whatever transport's congestion controller asked for it, so with
+  several transports one transport's probes travelled another's path and measured nothing of
+  its own (RFC 8836 2, RFC 8835 4.2). A cluster is now filled on a stream of the RTP session
+  the request is tagged with (`RtpSession`, learned from the `RtpSessionAssignment`s); with one
+  session nothing changes.
+- **peer connection** (mt-9, W3C webrtc-pc 4.4.1.1-9): the constructor and
+  `set_configuration` run one validation, "set the configuration"
+  (`RTCConfiguration::set_the_configuration`): ICE server truncation and checks, the members
+  that cannot change (with a previous configuration only), the relay-only warning.
+- **peer connection** (mt-9, pc rows): the asymmetric-pairs data-channel test takes the
+  answerer's `RTCDataChannelEvent::OnDataChannel` as the W3C `datachannel` announcement, not a
+  change of the channel's state (train 7 failure).
 - **peer connection** (mt-8): ICE restart and DTLS per transport. `restart_ice()` (W3C
   restartIce) restarts every transport: the next offer gives each new credentials (one new
   pair shared by all unless `with_unique_transport_credentials`), and each restarts when the

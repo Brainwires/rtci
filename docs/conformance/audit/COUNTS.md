@@ -9,11 +9,11 @@ is a procedure step without a keyword.
 
 | Level | tested | untested | partial | missing | violated | n/a | rows |
 |---|---|---|---|---|---|---|---|
-| MUST | 4612 | 104 | 193 | 112 | 21 | 636 | 5678 |
-| SHOULD | 733 | 65 | 67 | 70 | 6 | 335 | 1276 |
+| MUST | 4614 | 104 | 192 | 111 | 21 | 636 | 5678 |
+| SHOULD | 733 | 65 | 67 | 71 | 6 | 334 | 1276 |
 | MAY | 405 | 30 | 34 | 127 | 0 | 173 | 769 |
 | PROC | 58 | 3 | 4 | 2 | 0 | 0 | 67 |
-| all | 5808 | 202 | 298 | 311 | 27 | 1144 | 7790 |
+| all | 5810 | 202 | 297 | 311 | 27 | 1143 | 7790 |
 
 ## Per file
 
@@ -101,7 +101,7 @@ is a procedure step without a keyword.
 | `rfc5761.md` | SHOULD | 2 | 1 | 0 | 0 | 0 | 3 | 6 |
 | `rfc5761.md` | MAY | 0 | 0 | 0 | 0 | 0 | 1 | 1 |
 | `rfc5764.md` | MUST | 24 | 0 | 1 | 0 | 0 | 9 | 34 |
-| `rfc5764.md` | SHOULD | 5 | 0 | 1 | 2 | 1 | 6 | 15 |
+| `rfc5764.md` | SHOULD | 5 | 0 | 1 | 3 | 1 | 5 | 15 |
 | `rfc5764.md` | MAY | 4 | 0 | 0 | 4 | 0 | 3 | 11 |
 | `rfc5780.md` | MUST | 2 | 0 | 0 | 0 | 0 | 2 | 4 |
 | `rfc5780.md` | MAY | 1 | 0 | 0 | 2 | 0 | 0 | 3 |
@@ -283,7 +283,7 @@ is a procedure step without a keyword.
 | `rfc8888.md` | MUST | 26 | 0 | 0 | 1 | 0 | 1 | 28 |
 | `rfc8888.md` | SHOULD | 7 | 0 | 1 | 0 | 0 | 0 | 8 |
 | `rfc8888.md` | MAY | 4 | 0 | 0 | 0 | 0 | 1 | 5 |
-| `rfc9143.md` | MUST | 57 | 9 | 4 | 2 | 0 | 3 | 75 |
+| `rfc9143.md` | MUST | 58 | 9 | 4 | 1 | 0 | 3 | 75 |
 | `rfc9143.md` | SHOULD | 2 | 3 | 0 | 0 | 0 | 1 | 6 |
 | `rfc9143.md` | MAY | 6 | 0 | 0 | 0 | 0 | 0 | 6 |
 | `rfc9146.md` | MUST | 14 | 0 | 0 | 0 | 0 | 0 | 14 |
@@ -318,7 +318,7 @@ is a procedure step without a keyword.
 | `w3c-webrtc-extensions.md` | MUST | 59 | 0 | 0 | 0 | 0 | 14 | 73 |
 | `w3c-webrtc-extensions.md` | SHOULD | 1 | 0 | 0 | 0 | 0 | 1 | 2 |
 | `w3c-webrtc-extensions.md` | MAY | 1 | 0 | 0 | 0 | 0 | 0 | 1 |
-| `w3c-webrtc-pc.md` | MUST | 833 | 1 | 20 | 15 | 0 | 60 | 929 |
+| `w3c-webrtc-pc.md` | MUST | 834 | 1 | 19 | 15 | 0 | 60 | 929 |
 | `w3c-webrtc-pc.md` | SHOULD | 4 | 0 | 1 | 0 | 0 | 5 | 10 |
 | `w3c-webrtc-pc.md` | MAY | 5 | 0 | 0 | 0 | 0 | 13 | 18 |
 | `w3c-webrtc-priority.md` | MUST | 14 | 0 | 0 | 0 | 0 | 0 | 14 |
