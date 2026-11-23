@@ -1173,6 +1173,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behaviour changes
 
+- **bandwidth** (pc-21): `maxBitrate` is enforced and the congestion controller's target is
+  divided among the senders (W3C webrtc 5.2.5, webrtc-priority 3.2, RFC 8835 section 4.1).
+  Every active encoding of a sending transceiver gets a share by `priority` (very-low : low :
+  medium : high = 1 : 2 : 4 : 8), capped at its `maxBitrate` with the rest going to the
+  others; `RTCRtpSender::target_bitrates()` returns the shares by SSRC, and each outbound
+  stream's `targetBitrate` reports its share (also with several streams). `setParameters`
+  divides again. An encoding with a `maxBitrate` has whole frames (the packets of one RTP
+  timestamp) dropped while they would take it above the maximum, counted as TIAS; one frame
+  always goes. A sender that wrote above its `maxBitrate` now loses frames.
+- **jitter buffer** (pc-21): `RTCRtpReceiver::set_jitter_buffer_target` reaches the chain's
+  adaptive jitter buffer (`AdaptiveJitterBufferInterceptor`), which holds the receiver's
+  streams for the target clamped to its minimum and maximum delay (W3C webrtc 5.3);
+  `None` returns to the adaptive delay. rtc-interceptor: `JitterBufferControl` (additive).
 - **fec**: an encoding the application gives without a FEC SSRC gets one when a FEC format
   (flexfec-03, RFC 8627 FlexFEC) is registered, as it gets an RTX SSRC: the offer carries the
   `a=ssrc-group:FEC-FR` and the repair flow is bound

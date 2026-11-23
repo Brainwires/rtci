@@ -89,9 +89,91 @@ pub(crate) struct RTCRtpSenderInternal {
     /// the two-byte form from then on (RFC 8285 section 4.1.2: "A stream MUST contain only
     /// one-byte headers or only two-byte headers").
     two_byte_ssrcs: Vec<SSRC>,
+    /// Each encoding's share of the congestion controller's target (`allocate_bandwidth`):
+    /// what its encoder is to aim for, by SSRC.
+    allocated_bitrates: Vec<(SSRC, f64)>,
+    /// The `maxBitrate` budget of each encoding that has one (`admit_under_max_bitrate`).
+    max_bitrate_limiters: Vec<MaxBitrateLimiter>,
+}
+
+/// W3C webrtc 5.2.5 `maxBitrate` on the wire: "a frame will always be sent as fast as
+/// possible, but frames may be dropped until bitrate is low enough. Thus, even a bitrate of
+/// zero will allow sending one frame." A budget that fills at `maxBitrate` (up to one second
+/// of it) and is charged for every packet sent (RTP header and payload: TIAS, RFC 3890
+/// 6.2.2); a frame (the packets of one RTP timestamp) that starts while the budget is spent
+/// is dropped whole.
+#[derive(Debug, Clone)]
+struct MaxBitrateLimiter {
+    ssrc: SSRC,
+    budget_bits: f64,
+    refilled: std::time::Instant,
+    /// The frame being sent: its RTP timestamp and whether it was admitted.
+    frame: Option<(u32, bool)>,
 }
 
 impl RTCRtpSenderInternal {
+    /// The share of the congestion controller's target allocated to the encoding sending on
+    /// `ssrc`, once there is a target.
+    pub(crate) fn allocated_bitrates(&self) -> &[(SSRC, f64)] {
+        &self.allocated_bitrates
+    }
+
+    pub(crate) fn set_allocated_bitrates(&mut self, shares: Vec<(SSRC, f64)>) {
+        self.allocated_bitrates = shares;
+    }
+
+    /// Whether a packet of `bits` on `ssrc` with RTP timestamp `timestamp`, written at `now`,
+    /// fits the encoding's `max_bitrate` (bits per second; 0 is no limit): see
+    /// [`MaxBitrateLimiter`].
+    pub(crate) fn admit_under_max_bitrate(
+        &mut self,
+        now: std::time::Instant,
+        ssrc: SSRC,
+        timestamp: u32,
+        bits: f64,
+        max_bitrate: u32,
+    ) -> bool {
+        if max_bitrate == 0 {
+            self.max_bitrate_limiters.retain(|l| l.ssrc != ssrc);
+            return true;
+        }
+        let rate = f64::from(max_bitrate);
+        let index = match self
+            .max_bitrate_limiters
+            .iter()
+            .position(|l| l.ssrc == ssrc)
+        {
+            Some(index) => index,
+            None => {
+                self.max_bitrate_limiters.push(MaxBitrateLimiter {
+                    ssrc,
+                    budget_bits: 0.0,
+                    refilled: now,
+                    frame: None,
+                });
+                self.max_bitrate_limiters.len() - 1
+            }
+        };
+        let limiter = &mut self.max_bitrate_limiters[index];
+        let elapsed = now
+            .saturating_duration_since(limiter.refilled)
+            .as_secs_f64();
+        limiter.budget_bits = (limiter.budget_bits + elapsed * rate).min(rate);
+        limiter.refilled = limiter.refilled.max(now);
+        let admitted = match limiter.frame {
+            Some((frame_timestamp, admitted)) if frame_timestamp == timestamp => admitted,
+            _ => {
+                let admitted = limiter.budget_bits >= 0.0;
+                limiter.frame = Some((timestamp, admitted));
+                admitted
+            }
+        };
+        if admitted {
+            limiter.budget_bits -= bits;
+        }
+        admitted
+    }
+
     /// Creates a new RTP sender internal state.
     ///
     /// # Parameters

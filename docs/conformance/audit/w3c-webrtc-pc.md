@@ -10,14 +10,14 @@ Totals (rows 957):
 
 The section 8 rows (statistics) carry the verdicts of branch `conf/stats-conformance`; the totals include them.
 
-- MUST: tested 767 / untested 22 / partial 57 / missing 22 / violated 0 / n-a 61
+- MUST: tested 769 / untested 22 / partial 56 / missing 21 / violated 0 / n-a 61
 - SHOULD: tested 4 / untested 0 / partial 1 / missing 0 / violated 0 / n-a 5
 - MAY: tested 3 / untested 2 / partial 0 / missing 0 / violated 0 / n-a 13
 
 By pass:
 
 - sections 1 to 4: rows 399; MUST: tested 290 / untested 11 / partial 25 / missing 21 / violated 0 / n-a 35
-- section 5: rows 258; MUST: tested 219 / untested 5 / partial 12 / missing 1 / violated 0 / n-a 13
+- section 5: rows 258; MUST: tested 221 / untested 5 / partial 11 / missing 0 / violated 0 / n-a 13
 - sections 6 to 12: rows 300; MUST: tested 258 / untested 6 / partial 20 / missing 0 / violated 0 / n-a 13
 
 | ID | § | Level | Clause (short paraphrase) | Verdict | Code | Test | Note |
@@ -524,7 +524,7 @@ By pass:
 | WEBRTC-5.2.4-1 | 5.2.4 | MUST | RTCRtpCodingParameters.rid: sent as the RID header extension; read-only after addTransceiver | tested | `src/rtp_transceiver/rtp_sender/rtp_coding_parameters.rs:1`, `src/rtp_transceiver/rtp_sender/internal.rs:192` | `tests/simulcast_rtc_to_rtc_interop.rs` | The application writes the RID extension into its packets |
 | WEBRTC-5.2.5-1 | 5.2.5 | MUST | RTCRtpEncodingParameters.active (default true): false stops sending that encoding, no BYE | tested | `src/rtp_transceiver/rtp_sender/mod.rs:432` | `an_inactive_encoding_is_a_paused_rid_only_when_pause_marks_are_written` | Rust `Default` gives false; the engine's own constructors set true |
 | WEBRTC-5.2.5-2 | 5.2.5 | SHOULD | RTCRtpEncodingParameters.codec: send with the first [[SendCodecs]] entry matching it | tested | `src/rtp_transceiver/rtp_sender/mod.rs:440` | `an_encoding_without_a_codec_is_repaired_over_rtx` | Used to rewrite the payload type of a packet whose own type is not negotiated |
-| WEBRTC-5.2.5-3 | 5.2.5 | MUST | RTCRtpEncodingParameters.maxBitrate: an upper bound the sender never exceeds | partial | `src/rtp_transceiver/rtp_sender/rtp_encoding_parameters.rs:1` | - | Carried (u32, 0 for unset) but enforced by nothing: neither the pacer nor the congestion controller reads it |
+| WEBRTC-5.2.5-3 | 5.2.5 | MUST | RTCRtpEncodingParameters.maxBitrate: an upper bound the sender never exceeds | tested | `src/rtp_transceiver/rtp_sender/internal.rs` (MaxBitrateLimiter, admit_under_max_bitrate), `src/rtp_transceiver/rtp_sender/mod.rs` (write_rtp_inner, target_bitrates), `src/peer_connection/priority.rs` (allocate_target_bitrate) | `frames_above_max_bitrate_are_dropped_whole`, `the_congestion_target_reaches_the_sender_capped_at_max_bitrate`, `the_target_is_divided_among_the_senders_by_priority_and_max_bitrate`, `a_capped_flow_gets_its_cap_and_the_rest_goes_to_the_others` | the encoding's share of the target never exceeds it (what the encoder aims for: `target_bitrates`, `targetBitrate`), and the sender drops whole frames while they would exceed it, TIAS-counted, one frame always going (the spec's "frames may be dropped until bitrate is low enough"); 0 is no maximum (the field has no unset state) |
 | WEBRTC-5.2.5-4 | 5.2.5 | MUST | RTCRtpEncodingParameters.maxFramerate (video only) | partial | `src/rtp_transceiver/rtp_sender/internal.rs:210` | `set_parameters_refuses_a_negative_max_framerate` | Carried and validated; applying it is the encoder's job |
 | WEBRTC-5.2.5-5 | 5.2.5 | MUST | RTCRtpEncodingParameters.scaleResolutionDownBy (video only, at least 1.0) | partial | `src/rtp_transceiver/rtp_sender/internal.rs:197` | - | Carried and validated in setParameters only |
 | WEBRTC-5.2.6-1 | 5.2.6 | MUST | RTCRtcpParameters.cname | tested | src/rtp_transceiver/rtp_sender/internal.rs (get_parameters) | get_parameters_keeps_its_transaction_until_set_parameters | the connection's CNAME |
@@ -552,7 +552,7 @@ By pass:
 | WEBRTC-5.3-6 | 5.3 | MUST | transport attribute: null before the DTLS transport exists | tested | `src/rtp_transceiver/rtp_receiver/mod.rs:213` | sender_and_receiver_transports_follow_the_descriptions | - |
 | WEBRTC-5.3-7 | 5.3 | MUST | jitterBufferTarget getter returns [[JitterBufferTarget]] | tested | `src/rtp_transceiver/rtp_receiver/mod.rs:273` | `jitter_buffer_target_is_stored_within_its_range` | - |
 | WEBRTC-5.3-8 | 5.3 | MUST | jitterBufferTarget setter: RangeError when negative or above 4000 ms; store the target | tested | `src/rtp_transceiver/rtp_receiver/mod.rs:287`, `src/rtp_transceiver/rtp_receiver/internal.rs:138` | `jitter_buffer_target_is_stored_within_its_range` | A Duration cannot be negative; above 4000 ms is a RangeError |
-| WEBRTC-5.3-9 | 5.3 | MUST | jitterBufferTarget: the system applies the target, clamped to its minimum and maximum allowed targets | missing | `rtc-interceptor/src/jitterbuffer` | - | The jitter-buffer interceptors take their delay at construction, not from the receiver |
+| WEBRTC-5.3-9 | 5.3 | MUST | jitterBufferTarget: the system applies the target, clamped to its minimum and maximum allowed targets | tested | `src/rtp_transceiver/rtp_receiver/mod.rs` (set_jitter_buffer_target), `rtc-interceptor/src/adaptive_jitter_buffer/{mod,stream}.rs` (JitterBufferControl, effective_delay), `src/peer_connection/handler/interceptor.rs` (record_sources) | `the_jitter_buffer_target_holds_the_receivers_packets`, `an_application_target_replaces_the_adaptive_one_within_the_bounds` | the target reaches the chain's adaptive jitter buffer, which holds the receiver's streams for it clamped to its minimum and maximum delay (a stream appearing later from its first packet); null returns to the adaptive delay; without a jitter buffer in the chain, playout is the application's |
 | WEBRTC-5.3-10 | 5.3 | SHOULD | jitterBufferTarget: synchronized receivers use the larger target; changes are applied gradually | n/a | - | - | Playout is the application's |
 | WEBRTC-5.3-11 | 5.3 | MUST | getCapabilities(kind): null for other kinds; else implemented receive codecs and header extensions | tested | `src/rtp_transceiver/rtp_receiver/mod.rs:264` | `get_capabilities_lists_the_engine_codecs_without_any_negotiation` | - |
 | WEBRTC-5.3-12 | 5.3 | MUST | getParameters: header extensions the receiver is prepared to receive | partial | `src/rtp_transceiver/rtp_receiver/internal.rs:109` | `test_set_rtp_parameters` | Connection-wide set for the kind |

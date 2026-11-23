@@ -383,7 +383,23 @@ impl RTCRtpSender<'_> {
                 parameters,
                 set_parameter_options,
                 &self.peer_connection.media_engine,
-            )
+            )?;
+        // The encodings' priority, maxBitrate or active flag may have changed: the target is
+        // divided again (W3C webrtc-priority 3.2, webrtc 5.2.5).
+        self.peer_connection.reallocate_target_bitrate();
+        Ok(())
+    }
+
+    /// The share of the congestion controller's target each of the sender's encodings is
+    /// given, by SSRC, in bits per second: what its encoder is to aim for. The target is
+    /// divided among the active encodings of every sending transceiver by `priority` (each
+    /// level twice the share of the level below, RFC 8835 section 4.1, W3C webrtc-priority
+    /// 3.2) and capped at each one's `max_bitrate` (W3C webrtc 5.2.5), the rest going to the
+    /// others. Empty until the congestion controller (the default interceptors) set a target,
+    /// and for a sender that does not send. Each outbound stream's `targetBitrate` statistic
+    /// reports the same share.
+    pub fn target_bitrates(&self) -> Vec<(crate::rtp_transceiver::SSRC, f64)> {
+        self.sender().allocated_bitrates().to_vec()
     }
 
     /// Returns the sender's current RTP send parameters.
@@ -619,6 +635,31 @@ impl RTCRtpSender<'_> {
             .any(|ssrc| ssrc == packet.header.ssrc)
         {
             return Err(Error::ErrSenderWithNoSSRCs);
+        }
+
+        // W3C webrtc 5.2.5 maxBitrate: the encoding's frames are dropped while they would
+        // take it above its maximum (one frame always goes).
+        let max_bitrate = sender
+            .send_encodings()
+            .iter()
+            .find(|e| e.rtp_coding_parameters.ssrc == Some(packet.header.ssrc))
+            .map_or(0, |e| e.max_bitrate);
+        let bits = {
+            use shared::marshal::MarshalSize;
+            (packet.marshal_size() * 8) as f64
+        };
+        if !sender.admit_under_max_bitrate(
+            now,
+            packet.header.ssrc,
+            packet.header.timestamp,
+            bits,
+            max_bitrate,
+        ) {
+            trace!(
+                "rtp_sender {:?} drops RTP ssrc {} ts {}: the frame would exceed maxBitrate {}",
+                self.id, packet.header.ssrc, packet.header.timestamp, max_bitrate
+            );
+            return Ok(());
         }
 
         // The payload types of comfort noise (13, and any the application registered) and of

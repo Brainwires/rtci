@@ -251,7 +251,7 @@ pub(crate) mod wire_image;
 // Fork additions kept over upstream (see FORK.md): the TWCC-driven GCC interceptor with its
 // shared bitrate handle, and the adaptive (RFC 3550 jitter + playout-delay extension) jitter buffer.
 pub use adaptive_jitter_buffer::{
-    JitterBufferBuilder as AdaptiveJitterBufferBuilder,
+    JitterBufferBuilder as AdaptiveJitterBufferBuilder, JitterBufferControl,
     JitterBufferInterceptor as AdaptiveJitterBufferInterceptor,
 };
 pub use cc::estimator::{BandwidthEstimator, ConstantBitrate, EstimatorStats};

@@ -54,6 +54,33 @@ use std::time::{Duration, Instant};
 mod stream;
 use stream::{JitterBufferStream, PLAYOUT_DELAY_URI};
 
+/// The application's jitter buffer target for the streams of one receiver (W3C webrtc 5.3
+/// `jitterBufferTarget`): written into the chain ([`into_packet`](Self::into_packet)), the
+/// jitter buffer takes it for each SSRC, now or when the stream is bound, and holds those
+/// streams' packets for `target` clamped to its minimum and maximum delay instead of its
+/// adaptive target; `None` returns them to the adaptive target. Consumed by the jitter
+/// buffer; without one in the chain it reaches the terminus and is dropped there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JitterBufferControl {
+    /// The SSRCs the target is for.
+    pub ssrcs: Vec<u32>,
+    /// The target delay, or `None` for no preference.
+    pub target: Option<Duration>,
+}
+
+impl JitterBufferControl {
+    /// The packet that carries this to the jitter buffer when written into the chain at
+    /// `now`.
+    pub fn into_packet(self, now: Instant) -> TaggedPacket {
+        TaggedPacket {
+            now,
+            transport: shared::TransportContext::default(),
+            message: crate::AttributedPacket::new(Packet::Rtcp(vec![]))
+                .with(crate::Attribute::Custom(std::sync::Arc::new(self))),
+        }
+    }
+}
+
 /// Builder for [`JitterBufferInterceptor`].
 pub struct JitterBufferBuilder<P> {
     min_delay: Duration,
@@ -106,6 +133,7 @@ impl<P> JitterBufferBuilder<P> {
             max_delay: self.max_delay,
             initial_delay: self.initial_delay,
             streams: HashMap::new(),
+            targets: HashMap::new(),
             last_now: None,
         }
     }
@@ -128,6 +156,10 @@ pub struct JitterBufferInterceptor<P> {
     /// Per-SSRC jitter buffer state, created in `bind_remote_stream`.
     streams: HashMap<u32, JitterBufferStream>,
 
+    /// The application's target of each SSRC that has one ([`JitterBufferControl`]), for
+    /// the streams bound later too.
+    targets: HashMap<u32, Duration>,
+
     /// Monotonic timestamp tracked from `handle_read` / `handle_timeout` calls,
     /// used by `poll_read` instead of `Instant::now()` to avoid wall-clock dependency.
     last_now: Option<Instant>,
@@ -149,6 +181,24 @@ impl<P: Interceptor> JitterBufferInterceptor<P> {
         }
         // RTCP, or RTP from an unbound SSRC → forward without delay.
         self.inner.handle_read(msg)
+    }
+
+    /// A [`JitterBufferControl`] is taken here, not passed on; anything else goes on.
+    #[overrides]
+    fn handle_write(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
+        if let Some(control) = msg.message.custom::<JitterBufferControl>() {
+            for &ssrc in &control.ssrcs {
+                match control.target {
+                    Some(target) => self.targets.insert(ssrc, target),
+                    None => self.targets.remove(&ssrc),
+                };
+                if let Some(stream) = self.streams.get_mut(&ssrc) {
+                    stream.set_application_target(control.target);
+                }
+            }
+            return Ok(());
+        }
+        self.inner.handle_write(msg)
     }
 
     /// Flush ready buffered packets into the inner chain, then poll the inner chain.
@@ -197,16 +247,15 @@ impl<P: Interceptor> JitterBufferInterceptor<P> {
             .find(|e| e.uri == PLAYOUT_DELAY_URI)
             .map(|e| e.id as u8);
 
-        self.streams.insert(
-            info.ssrc,
-            JitterBufferStream::new(
-                info.clock_rate,
-                ext_id,
-                self.initial_delay,
-                self.min_delay,
-                self.max_delay,
-            ),
+        let mut stream = JitterBufferStream::new(
+            info.clock_rate,
+            ext_id,
+            self.initial_delay,
+            self.min_delay,
+            self.max_delay,
         );
+        stream.set_application_target(self.targets.get(&info.ssrc).copied());
+        self.streams.insert(info.ssrc, stream);
         self.inner.bind_remote_stream(info);
     }
 
@@ -450,5 +499,72 @@ mod tests {
             wake <= base + Duration::from_millis(initial_ms + 10),
             "wake time should be close to initial_delay"
         );
+    }
+
+    /// Whether a packet of `ssrc` held since `base` has come out by `base + after_ms`.
+    fn released_by(chain: &mut impl crate::Interceptor, base: Instant, after_ms: u64) -> bool {
+        chain
+            .handle_timeout(base + Duration::from_millis(after_ms))
+            .unwrap();
+        chain.poll_read().is_some()
+    }
+
+    /// W3C webrtc 5.3 jitterBufferTarget: the application's target replaces the adaptive
+    /// one for the SSRCs it names, clamped to the minimum and maximum delay; the control is
+    /// consumed; a stream bound after it takes it too; `None` returns to the adaptive target.
+    #[test]
+    fn an_application_target_replaces_the_adaptive_one_within_the_bounds() {
+        let mut chain = make_chain(50, 500);
+        let ssrc = 4444;
+        chain.bind_remote_stream(&make_stream_info(ssrc, 90000));
+        let base = Instant::now();
+        let control = |target: Option<u64>, ssrcs: Vec<u32>| {
+            JitterBufferControl {
+                ssrcs,
+                target: target.map(Duration::from_millis),
+            }
+            .into_packet(base)
+        };
+
+        chain.handle_write(control(Some(300), vec![ssrc])).unwrap();
+        assert!(chain.poll_write().is_none(), "the control is consumed");
+        chain.handle_read(make_rtp_at(ssrc, 1, 0, base)).unwrap();
+        assert!(!released_by(&mut chain, base, 299));
+        assert!(released_by(&mut chain, base, 300), "held for the target");
+
+        // Above the maximum: the maximum.
+        chain.handle_write(control(Some(4000), vec![ssrc])).unwrap();
+        let base2 = base + Duration::from_secs(1);
+        chain
+            .handle_read(make_rtp_at(ssrc, 2, 90_000, base2))
+            .unwrap();
+        assert!(!released_by(&mut chain, base2, 499));
+        assert!(released_by(&mut chain, base2, 500));
+
+        // Below the minimum: the minimum.
+        chain.handle_write(control(Some(5), vec![ssrc])).unwrap();
+        let base3 = base + Duration::from_secs(2);
+        chain
+            .handle_read(make_rtp_at(ssrc, 3, 180_000, base3))
+            .unwrap();
+        assert!(!released_by(&mut chain, base3, 49));
+        assert!(released_by(&mut chain, base3, 50));
+
+        // A stream bound later takes the target set for its SSRC.
+        let later = 5555;
+        chain.handle_write(control(Some(200), vec![later])).unwrap();
+        chain.bind_remote_stream(&make_stream_info(later, 90000));
+        chain.handle_read(make_rtp_at(later, 1, 0, base3)).unwrap();
+        assert!(!released_by(&mut chain, base3, 199));
+        assert!(released_by(&mut chain, base3, 200));
+
+        // No preference: the adaptive target (50 ms here) again.
+        chain.handle_write(control(None, vec![ssrc])).unwrap();
+        let base4 = base + Duration::from_secs(3);
+        chain
+            .handle_read(make_rtp_at(ssrc, 4, 270_000, base4))
+            .unwrap();
+        assert!(!released_by(&mut chain, base4, 49));
+        assert!(released_by(&mut chain, base4, 51));
     }
 }

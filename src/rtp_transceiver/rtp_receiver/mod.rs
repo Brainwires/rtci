@@ -315,11 +315,19 @@ impl RTCRtpReceiver<'_> {
     /// milliseconds (a `Duration` cannot be negative, the other value W3C refuses); the
     /// stored target is then unchanged.
     pub fn set_jitter_buffer_target(&mut self, target: Option<std::time::Duration>) -> Result<()> {
-        self.peer_connection.rtp_transceivers[self.id.0]
-            .receiver_mut()
-            .as_mut()
-            .expect("every transceiver has a receiver")
-            .set_jitter_buffer_target(target)
+        self.receiver_mut().set_jitter_buffer_target(target)?;
+        // "Update the underlying system about the new target": the jitter buffer of the
+        // interceptor chain (`AdaptiveJitterBufferInterceptor`) holds the receiver's streams
+        // for it, clamped to its minimum and maximum delay; a stream that appears later is
+        // given it with its first packet (`record_sources`).
+        let ssrcs: Vec<u32> = self.receiver().track().ssrcs().collect();
+        if !ssrcs.is_empty() {
+            let now = self.peer_connection.pipeline_context.now;
+            self.peer_connection.interceptor.handle_write(
+                interceptor::JitterBufferControl { ssrcs, target }.into_packet(now),
+            )?;
+        }
+        Ok(())
     }
 
     /// Returns the RTP receive parameters for this receiver.

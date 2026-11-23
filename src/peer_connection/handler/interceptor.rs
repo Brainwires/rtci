@@ -77,6 +77,9 @@ pub(crate) struct InterceptorHandlerContext {
     /// The wall clock paired with the engine's clock, taken once, for the timestamps of the
     /// receivers' synchronization and contributing sources.
     pub(crate) wall_clock: Option<SystemInstant>,
+    /// The congestion controller's last target, in bits per second: what
+    /// `allocate_target_bitrate` divides again when the encodings change.
+    pub(crate) target_bitrate: Option<f64>,
 }
 
 fn receiver_declares_ssrc(transceiver: &RTCRtpTransceiverInternal, ssrc: SSRC) -> bool {
@@ -103,6 +106,7 @@ impl Default for InterceptorHandlerContext {
             sdes_rids: Default::default(),
             ssrc_collisions: Default::default(),
             wall_clock: None,
+            target_bitrate: None,
         }
     }
 }
@@ -1242,6 +1246,17 @@ impl<'a> InterceptorHandler<'a> {
                 clock_rate,
                 dependency_descriptor.as_deref(),
             );
+            // W3C webrtc 5.3 jitterBufferTarget: a stream the receiver did not have when the
+            // target was set is given it now (`RTCRtpReceiver::set_jitter_buffer_target`).
+            if ssrc_changed && let Some(target) = receiver.jitter_buffer_target() {
+                let control = interceptor::JitterBufferControl {
+                    ssrcs: vec![header.ssrc],
+                    target: Some(target),
+                };
+                if let Err(err) = self.interceptor.handle_write(control.into_packet(now)) {
+                    log::warn!("jitter buffer target for ssrc {}: {err}", header.ssrc);
+                }
+            }
             // webrtc-extensions 11: `ssrcchange`, then `csrcchange`, once both lists are
             // updated.
             let receiver_id = crate::rtp_transceiver::RTCRtpReceiverId::from(id);
@@ -1452,10 +1467,15 @@ impl<'a>
                 for attribute in &packet.message.attributes {
                     match attribute {
                         Attribute::TargetBitrateChanged { bits_per_second } => {
-                            // The outbound streams' `targetBitrate` and the selected pair's
-                            // `availableOutgoingBitrate` (see
-                            // `RTCStatsAccumulator::on_target_bitrate`).
-                            self.stats.on_target_bitrate(*bits_per_second);
+                            // The selected pair's `availableOutgoingBitrate`, and each
+                            // outbound stream's `targetBitrate`: its share by priority and
+                            // maxBitrate (`allocate_target_bitrate`).
+                            self.ctx.target_bitrate = Some(*bits_per_second);
+                            let shares = crate::peer_connection::priority::allocate_target_bitrate(
+                                self.rtp_transceivers,
+                                *bits_per_second,
+                            );
+                            self.stats.on_target_bitrate(*bits_per_second, &shares);
                         }
                         Attribute::Custom(value) => {
                             if let Some(event) = value.downcast_ref::<RtcpSessionEvent>() {
