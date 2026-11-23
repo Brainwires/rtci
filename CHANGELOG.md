@@ -1918,6 +1918,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Licence gate and MSRV** (branch `conf/tcp-7-licence-msrv`). `deny.toml` has a `[licenses]`
+  allow-list of permissive licences only (MIT, Apache-2.0 and its LLVM exception, BSD-2/3,
+  ISC, Zlib, Unicode, CC0, 0BSD, BSL-1.0, and CDLA-Permissive-2.0 for the optional
+  `webpki-roots`); no GPL, LGPL or AGPL, no exceptions needed today (r-efi's LGPL is one arm
+  of an `OR`). The audit workflow runs `cargo deny --all-features check licenses bans
+  sources`. The workspace declares `rust-version = "1.89"` (the lowest that builds: uuid
+  1.29 needs 1.89), every crate inherits it, and cargo.yml's `msrv` job checks the workspace
+  with every feature on that toolchain, resolving dependencies to versions that support it.
+
 - **The peer connection's transports are a set** (mt-1). The ICE, DTLS and SRTP contexts that
   `PipelineContext` held once are now a `TransportSet` of transport bundles keyed by a transport
   id, reached through `default()`, `transport(id)`, `transport_for(mid)` and the data transport
@@ -2259,6 +2268,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   new SRTP master keys and the key lifetime counts start over (RFC 3711 sections 9.2 and 11.3,
   RFC 7714 sections 8.4 and 9.4). Call it on `OnSrtpKeyLifetimeExpiring`; an rtc peer takes
   the new association, browsers ignore a new `tls-id`.
+- **ICE-TCP: a connection several transports could carry is tied to one only by a check**
+  (branch `conf/tcp-6-train-fixes`). On a port several transports share (a driver's shared
+  passive port), a connection accepted without a recorded transport took the first frame's
+  transport from the peer's address, so DTLS on a connection the peer reopened (RFC 6544
+  section 11.1) could tie it to the wrong transport for good. Now only a check names it (RFC
+  8445 section 7.2.2; `TransportSet::route_named`): a frame before one is dropped, and a write
+  that is not STUN never takes a connection whose transport is not known. A transport is
+  recorded on every connection the engine opens, at open.
+
 - **Several transports in one peer connection** (mt-2; RFC 9429 sections 4.1.1, 5.2.1, 5.3.1,
   RFC 9143 section 7, RFC 8835 section 4.2, RFC 8834 section 4.4). An m= section outside a
   BUNDLE group runs on a transport of its own: its own ICE agent and credentials, candidates,
