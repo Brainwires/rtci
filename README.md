@@ -300,7 +300,10 @@ candidate (out of `poll_write`, the answer taken out of `handle_read`; this need
 interface for a server given by address) and over TCP / TLS from its ICE-TCP listeners
 (`ReflexiveGathering::Application` leaves it to the application). A driver may answer a
 `Resolve` per family (`StreamEvent::ResolvedFamily`, AAAA and A as each arrives) so the race
-starts on the first answer (RFC 8305 section 3), or once with `StreamEvent::Resolved`. `StreamEvent::Written` is the
+starts on the first answer (RFC 8305 section 3), or once with `StreamEvent::Resolved`. For a
+server URI without a port the engine first asks for its NAPTR and SRV records
+(`StreamCommand::ResolveRecords`, answered with `StreamEvent::ResolvedRecords`; RFC 5928, RFC
+8489 section 8); a driver that cannot look records up answers with none. `StreamEvent::Written` is the
 back-pressure signal: the engine holds a window of unacknowledged bytes per connection.
 `SettingEngineBuilder::with_tcp_candidate_gathering(false)` keeps the engine's TCP off; an
 application that never polls the stream interface gets no TCP candidate and nothing changes.
@@ -314,6 +317,7 @@ implements the stream half on tokio, plus the socket choices a server makes:
 | One UDP port for many peer connections | `sockets::UfragMux`: register every `pc.ice_username_fragments()` entry after each local description; `route(from, datagram)` picks the connection |
 | One passive ICE-TCP port for many peer connections | `DriverConfig::shared_passive`, `sockets::accept_by_ufrag`, then `StreamDriver::adopt_shared` on the connection the first check names |
 | Which local addresses get candidates | `sockets::AddressFilter` (`bind_addresses`, `include_loopback`, `include_link_local`, `interface_filter`, `ip_filter`) and `local_addresses()` |
+| SRV / NAPTR lookups and per-family answers | feature `dns-records` (hickory-resolver) |
 | A server behind a 1:1 NAT | `SettingEngineBuilder::with_nat_1to1_ips(vec![external_ip], RTCIceCandidateType::Host)` (or `Srflx` to add a server-reflexive candidate beside each host one); it applies to the engine's TCP candidates too |
 
 Inside one peer connection the engine routes between its transports the same way a shared port

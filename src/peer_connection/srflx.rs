@@ -89,6 +89,8 @@ struct Attempt {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProbeState {
     Pending,
+    /// NAPTR / SRV records are being looked up (a URI without a port, RFC 8489 section 8).
+    Discovering(u64),
     Resolving(u64),
     Racing,
     Done,
@@ -108,6 +110,8 @@ struct Probe {
     query: Option<u64>,
     /// The address the server reported.
     mapped: Option<SocketAddr>,
+    /// The SRV discovery of a server whose URI gives no port.
+    discovery: Option<crate::peer_connection::dns_discovery::Discovery>,
 }
 
 impl Probe {
@@ -170,7 +174,7 @@ impl EngineSrflx {
             p.transport == transport
                 && match p.state {
                     ProbeState::Pending | ProbeState::Racing => true,
-                    ProbeState::Resolving(_) => resolving_counts,
+                    ProbeState::Resolving(_) | ProbeState::Discovering(_) => resolving_counts,
                     ProbeState::Done => false,
                 }
         })
@@ -213,6 +217,7 @@ impl EngineSrflx {
                 attempts: vec![],
                 query: None,
                 mapped: None,
+                discovery: None,
             });
         }
         found
@@ -363,6 +368,23 @@ impl RTCPeerConnection {
                     ));
                     probe.state = ProbeState::Racing;
                 }
+                // RFC 8489 section 8 / RFC 7064 section 3.2: without a port, SRV finds it.
+                Err(_) if !probe.url.explicit_port => {
+                    let srv = match (probe.kind, probe.tls) {
+                        (Base::Udp, _) => "_stun._udp",
+                        (_, false) => "_stun._tcp",
+                        (_, true) => "_stuns._tcp",
+                    };
+                    let discovery = crate::peer_connection::dns_discovery::Discovery::new(
+                        &probe.url.host,
+                        probe.url.port,
+                        None,
+                        srv,
+                    );
+                    let first = discovery.start();
+                    probe.discovery = Some(discovery);
+                    self.srflx_discovery_next(index, first, now);
+                }
                 Err(_) => {
                     let (host, port) = (probe.url.host.clone(), probe.url.port);
                     let query = self.streams.table.resolve(host, port);
@@ -405,11 +427,16 @@ impl RTCPeerConnection {
             }
             let probe = &mut self.streams.srflx.probes[index];
             if probe.race.as_ref().is_some_and(HappyEyeballs::exhausted) {
-                debug!(
-                    "{}: no server-reflexive address from {}",
-                    probe.url, probe.base
-                );
-                probe.state = ProbeState::Done;
+                // The next SRV target, when there is one (RFC 2782).
+                if let Some(next) = probe.discovery.as_mut().map(|d| d.next_target()) {
+                    self.srflx_discovery_next(index, next, now);
+                } else {
+                    debug!(
+                        "{}: no server-reflexive address from {}",
+                        probe.url, probe.base
+                    );
+                    probe.state = ProbeState::Done;
+                }
             }
         }
         self.finish_deferred_gathering();
@@ -739,11 +766,82 @@ impl RTCPeerConnection {
         ours
     }
 
+    /// Acts on the next step of a probe's discovery.
+    fn srflx_discovery_next(
+        &mut self,
+        index: usize,
+        next: crate::peer_connection::dns_discovery::Next,
+        now: Instant,
+    ) {
+        use crate::peer_connection::dns_discovery::Next;
+        match next {
+            Next::Records { name, kind } => {
+                let query = self.streams.table.resolve_records(name, kind);
+                let probe = &mut self.streams.srflx.probes[index];
+                probe.state = ProbeState::Discovering(query);
+                if let Some(d) = probe.discovery.as_mut() {
+                    d.asked(query, now);
+                }
+            }
+            Next::Address { host, port } => match host.parse::<IpAddr>() {
+                Ok(ip) => {
+                    let probe = &mut self.streams.srflx.probes[index];
+                    probe.race = Some(HappyEyeballs::new(
+                        vec![SocketAddr::new(ip, port)],
+                        CONNECTION_ATTEMPT_DELAY,
+                    ));
+                    probe.state = ProbeState::Racing;
+                }
+                Err(_) => {
+                    let query = self.streams.table.resolve(host, port);
+                    let probe = &mut self.streams.srflx.probes[index];
+                    probe.state = ProbeState::Resolving(query);
+                    probe.query = Some(query);
+                    probe.race = None;
+                }
+            },
+            Next::Exhausted => self.streams.srflx.probes[index].state = ProbeState::Done,
+        }
+    }
+
+    /// SRV records the driver looked up for a probe. Returns whether the query was a probe's.
+    pub(crate) fn srflx_records(
+        &mut self,
+        query: u64,
+        records: &[shared::stream::DnsRecord],
+    ) -> bool {
+        let now = self.pipeline_context.now;
+        let Some(index) = self
+            .streams
+            .srflx
+            .probes
+            .iter()
+            .position(|p| p.state == ProbeState::Discovering(query))
+        else {
+            return false;
+        };
+        let Some(next) = self.streams.srflx.probes[index]
+            .discovery
+            .as_mut()
+            .map(|d| d.on_records(records))
+        else {
+            return false;
+        };
+        self.srflx_discovery_next(index, next, now);
+        self.drive_srflx(now);
+        true
+    }
+
     /// The probes' next timer: a retransmission, Ti, the next attempt or the Ta gate.
     pub(crate) fn srflx_poll_timeout(&mut self) -> Option<Instant> {
         let mut next: Option<Instant> = None;
         let gate = self.streams.srflx.last_start.map(|last| last + TA);
         for probe in self.streams.srflx.probes.iter_mut() {
+            if let ProbeState::Discovering(_) = probe.state
+                && let Some(t) = probe.discovery.as_ref().and_then(|d| d.poll_timeout())
+            {
+                next = Some(next.map_or(t, |n| n.min(t)));
+            }
             for a in probe.attempts.iter_mut() {
                 if let Some(t) = a.client.poll_timeout() {
                     next = Some(next.map_or(t, |n| n.min(t)));
@@ -784,6 +882,24 @@ impl RTCPeerConnection {
                 }
                 self.pump_srflx_attempt(now, index, attempt);
             }
+        }
+        // A records query the driver did not answer counts as empty.
+        let unanswered: Vec<u64> = self
+            .streams
+            .srflx
+            .probes
+            .iter()
+            .filter_map(|p| match p.state {
+                ProbeState::Discovering(q)
+                    if p.discovery.as_ref().is_some_and(|d| d.timed_out(now)) =>
+                {
+                    Some(q)
+                }
+                _ => None,
+            })
+            .collect();
+        for query in unanswered {
+            self.srflx_records(query, &[]);
         }
         self.drive_srflx(now);
     }

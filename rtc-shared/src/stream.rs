@@ -155,6 +155,65 @@ pub enum StreamCommand {
         /// The port the addresses get.
         port: u16,
     },
+    /// Look up the `kind` records of `name` (SRV, RFC 2782; NAPTR, RFC 3403) and answer with
+    /// [`StreamEvent::ResolvedRecords`], an empty list when there are none or the driver
+    /// cannot look them up. Used to find a STUN or TURN server whose URI gives no port (RFC
+    /// 5928 section 3, RFC 8489 section 8); an answer that does not come within
+    /// [`RECORDS_TIMEOUT`] counts as empty.
+    ResolveRecords {
+        /// The query's id.
+        query: u64,
+        /// The name (for SRV, the whole `_service._proto.name`).
+        name: String,
+        /// The record type.
+        kind: RecordKind,
+    },
+}
+
+/// How long the engine waits for a [`StreamCommand::ResolveRecords`] answer before it takes
+/// the name's addresses instead (a driver that does not look records up).
+pub const RECORDS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// A DNS record type the engine asks for ([`StreamCommand::ResolveRecords`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum RecordKind {
+    /// SRV (RFC 2782).
+    Srv,
+    /// NAPTR (RFC 3403), for S-NAPTR (RFC 3958).
+    Naptr,
+}
+
+/// A DNS record, as the driver reports it ([`StreamEvent::ResolvedRecords`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DnsRecord {
+    /// An SRV record (RFC 2782).
+    Srv {
+        /// Lower is tried first.
+        priority: u16,
+        /// Among equal priorities, the share of selections.
+        weight: u16,
+        /// The server's port.
+        port: u16,
+        /// The server's name ("." for "no service here").
+        target: String,
+    },
+    /// A NAPTR record (RFC 3403).
+    Naptr {
+        /// Lower is used first.
+        order: u16,
+        /// Among equal orders, lower is used first.
+        preference: u16,
+        /// `S` (the replacement is an SRV name), `A` (an address name), ...
+        flags: String,
+        /// The service field, `RELAY:turn.tcp` and the like for TURN (RFC 5928 section 4).
+        services: String,
+        /// The regular expression (unused by S-NAPTR).
+        regexp: String,
+        /// The next name to look up.
+        replacement: String,
+    },
 }
 
 /// What the driver tells the engine about its sockets.
@@ -210,6 +269,13 @@ pub enum StreamEvent {
         query: u64,
         /// The addresses, with the query's port.
         addresses: Vec<SocketAddr>,
+    },
+    /// A [`StreamCommand::ResolveRecords`] is answered (an empty list: none).
+    ResolvedRecords {
+        /// The query's id.
+        query: u64,
+        /// The records.
+        records: Vec<DnsRecord>,
     },
     /// One family of a [`StreamCommand::Resolve`] is answered (AAAA with `ipv6`, A without),
     /// as it arrives: the engine starts on the first answer (RFC 8305 section 3). A driver
@@ -500,6 +566,13 @@ pub enum StreamNotice {
         /// The addresses (empty: the name did not resolve).
         addresses: Vec<SocketAddr>,
     },
+    /// Records the engine asked for were looked up.
+    ResolvedRecords {
+        /// The query.
+        query: u64,
+        /// The records (possibly none).
+        records: Vec<DnsRecord>,
+    },
     /// One family of a name the engine asked for was resolved.
     ResolvedFamily {
         /// The query.
@@ -681,6 +754,17 @@ impl StreamTable {
         self.next_query += 1;
         self.commands
             .push_back(StreamCommand::Resolve { query, host, port });
+        query
+    }
+
+    /// Asks the driver for the `kind` records of `name`; the answer comes as
+    /// [`StreamNotice::ResolvedRecords`] with the returned query id (ids are shared with
+    /// [`resolve`](Self::resolve)).
+    pub fn resolve_records(&mut self, name: String, kind: RecordKind) -> u64 {
+        let query = self.next_query;
+        self.next_query += 1;
+        self.commands
+            .push_back(StreamCommand::ResolveRecords { query, name, kind });
         query
     }
 
@@ -978,6 +1062,9 @@ impl StreamTable {
             StreamEvent::Resolved { query, addresses } => self
                 .notices
                 .push_back(StreamNotice::Resolved { query, addresses }),
+            StreamEvent::ResolvedRecords { query, records } => self
+                .notices
+                .push_back(StreamNotice::ResolvedRecords { query, records }),
             StreamEvent::ResolvedFamily {
                 query,
                 ipv6,

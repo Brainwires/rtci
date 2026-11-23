@@ -245,6 +245,8 @@
 pub mod certificate;
 pub mod configuration;
 pub mod cryptex;
+/// S-NAPTR and SRV discovery of STUN and TURN servers (RFC 5928, RFC 8489 section 8).
+pub(crate) mod dns_discovery;
 mod dtls_sdp;
 pub mod event;
 pub(crate) mod handler;

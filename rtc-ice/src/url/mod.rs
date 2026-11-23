@@ -111,6 +111,10 @@ pub struct Url {
     pub password: String,
     /// The transport to reach the server over, from the URL's `?transport=` parameter.
     pub proto: ProtoType,
+    /// Whether the URL names the port. Without one, a server's name is looked up with
+    /// S-NAPTR and SRV before its addresses (RFC 5928 section 3, RFC 8489 section 8); with
+    /// one, only its addresses are (RFC 5928 section 3, RFC 7064 section 3.2).
+    pub explicit_port: bool,
 }
 
 impl fmt::Display for Url {
@@ -176,6 +180,7 @@ impl Url {
             return Err(Error::ErrHost);
         };
 
+        let explicit_port = raw_parts.port().is_some();
         let port = if let Some(port) = raw_parts.port() {
             port
         } else if scheme == SchemeType::Stun || scheme == SchemeType::Turn {
@@ -246,6 +251,7 @@ impl Url {
             username: "".to_owned(),
             password: "".to_owned(),
             proto,
+            explicit_port,
         })
     }
 

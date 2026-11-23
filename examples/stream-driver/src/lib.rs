@@ -257,6 +257,7 @@ impl StreamDriver {
                     }
                 }
             }
+            #[cfg(not(feature = "dns-records"))]
             StreamCommand::Resolve { query, host, port } => {
                 let tx = self.inputs_tx.clone();
                 tokio::spawn(async move {
@@ -269,6 +270,41 @@ impl StreamDriver {
                     let _ = tx.send(DriverInput::Event(StreamEvent::Resolved {
                         query,
                         addresses,
+                    }));
+                });
+            }
+            #[cfg(feature = "dns-records")]
+            StreamCommand::Resolve { query, host, port } => {
+                // AAAA and A asked together, each answered as it arrives (RFC 8305 section 3):
+                // the engine starts on the first.
+                for ipv6 in [true, false] {
+                    let tx = self.inputs_tx.clone();
+                    let host = host.clone();
+                    tokio::spawn(async move {
+                        let addresses = dns::addresses(&host, port, ipv6).await;
+                        let _ = tx.send(DriverInput::Event(StreamEvent::ResolvedFamily {
+                            query,
+                            ipv6,
+                            addresses,
+                        }));
+                    });
+                }
+            }
+            StreamCommand::ResolveRecords { query, name, kind } => {
+                let tx = self.inputs_tx.clone();
+                tokio::spawn(async move {
+                    #[cfg(feature = "dns-records")]
+                    let records = dns::records(&name, kind).await;
+                    // Without the feature there is no record lookup: none, and the engine
+                    // takes the host's addresses (RFC 5928 section 3).
+                    #[cfg(not(feature = "dns-records"))]
+                    let records = {
+                        let _ = (&name, kind);
+                        vec![]
+                    };
+                    let _ = tx.send(DriverInput::Event(StreamEvent::ResolvedRecords {
+                        query,
+                        records,
                     }));
                 });
             }
@@ -484,5 +520,78 @@ async fn run_connection(
             // The peer closed or the connection broke: the reader has reported it.
             _ = &mut reader => return,
         }
+    }
+}
+
+/// DNS lookups with hickory-resolver (feature `dns-records`).
+#[cfg(feature = "dns-records")]
+mod dns {
+    use hickory_resolver::TokioResolver;
+    use hickory_resolver::proto::rr::{RData, RecordType};
+    use shared::stream::{DnsRecord, RecordKind};
+    use std::net::{IpAddr, SocketAddr};
+
+    fn resolver() -> Option<TokioResolver> {
+        TokioResolver::builder_tokio().ok().map(|b| b.build())
+    }
+
+    /// The addresses of one family of `host`, with `port`.
+    pub(crate) async fn addresses(host: &str, port: u16, ipv6: bool) -> Vec<SocketAddr> {
+        let Some(resolver) = resolver() else {
+            return vec![];
+        };
+        let kind = if ipv6 {
+            RecordType::AAAA
+        } else {
+            RecordType::A
+        };
+        let Ok(found) = resolver.lookup(host, kind).await else {
+            return vec![];
+        };
+        found
+            .iter()
+            .filter_map(|r| match r {
+                RData::A(a) => Some(IpAddr::V4(a.0)),
+                RData::AAAA(a) => Some(IpAddr::V6(a.0)),
+                _ => None,
+            })
+            .map(|ip| SocketAddr::new(ip, port))
+            .collect()
+    }
+
+    /// The SRV or NAPTR records of `name` (none on any error).
+    pub(crate) async fn records(name: &str, kind: RecordKind) -> Vec<DnsRecord> {
+        let Some(resolver) = resolver() else {
+            return vec![];
+        };
+        let record_type = match kind {
+            RecordKind::Srv => RecordType::SRV,
+            RecordKind::Naptr => RecordType::NAPTR,
+            _ => return vec![],
+        };
+        let Ok(found) = resolver.lookup(name, record_type).await else {
+            return vec![];
+        };
+        let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
+        found
+            .iter()
+            .filter_map(|r| match r {
+                RData::SRV(srv) => Some(DnsRecord::Srv {
+                    priority: srv.priority(),
+                    weight: srv.weight(),
+                    port: srv.port(),
+                    target: srv.target().to_utf8(),
+                }),
+                RData::NAPTR(n) => Some(DnsRecord::Naptr {
+                    order: n.order(),
+                    preference: n.preference(),
+                    flags: text(n.flags()),
+                    services: text(n.services()),
+                    regexp: text(n.regexp()),
+                    replacement: n.replacement().to_utf8(),
+                }),
+                _ => None,
+            })
+            .collect()
     }
 }

@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **ice**: `Url` has a new public field `explicit_port` (whether the URI gives the port; set
+  by `parse_url`). A STUN or TURN server whose URI has no port is now looked up with S-NAPTR
+  and SRV before its addresses (branch `conf/tcp-10-srv-naptr`): a driver serving the stream
+  interface gets `StreamCommand::ResolveRecords`, and one that does not answer it delays the
+  server's use by `RECORDS_TIMEOUT` (2 s) per query.
+
 - **Server-reflexive candidates are gathered by the engine** (branch `conf/tcp-8-srflx`,
   RFC 8445 section 5.1.1.2). With `stun:` / `stuns:` servers in the configuration, the engine
   now sends a Binding request to each from every UDP host candidate the application adds (out
@@ -2020,6 +2026,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a new realm re-keys the allocation it is about, not every allocation of the client.
 
 ### Features
+
+- **TURN over TLS against BCP 195** (branch `conf/tcp-10-srv-naptr`; RFC 8656 3.1-1, RFC
+  7350 4-2, RFC 9325). A test of the ClientHello the engine's TLS client sends: TLS 1.3 and 1.2
+  only (1.3 alone with `disable_tls12`), null compression only, SNI with the URI's host, only
+  ECDHE AEAD suites with TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 among them, RFC 5746 signalled.
+  What rustls guarantees by construction (no renegotiation, no SSL 3 / TLS 1.0 / 1.1, no
+  weak suites, extended master secret) is recorded in `rfc8656.md`.
+
+- **SRV / NAPTR discovery of STUN and TURN servers** (branch `conf/tcp-10-srv-naptr`; RFC
+  5928 section 3, RFC 3958, RFC 2782, RFC 8489 section 8, RFC 8445 5.1.1.2). New
+  `StreamCommand::ResolveRecords` / `StreamEvent::ResolvedRecords` (`RecordKind::{Srv,
+  Naptr}`, `DnsRecord`, `RECORDS_TIMEOUT`) and `StreamTable::resolve_records`. For a URI
+  without a port the engine's TURN links over TCP / TLS follow the NAPTR record of service
+  `RELAY` with `turn.tcp` / `turn.tls` (several protocols in one service field, non-terminal
+  records up to five deep), then its SRV name (`_turn._tcp`, `_turns._tcp` when there is no
+  NAPTR), then each SRV target in RFC 2782 order (priority, weighted draw), the next when one's
+  addresses all fail; no record: the host with the scheme's default port. The server-reflexive
+  probes do the same with SRV only (`_stun._udp`, `_stun._tcp`, `_stuns._tcp`). A `turns:`
+  server found this way is still verified against the URI's host (RFC 5928 3-6). With a port,
+  only the addresses are asked (3-4). `rtc-stream-driver` feature `dns-records`
+  (hickory-resolver 0.25, MIT OR Apache-2.0): SRV and NAPTR lookups, and AAAA and A answered
+  separately as `ResolvedFamily`; without it records are answered as none.
 
 - **Server-reflexive gathering in the engine** (branch `conf/tcp-8-srflx`; RFC 8445 5.1.1.2,
   RFC 8489 6.2.1 / 6.2.2 / 6.2.3, RFC 6544 5.2 and Appendix B, RFC 7064, RFC 7443, RFC 8305

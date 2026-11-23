@@ -736,10 +736,20 @@ impl RTCPeerConnection {
                     ipv6,
                     addresses,
                 } => self.name_resolved(query, Some(ipv6), &addresses),
+                StreamNotice::ResolvedRecords { query, records } => {
+                    self.records_resolved(query, &records)
+                }
                 _ => {}
             }
         }
         self.finish_deferred_gathering();
+    }
+
+    /// Records the engine asked the driver for: a TURN link's or a server-reflexive probe's.
+    fn records_resolved(&mut self, query: u64, records: &[shared::stream::DnsRecord]) {
+        if !self.turn_records(query, records) {
+            self.srflx_records(query, records);
+        }
     }
 
     /// A name the engine asked the driver for: a server-reflexive probe's or a TURN link's.
