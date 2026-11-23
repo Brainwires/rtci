@@ -521,3 +521,61 @@ fn an_application_that_never_serves_streams_gets_no_tcp_candidate_and_ends_gathe
     assert_eq!(tcp, 0);
     Ok(())
 }
+
+/// `with_nat_1to1_ips` (a server behind a 1:1 NAT, rtc-ice's external IP mapper) reaches the
+/// engine's own TCP candidates: with the `Host` type they are announced on the external
+/// address, with `Srflx` a server-reflexive candidate is added beside each.
+#[test]
+fn nat_1to1_addresses_apply_to_the_engines_tcp_candidates() -> Result<()> {
+    use rtc::peer_connection::transport::RTCIceCandidateType;
+    for (kind, expect_host, expect_srflx) in [
+        (RTCIceCandidateType::Host, true, false),
+        (RTCIceCandidateType::Srflx, false, true),
+    ] {
+        let settings = SettingEngineBuilder::new()
+            .with_nat_1to1_ips(vec!["203.0.113.7".to_owned()], kind)
+            .build();
+        let mut p = Peer::new(pc(settings), 0);
+        let c = udp_host(&p);
+        p.pc.add_local_candidate(c)?;
+        let now = Instant::now();
+        let mut port = 7000;
+        while let Some(cmd) = p.pc.poll_stream_command() {
+            if let StreamCommand::Listen {
+                listener, local, ..
+            } = cmd
+            {
+                port += 1;
+                p.pc.handle_stream_event(
+                    now,
+                    StreamEvent::Listening {
+                        listener,
+                        local: std::net::SocketAddr::new(local.ip(), port),
+                    },
+                )?;
+            }
+        }
+        let mut lines = vec![];
+        while let Some(e) = p.pc.poll_event() {
+            if let RTCPeerConnectionEvent::OnIceCandidateEvent(ev) = e
+                && let Some(c) = ev.candidate.filter(|c| !c.end_of_candidates)
+            {
+                lines.push(c.to_json()?.candidate);
+            }
+        }
+        let tcp: Vec<&String> = lines.iter().filter(|l| l.contains(" tcp ")).collect();
+        assert!(
+            tcp.iter()
+                .any(|l| l.contains("203.0.113.7 7001 typ host tcptype passive"))
+                == expect_host,
+            "{kind:?}: {tcp:?}"
+        );
+        assert!(
+            tcp.iter()
+                .any(|l| l.contains("203.0.113.7 7001 typ srflx") && l.contains("tcptype passive"))
+                == expect_srflx,
+            "{kind:?}: {tcp:?}"
+        );
+    }
+    Ok(())
+}

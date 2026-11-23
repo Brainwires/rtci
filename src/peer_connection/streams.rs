@@ -299,6 +299,20 @@ impl RTCPeerConnection {
         Ok(())
     }
 
+    /// The ICE username fragment the peer's checks address this connection by (RFC 8445
+    /// section 7.2.2: a Binding request's USERNAME is `<this ufrag>:<the peer's>`). A driver
+    /// that shares one UDP port or one ICE-TCP listening port between peer connections routes
+    /// by it (`rtc-stream-driver`'s `UfragMux`); read it again after each local description,
+    /// since an ICE restart changes it. During a restart the previous one stays in use until
+    /// the restart completes.
+    pub fn ice_username_fragment(&self) -> String {
+        self.ice_transport()
+            .agent
+            .get_local_credentials()
+            .ufrag
+            .clone()
+    }
+
     /// Requests the TCP candidates of the address of a UDP host candidate the application just
     /// added (`candidate_value`), or adds them again when they are bound already (a new ICE
     /// generation re-gathering the same addresses).

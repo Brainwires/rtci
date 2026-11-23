@@ -1620,6 +1620,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+- **stream driver**: server-side socket choices in `rtc-stream-driver` (branch
+  `conf/tcp-2b-driver-sockets`): `sockets::PortRange` with `bind_udp_in_range` and
+  `bind_tcp_listener_in_range` (and `DriverConfig::tcp_port_range` for the engine's
+  listeners); `sockets::AddressFilter` (bind addresses, interface and IP filters, loopback and
+  IPv6 link-local only on request) for the addresses that get host candidates; one UDP port
+  shared by many peer connections, routed by `sockets::UfragMux` (the receiver's ufrag of the
+  first Binding request from an address, RFC 8445 section 7.2.2, then the address); one passive
+  ICE-TCP port shared the same way (`DriverConfig::shared_passive`,
+  `sockets::accept_by_ufrag`, `StreamDriver::adopt_shared`, which hands the engine the bytes
+  read to route the connection). The engine side is `RTCPeerConnection::ice_username_fragment`.
+  `with_nat_1to1_ips` applies to the engine's TCP candidates too
+  (`nat_1to1_addresses_apply_to_the_engines_tcp_candidates`).
+
 - **ICE-TCP in the engine** (RFC 6544, RFC 4571; branch `conf/tcp-2-ice-tcp`). The
   application owns the sockets only: `RTCPeerConnection::poll_stream_command` (listen, stop,
   connect from a local address, close, reset), `poll_stream_transmit` (bytes for a connection),

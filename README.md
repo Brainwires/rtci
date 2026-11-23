@@ -329,6 +329,11 @@ over SRTP and is subject to none of SCTP's flow control.
 - ✅ **Stream transports without sockets** - `rtc_shared::stream`: connection ids, listen / connect / close / reset
   commands for the driver, RFC 4571 and TURN framing of arbitrarily segmented reads, an optional TLS layer and
   back-pressure; `examples/stream-driver` is a tokio driver for it
+- ✅ **Server-side sockets in the reference driver** - `rtc_stream_driver::sockets`: port ranges for UDP sockets and
+  ICE-TCP listeners, the local address list (bind addresses, interface and IP filters, loopback and link-local opt-in),
+  one UDP port and one passive ICE-TCP port shared by many peer connections (routed by the ICE ufrag of the first
+  check, `UfragMux`, `accept_by_ufrag`, `RTCPeerConnection::ice_username_fragment`); 1:1 NAT addresses
+  (`with_nat_1to1_ips`) apply to every host candidate, the engine's TCP ones included
 - ✅ **Simulcast** - RID-based simulcast, sending and receiving
 - ✅ **SVC signalling in `rtc-rtp`** - the W3C scalability modes and their layer structures, VP8 / VP9 layer descriptors, the AV1 Dependency Descriptor, and forwarder-side layer selectors (`scalabilityMode` on an encoding is not there yet)
 - ✅ **RTX & FEC** - RFC 4588 retransmission; FlexFEC through opt-in interceptors, both as browsers send it

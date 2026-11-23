@@ -26,6 +26,8 @@
 
 #![warn(missing_docs)]
 
+pub mod sockets;
+
 use shared::stream::{ListenerId, StreamCommand, StreamEvent, StreamId, StreamTransmit};
 use std::collections::HashMap;
 use std::io;
@@ -74,6 +76,14 @@ pub struct DriverConfig {
     pub connect_timeout: Duration,
     /// How long a close waits for the peer's end of stream before giving up.
     pub close_linger: Duration,
+    /// Listeners asked for on port 0 take a port of this range.
+    pub tcp_port_range: Option<sockets::PortRange>,
+    /// A passive ICE-TCP listening port shared with other peer connections: a `Listen` without
+    /// `reuse_address` is answered with this address and binds nothing; the application
+    /// accepts on the shared listener ([`sockets::accept_by_ufrag`]) and hands each connection
+    /// to the driver of the peer connection its first check names
+    /// ([`StreamDriver::adopt_shared`]).
+    pub shared_passive: Option<SocketAddr>,
 }
 
 impl Default for DriverConfig {
@@ -81,6 +91,8 @@ impl Default for DriverConfig {
         Self {
             connect_timeout: Duration::from_secs(10),
             close_linger: Duration::from_secs(2),
+            tcp_port_range: None,
+            shared_passive: None,
         }
     }
 }
@@ -104,6 +116,8 @@ pub struct StreamDriver {
     inputs: mpsc::UnboundedReceiver<DriverInput>,
     listeners: HashMap<ListenerId, JoinHandle<()>>,
     connections: HashMap<StreamId, Connection>,
+    /// The engine's listener answered with the shared passive address.
+    shared_listener: Option<ListenerId>,
 }
 
 impl Default for StreamDriver {
@@ -133,6 +147,7 @@ impl StreamDriver {
             inputs,
             listeners: HashMap::new(),
             connections: HashMap::new(),
+            shared_listener: None,
         }
     }
 
@@ -143,7 +158,28 @@ impl StreamDriver {
                 listener,
                 local,
                 reuse_address,
-            } => match bind_listener(local, reuse_address) {
+            } if !reuse_address
+                && self.config.shared_passive.is_some_and(|shared| {
+                    shared.ip() == local.ip() || local.ip().is_unspecified()
+                }) =>
+            {
+                self.shared_listener = Some(listener);
+                let shared = self.config.shared_passive.unwrap_or(local);
+                self.send(DriverInput::Event(StreamEvent::Listening {
+                    listener,
+                    local: shared,
+                }));
+            }
+            StreamCommand::Listen {
+                listener,
+                local,
+                reuse_address,
+            } => match match self.config.tcp_port_range {
+                Some(range) if local.port() == 0 => {
+                    sockets::bind_tcp_listener_in_range(local.ip(), range, reuse_address)
+                }
+                _ => bind_listener(local, reuse_address),
+            } {
                 Ok(socket) => {
                     let bound = socket.local_addr().unwrap_or(local);
                     self.send(DriverInput::Event(StreamEvent::Listening {
@@ -240,6 +276,33 @@ impl StreamDriver {
         );
     }
 
+    /// The engine's listener that stands for the shared passive port
+    /// ([`DriverConfig::shared_passive`]), once the engine asked for it.
+    pub fn shared_listener(&self) -> Option<ListenerId> {
+        self.shared_listener
+    }
+
+    /// Serves a connection accepted on the shared passive port, which the engine gave `id`
+    /// (`handle_stream_accepted` with [`shared_listener`](Self::shared_listener)); the bytes
+    /// already read from it to route it are handed to the engine first.
+    pub fn adopt_shared(&mut self, id: StreamId, accepted: sockets::SharedAccept) {
+        if !accepted.read.is_empty() {
+            self.send(DriverInput::Read {
+                id,
+                data: accepted.read,
+            });
+        }
+        self.adopt(
+            id,
+            Accepted {
+                listener: self.shared_listener.unwrap_or(ListenerId(0)),
+                local: accepted.local,
+                remote: accepted.remote,
+                stream: accepted.stream,
+            },
+        );
+    }
+
     /// Writes a transmit of the engine, after the earlier ones of its connection.
     pub fn write(&mut self, transmit: StreamTransmit) {
         if let Some(connection) = self.connections.get(&transmit.id) {
@@ -285,7 +348,7 @@ fn new_socket(addr: SocketAddr, reuse_address: bool) -> io::Result<TcpSocket> {
     Ok(socket)
 }
 
-fn bind_listener(local: SocketAddr, reuse_address: bool) -> io::Result<TcpListener> {
+pub(crate) fn bind_listener(local: SocketAddr, reuse_address: bool) -> io::Result<TcpListener> {
     let socket = new_socket(local, reuse_address)?;
     socket.bind(local)?;
     socket.listen(128)

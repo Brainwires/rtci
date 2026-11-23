@@ -13,6 +13,6 @@ categories.workspace = true
 publish = false
 
 [dependencies]
-shared = { workspace = true, default-features = false }
+shared = { workspace = true, default-features = false, features = ["ifaces"] }
 tokio.workspace = true
 socket2.workspace = true
