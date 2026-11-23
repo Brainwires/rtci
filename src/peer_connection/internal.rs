@@ -2818,6 +2818,21 @@ impl RTCPeerConnection {
                     };
                 }
 
+                // RFC 9143 section 9.2: the SSRCs the section declares beside its rids, bound
+                // when a packet of theirs that carries no RID arrives.
+                receiver.set_declared_codings(
+                    std::mem::take(&mut incoming_track.declared_ssrcs)
+                        .into_iter()
+                        .map(|declared| RTCRtpCodingParameters {
+                            rid: String::new(),
+                            ssrc: Some(declared.ssrc),
+                            rtx: declared.rtx_ssrc.map(|ssrc| RTCRtpRtxParameters { ssrc }),
+                            fec: declared.fec_ssrc.map(|ssrc| RTCRtpFecParameters { ssrc }),
+                            ..Default::default()
+                        })
+                        .collect(),
+                );
+
                 let mut receive_codings = vec![];
                 if !incoming_track.rids.is_empty() {
                     // for incoming_track with rids, defer adding track until received the first RTP
@@ -4595,11 +4610,26 @@ fn is_same_remote_track(
 
     let codings = receiver.get_coding_parameters();
     if !incoming_track.rids.is_empty() {
-        let mut current: Vec<&str> = codings.iter().map(|c| c.rid.as_str()).collect();
+        // The rid codings; a declared stream bound without a rid is one of `declared_codings`.
+        let mut current: Vec<&str> = codings
+            .iter()
+            .filter(|c| !c.rid.is_empty())
+            .map(|c| c.rid.as_str())
+            .collect();
         let mut remote: Vec<&str> = incoming_track.rids.iter().map(String::as_str).collect();
         current.sort_unstable();
         remote.sort_unstable();
-        return current == remote;
+        let declared = receiver.declared_codings();
+        return current == remote
+            && declared.len() == incoming_track.declared_ssrcs.len()
+            && declared
+                .iter()
+                .zip(&incoming_track.declared_ssrcs)
+                .all(|(coding, ssrcs)| {
+                    coding.ssrc == Some(ssrcs.ssrc)
+                        && coding.rtx.as_ref().map(|r| r.ssrc) == ssrcs.rtx_ssrc
+                        && coding.fec.as_ref().map(|f| f.ssrc) == ssrcs.fec_ssrc
+                });
     }
 
     match (codings, incoming_track.ssrc) {

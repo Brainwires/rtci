@@ -292,7 +292,90 @@ impl<'a> InterceptorHandler<'a> {
         if self.bind_undeclared_ssrc(now, ssrc, payload_type, rtp_header) {
             return;
         }
-        self.bind_by_rid(now, ssrc, payload_type, rtp_header);
+        if self.bind_by_rid(now, ssrc, payload_type, rtp_header) {
+            return;
+        }
+        self.bind_declared_in_rid_section(now, rtp_header);
+    }
+
+    /// RFC 9143 section 9.2: "If the packet's SSRC is in the incoming SSRC mapping table" (made
+    /// "for each SSRC configured for receiving in that m= section"), the packet belongs to that
+    /// section. A section with `a=rid` that also declares its streams by SSRC (`a=ssrc`,
+    /// `a=ssrc-group:FID`, as Pion and Firefox write it) is still received by RID when the
+    /// packet carries one ([`Self::bind_by_rid`]). A packet of a declared SSRC that carries no
+    /// RID nor RRID, and no MID naming another section, is bound as a stream of that section
+    /// without a rid, with its declared repair flows: no rid is guessed for it. A packet from
+    /// a declared RTX SSRC establishes the stream it repairs.
+    fn bind_declared_in_rid_section(&mut self, now: Instant, rtp_header: &rtp::Header) -> bool {
+        let (mid, rid, rrid) = self.stream_ids(rtp_header);
+        if !rid.is_empty() || !rrid.is_empty() {
+            return false;
+        }
+        let arrival = self.ctx.arrival_mids.as_deref();
+        let wire_ssrc = rtp_header.ssrc;
+        let Some((index, primary, is_repair)) =
+            self.rtp_transceivers
+                .iter()
+                .enumerate()
+                .find_map(|(index, transceiver)| {
+                    let section = transceiver.mid().as_ref()?;
+                    if transceiver.stopped()
+                        || (!mid.is_empty() && mid != *section)
+                        || arrival.is_some_and(|mids| !mids.contains(section))
+                    {
+                        return None;
+                    }
+                    let receiver = transceiver.receiver().as_ref()?;
+                    receiver.declared_codings().iter().find_map(|declared| {
+                        let primary = declared.ssrc?;
+                        if primary == wire_ssrc {
+                            Some((index, primary, false))
+                        } else if declared.rtx.as_ref().is_some_and(|r| r.ssrc == wire_ssrc) {
+                            Some((index, primary, true))
+                        } else {
+                            None
+                        }
+                    })
+                })
+        else {
+            return false;
+        };
+
+        // The payload type of the stream: an RTX packet's is its format's `apt` (RFC 4588
+        // section 8.1).
+        let Some(receiver) = self.rtp_transceivers[index].receiver_mut() else {
+            return false;
+        };
+        let payload_type = if is_repair {
+            let apt = receiver.get_codec_preferences().iter().find_map(|codec| {
+                (codec.payload_type == rtp_header.payload_type
+                    && codec.rtp_codec.mime_type.eq_ignore_ascii_case(
+                        crate::peer_connection::configuration::media_engine::MIME_TYPE_RTX,
+                    ))
+                .then(|| {
+                    crate::rtp_transceiver::rtp_sender::rtp_codec::parse_rtx_apt(
+                        &codec.rtp_codec.sdp_fmtp_line,
+                    )
+                })
+                .flatten()
+            });
+            let Some(apt) = apt else {
+                return false;
+            };
+            apt
+        } else {
+            rtp_header.payload_type
+        };
+        if !receiver.add_declared_coding(primary) {
+            return false;
+        }
+        debug!(
+            "ssrc {wire_ssrc} is declared for mid {:?} and carries no rid: stream {primary} \
+             without a rid (RFC 9143 section 9.2)",
+            self.rtp_transceivers[index].mid()
+        );
+        self.ctx.ssrc_owners.remove(primary);
+        self.bind_declared_ssrc(now, index, primary, payload_type)
     }
 
     /// [`Self::ensure_remote_stream_bound`]: unbinds `ssrc` from the receiver of transceiver
@@ -2087,6 +2170,10 @@ mod interceptor_sources_test;
 #[cfg(test)]
 #[path = "interceptor_association_test.rs"]
 mod interceptor_association_test;
+
+#[cfg(test)]
+#[path = "interceptor_declared_rid_section_test.rs"]
+mod interceptor_declared_rid_section_test;
 
 #[cfg(test)]
 #[path = "interceptor_session_test.rs"]

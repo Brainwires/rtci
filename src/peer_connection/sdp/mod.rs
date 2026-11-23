@@ -579,6 +579,20 @@ pub(crate) struct TrackDetails {
     pub(crate) rids: Vec<String>,
     /// What each rid's `a=rid` line restricts the stream to (RFC 8851 section 5).
     pub(crate) rid_restrictions: HashMap<String, RTCRtpRidRestrictions>,
+    /// With `rids`: the streams the section also declares by SSRC (`a=ssrc`, their repair
+    /// flows paired by `a=ssrc-group:FID` / `FEC-FR`), in the order of their `a=ssrc` lines.
+    /// RFC 9143 section 9.2 associates a packet whose SSRC the section declares with the
+    /// section; a packet of one that carries no RID is received as a stream without a rid.
+    pub(crate) declared_ssrcs: Vec<DeclaredSsrc>,
+}
+
+/// A stream an m= section declares by SSRC, with the repair flows its `a=ssrc-group` lines
+/// pair with it (RFC 5576 section 4.2, RFC 4588 section 8.1).
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DeclaredSsrc {
+    pub(crate) ssrc: SSRC,
+    pub(crate) rtx_ssrc: Option<SSRC>,
+    pub(crate) fec_ssrc: Option<SSRC>,
 }
 
 pub(crate) fn track_details_for_ssrc(
@@ -816,9 +830,10 @@ pub(crate) fn track_details_from_sdp(s: &SessionDescription) -> Vec<TrackDetails
         }
 
         // If media line is using RTP Stream Identifier Source Description per RFC8851
-        // we will need to override tracks, and remove ssrcs.
-        // This is in particular important for Firefox, as it uses both 'rid', 'simulcast'
-        // and 'a=ssrc' lines.
+        // the section is one track whose streams are its rids. Its `a=ssrc` lines (Firefox
+        // and Pion write them beside 'rid' and 'simulcast') are kept on that track as the
+        // SSRCs the section declares (RFC 9143 section 9.2): a packet that carries a RID is
+        // bound by its rid, one that carries none by its declared SSRC.
         if has_media_msid || (!track_id.is_empty() && !stream_id.is_empty()) {
             // The streams the remote side sends: its `send` rids. A `recv` rid is one of this
             // endpoint's own streams, which the remote side takes.
@@ -837,6 +852,16 @@ pub(crate) fn track_details_from_sdp(s: &SessionDescription) -> Vec<TrackDetails
                     rid_restrictions: rids
                         .iter()
                         .map(|r| (r.id.clone(), r.to_restrictions()))
+                        .collect(),
+                    declared_ssrcs: tracks_in_media_section
+                        .iter()
+                        .filter_map(|track| {
+                            Some(DeclaredSsrc {
+                                ssrc: track.ssrc?,
+                                rtx_ssrc: track.rtx_ssrc,
+                                fec_ssrc: track.fec_ssrc,
+                            })
+                        })
                         .collect(),
                     ..Default::default()
                 };

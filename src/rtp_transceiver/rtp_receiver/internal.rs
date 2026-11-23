@@ -17,7 +17,9 @@ use crate::rtp_transceiver::rtp_sender::rtp_codec::{
 use crate::rtp_transceiver::rtp_sender::rtp_codec_parameters::RTCRtpCodecParameters;
 use crate::rtp_transceiver::rtp_sender::rtp_coding_parameters::RTCRtpCodingParameters;
 use crate::rtp_transceiver::rtp_sender::rtp_receiver_parameters::RTCRtpReceiveParameters;
-use crate::rtp_transceiver::rtp_sender::{RTCRtpCodec, RTCRtpHeaderExtensionParameters};
+use crate::rtp_transceiver::rtp_sender::{
+    RTCRtpCodec, RTCRtpEncodingParameters, RTCRtpHeaderExtensionParameters,
+};
 use crate::rtp_transceiver::{PayloadType, SSRC};
 use interceptor::Interceptor;
 use shared::error::Result;
@@ -67,6 +69,11 @@ pub(crate) struct RTCRtpReceiverInternal {
     jitter_buffer_target: Option<Duration>,
 
     receive_codings: Vec<RTCRtpCodingParameters>,
+    /// The streams a remote description with `a=rid` declares by SSRC for the section (RFC
+    /// 9143 section 9.2), without a rid. They are not codings until a packet of theirs that
+    /// carries no RID arrives (`InterceptorHandler::bind_declared_in_rid_section`); a packet
+    /// that carries a RID is bound by its rid, as without them.
+    declared_codings: Vec<RTCRtpCodingParameters>,
     receive_codecs: Vec<RTCRtpCodecParameters>,
     /// The payload types this endpoint's pending offer listed for the section, which it must
     /// be ready to receive before the answer arrives (RFC 3264 section 5.1); cleared when the
@@ -121,6 +128,7 @@ impl RTCRtpReceiverInternal {
             synchronization_sources: vec![],
             jitter_buffer_target: None,
             receive_codings,
+            declared_codings: vec![],
 
             receive_codecs: vec![],
             offered_payload_types: vec![],
@@ -639,6 +647,41 @@ impl RTCRtpReceiverInternal {
         self.receive_codings = receive_codings;
         //TODO: if get_parameters is changed to use receive_codings to return it in RTCRtpReceiveParameters
         // self.last_returned_parameters = None;
+    }
+
+    /// The streams the remote description declares by SSRC beside its rids
+    /// ([`Self::set_declared_codings`]).
+    pub(crate) fn declared_codings(&self) -> &[RTCRtpCodingParameters] {
+        &self.declared_codings
+    }
+
+    /// Sets the streams a remote description with `a=rid` declares by SSRC for the section:
+    /// each a coding without a rid, with its declared repair flows.
+    pub(crate) fn set_declared_codings(&mut self, declared: Vec<RTCRtpCodingParameters>) {
+        self.declared_codings = declared;
+    }
+
+    /// A declared stream ([`Self::declared_codings`]) becomes a coding of this receiver and of
+    /// its track, without a rid and with its codec still to be resolved. `false` when `ssrc`
+    /// is not a declared primary or is a coding already.
+    pub(crate) fn add_declared_coding(&mut self, ssrc: SSRC) -> bool {
+        if self.receive_codings.iter().any(|c| c.ssrc == Some(ssrc)) {
+            return false;
+        }
+        let Some(coding) = self
+            .declared_codings
+            .iter()
+            .find(|c| c.ssrc == Some(ssrc))
+            .cloned()
+        else {
+            return false;
+        };
+        self.receive_codings.push(coding.clone());
+        self.track.add_coding(RTCRtpEncodingParameters {
+            rtp_coding_parameters: coding,
+            ..Default::default()
+        });
+        true
     }
 
     pub(crate) fn get_codec_preferences(&self) -> &[RTCRtpCodecParameters] {
