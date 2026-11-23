@@ -466,6 +466,10 @@ pub struct Agent {
     pub(crate) remote_lite: bool,
     /// The `LiteCandidateUpdate` event of this generation was raised.
     pub(crate) lite_update_raised: bool,
+    /// Two lite agents, controlled: the local transport address an updated candidate
+    /// exchange named in `a=remote-candidates` (RFC 8839 Section 4.4.2.2), which the pair
+    /// takes as its local candidate. See [`Agent::replace_remote_candidates_pinning`].
+    pub(crate) pinned_local_addr: Option<SocketAddr>,
     /// Ta as configured, before the peer's proposal (Section 14.2).
     pub(crate) configured_ta: Option<Duration>,
     /// Which of several nominations the controlled agent uses.
@@ -510,6 +514,32 @@ enum MdnsHostName {
     /// Too many names are published already: the candidate takes this name, which is not
     /// published, and so keeps its address private.
     Unpublished(String),
+}
+
+/// RFC 8839 section 5.4: `ice-ufrag` is 4 to 256 `ice-char`s and `ice-pwd` 22 to 256, with
+/// "at least 24 bits" and "at least 128 bits of randomness"; an agent "MUST NOT send" a ufrag
+/// longer than 32 characters. Credentials the application supplies are held to that (the
+/// generated ones are 16 and 32 letters): too short is too few bits, other characters or a
+/// longer value are invalid.
+pub(crate) fn check_local_credentials(ufrag: &str, pwd: &str) -> Result<()> {
+    let ice_chars = |value: &str| {
+        value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/')
+    };
+    if ufrag.len() < 4 || ufrag.len() * 8 < 24 {
+        return Err(Error::ErrLocalUfragInsufficientBits);
+    }
+    if pwd.len() < 22 || pwd.len() * 8 < 128 {
+        return Err(Error::ErrLocalPwdInsufficientBits);
+    }
+    if ufrag.len() > 32 || !ice_chars(ufrag) {
+        return Err(Error::ErrLocalUfragInvalid);
+    }
+    if pwd.len() > 256 || !ice_chars(pwd) {
+        return Err(Error::ErrLocalPwdInvalid);
+    }
+    Ok(())
 }
 
 impl Agent {
@@ -722,6 +752,7 @@ impl Agent {
 
             remote_lite: false,
             lite_update_raised: false,
+            pinned_local_addr: None,
             configured_ta: config.ta,
             nomination_acceptance: config.nomination_acceptance,
             failed_nomination: config.failed_nomination,
@@ -879,6 +910,19 @@ impl Agent {
                 candidate_type, self.candidate_types
             );
             return Ok(false);
+        }
+
+        // RFC 8839 section 5.1: "rel-addr and rel-port ... MUST be present for server
+        // reflexive, peer-reflexive and relayed candidates". A local one given without its
+        // related address would be signalled as `raddr  rport 0`: it is refused.
+        if matches!(
+            candidate_type,
+            CandidateType::ServerReflexive | CandidateType::Relay | CandidateType::PeerReflexive
+        ) && c
+            .related_address()
+            .is_none_or(|related| related.address.is_empty())
+        {
+            return Err(Error::ErrLocalCandidateWithoutRelatedAddress);
         }
 
         if c.candidate_type() == CandidateType::Host
@@ -1829,9 +1873,25 @@ impl Agent {
     /// is complete after and only after the updated candidate exchange is complete"), and
     /// selects again. Returns `false`, and changes nothing, unless both agents are lite.
     pub fn replace_remote_candidates(&mut self, now: Instant, candidates: Vec<Candidate>) -> bool {
+        self.replace_remote_candidates_pinning(now, candidates, None)
+    }
+
+    /// [`Agent::replace_remote_candidates`], with the local side of the pair given: RFC 8839
+    /// Section 4.4.2.2, a lite answerer offered `a=remote-candidates` forms the pair from the
+    /// offer's default destination and, as its local candidate, the transport address the
+    /// attribute names (the controlling agent's remote candidate is this agent's local one).
+    /// A pair with a local candidate at `local` is chosen over any other; `None` (or an
+    /// address no local candidate has) leaves the choice to the RFC 6724 preference.
+    pub fn replace_remote_candidates_pinning(
+        &mut self,
+        now: Instant,
+        candidates: Vec<Candidate>,
+        local: Option<SocketAddr>,
+    ) -> bool {
         if !(self.lite && self.remote_lite) {
             return false;
         }
+        self.pinned_local_addr = local;
         self.set_selected_pair(Some(now), None);
         self.announce_all_pairs_removed();
         self.candidate_pairs = Vec::new();
@@ -2136,12 +2196,7 @@ impl Agent {
             pwd = generate_pwd_with_random(self.crypto_provider.random())?;
         }
 
-        if ufrag.len() * 8 < 24 {
-            return Err(Error::ErrLocalUfragInsufficientBits);
-        }
-        if pwd.len() * 8 < 128 {
-            return Err(Error::ErrLocalPwdInsufficientBits);
-        }
+        check_local_credentials(&ufrag, &pwd)?;
 
         self.ufrag_pwd.pending_local_credentials = Some(Credentials { ufrag, pwd });
 
@@ -2215,6 +2270,7 @@ impl Agent {
         self.triggered_queue.clear();
         // A new generation: its candidates and its end-of-candidates are still to come.
         self.lite_update_raised = false;
+        self.pinned_local_addr = None;
         self.remote_end_of_candidates = false;
         self.local_gathering_complete = false;
 

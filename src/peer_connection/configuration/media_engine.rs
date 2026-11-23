@@ -176,7 +176,7 @@ mod multi_codec_test;
 
 use crate::peer_connection::sdp::{
     ATTR_KEY_SFRAME, ENCRYPT_URI, MediaDescriptionExt, SectionExtension,
-    codecs_from_media_description, is_unknown_application_media,
+    codecs_from_media_description, is_unknown_media_protocol,
     rtp_extensions_from_media_description,
 };
 use crate::rtp_transceiver::direction::RTCRtpTransceiverDirection;
@@ -299,6 +299,8 @@ pub const MIME_TYPE_TELEPHONE_EVENT: &str = "audio/telephone-event";
 /// its own) sends during silence; static payload type 13 at 8000 Hz.
 /// Note: MIME type matching is case-insensitive.
 pub const MIME_TYPE_CN: &str = "audio/CN";
+/// MIME type for redundant audio data, RED (RFC 2198), as `a=rtpmap:<pt> red/48000/2`.
+pub const MIME_TYPE_RED: &str = "audio/red";
 
 /// SMPTE ST 336 (KLV) metadata MIME type
 ///
@@ -445,6 +447,12 @@ pub struct MediaEngine {
 
     pub(crate) header_extensions: Vec<MediaEngineHeaderExtension>,
     pub(crate) negotiated_header_extensions: HashMap<u16, MediaEngineHeaderExtension>,
+    /// The header extension mappings (id, URI) of this endpoint's pending offer (RFC 9429
+    /// section 5.9: "For each specified RTP header extension, establish a mapping between
+    /// the extension ID and URI"): what a packet that arrives before the answer is read with
+    /// where no negotiated mapping says ([`Self::receive_header_extension_id`]). Empty
+    /// outside `have-local-offer` and `have-remote-pranswer`.
+    pub(crate) offered_header_extensions: Vec<(u16, String)>,
 
     /// Whether RTP retransmission (RFC 4588) is negotiated beside RFC 8627 FlexFEC.
     /// See [`MediaEngine::set_flexfec_with_retransmission`].
@@ -550,6 +558,21 @@ impl MediaEngine {
                     rtcp_feedback: vec![],
                 },
                 payload_type: 111,
+            },
+            // Redundant audio data (RFC 2198) with Opus as the primary and the redundant
+            // encoding: RFC 8854 section 4.2 has a WebRTC endpoint support RED for audio, and
+            // Chromium and WebKit offer it in this form (`a=rtpmap:63 red/48000/2`,
+            // `a=fmtp:63 111/111`, after Opus). The RED interceptor the peer connection
+            // installs sends and takes apart its packets.
+            RTCRtpCodecParameters {
+                rtp_codec: RTCRtpCodec {
+                    mime_type: MIME_TYPE_RED.to_owned(),
+                    clock_rate: 48000,
+                    channels: 2,
+                    sdp_fmtp_line: "111/111".to_owned(),
+                    rtcp_feedback: vec![],
+                },
+                payload_type: 63,
             },
             RTCRtpCodecParameters {
                 rtp_codec: RTCRtpCodec {
@@ -1139,6 +1162,25 @@ impl MediaEngine {
         }
 
         (0, false, false)
+    }
+
+    /// The id a received packet carries the header extension `uri` with: the negotiated one
+    /// (of either kind), else, while a local offer is pending, the one that offer maps it to
+    /// (RFC 3264 section 5.1: the offerer is prepared to receive as its offer describes
+    /// before the answer arrives). 0 when neither says.
+    pub(crate) fn receive_header_extension_id(&self, uri: &str) -> u16 {
+        if let Some((id, _)) = self
+            .negotiated_header_extensions
+            .iter()
+            .find(|(_, e)| e.uri == uri && (e.is_audio || e.is_video))
+        {
+            return *id;
+        }
+        self.offered_header_extensions
+            .iter()
+            .find(|(_, offered)| offered == uri)
+            .map(|(id, _)| *id)
+            .unwrap_or(0)
     }
 
     /// clone_to copies any user modifiable state of the MediaEngine
@@ -1796,7 +1838,7 @@ impl MediaEngine {
         for media in &desc.media_descriptions {
             // A data channel section, or an `m=application` line that is not RTP (the pre-RFC
             // 8841 `DTLS/SCTP` data section): no codecs to read.
-            if media.is_webrtc_datachannel() || is_unknown_application_media(media) {
+            if media.is_webrtc_datachannel() || is_unknown_media_protocol(media) {
                 continue;
             }
 

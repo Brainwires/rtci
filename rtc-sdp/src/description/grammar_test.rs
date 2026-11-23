@@ -143,7 +143,7 @@ fn lines_end_in_crlf_or_lf_and_the_last_one_may_end_at_the_end_of_input() {
 
 #[test]
 fn text_that_is_not_utf_8_is_refused() {
-    // `a=charset` is not supported: a description is UTF-8 (RFC 8866 section 5).
+    // Without `a=charset` a description is UTF-8 (RFC 8866 section 5).
     let mut bytes = format!("{V}{O}").into_bytes();
     bytes.extend_from_slice(b"s=caf\xe9\r\n");
     bytes.extend_from_slice(T.as_bytes());
@@ -372,6 +372,8 @@ fn origin_has_six_fields_with_the_grammar_of_each() {
             "o=mozilla...THIS_IS_SDPARTA-99.0 8847547619928269125 0 IN IP4 0.0.0.0\r\n",
             "o=- 0 0 IN IP6 2001:db8::1\r\n",
             "o=- 18446744073709551615 18446744073709551615 IN IP4 host.example.com\r\n",
+            // `1*DIGIT` has no upper bound (RFC 8866 section 9).
+            "o=- 18446744073709551616 1 IN IP4 0.0.0.0\r\n",
             "o=\u{e9}t\u{e9} 1 1 IN IP4 127.0.0.1\r\n",
             // RFC 8866 section 5.2: other network and address types may be registered.
             "o=- 1 1 ATM NSAP 47.0091.8100.0000.0060.3e64.fd01.0060.3e64.fd01.fe\r\n",
@@ -393,7 +395,6 @@ fn origin_has_six_fields_with_the_grammar_of_each() {
             "o=- 1 x IN IP4 0.0.0.0\r\n",
             "o=- -1 1 IN IP4 0.0.0.0\r\n",
             "o=- 1.5 1 IN IP4 0.0.0.0\r\n",
-            "o=- 18446744073709551616 1 IN IP4 0.0.0.0\r\n",
             "o=- 1 1 I/N IP4 0.0.0.0\r\n",
             "o=- 1 1 IN IP/4 0.0.0.0\r\n",
             "o=- 1 1 IN IP4 ::1\r\n",
@@ -410,6 +411,32 @@ fn origin_has_six_fields_with_the_grammar_of_each() {
     assert_eq!(parsed.origin.session_id, 3724394400);
     assert_eq!(parsed.origin.session_version, 3724394405);
     assert_eq!(parsed.origin.unicast_address, "198.51.100.1");
+}
+
+/// RFC 8866 section 9: `<sess-id>` and `<sess-version>` are `1*DIGIT`, with no upper bound. A
+/// description whose values do not fit 64 bits is compliant (RFC 9429 section 5.8 accepts
+/// compliant SDP that does not follow the generation rules of section 5.2.1), is read, and is
+/// written back as it was; the version increments past any width.
+#[test]
+fn an_origin_beyond_64_bits_is_read_and_written_back() {
+    let line = "o=- 340282366920938463463374607431768211456 000018446744073709551615 IN IP4 \
+                127.0.0.1\r\n";
+    let parsed = strict(&format!("{V}{line}{S}{T}")).unwrap();
+    assert_eq!(
+        parsed.origin.session_id.as_str(),
+        "340282366920938463463374607431768211456"
+    );
+    assert_eq!(parsed.origin.session_id.to_u64(), None);
+    assert_eq!(parsed.origin.session_version, u64::MAX);
+    assert!(parsed.marshal().contains(line), "{}", parsed.marshal());
+    let next = parsed.origin.session_version.incremented();
+    assert_eq!(next.as_str(), "18446744073709551616");
+    assert!(next > parsed.origin.session_version);
+    assert_eq!(
+        "999".parse::<SdpDecimal>().unwrap().incremented().as_str(),
+        "1000"
+    );
+    assert!("12a".parse::<SdpDecimal>().is_err());
 }
 
 // --- s=, i= -----------------------------------------------------------------------------------
@@ -459,8 +486,8 @@ fn an_empty_session_name_is_never_written() {
     let built = SessionDescription {
         origin: Origin {
             username: "-".to_owned(),
-            session_id: 1,
-            session_version: 1,
+            session_id: 1.into(),
+            session_version: 1.into(),
             network_type: "IN".to_owned(),
             address_type: "IP4".to_owned(),
             unicast_address: "0.0.0.0".to_owned(),
@@ -480,6 +507,11 @@ fn uri_email_and_phone_follow_their_grammars() {
         &[
             "u=http://www.example.com/seminars/sdp.pdf\r\nt=0 0\r\n",
             "u=urn:example:a\r\nt=0 0\r\n",
+            // RFC 8866 section 9: `uri = URI-reference`, so a relative reference too
+            // (RFC 9429 section 5.2.1: compliant SDP is accepted).
+            "u=seminars/sdp.pdf\r\nt=0 0\r\n",
+            "u=//www.example.com/a%20b?x=1#top\r\nt=0 0\r\n",
+            "u=../sdp.pdf\r\nt=0 0\r\n",
             // RFC 8866 section 5.6.
             "e=j.doe@example.com (Jane Doe)\r\nt=0 0\r\n",
             "e=Jane Doe <j.doe@example.com>\r\nt=0 0\r\n",
@@ -502,6 +534,9 @@ fn uri_email_and_phone_follow_their_grammars() {
         &[
             "u=\r\nt=0 0\r\n",
             "u=not a uri\r\nt=0 0\r\n",
+            "u=a%2\r\nt=0 0\r\n",
+            "u=1http://example.com/\r\nt=0 0\r\n",
+            "u=a<b\r\nt=0 0\r\n",
             "e=\r\nt=0 0\r\n",
             "e=Jane Doe\r\nt=0 0\r\n",
             "e=@example.com\r\nt=0 0\r\n",
@@ -546,6 +581,8 @@ fn uri_email_and_phone_follow_their_grammars() {
 
 #[test]
 fn connection_data_follows_the_address_grammar_of_its_address_type() {
+    const LONG_LABEL: &str =
+        "c=IN IP4 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.example\r\n";
     let c = |line: &str| session(&format!("{line}t=0 0\r\n"));
     let good = each(
         c,
@@ -559,6 +596,10 @@ fn connection_data_follows_the_address_grammar_of_its_address_type() {
             "c=IN IP6 host.example.com\r\n",
             // RFC 8866 section 5: an internationalized name is in its ASCII (ACE) form.
             "c=IN IP4 xn--bcher-kva.example\r\n",
+            // RFC 1034 / RFC 1035: a fully qualified name may end in the root's dot, and a
+            // label may start with a digit (RFC 1123 section 2.1).
+            "c=IN IP4 host.example.com.\r\n",
+            "c=IN IP4 61b445d2-6503.local\r\n",
             // RFC 8866 section 5.7: multicast, with a TTL for IPv4 and never for IPv6.
             "c=IN IP4 233.252.0.1/127\r\n",
             "c=IN IP4 233.252.0.1/0\r\n",
@@ -584,6 +625,14 @@ fn connection_data_follows_the_address_grammar_of_its_address_type() {
             "c=I/N IP4 0.0.0.0\r\n",
             "c=IN IP4 ::1\r\n",
             "c=IN IP4 a_b\r\n",
+            // RFC 8866 section 5: names "MUST comply with" RFC 1034 / RFC 1035: no empty
+            // label, none of more than 63 characters, no hyphen at either end of a label.
+            "c=IN IP4 host..example\r\n",
+            "c=IN IP4 -host.example\r\n",
+            "c=IN IP4 host-.example\r\n",
+            "c=IN IP6 host.-example\r\n",
+            "c=IN IP4 .example\r\n",
+            LONG_LABEL,
             "c=IN IP4 b\u{fc}cher.example\r\n",
             "c=IN IP6 b\u{fc}cher.example\r\n",
             "c=IN IP6 [::1]\r\n",
@@ -1306,8 +1355,8 @@ fn the_jsep_templates_write_the_lines_rfc_9429_section_5_2_1_gives() {
 fn a_description_is_written_in_the_order_of_the_grammar_whatever_was_set() {
     // Every optional part set: the lines come out as v o s i u e p c b t r z a, m i c b a.
     let mut session = SessionDescription::new_jsep_session_description(false);
-    session.origin.session_id = 1;
-    session.origin.session_version = 2;
+    session.origin.session_id = 1.into();
+    session.origin.session_version = 2.into();
     session
         .attributes
         .push(Attribute::new("x".to_owned(), None));
@@ -1315,7 +1364,7 @@ fn a_description_is_written_in_the_order_of_the_grammar_whatever_was_set() {
     session.connection_information = ConnectionInformation::parse("IN IP4 192.0.2.1").ok();
     session.phone_numbers.push("+1 555".to_owned());
     session.email_addresses.push("a@example.com".to_owned());
-    session.uri = url::Url::parse("http://example.com/").ok();
+    session.uri = Some("http://example.com/".to_owned());
     session.session_information = Some("info".to_owned());
     session.time_descriptions[0].time_zones.push(TimeZone {
         adjustment_time: 3724394400,
@@ -1392,4 +1441,39 @@ fn a_parse_error_names_the_line_it_is_on() {
     // The description ends before its t= line: about the whole description.
     assert_eq!(located(&format!("{V}{O}{S}")), Some(None));
     assert_eq!(located(&format!("{V}{O}{S}{T}")), None);
+}
+
+/// RFC 8866 section 6.10: `a=charset` names the character set of the session name and
+/// information, compared case-insensitively with the IANA registry's names and aliases.
+/// ISO-8859-1 is decoded as such; US-ASCII refuses a byte above 127; UTF-8 named or not
+/// refuses bytes that are not UTF-8; an unsupported set's strings are octet strings (each
+/// byte the character of its code point).
+#[test]
+fn a_charset_attribute_selects_how_the_text_is_read() {
+    let with = |charset: &str, name: &[u8]| {
+        let mut bytes = format!("{V}{O}").into_bytes();
+        bytes.extend_from_slice(b"s=");
+        bytes.extend_from_slice(name);
+        bytes.extend_from_slice(b"\r\n");
+        bytes.extend_from_slice(T.as_bytes());
+        bytes.extend_from_slice(format!("a=charset:{charset}\r\n").as_bytes());
+        SessionDescription::unmarshal(&mut Cursor::new(&bytes))
+    };
+    for name in ["ISO-8859-1", "iso-8859-1", "Latin1", "csISOLatin1"] {
+        let sd = with(name, b"caf\xe9").unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(sd.session_name, "caf\u{e9}", "{name}");
+        assert_eq!(sd.charset(), Charset::Latin1, "{name}");
+    }
+    assert!(with("US-ASCII", b"caf\xe9").is_err());
+    assert_eq!(with("us-ascii", b"cafe").unwrap().charset(), Charset::Ascii);
+    assert!(with("UTF-8", b"caf\xe9").is_err());
+    assert_eq!(
+        with("utf-8", "caf\u{e9}".as_bytes()).unwrap().session_name,
+        "caf\u{e9}"
+    );
+    let octets = with("x-unknown-set", b"\xa4\xe9").unwrap();
+    assert_eq!(octets.session_name, "\u{a4}\u{e9}");
+    assert_eq!(octets.charset(), Charset::Other("x-unknown-set".to_owned()));
+    let no_charset = with("UTF-8", b"x").unwrap();
+    assert_eq!(no_charset.charset(), Charset::Utf8);
 }

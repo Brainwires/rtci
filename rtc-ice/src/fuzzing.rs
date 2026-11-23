@@ -76,7 +76,7 @@ fn new_agent(
     let provider = crypto::fuzzing::deterministic_provider(seed, false).ok()?;
     let config = AgentConfig {
         local_ufrag: format!("{name}ufrag"),
-        local_pwd: format!("{name}-password-for-fuzzing"),
+        local_pwd: format!("{name}passwordforfuzzing"),
         multicast_dns_mode: MulticastDnsMode::Disabled,
         multicast_dns_local_name: format!("{name}.local"),
         disconnected_timeout: Some(Duration::from_millis(
@@ -556,7 +556,7 @@ pub fn agent_mdns_and_tcp(mut data: &[u8], start: Instant) {
     };
     let config = AgentConfig {
         local_ufrag: "targetufrag".to_owned(),
-        local_pwd: "target-password-for-fuzzing".to_owned(),
+        local_pwd: "targetpasswordforfuzzing".to_owned(),
         multicast_dns_mode: MulticastDnsMode::QueryAndGather,
         check_interval: Duration::from_millis(100),
         ..Default::default()

@@ -165,12 +165,20 @@ pub(crate) fn is_ip6_multicast_address(value: &str) -> bool {
         && is_ip6_address(value)
 }
 
-/// `FQDN = 4*(alpha-numeric / "-" / ".")`.
+/// `FQDN = 4*(alpha-numeric / "-" / ".")`, and a domain name as RFC 8866 section 5 has it
+/// ("MUST comply with [RFC1034] and [RFC1035]"): labels of 1 to 63 characters that neither
+/// start nor end with a hyphen (RFC 1035 section 2.3.1, a leading digit allowed since RFC 1123
+/// section 2.1), at most 253 characters in all, one final dot (the root) allowed.
 pub(crate) fn is_fqdn(value: &str) -> bool {
+    let name = value.strip_suffix('.').unwrap_or(value);
     value.len() >= 4
+        && name.len() <= 253
         && value
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.')
+        && name.split('.').all(|label| {
+            (1..=63).contains(&label.len()) && !label.starts_with('-') && !label.ends_with('-')
+        })
 }
 
 /// `unicast-address` for an address type: `IP4-address / IP6-address / FQDN / extn-addr`.
