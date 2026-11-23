@@ -249,6 +249,9 @@ struct Session {
     pc: RTCPeerConnection,
     sock: UdpSocket,
     local: SocketAddr,
+    /// One UDP socket per further transport (an m= section outside the BUNDLE group, RFC
+    /// 9429 section 5.2.1), with the mid its candidate was gathered for.
+    transport_socks: Vec<(UdpSocket, SocketAddr, String)>,
     ice_ip: IpAddr,
     /// The mDNS socket (5353, joined to 224.0.0.251): the peer connection resolves a
     /// browser's `.local` host candidates through it.
@@ -338,6 +341,7 @@ impl Session {
             pc,
             sock,
             local,
+            transport_socks: vec![],
             ice_ip: ip,
             mdns,
             tcp_listener: None,
@@ -365,6 +369,7 @@ impl Session {
 
         let mut buf = vec![0u8; 2048];
         let mut mbuf = vec![0u8; 2048];
+        let mut tbuf = vec![0u8; 2048];
         loop {
             s.drive()?;
             for v in s.out.drain(..) {
@@ -399,6 +404,11 @@ impl Session {
                     let (n, peer) = res?;
                     let local = s.local;
                     s.feed(local, peer, TransportProtocol::UDP, &buf[..n]);
+                }
+                res = recv_any(&s.transport_socks, &mut tbuf) => {
+                    if let Ok((n, peer, local)) = res {
+                        s.feed(local, peer, TransportProtocol::UDP, &tbuf[..n]);
+                    }
                 }
                 res = recv_opt(&s.mdns, &mut mbuf) => {
                     if let Ok((n, peer)) = res
@@ -520,6 +530,38 @@ impl Session {
         Ok(())
     }
 
+    /// A host candidate, on a socket of its own, for each transport but the first: the
+    /// sections a browser offers outside a BUNDLE group (`bundlePolicy: "max-compat"` with the
+    /// group removed) each have one (RFC 9429 section 5.3.1).
+    fn add_transport_candidates(&mut self) -> Result<()> {
+        for (mid, index) in self.pc.ice_transport_sections().into_iter().skip(1) {
+            if self.transport_socks.iter().any(|(_, _, m)| *m == mid) {
+                continue;
+            }
+            let std_sock = std::net::UdpSocket::bind(SocketAddr::new(self.ice_ip, 0))?;
+            std_sock.set_nonblocking(true)?;
+            let sock = UdpSocket::from_std(std_sock)?;
+            let local = sock.local_addr()?;
+            let host = CandidateHostConfig {
+                base_config: CandidateConfig {
+                    network: "udp".to_owned(),
+                    address: local.ip().to_string(),
+                    port: local.port(),
+                    component: 1,
+                    ..Default::default()
+                },
+                ..Default::default()
+            }
+            .new_candidate_host()?;
+            let mut candidate = RTCIceCandidate::from(&host).to_json()?;
+            candidate.sdp_mid = Some(mid.clone());
+            candidate.sdp_mline_index = Some(index);
+            self.pc.add_local_candidate(candidate)?;
+            self.transport_socks.push((sock, local, mid));
+        }
+        Ok(())
+    }
+
     fn send_offer(&mut self) -> Result<()> {
         self.add_candidates()?;
         let offer = self.pc.create_offer(None)?;
@@ -552,6 +594,7 @@ impl Session {
                 let offer =
                     RTCSessionDescription::offer(v["sdp"].as_str().unwrap_or_default().to_owned())?;
                 self.pc.set_remote_description(Instant::now(), offer)?;
+                self.add_transport_candidates()?;
                 let answer = self.pc.create_answer(None)?;
                 self.pc
                     .set_local_description(Instant::now(), answer.clone())?;
@@ -797,6 +840,12 @@ impl Session {
                 && let Some(mdns) = &self.mdns
             {
                 let _ = mdns.try_send_to(&m.message, peer);
+            } else if let Some((sock, _, _)) = self
+                .transport_socks
+                .iter()
+                .find(|(_, local, _)| *local == m.transport.local_addr)
+            {
+                let _ = sock.try_send_to(&m.message, peer);
             } else {
                 let _ = self.sock.try_send_to(&m.message, peer);
             }
@@ -1000,6 +1049,22 @@ impl Session {
         }
         Ok(())
     }
+}
+
+/// The next datagram on any of the transports' own sockets, with the local address it
+/// arrived on.
+async fn recv_any(
+    socks: &[(UdpSocket, SocketAddr, String)],
+    buf: &mut [u8],
+) -> std::io::Result<(usize, SocketAddr, SocketAddr)> {
+    if socks.is_empty() {
+        return std::future::pending().await;
+    }
+    let readable = socks.iter().map(|(sock, _, _)| Box::pin(sock.readable()));
+    let (_, index, _) = futures_util::future::select_all(readable).await;
+    let (sock, local, _) = &socks[index];
+    let (n, peer) = sock.try_recv_from(buf)?;
+    Ok((n, peer, *local))
 }
 
 async fn recv_opt(

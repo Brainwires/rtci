@@ -255,6 +255,7 @@ mod prohibited;
 mod remote_tracks;
 pub mod rtc_error;
 mod states_events;
+mod transport_layout;
 // wpt100:hdrext
 mod always_negotiate;
 pub mod message;
@@ -1449,10 +1450,8 @@ impl RTCPeerConnection {
         if matches!(
             local_description.sdp_type,
             RTCSdpType::Answer | RTCSdpType::Pranswer
-        ) && let Some(pending) = self.pending_remote_transport.take()
-            && let Some(parsed) = self.remote_description().and_then(|r| r.parsed.clone())
-        {
-            self.apply_remote_transport(now, &parsed, false, Some(pending.ice_restart))?;
+        ) {
+            self.apply_local_answer_transports(now, local_description.parsed.as_ref())?;
         }
 
         // W3C 4.4.1.4 (the transport's [[IceRole]], RFC 8445 rules): a local offer makes an
@@ -1554,6 +1553,7 @@ impl RTCPeerConnection {
             && let Some(parsed) = local_description.parsed.as_ref()
         {
             self.begin_local_gathering(parsed);
+            self.describe_other_transports(parsed);
         }
 
         if matches!(
@@ -1938,7 +1938,7 @@ impl RTCPeerConnection {
                     if !ice_restart && self.ice_transport().agent.media_path().is_some() {
                         self.pipeline_context
                             .transports
-                            .default_mut()
+                            .active_mut()
                             .dtls_handler_context
                             .connect_requested = Some(now);
                     }
@@ -2086,6 +2086,12 @@ impl RTCPeerConnection {
     /// Whether the remote candidates of the pending remote offer's ICE generation wait for the
     /// local answer: the offer starts the transport or restarts ICE.
     fn remote_candidates_wait_for_answer(&self) -> bool {
+        // A transport other than the default one starts with the answer: until then its
+        // candidates stay in the remote description, which it is started from.
+        let transports = &self.pipeline_context.transports;
+        if transports.active_id() != transports.default_id() {
+            return self.ice_transport().state() == RTCIceTransportState::New;
+        }
         self.pending_remote_transport
             .as_ref()
             .is_some_and(|pending| {
@@ -2212,9 +2218,7 @@ impl RTCPeerConnection {
             }
         }
 
-        if extract_ice_details(parsed)?.is_some() {
-            extract_fingerprints(parsed)?;
-        }
+        self.check_remote_transports(parsed)?;
         // RFC 9429 section 5.8.2: "Any 'a=remote-candidates' attributes MUST be parsed".
         remote_candidates(parsed)?;
         Ok(())
@@ -2481,11 +2485,7 @@ impl RTCPeerConnection {
 
             // The ICE and DTLS transports take an answer's parameters now, an offer's
             // when the local answer is applied (`defer_remote_transport`).
-            if we_offer {
-                self.apply_remote_transport(now, parsed_remote_description, true, None)?;
-            } else {
-                self.defer_remote_transport(parsed_remote_description)?;
-            }
+            self.apply_remote_transports(now, parsed_remote_description, we_offer)?;
 
             if is_final_answer
                 && let Some(parsed_local_description) = self
@@ -2631,6 +2631,37 @@ impl RTCPeerConnection {
     ///
     /// See [addIceCandidate](https://www.w3.org/TR/webrtc/#dom-rtcpeerconnection-addicecandidate!overload-1)
     pub fn add_remote_candidate(&mut self, remote_candidate: RTCIceCandidateInit) -> Result<()> {
+        // The candidate is for the transport of the section it names (RFC 9429 section
+        // 5.2.1: a transport per unbundled section); an end-of-candidates indication that
+        // names none is for every transport.
+        if self.pipeline_context.transports.len() > 1 {
+            let parsed = self.remote_description().and_then(|r| r.parsed.clone());
+            if remote_candidate.candidate.is_empty()
+                && remote_candidate.sdp_mid.is_none()
+                && remote_candidate.sdp_mline_index.is_none()
+            {
+                for id in self.pipeline_context.transports.ids() {
+                    let candidate = remote_candidate.clone();
+                    self.with_transport(id, |pc| pc.add_remote_candidate_on_transport(candidate))?;
+                }
+                return Ok(());
+            }
+            let id = self.transport_of_candidate(
+                remote_candidate.sdp_mid.as_deref(),
+                remote_candidate.sdp_mline_index,
+                parsed.as_ref(),
+            );
+            return self.with_transport(id, |pc| {
+                pc.add_remote_candidate_on_transport(remote_candidate)
+            });
+        }
+        self.add_remote_candidate_on_transport(remote_candidate)
+    }
+
+    fn add_remote_candidate_on_transport(
+        &mut self,
+        remote_candidate: RTCIceCandidateInit,
+    ) -> Result<()> {
         // W3C addIceCandidate: a candidate (not end-of-candidates) that names neither a media
         // description's mid nor its index is a TypeError, before anything else is looked at.
         if !remote_candidate.candidate.is_empty()
@@ -3011,6 +3042,27 @@ impl RTCPeerConnection {
     /// [`RTCPeerConnectionEvent::OnIceGatheringStateChangeEvent`]: crate::peer_connection::event::RTCPeerConnectionEvent::OnIceGatheringStateChangeEvent
     /// [`RTCIceCandidate::end_of_candidates`]: crate::peer_connection::transport::RTCIceCandidate::end_of_candidates
     pub fn add_local_candidate(&mut self, local_candidate: RTCIceCandidateInit) -> Result<()> {
+        // A candidate is gathered for the transport of the section its `sdp_mid` (or
+        // `sdp_mline_index`) names, the default transport without either. Each transport
+        // needs candidates on a local address of its own.
+        if self.pipeline_context.transports.len() > 1 {
+            let local = self.local_description().and_then(|l| l.parsed);
+            let id = self.transport_of_candidate(
+                local_candidate.sdp_mid.as_deref(),
+                local_candidate.sdp_mline_index,
+                local.as_ref(),
+            );
+            if id != self.pipeline_context.transports.default_id() {
+                return self.with_transport(id, |pc| pc.add_other_local_candidate(local_candidate));
+            }
+        }
+        self.add_local_candidate_on_default(local_candidate)
+    }
+
+    fn add_local_candidate_on_default(
+        &mut self,
+        local_candidate: RTCIceCandidateInit,
+    ) -> Result<()> {
         // A closed connection surfaces no candidate (W3C 4.4.2 close: no more events).
         if self.is_closed() {
             return Err(Error::ErrConnectionClosed);

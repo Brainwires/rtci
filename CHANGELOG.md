@@ -1354,6 +1354,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behaviour changes
 
+- **peer connection** (mt-2): a remote description whose sections have different ICE
+  credentials outside a BUNDLE group is applied, a transport per section, instead of refused
+  with `ErrSessionDescriptionConflictingIceUfrag`; an answer accepts a section offered outside
+  the BUNDLE group on its own transport instead of rejecting it with port 0 (it still does under
+  `must-bundle`). `iceConnectionState` is the W3C 4.3.4 aggregate: a connection whose only
+  transport was closed by a description now reports `new`, as the aggregate of closed
+  transports is, where it reported `closed`.
 - **fec**: an encoding the application gives without a FEC SSRC gets one when a FEC format
   (flexfec-03, RFC 8627 FlexFEC) is registered, as it gets an RTX SSRC: the offer carries the
   `a=ssrc-group:FEC-FR` and the repair flow is bound
@@ -1784,6 +1791,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   RTCP was negotiated, no padding bit on the first packet, padding only on the last); the
   default keeps accepting libwebrtc's padding on a packet in the middle of a compound packet.
   New `rtcp::compound_packet::validate_compound_headers`.
+- **Several transports in one peer connection** (mt-2; RFC 9429 sections 4.1.1, 5.2.1, 5.3.1,
+  RFC 9143 section 7, RFC 8835 section 4.2, RFC 8834 section 4.4). An m= section outside a
+  BUNDLE group runs on a transport of its own: its own ICE agent and credentials, candidates,
+  DTLS association (fingerprint check, role) and SRTP keys.
+  - A remote offer without a BUNDLE group, or with sections outside it, is answered with a
+    transport per such section (the bundle policy still decides which sections an answer to
+    an offer without a group accepts: `balanced` the first of each media type, `max-compat`
+    every one, `must-bundle` the first).
+  - `bundlePolicy: max-compat` offers a transport per m= section, each with its own
+    credentials; an answer that bundles them moves the sections to the tagged section's
+    transport and closes the others (RFC 9143 section 7.4, RFC 5888 section 9.2), one without
+    a group keeps them.
+  - The application gathers per transport: `RTCPeerConnection::ice_transport_sections()` lists
+    each transport's first section; `add_local_candidate` and `add_remote_candidate` give a
+    candidate to the transport of its `sdp_mid` / `sdp_mline_index` (the default transport
+    without either; an end-of-candidates without either is for every transport). Datagrams go
+    to the transport that gathered on their local address; packets go out on the transport
+    of their SSRC's section, SCTP on the data section's.
+  - `iceConnectionState` and `connectionState` aggregate every transport (W3C webrtc-pc 4.3.3,
+    4.3.4); `RTCRtpSender/Receiver::transport` and `RTCSctpTransport::transport` name their
+    section's transport.
+  - The browser interop matrix has a scenario for it ("unbundled: max-compat without a BUNDLE
+    group, a transport per section"); `examples/interop-peer` gathers per transport.
+  - Not yet: transport-level events (`OnIceTransportStateChange`, `OnDtlsTransportStateChange`,
+    `OnSelectedCandidatePairChange`, gathering events) and statistics for any transport but the
+    first; `balanced` offers (a transport per media type); several BUNDLE groups; an ICE restart
+    of the other transports.
 - **media conformance**: `rtp::codec::tone` (`Tone`, `ToneSender`): the `audio/tone` payload
   of RFC 4733 section 4 and its sending rule.
 - **media conformance**: RFC 3611 report blocks, RFC 5104 trade-off and back channel,
