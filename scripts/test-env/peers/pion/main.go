@@ -309,16 +309,18 @@ func (r *ridInterceptor) BindLocalStream(info *interceptor.StreamInfo, writer in
 // ---- the peer ----
 
 type Peer struct {
-	plan  Plan
-	mu    sync.Mutex
-	res   Result
-	pc    *webrtc.PeerConnection
-	ws    *websocket.Conn
-	inbox chan map[string]any
-	cands chan *webrtc.ICECandidate
-	stdin *bufio.Reader
-	hdrs  *headerLog
-	rids  *ridTable
+	plan Plan
+	mu   sync.Mutex
+	res  Result
+	// The RTCP datagrams counted already (readRTCP).
+	rtcpSeen map[string]struct{}
+	pc       *webrtc.PeerConnection
+	ws       *websocket.Conn
+	inbox    chan map[string]any
+	cands    chan *webrtc.ICECandidate
+	stdin    *bufio.Reader
+	hdrs     *headerLog
+	rids     *ridTable
 
 	sentScenario  bool
 	lastSentSDP   string
@@ -665,13 +667,30 @@ func rtcpName(pk rtcp.Packet) string {
 	}
 }
 
+// readRTCP counts what one of the peer's streams reads. Pion's SRTCP session hands a compound
+// datagram to every stream one of its packets names (an SR to the receiver of its SSRC and to
+// the senders its report blocks are about), so the same datagram reaches several readers:
+// each is counted once, by its bytes (an SR's NTP timestamp, a feedback packet's count make
+// two datagrams' bytes differ).
 func (p *Peer) readRTCP(read func() ([]rtcp.Packet, interceptor.Attributes, error)) {
 	for {
 		pkts, _, err := read()
 		if err != nil {
 			return
 		}
+		raw, err := rtcp.Marshal(pkts)
+		if err != nil {
+			continue
+		}
 		p.mu.Lock()
+		if p.rtcpSeen == nil {
+			p.rtcpSeen = map[string]struct{}{}
+		}
+		if _, seen := p.rtcpSeen[string(raw)]; seen {
+			p.mu.Unlock()
+			continue
+		}
+		p.rtcpSeen[string(raw)] = struct{}{}
 		for _, pk := range pkts {
 			p.res.RTCP[rtcpName(pk)]++
 			// Reception report blocks, in an SR or an RR (RFC 3550 6.4).

@@ -222,6 +222,7 @@ use serde::{Deserialize, Serialize};
 use shared::error::{Error, Result};
 use std::time::SystemTime;
 
+pub mod behaviour_profile;
 pub(crate) mod bundle_policy;
 pub(crate) mod ice_transport_policy;
 pub mod interceptor_registry;
@@ -232,6 +233,7 @@ pub(crate) mod rtcp_mux_policy;
 pub(crate) mod sdp_semantics;
 pub mod setting_engine;
 
+pub use behaviour_profile::BehaviourProfile;
 pub use bundle_policy::RTCBundlePolicy;
 pub use ice_transport_policy::{ICEGatherPolicy, RTCIceTransportPolicy};
 pub use offer_answer_options::{RTCAnswerOptions, RTCOfferOptions};

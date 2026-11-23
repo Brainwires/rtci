@@ -148,6 +148,10 @@ pub(crate) struct DtlsTransport {
     /// The retransmission timer the client's handshake was started with: 400 ms, or 1.5
     /// times the round trip time ICE measured (RFC 9147 section 5.8.2).
     pub(crate) flight_interval: Option<std::time::Duration>,
+    /// How the client's first retransmission timer is chosen
+    /// (`SettingEngineBuilder::with_dtls_flight_interval`).
+    pub(crate) flight_interval_rule:
+        crate::peer_connection::configuration::setting_engine::DtlsFlightInterval,
 
     // From SettingEngine
     pub(crate) answering_dtls_role: RTCDtlsRole,
@@ -287,6 +291,7 @@ impl DtlsTransport {
             srtp_required: false,
             srtp_negotiated: None,
             flight_interval: None,
+            flight_interval_rule: Default::default(),
 
             answering_dtls_role,
             srtp_protection_profiles,
@@ -493,8 +498,9 @@ impl DtlsTransport {
                 .with_replay_protection_window(self.replay_protection.dtls)
                 // RFC 9147 section 5.8.2: 400 ms is the retransmission timer recommended
                 // for DTLS-SRTP. A client that knows the round trip time of the selected
-                // pair from ICE starts from 1.5 times that instead (`DtlsHandler`).
-                .with_flight_interval(DTLS_SRTP_FLIGHT_INTERVAL)
+                // pair from ICE starts from 1.5 times that instead (`DtlsHandler`); the
+                // libwebrtc rule (`DtlsFlightInterval`) from 50 ms, or twice the round trip.
+                .with_flight_interval(self.flight_interval_rule.initial(None))
                 // No session resumption, in either version (RFC 8446 section 2.2, RFC 5246
                 // section 7.3): WebRTC authenticates each association by the certificate
                 // fingerprints of its SDP (RFC 8827 section 6.5) and makes a new one per

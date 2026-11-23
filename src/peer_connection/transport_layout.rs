@@ -808,6 +808,13 @@ impl RTCPeerConnection {
                 if m.attribute("ice-ufrag").is_none() {
                     continue;
                 }
+                // Media-level `a=ice-options` (`with_ice_options_in_media_sections`) stays
+                // after `a=ice-pwd`, where it was written.
+                let ice_options = m
+                    .attributes
+                    .iter()
+                    .position(|a| a.key == "ice-options")
+                    .map(|at| m.attributes.remove(at));
                 m.attributes.retain(|a| {
                     !TRANSPORT_ICE_ATTRIBUTES.contains(&a.key.as_str()) && a.key != ATTR_KEY_TLS_ID
                 });
@@ -821,6 +828,7 @@ impl RTCPeerConnection {
                 ));
                 m.attributes
                     .push(Attribute::new("ice-pwd".to_owned(), Some(pwd.to_owned())));
+                m.attributes.extend(ice_options);
                 if first {
                     first = false;
                     if with_tls_id && get_mid_value(m).is_some_and(|mid| speaks_for_itself(mid, id))

@@ -9,6 +9,109 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **peer connection, interceptors**: the `Performance` behaviour profile and the
+  `performance-defaults` cargo feature (`conf/rtcp-1-rate`). The defaults are unchanged (the
+  RFC values); `Performance` takes, for each governed behaviour, the cheaper form an RFC itself
+  offers, never turns a capability off and never leaves what the RFCs permit (a libwebrtc value
+  outside an RFC stays in `Chrome`). Measured with `tests/rtcp_rate_trace_rtc2rtc.rs` (two rtc
+  peer connections, virtual time, 30 s):
+  - `rtcp.t-rr-interval` 1 s (RFC 4585 3.4 / 3.5.3; RFC 5506 3.3 names `trr-int` as the remedy;
+    kept local, not announced): at 1 Mbit/s one way the sender's regular reports fall from 13.2
+    to 1.4 a second (27.3 to 3.8 SR/s) and RTCP from 4.20% to 1.45% of the media; both ways
+    4.91% to 1.44%. Cost: report blocks reach the sender 1.2 times a second instead of 12.2
+    (longest gap 1.36 s instead of 214 ms), which slows the RTP circuit breaker and RR-based
+    RTT; NACK and congestion control feedback are untouched (120 ms to the NACK either way).
+  - `rtcp.congestion-feedback-in-budget`, `rtcp.minimum-session-bandwidth` 16 kbit/s,
+    `cc.feedback-share` 2.5%, `cc.feedback-max-interval` 500 ms: congestion control feedback and
+    regular reports share RFC 3550's 5%. 24 kbit/s audio: 12.15% to 4.49% of the media (6.06%
+    without `a=rtcp-rsize`); 100 kbit/s audio and video: 5.96% to 2.75%. Cost: at those rates
+    feedback every 500 / 400 ms instead of 250 / 137 ms (Gcc settles 0.5 s either way at
+    150 kbit/s, 6.0 s against 5.5 s at 500 kbit/s; a Gcc sender with probing fed by a
+    `Performance` receiver reaches 2 Mbit/s in 0.62 s against 0.49 s), and a regular report
+    only every 5 s at 24 kbit/s.
+  - New settings: `RtcpSessionBuilder::with_congestion_feedback_in_budget`,
+    `with_minimum_session_bandwidth`; `TwccReceiverBuilder` / `Rfc8888Builder`
+    `with_feedback_share`, `with_max_adaptive_interval`; `DefaultInterceptorOptions` fields
+    `rtcp_congestion_feedback_in_budget`, `rtcp_minimum_session_bandwidth`,
+    `congestion_feedback_share`, `congestion_feedback_max_interval`. `BehaviourProfile` gains
+    `Performance` (the enum is `#[non_exhaustive]`; `ALL` has four entries).
+  - Cargo feature `performance-defaults`: `BehaviourProfile::default()` is `Performance`. With
+    `chrome-defaults` also on, `Chrome` wins and the build prints a deprecation warning naming
+    both. CI: a `performance_defaults` job like `chrome_defaults`.
+  - Audit: RFC4585-3.5.4-2 is `partial` (was `tested`: the congestion control feedback sent at
+    once is not added to `avg_rtcp_size`); RFC5506-4.2.1-1's note names the feedback that does
+    travel reduced-size (transport-cc and RFC 8888 included).
+  - Test environment: the RTCP cell logs the media rate it ran at (a few hundred kbit/s, not a
+    video call's) and no longer claims the stacks report every second; the Pion peer counts each
+    RTCP datagram once (its SRTCP session hands one datagram to every stream it names, which
+    counted SRs several times).
+  - The merge with master: `rtp.ssrc-per-clock-rate` follows master's default (one SSRC across
+    clock rates, `Rfc` `false`, `StrictRfc` `true`); `circuit_breaker_packet_size` is listed as
+    engine-only.
+
+- **peer connection**: behaviour profile values verified against libwebrtc's source
+  (`conf/profile-2-verified-values`). The 26 unverified Chrome values were read in libwebrtc's
+  public source (`main` at `a222406d49ec`, 2026-11-23; Chromium's glue at `8dafa8bce175`,
+  BoringSSL at `289645a45072`); each row now cites the file, the symbol and the revision. 40
+  governed behaviours (was 35): 11 observed, 29 from the source, 0 unverified; 11 not
+  expressible (was 10).
+  - Wrong Chrome values corrected: `sctp.rto` is 500 ms / 400 ms / 3 s (was 500 / 220 ms / 60 s:
+    dcsctp's `rto_min` is 400 ms, 220 ms is `min_rtt_variance`, and libwebrtc caps the timer
+    backoff at 3 s); `gcc.threshold-time-base` is the new `ThresholdTimeBase::ArrivalCapped`
+    (libwebrtc's `TrendlineEstimator::UpdateThreshold` steps over the arrival gaps, capped at
+    100 ms, not the departure gaps).
+  - New governed behaviours: `dtls.srtp-profile-order` (libwebrtc offers AES_CM_128_HMAC_SHA1_80
+    before GCM; the engine GCM first), `sctp.max-retransmissions` (libwebrtc never gives up on
+    retransmissions), and three new settings: `SettingEngineBuilder::with_ice_options_in_media_sections`
+    (`a=ice-options` in each section, as Chromium), `with_default_ice_pacing_stated` (no
+    `a=ice-pacing` for the default Ta, as Chromium), `with_dtls_flight_interval(DtlsFlightInterval)`
+    (`Rfc9147`, the default, or libwebrtc's two round trips within 50 ms and 3 s). Also
+    `without_sctp_max_retransmissions`. The `Chrome` profile's offers now place `a=ice-options` and
+    leave out `a=ice-pacing` as Chromium's do; `tests/behaviour_profiles.rs` no longer accepts
+    session-level `a=ice-options` or an extra `a=ice-pacing` under `Chrome`.
+  - Breaking: `ThresholdTimeBase` (rtc-interceptor) has a third variant, `ArrivalCapped`; its
+    `Departure` doc no longer calls it libwebrtc's.
+  - Corrected notes: libwebrtc does not retransmit ICE connectivity checks at all (each is sent once,
+    the 250 ms RTO is for server requests); DTLS 1.3 is not engine-only (libwebrtc's factory default is
+    DTLS 1.3); flexfec-03 and RFC 8888 are behind field trials in Chromium; the doc of
+    `with_unique_transport_credentials` now gives libwebrtc's rule for offers and answers (credentials
+    per transport, shared within a BUNDLE group; its offers bundle every section whatever the
+    policy).
+
+- **peer connection**: behaviour profiles (`conf/profile-1-behaviour-profiles`).
+  - `BehaviourProfile { Rfc, Chrome, StrictRfc }` (`rtc::peer_connection::configuration`), applied by
+    `SettingEngineBuilder::with_behaviour_profile`, `MediaEngine::for_profile` and
+    `DefaultInterceptorOptions::for_profile`; `register_default_interceptors` (and `_with_handles`,
+    `_without_congestion_control`, `configure_congestion_control`) take the options of the media
+    engine's profile, and the RTCP session a peer connection installs follows the setting engine's.
+    `Rfc` is the defaults unchanged. `docs/behaviour-profiles.md` (rendered by
+    `scripts/behaviour-profiles.py`, a Python gate with `--check`) lists 35 governed behaviours with
+    their clause, each profile's value and the source of each Chrome value (9 observed in the recorded
+    Chromium descriptions or the browser matrix, 26 unverified), the settings left alone with their
+    class, and 10 Chrome behaviours the engine cannot express.
+  - Cargo feature `chrome-defaults`: `BehaviourProfile::default()`, and with it every
+    `SettingEngine::default()`, `SettingEngineBuilder::new()`, `MediaEngine::default()` and
+    `DefaultInterceptorOptions::default()`, is `Chrome`. Cargo unifies features: one crate of a build
+    that turns it on changes the defaults of every user of `rtc` in that build.
+    `BehaviourProfile::compiled_default()` reports it. CI: one job checks the workspace and runs the
+    profile's tests with it.
+  - New settings: `SettingEngineBuilder::with_ice_software` (the SOFTWARE attribute of ICE checks,
+    RFC 8489 16.1.2), `without_sctp_rto`; `DefaultInterceptorOptions` fields `rtcp_t_rr_interval`,
+    `rtcp_immediate_congestion_feedback`, `rtcp_report_from_every_ssrc`, `twcc_rereport_received`,
+    `gcc_threshold_time_base`, `gcc_one_decrease_per_round_trip`, `abs_send_time_on_audio`,
+    `receiver_reference_time_on_audio` (the struct is `#[non_exhaustive]`; the last two put Chromium's
+    audio abs-send-time and `a=rtcp-xr:rcvr-rtt=all` in the `Chrome` profile's offers).
+    `SettingEngine::behaviour_profile`, `MediaEngine::behaviour_profile`.
+  - Breaking: `SettingEngine`, `MediaEngine` and `DefaultInterceptorOptions` implement `Default` by
+    hand (the build's default profile) instead of deriving it; `SctpMaxMessageSize` derives `Debug`,
+    `PartialEq` and `Eq`.
+  - Seven Chromium descriptions of the train 9 test environment are fixtures
+    (`tests/fixtures/browser-sdp/chromium--*.sdp`). One of them corrects the doc of
+    `with_unique_transport_credentials`: a Chromium answer without BUNDLE gives each transport
+    credentials of its own, so the `Chrome` profile does too.
+  - The browser matrix has five cells with the Rust peer under `Chrome`
+    (`scripts/test-env/interop/profile.spec.mjs`; `examples/interop-peer` takes `?profile=`).
+
 - **dtls, ice**: a new DTLS association runs on a new 3-tuple (RFC 8842 section 5.1: "a new
   3-tuple ... MUST be allocated by at least one of the endpoints"; section 6: "a completely new
   set of ICE candidates that were not recently used for any other DTLS association"). The ICE
@@ -455,6 +558,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     of codec `video/rtx` (at any time).
 
 ### Behaviour changes
+
+- **peer connection, interceptors**: behaviour profiles after the train-12 and train-13
+  (sctp-15, mt-9) merges (`conf/profile-3-on-master`). Each setting master added is classified, its libwebrtc value
+  read at `a222406d` (file and lines in `docs/behaviour-profiles.md`):
+  - `pacer.queue-overflow` (`DefaultInterceptorOptions::pacer_queue_overflow`): `Drop` in `Rfc`,
+    `StrictRfc` and `Performance`, `Drain` in `Chrome` (libwebrtc's
+    `PacingController::MaybeUpdateMediaRateDueToLongQueue` raises the rate to empty the queue
+    within 2 s and drops nothing).
+  - `nack.max-requests-per-packet`: new field `DefaultInterceptorOptions::nack_max_nacks_per_packet`
+    (0, unlimited, by default), passed to `NackGeneratorBuilder::with_max_nacks_per_packet`;
+    `Chrome` 100 (`kMaxNackRetries` in `modules/video_coding/nack_requester.cc`, not 10 as
+    `SUGGESTED_MAX_NACKS_PER_PACKET` says). libwebrtc's limits counted in packets (a NACK age of
+    10,000 sequence numbers, a list of at most 1000) are listed as not expressible: the
+    generator's age limit is a time.
+  - New field `DefaultInterceptorOptions::nack_retransmission_rate_limit`, passed to
+    `NackResponderBuilder::with_rate_limit`; `UpToTarget` in every profile until
+    `conf/gcc-2-rfc-retransmission` changes the RFC default.
+  - `ice.software-attribute` follows master's `with_ice_software` (an `Option<Option<String>>`
+    field): `Rfc` / `StrictRfc` / `Performance` send `rtc-ice` / `rtc-turn` and their versions,
+    `Chrome` sends no SOFTWARE in the ICE checks and responses and in the TURN requests either
+    (none in libwebrtc's `Connection::BuildPingRequest`, `SendStunBindingResponse` or its TURN
+    requests).
+  - Left alone, with the reason: `with_audio_redundancy` (`WhenPreferred`, libwebrtc's rule
+    too), `with_own_payload_types_in_answers` (off: libwebrtc answers with the offer's numbers),
+    `rtcp_random` (an injected source), `with_sctp_inbound_reassembly_limit` (train 13's sctp-15:
+    libwebrtc's dcSCTP has no partial delivery to bound; it reassembles inside its 5 MiB receive
+    window and aborts the association when that fills with no message complete),
+    `with_dtls_new_association_on_previous_addresses` (train 13's mt-9: off in every profile;
+    libwebrtc gathers each ICE generation on new sockets too).
+  - `DefaultInterceptorOptions` has a hand-written `Debug` (master's, for `rtcp_random`) listing
+    every field; `rtcp_random` reaches the RTCP session through `register_default_interceptors_with_options`
+    as on master.
+  - README: the "Behaviour profiles" section says how to choose a profile at run time
+    (`from_name`, `for_profile`) and by cargo feature, and which wins when both features are on.
 
 - **interceptors, peer connection**: audio RED is sent only when the remote side prefers it
   (`conf/red-1-send-policy`). jsep17 sent every Opus packet as RED, with a copy of the one
