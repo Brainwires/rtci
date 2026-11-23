@@ -204,13 +204,17 @@ impl RTCPeerConnection {
             }
         }
         transports.set_default(targets[0]);
-        for mid in self
-            .rtp_transceivers
-            .iter()
-            .filter_map(|t| t.mid().clone())
+        // Every section outside the groups leaves its transport: a transceiver's, and also a
+        // data section (which has no transceiver), else the transport a rolled-back offer
+        // gave a new data section would outlive the rollback (RFC 9429 section 5.7).
+        let outside: Vec<String> = transports
+            .ids()
+            .into_iter()
+            .flat_map(|id| transports.mids_on(id))
+            .chain(self.rtp_transceivers.iter().filter_map(|t| t.mid().clone()))
             .filter(|mid| !in_groups.contains(&mid))
-            .collect::<Vec<_>>()
-        {
+            .collect();
+        for mid in outside {
             self.pipeline_context.transports.unassign(&mid);
         }
         let data = self.data_section_mid_in(groups);
