@@ -58,6 +58,9 @@ jobs:
           body_path: RELEASE_NOTES.md
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      # This workflow is the only one a version tag starts; release-binaries.yml is started by
+      # hand only (docs/releasing.md).
+      #
       # Publishing to crates.io stays manual for now: docs/releasing.md has the procedure (dry
       # runs, the order, what to do when a publish fails midway; crates.io versions are
       # permanent). When it moves here, uncomment the step below and add the CRATES_IO_TOKEN
@@ -86,3 +89,5 @@ jobs:
       #     cargo publish -p rtc-ice --token ${{ secrets.CRATES_IO_TOKEN }}
       #     cargo publish -p rtc-turn --token ${{ secrets.CRATES_IO_TOKEN }}
       #     cargo publish -p rtc --token ${{ secrets.CRATES_IO_TOKEN }}
+      #     cargo publish -p rtc-audio --token ${{ secrets.CRATES_IO_TOKEN }}
+      #     cargo publish -p rtc-devices --token ${{ secrets.CRATES_IO_TOKEN }}

@@ -1114,6 +1114,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   released section of `CHANGELOG.md` differs from that section at the latest `v*` tag: merges
   that union two CHANGELOGs had put new entries into, and repeated entries in, the released
   0.22.0+brainwires.6 section. New entries go under `## [Unreleased]`.
+- **New crates** (`conf/publish-2-new-crates`): `rtc-audio` and `rtc-devices` are published
+  after `rtc` (21 crates); they gain the README their manifests named, `LICENSE-MIT` /
+  `LICENSE-APACHE` (without them `cargo package` failed) and `[package.metadata.docs.rs]` with
+  the features that build or link no C (not `libopus`, not `devices`); their explicit
+  `documentation` URLs are removed. `rtc-ffi` stays `publish = false`: a C library delivered as
+  built libraries and a header, not a Rust dependency. The root crate's dev-dependency on
+  `rtc-audio` is path-only, so `cargo publish` drops it (`rtc-audio` depends on `rtc`).
+- **Release binaries are manual**: `release-binaries.yml` runs by `workflow_dispatch` only; its
+  `v*` tag trigger is removed until the owner decides how and where release binaries are built
+  (runners, artefacts, signing). A `v0.1.0` tag starts `release.yml` alone, which makes the
+  GitHub release and publishes nothing.
+- **docs/releasing.md**: the order of operations for 0.1.0 (merged and green, rename commit,
+  release commit, tag, dry runs, publish, repository rename, detach from the fork network),
+  what each workflow does on a tag, the brainwires.6 known issues with their state on
+  `master` for the release notes, and an "after publishing" checklist (docs.rs builds, yanking,
+  announcing the rename). release.yml's commented publish list includes the two crates.
+- **README**: the status table follows `COUNTS.md` (111 specifications; MUST 99.7 % RFC
+  behaviour tested, 16 MUST rows open); merges had brought back upstream's crate badges and
+  images and a second copy of the feature list, which are removed; the crate table names
+  `rtc-audio` and `rtc-devices` and what is not published, and why.
 
 ### Notes for integrators
 
